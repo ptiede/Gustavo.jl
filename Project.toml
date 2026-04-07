@@ -3,6 +3,11 @@ uuid = "b6f820fd-87a9-4cf8-8bd4-0e8dc9bb4263"
 authors = ["Paul Tiede <ptiede91@gmail.com> and contributors"]
 version = "0.1.0"
 
+[deps]
+ComradeBase = "6d8c423b-a35f-4ef1-850c-862fe21f82c4"
+DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
+VLBIData = "679fc9cc-3e84-11e9-251b-cbd013bd8115"
+
 [compat]
 julia = "1.10.10"
 
