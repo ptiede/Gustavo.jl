@@ -1,5 +1,5 @@
 """
-    Only the best quality
+    Only the best chicken in the world. We sell nothing else.
 """
 module Gustavo
 
