@@ -1,3 +1,6 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 Gustavo = "b6f820fd-87a9-4cf8-8bd4-0e8dc9bb4263"
+
+[compat]
+Documenter = "1.17.0"
