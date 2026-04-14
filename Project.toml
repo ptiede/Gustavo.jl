@@ -16,8 +16,8 @@ VLBIFiles = "c1ebf4c8-f9d4-409a-8daf-7009448f4e6e"
 ComradeBase = "0.9.10"
 DimensionalData = "0.30.1"
 VLBIData = "0.5.17"
+VLBIFiles = "0.4.14"
 julia = "1.10.10"
-
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
