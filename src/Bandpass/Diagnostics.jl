@@ -267,6 +267,58 @@ function print_coherence_loss_table(rows; io=stdout)
     end
 end
 
+function site_coherence_rows(rows, site::String; pol=nothing)
+    filtered = NamedTuple[
+        row for row in rows if begin
+            sites = split(row.baseline, "-")
+            (site in sites) && (isnothing(pol) || row.pol == pol)
+        end
+    ]
+
+    sort!(filtered; by=row -> (
+        isfinite(row.loss_after) ? -row.loss_after : Inf,
+        isfinite(row.loss_improvement) ? row.loss_improvement : Inf,
+        row.baseline,
+    ))
+    return filtered
+end
+
+function print_site_coherence_rows(rows, site::String; pol=nothing, io=stdout, limit=nothing)
+    filtered = site_coherence_rows(rows, site; pol=pol)
+    isempty(filtered) && begin
+        println(io, "No coherence rows found for site ", site,
+            isnothing(pol) ? "" : " and pol $pol")
+        return filtered
+    end
+
+    title = isnothing(pol) ?
+        "Coherence summary for site $site" :
+        "Coherence summary for site $site, pol $pol"
+    println(io, title)
+    println(io, "baseline  partner  pol  scans  loss_before(%)  loss_after(%)  improve(%)  rms_after(deg)")
+
+    shown = isnothing(limit) ? filtered : first(filtered, min(limit, length(filtered)))
+    for row in shown
+        a, b = split(row.baseline, "-")
+        partner = a == site ? b : a
+        loss_before = isfinite(row.loss_before) ? @sprintf("%14.2f", row.loss_before) : "           n/a"
+        loss_after = isfinite(row.loss_after) ? @sprintf("%13.2f", row.loss_after) : "          n/a"
+        improve = isfinite(row.loss_improvement) ? @sprintf("%10.2f", row.loss_improvement) : "       n/a"
+        rms_after = isfinite(row.phase_rms_after) ? @sprintf("%14.2f", row.phase_rms_after) : "           n/a"
+
+        println(io, rpad(row.baseline, 8), "  ",
+            rpad(partner, 7), "  ",
+            rpad(row.pol, 3), "  ",
+            lpad(string(row.nsamp), 5), "  ",
+            loss_before, "  ",
+            loss_after, "  ",
+            improve, "  ",
+            rms_after)
+    end
+
+    return filtered
+end
+
 function baseline_in_data(data::UVData, bl_plot)
     a_idx = findfirst(==(bl_plot[1]), data.ant_names)
     b_idx = findfirst(==(bl_plot[2]), data.ant_names)

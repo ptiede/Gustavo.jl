@@ -35,5 +35,6 @@ export apply_bandpass, export_uvfits, default_output_path
 export coherence_loss_table, print_coherence_loss_table, choose_diagnostic_baseline
 export plot_baseline_phases, plot_phase_stability, plot_gain_solutions
 export parallel_hand_support_summary, site_parallel_hand_support, print_parallel_hand_support
+export site_coherence_rows, print_site_coherence_rows
 
 end
