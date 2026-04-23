@@ -3,14 +3,8 @@
 """
 module Gustavo
 
-using VLBIData
-using ComradeBase
-using DimensionalData
+include("Bandpass.jl")
+using .Bandpass
 
-
-abstract type AbstractBandPass end
-
-
-
-
+export Bandpass
 end

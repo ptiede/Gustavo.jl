@@ -2,5 +2,7 @@ using Gustavo
 using Test
 
 @testset "Gustavo.jl" begin
-    # Write your tests here.
+    @test isdefined(Gustavo, :Bandpass)
+    @test Gustavo.Bandpass isa Module
+    @test isdefined(Gustavo.Bandpass, :solve_bandpass)
 end

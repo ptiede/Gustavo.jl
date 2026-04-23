@@ -1,0 +1,36 @@
+module Bandpass
+
+using FITSFiles
+using CairoMakie
+using DimensionalData
+using StructArrays
+using Statistics
+using LinearAlgebra
+using LinearSolve
+using Printf
+using ColorSchemes
+
+include("Bandpass/DataIO.jl")
+include("Bandpass/StationModels.jl")
+include("Bandpass/Setup.jl")
+include("Bandpass/Solver.jl")
+include("Bandpass/Corrections.jl")
+include("Bandpass/Diagnostics.jl")
+
+export UVData, load_uvfits, decode_baseline, assign_scans, scan_average, wrap_gain_solutions
+export AbstractBandpassModel
+export PerChannelBandpassModel, FlatBandpassModel, DelayBandpassModel, PolynomialBandpassModel
+export SegmentedBandpassModel, CompositeBandpassModel
+export AbstractTimeSegmentation, AbstractFrequencySegmentation
+export GlobalTimeSegmentation, PerScanTimeSegmentation
+export GlobalFrequencySegmentation, BlockFrequencySegmentation
+export BandpassSegmentation, FeedBandpassModel, StationBandpassModel
+export bandpass, parameter_count
+export validate_station_bandpass_model, is_per_scan
+export best_ref_channel, design_matrices, build_station_models, station_model_summary, choose_phase_reference
+export solve_bandpass
+export apply_bandpass, export_uvfits, default_output_path
+export coherence_loss_table, print_coherence_loss_table, choose_diagnostic_baseline
+export plot_baseline_phases, plot_phase_stability, plot_gain_solutions
+
+end

@@ -5,10 +5,13 @@ version = "0.1.0"
 
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+ColorSchemes = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
 ComradeBase = "6d8c423b-a35f-4ef1-850c-862fe21f82c4"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"
 FITSIO = "525bcba6-941b-5504-bd06-fd0dc1a4d2eb"
+LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
+StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 VLBIData = "679fc9cc-3e84-11e9-251b-cbd013bd8115"
 VLBIFiles = "c1ebf4c8-f9d4-409a-8daf-7009448f4e6e"
 
