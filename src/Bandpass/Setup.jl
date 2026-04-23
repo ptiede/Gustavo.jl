@@ -1,12 +1,32 @@
-# Polarisation product → (feed index of antenna a, feed index of antenna b)
-# pol 1=RR, pol 2=LR, pol 3=RL, pol 4=LL;   feed 1=R/X, feed 2=L/Y
-const POL_FEEDS = [(1, 1), (2, 1), (1, 2), (2, 2)]
+stokes_feed_pair(code::Integer) = code == -1 ? (1, 1) :
+    code == -2 ? (2, 2) :
+    code == -3 ? (1, 2) :
+    code == -4 ? (2, 1) :
+    error("Unsupported Stokes code for feed mapping: $code")
 
-function best_ref_channel(W)
-    # Sum weights over scans × baselines, parallel hands only (RR=1, LL=last)
-    npol = size(W, 3)
-    pols = npol >= 4 ? [1, npol] : (1:npol)
-    return argmax(vec(sum(W[:, :, pols, :], dims=(1, 2, 3))))
+feed_pair_label(feeds::Tuple{<:Integer,<:Integer}) = string(feeds[1], feeds[2])
+polarization_label(code::Integer) = feed_pair_label(stokes_feed_pair(code))
+
+function parallel_hand_indices(pol_codes)
+    rr = findfirst(==(-1), pol_codes)
+    ll = findfirst(==(-2), pol_codes)
+    (isnothing(rr) || isnothing(ll)) && error("Parallel-hand 11/22 products not found in pol_codes=$(collect(pol_codes))")
+    return rr, ll
+end
+
+function cross_hand_indices(pol_codes)
+    rl = findfirst(==(-3), pol_codes)
+    lr = findfirst(==(-4), pol_codes)
+    (isnothing(rl) || isnothing(lr)) && return nothing
+    return (; rl, lr)
+end
+
+polarization_feeds(data::UVData, pol_index::Integer) = stokes_feed_pair(data.pol_codes[pol_index])
+
+function best_ref_channel(data::UVData)
+    rr, ll = parallel_hand_indices(data.pol_codes)
+    pols = [rr, ll]
+    return argmax(vec(sum(data.weights[:, :, pols, :], dims=(1, 2, 3))))
 end
 
 function design_matrices(bl_pairs, nant)
@@ -99,8 +119,8 @@ function phase_relative_to_ref(phases, ref_idx=1)
     return relative
 end
 
-function corrected_visibility(V, gains, bi, a, b, pol, s, c)
-    fa, fb = POL_FEEDS[pol]
+function corrected_visibility(V, gains, pol_codes, bi, a, b, pol, s, c)
+    fa, fb = stokes_feed_pair(pol_codes[pol])
     return V[s, bi, pol, c] / (gains[s, a, fa, c] * conj(gains[s, b, fb, c]))
 end
 
@@ -128,8 +148,7 @@ function choose_phase_reference(avg::UVData, variable_ants)
     nant = length(avg.ant_names)
     blocked = falses(nant)
     blocked[variable_ants] .= true
-    npol = size(W, 3)
-    pols = npol >= 4 ? (1, npol) : (1, npol)
+    pols = parallel_hand_indices(avg.pol_codes)
     scores = zeros(Float64, nant)
 
     for s in axes(W, 1), bi in axes(W, 2), pol in pols, c in axes(W, 4)

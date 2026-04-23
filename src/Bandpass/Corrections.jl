@@ -19,7 +19,7 @@ function apply_bandpass(data::UVData, gains)
 
         for p in 1:min(npol, 4), c in 1:nchan
             data.weights[i, p, c] > 0 || continue
-            fa, fb = POL_FEEDS[p]
+            fa, fb = polarization_feeds(data, p)
             vis_corr[i, p, c] /= gains[s, a, fa, c] * conj(gains[s, b, fb, c])
             weights_corr[i, p, c] *= abs2(gains[s, a, fa, c]) * abs2(gains[s, b, fb, c])
         end

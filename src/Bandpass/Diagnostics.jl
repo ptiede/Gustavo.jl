@@ -21,7 +21,8 @@ end
                          relative=false, comparison_weights=:input)
 
 Two-column figure showing scan-averaged phase vs channel for `bl_plot`
-(e.g. ("AA","KT")) before (left) and after (right) correction, for RR and LL.
+(e.g. ("AA","KT")) before (left) and after (right) correction, for the two
+parallel-hand products labelled by their feed pairs (typically `11` and `22`).
 By default this shows absolute phase so the dominant bandpass trend remains
 visible; set `relative=true` to suppress scan-constant offsets.
 
@@ -44,8 +45,9 @@ function plot_phase_stability(data::UVData, corr::UVData, bl_plot;
     nscan = length(data.sc)
     scan_wheel = diagnostic_scan_colormap(nscan)
 
-    pol_labels = ["RR", "LL"]
-    pol_idx = [1, 4]
+    rr, ll = parallel_hand_indices(data.pol_codes)
+    pol_idx = [rr, ll]
+    pol_labels = data.pol_labels[pol_idx]
 
     ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
     plot_weights_before, plot_weights_after = diagnostic_weight_pair(data.weights, corr.weights;
@@ -194,7 +196,7 @@ end
 
 """
     coherence_loss_table(avg::UVData, avg_corr::UVData;
-                         pol_idx=[1, 4], pol_labels=["RR", "LL"],
+                         pol_idx=[parallel-hand indices], pol_labels=[parallel-hand labels],
                          comparison_weights=:input)
 
 Build a baseline-by-baseline diagnostic table of expected coherence loss from
@@ -205,12 +207,17 @@ isolates phase improvement instead of gain-amplitude reweighting. Set
 `comparison_weights=:native` to evaluate the corrected data with its updated weights.
 """
 function coherence_loss_table(avg::UVData, avg_corr::UVData;
-    pol_idx=[1, 4], pol_labels=["RR", "LL"], comparison_weights=:input)
+    pol_idx=nothing, pol_labels=nothing, comparison_weights=:input)
     V = avg.vis
     W = avg.weights
     V_corr = avg_corr.vis
     _, W_corr = diagnostic_weight_pair(avg.weights, avg_corr.weights;
         comparison_weights=comparison_weights)
+    if isnothing(pol_idx)
+        rr, ll = parallel_hand_indices(avg.pol_codes)
+        pol_idx = [rr, ll]
+    end
+    isnothing(pol_labels) && (pol_labels = avg.pol_labels[pol_idx])
     rows = NamedTuple[]
 
     for bi in eachindex(avg.bl_pairs)
@@ -274,8 +281,7 @@ function choose_diagnostic_baseline(avg::UVData;
     end
 
     W = avg.weights
-    npol = size(W, 3)
-    pols = npol >= 4 ? [1, npol] : collect(1:npol)
+    pols = collect(parallel_hand_indices(avg.pol_codes))
     best_score = -Inf
     best_bl = nothing
 
@@ -314,13 +320,13 @@ function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
 
     nscan = length(data.sc)
     scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_labels = ["RR (R-R)", "LR (L-R)", "RL (R-L)", "LL (L-L)"]
+    pol_labels = collect(data.pol_labels)
     ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
     plot_weights_before, plot_weights_after = diagnostic_weight_pair(data.weights, corr.weights;
         comparison_weights=comparison_weights)
 
     fig = Figure(size=(1100, 900))
-    for (row, (pi, lab)) in enumerate(zip(1:4, pol_labels))
+    for (row, (pi, lab)) in enumerate(zip(eachindex(pol_labels), pol_labels))
         ax_b = Axis(fig[row, 1]; title="$(join(bl_plot, "-")) $lab before",
             xlabel="channel", ylabel=ylabel)
         ax_a = Axis(fig[row, 2]; title="$(join(bl_plot, "-")) $lab after",
@@ -346,7 +352,7 @@ function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
         end
     end
 
-    Colorbar(fig[1:4, 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
+    Colorbar(fig[1:length(pol_labels), 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
     return fig
 end
 
@@ -360,16 +366,17 @@ function plot_gain_solutions(gains, data::UVData)
     nscan = length(data.sc)
     nant = size(gains, 2)
     scan_wheel = diagnostic_scan_colormap(nscan)
+    pol_labels = ["Pol 1", "Pol 2"]
 
     fig = Figure(size=(900, 180 * nant))
     for ai in 1:nant
         ax_phase1 = Axis(fig[ai, 1];
             ylabel=data.ant_names[ai], xlabel="channel",
-            title=(ai == 1 ? "R/X gain  ∠g (rad)" : ""))
+            title=(ai == 1 ? "$(pol_labels[1]) gain  ∠g (rad)" : ""))
 
         ax_phase2 = Axis(fig[ai, 2];
             ylabel=data.ant_names[ai], xlabel="channel",
-            title=(ai == 1 ? "L/Y gain  ∠g (rad)" : ""))
+            title=(ai == 1 ? "$(pol_labels[2]) gain  ∠g (rad)" : ""))
         linkxaxes!(ax_phase1, ax_phase2)
         linkyaxes!(ax_phase1, ax_phase2)
         for s in 1:nscan
@@ -380,4 +387,90 @@ function plot_gain_solutions(gains, data::UVData)
     end
     Colorbar(fig[1:nant, 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
     return fig
+end
+
+function baseline_index(data::UVData, bl::Tuple{String,String})
+    a_idx = findfirst(==(bl[1]), data.ant_names)
+    b_idx = findfirst(==(bl[2]), data.ant_names)
+    (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl")
+
+    bl_idx = findfirst(==( (a_idx, b_idx) ), data.bl_pairs)
+    isnothing(bl_idx) && error("Baseline $bl not in data")
+    return bl_idx
+end
+
+function parallel_hand_support_summary(avg::UVData, bl::Tuple{String,String})
+    bi = baseline_index(avg, bl)
+    rr, ll = parallel_hand_indices(avg.pol_codes)
+    pol_map = [(avg.pol_labels[rr], rr), (avg.pol_labels[ll], ll)]
+    rows = NamedTuple[]
+
+    for (lab, pi) in pol_map
+        W = @view avg.weights[:, bi, pi, :]
+        V = @view avg.vis[:, bi, pi, :]
+        valid = (W .> 0) .& isfinite.(W) .& isfinite.(real.(V)) .& isfinite.(imag.(V))
+        scan_valid = vec(sum(valid, dims=2))
+        if_valid = vec(sum(valid, dims=1))
+        total_weight = sum(W[valid])
+        mean_phase_by_scan = [begin
+            idx = vec(valid[s, :])
+            any(idx) ? angle(sum(W[s, idx] .* (V[s, idx] ./ abs.(V[s, idx]))) / sum(W[s, idx])) : NaN
+        end for s in axes(W, 1)]
+
+        push!(rows, (;
+            baseline=join(bl, "-"),
+            pol=lab,
+            valid_samples=count(valid),
+            total_weight=total_weight,
+            scans_with_data=count(>(0), scan_valid),
+            min_scan_valid=minimum(scan_valid),
+            max_scan_valid=maximum(scan_valid),
+            min_if_valid=minimum(if_valid),
+            max_if_valid=maximum(if_valid),
+            mean_phase_by_scan,
+        ))
+    end
+
+    rr, ll = rows
+    return (; rows,
+        valid_ratio = ll.valid_samples / max(rr.valid_samples, 1),
+        weight_ratio = ll.total_weight / max(rr.total_weight, eps()))
+end
+
+function site_parallel_hand_support(avg::UVData, site::String)
+    rows = NamedTuple[]
+    for (bi, (a, b)) in enumerate(avg.bl_pairs)
+        names = (avg.ant_names[a], avg.ant_names[b])
+        site in names || continue
+        summary = parallel_hand_support_summary(avg, names)
+        rr, ll = summary.rows
+        push!(rows, (;
+            baseline=join(names, "-"),
+            rr_valid=rr.valid_samples,
+            ll_valid=ll.valid_samples,
+            rr_weight=rr.total_weight,
+            ll_weight=ll.total_weight,
+            ll_to_rr_valid=summary.valid_ratio,
+            ll_to_rr_weight=summary.weight_ratio,
+        ))
+    end
+    sort!(rows; by=row -> row.ll_to_rr_weight)
+    return rows
+end
+
+function print_parallel_hand_support(summary; io=stdout)
+    println(io, "Parallel-hand support summary for ", summary.rows[1].baseline)
+    println(io, "pol  valid_samples  total_weight   scans_with_data  min/max_scan_valid  min/max_IF_valid")
+    for row in summary.rows
+        println(io,
+            lpad(row.pol, 3), "  ",
+            lpad(string(row.valid_samples), 13), "  ",
+            lpad(@sprintf("%.6g", row.total_weight), 12), "  ",
+            lpad(string(row.scans_with_data), 15), "  ",
+            lpad("$(row.min_scan_valid)/$(row.max_scan_valid)", 18), "  ",
+            lpad("$(row.min_if_valid)/$(row.max_if_valid)", 16))
+    end
+    pol_a, pol_b = getindex.(summary.rows, :pol)
+    println(io, "$(pol_b)/$(pol_a) valid ratio  = ", @sprintf("%.4f", summary.valid_ratio))
+    println(io, "$(pol_b)/$(pol_a) weight ratio = ", @sprintf("%.4f", summary.weight_ratio))
 end

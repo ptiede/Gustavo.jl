@@ -17,7 +17,9 @@ include("Bandpass/Solver.jl")
 include("Bandpass/Corrections.jl")
 include("Bandpass/Diagnostics.jl")
 
-export UVData, load_uvfits, decode_baseline, assign_scans, scan_average, wrap_gain_solutions
+export UVData, load_uvfits, decode_baseline, assign_scans, scan_average
+export baseline_visibilities, baseline_weights, wrap_gain_solutions, wrap_xy_correction
+export feed_pair_label, polarization_label, polarization_feeds, parallel_hand_indices, cross_hand_indices
 export AbstractBandpassModel
 export PerChannelBandpassModel, FlatBandpassModel, DelayBandpassModel, PolynomialBandpassModel
 export SegmentedBandpassModel, CompositeBandpassModel
@@ -32,5 +34,6 @@ export solve_bandpass
 export apply_bandpass, export_uvfits, default_output_path
 export coherence_loss_table, print_coherence_loss_table, choose_diagnostic_baseline
 export plot_baseline_phases, plot_phase_stability, plot_gain_solutions
+export parallel_hand_support_summary, site_parallel_hand_support, print_parallel_hand_support
 
 end

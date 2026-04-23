@@ -33,10 +33,8 @@ function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c)
 end
 
 function solve_parallel_channel!(gains, solved, Vblock, Wblock, bl_pairs, nant, phase_ref_ant, c0, c, A_amp, A_phase,
-        station_models; min_baselines=3)
-    npol = ndims(Wblock) == 4 ? size(Wblock, 3) : size(Wblock, 2)
-
-    for (pol, feed) in ((1, 1), (npol, 2))
+        station_models, parallel_pols; min_baselines=3)
+    for (pol, feed) in zip(parallel_pols, (1, 2))
         D, row_weights, rows = collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c)
         length(rows) < min_baselines && continue
 
@@ -247,12 +245,10 @@ function fit_relative_correction_track(raw_correction, channel_weights, channel_
     return fitted
 end
 
-function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models)
+function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     nant = size(gains, 1)
-    npol = ndims(Wblock) == 4 ? size(Wblock, 3) : size(Wblock, 2)
-
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, 1)
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, npol)
+    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1])
+    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2])
 
     for ant in 1:nant
         model = station_models[ant]
@@ -291,12 +287,10 @@ function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, 
     return gains
 end
 
-function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models)
+function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     nant = size(gains, 1)
-    npol = ndims(Wblock) == 4 ? size(Wblock, 3) : size(Wblock, 2)
-
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, 1)
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, npol)
+    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1])
+    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2])
 
     for ant in 1:nant
         model = station_models[ant]
@@ -335,9 +329,9 @@ function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, stat
     return gains
 end
 
-function constrain_gain_models!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models)
-    constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models)
-    constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models)
+function constrain_gain_models!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+    constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+    constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     return gains
 end
 
@@ -352,9 +346,12 @@ The estimator first solves a raw per-channel complex feed-ratio track per scan,
 then projects that track onto the configured relative amplitude and phase basis
 for the reference station before applying it.
 """
-function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models; min_samples=2)
+function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models, pol_codes; min_samples=2)
     nscan, nbl, npol, nchan = size(V)
-    npol < 4 && return ones(ComplexF64, nscan, nchan)
+    cross_pols = cross_hand_indices(pol_codes)
+    isnothing(cross_pols) && return ones(ComplexF64, nscan, nchan)
+    rr, ll = parallel_hand_indices(pol_codes)
+    rl, lr = cross_pols.rl, cross_pols.lr
 
     xy_correction = ones(ComplexF64, nscan, nchan)
     ref_model = station_models[ref_ant]
@@ -375,14 +372,14 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
 
                 if a == ref_ant
                     estimators = [
-                        (2, 1,  W[s, bi, 2, c], W[s, bi, 1, c], W[s, bi, 2, c0], W[s, bi, 1, c0]),
-                        (4, 3,  W[s, bi, 4, c], W[s, bi, 3, c], W[s, bi, 4, c0], W[s, bi, 3, c0]),
+                        (lr, rr,  W[s, bi, lr, c], W[s, bi, rr, c], W[s, bi, lr, c0], W[s, bi, rr, c0]),
+                        (ll, rl,  W[s, bi, ll, c], W[s, bi, rl, c], W[s, bi, ll, c0], W[s, bi, rl, c0]),
                     ]
                     sign = 1.0
                 else
                     estimators = [
-                        (3, 1,  W[s, bi, 3, c], W[s, bi, 1, c], W[s, bi, 3, c0], W[s, bi, 1, c0]),
-                        (4, 2,  W[s, bi, 4, c], W[s, bi, 2, c], W[s, bi, 4, c0], W[s, bi, 2, c0]),
+                        (rl, rr,  W[s, bi, rl, c], W[s, bi, rr, c], W[s, bi, rl, c0], W[s, bi, rr, c0]),
+                        (ll, lr,  W[s, bi, ll, c], W[s, bi, lr, c], W[s, bi, ll, c0], W[s, bi, lr, c0]),
                     ]
                     sign = -1.0
                 end
@@ -390,10 +387,10 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
                 for (num_pol, den_pol, w_num_c, w_den_c, w_num_c0, w_den_c0) in estimators
                     min(w_num_c, w_den_c, w_num_c0, w_den_c0) > 0 || continue
 
-                    num_c = corrected_visibility(V, gains, bi, a, b, num_pol, s, c)
-                    den_c = corrected_visibility(V, gains, bi, a, b, den_pol, s, c)
-                    num_c0 = corrected_visibility(V, gains, bi, a, b, num_pol, s, c0)
-                    den_c0 = corrected_visibility(V, gains, bi, a, b, den_pol, s, c0)
+                    num_c = corrected_visibility(V, gains, pol_codes, bi, a, b, num_pol, s, c)
+                    den_c = corrected_visibility(V, gains, pol_codes, bi, a, b, den_pol, s, c)
+                    num_c0 = corrected_visibility(V, gains, pol_codes, bi, a, b, num_pol, s, c0)
+                    den_c0 = corrected_visibility(V, gains, pol_codes, bi, a, b, den_pol, s, c0)
 
                     vals = (num_c, den_c, num_c0, den_c0)
                     all(isfinite(real(v)) && isfinite(imag(v)) && abs(v) > 0 for v in vals) || continue
@@ -417,7 +414,7 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
     return xy_correction
 end
 
-function solve_bandpass_single_scan(Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models;
+function solve_bandpass_single_scan(Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
     min_baselines=3)
     nbl, npol, nchan = size(Vs)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
@@ -428,14 +425,14 @@ function solve_bandpass_single_scan(Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, c
     for c in 1:nchan
         c == c0 && continue
         solve_parallel_channel!(gains, solved, Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, c, A_amp, A_phase,
-            station_models; min_baselines=min_baselines)
+            station_models, parallel_pols; min_baselines=min_baselines)
     end
 
-    constrain_gain_models!(gains, Ws, bl_pairs, channel_freqs, c0, station_models)
+    constrain_gain_models!(gains, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     return gains, solved
 end
 
-function solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models;
+function solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
     min_baselines=3)
     nscan, nbl, npol, nchan = size(V)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
@@ -445,10 +442,10 @@ function solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channe
     for c in 1:nchan
         c == c0 && continue
         solve_parallel_channel!(gains, nothing, V, W, bl_pairs, nant, phase_ref_ant, c0, c, A_amp, A_phase,
-            station_models; min_baselines=min_baselines)
+            station_models, parallel_pols; min_baselines=min_baselines)
     end
 
-    constrain_gain_models!(gains, W, bl_pairs, channel_freqs, c0, station_models)
+    constrain_gain_models!(gains, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     return gains
 end
 
@@ -457,23 +454,24 @@ end
                    station_models=nothing, phase_ref_ant=ref_ant, apply_relative_correction=true)
 
 Solve for per-antenna complex bandpass gains relative to a reference channel.
-The solver uses a staged architecture: RR and LL are solved independently to
-build a stable backbone, then an optional reference-antenna relative feed
-correction is recovered afterward from the cross-hands.
+The solver uses a staged architecture: the two parallel-hand products (`11` and
+`22`) are solved independently to build a stable backbone, then an optional
+reference-antenna relative feed correction is recovered afterward from the
+cross-hands (`12`/`21`).
 
 Algorithm per (scan s, channel c, feed):
   1. Form ratios  D[a,b] = V[s,a,b,c] / V[s,a,b,c₀]   (source cancels)
   2. Amplitude:   log|g_a| + log|g_b| = log|D[a,b]|    (least squares)
   3. Phase:       φ_a    - φ_b        = ∠ D[a,b]        (least squares, ref_ant fixed)
-  4. Optionally use LR/RL relative to RR/LL on baselines touching `ref_ant`
+  4. Optionally use `12`/`21` relative to `11`/`22` on baselines touching `ref_ant`
       to estimate the reference antenna's differential feed correction.
   5. g_a = exp(log|g_a|) · exp(iφ_a), with feed 2 rephased by the solved
       differential term where available.
 
 Returns:
-  gains[nscan, nant, 2, nchan]  – feed 1 = R/X, feed 2 = L/Y, shared across scans
+  gains                         – `DimArray` with scan/antenna/feed/channel axes
   c0                            – reference channel index (gains = 1 there)
-  xy_correction[nscan, nchan]   – solved complex feed correction of the reference antenna
+  xy_correction                 – `DimArray` with scan/IF axes and metadata for the target site/pol
 """
 function solve_bandpass(avg::UVData, ref_ant;
         min_baselines=3, station_models=nothing, phase_ref_ant=ref_ant,
@@ -485,7 +483,7 @@ function solve_bandpass(avg::UVData, ref_ant;
     bl_pairs = avg.bl_pairs
     channel_freqs = avg.channel_freqs
 
-    c0 = best_ref_channel(W)
+    c0 = best_ref_channel(avg)
     @info "Reference channel: $c0 of $nchan"
 
     if isnothing(station_models)
@@ -495,9 +493,10 @@ function solve_bandpass(avg::UVData, ref_ant;
         station_models = validate_station_bandpass_model.(station_models)
     end
 
+    parallel_pols = parallel_hand_indices(avg.pol_codes)
     variable_ants = findall(model -> is_per_scan(model.segmentation.time), station_models)
 
-    gains_template = solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models;
+    gains_template = solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
         min_baselines=min_baselines)
     gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
     variable_mask = falses(nant)
@@ -513,6 +512,7 @@ function solve_bandpass(avg::UVData, ref_ant;
             c0,
             channel_freqs,
             station_models,
+            parallel_pols,
             min_baselines=min_baselines)
         overwrite = solved .& reshape(variable_mask, :, 1, 1)
         for a in 1:nant, feed in 1:2, c in 1:nchan
@@ -522,11 +522,18 @@ function solve_bandpass(avg::UVData, ref_ant;
     end
 
     xy_correction = ones(ComplexF64, nscan, nchan)
+    ref_partner_feed = partner_feed_index(station_models[ref_ant].reference_feed)
     if apply_relative_correction
-        xy_correction = solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models)
-        ref_partner_feed = partner_feed_index(station_models[ref_ant].reference_feed)
+        xy_correction = solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models, avg.pol_codes)
         gains[:, ref_ant, ref_partner_feed, :] .*= xy_correction
     end
 
-    return gains, c0, xy_correction
+    wrapped_xy = wrap_xy_correction(
+        xy_correction,
+        avg,
+        ref_ant;
+        applies_to_pol=ref_partner_feed,
+        reference_pol=station_models[ref_ant].reference_feed)
+
+    return wrap_gain_solutions(gains, avg), c0, wrapped_xy
 end
