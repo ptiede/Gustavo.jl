@@ -1,7 +1,7 @@
 using DimensionalData: TimeDim, @dim
 @dim IF "IF or Channel"
 @dim Pol "Polarization"
-@dim(Scan,  TimeDim, "Scan")
+@dim(Scan, TimeDim, "Scan")
 @dim Ant "Antenna"
 
 struct UVData{
