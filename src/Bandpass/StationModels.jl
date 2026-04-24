@@ -11,12 +11,12 @@ end
 abstract type AbstractTimeSegmentation end
 abstract type AbstractFrequencySegmentation end
 
-struct SegmentedBandpassModel{M<:AbstractBandpassModel,F<:AbstractFrequencySegmentation} <: AbstractBandpassModel
+struct SegmentedBandpassModel{M <: AbstractBandpassModel, F <: AbstractFrequencySegmentation} <: AbstractBandpassModel
     model::M
     segmentation::F
 end
 
-struct CompositeBandpassModel{C<:Tuple} <: AbstractBandpassModel
+struct CompositeBandpassModel{C <: Tuple} <: AbstractBandpassModel
     components::C
 end
 
@@ -29,27 +29,27 @@ struct BlockFrequencySegmentation <: AbstractFrequencySegmentation
     block_size::Int
 end
 
-BlockFrequencySegmentation(; block_size=1) =
+BlockFrequencySegmentation(; block_size = 1) =
     BlockFrequencySegmentation(block_size)
 
-struct BandpassSegmentation{T<:AbstractTimeSegmentation,F<:AbstractFrequencySegmentation}
+struct BandpassSegmentation{T <: AbstractTimeSegmentation, F <: AbstractFrequencySegmentation}
     time::T
     frequency::F
 end
 
 default_bandpass_segmentation() = BandpassSegmentation(GlobalTimeSegmentation(), GlobalFrequencySegmentation())
 
-struct BandpassSpec{M<:AbstractBandpassModel,S<:BandpassSegmentation}
+struct BandpassSpec{M <: AbstractBandpassModel, S <: BandpassSegmentation}
     model::M
     segmentation::S
 end
 
-struct FeedBandpassModel{P<:BandpassSpec,A<:BandpassSpec}
+struct FeedBandpassModel{P <: BandpassSpec, A <: BandpassSpec}
     phase::P
     amplitude::A
 end
 
-struct StationBandpassModel{F<:FeedBandpassModel,G<:FeedBandpassModel}
+struct StationBandpassModel{F <: FeedBandpassModel, G <: FeedBandpassModel}
     reference_feed::Int
     reference::F
     relative::G
@@ -192,19 +192,22 @@ function validate_segmentation(segmentation::BandpassSegmentation)
     return segmentation
 end
 
-function BandpassSpec(model::AbstractBandpassModel; segmentation=default_bandpass_segmentation())
+function BandpassSpec(model::AbstractBandpassModel; segmentation = default_bandpass_segmentation())
     segmentation_spec = validate_segmentation(segmentation)
     return BandpassSpec(model, segmentation_spec)
 end
 
-function BandpassSpec(; model=PerChannelBandpassModel(), segmentation=default_bandpass_segmentation())
-    return BandpassSpec(model; segmentation=segmentation)
+function BandpassSpec(; model = PerChannelBandpassModel(), segmentation = default_bandpass_segmentation())
+    return BandpassSpec(model; segmentation = segmentation)
 end
 
-function FeedBandpassModel(; phase=BandpassSpec(), amplitude=BandpassSpec())
-    return validate_feed_bandpass_model(FeedBandpassModel(
-        BandpassSpec(validate_phase_model(phase.model); segmentation=phase.segmentation),
-        BandpassSpec(validate_amplitude_model(amplitude.model); segmentation=amplitude.segmentation)))
+function FeedBandpassModel(; phase = BandpassSpec(), amplitude = BandpassSpec())
+    return validate_feed_bandpass_model(
+        FeedBandpassModel(
+            BandpassSpec(validate_phase_model(phase.model); segmentation = phase.segmentation),
+            BandpassSpec(validate_amplitude_model(amplitude.model); segmentation = amplitude.segmentation)
+        )
+    )
 end
 
 SegmentedBandpassModel(model::AbstractBandpassModel) =
@@ -225,10 +228,15 @@ function validate_station_bandpass_model(model::StationBandpassModel)
     return model
 end
 
-function StationBandpassModel(; reference_feed=1,
-    reference=FeedBandpassModel(), relative=FeedBandpassModel())
-    return validate_station_bandpass_model(StationBandpassModel(
-        validate_reference_feed(reference_feed),
-        validate_feed_bandpass_model(reference),
-        validate_feed_bandpass_model(relative)))
+function StationBandpassModel(;
+        reference_feed = 1,
+        reference = FeedBandpassModel(), relative = FeedBandpassModel()
+    )
+    return validate_station_bandpass_model(
+        StationBandpassModel(
+            validate_reference_feed(reference_feed),
+            validate_feed_bandpass_model(reference),
+            validate_feed_bandpass_model(relative)
+        )
+    )
 end

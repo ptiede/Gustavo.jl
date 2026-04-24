@@ -4,7 +4,7 @@ stokes_feed_pair(code::Integer) = code == -1 ? (1, 1) :
     code == -4 ? (2, 1) :
     error("Unsupported Stokes code for feed mapping: $code")
 
-feed_pair_label(feeds::Tuple{<:Integer,<:Integer}) = string(feeds[1], feeds[2])
+feed_pair_label(feeds::Tuple{<:Integer, <:Integer}) = string(feeds[1], feeds[2])
 polarization_label(code::Integer) = feed_pair_label(stokes_feed_pair(code))
 
 function parallel_hand_indices(pol_codes)
@@ -26,7 +26,7 @@ polarization_feeds(data::UVData, pol_index::Integer) = stokes_feed_pair(data.pol
 function best_ref_channel(data::UVData)
     rr, ll = parallel_hand_indices(data.pol_codes)
     pols = [rr, ll]
-    return argmax(vec(sum(data.weights[:, :, pols, :], dims=(1, 2, 3))))
+    return argmax(vec(sum(data.weights[:, :, pols, :], dims = (1, 2, 3))))
 end
 
 function design_matrices(bl_pairs, nant)
@@ -74,7 +74,7 @@ function weighted_regularized_least_squares(A, b, weights, penalties)
     return solve(LinearProblem(vcat(Aw, Areg), vcat(bw, breg)), QRFactorization()).u
 end
 
-function unwrap_phase_track(phases, ref_idx=1)
+function unwrap_phase_track(phases, ref_idx = 1)
     unwrapped = copy(phases)
     n = length(unwrapped)
     (1 <= ref_idx <= n) || return unwrapped
@@ -101,7 +101,7 @@ function unwrap_phase_track(phases, ref_idx=1)
     return unwrapped
 end
 
-function phase_relative_to_ref(phases, ref_idx=1)
+function phase_relative_to_ref(phases, ref_idx = 1)
     relative = fill(NaN, length(phases))
     (1 <= ref_idx <= length(phases)) || return relative
 
@@ -164,8 +164,10 @@ function choose_phase_reference(avg::UVData, variable_ants)
     return phase_ref
 end
 
-function build_station_models(ant_names, station_model_map;
-        default=StationBandpassModel())
+function build_station_models(
+        ant_names, station_model_map;
+        default = StationBandpassModel()
+    )
     default_model = validate_station_bandpass_model(default)
     station_models = StationBandpassModel[default_model for _ in ant_names]
     for (name, model) in station_model_map
@@ -181,7 +183,8 @@ function station_model_summary(name, model)
     relative_summary_phase = effective_bandpass_model_label(model.relative.phase.model, model.relative.phase.segmentation.frequency)
     reference_summary_amp = effective_bandpass_model_label(model.reference.amplitude.model, model.reference.amplitude.segmentation.frequency)
     relative_summary_amp = effective_bandpass_model_label(model.relative.amplitude.model, model.relative.amplitude.segmentation.frequency)
-    return string(name,
+    return string(
+        name,
         " ref=", reference_feed_label(model.reference_feed),
         " abs(phase=", reference_summary_phase,
         ", phase_time=", time_segmentation_label(model.reference.phase.segmentation.time),
@@ -190,5 +193,6 @@ function station_model_summary(name, model)
         " rel(phase=", relative_summary_phase,
         ", phase_time=", time_segmentation_label(model.relative.phase.segmentation.time),
         ", amp=", relative_summary_amp,
-        ", amp_time=", time_segmentation_label(model.relative.amplitude.segmentation.time), ")")
+        ", amp_time=", time_segmentation_label(model.relative.amplitude.segmentation.time), ")"
+    )
 end

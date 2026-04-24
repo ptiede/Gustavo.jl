@@ -9,7 +9,7 @@ center*, in the frame given by `AntennaTable.frame` (typically ITRF), rotated
 to the longitude of the array center.  Mount type codes: 0=alt-az, 1=equatorial,
 2=orbiting, 3=X-Y, 4=right-Naismith, 5=left-Naismith, 6=aperture/phased array.
 """
-struct Antenna{TName,TXYZ,TMnt,TAxOff,TDiam,TFa,TFb,TPola,TPolb}
+struct Antenna{TName, TXYZ, TMnt, TAxOff, TDiam, TFa, TFb, TPola, TPolb}
     name::TName             # ANNAME — station code
     station_xyz::TXYZ       # STABXYZ — 3-element (x,y,z) in meters
     mount_type::TMnt        # MNTSTA
@@ -27,7 +27,7 @@ end
 Array-of-structs antenna table.  `antennas` is a `StructArray{Antenna}`;
 the remaining fields carry array-level metadata from the AIPS AN table header.
 """
-struct AntennaTable{TAnt,TXyz,TName,TFreq,TRdate,TGst,TDeg,TUt,TSys,TFrame,THand}
+struct AntennaTable{TAnt, TXyz, TName, TFreq, TRdate, TGst, TDeg, TUt, TSys, TFrame, THand}
     antennas::TAnt          # StructArray{Antenna}
     array_xyz::TXyz         # ARRAYX/Y/Z — array center (meters)
     array_name::TName       # ARRNAM
@@ -55,7 +55,7 @@ frequency table (Memo 117 §4.7).
 + FQ `IF FREQ` offset).  `channel_bwidths` and `ch_width` come from `TOTAL
 BANDWIDTH` and `CH WIDTH` columns of the FQ table, respectively.
 """
-struct ObsMetadata{TObj,TTel,TObs,TDate,TEq,TBunit,TRa,TDec,TFreq,TCfreqs,TBw,TCw,TSb,TPcodes,TPlabs}
+struct ObsMetadata{TObj, TTel, TObs, TDate, TEq, TBunit, TRa, TDec, TFreq, TCfreqs, TBw, TCw, TSb, TPcodes, TPlabs}
     object::TObj            # OBJECT — source name
     telescope::TTel         # TELESCOP
     observer::TObs          # OBSERVER

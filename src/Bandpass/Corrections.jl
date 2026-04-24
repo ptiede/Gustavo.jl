@@ -52,7 +52,7 @@ function export_uvfits(input_path, data::UVData, output_path)
     raw_corr[:, 2, :, :] = Float32.(imag.(data.vis))
     raw_corr[:, 3, :, :] = Float32.(data.weights)
 
-    primary_data = merge(hdus[1].data, (data=restore_uvfits_shape(raw_corr, data.raw_shape, data.squeeze_dims),))
+    primary_data = merge(hdus[1].data, (data = restore_uvfits_shape(raw_corr, data.raw_shape, data.squeeze_dims),))
     hdus[1] = HDU(Random, primary_data, hdus[1].cards)
 
     write(output_path, hdus)

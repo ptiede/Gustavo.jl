@@ -76,28 +76,38 @@ end
 @testset "Bandpass time segmentation" begin
     BP = Gustavo.Bandpass
     model = BP.StationBandpassModel(
-        reference=BP.FeedBandpassModel(
-            phase=BP.BandpassSpec(
+        reference = BP.FeedBandpassModel(
+            phase = BP.BandpassSpec(
                 BP.PolynomialBandpassModel(1);
-                segmentation=BP.BandpassSegmentation(
+                segmentation = BP.BandpassSegmentation(
                     BP.PerScanTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation())),
-            amplitude=BP.BandpassSpec(
+                    BP.GlobalFrequencySegmentation()
+                )
+            ),
+            amplitude = BP.BandpassSpec(
                 BP.PolynomialBandpassModel(1);
-                segmentation=BP.BandpassSegmentation(
+                segmentation = BP.BandpassSegmentation(
                     BP.GlobalTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation()))),
-        relative=BP.FeedBandpassModel(
-            phase=BP.BandpassSpec(
+                    BP.GlobalFrequencySegmentation()
+                )
+            )
+        ),
+        relative = BP.FeedBandpassModel(
+            phase = BP.BandpassSpec(
                 BP.PolynomialBandpassModel(1);
-                segmentation=BP.BandpassSegmentation(
+                segmentation = BP.BandpassSegmentation(
                     BP.GlobalTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation())),
-            amplitude=BP.BandpassSpec(
+                    BP.GlobalFrequencySegmentation()
+                )
+            ),
+            amplitude = BP.BandpassSpec(
                 BP.PolynomialBandpassModel(1);
-                segmentation=BP.BandpassSegmentation(
+                segmentation = BP.BandpassSegmentation(
                     BP.GlobalTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation()))),
+                    BP.GlobalFrequencySegmentation()
+                )
+            )
+        ),
     )
 
     @test BP.phase_is_per_scan(model.reference)
@@ -138,30 +148,32 @@ end
     BP = Gustavo.Bandpass
     data = synthetic_uvdata()
     corr = BP.with_visibilities(data, data.vis .* (1.0 + 0.0im), data.weights)
-    gains = reshape(ComplexF64[
-        1.0 * cis(0.1), 2.0 * cis(0.2),
-        3.0 * cis(0.3), 4.0 * cis(0.4),
-        5.0 * cis(0.5), 6.0 * cis(0.6),
-        7.0 * cis(0.7), 8.0 * cis(0.8),
-        1.1 * cis(0.2), 2.1 * cis(0.3),
-        3.1 * cis(0.4), 4.1 * cis(0.5),
-        5.1 * cis(0.6), 6.1 * cis(0.7),
-        7.1 * cis(0.8), 8.1 * cis(0.9),
-    ], 2, 2, 2, 2)
+    gains = reshape(
+        ComplexF64[
+            1.0 * cis(0.1), 2.0 * cis(0.2),
+            3.0 * cis(0.3), 4.0 * cis(0.4),
+            5.0 * cis(0.5), 6.0 * cis(0.6),
+            7.0 * cis(0.7), 8.0 * cis(0.8),
+            1.1 * cis(0.2), 2.1 * cis(0.3),
+            3.1 * cis(0.4), 4.1 * cis(0.5),
+            5.1 * cis(0.6), 6.1 * cis(0.7),
+            7.1 * cis(0.8), 8.1 * cis(0.9),
+        ], 2, 2, 2, 2
+    )
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol=:parallel)
+    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = :parallel)
     @test pol_idx == [1, 2]
     @test pol_labels == ["11", "22"]
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol=["22", "12"])
+    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = ["22", "12"])
     @test pol_idx == [2, 3]
     @test pol_labels == ["22", "12"]
 
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity=:phase, pol="11"))
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity=:amplitude, pol=:all, relative=true))
+    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
+    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
     @test !isnothing(BP.plot_gain_solutions(gains, data))
-    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity=:amplitude, pol=1, sites="AA", relative=false))
-    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity=:phase, pol=[2], sites=["AX"]))
+    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
+    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 end
 
 @testset "Amplitude stability summary" begin
@@ -173,16 +185,16 @@ end
     weight_block = ones(Float64, 2, 2)
     groups = [1, 2]
 
-    summary = BP.scan_averaged_amplitude_series(vis_block, weight_block; relative=false, groups=groups)
+    summary = BP.scan_averaged_amplitude_series(vis_block, weight_block; relative = false, groups = groups)
     @test summary ≈ [1.0, 2.0]
 
     noise_vis = reshape(ComplexF64[1.0 + 0.0im, 2.0 + 0.0im], 1, 2)
     noise_weights = fill(2.0, 1, 2)
 
-    _, amp_noise = BP.amplitude_series_with_noise(noise_vis, noise_weights; relative=false)
+    _, amp_noise = BP.amplitude_series_with_noise(noise_vis, noise_weights; relative = false)
     @test amp_noise ≈ fill(1 / sqrt(2), 2)
 
-    phase, phase_noise = BP.phase_series_with_noise(noise_vis, noise_weights; relative=false)
+    phase, phase_noise = BP.phase_series_with_noise(noise_vis, noise_weights; relative = false)
     @test phase ≈ [0.0, 0.0]
     @test phase_noise ≈ [1 / sqrt(2), 1 / (2sqrt(2))]
 end
@@ -196,7 +208,7 @@ end
     gains = reshape(gains, 1, 2, 5)
 
     support = ones(Float64, 1, 2, 5)
-    repaired = BP.sanitize_gain_amplitudes!(gains, support, 2; collapse_fraction=0.05, min_gain_amplitude=1e-2, neighbor_window=1)
+    repaired = BP.sanitize_gain_amplitudes!(gains, support, 2; collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2, neighbor_window = 1)
 
     @test length(repaired) == 1
     @test repaired[1].channel == 4
@@ -205,5 +217,6 @@ end
     @test abs(gains[1, 2, 4]) ≈ 1.0
 
     @test_logs (:warn, r"repaired collapsed gain amplitudes") BP.warn_sanitized_gain_amplitudes(
-        repaired, ["AA"]; context="scan 1")
+        repaired, ["AA"]; context = "scan 1"
+    )
 end

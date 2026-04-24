@@ -1,67 +1,69 @@
 DD.@dim IF "IF or Channel"
 DD.@dim Pol "Polarization"
-DD.@dim Scan DD.TimeDim "Telescope Scan" 
+DD.@dim Scan DD.TimeDim "Telescope Scan"
 DD.@dim Ant "Antenna or Site"
 
 struct UVData{
-    V<:AbstractArray{<:Complex},
-    W<:AbstractArray{<:Real},
-    TObs<:AbstractVector{<:Real},
-    TScan<:AbstractVector{<:Integer},
-    TBlCodes<:AbstractVector{<:Real},
-    TBlPairs<:AbstractVector{<:Tuple{<:Integer,<:Integer}},
-    TLookup<:AbstractDict{<:Real,<:Integer},
-    TUniqueBls<:AbstractVector{<:Real},
-    TAntNames<:AbstractVector{<:AbstractString},
-    S,
-    TPolCodes<:AbstractVector{<:Integer},
-    TPolLabels<:AbstractVector{<:AbstractString},
-    TFreqs<:AbstractVector{<:Real},
-    TRawShape<:Tuple,
-    TSqueeze<:AbstractVector{<:Integer},
-}
-    vis          ::V
-    weights      ::W
-    obs_time     ::TObs
-    scan_idx     ::TScan
-    bl_codes     ::TBlCodes
-    bl_pairs     ::TBlPairs
-    bl_lookup    ::TLookup
-    unique_bls   ::TUniqueBls
-    ant_names    ::TAntNames
-    sc           ::S
-    pol_codes    ::TPolCodes
-    pol_labels   ::TPolLabels
+        V <: AbstractArray{<:Complex},
+        W <: AbstractArray{<:Real},
+        TObs <: AbstractVector{<:Real},
+        TScan <: AbstractVector{<:Integer},
+        TBlCodes <: AbstractVector{<:Real},
+        TBlPairs <: AbstractVector{<:Tuple{<:Integer, <:Integer}},
+        TLookup <: AbstractDict{<:Real, <:Integer},
+        TUniqueBls <: AbstractVector{<:Real},
+        TAntNames <: AbstractVector{<:AbstractString},
+        S,
+        TPolCodes <: AbstractVector{<:Integer},
+        TPolLabels <: AbstractVector{<:AbstractString},
+        TFreqs <: AbstractVector{<:Real},
+        TRawShape <: Tuple,
+        TSqueeze <: AbstractVector{<:Integer},
+    }
+    vis::V
+    weights::W
+    obs_time::TObs
+    scan_idx::TScan
+    bl_codes::TBlCodes
+    bl_pairs::TBlPairs
+    bl_lookup::TLookup
+    unique_bls::TUniqueBls
+    ant_names::TAntNames
+    sc::S
+    pol_codes::TPolCodes
+    pol_labels::TPolLabels
     channel_freqs::TFreqs
-    raw_shape    ::TRawShape
-    squeeze_dims ::TSqueeze
+    raw_shape::TRawShape
+    squeeze_dims::TSqueeze
 end
 
 function with_visibilities(data::UVData, vis, weights)
-    return UVData(vis, weights, data.obs_time, data.scan_idx, data.bl_codes, data.bl_pairs, data.bl_lookup,
+    return UVData(
+        vis, weights, data.obs_time, data.scan_idx, data.bl_codes, data.bl_pairs, data.bl_lookup,
         data.unique_bls, data.ant_names, data.sc, data.pol_codes, data.pol_labels, data.channel_freqs,
-        data.raw_shape, data.squeeze_dims)
+        data.raw_shape, data.squeeze_dims
+    )
 end
 
 scan_time_centers(data::UVData) = [(scan.lower + scan.upper) / 2 for scan in data.sc]
 band_center_frequency(data::UVData) = (first(data.channel_freqs) + last(data.channel_freqs)) / 2
 centered_channel_freqs(data::UVData) = data.channel_freqs .- band_center_frequency(data)
 
-function baseline_sites(data::UVData, bl::Tuple{String,String})
+function baseline_sites(data::UVData, bl::Tuple{String, String})
     a_idx = findfirst(==(bl[1]), data.ant_names)
     b_idx = findfirst(==(bl[2]), data.ant_names)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl")
     return a_idx, b_idx
 end
 
-function baseline_number(data::UVData, bl::Tuple{String,String})
+function baseline_number(data::UVData, bl::Tuple{String, String})
     a_idx, b_idx = baseline_sites(data, bl)
-    bi = findfirst(==( (a_idx, b_idx) ), data.bl_pairs)
+    bi = findfirst(==((a_idx, b_idx)), data.bl_pairs)
     isnothing(bi) && error("Baseline $bl not in data")
     return bi
 end
 
-function wrap_baseline_array(A, data::UVData, bl::Tuple{String,String}; kind::Symbol, obs_inds=nothing)
+function wrap_baseline_array(A, data::UVData, bl::Tuple{String, String}; kind::Symbol, obs_inds = nothing)
     centered_freqs = centered_channel_freqs(data)
     metadata = Dict(
         :baseline => join(bl, "-"),
@@ -78,17 +80,21 @@ function wrap_baseline_array(A, data::UVData, bl::Tuple{String,String}; kind::Sy
     elseif ndims(A) == 3 && !isnothing(obs_inds)
         metadata[:obs_indices] = collect(obs_inds)
         metadata[:scan_indices] = data.scan_idx[obs_inds]
-        return DimArray(A, (
-            Ti(data.obs_time[obs_inds]),
-            Pol(collect(data.pol_labels[1:size(A, 2)])),
-            IF(centered_freqs),
-        ); metadata=metadata)
+        return DimArray(
+            A, (
+                Ti(data.obs_time[obs_inds]),
+                Pol(collect(data.pol_labels[1:size(A, 2)])),
+                IF(centered_freqs),
+            ); metadata = metadata
+        )
     elseif ndims(A) == 3
-        return DimArray(A, (
-            Scan(scan_time_centers(data)),
-            Pol(collect(data.pol_labels[1:size(A, 2)])),
-            IF(centered_freqs),
-        ); metadata=metadata)
+        return DimArray(
+            A, (
+                Scan(scan_time_centers(data)),
+                Pol(collect(data.pol_labels[1:size(A, 2)])),
+                IF(centered_freqs),
+            ); metadata = metadata
+        )
     elseif ndims(A) == 4
         error("wrap_baseline_array expects a baseline-selected slice, not the full UV cube")
     else
@@ -105,15 +111,15 @@ Return visibilities for a single baseline as a `DimArray`.
 - For raw `UVData` loaded from uvfits this returns dimensions `(Ti, Pol, IF)`.
 - For scan-averaged `UVData` this returns dimensions `(Scan, Pol, IF)`.
 """
-function baseline_visibilities(data::UVData, bl::Tuple{String,String})
+function baseline_visibilities(data::UVData, bl::Tuple{String, String})
     if ndims(data.vis) == 3
         bi = baseline_number(data, bl)
         bl_code = data.unique_bls[bi]
         obs_inds = findall(==(bl_code), data.bl_codes)
-        return wrap_baseline_array(@view(data.vis[obs_inds, :, :]), data, bl; kind=:vis, obs_inds=obs_inds)
+        return wrap_baseline_array(@view(data.vis[obs_inds, :, :]), data, bl; kind = :vis, obs_inds = obs_inds)
     elseif ndims(data.vis) == 4
         bi = baseline_number(data, bl)
-        return wrap_baseline_array(@view(data.vis[:, bi, :, :]), data, bl; kind=:vis)
+        return wrap_baseline_array(@view(data.vis[:, bi, :, :]), data, bl; kind = :vis)
     else
         error("Unsupported visibility rank: $(ndims(data.vis))")
     end
@@ -125,32 +131,32 @@ end
 Return weights for a single baseline as a `DimArray`.
 The dimensional layout matches `baseline_visibilities`.
 """
-function baseline_weights(data::UVData, bl::Tuple{String,String})
+function baseline_weights(data::UVData, bl::Tuple{String, String})
     if ndims(data.weights) == 3
         bi = baseline_number(data, bl)
         bl_code = data.unique_bls[bi]
         obs_inds = findall(==(bl_code), data.bl_codes)
-        return wrap_baseline_array(@view(data.weights[obs_inds, :, :]), data, bl; kind=:weights, obs_inds=obs_inds)
+        return wrap_baseline_array(@view(data.weights[obs_inds, :, :]), data, bl; kind = :weights, obs_inds = obs_inds)
     elseif ndims(data.weights) == 4
         bi = baseline_number(data, bl)
-        return wrap_baseline_array(@view(data.weights[:, bi, :, :]), data, bl; kind=:weights)
+        return wrap_baseline_array(@view(data.weights[:, bi, :, :]), data, bl; kind = :weights)
     else
         error("Unsupported weight rank: $(ndims(data.weights))")
     end
 end
 
-Base.getindex(data::UVData, bl::Tuple{String,String}) = baseline_visibilities(data, bl)
+Base.getindex(data::UVData, bl::Tuple{String, String}) = baseline_visibilities(data, bl)
 
 function card_value(cards, key)
     prefix = rpad(key, 8)
     for card in cards
         s = string(card)
         startswith(s, prefix) || continue
-        parts = split(s, "="; limit=2)
+        parts = split(s, "="; limit = 2)
         length(parts) == 2 || continue
-        raw = strip(first(split(parts[2], "/"; limit=2)))
+        raw = strip(first(split(parts[2], "/"; limit = 2)))
         if startswith(raw, "'") && endswith(raw, "'")
-            return strip(raw[2:end-1])
+            return strip(raw[2:(end - 1)])
         end
         try
             return parse(Int, raw)
@@ -195,7 +201,7 @@ function load_uvfits(path)
 
     dim1 = findall(==(1), size(dt.data))
     raw_shape = size(dt.data)
-    raw = dropdims(dt.data, dims=Tuple(dim1))
+    raw = dropdims(dt.data, dims = Tuple(dim1))
 
     vis = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
     weights = Float64.(raw[:, 3, :, :])
@@ -208,7 +214,7 @@ function load_uvfits(path)
 
     lower = (nx.TIME .- nx.var"TIME INTERVAL" ./ 2) .* 24
     upper = (nx.TIME .+ nx.var"TIME INTERVAL" ./ 2) .* 24
-    sc = StructArray(lower=lower, upper=upper)
+    sc = StructArray(lower = lower, upper = upper)
 
     scan_idx = assign_scans(Ti, sc)
 
@@ -216,8 +222,10 @@ function load_uvfits(path)
     bl_lookup = Dict(bl => i for (i, bl) in enumerate(unique_bls))
     bl_pairs = decode_baseline.(unique_bls)
 
-    return UVData(vis, weights, Ti, scan_idx, bl_codes, bl_pairs, bl_lookup, unique_bls,
-        ant_names, sc, pol_codes, pol_labels, channel_freqs, raw_shape, dim1)
+    return UVData(
+        vis, weights, Ti, scan_idx, bl_codes, bl_pairs, bl_lookup, unique_bls,
+        ant_names, sc, pol_codes, pol_labels, channel_freqs, raw_shape, dim1
+    )
 end
 
 decode_baseline(bl) = (Int(round(bl)) ÷ 256, Int(round(bl)) % 256)
@@ -278,21 +286,23 @@ end
 Wrap the solved gain cube in a `DimArray` so scans, sites, polarisations, and IFs
 carry labeled dimensions for interactive inspection.
 """
-function wrap_gain_solutions(gains, data::UVData; pol_keys=1:2)
+function wrap_gain_solutions(gains, data::UVData; pol_keys = 1:2)
     size(gains, 1) == length(data.sc) || error("Gain scan axis does not match UVData scans")
     size(gains, 2) == length(data.ant_names) || error("Gain antenna axis does not match UVData antennas")
     size(gains, 3) == length(pol_keys) || error("pol_keys length must match gain polarisation axis")
     size(gains, 4) == length(data.channel_freqs) || error("Gain channel axis does not match UVData channels")
 
-    return DimArray(gains, (
-        Scan(scan_time_centers(data)),
-        Ant(data.ant_names),
-        Pol(collect(pol_keys)),
-        IF(centered_channel_freqs(data)),
-    ); metadata=Dict(
-        :channel_freqs => collect(data.channel_freqs),
-        :band_center_frequency => band_center_frequency(data),
-    ))
+    return DimArray(
+        gains, (
+            Scan(scan_time_centers(data)),
+            Ant(data.ant_names),
+            Pol(collect(pol_keys)),
+            IF(centered_channel_freqs(data)),
+        ); metadata = Dict(
+            :channel_freqs => collect(data.channel_freqs),
+            :band_center_frequency => band_center_frequency(data),
+        )
+    )
 end
 
 """
@@ -316,8 +326,10 @@ function wrap_xy_correction(xy_correction, data::UVData, ref_ant; applies_to_pol
         :band_center_frequency => band_center_frequency(data),
     )
 
-    return DimArray(xy_correction, (
-        Scan(scan_time_centers(data)),
-        IF(centered_channel_freqs(data)),
-    ); metadata=metadata)
+    return DimArray(
+        xy_correction, (
+            Scan(scan_time_centers(data)),
+            IF(centered_channel_freqs(data)),
+        ); metadata = metadata
+    )
 end

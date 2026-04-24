@@ -1,4 +1,4 @@
-function diagnostic_weight_pair(weights, weights_corr; comparison_weights=:input)
+function diagnostic_weight_pair(weights, weights_corr; comparison_weights = :input)
     if comparison_weights == :input
         return weights, weights
     elseif comparison_weights == :native
@@ -8,12 +8,14 @@ function diagnostic_weight_pair(weights, weights_corr; comparison_weights=:input
     end
 end
 
-diagnostic_scan_colormap(nscan) = cgrad(get(ColorSchemes.tol_muted, range(0, 1, length=max(nscan, 1))), categorical=true)
+diagnostic_scan_colormap(nscan) = cgrad(get(ColorSchemes.tol_muted, range(0, 1, length = max(nscan, 1))), categorical = true)
 
-function annotate_coherence!(ax, stats; fontsize=11)
-    text!(ax, 0.98, 0.96;
-        text=coherence_label(stats),
-        space=:relative, align=(:right, :top), fontsize=fontsize)
+function annotate_coherence!(ax, stats; fontsize = 11)
+    return text!(
+        ax, 0.98, 0.96;
+        text = coherence_label(stats),
+        space = :relative, align = (:right, :top), fontsize = fontsize
+    )
 end
 
 """
@@ -38,8 +40,10 @@ same pre-correction weights on both panels so gain-amplitude rescaling does not
 change the apparent scatter purely through reweighting. Use
 `comparison_weights=:native` to plot each panel with its own weights.
 """
-function plot_stability(data::UVData, corr::UVData, bl_plot;
-    quantity=:phase, pol=:parallel, relative=false, comparison_weights=:input)
+function plot_stability(
+        data::UVData, corr::UVData, bl_plot;
+        quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input
+    )
     a_idx = findfirst(==(bl_plot[1]), data.ant_names)
     b_idx = findfirst(==(bl_plot[2]), data.ant_names)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl_plot")
@@ -51,17 +55,23 @@ function plot_stability(data::UVData, corr::UVData, bl_plot;
 
     nscan = length(data.sc)
     scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_idx, pol_labels = resolve_plot_polarizations(data; pol=pol)
-    ylabel, summarize, scatter_series, scatter_noise, annotate_metric! = stability_plotting_config(quantity; relative=relative)
-    plot_weights_before, plot_weights_after = diagnostic_weight_pair(data.weights, corr.weights;
-        comparison_weights=comparison_weights)
+    pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
+    ylabel, summarize, scatter_series, scatter_noise, annotate_metric! = stability_plotting_config(quantity; relative = relative)
+    plot_weights_before, plot_weights_after = diagnostic_weight_pair(
+        data.weights, corr.weights;
+        comparison_weights = comparison_weights
+    )
 
-    fig = Figure(size=(900, 280 * length(pol_idx) + 40))
+    fig = Figure(size = (900, 280 * length(pol_idx) + 40))
     for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        ax_b = Axis(fig[row, 1]; title="$(join(bl_plot,"-")) $lab  before",
-            xlabel="channel", ylabel=ylabel)
-        ax_a = Axis(fig[row, 2]; title="$(join(bl_plot,"-")) $lab  after",
-            xlabel="channel", ylabel=ylabel)
+        ax_b = Axis(
+            fig[row, 1]; title = "$(join(bl_plot, "-")) $lab  before",
+            xlabel = "channel", ylabel = ylabel
+        )
+        ax_a = Axis(
+            fig[row, 2]; title = "$(join(bl_plot, "-")) $lab  after",
+            xlabel = "channel", ylabel = ylabel
+        )
         linkxaxes!(ax_b, ax_a)
         linkyaxes!(ax_b, ax_a)
 
@@ -71,10 +81,10 @@ function plot_stability(data::UVData, corr::UVData, bl_plot;
         w_after = @view plot_weights_after[int_inds, pi, :]
         scan_groups = data.scan_idx[int_inds]
 
-        summary_before = summarize(vis_before, w_before; groups=scan_groups)
-        summary_after = summarize(vis_after, w_after; groups=scan_groups)
-        lines!(ax_b, summary_before; color=:black, linewidth=2)
-        lines!(ax_a, summary_after; color=:black, linewidth=2)
+        summary_before = summarize(vis_before, w_before; groups = scan_groups)
+        summary_after = summarize(vis_after, w_after; groups = scan_groups)
+        lines!(ax_b, summary_before; color = :black, linewidth = 2)
+        lines!(ax_a, summary_after; color = :black, linewidth = 2)
 
         annotate_metric!(ax_b, vis_before, w_before, scan_groups)
         annotate_metric!(ax_a, vis_after, w_after, scan_groups)
@@ -82,11 +92,11 @@ function plot_stability(data::UVData, corr::UVData, bl_plot;
         for s in 1:nscan
             ii = int_inds[findall(i -> data.scan_idx[int_inds[i]] == s, eachindex(int_inds))]
             isempty(ii) && continue
-            kw = (color=s, colormap=scan_wheel, colorrange=(1, max(nscan, 1)), markersize=9)
-            before_phase = scatter_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups=nothing)
-            after_phase = scatter_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups=nothing)
-            before_noise = scatter_noise(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups=nothing)
-            after_noise = scatter_noise(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups=nothing)
+            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 9)
+            before_phase = scatter_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups = nothing)
+            after_phase = scatter_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups = nothing)
+            before_noise = scatter_noise(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups = nothing)
+            after_noise = scatter_noise(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups = nothing)
             plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
             plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
             scatter!(ax_b, before_phase; kw...)
@@ -94,7 +104,7 @@ function plot_stability(data::UVData, corr::UVData, bl_plot;
         end
     end
 
-    Colorbar(fig[1:length(pol_idx), 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
+    Colorbar(fig[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
     return fig
 end
 
@@ -134,7 +144,7 @@ function thermal_noise_series(weight_block)
     return noise
 end
 
-function amplitude_reference_index(amps, ref_idx=1)
+function amplitude_reference_index(amps, ref_idx = 1)
     if 1 <= ref_idx <= length(amps)
         ref = amps[ref_idx]
         isfinite(ref) && ref > 0 && return ref_idx
@@ -142,7 +152,7 @@ function amplitude_reference_index(amps, ref_idx=1)
     return findfirst(a -> isfinite(a) && a > 0, amps)
 end
 
-function phase_series_with_noise(vis_block, weight_block; relative=true, ref_idx=1)
+function phase_series_with_noise(vis_block, weight_block; relative = true, ref_idx = 1)
     avg = weighted_channel_average(vis_block, weight_block)
     amp = abs.(avg)
     phase = angle.(avg)
@@ -169,17 +179,17 @@ function phase_series_with_noise(vis_block, weight_block; relative=true, ref_idx
     return relative_phase, phase_noise
 end
 
-function phase_series(vis_block, weight_block; relative=true)
-    phase, _ = phase_series_with_noise(vis_block, weight_block; relative=relative)
+function phase_series(vis_block, weight_block; relative = true)
+    phase, _ = phase_series_with_noise(vis_block, weight_block; relative = relative)
     return phase
 end
 
-function phase_noise_series(vis_block, weight_block; relative=true)
-    _, noise = phase_series_with_noise(vis_block, weight_block; relative=relative)
+function phase_noise_series(vis_block, weight_block; relative = true)
+    _, noise = phase_series_with_noise(vis_block, weight_block; relative = relative)
     return noise
 end
 
-function amplitude_series_with_noise(vis_block, weight_block; relative=false, ref_idx=1)
+function amplitude_series_with_noise(vis_block, weight_block; relative = false, ref_idx = 1)
     amp = abs.(weighted_channel_average(vis_block, weight_block))
     sigma_amp = thermal_noise_series(weight_block)
     relative || return amp, sigma_amp
@@ -192,25 +202,27 @@ function amplitude_series_with_noise(vis_block, weight_block; relative=false, re
     ref_amp = amp[ref]
     ref_noise = sigma_amp[ref]
     for i in eachindex(amp)
-        (isfinite(relative_amp[i]) && isfinite(amp[i]) && amp[i] > 0 &&
-            isfinite(sigma_amp[i]) && isfinite(ref_noise) && ref_amp > 0) || continue
+        (
+            isfinite(relative_amp[i]) && isfinite(amp[i]) && amp[i] > 0 &&
+                isfinite(sigma_amp[i]) && isfinite(ref_noise) && ref_amp > 0
+        ) || continue
         relative_noise[i] = relative_amp[i] * sqrt((sigma_amp[i] / amp[i])^2 + (ref_noise / ref_amp)^2)
     end
     return relative_amp, relative_noise
 end
 
-function amplitude_series(vis_block, weight_block; relative=false)
-    amp, _ = amplitude_series_with_noise(vis_block, weight_block; relative=relative)
+function amplitude_series(vis_block, weight_block; relative = false)
+    amp, _ = amplitude_series_with_noise(vis_block, weight_block; relative = relative)
     return amp
 end
 
-function amplitude_noise_series(vis_block, weight_block; relative=false)
-    _, noise = amplitude_series_with_noise(vis_block, weight_block; relative=relative)
+function amplitude_noise_series(vis_block, weight_block; relative = false)
+    _, noise = amplitude_series_with_noise(vis_block, weight_block; relative = relative)
     return noise
 end
 
-function scan_averaged_amplitude_series(vis_block, weight_block; relative=false, groups=nothing)
-    isnothing(groups) && return amplitude_series(vis_block, weight_block; relative=relative)
+function scan_averaged_amplitude_series(vis_block, weight_block; relative = false, groups = nothing)
+    isnothing(groups) && return amplitude_series(vis_block, weight_block; relative = relative)
 
     nchan = size(vis_block, 2)
     accum = zeros(Float64, nchan)
@@ -221,7 +233,7 @@ function scan_averaged_amplitude_series(vis_block, weight_block; relative=false,
         ii = findall(==(group), groups)
         isempty(ii) && continue
 
-        spectrum = amplitude_series(view(vis_block, ii, :), view(weight_block, ii, :); relative=relative)
+        spectrum = amplitude_series(view(vis_block, ii, :), view(weight_block, ii, :); relative = relative)
         spectrum_weights = summed_channel_weights(view(weight_block, ii, :))
         for c in 1:nchan
             v = spectrum[c]
@@ -238,7 +250,7 @@ function scan_averaged_amplitude_series(vis_block, weight_block; relative=false,
     return summary
 end
 
-function amplitude_relative_to_ref(amps, ref_idx=1)
+function amplitude_relative_to_ref(amps, ref_idx = 1)
     relative = fill(NaN, length(amps))
     (1 <= ref_idx <= length(amps)) || return relative
 
@@ -256,12 +268,12 @@ function amplitude_relative_to_ref(amps, ref_idx=1)
     return relative
 end
 
-function amplitude_range_label(vis_block, weight_block; groups=nothing)
+function amplitude_range_label(vis_block, weight_block; groups = nothing)
     ranges = Float64[]
 
     if isnothing(groups)
         for s in axes(vis_block, 1)
-            amp = amplitude_series(view(vis_block, s:s, :), view(weight_block, s:s, :); relative=true)
+            amp = amplitude_series(view(vis_block, s:s, :), view(weight_block, s:s, :); relative = true)
             valid = isfinite.(amp)
             count(valid) >= 2 || continue
             push!(ranges, maximum(amp[valid]) - minimum(amp[valid]))
@@ -271,7 +283,7 @@ function amplitude_range_label(vis_block, weight_block; groups=nothing)
             group == 0 && continue
             ii = findall(==(group), groups)
             isempty(ii) && continue
-            amp = amplitude_series(view(vis_block, ii, :), view(weight_block, ii, :); relative=true)
+            amp = amplitude_series(view(vis_block, ii, :), view(weight_block, ii, :); relative = true)
             valid = isfinite.(amp)
             count(valid) >= 2 || continue
             push!(ranges, maximum(amp[valid]) - minimum(amp[valid]))
@@ -282,7 +294,7 @@ function amplitude_range_label(vis_block, weight_block; groups=nothing)
     return @sprintf("median rel amp span %.3f", median(ranges))
 end
 
-function resolve_plot_polarizations(data::UVData; pol=:parallel)
+function resolve_plot_polarizations(data::UVData; pol = :parallel)
     if pol == :parallel
         pol_idx = collect(parallel_hand_indices(data.pol_codes))
     elseif pol == :all
@@ -308,27 +320,32 @@ function resolve_single_polarization(data::UVData, pol::AbstractString)
     return idx
 end
 
-function stability_plotting_config(quantity; relative=false)
+function stability_plotting_config(quantity; relative = false)
     if quantity == :phase
         ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
-        summarize = (vis_block, weight_block; groups=nothing) -> phase_series(vis_block, weight_block; relative=relative)
+        summarize = (vis_block, weight_block; groups = nothing) -> phase_series(vis_block, weight_block; relative = relative)
         scatter_series = summarize
-        scatter_noise = (vis_block, weight_block; groups=nothing) -> phase_noise_series(vis_block, weight_block; relative=relative)
+        scatter_noise = (vis_block, weight_block; groups = nothing) -> phase_noise_series(vis_block, weight_block; relative = relative)
         annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
-            annotate_coherence!(ax, residual_phase_coherence(vis_block, weight_block; groups=scan_groups); fontsize=12)
+            return annotate_coherence!(ax, residual_phase_coherence(vis_block, weight_block; groups = scan_groups); fontsize = 12)
         end
     elseif quantity == :amplitude
         ylabel = relative ? "amplitude / ref" : "amplitude"
-        summarize = (vis_block, weight_block; groups=nothing) -> scan_averaged_amplitude_series(
-            vis_block, weight_block; relative=relative, groups=groups)
-        scatter_series = (vis_block, weight_block; groups=nothing) -> amplitude_series(
-            vis_block, weight_block; relative=relative)
-        scatter_noise = (vis_block, weight_block; groups=nothing) -> amplitude_noise_series(
-            vis_block, weight_block; relative=relative)
+        summarize = (vis_block, weight_block; groups = nothing) -> scan_averaged_amplitude_series(
+            vis_block, weight_block; relative = relative, groups = groups
+        )
+        scatter_series = (vis_block, weight_block; groups = nothing) -> amplitude_series(
+            vis_block, weight_block; relative = relative
+        )
+        scatter_noise = (vis_block, weight_block; groups = nothing) -> amplitude_noise_series(
+            vis_block, weight_block; relative = relative
+        )
         annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
-            text!(ax, 0.98, 0.96;
-                text=amplitude_range_label(vis_block, weight_block; groups=scan_groups),
-                space=:relative, align=(:right, :top), fontsize=12)
+            return text!(
+                ax, 0.98, 0.96;
+                text = amplitude_range_label(vis_block, weight_block; groups = scan_groups),
+                space = :relative, align = (:right, :top), fontsize = 12
+            )
         end
     else
         error("quantity must be :phase or :amplitude")
@@ -337,7 +354,7 @@ function stability_plotting_config(quantity; relative=false)
     return ylabel, summarize, scatter_series, scatter_noise, annotate_metric!
 end
 
-function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; alpha=0.18, linewidth=1.0)
+function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; alpha = 0.18, linewidth = 1.0)
     xs = Float64[]
     ys = Float64[]
     for (channel, (value, sigma)) in enumerate(zip(series, noise))
@@ -346,11 +363,13 @@ function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; 
         push!(ys, value - sigma, value + sigma)
     end
     isempty(xs) && return ax
-    linesegments!(ax, xs, ys;
-        color=(scan_index, alpha),
-        colormap=scan_wheel,
-        colorrange=(1, max(nscan, 1)),
-        linewidth=linewidth)
+    linesegments!(
+        ax, xs, ys;
+        color = (scan_index, alpha),
+        colormap = scan_wheel,
+        colorrange = (1, max(nscan, 1)),
+        linewidth = linewidth
+    )
     return ax
 end
 
@@ -381,7 +400,7 @@ function spectrum_phase_coherence(vis_spectrum, weight_spectrum)
     return (coherence, loss_percent, phase_rms_deg, count(valid))
 end
 
-function residual_phase_coherence(vis_block, weight_block; groups=nothing)
+function residual_phase_coherence(vis_block, weight_block; groups = nothing)
     scan_coherences = Float64[]
     scan_losses = Float64[]
     scan_phase_rms = Float64[]
@@ -390,7 +409,8 @@ function residual_phase_coherence(vis_block, weight_block; groups=nothing)
         for s in axes(vis_block, 1)
             coherence, loss_percent, phase_rms_deg, nsamp = spectrum_phase_coherence(
                 vec(vis_block[s, :]),
-                vec(weight_block[s, :]))
+                vec(weight_block[s, :])
+            )
             nsamp == 0 && continue
             push!(scan_coherences, coherence)
             push!(scan_losses, loss_percent)
@@ -436,13 +456,17 @@ By default this uses the original input weights on both sides so the comparison
 isolates phase improvement instead of gain-amplitude reweighting. Set
 `comparison_weights=:native` to evaluate the corrected data with its updated weights.
 """
-function coherence_loss_table(avg::UVData, avg_corr::UVData;
-    pol_idx=nothing, pol_labels=nothing, comparison_weights=:input)
+function coherence_loss_table(
+        avg::UVData, avg_corr::UVData;
+        pol_idx = nothing, pol_labels = nothing, comparison_weights = :input
+    )
     V = avg.vis
     W = avg.weights
     V_corr = avg_corr.vis
-    _, W_corr = diagnostic_weight_pair(avg.weights, avg_corr.weights;
-        comparison_weights=comparison_weights)
+    _, W_corr = diagnostic_weight_pair(
+        avg.weights, avg_corr.weights;
+        comparison_weights = comparison_weights
+    )
     if isnothing(pol_idx)
         rr, ll = parallel_hand_indices(avg.pol_codes)
         pol_idx = [rr, ll]
@@ -460,19 +484,23 @@ function coherence_loss_table(avg::UVData, avg_corr::UVData;
             nsamp = max(before[4], after[4])
             nsamp == 0 && continue
 
-            push!(rows, (; baseline, pol=lab, nsamp,
-                coherence_before=before[1], loss_before=before[2], phase_rms_before=before[3],
-                coherence_after=after[1], loss_after=after[2], phase_rms_after=after[3],
-                loss_improvement=before[2] - after[2],
-                phase_rms_improvement=before[3] - after[3]))
+            push!(
+                rows, (;
+                    baseline, pol = lab, nsamp,
+                    coherence_before = before[1], loss_before = before[2], phase_rms_before = before[3],
+                    coherence_after = after[1], loss_after = after[2], phase_rms_after = after[3],
+                    loss_improvement = before[2] - after[2],
+                    phase_rms_improvement = before[3] - after[3],
+                )
+            )
         end
     end
 
-    sort!(rows; by=row -> (isfinite(row.loss_improvement) ? -row.loss_improvement : Inf, row.baseline, row.pol))
+    sort!(rows; by = row -> (isfinite(row.loss_improvement) ? -row.loss_improvement : Inf, row.baseline, row.pol))
     return rows
 end
 
-function print_coherence_loss_table(rows; io=stdout)
+function print_coherence_loss_table(rows; io = stdout)
     println(io)
     println(io, "Expected coherence loss from within-scan channel phase scatter")
     println(io, "baseline  pol  scans  coh_before  loss_before(%)  coh_after  loss_after(%)  improve(%)  rms_after(deg)")
@@ -485,7 +513,8 @@ function print_coherence_loss_table(rows; io=stdout)
         improve = isfinite(row.loss_improvement) ? @sprintf("%10.2f", row.loss_improvement) : "       n/a"
         rms_after = isfinite(row.phase_rms_after) ? @sprintf("%14.2f", row.phase_rms_after) : "           n/a"
 
-        println(io, rpad(row.baseline, 8), "  ",
+        println(
+            io, rpad(row.baseline, 8), "  ",
             rpad(row.pol, 3), "  ",
             lpad(string(row.nsamp), 5), "  ",
             coh_before, "  ",
@@ -493,31 +522,37 @@ function print_coherence_loss_table(rows; io=stdout)
             coh_after, "  ",
             loss_after, "  ",
             improve, "  ",
-            rms_after)
+            rms_after
+        )
     end
+    return
 end
 
-function site_coherence_rows(rows, site::String; pol=nothing)
+function site_coherence_rows(rows, site::String; pol = nothing)
     filtered = NamedTuple[
         row for row in rows if begin
-            sites = split(row.baseline, "-")
-            (site in sites) && (isnothing(pol) || row.pol == pol)
-        end
+                sites = split(row.baseline, "-")
+                (site in sites) && (isnothing(pol) || row.pol == pol)
+            end
     ]
 
-    sort!(filtered; by=row -> (
-        isfinite(row.loss_after) ? -row.loss_after : Inf,
-        isfinite(row.loss_improvement) ? row.loss_improvement : Inf,
-        row.baseline,
-    ))
+    sort!(
+        filtered; by = row -> (
+            isfinite(row.loss_after) ? -row.loss_after : Inf,
+            isfinite(row.loss_improvement) ? row.loss_improvement : Inf,
+            row.baseline,
+        )
+    )
     return filtered
 end
 
-function print_site_coherence_rows(rows, site::String; pol=nothing, io=stdout, limit=nothing)
-    filtered = site_coherence_rows(rows, site; pol=pol)
+function print_site_coherence_rows(rows, site::String; pol = nothing, io = stdout, limit = nothing)
+    filtered = site_coherence_rows(rows, site; pol = pol)
     isempty(filtered) && begin
-        println(io, "No coherence rows found for site ", site,
-            isnothing(pol) ? "" : " and pol $pol")
+        println(
+            io, "No coherence rows found for site ", site,
+            isnothing(pol) ? "" : " and pol $pol"
+        )
         return filtered
     end
 
@@ -536,14 +571,16 @@ function print_site_coherence_rows(rows, site::String; pol=nothing, io=stdout, l
         improve = isfinite(row.loss_improvement) ? @sprintf("%10.2f", row.loss_improvement) : "       n/a"
         rms_after = isfinite(row.phase_rms_after) ? @sprintf("%14.2f", row.phase_rms_after) : "           n/a"
 
-        println(io, rpad(row.baseline, 8), "  ",
+        println(
+            io, rpad(row.baseline, 8), "  ",
             rpad(partner, 7), "  ",
             rpad(row.pol, 3), "  ",
             lpad(string(row.nsamp), 5), "  ",
             loss_before, "  ",
             loss_after, "  ",
             improve, "  ",
-            rms_after)
+            rms_after
+        )
     end
 
     return filtered
@@ -556,8 +593,10 @@ function baseline_in_data(data::UVData, bl_plot)
     return any(p -> p == (a_idx, b_idx), data.bl_pairs)
 end
 
-function choose_diagnostic_baseline(avg::UVData;
-    preferred=[("AA", "AX"), ("AA", "NN"), ("AA", "PV"), ("KT", "PV")])
+function choose_diagnostic_baseline(
+        avg::UVData;
+        preferred = [("AA", "AX"), ("AA", "NN"), ("AA", "PV"), ("KT", "PV")]
+    )
     for bl in preferred
         baseline_in_data(avg, bl) && return bl
     end
@@ -589,8 +628,10 @@ relative view intentionally suppresses. The default `comparison_weights=:input`
 uses the same pre-correction weights on both panels for a like-for-like visual
 comparison.
 """
-function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
-    relative=true, comparison_weights=:input)
+function plot_baseline_phases(
+        data::UVData, corr::UVData, bl_plot;
+        relative = true, comparison_weights = :input
+    )
     a_idx = findfirst(==(bl_plot[1]), data.ant_names)
     b_idx = findfirst(==(bl_plot[2]), data.ant_names)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl_plot")
@@ -604,15 +645,21 @@ function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_labels = collect(data.pol_labels)
     ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
-    plot_weights_before, plot_weights_after = diagnostic_weight_pair(data.weights, corr.weights;
-        comparison_weights=comparison_weights)
+    plot_weights_before, plot_weights_after = diagnostic_weight_pair(
+        data.weights, corr.weights;
+        comparison_weights = comparison_weights
+    )
 
-    fig = Figure(size=(1100, 900))
+    fig = Figure(size = (1100, 900))
     for (row, (pi, lab)) in enumerate(zip(eachindex(pol_labels), pol_labels))
-        ax_b = Axis(fig[row, 1]; title="$(join(bl_plot, "-")) $lab before",
-            xlabel="channel", ylabel=ylabel)
-        ax_a = Axis(fig[row, 2]; title="$(join(bl_plot, "-")) $lab after",
-            xlabel="channel", ylabel=ylabel)
+        ax_b = Axis(
+            fig[row, 1]; title = "$(join(bl_plot, "-")) $lab before",
+            xlabel = "channel", ylabel = ylabel
+        )
+        ax_a = Axis(
+            fig[row, 2]; title = "$(join(bl_plot, "-")) $lab after",
+            xlabel = "channel", ylabel = ylabel
+        )
         linkxaxes!(ax_b, ax_a)
         linkyaxes!(ax_b, ax_a)
 
@@ -622,17 +669,17 @@ function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
         w_after = @view plot_weights_after[int_inds, pi, :]
         scan_groups = data.scan_idx[int_inds]
 
-        annotate_coherence!(ax_b, residual_phase_coherence(vis_before, w_before; groups=scan_groups))
-        annotate_coherence!(ax_a, residual_phase_coherence(vis_after, w_after; groups=scan_groups))
+        annotate_coherence!(ax_b, residual_phase_coherence(vis_before, w_before; groups = scan_groups))
+        annotate_coherence!(ax_a, residual_phase_coherence(vis_after, w_after; groups = scan_groups))
 
         for s in 1:nscan
             ii = int_inds[findall(i -> data.scan_idx[int_inds[i]] == s, eachindex(int_inds))]
             isempty(ii) && continue
-            kw = (color=s, colormap=scan_wheel, colorrange=(1, max(nscan, 1)), markersize=4)
-            before_phase = phase_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative=relative)
-            after_phase = phase_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative=relative)
-            before_noise = phase_noise_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative=relative)
-            after_noise = phase_noise_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative=relative)
+            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
+            before_phase = phase_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative = relative)
+            after_phase = phase_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative = relative)
+            before_noise = phase_noise_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative = relative)
+            after_noise = phase_noise_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative = relative)
             plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
             plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
             scatter!(ax_b, before_phase; kw...)
@@ -640,7 +687,7 @@ function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
         end
     end
 
-    Colorbar(fig[1:length(pol_labels), 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
+    Colorbar(fig[1:length(pol_labels), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
     return fig
 end
 
@@ -654,21 +701,23 @@ choose feeds with `pol`, and restrict rows with `sites`.
 The default behavior matches the legacy plot: both feeds, all sites, and
 relative phase.
 """
-function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
+function plot_gain_solutions(gains, data::UVData; quantity = :phase, pol = :all, sites = :all, relative = true)
     nscan = length(data.sc)
     scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_idx, pol_labels = resolve_gain_polarizations(data; pol=pol)
-    site_idx, site_labels = resolve_gain_sites(data; sites=sites)
-    ylabel = gain_quantity_label(quantity; relative=relative)
-    series = gain_quantity_series(quantity; relative=relative)
+    pol_idx, pol_labels = resolve_gain_polarizations(data; pol = pol)
+    site_idx, site_labels = resolve_gain_sites(data; sites = sites)
+    ylabel = gain_quantity_label(quantity; relative = relative)
+    series = gain_quantity_series(quantity; relative = relative)
 
-    fig = Figure(size=(900, 180 * length(site_idx)))
+    fig = Figure(size = (900, 180 * length(site_idx)))
     for (row, ai) in enumerate(site_idx)
         axes_row = Axis[]
         for (col, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-            ax = Axis(fig[row, col];
-                ylabel=site_labels[row], xlabel="channel",
-                title=(row == 1 ? "$(lab) gain  $ylabel" : ""))
+            ax = Axis(
+                fig[row, col];
+                ylabel = site_labels[row], xlabel = "channel",
+                title = (row == 1 ? "$(lab) gain  $ylabel" : "")
+            )
             push!(axes_row, ax)
         end
 
@@ -678,17 +727,17 @@ function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sit
         end
 
         for s in 1:nscan
-            kw = (color=s, colormap=scan_wheel, colorrange=(1, max(nscan, 1)), markersize=4)
+            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
             for (ax, pi) in zip(axes_row, pol_idx)
                 scatter!(ax, series(vec(gains[s, ai, pi, :])); kw...)
             end
         end
     end
-    Colorbar(fig[1:length(site_idx), length(pol_idx) + 1], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
+    Colorbar(fig[1:length(site_idx), length(pol_idx) + 1], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
     return fig
 end
 
-function resolve_gain_polarizations(data::UVData; pol=:all)
+function resolve_gain_polarizations(data::UVData; pol = :all)
     if pol == :all
         pol_idx = [1, 2]
     elseif pol == :parallel
@@ -714,7 +763,7 @@ function resolve_single_gain_polarization(data::UVData, pol::AbstractString)
     error("Unsupported gain polarization label: $pol")
 end
 
-function resolve_gain_sites(data::UVData; sites=:all)
+function resolve_gain_sites(data::UVData; sites = :all)
     if sites == :all
         site_idx = collect(eachindex(data.ant_names))
     elseif sites isa Integer
@@ -738,7 +787,7 @@ function resolve_single_gain_site(data::UVData, site::AbstractString)
     return idx
 end
 
-function gain_quantity_series(quantity; relative=true)
+function gain_quantity_series(quantity; relative = true)
     if quantity == :phase
         return values -> begin
             phase = angle.(values)
@@ -754,7 +803,7 @@ function gain_quantity_series(quantity; relative=true)
     end
 end
 
-function gain_quantity_label(quantity; relative=true)
+function gain_quantity_label(quantity; relative = true)
     if quantity == :phase
         return relative ? "gain phase rel. to ref (rad)" : "gain phase (rad)"
     elseif quantity == :amplitude
@@ -764,17 +813,17 @@ function gain_quantity_label(quantity; relative=true)
     end
 end
 
-function baseline_index(data::UVData, bl::Tuple{String,String})
+function baseline_index(data::UVData, bl::Tuple{String, String})
     a_idx = findfirst(==(bl[1]), data.ant_names)
     b_idx = findfirst(==(bl[2]), data.ant_names)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl")
 
-    bl_idx = findfirst(==( (a_idx, b_idx) ), data.bl_pairs)
+    bl_idx = findfirst(==((a_idx, b_idx)), data.bl_pairs)
     isnothing(bl_idx) && error("Baseline $bl not in data")
     return bl_idx
 end
 
-function parallel_hand_support_summary(avg::UVData, bl::Tuple{String,String})
+function parallel_hand_support_summary(avg::UVData, bl::Tuple{String, String})
     bi = baseline_index(avg, bl)
     rr, ll = parallel_hand_indices(avg.pol_codes)
     pol_map = [(avg.pol_labels[rr], rr), (avg.pol_labels[ll], ll)]
@@ -784,32 +833,38 @@ function parallel_hand_support_summary(avg::UVData, bl::Tuple{String,String})
         W = @view avg.weights[:, bi, pi, :]
         V = @view avg.vis[:, bi, pi, :]
         valid = (W .> 0) .& isfinite.(W) .& isfinite.(real.(V)) .& isfinite.(imag.(V))
-        scan_valid = vec(sum(valid, dims=2))
-        if_valid = vec(sum(valid, dims=1))
+        scan_valid = vec(sum(valid, dims = 2))
+        if_valid = vec(sum(valid, dims = 1))
         total_weight = sum(W[valid])
-        mean_phase_by_scan = [begin
-            idx = vec(valid[s, :])
-            any(idx) ? angle(sum(W[s, idx] .* (V[s, idx] ./ abs.(V[s, idx]))) / sum(W[s, idx])) : NaN
-        end for s in axes(W, 1)]
+        mean_phase_by_scan = [
+            begin
+                    idx = vec(valid[s, :])
+                    any(idx) ? angle(sum(W[s, idx] .* (V[s, idx] ./ abs.(V[s, idx]))) / sum(W[s, idx])) : NaN
+                end for s in axes(W, 1)
+        ]
 
-        push!(rows, (;
-            baseline=join(bl, "-"),
-            pol=lab,
-            valid_samples=count(valid),
-            total_weight=total_weight,
-            scans_with_data=count(>(0), scan_valid),
-            min_scan_valid=minimum(scan_valid),
-            max_scan_valid=maximum(scan_valid),
-            min_if_valid=minimum(if_valid),
-            max_if_valid=maximum(if_valid),
-            mean_phase_by_scan,
-        ))
+        push!(
+            rows, (;
+                baseline = join(bl, "-"),
+                pol = lab,
+                valid_samples = count(valid),
+                total_weight = total_weight,
+                scans_with_data = count(>(0), scan_valid),
+                min_scan_valid = minimum(scan_valid),
+                max_scan_valid = maximum(scan_valid),
+                min_if_valid = minimum(if_valid),
+                max_if_valid = maximum(if_valid),
+                mean_phase_by_scan,
+            )
+        )
     end
 
     rr, ll = rows
-    return (; rows,
+    return (;
+        rows,
         valid_ratio = ll.valid_samples / max(rr.valid_samples, 1),
-        weight_ratio = ll.total_weight / max(rr.total_weight, eps()))
+        weight_ratio = ll.total_weight / max(rr.total_weight, eps()),
+    )
 end
 
 function site_parallel_hand_support(avg::UVData, site::String)
@@ -819,33 +874,37 @@ function site_parallel_hand_support(avg::UVData, site::String)
         site in names || continue
         summary = parallel_hand_support_summary(avg, names)
         rr, ll = summary.rows
-        push!(rows, (;
-            baseline=join(names, "-"),
-            rr_valid=rr.valid_samples,
-            ll_valid=ll.valid_samples,
-            rr_weight=rr.total_weight,
-            ll_weight=ll.total_weight,
-            ll_to_rr_valid=summary.valid_ratio,
-            ll_to_rr_weight=summary.weight_ratio,
-        ))
+        push!(
+            rows, (;
+                baseline = join(names, "-"),
+                rr_valid = rr.valid_samples,
+                ll_valid = ll.valid_samples,
+                rr_weight = rr.total_weight,
+                ll_weight = ll.total_weight,
+                ll_to_rr_valid = summary.valid_ratio,
+                ll_to_rr_weight = summary.weight_ratio,
+            )
+        )
     end
-    sort!(rows; by=row -> row.ll_to_rr_weight)
+    sort!(rows; by = row -> row.ll_to_rr_weight)
     return rows
 end
 
-function print_parallel_hand_support(summary; io=stdout)
+function print_parallel_hand_support(summary; io = stdout)
     println(io, "Parallel-hand support summary for ", summary.rows[1].baseline)
     println(io, "pol  valid_samples  total_weight   scans_with_data  min/max_scan_valid  min/max_IF_valid")
     for row in summary.rows
-        println(io,
+        println(
+            io,
             lpad(row.pol, 3), "  ",
             lpad(string(row.valid_samples), 13), "  ",
             lpad(@sprintf("%.6g", row.total_weight), 12), "  ",
             lpad(string(row.scans_with_data), 15), "  ",
             lpad("$(row.min_scan_valid)/$(row.max_scan_valid)", 18), "  ",
-            lpad("$(row.min_if_valid)/$(row.max_if_valid)", 16))
+            lpad("$(row.min_if_valid)/$(row.max_if_valid)", 16)
+        )
     end
     pol_a, pol_b = getindex.(summary.rows, :pol)
     println(io, "$(pol_b)/$(pol_a) valid ratio  = ", @sprintf("%.4f", summary.valid_ratio))
-    println(io, "$(pol_b)/$(pol_a) weight ratio = ", @sprintf("%.4f", summary.weight_ratio))
+    return println(io, "$(pol_b)/$(pol_a) weight ratio = ", @sprintf("%.4f", summary.weight_ratio))
 end
