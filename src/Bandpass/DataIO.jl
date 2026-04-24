@@ -1,3 +1,8 @@
+DD.@dim IF "IF or Channel"
+DD.@dim Pol "Polarization"
+DD.@dim Scan DD.TimeDim "Telescope Scan" 
+DD.@dim Ant "Antenna or Site"
+
 struct UVData{
     V<:AbstractArray{<:Complex},
     W<:AbstractArray{<:Real},
@@ -75,14 +80,14 @@ function wrap_baseline_array(A, data::UVData, bl::Tuple{String,String}; kind::Sy
         metadata[:scan_indices] = data.scan_idx[obs_inds]
         return DimArray(A, (
             Ti(data.obs_time[obs_inds]),
-            Dim{:Pol}(collect(data.pol_labels[1:size(A, 2)])),
-            Dim{:IF}(centered_freqs),
+            Pol(collect(data.pol_labels[1:size(A, 2)])),
+            IF(centered_freqs),
         ); metadata=metadata)
     elseif ndims(A) == 3
         return DimArray(A, (
-            Dim{:Scan}(scan_time_centers(data)),
-            Dim{:Pol}(collect(data.pol_labels[1:size(A, 2)])),
-            Dim{:IF}(centered_freqs),
+            Scan(scan_time_centers(data)),
+            Pol(collect(data.pol_labels[1:size(A, 2)])),
+            IF(centered_freqs),
         ); metadata=metadata)
     elseif ndims(A) == 4
         error("wrap_baseline_array expects a baseline-selected slice, not the full UV cube")
@@ -90,6 +95,7 @@ function wrap_baseline_array(A, data::UVData, bl::Tuple{String,String}; kind::Sy
         error("Unsupported baseline slice rank: $(ndims(A))")
     end
 end
+
 
 """
     baseline_visibilities(data::UVData, bl::Tuple{String,String})
@@ -279,10 +285,10 @@ function wrap_gain_solutions(gains, data::UVData; pol_keys=1:2)
     size(gains, 4) == length(data.channel_freqs) || error("Gain channel axis does not match UVData channels")
 
     return DimArray(gains, (
-        Dim{:Scan}(scan_time_centers(data)),
-        Dim{:Site}(data.ant_names),
-        Dim{:Pol}(collect(pol_keys)),
-        Dim{:IF}(centered_channel_freqs(data)),
+        Scan(scan_time_centers(data)),
+        Ant(data.ant_names),
+        Pol(collect(pol_keys)),
+        IF(centered_channel_freqs(data)),
     ); metadata=Dict(
         :channel_freqs => collect(data.channel_freqs),
         :band_center_frequency => band_center_frequency(data),
@@ -311,7 +317,7 @@ function wrap_xy_correction(xy_correction, data::UVData, ref_ant; applies_to_pol
     )
 
     return DimArray(xy_correction, (
-        Dim{:Scan}(scan_time_centers(data)),
-        Dim{:IF}(centered_channel_freqs(data)),
+        Scan(scan_time_centers(data)),
+        IF(centered_channel_freqs(data)),
     ); metadata=metadata)
 end
