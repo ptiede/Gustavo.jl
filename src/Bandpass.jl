@@ -26,14 +26,14 @@ export SegmentedBandpassModel, CompositeBandpassModel
 export AbstractTimeSegmentation, AbstractFrequencySegmentation
 export GlobalTimeSegmentation, PerScanTimeSegmentation
 export GlobalFrequencySegmentation, BlockFrequencySegmentation
-export BandpassSegmentation, FeedBandpassModel, StationBandpassModel
+export BandpassSegmentation, BandpassSpec, FeedBandpassModel, StationBandpassModel
 export bandpass, parameter_count
-export validate_station_bandpass_model, is_per_scan
+export validate_station_bandpass_model, is_per_scan, phase_is_per_scan, amplitude_is_per_scan
 export best_ref_channel, design_matrices, build_station_models, station_model_summary, choose_phase_reference
 export solve_bandpass
 export apply_bandpass, export_uvfits, default_output_path
 export coherence_loss_table, print_coherence_loss_table, choose_diagnostic_baseline
-export plot_baseline_phases, plot_phase_stability, plot_gain_solutions
+export plot_baseline_phases, plot_stability, plot_gain_solutions
 export parallel_hand_support_summary, site_parallel_hand_support, print_parallel_hand_support
 export site_coherence_rows, print_site_coherence_rows
 

@@ -17,22 +17,29 @@ function annotate_coherence!(ax, stats; fontsize=11)
 end
 
 """
-    plot_phase_stability(data, vis_corr, weights_corr, bl_plot;
-                         relative=false, comparison_weights=:input)
+    plot_stability(data, corr, bl_plot;
+                   quantity=:phase, pol=:parallel,
+                   relative=false, comparison_weights=:input)
 
-Two-column figure showing scan-averaged phase vs channel for `bl_plot`
-(e.g. ("AA","KT")) before (left) and after (right) correction, for the two
-parallel-hand products labelled by their feed pairs (typically `11` and `22`).
-By default this shows absolute phase so the dominant bandpass trend remains
-visible; set `relative=true` to suppress scan-constant offsets.
+Two-column figure showing scan-averaged baseline stability versus channel for
+`bl_plot` before (left) and after (right) correction. Set `quantity=:phase` or
+`:amplitude` and choose which polarization products to plot with `pol`.
+
+For phase plots, `relative=true` suppresses scan-constant offsets by plotting
+phase relative to the reference channel. For amplitude plots, `relative=true`
+normalizes each spectrum by its reference-channel amplitude.
+
+The default `pol=:parallel` plots the two parallel-hand products. Use
+`pol=:all` to include every product, or pass a single polarization label/index
+or a collection of labels/indices.
 
 For before/after comparison, the default `comparison_weights=:input` uses the
 same pre-correction weights on both panels so gain-amplitude rescaling does not
 change the apparent scatter purely through reweighting. Use
 `comparison_weights=:native` to plot each panel with its own weights.
 """
-function plot_phase_stability(data::UVData, corr::UVData, bl_plot;
-    relative=false, comparison_weights=:input)
+function plot_stability(data::UVData, corr::UVData, bl_plot;
+    quantity=:phase, pol=:parallel, relative=false, comparison_weights=:input)
     a_idx = findfirst(==(bl_plot[1]), data.ant_names)
     b_idx = findfirst(==(bl_plot[2]), data.ant_names)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl_plot")
@@ -44,16 +51,12 @@ function plot_phase_stability(data::UVData, corr::UVData, bl_plot;
 
     nscan = length(data.sc)
     scan_wheel = diagnostic_scan_colormap(nscan)
-
-    rr, ll = parallel_hand_indices(data.pol_codes)
-    pol_idx = [rr, ll]
-    pol_labels = data.pol_labels[pol_idx]
-
-    ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
+    pol_idx, pol_labels = resolve_plot_polarizations(data; pol=pol)
+    ylabel, summarize, scatter_series, annotate_metric! = stability_plotting_config(quantity; relative=relative)
     plot_weights_before, plot_weights_after = diagnostic_weight_pair(data.weights, corr.weights;
         comparison_weights=comparison_weights)
 
-    fig = Figure(size=(900, 600))
+    fig = Figure(size=(900, 280 * length(pol_idx) + 40))
     for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
         ax_b = Axis(fig[row, 1]; title="$(join(bl_plot,"-")) $lab  before",
             xlabel="channel", ylabel=ylabel)
@@ -68,26 +71,26 @@ function plot_phase_stability(data::UVData, corr::UVData, bl_plot;
         w_after = @view plot_weights_after[int_inds, pi, :]
         scan_groups = data.scan_idx[int_inds]
 
-        summary_before = phase_series(vis_before, w_before; relative=relative)
-        summary_after = phase_series(vis_after, w_after; relative=relative)
+        summary_before = summarize(vis_before, w_before; groups=scan_groups)
+        summary_after = summarize(vis_after, w_after; groups=scan_groups)
         lines!(ax_b, summary_before; color=:black, linewidth=2)
         lines!(ax_a, summary_after; color=:black, linewidth=2)
 
-        annotate_coherence!(ax_b, residual_phase_coherence(vis_before, w_before; groups=scan_groups); fontsize=12)
-        annotate_coherence!(ax_a, residual_phase_coherence(vis_after, w_after; groups=scan_groups); fontsize=12)
+        annotate_metric!(ax_b, vis_before, w_before, scan_groups)
+        annotate_metric!(ax_a, vis_after, w_after, scan_groups)
 
         for s in 1:nscan
             ii = int_inds[findall(i -> data.scan_idx[int_inds[i]] == s, eachindex(int_inds))]
             isempty(ii) && continue
             kw = (color=s, colormap=scan_wheel, colorrange=(1, max(nscan, 1)), markersize=9)
-            before_phase = phase_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative=relative)
-            after_phase = phase_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative=relative)
+            before_phase = scatter_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups=nothing)
+            after_phase = scatter_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups=nothing)
             scatter!(ax_b, before_phase; kw...)
             scatter!(ax_a, after_phase; kw...)
         end
     end
 
-    Colorbar(fig[1:2, 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
+    Colorbar(fig[1:length(pol_idx), 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
     return fig
 end
 
@@ -122,6 +125,136 @@ end
 function phase_series(vis_block, weight_block; relative=true)
     phase = angle.(weighted_channel_average(vis_block, weight_block))
     return relative ? phase_relative_to_ref(phase) : phase
+end
+
+function amplitude_series(vis_block, weight_block; relative=false)
+    amp = abs.(weighted_channel_average(vis_block, weight_block))
+    return relative ? amplitude_relative_to_ref(amp) : amp
+end
+
+function scan_averaged_amplitude_series(vis_block, weight_block; relative=false, groups=nothing)
+    isnothing(groups) && return amplitude_series(vis_block, weight_block; relative=relative)
+
+    nchan = size(vis_block, 2)
+    accum = zeros(Float64, nchan)
+    accum_weights = zeros(Float64, nchan)
+
+    for group in sort(unique(groups))
+        group == 0 && continue
+        ii = findall(==(group), groups)
+        isempty(ii) && continue
+
+        spectrum = amplitude_series(view(vis_block, ii, :), view(weight_block, ii, :); relative=relative)
+        spectrum_weights = summed_channel_weights(view(weight_block, ii, :))
+        for c in 1:nchan
+            v = spectrum[c]
+            w = spectrum_weights[c]
+            (isfinite(v) && isfinite(w) && w > 0) || continue
+            accum[c] += w * v
+            accum_weights[c] += w
+        end
+    end
+
+    summary = fill(NaN, nchan)
+    valid = accum_weights .> 0
+    summary[valid] .= accum[valid] ./ accum_weights[valid]
+    return summary
+end
+
+function amplitude_relative_to_ref(amps, ref_idx=1)
+    relative = fill(NaN, length(amps))
+    (1 <= ref_idx <= length(amps)) || return relative
+
+    ref = amps[ref_idx]
+    if !(isfinite(ref) && ref > 0)
+        ref_idx = findfirst(a -> isfinite(a) && a > 0, amps)
+        isnothing(ref_idx) && return relative
+        ref = amps[ref_idx]
+    end
+
+    for i in eachindex(amps)
+        (isfinite(amps[i]) && amps[i] > 0) || continue
+        relative[i] = amps[i] / ref
+    end
+    return relative
+end
+
+function amplitude_range_label(vis_block, weight_block; groups=nothing)
+    ranges = Float64[]
+
+    if isnothing(groups)
+        for s in axes(vis_block, 1)
+            amp = amplitude_series(view(vis_block, s:s, :), view(weight_block, s:s, :); relative=true)
+            valid = isfinite.(amp)
+            count(valid) >= 2 || continue
+            push!(ranges, maximum(amp[valid]) - minimum(amp[valid]))
+        end
+    else
+        for group in sort(unique(groups))
+            group == 0 && continue
+            ii = findall(==(group), groups)
+            isempty(ii) && continue
+            amp = amplitude_series(view(vis_block, ii, :), view(weight_block, ii, :); relative=true)
+            valid = isfinite.(amp)
+            count(valid) >= 2 || continue
+            push!(ranges, maximum(amp[valid]) - minimum(amp[valid]))
+        end
+    end
+
+    isempty(ranges) && return "no valid scans"
+    return @sprintf("median rel amp span %.3f", median(ranges))
+end
+
+function resolve_plot_polarizations(data::UVData; pol=:parallel)
+    if pol == :parallel
+        pol_idx = collect(parallel_hand_indices(data.pol_codes))
+    elseif pol == :all
+        pol_idx = collect(eachindex(data.pol_codes))
+    elseif pol isa Integer
+        pol_idx = [Int(pol)]
+    elseif pol isa AbstractString
+        pol_idx = [resolve_single_polarization(data, pol)]
+    elseif pol isa AbstractVector || pol isa Tuple
+        pol_idx = Int[resolve_single_polarization(data, item) for item in pol]
+    else
+        error("Unsupported polarization selector: $pol")
+    end
+
+    all(1 .<= pol_idx .<= length(data.pol_codes)) || error("Polarization index out of bounds: $pol_idx")
+    return pol_idx, collect(data.pol_labels[pol_idx])
+end
+
+resolve_single_polarization(data::UVData, pol::Integer) = Int(pol)
+function resolve_single_polarization(data::UVData, pol::AbstractString)
+    idx = findfirst(==(pol), data.pol_labels)
+    isnothing(idx) && error("Polarization $pol not found in $(collect(data.pol_labels))")
+    return idx
+end
+
+function stability_plotting_config(quantity; relative=false)
+    if quantity == :phase
+        ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
+        summarize = (vis_block, weight_block; groups=nothing) -> phase_series(vis_block, weight_block; relative=relative)
+        scatter_series = summarize
+        annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
+            annotate_coherence!(ax, residual_phase_coherence(vis_block, weight_block; groups=scan_groups); fontsize=12)
+        end
+    elseif quantity == :amplitude
+        ylabel = relative ? "amplitude / ref" : "amplitude"
+        summarize = (vis_block, weight_block; groups=nothing) -> scan_averaged_amplitude_series(
+            vis_block, weight_block; relative=relative, groups=groups)
+        scatter_series = (vis_block, weight_block; groups=nothing) -> amplitude_series(
+            vis_block, weight_block; relative=relative)
+        annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
+            text!(ax, 0.98, 0.96;
+                text=amplitude_range_label(vis_block, weight_block; groups=scan_groups),
+                space=:relative, align=(:right, :top), fontsize=12)
+        end
+    else
+        error("quantity must be :phase or :amplitude")
+    end
+
+    return ylabel, summarize, scatter_series, annotate_metric!
 end
 
 """
@@ -409,36 +542,123 @@ function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
 end
 
 """
-    plot_gain_solutions(gains, data)
+    plot_gain_solutions(gains, data; quantity=:phase, pol=:all, sites=:all, relative=true)
 
-Grid of relative feed phases of the solved gains, one row per antenna and one
-colour per scan.
+Grid of solved gain tracks versus channel, one row per selected site and one
+column per selected polarization/feed. Set `quantity=:phase` or `:amplitude`,
+choose feeds with `pol`, and restrict rows with `sites`.
+
+The default behavior matches the legacy plot: both feeds, all sites, and
+relative phase.
 """
-function plot_gain_solutions(gains, data::UVData)
+function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
     nscan = length(data.sc)
-    nant = size(gains, 2)
     scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_labels = ["Pol 1", "Pol 2"]
+    pol_idx, pol_labels = resolve_gain_polarizations(data; pol=pol)
+    site_idx, site_labels = resolve_gain_sites(data; sites=sites)
+    ylabel = gain_quantity_label(quantity; relative=relative)
+    series = gain_quantity_series(quantity; relative=relative)
 
-    fig = Figure(size=(900, 180 * nant))
-    for ai in 1:nant
-        ax_phase1 = Axis(fig[ai, 1];
-            ylabel=data.ant_names[ai], xlabel="channel",
-            title=(ai == 1 ? "$(pol_labels[1]) gain  ∠g (rad)" : ""))
+    fig = Figure(size=(900, 180 * length(site_idx)))
+    for (row, ai) in enumerate(site_idx)
+        axes_row = Axis[]
+        for (col, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
+            ax = Axis(fig[row, col];
+                ylabel=site_labels[row], xlabel="channel",
+                title=(row == 1 ? "$(lab) gain  $ylabel" : ""))
+            push!(axes_row, ax)
+        end
 
-        ax_phase2 = Axis(fig[ai, 2];
-            ylabel=data.ant_names[ai], xlabel="channel",
-            title=(ai == 1 ? "$(pol_labels[2]) gain  ∠g (rad)" : ""))
-        linkxaxes!(ax_phase1, ax_phase2)
-        linkyaxes!(ax_phase1, ax_phase2)
+        for ax in axes_row[2:end]
+            linkxaxes!(axes_row[1], ax)
+            linkyaxes!(axes_row[1], ax)
+        end
+
         for s in 1:nscan
             kw = (color=s, colormap=scan_wheel, colorrange=(1, max(nscan, 1)), markersize=4)
-            scatter!(ax_phase1, phase_relative_to_ref(angle.(gains[s, ai, 1, :])); kw...)
-            scatter!(ax_phase2, phase_relative_to_ref(angle.(gains[s, ai, 2, :])); kw...)
+            for (ax, pi) in zip(axes_row, pol_idx)
+                scatter!(ax, series(vec(gains[s, ai, pi, :])); kw...)
+            end
         end
     end
-    Colorbar(fig[1:nant, 3], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
+    Colorbar(fig[1:length(site_idx), length(pol_idx) + 1], colormap=scan_wheel, limits=(1, max(nscan, 1)), label="Scan")
     return fig
+end
+
+function resolve_gain_polarizations(data::UVData; pol=:all)
+    if pol == :all
+        pol_idx = [1, 2]
+    elseif pol == :parallel
+        pol_idx = [1, 2]
+    elseif pol isa Integer
+        pol_idx = [Int(pol)]
+    elseif pol isa AbstractString
+        pol_idx = [resolve_single_gain_polarization(data, pol)]
+    elseif pol isa AbstractVector || pol isa Tuple
+        pol_idx = Int[resolve_single_gain_polarization(data, item) for item in pol]
+    else
+        error("Unsupported gain polarization selector: $pol")
+    end
+
+    all(1 .<= pol_idx .<= 2) || error("Gain polarization index must be 1 or 2: $pol_idx")
+    return pol_idx, ["Pol $pi" for pi in pol_idx]
+end
+
+resolve_single_gain_polarization(data::UVData, pol::Integer) = Int(pol)
+function resolve_single_gain_polarization(data::UVData, pol::AbstractString)
+    pol in ("1", "Pol 1", "11", "RR") && return 1
+    pol in ("2", "Pol 2", "22", "LL") && return 2
+    error("Unsupported gain polarization label: $pol")
+end
+
+function resolve_gain_sites(data::UVData; sites=:all)
+    if sites == :all
+        site_idx = collect(eachindex(data.ant_names))
+    elseif sites isa Integer
+        site_idx = [Int(sites)]
+    elseif sites isa AbstractString
+        site_idx = [resolve_single_gain_site(data, sites)]
+    elseif sites isa AbstractVector || sites isa Tuple
+        site_idx = Int[resolve_single_gain_site(data, site) for site in sites]
+    else
+        error("Unsupported gain site selector: $sites")
+    end
+
+    all(1 .<= site_idx .<= length(data.ant_names)) || error("Gain site index out of bounds: $site_idx")
+    return site_idx, collect(data.ant_names[site_idx])
+end
+
+resolve_single_gain_site(data::UVData, site::Integer) = Int(site)
+function resolve_single_gain_site(data::UVData, site::AbstractString)
+    idx = findfirst(==(site), data.ant_names)
+    isnothing(idx) && error("Site $site not found in $(collect(data.ant_names))")
+    return idx
+end
+
+function gain_quantity_series(quantity; relative=true)
+    if quantity == :phase
+        return values -> begin
+            phase = angle.(values)
+            relative ? phase_relative_to_ref(phase) : phase
+        end
+    elseif quantity == :amplitude
+        return values -> begin
+            amp = abs.(values)
+            relative ? amplitude_relative_to_ref(amp) : amp
+        end
+    else
+        error("quantity must be :phase or :amplitude")
+    end
+end
+
+function gain_quantity_label(quantity; relative=true)
+    if quantity == :phase
+        return relative ? "gain phase rel. to ref (rad)" : "gain phase (rad)"
+    elseif quantity == :amplitude
+        return relative ? "gain amp / ref" : "gain amp"
+    else
+        error("quantity must be :phase or :amplitude")
+    end
 end
 
 function baseline_index(data::UVData, bl::Tuple{String,String})

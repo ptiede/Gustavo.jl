@@ -37,8 +37,14 @@ struct BandpassSegmentation{T<:AbstractTimeSegmentation,F<:AbstractFrequencySegm
     frequency::F
 end
 
+default_bandpass_segmentation() = BandpassSegmentation(GlobalTimeSegmentation(), GlobalFrequencySegmentation())
 
-struct FeedBandpassModel{P<:AbstractBandpassModel,A<:AbstractBandpassModel}
+struct BandpassSpec{M<:AbstractBandpassModel,S<:BandpassSegmentation}
+    model::M
+    segmentation::S
+end
+
+struct FeedBandpassModel{P<:BandpassSpec,A<:BandpassSpec}
     phase::P
     amplitude::A
 end
@@ -47,7 +53,6 @@ struct StationBandpassModel{F<:FeedBandpassModel,G<:FeedBandpassModel}
     reference_feed::Int
     reference::F
     relative::G
-    segmentation::BandpassSegmentation
 end
 
 parameter_count(::PerChannelBandpassModel) = nothing
@@ -122,13 +127,31 @@ function validate_reference_feed(reference_feed::Integer)
 end
 
 function validate_feed_bandpass_model(model::FeedBandpassModel)
-    validate_phase_model(model.phase)
-    validate_amplitude_model(model.amplitude)
+    validate_phase_model(model.phase.model)
+    validate_amplitude_model(model.amplitude.model)
+    validate_segmentation(model.phase.segmentation)
+    validate_segmentation(model.amplitude.segmentation)
     return model
 end
 
 is_per_scan(::AbstractTimeSegmentation) = false
 is_per_scan(::PerScanTimeSegmentation) = true
+phase_is_per_scan(segmentation::AbstractTimeSegmentation) = is_per_scan(segmentation)
+amplitude_is_per_scan(segmentation::AbstractTimeSegmentation) = is_per_scan(segmentation)
+phase_is_per_scan(model::FeedBandpassModel) = phase_is_per_scan(model.phase.segmentation.time)
+amplitude_is_per_scan(model::FeedBandpassModel) = amplitude_is_per_scan(model.amplitude.segmentation.time)
+phase_is_per_scan(model::StationBandpassModel) = phase_is_per_scan(model.reference) || phase_is_per_scan(model.relative)
+amplitude_is_per_scan(model::StationBandpassModel) = amplitude_is_per_scan(model.reference) || amplitude_is_per_scan(model.relative)
+function phase_is_per_scan(model::StationBandpassModel, feed::Integer)
+    feed == model.reference_feed && return phase_is_per_scan(model.reference)
+    feed == partner_feed_index(model.reference_feed) && return phase_is_per_scan(model.reference) || phase_is_per_scan(model.relative)
+    error("feed must be 1 or 2")
+end
+function amplitude_is_per_scan(model::StationBandpassModel, feed::Integer)
+    feed == model.reference_feed && return amplitude_is_per_scan(model.reference)
+    feed == partner_feed_index(model.reference_feed) && return amplitude_is_per_scan(model.reference) || amplitude_is_per_scan(model.relative)
+    error("feed must be 1 or 2")
+end
 
 bandpass_model_label(::PerChannelBandpassModel) = "per_channel"
 bandpass_model_label(::FlatBandpassModel) = "flat"
@@ -169,8 +192,19 @@ function validate_segmentation(segmentation::BandpassSegmentation)
     return segmentation
 end
 
-function FeedBandpassModel(; phase=PerChannelBandpassModel(), amplitude=PerChannelBandpassModel())
-    return validate_feed_bandpass_model(FeedBandpassModel(validate_phase_model(phase), validate_amplitude_model(amplitude)))
+function BandpassSpec(model::AbstractBandpassModel; segmentation=default_bandpass_segmentation())
+    segmentation_spec = validate_segmentation(segmentation)
+    return BandpassSpec(model, segmentation_spec)
+end
+
+function BandpassSpec(; model=PerChannelBandpassModel(), segmentation=default_bandpass_segmentation())
+    return BandpassSpec(model; segmentation=segmentation)
+end
+
+function FeedBandpassModel(; phase=BandpassSpec(), amplitude=BandpassSpec())
+    return validate_feed_bandpass_model(FeedBandpassModel(
+        BandpassSpec(validate_phase_model(phase.model); segmentation=phase.segmentation),
+        BandpassSpec(validate_amplitude_model(amplitude.model); segmentation=amplitude.segmentation)))
 end
 
 SegmentedBandpassModel(model::AbstractBandpassModel) =
@@ -188,17 +222,13 @@ function validate_station_bandpass_model(model::StationBandpassModel)
     validate_reference_feed(model.reference_feed)
     validate_feed_bandpass_model(model.reference)
     validate_feed_bandpass_model(model.relative)
-    validate_segmentation(model.segmentation)
     return model
 end
 
 function StationBandpassModel(; reference_feed=1,
-    reference=FeedBandpassModel(), relative=FeedBandpassModel(),
-    segmentation=BandpassSegmentation(GlobalTimeSegmentation(), GlobalFrequencySegmentation()))
-    segmentation_spec = validate_segmentation(segmentation)
+    reference=FeedBandpassModel(), relative=FeedBandpassModel())
     return validate_station_bandpass_model(StationBandpassModel(
         validate_reference_feed(reference_feed),
         validate_feed_bandpass_model(reference),
-        validate_feed_bandpass_model(relative),
-        segmentation_spec))
+        validate_feed_bandpass_model(relative)))
 end

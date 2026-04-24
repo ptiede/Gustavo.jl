@@ -45,7 +45,7 @@ function solve_parallel_channel!(gains, solved, Vblock, Wblock, bl_pairs, nant, 
             conn[a] += 1
             conn[b] += 1
         end
-        local_ref = choose_local_phase_reference(active, phase_ref_ant, station_models, conn)
+        local_ref = choose_local_phase_reference(active, phase_ref_ant, station_models, conn, feed)
         active_free = filter(≠(local_ref), active)
         isempty(active_free) && continue
 
@@ -98,6 +98,15 @@ function antenna_phase_weights(Wblock, bl_pairs, nant, pol)
     return channel_weights
 end
 
+function amplitude_support_weights(Wblock, bl_pairs, nant, parallel_pols)
+    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1])
+    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2])
+    support = zeros(Float64, nant, 2, size(reference_weights, 2))
+    support[:, 1, :] .= reference_weights
+    support[:, 2, :] .= partner_weights
+    return support
+end
+
 function phase_block_design_matrix(nchan, c0, phase_block_size, valid)
     phase_block_size <= 1 && return zeros(Float64, nchan, 0)
 
@@ -142,14 +151,49 @@ function model_basis_columns(model::PolynomialBandpassModel, x, x_scaled, segmen
     return [Float64[i in segment ? x_scaled[i]^degree : 0.0 for i in eachindex(x)] for degree in 1:model.degree]
 end
 
-function component_design_columns(component::SegmentedBandpassModel, x, c0, valid)
-    segments = frequency_segments(component.segmentation, length(x))
+function segment_design_coordinate(::GlobalFrequencySegmentation, x, segment, valid)
     scale = maximum(abs.(x[valid]))
-    x_scaled = scale > 0 ? x ./ scale : zeros(length(x))
+    return scale > 0 ? x ./ scale : zeros(length(x))
+end
+
+function segment_design_coordinate(::BlockFrequencySegmentation, x, segment, valid)
+    x_local = zeros(length(x))
+    valid_segment = segment[valid[segment]]
+    isempty(valid_segment) && return x_local
+
+    center = mean(x[valid_segment])
+    x_centered = x[segment] .- center
+    scale = maximum(abs.(x_centered[valid[segment]]))
+    x_local[segment] .= scale > 0 ? x_centered ./ scale : 0.0
+    return x_local
+end
+
+function independent_segment_columns(columns, valid)
+    independent = Vector{Vector{Float64}}()
+    current_rank = 0
+
+    for column in columns
+        any(!iszero, column[valid]) || continue
+
+        candidate = isempty(independent) ? hcat(column) : hcat(independent..., column)
+        candidate_rank = rank(candidate[valid, :])
+        candidate_rank > current_rank || continue
+
+        push!(independent, column)
+        current_rank = candidate_rank
+    end
+
+    return independent
+end
+
+function component_design_columns(component::SegmentedBandpassModel, x, valid)
+    segments = frequency_segments(component.segmentation, length(x))
     columns = Vector{Vector{Float64}}()
     for segment in segments
         any(valid[segment]) || continue
-        append!(columns, model_basis_columns(component.model, x, x_scaled, segment))
+        x_segment = segment_design_coordinate(component.segmentation, x, segment, valid)
+        segment_columns = model_basis_columns(component.model, x_segment, x_segment, segment)
+        append!(columns, independent_segment_columns(segment_columns, valid))
     end
     return columns
 end
@@ -167,7 +211,7 @@ function fit_phase_model(phase_track, channel_weights, channel_freqs, c0, phase_
 
     basis = Vector{Vector{Float64}}()
     for component in components
-        append!(basis, component_design_columns(component, x, c0, valid))
+        append!(basis, component_design_columns(component, x, valid))
     end
 
     if isempty(basis)
@@ -201,7 +245,7 @@ function fit_amplitude_model(log_amp_track, channel_weights, channel_freqs, c0, 
 
     basis = Vector{Vector{Float64}}()
     for component in components
-        append!(basis, component_design_columns(component, x, c0, valid))
+        append!(basis, component_design_columns(component, x, valid))
     end
 
     isempty(basis) && return log_amp_track
@@ -220,29 +264,80 @@ function fit_relative_correction_track(raw_correction, channel_weights, channel_
     relative_log_amp = log.(abs.(fitted_correction))
     relative_phase = angle.(fitted_correction)
 
-    fitted_log_amp = station_model.relative.amplitude isa PerChannelBandpassModel ?
+    fitted_log_amp = station_model.relative.amplitude.model isa PerChannelBandpassModel ?
         relative_log_amp :
         fit_amplitude_model(
             relative_log_amp,
             channel_weights,
             channel_freqs,
             c0,
-            station_model.relative.amplitude,
-            station_model.segmentation.frequency)
+            station_model.relative.amplitude.model,
+            station_model.relative.amplitude.segmentation.frequency)
 
-    fitted_phase = station_model.relative.phase isa PerChannelBandpassModel ?
+    fitted_phase = station_model.relative.phase.model isa PerChannelBandpassModel ?
         relative_phase :
         fit_phase_model(
             relative_phase,
             channel_weights,
             channel_freqs,
             c0,
-            station_model.relative.phase,
-            station_model.segmentation.frequency)
+            station_model.relative.phase.model,
+            station_model.relative.phase.segmentation.frequency)
 
     fitted = exp.(fitted_log_amp) .* cis.(fitted_phase)
     fitted[c0] = 1.0 + 0.0im
     return fitted
+end
+
+function replacement_amplitude_scale(amps, support, c, c0; neighbor_window=2)
+    local_values = Float64[]
+    lo = max(1, c - neighbor_window)
+    hi = min(length(amps), c + neighbor_window)
+    for j in lo:hi
+        j == c && continue
+        j == c0 && continue
+        support[j] > 0 || continue
+        amp = amps[j]
+        isfinite(amp) && amp > 0 || continue
+        push!(local_values, amp)
+    end
+    length(local_values) >= 2 && return median(local_values)
+
+    global_values = Float64[]
+    for j in eachindex(amps)
+        j == c && continue
+        j == c0 && continue
+        support[j] > 0 || continue
+        amp = amps[j]
+        isfinite(amp) && amp > 0 || continue
+        push!(global_values, amp)
+    end
+    isempty(global_values) && return nothing
+    return median(global_values)
+end
+
+function sanitize_gain_amplitudes!(gains, support_weights, c0;
+        collapse_fraction=0.05, min_gain_amplitude=1e-2, neighbor_window=2)
+    amps = abs.(gains)
+    repaired = NamedTuple[]
+
+    for ant in axes(gains, 1), feed in axes(gains, 2), c in axes(gains, 3)
+        c == c0 && continue
+        support_weights[ant, feed, c] > 0 || continue
+
+        amp = amps[ant, feed, c]
+        local_scale = replacement_amplitude_scale(view(amps, ant, feed, :), view(support_weights, ant, feed, :), c, c0;
+            neighbor_window=neighbor_window)
+        isnothing(local_scale) && continue
+
+        threshold = max(min_gain_amplitude, collapse_fraction * local_scale)
+        if !(isfinite(amp) && amp >= threshold)
+            gains[ant, feed, c] = local_scale * cis(angle(gains[ant, feed, c]))
+            push!(repaired, (; ant, feed, channel=c, amplitude=amp, replacement=local_scale))
+        end
+    end
+
+    return repaired
 end
 
 function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
@@ -255,7 +350,7 @@ function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, 
         reference_feed = model.reference_feed
         partner_feed = partner_feed_index(model.reference_feed)
 
-        abs_amp_model = model.reference.amplitude
+        abs_amp_model = model.reference.amplitude.model
         if !(abs_amp_model isa PerChannelBandpassModel)
             reference_log_amp = log.(abs.(gains[ant, reference_feed, :]))
             fitted_reference_log_amp = fit_amplitude_model(
@@ -264,11 +359,11 @@ function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, 
                 channel_freqs,
                 c0,
                 abs_amp_model,
-                model.segmentation.frequency)
+                model.reference.amplitude.segmentation.frequency)
             gains[ant, reference_feed, :] = exp.(fitted_reference_log_amp) .* cis.(angle.(gains[ant, reference_feed, :]))
         end
 
-        relative_amp_model = model.relative.amplitude
+        relative_amp_model = model.relative.amplitude.model
         if !(relative_amp_model isa PerChannelBandpassModel)
             ratio = gains[ant, partner_feed, :] ./ gains[ant, reference_feed, :]
             relative_log_amp = log.(abs.(ratio))
@@ -279,7 +374,7 @@ function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, 
                 channel_freqs,
                 c0,
                 relative_amp_model,
-                model.segmentation.frequency)
+                model.relative.amplitude.segmentation.frequency)
             gains[ant, partner_feed, :] = abs.(gains[ant, reference_feed, :]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(gains[ant, partner_feed, :]))
         end
     end
@@ -297,7 +392,7 @@ function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, stat
         reference_feed = model.reference_feed
         partner_feed = partner_feed_index(model.reference_feed)
 
-        reference_phase_model = model.reference.phase
+        reference_phase_model = model.reference.phase.model
         if !(reference_phase_model isa PerChannelBandpassModel)
             reference_phase_track = vec(angle.(gains[ant, reference_feed, :]))
             fitted_reference_phase = fit_phase_model(
@@ -306,11 +401,11 @@ function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, stat
                 channel_freqs,
                 c0,
                 reference_phase_model,
-                model.segmentation.frequency)
+                model.reference.phase.segmentation.frequency)
             gains[ant, reference_feed, :] = abs.(gains[ant, reference_feed, :]) .* cis.(fitted_reference_phase)
         end
 
-        relative_phase_model = model.relative.phase
+        relative_phase_model = model.relative.phase.model
         if !(relative_phase_model isa PerChannelBandpassModel)
             ratio = gains[ant, partner_feed, :] ./ gains[ant, reference_feed, :]
             relative_phase_track = vec(angle.(ratio))
@@ -321,7 +416,7 @@ function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, stat
                 channel_freqs,
                 c0,
                 relative_phase_model,
-                model.segmentation.frequency)
+                model.relative.phase.segmentation.frequency)
             gains[ant, partner_feed, :] = abs.(gains[ant, partner_feed, :]) .* cis.(angle.(gains[ant, reference_feed, :]) .+ fitted_relative_phase)
         end
     end
@@ -332,6 +427,7 @@ end
 function constrain_gain_models!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+    sanitize_gain_amplitudes!(gains, amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols), c0)
     return gains
 end
 
@@ -449,6 +545,19 @@ function solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channe
     return gains
 end
 
+function merge_scan_gains!(gain_slice, scan_gains, solved, phase_variable_mask, amplitude_variable_mask)
+    nant, nfeed, nchan = size(gain_slice)
+    for a in 1:nant, feed in 1:nfeed, c in 1:nchan
+        solved[a, feed, c] || continue
+
+        amp = amplitude_variable_mask[a, feed] ? abs(scan_gains[a, feed, c]) : abs(gain_slice[a, feed, c])
+        phase = phase_variable_mask[a, feed] ? angle(scan_gains[a, feed, c]) : angle(gain_slice[a, feed, c])
+        gain_slice[a, feed, c] = amp * cis(phase)
+    end
+
+    return gain_slice
+end
+
 """
     solve_bandpass(avg::UVData, ref_ant; min_baselines=3,
                    station_models=nothing, phase_ref_ant=ref_ant, apply_relative_correction=true)
@@ -494,13 +603,15 @@ function solve_bandpass(avg::UVData, ref_ant;
     end
 
     parallel_pols = parallel_hand_indices(avg.pol_codes)
-    variable_ants = findall(model -> is_per_scan(model.segmentation.time), station_models)
-
     gains_template = solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
         min_baselines=min_baselines)
     gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
-    variable_mask = falses(nant)
-    variable_mask[variable_ants] .= true
+    phase_variable_mask = falses(nant, 2)
+    amplitude_variable_mask = falses(nant, 2)
+    for ant in 1:nant, feed in 1:2
+        phase_variable_mask[ant, feed] = phase_is_per_scan(station_models[ant], feed)
+        amplitude_variable_mask[ant, feed] = amplitude_is_per_scan(station_models[ant], feed)
+    end
 
     for s in 1:nscan
         scan_gains, solved = solve_bandpass_single_scan(
@@ -514,11 +625,12 @@ function solve_bandpass(avg::UVData, ref_ant;
             station_models,
             parallel_pols,
             min_baselines=min_baselines)
-        overwrite = solved .& reshape(variable_mask, :, 1, 1)
-        for a in 1:nant, feed in 1:2, c in 1:nchan
-            overwrite[a, feed, c] || continue
-            gains[s, a, feed, c] = scan_gains[a, feed, c]
-        end
+        merge_scan_gains!(
+            view(gains, s, :, :, :),
+            scan_gains,
+            solved,
+            phase_variable_mask,
+            amplitude_variable_mask)
     end
 
     xy_correction = ones(ComplexF64, nscan, nchan)

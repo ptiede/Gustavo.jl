@@ -132,10 +132,10 @@ function decode_feed_node(node, nant)
     return ant, feed
 end
 
-function choose_local_phase_reference(active_ants, phase_ref_ant, station_models, connectivity)
+function choose_local_phase_reference(active_ants, phase_ref_ant, station_models, connectivity, feed)
     phase_ref_ant ∈ active_ants && return phase_ref_ant
 
-    stable_active = [ant for ant in active_ants if !is_per_scan(station_models[ant].segmentation.time)]
+    stable_active = [ant for ant in active_ants if !phase_is_per_scan(station_models[ant], feed)]
     candidates = isempty(stable_active) ? active_ants : stable_active
     isempty(candidates) && error("No active antennas available for local phase reference")
 
@@ -177,13 +177,18 @@ function build_station_models(ant_names, station_model_map;
 end
 
 function station_model_summary(name, model)
-    reference_summary_phase = effective_bandpass_model_label(model.reference.phase, model.segmentation.frequency)
-    relative_summary_phase = effective_bandpass_model_label(model.relative.phase, model.segmentation.frequency)
-    reference_summary_amp = effective_bandpass_model_label(model.reference.amplitude, model.segmentation.frequency)
-    relative_summary_amp = effective_bandpass_model_label(model.relative.amplitude, model.segmentation.frequency)
+    reference_summary_phase = effective_bandpass_model_label(model.reference.phase.model, model.reference.phase.segmentation.frequency)
+    relative_summary_phase = effective_bandpass_model_label(model.relative.phase.model, model.relative.phase.segmentation.frequency)
+    reference_summary_amp = effective_bandpass_model_label(model.reference.amplitude.model, model.reference.amplitude.segmentation.frequency)
+    relative_summary_amp = effective_bandpass_model_label(model.relative.amplitude.model, model.relative.amplitude.segmentation.frequency)
     return string(name,
-        ": time=", time_segmentation_label(model.segmentation.time),
         " ref=", reference_feed_label(model.reference_feed),
-        " abs(phase=", reference_summary_phase, " amp=", reference_summary_amp, ")",
-        " rel(phase=", relative_summary_phase, " amp=", relative_summary_amp, ")")
+        " abs(phase=", reference_summary_phase,
+        ", phase_time=", time_segmentation_label(model.reference.phase.segmentation.time),
+        ", amp=", reference_summary_amp,
+        ", amp_time=", time_segmentation_label(model.reference.amplitude.segmentation.time), ")",
+        " rel(phase=", relative_summary_phase,
+        ", phase_time=", time_segmentation_label(model.relative.phase.segmentation.time),
+        ", amp=", relative_summary_amp,
+        ", amp_time=", time_segmentation_label(model.relative.amplitude.segmentation.time), ")")
 end
