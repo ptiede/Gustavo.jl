@@ -192,10 +192,10 @@ end
 
 function load_uvfits(path)
     fid = FITSFiles.fits(path)
-    dt = fid[1].data
-    an = fid[2].data
-    fq = fid[3].data
-    nx = fid[4].data
+    dt = read(fid[1].data)
+    an = read(fid[2].data)
+    fq = read(fid[3].data)
+    nx = read(fid[4].data)
 
     clean(s) = filter(c -> isascii(c) && isprint(c) && !isspace(c), string(s))
     ant_names = clean.(an.ANNAME)
