@@ -44,13 +44,13 @@ end
 Write a uvfits copy of the file that produced `data` with the corrected visibilities
 and weights stored in the primary random-groups payload.
 """
-function export_uvfits(input_path, data::UVData, output_path, vis_corr, weights_corr)
+function export_uvfits(input_path, data::UVData, output_path)
     hdus = FITSFiles.fits(input_path)
 
-    raw_corr = zeros(Float32, size(vis_corr, 1), 3, size(vis_corr, 2), size(vis_corr, 3))
-    raw_corr[:, 1, :, :] = Float32.(real.(vis_corr))
-    raw_corr[:, 2, :, :] = Float32.(imag.(vis_corr))
-    raw_corr[:, 3, :, :] = Float32.(weights_corr)
+    raw_corr = zeros(Float32, size(data.vis, 1), 3, size(data.vis, 2), size(data.vis, 3))
+    raw_corr[:, 1, :, :] = Float32.(real.(data.vis))
+    raw_corr[:, 2, :, :] = Float32.(imag.(data.vis))
+    raw_corr[:, 3, :, :] = Float32.(data.weights)
 
     primary_data = merge(hdus[1].data, (data=restore_uvfits_shape(raw_corr, data.raw_shape, data.squeeze_dims),))
     hdus[1] = HDU(Random, primary_data, hdus[1].cards)

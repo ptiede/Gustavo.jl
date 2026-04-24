@@ -175,6 +175,16 @@ end
 
     summary = BP.scan_averaged_amplitude_series(vis_block, weight_block; relative=false, groups=groups)
     @test summary ≈ [1.0, 2.0]
+
+    noise_vis = reshape(ComplexF64[1.0 + 0.0im, 2.0 + 0.0im], 1, 2)
+    noise_weights = fill(2.0, 1, 2)
+
+    _, amp_noise = BP.amplitude_series_with_noise(noise_vis, noise_weights; relative=false)
+    @test amp_noise ≈ fill(1 / sqrt(2), 2)
+
+    phase, phase_noise = BP.phase_series_with_noise(noise_vis, noise_weights; relative=false)
+    @test phase ≈ [0.0, 0.0]
+    @test phase_noise ≈ [1 / sqrt(2), 1 / (2sqrt(2))]
 end
 
 @testset "Gain amplitude sanitization" begin
@@ -193,4 +203,7 @@ end
     @test abs(gains[1, 1, 4]) ≈ median([1.1, 1.2])
     @test angle(gains[1, 1, 4]) ≈ 0.4
     @test abs(gains[1, 2, 4]) ≈ 1.0
+
+    @test_logs (:warn, r"repaired collapsed gain amplitudes") BP.warn_sanitized_gain_amplitudes(
+        repaired, ["AA"]; context="scan 1")
 end

@@ -340,6 +340,33 @@ function sanitize_gain_amplitudes!(gains, support_weights, c0;
     return repaired
 end
 
+function warn_sanitized_gain_amplitudes(repaired, ant_names=nothing; context="")
+    isempty(repaired) && return nothing
+
+    grouped = Dict{Tuple{Int,Int}, Vector{NamedTuple}}()
+    for repair in repaired
+        key = (repair.ant, repair.feed)
+        push!(get!(grouped, key, NamedTuple[]), repair)
+    end
+
+    details = String[]
+    for ((ant, feed), entries) in sort!(collect(grouped); by=first)
+        ant_label = isnothing(ant_names) ? string("ant", ant) : string(ant_names[ant])
+        channels = sort(getfield.(entries, :channel))
+        min_amp = minimum(getfield.(entries, :amplitude))
+        max_replacement = maximum(getfield.(entries, :replacement))
+        push!(details,
+            string(ant_label, "/feed", feed,
+                " channels=", join(channels, ","),
+                " min_amp=", round(min_amp; digits=4),
+                " replacement<=", round(max_replacement; digits=4)))
+    end
+
+    prefix = isempty(context) ? "" : string(context, ": ")
+    @warn string(prefix, "repaired collapsed gain amplitudes; likely data/support issue") repaired_count=length(repaired) details
+    return nothing
+end
+
 function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     nant = size(gains, 1)
     reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1])
@@ -424,10 +451,12 @@ function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, stat
     return gains
 end
 
-function constrain_gain_models!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+function constrain_gain_models!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols;
+        ant_names=nothing, context="")
     constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
     constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
-    sanitize_gain_amplitudes!(gains, amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols), c0)
+    repaired = sanitize_gain_amplitudes!(gains, amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols), c0)
+    warn_sanitized_gain_amplitudes(repaired, ant_names; context=context)
     return gains
 end
 
@@ -511,6 +540,7 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
 end
 
 function solve_bandpass_single_scan(Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
+    ant_names=nothing, context="",
     min_baselines=3)
     nbl, npol, nchan = size(Vs)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
@@ -524,11 +554,13 @@ function solve_bandpass_single_scan(Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, c
             station_models, parallel_pols; min_baselines=min_baselines)
     end
 
-    constrain_gain_models!(gains, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+    constrain_gain_models!(gains, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols;
+        ant_names=ant_names, context=context)
     return gains, solved
 end
 
 function solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
+    ant_names=nothing, context="template",
     min_baselines=3)
     nscan, nbl, npol, nchan = size(V)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
@@ -541,7 +573,8 @@ function solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channe
             station_models, parallel_pols; min_baselines=min_baselines)
     end
 
-    constrain_gain_models!(gains, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+    constrain_gain_models!(gains, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols;
+        ant_names=ant_names, context=context)
     return gains
 end
 
@@ -604,6 +637,7 @@ function solve_bandpass(avg::UVData, ref_ant;
 
     parallel_pols = parallel_hand_indices(avg.pol_codes)
     gains_template = solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
+        ant_names=avg.ant_names,
         min_baselines=min_baselines)
     gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
     phase_variable_mask = falses(nant, 2)
@@ -624,6 +658,8 @@ function solve_bandpass(avg::UVData, ref_ant;
             channel_freqs,
             station_models,
             parallel_pols,
+            ant_names=avg.ant_names,
+            context=string("scan ", s),
             min_baselines=min_baselines)
         merge_scan_gains!(
             view(gains, s, :, :, :),

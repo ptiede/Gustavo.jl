@@ -52,7 +52,7 @@ function plot_stability(data::UVData, corr::UVData, bl_plot;
     nscan = length(data.sc)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_plot_polarizations(data; pol=pol)
-    ylabel, summarize, scatter_series, annotate_metric! = stability_plotting_config(quantity; relative=relative)
+    ylabel, summarize, scatter_series, scatter_noise, annotate_metric! = stability_plotting_config(quantity; relative=relative)
     plot_weights_before, plot_weights_after = diagnostic_weight_pair(data.weights, corr.weights;
         comparison_weights=comparison_weights)
 
@@ -85,6 +85,10 @@ function plot_stability(data::UVData, corr::UVData, bl_plot;
             kw = (color=s, colormap=scan_wheel, colorrange=(1, max(nscan, 1)), markersize=9)
             before_phase = scatter_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups=nothing)
             after_phase = scatter_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups=nothing)
+            before_noise = scatter_noise(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups=nothing)
+            after_noise = scatter_noise(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups=nothing)
+            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
+            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
             scatter!(ax_b, before_phase; kw...)
             scatter!(ax_a, after_phase; kw...)
         end
@@ -122,14 +126,87 @@ function summed_channel_weights(weight_block)
     return sums
 end
 
+function thermal_noise_series(weight_block)
+    sums = summed_channel_weights(weight_block)
+    noise = fill(NaN, length(sums))
+    valid = sums .> 0
+    noise[valid] .= 1.0 ./ sqrt.(sums[valid])
+    return noise
+end
+
+function amplitude_reference_index(amps, ref_idx=1)
+    if 1 <= ref_idx <= length(amps)
+        ref = amps[ref_idx]
+        isfinite(ref) && ref > 0 && return ref_idx
+    end
+    return findfirst(a -> isfinite(a) && a > 0, amps)
+end
+
+function phase_series_with_noise(vis_block, weight_block; relative=true, ref_idx=1)
+    avg = weighted_channel_average(vis_block, weight_block)
+    amp = abs.(avg)
+    phase = angle.(avg)
+    sigma_amp = thermal_noise_series(weight_block)
+    sigma_phase = fill(NaN, length(phase))
+
+    for i in eachindex(phase)
+        (isfinite(amp[i]) && amp[i] > 0 && isfinite(sigma_amp[i])) || continue
+        sigma_phase[i] = sigma_amp[i] / amp[i]
+    end
+
+    relative || return phase, sigma_phase
+
+    relative_phase = phase_relative_to_ref(phase, ref_idx)
+    phase_noise = fill(NaN, length(phase))
+    ref = amplitude_reference_index(amp, ref_idx)
+    isnothing(ref) && return relative_phase, phase_noise
+
+    ref_noise = sigma_phase[ref]
+    for i in eachindex(phase)
+        (isfinite(relative_phase[i]) && isfinite(sigma_phase[i]) && isfinite(ref_noise)) || continue
+        phase_noise[i] = sqrt(sigma_phase[i]^2 + ref_noise^2)
+    end
+    return relative_phase, phase_noise
+end
+
 function phase_series(vis_block, weight_block; relative=true)
-    phase = angle.(weighted_channel_average(vis_block, weight_block))
-    return relative ? phase_relative_to_ref(phase) : phase
+    phase, _ = phase_series_with_noise(vis_block, weight_block; relative=relative)
+    return phase
+end
+
+function phase_noise_series(vis_block, weight_block; relative=true)
+    _, noise = phase_series_with_noise(vis_block, weight_block; relative=relative)
+    return noise
+end
+
+function amplitude_series_with_noise(vis_block, weight_block; relative=false, ref_idx=1)
+    amp = abs.(weighted_channel_average(vis_block, weight_block))
+    sigma_amp = thermal_noise_series(weight_block)
+    relative || return amp, sigma_amp
+
+    relative_amp = amplitude_relative_to_ref(amp, ref_idx)
+    relative_noise = fill(NaN, length(amp))
+    ref = amplitude_reference_index(amp, ref_idx)
+    isnothing(ref) && return relative_amp, relative_noise
+
+    ref_amp = amp[ref]
+    ref_noise = sigma_amp[ref]
+    for i in eachindex(amp)
+        (isfinite(relative_amp[i]) && isfinite(amp[i]) && amp[i] > 0 &&
+            isfinite(sigma_amp[i]) && isfinite(ref_noise) && ref_amp > 0) || continue
+        relative_noise[i] = relative_amp[i] * sqrt((sigma_amp[i] / amp[i])^2 + (ref_noise / ref_amp)^2)
+    end
+    return relative_amp, relative_noise
 end
 
 function amplitude_series(vis_block, weight_block; relative=false)
-    amp = abs.(weighted_channel_average(vis_block, weight_block))
-    return relative ? amplitude_relative_to_ref(amp) : amp
+    amp, _ = amplitude_series_with_noise(vis_block, weight_block; relative=relative)
+    return amp
+end
+
+function amplitude_noise_series(vis_block, weight_block; relative=false)
+    _, noise = amplitude_series_with_noise(vis_block, weight_block; relative=relative)
+    return noise
 end
 
 function scan_averaged_amplitude_series(vis_block, weight_block; relative=false, groups=nothing)
@@ -236,6 +313,7 @@ function stability_plotting_config(quantity; relative=false)
         ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
         summarize = (vis_block, weight_block; groups=nothing) -> phase_series(vis_block, weight_block; relative=relative)
         scatter_series = summarize
+        scatter_noise = (vis_block, weight_block; groups=nothing) -> phase_noise_series(vis_block, weight_block; relative=relative)
         annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
             annotate_coherence!(ax, residual_phase_coherence(vis_block, weight_block; groups=scan_groups); fontsize=12)
         end
@@ -244,6 +322,8 @@ function stability_plotting_config(quantity; relative=false)
         summarize = (vis_block, weight_block; groups=nothing) -> scan_averaged_amplitude_series(
             vis_block, weight_block; relative=relative, groups=groups)
         scatter_series = (vis_block, weight_block; groups=nothing) -> amplitude_series(
+            vis_block, weight_block; relative=relative)
+        scatter_noise = (vis_block, weight_block; groups=nothing) -> amplitude_noise_series(
             vis_block, weight_block; relative=relative)
         annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
             text!(ax, 0.98, 0.96;
@@ -254,7 +334,24 @@ function stability_plotting_config(quantity; relative=false)
         error("quantity must be :phase or :amplitude")
     end
 
-    return ylabel, summarize, scatter_series, annotate_metric!
+    return ylabel, summarize, scatter_series, scatter_noise, annotate_metric!
+end
+
+function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; alpha=0.18, linewidth=1.0)
+    xs = Float64[]
+    ys = Float64[]
+    for (channel, (value, sigma)) in enumerate(zip(series, noise))
+        (isfinite(value) && isfinite(sigma) && sigma > 0) || continue
+        push!(xs, channel, channel)
+        push!(ys, value - sigma, value + sigma)
+    end
+    isempty(xs) && return ax
+    linesegments!(ax, xs, ys;
+        color=(scan_index, alpha),
+        colormap=scan_wheel,
+        colorrange=(1, max(nscan, 1)),
+        linewidth=linewidth)
+    return ax
 end
 
 """
@@ -532,8 +629,14 @@ function plot_baseline_phases(data::UVData, corr::UVData, bl_plot;
             ii = int_inds[findall(i -> data.scan_idx[int_inds[i]] == s, eachindex(int_inds))]
             isempty(ii) && continue
             kw = (color=s, colormap=scan_wheel, colorrange=(1, max(nscan, 1)), markersize=4)
-            scatter!(ax_b, phase_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative=relative); kw...)
-            scatter!(ax_a, phase_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative=relative); kw...)
+            before_phase = phase_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative=relative)
+            after_phase = phase_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative=relative)
+            before_noise = phase_noise_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative=relative)
+            after_noise = phase_noise_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative=relative)
+            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
+            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
+            scatter!(ax_b, before_phase; kw...)
+            scatter!(ax_a, after_phase; kw...)
         end
     end
 
