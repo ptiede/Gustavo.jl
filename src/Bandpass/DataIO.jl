@@ -1,9 +1,8 @@
-import DimensionalData as DD
-
-DD.@dim IF "IF or Channel"
-DD.@dim Pol "Polarization"
-DD.@dim Scan DD.TimeDim "Telescope Scan"
-DD.@dim Ant "Antenna or Site"
+using DimensionalData: TimeDim, @dim
+@dim IF "IF or Channel"
+@dim Pol "Polarization"
+@dim(Scan,  TimeDim, "Scan")
+@dim Ant "Antenna"
 
 struct UVData{
         V <: AbstractArray{<:Complex},
