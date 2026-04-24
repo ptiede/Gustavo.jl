@@ -1,3 +1,5 @@
+import DimensionalData as DD
+
 DD.@dim IF "IF or Channel"
 DD.@dim Pol "Polarization"
 DD.@dim Scan DD.TimeDim "Telescope Scan"
