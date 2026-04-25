@@ -45,6 +45,10 @@ Base.length(t::AntennaTable) = length(t.antennas)
 Base.getindex(t::AntennaTable, i) = t.antennas[i]
 Base.iterate(t::AntennaTable, args...) = iterate(t.antennas, args...)
 
+function Base.getproperty(t::AntennaTable, s::Symbol)
+    hasfield(typeof(t), s) ? getfield(t, s) : getproperty(getfield(t, :antennas), s)
+end
+
 """
     ObsMetadata{TObj,TTel,TObs,TDate,TEq,TBunit,TRa,TDec,TFreq,TCfreqs,TBw,TCw,TSb,TPcodes,TPlabs}
 

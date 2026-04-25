@@ -1262,8 +1262,12 @@ function prepare_bandpass_solver(
         station_models = validate_station_bandpass_model.(station_models)
     end
 
-    parallel_pols = parallel_hand_indices(avg.pol_codes)
+    parallel_pols = parallel_hand_indices(avg.metadata.pol_codes)
     c0 = best_ref_channel(avg)
+    gains_template = solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
+        ant_names=collect(avg.antennas.name),
+        min_baselines=min_baselines)
+    gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
     phase_variable_mask = falses(nant, 2)
     amplitude_variable_mask = falses(nant, 2)
     for ant in 1:nant, feed in 1:2

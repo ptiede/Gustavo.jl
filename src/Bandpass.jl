@@ -1,6 +1,6 @@
 module Bandpass
 
-using FITSFiles
+using ..UVFITS
 using CairoMakie
 using DimensionalData
 using StructArrays
@@ -18,7 +18,7 @@ include("Bandpass/Solver.jl")
 include("Bandpass/Corrections.jl")
 include("Bandpass/Diagnostics.jl")
 
-export UVData, load_uvfits, decode_baseline, assign_scans, scan_average
+export UVData, load_uvfits, write_uvfits, decode_baseline, assign_scans, scan_average
 export baseline_visibilities, baseline_weights, wrap_gain_solutions, wrap_xy_correction
 export feed_pair_label, polarization_label, polarization_feeds, parallel_hand_indices, cross_hand_indices
 export AbstractBandpassModel
@@ -37,7 +37,7 @@ export AbstractBandpassRefinement, BandpassALS
 export prepare_bandpass_solver, initialize_bandpass_state, refine_bandpass!, finalize_bandpass_state, bandpass_state_objective, bandpass_fit_stats
 export bandpass_residual_stats, print_bandpass_residual_stats
 export solve_bandpass
-export apply_bandpass, export_uvfits, default_output_path
+export apply_bandpass, default_output_path
 export coherence_loss_table, print_coherence_loss_table, choose_diagnostic_baseline
 export plot_baseline_phases, plot_stability, plot_gain_solutions, plot_baseline_bandpass_residuals
 export parallel_hand_support_summary, site_parallel_hand_support, print_parallel_hand_support

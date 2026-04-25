@@ -1,12 +1,3 @@
-stokes_feed_pair(code::Integer) = code == -1 ? (1, 1) :
-    code == -2 ? (2, 2) :
-    code == -3 ? (1, 2) :
-    code == -4 ? (2, 1) :
-    error("Unsupported Stokes code for feed mapping: $code")
-
-feed_pair_label(feeds::Tuple{<:Integer, <:Integer}) = string(feeds[1], feeds[2])
-polarization_label(code::Integer) = feed_pair_label(stokes_feed_pair(code))
-
 function parallel_hand_indices(pol_codes)
     rr = findfirst(==(-1), pol_codes)
     ll = findfirst(==(-2), pol_codes)
@@ -21,10 +12,10 @@ function cross_hand_indices(pol_codes)
     return (; rl, lr)
 end
 
-polarization_feeds(data::UVData, pol_index::Integer) = stokes_feed_pair(data.pol_codes[pol_index])
+polarization_feeds(data::UVData, pol_index::Integer) = stokes_feed_pair(data.metadata.pol_codes[pol_index])
 
 function best_ref_channel(data::UVData)
-    rr, ll = parallel_hand_indices(data.pol_codes)
+    rr, ll = parallel_hand_indices(data.metadata.pol_codes)
     pols = [rr, ll]
     return argmax(vec(sum(data.weights[:, :, pols, :], dims = (1, 2, 3))))
 end
@@ -155,10 +146,10 @@ end
 
 function choose_phase_reference(avg::UVData, variable_ants)
     W = avg.weights
-    nant = length(avg.ant_names)
+    nant = length(avg.antennas)
     blocked = falses(nant)
     blocked[variable_ants] .= true
-    pols = parallel_hand_indices(avg.pol_codes)
+    pols = parallel_hand_indices(avg.metadata.pol_codes)
     scores = zeros(Float64, nant)
 
     for s in axes(W, 1), bi in axes(W, 2), pol in pols, c in axes(W, 4)

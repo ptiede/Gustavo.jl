@@ -44,8 +44,8 @@ function plot_stability(
         data::UVData, corr::UVData, bl_plot;
         quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input
     )
-    a_idx = findfirst(==(bl_plot[1]), data.ant_names)
-    b_idx = findfirst(==(bl_plot[2]), data.ant_names)
+    a_idx = findfirst(==(bl_plot[1]), data.antennas.name)
+    b_idx = findfirst(==(bl_plot[2]), data.antennas.name)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl_plot")
 
     bl_idx = findfirst(p -> p == (a_idx, b_idx), data.bl_pairs)
@@ -53,7 +53,7 @@ function plot_stability(
     target_code = data.unique_bls[bl_idx]
     int_inds = findall(c -> c == target_code, data.bl_codes)
 
-    nscan = length(data.sc)
+    nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
     ylabel, summarize, scatter_series, scatter_noise, annotate_metric! = stability_plotting_config(quantity; relative = relative)
@@ -297,9 +297,9 @@ end
 
 function resolve_plot_polarizations(data::UVData; pol = :parallel)
     if pol == :parallel
-        pol_idx = collect(parallel_hand_indices(data.pol_codes))
+        pol_idx = collect(parallel_hand_indices(data.metadata.pol_codes))
     elseif pol == :all
-        pol_idx = collect(eachindex(data.pol_codes))
+        pol_idx = collect(eachindex(data.metadata.pol_codes))
     elseif pol isa Integer
         pol_idx = [Int(pol)]
     elseif pol isa AbstractString
@@ -310,14 +310,14 @@ function resolve_plot_polarizations(data::UVData; pol = :parallel)
         error("Unsupported polarization selector: $pol")
     end
 
-    all(1 .<= pol_idx .<= length(data.pol_codes)) || error("Polarization index out of bounds: $pol_idx")
-    return pol_idx, collect(data.pol_labels[pol_idx])
+    all(1 .<= pol_idx .<= length(data.metadata.pol_codes)) || error("Polarization index out of bounds: $pol_idx")
+    return pol_idx, collect(data.metadata.pol_labels[pol_idx])
 end
 
 resolve_single_polarization(data::UVData, pol::Integer) = Int(pol)
 function resolve_single_polarization(data::UVData, pol::AbstractString)
-    idx = findfirst(==(pol), data.pol_labels)
-    isnothing(idx) && error("Polarization $pol not found in $(collect(data.pol_labels))")
+    idx = findfirst(==(pol), data.metadata.pol_labels)
+    isnothing(idx) && error("Polarization $pol not found in $(collect(data.metadata.pol_labels))")
     return idx
 end
 
@@ -515,15 +515,15 @@ function coherence_loss_table(
         comparison_weights = comparison_weights
     )
     if isnothing(pol_idx)
-        rr, ll = parallel_hand_indices(avg.pol_codes)
+        rr, ll = parallel_hand_indices(avg.metadata.pol_codes)
         pol_idx = [rr, ll]
     end
-    isnothing(pol_labels) && (pol_labels = avg.pol_labels[pol_idx])
+    isnothing(pol_labels) && (pol_labels = avg.metadata.pol_labels[pol_idx])
     rows = NamedTuple[]
 
     for bi in eachindex(avg.bl_pairs)
         a, b = avg.bl_pairs[bi]
-        baseline = string(avg.ant_names[a], "-", avg.ant_names[b])
+        baseline = string(avg.antennas.name[a], "-", avg.antennas.name[b])
 
         for (pi, lab) in zip(pol_idx, pol_labels)
             before = residual_phase_coherence(view(V, :, bi, pi, :), view(W, :, bi, pi, :))
@@ -634,8 +634,8 @@ function print_site_coherence_rows(rows, site::String; pol = nothing, io = stdou
 end
 
 function baseline_in_data(data::UVData, bl_plot)
-    a_idx = findfirst(==(bl_plot[1]), data.ant_names)
-    b_idx = findfirst(==(bl_plot[2]), data.ant_names)
+    a_idx = findfirst(==(bl_plot[1]), data.antennas.name)
+    b_idx = findfirst(==(bl_plot[2]), data.antennas.name)
     (isnothing(a_idx) || isnothing(b_idx)) && return false
     return any(p -> p == (a_idx, b_idx), data.bl_pairs)
 end
@@ -649,7 +649,7 @@ function choose_diagnostic_baseline(
     end
 
     W = avg.weights
-    pols = collect(parallel_hand_indices(avg.pol_codes))
+    pols = collect(parallel_hand_indices(avg.metadata.pol_codes))
     best_score = -Inf
     best_bl = nothing
 
@@ -657,7 +657,7 @@ function choose_diagnostic_baseline(
         score = sum(@view W[:, bi, pols, :])
         if score > best_score
             best_score = score
-            best_bl = (avg.ant_names[a], avg.ant_names[b])
+            best_bl = (avg.antennas.name[a], avg.antennas.name[b])
         end
     end
 
@@ -679,8 +679,8 @@ function plot_baseline_phases(
         data::UVData, corr::UVData, bl_plot;
         relative = true, comparison_weights = :input
     )
-    a_idx = findfirst(==(bl_plot[1]), data.ant_names)
-    b_idx = findfirst(==(bl_plot[2]), data.ant_names)
+    a_idx = findfirst(==(bl_plot[1]), data.antennas.name)
+    b_idx = findfirst(==(bl_plot[2]), data.antennas.name)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl_plot")
 
     bl_idx = findfirst(p -> p == (a_idx, b_idx), data.bl_pairs)
@@ -688,9 +688,9 @@ function plot_baseline_phases(
     target_code = data.unique_bls[bl_idx]
     int_inds = findall(c -> c == target_code, data.bl_codes)
 
-    nscan = length(data.sc)
+    nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_labels = collect(data.pol_labels)
+    pol_labels = collect(data.metadata.pol_labels)
     ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
     plot_weights_before, plot_weights_after = diagnostic_weight_pair(
         data.weights, corr.weights;
@@ -753,8 +753,8 @@ choose feeds with `pol`, and restrict rows with `sites`.
 The default behavior matches the legacy plot: both feeds, all sites, and
 relative phase.
 """
-function plot_gain_solutions(gains, data::UVData; quantity = :phase, pol = :all, sites = :all, relative = true)
-    nscan = length(data.sc)
+function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
+    nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_gain_polarizations(data; pol = pol)
     site_idx, site_labels = resolve_gain_sites(data; sites = sites)
@@ -950,7 +950,7 @@ end
 
 function resolve_gain_sites(data::UVData; sites = :all)
     if sites == :all
-        site_idx = collect(eachindex(data.ant_names))
+        site_idx = collect(eachindex(data.antennas.name))
     elseif sites isa Integer
         site_idx = [Int(sites)]
     elseif sites isa AbstractString
@@ -961,14 +961,14 @@ function resolve_gain_sites(data::UVData; sites = :all)
         error("Unsupported gain site selector: $sites")
     end
 
-    all(1 .<= site_idx .<= length(data.ant_names)) || error("Gain site index out of bounds: $site_idx")
-    return site_idx, collect(data.ant_names[site_idx])
+    all(1 .<= site_idx .<= length(data.antennas.name)) || error("Gain site index out of bounds: $site_idx")
+    return site_idx, collect(data.antennas.name[site_idx])
 end
 
 resolve_single_gain_site(data::UVData, site::Integer) = Int(site)
 function resolve_single_gain_site(data::UVData, site::AbstractString)
-    idx = findfirst(==(site), data.ant_names)
-    isnothing(idx) && error("Site $site not found in $(collect(data.ant_names))")
+    idx = findfirst(==(site), data.antennas.name)
+    isnothing(idx) && error("Site $site not found in $(collect(data.antennas.name))")
     return idx
 end
 
@@ -998,9 +998,9 @@ function gain_quantity_label(quantity; relative = true)
     end
 end
 
-function baseline_index(data::UVData, bl::Tuple{String, String})
-    a_idx = findfirst(==(bl[1]), data.ant_names)
-    b_idx = findfirst(==(bl[2]), data.ant_names)
+function baseline_index(data::UVData, bl::Tuple{String,String})
+    a_idx = findfirst(==(bl[1]), data.antennas.name)
+    b_idx = findfirst(==(bl[2]), data.antennas.name)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl")
 
     bl_idx = findfirst(==((a_idx, b_idx)), data.bl_pairs)
@@ -1010,8 +1010,8 @@ end
 
 function parallel_hand_support_summary(avg::UVData, bl::Tuple{String, String})
     bi = baseline_index(avg, bl)
-    rr, ll = parallel_hand_indices(avg.pol_codes)
-    pol_map = [(avg.pol_labels[rr], rr), (avg.pol_labels[ll], ll)]
+    rr, ll = parallel_hand_indices(avg.metadata.pol_codes)
+    pol_map = [(avg.metadata.pol_labels[rr], rr), (avg.metadata.pol_labels[ll], ll)]
     rows = NamedTuple[]
 
     for (lab, pi) in pol_map
@@ -1055,7 +1055,7 @@ end
 function site_parallel_hand_support(avg::UVData, site::String)
     rows = NamedTuple[]
     for (bi, (a, b)) in enumerate(avg.bl_pairs)
-        names = (avg.ant_names[a], avg.ant_names[b])
+        names = (avg.antennas.name[a], avg.antennas.name[b])
         site in names || continue
         summary = parallel_hand_support_summary(avg, names)
         rr, ll = summary.rows
