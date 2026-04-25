@@ -414,6 +414,40 @@ end
     end
 end
 
+@testset "Reference-antenna bandpass gauge" begin
+    BP = Gustavo.Bandpass
+
+    gains = reshape(
+        ComplexF64[
+            exp(1.0) * cis(0.7), exp(2.0) * cis(1.2), exp(3.0) * cis(1.7),
+            exp(-0.5) * cis(-0.2), exp(0.0) * cis(0.3), exp(0.5) * cis(0.8),
+
+            exp(0.1) * cis(-0.4), exp(0.2) * cis(-0.1), exp(0.3) * cis(0.2),
+            exp(-0.7) * cis(0.5), exp(-0.2) * cis(0.8), exp(0.1) * cis(1.1),
+        ],
+        2, 2, 3
+    )
+    support = ones(Float64, 2, 2, 3)
+    gains_gauged = copy(gains)
+
+    BP.apply_bandpass_gauge!(gains_gauged, support, 2, BP.ReferenceAntennaBandpassGauge(2))
+
+    for feed in 1:2
+        log_amp = log.(abs.(gains_gauged[2, feed, :]))
+        phase = BP.unwrap_phase_track(vec(angle.(gains_gauged[2, feed, :])), 2)
+        @test abs(sum(log_amp) / length(log_amp)) < 1.0e-12
+        @test abs(sum(phase) / length(phase)) < 1.0e-12
+
+        for c in axes(gains, 3)
+            @test gains_gauged[1, feed, c] / gains_gauged[2, feed, c] ≈ gains[1, feed, c] / gains[2, feed, c]
+        end
+    end
+
+    setup = BP.prepare_bandpass_solver(synthetic_bandpass_avg_uvdata(), 1; gauge = BP.ReferenceAntennaBandpassGauge(2))
+    @test setup.gauge isa BP.ReferenceAntennaBandpassGauge
+    @test setup.gauge.ref_ant == 2
+end
+
 @testset "Solve parallel-hand channel ratios" begin
     BP = Gustavo.Bandpass
 

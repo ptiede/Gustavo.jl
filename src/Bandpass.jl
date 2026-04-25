@@ -32,6 +32,7 @@ export bandpass, parameter_count
 export validate_station_bandpass_model, is_per_scan, phase_is_per_scan, amplitude_is_per_scan
 export best_ref_channel, design_matrices, build_station_models, station_model_summary, choose_phase_reference
 export BandpassSolverSetup, BandpassSolverState, BandpassSolverResult
+export AbstractBandpassGauge, ZeroMeanBandpassGauge, ReferenceAntennaBandpassGauge
 export AbstractBandpassInitializer, RatioBandpassInitializer, RandomBandpassInitializer
 export AbstractBandpassRefinement, BandpassALS
 export prepare_bandpass_solver, initialize_bandpass_state, refine_bandpass!, finalize_bandpass_state, bandpass_state_objective, bandpass_fit_stats
