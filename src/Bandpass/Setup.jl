@@ -133,8 +133,10 @@ function decode_feed_node(node, nant)
     return ant, feed
 end
 
-function choose_local_phase_reference(active_ants, phase_ref_ant, station_models, connectivity, feed)
-    phase_ref_ant ∈ active_ants && return phase_ref_ant
+function choose_local_phase_reference(active_ants, gauge, station_models, connectivity, feed)
+    if gauge isa ReferenceAntennaBandpassGauge
+        gauge.ref_ant ∈ active_ants && return gauge.ref_ant
+    end
 
     stable_active = [ant for ant in active_ants if !phase_is_per_scan(station_models[ant], feed)]
     candidates = isempty(stable_active) ? active_ants : stable_active

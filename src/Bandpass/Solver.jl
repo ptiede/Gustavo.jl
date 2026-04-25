@@ -130,7 +130,7 @@ function zero_mean_gain_constraints(gain_columns)
 end
 
 function solve_parallel_channel_with_source_nuisance!(
-        gains, solved, Vblock, Wblock, bl_pairs, nant, phase_ref_ant, c0, c, A_amp, A_phase,
+        gains, solved, Vblock, Wblock, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
         station_models, parallel_pols; min_baselines = 3
     )
     for (pol, feed) in zip(parallel_pols, (1, 2))
@@ -163,7 +163,7 @@ function solve_parallel_channel_with_source_nuisance!(
                 amp_gain_columns[(channel, ant)] = amp_column
             end
 
-            local_ref = choose_local_phase_reference(active_ants, phase_ref_ant, station_models, channel_conn, feed)
+            local_ref = choose_local_phase_reference(active_ants, gauge, station_models, channel_conn, feed)
             for ant in active_ants
                 ant == local_ref && continue
                 phase_column += 1
@@ -222,7 +222,7 @@ function solve_parallel_channel_with_source_nuisance!(
 end
 
 function solve_parallel_channel!(
-        gains, solved, Vblock, Wblock, bl_pairs, nant, phase_ref_ant, c0, c, A_amp, A_phase,
+        gains, solved, Vblock, Wblock, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
         station_models, parallel_pols; min_baselines = 3
     )
     for (pol, feed) in zip(parallel_pols, (1, 2))
@@ -236,7 +236,7 @@ function solve_parallel_channel!(
             conn[a] += 1
             conn[b] += 1
         end
-        local_ref = choose_local_phase_reference(active, phase_ref_ant, station_models, conn, feed)
+        local_ref = choose_local_phase_reference(active, gauge, station_models, conn, feed)
         active_free = filter(≠(local_ref), active)
         isempty(active_free) && continue
 
@@ -1151,7 +1151,7 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
 end
 
 function solve_bandpass_single_scan(
-        Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
+        Vs, Ws, bl_pairs, nant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
         ant_names = nothing, context = "",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
@@ -1165,7 +1165,7 @@ function solve_bandpass_single_scan(
     for c in 1:nchan
         c == c0 && continue
         solve_parallel_channel!(
-            gains, solved, Vs, Ws, bl_pairs, nant, phase_ref_ant, c0, c, A_amp, A_phase,
+            gains, solved, Vs, Ws, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
             station_models, parallel_pols; min_baselines = min_baselines
         )
     end
@@ -1185,7 +1185,7 @@ function solve_bandpass_single_scan(
 end
 
 function solve_bandpass_template(
-        V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
+        V, W, bl_pairs, nant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
         ant_names = nothing, context = "template",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
@@ -1198,7 +1198,7 @@ function solve_bandpass_template(
     for c in 1:nchan
         c == c0 && continue
         solve_parallel_channel!(
-            gains, nothing, V, W, bl_pairs, nant, phase_ref_ant, c0, c, A_amp, A_phase,
+            gains, nothing, V, W, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
             station_models, parallel_pols; min_baselines = min_baselines
         )
     end
@@ -1238,10 +1238,9 @@ struct BandpassSolverSetup{
         P <: Tuple{Int, Int},
         C <: AbstractVector{<:Integer},
         G <: AbstractBandpassGauge,
-    }
+}
     data::D
     ref_ant::Int
-    phase_ref_ant::Int
     gauge::G
     min_baselines::Int
     bl_pairs::B
@@ -1313,7 +1312,7 @@ end
 
 function prepare_bandpass_solver(
         avg::UVData, ref_ant;
-        min_baselines = 3, station_models = nothing, phase_ref_ant = ref_ant,
+        min_baselines = 3, station_models = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
     ndims(avg.vis) == 4 || error("prepare_bandpass_solver expects scan-averaged rank-4 visibilities")
@@ -1327,7 +1326,7 @@ function prepare_bandpass_solver(
     end
 
     gauge = validate_bandpass_gauge(gauge, nant)
-    parallel_pols = parallel_hand_indices(avg.pol_codes)
+    parallel_pols = parallel_hand_indices(avg.metadata.pol_codes)
     c0 = best_ref_channel(avg)
     phase_variable_mask = falses(nant, 2)
     amplitude_variable_mask = falses(nant, 2)
@@ -1339,7 +1338,6 @@ function prepare_bandpass_solver(
     return BandpassSolverSetup(
         avg,
         ref_ant,
-        phase_ref_ant,
         gauge,
         min_baselines,
         avg.bl_pairs,
@@ -1439,7 +1437,6 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
         data.weights,
         setup.bl_pairs,
         nant,
-        setup.phase_ref_ant,
         setup.c0,
         setup.channel_freqs,
         setup.station_models,
@@ -1459,7 +1456,6 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
             view(data.weights, s, :, :, :),
             setup.bl_pairs,
             nant,
-            setup.phase_ref_ant,
             setup.c0,
             setup.channel_freqs,
             setup.station_models,
@@ -1571,15 +1567,15 @@ function summarize_bandpass_residual_block(residual_block, weight_block)
 end
 
 """
-    bandpass_residual_stats(setup, state; by=:baseline)
+    bandpass_residual_stats(setup, gains; by=:baseline)
 
-Summarize weighted complex residuals for the current merged bandpass state.
+Summarize weighted complex residuals for the provided merged bandpass gains.
 With `by=:baseline`, rows are grouped by `(baseline, pol)` across all scans and
 channels. With `by=:scan_baseline`, rows are grouped by `(scan, baseline, pol)`.
 """
-function bandpass_residual_stats(setup::BandpassSolverSetup, state::BandpassSolverState; by = :baseline)
-    source = fit_bandpass_source_coherencies(setup, state.gains)
-    _, residual = compute_bandpass_model_and_residuals(setup, state.gains, source)
+function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseline)
+    source = fit_bandpass_source_coherencies(setup, gains)
+    _, residual = compute_bandpass_model_and_residuals(setup, gains, source)
     rows = NamedTuple[]
 
     if by == :baseline
@@ -1615,6 +1611,9 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, state::BandpassSolv
     return rows
 end
 
+bandpass_residual_stats(setup::BandpassSolverSetup, state::BandpassSolverState; by = :baseline) =
+    bandpass_residual_stats(setup, state.gains; by = by)
+
 function print_bandpass_residual_stats(rows; io = stdout, limit = nothing)
     isempty(rows) && return println(io, "No residual statistics available")
 
@@ -1646,29 +1645,38 @@ function print_bandpass_residual_stats(rows; io = stdout, limit = nothing)
     return nothing
 end
 
-function bandpass_fit_stats(setup::BandpassSolverSetup, state::BandpassSolverState)
-    merged_source = fit_bandpass_source_coherencies(setup, state.gains)
+function bandpass_fit_stats(setup::BandpassSolverSetup, gains)
+    merged_source = fit_bandpass_source_coherencies(setup, gains)
 
     nvis = weighted_visibility_count(setup.data.weights)
     nreal = 2 * nvis
-    chi2 = joint_bandpass_objective(state.gains, merged_source, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_codes)
-    nparams = effective_gain_parameter_count(setup, state) + observed_source_parameter_count(
-        setup.data.vis,
-        setup.data.weights,
-        setup.pol_codes
-    )
-    dof = max(nreal - nparams, 1)
+    chi2 = joint_bandpass_objective(gains, merged_source, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_codes)
 
     return (
         chi2 = chi2,
         nvis = nvis,
         nreal = nreal,
-        nparams = nparams,
-        dof = dof,
+        nparams = missing,
+        dof = missing,
         chi2_per_visibility = chi2 / max(nvis, 1),
         chi2_per_real_component = chi2 / max(nreal, 1),
-        reduced_chi2 = chi2 / dof,
+        reduced_chi2 = missing,
     )
+end
+
+function bandpass_fit_stats(setup::BandpassSolverSetup, state::BandpassSolverState)
+    stats = bandpass_fit_stats(setup, state.gains)
+    nparams = effective_gain_parameter_count(setup, state) + observed_source_parameter_count(
+        setup.data.vis,
+        setup.data.weights,
+        setup.pol_codes
+    )
+    dof = max(stats.nreal - nparams, 1)
+    return merge(stats, (
+        nparams = nparams,
+        dof = dof,
+        reduced_chi2 = stats.chi2 / dof,
+    ))
 end
 
 function refine_bandpass!(
@@ -1824,7 +1832,7 @@ end
 
 """
     solve_bandpass(avg::UVData, ref_ant; min_baselines=3,
-                   station_models=nothing, phase_ref_ant=ref_ant,
+                   station_models=nothing,
                    gauge=ZeroMeanBandpassGauge(),
                    apply_relative_correction=true, joint_als_iterations=8,
                    joint_als_tolerance=1e-6)
@@ -1856,7 +1864,7 @@ Returns:
 """
 function solve_bandpass(
         avg::UVData, ref_ant;
-        min_baselines = 3, station_models = nothing, phase_ref_ant = ref_ant,
+        min_baselines = 3, station_models = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
         apply_relative_correction = true, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6
     )
@@ -1865,7 +1873,6 @@ function solve_bandpass(
         ref_ant;
         min_baselines = min_baselines,
         station_models = station_models,
-        phase_ref_ant = phase_ref_ant,
         gauge = gauge
     )
     @info "Reference channel: $(setup.c0) of $(length(setup.channel_freqs))"

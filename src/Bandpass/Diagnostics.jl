@@ -41,6 +41,7 @@ change the apparent scatter purely through reweighting. Use
 `comparison_weights=:native` to plot each panel with its own weights.
 """
 function plot_stability(
+        parent,
         data::UVData, corr::UVData, bl_plot;
         quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input
     )
@@ -62,14 +63,13 @@ function plot_stability(
         comparison_weights = comparison_weights
     )
 
-    fig = Figure(size = (900, 280 * length(pol_idx) + 40))
     for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
         ax_b = Axis(
-            fig[row, 1]; title = "$(join(bl_plot, "-")) $lab  before",
+            parent[row, 1]; title = "$(join(bl_plot, "-")) $lab  before",
             xlabel = "channel", ylabel = ylabel
         )
         ax_a = Axis(
-            fig[row, 2]; title = "$(join(bl_plot, "-")) $lab  after",
+            parent[row, 2]; title = "$(join(bl_plot, "-")) $lab  after",
             xlabel = "channel", ylabel = ylabel
         )
         linkxaxes!(ax_b, ax_a)
@@ -111,7 +111,16 @@ function plot_stability(
         isnothing(ylims) || ylims!(ax_b, ylims...)
     end
 
-    Colorbar(fig[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    return parent
+end
+
+function plot_stability(
+        data::UVData, corr::UVData, bl_plot;
+        quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input
+    )
+    fig = Figure(size = (900, 280 * length(resolve_plot_polarizations(data; pol = pol)[1]) + 40))
+    plot_stability(fig, data, corr, bl_plot; quantity = quantity, pol = pol, relative = relative, comparison_weights = comparison_weights)
     return fig
 end
 
@@ -297,9 +306,9 @@ end
 
 function resolve_plot_polarizations(data::UVData; pol = :parallel)
     if pol == :parallel
-        pol_idx = parallel_hand_indices(data.metadata.pol_codes)
+        pol_idx = collect(parallel_hand_indices(data.metadata.pol_codes))
     elseif pol == :all
-        pol_idx = eachindex(data.metadata.pol_codes)
+        pol_idx = collect(eachindex(data.metadata.pol_codes))
     elseif pol isa Integer
         pol_idx = [Int(pol)]
     elseif pol isa AbstractString
@@ -676,6 +685,7 @@ uses the same pre-correction weights on both panels for a like-for-like visual
 comparison.
 """
 function plot_baseline_phases(
+        parent,
         data::UVData, corr::UVData, bl_plot;
         relative = true, comparison_weights = :input
     )
@@ -697,14 +707,13 @@ function plot_baseline_phases(
         comparison_weights = comparison_weights
     )
 
-    fig = Figure(size = (1100, 900))
     for (row, (pi, lab)) in enumerate(zip(eachindex(pol_labels), pol_labels))
         ax_b = Axis(
-            fig[row, 1]; title = "$(join(bl_plot, "-")) $lab before",
+            parent[row, 1]; title = "$(join(bl_plot, "-")) $lab before",
             xlabel = "channel", ylabel = ylabel
         )
         ax_a = Axis(
-            fig[row, 2]; title = "$(join(bl_plot, "-")) $lab after",
+            parent[row, 2]; title = "$(join(bl_plot, "-")) $lab after",
             xlabel = "channel", ylabel = ylabel
         )
         linkxaxes!(ax_b, ax_a)
@@ -739,7 +748,16 @@ function plot_baseline_phases(
         isnothing(ylims) || ylims!(ax_b, ylims...)
     end
 
-    Colorbar(fig[1:length(pol_labels), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(pol_labels), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    return parent
+end
+
+function plot_baseline_phases(
+        data::UVData, corr::UVData, bl_plot;
+        relative = true, comparison_weights = :input
+    )
+    fig = Figure(size = (1100, 900))
+    plot_baseline_phases(fig, data, corr, bl_plot; relative = relative, comparison_weights = comparison_weights)
     return fig
 end
 
@@ -753,7 +771,7 @@ choose feeds with `pol`, and restrict rows with `sites`.
 The default behavior matches the legacy plot: both feeds, all sites, and
 relative phase.
 """
-function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
+function plot_gain_solutions(parent, gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
     nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_gain_polarizations(data; pol = pol)
@@ -761,12 +779,11 @@ function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sit
     ylabel = gain_quantity_label(quantity; relative = relative)
     series = gain_quantity_series(quantity; relative = relative)
 
-    fig = Figure(size = (900, 180 * length(site_idx)))
     for (row, ai) in enumerate(site_idx)
         axes_row = Axis[]
         for (col, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
             ax = Axis(
-                fig[row, col];
+                parent[row, col];
                 ylabel = site_labels[row], xlabel = "channel",
                 title = (row == 1 ? "$(lab) gain  $ylabel" : "")
             )
@@ -785,19 +802,26 @@ function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sit
             end
         end
     end
-    Colorbar(fig[1:length(site_idx), length(pol_idx) + 1], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(site_idx), length(pol_idx) + 1], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    return parent
+end
+
+function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
+    site_idx, _ = resolve_gain_sites(data; sites = sites)
+    fig = Figure(size = (900, 180 * length(site_idx)))
+    plot_gain_solutions(fig, gains, data; quantity = quantity, pol = pol, sites = sites, relative = relative)
     return fig
 end
 
-function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, state::BandpassSolverState, bi, pi)
+function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, gains, bi, pi)
     data = setup.data
     nscan = size(data.vis, 1)
     nchan = size(data.vis, 4)
     observed = fill(NaN + NaN * im, nscan, nchan)
     model = fill(NaN + NaN * im, nscan, nchan)
-    ratio = fill(NaN + NaN * im, nscan, nchan)
+    normalized_residual = fill(NaN + NaN * im, nscan, nchan)
     weights = Array{Float64}(undef, nscan, nchan)
-    source = fit_bandpass_source_coherencies(setup, state.gains)
+    source = fit_bandpass_source_coherencies(setup, gains)
 
     a, b = setup.bl_pairs[bi]
     fa, fb = stokes_feed_pair(setup.pol_codes[pi])
@@ -808,19 +832,21 @@ function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, state::Bandpa
         (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
 
         src = source[s, bi, fa, fb]
-        gain_model = state.gains[s, a, fa, c] * conj(state.gains[s, b, fb, c])
+        gain_model = gains[s, a, fa, c] * conj(gains[s, b, fb, c])
+        full_model = gain_model * src
         model[s, c] = gain_model
+        normalized_residual[s, c] = sqrt(w) * (v - full_model)
 
         if isfinite(real(src)) && isfinite(imag(src)) && abs(src) > 0
             observed[s, c] = v / src
-            if isfinite(real(gain_model)) && isfinite(imag(gain_model)) && abs(gain_model) > 0
-                ratio[s, c] = observed[s, c] / gain_model
-            end
         end
     end
 
-    return observed, model, ratio, weights
+    return observed, model, normalized_residual, weights
 end
+
+baseline_bandpass_diagnostics(setup::BandpassSolverSetup, state::BandpassSolverState, bi, pi) =
+    baseline_bandpass_diagnostics(setup, state.gains, bi, pi)
 
 function residual_stats_annotation(rows, baseline, pol)
     row = findfirst(r -> r.baseline == baseline && r.pol == pol, rows)
@@ -835,16 +861,16 @@ function residual_stats_annotation(rows, baseline, pol)
 end
 
 """
-    plot_baseline_bandpass_residuals(setup, state, bl_plot; pol=:parallel)
+    plot_baseline_bandpass(setup, state, bl_plot; pol=:parallel)
 
-Diagnostic figure for one baseline showing the fitted baseline bandpass shape
-and residuals for the current solver state. The left panels show the
-source-normalized observed baseline bandpass with the fitted model overlaid. The
-right panels show residual amplitude ratios and residual phases relative to that
-model, which should sit near `1` and `0` respectively when the fit is good.
+Diagnostic figure for one baseline showing the source-normalized observed
+baseline bandpass with the fitted model overlaid. The two columns show
+amplitude relative to the reference channel and phase relative to the reference
+channel.
 """
-function plot_baseline_bandpass_residuals(
-        setup::BandpassSolverSetup, state::BandpassSolverState, bl_plot;
+function plot_baseline_bandpass(
+        parent,
+        setup::BandpassSolverSetup, gains, bl_plot;
         pol = :parallel
     )
     data = setup.data
@@ -852,30 +878,108 @@ function plot_baseline_bandpass_residuals(
     nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
-    residual_rows = bandpass_residual_stats(setup, state; by = :baseline)
     baseline_label = join(bl_plot, "-")
 
-    fig = Figure(size = (1500, 280 * length(pol_idx) + 40))
     for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        ax_amp = Axis(fig[row, 1]; title = "$(baseline_label) $lab bandpass amp/ref", xlabel = "channel", ylabel = "amp / ref")
-        ax_phase = Axis(fig[row, 2]; title = "$(baseline_label) $lab bandpass phase", xlabel = "channel", ylabel = "phase rel. to ref (rad)")
-        ax_amp_res = Axis(fig[row, 3]; title = "$(baseline_label) $lab residual amp", xlabel = "channel", ylabel = "|obs / model|")
-        ax_phase_res = Axis(fig[row, 4]; title = "$(baseline_label) $lab residual phase", xlabel = "channel", ylabel = "angle(obs / model) (rad)")
+        ax_amp = Axis(parent[row, 1]; title = "$(baseline_label) $lab bandpass amp/ref", xlabel = "channel", ylabel = "amp / ref")
+        ax_phase = Axis(parent[row, 2]; title = "$(baseline_label) $lab bandpass phase", xlabel = "channel", ylabel = "phase rel. to ref (rad)")
+        linkxaxes!(ax_amp, ax_phase)
 
-        for ax in (ax_phase, ax_amp_res, ax_phase_res)
+        observed, model, _, weights = baseline_bandpass_diagnostics(setup, gains, bi, pi)
+        amp_series = Any[[1.0]]
+        phase_series_blocks = Any[]
+
+        for s in 1:nscan
+            valid_scan = vec(weights[s, :]) .> 0
+            any(valid_scan) || continue
+
+            color_kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
+            marker_kw = merge(color_kw, (markersize = 8,))
+            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
+
+            obs_amp = amplitude_relative_to_ref(abs.(vec(observed[s, :])))
+            model_amp = amplitude_relative_to_ref(abs.(vec(model[s, :])))
+            obs_phase = phase_relative_to_ref(angle.(vec(observed[s, :])))
+            model_phase = phase_relative_to_ref(angle.(vec(model[s, :])))
+
+            scatter!(ax_amp, obs_amp; marker_kw...)
+            lines!(ax_amp, model_amp; line_kw...)
+            scatter!(ax_phase, obs_phase; marker_kw...)
+            lines!(ax_phase, model_phase; line_kw...)
+
+            push!(amp_series, obs_amp, model_amp)
+            push!(phase_series_blocks, obs_phase, model_phase)
+        end
+
+        amp_lims = finite_series_ylims(amp_series)
+        phase_lims = finite_series_ylims(phase_series_blocks)
+        isnothing(amp_lims) || ylims!(ax_amp, amp_lims...)
+        isnothing(phase_lims) || ylims!(ax_phase, phase_lims...)
+    end
+
+    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    return parent
+end
+
+function plot_baseline_bandpass(
+        setup::BandpassSolverSetup, gains, bl_plot;
+        pol = :parallel
+    )
+    npol = length(resolve_plot_polarizations(setup.data; pol = pol)[1])
+    fig = Figure(size = (1100, 280 * npol + 40))
+    plot_baseline_bandpass(fig, setup, gains, bl_plot; pol = pol)
+    return fig
+end
+
+function plot_baseline_bandpass(
+        setup::BandpassSolverSetup, state::BandpassSolverState, bl_plot;
+        pol = :parallel
+    )
+    return plot_baseline_bandpass(setup, state.gains, bl_plot; pol = pol)
+end
+
+"""
+    plot_baseline_bandpass_residuals(setup, state, bl_plot; pol=:parallel)
+
+Diagnostic figure for one baseline showing the fitted baseline bandpass shape
+and residuals for the current solver state. The left panels show the
+source-normalized observed baseline bandpass with the fitted model overlaid. The
+right panels show the thermal-noise-normalized real and imaginary residuals
+driving the chi-square objective, which should sit near `0` when the fit is good.
+"""
+function plot_baseline_bandpass_residuals(
+        parent,
+        setup::BandpassSolverSetup, gains, bl_plot;
+        pol = :parallel
+    )
+    data = setup.data
+    bi = baseline_index(data, bl_plot)
+    nscan = length(data.scans)
+    scan_wheel = diagnostic_scan_colormap(nscan)
+    pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
+    residual_rows = bandpass_residual_stats(setup, gains; by = :baseline)
+    baseline_label = join(bl_plot, "-")
+
+    for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
+        ax_amp = Axis(parent[row, 1]; title = "$(baseline_label) $lab bandpass amp/ref", xlabel = "channel", ylabel = "amp / ref")
+        ax_phase = Axis(parent[row, 2]; title = "$(baseline_label) $lab bandpass phase", xlabel = "channel", ylabel = "phase rel. to ref (rad)")
+        ax_real_res = Axis(parent[row, 3]; title = "$(baseline_label) $lab residual Re", xlabel = "channel", ylabel = "sqrt(w) * Re(v - m)")
+        ax_imag_res = Axis(parent[row, 4]; title = "$(baseline_label) $lab residual Im", xlabel = "channel", ylabel = "sqrt(w) * Im(v - m)")
+
+        for ax in (ax_phase, ax_real_res, ax_imag_res)
             linkxaxes!(ax_amp, ax)
         end
 
-        observed, model, ratio, weights = baseline_bandpass_diagnostics(setup, state, bi, pi)
+        observed, model, normalized_residual, weights = baseline_bandpass_diagnostics(setup, gains, bi, pi)
         amp_series = Any[[1.0]]
         phase_series_blocks = Any[]
-        amp_res_series = Any[[1.0]]
-        phase_res_series = Any[[0.0]]
+        real_res_series = Any[[0.0]]
+        imag_res_series = Any[[0.0]]
 
-        hlines!(ax_amp_res, [1.0]; color = (:black, 0.35), linestyle = :dash)
-        hlines!(ax_phase_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
+        hlines!(ax_real_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
+        hlines!(ax_imag_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
         text!(
-            ax_phase_res, 0.98, 0.96;
+            ax_imag_res, 0.98, 0.96;
             text = residual_stats_annotation(residual_rows, baseline_label, lab),
             space = :relative, align = (:right, :top), fontsize = 11
         )
@@ -892,34 +996,51 @@ function plot_baseline_bandpass_residuals(
             model_amp = amplitude_relative_to_ref(abs.(vec(model[s, :])))
             obs_phase = phase_relative_to_ref(angle.(vec(observed[s, :])))
             model_phase = phase_relative_to_ref(angle.(vec(model[s, :])))
-            res_amp = abs.(vec(ratio[s, :]))
-            res_phase = angle.(vec(ratio[s, :]))
+            res_real = real.(vec(normalized_residual[s, :]))
+            res_imag = imag.(vec(normalized_residual[s, :]))
 
             scatter!(ax_amp, obs_amp; marker_kw...)
             lines!(ax_amp, model_amp; line_kw...)
             scatter!(ax_phase, obs_phase; marker_kw...)
             lines!(ax_phase, model_phase; line_kw...)
-            scatter!(ax_amp_res, res_amp; marker_kw...)
-            scatter!(ax_phase_res, res_phase; marker_kw...)
+            scatter!(ax_real_res, res_real; marker_kw...)
+            scatter!(ax_imag_res, res_imag; marker_kw...)
 
             push!(amp_series, obs_amp, model_amp)
             push!(phase_series_blocks, obs_phase, model_phase)
-            push!(amp_res_series, res_amp)
-            push!(phase_res_series, res_phase)
+            push!(real_res_series, res_real)
+            push!(imag_res_series, res_imag)
         end
 
         amp_lims = finite_series_ylims(amp_series)
         phase_lims = finite_series_ylims(phase_series_blocks)
-        amp_res_lims = finite_series_ylims(amp_res_series)
-        phase_res_lims = finite_series_ylims(phase_res_series)
+        real_res_lims = finite_series_ylims(real_res_series)
+        imag_res_lims = finite_series_ylims(imag_res_series)
         isnothing(amp_lims) || ylims!(ax_amp, amp_lims...)
         isnothing(phase_lims) || ylims!(ax_phase, phase_lims...)
-        isnothing(amp_res_lims) || ylims!(ax_amp_res, amp_res_lims...)
-        isnothing(phase_res_lims) || ylims!(ax_phase_res, phase_res_lims...)
+        isnothing(real_res_lims) || ylims!(ax_real_res, real_res_lims...)
+        isnothing(imag_res_lims) || ylims!(ax_imag_res, imag_res_lims...)
     end
 
-    Colorbar(fig[1:length(pol_idx), 5], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(pol_idx), 5], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    return parent
+end
+
+function plot_baseline_bandpass_residuals(
+        setup::BandpassSolverSetup, gains, bl_plot;
+        pol = :parallel
+    )
+    npol = length(resolve_plot_polarizations(setup.data; pol = pol)[1])
+    fig = Figure(size = (1500, 280 * npol + 40))
+    plot_baseline_bandpass_residuals(fig, setup, gains, bl_plot; pol = pol)
     return fig
+end
+
+function plot_baseline_bandpass_residuals(
+        setup::BandpassSolverSetup, state::BandpassSolverState, bl_plot;
+        pol = :parallel
+    )
+    return plot_baseline_bandpass_residuals(setup, state.gains, bl_plot; pol = pol)
 end
 
 function resolve_gain_polarizations(data::UVData; pol = :all)

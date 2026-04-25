@@ -279,9 +279,13 @@ end
     @test !isnothing(BP.plot_gain_solutions(gains, data))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
+    fig_embed = Gustavo.Bandpass.Figure(size = (1400, 500))
+    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
+    @test !isnothing(BP.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 
     fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11")
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig)
+    @test_nowarn show(IOBuffer(), MIME("image/png"), fig_embed)
 end
 
 @testset "Amplitude stability summary" begin
@@ -443,9 +447,10 @@ end
         end
     end
 
-    setup = BP.prepare_bandpass_solver(synthetic_bandpass_avg_uvdata(), 1; gauge = BP.ReferenceAntennaBandpassGauge(2))
-    @test setup.gauge isa BP.ReferenceAntennaBandpassGauge
-    @test setup.gauge.ref_ant == 2
+    validated = BP.validate_bandpass_gauge(BP.ReferenceAntennaBandpassGauge(2), 3)
+    @test validated isa BP.ReferenceAntennaBandpassGauge
+    @test validated.ref_ant == 2
+    @test_throws ErrorException BP.validate_bandpass_gauge(BP.ReferenceAntennaBandpassGauge(4), 3)
 end
 
 @testset "Solve parallel-hand channel ratios" begin
@@ -473,11 +478,12 @@ end
     end
     Wscan = ones(Float64, size(Vscan))
     gains_scan = ones(ComplexF64, nant, 2, nchan)
+    ref_gauge = BP.ReferenceAntennaBandpassGauge(1)
 
     for c in 1:nchan
         c == c0 && continue
         BP.solve_parallel_channel!(
-            gains_scan, nothing, Vscan, Wscan, bl_pairs, nant, 1, c0, c, A_amp, A_phase,
+            gains_scan, nothing, Vscan, Wscan, bl_pairs, nant, ref_gauge, c0, c, A_amp, A_phase,
             station_models, (1, 2); min_baselines = 3
         )
     end
@@ -515,7 +521,7 @@ end
     for c in 1:nchan
         c == c0 && continue
         BP.solve_parallel_channel!(
-            gains_template, nothing, Vtemplate, Wtemplate, bl_pairs, nant, 1, c0, c, A_amp, A_phase,
+            gains_template, nothing, Vtemplate, Wtemplate, bl_pairs, nant, ref_gauge, c0, c, A_amp, A_phase,
             station_models, (1, 2); min_baselines = 3
         )
     end
@@ -577,7 +583,7 @@ end
     for c in 1:nchan
         c == c0 && continue
         BP.solve_parallel_channel!(
-            gains_init, nothing, V, W, bl_pairs, nant, 1, c0, c, A_amp, A_phase,
+            gains_init, nothing, V, W, bl_pairs, nant, BP.ReferenceAntennaBandpassGauge(1), c0, c, A_amp, A_phase,
             station_models, parallel_pols; min_baselines = 3
         )
     end
@@ -621,8 +627,7 @@ end
         data,
         ref_ant;
         min_baselines = 3,
-        station_models = station_models,
-        phase_ref_ant = ref_ant
+        station_models = station_models
     )
     state = BP.initialize_bandpass_state(setup)
     objective_before = BP.bandpass_state_objective(state)
@@ -636,7 +641,6 @@ end
         ref_ant;
         min_baselines = 3,
         station_models = station_models,
-        phase_ref_ant = ref_ant,
         apply_relative_correction = false,
         joint_als_iterations = 2,
         joint_als_tolerance = 1.0e-10
@@ -693,8 +697,7 @@ end
         data,
         1;
         min_baselines = 3,
-        station_models = station_models,
-        phase_ref_ant = 1
+        station_models = station_models
     )
     state = BP.initialize_bandpass_state(setup)
 
@@ -731,8 +734,7 @@ end
         data,
         ref_ant;
         min_baselines = 3,
-        station_models = station_models,
-        phase_ref_ant = ref_ant
+        station_models = station_models
     )
     state = BP.initialize_bandpass_state(setup)
     BP.refine_bandpass!(setup, state, BP.BandpassALS(iterations = 2, tolerance = 1.0e-10))
@@ -740,17 +742,47 @@ end
     fit_stats = BP.bandpass_fit_stats(setup, state)
     residual_rows = BP.bandpass_residual_stats(setup, state; by = :baseline)
     scan_rows = BP.bandpass_residual_stats(setup, state; by = :scan_baseline)
+    result = BP.finalize_bandpass_state(setup, state; apply_relative_correction = false)
+    final_fit_stats = BP.bandpass_fit_stats(setup, result.gains)
+    final_residual_rows = BP.bandpass_residual_stats(setup, result.gains; by = :baseline)
 
     @test !isempty(residual_rows)
     @test !isempty(scan_rows)
+    @test !isempty(final_residual_rows)
     @test sum(getindex.(residual_rows, :nvis)) == fit_stats.nvis
     @test sum(getindex.(scan_rows, :nvis)) == fit_stats.nvis
     @test sum(getindex.(residual_rows, :chi2)) ≈ fit_stats.chi2
     @test sum(getindex.(scan_rows, :chi2)) ≈ fit_stats.chi2
+    @test sum(getindex.(final_residual_rows, :chi2)) ≈ final_fit_stats.chi2
     @test all(hasproperty.(residual_rows, :median_abs_normalized_residual))
     @test all(row -> row.normalized_residual_rms ≈ sqrt(row.chi2_per_real_component), residual_rows)
+    @test final_fit_stats.nparams === missing
+    @test final_fit_stats.dof === missing
+    @test final_fit_stats.reduced_chi2 === missing
 
-    fig = BP.plot_baseline_bandpass_residuals(setup, state, ("AA", "AX"); pol = :parallel)
+    bi = findfirst(==((1, 2)), data.bl_pairs)
+    observed, gain_model, normalized_residual, weights = BP.baseline_bandpass_diagnostics(setup, result.gains, bi, 1)
+    source = BP.fit_bandpass_source_coherencies(setup, result.gains)
+    for s in axes(data.vis, 1), c in axes(data.vis, 4)
+        w = data.weights[s, bi, 1, c]
+        v = data.vis[s, bi, 1, c]
+        if w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))
+            a, b = data.bl_pairs[bi]
+            m = result.gains[s, a, 1, c] * source[s, bi, 1, 1] * conj(result.gains[s, b, 1, c])
+            @test normalized_residual[s, c] ≈ sqrt(w) * (v - m)
+        end
+    end
+    @test size(observed) == size(gain_model) == size(normalized_residual) == size(weights)
+
+    fig_bandpass = BP.plot_baseline_bandpass(setup, result.gains, ("AA", "AX"); pol = :parallel)
+    @test !isempty(repr(MIME("image/png"), fig_bandpass))
+
+    fig_embed = Gustavo.Bandpass.Figure(size = (1800, 700))
+    @test !isnothing(BP.plot_baseline_bandpass(fig_embed[1, 1], setup, result.gains, ("AA", "AX"); pol = :parallel))
+    @test !isnothing(BP.plot_baseline_bandpass_residuals(fig_embed[1, 2], setup, result.gains, ("AA", "AX"); pol = :parallel))
+    @test !isempty(repr(MIME("image/png"), fig_embed))
+
+    fig = BP.plot_baseline_bandpass_residuals(setup, result.gains, ("AA", "AX"); pol = :parallel)
     png = repr(MIME("image/png"), fig)
     @test !isempty(png)
 end
@@ -765,8 +797,7 @@ end
         data,
         ref_ant;
         min_baselines = 3,
-        station_models = station_models,
-        phase_ref_ant = ref_ant
+        station_models = station_models
     )
 
     state_default = BP.initialize_bandpass_state(setup)
