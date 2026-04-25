@@ -320,7 +320,7 @@ function resolve_plot_polarizations(data::UVData; pol = :parallel)
     end
 
     all(1 .<= pol_idx .<= length(data.metadata.pol_codes)) || error("Polarization index out of bounds: $pol_idx")
-    return pol_idx, collect(data.metadata.pol_labels[collect(pol_idx)])
+    return pol_idx, collect(data.metadata.pol_labels[pol_idx])
 end
 
 resolve_single_polarization(data::UVData, pol::Integer) = Int(pol)
