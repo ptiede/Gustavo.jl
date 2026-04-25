@@ -74,6 +74,16 @@ function weighted_regularized_least_squares(A, b, weights, penalties)
     return solve(LinearProblem(vcat(Aw, Areg), vcat(bw, breg)), QRFactorization()).u
 end
 
+function weighted_constrained_least_squares(A, b, weights, C, d; constraint_weight = 1.0e6)
+    isempty(C) && return weighted_least_squares(A, b, weights)
+
+    Aw = A .* reshape(weights, :, 1)
+    bw = b .* weights
+    Acon = constraint_weight .* C
+    bcon = constraint_weight .* d
+    return solve(LinearProblem(vcat(Aw, Acon), vcat(bw, bcon)), QRFactorization()).u
+end
+
 function unwrap_phase_track(phases, ref_idx = 1)
     unwrapped = copy(phases)
     n = length(unwrapped)

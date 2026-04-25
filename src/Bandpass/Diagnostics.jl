@@ -85,6 +85,8 @@ function plot_stability(
         summary_after = summarize(vis_after, w_after; groups = scan_groups)
         lines!(ax_b, summary_before; color = :black, linewidth = 2)
         lines!(ax_a, summary_after; color = :black, linewidth = 2)
+        plotted_series = Any[summary_before, summary_after]
+        plotted_noise = Any[]
 
         annotate_metric!(ax_b, vis_before, w_before, scan_groups)
         annotate_metric!(ax_a, vis_after, w_after, scan_groups)
@@ -97,11 +99,16 @@ function plot_stability(
             after_phase = scatter_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups = nothing)
             before_noise = scatter_noise(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups = nothing)
             after_noise = scatter_noise(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups = nothing)
-            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
-            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
             scatter!(ax_b, before_phase; kw...)
             scatter!(ax_a, after_phase; kw...)
+            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
+            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
+            push!(plotted_series, before_phase, after_phase)
+            push!(plotted_noise, before_noise, after_noise)
         end
+
+        ylims = finite_series_ylims(plotted_series, plotted_noise)
+        isnothing(ylims) || ylims!(ax_b, ylims...)
     end
 
     Colorbar(fig[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
@@ -171,10 +178,9 @@ function phase_series_with_noise(vis_block, weight_block; relative = true, ref_i
     ref = amplitude_reference_index(amp, ref_idx)
     isnothing(ref) && return relative_phase, phase_noise
 
-    ref_noise = sigma_phase[ref]
     for i in eachindex(phase)
-        (isfinite(relative_phase[i]) && isfinite(sigma_phase[i]) && isfinite(ref_noise)) || continue
-        phase_noise[i] = sqrt(sigma_phase[i]^2 + ref_noise^2)
+        isfinite(relative_phase[i]) && isfinite(sigma_phase[i]) || continue
+        phase_noise[i] = i == ref ? 0.0 : sigma_phase[i]
     end
     return relative_phase, phase_noise
 end
@@ -199,14 +205,9 @@ function amplitude_series_with_noise(vis_block, weight_block; relative = false, 
     ref = amplitude_reference_index(amp, ref_idx)
     isnothing(ref) && return relative_amp, relative_noise
 
-    ref_amp = amp[ref]
-    ref_noise = sigma_amp[ref]
     for i in eachindex(amp)
-        (
-            isfinite(relative_amp[i]) && isfinite(amp[i]) && amp[i] > 0 &&
-                isfinite(sigma_amp[i]) && isfinite(ref_noise) && ref_amp > 0
-        ) || continue
-        relative_noise[i] = relative_amp[i] * sqrt((sigma_amp[i] / amp[i])^2 + (ref_noise / ref_amp)^2)
+        isfinite(relative_amp[i]) && isfinite(amp[i]) && amp[i] > 0 && isfinite(sigma_amp[i]) || continue
+        relative_noise[i] = i == ref ? 0.0 : relative_amp[i] * (sigma_amp[i] / amp[i])
     end
     return relative_amp, relative_noise
 end
@@ -354,18 +355,64 @@ function stability_plotting_config(quantity; relative = false)
     return ylabel, summarize, scatter_series, scatter_noise, annotate_metric!
 end
 
-function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; alpha = 0.18, linewidth = 1.0)
+function finite_series_ylims(
+        series_blocks, noise_blocks = ();
+        pad_fraction = 0.08, min_pad = 1.0e-3, noise_cap_fraction = 0.5
+    )
+    values = Float64[]
+    for block in series_blocks
+        for value in block
+            isfinite(value) || continue
+            push!(values, value)
+        end
+    end
+
+    isempty(values) && return nothing
+    ymin = minimum(values)
+    ymax = maximum(values)
+    span = ymax - ymin
+    scale = span > 0 ? span : max(abs(ymin), abs(ymax), 1.0)
+    pad = max(min_pad, pad_fraction * scale)
+
+    max_noise = 0.0
+    for block in noise_blocks
+        for sigma in block
+            (isfinite(sigma) && sigma > 0) || continue
+            max_noise = max(max_noise, sigma)
+        end
+    end
+    pad += min(max_noise, noise_cap_fraction * scale)
+
+    return ymin - pad, ymax + pad
+end
+
+function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; alpha = 0.75, linewidth = 1.8, cap_width = 0.22)
     xs = Float64[]
     ys = Float64[]
+    cap_xs = Float64[]
+    cap_ys = Float64[]
     for (channel, (value, sigma)) in enumerate(zip(series, noise))
         (isfinite(value) && isfinite(sigma) && sigma > 0) || continue
         push!(xs, channel, channel)
         push!(ys, value - sigma, value + sigma)
+        push!(cap_xs, channel - cap_width, channel + cap_width)
+        push!(cap_ys, value - sigma, value - sigma)
+        push!(cap_xs, channel - cap_width, channel + cap_width)
+        push!(cap_ys, value + sigma, value + sigma)
     end
     isempty(xs) && return ax
     linesegments!(
         ax, xs, ys;
-        color = (scan_index, alpha),
+        color = scan_index,
+        alpha = alpha,
+        colormap = scan_wheel,
+        colorrange = (1, max(nscan, 1)),
+        linewidth = linewidth
+    )
+    isempty(cap_xs) || linesegments!(
+        ax, cap_xs, cap_ys;
+        color = scan_index,
+        alpha = alpha,
         colormap = scan_wheel,
         colorrange = (1, max(nscan, 1)),
         linewidth = linewidth
@@ -668,6 +715,7 @@ function plot_baseline_phases(
         w_before = @view plot_weights_before[int_inds, pi, :]
         w_after = @view plot_weights_after[int_inds, pi, :]
         scan_groups = data.scan_idx[int_inds]
+        plotted_series = Any[]
 
         annotate_coherence!(ax_b, residual_phase_coherence(vis_before, w_before; groups = scan_groups))
         annotate_coherence!(ax_a, residual_phase_coherence(vis_after, w_after; groups = scan_groups))
@@ -680,11 +728,15 @@ function plot_baseline_phases(
             after_phase = phase_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative = relative)
             before_noise = phase_noise_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative = relative)
             after_noise = phase_noise_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative = relative)
-            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
-            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
             scatter!(ax_b, before_phase; kw...)
             scatter!(ax_a, after_phase; kw...)
+            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
+            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
+            push!(plotted_series, before_phase, after_phase)
         end
+
+        ylims = finite_series_ylims(plotted_series)
+        isnothing(ylims) || ylims!(ax_b, ylims...)
     end
 
     Colorbar(fig[1:length(pol_labels), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
@@ -734,6 +786,139 @@ function plot_gain_solutions(gains, data::UVData; quantity = :phase, pol = :all,
         end
     end
     Colorbar(fig[1:length(site_idx), length(pol_idx) + 1], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    return fig
+end
+
+function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, state::BandpassSolverState, bi, pi)
+    data = setup.data
+    nscan = size(data.vis, 1)
+    nchan = size(data.vis, 4)
+    observed = fill(NaN + NaN * im, nscan, nchan)
+    model = fill(NaN + NaN * im, nscan, nchan)
+    ratio = fill(NaN + NaN * im, nscan, nchan)
+    weights = Array{Float64}(undef, nscan, nchan)
+    source = fit_bandpass_source_coherencies(setup, state.gains)
+
+    a, b = setup.bl_pairs[bi]
+    fa, fb = stokes_feed_pair(setup.pol_codes[pi])
+    for s in 1:nscan, c in 1:nchan
+        v = data.vis[s, bi, pi, c]
+        w = data.weights[s, bi, pi, c]
+        weights[s, c] = w
+        (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+
+        src = source[s, bi, fa, fb]
+        gain_model = state.gains[s, a, fa, c] * conj(state.gains[s, b, fb, c])
+        model[s, c] = gain_model
+
+        if isfinite(real(src)) && isfinite(imag(src)) && abs(src) > 0
+            observed[s, c] = v / src
+            if isfinite(real(gain_model)) && isfinite(imag(gain_model)) && abs(gain_model) > 0
+                ratio[s, c] = observed[s, c] / gain_model
+            end
+        end
+    end
+
+    return observed, model, ratio, weights
+end
+
+function residual_stats_annotation(rows, baseline, pol)
+    row = findfirst(r -> r.baseline == baseline && r.pol == pol, rows)
+    isnothing(row) && return "no residual stats"
+    stats = rows[row]
+    return @sprintf(
+        "chi2/real %.2f\nnorm rms %.2f\nmed |r|sqrt(w) %.2f",
+        stats.chi2_per_real_component,
+        stats.normalized_residual_rms,
+        stats.median_abs_normalized_residual
+    )
+end
+
+"""
+    plot_baseline_bandpass_residuals(setup, state, bl_plot; pol=:parallel)
+
+Diagnostic figure for one baseline showing the fitted baseline bandpass shape
+and residuals for the current solver state. The left panels show the
+source-normalized observed baseline bandpass with the fitted model overlaid. The
+right panels show residual amplitude ratios and residual phases relative to that
+model, which should sit near `1` and `0` respectively when the fit is good.
+"""
+function plot_baseline_bandpass_residuals(
+        setup::BandpassSolverSetup, state::BandpassSolverState, bl_plot;
+        pol = :parallel
+    )
+    data = setup.data
+    bi = baseline_index(data, bl_plot)
+    nscan = length(data.sc)
+    scan_wheel = diagnostic_scan_colormap(nscan)
+    pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
+    residual_rows = bandpass_residual_stats(setup, state; by = :baseline)
+    baseline_label = join(bl_plot, "-")
+
+    fig = Figure(size = (1500, 280 * length(pol_idx) + 40))
+    for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
+        ax_amp = Axis(fig[row, 1]; title = "$(baseline_label) $lab bandpass amp/ref", xlabel = "channel", ylabel = "amp / ref")
+        ax_phase = Axis(fig[row, 2]; title = "$(baseline_label) $lab bandpass phase", xlabel = "channel", ylabel = "phase rel. to ref (rad)")
+        ax_amp_res = Axis(fig[row, 3]; title = "$(baseline_label) $lab residual amp", xlabel = "channel", ylabel = "|obs / model|")
+        ax_phase_res = Axis(fig[row, 4]; title = "$(baseline_label) $lab residual phase", xlabel = "channel", ylabel = "angle(obs / model) (rad)")
+
+        for ax in (ax_phase, ax_amp_res, ax_phase_res)
+            linkxaxes!(ax_amp, ax)
+        end
+
+        observed, model, ratio, weights = baseline_bandpass_diagnostics(setup, state, bi, pi)
+        amp_series = Any[[1.0]]
+        phase_series_blocks = Any[]
+        amp_res_series = Any[[1.0]]
+        phase_res_series = Any[[0.0]]
+
+        hlines!(ax_amp_res, [1.0]; color = (:black, 0.35), linestyle = :dash)
+        hlines!(ax_phase_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
+        text!(
+            ax_phase_res, 0.98, 0.96;
+            text = residual_stats_annotation(residual_rows, baseline_label, lab),
+            space = :relative, align = (:right, :top), fontsize = 11
+        )
+
+        for s in 1:nscan
+            valid_scan = vec(weights[s, :]) .> 0
+            any(valid_scan) || continue
+
+            color_kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
+            marker_kw = merge(color_kw, (markersize = 8,))
+            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
+
+            obs_amp = amplitude_relative_to_ref(abs.(vec(observed[s, :])))
+            model_amp = amplitude_relative_to_ref(abs.(vec(model[s, :])))
+            obs_phase = phase_relative_to_ref(angle.(vec(observed[s, :])))
+            model_phase = phase_relative_to_ref(angle.(vec(model[s, :])))
+            res_amp = abs.(vec(ratio[s, :]))
+            res_phase = angle.(vec(ratio[s, :]))
+
+            scatter!(ax_amp, obs_amp; marker_kw...)
+            lines!(ax_amp, model_amp; line_kw...)
+            scatter!(ax_phase, obs_phase; marker_kw...)
+            lines!(ax_phase, model_phase; line_kw...)
+            scatter!(ax_amp_res, res_amp; marker_kw...)
+            scatter!(ax_phase_res, res_phase; marker_kw...)
+
+            push!(amp_series, obs_amp, model_amp)
+            push!(phase_series_blocks, obs_phase, model_phase)
+            push!(amp_res_series, res_amp)
+            push!(phase_res_series, res_phase)
+        end
+
+        amp_lims = finite_series_ylims(amp_series)
+        phase_lims = finite_series_ylims(phase_series_blocks)
+        amp_res_lims = finite_series_ylims(amp_res_series)
+        phase_res_lims = finite_series_ylims(phase_res_series)
+        isnothing(amp_lims) || ylims!(ax_amp, amp_lims...)
+        isnothing(phase_lims) || ylims!(ax_phase, phase_lims...)
+        isnothing(amp_res_lims) || ylims!(ax_amp_res, amp_res_lims...)
+        isnothing(phase_res_lims) || ylims!(ax_phase_res, phase_res_lims...)
+    end
+
+    Colorbar(fig[1:length(pol_idx), 5], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
     return fig
 end
 
