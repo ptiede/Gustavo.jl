@@ -297,9 +297,9 @@ end
 
 function resolve_plot_polarizations(data::UVData; pol = :parallel)
     if pol == :parallel
-        pol_idx = collect(parallel_hand_indices(data.metadata.pol_codes))
+        pol_idx = parallel_hand_indices(data.metadata.pol_codes)
     elseif pol == :all
-        pol_idx = collect(eachindex(data.metadata.pol_codes))
+        pol_idx = eachindex(data.metadata.pol_codes)
     elseif pol isa Integer
         pol_idx = [Int(pol)]
     elseif pol isa AbstractString
@@ -311,7 +311,7 @@ function resolve_plot_polarizations(data::UVData; pol = :parallel)
     end
 
     all(1 .<= pol_idx .<= length(data.metadata.pol_codes)) || error("Polarization index out of bounds: $pol_idx")
-    return pol_idx, collect(data.metadata.pol_labels[pol_idx])
+    return pol_idx, collect(data.metadata.pol_labels[collect(pol_idx)])
 end
 
 resolve_single_polarization(data::UVData, pol::Integer) = Int(pol)
@@ -849,7 +849,7 @@ function plot_baseline_bandpass_residuals(
     )
     data = setup.data
     bi = baseline_index(data, bl_plot)
-    nscan = length(data.sc)
+    nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
     residual_rows = bandpass_residual_stats(setup, state; by = :baseline)

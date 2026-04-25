@@ -7,6 +7,12 @@ stokes_feed_pair(code::Integer) = code == -1 ? (1, 1) :
 feed_pair_label(feeds::Tuple{<:Integer,<:Integer}) = string(feeds[1], feeds[2])
 polarization_label(code::Integer) = feed_pair_label(stokes_feed_pair(code))
 
+
+using DimensionalData: @dim, TimeDim
+@dim Scan TimeDim "Scan Number"
+@dim Pol "Polarization"
+@dim IF "Intermediate Frequency"
+@dim Ant "Antenna"
 """
     UVData
 
@@ -14,7 +20,8 @@ Full per-integration UV dataset loaded from a UVFITS file.
 
 `vis` shape: `[nint, npol, nchan]`. `uvw` shape: `[nint, 3]` in light-seconds.
 `scans` is a StructArray with `.lower` / `.upper` fields (hours).
-`_hdus` holds the full raw `Vector{HDU}` for round-trip write-back.
+`primary_cards` holds the FITS header cards from the primary HDU for round-trip
+write-back without keeping two copies of the visibility data in memory.
 """
 struct UVData{
     V<:AbstractArray{<:Complex},
@@ -29,9 +36,7 @@ struct UVData{
     S,
     TAnt,
     TMeta,
-    TRawShape<:Tuple,
-    TSqueeze<:AbstractVector{<:Integer},
-    THdus,
+    TCards,
 }
     vis          ::V
     weights      ::W
@@ -45,15 +50,13 @@ struct UVData{
     scans        ::S
     antennas     ::TAnt
     metadata     ::TMeta
-    raw_shape    ::TRawShape
-    squeeze_dims ::TSqueeze
-    _hdus        ::THdus
+    primary_cards::TCards
 end
 
 function with_visibilities(data::UVData, vis, weights)
     return UVData(vis, weights, data.uvw, data.obs_time, data.scan_idx, data.bl_codes,
         data.bl_pairs, data.bl_lookup, data.unique_bls, data.scans, data.antennas,
-        data.metadata, data.raw_shape, data.squeeze_dims, data._hdus)
+        data.metadata, data.primary_cards)
 end
 
 scan_time_centers(data::UVData) = [(scan.lower + scan.upper) / 2 for scan in data.scans]
@@ -254,20 +257,20 @@ Load a UVFITS file, returning a `UVData`.
 """
 function load_uvfits(path)
     fid = FITSFiles.fits(path)
-    dt  = read(fid[1]).data
+    primary_hdu = read(fid[1])
+    dt  = primary_hdu.data
     an_hdu = read(fid[2])
     fq_hdu = read(fid[3])
     nx  = read(fid[4]).data
 
-    dim1      = findall(==(1), size(dt.data))
-    raw_shape = size(dt.data)
-    raw       = Array(dropdims(dt.data, dims=Tuple(dim1)))
+    dim1 = findall(==(1), size(dt.data))
+    raw  = Array(dropdims(dt.data, dims=Tuple(dim1)))
 
     vis     = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
     weights = Float64.(raw[:, 3, :, :])
 
     antennas = _build_antenna_table(an_hdu)
-    metadata = _build_obs_metadata(fid[1], fq_hdu, size(vis, 2), size(vis, 3))
+    metadata = _build_obs_metadata(primary_hdu, fq_hdu, size(vis, 2), size(vis, 3))
 
     Ti       = dt.DATE[:, 2] .* 24
     bl_codes = Float64.(dt.BASELINE)
@@ -285,7 +288,7 @@ function load_uvfits(path)
     bl_pairs    = decode_baseline.(unique_bls)
 
     return UVData(vis, weights, uvw, Ti, scan_idx, bl_codes, bl_pairs, bl_lookup,
-        unique_bls, scans, antennas, metadata, raw_shape, dim1, fid)
+        unique_bls, scans, antennas, metadata, primary_hdu.cards)
 end
 
 decode_baseline(bl) = (Int(round(bl)) ÷ 256, Int(round(bl)) % 256)
@@ -340,53 +343,122 @@ function _scan_average_arrays(vis, weights, data::UVData)
     return V, W
 end
 
-function restore_uvfits_shape(raw, raw_shape, squeeze_dims)
-    shape = ntuple(i -> i in squeeze_dims ? 1 : raw_shape[i], length(raw_shape))
-    return Float32.(reshape(raw, shape))
-end
-
 function default_output_path(path)
     root, ext = splitext(path)
     return root * "+bandpass" * ext
 end
 
+function _find_date_pzero(cards)
+    for i in 1:20
+        ptype = card_value(cards, "PTYPE$i")
+        ptype === nothing && break
+        rstrip(string(ptype)) == "DATE" && return Float64(something(card_value(cards, "PZERO$i"), 0.0))
+    end
+    return 0.0
+end
+
+function _build_an_hdu(antennas::AntennaTable)
+    nant = length(antennas)
+    data = (
+        ANNAME   = rpad.(antennas.name, 8),
+        STABXYZ  = [collect(Float64.(antennas.station_xyz[i])) for i in 1:nant],
+        NOSTA    = Int32.(1:nant),
+        MNTSTA   = Int32.(antennas.mount_type),
+        STAXOF   = Float32.(antennas.axis_offset),
+        POLTYA   = String.(antennas.feed_a),
+        POLAA    = Float32.(antennas.pola_angle),
+        POLTYB   = String.(antennas.feed_b),
+        POLAB    = Float32.(antennas.polb_angle),
+        DIAMETER = Float32.(antennas.diameter),
+    )
+    cards = [
+        Card("EXTNAME", "AIPS AN"),
+        Card("ARRAYX",  Float64(antennas.array_xyz[1])),
+        Card("ARRAYY",  Float64(antennas.array_xyz[2])),
+        Card("ARRAYZ",  Float64(antennas.array_xyz[3])),
+        Card("ARRNAM",  antennas.array_name),
+        Card("FREQ",    Float64(antennas.ref_freq)),
+        Card("RDATE",   antennas.rdate),
+        Card("GSTIA0",  Float64(antennas.gst_iat0)),
+        Card("DEGPDY",  Float64(antennas.earth_rot_rate)),
+        Card("UT1UTC",  Float64(antennas.ut1utc)),
+        Card("TIMSYS",  antennas.time_sys),
+        Card("FRAME",   antennas.frame),
+        Card("XYZHAND", antennas.xyzhand),
+    ]
+    return HDU(Bintable, data, cards)
+end
+
+function _build_fq_hdu(metadata::ObsMetadata)
+    nchan = length(metadata.channel_freqs)
+    if_freq = metadata.channel_freqs .- metadata.ref_freq
+    data = (
+        FRQSEL                  = Int32[1],
+        var"IF FREQ"            = [Float64.(if_freq)],
+        var"CH WIDTH"           = [Float32.(fill(metadata.ch_width, nchan))],
+        var"TOTAL BANDWIDTH"    = [Float32.(metadata.channel_bwidths)],
+        SIDEBAND                = [Int32.(metadata.sidebands)],
+    )
+    return HDU(Bintable, data, [Card("EXTNAME", "AIPS FQ")])
+end
+
+function _build_nx_hdu(data::UVData)
+    nscan = length(data.scans)
+    time_center   = Float64.([scan.lower + scan.upper for scan in data.scans]) ./ 48.0
+    time_interval = Float32.([scan.upper - scan.lower for scan in data.scans]) ./ 24.0f0
+    start_vis = zeros(Int32, nscan)
+    end_vis   = zeros(Int32, nscan)
+    for s in 1:nscan
+        idxs = findall(==(s), data.scan_idx)
+        isempty(idxs) && continue
+        start_vis[s] = Int32(first(idxs))
+        end_vis[s]   = Int32(last(idxs))
+    end
+    nt_data = (
+        TIME              = time_center,
+        var"TIME INTERVAL"= time_interval,
+        var"SOURCE ID"    = fill(Int32(1), nscan),
+        SUBARRAY          = fill(Int32(1), nscan),
+        var"FREQ ID"      = fill(Int32(1), nscan),
+        var"START VIS"    = start_vis,
+        var"END VIS"      = end_vis,
+    )
+    return HDU(Bintable, nt_data, [Card("EXTNAME", "AIPS NX")])
+end
+
 """
     write_uvfits(output_path, data::UVData)
 
-Write a UVFITS file with the visibilities and weights from `data`, reusing the
-original HDUs stored in `data._hdus` for all metadata.
+Write a UVFITS file from `data`, reconstructing all four HDUs (primary Random
+Groups, AN antenna table, FQ frequency table, NX index table) from the metadata
+stored in the `UVData` struct.
 """
 function write_uvfits(output_path, data::UVData)
-    lazy   = data._hdus[1].data           # LazyStructuredData from original file
-    pcount = lazy.format.param            # number of random-groups parameters (e.g. 7)
-    etype  = lazy.format.type             # Float32 (BITPIX=-32)
-    dlen   = lazy.format.leng             # data elements per group (e.g. 384 = 3×4×32)
-    nint   = size(data.vis, 1)
+    nint  = size(data.vis, 1)
+    npol  = size(data.vis, 2)
+    nchan = size(data.vis, 3)
 
-    # Build corrected raw data in original FITS shape, then flatten per-group
-    raw_corr = zeros(Float32, nint, 3, size(data.vis, 2), size(data.vis, 3))
-    raw_corr[:, 1, :, :] = Float32.(real.(data.vis))
-    raw_corr[:, 2, :, :] = Float32.(imag.(data.vis))
-    raw_corr[:, 3, :, :] = Float32.(data.weights)
-    raw_flat = reshape(
-        restore_uvfits_shape(raw_corr, data.raw_shape, data.squeeze_dims),
-        nint, :)   # [nint, dlen] in FITS column-major order
+    raw_data = zeros(Float32, nint, 3, npol, nchan, 1, 1, 1)
+    raw_data[:, 1, :, :, 1, 1, 1] .= Float32.(real.(data.vis))
+    raw_data[:, 2, :, :, 1, 1, 1] .= Float32.(imag.(data.vis))
+    raw_data[:, 3, :, :, 1, 1, 1] .= Float32.(data.weights)
 
-    # Copy original file byte-for-bit (preserves PCOUNT, PTYPE, parameter data, and
-    # all other HDUs exactly). Then overwrite only the DATA bytes in-place.
-    cp(lazy.filnam, output_path; force=true)
+    pzero_date1 = _find_date_pzero(data.primary_cards)
+    date = hcat(fill(Float32(pzero_date1), nint), Float32.(data.obs_time ./ 24))
 
-    param_bytes    = pcount * sizeof(etype)
-    bytes_per_group = (pcount + dlen) * sizeof(etype)
-    param_buf      = Vector{UInt8}(undef, param_bytes)
+    primary_data = (
+        UU       = Float32.(data.uvw[:, 1]),
+        VV       = Float32.(data.uvw[:, 2]),
+        WW       = Float32.(data.uvw[:, 3]),
+        BASELINE = Float32.(data.bl_codes),
+        DATE     = date,
+        data     = raw_data,
+    )
+    primary_hdu = HDU(Random, primary_data, copy(data.primary_cards))
+    an_hdu = _build_an_hdu(data.antennas)
+    fq_hdu = _build_fq_hdu(data.metadata)
+    nx_hdu = _build_nx_hdu(data)
 
-    open(output_path, "r+") do io
-        seek(io, lazy.begpos)
-        for i in 1:nint
-            read!(io, param_buf)          # advance past parameter bytes (keep them)
-            write(io, hton.(raw_flat[i, :]))
-        end
-    end
-
+    write(output_path, HDU[primary_hdu, an_hdu, fq_hdu, nx_hdu])
     return output_path
 end

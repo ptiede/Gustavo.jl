@@ -3,6 +3,7 @@ using Test
 using LinearAlgebra
 using Statistics
 using Random
+using StructArrays
 
 function synthetic_uvdata()
     vis = ComplexF64[
@@ -19,22 +20,43 @@ function synthetic_uvdata()
     vis = reshape(vis, 2, 4, 4)
     weights = fill(1.0, size(vis))
 
+    UV = Gustavo.UVFITS
+    antennas = UV.AntennaTable(
+        StructArray{UV.Antenna}((
+            name        = ["AA", "AX"],
+            station_xyz = [zeros(3), zeros(3)],
+            mount_type  = [0, 0],
+            axis_offset = [0.0, 0.0],
+            diameter    = [0.0, 0.0],
+            feed_a      = ["R", "R"],
+            feed_b      = ["L", "L"],
+            pola_angle  = [0.0, 0.0],
+            polb_angle  = [0.0, 0.0],
+        )),
+        zeros(3), "TEST", 1.0e9, "2000-01-01",
+        0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT",
+    )
+    metadata = UV.ObsMetadata(
+        "TEST", "TEST", "test", "2000-01-01", 2000.0, "JY",
+        0.0, 0.0, 1.0e9,
+        collect(1.0:4.0), fill(1.0, 4), 1.0, fill(1, 4),
+        [-1, -2, -3, -4], ["11", "22", "12", "21"],
+    )
+
     return Gustavo.Bandpass.UVData(
         vis,
         weights,
+        zeros(2, 3),
         [0.0, 1.0],
         [1, 2],
         [1.0, 1.0],
         [(1, 2)],
         Dict(1.0 => 1),
         [1.0],
-        ["AA", "AX"],
-        [1, 2],
-        [-1, -2, -3, -4],
-        ["11", "22", "12", "21"],
-        collect(1.0:4.0),
-        (2, 4, 4),
-        Int[],
+        StructArray(lower=[0.0, 1.0], upper=[1.0, 2.0]),
+        antennas,
+        metadata,
+        [],
     )
 end
 
@@ -80,22 +102,43 @@ function synthetic_bandpass_avg_uvdata()
     end
     weights = ones(Float64, size(vis))
 
+    UV = Gustavo.UVFITS
+    antennas = UV.AntennaTable(
+        StructArray{UV.Antenna}((
+            name        = ant_names,
+            station_xyz = [zeros(3) for _ in 1:nant],
+            mount_type  = zeros(Int, nant),
+            axis_offset = zeros(nant),
+            diameter    = zeros(nant),
+            feed_a      = fill("R", nant),
+            feed_b      = fill("L", nant),
+            pola_angle  = zeros(nant),
+            polb_angle  = zeros(nant),
+        )),
+        zeros(3), "TEST", 1.0e9, "2000-01-01",
+        0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT",
+    )
+    metadata = UV.ObsMetadata(
+        "TEST", "TEST", "test", "2000-01-01", 2000.0, "JY",
+        0.0, 0.0, 1.0e9,
+        collect(1.0:nchan), fill(1.0, nchan), 1.0, fill(1, nchan),
+        pol_codes, pol_labels,
+    )
+
     return BP.UVData(
         vis,
         weights,
+        zeros(nscan, 3),
         collect(0.0:(nscan - 1)),
         collect(1:nscan),
         collect(1.0:length(bl_pairs)),
         bl_pairs,
         Dict(Float64(i) => i for i in 1:length(bl_pairs)),
         collect(1.0:length(bl_pairs)),
-        ant_names,
-        [(; lower = Float64(i - 1), upper = Float64(i)) for i in 1:nscan],
-        pol_codes,
-        pol_labels,
-        collect(1.0:nchan),
-        size(vis),
-        Int[],
+        StructArray(lower=Float64.(0:(nscan - 1)), upper=Float64.(1:nscan)),
+        antennas,
+        metadata,
+        [],
     )
 end
 
@@ -538,7 +581,7 @@ end
     BP = Gustavo.Bandpass
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
-    station_models = [BP.StationBandpassModel() for _ in data.ant_names]
+    station_models = [BP.StationBandpassModel() for _ in data.antennas]
 
     setup = BP.prepare_bandpass_solver(
         data,
@@ -572,8 +615,8 @@ end
 
     stats = BP.bandpass_fit_stats(setup, state)
     merged_source = BP.allocate_source_coherencies(data.vis)
-    BP.solve_source_coherencies!(merged_source, state.gains, data.vis, data.weights, data.bl_pairs, data.pol_codes)
-    expected_chi2 = BP.joint_bandpass_objective(state.gains, merged_source, data.vis, data.weights, data.bl_pairs, data.pol_codes)
+    BP.solve_source_coherencies!(merged_source, state.gains, data.vis, data.weights, data.bl_pairs, data.metadata.pol_codes)
+    expected_chi2 = BP.joint_bandpass_objective(state.gains, merged_source, data.vis, data.weights, data.bl_pairs, data.metadata.pol_codes)
     @test stats.chi2 ≈ expected_chi2
     @test stats.nvis > 0
     @test stats.nreal == 2 * stats.nvis
@@ -648,7 +691,7 @@ end
     BP = Gustavo.Bandpass
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
-    station_models = [BP.StationBandpassModel() for _ in data.ant_names]
+    station_models = [BP.StationBandpassModel() for _ in data.antennas]
 
     setup = BP.prepare_bandpass_solver(
         data,
@@ -682,7 +725,7 @@ end
     BP = Gustavo.Bandpass
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
-    station_models = [BP.StationBandpassModel() for _ in data.ant_names]
+    station_models = [BP.StationBandpassModel() for _ in data.antennas]
 
     setup = BP.prepare_bandpass_solver(
         data,
@@ -707,8 +750,8 @@ end
     )
     random_state = BP.initialize_bandpass_state(setup, random_initializer)
 
-    @test size(random_state.gains_template) == (length(data.ant_names), 2, length(data.channel_freqs))
-    @test size(random_state.scan_gains) == (length(data.sc), length(data.ant_names), 2, length(data.channel_freqs))
+    @test size(random_state.gains_template) == (length(data.antennas), 2, length(data.metadata.channel_freqs))
+    @test size(random_state.scan_gains) == (length(data.scans), length(data.antennas), 2, length(data.metadata.channel_freqs))
     @test all(random_state.scan_solved)
     @test isfinite(BP.bandpass_state_objective(random_state))
     @test norm(random_state.gains_template .- state_ratio.gains_template) > 0

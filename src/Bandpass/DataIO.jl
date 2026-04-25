@@ -1,30 +1,30 @@
 function wrap_baseline_array(A, data::UVData, bl::Tuple{String,String}; kind::Symbol, obs_inds=nothing)
-    centered_freqs = centered_channel_freqs(data)
+    freqs = data.metadata.channel_freqs
     metadata = Dict(
         :baseline => join(bl, "-"),
-        :Sites => collect(bl),
+        :Sites => bl,
         :kind => kind,
-        :pol_codes => collect(data.metadata.pol_codes),
-        :pol_labels => collect(data.metadata.pol_labels),
-        :channel_freqs => collect(data.metadata.channel_freqs),
+        :pol_codes => data.metadata.pol_codes,
+        :pol_labels => data.metadata.pol_labels,
+        :channel_freqs => data.metadata.channel_freqs,
         :band_center_frequency => band_center_frequency(data),
     )
 
     if ndims(A) == 2
         error("wrap_baseline_array expects rank-3 baseline slices")
     elseif ndims(A) == 3 && !isnothing(obs_inds)
-        metadata[:obs_indices] = collect(obs_inds)
+        metadata[:obs_indices] = obs_inds
         metadata[:scan_indices] = data.scan_idx[obs_inds]
         return DimArray(A, (
             Ti(data.obs_time[obs_inds]),
-            Dim{:Pol}(collect(data.metadata.pol_labels[1:size(A, 2)])),
-            Dim{:IF}(centered_freqs),
+            Pol(collect(data.metadata.pol_labels[1:size(A, 2)])),
+            IF(freqs),
         ); metadata=metadata)
     elseif ndims(A) == 3
         return DimArray(A, (
-            Dim{:Scan}(scan_time_centers(data)),
-            Dim{:Pol}(collect(data.metadata.pol_labels[1:size(A, 2)])),
-            Dim{:IF}(centered_freqs),
+            Scan(scan_time_centers(data)),
+            Pol(collect(data.metadata.pol_labels[1:size(A, 2)])),
+            IF(freqs),
         ); metadata=metadata)
     elseif ndims(A) == 4
         error("wrap_baseline_array expects a baseline-selected slice, not the full UV cube")
@@ -91,12 +91,11 @@ function wrap_gain_solutions(gains, data::UVData; pol_keys=1:2)
     size(gains, 4) == length(data.metadata.channel_freqs) || error("Gain channel axis does not match UVData channels")
 
     return DimArray(gains, (
-        Dim{:Scan}(scan_time_centers(data)),
-        Dim{:Site}(collect(data.antennas.name)),
-        Dim{:Pol}(collect(pol_keys)),
-        Dim{:IF}(centered_channel_freqs(data)),
+        Scan(scan_time_centers(data)),
+        Ant(data.antennas.name),
+        Pol(collect(pol_keys)),
+        IF(data.metadata.channel_freqs),
     ); metadata=Dict(
-        :channel_freqs => collect(data.metadata.channel_freqs),
         :band_center_frequency => band_center_frequency(data),
     ))
 end
@@ -118,14 +117,14 @@ function wrap_xy_correction(xy_correction, data::UVData, ref_ant; applies_to_pol
         :Sites => [data.antennas.name[ref_ant]],
         :applies_to_pol => applies_to_pol,
         :reference_pol => reference_pol,
-        :channel_freqs => collect(data.metadata.channel_freqs),
+        :channel_freqs => data.metadata.channel_freqs,
         :band_center_frequency => band_center_frequency(data),
     )
 
     return DimArray(
         xy_correction, (
             Scan(scan_time_centers(data)),
-            IF(centered_channel_freqs(data)),
+            IF(data.metadata.channel_freqs),
         ); metadata = metadata
     )
 end

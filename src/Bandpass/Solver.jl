@@ -1254,7 +1254,7 @@ function prepare_bandpass_solver(
     )
     ndims(avg.vis) == 4 || error("prepare_bandpass_solver expects scan-averaged rank-4 visibilities")
 
-    nant = length(avg.ant_names)
+    nant = length(avg.antennas)
     if isnothing(station_models)
         station_models = [StationBandpassModel() for _ in 1:nant]
     else
@@ -1264,10 +1264,6 @@ function prepare_bandpass_solver(
 
     parallel_pols = parallel_hand_indices(avg.metadata.pol_codes)
     c0 = best_ref_channel(avg)
-    gains_template = solve_bandpass_template(V, W, bl_pairs, nant, phase_ref_ant, c0, channel_freqs, station_models, parallel_pols;
-        ant_names=collect(avg.antennas.name),
-        min_baselines=min_baselines)
-    gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
     phase_variable_mask = falses(nant, 2)
     amplitude_variable_mask = falses(nant, 2)
     for ant in 1:nant, feed in 1:2
@@ -1281,10 +1277,10 @@ function prepare_bandpass_solver(
         phase_ref_ant,
         min_baselines,
         avg.bl_pairs,
-        avg.channel_freqs,
+        avg.metadata.channel_freqs,
         station_models,
         parallel_pols,
-        avg.pol_codes,
+        avg.metadata.pol_codes,
         c0,
         phase_variable_mask,
         amplitude_variable_mask,
@@ -1370,7 +1366,7 @@ end
 function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassInitializer)
     data = setup.data
     nscan, _, _, nchan = size(data.vis)
-    nant = length(data.ant_names)
+    nant = length(data.antennas)
 
     gains_template = solve_bandpass_template(
         data.vis,
@@ -1383,7 +1379,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
         setup.station_models,
         setup.pol_codes,
         setup.parallel_pols;
-        ant_names = data.ant_names,
+        ant_names = data.antennas.name,
         min_baselines = setup.min_baselines,
         joint_als_iterations = 0,
     )
@@ -1402,7 +1398,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
             setup.station_models,
             setup.pol_codes,
             setup.parallel_pols;
-            ant_names = data.ant_names,
+            ant_names = data.antennas.name,
             context = string("scan ", s),
             min_baselines = setup.min_baselines,
             joint_als_iterations = 0,
@@ -1417,7 +1413,7 @@ end
 function initialize_bandpass_state(setup::BandpassSolverSetup, initializer::RandomBandpassInitializer)
     data = setup.data
     nscan, _, _, nchan = size(data.vis)
-    nant = length(data.ant_names)
+    nant = length(data.antennas)
     rng = initializer.rng
 
     gains_template = exp.(initializer.amplitude_sigma .* randn(rng, nant, 2, nchan)) .* cis.(initializer.phase_sigma .* randn(rng, nant, 2, nchan))
@@ -1526,8 +1522,8 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, state::BandpassSolv
             )
             isnothing(stats) && continue
             push!(rows, merge((
-                baseline = string(setup.data.ant_names[a], "-", setup.data.ant_names[b]),
-                pol = setup.data.pol_labels[pol],
+                baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
+                pol = setup.data.metadata.pol_labels[pol],
             ), stats))
         end
     elseif by == :scan_baseline
@@ -1539,8 +1535,8 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, state::BandpassSolv
             isnothing(stats) && continue
             push!(rows, merge((
                 scan = s,
-                baseline = string(setup.data.ant_names[a], "-", setup.data.ant_names[b]),
-                pol = setup.data.pol_labels[pol],
+                baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
+                pol = setup.data.metadata.pol_labels[pol],
             ), stats))
         end
     else
@@ -1694,7 +1690,7 @@ function finalize_bandpass_state(
             setup.c0,
             setup.station_models,
             setup.parallel_pols;
-            ant_names = data.ant_names,
+            ant_names = data.antennas.name,
             context = "template"
         )
 
@@ -1707,7 +1703,7 @@ function finalize_bandpass_state(
                 setup.c0,
                 setup.station_models,
                 setup.parallel_pols;
-                ant_names = data.ant_names,
+                ant_names = data.antennas.name,
                 context = string("scan ", s)
             )
         end
