@@ -45,8 +45,8 @@ Return visibilities for a single baseline as a `DimArray`.
 function baseline_visibilities(data::UVData, bl::Tuple{String, String})
     if ndims(data.vis) == 3
         bi = baseline_number(data, bl)
-        bl_code = data.unique_bls[bi]
-        obs_inds = findall(==(bl_code), data.bl_codes)
+        bl_code = data.baselines.unique_codes[bi]
+        obs_inds = findall(==(bl_code), data.baselines.codes)
         return wrap_baseline_array(@view(data.vis[obs_inds, :, :]), data, bl; kind = :vis, obs_inds = obs_inds)
     elseif ndims(data.vis) == 4
         bi = baseline_number(data, bl)
@@ -65,8 +65,8 @@ The dimensional layout matches `baseline_visibilities`.
 function baseline_weights(data::UVData, bl::Tuple{String, String})
     if ndims(data.weights) == 3
         bi = baseline_number(data, bl)
-        bl_code = data.unique_bls[bi]
-        obs_inds = findall(==(bl_code), data.bl_codes)
+        bl_code = data.baselines.unique_codes[bi]
+        obs_inds = findall(==(bl_code), data.baselines.codes)
         return wrap_baseline_array(@view(data.weights[obs_inds, :, :]), data, bl; kind = :weights, obs_inds = obs_inds)
     elseif ndims(data.weights) == 4
         bi = baseline_number(data, bl)

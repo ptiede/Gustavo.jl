@@ -1,11 +1,28 @@
-stokes_feed_pair(code::Integer) = code == -1 ? (1, 1) :
+stokes_feed_pair(code::Integer) =
+    code == -1 ? (1, 1) :
     code == -2 ? (2, 2) :
     code == -3 ? (1, 2) :
     code == -4 ? (2, 1) :
+    code == -5 ? (1, 1) :
+    code == -6 ? (2, 2) :
+    code == -7 ? (1, 2) :
+    code == -8 ? (2, 1) :
     error("Unsupported Stokes code: $code")
 
-feed_pair_label(feeds::Tuple{<:Integer,<:Integer}) = string(feeds[1], feeds[2])
-polarization_label(code::Integer) = feed_pair_label(stokes_feed_pair(code))
+function polarization_label(code::Integer)
+    code == -1 && return "RR"
+    code == -2 && return "LL"
+    code == -3 && return "RL"
+    code == -4 && return "LR"
+    code == -5 && return "XX"
+    code == -6 && return "YY"
+    code == -7 && return "XY"
+    code == -8 && return "YX"
+    error("Unsupported Stokes code: $code")
+end
+
+feed_type(s::String) = uppercase(s) ∈ ("R", "L") ? :circular : :linear
+same_feed_type(a::String, b::String) = feed_type(a) == feed_type(b)
 
 
 using DimensionalData: @dim, TimeDim
@@ -13,6 +30,28 @@ using DimensionalData: @dim, TimeDim
 @dim Pol "Polarization"
 @dim IF "Intermediate Frequency"
 @dim Ant "Antenna"
+
+
+"""
+    BaselineIndex
+
+Encapsulates the AIPS baseline encoding internals so they do not clutter
+the `UVData` field list.  End-users should rely on convenience functions
+(`nbaselines`, `antenna_names`, etc.) rather than accessing these fields
+directly.
+
+- `codes` — per-integration AIPS baseline code (256a + b) as Float64
+- `pairs` — unique `(a_idx, b_idx)` antenna-index pairs, one per unique baseline
+- `lookup` — `Dict(code => index)` for O(1) mapping from code to pair index
+- `unique_codes` — sorted unique baseline codes (one per unique baseline)
+"""
+struct BaselineIndex{TCodes, TPairs, TLookup}
+    codes       ::TCodes   # per-integration AIPS codes
+    pairs       ::TPairs   # unique (a_idx, b_idx) pairs
+    lookup      ::TLookup  # code → index in pairs
+    unique_codes::TCodes   # sorted unique codes
+end
+
 """
     UVData
 
@@ -29,12 +68,10 @@ struct UVData{
     TUvw<:AbstractArray{<:Real},
     TObs<:AbstractVector{<:Real},
     TScan<:AbstractVector{<:Integer},
-    TBlCodes<:AbstractVector{<:Real},
-    TBlPairs<:AbstractVector{<:Tuple{<:Integer,<:Integer}},
-    TLookup<:AbstractDict{<:Real,<:Integer},
-    TUniqueBls<:AbstractVector{<:Real},
+    TBl,
     S,
     TAnt,
+    TCfg,
     TMeta,
     TCards,
 }
@@ -43,20 +80,17 @@ struct UVData{
     uvw          ::TUvw
     obs_time     ::TObs
     scan_idx     ::TScan
-    bl_codes     ::TBlCodes
-    bl_pairs     ::TBlPairs
-    bl_lookup    ::TLookup
-    unique_bls   ::TUniqueBls
+    baselines    ::TBl
     scans        ::S
     antennas     ::TAnt
+    array_config ::TCfg
     metadata     ::TMeta
     primary_cards::TCards
 end
 
 function with_visibilities(data::UVData, vis, weights)
-    return UVData(vis, weights, data.uvw, data.obs_time, data.scan_idx, data.bl_codes,
-        data.bl_pairs, data.bl_lookup, data.unique_bls, data.scans, data.antennas,
-        data.metadata, data.primary_cards)
+    return UVData(vis, weights, data.uvw, data.obs_time, data.scan_idx, data.baselines,
+        data.scans, data.antennas, data.array_config, data.metadata, data.primary_cards)
 end
 
 scan_time_centers(data::UVData) = [(scan.lower + scan.upper) / 2 for scan in data.scans]
@@ -72,7 +106,7 @@ end
 
 function baseline_number(data::UVData, bl::Tuple{String,String})
     a_idx, b_idx = baseline_sites(data, bl)
-    bi = findfirst(==((a_idx, b_idx)), data.bl_pairs)
+    bi = findfirst(==((a_idx, b_idx)), data.baselines.pairs)
     isnothing(bi) && error("Baseline $bl not in data")
     return bi
 end
@@ -143,15 +177,15 @@ function _build_antenna_table(an_hdu)
     station_xyz = [Float64.(xyz_raw[i, :]) for i in eachindex(names)]
 
     antennas = StructArray{Antenna}((
-        name        = collect(names),
+        name        = names,
         station_xyz = station_xyz,
-        mount_type  = collect(Int.(mount_raw)),
-        axis_offset = collect(Float64.(axoff_raw)),
-        diameter    = collect(Float64.(diam_raw)),
-        feed_a      = collect(clean.(poltya_raw)),
-        feed_b      = collect(clean.(poltyb_raw)),
-        pola_angle  = collect(Float64.(polaa_raw)),
-        polb_angle  = collect(Float64.(polab_raw)),
+        mount_type  = Int.(mount_raw),
+        axis_offset = Float64.(axoff_raw),
+        diameter    = Float64.(diam_raw),
+        feed_a      = clean.(poltya_raw),
+        feed_b      = clean.(poltyb_raw),
+        pola_angle  = Float64.(polaa_raw),
+        polb_angle  = Float64.(polab_raw),
     ))
 
     arrayx = something(card_value(cards, "ARRAYX"),  0.0)
@@ -167,11 +201,12 @@ function _build_antenna_table(an_hdu)
     frame   = something(card_value(cards, "FRAME"),   "ITRF")
     xyzhand = something(card_value(cards, "XYZHAND"), "RIGHT")
 
-    return AntennaTable(
+    ant_table = AntennaTable(
         antennas,
         (Float64(arrayx), Float64(arrayy), Float64(arrayz)),
         string(arrnam),
-        Float64(freq),
+    )
+    arr_config = ArrayConfig(
         string(rdate),
         Float64(gstia0),
         Float64(degpdy),
@@ -180,6 +215,7 @@ function _build_antenna_table(an_hdu)
         string(frame),
         string(xyzhand),
     )
+    return ant_table, arr_config
 end
 
 function _build_obs_metadata(primary_hdu, fq_hdu, nvis_pol, nvis_chan)
@@ -269,11 +305,11 @@ function load_uvfits(path)
     vis     = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
     weights = Float64.(raw[:, 3, :, :])
 
-    antennas = _build_antenna_table(an_hdu)
+    antennas, array_config = _build_antenna_table(an_hdu)
     metadata = _build_obs_metadata(primary_hdu, fq_hdu, size(vis, 2), size(vis, 3))
 
     Ti       = dt.DATE[:, 2] .* 24
-    bl_codes = Float64.(dt.BASELINE)
+    bl_codes = round.(Int, dt.BASELINE)
 
     _col(nt, prefix) = getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt))))
     uvw = hcat(Float64.(_col(dt, "UU")), Float64.(_col(dt, "VV")), Float64.(_col(dt, "WW")))
@@ -282,16 +318,17 @@ function load_uvfits(path)
     upper    = (nx.TIME .+ nx.var"TIME INTERVAL" ./ 2) .* 24
     scans    = StructArray(lower=lower, upper=upper)
 
-    scan_idx    = assign_scans(Ti, scans)
-    unique_bls  = sort(unique(bl_codes))
-    bl_lookup   = Dict(bl => i for (i, bl) in enumerate(unique_bls))
-    bl_pairs    = decode_baseline.(unique_bls)
+    scan_idx     = assign_scans(Ti, scans)
+    unique_codes = sort(unique(bl_codes))
+    bl_lookup    = Dict(bl => i for (i, bl) in enumerate(unique_codes))
+    bl_pairs     = decode_baseline.(unique_codes)
+    baselines    = BaselineIndex(bl_codes, bl_pairs, bl_lookup, unique_codes)
 
-    return UVData(vis, weights, uvw, Ti, scan_idx, bl_codes, bl_pairs, bl_lookup,
-        unique_bls, scans, antennas, metadata, primary_hdu.cards)
+    return UVData(vis, weights, uvw, Ti, scan_idx, baselines, scans, antennas, array_config,
+        metadata, primary_hdu.cards)
 end
 
-decode_baseline(bl) = (Int(round(bl)) ÷ 256, Int(round(bl)) % 256)
+decode_baseline(bl::Integer) = (bl ÷ 256, bl % 256)
 
 function assign_scans(Ti, scans)
     idx = zeros(Int, length(Ti))
@@ -317,15 +354,15 @@ end
 function _scan_average_arrays(vis, weights, data::UVData)
     nint, npol, nchan = size(vis)
     nscan = length(data.scans)
-    nbl   = length(data.bl_pairs)
+    nbl   = length(data.baselines.pairs)
 
-    V = zeros(ComplexF64, nscan, nbl, npol, nchan)
-    W = zeros(Float64, nscan, nbl, npol, nchan)
+    V = zeros(eltype(vis), nscan, nbl, npol, nchan)
+    W = zeros(eltype(weights), nscan, nbl, npol, nchan)
 
     for i in 1:nint
         s  = data.scan_idx[i]
         s == 0 && continue
-        bi = get(data.bl_lookup, data.bl_codes[i], 0)
+        bi = get(data.baselines.lookup, data.baselines.codes[i], 0)
         bi == 0 && continue
         for p in 1:npol, c in 1:nchan
             w = weights[i, p, c]
@@ -357,7 +394,7 @@ function _find_date_pzero(cards)
     return 0.0
 end
 
-function _build_an_hdu(antennas::AntennaTable)
+function _build_an_hdu(antennas::AntennaTable, cfg::ArrayConfig, ref_freq::Float64)
     nant = length(antennas)
     data = (
         ANNAME   = rpad.(antennas.name, 8),
@@ -377,14 +414,14 @@ function _build_an_hdu(antennas::AntennaTable)
         Card("ARRAYY",  Float64(antennas.array_xyz[2])),
         Card("ARRAYZ",  Float64(antennas.array_xyz[3])),
         Card("ARRNAM",  antennas.array_name),
-        Card("FREQ",    Float64(antennas.ref_freq)),
-        Card("RDATE",   antennas.rdate),
-        Card("GSTIA0",  Float64(antennas.gst_iat0)),
-        Card("DEGPDY",  Float64(antennas.earth_rot_rate)),
-        Card("UT1UTC",  Float64(antennas.ut1utc)),
-        Card("TIMSYS",  antennas.time_sys),
-        Card("FRAME",   antennas.frame),
-        Card("XYZHAND", antennas.xyzhand),
+        Card("FREQ",    ref_freq),
+        Card("RDATE",   cfg.rdate),
+        Card("GSTIA0",  Float64(cfg.gst_iat0)),
+        Card("DEGPDY",  Float64(cfg.earth_rot_rate)),
+        Card("UT1UTC",  Float64(cfg.ut1utc)),
+        Card("TIMSYS",  cfg.time_sys),
+        Card("FRAME",   cfg.frame),
+        Card("XYZHAND", cfg.xyzhand),
     ]
     return HDU(Bintable, data, cards)
 end
@@ -450,15 +487,35 @@ function write_uvfits(output_path, data::UVData)
         UU       = Float32.(data.uvw[:, 1]),
         VV       = Float32.(data.uvw[:, 2]),
         WW       = Float32.(data.uvw[:, 3]),
-        BASELINE = Float32.(data.bl_codes),
+        BASELINE = Float32.(data.baselines.codes),
         DATE     = date,
         data     = raw_data,
     )
     primary_hdu = HDU(Random, primary_data, copy(data.primary_cards))
-    an_hdu = _build_an_hdu(data.antennas)
+    an_hdu = _build_an_hdu(data.antennas, data.array_config, data.metadata.ref_freq)
     fq_hdu = _build_fq_hdu(data.metadata)
     nx_hdu = _build_nx_hdu(data)
 
     write(output_path, HDU[primary_hdu, an_hdu, fq_hdu, nx_hdu])
     return output_path
+end
+
+antenna_names(data::UVData)   = data.antennas.name
+nbaselines(data::UVData)      = length(data.baselines.pairs)
+nscans(data::UVData)          = length(data.scans)
+nchannels(data::UVData)       = length(data.metadata.channel_freqs)
+npols(data::UVData)           = length(data.metadata.pol_codes)
+nintegrations(data::UVData)   = size(data.vis, 1)
+
+function Base.show(io::IO, data::UVData)
+    names = join(antenna_names(data), ", ")
+    nant  = length(data.antennas)
+    flo   = round(minimum(data.metadata.channel_freqs) / 1e9; digits = 3)
+    fhi   = round(maximum(data.metadata.channel_freqs) / 1e9; digits = 3)
+    pols  = join(data.metadata.pol_labels, ", ")
+    println(io, "UVData")
+    println(io, "  Array: $(data.antennas.array_name) ($nant antennas: $names)")
+    println(io, "  Scans: $(nscans(data))  Integrations: $(nintegrations(data))  Baselines: $(nbaselines(data))")
+    println(io, "  IFs ($(nchannels(data))): $(flo)–$(fhi) GHz")
+    print(io,   "  Polarizations ($(npols(data))): $pols")
 end

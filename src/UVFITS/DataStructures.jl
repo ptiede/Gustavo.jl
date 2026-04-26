@@ -22,23 +22,33 @@ struct Antenna{TName, TXYZ, TMnt, TAxOff, TDiam, TFa, TFb, TPola, TPolb}
 end
 
 """
-    AntennaTable{TAnt,TXyz,TName,TFreq,TRdate,TGst,TDeg,TUt,TSys,TFrame,THand}
+    AntennaTable{TAnt,TXyz,TName}
 
 Array-of-structs antenna table.  `antennas` is a `StructArray{Antenna}`;
-the remaining fields carry array-level metadata from the AIPS AN table header.
+`array_xyz` is the geocentric array center in meters; `array_name` is the
+array identifier string (ARRNAM).  Timing and geodetic parameters that
+accompany the AN table header are stored separately in `ArrayConfig`.
 """
-struct AntennaTable{TAnt, TXyz, TName, TFreq, TRdate, TGst, TDeg, TUt, TSys, TFrame, THand}
-    antennas::TAnt          # StructArray{Antenna}
-    array_xyz::TXyz         # ARRAYX/Y/Z — array center (meters)
-    array_name::TName       # ARRNAM
-    ref_freq::TFreq         # FREQ — reference frequency (Hz)
-    rdate::TRdate           # RDATE — reference date
-    gst_iat0::TGst          # GSTIA0 — GST at 0h on reference date (degrees)
+struct AntennaTable{TAnt, TXyz, TName}
+    antennas  ::TAnt   # StructArray{Antenna}
+    array_xyz ::TXyz   # ARRAYX/Y/Z — array center (meters)
+    array_name::TName  # ARRNAM
+end
+
+"""
+    ArrayConfig{TRdate,TGst,TDeg,TUt,TSys,TFrame,THand}
+
+Timing and geodetic metadata from the AIPS AN table header that are tied to
+the observation epoch rather than the physical antenna array.
+"""
+struct ArrayConfig{TRdate, TGst, TDeg, TUt, TSys, TFrame, THand}
+    rdate         ::TRdate  # RDATE — reference date
+    gst_iat0      ::TGst    # GSTIA0 — GST at 0h on reference date (degrees)
     earth_rot_rate::TDeg    # DEGPDY — Earth rotation rate (degrees/day)
-    ut1utc::TUt             # UT1UTC — UT1 minus UTC (seconds)
-    time_sys::TSys          # TIMSYS — 'IAT' or 'UTC'
-    frame::TFrame           # FRAME — coordinate frame (e.g. 'ITRF')
-    xyzhand::THand          # XYZHAND — 'RIGHT' or 'LEFT'
+    ut1utc        ::TUt     # UT1UTC — UT1 minus UTC (seconds)
+    time_sys      ::TSys    # TIMSYS — 'IAT' or 'UTC'
+    frame         ::TFrame  # FRAME — coordinate frame (e.g. 'ITRF')
+    xyzhand       ::THand   # XYZHAND — 'RIGHT' or 'LEFT'
 end
 
 Base.length(t::AntennaTable) = length(t.antennas)
@@ -73,6 +83,15 @@ struct ObsMetadata{TObj, TTel, TObs, TDate, TEq, TBunit, TRa, TDec, TFreq, TCfre
     channel_bwidths::TBw    # total IF bandwidth per spectral window (Hz)
     ch_width::TCw           # spectral channel separation (Hz)
     sidebands::TSb          # SIDEBAND: +1=upper, -1=lower
-    pol_codes::TPcodes      # Stokes codes (-1=RR,-2=LL,-3=RL,-4=LR)
-    pol_labels::TPlabs      # polarization labels ('11','22','12','21')
+    pol_codes::TPcodes      # Stokes codes (-1=RR,-2=LL,-3=RL,-4=LR,-5=XX,-6=YY,-7=XY,-8=YX)
+    pol_labels::TPlabs      # polarization labels ('RR','LL',…,'XX','YY',…)
+end
+
+function Base.show(io::IO, t::AntennaTable)
+    print(io, "AntennaTable($(t.array_name), $(length(t)) antennas)")
+end
+
+function Base.show(io::IO, m::ObsMetadata)
+    freq_ghz = round(m.ref_freq / 1e9; digits = 3)
+    print(io, "ObsMetadata($(m.object), $(m.telescope), $(m.date_obs), ref=$(freq_ghz) GHz)")
 end

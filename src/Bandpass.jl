@@ -20,7 +20,7 @@ include("Bandpass/Diagnostics.jl")
 
 export UVData, load_uvfits, write_uvfits, decode_baseline, assign_scans, scan_average
 export baseline_visibilities, baseline_weights, wrap_gain_solutions, wrap_xy_correction
-export feed_pair_label, polarization_label, polarization_feeds, parallel_hand_indices, cross_hand_indices
+export polarization_label, polarization_feeds, parallel_hand_indices, cross_hand_indices
 export AbstractBandpassModel
 export PerChannelBandpassModel, FlatBandpassModel, DelayBandpassModel, PolynomialBandpassModel
 export SegmentedBandpassModel, CompositeBandpassModel

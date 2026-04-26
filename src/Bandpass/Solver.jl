@@ -33,13 +33,14 @@ function propagated_log_double_ratio_weight(v_num, w_num, v_den, w_den, v_num_re
     return inv(sqrt(variance))
 end
 
-function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c)
+function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c, baseline_mask = nothing)
     D = ComplexF64[]
     row_weights = Float64[]
     rows = Int[]
 
     if ndims(Vblock) == 3
         for bi in axes(Vblock, 1)
+            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
             v_c = Vblock[bi, pol, c]
             v_c0 = Vblock[bi, pol, c0]
             w_c = Wblock[bi, pol, c]
@@ -52,6 +53,7 @@ function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c)
         end
     elseif ndims(Vblock) == 4
         for s in axes(Vblock, 1), bi in axes(Vblock, 2)
+            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
             v_c = Vblock[s, bi, pol, c]
             v_c0 = Vblock[s, bi, pol, c0]
             w_c = Wblock[s, bi, pol, c]
@@ -69,164 +71,14 @@ function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c)
     return D, row_weights, rows
 end
 
-function collect_parallel_hand_observations(Vblock, Wblock, pol)
-    Vobs = ComplexF64[]
-    row_weights = Float64[]
-    rows = Int[]
-    scans = Int[]
-    channels = Int[]
-
-    if ndims(Vblock) == 3
-        for bi in axes(Vblock, 1), c in axes(Vblock, 3)
-            v = Vblock[bi, pol, c]
-            w = Wblock[bi, pol, c]
-            weight = sqrt(log_visibility_precision(v, w))
-            weight > 0 || continue
-            push!(Vobs, v)
-            push!(row_weights, weight)
-            push!(rows, bi)
-            push!(scans, 1)
-            push!(channels, c)
-        end
-    elseif ndims(Vblock) == 4
-        for s in axes(Vblock, 1), bi in axes(Vblock, 2), c in axes(Vblock, 4)
-            v = Vblock[s, bi, pol, c]
-            w = Wblock[s, bi, pol, c]
-            weight = sqrt(log_visibility_precision(v, w))
-            weight > 0 || continue
-            push!(Vobs, v)
-            push!(row_weights, weight)
-            push!(rows, bi)
-            push!(scans, s)
-            push!(channels, c)
-        end
-    else
-        error("Unsupported visibility block rank: $(ndims(Vblock))")
-    end
-
-    return Vobs, row_weights, rows, scans, channels
-end
-
-function nuisance_source_design(obs_keys)
-    active_keys = sort(unique(obs_keys))
-    key_column = Dict(key => j for (j, key) in enumerate(active_keys))
-    source_design = zeros(Float64, length(obs_keys), length(active_keys))
-    for (i, key) in enumerate(obs_keys)
-        source_design[i, key_column[key]] = 1.0
-    end
-    return source_design, active_keys
-end
-
-function zero_mean_gain_constraints(gain_columns)
-    ants = sort(unique(last.(keys(gain_columns))))
-    isempty(ants) && return zeros(Float64, 0, length(gain_columns))
-
-    constraints = zeros(Float64, length(ants), length(gain_columns))
-    for (row, ant) in enumerate(ants), ((_, a), col) in gain_columns
-        a == ant || continue
-        constraints[row, col] = 1.0
-    end
-    return constraints, ants
-end
-
-function solve_parallel_channel_with_source_nuisance!(
-        gains, solved, Vblock, Wblock, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
-        station_models, parallel_pols; min_baselines = 3
-    )
-    for (pol, feed) in zip(parallel_pols, (1, 2))
-        Vobs, row_weights, rows, scans, channels = collect_parallel_hand_observations(Vblock, Wblock, pol)
-        length(rows) < min_baselines && continue
-
-        active_channels = sort(unique(channels))
-        amp_gain_columns = Dict{Tuple{Int, Int}, Int}()
-        phase_gain_columns = Dict{Tuple{Int, Int}, Int}()
-        channel_active_ants = Dict{Int, Vector{Int}}()
-        amp_column = 0
-        phase_column = 0
-        for channel in active_channels
-            channel_active = Set{Int}()
-            channel_conn = zeros(Int, nant)
-            for (i, row) in enumerate(rows)
-                channels[i] == channel || continue
-                a, b = bl_pairs[row]
-                push!(channel_active, a)
-                push!(channel_active, b)
-                channel_conn[a] += 1
-                channel_conn[b] += 1
-            end
-            active_ants = sort!(collect(channel_active))
-            isempty(active_ants) && continue
-            channel_active_ants[channel] = active_ants
-
-            for ant in active_ants
-                amp_column += 1
-                amp_gain_columns[(channel, ant)] = amp_column
-            end
-
-            local_ref = choose_local_phase_reference(active_ants, gauge, station_models, channel_conn, feed)
-            for ant in active_ants
-                ant == local_ref && continue
-                phase_column += 1
-                phase_gain_columns[(channel, ant)] = phase_column
-            end
-        end
-
-        obs_keys = collect(zip(scans, rows))
-        source_design, _ = nuisance_source_design(obs_keys)
-        namp_gain = length(amp_gain_columns)
-        nphase_gain = length(phase_gain_columns)
-        amp_design = zeros(Float64, length(rows), namp_gain + size(source_design, 2))
-        phase_design = zeros(Float64, length(rows), nphase_gain + size(source_design, 2))
-
-        for i in eachindex(rows)
-            a, b = bl_pairs[rows[i]]
-            channel = channels[i]
-            amp_design[i, amp_gain_columns[(channel, a)]] = 1.0
-            amp_design[i, amp_gain_columns[(channel, b)]] = 1.0
-            haskey(phase_gain_columns, (channel, a)) && (phase_design[i, phase_gain_columns[(channel, a)]] = 1.0)
-            haskey(phase_gain_columns, (channel, b)) && (phase_design[i, phase_gain_columns[(channel, b)]] = -1.0)
-        end
-        amp_design[:, (namp_gain + 1):end] .= source_design
-        phase_design[:, (nphase_gain + 1):end] .= source_design
-
-        gain_constraints, _ = zero_mean_gain_constraints(amp_gain_columns)
-        constraints = zeros(Float64, size(gain_constraints, 1), size(amp_design, 2))
-        constraints[:, 1:namp_gain] .= gain_constraints
-
-        length(rows) >= size(amp_design, 2) || continue
-        amp_solution = weighted_constrained_least_squares(
-            amp_design, log.(abs.(Vobs)), row_weights, constraints, zeros(size(constraints, 1))
-        )
-        length(rows) >= size(phase_design, 2) || continue
-        phase_solution = weighted_least_squares(phase_design, angle.(Vobs), row_weights)
-
-        log_amp = zeros(nant, size(gains, 3))
-        φ = zeros(nant, size(gains, 3))
-        for ((channel, ant), j) in amp_gain_columns
-            log_amp[ant, channel] = amp_solution[j]
-        end
-        for ((channel, ant), j) in phase_gain_columns
-            φ[ant, channel] = phase_solution[j]
-        end
-
-        if !isnothing(solved)
-            for (channel, active_ants) in channel_active_ants, ant in active_ants
-                solved[ant, feed, channel] = true
-            end
-        end
-
-        gains[:, feed, :] = exp.(log_amp) .* cis.(φ)
-    end
-
-    return gains
-end
 
 function solve_parallel_channel!(
         gains, solved, Vblock, Wblock, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
-        station_models, parallel_pols; min_baselines = 3
+        station_models, parallel_pols; min_baselines = 3, parallel_hand_mask = nothing
     )
     for (pol, feed) in zip(parallel_pols, (1, 2))
-        D, row_weights, rows = collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c)
+        bl_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, feed])
+        D, row_weights, rows = collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c, bl_mask)
         length(rows) < min_baselines && continue
 
         active = sort(unique(vcat([[bl_pairs[bi][1], bl_pairs[bi][2]] for bi in rows]...)))
@@ -263,12 +115,13 @@ function solve_parallel_channel!(
     return gains
 end
 
-function antenna_phase_weights(Wblock, bl_pairs, nant, pol)
+function antenna_phase_weights(Wblock, bl_pairs, nant, pol, baseline_mask = nothing)
     nchan = size(Wblock, ndims(Wblock))
     channel_weights = zeros(Float64, nant, nchan)
 
     if ndims(Wblock) == 4
         for s in axes(Wblock, 1), bi in axes(Wblock, 2), c in axes(Wblock, 4)
+            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
             w = Wblock[s, bi, pol, c]
             (w > 0 && isfinite(w)) || continue
             a, b = bl_pairs[bi]
@@ -277,6 +130,7 @@ function antenna_phase_weights(Wblock, bl_pairs, nant, pol)
         end
     elseif ndims(Wblock) == 3
         for bi in axes(Wblock, 1), c in axes(Wblock, 3)
+            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
             w = Wblock[bi, pol, c]
             (w > 0 && isfinite(w)) || continue
             a, b = bl_pairs[bi]
@@ -290,9 +144,11 @@ function antenna_phase_weights(Wblock, bl_pairs, nant, pol)
     return channel_weights
 end
 
-function amplitude_support_weights(Wblock, bl_pairs, nant, parallel_pols)
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1])
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2])
+function amplitude_support_weights(Wblock, bl_pairs, nant, parallel_pols, parallel_hand_mask = nothing)
+    ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
+    par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
+    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
+    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
     support = zeros(Float64, nant, 2, size(reference_weights, 2))
     support[:, 1, :] .= reference_weights
     support[:, 2, :] .= partner_weights
@@ -685,26 +541,6 @@ function refine_joint_bandpass_als!(
     return gains, source
 end
 
-function phase_block_design_matrix(nchan, c0, phase_block_size, valid)
-    phase_block_size <= 1 && return zeros(Float64, nchan, 0)
-
-    nblocks = cld(nchan, phase_block_size)
-    columns = Vector{Vector{Float64}}()
-
-    for block in 1:nblocks
-        lo = (block - 1) * phase_block_size + 1
-        hi = min(block * phase_block_size, nchan)
-        inds = lo:hi
-        any(valid[inds]) || continue
-
-        column = zeros(Float64, nchan)
-        column[inds] .= 1.0
-        push!(columns, column)
-    end
-
-    isempty(columns) && return zeros(Float64, nchan, 0)
-    return hcat(columns...)
-end
 
 frequency_segments(::GlobalFrequencySegmentation, nchan) = [1:nchan]
 
@@ -963,10 +799,12 @@ function warn_sanitized_gain_amplitudes(repaired, ant_names = nothing; context =
     return nothing
 end
 
-function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
     nant = size(gains, 1)
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1])
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2])
+    ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
+    par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
+    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
+    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
 
     for ant in 1:nant
         model = station_models[ant]
@@ -1007,10 +845,12 @@ function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, 
     return gains
 end
 
-function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
+function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
     nant = size(gains, 1)
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1])
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2])
+    ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
+    par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
+    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
+    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
 
     for ant in 1:nant
         model = station_models[ant]
@@ -1052,20 +892,16 @@ function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, stat
 end
 
 function constrain_gain_models!(
-        gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols;
+        gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing;
         ant_names = nothing, context = "",
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
-    constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
-    constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols)
-    repaired = sanitize_gain_amplitudes!(gains, amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols), c0)
+    constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
+    constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
+    support_weights = amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols, parallel_hand_mask)
+    repaired = sanitize_gain_amplitudes!(gains, support_weights, c0)
     warn_sanitized_gain_amplitudes(repaired, ant_names; context = context)
-    apply_bandpass_gauge!(
-        gains,
-        amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols),
-        c0,
-        gauge
-    )
+    apply_bandpass_gauge!(gains, support_weights, c0, gauge)
     return gains
 end
 
@@ -1154,6 +990,7 @@ function solve_bandpass_single_scan(
         Vs, Ws, bl_pairs, nant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
         ant_names = nothing, context = "",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
+        parallel_hand_mask = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
     _, _, nchan = size(Vs)
@@ -1166,7 +1003,7 @@ function solve_bandpass_single_scan(
         c == c0 && continue
         solve_parallel_channel!(
             gains, solved, Vs, Ws, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
-            station_models, parallel_pols; min_baselines = min_baselines
+            station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask
         )
     end
 
@@ -1177,7 +1014,7 @@ function solve_bandpass_single_scan(
     )
 
     constrain_gain_models!(
-        gains, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols;
+        gains, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
         ant_names = ant_names, context = context,
         gauge = gauge
     )
@@ -1188,6 +1025,7 @@ function solve_bandpass_template(
         V, W, bl_pairs, nant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
         ant_names = nothing, context = "template",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
+        parallel_hand_mask = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
     _, _, _, nchan = size(V)
@@ -1199,7 +1037,7 @@ function solve_bandpass_template(
         c == c0 && continue
         solve_parallel_channel!(
             gains, nothing, V, W, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
-            station_models, parallel_pols; min_baselines = min_baselines
+            station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask
         )
     end
 
@@ -1210,7 +1048,7 @@ function solve_bandpass_template(
     )
 
     constrain_gain_models!(
-        gains, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols;
+        gains, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
         ant_names = ant_names, context = context,
         gauge = gauge
     )
@@ -1235,7 +1073,6 @@ struct BandpassSolverSetup{
         B <: AbstractVector{<:Tuple{<:Integer, <:Integer}},
         F <: AbstractVector{<:Real},
         S <: AbstractVector{<:StationBandpassModel},
-        P <: Tuple{Int, Int},
         C <: AbstractVector{<:Integer},
         G <: AbstractBandpassGauge,
 }
@@ -1246,7 +1083,8 @@ struct BandpassSolverSetup{
     bl_pairs::B
     channel_freqs::F
     station_models::S
-    parallel_pols::P
+    parallel_pols::Tuple{Int, Int}
+    parallel_hand_mask::BitMatrix
     pol_codes::C
     c0::Int
     phase_variable_mask::BitMatrix
@@ -1327,6 +1165,7 @@ function prepare_bandpass_solver(
 
     gauge = validate_bandpass_gauge(gauge, nant)
     parallel_pols = parallel_hand_indices(avg.metadata.pol_codes)
+    parallel_hand_mask = build_parallel_hand_mask(avg.antennas, avg.baselines.pairs)
     c0 = best_ref_channel(avg)
     phase_variable_mask = falses(nant, 2)
     amplitude_variable_mask = falses(nant, 2)
@@ -1340,10 +1179,11 @@ function prepare_bandpass_solver(
         ref_ant,
         gauge,
         min_baselines,
-        avg.bl_pairs,
+        avg.baselines.pairs,
         avg.metadata.channel_freqs,
         station_models,
         parallel_pols,
+        parallel_hand_mask,
         avg.metadata.pol_codes,
         c0,
         phase_variable_mask,
@@ -1445,6 +1285,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
         ant_names = data.antennas.name,
         min_baselines = setup.min_baselines,
         joint_als_iterations = 0,
+        parallel_hand_mask = setup.parallel_hand_mask,
         gauge = setup.gauge,
     )
 
@@ -1465,6 +1306,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
             context = string("scan ", s),
             min_baselines = setup.min_baselines,
             joint_als_iterations = 0,
+            parallel_hand_mask = setup.parallel_hand_mask,
             gauge = setup.gauge,
         )
         scan_gains[s, :, :, :] .= gains_scan
@@ -1724,25 +1566,6 @@ function refine_bandpass!(
     return update_state_sources_and_objectives!(setup, state)
 end
 
-function refine_bandpass_state_als!(
-        setup::BandpassSolverSetup,
-        state::BandpassSolverState;
-        iterations = 1,
-        tolerance = 1.0e-6,
-        refine_template = true,
-        refine_scans = true
-    )
-    return refine_bandpass!(
-        setup,
-        state,
-        BandpassALS(
-            iterations = iterations,
-            tolerance = tolerance,
-            refine_template = refine_template,
-            refine_scans = refine_scans,
-        )
-    )
-end
 
 function finalize_bandpass_state(
         setup::BandpassSolverSetup,
@@ -1767,7 +1590,8 @@ function finalize_bandpass_state(
             setup.channel_freqs,
             setup.c0,
             setup.station_models,
-            setup.parallel_pols;
+            setup.parallel_pols,
+            setup.parallel_hand_mask;
             ant_names = data.antennas.name,
             context = "template",
             gauge = setup.gauge
@@ -1781,7 +1605,8 @@ function finalize_bandpass_state(
                 setup.channel_freqs,
                 setup.c0,
                 setup.station_models,
-                setup.parallel_pols;
+                setup.parallel_pols,
+                setup.parallel_hand_mask;
                 ant_names = data.antennas.name,
                 context = string("scan ", s),
                 gauge = setup.gauge
@@ -1812,7 +1637,7 @@ function finalize_bandpass_state(
 
     apply_bandpass_gauge!(
         merged_gains,
-        amplitude_support_weights(data.weights, setup.bl_pairs, nant, setup.parallel_pols),
+        amplitude_support_weights(data.weights, setup.bl_pairs, nant, setup.parallel_pols, setup.parallel_hand_mask),
         setup.c0,
         setup.gauge
     )

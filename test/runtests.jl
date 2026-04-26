@@ -33,14 +33,14 @@ function synthetic_uvdata()
             pola_angle  = [0.0, 0.0],
             polb_angle  = [0.0, 0.0],
         )),
-        zeros(3), "TEST", 1.0e9, "2000-01-01",
-        0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT",
+        zeros(3), "TEST",
     )
+    array_config = UV.ArrayConfig("2000-01-01", 0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT")
     metadata = UV.ObsMetadata(
         "TEST", "TEST", "test", "2000-01-01", 2000.0, "JY",
         0.0, 0.0, 1.0e9,
         collect(1.0:4.0), fill(1.0, 4), 1.0, fill(1, 4),
-        [-1, -2, -3, -4], ["11", "22", "12", "21"],
+        [-1, -2, -3, -4], ["RR", "LL", "RL", "LR"],
     )
 
     return Gustavo.Bandpass.UVData(
@@ -49,12 +49,10 @@ function synthetic_uvdata()
         zeros(2, 3),
         [0.0, 1.0],
         [1, 2],
-        [1.0, 1.0],
-        [(1, 2)],
-        Dict(1.0 => 1),
-        [1.0],
+        UV.BaselineIndex([1, 1], [(1, 2)], Dict(1 => 1), [1]),
         StructArray(lower=[0.0, 1.0], upper=[1.0, 2.0]),
         antennas,
+        array_config,
         metadata,
         [],
     )
@@ -66,7 +64,7 @@ function synthetic_bandpass_avg_uvdata()
     bl_pairs = [(1, 2), (1, 3), (2, 3)]
     ant_names = ["AA", "AX", "NN"]
     pol_codes = [-1, -2, -3, -4]
-    pol_labels = ["11", "22", "12", "21"]
+    pol_labels = ["RR", "LL", "RL", "LR"]
     nscan = 2
     nchan = 6
 
@@ -115,9 +113,9 @@ function synthetic_bandpass_avg_uvdata()
             pola_angle  = zeros(nant),
             polb_angle  = zeros(nant),
         )),
-        zeros(3), "TEST", 1.0e9, "2000-01-01",
-        0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT",
+        zeros(3), "TEST",
     )
+    array_config = UV.ArrayConfig("2000-01-01", 0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT")
     metadata = UV.ObsMetadata(
         "TEST", "TEST", "test", "2000-01-01", 2000.0, "JY",
         0.0, 0.0, 1.0e9,
@@ -131,12 +129,15 @@ function synthetic_bandpass_avg_uvdata()
         zeros(nscan, 3),
         collect(0.0:(nscan - 1)),
         collect(1:nscan),
-        collect(1.0:length(bl_pairs)),
-        bl_pairs,
-        Dict(Float64(i) => i for i in 1:length(bl_pairs)),
-        collect(1.0:length(bl_pairs)),
+        UV.BaselineIndex(
+            collect(1:length(bl_pairs)),
+            bl_pairs,
+            Dict(i => i for i in 1:length(bl_pairs)),
+            collect(1:length(bl_pairs)),
+        ),
         StructArray(lower=Float64.(0:(nscan - 1)), upper=Float64.(1:nscan)),
         antennas,
+        array_config,
         metadata,
         [],
     )
@@ -268,22 +269,22 @@ end
 
     pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = :parallel)
     @test pol_idx == [1, 2]
-    @test pol_labels == ["11", "22"]
+    @test pol_labels == ["RR", "LL"]
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = ["22", "12"])
+    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = ["LL", "RL"])
     @test pol_idx == [2, 3]
-    @test pol_labels == ["22", "12"]
+    @test pol_labels == ["LL", "RL"]
 
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
+    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "RR"))
     @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
     @test !isnothing(BP.plot_gain_solutions(gains, data))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
     fig_embed = Gustavo.Bandpass.Figure(size = (1400, 500))
-    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
+    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "RR"))
     @test !isnothing(BP.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 
-    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11")
+    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "RR")
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig)
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig_embed)
 end
@@ -653,8 +654,8 @@ end
 
     stats = BP.bandpass_fit_stats(setup, state)
     merged_source = BP.allocate_source_coherencies(data.vis)
-    BP.solve_source_coherencies!(merged_source, state.gains, data.vis, data.weights, data.bl_pairs, data.metadata.pol_codes)
-    expected_chi2 = BP.joint_bandpass_objective(state.gains, merged_source, data.vis, data.weights, data.bl_pairs, data.metadata.pol_codes)
+    BP.solve_source_coherencies!(merged_source, state.gains, data.vis, data.weights, data.baselines.pairs, data.metadata.pol_codes)
+    expected_chi2 = BP.joint_bandpass_objective(state.gains, merged_source, data.vis, data.weights, data.baselines.pairs, data.metadata.pol_codes)
     @test stats.chi2 ≈ expected_chi2
     @test stats.nvis > 0
     @test stats.nreal == 2 * stats.nvis
@@ -760,14 +761,14 @@ end
     @test final_fit_stats.dof === missing
     @test final_fit_stats.reduced_chi2 === missing
 
-    bi = findfirst(==((1, 2)), data.bl_pairs)
+    bi = findfirst(==((1, 2)), data.baselines.pairs)
     observed, gain_model, normalized_residual, weights = BP.baseline_bandpass_diagnostics(setup, result.gains, bi, 1)
     source = BP.fit_bandpass_source_coherencies(setup, result.gains)
     for s in axes(data.vis, 1), c in axes(data.vis, 4)
         w = data.weights[s, bi, 1, c]
         v = data.vis[s, bi, 1, c]
         if w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))
-            a, b = data.bl_pairs[bi]
+            a, b = data.baselines.pairs[bi]
             m = result.gains[s, a, 1, c] * source[s, bi, 1, 1] * conj(result.gains[s, b, 1, c])
             @test normalized_residual[s, c] ≈ sqrt(w) * (v - m)
         end

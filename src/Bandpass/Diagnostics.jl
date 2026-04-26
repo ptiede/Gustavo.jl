@@ -45,15 +45,7 @@ function plot_stability(
         data::UVData, corr::UVData, bl_plot;
         quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input
     )
-    a_idx = findfirst(==(bl_plot[1]), data.antennas.name)
-    b_idx = findfirst(==(bl_plot[2]), data.antennas.name)
-    (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl_plot")
-
-    bl_idx = findfirst(p -> p == (a_idx, b_idx), data.bl_pairs)
-    isnothing(bl_idx) && error("Baseline $bl_plot not in data")
-    target_code = data.unique_bls[bl_idx]
-    int_inds = findall(c -> c == target_code, data.bl_codes)
-
+    int_inds = _baseline_integration_indices(data, bl_plot)
     nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
@@ -92,7 +84,7 @@ function plot_stability(
         annotate_metric!(ax_a, vis_after, w_after, scan_groups)
 
         for s in 1:nscan
-            ii = int_inds[findall(i -> data.scan_idx[int_inds[i]] == s, eachindex(int_inds))]
+            ii = int_inds[findall(==(s), @view data.scan_idx[int_inds])]
             isempty(ii) && continue
             kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 9)
             before_phase = scatter_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups = nothing)
@@ -530,8 +522,8 @@ function coherence_loss_table(
     isnothing(pol_labels) && (pol_labels = avg.metadata.pol_labels[pol_idx])
     rows = NamedTuple[]
 
-    for bi in eachindex(avg.bl_pairs)
-        a, b = avg.bl_pairs[bi]
+    for bi in eachindex(avg.baselines.pairs)
+        a, b = avg.baselines.pairs[bi]
         baseline = string(avg.antennas.name[a], "-", avg.antennas.name[b])
 
         for (pi, lab) in zip(pol_idx, pol_labels)
@@ -646,7 +638,7 @@ function baseline_in_data(data::UVData, bl_plot)
     a_idx = findfirst(==(bl_plot[1]), data.antennas.name)
     b_idx = findfirst(==(bl_plot[2]), data.antennas.name)
     (isnothing(a_idx) || isnothing(b_idx)) && return false
-    return any(p -> p == (a_idx, b_idx), data.bl_pairs)
+    return any(p -> p == (a_idx, b_idx), data.baselines.pairs)
 end
 
 function choose_diagnostic_baseline(
@@ -662,7 +654,7 @@ function choose_diagnostic_baseline(
     best_score = -Inf
     best_bl = nothing
 
-    for (bi, (a, b)) in enumerate(avg.bl_pairs)
+    for (bi, (a, b)) in enumerate(avg.baselines.pairs)
         score = sum(@view W[:, bi, pols, :])
         if score > best_score
             best_score = score
@@ -689,15 +681,7 @@ function plot_baseline_phases(
         data::UVData, corr::UVData, bl_plot;
         relative = true, comparison_weights = :input
     )
-    a_idx = findfirst(==(bl_plot[1]), data.antennas.name)
-    b_idx = findfirst(==(bl_plot[2]), data.antennas.name)
-    (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl_plot")
-
-    bl_idx = findfirst(p -> p == (a_idx, b_idx), data.bl_pairs)
-    isnothing(bl_idx) && error("Baseline $bl_plot not in data")
-    target_code = data.unique_bls[bl_idx]
-    int_inds = findall(c -> c == target_code, data.bl_codes)
-
+    int_inds = _baseline_integration_indices(data, bl_plot)
     nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_labels = collect(data.metadata.pol_labels)
@@ -730,7 +714,7 @@ function plot_baseline_phases(
         annotate_coherence!(ax_a, residual_phase_coherence(vis_after, w_after; groups = scan_groups))
 
         for s in 1:nscan
-            ii = int_inds[findall(i -> data.scan_idx[int_inds[i]] == s, eachindex(int_inds))]
+            ii = int_inds[findall(==(s), @view data.scan_idx[int_inds])]
             isempty(ii) && continue
             kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
             before_phase = phase_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative = relative)
@@ -1124,9 +1108,14 @@ function baseline_index(data::UVData, bl::Tuple{String,String})
     b_idx = findfirst(==(bl[2]), data.antennas.name)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl")
 
-    bl_idx = findfirst(==((a_idx, b_idx)), data.bl_pairs)
+    bl_idx = findfirst(==((a_idx, b_idx)), data.baselines.pairs)
     isnothing(bl_idx) && error("Baseline $bl not in data")
     return bl_idx
+end
+
+function _baseline_integration_indices(data::UVData, bl_plot)
+    bi = baseline_index(data, bl_plot)
+    return findall(==(data.baselines.unique_codes[bi]), data.baselines.codes)
 end
 
 function parallel_hand_support_summary(avg::UVData, bl::Tuple{String, String})
@@ -1175,7 +1164,7 @@ end
 
 function site_parallel_hand_support(avg::UVData, site::String)
     rows = NamedTuple[]
-    for (bi, (a, b)) in enumerate(avg.bl_pairs)
+    for (bi, (a, b)) in enumerate(avg.baselines.pairs)
         names = (avg.antennas.name[a], avg.antennas.name[b])
         site in names || continue
         summary = parallel_hand_support_summary(avg, names)

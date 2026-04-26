@@ -13,9 +13,9 @@ function apply_bandpass(data::UVData, gains)
     for i in 1:nint
         s  = data.scan_idx[i]
         s == 0 && continue
-        bi = get(data.bl_lookup, data.bl_codes[i], 0)
+        bi = get(data.baselines.lookup, data.baselines.codes[i], 0)
         bi == 0 && continue
-        a, b = data.bl_pairs[bi]
+        a, b = data.baselines.pairs[bi]
 
         for p in 1:min(npol, 4), c in 1:nchan
             data.weights[i, p, c] > 0 || continue

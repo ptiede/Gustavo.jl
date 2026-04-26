@@ -1,15 +1,30 @@
 function parallel_hand_indices(pol_codes)
     rr = findfirst(==(-1), pol_codes)
     ll = findfirst(==(-2), pol_codes)
-    (isnothing(rr) || isnothing(ll)) && error("Parallel-hand 11/22 products not found in pol_codes=$(collect(pol_codes))")
-    return rr, ll
+    !isnothing(rr) && !isnothing(ll) && return rr, ll
+    xx = findfirst(==(-5), pol_codes)
+    yy = findfirst(==(-6), pol_codes)
+    !isnothing(xx) && !isnothing(yy) && return xx, yy
+    error("Parallel-hand products not found in pol_codes=$(collect(pol_codes))")
 end
 
 function cross_hand_indices(pol_codes)
     rl = findfirst(==(-3), pol_codes)
     lr = findfirst(==(-4), pol_codes)
-    (isnothing(rl) || isnothing(lr)) && return nothing
-    return (; rl, lr)
+    !isnothing(rl) && !isnothing(lr) && return (; rl, lr)
+    xy = findfirst(==(-7), pol_codes)
+    yx = findfirst(==(-8), pol_codes)
+    !isnothing(xy) && !isnothing(yx) && return (; xy, yx)
+    return nothing
+end
+
+function build_parallel_hand_mask(antennas, bl_pairs)
+    mask = falses(length(bl_pairs), 2)
+    for (bi, (a, b)) in enumerate(bl_pairs)
+        mask[bi, 1] = same_feed_type(antennas.feed_a[a], antennas.feed_a[b])
+        mask[bi, 2] = same_feed_type(antennas.feed_b[a], antennas.feed_b[b])
+    end
+    return mask
 end
 
 polarization_feeds(data::UVData, pol_index::Integer) = stokes_feed_pair(data.metadata.pol_codes[pol_index])
@@ -125,13 +140,6 @@ function corrected_visibility(V, gains, pol_codes, bi, a, b, pol, s, c)
     return V[s, bi, pol, c] / (gains[s, a, fa, c] * conj(gains[s, b, fb, c]))
 end
 
-feed_node(ant, feed, nant) = (feed - 1) * nant + ant
-
-function decode_feed_node(node, nant)
-    ant = mod1(node, nant)
-    feed = fld(node - 1, nant) + 1
-    return ant, feed
-end
 
 function choose_local_phase_reference(active_ants, gauge, station_models, connectivity, feed)
     if gauge isa ReferenceAntennaBandpassGauge
@@ -155,7 +163,7 @@ function choose_phase_reference(avg::UVData, variable_ants)
     scores = zeros(Float64, nant)
 
     for s in axes(W, 1), bi in axes(W, 2), pol in pols, c in axes(W, 4)
-        a, b = avg.bl_pairs[bi]
+        a, b = avg.baselines.pairs[bi]
         w = W[s, bi, pol, c]
         w > 0 || continue
         blocked[a] || (scores[a] += w)
