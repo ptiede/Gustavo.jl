@@ -1,24 +1,24 @@
 function log_visibility_precision(v, w)
     (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || return 0.0
     amp2 = abs2(v)
-    (amp2 > 0 && isfinite(amp2)) || return 0.0
+    (amp2 > 0 && isfinite(amp2)) || return zero(amp2)
     return w * amp2
 end
 
 function log_visibility_variance(v, w)
     precision = log_visibility_precision(v, w)
-    precision > 0 || return Inf
+    precision > 0 || return convert(typeof(w), Inf)
     return inv(precision)
 end
 
 function propagated_log_ratio_weight(v_num, w_num, v_den, w_den)
     variance = log_visibility_variance(v_num, w_num) + log_visibility_variance(v_den, w_den)
-    isfinite(variance) || return 0.0
-    variance > 0 || return 0.0
+    isfinite(variance) || return zero(variance)
+    variance > 0 || return zero(variance)
 
     # `weighted_least_squares` scales each row directly, so this needs the
     # inverse standard deviation of log(v_num / v_den).
-    return inv(sqrt(variance))
+    return inv(variance)
 end
 
 function propagated_log_double_ratio_weight(v_num, w_num, v_den, w_den, v_num_ref, w_num_ref, v_den_ref, w_den_ref)
@@ -28,14 +28,14 @@ function propagated_log_double_ratio_weight(v_num, w_num, v_den, w_den, v_num_re
         log_visibility_variance(v_num_ref, w_num_ref) +
         log_visibility_variance(v_den_ref, w_den_ref)
     )
-    isfinite(variance) || return 0.0
-    variance > 0 || return 0.0
-    return inv(sqrt(variance))
+    isfinite(variance) || return zero(variance)
+    variance > 0 || return zero(variance)
+    return inv(variance)
 end
 
 function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c, baseline_mask = nothing)
-    D = ComplexF64[]
-    row_weights = Float64[]
+    D = eltype(Vblock)[]
+    row_weights = eltype(Wblock)[]
     rows = Int[]
 
     if ndims(Vblock) == 3
@@ -117,7 +117,7 @@ end
 
 function antenna_phase_weights(Wblock, bl_pairs, nant, pol, baseline_mask = nothing)
     nchan = size(Wblock, ndims(Wblock))
-    channel_weights = zeros(Float64, nant, nchan)
+    channel_weights = zeros(eltype(Wblock), nant, nchan)
 
     if ndims(Wblock) == 4
         for s in axes(Wblock, 1), bi in axes(Wblock, 2), c in axes(Wblock, 4)
@@ -187,7 +187,7 @@ end
 
 function antenna_feed_support_weights(Wblock, bl_pairs, pol_codes, nant)
     nchan = size(Wblock, ndims(Wblock))
-    support = zeros(Float64, nant, 2, nchan)
+    support = zeros(eltype(Wblock), nant, 2, nchan)
 
     if ndims(Wblock) == 4
         for s in axes(Wblock, 1), bi in axes(Wblock, 2), pol in axes(Wblock, 3), c in axes(Wblock, 4)
@@ -226,7 +226,7 @@ function bandpass_track_gauge_factor(track, weights, ref_idx)
 end
 
 function zero_mean_bandpass_gauge_factors(gains, support_weights, ref_idx)
-    gamma = ones(ComplexF64, size(gains, 1), size(gains, 2))
+    gamma = ones(eltype(gains), size(gains, 1), size(gains, 2))
     for ant in axes(gains, 1), feed in axes(gains, 2)
         gamma[ant, feed] = bandpass_track_gauge_factor(@view(gains[ant, feed, :]), vec(support_weights[ant, feed, :]), ref_idx)
     end
@@ -234,7 +234,7 @@ function zero_mean_bandpass_gauge_factors(gains, support_weights, ref_idx)
 end
 
 function reference_antenna_bandpass_gauge_factors(gains, support_weights, ref_idx, ref_ant)
-    gamma = ones(ComplexF64, size(gains, 1), size(gains, 2))
+    gamma = ones(eltype(gains), size(gains, 1), size(gains, 2))
     for feed in axes(gains, 2)
         factor = bandpass_track_gauge_factor(@view(gains[ref_ant, feed, :]), vec(support_weights[ref_ant, feed, :]), ref_idx)
         gamma[:, feed] .= factor
@@ -742,7 +742,7 @@ end
 
 function sanitize_gain_amplitudes!(
         gains, support_weights, c0;
-        collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2, neighbor_window = 2
+        neighbor_window = 2
     )
     amps = abs.(gains)
     repaired = NamedTuple[]
@@ -752,17 +752,20 @@ function sanitize_gain_amplitudes!(
         support_weights[ant, feed, c] > 0 || continue
 
         amp = amps[ant, feed, c]
+        # Only repair genuinely broken values (NaN / Inf / negative / exact zero).
+        # Legitimately small amplitudes (e.g. EHT IF-edge bandpass rolloff) must be
+        # left alone — replacing them with a neighbor median produces a model that
+        # vastly overpredicts visibilities at those channels.
+        (isfinite(amp) && amp > 0) && continue
+
         local_scale = replacement_amplitude_scale(
             view(amps, ant, feed, :), view(support_weights, ant, feed, :), c, c0;
             neighbor_window = neighbor_window
         )
         isnothing(local_scale) && continue
 
-        threshold = max(min_gain_amplitude, collapse_fraction * local_scale)
-        if !(isfinite(amp) && amp >= threshold)
-            gains[ant, feed, c] = local_scale * cis(angle(gains[ant, feed, c]))
-            push!(repaired, (; ant, feed, channel = c, amplitude = amp, replacement = local_scale))
-        end
+        gains[ant, feed, c] = local_scale * cis(angle(gains[ant, feed, c]))
+        push!(repaired, (; ant, feed, channel = c, amplitude = amp, replacement = local_scale))
     end
 
     return repaired

@@ -330,6 +330,8 @@ end
     @test collect(ylims_noise) ≈ [0.4, 1.6]
 
     @test isnothing(BP.finite_series_ylims(([NaN], [Inf, -Inf])))
+    @test isequal(BP.shared_track(([1.0, 2.0, NaN], [1.0, 2.0, NaN])), [1.0, 2.0, NaN])
+    @test isnothing(BP.shared_track(([1.0, 2.0], [1.0, 3.0])))
 end
 
 @testset "Parallel-hand log-ratio weights" begin
@@ -762,7 +764,7 @@ end
     @test final_fit_stats.reduced_chi2 === missing
 
     bi = findfirst(==((1, 2)), data.baselines.pairs)
-    observed, gain_model, normalized_residual, weights = BP.baseline_bandpass_diagnostics(setup, result.gains, bi, 1)
+    observed, observed_weights, gain_model, normalized_residual, weights = BP.baseline_bandpass_diagnostics(setup, result.gains, bi, 1)
     source = BP.fit_bandpass_source_coherencies(setup, result.gains)
     for s in axes(data.vis, 1), c in axes(data.vis, 4)
         w = data.weights[s, bi, 1, c]
@@ -773,7 +775,7 @@ end
             @test normalized_residual[s, c] ≈ sqrt(w) * (v - m)
         end
     end
-    @test size(observed) == size(gain_model) == size(normalized_residual) == size(weights)
+    @test size(observed) == size(observed_weights) == size(gain_model) == size(normalized_residual) == size(weights)
 
     fig_bandpass = BP.plot_baseline_bandpass(setup, result.gains, ("AA", "AX"); pol = :parallel)
     @test !isempty(repr(MIME("image/png"), fig_bandpass))

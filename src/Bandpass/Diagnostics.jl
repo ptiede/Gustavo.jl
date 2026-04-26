@@ -421,6 +421,27 @@ function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; 
     return ax
 end
 
+function shared_track(tracks; atol = 1.0e-12, rtol = 1.0e-9)
+    representative = nothing
+    representative_valid = nothing
+
+    for track in tracks
+        valid = isfinite.(track)
+        any(valid) || continue
+
+        if isnothing(representative)
+            representative = copy(track)
+            representative_valid = valid
+            continue
+        end
+
+        valid == representative_valid || return nothing
+        all(isapprox.(track[valid], representative[valid]; atol = atol, rtol = rtol)) || return nothing
+    end
+
+    return representative
+end
+
 """
     residual_phase_coherence(vis_block, weight_block; groups=nothing)
 
@@ -802,7 +823,10 @@ function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, gains, bi, pi
     nscan = size(data.vis, 1)
     nchan = size(data.vis, 4)
     observed = fill(NaN + NaN * im, nscan, nchan)
+    observed_weights = zeros(Float64, nscan, nchan)
     model = fill(NaN + NaN * im, nscan, nchan)
+    gain_product = fill(NaN + NaN * im, nscan, nchan)
+    source_per_scan = fill(NaN + NaN * im, nscan, nchan)
     normalized_residual = fill(NaN + NaN * im, nscan, nchan)
     weights = Array{Float64}(undef, nscan, nchan)
     source = fit_bandpass_source_coherencies(setup, gains)
@@ -818,15 +842,15 @@ function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, gains, bi, pi
         src = source[s, bi, fa, fb]
         gain_model = gains[s, a, fa, c] * conj(gains[s, b, fb, c])
         full_model = gain_model * src
-        model[s, c] = gain_model
+        observed[s, c] = v
+        observed_weights[s, c] = w
+        model[s, c] = full_model
+        gain_product[s, c] = gain_model
+        source_per_scan[s, c] = src
         normalized_residual[s, c] = sqrt(w) * (v - full_model)
-
-        if isfinite(real(src)) && isfinite(imag(src)) && abs(src) > 0
-            observed[s, c] = v / src
-        end
     end
 
-    return observed, model, normalized_residual, weights
+    return observed, observed_weights, model, normalized_residual, weights, gain_product, source_per_scan
 end
 
 baseline_bandpass_diagnostics(setup::BandpassSolverSetup, state::BandpassSolverState, bi, pi) =
@@ -845,17 +869,26 @@ function residual_stats_annotation(rows, baseline, pol)
 end
 
 """
-    plot_baseline_bandpass(setup, state, bl_plot; pol=:parallel)
+    plot_baseline_bandpass(setup, state, bl_plot; pol=:parallel, normalize_by_source=false)
 
-Diagnostic figure for one baseline showing the source-normalized observed
-baseline bandpass with the fitted model overlaid. The two columns show
-amplitude relative to the reference channel and phase relative to the reference
-channel.
+Diagnostic figure for one baseline.
+
+When `normalize_by_source = false` (default), plots the observed visibility
+`v` per channel with the full fitted model `G_a · S · conj(G_b)` overlaid,
+in absolute amplitude and phase. Markers carry 1σ thermal noise (σ = 1/√w).
+
+When `normalize_by_source = true`, plots `v / S` (the data with the per-scan
+source coherency divided out) against the fitted bandpass `G_a · conj(G_b)`.
+For default station models (no per-scan-varying gains), the bandpass curve
+is identical across scans and is drawn once in black, with the data points
+from every scan overlaid on top — a clean way to see the bandpass shape and
+any cross-scan systematic.
 """
 function plot_baseline_bandpass(
         parent,
         setup::BandpassSolverSetup, gains, bl_plot;
-        pol = :parallel
+        pol = :parallel,
+        normalize_by_source = false,
     )
     data = setup.data
     bi = baseline_index(data, bl_plot)
@@ -865,40 +898,127 @@ function plot_baseline_bandpass(
     baseline_label = join(bl_plot, "-")
 
     for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        ax_amp = Axis(parent[row, 1]; title = "$(baseline_label) $lab bandpass amp/ref", xlabel = "channel", ylabel = "amp / ref")
-        ax_phase = Axis(parent[row, 2]; title = "$(baseline_label) $lab bandpass phase", xlabel = "channel", ylabel = "phase rel. to ref (rad)")
+        amp_title  = normalize_by_source ? "$(baseline_label) $lab |V / S|" : "$(baseline_label) $lab |V|"
+        phase_title = normalize_by_source ? "$(baseline_label) $lab arg(V / S)" : "$(baseline_label) $lab arg(V)"
+        amp_ylabel = normalize_by_source ? "amp / S" : "amplitude"
+        phase_ylabel = normalize_by_source ? "phase - S" : "phase (rad)"
+        ax_amp = Axis(parent[row, 1]; title = amp_title, xlabel = "channel", ylabel = amp_ylabel)
+        ax_phase = Axis(parent[row, 2]; title = phase_title, xlabel = "channel", ylabel = phase_ylabel)
         linkxaxes!(ax_amp, ax_phase)
 
-        observed, model, _, weights = baseline_bandpass_diagnostics(setup, gains, bi, pi)
-        amp_series = Any[[1.0]]
-        phase_series_blocks = Any[]
+        observed, observed_weights, model, _, weights, gain_product, source_per_scan =
+            baseline_bandpass_diagnostics(setup, gains, bi, pi)
+        amp_series = Vector{Float64}[]
+        phase_series_blocks = Vector{Float64}[]
+        amp_noise_blocks = Vector{Float64}[]
+        phase_noise_blocks = Vector{Float64}[]
+        plotted_scans = NamedTuple[]
 
         for s in 1:nscan
             valid_scan = vec(weights[s, :]) .> 0
             any(valid_scan) || continue
 
-            color_kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
-            marker_kw = merge(color_kw, (markersize = 8,))
-            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
+            nchan = size(observed, 2)
+            obs_amp = fill(NaN, nchan)
+            obs_amp_noise = fill(NaN, nchan)
+            obs_phase = fill(NaN, nchan)
+            obs_phase_noise = fill(NaN, nchan)
+            model_amp = fill(NaN, nchan)
+            model_phase = fill(NaN, nchan)
+            for c in 1:nchan
+                v = observed[s, c]
+                w = observed_weights[s, c]
+                m_full = model[s, c]
+                gp = gain_product[s, c]
+                src = source_per_scan[s, c]
+                (isfinite(real(v)) && isfinite(imag(v)) && w > 0 && isfinite(w)) || continue
+                sigma = 1.0 / sqrt(w)
 
-            obs_amp = amplitude_relative_to_ref(abs.(vec(observed[s, :])))
-            model_amp = amplitude_relative_to_ref(abs.(vec(model[s, :])))
-            obs_phase = phase_relative_to_ref(angle.(vec(observed[s, :])))
-            model_phase = phase_relative_to_ref(angle.(vec(model[s, :])))
-
-            scatter!(ax_amp, obs_amp; marker_kw...)
-            lines!(ax_amp, model_amp; line_kw...)
-            scatter!(ax_phase, obs_phase; marker_kw...)
-            lines!(ax_phase, model_phase; line_kw...)
+                if normalize_by_source
+                    (isfinite(real(src)) && isfinite(imag(src)) && abs(src) > 0) || continue
+                    r = v / src
+                    obs_amp[c] = abs(r)
+                    obs_phase[c] = angle(r)
+                    # σ on (v/S) is σ/|S| for both amp and phase.
+                    obs_amp_noise[c] = sigma / abs(src)
+                    obs_phase_noise[c] = sigma / abs(src)
+                    if isfinite(real(gp)) && isfinite(imag(gp))
+                        model_amp[c] = abs(gp)
+                        model_phase[c] = angle(gp)
+                    end
+                else
+                    obs_amp[c] = abs(v)
+                    obs_phase[c] = angle(v)
+                    # σ_|V| ≈ σ for high SNR; σ_phase ≈ σ/|V|.
+                    obs_amp_noise[c] = sigma
+                    obs_phase_noise[c] = abs(v) > 0 ? sigma / abs(v) : NaN
+                    if isfinite(real(m_full)) && isfinite(imag(m_full))
+                        model_amp[c] = abs(m_full)
+                        model_phase[c] = angle(m_full)
+                    end
+                end
+            end
 
             push!(amp_series, obs_amp, model_amp)
             push!(phase_series_blocks, obs_phase, model_phase)
+            push!(amp_noise_blocks, obs_amp_noise)
+            push!(phase_noise_blocks, obs_phase_noise)
+            push!(plotted_scans, (;
+                scan = s,
+                obs_amp,
+                obs_amp_noise,
+                model_amp,
+                obs_phase,
+                obs_phase_noise,
+                model_phase,
+            ))
         end
 
-        amp_lims = finite_series_ylims(amp_series)
-        phase_lims = finite_series_ylims(phase_series_blocks)
-        isnothing(amp_lims) || ylims!(ax_amp, amp_lims...)
+        # Decide whether the bandpass model (G_a · conj(G_b)) is shared across scans.
+        # In the source-normalized view that lets us draw a single black bandpass
+        # curve with all scan markers overlaid on top.
+        shared_amp_track = normalize_by_source ? shared_track(getfield.(plotted_scans, :model_amp)) : nothing
+        shared_phase_track = normalize_by_source ? shared_track(getfield.(plotted_scans, :model_phase)) : nothing
+
+        for entry in plotted_scans
+            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
+            marker_kw = merge(color_kw, (markersize = 8,))
+            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
+
+            scatter!(ax_amp, entry.obs_amp; marker_kw...)
+            plot_noise_segments!(ax_amp, entry.obs_amp, entry.obs_amp_noise, entry.scan, scan_wheel, nscan)
+            scatter!(ax_phase, entry.obs_phase; marker_kw...)
+            plot_noise_segments!(ax_phase, entry.obs_phase, entry.obs_phase_noise, entry.scan, scan_wheel, nscan)
+            isnothing(shared_amp_track)   && lines!(ax_amp, entry.model_amp; line_kw...)
+            isnothing(shared_phase_track) && lines!(ax_phase, entry.model_phase; line_kw...)
+        end
+
+        if !isnothing(shared_amp_track)
+            lines!(ax_amp, shared_amp_track; color = :black, linewidth = 2.4)
+        end
+        if !isnothing(shared_phase_track)
+            lines!(ax_phase, shared_phase_track; color = :black, linewidth = 2.4)
+        end
+
+        amp_lims = finite_series_ylims(amp_series, amp_noise_blocks)
+        phase_lims = finite_series_ylims(phase_series_blocks, phase_noise_blocks)
+        if !isnothing(amp_lims)
+            ylims!(ax_amp, max(0.0, amp_lims[1]), amp_lims[2])
+        else
+            ylims!(ax_amp, low = 0.0)
+        end
         isnothing(phase_lims) || ylims!(ax_phase, phase_lims...)
+
+        # Merged scan-color legend: one entry per role (data vs model).
+        # The model line shows as black when shared across scans and grey when
+        # drawn per-scan in scan colours.
+        model_color = (!isnothing(shared_amp_track) || !isnothing(shared_phase_track)) ? :black : :gray30
+        model_label = normalize_by_source ? "G_a · conj(G_b)" : "G_a · S · conj(G_b)"
+        legend_elements = [
+            MarkerElement(color = :gray30, marker = :circle, markersize = 8),
+            LineElement(color = model_color, linewidth = 2.0),
+        ]
+        axislegend(ax_amp, legend_elements, ["data", model_label]; position = :rt, framevisible = false)
     end
 
     Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
@@ -907,11 +1027,12 @@ end
 
 function plot_baseline_bandpass(
         setup::BandpassSolverSetup, gains, bl_plot;
-        pol = :parallel
+        pol = :parallel,
+        normalize_by_source = false,
     )
     npol = length(resolve_plot_polarizations(setup.data; pol = pol)[1])
     fig = Figure(size = (1100, 280 * npol + 40))
-    plot_baseline_bandpass(fig, setup, gains, bl_plot; pol = pol)
+    plot_baseline_bandpass(fig, setup, gains, bl_plot; pol = pol, normalize_by_source = normalize_by_source)
     return fig
 end
 
@@ -925,11 +1046,12 @@ end
 """
     plot_baseline_bandpass_residuals(setup, state, bl_plot; pol=:parallel)
 
-Diagnostic figure for one baseline showing the fitted baseline bandpass shape
-and residuals for the current solver state. The left panels show the
-source-normalized observed baseline bandpass with the fitted model overlaid. The
-right panels show the thermal-noise-normalized real and imaginary residuals
-driving the chi-square objective, which should sit near `0` when the fit is good.
+Diagnostic figure for one baseline. Left panels show the source-normalized
+observed baseline bandpass `v/S` and `arg(v) − arg(S)` with the fitted
+bandpass `G_a · conj(G_b)` overlaid. Right panels show the thermal-noise-
+normalized real and imaginary residuals `√w · (v − G·S·conj(G))` driving
+the chi-square objective; they should scatter around 0 with unit variance
+when the fit is good.
 """
 function plot_baseline_bandpass_residuals(
         parent,
@@ -945,8 +1067,8 @@ function plot_baseline_bandpass_residuals(
     baseline_label = join(bl_plot, "-")
 
     for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        ax_amp = Axis(parent[row, 1]; title = "$(baseline_label) $lab bandpass amp/ref", xlabel = "channel", ylabel = "amp / ref")
-        ax_phase = Axis(parent[row, 2]; title = "$(baseline_label) $lab bandpass phase", xlabel = "channel", ylabel = "phase rel. to ref (rad)")
+        ax_amp = Axis(parent[row, 1]; title = "$(baseline_label) $lab |V / S|", xlabel = "channel", ylabel = "amp / S")
+        ax_phase = Axis(parent[row, 2]; title = "$(baseline_label) $lab arg(V / S)", xlabel = "channel", ylabel = "phase - S")
         ax_real_res = Axis(parent[row, 3]; title = "$(baseline_label) $lab residual Re", xlabel = "channel", ylabel = "sqrt(w) * Re(v - m)")
         ax_imag_res = Axis(parent[row, 4]; title = "$(baseline_label) $lab residual Im", xlabel = "channel", ylabel = "sqrt(w) * Im(v - m)")
 
@@ -954,11 +1076,15 @@ function plot_baseline_bandpass_residuals(
             linkxaxes!(ax_amp, ax)
         end
 
-        observed, model, normalized_residual, weights = baseline_bandpass_diagnostics(setup, gains, bi, pi)
-        amp_series = Any[[1.0]]
-        phase_series_blocks = Any[]
-        real_res_series = Any[[0.0]]
-        imag_res_series = Any[[0.0]]
+        observed, observed_weights, _model, normalized_residual, weights, gain_product, source_per_scan =
+            baseline_bandpass_diagnostics(setup, gains, bi, pi)
+        amp_series = Vector{Float64}[]
+        phase_series_blocks = Vector{Float64}[]
+        amp_noise_blocks = Vector{Float64}[]
+        phase_noise_blocks = Vector{Float64}[]
+        real_res_series = Vector{Float64}[[0.0]]
+        imag_res_series = Vector{Float64}[[0.0]]
+        plotted_scans = NamedTuple[]
 
         hlines!(ax_real_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
         hlines!(ax_imag_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
@@ -972,38 +1098,99 @@ function plot_baseline_bandpass_residuals(
             valid_scan = vec(weights[s, :]) .> 0
             any(valid_scan) || continue
 
-            color_kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
-            marker_kw = merge(color_kw, (markersize = 8,))
-            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
-
-            obs_amp = amplitude_relative_to_ref(abs.(vec(observed[s, :])))
-            model_amp = amplitude_relative_to_ref(abs.(vec(model[s, :])))
-            obs_phase = phase_relative_to_ref(angle.(vec(observed[s, :])))
-            model_phase = phase_relative_to_ref(angle.(vec(model[s, :])))
+            nchan = size(observed, 2)
+            obs_amp = fill(NaN, nchan)
+            obs_amp_noise = fill(NaN, nchan)
+            obs_phase = fill(NaN, nchan)
+            obs_phase_noise = fill(NaN, nchan)
+            model_amp = fill(NaN, nchan)
+            model_phase = fill(NaN, nchan)
+            for c in 1:nchan
+                v = observed[s, c]
+                w = observed_weights[s, c]
+                gp = gain_product[s, c]
+                src = source_per_scan[s, c]
+                (isfinite(real(v)) && isfinite(imag(v)) && w > 0 && isfinite(w)) || continue
+                (isfinite(real(src)) && isfinite(imag(src)) && abs(src) > 0) || continue
+                sigma = 1.0 / sqrt(w)
+                r = v / src
+                obs_amp[c] = abs(r)
+                obs_phase[c] = angle(r)
+                obs_amp_noise[c] = sigma / abs(src)
+                obs_phase_noise[c] = sigma / abs(src)
+                if isfinite(real(gp)) && isfinite(imag(gp))
+                    model_amp[c] = abs(gp)
+                    model_phase[c] = angle(gp)
+                end
+            end
             res_real = real.(vec(normalized_residual[s, :]))
             res_imag = imag.(vec(normalized_residual[s, :]))
 
-            scatter!(ax_amp, obs_amp; marker_kw...)
-            lines!(ax_amp, model_amp; line_kw...)
-            scatter!(ax_phase, obs_phase; marker_kw...)
-            lines!(ax_phase, model_phase; line_kw...)
-            scatter!(ax_real_res, res_real; marker_kw...)
-            scatter!(ax_imag_res, res_imag; marker_kw...)
-
             push!(amp_series, obs_amp, model_amp)
             push!(phase_series_blocks, obs_phase, model_phase)
+            push!(amp_noise_blocks, obs_amp_noise)
+            push!(phase_noise_blocks, obs_phase_noise)
             push!(real_res_series, res_real)
             push!(imag_res_series, res_imag)
+            push!(plotted_scans, (;
+                scan = s,
+                obs_amp,
+                obs_amp_noise,
+                model_amp,
+                obs_phase,
+                obs_phase_noise,
+                model_phase,
+                res_real,
+                res_imag,
+            ))
         end
 
-        amp_lims = finite_series_ylims(amp_series)
-        phase_lims = finite_series_ylims(phase_series_blocks)
+        shared_model_amp = shared_track(getfield.(plotted_scans, :model_amp))
+        shared_model_phase = shared_track(getfield.(plotted_scans, :model_phase))
+
+        for entry in plotted_scans
+            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
+            marker_kw = merge(color_kw, (markersize = 8,))
+            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
+
+            scatter!(ax_amp, entry.obs_amp; marker_kw...)
+            plot_noise_segments!(ax_amp, entry.obs_amp, entry.obs_amp_noise, entry.scan, scan_wheel, nscan)
+            isnothing(shared_model_amp) && lines!(ax_amp, entry.model_amp; line_kw...)
+            scatter!(ax_phase, entry.obs_phase; marker_kw...)
+            plot_noise_segments!(ax_phase, entry.obs_phase, entry.obs_phase_noise, entry.scan, scan_wheel, nscan)
+            isnothing(shared_model_phase) && lines!(ax_phase, entry.model_phase; line_kw...)
+            scatter!(ax_real_res, entry.res_real; marker_kw...)
+            scatter!(ax_imag_res, entry.res_imag; marker_kw...)
+        end
+
+        if !isnothing(shared_model_amp)
+            lines!(ax_amp, shared_model_amp; color = :black, linewidth = 2.4)
+        end
+        if !isnothing(shared_model_phase)
+            lines!(ax_phase, shared_model_phase; color = :black, linewidth = 2.4)
+        end
+
+        amp_lims = finite_series_ylims(amp_series, amp_noise_blocks)
+        phase_lims = finite_series_ylims(phase_series_blocks, phase_noise_blocks)
         real_res_lims = finite_series_ylims(real_res_series)
         imag_res_lims = finite_series_ylims(imag_res_series)
-        isnothing(amp_lims) || ylims!(ax_amp, amp_lims...)
+        if !isnothing(amp_lims)
+            ylims!(ax_amp, max(0.0, amp_lims[1]), amp_lims[2])
+        else
+            ylims!(ax_amp, low = 0.0)
+        end
         isnothing(phase_lims) || ylims!(ax_phase, phase_lims...)
         isnothing(real_res_lims) || ylims!(ax_real_res, real_res_lims...)
         isnothing(imag_res_lims) || ylims!(ax_imag_res, imag_res_lims...)
+
+        # Merged legend: model line is black when the bandpass shape is shared
+        # across scans (drawn as a single black curve), grey otherwise.
+        model_color = (!isnothing(shared_model_amp) || !isnothing(shared_model_phase)) ? :black : :gray30
+        legend_elements = [
+            MarkerElement(color = :gray30, marker = :circle, markersize = 8),
+            LineElement(color = model_color, linewidth = 2.0),
+        ]
+        axislegend(ax_amp, legend_elements, ["data", "G_a · conj(G_b)"]; position = :rt, framevisible = false)
     end
 
     Colorbar(parent[1:length(pol_idx), 5], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
