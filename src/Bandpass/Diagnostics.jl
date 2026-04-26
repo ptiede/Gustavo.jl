@@ -75,8 +75,8 @@ function plot_stability(
 
         summary_before = summarize(vis_before, w_before; groups = scan_groups)
         summary_after = summarize(vis_after, w_after; groups = scan_groups)
-        lines!(ax_b, summary_before; color = :black, linewidth = 2)
-        lines!(ax_a, summary_after; color = :black, linewidth = 2)
+        lines!(ax_b, summary_before; color = :black, linewidth = 2, linestyle = :dot)
+        lines!(ax_a, summary_after; color = :black, linewidth = 2, linestyle = :dot)
         plotted_series = Any[summary_before, summary_after]
         plotted_noise = Any[]
 
@@ -800,10 +800,20 @@ function plot_gain_solutions(parent, gains, data::UVData; quantity=:phase, pol=:
             linkyaxes!(axes_row[1], ax)
         end
 
-        for s in 1:nscan
-            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
-            for (ax, pi) in zip(axes_row, pol_idx)
-                scatter!(ax, series(vec(gains[s, ai, pi, :])); kw...)
+        # Per-(ant, feed): if every scan produces the same gain track (e.g.
+        # antennas with no per-scan time segmentation), collapse the per-scan
+        # markers into a single black curve. Otherwise plot per-scan markers
+        # coloured by scan as before.
+        for (ax, pi) in zip(axes_row, pol_idx)
+            tracks = [series(vec(gains[s, ai, pi, :])) for s in 1:nscan]
+            shared = shared_track(tracks)
+            if isnothing(shared)
+                for s in 1:nscan
+                    kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
+                    scatter!(ax, tracks[s]; kw...)
+                end
+            else
+                lines!(ax, shared; color = :black, linewidth = 2.0)
             end
         end
     end
