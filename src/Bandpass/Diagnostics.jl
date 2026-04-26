@@ -318,8 +318,18 @@ end
 resolve_single_polarization(data::UVData, pol::Integer) = Int(pol)
 function resolve_single_polarization(data::UVData, pol::AbstractString)
     idx = findfirst(==(pol), data.metadata.pol_labels)
-    isnothing(idx) && error("Polarization $pol not found in $(collect(data.metadata.pol_labels))")
-    return idx
+    isnothing(idx) || return idx
+
+    if pol in ("11", "22")
+        rr, ll = parallel_hand_indices(data.metadata.pol_codes)
+        return pol == "11" ? rr : ll
+    end
+    if pol in ("12", "21")
+        cross = cross_hand_indices(data.metadata.pol_codes)
+        isnothing(cross) && error("Cross-hand pol $pol not found in $(collect(data.metadata.pol_labels))")
+        return pol == "12" ? cross[1] : cross[2]
+    end
+    error("Polarization $pol not found in $(collect(data.metadata.pol_labels))")
 end
 
 function stability_plotting_config(quantity; relative = false)
@@ -1243,11 +1253,11 @@ function resolve_gain_polarizations(data::UVData; pol = :all)
     return pol_idx, ["Pol $pi" for pi in pol_idx]
 end
 
-resolve_single_gain_polarization(data::UVData, pol::Integer) = Int(pol)
-function resolve_single_gain_polarization(data::UVData, pol::AbstractString)
-    pol in ("1", "Pol 1", "11", "RR") && return 1
-    pol in ("2", "Pol 2", "22", "LL") && return 2
-    error("Unsupported gain polarization label: $pol")
+resolve_single_gain_polarization(::UVData, pol::Integer) = Int(pol)
+function resolve_single_gain_polarization(::UVData, pol::AbstractString)
+    pol in ("11", "Pol 1") && return 1
+    pol in ("22", "Pol 2") && return 2
+    error("Unsupported gain polarization label: $pol; use \"11\" (POLA) or \"22\" (POLB)")
 end
 
 function resolve_gain_sites(data::UVData; sites = :all)

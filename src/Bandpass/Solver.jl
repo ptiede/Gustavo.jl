@@ -920,7 +920,7 @@ then projects that track onto the configured relative amplitude and phase basis
 for the reference station before applying it.
 """
 function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models, pol_codes; min_samples = 2)
-    nscan, nbl, npol, nchan = size(V)
+    nscan, nbl, _, nchan = size(V)
     cross_pols = cross_hand_indices(pol_codes)
     isnothing(cross_pols) && return ones(ComplexF64, nscan, nchan)
     rr, ll = parallel_hand_indices(pol_codes)

@@ -61,6 +61,11 @@ Full per-integration UV dataset loaded from a UVFITS file.
 `scans` is a StructArray with `.lower` / `.upper` fields (hours).
 `primary_cards` holds the FITS header cards from the primary HDU for round-trip
 write-back without keeping two copies of the visibility data in memory.
+`extra_columns` is a `NamedTuple` of any per-integration PTYPE columns from the
+primary HDU that are not part of the canonical UVFITS axes
+(UU/VV/WW/BASELINE/DATE) — e.g. `INTTIM`, `FREQSEL`, `SOURCE`. Keys are the
+exact PTYPE strings. They are preserved through `with_visibilities` so that
+`apply_bandpass(...) → write_uvfits(...)` round-trips do not lose them.
 """
 struct UVData{
     V<:AbstractArray{<:Complex},
@@ -74,6 +79,8 @@ struct UVData{
     TCfg,
     TMeta,
     TCards,
+    TDateParam<:AbstractMatrix{<:Real},
+    TExtras<:NamedTuple,
 }
     vis          ::V
     weights      ::W
@@ -86,11 +93,31 @@ struct UVData{
     array_config ::TCfg
     metadata     ::TMeta
     primary_cards::TCards
+    date_param   ::TDateParam   # raw [nint, 2] DATE matrix from PTYPE5/PTYPE6 (col 1 = JD reference, col 2 = fractional day)
+    extra_columns::TExtras
 end
+
+# Backward-compatible constructors. Tests and scripts that pre-date
+# `date_param` / `extra_columns` get sensible defaults: `date_param`
+# reconstructs the (zero, obs_time/24) layout that the writer used to
+# synthesize, and `extra_columns` defaults to empty.
+UVData(vis, weights, uvw, obs_time, scan_idx, baselines, scans, antennas,
+       array_config, metadata, primary_cards) =
+    UVData(vis, weights, uvw, obs_time, scan_idx, baselines, scans, antennas,
+        array_config, metadata, primary_cards, _default_date_param(obs_time), NamedTuple())
+
+UVData(vis, weights, uvw, obs_time, scan_idx, baselines, scans, antennas,
+       array_config, metadata, primary_cards, extra_columns::NamedTuple) =
+    UVData(vis, weights, uvw, obs_time, scan_idx, baselines, scans, antennas,
+        array_config, metadata, primary_cards, _default_date_param(obs_time), extra_columns)
+
+_default_date_param(obs_time) =
+    hcat(zeros(Float32, length(obs_time)), Float32.(obs_time ./ 24))
 
 function with_visibilities(data::UVData, vis, weights)
     return UVData(vis, weights, data.uvw, data.obs_time, data.scan_idx, data.baselines,
-        data.scans, data.antennas, data.array_config, data.metadata, data.primary_cards)
+        data.scans, data.antennas, data.array_config, data.metadata, data.primary_cards,
+        data.date_param, data.extra_columns)
 end
 
 scan_time_centers(data::UVData) = [(scan.lower + scan.upper) / 2 for scan in data.scans]
@@ -314,6 +341,13 @@ function load_uvfits(path)
     _col(nt, prefix) = getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt))))
     uvw = hcat(Float64.(_col(dt, "UU")), Float64.(_col(dt, "VV")), Float64.(_col(dt, "WW")))
 
+    extra_columns = _collect_extra_columns(dt, primary_hdu.cards)
+    # Preserve the raw 2-column DATE matrix verbatim — UVFITS stores the JD
+    # reference in column 1 (sometimes via PZERO, sometimes inline) and the
+    # fractional day in column 2. We must round-trip it exactly to keep the
+    # absolute date intact on write-back.
+    date_param = Matrix(dt.DATE)
+
     lower    = (nx.TIME .- nx.var"TIME INTERVAL" ./ 2) .* 24
     upper    = (nx.TIME .+ nx.var"TIME INTERVAL" ./ 2) .* 24
     scans    = StructArray(lower=lower, upper=upper)
@@ -325,7 +359,24 @@ function load_uvfits(path)
     baselines    = BaselineIndex(bl_codes, bl_pairs, bl_lookup, unique_codes)
 
     return UVData(vis, weights, uvw, Ti, scan_idx, baselines, scans, antennas, array_config,
-        metadata, primary_hdu.cards)
+        metadata, primary_hdu.cards, date_param, extra_columns)
+end
+
+# Capture per-integration PTYPE columns that are not part of the canonical
+# UVFITS axes (UU/VV/WW/BASELINE/DATE). Iterates the parsed primary-HDU
+# NamedTuple directly rather than scanning numbered cards. Returned as a
+# NamedTuple keyed by the exact PTYPE string so write-back can rebuild the
+# layout verbatim.
+function _collect_extra_columns(dt, primary_cards)
+    canonical_prefixes = Set(["UU", "VV", "WW", "BASELINE", "DATE"])
+    pairs = Pair{Symbol,Any}[]
+    for sym in propertynames(dt)
+        sym === :data && continue
+        prefix = uppercase(String(split(String(sym), "-")[1]))
+        prefix in canonical_prefixes && continue
+        push!(pairs, sym => getproperty(dt, sym))
+    end
+    return (; pairs...)
 end
 
 decode_baseline(bl::Integer) = (bl ÷ 256, bl % 256)
@@ -385,13 +436,61 @@ function default_output_path(path)
     return root * "+bandpass" * ext
 end
 
-function _find_date_pzero(cards)
-    for i in 1:20
-        ptype = card_value(cards, "PTYPE$i")
-        ptype === nothing && break
-        rstrip(string(ptype)) == "DATE" && return Float64(something(card_value(cards, "PZERO$i"), 0.0))
+# Iterate `primary_cards` and return PTYPE entries as `(index, name)` pairs in
+# index order. The cards collection is the authoritative source; we don't probe
+# `PTYPE1..PTYPE_N` with a magic ceiling.
+function _ptype_entries(primary_cards)
+    entries = Tuple{Int,String}[]
+    for card in primary_cards
+        m = match(r"^PTYPE(\d+)$", strip(string(card.key)))
+        m === nothing && continue
+        idx = parse(Int, m.captures[1])
+        push!(entries, (idx, rstrip(string(card.value))))
     end
-    return 0.0
+    sort!(entries; by = first)
+    return entries
+end
+
+# Build the random-groups primary-HDU NamedTuple with field names matching the
+# PTYPE cards on disk (e.g. "UU---SIN", "VV---SIN", "DATE"). FITSFiles' Random
+# writer looks up `data[Symbol(PTYPE_name)]`, so the NamedTuple keys must equal
+# the rstripped PTYPE values verbatim. Canonical UVFITS axes are filled from
+# UVData fields; any extra PTYPEs (INTTIM, FREQSEL, SOURCE, …) come from
+# `data.extra_columns`.
+function _build_primary_data(data::UVData, raw_data, date)
+    canonical = Dict{String,Any}(
+        "UU"       => Float32.(data.uvw[:, 1]),
+        "VV"       => Float32.(data.uvw[:, 2]),
+        "WW"       => Float32.(data.uvw[:, 3]),
+        "BASELINE" => Float32.(data.baselines.codes),
+        "DATE"     => date,
+    )
+    pairs = Pair{Symbol,Any}[]
+    seen = Set{String}()
+    for (idx, name) in _ptype_entries(data.primary_cards)
+        name in seen && continue   # duplicate PTYPEs (e.g. two DATE fields) share one key
+        push!(seen, name)
+        prefix = uppercase(String(split(name, "-")[1]))
+        col = if haskey(canonical, prefix)
+                canonical[prefix]
+            elseif haskey(canonical, uppercase(String(name)))
+                canonical[uppercase(String(name))]
+            elseif haskey(data.extra_columns, Symbol(name))
+                getproperty(data.extra_columns, Symbol(name))
+            else
+                error("write_uvfits: PTYPE$idx = \"$name\" has no mapped column " *
+                    "(neither a canonical UVFITS axis nor in data.extra_columns)")
+            end
+        push!(pairs, Symbol(name) => col)
+    end
+    if isempty(pairs)
+        # No PTYPE cards: fall back to canonical UVFITS axis layout.
+        for k in ("UU", "VV", "WW", "BASELINE", "DATE")
+            push!(pairs, Symbol(k) => canonical[k])
+        end
+    end
+    push!(pairs, :data => raw_data)
+    return (; pairs...)
 end
 
 function _build_an_hdu(antennas::AntennaTable, cfg::ArrayConfig, ref_freq::Float64)
@@ -436,7 +535,7 @@ function _build_fq_hdu(metadata::ObsMetadata)
         var"TOTAL BANDWIDTH"    = [Float32.(metadata.channel_bwidths)],
         SIDEBAND                = [Int32.(metadata.sidebands)],
     )
-    return HDU(Bintable, data, [Card("EXTNAME", "AIPS FQ")])
+    return HDU(Bintable, data, Card[Card("EXTNAME", "AIPS FQ")])
 end
 
 function _build_nx_hdu(data::UVData)
@@ -460,7 +559,7 @@ function _build_nx_hdu(data::UVData)
         var"START VIS"    = start_vis,
         var"END VIS"      = end_vis,
     )
-    return HDU(Bintable, nt_data, [Card("EXTNAME", "AIPS NX")])
+    return HDU(Bintable, nt_data, Card[Card("EXTNAME", "AIPS NX")])
 end
 
 """
@@ -480,17 +579,7 @@ function write_uvfits(output_path, data::UVData)
     raw_data[:, 2, :, :, 1, 1, 1] .= Float32.(imag.(data.vis))
     raw_data[:, 3, :, :, 1, 1, 1] .= Float32.(data.weights)
 
-    pzero_date1 = _find_date_pzero(data.primary_cards)
-    date = hcat(fill(Float32(pzero_date1), nint), Float32.(data.obs_time ./ 24))
-
-    primary_data = (
-        UU       = Float32.(data.uvw[:, 1]),
-        VV       = Float32.(data.uvw[:, 2]),
-        WW       = Float32.(data.uvw[:, 3]),
-        BASELINE = Float32.(data.baselines.codes),
-        DATE     = date,
-        data     = raw_data,
-    )
+    primary_data = _build_primary_data(data, raw_data, data.date_param)
     primary_hdu = HDU(Random, primary_data, copy(data.primary_cards))
     an_hdu = _build_an_hdu(data.antennas, data.array_config, data.metadata.ref_freq)
     fq_hdu = _build_fq_hdu(data.metadata)

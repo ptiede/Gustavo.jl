@@ -4,6 +4,7 @@ using LinearAlgebra
 using Statistics
 using Random
 using StructArrays
+using FITSFiles: Card
 
 function synthetic_uvdata()
     vis = ComplexF64[
@@ -54,7 +55,8 @@ function synthetic_uvdata()
         antennas,
         array_config,
         metadata,
-        [],
+        Card[],
+        NamedTuple(),
     )
 end
 
@@ -139,7 +141,8 @@ function synthetic_bandpass_avg_uvdata()
         antennas,
         array_config,
         metadata,
-        [],
+        Card[],
+        NamedTuple(),
     )
 end
 
@@ -275,16 +278,16 @@ end
     @test pol_idx == [2, 3]
     @test pol_labels == ["LL", "RL"]
 
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "RR"))
+    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
     @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
     @test !isnothing(BP.plot_gain_solutions(gains, data))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
     fig_embed = Gustavo.Bandpass.Figure(size = (1400, 500))
-    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "RR"))
+    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
     @test !isnothing(BP.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 
-    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "RR")
+    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11")
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig)
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig_embed)
 end
@@ -845,4 +848,72 @@ end
     @test_logs (:warn, r"repaired collapsed gain amplitudes") BP.warn_sanitized_gain_amplitudes(
         repaired, ["AA"]; context = "scan 1"
     )
+end
+
+@testset "write_uvfits HDU construction" begin
+    UV = Gustavo.UVFITS
+    data = synthetic_uvdata()
+
+    # Regression: _build_fq_hdu and _build_nx_hdu used to construct the cards
+    # vector with a homogeneous element type Vector{Card{Value{String}}}, which
+    # failed FITSFiles.HDU dispatch. Both helpers must accept the cards as
+    # Vector{Card} and succeed without a MethodError.
+    @test UV._build_fq_hdu(data.metadata) isa Any
+    @test UV._build_nx_hdu(data) isa Any
+    @test UV._build_an_hdu(data.antennas, data.array_config, data.metadata.ref_freq) isa Any
+
+    # End-to-end: write_uvfits should run on the synthetic dataset.
+    tmp = tempname() * ".uvfits"
+    try
+        @test UV.write_uvfits(tmp, data) == tmp
+        @test isfile(tmp)
+        @test filesize(tmp) > 0
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
+end
+
+@testset "UVData extra_columns + date_param preservation" begin
+    UV = Gustavo.UVFITS
+    base = synthetic_uvdata()
+    nint = size(base.vis, 1)
+
+    # Simulate primary_cards declaring a non-canonical INTTIM PTYPE alongside
+    # the standard UU/VV/WW/BASELINE/DATE axes, plus matching extra_columns
+    # and a non-trivial date_param (column 1 holds the JD reference inline,
+    # which must round-trip exactly so the absolute date is preserved).
+    inttim_values = Float32.(0.5 .* (1:nint))
+    primary_cards = Card[
+        Card("PTYPE1", "UU---SIN"),
+        Card("PTYPE2", "VV---SIN"),
+        Card("PTYPE3", "WW---SIN"),
+        Card("PTYPE4", "BASELINE"),
+        Card("PTYPE5", "DATE"),
+        Card("PTYPE6", "DATE"),
+        Card("PTYPE7", "INTTIM"),
+        Card("PCOUNT",  7),
+    ]
+    extras = (var"INTTIM" = inttim_values,)
+    date_param = hcat(fill(Float32(2_459_664.5), nint), Float32.(base.obs_time ./ 24))
+    data = UVData(
+        base.vis, base.weights, base.uvw, base.obs_time, base.scan_idx,
+        base.baselines, base.scans, base.antennas, base.array_config,
+        base.metadata, primary_cards, date_param, extras,
+    )
+
+    @test data.date_param === date_param
+    @test data.extra_columns.INTTIM === inttim_values
+
+    raw = zeros(Float32, nint, 3, 2, 4, 1, 1, 1)
+    primary = UV._build_primary_data(data, raw, data.date_param)
+    @test primary[Symbol("DATE")] === date_param
+    @test primary[Symbol("INTTIM")] === inttim_values
+
+    tmp = tempname() * ".uvfits"
+    try
+        @test UV.write_uvfits(tmp, data) == tmp
+        @test filesize(tmp) > 0
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
 end
