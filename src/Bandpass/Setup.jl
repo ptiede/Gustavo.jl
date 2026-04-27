@@ -75,7 +75,20 @@ end
 # themselves.**
 _row_scale(inv_variances) = sqrt.(inv_variances)
 
+# Promote the WLS triple `(A, b, inv_variances)` to a single common element
+# type. The design matrix `A` is built in Float64 by `design_matrices`, but
+# `b` (log-amplitudes / phases) and `inv_variances` (UVFITS weights) come in
+# at Float32 since AIPS Memo 117 stores weights as `1E`. LinearSolve's QR
+# `ldiv!` rejects a Float64 factorization against a Float32 RHS, so we have
+# to align eltypes up front.
+function _promote_lsq(A, b, inv_variances)
+    T = promote_type(eltype(A), eltype(b), real(eltype(inv_variances)))
+    return convert(AbstractMatrix{T}, A), convert(AbstractVector{T}, b),
+        convert(AbstractVector{T}, inv_variances)
+end
+
 function weighted_least_squares(A, b, inv_variances)
+    A, b, inv_variances = _promote_lsq(A, b, inv_variances)
     sw = _row_scale(inv_variances)
     Aw = A .* reshape(sw, :, 1)
     bw = b .* sw
@@ -86,18 +99,20 @@ function weighted_regularized_least_squares(A, b, inv_variances, penalties)
     isempty(penalties) && return weighted_least_squares(A, b, inv_variances)
     all(≤(0), penalties) && return weighted_least_squares(A, b, inv_variances)
 
+    A, b, inv_variances = _promote_lsq(A, b, inv_variances)
     sw = _row_scale(inv_variances)
     Aw = A .* reshape(sw, :, 1)
     bw = b .* sw
     reg = sqrt.(penalties)
     Areg = Matrix(Diagonal(reg))
-    breg = zeros(size(A, 2))
+    breg = zeros(eltype(Aw), size(A, 2))
     return solve(LinearProblem(vcat(Aw, Areg), vcat(bw, breg)), QRFactorization()).u
 end
 
 function weighted_constrained_least_squares(A, b, inv_variances, C, d; constraint_weight = 1.0e6)
     isempty(C) && return weighted_least_squares(A, b, inv_variances)
 
+    A, b, inv_variances = _promote_lsq(A, b, inv_variances)
     sw = _row_scale(inv_variances)
     Aw = A .* reshape(sw, :, 1)
     bw = b .* sw

@@ -4,7 +4,7 @@ using ..UVFITS
 using ..UVFITS: Integration, Pol, IF, UVW, Scan, Baseline, Ant
 using CairoMakie
 using DimensionalData
-using DimensionalData: AbstractDimArray, hasdim, name2dim, At
+using DimensionalData: AbstractDimArray, DimStack, hasdim, name2dim, At
 using StructArrays
 using Statistics
 using LinearAlgebra

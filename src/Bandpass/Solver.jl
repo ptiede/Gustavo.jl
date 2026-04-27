@@ -38,34 +38,21 @@ function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c, baseline_mask = 
     row_weights = eltype(Wblock)[]
     rows = Int[]
 
-    if ndims(Vblock) == 3
-        for bi in axes(Vblock, 1)
-            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
-            v_c = Vblock[bi, pol, c]
-            v_c0 = Vblock[bi, pol, c0]
-            w_c = Wblock[bi, pol, c]
-            w_c0 = Wblock[bi, pol, c0]
+    Vp = view(Vblock; Pol = pol)
+    Wp = view(Wblock; Pol = pol)
+    for bi in axes(Vp, Baseline)
+        (isnothing(baseline_mask) || baseline_mask[bi]) || continue
+        v_c_slice = view(Vp; Baseline = bi, IF = c)
+        v_c0_slice = view(Vp; Baseline = bi, IF = c0)
+        w_c_slice = view(Wp; Baseline = bi, IF = c)
+        w_c0_slice = view(Wp; Baseline = bi, IF = c0)
+        for (v_c, v_c0, w_c, w_c0) in zip(v_c_slice, v_c0_slice, w_c_slice, w_c0_slice)
             row_weight = propagated_log_ratio_weight(v_c, w_c, v_c0, w_c0)
             row_weight > 0 || continue
             push!(D, v_c / v_c0)
             push!(row_weights, row_weight)
             push!(rows, bi)
         end
-    elseif ndims(Vblock) == 4
-        for s in axes(Vblock, 1), bi in axes(Vblock, 2)
-            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
-            v_c = Vblock[s, bi, pol, c]
-            v_c0 = Vblock[s, bi, pol, c0]
-            w_c = Wblock[s, bi, pol, c]
-            w_c0 = Wblock[s, bi, pol, c0]
-            row_weight = propagated_log_ratio_weight(v_c, w_c, v_c0, w_c0)
-            row_weight > 0 || continue
-            push!(D, v_c / v_c0)
-            push!(row_weights, row_weight)
-            push!(rows, bi)
-        end
-    else
-        error("Unsupported visibility block rank: $(ndims(Vblock))")
     end
 
     return D, row_weights, rows
@@ -115,43 +102,57 @@ function solve_parallel_channel!(
     return gains
 end
 
-function antenna_phase_weights(Wblock, bl_pairs, nant, pol, baseline_mask = nothing)
-    nchan = size(Wblock, ndims(Wblock))
-    channel_weights = zeros(eltype(Wblock), nant, nchan)
-
-    if ndims(Wblock) == 4
-        for s in axes(Wblock, 1), bi in axes(Wblock, 2), c in axes(Wblock, 4)
-            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
-            w = Wblock[s, bi, pol, c]
-            (w > 0 && isfinite(w)) || continue
-            a, b = bl_pairs[bi]
-            channel_weights[a, c] += w
-            channel_weights[b, c] += w
+function antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, pol, baseline_mask = nothing)
+    # Inverse variance of the per-antenna phase / log-amplitude *track* at
+    # channel `c`, propagated from per-baseline visibility precisions
+    # `|v|²·w_raw` (`log_visibility_precision`). Earlier versions summed bare
+    # `w_raw`, which only matched the inverse-variance convention that
+    # downstream `weighted_least_squares` expects up to a sqrt — leaving
+    # high-SNR channels (e.g. AA-AX-rich) under-weighted in the polynomial
+    # bandpass fits. See `log_visibility_variance` for the per-baseline
+    # derivation.
+    Vp = view(Vblock; Pol = pol)
+    Wp = view(Wblock; Pol = pol)
+    nchan = size(Vp, IF)
+    T = float(eltype(Wblock))
+    channel_weights = zeros(T, nant, nchan)
+    for bi in axes(Vp, Baseline)
+        (isnothing(baseline_mask) || baseline_mask[bi]) || continue
+        a, b = bl_pairs[bi]
+        for c in 1:nchan
+            for (v, w) in zip(view(Vp; Baseline = bi, IF = c), view(Wp; Baseline = bi, IF = c))
+                prec = log_visibility_precision(v, w)
+                prec > 0 || continue
+                channel_weights[a, c] += prec
+                channel_weights[b, c] += prec
+            end
         end
-    elseif ndims(Wblock) == 3
-        for bi in axes(Wblock, 1), c in axes(Wblock, 3)
-            (isnothing(baseline_mask) || baseline_mask[bi]) || continue
-            w = Wblock[bi, pol, c]
-            (w > 0 && isfinite(w)) || continue
-            a, b = bl_pairs[bi]
-            channel_weights[a, c] += w
-            channel_weights[b, c] += w
-        end
-    else
-        error("Unsupported weight block rank: $(ndims(Wblock))")
     end
-
     return channel_weights
 end
 
 function amplitude_support_weights(Wblock, bl_pairs, nant, parallel_pols, parallel_hand_mask = nothing)
+    # Sanitization-gate weights: a per-antenna×feed×channel coverage tally that
+    # only needs to be monotone in "how much data backs this gain" — uses raw
+    # FITS weights so gauge / collapse-detection thresholds stay calibrated.
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
     par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
-    support = zeros(Float64, nant, 2, size(reference_weights, 2))
-    support[:, 1, :] .= reference_weights
-    support[:, 2, :] .= partner_weights
+    nchan = size(Wblock, IF)
+    support = zeros(Float64, nant, 2, nchan)
+    for (feed_idx, (pol, mask)) in enumerate(((parallel_pols[1], ref_mask), (parallel_pols[2], par_mask)))
+        Wp = view(Wblock; Pol = pol)
+        for bi in axes(Wp, Baseline)
+            (isnothing(mask) || mask[bi]) || continue
+            a, b = bl_pairs[bi]
+            for c in 1:nchan
+                for w in view(Wp; Baseline = bi, IF = c)
+                    (w > 0 && isfinite(w)) || continue
+                    support[a, feed_idx, c] += w
+                    support[b, feed_idx, c] += w
+                end
+            end
+        end
+    end
     return support
 end
 
@@ -880,12 +881,12 @@ function warn_sanitized_gain_amplitudes(repaired, ant_names = nothing; context =
     return nothing
 end
 
-function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
+function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
     nant = size(gains, 1)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
     par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
+    reference_weights = antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
+    partner_weights = antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
 
     for ant in 1:nant
         model = station_models[ant]
@@ -926,12 +927,12 @@ function constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, 
     return gains
 end
 
-function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
+function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
     nant = size(gains, 1)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
     par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
-    reference_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
-    partner_weights = antenna_phase_weights(Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
+    reference_weights = antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
+    partner_weights = antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, parallel_pols[2], par_mask)
 
     for ant in 1:nant
         model = station_models[ant]
@@ -973,12 +974,12 @@ function constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, stat
 end
 
 function constrain_gain_models!(
-        gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing;
+        gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing;
         ant_names = nothing, context = "",
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
-    constrain_gain_amplitudes!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
-    constrain_gain_phases!(gains, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
+    constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
+    constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
     support_weights = amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols, parallel_hand_mask)
     repaired = sanitize_gain_amplitudes!(gains, support_weights, c0)
     warn_sanitized_gain_amplitudes(repaired, ant_names; context = context)
@@ -1097,7 +1098,7 @@ function solve_bandpass_single_scan(
     )
 
     constrain_gain_models!(
-        gains, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
+        gains, Vs, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
         ant_names = ant_names, context = context,
         gauge = gauge
     )
@@ -1131,7 +1132,7 @@ function solve_bandpass_template(
     )
 
     constrain_gain_models!(
-        gains, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
+        gains, V, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
         ant_names = ant_names, context = context,
         gauge = gauge
     )
@@ -1678,6 +1679,7 @@ function finalize_bandpass_state(
     if project_models
         constrain_gain_models!(
             gains_template,
+            data.vis,
             data.weights,
             setup.bl_pairs,
             setup.channel_freqs,
@@ -1693,6 +1695,7 @@ function finalize_bandpass_state(
         for s in 1:nscan
             constrain_gain_models!(
                 view(scan_gains, s, :, :, :),
+                view(data.vis, s, :, :, :),
                 view(data.weights, s, :, :, :),
                 setup.bl_pairs,
                 setup.channel_freqs,

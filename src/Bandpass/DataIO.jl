@@ -54,17 +54,22 @@ dimensions. Selectors are forwarded to whichever fields contain that dim — e.g
 and `Baseline`/`Scan` apply to scan-averaged datasets.
 
 ```julia
-data[Pol = At("RR")]                        # NamedTuple of slices
+data[Pol = At("RR")]                        # DimStack of (vis, weights, uvw)
 data[Baseline = At("AA-AX"), IF = 1:4]      # scan-averaged path
 ```
 
-Returns a `NamedTuple{(:vis, :weights, :uvw)}` of the sliced arrays.
+Returns a `DimStack` whose layers (`vis`, `weights`, `uvw`) share their
+common dims. `uvw` keeps its `(Integration, UVW)` axes alongside the
+`(Integration, Pol, IF)` (or `(Scan, Baseline, Pol, IF)`) layout of `vis`/
+`weights`.
 """
 function Base.getindex(data::UVData; kwargs...)
-    return (
-        vis = _slice_dim(data.vis; kwargs...),
-        weights = _slice_dim(data.weights; kwargs...),
-        uvw = _slice_dim(data.uvw; kwargs...),
+    return DimStack(
+        (
+            vis = _slice_dim(data.vis; kwargs...),
+            weights = _slice_dim(data.weights; kwargs...),
+            uvw = _slice_dim(data.uvw; kwargs...),
+        )
     )
 end
 

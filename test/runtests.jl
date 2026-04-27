@@ -5,7 +5,7 @@ using Statistics
 using Random
 using StructArrays
 using FITSFiles: Card
-using DimensionalData: DimArray
+using DimensionalData: DimArray, dims
 using Gustavo.UVFITS: Integration, Pol, IF, UVW, Scan, Baseline
 
 function synthetic_uvdata()
@@ -414,10 +414,20 @@ end
     weights[2, 1, 1] = 25.0
     weights[2, 1, 2] = 36.0
 
-    ratios, row_weights, rows = BP.collect_parallel_hand_rows(vis, weights, 1, 1, 2)
+    # Wrap as DimArrays (Baseline × Pol × IF) so collect_parallel_hand_rows'
+    # dim-agnostic loop sees named axes — exercising the same code path the
+    # solver hits on real data.
+    bl_dim = Baseline(["A", "B"])
+    pol_dim = Pol(["RR"])
+    if_dim = IF([1.0, 2.0])
+    vis_d = DimArray(vis, (bl_dim, pol_dim, if_dim))
+    weights_d = DimArray(weights, (bl_dim, pol_dim, if_dim))
+
+    ratios, row_weights, rows = BP.collect_parallel_hand_rows(vis_d, weights_d, 1, 1, 2)
     weights_shifted_ref = copy(weights)
     weights_shifted_ref[1, 1, 1] = 1.0e6
-    _, shifted_ref_row_weights, _ = BP.collect_parallel_hand_rows(vis, weights_shifted_ref, 1, 1, 2)
+    weights_shifted_d = DimArray(weights_shifted_ref, (bl_dim, pol_dim, if_dim))
+    _, shifted_ref_row_weights, _ = BP.collect_parallel_hand_rows(vis_d, weights_shifted_d, 1, 1, 2)
 
     expected_variance = inv(16.0 * abs2(4.0 + 0.0im)) + inv(9.0 * abs2(2.0 + 0.0im))
     expected_weight = inv(expected_variance)
@@ -539,12 +549,14 @@ end
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
     station_models = [BP.StationBandpassModel() for _ in 1:nant]
 
-    Vscan = ones(ComplexF64, length(bl_pairs), npol, nchan)
+    Vscan_arr = ones(ComplexF64, length(bl_pairs), npol, nchan)
     source_scan = ComplexF64[1.5 * cis(0.3), 0.6 * cis(-0.4), 1.2 * cis(0.1)]
     for (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
-        Vscan[bi, pol, c] = source_scan[bi] * gains_true[a, c] * conj(gains_true[b, c])
+        Vscan_arr[bi, pol, c] = source_scan[bi] * gains_true[a, c] * conj(gains_true[b, c])
     end
-    Wscan = ones(Float64, size(Vscan))
+    Wscan_arr = ones(Float64, size(Vscan_arr))
+    Vscan = DimArray(Vscan_arr, (Baseline(["AB", "AC", "BC"]), Pol(["RR", "LL"]), IF(Float64.(1:nchan))))
+    Wscan = DimArray(Wscan_arr, dims(Vscan))
     gains_scan = ones(ComplexF64, nant, 2, nchan)
     ref_gauge = BP.ReferenceAntennaBandpassGauge(1)
 
@@ -572,7 +584,7 @@ end
     end
 
     nscan = 2
-    Vtemplate = ones(ComplexF64, nscan, length(bl_pairs), npol, nchan)
+    Vtemplate_arr = ones(ComplexF64, nscan, length(bl_pairs), npol, nchan)
     source_template = reshape(
         ComplexF64[
             1.5 * cis(0.3), 0.6 * cis(-0.4), 1.2 * cis(0.1),
@@ -581,9 +593,11 @@ end
         nscan, length(bl_pairs)
     )
     for s in 1:nscan, (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
-        Vtemplate[s, bi, pol, c] = source_template[s, bi] * gains_true[a, c] * conj(gains_true[b, c])
+        Vtemplate_arr[s, bi, pol, c] = source_template[s, bi] * gains_true[a, c] * conj(gains_true[b, c])
     end
-    Wtemplate = ones(Float64, size(Vtemplate))
+    Wtemplate_arr = ones(Float64, size(Vtemplate_arr))
+    Vtemplate = DimArray(Vtemplate_arr, (Scan(Float64.(1:nscan)), Baseline(["AB", "AC", "BC"]), Pol(["RR", "LL"]), IF(Float64.(1:nchan))))
+    Wtemplate = DimArray(Wtemplate_arr, dims(Vtemplate))
     gains_template = ones(ComplexF64, nant, 2, nchan)
 
     for c in 1:nchan
@@ -636,12 +650,14 @@ end
     source_true[2, :, :] .= ComplexF64[0.7 * cis(-0.1) 0.2 * cis(0.5); 0.15 * cis(-0.2) 1.2 * cis(-0.3)]
     source_true[3, :, :] .= ComplexF64[1.1 * cis(0.4) 0.35 * cis(0.2); 0.18 * cis(-0.5) 0.8 * cis(0.15)]
 
-    V = zeros(ComplexF64, length(bl_pairs), npol, nchan)
+    V_arr = zeros(ComplexF64, length(bl_pairs), npol, nchan)
     for (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
         fa, fb = BP.stokes_feed_pair(pol_codes[pol])
-        V[bi, pol, c] = gains_true[a, fa, c] * source_true[bi, fa, fb] * conj(gains_true[b, fb, c])
+        V_arr[bi, pol, c] = gains_true[a, fa, c] * source_true[bi, fa, fb] * conj(gains_true[b, fb, c])
     end
-    W = ones(Float64, size(V))
+    W_arr = ones(Float64, size(V_arr))
+    V = DimArray(V_arr, (Baseline(["AB", "AC", "BC"]), Pol(["RR", "LL", "RL", "LR"]), IF(Float64.(1:nchan))))
+    W = DimArray(W_arr, dims(V))
 
     gains_init = ones(ComplexF64, nant, 2, nchan)
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
@@ -1030,27 +1046,101 @@ end
     end
 end
 
+@testset "antenna_phase_weights uses |v|² · w" begin
+    # Regression: under the new inverse-variance WLS convention, channel
+    # weights for the polynomial bandpass fits must be the inverse variance
+    # of the *phase track*, i.e. Σ_bl |v|² · w_raw (`log_visibility_precision`),
+    # not bare Σ w_raw. With bare-w, high-SNR channels (AA-AX-rich) get
+    # sqrt-compressed weight relative to the old code and the polynomial
+    # leaves a visible AA-AX phase residual.
+    BP = Gustavo.Bandpass
+    bl_pairs = [(1, 2)]
+    nchan = 2
+    npol = 1
+    # |v|² differs across channels: 4 at c=1, 1 at c=2. w_raw is uniform.
+    V = DimArray(
+        ComplexF64[2.0+0.0im;; 1.0+0.0im;;;],
+        (Baseline(["AB"]), Pol(["RR"]), IF(Float64.(1:nchan)))
+    )
+    @assert size(V) == (1, 1, 2)
+    W = DimArray(fill(1.0, 1, 1, nchan), dims(V))
+
+    cw = BP.antenna_phase_weights(V, W, bl_pairs, 2, 1)
+    # log_visibility_precision = w·|v|² → 4.0 at c=1, 1.0 at c=2 per baseline,
+    # accumulated to both antennas.
+    @test cw[1, 1] ≈ 4.0
+    @test cw[1, 2] ≈ 1.0
+    @test cw[2, 1] ≈ 4.0
+    @test cw[2, 2] ≈ 1.0
+end
+
+@testset "Weighted LSQ accepts mixed-precision RHS" begin
+    # Regression: Memo-117 cleanup made `weights` Float32 while `A` is built in
+    # Float64 by `design_matrices`. LinearSolve's QR `ldiv!` errored on the
+    # Float64 factorization against a Float32 RHS — promote to a shared eltype.
+    BP = Gustavo.Bandpass
+    A = Float64[1.0 0.0; 1.0 1.0; 1.0 2.0; 1.0 3.0]
+    b32 = Float32[1.0, 2.0, 3.1, 3.9]
+    iv32 = Float32[1.0, 1.0, 1.0, 1.0]
+    x = BP.weighted_least_squares(A, b32, iv32)
+    @test eltype(x) == Float64
+    @test x ≈ A \ Float64.(b32) rtol = 1.0e-6
+
+    # Same for the regularized and constrained variants.
+    xr = BP.weighted_regularized_least_squares(A, b32, iv32, [0.0, 0.0])
+    @test xr ≈ A \ Float64.(b32) rtol = 1.0e-6
+    C = Float64[1.0 0.0]
+    d = Float64[0.5]
+    xc = BP.weighted_constrained_least_squares(A, b32, iv32, C, d)
+    @test isfinite(xc[1]) && isfinite(xc[2])
+end
+
+@testset "Bandpass solver works with Float32 weights" begin
+    # Regression: `prepare_bandpass_solver` + `initialize_bandpass_state` was
+    # erroring inside `weighted_least_squares` because `data.weights` is now
+    # Float32 (Memo 117) and the design matrix is Float64. This testset drives
+    # the full template-solve path on the synthetic averaged dataset using a
+    # Float32 weights cube to lock the regression.
+    BP = Gustavo.Bandpass
+    UV = Gustavo.UVFITS
+    avg = synthetic_bandpass_avg_uvdata()
+    # Force Float32 weights (the production path now produces these on load).
+    w32 = Float32.(parent(avg.weights))
+    avg = BP.with_visibilities(avg, parent(avg.vis), DimArray(w32, dims(avg.weights)))
+    @test eltype(avg.weights) == Float32
+
+    setup = BP.prepare_bandpass_solver(
+        avg, 1;
+        station_models = BP.build_station_models(avg.antennas.name, Dict{String, BP.StationBandpassModel}()),
+        min_baselines = 1,
+    )
+    state = BP.initialize_bandpass_state(setup, BP.RatioBandpassInitializer())
+    @test all(isfinite, state.gains)
+end
+
 @testset "UVData DimArray slicing" begin
+    using DimensionalData
     using DimensionalData: At
     raw = synthetic_uvdata()
     avg = synthetic_bandpass_avg_uvdata()
 
     # Per-integration cube has Integration × Pol × IF; uvw has Integration × UVW.
     sel = raw[Pol = At("RR")]
-    @test ndims(sel.vis) == 2
-    @test ndims(sel.weights) == 2
+    @test sel isa DimensionalData.DimStack
+    @test ndims(sel[:vis]) == 2
+    @test ndims(sel[:weights]) == 2
     # Pol dim doesn't exist on uvw → unchanged.
-    @test sel.uvw === raw.uvw
+    @test parent(sel[:uvw]) == parent(raw.uvw)
 
     # Integration applies to all three.
     sel2 = raw[Integration = 1]
-    @test ndims(sel2.vis) == 2
-    @test ndims(sel2.uvw) == 1
+    @test ndims(sel2[:vis]) == 2
+    @test ndims(sel2[:uvw]) == 1
 
     # Scan-averaged cube has Scan × Baseline × Pol × IF.
     sel3 = avg[Baseline = At("AA-AX")]
-    @test ndims(sel3.vis) == 3
-    @test sel3.uvw === avg.uvw  # Baseline not present on uvw
+    @test ndims(sel3[:vis]) == 3
+    @test parent(sel3[:uvw]) == parent(avg.uvw)  # Baseline not present on uvw
 
     # Baseline-tuple positional indexing keeps working.
     bl_vis = raw[("AA", "AX")]
