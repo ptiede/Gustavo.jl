@@ -5,6 +5,8 @@ using Statistics
 using Random
 using StructArrays
 using FITSFiles: Card
+using DimensionalData: DimArray
+using Gustavo.UVFITS: Integration, Pol, IF, UVW, Scan, Baseline
 
 function synthetic_uvdata()
     vis = ComplexF64[
@@ -18,44 +20,85 @@ function synthetic_uvdata()
         1.0 - 0.1im 0.8 + 0.0im 0.9 + 0.1im 0.7 - 0.1im;
         0.9 + 0.2im 0.7 + 0.3im 0.8 + 0.1im 0.6 + 0.0im;
     ]
-    vis = reshape(vis, 2, 4, 4)
-    weights = fill(1.0, size(vis))
+    vis = ComplexF32.(reshape(vis, 2, 4, 4))
+    weights = fill(1.0f0, size(vis))
+    obs_time_synth = [0.0, 1.0]
+    pol_labels_synth = ["RR", "LL", "RL", "LR"]
+    channel_freqs_synth = collect(1.0:4.0)
+    vis = DimArray(vis, (Integration(obs_time_synth), Pol(pol_labels_synth), IF(channel_freqs_synth)))
+    weights = DimArray(weights, (Integration(obs_time_synth), Pol(pol_labels_synth), IF(channel_freqs_synth)))
+    uvw = DimArray(zeros(Float32, 2, 3), (Integration(obs_time_synth), UVW(["U", "V", "W"])))
 
     UV = Gustavo.UVFITS
     antennas = UV.AntennaTable(
-        StructArray{UV.Antenna}((
-            name        = ["AA", "AX"],
-            station_xyz = [zeros(3), zeros(3)],
-            mount_type  = [0, 0],
-            axis_offset = [0.0, 0.0],
-            diameter    = [0.0, 0.0],
-            feed_a      = ["R", "R"],
-            feed_b      = ["L", "L"],
-            pola_angle  = [0.0, 0.0],
-            polb_angle  = [0.0, 0.0],
-        )),
+        StructArray{UV.Antenna}(
+            (
+                name = ["AA", "AX"],
+                station_xyz = [zeros(3), zeros(3)],
+                mount_type = Int32[0, 0],
+                axis_offset = Float32[0.0, 0.0],
+                feed_a = ["R", "R"],
+                feed_b = ["L", "L"],
+                pola_angle = Float32[0.0, 0.0],
+                polb_angle = Float32[0.0, 0.0],
+                polcala = [Float32[], Float32[]],
+                polcalb = [Float32[], Float32[]],
+            )
+        ),
         zeros(3), "TEST",
     )
-    array_config = UV.ArrayConfig("2000-01-01", 0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT")
+    array_config = UV.ArrayConfig(
+        "2000-01-01", 0.0f0, 360.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0,
+        "UTC", "ITRF", "RIGHT", "APPROX",
+        Int32(1), Int32(0), Int32(4), Int32(0), Int32(1),
+    )
+    freq_setup = UV.FrequencySetup(
+        Int32(1), 1.0e9,
+        collect(1.0:4.0), collect(0.0:3.0),
+        fill(1.0f0, 4), fill(1.0f0, 4), Int32.(fill(1, 4)),
+    )
     metadata = UV.ObsMetadata(
-        "TEST", "TEST", "test", "2000-01-01", 2000.0, "JY",
-        0.0, 0.0, 1.0e9,
-        collect(1.0:4.0), fill(1.0, 4), 1.0, fill(1, 4),
+        "TEST", "TEST", "TEST", "2000-01-01", 2000.0f0, "JY",
+        0.0, 0.0,
+        freq_setup,
         [-1, -2, -3, -4], ["RR", "LL", "RL", "LR"],
+        NamedTuple(),
     )
 
+    # Memo-117-shaped primary HDU cards: NAXIS=7 random-groups layout plus
+    # CTYPE cards for the regular axes (so STOKES/FREQ/RA/DEC round-trip
+    # through `parse_stokes_axis` and friends), plus PTYPE cards for the
+    # canonical random parameters.
+    primary_cards = Card[
+        Card("NAXIS", 7),
+        Card("CTYPE2", "COMPLEX"),
+        Card("CRVAL2", 1.0), Card("CDELT2", 1.0), Card("CRPIX2", 1.0),
+        Card("CTYPE3", "STOKES"),
+        Card("CRVAL3", -1.0), Card("CDELT3", -1.0), Card("CRPIX3", 1.0),
+        Card("CTYPE4", "FREQ"),
+        Card("CRVAL4", 1.0e9), Card("CDELT4", 1.0), Card("CRPIX4", 1.0),
+        Card("CTYPE5", "IF"),
+        Card("CTYPE6", "RA"), Card("CRVAL6", 0.0),
+        Card("CTYPE7", "DEC"), Card("CRVAL7", 0.0),
+        Card("PTYPE1", "UU---SIN"),
+        Card("PTYPE2", "VV---SIN"),
+        Card("PTYPE3", "WW---SIN"),
+        Card("PTYPE4", "BASELINE"),
+        Card("PTYPE5", "DATE"),
+        Card("PTYPE6", "DATE"),
+    ]
     return Gustavo.Bandpass.UVData(
         vis,
         weights,
-        zeros(2, 3),
-        [0.0, 1.0],
+        uvw,
+        obs_time_synth,
         [1, 2],
         UV.BaselineIndex([1, 1], [(1, 2)], Dict(1 => 1), [1]),
-        StructArray(lower=[0.0, 1.0], upper=[1.0, 2.0]),
+        StructArray(lower = [0.0, 1.0], upper = [1.0, 2.0]),
         antennas,
         array_config,
         metadata,
-        Card[],
+        primary_cards,
         NamedTuple(),
     )
 end
@@ -76,7 +119,7 @@ function synthetic_bandpass_avg_uvdata()
         gains_true[2, 1, c] = (1.05 + 0.01c) * cis(0.14 + 0.04 * (c - 1))
         gains_true[3, 1, c] = (0.88 - 0.015c) * cis(-0.09 - 0.05 * (c - 1))
 
-        gains_true[1, 2, c] = gains_true[1, 1, c] * (1.10 - 0.01c) * cis(0.20 + 0.02 * (c - 1))
+        gains_true[1, 2, c] = gains_true[1, 1, c] * (1.1 - 0.01c) * cis(0.2 + 0.02 * (c - 1))
         gains_true[2, 2, c] = gains_true[2, 1, c] * (0.92 + 0.015c) * cis(-0.15 + 0.01 * (c - 1))
         gains_true[3, 2, c] = gains_true[3, 1, c] * (1.04 - 0.005c) * cis(0.11 - 0.03 * (c - 1))
     end
@@ -95,40 +138,59 @@ function synthetic_bandpass_avg_uvdata()
         nscan, length(bl_pairs), 2, 2
     )
 
-    vis = zeros(ComplexF64, nscan, length(bl_pairs), length(pol_codes), nchan)
+    vis_arr = zeros(ComplexF64, nscan, length(bl_pairs), length(pol_codes), nchan)
     for s in 1:nscan, (bi, (a, b)) in enumerate(bl_pairs), pol in eachindex(pol_codes), c in 1:nchan
         fa, fb = BP.stokes_feed_pair(pol_codes[pol])
-        vis[s, bi, pol, c] = gains_true[a, fa, c] * source_true[s, bi, fa, fb] * conj(gains_true[b, fb, c])
+        vis_arr[s, bi, pol, c] = gains_true[a, fa, c] * source_true[s, bi, fa, fb] * conj(gains_true[b, fb, c])
     end
-    weights = ones(Float64, size(vis))
+    weights_arr = ones(Float64, size(vis_arr))
+    bl_labels = [string(ant_names[a], "-", ant_names[b]) for (a, b) in bl_pairs]
+    scan_centers = (Float64.(0:(nscan - 1)) .+ Float64.(1:nscan)) ./ 2
+    channel_freqs_synth = collect(1.0:nchan)
+    vis = DimArray(vis_arr, (Scan(scan_centers), Baseline(bl_labels), Pol(pol_labels), IF(channel_freqs_synth)))
+    weights = DimArray(weights_arr, (Scan(scan_centers), Baseline(bl_labels), Pol(pol_labels), IF(channel_freqs_synth)))
+    uvw = DimArray(zeros(nscan, 3), (Integration(collect(0.0:(nscan - 1))), UVW(["U", "V", "W"])))
 
     UV = Gustavo.UVFITS
     antennas = UV.AntennaTable(
-        StructArray{UV.Antenna}((
-            name        = ant_names,
-            station_xyz = [zeros(3) for _ in 1:nant],
-            mount_type  = zeros(Int, nant),
-            axis_offset = zeros(nant),
-            diameter    = zeros(nant),
-            feed_a      = fill("R", nant),
-            feed_b      = fill("L", nant),
-            pola_angle  = zeros(nant),
-            polb_angle  = zeros(nant),
-        )),
+        StructArray{UV.Antenna}(
+            (
+                name = ant_names,
+                station_xyz = [zeros(3) for _ in 1:nant],
+                mount_type = zeros(Int32, nant),
+                axis_offset = zeros(Float32, nant),
+                feed_a = fill("R", nant),
+                feed_b = fill("L", nant),
+                pola_angle = zeros(Float32, nant),
+                polb_angle = zeros(Float32, nant),
+                polcala = [Float32[] for _ in 1:nant],
+                polcalb = [Float32[] for _ in 1:nant],
+            )
+        ),
         zeros(3), "TEST",
     )
-    array_config = UV.ArrayConfig("2000-01-01", 0.0, 360.0, 0.0, "UTC", "ITRF", "RIGHT")
+    array_config = UV.ArrayConfig(
+        "2000-01-01", 0.0f0, 360.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0,
+        "UTC", "ITRF", "RIGHT", "APPROX",
+        Int32(1), Int32(0), Int32(nchan), Int32(0), Int32(1),
+    )
+    freq_setup = UV.FrequencySetup(
+        Int32(1), 1.0e9,
+        collect(1.0:nchan), collect(0.0:(nchan - 1)),
+        fill(1.0f0, nchan), fill(1.0f0, nchan), Int32.(fill(1, nchan)),
+    )
     metadata = UV.ObsMetadata(
-        "TEST", "TEST", "test", "2000-01-01", 2000.0, "JY",
-        0.0, 0.0, 1.0e9,
-        collect(1.0:nchan), fill(1.0, nchan), 1.0, fill(1, nchan),
+        "TEST", "TEST", "TEST", "2000-01-01", 2000.0f0, "JY",
+        0.0, 0.0,
+        freq_setup,
         pol_codes, pol_labels,
+        NamedTuple(),
     )
 
     return BP.UVData(
         vis,
         weights,
-        zeros(nscan, 3),
+        uvw,
         collect(0.0:(nscan - 1)),
         collect(1:nscan),
         UV.BaselineIndex(
@@ -137,7 +199,7 @@ function synthetic_bandpass_avg_uvdata()
             Dict(i => i for i in 1:length(bl_pairs)),
             collect(1:length(bl_pairs)),
         ),
-        StructArray(lower=Float64.(0:(nscan - 1)), upper=Float64.(1:nscan)),
+        StructArray(lower = Float64.(0:(nscan - 1)), upper = Float64.(1:nscan)),
         antennas,
         array_config,
         metadata,
@@ -358,9 +420,9 @@ end
     _, shifted_ref_row_weights, _ = BP.collect_parallel_hand_rows(vis, weights_shifted_ref, 1, 1, 2)
 
     expected_variance = inv(16.0 * abs2(4.0 + 0.0im)) + inv(9.0 * abs2(2.0 + 0.0im))
-    expected_weight = inv(sqrt(expected_variance))
+    expected_weight = inv(expected_variance)
     shifted_ref_variance = inv(16.0 * abs2(4.0 + 0.0im)) + inv(1.0e6 * abs2(2.0 + 0.0im))
-    shifted_ref_weight = inv(sqrt(shifted_ref_variance))
+    shifted_ref_weight = inv(shifted_ref_variance)
 
     @test ratios == ComplexF64[2.0 + 0.0im]
     @test row_weights ≈ [expected_weight]
@@ -376,11 +438,11 @@ end
     )
     expected_double_variance = (
         inv(25.0 * abs2(5.0 + 0.0im)) +
-        inv(16.0 * abs2(4.0 + 0.0im)) +
-        inv(9.0 * abs2(2.0 + 0.0im)) +
-        inv(36.0 * abs2(3.0 + 0.0im))
+            inv(16.0 * abs2(4.0 + 0.0im)) +
+            inv(9.0 * abs2(2.0 + 0.0im)) +
+            inv(36.0 * abs2(3.0 + 0.0im))
     )
-    @test double_ratio_weight ≈ inv(sqrt(expected_double_variance))
+    @test double_ratio_weight ≈ inv(expected_double_variance)
 end
 
 @testset "Zero-mean bandpass gauge" begin
@@ -471,7 +533,7 @@ end
     gains_true = Array{ComplexF64}(undef, nant, nchan)
     for c in 1:nchan
         gains_true[1, c] = (0.95 + 0.03c) * cis(0.04 * (c - 1))
-        gains_true[2, c] = (1.10 + 0.02c) * cis(0.10 + 0.05 * (c - 1))
+        gains_true[2, c] = (1.1 + 0.02c) * cis(0.1 + 0.05 * (c - 1))
         gains_true[3, c] = (0.85 - 0.02c) * cis(-0.08 - 0.04 * (c - 1))
     end
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
@@ -502,7 +564,7 @@ end
                 solved_ratio = gains_scan[a, feed, c] * conj(gains_scan[b, feed, c])
                 expected_ratio = (
                     gains_true[a, c] * conj(gains_true[b, c]) /
-                    (gains_true[a, c0] * conj(gains_true[b, c0]))
+                        (gains_true[a, c0] * conj(gains_true[b, c0]))
                 )
                 @test solved_ratio ≈ expected_ratio atol = 1.0e-10
             end
@@ -540,7 +602,7 @@ end
                 solved_ratio = gains_template[a, feed, c] * conj(gains_template[b, feed, c])
                 expected_ratio = (
                     gains_true[a, c] * conj(gains_true[b, c]) /
-                    (gains_true[a, c0] * conj(gains_true[b, c0]))
+                        (gains_true[a, c0] * conj(gains_true[b, c0]))
                 )
                 @test solved_ratio ≈ expected_ratio atol = 1.0e-10
             end
@@ -564,7 +626,7 @@ end
         gains_true[2, 1, c] = (1.05 + 0.01c) * cis(0.14 + 0.04 * (c - 1))
         gains_true[3, 1, c] = (0.88 - 0.015c) * cis(-0.09 - 0.05 * (c - 1))
 
-        gains_true[1, 2, c] = gains_true[1, 1, c] * (1.10 - 0.01c) * cis(0.20 + 0.02 * (c - 1))
+        gains_true[1, 2, c] = gains_true[1, 1, c] * (1.1 - 0.01c) * cis(0.2 + 0.02 * (c - 1))
         gains_true[2, 2, c] = gains_true[2, 1, c] * (0.92 + 0.015c) * cis(-0.15 + 0.01 * (c - 1))
         gains_true[3, 2, c] = gains_true[3, 1, c] * (1.04 - 0.005c) * cis(0.11 - 0.03 * (c - 1))
     end
@@ -830,23 +892,39 @@ end
 
 @testset "Gain amplitude sanitization" begin
     BP = Gustavo.Bandpass
+
+    # c0 = 1. Channel 3 (ant 1, feed 1) is genuinely broken (zero magnitude);
+    # channel 5 has a legitimately tiny but finite amplitude (e.g. IF-edge
+    # rolloff). Only the zero-magnitude gain gets sanitized; the small-but-
+    # finite value is left alone but surfaced separately by
+    # `inspect_collapsed_gain_amplitudes`.
     gains = ComplexF64[
-        0.9 * cis(0.1) 1.0 * cis(0.2) 1.1 * cis(0.3) 0.004 * cis(0.4) 1.2 * cis(0.5);
-        1.0 * cis(0.0) 1.0 * cis(0.1) 1.0 * cis(0.2) 1.0 * cis(0.3) 1.0 * cis(0.4);
+        1.0 + 0.0im   0.9 * cis(0.1)  0.0 + 0.0im     1.1 * cis(0.3)  0.004 * cis(0.4);
+        1.0 + 0.0im   1.0 * cis(0.1)  1.0 * cis(0.2)  1.0 * cis(0.3)  1.0 * cis(0.4);
     ]
     gains = reshape(gains, 1, 2, 5)
-
     support = ones(Float64, 1, 2, 5)
-    repaired = BP.sanitize_gain_amplitudes!(gains, support, 2; collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2, neighbor_window = 1)
+
+    repaired = BP.sanitize_gain_amplitudes!(gains, support, 1; neighbor_window = 1)
 
     @test length(repaired) == 1
-    @test repaired[1].channel == 4
-    @test abs(gains[1, 1, 4]) ≈ median([1.1, 1.2])
-    @test angle(gains[1, 1, 4]) ≈ 0.4
-    @test abs(gains[1, 2, 4]) ≈ 1.0
+    @test repaired[1].channel == 3
+    @test abs(gains[1, 1, 3]) ≈ median([0.9, 1.1])  # local neighbors at c±1 (c0=1 excluded)
+    @test isfinite(gains[1, 1, 5]) && abs(gains[1, 1, 5]) ≈ 0.004  # finite-tiny untouched
 
-    @test_logs (:warn, r"repaired collapsed gain amplitudes") BP.warn_sanitized_gain_amplitudes(
+    @test_logs (:warn, r"repaired") BP.warn_sanitized_gain_amplitudes(
         repaired, ["AA"]; context = "scan 1"
+    )
+
+    suspects = BP.inspect_collapsed_gain_amplitudes(
+        gains, support, 1;
+        collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2, neighbor_window = 1
+    )
+    @test length(suspects) == 1
+    @test suspects[1].channel == 5
+    @test suspects[1].amplitude ≈ 0.004
+    @test_logs (:warn, r"collapsed gain amplitudes detected") BP.warn_collapsed_gain_amplitudes(
+        suspects, ["AA"]; context = "scan 1"
     )
 end
 
@@ -873,6 +951,40 @@ end
     end
 end
 
+@testset "UVFITS round-trip preserves canonical fields" begin
+    UV = Gustavo.UVFITS
+    data = synthetic_uvdata()
+
+    # Element types must match Memo 117 TFORM specs (1E → Float32, 3D → Float64).
+    @test eltype(data.uvw) == Float32
+    @test eltype(data.weights) == Float32
+    @test eltype(data.vis) == ComplexF32 || eltype(data.vis) == ComplexF64  # synthetic uses ComplexF64; loaded uses ComplexF32
+    @test eltype(data.metadata.if_freqs) == Float64
+    @test eltype(data.metadata.ch_widths) == Float32
+    @test eltype(data.metadata.total_bandwidths) == Float32
+    @test eltype(data.metadata.sidebands) == Int32
+
+    tmp = tempname() * ".uvfits"
+    try
+        UV.write_uvfits(tmp, data)
+        round = UV.load_uvfits(tmp)
+
+        # Float32 columns round-trip exactly (no widen/narrow churn).
+        @test parent(round.uvw) == Float32.(parent(data.uvw))
+        @test parent(round.weights) == Float32.(parent(data.weights))
+        @test round.baselines.codes == data.baselines.codes
+
+        # Metadata round-trips.
+        @test round.metadata.if_freqs == data.metadata.if_freqs
+        @test round.metadata.ch_widths == data.metadata.ch_widths
+        @test round.metadata.total_bandwidths == data.metadata.total_bandwidths
+        @test round.metadata.sidebands == data.metadata.sidebands
+        @test round.metadata.pol_codes == data.metadata.pol_codes
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
+end
+
 @testset "UVData extra_columns + date_param preservation" begin
     UV = Gustavo.UVFITS
     base = synthetic_uvdata()
@@ -891,11 +1003,11 @@ end
         Card("PTYPE5", "DATE"),
         Card("PTYPE6", "DATE"),
         Card("PTYPE7", "INTTIM"),
-        Card("PCOUNT",  7),
+        Card("PCOUNT", 7),
     ]
     extras = (var"INTTIM" = inttim_values,)
     date_param = hcat(fill(Float32(2_459_664.5), nint), Float32.(base.obs_time ./ 24))
-    data = UVData(
+    data = UV.UVData(
         base.vis, base.weights, base.uvw, base.obs_time, base.scan_idx,
         base.baselines, base.scans, base.antennas, base.array_config,
         base.metadata, primary_cards, date_param, extras,
@@ -916,4 +1028,31 @@ end
     finally
         isfile(tmp) && rm(tmp; force = true)
     end
+end
+
+@testset "UVData DimArray slicing" begin
+    using DimensionalData: At
+    raw = synthetic_uvdata()
+    avg = synthetic_bandpass_avg_uvdata()
+
+    # Per-integration cube has Integration × Pol × IF; uvw has Integration × UVW.
+    sel = raw[Pol = At("RR")]
+    @test ndims(sel.vis) == 2
+    @test ndims(sel.weights) == 2
+    # Pol dim doesn't exist on uvw → unchanged.
+    @test sel.uvw === raw.uvw
+
+    # Integration applies to all three.
+    sel2 = raw[Integration = 1]
+    @test ndims(sel2.vis) == 2
+    @test ndims(sel2.uvw) == 1
+
+    # Scan-averaged cube has Scan × Baseline × Pol × IF.
+    sel3 = avg[Baseline = At("AA-AX")]
+    @test ndims(sel3.vis) == 3
+    @test sel3.uvw === avg.uvw  # Baseline not present on uvw
+
+    # Baseline-tuple positional indexing keeps working.
+    bl_vis = raw[("AA", "AX")]
+    @test ndims(bl_vis) == 3
 end

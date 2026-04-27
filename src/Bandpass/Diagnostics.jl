@@ -786,7 +786,7 @@ choose feeds with `pol`, and restrict rows with `sites`.
 The default behavior matches the legacy plot: both feeds, all sites, and
 relative phase.
 """
-function plot_gain_solutions(parent, gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
+function plot_gain_solutions(parent, gains, data::UVData; quantity = :phase, pol = :all, sites = :all, relative = true)
     nscan = length(data.scans)
     scan_wheel = diagnostic_scan_colormap(nscan)
     pol_idx, pol_labels = resolve_gain_polarizations(data; pol = pol)
@@ -831,7 +831,7 @@ function plot_gain_solutions(parent, gains, data::UVData; quantity=:phase, pol=:
     return parent
 end
 
-function plot_gain_solutions(gains, data::UVData; quantity=:phase, pol=:all, sites=:all, relative=true)
+function plot_gain_solutions(gains, data::UVData; quantity = :phase, pol = :all, sites = :all, relative = true)
     site_idx, _ = resolve_gain_sites(data; sites = sites)
     fig = Figure(size = (900, 180 * length(site_idx)))
     plot_gain_solutions(fig, gains, data; quantity = quantity, pol = pol, sites = sites, relative = relative)
@@ -918,7 +918,7 @@ function plot_baseline_bandpass(
     baseline_label = join(bl_plot, "-")
 
     for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        amp_title  = normalize_by_source ? "$(baseline_label) $lab |V / S|" : "$(baseline_label) $lab |V|"
+        amp_title = normalize_by_source ? "$(baseline_label) $lab |V / S|" : "$(baseline_label) $lab |V|"
         phase_title = normalize_by_source ? "$(baseline_label) $lab arg(V / S)" : "$(baseline_label) $lab arg(V)"
         amp_ylabel = normalize_by_source ? "amp / S" : "amplitude"
         phase_ylabel = normalize_by_source ? "phase - S" : "phase (rad)"
@@ -983,15 +983,17 @@ function plot_baseline_bandpass(
             push!(phase_series_blocks, obs_phase, model_phase)
             push!(amp_noise_blocks, obs_amp_noise)
             push!(phase_noise_blocks, obs_phase_noise)
-            push!(plotted_scans, (;
-                scan = s,
-                obs_amp,
-                obs_amp_noise,
-                model_amp,
-                obs_phase,
-                obs_phase_noise,
-                model_phase,
-            ))
+            push!(
+                plotted_scans, (;
+                    scan = s,
+                    obs_amp,
+                    obs_amp_noise,
+                    model_amp,
+                    obs_phase,
+                    obs_phase_noise,
+                    model_phase,
+                )
+            )
         end
 
         # Decide whether the bandpass model (G_a · conj(G_b)) is shared across scans.
@@ -1152,17 +1154,19 @@ function plot_baseline_bandpass_residuals(
             push!(phase_noise_blocks, obs_phase_noise)
             push!(real_res_series, res_real)
             push!(imag_res_series, res_imag)
-            push!(plotted_scans, (;
-                scan = s,
-                obs_amp,
-                obs_amp_noise,
-                model_amp,
-                obs_phase,
-                obs_phase_noise,
-                model_phase,
-                res_real,
-                res_imag,
-            ))
+            push!(
+                plotted_scans, (;
+                    scan = s,
+                    obs_amp,
+                    obs_amp_noise,
+                    model_amp,
+                    obs_phase,
+                    obs_phase_noise,
+                    model_phase,
+                    res_real,
+                    res_imag,
+                )
+            )
         end
 
         shared_model_amp = shared_track(getfield.(plotted_scans, :model_amp))
@@ -1310,7 +1314,7 @@ function gain_quantity_label(quantity; relative = true)
     end
 end
 
-function baseline_index(data::UVData, bl::Tuple{String,String})
+function baseline_index(data::UVData, bl::Tuple{String, String})
     a_idx = findfirst(==(bl[1]), data.antennas.name)
     b_idx = findfirst(==(bl[2]), data.antennas.name)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl")

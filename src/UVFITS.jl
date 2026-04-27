@@ -3,11 +3,13 @@ module UVFITS
 using FITSFiles
 using FITSFiles: HDU, Random, Bintable, Card
 using StructArrays
+using DimensionalData
+using DimensionalData: AbstractDimArray, DimArray, At, hasdim, dims, name2dim
 
 include("UVFITS/DataStructures.jl")
 include("UVFITS/DataIO.jl")
 
-export Antenna, AntennaTable, ArrayConfig, ObsMetadata
+export Antenna, AntennaTable, ArrayConfig, ObsMetadata, FrequencySetup
 export BaselineIndex, UVData, with_visibilities
 export load_uvfits, write_uvfits, default_output_path
 export decode_baseline, assign_scans, scan_average

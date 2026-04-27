@@ -1,54 +1,76 @@
 """
-    Antenna{TName,TXYZ,TMnt,TAxOff,TDiam,TFa,TFb,TPola,TPolb}
+    Antenna
 
-Single-antenna record drawn from the AIPS AN binary table (Memo 117 §4.1).
-Intended to be collected into a `StructArray` to form an `AntennaTable`.
+Single-antenna record drawn from the AIPS AN binary table (Memo 117 §4.1,
+Table 10). Only the **mandatory** columns of Table 10 are stored as fields;
+optional columns (`DIAMETER`, `BEAMFWHM`) live in `AntennaTable.extras`.
 
-`station_xyz` is the (x,y,z) coordinate of the antenna *relative to the array
-center*, in the frame given by `AntennaTable.frame` (typically ITRF), rotated
-to the longitude of the array center.  Mount type codes: 0=alt-az, 1=equatorial,
+`station_xyz` is the (x, y, z) coordinate of the antenna *relative to the array
+center* in the frame given by `ArrayConfig.frame` (typically ITRF), rotated to
+the longitude of the array center. Mount type codes: 0=alt-az, 1=equatorial,
 2=orbiting, 3=X-Y, 4=right-Naismith, 5=left-Naismith, 6=aperture/phased array.
+
+In-memory eltypes mirror Memo 117 TFORM types (E→Float32, D→Float64).
 """
-struct Antenna{TName, TXYZ, TMnt, TAxOff, TDiam, TFa, TFb, TPola, TPolb}
-    name::TName             # ANNAME — station code
-    station_xyz::TXYZ       # STABXYZ — 3-element (x,y,z) in meters
-    mount_type::TMnt        # MNTSTA
-    axis_offset::TAxOff     # STAXOF — Y-axis offset (meters)
-    diameter::TDiam         # DIAMETER (meters)
-    feed_a::TFa             # POLTYA — 'R','L','X','Y'
-    feed_b::TFb             # POLTYB
-    pola_angle::TPola       # POLAA — feed A position angle (degrees)
-    polb_angle::TPolb       # POLAB — feed B position angle (degrees)
+struct Antenna{TName, TXYZ, TMnt, TAxOff, TFa, TFb, TPola, TPolb, TPolcal}
+    name::TName             # ANNAME  (8A)
+    station_xyz::TXYZ       # STABXYZ (3D, Float64) — meters
+    mount_type::TMnt        # MNTSTA  (1J, Int32)
+    axis_offset::TAxOff     # STAXOF  (1E, Float32) — meters
+    feed_a::TFa             # POLTYA  (1A) — 'R','L','X','Y'
+    feed_b::TFb             # POLTYB  (1A)
+    pola_angle::TPola       # POLAA   (1E, Float32) — degrees
+    polb_angle::TPolb       # POLAB   (1E, Float32) — degrees
+    polcala::TPolcal        # POLCALA (E(NOPCAL,NO_IF), Float32) — empty if NOPCAL==0
+    polcalb::TPolcal        # POLCALB (E(NOPCAL,NO_IF), Float32)
 end
 
 """
-    AntennaTable{TAnt,TXyz,TName}
+    AntennaTable
 
-Array-of-structs antenna table.  `antennas` is a `StructArray{Antenna}`;
-`array_xyz` is the geocentric array center in meters; `array_name` is the
-array identifier string (ARRNAM).  Timing and geodetic parameters that
-accompany the AN table header are stored separately in `ArrayConfig`.
+Array-of-structs antenna table from the AIPS AN HDU.
+
+- `antennas`   : `StructArray{Antenna}` of the mandatory Table 10 columns
+- `array_xyz`  : geocentric array center in meters (ARRAYX/Y/Z header cards)
+- `array_name` : ARRNAM
+- `extras`     : `NamedTuple` of optional Table 10 columns actually present in
+  the file (e.g. `DIAMETER`, `BEAMFWHM`). Keys match the FITS column names.
 """
-struct AntennaTable{TAnt, TXyz, TName}
-    antennas  ::TAnt   # StructArray{Antenna}
-    array_xyz ::TXyz   # ARRAYX/Y/Z — array center (meters)
-    array_name::TName  # ARRNAM
+struct AntennaTable{TAnt, TXyz, TName, TExtras <: NamedTuple}
+    antennas::TAnt
+    array_xyz::TXyz
+    array_name::TName
+    extras::TExtras
 end
 
-"""
-    ArrayConfig{TRdate,TGst,TDeg,TUt,TSys,TFrame,THand}
+# Backward-compatible no-extras constructor.
+AntennaTable(antennas, array_xyz, array_name) =
+    AntennaTable(antennas, array_xyz, array_name, NamedTuple())
 
-Timing and geodetic metadata from the AIPS AN table header that are tied to
-the observation epoch rather than the physical antenna array.
 """
-struct ArrayConfig{TRdate, TGst, TDeg, TUt, TSys, TFrame, THand}
-    rdate         ::TRdate  # RDATE — reference date
-    gst_iat0      ::TGst    # GSTIA0 — GST at 0h on reference date (degrees)
-    earth_rot_rate::TDeg    # DEGPDY — Earth rotation rate (degrees/day)
-    ut1utc        ::TUt     # UT1UTC — UT1 minus UTC (seconds)
-    time_sys      ::TSys    # TIMSYS — 'IAT' or 'UTC'
-    frame         ::TFrame  # FRAME — coordinate frame (e.g. 'ITRF')
-    xyzhand       ::THand   # XYZHAND — 'RIGHT' or 'LEFT'
+    ArrayConfig
+
+Timing and geodetic metadata from the AIPS AN table header (Memo 117 §4.1,
+Table 8 mandatory keywords). These are tied to the observation epoch rather
+than the physical antenna array.
+"""
+struct ArrayConfig{TRdate, TGst, TDeg, TUt, TPol, TDut, TSys, TFrame, THand, TStr, TInt}
+    rdate::TRdate  # RDATE   (D)
+    gst_iat0::TGst    # GSTIA0  (E, Float32) — degrees
+    earth_rot_rate::TDeg    # DEGPDY  (E, Float32) — degrees/day
+    ut1utc::TUt     # UT1UTC  (E, Float32) — seconds
+    polarx::TPol    # POLARX  (E, Float32) — arc seconds
+    polary::TPol    # POLARY  (E, Float32) — arc seconds
+    datutc::TDut    # DATUTC  (E, Float32) — seconds
+    time_sys::TSys    # TIMSYS  (A) — 'IAT' or 'UTC'
+    frame::TFrame  # FRAME   (A) — e.g. 'ITRF'
+    xyzhand::THand   # XYZHAND (A) — 'RIGHT' or 'LEFT'
+    poltype::TStr    # POLTYPE (A)
+    extver::TInt    # EXTVER  (I) — subarray number
+    numorb::TInt    # NUMORB  (I)
+    no_if::TInt    # NO_IF   (I) — number of spectral windows
+    nopcal::TInt    # NOPCAL  (I) — 0 or 2
+    freqid::TInt    # FREQID  (I) — frequency setup number
 end
 
 Base.length(t::AntennaTable) = length(t.antennas)
@@ -56,42 +78,104 @@ Base.getindex(t::AntennaTable, i) = t.antennas[i]
 Base.iterate(t::AntennaTable, args...) = iterate(t.antennas, args...)
 
 function Base.getproperty(t::AntennaTable, s::Symbol)
-    hasfield(typeof(t), s) ? getfield(t, s) : getproperty(getfield(t, :antennas), s)
+    return hasfield(typeof(t), s) ? getfield(t, s) : getproperty(getfield(t, :antennas), s)
 end
 
 """
-    ObsMetadata{TObj,TTel,TObs,TDate,TEq,TBunit,TRa,TDec,TFreq,TCfreqs,TBw,TCw,TSb,TPcodes,TPlabs}
+    FrequencySetup
 
-Observation-level metadata from the primary HDU FITS cards and the AIPS FQ
-frequency table (Memo 117 §4.7).
+Frequency-axis description for a UVFITS dataset, drawn from the FREQ regular
+axis (Memo 117 §3.1.1) and the AIPS FQ binary table (Table 22). Pulled out of
+`ObsMetadata` because frequency setup is a self-contained concept used heavily
+on its own (e.g. by the bandpass solver) and one FITS file may, in principle,
+carry several setups identified by `FRQSEL`.
 
-`channel_freqs` are absolute IF center frequencies in Hz (reference frequency
-+ FQ `IF FREQ` offset).  `channel_bwidths` and `ch_width` come from `TOTAL
-BANDWIDTH` and `CH WIDTH` columns of the FQ table, respectively.
+In-memory eltypes mirror Memo 117 TFORM types (E→Float32, D→Float64), with
+two principled exceptions: `ref_freq` and `channel_freqs` stay Float64 for
+arithmetic stability under subtractions of similar-magnitude frequencies.
+
+- `freqid`            : FQ `FRQSEL` value identifying this setup (Int32)
+- `ref_freq`          : FREQ-axis CRVAL — reference frequency (Hz, Float64)
+- `channel_freqs`     : absolute IF center frequencies (Hz, Float64) =
+                        `ref_freq` + `if_freqs`
+- `if_freqs`          : FQ `IF FREQ` column (D, Float64) — Hz offsets
+- `ch_widths`         : FQ `CH WIDTH` column (E, Float32) per IF — Hz
+- `total_bandwidths`  : FQ `TOTAL BANDWIDTH` column (E, Float32) per IF — Hz
+- `sidebands`         : FQ `SIDEBAND` column (J, Int32): +1=upper, -1=lower
+- `extras`            : NamedTuple of optional FQ columns (e.g. `BANDCODE`)
 """
-struct ObsMetadata{TObj, TTel, TObs, TDate, TEq, TBunit, TRa, TDec, TFreq, TCfreqs, TBw, TCw, TSb, TPcodes, TPlabs}
-    object::TObj            # OBJECT — source name
-    telescope::TTel         # TELESCOP
-    observer::TObs          # OBSERVER
-    date_obs::TDate         # DATE-OBS
-    equinox::TEq            # EQUINOX (year, e.g. 2000.0)
-    bunit::TBunit           # BUNIT — flux units ('UNCALIB','JY',…)
-    ra::TRa                 # phase center RA (degrees)
-    dec::TDec               # phase center Dec (degrees)
-    ref_freq::TFreq         # reference frequency (Hz)
-    channel_freqs::TCfreqs  # absolute IF center frequencies (Hz)
-    channel_bwidths::TBw    # total IF bandwidth per spectral window (Hz)
-    ch_width::TCw           # spectral channel separation (Hz)
-    sidebands::TSb          # SIDEBAND: +1=upper, -1=lower
-    pol_codes::TPcodes      # Stokes codes (-1=RR,-2=LL,-3=RL,-4=LR,-5=XX,-6=YY,-7=XY,-8=YX)
-    pol_labels::TPlabs      # polarization labels ('RR','LL',…,'XX','YY',…)
+struct FrequencySetup{TFid, TFreq, TCfreqs, TIff, TCw, TBw, TSb, TExtras <: NamedTuple}
+    freqid::TFid
+    ref_freq::TFreq
+    channel_freqs::TCfreqs
+    if_freqs::TIff
+    ch_widths::TCw
+    total_bandwidths::TBw
+    sidebands::TSb
+    extras::TExtras
 end
+
+FrequencySetup(freqid, ref_freq, channel_freqs, if_freqs, ch_widths, total_bandwidths, sidebands) =
+    FrequencySetup(freqid, ref_freq, channel_freqs, if_freqs, ch_widths, total_bandwidths, sidebands, NamedTuple())
+
+function Base.show(io::IO, fs::FrequencySetup)
+    flo = round(minimum(fs.channel_freqs) / 1.0e9; digits = 3)
+    fhi = round(maximum(fs.channel_freqs) / 1.0e9; digits = 3)
+    return print(io, "FrequencySetup(FRQSEL=$(fs.freqid), $(length(fs.channel_freqs)) IFs, $(flo)–$(fhi) GHz)")
+end
+
+"""
+    ObsMetadata
+
+Observation-level metadata from the primary HDU FITS cards (Memo 117 Table 5).
+The frequency description is held in a separate `FrequencySetup` struct,
+because it's a self-contained concept (one row of the AIPS FQ table) used
+heavily on its own.
+
+For convenience, the `FrequencySetup` fields (`channel_freqs`, `ref_freq`,
+`if_freqs`, `ch_widths`, `total_bandwidths`, `sidebands`, `freqid`) are
+forwarded through `getproperty`, so call sites can keep writing
+`metadata.channel_freqs` rather than `metadata.freq_setup.channel_freqs`.
+
+- `pol_codes` / `pol_labels` : AIPS Stokes codes/labels (mandatory)
+- `freq_setup`               : see `FrequencySetup`
+- `extras`                   : NamedTuple of optional primary-HDU cards
+"""
+struct ObsMetadata{
+        TObj, TTel, TInst, TDate, TEq, TBunit, TRa, TDec,
+        TFs <: FrequencySetup, TPcodes, TPlabs, TExtras <: NamedTuple,
+    }
+    object::TObj             # OBJECT
+    telescope::TTel          # TELESCOP
+    instrume::TInst          # INSTRUME
+    date_obs::TDate          # DATE-OBS
+    equinox::TEq             # EQUINOX (E, Float32) — year, e.g. 2000.0
+    bunit::TBunit            # BUNIT — 'UNCALIB','JY',…
+    ra::TRa                  # phase center RA (degrees)
+    dec::TDec                # phase center Dec (degrees)
+    freq_setup::TFs          # FrequencySetup
+    pol_codes::TPcodes       # AIPS Stokes codes
+    pol_labels::TPlabs       # 'RR','LL',… string labels
+    extras::TExtras          # optional primary-HDU cards
+end
+
+# Forward FrequencySetup fields so existing call sites
+# (`metadata.channel_freqs`, `metadata.ref_freq`, …) keep working without
+# every consumer reaching through `metadata.freq_setup`.
+const _FREQ_SETUP_FIELDS = (:freqid, :ref_freq, :channel_freqs, :if_freqs, :ch_widths, :total_bandwidths, :sidebands)
+
+function Base.getproperty(m::ObsMetadata, s::Symbol)
+    s in _FREQ_SETUP_FIELDS && return getproperty(getfield(m, :freq_setup), s)
+    return getfield(m, s)
+end
+
+Base.propertynames(m::ObsMetadata) = (fieldnames(typeof(m))..., _FREQ_SETUP_FIELDS...)
 
 function Base.show(io::IO, t::AntennaTable)
-    print(io, "AntennaTable($(t.array_name), $(length(t)) antennas)")
+    return print(io, "AntennaTable($(t.array_name), $(length(t)) antennas)")
 end
 
 function Base.show(io::IO, m::ObsMetadata)
-    freq_ghz = round(m.ref_freq / 1e9; digits = 3)
-    print(io, "ObsMetadata($(m.object), $(m.telescope), $(m.date_obs), ref=$(freq_ghz) GHz)")
+    freq_ghz = round(m.ref_freq / 1.0e9; digits = 3)
+    return print(io, "ObsMetadata($(m.object), $(m.telescope), $(m.date_obs), ref=$(freq_ghz) GHz)")
 end

@@ -62,29 +62,45 @@ function weighted_complex_correction(samples, weights)
     return exp(log_amp) * cis(phase)
 end
 
-function weighted_least_squares(A, b, weights)
-    Aw = A .* reshape(weights, :, 1)
-    bw = b .* weights
+# Convention across Gustavo: a "weight" is always an *inverse variance*
+# (precision, 1/σ²), matching both the Gaussian-likelihood derivation of
+# weighted least squares and the AIPS UVFITS convention (Memo 117: visibility
+# weights are in Jy⁻² = variance⁻¹).
+#
+# For y_i = A_i x + ε_i with independent ε_i ~ N(0, σ_i²) the MLE is
+#   x* = (Aᵀ W A)⁻¹ Aᵀ W y,   W = diag(1/σ_i²).
+# To solve this with QR we need S with SᵀS = W; since W is diagonal-positive,
+# S = diag(√W_ii) = diag(1/σ_i), so we scale each row by √(weight) before
+# handing to QR. **Callers pass inverse variance and never take the sqrt
+# themselves.**
+_row_scale(inv_variances) = sqrt.(inv_variances)
+
+function weighted_least_squares(A, b, inv_variances)
+    sw = _row_scale(inv_variances)
+    Aw = A .* reshape(sw, :, 1)
+    bw = b .* sw
     return solve(LinearProblem(Aw, bw), QRFactorization()).u
 end
 
-function weighted_regularized_least_squares(A, b, weights, penalties)
-    isempty(penalties) && return weighted_least_squares(A, b, weights)
-    all(≤(0), penalties) && return weighted_least_squares(A, b, weights)
+function weighted_regularized_least_squares(A, b, inv_variances, penalties)
+    isempty(penalties) && return weighted_least_squares(A, b, inv_variances)
+    all(≤(0), penalties) && return weighted_least_squares(A, b, inv_variances)
 
-    Aw = A .* reshape(weights, :, 1)
-    bw = b .* weights
+    sw = _row_scale(inv_variances)
+    Aw = A .* reshape(sw, :, 1)
+    bw = b .* sw
     reg = sqrt.(penalties)
     Areg = Matrix(Diagonal(reg))
     breg = zeros(size(A, 2))
     return solve(LinearProblem(vcat(Aw, Areg), vcat(bw, breg)), QRFactorization()).u
 end
 
-function weighted_constrained_least_squares(A, b, weights, C, d; constraint_weight = 1.0e6)
-    isempty(C) && return weighted_least_squares(A, b, weights)
+function weighted_constrained_least_squares(A, b, inv_variances, C, d; constraint_weight = 1.0e6)
+    isempty(C) && return weighted_least_squares(A, b, inv_variances)
 
-    Aw = A .* reshape(weights, :, 1)
-    bw = b .* weights
+    sw = _row_scale(inv_variances)
+    Aw = A .* reshape(sw, :, 1)
+    bw = b .* sw
     Acon = constraint_weight .* C
     bcon = constraint_weight .* d
     return solve(LinearProblem(vcat(Aw, Acon), vcat(bw, bcon)), QRFactorization()).u

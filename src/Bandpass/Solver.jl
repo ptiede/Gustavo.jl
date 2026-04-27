@@ -16,17 +16,17 @@ function propagated_log_ratio_weight(v_num, w_num, v_den, w_den)
     isfinite(variance) || return zero(variance)
     variance > 0 || return zero(variance)
 
-    # `weighted_least_squares` scales each row directly, so this needs the
-    # inverse standard deviation of log(v_num / v_den).
+    # Returns the inverse variance (precision) of log(v_num / v_den), matching
+    # the inverse-variance convention used throughout Gustavo's WLS.
     return inv(variance)
 end
 
 function propagated_log_double_ratio_weight(v_num, w_num, v_den, w_den, v_num_ref, w_num_ref, v_den_ref, w_den_ref)
     variance = (
         log_visibility_variance(v_num, w_num) +
-        log_visibility_variance(v_den, w_den) +
-        log_visibility_variance(v_num_ref, w_num_ref) +
-        log_visibility_variance(v_den_ref, w_den_ref)
+            log_visibility_variance(v_den, w_den) +
+            log_visibility_variance(v_num_ref, w_num_ref) +
+            log_visibility_variance(v_den_ref, w_den_ref)
     )
     isfinite(variance) || return zero(variance)
     variance > 0 || return zero(variance)
@@ -771,6 +771,84 @@ function sanitize_gain_amplitudes!(
     return repaired
 end
 
+"""
+    inspect_collapsed_gain_amplitudes(gains, support_weights, c0;
+        collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2,
+        neighbor_window = 2)
+
+Non-mutating diagnostic that flags channels whose gain amplitude is
+suspiciously small relative to its neighbours. Returns a `Vector{NamedTuple}`
+with `(ant, feed, channel, amplitude, neighbor_median)` rows for any channel
+where the amplitude is finite-positive but either below `min_gain_amplitude`
+or below `collapse_fraction * neighbor_median`.
+
+This is the "warn but don't sanitize" companion to
+[`sanitize_gain_amplitudes!`](@ref): it surfaces likely-broken bandpass solves
+(e.g. a single dead channel that nevertheless produced a finite, tiny gain)
+without overwriting the solution, so legitimately small amplitudes (e.g. EHT
+IF-edge rolloff) are left alone but obvious collapses are still reported.
+"""
+function inspect_collapsed_gain_amplitudes(
+        gains, support_weights, c0;
+        collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2,
+        neighbor_window = 2
+    )
+    amps = abs.(gains)
+    suspects = NamedTuple[]
+
+    for ant in axes(gains, 1), feed in axes(gains, 2), c in axes(gains, 3)
+        c == c0 && continue
+        support_weights[ant, feed, c] > 0 || continue
+
+        amp = amps[ant, feed, c]
+        (isfinite(amp) && amp > 0) || continue
+
+        neighbor_median = replacement_amplitude_scale(
+            view(amps, ant, feed, :), view(support_weights, ant, feed, :), c, c0;
+            neighbor_window = neighbor_window
+        )
+        isnothing(neighbor_median) && continue
+
+        is_collapsed = amp < min_gain_amplitude || amp < collapse_fraction * neighbor_median
+        is_collapsed || continue
+
+        push!(suspects, (; ant, feed, channel = c, amplitude = amp, neighbor_median))
+    end
+
+    return suspects
+end
+
+function warn_collapsed_gain_amplitudes(suspects, ant_names = nothing; context = "")
+    isempty(suspects) && return nothing
+
+    grouped = Dict{Tuple{Int, Int}, Vector{NamedTuple}}()
+    for s in suspects
+        key = (s.ant, s.feed)
+        push!(get!(grouped, key, NamedTuple[]), s)
+    end
+
+    details = String[]
+    for ((ant, feed), entries) in sort!(collect(grouped); by = first)
+        ant_label = isnothing(ant_names) ? string("ant", ant) : string(ant_names[ant])
+        channels = sort(getfield.(entries, :channel))
+        min_amp = minimum(getfield.(entries, :amplitude))
+        max_neighbor = maximum(getfield.(entries, :neighbor_median))
+        push!(
+            details,
+            string(
+                ant_label, "/feed", feed,
+                " channels=", join(channels, ","),
+                " min_amp=", round(min_amp; digits = 4),
+                " neighbor_median<=", round(max_neighbor; digits = 4)
+            )
+        )
+    end
+
+    prefix = isempty(context) ? "" : string(context, ": ")
+    @warn string(prefix, "collapsed gain amplitudes detected (not sanitized); inspect data/support") suspect_count = length(suspects) details
+    return nothing
+end
+
 function warn_sanitized_gain_amplitudes(repaired, ant_names = nothing; context = "")
     isempty(repaired) && return nothing
 
@@ -970,9 +1048,11 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
 
                     ratio = (num_c / den_c) / (num_c0 / den_c0)
                     push!(corrections, sign > 0 ? ratio : inv(ratio))
-                    push!(correction_weights, propagated_log_double_ratio_weight(
-                        num_c, w_num_c, den_c, w_den_c, num_c0, w_num_c0, den_c0, w_den_c0
-                    ))
+                    push!(
+                        correction_weights, propagated_log_double_ratio_weight(
+                            num_c, w_num_c, den_c, w_den_c, num_c0, w_num_c0, den_c0, w_den_c0
+                        )
+                    )
                 end
             end
 
@@ -1078,7 +1158,7 @@ struct BandpassSolverSetup{
         S <: AbstractVector{<:StationBandpassModel},
         C <: AbstractVector{<:Integer},
         G <: AbstractBandpassGauge,
-}
+    }
     data::D
     ref_ant::Int
     gauge::G
@@ -1430,10 +1510,14 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseli
                 view(setup.data.weights, :, bi, pol, :)
             )
             isnothing(stats) && continue
-            push!(rows, merge((
-                baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
-                pol = setup.data.metadata.pol_labels[pol],
-            ), stats))
+            push!(
+                rows, merge(
+                    (
+                        baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
+                        pol = setup.data.metadata.pol_labels[pol],
+                    ), stats
+                )
+            )
         end
     elseif by == :scan_baseline
         for s in axes(setup.data.vis, 1), (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_codes)
@@ -1442,11 +1526,15 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseli
                 view(setup.data.weights, s, bi, pol, :)
             )
             isnothing(stats) && continue
-            push!(rows, merge((
-                scan = s,
-                baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
-                pol = setup.data.metadata.pol_labels[pol],
-            ), stats))
+            push!(
+                rows, merge(
+                    (
+                        scan = s,
+                        baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
+                        pol = setup.data.metadata.pol_labels[pol],
+                    ), stats
+                )
+            )
         end
     else
         error("Unsupported residual grouping $by. Use :baseline or :scan_baseline")
@@ -1517,11 +1605,13 @@ function bandpass_fit_stats(setup::BandpassSolverSetup, state::BandpassSolverSta
         setup.pol_codes
     )
     dof = max(stats.nreal - nparams, 1)
-    return merge(stats, (
-        nparams = nparams,
-        dof = dof,
-        reduced_chi2 = stats.chi2 / dof,
-    ))
+    return merge(
+        stats, (
+            nparams = nparams,
+            dof = dof,
+            reduced_chi2 = stats.chi2 / dof,
+        )
+    )
 end
 
 function refine_bandpass!(
