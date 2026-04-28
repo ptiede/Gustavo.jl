@@ -186,7 +186,7 @@ function apply_zero_mean_bandpass_gauge_track!(track, weights, ref_idx)
     return track
 end
 
-function antenna_feed_support_weights(Wblock, bl_pairs, pol_codes, nant)
+function antenna_feed_support_weights(Wblock, bl_pairs, pol_products, nant)
     nchan = size(Wblock, ndims(Wblock))
     support = zeros(eltype(Wblock), nant, 2, nchan)
 
@@ -195,7 +195,7 @@ function antenna_feed_support_weights(Wblock, bl_pairs, pol_codes, nant)
             w = Wblock[s, bi, pol, c]
             (w > 0 && isfinite(w)) || continue
             a, b = bl_pairs[bi]
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             support[a, fa, c] += w
             support[b, fb, c] += w
         end
@@ -204,7 +204,7 @@ function antenna_feed_support_weights(Wblock, bl_pairs, pol_codes, nant)
             w = Wblock[bi, pol, c]
             (w > 0 && isfinite(w)) || continue
             a, b = bl_pairs[bi]
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             support[a, fa, c] += w
             support[b, fb, c] += w
         end
@@ -278,7 +278,7 @@ function allocate_source_coherencies(Vblock)
     return ones(ComplexF64, nscan, nbl, 2, 2)
 end
 
-function solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_codes)
+function solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
     numer = zeros(ComplexF64, size(source))
     denom = zeros(Float64, size(source))
 
@@ -288,7 +288,7 @@ function solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_
             w = Wblock[s, bi, pol, c]
             (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
             a, b = bl_pairs[bi]
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             if ndims(gains) == 4
                 model = gains[s, a, fa, c] * conj(gains[s, b, fb, c])
             else
@@ -305,7 +305,7 @@ function solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_
             w = Wblock[bi, pol, c]
             (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
             a, b = bl_pairs[bi]
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             model = gains[a, fa, c] * conj(gains[b, fb, c])
             amp2 = abs2(model)
             (amp2 > 0 && isfinite(amp2)) || continue
@@ -324,7 +324,7 @@ function solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_
     return source
 end
 
-function joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_codes)
+function joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_products)
     objective = 0.0
 
     if ndims(Vblock) == 4
@@ -333,7 +333,7 @@ function joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_c
             w = Wblock[s, bi, pol, c]
             (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
             a, b = bl_pairs[bi]
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             if ndims(gains) == 4
                 model = gains[s, a, fa, c] * source[s, bi, fa, fb] * conj(gains[s, b, fb, c])
             else
@@ -348,7 +348,7 @@ function joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_c
             w = Wblock[bi, pol, c]
             (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
             a, b = bl_pairs[bi]
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             model = gains[a, fa, c] * source[1, bi, fa, fb] * conj(gains[b, fb, c])
             residual = v - model
             objective += w * abs2(residual)
@@ -406,7 +406,7 @@ function effective_gain_parameter_count(setup, state)
     return template_params + scan_params
 end
 
-function observed_source_parameter_count(Vblock, Wblock, pol_codes)
+function observed_source_parameter_count(Vblock, Wblock, pol_products)
     nscan = ndims(Vblock) == 4 ? size(Vblock, 1) : 1
     nbl = ndims(Vblock) == 4 ? size(Vblock, 2) : size(Vblock, 1)
     observed = falses(nscan, nbl, 2, 2)
@@ -416,7 +416,7 @@ function observed_source_parameter_count(Vblock, Wblock, pol_codes)
             v = Vblock[s, bi, pol, c]
             w = Wblock[s, bi, pol, c]
             (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             observed[s, bi, fa, fb] = true
         end
     elseif ndims(Vblock) == 3
@@ -424,7 +424,7 @@ function observed_source_parameter_count(Vblock, Wblock, pol_codes)
             v = Vblock[bi, pol, c]
             w = Wblock[bi, pol, c]
             (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
-            fa, fb = stokes_feed_pair(pol_codes[pol])
+            fa, fb = correlation_feed_pair(pol_products[pol])
             observed[1, bi, fa, fb] = true
         end
     else
@@ -457,15 +457,15 @@ function apply_zero_mean_bandpass_gauge_with_source!(gains, source, support_weig
 end
 
 function refine_joint_bandpass_als!(
-        gains, solved, Vblock, Wblock, bl_pairs, pol_codes, c0;
+        gains, solved, Vblock, Wblock, bl_pairs, pol_products, c0;
         max_iterations = 8, tolerance = 1.0e-6,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
     source = allocate_source_coherencies(Vblock)
-    support_weights = antenna_feed_support_weights(Wblock, bl_pairs, pol_codes, size(gains, 1))
-    solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_codes)
+    support_weights = antenna_feed_support_weights(Wblock, bl_pairs, pol_products, size(gains, 1))
+    solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
 
-    previous_objective = joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_codes)
+    previous_objective = joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_products)
 
     for _ in 1:max_iterations
         for c in axes(gains, 3), ant in axes(gains, 1), feed in axes(gains, 2)
@@ -478,7 +478,7 @@ function refine_joint_bandpass_als!(
                     w = Wblock[s, bi, pol, c]
                     (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
                     a, b = bl_pairs[bi]
-                    fa, fb = stokes_feed_pair(pol_codes[pol])
+                    fa, fb = correlation_feed_pair(pol_products[pol])
 
                     if a == ant && fa == feed
                         coeff = source[s, bi, feed, fb] * conj(gains[b, fb, c])
@@ -502,7 +502,7 @@ function refine_joint_bandpass_als!(
                     w = Wblock[bi, pol, c]
                     (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
                     a, b = bl_pairs[bi]
-                    fa, fb = stokes_feed_pair(pol_codes[pol])
+                    fa, fb = correlation_feed_pair(pol_products[pol])
 
                     if a == ant && fa == feed
                         coeff = source[1, bi, feed, fb] * conj(gains[b, fb, c])
@@ -530,8 +530,8 @@ function refine_joint_bandpass_als!(
         end
 
         apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, c0, gauge)
-        solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_codes)
-        objective = joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_codes)
+        solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
+        objective = joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_products)
 
         improvement = previous_objective - objective
         improvement <= 0 && break
@@ -998,11 +998,11 @@ The estimator first solves a raw per-channel complex feed-ratio track per scan,
 then projects that track onto the configured relative amplitude and phase basis
 for the reference station before applying it.
 """
-function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models, pol_codes; min_samples = 2)
+function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models, pol_products; min_samples = 2)
     nscan, nbl, _, nchan = size(V)
-    cross_pols = cross_hand_indices(pol_codes)
+    cross_pols = cross_hand_indices(pol_products)
     isnothing(cross_pols) && return ones(ComplexF64, nscan, nchan)
-    rr, ll = parallel_hand_indices(pol_codes)
+    rr, ll = parallel_hand_indices(pol_products)
     rl, lr = cross_pols.rl, cross_pols.lr
 
     xy_correction = ones(ComplexF64, nscan, nchan)
@@ -1039,10 +1039,10 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
                 for (num_pol, den_pol, w_num_c, w_den_c, w_num_c0, w_den_c0) in estimators
                     min(w_num_c, w_den_c, w_num_c0, w_den_c0) > 0 || continue
 
-                    num_c = corrected_visibility(V, gains, pol_codes, bi, a, b, num_pol, s, c)
-                    den_c = corrected_visibility(V, gains, pol_codes, bi, a, b, den_pol, s, c)
-                    num_c0 = corrected_visibility(V, gains, pol_codes, bi, a, b, num_pol, s, c0)
-                    den_c0 = corrected_visibility(V, gains, pol_codes, bi, a, b, den_pol, s, c0)
+                    num_c = corrected_visibility(V, gains, pol_products, bi, a, b, num_pol, s, c)
+                    den_c = corrected_visibility(V, gains, pol_products, bi, a, b, den_pol, s, c)
+                    num_c0 = corrected_visibility(V, gains, pol_products, bi, a, b, num_pol, s, c0)
+                    den_c0 = corrected_visibility(V, gains, pol_products, bi, a, b, den_pol, s, c0)
 
                     vals = (num_c, den_c, num_c0, den_c0)
                     all(isfinite(real(v)) && isfinite(imag(v)) && abs(v) > 0 for v in vals) || continue
@@ -1071,7 +1071,7 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
 end
 
 function solve_bandpass_single_scan(
-        Vs, Ws, bl_pairs, nant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
+        Vs, Ws, bl_pairs, nant, c0, channel_freqs, station_models, pol_products, parallel_pols;
         ant_names = nothing, context = "",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         parallel_hand_mask = nothing,
@@ -1092,7 +1092,7 @@ function solve_bandpass_single_scan(
     end
 
     joint_als_iterations > 0 && refine_joint_bandpass_als!(
-        gains, solved, Vs, Ws, bl_pairs, pol_codes, c0;
+        gains, solved, Vs, Ws, bl_pairs, pol_products, c0;
         max_iterations = joint_als_iterations, tolerance = joint_als_tolerance,
         gauge = gauge
     )
@@ -1106,7 +1106,7 @@ function solve_bandpass_single_scan(
 end
 
 function solve_bandpass_template(
-        V, W, bl_pairs, nant, c0, channel_freqs, station_models, pol_codes, parallel_pols;
+        V, W, bl_pairs, nant, c0, channel_freqs, station_models, pol_products, parallel_pols;
         ant_names = nothing, context = "template",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         parallel_hand_mask = nothing,
@@ -1126,7 +1126,7 @@ function solve_bandpass_template(
     end
 
     joint_als_iterations > 0 && refine_joint_bandpass_als!(
-        gains, nothing, V, W, bl_pairs, pol_codes, c0;
+        gains, nothing, V, W, bl_pairs, pol_products, c0;
         max_iterations = joint_als_iterations, tolerance = joint_als_tolerance,
         gauge = gauge
     )
@@ -1153,11 +1153,11 @@ function merge_scan_gains!(gain_slice, scan_gains, solved, phase_variable_mask, 
 end
 
 struct BandpassSolverSetup{
-        D <: UVData,
+        D,
         B <: AbstractVector{<:Tuple{<:Integer, <:Integer}},
         F <: AbstractVector{<:Real},
         S <: AbstractVector{<:StationBandpassModel},
-        C <: AbstractVector{<:Integer},
+        C <: AbstractVector{<:AbstractString},
         G <: AbstractBandpassGauge,
     }
     data::D
@@ -1169,7 +1169,7 @@ struct BandpassSolverSetup{
     station_models::S
     parallel_pols::Tuple{Int, Int}
     parallel_hand_mask::BitMatrix
-    pol_codes::C
+    pol_products::C
     c0::Int
     phase_variable_mask::BitMatrix
     amplitude_variable_mask::BitMatrix
@@ -1232,8 +1232,23 @@ function BandpassALS(; iterations = 1, tolerance = 1.0e-6, refine_template = tru
     return BandpassALS(Int(iterations), Float64(tolerance), Bool(refine_template), Bool(refine_scans))
 end
 
+function prepare_bandpass_solver(avg::UVSet, ref_ant; kwargs...)
+    src_list = sources(avg)
+    if length(src_list) > 1
+        error(
+            "prepare_bandpass_solver requires a single-source UVSet; " *
+                "got sources=$(src_list). Use prepare_bandpass_solver(uvset, source, ref_ant) " *
+                "or call select_source first."
+        )
+    end
+    return prepare_bandpass_solver(_to_bandpass_dataset(avg), ref_ant; kwargs...)
+end
+
+prepare_bandpass_solver(avg::UVSet, source::AbstractString, ref_ant; kwargs...) =
+    prepare_bandpass_solver(_to_bandpass_dataset(select_source(avg, source)), ref_ant; kwargs...)
+
 function prepare_bandpass_solver(
-        avg::UVData, ref_ant;
+        avg::BandpassDataset, ref_ant;
         min_baselines = 3, station_models = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
@@ -1248,7 +1263,8 @@ function prepare_bandpass_solver(
     end
 
     gauge = validate_bandpass_gauge(gauge, nant)
-    parallel_pols = parallel_hand_indices(avg.metadata.pol_codes)
+    pols = pol_products(avg)
+    parallel_pols = parallel_hand_indices(pols)
     parallel_hand_mask = build_parallel_hand_mask(avg.antennas, avg.baselines.pairs)
     c0 = best_ref_channel(avg)
     phase_variable_mask = falses(nant, 2)
@@ -1264,11 +1280,11 @@ function prepare_bandpass_solver(
         gauge,
         min_baselines,
         avg.baselines.pairs,
-        avg.metadata.channel_freqs,
+        avg.metadata.freq_setup.channel_freqs,
         station_models,
         parallel_pols,
         parallel_hand_mask,
-        avg.metadata.pol_codes,
+        pols,
         c0,
         phase_variable_mask,
         amplitude_variable_mask,
@@ -1276,9 +1292,9 @@ function prepare_bandpass_solver(
 end
 
 function update_state_sources_and_objectives!(setup::BandpassSolverSetup, state::BandpassSolverState)
-    solve_source_coherencies!(state.template_source, state.gains_template, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_codes)
+    solve_source_coherencies!(state.template_source, state.gains_template, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products)
     state.template_objective = joint_bandpass_objective(
-        state.gains_template, state.template_source, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_codes
+        state.gains_template, state.template_source, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products
     )
 
     for s in axes(state.scan_gains, 1)
@@ -1289,7 +1305,7 @@ function update_state_sources_and_objectives!(setup::BandpassSolverSetup, state:
             view(setup.data.vis, s, :, :, :),
             view(setup.data.weights, s, :, :, :),
             setup.bl_pairs,
-            setup.pol_codes
+            setup.pol_products
         )
         state.scan_sources[s, :, :, :] .= scan_source[1, :, :, :]
         state.scan_objectives[s] = joint_bandpass_objective(
@@ -1298,7 +1314,7 @@ function update_state_sources_and_objectives!(setup::BandpassSolverSetup, state:
             view(setup.data.vis, s, :, :, :),
             view(setup.data.weights, s, :, :, :),
             setup.bl_pairs,
-            setup.pol_codes
+            setup.pol_products
         )
     end
 
@@ -1364,7 +1380,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
         setup.c0,
         setup.channel_freqs,
         setup.station_models,
-        setup.pol_codes,
+        setup.pol_products,
         setup.parallel_pols;
         ant_names = data.antennas.name,
         min_baselines = setup.min_baselines,
@@ -1384,7 +1400,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
             setup.c0,
             setup.channel_freqs,
             setup.station_models,
-            setup.pol_codes,
+            setup.pol_products,
             setup.parallel_pols;
             ant_names = data.antennas.name,
             context = string("scan ", s),
@@ -1407,7 +1423,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, initializer::Rand
     rng = initializer.rng
 
     gains_template = exp.(initializer.amplitude_sigma .* randn(rng, nant, 2, nchan)) .* cis.(initializer.phase_sigma .* randn(rng, nant, 2, nchan))
-    support_template = antenna_feed_support_weights(data.weights, setup.bl_pairs, setup.pol_codes, nant)
+    support_template = antenna_feed_support_weights(data.weights, setup.bl_pairs, setup.pol_products, nant)
     apply_bandpass_gauge!(gains_template, support_template, setup.c0, setup.gauge)
 
     scan_gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
@@ -1415,7 +1431,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, initializer::Rand
         scan_gains .*= exp.(initializer.scan_perturbation .* randn(rng, nscan, nant, 2, nchan)) .* cis.(initializer.scan_perturbation .* randn(rng, nscan, nant, 2, nchan))
     end
     for s in 1:nscan
-        support_scan = antenna_feed_support_weights(view(data.weights, s, :, :, :), setup.bl_pairs, setup.pol_codes, nant)
+        support_scan = antenna_feed_support_weights(view(data.weights, s, :, :, :), setup.bl_pairs, setup.pol_products, nant)
         apply_bandpass_gauge!(view(scan_gains, s, :, :, :), support_scan, setup.c0, setup.gauge)
     end
     scan_solved = trues(nscan, nant, 2, nchan)
@@ -1430,7 +1446,7 @@ bandpass_state_objective(state::BandpassSolverState) = state.template_objective 
 function fit_bandpass_source_coherencies(setup::BandpassSolverSetup, gains = nothing)
     isnothing(gains) && error("gains must be provided")
     source = allocate_source_coherencies(setup.data.vis)
-    solve_source_coherencies!(source, gains, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_codes)
+    solve_source_coherencies!(source, gains, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products)
     return source
 end
 
@@ -1446,7 +1462,7 @@ function compute_bandpass_model_and_residuals(setup::BandpassSolverSetup, gains,
         (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
 
         a, b = setup.bl_pairs[bi]
-        fa, fb = stokes_feed_pair(setup.pol_codes[pol])
+        fa, fb = correlation_feed_pair(setup.pol_products[pol])
         m = gains[s, a, fa, c] * source[s, bi, fa, fb] * conj(gains[s, b, fb, c])
         model[s, bi, pol, c] = m
         residual[s, bi, pol, c] = v - m
@@ -1505,7 +1521,7 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseli
     rows = NamedTuple[]
 
     if by == :baseline
-        for (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_codes)
+        for (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_products)
             stats = summarize_bandpass_residual_block(
                 view(residual, :, bi, pol, :),
                 view(setup.data.weights, :, bi, pol, :)
@@ -1515,13 +1531,13 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseli
                 rows, merge(
                     (
                         baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
-                        pol = setup.data.metadata.pol_labels[pol],
+                        pol = setup.pol_products[pol],
                     ), stats
                 )
             )
         end
     elseif by == :scan_baseline
-        for s in axes(setup.data.vis, 1), (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_codes)
+        for s in axes(setup.data.vis, 1), (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_products)
             stats = summarize_bandpass_residual_block(
                 view(residual, s, bi, pol, :),
                 view(setup.data.weights, s, bi, pol, :)
@@ -1532,7 +1548,7 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseli
                     (
                         scan = s,
                         baseline = string(setup.data.antennas.name[a], "-", setup.data.antennas.name[b]),
-                        pol = setup.data.metadata.pol_labels[pol],
+                        pol = setup.pol_products[pol],
                     ), stats
                 )
             )
@@ -1584,7 +1600,7 @@ function bandpass_fit_stats(setup::BandpassSolverSetup, gains)
 
     nvis = weighted_visibility_count(setup.data.weights)
     nreal = 2 * nvis
-    chi2 = joint_bandpass_objective(gains, merged_source, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_codes)
+    chi2 = joint_bandpass_objective(gains, merged_source, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products)
 
     return (
         chi2 = chi2,
@@ -1603,7 +1619,7 @@ function bandpass_fit_stats(setup::BandpassSolverSetup, state::BandpassSolverSta
     nparams = effective_gain_parameter_count(setup, state) + observed_source_parameter_count(
         setup.data.vis,
         setup.data.weights,
-        setup.pol_codes
+        setup.pol_products
     )
     dof = max(stats.nreal - nparams, 1)
     return merge(
@@ -1624,7 +1640,7 @@ function refine_bandpass!(
 
     if refinement.refine_template
         refine_joint_bandpass_als!(
-            state.gains_template, nothing, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_codes, setup.c0;
+            state.gains_template, nothing, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products, setup.c0;
             max_iterations = refinement.iterations, tolerance = refinement.tolerance,
             gauge = setup.gauge
         )
@@ -1638,7 +1654,7 @@ function refine_bandpass!(
                 view(setup.data.vis, s, :, :, :),
                 view(setup.data.weights, s, :, :, :),
                 setup.bl_pairs,
-                setup.pol_codes,
+                setup.pol_products,
                 setup.c0;
                 max_iterations = refinement.iterations,
                 tolerance = refinement.tolerance,
@@ -1726,7 +1742,7 @@ function finalize_bandpass_state(
             setup.c0,
             setup.channel_freqs,
             setup.station_models,
-            setup.pol_codes
+            setup.pol_products
         )
         merged_gains[:, setup.ref_ant, ref_partner_feed, :] .*= xy_correction
     end
@@ -1752,7 +1768,7 @@ function finalize_bandpass_state(
 end
 
 """
-    solve_bandpass(avg::UVData, ref_ant; min_baselines=3,
+    solve_bandpass(avg::UVSet, ref_ant; min_baselines=3,
                    station_models=nothing,
                    gauge=ZeroMeanBandpassGauge(),
                    apply_relative_correction=true, joint_als_iterations=8,
@@ -1783,8 +1799,31 @@ Returns:
   c0                            – internal reference channel used for ratios, phase unwrapping, and relative-feed correction
   xy_correction                 – `DimArray` with scan/IF axes and metadata for the target site/pol
 """
+function solve_bandpass(avg::UVSet, ref_ant; kwargs...)
+    src_list = sources(avg)
+    if length(src_list) > 1
+        error(
+            "solve_bandpass requires a single-source UVSet; got sources=$(src_list). " *
+                "Use solve_bandpass(uvset, source, ref_ant) or call select_source first."
+        )
+    end
+    return solve_bandpass(_to_bandpass_dataset(avg), ref_ant; kwargs...)
+end
+
+solve_bandpass(uvset::UVSet, source::AbstractString, ref_ant; kwargs...) =
+    solve_bandpass(_to_bandpass_dataset(select_source(uvset, source)), ref_ant; kwargs...)
+
+# Per-leaf solve: `key` is a branch key like `:M3C273_scan_1`.
+function solve_bandpass(uvset::UVSet, key::Symbol, ref_ant; kwargs...)
+    branches_d = DimensionalData.branches(uvset)
+    haskey(branches_d, key) || error("UVSet has no partition $key")
+    info = DimensionalData.metadata(branches_d[key])
+    sub = select_partition(uvset; source = info.source_name, scan = info.scan_idx)
+    return solve_bandpass(scan_average(sub), ref_ant; kwargs...)
+end
+
 function solve_bandpass(
-        avg::UVData, ref_ant;
+        avg::BandpassDataset, ref_ant;
         min_baselines = 3, station_models = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
         apply_relative_correction = true, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6

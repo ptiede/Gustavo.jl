@@ -1,37 +1,89 @@
-function parallel_hand_indices(pol_codes)
-    rr = findfirst(==(-1), pol_codes)
-    ll = findfirst(==(-2), pol_codes)
-    !isnothing(rr) && !isnothing(ll) && return rr, ll
-    xx = findfirst(==(-5), pol_codes)
-    yy = findfirst(==(-6), pol_codes)
-    !isnothing(xx) && !isnothing(yy) && return xx, yy
-    error("Parallel-hand products not found in pol_codes=$(collect(pol_codes))")
+"""
+    correlation_feed_pair(label::AbstractString) -> Tuple{Int, Int}
+
+Map a generic correlation-product label `"PP"`/`"PQ"`/`"QP"`/`"QQ"` to the
+`(feed_a_idx, feed_b_idx)` pair (each ∈ {1, 2}) that the visibility
+`V[a, b, p]` relates to per-antenna gains via
+`V[a, b, p] = g_a[feed_a] · S · conj(g_b[feed_b])`.
+"""
+function correlation_feed_pair(label::AbstractString)
+    length(label) == 2 || error("correlation_feed_pair: expected 2-char label, got \"$label\"")
+    a = _feed_index(label[1])
+    b = _feed_index(label[2])
+    return a, b
+end
+_feed_index(c::Char) = c == 'P' ? 1 : c == 'Q' ? 2 : error("Unsupported feed letter '$c' (expected 'P' or 'Q')")
+
+"""
+    is_parallel_hand(label::AbstractString) -> Bool
+
+True for the parallel-hand correlations `"PP"` and `"QQ"`; false for
+`"PQ"` and `"QP"`.
+"""
+is_parallel_hand(label::AbstractString) =
+    length(label) == 2 && label[1] == label[2]
+
+"""
+    same_feed_label(a, b) -> Bool
+
+True iff two `PolTypes` (RPol/LPol/XPol/YPol) carry the same feed label.
+Used by `build_parallel_hand_mask` to determine, per-baseline, whether
+the two antennas' feed-1 (resp. feed-2) form a parallel-hand correlation.
+"""
+same_feed_label(a::T, b::T) where {T <: PolTypes} = true
+same_feed_label(::PolTypes, ::PolTypes) = false
+
+"""
+    parallel_hand_indices(pol_products) -> Tuple{Int, Int}
+
+Indices of `"PP"` and `"QQ"` in `pol_products`. Errors if either is
+missing.
+"""
+function parallel_hand_indices(pol_products)
+    pp = findfirst(==("PP"), pol_products)
+    qq = findfirst(==("QQ"), pol_products)
+    isnothing(pp) || isnothing(qq) &&
+        error("Parallel-hand products not found in pol_products=$(collect(pol_products))")
+    return pp, qq
 end
 
-function cross_hand_indices(pol_codes)
-    rl = findfirst(==(-3), pol_codes)
-    lr = findfirst(==(-4), pol_codes)
-    !isnothing(rl) && !isnothing(lr) && return (; rl, lr)
-    xy = findfirst(==(-7), pol_codes)
-    yx = findfirst(==(-8), pol_codes)
-    !isnothing(xy) && !isnothing(yx) && return (; xy, yx)
+"""
+    cross_hand_indices(pol_products) -> NamedTuple{(:pq, :qp), Tuple{Int, Int}} or nothing
+
+Indices of the two cross-hand correlations `"PQ"` and `"QP"`, or `nothing`
+if either is absent.
+"""
+function cross_hand_indices(pol_products)
+    pq = findfirst(==("PQ"), pol_products)
+    qp = findfirst(==("QP"), pol_products)
+    !isnothing(pq) && !isnothing(qp) && return (; pq, qp)
     return nothing
 end
 
+# `build_parallel_hand_mask(antennas, bl_pairs)` answers, for each
+# `(baseline, feed_index ∈ {1, 2})`, whether antenna A's feed-`feed_index`
+# and antenna B's feed-`feed_index` carry the same nominal label (so the
+# corresponding parallel-hand correlation on this baseline is meaningful).
+# Mixed-feed arrays produce `false` for baselines crossing different
+# nominal labels; uniform-feed arrays produce all `true`.
 function build_parallel_hand_mask(antennas, bl_pairs)
     mask = falses(length(bl_pairs), 2)
+    nb = antennas.nominal_basis  # Vector{NTuple{2, PolTypes}} via StructArray forwarding
     for (bi, (a, b)) in enumerate(bl_pairs)
-        mask[bi, 1] = same_feed_type(antennas.feed_a[a], antennas.feed_a[b])
-        mask[bi, 2] = same_feed_type(antennas.feed_b[a], antennas.feed_b[b])
+        mask[bi, 1] = same_feed_label(nb[a][1], nb[b][1])
+        mask[bi, 2] = same_feed_label(nb[a][2], nb[b][2])
     end
     return mask
 end
 
-polarization_feeds(data::UVData, pol_index::Integer) = stokes_feed_pair(data.metadata.pol_codes[pol_index])
+polarization_feeds(data::BandpassDataset, pol_index::Integer) =
+    correlation_feed_pair(pol_products(data)[pol_index])
+polarization_feeds(uvset::UVSet, pol_index::Integer) =
+    correlation_feed_pair(pol_products(uvset)[pol_index])
 
-function best_ref_channel(data::UVData)
-    rr, ll = parallel_hand_indices(data.metadata.pol_codes)
-    pols = [rr, ll]
+function best_ref_channel(data::BandpassDataset)
+    pp, qq = parallel_hand_indices(pol_products(data))
+    pols = [pp, qq]
     return argmax(vec(sum(data.weights[:, :, pols, :], dims = (1, 2, 3))))
 end
 
@@ -64,7 +116,7 @@ end
 
 # Convention across Gustavo: a "weight" is always an *inverse variance*
 # (precision, 1/σ²), matching both the Gaussian-likelihood derivation of
-# weighted least squares and the AIPS UVFITS convention (Memo 117: visibility
+# weighted least squares and the AIPS UVData convention (Memo 117: visibility
 # weights are in Jy⁻² = variance⁻¹).
 #
 # For y_i = A_i x + ε_i with independent ε_i ~ N(0, σ_i²) the MLE is
@@ -77,7 +129,7 @@ _row_scale(inv_variances) = sqrt.(inv_variances)
 
 # Promote the WLS triple `(A, b, inv_variances)` to a single common element
 # type. The design matrix `A` is built in Float64 by `design_matrices`, but
-# `b` (log-amplitudes / phases) and `inv_variances` (UVFITS weights) come in
+# `b` (log-amplitudes / phases) and `inv_variances` (UVData weights) come in
 # at Float32 since AIPS Memo 117 stores weights as `1E`. LinearSolve's QR
 # `ldiv!` rejects a Float64 factorization against a Float32 RHS, so we have
 # to align eltypes up front.
@@ -166,8 +218,8 @@ function phase_relative_to_ref(phases, ref_idx = 1)
     return relative
 end
 
-function corrected_visibility(V, gains, pol_codes, bi, a, b, pol, s, c)
-    fa, fb = stokes_feed_pair(pol_codes[pol])
+function corrected_visibility(V, gains, pol_products, bi, a, b, pol, s, c)
+    fa, fb = correlation_feed_pair(pol_products[pol])
     return V[s, bi, pol, c] / (gains[s, a, fa, c] * conj(gains[s, b, fb, c]))
 end
 
@@ -185,12 +237,12 @@ function choose_local_phase_reference(active_ants, gauge, station_models, connec
     return candidates[argmax(scores)]
 end
 
-function choose_phase_reference(avg::UVData, variable_ants)
+function choose_phase_reference(avg::BandpassDataset, variable_ants)
     W = avg.weights
     nant = length(avg.antennas)
     blocked = falses(nant)
     blocked[variable_ants] .= true
-    pols = parallel_hand_indices(avg.metadata.pol_codes)
+    pols = parallel_hand_indices(pol_products(avg))
     scores = zeros(Float64, nant)
 
     for s in axes(W, 1), bi in axes(W, 2), pol in pols, c in axes(W, 4)
@@ -205,6 +257,9 @@ function choose_phase_reference(avg::UVData, variable_ants)
     scores[phase_ref] > 0 || error("No stable antenna available for phase reference")
     return phase_ref
 end
+
+choose_phase_reference(uvset::UVSet, variable_ants) =
+    choose_phase_reference(_to_bandpass_dataset(uvset), variable_ants)
 
 function build_station_models(
         ant_names, station_model_map;

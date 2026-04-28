@@ -1,3 +1,79 @@
+# Plotting helpers consume either a `UVSet` (canonical, leaf-walking) or a
+# `BandpassDataset` (per-scan-averaged cube the solver consumes). Accessors
+# below return the same logical fields from either shape so internal helpers
+# don't have to branch on type.
+const _DataLike = Union{UVSet, BandpassDataset}
+
+_scans(data::BandpassDataset) = data.scans
+_scans(data::UVSet) = DimensionalData.metadata(data).scans
+_antenna_names_v(data::BandpassDataset) = data.antennas.name
+_antenna_names_v(data::UVSet) = DimensionalData.metadata(data).antennas.name
+
+# Build the union baseline pair list from a UVSet (every (a,b) that appears
+# in any leaf). For BandpassDataset, the per-scan-averaged cube already
+# carries the union as `data.baselines.pairs`.
+_baseline_pairs(data::BandpassDataset) = data.baselines.pairs
+function _baseline_pairs(data::UVSet)
+    seen = Set{Tuple{Int, Int}}()
+    out = Tuple{Int, Int}[]
+    for (_, leaf) in DimensionalData.branches(data)
+        for p in baselines(leaf).pairs
+            p in seen && continue
+            push!(seen, p)
+            push!(out, p)
+        end
+    end
+    return out
+end
+
+# Locate `bl` (e.g. ("AA", "AX")) within a single leaf's local baseline
+# index. Returns `nothing` if the baseline is absent from that leaf.
+function _local_baseline_idx(leaf::DimensionalData.AbstractDimTree, bl::Tuple{<:AbstractString, <:AbstractString})
+    bls = baselines(leaf)
+    a, b = String(bl[1]), String(bl[2])
+    @inbounds for i in eachindex(bls.pairs)
+        bls.ant1_names[i] == a && bls.ant2_names[i] == b && return i
+    end
+    return nothing
+end
+
+# Collect per-scan (leaf) blocks of (vis_before, vis_after, w_before, w_after)
+# for one (baseline, pol) selection. Returns a Vector of NamedTuples ordered
+# by branch (= scan_idx). Leaves that don't carry the baseline are skipped.
+function _baseline_scan_blocks(data::UVSet, corr::UVSet, bl_plot, pol_index::Integer)
+    blocks = NamedTuple[]
+    src_d = DimensionalData.branches(data)
+    src_c = DimensionalData.branches(corr)
+    for (k, leaf_d) in src_d
+        leaf_c = src_c[k]
+        bi_d = _local_baseline_idx(leaf_d, bl_plot)
+        isnothing(bi_d) && continue
+        bi_c = _local_baseline_idx(leaf_c, bl_plot)
+        isnothing(bi_c) && continue
+        sid = DimensionalData.metadata(leaf_d).scan_idx
+        push!(
+            blocks, (
+                sid = sid,
+                vis_b = copy(parent(leaf_d[:vis])[:, bi_d, pol_index, :]),
+                vis_a = copy(parent(leaf_c[:vis])[:, bi_c, pol_index, :]),
+                w_b = copy(parent(leaf_d[:weights])[:, bi_d, pol_index, :]),
+                w_a = copy(parent(leaf_c[:weights])[:, bi_c, pol_index, :]),
+            )
+        )
+    end
+    return blocks
+end
+
+# vcat per-scan blocks into a single (nrec, nchan) matrix and a parallel
+# `groups::Vector{Int}` of per-record scan ids.
+function _concat_scan_blocks(blocks; field::Symbol)
+    isempty(blocks) && return Matrix{ComplexF64}(undef, 0, 0), Int[]
+    cols = [getproperty(b, field) for b in blocks]
+    cat = vcat(cols...)
+    groups = vcat([fill(b.sid, size(getproperty(b, field), 1)) for b in blocks]...)
+    return cat, groups
+end
+
 function diagnostic_weight_pair(weights, weights_corr; comparison_weights = :input)
     if comparison_weights == :input
         return weights, weights
@@ -8,113 +84,9 @@ function diagnostic_weight_pair(weights, weights_corr; comparison_weights = :inp
     end
 end
 
-diagnostic_scan_colormap(nscan) = cgrad(get(ColorSchemes.tol_muted, range(0, 1, length = max(nscan, 1))), categorical = true)
-
-function annotate_coherence!(ax, stats; fontsize = 11)
-    return text!(
-        ax, 0.98, 0.96;
-        text = coherence_label(stats),
-        space = :relative, align = (:right, :top), fontsize = fontsize
-    )
-end
-
-"""
-    plot_stability(data, corr, bl_plot;
-                   quantity=:phase, pol=:parallel,
-                   relative=false, comparison_weights=:input)
-
-Two-column figure showing scan-averaged baseline stability versus channel for
-`bl_plot` before (left) and after (right) correction. Set `quantity=:phase` or
-`:amplitude` and choose which polarization products to plot with `pol`.
-
-For phase plots, `relative=true` suppresses scan-constant offsets by plotting
-phase relative to the reference channel. For amplitude plots, `relative=true`
-normalizes each spectrum by its reference-channel amplitude.
-
-The default `pol=:parallel` plots the two parallel-hand products. Use
-`pol=:all` to include every product, or pass a single polarization label/index
-or a collection of labels/indices.
-
-For before/after comparison, the default `comparison_weights=:input` uses the
-same pre-correction weights on both panels so gain-amplitude rescaling does not
-change the apparent scatter purely through reweighting. Use
-`comparison_weights=:native` to plot each panel with its own weights.
-"""
-function plot_stability(
-        parent,
-        data::UVData, corr::UVData, bl_plot;
-        quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input
-    )
-    int_inds = _baseline_integration_indices(data, bl_plot)
-    nscan = length(data.scans)
-    scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
-    ylabel, summarize, scatter_series, scatter_noise, annotate_metric! = stability_plotting_config(quantity; relative = relative)
-    plot_weights_before, plot_weights_after = diagnostic_weight_pair(
-        data.weights, corr.weights;
-        comparison_weights = comparison_weights
-    )
-
-    for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        ax_b = Axis(
-            parent[row, 1]; title = "$(join(bl_plot, "-")) $lab  before",
-            xlabel = "channel", ylabel = ylabel
-        )
-        ax_a = Axis(
-            parent[row, 2]; title = "$(join(bl_plot, "-")) $lab  after",
-            xlabel = "channel", ylabel = ylabel
-        )
-        linkxaxes!(ax_b, ax_a)
-        linkyaxes!(ax_b, ax_a)
-
-        vis_before = @view data.vis[int_inds, pi, :]
-        vis_after = @view corr.vis[int_inds, pi, :]
-        w_before = @view plot_weights_before[int_inds, pi, :]
-        w_after = @view plot_weights_after[int_inds, pi, :]
-        scan_groups = data.scan_idx[int_inds]
-
-        summary_before = summarize(vis_before, w_before; groups = scan_groups)
-        summary_after = summarize(vis_after, w_after; groups = scan_groups)
-        lines!(ax_b, summary_before; color = :black, linewidth = 2, linestyle = :dot)
-        lines!(ax_a, summary_after; color = :black, linewidth = 2, linestyle = :dot)
-        plotted_series = Any[summary_before, summary_after]
-        plotted_noise = Any[]
-
-        annotate_metric!(ax_b, vis_before, w_before, scan_groups)
-        annotate_metric!(ax_a, vis_after, w_after, scan_groups)
-
-        for s in 1:nscan
-            ii = int_inds[findall(==(s), @view data.scan_idx[int_inds])]
-            isempty(ii) && continue
-            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 9)
-            before_phase = scatter_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups = nothing)
-            after_phase = scatter_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups = nothing)
-            before_noise = scatter_noise(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; groups = nothing)
-            after_noise = scatter_noise(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; groups = nothing)
-            scatter!(ax_b, before_phase; kw...)
-            scatter!(ax_a, after_phase; kw...)
-            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
-            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
-            push!(plotted_series, before_phase, after_phase)
-            push!(plotted_noise, before_noise, after_noise)
-        end
-
-        ylims = finite_series_ylims(plotted_series, plotted_noise)
-        isnothing(ylims) || ylims!(ax_b, ylims...)
-    end
-
-    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
-    return parent
-end
-
-function plot_stability(
-        data::UVData, corr::UVData, bl_plot;
-        quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input
-    )
-    fig = Figure(size = (900, 280 * length(resolve_plot_polarizations(data; pol = pol)[1]) + 40))
-    plot_stability(fig, data, corr, bl_plot; quantity = quantity, pol = pol, relative = relative, comparison_weights = comparison_weights)
-    return fig
-end
+# `diagnostic_scan_colormap`, `annotate_coherence!`, and `plot_stability`
+# live in the `GustavoMakieExt` extension (load Makie or CairoMakie to
+# enable plotting).
 
 function weighted_channel_average(vis_block, weight_block)
     nchan = size(vis_block, 2)
@@ -296,11 +268,12 @@ function amplitude_range_label(vis_block, weight_block; groups = nothing)
     return @sprintf("median rel amp span %.3f", median(ranges))
 end
 
-function resolve_plot_polarizations(data::UVData; pol = :parallel)
+function resolve_plot_polarizations(data::_DataLike; pol = :parallel)
+    pp = pol_products(data)
     if pol == :parallel
-        pol_idx = collect(parallel_hand_indices(data.metadata.pol_codes))
+        pol_idx = collect(parallel_hand_indices(pp))
     elseif pol == :all
-        pol_idx = collect(eachindex(data.metadata.pol_codes))
+        pol_idx = collect(eachindex(pp))
     elseif pol isa Integer
         pol_idx = [Int(pol)]
     elseif pol isa AbstractString
@@ -311,60 +284,31 @@ function resolve_plot_polarizations(data::UVData; pol = :parallel)
         error("Unsupported polarization selector: $pol")
     end
 
-    all(1 .<= pol_idx .<= length(data.metadata.pol_codes)) || error("Polarization index out of bounds: $pol_idx")
-    return pol_idx, collect(data.metadata.pol_labels[pol_idx])
+    all(1 .<= pol_idx .<= length(pp)) || error("Polarization index out of bounds: $pol_idx")
+    return pol_idx, collect(pp[pol_idx])
 end
 
-resolve_single_polarization(data::UVData, pol::Integer) = Int(pol)
-function resolve_single_polarization(data::UVData, pol::AbstractString)
-    idx = findfirst(==(pol), data.metadata.pol_labels)
+resolve_single_polarization(data::_DataLike, pol::Integer) = Int(pol)
+function resolve_single_polarization(data::_DataLike, pol::AbstractString)
+    pp = pol_products(data)
+    idx = findfirst(==(pol), pp)
     isnothing(idx) || return idx
 
     if pol in ("11", "22")
-        rr, ll = parallel_hand_indices(data.metadata.pol_codes)
-        return pol == "11" ? rr : ll
+        p_idx, q_idx = parallel_hand_indices(pp)
+        return pol == "11" ? p_idx : q_idx
     end
     if pol in ("12", "21")
-        cross = cross_hand_indices(data.metadata.pol_codes)
-        isnothing(cross) && error("Cross-hand pol $pol not found in $(collect(data.metadata.pol_labels))")
-        return pol == "12" ? cross[1] : cross[2]
+        cross = cross_hand_indices(pp)
+        isnothing(cross) && error("Cross-hand pol $pol not found in $(collect(pp))")
+        return pol == "12" ? cross.pq : cross.qp
     end
-    error("Polarization $pol not found in $(collect(data.metadata.pol_labels))")
+    error("Polarization $pol not found in $(collect(pp))")
 end
 
-function stability_plotting_config(quantity; relative = false)
-    if quantity == :phase
-        ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
-        summarize = (vis_block, weight_block; groups = nothing) -> phase_series(vis_block, weight_block; relative = relative)
-        scatter_series = summarize
-        scatter_noise = (vis_block, weight_block; groups = nothing) -> phase_noise_series(vis_block, weight_block; relative = relative)
-        annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
-            return annotate_coherence!(ax, residual_phase_coherence(vis_block, weight_block; groups = scan_groups); fontsize = 12)
-        end
-    elseif quantity == :amplitude
-        ylabel = relative ? "amplitude / ref" : "amplitude"
-        summarize = (vis_block, weight_block; groups = nothing) -> scan_averaged_amplitude_series(
-            vis_block, weight_block; relative = relative, groups = groups
-        )
-        scatter_series = (vis_block, weight_block; groups = nothing) -> amplitude_series(
-            vis_block, weight_block; relative = relative
-        )
-        scatter_noise = (vis_block, weight_block; groups = nothing) -> amplitude_noise_series(
-            vis_block, weight_block; relative = relative
-        )
-        annotate_metric! = function (ax, vis_block, weight_block, scan_groups)
-            return text!(
-                ax, 0.98, 0.96;
-                text = amplitude_range_label(vis_block, weight_block; groups = scan_groups),
-                space = :relative, align = (:right, :top), fontsize = 12
-            )
-        end
-    else
-        error("quantity must be :phase or :amplitude")
-    end
-
-    return ylabel, summarize, scatter_series, scatter_noise, annotate_metric!
-end
+# `stability_plotting_config` lives in `GustavoMakieExt` because the
+# amplitude branch's `annotate_metric!` closure calls Makie's `text!`.
+function stability_plotting_config end
 
 function finite_series_ylims(
         series_blocks, noise_blocks = ();
@@ -397,39 +341,7 @@ function finite_series_ylims(
     return ymin - pad, ymax + pad
 end
 
-function plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; alpha = 0.75, linewidth = 1.8, cap_width = 0.22)
-    xs = Float64[]
-    ys = Float64[]
-    cap_xs = Float64[]
-    cap_ys = Float64[]
-    for (channel, (value, sigma)) in enumerate(zip(series, noise))
-        (isfinite(value) && isfinite(sigma) && sigma > 0) || continue
-        push!(xs, channel, channel)
-        push!(ys, value - sigma, value + sigma)
-        push!(cap_xs, channel - cap_width, channel + cap_width)
-        push!(cap_ys, value - sigma, value - sigma)
-        push!(cap_xs, channel - cap_width, channel + cap_width)
-        push!(cap_ys, value + sigma, value + sigma)
-    end
-    isempty(xs) && return ax
-    linesegments!(
-        ax, xs, ys;
-        color = scan_index,
-        alpha = alpha,
-        colormap = scan_wheel,
-        colorrange = (1, max(nscan, 1)),
-        linewidth = linewidth
-    )
-    isempty(cap_xs) || linesegments!(
-        ax, cap_xs, cap_ys;
-        color = scan_index,
-        alpha = alpha,
-        colormap = scan_wheel,
-        colorrange = (1, max(nscan, 1)),
-        linewidth = linewidth
-    )
-    return ax
-end
+# `plot_noise_segments!` lives in the `GustavoMakieExt` extension.
 
 function shared_track(tracks; atol = 1.0e-12, rtol = 1.0e-9)
     representative = nothing
@@ -524,19 +436,22 @@ function coherence_label(stats)
 end
 
 """
-    coherence_loss_table(avg::UVData, avg_corr::UVData;
+    coherence_loss_table(avg::_DataLike, avg_corr::_DataLike;
                          pol_idx=[parallel-hand indices], pol_labels=[parallel-hand labels],
                          comparison_weights=:input)
 
 Build a baseline-by-baseline diagnostic table of expected coherence loss from
 within-scan channel phase scatter before and after bandpass correction.
-`avg` and `avg_corr` are scan-averaged `UVData` objects (returned by `scan_average`).
+`avg` and `avg_corr` are scan-averaged `UVPartition` objects (returned by `scan_average`).
 By default this uses the original input weights on both sides so the comparison
 isolates phase improvement instead of gain-amplitude reweighting. Set
 `comparison_weights=:native` to evaluate the corrected data with its updated weights.
 """
+coherence_loss_table(avg::UVSet, avg_corr::UVSet; kwargs...) =
+    coherence_loss_table(_to_bandpass_dataset(avg), _to_bandpass_dataset(avg_corr); kwargs...)
+
 function coherence_loss_table(
-        avg::UVData, avg_corr::UVData;
+        avg::_DataLike, avg_corr::_DataLike;
         pol_idx = nothing, pol_labels = nothing, comparison_weights = :input
     )
     V = avg.vis
@@ -546,11 +461,12 @@ function coherence_loss_table(
         avg.weights, avg_corr.weights;
         comparison_weights = comparison_weights
     )
+    pp = pol_products(avg)
     if isnothing(pol_idx)
-        rr, ll = parallel_hand_indices(avg.metadata.pol_codes)
-        pol_idx = [rr, ll]
+        p_idx, q_idx = parallel_hand_indices(pp)
+        pol_idx = [p_idx, q_idx]
     end
-    isnothing(pol_labels) && (pol_labels = avg.metadata.pol_labels[pol_idx])
+    isnothing(pol_labels) && (pol_labels = pp[pol_idx])
     rows = NamedTuple[]
 
     for bi in eachindex(avg.baselines.pairs)
@@ -665,15 +581,19 @@ function print_site_coherence_rows(rows, site::String; pol = nothing, io = stdou
     return filtered
 end
 
-function baseline_in_data(data::UVData, bl_plot)
-    a_idx = findfirst(==(bl_plot[1]), data.antennas.name)
-    b_idx = findfirst(==(bl_plot[2]), data.antennas.name)
+function baseline_in_data(data::_DataLike, bl_plot)
+    ant_names = _antenna_names_v(data)
+    a_idx = findfirst(==(bl_plot[1]), ant_names)
+    b_idx = findfirst(==(bl_plot[2]), ant_names)
     (isnothing(a_idx) || isnothing(b_idx)) && return false
-    return any(p -> p == (a_idx, b_idx), data.baselines.pairs)
+    return any(p -> p == (a_idx, b_idx), _baseline_pairs(data))
 end
 
+choose_diagnostic_baseline(avg::UVSet; kwargs...) =
+    choose_diagnostic_baseline(_to_bandpass_dataset(avg); kwargs...)
+
 function choose_diagnostic_baseline(
-        avg::UVData;
+        avg::BandpassDataset;
         preferred = [("AA", "AX"), ("AA", "NN"), ("AA", "PV"), ("KT", "PV")]
     )
     for bl in preferred
@@ -681,7 +601,7 @@ function choose_diagnostic_baseline(
     end
 
     W = avg.weights
-    pols = collect(parallel_hand_indices(avg.metadata.pol_codes))
+    pols = collect(parallel_hand_indices(pol_products(avg)))
     best_score = -Inf
     best_bl = nothing
 
@@ -697,146 +617,8 @@ function choose_diagnostic_baseline(
     return best_bl
 end
 
-"""
-    plot_baseline_phases(data, corr, bl_plot; relative=true, comparison_weights=:input)
-
-Show scan-averaged phase versus channel for all four correlation products on a
-single baseline before and after correction. With `relative=false`, the figure
-shows absolute phase and is sensitive to scan-constant offsets that the default
-relative view intentionally suppresses. The default `comparison_weights=:input`
-uses the same pre-correction weights on both panels for a like-for-like visual
-comparison.
-"""
-function plot_baseline_phases(
-        parent,
-        data::UVData, corr::UVData, bl_plot;
-        relative = true, comparison_weights = :input
-    )
-    int_inds = _baseline_integration_indices(data, bl_plot)
-    nscan = length(data.scans)
-    scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_labels = collect(data.metadata.pol_labels)
-    ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
-    plot_weights_before, plot_weights_after = diagnostic_weight_pair(
-        data.weights, corr.weights;
-        comparison_weights = comparison_weights
-    )
-
-    for (row, (pi, lab)) in enumerate(zip(eachindex(pol_labels), pol_labels))
-        ax_b = Axis(
-            parent[row, 1]; title = "$(join(bl_plot, "-")) $lab before",
-            xlabel = "channel", ylabel = ylabel
-        )
-        ax_a = Axis(
-            parent[row, 2]; title = "$(join(bl_plot, "-")) $lab after",
-            xlabel = "channel", ylabel = ylabel
-        )
-        linkxaxes!(ax_b, ax_a)
-        linkyaxes!(ax_b, ax_a)
-
-        vis_before = @view data.vis[int_inds, pi, :]
-        vis_after = @view corr.vis[int_inds, pi, :]
-        w_before = @view plot_weights_before[int_inds, pi, :]
-        w_after = @view plot_weights_after[int_inds, pi, :]
-        scan_groups = data.scan_idx[int_inds]
-        plotted_series = Any[]
-
-        annotate_coherence!(ax_b, residual_phase_coherence(vis_before, w_before; groups = scan_groups))
-        annotate_coherence!(ax_a, residual_phase_coherence(vis_after, w_after; groups = scan_groups))
-
-        for s in 1:nscan
-            ii = int_inds[findall(==(s), @view data.scan_idx[int_inds])]
-            isempty(ii) && continue
-            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
-            before_phase = phase_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative = relative)
-            after_phase = phase_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative = relative)
-            before_noise = phase_noise_series(data.vis[ii, pi, :], plot_weights_before[ii, pi, :]; relative = relative)
-            after_noise = phase_noise_series(corr.vis[ii, pi, :], plot_weights_after[ii, pi, :]; relative = relative)
-            scatter!(ax_b, before_phase; kw...)
-            scatter!(ax_a, after_phase; kw...)
-            plot_noise_segments!(ax_b, before_phase, before_noise, s, scan_wheel, nscan)
-            plot_noise_segments!(ax_a, after_phase, after_noise, s, scan_wheel, nscan)
-            push!(plotted_series, before_phase, after_phase)
-        end
-
-        ylims = finite_series_ylims(plotted_series)
-        isnothing(ylims) || ylims!(ax_b, ylims...)
-    end
-
-    Colorbar(parent[1:length(pol_labels), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
-    return parent
-end
-
-function plot_baseline_phases(
-        data::UVData, corr::UVData, bl_plot;
-        relative = true, comparison_weights = :input
-    )
-    fig = Figure(size = (1100, 900))
-    plot_baseline_phases(fig, data, corr, bl_plot; relative = relative, comparison_weights = comparison_weights)
-    return fig
-end
-
-"""
-    plot_gain_solutions(gains, data; quantity=:phase, pol=:all, sites=:all, relative=true)
-
-Grid of solved gain tracks versus channel, one row per selected site and one
-column per selected polarization/feed. Set `quantity=:phase` or `:amplitude`,
-choose feeds with `pol`, and restrict rows with `sites`.
-
-The default behavior matches the legacy plot: both feeds, all sites, and
-relative phase.
-"""
-function plot_gain_solutions(parent, gains, data::UVData; quantity = :phase, pol = :all, sites = :all, relative = true)
-    nscan = length(data.scans)
-    scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_idx, pol_labels = resolve_gain_polarizations(data; pol = pol)
-    site_idx, site_labels = resolve_gain_sites(data; sites = sites)
-    ylabel = gain_quantity_label(quantity; relative = relative)
-    series = gain_quantity_series(quantity; relative = relative)
-
-    for (row, ai) in enumerate(site_idx)
-        axes_row = Axis[]
-        for (col, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-            ax = Axis(
-                parent[row, col];
-                ylabel = site_labels[row], xlabel = "channel",
-                title = (row == 1 ? "$(lab) gain  $ylabel" : "")
-            )
-            push!(axes_row, ax)
-        end
-
-        for ax in axes_row[2:end]
-            linkxaxes!(axes_row[1], ax)
-            linkyaxes!(axes_row[1], ax)
-        end
-
-        # Per-(ant, feed): if every scan produces the same gain track (e.g.
-        # antennas with no per-scan time segmentation), collapse the per-scan
-        # markers into a single black curve. Otherwise plot per-scan markers
-        # coloured by scan as before.
-        for (ax, pi) in zip(axes_row, pol_idx)
-            tracks = [series(vec(gains[s, ai, pi, :])) for s in 1:nscan]
-            shared = shared_track(tracks)
-            if isnothing(shared)
-                for s in 1:nscan
-                    kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
-                    scatter!(ax, tracks[s]; kw...)
-                end
-            else
-                lines!(ax, shared; color = :black, linewidth = 2.0)
-            end
-        end
-    end
-    Colorbar(parent[1:length(site_idx), length(pol_idx) + 1], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
-    return parent
-end
-
-function plot_gain_solutions(gains, data::UVData; quantity = :phase, pol = :all, sites = :all, relative = true)
-    site_idx, _ = resolve_gain_sites(data; sites = sites)
-    fig = Figure(size = (900, 180 * length(site_idx)))
-    plot_gain_solutions(fig, gains, data; quantity = quantity, pol = pol, sites = sites, relative = relative)
-    return fig
-end
+# `plot_baseline_phases` and `plot_gain_solutions` live in the
+# `GustavoMakieExt` extension.
 
 function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, gains, bi, pi)
     data = setup.data
@@ -852,7 +634,7 @@ function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, gains, bi, pi
     source = fit_bandpass_source_coherencies(setup, gains)
 
     a, b = setup.bl_pairs[bi]
-    fa, fb = stokes_feed_pair(setup.pol_codes[pi])
+    fa, fb = correlation_feed_pair(setup.pol_products[pi])
     for s in 1:nscan, c in 1:nchan
         v = data.vis[s, bi, pi, c]
         w = data.weights[s, bi, pi, c]
@@ -888,357 +670,8 @@ function residual_stats_annotation(rows, baseline, pol)
     )
 end
 
-"""
-    plot_baseline_bandpass(setup, state, bl_plot; pol=:parallel, normalize_by_source=false)
 
-Diagnostic figure for one baseline.
-
-When `normalize_by_source = false` (default), plots the observed visibility
-`v` per channel with the full fitted model `G_a · S · conj(G_b)` overlaid,
-in absolute amplitude and phase. Markers carry 1σ thermal noise (σ = 1/√w).
-
-When `normalize_by_source = true`, plots `v / S` (the data with the per-scan
-source coherency divided out) against the fitted bandpass `G_a · conj(G_b)`.
-For default station models (no per-scan-varying gains), the bandpass curve
-is identical across scans and is drawn once in black, with the data points
-from every scan overlaid on top — a clean way to see the bandpass shape and
-any cross-scan systematic.
-"""
-function plot_baseline_bandpass(
-        parent,
-        setup::BandpassSolverSetup, gains, bl_plot;
-        pol = :parallel,
-        normalize_by_source = false,
-    )
-    data = setup.data
-    bi = baseline_index(data, bl_plot)
-    nscan = length(data.scans)
-    scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
-    baseline_label = join(bl_plot, "-")
-
-    for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        amp_title = normalize_by_source ? "$(baseline_label) $lab |V / S|" : "$(baseline_label) $lab |V|"
-        phase_title = normalize_by_source ? "$(baseline_label) $lab arg(V / S)" : "$(baseline_label) $lab arg(V)"
-        amp_ylabel = normalize_by_source ? "amp / S" : "amplitude"
-        phase_ylabel = normalize_by_source ? "phase - S" : "phase (rad)"
-        ax_amp = Axis(parent[row, 1]; title = amp_title, xlabel = "channel", ylabel = amp_ylabel)
-        ax_phase = Axis(parent[row, 2]; title = phase_title, xlabel = "channel", ylabel = phase_ylabel)
-        linkxaxes!(ax_amp, ax_phase)
-
-        observed, observed_weights, model, _, weights, gain_product, source_per_scan =
-            baseline_bandpass_diagnostics(setup, gains, bi, pi)
-        amp_series = Vector{Float64}[]
-        phase_series_blocks = Vector{Float64}[]
-        amp_noise_blocks = Vector{Float64}[]
-        phase_noise_blocks = Vector{Float64}[]
-        plotted_scans = NamedTuple[]
-
-        for s in 1:nscan
-            valid_scan = vec(weights[s, :]) .> 0
-            any(valid_scan) || continue
-
-            nchan = size(observed, 2)
-            obs_amp = fill(NaN, nchan)
-            obs_amp_noise = fill(NaN, nchan)
-            obs_phase = fill(NaN, nchan)
-            obs_phase_noise = fill(NaN, nchan)
-            model_amp = fill(NaN, nchan)
-            model_phase = fill(NaN, nchan)
-            for c in 1:nchan
-                v = observed[s, c]
-                w = observed_weights[s, c]
-                m_full = model[s, c]
-                gp = gain_product[s, c]
-                src = source_per_scan[s, c]
-                (isfinite(real(v)) && isfinite(imag(v)) && w > 0 && isfinite(w)) || continue
-                sigma = 1.0 / sqrt(w)
-
-                if normalize_by_source
-                    (isfinite(real(src)) && isfinite(imag(src)) && abs(src) > 0) || continue
-                    r = v / src
-                    obs_amp[c] = abs(r)
-                    obs_phase[c] = angle(r)
-                    # σ on (v/S) is σ/|S| for both amp and phase.
-                    obs_amp_noise[c] = sigma / abs(src)
-                    obs_phase_noise[c] = sigma / abs(src)
-                    if isfinite(real(gp)) && isfinite(imag(gp))
-                        model_amp[c] = abs(gp)
-                        model_phase[c] = angle(gp)
-                    end
-                else
-                    obs_amp[c] = abs(v)
-                    obs_phase[c] = angle(v)
-                    # σ_|V| ≈ σ for high SNR; σ_phase ≈ σ/|V|.
-                    obs_amp_noise[c] = sigma
-                    obs_phase_noise[c] = abs(v) > 0 ? sigma / abs(v) : NaN
-                    if isfinite(real(m_full)) && isfinite(imag(m_full))
-                        model_amp[c] = abs(m_full)
-                        model_phase[c] = angle(m_full)
-                    end
-                end
-            end
-
-            push!(amp_series, obs_amp, model_amp)
-            push!(phase_series_blocks, obs_phase, model_phase)
-            push!(amp_noise_blocks, obs_amp_noise)
-            push!(phase_noise_blocks, obs_phase_noise)
-            push!(
-                plotted_scans, (;
-                    scan = s,
-                    obs_amp,
-                    obs_amp_noise,
-                    model_amp,
-                    obs_phase,
-                    obs_phase_noise,
-                    model_phase,
-                )
-            )
-        end
-
-        # Decide whether the bandpass model (G_a · conj(G_b)) is shared across scans.
-        # In the source-normalized view that lets us draw a single black bandpass
-        # curve with all scan markers overlaid on top.
-        shared_amp_track = normalize_by_source ? shared_track(getfield.(plotted_scans, :model_amp)) : nothing
-        shared_phase_track = normalize_by_source ? shared_track(getfield.(plotted_scans, :model_phase)) : nothing
-
-        for entry in plotted_scans
-            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
-            marker_kw = merge(color_kw, (markersize = 8,))
-            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
-
-            scatter!(ax_amp, entry.obs_amp; marker_kw...)
-            plot_noise_segments!(ax_amp, entry.obs_amp, entry.obs_amp_noise, entry.scan, scan_wheel, nscan)
-            scatter!(ax_phase, entry.obs_phase; marker_kw...)
-            plot_noise_segments!(ax_phase, entry.obs_phase, entry.obs_phase_noise, entry.scan, scan_wheel, nscan)
-            isnothing(shared_amp_track)   && lines!(ax_amp, entry.model_amp; line_kw...)
-            isnothing(shared_phase_track) && lines!(ax_phase, entry.model_phase; line_kw...)
-        end
-
-        if !isnothing(shared_amp_track)
-            lines!(ax_amp, shared_amp_track; color = :black, linewidth = 2.4)
-        end
-        if !isnothing(shared_phase_track)
-            lines!(ax_phase, shared_phase_track; color = :black, linewidth = 2.4)
-        end
-
-        amp_lims = finite_series_ylims(amp_series, amp_noise_blocks)
-        phase_lims = finite_series_ylims(phase_series_blocks, phase_noise_blocks)
-        if !isnothing(amp_lims)
-            ylims!(ax_amp, max(0.0, amp_lims[1]), amp_lims[2])
-        else
-            ylims!(ax_amp, low = 0.0)
-        end
-        isnothing(phase_lims) || ylims!(ax_phase, phase_lims...)
-
-        # Merged scan-color legend: one entry per role (data vs model).
-        # The model line shows as black when shared across scans and grey when
-        # drawn per-scan in scan colours.
-        model_color = (!isnothing(shared_amp_track) || !isnothing(shared_phase_track)) ? :black : :gray30
-        model_label = normalize_by_source ? "G_a · conj(G_b)" : "G_a · S · conj(G_b)"
-        legend_elements = [
-            MarkerElement(color = :gray30, marker = :circle, markersize = 8),
-            LineElement(color = model_color, linewidth = 2.0),
-        ]
-        axislegend(ax_amp, legend_elements, ["data", model_label]; position = :rt, framevisible = false)
-    end
-
-    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
-    return parent
-end
-
-function plot_baseline_bandpass(
-        setup::BandpassSolverSetup, gains, bl_plot;
-        pol = :parallel,
-        normalize_by_source = false,
-    )
-    npol = length(resolve_plot_polarizations(setup.data; pol = pol)[1])
-    fig = Figure(size = (1100, 280 * npol + 40))
-    plot_baseline_bandpass(fig, setup, gains, bl_plot; pol = pol, normalize_by_source = normalize_by_source)
-    return fig
-end
-
-function plot_baseline_bandpass(
-        setup::BandpassSolverSetup, state::BandpassSolverState, bl_plot;
-        pol = :parallel
-    )
-    return plot_baseline_bandpass(setup, state.gains, bl_plot; pol = pol)
-end
-
-"""
-    plot_baseline_bandpass_residuals(setup, state, bl_plot; pol=:parallel)
-
-Diagnostic figure for one baseline. Left panels show the source-normalized
-observed baseline bandpass `v/S` and `arg(v) − arg(S)` with the fitted
-bandpass `G_a · conj(G_b)` overlaid. Right panels show the thermal-noise-
-normalized real and imaginary residuals `√w · (v − G·S·conj(G))` driving
-the chi-square objective; they should scatter around 0 with unit variance
-when the fit is good.
-"""
-function plot_baseline_bandpass_residuals(
-        parent,
-        setup::BandpassSolverSetup, gains, bl_plot;
-        pol = :parallel
-    )
-    data = setup.data
-    bi = baseline_index(data, bl_plot)
-    nscan = length(data.scans)
-    scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_idx, pol_labels = resolve_plot_polarizations(data; pol = pol)
-    residual_rows = bandpass_residual_stats(setup, gains; by = :baseline)
-    baseline_label = join(bl_plot, "-")
-
-    for (row, (pi, lab)) in enumerate(zip(pol_idx, pol_labels))
-        ax_amp = Axis(parent[row, 1]; title = "$(baseline_label) $lab |V / S|", xlabel = "channel", ylabel = "amp / S")
-        ax_phase = Axis(parent[row, 2]; title = "$(baseline_label) $lab arg(V / S)", xlabel = "channel", ylabel = "phase - S")
-        ax_real_res = Axis(parent[row, 3]; title = "$(baseline_label) $lab residual Re", xlabel = "channel", ylabel = "sqrt(w) * Re(v - m)")
-        ax_imag_res = Axis(parent[row, 4]; title = "$(baseline_label) $lab residual Im", xlabel = "channel", ylabel = "sqrt(w) * Im(v - m)")
-
-        for ax in (ax_phase, ax_real_res, ax_imag_res)
-            linkxaxes!(ax_amp, ax)
-        end
-
-        observed, observed_weights, _model, normalized_residual, weights, gain_product, source_per_scan =
-            baseline_bandpass_diagnostics(setup, gains, bi, pi)
-        amp_series = Vector{Float64}[]
-        phase_series_blocks = Vector{Float64}[]
-        amp_noise_blocks = Vector{Float64}[]
-        phase_noise_blocks = Vector{Float64}[]
-        real_res_series = Vector{Float64}[[0.0]]
-        imag_res_series = Vector{Float64}[[0.0]]
-        plotted_scans = NamedTuple[]
-
-        hlines!(ax_real_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
-        hlines!(ax_imag_res, [0.0]; color = (:black, 0.35), linestyle = :dash)
-        text!(
-            ax_imag_res, 0.98, 0.96;
-            text = residual_stats_annotation(residual_rows, baseline_label, lab),
-            space = :relative, align = (:right, :top), fontsize = 11
-        )
-
-        for s in 1:nscan
-            valid_scan = vec(weights[s, :]) .> 0
-            any(valid_scan) || continue
-
-            nchan = size(observed, 2)
-            obs_amp = fill(NaN, nchan)
-            obs_amp_noise = fill(NaN, nchan)
-            obs_phase = fill(NaN, nchan)
-            obs_phase_noise = fill(NaN, nchan)
-            model_amp = fill(NaN, nchan)
-            model_phase = fill(NaN, nchan)
-            for c in 1:nchan
-                v = observed[s, c]
-                w = observed_weights[s, c]
-                gp = gain_product[s, c]
-                src = source_per_scan[s, c]
-                (isfinite(real(v)) && isfinite(imag(v)) && w > 0 && isfinite(w)) || continue
-                (isfinite(real(src)) && isfinite(imag(src)) && abs(src) > 0) || continue
-                sigma = 1.0 / sqrt(w)
-                r = v / src
-                obs_amp[c] = abs(r)
-                obs_phase[c] = angle(r)
-                obs_amp_noise[c] = sigma / abs(src)
-                obs_phase_noise[c] = sigma / abs(src)
-                if isfinite(real(gp)) && isfinite(imag(gp))
-                    model_amp[c] = abs(gp)
-                    model_phase[c] = angle(gp)
-                end
-            end
-            res_real = real.(vec(normalized_residual[s, :]))
-            res_imag = imag.(vec(normalized_residual[s, :]))
-
-            push!(amp_series, obs_amp, model_amp)
-            push!(phase_series_blocks, obs_phase, model_phase)
-            push!(amp_noise_blocks, obs_amp_noise)
-            push!(phase_noise_blocks, obs_phase_noise)
-            push!(real_res_series, res_real)
-            push!(imag_res_series, res_imag)
-            push!(
-                plotted_scans, (;
-                    scan = s,
-                    obs_amp,
-                    obs_amp_noise,
-                    model_amp,
-                    obs_phase,
-                    obs_phase_noise,
-                    model_phase,
-                    res_real,
-                    res_imag,
-                )
-            )
-        end
-
-        shared_model_amp = shared_track(getfield.(plotted_scans, :model_amp))
-        shared_model_phase = shared_track(getfield.(plotted_scans, :model_phase))
-
-        for entry in plotted_scans
-            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
-            marker_kw = merge(color_kw, (markersize = 8,))
-            line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
-
-            scatter!(ax_amp, entry.obs_amp; marker_kw...)
-            plot_noise_segments!(ax_amp, entry.obs_amp, entry.obs_amp_noise, entry.scan, scan_wheel, nscan)
-            isnothing(shared_model_amp) && lines!(ax_amp, entry.model_amp; line_kw...)
-            scatter!(ax_phase, entry.obs_phase; marker_kw...)
-            plot_noise_segments!(ax_phase, entry.obs_phase, entry.obs_phase_noise, entry.scan, scan_wheel, nscan)
-            isnothing(shared_model_phase) && lines!(ax_phase, entry.model_phase; line_kw...)
-            scatter!(ax_real_res, entry.res_real; marker_kw...)
-            scatter!(ax_imag_res, entry.res_imag; marker_kw...)
-        end
-
-        if !isnothing(shared_model_amp)
-            lines!(ax_amp, shared_model_amp; color = :black, linewidth = 2.4)
-        end
-        if !isnothing(shared_model_phase)
-            lines!(ax_phase, shared_model_phase; color = :black, linewidth = 2.4)
-        end
-
-        amp_lims = finite_series_ylims(amp_series, amp_noise_blocks)
-        phase_lims = finite_series_ylims(phase_series_blocks, phase_noise_blocks)
-        real_res_lims = finite_series_ylims(real_res_series)
-        imag_res_lims = finite_series_ylims(imag_res_series)
-        if !isnothing(amp_lims)
-            ylims!(ax_amp, max(0.0, amp_lims[1]), amp_lims[2])
-        else
-            ylims!(ax_amp, low = 0.0)
-        end
-        isnothing(phase_lims) || ylims!(ax_phase, phase_lims...)
-        isnothing(real_res_lims) || ylims!(ax_real_res, real_res_lims...)
-        isnothing(imag_res_lims) || ylims!(ax_imag_res, imag_res_lims...)
-
-        # Merged legend: model line is black when the bandpass shape is shared
-        # across scans (drawn as a single black curve), grey otherwise.
-        model_color = (!isnothing(shared_model_amp) || !isnothing(shared_model_phase)) ? :black : :gray30
-        legend_elements = [
-            MarkerElement(color = :gray30, marker = :circle, markersize = 8),
-            LineElement(color = model_color, linewidth = 2.0),
-        ]
-        axislegend(ax_amp, legend_elements, ["data", "G_a · conj(G_b)"]; position = :rt, framevisible = false)
-    end
-
-    Colorbar(parent[1:length(pol_idx), 5], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
-    return parent
-end
-
-function plot_baseline_bandpass_residuals(
-        setup::BandpassSolverSetup, gains, bl_plot;
-        pol = :parallel
-    )
-    npol = length(resolve_plot_polarizations(setup.data; pol = pol)[1])
-    fig = Figure(size = (1500, 280 * npol + 40))
-    plot_baseline_bandpass_residuals(fig, setup, gains, bl_plot; pol = pol)
-    return fig
-end
-
-function plot_baseline_bandpass_residuals(
-        setup::BandpassSolverSetup, state::BandpassSolverState, bl_plot;
-        pol = :parallel
-    )
-    return plot_baseline_bandpass_residuals(setup, state.gains, bl_plot; pol = pol)
-end
-
-function resolve_gain_polarizations(data::UVData; pol = :all)
+function resolve_gain_polarizations(data::_DataLike; pol = :all)
     if pol == :all
         pol_idx = [1, 2]
     elseif pol == :parallel
@@ -1257,16 +690,17 @@ function resolve_gain_polarizations(data::UVData; pol = :all)
     return pol_idx, ["Pol $pi" for pi in pol_idx]
 end
 
-resolve_single_gain_polarization(::UVData, pol::Integer) = Int(pol)
-function resolve_single_gain_polarization(::UVData, pol::AbstractString)
+resolve_single_gain_polarization(::_DataLike, pol::Integer) = Int(pol)
+function resolve_single_gain_polarization(::_DataLike, pol::AbstractString)
     pol in ("11", "Pol 1") && return 1
     pol in ("22", "Pol 2") && return 2
     error("Unsupported gain polarization label: $pol; use \"11\" (POLA) or \"22\" (POLB)")
 end
 
-function resolve_gain_sites(data::UVData; sites = :all)
+function resolve_gain_sites(data::_DataLike; sites = :all)
+    ant_names = _antenna_names_v(data)
     if sites == :all
-        site_idx = collect(eachindex(data.antennas.name))
+        site_idx = collect(eachindex(ant_names))
     elseif sites isa Integer
         site_idx = [Int(sites)]
     elseif sites isa AbstractString
@@ -1277,14 +711,15 @@ function resolve_gain_sites(data::UVData; sites = :all)
         error("Unsupported gain site selector: $sites")
     end
 
-    all(1 .<= site_idx .<= length(data.antennas.name)) || error("Gain site index out of bounds: $site_idx")
-    return site_idx, collect(data.antennas.name[site_idx])
+    all(1 .<= site_idx .<= length(ant_names)) || error("Gain site index out of bounds: $site_idx")
+    return site_idx, collect(ant_names[site_idx])
 end
 
-resolve_single_gain_site(data::UVData, site::Integer) = Int(site)
-function resolve_single_gain_site(data::UVData, site::AbstractString)
-    idx = findfirst(==(site), data.antennas.name)
-    isnothing(idx) && error("Site $site not found in $(collect(data.antennas.name))")
+resolve_single_gain_site(data::_DataLike, site::Integer) = Int(site)
+function resolve_single_gain_site(data::_DataLike, site::AbstractString)
+    ant_names = _antenna_names_v(data)
+    idx = findfirst(==(site), ant_names)
+    isnothing(idx) && error("Site $site not found in $(collect(ant_names))")
     return idx
 end
 
@@ -1314,25 +749,26 @@ function gain_quantity_label(quantity; relative = true)
     end
 end
 
-function baseline_index(data::UVData, bl::Tuple{String, String})
-    a_idx = findfirst(==(bl[1]), data.antennas.name)
-    b_idx = findfirst(==(bl[2]), data.antennas.name)
+function baseline_index(data::_DataLike, bl::Tuple{String, String})
+    ant_names = _antenna_names_v(data)
+    a_idx = findfirst(==(bl[1]), ant_names)
+    b_idx = findfirst(==(bl[2]), ant_names)
     (isnothing(a_idx) || isnothing(b_idx)) && error("Antenna not found: $bl")
 
-    bl_idx = findfirst(==((a_idx, b_idx)), data.baselines.pairs)
+    pairs_v = _baseline_pairs(data)
+    bl_idx = findfirst(==((a_idx, b_idx)), pairs_v)
     isnothing(bl_idx) && error("Baseline $bl not in data")
     return bl_idx
 end
 
-function _baseline_integration_indices(data::UVData, bl_plot)
-    bi = baseline_index(data, bl_plot)
-    return findall(==(data.baselines.unique_codes[bi]), data.baselines.codes)
-end
+parallel_hand_support_summary(avg::UVSet, bl::Tuple{String, String}) =
+    parallel_hand_support_summary(_to_bandpass_dataset(avg), bl)
 
-function parallel_hand_support_summary(avg::UVData, bl::Tuple{String, String})
+function parallel_hand_support_summary(avg::BandpassDataset, bl::Tuple{String, String})
     bi = baseline_index(avg, bl)
-    rr, ll = parallel_hand_indices(avg.metadata.pol_codes)
-    pol_map = [(avg.metadata.pol_labels[rr], rr), (avg.metadata.pol_labels[ll], ll)]
+    pp = pol_products(avg)
+    p_idx, q_idx = parallel_hand_indices(pp)
+    pol_map = [(pp[p_idx], p_idx), (pp[q_idx], q_idx)]
     rows = NamedTuple[]
 
     for (lab, pi) in pol_map
@@ -1373,7 +809,10 @@ function parallel_hand_support_summary(avg::UVData, bl::Tuple{String, String})
     )
 end
 
-function site_parallel_hand_support(avg::UVData, site::String)
+site_parallel_hand_support(avg::UVSet, site::String) =
+    site_parallel_hand_support(_to_bandpass_dataset(avg), site)
+
+function site_parallel_hand_support(avg::BandpassDataset, site::String)
     rows = NamedTuple[]
     for (bi, (a, b)) in enumerate(avg.baselines.pairs)
         names = (avg.antennas.name[a], avg.antennas.name[b])

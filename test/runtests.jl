@@ -5,8 +5,10 @@ using Statistics
 using Random
 using StructArrays
 using FITSFiles: Card
-using DimensionalData: DimArray, dims
-using Gustavo.UVFITS: Integration, Pol, IF, UVW, Scan, Baseline
+using CairoMakie
+using DimensionalData: DimArray, DimStack, dims, Ti
+using Gustavo.UVData: Integration, Pol, IF, UVW, Scan, Baseline, UVSet, pol_products
+using PolarizedTypes: RPol, LPol
 
 function synthetic_uvdata()
     vis = ComplexF64[
@@ -23,46 +25,60 @@ function synthetic_uvdata()
     vis = ComplexF32.(reshape(vis, 2, 4, 4))
     weights = fill(1.0f0, size(vis))
     obs_time_synth = [0.0, 1.0]
-    pol_labels_synth = ["RR", "LL", "RL", "LR"]
+    # Internal MSv4-canonical correlation order. AIPS Stokes axis on disk is
+    # [-1,-2,-3,-4] (RR/LL/RL/LR) which maps to ["PP","QQ","PQ","QP"]; the
+    # FITS read path permutes to MSv4 ["PP","PQ","QP","QQ"]. Since the
+    # synthetic vis values are placeholders, we just label the dim in MSv4
+    # order — the round-trip test exercises the read/write permutation.
+    pol_labels_synth = ["PP", "PQ", "QP", "QQ"]
     channel_freqs_synth = collect(1.0:4.0)
     vis = DimArray(vis, (Integration(obs_time_synth), Pol(pol_labels_synth), IF(channel_freqs_synth)))
     weights = DimArray(weights, (Integration(obs_time_synth), Pol(pol_labels_synth), IF(channel_freqs_synth)))
     uvw = DimArray(zeros(Float32, 2, 3), (Integration(obs_time_synth), UVW(["U", "V", "W"])))
 
-    UV = Gustavo.UVFITS
-    antennas = UV.AntennaTable(
-        StructArray{UV.Antenna}(
-            (
-                name = ["AA", "AX"],
-                station_xyz = [zeros(3), zeros(3)],
-                mount_type = Int32[0, 0],
-                axis_offset = Float32[0.0, 0.0],
-                feed_a = ["R", "R"],
-                feed_b = ["L", "L"],
-                pola_angle = Float32[0.0, 0.0],
-                polb_angle = Float32[0.0, 0.0],
-                polcala = [Float32[], Float32[]],
-                polcalb = [Float32[], Float32[]],
-            )
+    UV = Gustavo.UVData
+    nominal_basis_v = [(RPol(), LPol()), (RPol(), LPol())]
+    response_v = [Diagonal(ones(ComplexF32, 2)) for _ in 1:2]
+    pol_angles_v = [(0.0f0, 0.0f0), (0.0f0, 0.0f0)]
+    antennas_v = [
+        UV.Antenna(;
+            name = "AA",
+            station_xyz = zeros(3),
+            mount = UV.MountAltAz(),
+            nominal_basis = nominal_basis_v[1],
+            response = response_v[1],
+            pol_angles = pol_angles_v[1],
         ),
-        zeros(3), "TEST",
+        UV.Antenna(;
+            name = "AX",
+            station_xyz = zeros(3),
+            mount = UV.MountAltAz(),
+            nominal_basis = nominal_basis_v[2],
+            response = response_v[2],
+            pol_angles = pol_angles_v[2],
+        ),
+    ]
+    antennas = UV.AntennaTable(
+        StructArray(antennas_v), zeros(3), "TEST",
+        (POLCALA = [Float32[], Float32[]], POLCALB = [Float32[], Float32[]]),
     )
     array_config = UV.ArrayConfig(
         "2000-01-01", 0.0f0, 360.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0,
         "UTC", "ITRF", "RIGHT", "APPROX",
         Int32(1), Int32(0), Int32(4), Int32(0), Int32(1),
     )
-    freq_setup = UV.FrequencySetup(
-        Int32(1), 1.0e9,
-        collect(1.0:4.0), collect(0.0:3.0),
-        fill(1.0f0, 4), fill(1.0f0, 4), Int32.(fill(1, 4)),
+    freq_setup = UV.FrequencySetup(;
+        name = "FRQSEL_1",
+        ref_freq = 1.0e9,
+        channel_freqs = collect(1.0:4.0),
+        ch_widths = fill(1.0f0, 4),
+        total_bandwidths = fill(1.0f0, 4),
+        sidebands = Int32.(fill(1, 4)),
     )
-    metadata = UV.ObsMetadata(
-        "TEST", "TEST", "TEST", "2000-01-01", 2000.0f0, "JY",
-        0.0, 0.0,
+    array_obs = UV.ObsArrayMetadata(;
+        telescope = "TEST", instrume = "TEST",
+        date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
         freq_setup,
-        [-1, -2, -3, -4], ["RR", "LL", "RL", "LR"],
-        NamedTuple(),
     )
 
     # Memo-117-shaped primary HDU cards: NAXIS=7 random-groups layout plus
@@ -71,6 +87,10 @@ function synthetic_uvdata()
     # canonical random parameters.
     primary_cards = Card[
         Card("NAXIS", 7),
+        Card("OBJECT", "TEST"),
+        Card("TELESCOP", "TEST"),
+        Card("INSTRUME", "TEST"),
+        Card("DATE-OBS", "2000-01-01"),
         Card("CTYPE2", "COMPLEX"),
         Card("CRVAL2", 1.0), Card("CDELT2", 1.0), Card("CRPIX2", 1.0),
         Card("CTYPE3", "STOKES"),
@@ -85,21 +105,29 @@ function synthetic_uvdata()
         Card("PTYPE3", "WW---SIN"),
         Card("PTYPE4", "BASELINE"),
         Card("PTYPE5", "DATE"),
-        Card("PTYPE6", "DATE"),
     ]
-    return Gustavo.Bandpass.UVData(
-        vis,
-        weights,
-        uvw,
-        obs_time_synth,
-        [1, 2],
-        UV.BaselineIndex([1, 1], [(1, 2)], Dict(1 => 1), [1]),
-        StructArray(lower = [0.0, 1.0], upper = [1.0, 2.0]),
-        antennas,
-        array_config,
-        metadata,
-        primary_cards,
-        NamedTuple(),
+    return UVSet(
+        (
+            vis = vis,
+            weights = weights,
+            uvw = uvw,
+            obs_time = obs_time_synth,
+            scan_idx = [1, 2],
+            baselines = UV.BaselineIndex([1, 1], [(1, 2)], Dict(1 => 1), [1]; antenna_names = ["AA", "AX"]),
+            # Single DATE PTYPE column carrying obs_time/24 (hours → days).
+            # Whole-JD + fractional-day style needs two PTYPE columns which
+            # FITSFiles can't deduplicate on the round-trip path.
+            date_param = reshape(Float32[0.0, 1 / 24], :, 1),
+            extra_columns = NamedTuple(),
+            scans = StructArray(lower = [0.0, 1.0], upper = [1.0, 2.0]),
+            antennas = antennas,
+            array_config = array_config,
+            array_obs = array_obs,
+            source_name = "TEST",
+            ra = 0.0, dec = 0.0,
+            primary_cards = primary_cards,
+            basename = "synthetic",
+        )
     )
 end
 
@@ -108,8 +136,7 @@ function synthetic_bandpass_avg_uvdata()
     nant = 3
     bl_pairs = [(1, 2), (1, 3), (2, 3)]
     ant_names = ["AA", "AX", "NN"]
-    pol_codes = [-1, -2, -3, -4]
-    pol_labels = ["RR", "LL", "RL", "LR"]
+    pol_labels = ["PP", "PQ", "QP", "QQ"]   # MSv4-canonical order
     nscan = 2
     nchan = 6
 
@@ -138,9 +165,9 @@ function synthetic_bandpass_avg_uvdata()
         nscan, length(bl_pairs), 2, 2
     )
 
-    vis_arr = zeros(ComplexF64, nscan, length(bl_pairs), length(pol_codes), nchan)
-    for s in 1:nscan, (bi, (a, b)) in enumerate(bl_pairs), pol in eachindex(pol_codes), c in 1:nchan
-        fa, fb = BP.stokes_feed_pair(pol_codes[pol])
+    vis_arr = zeros(ComplexF64, nscan, length(bl_pairs), length(pol_labels), nchan)
+    for s in 1:nscan, (bi, (a, b)) in enumerate(bl_pairs), pol in eachindex(pol_labels), c in 1:nchan
+        fa, fb = BP.correlation_feed_pair(pol_labels[pol])
         vis_arr[s, bi, pol, c] = gains_true[a, fa, c] * source_true[s, bi, fa, fb] * conj(gains_true[b, fb, c])
     end
     weights_arr = ones(Float64, size(vis_arr))
@@ -151,60 +178,52 @@ function synthetic_bandpass_avg_uvdata()
     weights = DimArray(weights_arr, (Scan(scan_centers), Baseline(bl_labels), Pol(pol_labels), IF(channel_freqs_synth)))
     uvw = DimArray(zeros(nscan, 3), (Integration(collect(0.0:(nscan - 1))), UVW(["U", "V", "W"])))
 
-    UV = Gustavo.UVFITS
+    UV = Gustavo.UVData
+    antennas_v = [
+        UV.Antenna(;
+            name = ant_names[i],
+            station_xyz = zeros(3),
+            mount = UV.MountAltAz(),
+            nominal_basis = (RPol(), LPol()),
+            response = Diagonal(ones(ComplexF32, 2)),
+            pol_angles = (0.0f0, 0.0f0),
+        )
+        for i in 1:nant
+    ]
     antennas = UV.AntennaTable(
-        StructArray{UV.Antenna}(
-            (
-                name = ant_names,
-                station_xyz = [zeros(3) for _ in 1:nant],
-                mount_type = zeros(Int32, nant),
-                axis_offset = zeros(Float32, nant),
-                feed_a = fill("R", nant),
-                feed_b = fill("L", nant),
-                pola_angle = zeros(Float32, nant),
-                polb_angle = zeros(Float32, nant),
-                polcala = [Float32[] for _ in 1:nant],
-                polcalb = [Float32[] for _ in 1:nant],
-            )
-        ),
-        zeros(3), "TEST",
+        StructArray(antennas_v), zeros(3), "TEST",
+        (POLCALA = [Float32[] for _ in 1:nant], POLCALB = [Float32[] for _ in 1:nant]),
     )
     array_config = UV.ArrayConfig(
         "2000-01-01", 0.0f0, 360.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0,
         "UTC", "ITRF", "RIGHT", "APPROX",
         Int32(1), Int32(0), Int32(nchan), Int32(0), Int32(1),
     )
-    freq_setup = UV.FrequencySetup(
-        Int32(1), 1.0e9,
-        collect(1.0:nchan), collect(0.0:(nchan - 1)),
-        fill(1.0f0, nchan), fill(1.0f0, nchan), Int32.(fill(1, nchan)),
+    freq_setup = UV.FrequencySetup(;
+        name = "FRQSEL_1",
+        ref_freq = 1.0e9,
+        channel_freqs = collect(1.0:nchan),
+        ch_widths = fill(1.0f0, nchan),
+        total_bandwidths = fill(1.0f0, nchan),
+        sidebands = Int32.(fill(1, nchan)),
     )
-    metadata = UV.ObsMetadata(
-        "TEST", "TEST", "TEST", "2000-01-01", 2000.0f0, "JY",
-        0.0, 0.0,
+    array_obs = UV.ObsArrayMetadata(;
+        telescope = "TEST", instrume = "TEST",
+        date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
         freq_setup,
-        pol_codes, pol_labels,
-        NamedTuple(),
     )
 
-    return BP.UVData(
-        vis,
-        weights,
-        uvw,
-        collect(0.0:(nscan - 1)),
-        collect(1:nscan),
-        UV.BaselineIndex(
-            collect(1:length(bl_pairs)),
-            bl_pairs,
-            Dict(i => i for i in 1:length(bl_pairs)),
-            collect(1:length(bl_pairs)),
-        ),
-        StructArray(lower = Float64.(0:(nscan - 1)), upper = Float64.(1:nscan)),
-        antennas,
-        array_config,
-        metadata,
-        Card[],
-        NamedTuple(),
+    baselines_idx = UV.BaselineIndex(
+        collect(1:length(bl_pairs)),
+        bl_pairs,
+        Dict(i => i for i in 1:length(bl_pairs)),
+        collect(1:length(bl_pairs));
+        antenna_names = ant_names,
+    )
+    scans_struct = StructArray(lower = Float64.(0:(nscan - 1)), upper = Float64.(1:nscan))
+    return BP.BandpassDataset(
+        vis, weights, uvw, baselines_idx,
+        antennas, array_obs, scans_struct,
     )
 end
 
@@ -317,8 +336,12 @@ end
 
 @testset "Bandpass stability plots" begin
     BP = Gustavo.Bandpass
+    UV = Gustavo.UVData
     data = synthetic_uvdata()
-    corr = BP.with_visibilities(data, data.vis .* (1.0 + 0.0im), data.weights)
+    corr = UV.apply((leaf, _info, _meta) -> UV.with_visibilities(leaf, parent(leaf[:vis]) .* (1.0 + 0.0im), parent(leaf[:weights])), data)
+
+    # Plot helpers operate on UVSet directly. The resolver tests below
+    # also accept a UVSet (via the _DataLike accessors).
     gains = reshape(
         ComplexF64[
             1.0 * cis(0.1), 2.0 * cis(0.2),
@@ -333,23 +356,23 @@ end
     )
 
     pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = :parallel)
-    @test pol_idx == [1, 2]
-    @test pol_labels == ["RR", "LL"]
+    @test pol_idx == [1, 4]
+    @test pol_labels == ["PP", "QQ"]
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = ["LL", "RL"])
-    @test pol_idx == [2, 3]
-    @test pol_labels == ["LL", "RL"]
+    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = ["QQ", "PQ"])
+    @test pol_idx == [4, 2]
+    @test pol_labels == ["QQ", "PQ"]
 
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
+    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
     @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
     @test !isnothing(BP.plot_gain_solutions(gains, data))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
     @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
-    fig_embed = Gustavo.Bandpass.Figure(size = (1400, 500))
-    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "11"))
+    fig_embed = Figure(size = (1400, 500))
+    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
     @test !isnothing(BP.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 
-    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "11")
+    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP")
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig)
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig_embed)
 end
@@ -418,7 +441,7 @@ end
     # dim-agnostic loop sees named axes — exercising the same code path the
     # solver hits on real data.
     bl_dim = Baseline(["A", "B"])
-    pol_dim = Pol(["RR"])
+    pol_dim = Pol(["PP"])
     if_dim = IF([1.0, 2.0])
     vis_d = DimArray(vis, (bl_dim, pol_dim, if_dim))
     weights_d = DimArray(weights, (bl_dim, pol_dim, if_dim))
@@ -555,7 +578,7 @@ end
         Vscan_arr[bi, pol, c] = source_scan[bi] * gains_true[a, c] * conj(gains_true[b, c])
     end
     Wscan_arr = ones(Float64, size(Vscan_arr))
-    Vscan = DimArray(Vscan_arr, (Baseline(["AB", "AC", "BC"]), Pol(["RR", "LL"]), IF(Float64.(1:nchan))))
+    Vscan = DimArray(Vscan_arr, (Baseline(["AB", "AC", "BC"]), Pol(["PP", "QQ"]), IF(Float64.(1:nchan))))
     Wscan = DimArray(Wscan_arr, dims(Vscan))
     gains_scan = ones(ComplexF64, nant, 2, nchan)
     ref_gauge = BP.ReferenceAntennaBandpassGauge(1)
@@ -596,7 +619,7 @@ end
         Vtemplate_arr[s, bi, pol, c] = source_template[s, bi] * gains_true[a, c] * conj(gains_true[b, c])
     end
     Wtemplate_arr = ones(Float64, size(Vtemplate_arr))
-    Vtemplate = DimArray(Vtemplate_arr, (Scan(Float64.(1:nscan)), Baseline(["AB", "AC", "BC"]), Pol(["RR", "LL"]), IF(Float64.(1:nchan))))
+    Vtemplate = DimArray(Vtemplate_arr, (Scan(Float64.(1:nscan)), Baseline(["AB", "AC", "BC"]), Pol(["PP", "QQ"]), IF(Float64.(1:nchan))))
     Wtemplate = DimArray(Wtemplate_arr, dims(Vtemplate))
     gains_template = ones(ComplexF64, nant, 2, nchan)
 
@@ -630,8 +653,8 @@ end
     nant = 3
     bl_pairs = [(1, 2), (1, 3), (2, 3)]
     nchan = 6
-    pol_codes = [-1, -2, -3, -4]
-    npol = length(pol_codes)
+    pol_products_v = ["PP", "PQ", "QP", "QQ"]
+    npol = length(pol_products_v)
     c0 = 1
 
     gains_true = Array{ComplexF64}(undef, nant, 2, nchan)
@@ -652,11 +675,11 @@ end
 
     V_arr = zeros(ComplexF64, length(bl_pairs), npol, nchan)
     for (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
-        fa, fb = BP.stokes_feed_pair(pol_codes[pol])
+        fa, fb = BP.correlation_feed_pair(pol_products_v[pol])
         V_arr[bi, pol, c] = gains_true[a, fa, c] * source_true[bi, fa, fb] * conj(gains_true[b, fb, c])
     end
     W_arr = ones(Float64, size(V_arr))
-    V = DimArray(V_arr, (Baseline(["AB", "AC", "BC"]), Pol(["RR", "LL", "RL", "LR"]), IF(Float64.(1:nchan))))
+    V = DimArray(V_arr, (Baseline(["AB", "AC", "BC"]), Pol(pol_products_v), IF(Float64.(1:nchan))))
     W = DimArray(W_arr, dims(V))
 
     gains_init = ones(ComplexF64, nant, 2, nchan)
@@ -673,11 +696,11 @@ end
     end
 
     source_init = BP.allocate_source_coherencies(V)
-    BP.solve_source_coherencies!(source_init, gains_init, V, W, bl_pairs, pol_codes)
-    objective_before = BP.joint_bandpass_objective(gains_init, source_init, V, W, bl_pairs, pol_codes)
+    BP.solve_source_coherencies!(source_init, gains_init, V, W, bl_pairs, pol_products_v)
+    objective_before = BP.joint_bandpass_objective(gains_init, source_init, V, W, bl_pairs, pol_products_v)
 
     gains_before = copy(gains_init)
-    support = BP.antenna_feed_support_weights(W, bl_pairs, pol_codes, nant)
+    support = BP.antenna_feed_support_weights(W, bl_pairs, pol_products_v, nant)
     gains_expected = copy(gains_true)
     BP.apply_zero_mean_bandpass_gauge!(gains_expected, support, c0)
     gains_before_gauged = copy(gains_before)
@@ -685,13 +708,13 @@ end
     error_before = norm(gains_before_gauged .- gains_expected)
 
     BP.refine_joint_bandpass_als!(
-        gains_init, nothing, V, W, bl_pairs, pol_codes, c0;
+        gains_init, nothing, V, W, bl_pairs, pol_products_v, c0;
         max_iterations = 12, tolerance = 1.0e-10
     )
 
     source_final = BP.allocate_source_coherencies(V)
-    BP.solve_source_coherencies!(source_final, gains_init, V, W, bl_pairs, pol_codes)
-    objective_after = BP.joint_bandpass_objective(gains_init, source_final, V, W, bl_pairs, pol_codes)
+    BP.solve_source_coherencies!(source_final, gains_init, V, W, bl_pairs, pol_products_v)
+    objective_after = BP.joint_bandpass_objective(gains_init, source_final, V, W, bl_pairs, pol_products_v)
 
     gains_estimated = copy(gains_init)
     BP.apply_zero_mean_bandpass_gauge!(gains_estimated, support, c0)
@@ -737,8 +760,8 @@ end
 
     stats = BP.bandpass_fit_stats(setup, state)
     merged_source = BP.allocate_source_coherencies(data.vis)
-    BP.solve_source_coherencies!(merged_source, state.gains, data.vis, data.weights, data.baselines.pairs, data.metadata.pol_codes)
-    expected_chi2 = BP.joint_bandpass_objective(state.gains, merged_source, data.vis, data.weights, data.baselines.pairs, data.metadata.pol_codes)
+    BP.solve_source_coherencies!(merged_source, state.gains, data.vis, data.weights, data.baselines.pairs, pol_products(data))
+    expected_chi2 = BP.joint_bandpass_objective(state.gains, merged_source, data.vis, data.weights, data.baselines.pairs, pol_products(data))
     @test stats.chi2 ≈ expected_chi2
     @test stats.nvis > 0
     @test stats.nreal == 2 * stats.nvis
@@ -758,8 +781,8 @@ end
 
     V = ones(ComplexF64, 1, 1, 2, 3)
     W = ones(Float64, 1, 1, 2, 3)
-    pol_codes = [-1, -2]
-    @test BP.observed_source_parameter_count(V, W, pol_codes) == 4
+    pol_products_v = ["PP", "QQ"]
+    @test BP.observed_source_parameter_count(V, W, pol_products_v) == 4
 
     data = synthetic_bandpass_avg_uvdata()
     station_models = [
@@ -861,7 +884,7 @@ end
     fig_bandpass = BP.plot_baseline_bandpass(setup, result.gains, ("AA", "AX"); pol = :parallel)
     @test !isempty(repr(MIME("image/png"), fig_bandpass))
 
-    fig_embed = Gustavo.Bandpass.Figure(size = (1800, 700))
+    fig_embed = Figure(size = (1800, 700))
     @test !isnothing(BP.plot_baseline_bandpass(fig_embed[1, 1], setup, result.gains, ("AA", "AX"); pol = :parallel))
     @test !isnothing(BP.plot_baseline_bandpass_residuals(fig_embed[1, 2], setup, result.gains, ("AA", "AX"); pol = :parallel))
     @test !isempty(repr(MIME("image/png"), fig_embed))
@@ -899,8 +922,8 @@ end
     )
     random_state = BP.initialize_bandpass_state(setup, random_initializer)
 
-    @test size(random_state.gains_template) == (length(data.antennas), 2, length(data.metadata.channel_freqs))
-    @test size(random_state.scan_gains) == (length(data.scans), length(data.antennas), 2, length(data.metadata.channel_freqs))
+    @test size(random_state.gains_template) == (length(data.antennas), 2, length(data.metadata.freq_setup.channel_freqs))
+    @test size(random_state.scan_gains) == (length(data.scans), length(data.antennas), 2, length(data.metadata.freq_setup.channel_freqs))
     @test all(random_state.scan_solved)
     @test isfinite(BP.bandpass_state_objective(random_state))
     @test norm(random_state.gains_template .- state_ratio.gains_template) > 0
@@ -945,16 +968,8 @@ end
 end
 
 @testset "write_uvfits HDU construction" begin
-    UV = Gustavo.UVFITS
+    UV = Gustavo.UVData
     data = synthetic_uvdata()
-
-    # Regression: _build_fq_hdu and _build_nx_hdu used to construct the cards
-    # vector with a homogeneous element type Vector{Card{Value{String}}}, which
-    # failed FITSFiles.HDU dispatch. Both helpers must accept the cards as
-    # Vector{Card} and succeed without a MethodError.
-    @test UV._build_fq_hdu(data.metadata) isa Any
-    @test UV._build_nx_hdu(data) isa Any
-    @test UV._build_an_hdu(data.antennas, data.array_config, data.metadata.ref_freq) isa Any
 
     # End-to-end: write_uvfits should run on the synthetic dataset.
     tmp = tempname() * ".uvfits"
@@ -967,49 +982,95 @@ end
     end
 end
 
-@testset "UVFITS round-trip preserves canonical fields" begin
-    UV = Gustavo.UVFITS
+@testset "UVData round-trip preserves canonical fields" begin
+    UV = Gustavo.UVData
     data = synthetic_uvdata()
 
-    # Element types must match Memo 117 TFORM specs (1E → Float32, 3D → Float64).
-    @test eltype(data.uvw) == Float32
-    @test eltype(data.weights) == Float32
-    @test eltype(data.vis) == ComplexF32 || eltype(data.vis) == ComplexF64  # synthetic uses ComplexF64; loaded uses ComplexF32
-    @test eltype(data.metadata.if_freqs) == Float64
-    @test eltype(data.metadata.ch_widths) == Float32
-    @test eltype(data.metadata.total_bandwidths) == Float32
-    @test eltype(data.metadata.sidebands) == Int32
+    fs_orig = UV.metadata(data).array_obs.freq_setup
+    @test eltype(fs_orig.channel_freqs) == Float64
+    @test eltype(fs_orig.ch_widths) == Float32
+    @test eltype(fs_orig.total_bandwidths) == Float32
+    @test eltype(fs_orig.sidebands) == Int32
 
     tmp = tempname() * ".uvfits"
     try
         UV.write_uvfits(tmp, data)
-        round = UV.load_uvfits(tmp)
+        round_set = UV.load_uvfits(tmp)
+        @test round_set isa UV.UVSet
 
-        # Float32 columns round-trip exactly (no widen/narrow churn).
-        @test parent(round.uvw) == Float32.(parent(data.uvw))
-        @test parent(round.weights) == Float32.(parent(data.weights))
-        @test round.baselines.codes == data.baselines.codes
+        # Compare leaves directly: load → write → reload should preserve
+        # vis/weights/uvw cubes per partition and the baseline codes.
+        for (k, leaf_orig) in pairs(UV.branches(data))
+            leaf_round = UV.branches(round_set)[k]
+            @test parent(leaf_round[:uvw]) == Float32.(parent(leaf_orig[:uvw]))
+            @test parent(leaf_round[:weights]) == Float32.(parent(leaf_orig[:weights]))
+            @test UV.baselines(leaf_round).unique_codes == UV.baselines(leaf_orig).unique_codes
+        end
 
-        # Metadata round-trips.
-        @test round.metadata.if_freqs == data.metadata.if_freqs
-        @test round.metadata.ch_widths == data.metadata.ch_widths
-        @test round.metadata.total_bandwidths == data.metadata.total_bandwidths
-        @test round.metadata.sidebands == data.metadata.sidebands
-        @test round.metadata.pol_codes == data.metadata.pol_codes
+        fs_round = UV.metadata(round_set).array_obs.freq_setup
+        @test fs_round.channel_freqs == fs_orig.channel_freqs
+        @test fs_round.ch_widths == fs_orig.ch_widths
+        @test fs_round.total_bandwidths == fs_orig.total_bandwidths
+        @test fs_round.sidebands == fs_orig.sidebands
+        @test pol_products(round_set) == pol_products(data)
     finally
         isfile(tmp) && rm(tmp; force = true)
     end
 end
 
-@testset "UVData extra_columns + date_param preservation" begin
-    UV = Gustavo.UVFITS
+@testset "UVDataset extra_columns + date_param preservation" begin
+    UV = Gustavo.UVData
     base = synthetic_uvdata()
-    nint = size(base.vis, 1)
+    base_root = UV.metadata(base)
 
-    # Simulate primary_cards declaring a non-canonical INTTIM PTYPE alongside
-    # the standard UU/VV/WW/BASELINE/DATE axes, plus matching extra_columns
-    # and a non-trivial date_param (column 1 holds the JD reference inline,
-    # which must round-trip exactly so the absolute date is preserved).
+    # Materialise the flat record stream we need to feed UVSet's NamedTuple
+    # factory. Walk leaves in order to assemble per-record arrays with the
+    # same shape the load path produces.
+    leaves_collected = collect(values(UV.branches(base)))
+    obs_times = Float64[]
+    scan_indices = Int[]
+    bl_codes = Int[]
+    vis_chunks = Any[]
+    weights_chunks = Any[]
+    uvw_chunks = Any[]
+    for leaf in leaves_collected
+        info = UV.metadata(leaf)
+        ti_lookup = collect(UV.obs_time(leaf))
+        bls = info.baselines
+        vis_p = parent(leaf[:vis])
+        w_p = parent(leaf[:weights])
+        uvw_p = parent(leaf[:uvw])
+        for (ti, bi) in info.record_order
+            push!(obs_times, ti_lookup[ti])
+            push!(scan_indices, info.scan_idx)
+            push!(bl_codes, round(Int, bls.unique_codes[bi]))
+            push!(vis_chunks, vis_p[ti, bi, :, :])
+            push!(weights_chunks, w_p[ti, bi, :, :])
+            push!(uvw_chunks, uvw_p[ti, bi, :])
+        end
+    end
+    nint = length(obs_times)
+    npol = size(vis_chunks[1], 1)
+    nchan = size(vis_chunks[1], 2)
+    vis_flat = Array{ComplexF32, 3}(undef, nint, npol, nchan)
+    weights_flat = Array{Float32, 3}(undef, nint, npol, nchan)
+    uvw_flat = Array{Float32, 2}(undef, nint, 3)
+    for i in 1:nint
+        vis_flat[i, :, :] .= vis_chunks[i]
+        weights_flat[i, :, :] .= weights_chunks[i]
+        uvw_flat[i, :] .= uvw_chunks[i]
+    end
+    pol_labels = pol_products(base)
+    chan_freqs = base_root.array_obs.freq_setup.channel_freqs
+    vis_da = DimArray(vis_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.IF(chan_freqs)))
+    weights_da = DimArray(weights_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.IF(chan_freqs)))
+    uvw_da = DimArray(uvw_flat, (UV.Integration(obs_times), UV.UVW(["U", "V", "W"])))
+
+    unique_codes = sort(unique(bl_codes))
+    bl_lookup = Dict(c => i for (i, c) in enumerate(unique_codes))
+    bl_pairs = [UV.decode_baseline(c) for c in unique_codes]
+    bls = UV.BaselineIndex(bl_codes, bl_pairs, bl_lookup, unique_codes; antenna_names = base_root.antennas.name)
+
     inttim_values = Float32.(0.5 .* (1:nint))
     primary_cards = Card[
         Card("PTYPE1", "UU---SIN"),
@@ -1022,24 +1083,33 @@ end
         Card("PCOUNT", 7),
     ]
     extras = (var"INTTIM" = inttim_values,)
-    date_param = hcat(fill(Float32(2_459_664.5), nint), Float32.(base.obs_time ./ 24))
-    data = UV.UVData(
-        base.vis, base.weights, base.uvw, base.obs_time, base.scan_idx,
-        base.baselines, base.scans, base.antennas, base.array_config,
-        base.metadata, primary_cards, date_param, extras,
+    date_param = hcat(fill(Float32(2_459_664.5), nint), Float32.(obs_times ./ 24))
+
+    uvset = UV.UVSet(
+        (
+            vis = vis_da, weights = weights_da, uvw = uvw_da,
+            obs_time = obs_times, scan_idx = scan_indices,
+            baselines = bls,
+            date_param = date_param, extra_columns = extras,
+            scans = base_root.scans, antennas = base_root.antennas,
+            array_config = base_root.array_config,
+            array_obs = base_root.array_obs,
+            source_name = "TEST", ra = 0.0, dec = 0.0,
+            primary_cards = primary_cards,
+            basename = "synthetic",
+        )
     )
 
-    @test data.date_param === date_param
-    @test data.extra_columns.INTTIM === inttim_values
-
-    raw = zeros(Float32, nint, 3, 2, 4, 1, 1, 1)
-    primary = UV._build_primary_data(data, raw, data.date_param)
-    @test primary[Symbol("DATE")] === date_param
-    @test primary[Symbol("INTTIM")] === inttim_values
+    # Verify date_param + INTTIM round-trip through the leaves.
+    leaves_collected = collect(values(UV.branches(uvset)))
+    cat_dates = vcat([UV.date_param(l) for l in leaves_collected]...)
+    cat_inttim = vcat([UV.extra_columns(l).INTTIM for l in leaves_collected]...)
+    @test cat_dates == date_param
+    @test cat_inttim == inttim_values
 
     tmp = tempname() * ".uvfits"
     try
-        @test UV.write_uvfits(tmp, data) == tmp
+        @test UV.write_uvfits(tmp, uvset) == tmp
         @test filesize(tmp) > 0
     finally
         isfile(tmp) && rm(tmp; force = true)
@@ -1049,7 +1119,7 @@ end
 @testset "antenna_phase_weights uses |v|² · w" begin
     # Regression: under the new inverse-variance WLS convention, channel
     # weights for the polynomial bandpass fits must be the inverse variance
-    # of the *phase track*, i.e. Σ_bl |v|² · w_raw (`log_visibility_precision`),
+    # of the *phasetrack*, i.e. Σ_bl |v|² · w_raw (`log_visibility_precision`),
     # not bare Σ w_raw. With bare-w, high-SNR channels (AA-AX-rich) get
     # sqrt-compressed weight relative to the old code and the polynomial
     # leaves a visible AA-AX phase residual.
@@ -1059,10 +1129,9 @@ end
     npol = 1
     # |v|² differs across channels: 4 at c=1, 1 at c=2. w_raw is uniform.
     V = DimArray(
-        ComplexF64[2.0+0.0im;; 1.0+0.0im;;;],
-        (Baseline(["AB"]), Pol(["RR"]), IF(Float64.(1:nchan)))
+        reshape(ComplexF64[2.0 + 0.0im, 1.0 + 0.0im], 1, 1, nchan),
+        (Baseline(["AB"]), Pol(["PP"]), IF(Float64.(1:nchan)))
     )
-    @assert size(V) == (1, 1, 2)
     W = DimArray(fill(1.0, 1, 1, nchan), dims(V))
 
     cw = BP.antenna_phase_weights(V, W, bl_pairs, 2, 1)
@@ -1072,6 +1141,142 @@ end
     @test cw[1, 2] ≈ 1.0
     @test cw[2, 1] ≈ 4.0
     @test cw[2, 2] ≈ 1.0
+end
+
+@testset "UVSet partition tree shape" begin
+    UV = Gustavo.UVData
+    uvset = synthetic_uvdata()
+    @test uvset isa UV.UVSet
+    @test length(UV.branches(uvset)) == length(UV.metadata(uvset).scans)
+    for s in 1:length(UV.metadata(uvset).scans)
+        key = UV.partition_key(:TEST, s)
+        @test haskey(UV.branches(uvset), key)
+        leaf = UV.branches(uvset)[key]
+        @test UV.scan_idx(leaf) == s
+        @test ndims(parent(leaf[:vis])) == 4
+        @test ndims(parent(leaf[:uvw])) == 3
+    end
+end
+
+@testset "UVSet apply" begin
+    UV = Gustavo.UVData
+    uvset = synthetic_uvdata()
+
+    # Identity apply preserves shape and globals.
+    same = UV.apply((p, _info, _root) -> p, uvset)
+    @test same isa UV.UVSet
+    @test length(UV.branches(same)) == length(UV.branches(uvset))
+    @test UV.metadata(same).antennas === UV.metadata(uvset).antennas
+    for (key, _) in UV.branches(uvset)
+        @test haskey(UV.branches(same), key)
+    end
+
+    # Transformed leaves: scale weights by 2.
+    scaled = UV.apply(uvset) do leaf, _info, _root
+        new_w = parent(leaf[:weights]) .* 2
+        UV.with_visibilities(leaf, parent(leaf[:vis]), new_w)
+    end
+    for (key, leaf) in UV.branches(scaled)
+        orig = UV.branches(uvset)[key]
+        @test parent(leaf[:weights]) ≈ 2 .* parent(orig[:weights])
+    end
+end
+
+@testset "UVSet selection ergonomics" begin
+    UV = Gustavo.UVData
+    using DimensionalData: At
+    uvset = synthetic_uvdata()
+
+    # Single-scan selection returns a leaf DimTree.
+    p1 = UV.select_scan(uvset, "TEST", 1)
+    @test p1 isa UV.DimTree
+    @test p1 === UV.branches(uvset)[UV.partition_key(:TEST, 1)]
+
+    # Multi-scan selection via select_partition returns a sub-UVSet.
+    sub_s1 = UV.select_partition(uvset; scan = 1)
+    @test sub_s1 isa UV.UVSet
+    @test length(UV.branches(sub_s1)) == 1
+
+    # Source filter — single source "TEST" still returns the full set.
+    sub_test = UV.select_source(uvset, "TEST")
+    @test length(UV.branches(sub_test)) == length(UV.branches(uvset))
+    sub_other = UV.select_source(uvset, "NONEXISTENT")
+    @test isempty(UV.branches(sub_other))
+
+    # Station filter — synthetic fixture has antennas "AA","AX" so the only
+    # baseline AA-AX touches both. Filtering by "AA" keeps it; by "QQ"
+    # drops everything.
+    sub_aa = UV.select_station(uvset, "AA")
+    @test sub_aa isa UV.UVSet
+    @test length(UV.branches(sub_aa)) == length(UV.branches(uvset))
+    for (_, leaf) in UV.branches(sub_aa)
+        for bi in eachindex(UV.baselines(leaf).pairs)
+            @test "AA" in (UV.baselines(leaf).ant1_names[bi], UV.baselines(leaf).ant2_names[bi])
+        end
+    end
+    sub_qq = UV.select_station(uvset, "QQ")
+    @test isempty(UV.branches(sub_qq))
+
+    # Single-baseline filter.
+    sub_bl = UV.select_baseline(uvset, "AA-AX")
+    @test sub_bl isa UV.UVSet
+    @test length(UV.branches(sub_bl)) == length(UV.branches(uvset))
+    for (_, leaf) in UV.branches(sub_bl)
+        @test UV.baselines(leaf).labels == ["AA-AX"]
+        @test size(parent(leaf[:vis]), 2) == 1   # Baseline axis collapsed to 1
+    end
+
+    # Time window — synthetic fixture has obs_time = [0.0, 1.0], one per scan.
+    win = UV.time_window(uvset, 0.5, 1.5)
+    @test win isa UV.UVSet
+    @test length(UV.branches(win)) == 1
+    @test haskey(UV.branches(win), UV.partition_key(:TEST, 2))
+
+    # Flag layer is computed at construction (= weights ≤ 0).
+    leaf_1 = UV.branches(uvset)[UV.partition_key(:TEST, 1)]
+    @test eltype(leaf_1[:flag]) == Bool
+    @test parent(leaf_1[:flag]) == (parent(leaf_1[:weights]) .<= 0)
+end
+
+@testset "scan_average(uvset) collapses Ti to length 1" begin
+    UV = Gustavo.UVData
+    uvset = synthetic_uvdata()
+    avg_set = UV.scan_average(uvset)
+
+    @test avg_set isa UV.UVSet
+    @test length(UV.branches(avg_set)) == length(UV.branches(uvset))
+    for (key, leaf) in UV.branches(avg_set)
+        @test size(parent(leaf[:vis]), 1) == 1
+        @test length(UV.obs_time(leaf)) == 1
+    end
+
+    # The reducer-style entry point composes via apply.
+    via_apply = UV.apply(UV.TimeAverage(), uvset)
+    for (key, leaf) in UV.branches(via_apply)
+        @test parent(leaf[:vis]) == parent(UV.branches(avg_set)[key][:vis])
+    end
+end
+
+@testset "apply_bandpass(uvset) preserves shape per partition" begin
+    UV = Gustavo.UVData
+    BP = Gustavo.Bandpass
+    uvset = synthetic_uvdata()
+
+    nant = length(UV.metadata(uvset).antennas)
+    nchan = length(UV.metadata(uvset).array_obs.freq_setup.channel_freqs)
+    nscan = length(UV.metadata(uvset).scans)
+    gains = ComplexF64[
+        cis(0.1 * a + 0.05 * c + 0.02 * f + 0.01 * s) * (0.95 + 0.01 * (a + c))
+            for s in 1:nscan, a in 1:nant, f in 1:2, c in 1:nchan
+    ]
+
+    corr_set = BP.apply_bandpass(uvset, gains)
+    @test corr_set isa UV.UVSet
+    @test length(UV.branches(corr_set)) == length(UV.branches(uvset))
+    for (key, leaf) in UV.branches(corr_set)
+        orig = UV.branches(uvset)[key]
+        @test size(parent(leaf[:vis])) == size(parent(orig[:vis]))
+    end
 end
 
 @testset "Weighted LSQ accepts mixed-precision RHS" begin
@@ -1102,11 +1307,14 @@ end
     # the full template-solve path on the synthetic averaged dataset using a
     # Float32 weights cube to lock the regression.
     BP = Gustavo.Bandpass
-    UV = Gustavo.UVFITS
+    UV = Gustavo.UVData
     avg = synthetic_bandpass_avg_uvdata()
     # Force Float32 weights (the production path now produces these on load).
     w32 = Float32.(parent(avg.weights))
-    avg = BP.with_visibilities(avg, parent(avg.vis), DimArray(w32, dims(avg.weights)))
+    avg = BP.BandpassDataset(
+        avg.vis, DimArray(w32, dims(avg.weights)), avg.uvw,
+        avg.baselines, avg.antennas, avg.metadata, avg.scans,
+    )
     @test eltype(avg.weights) == Float32
 
     setup = BP.prepare_bandpass_solver(
@@ -1118,31 +1326,115 @@ end
     @test all(isfinite, state.gains)
 end
 
-@testset "UVData DimArray slicing" begin
+@testset "DimArray slicing" begin
     using DimensionalData
-    using DimensionalData: At
+    UV = Gustavo.UVData
+    BP = Gustavo.Bandpass
     raw = synthetic_uvdata()
     avg = synthetic_bandpass_avg_uvdata()
 
-    # Per-integration cube has Integration × Pol × IF; uvw has Integration × UVW.
-    sel = raw[Pol = At("RR")]
-    @test sel isa DimensionalData.DimStack
-    @test ndims(sel[:vis]) == 2
-    @test ndims(sel[:weights]) == 2
-    # Pol dim doesn't exist on uvw → unchanged.
-    @test parent(sel[:uvw]) == parent(raw.uvw)
+    # Per-leaf Pol slice on a UVSet: pull leaf, then DimTree's selector.
+    leaf1 = UV.select_scan(raw, "TEST", 1)
+    sliced = leaf1[Pol = At("PP")]
+    @test sliced isa DimensionalData.AbstractDimTree
 
-    # Integration applies to all three.
-    sel2 = raw[Integration = 1]
-    @test ndims(sel2[:vis]) == 2
-    @test ndims(sel2[:uvw]) == 1
-
-    # Scan-averaged cube has Scan × Baseline × Pol × IF.
+    # BandpassDataset Baseline slice returns a DimStack.
     sel3 = avg[Baseline = At("AA-AX")]
     @test ndims(sel3[:vis]) == 3
-    @test parent(sel3[:uvw]) == parent(avg.uvw)  # Baseline not present on uvw
+    @test parent(sel3[:uvw]) == parent(avg.uvw)
 
-    # Baseline-tuple positional indexing keeps working.
-    bl_vis = raw[("AA", "AX")]
+    # Baseline-tuple positional indexing on a BandpassDataset.
+    bl_vis = BP.baseline_visibilities(avg, ("AA", "AX"))
     @test ndims(bl_vis) == 3
+end
+
+# Build a second single-source UVSet so we can exercise multi-source
+# composition via merge_uvsets. The fixture mirrors `synthetic_uvdata`
+# but with source name "3C273" and slightly shifted obs_times.
+function synthetic_uvdata_3c273()
+    base = synthetic_uvdata()
+    UV = Gustavo.UVData
+    leaves_orig = collect(values(UV.branches(base)))
+    new_branches = Gustavo.UVData.DimensionalData.TreeDict()
+    for leaf in leaves_orig
+        info = UV.metadata(leaf)
+        info_3c = merge(
+            info,
+            (;
+                source_name = "3C273",
+                source_key = UV.sanitize_source("3C273"),
+                field_name = "3C273",
+                ra = 187.27791666666667,
+                dec = 12.391122222222222,
+                partition_name = "synthetic_0_3C273_$(info.scan_name)",
+            ),
+        )
+        new_leaf = UV._build_leaf(
+            leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+            partition_info = info_3c,
+        )
+        new_key = UV.partition_key(info_3c.source_key, info_3c.scan_idx)
+        new_branches[new_key] = new_leaf
+    end
+    return Gustavo.UVData.DimensionalData.rebuild(base; branches = new_branches)
+end
+
+@testset "multi-source UVSet" begin
+    UV = Gustavo.UVData
+    set_test = synthetic_uvdata()
+    set_3c = synthetic_uvdata_3c273()
+
+    multi = UV.merge_uvsets(set_test, set_3c)
+    @test multi isa UV.UVSet
+    @test length(UV.branches(multi)) == 4
+    @test UV.sources(multi) == ["TEST", "3C273"]
+    @test sort(UV.scan_ids(multi, "TEST")) == [1, 2]
+    @test sort(UV.scan_ids(multi, "3C273")) == [1, 2]
+    # summary returns one row per leaf with correct source/scan info.
+    rows = Base.summary(multi)
+    @test length(rows) == 4
+    @test count(r -> r.source_name == "TEST", rows) == 2
+    @test count(r -> r.source_name == "3C273", rows) == 2
+
+    # select_source narrows to one source's leaves.
+    sub_test = UV.select_source(multi, "TEST")
+    @test length(UV.branches(sub_test)) == 2
+    @test all(UV.metadata(l).source_name == "TEST" for (_, l) in UV.branches(sub_test))
+
+    # select_scan returns the leaf for (source, scan_idx).
+    leaf = UV.select_scan(multi, "3C273", 1)
+    @test UV.metadata(leaf).source_name == "3C273"
+    @test UV.metadata(leaf).scan_idx == 1
+
+    # Tab-completable Partitions accessor.
+    ps = UV.partitions(multi)
+    @test :TEST_scan_1 in propertynames(ps)
+    @test :M3C273_scan_1 in propertynames(ps)
+    @test ps.M3C273_scan_1 === UV.branches(multi)[:M3C273_scan_1]
+
+    # apply preserves tree shape; per-leaf metadata flows through.
+    averaged = UV.apply(UV.TimeAverage(), multi)
+    @test length(UV.branches(averaged)) == 4
+    @test all(size(parent(l[:vis]), 1) == 1 for (_, l) in UV.branches(averaged))
+
+    # write_uvfits errors clearly on multi-source input but works after select_source.
+    tmp = tempname() * ".uvfits"
+    try
+        @test_throws ErrorException UV.write_uvfits(tmp, multi)
+        @test UV.write_uvfits(tmp, UV.select_source(multi, "TEST")) == tmp
+        @test isfile(tmp)
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
+end
+
+@testset "Source name sanitization" begin
+    UV = Gustavo.UVData
+    @test UV.sanitize_source("TEST") == :TEST
+    @test UV.sanitize_source("3C273") == :M3C273       # digit-leading
+    @test UV.sanitize_source("Sgr A*") == :Sgr_A_      # non-identifier chars
+    @test UV.sanitize_source("NGC 4486") == :NGC_4486
+    @test UV.sanitize_source("") == :unknown
+    @test UV.sanitize_source("  ") == :unknown
+    @test UV.partition_key(:M3C273, 5) == :M3C273_scan_5
 end
