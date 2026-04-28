@@ -61,7 +61,8 @@ end
 
 function solve_parallel_channel!(
         gains, solved, Vblock, Wblock, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
-        station_models, parallel_pols; min_baselines = 3, parallel_hand_mask = nothing
+        station_models, parallel_pols; min_baselines = 3, parallel_hand_mask = nothing,
+        ref_ant = nothing,
     )
     for (pol, feed) in zip(parallel_pols, (1, 2))
         bl_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, feed])
@@ -75,7 +76,7 @@ function solve_parallel_channel!(
             conn[a] += 1
             conn[b] += 1
         end
-        local_ref = choose_local_phase_reference(active, gauge, station_models, conn, feed)
+        local_ref = choose_local_phase_reference(active, gauge, station_models, conn, feed, ref_ant)
         active_free = filter(≠(local_ref), active)
         isempty(active_free) && continue
 
@@ -178,7 +179,7 @@ function apply_zero_mean_bandpass_gauge_track!(track, weights, ref_idx)
 
     log_amp = log.(abs.(track))
     amp_offset = sum(weights[valid] .* log_amp[valid]) / sum(weights[valid])
-    track ./= exp(amp_offset)
+    track .*= exp(-amp_offset)
 
     phase_track = unwrap_phase_track(vec(angle.(track)), ref_idx)
     phase_offset = sum(weights[valid] .* phase_track[valid]) / sum(weights[valid])
@@ -1075,7 +1076,8 @@ function solve_bandpass_single_scan(
         ant_names = nothing, context = "",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         parallel_hand_mask = nothing,
-        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
+        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
+        ref_ant = nothing,
     )
     _, _, nchan = size(Vs)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
@@ -1087,7 +1089,8 @@ function solve_bandpass_single_scan(
         c == c0 && continue
         solve_parallel_channel!(
             gains, solved, Vs, Ws, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
-            station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask
+            station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask,
+            ref_ant = ref_ant,
         )
     end
 
@@ -1110,7 +1113,8 @@ function solve_bandpass_template(
         ant_names = nothing, context = "template",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         parallel_hand_mask = nothing,
-        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
+        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
+        ref_ant = nothing,
     )
     _, _, _, nchan = size(V)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
@@ -1121,7 +1125,8 @@ function solve_bandpass_template(
         c == c0 && continue
         solve_parallel_channel!(
             gains, nothing, V, W, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
-            station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask
+            station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask,
+            ref_ant = ref_ant,
         )
     end
 
@@ -1387,6 +1392,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
         joint_als_iterations = 0,
         parallel_hand_mask = setup.parallel_hand_mask,
         gauge = setup.gauge,
+        ref_ant = setup.ref_ant,
     )
 
     scan_gains = ones(ComplexF64, nscan, nant, 2, nchan)
@@ -1408,6 +1414,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
             joint_als_iterations = 0,
             parallel_hand_mask = setup.parallel_hand_mask,
             gauge = setup.gauge,
+            ref_ant = setup.ref_ant,
         )
         scan_gains[s, :, :, :] .= gains_scan
         scan_solved[s, :, :, :] .= solved

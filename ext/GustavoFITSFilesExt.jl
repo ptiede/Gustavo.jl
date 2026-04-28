@@ -411,7 +411,7 @@ function _load_uvfits_flat(path)
     end
     bl_codes = round.(Int, collect(dt.BASELINE))
 
-    _col(nt, prefix) = getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt))))
+    _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
     uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
     vis = _wrap_int_pol_if(vis_raw, obs_time, msv4_labels, array_obs.freq_setup.channel_freqs)
@@ -421,8 +421,13 @@ function _load_uvfits_flat(path)
     extra_columns = _collect_extra_columns(dt, primary_hdu.cards)
     date_param = ndims(date_raw) == 2 ? Matrix(date_raw) : reshape(collect(date_raw), :, 1)
 
-    lower = (nx.TIME .- nx.var"TIME INTERVAL" ./ 2) .* 24
-    upper = (nx.TIME .+ nx.var"TIME INTERVAL" ./ 2) .* 24
+    # Materialize the NX columns up front: they come back as lazy
+    # `DiskArrays`-backed broadcasts/LazyFieldArrays, and indexing them
+    # one-by-one inside `assign_scans` re-opens the FITS file per access.
+    nx_time = Float64.(collect(nx.TIME))
+    nx_dt = Float64.(collect(nx.var"TIME INTERVAL"))
+    lower = (nx_time .- nx_dt ./ 2) .* 24
+    upper = (nx_time .+ nx_dt ./ 2) .* 24
     scans = StructArray(lower = lower, upper = upper)
 
     scan_idx = assign_scans(obs_time, scans)
@@ -486,7 +491,10 @@ function _collect_extra_columns(dt, primary_cards)
         sym === :data && continue
         prefix = uppercase(String(split(String(sym), "-")[1]))
         prefix in canonical_prefixes && continue
-        push!(pairs, sym => getproperty(dt, sym))
+        # Materialize: per-scan partition extraction indexes these columns
+        # repeatedly; leaving them as lazy DiskArrays makes each `[int_inds]`
+        # re-open the FITS file.
+        push!(pairs, sym => collect(getproperty(dt, sym)))
     end
     return (; pairs...)
 end

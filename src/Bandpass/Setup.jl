@@ -224,10 +224,18 @@ function corrected_visibility(V, gains, pol_products, bi, a, b, pol, s, c)
 end
 
 
-function choose_local_phase_reference(active_ants, gauge, station_models, connectivity, feed)
+function choose_local_phase_reference(active_ants, gauge, station_models, connectivity, feed, ref_ant = nothing)
     if gauge isa ReferenceAntennaBandpassGauge
         gauge.ref_ant ∈ active_ants && return gauge.ref_ant
     end
+
+    # The user-supplied `ref_ant` takes precedence as the local phase reference
+    # when it is among the active antennas. Otherwise, prefer antennas whose
+    # phase model is *not* per-scan (so the per-channel pin propagates cleanly
+    # through the gauge step). Fall back to active_ants only if no station has
+    # a stable phase model. Within the candidate pool we prefer the *least*
+    # connected antenna so the most informative tracks remain free.
+    !isnothing(ref_ant) && ref_ant ∈ active_ants && return ref_ant
 
     stable_active = [ant for ant in active_ants if !phase_is_per_scan(station_models[ant], feed)]
     candidates = isempty(stable_active) ? active_ants : stable_active
