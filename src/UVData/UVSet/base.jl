@@ -191,21 +191,21 @@ end
 function Base.show(io::IO, ::MIME"text/plain", uvset::UVSet)
     root = DimensionalData.metadata(uvset)
     nant = length(root.antennas)
+    nms = root.antennas.name
     arr = root.array_obs
     chan_freqs = arr.freq_setup.channel_freqs
+    ref_freq = round(arr.freq_setup.ref_freq / 1.0e9; digits = 3)
     flo = round(minimum(chan_freqs) / 1.0e9; digits = 3)
     fhi = round(maximum(chan_freqs) / 1.0e9; digits = 3)
-    pp = pol_products(uvset)
-    pols = join(pp, ", ")
     n_part = length(DimensionalData.branches(uvset))
     src_list = sources(uvset)
     println(io, "UVSet")
     println(io, "  Telescope : $(arr.telescope)")
-    println(io, "  Array     : $(array_name(root.antennas)) ($nant antennas)")
+    println(io, "  Array     : $(array_name(root.antennas)) ($ref_freq GHz)")
     println(io, "  Sources   : $(length(src_list)) ($(join(src_list, ", ")))")
     println(io, "  Partitions: $(n_part)")
     println(io, "  IFs ($(length(chan_freqs))): $(flo)–$(fhi) GHz")
-    print(io, "  Pols ($(length(pp))): $pols")
+    print(io, "  Antennas ($(length(nms))): $(join(nms, ", "))")
     return io
 end
 
