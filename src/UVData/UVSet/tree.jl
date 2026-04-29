@@ -1,26 +1,40 @@
-function _build_leaf(vis::AbstractDimArray, weights::AbstractDimArray,
+function _build_leaf(
+        vis::AbstractDimArray, weights::AbstractDimArray,
         uvw::AbstractDimArray, flag::Union{Nothing, AbstractDimArray} = nothing;
-        partition_info::NamedTuple)
+        partition_info::PartitionInfo,
+        scan_name::Union{Nothing, AbstractVector{<:AbstractString}} = nothing,
+    )
     flag_layer = flag === nothing ? _derive_flag(weights) : flag
     vis_dims = dims(vis)
     uvw_dims = dims(uvw)
     vis_names = map(DimensionalData.name, vis_dims)
     uvw_names = map(DimensionalData.name, uvw_dims)
+    # ScanArray (xradio schema.py:779): per-Ti label, default to the cached
+    # primary `scan_name` repeated along the leaf's time axis.
+    ti_dim = vis_dims[findfirst(d -> DimensionalData.name(d) === :Ti, vis_dims)]
+    nti = length(lookup(ti_dim))
+    scan_name_vec = scan_name === nothing ?
+        fill(partition_info.scan_name, nti) : String.(collect(scan_name))
+    length(scan_name_vec) == nti ||
+        error("scan_name length $(length(scan_name_vec)) does not match Ti axis length $(nti)")
     nm = DimensionalData.Lookups.NoMetadata()
     data_dict = DimensionalData.DataDict(
         :vis => parent(vis),
         :weights => parent(weights),
         :uvw => parent(uvw),
         :flag => parent(flag_layer),
+        :scan_name => scan_name_vec,
     )
     layerdims = DimensionalData.TupleDict(
         :vis => vis_names,
         :weights => vis_names,
         :uvw => uvw_names,
         :flag => vis_names,
+        :scan_name => (DimensionalData.name(ti_dim),),
     )
     layermetadata = DimensionalData.DataDict(
         :vis => nm, :weights => nm, :uvw => nm, :flag => nm,
+        :scan_name => nm,
     )
     all_dims = (vis_dims..., DimensionalData.otherdims(uvw_dims, vis_dims)...)
     return DimensionalData.DimTree(;
@@ -32,8 +46,18 @@ function _build_leaf(vis::AbstractDimArray, weights::AbstractDimArray,
     )
 end
 
-function _extract_scan_leaf(flat::NamedTuple, scan_idx_::Integer; source_key::Symbol, basename::AbstractString)
-    int_inds = findall(==(scan_idx_), flat.scan_idx)
+function _extract_scan_leaf(
+        flat::NamedTuple, scan_label::AbstractString;
+        source_key::Symbol, basename::AbstractString,
+    )
+    int_inds = findall(==(scan_label), flat.record_scan_name)
+
+    # Sanity-check: all records in this scan must index the same FRQSEL.
+    # Phase 1.5 will lift this when we read multi-row FQ tables.
+    ids = unique(@view flat.record_freqid[int_inds])
+    length(ids) == 1 ||
+        error("scan $(scan_label) straddles multiple FRQSELs $(ids); not yet supported")
+    leaf_freq_setup = flat.freq_setups[Int(first(ids))]
     bl_codes_scan = flat.baselines.codes[int_inds]
     obs_times_per_int = flat.obs_time[int_inds]
 
@@ -78,13 +102,12 @@ function _extract_scan_leaf(flat::NamedTuple, scan_idx_::Integer; source_key::Sy
         uvw_dense[ti, bi, :] .= uvw_flat[int_i, :]
     end
 
-    array_obs = flat.array_obs
     pol_labels = collect(lookup(flat.vis, Pol))
     vis_part = DimArray(
         vis_dense,
         (
             Ti(unique_times), Baseline(baselines_scan.labels),
-            Pol(pol_labels), IF(array_obs.freq_setup.channel_freqs),
+            Pol(pol_labels), IF(channel_freqs(leaf_freq_setup)),
         ),
     )
     weights_part = DimArray(weights_dense, dims(vis_part))
@@ -98,18 +121,18 @@ function _extract_scan_leaf(flat::NamedTuple, scan_idx_::Integer; source_key::Sy
         ntuple(i -> flat.extra_columns[i][int_inds], length(flat.extra_columns))
     )
 
-    info = _partition_info(;
+    info = PartitionInfo(;
         source_name = flat.source_name,
         source_key = source_key,
-        scan_idx = scan_idx_,
+        scan_name = String(scan_label),
         ra = flat.ra, dec = flat.dec,
         baselines = baselines_scan,
         record_order = record_order,
         date_param = date_param_part,
         extra_columns = extras_part,
+        freq_setup = leaf_freq_setup,
         basename = basename,
     )
     leaf = _build_leaf(vis_part, weights_part, uvw_part; partition_info = info)
     return leaf, info
 end
-

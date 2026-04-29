@@ -113,5 +113,33 @@ function Base.show(io::IO, t::AntennaTable)
     return print(io, "AntennaTable($(array_name(t)), $(length(t)) antennas)")
 end
 
+# Structural equality and hashing. Two independently-constructed structs
+# with field-equal contents must compare `==` so they dedup in `Dict` and
+# the `merge_uvsets` strict-equality check works on independent loads.
+Base.:(==)(a::Mount, b::Mount) =
+    a.parallactic == b.parallactic && a.elevation == b.elevation &&
+    a.offset == b.offset
+Base.hash(a::Mount, h::UInt) =
+    hash((a.parallactic, a.elevation, a.offset), hash(:Mount, h))
 
+Base.:(==)(a::Antenna, b::Antenna) =
+    a.name == b.name && a.station_xyz == b.station_xyz &&
+    a.mount == b.mount && a.nominal_basis == b.nominal_basis &&
+    a.response == b.response && a.pol_angles == b.pol_angles
+Base.hash(a::Antenna, h::UInt) = hash(
+    (a.name, a.station_xyz, a.mount, a.nominal_basis, a.response, a.pol_angles),
+    hash(:Antenna, h),
+)
 
+Base.:(==)(a::AntennaTable, b::AntennaTable) =
+    getfield(a, :antennas) == getfield(b, :antennas) &&
+    getfield(a, :array_xyz) == getfield(b, :array_xyz) &&
+    getfield(a, :array_name) == getfield(b, :array_name) &&
+    getfield(a, :extras) == getfield(b, :extras)
+Base.hash(a::AntennaTable, h::UInt) = hash(
+    (
+        getfield(a, :antennas), getfield(a, :array_xyz),
+        getfield(a, :array_name), getfield(a, :extras),
+    ),
+    hash(:AntennaTable, h),
+)

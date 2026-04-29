@@ -4,7 +4,7 @@
 Abstract type for callables that map a leaf `DimTree` to a transformed leaf,
 to be composed with `apply(reducer, uvset)`. Built-in reducers (`TimeAverage`,
 `BandpassCorrection`) implement the
-`(leaf::DimTree, partition_info::NamedTuple, root_meta::UVMetadata) -> DimTree`
+`(leaf::DimTree, partition_info::PartitionInfo, root_meta::UVMetadata) -> DimTree`
 signature.
 """
 abstract type AbstractPartitionReducer end
@@ -20,7 +20,7 @@ weight-mean of `uvw`. Cells with no valid contributions become `NaN+NaN*im`
 """
 struct TimeAverage <: AbstractPartitionReducer end
 
-(r::TimeAverage)(leaf::DimensionalData.AbstractDimTree, ::NamedTuple, ::UVMetadata) =
+(r::TimeAverage)(leaf::DimensionalData.AbstractDimTree, ::PartitionInfo, ::UVMetadata) =
     _time_average_partition(leaf)
 
 function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
@@ -45,13 +45,11 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
     flag_da = DimArray(W_sum .<= 0, dims(vis_da))
 
     info = DimensionalData.metadata(leaf)
-    new_info = merge(
-        info,
-        (;
-            record_order = Tuple{Int, Int}[],
-            date_param = zeros(eltype(info.date_param), 0, size(info.date_param, 2)),
-            extra_columns = NamedTuple(),
-        ),
+    new_info = update(
+        info;
+        record_order = Tuple{Int, Int}[],
+        date_param = zeros(eltype(info.date_param), 0, size(info.date_param, 2)),
+        extra_columns = NamedTuple(),
     )
     return _build_leaf(vis_da, weights_da, uvw_da, flag_da; partition_info = new_info)
 end
@@ -108,8 +106,6 @@ function _time_average_kernel(
 end
 
 
-
-
 """
     scan_average(uvset::UVSet) -> UVSet
 
@@ -117,5 +113,3 @@ Time-average each leaf's `Ti` axis to length 1 (one timestamp per scan),
 preserving the tree shape. Equivalent to `apply(TimeAverage(), uvset)`.
 """
 scan_average(uvset::UVSet) = apply(TimeAverage(), uvset)
-
-

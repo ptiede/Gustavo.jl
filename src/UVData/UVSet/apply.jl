@@ -3,7 +3,7 @@
 
 Walk the leaves of `uvset` and rebuild a tree with each leaf replaced by
 `f(leaf, partition_info, root_meta)`, where `partition_info` is the leaf's
-`metadata` NamedTuple and `root_meta` is `metadata(uvset)`. Tree shape is
+`metadata::PartitionInfo` and `root_meta` is `metadata(uvset)`. Tree shape is
 preserved. Built-in reducers (`TimeAverage`, `BandpassCorrection`) implement
 this signature.
 """

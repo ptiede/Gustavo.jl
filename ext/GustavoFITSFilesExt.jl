@@ -10,13 +10,14 @@ using PolarizedTypes: CirBasis, LinBasis, XPol, YPol, RPol, LPol
 
 import Gustavo.UVData
 using Gustavo.UVData:
-    UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup,
+    UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup,
     Antenna, AntennaTable, ArrayConfig, BaselineIndex,
     Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL,
     Integration, Pol, IF, UVW,
     sources, parallactic_mount, elevation_mount, offset_mount,
     array_xyz, array_name, extras,
-    assign_scans, decode_baseline
+    decode_baseline,
+    channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
 
 
 # AIPS POLTYA/POLTYB letter ↔ PolarizedTypes
@@ -95,10 +96,7 @@ function mount_to_mntsta(m::Mount)::Int32
 end
 
 
-
-
-
-    # ── Card / HDU parsing helpers ──────────────────────────────────────────────
+# ── Card / HDU parsing helpers ──────────────────────────────────────────────
 
 function card_value(cards, key)
     target = rstrip(key)
@@ -229,14 +227,14 @@ function _build_antenna_table(an_hdu)
 
     antennas = [
         Antenna(;
-            name = names[i],
-            station_xyz = station_xyz[i],
-            mount = mnts[i],
-            nominal_basis = nominal_basis[i],
-            response = response[i],
-            pol_angles = pol_angles[i],
-        )
-        for i in 1:nant
+                name = names[i],
+                station_xyz = station_xyz[i],
+                mount = mnts[i],
+                nominal_basis = nominal_basis[i],
+                response = response[i],
+                pol_angles = pol_angles[i],
+            )
+            for i in 1:nant
     ]
 
     arrayx = Float64(something(card_value(cards, "ARRAYX"), 0.0))
@@ -317,6 +315,8 @@ function _build_frequency_setup(cards, fq, nvis_chan)
     sidebands = vec(Int32.(collect(fq.SIDEBAND)))
     freqid = hasproperty(fq, :FRQSEL) ? Int32(first(collect(fq.FRQSEL))) : Int32(1)
 
+    # TODO (Phase 1.5): support multi-row FQ tables. We currently consume
+    # only the first FRQSEL and assume nvis_chan == NO_IF for that row.
     length(channel_freqs) == nvis_chan ||
         error("FQ table has $(length(channel_freqs)) IFs but vis has $nvis_chan channels")
 
@@ -331,9 +331,8 @@ function _build_frequency_setup(cards, fq, nvis_chan)
     )
 end
 
-function _build_array_obs_metadata(primary_hdu, fq_hdu, nvis_chan)
+function _build_array_obs_metadata(primary_hdu)
     cards = primary_hdu.cards
-    fq = fq_hdu.data
 
     telescope = string(something(card_value(cards, "TELESCOP"), ""))
     instrume = string(something(card_value(cards, "INSTRUME"), ""))
@@ -341,11 +340,8 @@ function _build_array_obs_metadata(primary_hdu, fq_hdu, nvis_chan)
     equinox = Float32(something(card_value(cards, "EQUINOX"), 2000.0))
     bunit = string(something(card_value(cards, "BUNIT"), "UNCALIB"))
 
-    freq_setup = _build_frequency_setup(cards, fq, nvis_chan)
-
     return ObsArrayMetadata(;
         telescope, instrume, date_obs, equinox, bunit,
-        freq_setup,
         extras = _collect_obs_card_extras(cards),
     )
 end
@@ -390,7 +386,10 @@ function _load_uvfits_flat(path)
     weights_raw = raw[:, 3, :, :]
 
     antennas, array_config = _build_antenna_table(an_hdu)
-    array_obs = _build_array_obs_metadata(primary_hdu, fq_hdu, size(vis_raw, 3))
+    array_obs = _build_array_obs_metadata(primary_hdu)
+    # Phase 1: a single freq setup per file. Phase 1.5 will read every FQ
+    # row and use NX `FREQ ID` (or per-record FRQSEL) to bin records.
+    freq_setups = FrequencySetup[_build_frequency_setup(primary_hdu.cards, fq_hdu.data, size(vis_raw, 3))]
     src_info = _build_source_info(primary_hdu)
 
     aips_codes, aips_labels, msv4_labels, perm = parse_stokes_axis(primary_hdu.cards, size(vis_raw, 2))
@@ -414,23 +413,68 @@ function _load_uvfits_flat(path)
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
     uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
-    vis = _wrap_int_pol_if(vis_raw, obs_time, msv4_labels, array_obs.freq_setup.channel_freqs)
-    weights = _wrap_int_pol_if(weights_raw, obs_time, msv4_labels, array_obs.freq_setup.channel_freqs)
+    vis = _wrap_int_pol_if(vis_raw, obs_time, msv4_labels, channel_freqs(first(freq_setups)))
+    weights = _wrap_int_pol_if(weights_raw, obs_time, msv4_labels, channel_freqs(first(freq_setups)))
     uvw = _wrap_uvw(uvw_raw, obs_time)
 
     extra_columns = _collect_extra_columns(dt, primary_hdu.cards)
     date_param = ndims(date_raw) == 2 ? Matrix(date_raw) : reshape(collect(date_raw), :, 1)
 
     # Materialize the NX columns up front: they come back as lazy
-    # `DiskArrays`-backed broadcasts/LazyFieldArrays, and indexing them
-    # one-by-one inside `assign_scans` re-opens the FITS file per access.
+    # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition;
+    # we bin records by half-open `[lower, upper)` time intervals into a
+    # per-record scan label vector. AIPS NX has no SCAN_NUMBER column, so the
+    # row index becomes the canonical scan label (string-cast for xradio
+    # `ScanArray` shape).
     nx_time = Float64.(collect(nx.TIME))
     nx_dt = Float64.(collect(nx.var"TIME INTERVAL"))
-    lower = (nx_time .- nx_dt ./ 2) .* 24
-    upper = (nx_time .+ nx_dt ./ 2) .* 24
-    scans = StructArray(lower = lower, upper = upper)
+    nx_lower = (nx_time .- nx_dt ./ 2) .* 24
+    nx_upper = (nx_time .+ nx_dt ./ 2) .* 24
 
-    scan_idx = assign_scans(obs_time, scans)
+    # Bin each record into the NX row whose center is nearest. This is
+    # robust to:
+    #   - degenerate zero-width intervals (single-timestamp leaves where
+    #     `lower == upper` collapse to one center).
+    #   - Float32→Float64 round-off in the DATE PTYPE column (DATE * 24 can
+    #     drift by ~1e-7, which would push a record outside a `[l, u]`
+    #     check on the literal interval).
+    # Records were pre-binned by NX row on the writer side, so the nearest-
+    # center rule is unambiguous.
+    nx_centers = (nx_lower .+ nx_upper) ./ 2
+    record_scan_name = Vector{String}(undef, length(obs_time))
+    if isempty(nx_centers)
+        fill!(record_scan_name, "")
+    else
+        @inbounds for i in eachindex(obs_time)
+            t = obs_time[i]
+            best_s = 1
+            best_d = abs(t - nx_centers[1])
+            for s in 2:length(nx_centers)
+                d = abs(t - nx_centers[s])
+                if d < best_d
+                    best_d = d
+                    best_s = s
+                end
+            end
+            record_scan_name[i] = string(best_s)
+        end
+    end
+    # Drop records that fall outside any NX row; they cannot be assigned to a
+    # leaf and would otherwise pollute the partition.
+    valid = findall(!=(""), record_scan_name)
+    if length(valid) != length(obs_time)
+        obs_time = obs_time[valid]
+        record_scan_name = record_scan_name[valid]
+        bl_codes = bl_codes[valid]
+        vis = vis[Integration = valid]
+        weights = weights[Integration = valid]
+        uvw = uvw[Integration = valid]
+        date_param = date_param[valid, :]
+        extra_columns = NamedTuple{keys(extra_columns)}(
+            ntuple(i -> extra_columns[i][valid], length(extra_columns))
+        )
+    end
+
     unique_codes = sort(unique(bl_codes))
     bl_lookup = Dict(bl => i for (i, bl) in enumerate(unique_codes))
     bl_pairs = decode_baseline.(unique_codes)
@@ -441,10 +485,13 @@ function _load_uvfits_flat(path)
 
     basename = String(splitext(_basename_of_path(path))[1])
 
+    record_freqid = ones(Int32, length(obs_time))
+
     return (;
-        vis, weights, uvw, obs_time, scan_idx, baselines,
+        vis, weights, uvw, obs_time, baselines,
         date_param, extra_columns,
-        scans, antennas, array_config, array_obs,
+        antennas, array_config, array_obs,
+        freq_setups, record_freqid, record_scan_name,
         pol_labels = msv4_labels,
         aips_pol_codes = aips_codes,
         source_name = src_info.source_name,
@@ -603,40 +650,82 @@ function _build_an_hdu(antennas::AntennaTable, cfg::ArrayConfig, ref_freq::Float
     return HDU(Bintable, data, cards)
 end
 
-_build_fq_hdu(metadata::ObsArrayMetadata) = _build_fq_hdu(metadata.freq_setup)
-
 function _parse_freqid_from_name(name)
     s = string(name)
     m = match(r"(\d+)\s*$", s)
     return m === nothing ? Int32(1) : Int32(parse(Int, m.captures[1]))
 end
 
-function _build_fq_hdu(fs::FrequencySetup)
-    if_freqs = collect(fs.channel_freqs) .- fs.ref_freq
-    freqid = _parse_freqid_from_name(fs.name)
+"""
+    _collect_freq_setups(uvset) -> (Vector{FrequencySetup}, Dict{FrequencySetup,Int32})
+
+Walk leaves and gather their unique `FrequencySetup`s in first-seen order
+(via `union_frequency_axis`), then build a setup → FRQSEL lookup. The
+FRQSEL value is parsed from the setup name when it ends in digits, else
+the leaf's 1-based position in the union list. Setup names that share a
+parsed FRQSEL are reassigned 1..N to keep FRQSEL unique on disk.
+"""
+function _collect_freq_setups(uvset::UVSet)
+    setups = UVData.union_frequency_axis(uvset)
+    parsed = [_parse_freqid_from_name(setup_name(fs)) for fs in setups]
+    # If parsed FRQSELs collide, fall back to positional 1..N to guarantee uniqueness.
+    freqids = length(unique(parsed)) == length(parsed) ? parsed : Int32.(1:length(setups))
+    lookup = Dict{eltype(setups), Int32}()
+    for (fs, fid) in zip(setups, freqids)
+        lookup[fs] = fid
+    end
+    return setups, lookup
+end
+
+function _build_fq_hdu(setups::AbstractVector{<:FrequencySetup}, freqids::AbstractVector{<:Integer})
+    isempty(setups) && error("_build_fq_hdu: empty setup list")
+    nif = length(channel_freqs(first(setups)))
+    for fs in setups
+        length(channel_freqs(fs)) == nif ||
+            error("_build_fq_hdu: ragged channel counts across setups not yet supported (Phase 1.5)")
+    end
+    if_freqs_per_row = [collect(channel_freqs(fs)) .- ref_freq(fs) for fs in setups]
     base = (
-        FRQSEL = Int32[freqid],
-        var"IF FREQ" = [if_freqs],
-        var"CH WIDTH" = [fs.ch_widths],
-        var"TOTAL BANDWIDTH" = [fs.total_bandwidths],
-        SIDEBAND = [fs.sidebands],
+        FRQSEL = Int32.(freqids),
+        var"IF FREQ" = if_freqs_per_row,
+        var"CH WIDTH" = [collect(ch_widths(fs)) for fs in setups],
+        var"TOTAL BANDWIDTH" = [collect(total_bandwidths(fs)) for fs in setups],
+        SIDEBAND = [collect(sidebands(fs)) for fs in setups],
     )
-    data = merge(base, fs.extras)
-    cards = Card[Card("EXTNAME", "AIPS FQ"), Card("NO_IF", Int32(length(if_freqs)))]
+    # Carry per-row extras only if every setup has the same extras keyset
+    # (Phase 1.5 will need per-setup ragged handling here too).
+    extras_keys = keys(first(setups).extras)
+    if all(keys(fs.extras) == extras_keys for fs in setups)
+        extras_per_row = NamedTuple{extras_keys}(
+            ntuple(i -> [fs.extras[i] for fs in setups], length(extras_keys))
+        )
+        data = merge(base, extras_per_row)
+    else
+        data = base
+    end
+    cards = Card[Card("EXTNAME", "AIPS FQ"), Card("NO_IF", Int32(nif))]
     return HDU(Bintable, data, cards)
 end
 
-function _build_nx_hdu(uvset::UVSet, record_starts::AbstractVector, record_ends::AbstractVector)
-    scans = DimensionalData.metadata(uvset).scans
-    nscan = length(scans)
-    time_center = [Float64(scan.lower + scan.upper) for scan in scans] ./ 48.0
-    time_interval = [Float32(scan.upper - scan.lower) for scan in scans] ./ 24.0f0
+# Single-setup convenience kept for callers (and tests) that hand in one fs.
+_build_fq_hdu(fs::FrequencySetup) =
+    _build_fq_hdu([fs], Int32[_parse_freqid_from_name(fs.name)])
+
+function _build_nx_hdu(
+        scan_windows::AbstractVector{Tuple{Float64, Float64}},
+        record_starts::AbstractVector, record_ends::AbstractVector,
+        freqid_per_scan::AbstractVector{<:Integer},
+        subarray_per_scan::AbstractVector{<:Integer} = fill(Int32(1), length(scan_windows)),
+    )
+    nscan = length(scan_windows)
+    time_center = [Float64(lo + hi) / 48.0 for (lo, hi) in scan_windows]
+    time_interval = [Float32(hi - lo) / 24.0f0 for (lo, hi) in scan_windows]
     nt_data = (
         TIME = time_center,
         var"TIME INTERVAL" = time_interval,
         var"SOURCE ID" = fill(Int32(1), nscan),
-        SUBARRAY = fill(Int32(1), nscan),
-        var"FREQ ID" = fill(Int32(1), nscan),
+        SUBARRAY = Int32.(subarray_per_scan),
+        var"FREQ ID" = Int32.(freqid_per_scan),
         var"START VIS" = Int32.(record_starts),
         var"END VIS" = Int32.(record_ends),
     )
@@ -653,15 +742,29 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     branches_dict = DimensionalData.branches(uvset)
     isempty(branches_dict) && error("write_uvfits: UVSet has no partitions")
 
-    leaf_list = collect(values(branches_dict))
-    sids = [DimensionalData.metadata(l).scan_idx for l in leaf_list]
-    issorted(sids) || error("write_uvfits: branches are not in scan_idx order; sids=$(sids)")
+    # Phase 2: write one AN/FQ HDU and one SUBARRAY=1 column. Multi-subarray
+    # write (different AN extvers) is Phase 2.5 — guard explicitly.
+    sub_scans = unique(DimensionalData.metadata(l).sub_scan_name for (_, l) in branches_dict)
+    sub_scans == [""] || error(
+        "write_uvfits: multi-subarray write (sub_scan_name set) is not yet " *
+            "supported (Phase 2.5). Got sub_scan_names = $(sub_scans)."
+    )
+
+    # Sort leaves by scan-window start so NX rows ascend in time, matching
+    # AIPS convention. Within identical start times, fall back to scan_name.
+    leaf_list = sort(
+        collect(values(branches_dict));
+        by = leaf -> (
+            UVData.scan_window(leaf)[1],
+            DimensionalData.metadata(leaf).scan_name,
+        ),
+    )
 
     root = DimensionalData.metadata(uvset)
-    array_obs = root.array_obs
     msv4_labels = collect(UVData.pol_products(uvset))
     npol = length(msv4_labels)
-    nchan = length(array_obs.freq_setup.channel_freqs)
+    setups, freqid_lookup = _collect_freq_setups(uvset)
+    nchan = length(channel_freqs(first(setups)))
 
     # Map MSv4 pol order (in-memory) back to whatever AIPS Stokes order the
     # primary_cards specify, so the on-disk layout matches the round-tripped
@@ -693,14 +796,15 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     extras_eltypes = ntuple(i -> eltype(fp_info.extra_columns[i]), length(extras_keys))
     extras_bufs = ntuple(i -> Vector{extras_eltypes[i]}(undef, nrec_total), length(extras_keys))
 
-    nscan = length(root.scans)
+    nscan = length(leaf_list)
     record_starts = zeros(Int32, nscan)
     record_ends = zeros(Int32, nscan)
+    freqid_per_scan = ones(Int32, nscan)
+    scan_windows = Vector{Tuple{Float64, Float64}}(undef, nscan)
 
     rec_offset = 0
-    for leaf in leaf_list
+    for (sid, leaf) in enumerate(leaf_list)
         info = DimensionalData.metadata(leaf)
-        sid = info.scan_idx
         bls = info.baselines
         ro = info.record_order
         first_row_in_scan = rec_offset + 1
@@ -715,9 +819,11 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
                 extras_bufs[i][row] = info.extra_columns[i][rec_i]
             end
         end
-        if !isempty(ro) && 1 <= sid <= nscan
+        scan_windows[sid] = UVData.scan_window(leaf)
+        if !isempty(ro)
             record_starts[sid] = Int32(first_row_in_scan)
             record_ends[sid] = Int32(rec_offset + length(ro))
+            freqid_per_scan[sid] = freqid_lookup[info.freq_setup]
         end
         rec_offset += length(ro)
     end
@@ -725,9 +831,11 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     extras_cat = NamedTuple{extras_keys}(extras_bufs)
     primary_data = _build_primary_data(uvset, uu, vv, ww_, bl_codes, date_param_cat, extras_cat, raw_data)
     primary_hdu = HDU(Random, primary_data, copy(root.primary_cards))
-    an_hdu = _build_an_hdu(root.antennas, root.array_config, array_obs.freq_setup.ref_freq)
-    fq_hdu = _build_fq_hdu(array_obs)
-    nx_hdu = _build_nx_hdu(uvset, record_starts, record_ends)
+    # AN table reflects the array nominal — one ref_freq for the array, taken
+    # from the first setup. Per-SPW reference frequencies live on each FQ row.
+    an_hdu = _build_an_hdu(root.antennas, root.array_config, ref_freq(first(setups)))
+    fq_hdu = _build_fq_hdu(setups, [freqid_lookup[fs] for fs in setups])
+    nx_hdu = _build_nx_hdu(scan_windows, record_starts, record_ends, freqid_per_scan)
 
     write(output_path, HDU[primary_hdu, an_hdu, fq_hdu, nx_hdu])
     return output_path

@@ -13,21 +13,32 @@ function sanitize_source(name::AbstractString)
 end
 
 """
-    partition_key(source_key::Symbol, scan_idx::Integer) -> Symbol
+    partition_key(source_key, scan_name; sub_scan_name = "") -> Symbol
 
-Compose a leaf branch key as `:<source_key>_scan_<scan_idx>`.
+Compose a leaf branch key. Default shape is `:<source_key>_scan_<scan_name>`.
+When `sub_scan_name` is non-empty (sub-array / sub-scan disambiguation,
+mirrors xradio's `SUB_SCAN_NUMBER` partitioning), the key becomes
+`:<source_key>_scan_<scan_name>_<sub_scan_name>`.
 """
-partition_key(source_key::Symbol, scan_idx::Integer) =
-    Symbol(source_key, :_scan_, scan_idx)
+function partition_key(
+        source_key::Symbol, scan_name::AbstractString;
+        sub_scan_name::AbstractString = "",
+    )
+    return isempty(sub_scan_name) ?
+        Symbol(source_key, :_scan_, scan_name) :
+        Symbol(source_key, :_scan_, scan_name, :_, sub_scan_name)
+end
+
+# Back-compat: tests / fixtures historically called with an Integer scan id.
+partition_key(source_key::Symbol, scan_idx::Integer; kwargs...) =
+    partition_key(source_key, string(scan_idx); kwargs...)
 
 """
-    scan_key(id::Integer) -> Symbol
+    scan_key(id) -> Symbol
 
-Legacy scan key helper retained for backwards compatibility — note
-that with multi-source UVSets the per-source `partition_key(src, id)` is
-preferred. Returns `:scan_<id>`.
+Legacy scan-key helper retained for back-compat. Returns `:scan_<id>`.
 """
-scan_key(id::Integer) = Symbol("scan_", id)
+scan_key(id) = Symbol("scan_", id)
 
 # Preserve DimArray dim metadata when callers hand back a plain array result
 # of the same shape (e.g. an externally-built vis cube). Already-DimArray
@@ -47,25 +58,6 @@ AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices as
 decode_baseline(bl::Integer) = (bl ÷ 256, bl % 256)
 
 """
-    assign_scans(times, scans) -> Vector{Int}
-
-Map each entry of `times` to the index of the half-open scan interval
-`[scans[s].lower, scans[s].upper)` containing it; 0 if no scan matches.
-"""
-function assign_scans(times, scans)
-    idx = zeros(Int, length(times))
-    @inbounds for i in eachindex(times)
-        for s in eachindex(scans)
-            if scans[s].lower ≤ times[i] < scans[s].upper
-                idx[i] = s
-                break
-            end
-        end
-    end
-    return idx
-end
-
-"""
     pol_products(x) -> Vector{String}
 
 Return the polarization-product labels (e.g. `["PP", "PQ", "QP", "QQ"]`)
@@ -80,4 +72,3 @@ function pol_products(uvset::UVSet)
     isempty(bs) && error("pol_products: UVSet has no leaves")
     return pol_products(first(values(bs)))
 end
-

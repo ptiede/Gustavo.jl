@@ -14,20 +14,25 @@ function select_source(uvset::UVSet, name::AbstractString)
 end
 
 """
-    select_scan(uvset::UVSet, source::AbstractString, scan_idx::Integer) -> DimTree
+    select_scan(uvset::UVSet, source::AbstractString, scan_name) -> DimTree
 
-Return the single leaf for `(source, scan_idx)`. Errors if no such leaf
-exists.
+Return the single leaf for `(source, scan_name)`. `scan_name` may be a
+string (the leaf's primary scan label) or an integer (treated as
+`string(scan_name)` for back-compat with prior numeric scan handles).
+Errors if no such leaf exists.
 """
-function select_scan(uvset::UVSet, source::AbstractString, scan_idx::Integer)
+function select_scan(uvset::UVSet, source::AbstractString, scan_name::AbstractString)
     for (_, leaf) in DimensionalData.branches(uvset)
         m = DimensionalData.metadata(leaf)
-        if m.source_name == source && m.scan_idx == scan_idx
+        if m.source_name == source && m.scan_name == scan_name
             return leaf
         end
     end
-    return error("select_scan: no leaf for source=$(source), scan_idx=$(scan_idx)")
+    return error("select_scan: no leaf for source=$(source), scan_name=$(scan_name)")
 end
+
+select_scan(uvset::UVSet, source::AbstractString, scan_idx::Integer) =
+    select_scan(uvset, source, string(scan_idx))
 
 """
     select_partition(uvset::UVSet; source=nothing, scan=nothing,
@@ -39,15 +44,17 @@ the corresponding `partition_info` field for a leaf to be retained.
 function select_partition(
         uvset::UVSet;
         source::Union{Nothing, AbstractString} = nothing,
-        scan::Union{Nothing, Integer} = nothing,
+        scan::Union{Nothing, AbstractString, Integer} = nothing,
         spw::Union{Nothing, AbstractString} = nothing,
         intent::Union{Nothing, AbstractString} = nothing,
     )
+    scan_label = scan === nothing ? nothing :
+        (scan isa Integer ? string(scan) : String(scan))
     new_branches = DimensionalData.TreeDict()
     for (k, leaf) in DimensionalData.branches(uvset)
         m = DimensionalData.metadata(leaf)
         source === nothing || m.source_name == source || continue
-        scan === nothing || m.scan_idx == scan || continue
+        scan_label === nothing || m.scan_name == scan_label || continue
         spw === nothing || m.spw_name == spw || continue
         intent === nothing || m.intent == intent || continue
         new_branches[k] = leaf
@@ -190,14 +197,12 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
 
     return _build_leaf(
         vis_da, weights_da, uvw_da, flag_da;
-        partition_info = merge(
-            DimensionalData.metadata(leaf),
-            (;
-                baselines = new_baselines,
-                record_order = record_order_new,
-                date_param = date_param_new,
-                extra_columns = extras_new,
-            ),
+        partition_info = update(
+            DimensionalData.metadata(leaf);
+            baselines = new_baselines,
+            record_order = record_order_new,
+            date_param = date_param_new,
+            extra_columns = extras_new,
         ),
     )
 end
@@ -206,33 +211,43 @@ end
 """
     merge_uvsets(uvsets::UVSet...) -> UVSet
 
-Combine multiple UVSets into one. Validates that all share the same array-
-wide metadata (`telescope`, `freq_setup.name`, polarization products).
-Branch keys must be unique across inputs.
+Strictly combine multiple UVSets into one multi-source UVSet. All inputs
+must share identical array-wide metadata: `antennas`, `array_config`,
+`array_obs`, and the same polarization products on the `Pol` axis. The
+root `primary_cards` is taken from the first input verbatim — write-back
+round-trips after `select_source(merged, name)`.
+
+Branch keys must be unique across inputs (collisions would indicate two
+leaves describing the same `(source, scan, sub_scan)` triple, which is not
+representable). For sub-arrays observing the same `(source, scan)`
+simultaneously, set `sub_scan_name` distinctly on each leaf to disambiguate
+— mirrors xradio's `SUB_SCAN_NUMBER` partitioning.
 """
 function merge_uvsets(uvsets::UVSet...)
     isempty(uvsets) && error("merge_uvsets: at least one UVSet required")
     length(uvsets) == 1 && return only(uvsets)
     base = first(uvsets)
     base_root = DimensionalData.metadata(base)
-    base_arr = base_root.array_obs
     base_pp = pol_products(base)
-    for u in uvsets[2:end]
-        a = DimensionalData.metadata(u).array_obs
-        a.telescope == base_arr.telescope ||
-            error("merge_uvsets: telescope mismatch ($(a.telescope) vs $(base_arr.telescope))")
-        a.freq_setup.name == base_arr.freq_setup.name ||
-            error("merge_uvsets: freq_setup name mismatch")
+    for (i, u) in enumerate(uvsets[2:end])
+        m = DimensionalData.metadata(u)
+        m.antennas == base_root.antennas ||
+            error("merge_uvsets: antenna table mismatch (input $(i + 1) vs 1)")
+        m.array_config == base_root.array_config ||
+            error("merge_uvsets: array_config mismatch (input $(i + 1) vs 1)")
+        m.array_obs == base_root.array_obs ||
+            error("merge_uvsets: array_obs mismatch (input $(i + 1) vs 1)")
         pol_products(u) == base_pp ||
-            error("merge_uvsets: polarization product mismatch")
+            error("merge_uvsets: polarization product mismatch (input $(i + 1) vs 1)")
     end
+
     new_branches = DimensionalData.TreeDict()
     for u in uvsets
         for (k, leaf) in DimensionalData.branches(u)
-            haskey(new_branches, k) && error("merge_uvsets: duplicate partition key $(k)")
+            haskey(new_branches, k) &&
+                error("merge_uvsets: duplicate partition key $(k)")
             new_branches[k] = leaf
         end
     end
-    return DimensionalData.rebuild(first(uvsets); branches = new_branches)
+    return DimensionalData.rebuild(base; branches = new_branches)
 end
-

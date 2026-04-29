@@ -24,6 +24,3 @@ Single-source UVSets only — multi-source UVSets must first be narrowed via
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
 function write_uvfits end
-
-
-

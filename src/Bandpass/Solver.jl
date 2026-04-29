@@ -1237,17 +1237,8 @@ function BandpassALS(; iterations = 1, tolerance = 1.0e-6, refine_template = tru
     return BandpassALS(Int(iterations), Float64(tolerance), Bool(refine_template), Bool(refine_scans))
 end
 
-function prepare_bandpass_solver(avg::UVSet, ref_ant; kwargs...)
-    src_list = sources(avg)
-    if length(src_list) > 1
-        error(
-            "prepare_bandpass_solver requires a single-source UVSet; " *
-                "got sources=$(src_list). Use prepare_bandpass_solver(uvset, source, ref_ant) " *
-                "or call select_source first."
-        )
-    end
-    return prepare_bandpass_solver(_to_bandpass_dataset(avg), ref_ant; kwargs...)
-end
+prepare_bandpass_solver(avg::UVSet, ref_ant; kwargs...) =
+    prepare_bandpass_solver(_to_bandpass_dataset(avg), ref_ant; kwargs...)
 
 prepare_bandpass_solver(avg::UVSet, source::AbstractString, ref_ant; kwargs...) =
     prepare_bandpass_solver(_to_bandpass_dataset(select_source(avg, source)), ref_ant; kwargs...)
@@ -1285,7 +1276,7 @@ function prepare_bandpass_solver(
         gauge,
         min_baselines,
         avg.baselines.pairs,
-        avg.metadata.freq_setup.channel_freqs,
+        UVData.channel_freqs(avg.freq_setup),
         station_models,
         parallel_pols,
         parallel_hand_mask,
@@ -1806,16 +1797,8 @@ Returns:
   c0                            – internal reference channel used for ratios, phase unwrapping, and relative-feed correction
   xy_correction                 – `DimArray` with scan/IF axes and metadata for the target site/pol
 """
-function solve_bandpass(avg::UVSet, ref_ant; kwargs...)
-    src_list = sources(avg)
-    if length(src_list) > 1
-        error(
-            "solve_bandpass requires a single-source UVSet; got sources=$(src_list). " *
-                "Use solve_bandpass(uvset, source, ref_ant) or call select_source first."
-        )
-    end
-    return solve_bandpass(_to_bandpass_dataset(avg), ref_ant; kwargs...)
-end
+solve_bandpass(avg::UVSet, ref_ant; kwargs...) =
+    solve_bandpass(_to_bandpass_dataset(avg), ref_ant; kwargs...)
 
 solve_bandpass(uvset::UVSet, source::AbstractString, ref_ant; kwargs...) =
     solve_bandpass(_to_bandpass_dataset(select_source(uvset, source)), ref_ant; kwargs...)
@@ -1825,7 +1808,7 @@ function solve_bandpass(uvset::UVSet, key::Symbol, ref_ant; kwargs...)
     branches_d = DimensionalData.branches(uvset)
     haskey(branches_d, key) || error("UVSet has no partition $key")
     info = DimensionalData.metadata(branches_d[key])
-    sub = select_partition(uvset; source = info.source_name, scan = info.scan_idx)
+    sub = select_partition(uvset; source = info.source_name, scan = info.scan_name)
     return solve_bandpass(scan_average(sub), ref_ant; kwargs...)
 end
 

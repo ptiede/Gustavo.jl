@@ -78,7 +78,6 @@ function synthetic_uvdata()
     array_obs = UV.ObsArrayMetadata(;
         telescope = "TEST", instrume = "TEST",
         date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
-        freq_setup,
     )
 
     # Memo-117-shaped primary HDU cards: NAXIS=7 random-groups layout plus
@@ -112,17 +111,18 @@ function synthetic_uvdata()
             weights = weights,
             uvw = uvw,
             obs_time = obs_time_synth,
-            scan_idx = [1, 2],
+            record_scan_name = ["1", "2"],
             baselines = UV.BaselineIndex([1, 1], [(1, 2)], Dict(1 => 1), [1]; antenna_names = ["AA", "AX"]),
             # Single DATE PTYPE column carrying obs_time/24 (hours → days).
             # Whole-JD + fractional-day style needs two PTYPE columns which
             # FITSFiles can't deduplicate on the round-trip path.
             date_param = reshape(Float32[0.0, 1 / 24], :, 1),
             extra_columns = NamedTuple(),
-            scans = StructArray(lower = [0.0, 1.0], upper = [1.0, 2.0]),
             antennas = antennas,
             array_config = array_config,
             array_obs = array_obs,
+            freq_setups = UV.FrequencySetup[freq_setup],
+            record_freqid = Int32[1, 1],
             source_name = "TEST",
             ra = 0.0, dec = 0.0,
             primary_cards = primary_cards,
@@ -181,14 +181,14 @@ function synthetic_bandpass_avg_uvdata()
     UV = Gustavo.UVData
     antennas_v = [
         UV.Antenna(;
-            name = ant_names[i],
-            station_xyz = zeros(3),
-            mount = UV.MountAltAz(),
-            nominal_basis = (RPol(), LPol()),
-            response = Diagonal(ones(ComplexF32, 2)),
-            pol_angles = (0.0f0, 0.0f0),
-        )
-        for i in 1:nant
+                name = ant_names[i],
+                station_xyz = zeros(3),
+                mount = UV.MountAltAz(),
+                nominal_basis = (RPol(), LPol()),
+                response = Diagonal(ones(ComplexF32, 2)),
+                pol_angles = (0.0f0, 0.0f0),
+            )
+            for i in 1:nant
     ]
     antennas = UV.AntennaTable(
         StructArray(antennas_v), zeros(3), "TEST",
@@ -210,7 +210,6 @@ function synthetic_bandpass_avg_uvdata()
     array_obs = UV.ObsArrayMetadata(;
         telescope = "TEST", instrume = "TEST",
         date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
-        freq_setup,
     )
 
     baselines_idx = UV.BaselineIndex(
@@ -220,10 +219,10 @@ function synthetic_bandpass_avg_uvdata()
         collect(1:length(bl_pairs));
         antenna_names = ant_names,
     )
-    scans_struct = StructArray(lower = Float64.(0:(nscan - 1)), upper = Float64.(1:nscan))
+    scan_windows = [(Float64(s - 1), Float64(s)) for s in 1:nscan]
     return BP.BandpassDataset(
         vis, weights, uvw, baselines_idx,
-        antennas, array_obs, scans_struct,
+        antennas, array_obs, freq_setup, scan_windows,
     )
 end
 
@@ -896,6 +895,7 @@ end
 
 @testset "Bandpass initializer methods" begin
     BP = Gustavo.Bandpass
+    UV = Gustavo.UVData
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
     station_models = [BP.StationBandpassModel() for _ in data.antennas]
@@ -922,8 +922,8 @@ end
     )
     random_state = BP.initialize_bandpass_state(setup, random_initializer)
 
-    @test size(random_state.gains_template) == (length(data.antennas), 2, length(data.metadata.freq_setup.channel_freqs))
-    @test size(random_state.scan_gains) == (length(data.scans), length(data.antennas), 2, length(data.metadata.freq_setup.channel_freqs))
+    @test size(random_state.gains_template) == (length(data.antennas), 2, length(UV.channel_freqs(data.freq_setup)))
+    @test size(random_state.scan_gains) == (length(data.scans), length(data.antennas), 2, length(UV.channel_freqs(data.freq_setup)))
     @test all(random_state.scan_solved)
     @test isfinite(BP.bandpass_state_objective(random_state))
     @test norm(random_state.gains_template .- state_ratio.gains_template) > 0
@@ -986,7 +986,7 @@ end
     UV = Gustavo.UVData
     data = synthetic_uvdata()
 
-    fs_orig = UV.metadata(data).array_obs.freq_setup
+    fs_orig = UV.freq_setup(data)
     @test eltype(fs_orig.channel_freqs) == Float64
     @test eltype(fs_orig.ch_widths) == Float32
     @test eltype(fs_orig.total_bandwidths) == Float32
@@ -1007,7 +1007,7 @@ end
             @test UV.baselines(leaf_round).unique_codes == UV.baselines(leaf_orig).unique_codes
         end
 
-        fs_round = UV.metadata(round_set).array_obs.freq_setup
+        fs_round = UV.freq_setup(round_set)
         @test fs_round.channel_freqs == fs_orig.channel_freqs
         @test fs_round.ch_widths == fs_orig.ch_widths
         @test fs_round.total_bandwidths == fs_orig.total_bandwidths
@@ -1028,7 +1028,7 @@ end
     # same shape the load path produces.
     leaves_collected = collect(values(UV.branches(base)))
     obs_times = Float64[]
-    scan_indices = Int[]
+    scan_indices = String[]
     bl_codes = Int[]
     vis_chunks = Any[]
     weights_chunks = Any[]
@@ -1042,7 +1042,7 @@ end
         uvw_p = parent(leaf[:uvw])
         for (ti, bi) in info.record_order
             push!(obs_times, ti_lookup[ti])
-            push!(scan_indices, info.scan_idx)
+            push!(scan_indices, info.scan_name)
             push!(bl_codes, round(Int, bls.unique_codes[bi]))
             push!(vis_chunks, vis_p[ti, bi, :, :])
             push!(weights_chunks, w_p[ti, bi, :, :])
@@ -1061,7 +1061,7 @@ end
         uvw_flat[i, :] .= uvw_chunks[i]
     end
     pol_labels = pol_products(base)
-    chan_freqs = base_root.array_obs.freq_setup.channel_freqs
+    chan_freqs = UV.channel_freqs(UV.freq_setup(base))
     vis_da = DimArray(vis_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.IF(chan_freqs)))
     weights_da = DimArray(weights_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.IF(chan_freqs)))
     uvw_da = DimArray(uvw_flat, (UV.Integration(obs_times), UV.UVW(["U", "V", "W"])))
@@ -1085,15 +1085,19 @@ end
     extras = (var"INTTIM" = inttim_values,)
     date_param = hcat(fill(Float32(2_459_664.5), nint), Float32.(obs_times ./ 24))
 
+    base_fs = UV.freq_setup(base)
     uvset = UV.UVSet(
         (
             vis = vis_da, weights = weights_da, uvw = uvw_da,
-            obs_time = obs_times, scan_idx = scan_indices,
+            obs_time = obs_times,
+            record_scan_name = scan_indices,
             baselines = bls,
             date_param = date_param, extra_columns = extras,
-            scans = base_root.scans, antennas = base_root.antennas,
+            antennas = base_root.antennas,
             array_config = base_root.array_config,
             array_obs = base_root.array_obs,
+            freq_setups = UV.FrequencySetup[base_fs],
+            record_freqid = ones(Int32, length(obs_times)),
             source_name = "TEST", ra = 0.0, dec = 0.0,
             primary_cards = primary_cards,
             basename = "synthetic",
@@ -1147,12 +1151,13 @@ end
     UV = Gustavo.UVData
     uvset = synthetic_uvdata()
     @test uvset isa UV.UVSet
-    @test length(UV.branches(uvset)) == length(UV.metadata(uvset).scans)
-    for s in 1:length(UV.metadata(uvset).scans)
-        key = UV.partition_key(:TEST, s)
+    nleaves = length(UV.branches(uvset))
+    @test nleaves == 2
+    for s in 1:nleaves
+        key = UV.partition_key(:TEST, string(s))
         @test haskey(UV.branches(uvset), key)
         leaf = UV.branches(uvset)[key]
-        @test UV.scan_idx(leaf) == s
+        @test UV.primary_scan_name(leaf) == string(s)
         @test ndims(parent(leaf[:vis])) == 4
         @test ndims(parent(leaf[:uvw])) == 3
     end
@@ -1263,8 +1268,8 @@ end
     uvset = synthetic_uvdata()
 
     nant = length(UV.metadata(uvset).antennas)
-    nchan = length(UV.metadata(uvset).array_obs.freq_setup.channel_freqs)
-    nscan = length(UV.metadata(uvset).scans)
+    nchan = UV.nchannels(uvset)
+    nscan = length(UV.branches(uvset))
     gains = ComplexF64[
         cis(0.1 * a + 0.05 * c + 0.02 * f + 0.01 * s) * (0.95 + 0.01 * (a + c))
             for s in 1:nscan, a in 1:nant, f in 1:2, c in 1:nchan
@@ -1313,7 +1318,7 @@ end
     w32 = Float32.(parent(avg.weights))
     avg = BP.BandpassDataset(
         avg.vis, DimArray(w32, dims(avg.weights)), avg.uvw,
-        avg.baselines, avg.antennas, avg.metadata, avg.scans,
+        avg.baselines, avg.antennas, avg.metadata, avg.freq_setup, avg.scans,
     )
     @test eltype(avg.weights) == Float32
 
@@ -1358,25 +1363,48 @@ function synthetic_uvdata_3c273()
     new_branches = Gustavo.UVData.DimensionalData.TreeDict()
     for leaf in leaves_orig
         info = UV.metadata(leaf)
-        info_3c = merge(
-            info,
-            (;
-                source_name = "3C273",
-                source_key = UV.sanitize_source("3C273"),
-                field_name = "3C273",
-                ra = 187.27791666666667,
-                dec = 12.391122222222222,
-                partition_name = "synthetic_0_3C273_$(info.scan_name)",
-            ),
+        info_3c = UV.update(
+            info;
+            source_name = "3C273",
+            source_key = UV.sanitize_source("3C273"),
+            field_name = "3C273",
+            ra = 187.27791666666667,
+            dec = 12.391122222222222,
+            partition_name = "synthetic_0_3C273_$(info.scan_name)",
         )
         new_leaf = UV._build_leaf(
             leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
             partition_info = info_3c,
         )
-        new_key = UV.partition_key(info_3c.source_key, info_3c.scan_idx)
+        new_key = UV.partition_key(info_3c.source_key, info_3c.scan_name)
         new_branches[new_key] = new_leaf
     end
     return Gustavo.UVData.DimensionalData.rebuild(base; branches = new_branches)
+end
+
+# Same antennas/array_obs as `synthetic_uvdata_3c273` but with non-overlapping
+# scan time intervals — exercises that merging two UVSets whose leaves carry
+# distinct scan windows preserves each leaf's own window.
+function synthetic_uvdata_3c273_shifted()
+    UV = Gustavo.UVData
+    src = synthetic_uvdata_3c273()
+    # Pick a shift large enough that the new Ti axes don't overlap the original.
+    dt = 100.0
+    new_branches = Gustavo.UVData.DimensionalData.TreeDict()
+    for (k, leaf) in UV.branches(src)
+        info = UV.metadata(leaf)
+        old_vis = leaf[:vis]
+        old_uvw = leaf[:uvw]
+        old_t = collect(dims(old_vis, Ti))
+        new_t = old_t .+ dt
+        new_vis = DimArray(parent(old_vis), (Ti(new_t), dims(old_vis)[2:end]...))
+        new_w = DimArray(parent(leaf[:weights]), (Ti(new_t), dims(leaf[:weights])[2:end]...))
+        new_uvw = DimArray(parent(old_uvw), (Ti(new_t), dims(old_uvw)[2:end]...))
+        new_flag = DimArray(parent(leaf[:flag]), (Ti(new_t), dims(leaf[:flag])[2:end]...))
+        new_leaf = UV._build_leaf(new_vis, new_w, new_uvw, new_flag; partition_info = info)
+        new_branches[k] = new_leaf
+    end
+    return Gustavo.UVData.DimensionalData.rebuild(src; branches = new_branches)
 end
 
 @testset "multi-source UVSet" begin
@@ -1388,8 +1416,8 @@ end
     @test multi isa UV.UVSet
     @test length(UV.branches(multi)) == 4
     @test UV.sources(multi) == ["TEST", "3C273"]
-    @test sort(UV.scan_ids(multi, "TEST")) == [1, 2]
-    @test sort(UV.scan_ids(multi, "3C273")) == [1, 2]
+    @test sort(UV.scan_ids(multi, "TEST")) == ["1", "2"]
+    @test sort(UV.scan_ids(multi, "3C273")) == ["1", "2"]
     # summary returns one row per leaf with correct source/scan info.
     rows = Base.summary(multi)
     @test length(rows) == 4
@@ -1401,10 +1429,10 @@ end
     @test length(UV.branches(sub_test)) == 2
     @test all(UV.metadata(l).source_name == "TEST" for (_, l) in UV.branches(sub_test))
 
-    # select_scan returns the leaf for (source, scan_idx).
-    leaf = UV.select_scan(multi, "3C273", 1)
+    # select_scan returns the leaf for (source, scan_name).
+    leaf = UV.select_scan(multi, "3C273", "1")
     @test UV.metadata(leaf).source_name == "3C273"
-    @test UV.metadata(leaf).scan_idx == 1
+    @test UV.metadata(leaf).scan_name == "1"
 
     # Tab-completable Partitions accessor.
     ps = UV.partitions(multi)
@@ -1426,6 +1454,36 @@ end
     finally
         isfile(tmp) && rm(tmp; force = true)
     end
+
+    # With per-leaf scan windows (no root scans table), merging two UVSets
+    # whose leaves have shifted Ti axes preserves each leaf's own scan_window.
+    set_shifted = synthetic_uvdata_3c273_shifted()
+    multi2 = UV.merge_uvsets(set_test, set_shifted)
+    @test length(UV.branches(multi2)) ==
+        length(UV.branches(set_test)) + length(UV.branches(set_shifted))
+    # Each per-source leaf keeps its own scan_name; the shifted set still has
+    # scan labels "1" and "2".
+    @test sort(UV.scan_ids(multi2, "3C273")) == ["1", "2"]
+    leaf_shifted = UV.select_scan(multi2, "3C273", "1")
+    @test UV.scan_window(leaf_shifted) != UV.scan_window(UV.select_scan(multi2, "TEST", "1"))
+
+    # Strict equality rejects mismatched array-wide metadata.
+    set_other_telescope = let s = synthetic_uvdata()
+        m = UV.metadata(s)
+        new_arr = Gustavo.UVData.ObsArrayMetadata(;
+            telescope = "OTHER",
+            instrume = m.array_obs.instrume,
+            date_obs = m.array_obs.date_obs,
+            equinox = m.array_obs.equinox,
+            bunit = m.array_obs.bunit,
+            extras = m.array_obs.extras,
+        )
+        new_root = Gustavo.UVData.UVMetadata(
+            m.antennas, m.array_config, new_arr, m.primary_cards,
+        )
+        Gustavo.UVData.DimensionalData.rebuild(s; metadata = new_root)
+    end
+    @test_throws ErrorException UV.merge_uvsets(set_test, set_other_telescope)
 end
 
 @testset "Source name sanitization" begin
@@ -1437,4 +1495,206 @@ end
     @test UV.sanitize_source("") == :unknown
     @test UV.sanitize_source("  ") == :unknown
     @test UV.partition_key(:M3C273, 5) == :M3C273_scan_5
+end
+
+@testset "Structural ==/hash for metadata types" begin
+    UV = Gustavo.UVData
+    using LinearAlgebra: Diagonal
+
+    fs1() = UV.FrequencySetup(;
+        name = "FRQSEL_1", ref_freq = 1.0e9,
+        channel_freqs = collect(1.0:4.0),
+        ch_widths = fill(1.0f0, 4), total_bandwidths = fill(1.0f0, 4),
+        sidebands = Int32.(fill(1, 4)),
+    )
+    @test fs1() == fs1()
+    @test hash(fs1()) == hash(fs1())
+    # Differing field flips equality.
+    fs_alt = UV.FrequencySetup(;
+        name = "FRQSEL_1", ref_freq = 1.0e9,
+        channel_freqs = collect(1.0:5.0), ch_widths = fill(1.0f0, 5),
+        total_bandwidths = fill(1.0f0, 5), sidebands = Int32.(fill(1, 5)),
+    )
+    @test fs1() != fs_alt
+    # Dedup in a Dict relies on both `==` and `hash`.
+    d = Dict(fs1() => :first)
+    d[fs1()] = :second
+    @test d[fs1()] == :second
+    @test length(d) == 1
+
+    obs1() = UV.ObsArrayMetadata(;
+        telescope = "TEST", instrume = "TEST",
+        date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
+    )
+    @test obs1() == obs1()
+    @test hash(obs1()) == hash(obs1())
+
+    cfg1() = UV.ArrayConfig(
+        "2000-01-01", 0.0f0, 360.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0,
+        "UTC", "ITRF", "RIGHT", "APPROX",
+        Int32(1), Int32(0), Int32(4), Int32(0), Int32(1),
+    )
+    @test cfg1() == cfg1()
+    @test hash(cfg1()) == hash(cfg1())
+
+    mnt() = UV.MountAltAz()
+    @test mnt() == mnt()
+    @test hash(mnt()) == hash(mnt())
+
+    ant() = UV.Antenna(;
+        name = "AA", station_xyz = zeros(3), mount = UV.MountAltAz(),
+        nominal_basis = (RPol(), LPol()),
+        response = Diagonal(ones(ComplexF32, 2)),
+        pol_angles = (0.0f0, 0.0f0),
+    )
+    @test ant() == ant()
+    @test hash(ant()) == hash(ant())
+end
+
+@testset "Per-leaf freq_setup populated from load" begin
+    UV = Gustavo.UVData
+    data = synthetic_uvdata()
+    fs_root = UV.freq_setup(data)
+    # Every leaf carries its own copy of the same setup.
+    for (_, leaf) in UV.branches(data)
+        @test UV.freq_setup(leaf) == fs_root
+    end
+    # Union axis collapses identical setups to length 1.
+    axis = UV.union_frequency_axis(data)
+    @test length(axis) == 1
+    @test axis[1] == fs_root
+    # nchannels / band_center_frequency dispatch through freq_setup(uvset).
+    @test UV.nchannels(data) == length(UV.channel_freqs(fs_root))
+    @test UV.band_center_frequency(data) == UV.band_center_frequency(fs_root)
+
+    # Round-trip through write/read keeps the per-leaf setup.
+    tmp = tempname() * ".uvfits"
+    try
+        UV.write_uvfits(tmp, data)
+        round_set = UV.load_uvfits(tmp)
+        for (_, leaf) in UV.branches(round_set)
+            @test UV.channel_freqs(UV.freq_setup(leaf)) == UV.channel_freqs(fs_root)
+        end
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
+end
+
+@testset "freq_setup(uvset) errors on multi-SPW; union_frequency_axis returns both" begin
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    # Build a sibling leaf with a distinct FrequencySetup, swap it into the
+    # second scan slot. Hand-built — no FITS round-trip yet (Phase 1.5).
+    fs_alt = UV.FrequencySetup(;
+        name = "FRQSEL_2", ref_freq = 2.0e9,
+        channel_freqs = collect(2.0e9:1.0e3:(2.0e9 + 3.0e3)),
+        ch_widths = fill(1.0f3, 4), total_bandwidths = fill(1.0f3, 4),
+        sidebands = Int32.(fill(1, 4)),
+    )
+    branches = Gustavo.UVData.DimensionalData.TreeDict()
+    for (k, leaf) in UV.branches(base)
+        info = UV.metadata(leaf)
+        if info.scan_name == "2"
+            new_info = UV.update(info; freq_setup = fs_alt)
+            new_leaf = UV._build_leaf(
+                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+                partition_info = new_info,
+            )
+            branches[k] = new_leaf
+        else
+            branches[k] = leaf
+        end
+    end
+    multi = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
+
+    @test length(UV.union_frequency_axis(multi)) == 2
+    @test_throws ArgumentError UV.freq_setup(multi)
+    # nchannels(uvset) routes through freq_setup(uvset) and inherits the throw.
+    @test_throws ArgumentError UV.nchannels(multi)
+end
+
+@testset "Phase 1.5 holdover: multi-SPW round-trip" begin
+    # Once load_uvfits supports multiple FQ rows, write a 2-leaf 2-SPW UVSet,
+    # round-trip through write/load_uvfits, and confirm both setups come back.
+    @test_skip "multi-FREQID UVFITS round-trip — Phase 1.5"
+end
+
+@testset "ScanArray-style scan_name layer + accessors" begin
+    UV = Gustavo.UVData
+    data = synthetic_uvdata()
+    for (k, leaf) in UV.branches(data)
+        # `:scan_name` is a leaf data layer indexed by Ti, mirroring xradio's
+        # ScanArray (schema.py:779).
+        scan_layer = leaf[:scan_name]
+        @test scan_layer isa AbstractVector{<:AbstractString}
+        @test length(scan_layer) == length(UV.obs_time(leaf))
+        # Single-scan leaves carry a uniform scan_name across Ti.
+        @test all(==(UV.primary_scan_name(leaf)), scan_layer)
+        # Accessors agree with the layer.
+        @test UV.scan_name(leaf) === scan_layer
+        @test UV.scan_intents(leaf) isa Vector{String}
+        @test UV.sub_scan_name(leaf) == ""
+    end
+end
+
+@testset "scan_window derived from Ti axis" begin
+    UV = Gustavo.UVData
+    data = synthetic_uvdata()
+    for (_, leaf) in UV.branches(data)
+        lo, hi = UV.scan_window(leaf)
+        ti = collect(UV.obs_time(leaf))
+        @test lo == minimum(ti)
+        @test hi == maximum(ti)
+    end
+end
+
+@testset "participating_antennas surfaces sub-array participation" begin
+    UV = Gustavo.UVData
+    data = synthetic_uvdata()
+    for (_, leaf) in UV.branches(data)
+        ants = UV.participating_antennas(leaf)
+        @test ants isa Vector{String}
+        # Participating set ⊆ root antenna union.
+        @test issubset(Set(ants), Set(UV.metadata(data).antennas.name))
+    end
+end
+
+@testset "sub_scan_name disambiguates colliding (source, scan)" begin
+    # Mirrors xradio's SUB_SCAN_NUMBER partitioning: two sub-arrays
+    # observing the same source at the same scan would collide on
+    # `:<source>_scan_<n>`. Setting `sub_scan_name` distinctly on each leaf
+    # disambiguates via `:<source>_scan_<n>_<sub>`.
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    @test UV.partition_key(:TEST, "1") === :TEST_scan_1
+    @test UV.partition_key(:TEST, "1"; sub_scan_name = "A") === :TEST_scan_1_A
+    @test UV.partition_key(:TEST, "1"; sub_scan_name = "A") !==
+        UV.partition_key(:TEST, "1"; sub_scan_name = "B")
+
+    # Build a sibling leaf with a distinct sub_scan_name on top of an
+    # existing leaf and confirm both coexist after merge_uvsets-style assembly.
+    branches = Gustavo.UVData.DimensionalData.TreeDict()
+    for (k, leaf) in UV.branches(base)
+        branches[k] = leaf
+        info = UV.metadata(leaf)
+        if info.scan_name == "1"
+            sub_info = UV.update(info; sub_scan_name = "B")
+            sub_leaf = UV._build_leaf(
+                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+                partition_info = sub_info,
+            )
+            sub_key = UV.partition_key(info.source_key, info.scan_name; sub_scan_name = "B")
+            branches[sub_key] = sub_leaf
+        end
+    end
+    multi_sa = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
+    @test haskey(UV.branches(multi_sa), :TEST_scan_1)
+    @test haskey(UV.branches(multi_sa), :TEST_scan_1_B)
+    # write_uvfits should refuse multi-subarray (Phase 2.5).
+    tmp = tempname() * ".uvfits"
+    try
+        @test_throws ErrorException UV.write_uvfits(tmp, multi_sa)
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
 end

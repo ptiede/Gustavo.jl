@@ -5,7 +5,13 @@
 const _DataLike = Union{UVSet, BandpassDataset}
 
 _scans(data::BandpassDataset) = data.scans
-_scans(data::UVSet) = DimensionalData.metadata(data).scans
+function _scans(data::UVSet)
+    out = Tuple{Float64, Float64}[]
+    for (_, leaf) in DimensionalData.branches(data)
+        push!(out, UVData.scan_window(leaf))
+    end
+    return out
+end
 _antenna_names_v(data::BandpassDataset) = data.antennas.name
 _antenna_names_v(data::UVSet) = DimensionalData.metadata(data).antennas.name
 
@@ -39,18 +45,20 @@ end
 
 # Collect per-scan (leaf) blocks of (vis_before, vis_after, w_before, w_after)
 # for one (baseline, pol) selection. Returns a Vector of NamedTuples ordered
-# by branch (= scan_idx). Leaves that don't carry the baseline are skipped.
+# by branch insertion order. The `sid` field is the leaf's index in branch
+# order — used as a stable per-block ordinal for plotting/grouping; downstream
+# consumers should not assume it indexes into any global scan table.
+# Leaves that don't carry the baseline are skipped.
 function _baseline_scan_blocks(data::UVSet, corr::UVSet, bl_plot, pol_index::Integer)
     blocks = NamedTuple[]
     src_d = DimensionalData.branches(data)
     src_c = DimensionalData.branches(corr)
-    for (k, leaf_d) in src_d
+    for (sid, (k, leaf_d)) in enumerate(src_d)
         leaf_c = src_c[k]
         bi_d = _local_baseline_idx(leaf_d, bl_plot)
         isnothing(bi_d) && continue
         bi_c = _local_baseline_idx(leaf_c, bl_plot)
         isnothing(bi_c) && continue
-        sid = DimensionalData.metadata(leaf_d).scan_idx
         push!(
             blocks, (
                 sid = sid,

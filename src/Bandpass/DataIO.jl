@@ -8,17 +8,20 @@ solver needs (`antennas`, `metadata`, `scans`) and the union
 `BaselineIndex`.
 
 """
-struct BandpassDataset{TVis, TW, TUVW, TBl, TAnt, TMeta, TScans}
+struct BandpassDataset{TVis, TW, TUVW, TBl, TAnt, TMeta, TFS <: UVData.AbstractFrequencySetup, TScans}
     vis::TVis
     weights::TW
     uvw::TUVW
     baselines::TBl
     antennas::TAnt
     metadata::TMeta
+    freq_setup::TFS
     scans::TScans
 end
 
 UVData.pol_products(data::BandpassDataset) = UVData.pol_products(data.vis)
+UVData.freq_setup(data::BandpassDataset) = data.freq_setup
+UVData.channel_freqs(data::BandpassDataset) = UVData.channel_freqs(data.freq_setup)
 
 """
     _to_bandpass_dataset(uvset::UVSet) -> BandpassDataset
@@ -30,6 +33,10 @@ leaf / scan) and unioning baselines across leaves.
 function _to_bandpass_dataset(uvset::UVSet)
     branches_d = DimensionalData.branches(uvset)
     isempty(branches_d) && error("_to_bandpass_dataset: empty UVSet")
+
+    # Asserts every leaf shares one frequency setup; per-SPW grouping is a
+    # future extension and would dispatch on a `Vector{FrequencySetup}` here.
+    fs = UVData.freq_setup(uvset)
 
     # Concretely-typed leaf vector keeps inner loops type-stable despite the
     # `OrderedDict{Symbol, AbstractDimTree}` abstract eltype.
@@ -64,10 +71,20 @@ function _to_bandpass_dataset(uvset::UVSet)
 
     root = DimensionalData.metadata(uvset)
     array_obs = root.array_obs
-    nchan = length(array_obs.freq_setup.channel_freqs)
-    nscan = length(root.scans)
+    nchan = UVData.nchannels(fs)
 
-    first_part = first(leaf_list)
+    # Enumerate leaves in (scan_window.lower, sub_scan_name) sort order so the
+    # `Scan` dim has a stable ordering even with sub-arrays. After this, each
+    # leaf maps to exactly one Scan slot at position `sid`.
+    sorted_leaves = sort(
+        leaf_list;
+        by = leaf -> (UVData.scan_window(leaf)[1], DimensionalData.metadata(leaf).sub_scan_name),
+    )
+    nscan = length(sorted_leaves)
+    scan_windows = [UVData.scan_window(leaf) for leaf in sorted_leaves]
+    scan_centers = [(lo + hi) / 2 for (lo, hi) in scan_windows]
+
+    first_part = first(sorted_leaves)
     pol_labels = pol_products(first_part)
     npol = length(pol_labels)
     Tvis = eltype(parent(first_part[:vis]))
@@ -79,9 +96,7 @@ function _to_bandpass_dataset(uvset::UVSet)
     UVW_num = zeros(Tuvw, nscan, nbl, 3)
     UVW_w = zeros(Tw, nscan, nbl)
 
-    for part in leaf_list
-        sid = scan_idx(part)
-        (1 <= sid <= nscan) || continue
+    for (sid, part) in enumerate(sorted_leaves)
         # Function barrier: extract concretely-typed parent arrays and pass
         # to a kernel so the inner-loop scalar accesses don't box.
         _accumulate_avg_into!(
@@ -105,12 +120,11 @@ function _to_bandpass_dataset(uvset::UVSet)
         end
     end
 
-    scan_centers = [(root.scans[s].lower + root.scans[s].upper) / 2 for s in 1:nscan]
     vis_avg = DimensionalData.DimArray(
         V,
         (
             Scan(scan_centers), Baseline(union_labels),
-            Pol(pol_labels), IF(array_obs.freq_setup.channel_freqs),
+            Pol(pol_labels), IF(UVData.channel_freqs(fs)),
         ),
     )
     weights_avg = DimensionalData.DimArray(W_sum, dims(vis_avg))
@@ -121,7 +135,7 @@ function _to_bandpass_dataset(uvset::UVSet)
 
     return BandpassDataset(
         vis_avg, weights_avg, uvw_avg, union_baselines,
-        root.antennas, array_obs, root.scans,
+        root.antennas, array_obs, fs, scan_windows,
     )
 end
 
@@ -180,7 +194,7 @@ function _baseline_slice(A::DimensionalData.AbstractDimArray, data::BandpassData
         :Sites => bl,
         :kind => kind,
         :pol_products => collect(lookup(A, Pol)),
-        :channel_freqs => data.metadata.freq_setup.channel_freqs,
+        :channel_freqs => UVData.channel_freqs(data.freq_setup),
         :band_center_frequency => band_center_frequency_dataset(data),
     )
     return rebuild(@view(A[Baseline = bi]); metadata = metadata)
@@ -196,10 +210,10 @@ function baseline_number_in_dataset(data::BandpassDataset, bl::Tuple{String, Str
 end
 
 band_center_frequency_dataset(data::BandpassDataset) =
-    (first(data.metadata.freq_setup.channel_freqs) + last(data.metadata.freq_setup.channel_freqs)) / 2
+    (first(UVData.channel_freqs(data.freq_setup)) + last(UVData.channel_freqs(data.freq_setup))) / 2
 
 scan_time_centers_dataset(data::BandpassDataset) =
-    [(scan.lower + scan.upper) / 2 for scan in data.scans]
+    [(lo + hi) / 2 for (lo, hi) in data.scans]
 
 """
     baseline_visibilities(uvset::UVSet, bl::Tuple{String,String})
@@ -270,14 +284,14 @@ function wrap_gain_solutions(gains, data::BandpassDataset; pol_keys = 1:2)
     size(gains, 1) == length(data.scans) || error("Gain scan axis does not match dataset scans")
     size(gains, 2) == length(data.antennas) || error("Gain antenna axis does not match dataset antennas")
     size(gains, 3) == length(pol_keys) || error("pol_keys length must match gain polarisation axis")
-    size(gains, 4) == length(data.metadata.freq_setup.channel_freqs) || error("Gain channel axis does not match dataset channels")
+    size(gains, 4) == length(UVData.channel_freqs(data.freq_setup)) || error("Gain channel axis does not match dataset channels")
 
     return DimensionalData.DimArray(
         gains, (
             Scan(scan_time_centers_dataset(data)),
             Ant(data.antennas.name),
             Pol(collect(pol_keys)),
-            IF(data.metadata.freq_setup.channel_freqs),
+            IF(UVData.channel_freqs(data.freq_setup)),
         ); metadata = Dict(
             :band_center_frequency => band_center_frequency_dataset(data),
         )
@@ -289,7 +303,7 @@ end
 """
 function wrap_xy_correction(xy_correction, data::BandpassDataset, ref_ant; applies_to_pol, reference_pol)
     size(xy_correction, 1) == length(data.scans) || error("XY correction scan axis does not match dataset scans")
-    size(xy_correction, 2) == length(data.metadata.freq_setup.channel_freqs) || error("XY correction IF axis does not match dataset channels")
+    size(xy_correction, 2) == length(UVData.channel_freqs(data.freq_setup)) || error("XY correction IF axis does not match dataset channels")
     1 <= ref_ant <= length(data.antennas) || error("ref_ant index out of bounds")
 
     metadata = Dict(
@@ -297,14 +311,14 @@ function wrap_xy_correction(xy_correction, data::BandpassDataset, ref_ant; appli
         :Sites => [data.antennas.name[ref_ant]],
         :applies_to_pol => applies_to_pol,
         :reference_pol => reference_pol,
-        :channel_freqs => data.metadata.freq_setup.channel_freqs,
+        :channel_freqs => UVData.channel_freqs(data.freq_setup),
         :band_center_frequency => band_center_frequency_dataset(data),
     )
 
     return DimensionalData.DimArray(
         xy_correction, (
             Scan(scan_time_centers_dataset(data)),
-            IF(data.metadata.freq_setup.channel_freqs),
+            IF(UVData.channel_freqs(data.freq_setup)),
         ); metadata = metadata
     )
 end

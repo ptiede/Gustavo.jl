@@ -27,52 +27,76 @@ end
 
 """
     ObsArrayMetadata(; telescope, instrume, date_obs, equinox, bunit,
-                       freq_setup, extras = NamedTuple())
+                       extras = NamedTuple())
 
 Array-wide observation metadata that is **shared across every source /
-partition** in a UVSet: telescope, frequency setup, primary-HDU extras.
-Source-specific fields (`object`, `ra`, `dec`) live on each per-leaf
-`partition_info` NamedTuple. Polarization products are not stored here —
-they live on the `Pol` dimension of the data cube and can be read with
-`pol_products(uvset)` / `pol_products(leaf)` / `pol_products(data)`.
+partition** in a UVSet: telescope, observation epoch, primary-HDU extras.
+Source-specific fields (`object`, `ra`, `dec`) and the per-partition
+`freq_setup` live on each per-leaf `PartitionInfo`. Polarization products
+are not stored here — they live on the `Pol` dimension of the data cube
+and can be read with `pol_products(uvset)` / `pol_products(leaf)` /
+`pol_products(data)`.
 
-- `freq_setup`  : see `FrequencySetup`. Frequency-axis fields are reached
-  via `m.freq_setup.channel_freqs` etc. (no field forwarding).
 - `extras`      : `NamedTuple` of optional primary-HDU cards preserved
   verbatim for round-trip.
 """
 Base.@kwdef struct ObsArrayMetadata{
-        TTel, TInst, TDate, TEq, TBunit,
-        TFs <: FrequencySetup, TExtras <: NamedTuple,
+        TTel, TInst, TDate, TEq, TBunit, TExtras <: NamedTuple,
     }
     telescope::TTel
     instrume::TInst
     date_obs::TDate
     equinox::TEq
     bunit::TBunit
-    freq_setup::TFs
     extras::TExtras = NamedTuple()
 end
 
-freqsetup(m::ObsArrayMetadata) = m.freq_setup
+Base.:(==)(a::ObsArrayMetadata, b::ObsArrayMetadata) =
+    a.telescope == b.telescope && a.instrume == b.instrume &&
+    a.date_obs == b.date_obs && a.equinox == b.equinox &&
+    a.bunit == b.bunit && a.extras == b.extras
+Base.hash(a::ObsArrayMetadata, h::UInt) = hash(
+    (a.telescope, a.instrume, a.date_obs, a.equinox, a.bunit, a.extras),
+    hash(:ObsArrayMetadata, h),
+)
+
+Base.:(==)(a::ArrayConfig, b::ArrayConfig) =
+    a.rdate == b.rdate && a.gst_iat0 == b.gst_iat0 &&
+    a.earth_rot_rate == b.earth_rot_rate && a.ut1utc == b.ut1utc &&
+    a.polarx == b.polarx && a.polary == b.polary &&
+    a.datutc == b.datutc && a.time_sys == b.time_sys &&
+    a.frame == b.frame && a.xyzhand == b.xyzhand &&
+    a.poltype == b.poltype && a.extver == b.extver &&
+    a.numorb == b.numorb && a.no_if == b.no_if &&
+    a.nopcal == b.nopcal && a.freqid == b.freqid
+Base.hash(a::ArrayConfig, h::UInt) = hash(
+    (
+        a.rdate, a.gst_iat0, a.earth_rot_rate, a.ut1utc,
+        a.polarx, a.polary, a.datutc, a.time_sys, a.frame, a.xyzhand,
+        a.poltype, a.extver, a.numorb, a.no_if, a.nopcal, a.freqid,
+    ),
+    hash(:ArrayConfig, h),
+)
 
 function Base.show(io::IO, m::ObsArrayMetadata)
-    fs = freqsetup(m)
-    freq_ghz = round(fs.ref_freq / 1.0e9; digits = 3)
-    return print(io, "ObsArrayMetadata($(m.telescope), $(m.date_obs), ref=$(freq_ghz) GHz)")
+    return print(io, "ObsArrayMetadata($(m.telescope), $(m.date_obs))")
 end
 
 """
     UVMetadata
 
 Bundle of array-wide observation globals shared across every leaf of a
-`UVSet`: scan time bounds, antenna table, array config, the array-wide
-`ObsArrayMetadata` (telescope / freq setup / pol codes), and the FITS
-primary cards preserved verbatim for write-back. Source-specific fields
-(`object`, `ra`, `dec`) live on each leaf's `partition_info` NamedTuple.
+`UVSet`: antenna table, array config, the array-wide `ObsArrayMetadata`
+(telescope / observation epoch), and the FITS primary cards preserved
+verbatim for write-back.
+
+Per-leaf metadata — including the leaf's frequency setup, scan handles
+(`scan_name`, `scan_intents`, `sub_scan_name`), and source identification
+(`source_name`/`ra`/`dec`) — lives on each leaf's `PartitionInfo`. There
+is *no* root-level scan table; scan time bounds derive from each leaf's
+`Ti` axis (mirrors xradio's `ScanArray` / `ProcessingSet` model).
 """
-struct UVMetadata{TScans, TAnt, TCfg, TObs <: ObsArrayMetadata, TCards}
-    scans::TScans              # StructArray{lower, upper}
+struct UVMetadata{TAnt, TCfg, TObs <: ObsArrayMetadata, TCards}
     antennas::TAnt             # AntennaTable
     array_config::TCfg         # ArrayConfig
     array_obs::TObs            # ObsArrayMetadata
