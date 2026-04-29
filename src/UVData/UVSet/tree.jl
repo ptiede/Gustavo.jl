@@ -47,17 +47,16 @@ function _build_leaf(
 end
 
 function _extract_scan_leaf(
-        flat::NamedTuple, scan_label::AbstractString;
+        flat::NamedTuple, scan_label::AbstractString, spw_index::Integer;
         source_key::Symbol, basename::AbstractString,
     )
-    int_inds = findall(==(scan_label), flat.record_scan_name)
+    int_inds = findall(
+        i -> flat.record_scan_name[i] == scan_label &&
+            Int(flat.record_spw_index[i]) == Int(spw_index),
+        eachindex(flat.record_scan_name),
+    )
 
-    # Sanity-check: all records in this scan must index the same FRQSEL.
-    # Phase 1.5 will lift this when we read multi-row FQ tables.
-    ids = unique(@view flat.record_freqid[int_inds])
-    length(ids) == 1 ||
-        error("scan $(scan_label) straddles multiple FRQSELs $(ids); not yet supported")
-    leaf_freq_setup = flat.freq_setups[Int(first(ids))]
+    leaf_freq_setup = flat.freq_setups[Int(spw_index)]
     bl_codes_scan = flat.baselines.codes[int_inds]
     obs_times_per_int = flat.obs_time[int_inds]
 
@@ -131,6 +130,8 @@ function _extract_scan_leaf(
         date_param = date_param_part,
         extra_columns = extras_part,
         freq_setup = leaf_freq_setup,
+        spw_name = "spw_$(Int(spw_index) - 1)",
+        ddi = Int(spw_index) - 1,
         basename = basename,
     )
     leaf = _build_leaf(vis_part, weights_part, uvw_part; partition_info = info)

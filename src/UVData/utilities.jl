@@ -13,25 +13,48 @@ function sanitize_source(name::AbstractString)
 end
 
 """
-    partition_key(source_key, scan_name; sub_scan_name = "") -> Symbol
+    partition_key(info::PartitionInfo) -> Symbol
 
-Compose a leaf branch key. Default shape is `:<source_key>_scan_<scan_name>`.
-When `sub_scan_name` is non-empty (sub-array / sub-scan disambiguation,
-mirrors xradio's `SUB_SCAN_NUMBER` partitioning), the key becomes
-`:<source_key>_scan_<scan_name>_<sub_scan_name>`.
+Compose the leaf branch key by walking `partition_axes(info)`.
+Empty axis values are skipped; remaining values are joined with
+underscores. Default key shape (xradio MSv4):
+`:<source>_<spw_name>_scan_<scan_name>[_<sub_scan_name>]`.
+
+Adding a new axis is a one-line change to `DEFAULT_PARTITION_AXES` (or
+a method override of `partition_axes`); this function never needs to
+change.
 """
-function partition_key(
-        source_key::Symbol, scan_name::AbstractString;
-        sub_scan_name::AbstractString = "",
-    )
-    return isempty(sub_scan_name) ?
-        Symbol(source_key, :_scan_, scan_name) :
-        Symbol(source_key, :_scan_, scan_name, :_, sub_scan_name)
+partition_key(info::PartitionInfo) = partition_key(info, partition_axes(info))
+
+function partition_key(info::PartitionInfo, axes)
+    parts = String[]
+    for ax in axes
+        s = ax.value(info)
+        isempty(s) || push!(parts, s)
+    end
+    return Symbol(join(parts, "_"))
 end
 
-# Back-compat: tests / fixtures historically called with an Integer scan id.
-partition_key(source_key::Symbol, scan_idx::Integer; kwargs...) =
-    partition_key(source_key, string(scan_idx); kwargs...)
+"""
+    partition_key(; source_key, scan_name, spw_name = "spw_0",
+                    sub_scan_name = "") -> Symbol
+
+Lightweight key-only helper for tests / fixtures that don't have a
+real `PartitionInfo`. Mirrors `DEFAULT_PARTITION_AXES` shape; production
+code goes through `partition_key(info)` exclusively.
+"""
+function partition_key(;
+        source_key::Symbol,
+        scan_name::AbstractString,
+        spw_name::AbstractString = "spw_0",
+        sub_scan_name::AbstractString = "",
+    )
+    parts = String[string(source_key)]
+    isempty(spw_name) || push!(parts, spw_name)
+    isempty(scan_name) || push!(parts, "scan_" * scan_name)
+    isempty(sub_scan_name) || push!(parts, sub_scan_name)
+    return Symbol(join(parts, "_"))
+end
 
 """
     scan_key(id) -> Symbol

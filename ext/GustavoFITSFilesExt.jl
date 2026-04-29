@@ -283,11 +283,14 @@ const _FQ_MANDATORY_COLS = Set(
     ]
 )
 
-function _collect_fq_extras(fq)
+function _collect_fq_extras(fq, r::Integer)
     pairs = Pair{Symbol, Any}[]
     for sym in propertynames(fq)
         sym in _FQ_MANDATORY_COLS && continue
-        push!(pairs, sym => getproperty(fq, sym))
+        col = getproperty(fq, sym)
+        # FQ extras come as either a per-row vector or an (nrows, ncol) matrix.
+        val = ndims(col) == 1 ? col[r] : vec(col[r, :])
+        push!(pairs, sym => val)
     end
     return (; pairs...)
 end
@@ -304,31 +307,64 @@ function _collect_obs_card_extras(cards)
     return (; pairs...)
 end
 
-function _build_frequency_setup(cards, fq, nvis_chan)
-    ref_freq = Float64(_find_freq_axis(cards))
+"""
+    _build_frequency_setups(cards, fq, nvis_chan)
+        -> (Vector{FrequencySetup}, Vector{Int32})
 
-    if_freqs = vec(Float64.(collect(getproperty(fq, Symbol("IF FREQ")))))
-    channel_freqs = ref_freq .+ if_freqs
+Read every row of the FQ HDU. Each row becomes a `FrequencySetup` with
+MSv4-flavored `setup_name = "spw_<r-1>"`; the on-disk AIPS FRQSEL is
+preserved in `extras.frqsel` so write paths can recover it.
 
-    total_bandwidths = vec(Float32.(collect(getproperty(fq, Symbol("TOTAL BANDWIDTH")))))
-    ch_widths = vec(Float32.(collect(getproperty(fq, Symbol("CH WIDTH")))))
-    sidebands = vec(Int32.(collect(fq.SIDEBAND)))
-    freqid = hasproperty(fq, :FRQSEL) ? Int32(first(collect(fq.FRQSEL))) : Int32(1)
+Returns the dense vector of setups plus the parallel `frqsels` vector
+(per-row FRQSEL values). The setups vector is indexed 1..nrows; if the
+on-disk FRQSEL column is sparse, callers must densify per-record SPW
+indices via `frqsels`.
 
-    # TODO (Phase 1.5): support multi-row FQ tables. We currently consume
-    # only the first FRQSEL and assume nvis_chan == NO_IF for that row.
-    length(channel_freqs) == nvis_chan ||
-        error("FQ table has $(length(channel_freqs)) IFs but vis has $nvis_chan channels")
+Errors when channel counts differ across rows (ragged setups deferred).
+"""
+function _build_frequency_setups(cards, fq, nvis_chan)
+    ref_freq_v = Float64(_find_freq_axis(cards))
 
-    return FrequencySetup(;
-        name = string("FRQSEL_", freqid),
-        ref_freq,
-        channel_freqs,
-        ch_widths,
-        total_bandwidths,
-        sidebands,
-        extras = _collect_fq_extras(fq),
-    )
+    if_freqs_all = Float64.(getproperty(fq, Symbol("IF FREQ")))
+    ch_widths_all = Float32.(getproperty(fq, Symbol("CH WIDTH")))
+    total_bw_all = Float32.(getproperty(fq, Symbol("TOTAL BANDWIDTH")))
+    sidebands_all = Int32.(getproperty(fq, :SIDEBAND))
+    nrows = ndims(if_freqs_all) == 1 ? 1 : size(if_freqs_all, 1)
+    nif = ndims(if_freqs_all) == 1 ? length(if_freqs_all) : size(if_freqs_all, 2)
+    nif == nvis_chan ||
+        error("FQ table reports $nif IFs but vis has $nvis_chan channels")
+
+    frqsels = if hasproperty(fq, :FRQSEL)
+        Int32.(round.(Int, getproperty(fq, :FRQSEL)))
+    else
+        Int32.(1:nrows)
+    end
+
+    _row(M, r) = ndims(M) == 1 ? collect(M) : vec(M[r, :])
+
+    setups = FrequencySetup[]
+    for r in 1:nrows
+        if_freqs_r = _row(if_freqs_all, r)
+        ch_widths_r = _row(ch_widths_all, r)
+        total_bw_r = _row(total_bw_all, r)
+        sidebands_r = _row(sidebands_all, r)
+        length(if_freqs_r) == nif ||
+            error("FQ row $r has $(length(if_freqs_r)) IFs; expected $nif (ragged setups not yet supported)")
+
+        extras = merge(_collect_fq_extras(fq, r), (; frqsel = frqsels[r]))
+        push!(
+            setups, FrequencySetup(;
+                name = string("spw_", r - 1),
+                ref_freq = ref_freq_v,
+                channel_freqs = ref_freq_v .+ if_freqs_r,
+                ch_widths = ch_widths_r,
+                total_bandwidths = total_bw_r,
+                sidebands = sidebands_r,
+                extras,
+            )
+        )
+    end
+    return setups, frqsels
 end
 
 function _build_array_obs_metadata(primary_hdu)
@@ -387,9 +423,9 @@ function _load_uvfits_flat(path)
 
     antennas, array_config = _build_antenna_table(an_hdu)
     array_obs = _build_array_obs_metadata(primary_hdu)
-    # Phase 1: a single freq setup per file. Phase 1.5 will read every FQ
-    # row and use NX `FREQ ID` (or per-record FRQSEL) to bin records.
-    freq_setups = FrequencySetup[_build_frequency_setup(primary_hdu.cards, fq_hdu.data, size(vis_raw, 3))]
+    freq_setups, fq_frqsels = _build_frequency_setups(
+        primary_hdu.cards, fq_hdu.data, size(vis_raw, 3)
+    )
     src_info = _build_source_info(primary_hdu)
 
     aips_codes, aips_labels, msv4_labels, perm = parse_stokes_axis(primary_hdu.cards, size(vis_raw, 2))
@@ -430,6 +466,8 @@ function _load_uvfits_flat(path)
     nx_dt = Float64.(collect(nx.var"TIME INTERVAL"))
     nx_lower = (nx_time .- nx_dt ./ 2) .* 24
     nx_upper = (nx_time .+ nx_dt ./ 2) .* 24
+    nx_freqid = hasproperty(nx, Symbol("FREQ ID")) ?
+        Int32.(round.(Int, collect(nx.var"FREQ ID"))) : ones(Int32, length(nx_time))
 
     # Bin each record into the NX row whose center is nearest. This is
     # robust to:
@@ -442,6 +480,7 @@ function _load_uvfits_flat(path)
     # center rule is unambiguous.
     nx_centers = (nx_lower .+ nx_upper) ./ 2
     record_scan_name = Vector{String}(undef, length(obs_time))
+    record_nx_row = zeros(Int, length(obs_time))
     if isempty(nx_centers)
         fill!(record_scan_name, "")
     else
@@ -457,6 +496,7 @@ function _load_uvfits_flat(path)
                 end
             end
             record_scan_name[i] = string(best_s)
+            record_nx_row[i] = best_s
         end
     end
     # Drop records that fall outside any NX row; they cannot be assigned to a
@@ -465,6 +505,7 @@ function _load_uvfits_flat(path)
     if length(valid) != length(obs_time)
         obs_time = obs_time[valid]
         record_scan_name = record_scan_name[valid]
+        record_nx_row = record_nx_row[valid]
         bl_codes = bl_codes[valid]
         vis = vis[Integration = valid]
         weights = weights[Integration = valid]
@@ -485,13 +526,43 @@ function _load_uvfits_flat(path)
 
     basename = String(splitext(_basename_of_path(path))[1])
 
-    record_freqid = ones(Int32, length(obs_time))
+    # Per-record SPW index: prefer a per-record PTYPE (FREQSEL / FREQID),
+    # else propagate the per-NX-row FREQ ID column, else default to 1.
+    # After densification, indices are 1..length(freq_setups).
+    nfreq = length(freq_setups)
+    record_spw_index = if hasproperty(dt, :FREQSEL)
+        Int32.(round.(Int, collect(getproperty(dt, :FREQSEL))))
+    elseif hasproperty(dt, :FREQID)
+        Int32.(round.(Int, collect(getproperty(dt, :FREQID))))
+    elseif length(nx_freqid) > 0
+        [nx_freqid[r] for r in record_nx_row]
+    else
+        ones(Int32, length(obs_time))
+    end
+    if hasproperty(dt, :FREQSEL) || hasproperty(dt, :FREQID) || length(nx_freqid) > 0
+        # Densify FRQSEL slots to 1..nrows index when the FQ FRQSELs are sparse.
+        if fq_frqsels != Int32.(1:nfreq)
+            remap = Dict{Int32, Int32}()
+            for (i, f) in enumerate(fq_frqsels)
+                remap[f] = Int32(i)
+            end
+            record_spw_index = [
+                get(remap, Int32(s)) do
+                        error("record FRQSEL $s not present in FQ table $(fq_frqsels)")
+                end for s in record_spw_index
+            ]
+        end
+    end
+    if nfreq > 1 && all(==(record_spw_index[1]), record_spw_index)
+        @warn "load_uvfits: $nfreq FQ rows but every record reports the same SPW " *
+            "index $(record_spw_index[1]); resulting UVSet will have one leaf per scan."
+    end
 
     return (;
         vis, weights, uvw, obs_time, baselines,
         date_param, extra_columns,
         antennas, array_config, array_obs,
-        freq_setups, record_freqid, record_scan_name,
+        freq_setups, record_spw_index, record_scan_name,
         pol_labels = msv4_labels,
         aips_pol_codes = aips_codes,
         source_name = src_info.source_name,
@@ -650,25 +721,19 @@ function _build_an_hdu(antennas::AntennaTable, cfg::ArrayConfig, ref_freq::Float
     return HDU(Bintable, data, cards)
 end
 
-function _parse_freqid_from_name(name)
-    s = string(name)
-    m = match(r"(\d+)\s*$", s)
-    return m === nothing ? Int32(1) : Int32(parse(Int, m.captures[1]))
-end
-
 """
     _collect_freq_setups(uvset) -> (Vector{FrequencySetup}, Dict{FrequencySetup,Int32})
 
-Walk leaves and gather their unique `FrequencySetup`s in first-seen order
-(via `union_frequency_axis`), then build a setup → FRQSEL lookup. The
-FRQSEL value is parsed from the setup name when it ends in digits, else
-the leaf's 1-based position in the union list. Setup names that share a
-parsed FRQSEL are reassigned 1..N to keep FRQSEL unique on disk.
+Walk leaves and gather their unique `FrequencySetup`s in first-seen
+order (via `union_frequency_axis`), then build a setup → FRQSEL
+lookup. The FRQSEL value is recovered from `setup.extras.frqsel` when
+present (preserved on read), else the setup's 1-based position. If the
+recovered FRQSELs collide, fall back to positional 1..N to guarantee
+uniqueness on disk.
 """
 function _collect_freq_setups(uvset::UVSet)
     setups = UVData.union_frequency_axis(uvset)
-    parsed = [_parse_freqid_from_name(setup_name(fs)) for fs in setups]
-    # If parsed FRQSELs collide, fall back to positional 1..N to guarantee uniqueness.
+    parsed = Int32[Int32(get(fs.extras, :frqsel, i)) for (i, fs) in enumerate(setups)]
     freqids = length(unique(parsed)) == length(parsed) ? parsed : Int32.(1:length(setups))
     lookup = Dict{eltype(setups), Int32}()
     for (fs, fid) in zip(setups, freqids)
@@ -692,12 +757,14 @@ function _build_fq_hdu(setups::AbstractVector{<:FrequencySetup}, freqids::Abstra
         var"TOTAL BANDWIDTH" = [collect(total_bandwidths(fs)) for fs in setups],
         SIDEBAND = [collect(sidebands(fs)) for fs in setups],
     )
-    # Carry per-row extras only if every setup has the same extras keyset
-    # (Phase 1.5 will need per-setup ragged handling here too).
-    extras_keys = keys(first(setups).extras)
-    if all(keys(fs.extras) == extras_keys for fs in setups)
+    # Carry per-row extras only if every setup has the same extras keyset.
+    # `:frqsel` is preserved on read for round-trip recovery; it's already
+    # a top-level FRQSEL column here, so drop it from the extras merge.
+    _drop_frqsel(ex) = NamedTuple{filter(!=(:frqsel), keys(ex))}(ex)
+    extras_keys = keys(_drop_frqsel(first(setups).extras))
+    if all(keys(_drop_frqsel(fs.extras)) == extras_keys for fs in setups)
         extras_per_row = NamedTuple{extras_keys}(
-            ntuple(i -> [fs.extras[i] for fs in setups], length(extras_keys))
+            ntuple(i -> [_drop_frqsel(fs.extras)[i] for fs in setups], length(extras_keys))
         )
         data = merge(base, extras_per_row)
     else
@@ -706,10 +773,6 @@ function _build_fq_hdu(setups::AbstractVector{<:FrequencySetup}, freqids::Abstra
     cards = Card[Card("EXTNAME", "AIPS FQ"), Card("NO_IF", Int32(nif))]
     return HDU(Bintable, data, cards)
 end
-
-# Single-setup convenience kept for callers (and tests) that hand in one fs.
-_build_fq_hdu(fs::FrequencySetup) =
-    _build_fq_hdu([fs], Int32[_parse_freqid_from_name(fs.name)])
 
 function _build_nx_hdu(
         scan_windows::AbstractVector{Tuple{Float64, Float64}},

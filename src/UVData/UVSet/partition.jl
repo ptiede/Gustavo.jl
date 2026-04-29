@@ -134,6 +134,52 @@ function update(info::PartitionInfo; kwargs...)
     )
 end
 
+"""
+    PartitionAxis(name::Symbol, value::Function)
+
+A single axis component of the leaf partition key. `value(info)` returns
+its rendered string for a given `PartitionInfo`; an empty string causes
+the axis to be omitted from the key.
+
+Adding a new partition axis is a one-line change: append a
+`PartitionAxis(:newaxis, info -> ...)` entry to
+`DEFAULT_PARTITION_AXES`. No other code path needs to change — the
+generic `partition_key(info)` walks the registered list.
+"""
+struct PartitionAxis
+    name::Symbol
+    value::Function
+end
+
+"""
+    DEFAULT_PARTITION_AXES
+
+Ordered tuple of axes contributing to the leaf key, in xradio MSv4
+shape: `:source`, `:spw`, `:scan`, `:sub_scan`. Each renderer carries
+its own prefix convention (e.g. `scan_<n>`); empty values are skipped.
+
+Default key shape: `:<source>_<spw_name>_scan_<scan_name>[_<sub_scan>]`,
+e.g. `:M3C273_spw_0_scan_1` or `:M3C273_spw_1_scan_1_A`.
+"""
+const DEFAULT_PARTITION_AXES = (
+    PartitionAxis(:source, info -> string(info.source_key)),
+    PartitionAxis(:spw, info -> info.spw_name),
+    PartitionAxis(
+        :scan,
+        info -> isempty(info.scan_name) ? "" : "scan_" * info.scan_name,
+    ),
+    PartitionAxis(:sub_scan, info -> info.sub_scan_name),
+)
+
+"""
+    partition_axes(info::PartitionInfo) -> Tuple{PartitionAxis, ...}
+
+Hook to override the axis list for a custom `PartitionInfo` shape (e.g.
+to add an `intent` segment in a downstream extension). Defaults to
+`DEFAULT_PARTITION_AXES`.
+"""
+partition_axes(::PartitionInfo) = DEFAULT_PARTITION_AXES
+
 function _show_partition(io::IO, leaf::DimensionalData.AbstractDimTree)
     info = DimensionalData.metadata(leaf)
     nti = length(obs_time(leaf))

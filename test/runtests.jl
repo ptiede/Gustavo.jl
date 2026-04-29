@@ -122,7 +122,7 @@ function synthetic_uvdata()
             array_config = array_config,
             array_obs = array_obs,
             freq_setups = UV.FrequencySetup[freq_setup],
-            record_freqid = Int32[1, 1],
+            record_spw_index = Int32[1, 1],
             source_name = "TEST",
             ra = 0.0, dec = 0.0,
             primary_cards = primary_cards,
@@ -1097,7 +1097,7 @@ end
             array_config = base_root.array_config,
             array_obs = base_root.array_obs,
             freq_setups = UV.FrequencySetup[base_fs],
-            record_freqid = ones(Int32, length(obs_times)),
+            record_spw_index = ones(Int32, length(obs_times)),
             source_name = "TEST", ra = 0.0, dec = 0.0,
             primary_cards = primary_cards,
             basename = "synthetic",
@@ -1154,7 +1154,7 @@ end
     nleaves = length(UV.branches(uvset))
     @test nleaves == 2
     for s in 1:nleaves
-        key = UV.partition_key(:TEST, string(s))
+        key = UV.partition_key(; source_key = :TEST, scan_name = string(s))
         @test haskey(UV.branches(uvset), key)
         leaf = UV.branches(uvset)[key]
         @test UV.primary_scan_name(leaf) == string(s)
@@ -1195,7 +1195,7 @@ end
     # Single-scan selection returns a leaf DimTree.
     p1 = UV.select_scan(uvset, "TEST", 1)
     @test p1 isa UV.DimTree
-    @test p1 === UV.branches(uvset)[UV.partition_key(:TEST, 1)]
+    @test p1 === UV.branches(uvset)[UV.partition_key(; source_key = :TEST, scan_name = "1")]
 
     # Multi-scan selection via select_partition returns a sub-UVSet.
     sub_s1 = UV.select_partition(uvset; scan = 1)
@@ -1235,10 +1235,10 @@ end
     win = UV.time_window(uvset, 0.5, 1.5)
     @test win isa UV.UVSet
     @test length(UV.branches(win)) == 1
-    @test haskey(UV.branches(win), UV.partition_key(:TEST, 2))
+    @test haskey(UV.branches(win), UV.partition_key(; source_key = :TEST, scan_name = "2"))
 
     # Flag layer is computed at construction (= weights ≤ 0).
-    leaf_1 = UV.branches(uvset)[UV.partition_key(:TEST, 1)]
+    leaf_1 = UV.branches(uvset)[UV.partition_key(; source_key = :TEST, scan_name = "1")]
     @test eltype(leaf_1[:flag]) == Bool
     @test parent(leaf_1[:flag]) == (parent(leaf_1[:weights]) .<= 0)
 end
@@ -1376,7 +1376,7 @@ function synthetic_uvdata_3c273()
             leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
             partition_info = info_3c,
         )
-        new_key = UV.partition_key(info_3c.source_key, info_3c.scan_name)
+        new_key = UV.partition_key(info_3c)
         new_branches[new_key] = new_leaf
     end
     return Gustavo.UVData.DimensionalData.rebuild(base; branches = new_branches)
@@ -1436,9 +1436,9 @@ end
 
     # Tab-completable Partitions accessor.
     ps = UV.partitions(multi)
-    @test :TEST_scan_1 in propertynames(ps)
-    @test :M3C273_scan_1 in propertynames(ps)
-    @test ps.M3C273_scan_1 === UV.branches(multi)[:M3C273_scan_1]
+    @test :TEST_spw_0_scan_1 in propertynames(ps)
+    @test :M3C273_spw_0_scan_1 in propertynames(ps)
+    @test ps.M3C273_spw_0_scan_1 === UV.branches(multi)[:M3C273_spw_0_scan_1]
 
     # apply preserves tree shape; per-leaf metadata flows through.
     averaged = UV.apply(UV.TimeAverage(), multi)
@@ -1494,7 +1494,7 @@ end
     @test UV.sanitize_source("NGC 4486") == :NGC_4486
     @test UV.sanitize_source("") == :unknown
     @test UV.sanitize_source("  ") == :unknown
-    @test UV.partition_key(:M3C273, 5) == :M3C273_scan_5
+    @test UV.partition_key(; source_key = :M3C273, scan_name = "5") == :M3C273_spw_0_scan_5
 end
 
 @testset "Structural ==/hash for metadata types" begin
@@ -1613,10 +1613,142 @@ end
     @test_throws ArgumentError UV.nchannels(multi)
 end
 
-@testset "Phase 1.5 holdover: multi-SPW round-trip" begin
-    # Once load_uvfits supports multiple FQ rows, write a 2-leaf 2-SPW UVSet,
-    # round-trip through write/load_uvfits, and confirm both setups come back.
-    @test_skip "multi-FREQID UVFITS round-trip — Phase 1.5"
+@testset "partition_axes is single-point-of-extension" begin
+    UV = Gustavo.UVData
+    leaf = first(values(UV.branches(synthetic_uvdata())))
+    info = UV.metadata(leaf)
+    @test UV.partition_key(info) == :TEST_spw_0_scan_1
+
+    # Append a synthetic axis without touching `partition_key` or any other
+    # call site — only the axis tuple changes.
+    extended = (
+        UV.DEFAULT_PARTITION_AXES...,
+        UV.PartitionAxis(:obs, info -> isempty(info.intent) ? "" : "obs_$(info.intent)"),
+    )
+    @test UV.partition_key(info, extended) == :TEST_spw_0_scan_1
+    info_with_intent = UV.update(info; intent = "TARGET")
+    @test UV.partition_key(info_with_intent, extended) == :TEST_spw_0_scan_1_obs_TARGET
+end
+
+"""
+    synthetic_two_spw_flat()
+
+Build a flat NamedTuple with two `FrequencySetup`s and per-record
+`record_spw_index = [1, 2]` so `UVSet(flat)` splits records into two
+leaves sharing scan_name "1" but differing in SPW. Mirrors
+`synthetic_uvdata` shape but with two FQ rows.
+"""
+function synthetic_two_spw_flat()
+    UV = Gustavo.UVData
+    obs_t = [0.0, 1.0]
+    pol_lab = ["PP", "PQ", "QP", "QQ"]
+    chan_freq = collect(1.0:4.0)
+    vis = ComplexF32.(rand(ComplexF32, 2, 4, 4))
+    weights = fill(1.0f0, 2, 4, 4)
+    vis_da = DimArray(vis, (Integration(obs_t), Pol(pol_lab), IF(chan_freq)))
+    weights_da = DimArray(weights, (Integration(obs_t), Pol(pol_lab), IF(chan_freq)))
+    uvw_da = DimArray(zeros(Float32, 2, 3), (Integration(obs_t), UVW(["U", "V", "W"])))
+
+    # Reuse antennas / array_config / array_obs / primary_cards from the
+    # single-source fixture. Same structure, just two SPWs.
+    base = synthetic_uvdata()
+    base_meta = UV.metadata(base)
+
+    fs_a = UV.FrequencySetup(;
+        name = "spw_0", ref_freq = 1.0e9,
+        channel_freqs = collect(1.0:4.0), ch_widths = fill(1.0f0, 4),
+        total_bandwidths = fill(1.0f0, 4), sidebands = Int32.(fill(1, 4)),
+        extras = (; frqsel = Int32(1)),
+    )
+    fs_b = UV.FrequencySetup(;
+        name = "spw_1", ref_freq = 1.0e9,
+        channel_freqs = collect(5.0:8.0), ch_widths = fill(1.0f0, 4),
+        total_bandwidths = fill(1.0f0, 4), sidebands = Int32.(fill(1, 4)),
+        extras = (; frqsel = Int32(2)),
+    )
+
+    flat = (
+        vis = vis_da, weights = weights_da, uvw = uvw_da,
+        obs_time = obs_t,
+        record_scan_name = ["1", "1"],
+        record_spw_index = Int32[1, 2],
+        baselines = UV.BaselineIndex(
+            [1, 1], [(1, 2)], Dict(1 => 1), [1]; antenna_names = ["AA", "AX"]
+        ),
+        date_param = reshape(Float32[0.0, 1 / 24], :, 1),
+        extra_columns = NamedTuple(),
+        antennas = base_meta.antennas,
+        array_config = base_meta.array_config,
+        array_obs = base_meta.array_obs,
+        freq_setups = UV.FrequencySetup[fs_a, fs_b],
+        source_name = "TEST", ra = 0.0, dec = 0.0,
+        primary_cards = base_meta.primary_cards,
+        basename = "synthetic_2spw",
+    )
+    return flat, fs_a, fs_b
+end
+
+@testset "synthetic two-FREQID flat → UVSet" begin
+    UV = Gustavo.UVData
+    flat, fs_a, fs_b = synthetic_two_spw_flat()
+    uvset = UV.UVSet(flat)
+
+    @test length(UV.branches(uvset)) == 2
+    @test haskey(UV.branches(uvset), :TEST_spw_0_scan_1)
+    @test haskey(UV.branches(uvset), :TEST_spw_1_scan_1)
+    @test UV.freq_setup(UV.branches(uvset)[:TEST_spw_0_scan_1]) == fs_a
+    @test UV.freq_setup(UV.branches(uvset)[:TEST_spw_1_scan_1]) == fs_b
+    @test UV.union_frequency_axis(uvset) == [fs_a, fs_b]
+    @test_throws ArgumentError UV.freq_setup(uvset)
+end
+
+@testset "multi-FREQID write → load_uvfits round-trip" begin
+    UV = Gustavo.UVData
+    flat, fs_a, fs_b = synthetic_two_spw_flat()
+    uvset = UV.UVSet(flat)
+
+    tmp = tempname() * ".uvfits"
+    try
+        UV.write_uvfits(tmp, uvset)
+        round_set = UV.load_uvfits(tmp)
+        @test length(UV.branches(round_set)) == 2
+        # Round-trip preserves the two distinct frequency setups; scan_name
+        # may renumber via NX row index, but (spw, freq) identity survives.
+        round_setups = UV.union_frequency_axis(round_set)
+        @test length(round_setups) == 2
+        @test UV.channel_freqs(round_setups[1]) == UV.channel_freqs(fs_a)
+        @test UV.channel_freqs(round_setups[2]) == UV.channel_freqs(fs_b)
+        @test get(round_setups[1].extras, :frqsel, Int32(0)) == Int32(1)
+        @test get(round_setups[2].extras, :frqsel, Int32(0)) == Int32(2)
+    finally
+        isfile(tmp) && rm(tmp)
+    end
+end
+
+@testset "AIPS leak check: setup_name is MSv4, no record_freqid" begin
+    UV = Gustavo.UVData
+    fs = UV.freq_setup(first(values(UV.branches(synthetic_uvdata()))))
+    @test UV.setup_name(fs) == "FRQSEL_1" || startswith(UV.setup_name(fs), "spw_")
+    # `flat.record_freqid` no longer exists; constructing a UVSet from a flat
+    # tuple with that legacy key should fail (renamed to record_spw_index).
+    base = synthetic_uvdata()
+    bl = first(values(UV.branches(base)))
+    info = UV.metadata(bl)
+    bad_flat = (
+        vis = bl[:vis], weights = bl[:weights], uvw = bl[:uvw],
+        obs_time = collect(UV.obs_time(bl)),
+        record_scan_name = ["1", "1"],
+        record_freqid = Int32[1, 1],   # legacy name — should not be picked up
+        baselines = info.baselines, date_param = info.date_param,
+        extra_columns = NamedTuple(),
+        antennas = UV.metadata(base).antennas,
+        array_config = UV.metadata(base).array_config,
+        array_obs = UV.metadata(base).array_obs,
+        freq_setups = UV.FrequencySetup[UV.freq_setup(bl)],
+        source_name = "TEST", ra = 0.0, dec = 0.0,
+        primary_cards = UV.metadata(base).primary_cards,
+    )
+    @test_throws Exception UV.UVSet(bad_flat)
 end
 
 @testset "ScanArray-style scan_name layer + accessors" begin
@@ -1666,10 +1798,11 @@ end
     # disambiguates via `:<source>_scan_<n>_<sub>`.
     UV = Gustavo.UVData
     base = synthetic_uvdata()
-    @test UV.partition_key(:TEST, "1") === :TEST_scan_1
-    @test UV.partition_key(:TEST, "1"; sub_scan_name = "A") === :TEST_scan_1_A
-    @test UV.partition_key(:TEST, "1"; sub_scan_name = "A") !==
-        UV.partition_key(:TEST, "1"; sub_scan_name = "B")
+    @test UV.partition_key(; source_key = :TEST, scan_name = "1") === :TEST_spw_0_scan_1
+    @test UV.partition_key(; source_key = :TEST, scan_name = "1", sub_scan_name = "A") ===
+        :TEST_spw_0_scan_1_A
+    @test UV.partition_key(; source_key = :TEST, scan_name = "1", sub_scan_name = "A") !==
+        UV.partition_key(; source_key = :TEST, scan_name = "1", sub_scan_name = "B")
 
     # Build a sibling leaf with a distinct sub_scan_name on top of an
     # existing leaf and confirm both coexist after merge_uvsets-style assembly.
@@ -1683,13 +1816,13 @@ end
                 leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
                 partition_info = sub_info,
             )
-            sub_key = UV.partition_key(info.source_key, info.scan_name; sub_scan_name = "B")
+            sub_key = UV.partition_key(sub_info)
             branches[sub_key] = sub_leaf
         end
     end
     multi_sa = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
-    @test haskey(UV.branches(multi_sa), :TEST_scan_1)
-    @test haskey(UV.branches(multi_sa), :TEST_scan_1_B)
+    @test haskey(UV.branches(multi_sa), :TEST_spw_0_scan_1)
+    @test haskey(UV.branches(multi_sa), :TEST_spw_0_scan_1_B)
     # write_uvfits should refuse multi-subarray (Phase 2.5).
     tmp = tempname() * ".uvfits"
     try

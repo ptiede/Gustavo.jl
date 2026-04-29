@@ -61,7 +61,7 @@ end
 Construct a `UVSet` from a flat record-layout `NamedTuple` produced by
 `_load_uvfits_flat`. The named tuple must carry the per-record arrays
 (`vis`, `weights`, `uvw`, `obs_time`, `record_scan_name`,
-`record_freqid`, `baselines`, `date_param`, `extra_columns`), the
+`record_spw_index`, `baselines`, `date_param`, `extra_columns`), the
 observation-level globals (`antennas`, `array_config`, `array_obs`,
 `freq_setups`, `primary_cards`), and per-source fields
 (`source_name`, `ra`, `dec`).
@@ -70,26 +70,26 @@ function UVSet(flat::NamedTuple)
     src_key = sanitize_source(flat.source_name)
     base_name = haskey(flat, :basename) ? flat.basename : "uvfits"
 
-    # Each unique record_scan_name becomes one MSv4 partition leaf, in
-    # first-seen order. Mirrors xradio's MSv2→MSv4 partitioning rule for
-    # `SCAN_NUMBER` (partition_queries.py:36).
-    scan_labels = String[]
-    seen = Set{String}()
-    for lbl in flat.record_scan_name
-        s = String(lbl)
-        if !(s in seen)
-            push!(scan_labels, s)
-            push!(seen, s)
+    # Each unique (scan_name, spw_index) becomes one MSv4 partition leaf,
+    # in first-seen order. Mirrors xradio's MSv2→MSv4 partitioning rule:
+    # DDI is always a partition axis, alongside SCAN_NUMBER.
+    seen = Set{Tuple{String, Int}}()
+    ordered = Tuple{String, Int}[]
+    for i in eachindex(flat.record_scan_name)
+        pair = (String(flat.record_scan_name[i]), Int(flat.record_spw_index[i]))
+        if !(pair in seen)
+            push!(ordered, pair)
+            push!(seen, pair)
         end
     end
-    isempty(scan_labels) && error("UVSet(flat): no records in input")
+    isempty(ordered) && error("UVSet(flat): no records in input")
 
     branches = DimensionalData.TreeDict()
-    for lbl in scan_labels
-        leaf, info = _extract_scan_leaf(flat, lbl; source_key = src_key, basename = base_name)
-        key = partition_key(src_key, info.scan_name; sub_scan_name = info.sub_scan_name)
-        # Collision guard. Phase 2.5 (multi-AN-extver read) will populate
-        # `sub_scan_name` when the same `(source, scan)` would otherwise collide.
+    for (lbl, spw) in ordered
+        leaf, info = _extract_scan_leaf(
+            flat, lbl, spw; source_key = src_key, basename = base_name,
+        )
+        key = partition_key(info)
         if haskey(branches, key)
             error("UVSet: duplicate partition key $(key)")
         end
