@@ -16,8 +16,20 @@ using Gustavo.UVData:
     Integration, Pol, IF, UVW,
     sources, parallactic_mount, elevation_mount, offset_mount,
     array_xyz, array_name, extras,
-    decode_baseline,
     channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
+
+# AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices
+# as `bl = a*256 + b`. Caps the array at 255 antennas. Lives in the FITS
+# extension only; format-neutral code in `src/` speaks `(a, b)` tuples.
+_decode_aips_baseline(bl::Integer) = (bl ÷ 256, bl % 256)
+function _encode_aips_baseline(a::Integer, b::Integer)
+    (1 <= a < 256 && 1 <= b < 256) || error(
+        "AIPS UVFITS BASELINE column packs (a, b) as a*256 + b; " *
+            "antenna index $((a, b)) exceeds the 255-antenna limit. " *
+            "Use BLN_NUM-style encoding (not yet supported)."
+    )
+    return Int32(a * 256 + b)
+end
 
 
 # AIPS POLTYA/POLTYB letter ↔ PolarizedTypes
@@ -403,9 +415,43 @@ function _find_crval(cards, ctype_prefix)
     return card_value(cards, "CRVAL$i")
 end
 
+# ── Primary-card stash ──────────────────────────────────────────────────────
+#
+# Primary-HDU cards are pure UVFITS write-back state (not format-neutral
+# observation metadata), so they live here, in the FITS extension, rather
+# than on `UVMetadata`. `WeakKeyDict` so the cards are GC'd when the UVSet
+# is.
+const _PRIMARY_CARDS = WeakKeyDict{UVSet, Vector{Card}}()
+
+function UVData.primary_cards(uvset::UVSet)
+    haskey(_PRIMARY_CARDS, uvset) || error(
+        "primary_cards(uvset): no FITS primary-HDU cards registered. " *
+            "Either load via `load_uvfits`, or call " *
+            "`register_primary_cards!(uvset, cards)` before writing."
+    )
+    return _PRIMARY_CARDS[uvset]
+end
+
+UVData.register_primary_cards!(uvset::UVSet, cards::AbstractVector) =
+    (_PRIMARY_CARDS[uvset] = Vector{Card}(cards); uvset)
+
+# Hook so primary-HDU cards follow a UVSet through `rebuild` / `select_*`
+# / `merge_uvsets`. Source-of-truth lives only here; format-neutral code
+# in `src/` calls `_propagate_extension_state!` and gets a no-op when
+# the FITS extension isn't loaded.
+function UVData._propagate_extension_state!(new::UVSet, old::UVSet)
+    haskey(_PRIMARY_CARDS, old) && (_PRIMARY_CARDS[new] = _PRIMARY_CARDS[old])
+    return new
+end
+
 # ── Read path ───────────────────────────────────────────────────────────────
 
-UVData.load_uvfits(path) = UVSet(_load_uvfits_flat(path))
+function UVData.load_uvfits(path)
+    flat = _load_uvfits_flat(path)
+    uvset = UVSet(flat)
+    UVData.register_primary_cards!(uvset, flat.primary_cards)
+    return uvset
+end
 
 function _load_uvfits_flat(path)
     fid = FITSFiles.fits(path)
@@ -516,12 +562,11 @@ function _load_uvfits_flat(path)
         )
     end
 
-    unique_codes = sort(unique(bl_codes))
-    bl_lookup = Dict(bl => i for (i, bl) in enumerate(unique_codes))
-    bl_pairs = decode_baseline.(unique_codes)
+    bl_pairs_per_record = _decode_aips_baseline.(bl_codes)
+    bl_pairs = sort(unique(bl_pairs_per_record))
     baselines = BaselineIndex(
-        bl_codes, bl_pairs, bl_lookup, unique_codes;
-        antenna_names = antennas.name
+        bl_pairs_per_record, bl_pairs;
+        antenna_names = antennas.name,
     )
 
     basename = String(splitext(_basename_of_path(path))[1])
@@ -641,7 +686,7 @@ function _build_primary_data(uvset::UVSet, uu, vv, ww, bl_codes, date_param, ext
     )
     pairs = Pair{Symbol, Any}[]
     seen = Set{String}()
-    for (idx, name) in _ptype_entries(DimensionalData.metadata(uvset).primary_cards)
+    for (idx, name) in _ptype_entries(UVData.primary_cards(uvset))
         name in seen && continue
         push!(seen, name)
         prefix = uppercase(String(split(name, "-")[1]))
@@ -832,7 +877,8 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     # Map MSv4 pol order (in-memory) back to whatever AIPS Stokes order the
     # primary_cards specify, so the on-disk layout matches the round-tripped
     # CRVAL/CDELT.
-    aips_codes_disk, aips_labels_disk, _, _ = parse_stokes_axis(root.primary_cards, npol)
+    cards = UVData.primary_cards(uvset)
+    aips_codes_disk, aips_labels_disk, _, _ = parse_stokes_axis(cards, npol)
     pol_perm = if isempty(aips_codes_disk) || aips_labels_disk == msv4_labels
         collect(1:npol)
     else
@@ -871,10 +917,12 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
         bls = info.baselines
         ro = info.record_order
         first_row_in_scan = rec_offset + 1
+        # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
+        bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
             parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:uvw]),
-            bls.unique_codes, ro, info.date_param, rec_offset, pol_perm,
+            bl_aips_codes, ro, info.date_param, rec_offset, pol_perm,
         )
         for (rec_i, _) in enumerate(ro)
             row = rec_offset + rec_i
@@ -893,7 +941,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
 
     extras_cat = NamedTuple{extras_keys}(extras_bufs)
     primary_data = _build_primary_data(uvset, uu, vv, ww_, bl_codes, date_param_cat, extras_cat, raw_data)
-    primary_hdu = HDU(Random, primary_data, copy(root.primary_cards))
+    primary_hdu = HDU(Random, primary_data, copy(cards))
     # AN table reflects the array nominal — one ref_freq for the array, taken
     # from the first setup. Per-SPW reference frequencies live on each FQ row.
     an_hdu = _build_an_hdu(root.antennas, root.array_config, ref_freq(first(setups)))
@@ -914,7 +962,7 @@ function _write_records_kernel!(
         vis_dense::AbstractArray{Tvis, 4},
         w_dense::AbstractArray{Tw, 4},
         uvw_dense::AbstractArray{Tuvw, 3},
-        unique_codes,
+        bl_aips_codes_local::AbstractVector{Int32},
         record_order::AbstractVector{Tuple{Int, Int}},
         date_param::AbstractMatrix{Tdate},
         rec_offset::Integer,
@@ -936,7 +984,7 @@ function _write_records_kernel!(
         uu[row] = uvw_dense[ti, bi, 1]
         vv[row] = uvw_dense[ti, bi, 2]
         ww_[row] = uvw_dense[ti, bi, 3]
-        bl_codes[row] = round(Int, unique_codes[bi])
+        bl_codes[row] = Int(bl_aips_codes_local[bi])
         date_param_cat[row, :] .= @view date_param[rec_i, :]
     end
     return nothing

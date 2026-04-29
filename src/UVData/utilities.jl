@@ -73,14 +73,6 @@ _rewrap_like(A, ref::AbstractDimArray) =
 _rewrap_like(A, _) = A
 
 """
-    decode_baseline(bl::Integer) -> (a::Int, b::Int)
-
-AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices as
-`bl = a*256 + b`. Inverse on read.
-"""
-decode_baseline(bl::Integer) = (bl ÷ 256, bl % 256)
-
-"""
     pol_products(x) -> Vector{String}
 
 Return the polarization-product labels (e.g. `["PP", "PQ", "QP", "QQ"]`)

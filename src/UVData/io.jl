@@ -24,3 +24,21 @@ Single-source UVSets only — multi-source UVSets must first be narrowed via
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
 function write_uvfits end
+
+"""
+    primary_cards(uvset::UVSet) -> Vector
+
+Return the FITS primary-HDU cards registered for `uvset`. Provided by
+the `GustavoFITSFilesExt` extension; cards are registered automatically
+on `load_uvfits` and can be set explicitly via `register_primary_cards!`.
+"""
+function primary_cards end
+
+"""
+    register_primary_cards!(uvset::UVSet, cards)
+
+Register a vector of FITS primary-HDU cards for `uvset`. Used by callers
+that build a `UVSet` from scratch (e.g. test fixtures) before calling
+`write_uvfits`. Provided by the `GustavoFITSFilesExt` extension.
+"""
+function register_primary_cards! end

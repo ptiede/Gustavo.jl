@@ -105,14 +105,14 @@ function synthetic_uvdata()
         Card("PTYPE4", "BASELINE"),
         Card("PTYPE5", "DATE"),
     ]
-    return UVSet(
+    uvset = UVSet(
         (
             vis = vis,
             weights = weights,
             uvw = uvw,
             obs_time = obs_time_synth,
             record_scan_name = ["1", "2"],
-            baselines = UV.BaselineIndex([1, 1], [(1, 2)], Dict(1 => 1), [1]; antenna_names = ["AA", "AX"]),
+            baselines = UV.BaselineIndex([(1, 2), (1, 2)], [(1, 2)]; antenna_names = ["AA", "AX"]),
             # Single DATE PTYPE column carrying obs_time/24 (hours → days).
             # Whole-JD + fractional-day style needs two PTYPE columns which
             # FITSFiles can't deduplicate on the round-trip path.
@@ -125,10 +125,11 @@ function synthetic_uvdata()
             record_spw_index = Int32[1, 1],
             source_name = "TEST",
             ra = 0.0, dec = 0.0,
-            primary_cards = primary_cards,
             basename = "synthetic",
         )
     )
+    UV.register_primary_cards!(uvset, primary_cards)
+    return uvset
 end
 
 function synthetic_bandpass_avg_uvdata()
@@ -213,10 +214,7 @@ function synthetic_bandpass_avg_uvdata()
     )
 
     baselines_idx = UV.BaselineIndex(
-        collect(1:length(bl_pairs)),
-        bl_pairs,
-        Dict(i => i for i in 1:length(bl_pairs)),
-        collect(1:length(bl_pairs));
+        bl_pairs, bl_pairs;
         antenna_names = ant_names,
     )
     scan_windows = [(Float64(s - 1), Float64(s)) for s in 1:nscan]
@@ -1004,7 +1002,7 @@ end
             leaf_round = UV.branches(round_set)[k]
             @test parent(leaf_round[:uvw]) == Float32.(parent(leaf_orig[:uvw]))
             @test parent(leaf_round[:weights]) == Float32.(parent(leaf_orig[:weights]))
-            @test UV.baselines(leaf_round).unique_codes == UV.baselines(leaf_orig).unique_codes
+            @test UV.baselines(leaf_round).pairs == UV.baselines(leaf_orig).pairs
         end
 
         fs_round = UV.freq_setup(round_set)
@@ -1029,7 +1027,7 @@ end
     leaves_collected = collect(values(UV.branches(base)))
     obs_times = Float64[]
     scan_indices = String[]
-    bl_codes = Int[]
+    bl_pairs_per_record = Tuple{Int, Int}[]
     vis_chunks = Any[]
     weights_chunks = Any[]
     uvw_chunks = Any[]
@@ -1043,7 +1041,7 @@ end
         for (ti, bi) in info.record_order
             push!(obs_times, ti_lookup[ti])
             push!(scan_indices, info.scan_name)
-            push!(bl_codes, round(Int, bls.unique_codes[bi]))
+            push!(bl_pairs_per_record, bls.pairs[bi])
             push!(vis_chunks, vis_p[ti, bi, :, :])
             push!(weights_chunks, w_p[ti, bi, :, :])
             push!(uvw_chunks, uvw_p[ti, bi, :])
@@ -1066,10 +1064,8 @@ end
     weights_da = DimArray(weights_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.IF(chan_freqs)))
     uvw_da = DimArray(uvw_flat, (UV.Integration(obs_times), UV.UVW(["U", "V", "W"])))
 
-    unique_codes = sort(unique(bl_codes))
-    bl_lookup = Dict(c => i for (i, c) in enumerate(unique_codes))
-    bl_pairs = [UV.decode_baseline(c) for c in unique_codes]
-    bls = UV.BaselineIndex(bl_codes, bl_pairs, bl_lookup, unique_codes; antenna_names = base_root.antennas.name)
+    unique_pairs = sort(unique(bl_pairs_per_record))
+    bls = UV.BaselineIndex(bl_pairs_per_record, unique_pairs; antenna_names = base_root.antennas.name)
 
     inttim_values = Float32.(0.5 .* (1:nint))
     primary_cards = Card[
@@ -1099,10 +1095,10 @@ end
             freq_setups = UV.FrequencySetup[base_fs],
             record_spw_index = ones(Int32, length(obs_times)),
             source_name = "TEST", ra = 0.0, dec = 0.0,
-            primary_cards = primary_cards,
             basename = "synthetic",
         )
     )
+    UV.register_primary_cards!(uvset, primary_cards)
 
     # Verify date_param + INTTIM round-trip through the leaves.
     leaves_collected = collect(values(UV.branches(uvset)))
@@ -1479,7 +1475,7 @@ end
             extras = m.array_obs.extras,
         )
         new_root = Gustavo.UVData.UVMetadata(
-            m.antennas, m.array_config, new_arr, m.primary_cards,
+            m.antennas, m.array_config, new_arr,
         )
         Gustavo.UVData.DimensionalData.rebuild(s; metadata = new_root)
     end
@@ -1673,7 +1669,7 @@ function synthetic_two_spw_flat()
         record_scan_name = ["1", "1"],
         record_spw_index = Int32[1, 2],
         baselines = UV.BaselineIndex(
-            [1, 1], [(1, 2)], Dict(1 => 1), [1]; antenna_names = ["AA", "AX"]
+            [(1, 2), (1, 2)], [(1, 2)]; antenna_names = ["AA", "AX"]
         ),
         date_param = reshape(Float32[0.0, 1 / 24], :, 1),
         extra_columns = NamedTuple(),
@@ -1682,7 +1678,6 @@ function synthetic_two_spw_flat()
         array_obs = base_meta.array_obs,
         freq_setups = UV.FrequencySetup[fs_a, fs_b],
         source_name = "TEST", ra = 0.0, dec = 0.0,
-        primary_cards = base_meta.primary_cards,
         basename = "synthetic_2spw",
     )
     return flat, fs_a, fs_b
@@ -1706,6 +1701,8 @@ end
     UV = Gustavo.UVData
     flat, fs_a, fs_b = synthetic_two_spw_flat()
     uvset = UV.UVSet(flat)
+    # Inherit cards from a sibling fixture so the writer has PTYPE / STOKES context.
+    UV.register_primary_cards!(uvset, UV.primary_cards(synthetic_uvdata()))
 
     tmp = tempname() * ".uvfits"
     try
@@ -1723,6 +1720,52 @@ end
     finally
         isfile(tmp) && rm(tmp)
     end
+end
+
+@testset "AIPS BASELINE encoding: 255-antenna limit on write" begin
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    leaf = first(values(UV.branches(base)))
+    info = UV.metadata(leaf)
+    bad_bls = UV.BaselineIndex(
+        [(1, 256), (1, 256)], [(1, 256)]; antenna_names = ["A", "B"]
+    )
+    bad_info = UV.update(info; baselines = bad_bls)
+    bad_leaf = UV._build_leaf(
+        leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+        partition_info = bad_info,
+    )
+    branches = Gustavo.UVData.DimensionalData.TreeDict(:TEST_spw_0_scan_1 => bad_leaf)
+    bad_set = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
+    tmp = tempname() * ".uvfits"
+    try
+        @test_throws Exception UV.write_uvfits(tmp, bad_set)
+    finally
+        isfile(tmp) && rm(tmp)
+    end
+end
+
+@testset "primary_cards lives in FITS-extension WeakKeyDict" begin
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    # Fixture registered cards explicitly — the accessor should return them.
+    cards = UV.primary_cards(base)
+    @test !isempty(cards)
+    # Cards follow rebuild-style operations (e.g. select_source).
+    selected = UV.select_source(base, "TEST")
+    @test UV.primary_cards(selected) == cards
+end
+
+@testset "Phase 1.6 invariants: BaselineIndex + UVMetadata" begin
+    UV = Gustavo.UVData
+    # decode_baseline must not exist in the UVData public namespace.
+    @test !isdefined(UV, :decode_baseline)
+    # BaselineIndex must not carry AIPS-only fields.
+    @test !(:codes in fieldnames(UV.BaselineIndex))
+    @test !(:unique_codes in fieldnames(UV.BaselineIndex))
+    @test :pairs_per_record in fieldnames(UV.BaselineIndex)
+    # primary_cards must not be a UVMetadata field.
+    @test !(:primary_cards in fieldnames(UV.UVMetadata))
 end
 
 @testset "AIPS leak check: setup_name is MSv4, no record_freqid" begin
@@ -1746,7 +1789,6 @@ end
         array_obs = UV.metadata(base).array_obs,
         freq_setups = UV.FrequencySetup[UV.freq_setup(bl)],
         source_name = "TEST", ra = 0.0, dec = 0.0,
-        primary_cards = UV.metadata(base).primary_cards,
     )
     @test_throws Exception UV.UVSet(bad_flat)
 end

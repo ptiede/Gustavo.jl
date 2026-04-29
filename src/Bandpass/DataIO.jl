@@ -42,32 +42,28 @@ function _to_bandpass_dataset(uvset::UVSet)
     # `OrderedDict{Symbol, AbstractDimTree}` abstract eltype.
     leaf_list = collect(values(branches_d))
 
-    union_codes_set = Set{Int}()
+    union_pair_set = Set{Tuple{Int, Int}}()
     for p in leaf_list
-        union!(union_codes_set, Int.(baselines(p).unique_codes))
+        union!(union_pair_set, baselines(p).pairs)
     end
-    union_codes = sort!(collect(union_codes_set))
-    union_lookup = Dict(c => i for (i, c) in enumerate(union_codes))
-    code_to_pair = Dict{Int, Tuple{Int, Int}}()
-    code_to_ant1 = Dict{Int, String}()
-    code_to_ant2 = Dict{Int, String}()
+    union_pairs = sort!(collect(union_pair_set))
+    union_lookup = Dict(p => i for (i, p) in enumerate(union_pairs))
+    pair_to_ant1 = Dict{Tuple{Int, Int}, String}()
+    pair_to_ant2 = Dict{Tuple{Int, Int}, String}()
     for p in leaf_list
-        for (i, c) in enumerate(baselines(p).unique_codes)
-            ci = Int(c)
-            code_to_pair[ci] = baselines(p).pairs[i]
-            code_to_ant1[ci] = baselines(p).ant1_names[i]
-            code_to_ant2[ci] = baselines(p).ant2_names[i]
+        for (i, pr) in enumerate(baselines(p).pairs)
+            pair_to_ant1[pr] = baselines(p).ant1_names[i]
+            pair_to_ant2[pr] = baselines(p).ant2_names[i]
         end
     end
-    union_pairs = [code_to_pair[c] for c in union_codes]
-    union_ant1 = [code_to_ant1[c] for c in union_codes]
-    union_ant2 = [code_to_ant2[c] for c in union_codes]
+    union_ant1 = [pair_to_ant1[pr] for pr in union_pairs]
+    union_ant2 = [pair_to_ant2[pr] for pr in union_pairs]
     union_labels = string.(union_ant1, "-", union_ant2)
     union_baselines = UVData.BaselineIndex(
-        Int[], union_pairs, union_lookup, union_codes,
+        Tuple{Int, Int}[], union_pairs, union_lookup,
         union_labels, union_ant1, union_ant2,
     )
-    nbl = length(union_codes)
+    nbl = length(union_pairs)
 
     root = DimensionalData.metadata(uvset)
     array_obs = root.array_obs
@@ -102,7 +98,7 @@ function _to_bandpass_dataset(uvset::UVSet)
         _accumulate_avg_into!(
             V_num, W_sum, UVW_num, UVW_w,
             parent(part[:vis]), parent(part[:weights]), parent(part[:uvw]),
-            baselines(part).unique_codes, union_lookup, sid,
+            baselines(part).pairs, union_lookup, sid,
         )
     end
 
@@ -149,12 +145,11 @@ function _accumulate_avg_into!(
         vis_p::AbstractArray{Tvis, 4},
         w_p::AbstractArray{Tw, 4},
         uvw_p::AbstractArray{Tuvw, 3},
-        unique_codes_local, union_lookup, sid::Integer,
+        pairs_local, union_lookup, sid::Integer,
     ) where {Tvis, Tw, Tuvw}
     nti_p, nbl_p, npol, nchan = size(vis_p)
     @inbounds for ti in 1:nti_p, bi_local in 1:nbl_p
-        bl_code = Int(unique_codes_local[bi_local])
-        bi = union_lookup[bl_code]
+        bi = union_lookup[pairs_local[bi_local]]
         tot_w = zero(Tw)
         for p in 1:npol, c in 1:nchan
             w = w_p[ti, bi_local, p, c]

@@ -57,27 +57,25 @@ function _extract_scan_leaf(
     )
 
     leaf_freq_setup = flat.freq_setups[Int(spw_index)]
-    bl_codes_scan = flat.baselines.codes[int_inds]
+    bl_pairs_per_record = flat.baselines.pairs_per_record[int_inds]
     obs_times_per_int = flat.obs_time[int_inds]
 
-    unique_codes_scan = sort(unique(bl_codes_scan))
-    bl_lookup_scan = Dict(c => i for (i, c) in enumerate(unique_codes_scan))
-    src_pair = Dict(c => p for (c, p) in zip(flat.baselines.unique_codes, flat.baselines.pairs))
-    src_ant1 = Dict(c => n for (c, n) in zip(flat.baselines.unique_codes, flat.baselines.ant1_names))
-    src_ant2 = Dict(c => n for (c, n) in zip(flat.baselines.unique_codes, flat.baselines.ant2_names))
-    bl_pairs_scan = [src_pair[c] for c in unique_codes_scan]
-    bl_ant1_scan = [src_ant1[c] for c in unique_codes_scan]
-    bl_ant2_scan = [src_ant2[c] for c in unique_codes_scan]
+    bl_pairs_scan = sort(unique(bl_pairs_per_record))
+    bl_lookup_scan = Dict(p => i for (i, p) in enumerate(bl_pairs_scan))
+    src_ant1 = Dict(p => n for (p, n) in zip(flat.baselines.pairs, flat.baselines.ant1_names))
+    src_ant2 = Dict(p => n for (p, n) in zip(flat.baselines.pairs, flat.baselines.ant2_names))
+    bl_ant1_scan = [src_ant1[p] for p in bl_pairs_scan]
+    bl_ant2_scan = [src_ant2[p] for p in bl_pairs_scan]
     bl_labels_scan = string.(bl_ant1_scan, "-", bl_ant2_scan)
     baselines_scan = BaselineIndex(
-        bl_codes_scan, bl_pairs_scan, bl_lookup_scan, unique_codes_scan,
+        bl_pairs_per_record, bl_pairs_scan, bl_lookup_scan,
         bl_labels_scan, bl_ant1_scan, bl_ant2_scan,
     )
 
     unique_times = sort(unique(obs_times_per_int))
     time_lookup = Dict(t => i for (i, t) in enumerate(unique_times))
     nti = length(unique_times)
-    nbl = length(unique_codes_scan)
+    nbl = length(bl_pairs_scan)
     vis_flat = parent(flat.vis)
     weights_flat = parent(flat.weights)
     uvw_flat = parent(flat.uvw)
@@ -94,7 +92,7 @@ function _extract_scan_leaf(
     record_order = Vector{Tuple{Int, Int}}(undef, length(int_inds))
     for (rec_i, int_i) in enumerate(int_inds)
         ti = time_lookup[obs_times_per_int[rec_i]]
-        bi = bl_lookup_scan[bl_codes_scan[rec_i]]
+        bi = bl_lookup_scan[bl_pairs_per_record[rec_i]]
         record_order[rec_i] = (ti, bi)
         vis_dense[ti, bi, :, :] .= vis_flat[int_i, :, :]
         weights_dense[ti, bi, :, :] .= weights_flat[int_i, :, :]

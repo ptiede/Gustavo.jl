@@ -161,12 +161,11 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     end
 
     new_pairs = bls.pairs[bl_inds]
-    new_unique_codes = bls.unique_codes[bl_inds]
-    new_lookup = Dict(c => i for (i, c) in enumerate(new_unique_codes))
+    new_lookup = Dict{eltype(new_pairs), Int}(p => i for (i, p) in enumerate(new_pairs))
     new_ant1 = bls.ant1_names[bl_inds]
     new_ant2 = bls.ant2_names[bl_inds]
     new_baselines = BaselineIndex(
-        eltype(bls.codes)[], new_pairs, new_lookup, new_unique_codes,
+        eltype(new_pairs)[], new_pairs, new_lookup,
         new_labels, new_ant1, new_ant2,
     )
 
@@ -213,9 +212,10 @@ end
 
 Strictly combine multiple UVSets into one multi-source UVSet. All inputs
 must share identical array-wide metadata: `antennas`, `array_config`,
-`array_obs`, and the same polarization products on the `Pol` axis. The
-root `primary_cards` is taken from the first input verbatim — write-back
-round-trips after `select_source(merged, name)`.
+`array_obs`, and the same polarization products on the `Pol` axis.
+Primary-HDU cards (write-back state, FITS-extension-owned) are inherited
+from the first input via the extension's stash — write-back round-trips
+after `select_source(merged, name)`.
 
 Branch keys must be unique across inputs (collisions would indicate two
 leaves describing the same `(source, scan, sub_scan)` triple, which is not

@@ -19,9 +19,10 @@ works without bespoke overloads. Per-leaf data lives on each branch
 - `branches` : empty for UVData read-in; reserved for future MSv4
   sub-tables (`antenna_xds`, `field_and_source_xds`, …).
 
-Array-wide globals live on the root `metadata::UVMetadata` (`scans`,
-`antennas`, `array_config`, `array_obs::ObsArrayMetadata`,
-`primary_cards`).
+Array-wide globals live on the root `metadata::UVMetadata` (`antennas`,
+`array_config`, `array_obs::ObsArrayMetadata`). FITS primary-HDU cards
+(write-back state) live in a FITS-extension-owned `WeakKeyDict`, not on
+`UVMetadata`.
 
 Discovery helpers: `summary(uvset)`, `sources(uvset)`, `scan_ids(uvset, src)`,
 `partitions(uvset)` (tab-completable accessor), `select_source` /
@@ -63,8 +64,9 @@ Construct a `UVSet` from a flat record-layout `NamedTuple` produced by
 (`vis`, `weights`, `uvw`, `obs_time`, `record_scan_name`,
 `record_spw_index`, `baselines`, `date_param`, `extra_columns`), the
 observation-level globals (`antennas`, `array_config`, `array_obs`,
-`freq_setups`, `primary_cards`), and per-source fields
-(`source_name`, `ra`, `dec`).
+`freq_setups`), and per-source fields (`source_name`, `ra`, `dec`).
+The flat tuple may also carry `primary_cards` (consumed by the FITS
+extension's `load_uvfits` for write-back; ignored here).
 """
 function UVSet(flat::NamedTuple)
     src_key = sanitize_source(flat.source_name)
@@ -97,8 +99,7 @@ function UVSet(flat::NamedTuple)
     end
 
     metadata = UVMetadata(
-        flat.antennas, flat.array_config,
-        flat.array_obs, flat.primary_cards,
+        flat.antennas, flat.array_config, flat.array_obs,
     )
     return UVSet(; metadata = metadata, branches = branches)
 end
@@ -115,6 +116,16 @@ DimensionalData.branches(u::UVSet) = getfield(u, :branches)
 DimensionalData.tree(u::UVSet) = getfield(u, :tree)
 DimensionalData.basetypeof(::Type{<:UVSet}) = UVSet
 
+"""
+    _propagate_extension_state!(new::UVSet, old::UVSet)
+
+Hook for format-extension shadow state (e.g. FITS primary-HDU cards) to
+follow a `UVSet` through `rebuild` / `select_*` / `merge_uvsets`. The
+default is a no-op; the FITS extension overloads it to copy registered
+primary cards from `old` to `new`.
+"""
+_propagate_extension_state!(new, old) = new
+
 function DimensionalData.rebuild(
         u::UVSet;
         data = DimensionalData.data(u),
@@ -126,7 +137,8 @@ function DimensionalData.rebuild(
         tree = DimensionalData.tree(u),
         branches = DimensionalData.branches(u),
     )
-    return UVSet(data, dims, refdims, layerdims, layermetadata, metadata, branches, tree)
+    new = UVSet(data, dims, refdims, layerdims, layermetadata, metadata, branches, tree)
+    return _propagate_extension_state!(new, u)
 end
 
 """
@@ -326,8 +338,8 @@ nbaselines(uvset::UVSet) = length(
     unique(
         reduce(
             vcat,
-            [collect(baselines(leaf).unique_codes) for (_, leaf) in DimensionalData.branches(uvset)];
-            init = Int[],
+            [collect(baselines(leaf).pairs) for (_, leaf) in DimensionalData.branches(uvset)];
+            init = Tuple{Int, Int}[],
         )
     )
 )
