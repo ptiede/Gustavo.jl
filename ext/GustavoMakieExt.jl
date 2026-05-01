@@ -301,7 +301,12 @@ function Bandpass.plot_gain_solutions(parent, gains, data::_DataLike; quantity =
         end
 
         for (ax, pi) in zip(axes_row, pol_idx)
-            tracks = [series(vec(gains[s, ai, pi, :])) for s in 1:nscan]
+            # gains layout: (Frequency, Ti, Ant, Pol). Pull each Ti slice
+            # — yields a length-nchan vector for the (ai, pi) site/pol.
+            # `Base.parent` qualified because `parent` is the
+            # GridPosition argument above; on plain Arrays it's identity.
+            gains_arr = Base.parent(gains)
+            tracks = [series(vec(gains_arr[:, s, ai, pi])) for s in 1:nscan]
             shared = shared_track(tracks)
             if isnothing(shared)
                 for s in 1:nscan

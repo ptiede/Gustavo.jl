@@ -51,8 +51,8 @@ Use `PartitionInfo(; ...)` to construct and `update(info; ...)` to produce
 a copy with field overrides.
 """
 struct PartitionInfo{
-        TBL <: BaselineIndex, TFS <: AbstractFrequencySetup,
-        TDP, TEx <: NamedTuple,
+        TAnt <: AntennaTable, TBL <: BaselineIndex,
+        TFS <: AbstractFrequencySetup, TEx <: NamedTuple,
     }
     source_name::String
     source_key::Symbol
@@ -61,14 +61,15 @@ struct PartitionInfo{
     scan_intents::Vector{String}
     sub_scan_name::String
     spw_name::String
+    subarray_name::String
     intent::String
     ra::Float64
     dec::Float64
     ddi::Int
     partition_name::String
+    antennas::TAnt
     baselines::TBL
     record_order::Vector{Tuple{Int, Int}}
-    date_param::TDP
     extra_columns::TEx
     freq_setup::TFS
 end
@@ -76,14 +77,15 @@ end
 function PartitionInfo(;
         source_name::AbstractString, source_key::Symbol,
         scan_name::AbstractString, ra::Real, dec::Real,
+        antennas::AntennaTable,
         baselines::BaselineIndex,
         record_order::Vector{Tuple{Int, Int}},
-        date_param::AbstractMatrix,
         freq_setup::AbstractFrequencySetup,
         extra_columns::NamedTuple = NamedTuple(),
         scan_intents::AbstractVector{<:AbstractString} = String[],
         sub_scan_name::AbstractString = "",
         spw_name::AbstractString = "spw_0",
+        subarray_name::AbstractString = "",
         intent::AbstractString = "",
         ddi::Integer = 0,
         field_name::Union{Nothing, AbstractString} = nothing,
@@ -100,8 +102,9 @@ function PartitionInfo(;
     return PartitionInfo(
         String(source_name), source_key, field_n, String(scan_name),
         String.(collect(scan_intents)), sub_n,
-        String(spw_name), String(intent), Float64(ra), Float64(dec),
-        Int(ddi), pname, baselines, record_order, date_param,
+        String(spw_name), String(subarray_name), String(intent),
+        Float64(ra), Float64(dec),
+        Int(ddi), pname, antennas, baselines, record_order,
         extra_columns, freq_setup,
     )
 end
@@ -121,14 +124,15 @@ function update(info::PartitionInfo; kwargs...)
         get(kwargs, :scan_intents, info.scan_intents),
         get(kwargs, :sub_scan_name, info.sub_scan_name),
         get(kwargs, :spw_name, info.spw_name),
+        get(kwargs, :subarray_name, info.subarray_name),
         get(kwargs, :intent, info.intent),
         get(kwargs, :ra, info.ra),
         get(kwargs, :dec, info.dec),
         get(kwargs, :ddi, info.ddi),
         get(kwargs, :partition_name, info.partition_name),
+        get(kwargs, :antennas, info.antennas),
         get(kwargs, :baselines, info.baselines),
         get(kwargs, :record_order, info.record_order),
-        get(kwargs, :date_param, info.date_param),
         get(kwargs, :extra_columns, info.extra_columns),
         get(kwargs, :freq_setup, info.freq_setup),
     )
@@ -164,6 +168,7 @@ e.g. `:M3C273_spw_0_scan_1` or `:M3C273_spw_1_scan_1_A`.
 const DEFAULT_PARTITION_AXES = (
     PartitionAxis(:source, info -> string(info.source_key)),
     PartitionAxis(:spw, info -> info.spw_name),
+    PartitionAxis(:subarray, info -> info.subarray_name),
     PartitionAxis(
         :scan,
         info -> isempty(info.scan_name) ? "" : "scan_" * info.scan_name,
@@ -187,3 +192,28 @@ function _show_partition(io::IO, leaf::DimensionalData.AbstractDimTree)
     sub = isempty(info.sub_scan_name) ? "" : "/" * info.sub_scan_name
     return print(io, "UVDataSet(scan=$(info.scan_name)$(sub), nti=$(nti), nbaselines=$(nbl))")
 end
+
+# DimensionalData's `print_metadata_block` calls `isempty(metadata)` —
+# `PartitionInfo` is never empty, so short-circuit before iterate is hit.
+Base.isempty(::PartitionInfo) = false
+
+function Base.show(io::IO, ::MIME"text/plain", info::PartitionInfo)
+    nant = length(info.antennas)
+    nbl = length(info.baselines.pairs)
+    nrec = length(info.record_order)
+    extras = isempty(info.extra_columns) ? "—" :
+        join(string.(keys(info.extra_columns)), ", ")
+    intents = isempty(info.scan_intents) ? "—" : join(info.scan_intents, ",")
+    sub = isempty(info.sub_scan_name) ? "" : "  sub_scan=$(info.sub_scan_name)"
+    println(io, "PartitionInfo $(info.partition_name)")
+    println(io, "  source       = $(info.source_name)  (key=:$(info.source_key))  field=$(info.field_name)")
+    println(io, "  ra/dec       = $(round(info.ra; digits = 6)) / $(round(info.dec; digits = 6)) (rad)")
+    println(io, "  scan         = $(info.scan_name)$(sub)  intents=$(intents)")
+    println(io, "  spw          = $(info.spw_name)  ddi=$(info.ddi)  subarray=$(isempty(info.subarray_name) ? "—" : info.subarray_name)")
+    println(io, "  antennas     = $(nant)   baselines = $(nbl)   records = $(nrec)")
+    println(io, "  freq_setup   = $(info.freq_setup.name) ($(length(channel_freqs(info.freq_setup))) chan)")
+    return print(io, "  extras       = $(extras)")
+end
+
+Base.show(io::IO, info::PartitionInfo) =
+    print(io, "PartitionInfo($(info.partition_name))")

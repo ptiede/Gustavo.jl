@@ -24,6 +24,38 @@ UVData.freq_setup(data::BandpassDataset) = data.freq_setup
 UVData.channel_freqs(data::BandpassDataset) = UVData.channel_freqs(data.freq_setup)
 
 """
+    _group_leaves_by_spw(uvset::UVSet) -> OrderedDict{String, Vector{Symbol}}
+
+Walk leaves and group their branch keys by `spw_name` in first-seen
+order. Used by `solve_bandpass(::UVSet)` to dispatch one solver run
+per SPW.
+"""
+function _group_leaves_by_spw(uvset::UVSet)
+    groups = OrderedDict{String, Vector{Symbol}}()
+    for (key, leaf) in DimensionalData.branches(uvset)
+        spw = DimensionalData.metadata(leaf).spw_name
+        push!(get!(() -> Symbol[], groups, spw), key)
+    end
+    return groups
+end
+
+"""
+    _uvset_with_branches(uvset::UVSet, leaf_keys) -> UVSet
+
+Rebuild a UVSet with only the named branches. Goes through
+`DimensionalData.rebuild` so format-extension shadow state (e.g. FITS
+primary cards) follows automatically via `_propagate_extension_state!`.
+"""
+function _uvset_with_branches(uvset::UVSet, leaf_keys)
+    full = DimensionalData.branches(uvset)
+    sub = DimensionalData.TreeDict()
+    for k in leaf_keys
+        sub[k] = full[k]
+    end
+    return DimensionalData.rebuild(uvset; branches = sub)
+end
+
+"""
     _to_bandpass_dataset(uvset::UVSet) -> BandpassDataset
 
 Assemble a dense `(Scan, Baseline_union, Pol, IF)` averaged cube from a
@@ -34,8 +66,9 @@ function _to_bandpass_dataset(uvset::UVSet)
     branches_d = DimensionalData.branches(uvset)
     isempty(branches_d) && error("_to_bandpass_dataset: empty UVSet")
 
-    # Asserts every leaf shares one frequency setup; per-SPW grouping is a
-    # future extension and would dispatch on a `Vector{FrequencySetup}` here.
+    # Asserts every leaf shares one frequency setup; multi-SPW UVSets
+    # should be split via `_group_leaves_by_spw` upstream (see
+    # `solve_bandpass(::UVSet)`).
     fs = UVData.freq_setup(uvset)
 
     # Concretely-typed leaf vector keeps inner loops type-stable despite the
@@ -87,8 +120,10 @@ function _to_bandpass_dataset(uvset::UVSet)
     Tw = eltype(parent(first_part[:weights]))
     Tuvw = eltype(parent(first_part[:uvw]))
 
-    V_num = zeros(Tvis, nscan, nbl, npol, nchan)
-    W_sum = zeros(Tw, nscan, nbl, npol, nchan)
+    # Memory layout: vis/weights = (Frequency, Ti, Baseline, Pol);
+    # uvw = (Ti, Baseline, UVW). Frequency fastest, pol slowest.
+    V_num = zeros(Tvis, nchan, nscan, nbl, npol)
+    W_sum = zeros(Tw, nchan, nscan, nbl, npol)
     UVW_num = zeros(Tuvw, nscan, nbl, 3)
     UVW_w = zeros(Tw, nscan, nbl)
 
@@ -119,44 +154,44 @@ function _to_bandpass_dataset(uvset::UVSet)
     vis_avg = DimensionalData.DimArray(
         V,
         (
-            Scan(scan_centers), Baseline(union_labels),
-            Pol(pol_labels), IF(UVData.channel_freqs(fs)),
+            Frequency(UVData.channel_freqs(fs)), Ti(scan_centers),
+            Baseline(union_labels), Pol(pol_labels),
         ),
     )
     weights_avg = DimensionalData.DimArray(W_sum, dims(vis_avg))
     uvw_avg = DimensionalData.DimArray(
         UVW_out,
-        (Scan(scan_centers), Baseline(union_labels), UVW(["U", "V", "W"])),
+        (Ti(scan_centers), Baseline(union_labels), UVW(["U", "V", "W"])),
     )
 
     return BandpassDataset(
         vis_avg, weights_avg, uvw_avg, union_baselines,
-        root.antennas, array_obs, fs, scan_windows,
+        UVData.union_antennas(uvset), array_obs, fs, scan_windows,
     )
 end
 
 # Type-stable inner kernel for `_to_bandpass_dataset`. Accumulates one
 # leaf's contribution to the union (Scan, Baseline, Pol, IF) cube.
 function _accumulate_avg_into!(
-        V_num::AbstractArray{Tvis, 4},
-        W_sum::AbstractArray{Tw, 4},
-        UVW_num::AbstractArray{Tuvw, 3},
-        UVW_w::AbstractArray{Tw, 2},
-        vis_p::AbstractArray{Tvis, 4},
+        V_num::AbstractArray{Tvis, 4},      # (Frequency, Ti, Baseline, Pol)
+        W_sum::AbstractArray{Tw, 4},        # (Frequency, Ti, Baseline, Pol)
+        UVW_num::AbstractArray{Tuvw, 3},    # (Ti, Baseline, UVW)
+        UVW_w::AbstractArray{Tw, 2},        # (Ti, Baseline)
+        vis_p::AbstractArray{Tvis, 4},      # leaf: (Frequency, Ti, Baseline, Pol)
         w_p::AbstractArray{Tw, 4},
-        uvw_p::AbstractArray{Tuvw, 3},
+        uvw_p::AbstractArray{Tuvw, 3},      # leaf: (Ti, Baseline, UVW)
         pairs_local, union_lookup, sid::Integer,
     ) where {Tvis, Tw, Tuvw}
-    nti_p, nbl_p, npol, nchan = size(vis_p)
+    nchan, nti_p, nbl_p, npol = size(vis_p)
     @inbounds for ti in 1:nti_p, bi_local in 1:nbl_p
         bi = union_lookup[pairs_local[bi_local]]
         tot_w = zero(Tw)
         for p in 1:npol, c in 1:nchan
-            w = w_p[ti, bi_local, p, c]
-            v = vis_p[ti, bi_local, p, c]
+            w = w_p[c, ti, bi_local, p]
+            v = vis_p[c, ti, bi_local, p]
             (w > 0 && isfinite(w) && isfinite(real(v))) || continue
-            V_num[sid, bi, p, c] += w * v
-            W_sum[sid, bi, p, c] += w
+            V_num[c, sid, bi, p] += w * v
+            W_sum[c, sid, bi, p] += w
             tot_w += w
         end
         (tot_w > 0 && isfinite(tot_w)) || continue
@@ -273,20 +308,21 @@ end
 """
     wrap_gain_solutions(gains, data::BandpassDataset; pol_keys=1:2)
 
-Wrap the solved gain cube in a `DimArray` with scan/site/pol/IF axes.
+Wrap the solved gain cube in a `DimArray` with `(Frequency, Ti, Ant, Pol)`
+axes — frequency-fastest, pol-slowest in memory.
 """
 function wrap_gain_solutions(gains, data::BandpassDataset; pol_keys = 1:2)
-    size(gains, 1) == length(data.scans) || error("Gain scan axis does not match dataset scans")
-    size(gains, 2) == length(data.antennas) || error("Gain antenna axis does not match dataset antennas")
-    size(gains, 3) == length(pol_keys) || error("pol_keys length must match gain polarisation axis")
-    size(gains, 4) == length(UVData.channel_freqs(data.freq_setup)) || error("Gain channel axis does not match dataset channels")
+    size(gains, 1) == length(UVData.channel_freqs(data.freq_setup)) || error("Gain channel axis does not match dataset channels")
+    size(gains, 2) == length(data.scans) || error("Gain Ti axis does not match dataset scans")
+    size(gains, 3) == length(data.antennas) || error("Gain antenna axis does not match dataset antennas")
+    size(gains, 4) == length(pol_keys) || error("pol_keys length must match gain polarisation axis")
 
     return DimensionalData.DimArray(
         gains, (
-            Scan(scan_time_centers_dataset(data)),
+            Frequency(UVData.channel_freqs(data.freq_setup)),
+            Ti(scan_time_centers_dataset(data)),
             Ant(data.antennas.name),
             Pol(collect(pol_keys)),
-            IF(UVData.channel_freqs(data.freq_setup)),
         ); metadata = Dict(
             :band_center_frequency => band_center_frequency_dataset(data),
         )
@@ -297,8 +333,8 @@ end
     wrap_xy_correction(xy_correction, data::BandpassDataset, ref_ant; applies_to_pol, reference_pol)
 """
 function wrap_xy_correction(xy_correction, data::BandpassDataset, ref_ant; applies_to_pol, reference_pol)
-    size(xy_correction, 1) == length(data.scans) || error("XY correction scan axis does not match dataset scans")
-    size(xy_correction, 2) == length(UVData.channel_freqs(data.freq_setup)) || error("XY correction IF axis does not match dataset channels")
+    size(xy_correction, 1) == length(UVData.channel_freqs(data.freq_setup)) || error("XY correction Frequency axis does not match dataset channels")
+    size(xy_correction, 2) == length(data.scans) || error("XY correction Ti axis does not match dataset scans")
     1 <= ref_ant <= length(data.antennas) || error("ref_ant index out of bounds")
 
     metadata = Dict(
@@ -312,8 +348,8 @@ function wrap_xy_correction(xy_correction, data::BandpassDataset, ref_ant; appli
 
     return DimensionalData.DimArray(
         xy_correction, (
-            Scan(scan_time_centers_dataset(data)),
-            IF(UVData.channel_freqs(data.freq_setup)),
+            Frequency(UVData.channel_freqs(data.freq_setup)),
+            Ti(scan_time_centers_dataset(data)),
         ); metadata = metadata
     )
 end

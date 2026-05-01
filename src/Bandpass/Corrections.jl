@@ -1,90 +1,55 @@
 """
-    BandpassCorrection(gains, sid_lookup)
+    apply_bandpass(uvset::UVSet, sols::AbstractDict) -> UVSet
 
-Per-leaf reducer that divides visibilities by `g_a * conj(g_b)` and scales
-weights by `abs2(g_a)*abs2(g_b)`. `sid_lookup` is a callable mapping a leaf
-to its 1-based scan index in the `gains` array (built once by
-`apply_bandpass(uvset, gains)`). Flagged samples (weight ≤ 0) pass through
-unchanged.
+Apply per-SPW bandpass solutions to `uvset`. `sols` is the Dict
+returned by `solve_bandpass(uvset, ref_ant)`: keyed by `spw_name`,
+each value is a `DimArray{Complex, 4}` with `(Scan, Ant, Pol, IF)`
+dims.
+
+Each leaf reads its own `info.spw_name`, looks up the matching gain
+DimArray, and divides visibilities by `g_a * conj(g_b)` (scaling
+weights by `abs2(g_a) * abs2(g_b)`). Errors loudly when a leaf's
+SPW has no entry in `sols`.
+
+Flagged samples (weight ≤ 0) pass through unchanged.
 
 ```julia
-corrected = apply_bandpass(uvset, gains)
+sols = solve_bandpass(uvset, ref_ant)
+corrected = apply_bandpass(uvset, sols)
 ```
 """
-struct BandpassCorrection{G, L} <: UVData.AbstractPartitionReducer
-    gains::G
-    sid_lookup::L
+function apply_bandpass(uvset::UVSet, sols::AbstractDict)
+    return UVData.apply(uvset) do leaf, info, _root
+        haskey(sols, info.spw_name) || error(
+            "apply_bandpass: no gain solution for SPW '$(info.spw_name)'; " *
+                "available SPWs = $(collect(keys(sols))).",
+        )
+        gains = sols[info.spw_name]
+        sid = _scan_index_for_leaf(leaf, gains)
+        sid <= 0 && return leaf
+
+        bl_pairs = baselines(leaf).pairs
+        vis_l = leaf[:vis]
+        w_l = leaf[:weights]
+        vis_corr, weights_corr = _apply_bandpass_kernel(
+            vis_l, w_l, gains, bl_pairs, pol_products(leaf), sid,
+        )
+        return with_visibilities(leaf, vis_corr, weights_corr)
+    end
 end
 
-(c::BandpassCorrection)(leaf::DimensionalData.AbstractDimTree, ::UVData.PartitionInfo, ::UVData.UVMetadata) =
-    _apply_bandpass_partition(leaf, c.gains, c.sid_lookup, pol_products(leaf))
-
-"""
-    apply_bandpass(uvset::UVSet, gains)
-
-Return a new `UVSet` with each leaf's visibilities divided by
-`g_{fa}[a,c] * conj(g_{fb}[b,c])` and weights scaled by
-`abs2(g_a) * abs2(g_b)`. `gains` may be:
-
-- a `DimArray{(Scan,Ant,Pol,IF)}` (typically returned by
-  `wrap_gain_solutions`) — leaves are matched to gain slots by `Scan`
-  lookup against each leaf's scan-time center, or
-- a plain `Array{T,4}` — the first axis is taken to enumerate leaves in the
-  same order as `_to_bandpass_dataset` (sorted by `(scan_window.lower,
-  sub_scan_name)`).
-"""
-function apply_bandpass(uvset::UVSet, gains)
-    sid_lookup = _build_gains_sid_lookup(gains, uvset)
-    return UVData.apply(BandpassCorrection(gains, sid_lookup), uvset)
-end
-
-# Map leaf → sid by matching leaf scan-time center to the gains Scan axis.
-function _build_gains_sid_lookup(gains::DimensionalData.AbstractDimArray, uvset::UVSet)
-    scan_lookup = collect(lookup(gains, Scan))
-    centers = Dict{Float64, Int}()
+# Look up a leaf's scan slot in the per-SPW gain DimArray's `Scan` axis
+# by matching scan-time center. Returns 0 if the leaf has no usable
+# scan window or no matching center (caller passes through unchanged).
+function _scan_index_for_leaf(leaf, gains::DimensionalData.AbstractDimArray)
+    scan_lookup = collect(lookup(gains, Ti))
+    lo, hi = UVData.scan_window(leaf)
+    (isfinite(lo) && isfinite(hi)) || return 0
+    target = (lo + hi) / 2
     for (i, c) in enumerate(scan_lookup)
-        centers[Float64(c)] = i
+        c ≈ target && return i
     end
-    return leaf -> begin
-        lo, hi = UVData.scan_window(leaf)
-        (isfinite(lo) && isfinite(hi)) || return 0
-        get(centers, (lo + hi) / 2, 0)
-    end
-end
-
-# Plain Array: first axis aligned with leaves in `_to_bandpass_dataset` order.
-function _build_gains_sid_lookup(gains::AbstractArray, uvset::UVSet)
-    sorted_leaves = sort(
-        collect(values(DimensionalData.branches(uvset)));
-        by = leaf -> (
-            UVData.scan_window(leaf)[1],
-            DimensionalData.metadata(leaf).sub_scan_name,
-        ),
-    )
-    sid_by_obj = IdDict{Any, Int}()
-    for (i, leaf) in enumerate(sorted_leaves)
-        sid_by_obj[leaf] = i
-    end
-    return leaf -> get(sid_by_obj, leaf, 0)
-end
-
-function _apply_bandpass_partition(
-        leaf::DimensionalData.AbstractDimTree, gains, sid_lookup, pol_products,
-    )
-    sid = sid_lookup(leaf)
-    sid <= 0 && return leaf
-
-    bl_pairs = baselines(leaf).pairs
-    vis_l = leaf[:vis]
-    w_l = leaf[:weights]
-    # Function barrier: dispatch through `_apply_bandpass_kernel!` so the
-    # inner loops see concrete eltypes. `parent(leaf[:vis])` returns a
-    # DimArray backed by `data(leaf)::OrderedDict{Symbol, Any}`, which
-    # otherwise boxes every scalar in the hot loop.
-    vis_corr, weights_corr = _apply_bandpass_kernel(
-        vis_l, w_l, gains, bl_pairs, pol_products, sid,
-    )
-    return with_visibilities(leaf, vis_corr, weights_corr)
+    return 0
 end
 
 function _apply_bandpass_kernel(
@@ -92,6 +57,8 @@ function _apply_bandpass_kernel(
         w_p::AbstractArray,
         gains, bl_pairs, pol_products, sid::Integer,
     )
+    # Layout: vis/weights are (Frequency, Ti, Baseline, Pol);
+    # gains are (Frequency, Ti, Ant, Pol).
     vis_corr = copy(vis_p)
     weights_corr = copy(w_p)
 
@@ -99,13 +66,13 @@ function _apply_bandpass_kernel(
         a, b = bl_pairs[bi]
         for p in axes(vis_p, Pol)
             fa, fb = correlation_feed_pair(pol_products[Int(p)])
-            for c in axes(vis_p, IF)
-                w = w_p[ti, bi, p, c]
+            for c in axes(vis_p, Frequency)
+                w = w_p[c, ti, bi, p]
                 (w > 0 && isfinite(w)) || continue
-                ga = gains[sid, a, fa, c]
-                gb = gains[sid, b, fb, c]
-                vis_corr[ti, bi, p, c] /= ga * conj(gb)
-                weights_corr[ti, bi, p, c] *= abs2(ga) * abs2(gb)
+                ga = gains[c, sid, a, fa]
+                gb = gains[c, sid, b, fb]
+                vis_corr[c, ti, bi, p] /= ga * conj(gb)
+                weights_corr[c, ti, bi, p] *= abs2(ga) * abs2(gb)
             end
         end
     end

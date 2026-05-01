@@ -4,6 +4,7 @@ using FITSFiles
 using FITSFiles: HDU, Random, Bintable, Card
 using StructArrays
 using LinearAlgebra: Diagonal
+using Dates: Date, DateTime, datetime2julian
 using DimensionalData
 using DimensionalData: DimArray
 using PolarizedTypes: CirBasis, LinBasis, XPol, YPol, RPol, LPol
@@ -11,17 +12,20 @@ using PolarizedTypes: CirBasis, LinBasis, XPol, YPol, RPol, LPol
 import Gustavo.UVData
 using Gustavo.UVData:
     UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup,
-    Antenna, AntennaTable, ArrayConfig, BaselineIndex,
+    Antenna, AntennaTable, BaselineIndex,
     Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL,
-    Integration, Pol, IF, UVW,
+    Integration, Pol, Frequency, UVW,
     sources, parallactic_mount, elevation_mount, offset_mount,
     array_xyz, array_name, extras,
-    channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
+    channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name,
+    nchannels
+
+const POLBASIS = Union{RPol, LPol, XPol, YPol}
 
 # AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices
 # as `bl = a*256 + b`. Caps the array at 255 antennas. Lives in the FITS
 # extension only; format-neutral code in `src/` speaks `(a, b)` tuples.
-_decode_aips_baseline(bl::Integer) = (bl ÷ 256, bl % 256)
+_decode_aips_baseline(bl::Integer)::Tuple{Int, Int} = (bl ÷ 256, bl % 256)
 function _encode_aips_baseline(a::Integer, b::Integer)
     (1 <= a < 256 && 1 <= b < 256) || error(
         "AIPS UVFITS BASELINE column packs (a, b) as a*256 + b; " *
@@ -174,7 +178,7 @@ function parse_stokes_axis(cards, npol)
     crval = something(card_value(cards, "CRVAL$axis"), 1.0)
     cdelt = something(card_value(cards, "CDELT$axis"), 1.0)
     crpix = something(card_value(cards, "CRPIX$axis"), 1.0)
-    aips_codes = Int.(round.(crval .+ cdelt .* ((1:npol) .- crpix)))
+    aips_codes::Vector{Int} = Int.(round.(crval .+ cdelt .* ((1:npol) .- crpix)))
     aips_labels = aips_code_to_generic.(aips_codes)
     msv4_labels = _msv4_order(aips_labels)
     perm = [findfirst(==(lab), aips_labels) for lab in msv4_labels]
@@ -223,19 +227,19 @@ function _build_antenna_table(an_hdu)
     nant = length(names)
     xyz_raw = collect(an.STABXYZ)
     mount_raw = collect(an.MNTSTA)
-    staxof_raw = hasproperty(an, :STAXOF) ? collect(an.STAXOF) : fill(0.0f0, nant)
+    staxof_raw::Vector{Float32} = hasproperty(an, :STAXOF) ? collect(an.STAXOF) : fill(0.0f0, nant)
     mnts = mnt_codes_to_type.(mount_raw, staxof_raw)
     poltya_raw = hasproperty(an, :POLTYA) ? collect(an.POLTYA) : fill("R", nant)
-    poltya = poltype.(poltya_raw)
+    poltya::Vector{POLBASIS} = poltype.(poltya_raw)
     poltyb_raw = hasproperty(an, :POLTYB) ? collect(an.POLTYB) : fill("L", nant)
-    poltyb = poltype.(poltyb_raw)
-    polaa_raw = hasproperty(an, :POLAA) ? collect(an.POLAA) : fill(0.0f0, nant)
-    polab_raw = hasproperty(an, :POLAB) ? collect(an.POLAB) : fill(0.0f0, nant)
-    pol_angles = tuple.(Float32.(polaa_raw), Float32.(polab_raw))
+    poltyb::Vector{POLBASIS} = poltype.(poltyb_raw)
+    polaa_raw::Vector{Float32} = hasproperty(an, :POLAA) ? collect(an.POLAA) : fill(0.0f0, nant)
+    polab_raw::Vector{Float32} = hasproperty(an, :POLAB) ? collect(an.POLAB) : fill(0.0f0, nant)
+    pol_angles::Vector{Tuple{Float32, Float32}} = tuple.(Float32.(polaa_raw), Float32.(polab_raw))
 
-    response = [Diagonal(ones(ComplexF32, 2)) for _ in 1:nant]
-    station_xyz = [Float64.(xyz_raw[i, :]) for i in eachindex(names)]
-    nominal_basis = tuple.(poltya, poltyb)
+    response::Vector{Diagonal{ComplexF32, Vector{ComplexF32}}} = [Diagonal(ones(ComplexF32, 2)) for _ in 1:nant]
+    station_xyz::Vector{Vector{Float64}} = [Float64.(xyz_raw[i, :]) for i in eachindex(names)]
+    nominal_basis::Vector{Tuple{POLBASIS, POLBASIS}} = tuple.(poltya, poltyb)
 
     antennas = [
         Antenna(;
@@ -249,10 +253,10 @@ function _build_antenna_table(an_hdu)
             for i in 1:nant
     ]
 
-    arrayx = Float64(something(card_value(cards, "ARRAYX"), 0.0))
-    arrayy = Float64(something(card_value(cards, "ARRAYY"), 0.0))
-    arrayz = Float64(something(card_value(cards, "ARRAYZ"), 0.0))
-    arrnam = string(something(card_value(cards, "ARRNAM"), ""))
+    arrayx::Float64 = Float64(something(card_value(cards, "ARRAYX"), 0.0))
+    arrayy::Float64 = Float64(something(card_value(cards, "ARRAYY"), 0.0))
+    arrayz::Float64 = Float64(something(card_value(cards, "ARRAYZ"), 0.0))
+    arrnam::String = string(something(card_value(cards, "ARRNAM"), ""))
 
     ant_extras = (;
         POLCALA = _split_per_antenna_polcal(an, :POLCALA, nant),
@@ -261,31 +265,7 @@ function _build_antenna_table(an_hdu)
     )
 
     ant_table = AntennaTable(StructArray(antennas), (arrayx, arrayy, arrayz), arrnam, ant_extras)
-
-
-    rdate = string(something(card_value(cards, "RDATE"), ""))
-    gstia0 = Float32(something(card_value(cards, "GSTIA0"), 0.0))
-    degpdy = Float32(something(card_value(cards, "DEGPDY"), 360.9856))
-    ut1utc = Float32(something(card_value(cards, "UT1UTC"), 0.0))
-    polarx = Float32(something(card_value(cards, "POLARX"), 0.0))
-    polary = Float32(something(card_value(cards, "POLARY"), 0.0))
-    datutc = Float32(something(card_value(cards, "DATUTC"), 0.0))
-    timsys = string(something(card_value(cards, "TIMSYS"), "UTC"))
-    frame = string(something(card_value(cards, "FRAME"), "ITRF"))
-    xyzhand = string(something(card_value(cards, "XYZHAND"), "RIGHT"))
-    poltype_card = string(something(card_value(cards, "POLTYPE"), ""))
-    extver = Int32(something(card_value(cards, "EXTVER"), 1))
-    numorb = Int32(something(card_value(cards, "NUMORB"), 0))
-    no_if = Int32(something(card_value(cards, "NO_IF"), 1))
-    nopcal = Int32(something(card_value(cards, "NOPCAL"), 0))
-    freqid = Int32(something(card_value(cards, "FREQID"), 1))
-
-    arr_config = ArrayConfig(
-        rdate, gstia0, degpdy, ut1utc, polarx, polary, datutc,
-        timsys, frame, xyzhand, poltype_card,
-        extver, numorb, no_if, nopcal, freqid,
-    )
-    return ant_table, arr_config
+    return ant_table
 end
 
 const _FQ_MANDATORY_COLS = Set(
@@ -335,21 +315,21 @@ indices via `frqsels`.
 Errors when channel counts differ across rows (ragged setups deferred).
 """
 function _build_frequency_setups(cards, fq, nvis_chan)
-    ref_freq_v = Float64(_find_freq_axis(cards))
+    ref_freq_v::Float64 = Float64(_find_freq_axis(cards))
 
-    if_freqs_all = Float64.(getproperty(fq, Symbol("IF FREQ")))
-    ch_widths_all = Float32.(getproperty(fq, Symbol("CH WIDTH")))
-    total_bw_all = Float32.(getproperty(fq, Symbol("TOTAL BANDWIDTH")))
-    sidebands_all = Int32.(getproperty(fq, :SIDEBAND))
-    nrows = ndims(if_freqs_all) == 1 ? 1 : size(if_freqs_all, 1)
-    nif = ndims(if_freqs_all) == 1 ? length(if_freqs_all) : size(if_freqs_all, 2)
+    if_freqs_all::Matrix{Float64} = collect(getproperty(fq, Symbol("IF FREQ")))
+    ch_widths_all::Matrix{Float64} = collect(getproperty(fq, Symbol("CH WIDTH")))
+    total_bw_all::Matrix{Float64} = collect(getproperty(fq, Symbol("TOTAL BANDWIDTH")))
+    sidebands_all::Matrix{Float64} = collect(getproperty(fq, :SIDEBAND))
+    nrows::Int = ndims(if_freqs_all) == 1 ? 1 : size(if_freqs_all, 1)
+    nif::Int = ndims(if_freqs_all) == 1 ? length(if_freqs_all) : size(if_freqs_all, 2)
     nif == nvis_chan ||
         error("FQ table reports $nif IFs but vis has $nvis_chan channels")
 
-    frqsels = if hasproperty(fq, :FRQSEL)
-        Int32.(round.(Int, getproperty(fq, :FRQSEL)))
+    frqsels::Vector{Int32} = if hasproperty(fq, :FRQSEL)
+        round.(Int32, collect(getproperty(fq, :FRQSEL)))
     else
-        Int32.(1:nrows)
+        round.(Int32, collect(1:nrows))
     end
 
     _row(M, r) = ndims(M) == 1 ? collect(M) : vec(M[r, :])
@@ -379,26 +359,54 @@ function _build_frequency_setups(cards, fq, nvis_chan)
     return setups, frqsels
 end
 
-function _build_array_obs_metadata(primary_hdu)
+function _build_array_obs_metadata(primary_hdu, an_hdu = nothing)
     cards = primary_hdu.cards
 
-    telescope = string(something(card_value(cards, "TELESCOP"), ""))
-    instrume = string(something(card_value(cards, "INSTRUME"), ""))
-    date_obs = string(something(card_value(cards, "DATE-OBS"), ""))
-    equinox = Float32(something(card_value(cards, "EQUINOX"), 2000.0))
-    bunit = string(something(card_value(cards, "BUNIT"), "UNCALIB"))
+    telescope::String = string(something(card_value(cards, "TELESCOP"), ""))
+    instrume::String = string(something(card_value(cards, "INSTRUME"), ""))
+    date_obs::String = string(something(card_value(cards, "DATE-OBS"), ""))
+    equinox::Float32 = Float32(something(card_value(cards, "EQUINOX"), 2000.0f0))
+    bunit::String = string(something(card_value(cards, "BUNIT"), "UNCALIB"))
+
+    # Time-system / Earth-orientation / coord-frame fields live on the AIPS
+    # AN HDU header (Memo 117 §4.1). When no AN HDU is supplied (synthetic
+    # path), defaults kick in via the kwarg constructor.
+    if an_hdu === nothing
+        return ObsArrayMetadata(;
+            telescope, instrume, date_obs, equinox, bunit,
+            extras = _collect_obs_card_extras(cards),
+        )
+    end
+
+
+    an_cards = an_hdu.cards
+
+    rdate::String = string(something(card_value(an_cards, "RDATE"), ""))
+    gst_iat0::Float32 = Float32(something(card_value(an_cards, "GSTIA0"), 0.0))
+    earth_rot_rate::Float32 = Float32(something(card_value(an_cards, "DEGPDY"), 360.0))
+    ut1utc::Float32 = Float32(something(card_value(an_cards, "UT1UTC"), 0.0))
+    polarx::Float32 = Float32(something(card_value(an_cards, "POLARX"), 0.0))
+    polary::Float32 = Float32(something(card_value(an_cards, "POLARY"), 0.0))
+    datutc::Float32 = Float32(something(card_value(an_cards, "DATUTC"), 0.0))
+    time_sys::String = string(something(card_value(an_cards, "TIMSYS"), "UTC"))
+    frame::String = string(something(card_value(an_cards, "FRAME"), "ITRF"))
+    xyzhand::String = string(something(card_value(an_cards, "XYZHAND"), "RIGHT"))
+    poltype::String = string(something(card_value(an_cards, "POLTYPE"), ""))
+
 
     return ObsArrayMetadata(;
         telescope, instrume, date_obs, equinox, bunit,
+        rdate, gst_iat0, earth_rot_rate, ut1utc, polarx, polary, datutc, time_sys,
+        frame, xyzhand, poltype,
         extras = _collect_obs_card_extras(cards),
     )
 end
 
 function _build_source_info(primary_hdu)
     cards = primary_hdu.cards
-    object = string(something(card_value(cards, "OBJECT"), ""))
-    ra = Float64(something(card_value(cards, "OBSRA"), 0.0))
-    dec = Float64(something(card_value(cards, "OBSDEC"), 0.0))
+    object::String = string(something(card_value(cards, "OBJECT"), ""))
+    ra::Float64 = Float64(something(card_value(cards, "OBSRA"), 0.0))
+    dec::Float64 = Float64(something(card_value(cards, "OBSDEC"), 0.0))
     if ra == 0.0
         ra = Float64(something(_find_crval(cards, "RA"), 0.0))
     end
@@ -456,19 +464,40 @@ end
 function _load_uvfits_flat(path)
     fid = FITSFiles.fits(path)
     primary_hdu = fid[1]
-    dt = primary_hdu.data
-    an_hdu = fid[2]
-    fq_hdu = fid[3]
-    nx = fid[4].data
+    # Bypass FITSFiles' per-record Vector{Float32} allocation when the
+    # primary HDU is a random-group LazyArray.
+    primary_lazy = getfield(primary_hdu, :data)
+    dt = primary_lazy isa FITSFiles.LazyArray ?
+        _fast_random_read(primary_lazy) : primary_hdu.data
+    # Collect every AN HDU (filtered by EXTNAME=AIPS AN) — multi-AN-extver
+    # files carry one AN table per subarray.
+    an_hdus = HDU[]
+    fq_hdu = nothing
+    nx = nothing
+    for hdu in fid[2:end]
+        ext = string(something(card_value(hdu.cards, "EXTNAME"), ""))
+        if ext == "AIPS AN"
+            push!(an_hdus, hdu)
+        elseif ext == "AIPS FQ"
+            fq_hdu = hdu
+        elseif ext == "AIPS NX"
+            nx = hdu.data
+        end
+    end
+    isempty(an_hdus) && error("load_uvfits: no AIPS AN HDU found in $(path)")
+    fq_hdu === nothing && error("load_uvfits: no AIPS FQ HDU found in $(path)")
+    nx === nothing && error("load_uvfits: no AIPS NX HDU found in $(path)")
+    an_hdu = first(an_hdus)
 
     dim1 = findall(==(1), size(dt.data))
-    raw = Array(dropdims(dt.data, dims = Tuple(dim1)))
+    raw::Array{Float32, 4} = dropdims(dt.data, dims = Tuple(dim1))
 
-    vis_raw = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
-    weights_raw = raw[:, 3, :, :]
+    vis_raw::Array{ComplexF32, 3} = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
+    weights_raw::Array{Float32, 3} = raw[:, 3, :, :]
 
-    antennas, array_config = _build_antenna_table(an_hdu)
-    array_obs = _build_array_obs_metadata(primary_hdu)
+    antenna_tables = AntennaTable[_build_antenna_table(h) for h in an_hdus]
+    antennas = first(antenna_tables)
+    array_obs = _build_array_obs_metadata(primary_hdu, an_hdu)
     freq_setups, fq_frqsels = _build_frequency_setups(
         primary_hdu.cards, fq_hdu.data, size(vis_raw, 3)
     )
@@ -485,22 +514,22 @@ function _load_uvfits_flat(path)
     # (e.g. round-tripped synthetic fixtures), the value is a vector of
     # fractional days.
     date_raw = collect(dt.DATE)
-    obs_time = if ndims(date_raw) == 2
+    obs_time::Vector{Float64} = if ndims(date_raw) == 2
         Float64.(date_raw[:, 2]) .* 24
     else
         Float64.(date_raw) .* 24
     end
-    bl_codes = round.(Int, collect(dt.BASELINE))
+    bl_codes::Vector{Int} = round.(Int, collect(dt.BASELINE))
 
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
-    uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
+    uvw_raw::Matrix{Float32} = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
-    vis = _wrap_int_pol_if(vis_raw, obs_time, msv4_labels, channel_freqs(first(freq_setups)))
-    weights = _wrap_int_pol_if(weights_raw, obs_time, msv4_labels, channel_freqs(first(freq_setups)))
-    uvw = _wrap_uvw(uvw_raw, obs_time)
+    cfq::Vector{Float64} = channel_freqs(first(freq_setups))
+    dims = (Integration(obs_time), Pol(msv4_labels), Frequency(cfq))
+
+    vis, weights, uvw = _build_arrays(vis_raw, weights_raw, uvw_raw, dims)
 
     extra_columns = _collect_extra_columns(dt, primary_hdu.cards)
-    date_param = ndims(date_raw) == 2 ? Matrix(date_raw) : reshape(collect(date_raw), :, 1)
 
     # Materialize the NX columns up front: they come back as lazy
     # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition;
@@ -508,12 +537,14 @@ function _load_uvfits_flat(path)
     # per-record scan label vector. AIPS NX has no SCAN_NUMBER column, so the
     # row index becomes the canonical scan label (string-cast for xradio
     # `ScanArray` shape).
-    nx_time = Float64.(collect(nx.TIME))
-    nx_dt = Float64.(collect(nx.var"TIME INTERVAL"))
-    nx_lower = (nx_time .- nx_dt ./ 2) .* 24
-    nx_upper = (nx_time .+ nx_dt ./ 2) .* 24
-    nx_freqid = hasproperty(nx, Symbol("FREQ ID")) ?
-        Int32.(round.(Int, collect(nx.var"FREQ ID"))) : ones(Int32, length(nx_time))
+    nx_time::Vector{Float64} = Float64.(collect(nx.TIME))
+    nx_dt::Vector{Float64} = Float64.(collect(nx.var"TIME INTERVAL"))
+    nx_lower::Vector{Float64} = (nx_time .- nx_dt ./ 2) .* 24
+    nx_upper::Vector{Float64} = (nx_time .+ nx_dt ./ 2) .* 24
+    nx_freqid::Vector{Int32} = hasproperty(nx, Symbol("FREQ ID")) ?
+        round.(Int32, collect(nx.var"FREQ ID")) : ones(Int32, length(nx_time))
+    nx_subarray::Vector{Int32} = hasproperty(nx, :SUBARRAY) ?
+        round.(Int32, collect(nx.SUBARRAY)) : ones(Int32, length(nx_time))
 
     # Bin each record into the NX row whose center is nearest. This is
     # robust to:
@@ -524,7 +555,7 @@ function _load_uvfits_flat(path)
     #     check on the literal interval).
     # Records were pre-binned by NX row on the writer side, so the nearest-
     # center rule is unambiguous.
-    nx_centers = (nx_lower .+ nx_upper) ./ 2
+    nx_centers::Vector{Float64} = (nx_lower .+ nx_upper) ./ 2
     record_scan_name = Vector{String}(undef, length(obs_time))
     record_nx_row = zeros(Int, length(obs_time))
     if isempty(nx_centers)
@@ -556,17 +587,16 @@ function _load_uvfits_flat(path)
         vis = vis[Integration = valid]
         weights = weights[Integration = valid]
         uvw = uvw[Integration = valid]
-        date_param = date_param[valid, :]
         extra_columns = NamedTuple{keys(extra_columns)}(
             ntuple(i -> extra_columns[i][valid], length(extra_columns))
         )
     end
 
-    bl_pairs_per_record = _decode_aips_baseline.(bl_codes)
-    bl_pairs = sort(unique(bl_pairs_per_record))
+    bl_pairs_per_record::Vector{Tuple{Int, Int}} = _decode_aips_baseline.(bl_codes)
+    bl_pairs::Vector{Tuple{Int, Int}} = sort(unique(bl_pairs_per_record))
     baselines = BaselineIndex(
         bl_pairs_per_record, bl_pairs;
-        antenna_names = antennas.name,
+        antenna_names = antennas.name::Vector{String},
     )
 
     basename = String(splitext(_basename_of_path(path))[1])
@@ -575,18 +605,18 @@ function _load_uvfits_flat(path)
     # else propagate the per-NX-row FREQ ID column, else default to 1.
     # After densification, indices are 1..length(freq_setups).
     nfreq = length(freq_setups)
-    record_spw_index = if hasproperty(dt, :FREQSEL)
-        Int32.(round.(Int, collect(getproperty(dt, :FREQSEL))))
+    record_spw_index::Vector{Int32} = if hasproperty(dt, :FREQSEL)
+        round.(Int32, collect(getproperty(dt, :FREQSEL)))
     elseif hasproperty(dt, :FREQID)
-        Int32.(round.(Int, collect(getproperty(dt, :FREQID))))
+        round.(Int32, collect(getproperty(dt, :FREQID)))
     elseif length(nx_freqid) > 0
-        [nx_freqid[r] for r in record_nx_row]
+        Int32[nx_freqid[r] for r in record_nx_row]
     else
         ones(Int32, length(obs_time))
     end
     if hasproperty(dt, :FREQSEL) || hasproperty(dt, :FREQID) || length(nx_freqid) > 0
         # Densify FRQSEL slots to 1..nrows index when the FQ FRQSELs are sparse.
-        if fq_frqsels != Int32.(1:nfreq)
+        if fq_frqsels != 1:nfreq
             remap = Dict{Int32, Int32}()
             for (i, f) in enumerate(fq_frqsels)
                 remap[f] = Int32(i)
@@ -603,11 +633,22 @@ function _load_uvfits_flat(path)
             "index $(record_spw_index[1]); resulting UVSet will have one leaf per scan."
     end
 
+    # Per-record subarray index. AIPS UVFITS rarely emits a per-record
+    # SUBARRAY PTYPE; the NX SUBARRAY column is the canonical source.
+    record_subarray_index::Vector{Int32} = if hasproperty(dt, :SUBARRAY)
+        round.(Int32, collect(getproperty(dt, :SUBARRAY)))
+    elseif length(nx_subarray) > 0
+        Int32[nx_subarray[r] for r in record_nx_row]
+    else
+        ones(Int32, length(obs_time))
+    end
+
     return (;
         vis, weights, uvw, obs_time, baselines,
-        date_param, extra_columns,
-        antennas, array_config, array_obs,
+        extra_columns,
+        antenna_tables, array_obs,
         freq_setups, record_spw_index, record_scan_name,
+        record_subarray_index,
         pol_labels = msv4_labels,
         aips_pol_codes = aips_codes,
         source_name = src_info.source_name,
@@ -617,11 +658,143 @@ function _load_uvfits_flat(path)
     )
 end
 
+function _build_arrays(vis_raw, weights_raw, uvw_raw, dims)
+    vis = DimArray(vis_raw, dims)
+    weights = DimArray(weights_raw, dims)
+    uvw = DimArray(uvw_raw, (dims[1], UVW(["U", "V", "W"])))
+    return vis, weights, uvw
+end
+
 _basename_of_path(path) = isempty(path) ? "uvfits" : Base.basename(String(path))
+
+# Bypass FITSFiles' per-record `Vector{Float32}` allocation by streaming
+# the entire random-group data section into a single buffer. Returns a
+# NamedTuple with the same key shape as `read(io, ::Type{Random}, …)` on
+# the same file: one entry per unique PTYPE name (Vector for unique
+# names, Matrix for duplicates) plus `:data` of shape `(N, format.shape…)`.
+#
+# The original FITSFiles path allocates one `Vector{Float32}` per record
+# (~50 M allocs / 2 GiB on a 100k-record EHT file). The bulk read here
+# is a single `read!` into a `Vector{Float32}` of length
+# `N * (P + prod(shape))`, plus an in-place `bswap` pass.
+function _fast_random_read(lazy::FITSFiles.LazyArray)
+    fmt = lazy.format
+    fmt.type === Float32 ||
+        error("_fast_random_read: only Float32 random groups supported (got $(fmt.type))")
+    fields = lazy.fields::AbstractVector{<:FITSFiles.AbstractField}
+    P = fmt.param::Int
+    N = fmt.group::Int
+    leng_data = prod(fmt.shape)::Int
+    L = P + leng_data
+    total = N * L
+    buf = Vector{Float32}(undef, total)
+    open(lazy.filnam) do io
+        seek(io, lazy.begpos)
+        read!(io, buf)
+    end
+    @inbounds @simd for i in eachindex(buf)
+        buf[i] = ntoh(buf[i])
+    end
+    # View the buffer as `(L, N)`: column j holds the j-th record laid
+    # out as `[PTYPE_1, …, PTYPE_P, data_1, …, data_leng_data]`.
+    rec = reshape(buf, L, N)
+
+    data_field = fields[end]
+    # Permute (leng_data, N) view → (N, leng_data) materialised matrix
+    # via blocked transpose (Base's `permutedims` handles cache locality
+    # well on 2-D), then reshape to (N, shape...). Copying here decouples
+    # the data block from the PTYPE block so `buf` can be freed.
+    data_view = view(rec, (P + 1):L, :)
+    data_perm = permutedims(data_view, (2, 1))
+    data_block = reshape(data_perm, N, fmt.shape...)
+    # Apply BZERO/BSCALE if present (canonical UVFITS files have unity).
+    if !ismissing(data_field.zero) && !ismissing(data_field.scale)
+        if data_field.zero != 0 || data_field.scale != 1
+            @inbounds @simd for i in eachindex(data_block)
+                data_block[i] = data_field.zero + data_field.scale * data_block[i]
+            end
+        end
+    end
+
+    # Group PTYPE columns by name (duplicate names → Matrix; unique → Vector).
+    name_indices = Dict{String, Vector{Int}}()
+    name_order = String[]
+    for j in 1:P
+        name = String(fields[j].name)
+        if !haskey(name_indices, name)
+            name_indices[name] = Int[]
+            push!(name_order, name)
+        end
+        push!(name_indices[name], j)
+    end
+    pairs = Pair{Symbol, Any}[]
+    for name in name_order
+        ndx = name_indices[name]
+        col = if length(ndx) == 1
+            fld = fields[ndx[1]]
+            v = Vector{Float32}(undef, N)
+            @inbounds for j in 1:N
+                v[j] = rec[ndx[1], j]
+            end
+            if !ismissing(fld.zero) && !ismissing(fld.scale) &&
+                    (fld.zero != 0 || fld.scale != 1)
+                @inbounds @simd for j in 1:N
+                    v[j] = fld.zero + fld.scale * v[j]
+                end
+            end
+            v
+        else
+            m = Matrix{Float32}(undef, N, length(ndx))
+            @inbounds for (k, fi) in enumerate(ndx)
+                fld = fields[fi]
+                for j in 1:N
+                    m[j, k] = rec[fi, j]
+                end
+                if !ismissing(fld.zero) && !ismissing(fld.scale) &&
+                        (fld.zero != 0 || fld.scale != 1)
+                    for j in 1:N
+                        m[j, k] = fld.zero + fld.scale * m[j, k]
+                    end
+                end
+            end
+            m
+        end
+        push!(pairs, Symbol(name) => col)
+    end
+    push!(pairs, :data => data_block)
+    return (; pairs...)
+end
+
+# Parse `array_obs.rdate` (e.g. "2022-01-01") to a Julian Day at 0h UT.
+# Returns the canonical AIPS reference: integer JD ending in `.5`.
+# Falls back to MJD0 (`2_400_000.5`) when the string is empty / unparseable.
+function _rdate_jd(rdate_str::AbstractString)
+    isempty(rdate_str) && return 2_400_000.5
+    return try
+        d = Date(rdate_str)
+        datetime2julian(DateTime(d))
+    catch
+        2_400_000.5
+    end
+end
+
+# Reconstruct an AIPS DATE PTYPE column from a leaf's `obs_time`
+# (hours since RDATE). Emits a single column of fractional days
+# (`obs_time / 24`) shaped `(nrec_leaf, 1)`. The integer JD reference is
+# stored separately in the AN HDU's RDATE card; on read,
+# `obs_time = date_raw * 24` recovers the same hours convention.
+function _build_date_param(obs_time_hr::AbstractVector{<:Real}, ::Float64, record_order)
+    n = length(record_order)
+    out = Matrix{Float32}(undef, n, 1)
+    @inbounds for (rec_i, (ti, _)) in enumerate(record_order)
+        out[rec_i, 1] = Float32(obs_time_hr[ti] / 24)
+    end
+    return out
+end
 
 _wrap_int_pol_if(arr, obs_time, pol_labels, channel_freqs) = DimArray(
     arr,
-    (Integration(obs_time), Pol(pol_labels), IF(channel_freqs)),
+    (Integration(obs_time), Pol(pol_labels), Frequency(channel_freqs)),
 )
 
 # Warn if the AIPS Stokes axis (circular vs linear block) doesn't match the
@@ -713,7 +886,10 @@ function _build_primary_data(uvset::UVSet, uu, vv, ww, bl_codes, date_param, ext
     return (; pairs...)
 end
 
-function _build_an_hdu(antennas::AntennaTable, cfg::ArrayConfig, ref_freq::Float64)
+function _build_an_hdu(
+        antennas::AntennaTable, array_obs::ObsArrayMetadata, ref_freq::Float64;
+        extver::Integer = 1, no_if::Integer = 1, freqid::Integer = 1,
+    )
     nant = length(antennas)
     nb = collect(antennas.nominal_basis)
     pa = collect(antennas.pol_angles)
@@ -739,29 +915,34 @@ function _build_an_hdu(antennas::AntennaTable, cfg::ArrayConfig, ref_freq::Float
     )
     data = merge(base, extras_rest)
     arr_xyz = array_xyz(antennas)
+    # AIPS AN HDU header: time-system / Earth-orientation / coord-frame
+    # fields source from ObsArrayMetadata. Pure-AIPS bookkeeping fields
+    # (NUMORB, NO_IF, NOPCAL, FREQID, EXTVER) are reconstructed from the
+    # input data on write.
+    nopcal = isempty(polcala) ? 0 : max(length(polcala[1]), length(polcalb[1]))
     cards = [
         Card("EXTNAME", "AIPS AN"),
-        Card("EXTVER", cfg.extver),
+        Card("EXTVER", Int32(extver)),
         Card("ARRAYX", Float64(arr_xyz[1])),
         Card("ARRAYY", Float64(arr_xyz[2])),
         Card("ARRAYZ", Float64(arr_xyz[3])),
         Card("ARRNAM", array_name(antennas)),
         Card("FREQ", ref_freq),
-        Card("RDATE", cfg.rdate),
-        Card("GSTIA0", cfg.gst_iat0),
-        Card("DEGPDY", cfg.earth_rot_rate),
-        Card("UT1UTC", cfg.ut1utc),
-        Card("POLARX", cfg.polarx),
-        Card("POLARY", cfg.polary),
-        Card("DATUTC", cfg.datutc),
-        Card("TIMSYS", cfg.time_sys),
-        Card("FRAME", cfg.frame),
-        Card("XYZHAND", cfg.xyzhand),
-        Card("POLTYPE", cfg.poltype),
-        Card("NUMORB", cfg.numorb),
-        Card("NO_IF", cfg.no_if),
-        Card("NOPCAL", cfg.nopcal),
-        Card("FREQID", cfg.freqid),
+        Card("RDATE", array_obs.rdate),
+        Card("GSTIA0", array_obs.gst_iat0),
+        Card("DEGPDY", array_obs.earth_rot_rate),
+        Card("UT1UTC", array_obs.ut1utc),
+        Card("POLARX", array_obs.polarx),
+        Card("POLARY", array_obs.polary),
+        Card("DATUTC", array_obs.datutc),
+        Card("TIMSYS", array_obs.time_sys),
+        Card("FRAME", array_obs.frame),
+        Card("XYZHAND", array_obs.xyzhand),
+        Card("POLTYPE", array_obs.poltype),
+        Card("NUMORB", Int32(0)),
+        Card("NO_IF", Int32(no_if)),
+        Card("NOPCAL", Int32(nopcal)),
+        Card("FREQID", Int32(freqid)),
     ]
     return HDU(Bintable, data, cards)
 end
@@ -850,13 +1031,12 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     branches_dict = DimensionalData.branches(uvset)
     isempty(branches_dict) && error("write_uvfits: UVSet has no partitions")
 
-    # Phase 2: write one AN/FQ HDU and one SUBARRAY=1 column. Multi-subarray
-    # write (different AN extvers) is Phase 2.5 — guard explicitly.
-    sub_scans = unique(DimensionalData.metadata(l).sub_scan_name for (_, l) in branches_dict)
-    sub_scans == [""] || error(
-        "write_uvfits: multi-subarray write (sub_scan_name set) is not yet " *
-            "supported (Phase 2.5). Got sub_scan_names = $(sub_scans)."
-    )
+    # UVFITS limitation: a single global STOKES axis on the primary HDU
+    # forces the same pol product set across every record. UVSet supports
+    # per-leaf pol products natively, but writing them out via UVFITS is
+    # not possible without padding (lossy). Use MSv4 / xradio for that
+    # round-trip case.
+    UVData.union_pol_products(uvset)
 
     # Sort leaves by scan-window start so NX rows ascend in time, matching
     # AIPS convention. Within identical start times, fall back to scan_name.
@@ -892,23 +1072,40 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     fp = first(leaf_list)
     fp_info = DimensionalData.metadata(fp)
     uvw_eltype = eltype(parent(fp[:uvw]))
-    date_eltype = eltype(fp_info.date_param)
-    date_ncols = size(fp_info.date_param, 2)
+    rdate_jd = _rdate_jd(root.array_obs.rdate)
 
     raw_data = zeros(Float32, nrec_total, 3, npol, nchan, 1, 1, 1)
     uu = Vector{uvw_eltype}(undef, nrec_total)
     vv = Vector{uvw_eltype}(undef, nrec_total)
     ww_ = Vector{uvw_eltype}(undef, nrec_total)
     bl_codes = Vector{Int}(undef, nrec_total)
-    date_param_cat = Matrix{date_eltype}(undef, nrec_total, date_ncols)
+    # AIPS DATE PTYPE: emit a single column of fractional days
+    # (`obs_time / 24`); the integer JD reference is on the AN HDU's RDATE
+    # card. FITSFiles only emits one PTYPE column per Symbol key, so
+    # multi-PTYPE-DATE round-trip is reduced to single-column on write.
+    date_param_cat = Matrix{Float32}(undef, nrec_total, 1)
     extras_keys = keys(fp_info.extra_columns)
     extras_eltypes = ntuple(i -> eltype(fp_info.extra_columns[i]), length(extras_keys))
     extras_bufs = ntuple(i -> Vector{extras_eltypes[i]}(undef, nrec_total), length(extras_keys))
+
+    # Dedup leaf antenna tables: each unique table becomes one AN HDU on
+    # disk with a distinct EXTVER (1, 2, ...). Single-subarray observations
+    # produce one entry; multi-subarray observations produce many.
+    unique_antennas = AntennaTable[]
+    extver_lookup = Dict{AntennaTable, Int32}()
+    for (_, leaf) in branches_dict
+        ants = DimensionalData.metadata(leaf).antennas
+        if !haskey(extver_lookup, ants)
+            push!(unique_antennas, ants)
+            extver_lookup[ants] = Int32(length(unique_antennas))
+        end
+    end
 
     nscan = length(leaf_list)
     record_starts = zeros(Int32, nscan)
     record_ends = zeros(Int32, nscan)
     freqid_per_scan = ones(Int32, nscan)
+    subarray_per_scan = ones(Int32, nscan)
     scan_windows = Vector{Tuple{Float64, Float64}}(undef, nscan)
 
     rec_offset = 0
@@ -919,10 +1116,12 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
         first_row_in_scan = rec_offset + 1
         # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
         bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
+        # Reconstruct DATE PTYPE columns per-record from obs_time+rdate.
+        date_param_leaf = _build_date_param(UVData.obs_time(leaf), rdate_jd, ro)
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
             parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:uvw]),
-            bl_aips_codes, ro, info.date_param, rec_offset, pol_perm,
+            bl_aips_codes, ro, date_param_leaf, rec_offset, pol_perm,
         )
         for (rec_i, _) in enumerate(ro)
             row = rec_offset + rec_i
@@ -935,6 +1134,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
             record_starts[sid] = Int32(first_row_in_scan)
             record_ends[sid] = Int32(rec_offset + length(ro))
             freqid_per_scan[sid] = freqid_lookup[info.freq_setup]
+            subarray_per_scan[sid] = extver_lookup[info.antennas]
         end
         rec_offset += length(ro)
     end
@@ -942,13 +1142,28 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     extras_cat = NamedTuple{extras_keys}(extras_bufs)
     primary_data = _build_primary_data(uvset, uu, vv, ww_, bl_codes, date_param_cat, extras_cat, raw_data)
     primary_hdu = HDU(Random, primary_data, copy(cards))
-    # AN table reflects the array nominal — one ref_freq for the array, taken
-    # from the first setup. Per-SPW reference frequencies live on each FQ row.
-    an_hdu = _build_an_hdu(root.antennas, root.array_config, ref_freq(first(setups)))
+    # One AN HDU per unique antenna table. Per-SPW reference frequencies
+    # live on each FQ row; the AN ref_freq is the array nominal taken from
+    # the first setup.
+    first_setup = first(setups)
+    no_if_v = nchannels(first_setup)
+    freqid_v = Int(get(first_setup.extras, :frqsel, Int32(1)))
+    an_hdus = HDU[
+        _build_an_hdu(
+                ants, root.array_obs, ref_freq(first_setup);
+                extver = extver_lookup[ants], no_if = no_if_v, freqid = freqid_v,
+            ) for ants in unique_antennas
+    ]
     fq_hdu = _build_fq_hdu(setups, [freqid_lookup[fs] for fs in setups])
-    nx_hdu = _build_nx_hdu(scan_windows, record_starts, record_ends, freqid_per_scan)
+    nx_hdu = _build_nx_hdu(
+        scan_windows, record_starts, record_ends, freqid_per_scan, subarray_per_scan,
+    )
 
-    write(output_path, HDU[primary_hdu, an_hdu, fq_hdu, nx_hdu])
+    out_hdus = HDU[primary_hdu]
+    append!(out_hdus, an_hdus)
+    push!(out_hdus, fq_hdu)
+    push!(out_hdus, nx_hdu)
+    write(output_path, out_hdus)
     return output_path
 end
 
@@ -968,17 +1183,19 @@ function _write_records_kernel!(
         rec_offset::Integer,
         pol_perm::AbstractVector{Int},
     ) where {Tvis, Tw, Tuvw, Tdate}
+    # Leaf storage: (Frequency, Ti, Baseline, Pol) for vis/weights;
+    # (Ti, Baseline, UVW) for uvw.
     npol = length(pol_perm)
-    nchan = size(vis_dense, 4)
+    nchan = size(vis_dense, 1)
     @inbounds for (rec_i, (ti, bi)) in enumerate(record_order)
         row = rec_offset + rec_i
         for pdisk in 1:npol
             pmem = pol_perm[pdisk]
             for c in 1:nchan
-                v = vis_dense[ti, bi, pmem, c]
+                v = vis_dense[c, ti, bi, pmem]
                 raw_data[row, 1, pdisk, c, 1, 1, 1] = real(v)
                 raw_data[row, 2, pdisk, c, 1, 1, 1] = imag(v)
-                raw_data[row, 3, pdisk, c, 1, 1, 1] = w_dense[ti, bi, pmem, c]
+                raw_data[row, 3, pdisk, c, 1, 1, 1] = w_dense[c, ti, bi, pmem]
             end
         end
         uu[row] = uvw_dense[ti, bi, 1]

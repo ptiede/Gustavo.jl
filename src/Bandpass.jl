@@ -2,12 +2,12 @@ module Bandpass
 
 using ..UVData
 using ..UVData:
-    Integration, Pol, IF, UVW, Scan, Baseline, Ant, UVSet,
+    Integration, Pol, Frequency, UVW, Baseline, Ant, UVSet,
     scan_key, partition_key, sanitize_source,
     TimeAverage, AbstractPartitionReducer,
     apply, leaves, sources, scan_ids,
     select_source, select_scan, select_partition, merge_uvsets,
-    scan_idx, scan_id, baselines, record_order, date_param, extra_columns, obs_time,
+    scan_idx, scan_id, baselines, record_order, extra_columns, obs_time,
     pol_products, PolTypes
 using PolarizedTypes: RPol, LPol, XPol, YPol
 using DimensionalData: Ti

@@ -13,7 +13,7 @@ function _scans(data::UVSet)
     return out
 end
 _antenna_names_v(data::BandpassDataset) = data.antennas.name
-_antenna_names_v(data::UVSet) = DimensionalData.metadata(data).antennas.name
+_antenna_names_v(data::UVSet) = UVData.union_antennas(data).name
 
 # Build the union baseline pair list from a UVSet (every (a,b) that appears
 # in any leaf). For BandpassDataset, the per-scan-averaged cube already
@@ -59,13 +59,16 @@ function _baseline_scan_blocks(data::UVSet, corr::UVSet, bl_plot, pol_index::Int
         isnothing(bi_d) && continue
         bi_c = _local_baseline_idx(leaf_c, bl_plot)
         isnothing(bi_c) && continue
+        # Layout: (Frequency, Ti, Baseline, Pol). Slice to (Frequency, Ti)
+        # for fixed (baseline, pol), then transpose to (Ti, Frequency) so
+        # downstream concat yields (nrec, nchan).
         push!(
             blocks, (
                 sid = sid,
-                vis_b = copy(parent(leaf_d[:vis])[:, bi_d, pol_index, :]),
-                vis_a = copy(parent(leaf_c[:vis])[:, bi_c, pol_index, :]),
-                w_b = copy(parent(leaf_d[:weights])[:, bi_d, pol_index, :]),
-                w_a = copy(parent(leaf_c[:weights])[:, bi_c, pol_index, :]),
+                vis_b = copy(transpose(parent(leaf_d[:vis])[:, :, bi_d, pol_index])),
+                vis_a = copy(transpose(parent(leaf_c[:vis])[:, :, bi_c, pol_index])),
+                w_b = copy(transpose(parent(leaf_d[:weights])[:, :, bi_d, pol_index])),
+                w_a = copy(transpose(parent(leaf_c[:weights])[:, :, bi_c, pol_index])),
             )
         )
     end
@@ -614,7 +617,8 @@ function choose_diagnostic_baseline(
     best_bl = nothing
 
     for (bi, (a, b)) in enumerate(avg.baselines.pairs)
-        score = sum(@view W[:, bi, pols, :])
+        # W layout: (Frequency, Ti, Baseline, Pol).
+        score = sum(@view W[:, :, bi, pols])
         if score > best_score
             best_score = score
             best_bl = (avg.antennas.name[a], avg.antennas.name[b])
@@ -629,35 +633,39 @@ end
 # `GustavoMakieExt` extension.
 
 function baseline_bandpass_diagnostics(setup::BandpassSolverSetup, gains, bi, pi)
+    # data.vis/weights: (Frequency, Ti, Baseline, Pol). gains:
+    # (Frequency, Ti, Ant, Feed). Output arrays keep (Ti, Frequency)
+    # layout for plotting friendliness.
     data = setup.data
-    nscan = size(data.vis, 1)
-    nchan = size(data.vis, 4)
-    observed = fill(NaN + NaN * im, nscan, nchan)
-    observed_weights = zeros(Float64, nscan, nchan)
-    model = fill(NaN + NaN * im, nscan, nchan)
-    gain_product = fill(NaN + NaN * im, nscan, nchan)
-    source_per_scan = fill(NaN + NaN * im, nscan, nchan)
-    normalized_residual = fill(NaN + NaN * im, nscan, nchan)
-    weights = Array{Float64}(undef, nscan, nchan)
+    nchan, nti, _, _ = size(parent(data.vis))
+    observed = fill(NaN + NaN * im, nti, nchan)
+    observed_weights = zeros(Float64, nti, nchan)
+    model = fill(NaN + NaN * im, nti, nchan)
+    gain_product = fill(NaN + NaN * im, nti, nchan)
+    source_per_scan = fill(NaN + NaN * im, nti, nchan)
+    normalized_residual = fill(NaN + NaN * im, nti, nchan)
+    weights = Array{Float64}(undef, nti, nchan)
     source = fit_bandpass_source_coherencies(setup, gains)
 
     a, b = setup.bl_pairs[bi]
     fa, fb = correlation_feed_pair(setup.pol_products[pi])
-    for s in 1:nscan, c in 1:nchan
-        v = data.vis[s, bi, pi, c]
-        w = data.weights[s, bi, pi, c]
-        weights[s, c] = w
-        (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
-
+    for s in 1:nti
         src = source[s, bi, fa, fb]
-        gain_model = gains[s, a, fa, c] * conj(gains[s, b, fb, c])
-        full_model = gain_model * src
-        observed[s, c] = v
-        observed_weights[s, c] = w
-        model[s, c] = full_model
-        gain_product[s, c] = gain_model
-        source_per_scan[s, c] = src
-        normalized_residual[s, c] = sqrt(w) * (v - full_model)
+        @inbounds for c in 1:nchan
+            v = data.vis[c, s, bi, pi]
+            w = data.weights[c, s, bi, pi]
+            weights[s, c] = w
+            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+
+            gain_model = gains[c, s, a, fa] * conj(gains[c, s, b, fb])
+            full_model = gain_model * src
+            observed[s, c] = v
+            observed_weights[s, c] = w
+            model[s, c] = full_model
+            gain_product[s, c] = gain_model
+            source_per_scan[s, c] = src
+            normalized_residual[s, c] = sqrt(w) * (v - full_model)
+        end
     end
 
     return observed, observed_weights, model, normalized_residual, weights, gain_product, source_per_scan
@@ -780,17 +788,19 @@ function parallel_hand_support_summary(avg::BandpassDataset, bl::Tuple{String, S
     rows = NamedTuple[]
 
     for (lab, pi) in pol_map
-        W = @view avg.weights[:, bi, pi, :]
-        V = @view avg.vis[:, bi, pi, :]
+        # avg.weights/vis layout: (Frequency, Ti, Baseline, Pol). Slice to a
+        # (Frequency, Ti) 2-D view; iterate Ti as outer "scan" axis.
+        W = @view avg.weights[:, :, bi, pi]
+        V = @view avg.vis[:, :, bi, pi]
         valid = (W .> 0) .& isfinite.(W) .& isfinite.(real.(V)) .& isfinite.(imag.(V))
-        scan_valid = vec(sum(valid, dims = 2))
-        if_valid = vec(sum(valid, dims = 1))
+        scan_valid = vec(sum(valid, dims = 1))   # per-Ti valid count (length nti)
+        if_valid = vec(sum(valid, dims = 2))    # per-Frequency valid count (length nchan)
         total_weight = sum(W[valid])
         mean_phase_by_scan = [
             begin
-                    idx = vec(valid[s, :])
-                    any(idx) ? angle(sum(W[s, idx] .* (V[s, idx] ./ abs.(V[s, idx]))) / sum(W[s, idx])) : NaN
-                end for s in axes(W, 1)
+                    idx = vec(valid[:, s])
+                    any(idx) ? angle(sum(W[idx, s] .* (V[idx, s] ./ abs.(V[idx, s]))) / sum(W[idx, s])) : NaN
+                end for s in axes(W, 2)
         ]
 
         push!(

@@ -139,16 +139,18 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     end
     isempty(ti_inds) && return nothing
 
-    vis_p = parent(vis_l)[ti_inds, bl_inds, :, :]
-    w_p = parent(weights_l)[ti_inds, bl_inds, :, :]
-    flag_p = parent(flag_l)[ti_inds, bl_inds, :, :]
+    # Slice positionally. vis/weights/flag: (Frequency, Ti, Baseline, Pol).
+    # uvw: (Ti, Baseline, UVW).
+    vis_p = parent(vis_l)[:, ti_inds, bl_inds, :]
+    w_p = parent(weights_l)[:, ti_inds, bl_inds, :]
+    flag_p = parent(flag_l)[:, ti_inds, bl_inds, :]
     uvw_p = parent(uvw_l)[ti_inds, bl_inds, :]
     obs_time_new = obs_time(leaf)[ti_inds]
 
     new_labels = bls.labels[bl_inds]
     pol_dim = dims(vis_l, Pol)
-    if_dim = dims(vis_l, IF)
-    vis_da = DimArray(vis_p, (Ti(obs_time_new), Baseline(new_labels), pol_dim, if_dim))
+    if_dim = dims(vis_l, Frequency)
+    vis_da = DimArray(vis_p, (if_dim, Ti(obs_time_new), Baseline(new_labels), pol_dim))
     weights_da = DimArray(w_p, dims(vis_da))
     flag_da = DimArray(flag_p, dims(vis_da))
     uvw_da = DimArray(uvw_p, (Ti(obs_time_new), Baseline(new_labels), UVW(["U", "V", "W"])))
@@ -181,11 +183,6 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
         push!(rec_keep_inds, rec_i)
     end
 
-    date_param_new = if isempty(rec_keep_inds) || size(date_param(leaf), 1) == 0
-        zeros(eltype(date_param(leaf)), 0, size(date_param(leaf), 2))
-    else
-        date_param(leaf)[rec_keep_inds, :]
-    end
     extras_new = if isempty(rec_keep_inds)
         NamedTuple()
     else
@@ -200,7 +197,6 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
             DimensionalData.metadata(leaf);
             baselines = new_baselines,
             record_order = record_order_new,
-            date_param = date_param_new,
             extra_columns = extras_new,
         ),
     )
@@ -231,10 +227,6 @@ function merge_uvsets(uvsets::UVSet...)
     base_pp = pol_products(base)
     for (i, u) in enumerate(uvsets[2:end])
         m = DimensionalData.metadata(u)
-        m.antennas == base_root.antennas ||
-            error("merge_uvsets: antenna table mismatch (input $(i + 1) vs 1)")
-        m.array_config == base_root.array_config ||
-            error("merge_uvsets: array_config mismatch (input $(i + 1) vs 1)")
         m.array_obs == base_root.array_obs ||
             error("merge_uvsets: array_obs mismatch (input $(i + 1) vs 1)")
         pol_products(u) == base_pp ||

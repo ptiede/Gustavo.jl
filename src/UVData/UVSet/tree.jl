@@ -2,39 +2,27 @@ function _build_leaf(
         vis::AbstractDimArray, weights::AbstractDimArray,
         uvw::AbstractDimArray, flag::Union{Nothing, AbstractDimArray} = nothing;
         partition_info::PartitionInfo,
-        scan_name::Union{Nothing, AbstractVector{<:AbstractString}} = nothing,
     )
     flag_layer = flag === nothing ? _derive_flag(weights) : flag
     vis_dims = dims(vis)
     uvw_dims = dims(uvw)
     vis_names = map(DimensionalData.name, vis_dims)
     uvw_names = map(DimensionalData.name, uvw_dims)
-    # ScanArray (xradio schema.py:779): per-Ti label, default to the cached
-    # primary `scan_name` repeated along the leaf's time axis.
-    ti_dim = vis_dims[findfirst(d -> DimensionalData.name(d) === :Ti, vis_dims)]
-    nti = length(lookup(ti_dim))
-    scan_name_vec = scan_name === nothing ?
-        fill(partition_info.scan_name, nti) : String.(collect(scan_name))
-    length(scan_name_vec) == nti ||
-        error("scan_name length $(length(scan_name_vec)) does not match Ti axis length $(nti)")
     nm = DimensionalData.Lookups.NoMetadata()
     data_dict = DimensionalData.DataDict(
         :vis => parent(vis),
         :weights => parent(weights),
         :uvw => parent(uvw),
         :flag => parent(flag_layer),
-        :scan_name => scan_name_vec,
     )
     layerdims = DimensionalData.TupleDict(
         :vis => vis_names,
         :weights => vis_names,
         :uvw => uvw_names,
         :flag => vis_names,
-        :scan_name => (DimensionalData.name(ti_dim),),
     )
     layermetadata = DimensionalData.DataDict(
         :vis => nm, :weights => nm, :uvw => nm, :flag => nm,
-        :scan_name => nm,
     )
     all_dims = (vis_dims..., DimensionalData.otherdims(uvw_dims, vis_dims)...)
     return DimensionalData.DimTree(;
@@ -47,16 +35,20 @@ function _build_leaf(
 end
 
 function _extract_scan_leaf(
-        flat::NamedTuple, scan_label::AbstractString, spw_index::Integer;
-        source_key::Symbol, basename::AbstractString,
+        flat::NamedTuple, scan_label::AbstractString,
+        spw_index::Integer, subarray_index::Integer,
+        antenna_tables::AbstractVector, record_sub_idx::AbstractVector{<:Integer};
+        source_key::Symbol, basename::AbstractString, n_sub::Integer = 1,
     )
     int_inds = findall(
         i -> flat.record_scan_name[i] == scan_label &&
-            Int(flat.record_spw_index[i]) == Int(spw_index),
+            Int(flat.record_spw_index[i]) == Int(spw_index) &&
+            record_sub_idx[i] == Int(subarray_index),
         eachindex(flat.record_scan_name),
     )
 
     leaf_freq_setup = flat.freq_setups[Int(spw_index)]
+    leaf_antennas = antenna_tables[Int(subarray_index)]
     bl_pairs_per_record = flat.baselines.pairs_per_record[int_inds]
     obs_times_per_int = flat.obs_time[int_inds]
 
@@ -82,11 +74,15 @@ function _extract_scan_leaf(
     npol = size(vis_flat, 2)
     nchan = size(vis_flat, 3)
 
+    # Memory layout: frequency varies fastest, pol slowest. Order is
+    # (Frequency, Ti, Baseline, Pol) for vis/weights/flag and
+    # (UVW, Ti, Baseline) for uvw — matches xradio MSv4 frequency-fastest
+    # convention and gives stride-1 channel access in bandpass loops.
     vis_dense = fill(
         complex(eltype(real(eltype(vis_flat)))(NaN), eltype(real(eltype(vis_flat)))(NaN)),
-        nti, nbl, npol, nchan,
+        nchan, nti, nbl, npol,
     )
-    weights_dense = zeros(eltype(weights_flat), nti, nbl, npol, nchan)
+    weights_dense = zeros(eltype(weights_flat), nchan, nti, nbl, npol)
     uvw_dense = fill(eltype(uvw_flat)(NaN), nti, nbl, 3)
 
     record_order = Vector{Tuple{Int, Int}}(undef, length(int_inds))
@@ -94,17 +90,24 @@ function _extract_scan_leaf(
         ti = time_lookup[obs_times_per_int[rec_i]]
         bi = bl_lookup_scan[bl_pairs_per_record[rec_i]]
         record_order[rec_i] = (ti, bi)
-        vis_dense[ti, bi, :, :] .= vis_flat[int_i, :, :]
-        weights_dense[ti, bi, :, :] .= weights_flat[int_i, :, :]
-        uvw_dense[ti, bi, :] .= uvw_flat[int_i, :]
+        # flat layout is (Integration, Pol, Frequency); permute into
+        # (Frequency, Ti, Baseline, Pol).
+        for p in 1:npol, c in 1:nchan
+            vis_dense[c, ti, bi, p] = vis_flat[int_i, p, c]
+            weights_dense[c, ti, bi, p] = weights_flat[int_i, p, c]
+        end
+        # uvw layout: (Ti, Baseline, UVW) — easy slicing on Ti/Baseline.
+        for k in 1:3
+            uvw_dense[ti, bi, k] = uvw_flat[int_i, k]
+        end
     end
 
     pol_labels = collect(lookup(flat.vis, Pol))
     vis_part = DimArray(
         vis_dense,
         (
-            Ti(unique_times), Baseline(baselines_scan.labels),
-            Pol(pol_labels), IF(channel_freqs(leaf_freq_setup)),
+            Frequency(channel_freqs(leaf_freq_setup)), Ti(unique_times),
+            Baseline(baselines_scan.labels), Pol(pol_labels),
         ),
     )
     weights_part = DimArray(weights_dense, dims(vis_part))
@@ -113,22 +116,25 @@ function _extract_scan_leaf(
         (Ti(unique_times), Baseline(baselines_scan.labels), UVW(["U", "V", "W"])),
     )
 
-    date_param_part = flat.date_param[int_inds, :]
     extras_part = NamedTuple{keys(flat.extra_columns)}(
         ntuple(i -> flat.extra_columns[i][int_inds], length(flat.extra_columns))
     )
 
+    # Single-subarray files keep an empty subarray_name (axis omitted from
+    # the partition key); multi-subarray files render `sub_<n>`.
+    sub_name = n_sub > 1 ? "sub_$(Int(subarray_index) - 1)" : ""
     info = PartitionInfo(;
         source_name = flat.source_name,
         source_key = source_key,
         scan_name = String(scan_label),
         ra = flat.ra, dec = flat.dec,
+        antennas = leaf_antennas,
         baselines = baselines_scan,
         record_order = record_order,
-        date_param = date_param_part,
         extra_columns = extras_part,
         freq_setup = leaf_freq_setup,
         spw_name = "spw_$(Int(spw_index) - 1)",
+        subarray_name = sub_name,
         ddi = Int(spw_index) - 1,
         basename = basename,
     )

@@ -82,9 +82,12 @@ polarization_feeds(uvset::UVSet, pol_index::Integer) =
     correlation_feed_pair(pol_products(uvset)[pol_index])
 
 function best_ref_channel(data::BandpassDataset)
+    # data.weights layout: (Frequency, Ti, Baseline, Pol). Sum the
+    # parallel-hand pol slice along (Ti, Baseline, Pol) → length-nchan
+    # vector; argmax picks the strongest channel.
     pp, qq = parallel_hand_indices(pol_products(data))
     pols = [pp, qq]
-    return argmax(vec(sum(data.weights[:, :, pols, :], dims = (1, 2, 3))))
+    return argmax(vec(sum(view(parent(data.weights), :, :, :, pols), dims = (2, 3, 4))))
 end
 
 function design_matrices(bl_pairs, nant)
@@ -219,8 +222,9 @@ function phase_relative_to_ref(phases, ref_idx = 1)
 end
 
 function corrected_visibility(V, gains, pol_products, bi, a, b, pol, s, c)
+    # V layout: (Frequency, Ti, Baseline, Pol). gains: (Frequency, Ti, Ant, Feed).
     fa, fb = correlation_feed_pair(pol_products[pol])
-    return V[s, bi, pol, c] / (gains[s, a, fa, c] * conj(gains[s, b, fb, c]))
+    return V[c, s, bi, pol] / (gains[c, s, a, fa] * conj(gains[c, s, b, fb]))
 end
 
 
@@ -246,6 +250,8 @@ function choose_local_phase_reference(active_ants, gauge, station_models, connec
 end
 
 function choose_phase_reference(avg::BandpassDataset, variable_ants)
+    # W layout: (Frequency, Ti, Baseline, Pol). Stride-1 inner loop over
+    # Frequency.
     W = avg.weights
     nant = length(avg.antennas)
     blocked = falses(nant)
@@ -253,12 +259,14 @@ function choose_phase_reference(avg::BandpassDataset, variable_ants)
     pols = parallel_hand_indices(pol_products(avg))
     scores = zeros(Float64, nant)
 
-    for s in axes(W, 1), bi in axes(W, 2), pol in pols, c in axes(W, 4)
+    for pol in pols, bi in axes(W, 3), s in axes(W, 2)
         a, b = avg.baselines.pairs[bi]
-        w = W[s, bi, pol, c]
-        w > 0 || continue
-        blocked[a] || (scores[a] += w)
-        blocked[b] || (scores[b] += w)
+        @inbounds for c in axes(W, 1)
+            w = W[c, s, bi, pol]
+            w > 0 || continue
+            blocked[a] || (scores[a] += w)
+            blocked[b] || (scores[b] += w)
+        end
     end
 
     phase_ref = argmax(scores)

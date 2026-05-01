@@ -31,15 +31,16 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
     # loops see concrete eltypes. Without this, `leaf[:vis]` returns a DimArray
     # backed by `data(leaf)::DataDict = OrderedDict{Symbol, Any}`, so every
     # scalar access boxes.
-    V, W_sum, UVW_out, t_center = _time_average_kernel(parent(vis_l), parent(weights_l), parent(uvw_l), obs_time(leaf))
+    V, W_sum, UVW_out, t_center = _time_average_kernel(vis_l, weights_l, uvw_l, obs_time(leaf))
 
-    nbl = size(V, 2)
+
     new_obs_time = [t_center]
 
     pol_dim = dims(vis_l, Pol)
-    if_dim = dims(vis_l, IF)
+    if_dim = dims(vis_l, Frequency)
     bl_dim = dims(vis_l, Baseline)
-    vis_da = DimArray(V, (Ti(new_obs_time), bl_dim, pol_dim, if_dim))
+    # Storage layout: (Frequency, Ti, Baseline, Pol). uvw: (Ti, Baseline, UVW).
+    vis_da = DimArray(V, (if_dim, Ti(new_obs_time), bl_dim, pol_dim))
     weights_da = DimArray(W_sum, dims(vis_da))
     uvw_da = DimArray(UVW_out, (Ti(new_obs_time), bl_dim, UVW(["U", "V", "W"])))
     flag_da = DimArray(W_sum .<= 0, dims(vis_da))
@@ -48,7 +49,6 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
     new_info = update(
         info;
         record_order = Tuple{Int, Int}[],
-        date_param = zeros(eltype(info.date_param), 0, size(info.date_param, 2)),
         extra_columns = NamedTuple(),
     )
     return _build_leaf(vis_da, weights_da, uvw_da, flag_da; partition_info = new_info)
@@ -56,26 +56,27 @@ end
 
 # Type-stable kernel for inverse-variance time-averaging. Hot loop sees
 # concrete `vis_p::Array{Tvis,4}`, `w_p::Array{Tw,4}`, `uvw_p::Array{Tuvw,3}`.
+# Layout: vis/weights are (Frequency, Ti, Baseline, Pol); uvw is (Ti, Baseline, UVW).
 function _time_average_kernel(
         vis_p::AbstractArray{Tvis, 4},
         w_p::AbstractArray{Tw, 4},
         uvw_p::AbstractArray{Tuvw, 3},
         obs_t,
     ) where {Tvis, Tw, Tuvw}
-    nti, nbl, npol, nchan = size(vis_p)
-    V_num = zeros(Tvis, 1, nbl, npol, nchan)
-    W_sum = zeros(Tw, 1, nbl, npol, nchan)
+    nchan, nti, nbl, npol = size(vis_p)
+    V_num = zeros(Tvis, nchan, 1, nbl, npol)
+    W_sum = zeros(Tw, nchan, 1, nbl, npol)
     UVW_num = zeros(Tuvw, 1, nbl, 3)
     UVW_w = zeros(Tw, 1, nbl)
 
     @inbounds for ti in 1:nti, bi in 1:nbl
         tot_w = zero(Tw)
         for p in 1:npol, c in 1:nchan
-            w = w_p[ti, bi, p, c]
-            v = vis_p[ti, bi, p, c]
+            w = w_p[c, ti, bi, p]
+            v = vis_p[c, ti, bi, p]
             (w > 0 && isfinite(w) && isfinite(real(v))) || continue
-            V_num[1, bi, p, c] += w * v
-            W_sum[1, bi, p, c] += w
+            V_num[c, 1, bi, p] += w * v
+            W_sum[c, 1, bi, p] += w
             tot_w += w
         end
         (tot_w > 0 && isfinite(tot_w)) || continue

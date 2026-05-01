@@ -42,10 +42,10 @@ function collect_parallel_hand_rows(Vblock, Wblock, pol, c0, c, baseline_mask = 
     Wp = view(Wblock; Pol = pol)
     for bi in axes(Vp, Baseline)
         (isnothing(baseline_mask) || baseline_mask[bi]) || continue
-        v_c_slice = view(Vp; Baseline = bi, IF = c)
-        v_c0_slice = view(Vp; Baseline = bi, IF = c0)
-        w_c_slice = view(Wp; Baseline = bi, IF = c)
-        w_c0_slice = view(Wp; Baseline = bi, IF = c0)
+        v_c_slice = view(Vp; Baseline = bi, Frequency = c)
+        v_c0_slice = view(Vp; Baseline = bi, Frequency = c0)
+        w_c_slice = view(Wp; Baseline = bi, Frequency = c)
+        w_c0_slice = view(Wp; Baseline = bi, Frequency = c0)
         for (v_c, v_c0, w_c, w_c0) in zip(v_c_slice, v_c0_slice, w_c_slice, w_c0_slice)
             row_weight = propagated_log_ratio_weight(v_c, w_c, v_c0, w_c0)
             row_weight > 0 || continue
@@ -97,8 +97,16 @@ function solve_parallel_channel!(
         φ = zeros(nant)
         φ[active_free] = φ_free
 
-        gains[:, feed, c] = exp.(log_amp) .* cis.(φ)
-        isnothing(solved) || (solved[active, feed, c] .= true)
+        # Gains layout (3-D template): (Frequency, Ant, Feed). Write the
+        # solved channel slice along dim 1.
+        for ant in 1:nant
+            gains[c, ant, feed] = exp(log_amp[ant]) * cis(φ[ant])
+        end
+        if !isnothing(solved)
+            for ant in active
+                solved[c, ant, feed] = true
+            end
+        end
     end
     return gains
 end
@@ -114,14 +122,14 @@ function antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, pol, baseline_mas
     # derivation.
     Vp = view(Vblock; Pol = pol)
     Wp = view(Wblock; Pol = pol)
-    nchan = size(Vp, IF)
+    nchan = size(Vp, Frequency)
     T = float(eltype(Wblock))
     channel_weights = zeros(T, nant, nchan)
     for bi in axes(Vp, Baseline)
         (isnothing(baseline_mask) || baseline_mask[bi]) || continue
         a, b = bl_pairs[bi]
         for c in 1:nchan
-            for (v, w) in zip(view(Vp; Baseline = bi, IF = c), view(Wp; Baseline = bi, IF = c))
+            for (v, w) in zip(view(Vp; Baseline = bi, Frequency = c), view(Wp; Baseline = bi, Frequency = c))
                 prec = log_visibility_precision(v, w)
                 prec > 0 || continue
                 channel_weights[a, c] += prec
@@ -138,7 +146,7 @@ function amplitude_support_weights(Wblock, bl_pairs, nant, parallel_pols, parall
     # FITS weights so gauge / collapse-detection thresholds stay calibrated.
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
     par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
-    nchan = size(Wblock, IF)
+    nchan = size(Wblock, Frequency)
     support = zeros(Float64, nant, 2, nchan)
     for (feed_idx, (pol, mask)) in enumerate(((parallel_pols[1], ref_mask), (parallel_pols[2], par_mask)))
         Wp = view(Wblock; Pol = pol)
@@ -146,7 +154,7 @@ function amplitude_support_weights(Wblock, bl_pairs, nant, parallel_pols, parall
             (isnothing(mask) || mask[bi]) || continue
             a, b = bl_pairs[bi]
             for c in 1:nchan
-                for w in view(Wp; Baseline = bi, IF = c)
+                for w in view(Wp; Baseline = bi, Frequency = c)
                     (w > 0 && isfinite(w)) || continue
                     support[a, feed_idx, c] += w
                     support[b, feed_idx, c] += w
@@ -188,26 +196,32 @@ function apply_zero_mean_bandpass_gauge_track!(track, weights, ref_idx)
 end
 
 function antenna_feed_support_weights(Wblock, bl_pairs, pol_products, nant)
-    nchan = size(Wblock, ndims(Wblock))
+    # Weights layout: 4-D = (Frequency, Ti, Baseline, Pol);
+    # 3-D = (Frequency, Baseline, Pol). Stride-1 inner loop over Frequency.
+    nchan = size(Wblock, 1)
     support = zeros(eltype(Wblock), nant, 2, nchan)
 
     if ndims(Wblock) == 4
-        for s in axes(Wblock, 1), bi in axes(Wblock, 2), pol in axes(Wblock, 3), c in axes(Wblock, 4)
-            w = Wblock[s, bi, pol, c]
-            (w > 0 && isfinite(w)) || continue
+        for pol in axes(Wblock, 4), bi in axes(Wblock, 3), s in axes(Wblock, 2)
             a, b = bl_pairs[bi]
             fa, fb = correlation_feed_pair(pol_products[pol])
-            support[a, fa, c] += w
-            support[b, fb, c] += w
+            @inbounds for c in axes(Wblock, 1)
+                w = Wblock[c, s, bi, pol]
+                (w > 0 && isfinite(w)) || continue
+                support[a, fa, c] += w
+                support[b, fb, c] += w
+            end
         end
     elseif ndims(Wblock) == 3
-        for bi in axes(Wblock, 1), pol in axes(Wblock, 2), c in axes(Wblock, 3)
-            w = Wblock[bi, pol, c]
-            (w > 0 && isfinite(w)) || continue
+        for pol in axes(Wblock, 3), bi in axes(Wblock, 2)
             a, b = bl_pairs[bi]
             fa, fb = correlation_feed_pair(pol_products[pol])
-            support[a, fa, c] += w
-            support[b, fb, c] += w
+            @inbounds for c in axes(Wblock, 1)
+                w = Wblock[c, bi, pol]
+                (w > 0 && isfinite(w)) || continue
+                support[a, fa, c] += w
+                support[b, fb, c] += w
+            end
         end
     else
         error("Unsupported weight block rank: $(ndims(Wblock))")
@@ -228,17 +242,30 @@ function bandpass_track_gauge_factor(track, weights, ref_idx)
 end
 
 function zero_mean_bandpass_gauge_factors(gains, support_weights, ref_idx)
-    gamma = ones(eltype(gains), size(gains, 1), size(gains, 2))
-    for ant in axes(gains, 1), feed in axes(gains, 2)
-        gamma[ant, feed] = bandpass_track_gauge_factor(@view(gains[ant, feed, :]), vec(support_weights[ant, feed, :]), ref_idx)
+    # Gains 3-D layout: (Frequency, Ant, Feed). gamma is (Ant, Feed).
+    nant = size(gains, 2)
+    nfeed = size(gains, 3)
+    gamma = ones(eltype(gains), nant, nfeed)
+    for ant in 1:nant, feed in 1:nfeed
+        gamma[ant, feed] = bandpass_track_gauge_factor(
+            @view(gains[:, ant, feed]),
+            vec(support_weights[ant, feed, :]),
+            ref_idx,
+        )
     end
     return gamma
 end
 
 function reference_antenna_bandpass_gauge_factors(gains, support_weights, ref_idx, ref_ant)
-    gamma = ones(eltype(gains), size(gains, 1), size(gains, 2))
-    for feed in axes(gains, 2)
-        factor = bandpass_track_gauge_factor(@view(gains[ref_ant, feed, :]), vec(support_weights[ref_ant, feed, :]), ref_idx)
+    nant = size(gains, 2)
+    nfeed = size(gains, 3)
+    gamma = ones(eltype(gains), nant, nfeed)
+    for feed in 1:nfeed
+        factor = bandpass_track_gauge_factor(
+            @view(gains[:, ref_ant, feed]),
+            vec(support_weights[ref_ant, feed, :]),
+            ref_idx,
+        )
         gamma[:, feed] .= factor
     end
     return gamma
@@ -254,13 +281,19 @@ end
 
 function apply_bandpass_gauge!(gains, support_weights, ref_idx, gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge())
     if ndims(gains) == 3
+        # Gains 3-D layout: (Frequency, Ant, Feed). Divide stride-1 along
+        # the channel axis.
         gamma = bandpass_gauge_factors(gains, support_weights, ref_idx, gauge)
-        for ant in axes(gains, 1), feed in axes(gains, 2)
-            gains[ant, feed, :] ./= gamma[ant, feed]
+        for ant in axes(gains, 2), feed in axes(gains, 3)
+            for c in axes(gains, 1)
+                gains[c, ant, feed] /= gamma[ant, feed]
+            end
         end
     elseif ndims(gains) == 4
-        for scan in axes(gains, 1)
-            apply_bandpass_gauge!(@view(gains[scan, :, :, :]), support_weights, ref_idx, gauge)
+        # Gains 4-D layout: (Frequency, Ti, Ant, Feed). Recurse on each Ti
+        # slice — yields a 3-D (Frequency, Ant, Feed) view.
+        for s in axes(gains, 2)
+            apply_bandpass_gauge!(@view(gains[:, s, :, :]), support_weights, ref_idx, gauge)
         end
     else
         error("Unsupported gain array rank: $(ndims(gains))")
@@ -274,9 +307,12 @@ function apply_zero_mean_bandpass_gauge!(gains, support_weights, ref_idx)
 end
 
 function allocate_source_coherencies(Vblock)
-    nscan = ndims(Vblock) == 4 ? size(Vblock, 1) : 1
-    nbl = ndims(Vblock) == 4 ? size(Vblock, 2) : size(Vblock, 1)
-    return ones(ComplexF64, nscan, nbl, 2, 2)
+    # Vblock layouts: 4-D = (Frequency, Ti, Baseline, Pol);
+    # 3-D = (Frequency, Baseline, Pol). Source axes stay (Ti, Baseline, 2, 2)
+    # — the trailing (2, 2) are pol-pair indices, not labelled Pol.
+    nti = ndims(Vblock) == 4 ? size(Vblock, 2) : 1
+    nbl = ndims(Vblock) == 4 ? size(Vblock, 3) : size(Vblock, 2)
+    return ones(ComplexF64, nti, nbl, 2, 2)
 end
 
 function solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
@@ -284,34 +320,41 @@ function solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_
     denom = zeros(Float64, size(source))
 
     if ndims(Vblock) == 4
-        for s in axes(Vblock, 1), bi in axes(Vblock, 2), pol in axes(Vblock, 3), c in axes(Vblock, 4)
-            v = Vblock[s, bi, pol, c]
-            w = Wblock[s, bi, pol, c]
-            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+        # Vblock/Wblock: (Frequency, Ti, Baseline, Pol). Stride-1 inner
+        # loop over Frequency.
+        for pol in axes(Vblock, 4), bi in axes(Vblock, 3), s in axes(Vblock, 2)
             a, b = bl_pairs[bi]
             fa, fb = correlation_feed_pair(pol_products[pol])
-            if ndims(gains) == 4
-                model = gains[s, a, fa, c] * conj(gains[s, b, fb, c])
-            else
-                model = gains[a, fa, c] * conj(gains[b, fb, c])
+            @inbounds for c in axes(Vblock, 1)
+                v = Vblock[c, s, bi, pol]
+                w = Wblock[c, s, bi, pol]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                model = if ndims(gains) == 4
+                    gains[c, s, a, fa] * conj(gains[c, s, b, fb])
+                else
+                    gains[c, a, fa] * conj(gains[c, b, fb])
+                end
+                amp2 = abs2(model)
+                (amp2 > 0 && isfinite(amp2)) || continue
+                numer[s, bi, fa, fb] += w * v * conj(model)
+                denom[s, bi, fa, fb] += w * amp2
             end
-            amp2 = abs2(model)
-            (amp2 > 0 && isfinite(amp2)) || continue
-            numer[s, bi, fa, fb] += w * v * conj(model)
-            denom[s, bi, fa, fb] += w * amp2
         end
     elseif ndims(Vblock) == 3
-        for bi in axes(Vblock, 1), pol in axes(Vblock, 2), c in axes(Vblock, 3)
-            v = Vblock[bi, pol, c]
-            w = Wblock[bi, pol, c]
-            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+        # Single-Ti slice: (Frequency, Baseline, Pol).
+        for pol in axes(Vblock, 3), bi in axes(Vblock, 2)
             a, b = bl_pairs[bi]
             fa, fb = correlation_feed_pair(pol_products[pol])
-            model = gains[a, fa, c] * conj(gains[b, fb, c])
-            amp2 = abs2(model)
-            (amp2 > 0 && isfinite(amp2)) || continue
-            numer[1, bi, fa, fb] += w * v * conj(model)
-            denom[1, bi, fa, fb] += w * amp2
+            @inbounds for c in axes(Vblock, 1)
+                v = Vblock[c, bi, pol]
+                w = Wblock[c, bi, pol]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                model = gains[c, a, fa] * conj(gains[c, b, fb])
+                amp2 = abs2(model)
+                (amp2 > 0 && isfinite(amp2)) || continue
+                numer[1, bi, fa, fb] += w * v * conj(model)
+                denom[1, bi, fa, fb] += w * amp2
+            end
         end
     else
         error("Unsupported visibility block rank: $(ndims(Vblock))")
@@ -329,30 +372,38 @@ function joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_p
     objective = 0.0
 
     if ndims(Vblock) == 4
-        for s in axes(Vblock, 1), bi in axes(Vblock, 2), pol in axes(Vblock, 3), c in axes(Vblock, 4)
-            v = Vblock[s, bi, pol, c]
-            w = Wblock[s, bi, pol, c]
-            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+        # (Frequency, Ti, Baseline, Pol).
+        for pol in axes(Vblock, 4), bi in axes(Vblock, 3), s in axes(Vblock, 2)
             a, b = bl_pairs[bi]
             fa, fb = correlation_feed_pair(pol_products[pol])
-            if ndims(gains) == 4
-                model = gains[s, a, fa, c] * source[s, bi, fa, fb] * conj(gains[s, b, fb, c])
-            else
-                model = gains[a, fa, c] * source[s, bi, fa, fb] * conj(gains[b, fb, c])
+            src = source[s, bi, fa, fb]
+            @inbounds for c in axes(Vblock, 1)
+                v = Vblock[c, s, bi, pol]
+                w = Wblock[c, s, bi, pol]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                model = if ndims(gains) == 4
+                    gains[c, s, a, fa] * src * conj(gains[c, s, b, fb])
+                else
+                    gains[c, a, fa] * src * conj(gains[c, b, fb])
+                end
+                residual = v - model
+                objective += w * abs2(residual)
             end
-            residual = v - model
-            objective += w * abs2(residual)
         end
     elseif ndims(Vblock) == 3
-        for bi in axes(Vblock, 1), pol in axes(Vblock, 2), c in axes(Vblock, 3)
-            v = Vblock[bi, pol, c]
-            w = Wblock[bi, pol, c]
-            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+        # (Frequency, Baseline, Pol).
+        for pol in axes(Vblock, 3), bi in axes(Vblock, 2)
             a, b = bl_pairs[bi]
             fa, fb = correlation_feed_pair(pol_products[pol])
-            model = gains[a, fa, c] * source[1, bi, fa, fb] * conj(gains[b, fb, c])
-            residual = v - model
-            objective += w * abs2(residual)
+            src = source[1, bi, fa, fb]
+            @inbounds for c in axes(Vblock, 1)
+                v = Vblock[c, bi, pol]
+                w = Wblock[c, bi, pol]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                model = gains[c, a, fa] * src * conj(gains[c, b, fb])
+                residual = v - model
+                objective += w * abs2(residual)
+            end
         end
     else
         error("Unsupported visibility block rank: $(ndims(Vblock))")
@@ -382,9 +433,11 @@ function constrained_real_track_parameter_count(valid)
 end
 
 function effective_gain_parameter_count(setup, state)
+    # gains_template layout: (Frequency, Ant, Feed). scan_gains layout:
+    # (Frequency, Ti, Ant, Feed). Slice along the Frequency axis (dim 1).
     template_params = 0
-    for ant in axes(state.gains_template, 1), feed in axes(state.gains_template, 2)
-        valid = isfinite.(view(state.gains_template, ant, feed, :))
+    for ant in axes(state.gains_template, 2), feed in axes(state.gains_template, 3)
+        valid = isfinite.(view(state.gains_template, :, ant, feed))
         if !setup.amplitude_variable_mask[ant, feed]
             template_params += constrained_real_track_parameter_count(valid)
         end
@@ -394,8 +447,8 @@ function effective_gain_parameter_count(setup, state)
     end
 
     scan_params = 0
-    for s in axes(state.scan_gains, 1), ant in axes(state.scan_gains, 2), feed in axes(state.scan_gains, 3)
-        valid = isfinite.(view(state.scan_gains, s, ant, feed, :)) .& view(state.scan_solved, s, ant, feed, :)
+    for s in axes(state.scan_gains, 2), ant in axes(state.scan_gains, 3), feed in axes(state.scan_gains, 4)
+        valid = isfinite.(view(state.scan_gains, :, s, ant, feed)) .& view(state.scan_solved, :, s, ant, feed)
         if setup.amplitude_variable_mask[ant, feed]
             scan_params += constrained_real_track_parameter_count(valid)
         end
@@ -408,25 +461,29 @@ function effective_gain_parameter_count(setup, state)
 end
 
 function observed_source_parameter_count(Vblock, Wblock, pol_products)
-    nscan = ndims(Vblock) == 4 ? size(Vblock, 1) : 1
-    nbl = ndims(Vblock) == 4 ? size(Vblock, 2) : size(Vblock, 1)
-    observed = falses(nscan, nbl, 2, 2)
+    nti = ndims(Vblock) == 4 ? size(Vblock, 2) : 1
+    nbl = ndims(Vblock) == 4 ? size(Vblock, 3) : size(Vblock, 2)
+    observed = falses(nti, nbl, 2, 2)
 
     if ndims(Vblock) == 4
-        for s in axes(Vblock, 1), bi in axes(Vblock, 2), pol in axes(Vblock, 3), c in axes(Vblock, 4)
-            v = Vblock[s, bi, pol, c]
-            w = Wblock[s, bi, pol, c]
-            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+        for pol in axes(Vblock, 4), bi in axes(Vblock, 3), s in axes(Vblock, 2)
             fa, fb = correlation_feed_pair(pol_products[pol])
-            observed[s, bi, fa, fb] = true
+            @inbounds for c in axes(Vblock, 1)
+                v = Vblock[c, s, bi, pol]
+                w = Wblock[c, s, bi, pol]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                observed[s, bi, fa, fb] = true
+            end
         end
     elseif ndims(Vblock) == 3
-        for bi in axes(Vblock, 1), pol in axes(Vblock, 2), c in axes(Vblock, 3)
-            v = Vblock[bi, pol, c]
-            w = Wblock[bi, pol, c]
-            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+        for pol in axes(Vblock, 3), bi in axes(Vblock, 2)
             fa, fb = correlation_feed_pair(pol_products[pol])
-            observed[1, bi, fa, fb] = true
+            @inbounds for c in axes(Vblock, 1)
+                v = Vblock[c, bi, pol]
+                w = Wblock[c, bi, pol]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                observed[1, bi, fa, fb] = true
+            end
         end
     else
         error("Unsupported visibility block rank: $(ndims(Vblock))")
@@ -438,9 +495,12 @@ end
 function apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, ref_idx, gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge())
     ndims(gains) == 3 || error("Gauge/source refinement expects a rank-3 gain cube")
 
+    # Gains 3-D layout: (Frequency, Ant, Feed). gamma is (Ant, Feed).
     gamma = bandpass_gauge_factors(gains, support_weights, ref_idx, gauge)
-    for ant in axes(gains, 1), feed in axes(gains, 2)
-        gains[ant, feed, :] ./= gamma[ant, feed]
+    for ant in axes(gains, 2), feed in axes(gains, 3)
+        for c in axes(gains, 1)
+            gains[c, ant, feed] /= gamma[ant, feed]
+        end
     end
 
     for s in axes(source, 1), bi in axes(source, 2)
@@ -462,72 +522,104 @@ function refine_joint_bandpass_als!(
         max_iterations = 8, tolerance = 1.0e-6,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
     )
+    # Gains 3-D layout: (Frequency, Ant, Feed). Vblock/Wblock 4-D:
+    # (Frequency, Ti, Baseline, Pol); 3-D: (Frequency, Baseline, Pol).
+    nant = size(gains, 2)
     source = allocate_source_coherencies(Vblock)
-    support_weights = antenna_feed_support_weights(Wblock, bl_pairs, pol_products, size(gains, 1))
+    support_weights = antenna_feed_support_weights(Wblock, bl_pairs, pol_products, nant)
     solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
 
     previous_objective = joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_products)
+    nchan = size(gains, 1)
+    numer_ch = zeros(ComplexF64, nchan)
+    denom_ch = zeros(Float64, nchan)
 
     for _ in 1:max_iterations
-        for c in axes(gains, 3), ant in axes(gains, 1), feed in axes(gains, 2)
-            numer = 0.0 + 0.0im
-            denom = 0.0
+        for ant in axes(gains, 2), feed in axes(gains, 3)
+            fill!(numer_ch, 0.0 + 0.0im)
+            fill!(denom_ch, 0.0)
 
             if ndims(Vblock) == 4
-                for s in axes(Vblock, 1), bi in axes(Vblock, 2), pol in axes(Vblock, 3)
-                    v = Vblock[s, bi, pol, c]
-                    w = Wblock[s, bi, pol, c]
-                    (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                for pol in axes(Vblock, 4), bi in axes(Vblock, 3)
                     a, b = bl_pairs[bi]
                     fa, fb = correlation_feed_pair(pol_products[pol])
+                    a_match = (a == ant && fa == feed)
+                    b_match = (b == ant && fb == feed)
+                    (a_match || b_match) || continue
 
-                    if a == ant && fa == feed
-                        coeff = source[s, bi, feed, fb] * conj(gains[b, fb, c])
-                        amp2 = abs2(coeff)
-                        amp2 > 0 || continue
-                        numer += w * conj(coeff) * v
-                        denom += w * amp2
-                    end
-
-                    if b == ant && fb == feed
-                        coeff = conj(gains[a, fa, c] * source[s, bi, fa, feed])
-                        amp2 = abs2(coeff)
-                        amp2 > 0 || continue
-                        numer += w * conj(coeff) * conj(v)
-                        denom += w * amp2
+                    for s in axes(Vblock, 2)
+                        if a_match
+                            src = source[s, bi, feed, fb]
+                            @inbounds for c in 1:nchan
+                                v = Vblock[c, s, bi, pol]
+                                w = Wblock[c, s, bi, pol]
+                                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                                coeff = src * conj(gains[c, b, fb])
+                                amp2 = abs2(coeff)
+                                amp2 > 0 || continue
+                                numer_ch[c] += w * conj(coeff) * v
+                                denom_ch[c] += w * amp2
+                            end
+                        end
+                        if b_match
+                            src = source[s, bi, fa, feed]
+                            @inbounds for c in 1:nchan
+                                v = Vblock[c, s, bi, pol]
+                                w = Wblock[c, s, bi, pol]
+                                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                                coeff = conj(gains[c, a, fa] * src)
+                                amp2 = abs2(coeff)
+                                amp2 > 0 || continue
+                                numer_ch[c] += w * conj(coeff) * conj(v)
+                                denom_ch[c] += w * amp2
+                            end
+                        end
                     end
                 end
             elseif ndims(Vblock) == 3
-                for bi in axes(Vblock, 1), pol in axes(Vblock, 2)
-                    v = Vblock[bi, pol, c]
-                    w = Wblock[bi, pol, c]
-                    (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                for pol in axes(Vblock, 3), bi in axes(Vblock, 2)
                     a, b = bl_pairs[bi]
                     fa, fb = correlation_feed_pair(pol_products[pol])
+                    a_match = (a == ant && fa == feed)
+                    b_match = (b == ant && fb == feed)
+                    (a_match || b_match) || continue
 
-                    if a == ant && fa == feed
-                        coeff = source[1, bi, feed, fb] * conj(gains[b, fb, c])
-                        amp2 = abs2(coeff)
-                        amp2 > 0 || continue
-                        numer += w * conj(coeff) * v
-                        denom += w * amp2
+                    if a_match
+                        src = source[1, bi, feed, fb]
+                        @inbounds for c in 1:nchan
+                            v = Vblock[c, bi, pol]
+                            w = Wblock[c, bi, pol]
+                            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                            coeff = src * conj(gains[c, b, fb])
+                            amp2 = abs2(coeff)
+                            amp2 > 0 || continue
+                            numer_ch[c] += w * conj(coeff) * v
+                            denom_ch[c] += w * amp2
+                        end
                     end
-
-                    if b == ant && fb == feed
-                        coeff = conj(gains[a, fa, c] * source[1, bi, fa, feed])
-                        amp2 = abs2(coeff)
-                        amp2 > 0 || continue
-                        numer += w * conj(coeff) * conj(v)
-                        denom += w * amp2
+                    if b_match
+                        src = source[1, bi, fa, feed]
+                        @inbounds for c in 1:nchan
+                            v = Vblock[c, bi, pol]
+                            w = Wblock[c, bi, pol]
+                            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                            coeff = conj(gains[c, a, fa] * src)
+                            amp2 = abs2(coeff)
+                            amp2 > 0 || continue
+                            numer_ch[c] += w * conj(coeff) * conj(v)
+                            denom_ch[c] += w * amp2
+                        end
                     end
                 end
             else
                 error("Unsupported visibility block rank: $(ndims(Vblock))")
             end
 
-            denom > 0 || continue
-            gains[ant, feed, c] = numer / denom
-            isnothing(solved) || (solved[ant, feed, c] = true)
+            @inbounds for c in 1:nchan
+                denom_ch[c] > 0 || continue
+                gains[c, ant, feed] = numer_ch[c] / denom_ch[c]
+                isnothing(solved) || (solved[c, ant, feed] = true)
+            end
         end
 
         apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, c0, gauge)
@@ -746,14 +838,16 @@ function sanitize_gain_amplitudes!(
         gains, support_weights, c0;
         neighbor_window = 2
     )
+    # Gains 3-D layout: (Frequency, Ant, Feed). support_weights stays
+    # (Ant, Feed, Frequency).
     amps = abs.(gains)
     repaired = NamedTuple[]
 
-    for ant in axes(gains, 1), feed in axes(gains, 2), c in axes(gains, 3)
+    for ant in axes(gains, 2), feed in axes(gains, 3), c in axes(gains, 1)
         c == c0 && continue
         support_weights[ant, feed, c] > 0 || continue
 
-        amp = amps[ant, feed, c]
+        amp = amps[c, ant, feed]
         # Only repair genuinely broken values (NaN / Inf / negative / exact zero).
         # Legitimately small amplitudes (e.g. EHT IF-edge bandpass rolloff) must be
         # left alone — replacing them with a neighbor median produces a model that
@@ -761,12 +855,12 @@ function sanitize_gain_amplitudes!(
         (isfinite(amp) && amp > 0) && continue
 
         local_scale = replacement_amplitude_scale(
-            view(amps, ant, feed, :), view(support_weights, ant, feed, :), c, c0;
+            view(amps, :, ant, feed), view(support_weights, ant, feed, :), c, c0;
             neighbor_window = neighbor_window
         )
         isnothing(local_scale) && continue
 
-        gains[ant, feed, c] = local_scale * cis(angle(gains[ant, feed, c]))
+        gains[c, ant, feed] = local_scale * cis(angle(gains[c, ant, feed]))
         push!(repaired, (; ant, feed, channel = c, amplitude = amp, replacement = local_scale))
     end
 
@@ -795,18 +889,20 @@ function inspect_collapsed_gain_amplitudes(
         collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2,
         neighbor_window = 2
     )
+    # Gains 3-D layout: (Frequency, Ant, Feed). support_weights:
+    # (Ant, Feed, Frequency).
     amps = abs.(gains)
     suspects = NamedTuple[]
 
-    for ant in axes(gains, 1), feed in axes(gains, 2), c in axes(gains, 3)
+    for ant in axes(gains, 2), feed in axes(gains, 3), c in axes(gains, 1)
         c == c0 && continue
         support_weights[ant, feed, c] > 0 || continue
 
-        amp = amps[ant, feed, c]
+        amp = amps[c, ant, feed]
         (isfinite(amp) && amp > 0) || continue
 
         neighbor_median = replacement_amplitude_scale(
-            view(amps, ant, feed, :), view(support_weights, ant, feed, :), c, c0;
+            view(amps, :, ant, feed), view(support_weights, ant, feed, :), c, c0;
             neighbor_window = neighbor_window
         )
         isnothing(neighbor_median) && continue
@@ -883,7 +979,8 @@ function warn_sanitized_gain_amplitudes(repaired, ant_names = nothing; context =
 end
 
 function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
-    nant = size(gains, 1)
+    # Gains 3-D layout: (Frequency, Ant, Feed). Slice along the Frequency axis.
+    nant = size(gains, 2)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
     par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
     reference_weights = antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
@@ -896,7 +993,7 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
 
         abs_amp_model = model.reference.amplitude.model
         if !(abs_amp_model isa PerChannelBandpassModel)
-            reference_log_amp = log.(abs.(gains[ant, reference_feed, :]))
+            reference_log_amp = log.(abs.(gains[:, ant, reference_feed]))
             fitted_reference_log_amp = fit_amplitude_model(
                 vec(reference_log_amp),
                 vec(reference_weights[ant, :]),
@@ -905,12 +1002,12 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
                 abs_amp_model,
                 model.reference.amplitude.segmentation.frequency
             )
-            gains[ant, reference_feed, :] = exp.(fitted_reference_log_amp) .* cis.(angle.(gains[ant, reference_feed, :]))
+            gains[:, ant, reference_feed] = exp.(fitted_reference_log_amp) .* cis.(angle.(gains[:, ant, reference_feed]))
         end
 
         relative_amp_model = model.relative.amplitude.model
         if !(relative_amp_model isa PerChannelBandpassModel)
-            ratio = gains[ant, partner_feed, :] ./ gains[ant, reference_feed, :]
+            ratio = gains[:, ant, partner_feed] ./ gains[:, ant, reference_feed]
             relative_log_amp = log.(abs.(ratio))
             relative_weights = sqrt.(reference_weights[ant, :] .* partner_weights[ant, :])
             fitted_relative_log_amp = fit_amplitude_model(
@@ -921,7 +1018,7 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
                 relative_amp_model,
                 model.relative.amplitude.segmentation.frequency
             )
-            gains[ant, partner_feed, :] = abs.(gains[ant, reference_feed, :]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(gains[ant, partner_feed, :]))
+            gains[:, ant, partner_feed] = abs.(gains[:, ant, reference_feed]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(gains[:, ant, partner_feed]))
         end
     end
 
@@ -929,7 +1026,8 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
 end
 
 function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
-    nant = size(gains, 1)
+    # Gains 3-D layout: (Frequency, Ant, Feed).
+    nant = size(gains, 2)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
     par_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 2])
     reference_weights = antenna_phase_weights(Vblock, Wblock, bl_pairs, nant, parallel_pols[1], ref_mask)
@@ -942,7 +1040,7 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
 
         reference_phase_model = model.reference.phase.model
         if !(reference_phase_model isa PerChannelBandpassModel)
-            reference_phase_track = vec(angle.(gains[ant, reference_feed, :]))
+            reference_phase_track = vec(angle.(gains[:, ant, reference_feed]))
             fitted_reference_phase = fit_phase_model(
                 reference_phase_track,
                 vec(reference_weights[ant, :]),
@@ -951,12 +1049,12 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
                 reference_phase_model,
                 model.reference.phase.segmentation.frequency
             )
-            gains[ant, reference_feed, :] = abs.(gains[ant, reference_feed, :]) .* cis.(fitted_reference_phase)
+            gains[:, ant, reference_feed] = abs.(gains[:, ant, reference_feed]) .* cis.(fitted_reference_phase)
         end
 
         relative_phase_model = model.relative.phase.model
         if !(relative_phase_model isa PerChannelBandpassModel)
-            ratio = gains[ant, partner_feed, :] ./ gains[ant, reference_feed, :]
+            ratio = gains[:, ant, partner_feed] ./ gains[:, ant, reference_feed]
             relative_phase_track = vec(angle.(ratio))
             relative_weights = sqrt.(reference_weights[ant, :] .* partner_weights[ant, :])
             fitted_relative_phase = fit_phase_model(
@@ -967,7 +1065,7 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
                 relative_phase_model,
                 model.relative.phase.segmentation.frequency
             )
-            gains[ant, partner_feed, :] = abs.(gains[ant, partner_feed, :]) .* cis.(angle.(gains[ant, reference_feed, :]) .+ fitted_relative_phase)
+            gains[:, ant, partner_feed] = abs.(gains[:, ant, partner_feed]) .* cis.(angle.(gains[:, ant, reference_feed]) .+ fitted_relative_phase)
         end
     end
 
@@ -981,7 +1079,7 @@ function constrain_gain_models!(
     )
     constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
     constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
-    support_weights = amplitude_support_weights(Wblock, bl_pairs, size(gains, 1), parallel_pols, parallel_hand_mask)
+    support_weights = amplitude_support_weights(Wblock, bl_pairs, size(gains, 2), parallel_pols, parallel_hand_mask)
     repaired = sanitize_gain_amplitudes!(gains, support_weights, c0)
     warn_sanitized_gain_amplitudes(repaired, ant_names; context = context)
     apply_bandpass_gauge!(gains, support_weights, c0, gauge)
@@ -1000,16 +1098,18 @@ then projects that track onto the configured relative amplitude and phase basis
 for the reference station before applying it.
 """
 function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models, pol_products; min_samples = 2)
-    nscan, nbl, _, nchan = size(V)
+    # V/W layout: (Frequency, Ti, Baseline, Pol). xy_correction layout:
+    # (Frequency, Ti).
+    nchan, nti, nbl, _ = size(V)
     cross_pols = cross_hand_indices(pol_products)
-    isnothing(cross_pols) && return ones(ComplexF64, nscan, nchan)
+    isnothing(cross_pols) && return ones(ComplexF64, nchan, nti)
     rr, ll = parallel_hand_indices(pol_products)
     rl, lr = cross_pols.rl, cross_pols.lr
 
-    xy_correction = ones(ComplexF64, nscan, nchan)
+    xy_correction = ones(ComplexF64, nchan, nti)
     ref_model = station_models[ref_ant]
 
-    for s in 1:nscan
+    for s in 1:nti
         raw_correction = ones(ComplexF64, nchan)
         channel_weights = zeros(Float64, nchan)
 
@@ -1025,14 +1125,14 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
 
                 if a == ref_ant
                     estimators = [
-                        (lr, rr, W[s, bi, lr, c], W[s, bi, rr, c], W[s, bi, lr, c0], W[s, bi, rr, c0]),
-                        (ll, rl, W[s, bi, ll, c], W[s, bi, rl, c], W[s, bi, ll, c0], W[s, bi, rl, c0]),
+                        (lr, rr, W[c, s, bi, lr], W[c, s, bi, rr], W[c0, s, bi, lr], W[c0, s, bi, rr]),
+                        (ll, rl, W[c, s, bi, ll], W[c, s, bi, rl], W[c0, s, bi, ll], W[c0, s, bi, rl]),
                     ]
                     sign = 1.0
                 else
                     estimators = [
-                        (rl, rr, W[s, bi, rl, c], W[s, bi, rr, c], W[s, bi, rl, c0], W[s, bi, rr, c0]),
-                        (ll, lr, W[s, bi, ll, c], W[s, bi, lr, c], W[s, bi, ll, c0], W[s, bi, lr, c0]),
+                        (rl, rr, W[c, s, bi, rl], W[c, s, bi, rr], W[c0, s, bi, rl], W[c0, s, bi, rr]),
+                        (ll, lr, W[c, s, bi, ll], W[c, s, bi, lr], W[c0, s, bi, ll], W[c0, s, bi, lr]),
                     ]
                     sign = -1.0
                 end
@@ -1065,7 +1165,7 @@ function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_fre
             channel_weights[c] = sum(correction_weights)
         end
 
-        xy_correction[s, :] .= fit_relative_correction_track(raw_correction, channel_weights, channel_freqs, c0, ref_model)
+        xy_correction[:, s] .= fit_relative_correction_track(raw_correction, channel_weights, channel_freqs, c0, ref_model)
     end
 
     return xy_correction
@@ -1079,11 +1179,13 @@ function solve_bandpass_single_scan(
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
         ref_ant = nothing,
     )
-    _, _, nchan = size(Vs)
+    # Vs/Ws layout: (Frequency, Baseline, Pol). gains layout (3-D template):
+    # (Frequency, Ant, Feed).
+    nchan = size(Vs, 1)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
 
-    gains = ones(ComplexF64, nant, 2, nchan)
-    solved = falses(nant, 2, nchan)
+    gains = ones(ComplexF64, nchan, nant, 2)
+    solved = falses(nchan, nant, 2)
 
     for c in 1:nchan
         c == c0 && continue
@@ -1116,10 +1218,12 @@ function solve_bandpass_template(
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
         ref_ant = nothing,
     )
-    _, _, _, nchan = size(V)
+    # V/W layout: (Frequency, Ti, Baseline, Pol). gains layout (3-D template):
+    # (Frequency, Ant, Feed).
+    nchan = size(V, 1)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
 
-    gains = ones(ComplexF64, nant, 2, nchan)
+    gains = ones(ComplexF64, nchan, nant, 2)
 
     for c in 1:nchan
         c == c0 && continue
@@ -1145,13 +1249,16 @@ function solve_bandpass_template(
 end
 
 function merge_scan_gains!(gain_slice, scan_gains, solved, phase_variable_mask, amplitude_variable_mask)
-    nant, nfeed, nchan = size(gain_slice)
-    for a in 1:nant, feed in 1:nfeed, c in 1:nchan
-        solved[a, feed, c] || continue
+    # 3-D layout: (Frequency, Ant, Feed). Stride-1 inner loop over Frequency.
+    nchan, nant, nfeed = size(gain_slice)
+    for a in 1:nant, feed in 1:nfeed
+        @inbounds for c in 1:nchan
+            solved[c, a, feed] || continue
 
-        amp = amplitude_variable_mask[a, feed] ? abs(scan_gains[a, feed, c]) : abs(gain_slice[a, feed, c])
-        phase = phase_variable_mask[a, feed] ? angle(scan_gains[a, feed, c]) : angle(gain_slice[a, feed, c])
-        gain_slice[a, feed, c] = amp * cis(phase)
+            amp = amplitude_variable_mask[a, feed] ? abs(scan_gains[c, a, feed]) : abs(gain_slice[c, a, feed])
+            phase = phase_variable_mask[a, feed] ? angle(scan_gains[c, a, feed]) : angle(gain_slice[c, a, feed])
+            gain_slice[c, a, feed] = amp * cis(phase)
+        end
     end
 
     return gain_slice
@@ -1288,27 +1395,30 @@ function prepare_bandpass_solver(
 end
 
 function update_state_sources_and_objectives!(setup::BandpassSolverSetup, state::BandpassSolverState)
+    # data.vis/weights layout: (Frequency, Ti, Baseline, Pol). scan_gains:
+    # (Frequency, Ti, Ant, Feed). scan_sources: (Ti, Baseline, 2, 2).
+    # Slice along Ti (dim 2 for vis/weights/scan_gains, dim 1 for scan_sources).
     solve_source_coherencies!(state.template_source, state.gains_template, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products)
     state.template_objective = joint_bandpass_objective(
         state.gains_template, state.template_source, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products
     )
 
-    for s in axes(state.scan_gains, 1)
-        scan_source = allocate_source_coherencies(view(setup.data.vis, s, :, :, :))
+    for s in axes(state.scan_gains, 2)
+        vis_s = view(setup.data.vis, :, s, :, :)
+        w_s = view(setup.data.weights, :, s, :, :)
+        scan_source = allocate_source_coherencies(vis_s)
         solve_source_coherencies!(
             scan_source,
-            view(state.scan_gains, s, :, :, :),
-            view(setup.data.vis, s, :, :, :),
-            view(setup.data.weights, s, :, :, :),
+            view(state.scan_gains, :, s, :, :),
+            vis_s, w_s,
             setup.bl_pairs,
             setup.pol_products
         )
         state.scan_sources[s, :, :, :] .= scan_source[1, :, :, :]
         state.scan_objectives[s] = joint_bandpass_objective(
-            view(state.scan_gains, s, :, :, :),
+            view(state.scan_gains, :, s, :, :),
             scan_source,
-            view(setup.data.vis, s, :, :, :),
-            view(setup.data.weights, s, :, :, :),
+            vis_s, w_s,
             setup.bl_pairs,
             setup.pol_products
         )
@@ -1320,12 +1430,18 @@ end
 function assemble_bandpass_state_gains!(
         merged_gains, gains_template, scan_gains, scan_solved, phase_variable_mask, amplitude_variable_mask
     )
-    merged_gains .= reshape(gains_template, 1, size(gains_template, 1), size(gains_template, 2), size(gains_template, 3))
-    for s in axes(scan_gains, 1)
+    # merged_gains/scan_gains/scan_solved layout: (Frequency, Ti, Ant, Feed).
+    # gains_template layout: (Frequency, Ant, Feed). Broadcast template across
+    # Ti (dim 2).
+    nchan = size(gains_template, 1)
+    nant = size(gains_template, 2)
+    nfeed = size(gains_template, 3)
+    merged_gains .= reshape(gains_template, nchan, 1, nant, nfeed)
+    for s in axes(scan_gains, 2)
         merge_scan_gains!(
-            view(merged_gains, s, :, :, :),
-            view(scan_gains, s, :, :, :),
-            view(scan_solved, s, :, :, :),
+            view(merged_gains, :, s, :, :),
+            view(scan_gains, :, s, :, :),
+            view(scan_solved, :, s, :, :),
             phase_variable_mask,
             amplitude_variable_mask
         )
@@ -1339,11 +1455,15 @@ function build_bandpass_solver_state(
         scan_gains,
         scan_solved
     )
+    # data.vis layout: (Frequency, Ti, Baseline, Pol).
     data = setup.data
-    nscan, _, _, nchan = size(data.vis)
+    nchan, nti, _, _ = size(parent(data.vis))
     nbl = length(setup.bl_pairs)
+    nant = size(gains_template, 2)
+    nfeed = size(gains_template, 3)
 
-    gains = repeat(reshape(gains_template, 1, size(gains_template, 1), size(gains_template, 2), size(gains_template, 3)), nscan, 1, 1, 1)
+    # gains: (Frequency, Ti, Ant, Feed) — template broadcast across Ti.
+    gains = repeat(reshape(gains_template, nchan, 1, nant, nfeed), 1, nti, 1, 1)
     assemble_bandpass_state_gains!(
         gains, gains_template, scan_gains, scan_solved, setup.phase_variable_mask, setup.amplitude_variable_mask
     )
@@ -1353,19 +1473,21 @@ function build_bandpass_solver_state(
         scan_gains,
         scan_solved,
         gains,
-        ones(ComplexF64, nscan, nbl, 2, 2),
-        ones(ComplexF64, nscan, nbl, 2, 2),
+        ones(ComplexF64, nti, nbl, 2, 2),
+        ones(ComplexF64, nti, nbl, 2, 2),
         0.0,
-        zeros(Float64, nscan),
-        ones(ComplexF64, nscan, nchan),
+        zeros(Float64, nti),
+        ones(ComplexF64, nchan, nti),
         0,
     )
     return update_state_sources_and_objectives!(setup, state)
 end
 
 function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassInitializer)
+    # data.vis layout: (Frequency, Ti, Baseline, Pol). gains_template:
+    # (Frequency, Ant, Feed). scan_gains/scan_solved: (Frequency, Ti, Ant, Feed).
     data = setup.data
-    nscan, _, _, nchan = size(data.vis)
+    nchan, nti, _, _ = size(parent(data.vis))
     nant = length(data.antennas)
 
     gains_template = solve_bandpass_template(
@@ -1386,12 +1508,12 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
         ref_ant = setup.ref_ant,
     )
 
-    scan_gains = ones(ComplexF64, nscan, nant, 2, nchan)
-    scan_solved = falses(nscan, nant, 2, nchan)
-    for s in 1:nscan
+    scan_gains = ones(ComplexF64, nchan, nti, nant, 2)
+    scan_solved = falses(nchan, nti, nant, 2)
+    for s in 1:nti
         gains_scan, solved = solve_bandpass_single_scan(
-            view(data.vis, s, :, :, :),
-            view(data.weights, s, :, :, :),
+            view(data.vis, :, s, :, :),
+            view(data.weights, :, s, :, :),
             setup.bl_pairs,
             nant,
             setup.c0,
@@ -1407,32 +1529,33 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
             gauge = setup.gauge,
             ref_ant = setup.ref_ant,
         )
-        scan_gains[s, :, :, :] .= gains_scan
-        scan_solved[s, :, :, :] .= solved
+        scan_gains[:, s, :, :] .= gains_scan
+        scan_solved[:, s, :, :] .= solved
     end
 
     return build_bandpass_solver_state(setup, gains_template, scan_gains, scan_solved)
 end
 
 function initialize_bandpass_state(setup::BandpassSolverSetup, initializer::RandomBandpassInitializer)
+    # gains_template: (Frequency, Ant, Feed). scan_gains: (Frequency, Ti, Ant, Feed).
     data = setup.data
-    nscan, _, _, nchan = size(data.vis)
+    nchan, nti, _, _ = size(parent(data.vis))
     nant = length(data.antennas)
     rng = initializer.rng
 
-    gains_template = exp.(initializer.amplitude_sigma .* randn(rng, nant, 2, nchan)) .* cis.(initializer.phase_sigma .* randn(rng, nant, 2, nchan))
+    gains_template = exp.(initializer.amplitude_sigma .* randn(rng, nchan, nant, 2)) .* cis.(initializer.phase_sigma .* randn(rng, nchan, nant, 2))
     support_template = antenna_feed_support_weights(data.weights, setup.bl_pairs, setup.pol_products, nant)
     apply_bandpass_gauge!(gains_template, support_template, setup.c0, setup.gauge)
 
-    scan_gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
+    scan_gains = repeat(reshape(gains_template, nchan, 1, nant, 2), 1, nti, 1, 1)
     if initializer.scan_perturbation > 0
-        scan_gains .*= exp.(initializer.scan_perturbation .* randn(rng, nscan, nant, 2, nchan)) .* cis.(initializer.scan_perturbation .* randn(rng, nscan, nant, 2, nchan))
+        scan_gains .*= exp.(initializer.scan_perturbation .* randn(rng, nchan, nti, nant, 2)) .* cis.(initializer.scan_perturbation .* randn(rng, nchan, nti, nant, 2))
     end
-    for s in 1:nscan
-        support_scan = antenna_feed_support_weights(view(data.weights, s, :, :, :), setup.bl_pairs, setup.pol_products, nant)
-        apply_bandpass_gauge!(view(scan_gains, s, :, :, :), support_scan, setup.c0, setup.gauge)
+    for s in 1:nti
+        support_scan = antenna_feed_support_weights(view(data.weights, :, s, :, :), setup.bl_pairs, setup.pol_products, nant)
+        apply_bandpass_gauge!(view(scan_gains, :, s, :, :), support_scan, setup.c0, setup.gauge)
     end
-    scan_solved = trues(nscan, nant, 2, nchan)
+    scan_solved = trues(nchan, nti, nant, 2)
 
     return build_bandpass_solver_state(setup, gains_template, scan_gains, scan_solved)
 end
@@ -1449,21 +1572,25 @@ function fit_bandpass_source_coherencies(setup::BandpassSolverSetup, gains = not
 end
 
 function compute_bandpass_model_and_residuals(setup::BandpassSolverSetup, gains, source)
+    # V/W layout: (Frequency, Ti, Baseline, Pol). gains: (Frequency, Ti, Ant, Feed).
     V = setup.data.vis
     W = setup.data.weights
     model = fill(NaN + NaN * im, size(V))
     residual = similar(model)
 
-    for s in axes(V, 1), bi in axes(V, 2), pol in axes(V, 3), c in axes(V, 4)
-        v = V[s, bi, pol, c]
-        w = W[s, bi, pol, c]
-        (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
-
+    for pol in axes(V, 4), bi in axes(V, 3), s in axes(V, 2)
         a, b = setup.bl_pairs[bi]
         fa, fb = correlation_feed_pair(setup.pol_products[pol])
-        m = gains[s, a, fa, c] * source[s, bi, fa, fb] * conj(gains[s, b, fb, c])
-        model[s, bi, pol, c] = m
-        residual[s, bi, pol, c] = v - m
+        src = source[s, bi, fa, fb]
+        @inbounds for c in axes(V, 1)
+            v = V[c, s, bi, pol]
+            w = W[c, s, bi, pol]
+            (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+
+            m = gains[c, s, a, fa] * src * conj(gains[c, s, b, fb])
+            model[c, s, bi, pol] = m
+            residual[c, s, bi, pol] = v - m
+        end
     end
 
     return model, residual
@@ -1518,11 +1645,13 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseli
     _, residual = compute_bandpass_model_and_residuals(setup, gains, source)
     rows = NamedTuple[]
 
+    # residual / weights layout: (Frequency, Ti, Baseline, Pol). Slice
+    # along Frequency (dim 1) and Ti (dim 2).
     if by == :baseline
         for (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_products)
             stats = summarize_bandpass_residual_block(
-                view(residual, :, bi, pol, :),
-                view(setup.data.weights, :, bi, pol, :)
+                view(residual, :, :, bi, pol),
+                view(setup.data.weights, :, :, bi, pol)
             )
             isnothing(stats) && continue
             push!(
@@ -1535,10 +1664,10 @@ function bandpass_residual_stats(setup::BandpassSolverSetup, gains; by = :baseli
             )
         end
     elseif by == :scan_baseline
-        for s in axes(setup.data.vis, 1), (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_products)
+        for s in axes(setup.data.vis, 2), (bi, (a, b)) in enumerate(setup.bl_pairs), pol in eachindex(setup.pol_products)
             stats = summarize_bandpass_residual_block(
-                view(residual, s, bi, pol, :),
-                view(setup.data.weights, s, bi, pol, :)
+                view(residual, :, s, bi, pol),
+                view(setup.data.weights, :, s, bi, pol)
             )
             isnothing(stats) && continue
             push!(
@@ -1645,12 +1774,14 @@ function refine_bandpass!(
     end
 
     if refinement.refine_scans
-        for s in axes(state.scan_gains, 1)
+        # scan_gains/scan_solved: (Frequency, Ti, Ant, Feed). data.vis/weights:
+        # (Frequency, Ti, Baseline, Pol). Slice on Ti (dim 2).
+        for s in axes(state.scan_gains, 2)
             refine_joint_bandpass_als!(
-                view(state.scan_gains, s, :, :, :),
-                view(state.scan_solved, s, :, :, :),
-                view(setup.data.vis, s, :, :, :),
-                view(setup.data.weights, s, :, :, :),
+                view(state.scan_gains, :, s, :, :),
+                view(state.scan_solved, :, s, :, :),
+                view(setup.data.vis, :, s, :, :),
+                view(setup.data.weights, :, s, :, :),
                 setup.bl_pairs,
                 setup.pol_products,
                 setup.c0;
@@ -1681,14 +1812,15 @@ function finalize_bandpass_state(
         apply_relative_correction = state.als_iterations_completed == 0,
         project_models = true
     )
+    # state.scan_gains layout: (Frequency, Ti, Ant, Feed).
     data = setup.data
-    nscan = size(state.scan_gains, 1)
-    nant = size(state.scan_gains, 2)
-    nchan = size(state.scan_gains, 4)
+    nchan = size(state.scan_gains, 1)
+    nti = size(state.scan_gains, 2)
+    nant = size(state.scan_gains, 3)
 
     gains_template = copy(state.gains_template)
     scan_gains = copy(state.scan_gains)
-    merged_gains = repeat(reshape(gains_template, 1, nant, 2, nchan), nscan, 1, 1, 1)
+    merged_gains = repeat(reshape(gains_template, nchan, 1, nant, 2), 1, nti, 1, 1)
 
     if project_models
         constrain_gain_models!(
@@ -1706,11 +1838,11 @@ function finalize_bandpass_state(
             gauge = setup.gauge
         )
 
-        for s in 1:nscan
+        for s in 1:nti
             constrain_gain_models!(
-                view(scan_gains, s, :, :, :),
-                view(data.vis, s, :, :, :),
-                view(data.weights, s, :, :, :),
+                view(scan_gains, :, s, :, :),
+                view(data.vis, :, s, :, :),
+                view(data.weights, :, s, :, :),
                 setup.bl_pairs,
                 setup.channel_freqs,
                 setup.c0,
@@ -1728,7 +1860,9 @@ function finalize_bandpass_state(
         merged_gains, gains_template, scan_gains, state.scan_solved, setup.phase_variable_mask, setup.amplitude_variable_mask
     )
 
-    xy_correction = ones(ComplexF64, nscan, nchan)
+    # xy_correction layout: (Frequency, Ti). Apply along the partner-feed
+    # slice of merged_gains (Frequency, Ti, ref_ant, ref_partner_feed).
+    xy_correction = ones(ComplexF64, nchan, nti)
     ref_partner_feed = partner_feed_index(setup.station_models[setup.ref_ant].reference_feed)
     if apply_relative_correction
         xy_correction = solve_ref_xy_correction(
@@ -1742,7 +1876,7 @@ function finalize_bandpass_state(
             setup.station_models,
             setup.pol_products
         )
-        merged_gains[:, setup.ref_ant, ref_partner_feed, :] .*= xy_correction
+        merged_gains[:, :, setup.ref_ant, ref_partner_feed] .*= xy_correction
     end
 
     apply_bandpass_gauge!(
@@ -1766,50 +1900,92 @@ function finalize_bandpass_state(
 end
 
 """
-    solve_bandpass(avg::UVSet, ref_ant; min_baselines=3,
-                   station_models=nothing,
-                   gauge=ZeroMeanBandpassGauge(),
-                   apply_relative_correction=true, joint_als_iterations=8,
-                   joint_als_tolerance=1e-6)
+    _wrap_solution(gains, avg, c0, xy_corr, spw_name) -> DimArray
 
-Solve for per-antenna complex bandpass gains using a staged procedure:
-parallel-hand channel ratios provide the initialization, then an optional joint
-complex ALS refinement fits all available hands with a per-scan/per-baseline
-2×2 nuisance coherency that is held constant across channel. The final gains are
-reported in the requested bandpass gauge across frequency.
-
-Algorithm per (scan s, channel c, feed):
-  1. Form ratios `D[a,b] = V[s,a,b,c] / V[s,a,b,c₀]` so the scan/baseline source term cancels.
-  2. Amplitude: `log|g_a[c]/g_a[c₀]| + log|g_b[c]/g_b[c₀]| = log|D[a,b]|`.
-  3. Phase: `φ_a[c]-φ_a[c₀] - (φ_b[c]-φ_b[c₀]) = ∠D[a,b]`, with one local antenna held fixed.
-  4. If `joint_als_iterations > 0`, refine those gains jointly against all
-     available hands by alternating between source-coherency and gain updates
-     in the complex domain, while gauge-fixing only channel-constant per-track
-     offsets.
-  5. Fit/project the refined tracks onto the configured station models and
-     apply the requested final gain gauge.
-  6. If joint ALS is disabled, optionally use `12`/`21` relative to `11`/`22`
-     on baselines touching `ref_ant` to estimate the reference antenna's
-     differential feed correction.
-
-Returns:
-  gains                         – `DimArray` with scan/antenna/feed/channel axes
-  c0                            – internal reference channel used for ratios, phase unwrapping, and relative-feed correction
-  xy_correction                 – `DimArray` with scan/IF axes and metadata for the target site/pol
+Wrap the inner solver's `(gains, c0, xy_correction)` output as a
+`DimArray` with `(Frequency, Ti, Ant, Pol)` dims — matches the
+public layout natively (no permutation). Auxiliary outputs ride
+along on the DimArray's `metadata` slot, extracted via
+`bandpass_c0` / `bandpass_xy_correction`.
 """
-solve_bandpass(avg::UVSet, ref_ant; kwargs...) =
-    solve_bandpass(_to_bandpass_dataset(avg), ref_ant; kwargs...)
+function _wrap_solution(gains::AbstractArray{<:Complex, 4}, avg::BandpassDataset, c0, xy_corr, spw_name)
+    ant_names = avg.antennas.name
+    pol_labels = pol_products(avg)
+    chan_freqs = UVData.channel_freqs(avg.freq_setup)
+    scan_centers = [(lo + hi) / 2 for (lo, hi) in avg.scans]
+    gains_array = gains isa DimensionalData.AbstractDimArray ? parent(gains) : gains
+    return DimensionalData.DimArray(
+        gains_array,
+        (
+            Frequency(chan_freqs), Ti(scan_centers),
+            Ant(ant_names), Pol(pol_labels),
+        );
+        metadata = Dict{Symbol, Any}(
+            :c0 => c0, :xy_correction => xy_corr, :spw_name => String(spw_name),
+        ),
+    )
+end
+
+"""
+    bandpass_c0(da) -> Int
+    bandpass_xy_correction(da) -> ComplexF64
+
+Read auxiliary solver outputs from a Phase 3 per-SPW gain DimArray.
+"""
+bandpass_c0(da::DimensionalData.AbstractDimArray) =
+    DimensionalData.metadata(da)[:c0]
+bandpass_xy_correction(da::DimensionalData.AbstractDimArray) =
+    DimensionalData.metadata(da)[:xy_correction]
+
+"""
+    solve_bandpass(uvset::UVSet, ref_ant; ...) -> OrderedDict{String, DimArray}
+
+Per-SPW orchestrator. Groups leaves by `spw_name`, builds a
+`BandpassDataset` per group via `_to_bandpass_dataset`, runs the
+inner solver, and collects per-SPW gain `DimArray`s into an ordered
+Dict keyed by `spw_name`. Single-SPW UVSets return a length-1 Dict.
+
+Within an SPW group, `union_antennas` (called by
+`_to_bandpass_dataset`) enforces antenna-metadata consistency across
+multi-subarray leaves; conflicts error with a clear message.
+"""
+function solve_bandpass(
+        uvset::UVSet, ref_ant;
+        min_baselines = 3, station_models = nothing,
+        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
+        apply_relative_correction = true,
+        joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
+    )
+    groups = _group_leaves_by_spw(uvset)
+    isempty(groups) && error("solve_bandpass: UVSet has no leaves")
+
+    sols = OrderedDict{String, DimensionalData.DimArray}()
+    for (spw_name, leaf_keys) in groups
+        sub_uvset = _uvset_with_branches(uvset, leaf_keys)
+        avg = _to_bandpass_dataset(sub_uvset)
+        gains, c0, xy_corr = solve_bandpass(
+            avg, ref_ant;
+            min_baselines = min_baselines, station_models = station_models,
+            gauge = gauge,
+            apply_relative_correction = apply_relative_correction,
+            joint_als_iterations = joint_als_iterations,
+            joint_als_tolerance = joint_als_tolerance,
+        )
+        sols[spw_name] = _wrap_solution(gains, avg, c0, xy_corr, spw_name)
+    end
+    return sols
+end
 
 solve_bandpass(uvset::UVSet, source::AbstractString, ref_ant; kwargs...) =
-    solve_bandpass(_to_bandpass_dataset(select_source(uvset, source)), ref_ant; kwargs...)
+    solve_bandpass(select_source(uvset, source), ref_ant; kwargs...)
 
-# Per-leaf solve: `key` is a branch key like `:M3C273_scan_1`.
+# Per-leaf solve: `key` is a branch key like `:M3C273_spw_0_scan_1`.
 function solve_bandpass(uvset::UVSet, key::Symbol, ref_ant; kwargs...)
     branches_d = DimensionalData.branches(uvset)
     haskey(branches_d, key) || error("UVSet has no partition $key")
     info = DimensionalData.metadata(branches_d[key])
     sub = select_partition(uvset; source = info.source_name, scan = info.scan_name)
-    return solve_bandpass(scan_average(sub), ref_ant; kwargs...)
+    return solve_bandpass(sub, ref_ant; kwargs...)
 end
 
 function solve_bandpass(
