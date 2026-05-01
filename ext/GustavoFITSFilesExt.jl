@@ -508,14 +508,14 @@ function _load_uvfits_flat(path)
     vis_raw = vis_raw[:, perm, :]
     weights_raw = weights_raw[:, perm, :]
 
-    # AIPS UVFITS often stores DATE as two PTYPE columns (integer JD +
-    # fractional day). FITSFiles returns these merged as a matrix with the
-    # fractional part in column 2. When only one DATE column is present
-    # (e.g. round-tripped synthetic fixtures), the value is a vector of
-    # fractional days.
+    # AIPS UVFITS often stores DATE as two PTYPE columns whose sum is
+    # the day offset from RDATE. FITSFiles returns these merged as a
+    # matrix; sum across columns to recover total days. When only one
+    # DATE column is present (e.g. round-tripped synthetic fixtures),
+    # the value is a vector of fractional days.
     date_raw = collect(dt.DATE)
     obs_time::Vector{Float64} = if ndims(date_raw) == 2
-        Float64.(date_raw[:, 2]) .* 24
+        Float64.(vec(sum(date_raw; dims = 2))) .* 24
     else
         Float64.(date_raw) .* 24
     end
@@ -778,16 +778,22 @@ function _rdate_jd(rdate_str::AbstractString)
     end
 end
 
-# Reconstruct an AIPS DATE PTYPE column from a leaf's `obs_time`
-# (hours since RDATE). Emits a single column of fractional days
-# (`obs_time / 24`) shaped `(nrec_leaf, 1)`. The integer JD reference is
-# stored separately in the AN HDU's RDATE card; on read,
-# `obs_time = date_raw * 24` recovers the same hours convention.
+# Reconstruct AIPS DATE PTYPE columns from a leaf's `obs_time` (hours
+# since RDATE). Emits two columns shaped `(nrec_leaf, 2)`: column 1 is
+# the integer-day part `floor(obs_time / 24)` and column 2 is the
+# sub-day fractional remainder. Their sum is `obs_time / 24` (days
+# since RDATE); the integer JD reference is on the AN HDU's RDATE
+# card. AIPS-convention readers (CASA / xradio) require both PTYPE
+# columns; on read, `obs_time = (col1 + col2) * 24` recovers the hours
+# convention.
 function _build_date_param(obs_time_hr::AbstractVector{<:Real}, ::Float64, record_order)
     n = length(record_order)
-    out = Matrix{Float32}(undef, n, 1)
+    out = Matrix{Float32}(undef, n, 2)
     @inbounds for (rec_i, (ti, _)) in enumerate(record_order)
-        out[rec_i, 1] = Float32(obs_time_hr[ti] / 24)
+        days = obs_time_hr[ti] / 24
+        intpart = floor(days)
+        out[rec_i, 1] = Float32(intpart)
+        out[rec_i, 2] = Float32(days - intpart)
     end
     return out
 end
@@ -837,6 +843,59 @@ end
 
 # ── Write path ──────────────────────────────────────────────────────────────
 
+"""
+    _strip_stale_shape_cards!(cards)
+
+Remove all PTYPE/PSCAL/PZERO/PUNIT/NAXIS\$j cards plus NAXIS, PCOUNT,
+GCOUNT from the copied primary header so `create_cards!` rebuilds them
+cleanly from the freshly-derived format/fields. Preserving the originals
+is unsafe because `create_cards!` reuses any existing `PTYPE\$j` card via
+`popat!`, which carries forward stale duplicate `DATE` entries from the
+input header.
+"""
+function _strip_stale_shape_cards!(cards)
+    pat = r"^(PTYPE|PSCAL|PZERO|PUNIT|NAXIS)\d+$|^(NAXIS|PCOUNT|GCOUNT)$"
+    filter!(c -> match(pat, strip(string(c.key))) === nothing, cards)
+    return cards
+end
+
+"""
+    _inject_duplicate_date!(hdu)
+
+Mutate the primary HDU's cards to add a second `PTYPE\$P=DATE` entry
+and bump `PCOUNT` accordingly, restoring the AIPS-convention
+integer-JD + fractional-day PTYPE pair. The HDU's `data.DATE` value
+must already be an N×2 matrix; on `Base.write`, FITSFiles' Random
+field layout reads two `DATE` PTYPE cards from the header and writes
+columns 1 and 2 of the matrix as the two parameter values.
+"""
+function _inject_duplicate_date!(hdu)
+    cards = getfield(hdu, :cards)
+    date_idxs = Int[]
+    pcount_idx = 0
+    naxis_val = 0
+    for (i, c) in enumerate(cards)
+        key = strip(string(c.key))
+        if key == "PCOUNT"
+            pcount_idx = i
+        elseif key == "NAXIS"
+            naxis_val = Int(c.value)
+        else
+            m = match(r"^PTYPE(\d+)$", key)
+            if m !== nothing && rstrip(string(c.value)) == "DATE"
+                push!(date_idxs, parse(Int, m.captures[1]))
+            end
+        end
+    end
+    isempty(date_idxs) && return hdu
+    length(date_idxs) >= 2 && return hdu
+    pcount_idx == 0 && return hdu
+    new_pcount = Int(cards[pcount_idx].value) + 1
+    cards[pcount_idx] = Card("PCOUNT", Int32(new_pcount))
+    push!(cards, Card("PTYPE$(new_pcount)", "DATE"))
+    return hdu
+end
+
 function _ptype_entries(primary_cards)
     entries = Tuple{Int, String}[]
     for card in primary_cards
@@ -857,6 +916,11 @@ function _build_primary_data(uvset::UVSet, uu, vv, ww, bl_codes, date_param, ext
         "BASELINE" => Float32.(bl_codes),
         "DATE" => date_param,
     )
+    # Emit one NamedTuple entry per unique PTYPE name. Duplicate AIPS
+    # `DATE` PTYPEs (integer-JD + fractional-day pair) collapse to a
+    # single :DATE key whose value is an N×2 matrix; the second PTYPE
+    # card is re-injected into the header after HDU construction (see
+    # `_inject_duplicate_date!`).
     pairs = Pair{Symbol, Any}[]
     seen = Set{String}()
     for (idx, name) in _ptype_entries(UVData.primary_cards(uvset))
@@ -1083,7 +1147,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     # (`obs_time / 24`); the integer JD reference is on the AN HDU's RDATE
     # card. FITSFiles only emits one PTYPE column per Symbol key, so
     # multi-PTYPE-DATE round-trip is reduced to single-column on write.
-    date_param_cat = Matrix{Float32}(undef, nrec_total, 1)
+    date_param_cat = Matrix{Float32}(undef, nrec_total, 2)
     extras_keys = keys(fp_info.extra_columns)
     extras_eltypes = ntuple(i -> eltype(fp_info.extra_columns[i]), length(extras_keys))
     extras_bufs = ntuple(i -> Vector{extras_eltypes[i]}(undef, nrec_total), length(extras_keys))
@@ -1141,7 +1205,9 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
 
     extras_cat = NamedTuple{extras_keys}(extras_bufs)
     primary_data = _build_primary_data(uvset, uu, vv, ww_, bl_codes, date_param_cat, extras_cat, raw_data)
-    primary_hdu = HDU(Random, primary_data, copy(cards))
+    primary_cards_out = _strip_stale_shape_cards!(copy(cards))
+    primary_hdu = HDU(Random, primary_data, primary_cards_out)
+    _inject_duplicate_date!(primary_hdu)
     # One AN HDU per unique antenna table. Per-SPW reference frequencies
     # live on each FQ row; the AN ref_freq is the array nominal taken from
     # the first setup.
