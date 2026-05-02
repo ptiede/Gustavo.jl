@@ -7,7 +7,7 @@ using ..UVData:
     TimeAverage, AbstractPartitionReducer,
     apply, leaves, sources, scan_ids,
     select_source, select_scan, select_partition, merge_uvsets,
-    scan_idx, scan_id, baselines, record_order, extra_columns, obs_time,
+    baselines, record_order, extra_columns, obs_time,
     pol_products, PolTypes
 using PolarizedTypes: RPol, LPol, XPol, YPol
 using DimensionalData: Ti
