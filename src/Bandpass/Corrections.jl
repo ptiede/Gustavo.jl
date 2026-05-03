@@ -38,16 +38,37 @@ function apply_bandpass(uvset::UVSet, sols::AbstractDict)
     end
 end
 
-# Look up a leaf's scan slot in the per-SPW gain DimArray's `Scan` axis
-# by matching scan-time center. Returns 0 if the leaf has no usable
-# scan window or no matching center (caller passes through unchanged).
+"""
+    apply_bandpass(uvset::UVSet, gains::AbstractDimArray) -> UVSet
+
+Single-SPW shorthand: wraps `gains` as `Dict(spw_name => gains)` using
+the SPW label embedded in the DimArray's metadata (set by
+`finalize_bandpass_state` / `wrap_gain_solutions`). Defaults to
+`"spw_0"` when no metadata is attached.
+"""
+function apply_bandpass(uvset::UVSet, gains::DimensionalData.AbstractDimArray)
+    md = DimensionalData.metadata(gains)
+    spw_name = md isa AbstractDict && haskey(md, :spw_name) ? String(md[:spw_name]) : "spw_0"
+    return apply_bandpass(uvset, Dict(spw_name => gains))
+end
+
+# Absolute scan-match tolerance. `obs_time` is in fractional hours since
+# RDATE 00:00 UTC; 1e-3 h = 3.6 s — well above the Float32 round-trip
+# error in the AIPS DATE PTYPE (~1.3 ms at typical magnitudes) and well
+# below any plausible scan separation.
+const _SCAN_MATCH_TOL_HOURS = 1.0e-3
+
+# Look up a leaf's scan slot in the per-SPW gain DimArray's `Ti` axis by
+# matching scan-time center to within `_SCAN_MATCH_TOL_HOURS`. Returns 0
+# if the leaf has no usable scan window or no matching center (caller
+# passes through unchanged).
 function _scan_index_for_leaf(leaf, gains::DimensionalData.AbstractDimArray)
     scan_lookup = collect(lookup(gains, Ti))
     lo, hi = UVData.scan_window(leaf)
     (isfinite(lo) && isfinite(hi)) || return 0
     target = (lo + hi) / 2
     for (i, c) in enumerate(scan_lookup)
-        c ≈ target && return i
+        abs(c - target) <= _SCAN_MATCH_TOL_HOURS && return i
     end
     return 0
 end

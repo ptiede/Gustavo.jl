@@ -87,7 +87,7 @@ Categorical scan colormap for plot helpers. Provided by `GustavoMakieExt`.
 function diagnostic_scan_colormap end
 
 export load_uvfits, write_uvfits, scan_average
-export baseline_visibilities, baseline_weights, wrap_gain_solutions, wrap_xy_correction
+export baseline_visibilities, baseline_weights, wrap_gain_solutions
 export polarization_feeds, parallel_hand_indices, cross_hand_indices
 export correlation_feed_pair, is_parallel_hand
 export AbstractBandpassModel
@@ -99,8 +99,8 @@ export GlobalFrequencySegmentation, BlockFrequencySegmentation
 export BandpassSegmentation, BandpassSpec, FeedBandpassModel, StationBandpassModel
 export bandpass, parameter_count
 export validate_station_bandpass_model, is_per_scan, phase_is_per_scan, amplitude_is_per_scan
-export best_ref_channel, design_matrices, build_station_models, station_model_summary, choose_phase_reference
-export BandpassSolverSetup, BandpassSolverState, BandpassSolverResult
+export design_matrices, build_station_models, station_model_summary, choose_phase_reference
+export BandpassSolverSetup, BandpassSolverState
 export AbstractBandpassGauge, ZeroMeanBandpassGauge, ReferenceAntennaBandpassGauge
 export AbstractBandpassInitializer, RatioBandpassInitializer, RandomBandpassInitializer
 export AbstractBandpassRefinement, BandpassALS

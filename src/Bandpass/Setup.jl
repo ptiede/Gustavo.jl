@@ -176,15 +176,45 @@ function weighted_constrained_least_squares(A, b, inv_variances, C, d; constrain
     return solve(LinearProblem(vcat(Aw, Acon), vcat(bw, bcon)), QRFactorization()).u
 end
 
-function unwrap_phase_track(phases, ref_idx = 1)
+"""
+    unwrap_phase_track(phases; weights=nothing) -> Vector
+
+Unwrap a phase track to remove ±2π discontinuities between adjacent
+finite samples. The walk seeds from a single reference index, picked
+internally as `argmax(weights[finite])` when `weights` is provided, or
+the first finite phase otherwise. The returned track is bit-identical
+to the prior `unwrap_phase_track(phases, ref_idx)` form when `ref_idx`
+is the highest-weight finite channel.
+
+This is an algorithmic anchor only — downstream gauge code should
+always center via a weighted mean (or remove a per-feed factor in the
+`ReferenceAntennaBandpassGauge` case), not pin the unwrap reference.
+"""
+function unwrap_phase_track(phases; weights = nothing)
     unwrapped = copy(phases)
     n = length(unwrapped)
-    (1 <= ref_idx <= n) || return unwrapped
+    n == 0 && return unwrapped
 
-    if !isfinite(unwrapped[ref_idx])
-        ref_idx = findfirst(isfinite, unwrapped)
-        isnothing(ref_idx) && return unwrapped
+    finite = isfinite.(unwrapped)
+    any(finite) || return unwrapped
+
+    ref_idx = if weights === nothing
+        findfirst(finite)
+    else
+        @assert length(weights) == n "weights length must match phases length"
+        # Choose the highest-weight finite channel as the unwrap seed.
+        best_w = -Inf
+        best_i = findfirst(finite)
+        @inbounds for i in 1:n
+            (finite[i] && isfinite(weights[i])) || continue
+            if weights[i] > best_w
+                best_w = weights[i]
+                best_i = i
+            end
+        end
+        best_i
     end
+    isnothing(ref_idx) && return unwrapped
 
     last = unwrapped[ref_idx]
     for i in (ref_idx + 1):n

@@ -485,8 +485,16 @@ function coherence_loss_table(
         baseline = string(avg.antennas.name[a], "-", avg.antennas.name[b])
 
         for (pi, lab) in zip(pol_idx, pol_labels)
-            before = residual_phase_coherence(view(V, :, bi, pi, :), view(W, :, bi, pi, :))
-            after = residual_phase_coherence(view(V_corr, :, bi, pi, :), view(W_corr, :, bi, pi, :))
+            # BandpassDataset cubes are (Frequency, Ti, Baseline, Pol), while
+            # `residual_phase_coherence` consumes (Ti, Frequency) blocks.
+            before = residual_phase_coherence(
+                transpose(view(V, Baseline=bi, Pol=pi)),
+                transpose(view(W, Baseline=bi, Pol=pi)),
+            )
+            after = residual_phase_coherence(
+                transpose(view(V_corr, Baseline=bi, Pol=pi)),
+                transpose(view(W_corr, Baseline=bi, Pol=pi)),
+            )
             nsamp = max(before[4], after[4])
             nsamp == 0 && continue
 

@@ -95,6 +95,7 @@ function UVSet(flat::NamedTuple)
     # participation splits leaves further when it's non-uniform.
     seen = Set{Tuple{String, Int, Int}}()
     ordered = Tuple{String, Int, Int}[]
+    grouped_int_inds = Dict{Tuple{String, Int, Int}, Vector{Int}}()
     for i in eachindex(flat.record_scan_name)
         triple = (
             String(flat.record_scan_name[i]),
@@ -104,14 +105,16 @@ function UVSet(flat::NamedTuple)
         if !(triple in seen)
             push!(ordered, triple)
             push!(seen, triple)
+            grouped_int_inds[triple] = Int[]
         end
+        push!(grouped_int_inds[triple], i)
     end
     isempty(ordered) && error("UVSet(flat): no records in input")
 
     branches = DimensionalData.TreeDict()
     for (lbl, spw, sub) in ordered
         leaf, info = _extract_scan_leaf(
-            flat, lbl, spw, sub, antenna_tables, record_sub_idx;
+            flat, grouped_int_inds[(lbl, spw, sub)], lbl, spw, sub, antenna_tables;
             source_key = src_key, basename = base_name, n_sub = n_sub,
         )
         key = partition_key(info)
@@ -494,7 +497,10 @@ function participating_antennas(part::DimensionalData.AbstractDimTree)
     return sort!(collect(Set{String}(vcat(bls.ant1_names, bls.ant2_names))))
 end
 
-# Time axis lookup. Leaves use `Ti`.
+# Time axis lookup. Leaves use `Ti`. Values are Float64 fractional hours
+# since RDATE 00:00 UTC (the AIPS RDATE card on the AN HDU). For a
+# single-night track, magnitudes are bounded by ~24; multi-night tracks
+# accumulate as 24·days_offset + hour_within_day.
 function obs_time(part::DimensionalData.AbstractDimTree)
     vis = part[:vis]
     return hasdim(vis, Ti) ? lookup(vis, Ti) : lookup(vis, Integration)

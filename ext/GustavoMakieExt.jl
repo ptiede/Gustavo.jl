@@ -37,6 +37,9 @@ Bandpass.diagnostic_scan_colormap(nscan) =
 
 const diagnostic_scan_colormap = Bandpass.diagnostic_scan_colormap
 
+_scan_colorrange(nscan::Integer) =
+    nscan <= 1 ? (0.5, 1.5) : (1.0, Float64(nscan))
+
 function Bandpass.annotate_coherence!(ax, stats; fontsize = 11)
     return text!(
         ax, 0.98, 0.96;
@@ -69,7 +72,7 @@ function Bandpass.plot_noise_segments!(
         color = scan_index,
         alpha = alpha,
         colormap = scan_wheel,
-        colorrange = (1, max(nscan, 1)),
+        colorrange = _scan_colorrange(nscan),
         linewidth = linewidth,
     )
     isempty(cap_xs) || linesegments!(
@@ -77,7 +80,7 @@ function Bandpass.plot_noise_segments!(
         color = scan_index,
         alpha = alpha,
         colormap = scan_wheel,
-        colorrange = (1, max(nscan, 1)),
+        colorrange = _scan_colorrange(nscan),
         linewidth = linewidth,
     )
     return ax
@@ -170,7 +173,7 @@ function Bandpass.plot_stability(
 
         for b in blocks
             s = b.sid
-            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 9)
+            kw = (color = s, colormap = scan_wheel, colorrange = _scan_colorrange(nscan), markersize = 9)
             w_b_before = b.w_b
             w_b_after = use_input_weights ? b.w_b : b.w_a
             before_phase = scatter_series(b.vis_b, w_b_before; groups = nothing)
@@ -189,7 +192,7 @@ function Bandpass.plot_stability(
         isnothing(ylims) || ylims!(ax_b, ylims...)
     end
 
-    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = _scan_colorrange(nscan), label = "Scan")
     return parent
 end
 
@@ -243,7 +246,7 @@ function Bandpass.plot_baseline_phases(
 
         for b in blocks
             s = b.sid
-            kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
+            kw = (color = s, colormap = scan_wheel, colorrange = _scan_colorrange(nscan), markersize = 4)
             w_b_before = b.w_b
             w_b_after = use_input_weights ? b.w_b : b.w_a
             before_phase = phase_series(b.vis_b, w_b_before; relative = relative)
@@ -261,7 +264,7 @@ function Bandpass.plot_baseline_phases(
         isnothing(ylims) || ylims!(ax_b, ylims...)
     end
 
-    Colorbar(parent[1:length(pol_labels), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(pol_labels), 3], colormap = scan_wheel, limits = _scan_colorrange(nscan), label = "Scan")
     return parent
 end
 
@@ -310,7 +313,7 @@ function Bandpass.plot_gain_solutions(parent, gains, data::_DataLike; quantity =
             shared = shared_track(tracks)
             if isnothing(shared)
                 for s in 1:nscan
-                    kw = (color = s, colormap = scan_wheel, colorrange = (1, max(nscan, 1)), markersize = 4)
+                    kw = (color = s, colormap = scan_wheel, colorrange = _scan_colorrange(nscan), markersize = 4)
                     scatter!(ax, tracks[s]; kw...)
                 end
             else
@@ -318,7 +321,7 @@ function Bandpass.plot_gain_solutions(parent, gains, data::_DataLike; quantity =
             end
         end
     end
-    Colorbar(parent[1:length(site_idx), length(pol_idx) + 1], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(site_idx), length(pol_idx) + 1], colormap = scan_wheel, limits = _scan_colorrange(nscan), label = "Scan")
     return parent
 end
 
@@ -425,7 +428,7 @@ function Bandpass.plot_baseline_bandpass(
         shared_phase_track = normalize_by_source ? shared_track(getfield.(plotted_scans, :model_phase)) : nothing
 
         for entry in plotted_scans
-            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
+            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = _scan_colorrange(nscan))
             marker_kw = merge(color_kw, (markersize = 8,))
             line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
 
@@ -462,7 +465,7 @@ function Bandpass.plot_baseline_bandpass(
         axislegend(ax_amp, legend_elements, ["data", model_label]; position = :rt, framevisible = false)
     end
 
-    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(pol_idx), 3], colormap = scan_wheel, limits = _scan_colorrange(nscan), label = "Scan")
     return parent
 end
 
@@ -584,7 +587,7 @@ function Bandpass.plot_baseline_bandpass_residuals(
         shared_model_phase = shared_track(getfield.(plotted_scans, :model_phase))
 
         for entry in plotted_scans
-            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = (1, max(nscan, 1)))
+            color_kw = (color = entry.scan, colormap = scan_wheel, colorrange = _scan_colorrange(nscan))
             marker_kw = merge(color_kw, (markersize = 8,))
             line_kw = merge(color_kw, (linewidth = 2.0, alpha = 0.9))
 
@@ -626,7 +629,7 @@ function Bandpass.plot_baseline_bandpass_residuals(
         axislegend(ax_amp, legend_elements, ["data", "G_a · conj(G_b)"]; position = :rt, framevisible = false)
     end
 
-    Colorbar(parent[1:length(pol_idx), 5], colormap = scan_wheel, limits = (1, max(nscan, 1)), label = "Scan")
+    Colorbar(parent[1:length(pol_idx), 5], colormap = scan_wheel, limits = _scan_colorrange(nscan), label = "Scan")
     return parent
 end
 

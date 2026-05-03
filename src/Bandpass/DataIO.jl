@@ -306,16 +306,30 @@ function _slice_dim(A::DimensionalData.AbstractDimArray; kwargs...)
 end
 
 """
-    wrap_gain_solutions(gains, data::BandpassDataset; pol_keys=1:2)
+    wrap_gain_solutions(gains, data::BandpassDataset; pol_keys=1:2,
+                        spw_name="spw_0") -> DimArray
 
 Wrap the solved gain cube in a `DimArray` with `(Frequency, Ti, Ant, Pol)`
-axes — frequency-fastest, pol-slowest in memory.
+axes — frequency-fastest, pol-slowest in memory. The `spw_name` rides
+on the DimArray's metadata so callers can pass the result directly to
+`apply_bandpass` without extra wrapping. Pol axis labels feed indices
+`1:2` (each correlation product uses one feed per side); pol-product
+names live on `data.vis`'s Pol axis.
 """
-function wrap_gain_solutions(gains, data::BandpassDataset; pol_keys = 1:2)
+function wrap_gain_solutions(
+        gains, data::BandpassDataset;
+        pol_keys = 1:2,
+        spw_name::AbstractString = "spw_0",
+    )
     size(gains, 1) == length(UVData.channel_freqs(data.freq_setup)) || error("Gain channel axis does not match dataset channels")
     size(gains, 2) == length(data.scans) || error("Gain Ti axis does not match dataset scans")
     size(gains, 3) == length(data.antennas) || error("Gain antenna axis does not match dataset antennas")
     size(gains, 4) == length(pol_keys) || error("pol_keys length must match gain polarisation axis")
+
+    metadata = Dict{Symbol, Any}(
+        :band_center_frequency => band_center_frequency_dataset(data),
+        :spw_name => String(spw_name),
+    )
 
     return DimensionalData.DimArray(
         gains, (
@@ -323,33 +337,6 @@ function wrap_gain_solutions(gains, data::BandpassDataset; pol_keys = 1:2)
             Ti(scan_time_centers_dataset(data)),
             Ant(data.antennas.name),
             Pol(collect(pol_keys)),
-        ); metadata = Dict(
-            :band_center_frequency => band_center_frequency_dataset(data),
-        )
-    )
-end
-
-"""
-    wrap_xy_correction(xy_correction, data::BandpassDataset, ref_ant; applies_to_pol, reference_pol)
-"""
-function wrap_xy_correction(xy_correction, data::BandpassDataset, ref_ant; applies_to_pol, reference_pol)
-    size(xy_correction, 1) == length(UVData.channel_freqs(data.freq_setup)) || error("XY correction Frequency axis does not match dataset channels")
-    size(xy_correction, 2) == length(data.scans) || error("XY correction Ti axis does not match dataset scans")
-    1 <= ref_ant <= length(data.antennas) || error("ref_ant index out of bounds")
-
-    metadata = Dict(
-        :SiteIndices => [ref_ant],
-        :Sites => [data.antennas.name[ref_ant]],
-        :applies_to_pol => applies_to_pol,
-        :reference_pol => reference_pol,
-        :channel_freqs => UVData.channel_freqs(data.freq_setup),
-        :band_center_frequency => band_center_frequency_dataset(data),
-    )
-
-    return DimensionalData.DimArray(
-        xy_correction, (
-            Frequency(UVData.channel_freqs(data.freq_setup)),
-            Ti(scan_time_centers_dataset(data)),
-        ); metadata = metadata
+        ); metadata = metadata,
     )
 end

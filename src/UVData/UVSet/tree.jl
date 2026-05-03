@@ -35,18 +35,11 @@ function _build_leaf(
 end
 
 function _extract_scan_leaf(
-        flat::NamedTuple, scan_label::AbstractString,
+        flat::NamedTuple, int_inds::AbstractVector{<:Integer}, scan_label::AbstractString,
         spw_index::Integer, subarray_index::Integer,
-        antenna_tables::AbstractVector, record_sub_idx::AbstractVector{<:Integer};
+        antenna_tables::AbstractVector;
         source_key::Symbol, basename::AbstractString, n_sub::Integer = 1,
     )
-    int_inds = findall(
-        i -> flat.record_scan_name[i] == scan_label &&
-            Int(flat.record_spw_index[i]) == Int(spw_index) &&
-            record_sub_idx[i] == Int(subarray_index),
-        eachindex(flat.record_scan_name),
-    )
-
     leaf_freq_setup = flat.freq_setups[Int(spw_index)]
     leaf_antennas = antenna_tables[Int(subarray_index)]
     bl_pairs_per_record = flat.baselines.pairs_per_record[int_inds]

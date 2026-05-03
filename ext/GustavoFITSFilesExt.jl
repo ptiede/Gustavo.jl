@@ -211,10 +211,17 @@ end
 function _split_per_antenna_polcal(an, sym::Symbol, nant)
     hasproperty(an, sym) || return [Float32[] for _ in 1:nant]
     raw = getproperty(an, sym)
-    if raw isa AbstractMatrix
-        return [Float32.(view(raw, i, :)) for i in 1:nant]
+    # Materialize eagerly via `collect`: the AN HDU column may come
+    # back as a lazy `LazyFieldArray`, and downstream `hash`/`==` on
+    # the antenna struct iterates the per-antenna POLCAL vectors —
+    # which crashes on lazy 0-length chunked arrays. We avoid
+    # `Matrix{T}(::LazyFieldArray)` because that path goes through
+    # DiskArrays' broadcast machinery and also fails on empty fields.
+    raw_mat = collect(raw)
+    if raw_mat isa AbstractMatrix
+        return [Float32.(raw_mat[i, :]) for i in 1:nant]
     end
-    return [Float32.(x) for x in collect(raw)]
+    return [Float32.(collect(x)) for x in raw_mat]
 end
 
 function _build_antenna_table(an_hdu)
@@ -461,6 +468,78 @@ function UVData.load_uvfits(path)
     return uvset
 end
 
+const _NX_TIME_TOL_HOURS = 1.0e-6
+
+function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
+    nrec = length(obs_time)
+    rows = zeros(Int, nrec)
+    isempty(nx_lower) && return rows
+
+    perm = sortperm(nx_lower)
+    lower_s = nx_lower[perm]
+    upper_s = nx_upper[perm]
+    center_s = (lower_s .+ upper_s) ./ 2
+
+    @inbounds for i in eachindex(obs_time)
+        t = obs_time[i]
+        pos = searchsortedlast(lower_s, t)
+
+        assigned = 0
+        if 1 <= pos <= length(lower_s)
+            lo = lower_s[pos] - _NX_TIME_TOL_HOURS
+            hi = upper_s[pos] + _NX_TIME_TOL_HOURS
+            if lo <= t <= hi
+                assigned = perm[pos]
+            end
+        end
+        if assigned == 0 && pos + 1 <= length(lower_s)
+            lo = lower_s[pos + 1] - _NX_TIME_TOL_HOURS
+            hi = upper_s[pos + 1] + _NX_TIME_TOL_HOURS
+            if lo <= t <= hi
+                assigned = perm[pos + 1]
+            end
+        end
+
+        if assigned == 0
+            best_j = clamp(pos, 1, length(center_s))
+            best_d = abs(t - center_s[best_j])
+            for j in max(1, pos - 2):min(length(center_s), pos + 2)
+                d = abs(t - center_s[j])
+                if d < best_d
+                    best_d = d
+                    best_j = j
+                end
+            end
+            assigned = perm[best_j]
+        end
+
+        rows[i] = assigned
+    end
+    return rows
+end
+
+function _assign_records_to_nx_rows(
+        obs_time, nx_lower, nx_upper;
+        nx_start_vis = nothing, nx_end_vis = nothing,
+    )
+    nrec = length(obs_time)
+    if nx_start_vis !== nothing && nx_end_vis !== nothing && length(nx_start_vis) == length(nx_end_vis)
+        rows = zeros(Int, nrec)
+        complete = true
+        @inbounds for s in eachindex(nx_start_vis)
+            lo = Int(round(nx_start_vis[s]))
+            hi = Int(round(nx_end_vis[s]))
+            if !(1 <= lo <= hi <= nrec) || any(!=(0), @view(rows[lo:hi]))
+                complete = false
+                break
+            end
+            rows[lo:hi] .= s
+        end
+        complete && all(!=(0), rows) && return rows
+    end
+    return _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
+end
+
 function _load_uvfits_flat(path)
     fid = FITSFiles.fits(path)
     primary_hdu = fid[1]
@@ -508,17 +587,49 @@ function _load_uvfits_flat(path)
     vis_raw = vis_raw[:, perm, :]
     weights_raw = weights_raw[:, perm, :]
 
-    # AIPS UVFITS often stores DATE as two PTYPE columns whose sum is
-    # the day offset from RDATE. FITSFiles returns these merged as a
-    # matrix; sum across columns to recover total days. When only one
-    # DATE column is present (e.g. round-tripped synthetic fixtures),
-    # the value is a vector of fractional days.
+    # AIPS UVFITS stores DATE as two PTYPE columns. Different writers use
+    # different splits:
+    #   * AIPS strict: col1 = integer JD (~2.46e6 for 2022 data), col2 =
+    #     fractional day. Sum is full JD.
+    #   * Gustavo / round-tripped: col1 = floor(days_since_RDATE) (~0..few),
+    #     col2 = fractional remainder. Sum is days_since_RDATE.
+    # We lift each column to Float64 *before* summing (Float32 ULP at JD
+    # magnitude is ~0.25 days, which would collapse sub-second timestamps),
+    # then detect whether the sum is full JD or already RDATE-relative and
+    # produce **fractional hours since RDATE 00:00 UTC** ("hours since the
+    # start of the track"). Magnitude is bounded by track length (typically
+    # 0..~24 h) so float-tolerance comparisons in scan-matching code (e.g.
+    # `_scan_index_for_leaf`'s `≈`) have plenty of headroom.
+    rdate_jd = _rdate_jd_or_zero(array_obs.rdate)
     date_raw = collect(dt.DATE)
-    obs_time::Vector{Float64} = if ndims(date_raw) == 2
-        Float64.(vec(sum(date_raw; dims = 2))) .* 24
+    raw_sum::Vector{Float64} = if ndims(date_raw) == 2
+        Float64.(@view date_raw[:, 1]) .+ Float64.(@view date_raw[:, 2])
     else
-        Float64.(date_raw) .* 24
+        Float64.(date_raw)
     end
+    # Detect AIPS-strict full-JD (large) vs already-RDATE-relative (small).
+    # Full JD has been > 2.4e6 since ~1858 (the MJD reference); plausible
+    # days-since-RDATE is < ~1e3 even for decade-long campaigns. A value
+    # in [1e3, 2.4e6) cannot come from either convention and indicates a
+    # corrupted file or unsupported writer — error rather than guess.
+    days_since_rdate::Vector{Float64} = if isempty(raw_sum)
+        raw_sum
+    else
+        raw_max = maximum(raw_sum)
+        if raw_max >= 2.4e6
+            raw_sum .- rdate_jd          # AIPS-strict full JD
+        elseif raw_max <= 1.0e3
+            raw_sum                       # Gustavo / RDATE-relative
+        else
+            error(
+                "load_uvfits: ambiguous DATE PTYPE values — max(col1+col2) = $raw_max " *
+                    "is neither plausibly a full Julian Day (≥2.4e6) nor a " *
+                    "days-since-RDATE offset (≤1e3). The file may be corrupted " *
+                    "or written with an unsupported convention."
+            )
+        end
+    end
+    obs_time::Vector{Float64} = days_since_rdate .* 24.0
     bl_codes::Vector{Int} = round.(Int, collect(dt.BASELINE))
 
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
@@ -532,52 +643,32 @@ function _load_uvfits_flat(path)
     extra_columns = _collect_extra_columns(dt, primary_hdu.cards)
 
     # Materialize the NX columns up front: they come back as lazy
-    # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition;
-    # we bin records by half-open `[lower, upper)` time intervals into a
-    # per-record scan label vector. AIPS NX has no SCAN_NUMBER column, so the
-    # row index becomes the canonical scan label (string-cast for xradio
-    # `ScanArray` shape).
+    # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition.
+    # AIPS NX has no SCAN_NUMBER column, so the row index becomes the
+    # canonical scan label (string-cast for xradio `ScanArray` shape).
     nx_time::Vector{Float64} = Float64.(collect(nx.TIME))
     nx_dt::Vector{Float64} = Float64.(collect(nx.var"TIME INTERVAL"))
-    nx_lower::Vector{Float64} = (nx_time .- nx_dt ./ 2) .* 24
-    nx_upper::Vector{Float64} = (nx_time .+ nx_dt ./ 2) .* 24
+    # NX TIME / TIME INTERVAL are days-since-RDATE; convert to hours
+    # since RDATE 00:00 UTC to share `obs_time`'s scale.
+    nx_lower::Vector{Float64} = (nx_time .- nx_dt ./ 2) .* 24.0
+    nx_upper::Vector{Float64} = (nx_time .+ nx_dt ./ 2) .* 24.0
     nx_freqid::Vector{Int32} = hasproperty(nx, Symbol("FREQ ID")) ?
         round.(Int32, collect(nx.var"FREQ ID")) : ones(Int32, length(nx_time))
     nx_subarray::Vector{Int32} = hasproperty(nx, :SUBARRAY) ?
         round.(Int32, collect(nx.SUBARRAY)) : ones(Int32, length(nx_time))
+    nx_start_vis = hasproperty(nx, Symbol("START VIS")) ?
+        collect(getproperty(nx, Symbol("START VIS"))) : nothing
+    nx_end_vis = hasproperty(nx, Symbol("END VIS")) ?
+        collect(getproperty(nx, Symbol("END VIS"))) : nothing
 
-    # Bin each record into the NX row whose center is nearest. This is
-    # robust to:
-    #   - degenerate zero-width intervals (single-timestamp leaves where
-    #     `lower == upper` collapse to one center).
-    #   - Float32→Float64 round-off in the DATE PTYPE column (DATE * 24 can
-    #     drift by ~1e-7, which would push a record outside a `[l, u]`
-    #     check on the literal interval).
-    # Records were pre-binned by NX row on the writer side, so the nearest-
-    # center rule is unambiguous.
-    nx_centers::Vector{Float64} = (nx_lower .+ nx_upper) ./ 2
-    record_scan_name = Vector{String}(undef, length(obs_time))
-    record_nx_row = zeros(Int, length(obs_time))
-    if isempty(nx_centers)
-        fill!(record_scan_name, "")
-    else
-        @inbounds for i in eachindex(obs_time)
-            t = obs_time[i]
-            best_s = 1
-            best_d = abs(t - nx_centers[1])
-            for s in 2:length(nx_centers)
-                d = abs(t - nx_centers[s])
-                if d < best_d
-                    best_d = d
-                    best_s = s
-                end
-            end
-            record_scan_name[i] = string(best_s)
-            record_nx_row[i] = best_s
-        end
-    end
-    # Drop records that fall outside any NX row; they cannot be assigned to a
-    # leaf and would otherwise pollute the partition.
+    # Prefer explicit NX record ranges when present: they're exact and avoid
+    # an O(nrecord * nscan) nearest-center search on large files. Fall back to
+    # time-based assignment for files that omit START/END VIS.
+    record_nx_row = _assign_records_to_nx_rows(
+        obs_time, nx_lower, nx_upper;
+        nx_start_vis = nx_start_vis, nx_end_vis = nx_end_vis,
+    )
+    record_scan_name = [r == 0 ? "" : string(r) for r in record_nx_row]
     valid = findall(!=(""), record_scan_name)
     if length(valid) != length(obs_time)
         obs_time = obs_time[valid]
@@ -766,31 +857,32 @@ function _fast_random_read(lazy::FITSFiles.LazyArray)
 end
 
 # Parse `array_obs.rdate` (e.g. "2022-01-01") to a Julian Day at 0h UT.
-# Returns the canonical AIPS reference: integer JD ending in `.5`.
-# Falls back to MJD0 (`2_400_000.5`) when the string is empty / unparseable.
-function _rdate_jd(rdate_str::AbstractString)
-    isempty(rdate_str) && return 2_400_000.5
+# Used to subtract from AIPS-strict full-JD `DATE` PTYPE values when
+# decoding to "days since RDATE". Returns 0.0 when the string is empty /
+# unparseable so the subtraction is a no-op (Gustavo-written files
+# already store days-since-RDATE in `DATE` and do not need the subtract).
+function _rdate_jd_or_zero(rdate_str::AbstractString)
+    isempty(rdate_str) && return 0.0
     return try
-        d = Date(rdate_str)
-        datetime2julian(DateTime(d))
+        datetime2julian(DateTime(Date(rdate_str)))
     catch
-        2_400_000.5
+        0.0
     end
 end
 
-# Reconstruct AIPS DATE PTYPE columns from a leaf's `obs_time` (hours
-# since RDATE). Emits two columns shaped `(nrec_leaf, 2)`: column 1 is
-# the integer-day part `floor(obs_time / 24)` and column 2 is the
-# sub-day fractional remainder. Their sum is `obs_time / 24` (days
-# since RDATE); the integer JD reference is on the AN HDU's RDATE
-# card. AIPS-convention readers (CASA / xradio) require both PTYPE
-# columns; on read, `obs_time = (col1 + col2) * 24` recovers the hours
-# convention.
-function _build_date_param(obs_time_hr::AbstractVector{<:Real}, ::Float64, record_order)
+# Reconstruct AIPS DATE PTYPE columns from a leaf's `obs_time` (fractional
+# hours since RDATE 00:00 UTC). Emits two columns shaped `(nrec_leaf, 2)`:
+# column 1 is the integer-day part of `obs_time / 24`, column 2 is the
+# sub-day fractional remainder. Their sum is days-since-RDATE; the
+# integer-JD reference is on the AN HDU's RDATE card. On read the
+# loader recognises this layout (sum is small, < 1e5) and uses it
+# directly; AIPS-strict files (sum is full JD ≥ 1e5) get rdate_jd
+# subtracted first.
+function _build_date_param(obs_time_hr::AbstractVector{<:Real}, record_order)
     n = length(record_order)
     out = Matrix{Float32}(undef, n, 2)
     @inbounds for (rec_i, (ti, _)) in enumerate(record_order)
-        days = obs_time_hr[ti] / 24
+        days = obs_time_hr[ti] / 24.0
         intpart = floor(days)
         out[rec_i, 1] = Float32(intpart)
         out[rec_i, 2] = Float32(days - intpart)
@@ -1071,8 +1163,10 @@ function _build_nx_hdu(
         subarray_per_scan::AbstractVector{<:Integer} = fill(Int32(1), length(scan_windows)),
     )
     nscan = length(scan_windows)
-    time_center = [Float64(lo + hi) / 48.0 for (lo, hi) in scan_windows]
-    time_interval = [Float32(hi - lo) / 24.0f0 for (lo, hi) in scan_windows]
+    # scan_windows are fractional hours since RDATE 00:00 UTC; convert
+    # to AIPS NX's days-since-RDATE convention.
+    time_center = [(lo + hi) / 2 / 24.0 for (lo, hi) in scan_windows]
+    time_interval = [Float32((hi - lo) / 24.0) for (lo, hi) in scan_windows]
     nt_data = (
         TIME = time_center,
         var"TIME INTERVAL" = time_interval,
@@ -1136,17 +1230,16 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     fp = first(leaf_list)
     fp_info = DimensionalData.metadata(fp)
     uvw_eltype = eltype(parent(fp[:uvw]))
-    rdate_jd = _rdate_jd(root.array_obs.rdate)
-
     raw_data = zeros(Float32, nrec_total, 3, npol, nchan, 1, 1, 1)
     uu = Vector{uvw_eltype}(undef, nrec_total)
     vv = Vector{uvw_eltype}(undef, nrec_total)
     ww_ = Vector{uvw_eltype}(undef, nrec_total)
     bl_codes = Vector{Int}(undef, nrec_total)
-    # AIPS DATE PTYPE: emit a single column of fractional days
-    # (`obs_time / 24`); the integer JD reference is on the AN HDU's RDATE
-    # card. FITSFiles only emits one PTYPE column per Symbol key, so
-    # multi-PTYPE-DATE round-trip is reduced to single-column on write.
+    # AIPS DATE PTYPE: two columns whose sum is days-since-RDATE. We
+    # split `obs_time / 24` (already RDATE-relative) into floor +
+    # fractional parts so the Float32 storage carries sub-second
+    # precision; the integer-JD reference lives on the AN HDU's RDATE
+    # card.
     date_param_cat = Matrix{Float32}(undef, nrec_total, 2)
     extras_keys = keys(fp_info.extra_columns)
     extras_eltypes = ntuple(i -> eltype(fp_info.extra_columns[i]), length(extras_keys))
@@ -1180,8 +1273,9 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
         first_row_in_scan = rec_offset + 1
         # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
         bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
-        # Reconstruct DATE PTYPE columns per-record from obs_time+rdate.
-        date_param_leaf = _build_date_param(UVData.obs_time(leaf), rdate_jd, ro)
+        # Reconstruct DATE PTYPE columns per-record from obs_time
+        # (already in hours since RDATE 00:00 UTC).
+        date_param_leaf = _build_date_param(UVData.obs_time(leaf), ro)
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
             parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:uvw]),

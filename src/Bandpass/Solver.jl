@@ -181,16 +181,26 @@ function validate_bandpass_gauge(gauge::ReferenceAntennaBandpassGauge, nant)
     return gauge
 end
 
-function apply_zero_mean_bandpass_gauge_track!(track, weights, ref_idx)
+# Weighted mean of a real vector, restricted to channels marked `valid`
+# (a Bool mask). Returns 0 when no channel is valid or weights sum to 0,
+# so callers can use the result as an offset that vanishes for empty
+# tracks.
+function _weighted_mean_valid(values, weights, valid)
+    wsum = sum(weights[valid])
+    wsum > 0 || return zero(eltype(values))
+    return sum(weights[valid] .* values[valid]) / wsum
+end
+
+function apply_zero_mean_bandpass_gauge_track!(track, weights)
     valid = (weights .> 0) .& isfinite.(weights) .& isfinite.(real.(track)) .& isfinite.(imag.(track))
     any(valid) || return track
 
     log_amp = log.(abs.(track))
-    amp_offset = sum(weights[valid] .* log_amp[valid]) / sum(weights[valid])
+    amp_offset = _weighted_mean_valid(log_amp, weights, valid)
     track .*= exp(-amp_offset)
 
-    phase_track = unwrap_phase_track(vec(angle.(track)), ref_idx)
-    phase_offset = sum(weights[valid] .* phase_track[valid]) / sum(weights[valid])
+    phase_track = unwrap_phase_track(vec(angle.(track)); weights = weights)
+    phase_offset = _weighted_mean_valid(phase_track, weights, valid)
     track .*= cis.(-phase_offset)
     return track
 end
@@ -230,18 +240,18 @@ function antenna_feed_support_weights(Wblock, bl_pairs, pol_products, nant)
     return support
 end
 
-function bandpass_track_gauge_factor(track, weights, ref_idx)
+function bandpass_track_gauge_factor(track, weights)
     valid = (weights .> 0) .& isfinite.(weights) .& isfinite.(real.(track)) .& isfinite.(imag.(track))
     any(valid) || return 1.0 + 0.0im
 
     log_amp = log.(abs.(track))
-    amp_offset = sum(weights[valid] .* log_amp[valid]) / sum(weights[valid])
-    phase_track = unwrap_phase_track(vec(angle.(track)), ref_idx)
-    phase_offset = sum(weights[valid] .* phase_track[valid]) / sum(weights[valid])
+    amp_offset = _weighted_mean_valid(log_amp, weights, valid)
+    phase_track = unwrap_phase_track(vec(angle.(track)); weights = weights)
+    phase_offset = _weighted_mean_valid(phase_track, weights, valid)
     return exp(amp_offset) * cis(phase_offset)
 end
 
-function zero_mean_bandpass_gauge_factors(gains, support_weights, ref_idx)
+function zero_mean_bandpass_gauge_factors(gains, support_weights)
     # Gains 3-D layout: (Frequency, Ant, Feed). gamma is (Ant, Feed).
     nant = size(gains, 2)
     nfeed = size(gains, 3)
@@ -250,13 +260,12 @@ function zero_mean_bandpass_gauge_factors(gains, support_weights, ref_idx)
         gamma[ant, feed] = bandpass_track_gauge_factor(
             @view(gains[:, ant, feed]),
             vec(support_weights[ant, feed, :]),
-            ref_idx,
         )
     end
     return gamma
 end
 
-function reference_antenna_bandpass_gauge_factors(gains, support_weights, ref_idx, ref_ant)
+function reference_antenna_bandpass_gauge_factors(gains, support_weights, ref_ant)
     nant = size(gains, 2)
     nfeed = size(gains, 3)
     gamma = ones(eltype(gains), nant, nfeed)
@@ -264,26 +273,25 @@ function reference_antenna_bandpass_gauge_factors(gains, support_weights, ref_id
         factor = bandpass_track_gauge_factor(
             @view(gains[:, ref_ant, feed]),
             vec(support_weights[ref_ant, feed, :]),
-            ref_idx,
         )
         gamma[:, feed] .= factor
     end
     return gamma
 end
 
-function bandpass_gauge_factors(gains, support_weights, ref_idx, ::ZeroMeanBandpassGauge)
-    return zero_mean_bandpass_gauge_factors(gains, support_weights, ref_idx)
+function bandpass_gauge_factors(gains, support_weights, ::ZeroMeanBandpassGauge)
+    return zero_mean_bandpass_gauge_factors(gains, support_weights)
 end
 
-function bandpass_gauge_factors(gains, support_weights, ref_idx, gauge::ReferenceAntennaBandpassGauge)
-    return reference_antenna_bandpass_gauge_factors(gains, support_weights, ref_idx, gauge.ref_ant)
+function bandpass_gauge_factors(gains, support_weights, gauge::ReferenceAntennaBandpassGauge)
+    return reference_antenna_bandpass_gauge_factors(gains, support_weights, gauge.ref_ant)
 end
 
-function apply_bandpass_gauge!(gains, support_weights, ref_idx, gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge())
+function apply_bandpass_gauge!(gains, support_weights, gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge())
     if ndims(gains) == 3
         # Gains 3-D layout: (Frequency, Ant, Feed). Divide stride-1 along
         # the channel axis.
-        gamma = bandpass_gauge_factors(gains, support_weights, ref_idx, gauge)
+        gamma = bandpass_gauge_factors(gains, support_weights, gauge)
         for ant in axes(gains, 2), feed in axes(gains, 3)
             for c in axes(gains, 1)
                 gains[c, ant, feed] /= gamma[ant, feed]
@@ -293,7 +301,7 @@ function apply_bandpass_gauge!(gains, support_weights, ref_idx, gauge::AbstractB
         # Gains 4-D layout: (Frequency, Ti, Ant, Feed). Recurse on each Ti
         # slice — yields a 3-D (Frequency, Ant, Feed) view.
         for s in axes(gains, 2)
-            apply_bandpass_gauge!(@view(gains[:, s, :, :]), support_weights, ref_idx, gauge)
+            apply_bandpass_gauge!(@view(gains[:, s, :, :]), support_weights, gauge)
         end
     else
         error("Unsupported gain array rank: $(ndims(gains))")
@@ -302,8 +310,8 @@ function apply_bandpass_gauge!(gains, support_weights, ref_idx, gauge::AbstractB
     return gains
 end
 
-function apply_zero_mean_bandpass_gauge!(gains, support_weights, ref_idx)
-    return apply_bandpass_gauge!(gains, support_weights, ref_idx, ZeroMeanBandpassGauge())
+function apply_zero_mean_bandpass_gauge!(gains, support_weights)
+    return apply_bandpass_gauge!(gains, support_weights, ZeroMeanBandpassGauge())
 end
 
 function allocate_source_coherencies(Vblock)
@@ -492,11 +500,11 @@ function observed_source_parameter_count(Vblock, Wblock, pol_products)
     return 2 * count(observed)
 end
 
-function apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, ref_idx, gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge())
+function apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge())
     ndims(gains) == 3 || error("Gauge/source refinement expects a rank-3 gain cube")
 
     # Gains 3-D layout: (Frequency, Ant, Feed). gamma is (Ant, Feed).
-    gamma = bandpass_gauge_factors(gains, support_weights, ref_idx, gauge)
+    gamma = bandpass_gauge_factors(gains, support_weights, gauge)
     for ant in axes(gains, 2), feed in axes(gains, 3)
         for c in axes(gains, 1)
             gains[c, ant, feed] /= gamma[ant, feed]
@@ -513,18 +521,23 @@ function apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pa
     return gains, source
 end
 
-function apply_zero_mean_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, ref_idx)
-    return apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, ref_idx, ZeroMeanBandpassGauge())
+function apply_zero_mean_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs)
+    return apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, ZeroMeanBandpassGauge())
 end
 
 function refine_joint_bandpass_als!(
-        gains, solved, Vblock, Wblock, bl_pairs, pol_products, c0;
+        gains, solved, Vblock, Wblock, bl_pairs, pol_products,
+        station_models::AbstractVector{<:StationBandpassModel},
+        channel_freqs::AbstractVector{<:Real},
+        parallel_pols::Tuple{Int, Int},
+        parallel_hand_mask = nothing;
         max_iterations = 8, tolerance = 1.0e-6,
-        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
+        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
     )
     # Gains 3-D layout: (Frequency, Ant, Feed). Vblock/Wblock 4-D:
     # (Frequency, Ti, Baseline, Pol); 3-D: (Frequency, Baseline, Pol).
     nant = size(gains, 2)
+    nfeed = size(gains, 3)
     source = allocate_source_coherencies(Vblock)
     support_weights = antenna_feed_support_weights(Wblock, bl_pairs, pol_products, nant)
     solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
@@ -533,8 +546,12 @@ function refine_joint_bandpass_als!(
     nchan = size(gains, 1)
     numer_ch = zeros(ComplexF64, nchan)
     denom_ch = zeros(Float64, nchan)
+    # Per-channel Fisher info for each (ant, feed), used as projection
+    # weight after the per-channel update (option (ii)).
+    denom_af = zeros(Float64, nchan, nant, nfeed)
 
-    for _ in 1:max_iterations
+    for iter in 1:max_iterations
+        fill!(denom_af, 0.0)
         for ant in axes(gains, 2), feed in axes(gains, 3)
             fill!(numer_ch, 0.0 + 0.0im)
             fill!(denom_ch, 0.0)
@@ -616,18 +633,31 @@ function refine_joint_bandpass_als!(
             end
 
             @inbounds for c in 1:nchan
+                denom_af[c, ant, feed] = denom_ch[c]
                 denom_ch[c] > 0 || continue
                 gains[c, ant, feed] = numer_ch[c] / denom_ch[c]
                 isnothing(solved) || (solved[c, ant, feed] = true)
             end
         end
 
-        apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, c0, gauge)
+        # Project the per-channel update for every (ant, feed) onto the
+        # user-specified bandpass model subspace using per-iter Fisher-info
+        # weights `denom_af · |g|²`. Reference feed first, then partner-feed
+        # ratio (handled inside the helpers).
+        constrain_gain_amplitudes_with_weights!(gains, denom_af, channel_freqs, station_models)
+        constrain_gain_phases_with_weights!(gains, denom_af, channel_freqs, station_models)
+
+        apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, gauge)
         solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
         objective = joint_bandpass_objective(gains, source, Vblock, Wblock, bl_pairs, pol_products)
 
         improvement = previous_objective - objective
-        improvement <= 0 && break
+        # Skip the monotone-improvement guard on iter 1: the projection
+        # step is non-monotonic in unconstrained χ², so a single iter can
+        # legitimately raise the measured objective above the per-channel
+        # initial state. From iter 2 onward both endpoints lie on the
+        # constraint manifold and the descent argument applies.
+        iter > 1 && improvement <= 0 && break
         (improvement / max(previous_objective, eps(Float64))) <= tolerance && break
         previous_objective = objective
     end
@@ -709,15 +739,18 @@ function component_design_columns(component::SegmentedBandpassModel, x, valid)
 end
 
 function fit_phase_model(
-        phase_track, channel_weights, channel_freqs, c0, phase_model::AbstractBandpassModel,
-        default_segmentation::AbstractFrequencySegmentation
+        phase_track, channel_weights, channel_freqs, phase_model::AbstractBandpassModel,
+        default_segmentation::AbstractFrequencySegmentation,
     )
     components = model_components(phase_model, default_segmentation)
     length(components) == 1 && components[1].model isa PerChannelBandpassModel && return phase_track
 
-    phase_unwrapped = unwrap_phase_track(phase_track, c0)
+    phase_unwrapped = unwrap_phase_track(phase_track; weights = channel_weights)
 
-    x = 2π .* (channel_freqs .- channel_freqs[c0])
+    # Basis is fit in a centered frequency coordinate. The center choice
+    # is gauge-immaterial (a constant offset rotates the basis but not
+    # the fitted predictions), so use the plain `mean(channel_freqs)`.
+    x = 2π .* (channel_freqs .- mean(channel_freqs))
     valid = (channel_weights .> 0) .& isfinite.(channel_weights) .& isfinite.(phase_unwrapped) .& isfinite.(x)
     count(valid) >= 2 || return phase_track
 
@@ -727,35 +760,34 @@ function fit_phase_model(
     end
 
     if isempty(basis)
-        fitted = zeros(length(phase_track))
-        fitted[c0] = 0.0
-        return fitted
+        return zeros(length(phase_track))
     end
 
     A = hcat(basis...)
     count(valid) >= size(A, 2) || return phase_track
     coeffs = weighted_least_squares(A[valid, :], phase_unwrapped[valid], channel_weights[valid])
     fitted = A * coeffs
-    fitted .-= fitted[c0]
-    fitted[c0] = 0.0
+    # Weighted-zero-mean gauge: subtract the channel-weighted mean of
+    # the fitted phase track. Channel-symmetric (no anchor).
+    fitted .-= _weighted_mean_valid(fitted, channel_weights, valid)
     return fitted
 end
 
 function fit_amplitude_model(
-        log_amp_track, channel_weights, channel_freqs, c0, ::PerChannelBandpassModel,
-        default_segmentation::AbstractFrequencySegmentation
+        log_amp_track, channel_weights, channel_freqs, ::PerChannelBandpassModel,
+        default_segmentation::AbstractFrequencySegmentation,
     )
     return log_amp_track
 end
 
 function fit_amplitude_model(
-        log_amp_track, channel_weights, channel_freqs, c0, amp_model::AbstractBandpassModel,
-        default_segmentation::AbstractFrequencySegmentation
+        log_amp_track, channel_weights, channel_freqs, amp_model::AbstractBandpassModel,
+        default_segmentation::AbstractFrequencySegmentation,
     )
     components = model_components(amp_model, default_segmentation)
     length(components) == 1 && components[1].model isa PerChannelBandpassModel && return log_amp_track
 
-    x = channel_freqs .- channel_freqs[c0]
+    x = channel_freqs .- mean(channel_freqs)
     valid = (channel_weights .> 0) .& isfinite.(channel_weights) .& isfinite.(log_amp_track) .& isfinite.(x)
     count(valid) >= 1 || return log_amp_track
 
@@ -769,51 +801,16 @@ function fit_amplitude_model(
     count(valid) >= size(A, 2) || return log_amp_track
     coeffs = weighted_least_squares(A[valid, :], log_amp_track[valid], channel_weights[valid])
     fitted = A * coeffs
-    fitted[c0] = 0.0
+    fitted .-= _weighted_mean_valid(fitted, channel_weights, valid)
     return fitted
 end
 
-function fit_relative_correction_track(raw_correction, channel_weights, channel_freqs, c0, station_model)
-    fitted_correction = copy(raw_correction)
-    fitted_correction[c0] = 1.0 + 0.0im
-
-    relative_log_amp = log.(abs.(fitted_correction))
-    relative_phase = angle.(fitted_correction)
-
-    fitted_log_amp = station_model.relative.amplitude.model isa PerChannelBandpassModel ?
-        relative_log_amp :
-        fit_amplitude_model(
-            relative_log_amp,
-            channel_weights,
-            channel_freqs,
-            c0,
-            station_model.relative.amplitude.model,
-            station_model.relative.amplitude.segmentation.frequency
-        )
-
-    fitted_phase = station_model.relative.phase.model isa PerChannelBandpassModel ?
-        relative_phase :
-        fit_phase_model(
-            relative_phase,
-            channel_weights,
-            channel_freqs,
-            c0,
-            station_model.relative.phase.model,
-            station_model.relative.phase.segmentation.frequency
-        )
-
-    fitted = exp.(fitted_log_amp) .* cis.(fitted_phase)
-    fitted[c0] = 1.0 + 0.0im
-    return fitted
-end
-
-function replacement_amplitude_scale(amps, support, c, c0; neighbor_window = 2)
+function replacement_amplitude_scale(amps, support, c; neighbor_window = 2)
     local_values = Float64[]
     lo = max(1, c - neighbor_window)
     hi = min(length(amps), c + neighbor_window)
     for j in lo:hi
         j == c && continue
-        j == c0 && continue
         support[j] > 0 || continue
         amp = amps[j]
         isfinite(amp) && amp > 0 || continue
@@ -824,7 +821,6 @@ function replacement_amplitude_scale(amps, support, c, c0; neighbor_window = 2)
     global_values = Float64[]
     for j in eachindex(amps)
         j == c && continue
-        j == c0 && continue
         support[j] > 0 || continue
         amp = amps[j]
         isfinite(amp) && amp > 0 || continue
@@ -835,8 +831,8 @@ function replacement_amplitude_scale(amps, support, c, c0; neighbor_window = 2)
 end
 
 function sanitize_gain_amplitudes!(
-        gains, support_weights, c0;
-        neighbor_window = 2
+        gains, support_weights;
+        neighbor_window = 2,
     )
     # Gains 3-D layout: (Frequency, Ant, Feed). support_weights stays
     # (Ant, Feed, Frequency).
@@ -844,7 +840,6 @@ function sanitize_gain_amplitudes!(
     repaired = NamedTuple[]
 
     for ant in axes(gains, 2), feed in axes(gains, 3), c in axes(gains, 1)
-        c == c0 && continue
         support_weights[ant, feed, c] > 0 || continue
 
         amp = amps[c, ant, feed]
@@ -855,8 +850,8 @@ function sanitize_gain_amplitudes!(
         (isfinite(amp) && amp > 0) && continue
 
         local_scale = replacement_amplitude_scale(
-            view(amps, :, ant, feed), view(support_weights, ant, feed, :), c, c0;
-            neighbor_window = neighbor_window
+            view(amps, :, ant, feed), view(support_weights, ant, feed, :), c;
+            neighbor_window = neighbor_window,
         )
         isnothing(local_scale) && continue
 
@@ -868,7 +863,7 @@ function sanitize_gain_amplitudes!(
 end
 
 """
-    inspect_collapsed_gain_amplitudes(gains, support_weights, c0;
+    inspect_collapsed_gain_amplitudes(gains, support_weights;
         collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2,
         neighbor_window = 2)
 
@@ -885,9 +880,9 @@ without overwriting the solution, so legitimately small amplitudes (e.g. EHT
 IF-edge rolloff) are left alone but obvious collapses are still reported.
 """
 function inspect_collapsed_gain_amplitudes(
-        gains, support_weights, c0;
+        gains, support_weights;
         collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2,
-        neighbor_window = 2
+        neighbor_window = 2,
     )
     # Gains 3-D layout: (Frequency, Ant, Feed). support_weights:
     # (Ant, Feed, Frequency).
@@ -895,15 +890,14 @@ function inspect_collapsed_gain_amplitudes(
     suspects = NamedTuple[]
 
     for ant in axes(gains, 2), feed in axes(gains, 3), c in axes(gains, 1)
-        c == c0 && continue
         support_weights[ant, feed, c] > 0 || continue
 
         amp = amps[c, ant, feed]
         (isfinite(amp) && amp > 0) || continue
 
         neighbor_median = replacement_amplitude_scale(
-            view(amps, :, ant, feed), view(support_weights, ant, feed, :), c, c0;
-            neighbor_window = neighbor_window
+            view(amps, :, ant, feed), view(support_weights, ant, feed, :), c;
+            neighbor_window = neighbor_window,
         )
         isnothing(neighbor_median) && continue
 
@@ -978,7 +972,7 @@ function warn_sanitized_gain_amplitudes(repaired, ant_names = nothing; context =
     return nothing
 end
 
-function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
+function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing)
     # Gains 3-D layout: (Frequency, Ant, Feed). Slice along the Frequency axis.
     nant = size(gains, 2)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
@@ -998,9 +992,8 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
                 vec(reference_log_amp),
                 vec(reference_weights[ant, :]),
                 channel_freqs,
-                c0,
                 abs_amp_model,
-                model.reference.amplitude.segmentation.frequency
+                model.reference.amplitude.segmentation.frequency,
             )
             gains[:, ant, reference_feed] = exp.(fitted_reference_log_amp) .* cis.(angle.(gains[:, ant, reference_feed]))
         end
@@ -1014,9 +1007,8 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
                 vec(relative_log_amp),
                 vec(relative_weights),
                 channel_freqs,
-                c0,
                 relative_amp_model,
-                model.relative.amplitude.segmentation.frequency
+                model.relative.amplitude.segmentation.frequency,
             )
             gains[:, ant, partner_feed] = abs.(gains[:, ant, reference_feed]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(gains[:, ant, partner_feed]))
         end
@@ -1025,7 +1017,7 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
     return gains
 end
 
-function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing)
+function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing)
     # Gains 3-D layout: (Frequency, Ant, Feed).
     nant = size(gains, 2)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
@@ -1045,9 +1037,8 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
                 reference_phase_track,
                 vec(reference_weights[ant, :]),
                 channel_freqs,
-                c0,
                 reference_phase_model,
-                model.reference.phase.segmentation.frequency
+                model.reference.phase.segmentation.frequency,
             )
             gains[:, ant, reference_feed] = abs.(gains[:, ant, reference_feed]) .* cis.(fitted_reference_phase)
         end
@@ -1061,9 +1052,8 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
                 relative_phase_track,
                 vec(relative_weights),
                 channel_freqs,
-                c0,
                 relative_phase_model,
-                model.relative.phase.segmentation.frequency
+                model.relative.phase.segmentation.frequency,
             )
             gains[:, ant, partner_feed] = abs.(gains[:, ant, partner_feed]) .* cis.(angle.(gains[:, ant, reference_feed]) .+ fitted_relative_phase)
         end
@@ -1072,107 +1062,156 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
     return gains
 end
 
-function constrain_gain_models!(
-        gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask = nothing;
-        ant_names = nothing, context = "",
-        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
+# Per-iter Fisher-info-weighted projection. `denom_af[c, ant, feed]` is the
+# per-channel ALS denominator from `refine_joint_bandpass_als!` — i.e. the
+# Fisher information of `g[c, ant, feed]` at the current source / other-gain
+# iterate. The WLS weight for projecting `log|g|` and `arg g` onto the user's
+# basis is `denom_af · |g|²` (linearized log/arg variance for a complex
+# Gaussian estimator). Unlike `constrain_gain_amplitudes!` /
+# `constrain_gain_phases!` these helpers do not need `Vblock`/`Wblock`/
+# `bl_pairs`/`parallel_pols` because the weight is precomputed.
+function constrain_gain_amplitudes_with_weights!(
+        gains, denom_af, channel_freqs, station_models,
     )
-    constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
-    constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask)
-    support_weights = amplitude_support_weights(Wblock, bl_pairs, size(gains, 2), parallel_pols, parallel_hand_mask)
-    repaired = sanitize_gain_amplitudes!(gains, support_weights, c0)
-    warn_sanitized_gain_amplitudes(repaired, ant_names; context = context)
-    apply_bandpass_gauge!(gains, support_weights, c0, gauge)
+    nant = size(gains, 2)
+    @assert size(denom_af) == size(gains)
+    for ant in 1:nant
+        model = station_models[ant]
+        reference_feed = model.reference_feed
+        partner_feed = partner_feed_index(model.reference_feed)
+
+        ref_g = view(gains, :, ant, reference_feed)
+        par_g = view(gains, :, ant, partner_feed)
+        ref_w = view(denom_af, :, ant, reference_feed) .* abs2.(ref_g)
+        par_w = view(denom_af, :, ant, partner_feed) .* abs2.(par_g)
+
+        abs_amp_model = model.reference.amplitude.model
+        if !(abs_amp_model isa PerChannelBandpassModel)
+            reference_log_amp = log.(abs.(ref_g))
+            fitted_reference_log_amp = fit_amplitude_model(
+                vec(reference_log_amp),
+                vec(ref_w),
+                channel_freqs,
+                abs_amp_model,
+                model.reference.amplitude.segmentation.frequency,
+            )
+            gains[:, ant, reference_feed] = exp.(fitted_reference_log_amp) .* cis.(angle.(ref_g))
+        end
+
+        relative_amp_model = model.relative.amplitude.model
+        if !(relative_amp_model isa PerChannelBandpassModel)
+            ratio = par_g ./ ref_g
+            relative_log_amp = log.(abs.(ratio))
+            relative_weights = sqrt.(ref_w .* par_w)  # geometric-mean precision (existing convention)
+            fitted_relative_log_amp = fit_amplitude_model(
+                vec(relative_log_amp),
+                vec(relative_weights),
+                channel_freqs,
+                relative_amp_model,
+                model.relative.amplitude.segmentation.frequency,
+            )
+            gains[:, ant, partner_feed] = abs.(gains[:, ant, reference_feed]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(par_g))
+        end
+    end
     return gains
 end
 
-"""
-    solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models; min_samples=2)
+function constrain_gain_phases_with_weights!(
+        gains, denom_af, channel_freqs, station_models,
+    )
+    nant = size(gains, 2)
+    @assert size(denom_af) == size(gains)
+    for ant in 1:nant
+        model = station_models[ant]
+        reference_feed = model.reference_feed
+        partner_feed = partner_feed_index(model.reference_feed)
 
-Estimate the differential feed correction for the reference antenna after
-the parallel-hand solve. This uses cross-hand to parallel-hand ratios on
-baselines touching `ref_ant`, so only one feed phase is held fixed overall.
+        ref_g = view(gains, :, ant, reference_feed)
+        par_g = view(gains, :, ant, partner_feed)
+        ref_w = view(denom_af, :, ant, reference_feed) .* abs2.(ref_g)
+        par_w = view(denom_af, :, ant, partner_feed) .* abs2.(par_g)
 
-The estimator first solves a raw per-channel complex feed-ratio track per scan,
-then projects that track onto the configured relative amplitude and phase basis
-for the reference station before applying it.
-"""
-function solve_ref_xy_correction(V, W, bl_pairs, gains, ref_ant, c0, channel_freqs, station_models, pol_products; min_samples = 2)
-    # V/W layout: (Frequency, Ti, Baseline, Pol). xy_correction layout:
-    # (Frequency, Ti).
-    nchan, nti, nbl, _ = size(V)
-    cross_pols = cross_hand_indices(pol_products)
-    isnothing(cross_pols) && return ones(ComplexF64, nchan, nti)
-    rr, ll = parallel_hand_indices(pol_products)
-    rl, lr = cross_pols.rl, cross_pols.lr
-
-    xy_correction = ones(ComplexF64, nchan, nti)
-    ref_model = station_models[ref_ant]
-
-    for s in 1:nti
-        raw_correction = ones(ComplexF64, nchan)
-        channel_weights = zeros(Float64, nchan)
-
-        for c in 1:nchan
-            c == c0 && continue
-
-            corrections = ComplexF64[]
-            correction_weights = Float64[]
-
-            for bi in 1:nbl
-                a, b = bl_pairs[bi]
-                ref_ant ∉ (a, b) && continue
-
-                if a == ref_ant
-                    estimators = [
-                        (lr, rr, W[c, s, bi, lr], W[c, s, bi, rr], W[c0, s, bi, lr], W[c0, s, bi, rr]),
-                        (ll, rl, W[c, s, bi, ll], W[c, s, bi, rl], W[c0, s, bi, ll], W[c0, s, bi, rl]),
-                    ]
-                    sign = 1.0
-                else
-                    estimators = [
-                        (rl, rr, W[c, s, bi, rl], W[c, s, bi, rr], W[c0, s, bi, rl], W[c0, s, bi, rr]),
-                        (ll, lr, W[c, s, bi, ll], W[c, s, bi, lr], W[c0, s, bi, ll], W[c0, s, bi, lr]),
-                    ]
-                    sign = -1.0
-                end
-
-                for (num_pol, den_pol, w_num_c, w_den_c, w_num_c0, w_den_c0) in estimators
-                    min(w_num_c, w_den_c, w_num_c0, w_den_c0) > 0 || continue
-
-                    num_c = corrected_visibility(V, gains, pol_products, bi, a, b, num_pol, s, c)
-                    den_c = corrected_visibility(V, gains, pol_products, bi, a, b, den_pol, s, c)
-                    num_c0 = corrected_visibility(V, gains, pol_products, bi, a, b, num_pol, s, c0)
-                    den_c0 = corrected_visibility(V, gains, pol_products, bi, a, b, den_pol, s, c0)
-
-                    vals = (num_c, den_c, num_c0, den_c0)
-                    all(isfinite(real(v)) && isfinite(imag(v)) && abs(v) > 0 for v in vals) || continue
-
-                    ratio = (num_c / den_c) / (num_c0 / den_c0)
-                    push!(corrections, sign > 0 ? ratio : inv(ratio))
-                    push!(
-                        correction_weights, propagated_log_double_ratio_weight(
-                            num_c, w_num_c, den_c, w_den_c, num_c0, w_num_c0, den_c0, w_den_c0
-                        )
-                    )
-                end
-            end
-
-            length(corrections) < min_samples && continue
-            correction = weighted_complex_correction(corrections, correction_weights)
-            isnothing(correction) && continue
-            raw_correction[c] = correction
-            channel_weights[c] = sum(correction_weights)
+        reference_phase_model = model.reference.phase.model
+        if !(reference_phase_model isa PerChannelBandpassModel)
+            reference_phase_track = vec(angle.(ref_g))
+            fitted_reference_phase = fit_phase_model(
+                reference_phase_track,
+                vec(ref_w),
+                channel_freqs,
+                reference_phase_model,
+                model.reference.phase.segmentation.frequency,
+            )
+            gains[:, ant, reference_feed] = abs.(ref_g) .* cis.(fitted_reference_phase)
         end
 
-        xy_correction[:, s] .= fit_relative_correction_track(raw_correction, channel_weights, channel_freqs, c0, ref_model)
+        relative_phase_model = model.relative.phase.model
+        if !(relative_phase_model isa PerChannelBandpassModel)
+            ratio = par_g ./ gains[:, ant, reference_feed]
+            relative_phase_track = vec(angle.(ratio))
+            relative_weights = sqrt.(ref_w .* par_w)
+            fitted_relative_phase = fit_phase_model(
+                relative_phase_track,
+                vec(relative_weights),
+                channel_freqs,
+                relative_phase_model,
+                model.relative.phase.segmentation.frequency,
+            )
+            gains[:, ant, partner_feed] = abs.(par_g) .* cis.(angle.(gains[:, ant, reference_feed]) .+ fitted_relative_phase)
+        end
     end
+    return gains
+end
 
-    return xy_correction
+function sanitize_and_gauge_gains!(
+        gains, Wblock, bl_pairs, parallel_pols, parallel_hand_mask = nothing;
+        ant_names = nothing, context = "",
+        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
+    )
+    # Sanitization-and-gauge only. ALS already produced the per-channel
+    # solution; this step does NOT refit gains onto a smoothed model
+    # basis. Per-station frequency models are an ALS-time concern (and
+    # an init concern via `solve_bandpass_template`/`single_scan`); at
+    # finalize we just repair NaN/zero amplitudes and apply the user's
+    # gauge choice (channel-symmetric weighted-zero-mean per (ant, feed),
+    # or pinned to a reference antenna's track).
+    support_weights = amplitude_support_weights(Wblock, bl_pairs, size(gains, 2), parallel_pols, parallel_hand_mask)
+    repaired = sanitize_gain_amplitudes!(gains, support_weights)
+    warn_sanitized_gain_amplitudes(repaired, ant_names; context = context)
+    apply_bandpass_gauge!(gains, support_weights, gauge)
+    return gains
+end
+
+# Pick a per-call init reference channel for the per-channel ratio basis
+# in `solve_parallel_channel!`. Internal to solver init only — the
+# downstream gauge is channel-symmetric and does not depend on this
+# choice. Falls back to channel 1 if support is uniformly zero.
+function _init_ref_channel_from_weights(Wblock, parallel_pols)
+    # Wblock layouts: (Frequency, Ti, Baseline, Pol) or (Frequency, Baseline, Pol).
+    rr, ll = parallel_pols
+    nchan = size(Wblock, 1)
+    chan_weight = zeros(Float64, nchan)
+    if ndims(Wblock) == 4
+        for pol in (rr, ll), bi in axes(Wblock, 3), s in axes(Wblock, 2)
+            @inbounds for c in 1:nchan
+                w = Wblock[c, s, bi, pol]
+                (w > 0 && isfinite(w)) || continue
+                chan_weight[c] += w
+            end
+        end
+    else
+        for pol in (rr, ll), bi in axes(Wblock, 2)
+            @inbounds for c in 1:nchan
+                w = Wblock[c, bi, pol]
+                (w > 0 && isfinite(w)) || continue
+                chan_weight[c] += w
+            end
+        end
+    end
+    return any(chan_weight .> 0) ? argmax(chan_weight) : 1
 end
 
 function solve_bandpass_single_scan(
-        Vs, Ws, bl_pairs, nant, c0, channel_freqs, station_models, pol_products, parallel_pols;
+        Vs, Ws, bl_pairs, nant, channel_freqs, station_models, pol_products, parallel_pols;
         ant_names = nothing, context = "",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         parallel_hand_mask = nothing,
@@ -1183,35 +1222,51 @@ function solve_bandpass_single_scan(
     # (Frequency, Ant, Feed).
     nchan = size(Vs, 1)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
+    init_ref_chan = _init_ref_channel_from_weights(Ws, parallel_pols)
 
     gains = ones(ComplexF64, nchan, nant, 2)
     solved = falses(nchan, nant, 2)
 
     for c in 1:nchan
-        c == c0 && continue
+        c == init_ref_chan && continue
         solve_parallel_channel!(
-            gains, solved, Vs, Ws, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
+            gains, solved, Vs, Ws, bl_pairs, nant, gauge, init_ref_chan, c, A_amp, A_phase,
             station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask,
             ref_ant = ref_ant,
         )
     end
 
-    joint_als_iterations > 0 && refine_joint_bandpass_als!(
-        gains, solved, Vs, Ws, bl_pairs, pol_products, c0;
-        max_iterations = joint_als_iterations, tolerance = joint_als_tolerance,
-        gauge = gauge
+    # Init-time projection: pull the per-channel init onto the user's
+    # bandpass model subspace before ALS starts. Uses the
+    # `antenna_phase_weights`-flavored helpers because we don't yet have the
+    # per-iter `denom_af` (that's an artifact of the ALS loop). The first
+    # ALS iter immediately re-projects with proper Fisher-info weights.
+    constrain_gain_amplitudes!(
+        gains, Vs, Ws, bl_pairs, channel_freqs,
+        station_models, parallel_pols, parallel_hand_mask,
+    )
+    constrain_gain_phases!(
+        gains, Vs, Ws, bl_pairs, channel_freqs,
+        station_models, parallel_pols, parallel_hand_mask,
     )
 
-    constrain_gain_models!(
-        gains, Vs, Ws, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
+    joint_als_iterations > 0 && refine_joint_bandpass_als!(
+        gains, solved, Vs, Ws, bl_pairs, pol_products,
+        station_models, channel_freqs, parallel_pols, parallel_hand_mask;
+        max_iterations = joint_als_iterations, tolerance = joint_als_tolerance,
+        gauge = gauge,
+    )
+
+    sanitize_and_gauge_gains!(
+        gains, Ws, bl_pairs, parallel_pols, parallel_hand_mask;
         ant_names = ant_names, context = context,
-        gauge = gauge
+        gauge = gauge,
     )
     return gains, solved
 end
 
 function solve_bandpass_template(
-        V, W, bl_pairs, nant, c0, channel_freqs, station_models, pol_products, parallel_pols;
+        V, W, bl_pairs, nant, channel_freqs, station_models, pol_products, parallel_pols;
         ant_names = nothing, context = "template",
         min_baselines = 3, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
         parallel_hand_mask = nothing,
@@ -1222,28 +1277,40 @@ function solve_bandpass_template(
     # (Frequency, Ant, Feed).
     nchan = size(V, 1)
     A_amp, A_phase = design_matrices(bl_pairs, nant)
+    init_ref_chan = _init_ref_channel_from_weights(W, parallel_pols)
 
     gains = ones(ComplexF64, nchan, nant, 2)
 
     for c in 1:nchan
-        c == c0 && continue
+        c == init_ref_chan && continue
         solve_parallel_channel!(
-            gains, nothing, V, W, bl_pairs, nant, gauge, c0, c, A_amp, A_phase,
+            gains, nothing, V, W, bl_pairs, nant, gauge, init_ref_chan, c, A_amp, A_phase,
             station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask,
             ref_ant = ref_ant,
         )
     end
 
-    joint_als_iterations > 0 && refine_joint_bandpass_als!(
-        gains, nothing, V, W, bl_pairs, pol_products, c0;
-        max_iterations = joint_als_iterations, tolerance = joint_als_tolerance,
-        gauge = gauge
+    # Init-time projection (see solve_bandpass_single_scan for rationale).
+    constrain_gain_amplitudes!(
+        gains, V, W, bl_pairs, channel_freqs,
+        station_models, parallel_pols, parallel_hand_mask,
+    )
+    constrain_gain_phases!(
+        gains, V, W, bl_pairs, channel_freqs,
+        station_models, parallel_pols, parallel_hand_mask,
     )
 
-    constrain_gain_models!(
-        gains, V, W, bl_pairs, channel_freqs, c0, station_models, parallel_pols, parallel_hand_mask;
+    joint_als_iterations > 0 && refine_joint_bandpass_als!(
+        gains, nothing, V, W, bl_pairs, pol_products,
+        station_models, channel_freqs, parallel_pols, parallel_hand_mask;
+        max_iterations = joint_als_iterations, tolerance = joint_als_tolerance,
+        gauge = gauge,
+    )
+
+    sanitize_and_gauge_gains!(
+        gains, W, bl_pairs, parallel_pols, parallel_hand_mask;
         ant_names = ant_names, context = context,
-        gauge = gauge
+        gauge = gauge,
     )
     return gains
 end
@@ -1282,7 +1349,6 @@ struct BandpassSolverSetup{
     parallel_pols::Tuple{Int, Int}
     parallel_hand_mask::BitMatrix
     pol_products::C
-    c0::Int
     phase_variable_mask::BitMatrix
     amplitude_variable_mask::BitMatrix
 end
@@ -1296,14 +1362,7 @@ mutable struct BandpassSolverState
     scan_sources::Array{ComplexF64, 4}
     template_objective::Float64
     scan_objectives::Vector{Float64}
-    xy_correction::Array{ComplexF64, 2}
     als_iterations_completed::Int
-end
-
-struct BandpassSolverResult{G, X}
-    gains::G
-    c0::Int
-    xy_correction::X
 end
 
 abstract type AbstractBandpassInitializer end
@@ -1353,7 +1412,7 @@ prepare_bandpass_solver(avg::UVSet, source::AbstractString, ref_ant; kwargs...) 
 function prepare_bandpass_solver(
         avg::BandpassDataset, ref_ant;
         min_baselines = 3, station_models = nothing,
-        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge()
+        gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
     )
     ndims(avg.vis) == 4 || error("prepare_bandpass_solver expects scan-averaged rank-4 visibilities")
 
@@ -1369,7 +1428,6 @@ function prepare_bandpass_solver(
     pols = pol_products(avg)
     parallel_pols = parallel_hand_indices(pols)
     parallel_hand_mask = build_parallel_hand_mask(avg.antennas, avg.baselines.pairs)
-    c0 = best_ref_channel(avg)
     phase_variable_mask = falses(nant, 2)
     amplitude_variable_mask = falses(nant, 2)
     for ant in 1:nant, feed in 1:2
@@ -1377,7 +1435,7 @@ function prepare_bandpass_solver(
         amplitude_variable_mask[ant, feed] = amplitude_is_per_scan(station_models[ant], feed)
     end
 
-    return BandpassSolverSetup(
+    setup = BandpassSolverSetup(
         avg,
         ref_ant,
         gauge,
@@ -1388,10 +1446,155 @@ function prepare_bandpass_solver(
         parallel_pols,
         parallel_hand_mask,
         pols,
-        c0,
         phase_variable_mask,
         amplitude_variable_mask,
     )
+
+    warn_underdetermined_per_scan_supports(setup)
+
+    return setup
+end
+
+# Per-(ant, scan, feed) free-parameter count for one scan, given the
+# user's station model. PerChannel is treated as `nchan` parameters
+# (full channel-by-channel freedom). For Composite models the per-block
+# basis count is `parameter_count(model) + 1` per block (the `+1`
+# accounts for the per-block `Flat` constant; `parameter_count` returns
+# only the polynomial-degree count). When time segmentation is global
+# this returns 0 (the per-scan slice doesn't add free DoF).
+function _per_scan_free_params(spec::BandpassSpec, nchan::Integer)
+    is_per_scan(spec.segmentation.time) || return 0
+    model = spec.model
+    seg = spec.segmentation.frequency
+    return _model_freedom(model, seg, nchan)
+end
+
+_model_freedom(::PerChannelBandpassModel, _seg, nchan::Integer) = nchan
+_model_freedom(model::SegmentedBandpassModel, _outer_seg, nchan::Integer) =
+    _segmented_freedom(model, nchan)
+_model_freedom(model::CompositeBandpassModel, _seg, nchan::Integer) =
+    sum(_segmented_freedom(component, nchan) for component in model.components)
+_model_freedom(model::AbstractBandpassModel, _seg, _nchan::Integer) =
+    something(parameter_count(model), 0)
+
+function _segmented_freedom(component::SegmentedBandpassModel, nchan::Integer)
+    component.model isa PerChannelBandpassModel && return nchan
+    nblocks = length(frequency_segments(component.segmentation, nchan))
+    is_flat = component.model isa FlatBandpassModel
+    per_block = is_flat ? 1 : something(parameter_count(component.model), 0)
+    return nblocks * per_block
+end
+
+# Count of distinct baselines touching `(ant, feed)` with non-zero
+# parallel-hand weight on a given scan. Used as a heuristic constraint
+# count for the per-scan WLS gain solve.
+function _baselines_with_parallel_data(setup::BandpassSolverSetup, ant::Integer, scan::Integer, parallel_pol::Integer)
+    Wp = parent(setup.data.weights)
+    bl_pairs = setup.bl_pairs
+    n = 0
+    for bi in eachindex(bl_pairs)
+        a, b = bl_pairs[bi]
+        (ant == a || ant == b) || continue
+        @inbounds for c in axes(Wp, 1)
+            w = Wp[c, scan, bi, parallel_pol]
+            if w > 0 && isfinite(w)
+                n += 1
+                break
+            end
+        end
+    end
+    return n
+end
+
+"""
+    warn_underdetermined_per_scan_supports(setup)
+
+Emit `@warn` for any `(ant, scan, feed)` whose per-scan station model
+has more free parameters than the data can plausibly constrain — i.e.
+where `nchan × n_baselines_with_parallel_data` is below `model_dof`.
+This catches cases like NN on early EHT scans (only 2 baselines with
+data) configured with `PerChannelBandpassModel` per scan: each scan
+has 32 free per-channel DoF but only 2 baselines × 32 channels = 64
+real WLS constraints minus a per-channel source DoF, leaving the
+solve under-determined.
+
+Pure diagnostic; does not change the solver's behaviour.
+"""
+function warn_underdetermined_per_scan_supports(setup::BandpassSolverSetup)
+    nchan = length(setup.channel_freqs)
+    nti = size(parent(setup.data.weights), 2)
+    nant = length(setup.data.antennas)
+    rr_pol, ll_pol = setup.parallel_pols
+    rows = NamedTuple[]
+    for ant in 1:nant
+        model = setup.station_models[ant]
+        for feed in 1:2
+            spec_phase, spec_amp = if feed == model.reference_feed
+                model.reference.phase, model.reference.amplitude
+            else
+                model.relative.phase, model.relative.amplitude
+            end
+            phase_dof = _per_scan_free_params(spec_phase, nchan)
+            amp_dof = _per_scan_free_params(spec_amp, nchan)
+            (phase_dof + amp_dof > 0) || continue   # global model — not per-scan
+            parallel_pol = feed == 1 ? rr_pol : ll_pol
+            model_dof = phase_dof + amp_dof
+            for s in 1:nti
+                nbl = _baselines_with_parallel_data(setup, ant, s, parallel_pol)
+                # Skip scans where the antenna has no data — those leave
+                # the gain at its initialization value but aren't a
+                # model-vs-data mismatch, just a coverage gap.
+                nbl > 0 || continue
+                # The per-channel ALS for one (ant, feed) at one channel
+                # sees `2·nbl` real measurements vs at least `2 + 2·nbl`
+                # unknowns (this gain plus per-baseline source DoF), so
+                # it is always 2 real DoF short per channel — relying on
+                # the joint (gains, source) solve over many channels and
+                # baselines to constrain the remaining DoF. In practice
+                # the per-scan solve is well-conditioned only when an
+                # antenna participates in at least `min_baselines` non-
+                # degenerate baselines (3 by default). Flag any per-
+                # scan (ant, feed) below that threshold whose model
+                # carries any per-scan freedom — those configurations
+                # let the per-channel gain track drift along the under-
+                # determined null space, which surfaces as visibly noisy
+                # corrected visibilities.
+                if nbl < setup.min_baselines
+                    push!(rows, (
+                        ant = setup.data.antennas.name[ant],
+                        scan = s,
+                        feed = feed,
+                        nbaselines = nbl,
+                        model_dof = model_dof,
+                        min_baselines = setup.min_baselines,
+                    ))
+                end
+            end
+        end
+    end
+    isempty(rows) && return
+    sort!(rows; by = r -> (r.ant, r.scan, r.feed))
+    samples = first(rows, min(length(rows), 8))
+    detail = join(
+        [
+            "$(r.ant) scan=$(r.scan) feed=$(r.feed) nbl=$(r.nbaselines) (< min_baselines=$(r.min_baselines))"
+                for r in samples
+        ],
+        "; ",
+    )
+    extra = length(rows) > length(samples) ? " (+$(length(rows) - length(samples)) more)" : ""
+    @warn (
+        "prepare_bandpass_solver: $(length(rows)) (antenna, scan, feed) configurations are " *
+            "under-determined — the antenna participates in fewer than `min_baselines` " *
+            "baselines on those scans while its station model carries per-scan freedom. " *
+            "The per-scan gain solve will drift along the under-determined null space and " *
+            "corrected visibilities on those baselines will look unstable. Consider " *
+            "downgrading those antennas to a global-time / coarser-frequency station model " *
+            "(e.g. Composite(Flat ⊕ Poly2) with GlobalTimeSegmentation, or " *
+            "BlockFrequencySegmentation), or excluding the affected scans. Sample: " *
+            detail * extra
+    )
+    return
 end
 
 function update_state_sources_and_objectives!(setup::BandpassSolverSetup, state::BandpassSolverState)
@@ -1477,7 +1680,6 @@ function build_bandpass_solver_state(
         ones(ComplexF64, nti, nbl, 2, 2),
         0.0,
         zeros(Float64, nti),
-        ones(ComplexF64, nchan, nti),
         0,
     )
     return update_state_sources_and_objectives!(setup, state)
@@ -1495,7 +1697,6 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
         data.weights,
         setup.bl_pairs,
         nant,
-        setup.c0,
         setup.channel_freqs,
         setup.station_models,
         setup.pol_products,
@@ -1516,7 +1717,6 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, ::RatioBandpassIn
             view(data.weights, :, s, :, :),
             setup.bl_pairs,
             nant,
-            setup.c0,
             setup.channel_freqs,
             setup.station_models,
             setup.pol_products,
@@ -1545,7 +1745,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, initializer::Rand
 
     gains_template = exp.(initializer.amplitude_sigma .* randn(rng, nchan, nant, 2)) .* cis.(initializer.phase_sigma .* randn(rng, nchan, nant, 2))
     support_template = antenna_feed_support_weights(data.weights, setup.bl_pairs, setup.pol_products, nant)
-    apply_bandpass_gauge!(gains_template, support_template, setup.c0, setup.gauge)
+    apply_bandpass_gauge!(gains_template, support_template, setup.gauge)
 
     scan_gains = repeat(reshape(gains_template, nchan, 1, nant, 2), 1, nti, 1, 1)
     if initializer.scan_perturbation > 0
@@ -1553,7 +1753,7 @@ function initialize_bandpass_state(setup::BandpassSolverSetup, initializer::Rand
     end
     for s in 1:nti
         support_scan = antenna_feed_support_weights(view(data.weights, :, s, :, :), setup.bl_pairs, setup.pol_products, nant)
-        apply_bandpass_gauge!(view(scan_gains, :, s, :, :), support_scan, setup.c0, setup.gauge)
+        apply_bandpass_gauge!(view(scan_gains, :, s, :, :), support_scan, setup.gauge)
     end
     scan_solved = trues(nchan, nti, nant, 2)
 
@@ -1767,9 +1967,13 @@ function refine_bandpass!(
 
     if refinement.refine_template
         refine_joint_bandpass_als!(
-            state.gains_template, nothing, setup.data.vis, setup.data.weights, setup.bl_pairs, setup.pol_products, setup.c0;
+            state.gains_template, nothing,
+            setup.data.vis, setup.data.weights,
+            setup.bl_pairs, setup.pol_products,
+            setup.station_models, setup.channel_freqs,
+            setup.parallel_pols, setup.parallel_hand_mask;
             max_iterations = refinement.iterations, tolerance = refinement.tolerance,
-            gauge = setup.gauge
+            gauge = setup.gauge,
         )
     end
 
@@ -1784,10 +1988,11 @@ function refine_bandpass!(
                 view(setup.data.weights, :, s, :, :),
                 setup.bl_pairs,
                 setup.pol_products,
-                setup.c0;
+                setup.station_models, setup.channel_freqs,
+                setup.parallel_pols, setup.parallel_hand_mask;
                 max_iterations = refinement.iterations,
                 tolerance = refinement.tolerance,
-                gauge = setup.gauge
+                gauge = setup.gauge,
             )
         end
     end
@@ -1800,7 +2005,6 @@ function refine_bandpass!(
         setup.phase_variable_mask,
         setup.amplitude_variable_mask
     )
-    state.xy_correction .= 1.0 + 0.0im
     state.als_iterations_completed += refinement.iterations
     return update_state_sources_and_objectives!(setup, state)
 end
@@ -1809,8 +2013,7 @@ end
 function finalize_bandpass_state(
         setup::BandpassSolverSetup,
         state::BandpassSolverState;
-        apply_relative_correction = state.als_iterations_completed == 0,
-        project_models = true
+        spw_name::AbstractString = "spw_0",
     )
     # state.scan_gains layout: (Frequency, Ti, Ant, Feed).
     data = setup.data
@@ -1822,120 +2025,41 @@ function finalize_bandpass_state(
     scan_gains = copy(state.scan_gains)
     merged_gains = repeat(reshape(gains_template, nchan, 1, nant, 2), 1, nti, 1, 1)
 
-    if project_models
-        constrain_gain_models!(
-            gains_template,
-            data.vis,
-            data.weights,
-            setup.bl_pairs,
-            setup.channel_freqs,
-            setup.c0,
-            setup.station_models,
-            setup.parallel_pols,
-            setup.parallel_hand_mask;
-            ant_names = data.antennas.name,
-            context = "template",
-            gauge = setup.gauge
-        )
+    sanitize_and_gauge_gains!(
+        gains_template, data.weights, setup.bl_pairs,
+        setup.parallel_pols, setup.parallel_hand_mask;
+        ant_names = data.antennas.name,
+        context = "template",
+        gauge = setup.gauge,
+    )
 
-        for s in 1:nti
-            constrain_gain_models!(
-                view(scan_gains, :, s, :, :),
-                view(data.vis, :, s, :, :),
-                view(data.weights, :, s, :, :),
-                setup.bl_pairs,
-                setup.channel_freqs,
-                setup.c0,
-                setup.station_models,
-                setup.parallel_pols,
-                setup.parallel_hand_mask;
-                ant_names = data.antennas.name,
-                context = string("scan ", s),
-                gauge = setup.gauge
-            )
-        end
+    for s in 1:nti
+        sanitize_and_gauge_gains!(
+            view(scan_gains, :, s, :, :),
+            view(data.weights, :, s, :, :),
+            setup.bl_pairs,
+            setup.parallel_pols, setup.parallel_hand_mask;
+            ant_names = data.antennas.name,
+            context = string("scan ", s),
+            gauge = setup.gauge,
+        )
     end
 
     assemble_bandpass_state_gains!(
         merged_gains, gains_template, scan_gains, state.scan_solved, setup.phase_variable_mask, setup.amplitude_variable_mask
     )
 
-    # xy_correction layout: (Frequency, Ti). Apply along the partner-feed
-    # slice of merged_gains (Frequency, Ti, ref_ant, ref_partner_feed).
-    xy_correction = ones(ComplexF64, nchan, nti)
-    ref_partner_feed = partner_feed_index(setup.station_models[setup.ref_ant].reference_feed)
-    if apply_relative_correction
-        xy_correction = solve_ref_xy_correction(
-            data.vis,
-            data.weights,
-            setup.bl_pairs,
-            merged_gains,
-            setup.ref_ant,
-            setup.c0,
-            setup.channel_freqs,
-            setup.station_models,
-            setup.pol_products
-        )
-        merged_gains[:, :, setup.ref_ant, ref_partner_feed] .*= xy_correction
-    end
-
     apply_bandpass_gauge!(
         merged_gains,
         amplitude_support_weights(data.weights, setup.bl_pairs, nant, setup.parallel_pols, setup.parallel_hand_mask),
-        setup.c0,
-        setup.gauge
+        setup.gauge,
     )
 
-    return BandpassSolverResult(
-        wrap_gain_solutions(merged_gains, data),
-        setup.c0,
-        wrap_xy_correction(
-            xy_correction,
-            data,
-            setup.ref_ant;
-            applies_to_pol = ref_partner_feed,
-            reference_pol = setup.station_models[setup.ref_ant].reference_feed
-        )
+    return wrap_gain_solutions(
+        merged_gains, data;
+        spw_name = String(spw_name),
     )
 end
-
-"""
-    _wrap_solution(gains, avg, c0, xy_corr, spw_name) -> DimArray
-
-Wrap the inner solver's `(gains, c0, xy_correction)` output as a
-`DimArray` with `(Frequency, Ti, Ant, Pol)` dims — matches the
-public layout natively (no permutation). Auxiliary outputs ride
-along on the DimArray's `metadata` slot, extracted via
-`bandpass_c0` / `bandpass_xy_correction`.
-"""
-function _wrap_solution(gains::AbstractArray{<:Complex, 4}, avg::BandpassDataset, c0, xy_corr, spw_name)
-    ant_names = avg.antennas.name
-    pol_labels = pol_products(avg)
-    chan_freqs = UVData.channel_freqs(avg.freq_setup)
-    scan_centers = [(lo + hi) / 2 for (lo, hi) in avg.scans]
-    gains_array = gains isa DimensionalData.AbstractDimArray ? parent(gains) : gains
-    return DimensionalData.DimArray(
-        gains_array,
-        (
-            Frequency(chan_freqs), Ti(scan_centers),
-            Ant(ant_names), Pol(pol_labels),
-        );
-        metadata = Dict{Symbol, Any}(
-            :c0 => c0, :xy_correction => xy_corr, :spw_name => String(spw_name),
-        ),
-    )
-end
-
-"""
-    bandpass_c0(da) -> Int
-    bandpass_xy_correction(da) -> ComplexF64
-
-Read auxiliary solver outputs from a Phase 3 per-SPW gain DimArray.
-"""
-bandpass_c0(da::DimensionalData.AbstractDimArray) =
-    DimensionalData.metadata(da)[:c0]
-bandpass_xy_correction(da::DimensionalData.AbstractDimArray) =
-    DimensionalData.metadata(da)[:xy_correction]
 
 """
     solve_bandpass(uvset::UVSet, ref_ant; ...) -> OrderedDict{String, DimArray}
@@ -1953,7 +2077,6 @@ function solve_bandpass(
         uvset::UVSet, ref_ant;
         min_baselines = 3, station_models = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
-        apply_relative_correction = true,
         joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
     )
     groups = _group_leaves_by_spw(uvset)
@@ -1963,15 +2086,14 @@ function solve_bandpass(
     for (spw_name, leaf_keys) in groups
         sub_uvset = _uvset_with_branches(uvset, leaf_keys)
         avg = _to_bandpass_dataset(sub_uvset)
-        gains, c0, xy_corr = solve_bandpass(
+        sols[spw_name] = solve_bandpass(
             avg, ref_ant;
             min_baselines = min_baselines, station_models = station_models,
             gauge = gauge,
-            apply_relative_correction = apply_relative_correction,
             joint_als_iterations = joint_als_iterations,
             joint_als_tolerance = joint_als_tolerance,
+            spw_name = spw_name,
         )
-        sols[spw_name] = _wrap_solution(gains, avg, c0, xy_corr, spw_name)
     end
     return sols
 end
@@ -1992,28 +2114,24 @@ function solve_bandpass(
         avg::BandpassDataset, ref_ant;
         min_baselines = 3, station_models = nothing,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
-        apply_relative_correction = true, joint_als_iterations = 8, joint_als_tolerance = 1.0e-6
+        joint_als_iterations = 8, joint_als_tolerance = 1.0e-6,
+        spw_name::AbstractString = "spw_0",
     )
     setup = prepare_bandpass_solver(
         avg,
         ref_ant;
         min_baselines = min_baselines,
         station_models = station_models,
-        gauge = gauge
+        gauge = gauge,
     )
-    @info "Reference channel: $(setup.c0) of $(length(setup.channel_freqs))"
+    @info "Bandpass solver setup: $(length(setup.channel_freqs)) channels × $(length(setup.data.antennas)) antennas, gauge=$(typeof(setup.gauge))"
 
     state = initialize_bandpass_state(setup)
     joint_als_iterations > 0 && refine_bandpass!(
         setup,
         state,
-        BandpassALS(iterations = joint_als_iterations, tolerance = joint_als_tolerance)
+        BandpassALS(iterations = joint_als_iterations, tolerance = joint_als_tolerance),
     )
 
-    result = finalize_bandpass_state(
-        setup,
-        state;
-        apply_relative_correction = apply_relative_correction && joint_als_iterations <= 0
-    )
-    return result.gains, result.c0, result.xy_correction
+    return finalize_bandpass_state(setup, state; spw_name = spw_name)
 end
