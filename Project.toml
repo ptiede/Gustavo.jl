@@ -4,6 +4,7 @@ authors = ["Paul Tiede <ptiede91@gmail.com> and contributors"]
 version = "0.1.0"
 
 [deps]
+AstroLib = "c7932e45-9af1-51e7-9da9-f004cd3a462b"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"
@@ -24,6 +25,7 @@ GustavoFITSFilesExt = "FITSFiles"
 GustavoMakieExt = "Makie"
 
 [compat]
+AstroLib = "0.4"
 Dates = "1"
 DimensionalData = "0.30"
 FITSFiles = "0.3"
@@ -40,8 +42,9 @@ julia = "1.10"
 
 [extras]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "FITSFiles", "CairoMakie"]
+test = ["Test", "FITSFiles", "CairoMakie", "Dates"]

@@ -1,7 +1,9 @@
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"
+OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 Gustavo = "b6f820fd-87a9-4cf8-8bd4-0e8dc9bb4263"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 PolarizedTypes = "d3c5d4cd-a8ee-40d6-aac7-e34df5a20044"

@@ -26,6 +26,8 @@ include("Bandpass/StationModels.jl")
 include("Bandpass/Setup.jl")
 include("Bandpass/Solver.jl")
 include("Bandpass/Corrections.jl")
+include("Bandpass/Antab.jl")
+include("Bandpass/Apriori.jl")
 include("Bandpass/Diagnostics.jl")
 
 # ── Plot stubs — implemented by `GustavoMakieExt`. Load Makie or CairoMakie
@@ -108,6 +110,9 @@ export prepare_bandpass_solver, initialize_bandpass_state, refine_bandpass!, fin
 export bandpass_residual_stats, print_bandpass_residual_stats
 export solve_bandpass
 export apply_bandpass, default_output_path
+export AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
+export load_antab, tsys_at, elevation_gain, stations
+export AprioriFluxGains, apriori_flux_gains, apply_calibration
 export coherence_loss_table, print_coherence_loss_table, choose_diagnostic_baseline
 export plot_baseline_phases, plot_stability, plot_gain_solutions, plot_baseline_bandpass, plot_baseline_bandpass_residuals
 export parallel_hand_support_summary, site_parallel_hand_support, print_parallel_hand_support

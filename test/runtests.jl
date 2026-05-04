@@ -4,8 +4,11 @@ using LinearAlgebra
 using Statistics
 using Random
 using StructArrays
+using Dates
+using OrderedCollections
 using FITSFiles: Card
 using CairoMakie
+using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
 using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products
 using PolarizedTypes: RPol, LPol
@@ -2286,6 +2289,204 @@ end
     end
 end
 
+@testset "ANTAB parser: GAIN + TSYS layouts" begin
+    BP = Gustavo.Bandpass
+    text = """
+    GAIN AA ELEV DPFU = 0.031000 POLY = 1.0 /
+    GAIN MG ELEV DPFU = 0.0179, 0.0168 POLY = 0.727119, 0.00947339, -0.00008222 /
+    GAIN NN ELEV DPFU = 1.000000, 1.000000 POLY = 1.0 /
+
+    TSYS AA  FT=1.0  TIMEOFF=0
+    INDEX = 'L1|R1', 'L2|R2'
+    /
+    100 12:00:00     2.5    3.5
+    100 12:30:00     2.7    3.7
+    /
+    TSYS MG timeoff= 0.0  FT = 1.0  INDEX = 'R1:32', 'L1:32' /
+    100 12:00:00     200.0  220.0
+    100 13:00:00     180.0  210.0
+    /
+    TSYS NN timeoff= 0.0  FT = 1.0  INDEX = 'R1:32', 'L1:32' /
+    100 12:00:00     500.0  600.0
+    100 13:00:00     520.0  580.0
+    /
+    """
+    path, io = mktemp()
+    try
+        write(io, text); close(io)
+        new_path = path * "_e22a26_b1_proc.AN"
+        cp(path, new_path; force = true)
+        antab = BP.load_antab(new_path)
+
+        @test length(antab.stations) == 3
+        @test haskey(antab, "AA") && haskey(antab, "MG") && haskey(antab, "NN")
+        @test antab.year == 2022
+        @test antab.track_label == "e22a26_b1"
+
+        # Per-channel ALMA block, paired-pol columns.
+        st_aa = antab["AA"]
+        @test st_aa.nchannels == 2
+        @test length(st_aa.tsys.times) == 2
+        @test BP.tsys_at(st_aa, st_aa.tsys.times[1], 1, :R) ≈ 2.5
+        @test BP.tsys_at(st_aa, st_aa.tsys.times[1], 1, :L) ≈ 2.5    # paired
+        @test BP.tsys_at(st_aa, st_aa.tsys.times[1], 2, :L) ≈ 3.5
+
+        # Aggregate per-pol columns broadcast across channels.
+        st_mg = antab["MG"]
+        @test st_mg.nchannels == 0
+        @test BP.tsys_at(st_mg, st_mg.tsys.times[1], 1, :R) ≈ 200.0
+        @test BP.tsys_at(st_mg, st_mg.tsys.times[1], 17, :L) ≈ 220.0
+
+        # Time interpolation midpoint.
+        midpoint = st_mg.tsys.times[1] + (st_mg.tsys.times[2] - st_mg.tsys.times[1]) ÷ 2
+        @test BP.tsys_at(st_mg, midpoint, 1, :R) ≈ 190.0 atol = 0.5
+
+        # Out-of-range time returns NaN.
+        @test isnan(BP.tsys_at(st_mg, st_mg.tsys.times[end] + Dates.Hour(2), 1, :R))
+
+        # Elevation-gain Horner.
+        @test BP.elevation_gain(st_aa.gain, 30.0) ≈ 1.0
+        @test BP.elevation_gain(st_mg.gain, 0.0) ≈ st_mg.gain.poly[1]
+        @test BP.elevation_gain(st_mg.gain, 45.0) ≈
+            (st_mg.gain.poly[1] + st_mg.gain.poly[2] * 45 + st_mg.gain.poly[3] * 45^2)
+
+        # DPFU broadcasting for single-value GAIN rows.
+        @test st_aa.gain.dpfu == (0.031, 0.031)
+        @test st_mg.gain.dpfu == (0.0179, 0.0168)
+
+        # Year override and unparseable filename should error.
+        antab2 = BP.load_antab(new_path; year = 2017)
+        @test antab2.year == 2017
+    finally
+        isfile(path) && rm(path)
+    end
+end
+
+@testset "apply_calibration: synthetic UVSet" begin
+    UV = Gustavo.UVData
+    BP = Gustavo.Bandpass
+
+    base = synthetic_uvdata()
+    leaves_v = collect(values(UV.branches(base)))
+    ants = UV.union_antennas(base)
+    ant_names = ants.name
+
+    # Build an ANTAB calibration directly so we can pin SEFD values
+    # without relying on elevation evaluation. Both stations have flat
+    # POLY=[1.0] and DPFU=1.0 so SEFD = Tsys exactly. Cover every leaf's
+    # scan window so the per-scan Tsys lookup finds at least one antab
+    # row in each.
+    rdate = UV.DimensionalData.metadata(base).array_obs.rdate
+    base_dt = DateTime(Date(rdate))
+    ts_all = unique(sort!(reduce(vcat, [collect(UV.obs_time(l)) for l in leaves_v])))
+    isempty(ts_all) && error("synthetic obs_time empty")
+    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+    extended_times = [times[1] - Hour(2); times; times[end] + Hour(2)]
+
+    sefd_aa = 100.0
+    sefd_ax = 400.0
+    function _make_station(name, sefd)
+        gain = BP.AntabGainCurve((1.0, 1.0), [1.0])
+        # Aggregate per-pol columns: 'R1:32' broadcasts SEFD to all channels.
+        cols = [(0, :R), (0, :L)]
+        vals = repeat([sefd sefd], length(extended_times), 1)
+        ts_series = BP.AntabTsysSeries(extended_times, cols, vals)
+        return BP.AntabStation(name, gain, ts_series, 0)
+    end
+    stations = Dict(
+        "AA" => _make_station("AA", sefd_aa),
+        "AX" => _make_station("AX", sefd_ax),
+    )
+    antab = BP.AntabCalibration(
+        "synthetic", "synth", 2000, stations,
+    )
+
+    corr = BP.apply_calibration(base, antab)
+
+    # The synthetic `synthetic_uvdata` fakes `station_xyz = zeros(3)` —
+    # the elevation calculation will be ill-defined there, but the test
+    # antab has POLY=[1.0] so g_E always evaluates to 1 regardless. We
+    # only need SEFD = 100 on AA, 400 on AX, hence cal_factor =
+    # sqrt(SEFD_a * SEFD_b) = sqrt(100*400) = 200 on the AA-AX baseline.
+    expected_factor = sqrt(sefd_aa * sefd_ax)
+    for (k, leaf_in) in UV.branches(base)
+        leaf_out = UV.branches(corr)[k]
+        # Take a finite, weight>0 sample.
+        vis_in = parent(leaf_in[:vis])
+        vis_out = parent(leaf_out[:vis])
+        w_out = parent(leaf_out[:weights])
+        idx = findfirst(i -> isfinite(vis_in[i]) && w_out[i] > 0, eachindex(vis_in))
+        @test idx !== nothing
+        @test abs(vis_out[idx]) ≈ abs(vis_in[idx]) * expected_factor rtol = 1e-6
+    end
+end
+
+@testset "tsys_in_window rejects outliers outside the scan window" begin
+    BP = Gustavo.Bandpass
+    # Three rows: an "in-scan" row, a slew-time outlier outside the window,
+    # and another "in-scan" row. The window-mean must average only the
+    # in-window rows and never see the outlier.
+    base_dt = DateTime(2022, 3, 27, 0, 0, 0)
+    times = [base_dt, base_dt + Minute(2), base_dt + Minute(10), base_dt + Minute(20)]
+    cols  = [(0, :R), (0, :L)]
+    vals  = Float64[
+        100.0   120.0;
+        110.0   130.0;
+        1.0e6   1.0e6;        # slew/outlier — outside the scan window below
+        105.0   125.0;
+    ]
+    st = BP.AntabStation("XX",
+        BP.AntabGainCurve((1.0, 1.0), [1.0]),
+        BP.AntabTsysSeries(times, cols, vals),
+        0,
+    )
+
+    # Window covers rows 1 + 2 (mean = 105 R, 125 L), excludes the outlier at +10min.
+    t_lo, t_hi = base_dt - Second(1), base_dt + Minute(5)
+    @test BP.tsys_in_window(st, t_lo, t_hi, 1, :R) ≈ 105.0
+    @test BP.tsys_in_window(st, t_lo, t_hi, 1, :L) ≈ 125.0
+    # No rows in window → NaN
+    @test isnan(BP.tsys_in_window(st, base_dt + Hour(2), base_dt + Hour(3), 1, :R))
+    # Window that covers only the outlier returns the outlier (caller's responsibility)
+    @test BP.tsys_in_window(st, base_dt + Minute(8), base_dt + Minute(15), 1, :R) ≈ 1.0e6
+end
+
+@testset "apply_calibration: missing station warns" begin
+    UV = Gustavo.UVData
+    BP = Gustavo.Bandpass
+    base = synthetic_uvdata()
+
+    leaves_v = collect(values(UV.branches(base)))
+    rdate = UV.DimensionalData.metadata(base).array_obs.rdate
+    base_dt = DateTime(Date(rdate))
+    ts_all = unique(sort!(reduce(vcat, [collect(UV.obs_time(l)) for l in leaves_v])))
+    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+    extended_times = [times[1] - Hour(2); times; times[end] + Hour(2)]
+    aa_only = Dict(
+        "AA" => BP.AntabStation(
+            "AA",
+            BP.AntabGainCurve((1.0, 1.0), [1.0]),
+            BP.AntabTsysSeries(
+                extended_times, [(0, :R), (0, :L)],
+                repeat([100.0 100.0], length(extended_times), 1),
+            ),
+            0,
+        ),
+    )
+    antab = BP.AntabCalibration("synth", "synth", 2000, aa_only)
+
+    # Suppress the warnings here — the warning behavior is exercised by the
+    # missing-station check in `apriori_flux_gains`. We just need to confirm
+    # the call succeeds (silently with :ignore) and errors with :error.
+    out = BP.apply_calibration(base, antab; on_missing_station = :ignore)
+    @test out isa Gustavo.UVData.UVSet
+    flux = BP.apriori_flux_gains(base, antab; on_missing_station = :ignore)
+    @test all(g -> "AX" in g.missing_stations, values(flux))
+    @test_throws ErrorException BP.apply_calibration(
+        base, antab; on_missing_station = :error,
+    )
+end
+
 @testset "Phase 3: apply_bandpass errors on missing SPW" begin
     UV = Gustavo.UVData
     BP = Gustavo.Bandpass
@@ -2306,4 +2507,130 @@ end
     )
     sols = Dict("spw_99" => bogus_da)
     @test_throws ErrorException BP.apply_bandpass(base, sols)
+end
+
+@testset "apply / mapleaves / flatmap arity overloads" begin
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    leaves_v = collect(values(UV.branches(base)))
+    @test length(leaves_v) == 2
+
+    # 1-arg `f(leaf)`
+    nleaves_1 = UV.mapleaves(leaf -> length(UV.obs_time(leaf)), base)
+    @test nleaves_1 isa OrderedCollections.OrderedDict
+    @test all(v == length(UV.obs_time(l)) for ((_, v), l) in zip(nleaves_1, leaves_v))
+
+    # 2-arg `f(leaf, info)`
+    nleaves_2 = UV.mapleaves(base) do leaf, info
+        (; scan = info.scan_name, n = length(UV.obs_time(leaf)))
+    end
+    @test all(getproperty(v, :scan) == UV.scan_name(l) for ((_, v), l) in zip(nleaves_2, leaves_v))
+
+    # 3-arg `f(leaf, info, root)` matches the legacy signature.
+    nleaves_3 = UV.mapleaves(base) do leaf, info, root
+        (; scan = info.scan_name, telescope = root.array_obs.telescope)
+    end
+    @test all(getproperty(v, :telescope) == UV.metadata(base).array_obs.telescope
+              for v in values(nleaves_3))
+
+    # `flatmap` produces a vcat'd Vector
+    rows = UV.flatmap(base) do leaf
+        info = UV.metadata(leaf)
+        [(; scan = info.scan_name, label = lbl) for lbl in UV.baselines(leaf).labels]
+    end
+    @test rows isa AbstractVector
+    @test length(rows) == sum(length(UV.baselines(l).labels) for l in leaves_v)
+
+    # `apply` still returns a UVSet when `f` returns a DimTree.
+    out = UV.apply(base) do leaf
+        UV.with_visibilities(leaf, leaf[:vis], leaf[:weights])
+    end
+    @test out isa UV.UVSet
+    @test length(UV.branches(out)) == length(UV.branches(base))
+end
+
+@testset "BaselineIndex lookup sugar" begin
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    leaf = first(values(UV.branches(base)))
+    bls = UV.baselines(leaf)
+    @test length(bls) == length(bls.pairs) > 0
+
+    p = bls.pairs[1]
+    lbl = bls.labels[1]
+    a, b = bls.ant1_names[1], bls.ant2_names[1]
+    @test bls[p] == 1
+    @test bls[lbl] == 1
+    @test bls[(a, b)] == 1
+    @test haskey(bls, p) && haskey(bls, lbl) && haskey(bls, (a, b))
+    @test !haskey(bls, (-1, -2))
+    @test !haskey(bls, "ZZ-ZZ")
+    @test_throws KeyError bls[(-1, -2)]
+    @test UV.baseline_index(bls, (-1, -2)) == 0
+end
+
+@testset "pol_index / pol_at canonicalization" begin
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    leaf = first(values(UV.branches(base)))
+    pp = UV.pol_index(leaf, "PP")
+    @test pp isa Integer && pp > 0
+    # EHT shorthands fold onto the canonical PP/PQ/QP/QQ.
+    @test UV.pol_index(leaf, "RR") == pp
+    @test UV.pol_index(leaf, "XX") == pp
+    @test UV.pol_index(leaf, (RPol(), RPol())) == pp
+
+    @test UV.pol_index(leaf, "QQ") == UV.pol_index(leaf, "LL")
+    # Selector roundtrip.
+    sel = UV.pol_at("RR")
+    @test sel isa DimensionalData.At
+    @test getfield(sel, :val) == "PP"  # canonical label
+end
+
+@testset "baseline DimStack views" begin
+    UV = Gustavo.UVData
+    base = synthetic_uvdata()
+    leaf = first(values(UV.branches(base)))
+    bls = UV.baselines(leaf)
+    bl = UV.baseline(leaf, bls.pairs[1])
+
+    @test bl isa DimensionalData.DimStack
+    @test Set(keys(bl)) == Set((:vis, :weights, :flag, :uvw))
+
+    # Shape & dims
+    nch = UV.nchannels(base)
+    nti = length(UV.obs_time(leaf))
+    npol = length(UV.pol_products(leaf))
+    @test size(bl[:vis]) == (nch, nti, npol)
+    @test size(bl[:weights]) == (nch, nti, npol)
+    @test size(bl[:flag]) == (nch, nti, npol)
+    @test size(bl[:uvw]) == (nti, 3)
+
+    # Pol selector path matches manual indexing.
+    pp_idx = UV.pol_index(leaf, "PP")
+    via_selector = parent(bl[:vis][Pol = UV.pol_at("PP")])
+    via_manual = parent(view(leaf[:vis], UV.Baseline(bls.pairs[1] |> p -> bls[p])))[:, :, pp_idx]
+    @test via_selector == via_manual
+
+    # Metadata carries the antenna identification + scan name.
+    md = DimensionalData.metadata(bl)
+    @test md.ant1 == bls.ant1_names[1]
+    @test md.ant2 == bls.ant2_names[1]
+    @test md.label == bls.labels[1]
+    @test md.scan_name == UV.scan_name(leaf)
+
+    # Missing baseline → KeyError
+    @test_throws KeyError UV.baseline(leaf, "ZZ-ZZ")
+
+    # baselines_per_scan returns OrderedDict keyed by partition.
+    per_scan = UV.baselines_per_scan(base, bls.pairs[1])
+    @test per_scan isa OrderedCollections.OrderedDict
+    @test length(per_scan) == 2  # synthetic_uvdata has 2 leaves, both share this baseline
+
+    # baseline(uvset, bl) concatenates Ti.
+    full = UV.baseline(base, bls.pairs[1])
+    @test full isa DimensionalData.DimStack
+    expected_ti = sum(length(UV.obs_time(l)) for l in values(UV.branches(base)))
+    @test size(full[:vis], 2) == expected_ti
+    @test size(full[:uvw], 1) == expected_ti
 end

@@ -871,21 +871,28 @@ function _rdate_jd_or_zero(rdate_str::AbstractString)
 end
 
 # Reconstruct AIPS DATE PTYPE columns from a leaf's `obs_time` (fractional
-# hours since RDATE 00:00 UTC). Emits two columns shaped `(nrec_leaf, 2)`:
-# column 1 is the integer-day part of `obs_time / 24`, column 2 is the
-# sub-day fractional remainder. Their sum is days-since-RDATE; the
-# integer-JD reference is on the AN HDU's RDATE card. On read the
-# loader recognises this layout (sum is small, < 1e5) and uses it
-# directly; AIPS-strict files (sum is full JD ≥ 1e5) get rdate_jd
-# subtracted first.
-function _build_date_param(obs_time_hr::AbstractVector{<:Real}, record_order)
+# hours since RDATE 00:00 UTC). Emits two columns shaped `(nrec_leaf, 2)`
+# whose sum is the **full Julian Day** of the record (AIPS-strict
+# convention) so external readers — astropy/ehtim, AIPS APCAL, CASA —
+# parse the timestamp correctly. Column 1 carries the integer JD (which
+# Float32 holds exactly up to ~16M) and column 2 carries the sub-day
+# fractional remainder (giving sub-second precision).
+#
+# `rdate_jd` is the Julian Day of RDATE 0h UTC, computed from the
+# `array_obs.rdate` string. When `rdate_jd == 0` (no RDATE set), the
+# writer emits days-since-epoch-zero — round-trippable through the
+# Gustavo loader but **not** readable by external tools. Callers should
+# ensure `array_obs.rdate` is populated before writing.
+function _build_date_param(
+        obs_time_hr::AbstractVector{<:Real}, record_order, rdate_jd::Real,
+    )
     n = length(record_order)
     out = Matrix{Float32}(undef, n, 2)
     @inbounds for (rec_i, (ti, _)) in enumerate(record_order)
-        days = obs_time_hr[ti] / 24.0
-        intpart = floor(days)
+        jd = rdate_jd + obs_time_hr[ti] / 24.0
+        intpart = floor(jd)
         out[rec_i, 1] = Float32(intpart)
-        out[rec_i, 2] = Float32(days - intpart)
+        out[rec_i, 2] = Float32(jd - intpart)
     end
     return out
 end
@@ -1227,6 +1234,18 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     nrec_total = sum(length(DimensionalData.metadata(l).record_order) for l in leaf_list)
     nrec_total > 0 || error("write_uvfits: UVSet has no records to write")
 
+    # AIPS-strict DATE PTYPE: emit full Julian Day (col1 = integer JD,
+    # col2 = sub-day fraction). Compute the JD offset once per write.
+    rdate_jd = _rdate_jd_or_zero(root.array_obs.rdate)
+    if rdate_jd == 0.0
+        @warn(
+            "write_uvfits: `array_obs.rdate` is empty; DATE PTYPE will be " *
+                "emitted relative to JD 0 (year -4713). External readers " *
+                "(astropy / ehtim) will reject this. Populate the RDATE " *
+                "metadata before writing.",
+        )
+    end
+
     fp = first(leaf_list)
     fp_info = DimensionalData.metadata(fp)
     uvw_eltype = eltype(parent(fp[:uvw]))
@@ -1235,11 +1254,10 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     vv = Vector{uvw_eltype}(undef, nrec_total)
     ww_ = Vector{uvw_eltype}(undef, nrec_total)
     bl_codes = Vector{Int}(undef, nrec_total)
-    # AIPS DATE PTYPE: two columns whose sum is days-since-RDATE. We
-    # split `obs_time / 24` (already RDATE-relative) into floor +
-    # fractional parts so the Float32 storage carries sub-second
-    # precision; the integer-JD reference lives on the AN HDU's RDATE
-    # card.
+    # AIPS-strict DATE PTYPE: two columns whose sum is the full Julian
+    # Day. Splitting into floor + fractional parts keeps Float32 sub-day
+    # precision intact (Float32 represents the integer JD exactly up to
+    # ~16M, and the fractional remainder gives ~10 ms resolution).
     date_param_cat = Matrix{Float32}(undef, nrec_total, 2)
     extras_keys = keys(fp_info.extra_columns)
     extras_eltypes = ntuple(i -> eltype(fp_info.extra_columns[i]), length(extras_keys))
@@ -1274,8 +1292,8 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
         # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
         bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
         # Reconstruct DATE PTYPE columns per-record from obs_time
-        # (already in hours since RDATE 00:00 UTC).
-        date_param_leaf = _build_date_param(UVData.obs_time(leaf), ro)
+        # (hours since RDATE 0h UTC) and the AN-HDU RDATE Julian Day.
+        date_param_leaf = _build_date_param(UVData.obs_time(leaf), ro, rdate_jd)
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
             parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:uvw]),
