@@ -309,7 +309,7 @@ choose_phase_reference(uvset::UVSet, variable_ants) =
 
 function build_station_models(
         ant_names, station_model_map;
-        default = StationBandpassModel()
+        default::StationBandpassModel,
     )
     default_model = validate_station_bandpass_model(default)
     station_models = StationBandpassModel[default_model for _ in ant_names]
@@ -322,20 +322,16 @@ function build_station_models(
 end
 
 function station_model_summary(name, model)
-    reference_summary_phase = effective_bandpass_model_label(model.reference.phase.model, model.reference.phase.segmentation.frequency)
-    relative_summary_phase = effective_bandpass_model_label(model.relative.phase.model, model.relative.phase.segmentation.frequency)
-    reference_summary_amp = effective_bandpass_model_label(model.reference.amplitude.model, model.reference.amplitude.segmentation.frequency)
-    relative_summary_amp = effective_bandpass_model_label(model.relative.amplitude.model, model.relative.amplitude.segmentation.frequency)
     return string(
         name,
         " ref=", reference_feed_label(model.reference_feed),
-        " abs(phase=", reference_summary_phase,
-        ", phase_time=", time_segmentation_label(model.reference.phase.segmentation.time),
-        ", amp=", reference_summary_amp,
-        ", amp_time=", time_segmentation_label(model.reference.amplitude.segmentation.time), ")",
-        " rel(phase=", relative_summary_phase,
-        ", phase_time=", time_segmentation_label(model.relative.phase.segmentation.time),
-        ", amp=", relative_summary_amp,
-        ", amp_time=", time_segmentation_label(model.relative.amplitude.segmentation.time), ")"
+        " abs(phase=", spec_label(model.reference.phase),
+        ", phase_time=", spec_time_label(model.reference.phase),
+        ", amp=", spec_label(model.reference.amplitude),
+        ", amp_time=", spec_time_label(model.reference.amplitude), ")",
+        " rel(phase=", spec_label(model.relative.phase),
+        ", phase_time=", spec_time_label(model.relative.phase),
+        ", amp=", spec_label(model.relative.amplitude),
+        ", amp_time=", spec_time_label(model.relative.amplitude), ")"
     )
 end

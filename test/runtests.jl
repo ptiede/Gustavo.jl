@@ -13,6 +13,22 @@ using DimensionalData: DimArray, DimStack, dims, Ti
 using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products
 using PolarizedTypes: RPol, LPol
 
+# α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
+# requires explicit time + frequency segmentations. The helper below
+# rebuilds the previous "auto-default" station model — PerChannel ×
+# Global × Global on every feed/spec — so existing tests that assumed
+# a no-arg StationBandpassModel can opt into it explicitly.
+function default_station_model_for_tests()
+    BP = Gustavo.Bandpass
+    spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
+        BP.PerChannelBandpassModel(),
+        BP.GlobalTimeSegmentation(),
+        BP.GlobalFrequencySegmentation(),
+    ))
+    feed = BP.FeedBandpassModel(phase = spec, amplitude = spec)
+    return BP.StationBandpassModel(reference_feed = 1, reference = feed, relative = feed)
+end
+
 function synthetic_uvdata()
     vis = ComplexF64[
         1.0 + 0.0im 0.8 + 0.1im 0.9 - 0.1im 0.7 + 0.2im;
@@ -224,16 +240,18 @@ end
 
 @testset "Bandpass composite basis" begin
     BP = Gustavo.Bandpass
-    segmentation = BP.BlockFrequencySegmentation(4)
+    freq = BP.BlockFrequencySegmentation(4)
+    time = BP.GlobalTimeSegmentation()
     model = BP.CompositeBandpassModel(
-        BP.SegmentedBandpassModel(BP.FlatBandpassModel(), segmentation),
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(1), segmentation),
+        BP.SegmentedBandpassModel(BP.FlatBandpassModel(), time, freq),
+        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(1), time, freq),
     )
+    spec = BP.BandpassSpec(model)
 
     x = collect(1.0:8.0)
     valid = trues(length(x))
     basis = Vector{Vector{Float64}}()
-    for component in BP.model_components(model, segmentation)
+    for component in BP.spec_components(spec)
         append!(basis, BP.component_design_columns(component, x, valid))
     end
     A = hcat(basis...)
@@ -243,7 +261,7 @@ end
 
     valid = Bool[1, 0, 0, 0, 1, 1, 1, 1]
     basis = Vector{Vector{Float64}}()
-    for component in BP.model_components(model, segmentation)
+    for component in BP.spec_components(spec)
         append!(basis, BP.component_design_columns(component, x, valid))
     end
     A = hcat(basis...)
@@ -252,40 +270,189 @@ end
     @test rank(A[valid, :]) == size(A, 2)
 end
 
+@testset "Bandpass mixed-time spec (commit 2 of α refactor)" begin
+    BP = Gustavo.Bandpass
+
+    # Mixing GlobalTime and PerScanTime components within a single spec
+    # is allowed under commit 2 — the solver routes global components
+    # into the template fit and per-scan components into the per-scan
+    # deviation fit.
+    gt = BP.GlobalTimeSegmentation()
+    ps = BP.PerScanTimeSegmentation()
+    bf4 = BP.BlockFrequencySegmentation(4)
+    composite = BP.CompositeBandpassModel(
+        BP.SegmentedBandpassModel(BP.FlatBandpassModel(),        gt, bf4),
+        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), ps, bf4),
+    )
+    spec = BP.BandpassSpec(composite)
+
+    # Spec construction is no longer rejected by the validator.
+    spec_amp = BP.BandpassSpec(BP.SegmentedBandpassModel(
+        BP.PerChannelBandpassModel(), gt, BP.GlobalFrequencySegmentation(),
+    ))
+    feed = BP.FeedBandpassModel(phase = spec, amplitude = spec_amp)
+    @test feed isa BP.FeedBandpassModel
+
+    # Mixed time means the spec is "per-scan" overall (any component
+    # per-scan ⇒ phase_variable_mask is set), but spec_time_segmentation
+    # returns nothing, and spec_time_label lists both.
+    @test BP.phase_is_per_scan(feed)
+    @test BP.spec_time_segmentation(spec) === nothing
+    @test BP.spec_time_label(spec) == "global+per_scan"
+
+    # Internal helper: filtering by mode pulls only the global or the
+    # per-scan components.
+    comps_global  = Gustavo.Bandpass._components_for_mode(spec, :template)
+    comps_perscan = Gustavo.Bandpass._components_for_mode(spec, :per_scan)
+    comps_full    = Gustavo.Bandpass._components_for_mode(spec, :full)
+    @test length(comps_global) == 1 && comps_global[1].model isa BP.FlatBandpassModel
+    @test length(comps_perscan) == 1 && comps_perscan[1].model isa BP.PolynomialBandpassModel
+    @test length(comps_full) == 2
+end
+
+@testset "Per-scan projection: identity template when no global components" begin
+    # Regression for commit-2 bug 1: an all-per-scan spec was using the
+    # unrefined `template_gains` slot as `frozen`, fitting only the
+    # residual (track − unrefined_template) onto a demeaned per-scan
+    # basis. Because the unrefined `frozen` is generally not in the
+    # basis span, the fitted total deviated from the equivalent direct
+    # fit on `track`. The fix: `_phase_frozen` / `_amp_frozen` return
+    # `nothing` when the spec has no global components, routing the
+    # projection through the direct (full-track) fit.
+    BP = Gustavo.Bandpass
+    nchan = 16
+
+    spec_perscan_only = BP.BandpassSpec(BP.SegmentedBandpassModel(
+        BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation(),
+    ))
+    spec_with_global = BP.BandpassSpec(BP.CompositeBandpassModel(
+        BP.SegmentedBandpassModel(BP.FlatBandpassModel(),        BP.GlobalTimeSegmentation(),  BP.GlobalFrequencySegmentation()),
+        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation()),
+    ))
+
+    weights = ones(nchan)
+    # Concrete template_gains shape (chan, ant, feed) with non-trivial
+    # values that should be IGNORED when the spec has no global components.
+    template_gains = fill(2.0 * cis(1.7), nchan, 1, 2)
+
+    @test BP.Bandpass._phase_frozen(template_gains, 1, 1, :per_scan, weights, spec_perscan_only) === nothing
+    @test BP.Bandpass._phase_frozen(nothing, 1, 1, :per_scan, weights, spec_perscan_only) === nothing
+    @test BP.Bandpass._amp_frozen(template_gains, 1, 1, :per_scan, spec_perscan_only) === nothing
+    @test BP.Bandpass._amp_frozen(nothing, 1, 1, :per_scan, spec_perscan_only) === nothing
+
+    # When the spec carries global components, frozen tracks the template.
+    frozen_phase = BP.Bandpass._phase_frozen(template_gains, 1, 1, :per_scan, weights, spec_with_global)
+    @test frozen_phase isa AbstractVector{Float64}
+    @test all(isapprox.(frozen_phase, 1.7; atol = 1e-12))
+
+    frozen_amp = BP.Bandpass._amp_frozen(template_gains, 1, 1, :per_scan, spec_with_global)
+    @test frozen_amp isa AbstractVector{Float64}
+    @test all(isapprox.(frozen_amp, log(2.0); atol = 1e-12))
+
+    # Non-:per_scan modes never produce a frozen track.
+    @test BP.Bandpass._phase_frozen(template_gains, 1, 1, :template, weights, spec_with_global) === nothing
+    @test BP.Bandpass._phase_frozen(template_gains, 1, 1, :full,     weights, spec_with_global) === nothing
+end
+
+@testset "Per-scan projection is invariant under 2π unwrap branch shift" begin
+    # Regression for commit-2 bug 2: independent unwraps of `track` and
+    # `template_phase` could land 2π apart globally, leaking a constant
+    # offset that the demeaned per-scan basis cannot absorb. The fix:
+    # `_fit_phase_track_with_frozen` computes the deviation as
+    # `mod(track − frozen + π, 2π) − π`, the wrap-correct phase
+    # difference, so any 2π shift in `frozen` cancels.
+    BP = Gustavo.Bandpass
+    nchan = 16
+    freqs = collect(range(220.0, 230.0; length = nchan))
+    weights = ones(nchan)
+
+    components = (
+        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation()),
+    )
+
+    # A wrapped per-scan gain phase track and a corresponding "template"
+    # phase that, on its own unwrap branch, is a smooth slope — a stand-in
+    # for what the template solve produces.
+    true_template = collect(range(-0.4, 0.4; length = nchan))
+    deviation_true = 0.05 .* sin.(2π .* (freqs .- minimum(freqs)) ./ (maximum(freqs) - minimum(freqs)))
+    track = mod.(true_template .+ deviation_true .+ π, 2π) .- π   # wrapped
+
+    # Two equivalent unwrap branches for the template.
+    frozen_a = copy(true_template)
+    frozen_b = true_template .+ 2π          # offset by exactly 2π globally
+
+    fitted_a = BP.Bandpass._fit_phase_track_with_frozen(track, weights, freqs, components, frozen_a)
+    fitted_b = BP.Bandpass._fit_phase_track_with_frozen(track, weights, freqs, components, frozen_b)
+
+    # The fitted total should be the same modulo the 2π offset of the
+    # frozen branch — i.e., `cis(fitted_a) ≈ cis(fitted_b)`.
+    @test maximum(abs.(cis.(fitted_a) .- cis.(fitted_b))) < 1e-10
+
+    # And the fitted total should reproduce the underlying (template + dev)
+    # within thermal-noise-free precision when the deviation lives in the
+    # basis span.
+    poly2 = (
+        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation()),
+    )
+    expected_total = true_template .+ deviation_true
+    @test maximum(abs.(cis.(fitted_a) .- cis.(expected_total))) < 0.05
+end
+
+@testset "Bandpass per-scan demeaning enforces G3" begin
+    # Per-scan components must produce a basis whose every column has
+    # zero uniform whole-band mean — this is the model-side enforcement
+    # of the user's G3 invariant (per-(ant, feed) band-mean is
+    # time-invariant, so band-averaging visibilities is unchanged by
+    # bandpass application up to a baseline-level constant).
+    BP = Gustavo.Bandpass
+    freq = BP.BlockFrequencySegmentation(4)
+    nchan = 8
+    x = collect(1.0:nchan)
+    valid = trues(nchan)
+
+    # Global-time component: columns NOT demeaned — band-mean nonzero.
+    global_comp = BP.SegmentedBandpassModel(
+        BP.FlatBandpassModel(), BP.GlobalTimeSegmentation(), freq,
+    )
+    cols_g = BP.component_design_columns(global_comp, x, valid)
+    @test all(abs(sum(c) / nchan) > 1e-12 for c in cols_g)
+
+    # Per-scan time component: every column demeaned to zero band-mean.
+    per_scan_comp = BP.SegmentedBandpassModel(
+        BP.FlatBandpassModel(), BP.PerScanTimeSegmentation(), freq,
+    )
+    cols_p = BP.component_design_columns(per_scan_comp, x, valid)
+    @test all(abs(sum(c) / nchan) < 1e-12 for c in cols_p)
+
+    # Demeaned `Flat × Block(N)` columns sum to zero — the post-fit rank
+    # trim drops one. fit_phase_model handles that internally; here we
+    # verify the columns themselves carry the demean.
+    poly_per_scan = BP.SegmentedBandpassModel(
+        BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), freq,
+    )
+    cols_poly = BP.component_design_columns(poly_per_scan, x, valid)
+    @test all(abs(sum(c) / nchan) < 1e-12 for c in cols_poly)
+end
+
 @testset "Bandpass time segmentation" begin
     BP = Gustavo.Bandpass
+    poly1 = BP.PolynomialBandpassModel(1)
+    global_freq = BP.GlobalFrequencySegmentation()
+    per_scan_phase_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
+        poly1, BP.PerScanTimeSegmentation(), global_freq,
+    ))
+    global_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
+        poly1, BP.GlobalTimeSegmentation(), global_freq,
+    ))
     model = BP.StationBandpassModel(
+        reference_feed = 1,
         reference = BP.FeedBandpassModel(
-            phase = BP.BandpassSpec(
-                BP.PolynomialBandpassModel(1);
-                segmentation = BP.BandpassSegmentation(
-                    BP.PerScanTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation()
-                )
-            ),
-            amplitude = BP.BandpassSpec(
-                BP.PolynomialBandpassModel(1);
-                segmentation = BP.BandpassSegmentation(
-                    BP.GlobalTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation()
-                )
-            )
+            phase = per_scan_phase_spec,
+            amplitude = global_spec,
         ),
         relative = BP.FeedBandpassModel(
-            phase = BP.BandpassSpec(
-                BP.PolynomialBandpassModel(1);
-                segmentation = BP.BandpassSegmentation(
-                    BP.GlobalTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation()
-                )
-            ),
-            amplitude = BP.BandpassSpec(
-                BP.PolynomialBandpassModel(1);
-                segmentation = BP.BandpassSegmentation(
-                    BP.GlobalTimeSegmentation(),
-                    BP.GlobalFrequencySegmentation()
-                )
-            )
+            phase = global_spec,
+            amplitude = global_spec,
         ),
     )
 
@@ -572,7 +739,7 @@ end
         gains_true[3, c] = (0.85 - 0.02c) * cis(-0.08 - 0.04 * (c - 1))
     end
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
-    station_models = [BP.StationBandpassModel() for _ in 1:nant]
+    station_models = [default_station_model_for_tests() for _ in 1:nant]
 
     # Vscan_arr layout: (Frequency, Baseline, Pol). gains_scan layout:
     # (Frequency, Ant, Feed). 3-D single-Ti slice.
@@ -691,7 +858,7 @@ end
 
     gains_init = ones(ComplexF64, nchan, nant, 2)
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
-    station_models = [BP.StationBandpassModel() for _ in 1:nant]
+    station_models = [default_station_model_for_tests() for _ in 1:nant]
     parallel_pols = (1, 2)
 
     for c in 1:nchan
@@ -779,16 +946,17 @@ end
     V = DimArray(V_arr, (Frequency(chan_freqs), Baseline(string.("B", 1:length(bl_pairs))), Pol(pol_products_v)))
     W = DimArray(W_arr, dims(V))
 
+    global_time = BP.GlobalTimeSegmentation()
+    global_freq = BP.GlobalFrequencySegmentation()
     poly2 = BP.CompositeBandpassModel(
-        BP.SegmentedBandpassModel(BP.FlatBandpassModel(), BP.GlobalFrequencySegmentation()),
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(2), BP.GlobalFrequencySegmentation()),
+        BP.SegmentedBandpassModel(BP.FlatBandpassModel(), global_time, global_freq),
+        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(2), global_time, global_freq),
     )
-    seg = BP.BandpassSegmentation(BP.GlobalTimeSegmentation(), BP.GlobalFrequencySegmentation())
     feedmodel = BP.FeedBandpassModel(
-        phase = BP.BandpassSpec(poly2; segmentation = seg),
-        amplitude = BP.BandpassSpec(poly2; segmentation = seg),
+        phase = BP.BandpassSpec(poly2),
+        amplitude = BP.BandpassSpec(poly2),
     )
-    station_models = [BP.StationBandpassModel(reference = feedmodel, relative = feedmodel) for _ in 1:nant]
+    station_models = [BP.StationBandpassModel(reference_feed = 1, reference = feedmodel, relative = feedmodel) for _ in 1:nant]
 
     gains = ones(ComplexF64, nchan, nant, 2)
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
@@ -861,7 +1029,7 @@ end
     BP = Gustavo.Bandpass
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
-    station_models = [BP.StationBandpassModel() for _ in data.antennas]
+    station_models = [default_station_model_for_tests() for _ in data.antennas]
 
     setup = BP.prepare_bandpass_solver(
         data,
@@ -917,20 +1085,32 @@ end
     @test BP.observed_source_parameter_count(V, W, pol_products_v) == 4
 
     data = synthetic_bandpass_avg_uvdata()
+    per_scan_phase_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
+        BP.PerChannelBandpassModel(),
+        BP.PerScanTimeSegmentation(),
+        BP.GlobalFrequencySegmentation(),
+    ))
+    global_amp_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
+        BP.PerChannelBandpassModel(),
+        BP.GlobalTimeSegmentation(),
+        BP.GlobalFrequencySegmentation(),
+    ))
+    per_scan_feed = BP.FeedBandpassModel(
+        phase = per_scan_phase_spec,
+        amplitude = global_amp_spec,
+    )
+    global_feed = BP.FeedBandpassModel(
+        phase = global_amp_spec,
+        amplitude = global_amp_spec,
+    )
     station_models = [
-        BP.StationBandpassModel(),
+        default_station_model_for_tests(),
         BP.StationBandpassModel(
-            reference = BP.FeedBandpassModel(
-                phase = BP.BandpassSpec(
-                    BP.PerChannelBandpassModel();
-                    segmentation = BP.BandpassSegmentation(
-                        BP.PerScanTimeSegmentation(),
-                        BP.GlobalFrequencySegmentation()
-                    )
-                )
-            )
+            reference_feed = 1,
+            reference = per_scan_feed,
+            relative = global_feed,
         ),
-        BP.StationBandpassModel(),
+        default_station_model_for_tests(),
     ]
     setup = BP.prepare_bandpass_solver(
         data,
@@ -969,7 +1149,7 @@ end
     BP = Gustavo.Bandpass
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
-    station_models = [BP.StationBandpassModel() for _ in data.antennas]
+    station_models = [default_station_model_for_tests() for _ in data.antennas]
 
     setup = BP.prepare_bandpass_solver(
         data,
@@ -1035,7 +1215,7 @@ end
     UV = Gustavo.UVData
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
-    station_models = [BP.StationBandpassModel() for _ in data.antennas]
+    station_models = [default_station_model_for_tests() for _ in data.antennas]
 
     setup = BP.prepare_bandpass_solver(
         data,
@@ -1507,7 +1687,10 @@ end
 
     setup = BP.prepare_bandpass_solver(
         avg, 1;
-        station_models = BP.build_station_models(avg.antennas.name, Dict{String, BP.StationBandpassModel}()),
+        station_models = BP.build_station_models(
+            avg.antennas.name, Dict{String, BP.StationBandpassModel}();
+            default = default_station_model_for_tests(),
+        ),
         min_baselines = 1,
     )
     state = BP.initialize_bandpass_state(setup, BP.RatioBandpassInitializer())

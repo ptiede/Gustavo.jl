@@ -241,13 +241,26 @@ function antenna_feed_support_weights(Wblock, bl_pairs, pol_products, nant)
 end
 
 function bandpass_track_gauge_factor(track, weights)
-    valid = (weights .> 0) .& isfinite.(weights) .& isfinite.(real.(track)) .& isfinite.(imag.(track))
-    any(valid) || return 1.0 + 0.0im
+    finite = isfinite.(real.(track)) .& isfinite.(imag.(track)) .& (abs.(track) .> 0)
+    any(finite) || return 1.0 + 0.0im
 
+    # Uniform channel-mean (over all finite-gain channels) for both
+    # log-amp and unwrapped phase. Two choices here matter for the
+    # G3 invariant `<arg G>_ν` to be exactly time-invariant when the
+    # gain values are time-stable:
+    #   1. Mean over `finite` (not `weights > 0`) so flagged-but-finite
+    #      channels — which the per-scan basis demeaning already
+    #      includes — are also included here.
+    #   2. `unwrap_phase_track` is called with `weights = nothing` so
+    #      its reference-channel seed is deterministically the first
+    #      finite channel. The default `argmax(weights)` seed drifts
+    #      with per-scan support_weights and leaks a sub-2π per-scan
+    #      offset into the gauge factor.
     log_amp = log.(abs.(track))
-    amp_offset = _weighted_mean_valid(log_amp, weights, valid)
-    phase_track = unwrap_phase_track(vec(angle.(track)); weights = weights)
-    phase_offset = _weighted_mean_valid(phase_track, weights, valid)
+    amp_offset = mean(view(log_amp, finite))
+    phase_track = unwrap_phase_track(vec(angle.(track)); weights = nothing)
+    finite_phase = finite .& isfinite.(phase_track)
+    phase_offset = mean(view(phase_track, finite_phase))
     return exp(amp_offset) * cis(phase_offset)
 end
 
@@ -533,6 +546,16 @@ function refine_joint_bandpass_als!(
         parallel_hand_mask = nothing;
         max_iterations = 8, tolerance = 1.0e-6,
         gauge::AbstractBandpassGauge = ZeroMeanBandpassGauge(),
+        # α refactor (commit 2): which subset of each spec's components
+        # to project onto. `:full` (default) keeps the Commit-1 behaviour
+        # of fitting all components against the track. `:template`
+        # restricts the projection to global-time components (used for
+        # the across-scans template solve). `:per_scan` restricts to
+        # per-scan-time components and fits the deviation against
+        # `template_gains`, adding the template back so `gains` carries
+        # the total (template + deviation).
+        mode::Symbol = :full,
+        template_gains = nothing,
     )
     # Gains 3-D layout: (Frequency, Ant, Feed). Vblock/Wblock 4-D:
     # (Frequency, Ti, Baseline, Pol); 3-D: (Frequency, Baseline, Pol).
@@ -644,8 +667,10 @@ function refine_joint_bandpass_als!(
         # user-specified bandpass model subspace using per-iter Fisher-info
         # weights `denom_af · |g|²`. Reference feed first, then partner-feed
         # ratio (handled inside the helpers).
-        constrain_gain_amplitudes_with_weights!(gains, denom_af, channel_freqs, station_models)
-        constrain_gain_phases_with_weights!(gains, denom_af, channel_freqs, station_models)
+        constrain_gain_amplitudes_with_weights!(gains, denom_af, channel_freqs, station_models;
+            mode = mode, template_gains = template_gains)
+        constrain_gain_phases_with_weights!(gains, denom_af, channel_freqs, station_models;
+            mode = mode, template_gains = template_gains)
 
         apply_bandpass_gauge_with_source!(gains, source, support_weights, bl_pairs, gauge)
         solve_source_coherencies!(source, gains, Vblock, Wblock, bl_pairs, pol_products)
@@ -727,25 +752,41 @@ function independent_segment_columns(columns, valid)
 end
 
 function component_design_columns(component::SegmentedBandpassModel, x, valid)
-    segments = frequency_segments(component.segmentation, length(x))
+    segments = frequency_segments(component.frequency, length(x))
     columns = Vector{Vector{Float64}}()
     for segment in segments
         any(valid[segment]) || continue
-        x_segment = segment_design_coordinate(component.segmentation, x, segment, valid)
+        x_segment = segment_design_coordinate(component.frequency, x, segment, valid)
         segment_columns = model_basis_columns(component.model, x_segment, x_segment, segment)
         append!(columns, independent_segment_columns(segment_columns, valid))
+    end
+    if component_is_per_scan(component)
+        # G3 invariant: a per-scan component must contribute zero to the
+        # whole-band mean of the bandpass at every scan, so the per-(ant,
+        # feed) band-mean is time-invariant. Replace each basis column φ
+        # with φ − ⟨φ⟩_unif, where the mean is the uniform average over
+        # all `length(x)` channels. Cross-block linear dependence
+        # introduced by this projection (e.g. demeaned `Flat × Block(N)`
+        # columns sum to zero) is dropped by the global rank trim in
+        # `fit_phase_model` / `fit_amplitude_model`.
+        columns = [col .- (sum(col) / length(x)) for col in columns]
     end
     return columns
 end
 
-function fit_phase_model(
-        phase_track, channel_weights, channel_freqs, phase_model::AbstractBandpassModel,
-        default_segmentation::AbstractFrequencySegmentation,
-    )
-    components = model_components(phase_model, default_segmentation)
+function fit_phase_model(phase_track, channel_weights, channel_freqs, components)
+    isempty(components) && return zeros(eltype(phase_track), length(phase_track))
     length(components) == 1 && components[1].model isa PerChannelBandpassModel && return phase_track
 
-    phase_unwrapped = unwrap_phase_track(phase_track; weights = channel_weights)
+    # Deterministic unwrap seed (first finite channel). The default
+    # `argmax(channel_weights)` seed drifts scan-to-scan with per-scan
+    # weights, and because our per-scan basis is *uniform*-demeaned
+    # (not weighted-demeaned) the WLS fit is not invariant under 2π
+    # global shifts of the unwrapped track when channel weights are
+    # non-uniform. Using a deterministic seed keeps the fitted track
+    # identical across scans whenever the input gain values are
+    # identical.
+    phase_unwrapped = unwrap_phase_track(phase_track; weights = nothing)
 
     # Basis is fit in a centered frequency coordinate. The center choice
     # is gauge-immaterial (a constant offset rotates the basis but not
@@ -758,6 +799,10 @@ function fit_phase_model(
     for component in components
         append!(basis, component_design_columns(component, x, valid))
     end
+    # Global rank trim: drop columns made redundant by per-scan
+    # demeaning (cross-block constant is removed from `Flat × Block(N)`
+    # demeaned, etc.).
+    basis = independent_segment_columns(basis, valid)
 
     if isempty(basis)
         return zeros(length(phase_track))
@@ -767,24 +812,24 @@ function fit_phase_model(
     count(valid) >= size(A, 2) || return phase_track
     coeffs = weighted_least_squares(A[valid, :], phase_unwrapped[valid], channel_weights[valid])
     fitted = A * coeffs
-    # Weighted-zero-mean gauge: subtract the channel-weighted mean of
-    # the fitted phase track. Channel-symmetric (no anchor).
-    fitted .-= _weighted_mean_valid(fitted, channel_weights, valid)
+    # Uniform-zero-mean gauge: subtract the unweighted mean of the
+    # fitted phase track over ALL channels. Matches the basis
+    # demeaning (also uniform over `length(x)`), so the fitted total
+    # has exactly zero uniform band-mean — keeping the G3 invariant
+    # that `<arg G>_ν` is a constant in time per (ant, feed). Using a
+    # `valid`-only mean here would re-introduce a small per-scan
+    # offset since the basis demean covers all channels but the fit
+    # only sees valid ones.
+    fitted .-= mean(fitted)
     return fitted
 end
 
-function fit_amplitude_model(
-        log_amp_track, channel_weights, channel_freqs, ::PerChannelBandpassModel,
-        default_segmentation::AbstractFrequencySegmentation,
-    )
-    return log_amp_track
-end
+# Backward-compat: pass a BandpassSpec, fit using all of its components.
+fit_phase_model(track, weights, freqs, spec::BandpassSpec) =
+    fit_phase_model(track, weights, freqs, spec_components(spec))
 
-function fit_amplitude_model(
-        log_amp_track, channel_weights, channel_freqs, amp_model::AbstractBandpassModel,
-        default_segmentation::AbstractFrequencySegmentation,
-    )
-    components = model_components(amp_model, default_segmentation)
+function fit_amplitude_model(log_amp_track, channel_weights, channel_freqs, components)
+    isempty(components) && return zeros(eltype(log_amp_track), length(log_amp_track))
     length(components) == 1 && components[1].model isa PerChannelBandpassModel && return log_amp_track
 
     x = channel_freqs .- mean(channel_freqs)
@@ -795,14 +840,155 @@ function fit_amplitude_model(
     for component in components
         append!(basis, component_design_columns(component, x, valid))
     end
+    basis = independent_segment_columns(basis, valid)
 
     isempty(basis) && return log_amp_track
     A = hcat(basis...)
     count(valid) >= size(A, 2) || return log_amp_track
     coeffs = weighted_least_squares(A[valid, :], log_amp_track[valid], channel_weights[valid])
     fitted = A * coeffs
-    fitted .-= _weighted_mean_valid(fitted, channel_weights, valid)
+    fitted .-= mean(fitted)
     return fitted
+end
+
+fit_amplitude_model(track, weights, freqs, spec::BandpassSpec) =
+    fit_amplitude_model(track, weights, freqs, spec_components(spec))
+
+# Filter spec components by ALS mode. `:template` keeps only global-time
+# components (template solve fits these against the time-averaged
+# track); `:per_scan` keeps only per-scan-time components (per-scan
+# solve fits these against the residual `track − template`); `:full`
+# keeps everything (used by callers that don't split global vs per-scan
+# — preserves the Commit-1 behaviour).
+function _components_for_mode(spec::BandpassSpec, mode::Symbol)
+    comps = spec_components(spec)
+    mode === :template && return Tuple(c for c in comps if !component_is_per_scan(c))
+    mode === :per_scan && return Tuple(c for c in comps if component_is_per_scan(c))
+    mode === :full && return comps
+    error("Unknown ALS projection mode: $mode (expected :template, :per_scan, or :full)")
+end
+
+function _is_per_channel_only_components(components)
+    return length(components) == 1 && components[1].model isa PerChannelBandpassModel
+end
+
+# In :per_scan mode the projection fits `(track − frozen)` onto the
+# per-scan components and adds `frozen` back; here `frozen` is the
+# global-time template's contribution at this (ant, feed). In :full or
+# :template mode `frozen` is `nothing` and the fit is on `track` directly.
+function _fit_phase_track_with_frozen(track, weights, freqs, components, ::Nothing)
+    return fit_phase_model(track, weights, freqs, components)
+end
+function _fit_phase_track_with_frozen(track, weights, freqs, components, frozen::AbstractVector)
+    isempty(components) && return frozen
+    # Compute the per-scan deviation as the wrapped-difference between
+    # the gain phase and the template phase: equivalent to
+    # `angle(gain · conj(template))`. Going through the complex form
+    # eliminates any 2π branch mismatch between independently-unwrapped
+    # tracks (which would otherwise leak a constant offset into the
+    # fitted deviation that the demeaned per-scan basis cannot absorb).
+    deviation = mod.(track .- frozen .+ π, 2π) .- π
+    fitted_dev = fit_phase_model(deviation, weights, freqs, components)
+    return frozen .+ fitted_dev
+end
+
+function _fit_log_amp_track_with_frozen(track, weights, freqs, components, ::Nothing)
+    return fit_amplitude_model(track, weights, freqs, components)
+end
+function _fit_log_amp_track_with_frozen(track, weights, freqs, components, frozen::AbstractVector)
+    isempty(components) && return frozen
+    residual = track .- frozen
+    fitted_dev = fit_amplitude_model(residual, weights, freqs, components)
+    return frozen .+ fitted_dev
+end
+
+# A spec is "per-channel only" if it consists of a single segmented
+# component wrapping `PerChannelBandpassModel` — in that case the fit
+# functions return the input track unchanged, and the constrain_gain_*!
+# functions skip rebuilding/applying the projection.
+function _is_per_channel_only(spec::BandpassSpec)
+    components = spec_components(spec)
+    return length(components) == 1 && components[1].model isa PerChannelBandpassModel
+end
+
+# Decide whether the constrain step should project this (ant, feed)
+# under the given mode. The full mode does the standard Commit-1
+# projection unless the spec is per-channel only (no projection
+# needed). The :template mode skips projection when no global components
+# exist (the gain is left as initialization). The :per_scan mode always
+# projects when in scope — even with no per-scan components, the
+# frozen-only path sets the per-scan gain to the template.
+function _should_project(components, mode::Symbol)
+    if mode === :template
+        isempty(components) && return false
+        return !_is_per_channel_only_components(components)
+    elseif mode === :per_scan
+        # Always project so the gain track tracks (template + per-scan
+        # deviation) consistently — even when no per-scan components
+        # exist this collapses to "set gain = template" via the frozen
+        # path.
+        _is_per_channel_only_components(components) && return false
+        return true
+    else
+        # :full
+        isempty(components) && return false
+        return !_is_per_channel_only_components(components)
+    end
+end
+
+# Frozen-track helpers: in :per_scan mode the projection fits per-scan
+# deviations against the template's contribution. The frozen track is
+# `unwrap(angle(template[:, ant, feed]))` for the reference projection
+# and the same for the partner-feed ratio for the relative projection.
+#
+# When the spec has NO global-time components, the template solve
+# leaves `template_gains[:, ant, feed]` at its initialization (the
+# template solve's per-channel ALS may have updated it freely, but no
+# basis projection ever pinned it). Using that as a frozen contribution
+# is wrong — the residual `track − frozen` lives in a basis space that
+# doesn't span the unrefined `frozen`, so the fitted total deviates
+# from the Commit-1 :full-mode projection. In that case, return
+# `nothing` so the projection collapses to fitting the full track on
+# the per-scan basis directly (matching :full-mode behaviour).
+_spec_has_global(spec::BandpassSpec) =
+    any(c -> !component_is_per_scan(c), spec_components(spec))
+
+function _phase_frozen(template_gains::Nothing, ant, feed, mode, weights, spec::BandpassSpec)
+    return nothing
+end
+function _phase_frozen(template_gains::AbstractArray, ant, feed, mode::Symbol, weights, spec::BandpassSpec)
+    mode === :per_scan || return nothing
+    _spec_has_global(spec) || return nothing
+    track = vec(angle.(template_gains[:, ant, feed]))
+    return unwrap_phase_track(track; weights = weights)
+end
+
+function _phase_relative_frozen(template_gains::Nothing, ant, partner_feed, ref_feed, mode, weights, spec::BandpassSpec)
+    return nothing
+end
+function _phase_relative_frozen(template_gains::AbstractArray, ant, partner_feed, ref_feed, mode::Symbol, weights, spec::BandpassSpec)
+    mode === :per_scan || return nothing
+    _spec_has_global(spec) || return nothing
+    track = vec(angle.(template_gains[:, ant, partner_feed] ./ template_gains[:, ant, ref_feed]))
+    return unwrap_phase_track(track; weights = weights)
+end
+
+function _amp_frozen(template_gains::Nothing, ant, feed, mode, spec::BandpassSpec)
+    return nothing
+end
+function _amp_frozen(template_gains::AbstractArray, ant, feed, mode::Symbol, spec::BandpassSpec)
+    mode === :per_scan || return nothing
+    _spec_has_global(spec) || return nothing
+    return vec(log.(abs.(template_gains[:, ant, feed])))
+end
+
+function _amp_relative_frozen(template_gains::Nothing, ant, partner_feed, ref_feed, mode, spec::BandpassSpec)
+    return nothing
+end
+function _amp_relative_frozen(template_gains::AbstractArray, ant, partner_feed, ref_feed, mode::Symbol, spec::BandpassSpec)
+    mode === :per_scan || return nothing
+    _spec_has_global(spec) || return nothing
+    return vec(log.(abs.(template_gains[:, ant, partner_feed])) .- log.(abs.(template_gains[:, ant, ref_feed])))
 end
 
 function replacement_amplitude_scale(amps, support, c; neighbor_window = 2)
@@ -972,7 +1158,9 @@ function warn_sanitized_gain_amplitudes(repaired, ant_names = nothing; context =
     return nothing
 end
 
-function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing)
+function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing;
+        mode::Symbol = :full, template_gains = nothing,
+    )
     # Gains 3-D layout: (Frequency, Ant, Feed). Slice along the Frequency axis.
     nant = size(gains, 2)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
@@ -985,30 +1173,24 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
         reference_feed = model.reference_feed
         partner_feed = partner_feed_index(model.reference_feed)
 
-        abs_amp_model = model.reference.amplitude.model
-        if !(abs_amp_model isa PerChannelBandpassModel)
-            reference_log_amp = log.(abs.(gains[:, ant, reference_feed]))
-            fitted_reference_log_amp = fit_amplitude_model(
-                vec(reference_log_amp),
-                vec(reference_weights[ant, :]),
-                channel_freqs,
-                abs_amp_model,
-                model.reference.amplitude.segmentation.frequency,
+        comps_ref = _components_for_mode(model.reference.amplitude, mode)
+        if _should_project(comps_ref, mode)
+            reference_log_amp = vec(log.(abs.(gains[:, ant, reference_feed])))
+            frozen = _amp_frozen(template_gains, ant, reference_feed, mode, model.reference.amplitude)
+            fitted_reference_log_amp = _fit_log_amp_track_with_frozen(
+                reference_log_amp, vec(reference_weights[ant, :]), channel_freqs, comps_ref, frozen,
             )
             gains[:, ant, reference_feed] = exp.(fitted_reference_log_amp) .* cis.(angle.(gains[:, ant, reference_feed]))
         end
 
-        relative_amp_model = model.relative.amplitude.model
-        if !(relative_amp_model isa PerChannelBandpassModel)
+        comps_rel = _components_for_mode(model.relative.amplitude, mode)
+        if _should_project(comps_rel, mode)
             ratio = gains[:, ant, partner_feed] ./ gains[:, ant, reference_feed]
-            relative_log_amp = log.(abs.(ratio))
+            relative_log_amp = vec(log.(abs.(ratio)))
             relative_weights = sqrt.(reference_weights[ant, :] .* partner_weights[ant, :])
-            fitted_relative_log_amp = fit_amplitude_model(
-                vec(relative_log_amp),
-                vec(relative_weights),
-                channel_freqs,
-                relative_amp_model,
-                model.relative.amplitude.segmentation.frequency,
+            frozen = _amp_relative_frozen(template_gains, ant, partner_feed, reference_feed, mode, model.relative.amplitude)
+            fitted_relative_log_amp = _fit_log_amp_track_with_frozen(
+                relative_log_amp, vec(relative_weights), channel_freqs, comps_rel, frozen,
             )
             gains[:, ant, partner_feed] = abs.(gains[:, ant, reference_feed]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(gains[:, ant, partner_feed]))
         end
@@ -1017,7 +1199,9 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
     return gains
 end
 
-function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing)
+function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing;
+        mode::Symbol = :full, template_gains = nothing,
+    )
     # Gains 3-D layout: (Frequency, Ant, Feed).
     nant = size(gains, 2)
     ref_mask = isnothing(parallel_hand_mask) ? nothing : @view(parallel_hand_mask[:, 1])
@@ -1030,30 +1214,26 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
         reference_feed = model.reference_feed
         partner_feed = partner_feed_index(model.reference_feed)
 
-        reference_phase_model = model.reference.phase.model
-        if !(reference_phase_model isa PerChannelBandpassModel)
+        comps_ref = _components_for_mode(model.reference.phase, mode)
+        if _should_project(comps_ref, mode)
             reference_phase_track = vec(angle.(gains[:, ant, reference_feed]))
-            fitted_reference_phase = fit_phase_model(
-                reference_phase_track,
-                vec(reference_weights[ant, :]),
-                channel_freqs,
-                reference_phase_model,
-                model.reference.phase.segmentation.frequency,
+            ref_w = vec(reference_weights[ant, :])
+            frozen = _phase_frozen(template_gains, ant, reference_feed, mode, ref_w, model.reference.phase)
+            fitted_reference_phase = _fit_phase_track_with_frozen(
+                reference_phase_track, ref_w, channel_freqs, comps_ref, frozen,
             )
             gains[:, ant, reference_feed] = abs.(gains[:, ant, reference_feed]) .* cis.(fitted_reference_phase)
         end
 
-        relative_phase_model = model.relative.phase.model
-        if !(relative_phase_model isa PerChannelBandpassModel)
+        comps_rel = _components_for_mode(model.relative.phase, mode)
+        if _should_project(comps_rel, mode)
             ratio = gains[:, ant, partner_feed] ./ gains[:, ant, reference_feed]
             relative_phase_track = vec(angle.(ratio))
             relative_weights = sqrt.(reference_weights[ant, :] .* partner_weights[ant, :])
-            fitted_relative_phase = fit_phase_model(
-                relative_phase_track,
-                vec(relative_weights),
-                channel_freqs,
-                relative_phase_model,
-                model.relative.phase.segmentation.frequency,
+            rel_w = vec(relative_weights)
+            frozen = _phase_relative_frozen(template_gains, ant, partner_feed, reference_feed, mode, rel_w, model.relative.phase)
+            fitted_relative_phase = _fit_phase_track_with_frozen(
+                relative_phase_track, rel_w, channel_freqs, comps_rel, frozen,
             )
             gains[:, ant, partner_feed] = abs.(gains[:, ant, partner_feed]) .* cis.(angle.(gains[:, ant, reference_feed]) .+ fitted_relative_phase)
         end
@@ -1071,7 +1251,8 @@ end
 # `constrain_gain_phases!` these helpers do not need `Vblock`/`Wblock`/
 # `bl_pairs`/`parallel_pols` because the weight is precomputed.
 function constrain_gain_amplitudes_with_weights!(
-        gains, denom_af, channel_freqs, station_models,
+        gains, denom_af, channel_freqs, station_models;
+        mode::Symbol = :full, template_gains = nothing,
     )
     nant = size(gains, 2)
     @assert size(denom_af) == size(gains)
@@ -1085,30 +1266,24 @@ function constrain_gain_amplitudes_with_weights!(
         ref_w = view(denom_af, :, ant, reference_feed) .* abs2.(ref_g)
         par_w = view(denom_af, :, ant, partner_feed) .* abs2.(par_g)
 
-        abs_amp_model = model.reference.amplitude.model
-        if !(abs_amp_model isa PerChannelBandpassModel)
-            reference_log_amp = log.(abs.(ref_g))
-            fitted_reference_log_amp = fit_amplitude_model(
-                vec(reference_log_amp),
-                vec(ref_w),
-                channel_freqs,
-                abs_amp_model,
-                model.reference.amplitude.segmentation.frequency,
+        comps_ref = _components_for_mode(model.reference.amplitude, mode)
+        if _should_project(comps_ref, mode)
+            reference_log_amp = vec(log.(abs.(ref_g)))
+            frozen = _amp_frozen(template_gains, ant, reference_feed, mode, model.reference.amplitude)
+            fitted_reference_log_amp = _fit_log_amp_track_with_frozen(
+                reference_log_amp, vec(ref_w), channel_freqs, comps_ref, frozen,
             )
             gains[:, ant, reference_feed] = exp.(fitted_reference_log_amp) .* cis.(angle.(ref_g))
         end
 
-        relative_amp_model = model.relative.amplitude.model
-        if !(relative_amp_model isa PerChannelBandpassModel)
+        comps_rel = _components_for_mode(model.relative.amplitude, mode)
+        if _should_project(comps_rel, mode)
             ratio = par_g ./ ref_g
-            relative_log_amp = log.(abs.(ratio))
+            relative_log_amp = vec(log.(abs.(ratio)))
             relative_weights = sqrt.(ref_w .* par_w)  # geometric-mean precision (existing convention)
-            fitted_relative_log_amp = fit_amplitude_model(
-                vec(relative_log_amp),
-                vec(relative_weights),
-                channel_freqs,
-                relative_amp_model,
-                model.relative.amplitude.segmentation.frequency,
+            frozen = _amp_relative_frozen(template_gains, ant, partner_feed, reference_feed, mode, model.relative.amplitude)
+            fitted_relative_log_amp = _fit_log_amp_track_with_frozen(
+                relative_log_amp, vec(relative_weights), channel_freqs, comps_rel, frozen,
             )
             gains[:, ant, partner_feed] = abs.(gains[:, ant, reference_feed]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(par_g))
         end
@@ -1117,7 +1292,8 @@ function constrain_gain_amplitudes_with_weights!(
 end
 
 function constrain_gain_phases_with_weights!(
-        gains, denom_af, channel_freqs, station_models,
+        gains, denom_af, channel_freqs, station_models;
+        mode::Symbol = :full, template_gains = nothing,
     )
     nant = size(gains, 2)
     @assert size(denom_af) == size(gains)
@@ -1131,30 +1307,26 @@ function constrain_gain_phases_with_weights!(
         ref_w = view(denom_af, :, ant, reference_feed) .* abs2.(ref_g)
         par_w = view(denom_af, :, ant, partner_feed) .* abs2.(par_g)
 
-        reference_phase_model = model.reference.phase.model
-        if !(reference_phase_model isa PerChannelBandpassModel)
+        comps_ref = _components_for_mode(model.reference.phase, mode)
+        if _should_project(comps_ref, mode)
             reference_phase_track = vec(angle.(ref_g))
-            fitted_reference_phase = fit_phase_model(
-                reference_phase_track,
-                vec(ref_w),
-                channel_freqs,
-                reference_phase_model,
-                model.reference.phase.segmentation.frequency,
+            ref_w_vec = vec(ref_w)
+            frozen = _phase_frozen(template_gains, ant, reference_feed, mode, ref_w_vec, model.reference.phase)
+            fitted_reference_phase = _fit_phase_track_with_frozen(
+                reference_phase_track, ref_w_vec, channel_freqs, comps_ref, frozen,
             )
             gains[:, ant, reference_feed] = abs.(ref_g) .* cis.(fitted_reference_phase)
         end
 
-        relative_phase_model = model.relative.phase.model
-        if !(relative_phase_model isa PerChannelBandpassModel)
+        comps_rel = _components_for_mode(model.relative.phase, mode)
+        if _should_project(comps_rel, mode)
             ratio = par_g ./ gains[:, ant, reference_feed]
             relative_phase_track = vec(angle.(ratio))
             relative_weights = sqrt.(ref_w .* par_w)
-            fitted_relative_phase = fit_phase_model(
-                relative_phase_track,
-                vec(relative_weights),
-                channel_freqs,
-                relative_phase_model,
-                model.relative.phase.segmentation.frequency,
+            rel_w_vec = vec(relative_weights)
+            frozen = _phase_relative_frozen(template_gains, ant, partner_feed, reference_feed, mode, rel_w_vec, model.relative.phase)
+            fitted_relative_phase = _fit_phase_track_with_frozen(
+                relative_phase_track, rel_w_vec, channel_freqs, comps_rel, frozen,
             )
             gains[:, ant, partner_feed] = abs.(par_g) .* cis.(angle.(gains[:, ant, reference_feed]) .+ fitted_relative_phase)
         end
@@ -1463,26 +1635,31 @@ end
 # only the polynomial-degree count). When time segmentation is global
 # this returns 0 (the per-scan slice doesn't add free DoF).
 function _per_scan_free_params(spec::BandpassSpec, nchan::Integer)
-    is_per_scan(spec.segmentation.time) || return 0
-    model = spec.model
-    seg = spec.segmentation.frequency
-    return _model_freedom(model, seg, nchan)
+    phase_is_per_scan(spec) || return 0
+    # Only per-scan components contribute per-scan DOF; global-time
+    # components live in the template solve and aren't refit per scan.
+    total = 0
+    for c in spec_components(spec)
+        component_is_per_scan(c) || continue
+        total += _segmented_freedom(c, nchan)
+    end
+    return total
 end
-
-_model_freedom(::PerChannelBandpassModel, _seg, nchan::Integer) = nchan
-_model_freedom(model::SegmentedBandpassModel, _outer_seg, nchan::Integer) =
-    _segmented_freedom(model, nchan)
-_model_freedom(model::CompositeBandpassModel, _seg, nchan::Integer) =
-    sum(_segmented_freedom(component, nchan) for component in model.components)
-_model_freedom(model::AbstractBandpassModel, _seg, _nchan::Integer) =
-    something(parameter_count(model), 0)
 
 function _segmented_freedom(component::SegmentedBandpassModel, nchan::Integer)
     component.model isa PerChannelBandpassModel && return nchan
-    nblocks = length(frequency_segments(component.segmentation, nchan))
+    nblocks = length(frequency_segments(component.frequency, nchan))
     is_flat = component.model isa FlatBandpassModel
     per_block = is_flat ? 1 : something(parameter_count(component.model), 0)
-    return nblocks * per_block
+    base = nblocks * per_block
+    # Per-scan demeaning of `Flat × Block(N)` makes the N indicator
+    # columns sum to zero, so one column is dropped by the post-fit
+    # rank trim. Account for that DOF loss here so the
+    # under-determined warning matches the actual basis dimension.
+    if component_is_per_scan(component) && is_flat && nblocks >= 1
+        base -= 1
+    end
+    return base
 end
 
 # Count of distinct baselines touching `(ant, feed)` with non-zero
@@ -1966,6 +2143,9 @@ function refine_bandpass!(
     refinement.iterations > 0 || return state
 
     if refinement.refine_template
+        # Template solve: project the across-scans gain onto the
+        # global-time components only. Per-scan content is solved in the
+        # per-scan refine pass below.
         refine_joint_bandpass_als!(
             state.gains_template, nothing,
             setup.data.vis, setup.data.weights,
@@ -1974,12 +2154,16 @@ function refine_bandpass!(
             setup.parallel_pols, setup.parallel_hand_mask;
             max_iterations = refinement.iterations, tolerance = refinement.tolerance,
             gauge = setup.gauge,
+            mode = :template,
         )
     end
 
     if refinement.refine_scans
         # scan_gains/scan_solved: (Frequency, Ti, Ant, Feed). data.vis/weights:
         # (Frequency, Ti, Baseline, Pol). Slice on Ti (dim 2).
+        # Per-scan solve: fit per-scan-time components against the
+        # residual `track − template_gains`, adding the template back
+        # so `scan_gains[:, s, :, :]` stores the total per-scan gain.
         for s in axes(state.scan_gains, 2)
             refine_joint_bandpass_als!(
                 view(state.scan_gains, :, s, :, :),
@@ -1993,6 +2177,8 @@ function refine_bandpass!(
                 max_iterations = refinement.iterations,
                 tolerance = refinement.tolerance,
                 gauge = setup.gauge,
+                mode = :per_scan,
+                template_gains = state.gains_template,
             )
         end
     end

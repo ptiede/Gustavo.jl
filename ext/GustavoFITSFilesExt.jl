@@ -1249,7 +1249,13 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     fp = first(leaf_list)
     fp_info = DimensionalData.metadata(fp)
     uvw_eltype = eltype(parent(fp[:uvw]))
-    raw_data = zeros(Float32, nrec_total, 3, npol, nchan, 1, 1, 1)
+    # Per AIPS Memo 117 §3.1.1 + the FQ-table semantics, each entry of
+    # `FrequencySetup.channel_freqs` is an IF center frequency (one
+    # channel per IF — the loader enforces `nif == nvis_chan`). On the
+    # data array that means NAXIS5=nIF (the IF axis), NAXIS4=1 (one
+    # channel per IF). Putting all spectral entries on NAXIS4 would
+    # produce a file whose DATA shape contradicts the FQ table's NIF.
+    raw_data = zeros(Float32, nrec_total, 3, npol, 1, nchan, 1, 1)
     uu = Vector{uvw_eltype}(undef, nrec_total)
     vv = Vector{uvw_eltype}(undef, nrec_total)
     ww_ = Vector{uvw_eltype}(undef, nrec_total)
@@ -1365,15 +1371,17 @@ function _write_records_kernel!(
     # (Ti, Baseline, UVW) for uvw.
     npol = length(pol_perm)
     nchan = size(vis_dense, 1)
+    # In-memory `Frequency` dim entries are per-IF (1 channel each), so
+    # they go on axis 5 (IF) of the AIPS-format array, with NAXIS4=1.
     @inbounds for (rec_i, (ti, bi)) in enumerate(record_order)
         row = rec_offset + rec_i
         for pdisk in 1:npol
             pmem = pol_perm[pdisk]
             for c in 1:nchan
                 v = vis_dense[c, ti, bi, pmem]
-                raw_data[row, 1, pdisk, c, 1, 1, 1] = real(v)
-                raw_data[row, 2, pdisk, c, 1, 1, 1] = imag(v)
-                raw_data[row, 3, pdisk, c, 1, 1, 1] = w_dense[c, ti, bi, pmem]
+                raw_data[row, 1, pdisk, 1, c, 1, 1] = real(v)
+                raw_data[row, 2, pdisk, 1, c, 1, 1] = imag(v)
+                raw_data[row, 3, pdisk, 1, c, 1, 1] = w_dense[c, ti, bi, pmem]
             end
         end
         uu[row] = uvw_dense[ti, bi, 1]

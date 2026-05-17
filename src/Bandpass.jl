@@ -98,9 +98,10 @@ export SegmentedBandpassModel, CompositeBandpassModel
 export AbstractTimeSegmentation, AbstractFrequencySegmentation
 export GlobalTimeSegmentation, PerScanTimeSegmentation
 export GlobalFrequencySegmentation, BlockFrequencySegmentation
-export BandpassSegmentation, BandpassSpec, FeedBandpassModel, StationBandpassModel
-export bandpass, parameter_count
+export BandpassSpec, FeedBandpassModel, StationBandpassModel
+export bandpass, parameter_count, spec_components, spec_time_segmentation
 export validate_station_bandpass_model, is_per_scan, phase_is_per_scan, amplitude_is_per_scan
+export component_is_per_scan
 export design_matrices, build_station_models, station_model_summary, choose_phase_reference
 export BandpassSolverSetup, BandpassSolverState
 export AbstractBandpassGauge, ZeroMeanBandpassGauge, ReferenceAntennaBandpassGauge
