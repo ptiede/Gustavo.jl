@@ -315,8 +315,11 @@ function build_station_models(
     station_models = StationBandpassModel[default_model for _ in ant_names]
     for (name, model) in station_model_map
         ant_idx = findfirst(==(name), ant_names)
-        isnothing(ant_idx) && error("Unknown station in station_model_map: $name")
-        station_models[ant_idx] = validate_station_bandpass_model(model)
+        if !isnothing(ant_idx)
+            station_models[ant_idx] = validate_station_bandpass_model(model)
+        else
+            @warn("Unknown station in station_model_map: $name skipping specification")
+        end
     end
     return station_models
 end

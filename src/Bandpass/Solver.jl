@@ -751,7 +751,7 @@ function independent_segment_columns(columns, valid)
     return independent
 end
 
-function component_design_columns(component::SegmentedBandpassModel, x, valid)
+function component_design_columns(component::SegmentedBandpassModel, x, valid, weights = nothing)
     segments = frequency_segments(component.frequency, length(x))
     columns = Vector{Vector{Float64}}()
     for segment in segments
@@ -761,14 +761,20 @@ function component_design_columns(component::SegmentedBandpassModel, x, valid)
         append!(columns, independent_segment_columns(segment_columns, valid))
     end
     if component_is_per_scan(component)
-        # G3 invariant: a per-scan component must contribute zero to the
-        # whole-band mean of the bandpass at every scan, so the per-(ant,
-        # feed) band-mean is time-invariant. Replace each basis column φ
-        # with φ − ⟨φ⟩_unif, where the mean is the uniform average over
-        # all `length(x)` channels. Cross-block linear dependence
-        # introduced by this projection (e.g. demeaned `Flat × Block(N)`
-        # columns sum to zero) is dropped by the global rank trim in
-        # `fit_phase_model` / `fit_amplitude_model`.
+        # G3 invariant: per-scan basis columns are demeaned over channels
+        # so any linear combination's band-mean is zero. We use the
+        # UNIFORM-over-all-channels mean here for the basis demean, even
+        # when the final gauge subtraction in `fit_*_model` is weighted.
+        # The basis demean's job is to make the fit space orthogonal to
+        # the band-constant mode (so the rank trim drops the cross-block
+        # constant cleanly and the fit can't absorb a per-scan uniform
+        # offset). Using `sum(col .* w)/sum(w)` instead pins the dropped
+        # mode to a weight-dependent direction, which slightly tilts the
+        # remaining basis values per block — and that tilt shows up as a
+        # 4-block-period wave on baselines involving the demeaned feed.
+        # Uniform demean keeps the basis shape clean; the post-fit
+        # weighted subtraction in `fit_*_model` is what actually enforces
+        # `<fitted>_w = 0`.
         columns = [col .- (sum(col) / length(x)) for col in columns]
     end
     return columns
@@ -776,7 +782,34 @@ end
 
 function fit_phase_model(phase_track, channel_weights, channel_freqs, components)
     isempty(components) && return zeros(eltype(phase_track), length(phase_track))
-    length(components) == 1 && components[1].model isa PerChannelBandpassModel && return phase_track
+    if length(components) == 1 && components[1].model isa PerChannelBandpassModel
+        # PerChannel × GlobalTime: identity fit (each channel is its own DOF
+        # with no time variation, no constraint to enforce).
+        # PerChannel × PerScan: G3 demands the weighted band-mean of the
+        # per-scan track to be zero. Demean only the VALID channels — at
+        # invalid channels leave the input as-is. Pinning invalid channels
+        # to `-m` (the previous attempt) produces a sawtooth wherever
+        # flagged channels are interleaved with valid ones, since each
+        # invalid channel jumps to the constant `-m` while neighbouring
+        # valid channels carry their (unwrapped − m) signal.
+        if !component_is_per_scan(components[1])
+            return phase_track
+        end
+        phase_unwrapped = unwrap_phase_track(phase_track; weights = nothing)
+        valid = (channel_weights .> 0) .& isfinite.(channel_weights) .& isfinite.(phase_unwrapped)
+        any(valid) || return phase_track
+        w = ifelse.(valid, Float64.(channel_weights), 0.0)
+        wsum = sum(w)
+        wsum > 0 || return phase_track
+        # Weighted mean over valid channels only (NaN-safe — w is zero
+        # wherever the input wasn't usable).
+        m = sum(ifelse.(valid, phase_unwrapped, 0.0) .* w) / wsum
+        result = copy(phase_unwrapped)
+        @inbounds for i in eachindex(result)
+            valid[i] && (result[i] -= m)
+        end
+        return result
+    end
 
     # Deterministic unwrap seed (first finite channel). The default
     # `argmax(channel_weights)` seed drifts scan-to-scan with per-scan
@@ -797,7 +830,7 @@ function fit_phase_model(phase_track, channel_weights, channel_freqs, components
 
     basis = Vector{Vector{Float64}}()
     for component in components
-        append!(basis, component_design_columns(component, x, valid))
+        append!(basis, component_design_columns(component, x, valid, channel_weights))
     end
     # Global rank trim: drop columns made redundant by per-scan
     # demeaning (cross-block constant is removed from `Flat × Block(N)`
@@ -817,9 +850,13 @@ function fit_phase_model(phase_track, channel_weights, channel_freqs, components
     # demeaning (also uniform over `length(x)`), so the fitted total
     # has exactly zero uniform band-mean — keeping the G3 invariant
     # that `<arg G>_ν` is a constant in time per (ant, feed). Using a
-    # `valid`-only mean here would re-introduce a small per-scan
-    # offset since the basis demean covers all channels but the fit
-    # only sees valid ones.
+    # weighted mean here re-introduces a per-scan uniform offset
+    # (basis columns are *uniform*-demeaned but channel weights vary
+    # scan-to-scan), and the downstream `bandpass_track_gauge_factor`
+    # also operates on uniform means — so a weighted subtraction here
+    # leaks an uncorrected per-scan tilt onto every non-reference
+    # antenna's gain, visible as a per-IF-block sawtooth/slope on
+    # baselines that share the affected feed (e.g. AA-NN QQ).
     fitted .-= mean(fitted)
     return fitted
 end
@@ -830,7 +867,33 @@ fit_phase_model(track, weights, freqs, spec::BandpassSpec) =
 
 function fit_amplitude_model(log_amp_track, channel_weights, channel_freqs, components)
     isempty(components) && return zeros(eltype(log_amp_track), length(log_amp_track))
-    length(components) == 1 && components[1].model isa PerChannelBandpassModel && return log_amp_track
+    if length(components) == 1 && components[1].model isa PerChannelBandpassModel
+        # Mirror of fit_phase_model: PerChannel × PerScan enforces zero
+        # weighted band-mean of log|G| per scan, so applying the bandpass
+        # leaves weighted-band-averaged baseline amplitude unchanged
+        # scan-to-scan. Demean only the VALID channels — at invalid
+        # channels leave the input as-is. Zeroing invalid log-amps and
+        # then subtracting the mean (as the previous attempt did) pins
+        # each invalid channel to `-m`, which on a (scan, channel) grid
+        # where flagged channels are interleaved with valid ones shows up
+        # as a sawtooth on the partner-feed (QQ) bandpass — e.g. NOEMA,
+        # whose few-partner support yields many channels with
+        # `denom_af = 0`.
+        if !component_is_per_scan(components[1])
+            return log_amp_track
+        end
+        valid = (channel_weights .> 0) .& isfinite.(channel_weights) .& isfinite.(log_amp_track)
+        any(valid) || return log_amp_track
+        w = ifelse.(valid, Float64.(channel_weights), 0.0)
+        wsum = sum(w)
+        wsum > 0 || return log_amp_track
+        m = sum(ifelse.(valid, log_amp_track, 0.0) .* w) / wsum
+        result = copy(log_amp_track)
+        @inbounds for i in eachindex(result)
+            valid[i] && (result[i] -= m)
+        end
+        return result
+    end
 
     x = channel_freqs .- mean(channel_freqs)
     valid = (channel_weights .> 0) .& isfinite.(channel_weights) .& isfinite.(log_amp_track) .& isfinite.(x)
@@ -838,7 +901,7 @@ function fit_amplitude_model(log_amp_track, channel_weights, channel_freqs, comp
 
     basis = Vector{Vector{Float64}}()
     for component in components
-        append!(basis, component_design_columns(component, x, valid))
+        append!(basis, component_design_columns(component, x, valid, channel_weights))
     end
     basis = independent_segment_columns(basis, valid)
 
@@ -847,6 +910,8 @@ function fit_amplitude_model(log_amp_track, channel_weights, channel_freqs, comp
     count(valid) >= size(A, 2) || return log_amp_track
     coeffs = weighted_least_squares(A[valid, :], log_amp_track[valid], channel_weights[valid])
     fitted = A * coeffs
+    # Uniform-zero-mean gauge (matches the basis uniform-demean and the
+    # downstream `bandpass_track_gauge_factor`).
     fitted .-= mean(fitted)
     return fitted
 end
@@ -920,19 +985,26 @@ end
 # frozen-only path sets the per-scan gain to the template.
 function _should_project(components, mode::Symbol)
     if mode === :template
+        # Template solve uses GlobalTime components only; PerChannel ×
+        # GlobalTime is an identity fit, no constraint to apply.
         isempty(components) && return false
         return !_is_per_channel_only_components(components)
     elseif mode === :per_scan
         # Always project so the gain track tracks (template + per-scan
-        # deviation) consistently — even when no per-scan components
-        # exist this collapses to "set gain = template" via the frozen
-        # path.
-        _is_per_channel_only_components(components) && return false
+        # deviation) consistently. PerChannel × PerScan specs MUST be
+        # projected — the projection demeans the track to enforce G3.
+        # Skipping them (as the previous code did) leaves the per-scan
+        # gain at whatever the ALS update produced, with no band-mean
+        # constraint at all, which breaks G3 on every (ant, feed) that
+        # uses a per-channel-only per-scan spec.
         return true
     else
-        # :full
+        # :full — legacy unsplit solve. PerChannel × PerScan in :full
+        # mode also requires projection for G3; PerChannel × GlobalTime
+        # remains an identity fit.
         isempty(components) && return false
-        return !_is_per_channel_only_components(components)
+        _is_per_channel_only_components(components) || return true
+        return component_is_per_scan(components[1])
     end
 end
 
