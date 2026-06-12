@@ -70,6 +70,11 @@ function solve_parallel_channel!(
         length(rows) < min_baselines && continue
 
         active = sort(unique(vcat([[bl_pairs[bi][1], bl_pairs[bi][2]] for bi in rows]...)))
+        # Amplitude LS solves length(rows) equations for length(active)
+        # unknowns; when rows < active the (rows × active) design is
+        # underdetermined and QRCompactWY's backsolve refuses the non-square R.
+        # Skip — gains stay 1 / solved stays false and ALS fills it in.
+        length(rows) < length(active) && continue
         conn = zeros(Int, nant)
         for bi in rows
             a, b = bl_pairs[bi]
@@ -1231,7 +1236,7 @@ function warn_sanitized_gain_amplitudes(repaired, ant_names = nothing; context =
 end
 
 function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing;
-        mode::Symbol = :full, template_gains = nothing,
+        mode::Symbol = :full, template_gains = nothing, solved = nothing,
     )
     # Gains 3-D layout: (Frequency, Ant, Feed). Slice along the Frequency axis.
     nant = size(gains, 2)
@@ -1245,12 +1250,21 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
         reference_feed = model.reference_feed
         partner_feed = partner_feed_index(model.reference_feed)
 
+        # Channels that solve_parallel_channel! skipped (underdetermined per-channel
+        # LS) still have `antenna_phase_weights > 0` here because the antenna
+        # touched some baselines at that channel — just not enough joint baselines
+        # for a unique fit. Their gain is the default 1.0, so leaving the weight
+        # > 0 drags the polynomial toward log|g|=0 / arg g=0 (visible as a
+        # per-channel offset in the polynomial init).
+        ref_track_w = _gate_track_weights(reference_weights, ant, solved, reference_feed)
+        par_track_w = _gate_track_weights(partner_weights, ant, solved, partner_feed)
+
         comps_ref = _components_for_mode(model.reference.amplitude, mode)
         if _should_project(comps_ref, mode)
             reference_log_amp = vec(log.(abs.(gains[:, ant, reference_feed])))
             frozen = _amp_frozen(template_gains, ant, reference_feed, mode, model.reference.amplitude)
             fitted_reference_log_amp = _fit_log_amp_track_with_frozen(
-                reference_log_amp, vec(reference_weights[ant, :]), channel_freqs, comps_ref, frozen,
+                reference_log_amp, ref_track_w, channel_freqs, comps_ref, frozen,
             )
             gains[:, ant, reference_feed] = exp.(fitted_reference_log_amp) .* cis.(angle.(gains[:, ant, reference_feed]))
         end
@@ -1259,10 +1273,10 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
         if _should_project(comps_rel, mode)
             ratio = gains[:, ant, partner_feed] ./ gains[:, ant, reference_feed]
             relative_log_amp = vec(log.(abs.(ratio)))
-            relative_weights = sqrt.(reference_weights[ant, :] .* partner_weights[ant, :])
+            relative_weights = sqrt.(ref_track_w .* par_track_w)
             frozen = _amp_relative_frozen(template_gains, ant, partner_feed, reference_feed, mode, model.relative.amplitude)
             fitted_relative_log_amp = _fit_log_amp_track_with_frozen(
-                relative_log_amp, vec(relative_weights), channel_freqs, comps_rel, frozen,
+                relative_log_amp, relative_weights, channel_freqs, comps_rel, frozen,
             )
             gains[:, ant, partner_feed] = abs.(gains[:, ant, reference_feed]) .* exp.(fitted_relative_log_amp) .* cis.(angle.(gains[:, ant, partner_feed]))
         end
@@ -1271,8 +1285,20 @@ function constrain_gain_amplitudes!(gains, Vblock, Wblock, bl_pairs, channel_fre
     return gains
 end
 
+# Zero out per-channel polynomial-fit weights at channels where the per-channel
+# init bailed (`solved[c, ant, feed] = false`). Returns a plain Vector so the
+# downstream fit doesn't observe a view onto the shared `*_weights` matrix.
+function _gate_track_weights(weights_mat, ant, solved, feed)
+    w = collect(vec(weights_mat[ant, :]))
+    isnothing(solved) && return w
+    @inbounds for c in eachindex(w)
+        solved[c, ant, feed] || (w[c] = zero(eltype(w)))
+    end
+    return w
+end
+
 function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, station_models, parallel_pols, parallel_hand_mask = nothing;
-        mode::Symbol = :full, template_gains = nothing,
+        mode::Symbol = :full, template_gains = nothing, solved = nothing,
     )
     # Gains 3-D layout: (Frequency, Ant, Feed).
     nant = size(gains, 2)
@@ -1286,10 +1312,12 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
         reference_feed = model.reference_feed
         partner_feed = partner_feed_index(model.reference_feed)
 
+        ref_w = _gate_track_weights(reference_weights, ant, solved, reference_feed)
+        par_w = _gate_track_weights(partner_weights, ant, solved, partner_feed)
+
         comps_ref = _components_for_mode(model.reference.phase, mode)
         if _should_project(comps_ref, mode)
             reference_phase_track = vec(angle.(gains[:, ant, reference_feed]))
-            ref_w = vec(reference_weights[ant, :])
             frozen = _phase_frozen(template_gains, ant, reference_feed, mode, ref_w, model.reference.phase)
             fitted_reference_phase = _fit_phase_track_with_frozen(
                 reference_phase_track, ref_w, channel_freqs, comps_ref, frozen,
@@ -1301,8 +1329,7 @@ function constrain_gain_phases!(gains, Vblock, Wblock, bl_pairs, channel_freqs, 
         if _should_project(comps_rel, mode)
             ratio = gains[:, ant, partner_feed] ./ gains[:, ant, reference_feed]
             relative_phase_track = vec(angle.(ratio))
-            relative_weights = sqrt.(reference_weights[ant, :] .* partner_weights[ant, :])
-            rel_w = vec(relative_weights)
+            rel_w = sqrt.(ref_w .* par_w)
             frozen = _phase_relative_frozen(template_gains, ant, partner_feed, reference_feed, mode, rel_w, model.relative.phase)
             fitted_relative_phase = _fit_phase_track_with_frozen(
                 relative_phase_track, rel_w, channel_freqs, comps_rel, frozen,
@@ -1485,13 +1512,18 @@ function solve_bandpass_single_scan(
     # `antenna_phase_weights`-flavored helpers because we don't yet have the
     # per-iter `denom_af` (that's an artifact of the ALS loop). The first
     # ALS iter immediately re-projects with proper Fisher-info weights.
+    # `solved` is forwarded so per-channel slots that were skipped as
+    # underdetermined (and therefore still sit at the default gain=1) contribute
+    # zero weight to the polynomial fit instead of pulling it to zero.
     constrain_gain_amplitudes!(
         gains, Vs, Ws, bl_pairs, channel_freqs,
-        station_models, parallel_pols, parallel_hand_mask,
+        station_models, parallel_pols, parallel_hand_mask;
+        solved = solved,
     )
     constrain_gain_phases!(
         gains, Vs, Ws, bl_pairs, channel_freqs,
-        station_models, parallel_pols, parallel_hand_mask,
+        station_models, parallel_pols, parallel_hand_mask;
+        solved = solved,
     )
 
     joint_als_iterations > 0 && refine_joint_bandpass_als!(
@@ -1524,11 +1556,12 @@ function solve_bandpass_template(
     init_ref_chan = _init_ref_channel_from_weights(W, parallel_pols)
 
     gains = ones(ComplexF64, nchan, nant, 2)
+    solved = falses(nchan, nant, 2)
 
     for c in 1:nchan
         c == init_ref_chan && continue
         solve_parallel_channel!(
-            gains, nothing, V, W, bl_pairs, nant, gauge, init_ref_chan, c, A_amp, A_phase,
+            gains, solved, V, W, bl_pairs, nant, gauge, init_ref_chan, c, A_amp, A_phase,
             station_models, parallel_pols; min_baselines = min_baselines, parallel_hand_mask = parallel_hand_mask,
             ref_ant = ref_ant,
         )
@@ -1537,11 +1570,13 @@ function solve_bandpass_template(
     # Init-time projection (see solve_bandpass_single_scan for rationale).
     constrain_gain_amplitudes!(
         gains, V, W, bl_pairs, channel_freqs,
-        station_models, parallel_pols, parallel_hand_mask,
+        station_models, parallel_pols, parallel_hand_mask;
+        solved = solved,
     )
     constrain_gain_phases!(
         gains, V, W, bl_pairs, channel_freqs,
-        station_models, parallel_pols, parallel_hand_mask,
+        station_models, parallel_pols, parallel_hand_mask;
+        solved = solved,
     )
 
     joint_als_iterations > 0 && refine_joint_bandpass_als!(
