@@ -44,13 +44,33 @@ struct SharedFeeds <: AbstractFeedTying end
 
 The `reference_feed` reads a reference block; the partner feed reads the
 reference block PLUS a relative-deviation block (partner = reference + relative).
-This reproduces the old absolute/relative bandpass feed pattern.
+This reproduces the old absolute/relative bandpass feed pattern when both feeds
+share the *same* term and segmentation. For an asymmetric bandpass model (the
+two feeds use different terms/segmentations) use a `SharedFeeds` component for
+the common part plus a `FeedComponent` for the partner-only deviation.
 """
 struct ReferenceRelative <: AbstractFeedTying
     reference_feed::Int
     function ReferenceRelative(reference_feed::Integer)
         reference_feed in (1, 2) || error("ReferenceRelative reference_feed must be 1 or 2")
         return new(Int(reference_feed))
+    end
+end
+
+"""
+    FeedComponent(feed)
+
+The component applies to one `feed` (1 or 2) only — the other feed gets no
+contribution from it. Allocates a single parameter block, assigned to `feed`.
+This is the primitive that expresses a partner-feed-only deviation, so the old
+asymmetric reference/relative bandpass model decomposes as a `SharedFeeds`
+common part plus a `FeedComponent(partner)` deviation.
+"""
+struct FeedComponent <: AbstractFeedTying
+    feed::Int
+    function FeedComponent(feed::Integer)
+        feed in (1, 2) || error("FeedComponent feed must be 1 or 2")
+        return new(Int(feed))
     end
 end
 
@@ -77,6 +97,7 @@ freq_segmentation(tc::TiedComponent) = tc.component.freq
 nfeed_blocks(::PerFeed) = 2
 nfeed_blocks(::SharedFeeds) = 1
 nfeed_blocks(::ReferenceRelative) = 2
+nfeed_blocks(::FeedComponent) = 1
 
 """
     StationGainModel(; phase = (), logamp = ())
@@ -105,6 +126,7 @@ is_per_scan(::AbstractTimeSegmentation) = false
 is_per_scan(::PerScan) = true
 is_per_scan(::PerIntegration) = true
 component_is_per_scan(tc::TiedComponent) = is_per_scan(time_segmentation(tc))
+component_is_per_scan(c::GainComponent) = is_per_scan(c.time)
 
 phase_is_per_scan(m::StationGainModel) = any(component_is_per_scan, m.phase)
 amplitude_is_per_scan(m::StationGainModel) = any(component_is_per_scan, m.logamp)
@@ -123,6 +145,7 @@ end
 tying_label(::PerFeed) = "perfeed"
 tying_label(::SharedFeeds) = "shared"
 tying_label(t::ReferenceRelative) = "refrel$(t.reference_feed)"
+tying_label(t::FeedComponent) = "feed$(t.feed)"
 
 function component_label(tc::TiedComponent)
     return string(

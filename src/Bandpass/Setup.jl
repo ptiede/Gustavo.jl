@@ -70,29 +70,14 @@ choose_phase_reference(uvset::UVSet, variable_ants) =
 
 function build_station_models(
         ant_names, station_model_map;
-        default::StationBandpassModel,
+        default::StationGainModel,
     )
-    default_model = validate_station_bandpass_model(default)
-    station_models = StationBandpassModel[default_model for _ in ant_names]
+    default_model = validate_station_gain_model(default)
+    station_models = StationGainModel[default_model for _ in ant_names]
     for (name, model) in station_model_map
         ant_idx = findfirst(==(name), ant_names)
         isnothing(ant_idx) && error("Unknown station in station_model_map: $name")
-        station_models[ant_idx] = validate_station_bandpass_model(model)
+        station_models[ant_idx] = validate_station_gain_model(model)
     end
     return station_models
-end
-
-function station_model_summary(name, model)
-    return string(
-        name,
-        " ref=", reference_feed_label(model.reference_feed),
-        " abs(phase=", spec_label(model.reference.phase),
-        ", phase_time=", spec_time_label(model.reference.phase),
-        ", amp=", spec_label(model.reference.amplitude),
-        ", amp_time=", spec_time_label(model.reference.amplitude), ")",
-        " rel(phase=", spec_label(model.relative.phase),
-        ", phase_time=", spec_time_label(model.relative.phase),
-        ", amp=", spec_label(model.relative.amplitude),
-        ", amp_time=", spec_time_label(model.relative.amplitude), ")"
-    )
 end

@@ -98,6 +98,12 @@ function _assign_blocks!(off1, off2, ::SharedFeeds, ant, ts, fs, bl, next)
     return next
 end
 
+function _assign_blocks!(off1, off2, tying::FeedComponent, ant, ts, fs, bl, next)
+    off1[ant, tying.feed, ts, fs] = next
+    next += bl
+    return next
+end
+
 function _assign_blocks!(off1, off2, tying::ReferenceRelative, ant, ts, fs, bl, next)
     rf = tying.reference_feed
     partner = 3 - rf

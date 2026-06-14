@@ -312,19 +312,16 @@ end
     @test feed isa BP.FeedBandpassModel
 
     # Mixed time means the spec is "per-scan" overall (any component
-    # per-scan ⇒ phase_variable_mask is set), but spec_time_segmentation
-    # returns nothing, and spec_time_label lists both.
+    # per-scan ⇒ phase_variable_mask is set).
     @test BP.phase_is_per_scan(feed)
-    @test BP.spec_time_segmentation(spec) === nothing
-    @test BP.spec_time_label(spec) == "global+per_scan"
 
     # Internal helper: filtering by mode pulls only the global or the
     # per-scan components.
     comps_global  = Gustavo.Bandpass._components_for_mode(spec, :template)
     comps_perscan = Gustavo.Bandpass._components_for_mode(spec, :per_scan)
     comps_full    = Gustavo.Bandpass._components_for_mode(spec, :full)
-    @test length(comps_global) == 1 && comps_global[1].model isa BP.FlatBandpassModel
-    @test length(comps_perscan) == 1 && comps_perscan[1].model isa BP.PolynomialBandpassModel
+    @test length(comps_global) == 1 && comps_global[1].term isa Gustavo.Calibration.ConstantTerm
+    @test length(comps_perscan) == 1 && comps_perscan[1].term isa Gustavo.Calibration.PolynomialFreq
     @test length(comps_full) == 2
 end
 
@@ -462,22 +459,24 @@ end
     global_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
         poly1, BP.GlobalTimeSegmentation(), global_freq,
     ))
+    reference_feed_model = BP.FeedBandpassModel(
+        phase = per_scan_phase_spec,
+        amplitude = global_spec,
+    )
+    relative_feed_model = BP.FeedBandpassModel(
+        phase = global_spec,
+        amplitude = global_spec,
+    )
     model = BP.StationBandpassModel(
         reference_feed = 1,
-        reference = BP.FeedBandpassModel(
-            phase = per_scan_phase_spec,
-            amplitude = global_spec,
-        ),
-        relative = BP.FeedBandpassModel(
-            phase = global_spec,
-            amplitude = global_spec,
-        ),
+        reference = reference_feed_model,
+        relative = relative_feed_model,
     )
 
-    @test BP.phase_is_per_scan(model.reference)
-    @test !BP.amplitude_is_per_scan(model.reference)
-    @test !BP.phase_is_per_scan(model.relative)
-    @test occursin("abs(phase=poly1, phase_time=per_scan, amp=poly1, amp_time=global)", BP.station_model_summary("AA", model))
+    @test BP.phase_is_per_scan(reference_feed_model)
+    @test !BP.amplitude_is_per_scan(reference_feed_model)
+    @test !BP.phase_is_per_scan(relative_feed_model)
+    @test occursin("phase(polyf1×perscan×global[shared]", BP.station_model_summary("AA", model))
 
     gain_slice = ComplexF64[
         2.0 * cis(0.1) 3.0 * cis(0.2)
@@ -757,7 +756,7 @@ end
         gains_true[3, c] = (0.85 - 0.02c) * cis(-0.08 - 0.04 * (c - 1))
     end
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
-    station_models = [default_station_model_for_tests() for _ in 1:nant]
+    station_models = [BP.resolve_bandpass_model(default_station_model_for_tests()) for _ in 1:nant]
 
     # Vscan_arr layout: (Frequency, Baseline, Pol). gains_scan layout:
     # (Frequency, Ant, Feed). 3-D single-Ti slice.
@@ -876,7 +875,7 @@ end
 
     gains_init = ones(ComplexF64, nchan, nant, 2)
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
-    station_models = [default_station_model_for_tests() for _ in 1:nant]
+    station_models = [BP.resolve_bandpass_model(default_station_model_for_tests()) for _ in 1:nant]
     parallel_pols = (1, 2)
 
     for c in 1:nchan
@@ -974,7 +973,7 @@ end
         phase = BP.BandpassSpec(poly2),
         amplitude = BP.BandpassSpec(poly2),
     )
-    station_models = [BP.StationBandpassModel(reference_feed = 1, reference = feedmodel, relative = feedmodel) for _ in 1:nant]
+    station_models = [BP.resolve_bandpass_model(BP.StationBandpassModel(reference_feed = 1, reference = feedmodel, relative = feedmodel)) for _ in 1:nant]
 
     gains = ones(ComplexF64, nchan, nant, 2)
     A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
@@ -1706,7 +1705,7 @@ end
     setup = BP.prepare_bandpass_solver(
         avg, 1;
         station_models = BP.build_station_models(
-            avg.antennas.name, Dict{String, BP.StationBandpassModel}();
+            avg.antennas.name, Dict{String, Gustavo.Calibration.StationGainModel}();
             default = default_station_model_for_tests(),
         ),
         min_baselines = 1,

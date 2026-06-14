@@ -540,7 +540,7 @@ end
 
 function refine_joint_bandpass_als!(
         gains, solved, Vblock, Wblock, bl_pairs, pol_products,
-        station_models::AbstractVector{<:StationBandpassModel},
+        station_models::AbstractVector{<:ResolvedBandpassModel},
         channel_freqs::AbstractVector{<:Real},
         parallel_pols::Tuple{Int, Int},
         parallel_hand_mask = nothing;
@@ -691,37 +691,44 @@ function refine_joint_bandpass_als!(
 end
 
 
-frequency_segments(::GlobalFrequencySegmentation, nchan) = [1:nchan]
+frequency_segments(::GlobalFrequency, nchan) = [1:nchan]
 
-function frequency_segments(segmentation::BlockFrequencySegmentation, nchan)
+frequency_segments(::PerSpectralWindow, nchan) = [1:nchan]
+
+function frequency_segments(segmentation::ChannelBlocks, nchan)
     return [
         ((block - 1) * segmentation.block_size + 1):min(block * segmentation.block_size, nchan)
             for block in 1:cld(nchan, segmentation.block_size)
     ]
 end
 
-function model_basis_columns(::PerChannelBandpassModel, x, x_scaled, segment)
+function model_basis_columns(::PerChannel, x, x_scaled, segment)
     return [Float64[i == channel ? 1.0 : 0.0 for i in eachindex(x)] for channel in segment]
 end
 
-function model_basis_columns(::FlatBandpassModel, x, x_scaled, segment)
+function model_basis_columns(::ConstantTerm, x, x_scaled, segment)
     return [Float64[i in segment ? 1.0 : 0.0 for i in eachindex(x)]]
 end
 
-function model_basis_columns(::DelayBandpassModel, x, x_scaled, segment)
+function model_basis_columns(::Delay, x, x_scaled, segment)
     return [Float64[i in segment ? x[i] : 0.0 for i in eachindex(x)]]
 end
 
-function model_basis_columns(model::PolynomialBandpassModel, x, x_scaled, segment)
+function model_basis_columns(model::PolynomialFreq, x, x_scaled, segment)
     return [Float64[i in segment ? x_scaled[i]^degree : 0.0 for i in eachindex(x)] for degree in 1:model.degree]
 end
 
-function segment_design_coordinate(::GlobalFrequencySegmentation, x, segment, valid)
+function segment_design_coordinate(::GlobalFrequency, x, segment, valid)
     scale = maximum(abs.(x[valid]))
     return scale > 0 ? x ./ scale : zeros(length(x))
 end
 
-function segment_design_coordinate(::BlockFrequencySegmentation, x, segment, valid)
+function segment_design_coordinate(::PerSpectralWindow, x, segment, valid)
+    scale = maximum(abs.(x[valid]))
+    return scale > 0 ? x ./ scale : zeros(length(x))
+end
+
+function segment_design_coordinate(::ChannelBlocks, x, segment, valid)
     x_local = zeros(length(x))
     valid_segment = segment[valid[segment]]
     isempty(valid_segment) && return x_local
@@ -751,13 +758,13 @@ function independent_segment_columns(columns, valid)
     return independent
 end
 
-function component_design_columns(component::SegmentedBandpassModel, x, valid)
-    segments = frequency_segments(component.frequency, length(x))
+function component_design_columns(component::GainComponent, x, valid)
+    segments = frequency_segments(component.freq, length(x))
     columns = Vector{Vector{Float64}}()
     for segment in segments
         any(valid[segment]) || continue
-        x_segment = segment_design_coordinate(component.frequency, x, segment, valid)
-        segment_columns = model_basis_columns(component.model, x_segment, x_segment, segment)
+        x_segment = segment_design_coordinate(component.freq, x, segment, valid)
+        segment_columns = model_basis_columns(component.term, x_segment, x_segment, segment)
         append!(columns, independent_segment_columns(segment_columns, valid))
     end
     if component_is_per_scan(component)
@@ -776,7 +783,7 @@ end
 
 function fit_phase_model(phase_track, channel_weights, channel_freqs, components)
     isempty(components) && return zeros(eltype(phase_track), length(phase_track))
-    length(components) == 1 && components[1].model isa PerChannelBandpassModel && return phase_track
+    length(components) == 1 && components[1].term isa PerChannel && return phase_track
 
     # Deterministic unwrap seed (first finite channel). The default
     # `argmax(channel_weights)` seed drifts scan-to-scan with per-scan
@@ -824,13 +831,9 @@ function fit_phase_model(phase_track, channel_weights, channel_freqs, components
     return fitted
 end
 
-# Backward-compat: pass a BandpassSpec, fit using all of its components.
-fit_phase_model(track, weights, freqs, spec::BandpassSpec) =
-    fit_phase_model(track, weights, freqs, spec_components(spec))
-
 function fit_amplitude_model(log_amp_track, channel_weights, channel_freqs, components)
     isempty(components) && return zeros(eltype(log_amp_track), length(log_amp_track))
-    length(components) == 1 && components[1].model isa PerChannelBandpassModel && return log_amp_track
+    length(components) == 1 && components[1].term isa PerChannel && return log_amp_track
 
     x = channel_freqs .- mean(channel_freqs)
     valid = (channel_weights .> 0) .& isfinite.(channel_weights) .& isfinite.(log_amp_track) .& isfinite.(x)
@@ -851,17 +854,13 @@ function fit_amplitude_model(log_amp_track, channel_weights, channel_freqs, comp
     return fitted
 end
 
-fit_amplitude_model(track, weights, freqs, spec::BandpassSpec) =
-    fit_amplitude_model(track, weights, freqs, spec_components(spec))
-
 # Filter spec components by ALS mode. `:template` keeps only global-time
 # components (template solve fits these against the time-averaged
 # track); `:per_scan` keeps only per-scan-time components (per-scan
 # solve fits these against the residual `track − template`); `:full`
 # keeps everything (used by callers that don't split global vs per-scan
 # — preserves the Commit-1 behaviour).
-function _components_for_mode(spec::BandpassSpec, mode::Symbol)
-    comps = spec_components(spec)
+function _components_for_mode(comps::Tuple, mode::Symbol)
     mode === :template && return Tuple(c for c in comps if !component_is_per_scan(c))
     mode === :per_scan && return Tuple(c for c in comps if component_is_per_scan(c))
     mode === :full && return comps
@@ -869,7 +868,7 @@ function _components_for_mode(spec::BandpassSpec, mode::Symbol)
 end
 
 function _is_per_channel_only_components(components)
-    return length(components) == 1 && components[1].model isa PerChannelBandpassModel
+    return length(components) == 1 && components[1].term isa PerChannel
 end
 
 # In :per_scan mode the projection fits `(track − frozen)` onto the
@@ -906,9 +905,8 @@ end
 # component wrapping `PerChannelBandpassModel` — in that case the fit
 # functions return the input track unchanged, and the constrain_gain_*!
 # functions skip rebuilding/applying the projection.
-function _is_per_channel_only(spec::BandpassSpec)
-    components = spec_components(spec)
-    return length(components) == 1 && components[1].model isa PerChannelBandpassModel
+function _is_per_channel_only(components::Tuple)
+    return length(components) == 1 && components[1].term isa PerChannel
 end
 
 # Decide whether the constrain step should project this (ant, feed)
@@ -950,44 +948,44 @@ end
 # from the Commit-1 :full-mode projection. In that case, return
 # `nothing` so the projection collapses to fitting the full track on
 # the per-scan basis directly (matching :full-mode behaviour).
-_spec_has_global(spec::BandpassSpec) =
-    any(c -> !component_is_per_scan(c), spec_components(spec))
+_spec_has_global(comps::Tuple) =
+    any(c -> !component_is_per_scan(c), comps)
 
-function _phase_frozen(template_gains::Nothing, ant, feed, mode, weights, spec::BandpassSpec)
+function _phase_frozen(template_gains::Nothing, ant, feed, mode, weights, comps::Tuple)
     return nothing
 end
-function _phase_frozen(template_gains::AbstractArray, ant, feed, mode::Symbol, weights, spec::BandpassSpec)
+function _phase_frozen(template_gains::AbstractArray, ant, feed, mode::Symbol, weights, comps::Tuple)
     mode === :per_scan || return nothing
-    _spec_has_global(spec) || return nothing
+    _spec_has_global(comps) || return nothing
     track = vec(angle.(template_gains[:, ant, feed]))
     return unwrap_phase_track(track; weights = weights)
 end
 
-function _phase_relative_frozen(template_gains::Nothing, ant, partner_feed, ref_feed, mode, weights, spec::BandpassSpec)
+function _phase_relative_frozen(template_gains::Nothing, ant, partner_feed, ref_feed, mode, weights, comps::Tuple)
     return nothing
 end
-function _phase_relative_frozen(template_gains::AbstractArray, ant, partner_feed, ref_feed, mode::Symbol, weights, spec::BandpassSpec)
+function _phase_relative_frozen(template_gains::AbstractArray, ant, partner_feed, ref_feed, mode::Symbol, weights, comps::Tuple)
     mode === :per_scan || return nothing
-    _spec_has_global(spec) || return nothing
+    _spec_has_global(comps) || return nothing
     track = vec(angle.(template_gains[:, ant, partner_feed] ./ template_gains[:, ant, ref_feed]))
     return unwrap_phase_track(track; weights = weights)
 end
 
-function _amp_frozen(template_gains::Nothing, ant, feed, mode, spec::BandpassSpec)
+function _amp_frozen(template_gains::Nothing, ant, feed, mode, comps::Tuple)
     return nothing
 end
-function _amp_frozen(template_gains::AbstractArray, ant, feed, mode::Symbol, spec::BandpassSpec)
+function _amp_frozen(template_gains::AbstractArray, ant, feed, mode::Symbol, comps::Tuple)
     mode === :per_scan || return nothing
-    _spec_has_global(spec) || return nothing
+    _spec_has_global(comps) || return nothing
     return vec(log.(abs.(template_gains[:, ant, feed])))
 end
 
-function _amp_relative_frozen(template_gains::Nothing, ant, partner_feed, ref_feed, mode, spec::BandpassSpec)
+function _amp_relative_frozen(template_gains::Nothing, ant, partner_feed, ref_feed, mode, comps::Tuple)
     return nothing
 end
-function _amp_relative_frozen(template_gains::AbstractArray, ant, partner_feed, ref_feed, mode::Symbol, spec::BandpassSpec)
+function _amp_relative_frozen(template_gains::AbstractArray, ant, partner_feed, ref_feed, mode::Symbol, comps::Tuple)
     mode === :per_scan || return nothing
-    _spec_has_global(spec) || return nothing
+    _spec_has_global(comps) || return nothing
     return vec(log.(abs.(template_gains[:, ant, partner_feed])) .- log.(abs.(template_gains[:, ant, ref_feed])))
 end
 
@@ -1507,7 +1505,7 @@ struct BandpassSolverSetup{
         D,
         B <: AbstractVector{<:Tuple{<:Integer, <:Integer}},
         F <: AbstractVector{<:Real},
-        S <: AbstractVector{<:StationBandpassModel},
+        S <: AbstractVector{<:ResolvedBandpassModel},
         C <: AbstractVector{<:AbstractString},
         G <: AbstractBandpassGauge,
     }
@@ -1590,11 +1588,12 @@ function prepare_bandpass_solver(
 
     nant = length(avg.antennas)
     if isnothing(station_models)
-        station_models = [StationBandpassModel() for _ in 1:nant]
+        models = [default_bandpass_station_model() for _ in 1:nant]
     else
         length(station_models) == nant || error("station_models length does not match antenna count")
-        station_models = validate_station_bandpass_model.(station_models)
+        models = validate_station_gain_model.(station_models)
     end
+    station_models = [resolve_bandpass_model(m) for m in models]
 
     gauge = validate_bandpass_gauge(gauge, nant)
     pols = pol_products(avg)
@@ -1634,23 +1633,23 @@ end
 # accounts for the per-block `Flat` constant; `parameter_count` returns
 # only the polynomial-degree count). When time segmentation is global
 # this returns 0 (the per-scan slice doesn't add free DoF).
-function _per_scan_free_params(spec::BandpassSpec, nchan::Integer)
-    phase_is_per_scan(spec) || return 0
+function _per_scan_free_params(comps::Tuple, nchan::Integer)
+    any(component_is_per_scan, comps) || return 0
     # Only per-scan components contribute per-scan DOF; global-time
     # components live in the template solve and aren't refit per scan.
     total = 0
-    for c in spec_components(spec)
+    for c in comps
         component_is_per_scan(c) || continue
         total += _segmented_freedom(c, nchan)
     end
     return total
 end
 
-function _segmented_freedom(component::SegmentedBandpassModel, nchan::Integer)
-    component.model isa PerChannelBandpassModel && return nchan
-    nblocks = length(frequency_segments(component.frequency, nchan))
-    is_flat = component.model isa FlatBandpassModel
-    per_block = is_flat ? 1 : something(parameter_count(component.model), 0)
+function _segmented_freedom(component::GainComponent, nchan::Integer)
+    component.term isa PerChannel && return nchan
+    nblocks = length(frequency_segments(component.freq, nchan))
+    is_flat = component.term isa ConstantTerm
+    per_block = is_flat ? 1 : Calibration.nparams_per_block(component.term, 0)
     base = nblocks * per_block
     # Per-scan demeaning of `Flat × Block(N)` makes the N indicator
     # columns sum to zero, so one column is dropped by the post-fit
