@@ -79,8 +79,9 @@ mutable struct FringeWorkspace
     G::Matrix{ComplexF64}
     D::Matrix{ComplexF64}
     plan::Any
+    dwin::Vector{Float64}      # scratch for the windowed |D|² noise estimate
 end
-FringeWorkspace() = FringeWorkspace(0, 0, Matrix{ComplexF64}(undef, 0, 0), Matrix{ComplexF64}(undef, 0, 0), nothing)
+FringeWorkspace() = FringeWorkspace(0, 0, Matrix{ComplexF64}(undef, 0, 0), Matrix{ComplexF64}(undef, 0, 0), nothing, Float64[])
 
 # Ensure `ws` is sized for an `nf × nt` grid (reallocating + replanning only when
 # the size changes). `nothing` makes a fresh workspace (single-call fallback).
@@ -171,7 +172,8 @@ function baseline_fringe_search(
     delays = fax.degenerate ? [0.0] : collect(fftfreq(nf_pad, 1.0 / fax.step))
     rates = tax.degenerate ? [0.0] : collect(fftfreq(nt_pad, 1.0 / tax.step))
 
-    # Windowed peak of |D|.
+    # Windowed peak of |D|, plus Σ|D|² over the window for a data-driven noise
+    # estimate (see SNR below).
     kbest = lbest = 0
     peakabs = -1.0
     @inbounds for l in eachindex(rates)
@@ -187,6 +189,18 @@ function baseline_fringe_search(
         end
     end
     peakabs >= 0 || return _INVALID_DETECTION
+
+    # Noise estimate from a strided sample of the FULL |D|² plane (not the search
+    # window, which is narrow and centred on the fringe — its sidelobe ridge would
+    # bias the estimate). The fringe occupies a tiny fraction of the plane, so the
+    # median is the noise floor.
+    dwin = ws.dwin
+    empty!(dwin)
+    ntot = length(D)
+    stride = max(1, ntot ÷ 20000)
+    @inbounds for idx in 1:stride:ntot
+        push!(dwin, abs2(D[idx]))
+    end
 
     # Quadratic peak refinement on |D| along each non-degenerate axis. The bin
     # spacings are 1/(nf_pad·Δf) for delay and 1/(nt_pad·Δt) for rate.
@@ -208,8 +222,8 @@ function baseline_fringe_search(
     # phase offset. Re-evaluate the matched filter EXACTLY at the refined
     # (delay, rate), referenced directly to (f0, t0):
     #     Dref = Σ w·V·exp(−2πi[delay·(f−f0) + rate·(t−t0)])
-    # so amp = |Dref|/Σw, snr = |Dref|/√Σw, φ = angle(Dref) — all exact, no
-    # scalloping loss, no origin rotation.
+    # so amp = |Dref|/Σw, φ = angle(Dref) — exact, no scalloping loss / origin
+    # rotation.
     Dref = zero(ComplexF64)
     @inbounds for ti in 1:ntime, ci in 1:nchan
         w = W[ci, ti]
@@ -220,7 +234,17 @@ function baseline_fringe_search(
     end
     absref = abs(Dref)
     amp = absref / Wsum
-    snr = absref / sqrt(Wsum)
+    # Data-driven SNR: the matched-filter noise is estimated from the spread of
+    # |D| over the search plane, robustly (median) so the bright peak and its
+    # sidelobes don't bias it. For Rayleigh-distributed noise bins
+    # `median(|D|²) = ln2 · mean(|D|²)`, and `mean(|D|²) = Σw` when the weights are
+    # true inverse-variances — so this reduces to the matched-filter |Dref|/√Σw
+    # for calibrated data, but stays correct when the WEIGHT column is
+    # uncalibrated / uniform (common in raw correlator output), where √Σw badly
+    # mis-scales the SNR and silently fails the snr_min gate. Falls back to √Σw if
+    # the window is too small to estimate noise.
+    noise2 = length(dwin) > 2 ? max(median(dwin) / log(2), eps(Float64)) : Wsum
+    snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
 
     return FringeDetection(delay, rate, phase, amp, snr, snr >= opts.snr_min)
