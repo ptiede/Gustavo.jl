@@ -37,6 +37,7 @@ export AbstractUVDataset, is_lazy, materialize_leaf, materialize
 export apply_calibration
 export primary_cards, register_primary_cards!
 export TimeAverage, scan_average
+export FrequencyAverage, frequency_average, TimeBinAverage, time_bin_average
 export scan_time_centers, band_center_frequency, centered_channel_freqs
 export baseline_sites, baseline_number
 export antenna_names, nbaselines, nscans, nchannels, npols, nintegrations

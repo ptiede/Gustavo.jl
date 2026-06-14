@@ -46,10 +46,11 @@ struct _ScanGroup
     g_ti::Vector{Int}                    # global time indices of tg
 end
 
-# Group leaves by (source_name, scan_name), concatenate sibling bands along the
-# frequency axis (sorted by channel frequency), and resolve their global geom
-# indices.
-function _build_scan_groups(uvset::UVSet, geom::DataGeometry)
+# Group leaf references by (source_name, scan_name) WITHOUT materializing — the
+# leaves stay lazy so the caller can materialize one scan group at a time. A
+# whole-dataset eager materialization here is what fills RAM on a real (24 GB)
+# file: each band leaf is ~80 MB once promoted to ComplexF64, ×144 leaves ≈ 18 GB.
+function _scan_group_leaves(uvset::UVSet)
     groups = Dict{Tuple{String, String}, Vector{Any}}()
     order = Tuple{String, String}[]
     for (_, leaf) in UVData.branches(uvset)
@@ -59,12 +60,18 @@ function _build_scan_groups(uvset::UVSet, geom::DataGeometry)
             groups[key] = Any[]
             push!(order, key)
         end
-        push!(groups[key], materialize_leaf(leaf))
+        push!(groups[key], leaf)            # lazy leaf reference
     end
+    return [groups[k] for k in order]
+end
 
-    out = _ScanGroup[]
-    for key in order
-        leaves = groups[key]
+# Materialize ONE (source, scan) group: concatenate its sibling band leaves along
+# the frequency axis (sorted by channel frequency) and resolve global geom
+# indices. Called per group inside the solve loop so only one group's worth of
+# data (~hundreds of MB) is resident at a time.
+function _materialize_scan_group(leaves_lazy, geom::DataGeometry)
+    leaves = [materialize_leaf(l) for l in leaves_lazy]
+    let
         # Reference baselines/pols/times from the first band leaf.
         l0 = first(leaves)
         bl_pairs = collect(UVData.baselines(l0).pairs)
@@ -103,9 +110,8 @@ function _build_scan_groups(uvset::UVSet, geom::DataGeometry)
         end
 
         _, g_ti = leaf_window(geom, l0)
-        push!(out, _ScanGroup(Vg, Wg, fg, tg, bl_pairs, pols, g_ci, g_ti))
+        return _ScanGroup(Vg, Wg, fg, tg, bl_pairs, pols, g_ci, g_ti)
     end
-    return out
 end
 
 # Accumulate a per-(ant,feed) station value (NaN-skipping) into θ at the given
@@ -123,6 +129,78 @@ function _pack_station!(θ, plan::ComponentPlan, vals::AbstractMatrix, tseg::Int
         θ[off] += v
     end
     return θ
+end
+
+# Solve one materialized scan group into `θ` (the chunk's buffer): search →
+# stationize → pack Stage-B, repeated `rounds` times on the residual, then the
+# globally-closing adhoc phase. Writes only this group's (disjoint) θ slots.
+# Returns `(max_snr, chi, ncomp)` from the final round for diagnostics.
+function _solve_one_group!(θ, grp::_ScanGroup, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant)
+    const_plan, delay_plan, rate_plan, adhoc_plan = plans
+    nbl = length(grp.bl_pairs)
+    npol = length(grp.pol_products)
+    stseg = const_plan.tseg_id[first(grp.g_ti)]   # PerScan segment for this group
+    maxsnr = 0.0
+    chi = NaN
+    ncomp = 0
+
+    for round in 1:max(rounds, 1)
+        # On rounds > 1, divide out the current θ gains so the search runs on the
+        # residual; round 1 searches the raw data.
+        Vsearch = round > 1 ? _residual_vis(ev, θ, grp) : grp.Vg
+
+        det = Matrix{FringeDetection}(undef, nbl, npol)
+        maxsnr = 0.0
+        for p in 1:npol, bi in 1:nbl
+            a, b = grp.bl_pairs[bi]
+            if a == b
+                det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
+                continue
+            end
+            d = baseline_fringe_search(
+                Vsearch[:, :, bi, p], grp.Wg[:, :, bi, p],
+                grp.fg, grp.tg .* 3600.0, f0, t0_sec; opts = search,
+            )
+            det[bi, p] = d
+            d.valid && (maxsnr = max(maxsnr, d.snr))
+        end
+
+        ss = stationize_scan(det, grp.bl_pairs, grp.pol_products, nant; ref_ant = ref_ant)
+        _pack_station!(θ, const_plan, ss.phase, stseg)
+        _pack_station!(θ, delay_plan, ss.delay, stseg)
+        _pack_station!(θ, rate_plan, ss.rate, stseg)
+        chi = ss.chi
+        ncomp = ss.ncomp
+    end
+
+    # ── Adhoc: residual after Stage-B, coherently freq-averaged per AP. ──
+    Vresid = _residual_vis(ev, θ, grp)
+    nap = length(grp.tg)
+    rbar = zeros(ComplexF64, nbl, npol, nap)
+    wbar = zeros(Float64, nbl, npol, nap)
+    nchan = length(grp.fg)
+    @inbounds for p in 1:npol, bi in 1:nbl, ap in 1:nap, c in 1:nchan
+        w = grp.Wg[c, ap, bi, p]
+        v = Vresid[c, ap, bi, p]
+        (isfinite(w) && w > 0 && isfinite(v)) || continue
+        rbar[bi, p, ap] += w * v
+        wbar[bi, p, ap] += w
+    end
+    as = solve_adhoc_phasing(
+        rbar, wbar, grp.bl_pairs, grp.pol_products, nant, grp.tg;
+        ref_ant = ref_ant, opts = adhoc,
+    )
+    for (ap, gti) in enumerate(grp.g_ti)
+        tseg = adhoc_plan.tseg_id[gti]
+        for ant in 1:nant, feed in 1:2
+            v = as.phase[ant, feed, ap]
+            isfinite(v) || continue
+            off = adhoc_plan.off1[ant, feed, tseg, 1]
+            off == 0 && continue
+            θ[off] = v
+        end
+    end
+    return maxsnr, chi, ncomp
 end
 
 """
@@ -151,103 +229,49 @@ function solve_fringes(
     first_leaf = first(values(UVData.branches(uvset)))
     nant = length(UVData.metadata(first_leaf).antennas)
     layout = plan_parameters(model, nant, geom)
-    θ = zeros(layout.nθ)
     ev = GainEvaluator(model, layout)
-
-    groups = _build_scan_groups(uvset, geom)
-
-    const_plan = layout.plans[1]
-    delay_plan = layout.plans[2]
-    rate_plan = layout.plans[3]
-    adhoc_plan = layout.plans[4]
-
+    plans = (layout.plans[1], layout.plans[2], layout.plans[3], layout.plans[4])
     f0 = geom.f0
     t0_sec = geom.t0 * 3600.0
 
-    scan_snr = Float64[]
-    scan_chi = Float64[]
-    scan_ncomp = Int[]
+    # Lazy grouping — leaves are materialized one group at a time inside the loop
+    # so peak memory is one scan group (hundreds of MB), not the whole file.
+    group_leaves = _scan_group_leaves(uvset)
+    ngroups = length(group_leaves)
+    scan_snr = zeros(ngroups)
+    scan_chi = fill(NaN, ngroups)
+    scan_ncomp = zeros(Int, ngroups)
 
-    for grp in groups
-        nbl = length(grp.bl_pairs)
-        npol = length(grp.pol_products)
-        # PerScan tseg id for this group (constant across the group's times).
-        stseg = const_plan.tseg_id[first(grp.g_ti)]
+    # Threaded over scan groups. Each (source, scan) group is independent and
+    # writes a DISJOINT set of θ slots (its own PerScan / PerIntegration time
+    # segment), so each chunk of groups accumulates into its own θ buffer and the
+    # buffers are summed at the end — the result is identical to the sequential
+    # solve (the nonzero slots never overlap) regardless of thread count.
+    nchunks = max(1, min(Threads.nthreads(), ngroups))
+    θbufs = [zeros(layout.nθ) for _ in 1:nchunks]
+    chunks = [Int[] for _ in 1:nchunks]
+    for gi in 1:ngroups
+        push!(chunks[mod1(gi, nchunks)], gi)        # round-robin load balance
+    end
 
-        for round in 1:max(rounds, 1)
-            # On rounds > 1, divide out the current θ gains (Stage-B + adhoc) so
-            # the search runs on the residual; round 1 searches the raw data.
-            Vsearch = grp.Vg
-            if round > 1
-                Vsearch = _residual_vis(ev, θ, grp)
-            end
-
-            # Per-baseline fringe search over the concatenated band.
-            det = Matrix{FringeDetection}(undef, nbl, npol)
-            maxsnr = 0.0
-            for p in 1:npol, bi in 1:nbl
-                a, b = grp.bl_pairs[bi]
-                if a == b
-                    det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
-                    continue
-                end
-                d = baseline_fringe_search(
-                    Vsearch[:, :, bi, p], grp.Wg[:, :, bi, p],
-                    grp.fg, grp.tg .* 3600.0, f0, t0_sec; opts = search,
-                )
-                det[bi, p] = d
-                d.valid && (maxsnr = max(maxsnr, d.snr))
-            end
-
-            ss = stationize_scan(det, grp.bl_pairs, grp.pol_products, nant; ref_ant = ref_ant)
-
-            # Accumulate Stage-B station gains; on rounds > 1 this adds the
-            # residual delay/rate/phase found on the corrected data.
-            _pack_station!(θ, const_plan, ss.phase, stseg)
-            _pack_station!(θ, delay_plan, ss.delay, stseg)
-            _pack_station!(θ, rate_plan, ss.rate, stseg)
-
-            if round == max(rounds, 1)
-                push!(scan_snr, maxsnr)
-                push!(scan_chi, ss.chi)
-                push!(scan_ncomp, ss.ncomp)
-            end
-        end
-
-        # ── Adhoc: residual after Stage-B, coherently freq-averaged per AP. ──
-        Vresid = _residual_vis(ev, θ, grp)
-        nap = length(grp.tg)
-        rbar = zeros(ComplexF64, nbl, npol, nap)
-        wbar = zeros(Float64, nbl, npol, nap)
-        nchan = length(grp.fg)
-        @inbounds for p in 1:npol, bi in 1:nbl, ap in 1:nap, c in 1:nchan
-            w = grp.Wg[c, ap, bi, p]
-            v = Vresid[c, ap, bi, p]
-            (isfinite(w) && w > 0 && isfinite(v)) || continue
-            rbar[bi, p, ap] += w * v
-            wbar[bi, p, ap] += w
-        end
-        as = solve_adhoc_phasing(
-            rbar, wbar, grp.bl_pairs, grp.pol_products, nant, grp.tg;
-            ref_ant = ref_ant, opts = adhoc,
-        )
-
-        # Pack adhoc per-AP station phases into the PerIntegration component.
-        for (ap, gti) in enumerate(grp.g_ti)
-            tseg = adhoc_plan.tseg_id[gti]
-            for ant in 1:nant, feed in 1:2
-                v = as.phase[ant, feed, ap]
-                isfinite(v) || continue
-                off = adhoc_plan.off1[ant, feed, tseg, 1]
-                off == 0 && continue
-                θ[off] = v
-            end
+    Threads.@threads for ci in 1:nchunks
+        θloc = θbufs[ci]
+        for gi in chunks[ci]
+            grp = _materialize_scan_group(group_leaves[gi], geom)
+            snr, chi, nc = _solve_one_group!(
+                θloc, grp, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant,
+            )
+            scan_snr[gi] = snr
+            scan_chi[gi] = chi
+            scan_ncomp[gi] = nc
+            grp = nothing                            # release this group before the next
         end
     end
+    θ = nchunks == 1 ? θbufs[1] : reduce(+, θbufs)
 
     info = (;
         nant = nant,
-        nscan = length(groups),
+        nscan = ngroups,
         scan_max_snr = scan_snr,
         scan_chi = scan_chi,
         scan_ncomp = scan_ncomp,

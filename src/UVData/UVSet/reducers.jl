@@ -114,3 +114,229 @@ Time-average each leaf's `Ti` axis to length 1 (one timestamp per scan),
 preserving the tree shape. Equivalent to `apply(TimeAverage(), uvset)`.
 """
 scan_average(uvset::UVSet) = apply(TimeAverage(), uvset)
+
+
+# ── Frequency averaging ──────────────────────────────────────────────────────
+
+"""
+    FrequencyAverage(nout = 1)
+
+Per-leaf reducer that inverse-variance-averages the `Frequency` axis into `nout`
+contiguous output channels (default 1 — collapse each band leaf to a single
+channel). The leaf's `freq_setup` is updated to the averaged channels (center =
+mean channel frequency of each group, `ch_width`/`total_bandwidth` = the group's
+summed channel widths). Post-fringe-fit continuum reduction: a band's delay
+structure has been removed, so coherently averaging channels is lossless for
+imaging while shrinking the data by `nchan/nout`.
+"""
+struct FrequencyAverage <: AbstractPartitionReducer
+    nout::Int
+    function FrequencyAverage(nout::Integer = 1)
+        nout >= 1 || error("FrequencyAverage nout must be ≥ 1")
+        return new(Int(nout))
+    end
+end
+
+(r::FrequencyAverage)(leaf::DimensionalData.AbstractDimTree, ::PartitionInfo, ::UVMetadata) =
+    _frequency_average_partition(leaf, r.nout)
+
+# Contiguous near-equal channel groups (group g = output channel g).
+function _channel_groups(nchan::Integer, nout::Integer)
+    nout = min(nout, nchan)
+    bs = cld(nchan, nout)
+    return [((g - 1) * bs + 1):min(g * bs, nchan) for g in 1:cld(nchan, bs)]
+end
+
+function _frequency_average_partition(leaf::DimensionalData.AbstractDimTree, nout::Integer)
+    vis_l = leaf[:vis]
+    weights_l = leaf[:weights]
+    uvw_l = leaf[:uvw]
+    info = DimensionalData.metadata(leaf)
+    fs = info.freq_setup
+    cfreqs = collect(channel_freqs(fs))
+    cwidths = collect(ch_widths(fs))
+    groups = _channel_groups(length(cfreqs), nout)
+
+    V, W = _frequency_average_kernel(vis_l, weights_l, groups)
+
+    # New per-group channel axis + freq_setup.
+    new_freqs = [sum(@view cfreqs[g]) / length(g) for g in groups]
+    new_widths = [sum(@view cwidths[g]) for g in groups]
+    new_fs = FrequencySetup(;
+        name = fs.name, ref_freq = fs.ref_freq,
+        channel_freqs = new_freqs, ch_widths = new_widths,
+        total_bandwidths = new_widths,
+        sidebands = [sidebands(fs)[first(g)] for g in groups],
+        extras = fs.extras,
+    )
+
+    pol_dim = dims(vis_l, Pol)
+    bl_dim = dims(vis_l, Baseline)
+    ti_dim = dims(vis_l, Ti)
+    vis_da = DimArray(V, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
+    weights_da = DimArray(W, dims(vis_da))
+    flag_da = DimArray(W .<= 0, dims(vis_da))
+    new_info = update(info; freq_setup = new_fs)
+    # uvw is frequency-independent — carry it through unchanged.
+    return _build_leaf(vis_da, weights_da, uvw_l, flag_da; partition_info = new_info)
+end
+
+# Type-stable kernel: average `vis`/`weights` over each channel group.
+# Layout (Frequency, Ti, Baseline, Pol).
+function _frequency_average_kernel(
+        vis_p::AbstractArray{Tvis, 4}, w_p::AbstractArray{Tw, 4}, groups,
+    ) where {Tvis, Tw}
+    nchan, nti, nbl, npol = size(vis_p)
+    ng = length(groups)
+    Vnum = zeros(Tvis, ng, nti, nbl, npol)
+    Wsum = zeros(Tw, ng, nti, nbl, npol)
+    @inbounds for p in 1:npol, bi in 1:nbl, ti in 1:nti
+        for (g, grp) in enumerate(groups)
+            for c in grp
+                w = w_p[c, ti, bi, p]
+                v = vis_p[c, ti, bi, p]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                Vnum[g, ti, bi, p] += w * v
+                Wsum[g, ti, bi, p] += w
+            end
+        end
+    end
+    V = similar(Vnum)
+    @inbounds for k in eachindex(V)
+        V[k] = Wsum[k] > 0 ? Vnum[k] / Wsum[k] : Tvis(NaN, NaN)
+    end
+    return V, Wsum
+end
+
+"""
+    frequency_average(uvset::UVSet; nout = 1) -> UVSet
+
+Average each leaf's `Frequency` axis into `nout` channels. `apply(FrequencyAverage(nout), uvset)`.
+"""
+frequency_average(uvset::UVSet; nout::Integer = 1) = apply(FrequencyAverage(nout), uvset)
+
+
+# ── Time-bin averaging ───────────────────────────────────────────────────────
+
+"""
+    TimeBinAverage(dt_seconds)
+
+Per-leaf reducer that inverse-variance-averages the `Ti` axis into consecutive
+bins spanning `dt_seconds` (the `Ti` lookup is in hours). Bins are formed by
+`floor((t − t₀)/Δt)` over the leaf's sorted times; each output sample sits at its
+bin's weighted-mean epoch, with summed weights and weight-mean `uvw`. After
+fringe + adhoc phasing the per-AP residual phase is flat, so averaging to a
+coarser cadence is lossless — the core payoff of fringe fitting.
+"""
+struct TimeBinAverage <: AbstractPartitionReducer
+    dt_seconds::Float64
+    function TimeBinAverage(dt_seconds::Real)
+        dt_seconds > 0 || error("TimeBinAverage dt_seconds must be positive")
+        return new(Float64(dt_seconds))
+    end
+end
+
+(r::TimeBinAverage)(leaf::DimensionalData.AbstractDimTree, ::PartitionInfo, ::UVMetadata) =
+    _time_bin_average_partition(leaf, r.dt_seconds)
+
+# Bin id (1..nbin, contiguous) for each (sorted) time sample under width dt (s).
+function _time_bins(ts::AbstractVector, dt_seconds::Real)
+    n = length(ts)
+    n == 0 && return (Int[], Float64[], 0)
+    t0 = float(first(ts))
+    raw = [floor(Int, (float(t) - t0) * 3600.0 / dt_seconds) for t in ts]
+    ids = Vector{Int}(undef, n)
+    nbin = 0
+    last = typemin(Int)
+    @inbounds for i in 1:n
+        if raw[i] != last
+            nbin += 1
+            last = raw[i]
+        end
+        ids[i] = nbin
+    end
+    return ids, Float64.(ts), nbin
+end
+
+function _time_bin_average_partition(leaf::DimensionalData.AbstractDimTree, dt_seconds::Real)
+    vis_l = leaf[:vis]
+    weights_l = leaf[:weights]
+    uvw_l = leaf[:uvw]
+    ts = collect(obs_time(leaf))
+    ids, tvals, nbin = _time_bins(ts, dt_seconds)
+
+    V, W, UVW_out, tcenters = _time_bin_average_kernel(vis_l, weights_l, uvw_l, ids, tvals, nbin)
+
+    pol_dim = dims(vis_l, Pol)
+    if_dim = dims(vis_l, Frequency)
+    bl_dim = dims(vis_l, Baseline)
+    vis_da = DimArray(V, (if_dim, Ti(tcenters), bl_dim, pol_dim))
+    weights_da = DimArray(W, dims(vis_da))
+    uvw_da = DimArray(UVW_out, (Ti(tcenters), bl_dim, UVW(["U", "V", "W"])))
+    flag_da = DimArray(W .<= 0, dims(vis_da))
+    info = DimensionalData.metadata(leaf)
+    new_info = update(info; record_order = Tuple{Int, Int}[], extra_columns = NamedTuple())
+    return _build_leaf(vis_da, weights_da, uvw_da, flag_da; partition_info = new_info)
+end
+
+# Type-stable kernel: inverse-variance average into `nbin` time bins.
+# Layout: vis/weights (Frequency, Ti, Baseline, Pol); uvw (Ti, Baseline, UVW).
+function _time_bin_average_kernel(
+        vis_p::AbstractArray{Tvis, 4}, w_p::AbstractArray{Tw, 4},
+        uvw_p::AbstractArray{Tuvw, 3}, ids::AbstractVector{<:Integer},
+        tvals::AbstractVector, nbin::Integer,
+    ) where {Tvis, Tw, Tuvw}
+    nchan, nti, nbl, npol = size(vis_p)
+    Vnum = zeros(Tvis, nchan, nbin, nbl, npol)
+    Wsum = zeros(Tw, nchan, nbin, nbl, npol)
+    UVWnum = zeros(Tuvw, nbin, nbl, 3)
+    UVWw = zeros(Tw, nbin, nbl)
+    tnum = zeros(Float64, nbin)
+    tw = zeros(Float64, nbin)
+
+    @inbounds for ti in 1:nti
+        b = ids[ti]
+        for bi in 1:nbl
+            tot_w = zero(Tw)
+            for p in 1:npol, c in 1:nchan
+                w = w_p[c, ti, bi, p]
+                v = vis_p[c, ti, bi, p]
+                (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
+                Vnum[c, b, bi, p] += w * v
+                Wsum[c, b, bi, p] += w
+                tot_w += w
+            end
+            (tot_w > 0 && isfinite(tot_w)) || continue
+            for k in 1:3
+                u = uvw_p[ti, bi, k]
+                isfinite(u) || continue
+                UVWnum[b, bi, k] += tot_w * u
+            end
+            UVWw[b, bi] += tot_w
+            tnum[b] += tot_w * tvals[ti]
+            tw[b] += tot_w
+        end
+    end
+
+    V = similar(Vnum)
+    @inbounds for k in eachindex(V)
+        V[k] = Wsum[k] > 0 ? Vnum[k] / Wsum[k] : Tvis(NaN, NaN)
+    end
+    UVW_out = fill(Tuvw(NaN), nbin, nbl, 3)
+    @inbounds for bi in 1:nbl, b in 1:nbin
+        if UVWw[b, bi] > 0
+            for k in 1:3
+                UVW_out[b, bi, k] = UVWnum[b, bi, k] / UVWw[b, bi]
+            end
+        end
+    end
+    tcenters = [tw[b] > 0 ? tnum[b] / tw[b] : (isempty(tvals) ? 0.0 : tvals[1]) for b in 1:nbin]
+    return V, Wsum, UVW_out, tcenters
+end
+
+"""
+    time_bin_average(uvset::UVSet, dt_seconds) -> UVSet
+
+Average each leaf's `Ti` axis into `dt_seconds`-wide bins. `apply(TimeBinAverage(dt_seconds), uvset)`.
+"""
+time_bin_average(uvset::UVSet, dt_seconds::Real) = apply(TimeBinAverage(dt_seconds), uvset)
