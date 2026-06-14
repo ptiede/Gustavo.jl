@@ -26,6 +26,32 @@ Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 function write_uvfits end
 
 """
+    load_fitsidi(path; lazy = true, scans = :, bands = :) -> UVSet
+
+Load a FITS-IDI file (AIPS Memo 114) into a `UVSet`. Header tables
+(ARRAY_GEOMETRY, FREQUENCY, SOURCE, ANTENNA, …) are read eagerly; the
+`UV_DATA` payload is left lazy by default — each per-(scan, band) leaf's
+`vis`/`weights`/`flag` layers are disk-backed and materialized on demand
+(`materialize_leaf`). Pass `lazy = false` to materialize everything up front
+(only for small files), or restrict `scans`/`bands` to a subset.
+
+Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
+"""
+function load_fitsidi end
+
+"""
+    write_fitsidi(output_path, uvset::UVSet)
+
+Write a `UVSet` to a FITS-IDI file (AIPS Memo 114): a stub PRIMARY HDU plus
+ARRAY_GEOMETRY, SOURCE, ANTENNA, FREQUENCY, and a time-ordered `UV_DATA`
+binary table. Used primarily to build round-trip and fringe-injection test
+fixtures.
+
+Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
+"""
+function write_fitsidi end
+
+"""
     primary_cards(uvset::UVSet) -> Vector
 
 Return the FITS primary-HDU cards registered for `uvset`. Provided by

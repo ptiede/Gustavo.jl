@@ -16,6 +16,7 @@ include("frequencyband.jl")
 include("metadata.jl")
 include("UVSet/UVSet.jl")
 include("io.jl")
+include("dataset.jl")
 include("utilities.jl")
 
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
@@ -31,6 +32,8 @@ export scan_name, primary_scan_name, scan_intents, sub_scan_name, scan_window, p
 export select_source, select_scan, select_station, select_baseline, select_partition
 export merge_uvsets, time_window
 export load_uvfits, write_uvfits, default_output_path
+export load_fitsidi, write_fitsidi
+export AbstractUVDataset, is_lazy, materialize_leaf, materialize
 export primary_cards, register_primary_cards!
 export TimeAverage, scan_average
 export scan_time_centers, band_center_frequency, centered_channel_freqs

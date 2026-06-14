@@ -5,5 +5,7 @@
 module GustavoFITSFilesExt
 
 include("uvfits.jl")
+include("fitsidi_read.jl")
+include("fitsidi_write.jl")
 
 end # module

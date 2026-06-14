@@ -13,7 +13,7 @@ using Gustavo.UVData:
     UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup,
     Antenna, AntennaTable, BaselineIndex,
     Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL,
-    Integration, Pol, Frequency, UVW,
+    Integration, Pol, Frequency, UVW, Baseline,
     sources, parallactic_mount, elevation_mount, offset_mount,
     array_xyz, array_name, extras,
     channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name,
