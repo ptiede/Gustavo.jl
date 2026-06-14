@@ -546,3 +546,33 @@ end
         end
     end
 end
+
+@testset "FITS-IDI Int16/TSCAL flux decode (E3)" begin
+    # Exercises the reader's scaled integer FLUX decode path (DiFX Int16 variant),
+    # which the real Float32 validation file does not cover. `_swap_into!` is the
+    # per-row hot loop: big-endian on-disk integers → host order (ntoh) → Float32,
+    # applying TSCAL/TZERO when `scale = true`.
+    ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+    @test ext !== nothing
+
+    raw = Int16[2, 4, -6, 1000, -32768]
+    rawbuf = UInt8[]
+    for v in raw
+        append!(rawbuf, reinterpret(UInt8, [hton(v)]))      # big-endian on disk
+    end
+    nb = length(raw)
+    # Duck-typed field with active TSCAL/TZERO: decoded = zero + scale*raw.
+    field = (; type = Int16, zero = 100.0, scale = 0.5)
+
+    cube = zeros(Float32, nb)
+    ext._swap_into!(cube, rawbuf, Int16, nb, field, true)
+    @test cube ≈ Float32[100 + 0.5 * r for r in raw]
+
+    # scale = false: byte-swap only, no TSCAL/TZERO applied.
+    cube2 = zeros(Float32, nb)
+    ext._swap_into!(cube2, rawbuf, Int16, nb, field, false)
+    @test cube2 ≈ Float32.(raw)
+
+    # scale_value agrees on a scalar (the primitive _swap_into! calls).
+    @test FITSFiles.scale_value(Int16(8), field, true) ≈ 104.0
+end

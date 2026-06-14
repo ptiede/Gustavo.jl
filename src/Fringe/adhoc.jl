@@ -108,6 +108,14 @@ function solve_adhoc_phasing(
         covered[:, :, ap] .= cov
     end
 
+    # Restitch the per-AP gauge when the reference antenna drops out (K3). Each
+    # per-AP solve pins `ref_ant`; in APs where `ref_ant` has no data the solve
+    # falls back to a different anchor node, so that AP's whole solution is offset
+    # by an arbitrary (non-2π) constant — which would otherwise inject a spurious
+    # common-mode jump into every station's track. Re-reference those APs to the
+    # trusted frame from neighbouring ref-present APs via the overlapping stations.
+    _restitch_refant_gauge!(phase, covered, track_w, ref_ant)
+
     # Unwrap each (station, feed) track across APs (per-AP solves share the ref
     # gauge, so a track is continuous up to ±2π steps the unwrap removes).
     for a in 1:nant, f in 1:2
@@ -139,6 +147,64 @@ function solve_adhoc_phasing(
     end
 
     return AdhocSolution(phase, chi, collect(float.(times)), covered)
+end
+
+# Restitch per-AP gauges so the reference frame is consistent across APs even
+# when `ref_ant` drops out (K3). When `ref_ant` is solved in an AP, that AP's
+# per-AP solve already pins it (frame = ref_ant phase 0) and we trust it,
+# refreshing the running anchor from this AP's solved cells (so real drift
+# propagates). When `ref_ant` is ABSENT, the AP's solve anchored on a different
+# node, so it carries an arbitrary global offset δ; we estimate δ as the
+# weighted circular mean over the cells common to this AP and the anchor, and
+# subtract it from every solved cell of the AP. This is a no-op when `ref_ant` is
+# present in every AP (so it never perturbs the well-anchored case), and it only
+# removes a single global per-AP constant — per-(station, feed) means and slopes
+# are still handled later by `_detrend_track!`. Leading APs with no trusted
+# anchor yet are left untouched (best effort). A multi-component AP keeps one
+# global δ dominated by the largest overlap; per-island offsets remain a
+# fundamental gauge freedom (documented in `stationize_scan`).
+function _restitch_refant_gauge!(phase, covered, track_w, ref_ant::Integer)
+    nant, _, nap = size(phase)
+    anchor = fill(NaN, nant, 2)
+    have_anchor = false
+    for ap in 1:nap
+        ref_present = covered[ref_ant, 1, ap] || covered[ref_ant, 2, ap]
+        if !ref_present && have_anchor
+            # Register PER FEED. With cross hands the two feeds share a component
+            # but carry two gauge freedoms (the overall phase pin and the feed-2
+            # EVPA pin); when ref_ant drops out both fall back to a different
+            # antenna, shifting each feed by its own constant. The per-feed
+            # convention (each feed gauged relative to ref_ant's feed) matches the
+            # rest of the adhoc solve, so a separate δ per feed restores it.
+            for f in 1:2
+                num_s = 0.0
+                num_c = 0.0
+                wsum = 0.0
+                for a in 1:nant
+                    (covered[a, f, ap] && isfinite(anchor[a, f]) && isfinite(phase[a, f, ap])) || continue
+                    d = phase[a, f, ap] - anchor[a, f]
+                    wk = (isfinite(track_w[a, f, ap]) && track_w[a, f, ap] > 0) ? track_w[a, f, ap] : 1.0
+                    num_s += wk * sin(d)
+                    num_c += wk * cos(d)
+                    wsum += wk
+                end
+                if wsum > 0 && (num_s != 0 || num_c != 0)
+                    δ = atan(num_s, num_c)
+                    for a in 1:nant
+                        covered[a, f, ap] && (phase[a, f, ap] -= δ)
+                    end
+                end
+            end
+        end
+        # Refresh the anchor from this AP's (now registered) solved cells.
+        if ref_present || have_anchor
+            for a in 1:nant, f in 1:2
+                (covered[a, f, ap] && isfinite(phase[a, f, ap])) && (anchor[a, f] = phase[a, f, ap])
+            end
+            have_anchor = true
+        end
+    end
+    return phase
 end
 
 # Dense first-difference penalized smoother (no SparseArrays — the system is

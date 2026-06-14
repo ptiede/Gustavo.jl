@@ -58,11 +58,28 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
         info = UVData.metadata(leaf)
         fs = channel_freqs(info.freq_setup)
         for f in fs
-            freq_spw[Float64(f)] = info.spw_name
+            fk = Float64(f)
+            prev = get(freq_spw, fk, nothing)
+            (prev === nothing || prev == info.spw_name) ||
+                error(
+                "build_geometry: channel frequency $fk Hz appears in conflicting spectral " *
+                    "windows '$prev' and '$(info.spw_name)' — a single concatenated channel axis " *
+                    "cannot dense-rank it to one spw. Partition the set so each frequency belongs " *
+                    "to one spw, or rename the spws consistently."
+            )
+            freq_spw[fk] = info.spw_name
         end
         ts = lookup(leaf[:vis], Ti)
         for t in ts
-            time_scan[Float64(t)] = info.scan_name
+            tk = Float64(t)
+            prev = get(time_scan, tk, nothing)
+            (prev === nothing || prev == info.scan_name) ||
+                error(
+                "build_geometry: time $tk h appears in conflicting scans '$prev' and " *
+                    "'$(info.scan_name)' — a single concatenated time axis cannot dense-rank it to " *
+                    "one scan. Check for overlapping scan windows or inconsistent scan names."
+            )
+            time_scan[tk] = info.scan_name
         end
     end
 

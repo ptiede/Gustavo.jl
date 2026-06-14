@@ -204,3 +204,51 @@ end
     @test !any(sol_hi.covered)
     @test all(isnan, sol_hi.delay)
 end
+
+@testset "Stationize: spanning-tree re-wrap recovers |Δφ| > π (K1)" begin
+    # A chain of high-SNR baselines (1-2-3-4-5) carries small per-step phase
+    # increments that accumulate to a station-to-station difference exceeding ±π.
+    # Redundant (lower-SNR) baselines therefore have TRUE phase differences > π,
+    # whose measured values wrap into (−π, π]. The max-weight spanning-tree seed
+    # propagates the unambiguous chain unwrapping so the redundant edges are
+    # re-wrapped to the correct 2π branch; a fit seeded from the raw wrapped
+    # observations can lock onto the wrong branch.
+    nant = 5
+    ref = 1
+    bl = all_baselines(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+
+    # Cumulative phase: φ[a] − φ[ref] grows past π along the chain.
+    φ = zeros(nant, 2)
+    for a in 1:nant
+        φ[a, 1] = 1.2 * (a - 1)            # 0, 1.2, 2.4, 3.6, 4.8  (1↔5 diff = 4.8 > π)
+        φ[a, 2] = 1.2 * (a - 1) + 0.4
+    end
+    χ = 0.3
+    τ = zeros(nant, 2)
+    ṙ = zeros(nant, 2)
+
+    # Chain edges get the highest SNR so the spanning tree follows them.
+    is_chain(a, b) = abs(a - b) == 1
+    D = Matrix{FR.FringeDetection}(undef, length(bl), length(pols))
+    for (bi, (a, b)) in enumerate(bl), (p, (fa, fb)) in enumerate(feeds)
+        cs = _chisign(fa, fb)
+        phase = rem2pi(φ[a, fa] - φ[b, fb] + cs * χ, RoundNearest)
+        snr = is_chain(a, b) ? 200.0 : 100.0
+        D[bi, p] = FR.FringeDetection(τ[a, fa] - τ[b, fb], ṙ[a, fa] - ṙ[b, fb], phase, 1.0, snr, true)
+    end
+
+    # At least one redundant baseline genuinely exceeds ±π in parallel hand.
+    @test any(!is_chain(a, b) && abs(φ[a, 1] - φ[b, 1]) > π for (a, b) in bl)
+
+    sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
+
+    # Model reproduces every measured phase (closure after correct unwrap).
+    @test recon_residuals(D, sol, bl, pols).phase < 1.0e-6
+    # The recovered absolute (unwrapped) station phases match the injected branch
+    # — not a wrapped alias. Feed-1 is gauged at (ref, feed1).
+    for a in 1:nant
+        @test isapprox(sol.phase[a, 1] - sol.phase[ref, 1], φ[a, 1] - φ[ref, 1]; atol = 1.0e-6)
+    end
+end

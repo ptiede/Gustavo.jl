@@ -172,6 +172,14 @@ function _solve_observable(rows::Vector{_ObsRow}, nant::Integer, ref_ant::Intege
             break
         end
     end
+    # Pin every UNTOUCHED node — an (antenna, feed) with no observation in this
+    # solve, e.g. a station that dropped out. Its design column is all-zero, which
+    # would make the constrained QR system rank-deficient and corrupt the solve
+    # for the stations that DO have data. Pinning it to 0 (its value is discarded;
+    # only `touched` cells are returned) keeps the system full-rank and well-posed.
+    for n in 1:nnodes
+        touched[n] || n in pins || push!(pins, n)
+    end
 
     A = zeros(Float64, nrow, ncol)
     b = zeros(Float64, nrow)
@@ -189,16 +197,27 @@ function _solve_observable(rows::Vector{_ObsRow}, nant::Integer, ref_ant::Intege
     end
     dgauge = zeros(Float64, length(pins))
 
-    x = weighted_constrained_least_squares(A, b, w, C, dgauge)
-    # Phase re-wrap: unwrap observations toward the current model and re-solve, so
-    # station-difference phases exceeding ±π are handled.
+    # Phase re-wrap: unwrap observations toward a model and re-solve, so
+    # station-difference phases exceeding ±π are handled. The first model comes
+    # from a maximum-weight spanning-tree traversal of the (station, feed) graph
+    # (K1): propagating wrapped edge phases from each pin gives a globally
+    # consistent unwrap that is correct even when a true station-difference
+    # exceeds ±π — far more robust than starting the iteration from a WLS fit on
+    # the raw wrapped observations, which can lock onto the wrong 2π branch. For
+    # delay/rate (`rewrap == 0`, no wrapping) we solve the raw system directly.
     if rewrap > 0
-        bw = copy(b)
+        xseed = _spanning_tree_seed(rows, nant, pins, ncol)
+        model = A * xseed
+        bw = similar(b)
+        @. bw = b + 2π * round((model - b) / (2π))
+        x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
         for _ in 1:rewrap
             model = A * x
             @. bw = b + 2π * round((model - b) / (2π))
             x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
         end
+    else
+        x = weighted_constrained_least_squares(A, b, w, C, dgauge)
     end
 
     for ant in 1:nant, feed in 1:2
@@ -210,6 +229,65 @@ function _solve_observable(rows::Vector{_ObsRow}, nant::Integer, ref_ant::Intege
     end
     chi = has_chi ? x[nnodes + 1] : NaN
     return vals, chi, cov, ncomp
+end
+
+# Maximum-weight spanning-tree phase seed (K1). Propagate wrapped edge phases
+# from each pin over the parallel-hand (chisign == 0, same-feed) edges of the
+# (station, feed) graph, preferring high-weight edges, to build a globally
+# consistent node-phase estimate. Cross-hand rows (which carry the unknown χ) are
+# excluded from the tree; their nodes are reached through the parallel-hand
+# subgraph (or seeded 0 and resolved by the WLS + χ). Returns a length-`ncol`
+# vector (χ column, if present, seeded 0). The estimate is used only to unwrap the
+# observations for the first constrained solve, so any edge it cannot place stays
+# 0 — the re-wrap iterations refine from there.
+function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, pins::AbstractVector{<:Integer}, ncol::Integer)
+    nnodes = 2 * nant
+    x = zeros(Float64, ncol)
+    # Adjacency over parallel-hand edges: neighbor, phase to ADD (φ_v = φ_u + add), weight.
+    adj = [Vector{Tuple{Int, Float64, Float64}}() for _ in 1:nnodes]
+    for r in rows
+        r.chisign == 0 || continue
+        na = _node(r.a, r.fa, nant)
+        nb = _node(r.b, r.fb, nant)
+        # row: φ_na − φ_nb = r.val ⇒ from na, φ_nb = φ_na − r.val; from nb, φ_na = φ_nb + r.val.
+        push!(adj[na], (nb, -r.val, r.w))
+        push!(adj[nb], (na, r.val, r.w))
+    end
+    # Visit strongest edges first so the tree follows high-SNR connections.
+    for n in 1:nnodes
+        sort!(adj[n]; by = e -> e[3], rev = true)
+    end
+    # Grow a MAX-WEIGHT spanning tree per component (Prim): repeatedly attach the
+    # highest-weight edge from the visited set to an unvisited node. Following the
+    # strongest edges (not just any incident edge, as a plain BFS would) keeps the
+    # unwrapping on the most reliable, smallest-|Δφ| connections — a hub node
+    # directly joined to a far node by a low-SNR, >π edge does not get to define
+    # that node's branch.
+    visited = falses(nnodes)
+    for p in pins
+        (1 <= p <= nnodes && !visited[p]) || continue
+        visited[p] = true                       # pinned node phase stays 0
+        while true
+            best_w = -Inf
+            best_u = 0
+            best_v = 0
+            best_add = 0.0
+            for u in 1:nnodes
+                visited[u] || continue
+                for (v, add, w) in adj[u]
+                    (!visited[v] && w > best_w) || continue
+                    best_w = w
+                    best_u = u
+                    best_v = v
+                    best_add = add
+                end
+            end
+            best_v == 0 && break               # component exhausted
+            x[best_v] = x[best_u] + best_add
+            visited[best_v] = true
+        end
+    end
+    return x
 end
 
 """

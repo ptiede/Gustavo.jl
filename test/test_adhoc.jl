@@ -181,3 +181,48 @@ end
     # Averaging 80 low-SNR trials: bias well below the single-trial scatter.
     @test maxbias < 0.1
 end
+
+@testset "Adhoc: ref-antenna dropout gauge restitch (K3)" begin
+    # A time-CONSTANT screen so the only across-AP variation is the per-AP gauge.
+    # The reference antenna drops out in a middle block of APs; without the K3
+    # restitch those APs anchor on a different node, injecting a common-mode jump
+    # into every station's track. With it, the recovered track (relative to the
+    # injected truth) is the SAME constant in every AP — including the dropout.
+    nant, nap = 5, 12
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    rng = MersenneTwister(0xC3C3)
+
+    c = 0.6 .* randn(rng, nant, 2)                 # per-(station,feed) constant
+    screen = repeat(reshape(c, nant, 2, 1), 1, 1, nap)
+    χ = zeros(nap)
+    rbar, wbar = inject_screen(bl, pols, screen, χ)
+
+    # Drop every baseline touching ref_ant in APs 5..8.
+    dropaps = 5:8
+    for ap in dropaps, bi in eachindex(bl)
+        (bl[bi][1] == ref || bl[bi][2] == ref) || continue
+        rbar[bi, :, ap] .= 0.0 + 0.0im
+        wbar[bi, :, ap] .= 0.0
+    end
+
+    sol = FRa.solve_adhoc_phasing(
+        rbar, wbar, bl, pols, nant, times;
+        ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false),
+    )
+
+    # ref_ant is unsolved in the dropout APs but solved elsewhere.
+    @test all(!sol.covered[ref, 1, ap] && !sol.covered[ref, 2, ap] for ap in dropaps)
+    @test all(sol.covered[ref, 1, ap] for ap in 1:nap if !(ap in dropaps))
+
+    # Non-ref stations are still solved in the dropout APs, and the recovered
+    # phase relative to truth is the SAME constant across ALL APs (no jump).
+    for a in 2:nant, f in 1:2
+        truth = c[a, f] - c[ref, f]
+        d = [rem2pi(sol.phase[a, f, ap] - truth, RoundNearest) for ap in 1:nap if isfinite(sol.phase[a, f, ap])]
+        @test length(d) == nap                                    # solved every AP
+        @test maximum(d) - minimum(d) < 1.0e-6                    # gauge consistent across dropout
+    end
+end

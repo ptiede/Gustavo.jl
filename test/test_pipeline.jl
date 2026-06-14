@@ -291,3 +291,16 @@ end
         @test worst > 0.99
     end
 end
+
+@testset "build_geometry conflict detection (N1)" begin
+    # Normal multi-band set: each channel frequency belongs to exactly one spw.
+    uvset_ok, _ = _build_fringe_uvset()
+    @test CAL.build_geometry(uvset_ok) isa CAL.DataGeometry
+
+    # band_sep = 0 ⇒ the two bands share identical channel frequencies but carry
+    # distinct spw_names ("band_1"/"band_2"), so a single concatenated channel
+    # axis cannot dense-rank a frequency to one spw — build_geometry must error
+    # instead of silently last-write-wins.
+    uvset_conflict, _ = _build_fringe_uvset(band_sep = 0.0)
+    @test_throws ErrorException CAL.build_geometry(uvset_conflict)
+end
