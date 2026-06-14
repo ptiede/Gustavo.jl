@@ -8,7 +8,9 @@ by both `Gustavo.Bandpass` and `Gustavo.Fringe`.
 """
 module Calibration
 
-using ..UVData: PolTypes
+using ..UVData
+using ..UVData: PolTypes, UVSet, channel_freqs, with_visibilities, materialize_leaf,
+    pol_products, baselines
 using LinearAlgebra
 using LinearSolve
 
@@ -18,6 +20,7 @@ include("Calibration/terms.jl")
 include("Calibration/models.jl")
 include("Calibration/parameters.jl")
 include("Calibration/evaluate.jl")
+include("Calibration/solutions.jl")
 
 # Feed / correlation-product conventions
 export correlation_feed_pair, is_parallel_hand, same_feed_label
@@ -55,5 +58,8 @@ export validate_station_gain_model, station_model_summary, component_label
 # Parameter layout and pure evaluation
 export ParameterLayout, ComponentPlan, plan_parameters
 export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
+
+# Calibration solution container, apply, serialization
+export CalibrationSolution, build_geometry, leaf_window, save_solution, load_solution
 
 end

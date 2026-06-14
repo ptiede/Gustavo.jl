@@ -28,6 +28,9 @@ include("test_stationize.jl")
 # Globally-closing adhoc phasing (Phase 5 of the fringe-fitter refactor).
 include("test_adhoc.jl")
 
+# End-to-end CalibrationSolution + solve_fringes pipeline (Phase 6).
+include("test_pipeline.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

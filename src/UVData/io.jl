@@ -52,6 +52,17 @@ Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 function write_fitsidi end
 
 """
+    apply_calibration(uvset::UVSet, calibration; kwargs...) -> UVSet
+
+Apply a calibration to `uvset`, returning a corrected `UVSet`. Generic entry
+point with methods for different calibration objects (an ANTAB a-priori
+calibration in `Gustavo.Bandpass`; a `Gustavo.Calibration.CalibrationSolution`
+fringe/bandpass solution). Visibilities are divided by `g_a · conj(g_b)` and
+weights scaled by `|g_a g_b|²`.
+"""
+function apply_calibration end
+
+"""
     primary_cards(uvset::UVSet) -> Vector
 
 Return the FITS primary-HDU cards registered for `uvset`. Provided by

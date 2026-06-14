@@ -72,6 +72,37 @@ function evaluate_gains(ev::GainEvaluator, θ::AbstractVector)
 end
 
 """
+    evaluate_gains(ev::GainEvaluator, θ, chan_idx, ti_idx) -> Array{Complex,4}
+
+Windowed pure forward map: gains of shape `(length(chan_idx), length(ti_idx),
+nant, 2)` at the given GLOBAL channel and time indices (into `ev`'s geometry).
+Use this to evaluate the gains a single UVSet leaf needs without materializing
+the full `(nchan_total, ntime_total, …)` array.
+"""
+function evaluate_gains(
+        ev::GainEvaluator, θ::AbstractVector,
+        chan_idx::AbstractVector{<:Integer}, ti_idx::AbstractVector{<:Integer},
+    )
+    lay = ev.layout
+    length(θ) == lay.nθ ||
+        error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
+    T = float(eltype(θ))
+    gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
+    phase_c = phase_components(ev.model)
+    logamp_c = logamp_components(ev.model)
+    nphase = lay.nphase
+    plans = lay.plans
+    @inbounds for feed in 1:2, ant in 1:lay.nant
+        for (tii, ti) in enumerate(ti_idx), (ci, c) in enumerate(chan_idx)
+            phase = _sum_components(phase_c, plans, 1, θ, ant, feed, ti, c)
+            logamp = _sum_components(logamp_c, plans, nphase + 1, θ, ant, feed, ti, c)
+            gains[ci, tii, ant, feed] = exp(logamp) * cis(phase)
+        end
+    end
+    return gains
+end
+
+"""
     predict_visibilities(gains, coh, bl_a, bl_b, feed_a, feed_b) -> Array{Complex,4}
 
 Pure visibility prediction `V̂[c,ti,bi,p] = g_a · coh · conj(g_b)` from antenna

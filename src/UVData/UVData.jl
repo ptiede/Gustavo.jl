@@ -34,6 +34,7 @@ export merge_uvsets, time_window
 export load_uvfits, write_uvfits, default_output_path
 export load_fitsidi, write_fitsidi
 export AbstractUVDataset, is_lazy, materialize_leaf, materialize
+export apply_calibration
 export primary_cards, register_primary_cards!
 export TimeAverage, scan_average
 export scan_time_centers, band_center_frequency, centered_channel_freqs

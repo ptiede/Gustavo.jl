@@ -228,7 +228,7 @@ The caller is responsible for matching the ANTAB to the right uvfits
 track and band; pass `on_missing_station=:error` to refuse to silently
 skip stations.
 """
-function apply_calibration(
+function UVData.apply_calibration(
         uvset::UVSet, antab::AntabCalibration;
         on_missing_station::Symbol = :warn,
     )
