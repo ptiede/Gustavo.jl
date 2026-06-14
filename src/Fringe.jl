@@ -15,6 +15,7 @@ using ..Calibration
 using FFTW: fft, fftfreq, plan_fft
 using Statistics: median, mean
 using LinearAlgebra
+using OhMyThreads: tmap, TaskLocalValue
 
 include("Fringe/search.jl")
 include("Fringe/stationize.jl")

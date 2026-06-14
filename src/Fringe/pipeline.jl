@@ -36,8 +36,8 @@ end
 # One (source, scan) group of band leaves, already materialized, with the data
 # concatenated along frequency.
 struct _ScanGroup
-    Vg::Array{ComplexF64, 4}             # (chan, ti, bl, pol)
-    Wg::Array{Float64, 4}
+    Vg::Array{ComplexF32, 4}             # (chan, ti, bl, pol) — native precision (halves RAM)
+    Wg::Array{Float32, 4}
     fg::Vector{Float64}                  # channel freqs (Hz), all bands stacked
     tg::Vector{Float64}                  # times (hours)
     bl_pairs::Vector{Tuple{Int, Int}}
@@ -95,8 +95,8 @@ function _materialize_scan_group(leaves_lazy, geom::DataGeometry)
         sort!(chan_entries; by = e -> e[1])
         nchan = length(chan_entries)
 
-        Vg = Array{ComplexF64}(undef, nchan, nti, nbl, npol)
-        Wg = Array{Float64}(undef, nchan, nti, nbl, npol)
+        Vg = Array{ComplexF32}(undef, nchan, nti, nbl, npol)
+        Wg = Array{Float32}(undef, nchan, nti, nbl, npol)
         fg = Vector{Float64}(undef, nchan)
         g_ci = Vector{Int}(undef, nchan)
         for (row, e) in enumerate(chan_entries)
@@ -174,18 +174,12 @@ function _solve_one_group!(θ, grp::_ScanGroup, ev, plans, f0, t0_sec, search, a
     end
 
     # ── Adhoc: residual after Stage-B, coherently freq-averaged per AP. ──
-    Vresid = _residual_vis(ev, θ, grp)
+    # Fused: evaluate gains once and accumulate the per-AP coherent sum directly,
+    # without materializing a full residual cube (saves a Vg-sized array/group).
     nap = length(grp.tg)
     rbar = zeros(ComplexF64, nbl, npol, nap)
     wbar = zeros(Float64, nbl, npol, nap)
-    nchan = length(grp.fg)
-    @inbounds for p in 1:npol, bi in 1:nbl, ap in 1:nap, c in 1:nchan
-        w = grp.Wg[c, ap, bi, p]
-        v = Vresid[c, ap, bi, p]
-        (isfinite(w) && w > 0 && isfinite(v)) || continue
-        rbar[bi, p, ap] += w * v
-        wbar[bi, p, ap] += w
-    end
+    _accumulate_residual_rbar!(rbar, wbar, ev, θ, grp)
     as = solve_adhoc_phasing(
         rbar, wbar, grp.bl_pairs, grp.pol_products, nant, grp.tg;
         ref_ant = ref_ant, opts = adhoc,
@@ -222,6 +216,7 @@ function solve_fringes(
         adhoc::AdhocPhasing = AdhocPhasing(),
         rounds::Int = 1,
         ref_ant::Integer = 1,
+        ntasks::Integer = Threads.nthreads(),
     )
     model = _fringe_model()
     geom = build_geometry(uvset)
@@ -242,33 +237,29 @@ function solve_fringes(
     scan_chi = fill(NaN, ngroups)
     scan_ncomp = zeros(Int, ngroups)
 
-    # Threaded over scan groups. Each (source, scan) group is independent and
-    # writes a DISJOINT set of θ slots (its own PerScan / PerIntegration time
-    # segment), so each chunk of groups accumulates into its own θ buffer and the
-    # buffers are summed at the end — the result is identical to the sequential
-    # solve (the nonzero slots never overlap) regardless of thread count.
-    nchunks = max(1, min(Threads.nthreads(), ngroups))
-    θbufs = [zeros(layout.nθ) for _ in 1:nchunks]
-    chunks = [Int[] for _ in 1:nchunks]
-    for gi in 1:ngroups
-        push!(chunks[mod1(gi, nchunks)], gi)        # round-robin load balance
+    # Threaded over scan groups via OhMyThreads with a bounded task count. Each
+    # (source, scan) group is independent and writes a DISJOINT set of θ slots
+    # (its own PerScan / PerIntegration time segment), so each group fills its own
+    # (cheap, ~1 MB) θ contribution which are summed at the end — the result is
+    # identical to the sequential solve (the nonzero slots never overlap)
+    # regardless of task count. `ntasks` caps how many groups are resident at once
+    # (peak RAM ≈ ntasks × per-group size), so it is the knob to scale threads to
+    # the machine's MEMORY, not just its core count. The FFT workspace is task-
+    # local (one per task, reused across that task's groups).
+    ntasks_use = max(1, min(Int(ntasks), ngroups))
+    ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
+    contribs = tmap(1:ngroups; ntasks = ntasks_use) do gi
+        θloc = zeros(layout.nθ)
+        grp = _materialize_scan_group(group_leaves[gi], geom)
+        snr, chi, nc = _solve_one_group!(
+            θloc, grp, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant, ws_tlv[],
+        )
+        scan_snr[gi] = snr
+        scan_chi[gi] = chi
+        scan_ncomp[gi] = nc
+        θloc
     end
-
-    Threads.@threads for ci in 1:nchunks
-        θloc = θbufs[ci]
-        ws = FringeWorkspace()                       # per-thread FFT scratch (reused across groups)
-        for gi in chunks[ci]
-            grp = _materialize_scan_group(group_leaves[gi], geom)
-            snr, chi, nc = _solve_one_group!(
-                θloc, grp, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant, ws,
-            )
-            scan_snr[gi] = snr
-            scan_chi[gi] = chi
-            scan_ncomp[gi] = nc
-            grp = nothing                            # release this group before the next
-        end
-    end
-    θ = nchunks == 1 ? θbufs[1] : reduce(+, θbufs)
+    θ = isempty(contribs) ? zeros(layout.nθ) : reduce(+, contribs)
 
     info = (;
         nant = nant,
@@ -280,8 +271,39 @@ function solve_fringes(
     return CalibrationSolution(model, layout, geom, θ, info)
 end
 
+# Accumulate the coherent per-(baseline, product, AP) residual sum
+# `rbar = Σ_chan w·(V/gain)`, `wbar = Σ_chan w` — evaluating gains once and
+# streaming over channels so no full residual cube is allocated (the adhoc stage
+# only needs the frequency-collapsed residual). Matches `_residual_vis` + the old
+# explicit accumulation exactly.
+function _accumulate_residual_rbar!(rbar, wbar, ev::GainEvaluator, θ::AbstractVector, grp::_ScanGroup)
+    g = evaluate_gains(ev, θ, grp.g_ci, grp.g_ti)    # (nchan, nti, nant, 2)
+    nchan, nti, nbl, npol = size(grp.Vg)
+    @inbounds for p in 1:npol
+        fa, fb = correlation_feed_pair(grp.pol_products[p])
+        for bi in 1:nbl
+            a, b = grp.bl_pairs[bi]
+            for tt in 1:nti, c in 1:nchan
+                w = grp.Wg[c, tt, bi, p]
+                (w > 0 && isfinite(w)) || continue
+                ga = g[c, tt, a, fa]
+                gb = g[c, tt, b, fb]
+                denom = ga * conj(gb)
+                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(denom)) || continue
+                v = grp.Vg[c, tt, bi, p] / denom
+                isfinite(v) || continue
+                rbar[bi, p, tt] += w * v
+                wbar[bi, p, tt] += w
+            end
+        end
+    end
+    return rbar, wbar
+end
+
 # Residual visibilities for one scan group: Vg divided by the current θ gains
-# evaluated at the group's (global chan, global ti) window.
+# evaluated at the group's (global chan, global ti) window. Used for rounds > 1
+# (the search needs a full residual cube); the adhoc stage uses the fused
+# `_accumulate_residual_rbar!` above instead.
 function _residual_vis(ev::GainEvaluator, θ::AbstractVector, grp::_ScanGroup)
     g = evaluate_gains(ev, θ, grp.g_ci, grp.g_ti)    # (nchan, nti, nant, 2)
     nchan, nti, nbl, npol = size(grp.Vg)
