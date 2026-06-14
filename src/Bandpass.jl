@@ -9,6 +9,14 @@ using ..UVData:
     select_source, select_scan, select_partition, merge_uvsets,
     baselines, record_order, extra_columns, obs_time,
     pol_products, PolTypes
+using ..Calibration: correlation_feed_pair, _feed_index, is_parallel_hand,
+    same_feed_label, parallel_hand_indices, cross_hand_indices,
+    build_parallel_hand_mask, design_matrices,
+    weighted_phase_mean, weighted_complex_correction,
+    _row_scale, _promote_lsq,
+    weighted_least_squares, weighted_regularized_least_squares,
+    weighted_constrained_least_squares,
+    unwrap_phase_track, phase_relative_to_ref
 using PolarizedTypes: RPol, LPol, XPol, YPol
 using DimensionalData: Ti
 using OrderedCollections: OrderedDict

@@ -1,4 +1,3 @@
-module GustavoFITSFilesExt
 
 using FITSFiles
 using FITSFiles: HDU, Random, Bintable, Card
@@ -1393,4 +1392,3 @@ function _write_records_kernel!(
     return nothing
 end
 
-end # module

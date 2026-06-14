@@ -13,6 +13,9 @@ using DimensionalData: DimArray, DimStack, dims, Ti
 using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products
 using PolarizedTypes: RPol, LPol
 
+# Unified Calibration framework (Phase 1 of the fringe-fitter refactor).
+include("test_calibration.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×
