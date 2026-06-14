@@ -25,6 +25,9 @@ include("test_fringe_search.jl")
 # Per-feed stationization with closure (Phase 4 of the fringe-fitter refactor).
 include("test_stationize.jl")
 
+# Globally-closing adhoc phasing (Phase 5 of the fringe-fitter refactor).
+include("test_adhoc.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

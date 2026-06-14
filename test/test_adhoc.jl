@@ -1,0 +1,183 @@
+# Phase 5 — globally-closing adhoc phasing.
+# Standalone-runnable and included from runtests.jl.
+
+using Gustavo
+using Test
+using Random
+using Statistics: mean, std
+
+const FRa = Gustavo.Fringe
+const CALa = Gustavo.Calibration
+
+_cs_a(fa, fb) = fa == fb ? 0 : (fa < fb ? 1 : -1)
+all_bl_a(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
+
+# Build residual baseline visibilities rbar[bl,pol,ap] from a per-(station,feed,
+# ap) phase screen and a per-AP source phase χ. `amp` sets the coherent SNR.
+function inject_screen(bl_pairs, pol_products, screen, χ; amp = 10.0, noise = 0.0, rng = nothing)
+    nbl, npol = length(bl_pairs), length(pol_products)
+    nap = size(screen, 3)
+    feeds = [CALa.correlation_feed_pair(p) for p in pol_products]
+    rbar = Array{ComplexF64}(undef, nbl, npol, nap)
+    wbar = ones(nbl, npol, nap)
+    for ap in 1:nap, bi in 1:nbl, p in 1:npol
+        a, b = bl_pairs[bi]
+        fa, fb = feeds[p]
+        cs = _cs_a(fa, fb)
+        model = screen[a, fa, ap] - screen[b, fb, ap] + cs * χ[ap]
+        v = amp * cis(model)
+        if noise > 0 && rng !== nothing
+            v += noise * (randn(rng) + im * randn(rng)) / sqrt(2)
+        end
+        rbar[bi, p, ap] = v
+    end
+    return rbar, wbar
+end
+
+# Max |measured − model-from-solution| (mod 2π) over valid baselines/APs.
+function adhoc_recon(rbar, sol, bl_pairs, pol_products)
+    feeds = [CALa.correlation_feed_pair(p) for p in pol_products]
+    m = 0.0
+    for ap in axes(rbar, 3), bi in eachindex(bl_pairs), p in eachindex(pol_products)
+        a, b = bl_pairs[bi]
+        a == b && continue
+        r = rbar[bi, p, ap]
+        abs(r) > 0 || continue
+        fa, fb = feeds[p]
+        cs = _cs_a(fa, fb)
+        (isfinite(sol.phase[a, fa, ap]) && isfinite(sol.phase[b, fb, ap])) || continue
+        model = sol.phase[a, fa, ap] - sol.phase[b, fb, ap] + (cs == 0 ? 0.0 : cs * sol.chi[ap])
+        m = max(m, abs(rem2pi(angle(r) - model, RoundNearest)))
+    end
+    return m
+end
+
+@testset "Adhoc: raw per-AP global solve closes" begin
+    rng = MersenneTwister(0x0ADC)
+    nant, nap = 5, 20
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    screen = 0.3 .* randn(rng, nant, 2, nap)
+    χ = 0.2 .* randn(rng, nap)
+    times = collect(0:(nap - 1)) .* 1.0
+
+    rbar, wbar = inject_screen(bl, pols, screen, χ)
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false))
+
+    @test adhoc_recon(rbar, sol, bl, pols) < 1.0e-9
+    # Reference station held at zero adhoc phase (the per-AP gauge).
+    @test all(abs.(sol.phase[ref, 1, :]) .< 1.0e-9)
+    @test all(abs.(sol.phase[ref, 2, :]) .< 1.0e-9)
+    # Per-AP recovery up to the (ref, feed) gauge.
+    for ap in 1:nap, a in 1:nant, f in 1:2
+        truth = screen[a, f, ap] - screen[ref, f, ap]
+        @test isapprox(rem2pi(sol.phase[a, f, ap] - truth, RoundNearest), 0.0; atol = 1.0e-8)
+    end
+end
+
+@testset "Adhoc: detrend removes per-scan mean and slope" begin
+    rng = MersenneTwister(0x0DE7)
+    nant, nap = 4, 30
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    tc = times .- mean(times)
+    # Screen = per-station constant + slope + small wiggle.
+    c0 = 0.5 .* randn(rng, nant, 2)
+    c1 = 0.02 .* randn(rng, nant, 2)
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        screen[a, f, ap] = c0[a, f] + c1[a, f] * tc[ap] + 0.05 * sin(2π * ap / nap)
+    end
+    χ = zeros(nap)
+    rbar, wbar = inject_screen(bl, pols, screen, χ)
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = true))
+
+    # After detrend, every solved track has ~zero mean and ~zero slope, so adhoc
+    # cannot alias the Stage-B constant phase / rate.
+    for a in 1:nant, f in 1:2
+        a == ref && continue
+        tr = sol.phase[a, f, :]
+        @test abs(mean(tr)) < 1.0e-8
+        slope = sum(tc .* (tr .- mean(tr))) / sum(tc .^ 2)
+        @test abs(slope) < 1.0e-8
+    end
+end
+
+@testset "Adhoc: smoothing reduces noise on a smooth screen" begin
+    rng = MersenneTwister(0x5704)
+    nant, nap = 5, 60
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    # Smooth (band-limited) screen per station/feed.
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2
+        ph = 2π * rand(rng)
+        amp = 0.4 * rand(rng)
+        for ap in 1:nap
+            screen[a, f, ap] = amp * sin(2π * 2 * ap / nap + ph)
+        end
+    end
+    χ = zeros(nap)
+    rbar, wbar = inject_screen(bl, pols, screen, χ; amp = 4.0, noise = 1.5, rng = rng)
+
+    truth(a, f) = screen[a, f, :] .- screen[ref, f, :]
+    rms_to_truth(sol) = begin
+        e = Float64[]
+        for a in 1:nant, f in 1:2
+            a == ref && continue
+            d = sol.phase[a, f, :] .- truth(a, f)
+            d .-= mean(d)                      # remove gauge constant
+            append!(e, d)
+        end
+        sqrt(mean(abs2, e))
+    end
+
+    raw = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false))
+    sm = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :smooth, window = 11, order = 2, detrend = false))
+    pen = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :penalized, smoothness = 20.0, detrend = false))
+
+    @test rms_to_truth(sm) < rms_to_truth(raw)
+    @test rms_to_truth(pen) < rms_to_truth(raw)
+end
+
+@testset "Adhoc: low-SNR no-anchor solve is unbiased" begin
+    # No dominant anchor station (all equal SNR), low per-baseline SNR. The
+    # global solve over all baselines should be unbiased — averaging many noise
+    # realizations recovers the gauged truth.
+    nant, nap = 5, 4
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    rng = MersenneTwister(0xB1A5)
+    screen = 0.4 .* randn(rng, nant, 2, nap)
+    χ = zeros(nap)
+
+    ntrial = 80
+    acc = zeros(nant, 2, nap)
+    cnt = zeros(nant, 2, nap)
+    for _ in 1:ntrial
+        rbar, wbar = inject_screen(bl, pols, screen, χ; amp = 2.0, noise = 1.0, rng = rng)
+        sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false, snr_floor = 0.0))
+        for a in 1:nant, f in 1:2, ap in 1:nap
+            isfinite(sol.phase[a, f, ap]) || continue
+            acc[a, f, ap] += rem2pi(sol.phase[a, f, ap], RoundNearest)
+            cnt[a, f, ap] += 1
+        end
+    end
+    maxbias = 0.0
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        a == ref && continue
+        cnt[a, f, ap] > 0 || continue
+        est = acc[a, f, ap] / cnt[a, f, ap]
+        truth = screen[a, f, ap] - screen[ref, f, ap]
+        maxbias = max(maxbias, abs(rem2pi(est - truth, RoundNearest)))
+    end
+    # Averaging 80 low-SNR trials: bias well below the single-trial scatter.
+    @test maxbias < 0.1
+end

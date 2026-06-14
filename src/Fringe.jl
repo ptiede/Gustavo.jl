@@ -13,13 +13,15 @@ module Fringe
 using ..UVData
 using ..Calibration
 using FFTW: fft, fftfreq
-using Statistics: median
+using Statistics: median, mean
 using LinearAlgebra
 
 include("Fringe/search.jl")
 include("Fringe/stationize.jl")
+include("Fringe/adhoc.jl")
 
 export FringeSearch, FringeDetection, baseline_fringe_search
 export Stationization, StationSolution, stationize_scan, station_closure_residuals
+export AdhocPhasing, AdhocSolution, solve_adhoc_phasing
 
 end

@@ -104,6 +104,34 @@ function weighted_complex_correction(samples, weights)
 end
 
 """
+    savitzky_golay_smooth(y, weights = nothing; window = 11, order = 2) -> Vector
+
+Savitzky–Golay-style smoothing: at each index fit a degree-`order` polynomial by
+(optionally weighted) least squares over a centered window of `window` samples
+and evaluate it at the centre. Non-finite (`NaN`) samples are skipped in each
+local fit (so the smoother also interpolates gaps), and the polynomial order is
+reduced where a window has too few finite samples. Returns a new vector.
+"""
+function savitzky_golay_smooth(y::AbstractVector, weights = nothing; window::Integer = 11, order::Integer = 2)
+    n = length(y)
+    out = collect(float.(y))
+    h = window ÷ 2
+    for i in 1:n
+        lo, hi = max(1, i - h), min(n, i + h)
+        idx = [j for j in lo:hi if isfinite(y[j])]
+        isempty(idx) && continue
+        ord = min(order, length(idx) - 1)
+        x = Float64.(idx .- i)                         # centred coordinate; centre is x = 0
+        A = reduce(hcat, (x .^ d for d in 0:ord))
+        b = Float64.(y[idx])
+        w = weights === nothing ? ones(length(idx)) : Float64.(weights[idx])
+        coef = weighted_least_squares(A, b, w)
+        out[i] = coef[1]                               # value of the local polynomial at the centre
+    end
+    return out
+end
+
+"""
     connected_components(nnodes, edges) -> (compid, ncomp, touched)
 
 Union–find connected components of an undirected graph on `nnodes` nodes given
