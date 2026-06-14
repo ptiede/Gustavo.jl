@@ -103,6 +103,55 @@ function weighted_complex_correction(samples, weights)
     return exp(log_amp) * cis(phase)
 end
 
+"""
+    connected_components(nnodes, edges) -> (compid, ncomp, touched)
+
+Union–find connected components of an undirected graph on `nnodes` nodes given
+`edges` (any iterable of `(u, v)` index pairs). Returns `compid::Vector{Int}`
+(dense component id `1:ncomp` for each node that appears in an edge, `0` for
+isolated/untouched nodes), the component count `ncomp`, and `touched::Vector{Bool}`
+marking nodes that appear in at least one edge.
+
+Used by the fringe stationization / adhoc-phasing solvers to gauge each
+connected piece of the (station, feed) graph independently (so disconnected
+array subgraphs each get their own reference pin).
+"""
+function connected_components(nnodes::Integer, edges)
+    parent = collect(1:nnodes)
+    function findroot(x)
+        root = x
+        while parent[root] != root
+            root = parent[root]
+        end
+        while parent[x] != root           # path compression
+            parent[x], x = root, parent[x]
+        end
+        return root
+    end
+    touched = falses(nnodes)
+    for (u, v) in edges
+        touched[u] = true
+        touched[v] = true
+        ru, rv = findroot(u), findroot(v)
+        ru == rv || (parent[ru] = rv)
+    end
+    compid = zeros(Int, nnodes)
+    label = Dict{Int, Int}()
+    ncomp = 0
+    for n in 1:nnodes
+        touched[n] || continue
+        r = findroot(n)
+        id = get(label, r, 0)
+        if id == 0
+            ncomp += 1
+            label[r] = ncomp
+            id = ncomp
+        end
+        compid[n] = id
+    end
+    return compid, ncomp, touched
+end
+
 # Convention across Gustavo: a "weight" is always an *inverse variance*
 # (precision, 1/σ²), matching both the Gaussian-likelihood derivation of
 # weighted least squares and the AIPS UVData convention (Memo 117: visibility

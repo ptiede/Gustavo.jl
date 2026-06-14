@@ -28,6 +28,7 @@ export design_matrices
 export weighted_least_squares, weighted_regularized_least_squares,
     weighted_constrained_least_squares
 export weighted_phase_mean, weighted_complex_correction
+export connected_components
 
 # Phase-track utilities
 export unwrap_phase_track, phase_relative_to_ref
