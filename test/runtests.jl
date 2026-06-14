@@ -31,6 +31,9 @@ include("test_adhoc.jl")
 # End-to-end CalibrationSolution + solve_fringes pipeline (Phase 6).
 include("test_pipeline.jl")
 
+# Fringe diagnostics + Makie plot stubs (Phase 8).
+include("test_fringe_diagnostics.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

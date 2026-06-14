@@ -650,4 +650,6 @@ function Bandpass.plot_baseline_bandpass_residuals(
     return Bandpass.plot_baseline_bandpass_residuals(setup, state.gains, bl_plot; pol = pol)
 end
 
+include("GustavoMakieExt_fringe.jl")
+
 end # module
