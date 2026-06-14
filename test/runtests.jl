@@ -16,6 +16,9 @@ using PolarizedTypes: RPol, LPol
 # Unified Calibration framework (Phase 1 of the fringe-fitter refactor).
 include("test_calibration.jl")
 
+# FITS-IDI writer round-trip tests (Phase 2 of the fringe-fitter refactor).
+include("test_fitsidi.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×
