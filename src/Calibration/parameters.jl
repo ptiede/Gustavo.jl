@@ -49,8 +49,16 @@ function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next:
     fseg_groups = segment_groups(fseg_id, nfseg)
     tseg_groups = segment_groups(tseg_id, ntseg)
 
-    xf = freq_coordinate(t, geom.channel_freqs, fseg_groups, geom.f0)
-    xt = time_coordinate(t, geom.times, tseg_groups, geom.t0)
+    # Build only the coordinate the term actually reads (its `coord_kind`); the
+    # other axis stays zero. Calling the builder solely for the matching kind
+    # means a term that declares COORD_FREQ/COORD_TIME but is missing its
+    # `freq_coordinate`/`time_coordinate` method errors loudly (no silent
+    # zero-coordinate fallback) — the key extensibility guard.
+    ck = coord_kind(t)
+    xf = ck == COORD_FREQ ? freq_coordinate(t, geom.channel_freqs, fseg_groups, geom.f0) :
+        zeros(Float64, nchannels(geom))
+    xt = ck == COORD_TIME ? time_coordinate(t, geom.times, tseg_groups, geom.t0) :
+        zeros(Float64, ntimes(geom))
 
     # Local channel index within each frequency segment (walk in channel order).
     nchan = nchannels(geom)

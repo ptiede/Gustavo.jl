@@ -93,8 +93,10 @@ function freq_coordinate(t::PolynomialFreq, channel_freqs, fseg_groups, f0)
     return x
 end
 
-freq_coordinate(::AbstractGainTerm, channel_freqs, fseg_groups, f0) =
-    zeros(Float64, length(channel_freqs))
+# NOTE: there is deliberately NO generic `freq_coordinate(::AbstractGainTerm, …)`
+# fallback. `plan_parameters` calls `freq_coordinate` only for terms whose
+# `coord_kind` is `COORD_FREQ`, so a new frequency-dependent term that forgets to
+# define this method errors loudly instead of silently evaluating with xf = 0.
 
 # ── Time-coordinate builders ─────────────────────────────────────────────────
 # Rate uses (t − t0) in seconds (t given in hours) so θ is a rate in Hz.
@@ -117,8 +119,8 @@ function time_coordinate(t::PolynomialTime, times, tseg_groups, t0)
     return x
 end
 
-time_coordinate(::AbstractGainTerm, times, tseg_groups, t0) =
-    zeros(Float64, length(times))
+# NOTE: no generic `time_coordinate(::AbstractGainTerm, …)` fallback either, for
+# the same reason — `plan_parameters` only calls it for `COORD_TIME` terms.
 
 # ── Pure scalar evaluation ───────────────────────────────────────────────────
 # `θ` is the full parameter vector; `off` the 1-based start of this block;

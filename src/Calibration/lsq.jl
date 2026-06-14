@@ -42,7 +42,7 @@ missing.
 function parallel_hand_indices(pol_products)
     pp = findfirst(==("PP"), pol_products)
     qq = findfirst(==("QQ"), pol_products)
-    isnothing(pp) || isnothing(qq) &&
+    (isnothing(pp) || isnothing(qq)) &&
         error("Parallel-hand products not found in pol_products=$(collect(pol_products))")
     return pp, qq
 end
@@ -122,7 +122,10 @@ function savitzky_golay_smooth(y::AbstractVector, weights = nothing; window::Int
         isempty(idx) && continue
         ord = min(order, length(idx) - 1)
         x = Float64.(idx .- i)                         # centred coordinate; centre is x = 0
-        A = reduce(hcat, (x .^ d for d in 0:ord))
+        # Build the Vandermonde directly as a Matrix — `reduce(hcat, ...)` over a
+        # single degree-0 column would return a Vector and crash the WLS solve
+        # when a window has only one finite sample (ord == 0).
+        A = Float64[x[r]^d for r in eachindex(x), d in 0:ord]
         b = Float64.(y[idx])
         w = weights === nothing ? ones(length(idx)) : Float64.(weights[idx])
         coef = weighted_least_squares(A, b, w)

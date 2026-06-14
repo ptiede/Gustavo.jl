@@ -210,6 +210,165 @@ function _build_idi_sources(src_hdu)
     return out
 end
 
+# ── FLAG table (AIPS Memo 114 §) ──────────────────────────────────────────────
+#
+# The FITS-IDI FLAG table records correlator/operator flags (RFI, bad channels,
+# antennas dropping out, …) that are NOT reflected in the per-record WEIGHT
+# column. Each row asserts that some (source, antenna(s), freqid, time range,
+# band(s), channel range, polarization(s)) selection of UV_DATA cells is bad.
+# We parse it eagerly into `FlagEntry`s (the table is tiny — a few thousand
+# rows — vs the multi-GB FLUX matrix) and consult them lazily in the chunk
+# array `readblock!`s, so building the UVSet never touches FLUX/WEIGHT.
+#
+# Columns (verified on the VLBA validation file; AIPS Memo 114):
+#   SOURCE_ID(1J)  0 = all sources
+#   ARRAY(1J)      (ignored — single array)
+#   ANTS(2J)       one or two NOSTA antenna numbers; 0 = all/wildcard. One
+#                  antenna flags every baseline touching it; two flag that
+#                  baseline only.
+#   FREQID(1J)     0 = all freq setups
+#   TIMERANG(2E)   (start, end) in DAYS relative to RDATE. Multiply by 24 to
+#                  get the reader's `t_hours` (hours since RDATE 00:00 UTC);
+#                  TIMERANG is already RDATE-relative, so no jd0 term is added.
+#   BANDS(NO_BAND J)  per-band flag, 1 = flag that band
+#   CHANS(2J)      (lo, hi) 1-based channel range; (0,0) = all channels
+#   PFLAGS(NO_STKD J) per-stokes flag in on-disk (RR/LL/RL/LR) order, 1 = flag
+#   REASON(A), SEVERITY(1J)  (ignored)
+
+# One parsed FLAG row. Antenna numbers are mapped NOSTA → global 1-based antenna
+# index; `pflags` is permuted into MSv4 Pol order so it aligns with the leaf Pol
+# axis. `bands` has length NO_BAND, `pflags` length NO_STKD.
+struct FlagEntry
+    source_id::Int            # 0 = all sources
+    ant1::Int                 # global antenna index, 0 = wildcard
+    ant2::Int                 # global antenna index, 0 = wildcard
+    freqid::Int               # 0 = all freq setups
+    t0::Float64               # hours since RDATE 00:00 UTC
+    t1::Float64
+    bands::Vector{Bool}       # per-band (length NO_BAND)
+    chan_lo::Int              # 1-based channel lo (0 = all)
+    chan_hi::Int              # 1-based channel hi (0 = all)
+    pflags::Vector{Bool}      # per-pol, MSv4 order (length NO_STKD)
+end
+
+# True when this FLAG entry applies to band `band` (1-based). Out-of-range BANDS
+# (shorter than NO_BAND) is treated as "flag" (defensive: a malformed/short
+# BANDS column should not silently un-flag).
+@inline _flag_band(e::FlagEntry, band::Int) =
+    band <= length(e.bands) ? e.bands[band] : true
+
+# True when global channel `ch` (1-based) is within this entry's channel range.
+@inline function _flag_chan(e::FlagEntry, ch::Int)
+    (e.chan_lo == 0 && e.chan_hi == 0) && return true
+    lo = e.chan_lo == 0 ? 1 : e.chan_lo
+    hi = e.chan_hi == 0 ? typemax(Int) : e.chan_hi
+    return lo <= ch <= hi
+end
+
+# True when this entry's antenna selection matches a baseline (global antenna
+# indices `a`, `b`). One antenna (other = 0) flags every baseline touching it;
+# two antennas flag that baseline (either ordering); (0,0) flags all baselines.
+@inline function _flag_baseline(e::FlagEntry, a::Int, b::Int)
+    e.ant1 == 0 && e.ant2 == 0 && return true
+    if e.ant2 == 0
+        return e.ant1 == a || e.ant1 == b
+    elseif e.ant1 == 0
+        return e.ant2 == a || e.ant2 == b
+    else
+        return (e.ant1 == a && e.ant2 == b) || (e.ant1 == b && e.ant2 == a)
+    end
+end
+
+# Parse the FLAG HDU into `FlagEntry`s. `nosta_to_idx` maps NOSTA → global
+# antenna index; `perm[p]` is the on-disk stokes index for MSv4 pol `p`, so
+# `pflags_msv4[p] = pflags_disk[perm[p]]` aligns PFLAGS with the leaf Pol axis.
+function _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stkd)
+    flag_hdu === nothing && return FlagEntry[]
+    d = flag_hdu.data
+    # The FLAG table is small; read its columns eagerly. Missing columns fall
+    # back to wildcards (older producers may omit some).
+    n = Int(flag_hdu.data.format.shape[2])
+    n == 0 && return FlagEntry[]
+
+    _col(name) = hasproperty(d, name) ? collect(getproperty(d, name)) : nothing
+    src = _col(:SOURCE_ID)
+    ants = _col(:ANTS)
+    fqid = _col(:FREQID)
+    trang = _col(:TIMERANG)
+    bands = _col(:BANDS)
+    chans = _col(:CHANS)
+    pflags = _col(:PFLAGS)
+
+    _mapant(nosta) = nosta == 0 ? 0 : get(nosta_to_idx, Int(nosta), Int(nosta))
+
+    out = Vector{FlagEntry}(undef, n)
+    for r in 1:n
+        sid = src === nothing ? 0 : Int(src isa AbstractMatrix ? src[r, 1] : src[r])
+        ar = ants === nothing ? Int32[0, 0] : _idi_row(ants, r)
+        a1 = _mapant(length(ar) >= 1 ? ar[1] : 0)
+        a2 = _mapant(length(ar) >= 2 ? ar[2] : 0)
+        fq = fqid === nothing ? 0 : Int(fqid isa AbstractMatrix ? fqid[r, 1] : fqid[r])
+
+        if trang === nothing
+            t0 = -Inf
+            t1 = Inf
+        else
+            tr = _idi_row(trang, r)
+            # TIMERANG is in DAYS relative to RDATE → hours.
+            t0 = Float64(tr[1]) * 24.0
+            t1 = Float64(length(tr) >= 2 ? tr[2] : tr[1]) * 24.0
+            # (0,0) means "all times" in AIPS convention.
+            (t0 == 0.0 && t1 == 0.0) && (t0 = -Inf; t1 = Inf)
+        end
+
+        bvec = if bands === nothing
+            fill(true, no_band)
+        else
+            br = _idi_row(bands, r)
+            Bool[(b <= length(br) ? br[b] != 0 : true) for b in 1:no_band]
+        end
+
+        if chans === nothing
+            clo = 0
+            chi = 0
+        else
+            cr = _idi_row(chans, r)
+            clo = Int(cr[1])
+            chi = Int(length(cr) >= 2 ? cr[2] : cr[1])
+        end
+
+        pvec_disk = if pflags === nothing
+            fill(true, no_stkd)
+        else
+            pr = _idi_row(pflags, r)
+            Bool[(s <= length(pr) ? pr[s] != 0 : true) for s in 1:no_stkd]
+        end
+        # Permute on-disk stokes order → MSv4 Pol order.
+        pvec = Bool[pvec_disk[perm[p]] for p in 1:no_stkd]
+
+        out[r] = FlagEntry(sid, a1, a2, fq, t0, t1, bvec, clo, chi, pvec)
+    end
+    return out
+end
+
+# Pre-filter the global flag list to those entries that can possibly touch a
+# given leaf: matching source (or wildcard), flagging this band, and whose time
+# range overlaps the scan's [t_lo, t_hi]. Done once at leaf construction so each
+# `readblock!` iterates a short list. Channel/pol/baseline matching stays in the
+# inner loop (cheap; the leaf has only one band).
+function _filter_flags_for_leaf(entries, source_id, band, t_lo, t_hi)
+    isempty(entries) && return FlagEntry[]
+    out = FlagEntry[]
+    for e in entries
+        (e.source_id == 0 || e.source_id == source_id) || continue
+        _flag_band(e, band) || continue
+        # Time overlap (treat ±Inf endpoints as "all times").
+        (e.t1 >= t_lo && e.t0 <= t_hi) || continue
+        push!(out, e)
+    end
+    return out
+end
+
 # ── Lazy chunk array ─────────────────────────────────────────────────────────
 
 """
@@ -257,12 +416,16 @@ struct IDIChunkArray{T, K, TD, TFF, TW} <: DiskArrays.AbstractDiskArray{T, 4}
     perm::Vector{Int}       # on-disk stokes idx → MSv4 Pol idx
     flux_scale::Bool        # whether FLUX has active TSCAL/TZERO
     row_of::Matrix{Int}     # (nti, nbl) UV_DATA row per cell (0 = missing)
+    flags::Vector{FlagEntry}  # FLAG entries pre-filtered to this leaf
+    bl_ants::Vector{Tuple{Int, Int}}  # global antenna pair per baseline column
+    times::Vector{Float64}  # per-ti time (hours since RDATE) for TIMERANG match
     kind::K
 end
 
 function _idi_chunk(
         ::Type{T}, kind::K, data, flux_field, weight_col,
         band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
+        flags, bl_ants, times,
     ) where {T, K}
     L = Int(data.format.shape[1])
     flux_M = first(flux_field.slice) - 1
@@ -270,7 +433,8 @@ function _idi_chunk(
     return IDIChunkArray{T, K, typeof(data), typeof(flux_field), typeof(weight_col)}(
         data, flux_field, weight_col, Int(data.begpos), L, flux_M,
         Int(band), Int(no_stkd), Int(no_chan), Int(no_band), nperband,
-        Vector{Int}(perm), Bool(flux_scale), row_of, kind,
+        Vector{Int}(perm), Bool(flux_scale), row_of,
+        flags, bl_ants, Vector{Float64}(times), kind,
     )
 end
 
@@ -345,6 +509,21 @@ end
     return wbuf
 end
 
+# True when any FLAG entry on this leaf flags cell (global channel `ch`, time
+# `t`, baseline column `bl` with global antennas (ea,eb), MSv4 pol `p`). The
+# entry list is already pre-filtered to this leaf's (source, band, time-span),
+# so this only checks the per-cell axes (time, channel, pol, baseline).
+@inline function _idi_cell_flagged(a::IDIChunkArray, ch::Int, t::Float64, ea::Int, eb::Int, p::Int)
+    @inbounds for e in a.flags
+        (t >= e.t0 && t <= e.t1) || continue
+        e.pflags[p] || continue
+        _flag_chan(e, ch) || continue
+        _flag_baseline(e, ea, eb) || continue
+        return true
+    end
+    return false
+end
+
 function DiskArrays.readblock!(
         a::IDIChunkArray{T, Val{:vis}}, out,
         rchan::AbstractUnitRange, rti::AbstractUnitRange,
@@ -389,14 +568,26 @@ function DiskArrays.readblock!(
     ) where {T}
     io = FITSFiles.open_lazy_source(a.data)
     wbuf = Vector{Float32}(undef, a.no_stkd)
+    have_flags = !isempty(a.flags)
     try
         @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
             r = a.row_of[ti, bl]
             r != 0 && _read_weight_row!(wbuf, io, a, r)
+            ea, eb = a.bl_ants[bl]
+            t = a.times[ti]
             for (pj, p) in enumerate(rpol)
                 w = r == 0 ? zero(T) : T(wbuf[a.perm[p]])
-                for cj in eachindex(rchan)
-                    out[cj, tj, bj, pj] = w
+                # FLAG-table entries zero the weight (channel-dependent when
+                # CHANS is set). OR'd with the existing weight<=0 path.
+                if have_flags && r != 0 && w > 0
+                    for (cj, c) in enumerate(rchan)
+                        out[cj, tj, bj, pj] =
+                            _idi_cell_flagged(a, c, t, ea, eb, p) ? zero(T) : w
+                    end
+                else
+                    for cj in eachindex(rchan)
+                        out[cj, tj, bj, pj] = w
+                    end
                 end
             end
         end
@@ -413,14 +604,25 @@ function DiskArrays.readblock!(
     ) where {T}
     io = FITSFiles.open_lazy_source(a.data)
     wbuf = Vector{Float32}(undef, a.no_stkd)
+    have_flags = !isempty(a.flags)
     try
         @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
             r = a.row_of[ti, bl]
             r != 0 && _read_weight_row!(wbuf, io, a, r)
+            ea, eb = a.bl_ants[bl]
+            t = a.times[ti]
             for (pj, p) in enumerate(rpol)
-                flagged = r == 0 || wbuf[a.perm[p]] <= 0
-                for cj in eachindex(rchan)
-                    out[cj, tj, bj, pj] = flagged
+                # weight<=0 path (or missing row) flags the whole channel run;
+                # otherwise consult the FLAG table per channel.
+                wflag = r == 0 || wbuf[a.perm[p]] <= 0
+                if wflag || !have_flags
+                    for cj in eachindex(rchan)
+                        out[cj, tj, bj, pj] = wflag
+                    end
+                else
+                    for (cj, c) in enumerate(rchan)
+                        out[cj, tj, bj, pj] = _idi_cell_flagged(a, c, t, ea, eb, p)
+                    end
                 end
             end
         end
@@ -521,20 +723,31 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
 
     # Locate HDUs by EXTNAME.
     primary_hdu = fid[1]
-    ag_hdu = an_hdu = src_hdu = fq_hdu = uv_hdu = nothing
+    ag_hdu = an_hdu = src_hdu = fq_hdu = uv_hdu = flag_hdu = nothing
+    n_uv = 0
     for hdu in fid[2:end]
         ext = strip(string(something(card_value(hdu.cards, "EXTNAME"), "")))
         ext == "ARRAY_GEOMETRY" && (ag_hdu = hdu)
         ext == "ANTENNA" && (an_hdu = hdu)
         ext == "SOURCE" && (src_hdu = hdu)
         ext == "FREQUENCY" && (fq_hdu = hdu)
-        ext == "UV_DATA" && (uv_hdu = hdu)
+        ext == "FLAG" && (flag_hdu = hdu)
+        if ext == "UV_DATA"
+            uv_hdu = hdu
+            n_uv += 1
+        end
     end
     ag_hdu === nothing && error("load_fitsidi: no ARRAY_GEOMETRY HDU in $(path)")
     an_hdu === nothing && error("load_fitsidi: no ANTENNA HDU in $(path)")
     src_hdu === nothing && error("load_fitsidi: no SOURCE HDU in $(path)")
     fq_hdu === nothing && error("load_fitsidi: no FREQUENCY HDU in $(path)")
     uv_hdu === nothing && error("load_fitsidi: no UV_DATA HDU in $(path)")
+    # Multiple UV_DATA HDUs would silently merge into the last one's geometry;
+    # we do not support that (each can carry a different setup). Error clearly.
+    n_uv > 1 && error(
+        "load_fitsidi: $(n_uv) UV_DATA HDUs found in $(path); only a single " *
+            "UV_DATA HDU is supported.",
+    )
 
     uv_cards = uv_hdu.cards
     no_stkd = Int(something(card_value(uv_cards, "NO_STKD"), 4))
@@ -545,12 +758,33 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
     # Eager metadata.
     antennas = _build_idi_antenna_table(ag_hdu, an_hdu)
     nosta = extras(antennas).NOSTA::Vector{Int32}
+    # The reader decodes BASELINE as `256*a + b`; that only round-trips for
+    # NOSTA < 256. AIPS' alternate 2048-packing (`bl = 2048*a + b + 0.01*subarray`)
+    # is a different convention and is not supported.
+    let bad = filter(s -> Int(s) >= 256, nosta)
+        isempty(bad) || error(
+            "load_fitsidi: NOSTA values $(Int.(bad)) are >= 256; the 256*a+b " *
+                "BASELINE packing assumed here cannot represent them (the AIPS " *
+                "2048-packing variant is unsupported).",
+        )
+    end
     # NOSTA → 1-based antenna index (row in the antenna table).
     nosta_to_idx = Dict{Int, Int}(Int(nosta[i]) => i for i in eachindex(nosta))
     array_obs = _build_idi_array_obs(primary_hdu, ag_hdu)
+    # Multi-setup (>1 FREQID) files carry several frequency configurations; the
+    # reader only uses the first FREQID row. Warn rather than silently drop.
+    let nfreqid = Int(fq_hdu.data.format.shape[2])
+        nfreqid > 1 && @warn(
+            "load_fitsidi: FREQUENCY table has $(nfreqid) FREQIDs; only the " *
+                "first is used."
+        )
+    end
     freq_setups = _build_idi_freq_setups(fq_hdu, ref_freq, no_chan, no_band)
     src_table = _build_idi_sources(src_hdu)
     _, _, msv4_labels, perm = _idi_stokes_perm(uv_cards)
+
+    # Parse the FLAG table eagerly (small; the FLUX matrix is never touched).
+    flag_entries = _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stkd)
 
     # Index pass: small per-row columns only (no WEIGHT / FLUX). Read in ONE
     # strided pass over the row prefixes (see `_idi_read_small_columns`); doing
@@ -652,6 +886,11 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
             (Ti(unique_times), Baseline(baselines.labels), UVW(["U", "V", "W"])),
         )
 
+        # Scan time span (hours), used to pre-filter FLAG entries per leaf.
+        scan_t_lo = isempty(unique_times) ? -Inf : first(unique_times)
+        scan_t_hi = isempty(unique_times) ? Inf : last(unique_times)
+        no_flags = FlagEntry[]
+
         for band in band_sel
             fsetup = freq_setups[band]
             chf = channel_freqs(fsetup)
@@ -660,17 +899,27 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
                 Baseline(baselines.labels), Pol(msv4_labels),
             )
 
+            # Flags touching this leaf (source, band, time-span). The vis layer
+            # is never flagged (its values stay as read); flagging is carried by
+            # the weights (→0) and flag (→true) layers.
+            leaf_flags = _filter_flags_for_leaf(
+                flag_entries, sid, band, scan_t_lo, scan_t_hi,
+            )
+
             vis_chunk = _idi_chunk(
                 eltype_vis, Val(:vis), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
+                no_flags, bl_pairs, unique_times,
             )
             w_chunk = _idi_chunk(
                 Float32, Val(:weights), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
+                leaf_flags, bl_pairs, unique_times,
             )
             flag_chunk = _idi_chunk(
                 Bool, Val(:flag), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
+                leaf_flags, bl_pairs, unique_times,
             )
 
             vis_part = DimArray(vis_chunk, vis_dims)

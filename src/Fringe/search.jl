@@ -18,8 +18,11 @@
 # Conventions: weights are inverse variances (1/σ²); at the matched point
 # |D| ≈ A·Σw and the noise on D has variance Σw, so SNR = |D_peak| / √(Σw) and
 # amplitude A = |D_peak| / Σw. Multi-band (gapped) frequency axes are gridded
-# onto a common Δf grid with empty bins zero-filled, so a concatenated-spw block
-# searches multi-band delay correctly.
+# onto a common Δf grid with empty bins zero-filled. NOTE: for narrow bands that
+# are widely separated, the multi-band matched filter has near-equal-height alias
+# peaks at the inverse band-spacing, and the FFT can lock onto an alias unless the
+# delay window is narrower than the alias spacing or `oversample` is large — so
+# multi-band delay is only as unambiguous as the a-priori `delay_window` allows.
 
 """
     FringeSearch(; delay_window, rate_window, oversample, snr_min, quad_interp)
@@ -28,14 +31,16 @@ Options for [`baseline_fringe_search`](@ref).
 
 - `delay_window`  : `(lo, hi)` delay search window in seconds. Default ±1 µs.
 - `rate_window`   : `(lo, hi)` fringe-rate search window in Hz. Default ±50 mHz.
-- `oversample`    : zero-padding factor per axis (finer delay/rate grid). Default 4.
+- `oversample`    : zero-padding factor per axis (finer delay/rate grid). Default 8.
+  Widely-separated narrow bands may need a larger value (or a tight
+  `delay_window`) to avoid locking onto a multi-band alias peak.
 - `snr_min`       : detection threshold; `valid = snr ≥ snr_min`. Default 6.
 - `quad_interp`   : refine the peak by 3-point quadratic interpolation. Default true.
 """
 Base.@kwdef struct FringeSearch
     delay_window::Tuple{Float64, Float64} = (-1.0e-6, 1.0e-6)
     rate_window::Tuple{Float64, Float64} = (-0.05, 0.05)
-    oversample::Int = 4
+    oversample::Int = 8
     snr_min::Float64 = 6.0
     quad_interp::Bool = true
 end

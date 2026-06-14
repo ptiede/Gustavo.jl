@@ -264,3 +264,30 @@ end
         rm(path; force = true)
     end
 end
+
+@testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
+    # Regression for the θ-overwrite bug: even rounds previously wiped the
+    # round-1 solution (coherence collapsed). Accumulation keeps all rounds good.
+    uvset, _ = _build_fringe_uvset()
+    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    for r in (1, 2, 3)
+        sol = FP.solve_fringes(uvset; ref_ant = 1, rounds = r, adhoc = adhoc)
+        corr = Gustavo.apply_calibration(uvset, sol)
+        worst = 1.0
+        for (_, leaf) in DimensionalData.branches(corr)
+            V = parent(leaf[:vis])
+            W = parent(leaf[:weights])
+            bl_pairs = UVP.baselines(leaf).pairs
+            lp = pol_products(leaf)
+            for p in eachindex(lp)
+                Gustavo.Calibration.is_parallel_hand(lp[p]) || continue
+                for bi in eachindex(bl_pairs)
+                    a, b = bl_pairs[bi]
+                    a == b && continue
+                    worst = min(worst, _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])))
+                end
+            end
+        end
+        @test worst > 0.99
+    end
+end

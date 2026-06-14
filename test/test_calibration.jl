@@ -182,3 +182,42 @@ end
         @test isapprox(rem2pi(cphase, RoundNearest), 0.0; atol = 1.0e-10)
     end
 end
+
+# ── Audit-driven regression tests ────────────────────────────────────────────
+
+@testset "Calibration parallel_hand_indices errors when PP/QQ missing" begin
+    @test CAL.parallel_hand_indices(["PP", "PQ", "QP", "QQ"]) == (1, 4)
+    # Regression for the operator-precedence bug: a missing PP must error, not
+    # silently return (nothing, idx).
+    @test_throws ErrorException CAL.parallel_hand_indices(["RL", "QQ"])
+    @test_throws ErrorException CAL.parallel_hand_indices(["PP", "RL"])
+    @test_throws ErrorException CAL.parallel_hand_indices(["RR", "LL"])
+end
+
+@testset "Calibration savitzky_golay_smooth: isolated finite sample" begin
+    # Regression: a window containing one finite sample (ord = 0) must not crash.
+    y = [NaN, 1.5, NaN]
+    out = CAL.savitzky_golay_smooth(y, [0.0, 2.0, 0.0]; window = 7, order = 2)
+    @test out[2] ≈ 1.5
+    @test all(isfinite, out)                      # gaps interpolated from the one sample
+    # A fully-finite smooth track is preserved.
+    t = sin.(range(0, 2π; length = 30))
+    sm = CAL.savitzky_golay_smooth(t; window = 7, order = 2)
+    @test maximum(abs.(sm .- t)) < 0.1
+end
+
+@testset "Calibration: misdeclared coordinate term errors loudly (N3)" begin
+    # A new term that declares COORD_FREQ but defines no freq_coordinate must
+    # error at plan time, not silently evaluate with xf = 0.
+    @eval CAL begin
+        struct _AuditBadFreqTerm <: AbstractGainTerm end
+        coord_kind(::_AuditBadFreqTerm) = COORD_FREQ
+        nparams_per_block(::_AuditBadFreqTerm, n) = 1
+        # NOTE: deliberately no freq_coordinate method.
+    end
+    geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [1.0e9, 2.0e9])
+    model = CAL.StationGainModel(
+        phase = (CAL.TiedComponent(CAL.GainComponent(CAL._AuditBadFreqTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+    )
+    @test_throws MethodError CAL.plan_parameters(model, 1, geom)
+end

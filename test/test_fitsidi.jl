@@ -314,3 +314,235 @@ const _F32EPS = 1.0f-4
         end
     end
 end
+
+# ── FLAG-table support ────────────────────────────────────────────────────────
+#
+# `write_fitsidi` does not emit a FLAG table, so these tests construct one by
+# hand: write a base file with `write_fitsidi`, reopen it to collect its HDUs,
+# append a FLAG bintable HDU (built directly with FITSFiles), and rewrite. Then
+# `load_fitsidi` reads the FLAG table and applies it to the lazy weight/flag
+# layers. We do NOT modify fitsidi_write.jl.
+
+using FITSFiles: HDU, Bintable, Card, fits
+
+# Build + write a FITS-IDI file that carries `flag_rows`. Each flag row is a
+# NamedTuple with fields SOURCE_ID, ANTS (length-2 vector, NOSTA numbers, 0 =
+# wildcard), FREQID, TIMERANG (length-2 vector, DAYS rel. RDATE), BANDS
+# (length-no_band), CHANS (length-2, 1-based, (0,0)=all), PFLAGS (length-no_stkd,
+# on-disk RR/LL/RL/LR order), SEVERITY. The base file uses ≥2 bands so the
+# vector columns are length>1 (FITSFiles cannot serialize length-1 vector
+# columns).
+function write_idi_with_flags(path, uvset, flag_rows; no_band, no_stkd, no_chan)
+    UV = Gustavo.UVData
+    base = tempname() * ".idifits"
+    UV.write_fitsidi(base, uvset)
+    fid = fits(base)
+    hdus = collect(fid)
+
+    nrow = length(flag_rows)
+    flagdata = (
+        SOURCE_ID = Int32[Int32(r.SOURCE_ID) for r in flag_rows],
+        ARRAY = fill(Int32(1), nrow),
+        ANTS = [Int32.(collect(r.ANTS)) for r in flag_rows],
+        FREQID = Int32[Int32(r.FREQID) for r in flag_rows],
+        TIMERANG = [Float32.(collect(r.TIMERANG)) for r in flag_rows],
+        BANDS = [Int32.(collect(r.BANDS)) for r in flag_rows],
+        CHANS = [Int32.(collect(r.CHANS)) for r in flag_rows],
+        PFLAGS = [Int32.(collect(r.PFLAGS)) for r in flag_rows],
+        REASON = [rpad("TEST", 24) for _ in flag_rows],
+        SEVERITY = Int32[Int32(r.SEVERITY) for r in flag_rows],
+    )
+    flagcards = Card[
+        Card("EXTNAME", "FLAG"),
+        Card("EXTVER", Int32(1)),
+        Card("NO_STKD", Int32(no_stkd)),
+        Card("NO_BAND", Int32(no_band)),
+        Card("NO_CHAN", Int32(no_chan)),
+    ]
+    flag_hdu = HDU(Bintable, flagdata, flagcards)
+    write(path, vcat(hdus, [flag_hdu]))
+    isfile(base) && rm(base)
+    return path
+end
+
+@testset "FITS-IDI FLAG table" begin
+    UV = Gustavo.UVData
+
+    @testset "synthetic FLAG selection" begin
+        # 2 bands so the FLAG vector columns are length>1. Antennas NOSTA 1:3,
+        # baselines (1,2),(1,3),(2,3). All weights positive so the only flags
+        # come from the FLAG table.
+        nbands = 2
+        nchan = 4
+        nant = 3
+        ntime = 3
+        uvset = build_synth_idi_uvset(;
+            nant = nant, nbands = nbands, nchan = nchan, nscan = 1, ntime = ntime,
+            weight_fn = (band, ti, bl, p) -> 2.0f0,
+        )
+        # The synthetic scan times are 0.0, 0.01, 0.02 hours (scan 1).
+        # Flag: antenna 2, band 1, channels 2..3, pol RR(disk idx1 → MSv4 PP),
+        # over time 0.005..0.025 hours → in days = /24.
+        thi = 0.025 / 24.0
+        tlo = 0.005 / 24.0
+        flag_rows = [
+            (;
+                SOURCE_ID = 0, ANTS = [2, 0], FREQID = 0,
+                TIMERANG = [tlo, thi],
+                BANDS = [1, 0],                  # band 1 only
+                CHANS = [2, 3],                  # channels 2..3
+                PFLAGS = [1, 0, 0, 0],           # RR only (disk order)
+                SEVERITY = -1,
+            ),
+        ]
+        path = tempname() * ".idifits"
+        try
+            write_idi_with_flags(
+                path, uvset, flag_rows;
+                no_band = nbands, no_stkd = 4, no_chan = nchan,
+            )
+            rt = UV.load_fitsidi(path; lazy = true)
+            idx = _index_leaves_by_scan_band(rt)
+
+            # Band 1 leaf: flags should appear; band 2 leaf: none.
+            leaf1 = idx[("1", 1)]
+            leaf2 = idx[("1", 2)]
+            m1 = UV.materialize_leaf(leaf1)
+            m2 = UV.materialize_leaf(leaf2)
+
+            f1 = parent(m1[:flag])      # (Frequency, Ti, Baseline, Pol)
+            w1 = parent(m1[:weights])
+            f2 = parent(m2[:flag])
+
+            pols = collect(lookup(leaf1[:vis], Pol))   # MSv4 order
+            pp = findfirst(==("PP"), pols)             # RR → PP
+            qq = findfirst(==("QQ"), pols)
+            bls = collect(lookup(leaf1[:vis], Baseline))
+            # Baseline columns touching antenna 2: (1,2) and (2,3).
+            touch2 = findall(b -> occursin("A2", string(b)), bls)
+            notouch = setdiff(1:length(bls), touch2)
+            # Time indices within the flag window 0.005..0.025h: ti 2,3 (0.01,0.02).
+            tin = [2, 3]
+            tout = [1]
+
+            # Flagged cells: band 1, baselines touching A2, ti in window, chans
+            # 2..3, pol PP.
+            for bi in touch2, ti in tin, c in 2:3
+                @test f1[c, ti, bi, pp]
+                @test w1[c, ti, bi, pp] == 0
+            end
+            # NOT flagged: other pol (QQ).
+            for bi in touch2, ti in tin, c in 2:3
+                @test !f1[c, ti, bi, qq]
+                @test w1[c, ti, bi, qq] > 0
+            end
+            # NOT flagged: channels outside 2..3.
+            for bi in touch2, ti in tin, c in (1, 4)
+                @test !f1[c, ti, bi, pp]
+            end
+            # NOT flagged: baselines not touching A2.
+            for bi in notouch, ti in tin, c in 2:3
+                @test !f1[c, ti, bi, pp]
+            end
+            # NOT flagged: time outside the window.
+            for bi in touch2, ti in tout, c in 2:3
+                @test !f1[c, ti, bi, pp]
+            end
+            # Band 2 leaf: completely unflagged (BANDS[2] == 0).
+            @test !any(f2)
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "wildcard antenna + all-channel + pol flag" begin
+        nbands = 2
+        nchan = 3
+        nant = 3
+        ntime = 2
+        uvset = build_synth_idi_uvset(;
+            nant = nant, nbands = nbands, nchan = nchan, nscan = 1, ntime = ntime,
+            weight_fn = (band, ti, bl, p) -> 1.0f0,
+        )
+        # Wildcard antenna (ANTS=(0,0)), all channels (CHANS=(0,0)), all times
+        # (TIMERANG=(0,0)), pol LL(disk idx2 → MSv4 QQ), band 2 only.
+        flag_rows = [
+            (;
+                SOURCE_ID = 0, ANTS = [0, 0], FREQID = 0,
+                TIMERANG = [0.0, 0.0],
+                BANDS = [0, 1],
+                CHANS = [0, 0],
+                PFLAGS = [0, 1, 0, 0],   # LL only (disk order)
+                SEVERITY = -1,
+            ),
+        ]
+        path = tempname() * ".idifits"
+        try
+            write_idi_with_flags(
+                path, uvset, flag_rows;
+                no_band = nbands, no_stkd = 4, no_chan = nchan,
+            )
+            rt = UV.load_fitsidi(path; lazy = true)
+            idx = _index_leaves_by_scan_band(rt)
+            m2 = UV.materialize_leaf(idx[("1", 2)])
+            m1 = UV.materialize_leaf(idx[("1", 1)])
+            f2 = parent(m2[:flag])
+            w2 = parent(m2[:weights])
+            pols = collect(lookup(idx[("1", 2)][:vis], Pol))
+            qq = findfirst(==("QQ"), pols)
+            others = setdiff(1:length(pols), [qq])
+
+            # Band 2, QQ pol: everything flagged (all ants, chans, times).
+            @test all(f2[:, :, :, qq])
+            @test all(w2[:, :, :, qq] .== 0)
+            # Other pols on band 2: untouched.
+            for p in others
+                @test !any(f2[:, :, :, p])
+                @test all(w2[:, :, :, p] .> 0)
+            end
+            # Band 1: untouched entirely.
+            @test !any(parent(m1[:flag]))
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "real-file FLAG smoke test" begin
+        real_path = joinpath(
+            @__DIR__, "..", "testdata", "BT164", "BT164A",
+            "VLBA_BT164A_bt164aQband_BIN0_SRC0_0_260108T230453.idifits",
+        )
+        if !isfile(real_path)
+            @test_skip "real FITS-IDI file not present"
+        else
+            # Build the UVSet lazily; this must NOT read the FLUX matrix.
+            uvset = UV.load_fitsidi(real_path; lazy = true)
+            leaves = collect(DimensionalData.branches(uvset))
+            @test !isempty(leaves)
+
+            # Find a leaf whose scan/band the FLAG table actually touches. The
+            # real FLAG rows flag whole (antenna, band, time-range) selections,
+            # so scan the leaves for one that picks up FLAG-table flags on cells
+            # whose visibility is present (finite) — i.e. flags the pre-fix
+            # reader (weight<=0 only) would have missed.
+            found = false
+            for (_, leaf) in leaves
+                m = UV.materialize_leaf(leaf)
+                flag = parent(m[:flag])
+                vis = parent(m[:vis])
+                # A flagged cell whose vis is finite cannot be a "missing row"
+                # (those are NaN); on this file all on-disk weights are
+                # positive, so such a flag can only come from the FLAG table.
+                flagged_with_data = flag .& isfinite.(real.(vis)) .& isfinite.(imag.(vis))
+                n = count(flagged_with_data)
+                if n > 0
+                    @info "real-file FLAG smoke" scan = DimensionalData.metadata(leaf).scan_name n_flag = count(flag) n_flag_with_data = n size(flag)
+                    @test n > 0
+                    found = true
+                    break
+                end
+            end
+            @test found
+        end
+    end
+end

@@ -107,7 +107,7 @@ function stationize_scan(
     phase_rows = _ObsRow[]
     for bi in 1:nbl, p in 1:npol
         det = detections[bi, p]
-        det.valid || continue
+        (det.valid && det.snr >= opts.snr_min) || continue
         a, b = bl_pairs[bi]
         a == b && continue                      # skip autocorrelations
         fa, fb = feeds[p]

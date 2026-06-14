@@ -108,8 +108,11 @@ function _build_scan_groups(uvset::UVSet, geom::DataGeometry)
     return out
 end
 
-# Pack a per-(ant,feed) station value (NaN-skipping) into θ at the given
-# component plan's (tseg, fseg=1) block.
+# Accumulate a per-(ant,feed) station value (NaN-skipping) into θ at the given
+# component plan's (tseg, fseg=1) block. Accumulation (not overwrite) is what
+# makes `rounds > 1` correct: each round searches the residual (data ÷ current
+# gains) and finds the *incremental* delay/rate/phase, which adds in the gain
+# exponent. Round 1 starts from θ = 0, so `+=` still sets the initial value.
 function _pack_station!(θ, plan::ComponentPlan, vals::AbstractMatrix, tseg::Int)
     nant = size(vals, 1)
     for ant in 1:nant, feed in 1:2
@@ -117,7 +120,7 @@ function _pack_station!(θ, plan::ComponentPlan, vals::AbstractMatrix, tseg::Int
         isfinite(v) || continue
         off = plan.off1[ant, feed, tseg, 1]
         off == 0 && continue
-        θ[off] = v
+        θ[off] += v
     end
     return θ
 end
@@ -198,7 +201,8 @@ function solve_fringes(
 
             ss = stationize_scan(det, grp.bl_pairs, grp.pol_products, nant; ref_ant = ref_ant)
 
-            # Pack Stage-B station gains (overwrite each round).
+            # Accumulate Stage-B station gains; on rounds > 1 this adds the
+            # residual delay/rate/phase found on the corrected data.
             _pack_station!(θ, const_plan, ss.phase, stseg)
             _pack_station!(θ, delay_plan, ss.delay, stseg)
             _pack_station!(θ, rate_plan, ss.rate, stseg)

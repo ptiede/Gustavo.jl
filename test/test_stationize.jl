@@ -190,3 +190,17 @@ end
         @test isapprox(rem2pi(sol.phase[a, f] - (φ[a, f] - φ[ref, f]), RoundNearest), 0.0; atol = 1.0e-10)
     end
 end
+
+@testset "Stationize: snr_min drops low-SNR detections" begin
+    nant = 4
+    bl = all_baselines(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    τ = 1.0e-9 .* randn(MersenneTwister(0x33), nant, 2)
+    D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 5.0)
+    # All detections at SNR 5: snr_min=2 solves, snr_min=6 drops everything.
+    sol_lo = FR.stationize_scan(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(snr_min = 2.0))
+    @test any(sol_lo.covered)
+    sol_hi = FR.stationize_scan(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(snr_min = 6.0))
+    @test !any(sol_hi.covered)
+    @test all(isnan, sol_hi.delay)
+end
