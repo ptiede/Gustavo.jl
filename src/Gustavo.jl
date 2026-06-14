@@ -13,5 +13,8 @@ using .Calibration
 include("Bandpass.jl")
 using .Bandpass
 
-export UVData, Calibration, Bandpass
+include("Fringe.jl")
+using .Fringe
+
+export UVData, Calibration, Bandpass, Fringe
 end
