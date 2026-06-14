@@ -135,7 +135,7 @@ end
 # stationize → pack Stage-B, repeated `rounds` times on the residual, then the
 # globally-closing adhoc phase. Writes only this group's (disjoint) θ slots.
 # Returns `(max_snr, chi, ncomp)` from the final round for diagnostics.
-function _solve_one_group!(θ, grp::_ScanGroup, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant)
+function _solve_one_group!(θ, grp::_ScanGroup, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant, ws)
     const_plan, delay_plan, rate_plan, adhoc_plan = plans
     nbl = length(grp.bl_pairs)
     npol = length(grp.pol_products)
@@ -159,7 +159,7 @@ function _solve_one_group!(θ, grp::_ScanGroup, ev, plans, f0, t0_sec, search, a
             end
             d = baseline_fringe_search(
                 Vsearch[:, :, bi, p], grp.Wg[:, :, bi, p],
-                grp.fg, grp.tg .* 3600.0, f0, t0_sec; opts = search,
+                grp.fg, grp.tg .* 3600.0, f0, t0_sec; opts = search, workspace = ws,
             )
             det[bi, p] = d
             d.valid && (maxsnr = max(maxsnr, d.snr))
@@ -256,10 +256,11 @@ function solve_fringes(
 
     Threads.@threads for ci in 1:nchunks
         θloc = θbufs[ci]
+        ws = FringeWorkspace()                       # per-thread FFT scratch (reused across groups)
         for gi in chunks[ci]
             grp = _materialize_scan_group(group_leaves[gi], geom)
             snr, chi, nc = _solve_one_group!(
-                θloc, grp, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant,
+                θloc, grp, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant, ws,
             )
             scan_snr[gi] = snr
             scan_chi[gi] = chi

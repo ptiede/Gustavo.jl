@@ -64,6 +64,38 @@ end
 
 const _INVALID_DETECTION = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
 
+"""
+    FringeWorkspace()
+
+Reusable scratch for [`baseline_fringe_search`](@ref): the zero-padded gridding
+buffer `G`, the FFT output `D`, and a cached FFT plan, lazily (re)allocated when
+the padded grid size changes. Pass one per thread to avoid allocating the grid
+(tens of MB at `oversample = 8`) on every call — the search runs thousands of
+times per solve, so reuse removes essentially all of its allocation/GC churn.
+"""
+mutable struct FringeWorkspace
+    nf::Int
+    nt::Int
+    G::Matrix{ComplexF64}
+    D::Matrix{ComplexF64}
+    plan::Any
+end
+FringeWorkspace() = FringeWorkspace(0, 0, Matrix{ComplexF64}(undef, 0, 0), Matrix{ComplexF64}(undef, 0, 0), nothing)
+
+# Ensure `ws` is sized for an `nf × nt` grid (reallocating + replanning only when
+# the size changes). `nothing` makes a fresh workspace (single-call fallback).
+_ensure_workspace!(::Nothing, nf::Integer, nt::Integer) = _ensure_workspace!(FringeWorkspace(), nf, nt)
+function _ensure_workspace!(ws::FringeWorkspace, nf::Integer, nt::Integer)
+    if ws.nf != nf || ws.nt != nt || ws.plan === nothing
+        ws.G = zeros(ComplexF64, nf, nt)
+        ws.D = similar(ws.G)
+        ws.plan = plan_fft(ws.G)
+        ws.nf = Int(nf)
+        ws.nt = Int(nt)
+    end
+    return ws
+end
+
 # Uniform-grid descriptor for one axis: the origin, spacing, and grid length such
 # that every sample `x` lands at `round((x - origin)/Δ) + 1 ∈ 1:n`. Δ is the
 # median adjacent spacing (robust to gaps); n spans min→max. A length-1 axis is
@@ -99,6 +131,7 @@ function baseline_fringe_search(
         V::AbstractMatrix, W::AbstractMatrix,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real;
         opts::FringeSearch = FringeSearch(),
+        workspace::Union{Nothing, FringeWorkspace} = nothing,
     )
     size(V) == size(W) || error("V and W must have the same shape")
     nchan, ntime = size(V)
@@ -113,8 +146,11 @@ function baseline_fringe_search(
     nf_pad = fax.degenerate ? 1 : _fast_fft_size(opts.oversample * fax.n)
     nt_pad = tax.degenerate ? 1 : _fast_fft_size(opts.oversample * tax.n)
 
-    # Place weighted visibilities on the uniform grid.
-    G = zeros(ComplexF64, nf_pad, nt_pad)
+    # Reuse the workspace's gridding buffer + FFT plan (zeroed each call) instead
+    # of allocating an `nf_pad × nt_pad` ComplexF64 grid every call.
+    ws = _ensure_workspace!(workspace, nf_pad, nt_pad)
+    G = ws.G
+    fill!(G, zero(ComplexF64))
     Wsum = 0.0
     @inbounds for ti in 1:ntime, ci in 1:nchan
         w = W[ci, ti]
@@ -128,7 +164,8 @@ function baseline_fringe_search(
     end
     Wsum > 0 || return _INVALID_DETECTION
 
-    D = fft(G)
+    D = ws.D
+    mul!(D, ws.plan, G)
 
     # Conjugate-axis coordinates: delays (s) ↔ frequency grid, rates (Hz) ↔ time.
     delays = fax.degenerate ? [0.0] : collect(fftfreq(nf_pad, 1.0 / fax.step))

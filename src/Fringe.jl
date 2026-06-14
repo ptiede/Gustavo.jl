@@ -12,7 +12,7 @@ module Fringe
 
 using ..UVData
 using ..Calibration
-using FFTW: fft, fftfreq
+using FFTW: fft, fftfreq, plan_fft
 using Statistics: median, mean
 using LinearAlgebra
 
