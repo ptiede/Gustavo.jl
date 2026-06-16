@@ -106,6 +106,13 @@ end
 _bulk_backend(::AbstractArray) = nothing
 function _materialize_group_bulk end
 
+# Decode concurrency for the bulk reader: how many tasks a single leaf's
+# vis/weights fill spreads its baseline columns over. Decode (byte-swap + complex
+# repack + pol permute) is CPU-bound, so threading it uses the cores the solve's
+# memory cap otherwise leaves idle. Default 1 = sequential (unchanged behavior for
+# tests and any non-solver caller); the fringe solve raises it around its passes.
+const _DECODE_NTASKS = Ref(1)
+
 """
     materialize(uvset::UVSet) -> UVSet
 

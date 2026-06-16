@@ -54,6 +54,20 @@ function _with_fft_threads(f, n::Int)
     end
 end
 
+# Run `f` with the bulk reader decoding each leaf over `n` tasks, restoring 1
+# after. Decode (byte-swap + complex repack + pol permute) is CPU-bound, so like
+# the FFT it can use the cores the memory cap leaves idle. Nested under the group
+# `tmap`, but Julia's scheduler caps live tasks at `nthreads`, so it composes.
+function _with_decode_threads(f, n::Int)
+    old = UVData._DECODE_NTASKS[]
+    UVData._DECODE_NTASKS[] = max(1, n)
+    try
+        return f()
+    finally
+        UVData._DECODE_NTASKS[] = old
+    end
+end
+
 # The shared fringe model. Phase, over the global frequency band:
 #   - feed-COMMON per-scan constant + delay (`SharedFeeds`): the atmosphere/clock
 #     terms that vary scan-to-scan and are the same for both polarization feeds;
@@ -385,20 +399,22 @@ function solve_fringes(
     nfft = max(1, Threads.nthreads() ÷ ntasks_use)
     ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
 
-    chi, ncomp = _with_fft_threads(nfft) do
-        _with_single_blas_thread() do
-            ch, nc = _search_and_stationize!(
-                θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
-                search, rounds, ref_ant, ntasks_use, ws_tlv,
-            )
-            # Pass 2: adhoc per group on the residual after the global stage-B (each
-            # group writes its own disjoint per-integration slots of the shared θ).
-            tmap(1:ngroups; ntasks = ntasks_use) do gi
-                grp, _ = _materialize_scan_group(group_leaves[gi], geom)
-                _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
-                nothing
+    chi, ncomp = _with_decode_threads(nfft) do
+        _with_fft_threads(nfft) do
+            _with_single_blas_thread() do
+                ch, nc = _search_and_stationize!(
+                    θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
+                    search, rounds, ref_ant, ntasks_use, ws_tlv,
+                )
+                # Pass 2: adhoc per group on the residual after the global stage-B (each
+                # group writes its own disjoint per-integration slots of the shared θ).
+                tmap(1:ngroups; ntasks = ntasks_use) do gi
+                    grp, _ = _materialize_scan_group(group_leaves[gi], geom)
+                    _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
+                    nothing
+                end
+                (ch, nc)
             end
-            (ch, nc)
         end
     end
 
@@ -465,29 +481,31 @@ function solve_and_reduce_fringes(
     nfft = max(1, Threads.nthreads() ÷ ntasks_use)
     ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
 
-    out_pairs, chi, ncomp = _with_fft_threads(nfft) do
-        _with_single_blas_thread() do
-            ch, nc = _search_and_stationize!(
-                θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
-                search, rounds, ref_ant, ntasks_use, ws_tlv,
-            )
-            # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
-            # this group (global stage-B + this group's just-written adhoc slots), so
-            # the group-local solution corrects identically to the global one.
-            results = tmap(1:ngroups; ntasks = ntasks_use) do gi
-                grp, keyed = _materialize_scan_group(group_leaves[gi], geom)
-                _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
-                grp = nothing
-                sub_branches = DimensionalData.TreeDict()
-                for (k, leaf) in keyed
-                    sub_branches[k] = leaf
+    out_pairs, chi, ncomp = _with_decode_threads(nfft) do
+        _with_fft_threads(nfft) do
+            _with_single_blas_thread() do
+                ch, nc = _search_and_stationize!(
+                    θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
+                    search, rounds, ref_ant, ntasks_use, ws_tlv,
+                )
+                # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
+                # this group (global stage-B + this group's just-written adhoc slots), so
+                # the group-local solution corrects identically to the global one.
+                results = tmap(1:ngroups; ntasks = ntasks_use) do gi
+                    grp, keyed = _materialize_scan_group(group_leaves[gi], geom)
+                    _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
+                    grp = nothing
+                    sub_branches = DimensionalData.TreeDict()
+                    for (k, leaf) in keyed
+                        sub_branches[k] = leaf
+                    end
+                    sub = DimensionalData.rebuild(uvset; branches = sub_branches)
+                    sol_local = CalibrationSolution(model, layout, geom, θ, (;))
+                    reduced = postprocess(UVData.apply_calibration(sub, sol_local))
+                    collect(pairs(UVData.branches(reduced)))
                 end
-                sub = DimensionalData.rebuild(uvset; branches = sub_branches)
-                sol_local = CalibrationSolution(model, layout, geom, θ, (;))
-                reduced = postprocess(UVData.apply_calibration(sub, sol_local))
-                collect(pairs(UVData.branches(reduced)))
+                (results, ch, nc)
             end
-            (results, ch, nc)
         end
     end
 

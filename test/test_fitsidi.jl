@@ -265,6 +265,19 @@ const _F32EPS = 1.0f-4
                     @test parent(b[:flag]) == parent(p[:flag])   # derived from weights both ways
                     @test parent(b[:uvw]) == parent(p[:uvw])
                 end
+                # Threaded decode (per-leaf baseline threading) must be identical to
+                # the sequential path — tasks write disjoint baseline columns.
+                old = UV._DECODE_NTASKS[]
+                UV._DECODE_NTASKS[] = 4
+                try
+                    threaded = UV.materialize_group(leaves; layers = (:vis, :weights, :uvw))
+                    for (t, b) in zip(threaded, bulk)
+                        @test parent(t[:vis]) == parent(b[:vis])
+                        @test parent(t[:weights]) == parent(b[:weights])
+                    end
+                finally
+                    UV._DECODE_NTASKS[] = old
+                end
             end
         finally
             isfile(path) && rm(path)

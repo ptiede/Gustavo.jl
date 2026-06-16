@@ -27,6 +27,11 @@
 # which `using DiskArrays` (its lazy field arrays subtype AbstractDiskArray).
 const DiskArrays = FITSFiles.DiskArrays
 using Statistics: median
+using OhMyThreads: tforeach
+
+# Tasks to spread one leaf's vis/weights decode over (bounded by the baseline
+# count). Reads the solve-set knob in UVData; defaults to 1 (sequential).
+_decode_ntasks(nbl::Int) = max(1, min(nbl, UVData._DECODE_NTASKS[]))
 
 # ── Small helpers ────────────────────────────────────────────────────────────
 
@@ -538,36 +543,67 @@ end
 
 # Byte-swap row `r`'s FLUX band slice out of the span buffer (row `rmin` is the
 # span's first row). Mirrors `_read_flux_cell!` but reads from memory, not `io`.
-@inline function _flux_from_span!(cube, span::Vector{UInt8}, a::IDIChunkArray, r::Int, rmin::Int)
-    dtype = a.flux_field.type
+# `D` (the on-disk FLUX element type) is passed in as a CONCRETE type parameter so
+# `Ptr{D}` and the `_swap_ptr!` dispatch are statically resolved. Reading it from
+# `a.flux_field.type` here instead — as the code used to — is type-unstable
+# (FITSFiles' `DataFormat.type::Type` is abstract), forcing one dynamic dispatch
+# per row. The caller resolves `D` ONCE per leaf via the `_fill_*_dense!` barrier.
+@inline function _flux_from_span!(cube, span::Vector{UInt8}, a::IDIChunkArray, r::Int, rmin::Int, ::Type{D}) where {D}
     nb = a.nperband
-    off = a.L * (r - rmin) + a.flux_M + sizeof(dtype) * ((a.band - 1) * nb)
-    return _swap_ptr!(cube, Ptr{dtype}(pointer(span, off + 1)), nb, a.flux_field, a.flux_scale)
+    off = a.L * (r - rmin) + a.flux_M + sizeof(D) * ((a.band - 1) * nb)
+    return _swap_ptr!(cube, Ptr{D}(pointer(span, off + 1)), nb, a.flux_field, a.flux_scale)
 end
 
 # Byte-swap row `r`'s WEIGHT block out of the span buffer (mirror of
 # `_read_weight_row!`).
-@inline function _weights_from_span!(wbuf, span::Vector{UInt8}, a::IDIChunkArray, r::Int, rmin::Int, scale::Bool)
+@inline function _weights_from_span!(wbuf, span::Vector{UInt8}, a::IDIChunkArray, r::Int, rmin::Int, scale::Bool, ::Type{D}) where {D}
     if a.weight_col === nothing
         fill!(wbuf, 1.0f0)
         return wbuf
     end
     wf = a.weight_col.fields[1]
     ns = a.no_stkd
-    off = a.L * (r - rmin) + (first(wf.slice) - 1) + sizeof(wf.type) * ((a.band - 1) * ns)
-    return _swap_weights_ptr!(wbuf, Ptr{wf.type}(pointer(span, off + 1)), ns, wf, scale)
+    off = a.L * (r - rmin) + (first(wf.slice) - 1) + sizeof(D) * ((a.band - 1) * ns)
+    return _swap_weights_ptr!(wbuf, Ptr{D}(pointer(span, off + 1)), ns, wf, scale)
 end
 
 # Fill a dense (no_chan, nti, nbl, no_stkd) vis array (MSv4 pol order) from the
 # span — the full-leaf equivalent of the vis `readblock!` loop.
+# Outer method: resolve the abstract on-disk dtype `a.flux_field.type` to a
+# concrete `Type{D}` ONCE, then dispatch into the typed kernel. Everything past
+# the barrier is type-stable (no per-row dynamic dispatch on the FLUX dtype).
 function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int) where {T}
+    return _fill_vis_dense!(out, a, span, rmin, a.flux_field.type)
+end
+
+@noinline function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int, ::Type{D}) where {T, D}
+    nbl = size(a.row_of, 2)
+    # Thread over baseline columns: decode is CPU-bound (byte-swap + complex repack
+    # + permute), so spreading columns across the cores the memory cap leaves idle
+    # lifts materialize throughput. The per-baseline work is a NAMED function (not a
+    # `do`-closure) so it specializes cleanly — a closure here boxed its captures
+    # and halved single-thread speed. Nested under the solve's group-level `tmap`,
+    # but Julia's scheduler caps live tasks at `nthreads`, so it composes.
+    nt = _decode_ntasks(nbl)
+    if nt == 1
+        for bl in 1:nbl
+            _decode_vis_bl!(out, a, span, rmin, D, bl)
+        end
+    else
+        tforeach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
+    end
+    return out
+end
+
+# Decode one baseline column (all times) of a vis leaf from the span into `out`.
+@inline function _decode_vis_bl!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int, ::Type{D}, bl::Int) where {T, D}
     nchan = a.no_chan
-    nti, nbl = size(a.row_of)
+    nti = size(a.row_of, 1)
     npol = a.no_stkd
     twostk = 2 * a.no_stkd
-    cube = Vector{Float32}(undef, a.nperband)
     nan = T(complex(NaN32, NaN32))
-    @inbounds for bl in 1:nbl, ti in 1:nti
+    cube = Vector{Float32}(undef, a.nperband)
+    @inbounds for ti in 1:nti
         r = a.row_of[ti, bl]
         if r == 0
             for p in 1:npol, c in 1:nchan
@@ -575,7 +611,7 @@ function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int) 
             end
             continue
         end
-        _flux_from_span!(cube, span, a, r, rmin)
+        _flux_from_span!(cube, span, a, r, rmin, D)
         for p in 1:npol
             s = a.perm[p]
             base = (s - 1) * 2
@@ -585,22 +621,44 @@ function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int) 
             end
         end
     end
-    return out
+    return nothing
 end
 
 # Fill a dense (no_chan, nti, nbl, no_stkd) weights array from the span — the
 # full-leaf equivalent of the weights `readblock!` loop (FLAG-table aware).
+# Barrier: resolve the abstract on-disk WEIGHT dtype once (Float32 placeholder when
+# there is no WEIGHT column — `_weights_from_span!` fills 1.0 then), then run the
+# type-stable, baseline-threaded kernel.
 function _fill_weights_dense!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int) where {T}
+    D = a.weight_col === nothing ? Float32 : a.weight_col.fields[1].type
+    return _fill_weights_dense!(out, a, span, rmin, D)
+end
+
+@noinline function _fill_weights_dense!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int, ::Type{D}) where {T, D}
+    nbl = size(a.row_of, 2)
+    nt = _decode_ntasks(nbl)
+    if nt == 1
+        for bl in 1:nbl
+            _decode_weights_bl!(out, a, span, rmin, D, bl)
+        end
+    else
+        tforeach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
+    end
+    return out
+end
+
+# Decode one baseline column (all times) of a weights leaf from the span (FLAG-aware).
+@inline function _decode_weights_bl!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int, ::Type{D}, bl::Int) where {T, D}
     nchan = a.no_chan
-    nti, nbl = size(a.row_of)
+    nti = size(a.row_of, 1)
     npol = a.no_stkd
-    wbuf = Vector{Float32}(undef, a.no_stkd)
     wscale = _weight_scale(a)
     have_flags = !isempty(a.flags)
-    @inbounds for bl in 1:nbl, ti in 1:nti
+    wbuf = Vector{Float32}(undef, a.no_stkd)
+    ea, eb = a.bl_ants[bl]
+    @inbounds for ti in 1:nti
         r = a.row_of[ti, bl]
-        r != 0 && _weights_from_span!(wbuf, span, a, r, rmin, wscale)
-        ea, eb = a.bl_ants[bl]
+        r != 0 && _weights_from_span!(wbuf, span, a, r, rmin, wscale, D)
         t = a.times[ti]
         for p in 1:npol
             w = r == 0 ? zero(T) : T(wbuf[a.perm[p]])
@@ -615,7 +673,7 @@ function _fill_weights_dense!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmi
             end
         end
     end
-    return out
+    return nothing
 end
 
 # Mark IDI-backed leaves as bulk-capable and provide the one-read group reader.
