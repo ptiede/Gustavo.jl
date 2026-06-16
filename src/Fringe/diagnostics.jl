@@ -106,3 +106,142 @@ function fringe_gain_time_series(sol::CalibrationSolution; ci::Integer = 1)
     g = evaluate_gains(ev, sol.θ, ci:ci, 1:(sol.layout.ntime))   # (1, ntime, nant, 2)
     return sol.geom.times, g[1, :, :, :]
 end
+
+# ── Per-baseline before/after data (the fringe-fit quality check) ──────────────
+
+"""
+    BaselineFringeData
+
+Per-baseline coherent visibility averages for ONE scan, before and after applying
+a fringe `CalibrationSolution`. Produced by [`baseline_fringe_data`](@ref) and
+consumed by `plot_baseline_fringes`.
+
+Fields: `source`/`scan`/`scan_index`/`max_snr` identify the scan; `bl_pairs` and
+`pol_products` label the baseline and correlation axes; `freqs` (Hz, all bands
+stacked) and `times` (h) the data axes. The four data arrays are weighted coherent
+means (vector averages, `NaN` where a cell has no unflagged data):
+
+- `spec_before`/`spec_after` — `(nchan, nbl, npol)`, averaged over time. `angle`
+  vs frequency shows the group-delay slope (flat after a good fit); `abs` shows
+  the band-averaged coherence.
+- `tser_before`/`tser_after` — `(ntime, nbl, npol)`, averaged over frequency.
+  `angle` vs time shows the fringe-rate slope (flat after a good fit).
+"""
+struct BaselineFringeData
+    source::String
+    scan::String
+    scan_index::Int
+    max_snr::Float64
+    bl_pairs::Vector{Tuple{Int, Int}}
+    pol_products::Vector{String}
+    freqs::Vector{Float64}
+    times::Vector{Float64}
+    spec_before::Array{ComplexF64, 3}
+    spec_after::Array{ComplexF64, 3}
+    tser_before::Array{ComplexF64, 3}
+    tser_after::Array{ComplexF64, 3}
+end
+
+# Scan group with the largest detection SNR (the most informative to inspect),
+# falling back to the first group when no per-scan SNR is recorded.
+function _max_snr_scan(sol::CalibrationSolution, ngroups::Integer)
+    haskey(sol.info, :scan_max_snr) || return 1
+    snr = sol.info.scan_max_snr
+    (isempty(snr) || all(!isfinite, snr)) && return 1
+    best = argmax(i -> (isfinite(snr[i]) ? snr[i] : -Inf), 1:min(length(snr), ngroups))
+    return best
+end
+
+# Divide a weighted sum by its weight, leaving NaN where there was no data.
+function _coherent_mean!(sum::Array{ComplexF64}, w::Array{Float64})
+    @inbounds for i in eachindex(sum, w)
+        sum[i] = w[i] > 0 ? sum[i] / w[i] : ComplexF64(NaN, NaN)
+    end
+    return sum
+end
+
+"""
+    baseline_fringe_data(uvset, sol; scan_index = nothing) -> BaselineFringeData
+
+Materialize one scan of `uvset` and compute, per baseline and correlation product,
+the weighted coherent visibility average vs frequency and vs time, BEFORE and AFTER
+dividing out the fringe solution `sol`. This is the per-baseline before/after check:
+a good fit flattens the phase slopes (delay in frequency, rate in time) and lifts
+the coherent amplitude.
+
+`scan_index` selects which `(source, scan)` group (in the same order
+[`solve_fringes`](@ref) used); the default is the highest-SNR scan. The "after"
+visibility is `V / (g_a · conj(g_b))` with gains evaluated from `sol` exactly as the
+solver applies them — no second disk read of the full set, just this one scan.
+"""
+function baseline_fringe_data(
+        uvset::UVSet, sol::CalibrationSolution;
+        scan_index::Union{Integer, Nothing} = nothing,
+    )
+    groups = _scan_group_leaves(uvset)
+    isempty(groups) && error("baseline_fringe_data: uvset has no scan groups")
+    gi = scan_index === nothing ? _max_snr_scan(sol, length(groups)) : Int(scan_index)
+    (1 <= gi <= length(groups)) || error("baseline_fringe_data: scan_index $gi out of range 1:$(length(groups))")
+
+    grp, keyed = _materialize_scan_group(groups[gi], sol.geom)
+    info = UVData.metadata(last(first(keyed)))
+    ev = GainEvaluator(sol.model, sol.layout)
+    g = evaluate_gains(ev, sol.θ, grp.g_ci, grp.g_ti)   # (nchan, nti, nant, 2)
+    nchan, nti, nbl, npol = size(grp.Vg)
+
+    sb = zeros(ComplexF64, nchan, nbl, npol); swb = zeros(Float64, nchan, nbl, npol)
+    sa = zeros(ComplexF64, nchan, nbl, npol); swa = zeros(Float64, nchan, nbl, npol)
+    tb = zeros(ComplexF64, nti, nbl, npol); twb = zeros(Float64, nti, nbl, npol)
+    ta = zeros(ComplexF64, nti, nbl, npol); twa = zeros(Float64, nti, nbl, npol)
+
+    @inbounds for p in 1:npol
+        fa, fb = correlation_feed_pair(grp.pol_products[p])
+        for bi in 1:nbl
+            a, b = grp.bl_pairs[bi]
+            a == b && continue                          # skip autocorrelations
+            for ti in 1:nti, c in 1:nchan
+                w = grp.Wg[c, ti, bi, p]
+                v = grp.Vg[c, ti, bi, p]
+                (w > 0 && isfinite(w) && isfinite(v)) || continue
+                sb[c, bi, p] += w * v; swb[c, bi, p] += w
+                tb[ti, bi, p] += w * v; twb[ti, bi, p] += w
+                ga = g[c, ti, a, fa]; gb = g[c, ti, b, fb]
+                denom = ga * conj(gb)
+                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(denom)) || continue
+                vc = v / denom
+                isfinite(vc) || continue
+                sa[c, bi, p] += w * vc; swa[c, bi, p] += w
+                ta[ti, bi, p] += w * vc; twa[ti, bi, p] += w
+            end
+        end
+    end
+
+    msnr = (haskey(sol.info, :scan_max_snr) && gi <= length(sol.info.scan_max_snr)) ?
+        Float64(sol.info.scan_max_snr[gi]) : NaN
+    return BaselineFringeData(
+        info.source_name, info.scan_name, gi, msnr,
+        copy(grp.bl_pairs), copy(grp.pol_products),
+        copy(grp.fg), copy(grp.tg),
+        _coherent_mean!(sb, swb), _coherent_mean!(sa, swa),
+        _coherent_mean!(tb, twb), _coherent_mean!(ta, twa),
+    )
+end
+
+"""
+    baseline_pol_index(data, pol) -> Int
+
+Resolve a correlation-product selector (`Integer` index, or `String`/`Symbol`
+label like `"PP"`) against `data.pol_products`. With `pol = :parallel` (the
+default used by the plots) returns the first parallel-hand product.
+"""
+function baseline_pol_index(data::BaselineFringeData, pol)
+    return if pol === :parallel
+        idx = findfirst(p -> (fp = correlation_feed_pair(p); fp[1] == fp[2]), data.pol_products)
+        idx === nothing ? 1 : idx
+    elseif pol isa Integer
+        Int(pol)
+    else
+        idx = findfirst(==(String(pol)), data.pol_products)
+        idx === nothing ? error("pol $(pol) not in $(data.pol_products)") : idx
+    end
+end

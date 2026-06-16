@@ -53,12 +53,28 @@ Per-scan max detection SNR (and χ) from the solver diagnostics. Provided by
 """
 function plot_fringe_snr end
 
+"""
+    plot_baseline_fringes(uvset, sol; kind, pol, baselines, scan_index, show)
+    plot_baseline_fringes(data::BaselineFringeData; ...)
+    plot_baseline_fringes(parent, data; ...)
+
+Per-baseline before/after fringe-fit check for one scan: a grid of panels (one per
+baseline) overlaying the coherent visibility BEFORE and AFTER applying `sol`.
+`kind = :freq` plots phase (or amplitude) vs frequency — a group delay shows as a
+slope that flattens after a good fit; `kind = :time` plots vs time — a fringe rate
+shows as a slope that flattens. `show = :phase` (default) or `:amp`. `pol` selects
+the correlation product (default `:parallel`); `baselines` selects which to draw.
+Provided by `GustavoMakieExt`.
+"""
+function plot_baseline_fringes end
+
 export FringeSearch, FringeDetection, baseline_fringe_search
 export Stationization, StationSolution, stationize_scan, station_closure_residuals
 export AdhocPhasing, AdhocSolution, solve_adhoc_phasing
 export solve_fringes, solve_and_reduce_fringes
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary
 export fringe_gain_spectrum, fringe_gain_time_series
-export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr
+export BaselineFringeData, baseline_fringe_data, baseline_pol_index
+export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
 
 end

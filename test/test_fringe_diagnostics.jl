@@ -59,4 +59,51 @@
         @test (show(IOBuffer(), MIME("image/png"), fig_spec); true)
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
+
+    @testset "baseline before/after data" begin
+        data = FP.baseline_fringe_data(uvset, sol)
+        @test data isa FP.BaselineFringeData
+        nchan = length(sol.geom.channel_freqs)
+        nbl = length(data.bl_pairs)
+        npol = length(data.pol_products)
+        @test size(data.spec_before) == (nchan, nbl, npol)
+        @test size(data.spec_after) == (nchan, nbl, npol)
+        @test size(data.tser_before, 1) == length(data.times)
+        @test data.scan_index == FP._max_snr_scan(sol, length(FP._scan_group_leaves(uvset)))
+
+        p = FP.baseline_pol_index(data, :parallel)
+        @test 1 <= p <= npol
+        @test FP.baseline_pol_index(data, data.pol_products[1]) == 1
+
+        # Quality: dividing out the solution should ALIGN the per-channel phases
+        # (flatten the delay slope), so the coherent concentration R = |Σe^{iφ}|/N
+        # over frequency should not drop on any cross baseline.
+        concentration(z) = (v = filter(isfinite, z); isempty(v) ? 0.0 : abs(sum(cis, angle.(v))) / length(v))
+        improved = 0
+        total = 0
+        for bi in 1:nbl
+            a, b = data.bl_pairs[bi]
+            a == b && continue
+            rb = concentration(@view data.spec_before[:, bi, p])
+            ra = concentration(@view data.spec_after[:, bi, p])
+            (rb == 0 && ra == 0) && continue
+            total += 1
+            ra >= rb - 1.0e-6 && (improved += 1)
+        end
+        @test total > 0
+        @test improved == total          # no baseline gets LESS coherent after the fit
+    end
+
+    @testset "plot_baseline_fringes smoke" begin
+        data = FP.baseline_fringe_data(uvset, sol)
+        @test !isnothing(FP.plot_baseline_fringes(data))                                   # freq/phase
+        @test !isnothing(FP.plot_baseline_fringes(data; kind = :time))
+        @test !isnothing(FP.plot_baseline_fringes(data; kind = :freq, show = :amp))
+        @test !isnothing(FP.plot_baseline_fringes(data; baselines = 2, pol = 1))
+        @test !isnothing(FP.plot_baseline_fringes(uvset, sol; kind = :time))               # full path
+        fig = Figure(size = (900, 700))
+        @test !isnothing(FP.plot_baseline_fringes(fig[1, 1], data; kind = :freq))
+        figbl = FP.plot_baseline_fringes(data)
+        @test (show(IOBuffer(), MIME("image/png"), figbl); true)
+    end
 end
