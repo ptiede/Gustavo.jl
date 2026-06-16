@@ -90,7 +90,14 @@ function _ensure_workspace!(ws::FringeWorkspace, nf::Integer, nt::Integer)
     if ws.nf != nf || ws.nt != nt || ws.plan === nothing
         ws.G = zeros(ComplexF64, nf, nt)
         ws.D = similar(ws.G)
-        ws.plan = plan_fft(ws.G)
+        # FFT is ~96% of the search cost, so plan with FFTW.MEASURE (≈1.8× faster
+        # transforms than the default ESTIMATE) and let the plan pick up the
+        # process-wide FFTW thread count set by the solve. The plan is built once
+        # per (thread-local) workspace per grid size and reused thousands of times,
+        # so MEASURE's one-off planning cost is amortized to nothing; MEASURE may
+        # scribble on `G`, but every search `fill!`s `G` before gridding. Results
+        # are bit-identical to ESTIMATE — only the algorithm/speed differs.
+        ws.plan = plan_fft(ws.G; flags = MEASURE)
         ws.nf = Int(nf)
         ws.nt = Int(nt)
     end

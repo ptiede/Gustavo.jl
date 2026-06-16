@@ -12,7 +12,8 @@ module Fringe
 
 using ..UVData
 using ..Calibration
-using FFTW: fft, fftfreq, plan_fft
+using FFTW: fft, fftfreq, plan_fft, MEASURE
+import FFTW
 using Statistics: median, mean
 using LinearAlgebra
 using OhMyThreads: tmap, TaskLocalValue

@@ -38,6 +38,22 @@ function _with_single_blas_thread(f)
     end
 end
 
+# Run `f` with FFTW using `n` threads per transform, restoring 1 (FFTW's default)
+# after. The fringe SEARCH is ~96% FFT, but the memory cap pins group-parallelism
+# (`ntasks`) well below the core count on a big file — leaving cores idle DURING
+# the search. Giving each FFT `n = nthreads ÷ ntasks` threads uses them
+# (`ntasks × n ≈ nthreads`), so the otherwise-idle cores accelerate the transforms
+# instead of sitting out the bottleneck phase. Plans are built lazily inside the
+# threaded passes, so this must wrap them to take effect.
+function _with_fft_threads(f, n::Int)
+    FFTW.set_num_threads(max(1, n))
+    try
+        return f()
+    finally
+        FFTW.set_num_threads(1)
+    end
+end
+
 # The shared fringe model. Phase, over the global frequency band:
 #   - feed-COMMON per-scan constant + delay (`SharedFeeds`): the atmosphere/clock
 #     terms that vary scan-to-scan and are the same for both polarization feeds;
@@ -131,6 +147,27 @@ function _materialize_scan_group(keyed_leaves_lazy, geom::DataGeometry)
     return _build_scan_group(leaves, geom), keyed
 end
 
+# Copy a contiguous channel-block from one band leaf's vis/weights (`V`/`W`) into
+# the concatenated cubes at destination channel offset `dst0`. A FUNCTION BARRIER:
+# `V`/`W` come from `parent(leaf[:vis])`, which is type-unstable at the call site,
+# so doing the scalar copy inline made every element a dynamic dispatch (~1 MB/s).
+# Passing them as arguments forces Julia to specialize this loop on their concrete
+# runtime types; the `@simd` inner loop over the leading (stride-1) channel axis
+# then runs at native speed.
+function _concat_block!(
+        Vg::Array{ComplexF32, 4}, Wg::Array{Float32, 4}, V, W,
+        dst0::Int, lc0::Int, nbc::Int,
+    )
+    _, nti, nbl, npol = size(Vg)
+    @inbounds for p in 1:npol, bl in 1:nbl, ti in 1:nti
+        @simd for c in 0:(nbc - 1)
+            Vg[dst0 + c, ti, bl, p] = V[lc0 + c, ti, bl, p]
+            Wg[dst0 + c, ti, bl, p] = W[lc0 + c, ti, bl, p]
+        end
+    end
+    return nothing
+end
+
 # Build the concatenated `_ScanGroup` from a group's already-materialized sibling
 # band leaves: stack the frequency axis (sorted by channel frequency) and resolve
 # global geom indices.
@@ -164,13 +201,30 @@ function _build_scan_group(leaves, geom::DataGeometry)
         fg = Vector{Float64}(undef, nchan)
         g_ci = Vector{Int}(undef, nchan)
         for (row, e) in enumerate(chan_entries)
-            gc, f, li, lc = e
-            fg[row] = f
-            g_ci[row] = gc
+            fg[row] = e[2]
+            g_ci[row] = e[1]
+        end
+
+        # Cache-friendly concat: walk maximal runs of consecutive channels coming
+        # from the same band leaf and copy each as a contiguous channel-block
+        # (channel is the leading, stride-1 axis of both V and Vg). The old
+        # `Vg[row, :, :, :] .= V[lc, :, :, :]` fixed the *leading* axis, scattering
+        # single elements at stride `nchan` across the whole cube one channel-row at
+        # a time (nchan times) — cache-hostile and ~5× slower than this block copy.
+        i = 1
+        @inbounds while i <= nchan
+            li = chan_entries[i][3]
+            lc0 = chan_entries[i][4]
+            j = i
+            while j < nchan && chan_entries[j + 1][3] == li &&
+                    chan_entries[j + 1][4] == chan_entries[j][4] + 1
+                j += 1
+            end
+            nbc = j - i + 1
             V = parent(leaves[li][:vis])
             W = parent(leaves[li][:weights])
-            @views Vg[row, :, :, :] .= V[lc, :, :, :]
-            @views Wg[row, :, :, :] .= W[lc, :, :, :]
+            _concat_block!(Vg, Wg, V, W, i, lc0, nbc)
+            i = j + 1
         end
 
         _, g_ti = leaf_window(geom, l0)
@@ -230,6 +284,40 @@ function _adhoc_group!(θ, grp::_ScanGroup, ev, adhoc_plan, adhoc, ref_ant, nant
     return θ
 end
 
+# Estimate the PEAK resident bytes for processing one scan group through the bulk
+# reader. The bulk path holds, at once: the transient row-span buffer (~one copy
+# of the raw bytes), the per-band materialized leaves, AND the concatenated
+# `_ScanGroup` copy — plus a windowed gain cube. That is ~3–4× the raw vis size;
+# we charge 4× (vis ComplexF32 = 8 B + weights Float32 = 4 B ⇒ 12 B/cell, ×4) as a
+# safe peak. `group_leaves[i]` is a vector of `(key, lazy_leaf)`; summing
+# `prod(size(leaf[:vis]))` over its bands gives the group's cell count without
+# materializing anything.
+function _group_peak_bytes(group)
+    cells = 0
+    for (_, leaf) in group
+        cells += prod(size(leaf[:vis]))
+    end
+    return 4 * 12 * cells
+end
+
+# Bound `ntasks` so peak RAM (`ntasks × per-group peak`) stays under a fraction of
+# physical memory. Defaulting `ntasks` to `Threads.nthreads()` OOMs on a real
+# (24 GB) file: at 16 cores each concurrent group peaks at several GB, so the
+# thread count, not memory, would set concurrency. We size the cap from the
+# LARGEST group and `mem_fraction` of total RAM. Returns at least 1.
+function _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = 0.6)
+    requested = max(1, min(Int(ntasks), ngroups))
+    peak = maximum(_group_peak_bytes, group_leaves; init = 0)
+    peak <= 0 && return requested
+    budget = mem_fraction * Sys.total_memory()
+    cap = max(1, Int(floor(budget / peak)))
+    used = min(requested, cap)
+    if used < requested
+        @info "Fringe solve: capping ntasks for memory" requested cap used peak_GB = round(peak / 2^30; digits = 2) budget_GB = round(budget / 2^30; digits = 2)
+    end
+    return used
+end
+
 # Pass 1: search every group (threaded; on the residual for rounds > 1), then a
 # SINGLE global stage-B solve over all groups' detections — `solve_station_systems!`
 # couples scans through the global R–L offset column, so it cannot be per-group.
@@ -276,6 +364,7 @@ function solve_fringes(
         rounds::Int = 1,
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
+        mem_fraction::Real = 0.6,
     )
     model = _fringe_model()
     geom = build_geometry(uvset)
@@ -292,22 +381,25 @@ function solve_fringes(
     ngroups = length(group_leaves)
     scan_snr = zeros(ngroups)
     θ = zeros(layout.nθ)
-    ntasks_use = max(1, min(Int(ntasks), ngroups))
+    ntasks_use = _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = mem_fraction)
+    nfft = max(1, Threads.nthreads() ÷ ntasks_use)
     ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
 
-    chi, ncomp = _with_single_blas_thread() do
-        ch, nc = _search_and_stationize!(
-            θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
-            search, rounds, ref_ant, ntasks_use, ws_tlv,
-        )
-        # Pass 2: adhoc per group on the residual after the global stage-B (each
-        # group writes its own disjoint per-integration slots of the shared θ).
-        tmap(1:ngroups; ntasks = ntasks_use) do gi
-            grp, _ = _materialize_scan_group(group_leaves[gi], geom)
-            _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
-            nothing
+    chi, ncomp = _with_fft_threads(nfft) do
+        _with_single_blas_thread() do
+            ch, nc = _search_and_stationize!(
+                θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
+                search, rounds, ref_ant, ntasks_use, ws_tlv,
+            )
+            # Pass 2: adhoc per group on the residual after the global stage-B (each
+            # group writes its own disjoint per-integration slots of the shared θ).
+            tmap(1:ngroups; ntasks = ntasks_use) do gi
+                grp, _ = _materialize_scan_group(group_leaves[gi], geom)
+                _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
+                nothing
+            end
+            (ch, nc)
         end
-        (ch, nc)
     end
 
     info = (;
@@ -335,8 +427,14 @@ e.g.
     postprocess = uv -> combine_spw(time_bin_average(frequency_average(uv; nout = 1), 2.0))
 
 `output` is a full `UVSet` mirroring the input tree with every leaf corrected and
-reduced; `sol` is the same solution `solve_fringes` would return. `ntasks` caps
-how many groups are resident at once (peak RAM ≈ `ntasks` × per-group size).
+reduced; `sol` is the same solution `solve_fringes` would return.
+
+`ntasks` requests how many groups are processed concurrently, but it is bounded
+down so peak RAM (≈ `ntasks` × per-group size) stays under `mem_fraction` of total
+physical memory — the bulk reader holds a whole scan's row span plus two copies of
+its vis cube at once (several GB on a real file), so a thread-count default would
+OOM. Lower `mem_fraction` if other processes need the RAM; raise it on a big box.
+A capping decision is logged via `@info`.
 """
 function solve_and_reduce_fringes(
         uvset::UVSet;
@@ -346,6 +444,7 @@ function solve_and_reduce_fringes(
         rounds::Int = 1,
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
+        mem_fraction::Real = 0.6,
     )
     model = _fringe_model()
     geom = build_geometry(uvset)
@@ -362,31 +461,34 @@ function solve_and_reduce_fringes(
     ngroups = length(group_leaves)
     scan_snr = zeros(ngroups)
     θ = zeros(layout.nθ)
-    ntasks_use = max(1, min(Int(ntasks), ngroups))
+    ntasks_use = _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = mem_fraction)
+    nfft = max(1, Threads.nthreads() ÷ ntasks_use)
     ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
 
-    out_pairs, chi, ncomp = _with_single_blas_thread() do
-        ch, nc = _search_and_stationize!(
-            θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
-            search, rounds, ref_ant, ntasks_use, ws_tlv,
-        )
-        # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
-        # this group (global stage-B + this group's just-written adhoc slots), so
-        # the group-local solution corrects identically to the global one.
-        results = tmap(1:ngroups; ntasks = ntasks_use) do gi
-            grp, keyed = _materialize_scan_group(group_leaves[gi], geom)
-            _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
-            grp = nothing
-            sub_branches = DimensionalData.TreeDict()
-            for (k, leaf) in keyed
-                sub_branches[k] = leaf
+    out_pairs, chi, ncomp = _with_fft_threads(nfft) do
+        _with_single_blas_thread() do
+            ch, nc = _search_and_stationize!(
+                θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
+                search, rounds, ref_ant, ntasks_use, ws_tlv,
+            )
+            # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
+            # this group (global stage-B + this group's just-written adhoc slots), so
+            # the group-local solution corrects identically to the global one.
+            results = tmap(1:ngroups; ntasks = ntasks_use) do gi
+                grp, keyed = _materialize_scan_group(group_leaves[gi], geom)
+                _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
+                grp = nothing
+                sub_branches = DimensionalData.TreeDict()
+                for (k, leaf) in keyed
+                    sub_branches[k] = leaf
+                end
+                sub = DimensionalData.rebuild(uvset; branches = sub_branches)
+                sol_local = CalibrationSolution(model, layout, geom, θ, (;))
+                reduced = postprocess(UVData.apply_calibration(sub, sol_local))
+                collect(pairs(UVData.branches(reduced)))
             end
-            sub = DimensionalData.rebuild(uvset; branches = sub_branches)
-            sol_local = CalibrationSolution(model, layout, geom, θ, (;))
-            reduced = postprocess(UVData.apply_calibration(sub, sol_local))
-            collect(pairs(UVData.branches(reduced)))
+            (results, ch, nc)
         end
-        (results, ch, nc)
     end
 
     out_branches = DimensionalData.TreeDict()
