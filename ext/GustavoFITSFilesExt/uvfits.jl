@@ -1,4 +1,3 @@
-
 using FITSFiles
 using FITSFiles: HDU, Random, Bintable, Card
 using StructArrays
@@ -437,13 +436,63 @@ end
 # is.
 const _PRIMARY_CARDS = WeakKeyDict{UVSet, Vector{Card}}()
 
+# Synthesize a complete UVFITS primary-HDU card set from a UVSet's own metadata,
+# for UVSets that did not come from `load_uvfits` (FITS-IDI origin, or freshly
+# built). Mirrors the structure the loader produces and the writer consumes: a
+# NAXIS=7 random-groups layout with COMPLEX/STOKES/FREQ/IF/RA/DEC axis
+# descriptors plus the five standard UU/VV/WW/BASELINE/DATE PTYPEs. The STOKES
+# codes use the basis-agnostic generic block (-1..-N; `aips_code_to_generic`
+# maps -1→PP etc. regardless of feed basis), matching `write_fitsidi`; the
+# writer's `pol_perm` reorders the in-memory MSv4 pols onto this on-disk axis.
+function _synthesize_primary_cards(uvset::UVSet)
+    branches_dict = DimensionalData.branches(uvset)
+    isempty(branches_dict) &&
+        error("primary_cards(uvset): cannot synthesize cards for an empty UVSet.")
+    root = DimensionalData.metadata(uvset)
+    info = DimensionalData.metadata(first(values(branches_dict)))
+    obs = root.array_obs
+    fs = first(UVData.union_frequency_axis(uvset))
+
+    f_ref = Float64(ref_freq(fs))
+    cws = ch_widths(fs)
+    cdelt4 = isempty(cws) ? 1.0 : Float64(first(cws))
+    obsra = Float64(info.ra)
+    obsdec = Float64(info.dec)
+    date_obs = isempty(string(obs.date_obs)) ? string(obs.rdate) : string(obs.date_obs)
+
+    return Card[
+        Card("NAXIS", 7),
+        Card("OBJECT", string(info.source_name)),
+        Card("TELESCOP", string(obs.telescope)),
+        Card("INSTRUME", string(obs.instrume)),
+        Card("DATE-OBS", date_obs),
+        Card("BUNIT", string(obs.bunit)),
+        Card("EQUINOX", Float64(obs.equinox)),
+        Card("CTYPE2", "COMPLEX"),
+        Card("CRVAL2", 1.0), Card("CDELT2", 1.0), Card("CRPIX2", 1.0),
+        Card("CTYPE3", "STOKES"),
+        Card("CRVAL3", -1.0), Card("CDELT3", -1.0), Card("CRPIX3", 1.0),
+        Card("CTYPE4", "FREQ"),
+        Card("CRVAL4", f_ref), Card("CDELT4", cdelt4), Card("CRPIX4", 1.0),
+        Card("CTYPE5", "IF"),
+        Card("CTYPE6", "RA"), Card("CRVAL6", obsra),
+        Card("CTYPE7", "DEC"), Card("CRVAL7", obsdec),
+        Card("OBSRA", obsra), Card("OBSDEC", obsdec),
+        Card("PTYPE1", "UU---SIN"),
+        Card("PTYPE2", "VV---SIN"),
+        Card("PTYPE3", "WW---SIN"),
+        Card("PTYPE4", "BASELINE"),
+        Card("PTYPE5", "DATE"),
+    ]
+end
+
 function UVData.primary_cards(uvset::UVSet)
-    haskey(_PRIMARY_CARDS, uvset) || error(
-        "primary_cards(uvset): no FITS primary-HDU cards registered. " *
-            "Either load via `load_uvfits`, or call " *
-            "`register_primary_cards!(uvset, cards)` before writing."
-    )
-    return _PRIMARY_CARDS[uvset]
+    haskey(_PRIMARY_CARDS, uvset) && return _PRIMARY_CARDS[uvset]
+    # No registered cards (FITS-IDI origin or freshly built): synthesize a
+    # complete set from the UVSet's own metadata and cache it so writes succeed.
+    cards = _synthesize_primary_cards(uvset)
+    _PRIMARY_CARDS[uvset] = cards
+    return cards
 end
 
 UVData.register_primary_cards!(uvset::UVSet, cards::AbstractVector) =
@@ -1185,6 +1234,20 @@ function _build_nx_hdu(
     return HDU(Bintable, nt_data, Card[Card("EXTNAME", "AIPS NX")])
 end
 
+# Records to emit for a leaf, as (ti, baseline) index pairs. Raw leaves carry an
+# explicit `record_order`; averaging/binning reducers (TimeAverage,
+# TimeBinAverage) clear it because the original UV_DATA rows no longer map to the
+# collapsed grid — for those we densify to the full (ti, baseline) grid of the
+# leaf's own axes (every cell is a record; flagged/empty cells carry zero
+# weight). This is what lets a reduced UVSet be written out.
+function _leaf_record_order(leaf)
+    ro = DimensionalData.metadata(leaf).record_order
+    isempty(ro) || return ro
+    sz = size(parent(leaf[:vis]))     # (Frequency, Ti, Baseline, Pol)
+    nti, nbl = sz[2], sz[3]
+    return [(ti, bl) for bl in 1:nbl for ti in 1:nti]
+end
+
 function UVData.write_uvfits(output_path, uvset::UVSet)
     src_list = sources(uvset)
     length(src_list) == 1 || error(
@@ -1230,7 +1293,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     end
     any(isnothing, pol_perm) && error("write_uvfits: cannot map MSv4 pols $msv4_labels to AIPS order $aips_labels_disk")
 
-    nrec_total = sum(length(DimensionalData.metadata(l).record_order) for l in leaf_list)
+    nrec_total = sum(length(_leaf_record_order(l)) for l in leaf_list)
     nrec_total > 0 || error("write_uvfits: UVSet has no records to write")
 
     # AIPS-strict DATE PTYPE: emit full Julian Day (col1 = integer JD,
@@ -1292,7 +1355,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     for (sid, leaf) in enumerate(leaf_list)
         info = DimensionalData.metadata(leaf)
         bls = info.baselines
-        ro = info.record_order
+        ro = _leaf_record_order(leaf)
         first_row_in_scan = rec_offset + 1
         # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
         bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
@@ -1391,4 +1454,3 @@ function _write_records_kernel!(
     end
     return nothing
 end
-

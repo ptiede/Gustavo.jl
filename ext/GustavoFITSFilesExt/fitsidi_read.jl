@@ -470,12 +470,12 @@ UVData._layer_is_lazy(::IDIChunkArray) = true
     return cube
 end
 
-# Byte-swap `nb` on-disk values of type `D` from `rawbuf` into `cube`
+# Byte-swap `nb` on-disk values of type `D` starting at pointer `p` into `cube`
 # (`Float32`), optionally applying TSCAL/TZERO. Specialized per on-disk type so
 # the hot loop has a concrete element type (DiFX Float32 fast path; Int16/Int32
-# scaled paths for other producers).
-@inline function _swap_into!(cube, rawbuf, ::Type{D}, nb, field, scale::Bool) where {D}
-    p = Ptr{D}(pointer(rawbuf))
+# scaled paths for other producers). `p` may point into a per-row scratch buffer
+# (`_swap_into!`) or directly into a multi-row span buffer (`_flux_from_span!`).
+@inline function _swap_ptr!(cube, p::Ptr{D}, nb, field, scale::Bool) where {D}
     @inbounds if scale
         for k in 1:nb
             cube[k] = Float32(FITSFiles.scale_value(ntoh(unsafe_load(p, k)), field, true))
@@ -488,11 +488,198 @@ end
     return cube
 end
 
+@inline _swap_into!(cube, rawbuf, ::Type{D}, nb, field, scale::Bool) where {D} =
+    _swap_ptr!(cube, Ptr{D}(pointer(rawbuf)), nb, field, scale)
+
+# Byte-swap `ns` on-disk WEIGHT values of type `D` from `wraw` into `wbuf`
+# (`Float32`), optionally applying TSCAL/TZERO. Same flat-buffer + in-place
+# `ntoh` loop as `_swap_into!` (the vis path); specialized per on-disk type so
+# the hot loop has a concrete element type.
+@inline function _swap_weights_ptr!(wbuf, p::Ptr{D}, ns, field, scale::Bool) where {D}
+    @inbounds if scale
+        for s in 1:ns
+            wbuf[s] = Float32(FITSFiles.scale_value(ntoh(unsafe_load(p, s)), field, true))
+        end
+    else
+        for s in 1:ns
+            wbuf[s] = Float32(ntoh(unsafe_load(p, s)))
+        end
+    end
+    return wbuf
+end
+
+@inline _swap_weights_into!(wbuf, wraw, ::Type{D}, ns, field, scale::Bool) where {D} =
+    _swap_weights_ptr!(wbuf, Ptr{D}(pointer(wraw)), ns, field, scale)
+
+# ── Bulk (one-read) materialization ──────────────────────────────────────────
+#
+# The reader's natural unit is a scan×band leaf, but the per-row `seek`+`read`
+# pattern (one ~8 KB FLUX slice per (time, baseline) cell) is seek-bound: ~20k
+# tiny random reads per scan group, ~110 MB/s on an NVMe that streams at GB/s.
+# Since the file is `SORT='T*'`, a scan's UV_DATA rows are a CONTIGUOUS range and
+# all of its bands share the SAME `row_of`, so `_materialize_group_bulk` reads the
+# whole scan's row span ONCE (one big sequential read) and extracts every band's
+# FLUX + WEIGHT from that buffer — one read per scan instead of (bands × layers ×
+# cells) seeks.
+
+const _MAX_SPAN_BYTES = 1024 * 1024 * 1024   # cap; larger spans fall back to per-leaf reads
+
+# Read the contiguous byte span covering UV_DATA rows [rmin, rmax] into one buffer
+# (or `nothing` if it would exceed the cap). The file is time-sorted, so a scan's
+# rows are contiguous and this is a single sequential read.
+function _read_row_span(io, a::IDIChunkArray, rmin::Int, rmax::Int)
+    nbytes = (rmax - rmin + 1) * a.L
+    nbytes <= _MAX_SPAN_BYTES || return nothing
+    span = Vector{UInt8}(undef, nbytes)
+    seek(io, a.begpos + a.L * (rmin - 1))
+    readbytes!(io, span, nbytes)
+    return span
+end
+
+# Byte-swap row `r`'s FLUX band slice out of the span buffer (row `rmin` is the
+# span's first row). Mirrors `_read_flux_cell!` but reads from memory, not `io`.
+@inline function _flux_from_span!(cube, span::Vector{UInt8}, a::IDIChunkArray, r::Int, rmin::Int)
+    dtype = a.flux_field.type
+    nb = a.nperband
+    off = a.L * (r - rmin) + a.flux_M + sizeof(dtype) * ((a.band - 1) * nb)
+    return _swap_ptr!(cube, Ptr{dtype}(pointer(span, off + 1)), nb, a.flux_field, a.flux_scale)
+end
+
+# Byte-swap row `r`'s WEIGHT block out of the span buffer (mirror of
+# `_read_weight_row!`).
+@inline function _weights_from_span!(wbuf, span::Vector{UInt8}, a::IDIChunkArray, r::Int, rmin::Int, scale::Bool)
+    if a.weight_col === nothing
+        fill!(wbuf, 1.0f0)
+        return wbuf
+    end
+    wf = a.weight_col.fields[1]
+    ns = a.no_stkd
+    off = a.L * (r - rmin) + (first(wf.slice) - 1) + sizeof(wf.type) * ((a.band - 1) * ns)
+    return _swap_weights_ptr!(wbuf, Ptr{wf.type}(pointer(span, off + 1)), ns, wf, scale)
+end
+
+# Fill a dense (no_chan, nti, nbl, no_stkd) vis array (MSv4 pol order) from the
+# span — the full-leaf equivalent of the vis `readblock!` loop.
+function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int) where {T}
+    nchan = a.no_chan
+    nti, nbl = size(a.row_of)
+    npol = a.no_stkd
+    twostk = 2 * a.no_stkd
+    cube = Vector{Float32}(undef, a.nperband)
+    nan = T(complex(NaN32, NaN32))
+    @inbounds for bl in 1:nbl, ti in 1:nti
+        r = a.row_of[ti, bl]
+        if r == 0
+            for p in 1:npol, c in 1:nchan
+                out[c, ti, bl, p] = nan
+            end
+            continue
+        end
+        _flux_from_span!(cube, span, a, r, rmin)
+        for p in 1:npol
+            s = a.perm[p]
+            base = (s - 1) * 2
+            for c in 1:nchan
+                o = (c - 1) * twostk + base
+                out[c, ti, bl, p] = T(complex(cube[o + 1], cube[o + 2]))
+            end
+        end
+    end
+    return out
+end
+
+# Fill a dense (no_chan, nti, nbl, no_stkd) weights array from the span — the
+# full-leaf equivalent of the weights `readblock!` loop (FLAG-table aware).
+function _fill_weights_dense!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int) where {T}
+    nchan = a.no_chan
+    nti, nbl = size(a.row_of)
+    npol = a.no_stkd
+    wbuf = Vector{Float32}(undef, a.no_stkd)
+    wscale = _weight_scale(a)
+    have_flags = !isempty(a.flags)
+    @inbounds for bl in 1:nbl, ti in 1:nti
+        r = a.row_of[ti, bl]
+        r != 0 && _weights_from_span!(wbuf, span, a, r, rmin, wscale)
+        ea, eb = a.bl_ants[bl]
+        t = a.times[ti]
+        for p in 1:npol
+            w = r == 0 ? zero(T) : T(wbuf[a.perm[p]])
+            if have_flags && r != 0 && w > 0
+                for c in 1:nchan
+                    out[c, ti, bl, p] = _idi_cell_flagged(a, c, t, ea, eb, p) ? zero(T) : w
+                end
+            else
+                for c in 1:nchan
+                    out[c, ti, bl, p] = w
+                end
+            end
+        end
+    end
+    return out
+end
+
+# Mark IDI-backed leaves as bulk-capable and provide the one-read group reader.
+UVData._bulk_backend(a::IDIChunkArray) = a
+
+function UVData._materialize_group_bulk(leaves, layers)
+    isempty(leaves) && return nothing
+    a1 = parent(first(leaves)[:vis])
+    a1 isa IDIChunkArray || return nothing
+    # All leaves must be sibling bands of one scan: same UV_DATA + same row map.
+    for l in leaves
+        av = parent(l[:vis])
+        (
+            av isa IDIChunkArray && av.data === a1.data && av.row_of === a1.row_of &&
+                av.begpos == a1.begpos && av.L == a1.L
+        ) || return nothing
+    end
+    rmin = typemax(Int)
+    rmax = 0
+    @inbounds for r in a1.row_of
+        r == 0 && continue
+        r < rmin && (rmin = r)
+        r > rmax && (rmax = r)
+    end
+    rmax == 0 && return nothing                      # empty scan → let caller fall back
+    io = FITSFiles.open_lazy_source(a1.data)
+    local span
+    try
+        span = _read_row_span(io, a1, rmin, rmax)
+    finally
+        close(io)
+    end
+    span === nothing && return nothing               # span over the cap → fall back
+
+    want_flag = :flag in layers
+    return map(leaves) do l
+        av = parent(l[:vis])
+        aw = parent(l[:weights])
+        nti, nbl = size(av.row_of)
+        vis_dense = Array{eltype(av)}(undef, av.no_chan, nti, nbl, av.no_stkd)
+        _fill_vis_dense!(vis_dense, av, span, rmin)
+        w_dense = Array{Float32}(undef, aw.no_chan, nti, nbl, aw.no_stkd)
+        _fill_weights_dense!(w_dense, aw, span, rmin)
+        vis_da = DimArray(vis_dense, dims(l[:vis]))
+        w_da = DimArray(w_dense, dims(l[:weights]))
+        uvw_da = DimArray(UVData._materialize_layer(parent(l[:uvw])), dims(l[:uvw]))
+        flag_da = want_flag ? DimArray(UVData._materialize_layer(parent(l[:flag])), dims(l[:flag])) : nothing
+        UVData._build_leaf(vis_da, w_da, uvw_da, flag_da; partition_info = DimensionalData.metadata(l))
+    end
+end
+
 # Read this band's `no_stkd` WEIGHT entries for UV_DATA row `i` into `wbuf`
 # (length `no_stkd`) in one seek+read. WEIGHT linear order is stokes-fastest
 # then band, so this band's block starts at element (band-1)*no_stkd + 1 and is
 # contiguous. `wbuf[s]` is the weight for on-disk stokes `s`.
-@inline function _read_weight_row!(wbuf::Vector{Float32}, io, a::IDIChunkArray, i::Integer)
+#
+# `wraw` is a reusable `Vector{UInt8}` scratch (≥ ns*sizeof(type) bytes). Like
+# the vis path, this does one bulk `readbytes!` + one tight in-place `ntoh` loop
+# instead of `read_bigendian`'s `ntoh.(reinterpret(type, read(...)))`, which
+# allocated two vectors per row and paid reinterpret-indexing cost — a per-row
+# cost on the WEIGHT read repeated for every (baseline, time) cell.
+@inline function _read_weight_row!(
+        wbuf::Vector{Float32}, wraw::Vector{UInt8}, io, a::IDIChunkArray, i::Integer, scale::Bool,
+    )
     if a.weight_col === nothing
         fill!(wbuf, 1.0f0)
         return wbuf
@@ -502,12 +689,22 @@ end
     off = a.begpos + a.L * (i - 1) + (first(wf.slice) - 1) +
         sizeof(wf.type) * ((a.band - 1) * ns)
     seek(io, off)
-    vals = FITSFiles.read_bigendian(io, wf.type, ns)
-    @inbounds for s in 1:ns
-        wbuf[s] = Float32(FITSFiles.scale_value(vals[s], wf, true))
-    end
+    readbytes!(io, wraw, ns * sizeof(wf.type))
+    _swap_weights_into!(wbuf, wraw, wf.type, ns, wf, scale)
     return wbuf
 end
+
+# Whether this leaf's WEIGHT column carries active TSCAL/TZERO (computed once per
+# readblock, then passed into the per-row reader so the hot loop can skip the
+# scaling branch entirely on the DiFX Float32 fast path).
+@inline _weight_scale(a::IDIChunkArray) =
+    a.weight_col === nothing ? false :
+    FITSFiles._has_active_scaling(a.weight_col.fields[1], true)
+
+# Raw-byte scratch buffer big enough for one band's WEIGHT block.
+@inline _weight_rawbuf(a::IDIChunkArray) =
+    a.weight_col === nothing ? Vector{UInt8}(undef, 0) :
+    Vector{UInt8}(undef, a.no_stkd * sizeof(a.weight_col.fields[1].type))
 
 # True when any FLAG entry on this leaf flags cell (global channel `ch`, time
 # `t`, baseline column `bl` with global antennas (ea,eb), MSv4 pol `p`). The
@@ -568,11 +765,13 @@ function DiskArrays.readblock!(
     ) where {T}
     io = FITSFiles.open_lazy_source(a.data)
     wbuf = Vector{Float32}(undef, a.no_stkd)
+    wraw = _weight_rawbuf(a)
+    wscale = _weight_scale(a)
     have_flags = !isempty(a.flags)
     try
         @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
             r = a.row_of[ti, bl]
-            r != 0 && _read_weight_row!(wbuf, io, a, r)
+            r != 0 && _read_weight_row!(wbuf, wraw, io, a, r, wscale)
             ea, eb = a.bl_ants[bl]
             t = a.times[ti]
             for (pj, p) in enumerate(rpol)
@@ -604,11 +803,13 @@ function DiskArrays.readblock!(
     ) where {T}
     io = FITSFiles.open_lazy_source(a.data)
     wbuf = Vector{Float32}(undef, a.no_stkd)
+    wraw = _weight_rawbuf(a)
+    wscale = _weight_scale(a)
     have_flags = !isempty(a.flags)
     try
         @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
             r = a.row_of[ti, bl]
-            r != 0 && _read_weight_row!(wbuf, io, a, r)
+            r != 0 && _read_weight_row!(wbuf, wraw, io, a, r, wscale)
             ea, eb = a.bl_ants[bl]
             t = a.times[ti]
             for (pj, p) in enumerate(rpol)

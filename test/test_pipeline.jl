@@ -265,6 +265,100 @@ end
     end
 end
 
+@testset "Fused solve_and_reduce_fringes ≡ two-pass" begin
+    # The fused single-pass driver must produce the SAME result as the explicit
+    # two-pass `apply_calibration(uvset, solve_fringes(uvset))`, because each
+    # leaf's gains depend only on its own (disjoint) θ slots.
+    uvset, _ = _build_fringe_uvset()
+    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+
+    sol_ref = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc)
+    corr_ref = Gustavo.apply_calibration(uvset, sol_ref)
+
+    # postprocess = identity → fused correction only (no reduction).
+    sol_fused, out_fused = FP.solve_and_reduce_fringes(uvset; ref_ant = 1, adhoc = adhoc)
+
+    @test sol_fused.θ ≈ sol_ref.θ
+    # Same tree keys.
+    @test Set(keys(DimensionalData.branches(out_fused))) ==
+        Set(keys(DimensionalData.branches(corr_ref)))
+    # Identical corrected visibilities/weights per leaf (NaN-aware).
+    for (k, leaf) in DimensionalData.branches(corr_ref)
+        Vr = parent(leaf[:vis]); Wr = parent(leaf[:weights])
+        lf = DimensionalData.branches(out_fused)[k]
+        Vf = parent(lf[:vis]); Wf = parent(lf[:weights])
+        @test size(Vf) == size(Vr)
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(Vr, Vf))
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(Wr, Wf))
+    end
+
+    # With a reducer the fused output must equal applying the same reducer to the
+    # two-pass corrected set.
+    red_ref = UVP.frequency_average(corr_ref; nout = 1)
+    _, out_red = FP.solve_and_reduce_fringes(
+        uvset; ref_ant = 1, adhoc = adhoc,
+        postprocess = uv -> UVP.frequency_average(uv; nout = 1),
+    )
+    for (k, leaf) in DimensionalData.branches(red_ref)
+        Vr = parent(leaf[:vis])
+        Vf = parent(DimensionalData.branches(out_red)[k][:vis])
+        @test size(Vf) == size(Vr)
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(Vr, Vf))
+    end
+end
+
+@testset "combine_spw: bands → IF axis" begin
+    uvset, _ = _build_fringe_uvset(nbands = 3, nchan = 4)
+    avg = UVP.frequency_average(uvset; nout = 1)          # each band → 1 channel
+    @test length(UVP.union_frequency_axis(avg)) == 3      # 3 distinct band setups
+
+    combined = UVP.combine_spw(avg)
+    @test length(DimensionalData.branches(combined)) == 1 # one leaf per (src,scan)
+    setups = UVP.union_frequency_axis(combined)
+    @test length(setups) == 1                             # single FREQID
+    cf = collect(channel_freqs(first(setups)))
+    @test length(cf) == 3                                 # 3 IFs
+    @test issorted(cf)                                    # ascending IF freqs
+    # The combined channel frequencies are exactly the per-band averaged centers.
+    band_centers = sort([only(channel_freqs(fs)) for fs in UVP.union_frequency_axis(avg)])
+    @test cf ≈ band_centers
+    leaf = first(values(DimensionalData.branches(combined)))
+    @test size(parent(leaf[:vis]), 1) == 3                # Frequency axis = 3 IFs
+end
+
+@testset "write_uvfits on FITS-IDI-style UVSet (synthesized primary cards)" begin
+    # `_build_fringe_uvset` registers NO primary cards, so write_uvfits must
+    # synthesize them. Reduce + combine bands to IFs, then round-trip via UVFITS.
+    uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
+    sol, reduced = FP.solve_and_reduce_fringes(
+        uvset; ref_ant = 1,
+        adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0),
+        postprocess = uv -> UVP.time_bin_average(
+            UVP.combine_spw(UVP.frequency_average(uv; nout = 1)), 0.02,
+        ),
+    )
+    @test length(DimensionalData.branches(reduced)) == 1
+    @test length(UVP.union_frequency_axis(reduced)) == 1
+    @test length(channel_freqs(first(UVP.union_frequency_axis(reduced)))) == 2
+
+    path = tempname() * ".uvfits"
+    try
+        @test Gustavo.UVData.write_uvfits(path, reduced) == path
+        @test isfile(path) && filesize(path) > 0
+        rt = Gustavo.UVData.load_uvfits(path)
+        @test length(DimensionalData.branches(rt)) == 1
+        rt_setups = UVP.union_frequency_axis(rt)
+        @test length(rt_setups) == 1
+        @test length(channel_freqs(first(rt_setups))) == 2          # 2 IFs survive
+        @test channel_freqs(first(rt_setups)) ≈ channel_freqs(first(UVP.union_frequency_axis(reduced)))
+        rt_leaf = first(values(DimensionalData.branches(rt)))
+        @test Set(String.(pol_products(rt_leaf))) == Set(["PP", "PQ", "QP", "QQ"])
+        @test all(isfinite, filter(isfinite, parent(rt_leaf[:vis])))  # no NaN explosion
+    finally
+        isfile(path) && rm(path; force = true)
+    end
+end
+
 @testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
     # Regression for the θ-overwrite bug: even rounds previously wiped the
     # round-1 solution (coherence collapsed). Accumulation keeps all rounds good.

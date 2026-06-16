@@ -81,9 +81,13 @@ offset at this time).
 """
 function fringe_gain_spectrum(sol::CalibrationSolution; ti::Integer = 1)
     ev = GainEvaluator(sol.model, sol.layout)
-    g = evaluate_gains(ev, sol.θ)            # (nchan, ntime, nant, 2)
-    1 <= ti <= size(g, 2) || error("fringe_gain_spectrum: ti=$ti out of range 1:$(size(g, 2))")
-    return sol.geom.channel_freqs, g[:, ti, :, :]
+    ntime = sol.layout.ntime
+    1 <= ti <= ntime || error("fringe_gain_spectrum: ti=$ti out of range 1:$ntime")
+    # Window to the single requested time — evaluating the full (nchan × ntime)
+    # cube just to slice one column is O(ntime) wasted work (and memory) on long
+    # tracks.
+    g = evaluate_gains(ev, sol.θ, 1:(sol.layout.nchan), ti:ti)   # (nchan, 1, nant, 2)
+    return sol.geom.channel_freqs, g[:, 1, :, :]
 end
 
 """
@@ -96,7 +100,9 @@ per (station, feed).
 """
 function fringe_gain_time_series(sol::CalibrationSolution; ci::Integer = 1)
     ev = GainEvaluator(sol.model, sol.layout)
-    g = evaluate_gains(ev, sol.θ)            # (nchan, ntime, nant, 2)
-    1 <= ci <= size(g, 1) || error("fringe_gain_time_series: ci=$ci out of range 1:$(size(g, 1))")
-    return sol.geom.times, g[ci, :, :, :]
+    nchan = sol.layout.nchan
+    1 <= ci <= nchan || error("fringe_gain_time_series: ci=$ci out of range 1:$nchan")
+    # Window to the single requested channel (see fringe_gain_spectrum).
+    g = evaluate_gains(ev, sol.θ, ci:ci, 1:(sol.layout.ntime))   # (1, ntime, nant, 2)
+    return sol.geom.times, g[1, :, :, :]
 end

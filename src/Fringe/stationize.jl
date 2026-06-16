@@ -290,6 +290,294 @@ function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, pins::Abstrac
     return x
 end
 
+# ── Generic, model-driven station solve ──────────────────────────────────────
+#
+# `solve_station_systems!` is the segmentation/tying-aware generalization of
+# `stationize_scan`. Instead of a fixed per-scan (station, feed) node space, the
+# unknowns are the θ COLUMNS the model declares: for each stage-B phase component
+# (a `ConstantTerm`/`Delay`/`Rate` × time-seg × tying), `plan.off1[ant, feed,
+# tseg_id[ti], 1]` is the θ slot a (station, feed, time) observation maps to.
+# That `off1` table already encodes the segmentation (PerScan → a distinct column
+# per scan; GlobalTime → one column shared across the whole track) and the tying
+# (PerFeed → distinct feed columns; SharedFeeds → one shared column). So the SAME
+# engine solves a per-scan model (columns disjoint per scan ⇒ block-diagonal ⇒
+# identical to N independent `stationize_scan` calls) and a model with a global
+# R–L offset (a column shared across scans couples them) — the model is the
+# extension point, this solver just reads `off1`.
+#
+# `scans` is a vector of `StationScanDetections`, each carrying one scan's
+# detection matrix, its `(a, b)` pairs, per-product feeds, and a representative
+# global time index `ti` for the `tseg_id` lookup. θ slots are ACCUMULATED into
+# (`+=`), matching `_pack_station!`, so `rounds > 1` (search on the residual)
+# stays correct.
+
+struct StationScanDetections{D}
+    det::D                                   # Matrix{FringeDetection} [baseline, product]
+    bl_pairs::Vector{Tuple{Int, Int}}
+    feeds::Vector{Tuple{Int, Int}}           # feed pair per product
+    ti::Int                                  # representative global time index (→ tseg)
+end
+
+"""
+    solve_station_systems!(θ, scans, components; ref_ant, opts) -> (chi, ncomp)
+
+Solve the stage-B fringe systems (delay, rate, constant phase) over `scans` and
+accumulate the per-(station, feed) values into `θ` at the columns the model
+declares. `components` is a vector of `(plan::ComponentPlan, kind::Symbol)` with
+`kind ∈ (:delay, :rate, :phase)`. Multiple components of the SAME kind are summed
+per (station, feed) observation: e.g. a feed-common `PerScan × SharedFeeds` term
+plus a global `GlobalTime × FeedComponent(2)` R–L offset both feed the delay
+system, so a feed-2 row touches both columns and a stable R–L offset is solved
+once across the track (bright scans pin it; weak scans inherit it, tying feeds
+that would otherwise split). Returns the representative cross-hand `chi` and the
+phase-system component count for diagnostics. With a single per-scan/per-feed
+component per kind and one scan, this is numerically identical to
+`stationize_scan`.
+"""
+function solve_station_systems!(
+        θ::AbstractVector, scans, components;
+        ref_ant::Integer = 1, opts::Stationization = Stationization(),
+    )
+    chi = NaN
+    ncomp = 0
+    for kind in (:delay, :rate, :phase)
+        plans = [c[1] for c in components if c[2] === kind]
+        isempty(plans) && continue
+        ch, nc = _solve_kind_cols!(θ, scans, plans, ref_ant, opts, kind)
+        if kind === :phase
+            chi = ch
+            ncomp = nc
+        end
+    end
+    return chi, ncomp
+end
+
+# Solve one observable kind across all scans, accumulating into θ. Each detection
+# becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
+# `off1` columns for that (station, feed, time) — a feed-common per-scan column
+# and, when present, a global feed-offset column. Returns (chi, ncomp).
+function _solve_kind_cols!(θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol)
+    getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
+    use_chi = kind === :phase
+    rewrap = kind === :phase ? opts.phase_rewrap_iters : 0
+    # Cross-hand rows: delay & phase always include them (they tie the feeds);
+    # rate only when requested (cross-hand rate would absorb field rotation).
+    include_cross = kind === :rate ? opts.cross_hand_rate : true
+
+    colnode = Dict{Int, Int}()               # θ column → local node id
+    node_col = Int[]                         # local node → θ column
+    node_feed = Int[]                        # exclusive feed (1/2), or 0 if a column is shared by both feeds
+    node_station = Int[]
+    node_scan = Int[]                        # scan id, or 0 if a column spans scans (global)
+    function getnode(col, st, fd, sidx)
+        if haskey(colnode, col)
+            n = colnode[col]
+            node_feed[n] == fd || (node_feed[n] = 0)        # touched by both feeds → shared
+            node_scan[n] == sidx || (node_scan[n] = 0)      # spans scans → global
+            return n
+        end
+        push!(node_col, col); push!(node_feed, fd); push!(node_station, st); push!(node_scan, sidx)
+        return colnode[col] = length(node_col)
+    end
+
+    # Rows in θ-column space: each side is the list of (off1) columns whose sum is
+    # that station's value for this observable (+1 on a-side, −1 on b-side).
+    rowA = Vector{Int}[]; rowB = Vector{Int}[]
+    rval = Float64[]; rw = Float64[]; rcs = Int[]; rscan = Int[]
+    for (sidx, sc) in enumerate(scans)
+        nbl, npol = size(sc.det)
+        for bi in 1:nbl, p in 1:npol
+            det = sc.det[bi, p]
+            (det.valid && det.snr >= opts.snr_min) || continue
+            a, b = sc.bl_pairs[bi]
+            a == b && continue
+            fa, fb = sc.feeds[p]
+            cs = _chi_sign(fa, fb)
+            (include_cross || cs == 0) || continue
+            nsA = Int[]; nsB = Int[]
+            for plan in plans
+                ca = plan.off1[a, fa, plan.tseg_id[sc.ti], 1]
+                ca != 0 && push!(nsA, getnode(ca, a, fa, sidx))
+                cb = plan.off1[b, fb, plan.tseg_id[sc.ti], 1]
+                cb != 0 && push!(nsB, getnode(cb, b, fb, sidx))
+            end
+            (isempty(nsA) || isempty(nsB)) && continue
+            push!(rowA, nsA); push!(rowB, nsB)
+            push!(rval, getval(det)); push!(rw, det.snr^2); push!(rcs, cs); push!(rscan, sidx)
+        end
+    end
+    isempty(rowA) && return (NaN, 0)
+
+    x, chi, ncomp = _solve_tagged_system(
+        rowA, rowB, rval, rw, rcs, rscan, length(node_col),
+        node_feed, node_station, node_scan, ref_ant; use_chi = use_chi, rewrap = rewrap,
+    )
+    @inbounds for n in eachindex(node_col)
+        θ[node_col[n]] += x[n]
+    end
+    return chi, ncomp
+end
+
+# Constrained WLS over a tagged node graph (the column-space generalization of
+# `_solve_observable`). `node_feed`/`node_station`/`node_scan` tag each local node
+# (feed 0 = shared by both feeds; scan 0 = global column) so the gauge reproduces
+# `_solve_observable`'s tie-breaks in the per-scan case. Rows may touch more than
+# one column per side (a feed-common column plus a global feed-offset column). χ
+# is a per-scan nuisance. After the explicit reference/EVPA pins, any residual
+# gauge freedom (e.g. the per-scan absolute level once scans are globally coupled)
+# is removed by a minimum-norm null-space pin — so the engine is well-posed for
+# any model `plan_parameters` can flatten, with no model-specific gauge code.
+function _solve_tagged_system(
+        rowA, rowB, rval, rw, rcs, rscan, nnodes,
+        node_feed, node_station, node_scan, ref_ant; use_chi::Bool, rewrap::Integer,
+    )
+    # Union the columns of each (possibly multi-term) row into one component.
+    edges = Tuple{Int, Int}[]
+    for i in eachindex(rowA)
+        ns = vcat(rowA[i], rowB[i])
+        for k in 2:length(ns)
+            push!(edges, (ns[1], ns[k]))
+        end
+    end
+    compid, ncomp, _ = connected_components(nnodes, edges)
+
+    # χ columns: one per scan that carries a cross-hand row.
+    chi_col = Dict{Int, Int}()
+    if use_chi
+        for i in eachindex(rcs)
+            rcs[i] != 0 || continue
+            get!(chi_col, rscan[i], length(chi_col) + 1)
+        end
+    end
+    nchi = length(chi_col)
+    ncol = nnodes + nchi
+
+    # feed-1-or-shared nodes sort before feed-2; then by station, then scan.
+    nodekey(n) = (node_feed[n] == 2 ? 1 : 0, node_station[n], node_scan[n])
+    is_ref(n) = node_station[n] == ref_ant
+    is_feed1(n) = node_feed[n] != 2
+
+    pins = Int[]
+    # One reference pin per component: prefer ref_ant feed-1/shared, then feed-2,
+    # then the lowest (feed, station, scan) node.
+    for c in 1:ncomp
+        comp = [n for n in 1:nnodes if compid[n] == c]
+        isempty(comp) && continue
+        r1 = findfirst(n -> is_ref(n) && is_feed1(n), comp)
+        r2 = findfirst(n -> is_ref(n) && node_feed[n] == 2, comp)
+        pin = r1 !== nothing ? comp[r1] :
+            r2 !== nothing ? comp[r2] : comp[argmin(map(nodekey, comp))]
+        push!(pins, pin)
+    end
+    # EVPA gauge: the (feed-2 offset ↔ χ) freedom. Add one feed-2 pin per scan that
+    # has a both-feed component (deduped — a global R–L offset column is one node
+    # shared by all scans, so this resolves to a single pin on the global offset).
+    if nchi > 0
+        for s in sort(collect(keys(chi_col)))
+            scomps = unique(compid[n] for n in 1:nnodes if node_scan[n] == s)
+            ref_first = sort(scomps; by = c -> any(n -> compid[n] == c && is_ref(n) && is_feed1(n), 1:nnodes) ? 0 : 1)
+            for c in ref_first
+                comp = [n for n in 1:nnodes if compid[n] == c]
+                (any(is_feed1, comp) && any(n -> node_feed[n] == 2, comp)) || continue
+                f2 = [n for n in comp if node_feed[n] == 2]
+                r2 = findfirst(is_ref, f2)
+                pin = r2 !== nothing ? f2[r2] : f2[argmin(map(nodekey, f2))]
+                pin in pins || push!(pins, pin)
+                break
+            end
+        end
+    end
+
+    nrow = length(rowA)
+    A = zeros(Float64, nrow, ncol)
+    b = zeros(Float64, nrow)
+    w = zeros(Float64, nrow)
+    @inbounds for i in 1:nrow
+        for n in rowA[i]
+            A[i, n] += 1.0
+        end
+        for n in rowB[i]
+            A[i, n] -= 1.0
+        end
+        if nchi > 0 && rcs[i] != 0
+            A[i, nnodes + chi_col[rscan[i]]] = float(rcs[i])
+        end
+        b[i] = rval[i]
+        w[i] = rw[i]
+    end
+    Cp = zeros(Float64, length(pins), ncol)
+    for (j, p) in enumerate(pins)
+        Cp[j, p] = 1.0
+    end
+    # Min-norm completion: pin any gauge freedom the explicit pins leave (the null
+    # space of [A; Cp]). Empty for the per-scan model (explicit pins suffice ⇒
+    # byte-identical), non-trivial once a global column couples scans.
+    nb = nullspace(vcat(A, Cp))
+    C = size(nb, 2) > 0 ? vcat(Cp, permutedims(nb)) : Cp
+    dgauge = zeros(Float64, size(C, 1))
+
+    if rewrap > 0
+        xseed = _seed_tagged(rowA, rowB, rval, rw, rcs, pins, ncol, nnodes)
+        model = A * xseed
+        bw = similar(b)
+        @. bw = b + 2π * round((model - b) / (2π))
+        x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
+        for _ in 1:rewrap
+            model = A * x
+            @. bw = b + 2π * round((model - b) / (2π))
+            x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
+        end
+    else
+        x = weighted_constrained_least_squares(A, b, w, C, dgauge)
+    end
+
+    chi = NaN
+    if nchi > 0
+        s0 = minimum(keys(chi_col))
+        chi = x[nnodes + chi_col[s0]]
+    end
+    return x[1:nnodes], chi, ncomp
+end
+
+# Max-weight spanning-tree phase seed in local-node space (column-space twin of
+# `_spanning_tree_seed`): propagate wrapped parallel-hand edge phases from each
+# pin to unwrap the first constrained solve. Only single-column-per-side
+# parallel-hand rows are tree edges; multi-term (global-offset) rows are left to
+# the constrained WLS + re-wrap iterations.
+function _seed_tagged(rowA, rowB, rval, rw, rcs, pins, ncol::Integer, nnodes::Integer)
+    x = zeros(Float64, ncol)
+    adj = [Vector{Tuple{Int, Float64, Float64}}() for _ in 1:nnodes]
+    for i in eachindex(rowA)
+        (rcs[i] == 0 && length(rowA[i]) == 1 && length(rowB[i]) == 1) || continue
+        na, nb = rowA[i][1], rowB[i][1]
+        push!(adj[na], (nb, -rval[i], rw[i]))
+        push!(adj[nb], (na, rval[i], rw[i]))
+    end
+    for n in 1:nnodes
+        sort!(adj[n]; by = e -> e[3], rev = true)
+    end
+    visited = falses(nnodes)
+    for p in pins
+        (1 <= p <= nnodes && !visited[p]) || continue
+        visited[p] = true
+        while true
+            best_w = -Inf
+            best_u = 0; best_v = 0; best_add = 0.0
+            for u in 1:nnodes
+                visited[u] || continue
+                for (v, add, ww) in adj[u]
+                    (!visited[v] && ww > best_w) || continue
+                    best_w = ww; best_u = u; best_v = v; best_add = add
+                end
+            end
+            best_v == 0 && break
+            x[best_v] = x[best_u] + best_add
+            visited[best_v] = true
+        end
+    end
+    return x
+end
+
 """
     station_closure_residuals(detections, bl_pairs, pol_products, sol; observable = :phase) -> Vector
 

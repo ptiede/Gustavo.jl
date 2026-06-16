@@ -179,7 +179,9 @@ Samples where either gain magnitude underflows are flagged (weight 0, vis NaN).
 function UVData.apply_calibration(uvset::UVSet, sol::CalibrationSolution)
     ev = GainEvaluator(sol.model, sol.layout)
     return UVData.apply(uvset) do leaf, info, root
-        leaf = materialize_leaf(leaf)
+        # Correction reads vis + weights; the output flag is re-derived from the
+        # corrected weights downstream, so skip the redundant on-disk flag layer.
+        leaf = materialize_leaf(leaf; layers = (:vis, :weights, :uvw))
         ci, ti = leaf_window(sol.geom, leaf)
         g = evaluate_gains(ev, sol.θ, ci, ti)      # (nchan_leaf, nti_leaf, nant, 2)
         bl_pairs = UVData.baselines(leaf).pairs

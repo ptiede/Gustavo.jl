@@ -340,3 +340,95 @@ end
 Average each leaf's `Ti` axis into `dt_seconds`-wide bins. `apply(TimeBinAverage(dt_seconds), uvset)`.
 """
 time_bin_average(uvset::UVSet, dt_seconds::Real) = apply(TimeBinAverage(dt_seconds), uvset)
+
+
+# ── Combine spectral windows (bands) into one IF axis ────────────────────────
+
+"""
+    combine_spw(uvset::UVSet) -> UVSet
+
+Merge the sibling spectral-window (band) leaves of each (source, scan, subarray)
+into a single leaf whose `Frequency` axis is the concatenation of all bands'
+channels (sorted by frequency). The per-band `FrequencySetup`s collapse into one
+setup whose `channel_freqs`/`ch_widths`/`total_bandwidths`/`sidebands` are the
+concatenated band values.
+
+This is the shape a UVFITS export wants: `write_uvfits` maps a leaf's `Frequency`
+axis onto the AIPS IF axis (one channel per IF), so the combined bands become the
+IFs of a single FREQID — the standard continuum layout — rather than one FREQID
+per band (which a reader also cannot serialize when a band carries a single
+channel). Apply after [`frequency_average`](@ref) so each band is one channel.
+
+All sibling leaves of a group must share their `Ti`, `Baseline`, and `Pol` axes
+(true for bands read from one FITS-IDI `UV_DATA` table); a mismatch errors.
+Groups with a single band are returned unchanged.
+"""
+function combine_spw(uvset::UVSet)
+    groups = Dict{Tuple{String, String, String}, Vector{Any}}()
+    order = Tuple{String, String, String}[]
+    for (_, leaf) in DimensionalData.branches(uvset)
+        info = DimensionalData.metadata(leaf)
+        key = (String(info.source_name), String(info.scan_name), String(info.subarray_name))
+        if !haskey(groups, key)
+            groups[key] = Any[]
+            push!(order, key)
+        end
+        push!(groups[key], leaf)
+    end
+
+    new_branches = DimensionalData.TreeDict()
+    for key in order
+        leaves = groups[key]
+        merged = length(leaves) == 1 ? only(leaves) : _combine_band_leaves(leaves)
+        new_branches[partition_key(DimensionalData.metadata(merged))] = merged
+    end
+    return DimensionalData.rebuild(uvset; branches = new_branches)
+end
+
+# Concatenate sibling band leaves along Frequency into one leaf (one merged
+# FrequencySetup). Leaves must agree on Ti/Baseline/Pol; uvw is freq-independent
+# so the first leaf's is carried through.
+function _combine_band_leaves(leaves)
+    band_min(l) = minimum(channel_freqs(DimensionalData.metadata(l).freq_setup))
+    leaves = sort(collect(leaves); by = band_min)
+    l0 = first(leaves)
+    info0 = DimensionalData.metadata(l0)
+
+    ti0 = lookup(l0[:vis], Ti)
+    bl0 = lookup(l0[:vis], Baseline)
+    pol0 = lookup(l0[:vis], Pol)
+    for l in leaves
+        (lookup(l[:vis], Ti) == ti0 && lookup(l[:vis], Baseline) == bl0 && lookup(l[:vis], Pol) == pol0) ||
+            error(
+            "combine_spw: sibling band leaves must share Ti/Baseline/Pol axes. " *
+                "If you time-averaged first, each band got its own weighted bin-center " *
+                "epochs — apply combine_spw BEFORE time_bin_average (after frequency_average, " *
+                "which preserves the integration axis).",
+        )
+    end
+
+    vis_cat = cat(map(l -> parent(l[:vis]), leaves)...; dims = 1)
+    w_cat = cat(map(l -> parent(l[:weights]), leaves)...; dims = 1)
+
+    setups = [DimensionalData.metadata(l).freq_setup for l in leaves]
+    fs0 = first(setups)
+    new_freqs = reduce(vcat, [collect(channel_freqs(fs)) for fs in setups])
+    new_fs = FrequencySetup(;
+        name = setup_name(fs0), ref_freq = ref_freq(fs0),
+        channel_freqs = new_freqs,
+        ch_widths = reduce(vcat, [collect(ch_widths(fs)) for fs in setups]),
+        total_bandwidths = reduce(vcat, [collect(total_bandwidths(fs)) for fs in setups]),
+        sidebands = reduce(vcat, [collect(sidebands(fs)) for fs in setups]),
+        extras = (; frqsel = Int32(1)),
+    )
+
+    ti_dim = dims(l0[:vis], Ti)
+    bl_dim = dims(l0[:vis], Baseline)
+    pol_dim = dims(l0[:vis], Pol)
+    vis_da = DimArray(vis_cat, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
+    w_da = DimArray(w_cat, dims(vis_da))
+    flag_da = DimArray(parent(w_da) .<= 0, dims(vis_da))
+
+    new_info = update(info0; freq_setup = new_fs, spw_name = "combined", ddi = 0)
+    return _build_leaf(vis_da, w_da, l0[:uvw], flag_da; partition_info = new_info)
+end

@@ -252,3 +252,149 @@ end
         @test isapprox(sol.phase[a, 1] - sol.phase[ref, 1], φ[a, 1] - φ[ref, 1]; atol = 1.0e-6)
     end
 end
+
+@testset "solve_station_systems! ≡ stationize_scan (per-scan, model-driven)" begin
+    # The model-driven column solver must reproduce the per-scan reference solve
+    # byte-for-byte when the model is per-scan/per-feed (the block-diagonal case).
+    rng = MersenneTwister(0x00C0FFEE)
+    nant = 5
+    ref = 1
+    bl = all_baselines(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+
+    τ = 1.0e-9 .* randn(rng, nant, 2)
+    ṙ = 1.0e-3 .* randn(rng, nant, 2)
+    φ = 0.3 .* randn(rng, nant, 2)
+    χ = 0.7
+    D = inject_detections(bl, pols, τ, ṙ, φ, χ; snr = 100.0)
+
+    # Reference: the existing per-scan stationizer.
+    ss = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
+
+    # Model-driven engine: const/delay/rate as PerScan × PerFeed over a one-scan
+    # geometry, solved through the off1 columns the layout declares.
+    geom = CALs.DataGeometry(; times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
+    model = CALs.StationGainModel(
+        phase = (
+            CALs.TiedComponent(CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            CALs.TiedComponent(CALs.GainComponent(CALs.Delay(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            CALs.TiedComponent(CALs.GainComponent(CALs.Rate(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+        ),
+    )
+    layout = CALs.plan_parameters(model, nant, geom)
+    cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
+
+    θ = zeros(layout.nθ)
+    scans = (FR.StationScanDetections(D, bl, feeds, 1),)
+    chi, ncomp = FR.solve_station_systems!(
+        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref,
+    )
+
+    colval(plan, ant, feed) = (c = plan.off1[ant, feed, 1, 1]; c == 0 ? NaN : θ[c])
+    for ant in 1:nant, feed in 1:2
+        if isfinite(ss.delay[ant, feed])
+            @test colval(dplan, ant, feed) ≈ ss.delay[ant, feed] atol = 1.0e-12
+        end
+        if isfinite(ss.rate[ant, feed])
+            @test colval(rplan, ant, feed) ≈ ss.rate[ant, feed] atol = 1.0e-12
+        end
+        if isfinite(ss.phase[ant, feed])
+            @test colval(cplan, ant, feed) ≈ ss.phase[ant, feed] atol = 1.0e-9
+        end
+    end
+    @test ncomp == ss.ncomp
+    @test chi ≈ ss.chi atol = 1.0e-9
+end
+
+@testset "Global R-L offset: stable across scans, weak scan inherits it" begin
+    # Two scans share ONE stable R-L (feed-2 − feed-1) delay/phase offset per
+    # station; the per-scan feed-common delays/phases differ. Scan 2 has NO
+    # cross-hand detections (the weak case that splits into ncomp=2 per-scan). The
+    # global FeedComponent(2) × GlobalTime offset, pinned by scan 1's cross hands,
+    # must tie scan 2's feeds too.
+    rng = MersenneTwister(0x5EED)
+    nant = 4
+    ref = 1
+    bl = all_baselines(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+
+    δ = 1.0e-9 .* randn(rng, nant)          # global R-L delay offset (feed2 − feed1)
+    ε = 0.5 .* randn(rng, nant)             # global R-L phase offset
+    Dc = [1.0e-9 .* randn(rng, nant), 1.0e-9 .* randn(rng, nant)]   # per-scan feed-common delay
+    Φc = [0.3 .* randn(rng, nant), 0.3 .* randn(rng, nant)]          # per-scan feed-common phase
+    χs = [0.6, -0.4]
+
+    function scan_det(s; with_cross)
+        D = Matrix{FR.FringeDetection}(undef, length(bl), length(pols))
+        for (bi, (a, b)) in enumerate(bl), (p, (fa, fb)) in enumerate(feeds)
+            cs = _chisign(fa, fb)
+            valid = with_cross || cs == 0
+            τa = Dc[s][a] + (fa == 2 ? δ[a] : 0.0)
+            τb = Dc[s][b] + (fb == 2 ? δ[b] : 0.0)
+            φa = Φc[s][a] + (fa == 2 ? ε[a] : 0.0)
+            φb = Φc[s][b] + (fb == 2 ? ε[b] : 0.0)
+            phase = rem2pi(φa - φb + cs * χs[s], RoundNearest)
+            D[bi, p] = FR.FringeDetection(τa - τb, 0.0, phase, 1.0, 100.0, valid)
+        end
+        return D
+    end
+    D1 = scan_det(1; with_cross = true)
+    D2 = scan_det(2; with_cross = false)     # weak scan: cross hands undetected
+
+    geom = CALs.DataGeometry(;
+        times = [0.0, 1.0, 2.0, 100.0, 101.0, 102.0],
+        scan_of_time = [1, 1, 1, 2, 2, 2],
+        channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
+    )
+    mkc(term, tseg, tying) = CALs.TiedComponent(CALs.GainComponent(term, tseg, CALs.GlobalFrequency()), tying)
+    model = CALs.StationGainModel(
+        phase = (
+            mkc(CALs.ConstantTerm(), CALs.PerScan(), CALs.SharedFeeds()),
+            mkc(CALs.ConstantTerm(), CALs.GlobalTime(), CALs.FeedComponent(2)),
+            mkc(CALs.Delay(), CALs.PerScan(), CALs.SharedFeeds()),
+            mkc(CALs.Delay(), CALs.GlobalTime(), CALs.FeedComponent(2)),
+            mkc(CALs.Rate(), CALs.PerScan(), CALs.PerFeed()),
+        ),
+    )
+    layout = CALs.plan_parameters(model, nant, geom)
+    cf_sf, cf_g, d_sf, d_g, _ = layout.plans
+
+    θ = zeros(layout.nθ)
+    scans = (FR.StationScanDetections(D1, bl, feeds, 1), FR.StationScanDetections(D2, bl, feeds, 4))
+    comps = (
+        (cf_sf, :phase), (cf_g, :phase), (d_sf, :delay), (d_g, :delay), (layout.plans[5], :rate),
+    )
+    chi, ncomp = FR.solve_station_systems!(θ, scans, comps; ref_ant = ref)
+
+    # The global R-L delay offset is recovered absolutely (cross hands pin it).
+    δrec = [d_g.off1[a, 2, 1, 1] == 0 ? NaN : θ[d_g.off1[a, 2, 1, 1]] for a in 1:nant]
+    for a in 1:nant
+        @test δrec[a] ≈ δ[a] atol = 1.0e-13
+    end
+    # The global R-L phase offset is recovered up to the EVPA gauge (ref pinned).
+    εrec = [cf_g.off1[a, 2, 1, 1] == 0 ? NaN : θ[cf_g.off1[a, 2, 1, 1]] for a in 1:nant]
+    for a in 1:nant
+        @test (εrec[a] - εrec[ref]) ≈ (ε[a] - ε[ref]) atol = 1.0e-9
+    end
+
+    # Reconstruction: recovered feed values reproduce EVERY observed delay,
+    # including scan 2's QQ rows whose feed-2 is tied only through the global δ.
+    recov_delay(a, feed, ti) = begin
+        seg = d_sf.tseg_id[ti]
+        cc = d_sf.off1[a, feed, seg, 1]
+        gg = d_g.off1[a, feed, 1, 1]
+        (cc == 0 ? 0.0 : θ[cc]) + (gg == 0 ? 0.0 : θ[gg])
+    end
+    worst = 0.0
+    for (s, (D, ti)) in enumerate(((D1, 1), (D2, 4)))
+        for (bi, (a, b)) in enumerate(bl), (p, (fa, fb)) in enumerate(feeds)
+            D[bi, p].valid || continue
+            model_d = recov_delay(a, fa, ti) - recov_delay(b, fb, ti)
+            worst = max(worst, abs(model_d - D[bi, p].delay))
+        end
+    end
+    @test worst < 1.0e-13
+    @test ncomp == 1                          # global offset ties everything into one component
+end

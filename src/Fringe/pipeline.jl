@@ -16,22 +16,70 @@
 # scan times (hours) and t0 (hours) are multiplied by 3600 on the way in; the
 # Rate term stores its parameter in Hz, matching what `stationize_scan` returns.
 
+import DimensionalData
 using DimensionalData: lookup, dims, Ti
 using ..UVData: Frequency
 using Statistics: mean
+using LinearAlgebra: BLAS
 
-# The shared fringe model: phase = per-scan {const, delay, rate} + per-AP adhoc
-# const, all per-feed, all over the global frequency band. Log-amplitude empty.
+# Run `f` with BLAS pinned to a single thread, restoring the prior setting after.
+# The fringe solve threads over scan groups with OhMyThreads; if BLAS also
+# spawns threads, every task's WLS/QR solve fans out `BLAS.get_num_threads()`
+# threads, so `ntasks × blas_threads` (e.g. 8 × 8 = 64) oversubscribe the cores
+# and contend — threads sit "runnable" while only ~1 core makes progress. One
+# BLAS thread per task is the correct split when the parallelism is across tasks.
+function _with_single_blas_thread(f)
+    old = BLAS.get_num_threads()
+    BLAS.set_num_threads(1)
+    try
+        return f()
+    finally
+        BLAS.set_num_threads(old)
+    end
+end
+
+# The shared fringe model. Phase, over the global frequency band:
+#   - feed-COMMON per-scan constant + delay (`SharedFeeds`): the atmosphere/clock
+#     terms that vary scan-to-scan and are the same for both polarization feeds;
+#   - a GLOBAL R–L offset constant + delay (`GlobalTime × FeedComponent(2)`): the
+#     instrumental feed-2−feed-1 offset, stable across the whole observation
+#     (EHT-HOPS / rPICARD assumption). Solved once from all scans' cross hands so
+#     the bright polarized scans pin it and weak scans inherit it (feeds that
+#     would otherwise split into `ncomp = 2` are tied);
+#   - per-scan rate (`PerFeed`, unchanged — R–L rate is negligible);
+#   - a per-AP adhoc-phase constant (`PerFeed`).
+# Log-amplitude empty. `solve_station_systems!` reads the off1 columns this model
+# declares — so the global-vs-per-scan split is a model choice, not solver code.
 function _fringe_model()
     return StationGainModel(
         phase = (
-            TiedComponent(GainComponent(ConstantTerm(), PerScan(), GlobalFrequency()), PerFeed()),
-            TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), PerFeed()),
+            TiedComponent(GainComponent(ConstantTerm(), PerScan(), GlobalFrequency()), SharedFeeds()),
+            TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
+            TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), SharedFeeds()),
+            TiedComponent(GainComponent(Delay(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
             TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), PerFeed()),
             TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), PerFeed()),
         ),
     )
 end
+
+# Stage-B engine components `(plan, kind)` — every phase component except the
+# per-integration adhoc term, with `kind` derived from the term type (so a new
+# term/segmentation is picked up automatically; no hardcoded indices).
+function _stageB_components(model, layout)
+    comps = Tuple{ComponentPlan, Symbol}[]
+    for (i, tc) in enumerate(model.phase)
+        tc.component.time isa PerIntegration && continue
+        term = tc.component.term
+        kind = term isa Delay ? :delay : term isa Rate ? :rate : :phase
+        push!(comps, (layout.plans[i], kind))
+    end
+    return comps
+end
+
+# The adhoc component's plan (the per-integration phase term).
+_adhoc_plan(model, layout) =
+    layout.plans[findfirst(tc -> tc.component.time isa PerIntegration, model.phase)]
 
 # One (source, scan) group of band leaves, already materialized, with the data
 # concatenated along frequency.
@@ -50,27 +98,43 @@ end
 # leaves stay lazy so the caller can materialize one scan group at a time. A
 # whole-dataset eager materialization here is what fills RAM on a real (24 GB)
 # file: each band leaf is ~80 MB once promoted to ComplexF64, ×144 leaves ≈ 18 GB.
+# Each group entry is a `(partition_key, lazy_leaf)` pair; the key is kept so the
+# fused solve+reduce path can reassemble the output tree in the original layout.
 function _scan_group_leaves(uvset::UVSet)
     groups = Dict{Tuple{String, String}, Vector{Any}}()
     order = Tuple{String, String}[]
-    for (_, leaf) in UVData.branches(uvset)
+    for (k, leaf) in UVData.branches(uvset)
         info = UVData.metadata(leaf)
         key = (info.source_name, info.scan_name)
         if !haskey(groups, key)
             groups[key] = Any[]
             push!(order, key)
         end
-        push!(groups[key], leaf)            # lazy leaf reference
+        push!(groups[key], (k, leaf))       # (partition key, lazy leaf reference)
     end
     return [groups[k] for k in order]
 end
 
-# Materialize ONE (source, scan) group: concatenate its sibling band leaves along
-# the frequency axis (sorted by channel frequency) and resolve global geom
-# indices. Called per group inside the solve loop so only one group's worth of
-# data (~hundreds of MB) is resident at a time.
-function _materialize_scan_group(leaves_lazy, geom::DataGeometry)
-    leaves = [materialize_leaf(l) for l in leaves_lazy]
+# Materialize ONE (source, scan) group and build its concatenated `_ScanGroup`.
+# Returns `(grp, keyed)` where `keyed` is the vector of `(partition_key,
+# materialized_leaf)` pairs — kept so the fused path can correct+reduce the SAME
+# materialized leaves (no second disk read) and reassemble the output tree.
+# Called per group inside the solve loop so only one group's worth of data
+# (~hundreds of MB) is resident at a time.
+function _materialize_scan_group(keyed_leaves_lazy, geom::DataGeometry)
+    # The solve reads only vis + weights (flag is redundant with w <= 0); skip the
+    # flag layer. `materialize_group` reads the scan's whole contiguous row span in
+    # ONE sequential read (FITS-IDI bulk path), extracting all bands — vs per-leaf,
+    # per-row seeks — then falls back to per-leaf for eager/non-IDI leaves.
+    leaves = UVData.materialize_group([l for (_, l) in keyed_leaves_lazy]; layers = (:vis, :weights, :uvw))
+    keyed = [(k, m) for ((k, _), m) in zip(keyed_leaves_lazy, leaves)]
+    return _build_scan_group(leaves, geom), keyed
+end
+
+# Build the concatenated `_ScanGroup` from a group's already-materialized sibling
+# band leaves: stack the frequency axis (sorted by channel frequency) and resolve
+# global geom indices.
+function _build_scan_group(leaves, geom::DataGeometry)
     let
         # Reference baselines/pols/times from the first band leaf.
         l0 = first(leaves)
@@ -114,68 +178,37 @@ function _materialize_scan_group(leaves_lazy, geom::DataGeometry)
     end
 end
 
-# Accumulate a per-(ant,feed) station value (NaN-skipping) into θ at the given
-# component plan's (tseg, fseg=1) block. Accumulation (not overwrite) is what
-# makes `rounds > 1` correct: each round searches the residual (data ÷ current
-# gains) and finds the *incremental* delay/rate/phase, which adds in the gain
-# exponent. Round 1 starts from θ = 0, so `+=` still sets the initial value.
-function _pack_station!(θ, plan::ComponentPlan, vals::AbstractMatrix, tseg::Int)
-    nant = size(vals, 1)
-    for ant in 1:nant, feed in 1:2
-        v = vals[ant, feed]
-        isfinite(v) || continue
-        off = plan.off1[ant, feed, tseg, 1]
-        off == 0 && continue
-        θ[off] += v
-    end
-    return θ
-end
-
-# Solve one materialized scan group into `θ` (the chunk's buffer): search →
-# stationize → pack Stage-B, repeated `rounds` times on the residual, then the
-# globally-closing adhoc phase. Writes only this group's (disjoint) θ slots.
-# Returns `(max_snr, chi, ncomp)` from the final round for diagnostics.
-function _solve_one_group!(θ, grp::_ScanGroup, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant, ws)
-    const_plan, delay_plan, rate_plan, adhoc_plan = plans
+# Fringe-search every (baseline, product) of a materialized group on `Vsearch`
+# (the raw cube, or the residual on rounds > 1). Returns the detection matrix and
+# the group's max valid SNR.
+function _search_group(grp::_ScanGroup, Vsearch, f0, t0_sec, search, ws)
     nbl = length(grp.bl_pairs)
     npol = length(grp.pol_products)
-    stseg = const_plan.tseg_id[first(grp.g_ti)]   # PerScan segment for this group
+    det = Matrix{FringeDetection}(undef, nbl, npol)
     maxsnr = 0.0
-    chi = NaN
-    ncomp = 0
-
-    for round in 1:max(rounds, 1)
-        # On rounds > 1, divide out the current θ gains so the search runs on the
-        # residual; round 1 searches the raw data.
-        Vsearch = round > 1 ? _residual_vis(ev, θ, grp) : grp.Vg
-
-        det = Matrix{FringeDetection}(undef, nbl, npol)
-        maxsnr = 0.0
-        for p in 1:npol, bi in 1:nbl
-            a, b = grp.bl_pairs[bi]
-            if a == b
-                det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
-                continue
-            end
-            d = baseline_fringe_search(
-                Vsearch[:, :, bi, p], grp.Wg[:, :, bi, p],
-                grp.fg, grp.tg .* 3600.0, f0, t0_sec; opts = search, workspace = ws,
-            )
-            det[bi, p] = d
-            d.valid && (maxsnr = max(maxsnr, d.snr))
+    for p in 1:npol, bi in 1:nbl
+        a, b = grp.bl_pairs[bi]
+        if a == b
+            det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
+            continue
         end
-
-        ss = stationize_scan(det, grp.bl_pairs, grp.pol_products, nant; ref_ant = ref_ant)
-        _pack_station!(θ, const_plan, ss.phase, stseg)
-        _pack_station!(θ, delay_plan, ss.delay, stseg)
-        _pack_station!(θ, rate_plan, ss.rate, stseg)
-        chi = ss.chi
-        ncomp = ss.ncomp
+        d = baseline_fringe_search(
+            Vsearch[:, :, bi, p], grp.Wg[:, :, bi, p],
+            grp.fg, grp.tg .* 3600.0, f0, t0_sec; opts = search, workspace = ws,
+        )
+        det[bi, p] = d
+        d.valid && (maxsnr = max(maxsnr, d.snr))
     end
+    return det, maxsnr
+end
 
-    # ── Adhoc: residual after Stage-B, coherently freq-averaged per AP. ──
-    # Fused: evaluate gains once and accumulate the per-AP coherent sum directly,
-    # without materializing a full residual cube (saves a Vg-sized array/group).
+# Globally-closing adhoc phase for one group: residual after the (already-solved,
+# global) stage-B gains, coherently freq-averaged per AP, solved and written into
+# `θ`'s per-integration adhoc slots (disjoint per group). Fused accumulation
+# avoids materializing a full residual cube.
+function _adhoc_group!(θ, grp::_ScanGroup, ev, adhoc_plan, adhoc, ref_ant, nant)
+    nbl = length(grp.bl_pairs)
+    npol = length(grp.pol_products)
     nap = length(grp.tg)
     rbar = zeros(ComplexF64, nbl, npol, nap)
     wbar = zeros(Float64, nbl, npol, nap)
@@ -194,21 +227,47 @@ function _solve_one_group!(θ, grp::_ScanGroup, ev, plans, f0, t0_sec, search, a
             θ[off] = v
         end
     end
-    return maxsnr, chi, ncomp
+    return θ
+end
+
+# Pass 1: search every group (threaded; on the residual for rounds > 1), then a
+# SINGLE global stage-B solve over all groups' detections — `solve_station_systems!`
+# couples scans through the global R–L offset column, so it cannot be per-group.
+# Mutates `θ` (stage-B slots) and `scan_snr`; returns (chi, ncomp).
+function _search_and_stationize!(
+        θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
+        search, rounds, ref_ant, ntasks_use, ws_tlv,
+    )
+    ngroups = length(group_leaves)
+    chi = NaN
+    ncomp = 0
+    for round in 1:max(rounds, 1)
+        dets = tmap(1:ngroups; ntasks = ntasks_use) do gi
+            grp, _ = _materialize_scan_group(group_leaves[gi], geom)
+            Vsearch = round > 1 ? _residual_vis(ev, θ, grp) : grp.Vg
+            det, snr = _search_group(grp, Vsearch, f0, t0_sec, search, ws_tlv[])
+            scan_snr[gi] = snr
+            feeds = [correlation_feed_pair(p) for p in grp.pol_products]
+            StationScanDetections(det, grp.bl_pairs, feeds, first(grp.g_ti))
+        end
+        chi, ncomp = solve_station_systems!(θ, dets, stageB; ref_ant = ref_ant)
+    end
+    return chi, ncomp
 end
 
 """
     solve_fringes(uvset; search, adhoc, rounds, ref_ant) -> CalibrationSolution
 
-Fringe-fit `uvset`. Builds a shared per-feed fringe model (per-scan constant
-phase + delay + rate, plus a per-integration adhoc-phase term), solves each
-(source, scan) group of sibling band leaves with a multi-band fringe search →
-stationization → globally-closing adhoc phasing, and returns the packed
-`CalibrationSolution`.
+Fringe-fit `uvset`. Builds the shared fringe model (feed-common per-scan phase +
+delay, a global stable R–L offset, per-scan rate, and a per-integration adhoc
+term) and solves it in two passes over the (source, scan) groups: (1) a multi-band
+fringe search on every group followed by ONE global stationization that ties the
+feeds with a track-wide R–L offset; (2) the globally-closing adhoc phase per
+group on the stage-B residual. Returns the packed `CalibrationSolution`.
 
-`search::FringeSearch` and `adhoc::AdhocPhasing` tune the two stages; `rounds`
-re-runs the search/stationize stage on the (previous round's) corrected data;
-`ref_ant` is the gauge reference station.
+Because the R–L offset couples scans, the stage-B solve is global — so the data
+is read once for the search pass and once for the adhoc pass (`rounds` re-runs
+the search pass on the residual).
 """
 function solve_fringes(
         uvset::UVSet;
@@ -220,55 +279,133 @@ function solve_fringes(
     )
     model = _fringe_model()
     geom = build_geometry(uvset)
-    # nant from the first leaf's antenna table.
     first_leaf = first(values(UVData.branches(uvset)))
     nant = length(UVData.metadata(first_leaf).antennas)
     layout = plan_parameters(model, nant, geom)
     ev = GainEvaluator(model, layout)
-    plans = (layout.plans[1], layout.plans[2], layout.plans[3], layout.plans[4])
+    stageB = _stageB_components(model, layout)
+    adhoc_plan = _adhoc_plan(model, layout)
     f0 = geom.f0
     t0_sec = geom.t0 * 3600.0
 
-    # Lazy grouping — leaves are materialized one group at a time inside the loop
-    # so peak memory is one scan group (hundreds of MB), not the whole file.
     group_leaves = _scan_group_leaves(uvset)
     ngroups = length(group_leaves)
     scan_snr = zeros(ngroups)
-    scan_chi = fill(NaN, ngroups)
-    scan_ncomp = zeros(Int, ngroups)
-
-    # Threaded over scan groups via OhMyThreads with a bounded task count. Each
-    # (source, scan) group is independent and writes a DISJOINT set of θ slots
-    # (its own PerScan / PerIntegration time segment), so each group fills its own
-    # (cheap, ~1 MB) θ contribution which are summed at the end — the result is
-    # identical to the sequential solve (the nonzero slots never overlap)
-    # regardless of task count. `ntasks` caps how many groups are resident at once
-    # (peak RAM ≈ ntasks × per-group size), so it is the knob to scale threads to
-    # the machine's MEMORY, not just its core count. The FFT workspace is task-
-    # local (one per task, reused across that task's groups).
+    θ = zeros(layout.nθ)
     ntasks_use = max(1, min(Int(ntasks), ngroups))
     ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
-    contribs = tmap(1:ngroups; ntasks = ntasks_use) do gi
-        θloc = zeros(layout.nθ)
-        grp = _materialize_scan_group(group_leaves[gi], geom)
-        snr, chi, nc = _solve_one_group!(
-            θloc, grp, ev, plans, f0, t0_sec, search, adhoc, rounds, ref_ant, nant, ws_tlv[],
+
+    chi, ncomp = _with_single_blas_thread() do
+        ch, nc = _search_and_stationize!(
+            θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
+            search, rounds, ref_ant, ntasks_use, ws_tlv,
         )
-        scan_snr[gi] = snr
-        scan_chi[gi] = chi
-        scan_ncomp[gi] = nc
-        θloc
+        # Pass 2: adhoc per group on the residual after the global stage-B (each
+        # group writes its own disjoint per-integration slots of the shared θ).
+        tmap(1:ngroups; ntasks = ntasks_use) do gi
+            grp, _ = _materialize_scan_group(group_leaves[gi], geom)
+            _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
+            nothing
+        end
+        (ch, nc)
     end
-    θ = isempty(contribs) ? zeros(layout.nθ) : reduce(+, contribs)
 
     info = (;
         nant = nant,
         nscan = ngroups,
         scan_max_snr = scan_snr,
-        scan_chi = scan_chi,
-        scan_ncomp = scan_ncomp,
+        scan_chi = fill(chi, ngroups),
+        scan_ncomp = fill(ncomp, ngroups),
     )
     return CalibrationSolution(model, layout, geom, θ, info)
+end
+
+"""
+    solve_and_reduce_fringes(uvset; postprocess, search, adhoc, rounds, ref_ant, ntasks)
+        -> (sol::CalibrationSolution, output::UVSet)
+
+Fringe fit **and** correction/reduction. The stage-B solve ties the feeds with a
+track-wide R–L offset (so it is global, not per-scan); the data is therefore read
+in two threaded passes: (1) search every group → one global stationization; (2)
+per group, adhoc-phase → gain-correct → run through `postprocess` (a `UVSet ->
+UVSet` map, default `identity`) → free. `postprocess` runs while the corrected
+group is resident (no extra I/O), so the natural use is post-fringe reduction,
+e.g.
+
+    postprocess = uv -> combine_spw(time_bin_average(frequency_average(uv; nout = 1), 2.0))
+
+`output` is a full `UVSet` mirroring the input tree with every leaf corrected and
+reduced; `sol` is the same solution `solve_fringes` would return. `ntasks` caps
+how many groups are resident at once (peak RAM ≈ `ntasks` × per-group size).
+"""
+function solve_and_reduce_fringes(
+        uvset::UVSet;
+        postprocess = identity,
+        search::FringeSearch = FringeSearch(),
+        adhoc::AdhocPhasing = AdhocPhasing(),
+        rounds::Int = 1,
+        ref_ant::Integer = 1,
+        ntasks::Integer = Threads.nthreads(),
+    )
+    model = _fringe_model()
+    geom = build_geometry(uvset)
+    first_leaf = first(values(UVData.branches(uvset)))
+    nant = length(UVData.metadata(first_leaf).antennas)
+    layout = plan_parameters(model, nant, geom)
+    ev = GainEvaluator(model, layout)
+    stageB = _stageB_components(model, layout)
+    adhoc_plan = _adhoc_plan(model, layout)
+    f0 = geom.f0
+    t0_sec = geom.t0 * 3600.0
+
+    group_leaves = _scan_group_leaves(uvset)
+    ngroups = length(group_leaves)
+    scan_snr = zeros(ngroups)
+    θ = zeros(layout.nθ)
+    ntasks_use = max(1, min(Int(ntasks), ngroups))
+    ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
+
+    out_pairs, chi, ncomp = _with_single_blas_thread() do
+        ch, nc = _search_and_stationize!(
+            θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
+            search, rounds, ref_ant, ntasks_use, ws_tlv,
+        )
+        # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
+        # this group (global stage-B + this group's just-written adhoc slots), so
+        # the group-local solution corrects identically to the global one.
+        results = tmap(1:ngroups; ntasks = ntasks_use) do gi
+            grp, keyed = _materialize_scan_group(group_leaves[gi], geom)
+            _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
+            grp = nothing
+            sub_branches = DimensionalData.TreeDict()
+            for (k, leaf) in keyed
+                sub_branches[k] = leaf
+            end
+            sub = DimensionalData.rebuild(uvset; branches = sub_branches)
+            sol_local = CalibrationSolution(model, layout, geom, θ, (;))
+            reduced = postprocess(UVData.apply_calibration(sub, sol_local))
+            collect(pairs(UVData.branches(reduced)))
+        end
+        (results, ch, nc)
+    end
+
+    out_branches = DimensionalData.TreeDict()
+    for r in out_pairs
+        for (k, leaf) in r
+            out_branches[k] = leaf
+        end
+    end
+    output = DimensionalData.rebuild(uvset; branches = out_branches)
+
+    info = (;
+        nant = nant,
+        nscan = ngroups,
+        scan_max_snr = scan_snr,
+        scan_chi = fill(chi, ngroups),
+        scan_ncomp = fill(ncomp, ngroups),
+    )
+    sol = CalibrationSolution(model, layout, geom, θ, info)
+    return sol, output
 end
 
 # Accumulate the coherent per-(baseline, product, AP) residual sum

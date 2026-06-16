@@ -55,7 +55,7 @@ function plot_fringe_snr end
 export FringeSearch, FringeDetection, baseline_fringe_search
 export Stationization, StationSolution, stationize_scan, station_closure_residuals
 export AdhocPhasing, AdhocSolution, solve_adhoc_phasing
-export solve_fringes
+export solve_fringes, solve_and_reduce_fringes
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary
 export fringe_gain_spectrum, fringe_gain_time_series
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr

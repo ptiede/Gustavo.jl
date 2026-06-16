@@ -239,6 +239,38 @@ const _F32EPS = 1.0f-4
         end
     end
 
+    @testset "bulk group read ≡ per-leaf" begin
+        # materialize_group reads a scan's whole contiguous row span in ONE read
+        # and extracts every band — must be byte-identical to per-leaf reads.
+        uvset = build_synth_idi_uvset(; nbands = 3, nchan = 4, nscan = 2, ntime = 3)
+        path = tempname() * ".idifits"
+        try
+            UV.write_fitsidi(path, uvset)
+            lazy = UV.load_fitsidi(path; lazy = true)
+            # Group lazy leaves by scan (sibling bands share a row map → bulk path).
+            byscan = Dict{String, Vector{Any}}()
+            for (_, leaf) in DimensionalData.branches(lazy)
+                push!(get!(byscan, DimensionalData.metadata(leaf).scan_name, Any[]), leaf)
+            end
+            @test !isempty(byscan)
+            for (_, leaves) in byscan
+                @test length(leaves) == 3                       # 3 bands per scan
+                # Confirm the bulk path is actually taken (IDI-backed lazy leaf).
+                @test UV._bulk_backend(parent(leaves[1][:vis])) !== nothing
+                bulk = UV.materialize_group(leaves; layers = (:vis, :weights, :uvw))
+                perleaf = [UV.materialize_leaf(l; layers = (:vis, :weights, :uvw)) for l in leaves]
+                for (b, p) in zip(bulk, perleaf)
+                    @test parent(b[:vis]) == parent(p[:vis])
+                    @test parent(b[:weights]) == parent(p[:weights])
+                    @test parent(b[:flag]) == parent(p[:flag])   # derived from weights both ways
+                    @test parent(b[:uvw]) == parent(p[:uvw])
+                end
+            end
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
     @testset "stokes order" begin
         # Inject a distinct magnitude per pol: PP=1, PQ=2, QP=3, QQ=4. A
         # perm-inversion bug would scramble these in the read-back MSv4 order.
@@ -409,6 +441,14 @@ end
             leaf2 = idx[("1", 2)]
             m1 = UV.materialize_leaf(leaf1)
             m2 = UV.materialize_leaf(leaf2)
+
+            # Layer-selective materialize (skip :flag): the flag derived from the
+            # materialized weights (w <= 0) must be bit-identical to the on-disk
+            # flag layer, since the reader bakes every FLAG-table flag into the
+            # weights. This is what makes the fringe solve safe to skip :flag.
+            m1_nf = UV.materialize_leaf(leaf1; layers = (:vis, :weights, :uvw))
+            @test parent(m1_nf[:weights]) == parent(m1[:weights])
+            @test parent(m1_nf[:flag]) == parent(m1[:flag])
 
             f1 = parent(m1[:flag])      # (Frequency, Ti, Baseline, Pol)
             w1 = parent(m1[:weights])
