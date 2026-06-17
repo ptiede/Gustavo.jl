@@ -29,6 +29,7 @@ function _build_fringe_uvset(;
         pol_labels = ["PP", "PQ", "QP", "QQ"],
         ref_freq = 230.0e9, chan_bw = 2.0e6, band_sep = 1.0e8,
         seed = 1234,
+        bandpass = nothing,    # optional (nant, 2, nbands*nchan) per-channel phase (rad)
     )
     UV = Gustavo.UVData
     rng = MersenneTwister(seed)
@@ -132,7 +133,9 @@ function _build_fringe_uvset(;
             dṙ = rate[a, fa] - rate[bb, fb]
             dφ = phi[a, fa] - phi[bb, fb]
             dscr = screen[a, fa, ti] - screen[bb, fb, ti]
-            ph = dφ + 2π * dτ * (f - f0) + 2π * dṙ * (tsec - t0_sec) + dscr
+            gc = (b - 1) * nchan + c          # global channel index (bands stacked by freq)
+            dbp = bandpass === nothing ? 0.0 : (bandpass[a, fa, gc] - bandpass[bb, fb, gc])
+            ph = dφ + 2π * dτ * (f - f0) + 2π * dṙ * (tsec - t0_sec) + dscr + dbp
             vis_dense[c, ti, bl, p] = ComplexF32(A0 * cis(ph))
         end
         vis_part = DimArray(
@@ -173,7 +176,7 @@ function _build_fringe_uvset(;
     end
 
     uvset = Gustavo.UVData.UVSet(; metadata = UV.UVMetadata(array_obs), branches = branches)
-    return uvset, (; delay, rate, phi, screen, f0, t0_sec, bl_pairs, pol_labels, feeds)
+    return uvset, (; delay, rate, phi, screen, bandpass, f0, t0_sec, bl_pairs, pol_labels, feeds)
 end
 
 # Coherence of a (baseline, product) block: |Σ w·V| / Σ (w·|V|). 1 ⇒ phase flat.
@@ -397,4 +400,52 @@ end
     # instead of silently last-write-wins.
     uvset_conflict, _ = _build_fringe_uvset(band_sep = 0.0)
     @test_throws ErrorException CAL.build_geometry(uvset_conflict)
+end
+
+@testset "Phase bandpass: per-channel phase recovered" begin
+    # Inject a smooth per-(station, feed, channel) phase bandpass (ref ant 1 = 0)
+    # on top of the usual delay/rate/phase/screen. The bandpass stage should
+    # flatten the per-channel phase; with it OFF the bandpass survives uncorrected.
+    nant, nbands, nchan = 4, 2, 8
+    nchg = nbands * nchan
+    rng = MersenneTwister(0xBA9D)
+    bp = zeros(nant, 2, nchg)
+    for a in 2:nant, f in 1:2
+        off = (rand(rng) - 0.5)
+        for gc in 1:nchg
+            bp[a, f, gc] = off + 1.0 * sin(2π * gc / nchg + a + f)   # smooth shape + offset
+        end
+    end
+    uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
+    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    sol_on = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, phase_bandpass = true)
+    sol_off = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, phase_bandpass = false)
+
+    don = FP.baseline_fringe_data(uvset, sol_on)
+    doff = FP.baseline_fringe_data(uvset, sol_off)
+    p = FP.baseline_pol_index(don, :parallel)
+    # Per-channel phase coherence per cross baseline: R = |Σ_c V̄_c| / Σ_c |V̄_c|
+    # (1 ⇒ flat per-channel phase). Mean over baselines.
+    function freq_coh(spec)
+        rs = Float64[]
+        for bi in eachindex(don.bl_pairs)
+            a, b = don.bl_pairs[bi]
+            a == b && continue
+            z = filter(isfinite, spec[:, bi, p])
+            isempty(z) && continue
+            push!(rs, abs(sum(z)) / sum(abs.(z)))
+        end
+        return sum(rs) / length(rs)
+    end
+    R_on = freq_coh(don.spec_after)
+    R_off = freq_coh(doff.spec_after)
+    @test R_on > R_off                  # the bandpass stage flattens per-channel phase
+    @test R_on > 0.97                   # nearly flat after the bandpass
+    @test R_off < 0.95                  # bandpass survives without the stage
+
+    # Bandpass is station-based ⇒ triangle delay closure is unchanged by it.
+    c_on = FP.delay_closure(don)
+    c_off = FP.delay_closure(doff)
+    mx(v) = (u = abs.(filter(isfinite, v)); isempty(u) ? 0.0 : maximum(u))
+    @test isapprox(mx(c_on.closure_before), mx(c_off.closure_before); rtol = 0.2)
 end

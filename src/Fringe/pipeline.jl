@@ -88,18 +88,27 @@ function _fringe_model()
             TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), SharedFeeds()),
             TiedComponent(GainComponent(Delay(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
             TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), PerFeed()),
+            # Phase bandpass: per-channel, stable across the observation (HOPS-style),
+            # per feed. Captures the residual nonlinear-in-frequency instrumental phase
+            # that the per-scan (linear) delay cannot represent. Solved by a dedicated
+            # frequency-stationization stage (`_solve_phase_bandpass!`), not by the
+            # delay/rate search — `PerChannel` is its signature, used to route it.
+            TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),
             TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), PerFeed()),
         ),
     )
 end
 
-# Stage-B engine components `(plan, kind)` — every phase component except the
-# per-integration adhoc term, with `kind` derived from the term type (so a new
-# term/segmentation is picked up automatically; no hardcoded indices).
+# Stage-B engine components `(plan, kind)` — the delay/rate/const terms solved by
+# the fringe search + stationization. EXCLUDES the per-integration adhoc term
+# (`PerIntegration`, solved per-AP) and the phase bandpass (`PerChannel`, solved
+# per-channel). `kind` is derived from the term type, so the routing is structural
+# (by term/segmentation), not by hardcoded indices.
 function _stageB_components(model, layout)
     comps = Tuple{ComponentPlan, Symbol}[]
     for (i, tc) in enumerate(model.phase)
-        tc.component.time isa PerIntegration && continue
+        tc.component.time isa PerIntegration && continue   # adhoc (per-AP)
+        tc.component.term isa PerChannel && continue        # bandpass (per-channel)
         term = tc.component.term
         kind = term isa Delay ? :delay : term isa Rate ? :rate : :phase
         push!(comps, (layout.plans[i], kind))
@@ -110,6 +119,13 @@ end
 # The adhoc component's plan (the per-integration phase term).
 _adhoc_plan(model, layout) =
     layout.plans[findfirst(tc -> tc.component.time isa PerIntegration, model.phase)]
+
+# The phase-bandpass component's plan (the per-channel phase term), or `nothing`
+# if the model carries no bandpass component.
+function _bandpass_plan(model, layout)
+    i = findfirst(tc -> tc.component.term isa PerChannel, model.phase)
+    return i === nothing ? nothing : layout.plans[i]
+end
 
 # One (source, scan) group of band leaves, already materialized, with the data
 # concatenated along frequency.
@@ -314,20 +330,38 @@ function _group_peak_bytes(group)
     return 4 * 12 * cells
 end
 
-# Bound `ntasks` so peak RAM (`ntasks × per-group peak`) stays under a fraction of
-# physical memory. Defaulting `ntasks` to `Threads.nthreads()` OOMs on a real
-# (24 GB) file: at 16 cores each concurrent group peaks at several GB, so the
-# thread count, not memory, would set concurrency. We size the cap from the
-# LARGEST group and `mem_fraction` of total RAM. Returns at least 1.
+# Memory currently AVAILABLE to allocate (reclaimable cache included). On Linux
+# this is `/proc/meminfo` `MemAvailable`; elsewhere fall back to `Sys.free_memory()`.
+# Budgeting from this (not `Sys.total_memory()`) makes the cap adapt to whatever
+# else is running — e.g. IDE language servers eating several GB — instead of
+# over-committing a loaded box and getting OOM-killed.
+function _available_memory()
+    try
+        for line in eachline("/proc/meminfo")
+            if startswith(line, "MemAvailable:")
+                return parse(Int, split(line)[2]) * 1024    # kB → bytes
+            end
+        end
+    catch
+    end
+    return Sys.free_memory()
+end
+
+# Bound `ntasks` so peak RAM (`ntasks × per-group peak`) stays under `mem_fraction`
+# of currently-AVAILABLE memory. Defaulting `ntasks` to `Threads.nthreads()` OOMs
+# on a real (24 GB) file: each concurrent group peaks at several GB. We size the
+# cap from the LARGEST group and the available RAM (not total — a loaded box has
+# far less free, and budgeting from total over-commits and OOMs). Returns ≥ 1.
 function _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = 0.6)
     requested = max(1, min(Int(ntasks), ngroups))
     peak = maximum(_group_peak_bytes, group_leaves; init = 0)
     peak <= 0 && return requested
-    budget = mem_fraction * Sys.total_memory()
+    avail = _available_memory()
+    budget = mem_fraction * avail
     cap = max(1, Int(floor(budget / peak)))
     used = min(requested, cap)
     if used < requested
-        @info "Fringe solve: capping ntasks for memory" requested cap used peak_GB = round(peak / 2^30; digits = 2) budget_GB = round(budget / 2^30; digits = 2)
+        @info "Fringe solve: capping ntasks for memory" requested cap used peak_GB = round(peak / 2^30; digits = 2) avail_GB = round(avail / 2^30; digits = 2) budget_GB = round(budget / 2^30; digits = 2)
     end
     return used
 end
@@ -379,6 +413,8 @@ function solve_fringes(
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
+        phase_bandpass::Bool = true,
+        bandpass_source = nothing,
     )
     model = _fringe_model()
     geom = build_geometry(uvset)
@@ -388,10 +424,12 @@ function solve_fringes(
     ev = GainEvaluator(model, layout)
     stageB = _stageB_components(model, layout)
     adhoc_plan = _adhoc_plan(model, layout)
+    bp_plan = _bandpass_plan(model, layout)
     f0 = geom.f0
     t0_sec = geom.t0 * 3600.0
 
     group_leaves = _scan_group_leaves(uvset)
+    group_sources = _group_sources(group_leaves)
     ngroups = length(group_leaves)
     scan_snr = zeros(ngroups)
     θ = zeros(layout.nθ)
@@ -406,6 +444,12 @@ function solve_fringes(
                     θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
                     search, rounds, ref_ant, ntasks_use, ws_tlv,
                 )
+                # Phase bandpass (between Stage-B and adhoc; orthogonal frequency
+                # structure). Solved once from the brightest calibrator, time-stable.
+                if phase_bandpass && bp_plan !== nothing
+                    cal = _bandpass_calibrator(bandpass_source, group_sources, scan_snr)
+                    _solve_bandpass_stage!(θ, group_leaves, group_sources, cal, geom, ev, bp_plan, nant; ref_ant = ref_ant)
+                end
                 # Pass 2: adhoc per group on the residual after the global stage-B (each
                 # group writes its own disjoint per-integration slots of the shared θ).
                 tmap(1:ngroups; ntasks = ntasks_use) do gi
@@ -446,11 +490,12 @@ e.g.
 reduced; `sol` is the same solution `solve_fringes` would return.
 
 `ntasks` requests how many groups are processed concurrently, but it is bounded
-down so peak RAM (≈ `ntasks` × per-group size) stays under `mem_fraction` of total
-physical memory — the bulk reader holds a whole scan's row span plus two copies of
-its vis cube at once (several GB on a real file), so a thread-count default would
-OOM. Lower `mem_fraction` if other processes need the RAM; raise it on a big box.
-A capping decision is logged via `@info`.
+down so peak RAM (≈ `ntasks` × per-group size) stays under `mem_fraction` of
+currently-AVAILABLE memory (not total — a loaded box has far less free, and
+budgeting from total over-commits and OOMs) — the bulk reader holds a whole scan's
+row span plus two copies of its vis cube at once (several GB on a real file), so a
+thread-count default would OOM. Lower `mem_fraction` if other processes need the
+RAM; raise it on a quiet box. A capping decision is logged via `@info`.
 """
 function solve_and_reduce_fringes(
         uvset::UVSet;
@@ -461,6 +506,8 @@ function solve_and_reduce_fringes(
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
+        phase_bandpass::Bool = true,
+        bandpass_source = nothing,
     )
     model = _fringe_model()
     geom = build_geometry(uvset)
@@ -470,10 +517,12 @@ function solve_and_reduce_fringes(
     ev = GainEvaluator(model, layout)
     stageB = _stageB_components(model, layout)
     adhoc_plan = _adhoc_plan(model, layout)
+    bp_plan = _bandpass_plan(model, layout)
     f0 = geom.f0
     t0_sec = geom.t0 * 3600.0
 
     group_leaves = _scan_group_leaves(uvset)
+    group_sources = _group_sources(group_leaves)
     ngroups = length(group_leaves)
     scan_snr = zeros(ngroups)
     θ = zeros(layout.nθ)
@@ -488,6 +537,12 @@ function solve_and_reduce_fringes(
                     θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
                     search, rounds, ref_ant, ntasks_use, ws_tlv,
                 )
+                # Phase bandpass from the brightest calibrator (time-stable), applied
+                # to every group's correction below via the full θ.
+                if phase_bandpass && bp_plan !== nothing
+                    cal = _bandpass_calibrator(bandpass_source, group_sources, scan_snr)
+                    _solve_bandpass_stage!(θ, group_leaves, group_sources, cal, geom, ev, bp_plan, nant; ref_ant = ref_ant)
+                end
                 # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
                 # this group (global stage-B + this group's just-written adhoc slots), so
                 # the group-local solution corrects identically to the global one.
@@ -555,6 +610,153 @@ function _accumulate_residual_rbar!(rbar, wbar, ev::GainEvaluator, θ::AbstractV
         end
     end
     return rbar, wbar
+end
+
+# ── Phase bandpass (HOPS-style passband): per-channel station phase, time-stable ──
+#
+# Accumulate one group's contribution to the per-(global-baseline, product, GLOBAL
+# channel) coherent residual `rbar_bp` (and weight `wbar_bp`), for the phase-
+# bandpass solve. The residual is V / (stage-B gains); BEFORE summing over time we
+# counter-rotate each AP by its OWN band-averaged residual phase, removing the
+# per-AP time phase (residual rate/drift, and what the adhoc would later remove)
+# so the time-average is coherent and isolates the per-channel SHAPE. `blidx` maps
+# `(a, b) -> row` in the global baseline table. Mirrors the adhoc accumulation but
+# collapses over time per channel instead of over frequency per AP.
+function _accumulate_bandpass_rbar!(rbar_bp, wbar_bp, blidx, ev::GainEvaluator, θ::AbstractVector, grp::_ScanGroup)
+    g = evaluate_gains(ev, θ, grp.g_ci, grp.g_ti)    # (nchan, nti, nant, 2)
+    nchan, nti, nbl, npol = size(grp.Vg)
+    @inbounds for p in 1:npol
+        fa, fb = correlation_feed_pair(grp.pol_products[p])
+        for bi in 1:nbl
+            a, b = grp.bl_pairs[bi]
+            a == b && continue
+            idx = get(blidx, (a, b), 0)
+            idx == 0 && continue
+            for tt in 1:nti
+                # Band-averaged residual phase for this AP (the per-AP time phase).
+                acc = zero(ComplexF64)
+                for c in 1:nchan
+                    w = grp.Wg[c, tt, bi, p]
+                    (w > 0 && isfinite(w)) || continue
+                    ga = g[c, tt, a, fa]; gb = g[c, tt, b, fb]
+                    den = ga * conj(gb)
+                    (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
+                    v = grp.Vg[c, tt, bi, p] / den
+                    isfinite(v) && (acc += w * v)
+                end
+                abs(acc) > 0 || continue
+                rot = conj(acc) / abs(acc)            # cis(-angle(acc)): de-rotate this AP
+                for c in 1:nchan
+                    w = grp.Wg[c, tt, bi, p]
+                    (w > 0 && isfinite(w)) || continue
+                    ga = g[c, tt, a, fa]; gb = g[c, tt, b, fb]
+                    den = ga * conj(gb)
+                    (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
+                    v = grp.Vg[c, tt, bi, p] / den
+                    isfinite(v) || continue
+                    gc = grp.g_ci[c]
+                    rbar_bp[idx, p, gc] += w * v * rot
+                    wbar_bp[idx, p, gc] += w
+                end
+            end
+        end
+    end
+    return rbar_bp, wbar_bp
+end
+
+# Solve the per-(station, feed) phase bandpass from the accumulated per-channel
+# residual and write it into `θ`'s `PerChannel` slots. For each global channel,
+# the globally-closing per-feed phase is solved exactly like the adhoc (reusing
+# `_solve_observable` over the (station, feed) graph) with the same scale-invariant
+# SNR gate (`_track_noise2`, robust to uncalibrated weights). Each (station, feed)
+# track is then referenced to its CIRCULAR-mean phase over channels (zero net phase
+# ⇒ does not alias the Stage-B constant phase). No cross-channel unwrap/smoothing —
+# the per-channel phase is applied as `cis(φ)`, for which wrapping is irrelevant,
+# and unwrapping across the sub-band gaps would be unsafe.
+function _solve_phase_bandpass!(
+        θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan;
+        ref_ant::Integer = 1, snr_floor::Real = 1.0,
+    )
+    nbl, npol, nchan = size(rbar_bp)
+    feeds = [correlation_feed_pair(p) for p in pol_products]
+    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in 1:nbl, p in 1:npol]
+    phase = fill(NaN, nant, 2, nchan)
+    for gc in 1:nchan
+        rows = _ObsRow[]
+        for bi in 1:nbl, p in 1:npol
+            a, b = bl_pairs[bi]
+            a == b && continue
+            r = rbar_bp[bi, p, gc]; w = wbar_bp[bi, p, gc]
+            (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
+            n2 = noise2[bi, p]
+            snr2 = isfinite(n2) && n2 > 0 ? abs2(r / w) / n2 : abs2(r) / w
+            snr2 >= snr_floor^2 || continue
+            fa, fb = feeds[p]
+            push!(rows, _ObsRow(a, b, fa, fb, angle(r), snr2, _chi_sign(fa, fb)))
+        end
+        ph, _, _, _ = _solve_observable(rows, nant, ref_ant; use_chi = true, rewrap = 0)
+        phase[:, :, gc] .= ph
+    end
+
+    # Circular-mean reference per (station, feed) → zero net applied phase (gauge).
+    for a in 1:nant, f in 1:2
+        acc = zero(ComplexF64)
+        @inbounds for gc in 1:nchan
+            v = phase[a, f, gc]
+            isfinite(v) && (acc += cis(v))
+        end
+        abs(acc) > 0 || continue
+        m = angle(acc)
+        @inbounds for gc in 1:nchan
+            v = phase[a, f, gc]
+            isfinite(v) || continue
+            off = plan.off1[a, f, 1, 1]
+            off == 0 && continue
+            θ[off + plan.clocal[gc] - 1] = rem2pi(v - m, RoundNearest)
+        end
+    end
+    return θ
+end
+
+# Bandpass stage: solve the phase bandpass from one (bright calibrator) source and
+# write it into `θ`. Accumulates the per-channel residual over that source's scans
+# (after the global Stage-B), then one closing per-channel solve. Sequential over
+# the calibrator's groups (one source, a handful of scans) — only one group is
+# resident at a time. Time-stable, so it applies to ALL scans via `GlobalTime`.
+function _solve_bandpass_stage!(
+        θ, group_leaves, group_sources, cal_source, geom, ev, plan, nant;
+        ref_ant::Integer = 1, snr_floor::Real = 1.0,
+    )
+    nchan = length(geom.channel_freqs)
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    blidx = Dict(bl_pairs[i] => i for i in eachindex(bl_pairs))
+    rbar_bp = nothing; wbar_bp = nothing; pols = String[]
+    for gi in eachindex(group_leaves)
+        group_sources[gi] == cal_source || continue
+        grp, _ = _materialize_scan_group(group_leaves[gi], geom)
+        if rbar_bp === nothing
+            pols = grp.pol_products
+            rbar_bp = zeros(ComplexF64, length(bl_pairs), length(pols), nchan)
+            wbar_bp = zeros(Float64, length(bl_pairs), length(pols), nchan)
+        end
+        _accumulate_bandpass_rbar!(rbar_bp, wbar_bp, blidx, ev, θ, grp)
+    end
+    rbar_bp === nothing && return θ            # calibrator absent → leave bandpass at 0
+    _solve_phase_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, plan; ref_ant = ref_ant, snr_floor = snr_floor)
+    return θ
+end
+
+# Source name of each (source, scan) group, without materializing.
+_group_sources(group_leaves) =
+    [UVData.metadata(last(first(g))).source_name for g in group_leaves]
+
+# The calibrator for the bandpass: the explicit `bandpass_source`, else the source
+# carrying the highest-SNR scan (brightest), else the first group's source.
+function _bandpass_calibrator(bandpass_source, group_sources, scan_snr)
+    bandpass_source !== nothing && return String(bandpass_source)
+    isempty(group_sources) && return ""
+    gi = all(!isfinite, scan_snr) ? 1 : argmax(i -> (isfinite(scan_snr[i]) ? scan_snr[i] : -Inf), eachindex(scan_snr))
+    return group_sources[gi]
 end
 
 # Residual visibilities for one scan group: Vg divided by the current θ gains
