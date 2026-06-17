@@ -2,6 +2,8 @@
 # multi-band UVSet builder `_build_fringe_uvset` from test_pipeline.jl (included
 # earlier in runtests.jl) and CairoMakie (loaded at the top of runtests.jl).
 
+using HDF5
+
 @testset "Fringe diagnostics" begin
     uvset, _truth = _build_fringe_uvset()
     sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0))
@@ -130,5 +132,43 @@
         @test !isnothing(FP.plot_baseline_fringes(fig[1, 1], data; kind = :freq))
         figbl = FP.plot_baseline_fringes(data)
         @test (show(IOBuffer(), MIME("image/png"), figbl); true)
+    end
+
+    @testset "HDF5 caltable: round-trip + external-readable" begin
+        path = tempname() * ".h5"
+        try
+            CAL.save_solution_hdf5(path, sol; time_block = 4)
+
+            # Lossless Julia round-trip via the embedded blob.
+            sol2 = CAL.load_solution_hdf5(path)
+            @test sol2.θ == sol.θ
+            @test sol2.layout.nθ == sol.layout.nθ
+            @test sol2.geom.channel_freqs == sol.geom.channel_freqs
+
+            # Language-neutral content: gains + axes + diagnostics readable directly.
+            nchan = sol.layout.nchan; ntime = sol.layout.ntime; nant = sol.layout.nant
+            HDF5.h5open(path, "r") do f
+                @test read(HDF5.attributes(f)["format"]) == "GustavoCalibrationSolution"
+                @test haskey(f, "gain") && haskey(f, "axes")
+                gr = read(f["gain"]["real"]); gi = read(f["gain"]["imag"])
+                @test size(gr) == (nchan, ntime, nant, 2)
+                @test read(f["axes"]["channel_freq_hz"]) == sol.geom.channel_freqs
+                @test haskey(f["info"], "scan_max_snr")
+                # gains in the file match the evaluator exactly (Float32 precision).
+                ev = CAL.GainEvaluator(sol.model, sol.layout)
+                g = CAL.evaluate_gains(ev, sol.θ, 1:nchan, 1:ntime)
+                @test gr ≈ Float32.(real.(g))
+                @test gi ≈ Float32.(imag.(g))
+            end
+
+            # gains = false → compact (blob-only) file still round-trips.
+            path2 = tempname() * ".h5"
+            CAL.save_solution_hdf5(path2, sol; gains = false)
+            @test CAL.load_solution_hdf5(path2).θ == sol.θ
+            @test !HDF5.h5open(ff -> haskey(ff, "gain"), path2, "r")
+            isfile(path2) && rm(path2)
+        finally
+            isfile(path) && rm(path)
+        end
     end
 end

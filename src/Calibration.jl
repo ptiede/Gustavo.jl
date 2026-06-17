@@ -61,5 +61,6 @@ export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
 
 # Calibration solution container, apply, serialization
 export CalibrationSolution, build_geometry, leaf_window, save_solution, load_solution
+export save_solution_hdf5, load_solution_hdf5
 
 end

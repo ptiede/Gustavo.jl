@@ -250,3 +250,31 @@ function load_solution(path::AbstractString)
     w.version == 1 || error("load_solution: unsupported version $(w.version)")
     return CalibrationSolution(w.model, w.layout, w.geom, w.θ, w.info)
 end
+
+"""
+    save_solution_hdf5(path, sol::CalibrationSolution; gains = true, time_block = 1024)
+
+Write `sol` to an HDF5 caltable readable from any language (Python/h5py, CASA, …),
+NOT just Julia. Provided by `GustavoHDF5Ext` — load `HDF5` to enable it.
+
+Layout:
+- `gain/real`, `gain/imag` — the evaluated complex antenna gains on the
+  `(channel, time, antenna, feed)` grid (`Float32`, chunked + gzip). Written in
+  blocks of `time_block` integrations so the full ~GB cube is never resident. Omit
+  with `gains = false` to write only the compact parametric form.
+- `axes/*` — `channel_freq_hz`, `time`, `scan_of_time`, `spw_of_chan`, `f0`, `t0`.
+- `info/*` — the solver diagnostics (per-scan SNR/χ/ncomp, counts).
+- root attributes — format/version, units, and the gain convention
+  `V_corr = V / (g_a · conj(g_b))`, `weight ×= |g_a g_b|²`.
+- `julia/blob` — the `Serialization` bytes of `(model, layout, geom, θ, info)` so
+  Julia can round-trip the solution losslessly (external readers ignore it).
+"""
+function save_solution_hdf5 end
+
+"""
+    load_solution_hdf5(path) -> CalibrationSolution
+
+Reconstruct a `CalibrationSolution` from an HDF5 file written by
+[`save_solution_hdf5`](@ref) (via its `julia/blob`). Provided by `GustavoHDF5Ext`.
+"""
+function load_solution_hdf5 end
