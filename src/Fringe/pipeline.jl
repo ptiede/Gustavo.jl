@@ -178,19 +178,28 @@ function _scan_group_leaves(uvset::UVSet)
 end
 
 # Materialize ONE (source, scan) group and build its concatenated `_ScanGroup`.
-# Returns `(grp, keyed)` where `keyed` is the vector of `(partition_key,
-# materialized_leaf)` pairs — kept so the fused path can correct+reduce the SAME
-# materialized leaves (no second disk read) and reassemble the output tree.
-# Called per group inside the solve loop so only one group's worth of data
-# (~hundreds of MB) is resident at a time.
-function _materialize_scan_group(keyed_leaves_lazy, geom::DataGeometry)
-    # The solve reads only vis + weights (flag is redundant with w <= 0); skip the
-    # flag layer. `materialize_group` reads the scan's whole contiguous row span in
-    # ONE sequential read (FITS-IDI bulk path), extracting all bands — vs per-leaf,
-    # per-row seeks — then falls back to per-leaf for eager/non-IDI leaves.
-    leaves = UVData.materialize_group([l for (_, l) in keyed_leaves_lazy]; layers = (:vis, :weights, :uvw))
-    keyed = [(k, m) for ((k, _), m) in zip(keyed_leaves_lazy, leaves)]
-    return _build_scan_group(leaves, geom), keyed
+# The solve reads only vis + weights (flag is redundant with w <= 0); skip the flag
+# layer. `materialize_group` reads the scan's whole contiguous row span in ONE
+# sequential read (FITS-IDI bulk path), extracting all bands — vs per-leaf, per-row
+# seeks — then falls back to per-leaf for eager/non-IDI leaves.
+_materialize_group_leaves(keyed_leaves_lazy) =
+    UVData.materialize_group([l for (_, l) in keyed_leaves_lazy]; layers = (:vis, :weights, :uvw))
+
+# Materialize a group and build ONLY the concatenated `_ScanGroup` (frequency
+# stacked) — the per-band leaves are local and freed once copied, so this holds a
+# single data copy. Used by the fringe search (needs the full freq axis for the
+# 2-D FFT) and the bandpass stage.
+function _materialize_concat_group(keyed_leaves_lazy, geom::DataGeometry)
+    leaves = _materialize_group_leaves(keyed_leaves_lazy)
+    return _build_scan_group(leaves, geom)
+end
+
+# Materialize a group as its per-band `(key, leaf)` pairs WITHOUT building the
+# concatenated copy — used by pass 2 (adhoc runs directly on the leaves, then they
+# are corrected/reduced/reassembled in place). Holds a single data copy.
+function _materialize_leaf_group(keyed_leaves_lazy)
+    leaves = _materialize_group_leaves(keyed_leaves_lazy)
+    return [(k, m) for ((k, _), m) in zip(keyed_leaves_lazy, leaves)]
 end
 
 # Copy a contiguous channel-block from one band leaf's vis/weights (`V`/`W`) into
@@ -330,6 +339,68 @@ function _adhoc_group!(θ, grp::_ScanGroup, ev, adhoc_plan, adhoc, ref_ant, nant
     return θ
 end
 
+# Adhoc for one group from its per-band LEAVES (no concatenated `_ScanGroup` — pass
+# 2's memory-lean path). The per-AP residual is summed over each band leaf's
+# channels (a function barrier per leaf, gains evaluated on the leaf window); the
+# sum over all bands' channels is identical to accumulating over the concatenated
+# cube, so the result matches `_adhoc_group!` exactly. `keyed` is the group's
+# `(key, leaf)` pairs.
+function _adhoc_group_leaves!(θ, keyed, geom::DataGeometry, ev, adhoc_plan, adhoc, ref_ant, nant)
+    leaves = [m for (_, m) in keyed]
+    l0 = first(leaves)
+    bl_pairs = collect(UVData.baselines(l0).pairs)
+    pols = String.(pol_products(l0))
+    tg = Float64.(lookup(l0[:vis], Ti))
+    _, g_ti = leaf_window(geom, l0)
+    nbl = length(bl_pairs); npol = length(pols); nap = length(tg)
+    rbar = zeros(ComplexF64, nbl, npol, nap)
+    wbar = zeros(Float64, nbl, npol, nap)
+    for leaf in leaves
+        ci, ti = leaf_window(geom, leaf)
+        g = evaluate_gains(ev, θ, ci, ti)               # (nchan_leaf, nti, nant, 2)
+        _accumulate_leaf_rbar!(rbar, wbar, parent(leaf[:vis]), parent(leaf[:weights]), g, bl_pairs, pols)
+    end
+    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg; ref_ant = ref_ant, opts = adhoc)
+    for (ap, gti) in enumerate(g_ti)
+        tseg = adhoc_plan.tseg_id[gti]
+        for ant in 1:nant, feed in 1:2
+            v = as.phase[ant, feed, ap]
+            isfinite(v) || continue
+            off = adhoc_plan.off1[ant, feed, tseg, 1]
+            off == 0 && continue
+            θ[off] = v
+        end
+    end
+    return θ
+end
+
+# Accumulate one band leaf's per-AP residual `Σ_chan w·(V/gain)` into `rbar`/`wbar`.
+# Function barrier: `V`/`W` from `parent(leaf[...])` are type-unstable at the call
+# site, so the per-cell loop must be a specialized function (else dynamic dispatch
+# per element). Mirrors `_accumulate_residual_rbar!` but for one leaf's channels.
+function _accumulate_leaf_rbar!(rbar, wbar, V, W, g, bl_pairs, pols)
+    nchan, nti, nbl, npol = size(V)
+    @inbounds for p in 1:npol
+        fa, fb = correlation_feed_pair(pols[p])
+        for bi in 1:nbl
+            a, b = bl_pairs[bi]
+            for tt in 1:nti, c in 1:nchan
+                w = W[c, tt, bi, p]
+                (w > 0 && isfinite(w)) || continue
+                ga = g[c, tt, a, fa]
+                gb = g[c, tt, b, fb]
+                den = ga * conj(gb)
+                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
+                v = V[c, tt, bi, p] / den
+                isfinite(v) || continue
+                rbar[bi, p, tt] += w * v
+                wbar[bi, p, tt] += w
+            end
+        end
+    end
+    return rbar, wbar
+end
+
 # Estimate the PEAK resident bytes for processing one scan group through the bulk
 # reader. The bulk path holds, at once: the transient row-span buffer (~one copy
 # of the raw bytes), the per-band materialized leaves, AND the concatenated
@@ -338,12 +409,17 @@ end
 # safe peak. `group_leaves[i]` is a vector of `(key, lazy_leaf)`; summing
 # `prod(size(leaf[:vis]))` over its bands gives the group's cell count without
 # materializing anything.
+# Estimate the PEAK resident bytes for one scan group. Each pass now holds a SINGLE
+# data copy (search: the concatenated cube; pass 2: the per-band leaves — never
+# both), so the charge is ~2.5× the raw vis size: one copy (vis ComplexF32 8 B +
+# weights Float32 4 B = 12 B/cell) plus the transient bulk-read span and GC/heap
+# overhead. (Before the search/pass-2 split this was 4× — two copies held at once.)
 function _group_peak_bytes(group)
     cells = 0
     for (_, leaf) in group
         cells += prod(size(leaf[:vis]))
     end
-    return 4 * 12 * cells
+    return round(Int, 2.5 * 12 * cells)
 end
 
 # Memory currently AVAILABLE to allocate (reclaimable cache included). On Linux
@@ -395,7 +471,7 @@ function _search_and_stationize!(
     ncomp = 0
     for round in 1:max(rounds, 1)
         dets = tmap(1:ngroups; ntasks = ntasks_use) do gi
-            grp, _ = _materialize_scan_group(group_leaves[gi], geom)
+            grp = _materialize_concat_group(group_leaves[gi], geom)
             Vsearch = round > 1 ? _residual_vis(ev, θ, grp) : grp.Vg
             det, snr = _search_group(grp, Vsearch, f0, t0_sec, search, ws_tlv[])
             scan_snr[gi] = snr
@@ -476,8 +552,8 @@ function solve_fringes(
                 # Pass 2: adhoc per group on the residual after the global stage-B (each
                 # group writes its own disjoint per-integration slots of the shared θ).
                 tmap(1:ngroups; ntasks = ntasks_use) do gi
-                    grp, _ = _materialize_scan_group(group_leaves[gi], geom)
-                    _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
+                    keyed = _materialize_leaf_group(group_leaves[gi])
+                    _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant)
                     nothing
                 end
                 (ch, nc)
@@ -576,9 +652,8 @@ function solve_and_reduce_fringes(
                 # this group (global stage-B + this group's just-written adhoc slots), so
                 # the group-local solution corrects identically to the global one.
                 results = tmap(1:ngroups; ntasks = ntasks_use) do gi
-                    grp, keyed = _materialize_scan_group(group_leaves[gi], geom)
-                    _adhoc_group!(θ, grp, ev, adhoc_plan, adhoc, ref_ant, nant)
-                    grp = nothing
+                    keyed = _materialize_leaf_group(group_leaves[gi])
+                    _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant)
                     sub_branches = DimensionalData.TreeDict()
                     for (k, leaf) in keyed
                         sub_branches[k] = leaf
@@ -835,7 +910,7 @@ function _solve_bandpass_stage!(
     rbar_bp = nothing; wbar_bp = nothing; pols = String[]
     for gi in eachindex(group_leaves)
         group_sources[gi] == cal_source || continue
-        grp, _ = _materialize_scan_group(group_leaves[gi], geom)
+        grp = _materialize_concat_group(group_leaves[gi], geom)
         if rbar_bp === nothing
             pols = grp.pol_products
             rbar_bp = zeros(ComplexF64, length(bl_pairs), length(pols), nchan)

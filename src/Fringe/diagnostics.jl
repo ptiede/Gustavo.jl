@@ -183,8 +183,8 @@ function baseline_fringe_data(
     gi = scan_index === nothing ? _max_snr_scan(sol, length(groups)) : Int(scan_index)
     (1 <= gi <= length(groups)) || error("baseline_fringe_data: scan_index $gi out of range 1:$(length(groups))")
 
-    grp, keyed = _materialize_scan_group(groups[gi], sol.geom)
-    info = UVData.metadata(last(first(keyed)))
+    info = UVData.metadata(last(first(groups[gi])))   # source/scan from the lazy leaf
+    grp = _materialize_concat_group(groups[gi], sol.geom)
     ev = GainEvaluator(sol.model, sol.layout)
     g = evaluate_gains(ev, sol.θ, grp.g_ci, grp.g_ti)   # (nchan, nti, nant, 2)
     nchan, nti, nbl, npol = size(grp.Vg)
