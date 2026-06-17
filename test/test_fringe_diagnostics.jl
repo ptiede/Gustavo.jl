@@ -94,6 +94,31 @@
         @test improved == total          # no baseline gets LESS coherent after the fit
     end
 
+    @testset "delay closure" begin
+        data = FP.baseline_fringe_data(uvset, sol)
+        c = FP.delay_closure(data)
+        @test !isempty(c.triangles)
+        @test length(c.closure_before) == length(c.triangles)
+
+        finite(v) = filter(isfinite, v)
+        mx(v) = (u = abs.(finite(v)); isempty(u) ? 0.0 : maximum(u))
+        τscale = mx(c.data_delay)                         # spread of the data's baseline delays
+        @test τscale > 0                                  # the synthetic injected real delays
+
+        # Closure is the defining consistency property: triangle sums of the DATA
+        # delays cancel (≪ the individual delays) because real delays are station-
+        # based — this is what would break if the station model were wrong.
+        @test mx(c.closure_before) < 0.05 * τscale
+        # A correct delay solution removes the delay on every baseline (residual ≪
+        # data) and cannot introduce closure errors.
+        @test mx(c.resid_delay) < 0.05 * τscale
+        @test mx(c.closure_after) < 0.05 * τscale
+
+        @test_nowarn FP.print_delay_closure(c; io = IOBuffer())
+        buf = IOBuffer(); FP.print_delay_closure(c; io = buf)
+        @test occursin("Delay closure", String(take!(buf)))
+    end
+
     @testset "plot_baseline_fringes smoke" begin
         data = FP.baseline_fringe_data(uvset, sol)
         @test !isnothing(FP.plot_baseline_fringes(data))                                   # freq/phase

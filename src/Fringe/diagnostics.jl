@@ -245,3 +245,92 @@ function baseline_pol_index(data::BaselineFringeData, pol)
         idx === nothing ? error("pol $(pol) not in $(data.pol_products)") : idx
     end
 end
+
+# Coherence-weighted group delay (s) of one baseline's spectrum `z` over `freqs`
+# from the per-channel phase increment: τ = ⟨angle(z[c+1] z[c]*)⟩ / (2π Δf). Uses
+# the wrapped increment (no unwrap needed) and weights by |z|; skips flagged cells
+# and the sub-band-boundary jumps (Δf ≫ in-band spacing) where the increment wraps.
+function _baseline_delay(z::AbstractVector, freqs::AbstractVector)
+    df = Float64[]
+    @inbounds for c in 1:(length(freqs) - 1)
+        d = freqs[c + 1] - freqs[c]
+        d > 0 && push!(df, d)
+    end
+    isempty(df) && return NaN
+    dfmed = median(df)
+    num = 0.0; den = 0.0
+    @inbounds for c in 1:(length(z) - 1)
+        z1 = z[c]; z2 = z[c + 1]
+        (isfinite(z1) && isfinite(z2) && abs(z1) > 0 && abs(z2) > 0) || continue
+        d = freqs[c + 1] - freqs[c]
+        (d > 0 && d <= 3 * dfmed) || continue         # skip sub-band boundary jumps
+        w = abs(z1) * abs(z2)
+        num += w * angle(z2 * conj(z1))
+        den += w * 2π * d
+    end
+    return den > 0 ? num / den : NaN
+end
+
+"""
+    delay_closure(data::BaselineFringeData; pol = :parallel) -> NamedTuple
+
+Triangle delay-closure check, the consistency test a station-based delay solution
+must pass. For every closed triangle `(a,b,c)` it forms `τ_ab + τ_bc − τ_ac` from
+the per-baseline group delays fitted to the coherent spectra:
+
+- `closure_before` — from the raw data. A property of the *data*: real station-
+  based delays cancel around a triangle, so these are ≈ 0 (up to noise). Large
+  values would mean the data itself is non-closing (not something a fit can fix).
+- `closure_after` — from the corrected data. Must stay ≈ 0 (a correct station-based
+  solution cannot create closure errors).
+- `resid_delay` — the per-baseline residual group delay after correction; a correct
+  delay solution drives these to ≈ 0 on every baseline.
+
+Returns `(; pol, triangles, closure_before, closure_after, resid_delay, bl_pairs)`.
+A station-structure or sign mistake shows up as nonzero `resid_delay` (and, if it
+breaks closure, nonzero `closure_after`).
+"""
+function delay_closure(data::BaselineFringeData; pol = :parallel)
+    p = baseline_pol_index(data, pol)
+    nbl = length(data.bl_pairs)
+    τb = fill(NaN, nbl); τa = fill(NaN, nbl)
+    for bi in 1:nbl
+        a, b = data.bl_pairs[bi]
+        a == b && continue
+        τb[bi] = _baseline_delay(view(data.spec_before, :, bi, p), data.freqs)
+        τa[bi] = _baseline_delay(view(data.spec_after, :, bi, p), data.freqs)
+    end
+    blindex = Dict(data.bl_pairs[bi] => bi for bi in 1:nbl)
+    ants = sort(unique(Iterators.flatten(data.bl_pairs)))
+    tris = NTuple{3, Int}[]; cb = Float64[]; ca = Float64[]
+    for a in ants, b in ants, c in ants
+        (a < b < c) || continue
+        (haskey(blindex, (a, b)) && haskey(blindex, (b, c)) && haskey(blindex, (a, c))) || continue
+        ab, bc, ac = blindex[(a, b)], blindex[(b, c)], blindex[(a, c)]
+        (isfinite(τb[ab]) && isfinite(τb[bc]) && isfinite(τb[ac])) || continue
+        push!(tris, (a, b, c))
+        push!(cb, τb[ab] + τb[bc] - τb[ac])
+        push!(ca, τa[ab] + τa[bc] - τa[ac])
+    end
+    return (;
+        pol = data.pol_products[p], triangles = tris, closure_before = cb,
+        closure_after = ca, data_delay = τb, resid_delay = τa, bl_pairs = copy(data.bl_pairs),
+    )
+end
+
+"""
+    print_delay_closure(c; io = stdout)
+
+Summarize [`delay_closure`](@ref): RMS/max triangle closure (data and residual)
+and the RMS/max residual per-baseline delay, all in ns.
+"""
+function print_delay_closure(c; io = stdout)
+    rms(v) = (u = filter(isfinite, v); isempty(u) ? NaN : sqrt(sum(abs2, u) / length(u)))
+    mx(v) = (u = abs.(filter(isfinite, v)); isempty(u) ? NaN : maximum(u))
+    ns(x) = 1.0e9 * x
+    println(io, "Delay closure [", c.pol, "], ", length(c.triangles), " triangles:")
+    println(io, @sprintf("  data     closure rms = %9.4f ns  max = %9.4f ns", ns(rms(c.closure_before)), ns(mx(c.closure_before))))
+    println(io, @sprintf("  residual closure rms = %9.4f ns  max = %9.4f ns", ns(rms(c.closure_after)), ns(mx(c.closure_after))))
+    println(io, @sprintf("  residual delay   rms = %9.4f ns  max = %9.4f ns", ns(rms(c.resid_delay)), ns(mx(c.resid_delay))))
+    return nothing
+end
