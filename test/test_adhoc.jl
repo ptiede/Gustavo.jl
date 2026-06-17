@@ -76,7 +76,7 @@ end
     end
 end
 
-@testset "Adhoc: detrend removes per-scan mean and slope" begin
+@testset "Adhoc: detrend removes per-scan mean only (keeps slope/rate)" begin
     rng = MersenneTwister(0x0DE7)
     nant, nap = 4, 30
     ref = 1
@@ -84,7 +84,8 @@ end
     pols = ["PP", "PQ", "QP", "QQ"]
     times = collect(0:(nap - 1)) .* 1.0
     tc = times .- mean(times)
-    # Screen = per-station constant + slope + small wiggle.
+    # Screen = per-station constant + slope + a common wiggle (cancels in the
+    # ref-relative solve, so the recovered track is exactly constant + slope).
     c0 = 0.5 .* randn(rng, nant, 2)
     c1 = 0.02 .* randn(rng, nant, 2)
     screen = Array{Float64}(undef, nant, 2, nap)
@@ -95,14 +96,46 @@ end
     rbar, wbar = inject_screen(bl, pols, screen, χ)
     sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = true))
 
-    # After detrend, every solved track has ~zero mean and ~zero slope, so adhoc
-    # cannot alias the Stage-B constant phase / rate.
+    # Detrend removes the per-station MEAN (breaks the constant-phase gauge vs the
+    # Stage-B ConstantTerm) but KEEPS the slope — so adhoc can flatten a residual
+    # fringe rate. The recovered slope must match the injected differential rate
+    # c1[a] - c1[ref] (the common wiggle cancels in the ref-relative solve).
     for a in 1:nant, f in 1:2
         a == ref && continue
         tr = sol.phase[a, f, :]
         @test abs(mean(tr)) < 1.0e-8
         slope = sum(tc .* (tr .- mean(tr))) / sum(tc .^ 2)
-        @test abs(slope) < 1.0e-8
+        @test isapprox(slope, c1[a, f] - c1[ref, f]; atol = 1.0e-8)
+    end
+end
+
+@testset "Adhoc: SNR gate is invariant to WEIGHT column scale" begin
+    # Regression: the per-AP SNR gate used |rbar|²/wbar, a true SNR only for
+    # calibrated inverse-variance weights. On raw correlator output (uniform/
+    # uncalibrated WEIGHT) the absolute scale is arbitrary, so a fixed snr_floor
+    # dropped every row and killed the whole adhoc stage. The data-driven gate must
+    # be invariant to a global weight rescale (rbar and wbar both scale by k).
+    rng = MersenneTwister(0xBEEF)
+    nant, nap = 4, 40
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        screen[a, f, ap] = 0.3 * randn(rng) + 0.04 * sin(2π * ap / nap + a)
+    end
+    rbar, wbar = inject_screen(bl, pols, screen, zeros(nap); amp = 5.0, noise = 0.4, rng = rng)
+    opts = FRa.AdhocPhasing(mode = :none, detrend = false, snr_floor = 1.0)
+    s1 = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = opts)
+    k = 1.0e-6
+    s2 = FRa.solve_adhoc_phasing(k .* rbar, k .* wbar, bl, pols, nant, times; ref_ant = ref, opts = opts)
+
+    @test count(isfinite, s1.phase) > 0                      # adhoc actually runs
+    @test count(isfinite, s2.phase) == count(isfinite, s1.phase)   # scale doesn't change coverage
+    for i in eachindex(s1.phase)
+        (isfinite(s1.phase[i]) && isfinite(s2.phase[i])) || continue
+        @test isapprox(s1.phase[i], s2.phase[i]; atol = 1.0e-9)
     end
 end
 

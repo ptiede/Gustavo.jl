@@ -15,9 +15,9 @@
 # rows add connectivity and absorb residual field-rotation drift at AP
 # resolution, since field rotation is deliberately NOT pre-corrected); (3) unwrap
 # each (station, feed) track across APs; (4) smooth (Savitzky–Golay) or penalize
-# (dense first-difference — no SparseArrays); (5) detrend per (station, feed):
-# remove the per-scan weighted mean and slope so the adhoc track does not alias
-# the Stage-B constant phase and rate.
+# (dense first-difference — no SparseArrays); (5) demean per (station, feed):
+# remove the per-scan weighted mean so the adhoc track does not alias the Stage-B
+# constant phase (the slope/residual rate is kept so adhoc can flatten it).
 
 """
     AdhocPhasing(; mode, window, order, smoothness, snr_floor, phase_rewrap_iters, detrend)
@@ -31,7 +31,9 @@ Options for [`solve_adhoc_phasing`](@ref).
 - `smoothness`      : `λ` for `:penalized`.
 - `snr_floor`       : per-AP per-baseline coherent-SNR floor; weaker rows drop.
 - `phase_rewrap_iters` : re-wrap iterations in each per-AP solve.
-- `detrend`         : remove the per-(station, feed) mean + slope per scan.
+- `detrend`         : remove the per-(station, feed) weighted MEAN per scan (breaks
+  the constant-phase gauge vs the Stage-B `ConstantTerm`); the slope/rate is kept so
+  adhoc can flatten residual fringe rate left by an imperfect per-scan `Rate`.
 """
 Base.@kwdef struct AdhocPhasing
     mode::Symbol = :smooth
@@ -66,6 +68,26 @@ baseline visibilities. `rbar[baseline, product, ap]` is `Σ_chan w·V_residual`
 coherent SNR² is `|rbar|²/wbar`. `times` are the AP epochs (any units; used only
 for detrending). `ref_ant` sets the per-AP gauge (its adhoc phase is held at 0).
 """
+# Data-driven noise variance of one (baseline, product) coherent track
+# `V̄_ap = rbar/wbar`, from the robust scatter of its AP-to-AP differences. The
+# source/atmosphere vary slowly AP-to-AP while noise is independent, so successive
+# differences isolate the noise. For complex-Gaussian noise, `median(|ΔV̄|²) =
+# 2 ln2 · σ²` (Δ of two APs has twice the variance, and the median of an
+# exponential is `ln2 ×` its mean), so `σ² = median(|ΔV̄|²) / (2 ln2)`. Returns
+# `NaN` when fewer than 4 differences are available (caller falls back).
+function _track_noise2(rbar, wbar, bi::Int, p::Int, nap::Int)
+    d2 = Float64[]
+    prev = ComplexF64(NaN, NaN)
+    @inbounds for ap in 1:nap
+        w = wbar[bi, p, ap]
+        v = w > 0 ? rbar[bi, p, ap] / w : ComplexF64(NaN, NaN)
+        (isfinite(v) && isfinite(prev)) && push!(d2, abs2(v - prev))
+        prev = v
+    end
+    length(d2) >= 4 || return NaN
+    return median(d2) / (2 * log(2))
+end
+
 function solve_adhoc_phasing(
         rbar::AbstractArray{<:Complex, 3}, wbar::AbstractArray{<:Real, 3},
         bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
@@ -87,6 +109,16 @@ function solve_adhoc_phasing(
     # Track per-(station,feed) coherent weight for smoothing / detrend.
     track_w = zeros(nant, 2, nap)
 
+    # Per-(baseline, product) noise of the coherent track, estimated data-driven
+    # from its AP-to-AP scatter — see `_track_noise2`. The per-AP coherent SNR² is
+    # then |V̄_ap|² / noise², which is SCALE-INVARIANT in the WEIGHT column: the
+    # naive `|rbar|²/wbar` is only a true SNR when WEIGHT is calibrated inverse-
+    # variance, and on raw correlator output (uncalibrated/uniform weights, common
+    # in FITS-IDI) it is mis-scaled by an arbitrary factor, silently dropping every
+    # row at any fixed `snr_floor` and killing the whole adhoc stage. For calibrated
+    # weights `noise² → 1/wbar`, so this reduces to the old `|rbar|²/wbar` exactly.
+    noise2 = [_track_noise2(rbar, wbar, bi, p, nap) for bi in 1:nbl, p in 1:npol]
+
     for ap in 1:nap
         rows = _ObsRow[]
         for bi in 1:nbl, p in 1:npol
@@ -95,7 +127,8 @@ function solve_adhoc_phasing(
             r = rbar[bi, p, ap]
             w = wbar[bi, p, ap]
             (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            snr2 = abs2(r) / w
+            n2 = noise2[bi, p]
+            snr2 = isfinite(n2) && n2 > 0 ? abs2(r / w) / n2 : abs2(r) / w   # fall back if unestimable
             snr2 >= opts.snr_floor^2 || continue
             fa, fb = feeds[p]
             push!(rows, _ObsRow(a, b, fa, fb, angle(r), snr2, _chi_sign(fa, fb)))
@@ -138,11 +171,12 @@ function solve_adhoc_phasing(
         error("AdhocPhasing mode must be :smooth, :penalized or :none; got $(opts.mode)")
     end
 
-    # Detrend per (station, feed): remove mean + slope over the scan so adhoc does
-    # not alias the Stage-B constant phase / rate.
+    # Demean per (station, feed): remove the per-scan mean so adhoc does not alias
+    # the Stage-B constant phase. The slope (residual rate) is intentionally kept —
+    # see `_detrend_track!`.
     if opts.detrend
         for a in 1:nant, f in 1:2
-            _detrend_track!(@view(phase[a, f, :]), times, @view(track_w[a, f, :]))
+            _detrend_track!(@view(phase[a, f, :]), @view(track_w[a, f, :]))
         end
     end
 
@@ -232,24 +266,21 @@ function _penalized_smooth(y::AbstractVector, w::AbstractVector, λ::Real)
 end
 
 # Remove the weighted mean and linear slope of a track over `times`.
-function _detrend_track!(track::AbstractVector, times::AbstractVector, w::AbstractVector)
+function _detrend_track!(track::AbstractVector, w::AbstractVector)
     idx = [i for i in eachindex(track) if isfinite(track[i])]
     length(idx) >= 1 || return track
     ws = [(isfinite(w[i]) && w[i] > 0) ? float(w[i]) : 1.0 for i in idx]
-    t = Float64.(times[idx])
-    tbar = sum(ws .* t) / sum(ws)
-    tc = t .- tbar
-    if length(idx) >= 2 && sum(ws .* tc .^ 2) > 0
-        A = hcat(ones(length(idx)), tc)
-        coef = weighted_least_squares(A, Float64.(track[idx]), ws)
-        for i in idx
-            track[i] -= coef[1] + coef[2] * (times[i] - tbar)
-        end
-    else                                                # single point: remove mean only
-        m = sum(ws .* track[idx]) / sum(ws)
-        for i in idx
-            track[i] -= m
-        end
+    # Remove the weighted MEAN only — NOT the slope. The constant-phase degeneracy
+    # between the per-AP adhoc term and the Stage-B `ConstantTerm` is real and worth
+    # breaking (zero-mean adhoc ⇒ the constant is owned by Stage-B). The *slope*,
+    # however, is the residual fringe RATE left when Stage-B's per-scan `Rate` is
+    # imperfect (e.g. within-scan atmospheric drift); removing it would force that
+    # error to survive uncorrected. Letting adhoc keep the slope lets it flatten
+    # residual rates — the whole point of a per-AP phase track. (`times` is unused
+    # the whole point of a per-AP phase track.)
+    m = sum(ws .* Float64.(track[idx])) / sum(ws)
+    for i in idx
+        track[i] -= m
     end
     return track
 end
