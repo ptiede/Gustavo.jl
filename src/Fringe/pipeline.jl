@@ -834,7 +834,7 @@ end
 # degenerate with the source spectrum and intentionally NOT recovered here.
 function _solve_amp_bandpass!(
         θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan;
-        snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
+        snr_floor::Real = 1.0, ridge::Real = 1.0e-6, max_logamp::Real = log(2.0),
     )
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
@@ -875,6 +875,27 @@ function _solve_amp_bandpass!(
         end
     end
 
+    # Remove the per-channel COMMON MODE (mean over stations, per feed). The +1/+1
+    # closure with no source term attributes the common instrumental bandpass (the
+    # filterbank roll-off) AND the source spectrum to the stations, so each station's
+    # `la` carries the whole band shape (|g| 0.1→1.6, →0 at edges). Subtracting the
+    # per-channel station mean leaves only the station-RELATIVE bandpass (|g|~1, no
+    # roll-off, no edge blow-up) — the common mode is degenerate with the source and
+    # intentionally NOT corrected. This is the amplitude analog of the phase solve's
+    # ±1 difference closure (which cancels the common mode automatically).
+    @inbounds for f in 1:2, gc in 1:nchan
+        acc = 0.0; n = 0
+        for a in 1:nant
+            v = la[a, f, gc]
+            isfinite(v) && (acc += v; n += 1)
+        end
+        n == 0 && continue
+        m = acc / n
+        for a in 1:nant
+            isfinite(la[a, f, gc]) && (la[a, f, gc] -= m)
+        end
+    end
+
     # Zero band-mean log-amp gauge per (station, feed), then write the log-amp slots.
     for a in 1:nant, f in 1:2
         acc = 0.0; n = 0
@@ -889,7 +910,11 @@ function _solve_amp_bandpass!(
         @inbounds for gc in 1:nchan
             v = la[a, f, gc]
             isfinite(v) || continue
-            θ[off + plan.clocal[gc] - 1] = v - m
+            val = v - m
+            # Leave implausibly large corrections UNAPPLIED (|g| = 1): these are the
+            # low-SNR band-edge channels where the relative solve is unstable, and
+            # where a |g| > 1 would even up-weight noise (apply scales weight ×|g|²).
+            θ[off + plan.clocal[gc] - 1] = abs(val) > max_logamp ? 0.0 : val
         end
     end
     return θ

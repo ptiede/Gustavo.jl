@@ -466,6 +466,15 @@ end
             abp[a, f, gc] = off + 0.3 * sin(2π * gc / nchg + a + f)   # smooth log-amp shape
         end
     end
+    # The solver recovers only the station-RELATIVE bandpass (the common mode per
+    # channel is degenerate with the source spectrum and gauged out), so inject a
+    # pure relative bandpass: zero mean over stations at each (feed, channel).
+    for f in 1:2, gc in 1:nchg
+        m = sum(abp[a, f, gc] for a in 1:nant) / nant
+        for a in 1:nant
+            abp[a, f, gc] -= m
+        end
+    end
     uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, amp_bandpass = abp)
     adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
     sol_on = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = true)
