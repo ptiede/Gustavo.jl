@@ -30,6 +30,7 @@ function _build_fringe_uvset(;
         ref_freq = 230.0e9, chan_bw = 2.0e6, band_sep = 1.0e8,
         seed = 1234,
         bandpass = nothing,    # optional (nant, 2, nbands*nchan) per-channel phase (rad)
+        amp_bandpass = nothing, # optional (nant, 2, nbands*nchan) per-channel log-amp
     )
     UV = Gustavo.UVData
     rng = MersenneTwister(seed)
@@ -135,8 +136,9 @@ function _build_fringe_uvset(;
             dscr = screen[a, fa, ti] - screen[bb, fb, ti]
             gc = (b - 1) * nchan + c          # global channel index (bands stacked by freq)
             dbp = bandpass === nothing ? 0.0 : (bandpass[a, fa, gc] - bandpass[bb, fb, gc])
+            dla = amp_bandpass === nothing ? 0.0 : (amp_bandpass[a, fa, gc] + amp_bandpass[bb, fb, gc])  # log-amp SUMS
             ph = dφ + 2π * dτ * (f - f0) + 2π * dṙ * (tsec - t0_sec) + dscr + dbp
-            vis_dense[c, ti, bl, p] = ComplexF32(A0 * cis(ph))
+            vis_dense[c, ti, bl, p] = ComplexF32(A0 * exp(dla) * cis(ph))
         end
         vis_part = DimArray(
             vis_dense,
@@ -176,7 +178,7 @@ function _build_fringe_uvset(;
     end
 
     uvset = Gustavo.UVData.UVSet(; metadata = UV.UVMetadata(array_obs), branches = branches)
-    return uvset, (; delay, rate, phi, screen, bandpass, f0, t0_sec, bl_pairs, pol_labels, feeds)
+    return uvset, (; delay, rate, phi, screen, bandpass, amp_bandpass, f0, t0_sec, bl_pairs, pol_labels, feeds)
 end
 
 # Coherence of a (baseline, product) block: |Σ w·V| / Σ (w·|V|). 1 ⇒ phase flat.
@@ -448,4 +450,45 @@ end
     c_off = FP.delay_closure(doff)
     mx(v) = (u = abs.(filter(isfinite, v)); isempty(u) ? 0.0 : maximum(u))
     @test isapprox(mx(c_on.closure_before), mx(c_off.closure_before); rtol = 0.2)
+end
+
+@testset "Amplitude bandpass: per-channel amplitude flattened" begin
+    # Inject a smooth per-(station, feed, channel) log-amp bandpass (ref ant 1 = 0).
+    # The amplitude bandpass stage should flatten the per-channel |V|; with it OFF
+    # the amplitude ripple survives.
+    nant, nbands, nchan = 4, 2, 8
+    nchg = nbands * nchan
+    rng = MersenneTwister(0x5A11)
+    abp = zeros(nant, 2, nchg)
+    for a in 2:nant, f in 1:2
+        off = (rand(rng) - 0.5) * 0.3
+        for gc in 1:nchg
+            abp[a, f, gc] = off + 0.3 * sin(2π * gc / nchg + a + f)   # smooth log-amp shape
+        end
+    end
+    uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, amp_bandpass = abp)
+    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    sol_on = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = true)
+    sol_off = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = false)
+
+    don = FP.baseline_fringe_data(uvset, sol_on)
+    doff = FP.baseline_fringe_data(uvset, sol_off)
+    p = FP.baseline_pol_index(don, :parallel)
+    # Per-channel amplitude flatness per cross baseline: max/min of |V̄_c| (1 ⇒ flat).
+    function amp_ripple(spec)
+        rs = Float64[]
+        for bi in eachindex(don.bl_pairs)
+            a, b = don.bl_pairs[bi]
+            a == b && continue
+            m = abs.(filter(isfinite, spec[:, bi, p]))
+            (isempty(m) || minimum(m) <= 0) && continue
+            push!(rs, maximum(m) / minimum(m))
+        end
+        isempty(rs) ? NaN : sum(rs) / length(rs)
+    end
+    r_on = amp_ripple(don.spec_after)
+    r_off = amp_ripple(doff.spec_after)
+    @test r_on < r_off                  # the stage flattens the per-channel amplitude
+    @test r_on < 1.05                    # nearly flat after the amplitude bandpass
+    @test r_off > 1.1                    # ripple survives without the stage
 end

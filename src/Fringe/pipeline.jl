@@ -96,6 +96,14 @@ function _fringe_model()
             TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),
             TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), PerFeed()),
         ),
+        # Amplitude bandpass: per-channel, time-stable, per-feed log-amplitude — the
+        # station-RELATIVE instrumental amplitude shape (the common-mode part is
+        # degenerate with the source spectrum and left to amplitude cal). Solved by
+        # the same bandpass stage from the calibrator; the SNR gate leaves low-signal
+        # band edges uncorrected (gain 1) rather than dividing by ~0.
+        logamp = (
+            TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),
+        ),
     )
 end
 
@@ -125,6 +133,14 @@ _adhoc_plan(model, layout) =
 function _bandpass_plan(model, layout)
     i = findfirst(tc -> tc.component.term isa PerChannel, model.phase)
     return i === nothing ? nothing : layout.plans[i]
+end
+
+# The amplitude-bandpass component's plan (the per-channel log-amp term), or
+# `nothing`. Log-amp plans follow the phase plans in `layout.plans` (offset
+# `nphase`), so index the `PerChannel` position within `model.logamp`.
+function _amp_bandpass_plan(model, layout)
+    j = findfirst(tc -> tc.component.term isa PerChannel, model.logamp)
+    return j === nothing ? nothing : layout.plans[layout.nphase + j]
 end
 
 # One (source, scan) group of band leaves, already materialized, with the data
@@ -414,6 +430,7 @@ function solve_fringes(
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
         phase_bandpass::Bool = true,
+        amp_bandpass::Bool = true,
         bandpass_source = nothing,
     )
     model = _fringe_model()
@@ -425,6 +442,7 @@ function solve_fringes(
     stageB = _stageB_components(model, layout)
     adhoc_plan = _adhoc_plan(model, layout)
     bp_plan = _bandpass_plan(model, layout)
+    amp_bp_plan = _amp_bandpass_plan(model, layout)
     f0 = geom.f0
     t0_sec = geom.t0 * 3600.0
 
@@ -444,11 +462,16 @@ function solve_fringes(
                     θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
                     search, rounds, ref_ant, ntasks_use, ws_tlv,
                 )
-                # Phase bandpass (between Stage-B and adhoc; orthogonal frequency
-                # structure). Solved once from the brightest calibrator, time-stable.
-                if phase_bandpass && bp_plan !== nothing
+                # Phase + amplitude bandpass (between Stage-B and adhoc; orthogonal
+                # frequency structure). Solved once from the brightest calibrator,
+                # time-stable, from one shared per-channel residual accumulation.
+                if (phase_bandpass && bp_plan !== nothing) || (amp_bandpass && amp_bp_plan !== nothing)
                     cal = _bandpass_calibrator(bandpass_source, group_sources, scan_snr)
-                    _solve_bandpass_stage!(θ, group_leaves, group_sources, cal, geom, ev, bp_plan, nant; ref_ant = ref_ant)
+                    _solve_bandpass_stage!(
+                        θ, group_leaves, group_sources, cal, geom, ev,
+                        phase_bandpass ? bp_plan : nothing, nant;
+                        amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
+                    )
                 end
                 # Pass 2: adhoc per group on the residual after the global stage-B (each
                 # group writes its own disjoint per-integration slots of the shared θ).
@@ -507,6 +530,7 @@ function solve_and_reduce_fringes(
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
         phase_bandpass::Bool = true,
+        amp_bandpass::Bool = true,
         bandpass_source = nothing,
     )
     model = _fringe_model()
@@ -518,6 +542,7 @@ function solve_and_reduce_fringes(
     stageB = _stageB_components(model, layout)
     adhoc_plan = _adhoc_plan(model, layout)
     bp_plan = _bandpass_plan(model, layout)
+    amp_bp_plan = _amp_bandpass_plan(model, layout)
     f0 = geom.f0
     t0_sec = geom.t0 * 3600.0
 
@@ -537,11 +562,15 @@ function solve_and_reduce_fringes(
                     θ, scan_snr, group_leaves, geom, ev, stageB, f0, t0_sec,
                     search, rounds, ref_ant, ntasks_use, ws_tlv,
                 )
-                # Phase bandpass from the brightest calibrator (time-stable), applied
-                # to every group's correction below via the full θ.
-                if phase_bandpass && bp_plan !== nothing
+                # Phase + amplitude bandpass from the brightest calibrator (time-
+                # stable), applied to every group's correction below via the full θ.
+                if (phase_bandpass && bp_plan !== nothing) || (amp_bandpass && amp_bp_plan !== nothing)
                     cal = _bandpass_calibrator(bandpass_source, group_sources, scan_snr)
-                    _solve_bandpass_stage!(θ, group_leaves, group_sources, cal, geom, ev, bp_plan, nant; ref_ant = ref_ant)
+                    _solve_bandpass_stage!(
+                        θ, group_leaves, group_sources, cal, geom, ev,
+                        phase_bandpass ? bp_plan : nothing, nant;
+                        amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
+                    )
                 end
                 # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
                 # this group (global stage-B + this group's just-written adhoc slots), so
@@ -718,6 +747,79 @@ function _solve_phase_bandpass!(
     return θ
 end
 
+# Solve the per-(station, feed) AMPLITUDE bandpass (log-amp) from the SAME
+# accumulated residual and write it into `θ`'s log-amp `PerChannel` slots. For each
+# channel the coherent baseline amplitude obeys `log|V̄_ab| = la + lb` (a SUM
+# closure, +1/+1 incidence — unlike the phase difference), solved per channel by a
+# ridge-regularized WLS over the (station, feed) nodes (ridge stabilizes any
+# rank-deficient/bipartite component; the gauge below removes the resulting offset).
+# Same scale-invariant SNR gate as the phase path, so low-signal band edges are
+# left uncorrected (log-amp 0 ⇒ gain 1) rather than dividing by ~0. Gauge: zero
+# band-mean log-amp per (station, feed) — the absolute/common-mode amplitude is
+# degenerate with the source spectrum and intentionally NOT recovered here.
+function _solve_amp_bandpass!(
+        θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan;
+        snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
+    )
+    nbl, npol, nchan = size(rbar_bp)
+    feeds = [correlation_feed_pair(p) for p in pol_products]
+    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in 1:nbl, p in 1:npol]
+    nnodes = 2 * nant
+    pen = fill(float(ridge), nnodes)
+    la = fill(NaN, nant, 2, nchan)
+    for gc in 1:nchan
+        n1 = Int[]; n2 = Int[]; vals = Float64[]; wts = Float64[]
+        touched = falses(nnodes)
+        for bi in 1:nbl, p in 1:npol
+            a, b = bl_pairs[bi]
+            a == b && continue
+            r = rbar_bp[bi, p, gc]; w = wbar_bp[bi, p, gc]
+            (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
+            nz = noise2[bi, p]
+            snr2 = isfinite(nz) && nz > 0 ? abs2(r / w) / nz : abs2(r) / w
+            snr2 >= snr_floor^2 || continue
+            amp = abs(r / w)
+            amp > 0 || continue
+            fa, fb = feeds[p]
+            push!(n1, _node(a, fa, nant)); push!(n2, _node(b, fb, nant))
+            push!(vals, log(amp)); push!(wts, snr2)
+            touched[_node(a, fa, nant)] = true; touched[_node(b, fb, nant)] = true
+        end
+        isempty(vals) && continue
+        A = zeros(length(vals), nnodes)
+        @inbounds for ri in eachindex(vals)
+            A[ri, n1[ri]] += 1.0
+            A[ri, n2[ri]] += 1.0
+        end
+        sol = weighted_regularized_least_squares(A, vals, wts, pen)
+        for node in 1:nnodes
+            touched[node] || continue
+            ant = (node - 1) % nant + 1
+            feed = (node - 1) ÷ nant + 1
+            la[ant, feed, gc] = sol[node]
+        end
+    end
+
+    # Zero band-mean log-amp gauge per (station, feed), then write the log-amp slots.
+    for a in 1:nant, f in 1:2
+        acc = 0.0; n = 0
+        @inbounds for gc in 1:nchan
+            v = la[a, f, gc]
+            isfinite(v) && (acc += v; n += 1)
+        end
+        n == 0 && continue
+        m = acc / n
+        off = plan.off1[a, f, 1, 1]
+        off == 0 && continue
+        @inbounds for gc in 1:nchan
+            v = la[a, f, gc]
+            isfinite(v) || continue
+            θ[off + plan.clocal[gc] - 1] = v - m
+        end
+    end
+    return θ
+end
+
 # Bandpass stage: solve the phase bandpass from one (bright calibrator) source and
 # write it into `θ`. Accumulates the per-channel residual over that source's scans
 # (after the global Stage-B), then one closing per-channel solve. Sequential over
@@ -725,7 +827,7 @@ end
 # resident at a time. Time-stable, so it applies to ALL scans via `GlobalTime`.
 function _solve_bandpass_stage!(
         θ, group_leaves, group_sources, cal_source, geom, ev, plan, nant;
-        ref_ant::Integer = 1, snr_floor::Real = 1.0,
+        amp_plan = nothing, ref_ant::Integer = 1, snr_floor::Real = 1.0,
     )
     nchan = length(geom.channel_freqs)
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
@@ -742,7 +844,10 @@ function _solve_bandpass_stage!(
         _accumulate_bandpass_rbar!(rbar_bp, wbar_bp, blidx, ev, θ, grp)
     end
     rbar_bp === nothing && return θ            # calibrator absent → leave bandpass at 0
-    _solve_phase_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, plan; ref_ant = ref_ant, snr_floor = snr_floor)
+    plan === nothing ||
+        _solve_phase_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, plan; ref_ant = ref_ant, snr_floor = snr_floor)
+    amp_plan === nothing ||
+        _solve_amp_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, amp_plan; snr_floor = snr_floor)
     return θ
 end
 
