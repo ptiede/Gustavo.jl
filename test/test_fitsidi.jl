@@ -6,6 +6,7 @@
 using Gustavo
 using Test
 using FITSFiles
+using Dates: DateTime, Date, Millisecond, Hour
 using LinearAlgebra: Diagonal
 using StructArrays
 using DimensionalData
@@ -358,6 +359,99 @@ const _F32EPS = 1.0f-4
             isfile(path) && rm(path)
         end
     end
+
+    @testset "weight_mode = :radiometer" begin
+        # Δν = chan_bw, τ = INTTIM = min Ti spacing (0.01 h = 36 s); a valid
+        # validity weight w becomes w·2·Δν·τ·η². Flag sentinels (≤0) pass through.
+        chan_bw = 2.0e6
+        tau = 36.0                              # 0.01 h spacing → 36 s
+        factor = 2 * chan_bw * tau              # η = 1
+        uvset = build_synth_idi_uvset(;
+            nbands = 1, nchan = 3, nscan = 1, ntime = 3, chan_bw = chan_bw,
+            weight_fn = (band, ti, bl, p) -> p == 2 ? -1.0f0 : 2.0f0,
+        )
+        path = tempname() * ".idifits"
+        try
+            UV.write_fitsidi(path, uvset)
+            valid = UV.load_fitsidi(path; lazy = false, weight_mode = :validity)
+            radio = UV.load_fitsidi(path; lazy = false, weight_mode = :radiometer)
+            radio_eta = UV.load_fitsidi(
+                path; lazy = false, weight_mode = :radiometer, weight_efficiency = 0.5,
+            )
+            lv = first(values(DimensionalData.branches(valid)))
+            lr = first(values(DimensionalData.branches(radio)))
+            le = first(values(DimensionalData.branches(radio_eta)))
+            pols = collect(lookup(lv[:vis], Pol))
+            pp = findfirst(==("PP"), pols)
+            pq = findfirst(==("PQ"), pols)
+            wv = parent(lv[:weights]); wr = parent(lr[:weights]); we = parent(le[:weights])
+            # Validity weights are the raw correlator values (≈2 here).
+            @test all(wv[:, :, :, pp] .≈ 2.0f0)
+            # Radiometer weights = validity · 2·Δν·τ (η=1), and ·0.25 for η=0.5.
+            @test all(isapprox.(wr[:, :, :, pp], Float32(2 * factor); rtol = 1.0f-4))
+            @test all(isapprox.(we[:, :, :, pp], Float32(2 * factor * 0.25); rtol = 1.0f-4))
+            # Flag sentinels (≤0) are preserved, not scaled into valid weights.
+            @test all(wr[:, :, :, pq] .<= 0)
+            @test all(parent(lr[:flag])[:, :, :, pq])
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+end
+
+# Per-band a-priori amplitude calibration: `apply_calibration(uvset, band_cals)`
+# selects a distinct AntabCalibration per band (info.ddi + 1). This is the
+# format-neutral half of the FITS-IDI a-priori path (`load_fitsidi_apriori`
+# builds the per-band cals from GAIN_CURVE + SYSTEM_TEMPERATURE).
+@testset "a-priori per-band apply_calibration" begin
+    UV = Gustavo.UVData
+    BP = Gustavo.Bandpass
+
+    # Two bands; all weights 1. Flat gain (POLY=[1.0]) + DPFU=1 ⇒ SEFD = Tsys,
+    # so the per-baseline amplitude factor is √(Tsys_a·Tsys_b) = Tsys_band.
+    uvset = build_synth_idi_uvset(; nant = 3, nbands = 2, nchan = 2, nscan = 1, ntime = 3)
+    ant_names = UV.union_antennas(uvset).name
+
+    rdate = DimensionalData.metadata(uvset).array_obs.rdate
+    base_dt = DateTime(Date(rdate))
+    ts_all = sort!(unique(reduce(vcat, [collect(UV.obs_time(l)) for l in values(UV.branches(uvset))])))
+    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+    times = [times[1] - Hour(1); times; times[end] + Hour(1)]   # pad the window
+
+    tsys_band = Dict(1 => 100.0, 2 => 400.0)
+    band_cals = Dict{Int, BP.AntabCalibration}()
+    for (b, tsys) in tsys_band
+        stns = Dict{String, BP.AntabStation}()
+        for nm in ant_names
+            gain = BP.AntabGainCurve((1.0, 1.0), [1.0])
+            vals = repeat([tsys tsys], length(times), 1)
+            series = BP.AntabTsysSeries(times, [(0, :R), (0, :L)], vals)
+            stns[String(nm)] = BP.AntabStation(String(nm), gain, series, 0)
+        end
+        band_cals[b] = BP.AntabCalibration("synthetic", "synth", 2000, stns)
+    end
+
+    # min_elevation_deg = -Inf: synthetic station_xyz aren't real ECEF coords
+    # (elevation ill-defined) and the gain curve is flat, so disable the
+    # below-horizon cutoff — this test only checks per-band SEFD scaling.
+    corr = BP.apply_calibration(
+        uvset, band_cals; on_missing_station = :error, min_elevation_deg = -Inf,
+    )
+
+    seen_bands = Set{Int}()
+    for (k, leaf_in) in UV.branches(uvset)
+        leaf_out = UV.branches(corr)[k]
+        band = Int(DimensionalData.metadata(leaf_in).ddi) + 1
+        push!(seen_bands, band)
+        factor = tsys_band[band]                       # √(SEFD_a·SEFD_b), equal SEFDs
+        vin = parent(leaf_in[:vis]); vout = parent(leaf_out[:vis])
+        win = parent(leaf_in[:weights]); wout = parent(leaf_out[:weights])
+        idx = findfirst(i -> isfinite(vin[i]) && win[i] > 0, eachindex(vin))
+        @test idx !== nothing
+        @test abs(vout[idx]) ≈ abs(vin[idx]) * factor rtol = 1.0e-6
+        @test wout[idx] ≈ win[idx] / factor^2 rtol = 1.0e-6
+    end
+    @test seen_bands == Set([1, 2])                    # both bands exercised, distinctly
 end
 
 # ── FLAG-table support ────────────────────────────────────────────────────────

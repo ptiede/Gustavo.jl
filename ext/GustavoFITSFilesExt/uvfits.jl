@@ -498,12 +498,54 @@ end
 UVData.register_primary_cards!(uvset::UVSet, cards::AbstractVector) =
     (_PRIMARY_CARDS[uvset] = Vector{Card}(cards); uvset)
 
-# Hook so primary-HDU cards follow a UVSet through `rebuild` / `select_*`
-# / `merge_uvsets`. Source-of-truth lives only here; format-neutral code
-# in `src/` calls `_propagate_extension_state!` and gets a no-op when
-# the FITS extension isn't loaded.
+# Track the on-disk file each UVSet was loaded from. Both UVFITS and FITS-IDI
+# reads keep lazy/DiskArray references into the source file (and the eager
+# UVFITS path still reads the AN/FQ/NX tables lazily while writing). Writing
+# back to that same path calls `open(path; write=true)`, which truncates the
+# file *before* those reads complete — silently corrupting the output. We
+# record the source so the writers can refuse.
+#
+# Keyed by `objectid`, NOT a `WeakKeyDict{UVSet}`: `isequal(uvset, uvset)` is
+# `false` for these sets (their lazy DimArrays compare unequal to themselves),
+# so a value-keyed dict could never find its own entries. `objectid` is
+# identity-based and stable, and storing it does not pin the (large) UVSet in
+# memory; the tiny per-load entry is harmless. Paths normalized at registration.
+const _SOURCE_PATHS = Dict{UInt, String}()
+
+_norm_path(p) = try
+    realpath(String(p))
+catch
+    abspath(String(p))
+end
+
+register_source_path!(uvset::UVSet, path) =
+    (_SOURCE_PATHS[objectid(uvset)] = _norm_path(path); uvset)
+
+# Refuse an in-place write that would truncate the very file backing `uvset`.
+# A no-op when the destination is a different file (or the UVSet has no
+# recorded source, e.g. freshly built or fully materialized).
+function _assert_not_writing_to_source(output_path, uvset::UVSet)
+    src = get(_SOURCE_PATHS, objectid(uvset), nothing)
+    src === nothing && return nothing
+    isfile(output_path) || return nothing            # not an existing file → no clash
+    _norm_path(output_path) == src || return nothing
+    error(
+        "write: refusing to write to \"$(output_path)\" — this is the file the " *
+            "UVSet was loaded from. The write truncates the file before reading " *
+            "from it completes, which corrupts the data. Write to a different " *
+            "path (then move it into place if you need to overwrite).",
+    )
+end
+
+# Hook so primary-HDU cards and the source path follow a UVSet through
+# `rebuild` / `select_*` / `merge_uvsets`. Source-of-truth lives only here;
+# format-neutral code in `src/` calls `_propagate_extension_state!` and gets a
+# no-op when the FITS extension isn't loaded.
 function UVData._propagate_extension_state!(new::UVSet, old::UVSet)
     haskey(_PRIMARY_CARDS, old) && (_PRIMARY_CARDS[new] = _PRIMARY_CARDS[old])
+    let s = get(_SOURCE_PATHS, objectid(old), nothing)
+        s === nothing || (_SOURCE_PATHS[objectid(new)] = s)
+    end
     return new
 end
 
@@ -513,6 +555,7 @@ function UVData.load_uvfits(path)
     flat = _load_uvfits_flat(path)
     uvset = UVSet(flat)
     UVData.register_primary_cards!(uvset, flat.primary_cards)
+    register_source_path!(uvset, path)
     return uvset
 end
 
@@ -1249,6 +1292,7 @@ function _leaf_record_order(leaf)
 end
 
 function UVData.write_uvfits(output_path, uvset::UVSet)
+    _assert_not_writing_to_source(output_path, uvset)
     src_list = sources(uvset)
     length(src_list) == 1 || error(
         "write_uvfits: UVData is single-source; got sources=$(src_list). " *

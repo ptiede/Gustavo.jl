@@ -185,6 +185,7 @@ end
 # ── Public entry point ───────────────────────────────────────────────────────
 
 function UVData.write_fitsidi(output_path, uvset::UVSet)
+    _assert_not_writing_to_source(output_path, uvset)
     src_list = sources(uvset)
     length(src_list) == 1 || error(
         "write_fitsidi: UVData is single-source; got sources=$(src_list). " *

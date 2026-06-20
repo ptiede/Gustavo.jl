@@ -74,6 +74,22 @@ function Base.show(io::IO, m::ObsArrayMetadata)
 end
 
 """
+    with_bunit(o::ObsArrayMetadata, bunit) -> ObsArrayMetadata
+
+Copy of `o` with the brightness unit `bunit` replaced (e.g. `"JY"` after a
+priori flux calibration). All other fields are preserved.
+"""
+function with_bunit(o::ObsArrayMetadata, bunit)
+    return ObsArrayMetadata(;
+        telescope = o.telescope, instrume = o.instrume, date_obs = o.date_obs,
+        equinox = o.equinox, bunit = bunit, rdate = o.rdate, gst_iat0 = o.gst_iat0,
+        earth_rot_rate = o.earth_rot_rate, ut1utc = o.ut1utc, polarx = o.polarx,
+        polary = o.polary, datutc = o.datutc, time_sys = o.time_sys, frame = o.frame,
+        xyzhand = o.xyzhand, poltype = o.poltype, extras = o.extras,
+    )
+end
+
+"""
     UVMetadata
 
 Bundle of array-wide observation globals shared across every leaf of a

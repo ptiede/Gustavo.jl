@@ -31,6 +31,10 @@ include("test_adhoc.jl")
 # End-to-end CalibrationSolution + solve_fringes pipeline (Phase 6).
 include("test_pipeline.jl")
 
+# Modular calibration pipeline (CalibrationPipeline / calibrate refactor).
+# Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
+include("test_pipeline_config.jl")
+
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
 
@@ -2604,7 +2608,10 @@ end
         "synthetic", "synth", 2000, stations,
     )
 
-    corr = BP.apply_calibration(base, antab)
+    # min_elevation_deg = -Inf: this test fakes station_xyz = zeros(3) (elevation
+    # ill-defined) and uses a flat gain curve, so we disable the below-horizon
+    # cutoff to keep it purely a SEFD-scaling check.
+    corr = BP.apply_calibration(base, antab; min_elevation_deg = -Inf)
 
     # The synthetic `synthetic_uvdata` fakes `station_xyz = zeros(3)` —
     # the elevation calculation will be ill-defined there, but the test

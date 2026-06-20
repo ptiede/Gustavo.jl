@@ -49,6 +49,19 @@ function apply(f, uvset::UVSet)
 end
 
 """
+    set_bunit(uvset::UVSet, bunit) -> UVSet
+
+Return `uvset` with its array-wide brightness unit set to `bunit` (e.g. `"JY"`
+once the visibilities have been flux-calibrated). Only the root
+`ObsArrayMetadata.bunit` is changed; leaves and data are untouched.
+"""
+function set_bunit(uvset::UVSet, bunit)
+    root = DimensionalData.metadata(uvset)
+    new_meta = UVMetadata(with_bunit(root.array_obs, bunit))
+    return DimensionalData.rebuild(uvset; metadata = new_meta)
+end
+
+"""
     mapleaves(f, uvset::UVSet) -> OrderedDict{Symbol, T}
 
 Walk the leaves and collect `f(leaf)` (or `f(leaf, info)` / `f(leaf, info,

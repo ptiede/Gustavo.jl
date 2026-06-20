@@ -75,7 +75,7 @@ export AdhocPhasing, AdhocSolution, solve_adhoc_phasing
 export solve_fringes, solve_and_reduce_fringes
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary
 export fringe_gain_spectrum, fringe_gain_time_series
-export BaselineFringeData, baseline_fringe_data, baseline_pol_index
+export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups
 export delay_closure, print_delay_closure
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
 

@@ -123,6 +123,36 @@ end
 # Next FFT-friendly size ≥ m (products of small primes are fast in FFTW).
 _fast_fft_size(m::Integer) = nextprod((2, 3, 5, 7), max(1, m))
 
+# A `_uniform_axis` descriptor (concrete NamedTuple type, so `_SearchAxes` fields
+# stay type-stable).
+const _Axis = @NamedTuple{origin::Float64, step::Float64, n::Int, degenerate::Bool}
+
+# Per-(scan group) search-grid geometry: the frequency/time uniform-axis
+# descriptors, the padded FFT sizes, and the conjugate delay/rate coordinate
+# vectors. These depend ONLY on (freqs, times, oversample) — identical across every
+# (baseline, product) of a group — so the search builds them ONCE per group via
+# `_search_axes` instead of re-sorting the freq/time axes (an O(nchan log nchan)
+# sort of the same 1024 channels) and re-`collect`ing the two fftfreq vectors on
+# each of the group's nbl×npol calls.
+struct _SearchAxes
+    fax::_Axis
+    tax::_Axis
+    nf_pad::Int
+    nt_pad::Int
+    delays::Vector{Float64}
+    rates::Vector{Float64}
+end
+
+function _search_axes(freqs::AbstractVector, times::AbstractVector, opts::FringeSearch)
+    fax = _uniform_axis(freqs)
+    tax = _uniform_axis(times)
+    nf_pad = fax.degenerate ? 1 : _fast_fft_size(opts.oversample * fax.n)
+    nt_pad = tax.degenerate ? 1 : _fast_fft_size(opts.oversample * tax.n)
+    delays = fax.degenerate ? [0.0] : collect(fftfreq(nf_pad, 1.0 / fax.step))
+    rates = tax.degenerate ? [0.0] : collect(fftfreq(nt_pad, 1.0 / tax.step))
+    return _SearchAxes(fax, tax, nf_pad, nt_pad, delays, rates)
+end
+
 """
     baseline_fringe_search(V, W, freqs, times, f0, t0; opts = FringeSearch()) -> FringeDetection
 
@@ -145,14 +175,25 @@ function baseline_fringe_search(
     nchan, ntime = size(V)
     (nchan == length(freqs) && ntime == length(times)) ||
         error("V is $(size(V)); expected (length(freqs), length(times)) = ($(length(freqs)), $(length(times)))")
+    ax = _search_axes(freqs, times, opts)
+    return _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts)
+end
 
-    fax = _uniform_axis(freqs)
-    tax = _uniform_axis(times)
-
-    # Pad each axis (oversample), then round up to a fast FFT size. A degenerate
-    # axis keeps length 1 (its conjugate parameter stays 0).
-    nf_pad = fax.degenerate ? 1 : _fast_fft_size(opts.oversample * fax.n)
-    nt_pad = tax.degenerate ? 1 : _fast_fft_size(opts.oversample * tax.n)
+# Core matched-filter search on a PRECOMPUTED `_SearchAxes` — the hot path called
+# once per (baseline, product). `baseline_fringe_search` above is the public,
+# one-off wrapper that builds the axes then calls this; the group search builds the
+# axes once and calls this directly for every baseline. Numerically identical to the
+# previously-inlined body.
+function _baseline_fringe_search(
+        V::AbstractMatrix, W::AbstractMatrix,
+        freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
+        ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
+    )
+    nchan, ntime = size(V)
+    fax = ax.fax
+    tax = ax.tax
+    nf_pad = ax.nf_pad
+    nt_pad = ax.nt_pad
 
     # Reuse the workspace's gridding buffer + FFT plan (zeroed each call) instead
     # of allocating an `nf_pad × nt_pad` ComplexF64 grid every call.
@@ -176,8 +217,9 @@ function baseline_fringe_search(
     mul!(D, ws.plan, G)
 
     # Conjugate-axis coordinates: delays (s) ↔ frequency grid, rates (Hz) ↔ time.
-    delays = fax.degenerate ? [0.0] : collect(fftfreq(nf_pad, 1.0 / fax.step))
-    rates = tax.degenerate ? [0.0] : collect(fftfreq(nt_pad, 1.0 / tax.step))
+    # Precomputed once per group in `ax` (identical every call).
+    delays = ax.delays
+    rates = ax.rates
 
     # Windowed peak of |D|, plus Σ|D|² over the window for a data-driven noise
     # estimate (see SNR below).

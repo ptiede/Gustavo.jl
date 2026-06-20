@@ -342,6 +342,94 @@ Average each leaf's `Ti` axis into `dt_seconds`-wide bins. `apply(TimeBinAverage
 time_bin_average(uvset::UVSet, dt_seconds::Real) = apply(TimeBinAverage(dt_seconds), uvset)
 
 
+# ── Band-edge handling ───────────────────────────────────────────────────────
+
+"""
+    BandEdgeFlag(mode, fraction)
+
+Per-leaf reducer that handles polyphase-filterbank band edges. `fraction` is the
+fraction of channels removed at *each* edge of every band (so `2·fraction` of the
+band in total).
+
+- `:flag_fraction` — zero the `weights` (and set `flag`) on the outer `fraction`
+  of channels at each edge; the `Frequency` axis length is unchanged.
+- `:trim` — drop the outer `fraction` of channels at each edge, shortening the
+  `Frequency` axis and updating the leaf `FrequencySetup` accordingly.
+
+`fraction = 0` (or a count that rounds to zero channels) is a no-op.
+"""
+struct BandEdgeFlag <: AbstractPartitionReducer
+    mode::Symbol
+    fraction::Float64
+    function BandEdgeFlag(mode::Symbol = :flag_fraction, fraction::Real = 0.0)
+        mode in (:flag_fraction, :trim) ||
+            error("BandEdgeFlag mode must be :flag_fraction or :trim, got :$mode")
+        (0.0 <= fraction < 0.5) ||
+            error("BandEdgeFlag fraction must be in [0, 0.5), got $fraction")
+        return new(mode, Float64(fraction))
+    end
+end
+
+(r::BandEdgeFlag)(leaf::DimensionalData.AbstractDimTree, ::PartitionInfo, ::UVMetadata) =
+    _band_edge_partition(leaf, r.mode, r.fraction)
+
+function _band_edge_partition(leaf::DimensionalData.AbstractDimTree, mode::Symbol, fraction::Real)
+    vis_l = leaf[:vis]
+    nchan = size(vis_l, 1)
+    ne = floor(Int, fraction * nchan)
+    ne == 0 && return leaf
+    if mode === :flag_fraction
+        # Zero the edge-channel weights; `with_visibilities` re-derives `flag`.
+        w_new = copy(parent(leaf[:weights]))
+        @inbounds w_new[1:ne, :, :, :] .= 0
+        @inbounds w_new[(nchan - ne + 1):nchan, :, :, :] .= 0
+        return with_visibilities(leaf, parent(vis_l), w_new)
+    else  # :trim
+        keep = (ne + 1):(nchan - ne)
+        isempty(keep) &&
+            error("BandEdgeFlag :trim removed all $nchan channels (fraction=$fraction)")
+        return _trim_channels(leaf, keep)
+    end
+end
+
+# Slice the leaf's `Frequency` axis to `keep`, rebuilding the per-leaf
+# FrequencySetup; uvw is frequency-independent and carried through unchanged.
+function _trim_channels(leaf::DimensionalData.AbstractDimTree, keep::AbstractVector{<:Integer})
+    vis_l = leaf[:vis]
+    w_l = leaf[:weights]
+    uvw_l = leaf[:uvw]
+    info = DimensionalData.metadata(leaf)
+    fs = info.freq_setup
+    new_freqs = collect(channel_freqs(fs))[keep]
+    new_fs = FrequencySetup(;
+        name = setup_name(fs), ref_freq = ref_freq(fs),
+        channel_freqs = new_freqs,
+        ch_widths = collect(ch_widths(fs))[keep],
+        total_bandwidths = collect(total_bandwidths(fs))[keep],
+        sidebands = collect(sidebands(fs))[keep],
+        extras = fs.extras,
+    )
+    V = parent(vis_l)[keep, :, :, :]
+    W = parent(w_l)[keep, :, :, :]
+    ti_dim = dims(vis_l, Ti)
+    bl_dim = dims(vis_l, Baseline)
+    pol_dim = dims(vis_l, Pol)
+    vis_da = DimArray(V, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
+    weights_da = DimArray(W, dims(vis_da))
+    flag_da = DimArray(W .<= 0, dims(vis_da))
+    new_info = update(info; freq_setup = new_fs)
+    return _build_leaf(vis_da, weights_da, uvw_l, flag_da; partition_info = new_info)
+end
+
+"""
+    flag_band_edges(uvset::UVSet; mode = :flag_fraction, fraction = 0.0) -> UVSet
+
+Handle band edges on every leaf. `apply(BandEdgeFlag(mode, fraction), uvset)`.
+"""
+flag_band_edges(uvset::UVSet; mode::Symbol = :flag_fraction, fraction::Real = 0.0) =
+    apply(BandEdgeFlag(mode, fraction), uvset)
+
+
 # ── Combine spectral windows (bands) into one IF axis ────────────────────────
 
 """

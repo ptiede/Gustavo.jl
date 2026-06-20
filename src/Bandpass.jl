@@ -106,6 +106,19 @@ Categorical scan colormap for plot helpers. Provided by `GustavoMakieExt`.
 """
 function diagnostic_scan_colormap end
 
+"""
+    load_fitsidi_apriori(path; tsys_max = 1.0e4) -> Dict{Int, AntabCalibration}
+
+Build per-band a-priori flux calibrations from a FITS-IDI file's `GAIN_CURVE`
+(DPFU + elevation gain polynomial) and `SYSTEM_TEMPERATURE` (Tsys) tables, one
+`AntabCalibration` per 1-based band index — ready to pass to
+`apply_calibration(uvset, band_cals)`. Tsys values that are non-positive, the
+`999` placeholder, or `> tsys_max` are treated as missing and fall back to the
+other feed's value for the same (antenna, band, time); samples with no usable
+Tsys are flagged on apply. Implemented in `GustavoFITSFilesExt` (load FITSFiles).
+"""
+function load_fitsidi_apriori end
+
 export load_uvfits, write_uvfits, scan_average
 export baseline_visibilities, baseline_weights, wrap_gain_solutions
 export polarization_feeds, parallel_hand_indices, cross_hand_indices
@@ -129,7 +142,7 @@ export solve_bandpass
 export apply_bandpass, default_output_path
 export AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
 export load_antab, tsys_at, elevation_gain, stations
-export AprioriFluxGains, apriori_flux_gains, apply_calibration
+export AprioriFluxGains, apriori_flux_gains, apply_calibration, load_fitsidi_apriori
 export coherence_loss_table, print_coherence_loss_table, choose_diagnostic_baseline
 export plot_baseline_phases, plot_stability, plot_gain_solutions, plot_baseline_bandpass, plot_baseline_bandpass_residuals
 export parallel_hand_support_summary, site_parallel_hand_support, print_parallel_hand_support

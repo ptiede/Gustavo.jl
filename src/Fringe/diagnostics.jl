@@ -68,6 +68,33 @@ function fringe_solution_summary(sol::CalibrationSolution)
     )
 end
 
+"""
+    fringe_scan_groups(uvset, sol::CalibrationSolution) -> Vector{NamedTuple}
+
+Per scan-group metadata in solver order: `(; scan_index, source, scan, max_snr)`.
+Lazy — reads only leaf metadata (no visibilities), so it is cheap on a streamed
+`UVSet`. Use it to choose which scans to inspect with [`baseline_fringe_data`](@ref)
+/ `plot_baseline_fringes`, e.g. the highest-SNR scan of each source:
+
+    g = fringe_scan_groups(uvset, sol)
+    best = argmax(r -> r.max_snr, filter(r -> r.source == "M87", g))
+"""
+function fringe_scan_groups(uvset::UVSet, sol::CalibrationSolution)
+    groups = _scan_group_leaves(uvset)
+    snr = get(sol.info, :scan_max_snr, Float64[])
+    out = NamedTuple[]
+    for (gi, g) in enumerate(groups)
+        info = UVData.metadata(last(first(g)))
+        push!(
+            out, (;
+                scan_index = gi, source = info.source_name, scan = info.scan_name,
+                max_snr = gi <= length(snr) ? Float64(snr[gi]) : NaN,
+            ),
+        )
+    end
+    return out
+end
+
 # ── Gain extractors (pure; consumed by the Makie plot stubs and tests) ─────────
 
 """
@@ -133,6 +160,7 @@ struct BaselineFringeData
     scan_index::Int
     max_snr::Float64
     bl_pairs::Vector{Tuple{Int, Int}}
+    ant_names::Vector{String}        # station codes, indexed by antenna number
     pol_products::Vector{String}
     freqs::Vector{Float64}
     times::Vector{Float64}
@@ -220,7 +248,7 @@ function baseline_fringe_data(
         Float64(sol.info.scan_max_snr[gi]) : NaN
     return BaselineFringeData(
         info.source_name, info.scan_name, gi, msnr,
-        copy(grp.bl_pairs), copy(grp.pol_products),
+        copy(grp.bl_pairs), String.(collect(info.antennas.name)), copy(grp.pol_products),
         copy(grp.fg), copy(grp.tg),
         _coherent_mean!(sb, swb), _coherent_mean!(sa, swa),
         _coherent_mean!(tb, twb), _coherent_mean!(ta, twa),

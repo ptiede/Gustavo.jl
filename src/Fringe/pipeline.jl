@@ -185,13 +185,88 @@ end
 _materialize_group_leaves(keyed_leaves_lazy) =
     UVData.materialize_group([l for (_, l) in keyed_leaves_lazy]; layers = (:vis, :weights, :uvw))
 
-# Materialize a group and build ONLY the concatenated `_ScanGroup` (frequency
-# stacked) — the per-band leaves are local and freed once copied, so this holds a
-# single data copy. Used by the fringe search (needs the full freq axis for the
-# 2-D FFT) and the bandpass stage.
+# Build the concatenated `_ScanGroup` (frequency stacked) for the fringe search /
+# bandpass stage. Fast path: decode each band's vis+weights DIRECTLY into a
+# contiguous channel-block of the stacked cube (`_try_build_scan_group_direct`),
+# avoiding the per-band intermediate dense arrays + the explicit concat copy (one
+# full in-RAM data copy and one read+write pass eliminated) and the unused uvw
+# read. Falls back to materialize-then-copy when the group is not a single
+# sibling-band IDI span or its channels do not stack contiguously.
 function _materialize_concat_group(keyed_leaves_lazy, geom::DataGeometry)
+    direct = _try_build_scan_group_direct(keyed_leaves_lazy, geom)
+    direct === nothing || return direct
     leaves = _materialize_group_leaves(keyed_leaves_lazy)
     return _build_scan_group(leaves, geom)
+end
+
+# Try to build the stacked `_ScanGroup` by decoding straight into the cube. Returns
+# `nothing` (caller falls back) unless every band leaf maps to ONE full contiguous
+# ascending channel block of the stacked frequency axis — the normal case (distinct,
+# non-interleaved sub-bands). Metadata (baselines/pols/times/freqs) comes from the
+# LAZY leaves (dims are eager), so nothing is materialized until the decode.
+function _try_build_scan_group_direct(keyed_leaves_lazy, geom::DataGeometry)
+    lazy = [l for (_, l) in keyed_leaves_lazy]
+    l0 = first(lazy)
+    bl_pairs = collect(UVData.baselines(l0).pairs)
+    pols = String.(pol_products(l0))
+    tg = Float64.(lookup(l0[:vis], Ti))
+    nti = length(tg)
+    nbl = length(bl_pairs)
+    npol = length(pols)
+
+    # (global channel index, freq, leafidx, local channel) for every channel, sorted
+    # by global index — the stacked-cube channel order (same as `_build_scan_group`).
+    chan_entries = Tuple{Int, Float64, Int, Int}[]
+    nchan_leaf = Vector{Int}(undef, length(lazy))
+    for (li, leaf) in enumerate(lazy)
+        ci, _ = leaf_window(geom, leaf)
+        fs = Float64.(lookup(leaf[:vis], Frequency))
+        nchan_leaf[li] = length(ci)
+        for (lc, gc) in enumerate(ci)
+            push!(chan_entries, (gc, fs[lc], li, lc))
+        end
+    end
+    sort!(chan_entries; by = e -> e[1])
+    nchan = length(chan_entries)
+
+    # Require each leaf to be exactly one full contiguous ascending run (local
+    # channels 1..no_chan land on a consecutive cube block). Anything else (a band
+    # split or interleaved with another) → bail to the general copy path.
+    blocks = Vector{UnitRange{Int}}(undef, length(lazy))
+    fill!(blocks, 1:0)
+    i = 1
+    while i <= nchan
+        li = chan_entries[i][3]
+        chan_entries[i][4] == 1 || return nothing          # run must start at local channel 1
+        j = i
+        while j < nchan && chan_entries[j + 1][3] == li &&
+                chan_entries[j + 1][4] == chan_entries[j][4] + 1
+            j += 1
+        end
+        (j - i + 1) == nchan_leaf[li] || return nothing     # run must cover the whole band
+        isempty(blocks[li]) || return nothing               # each leaf exactly once
+        blocks[li] = i:j
+        i = j + 1
+    end
+    any(isempty, blocks) && return nothing
+
+    Vg = Array{ComplexF32}(undef, nchan, nti, nbl, npol)
+    Wg = Array{Float32}(undef, nchan, nti, nbl, npol)
+    fg = Vector{Float64}(undef, nchan)
+    g_ci = Vector{Int}(undef, nchan)
+    for (row, e) in enumerate(chan_entries)
+        fg[row] = e[2]
+        g_ci[row] = e[1]
+    end
+
+    dests = [
+        (view(Vg, blocks[li], :, :, :), view(Wg, blocks[li], :, :, :))
+            for li in eachindex(lazy)
+    ]
+    UVData.materialize_group_into!(dests, lazy; layers = (:vis, :weights)) || return nothing
+
+    _, g_ti = leaf_window(geom, l0)
+    return _ScanGroup(Vg, Wg, fg, tg, bl_pairs, pols, g_ci, g_ti)
 end
 
 # Materialize a group as its per-band `(key, leaf)` pairs WITHOUT building the
@@ -295,15 +370,20 @@ function _search_group(grp::_ScanGroup, Vsearch, f0, t0_sec, search, ws)
     npol = length(grp.pol_products)
     det = Matrix{FringeDetection}(undef, nbl, npol)
     maxsnr = 0.0
+    # Build the search-grid geometry ONCE for the group (freqs/times are shared by
+    # every baseline×product), and pass `view`s of the cube into the core so each
+    # call neither re-sorts the axes nor copies its (chan, ti) slice.
+    times = grp.tg .* 3600.0
+    ax = _search_axes(grp.fg, times, search)
     for p in 1:npol, bi in 1:nbl
         a, b = grp.bl_pairs[bi]
         if a == b
             det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
             continue
         end
-        d = baseline_fringe_search(
-            Vsearch[:, :, bi, p], grp.Wg[:, :, bi, p],
-            grp.fg, grp.tg .* 3600.0, f0, t0_sec; opts = search, workspace = ws,
+        d = _baseline_fringe_search(
+            view(Vsearch, :, :, bi, p), view(grp.Wg, :, :, bi, p),
+            grp.fg, times, f0, t0_sec, ax, ws, search,
         )
         det[bi, p] = d
         d.valid && (maxsnr = max(maxsnr, d.snr))
@@ -409,11 +489,15 @@ end
 # safe peak. `group_leaves[i]` is a vector of `(key, lazy_leaf)`; summing
 # `prod(size(leaf[:vis]))` over its bands gives the group's cell count without
 # materializing anything.
-# Estimate the PEAK resident bytes for one scan group. Each pass now holds a SINGLE
-# data copy (search: the concatenated cube; pass 2: the per-band leaves — never
-# both), so the charge is ~2.5× the raw vis size: one copy (vis ComplexF32 8 B +
-# weights Float32 4 B = 12 B/cell) plus the transient bulk-read span and GC/heap
-# overhead. (Before the search/pass-2 split this was 4× — two copies held at once.)
+# Estimate the PEAK resident bytes for one scan group (vis ComplexF32 8 B + weights
+# Float32 4 B = 12 B/cell). During decode the search pass holds the stacked cube
+# (one copy) PLUS the transient bulk-read span (≈ one copy — on-disk FLUX is the
+# same 8 B/cell, measured span/cube ≈ 0.8–1.1 here), so peak ≈ 2× cube; pass 2
+# similarly holds the per-band leaves plus the corrected copy `apply_calibration`
+# allocates. We charge 2.5× for GC/heap headroom over that ~2.25× peak. The
+# decode-into-cube change removed the OLD second copy (leaves AND cube held at once),
+# but the now-larger in-RAM span (the 3 GiB cap lets big scans use the fast read)
+# brings the peak back to ~2× — so the charge stays 2.5×.
 function _group_peak_bytes(group)
     cells = 0
     for (_, leaf) in group
@@ -422,38 +506,35 @@ function _group_peak_bytes(group)
     return round(Int, 2.5 * 12 * cells)
 end
 
-# Memory currently AVAILABLE to allocate (reclaimable cache included). On Linux
-# this is `/proc/meminfo` `MemAvailable`; elsewhere fall back to `Sys.free_memory()`.
-# Budgeting from this (not `Sys.total_memory()`) makes the cap adapt to whatever
-# else is running — e.g. IDE language servers eating several GB — instead of
-# over-committing a loaded box and getting OOM-killed.
-function _available_memory()
-    try
-        for line in eachline("/proc/meminfo")
-            if startswith(line, "MemAvailable:")
-                return parse(Int, split(line)[2]) * 1024    # kB → bytes
-            end
-        end
-    catch
-    end
-    return Sys.free_memory()
+# The DETERMINISTIC memory budget for the solve (bytes): an explicit `mem_budget`
+# if given, else `mem_fraction` of TOTAL physical RAM. Total RAM is a machine
+# constant, so the budget — and therefore `ntasks`, and therefore the whole solve's
+# wall time — is REPRODUCIBLE across runs on a box. The earlier version budgeted
+# from `/proc/meminfo` `MemAvailable`, which swings as other processes (IDE/language
+# servers) come and go and so flipped the cap between e.g. 2 and 3 tasks on
+# identical inputs — making the solve impossible to benchmark. The trade-off of
+# using total: it can over-commit a heavily LOADED box, so `mem_fraction` must leave
+# headroom for everything else (lower it on a shared box, or pass an explicit
+# `mem_budget` for machine-independent control). The conservative per-group peak
+# charge (`_group_peak_bytes`, 2.5× the real ~2× footprint) provides further slack.
+function _memory_budget(mem_fraction, mem_budget)
+    mem_budget === nothing || return Float64(mem_budget)
+    return mem_fraction * Float64(Sys.total_memory())
 end
 
-# Bound `ntasks` so peak RAM (`ntasks × per-group peak`) stays under `mem_fraction`
-# of currently-AVAILABLE memory. Defaulting `ntasks` to `Threads.nthreads()` OOMs
-# on a real (24 GB) file: each concurrent group peaks at several GB. We size the
-# cap from the LARGEST group and the available RAM (not total — a loaded box has
-# far less free, and budgeting from total over-commits and OOMs). Returns ≥ 1.
-function _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = 0.6)
+# Bound `ntasks` so peak RAM (`ntasks × per-group peak`) stays under the
+# deterministic memory budget. Defaulting `ntasks` to `Threads.nthreads()` OOMs on a
+# real (24 GB) file: each concurrent group peaks at several GB. We size the cap from
+# the LARGEST group and the budget. Returns ≥ 1.
+function _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = 0.6, mem_budget = nothing)
     requested = max(1, min(Int(ntasks), ngroups))
     peak = maximum(_group_peak_bytes, group_leaves; init = 0)
     peak <= 0 && return requested
-    avail = _available_memory()
-    budget = mem_fraction * avail
+    budget = _memory_budget(mem_fraction, mem_budget)
     cap = max(1, Int(floor(budget / peak)))
     used = min(requested, cap)
     if used < requested
-        @info "Fringe solve: capping ntasks for memory" requested cap used peak_GB = round(peak / 2^30; digits = 2) avail_GB = round(avail / 2^30; digits = 2) budget_GB = round(budget / 2^30; digits = 2)
+        @info "Fringe solve: capping ntasks for memory" requested cap used peak_GB = round(peak / 2^30; digits = 2) total_GB = round(Sys.total_memory() / 2^30; digits = 2) budget_GB = round(budget / 2^30; digits = 2)
     end
     return used
 end
@@ -505,6 +586,7 @@ function solve_fringes(
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
+        mem_budget = nothing,
         phase_bandpass::Bool = true,
         amp_bandpass::Bool = true,
         bandpass_source = nothing,
@@ -527,7 +609,7 @@ function solve_fringes(
     ngroups = length(group_leaves)
     scan_snr = zeros(ngroups)
     θ = zeros(layout.nθ)
-    ntasks_use = _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = mem_fraction)
+    ntasks_use = _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = mem_fraction, mem_budget = mem_budget)
     nfft = max(1, Threads.nthreads() ÷ ntasks_use)
     ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
 
@@ -567,6 +649,7 @@ function solve_fringes(
         scan_max_snr = scan_snr,
         scan_chi = fill(chi, ngroups),
         scan_ncomp = fill(ncomp, ngroups),
+        ant_names = String.(collect(UVData.metadata(first_leaf).antennas.name)),
     )
     return CalibrationSolution(model, layout, geom, θ, info)
 end
@@ -589,12 +672,14 @@ e.g.
 reduced; `sol` is the same solution `solve_fringes` would return.
 
 `ntasks` requests how many groups are processed concurrently, but it is bounded
-down so peak RAM (≈ `ntasks` × per-group size) stays under `mem_fraction` of
-currently-AVAILABLE memory (not total — a loaded box has far less free, and
-budgeting from total over-commits and OOMs) — the bulk reader holds a whole scan's
-row span plus two copies of its vis cube at once (several GB on a real file), so a
-thread-count default would OOM. Lower `mem_fraction` if other processes need the
-RAM; raise it on a quiet box. A capping decision is logged via `@info`.
+down so peak RAM (≈ `ntasks` × per-group size) stays under a DETERMINISTIC budget:
+`mem_budget` (absolute bytes) if given, else `mem_fraction` of TOTAL physical RAM.
+Using total — a machine constant — makes `ntasks` reproducible across runs (the
+old MemAvailable basis swung the cap with whatever else was running). The bulk
+reader holds a whole scan's row span plus its vis cube at once (several GB on a
+real file), so a raw thread-count default would OOM. On a shared/loaded box leave
+headroom: lower `mem_fraction` (or pass an explicit `mem_budget`); raise it on a
+dedicated box. A capping decision is logged via `@info`.
 """
 function solve_and_reduce_fringes(
         uvset::UVSet;
@@ -605,6 +690,7 @@ function solve_and_reduce_fringes(
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
+        mem_budget = nothing,
         phase_bandpass::Bool = true,
         amp_bandpass::Bool = true,
         bandpass_source = nothing,
@@ -627,7 +713,7 @@ function solve_and_reduce_fringes(
     ngroups = length(group_leaves)
     scan_snr = zeros(ngroups)
     θ = zeros(layout.nθ)
-    ntasks_use = _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = mem_fraction)
+    ntasks_use = _bounded_ntasks(group_leaves, ntasks, ngroups; mem_fraction = mem_fraction, mem_budget = mem_budget)
     nfft = max(1, Threads.nthreads() ÷ ntasks_use)
     ws_tlv = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
 
@@ -682,6 +768,7 @@ function solve_and_reduce_fringes(
         scan_max_snr = scan_snr,
         scan_chi = fill(chi, ngroups),
         scan_ncomp = fill(ncomp, ngroups),
+        ant_names = String.(collect(UVData.metadata(first_leaf).antennas.name)),
     )
     sol = CalibrationSolution(model, layout, geom, θ, info)
     return sol, output

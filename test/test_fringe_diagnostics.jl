@@ -42,6 +42,15 @@ using HDF5
         @test_throws ErrorException FP.fringe_gain_time_series(sol; ci = 10_000)
     end
 
+    @testset "station codes available for plot labels" begin
+        # Spectrum/phase plots read codes from sol.info; baseline plots from the data.
+        @test sol.info.ant_names == ["A1", "A2", "A3", "A4"]
+        data = FP.baseline_fringe_data(uvset, sol)
+        @test data.ant_names == ["A1", "A2", "A3", "A4"]
+        a, b = data.bl_pairs[1]
+        @test data.ant_names[a] isa String && data.ant_names[b] isa String
+    end
+
     @testset "Makie plot smoke" begin
         @test !isnothing(FP.plot_fringe_spectrum(sol))
         @test !isnothing(FP.plot_fringe_spectrum(sol; sites = 1, feeds = [1]))
@@ -94,6 +103,23 @@ using HDF5
         end
         @test total > 0
         @test improved == total          # no baseline gets LESS coherent after the fit
+    end
+
+    @testset "fringe_scan_groups" begin
+        g = FP.fringe_scan_groups(uvset, sol)
+        ngroups = length(FP._scan_group_leaves(uvset))
+        @test length(g) == ngroups
+        @test all(r -> haskey(r, :scan_index) && haskey(r, :source) && haskey(r, :scan) && haskey(r, :max_snr), g)
+        @test [r.scan_index for r in g] == collect(1:ngroups)        # solver order, 1-based
+        @test Set(r.source for r in g) ⊆ Set(UVP.sources(uvset))
+        # max_snr agrees with the per-scan SNR table / the default scan picker.
+        @test g[FP._max_snr_scan(sol, ngroups)].max_snr == maximum(r.max_snr for r in g)
+        # the per-source best-scan selection used by run_pipeline resolves to a valid group
+        for s in unique(r.source for r in g)
+            rows = filter(r -> r.source == s, g)
+            best = rows[argmax([isfinite(r.max_snr) ? r.max_snr : -Inf for r in rows])]
+            @test 1 <= best.scan_index <= ngroups
+        end
     end
 
     @testset "delay closure" begin

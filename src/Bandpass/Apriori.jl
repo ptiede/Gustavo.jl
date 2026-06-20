@@ -82,7 +82,7 @@ end
 # remains evaluated per integration.
 function _build_apriori_gains(
         leaf, info, root_meta, antab::AntabCalibration;
-        on_missing_station::Symbol = :warn,
+        on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
     on_missing_station in (:warn, :error, :ignore) || error(
         "apply_calibration: on_missing_station must be :warn, :error, or :ignore"
@@ -119,10 +119,12 @@ function _build_apriori_gains(
     pol_syms = (:R, :L)
     missing_stations = String[]
 
-    # PartitionInfo stores ra/dec verbatim from the FITS primary HDU
-    # (CRVAL of the RA/DEC axes), which is degrees per the FITS standard.
-    ra_rad = deg2rad(Float64(info.ra))
-    dec_rad = deg2rad(Float64(info.dec))
+    # PartitionInfo stores source ra/dec in RADIANS (the FITS-IDI loader
+    # converts the SOURCE table's RAEPO/DECEPO degrees → radians, and the
+    # UVFITS path round-trips radians through OBSRA/OBSDEC), so they feed
+    # `_source_elevation` (which expects radians) directly.
+    ra_rad = Float64(info.ra)
+    dec_rad = Float64(info.dec)
 
     for (a, name) in pairs(ant_names)
         if !haskey(antab, name)
@@ -154,11 +156,16 @@ function _build_apriori_gains(
         for ti in 1:nti
             el = elevation_deg[ti, a]
             gE = elevation_gain(st.gain, el)
+            # Below the elevation cutoff (default: the horizon) the source is
+            # not observable and the gain-curve polynomial extrapolates to tiny
+            # / negative values, which makes SEFD = Tsys/(DPFU·gE) explode. Flag
+            # those samples (weight ← 0 on apply) rather than apply a blown-up gain.
+            el_ok = isfinite(el) && el >= min_elevation_deg
             for p in 1:2
                 dpfu = st.gain.dpfu[p]
                 for c in 1:nchan
                     tsys = scan_tsys[c, p]
-                    if !(isfinite(tsys) && isfinite(gE) && isfinite(dpfu) && dpfu > 0 && gE > 0 && tsys > 0)
+                    if !(el_ok && isfinite(tsys) && isfinite(gE) && isfinite(dpfu) && dpfu > 0 && gE > 0 && tsys > 0)
                         sefd[c, ti, a, p] = NaN
                         gains[c, ti, a, p] = NaN
                     else
@@ -175,7 +182,7 @@ function _build_apriori_gains(
         if on_missing_station === :error
             error("apply_calibration: ANTAB has no record for stations $(missing_stations)")
         elseif on_missing_station === :warn
-            @warn "apply_calibration: ANTAB has no record for stations; baselines involving them are left unchanged" stations=missing_stations track=antab.track_label
+            @warn "apply_calibration: ANTAB has no record for stations; baselines involving them are left unchanged" stations = missing_stations track = antab.track_label
         end
     end
 
@@ -197,7 +204,7 @@ with a warning; `:error` raises; `:ignore` suppresses the message.
 """
 function apriori_flux_gains(
         uvset::UVSet, antab::AntabCalibration;
-        on_missing_station::Symbol = :warn,
+        on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
     out = Dict{Symbol, AprioriFluxGains}()
     root_meta = DimensionalData.metadata(uvset)
@@ -205,7 +212,7 @@ function apriori_flux_gains(
         info = DimensionalData.metadata(leaf)
         out[k] = _build_apriori_gains(
             leaf, info, root_meta, antab;
-            on_missing_station = on_missing_station,
+            on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
         )
     end
     return out
@@ -226,15 +233,18 @@ ANTAB Tsys is missing or non-positive are flagged (weight set to 0).
 
 The caller is responsible for matching the ANTAB to the right uvfits
 track and band; pass `on_missing_station=:error` to refuse to silently
-skip stations.
+skip stations. Samples below `min_elevation_deg` (default: the horizon) are
+flagged rather than calibrated with a blown-up gain. The output is marked
+`BUNIT = "JY"`.
 """
 function UVData.apply_calibration(
         uvset::UVSet, antab::AntabCalibration;
-        on_missing_station::Symbol = :warn,
+        on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    return UVData.apply(uvset) do leaf, info, root
+    out = UVData.apply(uvset) do leaf, info, root
         gains_pkg = _build_apriori_gains(
-            leaf, info, root, antab; on_missing_station = on_missing_station,
+            leaf, info, root, antab;
+            on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
         )
         bl_pairs = baselines(leaf).pairs
         vis_l = leaf[:vis]
@@ -244,6 +254,39 @@ function UVData.apply_calibration(
         )
         return with_visibilities(leaf, vis_corr, weights_corr)
     end
+    return UVData.set_bunit(out, "JY")
+end
+
+"""
+    apply_calibration(uvset, band_cals::AbstractDict{<:Integer, AntabCalibration}; on_missing_station = :warn) -> UVSet
+
+A-priori flux calibration where each spectral band (spw) has its OWN
+`AntabCalibration`. Each leaf is calibrated with `band_cals[info.ddi + 1]`
+(1-based band index); otherwise identical to the single-`AntabCalibration`
+method. Used for FITS-IDI `GAIN_CURVE` + `SYSTEM_TEMPERATURE` calibration
+(see `load_fitsidi_apriori`), where DPFU / gain-curve / Tsys are per band.
+"""
+function UVData.apply_calibration(
+        uvset::UVSet, band_cals::AbstractDict{<:Integer, AntabCalibration};
+        on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
+    )
+    out = UVData.apply(uvset) do leaf, info, root
+        band = Int(info.ddi) + 1
+        haskey(band_cals, band) || error(
+            "apply_calibration: no a-priori calibration for band $(band) " *
+                "(spw $(info.spw_name)); have bands $(sort(collect(keys(band_cals))))",
+        )
+        gains_pkg = _build_apriori_gains(
+            leaf, info, root, band_cals[band];
+            on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
+        )
+        bl_pairs = baselines(leaf).pairs
+        vis_corr, weights_corr = _apply_apriori_kernel(
+            leaf[:vis], leaf[:weights], gains_pkg.gains, bl_pairs, pol_products(leaf),
+        )
+        return with_visibilities(leaf, vis_corr, weights_corr)
+    end
+    return UVData.set_bunit(out, "JY")
 end
 
 # Apply per-(channel, integration, antenna, feed) real-valued gains. NaN
@@ -258,6 +301,16 @@ function _apply_apriori_kernel(
     weights_corr = copy(w_p)
     for ti in axes(vis_p, Ti), bi in axes(vis_p, Baseline)
         a, b = bl_pairs[bi]
+        # Autocorrelations (a == b) are total power, not interferometric
+        # visibilities: `√(SEFD_a·SEFD_b)` flux-scaling is meaningless and blows
+        # their amplitude up by the SEFD. Flag them (weight ← 0) so they are not
+        # used downstream — the fringe solve already skips them.
+        if a == b
+            for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
+                weights_corr[c, ti, bi, p] = zero(eltype(weights_corr))
+            end
+            continue
+        end
         for p in axes(vis_p, Pol)
             fa, fb = correlation_feed_pair(pol_products[Int(p)])
             for c in axes(vis_p, Frequency)

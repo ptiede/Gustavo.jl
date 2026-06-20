@@ -19,7 +19,10 @@ _fringe_indices(sel::AbstractVector{<:Integer}, n::Integer) = collect(Int.(sel))
 _fringe_indices(sel::Symbol, n::Integer) = sel === :all ? collect(1:n) :
     error("site/feed selector Symbol must be :all")
 
-_site_label(i::Integer) = string("ant", i)
+# Station label: the actual code when available (from `sol.info.ant_names` /
+# `BaselineFringeData.ant_names`), else a generic `ant{i}` fallback.
+_site_label(names, i::Integer) =
+    (names !== nothing && i <= length(names)) ? String(names[i]) : string("ant", i)
 _feed_label(f::Integer) = string("feed", f)
 
 # ── plot_fringe_spectrum: phase vs frequency, rows = sites, cols = feeds ───────
@@ -29,6 +32,7 @@ function Fringe.plot_fringe_spectrum(
     )
     freqs, g = fringe_gain_spectrum(sol; ti = ti)
     nant = size(g, 2)
+    names = get(sol.info, :ant_names, nothing)
     site_idx = _fringe_indices(sites, nant)
     feed_idx = _fringe_indices(feeds, 2)
     fghz = freqs ./ 1.0e9
@@ -37,7 +41,7 @@ function Fringe.plot_fringe_spectrum(
         for (col, fi) in enumerate(feed_idx)
             ax = Axis(
                 parent[row, col];
-                xlabel = "frequency (GHz)", ylabel = _site_label(ai),
+                xlabel = "frequency (GHz)", ylabel = _site_label(names, ai),
                 title = (row == 1 ? string(_feed_label(fi), " phase (rad)") : ""),
             )
             scatter!(ax, fghz, vec(angle.(g[:, ai, fi])); markersize = 5, color = :steelblue)
@@ -66,6 +70,7 @@ function Fringe.plot_fringe_phases(
     )
     times, g = fringe_gain_time_series(sol; ci = ci)
     nant = size(g, 2)
+    names = get(sol.info, :ant_names, nothing)
     site_idx = _fringe_indices(sites, nant)
     feed_idx = _fringe_indices(feeds, 2)
     for (row, ai) in enumerate(site_idx)
@@ -73,7 +78,7 @@ function Fringe.plot_fringe_phases(
         for (col, fi) in enumerate(feed_idx)
             ax = Axis(
                 parent[row, col];
-                xlabel = "time (h)", ylabel = _site_label(ai),
+                xlabel = "time (h)", ylabel = _site_label(names, ai),
                 title = (row == 1 ? string(_feed_label(fi), " phase (rad)") : ""),
             )
             scatter!(ax, times, vec(angle.(g[:, ai, fi])); markersize = 5, color = :darkorange)
@@ -122,7 +127,7 @@ function Fringe.plot_fringe_snr(sol::CalibrationSolution)
 end
 
 # ── plot_baseline_fringes: per-baseline before/after, grid of panels ───────────
-_bl_label((a, b)::Tuple) = string(a, "–", b)
+_bl_label((a, b)::Tuple, names) = string(_site_label(names, a), "–", _site_label(names, b))
 
 # Cross-baseline column indices (skip autocorrelations), honoring a selector.
 function _baseline_indices(data::BaselineFringeData, sel)
@@ -161,7 +166,7 @@ function Fringe.plot_baseline_fringes(
         row, col = fldmod1(k, ncols)
         ax = Axis(
             parent[row, col];
-            title = _bl_label(data.bl_pairs[bi]),
+            title = _bl_label(data.bl_pairs[bi], data.ant_names),
             xlabel = (row == nrows ? xlab : ""), ylabel = (col == 1 ? ylab : ""),
         )
         yb = reduce_y.(@view before[:, bi, p])

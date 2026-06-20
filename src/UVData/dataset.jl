@@ -106,6 +106,31 @@ end
 _bulk_backend(::AbstractArray) = nothing
 function _materialize_group_bulk end
 
+"""
+    materialize_group_into!(dests, leaves; layers = (:vis, :weights)) -> Bool
+
+Decode a group of sibling-band lazy `leaves` DIRECTLY into caller-provided
+destination arrays — no per-band intermediate dense copy. `dests[i]` is a
+`(vis_dest, weights_dest)` pair the i-th leaf decodes into; each destination's
+axis-1 length must equal that leaf's channel count and axes 2-4 its
+`(ti, baseline, pol)`. Views into a larger concatenated cube are the intended use
+(the fringe search builds its stacked-frequency cube this way, avoiding the
+materialize-then-copy round trip and one full in-RAM data copy).
+
+Returns `true` if a bulk backend handled it; `false` otherwise (the caller then
+falls back to [`materialize_group`](@ref) + an explicit copy). Format-neutral: the
+actual one-read decode lives in the I/O extension's `_materialize_group_bulk_into!`.
+"""
+function materialize_group_into!(dests, leaves; layers = (:vis, :weights))
+    if !isempty(leaves) && _bulk_backend(parent(first(leaves)[:vis])) !== nothing
+        _materialize_group_bulk_into!(dests, leaves, layers) && return true
+    end
+    return false
+end
+# Method provided by the I/O extension (mirrors `_materialize_group_bulk`); the
+# `_bulk_backend` guard above ensures we only dispatch when a backend is loaded.
+function _materialize_group_bulk_into! end
+
 # Decode concurrency for the bulk reader: how many tasks a single leaf's
 # vis/weights fill spreads its baseline columns over. Decode (byte-swap + complex
 # repack + pol permute) is CPU-bound, so threading it uses the cores the solve's

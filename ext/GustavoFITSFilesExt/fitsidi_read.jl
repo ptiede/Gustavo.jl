@@ -424,13 +424,21 @@ struct IDIChunkArray{T, K, TD, TFF, TW} <: DiskArrays.AbstractDiskArray{T, 4}
     flags::Vector{FlagEntry}  # FLAG entries pre-filtered to this leaf
     bl_ants::Vector{Tuple{Int, Int}}  # global antenna pair per baseline column
     times::Vector{Float64}  # per-ti time (hours since RDATE) for TIMERANG match
+    wfactor::Float32        # radiometer weight factor 2·Δν·η² for this band (0 ⇒ no scaling)
+    inttim::Vector{Float32} # per-(global-row) INTTIM (s); empty when wfactor == 0
+    # Per-integration autocorrelation normalization (correlation coefficients):
+    auto_row::Matrix{Int}   # (nti, nant) UV_DATA row of the (a,a) record, 0 = absent
+    normalize::Bool         # divide cross by √(A_a·A_b) per (chan, ti, feed); empty auto_row ⇒ no-op
+    feed_pairs::Vector{Tuple{Int, Int}}  # per MSv4 pol → (feed_a, feed_b) ∈ {1,2}
+    auto_stokes::NTuple{2, Int}          # on-disk stokes index of the (feed1,feed1) and (feed2,feed2) autocorr
     kind::K
 end
 
 function _idi_chunk(
         ::Type{T}, kind::K, data, flux_field, weight_col,
         band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
-        flags, bl_ants, times,
+        flags, bl_ants, times, wfactor, inttim,
+        auto_row, normalize, feed_pairs, auto_stokes,
     ) where {T, K}
     L = Int(data.format.shape[1])
     flux_M = first(flux_field.slice) - 1
@@ -439,9 +447,93 @@ function _idi_chunk(
         data, flux_field, weight_col, Int(data.begpos), L, flux_M,
         Int(band), Int(no_stkd), Int(no_chan), Int(no_band), nperband,
         Vector{Int}(perm), Bool(flux_scale), row_of,
-        flags, bl_ants, Vector{Float64}(times), kind,
+        flags, bl_ants, Vector{Float64}(times),
+        Float32(wfactor), Vector{Float32}(inttim),
+        auto_row, Bool(normalize), Vector{Tuple{Int, Int}}(feed_pairs),
+        (Int(auto_stokes[1]), Int(auto_stokes[2])), kind,
     )
 end
+
+# Decode the per-(chan, ti, feed) autocorrelation amplitude `Aspec[c, ti, ant, f]`
+# = |autocorr(a,a) at the feed's parallel-hand stokes|, for every antenna present
+# in this leaf's `auto_row`. `read_row!(cube, r)` fills `cube` (a length-`nperband`
+# Float32 buffer) with UV_DATA row `r`'s band slice (from a span or from io).
+# Used to form correlation coefficients: V_ab ← V_ab / √(A_a·A_b).
+function _autocorr_spectra(a::IDIChunkArray, read_row!::F) where {F}
+    nchan = a.no_chan
+    nti, nant = size(a.auto_row)
+    twostk = 2 * a.no_stkd
+    Aspec = fill(NaN32, nchan, nti, nant, 2)
+    cube = Vector{Float32}(undef, a.nperband)
+    @inbounds for ant in 1:nant, ti in 1:nti
+        r = a.auto_row[ti, ant]
+        r == 0 && continue
+        read_row!(cube, r)
+        for f in 1:2
+            base = (a.auto_stokes[f] - 1) * 2     # re/im offset of this feed's parallel-hand
+            for c in 1:nchan
+                o = (c - 1) * twostk + base
+                Aspec[c, ti, ant, f] = abs(complex(cube[o + 1], cube[o + 2]))
+            end
+        end
+    end
+    return Aspec
+end
+
+# Autocorrelation spectra from a row-span buffer (bulk path) / from `io` (readblock).
+_aspec_from_span(a::IDIChunkArray, span, rmin::Int, ::Type{D}) where {D} =
+    _autocorr_spectra(a, (cube, r) -> _flux_from_span!(cube, span, a, r, rmin, D))
+function _aspec_from_io(a::IDIChunkArray, io)
+    rawbuf = Vector{UInt8}(undef, a.nperband * sizeof(a.flux_field.type))
+    return _autocorr_spectra(a, (cube, r) -> _read_flux_cell!(cube, rawbuf, io, a, r))
+end
+
+# Form correlation coefficients in a dense vis block: `out[*, bl(a,b), pol] /=
+# √(A_a·A_b)` with the feed-appropriate autocorr; NaN where an autocorr is
+# missing/≤0 (the weights pass flags those). `r*` are the block's global index
+# ranges (full-leaf ranges in the bulk path); `Aspec` is indexed by global (c, ti).
+function _normalize_vis!(out, a::IDIChunkArray{T}, Aspec, rchan, rti, rbl, rpol) where {T}
+    nan = T(complex(NaN32, NaN32))
+    @inbounds for (bj, bl) in enumerate(rbl)
+        ea, eb = a.bl_ants[bl]
+        for (pj, p) in enumerate(rpol)
+            fa, fb = a.feed_pairs[p]
+            ok_feed = fa != 0 && fb != 0
+            for (tj, ti) in enumerate(rti), (cj, c) in enumerate(rchan)
+                d = ok_feed ? sqrt(Aspec[c, ti, ea, fa] * Aspec[c, ti, eb, fb]) : NaN32
+                out[cj, tj, bj, pj] = (isfinite(d) && d > 0) ? out[cj, tj, bj, pj] / d : nan
+            end
+        end
+    end
+    return out
+end
+
+# Scale a dense weights block to track the correlation-coefficient normalization:
+# noise ÷ √(A_a·A_b) ⇒ weight × (A_a·A_b). Cells with a missing/≤0 autocorr are
+# flagged (weight ← 0), matching the NaN the vis pass writes there.
+function _scale_weights!(out, a::IDIChunkArray{T}, Aspec, rchan, rti, rbl, rpol) where {T}
+    @inbounds for (bj, bl) in enumerate(rbl)
+        ea, eb = a.bl_ants[bl]
+        for (pj, p) in enumerate(rpol)
+            fa, fb = a.feed_pairs[p]
+            ok_feed = fa != 0 && fb != 0
+            for (tj, ti) in enumerate(rti), (cj, c) in enumerate(rchan)
+                w = out[cj, tj, bj, pj]
+                (w > 0 && isfinite(w)) || continue
+                fac = ok_feed ? Aspec[c, ti, ea, fa] * Aspec[c, ti, eb, fb] : NaN32
+                out[cj, tj, bj, pj] = (isfinite(fac) && fac > 0) ? w * fac : zero(T)
+            end
+        end
+    end
+    return out
+end
+
+# Per-cell radiometer weight scale: 2·Δν·τ·η² for UV_DATA row `r`, where the
+# band-constant part `2·Δν·η²` is precomputed in `a.wfactor` and τ = INTTIM[r].
+# Returns 1 when scaling is disabled (`wfactor == 0`, i.e. `weight_mode` was
+# `:validity`, Δν was unavailable, or there was no INTTIM column).
+@inline _wscale_phys(a::IDIChunkArray, r::Int) =
+    a.wfactor == 0.0f0 ? 1.0f0 : a.wfactor * @inbounds(a.inttim[r])
 
 Base.size(a::IDIChunkArray) =
     (a.no_chan, size(a.row_of, 1), size(a.row_of, 2), a.no_stkd)
@@ -527,7 +619,13 @@ end
 # FLUX + WEIGHT from that buffer — one read per scan instead of (bands × layers ×
 # cells) seeks.
 
-const _MAX_SPAN_BYTES = 1024 * 1024 * 1024   # cap; larger spans fall back to per-leaf reads
+# Cap on the transient span buffer; larger spans fall back to the (slow, seek-bound)
+# per-leaf path. Sized so a real scan's whole row span fits the fast one-read path:
+# on the VLBA Q-band validation file the biggest scans span ~1.01 GB, so a 1 GB cap
+# pushed ~half the data onto the slow path. The solve's memory governor
+# (`_group_peak_bytes` × `_bounded_ntasks`) bounds how many of these spans are
+# resident at once, so the cap can be generous; 3 GiB covers this file with margin.
+const _MAX_SPAN_BYTES = 3 * 1024 * 1024 * 1024   # 3 GiB
 
 # Read the contiguous byte span covering UV_DATA rows [rmin, rmax] into one buffer
 # (or `nothing` if it would exceed the cap). The file is time-sorted, so a scan's
@@ -592,6 +690,10 @@ end
     else
         tforeach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
     end
+    if a.normalize
+        Aspec = _aspec_from_span(a, span, rmin, D)
+        _normalize_vis!(out, a, Aspec, 1:a.no_chan, 1:size(a.row_of, 1), 1:nbl, 1:a.no_stkd)
+    end
     return out
 end
 
@@ -644,6 +746,10 @@ end
     else
         tforeach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
     end
+    if a.normalize
+        Aspec = _aspec_from_span(a, span, rmin, a.flux_field.type)
+        _scale_weights!(out, a, Aspec, 1:a.no_chan, 1:size(a.row_of, 1), 1:nbl, 1:a.no_stkd)
+    end
     return out
 end
 
@@ -659,9 +765,12 @@ end
     @inbounds for ti in 1:nti
         r = a.row_of[ti, bl]
         r != 0 && _weights_from_span!(wbuf, span, a, r, rmin, wscale, D)
+        sc = r == 0 ? 1.0f0 : _wscale_phys(a, r)   # radiometer scale (1 if disabled)
         t = a.times[ti]
         for p in 1:npol
-            w = r == 0 ? zero(T) : T(wbuf[a.perm[p]])
+            wv = r == 0 ? 0.0f0 : wbuf[a.perm[p]]
+            # Scale only valid (positive) weights; <=0 stays a flag sentinel.
+            w = wv > 0 ? T(wv * sc) : T(wv)
             if have_flags && r != 0 && w > 0
                 for c in 1:nchan
                     out[c, ti, bl, p] = _idi_cell_flagged(a, c, t, ea, eb, p) ? zero(T) : w
@@ -698,6 +807,13 @@ function UVData._materialize_group_bulk(leaves, layers)
         r < rmin && (rmin = r)
         r > rmax && (rmax = r)
     end
+    # The autocorrelation rows (used as correlation-coefficient normalizers) must
+    # also be inside the span, or `_aspec_from_span` reads past the buffer.
+    @inbounds for r in a1.auto_row
+        r == 0 && continue
+        r < rmin && (rmin = r)
+        r > rmax && (rmax = r)
+    end
     rmax == 0 && return nothing                      # empty scan → let caller fall back
     io = FITSFiles.open_lazy_source(a1.data)
     local span
@@ -723,6 +839,56 @@ function UVData._materialize_group_bulk(leaves, layers)
         flag_da = want_flag ? DimArray(UVData._materialize_layer(parent(l[:flag])), dims(l[:flag])) : nothing
         UVData._build_leaf(vis_da, w_da, uvw_da, flag_da; partition_info = DimensionalData.metadata(l))
     end
+end
+
+# Direct-into-destination variant of `_materialize_group_bulk`: read the scan's
+# shared row span ONCE, then decode each band's vis/weights straight into the
+# caller's `dests[i] = (vis_dest, weights_dest)` (typically contiguous channel-block
+# views of one stacked cube) — skipping the per-band intermediate dense arrays and
+# the uvw/flag layers the fringe search never uses. The decode kernels write
+# `out[c, ti, bl, p]` generically, so a SubArray destination works (axis-1 = the
+# band's channel block, stride 1). Returns `false` to fall back if the leaves are
+# not a single sibling-band scan span (then the caller uses materialize_group + copy).
+function UVData._materialize_group_bulk_into!(dests, leaves, layers)
+    isempty(leaves) && return false
+    a1 = parent(first(leaves)[:vis])
+    a1 isa IDIChunkArray || return false
+    for l in leaves
+        av = parent(l[:vis])
+        (
+            av isa IDIChunkArray && av.data === a1.data && av.row_of === a1.row_of &&
+                av.begpos == a1.begpos && av.L == a1.L
+        ) || return false
+    end
+    rmin = typemax(Int)
+    rmax = 0
+    @inbounds for r in a1.row_of
+        r == 0 && continue
+        r < rmin && (rmin = r)
+        r > rmax && (rmax = r)
+    end
+    @inbounds for r in a1.auto_row          # autocorr normalizers must be in-span too
+        r == 0 && continue
+        r < rmin && (rmin = r)
+        r > rmax && (rmax = r)
+    end
+    rmax == 0 && return false
+    io = FITSFiles.open_lazy_source(a1.data)
+    local span
+    try
+        span = _read_row_span(io, a1, rmin, rmax)
+    finally
+        close(io)
+    end
+    span === nothing && return false        # span over the cap → fall back
+    for (i, l) in enumerate(leaves)
+        av = parent(l[:vis])
+        aw = parent(l[:weights])
+        vis_dest, w_dest = dests[i]
+        _fill_vis_dense!(vis_dest, av, span, rmin)
+        _fill_weights_dense!(w_dest, aw, span, rmin)
+    end
+    return true
 end
 
 # Read this band's `no_stkd` WEIGHT entries for UV_DATA row `i` into `wbuf`
@@ -810,6 +976,9 @@ function DiskArrays.readblock!(
                 end
             end
         end
+        if a.normalize
+            _normalize_vis!(out, a, _aspec_from_io(a, io), rchan, rti, rbl, rpol)
+        end
     finally
         close(io)
     end
@@ -830,10 +999,13 @@ function DiskArrays.readblock!(
         @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
             r = a.row_of[ti, bl]
             r != 0 && _read_weight_row!(wbuf, wraw, io, a, r, wscale)
+            sc = r == 0 ? 1.0f0 : _wscale_phys(a, r)   # radiometer scale (1 if disabled)
             ea, eb = a.bl_ants[bl]
             t = a.times[ti]
             for (pj, p) in enumerate(rpol)
-                w = r == 0 ? zero(T) : T(wbuf[a.perm[p]])
+                wv = r == 0 ? 0.0f0 : wbuf[a.perm[p]]
+                # Scale only valid (positive) weights; <=0 stays a flag sentinel.
+                w = wv > 0 ? T(wv * sc) : T(wv)
                 # FLAG-table entries zero the weight (channel-dependent when
                 # CHANS is set). OR'd with the existing weight<=0 path.
                 if have_flags && r != 0 && w > 0
@@ -847,6 +1019,9 @@ function DiskArrays.readblock!(
                     end
                 end
             end
+        end
+        if a.normalize
+            _scale_weights!(out, a, _aspec_from_io(a, io), rchan, rti, rbl, rpol)
         end
     finally
         close(io)
@@ -977,7 +1152,49 @@ end
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
-function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
+"""
+    load_fitsidi(path; lazy=true, scans=:, bands=:,
+                 weight_mode=:validity, weight_efficiency=1.0, drop_autocorr=true) -> UVSet
+
+Load a FITS-IDI file into a (lazily streamed) `UVSet`.
+
+`normalize_autocorr` (default `true`) divides each cross-correlation by the
+per-(channel, integration, feed) autocorrelations, `V_ab ← V_ab/√(A_a·A_b)`,
+forming true correlation coefficients (flattens the amplitude bandpass; weights
+scale by `A_a·A_b`). This is what makes the data match the HOPS/rPICARD
+"correlation coefficient" convention. The autocorrelations are then consumed
+(the `a==a` baselines are dropped). A no-op on data with no autocorrelations.
+
+`drop_autocorr` (default `true`) excludes autocorrelation baselines (antenna
+`a == a`) from the visibility set even when not normalizing (total power, not
+interferometric). `normalize_autocorr=true` implies the autocorrelations are
+dropped from the output regardless. Pass both `false` to keep autocorrelations.
+
+`weight_mode` controls how the on-disk `WEIGHT` column is interpreted:
+
+  * `:validity` (default) — return the correlator weights verbatim. These are
+    DiFX/FITS-IDI *validity* weights (fraction of the sample actually
+    correlated, ≈1), NOT inverse variances, so `1/√weight` is not a noise.
+  * `:radiometer` — convert to thermal-noise inverse variances in the data's
+    (correlation-coefficient) units: `w → w · 2·Δν·τ·η²`, with channel width
+    `Δν` from the FREQUENCY table (`CH_WIDTH`) and per-record accumulation time
+    `τ` from the `INTTIM` column. `weight_efficiency` (η) is the
+    correlator/quantization efficiency (a single scalar; it sets the absolute
+    χ²/SNR scale, not the relative weighting). Tsys is not needed — it cancels
+    in correlation-coefficient units. Non-positive weights (flag sentinels) are
+    preserved; bands lacking a usable `CH_WIDTH`/`INTTIM` fall back to
+    `:validity`.
+"""
+function UVData.load_fitsidi(
+        path; lazy = true, scans = :, bands = :,
+        weight_mode::Symbol = :validity, weight_efficiency::Real = 1.0,
+        drop_autocorr::Bool = true, normalize_autocorr::Bool = true,
+    )
+    weight_mode in (:validity, :radiometer) || error(
+        "load_fitsidi: weight_mode must be :validity (raw correlator validity " *
+            "weights, as on disk) or :radiometer (convert to thermal-noise " *
+            "inverse-variance via 2·Δν·τ·η²); got $(weight_mode).",
+    )
     fid = FITSFiles.fits(path)
 
     # Locate HDUs by EXTNAME.
@@ -1042,6 +1259,15 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
     src_table = _build_idi_sources(src_hdu)
     _, _, msv4_labels, perm = _idi_stokes_perm(uv_cards)
 
+    # Autocorrelation-normalization maps (constant across scans/bands): per MSv4
+    # pol → (feed_a, feed_b), and the on-disk stokes of the two parallel-hand
+    # autocorr products (PP→feed1, QQ→feed2; 0 if that hand is absent). MSv4
+    # canonical labels are P/Q.
+    _feedchar(c) = c == 'P' ? 1 : c == 'Q' ? 2 : 0
+    feed_pairs = Tuple{Int, Int}[(_feedchar(first(lab)), _feedchar(last(lab))) for lab in msv4_labels]
+    _idx(lab) = (i = findfirst(==(lab), msv4_labels); i === nothing ? 0 : Int(perm[i]))
+    auto_stokes = (_idx("PP"), _idx("QQ"))
+
     # Parse the FLAG table eagerly (small; the FLUX matrix is never touched).
     flag_entries = _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stkd)
 
@@ -1104,6 +1330,10 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
         unique_times = sort(unique(seg_t))
         time_lookup = Dict(t => i for (i, t) in enumerate(unique_times))
 
+        # Autocorrelations are dropped from the output baseline set when either
+        # dropping or normalizing (normalize consumes them as the √(A_a·A_b)
+        # normalizer, then they are no longer science visibilities).
+        excl_auto = drop_autocorr || normalize_autocorr
         bl_pairs = Tuple{Int, Int}[]
         seen_bl = Set{Tuple{Int, Int}}()
         for code in seg_bl
@@ -1111,6 +1341,7 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
             b = code % 256
             pa = get(nosta_to_idx, a, a)
             pb = get(nosta_to_idx, b, b)
+            excl_auto && pa == pb && continue
             p = (pa, pb)
             if !(p in seen_bl)
                 push!(bl_pairs, p)
@@ -1126,19 +1357,32 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
 
         row_of = zeros(Int, nti, nbl)
         uvw_dense = fill(Float32(NaN), nti, nbl, 3)
-        record_order = Vector{Tuple{Int, Int}}(undef, length(rng))
-        for (k, gi) in enumerate(rng)
+        # `auto_row[ti, ant]` = UV_DATA row of the (ant,ant) autocorr record, kept
+        # (when normalizing) so the decoder can form correlation coefficients even
+        # though the autocorr baselines are absent from the output.
+        nant_tot = length(antennas.name)
+        auto_row = normalize_autocorr ? zeros(Int, nti, nant_tot) : zeros(Int, 0, 0)
+        # Records for dropped (autocorr) baselines are skipped, so `record_order`
+        # grows only over the kept cross-correlation records (in on-disk order).
+        record_order = Tuple{Int, Int}[]
+        for gi in rng
             ti = time_lookup[t_hours[gi]]
             code = bl_codes[gi]
             pa = get(nosta_to_idx, code ÷ 256, code ÷ 256)
             pb = get(nosta_to_idx, code % 256, code % 256)
-            bi = bl_lookup[(pa, pb)]
+            if pa == pb
+                normalize_autocorr && 1 <= pa <= nant_tot && (auto_row[ti, pa] = gi)
+                continue                              # autocorr: not a science baseline
+            end
+            bi = get(bl_lookup, (pa, pb), 0)
+            bi == 0 && continue
             row_of[ti, bi] = gi
-            record_order[k] = (ti, bi)
+            push!(record_order, (ti, bi))
             uvw_dense[ti, bi, 1] = uu[gi]
             uvw_dense[ti, bi, 2] = vv[gi]
             uvw_dense[ti, bi, 3] = ww[gi]
         end
+        do_normalize = normalize_autocorr && any(!iszero, auto_row)
 
         uvw_part = DimArray(
             uvw_dense,
@@ -1158,6 +1402,16 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
                 Baseline(baselines.labels), Pol(msv4_labels),
             )
 
+            # Radiometer weight factor for this band: 2·Δν·η² (per-row τ = INTTIM
+            # is applied at decode). Disabled (0) for :validity mode, or when the
+            # band channel width / INTTIM column is unavailable — then the raw
+            # correlator validity weights pass through unchanged.
+            cws_b = ch_widths(fsetup)
+            dnu_b = isempty(cws_b) ? 0.0 : abs(Float64(first(cws_b)))
+            wfactor_b = (weight_mode === :radiometer && dnu_b > 0 && !isempty(inttim)) ?
+                Float32(2 * dnu_b * weight_efficiency^2) : 0.0f0
+            inttim_b = wfactor_b == 0.0f0 ? Float32[] : inttim
+
             # Flags touching this leaf (source, band, time-span). The vis layer
             # is never flagged (its values stay as read); flagging is carried by
             # the weights (→0) and flag (→true) layers.
@@ -1168,17 +1422,20 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
             vis_chunk = _idi_chunk(
                 eltype_vis, Val(:vis), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
-                no_flags, bl_pairs, unique_times,
+                no_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
+                auto_row, do_normalize, feed_pairs, auto_stokes,
             )
             w_chunk = _idi_chunk(
                 Float32, Val(:weights), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
-                leaf_flags, bl_pairs, unique_times,
+                leaf_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
+                auto_row, do_normalize, feed_pairs, auto_stokes,
             )
             flag_chunk = _idi_chunk(
                 Bool, Val(:flag), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
-                leaf_flags, bl_pairs, unique_times,
+                leaf_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
+                auto_row, false, feed_pairs, auto_stokes,
             )
 
             vis_part = DimArray(vis_chunk, vis_dims)
@@ -1209,6 +1466,7 @@ function UVData.load_fitsidi(path; lazy = true, scans = :, bands = :)
     end
 
     uvset = UVSet(; metadata = UVMetadata(array_obs), branches = branches)
-    lazy || return UVData.materialize(uvset)
+    register_source_path!(uvset, path)
+    lazy || return register_source_path!(UVData.materialize(uvset), path)
     return uvset
 end

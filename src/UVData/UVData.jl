@@ -25,6 +25,7 @@ export freq_setup, union_frequency_axis, channel_freqs, ref_freq, ch_widths, tot
 export Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL
 export BaselineIndex, UVSet, with_visibilities, scan_key
 export apply, mapleaves, flatmap, leaves, sources, scan_ids, partitions, pol_products
+export set_bunit, with_bunit
 export baseline, baselines_per_scan, baselines
 export pol_index, pol_at, baseline_index
 export obs_time
@@ -38,6 +39,7 @@ export apply_calibration
 export primary_cards, register_primary_cards!
 export TimeAverage, scan_average
 export FrequencyAverage, frequency_average, TimeBinAverage, time_bin_average
+export BandEdgeFlag, flag_band_edges
 export combine_spw
 export scan_time_centers, band_center_frequency, centered_channel_freqs
 export baseline_sites, baseline_number
