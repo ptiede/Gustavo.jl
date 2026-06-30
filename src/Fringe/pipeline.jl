@@ -631,7 +631,7 @@ function solve_fringes(
         mem_budget = nothing,
         phase_bandpass::Bool = true,
         amp_bandpass::Bool = true,
-        amp_smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
+        amp_smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0),
         bandpass_source = nothing,
     )
     model = _fringe_model()
@@ -738,7 +738,7 @@ function solve_and_reduce_fringes(
         mem_budget = nothing,
         phase_bandpass::Bool = true,
         amp_bandpass::Bool = true,
-        amp_smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
+        amp_smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0),
         bandpass_source = nothing,
     )
     model = _fringe_model()
@@ -1049,7 +1049,7 @@ function _solve_amp_bandpass!(
         θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan, channel_freqs;
         snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
         spw_of_chan::AbstractVector{<:Integer} = Int[],
-        smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
+        smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0),
     )
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
@@ -1120,7 +1120,7 @@ end
 function _solve_bandpass_stage!(
         θ, group_leaves, group_sources, cal_source, geom, ev, plan, nant;
         amp_plan = nothing, ref_ant::Integer = 1, snr_floor::Real = 1.0,
-        amp_smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
+        amp_smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0),
     )
     nchan = length(geom.channel_freqs)
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
