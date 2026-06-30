@@ -156,12 +156,21 @@ weights to be inverse variances (`w = 1/σ²`, e.g. `load_fitsidi(weight_mode =
 :radiometer)`). Without it the raw η is pulled below 1 at coarse averaging by
 noise alone (the incoherent Σ w·|V| is noise-inflated), so it understates a good
 solution at native per-cell SNR; with it η reflects the genuine residual-phase
-coherence (η ≈ 1 for a flat-phase solution regardless of SNR). See
-[`CoherenceReport`](@ref) / [`print_coherence_report`](@ref) / `plot_coherence`.
+coherence (η ≈ 1 for a flat-phase solution regardless of SNR).
+
+`marginalize` (default `false`) measures each curve on the data coherently averaged
+over the OTHER axis first — the time curve on the per-AP band-average, the freq
+curve on the per-channel time-average (incoherent/segmented, EHT-HOPS style). This
+boosts the per-sample SNR (so `debias` is reliable) and answers the real "can I
+average this" question; at native per-cell SNR ≲ 1 (faint/resolved sources) the
+default per-channel/per-AP curves understate coherence, while `marginalize` does
+not. Combine with `debias = true`. See [`CoherenceReport`](@ref) /
+[`print_coherence_report`](@ref) / `plot_coherence`.
 """
 function coherence_report(
         uvset::UVSet;
-        timescales = nothing, bandwidths = nothing, pols = :parallel, debias = false,
+        timescales = nothing, bandwidths = nothing, pols = :parallel,
+        debias = false, marginalize = false,
     )
     src = DimensionalData.branches(uvset)
     isempty(src) && error("coherence_report: uvset has no leaves")
@@ -208,11 +217,17 @@ function coherence_report(
 
     numT = zeros(Float64, nT, nbl)
     numF = zeros(Float64, nF, nbl)
-    den = zeros(Float64, nbl)
+    # In `marginalize` mode the two curves use DIFFERENT denominators (the time curve
+    # references the per-AP band-averaged amplitude, the freq curve the per-channel
+    # time-averaged amplitude), so keep them separate; non-marginalized shares one.
+    denT = zeros(Float64, nbl)
+    denF = zeros(Float64, nbl)
     npts = zeros(Int, nbl)
+    dumF = zeros(Float64, 1, nbl)
+    dumT = zeros(Float64, 1, nbl)
+    dumN = zeros(Int, nbl)
 
-    # Pass 2 — materialize each leaf and accumulate. The denominator Σ w·|V| is
-    # binning-independent, so it (and the cell count) is summed once per baseline.
+    # Pass 2 — materialize each leaf and accumulate.
     for leaf in values(src)
         m = materialize_leaf(leaf; layers = (:vis, :weights))
         V = parent(m[:vis]); W = parent(m[:weights])
@@ -234,11 +249,22 @@ function coherence_report(
         blmap = [get(blidx, p, 0) for p in baselines(m).pairs]
         times_sec = Float64.(lookup(m[:vis], Ti)) .* 3600.0
         freqs = Float64.(lookup(m[:vis], Frequency))
-        _coherence_accumulate!(numT, numF, den, npts, V, W, blmap, plist, times_sec, freqs, dts, dnus, debias)
+        if marginalize
+            # Coherently average the OTHER axis first (incoherent/segmented style), so
+            # each curve is measured on high-SNR samples and the debias is reliable.
+            f0m = isempty(freqs) ? 0.0 : sum(freqs) / length(freqs)
+            t0m = isempty(times_sec) ? 0.0 : sum(times_sec) / length(times_sec)
+            Vt, Wt = _collapse_axis(V, W, 1)        # band-average per AP → time curve
+            _coherence_accumulate!(numT, dumF, denT, npts, Vt, Wt, blmap, plist, times_sec, [f0m], dts, [1.0], debias)
+            Vf, Wf = _collapse_axis(V, W, 2)        # time-average per channel → freq curve
+            _coherence_accumulate!(dumT, numF, denF, dumN, Vf, Wf, blmap, plist, [t0m], freqs, [1.0], dnus, debias)
+        else
+            _coherence_accumulate!(numT, numF, denT, npts, V, W, blmap, plist, times_sec, freqs, dts, dnus, debias)
+        end
     end
 
-    etaT, aggT = _curve_from_sums(numT, den)
-    etaF, aggF = _curve_from_sums(numF, den)
+    etaT, aggT = _curve_from_sums(numT, denT)
+    etaF, aggF = _curve_from_sums(numF, marginalize ? denF : denT)
     return CoherenceReport(
         bl_pairs, ant_names, pol_labels, npts,
         CoherenceCurve(:time, dts, aggT, etaT),
@@ -403,6 +429,34 @@ function _coherence_accumulate!(
         end
     end
     return nothing
+end
+
+# Coherently weighted-average `V` (with weights `W`) over `axis` (1 = Frequency,
+# 2 = Ti), returning `(Vbar, Wbar)` with that axis collapsed to length 1: `Vbar` is
+# the weighted mean `Σ w·V / Σ w` and `Wbar = Σ w` (so its noise variance is `1/Wbar`,
+# preserving the inverse-variance convention the debias relies on). For corrected
+# data this is the high-SNR band-average (axis 1) or time-average (axis 2) used by
+# `coherence_report(marginalize = true)`; cells with no weight become `NaN`.
+function _collapse_axis(V::AbstractArray{<:Any, 4}, W::AbstractArray{<:Any, 4}, axis::Int)
+    nchan, nti, nbl, npol = size(V)
+    on, no = axis == 1 ? (nchan, nti) : (nti, nchan)
+    Vbar = fill(ComplexF64(NaN), axis == 1 ? 1 : nchan, axis == 1 ? nti : 1, nbl, npol)
+    Wbar = zeros(Float64, axis == 1 ? 1 : nchan, axis == 1 ? nti : 1, nbl, npol)
+    @inbounds for p in 1:npol, bl in 1:nbl, j in 1:no
+        s = zero(ComplexF64); w = 0.0
+        for i in 1:on
+            c, ti = axis == 1 ? (i, j) : (j, i)
+            wc = W[c, ti, bl, p]; vc = V[c, ti, bl, p]
+            (wc > 0 && isfinite(wc) && isfinite(vc)) || continue
+            s += Float64(wc) * ComplexF64(vc); w += Float64(wc)
+        end
+        if w > 0
+            oj1, oj2 = axis == 1 ? (1, j) : (j, 1)
+            Vbar[oj1, oj2, bl, p] = s / w
+            Wbar[oj1, oj2, bl, p] = w
+        end
+    end
+    return Vbar, Wbar
 end
 
 """

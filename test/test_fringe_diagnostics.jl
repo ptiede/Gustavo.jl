@@ -243,6 +243,33 @@ using HDF5
         @test freq_eta(; sigma = 0.2, phase_rms = 0.4, debias = true) < 0.97
     end
 
+    @testset "coherence marginalize (incoherent)" begin
+        # Faint FLAT-phase source (per-cell amplitude SNR ≈ 0.4, like a resolved/weak
+        # baseline): the per-channel time curve understates coherence even debiased,
+        # but marginalizing (band-average per AP → high SNR) recovers η ≈ 1.
+        rng = MersenneTwister(9)
+        nchan, nti = 64, 40
+        sigma = 2.5; w = 1 / sigma^2
+        V = Array{ComplexF64}(undef, nchan, nti, 1, 1); W = fill(w, nchan, nti, 1, 1)
+        for c in 1:nchan, t in 1:nti
+            V[c, t, 1, 1] = 1.0 + sigma * (randn(rng) + im * randn(rng)) / sqrt(2)
+        end
+        times = collect(1.0:nti); freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6)
+        dts = [Float64(nti)]
+        # per-channel time η at full averaging (debiased)
+        nT = zeros(1, 1); den = zeros(1)
+        UVP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(Int, 1), V, W, [1], [1], times, freqs, dts, [1.0e8], true)
+        eta_perchan = den[1] > 0 ? min(nT[1, 1] / den[1], 1.0) : NaN
+        # marginalized: band-average per AP, then time η
+        Vt, Wt = UVP._collapse_axis(V, W, 1)
+        @test size(Vt) == (1, nti, 1, 1)
+        nT2 = zeros(1, 1); denT = zeros(1)
+        UVP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(Int, 1), Vt, Wt, [1], [1], times, [1.5e9], dts, [1.0], true)
+        eta_marg = denT[1] > 0 ? min(nT2[1, 1] / denT[1], 1.0) : NaN
+        @test eta_marg > eta_perchan        # marginalize recovers what per-channel loses
+        @test eta_marg > 0.95               # ...to ≈ 1 for a flat-phase source
+    end
+
     @testset "HDF5 caltable: round-trip + external-readable" begin
         path = tempname() * ".h5"
         try
