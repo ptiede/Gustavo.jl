@@ -219,6 +219,30 @@ using HDF5
         @test (show(IOBuffer(), MIME("image/png"), figm); true)
     end
 
+    @testset "coherence thermal debias" begin
+        # One (baseline, pol) of `nchan` cells with inverse-variance weights (w = 1/σ²):
+        # flat phase + noise should debias to η ≈ 1 (raw is pulled below by the noise);
+        # a real per-cell phase scatter must keep η < 1 even debiased.
+        function freq_eta(; sigma, phase_rms, debias, nchan = 600, seed = 7)
+            rng = MersenneTwister(seed); w = 1 / sigma^2
+            V = Array{ComplexF64}(undef, nchan, 1, 1, 1); W = fill(w, nchan, 1, 1, 1)
+            for c in 1:nchan
+                V[c, 1, 1, 1] = cis(phase_rms * randn(rng)) + sigma * (randn(rng) + im * randn(rng)) / sqrt(2)
+            end
+            freqs = collect(range(1.0e9, 1.1e9; length = nchan))
+            numF = zeros(1, 1); den = zeros(1); npts = zeros(Int, 1)
+            UVP._coherence_accumulate!(
+                zeros(0, 1), numF, den, npts, V, W, [1], [1], [0.0], freqs, Float64[], [2.0e8], debias,
+            )
+            return den[1] > 0 ? min(numF[1, 1] / den[1], 1.0) : NaN   # clamp as `_curve_from_sums` does
+        end
+        # Flat phase, high per-cell SNR: raw is biased below 1, debias ≈ 1.
+        @test freq_eta(; sigma = 0.2, phase_rms = 0.0, debias = false) < 0.995
+        @test freq_eta(; sigma = 0.2, phase_rms = 0.0, debias = true) > 0.99
+        # Real residual phase (0.4 rad): debias must NOT hide it (η stays < 1).
+        @test freq_eta(; sigma = 0.2, phase_rms = 0.4, debias = true) < 0.97
+    end
+
     @testset "HDF5 caltable: round-trip + external-readable" begin
         path = tempname() * ".h5"
         try

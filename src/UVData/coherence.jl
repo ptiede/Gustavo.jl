@@ -24,12 +24,13 @@
 #
 # CAVEAT: η is computed against the data's own finest resolution (a single
 # integration / channel gives η ≡ 1), so it is self-normalized and needs no
-# external gain model — but it is NOT thermal-noise-debiased. Pure thermal noise
-# alone pulls η below 1 at coarse averaging (the incoherent |V| is noise-inflated
-# while the coherent sum averages noise down). The diagnostic value is therefore
-# the *shape* of the curve and the *before/after* (or stage-to-stage) comparison,
-# not the absolute η: a correct solution tracks the thermal floor, a residual
-# phase error drops faster.
+# external gain model. By default it is NOT thermal-noise-debiased: pure thermal
+# noise alone pulls η below 1 at coarse averaging (the incoherent |V| is
+# noise-inflated while the coherent sum averages noise down), so at native per-cell
+# SNR the absolute η UNDERSTATES a good solution — read the *shape* and the
+# *before/after* comparison, not the absolute value. Pass `debias = true` (REQUIRES
+# inverse-variance weights, `w = 1/σ²`) to subtract that bias: η then reflects the
+# genuine residual-phase coherence (≈1 for a flat-phase solution regardless of SNR).
 
 """
     CoherenceCurve
@@ -148,12 +149,19 @@ materialized one at a time (memory-safe on a streamed set).
 `timescales` (seconds) / `bandwidths` (Hz) override the default geometric sweeps
 (native spacing → full extent). `pols` selects products: `:parallel` (default,
 parallel-hand only — cross hands are mostly noise and would bias η down), `:all`,
-an index, or product label(s). See [`CoherenceReport`](@ref) /
-[`print_coherence_report`](@ref) / `plot_coherence`.
+an index, or product label(s).
+
+`debias` (default `false`) subtracts the thermal-noise bias from η — REQUIRES the
+weights to be inverse variances (`w = 1/σ²`, e.g. `load_fitsidi(weight_mode =
+:radiometer)`). Without it the raw η is pulled below 1 at coarse averaging by
+noise alone (the incoherent Σ w·|V| is noise-inflated), so it understates a good
+solution at native per-cell SNR; with it η reflects the genuine residual-phase
+coherence (η ≈ 1 for a flat-phase solution regardless of SNR). See
+[`CoherenceReport`](@ref) / [`print_coherence_report`](@ref) / `plot_coherence`.
 """
 function coherence_report(
         uvset::UVSet;
-        timescales = nothing, bandwidths = nothing, pols = :parallel,
+        timescales = nothing, bandwidths = nothing, pols = :parallel, debias = false,
     )
     src = DimensionalData.branches(uvset)
     isempty(src) && error("coherence_report: uvset has no leaves")
@@ -226,7 +234,7 @@ function coherence_report(
         blmap = [get(blidx, p, 0) for p in baselines(m).pairs]
         times_sec = Float64.(lookup(m[:vis], Ti)) .* 3600.0
         freqs = Float64.(lookup(m[:vis], Frequency))
-        _coherence_accumulate!(numT, numF, den, npts, V, W, blmap, plist, times_sec, freqs, dts, dnus)
+        _coherence_accumulate!(numT, numF, den, npts, V, W, blmap, plist, times_sec, freqs, dts, dnus, debias)
     end
 
     etaT, aggT = _curve_from_sums(numT, den)
@@ -239,6 +247,9 @@ function coherence_report(
 end
 
 # Per-baseline η = num/den and the pooled aggregate η = Σnum/Σden, per interval.
+# Raw η is ≤ 1 by the triangle inequality; with `debias` the per-cell denominator
+# debias is slightly Jensen-biased low at low per-cell SNR (accurate at high SNR),
+# which can nudge η just above 1, so clamp to the physical ceiling.
 function _curve_from_sums(num::Matrix{Float64}, den::Vector{Float64})
     nrow, nbl = size(num)
     eta_bl = fill(NaN, nrow, nbl)
@@ -248,10 +259,10 @@ function _curve_from_sums(num::Matrix{Float64}, den::Vector{Float64})
         for bl in 1:nbl
             d = den[bl]
             d > 0 || continue
-            eta_bl[k, bl] = num[k, bl] / d
+            eta_bl[k, bl] = min(num[k, bl] / d, 1.0)
             sn += num[k, bl]; sd += d
         end
-        sd > 0 && (agg[k] = sn / sd)
+        sd > 0 && (agg[k] = min(sn / sd, 1.0))
     end
     return eta_bl, agg
 end
@@ -281,6 +292,7 @@ function _coherence_accumulate!(
         numT::Matrix{Float64}, numF::Matrix{Float64}, den::Vector{Float64}, npts::Vector{Int},
         V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, blmap::Vector{Int}, plist::Vector{Int},
         times_sec::Vector{Float64}, freqs::Vector{Float64}, dts::Vector{Float64}, dnus::Vector{Float64},
+        debias::Bool,
     ) where {Tv, Tw}
     nchan, nti, nbl, npol = size(V)
     nT = length(dts); nF = length(dnus)
@@ -306,8 +318,18 @@ function _coherence_accumulate!(
     end
 
     # Running per-interval accumulators, reused across (baseline, pol, channel/AP).
-    accT = Vector{ComplexF64}(undef, nT); curT = Vector{Int}(undef, nT); haveT = Vector{Bool}(undef, nT)
-    accF = Vector{ComplexF64}(undef, nF); curF = Vector{Int}(undef, nF); haveF = Vector{Bool}(undef, nF)
+    # `swT`/`swF` carry the per-bin Σw for the optional thermal debias.
+    accT = Vector{ComplexF64}(undef, nT); swT = Vector{Float64}(undef, nT)
+    curT = Vector{Int}(undef, nT); haveT = Vector{Bool}(undef, nT)
+    accF = Vector{ComplexF64}(undef, nF); swF = Vector{Float64}(undef, nF)
+    curF = Vector{Int}(undef, nF); haveF = Vector{Bool}(undef, nF)
+
+    # Debiased coherent-bin amplitude: with inverse-variance weights (`w = 1/σ²`),
+    # `|Σ w·V|²` is noise-inflated by `Σw`, so the unbiased amplitude is
+    # `√(max(|Σ w·V|² − Σw, 0))` (and `|Σ w·V|` otherwise). At native resolution
+    # (one cell: `s = w·V`, `sw = w`) this equals the debiased denominator cell, so
+    # η ≡ 1 there for noise-free data.
+    binamp(s::ComplexF64, sw::Float64) = debias ? sqrt(max(abs2(s) - sw, 0.0)) : abs(s)
 
     @inbounds for bli in 1:nbl
         bl = blmap[bli]
@@ -316,11 +338,14 @@ function _coherence_accumulate!(
             p = plist[pli]
             p in 1:npol || continue
 
-            # Denominator Σ w·|V| and cell count (interval-independent).
+            # Denominator Σ w·|V| and cell count (interval-independent). With
+            # `debias`, the incoherent |V| = √(|V_true|² + 1/w) is noise-inflated, so
+            # use √(max(|V|² − 1/w, 0)) (w = 1/σ²).
             for ti in 1:nti, c in 1:nchan
                 w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
-                den[bl] += w * abs(ComplexF64(v))
+                a2 = abs2(ComplexF64(v))
+                den[bl] += w * (debias ? sqrt(max(a2 - inv(Float64(w)), 0.0)) : sqrt(a2))
                 npts[bl] += 1
             end
 
@@ -328,7 +353,7 @@ function _coherence_accumulate!(
             # fans each cell into all nT intervals.
             for c in 1:nchan
                 for k in 1:nT
-                    accT[k] = zero(ComplexF64); haveT[k] = false
+                    accT[k] = zero(ComplexF64); swT[k] = 0.0; haveT[k] = false
                 end
                 for ti in tperm
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
@@ -339,13 +364,14 @@ function _coherence_accumulate!(
                         if !haveT[k]
                             curT[k] = id; haveT[k] = true
                         elseif id != curT[k]
-                            numT[k, bl] += abs(accT[k]); accT[k] = zero(ComplexF64); curT[k] = id
+                            numT[k, bl] += binamp(accT[k], swT[k])
+                            accT[k] = zero(ComplexF64); swT[k] = 0.0; curT[k] = id
                         end
-                        accT[k] += wv
+                        accT[k] += wv; swT[k] += w
                     end
                 end
                 for k in 1:nT
-                    haveT[k] && (numT[k, bl] += abs(accT[k]))
+                    haveT[k] && (numT[k, bl] += binamp(accT[k], swT[k]))
                 end
             end
 
@@ -353,7 +379,7 @@ function _coherence_accumulate!(
             # fans each cell into all nF intervals.
             for ti in 1:nti
                 for k in 1:nF
-                    accF[k] = zero(ComplexF64); haveF[k] = false
+                    accF[k] = zero(ComplexF64); swF[k] = 0.0; haveF[k] = false
                 end
                 for c in cperm
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
@@ -364,13 +390,14 @@ function _coherence_accumulate!(
                         if !haveF[k]
                             curF[k] = id; haveF[k] = true
                         elseif id != curF[k]
-                            numF[k, bl] += abs(accF[k]); accF[k] = zero(ComplexF64); curF[k] = id
+                            numF[k, bl] += binamp(accF[k], swF[k])
+                            accF[k] = zero(ComplexF64); swF[k] = 0.0; curF[k] = id
                         end
-                        accF[k] += wv
+                        accF[k] += wv; swF[k] += w
                     end
                 end
                 for k in 1:nF
-                    haveF[k] && (numF[k, bl] += abs(accF[k]))
+                    haveF[k] && (numF[k, bl] += binamp(accF[k], swF[k]))
                 end
             end
         end
