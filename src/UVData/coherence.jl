@@ -158,19 +158,20 @@ noise alone (the incoherent Σ w·|V| is noise-inflated), so it understates a go
 solution at native per-cell SNR; with it η reflects the genuine residual-phase
 coherence (η ≈ 1 for a flat-phase solution regardless of SNR).
 
-`marginalize` (default `false`) measures each curve on the data coherently averaged
+`marginalize` (default `true`) measures each curve on the data coherently averaged
 over the OTHER axis first — the time curve on the per-AP band-average, the freq
 curve on the per-channel time-average (incoherent/segmented, EHT-HOPS style). This
 boosts the per-sample SNR (so `debias` is reliable) and answers the real "can I
 average this" question; at native per-cell SNR ≲ 1 (faint/resolved sources) the
-default per-channel/per-AP curves understate coherence, while `marginalize` does
-not. Combine with `debias = true`. See [`CoherenceReport`](@ref) /
+`marginalize = false` per-channel/per-AP curves understate coherence (they measure
+noise), while marginalizing does not. Combine with `debias = true`. See
+[`CoherenceReport`](@ref) /
 [`print_coherence_report`](@ref) / `plot_coherence`.
 """
 function coherence_report(
         uvset::UVSet;
         timescales = nothing, bandwidths = nothing, pols = :parallel,
-        debias = false, marginalize = false,
+        debias = false, marginalize = true,
     )
     src = DimensionalData.branches(uvset)
     isempty(src) && error("coherence_report: uvset has no leaves")
