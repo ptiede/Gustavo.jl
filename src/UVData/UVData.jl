@@ -8,6 +8,7 @@ using DimensionalData:
 import DimensionalData: metadata, branches
 using OrderedCollections: OrderedDict
 using PolarizedTypes: CirBasis, LinBasis, XPol, YPol, RPol, LPol
+using Statistics: median
 
 include("dimensions.jl")
 include("antenna.jl")
@@ -17,6 +18,7 @@ include("metadata.jl")
 include("UVSet/UVSet.jl")
 include("io.jl")
 include("dataset.jl")
+include("coherence.jl")
 include("utilities.jl")
 
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
@@ -41,6 +43,8 @@ export TimeAverage, scan_average
 export FrequencyAverage, frequency_average, TimeBinAverage, time_bin_average
 export BandEdgeFlag, flag_band_edges
 export combine_spw
+export CoherenceReport, CoherenceCurve, coherence_report, coherence_headline
+export print_coherence_report, plot_coherence, plot_coherence_matrix
 export scan_time_centers, band_center_frequency, centered_channel_freqs
 export baseline_sites, baseline_number
 export antenna_names, nbaselines, nscans, nchannels, npols, nintegrations

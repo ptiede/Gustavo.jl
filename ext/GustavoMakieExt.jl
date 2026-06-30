@@ -651,5 +651,6 @@ function Bandpass.plot_baseline_bandpass_residuals(
 end
 
 include("GustavoMakieExt_fringe.jl")
+include("GustavoMakieExt_coherence.jl")
 
 end # module
