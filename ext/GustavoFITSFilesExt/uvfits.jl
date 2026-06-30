@@ -724,7 +724,14 @@ function _load_uvfits_flat(path)
     bl_codes::Vector{Int} = round.(Int, collect(dt.BASELINE))
 
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
-    uvw_raw::Matrix{Float32} = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
+    # NEGATE (u,v,w) crossing the UVFITS boundary. AIPS random-groups UVFITS uses
+    # the opposite (u,v,w) sign convention to Gustavo's internal (DiFX FITS-IDI)
+    # convention; the visibility values are identical in both. Without this a file
+    # written/read here point-reflects the image in AIPS/HOPS/ehtim/Comrade. All
+    # three components flip together (Hermitian-consistent, including the w-term —
+    # flipping only u,v would be inconsistent for wide-field/w). `write_uvfits`
+    # applies the same negation, so the write→read round-trip is identity.
+    uvw_raw::Matrix{Float32} = -hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
     cfq::Vector{Float64} = channel_freqs(first(freq_setups))
     dims = (Integration(obs_time), Pol(msv4_labels), Frequency(cfq))
@@ -1490,9 +1497,11 @@ function _write_records_kernel!(
                 raw_data[row, 3, pdisk, 1, c, 1, 1] = w_dense[c, ti, bi, pmem]
             end
         end
-        uu[row] = uvw_dense[ti, bi, 1]
-        vv[row] = uvw_dense[ti, bi, 2]
-        ww_[row] = uvw_dense[ti, bi, 3]
+        # Negate (u,v,w): Gustavo-internal (DiFX) → AIPS UVFITS sign convention
+        # (visibility untouched; see the matching note in load_uvfits).
+        uu[row] = -uvw_dense[ti, bi, 1]
+        vv[row] = -uvw_dense[ti, bi, 2]
+        ww_[row] = -uvw_dense[ti, bi, 3]
         bl_codes[row] = Int(bl_aips_codes_local[bi])
         date_param_cat[row, :] .= @view date_param[rec_i, :]
     end

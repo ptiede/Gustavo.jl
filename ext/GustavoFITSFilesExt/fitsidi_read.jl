@@ -1176,18 +1176,27 @@ dropped from the output regardless. Pass both `false` to keep autocorrelations.
     DiFX/FITS-IDI *validity* weights (fraction of the sample actually
     correlated, ≈1), NOT inverse variances, so `1/√weight` is not a noise.
   * `:radiometer` — convert to thermal-noise inverse variances in the data's
-    (correlation-coefficient) units: `w → w · 2·Δν·τ·η²`, with channel width
-    `Δν` from the FREQUENCY table (`CH_WIDTH`) and per-record accumulation time
-    `τ` from the `INTTIM` column. `weight_efficiency` (η) is the
+    (correlation-coefficient) units: `w → (w / weight_norm) · 2·Δν·τ·η²`, with
+    channel width `Δν` from the FREQUENCY table (`CH_WIDTH`) and per-record
+    accumulation time `τ` from the `INTTIM` column. `weight_efficiency` (η) is the
     correlator/quantization efficiency (a single scalar; it sets the absolute
     χ²/SNR scale, not the relative weighting). Tsys is not needed — it cancels
     in correlation-coefficient units. Non-positive weights (flag sentinels) are
     preserved; bands lacking a usable `CH_WIDTH`/`INTTIM` fall back to
     `:validity`.
+
+    `weight_norm` is the nominal fully-valid value of the on-disk `WEIGHT` column.
+    The radiometer formula treats `WEIGHT` as a ≈1 validity *fraction*, but some
+    correlators write an unnormalized value (e.g. DiFX BT164 ≈ 3.4); leaving
+    `weight_norm = 1.0` then overstates the inverse-variance by that factor. Set it
+    to `median(positive WEIGHT)` so a fully-valid cell lands at the correct
+    `2·Δν·τ·η²`. A successive-difference scatter test (`|ΔV|²/(σᵢ²+σⱼ²) ≈ 1`) on the
+    output is the way to confirm the absolute scale.
 """
 function UVData.load_fitsidi(
         path; lazy = true, scans = :, bands = :,
         weight_mode::Symbol = :validity, weight_efficiency::Real = 1.0,
+        weight_norm::Real = 1.0,
         drop_autocorr::Bool = true, normalize_autocorr::Bool = true,
     )
     weight_mode in (:validity, :radiometer) || error(
@@ -1195,6 +1204,7 @@ function UVData.load_fitsidi(
             "weights, as on disk) or :radiometer (convert to thermal-noise " *
             "inverse-variance via 2·Δν·τ·η²); got $(weight_mode).",
     )
+    weight_norm > 0 || error("load_fitsidi: weight_norm must be positive, got $(weight_norm).")
     fid = FITSFiles.fits(path)
 
     # Locate HDUs by EXTNAME.
@@ -1402,14 +1412,23 @@ function UVData.load_fitsidi(
                 Baseline(baselines.labels), Pol(msv4_labels),
             )
 
-            # Radiometer weight factor for this band: 2·Δν·η² (per-row τ = INTTIM
-            # is applied at decode). Disabled (0) for :validity mode, or when the
-            # band channel width / INTTIM column is unavailable — then the raw
-            # correlator validity weights pass through unchanged.
+            # Radiometer weight factor for this band: 2·Δν·η² / weight_norm (per-row
+            # τ = INTTIM is applied at decode). Disabled (0) for :validity mode, or
+            # when the band channel width / INTTIM column is unavailable — then the
+            # raw correlator validity weights pass through unchanged.
+            #
+            # `weight_norm` divides out the nominal fully-valid value of the on-disk
+            # WEIGHT column so that a fully-valid cell ends up at the correct
+            # `2·Δν·τ·η²`. The radiometer formula assumes WEIGHT is a ≈1 validity
+            # FRACTION, but some correlators (e.g. this DiFX BT164 set, WEIGHT ≈ 3.4)
+            # write an unnormalized value; multiplying it in verbatim then overstates
+            # the inverse-variance by that factor (confirmed by a successive-difference
+            # scatter test). Pass `weight_norm = median(on-disk WEIGHT)` (1.0 keeps the
+            # old behaviour, correct only when WEIGHT really is ≈1).
             cws_b = ch_widths(fsetup)
             dnu_b = isempty(cws_b) ? 0.0 : abs(Float64(first(cws_b)))
             wfactor_b = (weight_mode === :radiometer && dnu_b > 0 && !isempty(inttim)) ?
-                Float32(2 * dnu_b * weight_efficiency^2) : 0.0f0
+                Float32(2 * dnu_b * weight_efficiency^2 / weight_norm) : 0.0f0
             inttim_b = wfactor_b == 0.0f0 ? Float32[] : inttim
 
             # Flags touching this leaf (source, band, time-span). The vis layer
