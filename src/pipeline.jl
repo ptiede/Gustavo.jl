@@ -111,14 +111,18 @@ end
 # ── Option holders ────────────────────────────────────────────────────────────
 
 """
-    BandpassOptions(; phase = true, amp = true, source = nothing)
+    BandpassOptions(; phase = true, amp = true, amp_smoother = PolynomialBandpass(4), source = nothing)
 
 Fringe relative phase/amplitude bandpass toggles for [`FringeFit`](@ref).
-`source` names the bandpass calibrator (default: the brightest).
+`source` names the bandpass calibrator (default: the brightest). `amp_smoother`
+selects the amplitude-bandpass estimator — an `AbstractBandpassSmoother`, e.g.
+[`PolynomialBandpass`](@ref) (degree), [`PenalizedBandpass`](@ref) (λ), or
+[`FreeBandpass`](@ref).
 """
 Base.@kwdef struct BandpassOptions
     phase::Bool = true
     amp::Bool = true
+    amp_smoother::AbstractBandpassSmoother = PolynomialBandpass(4)
     source = nothing
 end
 
@@ -171,6 +175,7 @@ function run_step(s::FringeFit, ctx::CalibrationContext)
         search = s.search, adhoc = s.adhoc,
         ntasks = s.ntasks, mem_fraction = s.mem_fraction, mem_budget = s.mem_budget,
         phase_bandpass = s.bandpass.phase, amp_bandpass = s.bandpass.amp,
+        amp_smoother = s.bandpass.amp_smoother,
         bandpass_source = s.bandpass.source,
     )
     return _with(ctx; solution = sol, output = output)

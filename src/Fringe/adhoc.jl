@@ -67,6 +67,14 @@ baseline visibilities. `rbar[baseline, product, ap]` is `Σ_chan w·V_residual`
 (complex) and `wbar[baseline, product, ap]` is `Σ_chan w` for each AP, so the
 coherent SNR² is `|rbar|²/wbar`. `times` are the AP epochs (any units; used only
 for detrending). `ref_ant` sets the per-AP gauge (its adhoc phase is held at 0).
+
+`shared_feeds` (default `false`) solves ONE feed-common station phase per AP
+(both feeds collapsed to a single node, χ retained) instead of an independent
+track per feed. The residual atmospheric phase is non-birefringent, so a shared
+adhoc both denoises it (all four products constrain one node) and contributes
+exactly zero R–L (RL/RR) phase — leaving the instrumental R–L offset to the
+global Stage-B feed term. Pass `true` when the model's adhoc component is
+`SharedFeeds`.
 """
 # Data-driven noise variance of one (baseline, product) coherent track
 # `V̄_ap = rbar/wbar`, from the robust scatter of its AP-to-AP differences. The
@@ -95,6 +103,7 @@ function solve_adhoc_phasing(
         nant::Integer, times::AbstractVector;
         ref_ant::Integer = 1,
         opts::AdhocPhasing = AdhocPhasing(),
+        shared_feeds::Bool = false,
     )
     nbl, npol, nap = size(rbar)
     size(wbar) == size(rbar) || error("rbar and wbar must have the same shape")
@@ -131,9 +140,18 @@ function solve_adhoc_phasing(
             snr2 = isfinite(n2) && n2 > 0 ? abs2(r / w) / n2 : abs2(r) / w   # fall back if unestimable
             snr2 >= opts.snr_floor^2 || continue
             fa, fb = feeds[p]
-            push!(rows, _ObsRow(a, b, fa, fb, angle(r), snr2, _chi_sign(fa, fb)))
-            track_w[a, fa, ap] += snr2
-            track_w[b, fb, ap] += snr2
+            cs = _chi_sign(fa, fb)
+            # With `shared_feeds` the residual phase is feed-COMMON (the atmosphere is
+            # non-birefringent), so both feeds map to ONE station node (feed 1); the
+            # cross-hand χ sign is kept (χ still absorbs the per-AP source cross-hand
+            # phase). Collapsing here makes all four products constrain the same
+            # node difference φ_a − φ_b (±χ), so the solve has no feed-2 node and thus
+            # contributes ZERO R–L phase — R–L is left to the global instrumental term.
+            na = shared_feeds ? 1 : fa
+            nb = shared_feeds ? 1 : fb
+            push!(rows, _ObsRow(a, b, na, nb, angle(r), snr2, cs))
+            track_w[a, na, ap] += snr2
+            track_w[b, nb, ap] += snr2
         end
         ph, c, cov, _ = _solve_observable(rows, nant, ref_ant; use_chi = true, rewrap = opts.phase_rewrap_iters)
         phase[:, :, ap] .= ph
@@ -178,6 +196,16 @@ function solve_adhoc_phasing(
         for a in 1:nant, f in 1:2
             _detrend_track!(@view(phase[a, f, :]), @view(track_w[a, f, :]))
         end
+    end
+
+    # `shared_feeds`: the solve placed the feed-common track on feed 1 only (feed 2
+    # nodes were never touched). Replicate it onto feed 2 so the per-(station, feed)
+    # write into θ's SharedFeeds adhoc column is identical for both feeds (and so the
+    # returned solution is a valid `(nant, 2, nap)` array). R–L from the adhoc is then
+    # exactly 0 by construction.
+    if shared_feeds
+        phase[:, 2, :] .= @view phase[:, 1, :]
+        covered[:, 2, :] .= @view covered[:, 1, :]
     end
 
     return AdhocSolution(phase, chi, collect(float.(times)), covered)

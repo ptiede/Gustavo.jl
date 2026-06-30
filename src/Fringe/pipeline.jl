@@ -76,8 +76,19 @@ end
 #     (EHT-HOPS / rPICARD assumption). Solved once from all scans' cross hands so
 #     the bright polarized scans pin it and weak scans inherit it (feeds that
 #     would otherwise split into `ncomp = 2` are tied);
-#   - per-scan rate (`PerFeed`, unchanged — R–L rate is negligible);
-#   - a per-AP adhoc-phase constant (`PerFeed`).
+#   - per-scan rate (`SharedFeeds`): the fringe rate is common to both feeds, so it
+#     is tied across them — exactly like the per-scan constant/delay. Solving it
+#     `PerFeed` instead lets a spurious R–L rate (`rate₂ − rate₁`) float on noise;
+#     since the Rate phase is `2π·rate·(t − t0_global)` with `t0` the WHOLE-TRACK
+#     reference, that per-feed noise is multiplied by a per-scan lever arm of hours,
+#     injecting a large, arbitrary, scan-to-scan R–L (RL/RR) phase jump. R–L rate is
+#     negligible (EHT-HOPS), so tie it; a genuine offset would be a `GlobalTime ×
+#     FeedComponent(2)` rate term (the analog of the R–L constant/delay), not PerFeed;
+#   - a per-AP adhoc-phase constant (`SharedFeeds`): residual atmospheric phase is
+#     non-birefringent (common to both feeds), so it is solved feed-common — which
+#     denoises it and, crucially, contributes ZERO R–L phase. A `PerFeed` adhoc lets
+#     per-AP solve noise differ between feeds and so injects spurious R–L (RL/RR)
+#     scatter on top of the stable global instrumental R–L offset.
 # Log-amplitude empty. `solve_station_systems!` reads the off1 columns this model
 # declares — so the global-vs-per-scan split is a model choice, not solver code.
 function _fringe_model()
@@ -87,20 +98,21 @@ function _fringe_model()
             TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
             TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), SharedFeeds()),
             TiedComponent(GainComponent(Delay(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
-            TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), PerFeed()),
+            TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), SharedFeeds()),
             # Phase bandpass: per-channel, stable across the observation (HOPS-style),
             # per feed. Captures the residual nonlinear-in-frequency instrumental phase
             # that the per-scan (linear) delay cannot represent. Solved by a dedicated
             # frequency-stationization stage (`_solve_phase_bandpass!`), not by the
             # delay/rate search — `PerChannel` is its signature, used to route it.
             TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),
-            TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), PerFeed()),
+            TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),
         ),
         # Amplitude bandpass: per-channel, time-stable, per-feed log-amplitude — the
-        # station-RELATIVE instrumental amplitude shape (the common-mode part is
-        # degenerate with the source spectrum and left to amplitude cal). Solved by
-        # the same bandpass stage from the calibrator; the SNR gate leaves low-signal
-        # band edges uncorrected (gain 1) rather than dividing by ~0.
+        # per-station instrumental amplitude shape (filterbank passband), FLATTENED
+        # from the calibrator. Solved by the bandpass stage via a pluggable
+        # `AbstractBandpassSmoother` (`_solve_amp_bandpass!`); the SNR gate drops
+        # no-signal channels, which the smoother then estimates (or, for `FreeBandpass`,
+        # leaves at gain 1). The absolute level stays the a-priori amplitude cal's job.
         logamp = (
             TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),
         ),
@@ -124,9 +136,15 @@ function _stageB_components(model, layout)
     return comps
 end
 
+# Index of the adhoc component (the per-integration phase term) within `model.phase`.
+_adhoc_idx(model) = findfirst(tc -> tc.component.time isa PerIntegration, model.phase)
+
 # The adhoc component's plan (the per-integration phase term).
-_adhoc_plan(model, layout) =
-    layout.plans[findfirst(tc -> tc.component.time isa PerIntegration, model.phase)]
+_adhoc_plan(model, layout) = layout.plans[_adhoc_idx(model)]
+
+# Whether the adhoc (per-integration) phase component is feed-common (`SharedFeeds`),
+# so `solve_adhoc_phasing` solves one feed-common track and contributes zero R–L.
+_adhoc_shared(model) = model.phase[_adhoc_idx(model)].tying isa SharedFeeds
 
 # The phase-bandpass component's plan (the per-channel phase term), or `nothing`
 # if the model carries no bandpass component.
@@ -391,41 +409,13 @@ function _search_group(grp::_ScanGroup, Vsearch, f0, t0_sec, search, ws)
     return det, maxsnr
 end
 
-# Globally-closing adhoc phase for one group: residual after the (already-solved,
-# global) stage-B gains, coherently freq-averaged per AP, solved and written into
-# `θ`'s per-integration adhoc slots (disjoint per group). Fused accumulation
-# avoids materializing a full residual cube.
-function _adhoc_group!(θ, grp::_ScanGroup, ev, adhoc_plan, adhoc, ref_ant, nant)
-    nbl = length(grp.bl_pairs)
-    npol = length(grp.pol_products)
-    nap = length(grp.tg)
-    rbar = zeros(ComplexF64, nbl, npol, nap)
-    wbar = zeros(Float64, nbl, npol, nap)
-    _accumulate_residual_rbar!(rbar, wbar, ev, θ, grp)
-    as = solve_adhoc_phasing(
-        rbar, wbar, grp.bl_pairs, grp.pol_products, nant, grp.tg;
-        ref_ant = ref_ant, opts = adhoc,
-    )
-    for (ap, gti) in enumerate(grp.g_ti)
-        tseg = adhoc_plan.tseg_id[gti]
-        for ant in 1:nant, feed in 1:2
-            v = as.phase[ant, feed, ap]
-            isfinite(v) || continue
-            off = adhoc_plan.off1[ant, feed, tseg, 1]
-            off == 0 && continue
-            θ[off] = v
-        end
-    end
-    return θ
-end
-
 # Adhoc for one group from its per-band LEAVES (no concatenated `_ScanGroup` — pass
 # 2's memory-lean path). The per-AP residual is summed over each band leaf's
 # channels (a function barrier per leaf, gains evaluated on the leaf window); the
 # sum over all bands' channels is identical to accumulating over the concatenated
-# cube, so the result matches `_adhoc_group!` exactly. `keyed` is the group's
+# cube, so the result matches the concatenated-cube accumulation exactly. `keyed` is the group's
 # `(key, leaf)` pairs.
-function _adhoc_group_leaves!(θ, keyed, geom::DataGeometry, ev, adhoc_plan, adhoc, ref_ant, nant)
+function _adhoc_group_leaves!(θ, keyed, geom::DataGeometry, ev, adhoc_plan, adhoc, ref_ant, nant; shared_feeds::Bool = false)
     leaves = [m for (_, m) in keyed]
     l0 = first(leaves)
     bl_pairs = collect(UVData.baselines(l0).pairs)
@@ -440,7 +430,7 @@ function _adhoc_group_leaves!(θ, keyed, geom::DataGeometry, ev, adhoc_plan, adh
         g = evaluate_gains(ev, θ, ci, ti)               # (nchan_leaf, nti, nant, 2)
         _accumulate_leaf_rbar!(rbar, wbar, parent(leaf[:vis]), parent(leaf[:weights]), g, bl_pairs, pols)
     end
-    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg; ref_ant = ref_ant, opts = adhoc)
+    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg; ref_ant = ref_ant, opts = adhoc, shared_feeds = shared_feeds)
     for (ap, gti) in enumerate(g_ti)
         tseg = adhoc_plan.tseg_id[gti]
         for ant in 1:nant, feed in 1:2
@@ -457,7 +447,7 @@ end
 # Accumulate one band leaf's per-AP residual `Σ_chan w·(V/gain)` into `rbar`/`wbar`.
 # Function barrier: `V`/`W` from `parent(leaf[...])` are type-unstable at the call
 # site, so the per-cell loop must be a specialized function (else dynamic dispatch
-# per element). Mirrors `_accumulate_residual_rbar!` but for one leaf's channels.
+# per element). Accumulates the fused per-AP residual for one leaf's channels.
 function _accumulate_leaf_rbar!(rbar, wbar, V, W, g, bl_pairs, pols)
     nchan, nti, nbl, npol = size(V)
     @inbounds for p in 1:npol
@@ -564,6 +554,58 @@ function _search_and_stationize!(
     return chi, ncomp
 end
 
+# ── Amplitude-bandpass smoothers (pluggable estimators) ───────────────────────────
+#
+# The per-(station, feed) log-amp bandpass is solved from the SUM closure
+# `log|V̄_ab(ν)| = la_a(ν) + lb_b(ν)` over each spw (a +1/+1, signless-Laplacian
+# incidence — FULL RANK, so no reference state). HOW the per-channel shape is
+# estimated — and how low-/no-signal channels are filled — is a pluggable strategy:
+# add an `AbstractBandpassSmoother` subtype and a `_fit_bandpass_segment` method
+# (defined below `solve_fringes`) to extend.
+abstract type AbstractBandpassSmoother end
+
+"""
+    FreeBandpass()
+
+Free per-channel closure: one independent WLS per channel, no regularisation.
+Follows the data but does NOT estimate low-/no-signal channels (left at |g| = 1).
+The `λ → 0` / `degree → ∞` limit of the others.
+"""
+struct FreeBandpass <: AbstractBandpassSmoother end
+
+"""
+    PolynomialBandpass(degree = 4)
+
+Smooth per-spw polynomial of `degree` in a centred/scaled frequency coordinate, fit
+by a single closure WLS (the `PolynomialFreq` design convention). Estimates gaps by
+the fit. Assumes the in-spw bandpass is ~a low-order polynomial (smooth passband +
+gentle roll-off); a high degree can ring (Runge) at the edges.
+"""
+struct PolynomialBandpass <: AbstractBandpassSmoother
+    degree::Int
+    function PolynomialBandpass(degree::Integer = 4)
+        degree >= 1 || error("PolynomialBandpass: degree must be ≥ 1")
+        return new(Int(degree))
+    end
+end
+
+"""
+    PenalizedBandpass(lambda = 1.0)
+
+Roughness-penalised per-channel bandpass (a Whittaker smoother): a free value per
+channel plus a 2nd-difference smoothness penalty of strength `lambda` (relative to
+the per-channel data weight). Makes NO shape assumption — follows real structure
+where the SNR supports it and smoothly interpolates gaps where it does not.
+`lambda → 0` ⇒ [`FreeBandpass`](@ref); large `lambda` ⇒ flat.
+"""
+struct PenalizedBandpass <: AbstractBandpassSmoother
+    lambda::Float64
+    function PenalizedBandpass(lambda::Real = 1.0)
+        lambda >= 0 || error("PenalizedBandpass: lambda must be ≥ 0")
+        return new(Float64(lambda))
+    end
+end
+
 """
     solve_fringes(uvset; search, adhoc, rounds, ref_ant) -> CalibrationSolution
 
@@ -589,6 +631,7 @@ function solve_fringes(
         mem_budget = nothing,
         phase_bandpass::Bool = true,
         amp_bandpass::Bool = true,
+        amp_smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
         bandpass_source = nothing,
     )
     model = _fringe_model()
@@ -599,6 +642,7 @@ function solve_fringes(
     ev = GainEvaluator(model, layout)
     stageB = _stageB_components(model, layout)
     adhoc_plan = _adhoc_plan(model, layout)
+    adhoc_shared = _adhoc_shared(model)
     bp_plan = _bandpass_plan(model, layout)
     amp_bp_plan = _amp_bandpass_plan(model, layout)
     f0 = geom.f0
@@ -629,13 +673,14 @@ function solve_fringes(
                         θ, group_leaves, group_sources, cal, geom, ev,
                         phase_bandpass ? bp_plan : nothing, nant;
                         amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
+                        amp_smoother = amp_smoother,
                     )
                 end
                 # Pass 2: adhoc per group on the residual after the global stage-B (each
                 # group writes its own disjoint per-integration slots of the shared θ).
                 tmap(1:ngroups; ntasks = ntasks_use) do gi
                     keyed = _materialize_leaf_group(group_leaves[gi])
-                    _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant)
+                    _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant; shared_feeds = adhoc_shared)
                     nothing
                 end
                 (ch, nc)
@@ -693,6 +738,7 @@ function solve_and_reduce_fringes(
         mem_budget = nothing,
         phase_bandpass::Bool = true,
         amp_bandpass::Bool = true,
+        amp_smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
         bandpass_source = nothing,
     )
     model = _fringe_model()
@@ -703,6 +749,7 @@ function solve_and_reduce_fringes(
     ev = GainEvaluator(model, layout)
     stageB = _stageB_components(model, layout)
     adhoc_plan = _adhoc_plan(model, layout)
+    adhoc_shared = _adhoc_shared(model)
     bp_plan = _bandpass_plan(model, layout)
     amp_bp_plan = _amp_bandpass_plan(model, layout)
     f0 = geom.f0
@@ -732,6 +779,7 @@ function solve_and_reduce_fringes(
                         θ, group_leaves, group_sources, cal, geom, ev,
                         phase_bandpass ? bp_plan : nothing, nant;
                         amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
+                        amp_smoother = amp_smoother,
                     )
                 end
                 # Pass 2: per group, adhoc → correct → reduce. θ is fully populated for
@@ -739,7 +787,7 @@ function solve_and_reduce_fringes(
                 # the group-local solution corrects identically to the global one.
                 results = tmap(1:ngroups; ntasks = ntasks_use) do gi
                     keyed = _materialize_leaf_group(group_leaves[gi])
-                    _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant)
+                    _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant; shared_feeds = adhoc_shared)
                     sub_branches = DimensionalData.TreeDict()
                     for (k, leaf) in keyed
                         sub_branches[k] = leaf
@@ -772,35 +820,6 @@ function solve_and_reduce_fringes(
     )
     sol = CalibrationSolution(model, layout, geom, θ, info)
     return sol, output
-end
-
-# Accumulate the coherent per-(baseline, product, AP) residual sum
-# `rbar = Σ_chan w·(V/gain)`, `wbar = Σ_chan w` — evaluating gains once and
-# streaming over channels so no full residual cube is allocated (the adhoc stage
-# only needs the frequency-collapsed residual). Matches `_residual_vis` + the old
-# explicit accumulation exactly.
-function _accumulate_residual_rbar!(rbar, wbar, ev::GainEvaluator, θ::AbstractVector, grp::_ScanGroup)
-    g = evaluate_gains(ev, θ, grp.g_ci, grp.g_ti)    # (nchan, nti, nant, 2)
-    nchan, nti, nbl, npol = size(grp.Vg)
-    @inbounds for p in 1:npol
-        fa, fb = correlation_feed_pair(grp.pol_products[p])
-        for bi in 1:nbl
-            a, b = grp.bl_pairs[bi]
-            for tt in 1:nti, c in 1:nchan
-                w = grp.Wg[c, tt, bi, p]
-                (w > 0 && isfinite(w)) || continue
-                ga = g[c, tt, a, fa]
-                gb = g[c, tt, b, fb]
-                denom = ga * conj(gb)
-                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(denom)) || continue
-                v = grp.Vg[c, tt, bi, p] / denom
-                isfinite(v) || continue
-                rbar[bi, p, tt] += w * v
-                wbar[bi, p, tt] += w
-            end
-        end
-    end
-    return rbar, wbar
 end
 
 # ── Phase bandpass (HOPS-style passband): per-channel station phase, time-stable ──
@@ -909,30 +928,147 @@ function _solve_phase_bandpass!(
     return θ
 end
 
-# Solve the per-(station, feed) AMPLITUDE bandpass (log-amp) from the SAME
-# accumulated residual and write it into `θ`'s log-amp `PerChannel` slots. For each
-# channel the coherent baseline amplitude obeys `log|V̄_ab| = la + lb` (a SUM
-# closure, +1/+1 incidence — unlike the phase difference), solved per channel by a
-# ridge-regularized WLS over the (station, feed) nodes (ridge stabilizes any
-# rank-deficient/bipartite component; the gauge below removes the resulting offset).
-# Same scale-invariant SNR gate as the phase path, so low-signal band edges are
-# left uncorrected (log-amp 0 ⇒ gain 1) rather than dividing by ~0. Gauge: zero
-# band-mean log-amp per (station, feed) — the absolute/common-mode amplitude is
-# degenerate with the source spectrum and intentionally NOT recovered here.
+# `_fit_bandpass_segment(smoother, …)` implementations for the amplitude-bandpass
+# smoother types (defined above `solve_fringes`). Each takes ONE spw's gated closure
+# observations — `na`/`nb` node indices, `ci` local-channel index, `val = log|V̄|`,
+# `w = SNR²`, `xseg` the centred/scaled in-spw frequency coordinate — and returns
+# `la_seg::Matrix` (nnodes × nchan_seg, `NaN` where unestimable).
+
+# Bucket observation indices by their local channel.
+function _bandpass_obs_by_channel(ci, nseg)
+    byc = [Int[] for _ in 1:nseg]
+    for i in eachindex(ci)
+        push!(byc[ci[i]], i)
+    end
+    return byc
+end
+
+# Free per-channel closure: independent signless-Laplacian WLS per channel.
+function _fit_bandpass_segment(::FreeBandpass, na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+    la = fill(NaN, nnodes, nseg)
+    pen = fill(float(ridge), nnodes)
+    for (c, idx) in enumerate(_bandpass_obs_by_channel(ci, nseg))
+        isempty(idx) && continue
+        A = zeros(length(idx), nnodes)
+        touched = falses(nnodes)
+        for (r, i) in enumerate(idx)
+            A[r, na[i]] += 1.0; A[r, nb[i]] += 1.0
+            touched[na[i]] = true; touched[nb[i]] = true
+        end
+        sol = weighted_regularized_least_squares(A, val[idx], w[idx], pen)
+        for node in 1:nnodes
+            touched[node] && (la[node, c] = sol[node])
+        end
+    end
+    return la
+end
+
+# Per-spw polynomial: one closure WLS over `nb = degree+1` coefficients per node;
+# θ-column for (node, k) is `(node-1)*nb + k`. Evaluated at every channel (incl. gaps).
+function _fit_bandpass_segment(sm::PolynomialBandpass, na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+    deg = clamp(sm.degree, 1, max(1, nseg - 1))
+    nbf = deg + 1
+    B = Float64[xseg[c]^k for c in 1:nseg, k in 0:deg]      # nseg × nbf basis
+    ncol = nnodes * nbf
+    A = zeros(length(val), ncol)
+    touched = falses(nnodes)
+    @inbounds for i in eachindex(val)
+        oa = (na[i] - 1) * nbf; ob = (nb[i] - 1) * nbf
+        for k in 1:nbf
+            A[i, oa + k] += B[ci[i], k]; A[i, ob + k] += B[ci[i], k]
+        end
+        touched[na[i]] = true; touched[nb[i]] = true
+    end
+    coef = weighted_regularized_least_squares(A, val, w, fill(float(ridge), ncol))
+    la = fill(NaN, nnodes, nseg)
+    for node in 1:nnodes
+        touched[node] || continue
+        c0 = (node - 1) * nbf
+        for c in 1:nseg
+            v = 0.0
+            @inbounds for k in 1:nbf
+                v += coef[c0 + k] * B[c, k]
+            end
+            la[node, c] = v
+        end
+    end
+    return la
+end
+
+# Roughness-penalised: free per-channel closure, then a per-node Whittaker
+# (2nd-difference) penalised WLS across channels — interpolating gated channels via
+# the penalty, following the data elsewhere.
+function _fit_bandpass_segment(sm::PenalizedBandpass, na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+    la0 = _fit_bandpass_segment(FreeBandpass(), na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+    (sm.lambda <= 0 || nseg < 3) && return la0
+    prec = zeros(nnodes, nseg)                              # per-(node, channel) precision Σ w
+    for i in eachindex(val)
+        prec[na[i], ci[i]] += w[i]; prec[nb[i], ci[i]] += w[i]
+    end
+    la = copy(la0)
+    for node in 1:nnodes
+        any(>(0), @view prec[node, :]) || continue
+        la[node, :] .= _whittaker_smooth(view(la0, node, :), view(prec, node, :), sm.lambda, ridge)
+    end
+    return la
+end
+
+# 1-D Whittaker smoother: minimise  Σ w_i (x_i − y_i)² + (λ·w̄) Σ (x_{i−1} − 2x_i + x_{i+1})².
+# `w_i = 0` (and `y_i` non-finite) where a channel had no data → the penalty alone
+# sets it (interpolation). `λ` is scaled by the median positive weight so it is
+# data-relative. Dense pentadiagonal normal-matrix solve (no SparseArrays).
+function _whittaker_smooth(y, w, lambda::Real, ridge::Real)
+    n = length(y)
+    pos = [w[i] for i in 1:n if w[i] > 0]
+    λ = lambda * (isempty(pos) ? 1.0 : median(pos))
+    M = zeros(n, n); rhs = zeros(n)
+    @inbounds for i in 1:n
+        wi = (w[i] > 0 && isfinite(y[i])) ? float(w[i]) : 0.0
+        M[i, i] += wi + ridge
+        rhs[i] += wi * (wi > 0 ? y[i] : 0.0)
+    end
+    @inbounds for i in 1:(n - 2)                            # 2nd-difference rows [1, −2, 1]
+        c = (i, i + 1, i + 2); s = (1.0, -2.0, 1.0)
+        for a in 1:3, b in 1:3
+            M[c[a], c[b]] += λ * s[a] * s[b]
+        end
+    end
+    return M \ rhs
+end
+
+# Solve the per-(station, feed) AMPLITUDE bandpass (log-amp) from the accumulated
+# residual and write it into `θ`'s log-amp `PerChannel` slots — flattening the
+# per-station instrumental frequency response (the filterbank passband). Gathers the
+# gated closure observations PER SPW (so an estimator never crosses a sub-band gap)
+# and hands them to `smoother` (an `AbstractBandpassSmoother` — see above). The
+# scale-invariant SNR gate (`_track_noise2`) drops no-signal channels from the fit
+# (then estimated, or not, per the smoother); a spw with no signal stays |g| = 1.
+# A final zero-band-mean gauge per (station, feed) keeps the bandpass to SHAPE only —
+# the absolute level is the a-priori amplitude cal's job.
 function _solve_amp_bandpass!(
-        θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan;
-        snr_floor::Real = 1.0, ridge::Real = 1.0e-6, max_logamp::Real = log(2.0),
+        θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan, channel_freqs;
+        snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
+        spw_of_chan::AbstractVector{<:Integer} = Int[],
+        smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
     )
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
     noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in 1:nbl, p in 1:npol]
     nnodes = 2 * nant
-    pen = fill(float(ridge), nnodes)
+    soc = isempty(spw_of_chan) ? ones(Int, nchan) : collect(spw_of_chan)
     la = fill(NaN, nant, 2, nchan)
-    for gc in 1:nchan
-        n1 = Int[]; n2 = Int[]; vals = Float64[]; wts = Float64[]
-        touched = falses(nnodes)
-        for bi in 1:nbl, p in 1:npol
+
+    for bnd in sort(unique(soc))
+        chans = [gc for gc in 1:nchan if soc[gc] == bnd]
+        nseg = length(chans); nseg == 0 && continue
+        fs = Float64[channel_freqs[gc] for gc in chans]
+        center = sum(fs) / nseg
+        scale = maximum(abs.(fs .- center)); scale = scale > 0 ? scale : 1.0
+        xseg = [(fs[ci] - center) / scale for ci in 1:nseg]
+
+        # Gated closure observations for this spw (local channel index `ci`).
+        na = Int[]; nbn = Int[]; cii = Int[]; vals = Float64[]; wts = Float64[]
+        for (ci, gc) in enumerate(chans), bi in 1:nbl, p in 1:npol
             a, b = bl_pairs[bi]
             a == b && continue
             r = rbar_bp[bi, p, gc]; w = wbar_bp[bi, p, gc]
@@ -940,50 +1076,23 @@ function _solve_amp_bandpass!(
             nz = noise2[bi, p]
             snr2 = isfinite(nz) && nz > 0 ? abs2(r / w) / nz : abs2(r) / w
             snr2 >= snr_floor^2 || continue
-            amp = abs(r / w)
-            amp > 0 || continue
+            amp = abs(r / w); amp > 0 || continue
             fa, fb = feeds[p]
-            push!(n1, _node(a, fa, nant)); push!(n2, _node(b, fb, nant))
+            push!(na, _node(a, fa, nant)); push!(nbn, _node(b, fb, nant)); push!(cii, ci)
             push!(vals, log(amp)); push!(wts, snr2)
-            touched[_node(a, fa, nant)] = true; touched[_node(b, fb, nant)] = true
         end
         isempty(vals) && continue
-        A = zeros(length(vals), nnodes)
-        @inbounds for ri in eachindex(vals)
-            A[ri, n1[ri]] += 1.0
-            A[ri, n2[ri]] += 1.0
-        end
-        sol = weighted_regularized_least_squares(A, vals, wts, pen)
+        la_seg = _fit_bandpass_segment(smoother, na, nbn, cii, vals, wts, nnodes, nseg, xseg, ridge)
         for node in 1:nnodes
-            touched[node] || continue
-            ant = (node - 1) % nant + 1
-            feed = (node - 1) ÷ nant + 1
-            la[ant, feed, gc] = sol[node]
+            ant = (node - 1) % nant + 1; feed = (node - 1) ÷ nant + 1
+            for ci in 1:nseg
+                v = la_seg[node, ci]
+                isfinite(v) && (la[ant, feed, chans[ci]] = v)
+            end
         end
     end
 
-    # Remove the per-channel COMMON MODE (mean over stations, per feed). The +1/+1
-    # closure with no source term attributes the common instrumental bandpass (the
-    # filterbank roll-off) AND the source spectrum to the stations, so each station's
-    # `la` carries the whole band shape (|g| 0.1→1.6, →0 at edges). Subtracting the
-    # per-channel station mean leaves only the station-RELATIVE bandpass (|g|~1, no
-    # roll-off, no edge blow-up) — the common mode is degenerate with the source and
-    # intentionally NOT corrected. This is the amplitude analog of the phase solve's
-    # ±1 difference closure (which cancels the common mode automatically).
-    @inbounds for f in 1:2, gc in 1:nchan
-        acc = 0.0; n = 0
-        for a in 1:nant
-            v = la[a, f, gc]
-            isfinite(v) && (acc += v; n += 1)
-        end
-        n == 0 && continue
-        m = acc / n
-        for a in 1:nant
-            isfinite(la[a, f, gc]) && (la[a, f, gc] -= m)
-        end
-    end
-
-    # Zero band-mean log-amp gauge per (station, feed), then write the log-amp slots.
+    # Zero band-mean log-amp gauge per (station, feed) — SHAPE only. Write the slots.
     for a in 1:nant, f in 1:2
         acc = 0.0; n = 0
         @inbounds for gc in 1:nchan
@@ -997,11 +1106,7 @@ function _solve_amp_bandpass!(
         @inbounds for gc in 1:nchan
             v = la[a, f, gc]
             isfinite(v) || continue
-            val = v - m
-            # Leave implausibly large corrections UNAPPLIED (|g| = 1): these are the
-            # low-SNR band-edge channels where the relative solve is unstable, and
-            # where a |g| > 1 would even up-weight noise (apply scales weight ×|g|²).
-            θ[off + plan.clocal[gc] - 1] = abs(val) > max_logamp ? 0.0 : val
+            θ[off + plan.clocal[gc] - 1] = v - m
         end
     end
     return θ
@@ -1015,6 +1120,7 @@ end
 function _solve_bandpass_stage!(
         θ, group_leaves, group_sources, cal_source, geom, ev, plan, nant;
         amp_plan = nothing, ref_ant::Integer = 1, snr_floor::Real = 1.0,
+        amp_smoother::AbstractBandpassSmoother = PolynomialBandpass(4),
     )
     nchan = length(geom.channel_freqs)
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
@@ -1034,7 +1140,10 @@ function _solve_bandpass_stage!(
     plan === nothing ||
         _solve_phase_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, plan; ref_ant = ref_ant, snr_floor = snr_floor)
     amp_plan === nothing ||
-        _solve_amp_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, amp_plan; snr_floor = snr_floor)
+        _solve_amp_bandpass!(
+        θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, amp_plan, geom.channel_freqs;
+        snr_floor = snr_floor, spw_of_chan = geom.spw_of_chan, smoother = amp_smoother,
+    )
     return θ
 end
 
@@ -1054,7 +1163,7 @@ end
 # Residual visibilities for one scan group: Vg divided by the current θ gains
 # evaluated at the group's (global chan, global ti) window. Used for rounds > 1
 # (the search needs a full residual cube); the adhoc stage uses the fused
-# `_accumulate_residual_rbar!` above instead.
+# per-leaf accumulation (`_accumulate_leaf_rbar!`) instead.
 function _residual_vis(ev::GainEvaluator, θ::AbstractVector, grp::_ScanGroup)
     g = evaluate_gains(ev, θ, grp.g_ci, grp.g_ti)    # (nchan, nti, nant, 2)
     nchan, nti, nbl, npol = size(grp.Vg)

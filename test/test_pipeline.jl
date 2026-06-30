@@ -92,26 +92,36 @@ function _build_fringe_uvset(;
     f0 = sum(allfreqs) / length(allfreqs)
     t0_sec = ti_vals[1] * 3600.0
 
-    # Injected per-(station, feed) parameters. Reference antenna 1 = 0 (so the
-    # recovered solution matches the gauge), others drawn small.
-    delay = zeros(nant, 2)         # seconds
-    rate = zeros(nant, 2)          # Hz
-    phi = zeros(nant, 2)           # rad
-    for a in 2:nant, f in 1:2
-        delay[a, f] = (rand(rng) - 0.5) * 2.0e-9      # ±1 ns  (« 1/chan_bw)
-        rate[a, f] = (rand(rng) - 0.5) * 2.0e-3       # ±1 mHz
-        phi[a, f] = (rand(rng) - 0.5) * 2.0           # ±1 rad
+    # Injected parameters. Reference antenna 1 = 0 (so the recovered solution matches
+    # the gauge), others drawn small. `delay`/`phi` are PER-FEED (their constant R–L
+    # offset is recovered by the model's global `FeedComponent(2)` delay/const terms);
+    # `rate` is FEED-COMMON because the fringe model ties rate `SharedFeeds` (R–L rate
+    # is not solved — see the model in pipeline.jl), so a per-feed rate would be
+    # physically inconsistent and left uncorrected.
+    delay = zeros(nant, 2)         # seconds (per feed)
+    rate = zeros(nant, 2)          # Hz (feed-common)
+    phi = zeros(nant, 2)           # rad (per feed)
+    for a in 2:nant
+        rc = (rand(rng) - 0.5) * 2.0e-3               # ±1 mHz, feed-common
+        for f in 1:2
+            delay[a, f] = (rand(rng) - 0.5) * 2.0e-9      # ±1 ns  (« 1/chan_bw)
+            rate[a, f] = rc
+            phi[a, f] = (rand(rng) - 0.5) * 2.0           # ±1 rad
+        end
     end
 
-    # Per-(station, feed, AP) atmospheric screen (rad), reference held at 0. A
-    # smooth (slowly-varying) phase track — the regime the Savitzky–Golay adhoc
-    # smoother is designed for — plus a per-(station, feed) constant offset that
-    # Stage-B's per-scan constant phase absorbs.
+    # Per-(station, AP) atmospheric screen (rad), reference held at 0, FEED-COMMON:
+    # the atmosphere is non-birefringent, so both feeds see the same screen, and the
+    # model's adhoc term is `SharedFeeds`. A smooth (slowly-varying) phase track — the
+    # regime the Savitzky–Golay adhoc smoother is designed for — plus a per-station
+    # constant offset that Stage-B's per-scan constant phase absorbs.
     screen = zeros(nant, 2, ntime)
-    for a in 2:nant, f in 1:2
+    for a in 2:nant
         base = (rand(rng) - 0.5) * 1.0
         for ti in 1:ntime
-            screen[a, f, ti] = base + 0.2 * sin(0.5 * ti + a + f)
+            s = base + 0.2 * sin(0.5 * ti + a)
+            screen[a, 1, ti] = s
+            screen[a, 2, ti] = s
         end
     end
 
@@ -267,6 +277,49 @@ end
             @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(V, V2))
         end
         rm(path; force = true)
+    end
+end
+
+@testset "Rate & adhoc are feed-tied (SharedFeeds regression)" begin
+    # The fringe model MUST tie the per-scan RATE and the per-AP ADHOC phase across
+    # feeds (`SharedFeeds`). Both are feed-common physics: the fringe rate is shared
+    # by the two feeds and the residual atmospheric screen is non-birefringent. A
+    # revert to `PerFeed` lets a spurious R–L rate (rate₂ − rate₁) / adhoc phase
+    # float on noise and — multiplied by the whole-track Rate lever arm
+    # `2π·rate·(t − t0_global)`, hours long — inject large, arbitrary scan-to-scan
+    # R–L (RL/RR) phase jumps (see the rationale comment on `_fringe_model` in
+    # pipeline.jl and the `fringe-rate-must-be-sharedfeeds` decision).
+    #
+    # The end-to-end coherence test injects FEED-COMMON truth, so a `PerFeed` revert
+    # would still recover it at high SNR and pass — it does NOT guard this decision.
+    # Assert the tying structurally (the model) AND that the layout realises it (both
+    # feeds share one θ column per (station, time-seg), so the solved R–L is ≡ 0).
+    model = FP._fringe_model()
+    phase = CAL.phase_components(model)
+
+    rate_i = findfirst(tc -> tc.component.term isa CAL.Rate, phase)
+    @test rate_i !== nothing
+    @test phase[rate_i].tying isa CAL.SharedFeeds
+    @test !(phase[rate_i].tying isa CAL.PerFeed)
+
+    adhoc_i = findfirst(tc -> tc.component.time isa CAL.PerIntegration, phase)
+    @test adhoc_i !== nothing
+    @test phase[adhoc_i].tying isa CAL.SharedFeeds
+    @test !(phase[adhoc_i].tying isa CAL.PerFeed)
+
+    # Layout: `SharedFeeds` assigns ONE θ column to both feeds, `PerFeed` two distinct
+    # ones (Calibration `_assign_blocks!`). So feed-1 and feed-2 share every off1 slot
+    # iff the tie holds — a `PerFeed` revert breaks this on any solved (station, seg).
+    uvset, _ = _build_fringe_uvset()
+    geom = CAL.build_geometry(uvset)
+    first_leaf = first(values(DimensionalData.branches(uvset)))
+    nant = length(UVP.metadata(first_leaf).antennas)
+    layout = CAL.plan_parameters(model, nant, geom)
+
+    for (ci, label) in ((rate_i, "rate"), (adhoc_i, "adhoc"))
+        off1 = layout.plans[ci].off1                 # (ant, feed, ntseg, nfseg)
+        @test off1[:, 1, :, :] == off1[:, 2, :, :]   # both feeds → same θ columns
+        @test any(!=(0), off1[:, 1, :, :])           # ...and the plan is non-trivial
     end
 end
 
@@ -452,39 +505,39 @@ end
     @test isapprox(mx(c_on.closure_before), mx(c_off.closure_before); rtol = 0.2)
 end
 
-@testset "Amplitude bandpass: per-channel amplitude flattened" begin
-    # Inject a smooth per-(station, feed, channel) log-amp bandpass (ref ant 1 = 0).
-    # The amplitude bandpass stage should flatten the per-channel |V|; with it OFF
-    # the amplitude ripple survives.
+@testset "Amplitude bandpass: pluggable estimators (poly / penalized / free)" begin
+    # Inject a per-BAND log-amp roll-off (the filterbank passband, deep toward each
+    # band's high-channel edge) shared by all stations, plus a small per-station
+    # ripple. THEN kill one interior channel per band (zero its weight on every
+    # baseline). The two SMOOTH estimators (polynomial, penalized) must flatten the
+    # band AND estimate the killed channels from the in-spw shape; FreeBandpass must
+    # leave the killed channels untouched (|g| = 1).
     nant, nbands, nchan = 4, 2, 8
     nchg = nbands * nchan
     rng = MersenneTwister(0x5A11)
+    locof(gc) = (gc - 1) % nchan + 1                                # local channel within its band
+    rolloff(gc) = -0.5 * ((locof(gc) - 1) / (nchan - 1))^2          # per-band: 0 → −0.5 toward high edge
     abp = zeros(nant, 2, nchg)
-    for a in 2:nant, f in 1:2
-        off = (rand(rng) - 0.5) * 0.3
+    for a in 1:nant, f in 1:2
+        dev = a == 1 ? 0.0 : (rand(rng) - 0.5) * 0.3               # per-station offset (gauge removes it)
         for gc in 1:nchg
-            abp[a, f, gc] = off + 0.3 * sin(2π * gc / nchg + a + f)   # smooth log-amp shape
-        end
-    end
-    # The solver recovers only the station-RELATIVE bandpass (the common mode per
-    # channel is degenerate with the source spectrum and gauged out), so inject a
-    # pure relative bandpass: zero mean over stations at each (feed, channel).
-    for f in 1:2, gc in 1:nchg
-        m = sum(abp[a, f, gc] for a in 1:nant) / nant
-        for a in 1:nant
-            abp[a, f, gc] -= m
+            wig = a == 1 ? 0.0 : 0.05 * sin(2π * gc / nchg + a + f) # small per-station ripple
+            abp[a, f, gc] = rolloff(gc) + dev + wig
         end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, amp_bandpass = abp)
-    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
-    sol_on = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = true)
-    sol_off = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = false)
 
-    don = FP.baseline_fringe_data(uvset, sol_on)
-    doff = FP.baseline_fringe_data(uvset, sol_off)
-    p = FP.baseline_pol_index(don, :parallel)
-    # Per-channel amplitude flatness per cross baseline: max/min of |V̄_c| (1 ⇒ flat).
-    function amp_ripple(spec)
+    # Kill local channel 7 in every band (globals 7 and 15): zero its weight on all
+    # baselines so the per-channel solve has NO data there.
+    dead_local = 7
+    dead_globals = [(b - 1) * nchan + dead_local for b in 1:nbands]
+    for (_, leaf) in DimensionalData.branches(uvset)
+        parent(leaf[:weights])[dead_local, :, :, :] .= 0.0f0
+    end
+
+    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    larec(sol, plan, a, f, gc) = (off = plan.off1[a, f, 1, 1]; off == 0 ? NaN : sol.θ[off + plan.clocal[gc] - 1])
+    function amp_ripple(spec, don, p)
         rs = Float64[]
         for bi in eachindex(don.bl_pairs)
             a, b = don.bl_pairs[bi]
@@ -495,9 +548,33 @@ end
         end
         isempty(rs) ? NaN : sum(rs) / length(rs)
     end
-    r_on = amp_ripple(don.spec_after)
-    r_off = amp_ripple(doff.spec_after)
-    @test r_on < r_off                  # the stage flattens the per-channel amplitude
-    @test r_on < 1.05                    # nearly flat after the amplitude bandpass
-    @test r_off > 1.1                    # ripple survives without the stage
+
+    sol_off = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = false)
+    doff = FP.baseline_fringe_data(uvset, sol_off)
+    poff = FP.baseline_pol_index(doff, :parallel)
+    @test amp_ripple(doff.spec_after, doff, poff) > 1.3    # roll-off ripple without the stage
+
+    # The smooth estimators flatten the band AND fill the killed channels onto the
+    # in-spw curve (≈ the mean of the live neighbours, well away from log-amp 0).
+    for sm in (FP.PolynomialBandpass(4), FP.PenalizedBandpass(0.1))
+        sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = true, amp_smoother = sm)
+        don = FP.baseline_fringe_data(uvset, sol)
+        p = FP.baseline_pol_index(don, :parallel)
+        @test amp_ripple(don.spec_after, don, p) < 1.08
+        plan = FP._amp_bandpass_plan(sol.model, sol.layout)
+        for dg in dead_globals, a in 2:nant, f in 1:2
+            nbr = 0.5 * (larec(sol, plan, a, f, dg - 1) + larec(sol, plan, a, f, dg + 1))
+            @test isfinite(larec(sol, plan, a, f, dg))
+            @test abs(larec(sol, plan, a, f, dg) - nbr) < 0.1    # estimated, on the smooth curve
+            @test abs(nbr) > 0.12                                 # ...curve far from |g|=1 (meaningful)
+        end
+    end
+
+    # FreeBandpass does NOT estimate the killed channels — their θ slot is untouched
+    # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
+    solf = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = true, amp_smoother = FP.FreeBandpass())
+    planf = FP._amp_bandpass_plan(solf.model, solf.layout)
+    for dg in dead_globals, a in 2:nant, f in 1:2
+        @test larec(solf, planf, a, f, dg) == 0.0
+    end
 end
