@@ -259,3 +259,21 @@ end
         @test maximum(d) - minimum(d) < 1.0e-6                    # gauge consistent across dropout
     end
 end
+
+@testset "EHT-HOPS adhoc window (T_dof, Eqs 21-22)" begin
+    # Savitzky–Golay window from the EHT-HOPS optimal integration time. SNR-adaptive
+    # (higher per-AP SNR² → shorter window) and grows with the assumed coherence
+    # time; odd and ≥ order+1.
+    order = 2
+    w_hi = FRa._savgol_window_dof(1.0e3, 15.0, 5 / 3, order)         # high SNR
+    w_lo = FRa._savgol_window_dof(10.0, 15.0, 5 / 3, order)          # low  SNR
+    w_lo_longcoh = FRa._savgol_window_dof(10.0, 60.0, 5 / 3, order)  # longer T_coh
+    @test w_hi <= w_lo                                  # higher SNR → tighter window
+    @test w_lo_longcoh >= w_lo                          # longer coherence → larger window
+    for w in (w_hi, w_lo, w_lo_longcoh)
+        @test isodd(w) && w >= order + 1
+    end
+    # Degenerate inputs fall back to the minimal window.
+    @test FRa._savgol_window_dof(0.0, 15.0, 5 / 3, order) == order + 1
+    @test FRa._savgol_window_dof(10.0, 0.0, 5 / 3, order) == order + 1
+end

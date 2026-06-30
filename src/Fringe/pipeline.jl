@@ -430,7 +430,9 @@ function _adhoc_group_leaves!(θ, keyed, geom::DataGeometry, ev, adhoc_plan, adh
         g = evaluate_gains(ev, θ, ci, ti)               # (nchan_leaf, nti, nant, 2)
         _accumulate_leaf_rbar!(rbar, wbar, parent(leaf[:vis]), parent(leaf[:weights]), g, bl_pairs, pols)
     end
-    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg; ref_ant = ref_ant, opts = adhoc, shared_feeds = shared_feeds)
+    # `tg` is in hours; pass SECONDS so the adhoc's `:auto` window (T_AP / T_coh) is
+    # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.
+    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg .* 3600.0; ref_ant = ref_ant, opts = adhoc, shared_feeds = shared_feeds)
     for (ap, gti) in enumerate(g_ti)
         tseg = adhoc_plan.tseg_id[gti]
         for ant in 1:nant, feed in 1:2

@@ -578,3 +578,26 @@ end
         @test larec(solf, planf, a, f, dg) == 0.0
     end
 end
+
+@testset "Adhoc auto window (:auto) flattens end-to-end" begin
+    # The default `AdhocPhasing()` now uses `window = :auto` (EHT-HOPS coherence-time
+    # selection). Verify the default path still flattens the per-baseline phase.
+    uvset, _ = _build_fringe_uvset()
+    sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = FP.AdhocPhasing())   # window = :auto
+    corr = Gustavo.apply_calibration(uvset, sol)
+    worst = 1.0
+    for (_, leaf) in DimensionalData.branches(corr)
+        V = parent(leaf[:vis]); W = parent(leaf[:weights])
+        bl_pairs = UVP.baselines(leaf).pairs
+        lp = pol_products(leaf)
+        for p in eachindex(lp)
+            Gustavo.Calibration.is_parallel_hand(lp[p]) || continue
+            for bi in eachindex(bl_pairs)
+                a, b = bl_pairs[bi]
+                a == b && continue
+                worst = min(worst, _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])))
+            end
+        end
+    end
+    @test worst > 0.99
+end

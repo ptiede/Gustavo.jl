@@ -27,7 +27,16 @@ Options for [`solve_adhoc_phasing`](@ref).
 - `mode`  : `:smooth` (Savitzky–Golay, default), `:penalized` (dense
   first-difference regularization with strength `smoothness`), or `:none` (raw
   per-AP solves).
-- `window`, `order` : Savitzky–Golay window (APs) and polynomial order.
+- `window`, `order` : Savitzky–Golay window (APs) and polynomial order. `window`
+  may be `:auto` (default) — the EHT-HOPS per-station optimal window (Blackburn
+  et al. 2019, Eqs 21–22): an SNR-adaptive integration time that balances thermal
+  phase noise against atmospheric drift, from the assumed `coherence_time` and
+  `structure_exponent`; see [`_savgol_window_dof`](@ref). Pass an integer to fix it.
+- `coherence_time` : assumed atmospheric coherence time `T_coh` (SECONDS) — the time
+  for phase to drift 1 rad. Band/weather-dependent (EHT-HOPS: ~18 s at 3.5 mm); set
+  it for your observation. Only used when `window = :auto`.
+- `structure_exponent` : phase structure-function exponent `α` (5/3 = 3D Kolmogorov,
+  2/3 = 2D). Only used when `window = :auto`.
 - `smoothness`      : `λ` for `:penalized`.
 - `snr_floor`       : per-AP per-baseline coherent-SNR floor; weaker rows drop.
 - `phase_rewrap_iters` : re-wrap iterations in each per-AP solve.
@@ -37,8 +46,10 @@ Options for [`solve_adhoc_phasing`](@ref).
 """
 Base.@kwdef struct AdhocPhasing
     mode::Symbol = :smooth
-    window::Int = 11
+    window::Union{Int, Symbol} = :auto
     order::Int = 2
+    coherence_time::Float64 = 10.0
+    structure_exponent::Float64 = 5 / 3
     smoothness::Float64 = 1.0
     snr_floor::Float64 = 1.0
     phase_rewrap_iters::Int = 3
@@ -65,8 +76,10 @@ end
 Solve globally-closing adhoc phases from coherently frequency-averaged residual
 baseline visibilities. `rbar[baseline, product, ap]` is `Σ_chan w·V_residual`
 (complex) and `wbar[baseline, product, ap]` is `Σ_chan w` for each AP, so the
-coherent SNR² is `|rbar|²/wbar`. `times` are the AP epochs (any units; used only
-for detrending). `ref_ant` sets the per-AP gauge (its adhoc phase is held at 0).
+coherent SNR² is `|rbar|²/wbar`. `times` are the AP epochs in SECONDS — their
+spacing sets `T_AP` for the `:auto` smoothing window (otherwise unused, the
+detrend removes only the mean). `ref_ant` sets the per-AP gauge (its adhoc phase
+is held at 0).
 
 `shared_feeds` (default `false`) solves ONE feed-common station phase per AP
 (both feeds collapsed to a single node, χ retained) instead of an independent
@@ -94,6 +107,32 @@ function _track_noise2(rbar, wbar, bi::Int, p::Int, nap::Int)
     end
     length(d2) >= 4 || return NaN
     return median(d2) / (2 * log(2))
+end
+
+"""
+    _savgol_window_dof(rho2, m_coh, alpha, order) -> Int
+
+EHT-HOPS optimal Savitzky–Golay window in APs (Blackburn et al. 2019, Eqs 21–22).
+The effective integration time per degree of freedom `T_dof` balances thermal phase
+noise (`∝ 1/(ρ²·T)`) against residual atmospheric drift from the power-law structure
+function `D_φ(t) = (t/T_coh)^α`:
+
+    T_dof = [ (1+α)(2+α)·T_coh^α / (2^(−α)·α·(2+α−2^α)·ρ²) ]^(1/(α+1)),
+
+and the order-`d` SG window is `N = max(d+1, 1 + 2⌊(d+1)·T_dof/(2·T_AP)⌋)`. Higher
+SNR ⇒ shorter window (track the atmosphere); lower SNR ⇒ longer (average down
+thermal noise). `rho2` is the station's per-AP coherent SNR², `m_coh = T_coh/T_AP`
+the coherence time in APs, `alpha` the structure exponent. Returns the odd SG window
+(≥ `order + 1`). (The paper's round-robin leave-one-out over channels is not
+reproduced here.)
+"""
+function _savgol_window_dof(rho2::Real, m_coh::Real, alpha::Real, order::Integer)
+    (isfinite(rho2) && rho2 > 0 && m_coh > 0) || return order + 1
+    a = float(alpha)
+    coef = (1 + a) * (2 + a) / (2.0^(-a) * a * (2 + a - 2.0^a))
+    m_dof = (coef * float(m_coh)^a / float(rho2))^(1 / (a + 1))   # T_dof / T_AP, in APs
+    n = max(order + 1, 1 + 2 * floor(Int, (order + 1) * m_dof / 2))
+    return iseven(n) ? n + 1 : n
 end
 
 function solve_adhoc_phasing(
@@ -174,11 +213,29 @@ function solve_adhoc_phasing(
         phase[a, f, :] .= unwrap_phase_track(phase[a, f, :]; weights = track_w[a, f, :])
     end
 
-    # Smooth / penalize.
+    # Smooth / penalize. `window = :auto` sets a PER-STATION Savitzky–Golay window
+    # from the EHT-HOPS `T_dof` (Eqs 21–22): an SNR-adaptive integration time scaled
+    # by the assumed coherence time. `T_AP` is the AP spacing (`times` in SECONDS);
+    # the per-AP coherent SNR² is the station's mean `track_w` (Σ baseline SNR²).
     if opts.mode === :smooth
+        auto = opts.window === :auto
+        m_coh = if auto
+            dts = filter(>(0), diff(sort(Float64.(collect(times)))))
+            t_ap = isempty(dts) ? 1.0 : median(dts)
+            opts.coherence_time / t_ap
+        else
+            0.0
+        end
         for a in 1:nant, f in 1:2
             any(isfinite, @view phase[a, f, :]) || continue
-            phase[a, f, :] .= savitzky_golay_smooth(phase[a, f, :], track_w[a, f, :]; window = opts.window, order = opts.order)
+            win = if auto
+                tw = [track_w[a, f, ap] for ap in 1:nap if track_w[a, f, ap] > 0]
+                rho2 = isempty(tw) ? 0.0 : sum(tw) / length(tw)
+                _savgol_window_dof(rho2, m_coh, opts.structure_exponent, opts.order)
+            else
+                Int(opts.window)
+            end
+            phase[a, f, :] .= savitzky_golay_smooth(phase[a, f, :], track_w[a, f, :]; window = win, order = opts.order)
         end
     elseif opts.mode === :penalized
         for a in 1:nant, f in 1:2
