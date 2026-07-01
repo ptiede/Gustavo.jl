@@ -138,12 +138,30 @@ function _baseline_indices(data::BaselineFringeData, sel)
     error("baselines selector must be :all, an Integer, or a vector of indices")
 end
 
+# Triangle (baseline-matrix) layout: the stations present among `bls` are ordered
+# by antenna index and placed on the diagonal; baseline (a, b) lives in the upper
+# triangle at (row = pos[min], col = pos[max]). Returns the ordered antenna ids,
+# a pos lookup, and the matrix dimension M.
+function _triangle_positions(data::BaselineFringeData, bls)
+    present = Int[]
+    for bi in bls
+        a, b = data.bl_pairs[bi]
+        a in present || push!(present, a)
+        b in present || push!(present, b)
+    end
+    sort!(present)
+    pos = Dict(a => i for (i, a) in enumerate(present))
+    return present, pos, length(present)
+end
+
 function Fringe.plot_baseline_fringes(
         parent, data::BaselineFringeData;
         kind::Symbol = :freq, show::Symbol = :phase, pol = :parallel, baselines = :all,
+        layout::Symbol = :triangle,
     )
     kind in (:freq, :time) || error("kind must be :freq or :time")
     show in (:phase, :amp) || error("show must be :phase or :amp")
+    layout in (:triangle, :grid) || error("layout must be :triangle or :grid")
     p = baseline_pol_index(data, pol)
     bls = _baseline_indices(data, baselines)
     if kind === :freq
@@ -158,16 +176,34 @@ function Fringe.plot_baseline_fringes(
     reduce_y = show === :phase ? angle : abs
     ylab = show === :phase ? "phase (rad)" : "amplitude"
 
-    n = length(bls)
-    ncols = max(1, ceil(Int, sqrt(n)))
-    nrows = ceil(Int, n / ncols)
+    # Panel placement: (row, col) per selected baseline, plus a flag for which
+    # cells sit on the bottom/left edge of their column/row (for sparse axis
+    # labels). In :triangle mode the diagonal carries station-name labels.
+    present, pos, M = _triangle_positions(data, bls)
+    if layout === :triangle
+        cells = [(min(pos[data.bl_pairs[bi][1]], pos[data.bl_pairs[bi][2]]),
+                  max(pos[data.bl_pairs[bi][1]], pos[data.bl_pairs[bi][2]])) for bi in bls]
+        nrows, ncols = M, M
+    else
+        n = length(bls)
+        ncols = max(1, ceil(Int, sqrt(n)))
+        nrows = ceil(Int, n / ncols)
+        cells = [fldmod1(k, ncols) for k in 1:n]
+    end
+    # Bottom-most filled row in each column / left-most filled col in each row.
+    botrow = Dict{Int, Int}(); leftcol = Dict{Int, Int}()
+    for (row, col) in cells
+        botrow[col] = max(get(botrow, col, 0), row)
+        leftcol[row] = min(get(leftcol, row, typemax(Int)), col)
+    end
+
     local axfirst = nothing
     for (k, bi) in enumerate(bls)
-        row, col = fldmod1(k, ncols)
+        row, col = cells[k]
         ax = Axis(
             parent[row, col];
             title = _bl_label(data.bl_pairs[bi], data.ant_names),
-            xlabel = (row == nrows ? xlab : ""), ylabel = (col == 1 ? ylab : ""),
+            xlabel = (row == botrow[col] ? xlab : ""), ylabel = (col == leftcol[row] ? ylab : ""),
         )
         yb = reduce_y.(@view before[:, bi, p])
         ya = reduce_y.(@view after[:, bi, p])
@@ -177,6 +213,11 @@ function Fringe.plot_baseline_fringes(
         if axfirst === nothing
             axfirst = ax
             axislegend(ax, [sb, sa], ["before", "after"]; position = :rt, labelsize = 9, framevisible = false)
+        end
+    end
+    if layout === :triangle
+        for (i, a) in enumerate(present)
+            Label(parent[i, i], _site_label(data.ant_names, a); fontsize = 22, font = :bold, tellwidth = false, tellheight = false)
         end
     end
     Label(
@@ -193,9 +234,15 @@ end
 
 function Fringe.plot_baseline_fringes(data::BaselineFringeData; kind::Symbol = :freq, kwargs...)
     bls = _baseline_indices(data, get(kwargs, :baselines, :all))
-    n = max(1, length(bls))
-    ncols = max(1, ceil(Int, sqrt(n)))
-    nrows = ceil(Int, n / ncols)
+    layout = get(kwargs, :layout, :triangle)
+    if layout === :triangle
+        _, _, M = _triangle_positions(data, bls)
+        ncols = nrows = max(1, M)
+    else
+        n = max(1, length(bls))
+        ncols = max(1, ceil(Int, sqrt(n)))
+        nrows = ceil(Int, n / ncols)
+    end
     fig = Figure(size = (360 * ncols + 40, 240 * nrows + 60))
     Fringe.plot_baseline_fringes(fig, data; kind = kind, kwargs...)
     return fig

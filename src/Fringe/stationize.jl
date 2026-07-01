@@ -130,7 +130,11 @@ end
 
 # Solve one observable's WLS system on the (station, feed) graph. Returns
 # (values::(nant,2), chi, covered::(nant,2), ncomp).
-function _solve_observable(rows::Vector{_ObsRow}, nant::Integer, ref_ant::Integer; use_chi::Bool, rewrap::Integer)
+function _solve_observable(
+        rows::Vector{_ObsRow}, nant::Integer, ref_ant::Integer;
+        use_chi::Bool, rewrap::Integer,
+        seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing, seed_chi::Real = NaN,
+    )
     vals = fill(NaN, nant, 2)
     cov = falses(nant, 2)
     nnodes = 2 * nant
@@ -207,6 +211,22 @@ function _solve_observable(rows::Vector{_ObsRow}, nant::Integer, ref_ant::Intege
     # delay/rate (`rewrap == 0`, no wrapping) we solve the raw system directly.
     if rewrap > 0
         xseed = _spanning_tree_seed(rows, nant, pins, ncol)
+        # Temporal warm-start: where a `seed_phase` (e.g. the previous AP's solved
+        # node phases) is available, OVERRIDE the per-solve spanning-tree seed with
+        # it. The model is used only to pick each observation's 2π branch, and edge
+        # predictions `φ_na − φ_nb` are gauge-invariant, so a warm-start from a
+        # differently-anchored neighbouring AP is safe. This gives the per-AP adhoc
+        # track temporal continuity, so a weakly-constrained station cannot flip
+        # between two sub-2π branches AP-to-AP (which the integer-2π unwrap and the
+        # smoother both leave intact). Stations the seed does not cover fall back to
+        # the spanning-tree estimate.
+        if seed_phase !== nothing
+            for ant in 1:nant, feed in 1:2
+                v = seed_phase[ant, feed]
+                isfinite(v) && (xseed[_node(ant, feed, nant)] = float(v))
+            end
+            has_chi && isfinite(seed_chi) && (xseed[nnodes + 1] = float(seed_chi))
+        end
         model = A * xseed
         bw = similar(b)
         @. bw = b + 2π * round((model - b) / (2π))

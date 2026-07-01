@@ -1052,6 +1052,7 @@ function _solve_amp_bandpass!(
         snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
         spw_of_chan::AbstractVector{<:Integer} = Int[],
         smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0),
+        max_logamp::Real = log(10.0),
     )
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
@@ -1108,7 +1109,15 @@ function _solve_amp_bandpass!(
         @inbounds for gc in 1:nchan
             v = la[a, f, gc]
             isfinite(v) || continue
-            θ[off + plan.clocal[gc] - 1] = v - m
+            val = v - m
+            # Leave implausibly-large corrections UNAPPLIED (|g| = 1). A smoother (the
+            # default) interpolates gaps and self-regularizes, but `FreeBandpass` (or a
+            # near-zero `lambda`) can hand a low-SNR band-edge channel that barely
+            # clears the gate a huge log-amp; applying it would up-weight that channel's
+            # noise, since `apply_calibration` scales weights by |g|². The bound is
+            # generous (|g| ≤ 10) so real passband roll-off/structure passes unchanged —
+            # only pathological noise blow-ups are gated.
+            θ[off + plan.clocal[gc] - 1] = abs(val) > max_logamp ? 0.0 : val
         end
     end
     return θ

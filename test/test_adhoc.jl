@@ -260,6 +260,64 @@ end
     end
 end
 
+@testset "Adhoc: warm-start selects the rewrap branch (no per-AP flips)" begin
+    # Regression for the LA-baseline bimodality: a weakly-constrained station's
+    # per-AP solve can be BISTABLE — two rewrap fixed points a sub-2π distance
+    # apart — and which one the spanning-tree seed lands on can flip AP-to-AP,
+    # injecting a phantom phase jump the integer-2π unwrap and the smoother both
+    # leave intact. The per-AP solve must therefore accept a temporal warm-start
+    # (`seed_phase`, the previous AP's solution) that pins the branch.
+    #
+    # Construct a genuinely bistable solve: station 4 sees two weak edges (to 2 and
+    # 3, both pinned ≈0 by strong edges to ref=1) whose WRAPPED phases disagree by
+    # ~2π, so φ4 ≈ 0 and φ4 ≈ ±π are BOTH self-consistent rewrap fixed points.
+    OR = FRa._ObsRow
+    rows = OR[
+        OR(1, 2, 1, 1, 0.0, 100.0, 0),
+        OR(1, 3, 1, 1, 0.0, 100.0, 0),
+        OR(2, 4, 1, 1, 3.0, 1.0, 0),
+        OR(3, 4, 1, 1, -3.0, 1.0, 0),
+    ]
+    nant, ref = 4, 1
+    solve4(seed) = begin
+        sp = seed === nothing ? nothing : (M = fill(NaN, nant, 2); M[4, 1] = seed; M)
+        ph, _, cov, _ = FRa._solve_observable(rows, nant, ref; use_chi = false, rewrap = 3, seed_phase = sp)
+        @test cov[4, 1]
+        ph[4, 1]
+    end
+
+    # Unseeded, the solve lands on the ±π branch (NOT zero).
+    φ_none = solve4(nothing)
+    @test abs(abs(φ_none) - π) < 1.0e-3
+    # A warm-start in the basin of zero selects the zero branch; one near π selects π.
+    @test abs(solve4(0.0)) < 1.0e-3
+    @test abs(abs(solve4(Float64(π))) - π) < 1.0e-3
+    # The two seeded branches differ by ~π — the seed genuinely controls the result.
+    @test abs(rem2pi(solve4(Float64(π)) - solve4(0.0), RoundNearest)) > 1.0
+
+    # The default `solve_adhoc_phasing` warm-starts internally, so a smooth screen
+    # near the wrap cut is recovered as a CONTINUOUS track (no spurious sub-2π
+    # jumps) on the weak station.
+    rng = MersenneTwister(0xBADC0FFE)
+    nant2, nap = 5, 60
+    bl = all_bl_a(nant2)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = 0.2 .* randn(rng, nant2, 2, nap)
+    for ap in 1:nap                                  # station 5 hovers near +π
+        screen[5, :, ap] .= (π - 0.1) .+ 0.1 .* sin(2π * ap / 15)
+    end
+    χ = zeros(nap)
+    rbar, wbar = inject_screen(bl, pols, screen, χ; amp = 6.0, noise = 1.0, rng = rng)
+    sol = FRa.solve_adhoc_phasing(
+        rbar, wbar, bl, pols, nant2, times;
+        ref_ant = 1, opts = FRa.AdhocPhasing(mode = :none, detrend = false),
+    )
+    tr = sol.phase[5, 1, :]
+    jumps = [abs(rem2pi(tr[ap + 1] - tr[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(tr[ap]) && isfinite(tr[ap + 1])]
+    @test maximum(jumps) < 1.0                       # no ~π branch flip in the track
+end
+
 @testset "EHT-HOPS adhoc window (T_dof, Eqs 21-22)" begin
     # Savitzky–Golay window from the EHT-HOPS optimal integration time. SNR-adaptive
     # (higher per-AP SNR² → shorter window) and grows with the assumed coherence

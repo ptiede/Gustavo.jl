@@ -129,8 +129,15 @@ reproduced here.)
 function _savgol_window_dof(rho2::Real, m_coh::Real, alpha::Real, order::Integer)
     (isfinite(rho2) && rho2 > 0 && m_coh > 0) || return order + 1
     a = float(alpha)
-    coef = (1 + a) * (2 + a) / (2.0^(-a) * a * (2 + a - 2.0^a))
+    # T_dof is real only for a physical structure exponent 0 < α < 2 (the denominator
+    # `2 + a − 2^a` vanishes at α = 2 and goes negative above). Fall back to the
+    # minimal window rather than producing Inf/NaN — `solve_adhoc_phasing` validates
+    # α up front, so this only guards direct callers.
+    denom = 2 + a - 2.0^a
+    (0 < a < 2 && denom > 0) || return order + 1
+    coef = (1 + a) * (2 + a) / (2.0^(-a) * a * denom)
     m_dof = (coef * float(m_coh)^a / float(rho2))^(1 / (a + 1))   # T_dof / T_AP, in APs
+    isfinite(m_dof) || return order + 1
     n = max(order + 1, 1 + 2 * floor(Int, (order + 1) * m_dof / 2))
     return iseven(n) ? n + 1 : n
 end
@@ -167,6 +174,24 @@ function solve_adhoc_phasing(
     # weights `noise² → 1/wbar`, so this reduces to the old `|rbar|²/wbar` exactly.
     noise2 = [_track_noise2(rbar, wbar, bi, p, nap) for bi in 1:nbl, p in 1:npol]
 
+    # Carry solved node phases forward as a temporal warm-start for the next AP's
+    # 2π-branch selection (continuity ⇒ no per-AP branch flips on weakly-constrained
+    # stations). The seed is a REFERENCE-GAUGED snapshot: it is refreshed only from
+    # APs where `ref_ant` has data (so every stored cell is in the ref=0 gauge and
+    # the snapshot is mutually consistent) and applied only when the CURRENT AP also
+    # has `ref_ant` (so the per-AP spanning-tree seed it partially overrides is ref=0
+    # too). Skipping the seed on ref-dropout APs avoids mixing a ref=0 seed with a
+    # differently-anchored tree seed, which would mis-pick the 2π branch on a
+    # seeded↔tree boundary edge — the arbitrary non-2π offset such APs carry (K3).
+    prev_phase = fill(NaN, nant, 2)   # NaN for cells no ref-present AP has covered yet
+    prev_age = zeros(Int, nant, 2)    # APs since a cell was last refreshed (staleness)
+    prev_chi = NaN
+    # Trust a seed only while the atmosphere cannot yet have drifted past ±π (beyond
+    # which the old branch is no longer a safe guide): ~π of drift takes a few
+    # coherence times. `times` is in seconds; `T_AP` is its median spacing.
+    dts0 = filter(>(0), diff(sort(Float64.(collect(times)))))
+    t_ap0 = isempty(dts0) ? 1.0 : median(dts0)
+    max_stale = max(10, ceil(Int, 3 * opts.coherence_time / t_ap0))
     for ap in 1:nap
         rows = _ObsRow[]
         for bi in 1:nbl, p in 1:npol
@@ -192,10 +217,37 @@ function solve_adhoc_phasing(
             track_w[a, na, ap] += snr2
             track_w[b, nb, ap] += snr2
         end
-        ph, c, cov, _ = _solve_observable(rows, nant, ref_ant; use_chi = true, rewrap = opts.phase_rewrap_iters)
+        # `ref_ant` has data this AP iff some observation touches it (⇒ the solve is
+        # anchored at ref=0). Seed only then, and only with fresh, ref-gauged cells.
+        ref_here = any(r -> r.a == ref_ant || r.b == ref_ant, rows)
+        seed = nothing
+        if ref_here
+            seed = fill(NaN, nant, 2)
+            for a in 1:nant, f in 1:2
+                (isfinite(prev_phase[a, f]) && prev_age[a, f] <= max_stale) &&
+                    (seed[a, f] = prev_phase[a, f])
+            end
+        end
+        ph, c, cov, _ = _solve_observable(
+            rows, nant, ref_ant; use_chi = true, rewrap = opts.phase_rewrap_iters,
+            seed_phase = seed, seed_chi = ref_here ? prev_chi : NaN,
+        )
         phase[:, :, ap] .= ph
         chi[ap] = c
         covered[:, :, ap] .= cov
+        # Refresh the ref-gauged snapshot ONLY from ref-present APs (keep the last
+        # known value for a station absent this AP, so a brief dropout does not reset
+        # the branch); age every cell and zero the ones refreshed here.
+        prev_age .+= 1
+        if ref_here
+            for a in 1:nant, f in 1:2
+                if cov[a, f] && isfinite(ph[a, f])
+                    prev_phase[a, f] = ph[a, f]
+                    prev_age[a, f] = 0
+                end
+            end
+            isfinite(c) && (prev_chi = c)
+        end
     end
 
     # Restitch the per-AP gauge when the reference antenna drops out (K3). Each
@@ -219,6 +271,13 @@ function solve_adhoc_phasing(
     # the per-AP coherent SNR² is the station's mean `track_w` (Σ baseline SNR²).
     if opts.mode === :smooth
         auto = opts.window === :auto
+        auto && (
+            0 < opts.structure_exponent < 2 || error(
+                "solve_adhoc_phasing: structure_exponent must be in (0, 2) for window = :auto " *
+                    "(got $(opts.structure_exponent); 5/3 = 3D Kolmogorov, 2/3 = 2D). Outside this " *
+                    "range the T_dof denominator (2 + α − 2^α) is non-positive.",
+            )
+        )
         m_coh = if auto
             dts = filter(>(0), diff(sort(Float64.(collect(times)))))
             t_ap = isempty(dts) ? 1.0 : median(dts)
