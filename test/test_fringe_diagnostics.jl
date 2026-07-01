@@ -6,7 +6,7 @@ using HDF5
 
 @testset "Fringe diagnostics" begin
     uvset, _truth = _build_fringe_uvset()
-    sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0))
+    sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0))
 
     @testset "snr table + summary" begin
         rows = FP.fringe_snr_table(sol)

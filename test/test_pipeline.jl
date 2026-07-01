@@ -213,7 +213,7 @@ end
     # keeps every well-determined AP in this high-SNR synthetic.
     sol = FP.solve_fringes(
         uvset; ref_ant = 1,
-        adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0),
+        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
     )
     @test sol isa CAL.CalibrationSolution
     @test length(sol.θ) == sol.layout.nθ
@@ -328,7 +328,7 @@ end
     # two-pass `apply_calibration(uvset, solve_fringes(uvset))`, because each
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
-    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
 
     sol_ref = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc)
     corr_ref = Gustavo.apply_calibration(uvset, sol_ref)
@@ -390,7 +390,7 @@ end
     uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
     sol, reduced = FP.solve_and_reduce_fringes(
         uvset; ref_ant = 1,
-        adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0),
+        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
         postprocess = uv -> UVP.time_bin_average(
             UVP.combine_spw(UVP.frequency_average(uv; nout = 1)), 0.02,
         ),
@@ -421,7 +421,7 @@ end
     # Regression for the θ-overwrite bug: even rounds previously wiped the
     # round-1 solution (coherence collapsed). Accumulation keeps all rounds good.
     uvset, _ = _build_fringe_uvset()
-    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     for r in (1, 2, 3)
         sol = FP.solve_fringes(uvset; ref_ant = 1, rounds = r, adhoc = adhoc)
         corr = Gustavo.apply_calibration(uvset, sol)
@@ -472,7 +472,7 @@ end
         end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
-    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     sol_on = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, phase_bandpass = true)
     sol_off = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, phase_bandpass = false)
 
@@ -535,7 +535,7 @@ end
         parent(leaf[:weights])[dead_local, :, :, :] .= 0.0f0
     end
 
-    adhoc = FP.AdhocPhasing(; window = 7, order = 2, snr_floor = 0.0)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     larec(sol, plan, a, f, gc) = (off = plan.off1[a, f, 1, 1]; off == 0 ? NaN : sol.θ[off + plan.clocal[gc] - 1])
     function amp_ripple(spec, don, p)
         rs = Float64[]
@@ -580,10 +580,10 @@ end
 end
 
 @testset "Adhoc auto window (:auto) flattens end-to-end" begin
-    # The default `AdhocPhasing()` now uses `window = :auto` (EHT-HOPS coherence-time
+    # The default `SavitzkyGolaySmoother()` now uses `window = :auto` (EHT-HOPS coherence-time
     # selection). Verify the default path still flattens the per-baseline phase.
     uvset, _ = _build_fringe_uvset()
-    sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = FP.AdhocPhasing())   # window = :auto
+    sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = FP.SavitzkyGolaySmoother())   # window = :auto
     corr = Gustavo.apply_calibration(uvset, sol)
     worst = 1.0
     for (_, leaf) in DimensionalData.branches(corr)

@@ -130,7 +130,7 @@ end
 # ── Built-in steps ────────────────────────────────────────────────────────────
 
 """
-    FringeFit(; ref_ant = 1, rounds = 1, search = FringeSearch(), adhoc = AdhocPhasing(),
+    FringeFit(; ref_ant = 1, rounds = 1, search = FringeSearch(), adhoc = SavitzkyGolaySmoother(),
               ntasks = Threads.nthreads(), mem_fraction = 0.6, mem_budget = nothing,
               bandpass = BandpassOptions(), reduce = ReduceStep[])
 
@@ -155,7 +155,7 @@ Base.@kwdef struct FringeFit <: CalibrationStep
     ref_ant::Any = 1
     rounds::Int = 1
     search::FringeSearch = FringeSearch()
-    adhoc::AdhocPhasing = AdhocPhasing()
+    adhoc::AbstractAdhocSmoother = SavitzkyGolaySmoother()
     ntasks::Int = Threads.nthreads()
     mem_fraction::Float64 = 0.6
     mem_budget::Union{Nothing, Float64} = nothing

@@ -21,6 +21,7 @@ using OhMyThreads: tmap, TaskLocalValue
 
 include("Fringe/search.jl")
 include("Fringe/stationize.jl")
+include("Fringe/statespace.jl")
 include("Fringe/adhoc.jl")
 include("Fringe/pipeline.jl")
 include("Fringe/diagnostics.jl")
@@ -71,7 +72,8 @@ function plot_baseline_fringes end
 
 export FringeSearch, FringeDetection, baseline_fringe_search
 export Stationization, StationSolution, stationize_scan, station_closure_residuals
-export AdhocPhasing, AdhocSolution, solve_adhoc_phasing
+export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
+export OUSmoother, JointOUSmoother, NoSmoothing, AdhocSolution, solve_adhoc_phasing
 export solve_fringes, solve_and_reduce_fringes
 export AbstractBandpassSmoother, FreeBandpass, PolynomialBandpass, PenalizedBandpass
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary

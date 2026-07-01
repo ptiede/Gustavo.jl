@@ -114,7 +114,7 @@ Gustavo.run_step(s::_ProbeStep, ctx::Gustavo.CalibrationContext) = (s.seen[] = t
         f = FringeFit()
         @test f.ref_ant == 1 && f.rounds == 1
         @test f.search == FP.FringeSearch()
-        @test f.adhoc == FP.AdhocPhasing()
+        @test f.adhoc == FP.SavitzkyGolaySmoother()
         @test f.bandpass.phase && f.bandpass.amp && f.bandpass.source === nothing
         @test f.mem_fraction == 0.6 && f.mem_budget === nothing   # deterministic-budget defaults
         @test isempty(f.reduce)

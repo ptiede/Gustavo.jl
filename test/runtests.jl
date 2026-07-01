@@ -25,6 +25,9 @@ include("test_fringe_search.jl")
 # Per-feed stationization with closure (Phase 4 of the fringe-fitter refactor).
 include("test_stationize.jl")
 
+# OU / Matérn-1/2 state-space phase smoother primitives (underpins adhoc :gp).
+include("test_statespace.jl")
+
 # Globally-closing adhoc phasing (Phase 5 of the fringe-fitter refactor).
 include("test_adhoc.jl")
 

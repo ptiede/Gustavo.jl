@@ -63,7 +63,7 @@ end
     times = collect(0:(nap - 1)) .* 1.0
 
     rbar, wbar = inject_screen(bl, pols, screen, χ)
-    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false))
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.NoSmoothing(detrend = false))
 
     @test adhoc_recon(rbar, sol, bl, pols) < 1.0e-9
     # Reference station held at zero adhoc phase (the per-AP gauge).
@@ -94,7 +94,7 @@ end
     end
     χ = zeros(nap)
     rbar, wbar = inject_screen(bl, pols, screen, χ)
-    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = true))
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.NoSmoothing(detrend = true))
 
     # Detrend removes the per-station MEAN (breaks the constant-phase gauge vs the
     # Stage-B ConstantTerm) but KEEPS the slope — so adhoc can flatten a residual
@@ -126,10 +126,10 @@ end
         screen[a, f, ap] = 0.3 * randn(rng) + 0.04 * sin(2π * ap / nap + a)
     end
     rbar, wbar = inject_screen(bl, pols, screen, zeros(nap); amp = 5.0, noise = 0.4, rng = rng)
-    opts = FRa.AdhocPhasing(mode = :none, detrend = false, snr_floor = 1.0)
-    s1 = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = opts)
+    sm = FRa.NoSmoothing(detrend = false, snr_floor = 1.0)
+    s1 = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = sm)
     k = 1.0e-6
-    s2 = FRa.solve_adhoc_phasing(k .* rbar, k .* wbar, bl, pols, nant, times; ref_ant = ref, opts = opts)
+    s2 = FRa.solve_adhoc_phasing(k .* rbar, k .* wbar, bl, pols, nant, times; ref_ant = ref, smoother = sm)
 
     @test count(isfinite, s1.phase) > 0                      # adhoc actually runs
     @test count(isfinite, s2.phase) == count(isfinite, s1.phase)   # scale doesn't change coverage
@@ -170,12 +170,145 @@ end
         sqrt(mean(abs2, e))
     end
 
-    raw = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false))
-    sm = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :smooth, window = 11, order = 2, detrend = false))
-    pen = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :penalized, smoothness = 20.0, detrend = false))
+    raw = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.NoSmoothing(detrend = false))
+    sm = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.SavitzkyGolaySmoother(window = 11, order = 2, detrend = false))
+    pen = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.PenalizedSmoother(smoothness = 20.0, detrend = false))
+    gp = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.OUSmoother(coherence_time = 15.0, detrend = false))
 
     @test rms_to_truth(sm) < rms_to_truth(raw)
     @test rms_to_truth(pen) < rms_to_truth(raw)
+    # The OU / Matérn-1/2 Gaussian-process smoother (with ML-fit hypers) also
+    # denoises, and should be competitive with the first-difference penalty.
+    @test rms_to_truth(gp) < rms_to_truth(raw)
+    @test rms_to_truth(gp) < 1.5 * rms_to_truth(pen)
+end
+
+@testset "Adhoc :gp preserves the injected differential slope" begin
+    # Like the detrend test but through the :gp smoother: a constant + slope
+    # screen (no wiggle) must survive GP smoothing + detrend with its slope
+    # matching the injected differential rate c1[a] - c1[ref].
+    rng = MersenneTwister(0x6959)
+    nant, nap = 4, 40
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    tc = times .- mean(times)
+    c0 = 0.5 .* randn(rng, nant, 2)
+    c1 = 0.02 .* randn(rng, nant, 2)
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        screen[a, f, ap] = c0[a, f] + c1[a, f] * tc[ap]
+    end
+    rbar, wbar = inject_screen(bl, pols, screen, zeros(nap); amp = 20.0)
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.OUSmoother(coherence_time = 30.0, detrend = true))
+
+    for a in 1:nant, f in 1:2
+        a == ref && continue
+        tr = sol.phase[a, f, :]
+        @test abs(mean(tr)) < 1.0e-6
+        slope = sum(tc .* (tr .- mean(tr))) / sum(tc .^ 2)
+        @test isapprox(slope, c1[a, f] - c1[ref, f]; atol = 5.0e-3)
+    end
+end
+
+@testset "Adhoc :gp ref antenna pinned to zero" begin
+    rng = MersenneTwister(0x7A17)
+    nant, nap = 4, 30
+    ref = 2
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        screen[a, f, ap] = 0.3 * sin(2π * ap / nap + a) + 0.2 * randn(rng)
+    end
+    rbar, wbar = inject_screen(bl, pols, screen, zeros(nap); amp = 8.0, noise = 0.5, rng = rng)
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.OUSmoother(detrend = false))
+    @test all(abs.(sol.phase[ref, :, :]) .< 1.0e-8)   # reference gauge held at 0
+end
+
+# Non-birefringent (feed-common) smooth screen for the joint solve — matches the
+# `shared_feeds` truth (feed 2 ≡ feed 1) so the recovered per-station track is well
+# defined up to the ref gauge.
+function shared_screen(rng, nant, nap; k = 2.0, amp = 0.4)
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant
+        ph = 2π * rand(rng)
+        a0 = amp * rand(rng)
+        for ap in 1:nap
+            screen[a, 1, ap] = a0 * sin(2π * k * ap / nap + ph)
+            screen[a, 2, ap] = screen[a, 1, ap]
+        end
+    end
+    return screen
+end
+
+@testset "Adhoc :gp_joint runs, pins ref, recovers χ" begin
+    rng = MersenneTwister(0x00102547)
+    nant, nap = 5, 50
+    ref = 2
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap)
+    χtrue = 0.3 .* sin.(2π .* (1:nap) ./ nap)
+    rbar, wbar = inject_screen(bl, pols, screen, χtrue; amp = 6.0, noise = 1.0, rng = rng)
+    sol = FRa.solve_adhoc_phasing(
+        rbar, wbar, bl, pols, nant, times; ref_ant = ref,
+        smoother = FRa.JointOUSmoother(coherence_time = 15.0, detrend = false), shared_feeds = true,
+    )
+    @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)     # ref pinned
+    @test all(sol.phase[:, 1, :] .=== sol.phase[:, 2, :])                 # shared feeds replicated
+    # χ is per-AP; recovered up to a constant (the χ ↔ common-mode gauge).
+    a = sol.chi .- mean(sol.chi)
+    b = χtrue .- mean(χtrue)
+    @test sum(a .* b) / sqrt(sum(abs2, a) * sum(abs2, b)) > 0.9
+end
+
+@testset "Adhoc :gp_joint denoises and closes" begin
+    rng = MersenneTwister(0x9317)
+    nant, nap = 5, 60
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap; k = 1.5, amp = 0.5)
+    rbar, wbar = inject_screen(bl, pols, screen, zeros(nap); amp = 3.0, noise = 2.0, rng = rng)
+
+    truth(a, f) = screen[a, f, :] .- screen[ref, f, :]
+    rms_to_truth(sol) = begin
+        e = Float64[]
+        for a in 1:nant, f in 1:2
+            a == ref && continue
+            d = sol.phase[a, f, :] .- truth(a, f)
+            all(isfinite, d) || continue
+            d .-= mean(d)
+            append!(e, d)
+        end
+        sqrt(mean(abs2, e))
+    end
+
+    none = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.NoSmoothing(detrend = false), shared_feeds = true)
+    gp = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.OUSmoother(coherence_time = 20.0, detrend = false), shared_feeds = true)
+    gpj = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.JointOUSmoother(coherence_time = 20.0, detrend = false), shared_feeds = true)
+
+    @test rms_to_truth(gpj) < rms_to_truth(none)          # joint solve denoises
+    @test rms_to_truth(gpj) < 1.5 * rms_to_truth(gp)      # competitive with per-track
+end
+
+@testset "Adhoc :gp_joint requires shared_feeds" begin
+    rng = MersenneTwister(0x5A17)
+    nant, nap = 3, 10
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap)
+    rbar, wbar = inject_screen(bl, pols, screen, zeros(nap); amp = 8.0)
+    @test_throws ErrorException FRa.solve_adhoc_phasing(
+        rbar, wbar, bl, pols, nant, times;
+        smoother = FRa.JointOUSmoother(), shared_feeds = false,
+    )
 end
 
 @testset "Adhoc: low-SNR no-anchor solve is unbiased" begin
@@ -196,7 +329,7 @@ end
     cnt = zeros(nant, 2, nap)
     for _ in 1:ntrial
         rbar, wbar = inject_screen(bl, pols, screen, χ; amp = 2.0, noise = 1.0, rng = rng)
-        sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false, snr_floor = 0.0))
+        sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = FRa.NoSmoothing(detrend = false, snr_floor = 0.0))
         for a in 1:nant, f in 1:2, ap in 1:nap
             isfinite(sol.phase[a, f, ap]) || continue
             acc[a, f, ap] += rem2pi(sol.phase[a, f, ap], RoundNearest)
@@ -243,7 +376,7 @@ end
 
     sol = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        ref_ant = ref, opts = FRa.AdhocPhasing(mode = :none, detrend = false),
+        ref_ant = ref, smoother = FRa.NoSmoothing(detrend = false),
     )
 
     # ref_ant is unsolved in the dropout APs but solved elsewhere.
@@ -311,7 +444,7 @@ end
     rbar, wbar = inject_screen(bl, pols, screen, χ; amp = 6.0, noise = 1.0, rng = rng)
     sol = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant2, times;
-        ref_ant = 1, opts = FRa.AdhocPhasing(mode = :none, detrend = false),
+        ref_ant = 1, smoother = FRa.NoSmoothing(detrend = false),
     )
     tr = sol.phase[5, 1, :]
     jumps = [abs(rem2pi(tr[ap + 1] - tr[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(tr[ap]) && isfinite(tr[ap + 1])]
@@ -334,4 +467,34 @@ end
     # Degenerate inputs fall back to the minimal window.
     @test FRa._savgol_window_dof(0.0, 15.0, 5 / 3, order) == order + 1
     @test FRa._savgol_window_dof(10.0, 0.0, 5 / 3, order) == order + 1
+end
+
+@testset "Adhoc smoother interface: every type dispatches" begin
+    # The pluggable `AbstractAdhocSmoother` interface — each concrete smoother
+    # constructs, subtypes the abstract type, and drives `solve_adhoc_phasing`
+    # through `apply_adhoc!`. Mirrors the bandpass-smoother loop in test_pipeline.jl.
+    rng = MersenneTwister(0x00FACADE)
+    nant, nap = 4, 30
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap)         # feed-common (works for the joint solve too)
+    rbar, wbar = inject_screen(bl, pols, screen, zeros(nap); amp = 6.0, noise = 0.5, rng = rng)
+
+    # (smoother, shared_feeds) — the joint solve requires feed-common state.
+    cases = [
+        (FRa.SavitzkyGolaySmoother(window = 9, detrend = false), false),
+        (FRa.PenalizedSmoother(smoothness = 10.0, detrend = false), false),
+        (FRa.OUSmoother(coherence_time = 15.0, detrend = false), false),
+        (FRa.NoSmoothing(detrend = false), false),
+        (FRa.JointOUSmoother(coherence_time = 15.0, detrend = false), true),
+    ]
+    for (sm, shared) in cases
+        @test sm isa FRa.AbstractAdhocSmoother
+        sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = sm, shared_feeds = shared)
+        @test sol isa FRa.AdhocSolution
+        @test count(isfinite, sol.phase) > 0                     # the stage actually ran
+        @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)   # ref gauge held
+    end
 end

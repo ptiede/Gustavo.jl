@@ -432,7 +432,7 @@ function _adhoc_group_leaves!(θ, keyed, geom::DataGeometry, ev, adhoc_plan, adh
     end
     # `tg` is in hours; pass SECONDS so the adhoc's `:auto` window (T_AP / T_coh) is
     # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.
-    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg .* 3600.0; ref_ant = ref_ant, opts = adhoc, shared_feeds = shared_feeds)
+    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg .* 3600.0; ref_ant = ref_ant, smoother = adhoc, shared_feeds = shared_feeds)
     for (ap, gti) in enumerate(g_ti)
         tseg = adhoc_plan.tseg_id[gti]
         for ant in 1:nant, feed in 1:2
@@ -625,7 +625,7 @@ the search pass on the residual).
 function solve_fringes(
         uvset::UVSet;
         search::FringeSearch = FringeSearch(),
-        adhoc::AdhocPhasing = AdhocPhasing(),
+        adhoc::AbstractAdhocSmoother = SavitzkyGolaySmoother(),
         rounds::Int = 1,
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
@@ -732,7 +732,7 @@ function solve_and_reduce_fringes(
         uvset::UVSet;
         postprocess = identity,
         search::FringeSearch = FringeSearch(),
-        adhoc::AdhocPhasing = AdhocPhasing(),
+        adhoc::AbstractAdhocSmoother = SavitzkyGolaySmoother(),
         rounds::Int = 1,
         ref_ant::Integer = 1,
         ntasks::Integer = Threads.nthreads(),
