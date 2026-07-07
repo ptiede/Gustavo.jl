@@ -23,6 +23,8 @@ include("Fringe/search.jl")
 include("Fringe/stationize.jl")
 include("Fringe/statespace.jl")
 include("Fringe/adhoc.jl")
+include("Fringe/pseudostokes.jl")
+include("Fringe/phasecal.jl")
 include("Fringe/pipeline.jl")
 include("Fringe/diagnostics.jl")
 
@@ -56,6 +58,22 @@ Per-scan max detection SNR (and χ) from the solver diagnostics. Provided by
 function plot_fringe_snr end
 
 """
+    plot_fringe_search(uvset, sol; scan_index, baseline, pol, search)
+    plot_fringe_search(m::BaselineFringeMap)
+    plot_fringe_search(parent, m)
+
+HOPS-style fringe-search diagnostic for one baseline of one scan — THE plot for
+judging a suspected false fringe. Draws the delay–rate matched-filter SNR
+surface with delay/rate cross-sections through the peak, and annotates the
+refined detection (delay, rate, SNR) and its false-alarm probability. A real
+fringe is a single sharp peak far above the sidelobe forest with `pfa ≪ 1`; a
+false fringe barely clears the forest (`pfa` not small) and shows several
+comparable-height peaks. Selectors as [`fringe_search_map`](@ref). Provided by
+`GustavoMakieExt`.
+"""
+function plot_fringe_search end
+
+"""
     plot_baseline_fringes(uvset, sol; kind, pol, baselines, scan_index, show)
     plot_baseline_fringes(data::BaselineFringeData; ...)
     plot_baseline_fringes(parent, data; ...)
@@ -66,20 +84,29 @@ baseline) overlaying the coherent visibility BEFORE and AFTER applying `sol`.
 slope that flattens after a good fit; `kind = :time` plots vs time — a fringe rate
 shows as a slope that flattens. `show = :phase` (default) or `:amp`. `pol` selects
 the correlation product (default `:parallel`); `baselines` selects which to draw.
+`band = k` restricts the view to the k-th band group ([`fringe_band_groups`](@ref)):
+`:freq` panels show only that group's channels on the real frequency axis, `:time`
+panels average over only that group — the readable view on wide multi-group data
+(VGOS), where the all-band view hides which group misfits.
 Provided by `GustavoMakieExt`.
 """
 function plot_baseline_fringes end
 
 export FringeSearch, FringeDetection, baseline_fringe_search
+export FringeSearchMap, baseline_fringe_map, fringe_pfa
+export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask
 export Stationization, StationSolution, stationize_scan, station_closure_residuals
 export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
 export OUSmoother, JointOUSmoother, NoSmoothing, AdhocSolution, solve_adhoc_phasing
 export solve_fringes, solve_and_reduce_fringes
 export AbstractBandpassSmoother, FreeBandpass, PolynomialBandpass, PenalizedBandpass
-export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary
+export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_gain_spectrum, fringe_gain_time_series
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups
+export fringe_band_stats, fringe_band_groups
+export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags
 export delay_closure, print_delay_closure
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
+export plot_fringe_search
 
 end

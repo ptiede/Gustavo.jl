@@ -58,6 +58,27 @@ struct ChannelBlocks <: AbstractFrequencySegmentation
     end
 end
 
+"""
+One segment per explicit global-channel range — for caller-defined frequency
+groupings the other segmentations cannot express, e.g. the widely-separated
+VGOS band groups (`Fringe.fringe_band_groups`). Ranges must be ascending,
+contiguous, start at channel 1, and (checked against the geometry at plan
+time) cover every channel exactly once.
+"""
+struct FrequencyBands <: AbstractFrequencySegmentation
+    ranges::Vector{UnitRange{Int}}
+    function FrequencyBands(ranges::AbstractVector{<:UnitRange{<:Integer}})
+        rs = [UnitRange{Int}(r) for r in ranges]
+        isempty(rs) && error("FrequencyBands: at least one range required")
+        first(rs[1]) == 1 || error("FrequencyBands: ranges must start at channel 1")
+        for i in 2:length(rs)
+            first(rs[i]) == last(rs[i - 1]) + 1 ||
+                error("FrequencyBands: ranges must be contiguous and ascending")
+        end
+        return new(rs)
+    end
+end
+
 # ── DataGeometry ─────────────────────────────────────────────────────────────
 
 """
@@ -166,6 +187,17 @@ Segment id (1..nseg) for each global channel under frequency segmentation `seg`.
 """
 freq_segment_ids(::GlobalFrequency, geom::DataGeometry) = (ones(Int, nchannels(geom)), 1)
 freq_segment_ids(::PerSpectralWindow, geom::DataGeometry) = _dense_rank(geom.spw_of_chan)
+
+function freq_segment_ids(seg::FrequencyBands, geom::DataGeometry)
+    n = nchannels(geom)
+    last(seg.ranges[end]) == n ||
+        error("FrequencyBands: ranges cover $(last(seg.ranges[end])) channels; geometry has $n")
+    ids = Vector{Int}(undef, n)
+    for (k, r) in enumerate(seg.ranges), c in r
+        ids[c] = k
+    end
+    return ids, length(seg.ranges)
+end
 
 function freq_segment_ids(seg::ChannelBlocks, geom::DataGeometry)
     spw = geom.spw_of_chan

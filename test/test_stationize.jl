@@ -398,3 +398,71 @@ end
     @test worst < 1.0e-13
     @test ncomp == 1                          # global offset ties everything into one component
 end
+
+@testset "Stationize: robust rejection excises a closure-breaking false fringe" begin
+    # A co-located telescope pair (e.g. the Onsala twins) can carry a coherent
+    # crosstalk/tone fringe: ONE high-SNR baseline detection whose delay/rate is
+    # wildly closure-inconsistent with every other baseline. Without rejection
+    # the SNR²-weighted solve drags both stations' values; with it (the default)
+    # the poisoned rows are excised and the truth is recovered exactly.
+    rng = MersenneTwister(0x0E0F)
+    nant = 6
+    ref = 1
+    bl = all_baselines(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+    τ = 1.0e-9 .* randn(rng, nant, 2)
+    ṙ = 1.0e-3 .* randn(rng, nant, 2)
+    φ = 0.3 .* randn(rng, nant, 2)
+    D = inject_detections(bl, pols, τ, ṙ, φ, 0.5; snr = 30.0)
+    # Realistic measurement noise (CRB-scale, ∝ 1/snr): noiseless detections
+    # close EXACTLY, which makes every robust scale (MAD) zero and correctly
+    # disables rejection — the screen needs a genuine noise floor to cut against.
+    for bi in eachindex(bl), p in eachindex(pols)
+        d = D[bi, p]
+        D[bi, p] = FR.FringeDetection(
+            d.delay + 1.0e-11 * randn(rng), d.rate + 1.0e-5 * randn(rng),
+            d.phase + 0.01 * randn(rng), d.amp, d.snr, true,
+        )
+    end
+    poisoned = findfirst(==((5, 6)), bl)      # the "twin" baseline
+    for p in eachindex(pols)
+        D[poisoned, p] = FR.FringeDetection(-690.0e-9, 4.7e-3, 1.3, 1.0, 80.0, true)
+    end
+
+    sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
+    for a in 1:nant, f in 1:2
+        @test isapprox(sol.delay[a, f], τ[a, f] - τ[ref, 1]; atol = 1.0e-10)
+        @test isapprox(sol.rate[a, f], ṙ[a, f] - ṙ[ref, f]; atol = 1.0e-4)
+    end
+
+    # Rejection disabled: the false fringe drags stations 5/6 off truth.
+    sol0 = FR.stationize_scan(
+        D, bl, pols, nant; ref_ant = ref,
+        opts = FR.Stationization(reject_sigma = 0.0),
+    )
+    @test abs(sol0.delay[5, 1] - (τ[5, 1] - τ[ref, 1])) > 1.0e-9
+
+    # Same through the model-driven pipeline path (solve_station_systems!).
+    geom = CALs.DataGeometry(; times = [0.0, 1.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
+    model = CALs.StationGainModel(
+        phase = (
+            CALs.TiedComponent(CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            CALs.TiedComponent(CALs.GainComponent(CALs.Delay(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            CALs.TiedComponent(CALs.GainComponent(CALs.Rate(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+        ),
+    )
+    layout = CALs.plan_parameters(model, nant, geom)
+    cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
+    θ = zeros(layout.nθ)
+    scans = (FR.StationScanDetections(D, bl, feeds, 1),)
+    _, _, nrej = FR.solve_station_systems!(
+        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref,
+    )
+    @test nrej >= 4                           # ≥ the 4 poisoned products (closure screen)
+    for ant in 1:nant, feed in 1:2
+        c = dplan.off1[ant, feed, 1, 1]
+        c == 0 && continue
+        @test isapprox(θ[c], τ[ant, feed] - τ[ref, 1]; atol = 1.0e-10)
+    end
+end

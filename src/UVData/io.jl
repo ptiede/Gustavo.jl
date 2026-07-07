@@ -52,6 +52,28 @@ Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 function write_fitsidi end
 
 """
+    default_output_path(uvset::UVSet; dir = pwd(), ext = "uvfits") -> String
+
+Default on-disk path for writing `uvset`, named after its (single) real
+`source_name` — deliberately NOT the internal `source_key`, so a digit-leading
+catalog name like `"3C273"` yields `3C273.uvfits`, not the identifier-safe
+`src_3C273` tree key. Characters that are illegal or awkward in a filename are
+replaced with `_`; `ext` (without a leading dot) is appended as the extension.
+
+Multi-source UVSets must first be narrowed via `select_source(uvset, name)`.
+"""
+function default_output_path(uvset::UVSet; dir = pwd(), ext = "uvfits")
+    srcs = sources(uvset)
+    length(srcs) == 1 || error(
+        "default_output_path: expected a single-source UVSet; got sources=$(srcs). " *
+            "Use select_source(uvset, name) first.",
+    )
+    name = replace(strip(only(srcs)), r"[^A-Za-z0-9._+-]+" => "_")
+    isempty(name) && (name = "uvdata")
+    return joinpath(dir, string(name, ".", ext))
+end
+
+"""
     apply_calibration(uvset::UVSet, calibration; kwargs...) -> UVSet
 
 Apply a calibration to `uvset`, returning a corrected `UVSet`. Generic entry

@@ -40,12 +40,12 @@ export unwrap_phase_track, phase_relative_to_ref
 # Segmentation vocabulary
 export AbstractTimeSegmentation, AbstractFrequencySegmentation
 export GlobalTime, PerScan, PerIntegration, TimeBlocks, InstrumentScans
-export GlobalFrequency, PerSpectralWindow, ChannelBlocks
+export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FrequencyBands
 export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
 
 # Terms
 export AbstractGainTerm
-export ConstantTerm, Delay, Rate, PolynomialFreq, PolynomialTime, PerChannel
+export ConstantTerm, Delay, Dispersion, Rate, PolynomialFreq, PolynomialTime, PerChannel
 export basis_columns, nparams_per_block
 
 # Models and tying

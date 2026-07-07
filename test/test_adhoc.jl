@@ -244,7 +244,14 @@ function shared_screen(rng, nant, nap; k = 2.0, amp = 0.4)
     return screen
 end
 
-@testset "Adhoc :gp_joint runs, pins ref, recovers χ" begin
+# The shared-feeds solve uses parallel hands ONLY: they fully constrain the
+# feed-common track, and cross-hand rows carry the real cross-polarization
+# phase (field rotation / D-terms) — on linear-feed data that phase is
+# station-pair-dependent (NOT one per-AP χ), sits near ±π, and wraps through
+# a scan; letting it into the LSQ staircases whole station tracks (VR2505 WN:
+# ±1 rad plateaus). χ is therefore no longer estimated here — stage B's
+# stationize owns the cross-hand feed tie.
+@testset "Adhoc :gp_joint runs, pins ref, ignores cross hands" begin
     rng = MersenneTwister(0x00102547)
     nant, nap = 5, 50
     ref = 2
@@ -254,16 +261,31 @@ end
     screen = shared_screen(rng, nant, nap)
     χtrue = 0.3 .* sin.(2π .* (1:nap) ./ nap)
     rbar, wbar = inject_screen(bl, pols, screen, χtrue; amp = 6.0, noise = 1.0, rng = rng)
+    # Poison the cross hands with strong baseline-dependent wrapping ramps
+    # (the linear-pol failure mode) — the recovered track must not care.
+    feeds = [CALa.correlation_feed_pair(p) for p in pols]
+    for p in eachindex(pols)
+        fa, fb = feeds[p]
+        fa == fb && continue
+        for bi in eachindex(bl), ap in 1:nap
+            rbar[bi, p, ap] = 20.0 * cis(π - 0.02 * bi + 4π * ap / nap)
+        end
+    end
     sol = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times; ref_ant = ref,
         smoother = FRa.JointOUSmoother(coherence_time = 15.0, detrend = false), shared_feeds = true,
     )
     @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)     # ref pinned
     @test all(sol.phase[:, 1, :] .=== sol.phase[:, 2, :])                 # shared feeds replicated
-    # χ is per-AP; recovered up to a constant (the χ ↔ common-mode gauge).
-    a = sol.chi .- mean(sol.chi)
-    b = χtrue .- mean(χtrue)
-    @test sum(a .* b) / sqrt(sum(abs2, a) * sum(abs2, b)) > 0.9
+    # Station tracks recover the injected screen (ref-relative) untouched by
+    # the poisoned cross hands.
+    dev = 0.0
+    for a in 1:nant, ap in 1:nap
+        truth = screen[a, 1, ap] - screen[ref, 1, ap]
+        d = rem2pi(sol.phase[a, 1, ap] - truth, RoundNearest)
+        dev = max(dev, abs(d))
+    end
+    @test dev < 0.35
 end
 
 @testset "Adhoc :gp_joint denoises and closes" begin
@@ -391,6 +413,31 @@ end
         @test length(d) == nap                                    # solved every AP
         @test maximum(d) - minimum(d) < 1.0e-6                    # gauge consistent across dropout
     end
+
+    # REF-ABSENT variant (multi-subarray track): the nominal reference NEVER
+    # observes, and the best-covered station (the effective anchor) drops out in
+    # a middle block. Keying the restitch on the literal `ref_ant` left these
+    # scans with NO gauge repair at all — the dropout APs pin on a different
+    # node and every station's track jumps by an arbitrary constant (this is
+    # what let the adhoc DEGRADE VR2505's GS-less 0607-157 scan).
+    nant6 = nant + 1                                 # station 6 = the absent reference
+    rbar2, wbar2 = inject_screen(bl, pols, screen, χ)
+    for ap in dropaps, bi in eachindex(bl)           # drop the anchor (station 1) instead
+        (bl[bi][1] == 1 || bl[bi][2] == 1) || continue
+        rbar2[bi, :, ap] .= 0.0 + 0.0im
+        wbar2[bi, :, ap] .= 0.0
+    end
+    sol2 = FRa.solve_adhoc_phasing(
+        rbar2, wbar2, bl, pols, nant6, times;
+        ref_ant = nant6, smoother = FRa.NoSmoothing(detrend = false),
+    )
+    @test !any(sol2.covered[nant6, :, :])            # absent ref never fabricated
+    for a in 2:nant, f in 1:2
+        truth = c[a, f] - c[1, f]
+        d = [rem2pi(sol2.phase[a, f, ap] - truth, RoundNearest) for ap in 1:nap if isfinite(sol2.phase[a, f, ap])]
+        @test length(d) == nap                                    # solved every AP
+        @test maximum(d) - minimum(d) < 1.0e-6                    # gauge consistent across dropout
+    end
 end
 
 @testset "Adhoc: warm-start selects the rewrap branch (no per-AP flips)" begin
@@ -449,6 +496,22 @@ end
     tr = sol.phase[5, 1, :]
     jumps = [abs(rem2pi(tr[ap + 1] - tr[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(tr[ap]) && isfinite(tr[ap + 1])]
     @test maximum(jumps) < 1.0                       # no ~π branch flip in the track
+
+    # REF-ABSENT scan (multi-subarray track, e.g. VR2505's 0607-157 with no GS):
+    # the reference antenna never observes, so the warm start must key on the
+    # EFFECTIVE anchor (best-covered station) instead — keying on the literal
+    # `ref_ant` disabled the warm start entirely here and the branch flips
+    # returned on the weak station.
+    nant3 = nant2 + 1                                # station 6 = the absent reference
+    sol_noref = FRa.solve_adhoc_phasing(
+        rbar, wbar, bl, pols, nant3, times;
+        ref_ant = nant3, smoother = FRa.NoSmoothing(detrend = false),
+    )
+    @test !any(sol_noref.covered[nant3, :, :])       # absent ref is never fabricated
+    trn = sol_noref.phase[5, 1, :]
+    @test count(isfinite, trn) == nap
+    jumpsn = [abs(rem2pi(trn[ap + 1] - trn[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(trn[ap]) && isfinite(trn[ap + 1])]
+    @test maximum(jumpsn) < 1.0                      # warm start armed via the anchor
 end
 
 @testset "EHT-HOPS adhoc window (T_dof, Eqs 21-22)" begin

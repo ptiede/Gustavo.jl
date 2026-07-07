@@ -41,6 +41,10 @@ include("test_pipeline_config.jl")
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
 
+# Phase-cal (injected tone) calibration: multitone fit + precal hook.
+# Reuses _build_fringe_uvset + _coherence from test_pipeline.jl.
+include("test_phasecal.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×
@@ -1513,7 +1517,7 @@ end
     nleaves = length(UV.branches(uvset))
     @test nleaves == 2
     for s in 1:nleaves
-        key = UV.partition_key(; source_key = :TEST, scan_name = string(s))
+        key = UV.partition_key(; source_key = :src_TEST, scan_name = string(s))
         @test haskey(UV.branches(uvset), key)
         leaf = UV.branches(uvset)[key]
         @test UV.primary_scan_name(leaf) == string(s)
@@ -1554,7 +1558,7 @@ end
     # Single-scan selection returns a leaf DimTree.
     p1 = UV.select_scan(uvset, "TEST", 1)
     @test p1 isa UV.DimTree
-    @test p1 === UV.branches(uvset)[UV.partition_key(; source_key = :TEST, scan_name = "1")]
+    @test p1 === UV.branches(uvset)[UV.partition_key(; source_key = :src_TEST, scan_name = "1")]
 
     # Multi-scan selection via select_partition returns a sub-UVSet.
     sub_s1 = UV.select_partition(uvset; scan = 1)
@@ -1594,10 +1598,10 @@ end
     win = UV.time_window(uvset, 0.5, 1.5)
     @test win isa UV.UVSet
     @test length(UV.branches(win)) == 1
-    @test haskey(UV.branches(win), UV.partition_key(; source_key = :TEST, scan_name = "2"))
+    @test haskey(UV.branches(win), UV.partition_key(; source_key = :src_TEST, scan_name = "2"))
 
     # Flag layer is computed at construction (= weights ≤ 0).
-    leaf_1 = UV.branches(uvset)[UV.partition_key(; source_key = :TEST, scan_name = "1")]
+    leaf_1 = UV.branches(uvset)[UV.partition_key(; source_key = :src_TEST, scan_name = "1")]
     @test eltype(leaf_1[:flag]) == Bool
     @test parent(leaf_1[:flag]) == (parent(leaf_1[:weights]) .<= 0)
 end
@@ -1836,9 +1840,9 @@ end
 
     # Tab-completable Partitions accessor.
     ps = UV.partitions(multi)
-    @test :TEST_spw_0_scan_1 in propertynames(ps)
-    @test :M3C273_spw_0_scan_1 in propertynames(ps)
-    @test ps.M3C273_spw_0_scan_1 === UV.branches(multi)[:M3C273_spw_0_scan_1]
+    @test :src_TEST_spw_0_scan_1 in propertynames(ps)
+    @test :src_3C273_spw_0_scan_1 in propertynames(ps)
+    @test ps.src_3C273_spw_0_scan_1 === UV.branches(multi)[:src_3C273_spw_0_scan_1]
 
     # apply preserves tree shape; per-leaf metadata flows through.
     averaged = UV.apply(UV.TimeAverage(), multi)
@@ -1886,13 +1890,13 @@ end
 
 @testset "Source name sanitization" begin
     UV = Gustavo.UVData
-    @test UV.sanitize_source("TEST") == :TEST
-    @test UV.sanitize_source("3C273") == :M3C273       # digit-leading
-    @test UV.sanitize_source("Sgr A*") == :Sgr_A_      # non-identifier chars
-    @test UV.sanitize_source("NGC 4486") == :NGC_4486
-    @test UV.sanitize_source("") == :unknown
-    @test UV.sanitize_source("  ") == :unknown
-    @test UV.partition_key(; source_key = :M3C273, scan_name = "5") == :M3C273_spw_0_scan_5
+    @test UV.sanitize_source("TEST") == :src_TEST
+    @test UV.sanitize_source("3C273") == :src_3C273    # digit-leading
+    @test UV.sanitize_source("Sgr A*") == :src_Sgr_A_  # non-identifier chars
+    @test UV.sanitize_source("NGC 4486") == :src_NGC_4486
+    @test UV.sanitize_source("") == :src_unknown
+    @test UV.sanitize_source("  ") == :src_unknown
+    @test UV.partition_key(; source_key = :src_3C273, scan_name = "5") == :src_3C273_spw_0_scan_5
 end
 
 @testset "Structural ==/hash for metadata types" begin
@@ -2007,7 +2011,7 @@ end
     UV = Gustavo.UVData
     leaf = first(values(UV.branches(synthetic_uvdata())))
     info = UV.metadata(leaf)
-    @test UV.partition_key(info) == :TEST_spw_0_scan_1
+    @test UV.partition_key(info) == :src_TEST_spw_0_scan_1
 
     # Append a synthetic axis without touching `partition_key` or any other
     # call site — only the axis tuple changes.
@@ -2015,9 +2019,9 @@ end
         UV.DEFAULT_PARTITION_AXES...,
         UV.PartitionAxis(:obs, info -> isempty(info.intent) ? "" : "obs_$(info.intent)"),
     )
-    @test UV.partition_key(info, extended) == :TEST_spw_0_scan_1
+    @test UV.partition_key(info, extended) == :src_TEST_spw_0_scan_1
     info_with_intent = UV.update(info; intent = "TARGET")
-    @test UV.partition_key(info_with_intent, extended) == :TEST_spw_0_scan_1_obs_TARGET
+    @test UV.partition_key(info_with_intent, extended) == :src_TEST_spw_0_scan_1_obs_TARGET
 end
 
 """
@@ -2081,10 +2085,10 @@ end
     uvset = UV.UVSet(flat)
 
     @test length(UV.branches(uvset)) == 2
-    @test haskey(UV.branches(uvset), :TEST_spw_0_scan_1)
-    @test haskey(UV.branches(uvset), :TEST_spw_1_scan_1)
-    @test UV.freq_setup(UV.branches(uvset)[:TEST_spw_0_scan_1]) == fs_a
-    @test UV.freq_setup(UV.branches(uvset)[:TEST_spw_1_scan_1]) == fs_b
+    @test haskey(UV.branches(uvset), :src_TEST_spw_0_scan_1)
+    @test haskey(UV.branches(uvset), :src_TEST_spw_1_scan_1)
+    @test UV.freq_setup(UV.branches(uvset)[:src_TEST_spw_0_scan_1]) == fs_a
+    @test UV.freq_setup(UV.branches(uvset)[:src_TEST_spw_1_scan_1]) == fs_b
     @test UV.union_frequency_axis(uvset) == [fs_a, fs_b]
     @test_throws ArgumentError UV.freq_setup(uvset)
 end
@@ -2161,7 +2165,7 @@ end
         leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
         partition_info = bad_info,
     )
-    branches = Gustavo.UVData.DimensionalData.TreeDict(:TEST_spw_0_scan_1 => bad_leaf)
+    branches = Gustavo.UVData.DimensionalData.TreeDict(:src_TEST_spw_0_scan_1 => bad_leaf)
     bad_set = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
     tmp = tempname() * ".uvfits"
     try
@@ -2283,8 +2287,8 @@ end
         end
     end
     multi_sa = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
-    @test haskey(UV.branches(multi_sa), :TEST_spw_0_scan_1)
-    @test haskey(UV.branches(multi_sa), :TEST_spw_0_scan_1_B)
+    @test haskey(UV.branches(multi_sa), :src_TEST_spw_0_scan_1)
+    @test haskey(UV.branches(multi_sa), :src_TEST_spw_0_scan_1_B)
     # Multi-subarray write (Phase 1.7+2.5) succeeds when leaves share antennas;
     # multiple AN HDUs are emitted when antennas differ.
     tmp = tempname() * ".uvfits"
@@ -2348,7 +2352,7 @@ end
     for (k, v) in UV.branches(base)
         branches[k] = v
     end
-    branches[:TEST_spw_0_sub_1_scan_1] = bad_leaf
+    branches[:src_TEST_spw_0_sub_1_scan_1] = bad_leaf
     multi = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
     @test_throws ErrorException UV.union_antennas(multi)
 end

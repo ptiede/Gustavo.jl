@@ -30,17 +30,27 @@
 # gauge; absolute EVPA still needs external polarization calibration).
 
 """
-    Stationization(; snr_min, cross_hand_rate, phase_rewrap_iters)
+    Stationization(; snr_min, cross_hand_rate, phase_rewrap_iters, reject_sigma, reject_iters)
 
 Options for [`stationize_scan`](@ref). `snr_min` drops detections below this SNR;
 `cross_hand_rate` includes cross-hand products in the rate solve (default false —
 appropriate when χ is per-scan); `phase_rewrap_iters` re-wraps phase residuals to
 handle differences exceeding ±π.
+
+`reject_sigma`/`reject_iters` control robust outlier rejection: after each solve,
+detections whose SNR-weighted residual is a > `reject_sigma` MAD outlier are
+dropped and the system re-solved (up to `reject_iters` times). A false fringe —
+e.g. tone/crosstalk correlation on a co-located telescope pair — is closure-
+inconsistent with the true detections, so it lands far outside the residual
+distribution and is excised instead of dragging its stations' solutions.
+`reject_sigma = 0` disables rejection.
 """
 Base.@kwdef struct Stationization
     snr_min::Float64 = 6.0
     cross_hand_rate::Bool = false
     phase_rewrap_iters::Int = 3
+    reject_sigma::Float64 = 7.0
+    reject_iters::Int = 5
 end
 
 """
@@ -101,6 +111,12 @@ function stationize_scan(
     npol == length(pol_products) || error("detections has $npol products; pol_products has $(length(pol_products))")
     feeds = [correlation_feed_pair(p) for p in pol_products]
 
+    # Closure pre-screen (see `_closure_screen`): drop every product of a
+    # baseline whose delay/rate breaks triangle closure — a false fringe.
+    excl = opts.reject_sigma > 0 ?
+        _closure_screen((StationScanDetections(detections, collect(Tuple{Int, Int}, bl_pairs), feeds, 1),), opts) :
+        Set{Tuple{Int, Int}}()
+
     # Gather valid observation rows per observable.
     delay_rows = _ObsRow[]
     rate_rows = _ObsRow[]
@@ -108,6 +124,7 @@ function stationize_scan(
     for bi in 1:nbl, p in 1:npol
         det = detections[bi, p]
         (det.valid && det.snr >= opts.snr_min) || continue
+        (1, bi) in excl && continue             # closure-inconsistent baseline
         a, b = bl_pairs[bi]
         a == b && continue                      # skip autocorrelations
         fa, fb = feeds[p]
@@ -120,12 +137,114 @@ function stationize_scan(
         push!(phase_rows, _ObsRow(a, b, fa, fb, det.phase, w, cs))
     end
 
-    delay, _, cov_d, _ = _solve_observable(delay_rows, nant, ref_ant; use_chi = false, rewrap = 0)
-    rate, _, cov_r, _ = _solve_observable(rate_rows, nant, ref_ant; use_chi = false, rewrap = 0)
-    phase, chi, cov_p, ncomp = _solve_observable(phase_rows, nant, ref_ant; use_chi = true, rewrap = opts.phase_rewrap_iters)
+    delay, _, cov_d, _ = _solve_observable_robust(delay_rows, nant, ref_ant, opts; use_chi = false, rewrap = 0)
+    rate, _, cov_r, _ = _solve_observable_robust(rate_rows, nant, ref_ant, opts; use_chi = false, rewrap = 0)
+    phase, chi, cov_p, ncomp = _solve_observable_robust(phase_rows, nant, ref_ant, opts; use_chi = true, rewrap = opts.phase_rewrap_iters)
 
     covered = cov_d .| cov_r .| cov_p
     return StationSolution(delay, rate, phase, chi, covered, ncomp)
+end
+
+# Closure pre-screen: flag baselines whose DELAY or RATE detections break
+# triangle closure. A false fringe (e.g. tone/crosstalk correlation on a
+# co-located pair like the Onsala twins) is a high-SNR detection whose value is
+# inconsistent with every triangle it participates in, while genuine detections
+# close to within thermal noise. Unlike post-fit residual rejection, closure is
+# FIT-FREE, so a bad baseline cannot mask itself by dragging the solution: one
+# bad baseline corrupts at most 1 of (nsta − 2) triangles of any clean baseline,
+# so the per-baseline MEDIAN closure misfit isolates exactly the culprit.
+#
+# Scores are noise-normalized (`|closure| / √(1/w₁+1/w₂+1/w₃)`, w = snr², CRB
+# σ ∝ 1/snr) so one MAD cut applies across strong and weak triangles. Parallel
+# hands only (a triangle needs one feed throughout); a flagged baseline drops
+# ALL its products — cross-hand crosstalk accompanies parallel-hand crosstalk.
+# Returns a set of `(scan_index, baseline_index)` to exclude.
+function _closure_screen(scans, opts::Stationization)
+    excl = Set{Tuple{Int, Int}}()
+    for (sidx, sc) in enumerate(scans)
+        nbl, npol = size(sc.det)
+        for getval in ((d -> d.delay), (d -> d.rate)), feed in 1:2
+            # Weighted per-baseline value on this feed's parallel-hand subgraph.
+            acc = Dict{Tuple{Int, Int}, Tuple{Float64, Float64}}()   # (a,b) → (Σw·v, Σw)
+            for bi in 1:nbl, p in 1:npol
+                sc.feeds[p] == (feed, feed) || continue
+                det = sc.det[bi, p]
+                (det.valid && det.snr >= opts.snr_min) || continue
+                a, b = sc.bl_pairs[bi]
+                a == b && continue
+                s0 = get(acc, (a, b), (0.0, 0.0))
+                w = det.snr^2
+                acc[(a, b)] = (s0[1] + w * getval(det), s0[2] + w)
+            end
+            length(acc) >= 6 || continue                             # need triangle redundancy
+            val(a, b) = haskey(acc, (a, b)) ? acc[(a, b)][1] / acc[(a, b)][2] :
+                haskey(acc, (b, a)) ? -acc[(b, a)][1] / acc[(b, a)][2] : NaN
+            wgt(a, b) = haskey(acc, (a, b)) ? acc[(a, b)][2] :
+                haskey(acc, (b, a)) ? acc[(b, a)][2] : 0.0
+            stations = sort(unique(collect(Iterators.flatten(keys(acc)))))
+            scores = Dict{Tuple{Int, Int}, Float64}()
+            for (a, b) in keys(acc)
+                zs = Float64[]
+                for c in stations
+                    (c == a || c == b) && continue
+                    vac = val(a, c)
+                    vbc = val(b, c)
+                    (isnan(vac) || isnan(vbc)) && continue
+                    cl = val(a, b) + vbc - vac
+                    push!(zs, abs(cl) / sqrt(1 / wgt(a, b) + 1 / wgt(b, c) + 1 / wgt(a, c)))
+                end
+                length(zs) >= 2 || continue
+                scores[(a, b)] = median(zs)
+            end
+            length(scores) >= 5 || continue
+            svals = collect(values(scores))
+            med = median(svals)
+            s = 1.4826 * median(abs.(svals .- med))
+            s > 0 || continue
+            for ((a, b), sc_ab) in scores
+                sc_ab - med > opts.reject_sigma * s || continue
+                for bi in 1:nbl
+                    (sc.bl_pairs[bi] == (a, b) || sc.bl_pairs[bi] == (b, a)) &&
+                        push!(excl, (sidx, bi))
+                end
+            end
+        end
+    end
+    return excl
+end
+
+# Robust wrapper around `_solve_observable`: iteratively re-solve, dropping rows
+# whose SNR-weighted residual `(val − pred)·√w` is a > `reject_sigma` MAD outlier.
+# With CRB weights (`w = snr²`, σ_val ∝ 1/snr) the weighted residuals share one
+# scale across strong and weak rows, so a single cut is meaningful. Residuals of
+# the (wrapping) phase system are re-wrapped to ±π before the cut.
+function _solve_observable_robust(
+        rows::Vector{_ObsRow}, nant::Integer, ref_ant::Integer, opts::Stationization;
+        use_chi::Bool, rewrap::Integer,
+    )
+    vals, chi, cov, ncomp = _solve_observable(rows, nant, ref_ant; use_chi = use_chi, rewrap = rewrap)
+    (opts.reject_sigma > 0 && !isempty(rows)) || return vals, chi, cov, ncomp
+    wrap = rewrap > 0
+    for _ in 1:opts.reject_iters
+        z = map(rows) do r
+            pa = vals[r.a, r.fa]
+            pb = vals[r.b, r.fb]
+            (isfinite(pa) && isfinite(pb)) || return 0.0
+            pred = pa - pb + (use_chi && r.chisign != 0 && isfinite(chi) ? r.chisign * chi : 0.0)
+            res = r.val - pred
+            wrap && (res = rem2pi(res, RoundNearest))
+            return res * sqrt(r.w)
+        end
+        med = median(z)
+        s = 1.4826 * median(abs.(z .- med))
+        s > 0 || break
+        keep = abs.(z .- med) .<= opts.reject_sigma * s
+        all(keep) && break
+        rows = rows[keep]
+        isempty(rows) && break
+        vals, chi, cov, ncomp = _solve_observable(rows, nant, ref_ant; use_chi = use_chi, rewrap = rewrap)
+    end
+    return vals, chi, cov, ncomp
 end
 
 # Solve one observable's WLS system on the (station, feed) graph. Returns
@@ -339,7 +458,7 @@ struct StationScanDetections{D}
 end
 
 """
-    solve_station_systems!(θ, scans, components; ref_ant, opts) -> (chi, ncomp)
+    solve_station_systems!(θ, scans, components; ref_ant, opts) -> (chi, ncomp, nrejected)
 
 Solve the stage-B fringe systems (delay, rate, constant phase) over `scans` and
 accumulate the per-(station, feed) values into `θ` at the columns the model
@@ -349,10 +468,11 @@ per (station, feed) observation: e.g. a feed-common `PerScan × SharedFeeds` ter
 plus a global `GlobalTime × FeedComponent(2)` R–L offset both feed the delay
 system, so a feed-2 row touches both columns and a stable R–L offset is solved
 once across the track (bright scans pin it; weak scans inherit it, tying feeds
-that would otherwise split). Returns the representative cross-hand `chi` and the
-phase-system component count for diagnostics. With a single per-scan/per-feed
-component per kind and one scan, this is numerically identical to
-`stationize_scan`.
+that would otherwise split). Returns the representative cross-hand `chi`, the
+phase-system component count, and the number of detections excised by the robust
+rejection (summed over the three systems; see `Stationization`). With a single
+per-scan/per-feed component per kind and one scan, this is numerically identical
+to `stationize_scan`.
 """
 function solve_station_systems!(
         θ::AbstractVector, scans, components;
@@ -360,23 +480,48 @@ function solve_station_systems!(
     )
     chi = NaN
     ncomp = 0
+    # Closure pre-screen: baselines carrying a closure-breaking false fringe are
+    # excluded from every system up front (fit-free, so immune to the leverage
+    # masking that can defeat the post-fit residual cut on small arrays).
+    excl = opts.reject_sigma > 0 ? _closure_screen(scans, opts) : Set{Tuple{Int, Int}}()
+    nrej = 0
+    for (sidx, bi) in excl
+        for p in axes(scans[sidx].det, 2)
+            scans[sidx].det[bi, p].valid && (nrej += 1)
+        end
+    end
+    # (station, scan-index) pairs CONSTRAINED by the surviving rows — the
+    # EHT-HOPS flag criterion, inverted: a station with no strong detection
+    # left on ANY of its baselines after the closure screen and the robust
+    # rejection is uncalibrated for that scan (its θ stays 0 ⇒ identity gain)
+    # and must be FLAGGED downstream, not silently passed through. Intersected
+    # over the solved kinds: a station must be constrained in delay AND rate
+    # AND phase to count as calibrated.
+    covered = Set{Tuple{Int, Int}}()
+    first_kind = true
     for kind in (:delay, :rate, :phase)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        ch, nc = _solve_kind_cols!(θ, scans, plans, ref_ant, opts, kind)
+        ch, nc, nr, cov = _solve_kind_cols!(θ, scans, plans, ref_ant, opts, kind, excl)
+        nrej += nr
+        covered = first_kind ? cov : intersect(covered, cov)
+        first_kind = false
         if kind === :phase
             chi = ch
             ncomp = nc
         end
     end
-    return chi, ncomp
+    return chi, ncomp, nrej, covered
 end
 
 # Solve one observable kind across all scans, accumulating into θ. Each detection
 # becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
 # `off1` columns for that (station, feed, time) — a feed-common per-scan column
 # and, when present, a global feed-offset column. Returns (chi, ncomp).
-function _solve_kind_cols!(θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol)
+function _solve_kind_cols!(
+        θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol,
+        excl::Set{Tuple{Int, Int}} = Set{Tuple{Int, Int}}(),
+    )
     getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
     use_chi = kind === :phase
     rewrap = kind === :phase ? opts.phase_rewrap_iters : 0
@@ -404,11 +549,13 @@ function _solve_kind_cols!(θ::AbstractVector, scans, plans, ref_ant::Integer, o
     # that station's value for this observable (+1 on a-side, −1 on b-side).
     rowA = Vector{Int}[]; rowB = Vector{Int}[]
     rval = Float64[]; rw = Float64[]; rcs = Int[]; rscan = Int[]
+    rsta_a = Int[]; rsta_b = Int[]
     for (sidx, sc) in enumerate(scans)
         nbl, npol = size(sc.det)
         for bi in 1:nbl, p in 1:npol
             det = sc.det[bi, p]
             (det.valid && det.snr >= opts.snr_min) || continue
+            (sidx, bi) in excl && continue      # closure-inconsistent baseline
             a, b = sc.bl_pairs[bi]
             a == b && continue
             fa, fb = sc.feeds[p]
@@ -424,18 +571,48 @@ function _solve_kind_cols!(θ::AbstractVector, scans, plans, ref_ant::Integer, o
             (isempty(nsA) || isempty(nsB)) && continue
             push!(rowA, nsA); push!(rowB, nsB)
             push!(rval, getval(det)); push!(rw, det.snr^2); push!(rcs, cs); push!(rscan, sidx)
+            push!(rsta_a, a); push!(rsta_b, b)
         end
     end
-    isempty(rowA) && return (NaN, 0)
+    isempty(rowA) && return (NaN, 0, 0, Set{Tuple{Int, Int}}())
 
-    x, chi, ncomp = _solve_tagged_system(
-        rowA, rowB, rval, rw, rcs, rscan, length(node_col),
-        node_feed, node_station, node_scan, ref_ant; use_chi = use_chi, rewrap = rewrap,
-    )
+    # Robust solve: re-solve dropping rows whose SNR-weighted residual is a
+    # > `reject_sigma` MAD outlier (closure-breaking false fringes; see
+    # `Stationization`). Weighted residuals `resid·√w` share one scale across
+    # strong and weak rows (σ_val ∝ 1/snr, w = snr²). Phase residuals come back
+    # from the re-wrapped system, so they are already branch-corrected.
+    keep = trues(length(rowA))
+    nrej = 0
+    local x, chi, ncomp
+    it = 0
+    while true
+        idx = findall(keep)
+        isempty(idx) && return (NaN, 0, nrej, Set{Tuple{Int, Int}}())
+        x, chi, ncomp, resid = _solve_tagged_system(
+            rowA[idx], rowB[idx], rval[idx], rw[idx], rcs[idx], rscan[idx], length(node_col),
+            node_feed, node_station, node_scan, ref_ant; use_chi = use_chi, rewrap = rewrap,
+        )
+        it += 1
+        (opts.reject_sigma > 0 && it <= opts.reject_iters) || break
+        z = resid .* sqrt.(rw[idx])
+        med = median(z)
+        s = 1.4826 * median(abs.(z .- med))
+        s > 0 || break
+        bad = findall(abs.(z .- med) .> opts.reject_sigma * s)
+        isempty(bad) && break
+        keep[idx[bad]] .= false
+        nrej += length(bad)
+    end
     @inbounds for n in eachindex(node_col)
         θ[node_col[n]] += x[n]
     end
-    return chi, ncomp
+    # (station, scan) pairs constrained by the SURVIVING rows of this system.
+    cov = Set{Tuple{Int, Int}}()
+    for i in findall(keep)
+        push!(cov, (rsta_a[i], rscan[i]))
+        push!(cov, (rsta_b[i], rscan[i]))
+    end
+    return chi, ncomp, nrej, cov
 end
 
 # Constrained WLS over a tagged node graph (the column-space generalization of
@@ -547,8 +724,10 @@ function _solve_tagged_system(
             @. bw = b + 2π * round((model - b) / (2π))
             x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
         end
+        resid = bw .- A * x
     else
         x = weighted_constrained_least_squares(A, b, w, C, dgauge)
+        resid = b .- A * x
     end
 
     chi = NaN
@@ -556,7 +735,7 @@ function _solve_tagged_system(
         s0 = minimum(keys(chi_col))
         chi = x[nnodes + chi_col[s0]]
     end
-    return x[1:nnodes], chi, ncomp
+    return x[1:nnodes], chi, ncomp, resid
 end
 
 # Max-weight spanning-tree phase seed in local-node space (column-space twin of

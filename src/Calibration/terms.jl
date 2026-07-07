@@ -18,6 +18,17 @@ struct ConstantTerm <: AbstractGainTerm end
 "Group delay: phase = 2π·θ₁·(f − f0), θ₁ in seconds."
 struct Delay <: AbstractGainTerm end
 
+# rad·Hz per TECU (1 TECU = 1e16 el/m²): ionospheric phase = −K·TEC/f.
+const DISPERSION_K = 8.4479e9
+
+"""
+Ionospheric dispersion: phase = K·θ₁·(1/f0 − 1/f) with K = $DISPERSION_K rad·Hz/TECU,
+so θ₁ is a differential TEC in TECU. Station-based and non-magnetic to first
+order, so it ties feeds (`SharedFeeds`). Referenced to f0 — the 1/f0 offset
+lands in the accompanying constant/phase term, keeping this term pure shape.
+"""
+struct Dispersion <: AbstractGainTerm end
+
 "Fringe rate: phase = 2π·θ₁·(t − t0)·3600, θ₁ in Hz (t in hours)."
 struct Rate <: AbstractGainTerm end
 
@@ -52,6 +63,7 @@ struct PerChannel <: AbstractGainTerm end
 
 coord_kind(::ConstantTerm) = COORD_NONE
 coord_kind(::Delay) = COORD_FREQ
+coord_kind(::Dispersion) = COORD_FREQ
 coord_kind(::PolynomialFreq) = COORD_FREQ
 coord_kind(::Rate) = COORD_TIME
 coord_kind(::PolynomialTime) = COORD_TIME
@@ -62,6 +74,7 @@ coord_kind(::PerChannel) = COORD_PERCHANNEL
 # `PerChannel` depends on it.
 nparams_per_block(::ConstantTerm, nchan_seg) = 1
 nparams_per_block(::Delay, nchan_seg) = 1
+nparams_per_block(::Dispersion, nchan_seg) = 1
 nparams_per_block(::Rate, nchan_seg) = 1
 nparams_per_block(t::PolynomialFreq, nchan_seg) = t.degree
 nparams_per_block(t::PolynomialTime, nchan_seg) = t.degree
@@ -74,6 +87,14 @@ nparams_per_block(::PerChannel, nchan_seg) = nchan_seg
 # Delay uses the physical offset (f − f0) in Hz so θ is a delay in seconds.
 function freq_coordinate(::Delay, channel_freqs, fseg_groups, f0)
     return Float64.(channel_freqs) .- f0
+end
+
+# Dispersion uses K·(1/f0 − 1/f) so θ is a differential TEC in TECU. The
+# f0-referencing keeps it orthogonal to the constant term at f0 (not globally —
+# the delay↔dTEC covariance over a finite band is physical; solvers fit them
+# jointly).
+function freq_coordinate(::Dispersion, channel_freqs, fseg_groups, f0)
+    return DISPERSION_K .* (1.0 / f0 .- 1.0 ./ Float64.(channel_freqs))
 end
 
 # PolynomialFreq uses a per-segment centered/scaled coordinate in ~[-1, 1] so the
@@ -130,6 +151,7 @@ end
 # type-stable so the whole forward map is inferrable (and Reactant-traceable).
 @inline term_eval(::ConstantTerm, θ, off, xf, xt, clocal) = @inbounds θ[off]
 @inline term_eval(::Delay, θ, off, xf, xt, clocal) = @inbounds 2π * θ[off] * xf
+@inline term_eval(::Dispersion, θ, off, xf, xt, clocal) = @inbounds θ[off] * xf
 @inline term_eval(::Rate, θ, off, xf, xt, clocal) = @inbounds 2π * θ[off] * xt
 @inline term_eval(::PerChannel, θ, off, xf, xt, clocal) = @inbounds θ[off + clocal - 1]
 
@@ -164,6 +186,7 @@ end
 # by the solver, not here.
 basis_columns(::ConstantTerm, x::AbstractVector) = reshape(ones(Float64, length(x)), :, 1)
 basis_columns(::Delay, x::AbstractVector) = reshape(2π .* Float64.(x), :, 1)
+basis_columns(::Dispersion, x::AbstractVector) = reshape(Float64.(x), :, 1)
 basis_columns(::Rate, x::AbstractVector) = reshape(2π .* Float64.(x), :, 1)
 
 function basis_columns(t::PolynomialFreq, x::AbstractVector)
@@ -187,6 +210,7 @@ basis_columns(::PerChannel, x::AbstractVector) = Matrix{Float64}(I, length(x), l
 # Labels for diagnostics / summaries.
 term_label(::ConstantTerm) = "const"
 term_label(::Delay) = "delay"
+term_label(::Dispersion) = "dtec"
 term_label(::Rate) = "rate"
 term_label(t::PolynomialFreq) = "polyf$(t.degree)"
 term_label(t::PolynomialTime) = "polyt$(t.degree)"

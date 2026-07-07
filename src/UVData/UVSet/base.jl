@@ -3,7 +3,7 @@
 
 Top-level container mirroring xradio's MSv4 `ProcessingSet`: a flat
 `OrderedDict` of MSv4-shaped partition leaves under `branches`, keyed by
-sanitized `:<source>_scan_<n>` Symbols (e.g. `:M3C273_scan_1`). Multi-source
+sanitized `:<source>_scan_<n>` Symbols (e.g. `:src_3C273_scan_1`). Multi-source
 data shows up as sibling flat partitions, never as a nested Source dim.
 
 The struct subtypes `AbstractDimTree` so all DD machinery (selectors,

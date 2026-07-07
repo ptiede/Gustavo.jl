@@ -124,6 +124,10 @@ Base.@kwdef struct BandpassOptions
     amp::Bool = true
     amp_smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0)
     source = nothing
+    # Cap the accumulation to the N highest-SNR calibrator scans (0 = all).
+    # The bandpass is time-stable, so a few strong scans carry essentially all
+    # the information — and skipping the rest avoids re-reading them from disk.
+    max_scans::Int = 0
 end
 
 
@@ -150,6 +154,12 @@ Group concurrency is bounded by a DETERMINISTIC memory budget: `mem_budget`
 (and the solve's wall time) is reproducible across runs. Lower `mem_fraction` (or
 set `mem_budget`) on a shared box; pass an explicit `mem_budget` for identical
 behavior across machines.
+
+`precal` is a `CalibrationSolution` divided out of every scan group at
+materialization, BEFORE the fringe search (e.g. `phasecal_solution` from
+injected phase-cal tones) — the streaming equivalent of pre-applying it to the
+whole set. `flag_channels` zero-weights the marked GLOBAL channels (e.g.
+`tone_channel_mask`). The reduced output then carries `precal ∘ solution`.
 """
 Base.@kwdef struct FringeFit <: CalibrationStep
     ref_ant::Any = 1
@@ -161,6 +171,24 @@ Base.@kwdef struct FringeFit <: CalibrationStep
     mem_budget::Union{Nothing, Float64} = nothing
     bandpass::BandpassOptions = BandpassOptions()
     reduce::Vector{ReduceStep} = ReduceStep[]
+    precal::Union{Nothing, CalibrationSolution} = nothing
+    flag_channels::Union{Nothing, BitVector} = nothing
+    # Per-scan ionospheric dispersion (dTEC) term: `:auto` (on when the band
+    # layout can separate 1/ν from a linear delay — e.g. VGOS), `true`, `false`.
+    dispersion::Any = :auto
+    # Per-scan per-band-group single-band delay (fourfit SBD): `:auto` (on when
+    # the frequency axis has ≥ 2 band groups), `true`, `false`.
+    sbd::Any = :auto
+    # Tie co-located stations (< 1 km) to ONE dTEC — they share the ionosphere.
+    dtec_tie_colocated::Bool = true
+    # Drop intra-site (co-located twin) baselines from the adhoc + bandpass
+    # accumulations — their huge-SNR non-closing crosstalk pollutes both twins'
+    # gains otherwise. Stage B keeps them (closure-screened).
+    exclude_colocated::Bool = true
+    # `(stage, done, total)` callback fired per completed scan of each solve pass
+    # (stage ∈ :search/:bandpass/:adhoc; `done = 0` announces a pass) — drive a
+    # progress bar / ETA from it. Called under a lock; keep it quick.
+    progress::Any = nothing
 end
 
 function run_step(s::FringeFit, ctx::CalibrationContext)
@@ -177,6 +205,12 @@ function run_step(s::FringeFit, ctx::CalibrationContext)
         phase_bandpass = s.bandpass.phase, amp_bandpass = s.bandpass.amp,
         amp_smoother = s.bandpass.amp_smoother,
         bandpass_source = s.bandpass.source,
+        bandpass_max_scans = s.bandpass.max_scans,
+        precal = s.precal, flag_channels = s.flag_channels,
+        dispersion = s.dispersion,
+        sbd = s.sbd, dtec_tie_colocated = s.dtec_tie_colocated,
+        exclude_colocated = s.exclude_colocated,
+        progress = s.progress,
     )
     return _with(ctx; solution = sol, output = output)
 end

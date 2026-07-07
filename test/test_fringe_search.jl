@@ -157,3 +157,184 @@ end
     )
     @test !detn.valid
 end
+
+@testset "Fringe search map + PFA" begin
+    nchan, nt = 64, 30
+    freqs = 43.0e9 .+ (0:(nchan - 1)) .* 0.5e6
+    f0 = mean(freqs)
+    times = (0:(nt - 1)) .* 1.0
+    t0 = mean(times)
+    τ, ṙ, φ = 12.0e-9, 8.0e-3, 0.7
+    V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = φ)
+    W = ones(size(V))
+
+    m = FR.baseline_fringe_map(V, W, freqs, times, f0, t0)
+    @test m isa FR.FringeSearchMap
+    @test size(m.snr) == (length(m.delays), length(m.rates))
+    @test issorted(m.delays) && issorted(m.rates)
+    opts = FR.FringeSearch()
+    @test all(d -> opts.delay_window[1] <= d <= opts.delay_window[2], m.delays)
+    @test all(r -> opts.rate_window[1] <= r <= opts.rate_window[2], m.rates)
+
+    # The embedded detection is what the standalone search returns (≈ only
+    # because the two calls plan separate FFTW MEASURE transforms).
+    det = FR.baseline_fringe_search(V, W, freqs, times, f0, t0)
+    @test isapprox(m.detection.delay, det.delay; rtol = 1.0e-10, atol = 1.0e-20)
+    @test isapprox(m.detection.rate, det.rate; rtol = 1.0e-10, atol = 1.0e-15)
+    @test isapprox(m.detection.snr, det.snr; rtol = 1.0e-10)
+    @test m.detection.valid
+
+    # The map's discrete peak sits at the injected (delay, rate) — within a grid
+    # bin (quad refinement of the detection goes below the bin; the map does not).
+    pk = argmax(m.snr)
+    dbin = m.delays[2] - m.delays[1]
+    rbin = m.rates[2] - m.rates[1]
+    @test isapprox(m.delays[pk[1]], τ; atol = dbin)
+    @test isapprox(m.rates[pk[2]], ṙ; atol = rbin)
+    # ...and its height matches the refined detection SNR (the exact re-evaluated
+    # peak is ≥ the discrete grid peak, but only marginally at oversample = 8).
+    @test isapprox(maximum(m.snr), det.snr; rtol = 0.05)
+    @test maximum(m.snr) <= det.snr * (1 + 1.0e-9)
+
+    # A strong fringe is a secure detection.
+    @test m.ncells >= 1
+    @test m.pfa < 1.0e-10
+
+    # Pure noise: the peak is consistent with the sidelobe forest (PFA not small).
+    rng = MersenneTwister(0x000FA15E)
+    Vn = (randn(rng, nchan, nt) .+ im .* randn(rng, nchan, nt)) ./ sqrt(2)
+    mn = FR.baseline_fringe_map(Vn, W, freqs, times, f0, t0)
+    @test !mn.detection.valid
+    @test mn.pfa > 1.0e-3
+
+    # All-flagged block → empty map, invalid detection.
+    m0 = FR.baseline_fringe_map(V, zeros(size(V)), freqs, times, f0, t0)
+    @test isempty(m0.delays) && isempty(m0.rates)
+    @test !m0.detection.valid
+    @test isnan(m0.pfa)
+
+    # fringe_pfa: bounds, monotonicity, small-p linearization, edge cases.
+    @test FR.fringe_pfa(0.0, 1.0e6) == 1.0
+    @test FR.fringe_pfa(6.0, 1.0e6) < 1.0e-6
+    @test FR.fringe_pfa(6.0, 1.0e6) > FR.fringe_pfa(7.0, 1.0e6)      # ↓ in snr
+    @test FR.fringe_pfa(6.0, 1.0e8) > FR.fringe_pfa(6.0, 1.0e6)      # ↑ in ncells
+    @test isapprox(FR.fringe_pfa(5.0, 1.0e3), 1.0e3 * exp(-25.0); rtol = 1.0e-6)
+    @test FR.fringe_pfa(100.0, 1.0e12) == 0.0                        # underflow → secure
+    @test isnan(FR.fringe_pfa(NaN, 10.0))
+    @test 0.0 <= FR.fringe_pfa(2.0, 1.0e4) <= 1.0
+end
+
+@testset "Hierarchical MBD search (VGOS-style)" begin
+    # 8 narrow bands (16 ch × 1 MHz) with origins every 100 MHz: the common-Δf
+    # grid would be 716 bins for 128 real channels (>4× → mostly zeros), so
+    # :auto picks the hierarchical path. MBD ambiguity A = 1/100 MHz = 10 ns.
+    Δf = 1.0e6
+    nband, nchan_b, nt = 8, 16, 24
+    freqs = Float64[]
+    for b in 0:(nband - 1)
+        append!(freqs, 8.0e9 .+ b * 100.0e6 .+ (0:(nchan_b - 1)) .* Δf)
+    end
+    f0 = mean(freqs)
+    times = (0:(nt - 1)) .* 1.0
+    t0 = mean(times)
+
+    auto = FR.FringeSearch()
+    full = FR.FringeSearch(algorithm = :full)
+    mbd = FR.FringeSearch(algorithm = :mbd)
+    @test FR._search_axes(freqs, times, auto).mbd !== nothing     # auto → hierarchical
+    @test FR._search_axes(freqs, times, full).mbd === nothing
+
+    # Delay spanning MANY ambiguities (137.3 ns ≈ 8.8 × A) — the arbitration must
+    # unfold it; plus a rate and phase.
+    τ, ṙ, φ = 137.3e-9, 6.0e-3, -0.9
+    V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = φ, amp = 0.7)
+    W = ones(size(V))
+
+    dm = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = mbd)
+    df = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = full)
+    da = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = auto)
+    @test da.delay == dm.delay                                    # auto took the mbd path
+    for d in (dm, df)
+        @test d.valid
+        @test isapprox(d.delay, τ; atol = 0.5e-9)
+        @test isapprox(d.rate, ṙ; atol = 5.0e-4)
+        @test isapprox(rem2pi(d.phase - φ, RoundNearest), 0.0; atol = 2.0e-2)
+        @test isapprox(d.amp, 0.7; rtol = 2.0e-2)
+    end
+    # The two algorithms agree with each other (same matched filter; the exact-
+    # filter polish makes the mbd delay slightly MORE accurate than the FFT quad).
+    @test isapprox(dm.delay, df.delay; atol = 0.5e-9)
+    @test isapprox(dm.rate, df.rate; atol = 2.0e-4)
+
+    # With thermal noise the hierarchical path still finds and unfolds the
+    # fringe, and the two paths' data-driven SNRs agree (the noise-dominated
+    # regime is where the SNR convention is defined).
+    rng = MersenneTwister(0x000BEEF5)
+    σ = 0.5
+    Vn = V .+ σ .* (randn(rng, size(V)) .+ im .* randn(rng, size(V))) ./ sqrt(2)
+    Wn = fill(1 / σ^2, size(V))
+    dn = FR.baseline_fringe_search(Vn, Wn, freqs, times, f0, t0; opts = mbd)
+    dnf = FR.baseline_fringe_search(Vn, Wn, freqs, times, f0, t0; opts = full)
+    @test dn.valid
+    @test isapprox(dn.delay, τ; atol = 1.0e-9)
+    @test isapprox(dn.rate, ṙ; atol = 5.0e-4)
+    @test isapprox(dn.snr, dnf.snr; rtol = 0.15)
+
+    # Flagged channels (kill two whole bands + garbage) — result unchanged.
+    Vf = copy(V); Wf = copy(W)
+    Wf[1:(2 * nchan_b), :] .= 0.0
+    Vf[1:(2 * nchan_b), :] .= 1.0e6 .* cis(1.1)
+    dflag = FR.baseline_fringe_search(Vf, Wf, freqs, times, f0, t0; opts = mbd)
+    @test dflag.valid
+    @test isapprox(dflag.delay, τ; atol = 0.5e-9)
+
+    # All flagged → invalid.
+    d0 = FR.baseline_fringe_search(V, zeros(size(V)), freqs, times, f0, t0; opts = mbd)
+    @test !d0.valid
+
+    # Explicit :mbd on a CONTIGUOUS band falls back to the full path (single
+    # block → no hierarchy), with identical results by construction.
+    fc = 43.0e9 .+ (0:63) .* 0.5e6
+    @test FR._search_axes(fc, times, mbd).mbd === nothing
+    Vc = inject_fringe(fc, times, mean(fc), t0; delay = 9.0e-9, rate = 3.0e-3, phase = 0.2)
+    d1 = FR.baseline_fringe_search(Vc, ones(size(Vc)), fc, times, mean(fc), t0; opts = mbd)
+    d2 = FR.baseline_fringe_search(Vc, ones(size(Vc)), fc, times, mean(fc), t0; opts = full)
+    @test d1.delay == d2.delay && d1.snr == d2.snr
+
+    # Degenerate time axis (one AP): delay-only search through the mbd path.
+    V1 = inject_fringe(freqs, [0.0], f0, 0.0; delay = 40.0e-9, rate = 0.0, phase = 0.3)
+    dd = FR.baseline_fringe_search(V1, ones(size(V1)), freqs, [0.0], f0, 0.0; opts = mbd)
+    @test dd.rate == 0.0
+    @test isapprox(dd.delay, 40.0e-9; atol = 0.5e-9)
+
+    # VGOS-like MIXED origin spacings (64/96/192 MHz, as in real VR2505 data):
+    # the common divisor (32 MHz) is not reachable by halving any single spacing
+    # — the approximate-GCD grid fit must find it, and the ambiguity follows it.
+    fv = Float64[]
+    for off in (0.0, 192.0e6, 288.0e6, 352.0e6, 416.0e6)   # diffs 192/96/64/64
+        append!(fv, 3.0e9 .+ off .+ (0:15) .* Δf)
+    end
+    axv = FR._search_axes(fv, times, mbd)
+    @test axv.mbd !== nothing
+    @test axv.mbd.bc_step ≈ 32.0e6 rtol = 1.0e-9            # true GCD, not median/2^k
+    @test axv.mbd.ambig ≈ 1 / 32.0e6 rtol = 1.0e-9
+    f0v = mean(fv)
+    τv = 55.0e-9                                            # ≫ A = 31.25 ns
+    Vv = inject_fringe(fv, times, f0v, t0; delay = τv, rate = 2.0e-3, phase = 0.5)
+    dv = FR.baseline_fringe_search(Vv, ones(size(Vv)), fv, times, f0v, t0; opts = mbd)
+    dvf = FR.baseline_fringe_search(Vv, ones(size(Vv)), fv, times, f0v, t0; opts = full)
+    @test dv.valid
+    @test isapprox(dv.delay, τv; atol = 0.5e-9)
+    @test isapprox(dv.delay, dvf.delay; atol = 0.5e-9)
+
+    # Map diagnostic on multi-band data: plane from the full grid, detection from
+    # the (auto → mbd) search. On NOISY data (where the data-driven noise
+    # estimate is defined) the map peak tracks the detection SNR; the noiseless
+    # limit is degenerate (both "noise" estimates measure different sidelobe
+    # floors), so compare there.
+    m = FR.baseline_fringe_map(V, W, freqs, times, f0, t0; opts = auto)
+    @test m.detection.delay == da.delay                            # detection = solver's search
+    mn2 = FR.baseline_fringe_map(Vn, Wn, freqs, times, f0, t0; opts = auto)
+    @test isapprox(mn2.detection.delay, dn.delay; atol = 1.0e-12)
+    @test isapprox(maximum(mn2.snr), mn2.detection.snr; rtol = 0.15)
+end

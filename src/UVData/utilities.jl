@@ -1,15 +1,17 @@
 """
     sanitize_source(name::AbstractString) -> Symbol
 
-Sanitize a source name into a valid Julia identifier `Symbol`. Non-identifier
-chars are replaced with `_`; names starting with a digit are prefixed with
-`M`. Examples: `"3C273"` → `:M3C273`, `"Sgr A*"` → `:Sgr_A_`,
-`"NGC 4486"` → `:NGC_4486`. Used as the source-segment of a partition key.
+Sanitize a source name into a valid Julia identifier `Symbol`, always prefixed
+with `src_` so the key is identifier-safe (digit-leading catalog names like
+`3C273` are otherwise illegal identifiers) and never masquerades as a real
+source name. Non-identifier chars are replaced with `_`. Examples:
+`"3C273"` → `:src_3C273`, `"Sgr A*"` → `:src_Sgr_A_`,
+`"NGC 4486"` → `:src_NGC_4486`. Used as the source-segment of a partition key.
 """
 function sanitize_source(name::AbstractString)
     s = replace(strip(String(name)), r"[^A-Za-z0-9_]" => "_")
-    isempty(s) && return :unknown
-    return isdigit(first(s)) ? Symbol("M", s) : Symbol(s)
+    isempty(s) && (s = "unknown")
+    return Symbol("src_", s)
 end
 
 """

@@ -167,7 +167,7 @@ end
 # ── Apply ────────────────────────────────────────────────────────────────────
 
 """
-    apply_calibration(uvset::UVSet, sol::CalibrationSolution) -> UVSet
+    apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true) -> UVSet
 
 Divide every leaf's visibilities by the solution's per-antenna gains. For a
 baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
@@ -175,9 +175,19 @@ baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
     V_corr = V / (g_a[fa] · conj(g_b[fb])),    W_corr = W · |g_a · g_b|²
 
 Samples where either gain magnitude underflows are flagged (weight 0, vis NaN).
+
+`apply_flags` (default `true`) additionally zero-weights the solution's
+recorded flags, when present in `sol.info` (the fringe solver records both):
+(station, scan) pairs the solve left UNCONSTRAINED — identity gains, i.e. the
+data would pass through uncalibrated — and baselines excluded for cause (the
+intra-site crosstalk pairs). This is the EHT-HOPS flag semantic: a station is
+flagged per scan only when, after the closure-screened global solve, no strong
+detection constrains it; a merely weak baseline between two constrained
+stations is NOT flagged (it is calibrated by SNR transfer).
 """
-function UVData.apply_calibration(uvset::UVSet, sol::CalibrationSolution)
+function UVData.apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags::Bool = true)
     ev = GainEvaluator(sol.model, sol.layout)
+    flagged, exclbl = apply_flags ? _solution_flag_sets(sol.info) : (nothing, nothing)
     return UVData.apply(uvset) do leaf, info, root
         # Correction reads vis + weights; the output flag is re-derived from the
         # corrected weights downstream, so skip the redundant on-disk flag layer.
@@ -187,8 +197,56 @@ function UVData.apply_calibration(uvset::UVSet, sol::CalibrationSolution)
         bl_pairs = UVData.baselines(leaf).pairs
         pols = pol_products(leaf)
         vis_corr, w_corr = _apply_gain_kernel(leaf[:vis], leaf[:weights], g, bl_pairs, pols)
+        _flag_solution_rows!(parent(vis_corr), parent(w_corr), bl_pairs, sol.geom, ti, flagged, exclbl)
         return with_visibilities(leaf, vis_corr, w_corr)
     end
+end
+
+# The solution's recorded flags as lookup sets: `flagged` = (station, geometry
+# scan id) pairs with no constraint (identity gains), `exclbl` = excluded
+# baselines (both orders). `nothing` when the solution carries none.
+function _solution_flag_sets(info::NamedTuple)
+    flagged = if haskey(info, :flagged_ant) && !isempty(info.flagged_ant)
+        Set{Tuple{Int, Int}}(
+            (Int(info.flagged_ant[i]), Int(info.flagged_scan[i]))
+                for i in eachindex(info.flagged_ant)
+        )
+    else
+        nothing
+    end
+    exclbl = if haskey(info, :excluded_ant_a) && !isempty(info.excluded_ant_a)
+        s = Set{Tuple{Int, Int}}()
+        for i in eachindex(info.excluded_ant_a)
+            a, b = Int(info.excluded_ant_a[i]), Int(info.excluded_ant_b[i])
+            push!(s, (a, b))
+            push!(s, (b, a))
+        end
+        s
+    else
+        nothing
+    end
+    return flagged, exclbl
+end
+
+# Zero-weight (and NaN) whole baseline rows per the solution flags: baselines
+# touching a (station, scan) the solve left unconstrained, and the excluded
+# (intra-site) baselines. A leaf spans ONE scan, so the scan id comes from its
+# first time index.
+function _flag_solution_rows!(Vc, Wc, bl_pairs, geom, ti_idx, flagged, exclbl)
+    (flagged === nothing && exclbl === nothing) && return nothing
+    isempty(ti_idx) && return nothing
+    scanid = geom.scan_of_time[first(ti_idx)]
+    @inbounds for bi in eachindex(bl_pairs)
+        a, b = bl_pairs[bi]
+        a == b && continue
+        bad = (exclbl !== nothing && (a, b) in exclbl) || (
+            flagged !== nothing && ((a, scanid) in flagged || (b, scanid) in flagged)
+        )
+        bad || continue
+        Wc[:, :, bi, :] .= zero(eltype(Wc))
+        Vc[:, :, bi, :] .= convert(eltype(Vc), NaN)
+    end
+    return nothing
 end
 
 # Divide visibilities by complex antenna gains `g[c, ti, ant, feed]`. The vis /

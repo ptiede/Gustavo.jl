@@ -321,6 +321,51 @@ function _savgol_window_dof(rho2::Real, m_coh::Real, alpha::Real, order::Integer
     return iseven(n) ? n + 1 : n
 end
 
+# Circular (complex-phasor) solve of one AP's rows — the classic adhoc-phasing
+# iteration z_a ← Σ_b w·e^{iφ_ab}·z_b, gauged at the anchor. The linear
+# phases-as-values WLS has 2π-branch local minima when rows sit near ±π: a
+# cold-started AP can converge ~150° off a strong row, and the warm-start chain
+# then LOCKS that branch and relaxes toward truth across the whole scan — a
+# fake smooth ±π-scale arc in the station track (VR2505 WN band 2: +230° over
+# a 59-s scan whose rows close to ±20°). The phasor iteration is circular, so
+# it has no branch structure; it is used only to SEED the linear solve at APs
+# with no usable warm-start snapshot.
+function _circular_ap_seed(rows::Vector{_ObsRow}, nant::Integer, anchor::Integer)
+    isempty(rows) && return nothing
+    z = ones(ComplexF64, nant, 2)
+    present = falses(nant, 2)
+    for r in rows
+        r.chisign == 0 || continue          # χ-bearing rows: not a pure node difference
+        present[r.a, r.fa] = true
+        present[r.b, r.fb] = true
+    end
+    any(present) || return nothing
+    for _ in 1:50
+        acc = zeros(ComplexF64, nant, 2)
+        for r in rows
+            r.chisign == 0 || continue
+            R = cis(r.val)
+            acc[r.a, r.fa] += r.w * R * z[r.b, r.fb]
+            acc[r.b, r.fb] += r.w * conj(R) * z[r.a, r.fa]
+        end
+        for i in eachindex(z)
+            present[i] || continue
+            a = abs(acc[i])
+            a > 0 && (z[i] = acc[i] / a)
+        end
+    end
+    # One common gauge for the whole seed (anchor when present). A fully
+    # consistent seed is safe on anchor-dropout APs too: the rewrap uses
+    # prediction DIFFERENCES, so a common gauge offset cancels (unlike the
+    # mixed-gauge partial snapshots the K3 restitch logic guards against).
+    g = present[anchor, 1] ? conj(z[anchor, 1]) / abs(z[anchor, 1]) : one(ComplexF64)
+    ph = fill(NaN, nant, 2)
+    for f in 1:2, a in 1:nant
+        present[a, f] && (ph[a, f] = angle(z[a, f] * g))
+    end
+    return ph
+end
+
 # Build the WLS observation rows for one AP from the coherent residuals, with the
 # same data-driven SNR gate and feed→node collapse the per-AP solve uses. Shared
 # by the per-AP solve and the joint (`:gp_joint`) solve so both see identical rows.
@@ -330,13 +375,20 @@ function _adhoc_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, snr_fl
     @inbounds for bi in 1:nbl, p in eachindex(feeds)
         a, b = bl_pairs[bi]
         a == b && continue
+        fa, fb = feeds[p]
+        # Feed-common track: the parallel hands alone constrain it fully; a
+        # cross-hand row adds NOTHING about it and only injects the real
+        # cross-polarization phase (field rotation / D-terms — large on
+        # linear-feed VGOS, where e.g. WN's cross hands sit near ±π and wrap
+        # through the scan, staircasing the whole station track by ±1 rad).
+        # Cross hands stay in the per-feed solve, where they tie the feeds.
+        shared_feeds && fa != fb && continue
         r = rbar[bi, p, ap]
         w = wbar[bi, p, ap]
         (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
         n2 = noise2[bi, p]
         snr2 = isfinite(n2) && n2 > 0 ? abs2(r / w) / n2 : abs2(r) / w   # fall back if unestimable
         snr2 >= snr_floor2 || continue
-        fa, fb = feeds[p]
         cs = _chi_sign(fa, fb)
         na = shared_feeds ? 1 : fa
         nb = shared_feeds ? 1 : fb
@@ -520,15 +572,38 @@ function solve_adhoc_phasing(
     # weights `noise² → 1/wbar`, so this reduces to the old `|rbar|²/wbar` exactly.
     noise2 = [_track_noise2(rbar, wbar, bi, p, nap) for bi in 1:nbl, p in 1:npol]
 
+    # Effective per-scan ANCHOR station: `ref_ant` when it observes in this scan,
+    # else the best-covered station (largest total gated row weight). Everything
+    # gauge-related below — the per-AP pin, the warm-start seed condition, the
+    # gauge restitch, and the joint solve's re-gauge — keys on the anchor being
+    # PRESENT. Keying on the literal `ref_ant` disabled ALL of it on scans that
+    # never see the reference (common in multi-subarray tracks: VR2505's
+    # 0607-157 scan has no GS): the warm start never armed, so the K3 per-AP 2π
+    # branch flips returned on weakly-constrained stations, and the per-AP pin
+    # (lowest covered node) could hop with coverage flicker with the restitcher
+    # never engaging. The anchor choice is inert to the applied correction (a
+    # per-AP common mode cancels on every baseline); it exists so the
+    # per-station tracks are temporally consistent — i.e. smoothable.
+    anchor = let wtot = zeros(nant)
+        for ap in 1:nap
+            for row in _adhoc_ap_rows(rbar, wbar, ap, bl_pairs, feeds, noise2, smoother.snr_floor^2, shared_feeds)
+                wtot[row.a] += row.w
+                wtot[row.b] += row.w
+            end
+        end
+        wtot[ref_ant] > 0 || all(iszero, wtot) ? Int(ref_ant) : argmax(wtot)
+    end
+
     # Carry solved node phases forward as a temporal warm-start for the next AP's
     # 2π-branch selection (continuity ⇒ no per-AP branch flips on weakly-constrained
-    # stations). The seed is a REFERENCE-GAUGED snapshot: it is refreshed only from
-    # APs where `ref_ant` has data (so every stored cell is in the ref=0 gauge and
-    # the snapshot is mutually consistent) and applied only when the CURRENT AP also
-    # has `ref_ant` (so the per-AP spanning-tree seed it partially overrides is ref=0
-    # too). Skipping the seed on ref-dropout APs avoids mixing a ref=0 seed with a
-    # differently-anchored tree seed, which would mis-pick the 2π branch on a
-    # seeded↔tree boundary edge — the arbitrary non-2π offset such APs carry (K3).
+    # stations). The seed is an ANCHOR-GAUGED snapshot: it is refreshed only from
+    # APs where the anchor has data (so every stored cell is in the anchor=0 gauge
+    # and the snapshot is mutually consistent) and applied only when the CURRENT AP
+    # also has the anchor (so the per-AP spanning-tree seed it partially overrides
+    # is anchor=0 too). Skipping the seed on anchor-dropout APs avoids mixing an
+    # anchor=0 seed with a differently-anchored tree seed, which would mis-pick the
+    # 2π branch on a seeded↔tree boundary edge — the arbitrary non-2π offset such
+    # APs carry (K3).
     prev_phase = fill(NaN, nant, 2)   # NaN for cells no ref-present AP has covered yet
     prev_age = zeros(Int, nant, 2)    # APs since a cell was last refreshed (staleness)
     prev_chi = NaN
@@ -555,9 +630,10 @@ function solve_adhoc_phasing(
             track_w[row.a, row.fa, ap] += row.w
             track_w[row.b, row.fb, ap] += row.w
         end
-        # `ref_ant` has data this AP iff some observation touches it (⇒ the solve is
-        # anchored at ref=0). Seed only then, and only with fresh, ref-gauged cells.
-        ref_here = any(r -> r.a == ref_ant || r.b == ref_ant, rows)
+        # The anchor has data this AP iff some observation touches it (⇒ the solve
+        # is pinned at anchor=0). Seed only then, and only with fresh cells in the
+        # anchor gauge.
+        ref_here = any(r -> r.a == anchor || r.b == anchor, rows)
         seed = nothing
         if ref_here
             seed = fill(NaN, nant, 2)
@@ -566,16 +642,23 @@ function solve_adhoc_phasing(
                     (seed[a, f] = prev_phase[a, f])
             end
         end
+        # No usable warm-start snapshot (first AP, all cells stale, or an
+        # anchor-dropout AP): seed from the circular phasor solve instead of
+        # trusting the tree-initialized linear solve's 2π branch — see
+        # `_circular_ap_seed`.
+        if seed === nothing || !any(isfinite, seed)
+            seed = _circular_ap_seed(rows, nant, anchor)
+        end
         ph, c, cov, _ = _solve_observable(
-            rows, nant, ref_ant; use_chi = true, rewrap = smoother.phase_rewrap_iters,
+            rows, nant, anchor; use_chi = true, rewrap = smoother.phase_rewrap_iters,
             seed_phase = seed, seed_chi = ref_here ? prev_chi : NaN,
         )
         phase[:, :, ap] .= ph
         chi[ap] = c
         covered[:, :, ap] .= cov
-        # Refresh the ref-gauged snapshot ONLY from ref-present APs (keep the last
-        # known value for a station absent this AP, so a brief dropout does not reset
-        # the branch); age every cell and zero the ones refreshed here.
+        # Refresh the anchor-gauged snapshot ONLY from anchor-present APs (keep the
+        # last known value for a station absent this AP, so a brief dropout does not
+        # reset the branch); age every cell and zero the ones refreshed here.
         prev_age .+= 1
         if ref_here
             for a in 1:nant, f in 1:2
@@ -588,13 +671,13 @@ function solve_adhoc_phasing(
         end
     end
 
-    # Restitch the per-AP gauge when the reference antenna drops out (K3). Each
-    # per-AP solve pins `ref_ant`; in APs where `ref_ant` has no data the solve
-    # falls back to a different anchor node, so that AP's whole solution is offset
-    # by an arbitrary (non-2π) constant — which would otherwise inject a spurious
-    # common-mode jump into every station's track. Re-reference those APs to the
-    # trusted frame from neighbouring ref-present APs via the overlapping stations.
-    _restitch_refant_gauge!(phase, covered, track_w, ref_ant)
+    # Restitch the per-AP gauge when the anchor drops out (K3). Each per-AP solve
+    # pins the anchor; in APs where it has no data the solve falls back to a
+    # different pin node, so that AP's whole solution is offset by an arbitrary
+    # (non-2π) constant — which would otherwise inject a spurious common-mode jump
+    # into every station's track. Re-reference those APs to the trusted frame from
+    # neighbouring anchor-present APs via the overlapping stations.
+    _restitch_refant_gauge!(phase, covered, track_w, anchor)
 
     # Unwrap each (station, feed) track across APs (per-AP solves share the ref
     # gauge, so a track is continuous up to ±2π steps the unwrap removes).
@@ -606,8 +689,9 @@ function solve_adhoc_phasing(
     # Smooth: dispatch on the smoother type. Per-track smoothers loop the (station,
     # feed) tracks (`window = :auto` sets a PER-STATION Savitzky–Golay window from the
     # EHT-HOPS `T_dof`, Eqs 21–22); the joint solve runs one multivariate OU Kalman
-    # over all station phases; `NoSmoothing` is a no-op. See `apply_adhoc!`.
-    apply_adhoc!(smoother, phase, chi, track_w, times; ref_ant = ref_ant, nant = nant, ap_rows = ap_rows)
+    # over all station phases (re-gauged to the anchor, matching the per-AP path);
+    # `NoSmoothing` is a no-op. See `apply_adhoc!`.
+    apply_adhoc!(smoother, phase, chi, track_w, times; ref_ant = anchor, nant = nant, ap_rows = ap_rows)
 
     # Demean per (station, feed): remove the per-scan mean so adhoc does not alias
     # the Stage-B constant phase. The slope (residual rate) is intentionally kept —

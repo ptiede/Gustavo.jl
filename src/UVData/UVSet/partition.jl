@@ -6,7 +6,7 @@
 
 Wrapper struct exposing each branch key as a tab-completable property.
 `partitions(uvset).<TAB>` lists sanitized partition keys; access a leaf
-by `partitions(uvset).M3C273_scan_1`. `uvset.M3C273_scan_1` works equally
+by `partitions(uvset).src_3C273_scan_1`. `uvset.src_3C273_scan_1` works equally
 well via the inherited `AbstractDimTree.getproperty`.
 """
 struct Partitions{T <: UVSet}
@@ -163,7 +163,7 @@ shape: `:source`, `:spw`, `:scan`, `:sub_scan`. Each renderer carries
 its own prefix convention (e.g. `scan_<n>`); empty values are skipped.
 
 Default key shape: `:<source>_<spw_name>_scan_<scan_name>[_<sub_scan>]`,
-e.g. `:M3C273_spw_0_scan_1` or `:M3C273_spw_1_scan_1_A`.
+e.g. `:src_3C273_spw_0_scan_1` or `:src_3C273_spw_1_scan_1_A`.
 """
 const DEFAULT_PARTITION_AXES = (
     PartitionAxis(:source, info -> string(info.source_key)),

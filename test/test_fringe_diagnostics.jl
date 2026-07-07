@@ -17,6 +17,19 @@ using HDF5
         @test haskey(r1, :scan) && haskey(r1, :max_snr) && haskey(r1, :chi) && haskey(r1, :ncomp)
         @test all(r -> r.max_snr >= 0, rows)
 
+        # PFA column: the solve records the per-scan effective search cells, and
+        # the synthetic fringes are strong → secure detections on every scan.
+        @test haskey(r1, :pfa)
+        @test length(sol.info.scan_ncells) == sol.info.nscan
+        @test all(>=(1), sol.info.scan_ncells)
+        @test sol.info.search isa FP.FringeSearch
+        for r in rows
+            @test r.pfa ≈ FP.fringe_pfa(r.max_snr, sol.info.scan_ncells[r.scan])
+            r.max_snr > 10 && @test r.pfa < 1.0e-10
+        end
+        # A marginal SNR on the same search space would NOT be secure.
+        @test FP.fringe_pfa(3.0, sol.info.scan_ncells[1]) > 0.01
+
         buf = IOBuffer()
         @test_nowarn FP.print_fringe_snr_table(rows; io = buf)
         @test occursin("Fringe per-scan summary", String(take!(buf)))
@@ -26,6 +39,38 @@ using HDF5
         s = FP.fringe_solution_summary(sol)
         @test s isa String
         @test occursin("FringeSolution", s)
+    end
+
+    @testset "suspect_fringes (recorded detection table)" begin
+        # The solve records every VALID detection it consumed as parallel plain
+        # vectors (HDF5-representable).
+        inf = sol.info
+        n = length(inf.det_pfa)
+        @test n > 0
+        @test length(inf.det_scan) == length(inf.det_ant_a) == length(inf.det_ant_b) ==
+            length(inf.det_pol) == length(inf.det_snr) == n
+        @test all(s -> 1 <= s <= inf.nscan, inf.det_scan)
+        @test all(>=(inf.search.snr_min), inf.det_snr)               # valid detections only
+        @test all(p -> 0.0 <= p <= 1.0, inf.det_pfa)
+
+        # Strong synthetic fringes → nothing suspect at the default threshold.
+        @test isempty(FP.suspect_fringes(sol))
+        # ...and an all-pass threshold returns every recorded row, most-suspect first.
+        rows = FP.suspect_fringes(sol; pfa_max = -1.0)
+        @test length(rows) == n
+        @test issorted([r.pfa for r in rows]; rev = true)
+        r = first(rows)
+        @test r.sta_a == inf.ant_names[r.a] && r.sta_b == inf.ant_names[r.b]
+        # A flagged row is directly inspectable with fringe_search_map (same
+        # scan/baseline/product → the same detection, up to FFT-plan noise).
+        m = FP.fringe_search_map(uvset, sol; scan_index = r.scan, baseline = (r.a, r.b), pol = r.pol)
+        @test m.bl_pair in ((r.a, r.b), (r.b, r.a))
+        @test m.pol == r.pol
+        @test m.map.detection.snr ≈ r.snr rtol = 1.0e-6
+
+        # Solutions without the table (e.g. loaded from an older file) degrade cleanly.
+        old = CAL.CalibrationSolution(sol.model, sol.layout, sol.geom, sol.θ, (; nscan = 1))
+        @test isempty(FP.suspect_fringes(old))
     end
 
     @testset "gain extractors" begin
@@ -147,6 +192,54 @@ using HDF5
         @test occursin("Delay closure", String(take!(buf)))
     end
 
+    @testset "fringe_search_map (delay–rate surface)" begin
+        m = FP.fringe_search_map(uvset, sol)
+        @test m isa FP.BaselineFringeMap
+        # Defaults: the highest-SNR scan, the strongest baseline, a parallel hand.
+        @test m.scan_index == FP._max_snr_scan(sol, length(FP._scan_group_leaves(uvset)))
+        @test m.ant_names == ["A1", "A2", "A3", "A4"]
+        fa, fb = CAL.correlation_feed_pair(m.pol)
+        @test fa == fb
+        fsm = m.map
+        @test size(fsm.snr) == (length(fsm.delays), length(fsm.rates))
+        @test fsm.detection.valid
+        # The strongest baseline's map peak is the scan's recorded max SNR (up to
+        # peak refinement; the scan max is over all baselines/products searched).
+        @test fsm.detection.snr <= sol.info.scan_max_snr[m.scan_index] * (1 + 1.0e-9)
+        @test fsm.pfa < 1.0e-6
+        # The map peak sits at the detection's (delay, rate) within a grid bin.
+        pk = argmax(fsm.snr)
+        @test isapprox(fsm.delays[pk[1]], fsm.detection.delay; atol = fsm.delays[2] - fsm.delays[1])
+        @test isapprox(fsm.rates[pk[2]], fsm.detection.rate; atol = fsm.rates[2] - fsm.rates[1])
+
+        # Explicit selectors: scan, baseline by station codes / indices / column, pol.
+        a, b = m.bl_pair
+        m2 = FP.fringe_search_map(
+            uvset, sol;
+            scan_index = m.scan_index, baseline = (m.ant_names[a], m.ant_names[b]), pol = m.pol,
+        )
+        @test m2.bl_pair == m.bl_pair
+        @test m2.map.detection.snr ≈ fsm.detection.snr rtol = 1.0e-10
+        @test FP.fringe_search_map(uvset, sol; baseline = (b, a)).bl_pair == m.bl_pair  # order-insensitive
+        m3 = FP.fringe_search_map(uvset, sol; baseline = 2, pol = 1)
+        @test m3.pol == "PP"
+
+        @test_throws ErrorException FP.fringe_search_map(uvset, sol; scan_index = 10_000)
+        @test_throws ErrorException FP.fringe_search_map(uvset, sol; baseline = ("A1", "nope"))
+        @test_throws ErrorException FP.fringe_search_map(uvset, sol; pol = "XX")
+    end
+
+    @testset "plot_fringe_search smoke" begin
+        m = FP.fringe_search_map(uvset, sol)
+        @test !isnothing(FP.plot_fringe_search(m))
+        @test !isnothing(FP.plot_fringe_search(m.map))                    # unlabeled low-level map
+        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair))
+        fig = Figure(size = (900, 700))
+        @test !isnothing(FP.plot_fringe_search(fig[1, 1], m))
+        figm = FP.plot_fringe_search(m)
+        @test (show(IOBuffer(), MIME("image/png"), figm); true)
+    end
+
     @testset "plot_baseline_fringes smoke" begin
         data = FP.baseline_fringe_data(uvset, sol)
         @test !isnothing(FP.plot_baseline_fringes(data))                                   # freq/phase
@@ -158,6 +251,12 @@ using HDF5
         @test !isnothing(FP.plot_baseline_fringes(fig[1, 1], data; kind = :freq))
         figbl = FP.plot_baseline_fringes(data)
         @test (show(IOBuffer(), MIME("image/png"), figbl); true)
+        # per-band-group view (freq restricts channels; time uses the band tser)
+        nbg = length(data.band_groups)
+        @test !isnothing(FP.plot_baseline_fringes(data; kind = :freq, band = nbg))
+        @test !isnothing(FP.plot_baseline_fringes(data; kind = :time, band = 1))
+        @test_throws Exception FP.plot_baseline_fringes(data; band = nbg + 1)
+        @test !isnothing(FP.plot_fringe_spectrum(sol; band = 1))
     end
 
     @testset "coherence report (stage-agnostic)" begin
@@ -307,4 +406,38 @@ using HDF5
             isfile(path) && rm(path)
         end
     end
+end
+
+@testset "fringe_band_stats: per-band coherence + band splitting" begin
+    # 3 bands of 4 channels with gaps; after = flat phase (η=1), before = ramp.
+    freqs = vcat(1.0e9 .+ (0:3) .* 1.0e6, 1.1e9 .+ (0:3) .* 1.0e6, 1.3e9 .+ (0:3) .* 1.0e6)
+    @test FP._band_ranges(freqs) == [1:4, 5:8, 9:12]
+    nchan = length(freqs)
+    bl = [(1, 2)]
+    spec_b = reshape(ComplexF64[cis(2π * c / 6) for c in 1:nchan], nchan, 1, 1)
+    spec_a = reshape(fill(1.0 + 0.0im, nchan), nchan, 1, 1)
+    data = FP.BaselineFringeData(
+        "S", "1", 1, 100.0, bl, ["A", "B"], ["PP"], freqs, [0.0],
+        spec_b, spec_a,
+        zeros(ComplexF64, 1, 1, 1), zeros(ComplexF64, 1, 1, 1),
+    )
+    stats = FP.fringe_band_stats(data)
+    @test length(stats) == 3
+    @test all(r -> r.nchan == 4, stats)
+    @test all(r -> r.eta_after ≈ 1.0, stats)
+    @test all(r -> r.eta_before < 0.9, stats)
+    @test stats[1].f_lo == freqs[1] && stats[3].f_hi == freqs[end]
+
+    # Band GROUPS: comparable inter-block gaps merge into one group; a far-away
+    # block splits off its own group (the VGOS 3/5/6/10 GHz situation).
+    @test FP.fringe_band_groups(freqs) == [1:12]
+    freqs2 = vcat(freqs, 5.0e9 .+ (0:3) .* 1.0e6)
+    @test FP.fringe_band_groups(freqs2) == [1:12, 13:16]
+    @test FP.fringe_band_groups(freqs2[1:1]) == [1:1]
+
+    # Compat constructor: one full-range group whose band time series mirror the
+    # full-band ones.
+    @test data.band_groups == [1:12]
+    @test data.tser_band_before[:, :, :, 1] == data.tser_before
+    @test data.tser_band_after[:, :, :, 1] == data.tser_after
 end
