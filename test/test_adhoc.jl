@@ -561,3 +561,39 @@ end
         @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)   # ref gauge held
     end
 end
+
+@testset "Pseudo-Stokes-I: parallel-only un-flips the rotation null, no cross-hand leak" begin
+    # One baseline (1,2), unpolarized source: XX = YY ∝ cos Δ, XY = −YX ∝ sin Δ,
+    # all × I·e^{iφ}. Δ = ψ_2 − ψ_1 sweeps 0.1 → π−0.1, crossing π/2 (the null)
+    # so the RAW parallel-hand phase flips by π there. The parallel-only
+    # collapse (default) must recover a CONSTANT row phase φ across the null and
+    # drive the weight to 0 at it — without injecting any cross-hand phase.
+    pols = ["PP", "PQ", "QP", "QQ"]
+    feeds = [CALa.correlation_feed_pair(p) for p in pols]
+    bl = [(1, 2)]
+    nap = 41
+    φ = 0.7                                   # true (Stokes-I) row phase
+    Δs = range(0.1, π - 0.1; length = nap)
+    ψ = zeros(2, nap)
+    ψ[2, :] .= Δs                             # ψ_1 = 0 ⇒ Δ = Δs
+    # Cross-hand phase carries a bogus leakage offset that must NOT leak through.
+    leak = 1.3
+    rbar = Array{ComplexF64}(undef, 1, 4, nap)
+    wbar = ones(1, 4, nap)
+    for ap in 1:nap, p in 1:4
+        fa, fb = feeds[p]
+        if fa == fb
+            rbar[1, p, ap] = cos(Δs[ap]) * cis(φ)
+        else
+            s = fa < fb ? sin(Δs[ap]) : -sin(Δs[ap])
+            rbar[1, p, ap] = s * cis(φ + leak)     # cross hands: wrong phase
+        end
+    end
+    r2, w2 = FRa._pseudo_stokes_collapse!(copy(rbar), copy(wbar), bl, pols, ψ)   # cross_hands = false
+    pI = findfirst(f -> f[1] == f[2], feeds)
+    @test all(w2[1, p, ap] == 0 for p in 1:4, ap in 1:nap if p != pI)           # only Stokes-I slot kept
+    inull = argmin(abs.(cos.(Δs)))
+    @test w2[1, pI, inull] < 1.0e-3 * maximum(w2[1, pI, :])                      # weight → 0 at the null
+    good = findall(ap -> abs(cos(Δs[ap])) > 0.2, 1:nap)                          # away from the null
+    @test all(abs(rem2pi(angle(r2[1, pI, ap]) - φ, RoundNearest)) < 1.0e-6 for ap in good)  # constant φ, no π flip, no leak
+end

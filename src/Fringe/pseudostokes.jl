@@ -58,9 +58,26 @@ end
 # zeroed (the shared-feeds solve then sees ONE consistent high-SNR row per
 # baseline per AP). `sign` flips the sin-coefficient convention (mount/feed
 # handedness); the default is validated on VR2505.
+#
+# `cross_hands` (default false) chooses HOW MUCH of the fourfit collapse to
+# trust. The parallel-hand rows alone already carry the failure the collapse
+# exists to fix: XX, YY ∝ cos Δ, so through the rotation NULL (cos Δ → 0) they
+# change SIGN — a raw ±π jump in the adhoc row exactly where a near-zenith
+# station (VR2505 KE) sweeps Δ through 90°. Multiplying by c = cos Δ un-flips
+# it (cos Δ·(cos Δ·I e^{iφ}) = cos²Δ·I e^{iφ} ≥ 0) and drives the weight to 0
+# AT the null, where the per-track smoother bridges (KE barely needs adhoc:
+# noadh η ≈ 0.99). That parallel-only sign correction is band-INDEPENDENT and
+# safe. Pulling in the cross hands (∓sin Δ·XY) additionally recovers Stokes-I
+# amplitude THROUGH the null — but only if the source is unpolarized with no
+# leakage; then XY = −YX and their phase IS φ_ab. With real cross-pol the XY/YX
+# phase is frequency-dependent leakage/source polarization, and near the null
+# (where sin Δ dominates) it swamps the row: on VR2505 0607−157 it HELPS band 1
+# (small leakage) but injects a 330° KE arc in band 4 (large/rotated leakage).
+# So default to the parallel-only correction; `cross_hands = true` is opt-in for
+# data known unpolarized and leakage-free.
 function _pseudo_stokes_collapse!(
         rbar, wbar, bl_pairs, pol_products, ψ::AbstractMatrix{<:Real};
-        sign::Real = 1.0,
+        sign::Real = 1.0, cross_hands::Bool = false,
     )
     feeds = [correlation_feed_pair(p) for p in pol_products]
     pI = findfirst(f -> f[1] == f[2], feeds)
@@ -74,7 +91,13 @@ function _pseudo_stokes_collapse!(
         rI = zero(eltype(rbar)); wI = 0.0
         for p in 1:npol
             fa, fb = feeds[p]
-            cp = fa == fb ? c : (fa < fb ? -s : s)
+            if fa == fb
+                cp = c
+            elseif cross_hands
+                cp = fa < fb ? -s : s
+            else
+                continue                      # parallel-only sign correction
+            end
             rI += cp * rbar[bi, p, ap]
             wI += cp^2 * wbar[bi, p, ap]
         end
