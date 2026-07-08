@@ -185,6 +185,15 @@ Base.@kwdef struct FringeFit <: CalibrationStep
     # accumulations — their huge-SNR non-closing crosstalk pollutes both twins'
     # gains otherwise. Stage B keeps them (closure-screened).
     exclude_colocated::Bool = true
+    # Reuse the per-scan dTEC/SBD the bandpass stage already fit for its scans,
+    # instead of re-fitting in pass 2 (the refine is the bandpass stage's dominant
+    # cost). Pass 2 POLISHES the small residual in a narrow window rather than a
+    # full grid search. `false` restores the independent pass-2 refine.
+    reuse_bandpass_refine::Bool = true
+    # Half-width (TECU) of the pass-2 dTEC polish window when `reuse_bandpass_refine`.
+    # Wider = safer against clipping a weak scan's residual (coherence), narrower =
+    # faster. Default covers the worst observed VGOS residual with margin.
+    bandpass_polish_dtec::Float64 = 20.0
     # `(stage, done, total)` callback fired per completed scan of each solve pass
     # (stage ∈ :search/:bandpass/:adhoc; `done = 0` announces a pass) — drive a
     # progress bar / ETA from it. Called under a lock; keep it quick.
@@ -210,6 +219,8 @@ function run_step(s::FringeFit, ctx::CalibrationContext)
         dispersion = s.dispersion,
         sbd = s.sbd, dtec_tie_colocated = s.dtec_tie_colocated,
         exclude_colocated = s.exclude_colocated,
+        reuse_bandpass_refine = s.reuse_bandpass_refine,
+        bandpass_polish_dtec = s.bandpass_polish_dtec,
         progress = s.progress,
     )
     return _with(ctx; solution = sol, output = output)

@@ -1020,6 +1020,16 @@ function _fit_band_dispersion(
     return (tau = best_t, dtec = best_d, amp = best_a, snr = snr)
 end
 
+# Narrow delay window for the pass-2 POLISH of a scan the bandpass stage already
+# fit (`reuse_bandpass_refine`): the residual on top of the stage's fit is small,
+# so a tight window keeps the fine-grid resolution/accuracy while shrinking the
+# dominant coarse sweep (its cost scales with window extent). The dTEC half-width
+# is the user-tunable `bandpass_polish_dtec` (a too-tight window CLIPS noisy weak-
+# scan residuals → the coherence regression a full skip caused; default ±20 TECU
+# covers the worst observed). The delay window stays fixed here — well within the
+# band-comb ambiguity clamp (`_band_delay_halfwindow`).
+const _DTEC_POLISH_TAU = 8.0e-9      # s
+
 # Refine one materialized scan group: band phasors → per-baseline (Δτ, dTEC) →
 # two station solves accumulating into the per-scan delay and dispersion columns
 # (disjoint per scan, so pass-2 groups can refine concurrently). Returns the
@@ -1908,6 +1918,8 @@ function solve_fringes(
         dtec_tie_colocated::Bool = true,
         exclude_colocated::Bool = true,
         adhoc_pseudo_stokes = :auto,
+        reuse_bandpass_refine::Bool = true,
+        bandpass_polish_dtec::Real = 20.0,
     )
     geom = build_geometry(uvset)
     model = _fringe_model(
@@ -1980,18 +1992,21 @@ function solve_fringes(
                 # Phase + amplitude bandpass (between Stage-B and adhoc; orthogonal
                 # frequency structure). Solved once from the brightest calibrator,
                 # time-stable, from one shared per-channel residual accumulation.
+                refined_bp = Set{Int}()
                 if (phase_bandpass && bp_plan !== nothing) || (amp_bandpass && amp_bp_plan !== nothing)
                     cal = _bandpass_calibrator(bandpass_source, group_sources, scan_snr)
-                    _solve_bandpass_stage!(
-                        θ, group_leaves, group_sources, cal, geom, ev,
-                        phase_bandpass ? bp_plan : nothing, nant;
-                        amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
-                        amp_smoother = amp_smoother, pc = pc, progress = progress,
-                        max_scans = bandpass_max_scans, scan_snr = scan_snr,
-                        ntasks = ntasks_use, inner = inner, prefetch = bp_prefetch,
-                        disp_plan = disp_plan, ps_delay_plan = ps_delay_plan,
-                        dtec_rejected = dtec_rejected, sbd_plans = sbd_plans, ties = ties,
-                        excl = excl,
+                    refined_bp = Set(
+                        _solve_bandpass_stage!(
+                            θ, group_leaves, group_sources, cal, geom, ev,
+                            phase_bandpass ? bp_plan : nothing, nant;
+                            amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
+                            amp_smoother = amp_smoother, pc = pc, progress = progress,
+                            max_scans = bandpass_max_scans, scan_snr = scan_snr,
+                            ntasks = ntasks_use, inner = inner, prefetch = bp_prefetch,
+                            disp_plan = disp_plan, ps_delay_plan = ps_delay_plan,
+                            dtec_rejected = dtec_rejected, sbd_plans = sbd_plans, ties = ties,
+                            excl = excl,
+                        ),
                     )
                 end
                 t2w = time_ns()
@@ -2003,21 +2018,32 @@ function solve_fringes(
                     ta = time_ns()
                     keyed = _materialize_leaf_group(group_leaves[gi], geom, pc, inner)
                     tb = time_ns()
+                    # Reuse the bandpass stage's per-scan dTEC/SBD θ where it already
+                    # fit this scan (see the reduce path / `reuse_bandpass_refine`).
+                    reuse_scan = reuse_bandpass_refine && gi in refined_bp
                     # Per-scan (Δτ, dTEC) refinement BEFORE the adhoc solve, so the
                     # adhoc phases fit dispersion-corrected residuals. Writes only
-                    # this scan's θ columns — safe under the group tmap.
+                    # this scan's θ columns — safe under the group tmap. Bandpass-
+                    # stage-fit scans are polished in a narrow window (see the reduce
+                    # path / `reuse_bandpass_refine`).
                     if disp_plan !== nothing
                         # `local`: an unannotated `nrj` would capture-and-rebind the
                         # outer stage-B rejection count (a boxed capture OhMyThreads
                         # rejects outright).
-                        local nrej_scan = _refine_scan_dispersion!(
+                        local nrej_scan = reuse_scan ?
+                            _refine_scan_dispersion!(
+                            θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
+                            inner = inner, ties = ties, tau_max = _DTEC_POLISH_TAU, dtec_max = bandpass_polish_dtec,
+                        ) :
+                            _refine_scan_dispersion!(
                             θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
                             inner = inner, ties = ties,
                         )
                         Threads.atomic_add!(dtec_rejected, nrej_scan)
                     end
                     # Per-scan band-group SBD AFTER the dispersion refinement (so
-                    # the within-band slopes it fits are dispersion-corrected).
+                    # the within-band slopes it fits are dispersion-corrected). SBD
+                    # is cheap — always full-refine.
                     sbd_plans === nothing ||
                         _refine_scan_sbd!(θ, keyed, geom, ev, sbd_plans, ref_ant, nant; inner = inner)
                     _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant; shared_feeds = adhoc_shared, inner = inner, excl = excl, psI = psI)
@@ -2124,6 +2150,8 @@ function solve_and_reduce_fringes(
         dtec_tie_colocated::Bool = true,
         exclude_colocated::Bool = true,
         adhoc_pseudo_stokes = :auto,
+        reuse_bandpass_refine::Bool = true,
+        bandpass_polish_dtec::Real = 20.0,
     )
     geom = build_geometry(uvset)
     model = _fringe_model(
@@ -2195,18 +2223,23 @@ function solve_and_reduce_fringes(
                 t1w = time_ns()
                 # Phase + amplitude bandpass from the brightest calibrator (time-
                 # stable), applied to every group's correction below via the full θ.
+                # `refined_bp` = scans whose per-scan dTEC/SBD the stage already fit;
+                # pass 2 reuses them (see `reuse_bandpass_refine`).
+                refined_bp = Set{Int}()
                 if (phase_bandpass && bp_plan !== nothing) || (amp_bandpass && amp_bp_plan !== nothing)
                     cal = _bandpass_calibrator(bandpass_source, group_sources, scan_snr)
-                    _solve_bandpass_stage!(
-                        θ, group_leaves, group_sources, cal, geom, ev,
-                        phase_bandpass ? bp_plan : nothing, nant;
-                        amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
-                        amp_smoother = amp_smoother, pc = pc, progress = progress,
-                        max_scans = bandpass_max_scans, scan_snr = scan_snr,
-                        ntasks = ntasks_use, inner = inner, prefetch = bp_prefetch,
-                        disp_plan = disp_plan, ps_delay_plan = ps_delay_plan,
-                        dtec_rejected = dtec_rejected, sbd_plans = sbd_plans, ties = ties,
-                        excl = excl,
+                    refined_bp = Set(
+                        _solve_bandpass_stage!(
+                            θ, group_leaves, group_sources, cal, geom, ev,
+                            phase_bandpass ? bp_plan : nothing, nant;
+                            amp_plan = amp_bandpass ? amp_bp_plan : nothing, ref_ant = ref_ant,
+                            amp_smoother = amp_smoother, pc = pc, progress = progress,
+                            max_scans = bandpass_max_scans, scan_snr = scan_snr,
+                            ntasks = ntasks_use, inner = inner, prefetch = bp_prefetch,
+                            disp_plan = disp_plan, ps_delay_plan = ps_delay_plan,
+                            dtec_rejected = dtec_rejected, sbd_plans = sbd_plans, ties = ties,
+                            excl = excl,
+                        ),
                     )
                 end
                 t2w = time_ns()
@@ -2221,21 +2254,35 @@ function solve_and_reduce_fringes(
                     ta = time_ns()
                     keyed = _materialize_leaf_group(group_leaves[gi], geom, pc, inner)
                     tb = time_ns()
+                    # The bandpass stage already fit this scan's per-scan (Δτ, dTEC)
+                    # + SBD θ (and the bandpass is built dispersion-corrected, so a
+                    # re-fit here would recover ~zero) — reuse it instead of paying
+                    # the stage's dominant cost twice.
+                    reuse_scan = reuse_bandpass_refine && gi in refined_bp
                     # Per-scan (Δτ, dTEC) refinement BEFORE the adhoc solve (see
                     # `_refine_scan_dispersion!`); the reduce below then applies
-                    # the dispersion-corrected θ.
+                    # the dispersion-corrected θ. Scans the bandpass stage already
+                    # fit are POLISHED in a narrow window (cheap) rather than re-run
+                    # with the full grid search — keeps the weak-source increment a
+                    # full skip dropped.
                     if disp_plan !== nothing
                         # `local`: an unannotated `nrj` would capture-and-rebind the
                         # outer stage-B rejection count (a boxed capture OhMyThreads
                         # rejects outright).
-                        local nrej_scan = _refine_scan_dispersion!(
+                        local nrej_scan = reuse_scan ?
+                            _refine_scan_dispersion!(
+                            θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
+                            inner = inner, ties = ties, tau_max = _DTEC_POLISH_TAU, dtec_max = bandpass_polish_dtec,
+                        ) :
+                            _refine_scan_dispersion!(
                             θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
                             inner = inner, ties = ties,
                         )
                         Threads.atomic_add!(dtec_rejected, nrej_scan)
                     end
                     # Per-scan band-group SBD AFTER the dispersion refinement (so
-                    # the within-band slopes it fits are dispersion-corrected).
+                    # the within-band slopes it fits are dispersion-corrected). SBD
+                    # is cheap (~4% of the stage) — always full-refine.
                     sbd_plans === nothing ||
                         _refine_scan_sbd!(θ, keyed, geom, ev, sbd_plans, ref_ant, nant; inner = inner)
                     _adhoc_group_leaves!(θ, keyed, geom, ev, adhoc_plan, adhoc, ref_ant, nant; shared_feeds = adhoc_shared, inner = inner, excl = excl, psI = psI)
@@ -2686,7 +2733,7 @@ function _solve_bandpass_stage!(
     )
     cal_gis = cal_source === :all ? collect(eachindex(group_leaves)) :
         [gi for gi in eachindex(group_leaves) if group_sources[gi] == cal_source]
-    isempty(cal_gis) && return θ               # calibrator absent → leave bandpass at 0
+    isempty(cal_gis) && return Int[]           # calibrator absent → leave bandpass at 0
     if max_scans > 0 && scan_snr !== nothing && length(cal_gis) > max_scans
         ord = sortperm([isfinite(scan_snr[gi]) ? scan_snr[gi] : -Inf for gi in cal_gis]; rev = true)
         cal_gis = sort(cal_gis[ord[1:Int(max_scans)]])
@@ -2711,8 +2758,9 @@ function _solve_bandpass_stage!(
             # The caller enables it only when the budget can hold the one extra
             # resident group (serialized single-chunk case).
             nxt = prefetch ? Threads.@spawn(_materialize_concat_group(group_leaves[$(first(chunk))], geom, pc, inner)) : nothing
+            td = 0.0; tp = 0.0; tsb = 0.0; tac = 0.0   # per-op timers (profiling)
             for (ci, gi) in enumerate(chunk)
-                grp = nxt === nothing ?
+                td += @elapsed grp = nxt === nothing ?
                     _materialize_concat_group(group_leaves[gi], geom, pc, inner) :
                     fetch(nxt)::_ScanGroup
                 if prefetch && ci < length(chunk)
@@ -2723,37 +2771,52 @@ function _solve_bandpass_stage!(
                     # Dispersion-correct THIS scan before accumulating (see the
                     # stage comment). Writes only this scan's per-scan θ columns,
                     # so concurrent chunk tasks stay disjoint.
-                    local nrej_scan = _refine_scan_dispersion!(
-                        θ, grp, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
-                        inner = inner, ties = ties,
-                    )
-                    dtec_rejected === nothing || Threads.atomic_add!(dtec_rejected, nrej_scan)
+                    tp += @elapsed begin
+                        local nrej_scan = _refine_scan_dispersion!(
+                            θ, grp, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
+                            inner = inner, ties = ties,
+                        )
+                        dtec_rejected === nothing || Threads.atomic_add!(dtec_rejected, nrej_scan)
+                    end
                 end
                 # SBD-correct THIS scan likewise (see `_refine_scan_sbd!`) — the
                 # frozen bandpass must not average per-scan within-band slopes.
-                sbd_plans === nothing ||
-                    _refine_scan_sbd!(θ, grp, geom, ev, sbd_plans, ref_ant, nant; inner = inner)
-                _accumulate_bandpass_rbar!(rl, wl, blidx, ev, θ, grp)
+                tsb += @elapsed (
+                    sbd_plans === nothing ||
+                        _refine_scan_sbd!(θ, grp, geom, ev, sbd_plans, ref_ant, nant; inner = inner)
+                )
+                tac += @elapsed _accumulate_bandpass_rbar!(rl, wl, blidx, ev, θ, grp)
                 _progress_notify(progress, :bandpass, Threads.atomic_add!(ndone, 1) + 1, length(cal_gis))
             end
-            (rl, wl)
+            (rl, wl, td, tp, tsb, tac)
         end
     end
     rbar_bp = zeros(ComplexF64, length(bl_pairs), length(pols), nchan)
     wbar_bp = zeros(Float64, length(bl_pairs), length(pols), nchan)
+    Td = 0.0; Tp = 0.0; Tsb = 0.0; Tac = 0.0
     for t in parts
-        rl, wl = fetch(t)
+        rl, wl, td, tp, tsb, tac = fetch(t)
         rbar_bp .+= rl
         wbar_bp .+= wl
+        Td += td; Tp += tp; Tsb += tsb; Tac += tac
     end
-    plan === nothing ||
-        _solve_phase_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, plan; ref_ant = ref_ant, snr_floor = snr_floor)
-    amp_plan === nothing ||
-        _solve_amp_bandpass!(
-        θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, amp_plan, geom.channel_freqs;
-        snr_floor = snr_floor, spw_of_chan = geom.spw_of_chan, smoother = amp_smoother,
-    )
-    return θ
+    tsolve = @elapsed begin
+        plan === nothing ||
+            _solve_phase_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, plan; ref_ant = ref_ant, snr_floor = snr_floor)
+        amp_plan === nothing ||
+            _solve_amp_bandpass!(
+            θ, rbar_bp, wbar_bp, bl_pairs, pols, nant, amp_plan, geom.channel_freqs;
+            snr_floor = snr_floor, spw_of_chan = geom.spw_of_chan, smoother = amp_smoother,
+        )
+    end
+    if get(ENV, "GUSTAVO_BP_PROFILE", "0") == "1"
+        @info "[bandpass-profile] Σ decode $(round(Td, digits = 1)) / dTEC $(round(Tp, digits = 1)) / SBD $(round(Tsb, digits = 1)) / accum $(round(Tac, digits = 1)) / solve $(round(tsolve, digits = 1)) s over $(length(cal_gis)) scans, $(length(parts)) chunks"
+    end
+    # The scans whose per-scan (Δτ, dTEC) + SBD θ columns were refined here. Pass 2
+    # can REUSE these instead of re-refining (`reuse_bandpass_refine`): the bandpass
+    # is dispersion-corrected before it is built, so the residual dispersion pass 2
+    # would re-fit is ~zero and the refine is the stage's dominant cost (~72%).
+    return cal_gis
 end
 
 # Source name of each (source, scan) group, without materializing.
