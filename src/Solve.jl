@@ -33,6 +33,7 @@ using ..Graph
 using DimensionalData
 using ComponentArrays
 using ComponentArrays: getdata, getaxes
+import LogDensityProblems
 
 include("Solve/sitemodel.jl")
 include("Solve/plan.jl")
@@ -47,5 +48,7 @@ export GainPlan, GroupPlan, SiteComponent, plan_gains
 export zero_params, flatten, unflatten, group_arrays, evaluate_gains
 # Milestone 3 — per-leaf reverse-mode value + structured gradient (Enzyme ext).
 export leaf_value_and_grad
+# Milestone 4 — distributed objective+gradient over the Graph substrate + posterior.
+export fringe_objective, fringe_objective_and_grad, FringePosterior
 
 end # module Solve

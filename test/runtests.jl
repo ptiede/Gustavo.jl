@@ -69,6 +69,11 @@ include("test_solve_plan.jl")
 # ForwardDiff, incl. structural sparsity (Milestone 3, GustavoEnzymeExt).
 include("test_solve_gradient.jl")
 
+# Gustavo.Solve (Stage 2): distributed objective+gradient over the Graph
+# substrate (Serial ≡ Dagger, sum ≡ ForwardDiff, FringePosterior/LDP) —
+# reuses _build_fringe_uvset from test_pipeline.jl (Milestone 4).
+include("test_solve_distributed.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×
