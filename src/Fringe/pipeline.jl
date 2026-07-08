@@ -2032,13 +2032,13 @@ function solve_fringes(
                         # rejects outright).
                         local nrej_scan = reuse_scan ?
                             _refine_scan_dispersion!(
-                            θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
-                            inner = inner, ties = ties, tau_max = _DTEC_POLISH_TAU, dtec_max = bandpass_polish_dtec,
-                        ) :
+                                θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
+                                inner = inner, ties = ties, tau_max = _DTEC_POLISH_TAU, dtec_max = bandpass_polish_dtec,
+                            ) :
                             _refine_scan_dispersion!(
-                            θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
-                            inner = inner, ties = ties,
-                        )
+                                θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
+                                inner = inner, ties = ties,
+                            )
                         Threads.atomic_add!(dtec_rejected, nrej_scan)
                     end
                     # Per-scan band-group SBD AFTER the dispersion refinement (so
@@ -2271,13 +2271,13 @@ function solve_and_reduce_fringes(
                         # rejects outright).
                         local nrej_scan = reuse_scan ?
                             _refine_scan_dispersion!(
-                            θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
-                            inner = inner, ties = ties, tau_max = _DTEC_POLISH_TAU, dtec_max = bandpass_polish_dtec,
-                        ) :
+                                θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
+                                inner = inner, ties = ties, tau_max = _DTEC_POLISH_TAU, dtec_max = bandpass_polish_dtec,
+                            ) :
                             _refine_scan_dispersion!(
-                            θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
-                            inner = inner, ties = ties,
-                        )
+                                θ, keyed, geom, ev, ps_delay_plan, disp_plan, ref_ant, nant;
+                                inner = inner, ties = ties,
+                            )
                         Threads.atomic_add!(dtec_rejected, nrej_scan)
                     end
                     # Per-scan band-group SBD AFTER the dispersion refinement (so
@@ -2296,7 +2296,10 @@ function solve_and_reduce_fringes(
                     # unconstrained stations / excluded baselines exactly like a
                     # full-set `apply_calibration` would.
                     sol_local = CalibrationSolution(model, layout, geom, θ, _flag_info(station_flags, excl))
-                    reduced = postprocess(UVData.apply_calibration(sub, sol_local))
+                    # This runs INSIDE the per-scan-group parallel map; the gain
+                    # kernel must stay within this group's nested `inner` budget
+                    # (the public default threads over all cores → oversubscribe).
+                    reduced = postprocess(UVData.apply_calibration(sub, sol_local; ntasks = inner))
                     out = collect(pairs(UVData.branches(reduced)))
                     td = time_ns()
                     scan_t_decode2[gi] = (tb - ta) / 1.0e9

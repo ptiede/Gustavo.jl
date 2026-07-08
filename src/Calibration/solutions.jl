@@ -185,7 +185,10 @@ flagged per scan only when, after the closure-screened global solve, no strong
 detection constrains it; a merely weak baseline between two constrained
 stations is NOT flagged (it is calibrated by SNR transfer).
 """
-function UVData.apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags::Bool = true)
+function UVData.apply_calibration(
+        uvset::UVSet, sol::CalibrationSolution;
+        apply_flags::Bool = true, ntasks::Integer = Threads.nthreads(),
+    )
     ev = GainEvaluator(sol.model, sol.layout)
     flagged, exclbl = apply_flags ? _solution_flag_sets(sol.info) : (nothing, nothing)
     return UVData.apply(uvset) do leaf, info, root
@@ -196,7 +199,7 @@ function UVData.apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_
         g = evaluate_gains(ev, sol.θ, ci, ti)      # (nchan_leaf, nti_leaf, nant, 2)
         bl_pairs = UVData.baselines(leaf).pairs
         pols = pol_products(leaf)
-        vis_corr, w_corr = _apply_gain_kernel(leaf[:vis], leaf[:weights], g, bl_pairs, pols)
+        vis_corr, w_corr = _apply_gain_kernel(leaf[:vis], leaf[:weights], g, bl_pairs, pols; ntasks = ntasks)
         _flag_solution_rows!(parent(vis_corr), parent(w_corr), bl_pairs, sol.geom, ti, flagged, exclbl)
         return with_visibilities(leaf, vis_corr, w_corr)
     end
@@ -250,11 +253,16 @@ function _flag_solution_rows!(Vc, Wc, bl_pairs, geom, ti_idx, flagged, exclbl)
 end
 
 # Divide visibilities by complex antenna gains `g[c, ti, ant, feed]`. The vis /
-# weight DimArrays are (Frequency, Ti, Baseline, Pol).
+# weight DimArrays are (Frequency, Ti, Baseline, Pol). The per-(baseline, pol)
+# output columns are independent (disjoint writes, read-only gains), so the loop
+# fans out over `ntasks` tasks — this kernel is the dominant cost of applying a
+# solution (≈80% of `apply_calibration`), and one thread wastes a 16-core box.
+# Reordering across independent cells is bit-identical: every cell is computed by
+# the same scalar expression regardless of task partition.
 function _apply_gain_kernel(
         vis_p::AbstractArray, w_p::AbstractArray,
         g::AbstractArray{<:Complex, 4},
-        bl_pairs, pols,
+        bl_pairs, pols; ntasks::Integer = 1,
     )
     V = parent(vis_p)
     W = parent(w_p)
@@ -262,24 +270,37 @@ function _apply_gain_kernel(
     Wc = copy(W)
     nchan, nti, nbl, npol = size(V)
     geps = 1.0e-12
-    @inbounds for p in 1:npol
+    # One (bi, p) column of work per unit; disjoint outputs → safe to spawn.
+    cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
+    nt = clamp(Int(ntasks), 1, max(1, length(cols)))
+    do_col = @inline function (bi, p)
         fa, fb = correlation_feed_pair(pols[p])
-        for bi in 1:nbl
-            a, b = bl_pairs[bi]
-            for tt in 1:nti, c in 1:nchan
-                w = W[c, tt, bi, p]
-                ga = g[c, tt, a, fa]
-                gb = g[c, tt, b, fb]
-                denom = ga * conj(gb)
-                if abs(ga) < geps || abs(gb) < geps || !isfinite(denom)
-                    Wc[c, tt, bi, p] = zero(eltype(Wc))
-                    Vc[c, tt, bi, p] = convert(eltype(Vc), NaN)
-                    continue
-                end
-                Vc[c, tt, bi, p] = V[c, tt, bi, p] / denom
-                Wc[c, tt, bi, p] = w * abs2(ga * gb)
+        a, b = bl_pairs[bi]
+        return @inbounds for tt in 1:nti, c in 1:nchan
+            w = W[c, tt, bi, p]
+            ga = g[c, tt, a, fa]
+            gb = g[c, tt, b, fb]
+            denom = ga * conj(gb)
+            if abs(ga) < geps || abs(gb) < geps || !isfinite(denom)
+                Wc[c, tt, bi, p] = zero(eltype(Wc))
+                Vc[c, tt, bi, p] = convert(eltype(Vc), NaN)
+                continue
+            end
+            Vc[c, tt, bi, p] = V[c, tt, bi, p] / denom
+            Wc[c, tt, bi, p] = w * abs2(ga * gb)
+        end
+    end
+    if nt <= 1
+        for (bi, p) in cols
+            do_col(bi, p)
+        end
+    else
+        tasks = map(Iterators.partition(cols, cld(length(cols), nt))) do chunk
+            Threads.@spawn for (bi, p) in chunk
+                do_col(bi, p)
             end
         end
+        foreach(wait, tasks)
     end
     return Vc, Wc
 end
