@@ -2,6 +2,8 @@
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 ComponentArrays = "b0b7db55-cfe3-40fc-9ded-d10e2dbeff66"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"

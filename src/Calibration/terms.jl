@@ -10,13 +10,74 @@
 # frequency-segment) block of parameters. Terms therefore never see the global
 # parameter vector — they are handed a coordinate scalar and a parameter view.
 
+"""
+    AbstractGainTerm
+
+Base type for an atomic gain term (a phase- or log-amplitude contribution). A
+term is deliberately the ONE extension point of the whole calibration/fringe
+stack: define a new term and it works everywhere — the flat-θ `GainEvaluator`,
+the per-site `GainPlan` forward map, AND the Enzyme/ForwardDiff gradient
+(`Gustavo.Solve`) — with no solver changes and no AD rule, because the optimizer
+differentiates straight through your `term_eval`.
+
+Adding a term is two steps (qualify the methods, e.g. `import Gustavo.Calibration as C`):
+
+1. Subtype a FAMILY (which fixes the coordinate the term reads — so you never
+   declare that separately):
+   - `ScalarTerm`    — no coordinate (a constant offset).
+   - `FrequencyTerm` — a per-channel frequency coordinate (delay, dispersion, …).
+   - `TimeTerm`      — a per-time coordinate (rate, …).
+   - `ChannelTerm`   — one parameter per channel in the segment (a bandpass).
+
+2. Define ONE method, `term_eval` — the pure, differentiable primitive. `p` is
+   the block's parameters, read by position (`p[1]`, `p[2]`) or, if you declare
+   `param_names`, by name (`p.τ`):
+   - `C.term_eval(::T, p)`     for a `ScalarTerm`      → e.g. `p[1]`.
+   - `C.term_eval(::T, p, x)`  for `FrequencyTerm`/`TimeTerm`, `x` the coordinate
+      scalar (default `ν − ν0` / `t − t0`) → e.g. `2π * p[1] * x`.
+   - `C.term_eval(::T, p, k)`  for a `ChannelTerm`, `k` the local channel index.
+
+   Keep it linear in `p`, allocation-free, and branch only on integers/coordinates
+   (never on `p`), so the forward map stays inferrable and AD-clean.
+
+OPTIONAL overrides (sensible defaults provided, so most terms skip these):
+- `C.param_names(::T) = (:τ, :dtec)` — name a multi-parameter term's parameters.
+  This is the SINGLE source of truth: the per-block count is derived from it AND
+  you read the parameters by name (`p.τ`), while positional `p[k]` becomes
+  bounds-checked against it. A single unnamed parameter (the default) needs
+  nothing — just use `p[1]`.
+- `C.nparams_per_block(::T, nchan_seg)` — a VARIABLE parameter count not fixed by
+  names (a polynomial degree, a per-channel count); defaults to
+  `max(1, length(param_names))`.
+- `C.freq_coordinate(::T, channel_freqs, fseg_groups, f0)` /
+  `C.time_coordinate(::T, times, tseg_groups, t0)` — override the coordinate `x`
+  (defaults: `ν − ν0` for `FrequencyTerm`, `t − t0` hours for `TimeTerm`).
+- `C.basis_columns`, `C.term_label` — legacy WLS solvers / diagnostics only.
+
+So a new curved delay `phase = 2π·τ·(ν − ν0)²` is just:
+`struct QuadraticDelay <: FrequencyTerm end` +
+`param_names(::QuadraticDelay) = (:τ,)` +
+`term_eval(::QuadraticDelay, p, x) = 2π * p.τ * x^2`
+(or drop `param_names` and write `p[1]`).
+
+See `Delay`/`Rate`/`PerChannel`/`PolynomialFreq` for worked examples.
+"""
 abstract type AbstractGainTerm end
 
+# Family supertypes: a term's family fixes which coordinate it reads (so a term
+# never declares that separately) and supplies the default coordinate. Subtype
+# one of these, NOT `AbstractGainTerm` directly (which has no `coord_kind` and so
+# errors loudly at plan time — a guard against forgetting to classify a term).
+abstract type ScalarTerm <: AbstractGainTerm end
+abstract type FrequencyTerm <: AbstractGainTerm end
+abstract type TimeTerm <: AbstractGainTerm end
+abstract type ChannelTerm <: AbstractGainTerm end
+
 "Constant offset: phase/log-amp = θ₁. (Per-block constant — a fringe phase, or a flat gain.)"
-struct ConstantTerm <: AbstractGainTerm end
+struct ConstantTerm <: ScalarTerm end
 
 "Group delay: phase = 2π·θ₁·(f − f0), θ₁ in seconds."
-struct Delay <: AbstractGainTerm end
+struct Delay <: FrequencyTerm end
 
 # rad·Hz per TECU (1 TECU = 1e16 el/m²): ionospheric phase = −K·TEC/f.
 const DISPERSION_K = 8.4479e9
@@ -27,13 +88,13 @@ so θ₁ is a differential TEC in TECU. Station-based and non-magnetic to first
 order, so it ties feeds (`SharedFeeds`). Referenced to f0 — the 1/f0 offset
 lands in the accompanying constant/phase term, keeping this term pure shape.
 """
-struct Dispersion <: AbstractGainTerm end
+struct Dispersion <: FrequencyTerm end
 
 "Fringe rate: phase = 2π·θ₁·(t − t0)·3600, θ₁ in Hz (t in hours)."
-struct Rate <: AbstractGainTerm end
+struct Rate <: TimeTerm end
 
 "Polynomial in a segment-scaled frequency coordinate: Σ_{d=1}^{degree} θ_d · xf^d."
-struct PolynomialFreq <: AbstractGainTerm
+struct PolynomialFreq <: FrequencyTerm
     degree::Int
     function PolynomialFreq(degree::Integer)
         degree >= 1 || error("PolynomialFreq degree must be ≥ 1")
@@ -42,7 +103,7 @@ struct PolynomialFreq <: AbstractGainTerm
 end
 
 "Polynomial in a segment-scaled time coordinate: Σ_{d=1}^{degree} θ_d · xt^d."
-struct PolynomialTime <: AbstractGainTerm
+struct PolynomialTime <: TimeTerm
     degree::Int
     function PolynomialTime(degree::Integer)
         degree >= 1 || error("PolynomialTime degree must be ≥ 1")
@@ -51,43 +112,43 @@ struct PolynomialTime <: AbstractGainTerm
 end
 
 "One free parameter per channel within the frequency segment (the classic bandpass)."
-struct PerChannel <: AbstractGainTerm end
+struct PerChannel <: ChannelTerm end
 
-# ── Coordinate kind ──────────────────────────────────────────────────────────
-# Tells the layout builder which precomputed coordinate axis a term reads.
-#   :none       — no coordinate (ConstantTerm)
-#   :freq       — a per-channel frequency coordinate (Delay, PolynomialFreq)
-#   :time       — a per-time coordinate (Rate, PolynomialTime)
-#   :perchannel — indexes its parameter block by local channel position
+# ── Coordinate kind (derived from the term family) ───────────────────────────
+# Which precomputed coordinate axis a term reads. Defined on the family
+# supertypes, so a term inherits it from its `<: FrequencyTerm` / … choice and
+# never declares it. `AbstractGainTerm` itself has NO method → subtyping the root
+# directly errors loudly at plan time.
 @enum CoordKind COORD_NONE COORD_FREQ COORD_TIME COORD_PERCHANNEL
 
-coord_kind(::ConstantTerm) = COORD_NONE
-coord_kind(::Delay) = COORD_FREQ
-coord_kind(::Dispersion) = COORD_FREQ
-coord_kind(::PolynomialFreq) = COORD_FREQ
-coord_kind(::Rate) = COORD_TIME
-coord_kind(::PolynomialTime) = COORD_TIME
-coord_kind(::PerChannel) = COORD_PERCHANNEL
+coord_kind(::ScalarTerm) = COORD_NONE
+coord_kind(::FrequencyTerm) = COORD_FREQ
+coord_kind(::TimeTerm) = COORD_TIME
+coord_kind(::ChannelTerm) = COORD_PERCHANNEL
 
-# ── Parameter count per (time-segment, frequency-segment) block ──────────────
-# `nchan_seg` is the number of channels in the term's frequency segment; only
-# `PerChannel` depends on it.
-nparams_per_block(::ConstantTerm, nchan_seg) = 1
-nparams_per_block(::Delay, nchan_seg) = 1
-nparams_per_block(::Dispersion, nchan_seg) = 1
-nparams_per_block(::Rate, nchan_seg) = 1
+# ── Parameter names + count per block ────────────────────────────────────────
+# A term may OPTIONALLY name its parameters: `param_names(::T) = (:τ, :dtec)`.
+# When it does, the names are the SINGLE source of truth — the per-block count is
+# derived from them (no separate `nparams_per_block` to keep in sync) and the
+# term reads them by name (`p.τ`) inside `term_eval`. Terms that don't declare
+# names use positional access (`p[1]`, `p[2]`) and default to one parameter, or
+# override `nparams_per_block` for a variable count (polynomial degree, channels).
+param_names(::AbstractGainTerm) = ()
+
+# `nchan_seg` is the number of channels in the term's frequency segment.
+nparams_per_block(t::AbstractGainTerm, nchan_seg) = max(1, length(param_names(t)))
 nparams_per_block(t::PolynomialFreq, nchan_seg) = t.degree
 nparams_per_block(t::PolynomialTime, nchan_seg) = t.degree
 nparams_per_block(::PerChannel, nchan_seg) = nchan_seg
 
 # ── Frequency-coordinate builders ────────────────────────────────────────────
-# Build, for each global channel, the coordinate a freq-dependent term reads.
+# Build, for each global channel, the coordinate `x` a freq-dependent term reads.
 # `fseg_groups` is the list of channel-index groups (one per frequency segment).
-
-# Delay uses the physical offset (f − f0) in Hz so θ is a delay in seconds.
-function freq_coordinate(::Delay, channel_freqs, fseg_groups, f0)
-    return Float64.(channel_freqs) .- f0
-end
+# DEFAULT (any `FrequencyTerm`): the physical offset (f − f0) in Hz, so θ is a
+# delay in seconds — used by `Delay` and by simple custom terms. Terms needing a
+# different coordinate (dispersion, polynomials) override the specific method.
+freq_coordinate(::FrequencyTerm, channel_freqs, fseg_groups, f0) =
+    Float64.(channel_freqs) .- f0
 
 # Dispersion uses K·(1/f0 − 1/f) so θ is a differential TEC in TECU. The
 # f0-referencing keeps it orthogonal to the constant term at f0 (not globally —
@@ -114,12 +175,11 @@ function freq_coordinate(t::PolynomialFreq, channel_freqs, fseg_groups, f0)
     return x
 end
 
-# NOTE: there is deliberately NO generic `freq_coordinate(::AbstractGainTerm, …)`
-# fallback. `plan_parameters` calls `freq_coordinate` only for terms whose
-# `coord_kind` is `COORD_FREQ`, so a new frequency-dependent term that forgets to
-# define this method errors loudly instead of silently evaluating with xf = 0.
-
 # ── Time-coordinate builders ─────────────────────────────────────────────────
+# DEFAULT (any `TimeTerm`): (t − t0) in hours. `Rate` overrides to seconds so its
+# θ is a rate in Hz; polynomials override for a segment-scaled coordinate.
+time_coordinate(::TimeTerm, times, tseg_groups, t0) = Float64.(times) .- t0
+
 # Rate uses (t − t0) in seconds (t given in hours) so θ is a rate in Hz.
 function time_coordinate(::Rate, times, tseg_groups, t0)
     return (Float64.(times) .- t0) .* 3600.0
@@ -140,40 +200,80 @@ function time_coordinate(t::PolynomialTime, times, tseg_groups, t0)
     return x
 end
 
-# NOTE: no generic `time_coordinate(::AbstractGainTerm, …)` fallback either, for
-# the same reason — `plan_parameters` only calls it for `COORD_TIME` terms.
+# ── Parameter block view + pure evaluation ───────────────────────────────────
+#
+# `ParamBlock` is a lightweight, non-allocating handle on one block's parameters
+# inside the flat parameter vector (flat-θ path) or the per-site component array
+# (`GainPlan` path). It lets each term's `term_eval` read its parameters by
+# position (`p[1]`, `p[2]`) OR — when the term declares `param_names` — by name
+# (`p.τ`), with no offset arithmetic, while the evaluator hot loop stays
+# allocation-free. `Names` (a compile-time tuple of Symbols, possibly empty) is
+# the term's `param_names`; when non-empty, positional `p[k]` is bounds-checked
+# against it (so `p[3]` on a 2-parameter block errors instead of silently reading
+# the next block). Named access `p.τ` resolves to a compile-time-valid index.
+struct ParamBlock{Names, A}
+    data::A
+    off::Int
+end
+ParamBlock{Names}(data::A, off::Integer) where {Names, A} = ParamBlock{Names, A}(data, Int(off))
+ParamBlock(data, off::Integer) = ParamBlock{()}(data, off)
 
-# ── Pure scalar evaluation ───────────────────────────────────────────────────
-# `θ` is the full parameter vector; `off` the 1-based start of this block;
-# `xf`/`xt` the precomputed coordinate scalars for this channel/time; `clocal`
-# the channel's 1-based position within its frequency segment (for PerChannel).
-# These are the hot path of `evaluate_gains` — kept allocation-free and
-# type-stable so the whole forward map is inferrable (and Reactant-traceable).
-@inline term_eval(::ConstantTerm, θ, off, xf, xt, clocal) = @inbounds θ[off]
-@inline term_eval(::Delay, θ, off, xf, xt, clocal) = @inbounds 2π * θ[off] * xf
-@inline term_eval(::Dispersion, θ, off, xf, xt, clocal) = @inbounds θ[off] * xf
-@inline term_eval(::Rate, θ, off, xf, xt, clocal) = @inbounds 2π * θ[off] * xt
-@inline term_eval(::PerChannel, θ, off, xf, xt, clocal) = @inbounds θ[off + clocal - 1]
+@inline function Base.getindex(p::ParamBlock{Names}, k::Integer) where {Names}
+    @boundscheck (length(Names) == 0 || 1 <= k <= length(Names)) || throw(BoundsError(p, k))
+    return @inbounds getfield(p, :data)[getfield(p, :off) + Int(k) - 1]
+end
+@inline function Base.getproperty(p::ParamBlock{Names}, s::Symbol) where {Names}
+    (s === :data || s === :off) && return getfield(p, s)
+    return p[_name_index(Names, s)]
+end
+@inline Base.eltype(p::ParamBlock) = eltype(getfield(p, :data))
 
-@inline function term_eval(t::PolynomialFreq, θ, off, xf, xt, clocal)
-    v = zero(eltype(θ))
-    p = xf
-    @inbounds for d in 1:t.degree
-        v += θ[off + d - 1] * p
-        p *= xf
+# Compile-time index of a named parameter (constant-folds when `s` is a literal).
+@inline _name_index(names::Tuple, s::Symbol) =
+    first(names) === s ? 1 : 1 + _name_index(Base.tail(names), s)
+@inline _name_index(::Tuple{}, s::Symbol) = throw(ArgumentError("no parameter named :$s"))
+
+# `term_eval` — the pure, differentiable primitive each term defines. `p` is the
+# block's parameters (indexed from 1); `x` the term's coordinate scalar (freq or
+# time, per its family); `k` a `ChannelTerm`'s local channel index. These are the
+# hot path of `evaluate_gains` — allocation-free, linear in `p`, and branch-free
+# in `p`, so the whole forward map is inferrable (and AD- / Reactant-traceable).
+@inline term_eval(::ConstantTerm, p) = p[1]
+@inline term_eval(::Delay, p, x) = 2π * p[1] * x
+@inline term_eval(::Dispersion, p, x) = p[1] * x
+@inline term_eval(::Rate, p, x) = 2π * p[1] * x
+@inline term_eval(::PerChannel, p, k) = p[k]
+
+@inline function term_eval(t::PolynomialFreq, p, x)
+    v = zero(eltype(p))
+    xp = x
+    for d in 1:t.degree
+        v += p[d] * xp
+        xp *= x
     end
     return v
 end
 
-@inline function term_eval(t::PolynomialTime, θ, off, xf, xt, clocal)
-    v = zero(eltype(θ))
-    p = xt
-    @inbounds for d in 1:t.degree
-        v += θ[off + d - 1] * p
-        p *= xt
+@inline function term_eval(t::PolynomialTime, p, x)
+    v = zero(eltype(p))
+    xp = x
+    for d in 1:t.degree
+        v += p[d] * xp
+        xp *= x
     end
     return v
 end
+
+# Framework adapter: the evaluator hot loop calls this uniformly on every term
+# with the block's backing store `data` and 1-based `off`. It wraps them in a
+# `ParamBlock` carrying the term's `param_names` (for named/bounds-checked access)
+# and forwards to each family's `term_eval` the one coordinate that family reads
+# (`xf`/`xt`) or the local channel index (`k`), keeping the loop term-agnostic.
+@inline _paramblock(t, data, off) = ParamBlock{param_names(t)}(data, off)
+@inline _term_contribution(t::ScalarTerm, data, off, xf, xt, k) = term_eval(t, _paramblock(t, data, off))
+@inline _term_contribution(t::FrequencyTerm, data, off, xf, xt, k) = term_eval(t, _paramblock(t, data, off), xf)
+@inline _term_contribution(t::TimeTerm, data, off, xf, xt, k) = term_eval(t, _paramblock(t, data, off), xt)
+@inline _term_contribution(t::ChannelTerm, data, off, xf, xt, k) = term_eval(t, _paramblock(t, data, off), k)
 
 # ── Linear design columns (for WLS solvers) ──────────────────────────────────
 #

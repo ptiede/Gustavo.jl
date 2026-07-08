@@ -13,7 +13,7 @@ using Gustavo.Solve: nparameters, flatten, unflatten
 import Gustavo.Calibration as CAL
 using Gustavo.Calibration:
     DataGeometry, StationGainModel, GainComponent, TiedComponent, GainEvaluator,
-    ConstantTerm, Delay, Dispersion, PerChannel,
+    ConstantTerm, Delay, Dispersion, Rate, PerChannel,
     PerScan, GlobalTime, GlobalFrequency, PerSpectralWindow,
     PerFeed, SharedFeeds, ReferenceRelative, FeedComponent
 using Random: MersenneTwister
@@ -116,6 +116,37 @@ end
     @testset "type stability (homogeneous)" begin
         @test (@inferred evaluate_gains(plan, p, [2, 3], [1, 4])) isa Array{ComplexF64, 4}
         @test (@inferred evaluate_gains(plan, p)) isa Array{ComplexF64, 4}
+    end
+
+    @testset "named components (Lux-Chain-style keys)" begin
+        # Components named at the composition site become the ComponentVector keys
+        # (self-documenting), e.g. an LO-offset = a per-band Rate named `lo`.
+        named = StationGainModel(
+            phase = (
+                clock = TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency())),
+                lo = TiedComponent(GainComponent(Rate(), GlobalTime(), PerSpectralWindow()), SharedFeeds()),
+            ),
+            logamp = (
+                bandpass = TiedComponent(GainComponent(PerChannel(), GlobalTime(), PerSpectralWindow())),
+            ),
+        )
+        nplan = plan_gains(named, nant, geom)
+        np = zero_params(nplan)
+        @test propertynames(np.g1) == (:clock, :lo, :bandpass)
+        @test size(np.g1.lo) == (1, 1, 2, 1, nant)          # per-band (2 spw), shared feeds
+        @test size(np.g1.clock) == (1, 2, 1, 2, nant)       # per-scan (2), per-feed
+        # Named blocks are live views into the parameter vector.
+        np.g1.lo[1, 1, 2, 1, 1] = 5.0                        # 5 Hz LO offset, ant 1, band 2
+        @test flatten(np)[findfirst(==(5.0), flatten(np))] == 5.0
+        @test (@inferred evaluate_gains(nplan, np, [2, 3], [1, 4])) isa Array{ComplexF64, 4}
+        # A plain tuple still works — auto-named phase_1 / logamp_1.
+        auto = StationGainModel(phase = (TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency())),))
+        @test propertynames(plan_gains(auto, nant, geom).template.g1) == (:phase_1,)
+        # Duplicate names across phase + logamp are rejected.
+        @test_throws ErrorException StationGainModel(
+            phase = (bp = TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency())),),
+            logamp = (bp = TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency())),),
+        )
     end
 
     @testset "heterogeneous array (per-site override)" begin

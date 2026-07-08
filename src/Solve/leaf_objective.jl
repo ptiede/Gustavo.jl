@@ -110,3 +110,25 @@ function leaf_loglik(
     Smat = S === nothing ? point_source_coherency(length(ctx.bl_a); flux = flux) : S
     return leaf_loglik_gains(g, ctx, Smat)
 end
+
+"""
+    leaf_loglik(plan::GainPlan, p, ctx; S = nothing, flux = 1.0) -> Real
+
+Per-leaf WLS log-likelihood through the PER-SITE forward map: windowed
+`evaluate_gains(plan, p, ctx.chan_idx, ctx.ti_idx)` → [`leaf_loglik_gains`](@ref).
+`p` is the per-site parameter `ComponentVector`; `ctx` a [`build_leaf_ctx`](@ref)
+result. `S` defaults to an unpolarized point source of `flux`. This is the
+objective `GustavoEnzymeExt` reverse-differentiates in `p`
+([`leaf_value_and_grad`](@ref)).
+"""
+function leaf_loglik(plan::GainPlan, p, ctx; S = nothing, flux::Real = 1.0)
+    Smat = S === nothing ? point_source_coherency(length(ctx.bl_a); flux = flux) : S
+    return _leaf_loglik(plan, p, ctx, Smat)
+end
+
+# The bare differentiated closure: every argument but `p` is AD-inactive
+# (captured `Const`). No keyword defaults and no branch on `p`, so Enzyme
+# reverse-mode traces straight through the grouped `evaluate_gains` and the fused
+# per-product loop of `leaf_loglik_gains`.
+_leaf_loglik(plan::GainPlan, p, ctx, S) =
+    leaf_loglik_gains(evaluate_gains(plan, p, ctx.chan_idx, ctx.ti_idx), ctx, S)

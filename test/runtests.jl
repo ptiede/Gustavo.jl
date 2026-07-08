@@ -65,6 +65,10 @@ include("test_solve_objective.jl")
 # forward map, vs the flat-θ evaluator (Milestone 2).
 include("test_solve_plan.jl")
 
+# Gustavo.Solve (Stage 2): per-leaf Enzyme value + structured gradient, vs
+# ForwardDiff, incl. structural sparsity (Milestone 3, GustavoEnzymeExt).
+include("test_solve_gradient.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

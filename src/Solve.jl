@@ -28,7 +28,7 @@ import ..Calibration: evaluate_gains, nparameters
 # Non-exported forward-map internals reused by the per-site plan (Milestone 2).
 using ..Calibration:
     term, time_segmentation, freq_segmentation, coord_kind, COORD_FREQ, COORD_TIME,
-    freq_coordinate, time_coordinate, term_eval, nfeed_blocks
+    freq_coordinate, time_coordinate, _term_contribution, nfeed_blocks
 using ..Graph
 using DimensionalData
 using ComponentArrays
@@ -37,6 +37,7 @@ using ComponentArrays: getdata, getaxes
 include("Solve/sitemodel.jl")
 include("Solve/plan.jl")
 include("Solve/leaf_objective.jl")
+include("Solve/logdensity.jl")
 
 # Milestone 1 — per-leaf coherency WLS objective.
 export build_leaf_ctx, point_source_coherency, leaf_loglik_gains, leaf_loglik
@@ -44,5 +45,7 @@ export build_leaf_ctx, point_source_coherency, leaf_loglik_gains, leaf_loglik
 export ArrayGainModel, site_model
 export GainPlan, GroupPlan, SiteComponent, plan_gains
 export zero_params, flatten, unflatten, group_arrays, evaluate_gains
+# Milestone 3 — per-leaf reverse-mode value + structured gradient (Enzyme ext).
+export leaf_value_and_grad
 
 end # module Solve

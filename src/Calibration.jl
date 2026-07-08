@@ -44,14 +44,14 @@ export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FrequencyBands
 export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
 
 # Terms
-export AbstractGainTerm
+export AbstractGainTerm, ScalarTerm, FrequencyTerm, TimeTerm, ChannelTerm
 export ConstantTerm, Delay, Dispersion, Rate, PolynomialFreq, PolynomialTime, PerChannel
-export basis_columns, nparams_per_block
+export basis_columns, nparams_per_block, param_names
 
 # Models and tying
 export GainComponent, TiedComponent, StationGainModel
 export AbstractFeedTying, PerFeed, SharedFeeds, ReferenceRelative, FeedComponent
-export phase_components, logamp_components
+export phase_components, logamp_components, phase_component_names, logamp_component_names
 export phase_is_per_scan, amplitude_is_per_scan, component_is_per_scan
 export validate_station_gain_model, station_model_summary, component_label
 

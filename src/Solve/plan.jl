@@ -165,18 +165,23 @@ function plan_gains(am::ArrayGainModel, nant::Integer, geom::DataGeometry)
         na = length(ants)
         phase = map(tc -> _site_component(tc, geom), phase_components(m))
         logamp = map(tc -> _site_component(tc, geom), logamp_components(m))
-        phase_syms = ntuple(j -> Val(Symbol(:phase_, j)), length(phase))
-        logamp_syms = ntuple(j -> Val(Symbol(:logamp_, j)), length(logamp))
+        # Component keys in the parameter ComponentVector come from the model's
+        # component names (`p.<group>.<name>`), so the parameters are
+        # self-documenting; unique across phase + logamp (checked at model build).
+        pnames = phase_component_names(m)
+        anames = logamp_component_names(m)
+        phase_syms = map(Val, pnames)
+        logamp_syms = map(Val, anames)
         groupsym = Symbol(:g, g)
 
         # This group's parameter block: one named array per component,
         # A[nparam, ntseg, nfseg, nfeedblock, nant_in_group].
         pairs = Pair{Symbol, Array{Float64, 5}}[]
         for (j, c) in enumerate(phase)
-            push!(pairs, Symbol(:phase_, j) => zeros(Float64, c.nparam, c.ntseg, c.nfseg, c.nfb, na))
+            push!(pairs, pnames[j] => zeros(Float64, c.nparam, c.ntseg, c.nfseg, c.nfb, na))
         end
         for (j, c) in enumerate(logamp)
-            push!(pairs, Symbol(:logamp_, j) => zeros(Float64, c.nparam, c.ntseg, c.nfseg, c.nfb, na))
+            push!(pairs, anames[j] => zeros(Float64, c.nparam, c.ntseg, c.nfseg, c.nfb, na))
         end
         group_templates[g] = groupsym => (; pairs...)
         groups[g] = GroupPlan(Val(groupsym), m, ants, phase, logamp, phase_syms, logamp_syms)
@@ -233,7 +238,7 @@ end
 @inline _pull(pg, syms::Tuple) = map(v -> getproperty(pg, _sym(v)), syms)
 
 # Linear index of A[1, ts, fs, fb, la] in the column-major component array (the
-# parameter axis is fastest), so `term_eval(term, A, off, …)` reads the block.
+# parameter axis is fastest), so `ParamBlock(A, off)` indexes the block.
 @inline _block_offset(c::SiteComponent, ts, fs, fb, la) =
     1 + c.nparam * ((ts - 1) + c.ntseg * ((fs - 1) + c.nfseg * ((fb - 1) + c.nfb * (la - 1))))
 
@@ -248,12 +253,12 @@ end
     @inbounds fb1 = c.fb1[feed]
     if fb1 != 0
         off = _block_offset(c, ts, fs, fb1, la)
-        val += term_eval(c.term, A, off, xf, xt, cl)
+        val += _term_contribution(c.term, A, off, xf, xt, cl)
     end
     @inbounds fb2 = c.fb2[feed]
     if fb2 != 0
         off = _block_offset(c, ts, fs, fb2, la)
-        val += term_eval(c.term, A, off, xf, xt, cl)
+        val += _term_contribution(c.term, A, off, xf, xt, cl)
     end
     return val
 end
@@ -271,12 +276,17 @@ function _eval_group!(gains, gp::GroupPlan, pg, chan_idx, ti_idx, ::Type{T}) whe
     aarr = _pull(pg, gp.logamp_syms)
     ants = gp.ants
     z = zero(T)
-    @inbounds for feed in 1:2
+    # NB: the loop body is deliberately NOT wrapped in a blanket `@inbounds` — the
+    # framework array reads inside `_site_value` carry their own `@inbounds`, but a
+    # term's `p[k]` stays bounds-checked (a custom term over-indexing its block
+    # errors instead of silently reading the next block). Elidable with
+    # `--check-bounds=no` in production.
+    for feed in 1:2
         for (la, ant) in enumerate(ants)
             for (tii, ti) in enumerate(ti_idx), (ci, c) in enumerate(chan_idx)
                 phase = _sum_site(gp.phase, parr, z, feed, la, ti, c)
                 logamp = _sum_site(gp.logamp, aarr, z, feed, la, ti, c)
-                gains[ci, tii, ant, feed] = exp(logamp) * cis(phase)
+                @inbounds gains[ci, tii, ant, feed] = exp(logamp) * cis(phase)
             end
         end
     end
