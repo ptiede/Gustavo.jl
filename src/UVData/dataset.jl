@@ -24,6 +24,25 @@ abstract type AbstractUVDataset end
 # this for its disk-backed array type.
 _layer_is_lazy(::AbstractArray) = false
 
+# Source-file path a lazy leaf's data reads from (`nothing` for eager leaves).
+# The path lives inside the lazy backing descriptor, which is a plain value —
+# so a lazy leaf carries everything a remote worker needs to reopen the file and
+# materialize, PROVIDED the workers share the filesystem (same path visible on
+# each node). An I/O extension overrides `_leaf_source_path` for its disk-backed
+# array type; `src/` stays format-neutral.
+_leaf_source_path(::AbstractArray) = nothing
+
+"""
+    leaf_source_path(leaf) -> Union{String, Nothing}
+
+The on-disk file a lazy `leaf` materializes from, or `nothing` if the leaf is
+already eager (in-memory). Because the path is part of the serializable lazy
+descriptor, a lazy `UVSet` can be shipped to a Dagger worker and materialized
+there as long as the file is reachable at the same path on that worker.
+"""
+leaf_source_path(leaf::DimensionalData.AbstractDimTree) =
+    _leaf_source_path(parent(leaf[:vis]))
+
 """
     is_lazy(leaf) -> Bool
 

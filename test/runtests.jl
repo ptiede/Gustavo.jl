@@ -45,6 +45,26 @@ include("test_fringe_diagnostics.jl")
 # Reuses _build_fringe_uvset + _coherence from test_pipeline.jl.
 include("test_phasecal.jl")
 
+# Graceful missing-polarization helpers (pol_index_or / coherency_slots):
+# the 2×2 coherency-assembly seam for partial-pol arrays (Stage-1 refactor).
+include("test_polarization.jl")
+
+# Gustavo.Graph: distributed map/reduce substrate (Serial + Dagger executors).
+# Reuses _build_fringe_uvset from test_pipeline.jl.
+include("test_graph.jl")
+
+# Distribution-readiness: lazy UVSet serialization round-trip + a lazy-set
+# pmapreduce under the DaggerExecutor. Reuses build_synth_idi_uvset from
+# test_fitsidi.jl.
+include("test_serialize.jl")
+
+# Gustavo.Solve (Stage 2): per-leaf coherency-matrix WLS objective (Milestone 1).
+include("test_solve_objective.jl")
+
+# Gustavo.Solve (Stage 2): per-site 2D-array parameter container + grouped
+# forward map, vs the flat-θ evaluator (Milestone 2).
+include("test_solve_plan.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

@@ -29,14 +29,14 @@ export BaselineIndex, UVSet, with_visibilities, scan_key
 export apply, mapleaves, flatmap, leaves, sources, scan_ids, partitions, pol_products
 export set_bunit, with_bunit
 export baseline, baselines_per_scan, baselines
-export pol_index, pol_at, baseline_index
+export pol_index, pol_index_or, pol_at, coherency_slots, baseline_index
 export obs_time
 export scan_name, primary_scan_name, scan_intents, sub_scan_name, scan_window, participating_antennas
 export select_source, select_scan, select_station, select_baseline, select_partition
 export merge_uvsets, time_window
 export load_uvfits, write_uvfits, default_output_path
 export load_fitsidi, write_fitsidi
-export AbstractUVDataset, is_lazy, materialize_leaf, materialize, materialize_group
+export AbstractUVDataset, is_lazy, materialize_leaf, materialize, materialize_group, leaf_source_path
 export apply_calibration
 export primary_cards, register_primary_cards!
 export TimeAverage, scan_average
