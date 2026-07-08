@@ -516,17 +516,10 @@ function _apply_precal!(grp::_ScanGroup, pc, inner::Integer = 1)
     return grp
 end
 
-# Same, for one materialized band leaf (pass 2 works leaf-wise). NON-mutating:
-# an eager input's "materialized" leaf is the caller's own leaf, so dividing in
-# place would corrupt the user's uvset — copy + rebuild instead (the same
-# pattern as `apply_calibration`; one transient leaf copy).
-function _precal_leaf(leaf, pc, geom::DataGeometry)
-    pc === nothing && return leaf
-    ci, ti = leaf_window(geom, leaf)
-    V = copy(parent(leaf[:vis]))
-    W = copy(parent(leaf[:weights]))
-    bl_pairs = collect(UVData.baselines(leaf).pairs)
-    pols = String.(pol_products(leaf))
+# Divide the precal gains out of one band leaf's `V`/`W` arrays IN PLACE (and apply
+# the channel mask). Shared core of the two leaf wrappers below; `V`/`W` are
+# (nchan, nti, nbl, npol). `ci`/`ti` are the leaf's global channel/time windows.
+function _divide_precal!(V, W, pc, ci, ti, bl_pairs, pols)
     nchan, nti, nbl, npol = size(V)
     if pc.ev !== nothing
         tconst = _precal_time_constant(pc.ev, ti)
@@ -552,7 +545,38 @@ function _precal_leaf(leaf, pc, geom::DataGeometry)
             pc.mask[gc] && (W[c, :, :, :] .= 0)
         end
     end
+    return nothing
+end
+
+# Same, for one materialized band leaf (pass 2 works leaf-wise). NON-mutating:
+# an eager input's "materialized" leaf is the caller's own leaf, so dividing in
+# place would corrupt the user's uvset — copy + rebuild instead (the same
+# pattern as `apply_calibration`; one transient leaf copy). Use `_precal_leaf!`
+# when the leaf's arrays are known-private (freshly materialized from a lazy
+# source) — it skips this ~scan-sized copy.
+function _precal_leaf(leaf, pc, geom::DataGeometry)
+    pc === nothing && return leaf
+    ci, ti = leaf_window(geom, leaf)
+    V = copy(parent(leaf[:vis]))
+    W = copy(parent(leaf[:weights]))
+    _divide_precal!(V, W, pc, ci, ti, collect(UVData.baselines(leaf).pairs), String.(pol_products(leaf)))
     return with_visibilities(leaf, V, W)
+end
+
+# In-place variant for leaves whose backing arrays are PRIVATE (the streaming
+# solve materializes each lazy leaf into fresh arrays before this runs, so there
+# is no user-owned data to protect). Divides the precal out of the leaf's own
+# `vis`/`weights` and returns the same leaf — no defensive copy, no rebuild. On a
+# big VGOS scan the copy `_precal_leaf` makes is ~4 GiB of alloc + memcpy, so this
+# is the pass-2 fast path (see `_materialize_leaf_group`).
+function _precal_leaf!(leaf, pc, geom::DataGeometry)
+    pc === nothing && return leaf
+    ci, ti = leaf_window(geom, leaf)
+    _divide_precal!(
+        parent(leaf[:vis]), parent(leaf[:weights]), pc, ci, ti,
+        collect(UVData.baselines(leaf).pairs), String.(pol_products(leaf)),
+    )
+    return leaf
 end
 
 # Precal-aware materialization wrappers — the solve paths call these; the plain
@@ -568,11 +592,16 @@ end
 function _materialize_leaf_group(keyed_leaves_lazy, geom::DataGeometry, pc, inner::Integer = 1)
     keyed = _materialize_leaf_group(keyed_leaves_lazy)
     pc === nothing && return keyed
+    # When every source leaf was lazy, `keyed`'s arrays are freshly materialized
+    # (private), so precal can divide in place — no ~scan-sized defensive copy.
+    # An eager source hands back the caller's own leaf, so fall back to the copy.
+    private = all(((_, l),) -> UVData.is_lazy(l), keyed_leaves_lazy)
+    apply = private ? _precal_leaf! : _precal_leaf
     out = Vector{Any}(undef, length(keyed))
     tasks = map(Iterators.partition(eachindex(keyed), cld(length(keyed), clamp(Int(inner), 1, length(keyed))))) do chunk
         Threads.@spawn for i in chunk
             k, m = keyed[i]
-            out[i] = (k, _precal_leaf(m, pc, geom))
+            out[i] = (k, apply(m, pc, geom))
         end
     end
     foreach(wait, tasks)

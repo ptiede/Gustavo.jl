@@ -621,21 +621,50 @@ end
 
 # Cap on the transient span buffer; larger spans fall back to the (slow, seek-bound)
 # per-leaf path. Sized so a real scan's whole row span fits the fast one-read path:
-# on the VLBA Q-band validation file the biggest scans span ~1.01 GB, so a 1 GB cap
-# pushed ~half the data onto the slow path. The solve's memory governor
-# (`_group_peak_bytes` × `_bounded_ntasks`) bounds how many of these spans are
-# resident at once, so the cap can be generous; 3 GiB covers this file with margin.
-const _MAX_SPAN_BYTES = 3 * 1024 * 1024 * 1024   # 3 GiB
+# VLBA Q-band scans span ~1 GB; VGOS VR2505 scans span up to ~3.34 GB. The solve's
+# memory governor (`_group_peak_bytes` × `_bounded_ntasks`) bounds how many spans
+# are resident at once (an over-budget group runs alone), so the cap can be generous;
+# 6 GiB covers both files with margin and keeps every real scan on the fast path.
+const _MAX_SPAN_BYTES = 6 * 1024 * 1024 * 1024   # 6 GiB
+
+# Byte size above which the span read is split across concurrent handles. Below it,
+# one sequential `readbytes!` already saturates the device; above it, multiple
+# streams hide LUKS/dm-crypt latency (measured ~1 GB/s single-stream vs ~2-3 GB/s
+# with 2-8 streams on the encrypted NVMe when a big scan runs alone — the scheduler
+# runs over-budget scans alone, so there is no cross-group read parallelism then).
+const _SPAN_STREAM_BYTES = 512 * 1024 * 1024     # 512 MiB
+const _SPAN_MAX_STREAMS = 4
 
 # Read the contiguous byte span covering UV_DATA rows [rmin, rmax] into one buffer
 # (or `nothing` if it would exceed the cap). The file is time-sorted, so a scan's
-# rows are contiguous and this is a single sequential read.
+# rows are contiguous. Small spans: one sequential read on `io`. Large spans: split
+# the byte range across `nstream` concurrent handles (disjoint ranges → no data
+# race) to recover device bandwidth the single buffered stream leaves on the table.
 function _read_row_span(io, a::IDIChunkArray, rmin::Int, rmax::Int)
     nbytes = (rmax - rmin + 1) * a.L
     nbytes <= _MAX_SPAN_BYTES || return nothing
     span = Vector{UInt8}(undef, nbytes)
-    seek(io, a.begpos + a.L * (rmin - 1))
-    readbytes!(io, span, nbytes)
+    base = a.begpos + a.L * (rmin - 1)
+    nstream = nbytes >= _SPAN_STREAM_BYTES ?
+        clamp(cld(nbytes, _SPAN_STREAM_BYTES), 1, _SPAN_MAX_STREAMS) : 1
+    if nstream == 1
+        seek(io, base)
+        readbytes!(io, span, nbytes)
+    else
+        part = cld(nbytes, nstream)
+        tforeach(1:nstream; ntasks = nstream) do s
+            lo = (s - 1) * part
+            len = min(part, nbytes - lo)
+            len <= 0 && return
+            sio = FITSFiles.open_lazy_source(a.data)
+            try
+                seek(sio, base + lo)
+                GC.@preserve span unsafe_read(sio, pointer(span, lo + 1), len)
+            finally
+                close(sio)
+            end
+        end
+    end
     return span
 end
 
