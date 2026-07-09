@@ -49,6 +49,11 @@ using Test
         @test vs == vd
         @test flatten(gs) == flatten(gd)
         @test gs isa typeof(p)                       # structured gradient
+        # Force the per-leaf granularity path (target > #groups): the scan's band
+        # leaves fan out to one compute task each — still bit-identical to Serial.
+        vl, gl = fringe_objective_and_grad(plan, p, uvset, geom; executor = DaggerExecutor(target = 8))
+        @test vs == vl
+        @test flatten(gs) == flatten(gl)
     end
 
     @testset "value-only path + sum == monolithic" begin

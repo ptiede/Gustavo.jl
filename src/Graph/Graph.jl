@@ -28,6 +28,18 @@ using DimensionalData: AbstractDimTree, TreeDict, metadata, branches, rebuild
 using OrderedCollections: OrderedDict
 import Dagger
 
+# Teach MemPool (Dagger's datastore) how to size our leaf trees. Dagger moves every
+# task value through `MemPool.tochunk` → `approx_size`; for a `Vector`, that calls
+# `fixedlength(eltype)`, which recurses through the element struct's fields and
+# THROWS on a CONCRETE type that has ABSTRACT-typed fields — a `DimTree` holds
+# `AbstractDimTree`-typed children. (A single `DimTree` is fine: it takes MemPool's
+# generic `summarysize` path; only a `Vector{DimTree}` — e.g. a materialized scan
+# group crossing a task boundary — hits `fixedlength`.) Mark `AbstractDimTree` as
+# variable-length so it is stored BY REFERENCE, exactly as MemPool already does for
+# `String`/`Missing`/`Any`. Without this, DimTree data cannot cross a Dagger task
+# boundary at all — see `test/test_graph.jl`.
+Dagger.MemPool.fixedlength(::Type{<:DimensionalData.AbstractDimTree}, cycles = nothing) = -1
+
 export ParallelCoords, MapSpec, ReduceSpec
 export AbstractExecutor, SerialExecutor, DaggerExecutor
 export pmap, pmapreduce, load_groups
@@ -63,10 +75,12 @@ _as_over_tuple(o::Tuple) = o
 _as_over_tuple(o) = Tuple(o)
 
 function _check_supported(pc::ParallelCoords)
-    pc.over == (:partition,) || throw(ArgumentError(
-        "Graph: only `over = (:partition,)` is supported in this version " *
-            "(got $(pc.over)); finer within-leaf chunking is a planned extension.",
-    ))
+    pc.over == (:partition,) || throw(
+        ArgumentError(
+            "Graph: only `over = (:partition,)` is supported in this version " *
+                "(got $(pc.over)); finer within-leaf chunking is a planned extension.",
+        )
+    )
     return pc
 end
 
@@ -120,25 +134,30 @@ Sequential executor. `pmap`/`pmapreduce` under it are bit-identical to a plain
 struct SerialExecutor <: AbstractExecutor end
 
 """
-    DaggerExecutor()
+    DaggerExecutor(; target = Threads.nthreads())
 
-Dagger.jl executor — the general parallel path. Each load-group becomes a
-`Dagger.@spawn` task (which materializes the group once, then maps its leaves),
-and Dagger's scheduler runs them across threads in one process or across
-distributed workers, unchanged. Results are reassembled in deterministic
-partition order, so the output equals the `SerialExecutor`'s.
+Dagger.jl executor — the general parallel path. Dagger's scheduler runs the task
+DAG across threads in one process (or across distributed workers, unchanged), and
+results are reassembled in deterministic partition order so the output equals the
+`SerialExecutor`'s.
+
+`target` is the parallel width the planner aims for. The processing set is
+parallelized at the COARSEST granularity that already reaches `target`:
+
+- **group** — one task per `(source, scan)` load-group (the shared-load unit): used
+  when there are `≥ target` groups. Each task materializes its group once then maps
+  its leaves serially.
+- **leaf** — when there are fewer groups than `target`, each group still materializes
+  ONCE (one load task) but its band-leaves fan out to one compute task each (so a
+  few-scan, already-materialized solve still fills the cores).
+
+(Within-leaf chunking — finer than leaf — is the `chunkable` path of
+[`pmapreduce`](@ref).)
 """
-struct DaggerExecutor <: AbstractExecutor end
-
-# Run `work` over each element of `items`, returning a Vector of results in the
-# SAME order as `items`. Executors override this. The default is serial.
-_run(::SerialExecutor, work, items) = map(work, items)
-# Dagger owns the parallelism: one task per load-group, then gather. The shared
-# single-read-per-group happens inside `work` (via `materialize_group`).
-function _run(::DaggerExecutor, work, items)
-    tasks = [Dagger.@spawn work(item) for item in items]
-    return map(fetch, tasks)
+struct DaggerExecutor <: AbstractExecutor
+    target::Int
 end
+DaggerExecutor(; target::Integer = max(Threads.nthreads(), 1)) = DaggerExecutor(Int(target))
 
 # ── Load-group discovery (the shared load layer) ─────────────────────────────
 
@@ -179,24 +198,70 @@ function _map_to_resultmap(
     )
     root = metadata(uvset)
     groups = load_groups(uvset)
-    work = function (group)
-        leaves = [leaf for (_, leaf) in group]
-        mats = materialize_group(leaves; layers = layers)
-        out = Vector{Pair{Symbol, Any}}(undef, length(group))
-        @inbounds for i in eachindex(group)
-            key = group[i].first
-            data = mats[i]
-            coords = (; key = key, info = metadata(data), root = root)
-            out[i] = key => _call_node(spec.node_fn, data, coords, spec.params)
-        end
-        return out
-    end
-    grouped = _run(exec, work, groups)
+    grouped = _run_groups(exec, spec, groups, root, layers)
     resultmap = Dict{Symbol, Any}()
     for gr in grouped, kv in gr
         resultmap[kv.first] = kv.second
     end
     return resultmap
+end
+
+# Materialize a group and map the node function over its leaves SERIALLY — the
+# shared-load unit of work. Returns the group's `key => result` pairs.
+function _group_work(group, spec::MapSpec, root, layers)
+    leaves = [leaf for (_, leaf) in group]
+    mats = materialize_group(leaves; layers = layers)
+    out = Vector{Pair{Symbol, Any}}(undef, length(group))
+    @inbounds for i in eachindex(group)
+        key = group[i].first
+        data = mats[i]
+        coords = (; key = key, info = metadata(data), root = root)
+        out[i] = key => _call_node(spec.node_fn, data, coords, spec.params)
+    end
+    return out
+end
+
+# Materialize a group's leaves (the shared single read); the load task the per-leaf
+# compute tasks depend on. Returns a `Vector{DimTree}` — which crosses the Dagger
+# task boundary, hence the `AbstractDimTree` `fixedlength` method at the top.
+_matgroup(group, layers) = materialize_group([leaf for (_, leaf) in group]; layers = layers)
+
+# One leaf's node computation against an already-materialized group (`mats` is the
+# group's Vector of materialized leaves; `i` selects this leaf). The leaf-granularity
+# path runs one Dagger task of these per band-leaf, all depending on the one load.
+function _leaf_work(mats, i::Int, key::Symbol, spec::MapSpec, root)
+    data = mats[i]
+    coords = (; key = key, info = metadata(data), root = root)
+    return _call_node(spec.node_fn, data, coords, spec.params)
+end
+
+# Serial: walk groups (and their leaves) sequentially — the reference.
+_run_groups(::SerialExecutor, spec::MapSpec, groups, root, layers) =
+    [_group_work(g, spec, root, layers) for g in groups]
+
+# Dagger: pick group- vs leaf-granularity by the executor's `target` width, so a
+# few-scan solve (few groups) still fans its band-leaves across the workers.
+function _run_groups(exec::DaggerExecutor, spec::MapSpec, groups, root, layers)
+    ngroups = length(groups)
+    if ngroups == 0
+        return Vector{Vector{Pair{Symbol, Any}}}()
+    elseif ngroups >= exec.target
+        # Enough groups to fill the target: one Dagger task per group (serial leaves).
+        tasks = [Dagger.@spawn _group_work(g, spec, root, layers) for g in groups]
+        return map(fetch, tasks)
+    end
+    # Fewer groups than target → one Dagger LOAD task per group (materialize once,
+    # the shared read) and one Dagger COMPUTE task per band-leaf depending on it.
+    # The whole DAG is spawned before any fetch, so leaves run concurrently.
+    matT = [Dagger.@spawn _matgroup(g, layers) for g in groups]
+    tasks = [
+        [Dagger.@spawn _leaf_work(matT[gi], i, groups[gi][i].first, spec, root) for i in eachindex(groups[gi])]
+            for gi in 1:ngroups
+    ]
+    return [
+        [groups[gi][i].first => fetch(tasks[gi][i]) for i in eachindex(groups[gi])]
+            for gi in 1:ngroups
+    ]
 end
 
 # ── pmap ─────────────────────────────────────────────────────────────────────
@@ -277,9 +342,11 @@ end
 
 function _reduce_results(spec::ReduceSpec, results::AbstractVector)
     if isempty(results)
-        spec.init === nothing && throw(ArgumentError(
-            "pmapreduce: empty processing set and no `init` to return.",
-        ))
+        spec.init === nothing && throw(
+            ArgumentError(
+                "pmapreduce: empty processing set and no `init` to return.",
+            )
+        )
         return spec.init
     end
     combined = spec.tree ? _tree_reduce(spec.op, results) : foldl(spec.op, results)
