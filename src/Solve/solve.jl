@@ -51,6 +51,25 @@ function _nant(uvset)
     return n
 end
 
+# Resolve the `warmstart` option into a starting parameter `ComponentVector`:
+# `nothing` → zeros; `:fft`/`:auto` → the FFT search + stationization seed; an
+# explicit `ComponentVector` is passed through unchanged.
+_resolve_warmstart(::Nothing, plan, uvset, geom; kw...) = zero_params(plan)
+function _resolve_warmstart(
+        w::Symbol, plan, uvset, geom;
+        ref_ant, search, stationization,
+    )
+    (w === :fft || w === :auto) || error(
+        "warmstart symbol must be :fft or :auto (got :$w); pass a ComponentVector " *
+            "or nothing otherwise",
+    )
+    return fft_warmstart(
+        plan, uvset, geom;
+        ref_ant = ref_ant, search = search, stationization = stationization,
+    )
+end
+_resolve_warmstart(w, plan, uvset, geom; kw...) = w
+
 """
     fringe_solve(uvset, model; optimizer = nothing, source = ProfiledPointSource(),
                  gauge = ReferenceAntenna(ref_ant), scaling = AutoScale(),
@@ -68,8 +87,14 @@ The optimizer runs on a REPARAMETERIZED problem: `gauge` fixes the unobservable
 gauge (default [`ReferenceAntenna`](@ref)`(ref_ant)` — pins the refant's phase and
 amplitude), and `scaling` conditions the variables (default [`AutoScale`](@ref)).
 Both are user-specifiable. `source` defaults to a profiled point source (generic,
-source-agnostic, no absolute amplitude scale); `warmstart` is a `ComponentVector`
-(defaults to zeros); extra `solve_kwargs` pass through to `solve`.
+source-agnostic, no absolute amplitude scale); extra `solve_kwargs` pass through
+to `solve`.
+
+`warmstart` selects the optimizer's start: `nothing` (zeros), `:fft`/`:auto` (the
+FFT matched-filter search + closure stationization seed — [`fft_warmstart`](@ref),
+which resolves the delay/rate non-convexity a zero start cannot escape), or an
+explicit `ComponentVector`. `search`/`stationization` configure the two warm-start
+stages (used only for `:fft`/`:auto`).
 """
 function fringe_solve(
         uvset, model;
@@ -78,6 +103,8 @@ function fringe_solve(
         gauge::Union{AbstractGauge, Nothing} = nothing,
         scaling::AbstractScaling = AutoScale(),
         warmstart = nothing,
+        search::FringeSearch = FringeSearch(),
+        stationization::Stationization = Stationization(),
         ref_ant::Integer = 1,
         executor = SerialExecutor(),
         maxiters::Integer = 1000,
@@ -92,7 +119,10 @@ function fringe_solve(
     am = model isa ArrayGainModel ? model : ArrayGainModel(model)
     nant = _nant(uvset)
     plan = plan_gains(am, nant, geom)
-    p0 = warmstart === nothing ? zero_params(plan) : warmstart
+    p0 = _resolve_warmstart(
+        warmstart, plan, uvset, geom;
+        ref_ant = ref_ant, search = search, stationization = stationization,
+    )
     post = FringePosterior(plan, uvset, geom; source = source, executor = executor)
 
     gge = gauge === nothing ? ReferenceAntenna(ref_ant) : gauge

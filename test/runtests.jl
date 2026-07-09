@@ -83,6 +83,11 @@ include("test_solve_reparam.jl")
 # → machine-precision recovery of injected gains (Milestones 5 + 5b).
 include("test_solve_fit.jl")
 
+# Gustavo.Solve (Stage 2): FFT search + stationization warm-start — seeds the
+# delay/phase basin (wrapping delays a zero start cannot escape) so LBFGS reaches
+# machine precision (Milestone 5c). Reuses _forward_uvset from test_solve_fit.jl.
+include("test_solve_warmstart.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

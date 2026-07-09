@@ -41,6 +41,7 @@ include("Solve/source.jl")
 include("Solve/leaf_objective.jl")
 include("Solve/logdensity.jl")
 include("Solve/reparam.jl")
+include("Solve/warmstart.jl")
 include("Solve/solve.jl")
 
 # Milestone 1 — per-leaf coherency WLS objective.
@@ -59,5 +60,7 @@ export fringe_solve, FringeSolution
 # Milestone 5b — gauge fixing + parameter scaling (reparameterization).
 export AbstractGauge, ReferenceAntenna, NoGauge, FixParams
 export AbstractScaling, AutoScale, NoScaling, CustomScale, param_scale
+# Milestone 5c — FFT search + stationization warm-start seed.
+export fft_warmstart, seed_from_stationization!
 
 end # module Solve
