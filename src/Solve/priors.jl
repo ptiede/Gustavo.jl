@@ -7,9 +7,10 @@
 # (the priors here are Gaussian, so grad = −Q·x in O(n)); it is added to the
 # Enzyme likelihood gradient in `logdensity_and_gradient`.
 #
-# v1 (OU-first): the stochastic-time `OUPrior` on a station's per-integration
-# adhoc-phase track. `IIDGaussianPrior` and `SmoothnessPrior` (2nd-difference along
-# frequency) are the follow-ups.
+# Priors: the stochastic-time `OUPrior` on a station's per-integration adhoc-phase
+# track (Matérn-1/2 tridiagonal precision), the elementwise `IIDGaussianPrior`
+# (bandpass amp / dTEC shrinkage), and the `SmoothnessPrior` (2nd-difference
+# curvature along frequency — the logprior form of the old penalized bandpass).
 
 import ..Fringe
 using ..Fringe: ou_step
@@ -41,6 +42,39 @@ struct OUPrior{T} <: AbstractPrior
     σ2::T
 end
 OUPrior(; τ::Real, σ2::Real) = OUPrior(promote(τ, σ2)...)
+
+"""
+    IIDGaussianPrior(; μ = 0, σ)
+
+Elementwise (i.i.d.) Gaussian prior `N(μ, σ²)` on every parameter of a component's
+block — shrinkage toward `μ` (default 0). Used for a bandpass amplitude or a dTEC
+magnitude. `logprior = −½ Σ ((x−μ)/σ)² + const`, gradient `−(x−μ)/σ²`. With the
+default `μ = 0`, unused (padded ragged-`PerChannel`) slots sit at 0 and contribute
+nothing.
+"""
+struct IIDGaussianPrior{T} <: AbstractPrior
+    μ::T
+    σ::T
+end
+IIDGaussianPrior(; μ::Real = 0.0, σ::Real) = IIDGaussianPrior(promote(μ, σ)...)
+
+"""
+    SmoothnessPrior(λ)
+
+Second-difference (curvature) prior along FREQUENCY on a per-channel component
+(the bandpass): `logprior = −½ λ Σ (x_{i−1} − 2x_i + x_{i+1})²`, penalizing curvature
+of the per-channel spectrum WITHIN each frequency segment (never across a spw
+boundary), gradient `−λ (D²)ᵀD² x`. This is the proper-logprior form of the old
+`PenalizedBandpass` Whittaker regularizer: the MAP of a weighted-Gaussian
+likelihood plus `SmoothnessPrior(λ)` equals `_whittaker_smooth(y, w, λ/median(w))`.
+An improper prior (constants and linear ramps are unpenalized), so it carries no
+normalizing constant.
+"""
+struct SmoothnessPrior{T} <: AbstractPrior
+    λ::T
+end
+SmoothnessPrior(λ::Real) = SmoothnessPrior{typeof(float(λ))}(float(λ))
+SmoothnessPrior(; λ::Real) = SmoothnessPrior(λ)
 
 """
     ComponentPriors(; name = prior, …)
@@ -159,6 +193,52 @@ function _apply_prior!(pr::OUPrior, comp::SiteComponent, A, gA, geom)
         gx = @view gA[1, :, fs, fb, la]
         E = _ou_energy_and_grad!(gx, d, e, x)
         lp += -E - cst
+    end
+    return lp
+end
+
+# IIDGaussianPrior: elementwise N(μ, σ²) over the whole component block.
+function _apply_prior!(pr::IIDGaussianPrior, ::SiteComponent, A, gA, geom)
+    σ2 = pr.σ^2
+    c = 0.5 * log(2π * σ2)
+    lp = 0.0
+    @inbounds for I in eachindex(A)
+        r = A[I] - pr.μ
+        lp += -0.5 * r * r / σ2 - c
+        gA[I] += -r / σ2
+    end
+    return lp
+end
+
+# Channels per frequency segment (the real per-`PerChannel` block length), so the
+# curvature penalty runs only over a segment's real channels, never into padded
+# slots or across a spw boundary.
+function _seg_block_lens(comp::SiteComponent)
+    bl = zeros(Int, comp.nfseg)
+    @inbounds for fs in comp.fseg_id
+        bl[fs] += 1
+    end
+    return bl
+end
+
+# SmoothnessPrior: 2nd-difference curvature along the per-channel (nparam) axis,
+# independently per (time segment, frequency segment, feed block, antenna).
+function _apply_prior!(pr::SmoothnessPrior, comp::SiteComponent, A, gA, geom)
+    pr.λ <= 0 && return 0.0
+    seglen = _seg_block_lens(comp)
+    λ = pr.λ
+    lp = 0.0
+    na = size(A, 5)
+    @inbounds for la in 1:na, fb in 1:comp.nfb, ts in 1:comp.ntseg, fs in 1:comp.nfseg
+        m = min(seglen[fs], comp.nparam)
+        m < 3 && continue
+        for i in 1:(m - 2)
+            cc = A[i, ts, fs, fb, la] - 2 * A[i + 1, ts, fs, fb, la] + A[i + 2, ts, fs, fb, la]
+            lp += -0.5 * λ * cc * cc
+            gA[i, ts, fs, fb, la] += -λ * cc
+            gA[i + 1, ts, fs, fb, la] += 2λ * cc
+            gA[i + 2, ts, fs, fb, la] += -λ * cc
+        end
     end
     return lp
 end

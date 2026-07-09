@@ -16,18 +16,19 @@
 using Gustavo.Solve
 using Gustavo.Solve: fringe_solve, plan_gains, zero_params, evaluate_gains,
     point_source_coherency, PointSource, FringePosterior,
-    OUPrior, NoPrior, ComponentPriors, logprior, logprior_and_grad!,
-    ou_logprior, ou_logprior_grad, flatten, unflatten
+    OUPrior, NoPrior, IIDGaussianPrior, SmoothnessPrior, ComponentPriors,
+    logprior, logprior_and_grad!, ou_logprior, ou_logprior_grad, flatten, unflatten
 import Gustavo.UVData as UV
 import Gustavo.Fringe as FR
 using Gustavo.Calibration:
     build_geometry, leaf_window, predict_visibilities, correlation_feed_pair,
-    StationGainModel, GainComponent, TiedComponent, ConstantTerm, Delay, PerChannel,
+    DataGeometry, StationGainModel, GainComponent, TiedComponent, ConstantTerm, Delay, PerChannel,
     PerScan, PerIntegration, GlobalTime, GlobalFrequency, PerSpectralWindow,
     PerFeed, SharedFeeds
 import LogDensityProblems as LDP
 using Enzyme, Optimization, OptimizationOptimJL
 using LinearAlgebra: Diagonal, dot, logdet
+using Statistics: median
 using Random: MersenneTwister, randn
 using Test
 
@@ -183,5 +184,72 @@ end
         )
         # The OU prior denoises: the regularized track is closer to the smooth truth.
         @test rmse(solp) < rmse(sol0)
+    end
+end
+
+@testset "Solve M7b: IID Gaussian + Smoothness (bandpass) priors" begin
+    # A per-channel (bandpass) log-amp block over a 12-channel single-segment axis.
+    nchan = 12
+    geom = DataGeometry(
+        times = [0.0], channel_freqs = collect(range(2.3e11, 2.31e11, length = nchan)),
+        scan_of_time = [1], spw_of_chan = ones(Int, nchan),
+    )
+    model = StationGainModel(
+        phase = (fringe = TiedComponent(GainComponent(ConstantTerm(), PerScan(), GlobalFrequency()), PerFeed()),),
+        logamp = (bandpass = TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),),
+    )
+    plan = plan_gains(model, 3, geom)
+    rng = MersenneTwister(9)
+    p = zero_params(plan)
+    p.g1.bandpass .= 0.2 .* randn(rng, size(p.g1.bandpass))
+    p.g1.fringe .= 0.3 .* randn(rng, size(p.g1.fringe))
+
+    # 2nd-difference operator along the 12-channel axis.
+    D2 = zeros(nchan - 2, nchan)
+    for i in 1:(nchan - 2)
+        D2[i, i] = 1.0; D2[i, i + 1] = -2.0; D2[i, i + 2] = 1.0
+    end
+    H = D2' * D2
+
+    @testset "IIDGaussianPrior: elementwise shrinkage" begin
+        μ, σ = 0.05, 0.4
+        cp = ComponentPriors(bandpass = IIDGaussianPrior(μ = μ, σ = σ))
+        g = zero(p)
+        lp = logprior_and_grad!(g, cp, plan, geom, p)
+        # value == Σ over the block of the scalar Gaussian log-density
+        blk = p.g1.bandpass
+        expv = sum(b -> -0.5 * (b - μ)^2 / σ^2 - 0.5 * log(2π * σ^2), blk)
+        @test lp ≈ expv atol = 1.0e-9
+        # analytic gradient −(x−μ)/σ² on the block; zero elsewhere (fringe untouched)
+        @test g.g1.bandpass ≈ .-(blk .- μ) ./ σ^2 atol = 1.0e-10
+        @test all(iszero, g.g1.fringe)
+        # only the named component is penalized
+        @test logprior(ComponentPriors(fringe = IIDGaussianPrior(μ = 0.0, σ = 1.0)), plan, geom, p) !=
+            logprior(cp, plan, geom, p)
+    end
+
+    @testset "SmoothnessPrior: 2nd-difference curvature == old penalized bandpass" begin
+        λ = 3.0
+        cp = ComponentPriors(bandpass = SmoothnessPrior(λ))
+        g = zero(p)
+        lp = logprior_and_grad!(g, cp, plan, geom, p)
+        # value + gradient vs the dense curvature operator, per (feed, antenna) block
+        expv = 0.0
+        gexp = zero(p)
+        for fb in 1:2, la in 1:3
+            x = p.g1.bandpass[:, 1, 1, fb, la]
+            expv += -0.5 * λ * sum(abs2, D2 * x)
+            gexp.g1.bandpass[:, 1, 1, fb, la] .= .-λ .* (H * x)
+        end
+        @test lp ≈ expv atol = 1.0e-9
+        @test flatten(g) ≈ flatten(gexp) atol = 1.0e-9
+        # The MAP of (weighted-Gaussian likelihood + SmoothnessPrior) reproduces the
+        # old PenalizedBandpass Whittaker smoother when λ = lambda·median(w).
+        y = randn(rng, nchan)
+        w = rand(rng, nchan) .+ 0.5
+        lambda = 0.7
+        λw = lambda * median(w[w .> 0])
+        xhat_map = (Diagonal(w) + λw .* H) \ (w .* y)
+        @test xhat_map ≈ FR._whittaker_smooth(y, w, lambda, 0.0) atol = 1.0e-8
     end
 end
