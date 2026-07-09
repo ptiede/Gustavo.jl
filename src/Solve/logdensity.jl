@@ -103,25 +103,29 @@ end
 
 """
     FringePosterior(plan, uvset, geom; S = nothing, flux = 1.0,
-                    executor = SerialExecutor())
+                    prior = ComponentPriors(), executor = SerialExecutor())
 
 The forward-model fringe-fit log-density over the flat parameter vector, wrapping
 the distributed objective as a `LogDensityProblems` problem (order 1). `logdensity`
-returns the total log-likelihood; `logdensity_and_gradient` returns it with the
-flat gradient. (v1 = likelihood only; the `logprior` layer is Milestone 7.)
+returns the total log-density `Σ_leaf loglik + logprior`; `logdensity_and_gradient`
+returns it with the flat gradient. `prior` is a [`ComponentPriors`](@ref) (the
+empty default is pure likelihood); its `logprior` term is added ONCE here (not per
+leaf) with an analytic gradient, so `Enzyme` need not differentiate it.
 """
-struct FringePosterior{P <: GainPlan, U, G, SM <: AbstractSourceModel, E}
+struct FringePosterior{P <: GainPlan, U, G, SM <: AbstractSourceModel, PR <: ComponentPriors, E}
     plan::P
     uvset::U
     geom::G
     source::SM
+    prior::PR
     executor::E
 end
 function FringePosterior(
         plan::GainPlan, uvset, geom;
-        source = nothing, S = nothing, flux::Real = 1.0, executor = SerialExecutor(),
+        source = nothing, S = nothing, flux::Real = 1.0,
+        prior::ComponentPriors = ComponentPriors(), executor = SerialExecutor(),
     )
-    return FringePosterior(plan, uvset, geom, _resolve_source(source, S, flux), executor)
+    return FringePosterior(plan, uvset, geom, _resolve_source(source, S, flux), prior, executor)
 end
 
 LogDensityProblems.dimension(post::FringePosterior) = nparameters(post.plan)
@@ -129,10 +133,11 @@ LogDensityProblems.capabilities(::Type{<:FringePosterior}) = LogDensityProblems.
 
 function LogDensityProblems.logdensity(post::FringePosterior, x::AbstractVector)
     p = unflatten(post.plan, x)
-    return fringe_objective(
+    ll = fringe_objective(
         post.plan, p, post.uvset, post.geom;
         source = post.source, executor = post.executor,
     )
+    return ll + logprior(post.prior, post.plan, post.geom, p)
 end
 
 function LogDensityProblems.logdensity_and_gradient(post::FringePosterior, x::AbstractVector)
@@ -141,5 +146,11 @@ function LogDensityProblems.logdensity_and_gradient(post::FringePosterior, x::Ab
         post.plan, p, post.uvset, post.geom;
         source = post.source, executor = post.executor,
     )
+    # Prior term added once (analytic gradient), accumulated into the flat grad.
+    if !isempty(post.prior)
+        gp = zero(p)
+        v += logprior_and_grad!(gp, post.prior, post.plan, post.geom, p)
+        return v, flatten(g) .+ flatten(gp)
+    end
     return v, flatten(g)
 end

@@ -38,6 +38,7 @@ import LogDensityProblems
 include("Solve/sitemodel.jl")
 include("Solve/plan.jl")
 include("Solve/source.jl")
+include("Solve/priors.jl")
 include("Solve/leaf_objective.jl")
 include("Solve/logdensity.jl")
 include("Solve/reparam.jl")
@@ -62,5 +63,8 @@ export AbstractGauge, ReferenceAntenna, NoGauge, FixParams
 export AbstractScaling, AutoScale, NoScaling, CustomScale, param_scale
 # Milestone 5c — FFT search + stationization warm-start seed.
 export fft_warmstart, seed_from_stationization!
+# Milestone 7 — prior / regularizer layer (OU-first).
+export AbstractPrior, NoPrior, OUPrior, ComponentPriors
+export logprior, logprior_and_grad!, ou_logprior, ou_logprior_grad
 
 end # module Solve

@@ -94,6 +94,12 @@ include("test_solve_warmstart.jl")
 # test_solve_fit.jl.
 include("test_solve_override.jl")
 
+# Gustavo.Solve (Stage 2): prior / regularizer layer, OU-first (Milestone 7) —
+# the stochastic-time OU prior on a per-integration adhoc-phase track: math vs a
+# dense OU MvNormal + RTS smoother, ComponentPriors over a plan, FringePosterior
+# wiring, and MAP+OU denoising a low-SNR track. Reuses _build_fringe_uvset.
+include("test_solve_priors.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

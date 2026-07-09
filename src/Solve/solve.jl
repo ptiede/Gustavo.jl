@@ -102,6 +102,7 @@ function fringe_solve(
         source::AbstractSourceModel = ProfiledPointSource(),
         gauge::Union{AbstractGauge, Nothing} = nothing,
         scaling::AbstractScaling = AutoScale(),
+        prior::ComponentPriors = ComponentPriors(),
         warmstart = nothing,
         search::FringeSearch = FringeSearch(),
         stationization::Stationization = Stationization(),
@@ -123,7 +124,7 @@ function fringe_solve(
         warmstart, plan, uvset, geom;
         ref_ant = ref_ant, search = search, stationization = stationization,
     )
-    post = FringePosterior(plan, uvset, geom; source = source, executor = executor)
+    post = FringePosterior(plan, uvset, geom; source = source, prior = prior, executor = executor)
 
     gge = gauge === nothing ? ReferenceAntenna(ref_ant) : gauge
     reparam = build_reparam(plan, gge, scaling, p0)
