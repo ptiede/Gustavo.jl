@@ -271,7 +271,7 @@ function pmapreduce(
     resultmap = _map_to_resultmap(MapSpec(node_fn, params), uvset, executor, layers)
     # Flatten in deterministic partition order.
     src = branches(uvset)
-    results = Any[resultmap[k] for k in keys(src)]
+    results = [resultmap[k] for k in keys(src)]
     return _reduce_results(ReduceSpec(op, init, tree), results)
 end
 
