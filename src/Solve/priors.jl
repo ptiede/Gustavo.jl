@@ -9,8 +9,9 @@
 #
 # Priors: the stochastic-time `OUPrior` on a station's per-integration adhoc-phase
 # track (Matérn-1/2 tridiagonal precision), the elementwise `IIDGaussianPrior`
-# (bandpass amp / dTEC shrinkage), and the `SmoothnessPrior` (2nd-difference
-# curvature along frequency — the logprior form of the old penalized bandpass).
+# (bandpass amp / dTEC shrinkage), and the `BandpassARPrior` (a proper, matrix-free
+# autoregressive prior along frequency on the residual bandpass — smooth + small +
+# gauge-breaking; `φ=[ρ]` is AR(1)/OU, `φ=[2,−1]` is 2nd-difference curvature).
 
 import ..Fringe
 using ..Fringe: ou_step
@@ -59,22 +60,35 @@ end
 IIDGaussianPrior(; μ::Real = 0.0, σ::Real) = IIDGaussianPrior(promote(μ, σ)...)
 
 """
-    SmoothnessPrior(λ)
+    BandpassARPrior(; phi, sigma_eps, sigma0 = sigma_eps)
 
-Second-difference (curvature) prior along FREQUENCY on a per-channel component
-(the bandpass): `logprior = −½ λ Σ (x_{i−1} − 2x_i + x_{i+1})²`, penalizing curvature
-of the per-channel spectrum WITHIN each frequency segment (never across a spw
-boundary), gradient `−λ (D²)ᵀD² x`. This is the proper-logprior form of the old
-`PenalizedBandpass` Whittaker regularizer: the MAP of a weighted-Gaussian
-likelihood plus `SmoothnessPrior(λ)` equals `_whittaker_smooth(y, w, λ/median(w))`.
-An improper prior (constants and linear ramps are unpenalized), so it carries no
-normalizing constant.
+Proper autoregressive prior of order `p = length(phi)` on a per-channel component
+(the residual phase/amplitude bandpass), applied along the channel axis WITHIN each
+frequency segment (never across a spw boundary). Each block `b` (a segment's
+channels) is modelled as `b_k = Σ_j φ_j·b_{k−j} + ε_k`, `ε ~ N(0, σε²)`, with the
+first `p` channels anchored `N(0, σ0²)` so the prior is PROPER:
+
+    −logprior = ½/σ0² Σ_{k≤p} b_k²  +  ½/σε² Σ_{k>p} (b_k − Σ_j φ_j·b_{k−j})²  + const
+
+MATRIX-FREE: the banded precision is applied directly (energy and gradient in
+`O(n·p)`) — no matrix inversion, no dense covariance. Being proper, it pins the
+bandpass DC and slope (the directions degenerate with the per-scan constant/delay)
+toward 0, so it doubles as the bandpass gauge and keeps the residual bandpass small.
+Low orders are the intended range: `phi = [ρ]` is the AR(1)/OU case, `phi = [2, -1]`
+is the 2nd-difference curvature (smoothness) penalty. `sigma_eps` sets the
+innovation (smoothness) scale, `sigma0` the anchor (how strongly DC/slope are pinned
+and how small the residual is kept).
 """
-struct SmoothnessPrior{T} <: AbstractPrior
-    λ::T
+struct BandpassARPrior{T} <: AbstractPrior
+    φ::Vector{T}
+    σε::T
+    σ0::T
 end
-SmoothnessPrior(λ::Real) = SmoothnessPrior{typeof(float(λ))}(float(λ))
-SmoothnessPrior(; λ::Real) = SmoothnessPrior(λ)
+function BandpassARPrior(; phi::AbstractVector{<:Real}, sigma_eps::Real, sigma0::Real = sigma_eps)
+    isempty(phi) && error("BandpassARPrior: phi must have at least one coefficient (order ≥ 1)")
+    T = float(promote_type(eltype(phi), typeof(sigma_eps), typeof(sigma0)))
+    return BandpassARPrior{T}(collect(T, phi), T(sigma_eps), T(sigma0))
+end
 
 """
     ComponentPriors(; name = prior, …)
@@ -221,23 +235,39 @@ function _seg_block_lens(comp::SiteComponent)
     return bl
 end
 
-# SmoothnessPrior: 2nd-difference curvature along the per-channel (nparam) axis,
-# independently per (time segment, frequency segment, feed block, antenna).
-function _apply_prior!(pr::SmoothnessPrior, comp::SiteComponent, A, gA, geom)
-    pr.λ <= 0 && return 0.0
+# BandpassARPrior: a proper anchored-conditional AR(p) along the per-channel
+# (nparam) axis, independently per (time segment, frequency segment, feed block,
+# antenna). Matrix-free — the banded precision is applied directly.
+function _apply_prior!(pr::BandpassARPrior, comp::SiteComponent, A, gA, geom)
     seglen = _seg_block_lens(comp)
-    λ = pr.λ
+    φ = pr.φ
+    p = length(φ)
+    a0 = 1.0 / pr.σ0^2
+    aε = 1.0 / pr.σε^2
+    c0 = 0.5 * log(2π * pr.σ0^2)
+    cε = 0.5 * log(2π * pr.σε^2)
     lp = 0.0
     na = size(A, 5)
     @inbounds for la in 1:na, fb in 1:comp.nfb, ts in 1:comp.ntseg, fs in 1:comp.nfseg
         m = min(seglen[fs], comp.nparam)
-        m < 3 && continue
-        for i in 1:(m - 2)
-            cc = A[i, ts, fs, fb, la] - 2 * A[i + 1, ts, fs, fb, la] + A[i + 2, ts, fs, fb, la]
-            lp += -0.5 * λ * cc * cc
-            gA[i, ts, fs, fb, la] += -λ * cc
-            gA[i + 1, ts, fs, fb, la] += 2λ * cc
-            gA[i + 2, ts, fs, fb, la] += -λ * cc
+        m < 1 && continue
+        # Anchor the first min(p, m) channels: N(0, σ0²) → proper (pins DC/slope).
+        for k in 1:min(p, m)
+            bk = A[k, ts, fs, fb, la]
+            lp += -0.5 * a0 * bk * bk - c0
+            gA[k, ts, fs, fb, la] += -a0 * bk
+        end
+        # Conditional AR residuals for the rest: r_k = b_k − Σ_j φ_j b_{k−j}.
+        for k in (p + 1):m
+            r = A[k, ts, fs, fb, la]
+            for j in 1:p
+                r -= φ[j] * A[k - j, ts, fs, fb, la]
+            end
+            lp += -0.5 * aε * r * r - cε
+            gA[k, ts, fs, fb, la] += -aε * r
+            for j in 1:p
+                gA[k - j, ts, fs, fb, la] += aε * φ[j] * r
+            end
         end
     end
     return lp

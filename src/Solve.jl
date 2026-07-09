@@ -64,7 +64,7 @@ export AbstractScaling, AutoScale, NoScaling, CustomScale, param_scale
 # Milestone 5c — FFT search + stationization warm-start seed.
 export fft_warmstart, seed_from_stationization!
 # Milestone 7 — prior / regularizer layer.
-export AbstractPrior, NoPrior, OUPrior, IIDGaussianPrior, SmoothnessPrior, ComponentPriors
+export AbstractPrior, NoPrior, OUPrior, IIDGaussianPrior, BandpassARPrior, ComponentPriors
 export logprior, logprior_and_grad!, ou_logprior, ou_logprior_grad
 
 end # module Solve

@@ -16,7 +16,7 @@
 using Gustavo.Solve
 using Gustavo.Solve: fringe_solve, plan_gains, zero_params, evaluate_gains,
     point_source_coherency, PointSource, FringePosterior,
-    OUPrior, NoPrior, IIDGaussianPrior, SmoothnessPrior, ComponentPriors,
+    OUPrior, NoPrior, IIDGaussianPrior, BandpassARPrior, ComponentPriors,
     logprior, logprior_and_grad!, ou_logprior, ou_logprior_grad, flatten, unflatten
 import Gustavo.UVData as UV
 import Gustavo.Fringe as FR
@@ -28,7 +28,6 @@ using Gustavo.Calibration:
 import LogDensityProblems as LDP
 using Enzyme, Optimization, OptimizationOptimJL
 using LinearAlgebra: Diagonal, dot, logdet
-using Statistics: median
 using Random: MersenneTwister, randn
 using Test
 
@@ -187,7 +186,7 @@ end
     end
 end
 
-@testset "Solve M7b: IID Gaussian + Smoothness (bandpass) priors" begin
+@testset "Solve M7b: IID Gaussian + AR bandpass priors" begin
     # A per-channel (bandpass) log-amp block over a 12-channel single-segment axis.
     nchan = 12
     geom = DataGeometry(
@@ -204,12 +203,11 @@ end
     p.g1.bandpass .= 0.2 .* randn(rng, size(p.g1.bandpass))
     p.g1.fringe .= 0.3 .* randn(rng, size(p.g1.fringe))
 
-    # 2nd-difference operator along the 12-channel axis.
+    # 2nd-difference operator along the 12-channel axis (for the φ=[2,-1] check).
     D2 = zeros(nchan - 2, nchan)
     for i in 1:(nchan - 2)
         D2[i, i] = 1.0; D2[i, i + 1] = -2.0; D2[i, i + 2] = 1.0
     end
-    H = D2' * D2
 
     @testset "IIDGaussianPrior: elementwise shrinkage" begin
         μ, σ = 0.05, 0.4
@@ -228,28 +226,66 @@ end
             logprior(cp, plan, geom, p)
     end
 
-    @testset "SmoothnessPrior: 2nd-difference curvature == old penalized bandpass" begin
-        λ = 3.0
-        cp = ComponentPriors(bandpass = SmoothnessPrior(λ))
+    # Analytic anchored-conditional AR(ord) log-density of one channel block.
+    function ar_logprior_block(b, φ, σε, σ0)
+        m = length(b); ord = length(φ)
+        lp = 0.0
+        for k in 1:min(ord, m)
+            lp += -0.5 * b[k]^2 / σ0^2 - 0.5 * log(2π * σ0^2)
+        end
+        for k in (ord + 1):m
+            r = b[k] - sum(φ[j] * b[k - j] for j in 1:ord)
+            lp += -0.5 * r^2 / σε^2 - 0.5 * log(2π * σε^2)
+        end
+        return lp
+    end
+
+    @testset "BandpassARPrior: general AR(p) value + gradient" begin
+        φ = [0.6, 0.2]                      # order-2 AR coefficients
+        σε, σ0 = 0.3, 0.8
+        cp = ComponentPriors(bandpass = BandpassARPrior(phi = φ, sigma_eps = σε, sigma0 = σ0))
         g = zero(p)
         lp = logprior_and_grad!(g, cp, plan, geom, p)
-        # value + gradient vs the dense curvature operator, per (feed, antenna) block
-        expv = 0.0
-        gexp = zero(p)
-        for fb in 1:2, la in 1:3
-            x = p.g1.bandpass[:, 1, 1, fb, la]
-            expv += -0.5 * λ * sum(abs2, D2 * x)
-            gexp.g1.bandpass[:, 1, 1, fb, la] .= .-λ .* (H * x)
-        end
+        # value == Σ over (feed, antenna) blocks of the analytic AR log-density
+        expv = sum(fb -> sum(la -> ar_logprior_block(p.g1.bandpass[:, 1, 1, fb, la], φ, σε, σ0), 1:3), 1:2)
         @test lp ≈ expv atol = 1.0e-9
-        @test flatten(g) ≈ flatten(gexp) atol = 1.0e-9
-        # The MAP of (weighted-Gaussian likelihood + SmoothnessPrior) reproduces the
-        # old PenalizedBandpass Whittaker smoother when λ = lambda·median(w).
-        y = randn(rng, nchan)
-        w = rand(rng, nchan) .+ 0.5
-        lambda = 0.7
-        λw = lambda * median(w[w .> 0])
-        xhat_map = (Diagonal(w) + λw .* H) \ (w .* y)
-        @test xhat_map ≈ FR._whittaker_smooth(y, w, lambda, 0.0) atol = 1.0e-8
+        @test all(iszero, g.g1.fringe)       # only the named component is penalized
+        # gradient vs central finite differences on the flat vector
+        x0 = copy(flatten(p)); h = 1.0e-6
+        fd = map(eachindex(x0)) do i
+            xp = copy(x0); xp[i] += h; xm = copy(x0); xm[i] -= h
+            (logprior(cp, plan, geom, unflatten(plan, xp)) - logprior(cp, plan, geom, unflatten(plan, xm))) / (2h)
+        end
+        @test flatten(g) ≈ fd atol = 1.0e-6
+    end
+
+    @testset "phi = [2, -1] is the 2nd-difference (curvature) penalty" begin
+        σε, σ0 = 0.5, 1.0e6                  # weak anchor: conditional part ≈ pure curvature
+        cp = ComponentPriors(bandpass = BandpassARPrior(phi = [2.0, -1.0], sigma_eps = σε, sigma0 = σ0))
+        lp = logprior(cp, plan, geom, p)
+        # conditional residuals r_k = b_k − 2b_{k-1} + b_{k-2} == (D2·b); anchor negligible
+        expv = 0.0
+        for fb in 1:2, la in 1:3
+            b = p.g1.bandpass[:, 1, 1, fb, la]
+            expv += -0.5 / σε^2 * sum(abs2, D2 * b) - 0.5 * (nchan - 2) * log(2π * σε^2)
+            expv += sum(k -> -0.5 * b[k]^2 / σ0^2 - 0.5 * log(2π * σ0^2), 1:2)
+        end
+        @test lp ≈ expv atol = 1.0e-6
+    end
+
+    @testset "proper: DC and slope are penalized (gauge-breaking)" begin
+        cp = ComponentPriors(bandpass = BandpassARPrior(phi = [2.0, -1.0], sigma_eps = 0.5, sigma0 = 1.0))
+        # A constant block and a linear-ramp block both cost logprior (the anchor
+        # pins DC + slope), so the prior removes the delay/bandpass flat directions.
+        pc = zero_params(plan); pc.g1.bandpass .= 0.7
+        pr = zero_params(plan)
+        for fb in 1:2, la in 1:3
+            pr.g1.bandpass[:, 1, 1, fb, la] .= collect(1.0:nchan) .* 0.1
+        end
+        @test logprior(cp, plan, geom, pc) < 0          # constant is penalized (proper)
+        @test logprior(cp, plan, geom, pr) < 0          # ramp is penalized (proper)
+        # Adding a DC offset changes the log-density ⇒ the DC direction is not flat.
+        pshift = copy(p); pshift.g1.bandpass .+= 0.5
+        @test !isapprox(logprior(cp, plan, geom, p), logprior(cp, plan, geom, pshift); atol = 1.0e-6)
     end
 end
