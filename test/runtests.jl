@@ -74,6 +74,11 @@ include("test_solve_gradient.jl")
 # reuses _build_fringe_uvset from test_pipeline.jl (Milestone 4).
 include("test_solve_distributed.jl")
 
+# Gustavo.Solve (Stage 2): fringe_solve driver — Optimization.jl LBFGS over the
+# forward-model MAP objective (profiled + fixed source), FringeSolution +
+# apply_calibration; recovers injected gains (Milestone 5).
+include("test_solve_fit.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

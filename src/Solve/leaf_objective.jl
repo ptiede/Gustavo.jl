@@ -112,23 +112,33 @@ function leaf_loglik(
 end
 
 """
-    leaf_loglik(plan::GainPlan, p, ctx; S = nothing, flux = 1.0) -> Real
+    leaf_loglik(plan::GainPlan, p, ctx; source = nothing, S = nothing, flux = 1.0) -> Real
 
 Per-leaf WLS log-likelihood through the PER-SITE forward map: windowed
 `evaluate_gains(plan, p, ctx.chan_idx, ctx.ti_idx)` → [`leaf_loglik_gains`](@ref).
 `p` is the per-site parameter `ComponentVector`; `ctx` a [`build_leaf_ctx`](@ref)
-result. `S` defaults to an unpolarized point source of `flux`. This is the
-objective `GustavoEnzymeExt` reverse-differentiates in `p`
-([`leaf_value_and_grad`](@ref)).
+result. The source is a `source::AbstractSourceModel` (e.g.
+[`ProfiledPointSource`](@ref) for generic fringe fitting); as shorthand, an
+explicit coherency array `S` gives a [`FixedCoherency`](@ref) and `flux` a
+[`PointSource`](@ref). This is the objective `GustavoEnzymeExt`
+reverse-differentiates in `p` ([`leaf_value_and_grad`](@ref)).
 """
-function leaf_loglik(plan::GainPlan, p, ctx; S = nothing, flux::Real = 1.0)
-    Smat = S === nothing ? point_source_coherency(length(ctx.bl_a); flux = flux) : S
-    return _leaf_loglik(plan, p, ctx, Smat)
+function leaf_loglik(plan::GainPlan, p, ctx; source = nothing, S = nothing, flux::Real = 1.0)
+    return _leaf_loglik(plan, p, ctx, _resolve_source(source, S, flux))
 end
+
+_resolve_source(source::AbstractSourceModel, S, flux) = source
+_resolve_source(::Nothing, S::AbstractArray, flux) = FixedCoherency(S)
+_resolve_source(::Nothing, ::Nothing, flux) = PointSource(flux)
 
 # The bare differentiated closure: every argument but `p` is AD-inactive
 # (captured `Const`). No keyword defaults and no branch on `p`, so Enzyme
-# reverse-mode traces straight through the grouped `evaluate_gains` and the fused
-# per-product loop of `leaf_loglik_gains`.
-_leaf_loglik(plan::GainPlan, p, ctx, S) =
-    leaf_loglik_gains(evaluate_gains(plan, p, ctx.chan_idx, ctx.ti_idx), ctx, S)
+# reverse-mode traces straight through the grouped `evaluate_gains`, the (possibly
+# profiled) source, and the fused per-product loop of `leaf_loglik_gains`. A plain
+# coherency array is accepted too (wrapped as `FixedCoherency`) for the M3 path.
+_leaf_loglik(plan::GainPlan, p, ctx, S::AbstractArray) =
+    _leaf_loglik(plan, p, ctx, FixedCoherency(S))
+function _leaf_loglik(plan::GainPlan, p, ctx, source::AbstractSourceModel)
+    g = evaluate_gains(plan, p, ctx.chan_idx, ctx.ti_idx)
+    return leaf_loglik_gains(g, ctx, leaf_source(source, g, ctx))
+end

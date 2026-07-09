@@ -37,8 +37,10 @@ import LogDensityProblems
 
 include("Solve/sitemodel.jl")
 include("Solve/plan.jl")
+include("Solve/source.jl")
 include("Solve/leaf_objective.jl")
 include("Solve/logdensity.jl")
+include("Solve/solve.jl")
 
 # Milestone 1 — per-leaf coherency WLS objective.
 export build_leaf_ctx, point_source_coherency, leaf_loglik_gains, leaf_loglik
@@ -50,5 +52,8 @@ export zero_params, flatten, unflatten, group_arrays, evaluate_gains
 export leaf_value_and_grad
 # Milestone 4 — distributed objective+gradient over the Graph substrate + posterior.
 export fringe_objective, fringe_objective_and_grad, FringePosterior
+# Milestone 5 — source models, driver, solution.
+export AbstractSourceModel, FixedCoherency, PointSource, ProfiledPointSource
+export fringe_solve, FringeSolution
 
 end # module Solve

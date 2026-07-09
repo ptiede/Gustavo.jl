@@ -27,12 +27,15 @@ StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+Optimization = "7f7a1694-90dd-40f0-9382-eb1efda571ba"
+OptimizationOptimJL = "36348300-93cb-4f02-beb5-3c3902f8871e"
 
 [extensions]
 GustavoEnzymeExt = "Enzyme"
 GustavoFITSFilesExt = "FITSFiles"
 GustavoHDF5Ext = "HDF5"
 GustavoMakieExt = "Makie"
+GustavoOptimizationExt = ["Optimization", "OptimizationOptimJL"]
 
 [compat]
 AstroLib = "0.4"
@@ -50,6 +53,8 @@ LinearSolve = "3"
 LogDensityProblems = "2"
 Makie = "0.21, 0.22, 0.23, 0.24"
 OhMyThreads = "0.8.6"
+Optimization = "5"
+OptimizationOptimJL = "0.4"
 OrderedCollections = "1"
 PolarizedTypes = "0.1.3"
 Printf = "1"
