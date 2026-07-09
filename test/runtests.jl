@@ -74,9 +74,13 @@ include("test_solve_gradient.jl")
 # reuses _build_fringe_uvset from test_pipeline.jl (Milestone 4).
 include("test_solve_distributed.jl")
 
+# Gustavo.Solve (Stage 2): reparameterization — gauge fixing + parameter scaling
+# machinery (Milestone 5b). Pure (no Enzyme/optimization).
+include("test_solve_reparam.jl")
+
 # Gustavo.Solve (Stage 2): fringe_solve driver — Optimization.jl LBFGS over the
-# forward-model MAP objective (profiled + fixed source), FringeSolution +
-# apply_calibration; recovers injected gains (Milestone 5).
+# forward-model MAP objective (profiled + fixed source), AutoScale + refant gauge
+# → machine-precision recovery of injected gains (Milestones 5 + 5b).
 include("test_solve_fit.jl")
 
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel

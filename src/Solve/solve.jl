@@ -53,6 +53,7 @@ end
 
 """
     fringe_solve(uvset, model; optimizer = nothing, source = ProfiledPointSource(),
+                 gauge = ReferenceAntenna(ref_ant), scaling = AutoScale(),
                  warmstart = nothing, ref_ant = 1, executor = SerialExecutor(),
                  maxiters = 1000, f0 = nothing, t0 = nothing, solve_kwargs...)
         -> FringeSolution
@@ -61,7 +62,12 @@ Fit `model` (an `ArrayGainModel` or a bare `StationGainModel`) to `uvset` by
 minimizing the forward-model MAP objective with `optimizer` — ANY Optimization.jl
 optimizer (e.g. `OptimizationOptimJL.LBFGS()`), or `nothing` for the extension's
 default (LBFGS). Requires `GustavoOptimizationExt` (load `Optimization` +
-`OptimizationOptimJL`). `source` defaults to a profiled point source (generic,
+`OptimizationOptimJL`).
+
+The optimizer runs on a REPARAMETERIZED problem: `gauge` fixes the unobservable
+gauge (default [`ReferenceAntenna`](@ref)`(ref_ant)` — pins the refant's phase and
+amplitude), and `scaling` conditions the variables (default [`AutoScale`](@ref)).
+Both are user-specifiable. `source` defaults to a profiled point source (generic,
 source-agnostic, no absolute amplitude scale); `warmstart` is a `ComponentVector`
 (defaults to zeros); extra `solve_kwargs` pass through to `solve`.
 """
@@ -69,6 +75,8 @@ function fringe_solve(
         uvset, model;
         optimizer = nothing,
         source::AbstractSourceModel = ProfiledPointSource(),
+        gauge::Union{AbstractGauge, Nothing} = nothing,
+        scaling::AbstractScaling = AutoScale(),
         warmstart = nothing,
         ref_ant::Integer = 1,
         executor = SerialExecutor(),
@@ -86,8 +94,15 @@ function fringe_solve(
     plan = plan_gains(am, nant, geom)
     p0 = warmstart === nothing ? zero_params(plan) : warmstart
     post = FringePosterior(plan, uvset, geom; source = source, executor = executor)
-    p, sinfo = _optimize_map(post, p0, optimizer; maxiters = Int(maxiters), solve_kwargs...)
-    info = merge((; ref_ant = Int(ref_ant), nant = nant), sinfo)
+
+    gge = gauge === nothing ? ReferenceAntenna(ref_ant) : gauge
+    reparam = build_reparam(plan, gge, scaling, p0)
+    rpost = ReparamPosterior(post, reparam)
+    y0 = to_free(reparam, p0)
+    u, sinfo = _optimize_map(rpost, collect(y0), optimizer; maxiters = Int(maxiters), solve_kwargs...)
+    p = to_full(reparam, u)
+
+    info = merge((; ref_ant = Int(ref_ant), nant = nant, nfree = nfree(reparam)), sinfo)
     return FringeSolution(am, plan, geom, p, info)
 end
 

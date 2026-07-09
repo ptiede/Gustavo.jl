@@ -40,6 +40,7 @@ include("Solve/plan.jl")
 include("Solve/source.jl")
 include("Solve/leaf_objective.jl")
 include("Solve/logdensity.jl")
+include("Solve/reparam.jl")
 include("Solve/solve.jl")
 
 # Milestone 1 — per-leaf coherency WLS objective.
@@ -55,5 +56,8 @@ export fringe_objective, fringe_objective_and_grad, FringePosterior
 # Milestone 5 — source models, driver, solution.
 export AbstractSourceModel, FixedCoherency, PointSource, ProfiledPointSource
 export fringe_solve, FringeSolution
+# Milestone 5b — gauge fixing + parameter scaling (reparameterization).
+export AbstractGauge, ReferenceAntenna, NoGauge, FixParams
+export AbstractScaling, AutoScale, NoScaling, CustomScale, param_scale
 
 end # module Solve

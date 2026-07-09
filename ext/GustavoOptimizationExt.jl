@@ -11,11 +11,13 @@ module GustavoOptimizationExt
 using Optimization: OptimizationFunction, OptimizationProblem, solve
 import OptimizationOptimJL
 import LogDensityProblems as LDP
-import Gustavo.Solve: _optimize_map, flatten, unflatten
+import Gustavo.Solve: _optimize_map
 
-function _optimize_map(post, p0, optimizer; maxiters::Integer = 1000, solve_kwargs...)
-    x0 = collect(flatten(p0))
-    # Minimize the negative log-density; gradient from the order-1 posterior.
+# Minimize `-logdensity(post)` over the flat vector `x0` with `optimizer` (any
+# Optimization.jl optimizer; default LBFGS). `post` is any order-1
+# LogDensityProblems problem; the caller handles the parameterization. Returns
+# `(u, info)` — the optimized vector and solver diagnostics.
+function _optimize_map(post, x0, optimizer; maxiters::Integer = 1000, solve_kwargs...)
     f = OptimizationFunction(
         (x, _p) -> -LDP.logdensity(post, x);
         grad = (G, x, _p) -> begin
@@ -24,12 +26,11 @@ function _optimize_map(post, p0, optimizer; maxiters::Integer = 1000, solve_kwar
             return G
         end,
     )
-    prob = OptimizationProblem(f, x0)
+    prob = OptimizationProblem(f, collect(x0))
     opt = optimizer === nothing ? OptimizationOptimJL.LBFGS() : optimizer
     sol = solve(prob, opt; maxiters = maxiters, solve_kwargs...)
-    p = unflatten(post.plan, collect(sol.u))
     info = (; final_objective = -Float64(sol.objective), retcode = Symbol(sol.retcode))
-    return p, info
+    return collect(sol.u), info
 end
 
 end # module GustavoOptimizationExt

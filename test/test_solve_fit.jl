@@ -65,33 +65,37 @@ end
 
     obj0 = fringe_objective(plan, zero_params(plan), uvset, geom; source = PointSource(1.0))
 
-    @testset "fixed point source recovers the fit" begin
-        # Any Optimization.jl optimizer works — pass it directly.
+    # The injected truth has refant (antenna 1) = 0, matching the default
+    # ReferenceAntenna gauge, so an exact fit recovers p_true uniquely.
+    @testset "fixed point source recovers the injected gains" begin
+        # Any Optimization.jl optimizer works — pass it directly. Default
+        # AutoScale + ReferenceAntenna(1) gauge make it well-conditioned.
         sol = fringe_solve(
             uvset, model;
             optimizer = LBFGS(), source = PointSource(1.0), maxiters = 2000,
             warmstart = zero_params(plan),
         )
         @test sol isa FringeSolution
-        # From a zero warm-start the fringe is flattened (residual → tiny, the
-        # objective driven near its 0 maximum, a huge improvement over obj0). The
-        # last digits are conditioning-limited (delay-vs-phase gradient scale
-        # ~1e9) — preconditioning is the follow-up.
-        @test sol.info.final_objective > -0.5
-        @test sol.info.final_objective > obj0 + 1.0        # hugely better than zeros
+        # Machine-precision fit (was ~-0.1 before scaling+gauge).
+        @test sol.info.final_objective > -1.0e-10
+        @test sol.info.final_objective > obj0 + 1.0
+        # Recovered parameters match the injected truth (unique up to the pinned gauge).
+        @test flatten(sol.p) ≈ flatten(p_true) atol = 1.0e-6
         # apply_calibration runs and returns a calibrated UVSet.
-        cal = UV.apply_calibration(uvset, sol)
-        @test cal isa UV.UVSet
+        @test UV.apply_calibration(uvset, sol) isa UV.UVSet
     end
 
-    @testset "profiled source (no assumed flux/amp scale) also fits" begin
+    @testset "profiled source (no assumed flux/amp scale) also recovers it" begin
         sol = fringe_solve(
             uvset, model;
             optimizer = LBFGS(), source = ProfiledPointSource(), maxiters = 2000,
             warmstart = zero_params(plan),
         )
-        # The profiled objective (no assumed flux/amp scale) also flattens the fringe.
-        @test sol.info.final_objective > -0.5
-        @test sol.info.final_objective > obj0 + 1.0
+        @test sol.info.final_objective > -1.0e-10
+        @test flatten(sol.p) ≈ flatten(p_true) atol = 1.0e-6
+        # The reference antenna's phase + amplitude blocks are pinned to 0 (gauge).
+        @test all(iszero, sol.p.g1.clock[:, :, :, :, 1])
+        @test all(iszero, sol.p.g1.fringe[:, :, :, :, 1])
+        @test all(iszero, sol.p.g1.bandpass[:, :, :, :, 1])
     end
 end
