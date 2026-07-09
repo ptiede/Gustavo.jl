@@ -43,6 +43,8 @@ include("Solve/leaf_objective.jl")
 include("Solve/logdensity.jl")
 include("Solve/reparam.jl")
 include("Solve/warmstart.jl")
+include("Solve/hybrid.jl")
+include("Solve/strategy.jl")
 include("Solve/solve.jl")
 
 # Milestone 1 — per-leaf coherency WLS objective.
@@ -66,5 +68,9 @@ export fft_warmstart, seed_from_stationization!
 # Milestone 7 — prior / regularizer layer.
 export AbstractPrior, NoPrior, OUPrior, IIDGaussianPrior, BandpassARPrior, ComponentPriors
 export logprior, logprior_and_grad!, ou_logprior, ou_logprior_grad
+# Pluggable solve strategies: pure gradient vs block-coordinate (hybrid) + steps.
+export AbstractSolveStrategy, GradientDescent, BlockCoordinate
+export AbstractSolveStep, GradientStep, LinearPhaseStep, BandpassStep, AdhocStep
+export refine_phase_component!, refine_phase_bandpass!
 
 end # module Solve

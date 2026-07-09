@@ -26,18 +26,6 @@ struct FringeSolution{M, PL <: GainPlan, G <: DataGeometry, CV}
     info::NamedTuple
 end
 
-# ── Optimizer seam ───────────────────────────────────────────────────────────
-#
-# The objective is a `LogDensityProblems` posterior, so the solver takes ANY
-# Optimization.jl optimizer and hands it to `solve` (mirrors Comrade's
-# `comrade_opt(post, opt)`) — no bespoke per-optimizer type. `_optimize_map` has
-# no core methods; `GustavoOptimizationExt` (load `Optimization` +
-# `OptimizationOptimJL`) adds the one that builds the `OptimizationProblem` and
-# calls `solve(prob, optimizer)`. `optimizer = nothing` lets the ext pick a
-# sensible default (LBFGS). A future block-coordinate/ALS solver would be a
-# separate driver, not an "optimizer" for `solve`.
-function _optimize_map end
-
 # ── Driver ───────────────────────────────────────────────────────────────────
 
 # Number of antennas = highest antenna index appearing on any baseline.
@@ -106,6 +94,7 @@ function fringe_solve(
         warmstart = nothing,
         search::FringeSearch = FringeSearch(),
         stationization::Stationization = Stationization(),
+        strategy::Union{AbstractSolveStrategy, Nothing} = nothing,
         ref_ant::Integer = 1,
         executor = SerialExecutor(),
         maxiters::Integer = 1000,
@@ -126,14 +115,15 @@ function fringe_solve(
     )
     post = FringePosterior(plan, uvset, geom; source = source, prior = prior, executor = executor)
 
-    gge = gauge === nothing ? ReferenceAntenna(ref_ant) : gauge
-    reparam = build_reparam(plan, gge, scaling, p0)
-    rpost = ReparamPosterior(post, reparam)
-    y0 = to_free(reparam, p0)
-    u, sinfo = _optimize_map(rpost, collect(y0), optimizer; maxiters = Int(maxiters), solve_kwargs...)
-    p = to_full(reparam, u)
+    # Default strategy = pure gradient descent from the optimizer/gauge/scaling
+    # kwargs; a `strategy` (e.g. `BlockCoordinate`) overrides all three.
+    strat = strategy === nothing ?
+        GradientDescent(optimizer; gauge = gauge, scaling = scaling, maxiters = Int(maxiters)) :
+        strategy
+    ctx = (; post = post, ref_ant = Int(ref_ant), solve_kwargs = values(solve_kwargs))
+    p, sinfo = run_strategy(strat, ctx, p0)
 
-    info = merge((; ref_ant = Int(ref_ant), nant = nant, nfree = nfree(reparam)), sinfo)
+    info = merge((; ref_ant = Int(ref_ant), nant = nant), sinfo)
     return FringeSolution(am, plan, geom, p, info)
 end
 
