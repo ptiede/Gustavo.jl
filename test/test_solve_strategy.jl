@@ -3,7 +3,7 @@
 # `fringe_solve` runs either pure gradient descent (`GradientDescent`, the default)
 # or a block-coordinate scheme (`BlockCoordinate`) that alternates a gradient step
 # (with named components frozen) with direct LINEAR block solves — the per-channel
-# phase bandpass (`BandpassStep`) and the per-AP adhoc (`AdhocStep`), both the same
+# phase bandpass (`FreqStep`) and the per-AP adhoc (`TimeStep`), both the same
 # closure solve on orthogonal axes (`LinearPhaseStep`). Tests: the default path is
 # unchanged, `frozen` validates against real parameter-block names, and the hybrid
 # reaches a correct calibration on noiseless data.
@@ -14,7 +14,7 @@
 using Gustavo.Solve
 using Gustavo.Solve: fringe_solve, plan_gains, zero_params, evaluate_gains,
     point_source_coherency, PointSource,
-    GradientDescent, BlockCoordinate, GradientStep, BandpassStep, AdhocStep, LinearPhaseStep,
+    GradientDescent, BlockCoordinate, GradientStep, FreqStep, TimeStep, LinearPhaseStep,
     refine_phase_component!
 import Gustavo.UVData as UV
 using Gustavo.Calibration:
@@ -60,7 +60,7 @@ using Test
     @testset "block-coordinate hybrid reaches a correct calibration" begin
         strat = BlockCoordinate(
             GradientStep(LBFGS(); frozen = (:bandpass,), maxiters = 800),
-            BandpassStep(:bandpass);
+            FreqStep(:bandpass);
             rounds = 5,
         )
         sol = fringe_solve(uvset, model; strategy = strat, source = PointSource(1.0), warmstart = zero_params(plan))
@@ -75,16 +75,17 @@ using Test
     end
 
     @testset "frozen validates against actual parameter-block names" begin
-        strat = BlockCoordinate(GradientStep(LBFGS(); frozen = (:nope,)), BandpassStep(:bandpass))
+        strat = BlockCoordinate(GradientStep(LBFGS(); frozen = (:nope,)), FreqStep(:bandpass))
         @test_throws ErrorException fringe_solve(
             uvset, model; strategy = strat, source = PointSource(1.0), warmstart = zero_params(plan),
         )
     end
 
     @testset "convenience steps build the right LinearPhaseStep" begin
-        @test BandpassStep(:bandpass).axis === :freq
-        @test AdhocStep(:adhoc).axis === :time
-        @test AdhocStep(:adhoc).shared_feeds
+        @test FreqStep(:bandpass).axis === :freq
+        @test TimeStep(:adhoc).axis === :time
+        @test TimeStep(:adhoc).shared_feeds
+        @test !FreqStep(:bandpass).shared_feeds
         @test LinearPhaseStep(:x; axis = :time).component === :x
     end
 end

@@ -96,7 +96,7 @@ include("test_solve_override.jl")
 
 # Gustavo.Solve (Stage 2): pluggable solve strategies — pure GradientDescent (≡
 # default) vs BlockCoordinate hybrid with direct linear phase block steps
-# (BandpassStep/AdhocStep); frozen validation. Reuses _forward_uvset (fit test).
+# (FreqStep/TimeStep); frozen validation. Reuses _forward_uvset (fit test).
 include("test_solve_strategy.jl")
 
 # Gustavo.Solve (Stage 2): prior / regularizer layer, OU-first (Milestone 7) —

@@ -70,7 +70,7 @@ export AbstractPrior, NoPrior, OUPrior, IIDGaussianPrior, BandpassARPrior, Compo
 export logprior, logprior_and_grad!, ou_logprior, ou_logprior_grad
 # Pluggable solve strategies: pure gradient vs block-coordinate (hybrid) + steps.
 export AbstractSolveStrategy, GradientDescent, BlockCoordinate
-export AbstractSolveStep, GradientStep, LinearPhaseStep, BandpassStep, AdhocStep
+export AbstractSolveStep, GradientStep, LinearPhaseStep, FreqStep, TimeStep
 export refine_phase_component!, refine_phase_bandpass!
 
 end # module Solve

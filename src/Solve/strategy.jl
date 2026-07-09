@@ -9,8 +9,9 @@
 #
 #   strategy = GradientDescent(LBFGS())                         # pure gradient (default)
 #   strategy = BlockCoordinate(                                 # hybrid block-coordinate
-#       GradientStep(LBFGS(); frozen = (:bandpass,)),           #   nonlinear params
-#       BandpassStep(:bandpass);                                #   linear bandpass solve
+#       GradientStep(LBFGS(); frozen = (:bandpass, :adhoc)),    #   nonlinear params
+#       FreqStep(:bandpass),                                    #   linear bandpass (freq axis)
+#       TimeStep(:adhoc);                                       #   linear adhoc (time axis)
 #       rounds = 3,
 #   )
 
@@ -45,8 +46,8 @@ GradientDescent(optimizer = nothing; gauge = nothing, scaling = AutoScale(), max
 
 Block-coordinate strategy: run the ordered [`AbstractSolveStep`](@ref)s (each
 updates the parameter vector in place) `rounds` times. Compose e.g. a
-[`GradientStep`](@ref) freezing the bandpass with a [`BandpassStep`](@ref) that
-solves it directly.
+[`GradientStep`](@ref) freezing the bandpass with a [`FreqStep`](@ref) that solves
+it directly.
 """
 struct BlockCoordinate{T <: Tuple} <: AbstractSolveStrategy
     steps::T
@@ -76,11 +77,13 @@ GradientStep(optimizer = nothing; frozen = (), scaling = AutoScale(), maxiters::
 A block step that solves a per-slice phase `component` DIRECTLY (a linear closure
 solve) via [`refine_phase_component!`](@ref), instead of by gradient descent:
 
-- `axis = :freq` — a per-channel phase BANDPASS (see [`BandpassStep`](@ref)).
-- `axis = :time` — a per-AP ADHOC phase (see [`AdhocStep`](@ref)).
+- `axis = :freq` — a phase varying along FREQUENCY, one per channel (see
+  [`FreqStep`](@ref); the typical use is the instrumental bandpass).
+- `axis = :time` — a phase varying along TIME, one per AP (see [`TimeStep`](@ref);
+  the typical use is the atmospheric adhoc phase).
 
-`shared_feeds = true` for a feed-common (`SharedFeeds`) component. This is the
-extension point: point it at any per-slice phase block your model defines.
+`shared_feeds = true` solves one feed-common phase per slice (`SharedFeeds`). This
+is the extension point: point it at any per-slice phase block your model defines.
 """
 struct LinearPhaseStep{SM} <: AbstractSolveStep
     component::Symbol
@@ -92,20 +95,23 @@ LinearPhaseStep(component::Symbol; axis::Symbol = :freq, shared_feeds::Bool = fa
     LinearPhaseStep(component, axis, shared_feeds, smoother)
 
 """
-    BandpassStep(component = :bandpass; smoother = …) -> LinearPhaseStep
+    FreqStep(component = :bandpass; shared_feeds = false, smoother = …) -> LinearPhaseStep
 
-Solve the named per-channel phase bandpass directly (`axis = :freq`).
+Solve a phase that varies along FREQUENCY directly (`axis = :freq`) — the per-channel
+instrumental bandpass. Per-feed by default (bandpass is instrumental, not
+non-birefringent).
 """
-BandpassStep(component::Symbol = :bandpass; smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0)) =
-    LinearPhaseStep(component; axis = :freq, shared_feeds = false, smoother = smoother)
+FreqStep(component::Symbol = :bandpass; shared_feeds::Bool = false, smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0)) =
+    LinearPhaseStep(component; axis = :freq, shared_feeds = shared_feeds, smoother = smoother)
 
 """
-    AdhocStep(component = :adhoc; shared_feeds = true, smoother = …) -> LinearPhaseStep
+    TimeStep(component = :adhoc; shared_feeds = true, smoother = …) -> LinearPhaseStep
 
-Solve the named per-AP adhoc phase directly (`axis = :time`); `shared_feeds = true`
-for the usual feed-common adhoc.
+Solve a phase that varies along TIME directly (`axis = :time`) — the per-AP
+atmospheric adhoc phase. Feed-common by default (atmospheric phase is
+non-birefringent). (Not a numerical time step — a per-AP phase solve.)
 """
-AdhocStep(component::Symbol = :adhoc; shared_feeds::Bool = true, smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0)) =
+TimeStep(component::Symbol = :adhoc; shared_feeds::Bool = true, smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0)) =
     LinearPhaseStep(component; axis = :time, shared_feeds = shared_feeds, smoother = smoother)
 
 # ── Running a strategy ────────────────────────────────────────────────────────
