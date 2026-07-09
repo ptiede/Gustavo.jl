@@ -88,6 +88,12 @@ include("test_solve_fit.jl")
 # machine precision (Milestone 5c). Reuses _forward_uvset from test_solve_fit.jl.
 include("test_solve_warmstart.jl")
 
+# Gustavo.Solve (Stage 2): per-site model overrides — a heterogeneous
+# ArrayGainModel (one station carries an extra Rate term) solves independently,
+# homogeneous subset unaffected (Milestone 6). Reuses _forward_uvset from
+# test_solve_fit.jl.
+include("test_solve_override.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×
