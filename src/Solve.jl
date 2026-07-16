@@ -64,7 +64,7 @@ export fringe_solve, FringeSolution
 export AbstractGauge, ReferenceAntenna, NoGauge, FixParams
 export AbstractScaling, AutoScale, NoScaling, CustomScale, param_scale
 # Milestone 5c — FFT search + stationization warm-start seed.
-export fft_warmstart, seed_from_stationization!
+export fft_warmstart, seed_from_stationization!, seed_components_from!
 # Milestone 7 — prior / regularizer layer.
 export AbstractPrior, NoPrior, OUPrior, IIDGaussianPrior, BandpassARPrior, ComponentPriors
 export logprior, logprior_and_grad!, ou_logprior, ou_logprior_grad

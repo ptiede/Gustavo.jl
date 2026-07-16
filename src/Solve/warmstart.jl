@@ -48,14 +48,14 @@ seeded only when the scan maps to a SINGLE time segment for that component — a
 per-integration (adhoc) constant is a within-scan residual, not the per-scan
 fringe phase, so it is left at 0.
 """
-function seed_from_stationization!(p0, plan::GainPlan, ss::StationSolution, g_ti)
+function seed_from_stationization!(p0, plan::GainPlan, ss::StationSolution, g_ti; multiscan::Bool = false)
     for g in eachindex(plan.groups)
         gp = plan.groups[g]
         parr, _ = group_arrays(plan, p0, g)      # views into p0 (phase, logamp)
         for (ci, comp) in enumerate(gp.phase)
             obs = _seed_observable(comp.term, ss)
             obs === nothing && continue
-            _seed_component!(parr[ci], comp, gp.ants, obs, g_ti)
+            _seed_component!(parr[ci], comp, gp.ants, obs, g_ti; multiscan = multiscan)
         end
     end
     return p0
@@ -70,7 +70,12 @@ end
 # FeedComponent writes the single feed's block, and a ReferenceRelative reference
 # block gets the feed average while its relative block stays 0 (a benign seed the
 # optimizer refines).
-function _seed_component!(A, comp::SiteComponent, ants, obs, g_ti)
+function _seed_component!(A, comp::SiteComponent, ants, obs, g_ti; multiscan::Bool = false)
+    # A GLOBAL-in-time component (e.g. an instrumental R–L `instr` delay) is not a
+    # per-scan search observable — the stationization value is per scan, so seeding it
+    # (and overwriting it scan-by-scan) is wrong; leave it at 0 in a multi-scan solve.
+    # `ntseg == 1` identifies GlobalTime once we know the geometry spans >1 scan.
+    (multiscan && comp.ntseg == 1) && return nothing
     tsegs = unique(comp.tseg_id[gti] for gti in g_ti)   # time segments THIS scan touches
     # A per-scan phase must not seed a finer (per-integration) constant — its
     # per-AP mean is degenerate with the coarser per-scan constant.
@@ -123,6 +128,9 @@ function fft_warmstart(
     p0 = zero_params(plan)
     nant = plan.nant
     t0_sec = geom.t0 * 3600.0                     # search works in seconds (times are hours)
+    # >1 scan ⇒ GlobalTime components (`ntseg == 1`) are distinguishable from per-scan
+    # ones and must not be seeded from the per-scan stationization observable.
+    multiscan = length(unique(geom.scan_of_time)) > 1
     groups = Fringe._scan_group_leaves(uvset)
     pool = Fringe._ws_pool(max(Int(inner), 1))
     for keyed in groups
@@ -132,7 +140,34 @@ function fft_warmstart(
             det, grp.bl_pairs, grp.pol_products, nant;
             ref_ant = ref_ant, opts = stationization,
         )
-        seed_from_stationization!(p0, plan, ss, grp.g_ti)
+        seed_from_stationization!(p0, plan, ss, grp.g_ti; multiscan = multiscan)
+    end
+    return p0
+end
+
+"""
+    seed_components_from!(p0, plan, prior::FringeSolution; components) -> p0
+
+Copy the named `components` (e.g. `(:bandpass, :instr)`) from a PRIOR solution's
+parameters into the warm-start `ComponentVector` `p0` for `plan`, in place — the
+calibration-TRANSFER seed. Used to carry a shared instrumental block (learned on a
+bright subset in pass 1) into a streaming per-scan fit (pass 2), where it is then
+FROZEN (`GradientStep(; frozen = components)`).
+
+Requires that `plan` and `prior.plan` are built from the SAME model, antenna set, and
+frequency setup — then `GlobalTime` blocks (`ntseg == 1`) have identical shape and the
+copy is exact (a shape mismatch throws). Only components present in a given antenna
+group are copied. Mirrors [`seed_from_stationization!`](@ref)'s group walk.
+"""
+function seed_components_from!(p0, plan::GainPlan, prior; components)   # prior::FringeSolution (defined later in solve.jl)
+    for g in eachindex(plan.groups)
+        gv = plan.groups[g].groupval
+        dst = _sub(p0, gv)
+        src = _sub(prior.p, gv)
+        for name in components
+            (name in propertynames(dst) && name in propertynames(src)) || continue
+            getproperty(dst, name) .= getproperty(src, name)
+        end
     end
     return p0
 end

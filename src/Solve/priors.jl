@@ -120,7 +120,7 @@ function _ou_precision(τ::T, σ2::T, times::AbstractVector{<:Real}) where {T}
     ld = log(σ2)
     n == 0 && return d, e, zero(T)
     d[1] += one(T) / σ2
-    @inbounds for k in 2:n
+    @inbounds for k in eachindex(times)[2:end]
         a, q = ou_step(τ, σ2, times[k] - times[k - 1])
         d[k] += one(T) / q
         d[k - 1] += a * a / q
@@ -136,7 +136,7 @@ end
 function _ou_energy_and_grad!(g, d, e, x)
     n = length(x)
     E = zero(eltype(x))
-    @inbounds for k in 1:n
+    @inbounds for k in eachindex(x)
         qxk = d[k] * x[k]
         k > 1 && (qxk += e[k - 1] * x[k - 1])
         k < n && (qxk += e[k] * x[k + 1])
@@ -202,7 +202,7 @@ function _apply_prior!(pr::OUPrior, comp::SiteComponent, A, gA, geom)
     cst = 0.5 * (n * log(2π) + ld)
     lp = 0.0
     na = size(A, 5)
-    @inbounds for la in 1:na, fb in 1:comp.nfb, fs in 1:comp.nfseg
+    @inbounds for la in axes(A, 5), fb in 1:comp.nfb, fs in 1:comp.nfseg
         x = @view A[1, :, fs, fb, la]
         gx = @view gA[1, :, fs, fb, la]
         E = _ou_energy_and_grad!(gx, d, e, x)
@@ -248,7 +248,7 @@ function _apply_prior!(pr::BandpassARPrior, comp::SiteComponent, A, gA, geom)
     cε = 0.5 * log(2π * pr.σε^2)
     lp = 0.0
     na = size(A, 5)
-    @inbounds for la in 1:na, fb in 1:comp.nfb, ts in 1:comp.ntseg, fs in 1:comp.nfseg
+    @inbounds for la in axes(A, 5), fb in 1:comp.nfb, ts in 1:comp.ntseg, fs in 1:comp.nfseg
         m = min(seglen[fs], comp.nparam)
         m < 1 && continue
         # Anchor the first min(p, m) channels: N(0, σ0²) → proper (pins DC/slope).

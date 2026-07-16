@@ -12,14 +12,15 @@
 
 using Gustavo.Solve
 using Gustavo.Solve: fringe_solve, fft_warmstart, seed_from_stationization!,
-    plan_gains, zero_params, evaluate_gains, point_source_coherency,
+    seed_components_from!, plan_gains, zero_params, evaluate_gains, point_source_coherency,
     PointSource, fringe_objective
 import Gustavo.UVData as UV
 using Gustavo.Calibration:
     build_geometry, leaf_window, predict_visibilities, correlation_feed_pair,
     StationGainModel, GainComponent, TiedComponent, Delay, ConstantTerm, PerChannel,
-    PerScan, GlobalTime, GlobalFrequency, PerSpectralWindow, PerFeed
-using Gustavo.Fringe: FringeSearch, Stationization, stationize_scan
+    PerScan, GlobalTime, GlobalFrequency, PerSpectralWindow, PerFeed, SharedFeeds,
+    FeedComponent, DataGeometry
+using Gustavo.Fringe: FringeSearch, Stationization, stationize_scan, StationSolution
 using Enzyme, Optimization, OptimizationOptimJL     # enable Enzyme + LBFGS extensions
 using Random: MersenneTwister
 using Test
@@ -86,5 +87,62 @@ using Test
             warmstart = :auto, maxiters = 2000,
         )
         @test sol.info.final_objective > -1.0e-8
+    end
+end
+
+# Two hand-built geometries differing only in scan count, same model/antennas/freq —
+# the setting for calibration transfer and the GlobalTime warm-start guard.
+_geom(nscan) = DataGeometry(;
+    times = collect(0.0:0.01:(0.01 * (2nscan - 1))),         # 2 APs per scan
+    scan_of_time = repeat(1:nscan; inner = 2),
+    channel_freqs = 43.0e9 .+ (0:7) .* 2.0e6,                # 8 channels, 1 spw
+    spw_of_chan = ones(Int, 8),
+)
+
+@testset "Solve: transfer seed + GlobalTime warm-start guard" begin
+    nant = 4
+    # Phase model with a GlobalTime bandpass (the transferable instrumental block).
+    model = StationGainModel(
+        phase = (
+            clock = TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), PerFeed()),
+            bandpass = TiedComponent(GainComponent(PerChannel(), GlobalTime(), PerSpectralWindow()), PerFeed()),
+        ),
+        logamp = (),
+    )
+
+    @testset "seed_components_from! copies GlobalTime blocks across scan sets" begin
+        plan_a = plan_gains(model, nant, _geom(2))   # 2 scans
+        plan_b = plan_gains(model, nant, _geom(3))   # 3 scans — same bandpass shape
+        rng = MersenneTwister(7)
+        p_prior = zero_params(plan_a)
+        p_prior.g1.bandpass .= randn(rng, size(p_prior.g1.bandpass))
+        p_prior.g1.clock .= randn(rng, size(p_prior.g1.clock))
+        # The GlobalTime bandpass shape is scan-independent (ntseg == 1) → copyable.
+        @test size(p_prior.g1.bandpass) == size(zero_params(plan_b).g1.bandpass)
+
+        p0 = zero_params(plan_b)
+        p0.g1.clock .= 99.0                          # a marker that must NOT be touched
+        seed_components_from!(p0, plan_b, (; p = p_prior); components = (:bandpass,))
+        @test p0.g1.bandpass == p_prior.g1.bandpass  # transferred exactly
+        @test all(==(99.0), p0.g1.clock)             # only the named component copied
+    end
+
+    @testset "GlobalTime Delay is not FFT-seeded in a multi-scan solve" begin
+        # atmos = per-scan feed-common delay (seeded); instr = a GlobalTime per-feed
+        # (feed-2) delay (the R–L instrumental term — must stay 0, not double-seeded).
+        split = StationGainModel(
+            phase = (
+                atmos = TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), SharedFeeds()),
+                instr = TiedComponent(GainComponent(Delay(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
+            ),
+            logamp = (),
+        )
+        plan = plan_gains(split, nant, _geom(2))
+        p0 = zero_params(plan)
+        d = [1.0e-9 * a for a in 1:nant, _ in 1:2]    # nonzero delays for every station/feed
+        ss = StationSolution(d, zeros(nant, 2), zeros(nant, 2), 0.0, trues(nant, 2), 1)
+        seed_from_stationization!(p0, plan, ss, [1, 2]; multiscan = true)   # scan 1 = times 1,2
+        @test any(!iszero, p0.g1.atmos)               # per-scan delay WAS seeded
+        @test all(iszero, p0.g1.instr)                # GlobalTime instr left at 0 (not double-seeded)
     end
 end

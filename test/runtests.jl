@@ -105,6 +105,12 @@ include("test_solve_strategy.jl")
 # wiring, and MAP+OU denoising a low-SNR track. Reuses _build_fringe_uvset.
 include("test_solve_priors.jl")
 
+# Gustavo.Solve (Stage 2): the exact prior-coupled MAP block update (matrix-free
+# CG) behind LinearPhaseStep — operator ≡ dense solve, AR prior regularizes a
+# low-SNR recovery, `_map_block_solve` recovers a smooth freq/time truth, and the
+# strategy wires a BandpassARPrior into FreqStep. Reuses _forward_uvset.
+include("test_solve_mapblock.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

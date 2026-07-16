@@ -84,35 +84,55 @@ solve) via [`refine_phase_component!`](@ref), instead of by gradient descent:
 
 `shared_feeds = true` solves one feed-common phase per slice (`SharedFeeds`). This
 is the extension point: point it at any per-slice phase block your model defines.
+
+`prior` selects the per-slice solve. `nothing` (the default) inherits the posterior's
+[`ComponentPriors`](@ref) entry for `component` (falling back to the robust one-shot
+[`solve_adhoc_phasing`](@ref) when there is none); a concrete `AbstractPrior`
+overrides it (`NoPrior()` forces the one-shot path). A [`BandpassARPrior`](@ref)
+(`:freq`) or [`OUPrior`](@ref) (`:time`) triggers the EXACT prior-coupled MAP block
+update (matrix-free CG), which regularizes weak channels/APs. `map_maxgn`/`map_tol`
+bound the outer Gauss–Newton loop, `cg_tol`/`cg_maxit` the inner CG.
 """
-struct LinearPhaseStep{SM} <: AbstractSolveStep
+struct LinearPhaseStep{SM, PR} <: AbstractSolveStep
     component::Symbol
     axis::Symbol
     shared_feeds::Bool
     smoother::SM
+    prior::PR
+    map_maxgn::Int
+    map_tol::Float64
+    cg_tol::Float64
+    cg_maxit::Int
 end
-LinearPhaseStep(component::Symbol; axis::Symbol = :freq, shared_feeds::Bool = false, smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0)) =
-    LinearPhaseStep(component, axis, shared_feeds, smoother)
+LinearPhaseStep(
+    component::Symbol; axis::Symbol = :freq, shared_feeds::Bool = false,
+    smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0), prior = nothing,
+    map_maxgn::Integer = 5, map_tol::Real = 1.0e-8, cg_tol::Real = 1.0e-10, cg_maxit::Integer = 2000,
+) = LinearPhaseStep(
+    component, axis, shared_feeds, smoother, prior,
+    Int(map_maxgn), Float64(map_tol), Float64(cg_tol), Int(cg_maxit),
+)
 
 """
-    FreqStep(component = :bandpass; shared_feeds = false, smoother = …) -> LinearPhaseStep
+    FreqStep(component = :bandpass; shared_feeds = false, prior = nothing, smoother = …) -> LinearPhaseStep
 
 Solve a phase that varies along FREQUENCY directly (`axis = :freq`) — the per-channel
 instrumental bandpass. Per-feed by default (bandpass is instrumental, not
-non-birefringent).
+non-birefringent). See [`LinearPhaseStep`](@ref) for `prior` / MAP-block options.
 """
-FreqStep(component::Symbol = :bandpass; shared_feeds::Bool = false, smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0)) =
-    LinearPhaseStep(component; axis = :freq, shared_feeds = shared_feeds, smoother = smoother)
+FreqStep(component::Symbol = :bandpass; shared_feeds::Bool = false, kw...) =
+    LinearPhaseStep(component; axis = :freq, shared_feeds = shared_feeds, kw...)
 
 """
-    TimeStep(component = :adhoc; shared_feeds = true, smoother = …) -> LinearPhaseStep
+    TimeStep(component = :adhoc; shared_feeds = true, prior = nothing, smoother = …) -> LinearPhaseStep
 
 Solve a phase that varies along TIME directly (`axis = :time`) — the per-AP
 atmospheric adhoc phase. Feed-common by default (atmospheric phase is
-non-birefringent). (Not a numerical time step — a per-AP phase solve.)
+non-birefringent). (Not a numerical time step — a per-AP phase solve.) See
+[`LinearPhaseStep`](@ref) for `prior` / MAP-block options.
 """
-TimeStep(component::Symbol = :adhoc; shared_feeds::Bool = true, smoother = NoSmoothing(detrend = false, phase_rewrap_iters = 0)) =
-    LinearPhaseStep(component; axis = :time, shared_feeds = shared_feeds, smoother = smoother)
+TimeStep(component::Symbol = :adhoc; shared_feeds::Bool = true, kw...) =
+    LinearPhaseStep(component; axis = :time, shared_feeds = shared_feeds, kw...)
 
 # ── Running a strategy ────────────────────────────────────────────────────────
 #
@@ -151,13 +171,23 @@ apply_step(step::GradientStep, ctx, p) =
 )
 
 function apply_step(step::LinearPhaseStep, ctx, p)
+    prior = _resolve_step_prior(step, ctx.post.prior)
     refine_phase_component!(
         p, ctx.post.plan, ctx.post.uvset, ctx.post.geom;
         component = step.component, axis = step.axis, ref_ant = ctx.ref_ant,
-        shared_feeds = step.shared_feeds, smoother = step.smoother,
+        shared_feeds = step.shared_feeds, smoother = step.smoother, prior = prior,
+        map_maxgn = step.map_maxgn, map_tol = step.map_tol,
+        cg_tol = step.cg_tol, cg_maxit = step.cg_maxit,
     )
     return p, (;)
 end
+
+# The step's explicit `prior` wins; otherwise inherit the posterior's `ComponentPriors`
+# entry for the step's component (so `strategy = BlockCoordinate(FreqStep(:bandpass))`
+# with `prior = BandpassARPrior(...)` on the *solve* automatically does the MAP block).
+_resolve_step_prior(step::LinearPhaseStep, ::ComponentPriors) = step.prior
+_resolve_step_prior(step::LinearPhaseStep{<:Any, Nothing}, cp::ComponentPriors) =
+    get(cp.priors, step.component, NoPrior())
 
 # Gauge that pins the reference antenna AND holds the named components fixed.
 function _freeze_gauge(plan::GainPlan, ref_ant::Integer, frozen::Tuple)
