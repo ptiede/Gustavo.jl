@@ -57,13 +57,43 @@ end
     @test CAL.basis_columns(CAL.PolynomialFreq(2), x)[:, 2] ≈ x .^ 2
     @test CAL.basis_columns(CAL.PerChannel(), x) == Matrix(I, 5, 5)
 
-    # scalar term_eval primitives
+    # scalar term_eval primitives: p = ParamBlock(θ, off) (params indexed from 1),
+    # plus the term's coordinate (freq/time) or the local channel index.
     θ = [0.3, 1.5, -0.7]
-    @test CAL.term_eval(CAL.ConstantTerm(), θ, 2, 0.0, 0.0, 1) == 1.5
-    @test CAL.term_eval(CAL.Delay(), θ, 1, 4.0, 0.0, 1) ≈ 2π * 0.3 * 4.0
-    @test CAL.term_eval(CAL.Rate(), θ, 1, 0.0, 5.0, 1) ≈ 2π * 0.3 * 5.0
-    @test CAL.term_eval(CAL.PerChannel(), θ, 1, 0.0, 0.0, 3) == θ[3]
-    @test CAL.term_eval(CAL.PolynomialFreq(3), θ, 1, 2.0, 0.0, 1) ≈ 0.3 * 2 + 1.5 * 4 + (-0.7) * 8
+    @test CAL.term_eval(CAL.ConstantTerm(), CAL.ParamBlock(θ, 2)) == 1.5
+    @test CAL.term_eval(CAL.Delay(), CAL.ParamBlock(θ, 1), 4.0) ≈ 2π * 0.3 * 4.0
+    @test CAL.term_eval(CAL.Rate(), CAL.ParamBlock(θ, 1), 5.0) ≈ 2π * 0.3 * 5.0
+    @test CAL.term_eval(CAL.PerChannel(), CAL.ParamBlock(θ, 1), 3) == θ[3]
+    @test CAL.term_eval(CAL.PolynomialFreq(3), CAL.ParamBlock(θ, 1), 2.0) ≈ 0.3 * 2 + 1.5 * 4 + (-0.7) * 8
+    # The family adapter forwards the right coordinate to each term, given the
+    # block's backing store + offset (it builds the ParamBlock internally).
+    @test CAL._term_contribution(CAL.Delay(), θ, 1, 4.0, 0.0, 1) ≈ 2π * 0.3 * 4.0
+    @test CAL._term_contribution(CAL.Rate(), θ, 1, 0.0, 5.0, 1) ≈ 2π * 0.3 * 5.0
+    @test CAL._term_contribution(CAL.PerChannel(), θ, 1, 0.0, 0.0, 3) == θ[3]
+end
+
+@testset "Calibration: named parameters + bounds-checked block" begin
+    # A term that names its parameters: names are the single source of truth —
+    # the per-block count derives from them and they're read by name.
+    @eval CAL begin
+        struct _TwoParamTerm <: FrequencyTerm end
+        param_names(::_TwoParamTerm) = (:a, :b)
+        term_eval(::_TwoParamTerm, p, x) = p.a + p.b * x
+    end
+    t = CAL._TwoParamTerm()
+    @test CAL.param_names(t) == (:a, :b)
+    @test CAL.nparams_per_block(t, 4) == 2                 # derived from names
+
+    θ = [10.0, 3.0]
+    p = CAL.ParamBlock{(:a, :b)}(θ, 1)
+    @test p.a == 10.0 && p.b == 3.0                        # named access
+    @test p[1] == 10.0 && p[2] == 3.0                      # positional still works
+    @test_throws BoundsError p[3]                          # over-index errors (was silent)
+    @test CAL.term_eval(t, p, 2.0) ≈ 10.0 + 3.0 * 2.0
+
+    # An unnamed single-parameter term defaults to one parameter, positional.
+    @test CAL.param_names(CAL.Delay()) == ()
+    @test CAL.nparams_per_block(CAL.Delay(), 4) == 1
 end
 
 @testset "Calibration feed tying offset algebra" begin
@@ -206,18 +236,30 @@ end
     @test maximum(abs.(sm .- t)) < 0.1
 end
 
-@testset "Calibration: misdeclared coordinate term errors loudly (N3)" begin
-    # A new term that declares COORD_FREQ but defines no freq_coordinate must
-    # error at plan time, not silently evaluate with xf = 0.
+@testset "Calibration: misdeclared term errors loudly (N3)" begin
+    geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [1.0e9, 2.0e9])
+
+    # (1) NEW guard: a term that subtypes AbstractGainTerm directly (forgot to
+    #     pick a family) has no coord_kind → errors at plan time, never guesses.
+    @eval CAL begin
+        struct _AuditNoFamilyTerm <: AbstractGainTerm end
+    end
+    model1 = CAL.StationGainModel(
+        phase = (CAL.TiedComponent(CAL.GainComponent(CAL._AuditNoFamilyTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+    )
+    @test_throws MethodError CAL.plan_parameters(model1, 1, geom)
+
+    # (2) A term that claims to read frequency but defines no freq_coordinate must
+    #     also error, not silently evaluate with xf = 0. (Frequency terms get a
+    #     ν − f0 default; this one bypasses it by subtyping the root + declaring
+    #     coord_kind manually — so no matching coordinate builder exists.)
     @eval CAL begin
         struct _AuditBadFreqTerm <: AbstractGainTerm end
         coord_kind(::_AuditBadFreqTerm) = COORD_FREQ
-        nparams_per_block(::_AuditBadFreqTerm, n) = 1
         # NOTE: deliberately no freq_coordinate method.
     end
-    geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [1.0e9, 2.0e9])
-    model = CAL.StationGainModel(
+    model2 = CAL.StationGainModel(
         phase = (CAL.TiedComponent(CAL.GainComponent(CAL._AuditBadFreqTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
     )
-    @test_throws MethodError CAL.plan_parameters(model, 1, geom)
+    @test_throws MethodError CAL.plan_parameters(model2, 1, geom)
 end

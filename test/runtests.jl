@@ -45,6 +45,72 @@ include("test_fringe_diagnostics.jl")
 # Reuses _build_fringe_uvset + _coherence from test_pipeline.jl.
 include("test_phasecal.jl")
 
+# Graceful missing-polarization helpers (pol_index_or / coherency_slots):
+# the 2×2 coherency-assembly seam for partial-pol arrays (Stage-1 refactor).
+include("test_polarization.jl")
+
+# Gustavo.Graph: distributed map/reduce substrate (Serial + Dagger executors).
+# Reuses _build_fringe_uvset from test_pipeline.jl.
+include("test_graph.jl")
+
+# Distribution-readiness: lazy UVSet serialization round-trip + a lazy-set
+# pmapreduce under the DaggerExecutor. Reuses build_synth_idi_uvset from
+# test_fitsidi.jl.
+include("test_serialize.jl")
+
+# Gustavo.Solve (Stage 2): per-leaf coherency-matrix WLS objective (Milestone 1).
+include("test_solve_objective.jl")
+
+# Gustavo.Solve (Stage 2): per-site 2D-array parameter container + grouped
+# forward map, vs the flat-θ evaluator (Milestone 2).
+include("test_solve_plan.jl")
+
+# Gustavo.Solve (Stage 2): per-leaf Enzyme value + structured gradient, vs
+# ForwardDiff, incl. structural sparsity (Milestone 3, GustavoEnzymeExt).
+include("test_solve_gradient.jl")
+
+# Gustavo.Solve (Stage 2): distributed objective+gradient over the Graph
+# substrate (Serial ≡ Dagger, sum ≡ ForwardDiff, FringePosterior/LDP) —
+# reuses _build_fringe_uvset from test_pipeline.jl (Milestone 4).
+include("test_solve_distributed.jl")
+
+# Gustavo.Solve (Stage 2): reparameterization — gauge fixing + parameter scaling
+# machinery (Milestone 5b). Pure (no Enzyme/optimization).
+include("test_solve_reparam.jl")
+
+# Gustavo.Solve (Stage 2): fringe_solve driver — Optimization.jl LBFGS over the
+# forward-model MAP objective (profiled + fixed source), AutoScale + refant gauge
+# → machine-precision recovery of injected gains (Milestones 5 + 5b).
+include("test_solve_fit.jl")
+
+# Gustavo.Solve (Stage 2): FFT search + stationization warm-start — seeds the
+# delay/phase basin (wrapping delays a zero start cannot escape) so LBFGS reaches
+# machine precision (Milestone 5c). Reuses _forward_uvset from test_solve_fit.jl.
+include("test_solve_warmstart.jl")
+
+# Gustavo.Solve (Stage 2): per-site model overrides — a heterogeneous
+# ArrayGainModel (one station carries an extra Rate term) solves independently,
+# homogeneous subset unaffected (Milestone 6). Reuses _forward_uvset from
+# test_solve_fit.jl.
+include("test_solve_override.jl")
+
+# Gustavo.Solve (Stage 2): pluggable solve strategies — pure GradientDescent (≡
+# default) vs BlockCoordinate hybrid with direct linear phase block steps
+# (FreqStep/TimeStep); frozen validation. Reuses _forward_uvset (fit test).
+include("test_solve_strategy.jl")
+
+# Gustavo.Solve (Stage 2): prior / regularizer layer, OU-first (Milestone 7) —
+# the stochastic-time OU prior on a per-integration adhoc-phase track: math vs a
+# dense OU MvNormal + RTS smoother, ComponentPriors over a plan, FringePosterior
+# wiring, and MAP+OU denoising a low-SNR track. Reuses _build_fringe_uvset.
+include("test_solve_priors.jl")
+
+# Gustavo.Solve (Stage 2): the exact prior-coupled MAP block update (matrix-free
+# CG) behind LinearPhaseStep — operator ≡ dense solve, AR prior regularizes a
+# low-SNR recovery, `_map_block_solve` recovers a smooth freq/time truth, and the
+# strategy wires a BandpassARPrior into FreqStep. Reuses _forward_uvset.
+include("test_solve_mapblock.jl")
+
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below
 # rebuilds the previous "auto-default" station model — PerChannel ×

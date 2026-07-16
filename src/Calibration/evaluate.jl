@@ -37,11 +37,11 @@ end
     @inbounds xt = plan.xt[ti]
     @inbounds cl = plan.clocal[c]
     if o1 != 0
-        val += term_eval(t, θ, o1, xf, xt, cl)
+        val += _term_contribution(t, θ, o1, xf, xt, cl)
     end
     @inbounds o2 = plan.off2[ant, feed, ts, fs]
     if o2 != 0
-        val += term_eval(t, θ, o2, xf, xt, cl)
+        val += _term_contribution(t, θ, o2, xf, xt, cl)
     end
     return val
 end

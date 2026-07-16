@@ -157,3 +157,66 @@ shorthands (`R/L`, `X/Y`) onto the MSv4 `P/Q` convention.
 """
 pol_at(label::AbstractString) = At(_canonical_pol_label(label))
 pol_at(label::Tuple{<:PolTypes, <:PolTypes}) = At(_canonical_pol_label(label))
+
+"""
+    pol_index_or(x, label, default = 0) -> Int
+
+Non-throwing sibling of [`pol_index`](@ref): resolve `label` to its index
+along the `Pol` axis of `x`, returning `default` (0 by default) when the
+(canonicalized) product is absent rather than throwing a `KeyError`. Use this
+when a polarization product may legitimately be missing — partial-polarization
+arrays, where the goal is to assemble a coherency matrix with gaps rather than
+to require all four products.
+"""
+pol_index_or(x, label::AbstractString, default::Integer = 0) =
+    _pol_index_or(x, _canonical_pol_label(label), default)
+pol_index_or(x, label::Tuple{<:PolTypes, <:PolTypes}, default::Integer = 0) =
+    _pol_index_or(x, _canonical_pol_label(label), default)
+
+_pol_index_or(products::AbstractVector{<:AbstractString}, canon::AbstractString, default::Integer) =
+    let i = findfirst(==(canon), products)
+        i === nothing ? Int(default) : i
+    end
+_pol_index_or(x, canon::AbstractString, default::Integer) =
+    _pol_index_or(pol_products(x), canon, default)
+
+# Canonical 2×2 coherency layout: row = feed A ∈ {P, Q}, column = feed B ∈
+# {P, Q}, i.e. [PP PQ; QP QQ]. This is the fixed order `coherency_slots`
+# reports against; absent products simply map to slot 0.
+const _COHERENCY_LABELS = ["PP" "PQ"; "QP" "QQ"]
+
+"""
+    coherency_slots(x) -> Matrix{Int}   # 2×2
+
+Map the canonical coherency layout
+
+    ⎡ PP  PQ ⎤     ⎡ (A=1,B=1)  (A=1,B=2) ⎤
+    ⎣ QP  QQ ⎦  =  ⎣ (A=2,B=1)  (A=2,B=2) ⎦
+
+(row = feed A, column = feed B, feeds numbered P→1, Q→2) to the corresponding
+indices along the `Pol` axis of `x` — a `DimArray`, a leaf `AbstractDimTree`, a
+`UVSet`, or a `Vector{String}` of pol products. An entry is `0` when that
+product is absent from `x`.
+
+This is the graceful missing-polarization seam: the data model stores only the
+products actually present (no fixed 4-slot padding), and a solver reads this
+2×2 index table to assemble a coherency / Jones matrix with gaps. Feed
+shorthands fold onto `P`/`Q` (`R/L` circular, `X/Y` linear), so it works
+uniformly for circular, linear, and mixed-feed arrays.
+
+```julia
+julia> coherency_slots(["PP", "QQ"])      # parallel-hand only
+2×2 Matrix{Int64}:
+ 1  0
+ 0  2
+```
+"""
+function coherency_slots(x)
+    products = pol_products(x)
+    return Int[
+        pol_index_or(products, _COHERENCY_LABELS[i, j], 0) for i in 1:2, j in 1:2
+    ]
+end
+coherency_slots(products::AbstractVector{<:AbstractString}) = Int[
+    pol_index_or(products, _COHERENCY_LABELS[i, j], 0) for i in 1:2, j in 1:2
+]

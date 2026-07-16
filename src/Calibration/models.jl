@@ -102,23 +102,63 @@ nfeed_blocks(::FeedComponent) = 1
 """
     StationGainModel(; phase = (), logamp = ())
 
-The gain model for a station: a tuple of phase `TiedComponent`s and a tuple of
-log-amplitude `TiedComponent`s. `gain = exp(Σ logamp) · cis(Σ phase)`.
+The gain model for a station: phase `TiedComponent`s and log-amplitude
+`TiedComponent`s. `gain = exp(Σ logamp) · cis(Σ phase)`.
+
+Each component carries a NAME (Lux-`Chain`-style), which becomes its key in the
+solved parameter `ComponentVector` (`p.<group>.<name>`), so the parameters are
+self-documenting at the level the optimizer reads. Pass a NamedTuple to name them
+at the composition site:
+
+    StationGainModel(
+        phase = (clock = TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency())),
+                 lo    = TiedComponent(GainComponent(Rate(), GlobalTime(), PerSpectralWindow()), SharedFeeds())),
+        logamp = (bandpass = TiedComponent(GainComponent(PerChannel(), GlobalTime(), PerSpectralWindow())),),
+    )
+
+A plain tuple (or single component) is auto-named `phase_1…` / `logamp_1…`.
+Component names must be unique across `phase` and `logamp`.
 """
-struct StationGainModel{P <: Tuple, A <: Tuple}
+struct StationGainModel{P <: Tuple, A <: Tuple, PN <: Tuple, AN <: Tuple}
     phase::P
     logamp::A
+    phase_names::PN
+    logamp_names::AN
 end
-StationGainModel(; phase = (), logamp = ()) =
-    StationGainModel(_as_tied_tuple(phase), _as_tied_tuple(logamp))
+
+function StationGainModel(; phase = (), logamp = ())
+    pc, pn = _tied_and_names(phase, :phase)
+    ac, an = _tied_and_names(logamp, :logamp)
+    _check_unique_component_names(pn, an)
+    return StationGainModel(pc, ac, pn, an)
+end
+
+# NamedTuple → (components, names) from its values/keys; a plain tuple (or single
+# component) is auto-named `<prefix>_1, <prefix>_2, …`.
+_tied_and_names(nt::NamedTuple, prefix) = (_as_tied_tuple(values(nt)), keys(nt))
+function _tied_and_names(t::Tuple, prefix)
+    tc = _as_tied_tuple(t)
+    return tc, ntuple(i -> Symbol(prefix, :_, i), length(tc))
+end
+_tied_and_names(c, prefix) = _tied_and_names((c,), prefix)
 
 _as_tied_tuple(t::Tuple) = map(_as_tied, t)
 _as_tied_tuple(c) = (_as_tied(c),)
 _as_tied(tc::TiedComponent) = tc
 _as_tied(c::GainComponent) = TiedComponent(c)
 
+function _check_unique_component_names(pn, an)
+    names = (pn..., an...)
+    length(unique(names)) == length(names) ||
+        error("StationGainModel: component names must be unique across phase and logamp; got $(names)")
+    return nothing
+end
+
 phase_components(m::StationGainModel) = m.phase
 logamp_components(m::StationGainModel) = m.logamp
+"Names (Symbols) of the phase / log-amplitude components, in order."
+phase_component_names(m::StationGainModel) = m.phase_names
+logamp_component_names(m::StationGainModel) = m.logamp_names
 
 # ── Per-component / per-model time-segmentation queries ──────────────────────
 # Used by solvers to route global-time vs per-scan components.

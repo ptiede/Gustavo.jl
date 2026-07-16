@@ -542,6 +542,10 @@ DiskArrays.haschunks(::IDIChunkArray) = DiskArrays.Unchunked()
 
 UVData._layer_is_lazy(::IDIChunkArray) = true
 
+# The source file this lazy chunk reads from — the path is held in the (plain,
+# serializable) lazy descriptor, so a worker can reopen it after the leaf ships.
+UVData._leaf_source_path(a::IDIChunkArray) = a.data.filnam
+
 # Read band `b`'s contiguous `nperband` slice for UV_DATA row `i` into the
 # reusable `cube` buffer (a plain `Vector{Float32}`), byte-swapping in place.
 # `rawbuf` is a reusable `Vector{UInt8}` of `nperband*sizeof(dtype)` bytes.
