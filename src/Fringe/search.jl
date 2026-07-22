@@ -12,8 +12,10 @@
 #
 # is a 2-D DFT once the (weighted) visibilities are placed on a uniform
 # frequency × time grid: delay is conjugate to frequency, rate to time. We grid,
-# zero-pad (oversample), FFT, take the windowed peak of |D|, refine each axis by
-# 3-point quadratic interpolation, and read φ off the complex peak.
+# zero-pad (oversample), FFT, take the windowed peak of |D|, then polish that
+# coarse (delay, rate) cell on the EXACT matched filter (`_polish_peak_exact!`) and
+# read φ off it. The FFT only LOCATES the main lobe; the sub-cell peak comes from
+# the exact objective, so accuracy no longer needs a fine `oversample` grid.
 #
 # Conventions: weights are inverse variances (1/σ²); at the matched point
 # |D| ≈ A·Σw and the noise on D has variance Σw, so SNR = |D_peak| / √(Σw) and
@@ -41,7 +43,8 @@ Options for [`baseline_fringe_search`](@ref).
   Widely-separated narrow bands may need a larger value (or a tight
   `delay_window`) to avoid locking onto a multi-band alias peak.
 - `snr_min`       : detection threshold; `valid = snr ≥ snr_min`. Default 6.
-- `quad_interp`   : refine the peak by 3-point quadratic interpolation. Default true.
+- `quad_interp`   : polish the peak on the exact matched filter (sub-cell, per-axis
+  parabolic steps on the true objective — `_polish_peak_exact!`). Default true.
 - `algorithm`     : `:auto` (default), `:full`, or `:mbd`. `:full` is the single
   brute-force FFT over the common-Δf grid spanning the whole frequency axis;
   `:mbd` is the hierarchical single-band → multi-band delay search (HOPS/fourfit
@@ -297,29 +300,27 @@ function _baseline_fringe_search(
     # Noise estimate from the full |D|² plane (see `_plane_noise2!`).
     noise2 = _plane_noise2!(ws, Wsum)
 
-    # Quadratic peak refinement on |D| along each non-degenerate axis. The bin
-    # spacings are 1/(nf_pad·Δf) for delay and 1/(nt_pad·Δt) for rate.
+    # Refine the peak on the EXACT matched filter (scalloping-free), seeded at the
+    # FFT peak cell. This replaces the old on-grid 3-point parabola: the FFT only
+    # LOCATES the main lobe, and `_polish_peak_exact!` finds the sub-cell peak of
+    # the true objective — so accuracy no longer leans on a fine `oversample` grid.
+    # It also reads φ and amplitude off the exact complex peak, referenced directly
+    # to (f0, t0) with no FFT scalloping / grid-origin rotation:
+    #     Dref = Σ w·V·exp(−2πi[delay·(f−f0) + rate·(t−t0)])
+    # so amp = |Dref|/Σw, φ = angle(Dref).
     delay = delays[kbest]
     rate = rates[lbest]
     if opts.quad_interp
-        if !fax.degenerate
-            δ = _quad_offset(abs(D[_wrap(kbest - 1, nf_pad), lbest]), peakabs, abs(D[_wrap(kbest + 1, nf_pad), lbest]))
-            delay += δ / (nf_pad * fax.step)
-        end
-        if !tax.degenerate
-            δ = _quad_offset(abs(D[kbest, _wrap(lbest - 1, nt_pad)]), peakabs, abs(D[kbest, _wrap(lbest + 1, nt_pad)]))
-            rate += δ / (nt_pad * tax.step)
-        end
+        pk = _polish_peak_exact!(
+            V, W, freqs, times, f0, t0, delay, rate;
+            delay_bin = fax.degenerate ? 0.0 : 1.0 / (nf_pad * fax.step),
+            rate_bin = tax.degenerate ? 0.0 : 1.0 / (nt_pad * tax.step),
+            refine_delay = !fax.degenerate, refine_rate = !tax.degenerate,
+        )
+        delay, rate, Dref = pk.delay, pk.rate, pk.Dref
+    else
+        Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate)
     end
-
-    # The FFT localizes (delay, rate) to a fraction of a bin, but reading φ and
-    # amplitude off the discrete peak bin suffers FFT scalloping and a grid-origin
-    # phase offset. Re-evaluate the matched filter EXACTLY at the refined
-    # (delay, rate), referenced directly to (f0, t0):
-    #     Dref = Σ w·V·exp(−2πi[delay·(f−f0) + rate·(t−t0)])
-    # so amp = |Dref|/Σw, φ = angle(Dref) — exact, no scalloping loss / origin
-    # rotation.
-    Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate)
     absref = abs(Dref)
     amp = absref / Wsum
     # Data-driven SNR: the matched-filter noise is estimated from the spread of
@@ -381,6 +382,66 @@ function _exact_matched_filter(
         Dref += acc * cis(-2π * rate * (times[ti] - t0))
     end
     return Dref
+end
+
+# Refine a coarse (delay, rate) peak by maximizing the EXACT matched filter
+# |Σ w·V·exp(−2πi[τ(f−f0)+ṙ(t−t0)])| directly, rather than fitting a parabola to
+# the coarse FFT |D| (whose bias grows with the grid cell size, i.e. shrinks with
+# `oversample`). Two passes of a per-axis 3-point parabolic step evaluated on the
+# exact objective, seeded at the FFT peak cell with a half-bin probe — the same
+# coordinate-descent polish `_fit_band_dispersion` uses over its band phasors.
+# Optimizing the true objective can only raise |D|, so the refined SNR is ≥ the
+# on-grid SNR; steps that leave the seed cell or head downhill are rejected, so a
+# coarse (low-`oversample`) grid still seeds it safely. Returns the refined
+# `(delay, rate, Dref)`. A degenerate axis passes `refine_* = false` (its conjugate
+# coordinate is fixed at 0), so the polish reduces to a single exact evaluation.
+function _polish_peak_exact!(
+        V, W, freqs, times, f0, t0, delay::Float64, rate::Float64;
+        delay_bin::Float64, rate_bin::Float64,
+        refine_delay::Bool, refine_rate::Bool,
+    )
+    Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate)
+    best = abs(Dref)
+    # Per-axis probe half-width, shrunk geometrically each pass so the search hones
+    # from the coarse seed cell down to well below the fringe resolution regardless
+    # of `oversample`. The seed is the FFT argmax, so the true peak lies within
+    # ±half a grid bin; probing ±bin/2 brackets it. Where the three probes are
+    # concave we take the parabolic vertex, else step toward the taller side; the
+    # step is CLAMPED to one probe width (a coarse-grid parabola can overshoot the
+    # sinc peak) rather than rejected, so the point always walks toward the peak,
+    # and only an uphill move is kept.
+    hd = refine_delay ? delay_bin / 2 : 0.0
+    hr = refine_rate ? rate_bin / 2 : 0.0
+    for _ in 1:8
+        (hd > 0 || hr > 0) || break
+        if hd > 0
+            am = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay - hd, rate))
+            ap = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay + hd, rate))
+            den = am - 2 * best + ap
+            δ = den < 0 ? clamp(0.5 * hd * (am - ap) / den, -hd, hd) : (ap > am ? hd : (am > ap ? -hd : 0.0))
+            if δ != 0.0
+                Dn = _exact_matched_filter(V, W, freqs, times, f0, t0, delay + δ, rate)
+                if abs(Dn) >= best
+                    best = abs(Dn); Dref = Dn; delay += δ
+                end
+            end
+            hd *= 0.5
+        end
+        if hr > 0
+            am = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate - hr))
+            ap = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate + hr))
+            den = am - 2 * best + ap
+            δ = den < 0 ? clamp(0.5 * hr * (am - ap) / den, -hr, hr) : (ap > am ? hr : (am > ap ? -hr : 0.0))
+            if δ != 0.0
+                Dn = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate + δ)
+                if abs(Dn) >= best
+                    best = abs(Dn); Dref = Dn; rate += δ
+                end
+            end
+            hr *= 0.5
+        end
+    end
+    return (delay = delay, rate = rate, Dref = Dref)
 end
 
 # 3-point quadratic vertex offset (in bins) given neighbour magnitudes `ym, y0,
@@ -754,19 +815,21 @@ function _mbd_fringe_search(
         end
     end
 
-    # Parabolic polish of the fine delay on the exact filter (plays the role of
-    # the full path's on-grid quad refinement, but scalloping-free). Two passes:
-    # the second re-centers after any shift left by Δbc-grid residuals.
+    # Final refinement on the EXACT matched filter (scalloping-free), shared with
+    # the full path. The stage-2 FFT and the ambiguity arbitration above have
+    # located the main lobe and its correct alias branch; `_polish_peak_exact!`
+    # then finds the sub-cell (delay, rate) peak of the true objective. Its
+    # per-axis half-bin probe re-centres any residual left by the Δbc-grid
+    # quantization — what the old two-pass delay-only polish did, now also refining
+    # rate on the exact objective instead of on the (biased) stage-2 grid.
     if opts.quad_interp
-        h = mx.mbd_bin / 2
-        for _ in 1:2
-            ym = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay - h, rate_ref))
-            yp = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay + h, rate_ref))
-            δ = _quad_offset(ym, abs(Dref), yp)
-            δ == 0.0 && break
-            delay += δ * h
-            Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate_ref)
-        end
+        pk = _polish_peak_exact!(
+            V, W, freqs, times, f0, t0, delay, rate_ref;
+            delay_bin = mx.mbd_bin,
+            rate_bin = tax.degenerate ? 0.0 : 1.0 / (nt_pad * tax.step),
+            refine_delay = true, refine_rate = !tax.degenerate,
+        )
+        delay, rate_ref, Dref = pk.delay, pk.rate, pk.Dref
     end
 
     absref = abs(Dref)
