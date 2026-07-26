@@ -22,6 +22,9 @@ using .Fringe
 include("pipeline.jl")
 
 export UVData, Calibration, Fringe
+# Data entry and exit: the set type plus the reader/writer pair for each
+# supported format, so a bare `using Gustavo` spans load → fitcalibrate → write.
+export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export AbstractExecutor, ThreadsExecutor, DaggerExecutor, with_executor
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
@@ -39,10 +42,9 @@ export CalFunction, ApplySolution, StationWeightScale, FlagChannels
 export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
 export select_scans
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
-export ScanStream, scan_stream, ScanGroupSpec, ScanGroup, scan_view, select_groups
-export materialize_cube, materialize_leaves
+export ScanStream, scan_stream, ScanGroup, select_groups
 export ScanSearchResult, search_scan
 export map_groups, foreach_group
-export StageRecord, stage_names, stage_solution, stage_info, component_gains
+export StageRecord, StageView, stage_names, stage_solution, stage_info, component_gains
 export bandpass_solution
 end

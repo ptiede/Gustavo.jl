@@ -60,7 +60,7 @@ export phase_is_per_scan, amplitude_is_per_scan, component_is_per_scan
 export validate_station_gain_model, station_model_summary, component_label
 
 # Parameter layout and pure evaluation
-export ParameterLayout, ComponentPlan, plan_parameters
+export ParameterLayout, plan_parameters
 export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
 
 # Calibration solution container, apply, serialization

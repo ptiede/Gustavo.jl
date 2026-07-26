@@ -15,6 +15,7 @@ using ..Executors: exec_foreach
 using ..UVData
 using ..UVData: Frequency
 using ..Calibration
+using ..Calibration: ComponentPlan
 using FFTW: fft, fftfreq, plan_fft, MEASURE
 import FFTW
 import DimensionalData

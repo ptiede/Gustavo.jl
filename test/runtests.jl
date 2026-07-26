@@ -208,6 +208,30 @@ end
     @test isdefined(Gustavo, :fitcalibrate)
 end
 
+@testset "top-level export surface" begin
+    top = names(Gustavo)
+
+    # A bare `using Gustavo` spans the production path end to end: read a set,
+    # fit/calibrate it, name the per-stage view `sol[:fringe]` returns, write it.
+    for n in (
+            :UVSet, :load_uvfits, :load_fitsidi, :write_uvfits, :write_fitsidi,
+            :fit, :calibrate, :fitcalibrate, :StageView,
+        )
+        @test n in top
+    end
+
+    # Streaming-engine internals stay behind `Fringe`: reachable for users who
+    # drive the engine directly, absent from the pipeline-level namespace.
+    for n in (:ScanGroupSpec, :scan_view, :materialize_cube, :materialize_leaves)
+        @test !(n in top)
+        @test n in names(Gustavo.Fringe)
+    end
+
+    # Solver-internal parameter bookkeeping: still reachable, no longer exported.
+    @test !(:ComponentPlan in names(Gustavo.Calibration))
+    @test Gustavo.Calibration.ComponentPlan isa Type
+end
+
 @testset "Baseline stability plots" begin
     UV = Gustavo.UVData
     data = synthetic_uvdata()
