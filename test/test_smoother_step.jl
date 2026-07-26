@@ -183,7 +183,7 @@ end
     end
 
     @testset "AprioriAmplitude is an output-chain step" begin
-        BP = Gustavo.Bandpass
+        BP = Gustavo.UVData
         ant_names = String.(collect(UVP.union_antennas(uvset).name))
         rdate = DimensionalData.metadata(uvset).array_obs.rdate
         base_dt = DateTime(Date(rdate))

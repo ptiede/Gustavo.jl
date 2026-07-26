@@ -27,7 +27,7 @@
 
 using Dates: DateTime, Date, datetime2julian
 using AstroLib: ct2lst
-import ..Bandpass: _ecef_to_geodetic
+import ..UVData: _ecef_to_geodetic
 
 # Field-rotation angle per (station, time): ψ = f_par·q + f_el·el + offset +
 # feed-a pol angle, with the mount coefficients from the antenna table (alt-az

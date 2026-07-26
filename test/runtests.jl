@@ -21,7 +21,6 @@ using DimensionalData: DimArray, DimStack, dims, Ti
 using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products
 using PolarizedTypes: RPol, LPol
 
-# Unified Calibration framework (Phase 1 of the fringe-fitter refactor).
 include("test_calibration.jl")
 
 # FITS-IDI writer round-trip tests (Phase 2 of the fringe-fitter refactor).
@@ -2547,7 +2546,7 @@ end
 end
 
 @testset "ANTAB parser: GAIN + TSYS layouts" begin
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
     text = """
     GAIN AA ELEV DPFU = 0.031000 POLY = 1.0 /
     GAIN MG ELEV DPFU = 0.0179, 0.0168 POLY = 0.727119, 0.00947339, -0.00008222 /
@@ -2621,7 +2620,7 @@ end
 
 @testset "apply_calibration: synthetic UVSet" begin
     UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
 
     base = synthetic_uvdata()
     leaves_v = collect(values(UV.branches(base)))
@@ -2682,7 +2681,7 @@ end
 end
 
 @testset "tsys_in_window rejects outliers outside the scan window" begin
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
     # Three rows: an "in-scan" row, a slew-time outlier outside the window,
     # and another "in-scan" row. The window-mean must average only the
     # in-window rows and never see the outlier.
@@ -2713,7 +2712,7 @@ end
 
 @testset "apply_calibration: missing station warns" begin
     UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
     base = synthetic_uvdata()
 
     leaves_v = collect(values(UV.branches(base)))

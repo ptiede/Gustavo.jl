@@ -89,10 +89,10 @@ end
     apply_calibration(uvset::UVSet, calibration; kwargs...) -> UVSet
 
 Apply a calibration to `uvset`, returning a corrected `UVSet`. Generic entry
-point with methods for different calibration objects (an ANTAB a-priori
-calibration in `Gustavo.Bandpass`; a `Gustavo.Calibration.CalibrationSolution`
-fringe/bandpass solution). Visibilities are divided by `g_a · conj(g_b)` and
-weights scaled by `|g_a g_b|²`.
+point with methods for different calibration objects: an [`AntabCalibration`](@ref)
+(or a `Dict` of one per band) for a-priori amplitude calibration, and a
+`Gustavo.Calibration.CalibrationSolution` for a fringe/bandpass solution.
+Visibilities are divided by `g_a · conj(g_b)` and weights scaled by `|g_a g_b|²`.
 """
 function apply_calibration end
 
@@ -113,3 +113,16 @@ that build a `UVSet` from scratch (e.g. test fixtures) before calling
 `write_uvfits`. Provided by the `GustavoFITSFilesExt` extension.
 """
 function register_primary_cards! end
+
+"""
+    load_fitsidi_apriori(path; tsys_max = 1.0e4) -> Dict{Int, AntabCalibration}
+
+Build per-band a-priori flux calibrations from a FITS-IDI file's `GAIN_CURVE`
+(DPFU + elevation gain polynomial) and `SYSTEM_TEMPERATURE` (Tsys) tables, one
+[`AntabCalibration`](@ref) per 1-based band index — ready to pass to
+`apply_calibration(uvset, band_cals)`. Tsys values that are non-positive, the
+`999` placeholder, or `> tsys_max` are treated as missing and fall back to the
+other feed's value for the same (antenna, band, time); samples with no usable
+Tsys are flagged on apply. Provided by the `GustavoFITSFilesExt` extension.
+"""
+function load_fitsidi_apriori end

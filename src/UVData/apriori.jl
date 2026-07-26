@@ -1,5 +1,3 @@
-using AstroLib: ct2lst
-using Dates
 
 # ECEF (m) → geodetic (lat_rad, lon_rad, h_m). WGS84.
 function _ecef_to_geodetic(xyz::AbstractVector{<:Real})
@@ -105,7 +103,7 @@ function _build_apriori_gains(
             "ANTAB scan windows to the leaf's time axis.",
     )
     base_dt = DateTime(Date(rdate_str))
-    lo_h, hi_h = UVData.scan_window(leaf)
+    lo_h, hi_h = scan_window(leaf)
     (isfinite(lo_h) && isfinite(hi_h)) || error(
         "apply_calibration: leaf has no finite scan window",
     )
@@ -237,11 +235,11 @@ skip stations. Samples below `min_elevation_deg` (default: the horizon) are
 flagged rather than calibrated with a blown-up gain. The output is marked
 `BUNIT = "JY"`.
 """
-function UVData.apply_calibration(
+function apply_calibration(
         uvset::UVSet, antab::AntabCalibration;
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    out = UVData.apply(uvset) do leaf, info, root
+    out = apply(uvset) do leaf, info, root
         gains_pkg = _build_apriori_gains(
             leaf, info, root, antab;
             on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
@@ -254,7 +252,7 @@ function UVData.apply_calibration(
         )
         return with_visibilities(leaf, vis_corr, weights_corr)
     end
-    return UVData.set_bunit(out, "JY")
+    return set_bunit(out, "JY")
 end
 
 """
@@ -266,11 +264,11 @@ A-priori flux calibration where each spectral band (spw) has its OWN
 method. Used for FITS-IDI `GAIN_CURVE` + `SYSTEM_TEMPERATURE` calibration
 (see `load_fitsidi_apriori`), where DPFU / gain-curve / Tsys are per band.
 """
-function UVData.apply_calibration(
+function apply_calibration(
         uvset::UVSet, band_cals::AbstractDict{<:Integer, AntabCalibration};
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    out = UVData.apply(uvset) do leaf, info, root
+    out = apply(uvset) do leaf, info, root
         band = Int(info.ddi) + 1
         haskey(band_cals, band) || error(
             "apply_calibration: no a-priori calibration for band $(band) " *
@@ -286,7 +284,7 @@ function UVData.apply_calibration(
         )
         return with_visibilities(leaf, vis_corr, weights_corr)
     end
-    return UVData.set_bunit(out, "JY")
+    return set_bunit(out, "JY")
 end
 
 # Apply per-(channel, integration, antenna, feed) real-valued gains. NaN

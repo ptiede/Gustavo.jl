@@ -1,4 +1,3 @@
-using Dates
 
 """
     AntabGainCurve(dpfu, poly)

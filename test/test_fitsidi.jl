@@ -409,7 +409,7 @@ end
 # builds the per-band cals from GAIN_CURVE + SYSTEM_TEMPERATURE).
 @testset "a-priori per-band apply_calibration" begin
     UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
 
     # Two bands; all weights 1. Flat gain (POLY=[1.0]) + DPFU=1 ⇒ SEFD = Tsys,
     # so the per-baseline amplitude factor is √(Tsys_a·Tsys_b) = Tsys_band.

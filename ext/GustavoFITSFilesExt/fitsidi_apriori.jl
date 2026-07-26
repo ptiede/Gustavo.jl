@@ -1,13 +1,13 @@
 # A-priori amplitude calibration from a FITS-IDI file's GAIN_CURVE (DPFU +
 # elevation gain polynomial) and SYSTEM_TEMPERATURE (Tsys) tables. Produces one
-# `Bandpass.AntabCalibration` per band, reusing Gustavo's existing SEFD/elevation
+# `UVData.AntabCalibration` per band, reusing Gustavo's existing SEFD/elevation
 # apply machinery (`apply_calibration(uvset, band_cals)`). FITS-IDI specifics
 # (table layout, NOSTA→name mapping, time convention) live here; the calibration
-# math stays format-neutral in `src/Bandpass/Apriori.jl`.
+# math stays format-neutral in `src/UVData/apriori.jl`.
 
 using Dates: Date, DateTime, Millisecond, year
-import Gustavo.Bandpass
-using Gustavo.Bandpass: AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
+import Gustavo.UVData
+using Gustavo.UVData: AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
 
 # Locate the first HDU whose EXTNAME (trimmed) equals `name`.
 function _idi_find_hdu(fid, name)
@@ -23,7 +23,7 @@ end
 # placeholder, or an out-of-range outlier (off-source / failed measurement).
 @inline _tsys_ok(v, tmax) = isfinite(v) && v > 0 && !(998.5 < v < 999.5) && v <= tmax
 
-function Bandpass.load_fitsidi_apriori(path; tsys_max::Real = 1.0e4)
+function UVData.load_fitsidi_apriori(path; tsys_max::Real = 1.0e4)
     fid = FITSFiles.fits(path)
 
     ag = _idi_find_hdu(fid, "ARRAY_GEOMETRY")
