@@ -563,14 +563,11 @@ end
     @test angle(gain_slice[2, 2, 2]) ≈ 0.8
 end
 
-@testset "Bandpass stability plots" begin
-    BP = Gustavo.Bandpass
+@testset "Baseline stability plots" begin
     UV = Gustavo.UVData
     data = synthetic_uvdata()
     corr = UV.apply((leaf, _info, _meta) -> UV.with_visibilities(leaf, parent(leaf[:vis]) .* (1.0 + 0.0im), parent(leaf[:weights])), data)
 
-    # Plot helpers operate on UVSet directly. The resolver tests below
-    # also accept a UVSet (via the _DataLike accessors).
     gains = reshape(
         ComplexF64[
             1.0 * cis(0.1), 2.0 * cis(0.2),
@@ -584,30 +581,30 @@ end
         ], 2, 2, 2, 2
     )
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = :parallel)
+    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = :parallel)
     @test pol_idx == [1, 4]
     @test pol_labels == ["PP", "QQ"]
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = ["QQ", "PQ"])
+    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = ["QQ", "PQ"])
     @test pol_idx == [4, 2]
     @test pol_labels == ["QQ", "PQ"]
 
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
-    @test !isnothing(BP.plot_gain_solutions(gains, data))
-    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
-    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
+    @test !isnothing(UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
+    @test !isnothing(UV.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
+    @test !isnothing(UV.plot_gain_solutions(gains, data))
+    @test !isnothing(UV.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
+    @test !isnothing(UV.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
     fig_embed = Figure(size = (1400, 500))
-    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
-    @test !isnothing(BP.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
+    @test !isnothing(UV.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
+    @test !isnothing(UV.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 
-    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP")
+    fig = UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP")
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig)
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig_embed)
 end
 
 @testset "Amplitude stability summary" begin
-    BP = Gustavo.Bandpass
+    UV = Gustavo.UVData
     vis_block = ComplexF64[
         1.0 + 0.0im 2.0 + 0.0im;
         -1.0 + 0.0im -2.0 + 0.0im
@@ -615,40 +612,61 @@ end
     weight_block = ones(Float64, 2, 2)
     groups = [1, 2]
 
-    summary = BP.scan_averaged_amplitude_series(vis_block, weight_block; relative = false, groups = groups)
+    summary = UV.scan_averaged_amplitude_series(vis_block, weight_block; relative = false, groups = groups)
     @test summary ≈ [1.0, 2.0]
 
     noise_vis = reshape(ComplexF64[1.0 + 0.0im, 2.0 + 0.0im], 1, 2)
     noise_weights = fill(2.0, 1, 2)
 
-    _, amp_noise = BP.amplitude_series_with_noise(noise_vis, noise_weights; relative = false)
+    _, amp_noise = UV.amplitude_series_with_noise(noise_vis, noise_weights; relative = false)
     @test amp_noise ≈ fill(1 / sqrt(2), 2)
 
-    rel_amp, rel_amp_noise = BP.amplitude_series_with_noise(noise_vis, noise_weights; relative = true)
+    rel_amp, rel_amp_noise = UV.amplitude_series_with_noise(noise_vis, noise_weights; relative = true)
     @test rel_amp ≈ [1.0, 2.0]
     @test rel_amp_noise ≈ [0.0, 1 / sqrt(2)]
 
-    phase, phase_noise = BP.phase_series_with_noise(noise_vis, noise_weights; relative = false)
+    phase, phase_noise = UV.phase_series_with_noise(noise_vis, noise_weights; relative = false)
     @test phase ≈ [0.0, 0.0]
     @test phase_noise ≈ [1 / sqrt(2), 1 / (2sqrt(2))]
 
-    rel_phase, rel_phase_noise = BP.phase_series_with_noise(noise_vis, noise_weights; relative = true)
+    rel_phase, rel_phase_noise = UV.phase_series_with_noise(noise_vis, noise_weights; relative = true)
     @test rel_phase ≈ [0.0, 0.0]
     @test rel_phase_noise ≈ [0.0, 1 / (2sqrt(2))]
 end
 
 @testset "Diagnostics series y-limits" begin
-    BP = Gustavo.Bandpass
+    UV = Gustavo.UVData
 
-    ylims = BP.finite_series_ylims(([1.0, 2.0, NaN], [4.0]); pad_fraction = 0.1, min_pad = 0.0)
+    ylims = UV.finite_series_ylims(([1.0, 2.0, NaN], [4.0]); pad_fraction = 0.1, min_pad = 0.0)
     @test collect(ylims) ≈ [0.7, 4.3]
 
-    ylims_noise = BP.finite_series_ylims(([1.0, 1.0],), ([10.0, 0.2],); pad_fraction = 0.1, min_pad = 0.0, noise_cap_fraction = 0.5)
+    ylims_noise = UV.finite_series_ylims(([1.0, 1.0],), ([10.0, 0.2],); pad_fraction = 0.1, min_pad = 0.0, noise_cap_fraction = 0.5)
     @test collect(ylims_noise) ≈ [0.4, 1.6]
 
-    @test isnothing(BP.finite_series_ylims(([NaN], [Inf, -Inf])))
-    @test isequal(BP.shared_track(([1.0, 2.0, NaN], [1.0, 2.0, NaN])), [1.0, 2.0, NaN])
-    @test isnothing(BP.shared_track(([1.0, 2.0], [1.0, 3.0])))
+    @test isnothing(UV.finite_series_ylims(([NaN], [Inf, -Inf])))
+    @test isequal(UV.shared_track(([1.0, 2.0, NaN], [1.0, 2.0, NaN])), [1.0, 2.0, NaN])
+    @test isnothing(UV.shared_track(([1.0, 2.0], [1.0, 3.0])))
+end
+
+@testset "Reference-relative series" begin
+    UV = Gustavo.UVData
+
+    # `Calibration` re-exports the phase referencing helper from `UVData`.
+    @test Gustavo.Calibration.phase_relative_to_ref === UV.phase_relative_to_ref
+
+    @test UV.phase_relative_to_ref([0.5, 1.5, 2.5]) ≈ [0.0, 1.0, 2.0]
+    # Differences wrap into (-π, π].
+    @test UV.phase_relative_to_ref([0.0, 3π / 2]) ≈ [0.0, -π / 2]
+    # A non-finite reference falls through to the first finite entry.
+    @test UV.phase_relative_to_ref([NaN, 1.0, 2.0]) ≈ [NaN, 0.0, 1.0] nans = true
+    @test all(isnan, UV.phase_relative_to_ref([NaN, NaN]))
+    # ref_idx outside the axes yields all-NaN rather than throwing.
+    @test all(isnan, UV.phase_relative_to_ref([1.0, 2.0], 5))
+
+    @test UV.amplitude_relative_to_ref([2.0, 4.0, 1.0]) ≈ [1.0, 2.0, 0.5]
+    # Non-positive and non-finite amplitudes are not usable references.
+    @test UV.amplitude_relative_to_ref([0.0, 4.0, 2.0]) ≈ [NaN, 1.0, 0.5] nans = true
+    @test all(isnan, UV.amplitude_relative_to_ref([0.0, -1.0, NaN]))
 end
 
 @testset "Parallel-hand log-ratio weights" begin
@@ -1218,7 +1236,7 @@ end
     @test BP.effective_gain_parameter_count(setup, state) == expected_gain_params
 end
 
-@testset "Bandpass residual stats and plot" begin
+@testset "Bandpass residual stats" begin
     BP = Gustavo.Bandpass
     data = synthetic_bandpass_avg_uvdata()
     ref_ant = 1
@@ -1253,34 +1271,6 @@ end
     @test final_fit_stats.nparams === missing
     @test final_fit_stats.dof === missing
     @test final_fit_stats.reduced_chi2 === missing
-
-    bi = findfirst(==((1, 2)), data.baselines.pairs)
-    observed, observed_weights, gain_model, normalized_residual, weights = BP.baseline_bandpass_diagnostics(setup, result_gains, bi, 1)
-    source = BP.fit_bandpass_source_coherencies(setup, result_gains)
-    # data.vis/weights layout: (Frequency, Ti, Baseline, Pol). gains:
-    # (Frequency, Ti, Ant, Feed). Output normalized_residual stays (Ti, Frequency).
-    for s in axes(data.vis, 2), c in axes(data.vis, 1)
-        w = data.weights[c, s, bi, 1]
-        v = data.vis[c, s, bi, 1]
-        if w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))
-            a, b = data.baselines.pairs[bi]
-            m = result_gains[c, s, a, 1] * source[s, bi, 1, 1] * conj(result_gains[c, s, b, 1])
-            @test normalized_residual[s, c] ≈ sqrt(w) * (v - m)
-        end
-    end
-    @test size(observed) == size(observed_weights) == size(gain_model) == size(normalized_residual) == size(weights)
-
-    fig_bandpass = BP.plot_baseline_bandpass(setup, result_gains, ("AA", "AX"); pol = :parallel)
-    @test !isempty(repr(MIME("image/png"), fig_bandpass))
-
-    fig_embed = Figure(size = (1800, 700))
-    @test !isnothing(BP.plot_baseline_bandpass(fig_embed[1, 1], setup, result_gains, ("AA", "AX"); pol = :parallel))
-    @test !isnothing(BP.plot_baseline_bandpass_residuals(fig_embed[1, 2], setup, result_gains, ("AA", "AX"); pol = :parallel))
-    @test !isempty(repr(MIME("image/png"), fig_embed))
-
-    fig = BP.plot_baseline_bandpass_residuals(setup, result_gains, ("AA", "AX"); pol = :parallel)
-    png = repr(MIME("image/png"), fig)
-    @test !isempty(png)
 end
 
 @testset "Bandpass initializer methods" begin

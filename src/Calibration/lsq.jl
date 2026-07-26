@@ -221,20 +221,3 @@ function unwrap_phase_track(phases; weights = nothing)
     return unwrapped
 end
 
-function phase_relative_to_ref(phases, ref_idx = 1)
-    relative = fill(NaN, length(phases))
-    (1 <= ref_idx <= length(phases)) || return relative
-
-    ref = phases[ref_idx]
-    if !isfinite(ref)
-        ref_idx = findfirst(isfinite, phases)
-        isnothing(ref_idx) && return relative
-        ref = phases[ref_idx]
-    end
-
-    for i in eachindex(phases)
-        isfinite(phases[i]) || continue
-        relative[i] = angle(cis(phases[i] - ref))
-    end
-    return relative
-end
