@@ -239,8 +239,8 @@ end
     t0 = mean(times)
 
     auto = FR.FringeSearch()
-    full = FR.FringeSearch(algorithm = :full)
-    mbd = FR.FringeSearch(algorithm = :mbd)
+    full = FR.FringeSearch(algorithm = FR.FullGrid())
+    mbd = FR.FringeSearch(algorithm = FR.HierarchicalMBD())
     @test FR._search_axes(freqs, times, auto).mbd !== nothing     # auto → hierarchical
     @test FR._search_axes(freqs, times, full).mbd === nothing
 
@@ -337,4 +337,59 @@ end
     mn2 = FR.baseline_fringe_map(Vn, Wn, freqs, times, f0, t0; opts = auto)
     @test isapprox(mn2.detection.delay, dn.delay; atol = 1.0e-12)
     @test isapprox(maximum(mn2.snr), mn2.detection.snr; rtol = 0.15)
+end
+
+# An algorithm defined OUTSIDE the package — the only thing that proves
+# `AbstractSearchAlgorithm` is a real extension point rather than a declared one.
+struct _ProbeFullGrid <: FR.AbstractSearchAlgorithm end
+FR._mbd_axes(::_ProbeFullGrid, freqs, fax, tax, rates, opts) = nothing
+
+# Subtypes the seam but implements nothing.
+struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
+
+@testset "Search algorithm seam" begin
+    # A VGOS-style axis: 8 narrow bands spread over a wide span, so :auto
+    # resolves to the hierarchical path and the two built-ins differ.
+    Δf = 1.0e6
+    freqs = Float64[]
+    for b in 0:7
+        append!(freqs, 8.0e9 .+ b * 100.0e6 .+ (0:15) .* Δf)
+    end
+    times = (0:23) .* 1.0
+    fax = FR._uniform_axis(freqs)
+
+    @test FR._resolve_algorithm(:auto, freqs, fax) isa FR.HierarchicalMBD
+    # An explicit algorithm passes through untouched, including a foreign one.
+    for alg in (FR.FullGrid(), FR.HierarchicalMBD(), _ProbeFullGrid())
+        @test FR._resolve_algorithm(alg, freqs, fax) === alg
+    end
+    # A contiguous axis has nothing to decompose, so :auto stays on the full grid.
+    contig = collect(8.0e9 .+ (0:127) .* Δf)
+    @test FR._resolve_algorithm(:auto, contig, FR._uniform_axis(contig)) isa FR.FullGrid
+
+    # The foreign algorithm reaches the search and selects the full-grid path.
+    probe = FR.FringeSearch(algorithm = _ProbeFullGrid())
+    @test FR._search_axes(freqs, times, probe).mbd === nothing
+    f0, t0 = mean(freqs), mean(times)
+    V = inject_fringe(freqs, times, f0, t0; delay = 13.7e-9, rate = 6.0e-3, phase = -0.9)
+    W = ones(Float64, size(V))
+    d_probe = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = probe)
+    d_full = FR.baseline_fringe_search(
+        V, W, freqs, times, f0, t0; opts = FR.FringeSearch(algorithm = FR.FullGrid()))
+    @test d_probe.delay == d_full.delay
+    @test d_probe.snr == d_full.snr
+
+    # No silent fallback: an algorithm with no `_mbd_axes` method is an error,
+    # not a quiet switch to a different search.
+    @test_throws "defines no `Gustavo.Fringe._mbd_axes` method" FR._search_axes(
+        freqs, times, FR.FringeSearch(algorithm = _ProbeUnimplemented()))
+
+    # The sentinel is the ONLY Symbol accepted; the retired :full/:mbd names
+    # fail loudly rather than being silently reinterpreted.
+    for bogus in (:full, :mbd, :bogus)
+        opts = FR.FringeSearch(algorithm = bogus)
+        @test_throws ArgumentError FR._search_axes(freqs, times, opts)
+        @test_throws "algorithm must be :auto or an AbstractSearchAlgorithm" FR._search_axes(
+            freqs, times, opts)
+    end
 end

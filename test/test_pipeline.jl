@@ -700,7 +700,7 @@ end
     sol = fit(
         FringeFit(
             model = FringeModel(ref_ant = 1),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),        # no bandpass stage (see comment above)
         uvset,
     )
@@ -745,7 +745,7 @@ end
     sol0 = fit(
         FringeFit(
             model = FringeModel(ref_ant = 1, dispersion = false),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
     )
@@ -814,7 +814,7 @@ end
     sol = fit(
         FringeFit(
             model = FringeModel(ref_ant = 1, dispersion = false),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
     )
@@ -835,7 +835,7 @@ end
     sol0 = fit(
         FringeFit(
             model = FringeModel(ref_ant = 1, dispersion = false, sbd = false),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
     )
@@ -886,7 +886,7 @@ end
     sol = fit(
         FringeFit(
             model = FringeModel(ref_ant = 1, sbd = false),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
     )
@@ -960,7 +960,7 @@ end
     sol = fit(
         FringeFit(
             model = FringeModel(ref_ant = 1, sbd = false, dispersion = false),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
     )

@@ -33,6 +33,43 @@
 # "Hierarchical SBD → MBD search" section below).
 
 """
+    AbstractSearchAlgorithm
+
+How the delay search lays out its FFT grid. Built-ins: [`FullGrid`](@ref) and
+[`HierarchicalMBD`](@ref).
+
+A custom algorithm subtypes this and defines
+
+    Gustavo.Fringe._mbd_axes(alg, freqs, fax, tax, rates, opts) -> mbd_axes or nothing
+
+returning `nothing` to run the single full-grid FFT, or the hierarchical band
+geometry to run the two-stage search. There is no fallback: an algorithm with
+no method is an error rather than a silent switch to a different search.
+"""
+abstract type AbstractSearchAlgorithm end
+
+"""
+    FullGrid()
+
+One brute-force FFT over the common-Δf grid spanning the whole frequency axis.
+Simple and fast for contiguous bands (e.g. VLBA); on widely-separated narrow
+bands the grid is almost entirely zero-padding.
+"""
+struct FullGrid <: AbstractSearchAlgorithm end
+
+"""
+    HierarchicalMBD()
+
+Hierarchical single-band → multi-band delay search (HOPS/fourfit style): a
+per-band in-band delay, then a multi-band delay over the band origins, which
+resolves the MBD ambiguity explicitly against the in-band delay. Far cheaper
+than [`FullGrid`](@ref) when narrow bands are spread over a wide span
+(VGOS-style). Falls back to the full grid when the axis cannot support it —
+fewer than two band blocks, a degenerate or unsorted frequency axis.
+"""
+struct HierarchicalMBD <: AbstractSearchAlgorithm end
+
+"""
     FringeSearch(; delay_window, rate_window, oversample, snr_min, quad_interp, algorithm, pfa_max)
 
 Options for [`baseline_fringe_search`](@ref).
@@ -54,14 +91,12 @@ Options for [`baseline_fringe_search`](@ref).
   false-alarm budget — see `search_scan`.
 - `quad_interp`   : polish the peak on the exact matched filter (sub-cell, per-axis
   parabolic steps on the true objective — `_polish_peak_exact!`). Default true.
-- `algorithm`     : `:auto` (default), `:full`, or `:mbd`. `:full` is the single
-  brute-force FFT over the common-Δf grid spanning the whole frequency axis;
-  `:mbd` is the hierarchical single-band → multi-band delay search (HOPS/fourfit
-  style), which is far cheaper when narrow bands are spread over a wide span
-  (VGOS-style) and resolves the multi-band delay ambiguity explicitly against
-  the in-band delay. `:auto` picks `:mbd` when the axis has ≥ 2 band blocks and
-  the common grid would be > 4× the real channel count (mostly zero-padding),
-  else `:full` — contiguous-band data (e.g. VLBA) always takes the `:full` path.
+- `algorithm`     : an [`AbstractSearchAlgorithm`](@ref) — [`FullGrid`](@ref) or
+  [`HierarchicalMBD`](@ref) — or the sentinel `:auto` (default), which picks
+  between them from the frequency axis: `HierarchicalMBD` when the axis has ≥ 2
+  band blocks and the common grid would be > 4× the real channel count (mostly
+  zero-padding), else `FullGrid`. Contiguous-band data (e.g. VLBA) always takes
+  the full-grid path.
 """
 Base.@kwdef struct FringeSearch
     delay_window::Tuple{Float64, Float64} = (-1.0e-6, 1.0e-6)
@@ -69,7 +104,7 @@ Base.@kwdef struct FringeSearch
     oversample::Int = 8
     snr_min::Float64 = 6.0
     quad_interp::Bool = true
-    algorithm::Symbol = :auto
+    algorithm::Union{Symbol, AbstractSearchAlgorithm} = :auto
     pfa_max::Float64 = NaN
 end
 
@@ -559,22 +594,40 @@ struct _MBDAxes
     rate_scan::Vector{Int}          # positions in rate_idx inside the rate window
 end
 
-# Decide whether the hierarchical path applies (see `FringeSearch.algorithm`),
-# and build its geometry; `nothing` selects the full path.
-function _maybe_mbd_axes(freqs::AbstractVector, fax::_Axis, tax::_Axis, rates::Vector{Float64}, opts::FringeSearch)
-    alg = opts.algorithm
-    alg in (:auto, :full, :mbd) || error("FringeSearch: algorithm must be :auto, :full, or :mbd (got $(alg))")
-    alg === :full && return nothing
+# Resolve `FringeSearch.algorithm` to a concrete algorithm. The `:auto` sentinel
+# reads the frequency axis; an explicit algorithm passes through untouched.
+_resolve_algorithm(alg::AbstractSearchAlgorithm, freqs, fax::_Axis) = alg
+function _resolve_algorithm(alg::Symbol, freqs, fax::_Axis)
+    alg === :auto || throw(ArgumentError(
+            "FringeSearch: algorithm must be :auto or an AbstractSearchAlgorithm " *
+                "(FullGrid(), HierarchicalMBD()); got :$(alg)"
+        ))
+    # Hierarchical only when the common grid is mostly padding (> 4× the real
+    # channel count) — else the single FFT is simple and fast enough.
+    hierarchical = !fax.degenerate && issorted(freqs) && fax.n > 4 * length(freqs)
+    return hierarchical ? HierarchicalMBD() : FullGrid()
+end
+
+# The hierarchical band geometry for `alg`, or `nothing` to run the single
+# full-grid FFT. The extension point for a custom `AbstractSearchAlgorithm`:
+# dispatch is on the algorithm alone, so the remaining arguments stay
+# unannotated and an out-of-package method is unambiguously more specific.
+_mbd_axes(alg::AbstractSearchAlgorithm, freqs, fax, tax, rates, opts) =
+    throw(ArgumentError(
+        "FringeSearch: $(typeof(alg)) defines no `Gustavo.Fringe._mbd_axes` method"
+    ))
+
+_mbd_axes(::FullGrid, freqs, fax, tax, rates, opts) = nothing
+
+function _mbd_axes(::HierarchicalMBD, freqs, fax, tax, rates, opts)
     (fax.degenerate || !issorted(freqs)) && return nothing
     bands = _detect_bands(freqs, fax.step)
     length(bands) >= 2 || return nothing
-    if alg === :auto
-        # Hierarchical only when the common grid is mostly padding (> 4× the real
-        # channel count) — else the single FFT is simple and fast enough.
-        fax.n > 4 * length(freqs) || return nothing
-    end
     return _build_mbd_axes(freqs, bands, fax, tax, rates, opts)
 end
+
+_maybe_mbd_axes(freqs::AbstractVector, fax::_Axis, tax::_Axis, rates::Vector{Float64}, opts::FringeSearch) =
+    _mbd_axes(_resolve_algorithm(opts.algorithm, freqs, fax), freqs, fax, tax, rates, opts)
 
 function _build_mbd_axes(
         freqs::AbstractVector, bands::Vector{UnitRange{Int}},
@@ -945,7 +998,7 @@ end
         -> FringeSearchMap
 
 Compute the full delay–rate SNR surface for one visibility block — the
-brute-force common-Δf grid/FFT (`algorithm = :full`), returning the windowed
+brute-force common-Δf grid/FFT ([`FullGrid`](@ref)), returning the windowed
 `|D|` plane (in SNR units) instead of only the peak. The PLANE is always the
 full grid — showing the complete sidelobe/alias structure is the point of the
 diagnostic — while the embedded `detection` honours `opts.algorithm`, so it is
@@ -965,7 +1018,7 @@ function baseline_fringe_map(
         error("V is $(size(V)); expected (length(freqs), length(times)) = ($(length(freqs)), $(length(times)))")
     ax = _search_axes(freqs, times, opts)                # detection axes (honour opts.algorithm)
     axf = ax.mbd === nothing ? ax :                      # plane axes: always the full grid
-        _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.snr_min, opts.quad_interp, :full, opts.pfa_max))
+        _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.snr_min, opts.quad_interp, FullGrid(), opts.pfa_max))
     ncells = _search_cells(axf, opts)
     ws = _ensure_workspace!(workspace, axf.nf_pad, axf.nt_pad)
     Wsum = _grid_visibilities!(ws, V, W, freqs, times, axf)

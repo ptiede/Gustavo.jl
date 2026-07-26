@@ -73,8 +73,8 @@ Base.@kwdef struct FringeModel
     delay::AbstractTimeSegmentation = PerScan()
     rate::AbstractTimeSegmentation = PerScan()
     cross_feed::CrossFeed = CrossFeed()
-    dispersion::Any = :auto
-    sbd::Any = :auto
+    dispersion::Union{Bool, Symbol} = :auto
+    sbd::Union{Bool, Symbol} = :auto
     dtec_tie_colocated::Bool = true
 end
 
