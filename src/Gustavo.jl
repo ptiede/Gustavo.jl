@@ -15,16 +15,13 @@ using .UVData
 include("Calibration.jl")
 using .Calibration
 
-include("Bandpass.jl")
-using .Bandpass
-
 include("Fringe.jl")
 using .Fringe
 
-# Top-level modular calibration pipeline (orchestrates all four submodules).
+# Top-level modular calibration pipeline (orchestrates all three submodules).
 include("pipeline.jl")
 
-export UVData, Calibration, Bandpass, Fringe
+export UVData, Calibration, Fringe
 export AbstractExecutor, ThreadsExecutor, DaggerExecutor, with_executor
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate

@@ -2,15 +2,15 @@
     Calibration
 
 Shared calibration infrastructure for Gustavo: feed/correlation-product
-conventions, weighted least-squares solvers, phase-track utilities, and (as
-of the fringe-fitter refactor) the unified station gain-model framework used
-by both `Gustavo.Bandpass` and `Gustavo.Fringe`.
+conventions, weighted least-squares solvers, phase-track utilities, and the
+unified station gain-model framework used by `Gustavo.Fringe` and the
+calibration pipeline.
 """
 module Calibration
 
 using ..Executors: exec_foreach
 using ..UVData
-using ..UVData: correlation_feed_pair, _feed_index, is_parallel_hand, same_feed_label,
+using ..UVData: correlation_feed_pair, is_parallel_hand, same_feed_label,
     parallel_hand_indices, cross_hand_indices, build_parallel_hand_mask,
     phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, with_visibilities, materialize_leaf,

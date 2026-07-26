@@ -1,7 +1,6 @@
 # ── Gain components and station models ───────────────────────────────────────
 #
-# Composition hierarchy (replaces the old StationBandpassModel / FeedBandpassModel
-# / BandpassSpec / SegmentedBandpassModel tower):
+# Composition hierarchy:
 #
 #   StationGainModel
 #     .phase  :: Tuple of TiedComponent   →  Σ phase contributions

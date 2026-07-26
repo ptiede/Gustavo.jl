@@ -174,9 +174,9 @@ the first finite phase otherwise. The returned track is bit-identical
 to the prior `unwrap_phase_track(phases, ref_idx)` form when `ref_idx`
 is the highest-weight finite channel.
 
-This is an algorithmic anchor only — downstream gauge code should
-always center via a weighted mean (or remove a per-feed factor in the
-`ReferenceAntennaBandpassGauge` case), not pin the unwrap reference.
+This is an algorithmic anchor only — downstream gauge code should fix the
+phase gauge itself (by centering via a weighted mean, or by removing a
+per-feed reference factor), not rely on the unwrap reference.
 """
 function unwrap_phase_track(phases; weights = nothing)
     unwrapped = copy(phases)

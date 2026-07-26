@@ -224,8 +224,7 @@ antenna, channel, polarization, and integration time, computes
 `SEFD = T_sys^eff / (DPFU * g_E(elevation))` and rescales each visibility
 by `sqrt(SEFD_a * SEFD_b)` so the output amplitudes are in Jy.
 
-This implementation mirrors the structure of [`apply_bandpass`](@ref):
-visibilities are divided by `g_a * conj(g_b)` with `g_a = 1/sqrt(SEFD_a)`
+Visibilities are divided by `g_a * conj(g_b)` with `g_a = 1/sqrt(SEFD_a)`
 (real, positive), and weights scale by `|g_a|^2 |g_b|^2`. Samples whose
 ANTAB Tsys is missing or non-positive are flagged (weight set to 0).
 
