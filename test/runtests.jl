@@ -1,5 +1,13 @@
 using Gustavo
 using Test
+using Dagger      # activates GustavoDaggerExt — the executor A/B tests need it
+
+# The whole suite honors GUSTAVO_TEST_EXECUTOR=dagger (default: the package
+# default, Threads): the process-wide executor default scopes every pipeline
+# run and stream built below, so one env flip A/Bs the entire suite across
+# backends.
+get(ENV, "GUSTAVO_TEST_EXECUTOR", "") == "dagger" &&
+    (Gustavo.Executors.DEFAULT_EXECUTOR[] = Gustavo.DaggerExecutor())
 using LinearAlgebra
 using Statistics
 using Random
@@ -31,19 +39,54 @@ include("test_statespace.jl")
 # Globally-closing adhoc phasing (Phase 5 of the fringe-fitter refactor).
 include("test_adhoc.jl")
 
-# End-to-end CalibrationSolution + solve_fringes pipeline (Phase 6).
+# End-to-end CalibrationSolution + fit pipeline (Phase 6).
 include("test_pipeline.jl")
 
 # Modular calibration pipeline (CalibrationPipeline / calibrate refactor).
 # Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
 include("test_pipeline_config.jl")
 
+# Composable-pipeline interface (step protocol, transforms, selections, stage
+# snapshots, fit/calibrate/fitcalibrate). Reuses the same aliases.
+include("test_interface.jl")
+
+# New streaming engine vs the frozen monolith oracle (M2 gates): grouping /
+# materialization / search parity, and the transform chain vs the precal path.
+include("test_stream.jl")
+include("test_transforms.jl")
+
+# The FringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
+# cross-feed rate opt-in, fit-on-subset masking, transforms on the new path.
+include("test_fringe_step.jl")
+
+# The BandpassEstimator step on the new engine (M4 gates): fringe+bandpass θ
+# vs the frozen monolith, refine-kernel bit parity, coverage top-up,
+# bandpass_solution extraction + portable ApplySolution.
+include("test_bandpass_step.jl")
+
+# The TemporalSmoother step + output sink: multi-scan full-pipeline solves
+# (incl. the refine polish split), standalone calibrate ≡ fused output,
+# AprioriAmplitude as a recorded output-chain step.
+include("test_smoother_step.jl")
+
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
+
+# fringe_station_solutions θ-decode + rl_delay :global/:perscan model option.
+# Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
+include("test_fringe_station_solutions.jl")
 
 # Phase-cal (injected tone) calibration: multitone fit + precal hook.
 # Reuses _build_fringe_uvset + _coherence from test_pipeline.jl.
 include("test_phasecal.jl")
+
+# Per-station weight correction (station_weight_scale / the weight_scale option).
+# Reuses _build_fringe_uvset + the FP/CAL/UVP aliases from test_pipeline.jl.
+include("test_weight_scale.jl")
+
+# The executor seam (M7): Threads/Dagger A/B — bit-identical θ/outputs, shared
+# admission semantics, nested spawn safety, comparable error surface.
+include("test_executors.jl")
 
 # α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
 # requires explicit time + frequency segmentations. The helper below

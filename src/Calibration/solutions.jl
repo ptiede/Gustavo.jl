@@ -3,7 +3,7 @@
 # A `CalibrationSolution` bundles a solved `StationGainModel`, its
 # `ParameterLayout`, the `DataGeometry` it was solved over, and the flattened
 # parameter vector θ, plus a free-form `info` NamedTuple of diagnostics. It is
-# the hand-off object between a solver (e.g. `Gustavo.Fringe.solve_fringes`) and
+# the hand-off object between a solver (e.g. `Gustavo.fit`) and
 # the data: `apply_calibration(uvset, sol)` divides every leaf's visibilities by
 # the model's per-antenna gains, and `save_solution`/`load_solution` round-trip
 # it through the `Serialization` stdlib.
@@ -14,12 +14,39 @@ using DimensionalData: lookup, Ti
 using ..UVData: Frequency, Pol, Baseline
 
 """
-    CalibrationSolution(model, layout, geom, θ, info)
+    StageRecord(name, step_index, phase_comps, logamp_comps, info)
+
+Per-stage provenance on a [`CalibrationSolution`](@ref): which model components
+(indices into `model.phase` / `model.logamp`) the pipeline stage `name` owns —
+i.e. whose θ blocks it solved — plus that stage's own diagnostics. The records
+are ordered as the stages ran, which is what makes "the solution as of stage k"
+well-defined (see [`stage_solution`](@ref)).
+"""
+struct StageRecord
+    name::Symbol
+    step_index::Int
+    phase_comps::Vector{Int}
+    logamp_comps::Vector{Int}
+    info::NamedTuple
+end
+
+"""
+    CalibrationSolution(model, layout, geom, θ, info; stages = StageRecord[], transforms = Any[])
 
 A solved station gain model. `model::StationGainModel` is the shared model,
 `layout::ParameterLayout` its flattened parameter plan over `geom::DataGeometry`,
 `θ` the solved parameter vector (`length(θ) == layout.nθ`), and `info` a
 NamedTuple of solver diagnostics (per-scan SNR, χ, residuals, …).
+
+`stages` records per-pipeline-stage provenance ([`StageRecord`](@ref)) — index
+the solution by stage name (`sol[:bandpass]`) for the solution-as-of-that-stage
+and its diagnostics. `transforms` records the data-transform chain the solve
+materialized its scans through (precal, weight scaling, caller hooks), so
+diagnostics can replay it and the standalone apply path can reproduce
+`transforms ∘ solution`. `postcal` records the OUTPUT-chain calibration steps
+(a-priori amplitude) applied after the gains and before any reductions, so the
+standalone apply reproduces them without re-passing their inputs. All default
+empty (a plain single-stage solution).
 """
 struct CalibrationSolution{M <: StationGainModel, L <: ParameterLayout, G <: DataGeometry}
     model::M
@@ -27,15 +54,193 @@ struct CalibrationSolution{M <: StationGainModel, L <: ParameterLayout, G <: Dat
     geom::G
     θ::Vector{Float64}
     info::NamedTuple
+    stages::Vector{StageRecord}
+    transforms::Vector{Any}
+    postcal::Vector{Any}
 end
 
 function CalibrationSolution(
         model::StationGainModel, layout::ParameterLayout, geom::DataGeometry,
-        θ::AbstractVector, info::NamedTuple = NamedTuple(),
+        θ::AbstractVector, info::NamedTuple = NamedTuple();
+        stages = StageRecord[], transforms = Any[], postcal = Any[],
     )
     length(θ) == layout.nθ ||
         error("CalibrationSolution: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)")
-    return CalibrationSolution(model, layout, geom, Float64.(collect(θ)), info)
+    return CalibrationSolution(
+        model, layout, geom, Float64.(collect(θ)), info,
+        collect(StageRecord, stages), collect(Any, transforms), collect(Any, postcal),
+    )
+end
+
+# ── Per-stage views: snapshots of the solution as of each pipeline stage ─────
+
+"""
+    component_ranges(layout::ParameterLayout) -> Vector{UnitRange{Int}}
+
+The contiguous θ range owned by each component plan (phase components first,
+then log-amplitude, matching `layout.plans`). Exact because `plan_parameters`
+assigns blocks strictly sequentially: a component's parameters are the
+contiguous run from its first assigned offset up to the next component's first.
+A component that planned no parameters gets an empty range.
+"""
+function component_ranges(layout::ParameterLayout)
+    starts = Vector{Int}(undef, length(layout.plans))
+    for (i, p) in enumerate(layout.plans)
+        s = typemax(Int)
+        for v in p.off1
+            0 < v < s && (s = v)
+        end
+        for v in p.off2
+            0 < v < s && (s = v)
+        end
+        starts[i] = s == typemax(Int) ? 0 : s
+    end
+    ends = zeros(Int, length(starts))
+    nxt = layout.nθ + 1
+    for i in reverse(eachindex(starts))
+        starts[i] == 0 && continue
+        ends[i] = nxt - 1
+        nxt = starts[i]
+    end
+    return [starts[i] == 0 ? (1:0) : (starts[i]:ends[i]) for i in eachindex(starts)]
+end
+
+"""
+    StageView
+
+A view of one pipeline stage of a [`CalibrationSolution`](@ref), obtained by
+indexing the solution with the stage name: `sol[:fringe]`, `sol[:bandpass]`, ….
+[`stage_solution`](@ref) gives the full solution AS OF that stage;
+[`stage_info`](@ref) gives the stage's own diagnostics.
+"""
+struct StageView{S <: CalibrationSolution}
+    sol::S
+    k::Int
+end
+
+"""
+    stage_names(sol::CalibrationSolution) -> Vector{Symbol}
+
+The pipeline stages recorded on `sol`, in run order (empty for a plain
+single-stage solution).
+"""
+stage_names(sol::CalibrationSolution) = Symbol[r.name for r in sol.stages]
+
+function Base.getindex(sol::CalibrationSolution, name::Symbol)
+    k = findfirst(r -> r.name === name, sol.stages)
+    k === nothing && error(
+        "solution has no stage $(repr(name)); recorded stages: $(stage_names(sol))."
+    )
+    return StageView(sol, k)
+end
+
+"""
+    stage_info(sv::StageView) -> NamedTuple
+
+The diagnostics recorded by this stage (detections and per-scan SNR for the
+fringe stage, calibrator choice for the bandpass stage, …).
+"""
+stage_info(sv::StageView) = sv.sol.stages[sv.k].info
+
+"""
+    stage_solution(sv::StageView) -> CalibrationSolution
+
+The full solution AS OF this stage: the θ blocks of every later stage's
+components are zeroed, which is exactly identity gains for every term (phase 0,
+log-amplitude 0). Gauge pins live in the model structure and are untouched, so
+the snapshot stays on the same per-scan gauge the solve chose. Apply it, plot
+it, or difference it against the next stage's snapshot.
+"""
+function stage_solution(sv::StageView)
+    sol = sv.sol
+    rng = component_ranges(sol.layout)
+    θm = copy(sol.θ)
+    for j in (sv.k + 1):length(sol.stages)
+        r = sol.stages[j]
+        for ci in r.phase_comps
+            θm[rng[ci]] .= 0.0
+        end
+        for cj in r.logamp_comps
+            θm[rng[sol.layout.nphase + cj]] .= 0.0
+        end
+    end
+    return CalibrationSolution(
+        sol.model, sol.layout, sol.geom, θm, sol.info;
+        stages = sol.stages[1:sv.k], transforms = sol.transforms, postcal = sol.postcal,
+    )
+end
+
+"""
+    component_gains(sol::CalibrationSolution, plan_index::Integer; ci = :, ti = :)
+
+The complex antenna gains contributed by ONE model component alone (θ zeroed
+everywhere else), on the `(channel, time, antenna, feed)` window `ci × ti`.
+Exact, because station gains factor multiplicatively over components — the
+product over all components reproduces `evaluate_gains` on the full θ. Plan
+indices follow `layout.plans` (phase components first, then log-amplitude).
+"""
+function component_gains(sol::CalibrationSolution, plan_index::Integer; ci = Colon(), ti = Colon())
+    1 <= plan_index <= length(sol.layout.plans) ||
+        error("component_gains: plan_index $plan_index out of range 1:$(length(sol.layout.plans))")
+    rng = component_ranges(sol.layout)
+    θm = zeros(length(sol.θ))
+    θm[rng[plan_index]] = sol.θ[rng[plan_index]]
+    ev = GainEvaluator(sol.model, sol.layout)
+    civ = ci === Colon() ? (1:nchannels(sol.geom)) : ci
+    tiv = ti === Colon() ? (1:ntimes(sol.geom)) : ti
+    return evaluate_gains(ev, θm, civ, tiv)
+end
+
+"""
+    bandpass_solution(sol::CalibrationSolution) -> CalibrationSolution
+
+Extract the per-channel BANDPASS alone from a fitted solution: a new solution
+whose model carries only the `PerChannel` phase / log-amplitude components,
+with their θ blocks copied — nothing else (no per-scan delays/rates, no adhoc).
+Because the bandpass is time-stable (`GlobalTime`), the extracted solution is
+PORTABLE: apply it in a LATER pipeline run as a precal transform at the head of
+the chain,
+
+    bp = bandpass_solution(sol_calibrators)
+    fit(ApplySolution(bp) |> FringeFit(...), uvset_full)
+
+so the fringe search runs on bandpass-corrected data and the new solve fits the
+correction ON TOP of it (fit-on-a-few-scans / apply-everywhere, across runs —
+the transform is recorded on the new solution and replayed by `calibrate`).
+Cross-set application matches stations BY NAME and requires the identical
+channel layout (see [`Gustavo.Fringe.ApplySolution`](@ref)); stations absent
+from the extraction get identity gains.
+"""
+function bandpass_solution(sol::CalibrationSolution)
+    pcs = collect(sol.model.phase)
+    lcs = collect(sol.model.logamp)
+    pidx = findall(tc -> tc.component.term isa PerChannel, pcs)
+    lidx = findall(tc -> tc.component.term isa PerChannel, lcs)
+    isempty(pidx) && isempty(lidx) && error(
+        "bandpass_solution: the solution's model carries no per-channel bandpass component."
+    )
+    model = StationGainModel(phase = Tuple(pcs[pidx]), logamp = Tuple(lcs[lidx]))
+    nant = sol.layout.nant
+    layout = plan_parameters(model, nant, sol.geom)
+    θ = zeros(layout.nθ)
+    # Component plans are laid out deterministically from (component, nant,
+    # geom), so each extracted component's θ block is a straight range copy.
+    ro = component_ranges(sol.layout)
+    rn = component_ranges(layout)
+    for (k, i) in enumerate(pidx)
+        length(rn[k]) == length(ro[i]) ||
+            error("bandpass_solution: internal block-size mismatch (phase component $i)")
+        θ[rn[k]] = sol.θ[ro[i]]
+    end
+    for (k, j) in enumerate(lidx)
+        length(rn[layout.nphase + k]) == length(ro[sol.layout.nphase + j]) ||
+            error("bandpass_solution: internal block-size mismatch (logamp component $j)")
+        θ[rn[layout.nphase + k]] = sol.θ[ro[sol.layout.nphase + j]]
+    end
+    names = hasproperty(sol.info, :ant_names) ?
+        (; ant_names = sol.info.ant_names) : NamedTuple()
+    info = (; nant = nant, nscan = 0, extracted = :bandpass, names...)
+    return CalibrationSolution(model, layout, sol.geom, θ, info)
 end
 
 # ── Geometry from a UVSet ────────────────────────────────────────────────────
@@ -295,12 +500,9 @@ function _apply_gain_kernel(
             do_col(bi, p)
         end
     else
-        tasks = map(Iterators.partition(cols, cld(length(cols), nt))) do chunk
-            Threads.@spawn for (bi, p) in chunk
-                do_col(bi, p)
-            end
+        exec_foreach(cols; ntasks = nt) do (bi, p)
+            do_col(bi, p)
         end
-        foreach(wait, tasks)
     end
     return Vc, Wc
 end
@@ -311,23 +513,55 @@ end
     save_solution(path, sol::CalibrationSolution)
 
 Serialize `sol` to `path` via the `Serialization` stdlib inside a versioned
-wrapper NamedTuple `(; version, model, layout, geom, θ, info)`.
+wrapper NamedTuple (version 2 adds `stages` + `transforms`; version 3 adds
+`postcal`). Transforms that close over caller code (e.g. a `CalFunction`)
+serialize only within the same code state; a transform (or postcal step) that
+fails to serialize is recorded as `missing` with a warning rather than failing
+the save.
 """
 function save_solution(path::AbstractString, sol::CalibrationSolution)
-    wrapper = (; version = 1, sol.model, sol.layout, sol.geom, sol.θ, sol.info)
+    wrapper = (;
+        version = 3, sol.model, sol.layout, sol.geom, sol.θ, sol.info,
+        sol.stages, transforms = _serializable_transforms(sol.transforms),
+        postcal = _serializable_transforms(sol.postcal),
+    )
     serialize(path, wrapper)
     return path
+end
+
+function _serializable_transforms(ts)
+    out = Any[]
+    for t in ts
+        ok = try
+            serialize(IOBuffer(), t)
+            true
+        catch
+            false
+        end
+        if ok
+            push!(out, t)
+        else
+            @warn "save_solution: transform $(typeof(t)) is not serializable — recorded as `missing`."
+            push!(out, missing)
+        end
+    end
+    return out
 end
 
 """
     load_solution(path) -> CalibrationSolution
 
-Inverse of [`save_solution`](@ref).
+Inverse of [`save_solution`](@ref). Loads version 1 (pre-stage) files as
+solutions with empty `stages`/`transforms`, and version ≤ 2 (pre-postcal) with
+empty `postcal`.
 """
 function load_solution(path::AbstractString)
     w = deserialize(path)
-    w.version == 1 || error("load_solution: unsupported version $(w.version)")
-    return CalibrationSolution(w.model, w.layout, w.geom, w.θ, w.info)
+    w.version in (1, 2, 3) || error("load_solution: unsupported version $(w.version)")
+    stages = w.version >= 2 ? w.stages : StageRecord[]
+    transforms = w.version >= 2 ? w.transforms : Any[]
+    postcal = w.version >= 3 ? w.postcal : Any[]
+    return CalibrationSolution(w.model, w.layout, w.geom, w.θ, w.info; stages, transforms, postcal)
 end
 
 """

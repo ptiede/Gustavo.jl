@@ -33,7 +33,7 @@
 # "Hierarchical SBD → MBD search" section below).
 
 """
-    FringeSearch(; delay_window, rate_window, oversample, snr_min, quad_interp, algorithm)
+    FringeSearch(; delay_window, rate_window, oversample, snr_min, quad_interp, algorithm, pfa_max)
 
 Options for [`baseline_fringe_search`](@ref).
 
@@ -43,6 +43,15 @@ Options for [`baseline_fringe_search`](@ref).
   Widely-separated narrow bands may need a larger value (or a tight
   `delay_window`) to avoid locking onto a multi-band alias peak.
 - `snr_min`       : detection threshold; `valid = snr ≥ snr_min`. Default 6.
+- `pfa_max`       : false-alarm-probability detection gate. When set (finite),
+  `valid` requires the peak's false-alarm probability over this search's
+  independent (delay, rate) cells to satisfy `fringe_pfa(snr, ncells) ≤ pfa_max`
+  — an SNR cut of `fringe_snr_cut(pfa_max, ncells)` that scales itself with the
+  search size instead of being a fixed number; `snr_min` then acts only as an
+  additional floor (set `snr_min = 0` to gate purely on PFA). Default `NaN`
+  (disabled: the fixed `snr_min` cut alone). The group search divides `pfa_max`
+  by the number of searches sharing it (Bonferroni), making it a per-solve
+  false-alarm budget — see `search_scan`.
 - `quad_interp`   : polish the peak on the exact matched filter (sub-cell, per-axis
   parabolic steps on the true objective — `_polish_peak_exact!`). Default true.
 - `algorithm`     : `:auto` (default), `:full`, or `:mbd`. `:full` is the single
@@ -61,6 +70,7 @@ Base.@kwdef struct FringeSearch
     snr_min::Float64 = 6.0
     quad_interp::Bool = true
     algorithm::Symbol = :auto
+    pfa_max::Float64 = NaN
 end
 
 """
@@ -335,7 +345,7 @@ function _baseline_fringe_search(
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
 
-    return FringeDetection(delay, rate, phase, amp, snr, snr >= opts.snr_min)
+    return FringeDetection(delay, rate, phase, amp, snr, snr >= _gate_snr_min(opts, ax))
 end
 
 # Vector overloads: single-time (delay only) and the general fallback.
@@ -836,7 +846,7 @@ function _mbd_fringe_search(
     amp = absref / Wsum
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
-    return FringeDetection(delay, rate_ref, phase, amp, snr, snr >= opts.snr_min)
+    return FringeDetection(delay, rate_ref, phase, amp, snr, snr >= _gate_snr_min(opts, ax))
 end
 
 # ── False-fringe statistics + the delay–rate map extractor ─────────────────────
@@ -876,6 +886,32 @@ function fringe_pfa(snr::Real, ncells::Real)
     p1 >= 1 && return 1.0
     return -expm1(max(ncells, 1.0) * log1p(-p1))
 end
+
+"""
+    fringe_snr_cut(pfa, ncells) -> Float64
+
+Inverse of [`fringe_pfa`](@ref) in `snr`: the SNR at which a search over
+`ncells` independent (delay, rate) cells reaches false-alarm probability `pfa` —
+i.e. the effective SNR detection threshold implied by a PFA gate
+(`fringe_pfa(fringe_snr_cut(pfa, ncells), ncells) = pfa`). Because the cut only
+grows as `√log(ncells/pfa)`, it moves slowly with both arguments: a PFA-gated
+acceptance threshold is nearly flat across scans while still self-adjusting to
+the search size. Returns `0.0` for `pfa ≥ 1` and `Inf` for `pfa ≤ 0`.
+"""
+function fringe_snr_cut(pfa::Real, ncells::Real)
+    (isfinite(pfa) && isfinite(ncells)) || return NaN
+    pfa >= 1 && return 0.0
+    pfa <= 0 && return Inf
+    p1 = -expm1(log1p(-float(pfa)) / max(ncells, 1.0))   # per-cell exceedance
+    return sqrt(-log(p1))
+end
+
+# Acceptance threshold for one search: the fixed `snr_min`, raised to the PFA
+# gate's implied cut over THIS search's independent cells when `pfa_max` is set.
+_gate_snr_min(opts::FringeSearch, ax::_SearchAxes) =
+    isfinite(opts.pfa_max) ?
+        max(opts.snr_min, fringe_snr_cut(opts.pfa_max, _search_cells(ax, opts))) :
+        opts.snr_min
 
 """
     FringeSearchMap
@@ -929,7 +965,7 @@ function baseline_fringe_map(
         error("V is $(size(V)); expected (length(freqs), length(times)) = ($(length(freqs)), $(length(times)))")
     ax = _search_axes(freqs, times, opts)                # detection axes (honour opts.algorithm)
     axf = ax.mbd === nothing ? ax :                      # plane axes: always the full grid
-        _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.snr_min, opts.quad_interp, :full))
+        _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.snr_min, opts.quad_interp, :full, opts.pfa_max))
     ncells = _search_cells(axf, opts)
     ws = _ensure_workspace!(workspace, axf.nf_pad, axf.nt_pad)
     Wsum = _grid_visibilities!(ws, V, W, freqs, times, axf)

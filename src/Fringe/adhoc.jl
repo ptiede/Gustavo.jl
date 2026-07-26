@@ -24,7 +24,7 @@
 #
 # After the per-AP global solve (below) each (station, feed) phase track is
 # smoothed. WHICH smoother — and how it is parameterized — is a strategy TYPE, one
-# per method, mirroring the `AbstractBandpassSmoother` pattern in `pipeline.jl`.
+# per method, mirroring the `AbstractBandpassSmoother` pattern in `bandpass_stage.jl`.
 # Adding a method is "define a `<: AbstractAdhocSmoother` struct + one method",
 # nothing else. The informal interface a smoother participates in:
 #
@@ -624,6 +624,14 @@ function solve_adhoc_phasing(
         # phase). Collapsing makes all four products constrain the same node
         # difference φ_a − φ_b (±χ), so the solve has no feed-2 node and thus
         # contributes ZERO R–L phase — R–L is left to the global instrumental term.
+        # CAUTION (`shared_feeds = false`, non-default): with real feed-2 nodes the
+        # per-AP solve applies the EVPA feed-2 pin and its χ then absorbs the
+        # reference's per-AP R–L wander — solved into `chi[ap]` below but DROPPED
+        # at the θ write-back (only `.phase` is packed), i.e. the discarded-χ
+        # over-gauge class. Unreachable while the fringe model ties adhoc
+        # `SharedFeeds` (enforced by the test suite); reassign χ's AP-structure
+        # (as `_solve_phase_bandpass!` does per channel) before ever enabling a
+        # per-feed adhoc.
         rows = _adhoc_ap_rows(rbar, wbar, ap, bl_pairs, feeds, noise2, smoother.snr_floor^2, shared_feeds)
         save_rows && (ap_rows[ap] = rows)
         for row in rows

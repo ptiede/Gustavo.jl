@@ -4,6 +4,11 @@ Only the best chicken in the world. We sell nothing else and live on pure vibes
 """
 module Gustavo
 
+# The executor seam (M7): included FIRST so every submodule — the FITS-ext
+# decode fan-outs, the Fringe kernels, the pass runner — spawns through it.
+include("executors.jl")
+using .Executors
+
 include("UVData/UVData.jl")
 using .UVData
 
@@ -20,8 +25,27 @@ using .Fringe
 include("pipeline.jl")
 
 export UVData, Calibration, Bandpass, Fringe
+export AbstractExecutor, ThreadsExecutor, DaggerExecutor, with_executor
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
-export BandpassOptions
-export FringeFit, AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagBandEdges
+export FringeFit, FringeModel, CrossFeed, MatchedFilter, BandpassEstimator, TemporalSmoother
+export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagBandEdges
+# Composable-pipeline surface: verbs, step protocol, execution config.
+export fit, fitcalibrate
+export SolveStep, StepChain, DataTransformStep, ExecutionConfig
+export start_pass!, process_scan!, finish_pass!
+export model_components, fit_selection, provides, requires, required_grouping
+# Re-export the transform / selection vocabulary and stage accessors so
+# pipelines read naturally with a bare `using Gustavo`.
+export AbstractDataTransform, ScanDataView, apply_transform!, apply_transform
+export CalFunction, ApplySolution, StationWeightScale, FlagChannels
+export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
+export select_scans
+export AbstractLeafGrouping, ByScan, ByBand, ByKey
+export ScanStream, scan_stream, ScanGroupSpec, ScanGroup, scan_view, select_groups
+export materialize_cube, materialize_leaves
+export ScanSearchResult, search_scan
+export map_groups, foreach_group
+export StageRecord, stage_names, stage_solution, stage_info, component_gains
+export bandpass_solution
 end

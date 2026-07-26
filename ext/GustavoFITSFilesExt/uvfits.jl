@@ -418,7 +418,12 @@ function _build_source_info(primary_hdu)
     if dec == 0.0
         dec = Float64(something(_find_crval(cards, "DEC"), 0.0))
     end
-    return (; source_name = object, ra = ra, dec = dec)
+    # AIPS UVFITS stores OBSRA/OBSDEC and the RA/DEC axis CRVALs in DEGREES
+    # (Memo 117 §3.1.1). Gustavo's internal source coordinates are radians (see
+    # the FITS-IDI reader), so convert here — the inverse of the `rad2deg`
+    # applied in `_synthesize_primary_cards`, making the write→read round-trip
+    # identity and matching the FITS-IDI-origin convention.
+    return (; source_name = object, ra = deg2rad(ra), dec = deg2rad(dec))
 end
 
 function _find_crval(cards, ctype_prefix)
@@ -456,27 +461,54 @@ function _synthesize_primary_cards(uvset::UVSet)
     f_ref = Float64(ref_freq(fs))
     cws = ch_widths(fs)
     cdelt4 = isempty(cws) ? 1.0 : Float64(first(cws))
-    obsra = Float64(info.ra)
-    obsdec = Float64(info.dec)
+    # AIPS Memo 117 §3.1.1: the RA/DEC axes carry the phase center in DEGREES
+    # at the stated equinox. Gustavo's internal source coordinates are radians
+    # (the FITS-IDI reader applies `deg2rad`; `load_uvfits` applies it too), so
+    # convert on the way out. `_build_source_info` performs the inverse on read.
+    obsra = rad2deg(Float64(info.ra))
+    obsdec = rad2deg(Float64(info.dec))
     date_obs = isempty(string(obs.date_obs)) ? string(obs.rdate) : string(obs.date_obs)
 
+    # Emit the full CTYPE/CRVAL/CDELT/CRPIX/CROTA quintet for EVERY regular axis
+    # (2..7), exactly as AIPS `FITTP` writes it (Memo 117 Appendix B.2). Strict
+    # readers (DIFMAP, AIPS) require CRVAL/CRPIX/CDELT on each axis — the IF axis
+    # especially must carry CRVAL5=CRPIX5=CDELT5=1.0 (§3.1.1), and RA/DEC need
+    # CRPIX/CDELT=1.0 as degenerate length-1 axes. Missing descriptors make
+    # DIFMAP fail to establish the axis geometry.
+    equinox = Float64(obs.equinox)
     return Card[
         Card("NAXIS", 7),
+        # EXTEND=T tells readers extension HDUs (AIPS AN/FQ/NX) follow; without
+        # it a strict reader is not obliged to scan for the antenna table.
+        Card("EXTEND", true),
+        # BSCALE/BZERO for the data matrix: REAL = TAPE*BSCALE + BZERO (Table 5).
+        Card("BSCALE", 1.0), Card("BZERO", 0.0),
         Card("OBJECT", string(info.source_name)),
         Card("TELESCOP", string(obs.telescope)),
         Card("INSTRUME", string(obs.instrume)),
         Card("DATE-OBS", date_obs),
         Card("BUNIT", string(obs.bunit)),
-        Card("EQUINOX", Float64(obs.equinox)),
+        # EQUINOX is the modern keyword; EPOCH is emitted too for older DIFMAP.
+        Card("EQUINOX", equinox), Card("EPOCH", equinox),
+        # COMPLEX (axis 2): real, imag, weight — CRVAL/CDELT/CRPIX all 1.0.
         Card("CTYPE2", "COMPLEX"),
-        Card("CRVAL2", 1.0), Card("CDELT2", 1.0), Card("CRPIX2", 1.0),
+        Card("CRVAL2", 1.0), Card("CDELT2", 1.0), Card("CRPIX2", 1.0), Card("CROTA2", 0.0),
+        # STOKES (axis 3): codes -1,-2,-3,-4 = RR,LL,RL,LR (CDELT3 is negative).
         Card("CTYPE3", "STOKES"),
-        Card("CRVAL3", -1.0), Card("CDELT3", -1.0), Card("CRPIX3", 1.0),
+        Card("CRVAL3", -1.0), Card("CDELT3", -1.0), Card("CRPIX3", 1.0), Card("CROTA3", 0.0),
+        # FREQ (axis 4): CRVAL = reference frequency (Hz), CDELT = channel width.
         Card("CTYPE4", "FREQ"),
-        Card("CRVAL4", f_ref), Card("CDELT4", cdelt4), Card("CRPIX4", 1.0),
+        Card("CRVAL4", f_ref), Card("CDELT4", cdelt4), Card("CRPIX4", 1.0), Card("CROTA4", 0.0),
+        # IF (axis 5): per-IF frequency offsets live in the FQ table; this axis is
+        # conventional with CRVAL=CRPIX=CDELT=1.0 (§3.1.1).
         Card("CTYPE5", "IF"),
-        Card("CTYPE6", "RA"), Card("CRVAL6", obsra),
-        Card("CTYPE7", "DEC"), Card("CRVAL7", obsdec),
+        Card("CRVAL5", 1.0), Card("CDELT5", 1.0), Card("CRPIX5", 1.0), Card("CROTA5", 0.0),
+        # RA (axis 6): phase-center right ascension in DEGREES.
+        Card("CTYPE6", "RA"),
+        Card("CRVAL6", obsra), Card("CDELT6", 1.0), Card("CRPIX6", 1.0), Card("CROTA6", 0.0),
+        # DEC (axis 7): phase-center declination in DEGREES.
+        Card("CTYPE7", "DEC"),
+        Card("CRVAL7", obsdec), Card("CDELT7", 1.0), Card("CRPIX7", 1.0), Card("CROTA7", 0.0),
         Card("OBSRA", obsra), Card("OBSDEC", obsdec),
         Card("PTYPE1", "UU---SIN"),
         Card("PTYPE2", "VV---SIN"),
@@ -662,7 +694,15 @@ function _load_uvfits_flat(path)
     dim1 = findall(==(1), size(dt.data))
     raw::Array{Float32, 4} = dropdims(dt.data, dims = Tuple(dim1))
 
-    vis_raw::Array{ComplexF32, 3} = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
+    # CONJUGATE the visibilities crossing the UVFITS boundary. AIPS random-groups
+    # UVFITS stores the complex conjugate of Gustavo's internal (FITS-IDI / TMS)
+    # phase convention: FITS-IDI defines V = ⟨E_a1 · conj(E_a2)⟩, and AIPS/CASA use
+    # the opposite phase — same (u,v,w) and same 256·a1+a2 baseline convention
+    # (AIPS Memo 114r §2.1; casacore FitsIDItoMS.cc: "FITS-IDI convention is
+    # conjugate of AIPS and CASA convention"). So we negate the imaginary part on
+    # read and leave (u,v,w) untouched. `write_uvfits(...; convention = :aips)`
+    # applies the same conjugation, so the write→read round-trip is identity.
+    vis_raw::Array{ComplexF32, 3} = complex.(raw[:, 1, :, :], -raw[:, 2, :, :])
     weights_raw::Array{Float32, 3} = raw[:, 3, :, :]
 
     antenna_tables = AntennaTable[_build_antenna_table(h) for h in an_hdus]
@@ -724,14 +764,11 @@ function _load_uvfits_flat(path)
     bl_codes::Vector{Int} = round.(Int, collect(dt.BASELINE))
 
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
-    # NEGATE (u,v,w) crossing the UVFITS boundary. AIPS random-groups UVFITS uses
-    # the opposite (u,v,w) sign convention to Gustavo's internal (DiFX FITS-IDI)
-    # convention; the visibility values are identical in both. Without this a file
-    # written/read here point-reflects the image in AIPS/HOPS/ehtim/Comrade. All
-    # three components flip together (Hermitian-consistent, including the w-term —
-    # flipping only u,v would be inconsistent for wide-field/w). `write_uvfits`
-    # applies the same negation, so the write→read round-trip is identity.
-    uvw_raw::Matrix{Float32} = -hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
+    # (u,v,w) are NOT negated: FITS-IDI and AIPS UVFITS share an identical
+    # baseline-coordinate convention (u,v,w in light-seconds, coord = r_a1 − r_a2;
+    # AIPS Memo 117r §4.1.2 = Memo 114r §4.1.2 word for word). The FITS-IDI↔AIPS
+    # difference is purely the visibility conjugation applied above.
+    uvw_raw::Matrix{Float32} = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
     cfq::Vector{Float64} = channel_freqs(first(freq_setups))
     dims = (Integration(obs_time), Pol(msv4_labels), Frequency(cfq))
@@ -1164,6 +1201,10 @@ function _build_an_hdu(
     base = (
         ANNAME = rpad.(antennas.name, 8),
         STABXYZ = [collect(xyz[i]) for i in 1:nant],
+        # AIPS Memo 117 Table 10 mandates an ORBPARM column (orbital elements for
+        # orbiting antennas) in canonical position between STABXYZ and NOSTA. For
+        # ground arrays NUMORB=0, so it is a zero-length column (TFORM '0D').
+        ORBPARM = [Float64[] for _ in 1:nant],
         NOSTA = Int32.(1:nant),
         MNTSTA = [mount_to_mntsta(m) for m in mounts],
         STAXOF = Float32[Float32(offset_mount(m)) for m in mounts],
@@ -1236,13 +1277,20 @@ function _build_fq_hdu(setups::AbstractVector{<:FrequencySetup}, freqids::Abstra
         length(channel_freqs(fs)) == nif ||
             error("_build_fq_hdu: ragged channel counts across setups not yet supported (Phase 1.5)")
     end
-    if_freqs_per_row = [collect(channel_freqs(fs)) .- ref_freq(fs) for fs in setups]
+    # AIPS Memo 117 Table 22 column types: FRQSEL is J (int); IF FREQ is D
+    # (double — Hz offsets need the precision); CH WIDTH and TOTAL BANDWIDTH are
+    # E (single); SIDEBAND is J (int). Match them exactly so the on-disk TFORMs
+    # are '1J'/'nD'/'nE'/'nE'/'nJ' as AIPS/DIFMAP expect.
+    if_freqs_per_row = [Float64.(collect(channel_freqs(fs)) .- ref_freq(fs)) for fs in setups]
     base = (
         FRQSEL = Int32.(freqids),
         var"IF FREQ" = if_freqs_per_row,
-        var"CH WIDTH" = [collect(ch_widths(fs)) for fs in setups],
-        var"TOTAL BANDWIDTH" = [collect(total_bandwidths(fs)) for fs in setups],
-        SIDEBAND = [collect(sidebands(fs)) for fs in setups],
+        var"CH WIDTH" = [Float32.(collect(ch_widths(fs))) for fs in setups],
+        var"TOTAL BANDWIDTH" = [Float32.(collect(total_bandwidths(fs))) for fs in setups],
+        # AIPS Memo 117 Table 22: SIDEBAND is an INTEGER column (J), value ±1
+        # (-1 = lower sideband, +1 = upper). Emitting it as Float64 (TFORM 'nD')
+        # instead of 'nJ' is nonconformant and misparses in strict readers.
+        SIDEBAND = [round.(Int32, collect(sidebands(fs))) for fs in setups],
     )
     # Carry per-row extras only if every setup has the same extras keyset.
     # `:frqsel` is preserved on read for round-trip recovery; it's already
@@ -1298,7 +1346,21 @@ function _leaf_record_order(leaf)
     return [(ti, bl) for bl in 1:nbl for ti in 1:nti]
 end
 
-function UVData.write_uvfits(output_path, uvset::UVSet)
+function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :aips)
+    # `convention` selects the on-disk visibility phase convention:
+    #   :aips    — conjugate visibilities to the AIPS/CASA/UVFITS convention (the
+    #              standard form that DIFMAP/AIPS/CASA/ehtim/pyuvdata/VLBIFiles
+    #              read correctly). This is the default.
+    #   :fitsidi — write Gustavo's internal FITS-IDI (TMS) phase convention
+    #              verbatim, i.e. no conjugation.
+    # (u,v,w) are IDENTICAL in both formats and are never negated (see load_uvfits).
+    # NOTE: load_uvfits always assumes a standard :aips file, so only :aips
+    # round-trips through Gustavo as the identity.
+    convention in (:aips, :fitsidi) || error(
+        "write_uvfits: `convention` must be :aips (conjugate to the standard " *
+            "AIPS/CASA/UVFITS phase convention, default) or :fitsidi (internal " *
+            "FITS-IDI phase verbatim); got $(repr(convention)).",
+    )
     _assert_not_writing_to_source(output_path, uvset)
     src_list = sources(uvset)
     length(src_list) == 1 || error(
@@ -1402,6 +1464,9 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
     subarray_per_scan = ones(Int32, nscan)
     scan_windows = Vector{Tuple{Float64, Float64}}(undef, nscan)
 
+    # :aips conjugates (negate imag part); :fitsidi writes the imag part verbatim.
+    imag_sign::Float32 = convention === :aips ? -1.0f0 : 1.0f0
+
     rec_offset = 0
     for (sid, leaf) in enumerate(leaf_list)
         info = DimensionalData.metadata(leaf)
@@ -1416,7 +1481,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet)
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
             parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:uvw]),
-            bl_aips_codes, ro, date_param_leaf, rec_offset, pol_perm,
+            bl_aips_codes, ro, date_param_leaf, rec_offset, pol_perm, imag_sign,
         )
         for (rec_i, _) in enumerate(ro)
             row = rec_offset + rec_i
@@ -1479,6 +1544,7 @@ function _write_records_kernel!(
         date_param::AbstractMatrix{Tdate},
         rec_offset::Integer,
         pol_perm::AbstractVector{Int},
+        imag_sign::Float32,
     ) where {Tvis, Tw, Tuvw, Tdate}
     # Leaf storage: (Frequency, Ti, Baseline, Pol) for vis/weights;
     # (Ti, Baseline, UVW) for uvw.
@@ -1493,15 +1559,17 @@ function _write_records_kernel!(
             for c in 1:nchan
                 v = vis_dense[c, ti, bi, pmem]
                 raw_data[row, 1, pdisk, 1, c, 1, 1] = real(v)
-                raw_data[row, 2, pdisk, 1, c, 1, 1] = imag(v)
+                # imag_sign = -1 (:aips) conjugates to the AIPS/UVFITS phase
+                # convention; +1 (:fitsidi) writes the internal phase verbatim.
+                raw_data[row, 2, pdisk, 1, c, 1, 1] = imag_sign * imag(v)
                 raw_data[row, 3, pdisk, 1, c, 1, 1] = w_dense[c, ti, bi, pmem]
             end
         end
-        # Negate (u,v,w): Gustavo-internal (DiFX) → AIPS UVFITS sign convention
-        # (visibility untouched; see the matching note in load_uvfits).
-        uu[row] = -uvw_dense[ti, bi, 1]
-        vv[row] = -uvw_dense[ti, bi, 2]
-        ww_[row] = -uvw_dense[ti, bi, 3]
+        # (u,v,w) written verbatim: FITS-IDI and AIPS UVFITS share the same
+        # baseline-coordinate convention (see the matching note in load_uvfits).
+        uu[row] = uvw_dense[ti, bi, 1]
+        vv[row] = uvw_dense[ti, bi, 2]
+        ww_[row] = uvw_dense[ti, bi, 3]
         bl_codes[row] = Int(bl_aips_codes_local[bi])
         date_param_cat[row, :] .= @view date_param[rec_i, :]
     end

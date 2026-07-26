@@ -27,7 +27,7 @@
 # which `using DiskArrays` (its lazy field arrays subtype AbstractDiskArray).
 const DiskArrays = FITSFiles.DiskArrays
 using Statistics: median
-using OhMyThreads: tforeach
+using Gustavo.Executors: exec_foreach
 
 # Tasks to spread one leaf's vis/weights decode over (bounded by the baseline
 # count). Reads the solve-set knob in UVData; defaults to 1 (sequential).
@@ -652,7 +652,7 @@ function _read_row_span(io, a::IDIChunkArray, rmin::Int, rmax::Int)
         readbytes!(io, span, nbytes)
     else
         part = cld(nbytes, nstream)
-        tforeach(1:nstream; ntasks = nstream) do s
+        exec_foreach(1:nstream; ntasks = nstream) do s
             lo = (s - 1) * part
             len = min(part, nbytes - lo)
             len <= 0 && return
@@ -717,7 +717,7 @@ end
             _decode_vis_bl!(out, a, span, rmin, D, bl)
         end
     else
-        tforeach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
+        exec_foreach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
     end
     if a.normalize
         Aspec = _aspec_from_span(a, span, rmin, D)
@@ -773,7 +773,7 @@ end
             _decode_weights_bl!(out, a, span, rmin, D, bl)
         end
     else
-        tforeach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
+        exec_foreach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
     end
     if a.normalize
         Aspec = _aspec_from_span(a, span, rmin, a.flux_field.type)
@@ -1183,55 +1183,61 @@ end
 
 """
     load_fitsidi(path; lazy=true, scans=:, bands=:,
-                 weight_mode=:validity, weight_efficiency=1.0, drop_autocorr=true) -> UVSet
+                 weight_mode=:auto, weight_efficiency=1.0, drop_autocorr=true) -> UVSet
 
 Load a FITS-IDI file into a (lazily streamed) `UVSet`.
 
 `normalize_autocorr` (default `true`) divides each cross-correlation by the
 per-(channel, integration, feed) autocorrelations, `V_ab ← V_ab/√(A_a·A_b)`,
-forming true correlation coefficients (flattens the amplitude bandpass; weights
-scale by `A_a·A_b`). This is what makes the data match the HOPS/rPICARD
-"correlation coefficient" convention. The autocorrelations are then consumed
-(the `a==a` baselines are dropped). A no-op on data with no autocorrelations.
+forming true correlation coefficients (flattens the amplitude bandpass). This is
+what makes the data match the HOPS/rPICARD "correlation coefficient" convention.
+The autocorrelations are then consumed (the `a==a` baselines are dropped). A no-op
+on data with no autocorrelations.
 
 `drop_autocorr` (default `true`) excludes autocorrelation baselines (antenna
 `a == a`) from the visibility set even when not normalizing (total power, not
 interferometric). `normalize_autocorr=true` implies the autocorrelations are
 dropped from the output regardless. Pass both `false` to keep autocorrelations.
 
-`weight_mode` controls how the on-disk `WEIGHT` column is interpreted:
+`weight_mode` controls how the on-disk `WEIGHT` column becomes the output weight.
+Its meaning is set by the `WEIGHTYP` header keyword (AIPS Memo 114, Table 14),
+so the DEFAULT `:auto` reads that keyword and does the right thing — a caller
+normally passes nothing:
 
-  * `:validity` (default) — return the correlator weights verbatim. These are
-    DiFX/FITS-IDI *validity* weights (fraction of the sample actually
-    correlated, ≈1), NOT inverse variances, so `1/√weight` is not a noise.
-  * `:radiometer` — convert to thermal-noise inverse variances in the data's
-    (correlation-coefficient) units: `w → (w / weight_norm) · 2·Δν·τ·η²`, with
-    channel width `Δν` from the FREQUENCY table (`CH_WIDTH`) and per-record
-    accumulation time `τ` from the `INTTIM` column. `weight_efficiency` (η) is the
-    correlator/quantization efficiency (a single scalar; it sets the absolute
-    χ²/SNR scale, not the relative weighting). Tsys is not needed — it cancels
-    in correlation-coefficient units. Non-positive weights (flag sentinels) are
-    preserved; bands lacking a usable `CH_WIDTH`/`INTTIM` fall back to
-    `:validity`.
+  * `:auto` (default) — infer from `WEIGHTYP`. `'NORMAL'` weights are already true
+    weights (1/σ²) and are returned as-is. `'CORRELAT'`/`'CORRTIME'` weights are
+    validity fractions `f ∈ [0,1]` (fraction of the integration that correlated),
+    so they are converted to thermal-noise inverse variances `f·2·Δν·τ·η²` — the
+    radiometer conversion below. `WEIGHTYP` absent ⇒ `'CORRELAT'`, per the memo.
+  * `:radiometer` — force the thermal conversion regardless of `WEIGHTYP`.
+  * `:validity` — return the raw on-disk weights verbatim (no conversion); use for
+    byte round-trips and inspection.
 
-    `weight_norm` is the nominal fully-valid value of the on-disk `WEIGHT` column.
-    The radiometer formula treats `WEIGHT` as a ≈1 validity *fraction*, but some
-    correlators write an unnormalized value (e.g. DiFX BT164 ≈ 3.4); leaving
-    `weight_norm = 1.0` then overstates the inverse-variance by that factor. Set it
-    to `median(positive WEIGHT)` so a fully-valid cell lands at the correct
-    `2·Δν·τ·η²`. A successive-difference scatter test (`|ΔV|²/(σᵢ²+σⱼ²) ≈ 1`) on the
-    output is the way to confirm the absolute scale.
+The thermal conversion is `w → w · 2·Δν·τ·η²`, with channel width `Δν` from the
+FREQUENCY table (`CH_WIDTH`) and per-record accumulation time `τ` from the `INTTIM`
+column. `weight_efficiency` (η) is the correlator/quantization efficiency (one
+scalar; sets the absolute χ²/SNR scale, not the relative weighting). Tsys is not
+needed — it cancels in correlation-coefficient units. Non-positive weights (flag
+sentinels) are preserved; bands lacking a usable `CH_WIDTH`/`INTTIM` fall back to
+raw. NOTE the conversion carries NO `A_a·A_b` factor: for `'CORRELAT'` the weight
+is a fraction, not a variance, so autocorr normalization does not rescale it (that
+rescale applies only to `'NORMAL'` weights). `weight_norm` (default 1.0) divides
+the factor and exists only for the rare case of a mis-declared file; it is not
+needed for standard `'CORRELAT'` data. A successive-difference scatter test
+(`|ΔV|²·wᵢwⱼ/(wᵢ+wⱼ)`) on the output confirms the absolute scale (≈1 for a
+per-complex-variance convention, ≈2 for the per-quadrature convention many
+packages use).
 """
 function UVData.load_fitsidi(
         path; lazy = true, scans = :, bands = :,
-        weight_mode::Symbol = :validity, weight_efficiency::Real = 1.0,
+        weight_mode::Symbol = :auto, weight_efficiency::Real = 1.0,
         weight_norm::Real = 1.0,
         drop_autocorr::Bool = true, normalize_autocorr::Bool = true,
     )
-    weight_mode in (:validity, :radiometer) || error(
-        "load_fitsidi: weight_mode must be :validity (raw correlator validity " *
-            "weights, as on disk) or :radiometer (convert to thermal-noise " *
-            "inverse-variance via 2·Δν·τ·η²); got $(weight_mode).",
+    weight_mode in (:auto, :validity, :radiometer) || error(
+        "load_fitsidi: weight_mode must be :auto (infer from the WEIGHTYP header — " *
+            "the default), :validity (raw on-disk weights), or :radiometer (force the " *
+            "thermal-noise conversion via 2·Δν·τ·η²); got $(weight_mode).",
     )
     weight_norm > 0 || error("load_fitsidi: weight_norm must be positive, got $(weight_norm).")
     fid = FITSFiles.fits(path)
@@ -1269,6 +1275,31 @@ function UVData.load_fitsidi(
     no_band = Int(something(card_value(uv_cards, "NO_BAND"), 1))
     no_chan = Int(something(card_value(uv_cards, "NO_CHAN"), 1))
     ref_freq = Float64(something(card_value(uv_cards, "REF_FREQ"), 0.0))
+
+    # WEIGHTYP (AIPS Memo 114, Table 14) declares what the on-disk WEIGHT column IS.
+    # It governs how the weight must be interpreted when forming correlation
+    # coefficients (dividing the cross by √(A_a·A_b)):
+    #   :normal   — weights are true weights (1/σ²). Normalizing V by √(A_a·A_b)
+    #               shrinks σ by √(A_a·A_b), so the weight is scaled UP by A_a·A_b.
+    #   :correlat — weights are a fraction of integration time in [0,1] (a validity
+    #               fraction), NOT a variance. Coefficient normalization does not
+    #               scale them; the thermal weight is f·2Δν·τ·η² (radiometer), no A.
+    #   :corrtime — like :correlat but the visibility also carries the integration
+    #               time; treated as :correlat for the autocorr-scaling question.
+    # Absent ⇒ :correlat, per the memo ("must appear unless 'CORRELAT' is desired").
+    # Scaling the weight by A_a·A_b for :correlat data is wrong (the fraction is not
+    # a variance); it was only ever masked by callers passing weight_norm ≈
+    # median(A_a·A_b) to divide it back out.
+    weightyp = let s = uppercase(strip(string(something(card_value(uv_cards, "WEIGHTYP"), "CORRELAT"))))
+        s == "NORMAL" ? :normal : s == "CORRTIME" ? :corrtime : :correlat
+    end
+    # `:auto` (the default) infers the weight treatment from WEIGHTYP: 'CORRELAT'/
+    # 'CORRTIME' weights are validity fractions and get the radiometer conversion to a
+    # thermal inverse-variance (f·2Δν·τ·η²); 'NORMAL' weights are already 1/σ² and are
+    # returned as-is. `:radiometer`/`:validity` force one or the other regardless. So a
+    # caller normally just writes `load_fitsidi(path)` and the file's own header decides.
+    do_radiometer = weight_mode === :radiometer ||
+        (weight_mode === :auto && weightyp !== :normal)
 
     # Eager metadata.
     antennas = _build_idi_antenna_table(ag_hdu, an_hdu)
@@ -1422,6 +1453,11 @@ function UVData.load_fitsidi(
             uvw_dense[ti, bi, 3] = ww[gi]
         end
         do_normalize = normalize_autocorr && any(!iszero, auto_row)
+        # The vis is always divided by √(A_a·A_b) when normalizing (coefficient
+        # convention). The WEIGHT, though, is only scaled by A_a·A_b when it is a true
+        # weight (WEIGHTYP = 'NORMAL'); for 'CORRELAT'/'CORRTIME' the on-disk value is
+        # a validity fraction and must NOT be scaled — see the WEIGHTYP note above.
+        scale_w_by_auto = do_normalize && (weightyp === :normal)
 
         uvw_part = DimArray(
             uvw_dense,
@@ -1456,7 +1492,7 @@ function UVData.load_fitsidi(
             # old behaviour, correct only when WEIGHT really is ≈1).
             cws_b = ch_widths(fsetup)
             dnu_b = isempty(cws_b) ? 0.0 : abs(Float64(first(cws_b)))
-            wfactor_b = (weight_mode === :radiometer && dnu_b > 0 && !isempty(inttim)) ?
+            wfactor_b = (do_radiometer && dnu_b > 0 && !isempty(inttim)) ?
                 Float32(2 * dnu_b * weight_efficiency^2 / weight_norm) : 0.0f0
             inttim_b = wfactor_b == 0.0f0 ? Float32[] : inttim
 
@@ -1477,7 +1513,7 @@ function UVData.load_fitsidi(
                 Float32, Val(:weights), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
                 leaf_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
-                auto_row, do_normalize, feed_pairs, auto_stokes,
+                auto_row, scale_w_by_auto, feed_pairs, auto_stokes,
             )
             flag_chunk = _idi_chunk(
                 Bool, Val(:flag), data, flux_field, weight_col,

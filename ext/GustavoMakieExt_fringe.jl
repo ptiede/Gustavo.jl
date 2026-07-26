@@ -9,7 +9,7 @@
 import Gustavo.Fringe
 using Gustavo.UVData: UVSet
 using Gustavo.Calibration: CalibrationSolution
-using Gustavo.Fringe: fringe_gain_spectrum, fringe_gain_time_series, fringe_snr_table
+using Gustavo.Fringe: fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_snr_table
 using Gustavo.Fringe: BaselineFringeData, baseline_fringe_data, baseline_pol_index
 using Gustavo.Fringe: FringeSearchMap, BaselineFringeMap, fringe_search_map, _fmt_pfa
 
@@ -29,9 +29,13 @@ _feed_label(f::Integer) = string("feed", f)
 # ── plot_fringe_spectrum: phase vs frequency, rows = sites, cols = feeds ───────
 function Fringe.plot_fringe_spectrum(
         parent, sol::CalibrationSolution;
-        sites = :all, feeds = :all, ti::Integer = 1, band = nothing,
+        sites = :all, feeds = :all, ti::Integer = 1, band = nothing, residual::Bool = false,
     )
-    freqs, g = fringe_gain_spectrum(sol; ti = ti)
+    # `residual = true`: plot the per-channel bandpass ripple with the per-scan delay
+    # slope removed (readable — otherwise a big station delay wraps 2π·τ·(f−f0) across
+    # the band and hides the ripple). `false`: the full solved gain phase at time `ti`.
+    freqs, g = residual ? fringe_bandpass_spectrum(sol) : fringe_gain_spectrum(sol; ti = ti)
+    phaselab = residual ? "bandpass phase (rad)" : "phase (rad)"
     # Optional restriction to one band group of the (possibly gappy) channel axis.
     bandlab = ""
     if band !== nothing
@@ -53,7 +57,7 @@ function Fringe.plot_fringe_spectrum(
             ax = Axis(
                 parent[row, col];
                 xlabel = "frequency (GHz)", ylabel = _site_label(names, ai),
-                title = (row == 1 ? string(_feed_label(fi), " phase (rad)", bandlab) : ""),
+                title = (row == 1 ? string(_feed_label(fi), " ", phaselab, bandlab) : ""),
             )
             scatter!(ax, fghz, vec(angle.(g[:, ai, fi])); markersize = 5, color = :steelblue)
             push!(axrow, ax)
@@ -66,11 +70,11 @@ function Fringe.plot_fringe_spectrum(
     return parent
 end
 
-function Fringe.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, band = nothing)
+function Fringe.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, band = nothing, residual::Bool = false)
     nrow = length(_fringe_indices(sites, sol.layout.nant))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
-    Fringe.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, band = band)
+    Fringe.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, band = band, residual = residual)
     return fig
 end
 
@@ -194,10 +198,16 @@ function _bin_band(spec_col, r::UnitRange{Int}, bin::Int)
     return xs, zs
 end
 
+# Unit phasor of a complex sample's vector mean (the panel's mean phase direction),
+# or 1 if there is no finite signal. Used to re-centre phase panels so a flat "after"
+# track sitting near ±π is drawn as one band instead of split across the wrap.
+_unit_phasor(zs) = (s = sum(z -> isfinite(z) ? z : zero(z), zs); abs(s) > 0 ? s / abs(s) : one(ComplexF64))
+
 function Fringe.plot_baseline_fringes(
         parent, data::BaselineFringeData;
         kind::Symbol = :freq, show::Symbol = :phase, pol = :parallel, baselines = :all,
         layout::Symbol = :triangle, bin::Integer = 0, band = nothing,
+        recenter::Bool = true, drop_empty::Bool = true,
     )
     kind in (:freq, :time) || error("kind must be :freq or :time")
     show in (:phase, :amp) || error("show must be :phase or :amp")
@@ -234,7 +244,7 @@ function Fringe.plot_baseline_fringes(
         xlab = "time (h)"
     end
     reduce_y = show === :phase ? angle : abs
-    ylab = show === :phase ? "phase (rad)" : "amplitude"
+    ylab = show === :phase ? (recenter ? "phase − ⟨after⟩ (rad)" : "phase (rad)") : "amplitude"
     # Compressed-axis tick positions/labels: band centres, thinned to ≤ 8 labels.
     tickpos = Float64[]
     ticklab = String[]
@@ -245,6 +255,15 @@ function Fringe.plot_baseline_fringes(
             push!(tickpos, k - 0.5)
             push!(ticklab, string(round(sum(data.freqs[r]) / length(r) / 1.0e9; digits = 2)))
         end
+    end
+
+    # Drop baselines carrying no finite data for this product (e.g. a station flagged
+    # out of this scan), so the grid isn't padded with blank panels. Guard against
+    # dropping everything.
+    if drop_empty
+        keep = [bi for bi in bls
+                if any(isfinite, @view(after[:, bi, p])) || any(isfinite, @view(before[:, bi, p]))]
+        isempty(keep) || (bls = keep)
     end
 
     # Panel placement: (row, col) per selected baseline, plus a flag for which
@@ -293,13 +312,17 @@ function Fringe.plot_baseline_fringes(
                 fx, fz = _bin_band(view(after, :, bi, p), r, binw)
                 append!(xa, x0 .+ xw .* fx); append!(zav, fz)
             end
-            sb = scatter!(ax, xb, reduce_y.(zbv); markersize = 5, color = (:steelblue, 0.6))
-            sa = scatter!(ax, xa, reduce_y.(zav); markersize = 5, color = (:firebrick, 0.8))
+            # Phase only: rotate both traces so the "after" mean phase sits at 0, so a
+            # flat corrected track near ±π reads as one band, not a split at the wrap.
+            rot = (show === :phase && recenter) ? conj(_unit_phasor(zav)) : one(ComplexF64)
+            sb = scatter!(ax, xb, reduce_y.(rot .* zbv); markersize = 5, color = (:steelblue, 0.6))
+            sa = scatter!(ax, xa, reduce_y.(rot .* zav); markersize = 5, color = (:firebrick, 0.8))
             compressed && length(bands) > 1 &&
                 vlines!(ax, collect(1.0:(length(bands) - 1)); color = (:gray, 0.3), linewidth = 0.5)
         else
-            yb = reduce_y.(@view before[:, bi, p])
-            ya = reduce_y.(@view after[:, bi, p])
+            rot = (show === :phase && recenter) ? conj(_unit_phasor(@view after[:, bi, p])) : one(ComplexF64)
+            yb = reduce_y.(rot .* @view before[:, bi, p])
+            ya = reduce_y.(rot .* @view after[:, bi, p])
             sb = scatter!(ax, x, yb; markersize = 4, color = (:steelblue, 0.6))
             sa = scatter!(ax, x, ya; markersize = 4, color = (:firebrick, 0.8))
         end

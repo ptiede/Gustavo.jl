@@ -137,8 +137,8 @@ Fit the fourfit-style multitone instrumental correction from `pcal` on the
 geometry of `uvset`: per (station, feed, scan, spectral window), a robust tone
 delay + constant phase (see `_fit_tone_block`), packed as a phase-only
 `CalibrationSolution` (`Delay` + `ConstantTerm`, `PerScan` × `PerSpectralWindow`,
-`PerFeed`). Apply it with `apply_calibration(uvset, sol)` or pass it to
-[`solve_fringes`](@ref)/`FringeFit` as `precal` (applied in-stream, no
+`PerFeed`). Apply it with `apply_calibration(uvset, sol)` or put
+`ApplySolution(pcal)` in the pipeline's transform chain (applied in-stream, no
 materialization of the full set).
 
 - `sign` — orientation of the correction: the gain stored is
@@ -289,7 +289,7 @@ end
 `true` for every GLOBAL channel (geometry order) that contains an injected
 phase-cal tone (± `pad` neighbouring channels). Tone combs are phase-locked at
 every station, so they can cross-correlate and leave spurious spikes in those
-channels; pass the mask to `solve_fringes`/`FringeFit` as `flag_channels` to
+channels; put `FlagChannels(mask)` in the pipeline's transform chain to
 zero-weight them during the solve (≈ ntones/nchan of the data, ~4% for the
 VGOS 5 MHz comb at 0.2 MHz channels).
 """

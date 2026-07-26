@@ -13,7 +13,7 @@
 
 Per-scan fringe-fit summary rows `(scan, max_snr, chi, ncomp, pfa)` pulled from
 the solver's `info` (`scan_max_snr` / `scan_chi` / `scan_ncomp` / `scan_ncells`,
-as populated by [`solve_fringes`](@ref)). `pfa` is the scan's false-alarm
+as populated by [`fit`](@ref)). `pfa` is the scan's false-alarm
 probability [`fringe_pfa`](@ref): the chance that pure noise, searched over the
 scan's full delay×rate×baseline×product space, would produce a peak of at least
 `max_snr` — `pfa ≪ 1` marks a secure detection, `pfa` near 1 a likely FALSE
@@ -97,14 +97,13 @@ Lazy — reads only leaf metadata (no visibilities), so it is cheap on a streame
     best = argmax(r -> r.max_snr, filter(r -> r.source == "M87", g))
 """
 function fringe_scan_groups(uvset::UVSet, sol::CalibrationSolution)
-    groups = _scan_group_leaves(uvset)
+    specs = scan_stream(uvset; geom = sol.geom, ntasks = 1).groups
     snr = get(sol.info, :scan_max_snr, Float64[])
     out = NamedTuple[]
-    for (gi, g) in enumerate(groups)
-        info = UVData.metadata(last(first(g)))
+    for (gi, g) in enumerate(specs)
         push!(
             out, (;
-                scan_index = gi, source = info.source_name, scan = info.scan_name,
+                scan_index = gi, source = g.source, scan = g.scan,
                 max_snr = gi <= length(snr) ? Float64(snr[gi]) : NaN,
             ),
         )
@@ -135,6 +134,39 @@ function fringe_gain_spectrum(sol::CalibrationSolution; ti::Integer = 1)
 end
 
 """
+    fringe_bandpass_spectrum(sol::CalibrationSolution) -> (freqs, gains)
+
+Like [`fringe_gain_spectrum`](@ref) but evaluates ONLY the per-channel phase
+bandpass component — the per-scan delay slope (`2π·τ·(f−f0)`), constant, rate and
+R–L terms are zeroed — so `angle.(gains)` is the RESIDUAL instrumental passband
+ripple with the (large, station-dependent) delay wrap removed. This is the
+readable bandpass diagnostic: without it, a station with a big group delay shows a
+`2π·τ·(f−f0)` sawtooth that wraps many times across the band and buries the ripple.
+Returns `(channel_freqs, gains::(nchan, nant, 2))`. The bandpass is time-invariant,
+so no time index is needed. Errors if the model carries no `PerChannel` component.
+"""
+function fringe_bandpass_spectrum(sol::CalibrationSolution)
+    layout = sol.layout
+    bp_i = findfirst(tc -> tc.component.term isa PerChannel, sol.model.phase)
+    bp_i === nothing &&
+        error("fringe_bandpass_spectrum: model has no per-channel phase bandpass component")
+    bp = layout.plans[bp_i]
+    # θ with every parameter zeroed EXCEPT this component's per-channel blocks (start
+    # column `off1[a,f,1,fseg]`, one parameter per channel of that freq segment), so
+    # `evaluate_gains` returns the bandpass-only gain (all other terms → unit gain).
+    θbp = zeros(eltype(sol.θ), length(sol.θ))
+    for a in 1:layout.nant, f in 1:2, fseg in axes(bp.off1, 4)
+        start = bp.off1[a, f, 1, fseg]
+        start == 0 && continue
+        len = count(==(fseg), bp.fseg_id)
+        @views θbp[start:(start + len - 1)] .= sol.θ[start:(start + len - 1)]
+    end
+    ev = GainEvaluator(sol.model, sol.layout)
+    g = evaluate_gains(ev, θbp, 1:(layout.nchan), 1:1)   # time-invariant → any ti
+    return sol.geom.channel_freqs, g[:, 1, :, :]
+end
+
+"""
     fringe_gain_time_series(sol::CalibrationSolution; ci = 1) -> (times, gains)
 
 Evaluate the solution's complex antenna gains at channel index `ci` over the full
@@ -149,6 +181,85 @@ function fringe_gain_time_series(sol::CalibrationSolution; ci::Integer = 1)
     # Window to the single requested channel (see fringe_gain_spectrum).
     g = evaluate_gains(ev, sol.θ, ci:ci, 1:(sol.layout.ntime))   # (1, ntime, nant, 2)
     return sol.geom.times, g[1, :, :, :]
+end
+
+"""
+    fringe_station_solutions(sol::CalibrationSolution) -> Vector{NamedTuple}
+
+Decode the stationized per-scan delay/rate/constant-phase parameters straight out
+of `sol.θ` into a per-`(scan, station, feed)` table — no data read, no re-search.
+One row per (scan-group index `scan`, 1-based `station`, `feed ∈ {1, 2}`):
+
+- `delay_ns`  — station group delay (ns): the per-scan feed-common delay plus, on
+  feed 2, the R–L delay the model fit (whether `:global` — the same offset every
+  scan — or `:perscan`; see `_fringe_model`'s `rl_delay`).
+- `rate_mHz`  — station fringe rate (mHz).
+- `phase_deg` — station constant phase (deg): per-scan feed-common phase plus, on
+  feed 2, the global R–L phase.
+
+Summed from every stage-B component (`fringe_stage_components` — the delay/rate/
+constant terms, EXCLUDING the per-AP adhoc, the per-channel bandpass, dTEC and SBD),
+so it tracks the model automatically. Values are gauge-fixed to the solve's
+reference pin; a within-scan difference against the SAME feed of a reference station
+is gauge-invariant (the reported `delay_rel`/`rate_rel`).
+
+The table is DENSE: a row is emitted for every layout slot, so a (station, feed,
+scan) the solve never constrained reads back as the identity 0 (indistinguishable
+here from the reference's genuine gauge-zero). Mask it with the detection/flag info
+(`suspect_fringes` / `info.flagged_ant`/`flagged_scan`, and single-feed stations
+via which feeds ever appear in `info.det_pol`) — this accessor deliberately stays a
+pure θ-decode and does not consult the detections.
+
+Scan index matches the scan-group ordering used by [`fringe_snr_table`](@ref) and
+`info.det_scan` (the per-scan time segmentation is the scan-group partition).
+"""
+function fringe_station_solutions(sol::CalibrationSolution)
+    layout = sol.layout
+    θ = sol.θ
+    nant = layout.nant
+    comps = fringe_stage_components(sol.model, layout)     # (plan, kind ∈ :delay/:rate/:phase)
+    refplan = _perscan_delay_plan(sol.model, layout)
+    refplan === nothing &&
+        error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
+    nscan = size(refplan.off1, 3)                          # PerScan ⇒ ntseg == #scan groups
+    # First time index landing in each scan segment — used to look up every plan's
+    # own segment id for this scan (a `GlobalTime` R–L plan maps them all to 1, a
+    # `PerScan` one to the scan itself, so the same lookup handles both bases).
+    t0 = zeros(Int, nscan)
+    for ti in eachindex(refplan.tseg_id)
+        k = refplan.tseg_id[ti]
+        (1 <= k <= nscan && t0[k] == 0) && (t0[k] = ti)
+    end
+    out = NamedTuple[]
+    for k in 1:nscan
+        ti = t0[k]
+        ti == 0 && continue
+        for a in 1:nant, f in 1:2
+            d = 0.0; r = 0.0; p = 0.0
+            hd = false; hr = false; hp = false
+            for (plan, kind) in comps
+                col = plan.off1[a, f, plan.tseg_id[ti], 1]  # fseg 1: stage-B terms are GlobalFrequency
+                col == 0 && continue
+                v = θ[col]
+                if kind === :delay
+                    d += v; hd = true
+                elseif kind === :rate
+                    r += v; hr = true
+                else
+                    p += v; hp = true
+                end
+            end
+            push!(
+                out, (;
+                    scan = k, station = a, feed = f,
+                    delay_ns = hd ? d * 1e9 : NaN,       # τ (s) → ns
+                    rate_mHz = hr ? r * 1e3 : NaN,       # ṙ (Hz) → mHz
+                    phase_deg = hp ? rad2deg(p) : NaN,   # φ (rad) → deg
+                ),
+            )
+        end
+    end
+    return out
 end
 
 # ── Per-baseline before/after data (the fringe-fit quality check) ──────────────
@@ -215,6 +326,36 @@ function BaselineFringeData(
     )
 end
 
+# The scan stream a diagnostic materializes through. The transform chain is the
+# one RECORDED on `sol` by default, so diagnostics see exactly the data the
+# solve saw (the "pass `weight_scale` again or this map's SNR won't match the
+# solve" trap is gone); the legacy explicit kwargs (`precal`/`flag_channels`/
+# `weight_scale`) override it when any is given, in the solver's application
+# order (precal division, weight scale, channel mask); `transforms` overrides
+# everything with an explicit chain — `transforms = ()` inspects the RAW data.
+function _diag_stream(
+        uvset::UVSet, sol::CalibrationSolution;
+        precal = nothing, flag_channels = nothing, weight_scale = nothing,
+        transforms = nothing,
+    )
+    tfs = if transforms !== nothing
+        collect(Any, transforms)
+    elseif precal !== nothing || flag_channels !== nothing || weight_scale !== nothing
+        t = Any[]
+        precal === nothing || push!(t, ApplySolution(precal))
+        weight_scale === nothing || push!(t, StationWeightScale(weight_scale))
+        flag_channels === nothing || push!(t, FlagChannels(BitVector(flag_channels)))
+        t
+    else
+        sol.transforms
+    end
+    any(t -> t === missing, tfs) && error(
+        "diagnostics: the solution records a transform that did not survive " *
+            "serialization — pass the chain explicitly (precal/flag_channels/weight_scale)."
+    )
+    return scan_stream(uvset; geom = sol.geom, transforms = tfs, ntasks = 1)
+end
+
 # Scan group with the largest detection SNR (the most informative to inspect),
 # falling back to the first group when no per-scan SNR is recorded.
 function _max_snr_scan(sol::CalibrationSolution, ngroups::Integer)
@@ -243,28 +384,32 @@ a good fit flattens the phase slopes (delay in frequency, rate in time) and lift
 the coherent amplitude.
 
 `scan_index` selects which `(source, scan)` group (in the same order
-[`solve_fringes`](@ref) used); the default is the highest-SNR scan. The "after"
+the solve used); the default is the highest-SNR scan. The "after"
 visibility is `V / (g_a · conj(g_b))` with gains evaluated from `sol` exactly as the
 solver applies them — no second disk read of the full set, just this one scan.
 When the solve used a `precal` (e.g. `phasecal_solution`), pass the same one here
 so both BEFORE and AFTER are pre-calibrated the way the solver saw the data; the
 same goes for `flag_channels` (e.g. `tone_channel_mask` — flagged channels are
 zero-weighted, dropping out of the plotted averages exactly as they dropped out
-of the solve).
+of the solve) and `weight_scale` (the per-station weight correction — see
+[`station_weight_scale`](@ref)).
 """
 function baseline_fringe_data(
         uvset::UVSet, sol::CalibrationSolution;
         scan_index::Union{Integer, Nothing} = nothing,
         precal::Union{Nothing, CalibrationSolution} = nothing,
         flag_channels = nothing,
+        weight_scale = nothing,
+        transforms = nothing,
     )
-    groups = _scan_group_leaves(uvset)
+    stream = _diag_stream(uvset, sol; precal, flag_channels, weight_scale, transforms)
+    groups = stream.groups
     isempty(groups) && error("baseline_fringe_data: uvset has no scan groups")
     gi = scan_index === nothing ? _max_snr_scan(sol, length(groups)) : Int(scan_index)
     (1 <= gi <= length(groups)) || error("baseline_fringe_data: scan_index $gi out of range 1:$(length(groups))")
 
-    info = UVData.metadata(last(first(groups[gi])))   # source/scan from the lazy leaf
-    grp = _materialize_concat_group(groups[gi], sol.geom, _make_precal(precal, flag_channels, sol.geom))
+    info = UVData.metadata(last(first(groups[gi].leaves)))   # source/scan from the lazy leaf
+    grp = materialize_cube(stream, groups[gi])
     ev = GainEvaluator(sol.model, sol.layout)
     g = evaluate_gains(ev, sol.θ, grp.g_ci, grp.g_ti)   # (nchan, nti, nant, 2)
     nchan, nti, nbl, npol = size(grp.Vg)
@@ -581,7 +726,7 @@ end
 
 Recompute the delay–rate matched-filter surface (the HOPS-style fringe plot data,
 and THE false-fringe check) for one baseline of one scan of `uvset` — exactly the
-search [`solve_fringes`](@ref) ran, but keeping the whole windowed `|D|` plane in
+search the fringe pass ran, but keeping the whole windowed `|D|` plane in
 SNR units instead of only the peak. A real fringe is a single sharp peak far
 above the sidelobe forest (`pfa ≪ 1`); a false fringe barely clears it.
 
@@ -596,7 +741,9 @@ above the sidelobe forest (`pfa ≪ 1`); a false fringe barely clears it.
   (recorded in `sol.info`).
 - `precal` — when the solve used one (e.g. `phasecal_solution`), pass the same
   solution so the map is computed on the data the solver actually searched; the
-  same goes for `flag_channels` (e.g. `tone_channel_mask`).
+  same goes for `flag_channels` (e.g. `tone_channel_mask`) and `weight_scale`
+  (the per-station weight correction — see [`station_weight_scale`](@ref)),
+  without which this map's SNR/PFA would not match the solve's.
 
 Materializes only the one scan. Returns a [`BaselineFringeMap`](@ref).
 """
@@ -607,15 +754,18 @@ function fringe_search_map(
         search::Union{FringeSearch, Nothing} = nothing,
         precal::Union{Nothing, CalibrationSolution} = nothing,
         flag_channels = nothing,
+        weight_scale = nothing,
+        transforms = nothing,
     )
-    groups = _scan_group_leaves(uvset)
+    stream = _diag_stream(uvset, sol; precal, flag_channels, weight_scale, transforms)
+    groups = stream.groups
     isempty(groups) && error("fringe_search_map: uvset has no scan groups")
     gi = scan_index === nothing ? _max_snr_scan(sol, length(groups)) : Int(scan_index)
     (1 <= gi <= length(groups)) || error("fringe_search_map: scan_index $gi out of range 1:$(length(groups))")
 
-    info = UVData.metadata(last(first(groups[gi])))
+    info = UVData.metadata(last(first(groups[gi].leaves)))
     ant_names = String.(collect(info.antennas.name))
-    grp = _materialize_concat_group(groups[gi], sol.geom, _make_precal(precal, flag_channels, sol.geom))
+    grp = materialize_cube(stream, groups[gi])
     opts = search === nothing ? get(sol.info, :search, FringeSearch()) : search
     p = _pol_index(grp.pol_products, pol)
     times = grp.tg .* 3600.0
@@ -689,7 +839,7 @@ end
     suspect_fringes(sol::CalibrationSolution; pfa_max = 1.0e-4) -> Vector{NamedTuple}
 
 Screen the fringe solution for possible FALSE fringes: every valid detection the
-stage-B solve consumed (recorded per baseline by [`solve_fringes`](@ref)) whose
+stage-B solve consumed (recorded per baseline during the search pass) whose
 per-baseline false-alarm probability exceeds `pfa_max`. Rows
 `(; scan, a, b, sta_a, sta_b, pol, snr, pfa)`, most-suspect (largest `pfa`)
 first; empty when every detection is secure (or the solution predates detection
@@ -718,7 +868,7 @@ end
 """
     print_solve_timing(sol::CalibrationSolution; io = stdout, top = 5)
 
-Profiling summary of a fringe solve from the timers [`solve_fringes`](@ref)
+Profiling summary of a fringe solve from the timers the solve
 records in `sol.info`: wall time per stage, the decode vs. search vs. adhoc vs.
 reduce split summed over scans (task-seconds — with N concurrent group tasks the
 wall share is up to N× smaller), and the `top` slowest scans. Prints a notice

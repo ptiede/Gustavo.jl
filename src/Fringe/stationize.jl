@@ -282,7 +282,11 @@ function _solve_observable(
     # reference antenna's component if it spans both feeds, else the first such
     # component. Other disconnected islands' feed offsets are then tied through
     # the global χ, so they need no extra pin (an extra pin per island would
-    # over-constrain χ).
+    # over-constrain χ). NOTE: this pin is a RANK device, not a physical zero —
+    # under it the solved χ absorbs the reference's own R–L phase for this solve.
+    # A caller that repeats this solve along an axis (e.g. `_solve_phase_bandpass!`
+    # per channel) must reassign χ's along-axis structure back into the feed-2
+    # block, or the reference's R–L variation is silently discarded.
     if has_chi
         ref_comp = compid[_node(ref_ant, 1, nant)]
         order = ref_comp == 0 ? (1:ncomp) : Iterators.flatten((ref_comp, (c for c in 1:ncomp if c != ref_comp)))
@@ -669,6 +673,10 @@ function _solve_tagged_system(
     # EVPA gauge: the (feed-2 offset ↔ χ) freedom. Add one feed-2 pin per scan that
     # has a both-feed component (deduped — a global R–L offset column is one node
     # shared by all scans, so this resolves to a single pin on the global offset).
+    # As with the per-scan pin above, this fixes only the ONE conventional EVPA
+    # constant; the per-scan χ columns absorb the source cross-hand phase (which
+    # must NOT be calibrated out) plus any reference R–L drift, and are discarded
+    # below (only the scan-min χ is returned, as a diagnostic).
     if nchi > 0
         for s in sort(collect(keys(chi_col)))
             scomps = unique(compid[n] for n in 1:nnodes if node_scan[n] == s)

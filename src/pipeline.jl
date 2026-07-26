@@ -29,17 +29,6 @@ A `UVSet -> UVSet` transform that can be *fused* into a solver's streaming pass
 abstract type ReduceStep <: CalibrationStep end
 
 """
-    CalibrationPipeline(steps)
-    CalibrationPipeline(step1, step2, …)
-
-An ordered list of [`CalibrationStep`](@ref)s, run by [`calibrate`](@ref).
-"""
-struct CalibrationPipeline
-    steps::Vector{CalibrationStep}
-end
-CalibrationPipeline(steps::CalibrationStep...) = CalibrationPipeline(collect(steps))
-
-"""
     CalibrationContext
 
 State threaded through the pipeline (immutable; rebuilt per step). Fields:
@@ -94,137 +83,16 @@ function run_step(step::ReduceStep, ctx::CalibrationContext)
     return _with(ctx; output = f(target))
 end
 
-# Compose the reduce steps (in order) into a single postprocess closure, threading
-# the context (so e.g. a-priori can stash its band_cals).
-function _compose_reducers(steps, ctx::CalibrationContext)
-    transforms = Vector{Any}(undef, length(steps))
-    for (i, st) in enumerate(steps)
-        f, ctx = prepare_reducer(st, ctx)
-        transforms[i] = f
-    end
-    post = isempty(transforms) ? identity :
-        uv -> foldl((acc, f) -> f(acc), transforms; init = uv)
-    return post, ctx
-end
+# The composable-pipeline step protocol: SolveStep, the step hooks,
+# ExecutionConfig, step chaining (`|>`), and the CalibrationPipeline itself.
+include("pipeline/protocol.jl")
+
+# The built-in solve steps: FringeFit (model + estimator), BandpassEstimator,
+# TemporalSmoother.
+include("pipeline/steps.jl")
 
 
-# ── Option holders ────────────────────────────────────────────────────────────
-
-"""
-    BandpassOptions(; phase = true, amp = true, amp_smoother = PenalizedBandpass(1.0), source = nothing)
-
-Fringe relative phase/amplitude bandpass toggles for [`FringeFit`](@ref).
-`source` names the bandpass calibrator (default: the brightest). `amp_smoother`
-selects the amplitude-bandpass estimator — an `AbstractBandpassSmoother`, e.g.
-[`PolynomialBandpass`](@ref) (degree), [`PenalizedBandpass`](@ref) (λ), or
-[`FreeBandpass`](@ref).
-"""
-Base.@kwdef struct BandpassOptions
-    phase::Bool = true
-    amp::Bool = true
-    amp_smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0)
-    source = nothing
-    # Cap the accumulation to the N highest-SNR calibrator scans (0 = all).
-    # The bandpass is time-stable, so a few strong scans carry essentially all
-    # the information — and skipping the rest avoids re-reading them from disk.
-    max_scans::Int = 0
-end
-
-
-# ── Built-in steps ────────────────────────────────────────────────────────────
-
-"""
-    FringeFit(; ref_ant = 1, rounds = 1, search = FringeSearch(), adhoc = SavitzkyGolaySmoother(),
-              ntasks = Threads.nthreads(), mem_fraction = 0.6, mem_budget = nothing,
-              bandpass = BandpassOptions(), reduce = ReduceStep[])
-
-Action step: the fringe solver. Folds `reduce` (a list of [`ReduceStep`](@ref)s,
-in order) into the single streaming `postprocess` pass of `solve_and_reduce_fringes`,
-so reductions never materialize the full file. Sets `ctx.solution`, `ctx.output`,
-and (if a-priori is in `reduce`) `ctx.band_cals`.
-
-`ref_ant` may be a 1-based antenna index OR a station code (`String`/`Symbol`,
-e.g. `"PT"`) resolved against the data's antenna table. `rounds` re-runs the
-delay/rate/phase search pass on the residual (each round divides out the current
-solution and accumulates the leftover); >1 helps when one matched-filter pass
-leaves residual delay/rate, at the cost of another full streaming read.
-
-Group concurrency is bounded by a DETERMINISTIC memory budget: `mem_budget`
-(absolute bytes) if set, else `mem_fraction` of TOTAL physical RAM — so `ntasks`
-(and the solve's wall time) is reproducible across runs. Lower `mem_fraction` (or
-set `mem_budget`) on a shared box; pass an explicit `mem_budget` for identical
-behavior across machines.
-
-`precal` is a `CalibrationSolution` divided out of every scan group at
-materialization, BEFORE the fringe search (e.g. `phasecal_solution` from
-injected phase-cal tones) — the streaming equivalent of pre-applying it to the
-whole set. `flag_channels` zero-weights the marked GLOBAL channels (e.g.
-`tone_channel_mask`). The reduced output then carries `precal ∘ solution`.
-"""
-Base.@kwdef struct FringeFit <: CalibrationStep
-    ref_ant::Any = 1
-    rounds::Int = 1
-    search::FringeSearch = FringeSearch()
-    adhoc::AbstractAdhocSmoother = SavitzkyGolaySmoother()
-    ntasks::Int = Threads.nthreads()
-    mem_fraction::Float64 = 0.6
-    mem_budget::Union{Nothing, Float64} = nothing
-    bandpass::BandpassOptions = BandpassOptions()
-    reduce::Vector{ReduceStep} = ReduceStep[]
-    precal::Union{Nothing, CalibrationSolution} = nothing
-    flag_channels::Union{Nothing, BitVector} = nothing
-    # Per-scan ionospheric dispersion (dTEC) term: `:auto` (on when the band
-    # layout can separate 1/ν from a linear delay — e.g. VGOS), `true`, `false`.
-    dispersion::Any = :auto
-    # Per-scan per-band-group single-band delay (fourfit SBD): `:auto` (on when
-    # the frequency axis has ≥ 2 band groups), `true`, `false`.
-    sbd::Any = :auto
-    # Tie co-located stations (< 1 km) to ONE dTEC — they share the ionosphere.
-    dtec_tie_colocated::Bool = true
-    # Drop intra-site (co-located twin) baselines from the adhoc + bandpass
-    # accumulations — their huge-SNR non-closing crosstalk pollutes both twins'
-    # gains otherwise. Stage B keeps them (closure-screened).
-    exclude_colocated::Bool = true
-    # Reuse the per-scan dTEC/SBD the bandpass stage already fit for its scans,
-    # instead of re-fitting in pass 2 (the refine is the bandpass stage's dominant
-    # cost). Pass 2 POLISHES the small residual in a narrow window rather than a
-    # full grid search. `false` restores the independent pass-2 refine.
-    reuse_bandpass_refine::Bool = true
-    # Half-width (TECU) of the pass-2 dTEC polish window when `reuse_bandpass_refine`.
-    # Wider = safer against clipping a weak scan's residual (coherence), narrower =
-    # faster. Default covers the worst observed VGOS residual with margin.
-    bandpass_polish_dtec::Float64 = 20.0
-    # `(stage, done, total)` callback fired per completed scan of each solve pass
-    # (stage ∈ :search/:bandpass/:adhoc; `done = 0` announces a pass) — drive a
-    # progress bar / ETA from it. Called under a lock; keep it quick.
-    progress::Any = nothing
-end
-
-function run_step(s::FringeFit, ctx::CalibrationContext)
-    ctx.uvset === nothing &&
-        error("FringeFit: no `uvset` in context — add a Load step or call `calibrate(uvset, pipe)`.")
-    ref = _resolve_ref_ant(s.ref_ant, ctx.uvset)
-    post, ctx = _compose_reducers(s.reduce, ctx)
-    sol, output = solve_and_reduce_fringes(
-        ctx.uvset;
-        postprocess = post,
-        ref_ant = ref, rounds = s.rounds,
-        search = s.search, adhoc = s.adhoc,
-        ntasks = s.ntasks, mem_fraction = s.mem_fraction, mem_budget = s.mem_budget,
-        phase_bandpass = s.bandpass.phase, amp_bandpass = s.bandpass.amp,
-        amp_smoother = s.bandpass.amp_smoother,
-        bandpass_source = s.bandpass.source,
-        bandpass_max_scans = s.bandpass.max_scans,
-        precal = s.precal, flag_channels = s.flag_channels,
-        dispersion = s.dispersion,
-        sbd = s.sbd, dtec_tie_colocated = s.dtec_tie_colocated,
-        exclude_colocated = s.exclude_colocated,
-        reuse_bandpass_refine = s.reuse_bandpass_refine,
-        bandpass_polish_dtec = s.bandpass_polish_dtec,
-        progress = s.progress,
-    )
-    return _with(ctx; solution = sol, output = output)
-end
+# ── Reference-antenna resolution (shared by the bridge and the runner) ───────
 
 # Resolve a reference antenna to its 1-based index. An Integer passes through; a
 # station code (String/Symbol) is matched against the data's antenna table (the
@@ -246,25 +114,21 @@ end
 """
     AprioriAmplitude(band_cals; min_elevation_deg = 0.0, on_missing_station = :warn)
 
-Reduce step: a-priori amplitude calibration. Applies a pre-built `band_cals`
-(`load_fitsidi_apriori(path)` — the caller's job) via `apply_calibration` on the
-fringe-corrected native channels.
+Output-chain pipeline step (NOT a reduction): a-priori amplitude calibration.
+Applies a pre-built `band_cals` (`load_fitsidi_apriori(path)` — the caller's
+job) via `apply_calibration` on the fringe-corrected native channels, after the
+solution's gains and before any `ReduceStep`s. Place it in the
+`CalibrationPipeline`; it is RECORDED on the fitted solution (`sol.postcal`),
+so the standalone `calibrate(sol, uvset)` reproduces it without re-passing
+`band_cals`.
 """
-struct AprioriAmplitude <: ReduceStep
+struct AprioriAmplitude <: CalibrationStep
     band_cals::Any
     min_elevation_deg::Float64
     on_missing_station::Symbol
 end
 AprioriAmplitude(band_cals; min_elevation_deg::Real = 0.0, on_missing_station::Symbol = :warn) =
     AprioriAmplitude(band_cals, Float64(min_elevation_deg), on_missing_station)
-
-function prepare_reducer(s::AprioriAmplitude, ctx::CalibrationContext)
-    f = uv -> apply_calibration(
-        uv, s.band_cals;
-        min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
-    )
-    return f, _with(ctx; band_cals = s.band_cals)
-end
 
 """
     AverageFrequency(; nout = 1)
@@ -316,18 +180,6 @@ prepare_reducer(s::FlagBandEdges, ctx::CalibrationContext) =
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-"""
-    calibrate(uvset::UVSet, pipe::CalibrationPipeline) -> CalibrationContext
-
-Run `pipe`'s steps in order on an already-loaded `uvset`, threading a
-[`CalibrationContext`](@ref). The result exposes `.uvset`, `.solution`, `.output`,
-and `.band_cals`. Loading (`load_fitsidi`/`load_fitsidi_apriori`) is done by the
-caller and kept out of the pipeline.
-"""
-function calibrate(uvset::UVSet, pipe::CalibrationPipeline)
-    ctx = CalibrationContext(; uvset = uvset)
-    for step in pipe.steps
-        ctx = run_step(step, ctx)
-    end
-    return ctx
-end
+# The composable-pipeline verbs: fit / calibrate(sol, uvset) / fitcalibrate —
+# solve steps share one compiled model and streaming passes.
+include("pipeline/verbs.jl")

@@ -166,7 +166,11 @@ const _F32EPS = 1.0f-4
         path = tempname() * ".idifits"
         try
             UV.write_fitsidi(path, uvset)
-            rt = UV.load_fitsidi(path; lazy = false)
+            # :validity — this is a raw write→read fidelity check, comparing the
+            # read-back WEIGHT to the synthetic input verbatim. The default :auto would
+            # apply the WEIGHTYP=CORRELAT radiometer conversion (f·2Δν·τ·η²), which is
+            # correct for analysis but not what a byte round-trip compares against.
+            rt = UV.load_fitsidi(path; lazy = false, weight_mode = :validity)
 
             @test length(DimensionalData.branches(rt)) ==
                 length(DimensionalData.branches(uvset))

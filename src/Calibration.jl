@@ -8,6 +8,7 @@ by both `Gustavo.Bandpass` and `Gustavo.Fringe`.
 """
 module Calibration
 
+using ..Executors: exec_foreach
 using ..UVData
 using ..UVData: PolTypes, UVSet, channel_freqs, with_visibilities, materialize_leaf,
     pol_products, baselines
@@ -62,5 +63,11 @@ export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
 # Calibration solution container, apply, serialization
 export CalibrationSolution, build_geometry, leaf_window, save_solution, load_solution
 export save_solution_hdf5, load_solution_hdf5
+
+# Per-stage provenance and snapshots (composable pipeline)
+export StageRecord, StageView, stage_names, stage_solution, stage_info
+export component_ranges, component_gains
+# Fit-once / apply-later extraction (portable time-constant bandpass)
+export bandpass_solution
 
 end

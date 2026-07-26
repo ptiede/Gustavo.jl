@@ -1,234 +1,22 @@
 # End-to-end fringe-fitter pipeline test. Builds a small synthetic multi-band
 # in-memory UVSet with KNOWN injected per-(station, feed) delay/rate/constant
 # phase plus a per-(station, feed, AP) atmospheric phase screen, then verifies
-# that `solve_fringes` → `apply_calibration` flattens the residual baseline
+# that `fit` → `apply_calibration` flattens the residual baseline
 # phases (the coherence test) and that save/load round-trips.
 
-using Gustavo
-using Test
-using Random
-using LinearAlgebra: Diagonal
-using StructArrays
-using DimensionalData
-using DimensionalData: DimArray, Ti, dims, lookup
-using PolarizedTypes: RPol, LPol
-using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products, channel_freqs
-using HDF5   # triggers GustavoHDF5Ext (solution save/load round-trip)
-using FITSFiles   # triggers GustavoFITSFilesExt (write_uvfits/load_uvfits round-trip)
+# Shared synthetic-UVSet generator + usings/aliases (CAL/FP/UVP).
+include("synthetic_uvset.jl")
 
-const CAL = Gustavo.Calibration
-const FP = Gustavo.Fringe
-const UVP = Gustavo.UVData
-
-# ── Synthetic UVSet with injected station fringe parameters ──────────────────
-#
-# For baseline (a, b) and product p with feeds (fa, fb):
-#   V[c, ti] = A · exp(i·[ Δφ + 2π·Δτ·(f_c − f0) + 2π·Δṙ·(t_sec − t0_sec)
-#                          + Δscreen[ti] ])
-# with Δx = x[a, fa] − x[b, fb]. Times in seconds use t0_sec; freqs in Hz.
-function _build_fringe_uvset(;
-        nant = 4, nbands = 2, nchan = 8, ntime = 12,
-        pol_labels = ["PP", "PQ", "QP", "QQ"],
-        ref_freq = 230.0e9, chan_bw = 2.0e6, band_sep = 1.0e8,
-        seed = 1234,
-        bandpass = nothing,    # optional (nant, 2, nbands*nchan) per-channel phase (rad)
-        amp_bandpass = nothing, # optional (nant, 2, nbands*nchan) per-channel log-amp
-        dtec = nothing,         # optional (nant,) station TEC (TECU, feed-common)
-        feed_common = false,    # tie delay/phi across feeds (zero true R-L offset)
-        band_origins = nothing, # optional (nbands,) explicit band start freqs (Hz) — overrides band_sep
-        station_positions = nothing, # optional (nant,) xyz vectors (m) — for co-location tests
-    )
-    UV = Gustavo.UVData
-    rng = MersenneTwister(seed)
-    npol = length(pol_labels)
-
-    ants_v = [
-        UV.Antenna(;
-                name = "A$(i)",
-                station_xyz = station_positions === nothing ?
-                Float64[100.0 * i, 200.0 * i, 300.0 * i] : Float64.(station_positions[i]),
-                mount = UV.MountAltAz(),
-                nominal_basis = (RPol(), LPol()),
-                response = Diagonal(ones(ComplexF32, 2)),
-                pol_angles = (0.0f0, 0.0f0),
-            )
-            for i in 1:nant
-    ]
-    antennas = UV.AntennaTable(
-        StructArray(ants_v), Float64[1.0:nant;], "SYNTH",
-        (; NOSTA = Int32.(1:nant), DIAMETER = fill(25.0f0, nant)),
-    )
-
-    bl_pairs = Tuple{Int, Int}[(a, b) for a in 1:nant for b in (a + 1):nant]
-    nbl = length(bl_pairs)
-    baselines = UV.BaselineIndex(bl_pairs, bl_pairs; antenna_names = collect(antennas.name))
-
-    setups = UV.FrequencySetup[]
-    for b in 1:nbands
-        f_lo = band_origins === nothing ? ref_freq + (b - 1) * band_sep : Float64(band_origins[b])
-        chf = f_lo .+ (0:(nchan - 1)) .* chan_bw
-        push!(
-            setups, UV.FrequencySetup(;
-                name = "band_$(b)",
-                ref_freq = ref_freq,
-                channel_freqs = collect(chf),
-                ch_widths = fill(chan_bw, nchan),
-                total_bandwidths = fill(chan_bw * nchan, nchan),
-                sidebands = fill(1.0, nchan),
-                extras = (; bandfreq = (b - 1) * band_sep, band = b),
-            ),
-        )
-    end
-
-    array_obs = UV.ObsArrayMetadata(;
-        telescope = "SYNTH", instrume = "SYNTH",
-        date_obs = "2021-03-04", equinox = 2000.0f0, bunit = "JY",
-        rdate = "2021-03-04", earth_rot_rate = 360.0f0,
-        extras = (; correlat = "DiFX", obscode = "SY001"),
-    )
-
-    # Times (hours): one scan, 12 APs spaced 30 s.
-    ti_vals = collect((0:(ntime - 1)) .* (30.0 / 3600.0))
-
-    # Reference geometry constants (must match what solve_fringes derives):
-    # f0 = mean of all channel freqs across both bands; t0 = first time (hours).
-    allfreqs = Float64[]
-    for fs in setups
-        append!(allfreqs, collect(channel_freqs(fs)))
-    end
-    sort!(unique!(allfreqs))
-    f0 = sum(allfreqs) / length(allfreqs)
-    t0_sec = ti_vals[1] * 3600.0
-
-    # Injected parameters. Reference antenna 1 = 0 (so the recovered solution matches
-    # the gauge), others drawn small. `delay`/`phi` are PER-FEED (their constant R–L
-    # offset is recovered by the model's global `FeedComponent(2)` delay/const terms);
-    # `rate` is FEED-COMMON because the fringe model ties rate `SharedFeeds` (R–L rate
-    # is not solved — see the model in pipeline.jl), so a per-feed rate would be
-    # physically inconsistent and left uncorrected.
-    delay = zeros(nant, 2)         # seconds (per feed)
-    rate = zeros(nant, 2)          # Hz (feed-common)
-    phi = zeros(nant, 2)           # rad (per feed)
-    for a in 2:nant
-        rc = (rand(rng) - 0.5) * 2.0e-3               # ±1 mHz, feed-common
-        for f in 1:2
-            delay[a, f] = (rand(rng) - 0.5) * 2.0e-9      # ±1 ns  (« 1/chan_bw)
-            rate[a, f] = rc
-            phi[a, f] = (rand(rng) - 0.5) * 2.0           # ±1 rad
-        end
-    end
-
-    if feed_common
-        delay[:, 2] .= delay[:, 1]
-        phi[:, 2] .= phi[:, 1]
-    end
-
-    # Per-(station, AP) atmospheric screen (rad), reference held at 0, FEED-COMMON:
-    # the atmosphere is non-birefringent, so both feeds see the same screen, and the
-    # model's adhoc term is `SharedFeeds`. A smooth (slowly-varying) phase track — the
-    # regime the Savitzky–Golay adhoc smoother is designed for — plus a per-station
-    # constant offset that Stage-B's per-scan constant phase absorbs.
-    screen = zeros(nant, 2, ntime)
-    for a in 2:nant
-        base = (rand(rng) - 0.5) * 1.0
-        for ti in 1:ntime
-            s = base + 0.2 * sin(0.5 * ti + a)
-            screen[a, 1, ti] = s
-            screen[a, 2, ti] = s
-        end
-    end
-
-    feeds = [CAL.correlation_feed_pair(p) for p in pol_labels]
-    A0 = 2.5
-
-    src_name = "SRC1"
-    branches = DimensionalData.TreeDict()
-    for b in 1:nbands
-        fs = setups[b]
-        fch = collect(channel_freqs(fs))
-        vis_dense = Array{ComplexF32}(undef, nchan, ntime, nbl, npol)
-        w_dense = fill(1.0f3, nchan, ntime, nbl, npol)   # high weight → high SNR
-        for p in 1:npol, bl in 1:nbl, ti in 1:ntime, c in 1:nchan
-            a, bb = bl_pairs[bl]
-            fa, fb = feeds[p]
-            f = fch[c]
-            tsec = ti_vals[ti] * 3600.0
-            dτ = delay[a, fa] - delay[bb, fb]
-            dṙ = rate[a, fa] - rate[bb, fb]
-            dφ = phi[a, fa] - phi[bb, fb]
-            dscr = screen[a, fa, ti] - screen[bb, fb, ti]
-            gc = (b - 1) * nchan + c          # global channel index (bands stacked by freq)
-            dbp = bandpass === nothing ? 0.0 : (bandpass[a, fa, gc] - bandpass[bb, fb, gc])
-            dla = amp_bandpass === nothing ? 0.0 : (amp_bandpass[a, fa, gc] + amp_bandpass[bb, fb, gc])  # log-amp SUMS
-            ddt = dtec === nothing ? 0.0 :
-                CAL.DISPERSION_K * (dtec[a] - dtec[bb]) * (1.0 / f0 - 1.0 / f)
-            ph = dφ + 2π * dτ * (f - f0) + 2π * dṙ * (tsec - t0_sec) + dscr + dbp + ddt
-            vis_dense[c, ti, bl, p] = ComplexF32(A0 * exp(dla) * cis(ph))
-        end
-        vis_part = DimArray(
-            vis_dense,
-            (
-                Frequency(fch), Ti(ti_vals),
-                Baseline(baselines.labels), Pol(pol_labels),
-            ),
-        )
-        w_part = DimArray(w_dense, dims(vis_part))
-
-        uvw_dense = zeros(Float32, ntime, nbl, 3)
-        for ti in 1:ntime, bl in 1:nbl
-            uvw_dense[ti, bl, 1] = Float32(ti + 0.1 * bl)
-            uvw_dense[ti, bl, 2] = Float32(2 * ti + 0.2 * bl)
-            uvw_dense[ti, bl, 3] = Float32(3 * ti + 0.3 * bl)
-        end
-        uvw_part = DimArray(
-            uvw_dense,
-            (Ti(ti_vals), Baseline(baselines.labels), UVP.UVW(["U", "V", "W"])),
-        )
-
-        info = UV.PartitionInfo(;
-            source_name = src_name,
-            source_key = UV.sanitize_source(src_name),
-            scan_name = "1",
-            ra = 1.234, dec = -0.56,
-            antennas = antennas,
-            baselines = baselines,
-            record_order = [(ti, bl) for bl in 1:nbl for ti in 1:ntime],
-            freq_setup = fs,
-            spw_name = "band_$(b)",
-            ddi = b - 1,
-            basename = "synth_fringe",
-        )
-        leaf = UV._build_leaf(vis_part, w_part, uvw_part; partition_info = info)
-        branches[UV.partition_key(info)] = leaf
-    end
-
-    uvset = Gustavo.UVData.UVSet(; metadata = UV.UVMetadata(array_obs), branches = branches)
-    return uvset, (; delay, rate, phi, screen, bandpass, amp_bandpass, dtec, f0, t0_sec, bl_pairs, pol_labels, feeds)
-end
-
-# Coherence of a (baseline, product) block: |Σ w·V| / Σ (w·|V|). 1 ⇒ phase flat.
-function _coherence(V, W)
-    num = zero(ComplexF64)
-    den = 0.0
-    for i in eachindex(V)
-        v = V[i]
-        w = W[i]
-        (isfinite(v) && isfinite(w) && w > 0) || continue
-        num += w * v
-        den += w * abs(v)
-    end
-    den == 0 && return 0.0
-    return abs(num) / den
-end
 
 @testset "Fringe pipeline end-to-end" begin
     uvset, _truth = _build_fringe_uvset()
 
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
     # keeps every well-determined AP in this high-SNR synthetic.
-    sol = FP.solve_fringes(
-        uvset; ref_ant = 1,
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
+    sol = fit(
+        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        uvset,
     )
     @test sol isa CAL.CalibrationSolution
     @test length(sol.θ) == sol.layout.nθ
@@ -303,7 +91,7 @@ end
     # float on noise and — multiplied by the whole-track Rate lever arm
     # `2π·rate·(t − t0_global)`, hours long — inject large, arbitrary scan-to-scan
     # R–L (RL/RR) phase jumps (see the rationale comment on `_fringe_model` in
-    # pipeline.jl and the `fringe-rate-must-be-sharedfeeds` decision).
+    # model_plans.jl and the `fringe-rate-must-be-sharedfeeds` decision).
     #
     # The end-to-end coherence test injects FEED-COMMON truth, so a `PerFeed` revert
     # would still recover it at high SNR and pass — it does NOT guard this decision.
@@ -338,18 +126,20 @@ end
     end
 end
 
-@testset "Fused solve_and_reduce_fringes ≡ two-pass" begin
+@testset "Fused fitcalibrate ≡ two-pass fit + apply" begin
     # The fused single-pass driver must produce the SAME result as the explicit
-    # two-pass `apply_calibration(uvset, solve_fringes(uvset))`, because each
+    # two-pass `apply_calibration(uvset, fit(pipe, uvset))`, because each
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+    chain = FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        TemporalSmoother(adhoc)
 
-    sol_ref = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc)
+    sol_ref = fit(chain, uvset)
     corr_ref = Gustavo.apply_calibration(uvset, sol_ref)
 
-    # postprocess = identity → fused correction only (no reduction).
-    sol_fused, out_fused = FP.solve_and_reduce_fringes(uvset; ref_ant = 1, adhoc = adhoc)
+    # No reduce steps → fused correction only (no reduction).
+    sol_fused, out_fused = fitcalibrate(chain, uvset)
 
     @test sol_fused.θ ≈ sol_ref.θ
     # Same tree keys.
@@ -368,10 +158,7 @@ end
     # With a reducer the fused output must equal applying the same reducer to the
     # two-pass corrected set.
     red_ref = UVP.frequency_average(corr_ref; nout = 1)
-    _, out_red = FP.solve_and_reduce_fringes(
-        uvset; ref_ant = 1, adhoc = adhoc,
-        postprocess = uv -> UVP.frequency_average(uv; nout = 1),
-    )
+    _, out_red = fitcalibrate(chain, uvset; reduce = [AverageFrequency(nout = 1)])
     for (k, leaf) in DimensionalData.branches(red_ref)
         Vr = parent(leaf[:vis])
         Vf = parent(DimensionalData.branches(out_red)[k][:vis])
@@ -403,12 +190,11 @@ end
     # `_build_fringe_uvset` registers NO primary cards, so write_uvfits must
     # synthesize them. Reduce + combine bands to IFs, then round-trip via UVFITS.
     uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
-    sol, reduced = FP.solve_and_reduce_fringes(
-        uvset; ref_ant = 1,
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
-        postprocess = uv -> UVP.time_bin_average(
-            UVP.combine_spw(UVP.frequency_average(uv; nout = 1)), 0.02,
-        ),
+    sol, reduced = fitcalibrate(
+        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        uvset;
+        reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
     )
     @test length(DimensionalData.branches(reduced)) == 1
     @test length(UVP.union_frequency_axis(reduced)) == 1
@@ -429,6 +215,40 @@ end
         @test all(isfinite, filter(isfinite, parent(rt_leaf[:vis])))  # no NaN explosion
     finally
         isfile(path) && rm(path; force = true)
+    end
+end
+
+@testset "write_uvfits convention toggle (:aips conjugates, :fitsidi verbatim)" begin
+    # :aips writes conj(vis); :fitsidi writes vis verbatim; (u,v,w) never negated.
+    # load_uvfits always conjugates on read (assumes a standard :aips file), so the
+    # :fitsidi round-trip comes back as the conjugate of the :aips round-trip — and
+    # since both files traverse the identical write/load path, their records align
+    # exactly and differ ONLY by that conjugation. This isolates the convention.
+    uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
+    _, reduced = fitcalibrate(
+        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        uvset;
+        reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
+    )
+    pa = tempname() * ".uvfits"
+    pf = tempname() * ".uvfits"
+    try
+        @test UVP.write_uvfits(pa, reduced; convention = :aips) == pa
+        @test UVP.write_uvfits(pf, reduced; convention = :fitsidi) == pf
+        la = first(values(DimensionalData.branches(UVP.load_uvfits(pa))))
+        lf = first(values(DimensionalData.branches(UVP.load_uvfits(pf))))
+        Va = parent(la[:vis])
+        Vf = parent(lf[:vis])
+        finite = findall(v -> isfinite(real(v)) && isfinite(imag(v)), Va)
+        @test !isempty(finite)
+        @test Vf[finite] ≈ conj.(Va[finite])                      # convention flip
+        @test any(i -> abs(imag(Va[i])) > 1.0f-6, finite)         # non-trivial imag
+        @test parent(lf[:uvw]) ≈ parent(la[:uvw])                 # (u,v,w) not negated
+        @test_throws ErrorException UVP.write_uvfits(pa, reduced; convention = :bogus)
+    finally
+        isfile(pa) && rm(pa; force = true)
+        isfile(pf) && rm(pf; force = true)
     end
 end
 
@@ -467,7 +287,11 @@ end
     uvset, _ = _build_fringe_uvset()
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     for r in (1, 2, 3)
-        sol = FP.solve_fringes(uvset; ref_ant = 1, rounds = r, adhoc = adhoc)
+        sol = fit(
+            FringeFit(model = FringeModel(ref_ant = 1), estimator = FP.MatchedFilter(rounds = r)) |>
+                BandpassEstimator() |> TemporalSmoother(adhoc),
+            uvset,
+        )
         corr = Gustavo.apply_calibration(uvset, sol)
         worst = 1.0
         for (_, leaf) in DimensionalData.branches(corr)
@@ -517,8 +341,9 @@ end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    sol_on = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, phase_bandpass = true)
-    sol_off = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, phase_bandpass = false)
+    ff = FringeFit(model = FringeModel(ref_ant = 1))
+    sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(ff |> BandpassEstimator(phase = false) |> TemporalSmoother(adhoc), uvset)
 
     don = FP.baseline_fringe_data(uvset, sol_on)
     doff = FP.baseline_fringe_data(uvset, sol_off)
@@ -547,6 +372,86 @@ end
     c_off = FP.delay_closure(doff)
     mx(v) = (u = abs.(filter(isfinite, v)); isempty(u) ? 0.0 : maximum(u))
     @test isapprox(mx(c_on.closure_before), mx(c_off.closure_before); rtol = 0.2)
+end
+
+@testset "Phase bandpass: reference R–L shape solved (χ re-gauge)" begin
+    # The per-channel bandpass solve pins the REFERENCE's feed-2 node per channel
+    # (a rank device against the χ ↔ feed-2-offset degeneracy); the χ re-gauge in
+    # `_solve_phase_bandpass!` must reassign χ's band-structure into the feed-2
+    # block so the reference's relative R–L phase bandpass is SOLVED rather than
+    # zeroed — otherwise it survives uncorrected in every cross-hand visibility.
+    nant, nbands, nchan = 4, 2, 8
+    nchg = nbands * nchan
+    rng = MersenneTwister(0xEC9A)
+    bp = zeros(nant, 2, nchg)
+    # Reference (ant 1): feed 1 flat (the true per-channel gauge), feed 2 a smooth
+    # NONZERO shape — the relative R–L phase bandpass under test. The shape is
+    # orthogonalized against per-band constant + slope: those components are
+    # legitimately (and feed-COMMONLY) absorbed by the per-band SBD delay/const
+    # and R–L delay stages, so leaving them in would make the earlier solves fight
+    # an unmodelled feed-2-only per-band ramp instead of exercising the χ
+    # re-gauge this test is about.
+    for b in 1:nbands
+        cs = ((b - 1) * nchan + 1):(b * nchan)
+        s = [0.6 * sin(2π * k / nchan + 0.9 * b) for k in 1:nchan]   # full period per band
+        X = hcat(ones(nchan), collect(Float64, 1:nchan))
+        bp[1, 2, cs] .= s .- X * (X \ s)                             # ⊥ {const, slope} per band
+    end
+    for a in 2:nant, f in 1:2
+        off = (rand(rng) - 0.5)
+        for gc in 1:nchg
+            bp[a, f, gc] = off + 1.0 * sin(2π * gc / nchg + a + f)
+        end
+    end
+    uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+    ff = FringeFit(model = FringeModel(ref_ant = 1))
+    sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(ff |> BandpassEstimator(phase = false) |> TemporalSmoother(adhoc), uvset)
+
+    don = FP.baseline_fringe_data(uvset, sol_on)
+    doff = FP.baseline_fringe_data(uvset, sol_off)
+    # Per-channel phase coherence R = |Σ_c V̄_c| / Σ_c |V̄_c| over a product set.
+    # The source is unpolarized, so a correct solve leaves the corrected CROSS
+    # spectra flat; a SIGN error in the re-gauge doubles the ref R–L ripple
+    # instead of removing it, so the cross coherence is also the convention check.
+    function freq_coh(spec, ps)
+        rs = Float64[]
+        for bi in eachindex(don.bl_pairs), p in ps
+            a, b = don.bl_pairs[bi]
+            a == b && continue
+            z = filter(isfinite, spec[:, bi, p])
+            isempty(z) && continue
+            push!(rs, abs(sum(z)) / sum(abs.(z)))
+        end
+        return sum(rs) / length(rs)
+    end
+    cross_ps = findall(p -> (fp = CAL.correlation_feed_pair(p); fp[1] != fp[2]), don.pol_products)
+    R_on = freq_coh(don.spec_after, cross_ps)
+    R_off = freq_coh(doff.spec_after, cross_ps)
+    @test R_on > R_off
+    @test R_on > 0.97                   # ref R–L shape corrected in the cross hands
+    @test R_off < 0.95                  # ...and survives with the stage off
+
+    # θ recovery: the (ref, feed 2) PerChannel slots carry the injected shape up
+    # to per-band constant + slope components (the parts the per-band SBD and R–L
+    # delay terms legitimately absorb). Remove the per-band best-fit constant +
+    # slope from the difference; the residual shape must match.
+    plan = FP._bandpass_plan(sol_on.model, sol_on.layout)
+    slot0 = plan.off1[1, 2, 1, 1]
+    @test slot0 != 0
+    rec = [sol_on.θ[slot0 + plan.clocal[gc] - 1] for gc in 1:nchg]
+    worst = 0.0
+    for b in 1:nbands
+        cs = ((b - 1) * nchan + 1):(b * nchan)
+        d = [rem2pi(rec[gc] - bp[1, 2, gc], RoundNearest) for gc in cs]
+        X = hcat(ones(nchan), collect(Float64, 1:nchan))
+        worst = max(worst, maximum(abs.(d .- X * (X \ d))))
+    end
+    @test worst < 0.15
+
+    # Parallel hands are invariant under the feed-2 common-mode re-gauge.
+    @test freq_coh(don.spec_after, (FP.baseline_pol_index(don, :parallel),)) > 0.97
 end
 
 @testset "Amplitude bandpass: pluggable estimators (poly / penalized / free)" begin
@@ -593,7 +498,8 @@ end
         isempty(rs) ? NaN : sum(rs) / length(rs)
     end
 
-    sol_off = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = false)
+    ff = FringeFit(model = FringeModel(ref_ant = 1))
+    sol_off = fit(ff |> BandpassEstimator(amp = false) |> TemporalSmoother(adhoc), uvset)
     doff = FP.baseline_fringe_data(uvset, sol_off)
     poff = FP.baseline_pol_index(doff, :parallel)
     @test amp_ripple(doff.spec_after, doff, poff) > 1.3    # roll-off ripple without the stage
@@ -601,7 +507,7 @@ end
     # The smooth estimators flatten the band AND fill the killed channels onto the
     # in-spw curve (≈ the mean of the live neighbours, well away from log-amp 0).
     for sm in (FP.PolynomialBandpass(4), FP.PenalizedBandpass(0.1))
-        sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = true, amp_smoother = sm)
+        sol = fit(ff |> BandpassEstimator(amp_model = sm) |> TemporalSmoother(adhoc), uvset)
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, :parallel)
         @test amp_ripple(don.spec_after, don, p) < 1.08
@@ -616,7 +522,7 @@ end
 
     # FreeBandpass does NOT estimate the killed channels — their θ slot is untouched
     # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
-    solf = FP.solve_fringes(uvset; ref_ant = 1, adhoc = adhoc, amp_bandpass = true, amp_smoother = FP.FreeBandpass())
+    solf = fit(ff |> BandpassEstimator(amp_model = FP.FreeBandpass()) |> TemporalSmoother(adhoc), uvset)
     planf = FP._amp_bandpass_plan(solf.model, solf.layout)
     for dg in dead_globals, a in 2:nant, f in 1:2
         @test larec(solf, planf, a, f, dg) == 0.0
@@ -627,7 +533,11 @@ end
     # The default `SavitzkyGolaySmoother()` now uses `window = :auto` (EHT-HOPS coherence-time
     # selection). Verify the default path still flattens the per-baseline phase.
     uvset, _ = _build_fringe_uvset()
-    sol = FP.solve_fringes(uvset; ref_ant = 1, adhoc = FP.SavitzkyGolaySmoother())   # window = :auto
+    sol = fit(
+        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+            TemporalSmoother(FP.SavitzkyGolaySmoother()),   # window = :auto
+        uvset,
+    )
     corr = Gustavo.apply_calibration(uvset, sol)
     worst = 1.0
     for (_, leaf) in DimensionalData.branches(corr)
@@ -656,9 +566,10 @@ end
     ax = FP._search_axes(geom.channel_freqs, geom.times .* 3600.0, FP.FringeSearch())
     @test ax.mbd !== nothing
 
-    sol = FP.solve_fringes(
-        uvset; ref_ant = 1,
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
+    sol = fit(
+        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        uvset,
     )
     @test all(>(10), filter(isfinite, sol.info.scan_max_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
@@ -682,13 +593,12 @@ end
 @testset "Threaded per-baseline search ≡ serial, and stage timers" begin
     uvset, _ = _build_fringe_uvset()
     geom = CAL.build_geometry(uvset)
-    groups = FP._scan_group_leaves(uvset)
-    grp = FP._materialize_concat_group(groups[1], geom)
-    f0 = geom.f0
-    t0s = geom.t0 * 3600.0
-    s = FP.FringeSearch()
-    det1, snr1, nc1, rows1 = FP._search_group(grp, grp.Vg, f0, t0s, s, FP._ws_pool(1), 1)
-    det4, snr4, nc4, rows4 = FP._search_group(grp, grp.Vg, f0, t0s, s, FP._ws_pool(4), 4)
+    stq = FP.scan_stream(uvset; geom = geom)
+    grp = FP.materialize_cube(stq, stq.groups[1])
+    r1 = FP.search_scan(stq, grp, FP.FringeSearch(); inner = 1, ngroups = 1)
+    r4 = FP.search_scan(stq, grp, FP.FringeSearch(); inner = 4, ngroups = 1)
+    det1, snr1, nc1, rows1 = r1.det, r1.max_snr, r1.ncells, r1.rows
+    det4, snr4, nc4, rows4 = r4.det, r4.max_snr, r4.ncells, r4.rows
     # Same detections regardless of the inner task count (≈ only because the two
     # runs plan separate FFTW MEASURE transforms), and the recorded detection
     # table in the same order.
@@ -711,17 +621,20 @@ end
     # Stage timers land in the solution info and print; the progress callback
     # fires per completed scan of each pass (plus a done=0 pass announcement).
     events = Tuple{Symbol, Int, Int}[]
-    sol = FP.solve_fringes(
-        uvset; ref_ant = 1,
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
-        progress = (st, d, t) -> push!(events, (st, d, t)),
+    sol = fit(
+        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        uvset;
+        exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
     )
-    ngroups = length(FP._scan_group_leaves(uvset))
-    for st in (:search, :adhoc)
+    ngroups = length(FP.scan_stream(uvset; ntasks = 1).groups)
+    # Stages report under the pass names of the composable pipeline
+    # (:fringe/:bandpass/:adhoc — the monolith's :search stage died with it).
+    for st in (:fringe, :adhoc)
         ev = [(d, t) for (s2, d, t) in events if s2 == st]
         @test !isempty(ev)
         total = ev[1][2]
-        st === :search && @test total == ngroups
+        st === :fringe && @test total == ngroups
         @test sort([d for (d, _) in ev]) == collect(0:total)   # announcement + every scan
         @test all(t == total for (_, t) in ev)
     end
@@ -742,10 +655,12 @@ end
     # Capping the bandpass accumulation to the best calibrator scan still
     # produces a working solve (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
-    solc = FP.solve_fringes(
-        uvset; ref_ant = 1, bandpass_max_scans = 1,
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
-        progress = (st, d, t) -> push!(ev2, (st, d, t)),
+    solc = fit(
+        FringeFit(model = FringeModel(ref_ant = 1)) |>
+            BandpassEstimator(select = Gustavo.BrightestCalibrator(max_scans = 1)) |>
+            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        uvset;
+        exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
     )
     @test solc isa CAL.CalibrationSolution
     bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
@@ -782,9 +697,12 @@ end
     geom = CAL.build_geometry(uvset)
     @test FP._dispersion_enabled(:auto, geom)
 
-    sol = FP.solve_fringes(
-        uvset; ref_ant = 1, phase_bandpass = false, amp_bandpass = false,
-        search = FP.FringeSearch(algorithm = :full),
+    sol = fit(
+        FringeFit(
+            model = FringeModel(ref_ant = 1),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+        ) |> TemporalSmoother(),        # no bandpass stage (see comment above)
+        uvset,
     )
     @test sol.info.dispersion_applied
     dplan = FP._dispersion_plan(sol.model, sol.layout)
@@ -824,9 +742,12 @@ end
     @test _crossband_eta(corr) > 0.99
 
     # Without the term the dispersion survives as cross-band decoherence.
-    sol0 = FP.solve_fringes(
-        uvset; ref_ant = 1, phase_bandpass = false, amp_bandpass = false,
-        search = FP.FringeSearch(algorithm = :full), dispersion = false,
+    sol0 = fit(
+        FringeFit(
+            model = FringeModel(ref_ant = 1, dispersion = false),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+        ) |> TemporalSmoother(),
+        uvset,
     )
     @test !sol0.info.dispersion_applied
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
@@ -890,9 +811,12 @@ end
         return abs(sum(acc)) / sum(abs, acc)
     end
 
-    sol = FP.solve_fringes(
-        uvset; ref_ant = 1, phase_bandpass = false, amp_bandpass = false,
-        dispersion = false, search = FP.FringeSearch(algorithm = :full),
+    sol = fit(
+        FringeFit(
+            model = FringeModel(ref_ant = 1, dispersion = false),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+        ) |> TemporalSmoother(),
+        uvset,
     )
     @test sol.info.sbd_applied
     sbd = FP._sbd_plans(sol.model, sol.layout)
@@ -908,9 +832,12 @@ end
     @test _perchan_eta(corr, 1) > 0.98                          # baseline (1,2) flat
 
     # Without the term the per-group slope survives as within-group decoherence.
-    sol0 = FP.solve_fringes(
-        uvset; ref_ant = 1, phase_bandpass = false, amp_bandpass = false,
-        dispersion = false, sbd = false, search = FP.FringeSearch(algorithm = :full),
+    sol0 = fit(
+        FringeFit(
+            model = FringeModel(ref_ant = 1, dispersion = false, sbd = false),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+        ) |> TemporalSmoother(),
+        uvset,
     )
     @test !sol0.info.sbd_applied
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
@@ -956,9 +883,12 @@ end
     @test FP._colocated_ties(ant2) == [1, 2, 2, 4, 4]
     @test FP._colocated_pair_set(ant2) == Set([(2, 3), (3, 2), (4, 5), (5, 4)])
 
-    sol = FP.solve_fringes(
-        uvset; ref_ant = 1, phase_bandpass = false, amp_bandpass = false,
-        sbd = false, search = FP.FringeSearch(algorithm = :full),
+    sol = fit(
+        FringeFit(
+            model = FringeModel(ref_ant = 1, sbd = false),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+        ) |> TemporalSmoother(),
+        uvset,
     )
     dplan = FP._dispersion_plan(sol.model, sol.layout)
     @test dplan !== nothing
@@ -975,31 +905,36 @@ end
     # array — on VR2505 that left 10 of 17 stations with NO bandpass).
     srcs = ["A", "A", "A", "B"]
     snr = [500.0, 600.0, 550.0, 900.0]
-    @test FP._bandpass_calibrator(nothing, srcs, snr) == "A"
-    @test FP._bandpass_calibrator("B", srcs, snr) == "B"        # explicit override
-    @test FP._bandpass_calibrator(nothing, srcs, fill(NaN, 4)) == "A"
+    recs = [
+        (index = i, source = srcs[i], scan = "No$i", snr = snr[i], stations = Set([1, 2]))
+            for i in eachindex(srcs)
+    ]
+    @test select_scans(Gustavo.BrightestCalibrator(), recs) == [1, 2, 3]
+    @test select_scans(Gustavo.SourceScans("B"), recs) == [4]   # explicit override
 
-    # Top-up is a no-op when the calibrator scans already cover every station.
-    uvset, _ = _build_fringe_uvset()
-    groups = FP._scan_group_leaves(uvset)
-    @test isempty(FP._bandpass_coverage_topup(collect(eachindex(groups)), groups, ones(length(groups))))
+    # Top-up is a no-op when the selected scans already cover every station.
+    full = [
+        (index = i, source = "A", scan = "No$i", snr = 1.0, stations = Set(1:4))
+            for i in 1:3
+    ]
+    @test select_scans(FP.CoverageTopup(Gustavo.AllScans()), full) == [1, 2, 3]
 end
 
 @testset "Budget-scheduled group map" begin
     # Results come back in index order regardless of completion order, and
     # groups pack by their own charge (not the largest group's).
-    res, peak = FP._budget_scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2], 12; max_tasks = 4)
+    res, peak = FP._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2], 12; max_tasks = 4)
     @test res == [10, 20, 30, 40, 50, 60, 70, 80]
     @test 1 <= peak <= 4
 
     # A group charged more than the whole budget is clamped so it still runs.
-    res2, _ = FP._budget_scheduled_map(x -> x + 1, 1:3, [100, 1, 1], 10; max_tasks = 4)
+    res2, _ = FP._scheduled_map(x -> x + 1, 1:3, [100, 1, 1], 10; max_tasks = 4)
     @test res2 == [2, 3, 4]
 
     # Empty input and worker-error propagation.
-    res3, peak3 = FP._budget_scheduled_map(identity, Int[], Float64[], 10; max_tasks = 2)
+    res3, peak3 = FP._scheduled_map(identity, Int[], Float64[], 10; max_tasks = 2)
     @test isempty(res3) && peak3 == 0
-    @test_throws Exception FP._budget_scheduled_map(
+    @test_throws Exception FP._scheduled_map(
         x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1], 10; max_tasks = 2,
     )
 end
@@ -1022,9 +957,12 @@ end
             end
         end
     end
-    sol = FP.solve_fringes(
-        uvset; ref_ant = 1, phase_bandpass = false, amp_bandpass = false,
-        sbd = false, dispersion = false, search = FP.FringeSearch(algorithm = :full),
+    sol = fit(
+        FringeFit(
+            model = FringeModel(ref_ant = 1, sbd = false, dispersion = false),
+            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = :full)),
+        ) |> TemporalSmoother(),
+        uvset,
     )
     flags = FP.fringe_station_flags(sol)
     @test !isempty(flags)

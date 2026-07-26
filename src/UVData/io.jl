@@ -12,11 +12,23 @@ Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 function load_uvfits end
 
 """
-    write_uvfits(output_path, uvset::UVSet)
+    write_uvfits(output_path, uvset::UVSet; convention = :aips)
 
 Write a UVData file by walking the leaves of `uvset` directly and emitting
 random-groups records in scan-insertion order, then assembling the AN, FQ,
 and NX bintables from the root metadata.
+
+`convention` selects the on-disk visibility phase convention:
+- `:aips` (default) — conjugate the visibilities to the AIPS/CASA/UVFITS
+  convention, the standard form read correctly by AIPS, DIFMAP, CASA, ehtim,
+  pyuvdata, and VLBIFiles. FITS-IDI (Gustavo's internal convention) stores the
+  complex conjugate of this (AIPS Memo 114r §2.1).
+- `:fitsidi` — write Gustavo's internal FITS-IDI phase convention verbatim (no
+  conjugation), e.g. for tools that expect the FITS-IDI phase sense.
+
+`(u,v,w)` are written verbatim in both cases — FITS-IDI and AIPS UVFITS share
+the same baseline-coordinate convention. `load_uvfits` always assumes a standard
+`:aips` file (conjugating on read), so only `:aips` round-trips as the identity.
 
 Single-source UVSets only — multi-source UVSets must first be narrowed via
 `select_source(uvset, name)`.

@@ -111,9 +111,11 @@
         # untouched (regression: pass 2 once divided eager leaves in place).
         lc = first(values(UVP.branches(corrupt)))
         snapshot = copy(parent(lc[:vis]))
-        solf, output = FP.solve_and_reduce_fringes(
-            corrupt; ref_ant = 1, precal = sol,
-            adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
+        solf, output = fitcalibrate(
+            FP.ApplySolution(sol) |> FringeFit(model = FringeModel(ref_ant = 1)) |>
+                BandpassEstimator() |>
+                TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+            corrupt,
         )
         @test solf.info.precal_applied
         @test parent(lc[:vis]) == snapshot                 # caller's data unmutated
@@ -135,14 +137,18 @@
         lw = first(values(UVP.branches(worse)))
         @test !isapprox(parent(lw[:vis]), parent(l0[:vis]); rtol = 1.0e-2)
 
-        # Geometry mismatch is refused.
+        # Geometry mismatch is refused (fail-fast at stream construction).
         other, _ = _build_fringe_uvset(nchan = 6)
-        @test_throws ErrorException FP.solve_fringes(other; precal = sol)
+        @test_throws ErrorException fit(FP.ApplySolution(sol) |> FringeFit(), other)
 
         # Diagnostics see the pre-calibrated data when the same precal is passed:
-        # the "before" spectra of the corrupted set + precal equal the clean set's.
-        d_clean = FP.baseline_fringe_data(uvset, solf)
+        # the "before" spectra of the corrupted set + precal equal the clean
+        # set's RAW spectra (`transforms = ()` suppresses the recorded-chain
+        # replay — solf records the precal, and the no-kwarg default replays it).
+        d_clean = FP.baseline_fringe_data(uvset, solf; transforms = ())
         d_pcal = FP.baseline_fringe_data(corrupt, solf; precal = sol)
+        d_replay = FP.baseline_fringe_data(corrupt, solf)   # replays sol.transforms
+        @test isequal(d_replay.spec_before, d_pcal.spec_before)
         finite_close(x, y) = all(
             !isfinite(x[i]) || !isfinite(y[i]) || isapprox(x[i], y[i]; rtol = 1.0e-4, atol = 1.0e-10)
                 for i in eachindex(x, y)
@@ -164,9 +170,11 @@
         end
 
         # Solve with flagging: runs, and the output zero-weights those channels.
-        _, out2 = FP.solve_and_reduce_fringes(
-            uvset; ref_ant = 1, flag_channels = mask,
-            adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0),
+        _, out2 = fitcalibrate(
+            FP.FlagChannels(mask) |> FringeFit(model = FringeModel(ref_ant = 1)) |>
+                BandpassEstimator() |>
+                TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+            uvset,
         )
         lo = first(values(UVP.branches(out2)))
         ci, _ = CAL.leaf_window(geom, lo)
