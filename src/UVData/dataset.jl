@@ -11,15 +11,6 @@
 # and materialization is just `Array(x)`, which triggers the disk read on any
 # `DiskArrays.AbstractDiskArray` without `src/` depending on DiskArrays.
 
-"""
-    AbstractUVDataset
-
-Handle to an on-disk visibility dataset that can produce a (possibly lazy)
-`UVSet`. Concrete subtypes (e.g. the FITS-IDI reader's `FITSIDIDataset`) live in
-I/O extensions.
-"""
-abstract type AbstractUVDataset end
-
 # Laziness trait. Plain in-memory arrays are eager; an I/O extension overrides
 # this for its disk-backed array type.
 _layer_is_lazy(::AbstractArray) = false
