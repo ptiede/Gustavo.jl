@@ -96,9 +96,13 @@ relied on); under Threads it is a no-op.
 """
 exec_spawn(f; blocking::Bool = false) = _spawn(current_executor(), f, blocking)
 _spawn(::ThreadsExecutor, f, blocking::Bool) = Threads.@spawn f()
-_spawn(::DaggerExecutor, f, blocking::Bool) = error(
-    "DaggerExecutor requires the GustavoDaggerExt extension — load Dagger " *
-        "first (`using Dagger`)."
+# Fallback for executors whose backend package is not loaded. This must stay
+# less specific than the extension methods it stands in for: a stub sharing an
+# extension method's signature is overwritten when that extension loads, and
+# precompilation forbids method overwriting.
+_spawn(ex::AbstractExecutor, f, blocking::Bool) = error(
+    "$(nameof(typeof(ex))) has no spawn backend loaded — load the package " *
+        "providing its extension (`using Dagger` for DaggerExecutor)."
 )
 
 """

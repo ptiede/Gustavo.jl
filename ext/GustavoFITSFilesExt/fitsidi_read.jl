@@ -23,9 +23,7 @@
 # i.e. linear index = (band-1)*NO_STKD + stokes (verified empirically: each
 # group of NO_STKD entries shows the parallel/cross-hand signature).
 
-# DiskArrays is not a direct Gustavo dependency; reach it through FITSFiles,
-# which `using DiskArrays` (its lazy field arrays subtype AbstractDiskArray).
-const DiskArrays = FITSFiles.DiskArrays
+using DiskArrays
 using Statistics: median
 using Gustavo.Executors: exec_foreach
 

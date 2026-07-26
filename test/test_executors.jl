@@ -12,6 +12,9 @@ using Dagger      # activates GustavoDaggerExt (the DaggerExecutor backend)
 using Gustavo.Executors
 using Gustavo.Executors: exec_spawn, exec_fetch, exec_foreach
 
+# An executor with no backend loaded, for the `Executors._spawn` fallback.
+struct NoBackendExecutor <: AbstractExecutor end
+
 @testset "Executor seam" begin
     @testset "nested spawn/fetch on both backends" begin
         for ex in (ThreadsExecutor(), DaggerExecutor())
@@ -130,5 +133,17 @@ using Gustavo.Executors: exec_spawn, exec_fetch, exec_foreach
         )
         @test all(r_d.det .=== r_t.det)
         @test r_d.max_snr == r_t.max_snr
+    end
+
+    @testset "executor with no backend loaded" begin
+        # The `_spawn` fallback is annotated `AbstractExecutor` so every
+        # extension method stays strictly more specific. A same-signature stub
+        # would be overwritten when its extension loads, which precompilation
+        # rejects — so this dispatch must resolve to the extension, not the
+        # fallback, whenever the backend is present.
+        @test_throws "has no spawn backend loaded" with_executor(
+            () -> exec_spawn(() -> 1), NoBackendExecutor(),
+        )
+        @test Gustavo.Executors._spawn(DaggerExecutor(), () -> 1, false) isa Dagger.DTask
     end
 end

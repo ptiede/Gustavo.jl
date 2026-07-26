@@ -2894,3 +2894,18 @@ end
     @test size(full[:vis], 2) == expected_ti
     @test size(full[:uvw], 1) == expected_ti
 end
+
+# Every extension must precompile and load. An extension method that shares a
+# signature with a stub in `src/` is overwritten on load, which precompilation
+# rejects outright — so a missing extension here means the package is broken for
+# everyone who loads that trigger, not merely missing a feature. Runs last: each
+# extension only activates once its trigger package is loaded, and the suite
+# loads HDF5 from `synthetic_uvset.jl` rather than at the top of this file.
+@testset "extensions load" begin
+    for name in (
+            :GustavoFITSFilesExt, :GustavoDaggerExt,
+            :GustavoHDF5Ext, :GustavoMakieExt,
+        )
+        @test Base.get_extension(Gustavo, name) !== nothing
+    end
+end
