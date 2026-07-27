@@ -66,19 +66,19 @@ struct NoBackendExecutor <: AbstractExecutor end
 
     @testset "_scheduled_map: Dagger backend matches Threads semantics" begin
         for ex in (ThreadsExecutor(), DaggerExecutor())
-            res, peak = FP._scheduled_map(
+            res, peak = ST._scheduled_map(
                 x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2], 12;
                 max_tasks = 4, executor = ex,
             )
             @test res == [10, 20, 30, 40, 50, 60, 70, 80]   # items order
             @test 1 <= peak <= 4                            # in-flight cap held
             # Over-budget item is clamped so it still runs.
-            res2, _ = FP._scheduled_map(
+            res2, _ = ST._scheduled_map(
                 x -> x + 1, 1:3, [100, 1, 1], 10; max_tasks = 4, executor = ex,
             )
             @test res2 == [2, 3, 4]
             # Worker errors propagate.
-            @test_throws Exception FP._scheduled_map(
+            @test_throws Exception ST._scheduled_map(
                 x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1], 10;
                 max_tasks = 2, executor = ex,
             )
@@ -115,10 +115,10 @@ struct NoBackendExecutor <: AbstractExecutor end
         uvset, _ = _build_fringe_uvset()
         # The bare default follows the ambient/process executor (Dagger unless
         # the suite runs under GUSTAVO_TEST_EXECUTOR=threads).
-        st_d = with_executor(() -> FP.scan_stream(uvset), DaggerExecutor())
+        st_d = with_executor(() -> FP.scan_stream(uvset; workspace = FP.FringeWorkspace), DaggerExecutor())
         @test st_d.executor isa DaggerExecutor
         @test FP.scan_stream(uvset).executor == current_executor()
-        st_t = with_executor(() -> FP.scan_stream(uvset), ThreadsExecutor())
+        st_t = with_executor(() -> FP.scan_stream(uvset; workspace = FP.FringeWorkspace), ThreadsExecutor())
         @test st_t.executor isa ThreadsExecutor
         # Same search results either way (the QA drivers' path).
         grp_d = FP.materialize_cube(st_d, st_d.groups[1])

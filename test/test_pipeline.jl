@@ -593,7 +593,7 @@ end
 @testset "Threaded per-baseline search ≡ serial, and stage timers" begin
     uvset, _ = _build_fringe_uvset()
     geom = CAL.build_geometry(uvset)
-    stq = FP.scan_stream(uvset; geom = geom)
+    stq = FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace)
     grp = FP.materialize_cube(stq, stq.groups[1])
     r1 = FP.search_scan(stq, grp, FP.FringeSearch(); inner = 1, ngroups = 1)
     r4 = FP.search_scan(stq, grp, FP.FringeSearch(); inner = 4, ngroups = 1)
@@ -923,18 +923,18 @@ end
 @testset "Budget-scheduled group map" begin
     # Results come back in index order regardless of completion order, and
     # groups pack by their own charge (not the largest group's).
-    res, peak = FP._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2], 12; max_tasks = 4)
+    res, peak = ST._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2], 12; max_tasks = 4)
     @test res == [10, 20, 30, 40, 50, 60, 70, 80]
     @test 1 <= peak <= 4
 
     # A group charged more than the whole budget is clamped so it still runs.
-    res2, _ = FP._scheduled_map(x -> x + 1, 1:3, [100, 1, 1], 10; max_tasks = 4)
+    res2, _ = ST._scheduled_map(x -> x + 1, 1:3, [100, 1, 1], 10; max_tasks = 4)
     @test res2 == [2, 3, 4]
 
     # Empty input and worker-error propagation.
-    res3, peak3 = FP._scheduled_map(identity, Int[], Float64[], 10; max_tasks = 2)
+    res3, peak3 = ST._scheduled_map(identity, Int[], Float64[], 10; max_tasks = 2)
     @test isempty(res3) && peak3 == 0
-    @test_throws Exception FP._scheduled_map(
+    @test_throws Exception ST._scheduled_map(
         x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1], 10; max_tasks = 2,
     )
 end

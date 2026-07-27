@@ -1,25 +1,34 @@
 """
     Fringe
 
-VLBI fringe fitting on top of the unified `Gustavo.Calibration` model framework
-and the `Gustavo.UVData` visibility model. Stage by stage (EHT-HOPS-inspired,
-Blackburn et al. 2019, but with globally-closing per-feed solutions):
+VLBI fringe fitting on top of the unified `Gustavo.Calibration` model framework,
+the `Gustavo.UVData` visibility model, and the `Gustavo.Streaming` scan-group
+layer it runs its passes over (EHT-HOPS-inspired, Blackburn et al. 2019, but
+with globally-closing per-feed solutions): per-baseline FFT delay/rate search,
+stationization, bandpass and adhoc-phase stages, and the diagnostics over them.
 
-- `search.jl`     — per-baseline FFT delay/rate fringe search.
-- (stationize / adhoc / pipeline — later phases.)
+The streaming vocabulary (`ScanStream`, `ScanDataView`, the transform and
+selection types) is re-exported from `Gustavo.Streaming`, so a caller driving
+the fringe engine reaches it without a second `using`.
 """
 module Fringe
 
 using ..Executors
 using ..Executors: exec_foreach
 using ..UVData
-using ..UVData: Frequency
+using ..UVData: Frequency, Baseline
 using ..Calibration
 using ..Calibration: ComponentPlan
+using ..Streaming
+# `CoverageTopup` (bandpass_stage.jl) is another `AbstractScanSelection`, so its
+# resolver must be a METHOD of the streaming layer's generic — defining
+# `select_scans` under a bare `using` would mint a second function of the same
+# name and leave the two ambiguous wherever both modules are in scope.
+import ..Streaming: select_scans
 using FFTW: fft, fftfreq, plan_fft, MEASURE
 import FFTW
 import DimensionalData
-using DimensionalData: lookup, dims, Ti
+using DimensionalData: lookup, dims, Ti, DimArray
 using Statistics: median, mean
 using LinearAlgebra
 using Printf: @sprintf
@@ -30,14 +39,12 @@ include("Fringe/statespace.jl")
 include("Fringe/adhoc.jl")
 include("Fringe/pseudostokes.jl")
 include("Fringe/phasecal.jl")
-# The composable-pipeline engine: the materialization transform chain, scan
-# selections (fit-on-subset), the pluggable fringe-estimator strategy, the
-# scan-group streaming layer, the model/plan routers, and the three carved-out
-# stage implementations the step visitors call into.
-include("Fringe/transforms.jl")
-include("Fringe/selections.jl")
+# The composable-pipeline engine: the pluggable fringe-estimator strategy, the
+# search over one streamed scan group, the model/plan routers, and the three
+# carved-out stage implementations the step visitors call into.
 include("Fringe/estimators.jl")
-include("Fringe/stream.jl")
+include("Fringe/scan_search.jl")
+include("Fringe/threads.jl")
 include("Fringe/search_stage.jl")
 include("Fringe/model_plans.jl")
 include("Fringe/bandpass_stage.jl")

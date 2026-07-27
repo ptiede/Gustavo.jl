@@ -221,10 +221,18 @@ end
     end
 
     # Streaming-engine internals stay behind `Fringe`: reachable for users who
-    # drive the engine directly, absent from the pipeline-level namespace.
+    # drive the engine directly, absent from the pipeline-level namespace. They
+    # are `Streaming`'s, re-exported — the same binding under both names.
     for n in (:ScanGroupSpec, :scan_view, :materialize_cube, :materialize_leaves)
         @test !(n in top)
         @test n in names(Gustavo.Fringe)
+        @test n in names(Gustavo.Streaming)
+        @test getproperty(Gustavo.Fringe, n) === getproperty(Gustavo.Streaming, n)
+    end
+
+    # The four submodules, named at the top level.
+    for n in (:UVData, :Calibration, :Streaming, :Fringe)
+        @test n in top
     end
 
     # Solver-internal parameter bookkeeping: still reachable, no longer exported.

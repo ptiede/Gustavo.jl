@@ -34,7 +34,7 @@
             keyed = FP.materialize_leaves(st, spec; inner = 2)
             # Rebuild the cube from the transformed leaves: identical data —
             # the two choke paths apply the chain identically.
-            grp_l = FP._stacked_scan_group([m for (_, m) in keyed], geom)
+            grp_l = ST._stacked_scan_group([m for (_, m) in keyed], geom)
             @test isequal(grp.Vg, grp_l.Vg)
             @test isequal(grp.Wg, grp_l.Wg)
             # The mask really zero-weighted the flagged global channels.

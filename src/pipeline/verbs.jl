@@ -8,7 +8,7 @@
 #
 # Every pipeline runs on the new engine (`_fit_new_engine`): one compiled model,
 # one streaming pass per solve step under the visitor contract, and — for the
-# output verbs — a per-scan-group output tail (`Fringe.reduce_scan_output`)
+# output verbs — a per-scan-group output tail (`reduce_scan_output`)
 # that applies the solution and the reduce chain while the group is resident.
 # When the final solve step is a `TemporalSmoother` the tail FUSES into its
 # pass (the group is corrected and reduced right after its per-AP solve, the
@@ -72,12 +72,12 @@ function calibrate(
     post = _compose_output_chain(sol.postcal, collect(reduce))
     group_pairs = Fringe.map_groups(stream; stage = :output) do spec
         keyed = Fringe.materialize_leaves(stream, spec)
-        Fringe.reduce_scan_output(
+        reduce_scan_output(
             stream.uvset, keyed, sol, post;
             ntasks = stream.inner, apply_flags = apply_flags,
         )
     end
-    return Fringe.assemble_output(uvset, group_pairs)
+    return assemble_output(uvset, group_pairs)
 end
 
 """
@@ -116,6 +116,48 @@ function _run_fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet, reduce)
 end
 
 # ── The output sink ──────────────────────────────────────────────────────────
+
+"""
+    reduce_scan_output(uvset::UVSet, keyed, sol::CalibrationSolution, postprocess;
+                       ntasks = 1, apply_flags = true) -> Vector{Pair}
+
+The per-scan-group output tail: rebuild the group's `(key, leaf)` pairs as a
+sub-`UVSet`, apply `sol`'s gains/flags (`apply_calibration` — zero-weighting
+unconstrained stations and excluded baselines exactly like a full-set apply
+would), run `postprocess` (a `UVSet -> UVSet` map), and return the reduced
+output branches. Every output path — the fused `fitcalibrate` tail and the
+standalone `calibrate(sol, uvset)` stream — runs THIS function per group, so
+fused ≡ standalone by construction and a lazy set is never fully materialized.
+"""
+function reduce_scan_output(
+        uvset::UVSet, keyed, sol::CalibrationSolution, postprocess;
+        ntasks::Integer = 1, apply_flags::Bool = true,
+    )
+    sub_branches = DimensionalData.TreeDict()
+    for (k, leaf) in keyed
+        sub_branches[k] = leaf
+    end
+    sub = DimensionalData.rebuild(uvset; branches = sub_branches)
+    reduced = postprocess(UVData.apply_calibration(sub, sol; ntasks = ntasks, apply_flags = apply_flags))
+    return collect(pairs(UVData.branches(reduced)))
+end
+
+"""
+    assemble_output(uvset::UVSet, group_pairs) -> UVSet
+
+Rebuild an output `UVSet` from the per-group branch pairs
+[`reduce_scan_output`](@ref) returned (in group order).
+"""
+function assemble_output(uvset::UVSet, group_pairs)
+    out_branches = DimensionalData.TreeDict()
+    for r in group_pairs
+        r === nothing && continue
+        for (k, leaf) in r
+            out_branches[k] = leaf
+        end
+    end
+    return DimensionalData.rebuild(uvset; branches = out_branches)
+end
 
 # The fused output tail's configuration: the composed `UVSet -> UVSet`
 # postprocess (a-priori amplitude chain + reductions) applied after the
@@ -201,7 +243,7 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     stream = Fringe.scan_stream(
         uvset; geom = geom, transforms = br.tfs,
         ntasks = exec.ntasks, mem_fraction = exec.mem_fraction, mem_budget = exec.mem_budget,
-        executor = exec.executor,
+        workspace = Fringe.FringeWorkspace, executor = exec.executor,
     )
     ctx = SolveContext(
         model, layout, geom, ev, zeros(layout.nθ),
@@ -244,14 +286,14 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     if !fused
         group_pairs = Fringe.map_groups(ctx.stream; progress = exec.progress, stage = :output) do gspec
             keyed = Fringe.materialize_leaves(ctx.stream, gspec)
-            Fringe.reduce_scan_output(
+            reduce_scan_output(
                 ctx.stream.uvset, keyed, sol, sink.postprocess;
                 ntasks = ctx.stream.inner, apply_flags = sink.apply_flags,
             )
         end
-        return sol, Fringe.assemble_output(uvset, group_pairs)
+        return sol, assemble_output(uvset, group_pairs)
     end
-    return sol, Fringe.assemble_output(uvset, ctx.scratch[:sink_pairs])
+    return sol, assemble_output(uvset, ctx.scratch[:sink_pairs])
 end
 
 # One streaming pass per solve step: materialize each selected group, hand the
@@ -281,7 +323,7 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, step_index::Int, comps; 
                 keyed = nothing
             else
                 keyed = Fringe.materialize_leaves(ctx.stream, gspec)
-                grp = Fringe._stacked_scan_group([m for (_, m) in keyed], ctx.stream.geom)
+                grp = Streaming._stacked_scan_group([m for (_, m) in keyed], ctx.stream.geom)
             end
             v = Fringe.scan_view(ctx.stream, grp)
             tb = time_ns()
@@ -294,7 +336,7 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, step_index::Int, comps; 
                 # so the group-local solution corrects identically to the final
                 # global one — the monolith's pass-2 invariant.
                 sol_local = CalibrationSolution(ctx.model, ctx.layout, ctx.geom, ctx.θ, flag_nt)
-                out = Fringe.reduce_scan_output(
+                out = reduce_scan_output(
                     ctx.stream.uvset, keyed, sol_local, sink.postprocess;
                     ntasks = ctx.stream.inner, apply_flags = sink.apply_flags,
                 )

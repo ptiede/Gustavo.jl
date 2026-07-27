@@ -4,8 +4,11 @@ Only the best chicken in the world. We sell nothing else and live on pure vibes
 """
 module Gustavo
 
-# The executor seam (M7): included FIRST so every submodule — the FITS-ext
-# decode fan-outs, the Fringe kernels, the pass runner — spawns through it.
+# The output tail rebuilds a `UVSet`'s branch tree per scan group.
+import DimensionalData
+
+# The executor seam: included FIRST so every submodule — the FITS-ext decode
+# fan-outs, the Fringe kernels, the pass runner — spawns through it.
 include("executors.jl")
 using .Executors
 
@@ -15,13 +18,19 @@ using .UVData
 include("Calibration.jl")
 using .Calibration
 
+# Scan-group streaming: the substrate the solver stages run on. Between
+# `Calibration` (whose `DataGeometry`/`CalibrationSolution` it consumes) and
+# `Fringe` (which consumes it).
+include("Streaming.jl")
+using .Streaming
+
 include("Fringe.jl")
 using .Fringe
 
 # Top-level modular calibration pipeline (orchestrates all three submodules).
 include("pipeline.jl")
 
-export UVData, Calibration, Fringe
+export UVData, Calibration, Streaming, Fringe
 # Data entry and exit: the set type plus the reader/writer pair for each
 # supported format, so a bare `using Gustavo` spans load → fitcalibrate → write.
 export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi

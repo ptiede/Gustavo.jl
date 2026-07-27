@@ -1,9 +1,8 @@
-# ── Streaming layer (stream.jl) ──────────────────────────────────────────────
+# ── Streaming layer (Gustavo.Streaming) ──────────────────────────────────────
 #
 # Grouping, materialization (direct-decode fast path ≡ stacked fallback),
-# search determinism, selection, scheduling. (The frozen-monolith oracle these
-# were originally gated against was deleted at M5 after the parity gates
-# passed — see test_smoother_step.jl for the end-to-end gates.)
+# search determinism, selection, scheduling, and the layer's independence from
+# the fringe kernels. End-to-end gates live in test_smoother_step.jl.
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 
@@ -11,13 +10,13 @@
     uvset, _ = _build_fringe_uvset()
     geom = CAL.build_geometry(uvset)
 
-    st = FP.scan_stream(uvset; geom = geom)
+    st = FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace)
 
     @testset "grouping: order, identity, charges" begin
         @test length(st.groups) == length(unique(s.scan for s in st.groups))
         for spec in st.groups
             @test spec.index == findfirst(==(spec), st.groups)
-            @test spec.charge == FP._spec_peak_bytes(spec.leaves)
+            @test spec.charge == ST._spec_peak_bytes(spec.leaves)
             info = UVP.metadata(last(first(spec.leaves)))
             @test spec.source == String(info.source_name)
             @test spec.scan == String(info.scan_name)
@@ -29,12 +28,12 @@
             leaves = UVP.materialize_group(
                 [l for (_, l) in spec.leaves]; layers = (:vis, :weights, :uvw),
             )
-            grp_s = FP._stacked_scan_group(leaves, geom)
+            grp_s = ST._stacked_scan_group(leaves, geom)
             grp_n = FP.materialize_cube(st, spec)
             @test isequal(grp_n.Vg, grp_s.Vg) && isequal(grp_n.Wg, grp_s.Wg)
             # The direct-decode fast path, WHEN it fires (lazy sibling-band IDI
             # spans), must agree with the stacked fallback bit-for-bit.
-            grp_d = FP._direct_scan_group(spec, geom)
+            grp_d = ST._direct_scan_group(spec, geom)
             if grp_d !== nothing
                 @test isequal(grp_d.Vg, grp_s.Vg) && isequal(grp_d.Wg, grp_s.Wg)
                 @test grp_d.g_ci == grp_s.g_ci && grp_d.g_ti == grp_s.g_ti
@@ -140,4 +139,62 @@
         @test st_small.ntasks == 1
         @test map_groups(spec -> spec.index, st_small) == collect(1:length(st_small.groups))
     end
+end
+
+# The streaming layer drives a pass with nothing from `Gustavo.Fringe` in
+# scope: `using Gustavo.Streaming` alone must supply the stream, the grouping,
+# the transform contract and the pass runner.
+module StreamingWithoutFringe
+
+using Gustavo.Streaming
+import Gustavo.Streaming: apply_transform!
+
+struct HalveWeights <: AbstractDataTransform end
+apply_transform!(::HalveWeights, v::ScanDataView; inner::Integer = 1) =
+    (v.weights .*= 0.5; nothing)
+
+# One budget-admitted pass: materialize every group through the chain and
+# report each group's total weight.
+function pass(uvset, geom)
+    stream = scan_stream(uvset; geom = geom, transforms = (HalveWeights(),))
+    sums = map_groups(stream) do spec
+        sum(materialize_cube(stream, spec).Wg)
+    end
+    return stream, sums
+end
+
+end
+
+@testset "streaming layer stands alone" begin
+    uvset, _ = _build_fringe_uvset()
+    geom = CAL.build_geometry(uvset)
+
+    stream, halved = StreamingWithoutFringe.pass(uvset, geom)
+    plain = map_groups(s -> sum(FP.materialize_cube(FP.scan_stream(uvset; geom = geom), s).Wg),
+                       FP.scan_stream(uvset; geom = geom))
+    @test length(halved) == length(stream.groups) == length(plain)
+    @test all(isapprox(h, 0.5 * p; rtol = 1.0e-6) for (h, p) in zip(halved, plain))
+
+    # `Streaming` never names the fringe kernels — the module is the assertion,
+    # since it is loaded before `Fringe` and cannot reach back into it.
+    for n in (:FringeWorkspace, :FringeSearch, :search_scan, :ScanSearchResult)
+        @test !isdefined(Gustavo.Streaming, n)
+    end
+
+    # `Fringe`'s own selection extends the streaming generic rather than
+    # shadowing it: one function, reachable unambiguously at the top level.
+    @test FP.select_scans === ST.select_scans === Gustavo.select_scans
+    @test isdefined(Gustavo, :select_scans)
+    recs = [(; index = i, source = "S", scan = "s$i", snr = 1.0, stations = Set(1:3)) for i in 1:3]
+    @test select_scans(FP.CoverageTopup(AllScans()), recs) == [1, 2, 3]
+
+    # The scratch pool is the one seam, and it is empty by default: a stream
+    # built without a `workspace` factory carries no fringe workspaces, and
+    # `search_scan` says so rather than blocking on an empty channel.
+    @test eltype(stream.pool) === Nothing
+    @test eltype(FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace).pool) ===
+        FP.FringeWorkspace
+    grp = FP.materialize_cube(stream, stream.groups[1])
+    @test_throws ArgumentError FP.search_scan(stream, grp, FP.FringeSearch())
+    @test_throws "workspace = FringeWorkspace" FP.search_scan(stream, grp, FP.FringeSearch())
 end

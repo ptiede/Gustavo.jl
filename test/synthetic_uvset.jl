@@ -17,6 +17,7 @@ using FITSFiles   # triggers GustavoFITSFilesExt (write_uvfits/load_uvfits round
 
 const CAL = Gustavo.Calibration
 const FP = Gustavo.Fringe
+const ST = Gustavo.Streaming
 const UVP = Gustavo.UVData
 
 # ── Synthetic UVSet with injected station fringe parameters ──────────────────

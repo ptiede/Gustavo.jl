@@ -2,11 +2,10 @@
 #
 # An `AbstractDataTransform` is a caller-supplied operation applied to each scan
 # group's visibilities/weights AS IT IS MATERIALIZED, before any solver stage
-# sees it. The chain generalizes (and will replace) the fixed precal carrier
-# built by `_make_precal` — precal division, per-station weight scaling, and
-# channel flagging become three built-in transforms, and `CalFunction` opens the
-# same choke point to arbitrary caller code (e.g. rescaling the weights of ONE
-# baseline on ONE scan) with no edits to Gustavo internals.
+# sees it. Precal division, per-station weight scaling and channel flagging are
+# built-in transforms; `CalFunction` opens the same choke point to arbitrary
+# caller code (e.g. rescaling the weights of ONE baseline on ONE scan) with no
+# edits to Gustavo internals.
 #
 # The contract: implement `apply_transform!(t, v::ScanDataView; inner)` mutating
 # `v.vis`/`v.weights` in place. Transforms run in chain order at every
@@ -24,9 +23,6 @@ Built-ins: [`ApplySolution`](@ref), [`StationWeightScale`](@ref),
 [`FlagChannels`](@ref), [`CalFunction`](@ref).
 """
 abstract type AbstractDataTransform end
-
-using DimensionalData: DimensionalData, DimArray, DimStack, AbstractDimStack, lookup, Ti
-using ..UVData: Baseline
 
 """
     ScanDataView

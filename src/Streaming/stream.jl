@@ -1,18 +1,14 @@
-# ── Streaming layer: the new engine's unit of data flow ──────────────────────
+# ── The scan group: the streaming layer's unit of data flow ──────────────────
 #
-# The composable pipeline's executor streams a lazy `UVSet` one SCAN GROUP at a
-# time — the only unit of data flow (steps never see the uvset). This file owns
-# that mechanism for the new engine:
+# A pass sees a lazy `UVSet` one SCAN GROUP at a time and never the set itself:
 #
 #   stream = scan_stream(uvset; transforms = [...])   # group + budget, no read
 #   grp    = materialize_cube(stream, spec)           # one group, transforms applied
-#   res    = search_scan(stream, grp, search)         # public stage-A search
 #   map_groups(stream) do spec ... end                # budget-admitted pass runner
 #
-# The group/budget/workspace machinery descends verbatim from the proven
-# monolithic solver (deleted at M5 after the parity gates passed); the data
-# hook is the stream's TRANSFORM CHAIN (`AbstractDataTransform`, see
-# transforms.jl), applied at every materialization.
+# The data hook is the stream's TRANSFORM CHAIN (`AbstractDataTransform`, see
+# transforms.jl), applied at every materialization, so a solve, a re-run, and a
+# diagnostic that share a stream see identical data.
 
 # ── Leaf grouping ─────────────────────────────────────────────────────────────
 
@@ -84,11 +80,16 @@ end
 A `UVSet` prepared for scan-group streaming: the ordered [`ScanGroupSpec`](@ref)s,
 the data-transform chain applied at every materialization, and the run's
 deterministic resource sizing (memory budget, group concurrency `ntasks`,
-per-group task budget `inner`, shared FFT-workspace pool). Build with
+per-group task budget `inner`, per-task scratch pool). Build with
 [`scan_stream`](@ref); consume with [`materialize_cube`](@ref) /
-[`materialize_leaves`](@ref) / [`map_groups`](@ref) / [`search_scan`](@ref).
+[`materialize_leaves`](@ref) / [`map_groups`](@ref).
+
+`W` is the element type of the scratch `pool`, set by `scan_stream`'s
+`workspace` factory. It is `Nothing` — an empty pool — unless a factory is
+given, so a consumer whose kernels need scratch (`Gustavo.Fringe`'s FFT
+workspaces) asks for it by name and this module never names it.
 """
-struct ScanStream{G <: AbstractLeafGrouping}
+struct ScanStream{G <: AbstractLeafGrouping, W}
     uvset::UVSet
     geom::DataGeometry
     grouping::G
@@ -98,14 +99,13 @@ struct ScanStream{G <: AbstractLeafGrouping}
     budget::Float64
     ntasks::Int
     inner::Int
-    pool::Channel{FringeWorkspace}
+    pool::Channel{W}
     executor::Executors.AbstractExecutor
 end
 
 # Peak resident bytes charged for one group: 12 B/cell native (8 vis + 4 weight)
 # with a 2.5× headroom factor over the measured ~2× materialization peak (decode
-# span + stacked cube + GC slack) — the same conservative charge the solver's
-# admission control has always used.
+# span + stacked cube + GC slack).
 function _spec_peak_bytes(keyed_leaves)
     cells = 0
     for (_, leaf) in keyed_leaves
@@ -115,17 +115,29 @@ function _spec_peak_bytes(keyed_leaves)
 end
 
 # The deterministic memory budget (bytes): an explicit `mem_budget` if given,
-# else `mem_fraction` of TOTAL physical RAM (total, not available: reproducible
-# across runs on a box — see the monolith's rationale).
+# else `mem_fraction` of TOTAL physical RAM — total, not available, so the
+# admission decisions a run makes are reproducible on a given box.
 function _stream_budget(mem_fraction, mem_budget)
     mem_budget === nothing || return Float64(mem_budget)
     return mem_fraction * Float64(Sys.total_memory())
 end
 
+# The stream's per-task scratch pool: `n` objects from the `workspace` factory,
+# or an empty `Channel{Nothing}` when no factory is given. The element type is
+# what a consumer checks to tell a stream that carries its scratch from one
+# that does not.
+_workspace_pool(::Nothing, ::Int) = Channel{Nothing}(1)
+function _workspace_pool(workspace, n::Int)
+    ws = [workspace() for _ in 1:n]
+    pool = Channel{eltype(ws)}(n)
+    foreach(w -> put!(pool, w), ws)
+    return pool
+end
+
 """
     scan_stream(uvset::UVSet; grouping = ByScan(), transforms = (),
                 geom = build_geometry(uvset), ntasks = Threads.nthreads(),
-                mem_fraction = 0.6, mem_budget = nothing,
+                mem_fraction = 0.6, mem_budget = nothing, workspace = nothing,
                 executor = current_executor()) -> ScanStream
 
 Prepare `uvset` for scan-group streaming WITHOUT reading data: group the lazy
@@ -135,6 +147,13 @@ charge` fits the memory budget, and the leftover threads become each group's
 `inner` fan-out. `transforms` (a sequence of [`AbstractDataTransform`](@ref))
 are applied, in order, to every group as it is materialized — every consumer of
 the stream sees identical, consistently-corrected data.
+
+`workspace` is a zero-argument factory for the stream's per-task scratch pool,
+one object per thread, borrowed and returned by consumers that need scratch
+that outlives a single group. `nothing` builds no pool. The fringe search
+needs one:
+
+    stream = scan_stream(uvset; workspace = Gustavo.Fringe.FringeWorkspace)
 """
 function scan_stream(
         uvset::UVSet;
@@ -144,10 +163,10 @@ function scan_stream(
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
         mem_budget = nothing,
+        workspace = nothing,
         executor::Executors.AbstractExecutor = Executors.current_executor(),
     )
-    # Group lazy leaf references in branch order, first-seen key order (the
-    # monolith's `_scan_group_leaves`, generalized over the grouping).
+    # Group lazy leaf references in branch order, first-seen key order.
     groups = Dict{Any, Vector{Any}}()
     order = Any[]
     for (k, leaf) in UVData.branches(uvset)
@@ -183,10 +202,7 @@ function scan_stream(
     ntasks_use = peak <= 0 ? requested : min(requested, max(1, Int(floor(budget / peak))))
     inner = max(1, Threads.nthreads() ÷ ntasks_use)
 
-    pool = Channel{FringeWorkspace}(max(Threads.nthreads(), 1))
-    for _ in 1:max(Threads.nthreads(), 1)
-        put!(pool, FringeWorkspace())
-    end
+    pool = _workspace_pool(workspace, max(Threads.nthreads(), 1))
 
     return ScanStream(
         uvset, geom, grouping, specs, collect(Any, transforms), ant_names,
@@ -216,8 +232,7 @@ function select_groups(stream::ScanStream, sel::AbstractScanSelection; snr = not
     return stream.groups[select_scans(sel, recs)]
 end
 
-# Station set of one scan group, from lazy-leaf metadata (no reads) — the
-# monolith's `_group_stations` over a `ScanGroupSpec`.
+# Station set of one scan group, from lazy-leaf metadata (no reads).
 function _spec_stations(spec::ScanGroupSpec)
     sts = Set{Int}()
     for (_, leaf) in spec.leaves
@@ -301,8 +316,7 @@ function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; inner::Intege
     return grp
 end
 
-# Direct decode into the stacked cube (copy of the monolith's
-# `_try_build_scan_group_direct`): returns `nothing` (caller falls back) unless
+# Direct decode into the stacked cube: returns `nothing` (caller falls back) unless
 # every band leaf maps to ONE full contiguous ascending channel block of the
 # stacked frequency axis. Metadata comes from the LAZY leaves, so nothing is
 # materialized until the decode.
@@ -389,8 +403,8 @@ function _cube_block!(
 end
 
 # Stack already-materialized sibling band leaves along frequency, sorted by
-# global channel index (copy of the monolith's `_build_scan_group`; block copies
-# walk maximal same-leaf channel runs — cache-friendly on the stride-1 axis).
+# global channel index; block copies walk maximal same-leaf channel runs —
+# cache-friendly on the stride-1 axis.
 function _stacked_scan_group(leaves, geom::DataGeometry)
     l0 = first(leaves)
     bl_pairs = collect(UVData.baselines(l0).pairs)
@@ -480,8 +494,8 @@ end
 # sources): the leaf is rewrapped around array copies first, exactly as
 # `apply_calibration` does; private (freshly-materialized) leaves are
 # transformed in place with no scan-sized copy. Either way the returned leaf's
-# `flag` layer is re-derived from the TRANSFORMED weights (the monolith's
-# semantics — the pre-transform flag would be stale after e.g. `FlagChannels`).
+# `flag` layer is re-derived from the TRANSFORMED weights — the pre-transform
+# flag would be stale after e.g. `FlagChannels`.
 function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arrays::Bool)
     base = copy_arrays ?
         with_visibilities(leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights]))) : leaf
@@ -490,179 +504,6 @@ function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arr
     # Per-leaf work is already fanned out across leaves; keep transforms serial here.
     apply_transforms!(stream.transforms, v; inner = 1)
     return with_visibilities(base, v.vis, v.weights)
-end
-
-# ── Public fringe search over one group ───────────────────────────────────────
-
-# One recorded fringe detection row: baseline antennas, correlation product,
-# SNR, and the PER-BASELINE false-alarm probability (single-search null).
-const DetectionRow = @NamedTuple{a::Int, b::Int, pol::String, snr::Float64, pfa::Float64}
-
-"""
-    ScanSearchResult
-
-One scan group's fringe-search outcome: the per-(baseline, product) detection
-matrix `det`, the group's `max_snr`, `cells1` (independent search cells of ONE
-baseline×product search — the null for a single detection's PFA), `ncells` (the
-scan-level effective cells: `cells1 ×` the number of cross-baseline×product
-searches — the null for the scan's max SNR), and the valid detections as
-`rows` (`(; a, b, pol, snr, pfa)`).
-"""
-struct ScanSearchResult
-    det::Matrix{FringeDetection}
-    max_snr::Float64
-    cells1::Float64    # effective cells are FRACTIONAL (oversampled grids
-    ncells::Float64    # divide by the oversampling) — never Int on real data
-    rows::Vector{DetectionRow}
-end
-
-"""
-    search_scan(stream::ScanStream, grp::ScanGroup, search::FringeSearch;
-                Vsearch = grp.Vg, ngroups = length(stream.groups),
-                inner = stream.inner, t0 = stream.geom.t0 * 3600.0) -> ScanSearchResult
-    search_scan(stream::ScanStream, v::ScanDataView, search::FringeSearch;
-                Vsearch = v.vis, ...) -> ScanSearchResult
-
-Fringe-search every (baseline, product) of a materialized group — the public
-stage-A search. The second method searches through a scan view (the visitor
-contract's hand-off; `v.data === grp.data`, so it is the same cube). `Vsearch`
-lets a caller search a residual cube in place of the raw one (`rounds > 1`).
-`ngroups` sets the family-wise Bonferroni denominator: `search.pfa_max` budgets
-the whole family of `ncross×npol×ngroups` searches, so each individual search
-runs at `pfa_max` divided by that count; pass `ngroups = 1` for standalone
-per-scan gating (the QA convention). `t0` (seconds) is the epoch the detection
-PHASES are referenced to — delay/rate/SNR are epoch-invariant; the default is
-the solve's track epoch, a standalone QA caller typically wants the scan
-midpoint (`mean(grp.tg) * 3600`). Results are bit-identical to the serial loop
-regardless of `inner`.
-"""
-function search_scan(
-        stream::ScanStream, grp::ScanGroup, search::FringeSearch;
-        Vsearch = grp.Vg, ngroups::Integer = length(stream.groups),
-        inner::Integer = stream.inner, t0::Real = stream.geom.t0 * 3600.0,
-    )
-    return _search_scan_cube(
-        grp.bl_pairs, grp.pol_products, grp.fg, grp.tg, grp.Wg,
-        Vsearch, stream.geom.f0, Float64(t0), search,
-        stream.pool, inner, ngroups,
-    )
-end
-
-function search_scan(
-        stream::ScanStream, v::ScanDataView, search::FringeSearch;
-        Vsearch = v.vis, ngroups::Integer = length(stream.groups),
-        inner::Integer = stream.inner, t0::Real = stream.geom.t0 * 3600.0,
-    )
-    return _search_scan_cube(
-        v.bl_pairs, v.pol_products, v.freqs, v.times, v.weights,
-        Vsearch, stream.geom.f0, Float64(t0), search,
-        stream.pool, inner, ngroups,
-    )
-end
-
-# Core search over one stacked cube (copy of the monolith's `_search_group`,
-# returning `cells1` alongside). Grid geometry is built ONCE per group; the
-# independent per-(baseline, product) searches fan out over `inner` tasks, each
-# borrowing a workspace so FFTW plans survive scan-to-scan.
-function _search_scan_cube(
-        bl_pairs, pols, fg, tg, Wg, Vsearch, f0, t0_sec, search,
-        pool::Channel{FringeWorkspace}, inner::Integer, ngroups::Integer,
-    )
-    nbl = length(bl_pairs)
-    npol = length(pols)
-    det = Matrix{FringeDetection}(undef, nbl, npol)
-    times = tg .* 3600.0
-    ax = _search_axes(fg, times, search)
-    ncross = count(pr -> pr[1] != pr[2], bl_pairs)
-    cells1 = _search_cells(ax, search)
-    ncells = cells1 * max(ncross * npol, 1)
-    # Family-wise PFA gate (Bonferroni): each search runs at pfa_max/nsearches
-    # so the acceptance threshold scales itself with array size, product count,
-    # scan count, and (through cells1) bandwidth/duration.
-    nsearch = max(ncross * npol, 1) * max(ngroups, 1)
-    search = isfinite(search.pfa_max) ?
-        FringeSearch(search.delay_window, search.rate_window, search.oversample,
-                     search.snr_min, search.quad_interp, search.algorithm,
-                     search.pfa_max / nsearch) : search
-
-    pairs = [(bi, p) for p in 1:npol for bi in 1:nbl]
-    nchunk = clamp(Int(inner), 1, length(pairs))
-    chunks = collect(Iterators.partition(pairs, cld(length(pairs), nchunk)))
-    exec_foreach(chunks; ntasks = length(chunks)) do chunk
-        ws = take!(pool)
-        try
-            for (bi, p) in chunk
-                a, b = bl_pairs[bi]
-                if a == b
-                    det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
-                    continue
-                end
-                det[bi, p] = _baseline_fringe_search(
-                    view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),
-                    fg, times, f0, t0_sec, ax, ws, search,
-                )
-            end
-        finally
-            put!(pool, ws)
-        end
-    end
-
-    # Assemble the scalar outputs SEQUENTIALLY in the original (product-major)
-    # order so the recorded detection table matches the serial loop's exactly.
-    maxsnr = 0.0
-    rows = DetectionRow[]
-    for p in 1:npol, bi in 1:nbl
-        d = det[bi, p]
-        d.valid || continue
-        maxsnr = max(maxsnr, d.snr)
-        push!(rows, (; a = bl_pairs[bi][1], b = bl_pairs[bi][2],
-            pol = pols[p], snr = d.snr, pfa = fringe_pfa(d.snr, cells1)))
-    end
-    return ScanSearchResult(det, maxsnr, cells1, ncells, rows)
-end
-
-# ── The per-group output tail (apply + reduce, shared by all output paths) ────
-
-"""
-    reduce_scan_output(uvset::UVSet, keyed, sol::CalibrationSolution, postprocess;
-                       ntasks = 1, apply_flags = true) -> Vector{Pair}
-
-The per-scan-group output tail: rebuild the group's `(key, leaf)` pairs as a
-sub-`UVSet`, apply `sol`'s gains/flags (`apply_calibration` — zero-weighting
-unconstrained stations and excluded baselines exactly like a full-set apply
-would), run `postprocess` (a `UVSet -> UVSet` map), and return the reduced
-output branches. Every output path — the fused `fitcalibrate` tail and the
-standalone `calibrate(sol, uvset)` stream — runs THIS function per group, so
-fused ≡ standalone by construction and a lazy set is never fully materialized.
-"""
-function reduce_scan_output(
-        uvset::UVSet, keyed, sol::CalibrationSolution, postprocess;
-        ntasks::Integer = 1, apply_flags::Bool = true,
-    )
-    sub_branches = DimensionalData.TreeDict()
-    for (k, leaf) in keyed
-        sub_branches[k] = leaf
-    end
-    sub = DimensionalData.rebuild(uvset; branches = sub_branches)
-    reduced = postprocess(UVData.apply_calibration(sub, sol; ntasks = ntasks, apply_flags = apply_flags))
-    return collect(pairs(UVData.branches(reduced)))
-end
-
-"""
-    assemble_output(uvset::UVSet, group_pairs) -> UVSet
-
-Rebuild an output `UVSet` from the per-group branch pairs
-[`reduce_scan_output`](@ref) returned (in group order).
-"""
-function assemble_output(uvset::UVSet, group_pairs)
-    out_branches = DimensionalData.TreeDict()
-    for r in group_pairs
-        r === nothing && continue
-        for (k, leaf) in r
-            out_branches[k] = leaf
-        end
-    end
-    return DimensionalData.rebuild(uvset; branches = out_branches)
 end
 
 # ── The pass runner: budget-admitted group execution (the executor seam) ─────
@@ -730,8 +571,7 @@ end
 foreach_group(work::F, stream::ScanStream; kwargs...) where {F} =
     (map_groups(work, stream; kwargs...); nothing)
 
-# Budget-admission scheduler (copy of the monolith's `_budget_scheduled_map`):
-# admit each item by its own charge against a shared budget; among the items
+# Budget-admission scheduler: admit each item by its own charge against a shared budget; among the items
 # that currently fit, the LARGEST starts first; an item charged more than the
 # whole budget is clamped so it still runs (alone). Results in `items` order;
 # returns `(results, peak_concurrency)`. A failed worker rethrows after the
@@ -877,50 +717,3 @@ function _scheduled_map_dagger(work::F, items, charges, budget; max_tasks::Integ
     return map(identity, out), peak[]
 end
 
-# ── Thread-environment wrappers (relocated verbatim from the monolith) ───────
-
-# Run `f` with BLAS pinned to a single thread, restoring the prior setting after.
-# The fringe solve tasks over scan groups (see `_scheduled_map`); if BLAS also
-# spawns threads, every task's WLS/QR solve fans out `BLAS.get_num_threads()`
-# threads, so `ntasks × blas_threads` (e.g. 8 × 8 = 64) oversubscribe the cores
-# and contend — threads sit "runnable" while only ~1 core makes progress. One
-# BLAS thread per task is the correct split when the parallelism is across tasks.
-function _with_single_blas_thread(f)
-    old = BLAS.get_num_threads()
-    BLAS.set_num_threads(1)
-    try
-        return f()
-    finally
-        BLAS.set_num_threads(old)
-    end
-end
-
-# Run `f` with FFTW using `n` threads per transform, restoring 1 (FFTW's default)
-# after. The fringe SEARCH is ~96% FFT, but the memory cap pins group-parallelism
-# (`ntasks`) well below the core count on a big file — leaving cores idle DURING
-# the search. Giving each FFT `n = nthreads ÷ ntasks` threads uses them
-# (`ntasks × n ≈ nthreads`), so the otherwise-idle cores accelerate the transforms
-# instead of sitting out the bottleneck phase. Plans are built lazily inside the
-# threaded passes, so this must wrap them to take effect.
-function _with_fft_threads(f, n::Int)
-    FFTW.set_num_threads(max(1, n))
-    try
-        return f()
-    finally
-        FFTW.set_num_threads(1)
-    end
-end
-
-# Run `f` with the bulk reader decoding each leaf over `n` tasks, restoring 1
-# after. Decode (byte-swap + complex repack + pol permute) is CPU-bound, so like
-# the FFT it can use the cores the memory cap leaves idle. Nested under the group
-# group tasks, but the task scheduler bounds live parallelism, so it composes.
-function _with_decode_threads(f, n::Int)
-    old = UVData._DECODE_NTASKS[]
-    UVData._DECODE_NTASKS[] = max(1, n)
-    try
-        return f()
-    finally
-        UVData._DECODE_NTASKS[] = old
-    end
-end

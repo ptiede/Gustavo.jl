@@ -137,9 +137,9 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
 
         # Chains run in order; `nothing` chain is a no-op.
         v = mkview()
-        FP.apply_transforms!([StationWeightScale([2.0, 1.0, 1.0]), hook], v)
+        ST.apply_transforms!([StationWeightScale([2.0, 1.0, 1.0]), hook], v)
         @test all(v.weights[:, :, 2, :] .== 1.0)   # (1,3): 2·1 then ×0.5
-        FP.apply_transforms!(nothing, v)
+        ST.apply_transforms!(nothing, v)
 
         # A transform without an implementation errors loudly.
         @test_throws ErrorException apply_transform!(_NoImpl(), mkview())
