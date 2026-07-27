@@ -192,19 +192,10 @@ function _validate_fringe_components(comps::Tuple)
             ),
         )
     end
-    _at_most_one(comps, "the dispersion (dTEC) signature") do tc
-        tc.component.term isa Dispersion
-    end
-    _at_most_one(comps, "the per-scan feed-common delay signature") do tc
-        tc.component.term isa Delay && !(tc.component.time isa GlobalTime) &&
-            tc.component.freq isa GlobalFrequency && tc.tying isa SharedFeeds
-    end
-    _at_most_one(comps, "the per-band-group (SBD) delay signature") do tc
-        tc.component.term isa Delay && tc.component.freq isa FrequencyBands
-    end
-    _at_most_one(comps, "the per-band-group (SBD) constant signature") do tc
-        tc.component.term isa ConstantTerm && tc.component.freq isa FrequencyBands
-    end
+    _at_most_one(_is_dispersion, comps, "the dispersion (dTEC) signature")
+    _at_most_one(_is_perscan_delay, comps, "the per-scan feed-common delay signature")
+    _at_most_one(_is_sbd_delay, comps, "the per-band-group (SBD) delay signature")
+    _at_most_one(_is_sbd_constant, comps, "the per-band-group (SBD) constant signature")
     return comps
 end
 
@@ -242,22 +233,83 @@ function _dispersion_model(fm::FringeModel)
     return i === nothing ? nothing : fm.terms[i]
 end
 
-# Stage-B engine components `(plan, kind)` — the delay/rate/const terms the
-# search + stationization solve. Structural routing: excludes the
-# per-integration adhoc, the per-channel
-# bandpass, the dispersion term, and the SBD band-group terms.
+# What `MatchedFilter` does with a compiled component's θ block:
+#
+#   :delay / :rate / :phase — stage B's station system of that kind writes it,
+#                             from the per-baseline search observable of the
+#                             same name.
+#   :refine                 — the refine pass fits it (`refine_scan_dispersion!`,
+#                             `refine_scan_sbd!`), by a mechanism of its own.
+#   nothing                 — the matched filter does not touch it.
+#
+# ONE estimator's vocabulary, hence private: a global least-squares fringe
+# fitter has no use for it, fitting θ through `evaluate_gains` directly.
+#
+# The stage-B kinds cover exactly the single-parameter terms whose observable
+# the search measures. Everything else is `nothing` and so unfittable by this
+# estimator rather than approximated: `_solve_kind_cols!` writes one θ column
+# per (station, feed, time) node — the block's `off1` — so a multi-parameter
+# term (a polynomial) would have its trailing parameters left at zero.
+function matched_kind(tc)
+    tc.component.time isa PerIntegration && return nothing
+    _is_dispersion(tc) && return :refine
+    if tc.component.freq isa FrequencyBands
+        return (_is_sbd_delay(tc) || _is_sbd_constant(tc)) ? :refine : nothing
+    end
+    term = tc.component.term
+    term isa Delay && return :delay
+    term isa Rate && return :rate
+    term isa ConstantTerm && return :phase
+    return nothing
+end
+
+# Stage-B engine components `(plan, kind)` — the delay/rate/phase terms the
+# search + stationization solve, as declared by `matched_kind`.
 function fringe_stage_components(model, layout)
     comps = Tuple{ComponentPlan, Symbol}[]
     for (i, tc) in enumerate(model.phase)
-        tc.component.time isa PerIntegration && continue
-        tc.component.term isa PerChannel && continue
-        tc.component.term isa Dispersion && continue
-        tc.component.freq isa FrequencyBands && continue
-        term = tc.component.term
-        kind = term isa Delay ? :delay : term isa Rate ? :rate : :phase
+        kind = matched_kind(tc)
+        kind in (:delay, :rate, :phase) || continue
         push!(comps, (layout.plans[i], kind))
     end
     return comps
+end
+
+# ── MatchedFilter's capability ───────────────────────────────────────────────
+
+can_fit(::MatchedFilter, tc) = matched_kind(tc) !== nothing
+
+# What the matched filter REQUIRES to exist. Each absent item costs the
+# estimator its own output silently rather than crashing: `solve_station_systems!`
+# skips a kind with no components, dropping every scan's search estimate for
+# that observable, and `refine_scan_dispersion!` skips the Δτ half of the joint
+# (Δτ, dTEC) fit when the per-scan delay plan is missing, biasing the dTEC it
+# does report by exactly the degeneracy the joint fit exists to break.
+function validate_model(est::MatchedFilter, comps)
+    kinds = map(matched_kind, comps)
+    for (kind, what) in (
+            (:delay, "a delay component (the per-baseline delay search has nowhere to go)"),
+            (:rate, "a rate component (the per-baseline rate search has nowhere to go)"),
+            (:phase, "a constant-phase component (the station phase solve has nowhere to go)"),
+        )
+        kind in kinds || throw(
+            ArgumentError(
+                "$(nameof(typeof(est))) requires $what. Add one to the FringeModel's " *
+                    "`terms` — see `default_fringe_terms`.",
+            ),
+        )
+    end
+    any(_is_perscan_delay, comps) || throw(
+        ArgumentError(
+            "$(nameof(typeof(est))) requires a per-scan feed-common wideband delay " *
+                "component (`Delay` × a non-`GlobalTime` time segmentation × " *
+                "`GlobalFrequency` × `SharedFeeds`): the refine stage fits it jointly " *
+                "with dTEC, and a delay tied any other way leaves that fit with only " *
+                "its degenerate half. Add one to the FringeModel's `terms` — see " *
+                "`default_fringe_terms`.",
+        ),
+    )
+    return nothing
 end
 
 # The effective Stationization for a MatchedFilter run: with the PFA gate

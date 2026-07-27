@@ -33,6 +33,17 @@ receives and must return. Both have fallbacks that error, so an estimator that
 implements neither fails with a message naming what is missing rather than
 being silently skipped.
 
+Then declare what it can fit, which the step checks when it compiles the
+model — before any data is read:
+
+    Gustavo.Fringe.can_fit(est::MyEstimator, tc) -> Bool
+    Gustavo.Fringe.validate_model(est::MyEstimator, comps)   # optional
+
+[`can_fit`](@ref) defaults to `false`, so an estimator that declares nothing
+is rejected rather than quietly leaving θ columns unwritten;
+[`validate_model`](@ref) defaults to a no-op, since requiring nothing is
+legitimate. See both for the two directions of the check.
+
 The step, not the estimator, owns the θ slots `FringeModel` declared and the
 dTEC/SBD refine service it publishes for later stages — an estimator only has
 to fill θ and report.
@@ -85,6 +96,47 @@ finish_estimate!(est::AbstractFringeEstimator, ctx, step) = error(
         "Gustavo.Fringe.finish_estimate!(::$(typeof(est)), ctx, step) " *
         "solving the cross-scan parameters (see `AbstractFringeEstimator`)."
 )
+
+"""
+    can_fit(est::AbstractFringeEstimator, tc::Calibration.TiedComponent) -> Bool
+
+Whether `est` fits the θ block of the compiled component `tc`. `FringeFit`
+calls this once per component ITS OWN model contributed, at model-compile
+time, and throws an `ArgumentError` naming the estimator and the component on
+the first `false` — a term nothing writes is a silent no-fit, not a smaller
+solve.
+
+**The default is `false`**, and the step drives the loop, so an estimator whose
+author never considered capability fails loudly on the first model term rather
+than returning a solution with zeros in it. Declaring capability is therefore
+part of implementing the interface, not an optional refinement.
+
+Components contributed by OTHER steps — the per-integration adhoc phase, the
+per-channel bandpass — are not asked about: the step that contributes a
+component vouches for it.
+"""
+can_fit(::AbstractFringeEstimator, tc) = false
+
+"""
+    validate_model(est::AbstractFringeEstimator, comps) -> nothing
+
+Check that the compiled components `comps` (again, only the `FringeFit`'s own
+contributions) contain everything `est` REQUIRES, throwing an `ArgumentError`
+naming the estimator and the missing signature. The mirror of
+[`can_fit`](@ref): that one rejects terms the estimator cannot fit, this one
+rejects a model missing terms the estimator assumes exist.
+
+The default is a no-op — requiring nothing is legitimate. Define a method when
+an absent term would make the estimator discard its own results: an estimator
+that searches for delays and finds no delay component to write them into
+produces a solution that looks fitted and is not.
+
+Express a requirement as the routing signature the estimator's machinery
+actually looks up, not as a term type. `MatchedFilter` requires a per-scan
+feed-common delay; a `Delay` segmented by `GlobalTime` satisfies a term-level
+check and still leaves the router with nothing to return.
+"""
+validate_model(::AbstractFringeEstimator, comps) = nothing
 
 """
     estimator_info(est::AbstractFringeEstimator) -> NamedTuple

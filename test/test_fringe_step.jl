@@ -308,9 +308,15 @@ function FP.finish_estimate!(e::_ProbeEstimator, ctx, step)
     e.passes[] += 1
     return FP.finish_estimate!(e.inner, ctx, step)
 end
+# A wrapper fits exactly what it wraps, so both capability hooks forward too.
+FP.can_fit(e::_ProbeEstimator, tc) = FP.can_fit(e.inner, tc)
+FP.validate_model(e::_ProbeEstimator, comps) = FP.validate_model(e.inner, comps)
 
-# Implements neither hook: must fail loudly rather than solve nothing.
+# Implements neither solve hook: must fail loudly rather than solve nothing.
+# Claims the whole model so the failure is the missing hook, not the capability
+# check that runs before it.
 struct _SilentEstimator <: FP.AbstractFringeEstimator end
+FP.can_fit(::_SilentEstimator, tc) = true
 
 # The independence probe: implements the interface and NOTHING else. It writes no
 # θ and publishes none of the matched filter's diagnostic scratch tables, so it
@@ -324,6 +330,12 @@ function FP.estimate_scan!(e::_NullEstimator, ctx, step, view)
     return (; max_snr = NaN)
 end
 FP.finish_estimate!(::_NullEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, rejected = 0)
+FP.can_fit(::_NullEstimator, tc) = true
+
+# Declares no capability at all — the default. Every model term is unclaimed.
+struct _UnclaimingEstimator <: FP.AbstractFringeEstimator end
+FP.estimate_scan!(::_UnclaimingEstimator, ctx, step, view) = (; max_snr = NaN)
+FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, rejected = 0)
 
 @testset "fringe estimator seam" begin
     uvset, _ = _build_fringe_uvset()
@@ -380,6 +392,61 @@ FP.finish_estimate!(::_NullEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, reje
         @test_throws "estimate_scan!" fit(
             FringeFit(; model, estimator = _SilentEstimator()), uvset,
         )
+    end
+
+    @testset "an estimator that declares no capability is rejected, not run" begin
+        # `can_fit`'s default is `false` and the STEP drives the loop, so the
+        # estimator that never thought about capability fails at model-compile
+        # time instead of returning a solution full of unwritten θ.
+        @test_throws "cannot fit the model term" fit(
+            FringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+        )
+        @test_throws "_UnclaimingEstimator" fit(
+            FringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+        )
+    end
+
+    @testset "a term the estimator cannot fit is rejected by name" begin
+        # A polynomial-in-frequency phase is a legitimate gain term that the
+        # matched filter has no observable for: its θ block would stay at zero
+        # while the solution looked fitted.
+        terms = (_fringe_terms()..., CAL.TiedComponent(
+            CAL.PolynomialFreq(2), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()))
+        @test_throws "MatchedFilter cannot fit the model term" fit(
+            FringeFit(model = FringeModel(ref_ant = 1, terms = terms)), uvset,
+        )
+    end
+
+    @testset "a model missing a term the estimator requires is rejected by name" begin
+        # The kind is missing outright: nothing to write the rate search into.
+        norate = filter(
+            t -> !(t isa CAL.TiedComponent && t.component.term isa CAL.Rate),
+            _fringe_terms(),
+        )
+        @test_throws "requires a rate component" fit(
+            FringeFit(model = FringeModel(ref_ant = 1, terms = norate)), uvset,
+        )
+
+        # The kind is PRESENT and the router signature is not: the R–L delay is
+        # still a `:delay`, so only a signature-level check catches a wideband
+        # delay tied across the whole track.
+        globaldelay = map(_fringe_terms()) do t
+            t isa CAL.TiedComponent && FP._is_perscan_delay(t) ?
+                CAL.TiedComponent(t.component.term, CAL.GlobalTime(), t.component.freq, t.tying) : t
+        end
+        @test_throws "requires a per-scan feed-common wideband delay" fit(
+            FringeFit(model = FringeModel(ref_ant = 1, terms = globaldelay)), uvset,
+        )
+    end
+
+    @testset "the matched filter's kind vocabulary stays private" begin
+        # `matched_kind` answers "what does THIS estimator do with this
+        # component" — one estimator's vocabulary, so retiring the estimator
+        # must not be a public API removal.
+        @test !(:matched_kind in names(Gustavo.Fringe))
+        @test !(:matched_kind in names(Gustavo))
+        @test :can_fit in names(Gustavo.Fringe)
+        @test :validate_model in names(Gustavo.Fringe)
     end
 
     @testset "the estimator is carried as a type parameter, not an abstract field" begin

@@ -49,9 +49,12 @@ function _dispersion_enabled(dm::DispersionModel, geom::DataGeometry)
     return nb >= 4 && fmax / fmin > 1.3
 end
 
-# The dispersion component's plan, located by TERM TYPE rather than by index,
-# or `nothing` when the model carries no dTEC term.
+# The dTEC component's routing signature: located by TERM TYPE rather than by
+# index, so the model may carry it anywhere in its component order.
+_is_dispersion(tc) = tc.component.term isa Dispersion
+
+# The dispersion component's plan, or `nothing` when the model carries no dTEC term.
 function _dispersion_plan(model, layout)
-    i = findfirst(tc -> tc.component.term isa Dispersion, model.phase)
+    i = findfirst(_is_dispersion, model.phase)
     return i === nothing ? nothing : layout.plans[i]
 end

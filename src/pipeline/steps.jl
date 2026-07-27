@@ -104,8 +104,27 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 
 # ── Model components (compiled in step order into ONE StationGainModel) ───────
 
-model_components(s::FringeFit, spec) =
-    (; phase = Fringe.fringe_phase_components(s.model, spec.geom), logamp = ())
+# The estimator vets the model here, at compile time, before any data is read.
+# Both directions: no term the estimator cannot fit (its θ block would stay at
+# zero and the solution would look fitted), and no missing term the estimator
+# assumes exists (its own estimate of that quantity would be discarded). The
+# check covers only THIS step's contributions — the adhoc and bandpass
+# components come from steps that solve them themselves.
+function model_components(s::FringeFit, spec)
+    comps = Fringe.fringe_phase_components(s.model, spec.geom)
+    for tc in comps
+        Fringe.can_fit(s.estimator, tc) || throw(
+            ArgumentError(
+                "$(nameof(typeof(s.estimator))) cannot fit the model term compiling to " *
+                    "$(Calibration.component_label(tc)); its parameters would never be " *
+                    "solved. Remove the term, or use an estimator that declares " *
+                    "`Gustavo.Fringe.can_fit` for it.",
+            ),
+        )
+    end
+    Fringe.validate_model(s.estimator, comps)
+    return (; phase = comps, logamp = ())
+end
 
 # The per-channel bandpass components: phase and log-amp, per feed, time-stable
 # (the legacy `_fringe_model` placement — after the fringe terms).

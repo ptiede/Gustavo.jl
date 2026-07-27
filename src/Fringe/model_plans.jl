@@ -101,36 +101,40 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
     )
 end
 
-# Stage-B engine components `(plan, kind)` — the delay/rate/const terms solved by
-# the fringe search + stationization. EXCLUDES the per-integration adhoc term
-# (`PerIntegration`, solved per-AP) and the phase bandpass (`PerChannel`, solved
-# per-channel). `kind` is derived from the term type, so the routing is structural
-# (by term/segmentation), not by hardcoded indices.
+# ── Router signatures ────────────────────────────────────────────────────────
+#
+# Each plan router locates a θ block by `findfirst` over a compiled component's
+# (term, time segmentation, frequency segmentation, tying) types. The predicate
+# is the SIGNATURE: it is what a model must contain for the router to find
+# anything, so `validate_model` checks the same predicates the routers use
+# rather than a separate description of them. A term-level check is too coarse —
+# `Delay × GlobalTime` is a `Delay` and still leaves `_perscan_delay_plan`
+# empty-handed.
+
+# The feed-common wideband delay the refine stage's joint (Δτ, dTEC) fit
+# updates: NOT the per-band-group SBD delay (`FrequencyBands`), NOT a
+# feed-specific R–L delay (`FeedComponent`).
+_is_perscan_delay(tc) =
+    tc.component.term isa Delay && !(tc.component.time isa GlobalTime) &&
+    tc.component.freq isa GlobalFrequency && tc.tying isa SharedFeeds
+
+# The per-band-group single-band delay and its companion constant, which are
+# fit together by `refine_scan_sbd!`.
+_is_sbd_delay(tc) = tc.component.term isa Delay && tc.component.freq isa FrequencyBands
+_is_sbd_constant(tc) =
+    tc.component.term isa ConstantTerm && tc.component.freq isa FrequencyBands
 
 function _perscan_delay_plan(model, layout)
-    i = findfirst(
-        # NOT the per-band-group SBD delay (FrequencyBands) and NOT a
-        # feed-specific R–L delay (FeedComponent) — the refine stage's joint
-        # (Δτ, dTEC) fit updates the feed-common wideband delay only.
-        tc -> tc.component.term isa Delay && !(tc.component.time isa GlobalTime) &&
-            tc.component.freq isa GlobalFrequency && tc.tying isa SharedFeeds,
-        model.phase,
-    )
+    i = findfirst(_is_perscan_delay, model.phase)
     return i === nothing ? nothing : layout.plans[i]
 end
 
 # The SBD components' plans `(dplan, cplan, bands)` (per-scan per-band-group
 # delay + companion constant), or `nothing` when the model carries none.
 function _sbd_plans(model, layout)
-    i = findfirst(
-        tc -> tc.component.term isa Delay && tc.component.freq isa FrequencyBands,
-        model.phase,
-    )
+    i = findfirst(_is_sbd_delay, model.phase)
     i === nothing && return nothing
-    j = findfirst(
-        tc -> tc.component.term isa ConstantTerm && tc.component.freq isa FrequencyBands,
-        model.phase,
-    )
+    j = findfirst(_is_sbd_constant, model.phase)
     j === nothing && error("SBD delay component present without its companion constant")
     return (dplan = layout.plans[i], cplan = layout.plans[j], bands = model.phase[i].component.freq.ranges)
 end
