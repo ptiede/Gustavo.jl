@@ -345,6 +345,25 @@ end
         @test fieldnames(DispersionModel) == (:require_band_separation, :tie_colocated)
     end
 
+    @testset "the propagation model is Calibration's, not Fringe's" begin
+        # An ionosphere is modelled without loading the fringe-fitting module:
+        # the spec sits beside the `Dispersion` term it configures, and only the
+        # joint (Δτ, dTEC) estimator stays in `Fringe`.
+        @test parentmodule(DispersionModel) === Gustavo.Calibration
+        @test which(CAL._dispersion_enabled, Tuple{Nothing, CAL.DataGeometry}).module ===
+            Gustavo.Calibration
+        # Re-exported, so `FP.DispersionModel` and a bare `using Gustavo` name
+        # the SAME type rather than a shadowing second one.
+        @test FP.DispersionModel === CAL.DispersionModel === Gustavo.DispersionModel
+        @test !isdefined(FP, :_dispersion_plan)
+        @test FP._dispersion_enabled === CAL._dispersion_enabled
+        # Co-location is array geometry with two unrelated consumers — the dTEC
+        # tie and the intra-site baseline exclusion — so it belongs to UVData.
+        @test parentmodule(UVP._colocated_ties) === Gustavo.UVData
+        @test parentmodule(UVP._colocated_pair_set) === Gustavo.UVData
+        @test !isdefined(FP, :_colocated_ties)
+    end
+
     @testset "the step decides whether an ionosphere is modelled at all" begin
         # Whether the term is SOLVED end to end is `info.dispersion_applied`, which
         # additionally needs a stage that refines it (see the dispersion testset in
@@ -352,8 +371,8 @@ end
         on = fit(FringeFit(model = FringeModel(ref_ant = 1), estimator = mf), uvset)
         off = fit(FringeFit(model = FringeModel(ref_ant = 1), dispersion = nothing,
                 estimator = mf), uvset)
-        @test FP._dispersion_plan(on.model, on.layout) !== nothing
-        @test FP._dispersion_plan(off.model, off.layout) === nothing
+        @test CAL._dispersion_plan(on.model, on.layout) !== nothing
+        @test CAL._dispersion_plan(off.model, off.layout) === nothing
         @test any(tc -> tc.component.term isa CAL.Dispersion, on.model.phase)
         @test !any(tc -> tc.component.term isa CAL.Dispersion, off.model.phase)
         # No dTEC term means no dTEC columns in θ at all.
@@ -365,11 +384,11 @@ end
         narrow, _ = _build_fringe_uvset(nbands = 1, nchan = 8)
         geom_n = CAL.build_geometry(narrow)
         geom_w = CAL.build_geometry(uvset)
-        @test !FP._dispersion_enabled(DispersionModel(), geom_n)
-        @test FP._dispersion_enabled(DispersionModel(), geom_w)
+        @test !CAL._dispersion_enabled(DispersionModel(), geom_n)
+        @test CAL._dispersion_enabled(DispersionModel(), geom_w)
         # Forcing it on solves the term regardless of what the layout supports.
-        @test FP._dispersion_enabled(DispersionModel(require_band_separation = false), geom_n)
-        @test !FP._dispersion_enabled(nothing, geom_n)
+        @test CAL._dispersion_enabled(DispersionModel(require_band_separation = false), geom_n)
+        @test !CAL._dispersion_enabled(nothing, geom_n)
     end
 
     @testset "tie_colocated reaches the refine service through the step" begin
@@ -387,7 +406,7 @@ end
         # both plans, because over a finite band the two are near-degenerate.
         sol = fit(FringeFit(model = FringeModel(ref_ant = 1), estimator = mf), uvset)
         rf = FP.RefineService(
-            FP._dispersion_plan(sol.model, sol.layout),
+            CAL._dispersion_plan(sol.model, sol.layout),
             FP._perscan_delay_plan(sol.model, sol.layout),
             FP._sbd_plans(sol.model, sol.layout), nothing, true, 20.0,
         )

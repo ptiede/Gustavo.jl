@@ -133,7 +133,7 @@ end
         # (`reuse_bandpass_refine`), the other scans the full grid.
         pd = CalibrationPipeline(
             FringeFit(model = FringeModel(sbd = :auto),
-                dispersion = FP.DispersionModel(require_band_separation = false)),
+                dispersion = CAL.DispersionModel(require_band_separation = false)),
             BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 1),
@@ -142,7 +142,7 @@ end
         @test sol_nd.info.dispersion_applied
 
         # Injected per-station dTEC recovered on EVERY scan through the split.
-        dplan = FP._dispersion_plan(sol_nd.model, sol_nd.layout)
+        dplan = CAL._dispersion_plan(sol_nd.model, sol_nd.layout)
         @test dplan !== nothing
         nseg = size(dplan.off1, 3)
         @test nseg >= 3                        # per-scan dTEC columns
@@ -156,7 +156,7 @@ end
         # bandpass-refine + polish + adhoc chain.
         pd4 = CalibrationPipeline(
             FringeFit(model = FringeModel(sbd = :auto),
-                dispersion = FP.DispersionModel(require_band_separation = false)),
+                dispersion = CAL.DispersionModel(require_band_separation = false)),
             BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),

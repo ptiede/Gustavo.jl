@@ -23,6 +23,7 @@ include("Calibration/segmentation.jl")
 include("Calibration/terms.jl")
 include("Calibration/models.jl")
 include("Calibration/parameters.jl")
+include("Calibration/propagation.jl")
 include("Calibration/evaluate.jl")
 include("Calibration/solutions.jl")
 
@@ -58,6 +59,9 @@ export AbstractFeedTying, PerFeed, SharedFeeds, ReferenceRelative, FeedComponent
 export phase_components, logamp_components
 export phase_is_per_scan, amplitude_is_per_scan, component_is_per_scan
 export validate_station_gain_model, station_model_summary, component_label
+
+# Propagation
+export DispersionModel
 
 # Parameter layout and pure evaluation
 export ParameterLayout, plan_parameters

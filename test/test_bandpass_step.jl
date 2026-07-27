@@ -212,13 +212,13 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
             dtec = dtec_true, seed = 77, feed_common = true,
         )
         geom = CAL.build_geometry(uvd)
-        @test FP._dispersion_enabled(FP.DispersionModel(), geom)
+        @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
         model = FP._fringe_model(
             dispersion = true, sbd_bands = FP.fringe_band_groups(geom.channel_freqs),
         )
         layout = CAL.plan_parameters(model, 4, geom)
         ev = CAL.GainEvaluator(model, layout)
-        disp_plan = FP._dispersion_plan(model, layout)
+        disp_plan = CAL._dispersion_plan(model, layout)
         ps_delay = FP._perscan_delay_plan(model, layout)
         sbd = FP._sbd_plans(model, layout)
         @test disp_plan !== nothing && ps_delay !== nothing && sbd !== nothing

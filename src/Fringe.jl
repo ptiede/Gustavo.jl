@@ -18,7 +18,7 @@ using ..Executors: exec_foreach
 using ..UVData
 using ..UVData: Frequency, Baseline
 using ..Calibration
-using ..Calibration: ComponentPlan
+using ..Calibration: ComponentPlan, _dispersion_enabled
 using ..Streaming
 # `CoverageTopup` (bandpass_stage.jl) is another `AbstractScanSelection`, so its
 # resolver must be a METHOD of the streaming layer's generic — defining
@@ -135,7 +135,11 @@ export ApplySolution, StationWeightScale, FlagChannels, CalFunction
 export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
 export select_scans
 export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info
-export MatchedFilter, FringeModel, DispersionModel, CrossFeed
+export MatchedFilter, FringeModel, CrossFeed
+# `DispersionModel` is `Calibration`'s (the propagation model beside the
+# `Dispersion` term it configures); re-exported so a caller driving the fringe
+# engine names it without a second `using`.
+export DispersionModel
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, ScanGroupSpec, ScanGroup, scan_view, select_groups
 export materialize_cube, materialize_leaves

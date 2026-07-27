@@ -3,9 +3,9 @@
 # The canonical full fringe StationGainModel (`_fringe_model` — used by the
 # legacy kwarg wrappers' tests and standalone stage work; the pipeline verbs
 # compile the same components step by step), and the structural plan routers
-# that locate each stage's θ components by TERM TYPE (dispersion, per-scan
-# delay, SBD, bandpass, adhoc) — never by hardcoded index. Relocated verbatim
-# from the deleted monolith (`pipeline.jl`).
+# that locate each stage's θ components by TERM TYPE (per-scan delay, SBD,
+# bandpass, adhoc) — never by hardcoded index. The dispersion term's router is
+# `Calibration._dispersion_plan`, beside the model that configures it.
 
 # The shared fringe model. Phase, over the global frequency band:
 #   - feed-COMMON per-scan constant + delay (`SharedFeeds`): the atmosphere/clock
@@ -107,24 +107,6 @@ end
 # per-channel). `kind` is derived from the term type, so the routing is structural
 # (by term/segmentation), not by hardcoded indices.
 
-function _dispersion_plan(model, layout)
-    i = findfirst(tc -> tc.component.term isa Dispersion, model.phase)
-    return i === nothing ? nothing : layout.plans[i]
-end
-
-# Whether this geometry gets a dTEC term. No model, no term. With one, the
-# `require_band_separation` gate asks whether the band layout can separate 1/ν
-# from a linear delay: several sub-bands over a wide fractional bandwidth (VGOS
-# 3–10.7 GHz qualifies; a single contiguous band cannot constrain the curvature
-# and the term would just soak up delay).
-_dispersion_enabled(::Nothing, ::DataGeometry) = false
-function _dispersion_enabled(dm::DispersionModel, geom::DataGeometry)
-    dm.require_band_separation || return true
-    nb = length(unique(geom.spw_of_chan))
-    fmin, fmax = extrema(geom.channel_freqs)
-    return nb >= 4 && fmax / fmin > 1.3
-end
-
 function _perscan_delay_plan(model, layout)
     i = findfirst(
         tc -> tc.component.term isa Delay && !(tc.component.time isa GlobalTime) &&
@@ -158,61 +140,6 @@ function _sbd_bands(sbd, geom::DataGeometry)
     sbd === true || sbd === :auto || error("sbd must be :auto, true or false (got $sbd)")
     bands = fringe_band_groups(geom.channel_freqs)
     return length(bands) >= 2 ? bands : nothing
-end
-
-# ant → representative-station map for co-located groups (separation below
-# `max_sep` meters, e.g. the Onsala twins at ~75 m). Used to TIE the per-scan
-# dTEC solve: co-located stations see the same ionosphere, so a differential
-# TEC between them is pure solve error (VR2505 gave OE−OW = −2.4 TECU untied).
-function _colocated_ties(antennas; max_sep::Real = 1000.0)
-    n = length(antennas)
-    xyz = antennas.station_xyz
-    ties = collect(1:n)
-    # Guard: missing/degenerate positions (synthetic tables often carry zeros)
-    # would tie the whole array into one node; require a real VLBI-scale array
-    # before trusting the positions at all.
-    maxd2 = 0.0
-    for j in 2:n, i in 1:(j - 1)
-        maxd2 = max(maxd2, sum(abs2, Float64.(xyz[j]) .- Float64.(xyz[i])))
-    end
-    maxd2 > (10.0e3)^2 || return ties
-    # NOTE the explicit nesting: in a comma-nested `for j, i` a `break` exits
-    # BOTH levels — the old form stopped after the FIRST co-located pair in
-    # the array (on VR2505 it tied Onsala OE-OW and silently never examined
-    # the Wettzell twins, so WN-WS kept polluting the adhoc/bandpass solves
-    # and the dTEC tie).
-    for j in 2:n
-        for i in 1:(j - 1)
-            d2 = sum(abs2, Float64.(xyz[j]) .- Float64.(xyz[i]))
-            if d2 <= float(max_sep)^2
-                ties[j] = ties[i]
-                break
-            end
-        end
-    end
-    return ties
-end
-
-# Baseline pairs joining co-located stations (same `_colocated_ties` group, e.g.
-# the Onsala OE-OW and Wettzell WN-WS twins), both orders. These intra-site
-# baselines carry enormous SNR but non-closing (crosstalk) frequency/time
-# structure, so any solve that pools ALL baselines with ~snr² weights — the
-# per-AP adhoc phasing and the phase/amp bandpass — is pulled to fit the
-# crosstalk instead of the sky, splitting it into the two twins' gains and
-# decohering their SKY baselines (on VR2505: OE-OW band-avg coherence 0.95 →
-# 0.34 through the bandpass stages; WN's long baselines 1.00 → 0.6-0.7 through
-# adhoc). Stage B is protected by the stationize closure screen; these stages
-# pool raw residuals and need the exclusion up front. Empty when the array has
-# no co-located pair (or positions are untrustworthy — see `_colocated_ties`).
-function _colocated_pair_set(antennas; max_sep::Real = 1000.0)
-    t = _colocated_ties(antennas; max_sep = max_sep)
-    excl = Set{Tuple{Int, Int}}()
-    for j in 2:length(t), i in 1:(j - 1)
-        t[i] == t[j] || continue
-        push!(excl, (i, j))
-        push!(excl, (j, i))
-    end
-    return excl
 end
 
 # Index of the adhoc component (the per-integration phase term) within `model.phase`.

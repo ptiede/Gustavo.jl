@@ -27,7 +27,7 @@ refinements (see the legacy solver's kwargs of the same names).
 """
 Base.@kwdef struct FringeFit{E <: Fringe.AbstractFringeEstimator} <: SolveStep
     model::Fringe.FringeModel = Fringe.FringeModel()
-    dispersion::Union{Nothing, Fringe.DispersionModel} = Fringe.DispersionModel()
+    dispersion::Union{Nothing, DispersionModel} = DispersionModel()
     estimator::E = Fringe.MatchedFilter()
     reuse_bandpass_refine::Bool = true
     polish_dtec::Float64 = 20.0
@@ -135,8 +135,8 @@ process_scan!(s::FringeFit, ctx::SolveContext, v::Fringe.ScanDataView) =
 # Co-located stations see the same ionosphere, so a differential TEC between
 # them is pure solve error — but only a model that solves dTEC has any to tie.
 _dtec_ties(::Nothing, antennas) = nothing
-_dtec_ties(dm::Fringe.DispersionModel, antennas) =
-    dm.tie_colocated ? Fringe._colocated_ties(antennas) : nothing
+_dtec_ties(dm::DispersionModel, antennas) =
+    dm.tie_colocated ? UVData._colocated_ties(antennas) : nothing
 
 function finish_pass!(s::FringeFit, ctx::SolveContext)
     info = Fringe.finish_estimate!(s.estimator, ctx, s)
@@ -145,7 +145,7 @@ function finish_pass!(s::FringeFit, ctx::SolveContext)
     # has not finished writing those columns yet.
     get(info, :repeat_pass, false) && return info
     ctx.scratch[:refine] = Fringe.RefineService(
-        Fringe._dispersion_plan(ctx.model, ctx.layout),
+        Calibration._dispersion_plan(ctx.model, ctx.layout),
         Fringe._perscan_delay_plan(ctx.model, ctx.layout),
         Fringe._sbd_plans(ctx.model, ctx.layout),
         _dtec_ties(s.dispersion, ctx.antennas),

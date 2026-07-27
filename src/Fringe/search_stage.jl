@@ -76,31 +76,6 @@ Base.@kwdef struct FringeModel
 end
 
 """
-    DispersionModel(; require_band_separation = true, tie_colocated = true)
-
-The differential-ionosphere (dTEC) term: a per-scan, feed-common phase ∝ 1/ν.
-Give it to a [`FringeFit`](@ref) alongside its [`FringeModel`](@ref), or pass
-`dispersion = nothing` for a fit that models no ionosphere at all.
-
-- `require_band_separation` — solve the term only when the band layout can
-  actually separate 1/ν from a linear delay: several sub-bands over a wide
-  fractional bandwidth (VGOS 3–10.7 GHz qualifies; a single contiguous band
-  cannot constrain the curvature and the term would just soak up delay). Set
-  `false` to solve it regardless.
-- `tie_colocated` — tie co-located stations (< 1 km apart) to one dTEC. They
-  see the same ionosphere, so a differential TEC between them is pure solve
-  error.
-
-Estimating dispersion is NOT separable from estimating delay: over a finite
-band the two are near-degenerate, so the fringe estimator fits Δτ and dTEC
-jointly. The separation here is of the model, not of the solve.
-"""
-Base.@kwdef struct DispersionModel
-    require_band_separation::Bool = true
-    tie_colocated::Bool = true
-end
-
-"""
     MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1)
 
 HOW the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)):

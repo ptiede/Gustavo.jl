@@ -695,7 +695,7 @@ end
         dtec = dtec_true, seed = 77, feed_common = true,
     )
     geom = CAL.build_geometry(uvset)
-    @test FP._dispersion_enabled(FP.DispersionModel(), geom)
+    @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
 
     sol = fit(
         FringeFit(
@@ -705,7 +705,7 @@ end
         uvset,
     )
     @test sol.info.dispersion_applied
-    dplan = FP._dispersion_plan(sol.model, sol.layout)
+    dplan = CAL._dispersion_plan(sol.model, sol.layout)
     @test dplan !== nothing
     for a in 1:4
         off = dplan.off1[a, 1, 1, 1]
@@ -859,18 +859,18 @@ end
         station_positions = positions,
     )
     ants = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uvset)))).antennas
-    @test FP._colocated_ties(ants) == [1, 2, 3, 3]
+    @test UVP._colocated_ties(ants) == [1, 2, 3, 3]
 
     # Degenerate positions (the default synthetic table, max sep ≪ 10 km) must
     # NOT tie anything — the guard against missing/zero station_xyz.
     uvd, _ = _build_fringe_uvset(nant = 4, nbands = 2, nchan = 4)
     antd = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uvd)))).antennas
-    @test FP._colocated_ties(antd) == [1, 2, 3, 4]
+    @test UVP._colocated_ties(antd) == [1, 2, 3, 4]
 
     # The intra-site baseline set derived from the same grouping: exactly the
     # (3,4) twin pair, both orders; empty when the position guard trips.
-    @test FP._colocated_pair_set(ants) == Set([(3, 4), (4, 3)])
-    @test isempty(FP._colocated_pair_set(antd))
+    @test UVP._colocated_pair_set(ants) == Set([(3, 4), (4, 3)])
+    @test isempty(UVP._colocated_pair_set(antd))
 
     # TWO co-located pairs must BOTH tie (regression: a `break` in the old
     # comma-nested loop exited both levels after the first pair — on VR2505
@@ -883,8 +883,8 @@ end
         nant = 5, nbands = 2, nchan = 4, station_positions = pos2,
     )
     ant2 = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uv2)))).antennas
-    @test FP._colocated_ties(ant2) == [1, 2, 2, 4, 4]
-    @test FP._colocated_pair_set(ant2) == Set([(2, 3), (3, 2), (4, 5), (5, 4)])
+    @test UVP._colocated_ties(ant2) == [1, 2, 2, 4, 4]
+    @test UVP._colocated_pair_set(ant2) == Set([(2, 3), (3, 2), (4, 5), (5, 4)])
 
     sol = fit(
         FringeFit(
@@ -893,7 +893,7 @@ end
         ) |> TemporalSmoother(),
         uvset,
     )
-    dplan = FP._dispersion_plan(sol.model, sol.layout)
+    dplan = CAL._dispersion_plan(sol.model, sol.layout)
     @test dplan !== nothing
     o3 = dplan.off1[3, 1, 1, 1]
     o4 = dplan.off1[4, 1, 1, 1]

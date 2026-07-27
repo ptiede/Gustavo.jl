@@ -143,3 +143,57 @@ Base.hash(a::AntennaTable, h::UInt) = hash(
     ),
     hash(:AntennaTable, h),
 )
+
+# ── Co-located stations ──────────────────────────────────────────────────────
+
+# ant → representative-station map for co-located groups (separation below
+# `max_sep` meters, e.g. the Onsala twins at ~75 m). Co-located stations share
+# an atmosphere and an ionosphere, so downstream solves either tie them to one
+# parameter or exclude the intra-site baseline entirely.
+function _colocated_ties(antennas; max_sep::Real = 1000.0)
+    n = length(antennas)
+    xyz = antennas.station_xyz
+    ties = collect(1:n)
+    # Guard: missing/degenerate positions (synthetic tables often carry zeros)
+    # would tie the whole array into one node; require a real VLBI-scale array
+    # before trusting the positions at all.
+    maxd2 = 0.0
+    for j in 2:n, i in 1:(j - 1)
+        maxd2 = max(maxd2, sum(abs2, Float64.(xyz[j]) .- Float64.(xyz[i])))
+    end
+    maxd2 > (10.0e3)^2 || return ties
+    # NOTE the explicit nesting: in a comma-nested `for j, i` a `break` exits
+    # BOTH levels, so only the FIRST co-located pair in the array would ever be
+    # found and every later twin would stay untied.
+    for j in 2:n
+        for i in 1:(j - 1)
+            d2 = sum(abs2, Float64.(xyz[j]) .- Float64.(xyz[i]))
+            if d2 <= float(max_sep)^2
+                ties[j] = ties[i]
+                break
+            end
+        end
+    end
+    return ties
+end
+
+# Baseline pairs joining co-located stations (same `_colocated_ties` group, e.g.
+# the Onsala OE-OW and Wettzell WN-WS twins), both orders. These intra-site
+# baselines carry enormous SNR but non-closing (crosstalk) frequency/time
+# structure, so any solve that pools ALL baselines with ~snr² weights — the
+# per-AP adhoc phasing and the phase/amp bandpass — is pulled to fit the
+# crosstalk instead of the sky, splitting it into the two twins' gains and
+# decohering their SKY baselines (on VR2505, pooling them drops OE-OW band-avg
+# coherence 0.95 → 0.34 and WN's long baselines 1.00 → 0.6-0.7). Empty when the
+# array has no co-located pair
+# (or positions are untrustworthy — see `_colocated_ties`).
+function _colocated_pair_set(antennas; max_sep::Real = 1000.0)
+    t = _colocated_ties(antennas; max_sep = max_sep)
+    excl = Set{Tuple{Int, Int}}()
+    for j in 2:length(t), i in 1:(j - 1)
+        t[i] == t[j] || continue
+        push!(excl, (i, j))
+        push!(excl, (j, i))
+    end
+    return excl
+end

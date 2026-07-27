@@ -248,7 +248,7 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     # Intra-site (co-located) baseline exclusion, shared by the residual-pooling
     # stages and the exported flags (the monolith's `excl`).
     ctx.scratch[:excl] = if exec.exclude_colocated
-        s = Fringe._colocated_pair_set(antennas)
+        s = UVData._colocated_pair_set(antennas)
         isempty(s) ? nothing : s
     else
         nothing
