@@ -695,7 +695,7 @@ end
         dtec = dtec_true, seed = 77, feed_common = true,
     )
     geom = CAL.build_geometry(uvset)
-    @test FP._dispersion_enabled(:auto, geom)
+    @test FP._dispersion_enabled(FP.DispersionModel(), geom)
 
     sol = fit(
         FringeFit(
@@ -744,7 +744,8 @@ end
     # Without the term the dispersion survives as cross-band decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, dispersion = false),
+            model = FringeModel(ref_ant = 1),
+            dispersion = nothing,
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -813,7 +814,8 @@ end
 
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, dispersion = false),
+            model = FringeModel(ref_ant = 1),
+            dispersion = nothing,
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -834,7 +836,8 @@ end
     # Without the term the per-group slope survives as within-group decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, dispersion = false, sbd = false),
+            model = FringeModel(ref_ant = 1, sbd = false),
+            dispersion = nothing,
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -959,7 +962,8 @@ end
     end
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, sbd = false, dispersion = false),
+            model = FringeModel(ref_ant = 1, sbd = false),
+            dispersion = nothing,
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,

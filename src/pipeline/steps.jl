@@ -6,16 +6,20 @@
 # the runner in verbs.jl drives them). Every pipeline runs on this engine.
 
 """
-    FringeFit(; model = FringeModel(), estimator = MatchedFilter(),
-              reuse_bandpass_refine = true, polish_dtec = 20.0)
+    FringeFit(; model = FringeModel(), dispersion = DispersionModel(),
+              estimator = MatchedFilter(), reuse_bandpass_refine = true,
+              polish_dtec = 20.0)
 
-The fringe-fitting stage: solves the model components declared by
-[`FringeModel`](@ref) (per-scan delay/rate/phase, the R–L selection, optional
-dispersion/SBD) with a pluggable [`AbstractFringeEstimator`](@ref) — by default
-[`MatchedFilter`](@ref) (per-baseline delay/rate search + closure-screened
-station WLS). WHAT is solved lives on `model` (including the `ref_ant` gauge
-pin); HOW on `estimator` (including its `search`, `Stationization`, and
-residual `rounds`).
+The fringe-fitting stage. WHAT is solved is split across two models: `model`
+([`FringeModel`](@ref)) describes the INSTRUMENT — per-scan delay/rate/phase,
+the R–L selection, optional SBD — and `dispersion`
+([`DispersionModel`](@ref), or `nothing`) describes PROPAGATION through the
+ionosphere. HOW it is solved lives on `estimator`, a pluggable
+[`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
+(per-baseline delay/rate search + closure-screened station WLS).
+
+The two models are separate specifications but one estimate: delay and dTEC are
+near-degenerate over a finite band, so the estimator fits them jointly.
 
 The dTEC/SBD θ slots are owned by this step; `reuse_bandpass_refine` /
 `polish_dtec` control how later stages reuse or polish its per-scan
@@ -23,6 +27,7 @@ refinements (see the legacy solver's kwargs of the same names).
 """
 Base.@kwdef struct FringeFit{E <: Fringe.AbstractFringeEstimator} <: SolveStep
     model::Fringe.FringeModel = Fringe.FringeModel()
+    dispersion::Union{Nothing, Fringe.DispersionModel} = Fringe.DispersionModel()
     estimator::E = Fringe.MatchedFilter()
     reuse_bandpass_refine::Bool = true
     polish_dtec::Float64 = 20.0
@@ -101,7 +106,7 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 # ── Model components (compiled in step order into ONE StationGainModel) ───────
 
 model_components(s::FringeFit, spec) =
-    (; phase = Fringe.fringe_phase_components(s.model, spec.geom), logamp = ())
+    (; phase = Fringe.fringe_phase_components(s.model, s.dispersion, spec.geom), logamp = ())
 
 # The per-channel bandpass components: phase and log-amp, per feed, time-stable
 # (the legacy `_fringe_model` placement — after the fringe terms).
@@ -127,18 +132,23 @@ end
 process_scan!(s::FringeFit, ctx::SolveContext, v::Fringe.ScanDataView) =
     Fringe.estimate_scan!(s.estimator, ctx, s, v)
 
+# Co-located stations see the same ionosphere, so a differential TEC between
+# them is pure solve error — but only a model that solves dTEC has any to tie.
+_dtec_ties(::Nothing, antennas) = nothing
+_dtec_ties(dm::Fringe.DispersionModel, antennas) =
+    dm.tie_colocated ? Fringe._colocated_ties(antennas) : nothing
+
 function finish_pass!(s::FringeFit, ctx::SolveContext)
     info = Fringe.finish_estimate!(s.estimator, ctx, s)
     # The refine service describes the per-scan θ columns THIS STEP owns, so it
     # is the step's to publish and every estimator gets it. A pass that repeats
     # has not finished writing those columns yet.
     get(info, :repeat_pass, false) && return info
-    fm = s.model
     ctx.scratch[:refine] = Fringe.RefineService(
         Fringe._dispersion_plan(ctx.model, ctx.layout),
         Fringe._perscan_delay_plan(ctx.model, ctx.layout),
         Fringe._sbd_plans(ctx.model, ctx.layout),
-        fm.dtec_tie_colocated ? Fringe._colocated_ties(ctx.antennas) : nothing,
+        _dtec_ties(s.dispersion, ctx.antennas),
         s.reuse_bandpass_refine, s.polish_dtec,
     )
     return info

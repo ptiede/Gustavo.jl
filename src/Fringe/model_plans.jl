@@ -112,15 +112,14 @@ function _dispersion_plan(model, layout)
     return i === nothing ? nothing : layout.plans[i]
 end
 
-# Resolve the `dispersion` option (`:auto | true | false`). `:auto` enables the
-# term only when the band layout can separate 1/ν from a linear delay: several
-# sub-bands over a wide fractional bandwidth (VGOS 3–10.7 GHz qualifies; a
-# single contiguous band cannot constrain the curvature and the term would just
-# soak up delay).
-function _dispersion_enabled(dispersion, geom::DataGeometry)
-    dispersion === true && return true
-    dispersion === false && return false
-    dispersion === :auto || error("dispersion must be :auto, true or false (got $dispersion)")
+# Whether this geometry gets a dTEC term. No model, no term. With one, the
+# `require_band_separation` gate asks whether the band layout can separate 1/ν
+# from a linear delay: several sub-bands over a wide fractional bandwidth (VGOS
+# 3–10.7 GHz qualifies; a single contiguous band cannot constrain the curvature
+# and the term would just soak up delay).
+_dispersion_enabled(::Nothing, ::DataGeometry) = false
+function _dispersion_enabled(dm::DispersionModel, geom::DataGeometry)
+    dm.require_band_separation || return true
     nb = length(unique(geom.spw_of_chan))
     fmin, fmax = extrema(geom.channel_freqs)
     return nb >= 4 && fmax / fmin > 1.3

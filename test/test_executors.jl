@@ -89,7 +89,7 @@ struct NoBackendExecutor <: AbstractExecutor end
         uvset, _ = _build_fringe_uvset(; nscans = 2)
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
         mk(ex) = CalibrationPipeline(
-            FringeFit(model = FringeModel(dispersion = false, sbd = false)),
+            FringeFit(model = FringeModel(sbd = false), dispersion = nothing),
             BandpassEstimator(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 2, executor = ex),
         )

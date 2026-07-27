@@ -14,11 +14,11 @@
     @testset "fringe blocks invariant under later stages" begin
         uvset, _ = _build_fringe_uvset()
         solm = fit(
-            FringeFit(model = FringeModel(ref_ant = 1, dispersion = false, sbd = false)) |>
+            FringeFit(model = FringeModel(ref_ant = 1, sbd = false), dispersion = nothing) |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )
-        sol = fit(FringeFit(model = FringeModel(dispersion = false, sbd = false)), uvset)
+        sol = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
         @test length(sol.model.phase) == 5
         rn = CAL.component_ranges(sol.layout)
         rm = CAL.component_ranges(solm.layout)
@@ -33,7 +33,7 @@
         @test sol.info.det_pfa == solm.info.det_pfa
 
         # ref_ant as a station code resolves identically.
-        sol_code = fit(FringeFit(model = FringeModel(ref_ant = "A1", dispersion = false, sbd = false)), uvset)
+        sol_code = fit(FringeFit(model = FringeModel(ref_ant = "A1", sbd = false), dispersion = nothing), uvset)
         @test sol_code.θ == sol.θ
 
         # The snapshot machinery works on a single-stage solution.
@@ -48,14 +48,16 @@
         uvset, _ = _build_fringe_uvset()
         solm = fit(
             FringeFit(
-                model = FringeModel(ref_ant = 1, dispersion = false, sbd = false),
+                model = FringeModel(ref_ant = 1, sbd = false),
+                dispersion = nothing,
                 estimator = MatchedFilter(rounds = 2),
             ) |> TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )
         sol = fit(
             FringeFit(
-                model = FringeModel(dispersion = false, sbd = false),
+                model = FringeModel(sbd = false),
+                dispersion = nothing,
                 estimator = MatchedFilter(rounds = 2),
             ), uvset,
         )
@@ -69,9 +71,9 @@
     @testset "opt-in cross-feed rate (CrossFeed.rate)" begin
         inj = [0.0, 2.0e-4, -1.0e-4, 5.0e-5]
         uvset, _ = _build_fringe_uvset(rl_rate = inj)
-        mk(rate) = FringeModel(dispersion = false, sbd = false, cross_feed = CrossFeed(rate = rate))
+        mk(rate) = FringeModel(sbd = false, cross_feed = CrossFeed(rate = rate))
 
-        sol = fit(FringeFit(model = mk(Gustavo.GlobalTime())), uvset)
+        sol = fit(FringeFit(model = mk(Gustavo.GlobalTime()), dispersion = nothing), uvset)
         @test length(sol.model.phase) == 6
         plan = sol.layout.plans[6]
         solved = [sol.θ[plan.off1[a, 2, 1, 1]] for a in 1:4]
@@ -79,18 +81,18 @@
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         uv0, _ = _build_fringe_uvset()
-        sol0 = fit(FringeFit(model = mk(Gustavo.GlobalTime())), uv0)
+        sol0 = fit(FringeFit(model = mk(Gustavo.GlobalTime()), dispersion = nothing), uv0)
         plan0 = sol0.layout.plans[6]
         @test maximum(abs, [sol0.θ[plan0.off1[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # Default (rate = nothing): the component does not exist — tied ≡ 0.
-        sold = fit(FringeFit(model = FringeModel(dispersion = false, sbd = false)), uvset)
+        sold = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
         @test length(sold.model.phase) == 5
     end
 
     @testset "CrossFeed.fit_on masks cross-hand rows" begin
         uvset, _ = _build_fringe_uvset()      # per-feed delay/phi ⇒ real R–L offset
-        base = fit(FringeFit(model = FringeModel(dispersion = false, sbd = false)), uvset)
+        base = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
         # The global feed-2 delay offset (component 4) is solved.
         @test any(!iszero, base.θ[CAL.component_ranges(base.layout)[4]])
 
@@ -98,9 +100,10 @@
         same = fit(
             FringeFit(
                 model = FringeModel(
-                    dispersion = false, sbd = false,
+                    sbd = false,
                     cross_feed = CrossFeed(fit_on = Gustavo.ScanIndices(1)),
                 ),
+                dispersion = nothing,
             ), uvset,
         )
         @test same.θ == base.θ
@@ -112,9 +115,10 @@
         masked = fit(
             FringeFit(
                 model = FringeModel(
-                    dispersion = false, sbd = false,
+                    sbd = false,
                     cross_feed = CrossFeed(fit_on = Gustavo.ScanIndices(10_000)),
                 ),
+                dispersion = nothing,
             ), uvset,
         )
         @test all(isfinite, masked.θ)
@@ -145,8 +149,8 @@
         ws = [1.0, 0.5, 1.0, 2.0]
         # Weight scale: the search is invariant (snr from the |D|² plane), so
         # the fringe θ matches the untransformed solve bit-for-bit.
-        sol_ws = fit(StationWeightScale(ws) |> FringeFit(model = FringeModel(dispersion = false, sbd = false)), uvset)
-        sol = fit(FringeFit(model = FringeModel(dispersion = false, sbd = false)), uvset)
+        sol_ws = fit(StationWeightScale(ws) |> FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
+        sol = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
         @test sol_ws.θ == sol.θ
         @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
 
@@ -160,7 +164,7 @@
                 minmax(a, b) == (1, 2) && (v.weights[:, :, bi, :] .= 0)
             end
         end
-        sol_cf, out = fitcalibrate(kill12 |> FringeFit(model = FringeModel(dispersion = false, sbd = false)), uvset)
+        sol_cf, out = fitcalibrate(kill12 |> FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
         @test touched[] > 0
         @test sol_cf.transforms[1] isa CalFunction
         for (_, leaf) in DimensionalData.branches(out)
@@ -185,8 +189,12 @@
             FringeFit(model = FringeModel(delay = Gustavo.GlobalTime())), uvset)
         @test_throws ErrorException CrossFeed(delay = Gustavo.PerIntegration())
         @test_throws ErrorException CrossFeed(rate = Gustavo.PerIntegration())
-        @test_throws ErrorException fit(
-            FringeFit(model = FringeModel(dispersion = :maybe)), uvset)
+        # `dispersion` is no longer a FringeModel field — it is the step's own
+        # propagation model, so the instrument model rejects the keyword outright
+        # rather than validating a value domain.
+        @test_throws MethodError FringeModel(dispersion = :maybe)
+        @test :dispersion ∉ fieldnames(FringeModel)
+        @test :dispersion ∈ fieldnames(typeof(FringeFit()))
 
         # The options the legacy bridge used to reject (custom Stationization,
         # the R–L rate opt-in, fit_on subsetting, arbitrary CalFunction
@@ -314,5 +322,76 @@ FP.finish_estimate!(::_NullEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, reje
         @test isconcretetype(fieldtype(typeof(FringeFit()), :estimator))
         @test fieldtype(typeof(FringeFit(estimator = _SilentEstimator())), :estimator) ===
             _SilentEstimator
+    end
+end
+
+# ── Dispersion as a model of its own ─────────────────────────────────────────
+#
+# The ionosphere is specified separately from the instrument, but ESTIMATED
+# jointly with the delay it is degenerate with — these assert both halves.
+@testset "dispersion is a separate model" begin
+    # A VGOS-like layout: four sub-bands over a wide fractional bandwidth, which
+    # is what lets 1/ν be separated from a linear delay at all.
+    uvset, _ = _build_fringe_uvset(
+        nbands = 4, nchan = 8, dtec = [0.0, 3.0, -2.0, 1.5],
+        band_origins = [3.0e9, 5.0e9, 8.0e9, 1.03e10], feed_common = true,
+    )
+    mf = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid()))
+
+    @testset "the instrument model no longer carries the ionosphere" begin
+        @test :dispersion ∉ fieldnames(FringeModel)
+        @test :dtec_tie_colocated ∉ fieldnames(FringeModel)
+        @test :sbd ∈ fieldnames(FringeModel)      # instrumental: stays put
+        @test fieldnames(DispersionModel) == (:require_band_separation, :tie_colocated)
+    end
+
+    @testset "the step decides whether an ionosphere is modelled at all" begin
+        # Whether the term is SOLVED end to end is `info.dispersion_applied`, which
+        # additionally needs a stage that refines it (see the dispersion testset in
+        # test_pipeline.jl). What this asserts is the model structure the step built.
+        on = fit(FringeFit(model = FringeModel(ref_ant = 1), estimator = mf), uvset)
+        off = fit(FringeFit(model = FringeModel(ref_ant = 1), dispersion = nothing,
+                estimator = mf), uvset)
+        @test FP._dispersion_plan(on.model, on.layout) !== nothing
+        @test FP._dispersion_plan(off.model, off.layout) === nothing
+        @test any(tc -> tc.component.term isa CAL.Dispersion, on.model.phase)
+        @test !any(tc -> tc.component.term isa CAL.Dispersion, off.model.phase)
+        # No dTEC term means no dTEC columns in θ at all.
+        @test length(off.θ) < length(on.θ)
+    end
+
+    @testset "require_band_separation gates on the band layout" begin
+        # A single contiguous band cannot constrain the 1/ν curvature.
+        narrow, _ = _build_fringe_uvset(nbands = 1, nchan = 8)
+        geom_n = CAL.build_geometry(narrow)
+        geom_w = CAL.build_geometry(uvset)
+        @test !FP._dispersion_enabled(DispersionModel(), geom_n)
+        @test FP._dispersion_enabled(DispersionModel(), geom_w)
+        # Forcing it on solves the term regardless of what the layout supports.
+        @test FP._dispersion_enabled(DispersionModel(require_band_separation = false), geom_n)
+        @test !FP._dispersion_enabled(nothing, geom_n)
+    end
+
+    @testset "tie_colocated reaches the refine service through the step" begin
+        # The tie is the dispersion model's, but RefineService is the step's to
+        # publish, so it must arrive without the estimator knowing about it.
+        ants = Gustavo.UVData.metadata(
+            first(values(Gustavo.UVData.branches(uvset)))).antennas
+        @test Gustavo._dtec_ties(DispersionModel(tie_colocated = true), ants) !== nothing
+        @test Gustavo._dtec_ties(DispersionModel(tie_colocated = false), ants) === nothing
+        @test Gustavo._dtec_ties(nothing, ants) === nothing
+    end
+
+    @testset "delay and dTEC are still estimated jointly" begin
+        # The separation is of the specification only: one RefineService carries
+        # both plans, because over a finite band the two are near-degenerate.
+        sol = fit(FringeFit(model = FringeModel(ref_ant = 1), estimator = mf), uvset)
+        rf = FP.RefineService(
+            FP._dispersion_plan(sol.model, sol.layout),
+            FP._perscan_delay_plan(sol.model, sol.layout),
+            FP._sbd_plans(sol.model, sol.layout), nothing, true, 20.0,
+        )
+        @test rf.disp_plan !== nothing
+        @test rf.ps_delay_plan !== nothing
     end
 end

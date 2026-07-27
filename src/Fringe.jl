@@ -135,7 +135,7 @@ export ApplySolution, StationWeightScale, FlagChannels, CalFunction
 export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
 export select_scans
 export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info
-export MatchedFilter, FringeModel, CrossFeed
+export MatchedFilter, FringeModel, DispersionModel, CrossFeed
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, ScanGroupSpec, ScanGroup, scan_view, select_groups
 export materialize_cube, materialize_leaves

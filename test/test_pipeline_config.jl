@@ -137,7 +137,8 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test f.model.cross_feed.delay isa Gustavo.GlobalTime
         @test f.model.cross_feed.rate === nothing          # tied ≡ 0
         @test f.model.cross_feed.fit_on isa AllScans
-        @test f.model.dispersion == :auto && f.model.sbd == :auto
+        @test f.model.sbd == :auto
+        @test f.dispersion == DispersionModel()
         @test f.estimator isa MatchedFilter
         @test f.estimator.search == FP.FringeSearch()
         @test f.estimator.closure == FP.Stationization()

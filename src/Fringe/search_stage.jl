@@ -51,9 +51,11 @@ CrossFeed(; delay = GlobalTime(), rate = nothing, fit_on = AllScans()) =
 
 """
     FringeModel(; ref_ant = 1, delay = PerScan(), rate = PerScan(), cross_feed = CrossFeed(),
-                dispersion = :auto, sbd = :auto, dtec_tie_colocated = true)
+                sbd = :auto)
 
-WHAT the fringe stage solves — the model specification of a `FringeFit` step:
+WHAT the fringe stage solves of the INSTRUMENT — the model specification of a
+`FringeFit` step. Propagation through the ionosphere is a separate model, given
+to the step alongside this one ([`DispersionModel`](@ref)).
 
 - `ref_ant` — the gauge pin: a 1-based antenna index or a station code
   (`"PT"`). Part of the MODEL (it changes what is solved), not of the
@@ -61,21 +63,41 @@ WHAT the fringe stage solves — the model specification of a `FringeFit` step:
 - `delay`, `rate` — feed-common segmentations (default `PerScan()`; the
   matched-filter estimator currently supports only `PerScan()`).
 - `cross_feed` — the typed feed-2 − feed-1 selection ([`CrossFeed`](@ref)).
-- `dispersion` — per-scan feed-common differential TEC term: `:auto` (on when
-  the band layout can separate 1/ν from a linear delay — e.g. VGOS), `true`,
-  `false`.
 - `sbd` — per-scan per-band-group single-band delay (fourfit SBD): `:auto` (on
-  when the frequency axis has ≥ 2 band groups), `true`, `false`.
-- `dtec_tie_colocated` — tie co-located stations (< 1 km) to one dTEC.
+  when the frequency axis has ≥ 2 band groups), `true`, `false`. Instrumental,
+  not propagation: a per-band-group delay offset, so it belongs here.
 """
 Base.@kwdef struct FringeModel
     ref_ant::Union{Integer, AbstractString, Symbol} = 1
     delay::AbstractTimeSegmentation = PerScan()
     rate::AbstractTimeSegmentation = PerScan()
     cross_feed::CrossFeed = CrossFeed()
-    dispersion::Union{Bool, Symbol} = :auto
     sbd::Union{Bool, Symbol} = :auto
-    dtec_tie_colocated::Bool = true
+end
+
+"""
+    DispersionModel(; require_band_separation = true, tie_colocated = true)
+
+The differential-ionosphere (dTEC) term: a per-scan, feed-common phase ∝ 1/ν.
+Give it to a [`FringeFit`](@ref) alongside its [`FringeModel`](@ref), or pass
+`dispersion = nothing` for a fit that models no ionosphere at all.
+
+- `require_band_separation` — solve the term only when the band layout can
+  actually separate 1/ν from a linear delay: several sub-bands over a wide
+  fractional bandwidth (VGOS 3–10.7 GHz qualifies; a single contiguous band
+  cannot constrain the curvature and the term would just soak up delay). Set
+  `false` to solve it regardless.
+- `tie_colocated` — tie co-located stations (< 1 km apart) to one dTEC. They
+  see the same ionosphere, so a differential TEC between them is pure solve
+  error.
+
+Estimating dispersion is NOT separable from estimating delay: over a finite
+band the two are near-degenerate, so the fringe estimator fits Δτ and dTEC
+jointly. The separation here is of the model, not of the solve.
+"""
+Base.@kwdef struct DispersionModel
+    require_band_separation::Bool = true
+    tie_colocated::Bool = true
 end
 
 """
@@ -101,26 +123,25 @@ end
 # ── Model compilation ─────────────────────────────────────────────────────────
 
 """
-    fringe_phase_components(fm::FringeModel, geom::DataGeometry) -> Tuple
+    fringe_phase_components(fm::FringeModel, dm, geom::DataGeometry) -> Tuple
 
-The fringe stage's gain-model phase components compiled from `fm`, in the
-LEGACY `_fringe_model` order (per-scan constant, global R–L constant, delay,
-R–L delay, rate, [opt-in R–L rate,] [dispersion,] [SBD delay + constant]) —
-so the compiled layout's fringe block matches the frozen oracle's exactly
-whenever the optional R–L rate is off.
+The fringe stage's gain-model phase components compiled from the instrument
+model `fm` and the propagation model `dm` (a [`DispersionModel`](@ref), or
+`nothing` for no ionosphere term), in the LEGACY `_fringe_model` order (per-scan
+constant, global R–L constant, delay, R–L delay, rate, [opt-in R–L rate,]
+[dispersion,] [SBD delay + constant]) — so the compiled layout's fringe block
+matches the frozen oracle's exactly whenever the optional R–L rate is off.
 """
-function fringe_phase_components(fm::FringeModel, geom::DataGeometry)
+function fringe_phase_components(fm::FringeModel, dm, geom::DataGeometry)
     fm.delay isa PerScan ||
         error("FringeModel: the matched-filter stage currently supports delay = PerScan() only (got $(typeof(fm.delay)))")
     fm.rate isa PerScan ||
         error("FringeModel: the matched-filter stage currently supports rate = PerScan() only (got $(typeof(fm.rate)))")
-    fm.dispersion in (:auto, true, false) ||
-        error("FringeModel: dispersion must be :auto, true or false (got $(fm.dispersion))")
     fm.sbd in (:auto, true, false) ||
         error("FringeModel: sbd must be :auto, true or false (got $(fm.sbd))")
     rlrate = fm.cross_feed.rate === nothing ? () :
         (TiedComponent(GainComponent(Rate(), fm.cross_feed.rate, GlobalFrequency()), FeedComponent(2)),)
-    disp = _dispersion_enabled(fm.dispersion, geom) ?
+    disp = _dispersion_enabled(dm, geom) ?
         (TiedComponent(GainComponent(Dispersion(), PerScan(), GlobalFrequency()), SharedFeeds()),) : ()
     bands = _sbd_bands(fm.sbd, geom)
     sbd = bands === nothing ? () : (

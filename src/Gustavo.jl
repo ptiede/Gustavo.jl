@@ -37,7 +37,7 @@ export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export AbstractExecutor, ThreadsExecutor, DaggerExecutor, with_executor
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
-export FringeFit, FringeModel, CrossFeed, MatchedFilter, BandpassEstimator, TemporalSmoother
+export FringeFit, FringeModel, DispersionModel, CrossFeed, MatchedFilter, BandpassEstimator, TemporalSmoother
 export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagBandEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate
