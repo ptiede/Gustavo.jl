@@ -69,7 +69,7 @@ WHAT the fringe stage solves — the model specification of a `FringeFit` step:
 - `dtec_tie_colocated` — tie co-located stations (< 1 km) to one dTEC.
 """
 Base.@kwdef struct FringeModel
-    ref_ant::Any = 1
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1
     delay::AbstractTimeSegmentation = PerScan()
     rate::AbstractTimeSegmentation = PerScan()
     cross_feed::CrossFeed = CrossFeed()

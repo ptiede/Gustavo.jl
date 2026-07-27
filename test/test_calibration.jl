@@ -1,10 +1,12 @@
 # Phase 1 — unified Calibration framework core.
-# Standalone-runnable (`julia --project=. test/test_calibration.jl`) and included
-# from runtests.jl.
+# Standalone-runnable (`julia --project=test test/test_calibration.jl`) and
+# included from runtests.jl.
 
 using Gustavo
 using Test
 using LinearAlgebra
+using DimensionalData: DimArray, Dim
+import OffsetArrays
 
 const CAL = Gustavo.Calibration
 
@@ -220,4 +222,67 @@ end
         phase = (CAL.TiedComponent(CAL.GainComponent(CAL._AuditBadFreqTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
     )
     @test_throws MethodError CAL.plan_parameters(model, 1, geom)
+end
+
+@testset "CalibrationSolution θ keeps its array type" begin
+    nant = 3
+    freqs = collect(2.28e11:1.0e8:(2.28e11 + 5.0e8))
+    times = [0.0, 0.5, 1.0]
+    geom = CAL.DataGeometry(;
+        times, channel_freqs = freqs, t0 = 0.0, f0 = sum(freqs) / length(freqs),
+    )
+    # A delay term plus a per-channel bandpass, so `bandpass_solution` has
+    # something to extract.
+    model = CAL.StationGainModel(
+        phase = (
+            CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),
+            CAL.TiedComponent(CAL.GainComponent(CAL.PerChannel(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
+        ),
+    )
+    layout = CAL.plan_parameters(model, nant, geom)
+    θv = collect(1:(layout.nθ)) ./ 1.0e10
+    stages = [CAL.StageRecord(:fringe, 1, [1], Int[], (;)),
+        CAL.StageRecord(:bandpass, 2, [2], Int[], (;))]
+
+    solv = CAL.CalibrationSolution(model, layout, geom, θv, (; nant); stages)
+    @test solv.θ isa Vector{Float64}
+
+    @testset "a DimArray θ survives construction and every derived path" begin
+        θd = DimArray(copy(θv), Dim{:param}(1:(layout.nθ)))
+        sold = CAL.CalibrationSolution(model, layout, geom, θd, (; nant); stages)
+        @test sold.θ isa DimArray
+        @test sold.θ == θd
+        # Same numbers as the Vector-backed solution, not merely close.
+        ev = CAL.GainEvaluator(model, layout)
+        @test CAL.evaluate_gains(ev, sold.θ) == CAL.evaluate_gains(ev, solv.θ)
+        @test CAL.component_gains(sold, 1) == CAL.component_gains(solv, 1)
+        # A stage view is index-matched to θ, so it propagates the array type.
+        @test CAL.stage_solution(sold[:fringe]).θ isa DimArray
+        @test CAL.stage_solution(sold[:fringe]).θ == CAL.stage_solution(solv[:fringe]).θ
+        # `bandpass_solution` builds a DIFFERENT layout, so its θ shares no
+        # parameter identity with the original's — only the element type.
+        @test CAL.bandpass_solution(sold).θ == CAL.bandpass_solution(solv).θ
+    end
+
+    @testset "the 1-based contract is enforced, not assumed" begin
+        # `ComponentPlan.off1` holds absolute positions and the term kernels read
+        # them under `@inbounds`, so a shifted-axes θ must be refused here rather
+        # than read out of bounds later.
+        θoff = OffsetArrays.OffsetArray(copy(θv), 0:(layout.nθ - 1))
+        @test_throws ArgumentError CAL.CalibrationSolution(model, layout, geom, θoff, (;))
+        @test_throws "θ has length" CAL.CalibrationSolution(model, layout, geom, θv[1:(end - 1)], (;))
+    end
+
+    @testset "the element type is carried, not coerced to Float64" begin
+        @test CAL.CalibrationSolution(model, layout, geom, Float32.(θv), (;)).θ isa Vector{Float32}
+    end
+
+    @testset "the solution copies θ rather than aliasing it" begin
+        # The fused output tail builds a solution per scan group from the run's
+        # live θ while sibling groups are still writing their own slots.
+        θmut = copy(θv)
+        s = CAL.CalibrationSolution(model, layout, geom, θmut, (;))
+        θmut[1] = -999.0
+        @test s.θ[1] == θv[1]
+    end
 end

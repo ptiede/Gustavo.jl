@@ -279,8 +279,7 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     end
     sol = CalibrationSolution(
         model, layout, geom, ctx.θ, _new_engine_info(ctx, br);
-        stages = ctx.stages, transforms = collect(Any, br.tfs),
-        postcal = collect(Any, br.apriori),
+        stages = ctx.stages, transforms = br.tfs, postcal = br.apriori,
     )
     sink === nothing && return sol, nothing
     if !fused

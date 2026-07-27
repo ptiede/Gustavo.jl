@@ -122,8 +122,8 @@ solution's gains and before any `ReduceStep`s. Place it in the
 so the standalone `calibrate(sol, uvset)` reproduces it without re-passing
 `band_cals`.
 """
-struct AprioriAmplitude <: CalibrationStep
-    band_cals::Any
+struct AprioriAmplitude{C} <: CalibrationStep
+    band_cals::C
     min_elevation_deg::Float64
     on_missing_station::Symbol
 end

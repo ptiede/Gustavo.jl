@@ -74,6 +74,15 @@ _rewrap_like(A, ref::AbstractDimArray) =
     size(A) == size(ref) ? DimArray(A, dims(ref)) : A
 _rewrap_like(A, _) = A
 
+# Collect `xs` into a Vector whose element type is the tightest common supertype
+# of what it actually holds — concrete whenever the entries share a type, however
+# loosely the source container was typed. An empty `xs` has nothing to join and
+# becomes `Vector{Any}`; `Vector{Union{}}` could hold no entry at all.
+function _narrow_eltype(xs)
+    isempty(xs) && return Vector{Any}(undef, 0)
+    return collect(mapreduce(typeof, typejoin, xs), xs)
+end
+
 """
     pol_products(x) -> Vector{String}
 

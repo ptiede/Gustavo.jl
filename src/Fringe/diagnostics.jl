@@ -154,7 +154,7 @@ function fringe_bandpass_spectrum(sol::CalibrationSolution)
     # θ with every parameter zeroed EXCEPT this component's per-channel blocks (start
     # column `off1[a,f,1,fseg]`, one parameter per channel of that freq segment), so
     # `evaluate_gains` returns the bandpass-only gain (all other terms → unit gain).
-    θbp = zeros(eltype(sol.θ), length(sol.θ))
+    θbp = fill!(similar(sol.θ), 0)
     for a in 1:layout.nant, f in 1:2, fseg in axes(bp.off1, 4)
         start = bp.off1[a, f, 1, fseg]
         start == 0 && continue

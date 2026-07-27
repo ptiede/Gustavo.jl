@@ -31,12 +31,18 @@ struct StageRecord
 end
 
 """
-    CalibrationSolution(model, layout, geom, θ, info; stages = StageRecord[], transforms = Any[])
+    CalibrationSolution(model, layout, geom, θ, info; stages = StageRecord[],
+                        transforms = (), postcal = ())
 
 A solved station gain model. `model::StationGainModel` is the shared model,
 `layout::ParameterLayout` its flattened parameter plan over `geom::DataGeometry`,
-`θ` the solved parameter vector (`length(θ) == layout.nθ`), and `info` a
-NamedTuple of solver diagnostics (per-scan SNR, χ, residuals, …).
+`θ` the solved parameter vector, and `info` a NamedTuple of solver diagnostics
+(per-scan SNR, χ, residuals, …).
+
+`θ` keeps whatever array type it is given — a labelled `DimArray` as readily as a
+`Vector` — subject to two requirements the layout imposes: `length(θ) == layout.nθ`,
+and 1-based indexing, since `layout` addresses θ by absolute position. Both are
+checked on construction. The solution stores a copy, never an alias.
 
 `stages` records per-pipeline-stage provenance ([`StageRecord`](@ref)) — index
 the solution by stage name (`sol[:bandpass]`) for the solution-as-of-that-stage
@@ -48,27 +54,38 @@ diagnostics can replay it and the standalone apply path can reproduce
 standalone apply reproduces them without re-passing their inputs. All default
 empty (a plain single-stage solution).
 """
-struct CalibrationSolution{M <: StationGainModel, L <: ParameterLayout, G <: DataGeometry}
+struct CalibrationSolution{
+        M <: StationGainModel, L <: ParameterLayout, G <: DataGeometry,
+        V <: AbstractVector{<:Real}, T, P,
+    }
     model::M
     layout::L
     geom::G
-    θ::Vector{Float64}
+    θ::V
     info::NamedTuple
     stages::Vector{StageRecord}
-    transforms::Vector{Any}
-    postcal::Vector{Any}
+    transforms::Vector{T}
+    postcal::Vector{P}
 end
 
 function CalibrationSolution(
         model::StationGainModel, layout::ParameterLayout, geom::DataGeometry,
         θ::AbstractVector, info::NamedTuple = NamedTuple();
-        stages = StageRecord[], transforms = Any[], postcal = Any[],
+        stages = StageRecord[], transforms = (), postcal = (),
     )
+    # The layout addresses θ by absolute 1-based position (`ComponentPlan.off1`)
+    # and the term kernels read those offsets under `@inbounds`, so an array with
+    # other axes would read out of bounds silently rather than throw.
+    Base.require_one_based_indexing(θ)
     length(θ) == layout.nθ ||
         error("CalibrationSolution: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)")
+    # `copy`, not an alias: the fused output tail builds a solution per scan group
+    # from the run's working θ while sibling groups are still writing their own
+    # slots, and each group must correct against its own snapshot.
     return CalibrationSolution(
-        model, layout, geom, Float64.(collect(θ)), info,
-        collect(StageRecord, stages), collect(Any, transforms), collect(Any, postcal),
+        model, layout, geom, copy(θ), info,
+        collect(StageRecord, stages),
+        UVData._narrow_eltype(transforms), UVData._narrow_eltype(postcal),
     )
 end
 
@@ -183,7 +200,7 @@ function component_gains(sol::CalibrationSolution, plan_index::Integer; ci = Col
     1 <= plan_index <= length(sol.layout.plans) ||
         error("component_gains: plan_index $plan_index out of range 1:$(length(sol.layout.plans))")
     rng = component_ranges(sol.layout)
-    θm = zeros(length(sol.θ))
+    θm = fill!(similar(sol.θ), 0)
     θm[rng[plan_index]] = sol.θ[rng[plan_index]]
     ev = GainEvaluator(sol.model, sol.layout)
     civ = ci === Colon() ? (1:nchannels(sol.geom)) : ci
@@ -222,7 +239,9 @@ function bandpass_solution(sol::CalibrationSolution)
     model = StationGainModel(phase = Tuple(pcs[pidx]), logamp = Tuple(lcs[lidx]))
     nant = sol.layout.nant
     layout = plan_parameters(model, nant, sol.geom)
-    θ = zeros(layout.nθ)
+    # The extracted model has its own layout, so θ shares neither length nor
+    # parameter identity with `sol.θ` — only its element type carries over.
+    θ = zeros(eltype(sol.θ), layout.nθ)
     # Component plans are laid out deterministically from (component, nant,
     # geom), so each extracted component's θ block is a straight range copy.
     ro = component_ranges(sol.layout)

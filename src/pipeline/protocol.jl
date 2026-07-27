@@ -165,13 +165,13 @@ two runs differing only in their `ExecutionConfig` solve the same problem.
   admission/chunking/fold order under both, so θ and outputs are bit-identical
   across executors.
 """
-Base.@kwdef struct ExecutionConfig
+Base.@kwdef struct ExecutionConfig{P, E <: Executors.AbstractExecutor}
     ntasks::Int = Threads.nthreads()
     mem_fraction::Float64 = 0.6
     mem_budget::Union{Nothing, Float64} = nothing
-    progress::Any = nothing
+    progress::P = nothing
     exclude_colocated::Bool = true
-    executor::Executors.AbstractExecutor = Executors.current_executor()
+    executor::E = Executors.current_executor()
 end
 
 # ── The solve context (shared state of a pipeline run) ───────────────────────
@@ -189,17 +189,20 @@ per-group results in `:pass_results`; the fringe stage publishes `:scan_snr`
 for SNR-aware scan selections and its `:refine` service for the dTEC/SBD
 θ slots it owns; the bandpass stage records `:refined_scans`).
 """
-mutable struct SolveContext
-    model::Any
-    layout::Any
-    geom::Any
-    ev::Any
+mutable struct SolveContext{
+        M <: StationGainModel, E <: GainEvaluator, A <: UVData.AntennaTable,
+        S <: Streaming.ScanStream, X <: ExecutionConfig,
+    }
+    model::M
+    layout::ParameterLayout
+    geom::DataGeometry
+    ev::E
     θ::Vector{Float64}
     ref_ant::Int
     nant::Int
-    antennas::Any
-    stream::Any
-    exec::ExecutionConfig
+    antennas::A
+    stream::S
+    exec::X
     stages::Vector{StageRecord}
     scratch::Dict{Symbol, Any}
 end
@@ -263,9 +266,9 @@ An ordered list of [`CalibrationStep`](@ref)s (raw
 `Fringe.AbstractDataTransform`s are lifted automatically) plus the run-wide
 [`ExecutionConfig`](@ref). Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
 """
-struct CalibrationPipeline
+struct CalibrationPipeline{X <: ExecutionConfig}
     steps::Vector{CalibrationStep}
-    exec::ExecutionConfig
+    exec::X
 end
 CalibrationPipeline(steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig()) =
     CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec)

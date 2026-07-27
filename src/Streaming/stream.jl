@@ -66,11 +66,11 @@ One scheduled scan group: its `index` in stream order, `source`/`scan` names,
 the `(partition_key, lazy_leaf)` pairs, and the memory `charge` (bytes) used by
 the budget scheduler. Nothing is read until the group is materialized.
 """
-struct ScanGroupSpec
+struct ScanGroupSpec{L}
     index::Int
     source::String
     scan::String
-    leaves::Vector{Any}          # (partition_key, lazy leaf) pairs
+    leaves::Vector{L}            # (partition_key, lazy leaf) pairs
     charge::Int
 end
 
@@ -87,20 +87,30 @@ per-group task budget `inner`, per-task scratch pool). Build with
 `W` is the element type of the scratch `pool`, set by `scan_stream`'s
 `workspace` factory. It is `Nothing` — an empty pool — unless a factory is
 given, so a consumer whose kernels need scratch (`Gustavo.Fringe`'s FFT
-workspaces) asks for it by name and this module never names it.
+workspaces) asks for it by name and this module never names it. `S` and `T`
+carry the group-spec and transform types the stream was built from.
 """
-struct ScanStream{G <: AbstractLeafGrouping, W}
+struct ScanStream{G <: AbstractLeafGrouping, W, S <: ScanGroupSpec, T}
     uvset::UVSet
     geom::DataGeometry
     grouping::G
-    groups::Vector{ScanGroupSpec}
-    transforms::Vector{Any}
+    groups::Vector{S}
+    transforms::Vector{T}
     ant_names::Vector{String}
     budget::Float64
     ntasks::Int
     inner::Int
     pool::Channel{W}
     executor::Executors.AbstractExecutor
+end
+
+# One group's spec, labelled from its first leaf's partition metadata.
+function _scan_group_spec(index::Int, keyed_leaves)
+    info = UVData.metadata(last(first(keyed_leaves)))
+    return ScanGroupSpec(
+        index, String(info.source_name), String(info.scan_name),
+        keyed_leaves, _spec_peak_bytes(keyed_leaves),
+    )
 end
 
 # Peak resident bytes charged for one group: 12 B/cell native (8 vis + 4 weight)
@@ -177,14 +187,10 @@ function scan_stream(
         end
         push!(groups[key], (k, leaf))
     end
-    specs = Vector{ScanGroupSpec}(undef, length(order))
-    for (i, key) in enumerate(order)
-        kl = groups[key]
-        info = UVData.metadata(last(first(kl)))
-        specs[i] = ScanGroupSpec(
-            i, String(info.source_name), String(info.scan_name), kl, _spec_peak_bytes(kl),
-        )
-    end
+    specs = [
+        _scan_group_spec(i, UVData._narrow_eltype(groups[key]))
+            for (i, key) in enumerate(order)
+    ]
 
     first_leaf = last(first(UVData.branches(uvset)))
     ant_names = String.(UVData.metadata(first_leaf).antennas.name)
@@ -205,7 +211,7 @@ function scan_stream(
     pool = _workspace_pool(workspace, max(Threads.nthreads(), 1))
 
     return ScanStream(
-        uvset, geom, grouping, specs, collect(Any, transforms), ant_names,
+        uvset, geom, grouping, specs, UVData._narrow_eltype(transforms), ant_names,
         budget, ntasks_use, inner, pool, executor,
     )
 end

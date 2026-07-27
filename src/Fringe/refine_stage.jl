@@ -19,11 +19,11 @@
 # already refined should be POLISHED in a narrow window instead of re-run with
 # the full grid (`reuse_bandpass`), and the polish dTEC half-window (TECU,
 # `polish_dtec`). `nothing` plans disable the matching refinement.
-struct RefineService
-    disp_plan::Any
-    ps_delay_plan::Any
-    sbd_plans::Any
-    ties::Any
+struct RefineService{D, P, S, T}
+    disp_plan::D
+    ps_delay_plan::P
+    sbd_plans::S
+    ties::T
     reuse_bandpass::Bool
     polish_dtec::Float64
 end

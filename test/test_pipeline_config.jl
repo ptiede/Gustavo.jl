@@ -163,3 +163,105 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test ap.on_missing_station == :warn
     end
 end
+
+# The run-state types the pipeline layer threads through its solve loop carry
+# their contents as type parameters rather than as `Any`, so the whole solve
+# context is a concrete type. This is an interface property, not a speed one:
+# an `Any` field advertises no contract, and it drifts back silently.
+@testset "pipeline run state is concretely typed" begin
+    uvset, _ = _build_fringe_uvset()
+
+    @testset "SolveContext" begin
+        ff = FringeFit(model = FringeModel(ref_ant = 1))
+        geom = CAL.build_geometry(uvset)
+        antennas = UVP.metadata(first(values(UVP.branches(uvset)))).antennas
+        nant = length(antennas)
+        mc = Gustavo.model_components(ff, (; geom, antennas))
+        model = CAL.StationGainModel(phase = mc.phase, logamp = mc.logamp)
+        layout = CAL.plan_parameters(model, nant, geom)
+        ctx = Gustavo.SolveContext(
+            model, layout, geom, CAL.GainEvaluator(model, layout), zeros(layout.nθ),
+            1, nant, antennas, ST.scan_stream(uvset; geom, workspace = FP.FringeWorkspace),
+            ExecutionConfig(), CAL.StageRecord[], Dict{Symbol, Any}(),
+        )
+        @test isconcretetype(typeof(ctx))
+        for f in (:model, :layout, :geom, :ev, :antennas, :stream, :exec)
+            @test isconcretetype(fieldtype(typeof(ctx), f))
+        end
+        # `scratch` stays a `Dict{Symbol, Any}` by design — it is the untyped
+        # cross-step channel, and its readers assert on retrieval.
+        @test fieldtype(typeof(ctx), :scratch) == Dict{Symbol, Any}
+    end
+
+    @testset "ExecutionConfig carries the progress callback's type" begin
+        cb = (stage, done, total) -> nothing
+        e = ExecutionConfig(progress = cb)
+        @test fieldtype(typeof(e), :progress) === typeof(cb)
+        @test isconcretetype(typeof(ExecutionConfig()))
+        @test fieldtype(typeof(ExecutionConfig()), :progress) === Nothing
+        @test isconcretetype(fieldtype(typeof(e), :executor))
+        # The pipeline propagates it rather than widening back to the supertype.
+        @test fieldtype(typeof(CalibrationPipeline([FringeFit()]; exec = e)), :exec) === typeof(e)
+    end
+
+    @testset "stream group specs and transforms" begin
+        t = StationWeightScale(ones(4))
+        stream = ST.scan_stream(uvset; transforms = (t,))
+        @test isconcretetype(eltype(stream.groups))
+        @test isconcretetype(eltype(first(stream.groups).leaves))
+        @test eltype(stream.transforms) === typeof(t)
+        # No transforms: nothing to join, so the vector stays `Any`-typed rather
+        # than becoming a `Vector{Union{}}` that could never accept an entry.
+        @test eltype(ST.scan_stream(uvset).transforms) === Any
+    end
+
+    @testset "solution records its chains at their own type" begin
+        t = StationWeightScale(ones(4))
+        sol = fit(t |> FringeFit(), uvset)
+        @test eltype(sol.transforms) === typeof(t)
+        @test eltype(sol.postcal) === Any        # empty
+        # A stage view rebuilds the solution without widening the chain.
+        @test eltype(CAL.stage_solution(sol[:fringe]).transforms) === eltype(sol.transforms)
+    end
+
+    @testset "RefineService plans" begin
+        rf = FP.RefineService(nothing, nothing, nothing, [1, 2, 3, 4], false, 20.0)
+        @test isconcretetype(typeof(rf))
+        @test fieldtype(typeof(rf), :ties) === Vector{Int}
+        @test fieldtype(typeof(rf), :disp_plan) === Nothing
+    end
+
+    @testset "AprioriAmplitude and FringeModel.ref_ant" begin
+        bc = Dict(1 => :dummy)
+        @test fieldtype(typeof(AprioriAmplitude(bc)), :band_cals) === typeof(bc)
+        # ref_ant's domain is what `_resolve_ref_ant` accepts: an antenna index
+        # or a station code.
+        @test FringeModel(ref_ant = 2).ref_ant == 2
+        @test FringeModel(ref_ant = "A1").ref_ant == "A1"
+        @test FringeModel(ref_ant = :A1).ref_ant === :A1
+        @test_throws MethodError FringeModel(ref_ant = 2.5)
+    end
+end
+
+# The solve produces a `Vector`-backed θ, but a caller may rewrap it — e.g. as a
+# labelled `DimArray` — and the whole apply path must be indifferent to that.
+@testset "a rewrapped θ corrects data identically" begin
+    uvset, _ = _build_fringe_uvset()
+    sol = fit(FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator(), uvset)
+    sold = CAL.CalibrationSolution(
+        sol.model, sol.layout, sol.geom,
+        DimArray(copy(sol.θ), Dim{:param}(1:(sol.layout.nθ))), sol.info;
+        stages = sol.stages, transforms = sol.transforms, postcal = sol.postcal,
+    )
+    @test sold.θ isa DimArray
+
+    a = Gustavo.apply_calibration(uvset, sol)
+    b = Gustavo.apply_calibration(uvset, sold)
+    @test Set(keys(DimensionalData.branches(a))) == Set(keys(DimensionalData.branches(b)))
+    for (k, leaf) in DimensionalData.branches(a)
+        Va = parent(leaf[:vis])
+        Vb = parent(DimensionalData.branches(b)[k][:vis])
+        # Bit-identical, not approximate: the same arithmetic on the same numbers.
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || x === y, zip(Va, Vb))
+    end
+end
