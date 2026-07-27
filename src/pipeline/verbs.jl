@@ -211,11 +211,6 @@ end
 # (`output === nothing` without a sink).
 function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing)
     ff = br.ff
-    est = ff.estimator
-    est isa Fringe.MatchedFilter || error(
-        "fit: $(typeof(est)) is not implemented yet — MatchedFilter is the only " *
-            "AbstractFringeEstimator with an implementation."
-    )
     solve_steps = SolveStep[ff]
     br.bp === nothing || push!(solve_steps, br.bp)
     br.sm === nothing || push!(solve_steps, br.sm)
@@ -310,7 +305,7 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, step_index::Int, comps; 
     while true
         start_pass!(step, ctx)
         flag_nt = sink === nothing ? nothing :
-            Fringe.flag_table(ctx.scratch[:fringe_flags], ctx.scratch[:excl])
+            Fringe.flag_table(_fringe_flags(ctx), ctx.scratch[:excl])
         results = Fringe.map_groups(
             ctx.stream; selection = fit_selection(step),
             snr = get(ctx.scratch, :scan_snr, nothing),
@@ -364,8 +359,10 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, step_index::Int, comps; 
     return nothing
 end
 
-# The solution-level `info` NamedTuple of a new-engine fit — the same field
-# names the monolith reports, assembled from the passes' scratch state.
+# The solution-level `info` NamedTuple of a new-engine fit, assembled from the
+# passes' scratch state. The per-scan detection tables are what the estimator
+# published: an estimator with no notion of matched-filter detections leaves
+# them empty rather than being required to fake them.
 function _new_engine_info(ctx::SolveContext, br)
     ngroups = length(ctx.stream.groups)
     fringe = _fringe_stage_info(ctx)
@@ -376,12 +373,12 @@ function _new_engine_info(ctx::SolveContext, br)
     return (;
         nant = ctx.nant,
         nscan = ngroups,
-        scan_max_snr = ctx.scratch[:scan_snr]::Vector{Float64},
-        scan_ncells = ctx.scratch[:scan_ncells]::Vector{Float64},
+        scan_max_snr = get(() -> zeros(ngroups), ctx.scratch, :scan_snr)::Vector{Float64},
+        scan_ncells = get(() -> zeros(ngroups), ctx.scratch, :scan_ncells)::Vector{Float64},
         scan_chi = fill(fringe.chi, ngroups),
         scan_ncomp = fill(fringe.ncomp, ngroups),
         stageB_rejected = fringe.rejected,
-        Fringe.flag_table(ctx.scratch[:fringe_flags], ctx.scratch[:excl])...,
+        Fringe.flag_table(_fringe_flags(ctx), ctx.scratch[:excl])...,
         # dTEC/SBD cover the whole track once the temporal-smoother pass ran;
         # without it only the scans the bandpass stage read were refined
         # (`refined_scans`) and the rest stay 0.
@@ -392,21 +389,24 @@ function _new_engine_info(ctx::SolveContext, br)
         dtec_rejected = get(ctx.scratch, :bp_dtec_rejected, 0) +
             get(ctx.scratch, :adhoc_dtec_rejected, 0),
         ant_names = String.(collect(ctx.antennas.name)),
-        search = br.ff.estimator.search,
+        Fringe.estimator_info(br.ff.estimator)...,
         precal_applied = any(t -> t isa Fringe.ApplySolution, br.tfs),
         ntasks_used = ctx.stream.ntasks,
         inner_tasks = ctx.stream.inner,
         t_search_pass = get(times, :fringe, 0.0),
         t_bandpass_stage = get(times, :bandpass, 0.0),
         t_adhoc_pass = get(times, :adhoc, 0.0),
-        scan_t_decode = ctx.scratch[:scan_t_decode]::Vector{Float64},
-        scan_t_search = ctx.scratch[:scan_t_search]::Vector{Float64},
+        scan_t_decode = get(() -> zeros(ngroups), ctx.scratch, :scan_t_decode)::Vector{Float64},
+        scan_t_search = get(() -> zeros(ngroups), ctx.scratch, :scan_t_search)::Vector{Float64},
         scan_t_decode2 = get(ctx.scratch, :scan_t_decode2, zeros(ngroups))::Vector{Float64},
         scan_t_adhoc = get(ctx.scratch, :scan_t_adhoc, zeros(ngroups))::Vector{Float64},
         scan_t_reduce = get(ctx.scratch, :scan_t_reduce, zeros(ngroups))::Vector{Float64},
-        Fringe.detection_table(ctx.scratch[:scan_dets])...,
+        Fringe.detection_table(get(() -> Vector{Fringe.DetectionRow}[], ctx.scratch, :scan_dets))...,
     )
 end
+
+# The stage-B-unconstrained (station, scan) pairs an estimator reported, or none.
+_fringe_flags(ctx::SolveContext) = get(() -> Tuple{Int, Int}[], ctx.scratch, :fringe_flags)
 
 # The fringe stage's recorded diagnostics (chi/ncomp/rejected) off the context.
 function _fringe_stage_info(ctx::SolveContext)

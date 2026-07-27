@@ -211,3 +211,108 @@
         @test any(r -> r.name === :bandpass, sol_fb.stages)
     end
 end
+
+# ── The estimator seam, exercised from outside the package ───────────────────
+#
+# `AbstractFringeEstimator` is a supported extension point, so the proof is an
+# estimator defined HERE — not in `src/` — driven all the way through `fit`.
+
+# Delegates both hooks to a MatchedFilter it wraps, counting the calls. Anything
+# it gets wrong shows up as a θ difference against the same fit run directly.
+struct _ProbeEstimator{E <: FP.AbstractFringeEstimator} <: FP.AbstractFringeEstimator
+    inner::E
+    scans::Base.RefValue{Int}
+    passes::Base.RefValue{Int}
+end
+_ProbeEstimator(inner) = _ProbeEstimator(inner, Ref(0), Ref(0))
+
+function FP.estimate_scan!(e::_ProbeEstimator, ctx, step, view)
+    e.scans[] += 1
+    return FP.estimate_scan!(e.inner, ctx, step, view)
+end
+function FP.finish_estimate!(e::_ProbeEstimator, ctx, step)
+    e.passes[] += 1
+    return FP.finish_estimate!(e.inner, ctx, step)
+end
+
+# Implements neither hook: must fail loudly rather than solve nothing.
+struct _SilentEstimator <: FP.AbstractFringeEstimator end
+
+# The independence probe: implements the interface and NOTHING else. It writes no
+# θ and publishes none of the matched filter's diagnostic scratch tables, so it
+# fails if any of them is secretly required to assemble a solution.
+struct _NullEstimator <: FP.AbstractFringeEstimator
+    scans::Base.RefValue{Int}
+end
+_NullEstimator() = _NullEstimator(Ref(0))
+function FP.estimate_scan!(e::_NullEstimator, ctx, step, view)
+    e.scans[] += 1
+    return (; max_snr = NaN)
+end
+FP.finish_estimate!(::_NullEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, rejected = 0)
+
+@testset "fringe estimator seam" begin
+    uvset, _ = _build_fringe_uvset()
+    model = FringeModel(ref_ant = 1)
+
+    @testset "an out-of-package estimator drives the whole pipeline" begin
+        probe = _ProbeEstimator(MatchedFilter())
+        sol = fit(
+            FringeFit(; model, estimator = probe) |> BandpassEstimator() |>
+                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            uvset,
+        )
+        ref = fit(
+            FringeFit(; model) |> BandpassEstimator() |>
+                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            uvset,
+        )
+        # Bit-identical, not approximate: the seam must not perturb the solve.
+        @test sol.θ == ref.θ
+        @test stage_names(sol) == stage_names(ref)
+        @test probe.scans[] == sol.info.nscan
+        @test probe.passes[] == 1
+    end
+
+    @testset "the step's refine service reaches an out-of-package estimator" begin
+        # Downstream stages depend on it, so a third-party estimator must get it
+        # without publishing it itself.
+        probe = _ProbeEstimator(MatchedFilter())
+        sol = fit(
+            FringeFit(; model = FringeModel(ref_ant = 1, sbd = true), estimator = probe) |>
+                BandpassEstimator(),
+            uvset,
+        )
+        @test any(r -> r.name === :bandpass, sol.stages)
+    end
+
+    @testset "an estimator publishing no diagnostics still yields a solution" begin
+        null = _NullEstimator()
+        sol = fit(FringeFit(; model, estimator = null), uvset)
+        @test null.scans[] == sol.info.nscan
+        @test all(iszero, sol.θ)                 # it solved nothing, by construction
+        @test isempty(sol.info.det_snr)          # no detections reported
+        @test isempty(sol.info.flagged_ant)
+        @test all(isnan, sol.info.scan_max_snr) || all(iszero, sol.info.scan_max_snr)
+        # `search` is MatchedFilter provenance, so this solution carries none.
+        @test !haskey(sol.info, :search)
+        @test haskey(fit(FringeFit(; model), uvset).info, :search)
+    end
+
+    @testset "an estimator implementing neither hook errors by name" begin
+        @test_throws "does not implement the fringe estimator interface" fit(
+            FringeFit(; model, estimator = _SilentEstimator()), uvset,
+        )
+        @test_throws "estimate_scan!" fit(
+            FringeFit(; model, estimator = _SilentEstimator()), uvset,
+        )
+    end
+
+    @testset "the estimator is carried as a type parameter, not an abstract field" begin
+        # Removing the old `::MatchedFilter` assertion would otherwise put a
+        # dynamic dispatch in the per-scan path.
+        @test isconcretetype(fieldtype(typeof(FringeFit()), :estimator))
+        @test fieldtype(typeof(FringeFit(estimator = _SilentEstimator())), :estimator) ===
+            _SilentEstimator
+    end
+end

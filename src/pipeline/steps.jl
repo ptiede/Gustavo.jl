@@ -21,9 +21,9 @@ The dTEC/SBD θ slots are owned by this step; `reuse_bandpass_refine` /
 `polish_dtec` control how later stages reuse or polish its per-scan
 refinements (see the legacy solver's kwargs of the same names).
 """
-Base.@kwdef struct FringeFit <: SolveStep
+Base.@kwdef struct FringeFit{E <: Fringe.AbstractFringeEstimator} <: SolveStep
     model::Fringe.FringeModel = Fringe.FringeModel()
-    estimator::Fringe.AbstractFringeEstimator = Fringe.MatchedFilter()
+    estimator::E = Fringe.MatchedFilter()
     reuse_bandpass_refine::Bool = true
     polish_dtec::Float64 = 20.0
 end
@@ -124,9 +124,37 @@ function start_pass!(s::FringeFit, ctx::SolveContext)
     return nothing
 end
 
-function process_scan!(s::FringeFit, ctx::SolveContext, v::Fringe.ScanDataView)
+process_scan!(s::FringeFit, ctx::SolveContext, v::Fringe.ScanDataView) =
+    Fringe.estimate_scan!(s.estimator, ctx, s, v)
+
+function finish_pass!(s::FringeFit, ctx::SolveContext)
+    info = Fringe.finish_estimate!(s.estimator, ctx, s)
+    # The refine service describes the per-scan θ columns THIS STEP owns, so it
+    # is the step's to publish and every estimator gets it. A pass that repeats
+    # has not finished writing those columns yet.
+    get(info, :repeat_pass, false) && return info
+    fm = s.model
+    ctx.scratch[:refine] = Fringe.RefineService(
+        Fringe._dispersion_plan(ctx.model, ctx.layout),
+        Fringe._perscan_delay_plan(ctx.model, ctx.layout),
+        Fringe._sbd_plans(ctx.model, ctx.layout),
+        fm.dtec_tie_colocated ? Fringe._colocated_ties(ctx.antennas) : nothing,
+        s.reuse_bandpass_refine, s.polish_dtec,
+    )
+    return info
+end
+
+# ── MatchedFilter: the per-baseline search + closure-screened station WLS ─────
+#
+# Defined qualified on the `Fringe` generics, not as bare `estimate_scan!`,
+# which would mint a second function here and leave the seam's fallback in place.
+
+Fringe.estimator_info(est::Fringe.MatchedFilter) = (; search = est.search)
+
+function Fringe.estimate_scan!(
+        est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit, v::Fringe.ScanDataView,
+    )
     round = ctx.scratch[:fringe_round]::Int
-    est = s.estimator::Fringe.MatchedFilter
     Vsearch = round > 1 ? Fringe.residual_vis(ctx.ev, ctx.θ, v) : v.vis
     res = Fringe.search_scan(ctx.stream, v, est.search; Vsearch = Vsearch)
     feeds = [correlation_feed_pair(p) for p in v.pol_products]
@@ -134,8 +162,7 @@ function process_scan!(s::FringeFit, ctx::SolveContext, v::Fringe.ScanDataView)
     return (; det, max_snr = res.max_snr, ncells = res.ncells, rows = res.rows)
 end
 
-function finish_pass!(s::FringeFit, ctx::SolveContext)
-    est = s.estimator::Fringe.MatchedFilter
+function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit)
     fm = s.model
     results = ctx.scratch[:pass_results]
     ngroups = length(ctx.stream.groups)
@@ -163,17 +190,9 @@ function finish_pass!(s::FringeFit, ctx::SolveContext)
     )
     ctx.scratch[:fringe_flags] = Fringe.unconstrained_flags(dets, covered, ctx.geom)
     round = ctx.scratch[:fringe_round]::Int
+    # Another round re-searches the residual; the step holds back its refine
+    # service until the last one.
     round < max(est.rounds, 1) && return (; repeat_pass = true, chi, ncomp, rejected = nrej)
-    # Final round: publish the dTEC/SBD refine service — the plans of the
-    # per-scan θ columns this step OWNS, invoked by the bandpass stage (and the
-    # temporal smoother at M5) so refinements land in FringeFit's slots.
-    ctx.scratch[:refine] = Fringe.RefineService(
-        Fringe._dispersion_plan(ctx.model, ctx.layout),
-        Fringe._perscan_delay_plan(ctx.model, ctx.layout),
-        Fringe._sbd_plans(ctx.model, ctx.layout),
-        fm.dtec_tie_colocated ? Fringe._colocated_ties(ctx.antennas) : nothing,
-        s.reuse_bandpass_refine, s.polish_dtec,
-    )
     return (; chi, ncomp, rejected = nrej)
 end
 
