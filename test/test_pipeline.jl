@@ -744,8 +744,7 @@ end
     # Without the term the dispersion survives as cross-band decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1),
-            dispersion = nothing,
+            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false)),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -789,8 +788,8 @@ end
         band_origins = origins, bandpass = ph, seed = 99, feed_common = true,
     )
     geom = CAL.build_geometry(uvset)
-    @test FP._sbd_bands(:auto, geom) !== nothing
-    @test FP._sbd_bands(false, geom) === nothing
+    # The SingleBandDelay element emits its per-band pair on this geometry.
+    @test length(CAL.model_components(SingleBandDelay(), geom)) == 2
 
     # Per-channel pooled coherence of one baseline after correction (time-avg
     # per channel, |Σ_c z| / Σ_c |z| across all channels).
@@ -814,8 +813,7 @@ end
 
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1),
-            dispersion = nothing,
+            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false)),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -836,8 +834,7 @@ end
     # Without the term the per-group slope survives as within-group decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, sbd = false),
-            dispersion = nothing,
+            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false)),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -888,7 +885,7 @@ end
 
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, sbd = false),
+            model = FringeModel(ref_ant = 1, terms = _fringe_terms(sbd = false)),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -962,8 +959,7 @@ end
     end
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, sbd = false),
-            dispersion = nothing,
+            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false)),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,

@@ -109,8 +109,11 @@ end
 
 function _perscan_delay_plan(model, layout)
     i = findfirst(
+        # NOT the per-band-group SBD delay (FrequencyBands) and NOT a
+        # feed-specific R–L delay (FeedComponent) — the refine stage's joint
+        # (Δτ, dTEC) fit updates the feed-common wideband delay only.
         tc -> tc.component.term isa Delay && !(tc.component.time isa GlobalTime) &&
-            tc.component.freq isa GlobalFrequency,   # NOT the per-band-group SBD delay
+            tc.component.freq isa GlobalFrequency && tc.tying isa SharedFeeds,
         model.phase,
     )
     return i === nothing ? nothing : layout.plans[i]
@@ -130,16 +133,6 @@ function _sbd_plans(model, layout)
     )
     j === nothing && error("SBD delay component present without its companion constant")
     return (dplan = layout.plans[i], cplan = layout.plans[j], bands = model.phase[i].component.freq.ranges)
-end
-
-# Resolve the `sbd` option (`:auto | true | false`) into the band-group channel
-# ranges, or `nothing` when disabled/unconstrainable. A single band group is
-# fully degenerate with the stage-B wideband delay, so the term needs ≥ 2.
-function _sbd_bands(sbd, geom::DataGeometry)
-    sbd === false && return nothing
-    sbd === true || sbd === :auto || error("sbd must be :auto, true or false (got $sbd)")
-    bands = fringe_band_groups(geom.channel_freqs)
-    return length(bands) >= 2 ? bands : nothing
 end
 
 # Index of the adhoc component (the per-integration phase term) within `model.phase`.

@@ -61,10 +61,17 @@
 
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
         uvset, truth = _build_fringe_uvset(nant = 4)
+        # Per-scan R–L delay: the default list with the feed-2 Delay element's
+        # time basis switched from GlobalTime to PerScan.
+        rl_perscan = map(
+            t -> t isa CAL.TiedComponent && t.component.term isa CAL.Delay &&
+                t.tying isa CAL.FeedComponent ?
+                CAL.TiedComponent(CAL.Delay(), CAL.PerScan(), CAL.GlobalFrequency(), CAL.FeedComponent(2)) : t,
+            default_fringe_terms(),
+        )
         sol = fit(
-            FringeFit(model = FringeModel(
-                ref_ant = 1, cross_feed = FP.CrossFeed(delay = CAL.PerScan()),
-            )) |> BandpassEstimator() |>
+            FringeFit(model = FringeModel(ref_ant = 1, terms = rl_perscan)) |>
+                BandpassEstimator() |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )

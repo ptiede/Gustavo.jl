@@ -75,15 +75,21 @@ end
 
 """
     TiedComponent(component, tying)
+    TiedComponent(term, time, freq, tying = PerFeed())
 
 A `GainComponent` together with its across-feed tying. `TiedComponent(component)`
-defaults to `PerFeed()`.
+defaults to `PerFeed()`; the four-argument form builds the `GainComponent`
+inline — `TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds())`.
 """
 struct TiedComponent{C <: GainComponent, T <: AbstractFeedTying}
     component::C
     tying::T
 end
 TiedComponent(component::GainComponent) = TiedComponent(component, PerFeed())
+TiedComponent(
+    term::AbstractGainTerm, time::AbstractTimeSegmentation,
+    freq::AbstractFrequencySegmentation, tying::AbstractFeedTying = PerFeed(),
+) = TiedComponent(GainComponent(term, time, freq), tying)
 
 term(tc::TiedComponent) = tc.component.term
 time_segmentation(tc::TiedComponent) = tc.component.time
@@ -118,6 +124,22 @@ _as_tied(c::GainComponent) = TiedComponent(c)
 
 phase_components(m::StationGainModel) = m.phase
 logamp_components(m::StationGainModel) = m.logamp
+
+# ── Model-list elements ──────────────────────────────────────────────────────
+
+"""
+    model_components(element, geom::DataGeometry) -> Tuple{Vararg{TiedComponent}}
+
+Compile one model-list element into zero or more `TiedComponent`s for the data
+geometry `geom`. A bare `TiedComponent` compiles to itself; wrapper elements
+(e.g. [`DispersionModel`](@ref)) consult the geometry and emit nothing when it
+cannot constrain their terms. The same generic applied to a pipeline step
+returns the step's `(; phase, logamp)` component lists — steps and list
+elements compose through one mechanism.
+"""
+function model_components end
+
+model_components(tc::TiedComponent, ::DataGeometry) = (tc,)
 
 # ── Per-component / per-model time-segmentation queries ──────────────────────
 # Used by solvers to route global-time vs per-scan components.
@@ -164,6 +186,7 @@ time_segmentation_label(::InstrumentScans) = "instrscans"
 frequency_segmentation_label(::GlobalFrequency) = "global"
 frequency_segmentation_label(::PerSpectralWindow) = "perspw"
 frequency_segmentation_label(s::ChannelBlocks) = "chblocks$(s.block_size)"
+frequency_segmentation_label(s::FrequencyBands) = "bands$(length(s.ranges))"
 
 function station_model_summary(name, m::StationGainModel)
     ph = isempty(m.phase) ? "—" : join(component_label.(m.phase), " + ")

@@ -20,6 +20,13 @@ const FP = Gustavo.Fringe
 const ST = Gustavo.Streaming
 const UVP = Gustavo.UVData
 
+# The default fringe term list with the geometry-gated elements optionally
+# dropped — most stage tests want the instrument-only model (no dTEC, no SBD).
+_fringe_terms(; dispersion = true, sbd = true) = filter(
+    t -> (dispersion || !(t isa DispersionModel)) && (sbd || !(t isa SingleBandDelay)),
+    default_fringe_terms(),
+)
+
 # ── Synthetic UVSet with injected station fringe parameters ──────────────────
 #
 # For baseline (a, b) and product p with feeds (fa, fb):

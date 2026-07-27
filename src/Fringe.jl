@@ -19,6 +19,9 @@ using ..UVData
 using ..UVData: Frequency, Baseline
 using ..Calibration
 using ..Calibration: ComponentPlan, _dispersion_enabled
+# `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
+# the model layer's element-compilation generic.
+import ..Calibration: model_components
 using ..Streaming
 # `CoverageTopup` (bandpass_stage.jl) is another `AbstractScanSelection`, so its
 # resolver must be a METHOD of the streaming layer's generic — defining
@@ -135,7 +138,7 @@ export ApplySolution, StationWeightScale, FlagChannels, CalFunction
 export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
 export select_scans
 export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info
-export MatchedFilter, FringeModel, CrossFeed
+export MatchedFilter, FringeModel, SingleBandDelay, default_fringe_terms
 # `DispersionModel` is `Calibration`'s (the propagation model beside the
 # `Dispersion` term it configures); re-exported so a caller driving the fringe
 # engine names it without a second `using`.

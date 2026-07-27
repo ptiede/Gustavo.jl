@@ -36,11 +36,11 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test Gustavo.required_grouping(FringeFit()) == :scan_complete
         # The bandpass pass streams the user's selection wrapped in the station
         # coverage top-up; the fringe pass always streams every scan
-        # (CrossFeed.fit_on masks rows, not scans).
+        # (the estimator's cross_hand_fit_on masks rows, not scans).
         bsel = Gustavo.fit_selection(BandpassEstimator(select = SourceScans("X")))
         @test bsel isa FP.CoverageTopup && bsel.inner.sources == ["X"]
-        @test Gustavo.fit_selection(FringeFit(model = FringeModel(
-            cross_feed = CrossFeed(fit_on = ScanIndices(1))))) isa AllScans
+        @test Gustavo.fit_selection(FringeFit(
+            estimator = MatchedFilter(cross_hand_fit_on = ScanIndices(1)))) isa AllScans
         # Solve steps refuse the sequential run_step chain.
         @test_throws ErrorException Gustavo.run_step(FringeFit(), Gustavo.CalibrationContext())
     end

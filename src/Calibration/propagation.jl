@@ -9,8 +9,8 @@
     DispersionModel(; require_band_separation = true, tie_colocated = true)
 
 The differential-ionosphere (dTEC) term: a per-scan, feed-common phase ∝ 1/ν.
-Give it to a `FringeFit` alongside its `FringeModel`, or pass
-`dispersion = nothing` for a fit that models no ionosphere at all.
+A `FringeModel` term-list element — include it in the list to model the
+ionosphere, omit it for a fit that models no ionosphere at all.
 
 - `require_band_separation` — solve the term only when the band layout can
   actually separate 1/ν from a linear delay: several sub-bands over a wide
@@ -29,6 +29,12 @@ Base.@kwdef struct DispersionModel
     require_band_separation::Bool = true
     tie_colocated::Bool = true
 end
+
+# The element compiles to the dTEC component, or to nothing when the band
+# layout cannot constrain it (see `_dispersion_enabled`).
+model_components(dm::DispersionModel, geom::DataGeometry) =
+    _dispersion_enabled(dm, geom) ?
+    (TiedComponent(Dispersion(), PerScan(), GlobalFrequency(), SharedFeeds()),) : ()
 
 # Whether this geometry gets a dTEC term. No model, no term. With one, the
 # `require_band_separation` gate asks whether the band layout can separate 1/ν

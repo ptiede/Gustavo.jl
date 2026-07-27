@@ -17,6 +17,9 @@ using .UVData
 
 include("Calibration.jl")
 using .Calibration
+# The pipeline layer's step methods extend the model layer's
+# element-compilation generic (see pipeline/protocol.jl).
+import .Calibration: model_components
 
 # Scan-group streaming: the substrate the solver stages run on. Between
 # `Calibration` (whose `DataGeometry`/`CalibrationSolution` it consumes) and
@@ -37,7 +40,8 @@ export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export AbstractExecutor, ThreadsExecutor, DaggerExecutor, with_executor
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
-export FringeFit, FringeModel, DispersionModel, CrossFeed, MatchedFilter, BandpassEstimator, TemporalSmoother
+export FringeFit, FringeModel, DispersionModel, SingleBandDelay, default_fringe_terms,
+    MatchedFilter, BandpassEstimator, TemporalSmoother
 export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagBandEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate

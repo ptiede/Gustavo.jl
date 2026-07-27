@@ -56,7 +56,7 @@ export basis_columns, nparams_per_block
 # Models and tying
 export GainComponent, TiedComponent, StationGainModel
 export AbstractFeedTying, PerFeed, SharedFeeds, ReferenceRelative, FeedComponent
-export phase_components, logamp_components
+export phase_components, logamp_components, model_components
 export phase_is_per_scan, amplitude_is_per_scan, component_is_per_scan
 export validate_station_gain_model, station_model_summary, component_label
 

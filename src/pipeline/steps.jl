@@ -6,28 +6,27 @@
 # the runner in verbs.jl drives them). Every pipeline runs on this engine.
 
 """
-    FringeFit(; model = FringeModel(), dispersion = DispersionModel(),
-              estimator = MatchedFilter(), reuse_bandpass_refine = true,
-              polish_dtec = 20.0)
+    FringeFit(; model = FringeModel(), estimator = MatchedFilter(),
+              reuse_bandpass_refine = true, polish_dtec = 20.0)
 
-The fringe-fitting stage. WHAT is solved is split across two models: `model`
-([`FringeModel`](@ref)) describes the INSTRUMENT — per-scan delay/rate/phase,
-the R–L selection, optional SBD — and `dispersion`
-([`DispersionModel`](@ref), or `nothing`) describes PROPAGATION through the
-ionosphere. HOW it is solved lives on `estimator`, a pluggable
-[`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
-(per-baseline delay/rate search + closure-screened station WLS).
+The fringe-fitting stage. WHAT is solved is `model` ([`FringeModel`](@ref)):
+the gauge pin plus the ordered phase-term list — per-scan constant/delay/rate,
+the R–L offsets, propagation ([`DispersionModel`](@ref)) and SBD
+([`SingleBandDelay`](@ref)) as list elements. HOW it is solved lives on
+`estimator`, a pluggable [`AbstractFringeEstimator`](@ref); by default
+[`MatchedFilter`](@ref) (per-baseline delay/rate search + closure-screened
+station WLS).
 
-The two models are separate specifications but one estimate: delay and dTEC are
-near-degenerate over a finite band, so the estimator fits them jointly.
+The terms are separate specifications but not separate estimates: delay and
+dTEC are near-degenerate over a finite band, so the estimator fits them
+jointly.
 
 The dTEC/SBD θ slots are owned by this step; `reuse_bandpass_refine` /
 `polish_dtec` control how later stages reuse or polish its per-scan
 refinements (see the legacy solver's kwargs of the same names).
 """
-Base.@kwdef struct FringeFit{E <: Fringe.AbstractFringeEstimator} <: SolveStep
-    model::Fringe.FringeModel = Fringe.FringeModel()
-    dispersion::Union{Nothing, DispersionModel} = DispersionModel()
+Base.@kwdef struct FringeFit{M <: Fringe.FringeModel, E <: Fringe.AbstractFringeEstimator} <: SolveStep
+    model::M = Fringe.FringeModel()
     estimator::E = Fringe.MatchedFilter()
     reuse_bandpass_refine::Bool = true
     polish_dtec::Float64 = 20.0
@@ -35,8 +34,8 @@ end
 provides(::FringeFit) = :fringe
 required_grouping(::FringeFit) = :scan_complete
 # NOTE: no `fit_selection` method — the fringe pass streams EVERY scan (the
-# default `AllScans`); `model.cross_feed.fit_on` masks cross-hand ROWS inside
-# the estimator's solve, it does not restrict which scans are read.
+# default `AllScans`); the estimator's `cross_hand_fit_on` masks cross-hand
+# ROWS inside its solve, it does not restrict which scans are read.
 
 """
     BandpassEstimator(; phase = true, amp = true,
@@ -106,7 +105,7 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 # ── Model components (compiled in step order into ONE StationGainModel) ───────
 
 model_components(s::FringeFit, spec) =
-    (; phase = Fringe.fringe_phase_components(s.model, s.dispersion, spec.geom), logamp = ())
+    (; phase = Fringe.fringe_phase_components(s.model, spec.geom), logamp = ())
 
 # The per-channel bandpass components: phase and log-amp, per feed, time-stable
 # (the legacy `_fringe_model` placement — after the fringe terms).
@@ -148,7 +147,7 @@ function finish_pass!(s::FringeFit, ctx::SolveContext)
         Calibration._dispersion_plan(ctx.model, ctx.layout),
         Fringe._perscan_delay_plan(ctx.model, ctx.layout),
         Fringe._sbd_plans(ctx.model, ctx.layout),
-        _dtec_ties(s.dispersion, ctx.antennas),
+        _dtec_ties(Fringe._dispersion_model(s.model), ctx.antennas),
         s.reuse_bandpass_refine, s.polish_dtec,
     )
     return info
@@ -173,7 +172,6 @@ function Fringe.estimate_scan!(
 end
 
 function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit)
-    fm = s.model
     results = ctx.scratch[:pass_results]
     ngroups = length(ctx.stream.groups)
     scan_snr = get!(() -> zeros(ngroups), ctx.scratch, :scan_snr)::Vector{Float64}
@@ -192,9 +190,13 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
         scan_t_decode[gi] += res.decode
         scan_t_search[gi] += res.work
     end
-    Fringe.mask_unselected_cross_hands!(dets, fm.cross_feed.fit_on, ctx.stream.groups, scan_snr)
+    Fringe.mask_unselected_cross_hands!(dets, est.cross_hand_fit_on, ctx.stream.groups, scan_snr)
     stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout)
-    opts = Fringe.resolve_closure(est, fm.cross_feed.rate !== nothing)
+    # An opted-in R–L rate is a feed-specific Rate component in THIS step's own
+    # model (other steps contribute no rate terms) — cross-hand rows must then
+    # join the rate system.
+    rl_rate_on = Fringe._has_feed_rate(Fringe.fringe_phase_components(s.model, ctx.geom))
+    opts = Fringe.resolve_closure(est, rl_rate_on)
     chi, ncomp, nrej, covered = Fringe.solve_station_systems!(
         ctx.θ, dets, stageB; ref_ant = ctx.ref_ant, opts = opts,
     )

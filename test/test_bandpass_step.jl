@@ -30,21 +30,21 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
         nant, nbands, nchan, bandpass = bp_true, amp_bandpass = abp_true,
     )
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    fm = FringeModel(sbd = false)
+    fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
 
     # The fuller-pipeline reference (adhoc is solved AFTER the bandpass, so its
     # presence must not move the fringe/bandpass blocks; dispersion/sbd are OFF
     # so no later stage refines the compared slots).
     sol_o = fit(
         CalibrationPipeline(
-            FringeFit(model = fm, dispersion = nothing), BandpassEstimator(), TemporalSmoother(adhoc);
+            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 1),
         ),
         uvset,
     )
     sol_n = fit(
         CalibrationPipeline(
-            FringeFit(model = fm, dispersion = nothing), BandpassEstimator();
+            FringeFit(model = fm), BandpassEstimator();
             exec = ExecutionConfig(ntasks = 1),
         ),
         uvset,
@@ -77,7 +77,7 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
     @testset "new-engine fold is deterministic across ntasks" begin
         sol_n4 = fit(
             CalibrationPipeline(
-                FringeFit(model = fm, dispersion = nothing), BandpassEstimator();
+                FringeFit(model = fm), BandpassEstimator();
                 exec = ExecutionConfig(ntasks = 4),
             ),
             uvset,
@@ -88,7 +88,7 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
     @testset "max_scans = 1 subset: blocks invariant under the smoother stage" begin
         sol_oc = fit(
             CalibrationPipeline(
-                FringeFit(model = fm, dispersion = nothing),
+                FringeFit(model = fm),
                 BandpassEstimator(select = FP.BrightestCalibrator(max_scans = 1)),
                 TemporalSmoother(adhoc);
                 exec = ExecutionConfig(ntasks = 1),
@@ -97,7 +97,7 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
         )
         sol_nc = fit(
             CalibrationPipeline(
-                FringeFit(model = fm, dispersion = nothing),
+                FringeFit(model = fm),
                 BandpassEstimator(select = FP.BrightestCalibrator(max_scans = 1));
                 exec = ExecutionConfig(ntasks = 1),
             ),
@@ -112,7 +112,7 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
 
     @testset "step order honors requires/provides" begin
         @test_throws ErrorException fit(
-            CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm, dispersion = nothing)), uvset)
+            CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
     end
 
     @testset "CoverageTopup selection" begin
@@ -142,7 +142,7 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
         @test _blk(bps, bps.layout.nphase + 1) == _blk(sol_n, sol_n.layout.nphase + jan)
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
         # A solution with no per-channel component refuses extraction.
-        sol_f = fit(FringeFit(model = fm, dispersion = nothing), uvset)
+        sol_f = fit(FringeFit(model = fm), uvset)
         @test_throws ErrorException bandpass_solution(sol_f)
     end
 

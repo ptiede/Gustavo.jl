@@ -79,9 +79,9 @@ end
         nant, nbands = 2, nchan = 8, nscans = 3,
         bandpass = bp_true, amp_bandpass = abp_true,
     )
-    fm = FringeModel(sbd = false)
+    fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
     pipe = CalibrationPipeline(
-        FringeFit(model = fm, dispersion = nothing), BandpassEstimator(), TemporalSmoother(adhoc);
+        FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc);
         exec = ExecutionConfig(ntasks = 1),
     )
     sol_n = fit(pipe, uvset)
@@ -98,7 +98,7 @@ end
         # θ bit-deterministic across group concurrency (per-block partials fold
         # in a fixed order regardless of ntasks/inner).
         pipe4 = CalibrationPipeline(
-            FringeFit(model = fm, dispersion = nothing), BandpassEstimator(), TemporalSmoother(adhoc);
+            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
         )
         @test fit(pipe4, uvset).θ == sol_n.θ
@@ -131,9 +131,14 @@ end
         # bandpass capped to the single best calibrator scan: that scan's
         # dTEC/SBD columns take the narrow polish window in the smoother pass
         # (`reuse_bandpass_refine`), the other scans the full grid.
+        # The default list with its DispersionModel element reconfigured in place
+        # (this band layout needs the gate off for the term to be emitted).
+        force_disp = map(
+            t -> t isa DispersionModel ? CAL.DispersionModel(require_band_separation = false) : t,
+            default_fringe_terms(),
+        )
         pd = CalibrationPipeline(
-            FringeFit(model = FringeModel(sbd = :auto),
-                dispersion = CAL.DispersionModel(require_band_separation = false)),
+            FringeFit(model = FringeModel(terms = force_disp)),
             BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 1),
@@ -155,8 +160,7 @@ end
         # Bit-deterministic across group concurrency through the whole
         # bandpass-refine + polish + adhoc chain.
         pd4 = CalibrationPipeline(
-            FringeFit(model = FringeModel(sbd = :auto),
-                dispersion = CAL.DispersionModel(require_band_separation = false)),
+            FringeFit(model = FringeModel(terms = force_disp)),
             BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
@@ -167,7 +171,7 @@ end
     @testset "FringeFit |> TemporalSmoother (no bandpass)" begin
         sol_fs = fit(
             CalibrationPipeline(
-                FringeFit(model = fm, dispersion = nothing), TemporalSmoother(adhoc);
+                FringeFit(model = fm), TemporalSmoother(adhoc);
                 exec = ExecutionConfig(ntasks = 1),
             ),
             uvset,
@@ -207,7 +211,7 @@ end
         ap = AprioriAmplitude(band_cals; min_elevation_deg = -Inf)
 
         pipe_ap = CalibrationPipeline(
-            FringeFit(model = fm, dispersion = nothing), BandpassEstimator(), TemporalSmoother(adhoc), ap;
+            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc), ap;
             exec = ExecutionConfig(ntasks = 1),
         )
         sol_ap, out_ap = fitcalibrate(pipe_ap, uvset)

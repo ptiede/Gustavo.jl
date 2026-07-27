@@ -133,16 +133,23 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
     @testset "defaults" begin
         f = FringeFit()
         @test f.model.ref_ant == 1
-        @test f.model.delay isa Gustavo.PerScan && f.model.rate isa Gustavo.PerScan
-        @test f.model.cross_feed.delay isa Gustavo.GlobalTime
-        @test f.model.cross_feed.rate === nothing          # tied ≡ 0
-        @test f.model.cross_feed.fit_on isa AllScans
-        @test f.model.sbd == :auto
-        @test f.dispersion == DispersionModel()
+        @test f.model.terms == default_fringe_terms()
+        # The default list: 5 feed-by-feed instrument components + the two
+        # geometry-gated wrappers, in compiled order.
+        @test length(f.model.terms) == 7
+        @test any(t -> t === DispersionModel(), f.model.terms)
+        @test any(t -> t isa SingleBandDelay, f.model.terms)
+        # No feed-specific Rate element: the R–L rate is tied ≡ 0 by default.
+        @test !any(
+            t -> t isa CAL.TiedComponent && t.component.term isa CAL.Rate &&
+                t.tying isa CAL.FeedComponent,
+            f.model.terms,
+        )
         @test f.estimator isa MatchedFilter
         @test f.estimator.search == FP.FringeSearch()
         @test f.estimator.closure == FP.Stationization()
         @test f.estimator.rounds == 1
+        @test f.estimator.cross_hand_fit_on isa AllScans
         @test f.reuse_bandpass_refine && f.polish_dtec == 20.0
 
         b = BandpassEstimator()

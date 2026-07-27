@@ -1,82 +1,137 @@
-# ── FringeFit stage: typed model selection + the matched-filter estimator ─────
+# ── FringeFit stage: the term-list fringe model + the matched-filter estimator ─
 #
 # The composable pipeline's fringe stage in three parts:
 #
-# - `FringeModel` — WHAT is solved: the gauge pin (`ref_ant`), the delay/rate
-#   segmentations, the typed R–L selection (`CrossFeed`), and the dispersion/SBD
-#   toggles. Purely declarative; `fringe_phase_components` compiles it into the
-#   gain-model components (ordering identical to the legacy `_fringe_model`, so
-#   the compiled layout matches the frozen oracle's fringe block exactly).
+# - `FringeModel` — WHAT is solved: the gauge pin (`ref_ant`) plus an ordered
+#   list of phase-term elements. Each element declares its own feed scope
+#   through its tying (`SharedFeeds`, `FeedComponent(2)`, …), so the model is
+#   specified feed by feed; adding an effect is adding an element.
+#   `fringe_phase_components` compiles each element through
+#   `model_components(element, geom)` and concatenates in list order.
 # - `MatchedFilter <: AbstractFringeEstimator` — HOW it is estimated: today's
 #   stage A (per-baseline delay/rate matched-filter search + closure-screened
-#   station WLS). The search and `Stationization` live HERE, not on the step —
-#   an alternative estimator (e.g. a Schwab–Cotton-style global LS) plugs in
-#   with no vestigial search/stationization options.
+#   station WLS). The search, `Stationization`, and the cross-hand
+#   fit-on-subset selection live HERE, not on the model — an alternative
+#   estimator (e.g. a Schwab–Cotton-style global LS) plugs in with no
+#   vestigial search/stationization options.
 # - The stage machinery the runner drives through the streaming layer:
 #   residual cubes for `rounds > 1`, R–L fit-on-subset masking, the stage-B
 #   component filter, and the detection/flag tables recorded on the solution.
 
 """
-    CrossFeed(; delay = GlobalTime(), rate = nothing, fit_on = AllScans())
+    SingleBandDelay()
 
-Typed R–L (feed-2 − feed-1) model selection for [`FringeModel`](@ref):
+Per-scan per-band-group single-band delay (fourfit's SBD) — a
+[`FringeModel`](@ref) term-list element. A station's per-band signal path can
+move relative to its phase-cal tones between scans (~30 ns has been observed),
+which neither the wideband delay (one slope across all band groups) nor the
+time-invariant per-channel bandpass can track. Instrumental, not propagation.
 
-- `delay` — the per-station R–L delay's time basis: `GlobalTime()` (one
-  instrumental offset per station for the whole track — bright polarized scans
-  pin it, weak scans inherit it; the robust default) or `PerScan()` (fit per
-  scan — its scatter is an instrument-stability diagnostic, at the cost that a
-  scan with no cross-hand detection leaves feed 2 untied).
-- `rate` — `nothing` keeps the R–L rate tied ≡ 0 (the EHT-HOPS convention: a
-  per-feed rate would lever hours of `t − t0` into arbitrary R–L jumps).
-  Passing a segmentation (`GlobalTime()`) OPTS INTO a solvable per-feed rate;
-  cross-hand rows are then included in the rate solve.
-- `fit_on` — which scans' CROSS-HAND rows feed the solve (fit-on-subset /
-  apply-everywhere: fit the R–L offset from a few bright polarized scans, apply
-  it track-wide). Parallel-hand rows are unaffected.
+Compiles to a coupled per-band-group pair — a per-scan `Delay` plus its
+companion per-scan constant, over `FrequencyBands` ranges computed from the
+data geometry ([`fringe_band_groups`](@ref)) — or to nothing when the
+frequency axis has fewer than 2 band groups (a single group is fully
+degenerate with the wideband delay). Fit from within-band chunk slopes by the
+refine stage, nearly orthogonal to the cross-band observables that set the
+wideband delay and dTEC.
 """
-struct CrossFeed{TD <: AbstractTimeSegmentation, TR <: Union{Nothing, AbstractTimeSegmentation}, S <: AbstractScanSelection}
-    delay::TD
-    rate::TR
-    fit_on::S
-    function CrossFeed(delay::TD, rate::TR, fit_on::S) where {TD, TR, S}
-        delay isa Union{GlobalTime, PerScan} ||
-            error("CrossFeed: delay must be GlobalTime() or PerScan() (got $(typeof(delay)))")
-        rate isa Union{Nothing, GlobalTime, PerScan} ||
-            error("CrossFeed: rate must be nothing (tied ≡ 0), GlobalTime() or PerScan() (got $(typeof(rate)))")
-        return new{TD, TR, S}(delay, rate, fit_on)
-    end
+struct SingleBandDelay end
+
+function model_components(::SingleBandDelay, geom::DataGeometry)
+    bands = fringe_band_groups(geom.channel_freqs)
+    length(bands) >= 2 || return ()
+    # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a
+    # group slope about the group's own centre νg needs the companion per-group
+    # constant −2πτ(νg − f0): net phase 2πτ(f − νg), zero at the group centre —
+    # the cross-band solution is untouched.
+    return (
+        TiedComponent(Delay(), PerScan(), FrequencyBands(bands), SharedFeeds()),
+        TiedComponent(ConstantTerm(), PerScan(), FrequencyBands(bands), SharedFeeds()),
+    )
 end
-CrossFeed(; delay = GlobalTime(), rate = nothing, fit_on = AllScans()) =
-    CrossFeed(delay, rate, fit_on)
 
 """
-    FringeModel(; ref_ant = 1, delay = PerScan(), rate = PerScan(), cross_feed = CrossFeed(),
-                sbd = :auto)
+    default_fringe_terms() -> Tuple
 
-WHAT the fringe stage solves of the INSTRUMENT — the model specification of a
-`FringeFit` step. Propagation through the ionosphere is a separate model, given
-to the step alongside this one ([`DispersionModel`](@ref)).
+The default [`FringeModel`](@ref) term list — the standard VLBI fringe model,
+specified feed by feed (compiled component order = list order):
+
+1. per-scan constant phase, feed-common (`SharedFeeds`): atmosphere/clock.
+2. R–L constant offset, `GlobalTime × FeedComponent(2)`: the instrumental
+   feed-2 − feed-1 phase offset, stable across the observation (EHT-HOPS /
+   rPICARD assumption) — solved once from all scans' cross hands, so bright
+   polarized scans pin it and weak scans inherit it.
+3. per-scan wideband (multi-band) delay, feed-common.
+4. R–L delay offset, `GlobalTime × FeedComponent(2)`: one instrumental offset
+   per station for the whole track. Replace `GlobalTime()` with `PerScan()` to
+   fit it per scan — its scatter is an instrument-stability diagnostic, at the
+   cost that a scan with no cross-hand detection leaves feed 2 untied.
+5. per-scan rate, feed-common: the fringe rate is common to both feeds. There
+   is deliberately NO feed-specific rate here — the Rate phase is
+   `2π·rate·(t − t0_global)` with the WHOLE-TRACK reference, so per-feed rate
+   noise is levered by hours into large, arbitrary scan-to-scan R–L phase
+   jumps; R–L rate is negligible (EHT-HOPS convention). A genuine offset is
+   opted into by ADDING `TiedComponent(Rate(), GlobalTime(),
+   GlobalFrequency(), FeedComponent(2))` — cross-hand rows then join the rate
+   solve.
+6. [`DispersionModel`](@ref)`()`: per-scan feed-common dTEC (emitted only when
+   the band layout can separate 1/ν from a linear delay).
+7. [`SingleBandDelay`](@ref)`()`: per-scan per-band-group delay (emitted only
+   when the frequency axis has ≥ 2 band groups).
+
+Omit an element to drop the effect; add a `Calibration.TiedComponent` (term ×
+time segmentation × frequency segmentation × feed tying) to model a new one.
+"""
+default_fringe_terms() = (
+    TiedComponent(ConstantTerm(), PerScan(), GlobalFrequency(), SharedFeeds()),
+    TiedComponent(ConstantTerm(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
+    TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
+    TiedComponent(Delay(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
+    TiedComponent(Rate(), PerScan(), GlobalFrequency(), SharedFeeds()),
+    DispersionModel(),
+    SingleBandDelay(),
+)
+
+"""
+    FringeModel(; ref_ant = 1, terms = default_fringe_terms())
+
+WHAT the fringe stage solves — the model specification of a `FringeFit` step:
+the gauge pin plus an ordered list of phase-term elements.
 
 - `ref_ant` — the gauge pin: a 1-based antenna index or a station code
   (`"PT"`). Part of the MODEL (it changes what is solved), not of the
   execution configuration.
-- `delay`, `rate` — feed-common segmentations (default `PerScan()`; the
-  matched-filter estimator currently supports only `PerScan()`).
-- `cross_feed` — the typed feed-2 − feed-1 selection ([`CrossFeed`](@ref)).
-- `sbd` — per-scan per-band-group single-band delay (fourfit SBD): `:auto` (on
-  when the frequency axis has ≥ 2 band groups), `true`, `false`. Instrumental,
-  not propagation: a per-band-group delay offset, so it belongs here.
+- `terms` — the ordered term list. Each element is either a bare
+  `Calibration.TiedComponent` (the generic element — a gain term × time
+  segmentation × frequency segmentation × feed tying) or a wrapper that
+  consults the data geometry at model-compile time ([`DispersionModel`](@ref),
+  [`SingleBandDelay`](@ref)). Adding an effect is adding an element; the list
+  order is the compiled component order. See [`default_fringe_terms`](@ref)
+  for the default list and how to modify it.
 """
-Base.@kwdef struct FringeModel
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1
-    delay::AbstractTimeSegmentation = PerScan()
-    rate::AbstractTimeSegmentation = PerScan()
-    cross_feed::CrossFeed = CrossFeed()
-    sbd::Union{Bool, Symbol} = :auto
+struct FringeModel{T <: Tuple}
+    ref_ant::Union{Integer, AbstractString, Symbol}
+    terms::T
+    function FringeModel{T}(ref_ant, terms) where {T}
+        # Elements read back BY TYPE from the list (`_dtec_ties` reads
+        # `tie_colocated` off THE DispersionModel element) must be unique in it.
+        count(t -> t isa DispersionModel, terms) <= 1 || throw(
+            ArgumentError("FringeModel: more than one DispersionModel element in `terms`."),
+        )
+        count(t -> t isa SingleBandDelay, terms) <= 1 || throw(
+            ArgumentError("FringeModel: more than one SingleBandDelay element in `terms`."),
+        )
+        return new{T}(ref_ant, terms)
+    end
+end
+function FringeModel(; ref_ant = 1, terms = default_fringe_terms())
+    tt = Tuple(terms)
+    return FringeModel{typeof(tt)}(ref_ant, tt)
 end
 
 """
-    MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1)
+    MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1,
+                  cross_hand_fit_on = AllScans())
 
 HOW the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)):
 today's stage A — a per-baseline delay/rate matched-filter `search` on every
@@ -85,54 +140,106 @@ the feeds and solves any track-global columns. `rounds` re-runs the search on
 the residual (each round divides out the current solution and accumulates the
 leftover) — an iteration knob of THIS estimator.
 
+`cross_hand_fit_on` selects which scans' CROSS-HAND rows feed the station
+solve (fit-on-subset / apply-everywhere: fit the R–L offsets from a few bright
+polarized scans, apply them track-wide). Parallel-hand rows are unaffected.
+
 When `search.pfa_max` is finite and `closure` is left at its default, the
 stationization's fixed SNR floor is dropped (`snr_min = 0`): the PFA gate IS
 the acceptance decision. A custom `closure` is used as given.
 """
-Base.@kwdef struct MatchedFilter <: AbstractFringeEstimator
+Base.@kwdef struct MatchedFilter{S <: AbstractScanSelection} <: AbstractFringeEstimator
     search::FringeSearch = FringeSearch()
     closure::Stationization = Stationization()
     rounds::Int = 1
+    cross_hand_fit_on::S = AllScans()
 end
 
 # ── Model compilation ─────────────────────────────────────────────────────────
 
 """
-    fringe_phase_components(fm::FringeModel, dm, geom::DataGeometry) -> Tuple
+    fringe_phase_components(fm::FringeModel, geom::DataGeometry) -> Tuple
 
-The fringe stage's gain-model phase components compiled from the instrument
-model `fm` and the propagation model `dm` (a [`DispersionModel`](@ref), or
-`nothing` for no ionosphere term), in the LEGACY `_fringe_model` order (per-scan
-constant, global R–L constant, delay, R–L delay, rate, [opt-in R–L rate,]
-[dispersion,] [SBD delay + constant]) — so the compiled layout's fringe block
-matches the frozen oracle's exactly whenever the optional R–L rate is off.
+The fringe stage's gain-model phase components: each element of `fm.terms`
+compiled through `model_components(element, geom)`, concatenated in list order
+— the list order IS the compiled component order.
+
+Throws `ArgumentError` when two compiled components share a routing signature:
+the structural plan routers (`_perscan_delay_plan`, `_sbd_plans`,
+`Calibration._dispersion_plan`) locate θ blocks by `findfirst` over (term,
+segmentation, tying) types, so a second matching component would compile θ
+columns no stage ever writes — a silent no-fit.
 """
-function fringe_phase_components(fm::FringeModel, dm, geom::DataGeometry)
-    fm.delay isa PerScan ||
-        error("FringeModel: the matched-filter stage currently supports delay = PerScan() only (got $(typeof(fm.delay)))")
-    fm.rate isa PerScan ||
-        error("FringeModel: the matched-filter stage currently supports rate = PerScan() only (got $(typeof(fm.rate)))")
-    fm.sbd in (:auto, true, false) ||
-        error("FringeModel: sbd must be :auto, true or false (got $(fm.sbd))")
-    rlrate = fm.cross_feed.rate === nothing ? () :
-        (TiedComponent(GainComponent(Rate(), fm.cross_feed.rate, GlobalFrequency()), FeedComponent(2)),)
-    disp = _dispersion_enabled(dm, geom) ?
-        (TiedComponent(GainComponent(Dispersion(), PerScan(), GlobalFrequency()), SharedFeeds()),) : ()
-    bands = _sbd_bands(fm.sbd, geom)
-    sbd = bands === nothing ? () : (
-        TiedComponent(GainComponent(Delay(), PerScan(), FrequencyBands(bands)), SharedFeeds()),
-        TiedComponent(GainComponent(ConstantTerm(), PerScan(), FrequencyBands(bands)), SharedFeeds()),
+function fringe_phase_components(fm::FringeModel, geom::DataGeometry)
+    comps = _compile_terms(fm.terms, geom)
+    _validate_fringe_components(comps)
+    return comps
+end
+
+_compile_terms(::Tuple{}, ::DataGeometry) = ()
+_compile_terms(ts::Tuple, geom::DataGeometry) =
+    (model_components(ts[1], geom)..., _compile_terms(Base.tail(ts), geom)...)
+
+# Reject compiled component sets a findfirst router cannot address uniquely,
+# and exact duplicates (indistinguishable θ blocks are degenerate columns).
+function _validate_fringe_components(comps::Tuple)
+    for i in eachindex(comps), j in (i + 1):length(comps)
+        _same_component_signature(comps[i], comps[j]) && throw(
+            ArgumentError(
+                "FringeModel: terms compile two identical components " *
+                    "($(component_label(comps[i]))) — the routers and solvers cannot " *
+                    "distinguish their θ blocks. Remove the duplicate element.",
+            ),
+        )
+    end
+    _at_most_one(comps, "the dispersion (dTEC) signature") do tc
+        tc.component.term isa Dispersion
+    end
+    _at_most_one(comps, "the per-scan feed-common delay signature") do tc
+        tc.component.term isa Delay && !(tc.component.time isa GlobalTime) &&
+            tc.component.freq isa GlobalFrequency && tc.tying isa SharedFeeds
+    end
+    _at_most_one(comps, "the per-band-group (SBD) delay signature") do tc
+        tc.component.term isa Delay && tc.component.freq isa FrequencyBands
+    end
+    _at_most_one(comps, "the per-band-group (SBD) constant signature") do tc
+        tc.component.term isa ConstantTerm && tc.component.freq isa FrequencyBands
+    end
+    return comps
+end
+
+function _at_most_one(pred, comps::Tuple, what::String)
+    n = count(pred, comps)
+    n <= 1 || throw(
+        ArgumentError(
+            "FringeModel: $n compiled components match $what — the plan router " *
+                "routes to the first and the rest would never be fit. Remove the " *
+                "duplicate element(s).",
+        ),
     )
-    return (
-        TiedComponent(GainComponent(ConstantTerm(), PerScan(), GlobalFrequency()), SharedFeeds()),
-        TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
-        TiedComponent(GainComponent(Delay(), fm.delay, GlobalFrequency()), SharedFeeds()),
-        TiedComponent(GainComponent(Delay(), fm.cross_feed.delay, GlobalFrequency()), FeedComponent(2)),
-        TiedComponent(GainComponent(Rate(), fm.rate, GlobalFrequency()), SharedFeeds()),
-        rlrate...,
-        disp...,
-        sbd...,
-    )
+    return nothing
+end
+
+_same_component_signature(a::TiedComponent, b::TiedComponent) =
+    typeof(a.component.term) === typeof(b.component.term) &&
+    a.component.time == b.component.time &&
+    _same_freq_segmentation(a.component.freq, b.component.freq) &&
+    a.tying == b.tying
+
+_same_freq_segmentation(a, b) = a == b
+_same_freq_segmentation(a::FrequencyBands, b::FrequencyBands) = a.ranges == b.ranges
+
+# Whether the compiled fringe components opt into a solvable feed-specific
+# rate (an R–L rate column) — cross-hand rows must then join the rate system.
+_has_feed_rate(comps) =
+    any(tc -> tc.component.term isa Rate && tc.tying isa FeedComponent, comps)
+
+# The DispersionModel element of the term list, or `nothing`. An element-level
+# (not compiled) read: `tie_colocated` is configuration, wanted even on
+# geometries where the dTEC term gates itself off.
+function _dispersion_model(fm::FringeModel)
+    i = findfirst(t -> t isa DispersionModel, fm.terms)
+    return i === nothing ? nothing : fm.terms[i]
 end
 
 # Stage-B engine components `(plan, kind)` — the delay/rate/const terms the
@@ -206,9 +313,9 @@ function residual_vis(ev::GainEvaluator, θ::AbstractVector, v::ScanDataView)
 end
 
 # R–L fit-on-subset: invalidate the CROSS-HAND detections of every scan the
-# `CrossFeed.fit_on` selection does NOT pick, so only the selected scans' cross-hand
-# rows feed the station solve — the solved time-global R–L components still
-# apply to every scan. Parallel-hand rows are untouched. `dets` is the per-scan
+# estimator's `cross_hand_fit_on` selection does NOT pick, so only the selected
+# scans' cross-hand rows feed the station solve — the solved time-global R–L
+# components still apply to every scan. Parallel-hand rows are untouched. `dets` is the per-scan
 # `StationScanDetections` vector (mutated); `snr` supplies per-scan SNRs for
 # selections that need them.
 function mask_unselected_cross_hands!(dets, fit_on::AbstractScanSelection, groups, snr)

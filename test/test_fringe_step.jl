@@ -14,11 +14,11 @@
     @testset "fringe blocks invariant under later stages" begin
         uvset, _ = _build_fringe_uvset()
         solm = fit(
-            FringeFit(model = FringeModel(ref_ant = 1, sbd = false), dispersion = nothing) |>
+            FringeFit(model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false))) |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )
-        sol = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
+        sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
         @test length(sol.model.phase) == 5
         rn = CAL.component_ranges(sol.layout)
         rm = CAL.component_ranges(solm.layout)
@@ -33,7 +33,10 @@
         @test sol.info.det_pfa == solm.info.det_pfa
 
         # ref_ant as a station code resolves identically.
-        sol_code = fit(FringeFit(model = FringeModel(ref_ant = "A1", sbd = false), dispersion = nothing), uvset)
+        sol_code = fit(
+            FringeFit(model = FringeModel(ref_ant = "A1", terms = _fringe_terms(dispersion = false, sbd = false))),
+            uvset,
+        )
         @test sol_code.θ == sol.θ
 
         # The snapshot machinery works on a single-stage solution.
@@ -48,16 +51,14 @@
         uvset, _ = _build_fringe_uvset()
         solm = fit(
             FringeFit(
-                model = FringeModel(ref_ant = 1, sbd = false),
-                dispersion = nothing,
+                model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false)),
                 estimator = MatchedFilter(rounds = 2),
             ) |> TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )
         sol = fit(
             FringeFit(
-                model = FringeModel(sbd = false),
-                dispersion = nothing,
+                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
                 estimator = MatchedFilter(rounds = 2),
             ), uvset,
         )
@@ -68,12 +69,18 @@
         end
     end
 
-    @testset "opt-in cross-feed rate (CrossFeed.rate)" begin
+    @testset "opt-in cross-feed rate (a feed-2 Rate list element)" begin
         inj = [0.0, 2.0e-4, -1.0e-4, 5.0e-5]
         uvset, _ = _build_fringe_uvset(rl_rate = inj)
-        mk(rate) = FringeModel(sbd = false, cross_feed = CrossFeed(rate = rate))
+        # A solvable R–L rate is ADDED to the term list — a feed-specific Rate
+        # component; the estimator detects it structurally and includes the
+        # cross-hand rows in the rate system.
+        rl_terms = (
+            _fringe_terms(dispersion = false, sbd = false)...,
+            CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
+        )
 
-        sol = fit(FringeFit(model = mk(Gustavo.GlobalTime()), dispersion = nothing), uvset)
+        sol = fit(FringeFit(model = FringeModel(terms = rl_terms)), uvset)
         @test length(sol.model.phase) == 6
         plan = sol.layout.plans[6]
         solved = [sol.θ[plan.off1[a, 2, 1, 1]] for a in 1:4]
@@ -81,29 +88,27 @@
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         uv0, _ = _build_fringe_uvset()
-        sol0 = fit(FringeFit(model = mk(Gustavo.GlobalTime()), dispersion = nothing), uv0)
+        sol0 = fit(FringeFit(model = FringeModel(terms = rl_terms)), uv0)
         plan0 = sol0.layout.plans[6]
         @test maximum(abs, [sol0.θ[plan0.off1[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
-        # Default (rate = nothing): the component does not exist — tied ≡ 0.
-        sold = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
+        # No feed-specific Rate element: the component does not exist — the
+        # R–L rate is tied ≡ 0.
+        sold = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
         @test length(sold.model.phase) == 5
     end
 
-    @testset "CrossFeed.fit_on masks cross-hand rows" begin
+    @testset "cross_hand_fit_on masks cross-hand rows" begin
         uvset, _ = _build_fringe_uvset()      # per-feed delay/phi ⇒ real R–L offset
-        base = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
+        base = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
         # The global feed-2 delay offset (component 4) is solved.
         @test any(!iszero, base.θ[CAL.component_ranges(base.layout)[4]])
 
         # Selecting the (only) scan is a no-op: bit-identical to AllScans.
         same = fit(
             FringeFit(
-                model = FringeModel(
-                    sbd = false,
-                    cross_feed = CrossFeed(fit_on = Gustavo.ScanIndices(1)),
-                ),
-                dispersion = nothing,
+                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
+                estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(1)),
             ), uvset,
         )
         @test same.θ == base.θ
@@ -114,11 +119,8 @@
         # is unperturbed beyond solver precision on this noiseless synthetic.
         masked = fit(
             FringeFit(
-                model = FringeModel(
-                    sbd = false,
-                    cross_feed = CrossFeed(fit_on = Gustavo.ScanIndices(10_000)),
-                ),
-                dispersion = nothing,
+                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
+                estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(10_000)),
             ), uvset,
         )
         @test all(isfinite, masked.θ)
@@ -149,8 +151,12 @@
         ws = [1.0, 0.5, 1.0, 2.0]
         # Weight scale: the search is invariant (snr from the |D|² plane), so
         # the fringe θ matches the untransformed solve bit-for-bit.
-        sol_ws = fit(StationWeightScale(ws) |> FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
-        sol = fit(FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
+        sol_ws = fit(
+            StationWeightScale(ws) |>
+                FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            uvset,
+        )
+        sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
         @test sol_ws.θ == sol.θ
         @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
 
@@ -164,7 +170,10 @@
                 minmax(a, b) == (1, 2) && (v.weights[:, :, bi, :] .= 0)
             end
         end
-        sol_cf, out = fitcalibrate(kill12 |> FringeFit(model = FringeModel(sbd = false), dispersion = nothing), uvset)
+        sol_cf, out = fitcalibrate(
+            kill12 |> FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            uvset,
+        )
         @test touched[] > 0
         @test sol_cf.transforms[1] isa CalFunction
         for (_, leaf) in DimensionalData.branches(out)
@@ -185,16 +194,12 @@
 
     @testset "model validation + full-pipeline option coverage" begin
         uvset, _ = _build_fringe_uvset()
-        @test_throws ErrorException fit(
-            FringeFit(model = FringeModel(delay = Gustavo.GlobalTime())), uvset)
-        @test_throws ErrorException CrossFeed(delay = Gustavo.PerIntegration())
-        @test_throws ErrorException CrossFeed(rate = Gustavo.PerIntegration())
-        # `dispersion` is no longer a FringeModel field — it is the step's own
-        # propagation model, so the instrument model rejects the keyword outright
-        # rather than validating a value domain.
+        # The model is the term list plus the gauge pin — no per-effect fields
+        # or keywords survive on FringeModel or FringeFit.
         @test_throws MethodError FringeModel(dispersion = :maybe)
-        @test :dispersion ∉ fieldnames(FringeModel)
-        @test :dispersion ∈ fieldnames(typeof(FringeFit()))
+        @test_throws MethodError FringeModel(sbd = false)
+        @test fieldnames(FringeModel) == (:ref_ant, :terms)
+        @test :dispersion ∉ fieldnames(typeof(FringeFit()))
 
         # The options the legacy bridge used to reject (custom Stationization,
         # the R–L rate opt-in, fit_on subsetting, arbitrary CalFunction
@@ -203,9 +208,14 @@
             CalibrationPipeline(
                 CalFunction(v -> nothing),
                 FringeFit(
-                    model = FringeModel(cross_feed = CrossFeed(
-                        rate = Gustavo.GlobalTime(), fit_on = Gustavo.ScanIndices(1))),
-                    estimator = MatchedFilter(closure = FP.Stationization(snr_min = 3.0)),
+                    model = FringeModel(terms = (
+                        default_fringe_terms()...,
+                        CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
+                    )),
+                    estimator = MatchedFilter(
+                        closure = FP.Stationization(snr_min = 3.0),
+                        cross_hand_fit_on = Gustavo.ScanIndices(1),
+                    ),
                 ),
                 BandpassEstimator(), TemporalSmoother();
                 exec = ExecutionConfig(ntasks = 1),
@@ -217,6 +227,62 @@
         # stage (F |> B — no final pass).
         sol_fb = fit(CalibrationPipeline(FringeFit(), BandpassEstimator()), uvset)
         @test any(r -> r.name === :bandpass, sol_fb.stages)
+    end
+
+    @testset "term-list compilation: order, gating, duplicate rejection" begin
+        uvset, _ = _build_fringe_uvset()   # 2 band groups; narrow fractional bandwidth
+        geom = CAL.build_geometry(uvset)
+        sig(tc) = (
+            typeof(tc.component.term), typeof(tc.component.time),
+            typeof(tc.component.freq), typeof(tc.tying),
+        )
+
+        # The default list compiles IN LIST ORDER to the standard sequence: on
+        # this geometry the dispersion gate is closed (nb < 4) and the SBD gate
+        # open (2 band groups), so 7 elements → 7 components.
+        comps = FP.fringe_phase_components(FringeModel(), geom)
+        @test collect(map(sig, comps)) == [
+            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.ConstantTerm, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
+            (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.Delay, CAL.PerScan, CAL.FrequencyBands, CAL.SharedFeeds),
+            (CAL.ConstantTerm, CAL.PerScan, CAL.FrequencyBands, CAL.SharedFeeds),
+        ]
+
+        # Geometry-gated elements emit nothing when unconstrainable.
+        @test isempty(CAL.model_components(DispersionModel(), geom))
+        @test length(CAL.model_components(
+            DispersionModel(require_band_separation = false), geom)) == 1
+        narrow, _ = _build_fringe_uvset(nbands = 1)
+        @test isempty(CAL.model_components(SingleBandDelay(), CAL.build_geometry(narrow)))
+        # A bare TiedComponent compiles to itself.
+        tc = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2))
+        @test CAL.model_components(tc, geom) === (tc,)
+
+        # Exact duplicate components are rejected by message.
+        dup = (
+            default_fringe_terms()...,
+            CAL.TiedComponent(CAL.Delay(), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()),
+        )
+        @test_throws "two identical components" FP.fringe_phase_components(
+            FringeModel(terms = dup), geom)
+
+        # A second component matching a findfirst router's signature — without
+        # being an exact duplicate — is rejected naming the signature.
+        collide = (
+            default_fringe_terms()...,
+            CAL.TiedComponent(CAL.Delay(), CAL.TimeBlocks(1.0), CAL.GlobalFrequency(), CAL.SharedFeeds()),
+        )
+        @test_throws "per-scan feed-common delay signature" FP.fringe_phase_components(
+            FringeModel(terms = collide), geom)
+
+        # Elements read back BY TYPE from the list are unique at construction.
+        @test_throws "more than one DispersionModel" FringeModel(
+            terms = (default_fringe_terms()..., DispersionModel(tie_colocated = false)))
+        @test_throws "more than one SingleBandDelay" FringeModel(
+            terms = (default_fringe_terms()..., SingleBandDelay()))
     end
 end
 
@@ -287,7 +353,7 @@ FP.finish_estimate!(::_NullEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, reje
         # without publishing it itself.
         probe = _ProbeEstimator(MatchedFilter())
         sol = fit(
-            FringeFit(; model = FringeModel(ref_ant = 1, sbd = true), estimator = probe) |>
+            FringeFit(; model = FringeModel(ref_ant = 1), estimator = probe) |>
                 BandpassEstimator(),
             uvset,
         )
@@ -338,10 +404,12 @@ end
     )
     mf = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid()))
 
-    @testset "the instrument model no longer carries the ionosphere" begin
+    @testset "the ionosphere is a term-list element, not a field" begin
         @test :dispersion ∉ fieldnames(FringeModel)
         @test :dtec_tie_colocated ∉ fieldnames(FringeModel)
-        @test :sbd ∈ fieldnames(FringeModel)      # instrumental: stays put
+        # Instrumental terms stay in the instrument model's default list.
+        @test any(t -> t isa SingleBandDelay, FringeModel().terms)
+        @test any(t -> t isa DispersionModel, FringeModel().terms)
         @test fieldnames(DispersionModel) == (:require_band_separation, :tie_colocated)
     end
 
@@ -369,8 +437,12 @@ end
         # additionally needs a stage that refines it (see the dispersion testset in
         # test_pipeline.jl). What this asserts is the model structure the step built.
         on = fit(FringeFit(model = FringeModel(ref_ant = 1), estimator = mf), uvset)
-        off = fit(FringeFit(model = FringeModel(ref_ant = 1), dispersion = nothing,
-                estimator = mf), uvset)
+        off = fit(
+            FringeFit(
+                model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false)),
+                estimator = mf,
+            ), uvset,
+        )
         @test CAL._dispersion_plan(on.model, on.layout) !== nothing
         @test CAL._dispersion_plan(off.model, off.layout) === nothing
         @test any(tc -> tc.component.term isa CAL.Dispersion, on.model.phase)
