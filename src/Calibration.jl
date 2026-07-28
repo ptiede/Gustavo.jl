@@ -51,7 +51,6 @@ export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
 # Terms
 export AbstractGainTerm
 export ConstantTerm, Delay, Dispersion, Rate, Polynomial, PolynomialFreq, PolynomialTime
-export PerChannel
 export nparams_per_block
 
 # Models and tying

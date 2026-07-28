@@ -136,31 +136,26 @@ end
 """
     fringe_bandpass_spectrum(sol::CalibrationSolution) -> (freqs, gains)
 
-Like [`fringe_gain_spectrum`](@ref) but evaluates ONLY the per-channel phase
-bandpass component — the per-scan delay slope (`2π·τ·(f−f0)`), constant, rate and
-R–L terms are zeroed — so `angle.(gains)` is the RESIDUAL instrumental passband
+Like [`fringe_gain_spectrum`](@ref) but evaluates ONLY the phase bandpass
+component — the per-scan delay slope (`2π·τ·(f−f0)`), constant, rate and R–L
+terms are zeroed — so `angle.(gains)` is the RESIDUAL instrumental passband
 ripple with the (large, station-dependent) delay wrap removed. This is the
 readable bandpass diagnostic: without it, a station with a big group delay shows a
 `2π·τ·(f−f0)` sawtooth that wraps many times across the band and buries the ripple.
 Returns `(channel_freqs, gains::(nchan, nant, 2))`. The bandpass is time-invariant,
-so no time index is needed. Errors if the model carries no `PerChannel` component.
+so no time index is needed. Errors if the model carries no bandpass component.
 """
 function fringe_bandpass_spectrum(sol::CalibrationSolution)
     layout = sol.layout
-    bp_i = findfirst(tc -> tc.component.term isa PerChannel, sol.model.phase)
+    bp_i = findfirst(_is_bandpass, sol.model.phase)
     bp_i === nothing &&
-        error("fringe_bandpass_spectrum: model has no per-channel phase bandpass component")
-    bp = layout.plans[bp_i]
-    # θ with every parameter zeroed EXCEPT this component's per-channel blocks (start
-    # column `off1[a,f,1,fseg]`, one parameter per channel of that freq segment), so
-    # `evaluate_gains` returns the bandpass-only gain (all other terms → unit gain).
+        error("fringe_bandpass_spectrum: model has no phase bandpass component")
+    # θ with every parameter zeroed EXCEPT the bandpass component's own
+    # contiguous range, so `evaluate_gains` returns the bandpass-only gain (all
+    # other terms → unit gain).
     θbp = fill!(similar(sol.θ), 0)
-    for a in 1:layout.nant, f in 1:2, fseg in axes(bp.off1, 4)
-        start = bp.off1[a, f, 1, fseg]
-        start == 0 && continue
-        len = count(==(fseg), bp.fseg_id)
-        @views θbp[start:(start + len - 1)] .= sol.θ[start:(start + len - 1)]
-    end
+    rng = component_ranges(layout)[bp_i]
+    θbp[rng] = sol.θ[rng]
     ev = GainEvaluator(sol.model, sol.layout)
     g = evaluate_gains(ev, θbp, 1:(layout.nchan), 1:1)   # time-invariant → any ti
     return sol.geom.channel_freqs, g[:, 1, :, :]

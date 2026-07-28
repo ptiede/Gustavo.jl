@@ -23,7 +23,6 @@ struct ComponentPlan
     fseg_id::Vector{Int}        # length nchan  → freq-segment id
     xf::Vector{Float64}         # length nchan  → frequency coordinate
     xt::Vector{Float64}         # length ntime  → time coordinate
-    clocal::Vector{Int}         # length nchan  → local channel index within its fseg
     nchan_seg::Vector{Int}      # length nfseg  → channels in the frequency segment
     off1::Array{Int, 4}         # (ant, feed, ntseg, nfseg)
     off2::Array{Int, 4}
@@ -68,15 +67,6 @@ function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next:
     xt = :Ti in axes ? time_coordinate(t, geom.times, tseg_groups, geom.t0) :
         zeros(Float64, ntimes(geom))
 
-    # Local channel index within each frequency segment (walk in channel order).
-    nchan = nchannels(geom)
-    clocal = Vector{Int}(undef, nchan)
-    counter = zeros(Int, nfseg)
-    @inbounds for c in 1:nchan
-        f = fseg_id[c]
-        counter[f] += 1
-        clocal[c] = counter[f]
-    end
     # Channels per freq segment, and the block length each implies (only terms
     # whose arity comes from the data vary with it).
     nchan_seg = [length(grp) for grp in fseg_groups]
@@ -92,7 +82,7 @@ function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next:
     end
 
     plan = ComponentPlan(
-        collect(Symbol, axes), tseg_id, fseg_id, xf, xt, clocal, nchan_seg, off1, off2
+        collect(Symbol, axes), tseg_id, fseg_id, xf, xt, nchan_seg, off1, off2
     )
     return plan, next
 end

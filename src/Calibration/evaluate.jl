@@ -35,13 +35,12 @@ end
     val = zero(eltype(θ))
     x = _cell_coordinates(t, plan, ti, c)
     @inbounds shapes = param_shapes(t, plan.nchan_seg[fs])
-    shift = _channel_shift(t, plan, c, shapes)
     if o1 != 0
-        val += term_eval(t, _block_params(shapes, θ, o1 + shift), x)
+        val += term_eval(t, _block_params(shapes, θ, o1), x)
     end
     @inbounds o2 = plan.off2[ant, feed, ts, fs]
     if o2 != 0
-        val += term_eval(t, _block_params(shapes, θ, o2 + shift), x)
+        val += term_eval(t, _block_params(shapes, θ, o2), x)
     end
     return val
 end
@@ -57,17 +56,6 @@ end
     v = first(names) === :Frequency ? (@inbounds plan.xf[c]) : (@inbounds plan.xt[ti])
     return (v, _axis_values(Base.tail(names), plan, ti, c)...)
 end
-
-# Blocks of a `params_per_channel` term hold one parameter group per channel of
-# the frequency segment; this cell reads the group for its own channel.
-@inline function _channel_shift(t::AbstractGainTerm, plan::ComponentPlan, c, shapes)
-    params_per_channel(t) || return 0
-    @inbounds cl = plan.clocal[c]
-    return (cl - 1) * _group_size(values(shapes))
-end
-
-@inline _group_size(::Tuple{}) = 0
-@inline _group_size(shapes::Tuple) = prod(first(shapes)) + _group_size(Base.tail(shapes))
 
 # Address the parameters of one block: the declared names, in declaration order,
 # starting at `off` in θ. The layout reserved exactly `nparams_per_block` entries

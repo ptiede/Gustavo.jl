@@ -39,15 +39,22 @@ required_grouping(::FringeFit) = :scan_complete
 
 """
     BandpassEstimator(; phase = true, amp = true,
+                      freq = ChannelBlocks(1),
                       amp_model = PenalizedBandpass(1.0),
                       select = BrightestCalibrator())
 
-The bandpass stage: per-channel phase / log-amplitude station bandpass solved
-from the fringe-corrected residual of the scans `select` picks
-(fit-on-subset / apply-everywhere: the time-global bandpass fit from a few
-bright calibrator scans applies to the whole track). `amp_model` is the
+The bandpass stage: the time-global phase / log-amplitude station bandpass
+solved from the fringe-corrected residual of the scans `select` picks
+(fit-on-subset / apply-everywhere: the bandpass fit from a few bright
+calibrator scans applies to the whole track). `amp_model` is the
 amplitude-shape estimator ([`PenalizedBandpass`](@ref) /
 [`PolynomialBandpass`](@ref) / [`FreeBandpass`](@ref)).
+
+`freq` sets how finely the bandpass is resolved in frequency: the default
+[`ChannelBlocks`](@ref)`(1)` is one free value per channel, and
+`ChannelBlocks(k)` ties each `k` consecutive channels of a spw to one value —
+fewer parameters, and each fit from `k` channels' worth of signal, for tracks
+where the per-channel SNR will not support a free bandpass.
 
 `select` accepts any [`AbstractScanSelection`](@ref); the default
 [`BrightestCalibrator`](@ref) reproduces the legacy total-SNR calibrator pick
@@ -57,6 +64,7 @@ highest-SNR scans).
 Base.@kwdef struct BandpassEstimator <: SolveStep
     phase::Bool = true
     amp::Bool = true
+    freq::ChannelBlocks = ChannelBlocks(1)
     amp_model::Fringe.AbstractBandpassSmoother = Fringe.PenalizedBandpass(1.0)
     select::Fringe.AbstractScanSelection = Fringe.BrightestCalibrator()
 end
@@ -126,10 +134,11 @@ function model_components(s::FringeFit, spec)
     return (; phase = comps, logamp = ())
 end
 
-# The per-channel bandpass components: phase and log-amp, per feed, time-stable
-# (the legacy `_fringe_model` placement — after the fringe terms).
+# The bandpass components: phase and log-amp, per feed, time-stable, resolved in
+# frequency by `s.freq` (the legacy `_fringe_model` placement — after the fringe
+# terms).
 function model_components(s::BandpassEstimator, spec)
-    bpc = TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed())
+    bpc = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), s.freq), PerFeed())
     return (; phase = s.phase ? (bpc,) : (), logamp = s.amp ? (bpc,) : ())
 end
 

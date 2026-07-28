@@ -46,9 +46,6 @@ end
     # cannot disagree with the names.
     @test CAL.param_shapes(CAL.Delay(), 7) == (delay = (),)
     @test CAL.param_shapes(CAL.PolynomialFreq(3), 7) == (coeffs = (3,),)
-    # A per-channel term declares ONE channel's group; the block holds one per
-    # channel, so the block length still scales with the segment.
-    @test CAL.param_shapes(CAL.PerChannel(), 7) == (gain = (),)
 
     # One `Polynomial` term; the axis it reads is a type parameter, and the
     # convenience constructors are functions returning it.
@@ -65,16 +62,15 @@ end
     # channel index is never one of them.
     @test CAL.term_axes(CAL.Delay()) == (:Frequency,)
     @test CAL.term_axes(CAL.Rate()) == (:Ti,)
-    @test CAL.term_axes(CAL.PerChannel()) == ()
-    @test CAL.params_per_channel(CAL.PerChannel())
-    @test !CAL.params_per_channel(CAL.Delay())
+    @test CAL.term_axes(CAL.ConstantTerm()) == ()
 
+    # A block's size never depends on how many channels its segment holds: how
+    # finely a term varies in frequency is said by the segmentation.
     @test CAL.nparams_per_block(CAL.ConstantTerm(), 7) == 1
     @test CAL.nparams_per_block(CAL.Delay(), 7) == 1
     @test CAL.nparams_per_block(CAL.Rate(), 7) == 1
     @test CAL.nparams_per_block(CAL.PolynomialFreq(3), 7) == 3
     @test CAL.nparams_per_block(CAL.PolynomialTime(2), 7) == 2
-    @test CAL.nparams_per_block(CAL.PerChannel(), 7) == 7
 
     # scalar term_eval primitives: a term sees its own named parameters and the
     # coordinates `term_axes` declares, under those names.
@@ -82,7 +78,6 @@ end
     @test CAL.term_eval(CAL.Delay(), (delay = 0.3,), (Frequency = 4.0,)) ≈ 2π * 0.3 * 4.0
     @test CAL.term_eval(CAL.Rate(), (rate = 0.3,), (Ti = 5.0,)) ≈ 2π * 0.3 * 5.0
     @test CAL.term_eval(CAL.Dispersion(), (dtec = 0.3,), (Frequency = 4.0,)) ≈ 0.3 * 4.0
-    @test CAL.term_eval(CAL.PerChannel(), (gain = -0.7,), NamedTuple()) == -0.7
     @test CAL.term_eval(
         CAL.PolynomialFreq(3), (coeffs = [0.3, 1.5, -0.7],), (Frequency = 2.0,)
     ) ≈ 0.3 * 2 + 1.5 * 4 + (-0.7) * 8
@@ -272,7 +267,7 @@ end
     model = CAL.StationGainModel(
         phase = (
             CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),
-            CAL.TiedComponent(CAL.GainComponent(CAL.PerChannel(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
+            CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.ChannelBlocks(1)), CAL.SharedFeeds()),
         ),
     )
     layout = CAL.plan_parameters(model, nant, geom)

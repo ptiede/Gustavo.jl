@@ -65,9 +65,6 @@ Polynomial in a segment-scaled time coordinate. Dispatch on `Polynomial` (or
 """
 PolynomialTime(degree::Integer) = Polynomial{:Ti}(degree)
 
-"One free parameter per channel within the frequency segment (the classic bandpass)."
-struct PerChannel <: AbstractGainTerm end
-
 # ── Coordinate axes ──────────────────────────────────────────────────────────
 #
 # `term_axes(term)` names the coordinate axes a term reads: `:Frequency`, `:Ti`,
@@ -82,25 +79,15 @@ term_axes(::Delay) = (:Frequency,)
 term_axes(::Dispersion) = (:Frequency,)
 term_axes(::Rate) = (:Ti,)
 term_axes(::Polynomial{C}) where {C} = (C,)
-term_axes(::PerChannel) = ()
-
-# ── Per-channel parameters ───────────────────────────────────────────────────
-#
-# A term whose parameters are one group PER CHANNEL of its frequency segment
-# declares it here; `param_shapes` then describes one channel's group, the block
-# holds one per channel, and `term_eval` is handed this channel's. A channel
-# index is a position in the layout, not a physical coordinate, so it never
-# reaches a term through `term_axes`.
-params_per_channel(::AbstractGainTerm) = false
-params_per_channel(::PerChannel) = true
 
 # ── Parameter names and shapes ───────────────────────────────────────────────
 #
-# `param_shapes(term, nchan_seg)` names the parameters of one group and gives
+# `param_shapes(term, nchan_seg)` names the parameters of one block and gives
 # each one a shape: `()` for a scalar, `(n,)` for a vector of length `n`.
 # `nchan_seg` is the number of channels in the term's frequency segment, for the
-# terms whose arity the data sets. A block holds one group, or — for a
-# `params_per_channel` term — one group per channel.
+# terms whose arity the data sets. How finely a term varies in frequency is said
+# by its frequency SEGMENTATION, not by its parameter count: a free value per
+# channel is `ConstantTerm` × `ChannelBlocks(1)`.
 #
 # `term_eval` receives these as a `NamedTuple`, so a term author writes `p.delay`
 # and never a position into a block whose length they would have to know. Shapes
@@ -116,25 +103,16 @@ param_shapes(::Delay, nchan_seg) = (delay = (),)
 param_shapes(::Dispersion, nchan_seg) = (dtec = (),)
 param_shapes(::Rate, nchan_seg) = (rate = (),)
 param_shapes(t::Polynomial, nchan_seg) = (coeffs = (t.degree,),)
-param_shapes(::PerChannel, nchan_seg) = (gain = (),)
-
-# Total size of one parameter group.
-nparams_per_group(t::AbstractGainTerm, nchan_seg) =
-    sum(prod, values(param_shapes(t, nchan_seg)))
 
 """
     nparams_per_block(term, nchan_seg) -> Int
 
 Number of parameters one (time-segment, frequency-segment) block of `term`
-occupies in θ: one parameter group, or one per channel of the frequency segment
-if the term declares `params_per_channel`. A term names its parameters rather
-than counting them, so a count can never disagree with the names it is derived
-from.
+occupies in θ. A term names its parameters rather than counting them, so a count
+can never disagree with the names it is derived from.
 """
-function nparams_per_block(t::AbstractGainTerm, nchan_seg)
-    n = nparams_per_group(t, nchan_seg)
-    return params_per_channel(t) ? nchan_seg * n : n
-end
+nparams_per_block(t::AbstractGainTerm, nchan_seg) =
+    sum(prod, values(param_shapes(t, nchan_seg)))
 
 # ── Coordinate builders ──────────────────────────────────────────────────────
 #
@@ -202,7 +180,6 @@ end
 @inline term_eval(::Delay, p, x) = 2π * p.delay * x.Frequency
 @inline term_eval(::Dispersion, p, x) = p.dtec * x.Frequency
 @inline term_eval(::Rate, p, x) = 2π * p.rate * x.Ti
-@inline term_eval(::PerChannel, p, x) = p.gain
 
 # Σ_{d=1}^{degree} c_d · x^d, in the axis this polynomial declared. The basis
 # starts at x¹: a constant belongs to an accompanying `ConstantTerm`, and
@@ -219,4 +196,3 @@ term_label(::Dispersion) = "dtec"
 term_label(::Rate) = "rate"
 term_label(t::Polynomial{:Frequency}) = "polyf$(t.degree)"
 term_label(t::Polynomial{:Ti}) = "polyt$(t.degree)"
-term_label(::PerChannel) = "perchan"

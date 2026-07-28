@@ -178,7 +178,7 @@ end
         )
         @test Gustavo.stage_names(sol_fs) == [:fringe, :adhoc]
         phases = collect(sol_fs.model.phase)
-        @test !any(tc -> CAL.term(tc) isa CAL.PerChannel, phases)
+        @test !any(CAL._is_bandpass, phases)
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(sol_fs, ipi))
         # Without the bandpass stage the injected per-channel bandpass survives,

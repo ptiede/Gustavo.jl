@@ -17,8 +17,8 @@
 # One component's θ block. `i` indexes `layout.plans` (phase components first,
 # then log-amplitude).
 _blk(sol, i) = sol.θ[CAL.component_ranges(sol.layout)[i]]
-_pc_phase_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect(sol.model.phase))
-_pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect(sol.model.logamp))
+_pc_phase_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.phase))
+_pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
 
 @testset "BandpassEstimator step (new engine)" begin
     nant, nbands, nchan = 4, 2, 8
@@ -65,7 +65,7 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
             rtol = 1.0e-12, atol = 1.0e-12,
         )
         @test any(!=(0), _blk(sol_n, sol_n.layout.nphase + jan))
-        # Stage provenance: the bandpass stage owns exactly the PerChannel blocks.
+        # Stage provenance: the bandpass stage owns exactly the bandpass blocks.
         @test [r.name for r in sol_n.stages] == [:fringe, :bandpass]
         bprec = sol_n.stages[2]
         @test bprec.phase_comps == [ipn] && bprec.logamp_comps == [jan]
@@ -132,16 +132,46 @@ _pc_amp_idx(sol) = findfirst(tc -> tc.component.term isa CAL.PerChannel, collect
         @test FP.select_scans(FP.CoverageTopup(FP.AllScans()), recs2) == [1]
     end
 
+    @testset "grouped bandpass: ChannelBlocks(k) ties channels within a block" begin
+        # How finely the bandpass varies in frequency is said by the SEGMENTATION,
+        # so `ChannelBlocks(4)` gives one solved value per 4 consecutive channels
+        # of a spw — the channels of a block share a θ parameter, and the
+        # component is that many times smaller.
+        k = 4
+        sol_g = fit(
+            CalibrationPipeline(
+                FringeFit(model = fm), BandpassEstimator(freq = CAL.ChannelBlocks(k));
+                exec = ExecutionConfig(ntasks = 1),
+            ),
+            uvset,
+        )
+        ipg = _pc_phase_idx(sol_g)
+        @test length(_blk(sol_g, ipg)) * k == length(_blk(sol_n, _pc_phase_idx(sol_n)))
+        @test any(!=(0), _blk(sol_g, ipg))
+
+        # The tie is structural: every channel of a block addresses one θ slot,
+        # so the evaluated bandpass gain is constant across the block.
+        plan = FP._bandpass_plan(sol_g.model, sol_g.layout)
+        @test plan.fseg_id == repeat(1:(nglob ÷ k), inner = k)
+        _, gbp = FP.fringe_bandpass_spectrum(sol_g)
+        for a in 1:nant, f in 1:2, b in 1:(nglob ÷ k)
+            cs = ((b - 1) * k + 1):(b * k)
+            @test all(≈(gbp[first(cs), a, f]), gbp[cs, a, f])
+        end
+        # ...but the band still has shape: the blocks differ from each other.
+        @test !all(≈(gbp[1, 2, 1]), gbp[:, 2, 1])
+    end
+
     @testset "bandpass_solution extraction" begin
         bps = bandpass_solution(sol_n)
         @test length(bps.model.phase) == 1 && length(bps.model.logamp) == 1
-        @test bps.model.phase[1].component.term isa CAL.PerChannel
+        @test CAL._is_bandpass(bps.model.phase[1])
         ipn = _pc_phase_idx(sol_n)
         jan = _pc_amp_idx(sol_n)
         @test _blk(bps, 1) == _blk(sol_n, ipn)
         @test _blk(bps, bps.layout.nphase + 1) == _blk(sol_n, sol_n.layout.nphase + jan)
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
-        # A solution with no per-channel component refuses extraction.
+        # A solution with no bandpass component refuses extraction.
         sol_f = fit(FringeFit(model = fm), uvset)
         @test_throws ErrorException bandpass_solution(sol_f)
     end

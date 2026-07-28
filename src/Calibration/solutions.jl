@@ -211,9 +211,10 @@ end
 """
     bandpass_solution(sol::CalibrationSolution) -> CalibrationSolution
 
-Extract the per-channel BANDPASS alone from a fitted solution: a new solution
-whose model carries only the `PerChannel` phase / log-amplitude components,
-with their θ blocks copied — nothing else (no per-scan delays/rates, no adhoc).
+Extract the BANDPASS alone from a fitted solution: a new solution whose model
+carries only the frequency-resolved (`ChannelBlocks`) phase / log-amplitude
+components, with their θ blocks copied — nothing else (no per-scan delays/rates,
+no adhoc).
 Because the bandpass is time-stable (`GlobalTime`), the extracted solution is
 PORTABLE: apply it in a LATER pipeline run as a precal transform at the head of
 the chain,
@@ -231,10 +232,10 @@ from the extraction get identity gains.
 function bandpass_solution(sol::CalibrationSolution)
     pcs = collect(sol.model.phase)
     lcs = collect(sol.model.logamp)
-    pidx = findall(tc -> tc.component.term isa PerChannel, pcs)
-    lidx = findall(tc -> tc.component.term isa PerChannel, lcs)
+    pidx = findall(_is_bandpass, pcs)
+    lidx = findall(_is_bandpass, lcs)
     isempty(pidx) && isempty(lidx) && error(
-        "bandpass_solution: the solution's model carries no per-channel bandpass component."
+        "bandpass_solution: the solution's model carries no bandpass component."
     )
     model = StationGainModel(phase = Tuple(pcs[pidx]), logamp = Tuple(lcs[lidx]))
     nant = sol.layout.nant

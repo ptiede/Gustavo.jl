@@ -433,14 +433,13 @@ end
     @test R_on > 0.97                   # ref R–L shape corrected in the cross hands
     @test R_off < 0.95                  # ...and survives with the stage off
 
-    # θ recovery: the (ref, feed 2) PerChannel slots carry the injected shape up
+    # θ recovery: the (ref, feed 2) bandpass slots carry the injected shape up
     # to per-band constant + slope components (the parts the per-band SBD and R–L
     # delay terms legitimately absorb). Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
     plan = FP._bandpass_plan(sol_on.model, sol_on.layout)
-    slot0 = plan.off1[1, 2, 1, 1]
-    @test slot0 != 0
-    rec = [sol_on.θ[slot0 + plan.clocal[gc] - 1] for gc in 1:nchg]
+    @test plan.off1[1, 2, 1, 1] != 0
+    rec = [sol_on.θ[plan.off1[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
     worst = 0.0
     for b in 1:nbands
         cs = ((b - 1) * nchan + 1):(b * nchan)
@@ -485,7 +484,7 @@ end
     end
 
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    larec(sol, plan, a, f, gc) = (off = plan.off1[a, f, 1, 1]; off == 0 ? NaN : sol.θ[off + plan.clocal[gc] - 1])
+    larec(sol, plan, a, f, gc) = (off = plan.off1[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : sol.θ[off])
     function amp_ripple(spec, don, p)
         rs = Float64[]
         for bi in eachindex(don.bl_pairs)

@@ -18,7 +18,7 @@ using ..Executors: exec_foreach
 using ..UVData
 using ..UVData: Frequency, Baseline
 using ..Calibration
-using ..Calibration: ComponentPlan, _dispersion_enabled, _is_dispersion
+using ..Calibration: ComponentPlan, _dispersion_enabled, _is_bandpass, _is_dispersion
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
 # the model layer's element-compilation generic.
 import ..Calibration: model_components

@@ -146,12 +146,14 @@ end
                           ref_ant = 1, snr_floor = 1.0)
 
 Solve the per-(station, feed) phase bandpass from the accumulated per-channel
-residual and write it into `θ`'s `PerChannel` slots. Per global channel, the
+residual and write it into the bandpass component's θ blocks. `plan`'s frequency
+segmentation sets the resolution: one solved value per (station, feed, frequency
+segment), from the residual of every channel the segment holds. Per segment, the
 globally-closing per-feed phase is solved on the (station, feed) graph with a
-scale-invariant SNR gate; the per-channel χ's band-structure (the reference's
-R–L phase shape, parked in χ by the per-channel EVPA pin) is re-gauged into the
+scale-invariant SNR gate; the per-segment χ's band-structure (the reference's
+R–L phase shape, parked in χ by the per-segment EVPA pin) is re-gauged into the
 feed-2 block, and each (station, feed) track is referenced to its circular-mean
-phase over channels (zero net applied phase).
+phase over segments (zero net applied phase).
 """
 function solve_phase_bandpass!(
         θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan;
@@ -160,43 +162,44 @@ function solve_phase_bandpass!(
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
     noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in 1:nbl, p in 1:npol]
-    phase = fill(NaN, nant, 2, nchan)
-    chis = fill(NaN, nchan)
-    for gc in axes(rbar_bp, Frequency)
+    segs = segment_groups(plan.fseg_id, length(plan.nchan_seg))
+    nseg = length(segs)
+    phase = fill(NaN, nant, 2, nseg)
+    chis = fill(NaN, nseg)
+    for (fs, chans) in enumerate(segs)
         rows = _ObsRow[]
         for bi in axes(rbar_bp, Baseline), p in axes(rbar_bp, Pol)
             a, b = bl_pairs[bi]
             a == b && continue
-            r = rbar_bp[bi, p, gc]; w = wbar_bp[bi, p, gc]
+            r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
             (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            n2 = noise2[bi, p]
-            snr2 = isfinite(n2) && n2 > 0 ? abs2(r / w) / n2 : abs2(r) / w
+            snr2 = _segment_snr2(r, w, w2, noise2[bi, p])
             snr2 >= snr_floor^2 || continue
             fa, fb = feeds[p]
             push!(rows, _ObsRow(a, b, fa, fb, angle(r), snr2, _chi_sign(fa, fb)))
         end
         ph, chi, _, _ = _solve_observable(rows, nant, ref_ant; use_chi = true, rewrap = 0)
-        phase[:, :, gc] .= ph
-        chis[gc] = chi
+        phase[:, :, fs] .= ph
+        chis[fs] = chi
     end
 
-    # Reassign χ's band-structure into the feed-2 block (see the monolith header):
-    # the per-channel EVPA pin parked the reference's R–L phase shape in χ̂_c;
-    # subtract δ_c = χ̂_c − χ̄ from all feed-2 nodes so only the band-constant χ̄
-    # stays conventional. Channels with no finite χ̂ (no cross-hand row cleared
-    # the SNR gate) are left unshifted — the R–L alignment is unobservable there.
+    # Reassign χ's band-structure into the feed-2 block: the per-segment EVPA pin
+    # parked the reference's R–L phase shape in χ̂_s; subtract δ_s = χ̂_s − χ̄ from
+    # all feed-2 nodes so only the band-constant χ̄ stays conventional. Segments
+    # with no finite χ̂ (no cross-hand row cleared the SNR gate) are left
+    # unshifted — the R–L alignment is unobservable there.
     acc_chi = zero(eltype(rbar_bp))
-    for gc in axes(rbar_bp, Frequency)
-        isfinite(chis[gc]) && (acc_chi += cis(chis[gc]))
+    for fs in 1:nseg
+        isfinite(chis[fs]) && (acc_chi += cis(chis[fs]))
     end
     if abs(acc_chi) > 0
         chibar = angle(acc_chi)
-        for gc in axes(rbar_bp, Frequency)
-            isfinite(chis[gc]) || continue
-            δ = rem2pi(chis[gc] - chibar, RoundNearest)
+        for fs in 1:nseg
+            isfinite(chis[fs]) || continue
+            δ = rem2pi(chis[fs] - chibar, RoundNearest)
             @inbounds for a in 1:nant
-                v = phase[a, 2, gc]
-                isfinite(v) && (phase[a, 2, gc] = v - δ)
+                v = phase[a, 2, fs]
+                isfinite(v) && (phase[a, 2, fs] = v - δ)
             end
         end
     end
@@ -204,22 +207,53 @@ function solve_phase_bandpass!(
     # Circular-mean reference per (station, feed) → zero net applied phase (gauge).
     for a in 1:nant, f in 1:2
         acc = zero(ComplexF64)
-        @inbounds for gc in axes(rbar_bp, Frequency)
-            v = phase[a, f, gc]
+        for fs in 1:nseg
+            v = phase[a, f, fs]
             isfinite(v) && (acc += cis(v))
         end
         abs(acc) > 0 || continue
         m = angle(acc)
-        @inbounds for gc in axes(rbar_bp, Frequency)
-            v = phase[a, f, gc]
+        for fs in 1:nseg
+            v = phase[a, f, fs]
             isfinite(v) || continue
-            off = plan.off1[a, f, 1, 1]
+            off = plan.off1[a, f, 1, fs]
             off == 0 && continue
-            θ[off + plan.clocal[gc] - 1] = rem2pi(v - m, RoundNearest)
+            θ[off] = rem2pi(v - m, RoundNearest)
         end
     end
     return θ
 end
+
+# One frequency segment's coherent residual `(r, w, w2)`: the sums of the
+# accumulators over the channels it holds, plus `w2 = Σ wᶜ²`, which converts a
+# PER-CHANNEL noise variance into the variance of this segment's normalized
+# value `r/w` — `n2 · w2 / w²`, i.e. `n2/k` for `k` equally-weighted channels.
+# Scaling the noise the other way (or not at all) would make a wide block look
+# WORSE than its channels and the SNR gate would reject the very observations
+# grouping exists to strengthen.
+#
+# A one-channel segment leaves all three quantities at that channel's own, so
+# `ChannelBlocks(1)` reproduces a free per-channel bandpass exactly; a wider
+# block pools its channels' signal into the one value they share.
+function _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
+    r = zero(eltype(rbar_bp))
+    w = zero(eltype(wbar_bp))
+    w2 = zero(eltype(wbar_bp))
+    for gc in chans
+        rc = rbar_bp[bi, p, gc]
+        wc = wbar_bp[bi, p, gc]
+        (isfinite(rc) && isfinite(wc) && wc > 0) || continue
+        r += rc
+        w += wc
+        w2 += wc^2
+    end
+    return r, w, w2
+end
+
+# Segment SNR² under the per-channel noise estimate `n2` (`NaN` when the track
+# had too few channels to estimate one — then fall back to the weight itself).
+_segment_snr2(r, w, w2, n2) =
+    isfinite(n2) && n2 > 0 ? abs2(r / w) * w^2 / (n2 * w2) : abs2(r) / w
 
 """
     solve_amp_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan,
@@ -228,12 +262,14 @@ end
                         max_logamp = log(10.0), spike_sigma = 5.0)
 
 Solve the per-(station, feed) AMPLITUDE bandpass (log-amp) from the accumulated
-residual and write it into `θ`'s log-amp `PerChannel` slots — flattening the
-per-station instrumental frequency response. Gated closure observations are
-gathered PER SPW and handed to `smoother` (an [`AbstractBandpassSmoother`](@ref));
-narrow positive log-amp spikes (pcal tones, RFI — additive contamination the
-multiplicative model must not up-weight) are excised, and a zero-band-mean gauge
-per (station, feed) keeps the bandpass to SHAPE only.
+residual and write it into the log-amp bandpass component's θ blocks —
+flattening the per-station instrumental frequency response. `plan`'s frequency
+segmentation sets the resolution: one solved value per (station, feed, frequency
+segment). Gated closure observations are gathered PER SPW and handed to
+`smoother` (an [`AbstractBandpassSmoother`](@ref)); narrow positive log-amp
+spikes (pcal tones, RFI — additive contamination the multiplicative model must
+not up-weight) are excised, and a zero-band-mean gauge per (station, feed) keeps
+the bandpass to SHAPE only.
 """
 function solve_amp_bandpass!(
         θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan, channel_freqs;
@@ -248,25 +284,40 @@ function solve_amp_bandpass!(
     noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in 1:nbl, p in 1:npol]
     nnodes = 2 * nant
     soc = isempty(spw_of_chan) ? ones(Int, nchan) : collect(spw_of_chan)
-    la = fill(NaN, nant, 2, nchan)
+    fsegs = segment_groups(plan.fseg_id, length(plan.nchan_seg))
+    nfseg = length(fsegs)
+    # A frequency segment is the unit solved for, so it must lie within one spw:
+    # the smoothers fit a shape per spw and could not place a straddling segment.
+    seg_spw = map(fsegs) do chans
+        s = soc[first(chans)]
+        all(gc -> soc[gc] == s, chans) || throw(
+            ArgumentError(
+                "solve_amp_bandpass!: a frequency segment straddles a spectral-window " *
+                    "boundary; the bandpass segmentation must refine the spw partition.",
+            ),
+        )
+        return s
+    end
+    seg_freq = [sum(channel_freqs[gc] for gc in chans) / length(chans) for chans in fsegs]
+    la = fill(NaN, nant, 2, nfseg)
 
-    for bnd in sort(unique(soc))
-        chans = [gc for gc in 1:nchan if soc[gc] == bnd]
-        nseg = length(chans); nseg == 0 && continue
-        fs = Float64[channel_freqs[gc] for gc in chans]
+    for bnd in sort(unique(seg_spw))
+        sidx = [s for s in 1:nfseg if seg_spw[s] == bnd]
+        nseg = length(sidx); nseg == 0 && continue
+        fs = Float64[seg_freq[s] for s in sidx]
         center = sum(fs) / nseg
         scale = maximum(abs.(fs .- center)); scale = scale > 0 ? scale : 1.0
         xseg = [(fs[ci] - center) / scale for ci in 1:nseg]
 
-        # Gated closure observations for this spw (local channel index `ci`).
+        # Gated closure observations for this spw (`ci` indexes the frequency
+        # segments it holds).
         na = Int[]; nbn = Int[]; cii = Int[]; vals = Float64[]; wts = Float64[]
-        for (ci, gc) in enumerate(chans), bi in 1:nbl, p in 1:npol
+        for (ci, s) in enumerate(sidx), bi in 1:nbl, p in 1:npol
             a, b = bl_pairs[bi]
             a == b && continue
-            r = rbar_bp[bi, p, gc]; w = wbar_bp[bi, p, gc]
+            r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, fsegs[s])
             (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            nz = noise2[bi, p]
-            snr2 = isfinite(nz) && nz > 0 ? abs2(r / w) / nz : abs2(r) / w
+            snr2 = _segment_snr2(r, w, w2, noise2[bi, p])
             snr2 >= snr_floor^2 || continue
             amp = abs(r / w); amp > 0 || continue
             fa, fb = feeds[p]
@@ -279,7 +330,7 @@ function solve_amp_bandpass!(
             ant = (node - 1) % nant + 1; feed = (node - 1) ÷ nant + 1
             for ci in 1:nseg
                 v = la_seg[node, ci]
-                isfinite(v) && (la[ant, feed, chans[ci]] = v)
+                isfinite(v) && (la[ant, feed, sidx[ci]] = v)
             end
         end
     end
@@ -293,16 +344,16 @@ function solve_amp_bandpass!(
     # excised (left unapplied, |g| = 1) instead of trusted. `spike_sigma = 0`
     # disables the guard.
     if spike_sigma > 0
-        for a in 1:nant, f in 1:2, bnd in sort(unique(soc))
-            chans = [gc for gc in 1:nchan if soc[gc] == bnd]
-            v = [la[a, f, gc] for gc in chans if isfinite(la[a, f, gc])]
+        for a in 1:nant, f in 1:2, bnd in sort(unique(seg_spw))
+            sidx = [s for s in 1:nfseg if seg_spw[s] == bnd]
+            v = [la[a, f, s] for s in sidx if isfinite(la[a, f, s])]
             length(v) >= 8 || continue
             med = median(v)
             s = 1.4826 * median(abs.(v .- med))
             cut = spike_sigma * max(s, 0.02)
-            for gc in chans
-                isfinite(la[a, f, gc]) || continue
-                la[a, f, gc] - med > cut && (la[a, f, gc] = NaN)
+            for si in sidx
+                isfinite(la[a, f, si]) || continue
+                la[a, f, si] - med > cut && (la[a, f, si] = NaN)
             end
         end
     end
@@ -310,17 +361,17 @@ function solve_amp_bandpass!(
     # Zero band-mean log-amp gauge per (station, feed) — SHAPE only. Write the slots.
     for a in 1:nant, f in 1:2
         acc = 0.0; n = 0
-        @inbounds for gc in 1:nchan
-            v = la[a, f, gc]
+        for s in 1:nfseg
+            v = la[a, f, s]
             isfinite(v) && (acc += v; n += 1)
         end
         n == 0 && continue
         m = acc / n
-        off = plan.off1[a, f, 1, 1]
-        off == 0 && continue
-        @inbounds for gc in 1:nchan
-            v = la[a, f, gc]
+        for s in 1:nfseg
+            v = la[a, f, s]
             isfinite(v) || continue
+            off = plan.off1[a, f, 1, s]
+            off == 0 && continue
             val = v - m
             # Leave implausibly-large corrections UNAPPLIED (|g| = 1). A smoother (the
             # default) interpolates gaps and self-regularizes, but `FreeBandpass` (or a
@@ -329,7 +380,7 @@ function solve_amp_bandpass!(
             # noise, since `apply_calibration` scales weights by |g|². The bound is
             # generous (|g| ≤ 10) so real passband roll-off/structure passes unchanged —
             # only pathological noise blow-ups are gated.
-            θ[off + plan.clocal[gc] - 1] = abs(val) > max_logamp ? 0.0 : val
+            θ[off] = abs(val) > max_logamp ? 0.0 : val
         end
     end
     return θ
@@ -375,12 +426,12 @@ end
 # ── Per-segment amplitude-shape fitters (relocated verbatim from the monolith) ──
 
 # smoother types (defined at the top of this file). Each takes ONE spw's gated closure
-# observations — `na`/`nb` node indices, `ci` local-channel index, `val = log|V̄|`,
-# `w = SNR²`, `xseg` the centred/scaled in-spw frequency coordinate — and returns
-# `la_seg::Matrix` (nnodes × nchan_seg, `NaN` where unestimable).
+# observations — `na`/`nb` node indices, `ci` the index of the frequency segment within
+# the spw, `val = log|V̄|`, `w = SNR²`, `xseg` the centred/scaled in-spw frequency
+# coordinate — and returns `la_seg::Matrix` (nnodes × nseg, `NaN` where unestimable).
 
-# Bucket observation indices by their local channel.
-function _bandpass_obs_by_channel(ci, nseg)
+# Bucket observation indices by their frequency segment.
+function _bandpass_obs_by_segment(ci, nseg)
     byc = [Int[] for _ in 1:nseg]
     for i in eachindex(ci)
         push!(byc[ci[i]], i)
@@ -388,11 +439,11 @@ function _bandpass_obs_by_channel(ci, nseg)
     return byc
 end
 
-# Free per-channel closure: independent signless-Laplacian WLS per channel.
+# Free per-segment closure: independent signless-Laplacian WLS per frequency segment.
 function _fit_bandpass_segment(::FreeBandpass, na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
     la = fill(NaN, nnodes, nseg)
     pen = fill(float(ridge), nnodes)
-    for (c, idx) in enumerate(_bandpass_obs_by_channel(ci, nseg))
+    for (c, idx) in enumerate(_bandpass_obs_by_segment(ci, nseg))
         isempty(idx) && continue
         A = zeros(length(idx), nnodes)
         touched = falses(nnodes)
@@ -480,13 +531,3 @@ function _whittaker_smooth(y, w, lambda::Real, ridge::Real)
     end
     return M \ rhs
 end
-
-# Solve the per-(station, feed) AMPLITUDE bandpass (log-amp) from the accumulated
-# residual and write it into `θ`'s log-amp `PerChannel` slots — flattening the
-# per-station instrumental frequency response (the filterbank passband). Gathers the
-# gated closure observations PER SPW (so an estimator never crosses a sub-band gap)
-# and hands them to `smoother` (an `AbstractBandpassSmoother` — see above). The
-# scale-invariant SNR gate (`_track_noise2`) drops no-signal channels from the fit
-# (then estimated, or not, per the smoother); a spw with no signal stays |g| = 1.
-# A final zero-band-mean gauge per (station, feed) keeps the bandpass to SHAPE only —
-# the absolute level is the a-priori amplitude cal's job.

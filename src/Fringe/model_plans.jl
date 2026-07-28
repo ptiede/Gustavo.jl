@@ -53,7 +53,7 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
     # phase = K·θ·(1/f0 − 1/f). NOT solved by the FFT search — measured by the
     # per-scan (Δτ, dTEC) band-phasor refinement (`_refine_scan_dispersion!`),
     # which jointly updates the per-scan delay (the two covary over any finite
-    # band). `Dispersion` is its routing signature, like `PerChannel` for the
+    # band). `Dispersion` is its routing signature, like `ChannelBlocks` for the
     # bandpass. Only included when the band layout can constrain it.
     disp = dispersion ?
         (TiedComponent(GainComponent(Dispersion(), PerScan(), GlobalFrequency()), SharedFeeds()),) : ()
@@ -81,12 +81,13 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
             TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), SharedFeeds()),
             disp...,
             sbd...,
-            # Phase bandpass: per-channel, stable across the observation (HOPS-style),
-            # per feed. Captures the residual nonlinear-in-frequency instrumental phase
-            # that the per-scan (linear) delay cannot represent. Solved by a dedicated
-            # frequency-stationization stage (`_solve_phase_bandpass!`), not by the
-            # delay/rate search — `PerChannel` is its signature, used to route it.
-            TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),
+            # Phase bandpass: one free offset per channel, stable across the
+            # observation (HOPS-style), per feed. Captures the residual
+            # nonlinear-in-frequency instrumental phase that the per-scan (linear) delay
+            # cannot represent. Solved by a dedicated frequency-stationization stage
+            # (`solve_phase_bandpass!`), not by the delay/rate search — the
+            # `ChannelBlocks` segmentation is its routing signature.
+            TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
             TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),
         ),
         # Amplitude bandpass: per-channel, time-stable, per-feed log-amplitude — the
@@ -96,7 +97,7 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
         # no-signal channels, which the smoother then estimates (or, for `FreeBandpass`,
         # leaves at gain 1). The absolute level stays the a-priori amplitude cal's job.
         logamp = (
-            TiedComponent(GainComponent(PerChannel(), GlobalTime(), GlobalFrequency()), PerFeed()),
+            TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
         ),
     )
 end
@@ -149,18 +150,18 @@ _adhoc_plan(model, layout) = layout.plans[_adhoc_idx(model)]
 # so `solve_adhoc_phasing` solves one feed-common track and contributes zero R–L.
 _adhoc_shared(model) = model.phase[_adhoc_idx(model)].tying isa SharedFeeds
 
-# The phase-bandpass component's plan (the per-channel phase term), or `nothing`
-# if the model carries no bandpass component.
+# The phase-bandpass component's plan, or `nothing` if the model carries no
+# bandpass component. `Calibration._is_bandpass` is the signature.
 function _bandpass_plan(model, layout)
-    i = findfirst(tc -> tc.component.term isa PerChannel, model.phase)
+    i = findfirst(_is_bandpass, model.phase)
     return i === nothing ? nothing : layout.plans[i]
 end
 
-# The amplitude-bandpass component's plan (the per-channel log-amp term), or
-# `nothing`. Log-amp plans follow the phase plans in `layout.plans` (offset
-# `nphase`), so index the `PerChannel` position within `model.logamp`.
+# The amplitude-bandpass component's plan, or `nothing`. Log-amp plans follow
+# the phase plans in `layout.plans` (offset `nphase`), so index the bandpass
+# position within `model.logamp`.
 function _amp_bandpass_plan(model, layout)
-    j = findfirst(tc -> tc.component.term isa PerChannel, model.logamp)
+    j = findfirst(_is_bandpass, model.logamp)
     return j === nothing ? nothing : layout.plans[layout.nphase + j]
 end
 

@@ -245,17 +245,23 @@ end
 # ONE estimator's vocabulary, hence private: a global least-squares fringe
 # fitter has no use for it, fitting θ through `evaluate_gains` directly.
 #
-# The stage-B kinds cover exactly the single-parameter terms whose observable
-# the search measures. Everything else is `nothing` and so unfittable by this
-# estimator rather than approximated: `_solve_kind_cols!` writes one θ column
-# per (station, feed, time) node — the block's `off1` — so a multi-parameter
-# term (a polynomial) would have its trailing parameters left at zero.
+# The stage-B kinds cover exactly the single-parameter, band-wide terms whose
+# observable the search measures. Everything else is `nothing` and so unfittable
+# by this estimator rather than approximated: `_solve_kind_cols!` writes one θ
+# column per (station, feed, time) node — the block's `off1` at the FIRST
+# frequency segment — so a multi-parameter term (a polynomial) would have its
+# trailing parameters left at zero, and a frequency-resolved term (the bandpass,
+# `ConstantTerm × ChannelBlocks`) would have every segment but the first left at
+# zero while the search wrote its band-wide phase into that one.
 function matched_kind(tc)
     tc.component.time isa PerIntegration && return nothing
     _is_dispersion(tc) && return :refine
     if tc.component.freq isa FrequencyBands
         return (_is_sbd_delay(tc) || _is_sbd_constant(tc)) ? :refine : nothing
     end
+    # The per-baseline search measures ONE delay/rate/phase across the whole
+    # band, so only a component spanning it can receive that estimate.
+    tc.component.freq isa GlobalFrequency || return nothing
     term = tc.component.term
     term isa Delay && return :delay
     term isa Rate && return :rate

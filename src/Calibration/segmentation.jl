@@ -9,8 +9,9 @@
 # This single vocabulary covers everything both the bandpass solver and the
 # fringe fitter need: accumulation periods (`PerIntegration`), scans
 # (`PerScan`), instrument scans (`InstrumentScans`), fixed-duration stability
-# blocks (`TimeBlocks`); and channels (`PerChannel` *term*), spectral
-# windows/IFs/bands (`PerSpectralWindow`), and channel blocks (`ChannelBlocks`).
+# blocks (`TimeBlocks`); and spectral windows/IFs/bands (`PerSpectralWindow`)
+# and channel blocks (`ChannelBlocks`, with `ChannelBlocks(1)` the free
+# per-channel bandpass).
 
 abstract type AbstractTimeSegmentation end
 
