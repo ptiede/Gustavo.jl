@@ -51,7 +51,11 @@ the common part plus a `FeedComponent` for the partner-only deviation.
 struct ReferenceRelative <: AbstractFeedTying
     reference_feed::Int
     function ReferenceRelative(reference_feed::Integer)
-        reference_feed in (1, 2) || error("ReferenceRelative reference_feed must be 1 or 2")
+        reference_feed in (1, 2) || throw(
+            ArgumentError(
+                "ReferenceRelative reference_feed must be 1 or 2, got $reference_feed"
+            )
+        )
         return new(Int(reference_feed))
     end
 end
@@ -68,7 +72,8 @@ common part plus a `FeedComponent(partner)` deviation.
 struct FeedComponent <: AbstractFeedTying
     feed::Int
     function FeedComponent(feed::Integer)
-        feed in (1, 2) || error("FeedComponent feed must be 1 or 2")
+        feed in (1, 2) ||
+            throw(ArgumentError("FeedComponent feed must be 1 or 2, got $feed"))
         return new(Int(feed))
     end
 end
@@ -157,8 +162,9 @@ amplitude_is_per_scan(m::StationGainModel) = any(component_is_per_scan, m.logamp
 # makes it degenerate-free; the linear-algebra layer tolerates redundancy, so
 # validation here is light — mainly catching empty models.
 function validate_station_gain_model(m::StationGainModel)
-    (isempty(m.phase) && isempty(m.logamp)) &&
-        error("StationGainModel has neither phase nor log-amplitude components")
+    (isempty(m.phase) && isempty(m.logamp)) && throw(
+        ArgumentError("StationGainModel has neither phase nor log-amplitude components")
+    )
     return m
 end
 

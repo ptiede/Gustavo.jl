@@ -111,7 +111,9 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
     end
 
     @testset "step order honors requires/provides" begin
-        @test_throws ErrorException fit(
+        @test_throws ArgumentError fit(
+            CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
+        @test_throws "BandpassEstimator requires :fringe" fit(
             CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
     end
 
@@ -173,7 +175,8 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
         # A solution with no bandpass component refuses extraction.
         sol_f = fit(FringeFit(model = fm), uvset)
-        @test_throws ErrorException bandpass_solution(sol_f)
+        @test_throws ArgumentError bandpass_solution(sol_f)
+        @test_throws "carries no bandpass component" bandpass_solution(sol_f)
     end
 
     @testset "portable ApplySolution: same-set + cross-set by station name" begin

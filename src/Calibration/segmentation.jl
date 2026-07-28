@@ -28,7 +28,8 @@ struct PerIntegration <: AbstractTimeSegmentation end
 struct TimeBlocks <: AbstractTimeSegmentation
     duration_hr::Float64
     function TimeBlocks(duration_hr::Real)
-        duration_hr > 0 || error("TimeBlocks duration_hr must be positive")
+        duration_hr > 0 ||
+            throw(ArgumentError("TimeBlocks duration_hr must be positive, got $duration_hr"))
         return new(Float64(duration_hr))
     end
 end
@@ -54,7 +55,8 @@ struct PerSpectralWindow <: AbstractFrequencySegmentation end
 struct ChannelBlocks <: AbstractFrequencySegmentation
     block_size::Int
     function ChannelBlocks(block_size::Integer)
-        block_size >= 1 || error("ChannelBlocks block_size must be at least 1")
+        block_size >= 1 ||
+            throw(ArgumentError("ChannelBlocks block_size must be at least 1, got $block_size"))
         return new(Int(block_size))
     end
 end
@@ -70,11 +72,17 @@ struct FrequencyBands <: AbstractFrequencySegmentation
     ranges::Vector{UnitRange{Int}}
     function FrequencyBands(ranges::AbstractVector{<:UnitRange{<:Integer}})
         rs = [UnitRange{Int}(r) for r in ranges]
-        isempty(rs) && error("FrequencyBands: at least one range required")
-        first(rs[1]) == 1 || error("FrequencyBands: ranges must start at channel 1")
+        isempty(rs) && throw(ArgumentError("FrequencyBands: at least one range required"))
+        first(rs[1]) == 1 || throw(
+            ArgumentError("FrequencyBands: ranges must start at channel 1, got $(rs[1])")
+        )
         for i in 2:length(rs)
-            first(rs[i]) == last(rs[i - 1]) + 1 ||
-                error("FrequencyBands: ranges must be contiguous and ascending")
+            first(rs[i]) == last(rs[i - 1]) + 1 || throw(
+                ArgumentError(
+                    "FrequencyBands: ranges must be contiguous and ascending; " *
+                        "$(rs[i]) does not follow $(rs[i - 1])"
+                )
+            )
         end
         return new(rs)
     end
@@ -121,10 +129,17 @@ function DataGeometry(;
         scan_names::AbstractVector{<:AbstractString} = String[],
         spw_names::AbstractVector{<:AbstractString} = String[],
     )
-    length(scan_of_time) == length(times) ||
-        error("scan_of_time length $(length(scan_of_time)) ≠ times length $(length(times))")
-    length(spw_of_chan) == length(channel_freqs) ||
-        error("spw_of_chan length $(length(spw_of_chan)) ≠ channel_freqs length $(length(channel_freqs))")
+    length(scan_of_time) == length(times) || throw(
+        DimensionMismatch(
+            "scan_of_time length $(length(scan_of_time)) ≠ times length $(length(times))"
+        )
+    )
+    length(spw_of_chan) == length(channel_freqs) || throw(
+        DimensionMismatch(
+            "spw_of_chan length $(length(spw_of_chan)) ≠ " *
+                "channel_freqs length $(length(channel_freqs))"
+        )
+    )
     return DataGeometry(
         Float64.(collect(times)), Int.(collect(scan_of_time)),
         Float64.(collect(channel_freqs)), Int.(collect(spw_of_chan)),
@@ -191,8 +206,11 @@ freq_segment_ids(::PerSpectralWindow, geom::DataGeometry) = _dense_rank(geom.spw
 
 function freq_segment_ids(seg::FrequencyBands, geom::DataGeometry)
     n = nchannels(geom)
-    last(seg.ranges[end]) == n ||
-        error("FrequencyBands: ranges cover $(last(seg.ranges[end])) channels; geometry has $n")
+    last(seg.ranges[end]) == n || throw(
+        DimensionMismatch(
+            "FrequencyBands: ranges cover $(last(seg.ranges[end])) channels; geometry has $n"
+        )
+    )
     ids = Vector{Int}(undef, n)
     for (k, r) in enumerate(seg.ranges), c in r
         ids[c] = k

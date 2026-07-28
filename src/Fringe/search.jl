@@ -237,10 +237,16 @@ function baseline_fringe_search(
         opts::FringeSearch = FringeSearch(),
         workspace::Union{Nothing, FringeWorkspace} = nothing,
     )
-    size(V) == size(W) || error("V and W must have the same shape")
+    size(V) == size(W) || throw(
+        DimensionMismatch("V is $(size(V)) and W is $(size(W)); they must have the same shape")
+    )
     nchan, ntime = size(V)
-    (nchan == length(freqs) && ntime == length(times)) ||
-        error("V is $(size(V)); expected (length(freqs), length(times)) = ($(length(freqs)), $(length(times)))")
+    (nchan == length(freqs) && ntime == length(times)) || throw(
+        DimensionMismatch(
+            "V is $(size(V)); expected (length(freqs), length(times)) = " *
+                "($(length(freqs)), $(length(times)))"
+        )
+    )
     ax = _search_axes(freqs, times, opts)
     return _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts)
 end
@@ -395,7 +401,12 @@ function baseline_fringe_search(
     elseif length(V) == length(times) && length(freqs) == 1
         return baseline_fringe_search(reshape(V, 1, :), reshape(W, 1, :), freqs, times, f0, t0; opts)
     else
-        error("vector baseline_fringe_search: length(V)=$(length(V)) matches neither freqs ($(length(freqs))) nor times ($(length(times)))")
+        throw(
+            DimensionMismatch(
+                "vector baseline_fringe_search: length(V)=$(length(V)) matches neither " *
+                    "freqs ($(length(freqs))) nor times ($(length(times)))"
+            )
+        )
     end
 end
 
@@ -1013,9 +1024,15 @@ function baseline_fringe_map(
         opts::FringeSearch = FringeSearch(),
         workspace::Union{Nothing, FringeWorkspace} = nothing,
     )
-    size(V) == size(W) || error("V and W must have the same shape")
-    (size(V, 1) == length(freqs) && size(V, 2) == length(times)) ||
-        error("V is $(size(V)); expected (length(freqs), length(times)) = ($(length(freqs)), $(length(times)))")
+    size(V) == size(W) || throw(
+        DimensionMismatch("V is $(size(V)) and W is $(size(W)); they must have the same shape")
+    )
+    (size(V, 1) == length(freqs) && size(V, 2) == length(times)) || throw(
+        DimensionMismatch(
+            "V is $(size(V)); expected (length(freqs), length(times)) = " *
+                "($(length(freqs)), $(length(times)))"
+        )
+    )
     ax = _search_axes(freqs, times, opts)                # detection axes (honour opts.algorithm)
     axf = ax.mbd === nothing ? ax :                      # plane axes: always the full grid
         _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.snr_min, opts.quad_interp, FullGrid(), opts.pfa_max))

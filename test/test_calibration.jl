@@ -301,6 +301,8 @@ end
         # than read out of bounds later.
         θoff = OffsetArrays.OffsetArray(copy(θv), 0:(layout.nθ - 1))
         @test_throws ArgumentError CAL.CalibrationSolution(model, layout, geom, θoff, (;))
+        @test_throws DimensionMismatch CAL.CalibrationSolution(
+            model, layout, geom, θv[1:(end - 1)], (;))
         @test_throws "θ has length" CAL.CalibrationSolution(model, layout, geom, θv[1:(end - 1)], (;))
     end
 
@@ -315,5 +317,47 @@ end
         s = CAL.CalibrationSolution(model, layout, geom, θmut, (;))
         θmut[1] = -999.0
         @test s.θ[1] == θv[1]
+    end
+end
+
+@testset "argument validation is typed" begin
+    # Constructor and argument validation throws `ArgumentError` or
+    # `DimensionMismatch`; bare `error` is reserved for algorithmic failure, so a
+    # caller can tell "you passed me nonsense" from "the solve did not converge".
+    @testset "segmentation constructors" begin
+        @test_throws ArgumentError CAL.TimeBlocks(0.0)
+        @test_throws "duration_hr must be positive" CAL.TimeBlocks(-1.0)
+        @test_throws ArgumentError CAL.ChannelBlocks(0)
+        @test_throws "block_size must be at least 1" CAL.ChannelBlocks(-2)
+        @test_throws ArgumentError CAL.FrequencyBands(UnitRange{Int}[])
+        @test_throws "at least one range" CAL.FrequencyBands(UnitRange{Int}[])
+        @test_throws "must start at channel 1" CAL.FrequencyBands([2:4])
+        @test_throws "contiguous and ascending" CAL.FrequencyBands([1:4, 6:8])
+    end
+
+    @testset "geometry axis lengths" begin
+        @test_throws DimensionMismatch CAL.DataGeometry(;
+            times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1])
+        @test_throws "scan_of_time length" CAL.DataGeometry(;
+            times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1])
+        @test_throws DimensionMismatch CAL.DataGeometry(;
+            times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1])
+        @test_throws "spw_of_chan length" CAL.DataGeometry(;
+            times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1])
+
+        # `FrequencyBands` is structurally valid but must also cover the geometry.
+        geom = CAL.DataGeometry(; times = [0.0], channel_freqs = collect(1.0:6.0) .* 1.0e9)
+        @test_throws DimensionMismatch CAL.freq_segment_ids(CAL.FrequencyBands([1:4]), geom)
+        @test_throws "geometry has 6" CAL.freq_segment_ids(CAL.FrequencyBands([1:4]), geom)
+    end
+
+    @testset "feed tying and empty models" begin
+        @test_throws ArgumentError CAL.ReferenceRelative(3)
+        @test_throws "reference_feed must be 1 or 2" CAL.ReferenceRelative(0)
+        @test_throws ArgumentError CAL.FeedComponent(3)
+        @test_throws "feed must be 1 or 2" CAL.FeedComponent(0)
+        @test_throws ArgumentError CAL.validate_station_gain_model(CAL.StationGainModel())
+        @test_throws "neither phase nor log-amplitude" CAL.validate_station_gain_model(
+            CAL.StationGainModel())
     end
 end

@@ -152,7 +152,8 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
 
         @test sol isa CAL.CalibrationSolution
         @test stage_names(sol) == [:fringe, :bandpass, :adhoc]
-        @test_throws ErrorException sol[:bogus]
+        @test_throws ArgumentError sol[:bogus]
+        @test_throws "recorded stages: [:fringe, :bandpass, :adhoc]" sol[:bogus]
 
         # Component θ ranges: contiguous, disjoint, and they tile 1:nθ.
         rng = CAL.component_ranges(sol.layout)

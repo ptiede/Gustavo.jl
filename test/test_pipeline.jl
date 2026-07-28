@@ -322,7 +322,8 @@ end
     # axis cannot dense-rank a frequency to one spw — build_geometry must error
     # instead of silently last-write-wins.
     uvset_conflict, _ = _build_fringe_uvset(band_sep = 0.0)
-    @test_throws ErrorException CAL.build_geometry(uvset_conflict)
+    @test_throws ArgumentError CAL.build_geometry(uvset_conflict)
+    @test_throws "conflicting spectral windows" CAL.build_geometry(uvset_conflict)
 end
 
 @testset "Phase bandpass: per-channel phase recovered" begin

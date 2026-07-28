@@ -232,8 +232,8 @@ end
         # The standalone apply replays sol.postcal — identical to the fused out.
         @test _sets_equal(out_ap, calibrate(sol_ap, uvset))
         # …and refuses it in `reduce` (it is not a reduction).
-        @test_throws ErrorException fitcalibrate(pipe, uvset; reduce = [ap])
-        @test_throws ErrorException calibrate(sol_n, uvset; reduce = [ap])
+        @test_throws ArgumentError fitcalibrate(pipe, uvset; reduce = [ap])
+        @test_throws "is a pipeline step, not a reduction" calibrate(sol_n, uvset; reduce = [ap])
 
         # Serialization round-trips postcal (version 3).
         path = tempname() * ".jls"

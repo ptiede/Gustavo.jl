@@ -79,6 +79,28 @@ end
     det2 = FR.baseline_fringe_search(Vmat2, ones(size(Vmat2)), [43.0e9], times, 43.0e9, t0)
     @test det2.delay == 0.0
     @test isapprox(det2.rate, 10.0e-3; atol = 5.0e-4)
+
+    # A vector that matches neither axis is a shape error, not a search failure.
+    @test_throws DimensionMismatch FR.baseline_fringe_search(
+        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0)
+    @test_throws "matches neither" FR.baseline_fringe_search(
+        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0)
+end
+
+@testset "Fringe search: shape validation" begin
+    nchan, nt = 8, 4
+    freqs = 43.0e9 .+ (0:(nchan - 1)) .* 0.5e6
+    times = collect(0:(nt - 1)) .* 0.5
+    V = ones(ComplexF64, nchan, nt)
+
+    @test_throws DimensionMismatch FR.baseline_fringe_search(
+        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0)
+    @test_throws "same shape" FR.baseline_fringe_search(
+        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0)
+    @test_throws DimensionMismatch FR.baseline_fringe_search(
+        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0)
+    @test_throws "expected (length(freqs), length(times))" FR.baseline_fringe_map(
+        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0)
 end
 
 @testset "Fringe search: multi-band gapped frequency axis" begin

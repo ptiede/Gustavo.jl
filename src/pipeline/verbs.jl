@@ -60,13 +60,17 @@ function calibrate(
         reduce = ReduceStep[], apply_flags::Bool = true, ntasks::Integer = Threads.nthreads(),
         executor::Executors.AbstractExecutor = Executors.current_executor(),
     )
-    any(t -> t === missing, sol.transforms) && error(
-        "calibrate: this solution records a transform that did not survive serialization " *
-            "(saved as `missing`) — re-fit, or apply the original transform chain manually."
+    any(t -> t === missing, sol.transforms) && throw(
+        ArgumentError(
+            "calibrate: this solution records a transform that did not survive serialization " *
+                "(saved as `missing`) — re-fit, or apply the original transform chain manually."
+        )
     )
-    any(t -> t === missing, sol.postcal) && error(
-        "calibrate: this solution records an a-priori amplitude cal that did not survive " *
-            "serialization (saved as `missing`) — re-fit, or apply it manually."
+    any(t -> t === missing, sol.postcal) && throw(
+        ArgumentError(
+            "calibrate: this solution records an a-priori amplitude cal that did not survive " *
+                "serialization (saved as `missing`) — re-fit, or apply it manually."
+        )
     )
     stream = Fringe.scan_stream(uvset; transforms = sol.transforms, ntasks = ntasks, executor = executor)
     post = _compose_output_chain(sol.postcal, collect(reduce))
@@ -174,8 +178,10 @@ OutputSink(postprocess) = OutputSink(postprocess, true)
 function _compose_output_chain(apriori, reduces)
     fs = Any[]
     for s in apriori
-        s isa AprioriAmplitude || error(
-            "output chain: recorded postcal entry $(typeof(s)) is not an AprioriAmplitude."
+        s isa AprioriAmplitude || throw(
+            ArgumentError(
+                "output chain: recorded postcal entry $(typeof(s)) is not an AprioriAmplitude."
+            )
         )
         push!(fs, uv -> apply_calibration(
             uv, s.band_cals;
@@ -184,13 +190,17 @@ function _compose_output_chain(apriori, reduces)
     end
     ctx = CalibrationContext()
     for st in reduces
-        st isa AprioriAmplitude && error(
-            "fitcalibrate/calibrate: AprioriAmplitude is a pipeline step, not a reduction — " *
-                "place it in the CalibrationPipeline (it is recorded on the solution and " *
-                "replayed by `calibrate(sol, uvset)`)."
+        st isa AprioriAmplitude && throw(
+            ArgumentError(
+                "fitcalibrate/calibrate: AprioriAmplitude is a pipeline step, not a reduction " *
+                    "— place it in the CalibrationPipeline (it is recorded on the solution and " *
+                    "replayed by `calibrate(sol, uvset)`)."
+            )
         )
-        st isa ReduceStep || error(
-            "fitcalibrate/calibrate: `reduce` accepts ReduceSteps only (got $(typeof(st)))."
+        st isa ReduceStep || throw(
+            ArgumentError(
+                "fitcalibrate/calibrate: `reduce` accepts ReduceSteps only (got $(typeof(st)))."
+            )
         )
         f, ctx = prepare_reducer(st, ctx)
         push!(fs, f)
@@ -431,18 +441,29 @@ function _parse_pipeline(pipe::CalibrationPipeline)
         if s isa DataTransformStep
             push!(tfs, s.t)
         elseif s isa FringeFit
-            ff === nothing || error("fit/fitcalibrate: exactly ONE FringeFit per pipeline.")
+            ff === nothing ||
+                throw(ArgumentError("fit/fitcalibrate: exactly ONE FringeFit per pipeline."))
             ff = s
         elseif s isa BandpassEstimator
-            bp === nothing || error("fit/fitcalibrate: exactly ONE BandpassEstimator per pipeline.")
-            ff === nothing && error(
-                "fit/fitcalibrate: BandpassEstimator requires :fringe — place FringeFit before it."
+            bp === nothing || throw(
+                ArgumentError("fit/fitcalibrate: exactly ONE BandpassEstimator per pipeline.")
+            )
+            ff === nothing && throw(
+                ArgumentError(
+                    "fit/fitcalibrate: BandpassEstimator requires :fringe — place FringeFit " *
+                        "before it."
+                )
             )
             bp = s
         elseif s isa TemporalSmoother
-            sm === nothing || error("fit/fitcalibrate: exactly ONE TemporalSmoother per pipeline.")
-            ff === nothing && error(
-                "fit/fitcalibrate: TemporalSmoother requires :fringe — place FringeFit before it."
+            sm === nothing || throw(
+                ArgumentError("fit/fitcalibrate: exactly ONE TemporalSmoother per pipeline.")
+            )
+            ff === nothing && throw(
+                ArgumentError(
+                    "fit/fitcalibrate: TemporalSmoother requires :fringe — place FringeFit " *
+                        "before it."
+                )
             )
             sm = s
         elseif s isa AprioriAmplitude
@@ -450,13 +471,17 @@ function _parse_pipeline(pipe::CalibrationPipeline)
         elseif s isa ReduceStep
             push!(post_reduce, s)
         else
-            error(
-                "fit/fitcalibrate: step $(typeof(s)) is not runnable — supported: data " *
-                    "transforms, FringeFit, BandpassEstimator, TemporalSmoother, " *
-                    "AprioriAmplitude, and ReduceSteps."
+            throw(
+                ArgumentError(
+                    "fit/fitcalibrate: step $(typeof(s)) is not runnable — supported: data " *
+                        "transforms, FringeFit, BandpassEstimator, TemporalSmoother, " *
+                        "AprioriAmplitude, and ReduceSteps."
+                )
             )
         end
     end
-    ff === nothing && error("fit/fitcalibrate: the pipeline contains no FringeFit step.")
+    ff === nothing && throw(
+        ArgumentError("fit/fitcalibrate: the pipeline contains no FringeFit step.")
+    )
     return (; tfs, ff, bp, sm, apriori, post_reduce)
 end

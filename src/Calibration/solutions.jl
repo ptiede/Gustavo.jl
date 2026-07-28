@@ -77,8 +77,11 @@ function CalibrationSolution(
     # and the term kernels read those offsets under `@inbounds`, so an array with
     # other axes would read out of bounds silently rather than throw.
     Base.require_one_based_indexing(θ)
-    length(θ) == layout.nθ ||
-        error("CalibrationSolution: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)")
+    length(θ) == layout.nθ || throw(
+        DimensionMismatch(
+            "CalibrationSolution: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)"
+        )
+    )
     # `copy`, not an alias: the fused output tail builds a solution per scan group
     # from the run's working θ while sibling groups are still writing their own
     # slots, and each group must correct against its own snapshot.
@@ -145,8 +148,8 @@ stage_names(sol::CalibrationSolution) = Symbol[r.name for r in sol.stages]
 
 function Base.getindex(sol::CalibrationSolution, name::Symbol)
     k = findfirst(r -> r.name === name, sol.stages)
-    k === nothing && error(
-        "solution has no stage $(repr(name)); recorded stages: $(stage_names(sol))."
+    k === nothing && throw(
+        ArgumentError("solution has no stage $(repr(name)); recorded stages: $(stage_names(sol)).")
     )
     return StageView(sol, k)
 end
@@ -197,8 +200,11 @@ product over all components reproduces `evaluate_gains` on the full θ. Plan
 indices follow `layout.plans` (phase components first, then log-amplitude).
 """
 function component_gains(sol::CalibrationSolution, plan_index::Integer; ci = Colon(), ti = Colon())
-    1 <= plan_index <= length(sol.layout.plans) ||
-        error("component_gains: plan_index $plan_index out of range 1:$(length(sol.layout.plans))")
+    1 <= plan_index <= length(sol.layout.plans) || throw(
+        ArgumentError(
+            "component_gains: plan_index $plan_index out of range 1:$(length(sol.layout.plans))"
+        )
+    )
     rng = component_ranges(sol.layout)
     θm = fill!(similar(sol.θ), 0)
     θm[rng[plan_index]] = sol.θ[rng[plan_index]]
@@ -234,8 +240,8 @@ function bandpass_solution(sol::CalibrationSolution)
     lcs = collect(sol.model.logamp)
     pidx = findall(_is_bandpass, pcs)
     lidx = findall(_is_bandpass, lcs)
-    isempty(pidx) && isempty(lidx) && error(
-        "bandpass_solution: the solution's model carries no bandpass component."
+    isempty(pidx) && isempty(lidx) && throw(
+        ArgumentError("bandpass_solution: the solution's model carries no bandpass component.")
     )
     model = StationGainModel(phase = Tuple(pcs[pidx]), logamp = Tuple(lcs[lidx]))
     nant = sol.layout.nant
@@ -285,12 +291,13 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
         for f in fs
             fk = Float64(f)
             prev = get(freq_spw, fk, nothing)
-            (prev === nothing || prev == info.spw_name) ||
-                error(
-                "build_geometry: channel frequency $fk Hz appears in conflicting spectral " *
-                    "windows '$prev' and '$(info.spw_name)' — a single concatenated channel axis " *
-                    "cannot dense-rank it to one spw. Partition the set so each frequency belongs " *
-                    "to one spw, or rename the spws consistently."
+            (prev === nothing || prev == info.spw_name) || throw(
+                ArgumentError(
+                    "build_geometry: channel frequency $fk Hz appears in conflicting spectral " *
+                        "windows '$prev' and '$(info.spw_name)' — a single concatenated channel " *
+                        "axis cannot dense-rank it to one spw. Partition the set so each " *
+                        "frequency belongs to one spw, or rename the spws consistently."
+                )
             )
             freq_spw[fk] = info.spw_name
         end
@@ -298,11 +305,13 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
         for t in ts
             tk = Float64(t)
             prev = get(time_scan, tk, nothing)
-            (prev === nothing || prev == info.scan_name) ||
-                error(
-                "build_geometry: time $tk h appears in conflicting scans '$prev' and " *
-                    "'$(info.scan_name)' — a single concatenated time axis cannot dense-rank it to " *
-                    "one scan. Check for overlapping scan windows or inconsistent scan names."
+            (prev === nothing || prev == info.scan_name) || throw(
+                ArgumentError(
+                    "build_geometry: time $tk h appears in conflicting scans '$prev' and " *
+                        "'$(info.scan_name)' — a single concatenated time axis cannot dense-rank " *
+                        "it to one scan. Check for overlapping scan windows or inconsistent " *
+                        "scan names."
+                )
             )
             time_scan[tk] = info.scan_name
         end
@@ -377,13 +386,14 @@ function leaf_window(geom::DataGeometry, leaf)
     chan_idx = Vector{Int}(undef, length(fs))
     for (i, f) in enumerate(fs)
         j = findfirst(g -> isapprox(g, Float64(f); rtol = 1.0e-9), geom.channel_freqs)
-        isnothing(j) && error("leaf_window: channel frequency $f not found in geometry")
+        isnothing(j) &&
+            throw(ArgumentError("leaf_window: channel frequency $f not found in geometry"))
         chan_idx[i] = j
     end
     ti_idx = Vector{Int}(undef, length(ts))
     for (i, t) in enumerate(ts)
         j = findfirst(g -> isapprox(g, Float64(t); atol = 1.0e-9), geom.times)
-        isnothing(j) && error("leaf_window: time $t not found in geometry")
+        isnothing(j) && throw(ArgumentError("leaf_window: time $t not found in geometry"))
         ti_idx[i] = j
     end
     return chan_idx, ti_idx
