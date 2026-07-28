@@ -232,7 +232,7 @@ end
 # portability requirement for applying a solution onto a different time axis.
 function _globally_time_constant(ev::GainEvaluator)
     for plan in ev.layout.plans
-        plan.coord === Calibration.COORD_TIME && return false
+        :Ti in plan.axes && return false
         ts1 = plan.tseg_id[1]
         all(==(ts1), plan.tseg_id) || return false
     end
@@ -454,7 +454,7 @@ end
 function _precal_time_constant(ev::GainEvaluator, g_ti)
     length(g_ti) <= 1 && return true
     for plan in ev.layout.plans
-        plan.coord === Calibration.COORD_TIME && return false
+        :Ti in plan.axes && return false
         ts = plan.tseg_id[g_ti[1]]
         for gti in g_ti
             plan.tseg_id[gti] == ts || return false

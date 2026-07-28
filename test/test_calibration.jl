@@ -41,7 +41,34 @@ const CAL = Gustavo.Calibration
     @test CAL.segment_groups([1, 1, 2, 3, 3, 4], 4) == [[1, 2], [3], [4, 5], [6]]
 end
 
-@testset "Calibration terms: nparams, basis, eval" begin
+@testset "Calibration terms: names, nparams, eval" begin
+    # A term names its parameters and shapes them; the count is derived, so it
+    # cannot disagree with the names.
+    @test CAL.param_shapes(CAL.Delay(), 7) == (delay = (),)
+    @test CAL.param_shapes(CAL.PolynomialFreq(3), 7) == (coeffs = (3,),)
+    # A per-channel term declares ONE channel's group; the block holds one per
+    # channel, so the block length still scales with the segment.
+    @test CAL.param_shapes(CAL.PerChannel(), 7) == (gain = (),)
+
+    # One `Polynomial` term; the axis it reads is a type parameter, and the
+    # convenience constructors are functions returning it.
+    @test CAL.PolynomialFreq(3) isa CAL.Polynomial{:Frequency}
+    @test CAL.PolynomialTime(3) isa CAL.Polynomial{:Ti}
+    @test CAL.term_axes(CAL.PolynomialFreq(3)) == (:Frequency,)
+    @test CAL.term_axes(CAL.PolynomialTime(3)) == (:Ti,)
+    @test CAL.term_label(CAL.PolynomialFreq(3)) == "polyf3"
+    @test CAL.term_label(CAL.PolynomialTime(2)) == "polyt2"
+    @test_throws ArgumentError CAL.PolynomialFreq(0)
+    @test_throws "axis must be one of" CAL.Polynomial{:nope}(2)
+
+    # A term is handed the axes it declares, under the dimension names, and a
+    # channel index is never one of them.
+    @test CAL.term_axes(CAL.Delay()) == (:Frequency,)
+    @test CAL.term_axes(CAL.Rate()) == (:Ti,)
+    @test CAL.term_axes(CAL.PerChannel()) == ()
+    @test CAL.params_per_channel(CAL.PerChannel())
+    @test !CAL.params_per_channel(CAL.Delay())
+
     @test CAL.nparams_per_block(CAL.ConstantTerm(), 7) == 1
     @test CAL.nparams_per_block(CAL.Delay(), 7) == 1
     @test CAL.nparams_per_block(CAL.Rate(), 7) == 1
@@ -49,23 +76,32 @@ end
     @test CAL.nparams_per_block(CAL.PolynomialTime(2), 7) == 2
     @test CAL.nparams_per_block(CAL.PerChannel(), 7) == 7
 
-    # basis_columns shapes
-    x = collect(-1.0:0.5:1.0)              # 5 samples
-    @test size(CAL.basis_columns(CAL.ConstantTerm(), x)) == (5, 1)
-    @test CAL.basis_columns(CAL.ConstantTerm(), x) == reshape(ones(5), :, 1)
-    @test CAL.basis_columns(CAL.Delay(), x) ≈ reshape(2π .* x, :, 1)
-    @test size(CAL.basis_columns(CAL.PolynomialFreq(3), x)) == (5, 3)
-    @test CAL.basis_columns(CAL.PolynomialFreq(2), x)[:, 1] ≈ x
-    @test CAL.basis_columns(CAL.PolynomialFreq(2), x)[:, 2] ≈ x .^ 2
-    @test CAL.basis_columns(CAL.PerChannel(), x) == Matrix(I, 5, 5)
+    # scalar term_eval primitives: a term sees its own named parameters and the
+    # coordinates `term_axes` declares, under those names.
+    @test CAL.term_eval(CAL.ConstantTerm(), (offset = 1.5,), NamedTuple()) == 1.5
+    @test CAL.term_eval(CAL.Delay(), (delay = 0.3,), (Frequency = 4.0,)) ≈ 2π * 0.3 * 4.0
+    @test CAL.term_eval(CAL.Rate(), (rate = 0.3,), (Ti = 5.0,)) ≈ 2π * 0.3 * 5.0
+    @test CAL.term_eval(CAL.Dispersion(), (dtec = 0.3,), (Frequency = 4.0,)) ≈ 0.3 * 4.0
+    @test CAL.term_eval(CAL.PerChannel(), (gain = -0.7,), NamedTuple()) == -0.7
+    @test CAL.term_eval(
+        CAL.PolynomialFreq(3), (coeffs = [0.3, 1.5, -0.7],), (Frequency = 2.0,)
+    ) ≈ 0.3 * 2 + 1.5 * 4 + (-0.7) * 8
+    @test CAL.term_eval(
+        CAL.PolynomialTime(3), (coeffs = [0.3, 1.5, -0.7],), (Ti = 2.0,)
+    ) ≈ 0.3 * 2 + 1.5 * 4 + (-0.7) * 8
 
-    # scalar term_eval primitives
-    θ = [0.3, 1.5, -0.7]
-    @test CAL.term_eval(CAL.ConstantTerm(), θ, 2, 0.0, 0.0, 1) == 1.5
-    @test CAL.term_eval(CAL.Delay(), θ, 1, 4.0, 0.0, 1) ≈ 2π * 0.3 * 4.0
-    @test CAL.term_eval(CAL.Rate(), θ, 1, 0.0, 5.0, 1) ≈ 2π * 0.3 * 5.0
-    @test CAL.term_eval(CAL.PerChannel(), θ, 1, 0.0, 0.0, 3) == θ[3]
-    @test CAL.term_eval(CAL.PolynomialFreq(3), θ, 1, 2.0, 0.0, 1) ≈ 0.3 * 2 + 1.5 * 4 + (-0.7) * 8
+    # The named parameters of a block are addressed from the block's own start.
+    θ = [0.0, 0.3, 1.5, -0.7]
+    @test CAL._block_params(CAL.param_shapes(CAL.Delay(), 1), θ, 2) == (delay = 0.3,)
+    @test CAL._block_params(CAL.param_shapes(CAL.PolynomialFreq(2), 1), θ, 3).coeffs ==
+        [1.5, -0.7]
+    # Declaration order, and each name gets exactly the size it declared.
+    shapes = (a = (), b = (2,), c = ())
+    p = CAL._block_params(shapes, θ, 1)
+    @test p.a == 0.0 && p.b == [0.3, 1.5] && p.c == -0.7
+
+    # `basis_columns` is gone: WLS solvers build their own systems.
+    @test !isdefined(CAL, :basis_columns)
 end
 
 @testset "Calibration feed tying offset algebra" begin
@@ -209,12 +245,12 @@ end
 end
 
 @testset "Calibration: misdeclared coordinate term errors loudly (N3)" begin
-    # A new term that declares COORD_FREQ but defines no freq_coordinate must
-    # error at plan time, not silently evaluate with xf = 0.
+    # A new term that declares the :Frequency axis but defines no
+    # freq_coordinate must error at plan time, not silently evaluate at x = 0.
     @eval CAL begin
         struct _AuditBadFreqTerm <: AbstractGainTerm end
-        coord_kind(::_AuditBadFreqTerm) = COORD_FREQ
-        nparams_per_block(::_AuditBadFreqTerm, n) = 1
+        term_axes(::_AuditBadFreqTerm) = (:Frequency,)
+        param_shapes(::_AuditBadFreqTerm, n) = (scale = (),)
         # NOTE: deliberately no freq_coordinate method.
     end
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [1.0e9, 2.0e9])

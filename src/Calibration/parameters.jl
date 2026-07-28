@@ -14,14 +14,17 @@ per log-amplitude component). `off1`/`off2` give the 1-based start index in θ o
 the primary and secondary parameter block for `(ant, feed, time_segment,
 freq_segment)`; `0` means "no contribution". (`off2` is non-zero only for the
 partner feed under `ReferenceRelative`, where the value is reference + relative.)
+A block holds the parameters `param_shapes(term, nchan_seg[freq_segment])`
+declares, laid out in the order the names are declared in.
 """
 struct ComponentPlan
-    coord::CoordKind
+    axes::Vector{Symbol}        # the coordinate axes the term reads
     tseg_id::Vector{Int}        # length ntime  → time-segment id
     fseg_id::Vector{Int}        # length nchan  → freq-segment id
     xf::Vector{Float64}         # length nchan  → frequency coordinate
     xt::Vector{Float64}         # length ntime  → time coordinate
     clocal::Vector{Int}         # length nchan  → local channel index within its fseg
+    nchan_seg::Vector{Int}      # length nfseg  → channels in the frequency segment
     off1::Array{Int, 4}         # (ant, feed, ntseg, nfseg)
     off2::Array{Int, 4}
 end
@@ -49,15 +52,20 @@ function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next:
     fseg_groups = segment_groups(fseg_id, nfseg)
     tseg_groups = segment_groups(tseg_id, ntseg)
 
-    # Build only the coordinate the term actually reads (its `coord_kind`); the
-    # other axis stays zero. Calling the builder solely for the matching kind
-    # means a term that declares COORD_FREQ/COORD_TIME but is missing its
-    # `freq_coordinate`/`time_coordinate` method errors loudly (no silent
-    # zero-coordinate fallback) — the key extensibility guard.
-    ck = coord_kind(t)
-    xf = ck == COORD_FREQ ? freq_coordinate(t, geom.channel_freqs, fseg_groups, geom.f0) :
+    # Build only the axes the term declares; the rest stay zero. Calling a
+    # builder solely for a declared axis means a term that declares one but is
+    # missing its builder errors loudly (no silent zero-coordinate fallback) —
+    # the key extensibility guard.
+    axes = term_axes(t)
+    all(in(TERM_AXES), axes) || throw(
+        ArgumentError(
+            "$(typeof(t)) declares unknown coordinate axes $(setdiff(axes, TERM_AXES)); " *
+                "term_axes must be drawn from $TERM_AXES"
+        )
+    )
+    xf = :Frequency in axes ? freq_coordinate(t, geom.channel_freqs, fseg_groups, geom.f0) :
         zeros(Float64, nchannels(geom))
-    xt = ck == COORD_TIME ? time_coordinate(t, geom.times, tseg_groups, geom.t0) :
+    xt = :Ti in axes ? time_coordinate(t, geom.times, tseg_groups, geom.t0) :
         zeros(Float64, ntimes(geom))
 
     # Local channel index within each frequency segment (walk in channel order).
@@ -69,8 +77,10 @@ function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next:
         counter[f] += 1
         clocal[c] = counter[f]
     end
-    # Block length per freq segment (only PerChannel varies with |fseg|).
-    blocklen = [nparams_per_block(t, length(grp)) for grp in fseg_groups]
+    # Channels per freq segment, and the block length each implies (only terms
+    # whose arity comes from the data vary with it).
+    nchan_seg = [length(grp) for grp in fseg_groups]
+    blocklen = [nparams_per_block(t, n) for n in nchan_seg]
 
     off1 = zeros(Int, nant, 2, ntseg, nfseg)
     off2 = zeros(Int, nant, 2, ntseg, nfseg)
@@ -81,7 +91,9 @@ function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next:
         next = _assign_blocks!(off1, off2, tying, ant, ts, fs, bl, next)
     end
 
-    plan = ComponentPlan(coord_kind(t), tseg_id, fseg_id, xf, xt, clocal, off1, off2)
+    plan = ComponentPlan(
+        collect(Symbol, axes), tseg_id, fseg_id, xf, xt, clocal, nchan_seg, off1, off2
+    )
     return plan, next
 end
 

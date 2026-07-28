@@ -33,18 +33,58 @@ end
     @inbounds fs = plan.fseg_id[c]
     @inbounds o1 = plan.off1[ant, feed, ts, fs]
     val = zero(eltype(θ))
-    @inbounds xf = plan.xf[c]
-    @inbounds xt = plan.xt[ti]
-    @inbounds cl = plan.clocal[c]
+    x = _cell_coordinates(t, plan, ti, c)
+    @inbounds shapes = param_shapes(t, plan.nchan_seg[fs])
+    shift = _channel_shift(t, plan, c, shapes)
     if o1 != 0
-        val += term_eval(t, θ, o1, xf, xt, cl)
+        val += term_eval(t, _block_params(shapes, θ, o1 + shift), x)
     end
     @inbounds o2 = plan.off2[ant, feed, ts, fs]
     if o2 != 0
-        val += term_eval(t, θ, o2, xf, xt, cl)
+        val += term_eval(t, _block_params(shapes, θ, o2 + shift), x)
     end
     return val
 end
+
+# The coordinates a term declares through `term_axes`, under those names. The
+# declaration is a compile-time constant for a concrete term, so the selection
+# folds away and each `term_eval` sees concretely-typed scalars.
+@inline _cell_coordinates(t::AbstractGainTerm, plan::ComponentPlan, ti, c) =
+    NamedTuple{term_axes(t)}(_axis_values(term_axes(t), plan, ti, c))
+
+@inline _axis_values(::Tuple{}, plan, ti, c) = ()
+@inline function _axis_values(names::Tuple, plan, ti, c)
+    v = first(names) === :Frequency ? (@inbounds plan.xf[c]) : (@inbounds plan.xt[ti])
+    return (v, _axis_values(Base.tail(names), plan, ti, c)...)
+end
+
+# Blocks of a `params_per_channel` term hold one parameter group per channel of
+# the frequency segment; this cell reads the group for its own channel.
+@inline function _channel_shift(t::AbstractGainTerm, plan::ComponentPlan, c, shapes)
+    params_per_channel(t) || return 0
+    @inbounds cl = plan.clocal[c]
+    return (cl - 1) * _group_size(values(shapes))
+end
+
+@inline _group_size(::Tuple{}) = 0
+@inline _group_size(shapes::Tuple) = prod(first(shapes)) + _group_size(Base.tail(shapes))
+
+# Address the parameters of one block: the declared names, in declaration order,
+# starting at `off` in θ. The layout reserved exactly `nparams_per_block` entries
+# there, so the block is in bounds by construction — this is the one place that
+# knows it, which is why the terms themselves need no bounds assertion.
+@inline _block_params(shapes::NamedTuple{names}, θ, off) where {names} =
+    NamedTuple{names}(_shaped_params(values(shapes), θ, off))
+
+@inline _shaped_params(::Tuple{}, θ, off) = ()
+@inline function _shaped_params(shapes::Tuple, θ, off)
+    p = _shaped_param(first(shapes), θ, off)
+    return (p, _shaped_params(Base.tail(shapes), θ, off + prod(first(shapes)))...)
+end
+
+@inline _shaped_param(::Tuple{}, θ, off) = @inbounds θ[off]
+@inline _shaped_param(shape::Tuple{Integer}, θ, off) =
+    @inbounds view(θ, off:(off + shape[1] - 1))
 
 """
     evaluate_gains(ev::GainEvaluator, θ) -> Array{Complex,4}
