@@ -20,7 +20,8 @@ workspaces) supplies it and this module never names it.
 module Streaming
 
 using ..Executors
-using ..Executors: exec_foreach
+using ..Executors: ThreadsExecutor
+using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 using ..UVData
 using ..UVData: Baseline, Frequency, Pol
 using ..Calibration

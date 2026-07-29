@@ -88,9 +88,11 @@ per-group task budget `inner`, per-task scratch pool). Build with
 `workspace` factory. It is `Nothing` — an empty pool — unless a factory is
 given, so a consumer whose kernels need scratch (`Gustavo.Fringe`'s FFT
 workspaces) asks for it by name and this module never names it. `S` and `T`
-carry the group-spec and transform types the stream was built from.
+carry the group-spec and transform types the stream was built from. `O` and `I`
+are the outer (across-scan group scheduling) and inner (within-scan fan-out)
+executors — see [`ExecutionConfig`](@ref).
 """
-struct ScanStream{G <: AbstractLeafGrouping, W, S <: ScanGroupSpec, T}
+struct ScanStream{G <: AbstractLeafGrouping, W, S <: ScanGroupSpec, T, O, I}
     uvset::UVSet
     geom::DataGeometry
     grouping::G
@@ -101,7 +103,8 @@ struct ScanStream{G <: AbstractLeafGrouping, W, S <: ScanGroupSpec, T}
     ntasks::Int
     inner::Int
     pool::Channel{W}
-    executor::Executors.AbstractExecutor
+    outer_executor::O
+    inner_executor::I
 end
 
 # One group's spec, labelled from its first leaf's partition metadata.
@@ -148,7 +151,8 @@ end
     scan_stream(uvset::UVSet; grouping = ByScan(), transforms = (),
                 geom = build_geometry(uvset), ntasks = Threads.nthreads(),
                 mem_fraction = 0.6, mem_budget = nothing, workspace = nothing,
-                executor = current_executor()) -> ScanStream
+                outer_executor = ThreadsExecutor(),
+                inner_executor = DynamicScheduler()) -> ScanStream
 
 Prepare `uvset` for scan-group streaming WITHOUT reading data: group the lazy
 leaves under `grouping`, charge each group's peak bytes, and size the run's
@@ -174,7 +178,8 @@ function scan_stream(
         mem_fraction::Real = 0.6,
         mem_budget = nothing,
         workspace = nothing,
-        executor::Executors.AbstractExecutor = Executors.current_executor(),
+        outer_executor = Executors.DEFAULT_EXECUTOR[],
+        inner_executor = DynamicScheduler(),
     )
     # Group lazy leaf references in branch order, first-seen key order.
     groups = Dict{Any, Vector{Any}}()
@@ -210,9 +215,15 @@ function scan_stream(
 
     pool = _workspace_pool(workspace, max(Threads.nthreads(), 1))
 
+    # The inner executor fans out every within-scan loop; fix its chunk count to
+    # the parallelism the memory budget leaves per group (`ntasks_use × inner ≈
+    # nthreads`, so nested fan-outs don't oversubscribe). ChunkSplitters clamps
+    # the count down to each loop's length, so one scheduler serves them all.
+    inner_exec = Executors.with_nchunks(inner_executor, inner)
+
     return ScanStream(
         uvset, geom, grouping, specs, UVData._narrow_eltype(transforms), ant_names,
-        budget, ntasks_use, inner, pool, executor,
+        budget, ntasks_use, inner, pool, outer_executor, inner_exec,
     )
 end
 
@@ -255,7 +266,7 @@ end
 
 """
     materialize_cube(stream::ScanStream, spec::ScanGroupSpec;
-                     inner = stream.inner) -> (stack, win)
+                     executor = stream.inner_executor) -> (stack, win)
 
 Materialize one scan group as a frequency-concatenated cube and apply the
 stream's transform chain to it. Fast path decodes each band directly into its
@@ -271,7 +282,7 @@ concatenated axis lives on the `Frequency` lookup, NOT in
 `metadata.frequencies`, which still describes that one band). `win` is the
 group's [`GeometryWindow`](@ref) into the solve's index space.
 """
-function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; inner::Integer = stream.inner)
+function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; executor = stream.inner_executor)
     grp = _direct_scan_group(spec, stream.geom)
     if grp === nothing
         leaves = UVData.materialize_group(
@@ -280,7 +291,7 @@ function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; inner::Intege
         grp = _stacked_scan_group(leaves, stream.geom)
     end
     stack, win = grp
-    apply_transforms!(stream.transforms, stack, win; inner = inner)
+    apply_transforms!(stream.transforms, stack, win; executor)
     return stack, win
 end
 
@@ -427,7 +438,7 @@ end
 
 """
     materialize_leaves(stream::ScanStream, spec::ScanGroupSpec;
-                       inner = stream.inner) -> Vector{Tuple}
+                       executor = stream.inner_executor) -> Vector{Tuple}
 
 Materialize one scan group as its per-band `(partition_key, leaf)` pairs — no
 concatenated copy (the memory-lean path for leaf-wise passes) — with the
@@ -436,7 +447,7 @@ transformed in place (their arrays are freshly materialized, hence private); an
 eager source's leaf is the caller's own data, so it is copied first — the
 caller's `UVSet` is never mutated.
 """
-function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; inner::Integer = stream.inner)
+function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; executor = stream.inner_executor)
     keyed = [
         (k, m) for ((k, _), m) in zip(
             spec.leaves,
@@ -446,8 +457,7 @@ function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; inner::Inte
     isempty(stream.transforms) && return keyed
     private = all(((_, l),) -> UVData.is_lazy(l), spec.leaves)
     out = Vector{Any}(undef, length(keyed))
-    nt = clamp(Int(inner), 1, length(keyed))
-    exec_foreach(eachindex(keyed); ntasks = nt) do i
+    tforeach(eachindex(keyed); scheduler = executor) do i
         k, m = keyed[i]
         out[i] = (k, _transform_leaf(stream, spec, m; copy_arrays = !private))
     end
@@ -468,7 +478,8 @@ function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arr
         with_visibilities(leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights]))) : leaf
     # Per-leaf work is already fanned out across leaves; keep transforms serial here.
     apply_transforms!(
-        stream.transforms, base[(:vis, :weights)], leaf_window(stream.geom, base); inner = 1,
+        stream.transforms, base[(:vis, :weights)], leaf_window(stream.geom, base);
+        executor = SerialScheduler(),
     )
     return with_visibilities(base, base[:vis], base[:weights])
 end
@@ -518,15 +529,10 @@ function map_groups(
         _stream_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
         return r
     end
-    # Bind the stream's executor as the ambient one for the whole pass, so the
-    # group tasks AND every fan-out nested inside `work` (decode, search
-    # chunks, refine loops) run on the same backend.
-    results, _ = Executors.with_executor(stream.executor) do
-        _scheduled_map(
-            wrapped, specs, [s.charge for s in specs], stream.budget;
-            max_tasks = stream.ntasks, executor = stream.executor,
-        )
-    end
+    results, _ = _scheduled_map(
+        wrapped, specs, [s.charge for s in specs], stream.budget;
+        max_tasks = stream.ntasks, executor = stream.outer_executor,
+    )
     return results
 end
 
@@ -547,12 +553,19 @@ foreach_group(work::F, stream::ScanStream; kwargs...) where {F} =
 # both, so which groups ever run concurrently does not depend on the backend.
 function _scheduled_map(
         work::F, items, charges, budget;
-        max_tasks::Integer, executor::Executors.AbstractExecutor = Executors.ThreadsExecutor(),
+        max_tasks::Integer, executor = Executors.ThreadsExecutor(),
+    ) where {F}
+    length(items) == 0 && return Any[], 0
+    return _scheduled_map(executor, work, items, charges, budget, max_tasks)
+end
+
+# The default OUTER backend: a `Threads.@spawn` worker pool. A backend that
+# needs different task-lifetime management overrides this on its executor type
+# (the Dagger backend does, to force per-group GC — see `_scheduled_map_dagger`).
+function _scheduled_map(
+        ::Executors.ThreadsExecutor, work::F, items, charges, budget, max_tasks::Integer,
     ) where {F}
     n = length(items)
-    n == 0 && return Any[], 0
-    executor isa Executors.DaggerExecutor &&
-        return _scheduled_map_dagger(work, items, charges, budget; max_tasks)
     out = Vector{Any}(undef, n)
     remaining = sort(collect(1:n); by = k -> -Float64(charges[k]))
     cond = Threads.Condition()
@@ -604,6 +617,10 @@ function _scheduled_map(
     foreach(wait, workers)
     return map(identity, out), peak[]
 end
+
+_scheduled_map(
+    ::Executors.DaggerExecutor, work::F, items, charges, budget, max_tasks::Integer,
+) where {F} = _scheduled_map_dagger(work, items, charges, budget; max_tasks)
 
 # The Dagger backend of `_scheduled_map`: one `Dagger.@spawn` per item instead
 # of a worker pool, submitted by the SAME admission policy (largest-first, own

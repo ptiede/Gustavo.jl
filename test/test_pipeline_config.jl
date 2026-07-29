@@ -207,8 +207,9 @@ end
         @test fieldtype(typeof(e), :progress) === typeof(cb)
         @test isconcretetype(typeof(ExecutionConfig()))
         @test fieldtype(typeof(ExecutionConfig()), :progress) === Nothing
-        @test isconcretetype(fieldtype(typeof(e), :executor))
-        # The pipeline propagates it rather than widening back to the supertype.
+        @test isconcretetype(fieldtype(typeof(e), :outer_executor))
+        @test isconcretetype(fieldtype(typeof(e), :inner_executor))
+        # The pipeline propagates the config at its own concrete type.
         @test fieldtype(typeof(CalibrationPipeline([FringeFit()]; exec = e)), :exec) === typeof(e)
     end
 

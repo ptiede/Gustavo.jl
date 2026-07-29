@@ -30,7 +30,7 @@ end
 """
     search_scan(stream::ScanStream, stack, search::FringeSearch;
                 Vsearch = stack[:vis], ngroups = length(stream.groups),
-                inner = stream.inner, t0 = stream.geom.t0 * 3600.0) -> ScanSearchResult
+                executor = stream.inner_executor, t0 = stream.geom.t0 * 3600.0) -> ScanSearchResult
 
 Fringe-search every (baseline, product) of a materialized scan group — the
 public stage-A search. `stack` is the group's `DimStack` as
@@ -43,7 +43,7 @@ each individual search runs at `pfa_max` divided by that count; pass
 is the epoch the detection PHASES are referenced to — delay/rate/SNR are
 epoch-invariant; the default is the solve's track epoch, a standalone QA caller
 typically wants the scan midpoint (`mean(timestamps(stack)) * 3600`). Results
-are bit-identical to the serial loop regardless of `inner`.
+are bit-identical to the serial loop regardless of the inner `executor`.
 
 `stream` must carry a [`FringeWorkspace`](@ref) pool — build it with
 `scan_stream(uvset; workspace = FringeWorkspace)`.
@@ -51,13 +51,13 @@ are bit-identical to the serial loop regardless of `inner`.
 function search_scan(
         stream::ScanStream, stack::AbstractDimStack, search::FringeSearch;
         Vsearch = stack[:vis], ngroups::Integer = length(stream.groups),
-        inner::Integer = stream.inner, t0::Real = stream.geom.t0 * 3600.0,
+        executor = stream.inner_executor, t0::Real = stream.geom.t0 * 3600.0,
     )
     return _search_scan_cube(
         UVData.baselines(stack).pairs, pol_products(stack),
         frequencies(stack), timestamps(stack), stack[:weights],
         Vsearch, stream.geom.f0, Float64(t0), search,
-        _search_pool(stream), inner, ngroups,
+        _search_pool(stream), executor, ngroups,
     )
 end
 
@@ -78,11 +78,11 @@ function _search_pool(stream::ScanStream)
 end
 
 # Core search over one stacked cube. Grid geometry is built ONCE per group; the
-# independent per-(baseline, product) searches fan out over `inner` tasks, each
-# borrowing a workspace so FFTW plans survive scan-to-scan.
+# independent per-(baseline, product) searches fan out over the inner `executor`,
+# each borrowing a workspace so FFTW plans survive scan-to-scan.
 function _search_scan_cube(
         bl_pairs, pols, fg, tg, Wg, Vsearch, f0, t0_sec, search,
-        pool::Channel{FringeWorkspace}, inner::Integer, ngroups::Integer,
+        pool::Channel{FringeWorkspace}, executor, ngroups::Integer,
     )
     nbl = length(bl_pairs)
     npol = length(pols)
@@ -102,9 +102,9 @@ function _search_scan_cube(
                      search.pfa_max / nsearch) : search
 
     pairs = [(bi, p) for p in 1:npol for bi in 1:nbl]
-    nchunk = clamp(Int(inner), 1, length(pairs))
+    nchunk = clamp(Executors.inner_nchunks(executor), 1, length(pairs))
     chunks = collect(Iterators.partition(pairs, cld(length(pairs), nchunk)))
-    exec_foreach(chunks; ntasks = length(chunks)) do chunk
+    tforeach(chunks; scheduler = executor) do chunk
         ws = take!(pool)
         try
             for (bi, p) in chunk

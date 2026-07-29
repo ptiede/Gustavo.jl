@@ -28,19 +28,15 @@
 module GustavoDaggerExt
 
 import Gustavo.Executors as Executors
-using Gustavo.Executors: DaggerExecutor, with_executor
+using Gustavo.Executors: DaggerExecutor
 using Dagger
 using Distributed: Distributed, CapturedException
 
 function Executors._spawn(ex::DaggerExecutor, f, blocking::Bool)
-    # Re-bind the ambient-executor scope inside the Dagger task: ScopedValues
-    # cross a `Threads.@spawn` boundary but not Dagger's scheduler-created
-    # tasks.
-    g = () -> with_executor(f, ex)
     if blocking
-        return Dagger.@spawn occupancy = Dict(Dagger.ThreadProc => 0) g()
+        return Dagger.@spawn occupancy = Dict(Dagger.ThreadProc => 0) f()
     else
-        return Dagger.@spawn g()
+        return Dagger.@spawn f()
     end
 end
 

@@ -257,12 +257,12 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
         @test disp_plan !== nothing && ps_delay !== nothing && sbd !== nothing
 
         st = FP.scan_stream(uvd; geom = geom)
-        stack, win = FP.materialize_cube(st, st.groups[1]; inner = 1)
+        stack, win = FP.materialize_cube(st, st.groups[1]; executor = SerialScheduler())
 
         θn = zeros(layout.nθ)
         θ4 = zeros(layout.nθ)
-        nn = FP.refine_scan_dispersion!(θn, stack, win, ev, ps_delay, disp_plan, 1, 4; inner = 1)
-        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ev, ps_delay, disp_plan, 1, 4; inner = 4)
+        nn = FP.refine_scan_dispersion!(θn, stack, win, ev, ps_delay, disp_plan, 1, 4; executor = SerialScheduler())
+        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ev, ps_delay, disp_plan, 1, 4; executor = DynamicScheduler(; nchunks = 4))
         # Per-block accumulation ⇒ bit-identical at any inner fan-out.
         @test nn == n4
         @test θn == θ4
@@ -272,8 +272,8 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
             off = disp_plan.off1[a, 1, 1, 1]
             @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
         end
-        FP.refine_scan_sbd!(θn, stack, win, ev, sbd, 1, 4; inner = 1)
-        FP.refine_scan_sbd!(θ4, stack, win, ev, sbd, 1, 4; inner = 4)
+        FP.refine_scan_sbd!(θn, stack, win, ev, sbd, 1, 4; executor = SerialScheduler())
+        FP.refine_scan_sbd!(θ4, stack, win, ev, sbd, 1, 4; executor = DynamicScheduler(; nchunks = 4))
         @test θn == θ4
     end
 end

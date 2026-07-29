@@ -30,8 +30,8 @@
 
     @testset "cube path ≡ leaf path through the same chain" begin
         for spec in st.groups
-            stack, win = FP.materialize_cube(st, spec; inner = 2)
-            keyed = FP.materialize_leaves(st, spec; inner = 2)
+            stack, win = FP.materialize_cube(st, spec; executor = DynamicScheduler(; nchunks = 2))
+            keyed = FP.materialize_leaves(st, spec; executor = DynamicScheduler(; nchunks = 2))
             # Rebuild the cube from the transformed leaves: identical data —
             # the two choke paths apply the chain identically.
             stack_l, _ = ST._stacked_scan_group([m for (_, m) in keyed], geom)
@@ -46,7 +46,7 @@
 
     @testset "eager source data is never mutated" begin
         snap = [copy(parent(leaf[:weights])) for (_, leaf) in UVP.branches(uvset)]
-        FP.materialize_leaves(st, st.groups[1]; inner = 2)
+        FP.materialize_leaves(st, st.groups[1]; executor = DynamicScheduler(; nchunks = 2))
         FP.materialize_cube(st, st.groups[1])
         @test all(
             isequal(s, parent(leaf[:weights]))

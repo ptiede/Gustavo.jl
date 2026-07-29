@@ -3,8 +3,9 @@ using Test
 using Dagger      # activates GustavoDaggerExt — the executor A/B tests need it
 
 # The whole suite honors GUSTAVO_TEST_EXECUTOR=dagger (default: the package
-# default, Threads): the process-wide executor default scopes every pipeline
-# run and stream built below, so one env flip A/Bs the entire suite across
+# default, a threads worker pool): `DEFAULT_EXECUTOR` is the default OUTER
+# (across-scan) backend every `ExecutionConfig`/`scan_stream` reads when built
+# without one, so this one flip A/Bs the entire suite's group scheduling across
 # backends.
 get(ENV, "GUSTAVO_TEST_EXECUTOR", "") == "dagger" &&
     (Gustavo.Executors.DEFAULT_EXECUTOR[] = Gustavo.DaggerExecutor())

@@ -58,7 +58,7 @@ the solution was fit on, or another set with the same geometry.
 function calibrate(
         sol::CalibrationSolution, uvset::UVSet;
         reduce = ReduceStep[], apply_flags::Bool = true, ntasks::Integer = Threads.nthreads(),
-        executor::Executors.AbstractExecutor = Executors.current_executor(),
+        outer_executor = Executors.DEFAULT_EXECUTOR[], inner_executor = DynamicScheduler(),
     )
     any(t -> t === missing, sol.transforms) && throw(
         ArgumentError(
@@ -72,13 +72,16 @@ function calibrate(
                 "serialization (saved as `missing`) — re-fit, or apply it manually."
         )
     )
-    stream = Fringe.scan_stream(uvset; transforms = sol.transforms, ntasks = ntasks, executor = executor)
+    stream = Fringe.scan_stream(
+        uvset; transforms = sol.transforms, ntasks = ntasks,
+        outer_executor = outer_executor, inner_executor = inner_executor,
+    )
     post = _compose_output_chain(sol.postcal, collect(reduce))
     group_pairs = Fringe.map_groups(stream; stage = :output) do spec
         keyed = Fringe.materialize_leaves(stream, spec)
         reduce_scan_output(
             stream.uvset, keyed, sol, post;
-            ntasks = stream.inner, apply_flags = apply_flags,
+            executor = stream.inner_executor, apply_flags = apply_flags,
         )
     end
     return assemble_output(uvset, group_pairs)
@@ -135,14 +138,14 @@ fused ≡ standalone by construction and a lazy set is never fully materialized.
 """
 function reduce_scan_output(
         uvset::UVSet, keyed, sol::CalibrationSolution, postprocess;
-        ntasks::Integer = 1, apply_flags::Bool = true,
+        executor = SerialScheduler(), apply_flags::Bool = true,
     )
     sub_branches = DimensionalData.TreeDict()
     for (k, leaf) in keyed
         sub_branches[k] = leaf
     end
     sub = DimensionalData.rebuild(uvset; branches = sub_branches)
-    reduced = postprocess(UVData.apply_calibration(sub, sol; ntasks = ntasks, apply_flags = apply_flags))
+    reduced = postprocess(UVData.apply_calibration(sub, sol; executor, apply_flags))
     return collect(pairs(UVData.branches(reduced)))
 end
 
@@ -248,7 +251,8 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     stream = Fringe.scan_stream(
         uvset; geom = geom, transforms = br.tfs,
         ntasks = exec.ntasks, mem_fraction = exec.mem_fraction, mem_budget = exec.mem_budget,
-        workspace = Fringe.FringeWorkspace, executor = exec.executor,
+        workspace = Fringe.FringeWorkspace,
+        outer_executor = exec.outer_executor, inner_executor = exec.inner_executor,
     )
     ctx = SolveContext(
         model, layout, geom, ev, zeros(layout.nθ),
@@ -292,7 +296,7 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
             keyed = Fringe.materialize_leaves(ctx.stream, gspec)
             reduce_scan_output(
                 ctx.stream.uvset, keyed, sol, sink.postprocess;
-                ntasks = ctx.stream.inner, apply_flags = sink.apply_flags,
+                executor = ctx.stream.inner_executor, apply_flags = sink.apply_flags,
             )
         end
         return sol, assemble_output(uvset, group_pairs)
@@ -343,7 +347,7 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, step_index::Int, comps; 
                 sol_local = CalibrationSolution(ctx.model, ctx.layout, ctx.geom, ctx.θ, flag_nt)
                 out = reduce_scan_output(
                     ctx.stream.uvset, keyed, sol_local, sink.postprocess;
-                    ntasks = ctx.stream.inner, apply_flags = sink.apply_flags,
+                    executor = ctx.stream.inner_executor, apply_flags = sink.apply_flags,
                 )
             end
             (; index = gspec.index, decode = (tb - ta) / 1.0e9,

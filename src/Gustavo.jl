@@ -11,6 +11,9 @@ import DimensionalData
 # fan-outs, the Fringe kernels, the pass runner — spawns through it.
 include("executors.jl")
 using .Executors
+# Inner-executor types users select for within-scan fan-out; re-exported so a
+# bare `using Gustavo` can name them in `ExecutionConfig(inner_executor = …)`.
+using OhMyThreads: DynamicScheduler, StaticScheduler, SerialScheduler
 
 include("UVData/UVData.jl")
 using .UVData
@@ -37,7 +40,8 @@ export UVData, Calibration, Streaming, Fringe
 # Data entry and exit: the set type plus the reader/writer pair for each
 # supported format, so a bare `using Gustavo` spans load → fitcalibrate → write.
 export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
-export AbstractExecutor, ThreadsExecutor, DaggerExecutor, with_executor
+export ThreadsExecutor, DaggerExecutor
+export DynamicScheduler, StaticScheduler, SerialScheduler
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
 export FringeFit, FringeModel, DispersionModel, SingleBandDelay, default_fringe_terms,

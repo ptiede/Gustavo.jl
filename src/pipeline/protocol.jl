@@ -150,7 +150,8 @@ finish_pass!(step::SolveStep, ctx) = NamedTuple()
 
 """
     ExecutionConfig(; ntasks = Threads.nthreads(), mem_fraction = 0.6,
-                    mem_budget = nothing, progress = nothing, exclude_colocated = true)
+                    mem_budget = nothing, progress = nothing, exclude_colocated = true,
+                    outer_executor = ThreadsExecutor(), inner_executor = DynamicScheduler())
 
 Run-wide RESOURCES for a pipeline execution, shared by every pass — as opposed
 to per-step options, which shape an estimator or the model. Anything that
@@ -164,19 +165,24 @@ two runs differing only in their `ExecutionConfig` solve the same problem.
 - `progress` — `(stage, done, total)` callback per completed scan of each pass.
 - `exclude_colocated` — drop intra-site (co-located twin) baselines from the
   bandpass/adhoc accumulations (their non-closing crosstalk pollutes both).
-- `executor` — the task-scheduling backend ([`ThreadsExecutor`](@ref) by
-  default, via the ambient [`with_executor`](@ref) scope;
-  [`DaggerExecutor`](@ref) opt-in/experimental). Identical
-  admission/chunking/fold order under both, so θ and outputs are bit-identical
-  across executors.
+- `outer_executor` — the ACROSS-scan (group scheduling) backend:
+  [`ThreadsExecutor`](@ref) by default (the budget-admission worker pool on
+  `Threads.@spawn`), or [`DaggerExecutor`](@ref) for a distributed run. The
+  admission policy (memory budget, largest-first, `ntasks` cap) is identical
+  under both.
+- `inner_executor` — the WITHIN-scan fan-out scheduler, an OhMyThreads
+  `Scheduler` (`DynamicScheduler()` by default; `SerialScheduler()` to run the
+  within-scan solves single-threaded). `scan_stream` fixes its chunk count to
+  the inner parallelism the memory budget leaves per group.
 """
-Base.@kwdef struct ExecutionConfig{P, E <: Executors.AbstractExecutor}
+Base.@kwdef struct ExecutionConfig{P, O, I}
     ntasks::Int = Threads.nthreads()
     mem_fraction::Float64 = 0.6
     mem_budget::Union{Nothing, Float64} = nothing
     progress::P = nothing
     exclude_colocated::Bool = true
-    executor::E = Executors.current_executor()
+    outer_executor::O = Executors.DEFAULT_EXECUTOR[]
+    inner_executor::I = DynamicScheduler()
 end
 
 # ── The solve context (shared state of a pipeline run) ───────────────────────

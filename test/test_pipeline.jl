@@ -595,8 +595,8 @@ end
     geom = CAL.build_geometry(uvset)
     stq = FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace)
     stack, _ = FP.materialize_cube(stq, stq.groups[1])
-    r1 = FP.search_scan(stq, stack, FP.FringeSearch(); inner = 1, ngroups = 1)
-    r4 = FP.search_scan(stq, stack, FP.FringeSearch(); inner = 4, ngroups = 1)
+    r1 = FP.search_scan(stq, stack, FP.FringeSearch(); executor = SerialScheduler(), ngroups = 1)
+    r4 = FP.search_scan(stq, stack, FP.FringeSearch(); executor = DynamicScheduler(; nchunks = 4), ngroups = 1)
     det1, snr1, nc1, rows1 = r1.det, r1.max_snr, r1.ncells, r1.rows
     det4, snr4, nc4, rows4 = r4.det, r4.max_snr, r4.ncells, r4.rows
     # Same detections regardless of the inner task count (≈ only because the two

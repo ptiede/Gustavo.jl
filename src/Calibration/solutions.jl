@@ -444,7 +444,7 @@ stations is NOT flagged (it is calibrated by SNR transfer).
 """
 function UVData.apply_calibration(
         uvset::UVSet, sol::CalibrationSolution;
-        apply_flags::Bool = true, ntasks::Integer = Threads.nthreads(),
+        apply_flags::Bool = true, executor = DynamicScheduler(),
     )
     ev = GainEvaluator(sol.model, sol.layout)
     flagged, exclbl = apply_flags ? _solution_flag_sets(sol.info) : (nothing, nothing)
@@ -454,7 +454,7 @@ function UVData.apply_calibration(
         leaf = materialize_leaf(leaf; layers = (:vis, :weights, :uvw))
         win = leaf_window(sol.geom, leaf)
         g = evaluate_gains(ev, sol.θ, win.chan_idx, win.ti_idx)   # (nchan_leaf, nti_leaf, nant, 2)
-        vis_corr, w_corr = _apply_gain_kernel(leaf, g; ntasks = ntasks)
+        vis_corr, w_corr = _apply_gain_kernel(leaf, g; executor)
         _flag_solution_rows!(
             vis_corr, w_corr, UVData.baselines(leaf).pairs, sol.geom, win.ti_idx, flagged, exclbl,
         )
@@ -540,11 +540,11 @@ end
 # are read off the leaf, so they cannot disagree with the arrays they index.
 #
 # Each (baseline, product) column is independent — disjoint writes over
-# read-only gains — so the columns fan out over `ntasks`. That fan-out is
-# load-bearing: this kernel is ≈80% of `apply_calibration` and the split is
-# worth ~5× on 8 threads. It is also bit-identical to the serial loop, because
-# every cell is the same scalar expression whatever the partition.
-function _apply_gain_kernel(leaf, g::AbstractArray{<:Complex, 4}; ntasks::Integer = 1)
+# read-only gains — so the columns fan out over the inner `executor`. That
+# fan-out is load-bearing: this kernel is ≈80% of `apply_calibration` and the
+# split is worth ~5× on 8 threads. It is also bit-identical to the serial loop,
+# because every cell is the same scalar expression whatever the partition.
+function _apply_gain_kernel(leaf, g::AbstractArray{<:Complex, 4}; executor = SerialScheduler())
     vis = leaf[:vis]
     w = leaf[:weights]
     vis_c = similar(vis)
@@ -552,7 +552,7 @@ function _apply_gain_kernel(leaf, g::AbstractArray{<:Complex, 4}; ntasks::Intege
     ants = UVData.baselines(leaf).pairs
     feeds = map(correlation_feed_pair, pol_products(leaf))
     columns = vec(CartesianIndices((axes(vis, 3), axes(vis, 4))))
-    exec_foreach(columns; ntasks = clamp(Int(ntasks), 1, max(1, length(columns)))) do col
+    tforeach(columns; scheduler = executor) do col
         bi, p = Tuple(col)
         a, b = ants[bi]
         fa, fb = feeds[p]

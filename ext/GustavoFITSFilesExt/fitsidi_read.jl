@@ -25,10 +25,12 @@
 
 using DiskArrays
 using Statistics: median
-using Gustavo.Executors: exec_foreach
+using OhMyThreads: tforeach
 
 # Tasks to spread one leaf's vis/weights decode over (bounded by the baseline
-# count). Reads the solve-set knob in UVData; defaults to 1 (sequential).
+# count). Reads the solve-set knob in UVData; defaults to 1 (sequential). Decode
+# is byte-repacking I/O, always on local threads — independent of the run's
+# outer/inner executors.
 _decode_ntasks(nbl::Int) = max(1, min(nbl, UVData._DECODE_NTASKS[]))
 
 # ── Small helpers ────────────────────────────────────────────────────────────
@@ -650,7 +652,7 @@ function _read_row_span(io, a::IDIChunkArray, rmin::Int, rmax::Int)
         readbytes!(io, span, nbytes)
     else
         part = cld(nbytes, nstream)
-        exec_foreach(1:nstream; ntasks = nstream) do s
+        tforeach(1:nstream; ntasks = nstream) do s
             lo = (s - 1) * part
             len = min(part, nbytes - lo)
             len <= 0 && return
@@ -715,7 +717,7 @@ end
             _decode_vis_bl!(out, a, span, rmin, D, bl)
         end
     else
-        exec_foreach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
+        tforeach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
     end
     if a.normalize
         Aspec = _aspec_from_span(a, span, rmin, D)
@@ -771,7 +773,7 @@ end
             _decode_weights_bl!(out, a, span, rmin, D, bl)
         end
     else
-        exec_foreach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
+        tforeach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
     end
     if a.normalize
         Aspec = _aspec_from_span(a, span, rmin, a.flux_field.type)

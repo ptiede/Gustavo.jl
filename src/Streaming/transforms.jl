@@ -7,7 +7,7 @@
 # caller code (e.g. rescaling the weights of ONE baseline on ONE scan) with no
 # edits to Gustavo internals.
 #
-# The contract: implement `apply_transform!(t, stack, win; inner)` mutating the
+# The contract: implement `apply_transform!(t, stack, win; executor)` mutating the
 # stack's `:vis`/`:weights` layers in place. Transforms run in chain order at
 # every materialization, so a solve, a re-run, and a diagnostic that share the
 # chain see identical data. Solutions record the chain they were solved with
@@ -26,7 +26,7 @@ abstract type AbstractDataTransform end
 
 """
     apply_transform!(t::AbstractDataTransform, stack::AbstractDimStack,
-                     win::GeometryWindow; inner = 1)
+                     win::GeometryWindow; executor = SerialScheduler())
 
 Apply `t` to one materialized scan window, mutating `stack`'s `:vis`/`:weights`
 layers in place. The extension point for custom transforms.
@@ -40,15 +40,16 @@ pol_at("PP")]`, [`frequencies`](@ref), [`baselines`](@ref), [`source_name`](@ref
 coordinate axis cannot carry (`win.geom.channel_freqs[win.chan_idx] ==
 frequencies(stack)`).
 
-`inner` is the task budget for transforms that fan out over baselines.
+`executor` is the OhMyThreads scheduler for transforms that fan out over
+baselines (the within-scan inner executor — see [`ExecutionConfig`](@ref)).
 """
 # Only the transform type is annotated: a third-party method that leaves `stack`
 # and `win` unannotated — the natural spelling — must be strictly MORE specific
 # than this fallback, not ambiguous with it.
-function apply_transform!(t::AbstractDataTransform, stack, win; inner::Integer = 1)
+function apply_transform!(t::AbstractDataTransform, stack, win; executor = SerialScheduler())
     return error(
         "apply_transform! not implemented for $(typeof(t)) — implement " *
-            "`apply_transform!(t, stack, win::GeometryWindow; inner)` mutating the " *
+            "`apply_transform!(t, stack, win::GeometryWindow; executor)` mutating the " *
             "stack's :vis/:weights layers in place."
     )
 end
@@ -68,10 +69,10 @@ function apply_transform(uvset::UVSet, t::AbstractDataTransform)
 end
 
 # Run a chain in order (the choke-point entry; `nothing` chain = no-op).
-function apply_transforms!(ts, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1)
+function apply_transforms!(ts, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler())
     ts === nothing && return stack
     for t in ts
-        apply_transform!(t, stack, win; inner = inner)
+        apply_transform!(t, stack, win; executor)
     end
     return stack
 end
@@ -167,13 +168,13 @@ function validate_transform(t::ApplySolution, geom::DataGeometry, ant_names)
 end
 
 function apply_transform!(
-        t::ApplySolution, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1,
+        t::ApplySolution, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler(),
     )
     sol = t.sol
     ev = GainEvaluator(sol.model, sol.layout)
     if sol.geom.channel_freqs == win.geom.channel_freqs && sol.geom.times == win.geom.times
         # Same-set apply: stations index-aligned, full time mapping.
-        _divide_gains!(stack, win, ev, sol.θ, inner)
+        _divide_gains!(stack, win, ev, sol.θ, executor)
         return nothing
     end
     # Cross-set apply; the compatibility contract was already enforced by
@@ -187,7 +188,7 @@ function apply_transform!(
         missing_names = [n for (n, m) in zip(ant_names, amap) if m == 0]
         @warn "ApplySolution: stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
     end
-    _divide_gains!(stack, win, ev, sol.θ, inner; amap)
+    _divide_gains!(stack, win, ev, sol.θ, executor; amap)
     return nothing
 end
 
@@ -221,7 +222,7 @@ apply_transform(uvset::UVSet, t::ApplySolution) = UVData.apply_calibration(uvset
 # checks the loop is written to elide.
 function _divide_gains!(
         stack::AbstractDimStack, win::GeometryWindow, ev::GainEvaluator, θ,
-        inner::Integer; amap = nothing,
+        executor; amap = nothing,
     )
     V = parent(stack[:vis])
     W = parent(stack[:weights])
@@ -233,15 +234,15 @@ function _divide_gains!(
     tsel = amap === nothing ? (tconst ? (ti[1]:ti[1]) : ti) : (1:1)
     g = evaluate_gains(ev, θ, win.chan_idx, tsel)
     cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
-    nt = clamp(Int(inner), 1, length(cols))
-    do_chunk = function (chunk)
-        @inbounds for (bi, p) in chunk
+    tforeach(cols; scheduler = executor) do col
+        bi, p = col
+        @inbounds begin
             fa, fb = correlation_feed_pair(pols[p])
             a, b = bl_pairs[bi]
             if amap !== nothing
                 a = amap[a]
                 b = amap[b]
-                (a == 0 || b == 0) && continue
+                (a == 0 || b == 0) && return
             end
             for t in 1:nti
                 gt = tconst ? 1 : t
@@ -253,12 +254,6 @@ function _divide_gains!(
                 end
             end
         end
-    end
-    if nt <= 1
-        do_chunk(cols)
-    else
-        chunks = collect(Iterators.partition(cols, cld(length(cols), nt)))
-        exec_foreach(do_chunk, chunks; ntasks = length(chunks))
     end
     return nothing
 end
@@ -283,7 +278,7 @@ struct StationWeightScale <: AbstractDataTransform
 end
 
 function apply_transform!(
-        t::StationWeightScale, stack::AbstractDimStack, ::GeometryWindow; inner::Integer = 1,
+        t::StationWeightScale, stack::AbstractDimStack, ::GeometryWindow; executor = SerialScheduler(),
     )
     s = t.s
     bl_pairs = UVData.baselines(stack).pairs
@@ -327,7 +322,7 @@ end
 FlagChannels(mask::AbstractVector{Bool}) = FlagChannels(BitVector(mask))
 
 function apply_transform!(
-        t::FlagChannels, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1,
+        t::FlagChannels, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler(),
     )
     length(t.mask) == length(win.geom.channel_freqs) ||
         error("FlagChannels: mask length $(length(t.mask)) ≠ nchan $(length(win.geom.channel_freqs))")
@@ -367,7 +362,7 @@ struct CalFunction{F} <: AbstractDataTransform
 end
 
 function apply_transform!(
-        t::CalFunction, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1,
+        t::CalFunction, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler(),
     )
     t.f(stack, win)
     return nothing

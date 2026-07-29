@@ -31,7 +31,7 @@ end
 
 """
     refine_scan!(θ, stack, win::GeometryWindow, ev, rf::RefineService, ref_ant, nant;
-                 inner = 1, polish = false) -> nrej
+                 executor = DynamicScheduler(), polish = false) -> nrej
 
 Refine one scan's FringeFit-owned per-scan θ columns on the current residual:
 the joint (Δτ, dTEC) fit ([`refine_scan_dispersion!`](@ref)) followed by the
@@ -45,20 +45,20 @@ number of detections the robust dispersion station solve excised.
 """
 function refine_scan!(
         θ, stack::AbstractDimStack, win::GeometryWindow, ev, rf::RefineService, ref_ant, nant;
-        inner::Integer = 1, polish::Bool = false,
+        executor = DynamicScheduler(), polish::Bool = false,
     )
     nrej = polish ?
         refine_scan_dispersion!(
             θ, stack, win, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
-            inner = inner, ties = rf.ties,
+            executor, ties = rf.ties,
             tau_max = _DTEC_POLISH_TAU, dtec_max = rf.polish_dtec,
         ) :
         refine_scan_dispersion!(
             θ, stack, win, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
-            inner = inner, ties = rf.ties,
+            executor, ties = rf.ties,
         )
     rf.sbd_plans === nothing ||
-        refine_scan_sbd!(θ, stack, win, ev, rf.sbd_plans, ref_ant, nant; inner = inner)
+        refine_scan_sbd!(θ, stack, win, ev, rf.sbd_plans, ref_ant, nant; executor)
     return nrej
 end
 
@@ -81,7 +81,7 @@ end
 """
     refine_scan_dispersion!(θ, stack, win::GeometryWindow, ev, delay_plan, disp_plan,
                             ref_ant, nant; opts, snr_min, tau_max, dtec_max,
-                            inner, ties) -> nrej
+                            executor, ties) -> nrej
 
 Joint per-scan (Δτ, dTEC) refinement of one scan window: per-spw band phasors →
 per-baseline joint fits → two station solves accumulating into the per-scan
@@ -93,7 +93,7 @@ fewer than 4 bands are present (1/ν is unconstrainable).
 function refine_scan_dispersion!(
         θ, stack::AbstractDimStack, win::GeometryWindow, ev, delay_plan, disp_plan, ref_ant, nant;
         opts::Stationization = Stationization(reject_iters = 0), snr_min::Real = 8.0,
-        tau_max::Real = 2.0e-8, dtec_max::Real = 45.0, inner::Integer = 1,
+        tau_max::Real = 2.0e-8, dtec_max::Real = 45.0, executor = DynamicScheduler(),
         ties = nothing,
     )
     disp_plan === nothing && return 0
@@ -114,7 +114,7 @@ function refine_scan_dispersion!(
     z = zeros(ComplexF64, nbl, npol, nlf)
     w = zeros(Float64, nbl, npol, nlf)
     fb = [sum(@view fg[r]) / length(r) for r in blocks]
-    exec_foreach(1:nlf; ntasks = clamp(Int(inner), 1, nlf)) do li
+    tforeach(1:nlf; scheduler = executor) do li
         r = blocks[li]
         g = evaluate_gains(ev, θ, ci[r], ti)
         _accumulate_leaf_band_phasor!(
@@ -132,7 +132,7 @@ end
 
 """
     refine_scan_sbd!(θ, stack, win::GeometryWindow, ev, sbd, ref_ant, nant;
-                     nchunk = 4, snr_min = 8.0, tau_max = 6.0e-8, inner = 1) -> nrej
+                     nchunk = 4, snr_min = 8.0, tau_max = 6.0e-8, executor = DynamicScheduler()) -> nrej
 
 Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
 delay): each spw block's sub-band chunk phasors → per-(baseline, group) exact
@@ -143,7 +143,7 @@ dispersion-corrected. A no-op (0) when `sbd === nothing`.
 """
 function refine_scan_sbd!(
         θ, stack::AbstractDimStack, win::GeometryWindow, ev, sbd, ref_ant, nant;
-        nchunk::Integer = 4, snr_min::Real = 8.0, tau_max::Real = 6.0e-8, inner::Integer = 1,
+        nchunk::Integer = 4, snr_min::Real = 8.0, tau_max::Real = 6.0e-8, executor = DynamicScheduler(),
     )
     sbd === nothing && return 0
     geom = win.geom
@@ -164,7 +164,7 @@ function refine_scan_sbd!(
     w = zeros(Float64, nbl, npol, ntot)
     chunkf = zeros(Float64, ntot)
     chunkgrp = zeros(Int, ntot)
-    exec_foreach(1:nlf; ntasks = clamp(Int(inner), 1, nlf)) do li
+    tforeach(1:nlf; scheduler = executor) do li
         r = blocks[li]
         g = evaluate_gains(ev, θ, ci[r], ti)
         fs = fg[r]
@@ -198,7 +198,7 @@ end
 
 """
     adhoc_scan!(θ, stack, win::GeometryWindow, ev, adhoc_plan, adhoc, ref_ant, nant;
-                shared_feeds = false, inner = 1, excl = nothing, psI = nothing) -> θ
+                shared_feeds = false, executor = DynamicScheduler(), excl = nothing, psI = nothing) -> θ
 
 The per-integration atmospheric-phase (adhoc) solve of one scan window: accumulate
 the per-(baseline, product, AP) inverse-variance residual `V/g` (weight
@@ -213,7 +213,7 @@ using the field-rotation coefficients.
 """
 function adhoc_scan!(
         θ, stack::AbstractDimStack, win::GeometryWindow, ev, adhoc_plan, adhoc, ref_ant, nant;
-        shared_feeds::Bool = false, inner::Integer = 1, excl = nothing, psI = nothing,
+        shared_feeds::Bool = false, executor = DynamicScheduler(), excl = nothing, psI = nothing,
     )
     geom = win.geom
     bl_pairs = collect(UVData.baselines(stack).pairs)
@@ -225,16 +225,15 @@ function adhoc_scan!(
     npol = length(pols)
     nap = length(tg)
     # Per-band accumulation (the window's per-spw channel blocks stand in for the
-    # band leaves) fanned out over `inner` tasks — this loop (gain evaluation +
-    # residual sum over every visibility) dominates the adhoc pass on many-band
-    # data. Each BLOCK gets its own partial and the partials fold in block
-    # order, so the float association is fixed by the data layout alone — the
-    # result is bit-deterministic at any `inner`/ntasks (the monolith's
-    # chunk-local partials were not: chunk boundaries moved with `inner`).
+    # band leaves) fanned out over the inner `executor` — this loop (gain
+    # evaluation + residual sum over every visibility) dominates the adhoc pass
+    # on many-band data. Each BLOCK gets its own partial and the partials fold in
+    # block order, so the float association is fixed by the data layout alone —
+    # the result is bit-deterministic at any chunking.
     blocks = _spw_blocks(geom, ci)
     nblk = length(blocks)
     parts = Vector{Tuple{Array{ComplexF64, 3}, Array{Float64, 3}}}(undef, nblk)
-    exec_foreach(1:nblk; ntasks = clamp(Int(inner), 1, nblk)) do li
+    tforeach(1:nblk; scheduler = executor) do li
         r = blocks[li]
         rl = zeros(ComplexF64, nbl, npol, nap)
         wl = zeros(Float64, nbl, npol, nap)

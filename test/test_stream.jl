@@ -54,7 +54,7 @@
         search = FP.FringeSearch()
         spec = st.groups[1]
         stack_n, _ = FP.materialize_cube(st, spec)
-        res = FP.search_scan(st, stack_n, search; inner = 2)
+        res = FP.search_scan(st, stack_n, search; executor = DynamicScheduler(; nchunks = 2))
         ncross = count(pr -> pr[1] != pr[2], baselines(stack_n).pairs)
         @test res.ncells == res.cells1 * max(ncross * length(pol_products(stack_n)), 1)
         # Effective cells are FRACTIONAL on real grids (the oversampled plane is
@@ -67,11 +67,11 @@
 
         # `ngroups = 1` (standalone per-scan gating) only tightens/loosens the
         # per-search PFA threshold; the search grid — and cells1 — are unchanged.
-        res1 = FP.search_scan(st, stack_n, search; inner = 2, ngroups = 1)
+        res1 = FP.search_scan(st, stack_n, search; executor = DynamicScheduler(; nchunks = 2), ngroups = 1)
         @test res1.cells1 == res.cells1
 
         # inner fan-out is bit-identical to the serial loop.
-        res_ser = FP.search_scan(st, stack_n, search; inner = 1)
+        res_ser = FP.search_scan(st, stack_n, search; executor = SerialScheduler())
         @test all(res_ser.det .=== res.det)
         @test res_ser.rows == res.rows
     end
@@ -154,7 +154,7 @@ using Gustavo.Streaming
 import Gustavo.Streaming: apply_transform!
 
 struct HalveWeights <: AbstractDataTransform end
-apply_transform!(::HalveWeights, stack, win; inner::Integer = 1) =
+apply_transform!(::HalveWeights, stack, win; executor = SerialScheduler()) =
     (stack[:weights] .*= 0.5; nothing)
 
 # One budget-admitted pass: materialize every group through the chain and

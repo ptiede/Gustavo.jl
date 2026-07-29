@@ -273,7 +273,7 @@ function process_scan!(s::BandpassEstimator, ctx::SolveContext, stack, win::Geom
     nrej = rf === nothing ? 0 :
         Fringe.refine_scan!(
         ctx.θ, stack, win, ctx.ev, rf, ctx.ref_ant, ctx.nant;
-        inner = ctx.stream.inner,
+        executor = ctx.stream.inner_executor,
     )
     pols = String.(pol_products(stack))
     nchan = length(ctx.geom.channel_freqs)
@@ -351,12 +351,12 @@ function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::Geome
             first(win.ti_idx) in get(() -> Set{Int}(), ctx.scratch, :refined_t0)
         nrej = Fringe.refine_scan!(
             ctx.θ, stack, win, ctx.ev, rf, ctx.ref_ant, ctx.nant;
-            inner = ctx.stream.inner, polish = polish,
+            executor = ctx.stream.inner_executor, polish = polish,
         )
     end
     Fringe.adhoc_scan!(
         ctx.θ, stack, win, ctx.ev, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
-        shared_feeds = setup.shared, inner = ctx.stream.inner,
+        shared_feeds = setup.shared, executor = ctx.stream.inner_executor,
         excl = ctx.scratch[:excl], psI = setup.psI,
     )
     return (; nrej)

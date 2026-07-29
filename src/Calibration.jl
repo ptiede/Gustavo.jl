@@ -8,7 +8,7 @@ calibration pipeline.
 """
 module Calibration
 
-using ..Executors: exec_foreach
+using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 using ..UVData
 using ..UVData: correlation_feed_pair, is_parallel_hand, same_feed_label,
     parallel_hand_indices, cross_hand_indices, build_parallel_hand_mask,
