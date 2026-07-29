@@ -53,32 +53,6 @@ Base.@kwdef struct Stationization
     reject_iters::Int = 5
 end
 
-"""
-    StationSolution
-
-Per-(station, feed) fringe solution for one scan. `delay`/`rate`/`phase` are
-`(nant, 2)` matrices (feed axis 1/2); entries are `NaN` where a (station, feed)
-had no usable detection. `chi` is the per-scan cross-hand source phase (`NaN` if
-no cross hands were used). `covered` marks solved (station, feed) cells. `ncomp`
-gives the connected-component count of the phase graph (≥2 ⇒ disconnected array
-or feeds untied by cross hands).
-"""
-struct StationSolution
-    delay::Matrix{Float64}
-    rate::Matrix{Float64}
-    phase::Matrix{Float64}
-    chi::Float64
-    covered::BitMatrix
-    ncomp::Int
-end
-
-function Base.show(io::IO, s::StationSolution)
-    return print(
-        io, "StationSolution(", size(s.delay, 1), " antennas, ",
-        count(s.covered), "/", length(s.covered), " (station, feed) cells solved, ncomp=", s.ncomp, ")",
-    )
-end
-
 # Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 
@@ -98,12 +72,19 @@ struct _ObsRow
 end
 
 """
-    stationize_scan(detections, bl_pairs, pol_products, nant; ref_ant, opts) -> StationSolution
+    stationize_scan(detections, bl_pairs, pol_products, nant; ref_ant, opts) -> DimStack
 
 Solve per-(station, feed) delay, rate and phase from a scan's per-baseline
 `detections::AbstractMatrix{FringeDetection}` (indexed `[baseline, product]`).
 `bl_pairs` are the `(a, b)` antenna-index pairs, `pol_products` the MSv4
 correlation labels (e.g. `["PP","PQ","QP","QQ"]`), `ref_ant` the gauge reference.
+
+Returns a `DimStack` over `Ant × Feed` (feed axis 1/2): layers `:delay`/`:rate`/
+`:phase` are `NaN` where a (station, feed) had no usable detection, `:covered`
+marks the solved cells. Its metadata carries `:chi` (the per-scan cross-hand
+source phase, `NaN` if no cross hands were used) and `:ncomp` (the connected-
+component count of the phase graph; ≥2 ⇒ disconnected array or feeds untied by
+cross hands).
 """
 function stationize_scan(
         detections::AbstractMatrix{FringeDetection},
@@ -149,7 +130,16 @@ function stationize_scan(
     phase, chi, cov_p, ncomp = _solve_observable_robust(phase_rows, nant, ref_ant, opts; use_chi = true, rewrap = opts.phase_rewrap_iters)
 
     covered = cov_d .| cov_r .| cov_p
-    return StationSolution(delay, rate, phase, chi, covered, ncomp)
+    gdims = (Ant(1:nant), Feed(1:2))
+    return DimensionalData.DimStack(
+        (
+            delay = DimArray(delay, gdims),
+            rate = DimArray(rate, gdims),
+            phase = DimArray(phase, gdims),
+            covered = DimArray(covered, gdims),
+        );
+        metadata = Dict{Symbol, Any}(:chi => chi, :ncomp => ncomp),
+    )
 end
 
 # Closure pre-screen: flag baselines whose DELAY or RATE detections break
@@ -806,7 +796,7 @@ function station_closure_residuals(
         detections::AbstractMatrix{FringeDetection},
         bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
         pol_products::AbstractVector{<:AbstractString},
-        ::StationSolution;
+        ::AbstractDimStack;
         observable::Symbol = :phase,
         product::Integer = 1,
     )

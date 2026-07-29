@@ -122,7 +122,7 @@ export FringeSearch, FringeDetection, baseline_fringe_search
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
 export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask
-export Stationization, StationSolution, stationize_scan, station_closure_residuals
+export Stationization, stationize_scan, station_closure_residuals
 export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
 export station_weight_scale

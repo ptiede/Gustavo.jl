@@ -5,6 +5,7 @@ using Gustavo
 using Test
 using Random
 using Statistics: mean
+using DimensionalData: metadata
 
 const FR = Gustavo.Fringe
 const CALs = Gustavo.Calibration
@@ -45,7 +46,7 @@ function recon_residuals(D, sol, bl_pairs, pol_products)
         # Rate uses parallel hands only by default, so feed gauges are independent
         # — cross-hand rate is not reconstructable; only check parallel hands.
         cs == 0 && (rr = max(rr, abs(det.rate - (sol.rate[a, fa] - sol.rate[b, fb]))))
-        mph = sol.phase[a, fa] - sol.phase[b, fb] + (cs == 0 ? 0.0 : cs * sol.chi)
+        mph = sol.phase[a, fa] - sol.phase[b, fb] + (cs == 0 ? 0.0 : cs * metadata(sol)[:chi])
         rp = max(rp, abs(rem2pi(det.phase - mph, RoundNearest)))
     end
     return (delay = rd, rate = rr, phase = rp)
@@ -67,6 +68,10 @@ all_baselines(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
     D = inject_detections(bl, pols, τ, ṙ, φ, χ)
     sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
 
+    @test sol isa Gustavo.DimensionalData.AbstractDimStack
+    @test (:delay, :rate, :phase, :covered) ⊆ keys(sol)      # Ant × Feed layers
+    @test haskey(metadata(sol), :chi) && haskey(metadata(sol), :ncomp)
+
     # Cross hands tie the feeds: delay is one component, gauged at (ref, feed1).
     for a in 1:nant, f in 1:2
         @test isapprox(sol.delay[a, f], τ[a, f] - τ[ref, 1]; atol = 1.0e-18)
@@ -79,7 +84,7 @@ all_baselines(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
     for a in 1:nant, f in 1:2
         @test isapprox(rem2pi(sol.phase[a, f] - (φ[a, f] - φ[ref, f]), RoundNearest), 0.0; atol = 1.0e-10)
     end
-    @test isapprox(rem2pi(sol.chi - (χ + φ[ref, 1] - φ[ref, 2]), RoundNearest), 0.0; atol = 1.0e-10)
+    @test isapprox(rem2pi(metadata(sol)[:chi] - (χ + φ[ref, 1] - φ[ref, 2]), RoundNearest), 0.0; atol = 1.0e-10)
 
     # Solution reconstructs every product (closure of the data).
     r = recon_residuals(D, sol, bl, pols)
@@ -113,7 +118,7 @@ end
         recovered = sol.delay[a, 2] - sol.delay[a, 1]
         @test isapprox(recovered, rl_delay[a]; atol = 1.0e-15)
     end
-    @test sol.ncomp == 1                                # cross hands merge feeds
+    @test metadata(sol)[:ncomp] == 1                                # cross hands merge feeds
 end
 
 @testset "Stationize: parallel-hand triangle closure ≈ 0" begin
@@ -157,7 +162,7 @@ end
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.4)
     sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = 1)
-    @test sol.ncomp == 2                                # one component per island (feeds tied within each)
+    @test metadata(sol)[:ncomp] == 2                                # one component per island (feeds tied within each)
     # Reconstruction is gauge-invariant → residuals close within each island.
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-15
@@ -182,8 +187,8 @@ end
         end
     end
     sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
-    @test sol.ncomp == 2                                # feeds NOT tied without cross hands
-    @test isnan(sol.chi)                                # no cross hands → no χ
+    @test metadata(sol)[:ncomp] == 2                                # feeds NOT tied without cross hands
+    @test isnan(metadata(sol)[:chi])                                # no cross hands → no χ
     # Each feed gauged independently; delay relative to that feed's ref.
     for a in 1:nant, f in 1:2
         @test isapprox(sol.delay[a, f], τ[a, f] - τ[ref, f]; atol = 1.0e-15)
@@ -303,8 +308,8 @@ end
             @test colval(cplan, ant, feed) ≈ ss.phase[ant, feed] atol = 1.0e-9
         end
     end
-    @test ncomp == ss.ncomp
-    @test chi ≈ ss.chi atol = 1.0e-9
+    @test ncomp == metadata(ss)[:ncomp]
+    @test chi ≈ metadata(ss)[:chi] atol = 1.0e-9
 end
 
 @testset "Global R-L offset: stable across scans, weak scan inherits it" begin
