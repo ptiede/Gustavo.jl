@@ -12,6 +12,7 @@ using DimensionalData
 using DimensionalData: DimArray, Ti, dims, lookup
 using PolarizedTypes: RPol, LPol
 using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products, channel_freqs
+using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using HDF5   # triggers GustavoHDF5Ext (solution save/load round-trip)
 using FITSFiles   # triggers GustavoFITSFilesExt (write_uvfits/load_uvfits round-trip)
 

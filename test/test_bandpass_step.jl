@@ -185,13 +185,13 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
 
         # Same-set (identical geometry): index-aligned division.
         st0 = FP.scan_stream(uvset)
-        grp0 = FP.materialize_cube(st0, st0.groups[1])
+        stack0, win0 = FP.materialize_cube(st0, st0.groups[1])
         stt = FP.scan_stream(uvset; transforms = (FP.ApplySolution(bps),))
-        grpt = FP.materialize_cube(stt, stt.groups[1])
-        g = CAL.evaluate_gains(ev, bps.θ, grp0.g_ci, grp0.g_ti)
-        Vm = copy(grp0.Vg); Wm = copy(grp0.Wg)
-        for p in axes(Vm, 4), (bi, (a, b)) in enumerate(grp0.bl_pairs)
-            fa, fb = CAL.correlation_feed_pair(grp0.pol_products[p])
+        stackt, _ = FP.materialize_cube(stt, stt.groups[1])
+        g = CAL.evaluate_gains(ev, bps.θ, win0.chan_idx, win0.ti_idx)
+        Vm = copy(parent(stack0[:vis])); Wm = copy(parent(stack0[:weights]))
+        for p in axes(Vm, 4), (bi, (a, b)) in enumerate(baselines(stack0).pairs)
+            fa, fb = CAL.correlation_feed_pair(pol_products(stack0)[p])
             for t in axes(Vm, 2), c in axes(Vm, 1)
                 den = g[c, t, a, fa] * conj(g[c, t, b, fb])
                 (isfinite(den) && abs2(den) > 0) || continue
@@ -199,20 +199,20 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
                 Wm[c, t, bi, p] *= abs2(den)
             end
         end
-        @test isequal(grpt.Vg, Vm) && isequal(grpt.Wg, Wm)
+        @test isequal(parent(stackt[:vis]), Vm) && isequal(parent(stackt[:weights]), Wm)
 
         # Cross-set: a different track (fewer times) with a station subset —
         # the time-constant bandpass ports, stations matched by name.
         uvsub, _ = _build_fringe_uvset(; nant = 3, nbands, nchan, ntime = 5)
         sts = FP.scan_stream(uvsub; transforms = (FP.ApplySolution(bps),))
         @test CAL.build_geometry(uvsub).times != bps.geom.times
-        grpx = FP.materialize_cube(sts, sts.groups[1])
+        stackx, _ = FP.materialize_cube(sts, sts.groups[1])
         st0s = FP.scan_stream(uvsub)
-        grp0s = FP.materialize_cube(st0s, st0s.groups[1])
-        gx = CAL.evaluate_gains(ev, bps.θ, grp0s.g_ci, 1:1)   # A1..A3 ≡ solution rows 1..3
-        Vx = copy(grp0s.Vg); Wx = copy(grp0s.Wg)
-        for p in axes(Vx, 4), (bi, (a, b)) in enumerate(grp0s.bl_pairs)
-            fa, fb = CAL.correlation_feed_pair(grp0s.pol_products[p])
+        stack0s, win0s = FP.materialize_cube(st0s, st0s.groups[1])
+        gx = CAL.evaluate_gains(ev, bps.θ, win0s.chan_idx, 1:1)   # A1..A3 ≡ solution rows 1..3
+        Vx = copy(parent(stack0s[:vis])); Wx = copy(parent(stack0s[:weights]))
+        for p in axes(Vx, 4), (bi, (a, b)) in enumerate(baselines(stack0s).pairs)
+            fa, fb = CAL.correlation_feed_pair(pol_products(stack0s)[p])
             for t in axes(Vx, 2), c in axes(Vx, 1)
                 den = gx[c, 1, a, fa] * conj(gx[c, 1, b, fb])
                 (isfinite(den) && abs2(den) > 0) || continue
@@ -220,7 +220,7 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
                 Wx[c, t, bi, p] *= abs2(den)
             end
         end
-        @test isequal(grpx.Vg, Vx) && isequal(grpx.Wg, Wx)
+        @test isequal(parent(stackx[:vis]), Vx) && isequal(parent(stackx[:weights]), Wx)
 
         # A station the solution never saw keeps identity gains (with a warning).
         uvbig, _ = _build_fringe_uvset(; nant = 5, nbands, nchan, ntime = 5)
@@ -257,12 +257,12 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
         @test disp_plan !== nothing && ps_delay !== nothing && sbd !== nothing
 
         st = FP.scan_stream(uvd; geom = geom)
-        v = FP.scan_view(st, FP.materialize_cube(st, st.groups[1]; inner = 1))
+        stack, win = FP.materialize_cube(st, st.groups[1]; inner = 1)
 
         θn = zeros(layout.nθ)
         θ4 = zeros(layout.nθ)
-        nn = FP.refine_scan_dispersion!(θn, v, geom, ev, ps_delay, disp_plan, 1, 4; inner = 1)
-        n4 = FP.refine_scan_dispersion!(θ4, v, geom, ev, ps_delay, disp_plan, 1, 4; inner = 4)
+        nn = FP.refine_scan_dispersion!(θn, stack, win, ev, ps_delay, disp_plan, 1, 4; inner = 1)
+        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ev, ps_delay, disp_plan, 1, 4; inner = 4)
         # Per-block accumulation ⇒ bit-identical at any inner fan-out.
         @test nn == n4
         @test θn == θ4
@@ -272,8 +272,8 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
             off = disp_plan.off1[a, 1, 1, 1]
             @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
         end
-        FP.refine_scan_sbd!(θn, v, geom, ev, sbd, 1, 4; inner = 1)
-        FP.refine_scan_sbd!(θ4, v, geom, ev, sbd, 1, 4; inner = 4)
+        FP.refine_scan_sbd!(θn, stack, win, ev, sbd, 1, 4; inner = 1)
+        FP.refine_scan_sbd!(θ4, stack, win, ev, sbd, 1, 4; inner = 4)
         @test θn == θ4
     end
 end

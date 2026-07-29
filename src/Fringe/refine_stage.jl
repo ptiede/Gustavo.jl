@@ -1,8 +1,9 @@
-# ── Per-scan dTEC/SBD refinement over ScanDataViews (the carved-out service) ──
+# ── Per-scan dTEC/SBD refinement over scan windows (the carved-out service) ──
 #
 # The per-scan (Δτ, dTEC) band-phasor refinement and the per-band-group SBD
-# refinement, operating on a `ScanDataView` (descended verbatim from the
-# monolithic solver's concat-cube variants, deleted at M5). The θ slots they
+# refinement, operating on a scan's `DimStack` and its `GeometryWindow`
+# (descended verbatim from the monolithic solver's concat-cube variants,
+# deleted at M5). The θ slots they
 # write are OWNED by the FringeFit step; other
 # stages invoke them through [`refine_scan!`](@ref) — the bandpass stage
 # dispersion/SBD-corrects each calibrator scan BEFORE accumulating (scans with
@@ -29,7 +30,7 @@ struct RefineService{D, P, S, T}
 end
 
 """
-    refine_scan!(θ, v::ScanDataView, geom, ev, rf::RefineService, ref_ant, nant;
+    refine_scan!(θ, stack, win::GeometryWindow, ev, rf::RefineService, ref_ant, nant;
                  inner = 1, polish = false) -> nrej
 
 Refine one scan's FringeFit-owned per-scan θ columns on the current residual:
@@ -43,21 +44,21 @@ a full skip would drop); SBD is cheap and always full-refines. Returns the
 number of detections the robust dispersion station solve excised.
 """
 function refine_scan!(
-        θ, v::ScanDataView, geom::DataGeometry, ev, rf::RefineService, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, ev, rf::RefineService, ref_ant, nant;
         inner::Integer = 1, polish::Bool = false,
     )
     nrej = polish ?
         refine_scan_dispersion!(
-            θ, v, geom, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
+            θ, stack, win, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
             inner = inner, ties = rf.ties,
             tau_max = _DTEC_POLISH_TAU, dtec_max = rf.polish_dtec,
         ) :
         refine_scan_dispersion!(
-            θ, v, geom, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
+            θ, stack, win, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
             inner = inner, ties = rf.ties,
         )
     rf.sbd_plans === nothing ||
-        refine_scan_sbd!(θ, v, geom, ev, rf.sbd_plans, ref_ant, nant; inner = inner)
+        refine_scan_sbd!(θ, stack, win, ev, rf.sbd_plans, ref_ant, nant; inner = inner)
     return nrej
 end
 
@@ -78,33 +79,34 @@ function _spw_blocks(geom::DataGeometry, chan_idx)
 end
 
 """
-    refine_scan_dispersion!(θ, v::ScanDataView, geom, ev, delay_plan, disp_plan,
+    refine_scan_dispersion!(θ, stack, win::GeometryWindow, ev, delay_plan, disp_plan,
                             ref_ant, nant; opts, snr_min, tau_max, dtec_max,
                             inner, ties) -> nrej
 
-Joint per-scan (Δτ, dTEC) refinement of one scan view: per-spw band phasors →
+Joint per-scan (Δτ, dTEC) refinement of one scan window: per-spw band phasors →
 per-baseline joint fits → two station solves accumulating into the per-scan
-delay and dispersion θ columns. The view's per-spw channel blocks stand in for
+delay and dispersion θ columns. The window's per-spw channel blocks stand in for
 the band leaves (the concat-cube path). Returns the number of detections the
 robust station solves excised; a no-op (0) when `disp_plan === nothing` or
 fewer than 4 bands are present (1/ν is unconstrainable).
 """
 function refine_scan_dispersion!(
-        θ, v::ScanDataView, geom::DataGeometry, ev, delay_plan, disp_plan, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, ev, delay_plan, disp_plan, ref_ant, nant;
         opts::Stationization = Stationization(reject_iters = 0), snr_min::Real = 8.0,
         tau_max::Real = 2.0e-8, dtec_max::Real = 45.0, inner::Integer = 1,
         ties = nothing,
     )
     disp_plan === nothing && return 0
-    ci = v.chan_idx
-    ti = v.ti_idx
+    geom = win.geom
+    ci = win.chan_idx
+    ti = win.ti_idx
     blocks = _spw_blocks(geom, ci)
     length(blocks) >= 4 || return 0              # < 4 bands can't constrain 1/ν
-    V = v.vis
-    W = v.weights
-    fg = v.freqs
-    bl_pairs = v.bl_pairs
-    pols = v.pol_products
+    V = stack[:vis]
+    W = stack[:weights]
+    fg = frequencies(stack)
+    bl_pairs = UVData.baselines(stack).pairs
+    pols = pol_products(stack)
     feeds = [correlation_feed_pair(p) for p in pols]
     nbl = length(bl_pairs)
     npol = length(pols)
@@ -129,10 +131,10 @@ function refine_scan_dispersion!(
 end
 
 """
-    refine_scan_sbd!(θ, v::ScanDataView, geom, ev, sbd, ref_ant, nant;
+    refine_scan_sbd!(θ, stack, win::GeometryWindow, ev, sbd, ref_ant, nant;
                      nchunk = 4, snr_min = 8.0, tau_max = 6.0e-8, inner = 1) -> nrej
 
-Per-scan per-band-group SBD refinement of one scan view (fourfit's single-band
+Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
 delay): each spw block's sub-band chunk phasors → per-(baseline, group) exact
 matched-filter slope fits → guarded station solves accumulating into the
 per-scan `Delay × FrequencyBands` column and its companion constant. Run AFTER
@@ -140,18 +142,19 @@ the dispersion refinement so the within-band slopes it fits are
 dispersion-corrected. A no-op (0) when `sbd === nothing`.
 """
 function refine_scan_sbd!(
-        θ, v::ScanDataView, geom::DataGeometry, ev, sbd, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, ev, sbd, ref_ant, nant;
         nchunk::Integer = 4, snr_min::Real = 8.0, tau_max::Real = 6.0e-8, inner::Integer = 1,
     )
     sbd === nothing && return 0
-    ci = v.chan_idx
-    ti = v.ti_idx
+    geom = win.geom
+    ci = win.chan_idx
+    ti = win.ti_idx
     blocks = _spw_blocks(geom, ci)
-    V = v.vis
-    W = v.weights
-    fg = v.freqs
-    bl_pairs = v.bl_pairs
-    pols = v.pol_products
+    V = stack[:vis]
+    W = stack[:weights]
+    fg = frequencies(stack)
+    bl_pairs = UVData.baselines(stack).pairs
+    pols = pol_products(stack)
     feeds = [correlation_feed_pair(p) for p in pols]
     nbl = length(bl_pairs)
     npol = length(pols)
@@ -194,10 +197,10 @@ function refine_scan_sbd!(
 end
 
 """
-    adhoc_scan!(θ, v::ScanDataView, geom, ev, adhoc_plan, adhoc, ref_ant, nant;
+    adhoc_scan!(θ, stack, win::GeometryWindow, ev, adhoc_plan, adhoc, ref_ant, nant;
                 shared_feeds = false, inner = 1, excl = nothing, psI = nothing) -> θ
 
-The per-integration atmospheric-phase (adhoc) solve of one scan view: accumulate
+The per-integration atmospheric-phase (adhoc) solve of one scan window: accumulate
 the per-(baseline, product, AP) inverse-variance residual `V/g` (weight
 `w·|g|²` — the same reweighting `apply_calibration` applies; raw `w` would
 up-weight exactly the channels the amp bandpass marked low-|g|), solve the
@@ -209,18 +212,19 @@ data) collapses the four products to one pseudo-Stokes-I row per (baseline, AP)
 using the field-rotation coefficients.
 """
 function adhoc_scan!(
-        θ, v::ScanDataView, geom::DataGeometry, ev, adhoc_plan, adhoc, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, ev, adhoc_plan, adhoc, ref_ant, nant;
         shared_feeds::Bool = false, inner::Integer = 1, excl = nothing, psI = nothing,
     )
-    bl_pairs = collect(v.bl_pairs)
-    pols = String.(v.pol_products)
-    tg = Float64.(v.times)
-    ci = v.chan_idx
-    g_ti = v.ti_idx
+    geom = win.geom
+    bl_pairs = collect(UVData.baselines(stack).pairs)
+    pols = String.(pol_products(stack))
+    tg = Float64.(timestamps(stack))
+    ci = win.chan_idx
+    g_ti = win.ti_idx
     nbl = length(bl_pairs)
     npol = length(pols)
     nap = length(tg)
-    # Per-band accumulation (the view's per-spw channel blocks stand in for the
+    # Per-band accumulation (the window's per-spw channel blocks stand in for the
     # band leaves) fanned out over `inner` tasks — this loop (gain evaluation +
     # residual sum over every visibility) dominates the adhoc pass on many-band
     # data. Each BLOCK gets its own partial and the partials fold in block
@@ -236,7 +240,7 @@ function adhoc_scan!(
         wl = zeros(Float64, nbl, npol, nap)
         g = evaluate_gains(ev, θ, ci[r], g_ti)           # (nchan_block, nti, nant, 2)
         _accumulate_leaf_rbar!(
-            rl, wl, view(v.vis, r, :, :, :), view(v.weights, r, :, :, :),
+            rl, wl, view(stack[:vis], r, :, :, :), view(stack[:weights], r, :, :, :),
             g, bl_pairs, pols,
         )
         parts[li] = (rl, wl)

@@ -19,6 +19,7 @@ using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
 using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products
+using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using PolarizedTypes: RPol, LPol
 
 include("test_calibration.jl")
@@ -223,7 +224,7 @@ end
     # Streaming-engine internals stay behind `Fringe`: reachable for users who
     # drive the engine directly, absent from the pipeline-level namespace. They
     # are `Streaming`'s, re-exported — the same binding under both names.
-    for n in (:ScanGroupSpec, :scan_view, :materialize_cube, :materialize_leaves)
+    for n in (:ScanGroupSpec, :materialize_cube, :materialize_leaves)
         @test !(n in top)
         @test n in names(Gustavo.Fringe)
         @test n in names(Gustavo.Streaming)

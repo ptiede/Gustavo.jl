@@ -404,13 +404,16 @@ function baseline_fringe_data(
     (1 <= gi <= length(groups)) || error("baseline_fringe_data: scan_index $gi out of range 1:$(length(groups))")
 
     info = UVData.metadata(last(first(groups[gi].leaves)))   # source/scan from the lazy leaf
-    grp = materialize_cube(stream, groups[gi])
+    stack, win = materialize_cube(stream, groups[gi])
     ev = GainEvaluator(sol.model, sol.layout)
-    g = evaluate_gains(ev, sol.θ, grp.g_ci, grp.g_ti)   # (nchan, nti, nant, 2)
-    nchan, nti, nbl, npol = size(grp.Vg)
+    g = evaluate_gains(ev, sol.θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
+    fg = frequencies(stack)
+    Vg = stack[:vis]
+    Wg = stack[:weights]
+    nchan, nti, nbl, npol = size(Vg)
 
     # Band-group split of the stacked frequency axis (per-channel group id).
-    bgs = fringe_band_groups(grp.fg)
+    bgs = fringe_band_groups(fg)
     ngrp = length(bgs)
     gid = Vector{Int}(undef, nchan)
     for (k, r) in enumerate(bgs), c in r
@@ -425,13 +428,13 @@ function baseline_fringe_data(
     tab = zeros(ComplexF64, nti, nbl, npol, ngrp); twab = zeros(Float64, nti, nbl, npol, ngrp)
 
     @inbounds for p in 1:npol
-        fa, fb = correlation_feed_pair(grp.pol_products[p])
+        fa, fb = correlation_feed_pair(pol_products(stack)[p])
         for bi in 1:nbl
-            a, b = grp.bl_pairs[bi]
+            a, b = UVData.baselines(stack).pairs[bi]
             a == b && continue                          # skip autocorrelations
             for ti in 1:nti, c in 1:nchan
-                w = grp.Wg[c, ti, bi, p]
-                v = grp.Vg[c, ti, bi, p]
+                w = Wg[c, ti, bi, p]
+                v = Vg[c, ti, bi, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
                 k = gid[c]
                 sb[c, bi, p] += w * v; swb[c, bi, p] += w
@@ -456,8 +459,8 @@ function baseline_fringe_data(
         Float64(sol.info.scan_max_snr[gi]) : NaN
     return BaselineFringeData(
         info.source_name, info.scan_name, gi, msnr,
-        copy(grp.bl_pairs), String.(collect(info.antennas.name)), copy(grp.pol_products),
-        copy(grp.fg), copy(grp.tg),
+        copy(UVData.baselines(stack).pairs), String.(collect(info.antennas.name)), copy(pol_products(stack)),
+        copy(fg), copy(timestamps(stack)),
         _coherent_mean!(sb, swb), _coherent_mean!(sa, swa),
         _coherent_mean!(tb, twb), _coherent_mean!(ta, twa),
         bgs,
@@ -760,45 +763,48 @@ function fringe_search_map(
 
     info = UVData.metadata(last(first(groups[gi].leaves)))
     ant_names = String.(collect(info.antennas.name))
-    grp = materialize_cube(stream, groups[gi])
+    stack, win = materialize_cube(stream, groups[gi])
+    Vg = stack[:vis]
+    Wg = stack[:weights]
+    fg = frequencies(stack)
     opts = search === nothing ? get(sol.info, :search, FringeSearch()) : search
-    p = _pol_index(grp.pol_products, pol)
-    times = grp.tg .* 3600.0
+    p = _pol_index(pol_products(stack), pol)
+    times = timestamps(stack) .* 3600.0
     f0 = sol.geom.f0
     t0 = sol.geom.t0 * 3600.0
 
     bi = if baseline === nothing
         # Default to the strongest detection at this product — the same search the
         # solver ran, sharing one workspace/axes across baselines.
-        ax = _search_axes(grp.fg, times, opts)
+        ax = _search_axes(fg, times, opts)
         ws = FringeWorkspace()
         best = 0
         bestsnr = -Inf
-        for k in eachindex(grp.bl_pairs)
-            a, b = grp.bl_pairs[k]
+        for k in eachindex(UVData.baselines(stack).pairs)
+            a, b = UVData.baselines(stack).pairs[k]
             a == b && continue
             d = _baseline_fringe_search(
-                view(grp.Vg, :, :, k, p), view(grp.Wg, :, :, k, p),
-                grp.fg, times, f0, t0, ax, ws, opts,
+                view(Vg, :, :, k, p), view(Wg, :, :, k, p),
+                fg, times, f0, t0, ax, ws, opts,
             )
             d.snr > bestsnr && (bestsnr = d.snr; best = k)
         end
         best == 0 && error("fringe_search_map: scan has no cross baselines")
         best
     else
-        k = _baseline_index(grp.bl_pairs, ant_names, baseline)
-        a, b = grp.bl_pairs[k]
+        k = _baseline_index(UVData.baselines(stack).pairs, ant_names, baseline)
+        a, b = UVData.baselines(stack).pairs[k]
         a == b && error("fringe_search_map: ($a, $b) is an autocorrelation")
         k
     end
 
     m = baseline_fringe_map(
-        view(grp.Vg, :, :, bi, p), view(grp.Wg, :, :, bi, p),
-        grp.fg, times, f0, t0; opts = opts,
+        view(Vg, :, :, bi, p), view(Wg, :, :, bi, p),
+        fg, times, f0, t0; opts = opts,
     )
     return BaselineFringeMap(
-        info.source_name, info.scan_name, gi, grp.bl_pairs[bi], ant_names,
-        grp.pol_products[p], m,
+        info.source_name, info.scan_name, gi, UVData.baselines(stack).pairs[bi], ant_names,
+        pol_products(stack)[p], m,
     )
 end
 

@@ -1,10 +1,10 @@
-# ── Bandpass stage: per-channel station phase/log-amp over ScanDataViews ──────
+# ── Bandpass stage: per-channel station phase/log-amp over scan windows ───────
 #
 # The carved-out bandpass stage of the composable pipeline: the per-scan
 # residual accumulation ([`accumulate_bandpass!`](@ref)) and the two per-channel
 # solves ([`solve_phase_bandpass!`](@ref) / [`solve_amp_bandpass!`](@ref)) —
 # descended verbatim from the monolithic solver (deleted at M5), retargeted
-# from its concat cube to a `ScanDataView` where they touch data. The
+# from its concat cube to a scan `DimStack` where they touch data. The
 # BandpassEstimator step visits each selected scan (refine → accumulate → return
 # the scan's contribution) and its `finish_pass!` folds the contributions in
 # GROUP-INDEX order — deterministic at ANY concurrency (unlike the monolith's
@@ -68,9 +68,9 @@ struct PenalizedBandpass <: AbstractBandpassSmoother
 end
 
 """
-    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, ev, θ, v::ScanDataView)
+    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, ev, θ, stack, win::GeometryWindow)
 
-Accumulate one scan view's contribution to the per-(global-baseline, product,
+Accumulate one scan window's contribution to the per-(global-baseline, product,
 GLOBAL channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for the
 bandpass solves. The residual is `V / (current θ gains)`; BEFORE summing over
 time each AP is counter-rotated by its OWN band-averaged residual phase,
@@ -91,13 +91,16 @@ function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
     )
 end
 
-function accumulate_bandpass!(rbar_bp, wbar_bp, blidx, ev::GainEvaluator, θ::AbstractVector, v::ScanDataView)
-    g = evaluate_gains(ev, θ, v.chan_idx, v.ti_idx)    # (nchan, nti, nant, 2)
-    V = v.data[:vis]                                   # the dims-carrying layers —
-    W = v.data[:weights]                               # the loops below address axes BY NAME
-    bl_pairs = v.bl_pairs
-    pols = v.pol_products
-    g_ci = v.chan_idx
+function accumulate_bandpass!(
+        rbar_bp, wbar_bp, blidx, ev::GainEvaluator, θ::AbstractVector,
+        stack::AbstractDimStack, win::GeometryWindow,
+    )
+    g = evaluate_gains(ev, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
+    V = stack[:vis]                                      # the dims-carrying layers —
+    W = stack[:weights]                                  # the loops below address axes BY NAME
+    bl_pairs = UVData.baselines(stack).pairs
+    pols = pol_products(stack)
+    g_ci = win.chan_idx
     for p in axes(V, Pol)
         fa, fb = correlation_feed_pair(pols[p])
         for bi in axes(V, Baseline)

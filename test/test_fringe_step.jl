@@ -131,10 +131,12 @@
         # CROSS-HAND detection is invalidated, parallel hands untouched.
         geom = CAL.build_geometry(uvset)
         st = FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace)
-        grp = FP.materialize_cube(st, st.groups[1])
-        res = FP.search_scan(st, grp, FP.FringeSearch())
-        feeds = [CAL.correlation_feed_pair(p) for p in grp.pol_products]
-        d = FP.StationScanDetections(copy(res.det), grp.bl_pairs, feeds, first(grp.g_ti))
+        stack, win = FP.materialize_cube(st, st.groups[1])
+        res = FP.search_scan(st, stack, FP.FringeSearch())
+        feeds = [CAL.correlation_feed_pair(p) for p in pol_products(stack)]
+        d = FP.StationScanDetections(
+            copy(res.det), baselines(stack).pairs, feeds, first(win.ti_idx),
+        )
         FP.mask_unselected_cross_hands!([d], Gustavo.ScanIndices(10_000), st.groups, [NaN])
         for p in eachindex(feeds), bi in axes(d.det, 1)
             fa, fb = feeds[p]
@@ -164,10 +166,10 @@
         # is recorded + replayed by calibrate: zeroing one baseline's weights
         # zero-weights it in the calibrated output.
         touched = Threads.Atomic{Int}(0)
-        kill12 = CalFunction() do v
+        kill12 = CalFunction() do stack, win
             Threads.atomic_add!(touched, 1)
-            for (bi, (a, b)) in enumerate(v.bl_pairs)
-                minmax(a, b) == (1, 2) && (v.weights[:, :, bi, :] .= 0)
+            for (bi, (a, b)) in enumerate(baselines(stack).pairs)
+                minmax(a, b) == (1, 2) && (stack[:weights][Baseline = bi] .= 0)
             end
         end
         sol_cf, out = fitcalibrate(
@@ -206,7 +208,7 @@
         # transforms) run in FULL pipelines now — every pipeline is new-engine.
         sol_full = fit(
             CalibrationPipeline(
-                CalFunction(v -> nothing),
+                CalFunction((stack, win) -> nothing),
                 FringeFit(
                     model = FringeModel(terms = (
                         default_fringe_terms()...,
@@ -300,9 +302,9 @@ struct _ProbeEstimator{E <: FP.AbstractFringeEstimator} <: FP.AbstractFringeEsti
 end
 _ProbeEstimator(inner) = _ProbeEstimator(inner, Ref(0), Ref(0))
 
-function FP.estimate_scan!(e::_ProbeEstimator, ctx, step, view)
+function FP.estimate_scan!(e::_ProbeEstimator, ctx, step, stack, win)
     e.scans[] += 1
-    return FP.estimate_scan!(e.inner, ctx, step, view)
+    return FP.estimate_scan!(e.inner, ctx, step, stack, win)
 end
 function FP.finish_estimate!(e::_ProbeEstimator, ctx, step)
     e.passes[] += 1
@@ -325,7 +327,7 @@ struct _NullEstimator <: FP.AbstractFringeEstimator
     scans::Base.RefValue{Int}
 end
 _NullEstimator() = _NullEstimator(Ref(0))
-function FP.estimate_scan!(e::_NullEstimator, ctx, step, view)
+function FP.estimate_scan!(e::_NullEstimator, ctx, step, stack, win)
     e.scans[] += 1
     return (; max_snr = NaN)
 end
@@ -334,7 +336,7 @@ FP.can_fit(::_NullEstimator, tc) = true
 
 # Declares no capability at all — the default. Every model term is unclaimed.
 struct _UnclaimingEstimator <: FP.AbstractFringeEstimator end
-FP.estimate_scan!(::_UnclaimingEstimator, ctx, step, view) = (; max_snr = NaN)
+FP.estimate_scan!(::_UnclaimingEstimator, ctx, step, stack, win) = (; max_snr = NaN)
 FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, rejected = 0)
 
 @testset "fringe estimator seam" begin

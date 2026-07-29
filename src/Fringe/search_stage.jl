@@ -336,38 +336,35 @@ end
 
 # ── Stage machinery over the streaming layer ─────────────────────────────────
 
-"""
-    residual_vis(ev::GainEvaluator, θ, v::ScanDataView) -> Array{<:Complex, 4}
+# One residual cell: the visibility divided by its baseline's gain product. A
+# degenerate gain yields NaN, which the search's weight handling excludes. The
+# result keeps the visibility's element type, so a native-precision cube stays
+# native precision.
+function _residual_cell(v, ga, gb)
+    den = ga * conj(gb)
+    degenerate = abs(ga) < 1.0e-12 || abs(gb) < 1.0e-12 || !isfinite(den)
+    return oftype(v, degenerate ? complex(NaN, NaN) : v / den)
+end
 
-The scan's residual cube: `v.vis` divided by the current θ gains evaluated on
-the view's (global chan, global ti) window — the search input for residual
-re-search rounds. Cells with a degenerate gain become NaN (excluded by the
-search's weight handling).
 """
-function residual_vis(ev::GainEvaluator, θ::AbstractVector, v::ScanDataView)
-    g = evaluate_gains(ev, θ, v.chan_idx, v.ti_idx)      # (nchan, nti, nant, 2)
-    V = v.vis
-    bl_pairs = v.bl_pairs
-    pols = v.pol_products
-    nchan, nti, nbl, npol = size(V)
-    out = similar(V)
-    @inbounds for p in 1:npol
-        fa, fb = correlation_feed_pair(pols[p])
-        for bi in 1:nbl
-            a, b = bl_pairs[bi]
-            for tt in 1:nti, c in 1:nchan
-                ga = g[c, tt, a, fa]
-                gb = g[c, tt, b, fb]
-                denom = ga * conj(gb)
-                if abs(ga) < 1.0e-12 || abs(gb) < 1.0e-12 || !isfinite(denom)
-                    out[c, tt, bi, p] = ComplexF64(NaN, NaN)
-                else
-                    out[c, tt, bi, p] = V[c, tt, bi, p] / denom
-                end
-            end
-        end
-    end
-    return out
+    residual_vis(ev::GainEvaluator, θ, stack, win::GeometryWindow) -> DimArray
+
+The scan's residual visibilities: `stack`'s `:vis` layer divided by the current
+θ gains evaluated on `win`'s (global chan, global ti) window — the search input
+for residual re-search rounds. Carries the visibilities' dims and element type.
+"""
+function residual_vis(
+        ev::GainEvaluator, θ::AbstractVector, stack::AbstractDimStack, win::GeometryWindow,
+    )
+    g = evaluate_gains(ev, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
+    ants = UVData.baselines(stack).pairs
+    feeds = map(correlation_feed_pair, pol_products(stack))
+    # Indexing the gains by the baselines' antenna vector and the products' feed
+    # vector is an outer product over (Baseline, Pol) — the cube's last two axes
+    # — so the whole residual is one fused broadcast with no intermediate.
+    ga = view(g, :, :, first.(ants), first.(feeds))
+    gb = view(g, :, :, last.(ants), last.(feeds))
+    return _residual_cell.(stack[:vis], ga, gb)
 end
 
 # R–L fit-on-subset: invalidate the CROSS-HAND detections of every scan the

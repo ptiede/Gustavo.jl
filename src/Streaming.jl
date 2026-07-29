@@ -6,7 +6,7 @@ calibration pipeline runs on. Domain-independent — it knows about memory
 budgets, executors and `DimTree` leaves, not about fringes:
 
 - `transforms.jl` — [`AbstractDataTransform`](@ref), the per-materialization
-  hook chain, and the [`ScanDataView`](@ref) window it mutates.
+  hook chain, and the scan `DimStack` + [`GeometryWindow`](@ref) it mutates.
 - `selections.jl` — [`AbstractScanSelection`](@ref), naming WHICH scan groups a
   pass reads.
 - `stream.jl` — [`ScanStream`](@ref) construction, group materialization, and
@@ -22,8 +22,9 @@ module Streaming
 using ..Executors
 using ..Executors: exec_foreach
 using ..UVData
-using ..UVData: Baseline
+using ..UVData: Baseline, Frequency, Pol
 using ..Calibration
+using ..Calibration: GeometryWindow
 import DimensionalData
 using DimensionalData: DimArray, DimStack, AbstractDimStack, lookup, Ti
 
@@ -31,13 +32,13 @@ include("Streaming/transforms.jl")
 include("Streaming/selections.jl")
 include("Streaming/stream.jl")
 
-export AbstractDataTransform, ScanDataView, apply_transform!, apply_transform
+export AbstractDataTransform, apply_transform!, apply_transform
 export ApplySolution, StationWeightScale, FlagChannels, CalFunction
 export station_weight_scale
 export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
 export select_scans
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
-export ScanStream, scan_stream, ScanGroupSpec, ScanGroup, scan_view, select_groups
+export ScanStream, scan_stream, ScanGroupSpec, select_groups
 export materialize_cube, materialize_leaves
 export map_groups, foreach_group
 

@@ -300,8 +300,8 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     return sol, assemble_output(uvset, ctx.scratch[:sink_pairs])
 end
 
-# One streaming pass per solve step: materialize each selected group, hand the
-# view to `process_scan!`, collect the per-group returns IN GROUP-INDEX ORDER
+# One streaming pass per solve step: materialize each selected group, hand its
+# stack and geometry window to `process_scan!`, collect the per-group returns IN GROUP-INDEX ORDER
 # into `ctx.scratch[:pass_results]`, then `finish_pass!` (repeating the pass
 # while it returns `repeat_pass = true` — residual re-search rounds). With a
 # `sink` (the fused fitcalibrate tail) the group is materialized as LEAVES
@@ -323,15 +323,16 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, step_index::Int, comps; 
         ) do gspec
             ta = time_ns()
             if sink === nothing
-                grp = Fringe.materialize_cube(ctx.stream, gspec)
+                stack, win = Fringe.materialize_cube(ctx.stream, gspec)
                 keyed = nothing
             else
                 keyed = Fringe.materialize_leaves(ctx.stream, gspec)
-                grp = Streaming._stacked_scan_group([m for (_, m) in keyed], ctx.stream.geom)
+                stack, win = Streaming._stacked_scan_group(
+                    [m for (_, m) in keyed], ctx.stream.geom,
+                )
             end
-            v = Fringe.scan_view(ctx.stream, grp)
             tb = time_ns()
-            r = process_scan!(step, ctx, v)
+            r = process_scan!(step, ctx, stack, win)
             tc = time_ns()
             out = nothing
             if sink !== nothing

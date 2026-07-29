@@ -7,10 +7,10 @@
 # caller code (e.g. rescaling the weights of ONE baseline on ONE scan) with no
 # edits to Gustavo internals.
 #
-# The contract: implement `apply_transform!(t, v::ScanDataView; inner)` mutating
-# `v.vis`/`v.weights` in place. Transforms run in chain order at every
-# materialization, so a solve, a re-run, and a diagnostic that share the chain
-# see identical data. Solutions record the chain they were solved with
+# The contract: implement `apply_transform!(t, stack, win; inner)` mutating the
+# stack's `:vis`/`:weights` layers in place. Transforms run in chain order at
+# every materialization, so a solve, a re-run, and a diagnostic that share the
+# chain see identical data. Solutions record the chain they were solved with
 # (`sol.transforms`), so diagnostics can replay it automatically.
 
 """
@@ -25,69 +25,31 @@ Built-ins: [`ApplySolution`](@ref), [`StationWeightScale`](@ref),
 abstract type AbstractDataTransform end
 
 """
-    ScanDataView
+    apply_transform!(t::AbstractDataTransform, stack::AbstractDimStack,
+                     win::GeometryWindow; inner = 1)
 
-The mutable window a transform sees: one scan's data in leaf `DimStack` layout,
-plus the window that addresses it in the solve's index space. NOT a separate
-data format — the stack is never assembled by decomposing an existing
-container:
+Apply `t` to one materialized scan window, mutating `stack`'s `:vis`/`:weights`
+layers in place. The extension point for custom transforms.
 
-- `data` — a `DimStack` with layers `:vis`/`:weights` on
-  `(Frequency, Ti, Baseline, Pol)` dims (frequencies in Hz, times in hours,
-  correlation products on the `Pol` lookup) and the leaf's `PartitionInfo`
-  metadata. On the leaf paths this is literally `leaf[(:vis, :weights)]` — the
-  layer selection off the leaf tree, metadata and all; on the concatenated-cube
-  path it is the [`ScanGroup`](@ref)'s stack, built once where the cube is
-  born. There is no other construction route: a view always wraps data that
-  already lives in leaf form. DimensionalData selectors work directly, e.g.
-  `v.data[:vis][Pol = pol_at("PP")]`. Mutate the layers IN PLACE
-  (`parent(v.data[:weights]) .= …`).
-- `chan_idx`, `ti_idx` — the view's GLOBAL channel/time indices into `geom`
-  (`geom.channel_freqs[chan_idx] == v.freqs`) — the solve-side index window a
-  coordinate axis cannot carry.
-- `geom` — the solve's `DataGeometry`.
+`stack` carries layers `:vis`/`:weights` on `(Frequency, Ti, Baseline, Pol)`
+dims (frequencies in Hz, times in hours, correlation products on the `Pol`
+lookup) and the leaf's `PartitionInfo` metadata, so DimensionalData selectors
+and the `UVData` accessors both work on it directly — `stack[:vis][Pol =
+pol_at("PP")]`, [`frequencies`](@ref), [`baselines`](@ref), [`source_name`](@ref).
+`win` addresses the same channels and times in the solve's index space, which a
+coordinate axis cannot carry (`win.geom.channel_freqs[win.chan_idx] ==
+frequencies(stack)`).
 
-Convenience properties, all derived from `data` (the raw-array forms the
-built-in transforms and hot kernels use): `v.vis` / `v.weights` (the parent
-`(nchan, nti, nbl, npol)` arrays — mutating them mutates `data` and vice
-versa), `v.freqs`, `v.times`, `v.bl_pairs`, `v.pol_products`, `v.source`,
-`v.scan`, `v.ant_names`.
+`inner` is the task budget for transforms that fan out over baselines.
 """
-struct ScanDataView{S <: AbstractDimStack}
-    data::S
-    chan_idx::Vector{Int}
-    ti_idx::Vector{Int}
-    geom::DataGeometry
-end
-
-function Base.getproperty(v::ScanDataView, s::Symbol)
-    s === :vis && return parent(getfield(v, :data)[:vis])
-    s === :weights && return parent(getfield(v, :data)[:weights])
-    s === :freqs && return parent(lookup(getfield(v, :data)[:vis], Frequency))
-    s === :times && return parent(lookup(getfield(v, :data)[:vis], Ti))
-    s === :pol_products && return parent(lookup(getfield(v, :data)[:vis], Pol))
-    s === :bl_pairs && return DimensionalData.metadata(getfield(v, :data)).baselines.pairs
-    s === :source && return DimensionalData.metadata(getfield(v, :data)).source_name
-    s === :scan && return DimensionalData.metadata(getfield(v, :data)).scan_name
-    s === :ant_names && return String.(DimensionalData.metadata(getfield(v, :data)).antennas.name)
-    return getfield(v, s)
-end
-Base.propertynames(::ScanDataView) = (
-    :data, :chan_idx, :ti_idx, :geom, :vis, :weights, :freqs, :times,
-    :bl_pairs, :pol_products, :source, :scan, :ant_names,
-)
-
-"""
-    apply_transform!(t::AbstractDataTransform, v::ScanDataView; inner = 1)
-
-Apply `t` to one materialized scan window, mutating `v.vis`/`v.weights` in
-place. `inner` is the task budget for transforms that fan out over baselines.
-The extension point for custom transforms.
-"""
-function apply_transform!(t::AbstractDataTransform, v::ScanDataView; inner::Integer = 1)
+# Only the transform type is annotated: a third-party method that leaves `stack`
+# and `win` unannotated — the natural spelling — must be strictly MORE specific
+# than this fallback, not ambiguous with it.
+function apply_transform!(t::AbstractDataTransform, stack, win; inner::Integer = 1)
     return error(
         "apply_transform! not implemented for $(typeof(t)) — implement " *
-            "`apply_transform!(t, v::ScanDataView; inner)` mutating v.vis/v.weights in place."
+            "`apply_transform!(t, stack, win::GeometryWindow; inner)` mutating the " *
+            "stack's :vis/:weights layers in place."
     )
 end
 
@@ -106,12 +68,12 @@ function apply_transform(uvset::UVSet, t::AbstractDataTransform)
 end
 
 # Run a chain in order (the choke-point entry; `nothing` chain = no-op).
-function apply_transforms!(ts, v::ScanDataView; inner::Integer = 1)
-    ts === nothing && return v
+function apply_transforms!(ts, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1)
+    ts === nothing && return stack
     for t in ts
-        apply_transform!(t, v; inner = inner)
+        apply_transform!(t, stack, win; inner = inner)
     end
-    return v
+    return stack
 end
 
 """
@@ -130,26 +92,26 @@ validate_transform(t::AbstractDataTransform, geom::DataGeometry, ant_names) = no
     apply_transforms(uvset::UVSet, transforms; geom = build_geometry(uvset)) -> UVSet
 
 Eagerly apply a transform chain to a whole `UVSet`, leaf by leaf — each leaf is
-wrapped in a [`ScanDataView`](@ref) with its global geometry window, so EVERY
-transform works here, including [`CalFunction`](@ref) and
-[`FlagChannels`](@ref) (which need global indices and have no standalone
-whole-set form). This is the replay of the chain a solution records
-(`sol.transforms`), used by the standalone `calibrate`. Leaf arrays are
-copied; the input set is never mutated.
+paired with its global [`GeometryWindow`](@ref), so EVERY transform works here,
+including [`CalFunction`](@ref) and [`FlagChannels`](@ref) (which need global
+indices and have no standalone whole-set form). This is the replay of the chain
+a solution records (`sol.transforms`), used by the standalone `calibrate`. Leaf
+arrays are copied; the input set is never mutated.
 """
 function apply_transforms(uvset::UVSet, transforms; geom::DataGeometry = build_geometry(uvset))
     ts = collect(Any, transforms)
     isempty(ts) && return uvset
     return UVData.apply(uvset) do leaf, info, root
         ml = UVData.materialize_leaf(leaf; layers = (:vis, :weights, :uvw))
-        # Rewrap around array copies (the input set is never mutated), then the
-        # view is just the layer selection off that leaf — metadata included.
+        # Rewrap around array copies (the input set is never mutated); the
+        # transform's stack is then just the layer selection off that leaf —
+        # metadata included.
         mlc = with_visibilities(ml, copy(parent(ml[:vis])), copy(parent(ml[:weights])))
-        ci, ti = leaf_window(geom, mlc)
-        v = ScanDataView(mlc[(:vis, :weights)], collect(Int, ci), collect(Int, ti), geom)
-        apply_transforms!(ts, v)
-        # Re-derive the flag layer from the transformed weights.
-        return with_visibilities(mlc, v.vis, v.weights)
+        # The layer selection shares `mlc`'s arrays, so the chain mutates the
+        # leaf itself; the rebuild exists only to re-derive `flag` from the
+        # transformed weights.
+        apply_transforms!(ts, mlc[(:vis, :weights)], leaf_window(geom, mlc))
+        return with_visibilities(mlc, mlc[:vis], mlc[:weights])
     end
 end
 
@@ -204,27 +166,28 @@ function validate_transform(t::ApplySolution, geom::DataGeometry, ant_names)
     return nothing
 end
 
-function apply_transform!(t::ApplySolution, v::ScanDataView; inner::Integer = 1)
+function apply_transform!(
+        t::ApplySolution, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1,
+    )
     sol = t.sol
     ev = GainEvaluator(sol.model, sol.layout)
-    if sol.geom.channel_freqs == v.geom.channel_freqs && sol.geom.times == v.geom.times
+    if sol.geom.channel_freqs == win.geom.channel_freqs && sol.geom.times == win.geom.times
         # Same-set apply: stations index-aligned, full time mapping.
-        _divide_gains!(v.vis, v.weights, ev, sol.θ, v.chan_idx, v.ti_idx, v.bl_pairs, v.pol_products, inner)
+        _divide_gains!(stack, win, ev, sol.θ, inner)
         return nothing
     end
     # Cross-set apply; the compatibility contract was already enforced by
     # `validate_transform` at stream construction, re-checked here for direct
     # (stream-less) callers.
-    validate_transform(t, v.geom, v.ant_names)
+    ant_names = String.(UVData.antennas(stack).name)
+    validate_transform(t, win.geom, ant_names)
     solnames = String.(collect(sol.info.ant_names))
-    amap = [something(findfirst(==(n), solnames), 0) for n in v.ant_names]
+    amap = [something(findfirst(==(n), solnames), 0) for n in ant_names]
     if any(iszero, amap)
-        missing_names = [n for (n, m) in zip(v.ant_names, amap) if m == 0]
+        missing_names = [n for (n, m) in zip(ant_names, amap) if m == 0]
         @warn "ApplySolution: stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
     end
-    _divide_gains_mapped!(
-        v.vis, v.weights, ev, sol.θ, v.chan_idx, amap, v.bl_pairs, v.pol_products, inner,
-    )
+    _divide_gains!(stack, win, ev, sol.θ, inner; amap)
     return nothing
 end
 
@@ -241,19 +204,45 @@ end
 
 apply_transform(uvset::UVSet, t::ApplySolution) = UVData.apply_calibration(uvset, t.sol)
 
-# Divide evaluated gains out of a (nchan, nti, nbl, npol) window in place —
-# the transform-chain port of `_divide_precal!`'s gain branch, with the same
-# time-constant fast path and the same skip-bad-cell semantics.
-function _divide_gains!(V, W, ev::GainEvaluator, θ, ci, ti, bl_pairs, pols, inner::Integer)
+# Divide evaluated gains out of one scan window in place — the transform-chain
+# port of `_divide_precal!`'s gain branch, with the same time-constant fast path
+# and the same skip-bad-cell semantics.
+#
+# `amap` selects the SAME-set or CROSS-set reading. `nothing` (same set) reads
+# gains at the data's own station indices over the window's times. A vector
+# (target ant index → solution ant index, 0 = absent from the solution → cell
+# untouched) matches stations BY NAME and evaluates at the solution's single
+# time column, which is well-defined because `validate_transform` has already
+# established the solution is globally time-constant — the window's `ti_idx`
+# addresses the DATA's time axis and means nothing in the solution's.
+#
+# The elementwise write loop is the one place a raw `Array` earns its keep: DD's
+# `setindex!` is not `@propagate_inbounds`, so a `DimArray` here keeps bounds
+# checks the loop is written to elide.
+function _divide_gains!(
+        stack::AbstractDimStack, win::GeometryWindow, ev::GainEvaluator, θ,
+        inner::Integer; amap = nothing,
+    )
+    V = parent(stack[:vis])
+    W = parent(stack[:weights])
+    bl_pairs = UVData.baselines(stack).pairs
+    pols = pol_products(stack)
     nchan, nti, nbl, npol = size(V)
-    tconst = _precal_time_constant(ev, ti)
-    g = tconst ? evaluate_gains(ev, θ, ci, ti[1]:ti[1]) : evaluate_gains(ev, θ, ci, ti)
+    ti = win.ti_idx
+    tconst = amap === nothing ? _precal_time_constant(ev, ti) : true
+    tsel = amap === nothing ? (tconst ? (ti[1]:ti[1]) : ti) : (1:1)
+    g = evaluate_gains(ev, θ, win.chan_idx, tsel)
     cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
     nt = clamp(Int(inner), 1, length(cols))
     do_chunk = function (chunk)
         @inbounds for (bi, p) in chunk
             fa, fb = correlation_feed_pair(pols[p])
             a, b = bl_pairs[bi]
+            if amap !== nothing
+                a = amap[a]
+                b = amap[b]
+                (a == 0 || b == 0) && continue
+            end
             for t in 1:nti
                 gt = tconst ? 1 : t
                 for c in 1:nchan
@@ -262,39 +251,6 @@ function _divide_gains!(V, W, ev::GainEvaluator, θ, ci, ti, bl_pairs, pols, inn
                     V[c, t, bi, p] /= den
                     W[c, t, bi, p] *= abs2(den)
                 end
-            end
-        end
-    end
-    if nt <= 1
-        do_chunk(cols)
-    else
-        chunks = collect(Iterators.partition(cols, cld(length(cols), nt)))
-        exec_foreach(do_chunk, chunks; ntasks = length(chunks))
-    end
-    return nothing
-end
-
-# Cross-set variant of `_divide_gains!`: the (time-constant) gains are
-# evaluated once in the SOLUTION's station space and each data station is
-# remapped through `amap` (target ant index → solution ant index, 0 = not in
-# the solution → identity, cell untouched).
-function _divide_gains_mapped!(V, W, ev::GainEvaluator, θ, ci, amap, bl_pairs, pols, inner::Integer)
-    nchan, nti, nbl, npol = size(V)
-    g = evaluate_gains(ev, θ, ci, 1:1)               # time-constant: one column
-    cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
-    nt = clamp(Int(inner), 1, length(cols))
-    do_chunk = function (chunk)
-        @inbounds for (bi, p) in chunk
-            fa, fb = correlation_feed_pair(pols[p])
-            a, b = bl_pairs[bi]
-            am = amap[a]
-            bm = amap[b]
-            (am == 0 || bm == 0) && continue
-            for t in 1:nti, c in 1:nchan
-                den = g[c, 1, am, fa] * conj(g[c, 1, bm, fb])
-                (isfinite(den) && abs2(den) > 0) || continue
-                V[c, t, bi, p] /= den
-                W[c, t, bi, p] *= abs2(den)
             end
         end
     end
@@ -326,13 +282,16 @@ struct StationWeightScale <: AbstractDataTransform
     end
 end
 
-function apply_transform!(t::StationWeightScale, v::ScanDataView; inner::Integer = 1)
+function apply_transform!(
+        t::StationWeightScale, stack::AbstractDimStack, ::GeometryWindow; inner::Integer = 1,
+    )
     s = t.s
-    n = maximum(max(a, b) for (a, b) in v.bl_pairs; init = 0)
+    bl_pairs = UVData.baselines(stack).pairs
+    n = maximum(max(a, b) for (a, b) in bl_pairs; init = 0)
     n <= length(s) ||
         error("StationWeightScale: factor vector has $(length(s)) entries but the data references station index $n.")
-    W = v.weights
-    @inbounds for p in axes(W, 4), (bi, (a, b)) in enumerate(v.bl_pairs)
+    W = stack[:weights]
+    for p in axes(W, Pol), (bi, (a, b)) in enumerate(bl_pairs)
         f = s[a] * s[b]
         f == 1 && continue
         @views W[:, :, bi, p] .*= f
@@ -367,13 +326,14 @@ struct FlagChannels <: AbstractDataTransform
 end
 FlagChannels(mask::AbstractVector{Bool}) = FlagChannels(BitVector(mask))
 
-function apply_transform!(t::FlagChannels, v::ScanDataView; inner::Integer = 1)
-    length(t.mask) == length(v.geom.channel_freqs) ||
-        error("FlagChannels: mask length $(length(t.mask)) ≠ nchan $(length(v.geom.channel_freqs))")
-    W = v.weights
-    @inbounds for (c, gc) in enumerate(v.chan_idx)
-        t.mask[gc] && (W[c, :, :, :] .= 0)
-    end
+function apply_transform!(
+        t::FlagChannels, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1,
+    )
+    length(t.mask) == length(win.geom.channel_freqs) ||
+        error("FlagChannels: mask length $(length(t.mask)) ≠ nchan $(length(win.geom.channel_freqs))")
+    # `t.mask` is indexed by GLOBAL channel; gathering it through `win.chan_idx`
+    # gives the mask over this window's own frequency axis.
+    stack[:weights][Frequency = t.mask[win.chan_idx]] .= 0
     return nothing
 end
 
@@ -382,29 +342,34 @@ end
 """
     CalFunction(f)
 
-Transform: run caller code `f(v::ScanDataView)` on each scan group as it is
-materialized. `f` may mutate `v.vis`/`v.weights` in place and can address any
-(scan, baseline, channel, pol) via the view's metadata — the general escape
-hatch for per-datum corrections that have no dedicated option:
+Transform: run caller code `f(stack, win)` on each scan group as it is
+materialized. `f` may mutate the stack's `:vis`/`:weights` layers in place and
+can address any (scan, baseline, channel, pol) through the stack's dims and
+metadata — the general escape hatch for per-datum corrections that have no
+dedicated option:
 
     # halve the weight of the PT–LA baseline on scan "No0012" only
-    fix = CalFunction() do v
-        v.scan == "No0012" || return
-        pt = findfirst(==("PT"), v.ant_names); la = findfirst(==("LA"), v.ant_names)
-        for (bi, (a, b)) in enumerate(v.bl_pairs)
-            (minmax(a, b) == minmax(pt, la)) && (v.weights[:, :, bi, :] .*= 0.5)
+    fix = CalFunction() do stack, win
+        scan_name(stack) == "No0012" || return
+        names = antennas(stack).name
+        pt = findfirst(==("PT"), names); la = findfirst(==("LA"), names)
+        for (bi, (a, b)) in enumerate(baselines(stack).pairs)
+            (minmax(a, b) == minmax(pt, la)) && (stack[:weights][Baseline = bi] .*= 0.5)
         end
     end
 
-`f`'s work should stay cheap relative to a scan's solve (~seconds); it runs on
-every materialization of every scan group.
+`win` is the scan's [`GeometryWindow`](@ref), for code that needs to address the
+solve's global channel/time indices. `f`'s work should stay cheap relative to a
+scan's solve (~seconds); it runs on every materialization of every scan group.
 """
 struct CalFunction{F} <: AbstractDataTransform
     f::F
 end
 
-function apply_transform!(t::CalFunction, v::ScanDataView; inner::Integer = 1)
-    t.f(v)
+function apply_transform!(
+        t::CalFunction, stack::AbstractDimStack, win::GeometryWindow; inner::Integer = 1,
+    )
+    t.f(stack, win)
     return nothing
 end
 

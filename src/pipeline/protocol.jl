@@ -107,12 +107,13 @@ is materialized — allocate the step's accumulators here. Default: no-op.
 start_pass!(step::SolveStep, ctx) = nothing
 
 """
-    process_scan!(step::SolveStep, ctx::SolveContext, view::Fringe.ScanDataView) -> Any
+    process_scan!(step::SolveStep, ctx::SolveContext, stack, win::GeometryWindow) -> Any
 
 Accumulate one scan group into the step's state. The EXECUTOR has already
 materialized the group, applied the pipeline's transform chain, and admitted it
-against the memory budget — the step only consumes the view (and may read/write
-its own per-scan θ slots through `ctx`). Called once per selected scan group
+against the memory budget — the step only consumes the scan's `DimStack` and the
+[`GeometryWindow`](@ref) addressing it in the solve's index space (and may
+read/write its own per-scan θ slots through `ctx`). Called once per selected scan group
 (see [`fit_selection`](@ref)), possibly concurrently across groups; per-scan θ
 slots are disjoint. The RETURN VALUE is collected by the runner — one entry per
 selected group, in group-index order, delivered to [`finish_pass!`](@ref) via
@@ -120,7 +121,7 @@ selected group, in group-index order, delivered to [`finish_pass!`](@ref) via
 contribution and fold in `finish_pass!` (the fold is then deterministic at any
 concurrency). Default: no-op returning `nothing`.
 """
-process_scan!(step::SolveStep, ctx, view) = nothing
+process_scan!(step::SolveStep, ctx, stack, win) = nothing
 
 """
     finish_pass!(step::SolveStep, ctx::SolveContext) -> NamedTuple

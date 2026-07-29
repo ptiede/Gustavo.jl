@@ -121,14 +121,14 @@ struct NoBackendExecutor <: AbstractExecutor end
         st_t = with_executor(() -> FP.scan_stream(uvset; workspace = FP.FringeWorkspace), ThreadsExecutor())
         @test st_t.executor isa ThreadsExecutor
         # Same search results either way (the QA drivers' path).
-        grp_d = FP.materialize_cube(st_d, st_d.groups[1])
-        grp_t = with_executor(
+        stack_d, _ = FP.materialize_cube(st_d, st_d.groups[1])
+        stack_t, _ = with_executor(
             () -> FP.materialize_cube(st_t, st_t.groups[1]), ThreadsExecutor(),
         )
-        @test isequal(grp_d.Vg, grp_t.Vg) && isequal(grp_d.Wg, grp_t.Wg)
-        r_d = FP.search_scan(st_d, grp_d, FP.FringeSearch(); ngroups = 1)
+        @test isequal(stack_d[:vis], stack_t[:vis]) && isequal(stack_d[:weights], stack_t[:weights])
+        r_d = FP.search_scan(st_d, stack_d, FP.FringeSearch(); ngroups = 1)
         r_t = with_executor(
-            () -> FP.search_scan(st_t, grp_t, FP.FringeSearch(); ngroups = 1),
+            () -> FP.search_scan(st_t, stack_t, FP.FringeSearch(); ngroups = 1),
             ThreadsExecutor(),
         )
         @test all(r_d.det .=== r_t.det)

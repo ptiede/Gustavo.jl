@@ -28,31 +28,35 @@
             leaves = UVP.materialize_group(
                 [l for (_, l) in spec.leaves]; layers = (:vis, :weights, :uvw),
             )
-            grp_s = ST._stacked_scan_group(leaves, geom)
-            grp_n = FP.materialize_cube(st, spec)
-            @test isequal(grp_n.Vg, grp_s.Vg) && isequal(grp_n.Wg, grp_s.Wg)
+            stack_s, win_s = ST._stacked_scan_group(leaves, geom)
+            stack_n, win_n = FP.materialize_cube(st, spec)
+            @test isequal(stack_n[:vis], stack_s[:vis]) &&
+                isequal(stack_n[:weights], stack_s[:weights])
             # The direct-decode fast path, WHEN it fires (lazy sibling-band IDI
             # spans), must agree with the stacked fallback bit-for-bit.
-            grp_d = ST._direct_scan_group(spec, geom)
-            if grp_d !== nothing
-                @test isequal(grp_d.Vg, grp_s.Vg) && isequal(grp_d.Wg, grp_s.Wg)
-                @test grp_d.g_ci == grp_s.g_ci && grp_d.g_ti == grp_s.g_ti
+            direct = ST._direct_scan_group(spec, geom)
+            if direct !== nothing
+                stack_d, win_d = direct
+                @test isequal(stack_d[:vis], stack_s[:vis]) &&
+                    isequal(stack_d[:weights], stack_s[:weights])
+                @test win_d.chan_idx == win_s.chan_idx && win_d.ti_idx == win_s.ti_idx
             end
-            @test grp_s.g_ci == grp_n.g_ci && grp_s.g_ti == grp_n.g_ti
-            @test grp_n.fg == grp_s.fg && grp_n.tg == grp_s.tg
-            @test grp_n.bl_pairs == grp_s.bl_pairs
-            @test grp_n.pol_products == grp_s.pol_products
-            @test grp_n.source == spec.source && grp_n.scan == spec.scan
+            @test win_s.chan_idx == win_n.chan_idx && win_s.ti_idx == win_n.ti_idx
+            @test frequencies(stack_n) == frequencies(stack_s)
+            @test timestamps(stack_n) == timestamps(stack_s)
+            @test baselines(stack_n).pairs == baselines(stack_s).pairs
+            @test pol_products(stack_n) == pol_products(stack_s)
+            @test source_name(stack_n) == spec.source && scan_name(stack_n) == spec.scan
         end
     end
 
     @testset "search_scan determinism + cell accounting" begin
         search = FP.FringeSearch()
         spec = st.groups[1]
-        grp_n = FP.materialize_cube(st, spec)
-        res = FP.search_scan(st, grp_n, search; inner = 2)
-        ncross = count(pr -> pr[1] != pr[2], grp_n.bl_pairs)
-        @test res.ncells == res.cells1 * max(ncross * length(grp_n.pol_products), 1)
+        stack_n, _ = FP.materialize_cube(st, spec)
+        res = FP.search_scan(st, stack_n, search; inner = 2)
+        ncross = count(pr -> pr[1] != pr[2], baselines(stack_n).pairs)
+        @test res.ncells == res.cells1 * max(ncross * length(pol_products(stack_n)), 1)
         # Effective cells are FRACTIONAL on real grids (the oversampled plane is
         # divided by the oversampling) — the fields must be Float64, not Int
         # (regression: an Int field survived the whole synthetic suite because
@@ -63,11 +67,11 @@
 
         # `ngroups = 1` (standalone per-scan gating) only tightens/loosens the
         # per-search PFA threshold; the search grid — and cells1 — are unchanged.
-        res1 = FP.search_scan(st, grp_n, search; inner = 2, ngroups = 1)
+        res1 = FP.search_scan(st, stack_n, search; inner = 2, ngroups = 1)
         @test res1.cells1 == res.cells1
 
         # inner fan-out is bit-identical to the serial loop.
-        res_ser = FP.search_scan(st, grp_n, search; inner = 1)
+        res_ser = FP.search_scan(st, stack_n, search; inner = 1)
         @test all(res_ser.det .=== res.det)
         @test res_ser.rows == res.rows
     end
@@ -79,9 +83,9 @@
         @test all(s -> length(s.leaves) == 1, stb.groups)
         # A single-leaf group still materializes (one band's cube) with the
         # leaf's own geometry window.
-        grp1 = FP.materialize_cube(stb, stb.groups[1])
-        ci1, ti1 = CAL.leaf_window(geom, last(first(stb.groups[1].leaves)))
-        @test grp1.g_ci == collect(ci1) && grp1.g_ti == collect(ti1)
+        _, win1 = FP.materialize_cube(stb, stb.groups[1])
+        w1 = CAL.leaf_window(geom, last(first(stb.groups[1].leaves)))
+        @test win1.chan_idx == w1.chan_idx && win1.ti_idx == w1.ti_idx
 
         stk = FP.scan_stream(uvset; grouping = FP.ByKey((k, leaf) -> 1), geom = geom)
         @test length(stk.groups) == 1
@@ -150,15 +154,15 @@ using Gustavo.Streaming
 import Gustavo.Streaming: apply_transform!
 
 struct HalveWeights <: AbstractDataTransform end
-apply_transform!(::HalveWeights, v::ScanDataView; inner::Integer = 1) =
-    (v.weights .*= 0.5; nothing)
+apply_transform!(::HalveWeights, stack, win; inner::Integer = 1) =
+    (stack[:weights] .*= 0.5; nothing)
 
 # One budget-admitted pass: materialize every group through the chain and
 # report each group's total weight.
 function pass(uvset, geom)
     stream = scan_stream(uvset; geom = geom, transforms = (HalveWeights(),))
     sums = map_groups(stream) do spec
-        sum(materialize_cube(stream, spec).Wg)
+        sum(first(materialize_cube(stream, spec))[:weights])
     end
     return stream, sums
 end
@@ -170,8 +174,10 @@ end
     geom = CAL.build_geometry(uvset)
 
     stream, halved = StreamingWithoutFringe.pass(uvset, geom)
-    plain = map_groups(s -> sum(FP.materialize_cube(FP.scan_stream(uvset; geom = geom), s).Wg),
-                       FP.scan_stream(uvset; geom = geom))
+    plain = map_groups(
+        s -> sum(first(FP.materialize_cube(FP.scan_stream(uvset; geom = geom), s))[:weights]),
+        FP.scan_stream(uvset; geom = geom),
+    )
     @test length(halved) == length(stream.groups) == length(plain)
     @test all(isapprox(h, 0.5 * p; rtol = 1.0e-6) for (h, p) in zip(halved, plain))
 
@@ -194,7 +200,7 @@ end
     @test eltype(stream.pool) === Nothing
     @test eltype(FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace).pool) ===
         FP.FringeWorkspace
-    grp = FP.materialize_cube(stream, stream.groups[1])
-    @test_throws ArgumentError FP.search_scan(stream, grp, FP.FringeSearch())
-    @test_throws "workspace = FringeWorkspace" FP.search_scan(stream, grp, FP.FringeSearch())
+    stack, _ = FP.materialize_cube(stream, stream.groups[1])
+    @test_throws ArgumentError FP.search_scan(stream, stack, FP.FringeSearch())
+    @test_throws "workspace = FringeWorkspace" FP.search_scan(stream, stack, FP.FringeSearch())
 end

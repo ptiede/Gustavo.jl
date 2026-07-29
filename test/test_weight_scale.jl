@@ -31,13 +31,13 @@
     stw = FP.scan_stream(uvset; geom = geom, transforms = (FP.StationWeightScale(ws),))
 
     @testset "scan-group path scales weights, not visibilities" begin
-        plain = FP.materialize_cube(st0, st0.groups[1])
-        fixed = FP.materialize_cube(stw, stw.groups[1])
-        @test fixed.Vg == plain.Vg                                   # visibilities untouched
-        @test fixed.bl_pairs == plain.bl_pairs
-        for (bi, (a, b)) in enumerate(fixed.bl_pairs)
+        plain, _ = FP.materialize_cube(st0, st0.groups[1])
+        fixed, _ = FP.materialize_cube(stw, stw.groups[1])
+        @test fixed[:vis] == plain[:vis]                             # visibilities untouched
+        @test baselines(fixed).pairs == baselines(plain).pairs
+        for (bi, (a, b)) in enumerate(baselines(fixed).pairs)
             s = ws[a] * ws[b]
-            @test all(fixed.Wg[:, :, bi, :] .≈ Float32(s) .* plain.Wg[:, :, bi, :])
+            @test all(fixed[:weights][:, :, bi, :] .≈ Float32(s) .* plain[:weights][:, :, bi, :])
             @test s ≈ ((a, b) == (2, 3) ? 0.25 : (a in (2, 3) || b in (2, 3)) ? 0.5 : 1.0)
         end
     end

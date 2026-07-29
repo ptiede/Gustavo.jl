@@ -34,11 +34,12 @@ export freq_setup, union_frequency_axis, channel_freqs, ref_freq, ch_widths, tot
 export Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL
 export BaselineIndex, UVSet, with_visibilities, scan_key
 export apply, mapleaves, flatmap, leaves, sources, scan_ids, partitions, pol_products
+export frequencies, timestamps
 export set_bunit, with_bunit
 export baseline, baselines_per_scan, baselines
 export pol_index, pol_at, baseline_index
 export obs_time
-export scan_name, primary_scan_name, scan_intents, sub_scan_name, scan_window, participating_antennas
+export source_name, scan_name, primary_scan_name, scan_intents, sub_scan_name, scan_window, participating_antennas
 export select_source, select_scan, select_station, select_baseline, select_partition
 export merge_uvsets, time_window
 export load_uvfits, write_uvfits, default_output_path

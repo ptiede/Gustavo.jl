@@ -156,8 +156,8 @@ function start_pass!(s::FringeFit, ctx::SolveContext)
     return nothing
 end
 
-process_scan!(s::FringeFit, ctx::SolveContext, v::Fringe.ScanDataView) =
-    Fringe.estimate_scan!(s.estimator, ctx, s, v)
+process_scan!(s::FringeFit, ctx::SolveContext, stack, win::GeometryWindow) =
+    Fringe.estimate_scan!(s.estimator, ctx, s, stack, win)
 
 # Co-located stations see the same ionosphere, so a differential TEC between
 # them is pure solve error — but only a model that solves dTEC has any to tie.
@@ -189,13 +189,17 @@ end
 Fringe.estimator_info(est::Fringe.MatchedFilter) = (; search = est.search)
 
 function Fringe.estimate_scan!(
-        est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit, v::Fringe.ScanDataView,
+        est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit,
+        stack, win::GeometryWindow,
     )
     round = ctx.scratch[:fringe_round]::Int
-    Vsearch = round > 1 ? Fringe.residual_vis(ctx.ev, ctx.θ, v) : v.vis
-    res = Fringe.search_scan(ctx.stream, v, est.search; Vsearch = Vsearch)
-    feeds = [correlation_feed_pair(p) for p in v.pol_products]
-    det = Fringe.StationScanDetections(res.det, v.bl_pairs, feeds, first(v.ti_idx))
+    Vsearch = round > 1 ? Fringe.residual_vis(ctx.ev, ctx.θ, stack, win) : stack[:vis]
+    res = Fringe.search_scan(ctx.stream, stack, est.search; Vsearch)
+    pols = pol_products(stack)
+    feeds = [correlation_feed_pair(p) for p in pols]
+    det = Fringe.StationScanDetections(
+        res.det, UVData.baselines(stack).pairs, feeds, first(win.ti_idx),
+    )
     return (; det, max_snr = res.max_snr, ncells = res.ncells, rows = res.rows)
 end
 
@@ -259,7 +263,7 @@ function start_pass!(s::BandpassEstimator, ctx::SolveContext)
     return nothing
 end
 
-function process_scan!(s::BandpassEstimator, ctx::SolveContext, v::Fringe.ScanDataView)
+function process_scan!(s::BandpassEstimator, ctx::SolveContext, stack, win::GeometryWindow)
     setup = ctx.scratch[:bp_setup]
     # Dispersion/SBD-correct THIS scan before accumulating (FringeFit's refine
     # service): scans with different ionospheres would otherwise decohere the
@@ -268,14 +272,14 @@ function process_scan!(s::BandpassEstimator, ctx::SolveContext, v::Fringe.ScanDa
     rf = get(ctx.scratch, :refine, nothing)::Union{Nothing, Fringe.RefineService}
     nrej = rf === nothing ? 0 :
         Fringe.refine_scan!(
-        ctx.θ, v, ctx.geom, ctx.ev, rf, ctx.ref_ant, ctx.nant;
+        ctx.θ, stack, win, ctx.ev, rf, ctx.ref_ant, ctx.nant;
         inner = ctx.stream.inner,
     )
-    pols = String.(v.pol_products)
+    pols = String.(pol_products(stack))
     nchan = length(ctx.geom.channel_freqs)
     rl, wl = Fringe.bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
-    Fringe.accumulate_bandpass!(rl, wl, setup.blidx, ctx.ev, ctx.θ, v)
-    return (; rl, wl, nrej, pols, source = v.source, t0 = first(v.ti_idx))
+    Fringe.accumulate_bandpass!(rl, wl, setup.blidx, ctx.ev, ctx.θ, stack, win)
+    return (; rl, wl, nrej, pols, source = source_name(stack), t0 = first(win.ti_idx))
 end
 
 function finish_pass!(s::BandpassEstimator, ctx::SolveContext)
@@ -332,7 +336,7 @@ function start_pass!(s::TemporalSmoother, ctx::SolveContext)
     return nothing
 end
 
-function process_scan!(s::TemporalSmoother, ctx::SolveContext, v::Fringe.ScanDataView)
+function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::GeometryWindow)
     setup = ctx.scratch[:adhoc_setup]
     # Per-scan (Δτ, dTEC) + SBD refinement BEFORE the adhoc solve, so the per-AP
     # phases fit dispersion-corrected residuals (FringeFit's refine service —
@@ -344,14 +348,14 @@ function process_scan!(s::TemporalSmoother, ctx::SolveContext, v::Fringe.ScanDat
     nrej = 0
     if rf !== nothing
         polish = rf.reuse_bandpass &&
-            first(v.ti_idx) in get(() -> Set{Int}(), ctx.scratch, :refined_t0)
+            first(win.ti_idx) in get(() -> Set{Int}(), ctx.scratch, :refined_t0)
         nrej = Fringe.refine_scan!(
-            ctx.θ, v, ctx.geom, ctx.ev, rf, ctx.ref_ant, ctx.nant;
+            ctx.θ, stack, win, ctx.ev, rf, ctx.ref_ant, ctx.nant;
             inner = ctx.stream.inner, polish = polish,
         )
     end
     Fringe.adhoc_scan!(
-        ctx.θ, v, ctx.geom, ctx.ev, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
+        ctx.θ, stack, win, ctx.ev, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
         shared_feeds = setup.shared, inner = ctx.stream.inner,
         excl = ctx.scratch[:excl], psI = setup.psI,
     )

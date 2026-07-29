@@ -374,10 +374,32 @@ function _unique_in_order(labels::AbstractVector{<:AbstractString})
 end
 
 """
-    leaf_window(geom, leaf) -> (chan_idx::Vector{Int}, ti_idx::Vector{Int})
+    GeometryWindow
 
-Indices into `geom.channel_freqs` / `geom.times` of the channels and times the
-leaf carries, matched by value (frequency by `isapprox` rtol 1e-9, time by atol
+A window into a [`DataGeometry`](@ref): everything needed to locate one scan's
+channels and times in the solve's index space, with no data attached.
+
+- `geom` — the solve's geometry, the index space the window addresses.
+- `chan_idx`, `ti_idx` — GLOBAL indices into `geom.channel_freqs` / `geom.times`
+  of the channels and times the window covers.
+
+θ is addressed by POSITION — `ComponentPlan.off1[ant, feed, tseg_id, fseg_id]`
+over global-length segment-id tables — while a `DimStack`'s coordinates are
+PHYSICAL (Hz, hours), so this join cannot be recovered from the data alone.
+Build one with [`leaf_window`](@ref); pass it alongside the scan's `DimStack`
+to anything that needs both.
+"""
+struct GeometryWindow
+    geom::DataGeometry
+    chan_idx::Vector{Int}
+    ti_idx::Vector{Int}
+end
+
+"""
+    leaf_window(geom, leaf) -> GeometryWindow
+
+The [`GeometryWindow`](@ref) addressing the channels and times `leaf` carries,
+matched by value against `geom` (frequency by `isapprox` rtol 1e-9, time by atol
 1e-9 h). Errors if any leaf sample has no match in the geometry.
 """
 function leaf_window(geom::DataGeometry, leaf)
@@ -396,7 +418,7 @@ function leaf_window(geom::DataGeometry, leaf)
         isnothing(j) && throw(ArgumentError("leaf_window: time $t not found in geometry"))
         ti_idx[i] = j
     end
-    return chan_idx, ti_idx
+    return GeometryWindow(geom, chan_idx, ti_idx)
 end
 
 # ── Apply ────────────────────────────────────────────────────────────────────
@@ -430,12 +452,12 @@ function UVData.apply_calibration(
         # Correction reads vis + weights; the output flag is re-derived from the
         # corrected weights downstream, so skip the redundant on-disk flag layer.
         leaf = materialize_leaf(leaf; layers = (:vis, :weights, :uvw))
-        ci, ti = leaf_window(sol.geom, leaf)
-        g = evaluate_gains(ev, sol.θ, ci, ti)      # (nchan_leaf, nti_leaf, nant, 2)
-        bl_pairs = UVData.baselines(leaf).pairs
-        pols = pol_products(leaf)
-        vis_corr, w_corr = _apply_gain_kernel(leaf[:vis], leaf[:weights], g, bl_pairs, pols; ntasks = ntasks)
-        _flag_solution_rows!(parent(vis_corr), parent(w_corr), bl_pairs, sol.geom, ti, flagged, exclbl)
+        win = leaf_window(sol.geom, leaf)
+        g = evaluate_gains(ev, sol.θ, win.chan_idx, win.ti_idx)   # (nchan_leaf, nti_leaf, nant, 2)
+        vis_corr, w_corr = _apply_gain_kernel(leaf, g; ntasks = ntasks)
+        _flag_solution_rows!(
+            vis_corr, w_corr, UVData.baselines(leaf).pairs, sol.geom, win.ti_idx, flagged, exclbl,
+        )
         return with_visibilities(leaf, vis_corr, w_corr)
     end
 end
@@ -487,54 +509,60 @@ function _flag_solution_rows!(Vc, Wc, bl_pairs, geom, ti_idx, flagged, exclbl)
     return nothing
 end
 
-# Divide visibilities by complex antenna gains `g[c, ti, ant, feed]`. The vis /
-# weight DimArrays are (Frequency, Ti, Baseline, Pol). The per-(baseline, pol)
-# output columns are independent (disjoint writes, read-only gains), so the loop
-# fans out over `ntasks` tasks — this kernel is the dominant cost of applying a
-# solution (≈80% of `apply_calibration`), and one thread wastes a 16-core box.
-# Reordering across independent cells is bit-identical: every cell is computed by
-# the same scalar expression regardless of task partition.
-function _apply_gain_kernel(
-        vis_p::AbstractArray, w_p::AbstractArray,
-        g::AbstractArray{<:Complex, 4},
-        bl_pairs, pols; ntasks::Integer = 1,
-    )
-    V = parent(vis_p)
-    W = parent(w_p)
-    Vc = copy(V)
-    Wc = copy(W)
-    nchan, nti, nbl, npol = size(V)
-    geps = 1.0e-12
-    # One (bi, p) column of work per unit; disjoint outputs → safe to spawn.
-    cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
-    nt = clamp(Int(ntasks), 1, max(1, length(cols)))
-    do_col = @inline function (bi, p)
-        fa, fb = correlation_feed_pair(pols[p])
-        a, b = bl_pairs[bi]
-        return @inbounds for tt in 1:nti, c in 1:nchan
-            w = W[c, tt, bi, p]
-            ga = g[c, tt, a, fa]
-            gb = g[c, tt, b, fb]
-            denom = ga * conj(gb)
-            if abs(ga) < geps || abs(gb) < geps || !isfinite(denom)
-                Wc[c, tt, bi, p] = zero(eltype(Wc))
-                Vc[c, tt, bi, p] = convert(eltype(Vc), NaN)
-                continue
-            end
-            Vc[c, tt, bi, p] = V[c, tt, bi, p] / denom
-            Wc[c, tt, bi, p] = w * abs2(ga * gb)
+# Gain magnitude below which a cell is treated as unconstrained rather than
+# divided through: the correction would amplify noise without bound.
+const _GAIN_FLOOR = 1.0e-12
+
+# Correct one (baseline, product) column in place over its (Frequency, Ti)
+# plane: `V / (g_a conj(g_b))` and `w · |g_a g_b|²`, where `ga`/`gb` are the
+# two stations' gains on that same plane. A degenerate or non-finite gain blanks
+# the cell — NaN visibility, zero weight — which is what marks it flagged
+# downstream. Every cell of both outputs is written, so the caller need not
+# initialize them.
+function _correct_column!(vis_c, w_c, vis, w, ga, gb)
+    for i in eachindex(vis_c, w_c, vis, w, ga, gb)
+        gai = ga[i]
+        gbi = gb[i]
+        den = gai * conj(gbi)
+        if abs(gai) < _GAIN_FLOOR || abs(gbi) < _GAIN_FLOOR || !isfinite(den)
+            vis_c[i] = convert(eltype(vis_c), NaN)
+            w_c[i] = zero(eltype(w_c))
+        else
+            vis_c[i] = vis[i] / den
+            w_c[i] = w[i] * abs2(gai * gbi)
         end
     end
-    if nt <= 1
-        for (bi, p) in cols
-            do_col(bi, p)
-        end
-    else
-        exec_foreach(cols; ntasks = nt) do (bi, p)
-            do_col(bi, p)
-        end
+    return nothing
+end
+
+# Divide a leaf's visibilities by complex antenna gains `g[c, ti, ant, feed]`,
+# returning the corrected `(vis, weights)`. Baselines and correlation products
+# are read off the leaf, so they cannot disagree with the arrays they index.
+#
+# Each (baseline, product) column is independent — disjoint writes over
+# read-only gains — so the columns fan out over `ntasks`. That fan-out is
+# load-bearing: this kernel is ≈80% of `apply_calibration` and the split is
+# worth ~5× on 8 threads. It is also bit-identical to the serial loop, because
+# every cell is the same scalar expression whatever the partition.
+function _apply_gain_kernel(leaf, g::AbstractArray{<:Complex, 4}; ntasks::Integer = 1)
+    vis = leaf[:vis]
+    w = leaf[:weights]
+    vis_c = similar(vis)
+    w_c = similar(w)
+    ants = UVData.baselines(leaf).pairs
+    feeds = map(correlation_feed_pair, pol_products(leaf))
+    columns = vec(CartesianIndices((axes(vis, 3), axes(vis, 4))))
+    exec_foreach(columns; ntasks = clamp(Int(ntasks), 1, max(1, length(columns)))) do col
+        bi, p = Tuple(col)
+        a, b = ants[bi]
+        fa, fb = feeds[p]
+        _correct_column!(
+            view(vis_c, :, :, bi, p), view(w_c, :, :, bi, p),
+            view(vis, :, :, bi, p), view(w, :, :, bi, p),
+            view(g, :, :, a, fa), view(g, :, :, b, fb),
+        )
     end
-    return Vc, Wc
+    return vis_c, w_c
 end
 
 # ── Serialization ────────────────────────────────────────────────────────────

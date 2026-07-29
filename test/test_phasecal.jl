@@ -87,7 +87,8 @@
         # Corrupt a copy of the uvset with the instrumental gains (V ← V·g_a·g_b*).
         corrupt = deepcopy(uvset)
         for (_, leaf) in UVP.branches(corrupt)
-            ci, ti = CAL.leaf_window(geom, leaf)
+            win = CAL.leaf_window(geom, leaf)
+            ci, ti = win.chan_idx, win.ti_idx
             V = parent(leaf[:vis])
             bl_pairs = UVP.baselines(leaf).pairs
             lp = pol_products(leaf)
@@ -177,7 +178,7 @@
             uvset,
         )
         lo = first(values(UVP.branches(out2)))
-        ci, _ = CAL.leaf_window(geom, lo)
+        ci = CAL.leaf_window(geom, lo).chan_idx
         W = parent(lo[:weights])
         for (cc, c) in enumerate(ci)
             mask[c] && @test all(w -> w <= 0 || !isfinite(w), @view(W[cc, :, :, :]))

@@ -77,7 +77,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
         # Arbitrary run_step-based action steps no longer thread through a
         # pipeline (solve steps share one compiled model + streaming passes).
-        struct_probe = Gustavo.DataTransformStep(CalFunction(v -> nothing))
+        struct_probe = Gustavo.DataTransformStep(CalFunction((stack, win) -> nothing))
         @test_throws ErrorException Gustavo.run_step(struct_probe, Gustavo.CalibrationContext())
     end
 

@@ -25,7 +25,7 @@ a global least-squares estimator would carry neither.
 Subtype it and define two methods, which `FringeFit` calls once per scan group
 and once per pass:
 
-    Gustavo.Fringe.estimate_scan!(est::MyEstimator, ctx, step, view) -> NamedTuple
+    Gustavo.Fringe.estimate_scan!(est::MyEstimator, ctx, step, stack, win) -> NamedTuple
     Gustavo.Fringe.finish_estimate!(est::MyEstimator, ctx, step) -> NamedTuple
 
 See [`estimate_scan!`](@ref) and [`finish_estimate!`](@ref) for what each
@@ -51,12 +51,13 @@ to fill θ and report.
 abstract type AbstractFringeEstimator end
 
 """
-    estimate_scan!(est::AbstractFringeEstimator, ctx, step, view) -> NamedTuple
+    estimate_scan!(est::AbstractFringeEstimator, ctx, step, stack, win) -> NamedTuple
 
 One scan group's contribution to the fringe estimate. `ctx` is the pipeline's
 solve context (`ctx.θ`, `ctx.ev`, `ctx.geom`, `ctx.stream`, `ctx.scratch`),
 `step` the [`FringeFit`](@ref) being run — read its `model` for WHAT is solved —
-and `view` the materialized `ScanDataView`.
+`stack` the materialized scan group's `DimStack`, and `win` its
+[`GeometryWindow`](@ref) into the solve's index space.
 
 Runs concurrently across scan groups, so it may write only θ columns private to
 this scan; anything global belongs in [`finish_estimate!`](@ref). The returned
@@ -68,9 +69,9 @@ should return `NaN` rather than omit it.
 """
 function estimate_scan! end
 
-estimate_scan!(est::AbstractFringeEstimator, ctx, step, view) = error(
+estimate_scan!(est::AbstractFringeEstimator, ctx, step, stack, win) = error(
     "$(typeof(est)) does not implement the fringe estimator interface: define " *
-        "Gustavo.Fringe.estimate_scan!(::$(typeof(est)), ctx, step, view) " *
+        "Gustavo.Fringe.estimate_scan!(::$(typeof(est)), ctx, step, stack, win) " *
         "returning this scan group's contribution (see `AbstractFringeEstimator`)."
 )
 

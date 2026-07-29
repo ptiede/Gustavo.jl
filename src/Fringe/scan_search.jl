@@ -1,10 +1,9 @@
 # ── Fringe search over one materialized scan group ───────────────────────────
 #
 # The domain half of the streaming pass: `Streaming` owns the group/budget/
-# transform machinery and hands a materialized `ScanGroup` (or the transform
-# chain's `ScanDataView` over it) to the kernels in `search.jl`. This file is
-# the join — it is the only place `Streaming`'s types and the fringe kernels
-# meet.
+# transform machinery and hands a materialized scan `DimStack` to the kernels in
+# `search.jl`. This file is the join — it is the only place `Streaming`'s types
+# and the fringe kernels meet.
 
 # One recorded fringe detection row: baseline antennas, correlation product,
 # SNR, and the PER-BASELINE false-alarm probability (single-search null).
@@ -29,35 +28,34 @@ struct ScanSearchResult
 end
 
 """
-    search_scan(stream::ScanStream, grp::ScanGroup, search::FringeSearch;
-                Vsearch = grp.Vg, ngroups = length(stream.groups),
+    search_scan(stream::ScanStream, stack, search::FringeSearch;
+                Vsearch = stack[:vis], ngroups = length(stream.groups),
                 inner = stream.inner, t0 = stream.geom.t0 * 3600.0) -> ScanSearchResult
-    search_scan(stream::ScanStream, v::ScanDataView, search::FringeSearch;
-                Vsearch = v.vis, ...) -> ScanSearchResult
 
-Fringe-search every (baseline, product) of a materialized group — the public
-stage-A search. The second method searches through a scan view (the visitor
-contract's hand-off; `v.data === grp.data`, so it is the same cube). `Vsearch`
-lets a caller search a residual cube in place of the raw one (`rounds > 1`).
-`ngroups` sets the family-wise Bonferroni denominator: `search.pfa_max` budgets
-the whole family of `ncross×npol×ngroups` searches, so each individual search
-runs at `pfa_max` divided by that count; pass `ngroups = 1` for standalone
-per-scan gating (the QA convention). `t0` (seconds) is the epoch the detection
-PHASES are referenced to — delay/rate/SNR are epoch-invariant; the default is
-the solve's track epoch, a standalone QA caller typically wants the scan
-midpoint (`mean(grp.tg) * 3600`). Results are bit-identical to the serial loop
-regardless of `inner`.
+Fringe-search every (baseline, product) of a materialized scan group — the
+public stage-A search. `stack` is the group's `DimStack` as
+[`materialize_cube`](@ref) returns it; the search reads data only and needs no
+geometry window. `Vsearch` lets a caller search a residual cube in place of the
+raw one (`rounds > 1`). `ngroups` sets the family-wise Bonferroni denominator:
+`search.pfa_max` budgets the whole family of `ncross×npol×ngroups` searches, so
+each individual search runs at `pfa_max` divided by that count; pass
+`ngroups = 1` for standalone per-scan gating (the QA convention). `t0` (seconds)
+is the epoch the detection PHASES are referenced to — delay/rate/SNR are
+epoch-invariant; the default is the solve's track epoch, a standalone QA caller
+typically wants the scan midpoint (`mean(timestamps(stack)) * 3600`). Results
+are bit-identical to the serial loop regardless of `inner`.
 
 `stream` must carry a [`FringeWorkspace`](@ref) pool — build it with
 `scan_stream(uvset; workspace = FringeWorkspace)`.
 """
 function search_scan(
-        stream::ScanStream, grp::ScanGroup, search::FringeSearch;
-        Vsearch = grp.Vg, ngroups::Integer = length(stream.groups),
+        stream::ScanStream, stack::AbstractDimStack, search::FringeSearch;
+        Vsearch = stack[:vis], ngroups::Integer = length(stream.groups),
         inner::Integer = stream.inner, t0::Real = stream.geom.t0 * 3600.0,
     )
     return _search_scan_cube(
-        grp.bl_pairs, grp.pol_products, grp.fg, grp.tg, grp.Wg,
+        UVData.baselines(stack).pairs, pol_products(stack),
+        frequencies(stack), timestamps(stack), stack[:weights],
         Vsearch, stream.geom.f0, Float64(t0), search,
         _search_pool(stream), inner, ngroups,
     )
@@ -76,18 +74,6 @@ function _search_pool(stream::ScanStream)
                 "$(eltype(pool)) — build it with " *
                 "`scan_stream(uvset; workspace = FringeWorkspace)`."
         )
-    )
-end
-
-function search_scan(
-        stream::ScanStream, v::ScanDataView, search::FringeSearch;
-        Vsearch = v.vis, ngroups::Integer = length(stream.groups),
-        inner::Integer = stream.inner, t0::Real = stream.geom.t0 * 3600.0,
-    )
-    return _search_scan_cube(
-        v.bl_pairs, v.pol_products, v.freqs, v.times, v.weights,
-        Vsearch, stream.geom.f0, Float64(t0), search,
-        _search_pool(stream), inner, ngroups,
     )
 end
 

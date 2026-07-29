@@ -92,12 +92,32 @@ on a `DimArray` (the lookup), a leaf `AbstractDimTree`, or a `UVSet`
 (uses the first leaf — all leaves share the same Pol axis on read).
 """
 pol_products(vis::AbstractDimArray) = collect(lookup(vis, Pol))
-pol_products(leaf::AbstractDimTree) = pol_products(leaf[:vis])
+pol_products(leaf::PartitionedData) = pol_products(leaf[:vis])
 function pol_products(uvset::UVSet)
     bs = DimensionalData.branches(uvset)
     isempty(bs) && error("pol_products: UVSet has no leaves")
     return pol_products(first(values(bs)))
 end
+
+"""
+    frequencies(x) -> Vector{Float64}
+
+Channel frequencies (Hz) off the `Frequency` lookup of `x`'s visibility array —
+a `DimArray`, a leaf `AbstractDimTree`, or a layer selection off one. The raw
+coordinate vector, not a lookup wrapper.
+"""
+frequencies(vis::AbstractDimArray) = parent(lookup(vis, Frequency))
+frequencies(leaf::PartitionedData) = frequencies(leaf[:vis])
+
+"""
+    timestamps(x) -> Vector{Float64}
+
+Integration times (hours) off the `Ti` lookup of `x`'s visibility array — a
+`DimArray`, a leaf `AbstractDimTree`, or a layer selection off one. The raw
+coordinate vector, not a lookup wrapper.
+"""
+timestamps(vis::AbstractDimArray) = parent(lookup(vis, Ti))
+timestamps(leaf::PartitionedData) = timestamps(leaf[:vis])
 
 # ── Polarization-by-name selectors ────────────────────────────────────
 #

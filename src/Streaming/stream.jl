@@ -3,7 +3,7 @@
 # A pass sees a lazy `UVSet` one SCAN GROUP at a time and never the set itself:
 #
 #   stream = scan_stream(uvset; transforms = [...])   # group + budget, no read
-#   grp    = materialize_cube(stream, spec)           # one group, transforms applied
+#   stack, win = materialize_cube(stream, spec)       # one group, transforms applied
 #   map_groups(stream) do spec ... end                # budget-admitted pass runner
 #
 # The data hook is the stream's TRANSFORM CHAIN (`AbstractDataTransform`, see
@@ -254,61 +254,22 @@ end
 # ── Materialization (the transform-chain choke points) ────────────────────────
 
 """
-    ScanGroup
-
-One materialized scan group, frequency-concatenated across its band leaves.
-`data` is the leaf-shaped `DimStack` built ONCE where the concatenated cube is
-born: native-precision `:vis`/`:weights` layers on
-`(Frequency, Ti, Baseline, Pol)` dims, with the first band leaf's
-`PartitionInfo` as metadata (source/scan identity, antennas, and baselines are
-group-wide; the frequency truth for the concatenated axis lives on the
-`Frequency` lookup, NOT in `metadata.frequencies`, which still describes that
-one band). `g_ci`/`g_ti` are the global geometry indices.
-
-Convenience properties, all derived from `data`: `Vg`/`Wg` (the parent cubes,
-`(nchan, nti, nbl, npol)`), `fg` (Hz), `tg` (hours), `bl_pairs`,
-`pol_products`, `source`, `scan`.
-"""
-struct ScanGroup{S <: AbstractDimStack}
-    data::S
-    g_ci::Vector{Int}
-    g_ti::Vector{Int}
-end
-
-function Base.getproperty(g::ScanGroup, s::Symbol)
-    s === :Vg && return parent(getfield(g, :data)[:vis])
-    s === :Wg && return parent(getfield(g, :data)[:weights])
-    s === :fg && return parent(lookup(getfield(g, :data)[:vis], Frequency))
-    s === :tg && return parent(lookup(getfield(g, :data)[:vis], Ti))
-    s === :pol_products && return parent(lookup(getfield(g, :data)[:vis], Pol))
-    s === :bl_pairs && return DimensionalData.metadata(getfield(g, :data)).baselines.pairs
-    s === :source && return String(DimensionalData.metadata(getfield(g, :data)).source_name)
-    s === :scan && return String(DimensionalData.metadata(getfield(g, :data)).scan_name)
-    return getfield(g, s)
-end
-Base.propertynames(::ScanGroup) = (
-    :data, :g_ci, :g_ti, :Vg, :Wg, :fg, :tg, :bl_pairs, :pol_products,
-    :source, :scan,
-)
-
-"""
-    scan_view(stream::ScanStream, grp::ScanGroup) -> ScanDataView
-
-The transform-facing window over a materialized group — a zero-cost wrap: the
-view's `data` IS the group's stack (mutating the view mutates the group).
-"""
-scan_view(stream::ScanStream, grp::ScanGroup) =
-    ScanDataView(grp.data, grp.g_ci, grp.g_ti, stream.geom)
-
-"""
     materialize_cube(stream::ScanStream, spec::ScanGroupSpec;
-                     inner = stream.inner) -> ScanGroup
+                     inner = stream.inner) -> (stack, win)
 
-Materialize one scan group as the frequency-concatenated [`ScanGroup`](@ref)
-cube and apply the stream's transform chain to it. Fast path decodes each band
-directly into its contiguous channel block of the stacked cube (one sequential
-read, no per-band intermediates); falls back to materialize-then-copy when the
-group is not a single sibling-band IDI span.
+Materialize one scan group as a frequency-concatenated cube and apply the
+stream's transform chain to it. Fast path decodes each band directly into its
+contiguous channel block of the stacked cube (one sequential read, no per-band
+intermediates); falls back to materialize-then-copy when the group is not a
+single sibling-band IDI span.
+
+`stack` is a leaf-shaped `DimStack` built ONCE where the concatenated cube is
+born: native-precision `:vis`/`:weights` layers on `(Frequency, Ti, Baseline,
+Pol)` dims, with the first band leaf's `PartitionInfo` as metadata (source/scan
+identity, antennas and baselines are group-wide; the frequency truth for the
+concatenated axis lives on the `Frequency` lookup, NOT in
+`metadata.frequencies`, which still describes that one band). `win` is the
+group's [`GeometryWindow`](@ref) into the solve's index space.
 """
 function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; inner::Integer = stream.inner)
     grp = _direct_scan_group(spec, stream.geom)
@@ -318,8 +279,9 @@ function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; inner::Intege
         )
         grp = _stacked_scan_group(leaves, stream.geom)
     end
-    apply_transforms!(stream.transforms, scan_view(stream, grp); inner = inner)
-    return grp
+    stack, win = grp
+    apply_transforms!(stream.transforms, stack, win; inner = inner)
+    return stack, win
 end
 
 # Direct decode into the stacked cube: returns `nothing` (caller falls back) unless
@@ -339,7 +301,7 @@ function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry)
     chan_entries = Tuple{Int, Float64, Int, Int}[]      # (g_ci, freq, leafidx, local_c)
     nchan_leaf = Vector{Int}(undef, length(lazy))
     for (li, leaf) in enumerate(lazy)
-        ci, _ = leaf_window(geom, leaf)
+        ci = leaf_window(geom, leaf).chan_idx
         fs = Float64.(lookup(leaf[:vis], Frequency))
         nchan_leaf[li] = length(ci)
         for (lc, gc) in enumerate(ci)
@@ -382,12 +344,11 @@ function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry)
     ]
     UVData.materialize_group_into!(dests, lazy; layers = (:vis, :weights)) || return nothing
 
-    _, g_ti = leaf_window(geom, l0)
     info = UVData.metadata(l0)
     d = (Frequency(fg), Ti(tg), Baseline(copy(info.baselines.labels)), Pol(pols))
-    return ScanGroup(
+    return (
         DimStack((vis = DimArray(Vg, d), weights = DimArray(Wg, d)); metadata = info),
-        g_ci, g_ti,
+        GeometryWindow(geom, g_ci, leaf_window(geom, l0).ti_idx),
     )
 end
 
@@ -422,7 +383,7 @@ function _stacked_scan_group(leaves, geom::DataGeometry)
 
     chan_entries = Tuple{Int, Float64, Int, Int}[]      # (g_ci, freq, leafidx, local_c)
     for (li, leaf) in enumerate(leaves)
-        ci, _ = leaf_window(geom, leaf)
+        ci = leaf_window(geom, leaf).chan_idx
         fs = Float64.(lookup(leaf[:vis], Frequency))
         for (lc, gc) in enumerate(ci)
             push!(chan_entries, (gc, fs[lc], li, lc))
@@ -456,12 +417,11 @@ function _stacked_scan_group(leaves, geom::DataGeometry)
         i = j + 1
     end
 
-    _, g_ti = leaf_window(geom, l0)
     info = UVData.metadata(l0)
     d = (Frequency(fg), Ti(tg), Baseline(copy(info.baselines.labels)), Pol(pols))
-    return ScanGroup(
+    return (
         DimStack((vis = DimArray(Vg, d), weights = DimArray(Wg, d)); metadata = info),
-        g_ci, g_ti,
+        GeometryWindow(geom, g_ci, leaf_window(geom, l0).ti_idx),
     )
 end
 
@@ -494,22 +454,23 @@ function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; inner::Inte
     return [out[i]::Tuple for i in eachindex(out)]
 end
 
-# Run the transform chain over one materialized band leaf: the view's stack is
+# Run the transform chain over one materialized band leaf: the chain's stack is
 # the layer selection off the leaf ITSELF (`leaf[(:vis, :weights)]` — metadata
-# and all; no decomposition). `copy_arrays` guards user-owned data (eager
-# sources): the leaf is rewrapped around array copies first, exactly as
-# `apply_calibration` does; private (freshly-materialized) leaves are
-# transformed in place with no scan-sized copy. Either way the returned leaf's
-# `flag` layer is re-derived from the TRANSFORMED weights — the pre-transform
-# flag would be stale after e.g. `FlagChannels`.
+# and all; no decomposition), which shares the leaf's arrays, so the chain
+# mutates the leaf. `copy_arrays` guards user-owned data (eager sources): the
+# leaf is rewrapped around array copies first, exactly as `apply_calibration`
+# does; private (freshly-materialized) leaves are transformed in place with no
+# scan-sized copy. Either way the rebuild re-derives the returned leaf's `flag`
+# layer from the TRANSFORMED weights — the pre-transform flag would be stale
+# after e.g. `FlagChannels`.
 function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arrays::Bool)
     base = copy_arrays ?
         with_visibilities(leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights]))) : leaf
-    ci, ti = leaf_window(stream.geom, base)
-    v = ScanDataView(base[(:vis, :weights)], collect(Int, ci), collect(Int, ti), stream.geom)
     # Per-leaf work is already fanned out across leaves; keep transforms serial here.
-    apply_transforms!(stream.transforms, v; inner = 1)
-    return with_visibilities(base, v.vis, v.weights)
+    apply_transforms!(
+        stream.transforms, base[(:vis, :weights)], leaf_window(stream.geom, base); inner = 1,
+    )
+    return with_visibilities(base, base[:vis], base[:weights])
 end
 
 # ── The pass runner: budget-admitted group execution (the executor seam) ─────

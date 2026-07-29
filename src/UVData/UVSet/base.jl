@@ -1,3 +1,8 @@
+# The containers that carry a leaf's `PartitionInfo`: the leaf tree itself and
+# any layer selection off it (`leaf[(:vis, :weights)]`), which keeps the
+# metadata. Both answer the identity accessors defined throughout this file.
+const PartitionedData = Union{DimensionalData.AbstractDimTree, DimensionalData.AbstractDimStack}
+
 """
     UVSet <: DimensionalData.AbstractDimTree
 
@@ -364,7 +369,7 @@ end
 
 Per-leaf antenna table.
 """
-antennas(leaf::DimensionalData.AbstractDimTree) =
+antennas(leaf::PartitionedData) =
     DimensionalData.metadata(leaf).antennas
 
 """
@@ -455,22 +460,29 @@ nintegrations(uvset::UVSet) = sum(
 DimensionalData.metadata(dt::DimensionalData.DimTree) = getfield(dt, :metadata)
 
 
-freq_setup(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).freq_setup
-baselines(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).baselines
-record_order(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).record_order
-extra_columns(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).extra_columns
+freq_setup(part::PartitionedData) = DimensionalData.metadata(part).freq_setup
+baselines(part::PartitionedData) = DimensionalData.metadata(part).baselines
+record_order(part::PartitionedData) = DimensionalData.metadata(part).record_order
+extra_columns(part::PartitionedData) = DimensionalData.metadata(part).extra_columns
+
+"""
+    source_name(part) -> String
+
+Name of the source the leaf (or a layer selection off it) observes.
+"""
+source_name(part::PartitionedData) = DimensionalData.metadata(part).source_name
 
 # Each leaf maps to exactly one xradio MSv4 scan, so the scan label is a
 # scalar field on `PartitionInfo`. `scan_name` and `primary_scan_name`
 # return that String — twin accessors retained for callers that previously
 # read the per-Ti vector form.
-scan_name(part::DimensionalData.AbstractDimTree) =
+scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).scan_name
-primary_scan_name(part::DimensionalData.AbstractDimTree) =
+primary_scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).scan_name
-scan_intents(part::DimensionalData.AbstractDimTree) =
+scan_intents(part::PartitionedData) =
     DimensionalData.metadata(part).scan_intents
-sub_scan_name(part::DimensionalData.AbstractDimTree) =
+sub_scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).sub_scan_name
 
 """

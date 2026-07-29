@@ -50,12 +50,12 @@ export start_pass!, process_scan!, finish_pass!
 export model_components, fit_selection, provides, requires, required_grouping
 # Re-export the transform / selection vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
-export AbstractDataTransform, ScanDataView, apply_transform!, apply_transform
+export AbstractDataTransform, apply_transform!, apply_transform
 export CalFunction, ApplySolution, StationWeightScale, FlagChannels
 export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
 export select_scans
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
-export ScanStream, scan_stream, ScanGroup, select_groups
+export ScanStream, scan_stream, select_groups
 export ScanSearchResult, search_scan
 export map_groups, foreach_group
 export StageRecord, StageView, stage_names, stage_solution, stage_info, component_gains

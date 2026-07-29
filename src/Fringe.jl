@@ -7,7 +7,7 @@ layer it runs its passes over (EHT-HOPS-inspired, Blackburn et al. 2019, but
 with globally-closing per-feed solutions): per-baseline FFT delay/rate search,
 stationization, bandpass and adhoc-phase stages, and the diagnostics over them.
 
-The streaming vocabulary (`ScanStream`, `ScanDataView`, the transform and
+The streaming vocabulary (`ScanStream`, the transform and
 selection types) is re-exported from `Gustavo.Streaming`, so a caller driving
 the fringe engine reaches it without a second `using`.
 """
@@ -18,7 +18,7 @@ using ..Executors: exec_foreach
 using ..UVData
 using ..UVData: Frequency, Baseline
 using ..Calibration
-using ..Calibration: ComponentPlan, _dispersion_enabled, _is_bandpass, _is_dispersion
+using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_bandpass, _is_dispersion
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
 # the model layer's element-compilation generic.
 import ..Calibration: model_components
@@ -31,7 +31,7 @@ import ..Streaming: select_scans
 using FFTW: fft, fftfreq, plan_fft, MEASURE
 import FFTW
 import DimensionalData
-using DimensionalData: lookup, dims, Ti, DimArray
+using DimensionalData: lookup, dims, Ti, DimArray, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
 using Printf: @sprintf
@@ -133,7 +133,7 @@ export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan
 export fringe_band_stats, fringe_band_groups
 export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags
 export delay_closure, print_delay_closure
-export AbstractDataTransform, ScanDataView, apply_transform!, apply_transform
+export AbstractDataTransform, apply_transform!, apply_transform
 export ApplySolution, StationWeightScale, FlagChannels, CalFunction
 export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
 export select_scans
@@ -145,7 +145,7 @@ export MatchedFilter, FringeModel, SingleBandDelay, default_fringe_terms
 # engine names it without a second `using`.
 export DispersionModel
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
-export ScanStream, scan_stream, ScanGroupSpec, ScanGroup, scan_view, select_groups
+export ScanStream, scan_stream, ScanGroupSpec, select_groups
 export materialize_cube, materialize_leaves
 export ScanSearchResult, search_scan
 export map_groups, foreach_group

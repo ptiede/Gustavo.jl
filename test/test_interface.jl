@@ -23,7 +23,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test Gustavo.required_grouping(s) == :any
         # The executor-driven visitor contract has working defaults.
         @test Gustavo.start_pass!(s, nothing) === nothing
-        @test Gustavo.process_scan!(s, nothing, nothing) === nothing
+        @test Gustavo.process_scan!(s, nothing, nothing, nothing) === nothing
         @test Gustavo.finish_pass!(s, nothing) == NamedTuple()
     end
 
@@ -46,7 +46,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
     end
 
     @testset "chaining and lifting" begin
-        cf = CalFunction(v -> nothing)
+        cf = CalFunction((stack, win) -> nothing)
         chain = cf |> FringeFit() |> AverageFrequency(nout = 1)
         @test chain isa StepChain
         @test length(chain.steps) == 3
@@ -86,9 +86,9 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test_throws ErrorException select_scans(BrightestCalibrator(), blind)
     end
 
-    @testset "transforms on a ScanDataView" begin
-        # Views are built the way production builds them — a real (tiny) leaf,
-        # the stack selected off it — there is no raw-array assembly path.
+    @testset "transforms on a scan stack + geometry window" begin
+        # Built the way production builds them — a real (tiny) leaf, the stack
+        # selected off it — there is no raw-array assembly path.
         uvsmall, _ = _build_fringe_uvset(
             nant = 3, nbands = 1, nchan = 4, ntime = 3, pol_labels = ["PP", "QQ"],
         )
@@ -97,52 +97,52 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
             last(first(UVP.branches(uvsmall))); layers = (:vis, :weights, :uvw),
         )
         scanname = UVP.metadata(leaf).scan_name
-        function mkview()
+        function mkwindow()
             parent(leaf[:vis]) .= 1
             parent(leaf[:weights]) .= 1
-            ci, ti = CAL.leaf_window(geom, leaf)
-            return FP.ScanDataView(
-                leaf[(:vis, :weights)], collect(Int, ci), collect(Int, ti), geom,
-            )
+            return leaf[(:vis, :weights)], CAL.leaf_window(geom, leaf)
         end
 
         # StationWeightScale: w → w·s_a·s_b per baseline; vis untouched.
-        v = mkview()
-        apply_transform!(StationWeightScale([2.0, 3.0, 5.0]), v)
-        @test all(v.weights[:, :, 1, :] .== 6)
-        @test all(v.weights[:, :, 2, :] .== 10)
-        @test all(v.weights[:, :, 3, :] .== 15)
-        @test all(v.vis .== 1)
+        stack, win = mkwindow()
+        apply_transform!(StationWeightScale([2.0, 3.0, 5.0]), stack, win)
+        W = stack[:weights]
+        @test all(W[:, :, 1, :] .== 6)
+        @test all(W[:, :, 2, :] .== 10)
+        @test all(W[:, :, 3, :] .== 15)
+        @test all(stack[:vis] .== 1)
         @test_throws ErrorException StationWeightScale([1.0, -1.0, 1.0])
-        @test_throws ErrorException apply_transform!(StationWeightScale([1.0]), mkview())
+        @test_throws ErrorException apply_transform!(StationWeightScale([1.0]), mkwindow()...)
 
         # FlagChannels: zero-weights flagged GLOBAL channels only.
-        v = mkview()
-        apply_transform!(FlagChannels(BitVector([true, false, false, true])), v)
-        @test all(v.weights[1, :, :, :] .== 0) && all(v.weights[4, :, :, :] .== 0)
-        @test all(v.weights[2:3, :, :, :] .== 1)
-        @test_throws ErrorException apply_transform!(FlagChannels(trues(3)), mkview())
+        stack, win = mkwindow()
+        apply_transform!(FlagChannels(BitVector([true, false, false, true])), stack, win)
+        W = stack[:weights]
+        @test all(W[1, :, :, :] .== 0) && all(W[4, :, :, :] .== 0)
+        @test all(W[2:3, :, :, :] .== 1)
+        @test_throws ErrorException apply_transform!(FlagChannels(trues(3)), mkwindow()...)
 
         # CalFunction: arbitrary per-(scan, baseline) mutation — the pain point.
-        v = mkview()
-        hook = CalFunction() do view
-            view.scan == scanname || return
-            for (bi, (a, b)) in enumerate(view.bl_pairs)
-                minmax(a, b) == (1, 3) && (view.weights[:, :, bi, :] .*= 0.5)
+        stack, win = mkwindow()
+        hook = CalFunction() do st, w
+            scan_name(st) == scanname || return
+            for (bi, (a, b)) in enumerate(baselines(st).pairs)
+                minmax(a, b) == (1, 3) && (st[:weights][Baseline = bi] .*= 0.5)
             end
         end
-        apply_transform!(hook, v)
-        @test all(v.weights[:, :, 2, :] .== 0.5)
-        @test all(v.weights[:, :, 1, :] .== 1) && all(v.weights[:, :, 3, :] .== 1)
+        apply_transform!(hook, stack, win)
+        W = stack[:weights]
+        @test all(W[:, :, 2, :] .== 0.5)
+        @test all(W[:, :, 1, :] .== 1) && all(W[:, :, 3, :] .== 1)
 
         # Chains run in order; `nothing` chain is a no-op.
-        v = mkview()
-        ST.apply_transforms!([StationWeightScale([2.0, 1.0, 1.0]), hook], v)
-        @test all(v.weights[:, :, 2, :] .== 1.0)   # (1,3): 2·1 then ×0.5
-        ST.apply_transforms!(nothing, v)
+        stack, win = mkwindow()
+        ST.apply_transforms!([StationWeightScale([2.0, 1.0, 1.0]), hook], stack, win)
+        @test all(stack[:weights][:, :, 2, :] .== 1.0)   # (1,3): 2·1 then ×0.5
+        ST.apply_transforms!(nothing, stack, win)
 
         # A transform without an implementation errors loudly.
-        @test_throws ErrorException apply_transform!(_NoImpl(), mkview())
+        @test_throws ErrorException apply_transform!(_NoImpl(), mkwindow()...)
         @test_throws ErrorException FP.apply_transform(first(_build_fringe_uvset()), _NoImpl())
     end
 
