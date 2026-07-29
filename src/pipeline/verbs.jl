@@ -251,7 +251,6 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     stream = Fringe.scan_stream(
         uvset; geom = geom, transforms = br.tfs,
         ntasks = exec.ntasks, mem_fraction = exec.mem_fraction, mem_budget = exec.mem_budget,
-        workspace = Fringe.FringeWorkspace,
         outer_executor = exec.outer_executor, inner_executor = exec.inner_executor,
     )
     ctx = SolveContext(

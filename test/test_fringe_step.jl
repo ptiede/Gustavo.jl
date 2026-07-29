@@ -130,7 +130,7 @@
         # The masker's direct contract: with an empty selection every
         # CROSS-HAND detection is invalidated, parallel hands untouched.
         geom = CAL.build_geometry(uvset)
-        st = FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace)
+        st = FP.scan_stream(uvset; geom = geom)
         stack, win = FP.materialize_cube(st, st.groups[1])
         res = FP.search_scan(st, stack, FP.FringeSearch())
         feeds = [CAL.correlation_feed_pair(p) for p in pol_products(stack)]

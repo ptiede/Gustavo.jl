@@ -14,7 +14,7 @@ the fringe engine reaches it without a second `using`.
 module Fringe
 
 using ..Executors
-using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
+using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
 using ..UVData: Frequency, Baseline
 using ..Calibration

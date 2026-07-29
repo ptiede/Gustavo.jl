@@ -106,13 +106,13 @@ struct UnbackedExecutor end
     @testset "the driver-facing stream carries both executors" begin
         uvset, _ = _build_fringe_uvset()
         st = FP.scan_stream(
-            uvset; workspace = FP.FringeWorkspace,
+            uvset;
             outer_executor = DaggerExecutor(), inner_executor = SerialScheduler(),
         )
         @test st.outer_executor isa DaggerExecutor
         @test st.inner_executor isa SerialScheduler
         # The bare default follows the process-wide outer default.
-        st0 = FP.scan_stream(uvset; workspace = FP.FringeWorkspace)
+        st0 = FP.scan_stream(uvset)
         @test st0.outer_executor == Gustavo.Executors.DEFAULT_EXECUTOR[]
         # Same search results whichever inner executor runs the fan-out.
         stack, _ = FP.materialize_cube(st, st.groups[1])

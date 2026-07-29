@@ -80,19 +80,14 @@ end
 A `UVSet` prepared for scan-group streaming: the ordered [`ScanGroupSpec`](@ref)s,
 the data-transform chain applied at every materialization, and the run's
 deterministic resource sizing (memory budget, group concurrency `ntasks`,
-per-group task budget `inner`, per-task scratch pool). Build with
-[`scan_stream`](@ref); consume with [`materialize_cube`](@ref) /
-[`materialize_leaves`](@ref) / [`map_groups`](@ref).
+per-group task budget `inner`). Build with [`scan_stream`](@ref); consume with
+[`materialize_cube`](@ref) / [`materialize_leaves`](@ref) / [`map_groups`](@ref).
 
-`W` is the element type of the scratch `pool`, set by `scan_stream`'s
-`workspace` factory. It is `Nothing` — an empty pool — unless a factory is
-given, so a consumer whose kernels need scratch (`Gustavo.Fringe`'s FFT
-workspaces) asks for it by name and this module never names it. `S` and `T`
-carry the group-spec and transform types the stream was built from. `O` and `I`
-are the outer (across-scan group scheduling) and inner (within-scan fan-out)
-executors — see [`ExecutionConfig`](@ref).
+`S` and `T` carry the group-spec and transform types the stream was built from.
+`O` and `I` are the outer (across-scan group scheduling) and inner (within-scan
+fan-out) executors — see [`ExecutionConfig`](@ref).
 """
-struct ScanStream{G <: AbstractLeafGrouping, W, S <: ScanGroupSpec, T, O, I}
+struct ScanStream{G <: AbstractLeafGrouping, S <: ScanGroupSpec, T, O, I}
     uvset::UVSet
     geom::DataGeometry
     grouping::G
@@ -102,7 +97,6 @@ struct ScanStream{G <: AbstractLeafGrouping, W, S <: ScanGroupSpec, T, O, I}
     budget::Float64
     ntasks::Int
     inner::Int
-    pool::Channel{W}
     outer_executor::O
     inner_executor::I
 end
@@ -135,22 +129,10 @@ function _stream_budget(mem_fraction, mem_budget)
     return mem_fraction * Float64(Sys.total_memory())
 end
 
-# The stream's per-task scratch pool: `n` objects from the `workspace` factory,
-# or an empty `Channel{Nothing}` when no factory is given. The element type is
-# what a consumer checks to tell a stream that carries its scratch from one
-# that does not.
-_workspace_pool(::Nothing, ::Int) = Channel{Nothing}(1)
-function _workspace_pool(workspace, n::Int)
-    ws = [workspace() for _ in 1:n]
-    pool = Channel{eltype(ws)}(n)
-    foreach(w -> put!(pool, w), ws)
-    return pool
-end
-
 """
     scan_stream(uvset::UVSet; grouping = ByScan(), transforms = (),
                 geom = build_geometry(uvset), ntasks = Threads.nthreads(),
-                mem_fraction = 0.6, mem_budget = nothing, workspace = nothing,
+                mem_fraction = 0.6, mem_budget = nothing,
                 outer_executor = ThreadsExecutor(),
                 inner_executor = DynamicScheduler()) -> ScanStream
 
@@ -161,13 +143,6 @@ charge` fits the memory budget, and the leftover threads become each group's
 `inner` fan-out. `transforms` (a sequence of [`AbstractDataTransform`](@ref))
 are applied, in order, to every group as it is materialized — every consumer of
 the stream sees identical, consistently-corrected data.
-
-`workspace` is a zero-argument factory for the stream's per-task scratch pool,
-one object per thread, borrowed and returned by consumers that need scratch
-that outlives a single group. `nothing` builds no pool. The fringe search
-needs one:
-
-    stream = scan_stream(uvset; workspace = Gustavo.Fringe.FringeWorkspace)
 """
 function scan_stream(
         uvset::UVSet;
@@ -177,7 +152,6 @@ function scan_stream(
         ntasks::Integer = Threads.nthreads(),
         mem_fraction::Real = 0.6,
         mem_budget = nothing,
-        workspace = nothing,
         outer_executor = Executors.DEFAULT_EXECUTOR[],
         inner_executor = DynamicScheduler(),
     )
@@ -213,8 +187,6 @@ function scan_stream(
     ntasks_use = peak <= 0 ? requested : min(requested, max(1, Int(floor(budget / peak))))
     inner = max(1, Threads.nthreads() ÷ ntasks_use)
 
-    pool = _workspace_pool(workspace, max(Threads.nthreads(), 1))
-
     # The inner executor fans out every within-scan loop; fix its chunk count to
     # the parallelism the memory budget leaves per group (`ntasks_use × inner ≈
     # nthreads`, so nested fan-outs don't oversubscribe). ChunkSplitters clamps
@@ -223,7 +195,7 @@ function scan_stream(
 
     return ScanStream(
         uvset, geom, grouping, specs, UVData._narrow_eltype(transforms), ant_names,
-        budget, ntasks_use, inner, pool, outer_executor, inner_exec,
+        budget, ntasks_use, inner, outer_executor, inner_exec,
     )
 end
 

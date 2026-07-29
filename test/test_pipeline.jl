@@ -593,7 +593,7 @@ end
 @testset "Threaded per-baseline search ≡ serial, and stage timers" begin
     uvset, _ = _build_fringe_uvset()
     geom = CAL.build_geometry(uvset)
-    stq = FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace)
+    stq = FP.scan_stream(uvset; geom = geom)
     stack, _ = FP.materialize_cube(stq, stq.groups[1])
     r1 = FP.search_scan(stq, stack, FP.FringeSearch(); executor = SerialScheduler(), ngroups = 1)
     r4 = FP.search_scan(stq, stack, FP.FringeSearch(); executor = DynamicScheduler(; nchunks = 4), ngroups = 1)

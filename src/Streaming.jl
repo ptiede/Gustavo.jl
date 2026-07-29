@@ -12,10 +12,9 @@ budgets, executors and `DimTree` leaves, not about fringes:
 - `stream.jl` — [`ScanStream`](@ref) construction, group materialization, and
   the budget-admitted pass runner [`map_groups`](@ref).
 
-Per-task scratch is the layer's one hook into a consumer's kernels: a stream
-carries a `Channel{W}` pool whose element type comes from `scan_stream`'s
-`workspace` factory, so a consumer that needs scratch (`Gustavo.Fringe`'s FFT
-workspaces) supplies it and this module never names it.
+This layer owns the group/budget/transform machinery and never names a
+consumer's kernels: it hands a materialized scan `DimStack` to whatever reads it
+(`Gustavo.Fringe`'s search allocates its own per-task FFT scratch).
 """
 module Streaming
 

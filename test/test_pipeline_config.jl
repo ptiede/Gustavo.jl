@@ -189,7 +189,7 @@ end
         layout = CAL.plan_parameters(model, nant, geom)
         ctx = Gustavo.SolveContext(
             model, layout, geom, CAL.GainEvaluator(model, layout), zeros(layout.nθ),
-            1, nant, antennas, ST.scan_stream(uvset; geom, workspace = FP.FringeWorkspace),
+            1, nant, antennas, ST.scan_stream(uvset; geom),
             ExecutionConfig(), CAL.StageRecord[], Dict{Symbol, Any}(),
         )
         @test isconcretetype(typeof(ctx))

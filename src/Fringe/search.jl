@@ -131,42 +131,46 @@ const _INVALID_DETECTION = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
     FringeWorkspace()
 
 Reusable scratch for [`baseline_fringe_search`](@ref): the zero-padded gridding
-buffer `G`, the FFT output `D`, and a cached FFT plan, lazily (re)allocated when
-the padded grid size changes. Pass one per thread to avoid allocating the grid
-(tens of MB at `oversample = 8`) on every call — the search runs thousands of
-times per solve, so reuse removes essentially all of its allocation/GC churn.
+buffer `G` and the FFT output `D`, lazily (re)allocated when the padded grid
+size changes. Pass one per task to avoid allocating the grid (tens of MB at
+`oversample = 8`) on every call — the search runs thousands of times per solve,
+so reuse removes essentially all of its allocation/GC churn. The FFT plan is not
+here: it is a pure function of the grid size, so the search-grid geometry carries
+it (built once per scan, shared read-only across the workspaces that execute it).
 """
 mutable struct FringeWorkspace
     nf::Int
     nt::Int
     G::Matrix{ComplexF64}
     D::Matrix{ComplexF64}
-    plan::Any
     dwin::Vector{Float64}      # scratch for the windowed |D|² noise estimate
     mbd::Any                   # lazily-built `_MBDWorkspace` for the hierarchical path
 end
-FringeWorkspace() = FringeWorkspace(0, 0, Matrix{ComplexF64}(undef, 0, 0), Matrix{ComplexF64}(undef, 0, 0), nothing, Float64[], nothing)
+FringeWorkspace() = FringeWorkspace(0, 0, Matrix{ComplexF64}(undef, 0, 0), Matrix{ComplexF64}(undef, 0, 0), Float64[], nothing)
 
-# Ensure `ws` is sized for an `nf × nt` grid (reallocating + replanning only when
-# the size changes). `nothing` makes a fresh workspace (single-call fallback).
+# Ensure `ws` is sized for an `nf × nt` grid (reallocating only when the size
+# changes). `nothing` makes a fresh workspace (single-call fallback).
 _ensure_workspace!(::Nothing, nf::Integer, nt::Integer) = _ensure_workspace!(FringeWorkspace(), nf, nt)
 function _ensure_workspace!(ws::FringeWorkspace, nf::Integer, nt::Integer)
-    if ws.nf != nf || ws.nt != nt || ws.plan === nothing
+    if ws.nf != nf || ws.nt != nt
         ws.G = zeros(ComplexF64, nf, nt)
         ws.D = similar(ws.G)
-        # FFT is ~96% of the search cost, so plan with FFTW.MEASURE (≈1.8× faster
-        # transforms than the default ESTIMATE) and let the plan pick up the
-        # process-wide FFTW thread count set by the solve. The plan is built once
-        # per (thread-local) workspace per grid size and reused thousands of times,
-        # so MEASURE's one-off planning cost is amortized to nothing; MEASURE may
-        # scribble on `G`, but every search `fill!`s `G` before gridding. Results
-        # are bit-identical to ESTIMATE — only the algorithm/speed differs.
-        ws.plan = plan_fft(ws.G; flags = MEASURE)
         ws.nf = Int(nf)
         ws.nt = Int(nt)
     end
     return ws
 end
+
+# The scan's shared FFT plan. FFT is ~96% of the search cost, so plan with
+# FFTW.MEASURE (≈1.8× faster transforms than the default ESTIMATE) and let the
+# plan pick up the process-wide FFTW thread count set by the solve. The plan
+# depends only on the padded grid size, so it is built ONCE per scan and shared
+# read-only across every baseline/task: FFTW executes one plan concurrently
+# across threads through out-of-place `mul!(D, plan, G)`, which never mutates the
+# plan. MEASURE's one-off planning cost is amortized over the scan's thousands of
+# searches; it may scribble on this throwaway planning buffer, which is discarded
+# (every search `fill!`s its own `G` before gridding).
+_plan_grid(nf::Integer, nt::Integer) = plan_fft(zeros(ComplexF64, nf, nt); flags = MEASURE)
 
 # Uniform-grid descriptor for one axis: the origin, spacing, and grid length such
 # that every sample `x` lands at `round((x - origin)/Δ) + 1 ∈ 1:n`. Δ is the
@@ -206,6 +210,7 @@ struct _SearchAxes{M}
     delays::Vector{Float64}
     rates::Vector{Float64}
     mbd::M                     # `_MBDAxes` for the hierarchical path, else `nothing`
+    plan::Any                  # full-grid FFT plan; `nothing` when `mbd` owns the plans
 end
 
 function _search_axes(freqs::AbstractVector, times::AbstractVector, opts::FringeSearch)
@@ -216,7 +221,10 @@ function _search_axes(freqs::AbstractVector, times::AbstractVector, opts::Fringe
     delays = fax.degenerate ? [0.0] : collect(fftfreq(nf_pad, 1.0 / fax.step))
     rates = tax.degenerate ? [0.0] : collect(fftfreq(nt_pad, 1.0 / tax.step))
     mbd = _maybe_mbd_axes(freqs, fax, tax, rates, opts)
-    return _SearchAxes(fax, tax, nf_pad, nt_pad, delays, rates, mbd)
+    # The full-grid path executes `plan`; the hierarchical path carries its own
+    # plans on `mbd` and never touches this one, so only build it when needed.
+    plan = mbd === nothing ? _plan_grid(nf_pad, nt_pad) : nothing
+    return _SearchAxes(fax, tax, nf_pad, nt_pad, delays, rates, mbd, plan)
 end
 
 """
@@ -316,14 +324,15 @@ function _baseline_fringe_search(
     nf_pad = ax.nf_pad
     nt_pad = ax.nt_pad
 
-    # Reuse the workspace's gridding buffer + FFT plan (zeroed each call) instead
-    # of allocating an `nf_pad × nt_pad` ComplexF64 grid every call.
+    # Reuse the workspace's gridding buffer (zeroed each call) and the scan's
+    # shared FFT plan instead of allocating an `nf_pad × nt_pad` ComplexF64 grid
+    # and replanning on every call.
     ws = _ensure_workspace!(workspace, nf_pad, nt_pad)
     Wsum = _grid_visibilities!(ws, V, W, freqs, times, ax)
     Wsum > 0 || return _INVALID_DETECTION
 
     D = ws.D
-    mul!(D, ws.plan, ws.G)
+    mul!(D, ax.plan, ws.G)
 
     # Conjugate-axis coordinates: delays (s) ↔ frequency grid, rates (Hz) ↔ time.
     # Precomputed once per group in `ax` (identical every call).
@@ -603,6 +612,8 @@ struct _MBDAxes
     rate_idx::Vector{Int}           # rate FFT cols kept (sorted by value; window ±1)
     rate_val::Vector{Float64}       # rate value per kept col
     rate_scan::Vector{Int}          # positions in rate_idx inside the rate window
+    planb::Any                      # per-band 2-D FFT plan (nfb_pad × nt_pad)
+    planc::Any                      # stage-2 band-center FFT plan (nbc_pad × nrw, dim 1)
 end
 
 # Resolve `FringeSearch.algorithm` to a concrete algorithm. The `:auto` sentinel
@@ -696,14 +707,21 @@ function _build_mbd_axes(
     rate_scan = collect((first(sel) - i1 + 1):(last(sel) - i1 + 1))
 
     mbd = collect(fftfreq(nbc_pad, 1.0 / Δbc))
+    # Plans are pure functions of the padded band/band-center grid sizes (the rate
+    # axis reuses the scan's `nt_pad`, which is `length(rates)`), so build them
+    # here, once per scan, and share them across the workspaces (see `_plan_grid`).
+    nt_pad = length(rates)
+    planb = plan_fft(zeros(ComplexF64, nfb_pad, nt_pad); flags = MEASURE)
+    planc = plan_fft(zeros(ComplexF64, nbc_pad, length(rate_idx)), 1; flags = MEASURE)
     return _MBDAxes(
         bands, f_lo, bc_bin, Δbc, nbc_pad, nfb_pad, A, sbd_bin, A / nbc_pad,
-        sbd_idx, sbd_val, mbd, rate_idx, rate_val, rate_scan,
+        sbd_idx, sbd_val, mbd, rate_idx, rate_val, rate_scan, planb, planc,
     )
 end
 
 # Scratch for the hierarchical path, hung off `FringeWorkspace.mbd` (lazily
-# (re)built when the group geometry changes, like the main workspace).
+# (re)built when the group geometry changes, like the main workspace). The
+# stage-1/stage-2 FFT plans are carried by `_MBDAxes`, not here.
 mutable struct _MBDWorkspace
     nfb::Int
     nt::Int
@@ -713,11 +731,9 @@ mutable struct _MBDWorkspace
     nbc::Int
     Gb::Matrix{ComplexF64}          # per-band gridding buffer (nfb_pad × nt_pad)
     Db::Matrix{ComplexF64}
-    planb::Any
     X::Array{ComplexF64, 3}         # stage-1 outputs, windowed: (nsbd, nrw, nband)
     Mc::Matrix{ComplexF64}          # stage-2 input (nbc_pad × nrw)
     Dc::Matrix{ComplexF64}
-    planc::Any
 end
 
 function _ensure_mbd_workspace!(ws::FringeWorkspace, mx::_MBDAxes, nt_pad::Int)
@@ -729,12 +745,10 @@ function _ensure_mbd_workspace!(ws::FringeWorkspace, mx::_MBDAxes, nt_pad::Int)
             w.nband != nband || w.nsbd != nsbd || w.nrw != nrw || w.nbc != mx.nbc_pad
         Gb = zeros(ComplexF64, mx.nfb_pad, nt_pad)
         Db = similar(Gb)
-        planb = plan_fft(Gb; flags = MEASURE)
         X = Array{ComplexF64, 3}(undef, nsbd, nrw, nband)
         Mc = zeros(ComplexF64, mx.nbc_pad, nrw)
         Dc = similar(Mc)
-        planc = plan_fft(Mc, 1; flags = MEASURE)
-        w = _MBDWorkspace(mx.nfb_pad, nt_pad, nband, nsbd, nrw, mx.nbc_pad, Gb, Db, planb, X, Mc, Dc, planc)
+        w = _MBDWorkspace(mx.nfb_pad, nt_pad, nband, nsbd, nrw, mx.nbc_pad, Gb, Db, X, Mc, Dc)
         ws.mbd = w
     end
     return w::_MBDWorkspace
@@ -748,7 +762,7 @@ function _stage2_plane!(w::_MBDWorkspace, mx::_MBDAxes, sj::Int)
     @inbounds for b in 1:w.nband, rj in 1:w.nrw
         Mc[mx.bc_bin[b], rj] += w.X[sj, rj, b]
     end
-    mul!(w.Dc, w.planc, Mc)
+    mul!(w.Dc, mx.planc, Mc)
     return w.Dc
 end
 
@@ -805,7 +819,7 @@ function _mbd_fringe_search(
             Gb[bf, bt] += wgt * v
             Wsum += wgt
         end
-        mul!(w.Db, w.planb, Gb)
+        mul!(w.Db, mx.planb, Gb)
         empty!(dwin)
         ntot = length(w.Db)
         stride = max(1, ntot ÷ max(64, 20000 ÷ nband))
@@ -1041,7 +1055,7 @@ function baseline_fringe_map(
     Wsum = _grid_visibilities!(ws, V, W, freqs, times, axf)
     Wsum > 0 || return FringeSearchMap(Float64[], Float64[], zeros(0, 0), _INVALID_DETECTION, ncells, NaN)
     D = ws.D
-    mul!(D, ws.plan, ws.G)
+    mul!(D, axf.plan, ws.G)
     noise2 = _plane_noise2!(ws, Wsum)
 
     # In-window bins of each conjugate axis, in ascending coordinate order (the

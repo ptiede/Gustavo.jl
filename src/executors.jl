@@ -106,19 +106,4 @@ function with_nchunks(s::StaticScheduler, n::Integer)
     return StaticScheduler(; nchunks = max(1, Int(n)), split = chunksplit(s))
 end
 
-"""
-    inner_nchunks(sched::OhMyThreads.Scheduler) -> Int
-
-The number of chunks `sched` fans a within-scan loop into (`1` for a serial or
-unchunked scheduler). Used where a loop must borrow a pooled per-task buffer
-once per task rather than once per element.
-"""
-inner_nchunks(::SerialScheduler) = 1
-function inner_nchunks(s::Union{DynamicScheduler, StaticScheduler})
-    chunking_enabled(s) || return 1
-    n = nchunks(s)
-    return n === nothing ? Threads.nthreads() : max(1, n)
-end
-inner_nchunks(::Any) = Threads.nthreads()
-
 end # module

@@ -44,9 +44,6 @@ is the epoch the detection PHASES are referenced to — delay/rate/SNR are
 epoch-invariant; the default is the solve's track epoch, a standalone QA caller
 typically wants the scan midpoint (`mean(timestamps(stack)) * 3600`). Results
 are bit-identical to the serial loop regardless of the inner `executor`.
-
-`stream` must carry a [`FringeWorkspace`](@ref) pool — build it with
-`scan_stream(uvset; workspace = FringeWorkspace)`.
 """
 function search_scan(
         stream::ScanStream, stack::AbstractDimStack, search::FringeSearch;
@@ -57,32 +54,16 @@ function search_scan(
         UVData.baselines(stack).pairs, pol_products(stack),
         frequencies(stack), timestamps(stack), stack[:weights],
         Vsearch, stream.geom.f0, Float64(t0), search,
-        _search_pool(stream), executor, ngroups,
+        executor, ngroups,
     )
 end
 
-# The stream's workspace pool, or a message naming the fix. The pool's element
-# type is set by `scan_stream`'s `workspace` factory, which the streaming layer
-# defaults to none — searching through a stream that was built without one
-# would otherwise block forever on an empty channel.
-function _search_pool(stream::ScanStream)
-    pool = stream.pool
-    eltype(pool) === FringeWorkspace && return pool
-    throw(
-        ArgumentError(
-            "search_scan needs a FringeWorkspace pool, but this stream's pool holds " *
-                "$(eltype(pool)) — build it with " *
-                "`scan_stream(uvset; workspace = FringeWorkspace)`."
-        )
-    )
-end
-
-# Core search over one stacked cube. Grid geometry is built ONCE per group; the
-# independent per-(baseline, product) searches fan out over the inner `executor`,
-# each borrowing a workspace so FFTW plans survive scan-to-scan.
+# Core search over one stacked cube. Grid geometry (and its shared FFT plan) is
+# built ONCE per scan; the independent per-(baseline, product) searches fan out
+# over the inner `executor`, each task reusing one `FringeWorkspace` for scratch.
 function _search_scan_cube(
         bl_pairs, pols, fg, tg, Wg, Vsearch, f0, t0_sec, search,
-        pool::Channel{FringeWorkspace}, executor, ngroups::Integer,
+        executor, ngroups::Integer,
     )
     nbl = length(bl_pairs)
     npol = length(pols)
@@ -102,24 +83,19 @@ function _search_scan_cube(
                      search.pfa_max / nsearch) : search
 
     pairs = [(bi, p) for p in 1:npol for bi in 1:nbl]
-    nchunk = clamp(Executors.inner_nchunks(executor), 1, length(pairs))
-    chunks = collect(Iterators.partition(pairs, cld(length(pairs), nchunk)))
-    tforeach(chunks; scheduler = executor) do chunk
-        ws = take!(pool)
-        try
-            for (bi, p) in chunk
-                a, b = bl_pairs[bi]
-                if a == b
-                    det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
-                    continue
-                end
-                det[bi, p] = _baseline_fringe_search(
-                    view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),
-                    fg, times, f0, t0_sec, ax, ws, search,
-                )
-            end
-        finally
-            put!(pool, ws)
+    # One reusable workspace per task (not per pair): the grids are tens of MB, so
+    # a task processing many baselines allocates its scratch once. Each (bi, p)
+    # writes a distinct `det` cell, so the concurrent writes never overlap.
+    workspace = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
+    tforeach(pairs; scheduler = executor) do (bi, p)
+        a, b = bl_pairs[bi]
+        if a == b
+            det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
+        else
+            det[bi, p] = _baseline_fringe_search(
+                view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),
+                fg, times, f0, t0_sec, ax, workspace[], search,
+            )
         end
     end
 

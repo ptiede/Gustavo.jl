@@ -10,7 +10,7 @@
     uvset, _ = _build_fringe_uvset()
     geom = CAL.build_geometry(uvset)
 
-    st = FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace)
+    st = FP.scan_stream(uvset; geom = geom)
 
     @testset "grouping: order, identity, charges" begin
         @test length(st.groups) == length(unique(s.scan for s in st.groups))
@@ -194,13 +194,10 @@ end
     recs = [(; index = i, source = "S", scan = "s$i", snr = 1.0, stations = Set(1:3)) for i in 1:3]
     @test select_scans(FP.CoverageTopup(AllScans()), recs) == [1, 2, 3]
 
-    # The scratch pool is the one seam, and it is empty by default: a stream
-    # built without a `workspace` factory carries no fringe workspaces, and
-    # `search_scan` says so rather than blocking on an empty channel.
-    @test eltype(stream.pool) === Nothing
-    @test eltype(FP.scan_stream(uvset; geom = geom, workspace = FP.FringeWorkspace).pool) ===
-        FP.FringeWorkspace
+    # The stream carries no kernel scratch: the search allocates its own per-task
+    # FFT workspace, so any stream searches without prior setup.
+    @test !hasproperty(stream, :pool)
     stack, _ = FP.materialize_cube(stream, stream.groups[1])
-    @test_throws ArgumentError FP.search_scan(stream, stack, FP.FringeSearch())
-    @test_throws "workspace = FringeWorkspace" FP.search_scan(stream, stack, FP.FringeSearch())
+    res = FP.search_scan(stream, stack, FP.FringeSearch())
+    @test res isa FP.ScanSearchResult
 end
