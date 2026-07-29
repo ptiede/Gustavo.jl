@@ -3,7 +3,7 @@
 # Parses every small header table (ARRAY_GEOMETRY, ANTENNA, SOURCE,
 # FREQUENCY, PRIMARY) eagerly into Gustavo metadata types and leaves the
 # `UV_DATA` FLUX matrix lazy: each per-(source, band, scan) leaf carries a
-# disk-backed `IDIChunkArray` for `vis`/`weights`/`flag`, materialized only
+# disk-backed `IDIChunkArray` for `vis`/`weights`, materialized only
 # when `materialize_leaf` (or `Array`) is called. The index pass reads only
 # the small per-row columns (DATE/TIME/BASELINE/SOURCE/FREQID/INTTIM/UVW);
 # FLUX is never touched until a leaf is materialized, and then only the
@@ -380,15 +380,15 @@ end
     IDIChunkArray{T, K} <: DiskArrays.AbstractDiskArray{T, 4}
 
 Disk-backed `(Frequency, Ti, Baseline, Pol)` view of one band of one scan of
-a FITS-IDI `UV_DATA` table. `kind::Val{:vis}` / `Val{:weights}` / `Val{:flag}`
-selects the layer. No FLUX bytes are read until `readblock!` runs; each call
+a FITS-IDI `UV_DATA` table. `kind::Val{:vis}` / `Val{:weights}` selects the
+layer. No FLUX bytes are read until `readblock!` runs; each call
 opens the file once (`open_lazy_source`), then per (time, baseline) cell seeks
 to the cell's band slice, bulk-reads it in one `readbytes!`, byte-swaps it into
 a reused scratch buffer, and closes in a `finally` — never per element.
 
 Performance characteristics (measured on the 24 GB VLBA validation file, one
 leaf = 256 chan × 240 ti × 21 bl × 4 pol ≈ 41 MB):
-  * vis read ≈ 690 MB/s, full materialize (vis+weights+flag) ≈ 240 MB/s.
+  * vis read ≈ 690 MB/s, full materialize (vis+weights) ≈ 240 MB/s.
   * The disk read is NOT the bottleneck (~7% of profile); the byte-swap + copy
     loop was, so it uses a flat `Vector{Float32}` cube and direct linear
     indexing rather than `reshape(ntoh.(reinterpret(...)))`.
@@ -404,7 +404,7 @@ marginal here. Revisit if profiling on a slower/cold disk shows seek latency
 dominating.
 
 `row_of[ti, bl]` is the `UV_DATA` row backing cell `(ti, bl)`, or 0 when the
-cell is missing (→ NaN vis / 0 weight / true flag).
+cell is missing (→ NaN vis / 0 weight, i.e. flagged).
 """
 struct IDIChunkArray{T, K, TD, TFF, TW} <: DiskArrays.AbstractDiskArray{T, 4}
     data::TD                # LazyStructuredData (UV_DATA)
@@ -817,7 +817,7 @@ end
 # Mark IDI-backed leaves as bulk-capable and provide the one-read group reader.
 UVData._bulk_backend(a::IDIChunkArray) = a
 
-function UVData._materialize_group_bulk(leaves, layers)
+function UVData._materialize_group_bulk(leaves)
     isempty(leaves) && return nothing
     a1 = parent(first(leaves)[:vis])
     a1 isa IDIChunkArray || return nothing
@@ -853,7 +853,6 @@ function UVData._materialize_group_bulk(leaves, layers)
     end
     span === nothing && return nothing               # span over the cap → fall back
 
-    want_flag = :flag in layers
     return map(leaves) do l
         av = parent(l[:vis])
         aw = parent(l[:weights])
@@ -865,8 +864,7 @@ function UVData._materialize_group_bulk(leaves, layers)
         vis_da = DimArray(vis_dense, dims(l[:vis]))
         w_da = DimArray(w_dense, dims(l[:weights]))
         uvw_da = DimArray(UVData._materialize_layer(parent(l[:uvw])), dims(l[:uvw]))
-        flag_da = want_flag ? DimArray(UVData._materialize_layer(parent(l[:flag])), dims(l[:flag])) : nothing
-        UVData._build_leaf(vis_da, w_da, uvw_da, flag_da; partition_info = DimensionalData.metadata(l))
+        UVData._build_leaf(vis_da, w_da, uvw_da; partition_info = DimensionalData.metadata(l))
     end
 end
 
@@ -874,11 +872,11 @@ end
 # shared row span ONCE, then decode each band's vis/weights straight into the
 # caller's `dests[i] = (vis_dest, weights_dest)` (typically contiguous channel-block
 # views of one stacked cube) — skipping the per-band intermediate dense arrays and
-# the uvw/flag layers the fringe search never uses. The decode kernels write
+# the uvw layer the fringe search never uses. The decode kernels write
 # `out[c, ti, bl, p]` generically, so a SubArray destination works (axis-1 = the
 # band's channel block, stride 1). Returns `false` to fall back if the leaves are
 # not a single sibling-band scan span (then the caller uses materialize_group + copy).
-function UVData._materialize_group_bulk_into!(dests, leaves, layers)
+function UVData._materialize_group_bulk_into!(dests, leaves)
     isempty(leaves) && return false
     a1 = parent(first(leaves)[:vis])
     a1 isa IDIChunkArray || return false
@@ -1051,43 +1049,6 @@ function DiskArrays.readblock!(
         end
         if a.normalize
             _scale_weights!(out, a, _aspec_from_io(a, io), rchan, rti, rbl, rpol)
-        end
-    finally
-        close(io)
-    end
-    return out
-end
-
-function DiskArrays.readblock!(
-        a::IDIChunkArray{T, Val{:flag}}, out,
-        rchan::AbstractUnitRange, rti::AbstractUnitRange,
-        rbl::AbstractUnitRange, rpol::AbstractUnitRange,
-    ) where {T}
-    io = FITSFiles.open_lazy_source(a.data)
-    wbuf = Vector{Float32}(undef, a.no_stkd)
-    wraw = _weight_rawbuf(a)
-    wscale = _weight_scale(a)
-    have_flags = !isempty(a.flags)
-    try
-        @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
-            r = a.row_of[ti, bl]
-            r != 0 && _read_weight_row!(wbuf, wraw, io, a, r, wscale)
-            ea, eb = a.bl_ants[bl]
-            t = a.times[ti]
-            for (pj, p) in enumerate(rpol)
-                # weight<=0 path (or missing row) flags the whole channel run;
-                # otherwise consult the FLAG table per channel.
-                wflag = r == 0 || wbuf[a.perm[p]] <= 0
-                if wflag || !have_flags
-                    for cj in eachindex(rchan)
-                        out[cj, tj, bj, pj] = wflag
-                    end
-                else
-                    for (cj, c) in enumerate(rchan)
-                        out[cj, tj, bj, pj] = _idi_cell_flagged(a, c, t, ea, eb, p)
-                    end
-                end
-            end
         end
     finally
         close(io)
@@ -1498,7 +1459,7 @@ function UVData.load_fitsidi(
 
             # Flags touching this leaf (source, band, time-span). The vis layer
             # is never flagged (its values stay as read); flagging is carried by
-            # the weights (→0) and flag (→true) layers.
+            # the weights (a flagged cell reads weight 0).
             leaf_flags = _filter_flags_for_leaf(
                 flag_entries, sid, band, scan_t_lo, scan_t_hi,
             )
@@ -1515,16 +1476,9 @@ function UVData.load_fitsidi(
                 leaf_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
                 auto_row, scale_w_by_auto, feed_pairs, auto_stokes,
             )
-            flag_chunk = _idi_chunk(
-                Bool, Val(:flag), data, flux_field, weight_col,
-                band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
-                leaf_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
-                auto_row, false, feed_pairs, auto_stokes,
-            )
 
             vis_part = DimArray(vis_chunk, vis_dims)
             w_part = DimArray(w_chunk, vis_dims)
-            flag_part = DimArray(flag_chunk, vis_dims)
 
             info = UVData.PartitionInfo(;
                 source_name = si.name,
@@ -1540,7 +1494,7 @@ function UVData.load_fitsidi(
                 basename = base_name,
             )
             leaf = UVData._build_leaf(
-                vis_part, w_part, uvw_part, flag_part;
+                vis_part, w_part, uvw_part;
                 partition_info = info,
             )
             key = UVData.partition_key(info)

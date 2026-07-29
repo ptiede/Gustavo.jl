@@ -149,11 +149,10 @@
         # The transformed arrays flow through to the returned leaves unchanged.
         @test Set(objectid(parent(c.stack[:vis])) for c in captured) ==
             Set(objectid(parent(l[:vis])) for (_, l) in keyed)
-        # The flag layer is re-derived from the TRANSFORMED weights (FlagChannels
-        # zeroed whole channels above), matching the monolith's leaf semantics.
+        # FlagChannels zeroed whole channels above, so the transformed weights
+        # carry the flag (a cell is flagged iff its weight is ≤ 0).
         for (_, l) in keyed
-            @test parent(l[:flag]) == (parent(l[:weights]) .<= 0)
-            @test any(parent(l[:flag]))
+            @test any(parent(l[:weights]) .<= 0)
         end
     end
 

@@ -257,9 +257,7 @@ group's [`GeometryWindow`](@ref) into the solve's index space.
 function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; executor = stream.inner_executor)
     grp = _direct_scan_group(spec, stream.geom)
     if grp === nothing
-        leaves = UVData.materialize_group(
-            [l for (_, l) in spec.leaves]; layers = (:vis, :weights, :uvw),
-        )
+        leaves = UVData.materialize_group([l for (_, l) in spec.leaves])
         grp = _stacked_scan_group(leaves, stream.geom)
     end
     stack, win = grp
@@ -325,7 +323,7 @@ function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry)
         (view(Vg, blocks[li], :, :, :), view(Wg, blocks[li], :, :, :))
             for li in eachindex(lazy)
     ]
-    UVData.materialize_group_into!(dests, lazy; layers = (:vis, :weights)) || return nothing
+    UVData.materialize_group_into!(dests, lazy) || return nothing
 
     info = UVData.metadata(l0)
     d = (Frequency(fg), Ti(tg), Baseline(copy(info.baselines.labels)), Pol(pols))
@@ -423,7 +421,7 @@ function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; executor = 
     keyed = [
         (k, m) for ((k, _), m) in zip(
             spec.leaves,
-            UVData.materialize_group([l for (_, l) in spec.leaves]; layers = (:vis, :weights, :uvw)),
+            UVData.materialize_group([l for (_, l) in spec.leaves]),
         )
     ]
     isempty(stream.transforms) && return keyed
@@ -439,12 +437,10 @@ end
 # Run the transform chain over one materialized band leaf: the chain's stack is
 # the layer selection off the leaf ITSELF (`leaf[(:vis, :weights)]` — metadata
 # and all; no decomposition), which shares the leaf's arrays, so the chain
-# mutates the leaf. `copy_arrays` guards user-owned data (eager sources): the
-# leaf is rewrapped around array copies first, exactly as `apply_calibration`
-# does; private (freshly-materialized) leaves are transformed in place with no
-# scan-sized copy. Either way the rebuild re-derives the returned leaf's `flag`
-# layer from the TRANSFORMED weights — the pre-transform flag would be stale
-# after e.g. `FlagChannels`.
+# mutates the leaf in place and `base` is the transformed leaf. `copy_arrays`
+# guards user-owned data (eager sources): the leaf is rewrapped around array
+# copies first, exactly as `apply_calibration` does; private (freshly-materialized)
+# leaves are transformed in place with no scan-sized copy.
 function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arrays::Bool)
     base = copy_arrays ?
         with_visibilities(leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights]))) : leaf
@@ -453,7 +449,7 @@ function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arr
         stream.transforms, base[(:vis, :weights)], leaf_window(stream.geom, base);
         executor = SerialScheduler(),
     )
-    return with_visibilities(base, base[:vis], base[:weights])
+    return base
 end
 
 # ── The pass runner: budget-admitted group execution (the executor seam) ─────

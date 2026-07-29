@@ -25,9 +25,7 @@
 
     @testset "direct-decode fast path ≡ stacked fallback" begin
         for spec in st.groups
-            leaves = UVP.materialize_group(
-                [l for (_, l) in spec.leaves]; layers = (:vis, :weights, :uvw),
-            )
+            leaves = UVP.materialize_group([l for (_, l) in spec.leaves])
             stack_s, win_s = ST._stacked_scan_group(leaves, geom)
             stack_n, win_n = FP.materialize_cube(st, spec)
             @test isequal(stack_n[:vis], stack_s[:vis]) &&

@@ -43,7 +43,6 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
     vis_da = DimArray(V, (if_dim, Ti(new_obs_time), bl_dim, pol_dim))
     weights_da = DimArray(W_sum, dims(vis_da))
     uvw_da = DimArray(UVW_out, (Ti(new_obs_time), bl_dim, UVW(["U", "V", "W"])))
-    flag_da = DimArray(W_sum .<= 0, dims(vis_da))
 
     info = DimensionalData.metadata(leaf)
     new_info = update(
@@ -51,7 +50,7 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
         record_order = Tuple{Int, Int}[],
         extra_columns = NamedTuple(),
     )
-    return _build_leaf(vis_da, weights_da, uvw_da, flag_da; partition_info = new_info)
+    return _build_leaf(vis_da, weights_da, uvw_da; partition_info = new_info)
 end
 
 # Type-stable kernel for inverse-variance time-averaging. Hot loop sees
@@ -175,10 +174,9 @@ function _frequency_average_partition(leaf::DimensionalData.AbstractDimTree, nou
     ti_dim = dims(vis_l, Ti)
     vis_da = DimArray(V, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
     weights_da = DimArray(W, dims(vis_da))
-    flag_da = DimArray(W .<= 0, dims(vis_da))
     new_info = update(info; freq_setup = new_fs)
     # uvw is frequency-independent — carry it through unchanged.
-    return _build_leaf(vis_da, weights_da, uvw_l, flag_da; partition_info = new_info)
+    return _build_leaf(vis_da, weights_da, uvw_l; partition_info = new_info)
 end
 
 # Type-stable kernel: average `vis`/`weights` over each channel group.
@@ -273,10 +271,9 @@ function _time_bin_average_partition(leaf::DimensionalData.AbstractDimTree, dt_s
     vis_da = DimArray(V, (if_dim, Ti(tcenters), bl_dim, pol_dim))
     weights_da = DimArray(W, dims(vis_da))
     uvw_da = DimArray(UVW_out, (Ti(tcenters), bl_dim, UVW(["U", "V", "W"])))
-    flag_da = DimArray(W .<= 0, dims(vis_da))
     info = DimensionalData.metadata(leaf)
     new_info = update(info; record_order = Tuple{Int, Int}[], extra_columns = NamedTuple())
-    return _build_leaf(vis_da, weights_da, uvw_da, flag_da; partition_info = new_info)
+    return _build_leaf(vis_da, weights_da, uvw_da; partition_info = new_info)
 end
 
 # Type-stable kernel: inverse-variance average into `nbin` time bins.
@@ -379,7 +376,7 @@ function _band_edge_partition(leaf::DimensionalData.AbstractDimTree, mode::Symbo
     ne = floor(Int, fraction * nchan)
     ne == 0 && return leaf
     if mode === :flag_fraction
-        # Zero the edge-channel weights; `with_visibilities` re-derives `flag`.
+        # Zero the edge-channel weights; a zero weight is the flag.
         w_new = copy(parent(leaf[:weights]))
         @inbounds w_new[1:ne, :, :, :] .= 0
         @inbounds w_new[(nchan - ne + 1):nchan, :, :, :] .= 0
@@ -416,9 +413,8 @@ function _trim_channels(leaf::DimensionalData.AbstractDimTree, keep::AbstractVec
     pol_dim = dims(vis_l, Pol)
     vis_da = DimArray(V, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
     weights_da = DimArray(W, dims(vis_da))
-    flag_da = DimArray(W .<= 0, dims(vis_da))
     new_info = update(info; freq_setup = new_fs)
-    return _build_leaf(vis_da, weights_da, uvw_l, flag_da; partition_info = new_info)
+    return _build_leaf(vis_da, weights_da, uvw_l; partition_info = new_info)
 end
 
 """
@@ -515,8 +511,7 @@ function _combine_band_leaves(leaves)
     pol_dim = dims(l0[:vis], Pol)
     vis_da = DimArray(vis_cat, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
     w_da = DimArray(w_cat, dims(vis_da))
-    flag_da = DimArray(parent(w_da) .<= 0, dims(vis_da))
 
     new_info = update(info0; freq_setup = new_fs, spw_name = "combined", ddi = 0)
-    return _build_leaf(vis_da, w_da, l0[:uvw], flag_da; partition_info = new_info)
+    return _build_leaf(vis_da, w_da, l0[:uvw]; partition_info = new_info)
 end

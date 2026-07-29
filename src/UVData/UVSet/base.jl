@@ -16,7 +16,8 @@ The struct subtypes `AbstractDimTree` so all DD machinery (selectors,
 works without bespoke overloads. Per-leaf data lives on each branch
 (a plain `DimTree`) carrying:
 
-- `data`     : `:vis`, `:weights`, `:uvw`, `:flag` `DimArray` layers.
+- `data`     : `:vis`, `:weights`, `:uvw` `DimArray` layers. A cell is
+  flagged iff its weight is `≤ 0`, so no separate flag layer is stored.
 - `metadata` : `PartitionInfo` struct (`source_name`, `source_key`,
   `field_name`, `scan_name`, `scan_intents`, `sub_scan_name`, `spw_name`,
   `intent`, `ra`, `dec`, `ddi`, `partition_name`, `baselines::BaselineIndex`,
@@ -518,16 +519,11 @@ function obs_time(part::DimensionalData.AbstractDimTree)
     return hasdim(vis, Ti) ? lookup(vis, Ti) : lookup(vis, Integration)
 end
 
-# `weights ≤ 0` carries the FITS flag convention. We derive a Bool layer at
-# construction so `data.flag` is always available without recomputation.
-_derive_flag(w::AbstractDimArray) = DimArray(parent(w) .<= 0, dims(w))
-_derive_flag(w::AbstractArray) = w .<= 0
-
 """
     with_visibilities(part::AbstractDimTree, vis, weights) -> DimTree
 
 Return a new leaf sharing `part`'s `uvw` layer and metadata, with
-`vis`/`weights`/`flag` swapped in. `flag` is re-derived from `weights`.
+`vis`/`weights` swapped in. A cell is flagged iff its weight is `≤ 0`.
 """
 function with_visibilities(part::DimensionalData.AbstractDimTree, vis, weights)
     vis_l = _rewrap_like(vis, part[:vis])

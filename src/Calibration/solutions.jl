@@ -451,7 +451,7 @@ function UVData.apply_calibration(
     return UVData.apply(uvset) do leaf, info, root
         # Correction reads vis + weights; the output flag is re-derived from the
         # corrected weights downstream, so skip the redundant on-disk flag layer.
-        leaf = materialize_leaf(leaf; layers = (:vis, :weights, :uvw))
+        leaf = materialize_leaf(leaf)
         win = leaf_window(sol.geom, leaf)
         g = evaluate_gains(ev, sol.θ, win.chan_idx, win.ti_idx)   # (nchan_leaf, nti_leaf, nant, 2)
         vis_corr, w_corr = _apply_gain_kernel(leaf, g; executor)

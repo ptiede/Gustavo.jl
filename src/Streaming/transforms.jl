@@ -103,16 +103,14 @@ function apply_transforms(uvset::UVSet, transforms; geom::DataGeometry = build_g
     ts = collect(Any, transforms)
     isempty(ts) && return uvset
     return UVData.apply(uvset) do leaf, info, root
-        ml = UVData.materialize_leaf(leaf; layers = (:vis, :weights, :uvw))
+        ml = UVData.materialize_leaf(leaf)
         # Rewrap around array copies (the input set is never mutated); the
         # transform's stack is then just the layer selection off that leaf —
-        # metadata included.
+        # metadata included. The selection shares `mlc`'s arrays, so the chain
+        # mutates `mlc` in place and it is the transformed leaf.
         mlc = with_visibilities(ml, copy(parent(ml[:vis])), copy(parent(ml[:weights])))
-        # The layer selection shares `mlc`'s arrays, so the chain mutates the
-        # leaf itself; the rebuild exists only to re-derive `flag` from the
-        # transformed weights.
         apply_transforms!(ts, mlc[(:vis, :weights)], leaf_window(geom, mlc))
-        return with_visibilities(mlc, mlc[:vis], mlc[:weights])
+        return mlc
     end
 end
 
@@ -297,7 +295,7 @@ end
 function apply_transform(uvset::UVSet, t::StationWeightScale)
     s = t.s
     return UVData.apply(uvset) do leaf, info, root
-        leaf = UVData.materialize_leaf(leaf; layers = (:vis, :weights, :uvw))
+        leaf = UVData.materialize_leaf(leaf)
         W = copy(parent(leaf[:weights]))
         for (bi, (a, b)) in enumerate(UVData.baselines(leaf).pairs)
             f = s[a] * s[b]

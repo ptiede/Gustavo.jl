@@ -192,7 +192,8 @@ const _F32EPS = 1.0f-4
                 # synthetic weights are channel-constant so they round-trip.
                 @test maximum(abs.(ow .- rw)) < _F32EPS
 
-                @test parent(oleaf[:flag]) == parent(rleaf[:flag])
+                # Flag pattern (weight ≤ 0) round-trips.
+                @test (ow .<= 0) == (rw .<= 0)
 
                 # Axis labels.
                 @test collect(lookup(oleaf[:vis], Pol)) == collect(lookup(rleaf[:vis], Pol))
@@ -237,7 +238,6 @@ const _F32EPS = 1.0f-4
                 eleaf = eidx[k]
                 @test parent(mleaf[:vis]) == parent(eleaf[:vis])
                 @test parent(mleaf[:weights]) == parent(eleaf[:weights])
-                @test parent(mleaf[:flag]) == parent(eleaf[:flag])
             end
         finally
             isfile(path) && rm(path)
@@ -262,12 +262,11 @@ const _F32EPS = 1.0f-4
                 @test length(leaves) == 3                       # 3 bands per scan
                 # Confirm the bulk path is actually taken (IDI-backed lazy leaf).
                 @test UV._bulk_backend(parent(leaves[1][:vis])) !== nothing
-                bulk = UV.materialize_group(leaves; layers = (:vis, :weights, :uvw))
-                perleaf = [UV.materialize_leaf(l; layers = (:vis, :weights, :uvw)) for l in leaves]
+                bulk = UV.materialize_group(leaves)
+                perleaf = [UV.materialize_leaf(l) for l in leaves]
                 for (b, p) in zip(bulk, perleaf)
                     @test parent(b[:vis]) == parent(p[:vis])
                     @test parent(b[:weights]) == parent(p[:weights])
-                    @test parent(b[:flag]) == parent(p[:flag])   # derived from weights both ways
                     @test parent(b[:uvw]) == parent(p[:uvw])
                 end
                 # Threaded decode (per-leaf baseline threading) must be identical to
@@ -275,7 +274,7 @@ const _F32EPS = 1.0f-4
                 old = UV._DECODE_NTASKS[]
                 UV._DECODE_NTASKS[] = 4
                 try
-                    threaded = UV.materialize_group(leaves; layers = (:vis, :weights, :uvw))
+                    threaded = UV.materialize_group(leaves)
                     for (t, b) in zip(threaded, bulk)
                         @test parent(t[:vis]) == parent(b[:vis])
                         @test parent(t[:weights]) == parent(b[:weights])
@@ -351,14 +350,11 @@ const _F32EPS = 1.0f-4
             rt = UV.load_fitsidi(path; lazy = false)
             leaf = first(values(DimensionalData.branches(rt)))
             pols = collect(lookup(leaf[:vis], Pol))
-            flag = parent(leaf[:flag])    # (Frequency, Ti, Baseline, Pol)
-            w = parent(leaf[:weights])
+            w = parent(leaf[:weights])    # (Frequency, Ti, Baseline, Pol)
             pq = findfirst(==("PQ"), pols)
             pp = findfirst(==("PP"), pols)
-            @test all(flag[:, :, :, pq])           # PQ flagged everywhere
-            @test !any(flag[:, :, :, pp])          # PP not flagged
-            @test all(w[:, :, :, pq] .<= 0)
-            @test all(w[:, :, :, pp] .> 0)
+            @test all(w[:, :, :, pq] .<= 0)        # PQ flagged everywhere
+            @test all(w[:, :, :, pp] .> 0)         # PP not flagged
         finally
             isfile(path) && rm(path)
         end
@@ -396,7 +392,6 @@ const _F32EPS = 1.0f-4
             @test all(isapprox.(we[:, :, :, pp], Float32(2 * factor * 0.25); rtol = 1.0f-4))
             # Flag sentinels (≤0) are preserved, not scaled into valid weights.
             @test all(wr[:, :, :, pq] .<= 0)
-            @test all(parent(lr[:flag])[:, :, :, pq])
         finally
             isfile(path) && rm(path)
         end
@@ -553,17 +548,11 @@ end
             m1 = UV.materialize_leaf(leaf1)
             m2 = UV.materialize_leaf(leaf2)
 
-            # Layer-selective materialize (skip :flag): the flag derived from the
-            # materialized weights (w <= 0) must be bit-identical to the on-disk
-            # flag layer, since the reader bakes every FLAG-table flag into the
-            # weights. This is what makes the fringe solve safe to skip :flag.
-            m1_nf = UV.materialize_leaf(leaf1; layers = (:vis, :weights, :uvw))
-            @test parent(m1_nf[:weights]) == parent(m1[:weights])
-            @test parent(m1_nf[:flag]) == parent(m1[:flag])
-
-            f1 = parent(m1[:flag])      # (Frequency, Ti, Baseline, Pol)
+            # A cell is flagged iff its weight is ≤ 0: the reader bakes every
+            # FLAG-table flag into the weights.
             w1 = parent(m1[:weights])
-            f2 = parent(m2[:flag])
+            f1 = w1 .<= 0               # (Frequency, Ti, Baseline, Pol)
+            f2 = parent(m2[:weights]) .<= 0
 
             pols = collect(lookup(leaf1[:vis], Pol))   # MSv4 order
             pp = findfirst(==("PP"), pols)             # RR → PP
@@ -637,8 +626,8 @@ end
             idx = _index_leaves_by_scan_band(rt)
             m2 = UV.materialize_leaf(idx[("1", 2)])
             m1 = UV.materialize_leaf(idx[("1", 1)])
-            f2 = parent(m2[:flag])
             w2 = parent(m2[:weights])
+            f2 = w2 .<= 0
             pols = collect(lookup(idx[("1", 2)][:vis], Pol))
             qq = findfirst(==("QQ"), pols)
             others = setdiff(1:length(pols), [qq])
@@ -652,7 +641,7 @@ end
                 @test all(w2[:, :, :, p] .> 0)
             end
             # Band 1: untouched entirely.
-            @test !any(parent(m1[:flag]))
+            @test !any(parent(m1[:weights]) .<= 0)
         finally
             isfile(path) && rm(path)
         end
@@ -679,7 +668,7 @@ end
             found = false
             for (_, leaf) in leaves
                 m = UV.materialize_leaf(leaf)
-                flag = parent(m[:flag])
+                flag = parent(m[:weights]) .<= 0
                 vis = parent(m[:vis])
                 # A flagged cell whose vis is finite cannot be a "missing row"
                 # (those are NaN); on this file all on-disk weights are

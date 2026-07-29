@@ -43,7 +43,7 @@ function write_uvfits end
 Load a FITS-IDI file (AIPS Memo 114) into a `UVSet`. Header tables
 (ARRAY_GEOMETRY, FREQUENCY, SOURCE, ANTENNA, …) are read eagerly; the
 `UV_DATA` payload is left lazy by default — each per-(scan, band) leaf's
-`vis`/`weights`/`flag` layers are disk-backed and materialized on demand
+`vis`/`weights` layers are disk-backed and materialized on demand
 (`materialize_leaf`). Pass `lazy = false` to materialize everything up front
 (only for small files), or restrict `scans`/`bands` to a subset.
 

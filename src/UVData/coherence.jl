@@ -230,7 +230,7 @@ function coherence_report(
 
     # Pass 2 — materialize each leaf and accumulate.
     for leaf in values(src)
-        m = materialize_leaf(leaf; layers = (:vis, :weights))
+        m = materialize_leaf(leaf)
         V = parent(m[:vis]); W = parent(m[:weights])
         labels = String.(pol_products(m))
         plist = _select_coherence_pols(labels, pols)

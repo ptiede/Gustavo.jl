@@ -93,9 +93,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
             nant = 3, nbands = 1, nchan = 4, ntime = 3, pol_labels = ["PP", "QQ"],
         )
         geom = CAL.build_geometry(uvsmall)
-        leaf = UVP.materialize_leaf(
-            last(first(UVP.branches(uvsmall))); layers = (:vis, :weights, :uvw),
-        )
+        leaf = UVP.materialize_leaf(last(first(UVP.branches(uvsmall))))
         scanname = UVP.metadata(leaf).scan_name
         function mkwindow()
             parent(leaf[:vis]) .= 1

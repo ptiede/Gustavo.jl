@@ -599,11 +599,6 @@ end
     @test win isa UV.UVSet
     @test length(UV.branches(win)) == 1
     @test haskey(UV.branches(win), UV.partition_key(; source_key = :src_TEST, scan_name = "2"))
-
-    # Flag layer is computed at construction (= weights ≤ 0).
-    leaf_1 = UV.branches(uvset)[UV.partition_key(; source_key = :src_TEST, scan_name = "1")]
-    @test eltype(leaf_1[:flag]) == Bool
-    @test parent(leaf_1[:flag]) == (parent(leaf_1[:weights]) .<= 0)
 end
 
 @testset "scan_average(uvset) collapses Ti to length 1" begin
@@ -678,7 +673,7 @@ function synthetic_uvdata_3c273()
             partition_name = "synthetic_0_3C273_$(info.scan_name)",
         )
         new_leaf = UV._build_leaf(
-            leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+            leaf[:vis], leaf[:weights], leaf[:uvw];
             partition_info = info_3c,
         )
         new_key = UV.partition_key(info_3c)
@@ -696,7 +691,7 @@ function synthetic_uvdata_3c273_shifted()
     # Pick a shift large enough that the new Ti axes don't overlap the original.
     dt = 100.0
     new_branches = Gustavo.UVData.DimensionalData.TreeDict()
-    # Layout: (Frequency, Ti, Baseline, Pol) for vis/weights/flag and
+    # Layout: (Frequency, Ti, Baseline, Pol) for vis/weights and
     # (UVW, Ti, Baseline) for uvw — Ti is dim 2 in both. Replace it.
     _replace_ti(da, new_t) = begin
         old_dims = dims(da)
@@ -710,8 +705,7 @@ function synthetic_uvdata_3c273_shifted()
         new_vis = _replace_ti(old_vis, new_t)
         new_w = _replace_ti(leaf[:weights], new_t)
         new_uvw = _replace_ti(leaf[:uvw], new_t)
-        new_flag = _replace_ti(leaf[:flag], new_t)
-        new_leaf = UV._build_leaf(new_vis, new_w, new_uvw, new_flag; partition_info = info)
+        new_leaf = UV._build_leaf(new_vis, new_w, new_uvw; partition_info = info)
         new_branches[k] = new_leaf
     end
     return Gustavo.UVData.DimensionalData.rebuild(src; branches = new_branches)
@@ -897,7 +891,7 @@ end
         if info.scan_name == "2"
             new_info = UV.update(info; freq_setup = fs_alt)
             new_leaf = UV._build_leaf(
-                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+                leaf[:vis], leaf[:weights], leaf[:uvw];
                 partition_info = new_info,
             )
             branches[k] = new_leaf
@@ -1068,7 +1062,7 @@ end
     )
     bad_info = UV.update(info; baselines = bad_bls)
     bad_leaf = UV._build_leaf(
-        leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+        leaf[:vis], leaf[:weights], leaf[:uvw];
         partition_info = bad_info,
     )
     branches = Gustavo.UVData.DimensionalData.TreeDict(:src_TEST_spw_0_scan_1 => bad_leaf)
@@ -1185,7 +1179,7 @@ end
         if info.scan_name == "1"
             sub_info = UV.update(info; sub_scan_name = "B")
             sub_leaf = UV._build_leaf(
-                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+                leaf[:vis], leaf[:weights], leaf[:uvw];
                 partition_info = sub_info,
             )
             sub_key = UV.partition_key(sub_info)
@@ -1251,7 +1245,7 @@ end
     )
     bad_info = UV.update(info; antennas = bad_table)
     bad_leaf = UV._build_leaf(
-        leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+        leaf[:vis], leaf[:weights], leaf[:uvw];
         partition_info = bad_info,
     )
     branches = Gustavo.UVData.DimensionalData.TreeDict()
@@ -1296,7 +1290,7 @@ end
         if l_info.scan_name == "2"
             new_info = UV.update(l_info; antennas = perturbed, subarray_name = "sub_1")
             new_l = UV._build_leaf(
-                l[:vis], l[:weights], l[:uvw], l[:flag];
+                l[:vis], l[:weights], l[:uvw];
                 partition_info = new_info,
             )
             branches[UV.partition_key(new_info)] = new_l
@@ -1644,7 +1638,7 @@ end
     bl = UV.baseline(leaf, bls.pairs[1])
 
     @test bl isa DimensionalData.DimStack
-    @test Set(keys(bl)) == Set((:vis, :weights, :flag, :uvw))
+    @test Set(keys(bl)) == Set((:vis, :weights, :uvw))
 
     # Shape & dims
     nch = UV.nchannels(base)
@@ -1652,7 +1646,6 @@ end
     npol = length(UV.pol_products(leaf))
     @test size(bl[:vis]) == (nch, nti, npol)
     @test size(bl[:weights]) == (nch, nti, npol)
-    @test size(bl[:flag]) == (nch, nti, npol)
     @test size(bl[:uvw]) == (nti, 3)
 
     # Pol selector path matches manual indexing.
