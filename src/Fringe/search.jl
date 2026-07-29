@@ -109,32 +109,19 @@ Base.@kwdef struct FringeSearch
 end
 
 """
-    FringeDetection(delay, rate, phase, amp, snr, valid)
+    Detection = @NamedTuple{delay, rate, phase, amp, snr, valid}
 
-Result of a single-baseline fringe search. `delay` (s) and `rate` (Hz) are the
-station-pair group delay and fringe rate; `phase` (rad) is the constant phase φ
-referenced to `(f0, t0)`; `amp` is the coherent amplitude; `snr` the detection
-signal-to-noise; `valid = snr ≥ snr_min`.
+The result of a single-baseline fringe search. `delay` (s) and `rate` (Hz) are
+the station-pair group delay and fringe rate; `phase` (rad) is the constant
+phase φ referenced to `(f0, t0)`; `amp` is the coherent amplitude; `snr` the
+detection signal-to-noise; `valid = snr ≥ snr_min`.
 """
-struct FringeDetection
-    delay::Float64
-    rate::Float64
-    phase::Float64
-    amp::Float64
-    snr::Float64
-    valid::Bool
-end
+const Detection = @NamedTuple{
+    delay::Float64, rate::Float64, phase::Float64,
+    amp::Float64, snr::Float64, valid::Bool,
+}
 
-const _INVALID_DETECTION = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
-
-function Base.show(io::IO, d::FringeDetection)
-    return print(
-        io, "FringeDetection(", d.valid ? "valid" : "invalid",
-        ", delay=", round(d.delay * 1.0e9; digits = 3), " ns",
-        ", rate=", round(d.rate * 1.0e3; digits = 3), " mHz",
-        ", snr=", round(d.snr; digits = 2), ")",
-    )
-end
+const _INVALID_DETECTION = Detection((0.0, 0.0, 0.0, 0.0, 0.0, false))
 
 """
     FringeWorkspace()
@@ -237,7 +224,7 @@ function _search_axes(freqs::AbstractVector, times::AbstractVector, opts::Fringe
 end
 
 """
-    baseline_fringe_search(V, W, freqs, times, f0, t0; opts = FringeSearch()) -> FringeDetection
+    baseline_fringe_search(V, W, freqs, times, f0, t0; opts = FringeSearch()) -> Detection
 
 Search one block of visibilities `V[chan, time]` (with inverse-variance weights
 `W[chan, time]`) for the group delay, fringe rate, and phase that align the
@@ -404,7 +391,7 @@ function _baseline_fringe_search(
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
 
-    return FringeDetection(delay, rate, phase, amp, snr, snr >= _gate_snr_min(opts, ax))
+    return Detection((delay, rate, phase, amp, snr, snr >= _gate_snr_min(opts, ax)))
 end
 
 # Vector overloads: single-time (delay only) and the general fallback.
@@ -788,7 +775,7 @@ function _stage2_value(w::_MBDWorkspace, mx::_MBDAxes, sj::Int, m::Int, rj::Int)
 end
 
 # The hierarchical search core (same contract as the full-path body of
-# `_baseline_fringe_search`: identical FringeDetection semantics and SNR/noise
+# `_baseline_fringe_search`: identical Detection semantics and SNR/noise
 # conventions).
 function _mbd_fringe_search(
         V::AbstractMatrix, W::AbstractMatrix,
@@ -933,7 +920,7 @@ function _mbd_fringe_search(
     amp = absref / Wsum
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
-    return FringeDetection(delay, rate_ref, phase, amp, snr, snr >= _gate_snr_min(opts, ax))
+    return Detection((delay, rate_ref, phase, amp, snr, snr >= _gate_snr_min(opts, ax)))
 end
 
 # ── False-fringe statistics + the delay–rate map extractor ─────────────────────
@@ -1008,7 +995,7 @@ by [`baseline_fringe_map`](@ref) — the classic false-fringe diagnostic. Fields
 
 - `delays` (s) / `rates` (Hz) — the in-window grid coordinates, ascending.
 - `snr` — `(ndelay, nrate)` map of `|D| / noise` in the SAME units as
-  `FringeDetection.snr`, so the map's peak sits at ≈ `detection.snr`.
+  the detection's `snr`, so the map's peak sits at ≈ `detection.snr`.
 - `detection` — the refined peak, exactly as [`baseline_fringe_search`](@ref)
   returns it.
 - `ncells` — effective number of independent search cells (see `fringe_pfa`).
@@ -1022,7 +1009,7 @@ struct FringeSearchMap
     delays::Vector{Float64}
     rates::Vector{Float64}
     snr::Matrix{Float64}
-    detection::FringeDetection
+    detection::Detection
     ncells::Float64
     pfa::Float64
 end

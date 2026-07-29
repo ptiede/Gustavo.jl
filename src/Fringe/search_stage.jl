@@ -386,7 +386,7 @@ function mask_unselected_cross_hands!(dets, fit_on::AbstractScanSelection, group
             fa, fb = d.feeds[p]
             fa == fb && continue
             for bi in axes(d.det, 1)
-                d.det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
+                d.det[bi, p] = _INVALID_DETECTION
             end
         end
     end

@@ -118,7 +118,7 @@ Provided by `GustavoMakieExt`.
 """
 function plot_baseline_fringes end
 
-export FringeSearch, FringeDetection, baseline_fringe_search
+export FringeSearch, baseline_fringe_search
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
 export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask

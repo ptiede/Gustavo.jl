@@ -20,7 +20,7 @@ searches — the null for the scan's max SNR), and the valid detections as
 `rows` (`(; a, b, pol, snr, pfa)`).
 """
 struct ScanSearchResult
-    det::Matrix{FringeDetection}
+    det::Matrix{Detection}
     max_snr::Float64
     cells1::Float64    # effective cells are FRACTIONAL (oversampled grids
     ncells::Float64    # divide by the oversampling) — never Int on real data
@@ -67,7 +67,7 @@ function _search_scan_cube(
     )
     nbl = length(bl_pairs)
     npol = length(pols)
-    det = Matrix{FringeDetection}(undef, nbl, npol)
+    det = Matrix{Detection}(undef, nbl, npol)
     times = tg .* 3600.0
     ax = _search_axes(fg, times, search)
     ncross = count(pr -> pr[1] != pr[2], bl_pairs)
@@ -90,7 +90,7 @@ function _search_scan_cube(
     tforeach(pairs; scheduler = executor) do (bi, p)
         a, b = bl_pairs[bi]
         if a == b
-            det[bi, p] = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
+            det[bi, p] = _INVALID_DETECTION
         else
             det[bi, p] = _baseline_fringe_search(
                 view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),

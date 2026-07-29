@@ -482,8 +482,8 @@ function _dispersion_fit_stationize!(
                 tau_max = _band_delay_halfwindow(rows_f, tau_max), dtec_max = dtec_max,
             )
             fit.snr >= snr_min || continue
-            Dτ[bi, p] = FringeDetection(fit.tau, 0.0, 0.0, fit.amp, fit.snr, true)
-            Dd[bi, p] = FringeDetection(fit.dtec, 0.0, 0.0, fit.amp, fit.snr, true)
+            Dτ[bi, p] = Detection((fit.tau, 0.0, 0.0, fit.amp, fit.snr, true))
+            Dd[bi, p] = Detection((fit.dtec, 0.0, 0.0, fit.amp, fit.snr, true))
         end
     end
 
