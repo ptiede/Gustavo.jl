@@ -101,6 +101,16 @@ struct ScanStream{G <: AbstractLeafGrouping, S <: ScanGroupSpec, T, O, I}
     inner_executor::I
 end
 
+# Ordered container over its scan-group specs — iteration reads only the
+# precomputed group metadata, never visibilities.
+Base.length(s::ScanStream) = length(s.groups)
+Base.getindex(s::ScanStream, i) = s.groups[i]
+Base.iterate(s::ScanStream, args...) = iterate(s.groups, args...)
+Base.eltype(::Type{<:ScanStream{G, S}}) where {G, S} = S
+
+Base.show(io::IO, s::ScanStream) =
+    print(io, "ScanStream(", length(s.groups), " scan group(s), ", length(s.ant_names), " antennas)")
+
 # One group's spec, labelled from its first leaf's partition metadata.
 function _scan_group_spec(index::Int, keyed_leaves)
     info = UVData.metadata(last(first(keyed_leaves)))

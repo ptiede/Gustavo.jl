@@ -287,3 +287,28 @@ CalibrationPipeline(steps::_Chainable...; exec::ExecutionConfig = ExecutionConfi
     CalibrationPipeline(collect(steps); exec)
 CalibrationPipeline(chain::StepChain; exec::ExecutionConfig = ExecutionConfig()) =
     CalibrationPipeline(chain.steps, exec)
+
+# Label a step by kind; a lifted transform is named for the transform it wraps.
+_step_label(s::CalibrationStep) = string(nameof(typeof(s)))
+_step_label(s::DataTransformStep) = string(nameof(typeof(s.t)))
+
+function Base.show(io::IO, ::MIME"text/plain", p::CalibrationPipeline)
+    println(io, "CalibrationPipeline (", length(p.steps), " step(s))")
+    for (i, s) in enumerate(p.steps)
+        println(io, "  ", i, ". ", _step_label(s))
+    end
+    print(
+        io, "  exec: outer=", nameof(typeof(p.exec.outer_executor)),
+        ", inner=", nameof(typeof(p.exec.inner_executor)), ", ntasks=", p.exec.ntasks,
+    )
+    return io
+end
+
+Base.show(io::IO, p::CalibrationPipeline) =
+    print(io, "CalibrationPipeline(", length(p.steps), " steps)")
+
+# Ordered container over its steps.
+Base.length(p::CalibrationPipeline) = length(p.steps)
+Base.getindex(p::CalibrationPipeline, i) = p.steps[i]
+Base.iterate(p::CalibrationPipeline, args...) = iterate(p.steps, args...)
+Base.eltype(::Type{<:CalibrationPipeline}) = CalibrationStep

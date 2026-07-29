@@ -72,6 +72,13 @@ struct StationSolution
     ncomp::Int
 end
 
+function Base.show(io::IO, s::StationSolution)
+    return print(
+        io, "StationSolution(", size(s.delay, 1), " antennas, ",
+        count(s.covered), "/", length(s.covered), " (station, feed) cells solved, ncomp=", s.ncomp, ")",
+    )
+end
+
 # Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 

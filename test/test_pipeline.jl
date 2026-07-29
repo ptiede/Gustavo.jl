@@ -95,6 +95,37 @@ include("synthetic_uvset.jl")
             @test parent(l[:weights]) == snap[k][2]
         end
     end
+
+    @testset "standard interfaces: show and iteration" begin
+        # `show` gives each type its own summary line instead of a raw dump.
+        @test occursin("CalibrationSolution", sprint(show, sol))
+        @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
+        @test occursin("StationGainModel", sprint(show, sol.model))
+        d = FP.FringeDetection(1.0e-9, 1.0e-3, 0.5, 2.0, 8.0, true)
+        @test occursin("FringeDetection", sprint(show, d)) && occursin("valid", sprint(show, d))
+        ss = FP.StationSolution(zeros(3, 2), zeros(3, 2), zeros(3, 2), 0.0, trues(3, 2), 1)
+        @test occursin("StationSolution", sprint(show, ss))
+        as = FP.AdhocSolution(zeros(3, 2, 5), zeros(5), zeros(5), trues(3, 2, 5))
+        @test occursin("AdhocSolution", sprint(show, as))
+
+        # CalibrationPipeline is an ordered container over its steps.
+        pipe = CalibrationPipeline(FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator())
+        @test length(pipe) == length(pipe.steps)
+        @test eltype(typeof(pipe)) == CalibrationStep
+        @test collect(pipe) == pipe.steps
+        @test pipe[1] === pipe.steps[1]
+        @test [s for s in pipe] == pipe.steps
+        @test occursin("CalibrationPipeline", sprint(show, pipe))
+        @test occursin("CalibrationPipeline", sprint(show, MIME"text/plain"(), pipe))
+
+        # ScanStream is an ordered container over its scan-group specs.
+        stream = ST.scan_stream(uvset)
+        @test length(stream) == length(stream.groups)
+        @test eltype(typeof(stream)) == eltype(stream.groups)
+        @test collect(stream) == stream.groups
+        @test first(stream) === stream.groups[1]
+        @test occursin("ScanStream", sprint(show, stream))
+    end
 end
 
 # `_correct_column!` overwrites its `vis`/`w` in place while reading them, so a

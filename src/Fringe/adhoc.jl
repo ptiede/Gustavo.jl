@@ -243,6 +243,14 @@ struct AdhocSolution
     covered::BitArray{3}
 end
 
+function Base.show(io::IO, s::AdhocSolution)
+    nant, _, nap = size(s.phase)
+    return print(
+        io, "AdhocSolution(", nant, " antennas × ", nap, " APs, ",
+        count(s.covered), "/", length(s.covered), " cells solved)",
+    )
+end
+
 """
     solve_adhoc_phasing(rbar, wbar, bl_pairs, pol_products, nant, times; ref_ant, smoother) -> AdhocSolution
 

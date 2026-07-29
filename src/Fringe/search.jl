@@ -127,6 +127,15 @@ end
 
 const _INVALID_DETECTION = FringeDetection(0.0, 0.0, 0.0, 0.0, 0.0, false)
 
+function Base.show(io::IO, d::FringeDetection)
+    return print(
+        io, "FringeDetection(", d.valid ? "valid" : "invalid",
+        ", delay=", round(d.delay * 1.0e9; digits = 3), " ns",
+        ", rate=", round(d.rate * 1.0e3; digits = 3), " mHz",
+        ", snr=", round(d.snr; digits = 2), ")",
+    )
+end
+
 """
     FringeWorkspace()
 

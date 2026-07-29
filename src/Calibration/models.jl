@@ -214,3 +214,9 @@ function station_model_summary(name, m::StationGainModel)
     am = isempty(m.logamp) ? "—" : join(component_label.(m.logamp), " + ")
     return string(name, "  phase(", ph, ")  logamp(", am, ")")
 end
+
+function Base.show(io::IO, m::StationGainModel)
+    ph = isempty(m.phase) ? "—" : join(component_label.(m.phase), " + ")
+    am = isempty(m.logamp) ? "—" : join(component_label.(m.logamp), " + ")
+    return print(io, "StationGainModel(phase: ", ph, ", logamp: ", am, ")")
+end

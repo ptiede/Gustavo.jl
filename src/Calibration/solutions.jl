@@ -92,6 +92,22 @@ function CalibrationSolution(
     )
 end
 
+function Base.show(io::IO, ::MIME"text/plain", sol::CalibrationSolution)
+    L = sol.layout
+    println(io, "CalibrationSolution")
+    println(io, "  Model     : ", sol.model)
+    println(io, "  Grid      : ", L.nant, " antennas × ", L.nchan, " channels × ", L.ntime, " times")
+    println(io, "  Parameters: ", L.nθ)
+    print(
+        io, "  Provenance: ", length(sol.stages), " stage(s), ",
+        length(sol.transforms), " transform(s), ", length(sol.postcal), " postcal step(s)",
+    )
+    return io
+end
+
+Base.show(io::IO, sol::CalibrationSolution) =
+    print(io, "CalibrationSolution(", sol.layout.nant, " antennas, ", sol.layout.nθ, " parameters)")
+
 # ── Per-stage views: snapshots of the solution as of each pipeline stage ─────
 
 """
