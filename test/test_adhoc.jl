@@ -556,7 +556,9 @@ end
     for (sm, shared) in cases
         @test sm isa FRa.AbstractAdhocSmoother
         sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; ref_ant = ref, smoother = sm, shared_feeds = shared)
-        @test sol isa FRa.AdhocSolution
+        @test sol isa Gustavo.DimensionalData.AbstractDimStack
+        @test (:phase, :covered, :chi) ⊆ keys(sol)               # DimStack layers
+        @test size(sol.phase) == (nant, 2, length(times))        # Ant × Feed × Ti
         @test count(isfinite, sol.phase) > 0                     # the stage actually ran
         @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)   # ref gauge held
     end

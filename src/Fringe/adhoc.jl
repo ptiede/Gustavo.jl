@@ -230,29 +230,11 @@ function smooth_track(sm::OUSmoother, track, w, times)
 end
 
 """
-    AdhocSolution
+    solve_adhoc_phasing(rbar, wbar, bl_pairs, pol_products, nant, times; ref_ant, smoother) -> DimStack
 
-Per-(station, feed) adhoc phase track for one scan: `phase` is `(nant, 2, nap)`
-(rad, `NaN` where unsolved), `chi` the per-AP source cross-hand phase `(nap,)`,
-`times` the AP epochs, `covered` the solved cells.
-"""
-struct AdhocSolution
-    phase::Array{Float64, 3}
-    chi::Vector{Float64}
-    times::Vector{Float64}
-    covered::BitArray{3}
-end
-
-function Base.show(io::IO, s::AdhocSolution)
-    nant, _, nap = size(s.phase)
-    return print(
-        io, "AdhocSolution(", nant, " antennas × ", nap, " APs, ",
-        count(s.covered), "/", length(s.covered), " cells solved)",
-    )
-end
-
-"""
-    solve_adhoc_phasing(rbar, wbar, bl_pairs, pol_products, nant, times; ref_ant, smoother) -> AdhocSolution
+Returns a `DimStack` over `Ant × Feed × Ti`, its `Ti` axis carrying the AP epochs:
+layer `:phase` is the per-(station, feed) adhoc phase (rad, `NaN` where unsolved),
+`:covered` marks the solved cells, and `:chi` is the per-AP source cross-hand phase.
 
 Solve globally-closing adhoc phases from coherently frequency-averaged residual
 baseline visibilities. `rbar[baseline, product, ap]` is `Σ_chan w·V_residual`
@@ -728,7 +710,13 @@ function solve_adhoc_phasing(
         covered[:, 2, :] .= @view covered[:, 1, :]
     end
 
-    return AdhocSolution(phase, chi, collect(float.(times)), covered)
+    tdim = Ti(collect(float.(times)))
+    axs = (Ant(1:size(phase, 1)), Feed(1:2), tdim)
+    return DimensionalData.DimStack((
+        phase = DimArray(phase, axs),
+        covered = DimArray(covered, axs),
+        chi = DimArray(chi, (tdim,)),
+    ))
 end
 
 # Restitch per-AP gauges so the reference frame is consistent across APs even

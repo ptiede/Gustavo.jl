@@ -16,7 +16,7 @@ module Fringe
 using ..Executors
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
-using ..UVData: Frequency, Baseline
+using ..UVData: Frequency, Baseline, Feed
 using ..Calibration
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_bandpass, _is_dispersion
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
@@ -124,7 +124,7 @@ export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
 export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask
 export Stationization, StationSolution, stationize_scan, station_closure_residuals
 export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
-export OUSmoother, JointOUSmoother, NoSmoothing, AdhocSolution, solve_adhoc_phasing
+export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
 export station_weight_scale
 export AbstractBandpassSmoother, FreeBandpass, PolynomialBandpass, PenalizedBandpass
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing

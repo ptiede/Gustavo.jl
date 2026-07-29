@@ -105,8 +105,6 @@ include("synthetic_uvset.jl")
         @test occursin("FringeDetection", sprint(show, d)) && occursin("valid", sprint(show, d))
         ss = FP.StationSolution(zeros(3, 2), zeros(3, 2), zeros(3, 2), 0.0, trues(3, 2), 1)
         @test occursin("StationSolution", sprint(show, ss))
-        as = FP.AdhocSolution(zeros(3, 2, 5), zeros(5), zeros(5), trues(3, 2, 5))
-        @test occursin("AdhocSolution", sprint(show, as))
 
         # CalibrationPipeline is an ordered container over its steps.
         pipe = CalibrationPipeline(FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator())
