@@ -32,7 +32,7 @@ export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequenc
 export antennas, union_antennas, union_pol_products
 export freq_setup, union_frequency_axis, channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
 export Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL
-export BaselineIndex, UVSet, with_visibilities, scan_key
+export BaselineIndex, UVSet, rebuild_visibilities, scan_key
 export apply, mapleaves, flatmap, leaves, sources, scan_ids, partitions, pol_products
 export frequencies, timestamps
 export set_bunit, with_bunit

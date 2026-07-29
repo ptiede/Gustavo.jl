@@ -29,7 +29,7 @@ Walk the leaves of `uvset` and rebuild a tree with each leaf replaced by
 - `f(leaf, info, root_meta)` — `root_meta::UVMetadata` is `metadata(uvset)`.
 
 Whichever signature `f` defines, it must return a `DimTree` (e.g. via
-`with_visibilities`) so the resulting `UVSet` is well-formed. Tree shape
+`rebuild_visibilities`) so the resulting `UVSet` is well-formed. Tree shape
 is preserved. Built-in reducers (`TimeAverage`) and the bandpass /
 apriori applicators implement this signature.
 

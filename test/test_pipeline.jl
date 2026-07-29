@@ -81,6 +81,44 @@ include("synthetic_uvset.jl")
         end
         rm(path; force = true)
     end
+
+    @testset "eager input is left unmodified" begin
+        # An eager leaf is the caller's own data, so `apply_calibration` corrects
+        # a copy. The synthetic input carries no NaNs, so `==` is exact.
+        snap = Dict(
+            k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
+                for (k, l) in DimensionalData.branches(uvset)
+        )
+        Gustavo.apply_calibration(uvset, sol)
+        for (k, l) in DimensionalData.branches(uvset)
+            @test parent(l[:vis]) == snap[k][1]
+            @test parent(l[:weights]) == snap[k][2]
+        end
+    end
+end
+
+# `_correct_column!` overwrites its `vis`/`w` in place while reading them, so a
+# private (lazy-materialized) leaf can be corrected without an output copy. The
+# aliased read-then-write must land the same values as an out-of-place fold.
+@testset "gain correction folds in place exactly" begin
+    rng = MersenneTwister(0xC011)
+    nchan, nti = 4, 3
+    vis = rand(rng, ComplexF64, nchan, nti)
+    w = rand(rng, nchan, nti)
+    ga = rand(rng, ComplexF64, nchan, nti) .+ 1   # magnitudes well above _GAIN_FLOOR
+    gb = rand(rng, ComplexF64, nchan, nti) .+ 1
+    ga[1] = 0                                       # force the degenerate branch
+    vis0, w0 = copy(vis), copy(w)
+    CAL._correct_column!(vis, w, ga, gb)
+    for i in eachindex(vis0)
+        den = ga[i] * conj(gb[i])
+        if abs(ga[i]) < CAL._GAIN_FLOOR || abs(gb[i]) < CAL._GAIN_FLOOR || !isfinite(den)
+            @test isnan(vis[i]) && iszero(w[i])
+        else
+            @test vis[i] ≈ vis0[i] / den
+            @test w[i] ≈ w0[i] * abs2(ga[i] * gb[i])
+        end
+    end
 end
 
 @testset "Rate & adhoc are feed-tied (SharedFeeds regression)" begin

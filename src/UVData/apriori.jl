@@ -249,7 +249,7 @@ function apply_calibration(
         vis_corr, weights_corr = _apply_apriori_kernel(
             vis_l, w_l, gains_pkg.gains, bl_pairs, pol_products(leaf),
         )
-        return with_visibilities(leaf, vis_corr, weights_corr)
+        return rebuild_visibilities(leaf, vis_corr, weights_corr)
     end
     return set_bunit(out, "JY")
 end
@@ -281,7 +281,7 @@ function apply_calibration(
         vis_corr, weights_corr = _apply_apriori_kernel(
             leaf[:vis], leaf[:weights], gains_pkg.gains, bl_pairs, pol_products(leaf),
         )
-        return with_visibilities(leaf, vis_corr, weights_corr)
+        return rebuild_visibilities(leaf, vis_corr, weights_corr)
     end
     return set_bunit(out, "JY")
 end

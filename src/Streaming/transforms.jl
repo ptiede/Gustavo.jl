@@ -108,7 +108,7 @@ function apply_transforms(uvset::UVSet, transforms; geom::DataGeometry = build_g
         # transform's stack is then just the layer selection off that leaf —
         # metadata included. The selection shares `mlc`'s arrays, so the chain
         # mutates `mlc` in place and it is the transformed leaf.
-        mlc = with_visibilities(ml, copy(parent(ml[:vis])), copy(parent(ml[:weights])))
+        mlc = rebuild_visibilities(ml, copy(parent(ml[:vis])), copy(parent(ml[:weights])))
         apply_transforms!(ts, mlc[(:vis, :weights)], leaf_window(geom, mlc))
         return mlc
     end
@@ -302,7 +302,7 @@ function apply_transform(uvset::UVSet, t::StationWeightScale)
             f == 1 && continue
             @views W[:, :, bi, :] .*= f
         end
-        return with_visibilities(leaf, copy(parent(leaf[:vis])), W)
+        return rebuild_visibilities(leaf, copy(parent(leaf[:vis])), W)
     end
 end
 

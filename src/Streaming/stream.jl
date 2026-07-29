@@ -443,7 +443,7 @@ end
 # leaves are transformed in place with no scan-sized copy.
 function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arrays::Bool)
     base = copy_arrays ?
-        with_visibilities(leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights]))) : leaf
+        rebuild_visibilities(leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights]))) : leaf
     # Per-leaf work is already fanned out across leaves; keep transforms serial here.
     apply_transforms!(
         stream.transforms, base[(:vis, :weights)], leaf_window(stream.geom, base);

@@ -380,7 +380,7 @@ function _band_edge_partition(leaf::DimensionalData.AbstractDimTree, mode::Symbo
         w_new = copy(parent(leaf[:weights]))
         @inbounds w_new[1:ne, :, :, :] .= 0
         @inbounds w_new[(nchan - ne + 1):nchan, :, :, :] .= 0
-        return with_visibilities(leaf, parent(vis_l), w_new)
+        return rebuild_visibilities(leaf, parent(vis_l), w_new)
     else  # :trim
         keep = (ne + 1):(nchan - ne)
         isempty(keep) &&

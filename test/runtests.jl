@@ -245,7 +245,7 @@ end
 @testset "Baseline stability plots" begin
     UV = Gustavo.UVData
     data = synthetic_uvdata()
-    corr = UV.apply((leaf, _info, _meta) -> UV.with_visibilities(leaf, parent(leaf[:vis]) .* (1.0 + 0.0im), parent(leaf[:weights])), data)
+    corr = UV.apply((leaf, _info, _meta) -> UV.rebuild_visibilities(leaf, parent(leaf[:vis]) .* (1.0 + 0.0im), parent(leaf[:weights])), data)
 
     gains = reshape(
         ComplexF64[
@@ -542,7 +542,7 @@ end
     # Transformed leaves: scale weights by 2.
     scaled = UV.apply(uvset) do leaf, _info, _root
         new_w = parent(leaf[:weights]) .* 2
-        UV.with_visibilities(leaf, parent(leaf[:vis]), new_w)
+        UV.rebuild_visibilities(leaf, parent(leaf[:vis]), new_w)
     end
     for (key, leaf) in UV.branches(scaled)
         orig = UV.branches(uvset)[key]
@@ -1586,7 +1586,7 @@ end
 
     # `apply` still returns a UVSet when `f` returns a DimTree.
     out = UV.apply(base) do leaf
-        UV.with_visibilities(leaf, leaf[:vis], leaf[:weights])
+        UV.rebuild_visibilities(leaf, leaf[:vis], leaf[:weights])
     end
     @test out isa UV.UVSet
     @test length(UV.branches(out)) == length(UV.branches(base))

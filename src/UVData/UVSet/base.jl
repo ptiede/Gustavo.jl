@@ -495,7 +495,7 @@ sub_scan_name(part::PartitionedData) =
 function scan_window(part::DimensionalData.AbstractDimTree)
     t = obs_time(part)
     isempty(t) && return (NaN, NaN)
-    return (Float64(minimum(t)), Float64(maximum(t)))
+    return extrema(t)
 end
 
 """
@@ -520,12 +520,12 @@ function obs_time(part::DimensionalData.AbstractDimTree)
 end
 
 """
-    with_visibilities(part::AbstractDimTree, vis, weights) -> DimTree
+    rebuild_visibilities(part::AbstractDimTree, vis, weights) -> DimTree
 
 Return a new leaf sharing `part`'s `uvw` layer and metadata, with
 `vis`/`weights` swapped in. A cell is flagged iff its weight is `≤ 0`.
 """
-function with_visibilities(part::DimensionalData.AbstractDimTree, vis, weights)
+function rebuild_visibilities(part::DimensionalData.AbstractDimTree, vis, weights)
     vis_l = _rewrap_like(vis, part[:vis])
     w_l = _rewrap_like(weights, part[:weights])
     return _build_leaf(

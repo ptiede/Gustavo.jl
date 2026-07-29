@@ -449,16 +449,21 @@ function UVData.apply_calibration(
     ev = GainEvaluator(sol.model, sol.layout)
     flagged, exclbl = apply_flags ? _solution_flag_sets(sol.info) : (nothing, nothing)
     return UVData.apply(uvset) do leaf, info, root
-        # Correction reads vis + weights; the output flag is re-derived from the
-        # corrected weights downstream, so skip the redundant on-disk flag layer.
+        # A lazy leaf materializes to freshly-decoded private arrays we correct
+        # in place; an eager leaf is caller-owned, so copy it first. Capture
+        # laziness before `materialize_leaf` collapses it.
+        private = is_lazy(leaf)
         leaf = materialize_leaf(leaf)
+        private || (leaf = rebuild_visibilities(
+            leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights])),
+        ))
         win = leaf_window(sol.geom, leaf)
         g = evaluate_gains(ev, sol.θ, win.chan_idx, win.ti_idx)   # (nchan_leaf, nti_leaf, nant, 2)
-        vis_corr, w_corr = _apply_gain_kernel(leaf, g; executor)
+        _apply_gains!(leaf, g; executor)
         _flag_solution_rows!(
-            vis_corr, w_corr, UVData.baselines(leaf).pairs, sol.geom, win.ti_idx, flagged, exclbl,
+            leaf[:vis], leaf[:weights], UVData.baselines(leaf).pairs, sol.geom, win.ti_idx, flagged, exclbl,
         )
-        return with_visibilities(leaf, vis_corr, w_corr)
+        return leaf
     end
 end
 
@@ -514,41 +519,41 @@ end
 const _GAIN_FLOOR = 1.0e-12
 
 # Correct one (baseline, product) column in place over its (Frequency, Ti)
-# plane: `V / (g_a conj(g_b))` and `w · |g_a g_b|²`, where `ga`/`gb` are the
-# two stations' gains on that same plane. A degenerate or non-finite gain blanks
-# the cell — NaN visibility, zero weight — which is what marks it flagged
-# downstream. Every cell of both outputs is written, so the caller need not
-# initialize them.
-function _correct_column!(vis_c, w_c, vis, w, ga, gb)
-    for i in eachindex(vis_c, w_c, vis, w, ga, gb)
+# plane: `V ← V / (g_a conj(g_b))` and `w ← w · |g_a g_b|²`, where `ga`/`gb` are
+# the two stations' gains on that same plane. A degenerate or non-finite gain
+# blanks the cell — NaN visibility, zero weight — which is what marks it flagged
+# downstream. Each cell reads then writes its own index, so the update is exact
+# even though the read and the write hit the same array.
+function _correct_column!(vis, w, ga, gb)
+    for i in eachindex(vis, w, ga, gb)
         gai = ga[i]
         gbi = gb[i]
         den = gai * conj(gbi)
         if abs(gai) < _GAIN_FLOOR || abs(gbi) < _GAIN_FLOOR || !isfinite(den)
-            vis_c[i] = convert(eltype(vis_c), NaN)
-            w_c[i] = zero(eltype(w_c))
+            vis[i] = convert(eltype(vis), NaN)
+            w[i] = zero(eltype(w))
         else
-            vis_c[i] = vis[i] / den
-            w_c[i] = w[i] * abs2(gai * gbi)
+            vis[i] = vis[i] / den
+            w[i] = w[i] * abs2(gai * gbi)
         end
     end
     return nothing
 end
 
-# Divide a leaf's visibilities by complex antenna gains `g[c, ti, ant, feed]`,
-# returning the corrected `(vis, weights)`. Baselines and correlation products
-# are read off the leaf, so they cannot disagree with the arrays they index.
+# Correct a leaf's visibilities in place by its complex antenna gains
+# `g[c, ti, ant, feed]`. Baselines and correlation products are read off the
+# leaf, so they cannot disagree with the arrays they index. The caller owns the
+# copy-or-mutate decision: pass a private leaf to overwrite it, or a copy to
+# leave the source untouched.
 #
 # Each (baseline, product) column is independent — disjoint writes over
 # read-only gains — so the columns fan out over the inner `executor`. That
 # fan-out is load-bearing: this kernel is ≈80% of `apply_calibration` and the
 # split is worth ~5× on 8 threads. It is also bit-identical to the serial loop,
 # because every cell is the same scalar expression whatever the partition.
-function _apply_gain_kernel(leaf, g::AbstractArray{<:Complex, 4}; executor = SerialScheduler())
+function _apply_gains!(leaf, g::AbstractArray{<:Complex, 4}; executor = SerialScheduler())
     vis = leaf[:vis]
     w = leaf[:weights]
-    vis_c = similar(vis)
-    w_c = similar(w)
     ants = UVData.baselines(leaf).pairs
     feeds = map(correlation_feed_pair, pol_products(leaf))
     columns = vec(CartesianIndices((axes(vis, 3), axes(vis, 4))))
@@ -557,12 +562,11 @@ function _apply_gain_kernel(leaf, g::AbstractArray{<:Complex, 4}; executor = Ser
         a, b = ants[bi]
         fa, fb = feeds[p]
         _correct_column!(
-            view(vis_c, :, :, bi, p), view(w_c, :, :, bi, p),
             view(vis, :, :, bi, p), view(w, :, :, bi, p),
             view(g, :, :, a, fa), view(g, :, :, b, fb),
         )
     end
-    return vis_c, w_c
+    return leaf
 end
 
 # ── Serialization ────────────────────────────────────────────────────────────
