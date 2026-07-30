@@ -1,10 +1,11 @@
 name = "Gustavo"
 uuid = "b6f820fd-87a9-4cf8-8bd4-0e8dc9bb4263"
-authors = ["Paul Tiede <ptiede91@gmail.com> and contributors"]
 version = "0.1.0"
+authors = ["Paul Tiede <ptiede91@gmail.com> and contributors"]
 
 [deps]
 AstroLib = "c7932e45-9af1-51e7-9da9-f004cd3a462b"
+ComponentArrays = "b0b7db55-cfe3-40fc-9ded-d10e2dbeff66"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 DiskArrays = "3c3547ce-8d99-4f5e-a174-61eb10b00ae3"
@@ -34,20 +35,21 @@ GustavoMakieExt = "Makie"
 
 [compat]
 AstroLib = "0.4"
-Dagger = "0.21.0"
+ComponentArrays = "0.15"
+Dagger = "0.21"
 Dates = "1"
 DimensionalData = "0.30"
 DiskArrays = "0.4"
-Distributed = "1.11.0"
+Distributed = "1.11"
 FFTW = "1.10"
 FITSFiles = "0.3"
 HDF5 = "0.17"
 LinearAlgebra = "1"
 LinearSolve = "3"
 Makie = "0.21, 0.22, 0.23, 0.24"
-OhMyThreads = "0.8.6"
+OhMyThreads = "0.8"
 OrderedCollections = "1"
-PolarizedTypes = "0.1.3"
+PolarizedTypes = "0.1"
 Printf = "1"
 Serialization = "1"
 Statistics = "1"

@@ -17,6 +17,7 @@ using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materializ
     is_lazy, pol_products, baselines
 using LinearAlgebra
 using LinearSolve
+using ComponentArrays: ComponentVector, ComponentArray, getaxes
 
 include("Calibration/lsq.jl")
 include("Calibration/segmentation.jl")

@@ -201,11 +201,11 @@ for SNR-aware scan selections and its `:refine` service for the dTEC/SBD
 θ slots it owns; the bandpass stage records `:refined_scans`).
 """
 mutable struct SolveContext{
-        M <: StationGainModel, E <: GainEvaluator, A <: UVData.AntennaTable,
-        S <: Streaming.ScanStream, X <: ExecutionConfig,
+        M <: StationGainModel, L <: ParameterLayout, E <: GainEvaluator,
+        A <: UVData.AntennaTable, S <: Streaming.ScanStream, X <: ExecutionConfig,
     }
     model::M
-    layout::ParameterLayout
+    layout::L
     geom::DataGeometry
     ev::E
     θ::Vector{Float64}

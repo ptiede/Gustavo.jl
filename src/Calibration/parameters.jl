@@ -2,9 +2,20 @@
 #
 # `plan_parameters` flattens one shared `StationGainModel`, replicated across
 # `nant` antennas over a `DataGeometry`, into a single parameter vector θ and the
-# integer index tables needed to evaluate it. Everything here is plain integer
-# arrays — no Dicts, Strings, or closures in the structures the hot evaluation
-# loop reads — so the forward map stays type-stable and Reactant-traceable.
+# structures needed to address it. Two views of the same contiguous layout are
+# built together and kept consistent:
+#
+#   * a `ComponentVector` `template` — θ named and shaped by component. The block
+#     space of each component (parameters × feed-node × freq-segment × time-segment
+#     × antenna) is a leaf array under the component's name, `θ.phase.<name>` /
+#     `θ.logamp.<name>`, so a solved θ can be wrapped for named, shaped inspection.
+#   * the per-component `off1`/`off2` integer tables the hot forward loop reads.
+#
+# Both derive from the same depth-first block assignment, so a component's named
+# leaf occupies exactly the θ range its `off1`/`off2` entries point into (checked
+# when the layout is built). The forward loop stays on integer offsets — no Dicts,
+# Strings, or closures in the structures it reads — so it is type-stable and
+# Reactant-traceable.
 
 """
     ComponentPlan
@@ -31,20 +42,35 @@ end
 """
     ParameterLayout
 
-The flattened parameter plan for a solve: total length `nθ`, the grid dims, and
-one `ComponentPlan` per component (phase components first, then log-amplitude).
+The flattened parameter plan for a solve: total length `nθ`, the grid dims, one
+`ComponentPlan` per component (phase components first, then log-amplitude), the
+named/shaped `template` `ComponentVector`, and `axes` — a tree mirroring the
+model that records each component leaf's dimension sizes and the physical axis
+each dimension carries (`:Ant`, `:Feed`, `:Ti`, `:Frequency`, `:param`), for
+labelling a wrapped θ.
 """
-struct ParameterLayout
+struct ParameterLayout{CV, AX}
     nθ::Int
     nant::Int
     ntime::Int
     nchan::Int
     nphase::Int
     plans::Vector{ComponentPlan}
+    template::CV
+    axes::AX
 end
 
-# Build a ComponentPlan and return it together with the updated θ cursor.
-function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next::Int)
+# ── Per-component layout ─────────────────────────────────────────────────────
+#
+# One resolution of a `TiedComponent` over a geometry: the segment ids and
+# coordinates the `ComponentPlan` needs, plus the block bookkeeping the θ leaf
+# and the offset tables both derive from. The leaf `shape`/`roles` describe the
+# contiguous block run as a column-major array: fastest to slowest the block runs
+# over parameters, feed-node, frequency segment, time segment, then antenna, and
+# a size-1 axis among these is dropped. A component whose block length varies
+# across frequency segments has no rectangular shape, so its leaf is a flat vector
+# (`ragged`).
+function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
     t = term(tc)
     tseg_id, ntseg = time_segment_ids(time_segmentation(tc), geom)
     fseg_id, nfseg = freq_segment_ids(freq_segmentation(tc), geom)
@@ -72,17 +98,44 @@ function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next:
     nchan_seg = [length(grp) for grp in fseg_groups]
     blocklen = [nparams_per_block(t, n) for n in nchan_seg]
 
-    off1 = zeros(Int, nant, 2, ntseg, nfseg)
-    off2 = zeros(Int, nant, 2, ntseg, nfseg)
-    tying = tc.tying
-    for ant in 1:nant, ts in 1:ntseg, fs in 1:nfseg
-        bl = blocklen[fs]
+    nfeed = nfeed_blocks(tc.tying)
+    dof = nant * ntseg * nfeed * sum(blocklen)
+    bl = first(blocklen)                         # nchan_seg has one entry per segment (nfseg ≥ 1)
+    ragged = !all(==(bl), blocklen)
+    shape, roles = _leaf_shape(dof, ragged, bl, nfeed, nfseg, ntseg, nant, tc.tying)
+
+    return (;
+        axes, tseg_id, fseg_id, xf, xt, nchan_seg,
+        blocklen, ntseg, nfseg, tying = tc.tying, dof, shape, roles,
+    )
+end
+
+# Column-major leaf shape (fastest → slowest: parameters, feed-node, freq
+# segment, time segment, antenna) with size-1 axes dropped, and the physical
+# role of each retained axis. A ragged or empty component has no rectangular
+# shape, so its leaf is a flat vector.
+function _leaf_shape(dof, ragged, bl, nfeed, nfseg, ntseg, nant, tying)
+    (ragged || dof == 0) && return (dof,), (:flat,)
+    node_role = tying isa PerFeed ? :Feed : :node
+    dims = ((bl, :param), (nfeed, node_role), (nfseg, :Frequency), (ntseg, :Ti), (nant, :Ant))
+    kept = filter(d -> first(d) != 1, dims)
+    isempty(kept) && return (dof,), (:scalar,)     # every axis size 1 (dof == 1)
+    return Tuple(first(d) for d in kept), Tuple(last(d) for d in kept)
+end
+
+# Build a `ComponentPlan` and return it together with the updated θ cursor.
+function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next::Int)
+    cl = _component_layout(tc, nant, geom)
+    off1 = zeros(Int, nant, 2, cl.ntseg, cl.nfseg)
+    off2 = zeros(Int, nant, 2, cl.ntseg, cl.nfseg)
+    for ant in 1:nant, ts in 1:cl.ntseg, fs in 1:cl.nfseg
+        bl = cl.blocklen[fs]
         bl == 0 && continue
-        next = _assign_blocks!(off1, off2, tying, ant, ts, fs, bl, next)
+        next = _assign_blocks!(off1, off2, cl.tying, ant, ts, fs, bl, next)
     end
 
     plan = ComponentPlan(
-        collect(Symbol, axes), tseg_id, fseg_id, xf, xt, nchan_seg, off1, off2
+        collect(Symbol, cl.axes), cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg, off1, off2
     )
     return plan, next
 end
@@ -117,6 +170,25 @@ function _assign_blocks!(off1, off2, tying::ReferenceRelative, ant, ts, fs, bl, 
     return next
 end
 
+# ── Named/shaped template ────────────────────────────────────────────────────
+#
+# Walk the model's named component tree (not the flattened list) so the template
+# nests exactly where the model does; its depth-first leaf order equals the
+# flat-list order the plans and offsets use.
+_template_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
+    map(v -> _template_node(v, nant, geom), nt)
+_template_node(tc::TiedComponent, nant::Int, geom::DataGeometry) =
+    zeros(_component_layout(tc, nant, geom).shape...)
+_template_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _template_tree(nt, nant, geom)
+
+_axes_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
+    map(v -> _axes_node(v, nant, geom), nt)
+function _axes_node(tc::TiedComponent, nant::Int, geom::DataGeometry)
+    cl = _component_layout(tc, nant, geom)
+    return (; dims = cl.shape, roles = cl.roles)
+end
+_axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant, geom)
+
 """
     plan_parameters(model::StationGainModel, nant, geom::DataGeometry) -> ParameterLayout
 
@@ -138,5 +210,36 @@ function plan_parameters(model::StationGainModel, nant::Integer, geom::DataGeome
         plan, next = _plan_component(tc, nant, geom, next)
         push!(plans, plan)
     end
-    return ParameterLayout(next - 1, nant, ntimes(geom), nchannels(geom), nphase, plans)
+    nθ = next - 1
+
+    template = ComponentVector(
+        phase = _template_tree(model.phase, nant, geom),
+        logamp = _template_tree(model.logamp, nant, geom),
+    )
+    axes = (
+        phase = _axes_tree(model.phase, nant, geom),
+        logamp = _axes_tree(model.logamp, nant, geom),
+    )
+    length(template) == nθ || error(
+        "plan_parameters: template length $(length(template)) disagrees with nθ = $nθ; " *
+            "the named leaves and the offset tables must span the same θ."
+    )
+    return ParameterLayout(nθ, nant, ntimes(geom), nchannels(geom), nphase, plans, template, axes)
+end
+
+"""
+    component_vector(layout::ParameterLayout, θ::AbstractVector) -> ComponentVector
+
+Wrap a flat θ (length `layout.nθ`) as the layout's named, shaped
+`ComponentVector`, so `cv.phase.<name>` / `cv.logamp.<name>` view each
+component's block as a labelled array. The wrap shares data with `θ` (no copy);
+use it for inspection, not on the solve/AD hot path.
+"""
+function component_vector(layout::ParameterLayout, θ::AbstractVector)
+    length(θ) == layout.nθ || throw(
+        DimensionMismatch(
+            "component_vector: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)"
+        )
+    )
+    return ComponentArray(θ, getaxes(layout.template))
 end

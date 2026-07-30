@@ -128,6 +128,58 @@ end
     @test r.off2[1, 2, 1, 1] != 0                           # partner feed adds a relative block
 end
 
+@testset "Calibration ComponentVector template" begin
+    freqs = [1.0e9, 2.0e9, 3.0e9]                    # 3 channels
+    geom = CAL.DataGeometry(; times = [0.0, 1.0], channel_freqs = freqs)
+    nant = 2
+    model = CAL.StationGainModel(
+        phase = (
+            a = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),
+            bp = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.ChannelBlocks(1)), CAL.SharedFeeds()),
+            grp = (                                  # one element compiling to a nested subtree
+                d = CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
+                c = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
+            ),
+        ),
+    )
+    layout = CAL.plan_parameters(model, nant, geom)
+    θ = Float64.(1:layout.nθ)
+    cv = CAL.component_vector(layout, θ)
+
+    # The named/shaped view spans exactly the flat θ (one source of truth) and
+    # nests where the model does.
+    @test length(layout.template) == layout.nθ
+    @test propertynames(cv) == (:phase, :logamp)
+    @test propertynames(cv.phase) == (:a, :bp, :grp)
+    @test propertynames(cv.phase.grp) == (:d, :c)
+
+    # Each leaf is the shape its tying × segmentation imply, singleton axes dropped.
+    @test size(cv.phase.a) == (2, nant)                  # (feed, ant): PerFeed keeps the feed axis
+    @test size(cv.phase.bp) == (length(freqs), nant)     # (freq, ant): ChannelBlocks(1) resolves per channel
+    @test size(cv.phase.grp.d) == (nant,)                # a nested part is a plain leaf
+    @test size(cv.phase.grp.c) == (nant,)
+
+    # The stored axis roles name each retained dimension.
+    @test layout.axes.phase.a.roles == (:Feed, :Ant)
+    @test layout.axes.phase.bp.roles == (:Frequency, :Ant)
+    @test layout.axes.phase.grp.d.roles == (:Ant,)
+
+    # A named leaf is exactly the component's θ block (matches component_ranges:
+    # phase components depth-first — a, bp, grp.d, grp.c).
+    rng = CAL.component_ranges(layout)
+    @test vec(cv.phase.a) == θ[rng[1]]
+    @test vec(cv.phase.bp) == θ[rng[2]]
+    @test vec(cv.phase.grp.d) == θ[rng[3]]
+    @test vec(cv.phase.grp.c) == θ[rng[4]]
+
+    # The wrap shares data (no copy), and the forward map reads it identically to
+    # the flat vector.
+    ev = CAL.GainEvaluator(model, layout)
+    @test CAL.evaluate_gains(ev, cv) == CAL.evaluate_gains(ev, θ)
+    cv[1] = -99.0
+    @test θ[1] == -99.0
+end
+
 @testset "Calibration evaluate_gains: correctness, purity, inference" begin
     nant = 3
     freqs = collect(2.28e11:1.0e8:(2.28e11 + 5.0e8))         # 6 channels
