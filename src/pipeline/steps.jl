@@ -194,13 +194,29 @@ function Fringe.estimate_scan!(
     )
     round = ctx.scratch[:fringe_round]::Int
     Vsearch = round > 1 ? Fringe.residual_vis(ctx.ev, ctx.θ, stack, win) : stack[:vis]
-    res = Fringe.search_scan(ctx.stream, stack, est.search; Vsearch)
+    res = Fringe.search_scan(
+        stack, ctx.stream.geom, est.search;
+        Vsearch, ngroups = length(ctx.stream.groups), executor = ctx.stream.inner_executor,
+    )
     pols = pol_products(stack)
     feeds = [correlation_feed_pair(p) for p in pols]
-    det = Fringe.StationScanDetections(
-        res.det, UVData.baselines(stack).pairs, feeds, first(win.ti_idx),
-    )
-    return (; det, max_snr = res.max_snr, ncells = res.ncells, rows = res.rows)
+    # `res` covers only the surviving (cross) baselines; take its own pair list.
+    bl_pairs = collect(UVData.DimensionalData.lookup(res, UVData.Baseline))
+    det = Fringe.StationScanDetections(res, bl_pairs, feeds, first(win.ti_idx))
+
+    # Per-scan detection log for the solution diagnostics: the detection table
+    # (with per-baseline PFA), its max SNR, and the scan's effective cell count.
+    # The search cube is transient (consumed by the station solve), so these are
+    # read off it here; `cells1` is the only piece not already in the cube.
+    cells1 = Fringe._search_cells(frequencies(stack), timestamps(stack) .* 3600.0, est.search)
+    ncells = cells1 * max(length(bl_pairs) * length(pols), 1)
+    rows = [
+        (; a = bl_pairs[j][1], b = bl_pairs[j][2], pol = pols[p],
+           snr = res.snr[j, p], pfa = Fringe.fringe_pfa(res.snr[j, p], cells1))
+            for p in eachindex(pols) for j in eachindex(bl_pairs) if res.valid[j, p]
+    ]
+    max_snr = isempty(rows) ? 0.0 : maximum(r.snr for r in rows)
+    return (; det, max_snr, ncells, rows)
 end
 
 function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit)

@@ -252,7 +252,7 @@ function baseline_fringe_search(
         )
     )
     ax = _search_axes(freqs, times, opts)
-    return _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts)
+    return _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, _gate_snr_min(opts, ax))
 end
 
 # Grid the weighted visibilities onto the workspace's zero-padded uniform grid
@@ -309,10 +309,11 @@ function _baseline_fringe_search(
         V::AbstractMatrix, W::AbstractMatrix,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
         ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
+        snr_gate::Real,
     )
     # Hierarchical multi-band path (never allocates the big common-Δf grid).
     ax.mbd === nothing ||
-        return _mbd_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts)
+        return _mbd_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, snr_gate)
 
     nchan, ntime = size(V)
     fax = ax.fax
@@ -391,7 +392,7 @@ function _baseline_fringe_search(
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
 
-    return Detection((delay, rate, phase, amp, snr, snr >= _gate_snr_min(opts, ax)))
+    return Detection((delay, rate, phase, amp, snr, snr >= snr_gate))
 end
 
 # Vector overloads: single-time (delay only) and the general fallback.
@@ -781,6 +782,7 @@ function _mbd_fringe_search(
         V::AbstractMatrix, W::AbstractMatrix,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
         ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
+        snr_gate::Real,
     )
     mx = ax.mbd
     tax = ax.tax
@@ -920,7 +922,7 @@ function _mbd_fringe_search(
     amp = absref / Wsum
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
-    return Detection((delay, rate_ref, phase, amp, snr, snr >= _gate_snr_min(opts, ax)))
+    return Detection((delay, rate_ref, phase, amp, snr, snr >= snr_gate))
 end
 
 # ── False-fringe statistics + the delay–rate map extractor ─────────────────────
@@ -930,11 +932,19 @@ end
 # rate resolution 1/(time span), so cells-per-axis = window span / resolution,
 # clamped to [1, n gridded samples] (zero-pad `oversample` refines the peak but
 # adds NO independent cells). A degenerate axis contributes a factor 1.
-function _search_cells(ax::_SearchAxes, opts::FringeSearch)
-    nd = ax.fax.degenerate ? 1.0 :
-        clamp((opts.delay_window[2] - opts.delay_window[1]) * ax.fax.n * ax.fax.step, 1.0, Float64(ax.fax.n))
-    nr = ax.tax.degenerate ? 1.0 :
-        clamp((opts.rate_window[2] - opts.rate_window[1]) * ax.tax.n * ax.tax.step, 1.0, Float64(ax.tax.n))
+_search_cells(ax::_SearchAxes, opts::FringeSearch) = _search_cells(ax.fax, ax.tax, opts)
+_search_cells(freqs::AbstractVector, times::AbstractVector, opts::FringeSearch) =
+    _search_cells(_uniform_axis(freqs), _uniform_axis(times), opts)
+
+# Effective independent (delay, rate) cells inside the search window — the
+# null-hypothesis trial count behind `fringe_pfa`. Depends only on the axis
+# geometry and the windows, not on the FFT plan, so it is cheap to recompute
+# from `freqs`/`times` without building a `_SearchAxes`.
+function _search_cells(fax::_Axis, tax::_Axis, opts::FringeSearch)
+    nd = fax.degenerate ? 1.0 :
+        clamp((opts.delay_window[2] - opts.delay_window[1]) * fax.n * fax.step, 1.0, Float64(fax.n))
+    nr = tax.degenerate ? 1.0 :
+        clamp((opts.rate_window[2] - opts.rate_window[1]) * tax.n * tax.step, 1.0, Float64(tax.n))
     return nd * nr
 end
 
@@ -980,12 +990,20 @@ function fringe_snr_cut(pfa::Real, ncells::Real)
     return sqrt(-log(p1))
 end
 
-# Acceptance threshold for one search: the fixed `snr_min`, raised to the PFA
-# gate's implied cut over THIS search's independent cells when `pfa_max` is set.
-_gate_snr_min(opts::FringeSearch, ax::_SearchAxes) =
+# Per-search detection SNR gate: the fixed `snr_min`, or — when a family-wise
+# `pfa_max` is set — the SNR at which one search over `cells1` independent cells
+# clears `pfa_max` split across the `nsearch`-strong Bonferroni family (`nsearch`
+# = the cross-baseline×product×scan searches sharing the budget; `1` for a lone
+# search).
+_snr_gate(opts::FringeSearch, cells1::Real, nsearch::Integer) =
     isfinite(opts.pfa_max) ?
-        max(opts.snr_min, fringe_snr_cut(opts.pfa_max, _search_cells(ax, opts))) :
+        max(opts.snr_min, fringe_snr_cut(opts.pfa_max / nsearch, cells1)) :
         opts.snr_min
+_snr_gate(freqs::AbstractVector, times::AbstractVector, opts::FringeSearch, nsearch::Integer) =
+    _snr_gate(opts, _search_cells(freqs, times, opts), nsearch)
+
+# Single-search gate from the built axes (no family division).
+_gate_snr_min(opts::FringeSearch, ax::_SearchAxes) = _snr_gate(opts, _search_cells(ax, opts), 1)
 
 """
     FringeSearchMap
@@ -1069,6 +1087,6 @@ function baseline_fringe_map(
     # The refined peak, via the standard search (re-grids + re-FFTs the same data
     # in `ws` — the map above is already copied out, and reusing the search keeps
     # the peak/refinement logic in one place).
-    det = _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, ws, opts)
+    det = _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, ws, opts, _gate_snr_min(opts, ax))
     return FringeSearchMap(axf.delays[kidx], axf.rates[lidx], snrmap, det, ncells, fringe_pfa(det.snr, ncells))
 end

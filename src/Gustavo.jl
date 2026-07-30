@@ -60,7 +60,7 @@ export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIn
 export select_scans
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, select_groups
-export ScanSearchResult, search_scan
+export search_scan
 export map_groups, foreach_group
 export StageRecord, StageView, stage_names, stage_solution, stage_info, component_gains
 export bandpass_solution

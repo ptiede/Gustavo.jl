@@ -16,7 +16,7 @@ module Fringe
 using ..Executors
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
-using ..UVData: Frequency, Baseline, Feed
+using ..UVData: Frequency, Baseline, Feed, Pol
 using ..Calibration
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_bandpass, _is_dispersion
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
@@ -147,7 +147,7 @@ export DispersionModel
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, ScanGroupSpec, select_groups
 export materialize_cube, materialize_leaves
-export ScanSearchResult, search_scan
+export search_scan
 export map_groups, foreach_group
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
 export plot_fringe_search

@@ -658,15 +658,10 @@ end
     geom = CAL.build_geometry(uvset)
     stq = FP.scan_stream(uvset; geom = geom)
     stack, _ = FP.materialize_cube(stq, stq.groups[1])
-    r1 = FP.search_scan(stq, stack, FP.FringeSearch(); executor = SerialScheduler(), ngroups = 1)
-    r4 = FP.search_scan(stq, stack, FP.FringeSearch(); executor = DynamicScheduler(; nchunks = 4), ngroups = 1)
-    det1, snr1, nc1, rows1 = r1.det, r1.max_snr, r1.ncells, r1.rows
-    det4, snr4, nc4, rows4 = r4.det, r4.max_snr, r4.ncells, r4.rows
+    det1 = FP.search_scan(stack, stq.geom, FP.FringeSearch(); executor = SerialScheduler(), ngroups = 1)
+    det4 = FP.search_scan(stack, stq.geom, FP.FringeSearch(); executor = DynamicScheduler(; nchunks = 4), ngroups = 1)
     # Same detections regardless of the inner task count (≈ only because the two
-    # runs plan separate FFTW MEASURE transforms), and the recorded detection
-    # table in the same order.
-    @test nc1 == nc4
-    @test isapprox(snr1, snr4; rtol = 1.0e-9)
+    # runs plan separate FFTW MEASURE transforms).
     @test size(det1) == size(det4)
     @test all(
         isapprox(det1[i].delay, det4[i].delay; atol = 1.0e-15) &&
@@ -674,11 +669,6 @@ end
             isapprox(det1[i].snr, det4[i].snr; rtol = 1.0e-9) &&
             det1[i].valid == det4[i].valid
             for i in eachindex(det1)
-    )
-    @test length(rows1) == length(rows4)
-    @test all(
-        r1.a == r4.a && r1.b == r4.b && r1.pol == r4.pol && isapprox(r1.snr, r4.snr; rtol = 1.0e-9)
-            for (r1, r4) in zip(rows1, rows4)
     )
 
     # Stage timers land in the solution info and print; the progress callback

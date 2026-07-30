@@ -778,6 +778,7 @@ function fringe_search_map(
         # solver ran, sharing one workspace/axes across baselines.
         ax = _search_axes(fg, times, opts)
         ws = FringeWorkspace()
+        snr_gate = _gate_snr_min(opts, ax)
         best = 0
         bestsnr = -Inf
         for k in eachindex(UVData.baselines(stack).pairs)
@@ -785,7 +786,7 @@ function fringe_search_map(
             a == b && continue
             d = _baseline_fringe_search(
                 view(Vg, :, :, k, p), view(Wg, :, :, k, p),
-                fg, times, f0, t0, ax, ws, opts,
+                fg, times, f0, t0, ax, ws, opts, snr_gate,
             )
             d.snr > bestsnr && (bestsnr = d.snr; best = k)
         end

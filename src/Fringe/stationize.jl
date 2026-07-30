@@ -452,7 +452,9 @@ end
 # stays correct.
 
 struct StationScanDetections{D}
-    det::D                                   # Matrix{Detection} [baseline, product]
+    det::D                                   # [baseline, product] of Detection cells:
+                                             # a Baseline × Pol DimStack (search) or a
+                                             # Matrix{Detection} (refine/direct solve)
     bl_pairs::Vector{Tuple{Int, Int}}
     feeds::Vector{Tuple{Int, Int}}           # feed pair per product
     ti::Int                                  # representative global time index (→ tseg)

@@ -1,114 +1,99 @@
 # ── Fringe search over one materialized scan group ───────────────────────────
 #
-# The domain half of the streaming pass: `Streaming` owns the group/budget/
-# transform machinery and hands a materialized scan `DimStack` to the kernels in
-# `search.jl`. This file is the join — it is the only place `Streaming`'s types
-# and the fringe kernels meet.
+# The domain half of the streaming pass: given a materialized scan `DimStack`
+# and its `DataGeometry`, run the per-baseline kernels in `search.jl` over every
+# (baseline, product) cell. The caller (`Streaming`/the pipeline) owns the
+# group/budget/transform machinery and supplies the cube and geometry here.
 
 # One recorded fringe detection row: baseline antennas, correlation product,
 # SNR, and the PER-BASELINE false-alarm probability (single-search null).
 const DetectionRow = @NamedTuple{a::Int, b::Int, pol::String, snr::Float64, pfa::Float64}
 
 """
-    ScanSearchResult
+    search_scan(data, geom::DataGeometry, params::FringeSearch;
+                Vsearch = data[:vis], ngroups = 1,
+                executor = SerialScheduler(), t0 = geom.t0 * 3600.0) -> DimStack
 
-One scan group's fringe-search outcome: the per-(baseline, product) detection
-matrix `det`, the group's `max_snr`, `cells1` (independent search cells of ONE
-baseline×product search — the null for a single detection's PFA), `ncells` (the
-scan-level effective cells: `cells1 ×` the number of cross-baseline×product
-searches — the null for the scan's max SNR), and the valid detections as
-`rows` (`(; a, b, pol, snr, pfa)`).
-"""
-struct ScanSearchResult
-    det::Matrix{Detection}
-    max_snr::Float64
-    cells1::Float64    # effective cells are FRACTIONAL (oversampled grids
-    ncells::Float64    # divide by the oversampling) — never Int on real data
-    rows::Vector{DetectionRow}
-end
-
-"""
-    search_scan(stream::ScanStream, stack, search::FringeSearch;
-                Vsearch = stack[:vis], ngroups = length(stream.groups),
-                executor = stream.inner_executor, t0 = stream.geom.t0 * 3600.0) -> ScanSearchResult
-
-Fringe-search every (baseline, product) of a materialized scan group — the
-public stage-A search. `stack` is the group's `DimStack` as
+Fringe-search every cross-baseline (baseline, product) of a materialized scan
+group — the public stage-A search. `data` is the group's `DimStack` as
 [`materialize_cube`](@ref) returns it; the search reads data only and needs no
-geometry window. `Vsearch` lets a caller search a residual cube in place of the
-raw one (`rounds > 1`). `ngroups` sets the family-wise Bonferroni denominator:
-`search.pfa_max` budgets the whole family of `ncross×npol×ngroups` searches, so
-each individual search runs at `pfa_max` divided by that count; pass
-`ngroups = 1` for standalone per-scan gating (the QA convention). `t0` (seconds)
-is the epoch the detection PHASES are referenced to — delay/rate/SNR are
-epoch-invariant; the default is the solve's track epoch, a standalone QA caller
-typically wants the scan midpoint (`mean(timestamps(stack)) * 3600`). Results
-are bit-identical to the serial loop regardless of the inner `executor`.
+geometry window. Autocorrelation baselines (antenna `a == a`, total power) are
+dropped up front, so the result covers only interferometric baselines. `geom`
+supplies the reference frequency `f0` and the default phase epoch `t0`.
+`Vsearch` lets a caller search a residual cube in place of the raw one
+(`rounds > 1`). `ngroups` sets the family-wise Bonferroni denominator:
+`params.pfa_max` budgets the whole family of `ncross×npol×ngroups` searches, so
+each individual search runs at `pfa_max` divided by that count; the default
+`ngroups = 1` is standalone per-scan gating (the QA convention), a whole-track
+solve passes its scan count. `t0` (seconds) is the epoch the detection PHASES
+are referenced to — delay/rate/SNR are epoch-invariant; the default is `geom`'s
+track epoch, a standalone QA caller typically wants the scan midpoint
+(`mean(timestamps(data)) * 3600`). Results are bit-identical to the serial loop
+regardless of the fan-out `executor`.
+
+Returns a `DimStack` over `Baseline × Pol` whose layers are the six
+[`Detection`](@ref) fields (`:delay`/`:rate`/`:phase`/`:amp`/`:snr`/`:valid`),
+so one cell `det[bi, p]` reads back as a `Detection` `NamedTuple`, and its
+`Baseline` lookup carries the surviving `(a, b)` antenna pairs. The scan-level
+aggregates (max SNR, effective cell count, the detection table) are not stored
+here; a caller derives them from the cube's layers plus a cheap `_search_cells`
+recompute when it needs them.
+
+Grid geometry (and its shared FFT plan) is built ONCE per scan; the independent
+per-(baseline, product) searches fan out over `executor`, each task reusing one
+`FringeWorkspace` for scratch. Each search result is written straight into its
+cell of the DimStack — no intermediate detection matrix is built.
 """
 function search_scan(
-        stream::ScanStream, stack::AbstractDimStack, search::FringeSearch;
-        Vsearch = stack[:vis], ngroups::Integer = length(stream.groups),
-        executor = stream.inner_executor, t0::Real = stream.geom.t0 * 3600.0,
+        data::AbstractDimStack, geom::DataGeometry, params::FringeSearch;
+        Vsearch = data[:vis], ngroups::Integer = 1,
+        executor = SerialScheduler(), t0::Real = geom.t0 * 3600.0,
     )
-    return _search_scan_cube(
-        UVData.baselines(stack).pairs, pol_products(stack),
-        frequencies(stack), timestamps(stack), stack[:weights],
-        Vsearch, stream.geom.f0, Float64(t0), search,
-        executor, ngroups,
-    )
-end
-
-# Core search over one stacked cube. Grid geometry (and its shared FFT plan) is
-# built ONCE per scan; the independent per-(baseline, product) searches fan out
-# over the inner `executor`, each task reusing one `FringeWorkspace` for scratch.
-function _search_scan_cube(
-        bl_pairs, pols, fg, tg, Wg, Vsearch, f0, t0_sec, search,
-        executor, ngroups::Integer,
-    )
-    nbl = length(bl_pairs)
+    # Search only interferometric baselines: drop autocorrelations once here
+    # rather than guarding `a == b` per cell. `keep[j]` is the column of the
+    # surviving baseline `j` in `data` — the two sets diverge exactly when `data`
+    # still carries autocorrelations (they are dropped at load by default).
+    bls = UVData.baselines(data)
+    keep = findall(pr -> pr[1] != pr[2], bls.pairs)
+    bl_pairs = bls.pairs[keep]
+    pols = pol_products(data)
+    ncross = length(keep)
     npol = length(pols)
-    det = Matrix{Detection}(undef, nbl, npol)
-    times = tg .* 3600.0
-    ax = _search_axes(fg, times, search)
-    ncross = count(pr -> pr[1] != pr[2], bl_pairs)
-    cells1 = _search_cells(ax, search)
-    ncells = cells1 * max(ncross * npol, 1)
-    # Family-wise PFA gate (Bonferroni): each search runs at pfa_max/nsearches
-    # so the acceptance threshold scales itself with array size, product count,
-    # scan count, and (through cells1) bandwidth/duration.
+
+    dims = (Baseline(bl_pairs), Pol(pols))
+    delay = zeros(dims...)
+    rate = similar(delay)
+    phase = similar(delay)
+    amp = similar(delay)
+    snr = similar(delay)
+    # `valid` is a dense `Matrix{Bool}`, NOT a `BitArray`: the fan-out writes
+    # distinct cells concurrently, and adjacent bits of a BitArray share a word,
+    # so `zeros(Bool, …)` is race-free where `falses(…)` is not.
+    valid = zeros(Bool, dims...)
+    scube = DimensionalData.DimStack((; delay, rate, phase, amp, snr, valid))
+
+    fg = frequencies(data)
+    times = timestamps(data) .* 3600.0
+    ax = _search_axes(fg, times, params)
+    # Family-wise PFA (Bonferroni): split pfa_max across all ncross×npol×ngroups
+    # searches and resolve the per-search SNR gate once (cheap — no FFT plan).
     nsearch = max(ncross * npol, 1) * max(ngroups, 1)
-    search = isfinite(search.pfa_max) ?
-        FringeSearch(search.delay_window, search.rate_window, search.oversample,
-                     search.snr_min, search.quad_interp, search.algorithm,
-                     search.pfa_max / nsearch) : search
+    snr_gate = _snr_gate(fg, times, params, nsearch)
 
-    pairs = [(bi, p) for p in 1:npol for bi in 1:nbl]
-    # One reusable workspace per task (not per pair): the grids are tens of MB, so
-    # a task processing many baselines allocates its scratch once. Each (bi, p)
-    # writes a distinct `det` cell, so the concurrent writes never overlap.
+    f0 = geom.f0
+    t0_sec = Float64(t0)
+    Wg = data[:weights]
+    # One reusable workspace per task (not per cell): the grids are tens of MB, so
+    # a task processing many baselines allocates its scratch once. Each (j, p)
+    # writes a distinct cell of every layer, so the concurrent writes never overlap.
     workspace = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
-    tforeach(pairs; scheduler = executor) do (bi, p)
-        a, b = bl_pairs[bi]
-        if a == b
-            det[bi, p] = _INVALID_DETECTION
-        else
-            det[bi, p] = _baseline_fringe_search(
-                view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),
-                fg, times, f0, t0_sec, ax, workspace[], search,
-            )
-        end
+    cells = [(j, p) for p in 1:npol for j in 1:ncross]
+    tforeach(cells; scheduler = executor) do (j, p)
+        bi = keep[j]
+        scube[j, p] = _baseline_fringe_search(
+            view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),
+            fg, times, f0, t0_sec, ax, workspace[], params, snr_gate,
+        )
     end
-
-    # Assemble the scalar outputs SEQUENTIALLY in the original (product-major)
-    # order so the recorded detection table matches the serial loop's exactly.
-    maxsnr = 0.0
-    rows = DetectionRow[]
-    for p in 1:npol, bi in 1:nbl
-        d = det[bi, p]
-        d.valid || continue
-        maxsnr = max(maxsnr, d.snr)
-        push!(rows, (; a = bl_pairs[bi][1], b = bl_pairs[bi][2],
-            pol = pols[p], snr = d.snr, pfa = fringe_pfa(d.snr, cells1)))
-    end
-    return ScanSearchResult(det, maxsnr, cells1, ncells, rows)
+    return scube
 end

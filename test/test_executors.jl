@@ -118,9 +118,10 @@ struct UnbackedExecutor end
         stack, _ = FP.materialize_cube(st, st.groups[1])
         stack0, _ = FP.materialize_cube(st0, st0.groups[1])
         @test isequal(stack[:vis], stack0[:vis]) && isequal(stack[:weights], stack0[:weights])
-        r  = FP.search_scan(st,  stack,  FP.FringeSearch(); ngroups = 1)
-        r0 = FP.search_scan(st0, stack0, FP.FringeSearch(); ngroups = 1)
-        @test all(r.det .=== r0.det)
-        @test r.max_snr == r0.max_snr
+        r  = FP.search_scan(stack,  st.geom,  FP.FringeSearch(); ngroups = 1)
+        r0 = FP.search_scan(stack0, st0.geom, FP.FringeSearch(); ngroups = 1)
+        # Same detections whichever inner executor runs the fan-out, per layer
+        # (subsumes any derived aggregate like max SNR).
+        @test all(all(r[k] .=== r0[k]) for k in keys(r))
     end
 end

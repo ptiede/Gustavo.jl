@@ -52,26 +52,17 @@
         search = FP.FringeSearch()
         spec = st.groups[1]
         stack_n, _ = FP.materialize_cube(st, spec)
-        res = FP.search_scan(st, stack_n, search; executor = DynamicScheduler(; nchunks = 2))
-        ncross = count(pr -> pr[1] != pr[2], baselines(stack_n).pairs)
-        @test res.ncells == res.cells1 * max(ncross * length(pol_products(stack_n)), 1)
-        # Effective cells are FRACTIONAL on real grids (the oversampled plane is
-        # divided by the oversampling) — the fields must be Float64, not Int
-        # (regression: an Int field survived the whole synthetic suite because
-        # these fixtures happen to give integral counts, then threw
-        # InexactError on the first real file).
-        @test res.cells1 isa Float64 && res.ncells isa Float64
-        @test !isempty(res.rows)      # the synthetic fringes are strong
+        res = FP.search_scan(stack_n, st.geom, search; executor = DynamicScheduler(; nchunks = 2), ngroups = length(st.groups))
+        @test any(res.valid)      # the synthetic fringes are strong → detections
+        # Effective search cells are FRACTIONAL on real grids (the oversampled
+        # plane is divided by the oversampling) — a Float64, never an Int
+        # (regression: an Int once survived the whole synthetic suite because the
+        # fixtures give integral counts, then threw InexactError on a real file).
+        @test FP._search_cells(frequencies(stack_n), timestamps(stack_n) .* 3600.0, search) isa Float64
 
-        # `ngroups = 1` (standalone per-scan gating) only tightens/loosens the
-        # per-search PFA threshold; the search grid — and cells1 — are unchanged.
-        res1 = FP.search_scan(st, stack_n, search; executor = DynamicScheduler(; nchunks = 2), ngroups = 1)
-        @test res1.cells1 == res.cells1
-
-        # inner fan-out is bit-identical to the serial loop.
-        res_ser = FP.search_scan(st, stack_n, search; executor = SerialScheduler())
-        @test all(res_ser.det .=== res.det)
-        @test res_ser.rows == res.rows
+        # inner fan-out is bit-identical to the serial loop, per detection layer.
+        res_ser = FP.search_scan(stack_n, st.geom, search; executor = SerialScheduler(), ngroups = length(st.groups))
+        @test all(all(res_ser[k] .=== res[k]) for k in keys(res))
     end
 
     @testset "ByBand / ByKey grouping" begin
@@ -181,7 +172,7 @@ end
 
     # `Streaming` never names the fringe kernels — the module is the assertion,
     # since it is loaded before `Fringe` and cannot reach back into it.
-    for n in (:FringeWorkspace, :FringeSearch, :search_scan, :ScanSearchResult)
+    for n in (:FringeWorkspace, :FringeSearch, :search_scan)
         @test !isdefined(Gustavo.Streaming, n)
     end
 
@@ -196,6 +187,7 @@ end
     # FFT workspace, so any stream searches without prior setup.
     @test !hasproperty(stream, :pool)
     stack, _ = FP.materialize_cube(stream, stream.groups[1])
-    res = FP.search_scan(stream, stack, FP.FringeSearch())
-    @test res isa FP.ScanSearchResult
+    res = FP.search_scan(stack, stream.geom, FP.FringeSearch())
+    @test res isa DimStack
+    @test keys(res) == (:delay, :rate, :phase, :amp, :snr, :valid)
 end
