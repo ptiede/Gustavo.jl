@@ -10,8 +10,8 @@
 
 using Serialization: serialize, deserialize
 using Statistics: mean
-using DimensionalData: lookup, Ti
-using ..UVData: Frequency, Pol, Baseline
+using DimensionalData: lookup, Ti, DimArray
+using ..UVData: Frequency, Pol, Baseline, Ant, Feed
 
 """
     StageRecord(name, step_index, phase_comps, logamp_comps, info)
@@ -228,6 +228,31 @@ function component_gains(sol::CalibrationSolution, plan_index::Integer; ci = Col
     civ = ci === Colon() ? (1:nchannels(sol.geom)) : ci
     tiv = ti === Colon() ? (1:ntimes(sol.geom)) : ti
     return evaluate_gains(ev, θm, civ, tiv)
+end
+
+"""
+    gains(sol::CalibrationSolution) -> DimArray
+
+The solved complex antenna gains on the full grid of `sol`'s geometry, labelled
+for inspection: a `DimArray` over `(Frequency, Ti, Ant, Feed)` — channel
+frequencies (Hz), integration times (hours), antennas (named when `sol.info`
+carries `ant_names`, else `1:nant`), and feed. `gain = exp(Σ logamp) · cis(Σ
+phase)` is the same forward map [`apply_calibration`](@ref) divides by (and
+[`save_solution_hdf5`](@ref) writes); `abs.(gains(sol))` and `angle.(gains(sol))`
+recover amplitude and phase.
+"""
+function gains(sol::CalibrationSolution)
+    ev = GainEvaluator(sol.model, sol.layout)
+    g = evaluate_gains(ev, sol.θ)   # (nchan, ntime, nant, nfeed)
+    ants = hasproperty(sol.info, :ant_names) && length(sol.info.ant_names) == size(g, 3) ?
+        collect(sol.info.ant_names) : (1:size(g, 3))
+    return DimArray(
+        g,
+        (
+            Frequency(sol.geom.channel_freqs), Ti(sol.geom.times),
+            Ant(ants), Feed(1:size(g, 4)),
+        ),
+    )
 end
 
 """

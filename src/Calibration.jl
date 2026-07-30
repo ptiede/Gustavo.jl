@@ -73,7 +73,7 @@ export save_solution_hdf5, load_solution_hdf5
 
 # Per-stage provenance and snapshots (composable pipeline)
 export StageRecord, StageView, stage_names, stage_solution, stage_info
-export component_ranges, component_gains
+export component_ranges, component_gains, gains
 # Fit-once / apply-later extraction (portable time-constant bandpass)
 export bandpass_solution
 

@@ -5,8 +5,10 @@
 using Gustavo
 using Test
 using LinearAlgebra
-using DimensionalData: DimArray, Dim
+using DimensionalData: DimArray, Dim, lookup, Ti
 import OffsetArrays
+
+const UVD = Gustavo.UVData
 
 const CAL = Gustavo.Calibration
 
@@ -293,6 +295,26 @@ end
         # `bandpass_solution` builds a DIFFERENT layout, so its θ shares no
         # parameter identity with the original's — only the element type.
         @test CAL.bandpass_solution(sold).θ == CAL.bandpass_solution(solv).θ
+    end
+
+    @testset "gains(sol) labels the forward map for inspection" begin
+        ev = CAL.GainEvaluator(model, layout)
+        g = gains(solv)
+        @test g isa DimArray
+        @test size(g) == (length(freqs), length(times), nant, 2)
+        # The same numbers `evaluate_gains` / `apply_calibration` use.
+        @test parent(g) == CAL.evaluate_gains(ev, solv.θ)
+        # Axes carry the geometry, so a user can index by physical coordinate.
+        @test lookup(g, UVD.Frequency) == freqs
+        @test lookup(g, Ti) == times
+        @test lookup(g, UVD.Ant) == 1:nant           # no ant_names in info → 1:nant
+        @test lookup(g, UVD.Feed) == 1:2
+        # amp/phase recover from the complex gain, no separate accessor needed.
+        @test abs.(g) == abs.(CAL.evaluate_gains(ev, solv.θ))
+        @test angle.(g) == angle.(CAL.evaluate_gains(ev, solv.θ))
+        # Indifferent to θ's array type.
+        θd = DimArray(copy(θv), Dim{:param}(1:(layout.nθ)))
+        @test gains(CAL.CalibrationSolution(model, layout, geom, θd, (; nant))) == g
     end
 
     @testset "the 1-based contract is enforced, not assumed" begin

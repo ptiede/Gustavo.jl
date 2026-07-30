@@ -10,3 +10,8 @@ test/Manifest.toml
 testdata
 run_output
 vgos/
+DESIGN_REVIEW_PLAN.md
+DESIGN_REVIEW_SESSION.md
+NOTES_UPDATES.md
+scratch.jl
+
