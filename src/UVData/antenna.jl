@@ -3,16 +3,22 @@ const PolTypes = Union{RPol, LPol, XPol, YPol}
 """
     Mount(parallactic, elevation, offset=0)
 
-Defines the telescope mount type. `parallactic` and `elevation` are the
-rotation-rate coefficients applied during parallactic-angle evolution;
-`offset` is the feed angular offset (radians for natural use, but any
-numeric type works).
+A telescope mount: the rotation-rate coefficients applied during
+parallactic-angle evolution, plus a feed angular offset. `parallactic` and
+`elevation` are those coefficients; `offset` is the feed offset (radians for
+natural use, but any numeric type works). A single value-based type covers
+arbitrary coefficients, so a mount the standard names below do not anticipate is
+still expressible as a direct `Mount(...)`. Dispatch on `::Mount`.
 
-Convenience constructors:
-- `MountAltAz(offset=0)`: alt-az mount (AIPS `MNTSTA = 0`)
-- `MountEquatorial(offset=0)`: equatorial mount (AIPS `MNTSTA = 1`)
-- `MountNaismithR(offset=0)`: right Naismith mount (AIPS `MNTSTA = 4`)
-- `MountNaismithL(offset=0)`: left Naismith mount (AIPS `MNTSTA = 5`)
+The four standard mounts are FUNCTIONS returning a `Mount` (not distinct types,
+so do not dispatch on their names):
+- `MountAltAz(offset=0)`      → alt-az mount        (AIPS `MNTSTA = 0`)
+- `MountEquatorial(offset=0)` → equatorial mount    (AIPS `MNTSTA = 1`)
+- `MountNaismithR(offset=0)`  → right Naismith mount (AIPS `MNTSTA = 4`)
+- `MountNaismithL(offset=0)`  → left Naismith mount  (AIPS `MNTSTA = 5`)
+
+Read the fields back with `parallactic_mount(m)`, `elevation_mount(m)`, and
+`offset_mount(m)`.
 """
 struct Mount{A, B, C}
     parallactic::A
