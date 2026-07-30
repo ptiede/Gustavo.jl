@@ -58,10 +58,9 @@ function load_fitsidi_phasecal end
 function _phasecal_model()
     return StationGainModel(
         phase = (
-            TiedComponent(GainComponent(Delay(), PerScan(), PerSpectralWindow()), PerFeed()),
-            TiedComponent(GainComponent(ConstantTerm(), PerScan(), PerSpectralWindow()), PerFeed()),
+            delay = TiedComponent(GainComponent(Delay(), PerScan(), PerSpectralWindow()), PerFeed()),
+            constant = TiedComponent(GainComponent(ConstantTerm(), PerScan(), PerSpectralWindow()), PerFeed()),
         ),
-        logamp = (),
     )
 end
 

@@ -119,7 +119,8 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 # check covers only THIS step's contributions — the adhoc and bandpass
 # components come from steps that solve them themselves.
 function model_components(s::FringeFit, spec)
-    comps = Fringe.fringe_phase_components(s.model, spec.geom)
+    tree = Fringe.fringe_phase_components(s.model, spec.geom)
+    comps = Calibration._flatten_components(tree)
     for tc in comps
         Fringe.can_fit(s.estimator, tc) || throw(
             ArgumentError(
@@ -131,7 +132,7 @@ function model_components(s::FringeFit, spec)
         )
     end
     Fringe.validate_model(s.estimator, comps)
-    return (; phase = comps, logamp = ())
+    return (; phase = tree, logamp = (;))
 end
 
 # The bandpass components: phase and log-amp, per feed, time-stable, resolved in
@@ -139,14 +140,14 @@ end
 # terms).
 function model_components(s::BandpassEstimator, spec)
     bpc = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), s.freq), PerFeed())
-    return (; phase = s.phase ? (bpc,) : (), logamp = s.amp ? (bpc,) : ())
+    return (; phase = s.phase ? (bandpass = bpc,) : (;), logamp = s.amp ? (bandpass = bpc,) : (;))
 end
 
 # The per-integration adhoc phase: per-AP, feed-common, solved per scan by the
 # temporal-smoother pass (the legacy `_fringe_model` placement — last).
 model_components(s::TemporalSmoother, spec) = (;
-    phase = (TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),),
-    logamp = (),
+    phase = (adhoc = TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),),
+    logamp = (;),
 )
 
 # ── FringeFit visitor (stage A: per-scan search → one global station solve) ───

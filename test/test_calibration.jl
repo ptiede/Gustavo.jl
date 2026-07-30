@@ -105,7 +105,7 @@ end
     geom = CAL.DataGeometry(; times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
     # One ConstantTerm, GlobalTime × GlobalFrequency, 2 antennas.
     mk(tying) = CAL.StationGainModel(
-        phase = (CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), tying),),
+        phase = (c = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), tying),),
     )
 
     lay_pf = CAL.plan_parameters(mk(CAL.PerFeed()), 2, geom)
@@ -137,7 +137,7 @@ end
 
     # Pure per-feed delay model: phase = 2π τ (f − f0), one τ per (ant, feed).
     model = CAL.StationGainModel(
-        phase = (CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+        phase = (delay = CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
     )
     ev = CAL.GainEvaluator(model, geom; nant)
     @test CAL.nparameters(ev) == nant * 2
@@ -167,7 +167,7 @@ end
 
     # Rate term: phase grows linearly in time, flat in frequency.
     rate_model = CAL.StationGainModel(
-        phase = (CAL.TiedComponent(CAL.GainComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),),
+        phase = (rate = CAL.TiedComponent(CAL.GainComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),),
     )
     evr = CAL.GainEvaluator(rate_model, geom; nant)
     ṙ = 1.0e-3 .* collect(1:nant)                          # mHz-scale rates
@@ -185,8 +185,8 @@ end
     nant = 3
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [2.28e11, 2.281e11], t0 = 0.0)
     model = CAL.StationGainModel(
-        phase = (CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
-        logamp = (CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+        phase = (offset = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+        logamp = (offset = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
     )
     ev = CAL.GainEvaluator(model, geom; nant)
     θ = randn(CAL.nparameters(ev))
@@ -252,7 +252,7 @@ end
     end
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [1.0e9, 2.0e9])
     model = CAL.StationGainModel(
-        phase = (CAL.TiedComponent(CAL.GainComponent(CAL._AuditBadFreqTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+        phase = (bad = CAL.TiedComponent(CAL.GainComponent(CAL._AuditBadFreqTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
     )
     @test_throws MethodError CAL.plan_parameters(model, 1, geom)
 end
@@ -268,8 +268,8 @@ end
     # something to extract.
     model = CAL.StationGainModel(
         phase = (
-            CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),
-            CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.ChannelBlocks(1)), CAL.SharedFeeds()),
+            delay = CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),
+            bandpass = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.ChannelBlocks(1)), CAL.SharedFeeds()),
         ),
     )
     layout = CAL.plan_parameters(model, nant, geom)

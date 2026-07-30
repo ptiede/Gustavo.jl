@@ -42,16 +42,16 @@ abstract type SolveStep <: CalibrationStep end
 """
     model_components(step::SolveStep, spec) -> (; phase, logamp)
 
-The gain-model components `step` solves, as tuples of `TiedComponent`s to
-append to the compiled `StationGainModel`'s phase / log-amplitude lists.
-`spec` carries the data geometry and antenna table the step may consult (e.g.
-to resolve an `:auto` option). Default: no components.
+The gain-model components `step` solves, as named component trees (`NamedTuple`s
+of `TiedComponent`s) to merge into the compiled `StationGainModel`'s phase /
+log-amplitude groups. `spec` carries the data geometry and antenna table the
+step may consult (e.g. to resolve an `:auto` option). Default: no components.
 
 A method of the same generic that compiles a `FringeModel` term-list element —
 `model_components(element, geom::DataGeometry)` — so steps and model-list
 elements compose through one mechanism.
 """
-model_components(step::SolveStep, spec) = (; phase = (), logamp = ())
+model_components(step::SolveStep, spec) = (; phase = (;), logamp = (;))
 
 """
     transforms(step::CalibrationStep) -> Tuple

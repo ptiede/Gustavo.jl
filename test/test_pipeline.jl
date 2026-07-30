@@ -812,7 +812,7 @@ end
         CAL.save_solution_hdf5(path, sol)
         sol2 = CAL.load_solution_hdf5(path)
         @test sol2.θ == sol.θ
-        @test any(tc -> tc.component.term isa CAL.Dispersion, sol2.model.phase)
+        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(sol2.model))
     end
 end
 

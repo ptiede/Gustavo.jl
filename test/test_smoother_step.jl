@@ -88,7 +88,7 @@ end
 
     @testset "3-scan full pipeline: structure, determinism, coherence" begin
         @test Gustavo.stage_names(sol_n) == [:fringe, :bandpass, :adhoc]
-        phases = collect(sol_n.model.phase)
+        phases = CAL.phase_components(sol_n.model)
         # The adhoc block is really solved (nonzero) on every scan.
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(sol_n, ipi))
@@ -177,7 +177,7 @@ end
             uvset,
         )
         @test Gustavo.stage_names(sol_fs) == [:fringe, :adhoc]
-        phases = collect(sol_fs.model.phase)
+        phases = CAL.phase_components(sol_fs.model)
         @test !any(CAL._is_bandpass, phases)
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(sol_fs, ipi))

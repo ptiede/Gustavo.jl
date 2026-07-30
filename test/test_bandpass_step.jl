@@ -17,8 +17,8 @@
 # One component's θ block. `i` indexes `layout.plans` (phase components first,
 # then log-amplitude).
 _blk(sol, i) = sol.θ[CAL.component_ranges(sol.layout)[i]]
-_pc_phase_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.phase))
-_pc_amp_idx(sol) = findfirst(CAL._is_bandpass, collect(sol.model.logamp))
+_pc_phase_idx(sol) = findfirst(CAL._is_bandpass, CAL.phase_components(sol.model))
+_pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
 
 @testset "BandpassEstimator step (new engine)" begin
     nant, nbands, nchan = 4, 2, 8

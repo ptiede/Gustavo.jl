@@ -39,22 +39,24 @@ struct SingleBandDelay end
 
 function model_components(::SingleBandDelay, geom::DataGeometry)
     bands = fringe_band_groups(geom.channel_freqs)
-    length(bands) >= 2 || return ()
+    length(bands) >= 2 || return nothing
     # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a
     # group slope about the group's own centre νg needs the companion per-group
     # constant −2πτ(νg − f0): net phase 2πτ(f − νg), zero at the group centre —
-    # the cross-band solution is untouched.
+    # the cross-band solution is untouched. The pair nests under the element's
+    # key (`θ.phase.<key>.delay` / `.constant`).
     return (
-        TiedComponent(Delay(), PerScan(), FrequencyBands(bands), SharedFeeds()),
-        TiedComponent(ConstantTerm(), PerScan(), FrequencyBands(bands), SharedFeeds()),
+        delay = TiedComponent(Delay(), PerScan(), FrequencyBands(bands), SharedFeeds()),
+        constant = TiedComponent(ConstantTerm(), PerScan(), FrequencyBands(bands), SharedFeeds()),
     )
 end
 
 """
-    default_fringe_terms() -> Tuple
+    default_fringe_terms() -> NamedTuple
 
 The default [`FringeModel`](@ref) term list — the standard VLBI fringe model,
-specified feed by feed (compiled component order = list order):
+specified feed by feed as a named list (the key names the component; compiled
+component order = list order):
 
 1. per-scan constant phase, feed-common (`SharedFeeds`): atmosphere/clock.
 2. R–L constant offset, `GlobalTime × FeedComponent(2)`: the instrumental
@@ -83,13 +85,13 @@ Omit an element to drop the effect; add a `Calibration.TiedComponent` (term ×
 time segmentation × frequency segmentation × feed tying) to model a new one.
 """
 default_fringe_terms() = (
-    TiedComponent(ConstantTerm(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    TiedComponent(ConstantTerm(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
-    TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    TiedComponent(Delay(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
-    TiedComponent(Rate(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    DispersionModel(),
-    SingleBandDelay(),
+    atmos = TiedComponent(ConstantTerm(), PerScan(), GlobalFrequency(), SharedFeeds()),
+    rl_phase = TiedComponent(ConstantTerm(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
+    mbd = TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
+    rl_delay = TiedComponent(Delay(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
+    rate = TiedComponent(Rate(), PerScan(), GlobalFrequency(), SharedFeeds()),
+    dtec = DispersionModel(),
+    sbd = SingleBandDelay(),
 )
 
 """
@@ -101,32 +103,35 @@ the gauge pin plus an ordered list of phase-term elements.
 - `ref_ant` — the gauge pin: a 1-based antenna index or a station code
   (`"PT"`). Part of the MODEL (it changes what is solved), not of the
   execution configuration.
-- `terms` — the ordered term list. Each element is either a bare
+- `terms` — the ordered, NAMED term list (a `NamedTuple`; each key names the
+  component it compiles to). Each value is either a bare
   `Calibration.TiedComponent` (the generic element — a gain term × time
   segmentation × frequency segmentation × feed tying) or a wrapper that
   consults the data geometry at model-compile time ([`DispersionModel`](@ref),
-  [`SingleBandDelay`](@ref)). Adding an effect is adding an element; the list
-  order is the compiled component order. See [`default_fringe_terms`](@ref)
+  [`SingleBandDelay`](@ref)). Adding an effect is adding a named element; the
+  list order is the compiled component order. See [`default_fringe_terms`](@ref)
   for the default list and how to modify it.
 """
-struct FringeModel{T <: Tuple}
+struct FringeModel{T <: NamedTuple}
     ref_ant::Union{Integer, AbstractString, Symbol}
     terms::T
     function FringeModel{T}(ref_ant, terms) where {T}
-        # Elements read back BY TYPE from the list (`_dtec_ties` reads
+        # Elements read back BY TYPE from the list (`_dispersion_model` reads
         # `tie_colocated` off THE DispersionModel element) must be unique in it.
-        count(t -> t isa DispersionModel, terms) <= 1 || throw(
+        count(t -> t isa DispersionModel, values(terms)) <= 1 || throw(
             ArgumentError("FringeModel: more than one DispersionModel element in `terms`."),
         )
-        count(t -> t isa SingleBandDelay, terms) <= 1 || throw(
+        count(t -> t isa SingleBandDelay, values(terms)) <= 1 || throw(
             ArgumentError("FringeModel: more than one SingleBandDelay element in `terms`."),
         )
         return new{T}(ref_ant, terms)
     end
 end
 function FringeModel(; ref_ant = 1, terms = default_fringe_terms())
-    tt = Tuple(terms)
-    return FringeModel{typeof(tt)}(ref_ant, tt)
+    terms isa NamedTuple || throw(
+        ArgumentError("FringeModel: `terms` must be a NamedTuple naming each element."),
+    )
+    return FringeModel{typeof(terms)}(ref_ant, terms)
 end
 
 """
@@ -158,11 +163,13 @@ end
 # ── Model compilation ─────────────────────────────────────────────────────────
 
 """
-    fringe_phase_components(fm::FringeModel, geom::DataGeometry) -> Tuple
+    fringe_phase_components(fm::FringeModel, geom::DataGeometry) -> NamedTuple
 
-The fringe stage's gain-model phase components: each element of `fm.terms`
-compiled through `model_components(element, geom)`, concatenated in list order
-— the list order IS the compiled component order.
+The fringe stage's gain-model phase components as a named tree: each element of
+`fm.terms` compiled through `model_components(element, geom)` under its list key,
+in list order — the list order IS the compiled component order. An element that
+compiles to nothing contributes no key; one that compiles to several components
+nests them under its key.
 
 Throws `ArgumentError` when two compiled components share a routing signature:
 the structural plan routers (`_perscan_delay_plan`, `_sbd_plans`,
@@ -171,14 +178,25 @@ segmentation, tying) types, so a second matching component would compile θ
 columns no stage ever writes — a silent no-fit.
 """
 function fringe_phase_components(fm::FringeModel, geom::DataGeometry)
-    comps = _compile_terms(fm.terms, geom)
-    _validate_fringe_components(comps)
+    comps = _compile_named(fm.terms, geom)
+    _validate_fringe_components(_flatten_components(comps))
     return comps
 end
 
-_compile_terms(::Tuple{}, ::DataGeometry) = ()
-_compile_terms(ts::Tuple, geom::DataGeometry) =
-    (model_components(ts[1], geom)..., _compile_terms(Base.tail(ts), geom)...)
+# Compile a named term list into a named component tree: each element keyed by
+# its list name, dropped when it emits nothing, nested when it emits several.
+# The names come from the type parameter so the keys stay compile-time constants
+# and the tree's type is inferred.
+_compile_named(terms::NamedTuple{names}, geom::DataGeometry) where {names} =
+    _compile_named(names, terms, geom)
+_compile_named(::Tuple{}, terms, geom::DataGeometry) = (;)
+function _compile_named(names::Tuple, terms, geom::DataGeometry)
+    k = first(names)
+    v = model_components(terms[k], geom)
+    return _prepend_named(Val(k), v, _compile_named(Base.tail(names), terms, geom))
+end
+_prepend_named(::Val, ::Nothing, rest) = rest
+_prepend_named(::Val{k}, v, rest) where {k} = merge(NamedTuple{(k,)}((v,)), rest)
 
 # Reject compiled component sets a findfirst router cannot address uniquely,
 # and exact duplicates (indistinguishable θ blocks are degenerate columns).
@@ -222,6 +240,8 @@ _same_freq_segmentation(a::FrequencyBands, b::FrequencyBands) = a.ranges == b.ra
 
 # Whether the compiled fringe components opt into a solvable feed-specific
 # rate (an R–L rate column) — cross-hand rows must then join the rate system.
+# Accepts the named component tree (or any component collection).
+_has_feed_rate(comps::NamedTuple) = _has_feed_rate(_flatten_components(comps))
 _has_feed_rate(comps) =
     any(tc -> tc.component.term isa Rate && tc.tying isa FeedComponent, comps)
 
@@ -229,8 +249,9 @@ _has_feed_rate(comps) =
 # (not compiled) read: `tie_colocated` is configuration, wanted even on
 # geometries where the dTEC term gates itself off.
 function _dispersion_model(fm::FringeModel)
-    i = findfirst(t -> t isa DispersionModel, fm.terms)
-    return i === nothing ? nothing : fm.terms[i]
+    els = values(fm.terms)
+    i = findfirst(t -> t isa DispersionModel, els)
+    return i === nothing ? nothing : els[i]
 end
 
 # What `MatchedFilter` does with a compiled component's θ block:
@@ -273,7 +294,7 @@ end
 # search + stationization solve, as declared by `matched_kind`.
 function fringe_stage_components(model, layout)
     comps = Tuple{ComponentPlan, Symbol}[]
-    for (i, tc) in enumerate(model.phase)
+    for (i, tc) in enumerate(phase_components(model))
         kind = matched_kind(tc)
         kind in (:delay, :rate, :phase) || continue
         push!(comps, (layout.plans[i], kind))

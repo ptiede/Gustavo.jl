@@ -15,7 +15,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
 @testset "Composable pipeline interface" begin
     @testset "step protocol defaults + visitor hooks" begin
         s = _ProtoProbe()
-        @test Gustavo.model_components(s, nothing) == (; phase = (), logamp = ())
+        @test Gustavo.model_components(s, nothing) == (; phase = (;), logamp = (;))
         @test Gustavo.transforms(s) == ()
         @test Gustavo.fit_selection(s) isa AllScans
         @test Gustavo.provides(s) == :nothing

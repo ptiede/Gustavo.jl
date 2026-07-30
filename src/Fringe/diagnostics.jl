@@ -147,7 +147,7 @@ so no time index is needed. Errors if the model carries no bandpass component.
 """
 function fringe_bandpass_spectrum(sol::CalibrationSolution)
     layout = sol.layout
-    bp_i = findfirst(_is_bandpass, sol.model.phase)
+    bp_i = findfirst(_is_bandpass, phase_components(sol.model))
     bp_i === nothing &&
         error("fringe_bandpass_spectrum: model has no phase bandpass component")
     # θ with every parameter zeroed EXCEPT the bandpass component's own

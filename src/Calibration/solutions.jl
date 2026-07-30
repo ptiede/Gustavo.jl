@@ -277,14 +277,17 @@ channel layout (see [`Gustavo.Fringe.ApplySolution`](@ref)); stations absent
 from the extraction get identity gains.
 """
 function bandpass_solution(sol::CalibrationSolution)
-    pcs = collect(sol.model.phase)
-    lcs = collect(sol.model.logamp)
+    pcs = phase_components(sol.model)
+    lcs = logamp_components(sol.model)
     pidx = findall(_is_bandpass, pcs)
     lidx = findall(_is_bandpass, lcs)
     isempty(pidx) && isempty(lidx) && throw(
         ArgumentError("bandpass_solution: the solution's model carries no bandpass component.")
     )
-    model = StationGainModel(phase = Tuple(pcs[pidx]), logamp = Tuple(lcs[lidx]))
+    model = StationGainModel(
+        phase = _named_subset(sol.model.phase, _is_bandpass),
+        logamp = _named_subset(sol.model.logamp, _is_bandpass),
+    )
     nant = sol.layout.nant
     layout = plan_parameters(model, nant, sol.geom)
     # The extracted model has its own layout, so θ shares neither length nor

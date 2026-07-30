@@ -75,13 +75,13 @@
         # A solvable R–L rate is ADDED to the term list — a feed-specific Rate
         # component; the estimator detects it structurally and includes the
         # cross-hand rows in the rate system.
-        rl_terms = (
+        rl_terms = (;
             _fringe_terms(dispersion = false, sbd = false)...,
-            CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
+            rl_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
         )
 
         sol = fit(FringeFit(model = FringeModel(terms = rl_terms)), uvset)
-        @test length(sol.model.phase) == 6
+        @test length(CAL.phase_components(sol.model)) == 6
         plan = sol.layout.plans[6]
         solved = [sol.θ[plan.off1[a, 2, 1, 1]] for a in 1:4]
         @test solved ≈ inj .- inj[1] atol = 1.0e-7
@@ -210,9 +210,9 @@
             CalibrationPipeline(
                 CalFunction((stack, win) -> nothing),
                 FringeFit(
-                    model = FringeModel(terms = (
+                    model = FringeModel(terms = (;
                         default_fringe_terms()...,
-                        CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
+                        rl_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
                     )),
                     estimator = MatchedFilter(
                         closure = FP.Stationization(snr_min = 3.0),
@@ -243,7 +243,7 @@
         # this geometry the dispersion gate is closed (nb < 4) and the SBD gate
         # open (2 band groups), so 7 elements → 7 components.
         comps = FP.fringe_phase_components(FringeModel(), geom)
-        @test collect(map(sig, comps)) == [
+        @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.ConstantTerm, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -254,37 +254,37 @@
         ]
 
         # Geometry-gated elements emit nothing when unconstrainable.
-        @test isempty(CAL.model_components(DispersionModel(), geom))
-        @test length(CAL.model_components(
-            DispersionModel(require_band_separation = false), geom)) == 1
+        @test CAL.model_components(DispersionModel(), geom) === nothing
+        @test CAL.model_components(
+            DispersionModel(require_band_separation = false), geom) isa CAL.TiedComponent
         narrow, _ = _build_fringe_uvset(nbands = 1)
-        @test isempty(CAL.model_components(SingleBandDelay(), CAL.build_geometry(narrow)))
+        @test CAL.model_components(SingleBandDelay(), CAL.build_geometry(narrow)) === nothing
         # A bare TiedComponent compiles to itself.
         tc = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2))
-        @test CAL.model_components(tc, geom) === (tc,)
+        @test CAL.model_components(tc, geom) === tc
 
         # Exact duplicate components are rejected by message.
-        dup = (
+        dup = (;
             default_fringe_terms()...,
-            CAL.TiedComponent(CAL.Delay(), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()),
+            mbd2 = CAL.TiedComponent(CAL.Delay(), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()),
         )
         @test_throws "two identical components" FP.fringe_phase_components(
             FringeModel(terms = dup), geom)
 
         # A second component matching a findfirst router's signature — without
         # being an exact duplicate — is rejected naming the signature.
-        collide = (
+        collide = (;
             default_fringe_terms()...,
-            CAL.TiedComponent(CAL.Delay(), CAL.TimeBlocks(1.0), CAL.GlobalFrequency(), CAL.SharedFeeds()),
+            mbd_tb = CAL.TiedComponent(CAL.Delay(), CAL.TimeBlocks(1.0), CAL.GlobalFrequency(), CAL.SharedFeeds()),
         )
         @test_throws "per-scan feed-common delay signature" FP.fringe_phase_components(
             FringeModel(terms = collide), geom)
 
         # Elements read back BY TYPE from the list are unique at construction.
         @test_throws "more than one DispersionModel" FringeModel(
-            terms = (default_fringe_terms()..., DispersionModel(tie_colocated = false)))
+            terms = (; default_fringe_terms()..., dtec2 = DispersionModel(tie_colocated = false)))
         @test_throws "more than one SingleBandDelay" FringeModel(
-            terms = (default_fringe_terms()..., SingleBandDelay()))
+            terms = (; default_fringe_terms()..., sbd2 = SingleBandDelay()))
     end
 end
 
@@ -412,7 +412,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
         # A polynomial-in-frequency phase is a legitimate gain term that the
         # matched filter has no observable for: its θ block would stay at zero
         # while the solution looked fitted.
-        terms = (_fringe_terms()..., CAL.TiedComponent(
+        terms = (; _fringe_terms()..., poly = CAL.TiedComponent(
             CAL.PolynomialFreq(2), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()))
         @test_throws "MatchedFilter cannot fit the model term" fit(
             FringeFit(model = FringeModel(ref_ant = 1, terms = terms)), uvset,
@@ -514,8 +514,8 @@ end
         )
         @test CAL._dispersion_plan(on.model, on.layout) !== nothing
         @test CAL._dispersion_plan(off.model, off.layout) === nothing
-        @test any(tc -> tc.component.term isa CAL.Dispersion, on.model.phase)
-        @test !any(tc -> tc.component.term isa CAL.Dispersion, off.model.phase)
+        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(on.model))
+        @test !any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(off.model))
         # No dTEC term means no dTEC columns in θ at all.
         @test length(off.θ) < length(on.θ)
     end

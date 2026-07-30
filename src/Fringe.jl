@@ -18,7 +18,8 @@ using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
 using ..UVData: Frequency, Baseline, Feed, Pol
 using ..Calibration
-using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_bandpass, _is_dispersion
+using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_bandpass, _is_dispersion,
+    _flatten_components
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
 # the model layer's element-compilation generic.
 import ..Calibration: model_components

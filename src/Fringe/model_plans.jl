@@ -56,7 +56,7 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
     # band). `Dispersion` is its routing signature, like `ChannelBlocks` for the
     # bandpass. Only included when the band layout can constrain it.
     disp = dispersion ?
-        (TiedComponent(GainComponent(Dispersion(), PerScan(), GlobalFrequency()), SharedFeeds()),) : ()
+        (dtec = TiedComponent(GainComponent(Dispersion(), PerScan(), GlobalFrequency()), SharedFeeds()),) : (;)
     # Per-scan per-band-group single-band delay (fourfit's SBD): a station's
     # per-band signal path can move relative to its phase-cal tones between
     # scans (~30 ns on VR2505's YJ), which neither the wideband delay (one slope
@@ -68,27 +68,32 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
     # constant −2πτ(νg − f0): net phase 2πτ(f − νg), zero at the group centre —
     # the cross-band solution is untouched. `FrequencyBands` is the routing
     # signature (excluded from stage-B).
-    sbd = sbd_bands === nothing ? () : (
-            TiedComponent(GainComponent(Delay(), PerScan(), FrequencyBands(sbd_bands)), SharedFeeds()),
-            TiedComponent(GainComponent(ConstantTerm(), PerScan(), FrequencyBands(sbd_bands)), SharedFeeds()),
+    sbd = sbd_bands === nothing ? (;) : (
+            sbd = (
+                delay = TiedComponent(GainComponent(Delay(), PerScan(), FrequencyBands(sbd_bands)), SharedFeeds()),
+                constant = TiedComponent(GainComponent(ConstantTerm(), PerScan(), FrequencyBands(sbd_bands)), SharedFeeds()),
+            ),
         )
     return StationGainModel(
-        phase = (
-            TiedComponent(GainComponent(ConstantTerm(), PerScan(), GlobalFrequency()), SharedFeeds()),
-            TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
-            TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), SharedFeeds()),
-            TiedComponent(GainComponent(Delay(), rl_time, GlobalFrequency()), FeedComponent(2)),
-            TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), SharedFeeds()),
-            disp...,
-            sbd...,
-            # Phase bandpass: one free offset per channel, stable across the
-            # observation (HOPS-style), per feed. Captures the residual
-            # nonlinear-in-frequency instrumental phase that the per-scan (linear) delay
-            # cannot represent. Solved by a dedicated frequency-stationization stage
-            # (`solve_phase_bandpass!`), not by the delay/rate search — the
-            # `ChannelBlocks` segmentation is its routing signature.
-            TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
-            TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),
+        phase = merge(
+            (
+                atmos = TiedComponent(GainComponent(ConstantTerm(), PerScan(), GlobalFrequency()), SharedFeeds()),
+                rl_phase = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), GlobalFrequency()), FeedComponent(2)),
+                mbd = TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), SharedFeeds()),
+                rl_delay = TiedComponent(GainComponent(Delay(), rl_time, GlobalFrequency()), FeedComponent(2)),
+                rate = TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), SharedFeeds()),
+            ),
+            disp, sbd,
+            (
+                # Phase bandpass: one free offset per channel, stable across the
+                # observation (HOPS-style), per feed. Captures the residual
+                # nonlinear-in-frequency instrumental phase that the per-scan (linear) delay
+                # cannot represent. Solved by a dedicated frequency-stationization stage
+                # (`solve_phase_bandpass!`), not by the delay/rate search — the
+                # `ChannelBlocks` segmentation is its routing signature.
+                bandpass = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
+                adhoc = TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),
+            ),
         ),
         # Amplitude bandpass: per-channel, time-stable, per-feed log-amplitude — the
         # per-station instrumental amplitude shape (filterbank passband), FLATTENED
@@ -97,7 +102,7 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
         # no-signal channels, which the smoother then estimates (or, for `FreeBandpass`,
         # leaves at gain 1). The absolute level stays the a-priori amplitude cal's job.
         logamp = (
-            TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
+            bandpass = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
         ),
     )
 end
@@ -126,34 +131,36 @@ _is_sbd_constant(tc) =
     tc.component.term isa ConstantTerm && tc.component.freq isa FrequencyBands
 
 function _perscan_delay_plan(model, layout)
-    i = findfirst(_is_perscan_delay, model.phase)
+    i = findfirst(_is_perscan_delay, phase_components(model))
     return i === nothing ? nothing : layout.plans[i]
 end
 
 # The SBD components' plans `(dplan, cplan, bands)` (per-scan per-band-group
 # delay + companion constant), or `nothing` when the model carries none.
 function _sbd_plans(model, layout)
-    i = findfirst(_is_sbd_delay, model.phase)
+    pcs = phase_components(model)
+    i = findfirst(_is_sbd_delay, pcs)
     i === nothing && return nothing
-    j = findfirst(_is_sbd_constant, model.phase)
+    j = findfirst(_is_sbd_constant, pcs)
     j === nothing && error("SBD delay component present without its companion constant")
-    return (dplan = layout.plans[i], cplan = layout.plans[j], bands = model.phase[i].component.freq.ranges)
+    return (dplan = layout.plans[i], cplan = layout.plans[j], bands = pcs[i].component.freq.ranges)
 end
 
-# Index of the adhoc component (the per-integration phase term) within `model.phase`.
-_adhoc_idx(model) = findfirst(tc -> tc.component.time isa PerIntegration, model.phase)
+# Index of the adhoc component (the per-integration phase term) in the flat
+# phase-component order (= `layout.plans` order).
+_adhoc_idx(model) = findfirst(tc -> tc.component.time isa PerIntegration, phase_components(model))
 
 # The adhoc component's plan (the per-integration phase term).
 _adhoc_plan(model, layout) = layout.plans[_adhoc_idx(model)]
 
 # Whether the adhoc (per-integration) phase component is feed-common (`SharedFeeds`),
 # so `solve_adhoc_phasing` solves one feed-common track and contributes zero R–L.
-_adhoc_shared(model) = model.phase[_adhoc_idx(model)].tying isa SharedFeeds
+_adhoc_shared(model) = phase_components(model)[_adhoc_idx(model)].tying isa SharedFeeds
 
 # The phase-bandpass component's plan, or `nothing` if the model carries no
 # bandpass component. `Calibration._is_bandpass` is the signature.
 function _bandpass_plan(model, layout)
-    i = findfirst(_is_bandpass, model.phase)
+    i = findfirst(_is_bandpass, phase_components(model))
     return i === nothing ? nothing : layout.plans[i]
 end
 
@@ -161,7 +168,7 @@ end
 # the phase plans in `layout.plans` (offset `nphase`), so index the bandpass
 # position within `model.logamp`.
 function _amp_bandpass_plan(model, layout)
-    j = findfirst(_is_bandpass, model.logamp)
+    j = findfirst(_is_bandpass, logamp_components(model))
     return j === nothing ? nothing : layout.plans[layout.nphase + j]
 end
 

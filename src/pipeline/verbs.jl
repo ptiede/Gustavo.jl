@@ -233,17 +233,23 @@ function _fit_new_engine(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing
     antennas = UVData.metadata(first_leaf).antennas
     nant = length(antennas)
     spec = (; geom, antennas)
-    phase = ()
-    logamp = ()
+    phase = (;)
+    logamp = (;)
+    nphase = 0
+    nlogamp = 0
     comp_owner = NamedTuple[]
     for st in solve_steps
         mc = model_components(st, spec)
+        np = length(Calibration._flatten_components(mc.phase))
+        nl = length(Calibration._flatten_components(mc.logamp))
         push!(comp_owner, (;
-            phase = collect((length(phase) + 1):(length(phase) + length(mc.phase))),
-            logamp = collect((length(logamp) + 1):(length(logamp) + length(mc.logamp))),
+            phase = collect((nphase + 1):(nphase + np)),
+            logamp = collect((nlogamp + 1):(nlogamp + nl)),
         ))
-        phase = (phase..., mc.phase...)
-        logamp = (logamp..., mc.logamp...)
+        nphase += np
+        nlogamp += nl
+        phase = Calibration._merge_components(phase, mc.phase)
+        logamp = Calibration._merge_components(logamp, mc.logamp)
     end
     model = StationGainModel(phase = phase, logamp = logamp)
     layout = plan_parameters(model, nant, geom)

@@ -3,9 +3,17 @@
 # Composition hierarchy:
 #
 #   StationGainModel
-#     .phase  :: Tuple of TiedComponent   →  Σ phase contributions
-#     .logamp :: Tuple of TiedComponent   →  Σ log-amplitude contributions
+#     .phase  :: NamedTuple, name → TiedComponent   →  Σ phase contributions
+#     .logamp :: NamedTuple, name → TiedComponent   →  Σ log-amplitude contributions
 #       gain(t, f) = exp(Σ logamp) · cis(Σ phase)
+#
+# Each component carries a user-specified name (the NamedTuple key), unique
+# within its group. A value that is itself a NamedTuple is a named subtree — one
+# list element that compiled to several components (e.g. a single-band delay's
+# delay + companion constant), namespaced under the element's key. `θ` addresses
+# the parameters the same way: `θ.phase.<name>` / `θ.logamp.<name>`. The layout
+# and the forward map consume the depth-first flat view `phase_components` /
+# `logamp_components`, whose order is the list order.
 #
 #   TiedComponent
 #     .component :: GainComponent(term, time_seg, freq_seg)
@@ -110,41 +118,94 @@ nfeed_blocks(::ReferenceRelative) = 2
 nfeed_blocks(::FeedComponent) = 1
 
 """
-    StationGainModel(; phase = (), logamp = ())
+    StationGainModel(; phase = (;), logamp = (;))
 
-The gain model for a station: a tuple of phase `TiedComponent`s and a tuple of
-log-amplitude `TiedComponent`s. `gain = exp(Σ logamp) · cis(Σ phase)`.
+The gain model for a station: a `NamedTuple` of named phase `TiedComponent`s and
+a `NamedTuple` of named log-amplitude `TiedComponent`s.
+`gain = exp(Σ logamp) · cis(Σ phase)`. The keys are the component names, unique
+within each group; a value may itself be a `NamedTuple` — a named subtree for one
+element that compiled to several components. A `GainComponent` value is coerced to
+a `PerFeed` `TiedComponent`.
 """
-struct StationGainModel{P <: Tuple, A <: Tuple}
+struct StationGainModel{P <: NamedTuple, A <: NamedTuple}
     phase::P
     logamp::A
 end
-StationGainModel(; phase = (), logamp = ()) =
-    StationGainModel(_as_tied_tuple(phase), _as_tied_tuple(logamp))
+StationGainModel(; phase = (;), logamp = (;)) =
+    StationGainModel(_named_components(phase), _named_components(logamp))
 
-_as_tied_tuple(t::Tuple) = map(_as_tied, t)
-_as_tied_tuple(c) = (_as_tied(c),)
+_named_components(nt::NamedTuple) = map(_as_tied, nt)
+_named_components(::Tuple{}) = (;)
+_named_components(t::Tuple) = throw(
+    ArgumentError(
+        "StationGainModel components must be named: pass a NamedTuple " *
+            "(e.g. `phase = (delay = TiedComponent(...),)`), not a bare tuple.",
+    ),
+)
 _as_tied(tc::TiedComponent) = tc
 _as_tied(c::GainComponent) = TiedComponent(c)
+_as_tied(nt::NamedTuple) = map(_as_tied, nt)   # a named subtree
 
-phase_components(m::StationGainModel) = m.phase
-logamp_components(m::StationGainModel) = m.logamp
+# Depth-first flat tuple of the `TiedComponent`s in a named component tree, names
+# dropped — the order the layout and forward map consume. Type-stable: the tree
+# shape lives in the NamedTuple type, so the recursion specializes and each
+# `_flatten_one` dispatch resolves at compile time.
+_flatten_components(nt::NamedTuple) = _flatten_vals(values(nt))
+_flatten_vals(::Tuple{}) = ()
+_flatten_vals(t::Tuple) = (_flatten_one(first(t))..., _flatten_vals(Base.tail(t))...)
+_flatten_one(tc::TiedComponent) = (tc,)
+_flatten_one(nt::NamedTuple) = _flatten_components(nt)
+
+phase_components(m::StationGainModel) = _flatten_components(m.phase)
+logamp_components(m::StationGainModel) = _flatten_components(m.logamp)
+
+# Merge two named component groups, failing loudly on a name clash — `merge`
+# alone would silently drop the earlier component. Names are unique WITHIN a
+# group (phase or log-amp), so this guards the assembly of a model from several
+# steps' contributions.
+function _merge_components(a::NamedTuple, b::NamedTuple)
+    dup = intersect(keys(a), keys(b))
+    isempty(dup) || throw(
+        ArgumentError(
+            "duplicate component name(s) $(collect(dup)): each component in a " *
+                "group must be uniquely named.",
+        ),
+    )
+    return merge(a, b)
+end
+
+# The named top-level leaf components of `nt` whose `TiedComponent` satisfies
+# `pred`, preserving names and order — for extracting a sub-model by predicate
+# (e.g. the bandpass). Not type-stable (runtime key selection); used off the hot
+# path.
+function _named_subset(nt::NamedTuple, pred)
+    ks = filter(k -> nt[k] isa TiedComponent && pred(nt[k]), keys(nt))
+    return NamedTuple{ks}(map(k -> nt[k], ks))
+end
 
 # ── Model-list elements ──────────────────────────────────────────────────────
 
 """
-    model_components(element, geom::DataGeometry) -> Tuple{Vararg{TiedComponent}}
+    model_components(element, geom::DataGeometry) -> TiedComponent | NamedTuple | Nothing
 
-Compile one model-list element into zero or more `TiedComponent`s for the data
-geometry `geom`. A bare `TiedComponent` compiles to itself; wrapper elements
-(e.g. [`DispersionModel`](@ref)) consult the geometry and emit nothing when it
-cannot constrain their terms. The same generic applied to a pipeline step
-returns the step's `(; phase, logamp)` component lists — steps and list
-elements compose through one mechanism.
+Compile one model-list element for the data geometry `geom`. The result is named
+by the element's key in the term list, so an element returns only its own
+internal structure:
+
+- a single `TiedComponent` — the element's list key names it (`θ.phase.<key>`);
+- a `NamedTuple` of `TiedComponent`s — one element that compiles to several
+  components, nested under its list key (`θ.phase.<key>.<part>`);
+- `nothing` — the geometry cannot constrain the element, so it contributes no
+  component (and no key).
+
+A bare `TiedComponent` compiles to itself; wrapper elements (e.g.
+[`DispersionModel`](@ref)) consult the geometry. The same generic applied to a
+pipeline step returns the step's `(; phase, logamp)` named component trees —
+steps and list elements compose through one mechanism.
 """
 function model_components end
 
-model_components(tc::TiedComponent, ::DataGeometry) = (tc,)
+model_components(tc::TiedComponent, ::DataGeometry) = tc
 
 # ── Per-component / per-model time-segmentation queries ──────────────────────
 # Used by solvers to route global-time vs per-scan components.
@@ -154,15 +215,15 @@ is_per_scan(::PerIntegration) = true
 component_is_per_scan(tc::TiedComponent) = is_per_scan(time_segmentation(tc))
 component_is_per_scan(c::GainComponent) = is_per_scan(c.time)
 
-phase_is_per_scan(m::StationGainModel) = any(component_is_per_scan, m.phase)
-amplitude_is_per_scan(m::StationGainModel) = any(component_is_per_scan, m.logamp)
+phase_is_per_scan(m::StationGainModel) = any(component_is_per_scan, phase_components(m))
+amplitude_is_per_scan(m::StationGainModel) = any(component_is_per_scan, logamp_components(m))
 
 # ── Validation ───────────────────────────────────────────────────────────────
 # A frequency-only / time-only term must not be paired with a segmentation that
 # makes it degenerate-free; the linear-algebra layer tolerates redundancy, so
 # validation here is light — mainly catching empty models.
 function validate_station_gain_model(m::StationGainModel)
-    (isempty(m.phase) && isempty(m.logamp)) && throw(
+    (isempty(phase_components(m)) && isempty(logamp_components(m))) && throw(
         ArgumentError("StationGainModel has neither phase nor log-amplitude components")
     )
     return m
@@ -210,13 +271,15 @@ frequency_segmentation_label(s::ChannelBlocks) = "chblocks$(s.block_size)"
 frequency_segmentation_label(s::FrequencyBands) = "bands$(length(s.ranges))"
 
 function station_model_summary(name, m::StationGainModel)
-    ph = isempty(m.phase) ? "—" : join(component_label.(m.phase), " + ")
-    am = isempty(m.logamp) ? "—" : join(component_label.(m.logamp), " + ")
+    p, a = phase_components(m), logamp_components(m)
+    ph = isempty(p) ? "—" : join(component_label.(p), " + ")
+    am = isempty(a) ? "—" : join(component_label.(a), " + ")
     return string(name, "  phase(", ph, ")  logamp(", am, ")")
 end
 
 function Base.show(io::IO, m::StationGainModel)
-    ph = isempty(m.phase) ? "—" : join(component_label.(m.phase), " + ")
-    am = isempty(m.logamp) ? "—" : join(component_label.(m.logamp), " + ")
+    p, a = phase_components(m), logamp_components(m)
+    ph = isempty(p) ? "—" : join(component_label.(p), " + ")
+    am = isempty(a) ? "—" : join(component_label.(a), " + ")
     return print(io, "StationGainModel(phase: ", ph, ", logamp: ", am, ")")
 end

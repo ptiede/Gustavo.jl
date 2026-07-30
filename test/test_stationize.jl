@@ -282,9 +282,9 @@ end
     geom = CALs.DataGeometry(; times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
     model = CALs.StationGainModel(
         phase = (
-            CALs.TiedComponent(CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
-            CALs.TiedComponent(CALs.GainComponent(CALs.Delay(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
-            CALs.TiedComponent(CALs.GainComponent(CALs.Rate(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            offset = CALs.TiedComponent(CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            delay = CALs.TiedComponent(CALs.GainComponent(CALs.Delay(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            rate = CALs.TiedComponent(CALs.GainComponent(CALs.Rate(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
         ),
     )
     layout = CALs.plan_parameters(model, nant, geom)
@@ -356,11 +356,11 @@ end
     mkc(term, tseg, tying) = CALs.TiedComponent(CALs.GainComponent(term, tseg, CALs.GlobalFrequency()), tying)
     model = CALs.StationGainModel(
         phase = (
-            mkc(CALs.ConstantTerm(), CALs.PerScan(), CALs.SharedFeeds()),
-            mkc(CALs.ConstantTerm(), CALs.GlobalTime(), CALs.FeedComponent(2)),
-            mkc(CALs.Delay(), CALs.PerScan(), CALs.SharedFeeds()),
-            mkc(CALs.Delay(), CALs.GlobalTime(), CALs.FeedComponent(2)),
-            mkc(CALs.Rate(), CALs.PerScan(), CALs.PerFeed()),
+            atmos = mkc(CALs.ConstantTerm(), CALs.PerScan(), CALs.SharedFeeds()),
+            rl_phase = mkc(CALs.ConstantTerm(), CALs.GlobalTime(), CALs.FeedComponent(2)),
+            mbd = mkc(CALs.Delay(), CALs.PerScan(), CALs.SharedFeeds()),
+            rl_delay = mkc(CALs.Delay(), CALs.GlobalTime(), CALs.FeedComponent(2)),
+            rate = mkc(CALs.Rate(), CALs.PerScan(), CALs.PerFeed()),
         ),
     )
     layout = CALs.plan_parameters(model, nant, geom)
@@ -452,9 +452,9 @@ end
     geom = CALs.DataGeometry(; times = [0.0, 1.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
     model = CALs.StationGainModel(
         phase = (
-            CALs.TiedComponent(CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
-            CALs.TiedComponent(CALs.GainComponent(CALs.Delay(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
-            CALs.TiedComponent(CALs.GainComponent(CALs.Rate(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            offset = CALs.TiedComponent(CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            delay = CALs.TiedComponent(CALs.GainComponent(CALs.Delay(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
+            rate = CALs.TiedComponent(CALs.GainComponent(CALs.Rate(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
         ),
     )
     layout = CALs.plan_parameters(model, nant, geom)
