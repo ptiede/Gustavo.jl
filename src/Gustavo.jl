@@ -62,6 +62,6 @@ export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, select_groups
 export search_scan
 export map_groups, foreach_group
-export StageRecord, StageView, stage_names, stage_solution, stage_info, component_gains, gains
+export StageRecord, StageView, stage_names, stage_solution, stage_info, component_gains, gains, @comp
 export bandpass_solution
 end

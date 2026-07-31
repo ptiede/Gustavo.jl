@@ -10,7 +10,7 @@
 
 using Serialization: serialize, deserialize
 using Statistics: mean
-using DimensionalData: lookup, Ti, DimArray
+using DimensionalData: lookup, Ti, DimArray, Dim
 using ..UVData: Frequency, Pol, Baseline, Ant, Feed
 
 """
@@ -231,6 +231,96 @@ function gains(sol::CalibrationSolution)
             Ant(ants), Feed(1:size(g, 4)),
         ),
     )
+end
+
+# ── @comp: one component's θ leaf as a labelled DimArray ─────────────────────
+
+"""
+    @comp solution.θ.phase.<name>
+    @comp solution.θ.logamp.<name>
+
+The raw θ leaf of one model component, wrapped as a labelled `DimArray` for
+inspection. The path mirrors the model's named component tree: `phase` or
+`logamp`, then the component's name, descending into a multi-emit wrapper's
+subtree (`solution.θ.phase.sbd.delay`).
+
+The result carries the leaf's five axes `(param, feed, Frequency, Ti, Ant)` —
+the second is `Feed` when the component is fit per feed, else the tied `node`
+axis — with coordinates materialized from `solution`'s geometry: a `Frequency`
+segment's centre channel frequency (Hz), a `Ti` segment's mean epoch (hours),
+feed/node ids, and antenna names (from `solution.info.ant_names` when present,
+else `1:nant`).
+
+The wrap shares data with θ (no copy): an inspection view, never stored on the
+solution and never fed through the solve or AD.
+"""
+macro comp(ex)
+    sol, path = _parse_comp_path(ex)
+    pathexpr = Expr(:tuple, (QuoteNode(s) for s in path)...)
+    return :(_component_dimarray($(esc(sol)), $pathexpr))
+end
+
+# Split `solution.θ.group.name…` into the solution expression and the tuple of
+# component-path symbols after `.θ`. Errors at macro-expansion when the `.θ`
+# marker is absent or ends the path.
+function _parse_comp_path(ex)
+    syms = Symbol[]
+    e = ex
+    while e isa Expr && e.head === :. && length(e.args) == 2 && e.args[2] isa QuoteNode
+        push!(syms, e.args[2].value)
+        e = e.args[1]
+    end
+    reverse!(syms)
+    i = findfirst(==(:θ), syms)
+    (i === nothing || i == length(syms)) && error(
+        "@comp: expected a path of the form `solution.θ.phase.<name>`; got `$ex`."
+    )
+    sol = foldl((a, s) -> Expr(:., a, QuoteNode(s)), syms[1:(i - 1)]; init = e)
+    return sol, syms[(i + 1):end]
+end
+
+"""
+    _component_dimarray(sol::CalibrationSolution, path::Tuple{Vararg{Symbol}}) -> DimArray
+
+Runtime behind [`@comp`](@ref): descend `sol.layout.plantree` and `sol.layout.axes`
+by `path` to a component leaf and wrap it as a labelled `DimArray`. See `@comp`
+for the path grammar and coordinate sourcing.
+"""
+function _component_dimarray(sol::CalibrationSolution, path::Tuple{Vararg{Symbol}})
+    plan = foldl(getproperty, path; init = sol.layout.plantree)
+    plan isa ComponentPlan || throw(
+        ArgumentError(
+            "@comp: path $(join(path, '.')) names a component group, not a leaf; " *
+                "descend to a named component."
+        )
+    )
+    roles = foldl(getproperty, path; init = sol.layout.axes).roles
+    raw = _component_leaf(plan, sol.θ)
+    dims = ntuple(d -> _role_dim(roles[d], size(raw, d), sol, plan), ndims(raw))
+    return DimArray(raw, dims; name = last(path))
+end
+
+# The DimensionalData dimension for one leaf axis, from its role and the
+# solution's geometry. A segment axis takes a representative coordinate per
+# segment (a frequency segment's centre, a time segment's mean epoch); the
+# antenna axis takes station names when the solution carries them; `:param` and
+# `:node` are positional id spaces with no physical coordinate.
+function _role_dim(role::Symbol, n::Int, sol::CalibrationSolution, plan::ComponentPlan)
+    if role === :Frequency
+        groups = segment_groups(plan.fseg_id, n)
+        return Frequency([mean(view(sol.geom.channel_freqs, g)) for g in groups])
+    elseif role === :Ti
+        groups = segment_groups(plan.tseg_id, n)
+        return Ti([mean(view(sol.geom.times, g)) for g in groups])
+    elseif role === :Ant
+        ants = hasproperty(sol.info, :ant_names) && length(sol.info.ant_names) == n ?
+            collect(sol.info.ant_names) : (1:n)
+        return Ant(ants)
+    elseif role === :Feed
+        return Feed(1:n)
+    else
+        return Dim{role}(1:n)
+    end
 end
 
 """

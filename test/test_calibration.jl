@@ -5,7 +5,8 @@
 using Gustavo
 using Test
 using LinearAlgebra
-using DimensionalData: DimArray, Dim, lookup, Ti
+using DimensionalData: DimArray, Dim, lookup, Ti, name, dims
+using Statistics: mean
 import OffsetArrays
 
 const UVD = Gustavo.UVData
@@ -179,6 +180,89 @@ end
     @test CAL.evaluate_gains(ev, cv) == CAL.evaluate_gains(ev, θ)
     cv[1] = -99.0
     @test θ[1] == -99.0
+end
+
+@testset "@comp: a component leaf as a labelled DimArray" begin
+    freqs = [1.0e9, 2.0e9, 3.0e9, 4.0e9]
+    times = [0.0, 1.0, 2.0, 3.0]
+    geom = CAL.DataGeometry(;
+        times, channel_freqs = freqs,
+        scan_of_time = [1, 1, 2, 2], spw_of_chan = [1, 1, 1, 1], t0 = 0.0, f0 = 2.5e9,
+    )
+    nant = 3
+    ants = ["PT", "LM", "AA"]
+    model = CAL.StationGainModel(
+        phase = (
+            atmos = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()), CAL.PerFeed()),
+            bp = CAL.TiedComponent(CAL.GainComponent(CAL.PolynomialFreq(2), CAL.GlobalTime(), CAL.ChannelBlocks(2)), CAL.SharedFeeds()),
+            rl = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.ReferenceRelative(1)),
+        ),
+        logamp = (
+            amp = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
+        ),
+    )
+    layout = CAL.plan_parameters(model, nant, geom)
+    θ = Float64.(1:layout.nθ)
+    sol = CAL.CalibrationSolution(model, layout, geom, θ, (; ant_names = ants))
+
+    # A leaf's DimArray is shaped and rolled exactly as the layout stored it.
+    a = @comp sol.θ.phase.atmos
+    @test a isa DimArray
+    @test size(a) == layout.axes.phase.atmos.dims
+    @test name.(dims(a)) == layout.axes.phase.atmos.roles
+    @test name(a) == :atmos
+
+    # PerFeed carries a physical Feed axis; the tied tyings carry a positional
+    # node axis (ReferenceRelative: reference + relative, two nodes).
+    @test name(dims(a, 2)) == :Feed
+    @test name(dims((@comp sol.θ.phase.bp), 2)) == :node
+    @test size((@comp sol.θ.phase.rl), 2) == 2
+
+    # Segment axes carry a representative physical coordinate per segment: a
+    # frequency segment's centre, a time segment's mean epoch.
+    @test lookup(a, UVD.Frequency) == [mean(freqs)]              # GlobalFrequency: one centre
+    @test lookup(a, Ti) == [mean(times[1:2]), mean(times[3:4])]  # PerScan: per-scan mean epoch
+    @test lookup((@comp sol.θ.phase.bp), UVD.Frequency) ==
+        [mean(freqs[1:2]), mean(freqs[3:4])]                     # ChannelBlocks(2): block centres
+
+    # Antennas take the solution's station names; feed is 1:2.
+    @test lookup(a, UVD.Ant) == ants
+    @test lookup(a, UVD.Feed) == 1:2
+
+    # logamp descends the same way.
+    @test (@comp sol.θ.logamp.amp) isa DimArray
+
+    # The leaf is a view onto θ (no copy): its data is the component's block, and
+    # writing through it mirrors into θ.
+    rng = CAL.component_ranges(layout)
+    @test vec(parent(a)) == θ[rng[1]]
+    a[1, 1, 1, 1, 1] = -7.0
+    @test sol.θ[first(rng[1])] == -7.0
+
+    # No ant_names in info → the antenna axis falls back to 1:nant.
+    soln = CAL.CalibrationSolution(model, layout, geom, θ, (; nant))
+    @test lookup((@comp soln.θ.phase.atmos), UVD.Ant) == 1:nant
+
+    # A multi-emit wrapper's nested subtree is reached leaf by leaf, the shape
+    # SingleBandDelay compiles to (`sbd.delay` / `sbd.constant`).
+    gb = CAL.DataGeometry(;
+        times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9],
+        scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 2], t0 = 0.0, f0 = 3.0e9,
+    )
+    sbd = CAL.model_components(SingleBandDelay(), gb)
+    msbd = CAL.StationGainModel(phase = (sbd = sbd,))
+    lsbd = CAL.plan_parameters(msbd, 2, gb)
+    ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, Float64.(1:lsbd.nθ), (;))
+    dl = @comp ssbd.θ.phase.sbd.delay
+    @test dl isa DimArray
+    @test name(dl) == :delay
+    @test lookup(dl, UVD.Frequency) == [mean([1.0e9, 1.1e9]), mean([5.0e9, 5.1e9])]
+    @test vec(parent(dl)) == ssbd.θ[lsbd.plantree.phase.sbd.delay.range]
+
+    # A path that stops at a group, or omits the `.θ` marker, is rejected.
+    @test_throws ArgumentError (@comp ssbd.θ.phase.sbd)
+    @test_throws "names a component group" (@comp ssbd.θ.phase.sbd)
+    @test_throws LoadError @eval @comp sol.phase.atmos
 end
 
 @testset "Calibration evaluate_gains: correctness, purity, inference" begin
