@@ -244,7 +244,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test fit(StationWeightScale(ws) |> _full_chain(), uvset).θ ≈ sol_f.θ
     end
 
-    @testset "solution serialization v2 round-trip (+ v1 compat)" begin
+    @testset "solution serialization v4 round-trip; pre-v4 files refused" begin
         uvset, _ = _build_fringe_uvset()
         sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain()), uvset)
         path = joinpath(mktempdir(), "sol.jls")
@@ -255,13 +255,12 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test back.transforms[1] isa StationWeightScale
         @test CAL.stage_solution(back[:fringe]).θ == CAL.stage_solution(sol[:fringe]).θ
 
-        # v1 wrapper (pre-stage files) loads as a plain solution.
+        # Pre-v4 wrappers used a different θ layout; they are refused rather than
+        # misread, so a caller re-solves instead of loading a stale parameter vector.
         v1path = joinpath(mktempdir(), "sol_v1.jls")
         Gustavo.Calibration.serialize(
             v1path, (; version = 1, sol.model, sol.layout, sol.geom, sol.θ, sol.info)
         )
-        old = CAL.load_solution(v1path)
-        @test old.θ == sol.θ
-        @test isempty(old.stages) && isempty(old.transforms)
+        @test_throws "unsupported version" CAL.load_solution(v1path)
     end
 end
