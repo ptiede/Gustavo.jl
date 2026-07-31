@@ -216,7 +216,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
     refplan = _perscan_delay_plan(sol.model, layout)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
-    nscan = size(refplan.off1, 3)                          # PerScan ⇒ ntseg == #scan groups
+    nscan = refplan.shape[4]                                # PerScan ⇒ ntseg == #scan groups
     # First time index landing in each scan segment — used to look up every plan's
     # own segment id for this scan (a `GlobalTime` R–L plan maps them all to 1, a
     # `PerScan` one to the scan itself, so the same lookup handles both bases).
@@ -233,9 +233,9 @@ function fringe_station_solutions(sol::CalibrationSolution)
             d = 0.0; r = 0.0; p = 0.0
             hd = false; hr = false; hp = false
             for (plan, kind) in comps
-                col = plan.off1[a, f, plan.tseg_id[ti], 1]  # fseg 1: stage-B terms are GlobalFrequency
-                col == 0 && continue
-                v = θ[col]
+                node = _feed_node(plan.tying, f)            # fseg 1: stage-B terms are GlobalFrequency
+                node == 0 && continue
+                v = _component_leaf(plan, θ)[1, node, 1, plan.tseg_id[ti], a]
                 if kind === :delay
                     d += v; hd = true
                 elseif kind === :rate

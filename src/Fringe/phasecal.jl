@@ -179,6 +179,8 @@ function phasecal_solution(
     θ = zeros(layout.nθ)
     delay_plan = layout.plans[1]
     const_plan = layout.plans[2]
+    delay_leaf = _component_leaf(delay_plan, θ)
+    const_leaf = _component_leaf(const_plan, θ)
 
     # Scan time spans (hours) per time-segment id of the model.
     ntseg = maximum(delay_plan.tseg_id; init = 0)
@@ -258,8 +260,8 @@ function phasecal_solution(
                     nmissing += 1
                     continue
                 end
-                θ[delay_plan.off1[ant, feed, ts, fs]] = sgn * fit.τ
-                θ[const_plan.off1[ant, feed, ts, fs]] = sgn * fit.φ0
+                delay_leaf[1, _feed_node(delay_plan.tying, feed), fs, ts, ant] = sgn * fit.τ
+                const_leaf[1, _feed_node(const_plan.tying, feed), fs, ts, ant] = sgn * fit.φ0
                 nfit += 1
                 fit_per_ant[ant] += 1
                 τlo = min(τlo, fit.τ)

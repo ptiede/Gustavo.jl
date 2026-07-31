@@ -296,7 +296,7 @@ end
         θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref,
     )
 
-    colval(plan, ant, feed) = (c = plan.off1[ant, feed, 1, 1]; c == 0 ? NaN : θ[c])
+    colval(plan, ant, feed) = (c = plan_off1(plan)[ant, feed, 1, 1]; c == 0 ? NaN : θ[c])
     for ant in 1:nant, feed in 1:2
         if isfinite(ss.delay[ant, feed])
             @test colval(dplan, ant, feed) ≈ ss.delay[ant, feed] atol = 1.0e-12
@@ -374,12 +374,12 @@ end
     chi, ncomp = FR.solve_station_systems!(θ, scans, comps; ref_ant = ref)
 
     # The global R-L delay offset is recovered absolutely (cross hands pin it).
-    δrec = [d_g.off1[a, 2, 1, 1] == 0 ? NaN : θ[d_g.off1[a, 2, 1, 1]] for a in 1:nant]
+    δrec = [plan_off1(d_g)[a, 2, 1, 1] == 0 ? NaN : θ[plan_off1(d_g)[a, 2, 1, 1]] for a in 1:nant]
     for a in 1:nant
         @test δrec[a] ≈ δ[a] atol = 1.0e-13
     end
     # The global R-L phase offset is recovered up to the EVPA gauge (ref pinned).
-    εrec = [cf_g.off1[a, 2, 1, 1] == 0 ? NaN : θ[cf_g.off1[a, 2, 1, 1]] for a in 1:nant]
+    εrec = [plan_off1(cf_g)[a, 2, 1, 1] == 0 ? NaN : θ[plan_off1(cf_g)[a, 2, 1, 1]] for a in 1:nant]
     for a in 1:nant
         @test (εrec[a] - εrec[ref]) ≈ (ε[a] - ε[ref]) atol = 1.0e-9
     end
@@ -388,8 +388,8 @@ end
     # including scan 2's QQ rows whose feed-2 is tied only through the global δ.
     recov_delay(a, feed, ti) = begin
         seg = d_sf.tseg_id[ti]
-        cc = d_sf.off1[a, feed, seg, 1]
-        gg = d_g.off1[a, feed, 1, 1]
+        cc = plan_off1(d_sf)[a, feed, seg, 1]
+        gg = plan_off1(d_g)[a, feed, 1, 1]
         (cc == 0 ? 0.0 : θ[cc]) + (gg == 0 ? 0.0 : θ[gg])
     end
     worst = 0.0
@@ -466,7 +466,7 @@ end
     )
     @test nrej >= 4                           # ≥ the 4 poisoned products (closure screen)
     for ant in 1:nant, feed in 1:2
-        c = dplan.off1[ant, feed, 1, 1]
+        c = plan_off1(dplan)[ant, feed, 1, 1]
         c == 0 && continue
         @test isapprox(θ[c], τ[ant, feed] - τ[ref, 1]; atol = 1.0e-10)
     end

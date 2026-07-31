@@ -149,10 +149,10 @@ end
         # Injected per-station dTEC recovered on EVERY scan through the split.
         dplan = CAL._dispersion_plan(sol_nd.model, sol_nd.layout)
         @test dplan !== nothing
-        nseg = size(dplan.off1, 3)
+        nseg = size(plan_off1(dplan), 3)
         @test nseg >= 3                        # per-scan dTEC columns
         for a in 1:nant, s in 1:nseg
-            off = dplan.off1[a, 1, s, 1]
+            off = plan_off1(dplan)[a, 1, s, 1]
             off == 0 && continue
             @test isapprox(sol_nd.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
         end

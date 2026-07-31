@@ -208,6 +208,7 @@ function solve_phase_bandpass!(
     end
 
     # Circular-mean reference per (station, feed) → zero net applied phase (gauge).
+    leaf = _component_leaf(plan, θ)
     for a in 1:nant, f in 1:2
         acc = zero(ComplexF64)
         for fs in 1:nseg
@@ -219,9 +220,9 @@ function solve_phase_bandpass!(
         for fs in 1:nseg
             v = phase[a, f, fs]
             isfinite(v) || continue
-            off = plan.off1[a, f, 1, fs]
-            off == 0 && continue
-            θ[off] = rem2pi(v - m, RoundNearest)
+            node = _feed_node(plan.tying, f)
+            node == 0 && continue
+            leaf[1, node, fs, 1, a] = rem2pi(v - m, RoundNearest)
         end
     end
     return θ
@@ -362,6 +363,7 @@ function solve_amp_bandpass!(
     end
 
     # Zero band-mean log-amp gauge per (station, feed) — SHAPE only. Write the slots.
+    leaf = _component_leaf(plan, θ)
     for a in 1:nant, f in 1:2
         acc = 0.0; n = 0
         for s in 1:nfseg
@@ -373,8 +375,8 @@ function solve_amp_bandpass!(
         for s in 1:nfseg
             v = la[a, f, s]
             isfinite(v) || continue
-            off = plan.off1[a, f, 1, s]
-            off == 0 && continue
+            node = _feed_node(plan.tying, f)
+            node == 0 && continue
             val = v - m
             # Leave implausibly-large corrections UNAPPLIED (|g| = 1). A smoother (the
             # default) interpolates gaps and self-regularizes, but `FreeBandpass` (or a
@@ -383,7 +385,7 @@ function solve_amp_bandpass!(
             # noise, since `apply_calibration` scales weights by |g|². The bound is
             # generous (|g| ≤ 10) so real passband roll-off/structure passes unchanged —
             # only pathological noise blow-ups are gated.
-            θ[off] = abs(val) > max_logamp ? 0.0 : val
+            leaf[1, node, s, 1, a] = abs(val) > max_logamp ? 0.0 : val
         end
     end
     return θ

@@ -6,6 +6,13 @@
 # This is the surface a future Comrade/Reactant global solver will trace; the
 # WLS solvers may mutate their own scratch, but they go through this same map to
 # predict visibilities.
+#
+# The map recurses the layout's `plantree` (a `NamedTuple` mirroring the model,
+# so names are compile-time constants) and, at each component, slices its shaped
+# leaf straight out of θ by the plan's `range`/`shape`, then reads the parameter
+# block its `(feed, ti, c)` selects — no offset tables, no Dicts, no closures on
+# the hot path. `θ` is a plain vector; `component_vector` wraps it for named
+# inspection, but the map does not need that view.
 
 struct GainEvaluator{M <: StationGainModel, L <: ParameterLayout}
     model::M
@@ -17,33 +24,45 @@ GainEvaluator(model::StationGainModel, geom::DataGeometry; nant::Integer) =
 
 nparameters(ev::GainEvaluator) = ev.layout.nθ
 
-# Sum a tuple of TiedComponents' contributions for one (ant, feed, ti, c) cell.
-# Recursion over the (compile-time) tuple keeps each term's type concrete, so
-# `term_eval` dispatches statically — the key to type stability.
-@inline _sum_components(::Tuple{}, plans, k, θ, ant, feed, ti, c) = zero(eltype(θ))
-@inline function _sum_components(comps::Tuple, plans, k, θ, ant, feed, ti, c)
-    tc = comps[1]
-    @inbounds plan = plans[k]
-    v = _component_value(term(tc), plan, θ, ant, feed, ti, c)
-    return v + _sum_components(Base.tail(comps), plans, k + 1, θ, ant, feed, ti, c)
+# Sum a group's (phase or log-amp) component contributions for one
+# (ant, feed, ti, c) cell. Recursion over the group's nodes — the concretely
+# typed value tuple of the `NamedTuple` — keeps each plan's type known, so
+# `term_eval` dispatches statically and the walk unrolls.
+@inline _sum_group(ptree::NamedTuple, θ, ant, feed, ti, c) =
+    _sum_nodes(values(ptree), θ, ant, feed, ti, c)
+@inline _sum_nodes(::Tuple{}, θ, ant, feed, ti, c) = zero(eltype(θ))
+@inline function _sum_nodes(nodes::Tuple, θ, ant, feed, ti, c)
+    here = _node_value(first(nodes), θ, ant, feed, ti, c)
+    return here + _sum_nodes(Base.tail(nodes), θ, ant, feed, ti, c)
 end
 
-@inline function _component_value(t::AbstractGainTerm, plan::ComponentPlan, θ, ant, feed, ti, c)
+# A nested group (e.g. `sbd`) recurses; a leaf component evaluates its term.
+@inline _node_value(sub::NamedTuple, θ, ant, feed, ti, c) =
+    _sum_group(sub, θ, ant, feed, ti, c)
+@inline function _node_value(plan::ComponentPlan, θ, ant, feed, ti, c)
+    t = plan.term
     @inbounds ts = plan.tseg_id[ti]
     @inbounds fs = plan.fseg_id[c]
-    @inbounds o1 = plan.off1[ant, feed, ts, fs]
-    val = zero(eltype(θ))
     x = _cell_coordinates(t, plan, ti, c)
     @inbounds shapes = param_shapes(t, plan.nchan_seg[fs])
-    if o1 != 0
-        val += term_eval(t, _block_params(shapes, θ, o1), x)
+    leaf = _component_leaf(plan, θ)
+    val = zero(eltype(θ))
+    node = _feed_node(plan.tying, feed)
+    if node != 0
+        val += term_eval(t, _block_params(shapes, _leaf_block(leaf, node, fs, ts, ant)), x)
     end
-    @inbounds o2 = plan.off2[ant, feed, ts, fs]
-    if o2 != 0
-        val += term_eval(t, _block_params(shapes, θ, o2), x)
+    # `ReferenceRelative`'s partner also reads its relative block (node 2).
+    node2 = _feed_node2(plan.tying, feed)
+    if node2 != 0
+        val += term_eval(t, _block_params(shapes, _leaf_block(leaf, node2, fs, ts, ant)), x)
     end
     return val
 end
+
+# The parameter run of one block: the 1-D view over the leaf's `:param` axis at
+# `(node, fs, ts, ant)`. The layout reserved exactly `nparams_per_block` entries
+# there, so the block is in bounds by construction.
+@inline _leaf_block(leaf, node, fs, ts, ant) = @inbounds view(leaf, :, node, fs, ts, ant)
 
 # The coordinates a term declares through `term_axes`, under those names. The
 # declaration is a compile-time constant for a concrete term, so the selection
@@ -57,22 +76,21 @@ end
     return (v, _axis_values(Base.tail(names), plan, ti, c)...)
 end
 
-# Address the parameters of one block: the declared names, in declaration order,
-# starting at `off` in θ. The layout reserved exactly `nparams_per_block` entries
-# there, so the block is in bounds by construction — this is the one place that
-# knows it, which is why the terms themselves need no bounds assertion.
-@inline _block_params(shapes::NamedTuple{names}, θ, off) where {names} =
-    NamedTuple{names}(_shaped_params(values(shapes), θ, off))
+# Name the parameters of one block: the declared names, in declaration order,
+# over the block view (1-based). The block is in bounds by construction — this is
+# the one place that knows it, which is why the terms need no bounds assertion.
+@inline _block_params(shapes::NamedTuple{names}, block) where {names} =
+    NamedTuple{names}(_shaped_params(values(shapes), block, 1))
 
-@inline _shaped_params(::Tuple{}, θ, off) = ()
-@inline function _shaped_params(shapes::Tuple, θ, off)
-    p = _shaped_param(first(shapes), θ, off)
-    return (p, _shaped_params(Base.tail(shapes), θ, off + prod(first(shapes)))...)
+@inline _shaped_params(::Tuple{}, block, off) = ()
+@inline function _shaped_params(shapes::Tuple, block, off)
+    p = _shaped_param(first(shapes), block, off)
+    return (p, _shaped_params(Base.tail(shapes), block, off + prod(first(shapes)))...)
 end
 
-@inline _shaped_param(::Tuple{}, θ, off) = @inbounds θ[off]
-@inline _shaped_param(shape::Tuple{Integer}, θ, off) =
-    @inbounds view(θ, off:(off + shape[1] - 1))
+@inline _shaped_param(::Tuple{}, block, off) = @inbounds block[off]
+@inline _shaped_param(shape::Tuple{Integer}, block, off) =
+    @inbounds view(block, off:(off + shape[1] - 1))
 
 """
     evaluate_gains(ev::GainEvaluator, θ) -> Array{Complex,4}
@@ -87,13 +105,11 @@ function evaluate_gains(ev::GainEvaluator, θ::AbstractVector)
         error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
     T = float(eltype(θ))
     gains = Array{Complex{T}}(undef, lay.nchan, lay.ntime, lay.nant, 2)
-    phase_c = phase_components(ev.model)
-    logamp_c = logamp_components(ev.model)
-    nphase = lay.nphase
-    plans = lay.plans
+    pp = lay.plantree.phase
+    lp = lay.plantree.logamp
     @inbounds for feed in 1:2, ant in 1:lay.nant, ti in 1:lay.ntime, c in 1:lay.nchan
-        phase = _sum_components(phase_c, plans, 1, θ, ant, feed, ti, c)
-        logamp = _sum_components(logamp_c, plans, nphase + 1, θ, ant, feed, ti, c)
+        phase = _sum_group(pp, θ, ant, feed, ti, c)
+        logamp = _sum_group(lp, θ, ant, feed, ti, c)
         gains[c, ti, ant, feed] = exp(logamp) * cis(phase)
     end
     return gains
@@ -116,14 +132,12 @@ function evaluate_gains(
         error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
     T = float(eltype(θ))
     gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
-    phase_c = phase_components(ev.model)
-    logamp_c = logamp_components(ev.model)
-    nphase = lay.nphase
-    plans = lay.plans
+    pp = lay.plantree.phase
+    lp = lay.plantree.logamp
     @inbounds for feed in 1:2, ant in 1:lay.nant
         for (tii, ti) in enumerate(ti_idx), (ci, c) in enumerate(chan_idx)
-            phase = _sum_components(phase_c, plans, 1, θ, ant, feed, ti, c)
-            logamp = _sum_components(logamp_c, plans, nphase + 1, θ, ant, feed, ti, c)
+            phase = _sum_group(pp, θ, ant, feed, ti, c)
+            logamp = _sum_group(lp, θ, ant, feed, ti, c)
             gains[ci, tii, ant, feed] = exp(logamp) * cis(phase)
         end
     end

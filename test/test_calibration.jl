@@ -87,14 +87,14 @@ end
         CAL.PolynomialTime(3), (coeffs = [0.3, 1.5, -0.7],), (Ti = 2.0,)
     ) ≈ 0.3 * 2 + 1.5 * 4 + (-0.7) * 8
 
-    # The named parameters of a block are addressed from the block's own start.
+    # The named parameters of a block are addressed over the block's own view.
     θ = [0.0, 0.3, 1.5, -0.7]
-    @test CAL._block_params(CAL.param_shapes(CAL.Delay(), 1), θ, 2) == (delay = 0.3,)
-    @test CAL._block_params(CAL.param_shapes(CAL.PolynomialFreq(2), 1), θ, 3).coeffs ==
+    @test CAL._block_params(CAL.param_shapes(CAL.Delay(), 1), view(θ, 2:2)) == (delay = 0.3,)
+    @test CAL._block_params(CAL.param_shapes(CAL.PolynomialFreq(2), 1), view(θ, 3:4)).coeffs ==
         [1.5, -0.7]
     # Declaration order, and each name gets exactly the size it declared.
     shapes = (a = (), b = (2,), c = ())
-    p = CAL._block_params(shapes, θ, 1)
+    p = CAL._block_params(shapes, θ)
     @test p.a == 0.0 && p.b == [0.3, 1.5] && p.c == -0.7
 
     # `basis_columns` is gone: WLS solvers build their own systems.
@@ -111,21 +111,21 @@ end
     lay_pf = CAL.plan_parameters(mk(CAL.PerFeed()), 2, geom)
     @test lay_pf.nθ == 4                                    # 2 ant × 2 feeds
     p = lay_pf.plans[1]
-    @test p.off1[1, 1, 1, 1] != p.off1[1, 2, 1, 1]          # feeds independent
-    @test all(p.off2 .== 0)
+    @test plan_off1(p)[1, 1, 1, 1] != plan_off1(p)[1, 2, 1, 1]          # feeds independent
+    @test all(plan_off2(p) .== 0)
 
     lay_sf = CAL.plan_parameters(mk(CAL.SharedFeeds()), 2, geom)
     @test lay_sf.nθ == 2                                    # 2 ant, shared across feeds
     q = lay_sf.plans[1]
-    @test q.off1[1, 1, 1, 1] == q.off1[1, 2, 1, 1]          # feeds share a block
-    @test all(q.off2 .== 0)
+    @test plan_off1(q)[1, 1, 1, 1] == plan_off1(q)[1, 2, 1, 1]          # feeds share a block
+    @test all(plan_off2(q) .== 0)
 
     lay_rr = CAL.plan_parameters(mk(CAL.ReferenceRelative(1)), 2, geom)
     @test lay_rr.nθ == 4                                    # ref + relative per ant
     r = lay_rr.plans[1]
-    @test r.off1[1, 1, 1, 1] == r.off1[1, 2, 1, 1]          # both feeds reference the ref block
-    @test r.off2[1, 1, 1, 1] == 0                           # reference feed has no relative
-    @test r.off2[1, 2, 1, 1] != 0                           # partner feed adds a relative block
+    @test plan_off1(r)[1, 1, 1, 1] == plan_off1(r)[1, 2, 1, 1]          # both feeds reference the ref block
+    @test plan_off2(r)[1, 1, 1, 1] == 0                           # reference feed has no relative
+    @test plan_off2(r)[1, 2, 1, 1] != 0                           # partner feed adds a relative block
 end
 
 @testset "Calibration ComponentVector template" begin
@@ -153,16 +153,17 @@ end
     @test propertynames(cv.phase) == (:a, :bp, :grp)
     @test propertynames(cv.phase.grp) == (:d, :c)
 
-    # Each leaf is the shape its tying × segmentation imply, singleton axes dropped.
-    @test size(cv.phase.a) == (2, nant)                  # (feed, ant): PerFeed keeps the feed axis
-    @test size(cv.phase.bp) == (length(freqs), nant)     # (freq, ant): ChannelBlocks(1) resolves per channel
-    @test size(cv.phase.grp.d) == (nant,)                # a nested part is a plain leaf
-    @test size(cv.phase.grp.c) == (nant,)
+    # Each leaf is the full-rank shape its tying × segmentation imply
+    # (param, feed-node, freq-seg, time-seg, ant), size-1 axes kept.
+    @test size(cv.phase.a) == (1, 2, 1, 1, nant)                 # PerFeed: two feed nodes
+    @test size(cv.phase.bp) == (1, 1, length(freqs), 1, nant)    # ChannelBlocks(1): one freq-seg per channel
+    @test size(cv.phase.grp.d) == (1, 1, 1, 1, nant)             # a nested part is a plain leaf
+    @test size(cv.phase.grp.c) == (1, 1, 1, 1, nant)
 
-    # The stored axis roles name each retained dimension.
-    @test layout.axes.phase.a.roles == (:Feed, :Ant)
-    @test layout.axes.phase.bp.roles == (:Frequency, :Ant)
-    @test layout.axes.phase.grp.d.roles == (:Ant,)
+    # The stored axis roles name each dimension.
+    @test layout.axes.phase.a.roles == (:param, :Feed, :Frequency, :Ti, :Ant)
+    @test layout.axes.phase.bp.roles == (:param, :node, :Frequency, :Ti, :Ant)
+    @test layout.axes.phase.grp.d.roles == (:param, :node, :Frequency, :Ti, :Ant)
 
     # A named leaf is exactly the component's θ block (matches component_ranges:
     # phase components depth-first — a, bp, grp.d, grp.c).
@@ -201,7 +202,7 @@ end
     # Hand-check a couple of cells: |g| == 1 (no amplitude), phase = 2π τ (f−f0).
     p = ev.layout.plans[1]
     for ant in 1:nant, feed in 1:2, ci in eachindex(freqs)
-        off = p.off1[ant, feed, 1, 1]
+        off = plan_off1(p)[ant, feed, 1, 1]
         expected = cis(2π * τ[off] * (freqs[ci] - f0))
         @test g[ci, 1, ant, feed] ≈ expected
         @test g[ci, 2, ant, feed] ≈ expected            # time-invariant (GlobalTime)
@@ -226,7 +227,7 @@ end
     gr = CAL.evaluate_gains(evr, ṙ)
     pr = evr.layout.plans[1]
     for ant in 1:nant, ti in eachindex(times)
-        off = pr.off1[ant, 1, 1, 1]
+        off = plan_off1(pr)[ant, 1, 1, 1]
         expected = cis(2π * ṙ[off] * (times[ti] - 0.0) * 3600.0)
         @test gr[1, ti, ant, 1] ≈ expected
         @test gr[1, ti, ant, 2] ≈ expected               # shared across feeds
@@ -370,9 +371,9 @@ end
     end
 
     @testset "the 1-based contract is enforced, not assumed" begin
-        # `ComponentPlan.off1` holds absolute positions and the term kernels read
-        # them under `@inbounds`, so a shifted-axes θ must be refused here rather
-        # than read out of bounds later.
+        # A component's `range` holds absolute positions and the term kernels read
+        # its block under `@inbounds`, so a shifted-axes θ must be refused here
+        # rather than read out of bounds later.
         θoff = OffsetArrays.OffsetArray(copy(θv), 0:(layout.nθ - 1))
         @test_throws ArgumentError CAL.CalibrationSolution(model, layout, geom, θoff, (;))
         @test_throws DimensionMismatch CAL.CalibrationSolution(

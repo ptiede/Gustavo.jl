@@ -435,15 +435,16 @@ end
 # `solve_station_systems!` is the segmentation/tying-aware generalization of
 # `stationize_scan`. Instead of a fixed per-scan (station, feed) node space, the
 # unknowns are the θ COLUMNS the model declares: for each stage-B phase component
-# (a `ConstantTerm`/`Delay`/`Rate` × time-seg × tying), `plan.off1[ant, feed,
-# tseg_id[ti], 1]` is the θ slot a (station, feed, time) observation maps to.
-# That `off1` table already encodes the segmentation (PerScan → a distinct column
-# per scan; GlobalTime → one column shared across the whole track) and the tying
-# (PerFeed → distinct feed columns; SharedFeeds → one shared column). So the SAME
-# engine solves a per-scan model (columns disjoint per scan ⇒ block-diagonal ⇒
-# identical to N independent `stationize_scan` calls) and a model with a global
-# R–L offset (a column shared across scans couples them) — the model is the
-# extension point, this solver just reads `off1`.
+# (a `ConstantTerm`/`Delay`/`Rate` × time-seg × tying), `_block_index(plan,
+# _feed_node(tying, feed), 1, tseg_id[ti], ant)` is the θ slot a (station, feed,
+# time) observation maps to. The plan's segmentation encodes the time basis
+# (PerScan → a distinct column per scan; GlobalTime → one column shared across the
+# whole track) and its tying the feed fold (PerFeed → distinct feed columns;
+# SharedFeeds → one shared column). So the SAME engine solves a per-scan model
+# (columns disjoint per scan ⇒ block-diagonal ⇒ identical to N independent
+# `stationize_scan` calls) and a model with a global R–L offset (a column shared
+# across scans couples them) — the model is the extension point, this solver just
+# reads the θ columns each component declares.
 #
 # `scans` is a vector of `StationScanDetections`, each carrying one scan's
 # detection matrix, its `(a, b)` pairs, per-product feeds, and a representative
@@ -519,8 +520,8 @@ end
 
 # Solve one observable kind across all scans, accumulating into θ. Each detection
 # becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
-# `off1` columns for that (station, feed, time) — a feed-common per-scan column
-# and, when present, a global feed-offset column. Returns (chi, ncomp).
+# θ columns for that (station, feed, time) — a feed-common per-scan column and,
+# when present, a global feed-offset column. Returns (chi, ncomp).
 function _solve_kind_cols!(
         θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol,
         excl::Set{Tuple{Int, Int}} = Set{Tuple{Int, Int}}(),
@@ -548,7 +549,7 @@ function _solve_kind_cols!(
         return colnode[col] = length(node_col)
     end
 
-    # Rows in θ-column space: each side is the list of (off1) columns whose sum is
+    # Rows in θ-column space: each side is the list of θ columns whose sum is
     # that station's value for this observable (+1 on a-side, −1 on b-side).
     rowA = Vector{Int}[]; rowB = Vector{Int}[]
     rval = Float64[]; rw = Float64[]; rcs = Int[]; rscan = Int[]
@@ -566,9 +567,11 @@ function _solve_kind_cols!(
             (include_cross || cs == 0) || continue
             nsA = Int[]; nsB = Int[]
             for plan in plans
-                ca = plan.off1[a, fa, plan.tseg_id[sc.ti], 1]
+                na = _feed_node(plan.tying, fa)
+                ca = na == 0 ? 0 : _block_index(plan, na, 1, plan.tseg_id[sc.ti], a)
                 ca != 0 && push!(nsA, getnode(ca, a, fa, sidx))
-                cb = plan.off1[b, fb, plan.tseg_id[sc.ti], 1]
+                nb = _feed_node(plan.tying, fb)
+                cb = nb == 0 ? 0 : _block_index(plan, nb, 1, plan.tseg_id[sc.ti], b)
                 cb != 0 && push!(nsB, getnode(cb, b, fb, sidx))
             end
             (isempty(nsA) || isempty(nsB)) && continue

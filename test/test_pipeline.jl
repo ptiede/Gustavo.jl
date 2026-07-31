@@ -173,9 +173,9 @@ end
     @test phase[adhoc_i].tying isa CAL.SharedFeeds
     @test !(phase[adhoc_i].tying isa CAL.PerFeed)
 
-    # Layout: `SharedFeeds` assigns ONE θ column to both feeds, `PerFeed` two distinct
-    # ones (Calibration `_assign_blocks!`). So feed-1 and feed-2 share every off1 slot
-    # iff the tie holds — a `PerFeed` revert breaks this on any solved (station, seg).
+    # Layout: `SharedFeeds` folds both feeds to ONE node (θ column), `PerFeed` keeps
+    # two distinct ones. So feed-1 and feed-2 share every column iff the tie holds —
+    # a `PerFeed` revert breaks this on any solved (station, seg).
     uvset, _ = _build_fringe_uvset()
     geom = CAL.build_geometry(uvset)
     first_leaf = first(values(DimensionalData.branches(uvset)))
@@ -183,7 +183,7 @@ end
     layout = CAL.plan_parameters(model, nant, geom)
 
     for (ci, label) in ((rate_i, "rate"), (adhoc_i, "adhoc"))
-        off1 = layout.plans[ci].off1                 # (ant, feed, ntseg, nfseg)
+        off1 = plan_off1(layout.plans[ci])                 # (ant, feed, ntseg, nfseg)
         @test off1[:, 1, :, :] == off1[:, 2, :, :]   # both feeds → same θ columns
         @test any(!=(0), off1[:, 1, :, :])           # ...and the plan is non-trivial
     end
@@ -502,8 +502,8 @@ end
     # delay terms legitimately absorb). Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
     plan = FP._bandpass_plan(sol_on.model, sol_on.layout)
-    @test plan.off1[1, 2, 1, 1] != 0
-    rec = [sol_on.θ[plan.off1[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
+    @test plan_off1(plan)[1, 2, 1, 1] != 0
+    rec = [sol_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
     worst = 0.0
     for b in 1:nbands
         cs = ((b - 1) * nchan + 1):(b * nchan)
@@ -548,7 +548,7 @@ end
     end
 
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    larec(sol, plan, a, f, gc) = (off = plan.off1[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : sol.θ[off])
+    larec(sol, plan, a, f, gc) = (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : sol.θ[off])
     function amp_ripple(spec, don, p)
         rs = Float64[]
         for bi in eachindex(don.bl_pairs)
@@ -761,7 +761,7 @@ end
     dplan = CAL._dispersion_plan(sol.model, sol.layout)
     @test dplan !== nothing
     for a in 1:4
-        off = dplan.off1[a, 1, 1, 1]
+        off = plan_off1(dplan)[a, 1, 1, 1]
         off == 0 && continue
         @test isapprox(sol.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
     end
@@ -877,8 +877,8 @@ end
     # A common-mode slope across groups is gauge-shared with the wideband
     # stage-B delay (and its constants land in the SBD phase columns), so the
     # gauge-invariant recovery check is the ACROSS-GROUP DIFFERENCE.
-    Δ(a) = sol.θ[sbd.dplan.off1[a, 1, 1, 1]] - sol.θ[sbd.dplan.off1[a, 1, 1, 2]]
-    @test sbd.dplan.off1[2, 1, 1, 1] != 0
+    Δ(a) = sol.θ[plan_off1(sbd.dplan)[a, 1, 1, 1]] - sol.θ[plan_off1(sbd.dplan)[a, 1, 1, 2]]
+    @test plan_off1(sbd.dplan)[2, 1, 1, 1] != 0
     @test isapprox(Δ(2), τ2[1] - τ2[2]; atol = 0.1e-9)          # injected 4 ns split
     @test abs(Δ(3)) < 0.1e-9                                    # clean station ≈ 0
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
@@ -945,8 +945,8 @@ end
     )
     dplan = CAL._dispersion_plan(sol.model, sol.layout)
     @test dplan !== nothing
-    o3 = dplan.off1[3, 1, 1, 1]
-    o4 = dplan.off1[4, 1, 1, 1]
+    o3 = plan_off1(dplan)[3, 1, 1, 1]
+    o4 = plan_off1(dplan)[4, 1, 1, 1]
     @test o3 != 0 && o4 != 0
     @test sol.θ[o3] == sol.θ[o4]                                # tied EXACTLY
     @test isapprox(sol.θ[o3], dtec_true[3] - dtec_true[1]; atol = 0.05)

@@ -33,12 +33,12 @@
         # The two GlobalFrequency delay plans: the feed-common per-scan one (has a
         # feed-1 column) and the R–L one (feed-2 only). Identified structurally.
         dplans = [p for (p, k) in FP.fringe_stage_components(model, layout) if k === :delay]
-        shared = only(filter(p -> p.off1[2, 1, 1, 1] != 0, dplans))
-        rl = only(filter(p -> p.off1[2, 1, 1, 1] == 0 && p.off1[2, 2, 1, 1] != 0, dplans))
+        shared = only(filter(p -> plan_off1(p)[2, 1, 1, 1] != 0, dplans))
+        rl = only(filter(p -> plan_off1(p)[2, 1, 1, 1] == 0 && plan_off1(p)[2, 2, 1, 1] != 0, dplans))
 
         θ = zeros(layout.nθ)
-        θ[shared.off1[2, 1, 1, 1]] = 2.0e-9      # station 2 per-scan (feed-common) delay: 2 ns
-        θ[rl.off1[2, 2, 1, 1]]     = 0.5e-9      # station 2 R–L delay: +0.5 ns on feed 2
+        θ[plan_off1(shared)[2, 1, 1, 1]] = 2.0e-9      # station 2 per-scan (feed-common) delay: 2 ns
+        θ[plan_off1(rl)[2, 2, 1, 1]]     = 0.5e-9      # station 2 R–L delay: +0.5 ns on feed 2
         sol = CAL.CalibrationSolution(model, layout, geom, θ, (; nscan = 1))
 
         rows = FP.fringe_station_solutions(sol)
@@ -53,7 +53,7 @@
         # Rate (Hz → mHz) and phase (rad → deg) route through their own kinds.
         rplan = only(p for (p, k) in FP.fringe_stage_components(model, layout) if k === :rate)
         θ2 = zeros(layout.nθ)
-        θ2[rplan.off1[3, 1, 1, 1]] = 1.0e-3       # 1 mHz
+        θ2[plan_off1(rplan)[3, 1, 1, 1]] = 1.0e-3       # 1 mHz
         sol2 = CAL.CalibrationSolution(model, layout, geom, θ2, (; nscan = 1))
         rows2 = FP.fringe_station_solutions(sol2)
         @test only(filter(r -> r.station == 3 && r.feed == 1, rows2)).rate_mHz ≈ 1.0

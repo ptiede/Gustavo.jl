@@ -73,8 +73,8 @@ function CalibrationSolution(
         θ::AbstractVector, info::NamedTuple = NamedTuple();
         stages = StageRecord[], transforms = (), postcal = (),
     )
-    # The layout addresses θ by absolute 1-based position (`ComponentPlan.off1`)
-    # and the term kernels read those offsets under `@inbounds`, so an array with
+    # The layout addresses θ by absolute 1-based position (`ComponentPlan.range`)
+    # and the term kernels read those blocks under `@inbounds`, so an array with
     # other axes would read out of bounds silently rather than throw.
     Base.require_one_based_indexing(θ)
     length(θ) == layout.nθ || throw(
@@ -114,32 +114,10 @@ Base.show(io::IO, sol::CalibrationSolution) =
     component_ranges(layout::ParameterLayout) -> Vector{UnitRange{Int}}
 
 The contiguous θ range owned by each component plan (phase components first,
-then log-amplitude, matching `layout.plans`). Exact because `plan_parameters`
-assigns blocks strictly sequentially: a component's parameters are the
-contiguous run from its first assigned offset up to the next component's first.
-A component that planned no parameters gets an empty range.
+then log-amplitude, matching `layout.plans`) — each plan's own `range`, the span
+`plan_parameters` reserved for its leaf.
 """
-function component_ranges(layout::ParameterLayout)
-    starts = Vector{Int}(undef, length(layout.plans))
-    for (i, p) in enumerate(layout.plans)
-        s = typemax(Int)
-        for v in p.off1
-            0 < v < s && (s = v)
-        end
-        for v in p.off2
-            0 < v < s && (s = v)
-        end
-        starts[i] = s == typemax(Int) ? 0 : s
-    end
-    ends = zeros(Int, length(starts))
-    nxt = layout.nθ + 1
-    for i in reverse(eachindex(starts))
-        starts[i] == 0 && continue
-        ends[i] = nxt - 1
-        nxt = starts[i]
-    end
-    return [starts[i] == 0 ? (1:0) : (starts[i]:ends[i]) for i in eachindex(starts)]
-end
+component_ranges(layout::ParameterLayout) = [p.range for p in layout.plans]
 
 """
     StageView
@@ -427,9 +405,10 @@ channels and times in the solve's index space, with no data attached.
 - `chan_idx`, `ti_idx` — GLOBAL indices into `geom.channel_freqs` / `geom.times`
   of the channels and times the window covers.
 
-θ is addressed by POSITION — `ComponentPlan.off1[ant, feed, tseg_id, fseg_id]`
-over global-length segment-id tables — while a `DimStack`'s coordinates are
-PHYSICAL (Hz, hours), so this join cannot be recovered from the data alone.
+θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
+tseg_id, ant)` over global-length segment-id tables — while a `DimStack`'s
+coordinates are PHYSICAL (Hz, hours), so this join cannot be recovered from the
+data alone.
 Build one with [`leaf_window`](@ref); pass it alongside the scan's `DimStack`
 to anything that needs both.
 """
@@ -619,15 +598,15 @@ end
     save_solution(path, sol::CalibrationSolution)
 
 Serialize `sol` to `path` via the `Serialization` stdlib inside a versioned
-wrapper NamedTuple (version 2 adds `stages` + `transforms`; version 3 adds
-`postcal`). Transforms that close over caller code (e.g. a `CalFunction`)
-serialize only within the same code state; a transform (or postcal step) that
-fails to serialize is recorded as `missing` with a warning rather than failing
-the save.
+wrapper NamedTuple. The current version is 4 (θ addressed by named component
+leaves); earlier versions are refused on load. Transforms that close over caller
+code (e.g. a `CalFunction`) serialize only within the same code state; a
+transform (or postcal step) that fails to serialize is recorded as `missing` with
+a warning rather than failing the save.
 """
 function save_solution(path::AbstractString, sol::CalibrationSolution)
     wrapper = (;
-        version = 3, sol.model, sol.layout, sol.geom, sol.θ, sol.info,
+        version = 4, sol.model, sol.layout, sol.geom, sol.θ, sol.info,
         sol.stages, transforms = _serializable_transforms(sol.transforms),
         postcal = _serializable_transforms(sol.postcal),
     )
@@ -657,17 +636,20 @@ end
 """
     load_solution(path) -> CalibrationSolution
 
-Inverse of [`save_solution`](@ref). Loads version 1 (pre-stage) files as
-solutions with empty `stages`/`transforms`, and version ≤ 2 (pre-postcal) with
-empty `postcal`.
+Inverse of [`save_solution`](@ref). Only current-format (version 4) files are
+supported; files from an earlier Gustavo used a different θ layout and are
+refused — re-solve to produce a current-format solution.
 """
 function load_solution(path::AbstractString)
     w = deserialize(path)
-    w.version in (1, 2, 3) || error("load_solution: unsupported version $(w.version)")
-    stages = w.version >= 2 ? w.stages : StageRecord[]
-    transforms = w.version >= 2 ? w.transforms : Any[]
-    postcal = w.version >= 3 ? w.postcal : Any[]
-    return CalibrationSolution(w.model, w.layout, w.geom, w.θ, w.info; stages, transforms, postcal)
+    w.version == 4 || error(
+        "load_solution: unsupported version $(w.version) — saved by an incompatible " *
+            "Gustavo (the θ parameter layout changed); re-solve to produce a current file.",
+    )
+    return CalibrationSolution(
+        w.model, w.layout, w.geom, w.θ, w.info;
+        stages = w.stages, transforms = w.transforms, postcal = w.postcal,
+    )
 end
 
 """

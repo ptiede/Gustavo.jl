@@ -67,7 +67,7 @@ function save_solution_hdf5(
         # represent natively, so embed the Serialization bytes (external readers
         # ignore this dataset and use `gain/*` + `axes/*`).
         buf = IOBuffer()
-        serialize(buf, (; version = 1, sol.model, sol.layout, sol.geom, sol.θ, sol.info))
+        serialize(buf, (; version = 2, sol.model, sol.layout, sol.geom, sol.θ, sol.info))
         jg = create_group(f, "julia")
         jg["blob"] = take!(buf)
     end
@@ -80,7 +80,10 @@ function load_solution_hdf5(path::AbstractString)
             error("load_solution_hdf5: $path has no julia/blob (not written by Gustavo, or gains-only export)")
         deserialize(IOBuffer(read(f["julia"]["blob"])))
     end
-    w.version == 1 || error("load_solution_hdf5: unsupported version $(w.version)")
+    w.version == 2 || error(
+        "load_solution_hdf5: unsupported julia/blob version $(w.version) — saved by an " *
+            "incompatible Gustavo (the θ parameter layout changed); re-solve to produce a current file.",
+    )
     return CalibrationSolution(w.model, w.layout, w.geom, w.θ, w.info)
 end
 

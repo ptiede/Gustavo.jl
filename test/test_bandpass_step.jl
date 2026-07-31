@@ -269,7 +269,7 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
         @test any(!=(0), θn)
         # The dispersion column recovers the injected differential dTEC.
         for a in 2:4
-            off = disp_plan.off1[a, 1, 1, 1]
+            off = plan_off1(disp_plan)[a, 1, 1, 1]
             @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
         end
         FP.refine_scan_sbd!(θn, stack, win, ev, sbd, 1, 4; executor = SerialScheduler())

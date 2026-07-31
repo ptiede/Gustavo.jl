@@ -271,14 +271,15 @@ function adhoc_scan!(
     # `tg` is in hours; pass SECONDS so the adhoc's `:auto` window (T_AP / T_coh) is
     # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.
     as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg .* 3600.0; ref_ant = ref_ant, smoother = adhoc, shared_feeds = shared_feeds)
+    adhoc_leaf = _component_leaf(adhoc_plan, θ)
     for (ap, gti) in enumerate(g_ti)
         tseg = adhoc_plan.tseg_id[gti]
         for ant in 1:nant, feed in 1:2
             val = as.phase[ant, feed, ap]
             isfinite(val) || continue
-            off = adhoc_plan.off1[ant, feed, tseg, 1]
-            off == 0 && continue
-            θ[off] = val
+            node = _feed_node(adhoc_plan.tying, feed)
+            node == 0 && continue
+            adhoc_leaf[1, node, 1, tseg, ant] = val
         end
     end
     return θ
@@ -529,13 +530,13 @@ function _dispersion_fit_stationize!(
             # Members inherit the representative's solved value (assignment, not
             # increment — both start equal, so totals stay equal).
             ts = plan.tseg_id[ti0]
+            leaf = _component_leaf(plan, θ)
             for a in eachindex(ties)
                 ties[a] == a && continue
                 for f in 1:2
-                    offm = plan.off1[a, f, ts, 1]
-                    offr = plan.off1[ties[a], f, ts, 1]
-                    (offm == 0 || offr == 0) && continue
-                    θ[offm] = θ[offr]
+                    node = _feed_node(plan.tying, f)
+                    node == 0 && continue
+                    leaf[1, node, 1, ts, a] = leaf[1, node, 1, ts, ties[a]]
                 end
             end
         end
@@ -764,17 +765,19 @@ function _sbd_fit_stationize!(
     end
     num1 > num0 || return nrej + length(gsols)
     ts = sbd.dplan.tseg_id[ti0]
+    dleaf = _component_leaf(sbd.dplan, θ)
+    cleaf = _component_leaf(sbd.cplan, θ)
     for gs in gsols
         for a in 1:nant
             τa = (gs.covτ[a, 1] && isfinite(gs.τv[a, 1])) ? gs.τv[a, 1] : 0.0
             φa = (gs.covφ[a, 1] && isfinite(gs.φv[a, 1])) ? gs.φv[a, 1] : 0.0
             (τa == 0.0 && φa == 0.0) && continue
-            offd = sbd.dplan.off1[a, 1, ts, gs.gidx]
-            offd == 0 && continue
-            θ[offd] += τa
-            offc = sbd.cplan.off1[a, 1, ts, gs.gidx]
-            offc == 0 && continue
-            θ[offc] += φa - 2π * τa * (gs.fc - geom.f0)
+            nd = _feed_node(sbd.dplan.tying, 1)
+            nd == 0 && continue
+            dleaf[1, nd, gs.gidx, ts, a] += τa
+            nc = _feed_node(sbd.cplan.tying, 1)
+            nc == 0 && continue
+            cleaf[1, nc, gs.gidx, ts, a] += φa - 2π * τa * (gs.fc - geom.f0)
         end
     end
     return nrej

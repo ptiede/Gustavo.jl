@@ -1,75 +1,94 @@
 # ── Parameter layout ─────────────────────────────────────────────────────────
 #
-# `plan_parameters` flattens one shared `StationGainModel`, replicated across
-# `nant` antennas over a `DataGeometry`, into a single parameter vector θ and the
-# structures needed to address it. Two views of the same contiguous layout are
-# built together and kept consistent:
+# `plan_parameters` resolves one shared `StationGainModel`, replicated across
+# `nant` antennas over a `DataGeometry`, into the structures a solve addresses:
 #
-#   * a `ComponentVector` `template` — θ named and shaped by component. The block
-#     space of each component (parameters × feed-node × freq-segment × time-segment
-#     × antenna) is a leaf array under the component's name, `θ.phase.<name>` /
-#     `θ.logamp.<name>`, so a solved θ can be wrapped for named, shaped inspection.
-#   * the per-component `off1`/`off2` integer tables the hot forward loop reads.
+#   * a `ComponentVector` `template` — θ named and shaped by component. Each
+#     component's block space (parameters × feed-node × freq-segment ×
+#     time-segment × antenna) is a shaped leaf under the component's name,
+#     `θ.phase.<name>` / `θ.logamp.<name>`, so `component_vector` can wrap a solved
+#     θ for named, shaped inspection.
+#   * `plans` — the flat, depth-first list of `ComponentPlan`s (phase components
+#     first, then log-amplitude); and `plantree`, the same plans nested under the
+#     model's names. Each plan carries its term, segmentation metadata, and the
+#     contiguous θ `range`/`shape` of its leaf, so the forward map and the solve
+#     writers slice the block for a `(feed, ti, c)` cell directly out of θ.
 #
-# Both derive from the same depth-first block assignment, so a component's named
-# leaf occupies exactly the θ range its `off1`/`off2` entries point into (checked
-# when the layout is built). The forward loop stays on integer offsets — no Dicts,
-# Strings, or closures in the structures it reads — so it is type-stable and
-# Reactant-traceable.
+# A component's leaf occupies exactly its `range` (column-major over parameters,
+# feed-node, freq-segment, time-segment, antenna), so `reshape(view(θ, range),
+# shape)` is the same array `component_vector` exposes under the component's name.
+# The map recurses the `plantree` (names are compile-time constants) and slices θ
+# by `range`, so it needs no offset tables, Dicts, or closures and stays
+# type-stable and AD/Reactant-traceable.
 
 """
     ComponentPlan
 
-Resolved index tables for one gain component (one entry per phase component, then
-per log-amplitude component). `off1`/`off2` give the 1-based start index in θ of
-the primary and secondary parameter block for `(ant, feed, time_segment,
-freq_segment)`; `0` means "no contribution". (`off2` is non-zero only for the
-partner feed under `ReferenceRelative`, where the value is reference + relative.)
-A block holds the parameters `param_shapes(term, nchan_seg[freq_segment])`
-declares, laid out in the order the names are declared in.
+The term, resolved segmentation, and θ location for one gain component. `range`
+is the component's contiguous span in θ and `shape` its column-major shaped leaf
+`(param, feed-node, freq-seg, time-seg, ant)`, so `reshape(view(θ, range),
+shape)` recovers the leaf. The forward map reads `tseg_id[ti]`/`fseg_id[c]` to
+place a cell in its segment, `xf`/`xt` for the term's coordinates, and
+`nchan_seg` for the term's per-segment arity, then addresses the leaf block at
+`(node, fs, ts, ant)` with `node = _feed_node(tying, feed)`. A block holds the
+parameters `param_shapes(term, nchan_seg[fs])` declares, in declaration order.
 """
-struct ComponentPlan
-    axes::Vector{Symbol}        # the coordinate axes the term reads
+struct ComponentPlan{T <: AbstractGainTerm, Ty <: AbstractFeedTying}
+    term::T
     tseg_id::Vector{Int}        # length ntime  → time-segment id
     fseg_id::Vector{Int}        # length nchan  → freq-segment id
     xf::Vector{Float64}         # length nchan  → frequency coordinate
     xt::Vector{Float64}         # length ntime  → time coordinate
     nchan_seg::Vector{Int}      # length nfseg  → channels in the frequency segment
-    off1::Array{Int, 4}         # (ant, feed, ntseg, nfseg)
-    off2::Array{Int, 4}
+    tying::Ty
+    range::UnitRange{Int}       # the component's contiguous θ span
+    shape::NTuple{5, Int}       # (param, feed-node, freq-seg, time-seg, ant)
 end
 
 """
     ParameterLayout
 
-The flattened parameter plan for a solve: total length `nθ`, the grid dims, one
-`ComponentPlan` per component (phase components first, then log-amplitude), the
-named/shaped `template` `ComponentVector`, and `axes` — a tree mirroring the
-model that records each component leaf's dimension sizes and the physical axis
-each dimension carries (`:Ant`, `:Feed`, `:Ti`, `:Frequency`, `:param`), for
-labelling a wrapped θ.
+The resolved plan for a solve: total length `nθ`, the grid dims, the number of
+phase components `nphase`, the flat `plans` list and its `plantree` (the same
+plans nested under the model's names), the named/shaped `template`
+`ComponentVector`, and `axes` — a tree mirroring the model that records each
+leaf's dimension sizes and the physical axis each dimension carries (`:Ant`,
+`:Feed`, `:node`, `:Ti`, `:Frequency`, `:param`), for labelling a wrapped θ.
 """
-struct ParameterLayout{CV, AX}
+struct ParameterLayout{PT, CV, AX}
     nθ::Int
     nant::Int
     ntime::Int
     nchan::Int
     nphase::Int
     plans::Vector{ComponentPlan}
+    plantree::PT
     template::CV
     axes::AX
 end
 
+# The shaped leaf of a component in θ: `reshape(view(θ, range), shape)`, sharing
+# data with θ. Writing into it writes through to θ. `shape` is a fixed rank-5
+# tuple, so the reshape is type-stable.
+@inline _component_leaf(plan::ComponentPlan, θ::AbstractVector) =
+    reshape(view(θ, plan.range), plan.shape)
+
+# The absolute 1-based θ index of a block's first parameter at
+# `(node, fs, ts, ant)` — for the column-space station solver, which works in
+# flat θ positions rather than shaped leaves.
+@inline _block_index(plan::ComponentPlan, node::Int, fs::Int, ts::Int, ant::Int) =
+    first(plan.range) + LinearIndices(plan.shape)[1, node, fs, ts, ant] - 1
+
 # ── Per-component layout ─────────────────────────────────────────────────────
 #
 # One resolution of a `TiedComponent` over a geometry: the segment ids and
-# coordinates the `ComponentPlan` needs, plus the block bookkeeping the θ leaf
-# and the offset tables both derive from. The leaf `shape`/`roles` describe the
-# contiguous block run as a column-major array: fastest to slowest the block runs
-# over parameters, feed-node, frequency segment, time segment, then antenna, and
-# a size-1 axis among these is dropped. A component whose block length varies
-# across frequency segments has no rectangular shape, so its leaf is a flat vector
-# (`ragged`).
+# coordinates the `ComponentPlan` needs, plus the shaped-leaf description the
+# template and range build from. The leaf `shape`/`roles` describe the block run
+# as a fixed-rank column-major array: fastest to slowest over parameters,
+# feed-node, frequency segment, time segment, then antenna, size-1 axes kept so
+# every component reshapes to the same five axes and any consumer addresses it
+# the same way. A term whose block length varies across frequency segments has no
+# rectangular leaf and is rejected here.
 function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
     t = term(tc)
     tseg_id, ntseg = time_segment_ids(time_segmentation(tc), geom)
@@ -99,87 +118,57 @@ function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
     blocklen = [nparams_per_block(t, n) for n in nchan_seg]
 
     nfeed = nfeed_blocks(tc.tying)
-    dof = nant * ntseg * nfeed * sum(blocklen)
     bl = first(blocklen)                         # nchan_seg has one entry per segment (nfseg ≥ 1)
-    ragged = !all(==(bl), blocklen)
-    shape, roles = _leaf_shape(dof, ragged, bl, nfeed, nfseg, ntseg, nant, tc.tying)
-
-    return (;
-        axes, tseg_id, fseg_id, xf, xt, nchan_seg,
-        blocklen, ntseg, nfseg, tying = tc.tying, dof, shape, roles,
+    all(==(bl), blocklen) || throw(
+        ArgumentError(
+            "$(typeof(t)): block length varies across frequency segments (blocklen = " *
+                "$blocklen); the named-leaf layout requires one rectangular leaf per component."
+        )
     )
+    shape, roles = _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tc.tying)
+
+    return (; tseg_id, fseg_id, xf, xt, nchan_seg, tying = tc.tying, shape, roles)
 end
 
 # Column-major leaf shape (fastest → slowest: parameters, feed-node, freq
-# segment, time segment, antenna) with size-1 axes dropped, and the physical
-# role of each retained axis. A ragged or empty component has no rectangular
-# shape, so its leaf is a flat vector.
-function _leaf_shape(dof, ragged, bl, nfeed, nfseg, ntseg, nant, tying)
-    (ragged || dof == 0) && return (dof,), (:flat,)
+# segment, time segment, antenna) and the physical role of each axis. Every leaf
+# keeps all five axes, size-1 ones included, so the shape is a fixed-rank reshape
+# of the component's θ block run: solve writers and the forward map address any
+# component the same way, and each name retains its own complete
+# `(param, node, Frequency, Ti, Ant)` role set for labelling a wrapped θ.
+function _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tying)
     node_role = tying isa PerFeed ? :Feed : :node
-    dims = ((bl, :param), (nfeed, node_role), (nfseg, :Frequency), (ntseg, :Ti), (nant, :Ant))
-    kept = filter(d -> first(d) != 1, dims)
-    isempty(kept) && return (dof,), (:scalar,)     # every axis size 1 (dof == 1)
-    return Tuple(first(d) for d in kept), Tuple(last(d) for d in kept)
+    return (bl, nfeed, nfseg, ntseg, nant), (:param, node_role, :Frequency, :Ti, :Ant)
 end
 
-# Build a `ComponentPlan` and return it together with the updated θ cursor.
-function _plan_component(tc::TiedComponent, nant::Int, geom::DataGeometry, next::Int)
-    cl = _component_layout(tc, nant, geom)
-    off1 = zeros(Int, nant, 2, cl.ntseg, cl.nfseg)
-    off2 = zeros(Int, nant, 2, cl.ntseg, cl.nfseg)
-    for ant in 1:nant, ts in 1:cl.ntseg, fs in 1:cl.nfseg
-        bl = cl.blocklen[fs]
-        bl == 0 && continue
-        next = _assign_blocks!(off1, off2, cl.tying, ant, ts, fs, bl, next)
-    end
-
-    plan = ComponentPlan(
-        collect(Symbol, cl.axes), cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg, off1, off2
-    )
-    return plan, next
-end
-
-function _assign_blocks!(off1, off2, ::PerFeed, ant, ts, fs, bl, next)
-    off1[ant, 1, ts, fs] = next; next += bl
-    off1[ant, 2, ts, fs] = next; next += bl
-    return next
-end
-
-function _assign_blocks!(off1, off2, ::SharedFeeds, ant, ts, fs, bl, next)
-    off1[ant, 1, ts, fs] = next
-    off1[ant, 2, ts, fs] = next
-    next += bl
-    return next
-end
-
-function _assign_blocks!(off1, off2, tying::FeedComponent, ant, ts, fs, bl, next)
-    off1[ant, tying.feed, ts, fs] = next
-    next += bl
-    return next
-end
-
-function _assign_blocks!(off1, off2, tying::ReferenceRelative, ant, ts, fs, bl, next)
-    rf = tying.reference_feed
-    partner = 3 - rf
-    ref = next; next += bl
-    rel = next; next += bl
-    off1[ant, rf, ts, fs] = ref
-    off1[ant, partner, ts, fs] = ref
-    off2[ant, partner, ts, fs] = rel
-    return next
-end
-
-# ── Named/shaped template ────────────────────────────────────────────────────
+# ── Named trees ──────────────────────────────────────────────────────────────
 #
-# Walk the model's named component tree (not the flattened list) so the template
-# nests exactly where the model does; its depth-first leaf order equals the
-# flat-list order the plans and offsets use.
+# Walk the model's named component tree so the template, plans, and axes nest
+# exactly where the model does. The plans are built into both a flat depth-first
+# list (`flat`) and the mirrored tree (returned), sharing a θ cursor (`next`) so a
+# component's `range` matches the position of its leaf in the `ComponentVector`.
 _template_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
     map(v -> _template_node(v, nant, geom), nt)
 _template_node(tc::TiedComponent, nant::Int, geom::DataGeometry) =
     zeros(_component_layout(tc, nant, geom).shape...)
 _template_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _template_tree(nt, nant, geom)
+
+function _plans_tree(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
+    return NamedTuple{keys(nt)}(map(v -> _plans_node(v, nant, geom, flat, next), values(nt)))
+end
+function _plans_node(tc::TiedComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
+    cl = _component_layout(tc, nant, geom)
+    dof = prod(cl.shape)
+    range = next[]:(next[] + dof - 1)
+    next[] += dof
+    plan = ComponentPlan(
+        term(tc), cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg, cl.tying, range, cl.shape,
+    )
+    push!(flat, plan)
+    return plan
+end
+_plans_node(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}) =
+    _plans_tree(nt, nant, geom, flat, next)
 
 _axes_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
     map(v -> _axes_node(v, nant, geom), nt)
@@ -192,25 +181,19 @@ _axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant,
 """
     plan_parameters(model::StationGainModel, nant, geom::DataGeometry) -> ParameterLayout
 
-Flatten `model` (shared across `nant` antennas) over `geom` into a
+Resolve `model` (shared across `nant` antennas) over `geom` into a
 `ParameterLayout`. The returned `nθ` is the length of the parameter vector that
 `evaluate_gains` consumes.
 """
 function plan_parameters(model::StationGainModel, nant::Integer, geom::DataGeometry)
     validate_station_gain_model(model)
     nant = Int(nant)
-    plans = ComponentPlan[]
-    next = 1
-    for tc in phase_components(model)
-        plan, next = _plan_component(tc, nant, geom, next)
-        push!(plans, plan)
-    end
-    nphase = length(plans)
-    for tc in logamp_components(model)
-        plan, next = _plan_component(tc, nant, geom, next)
-        push!(plans, plan)
-    end
-    nθ = next - 1
+    flat = ComponentPlan[]
+    next = Ref(1)
+    ptree = _plans_tree(model.phase, nant, geom, flat, next)
+    nphase = length(flat)
+    ltree = _plans_tree(model.logamp, nant, geom, flat, next)
+    nθ = next[] - 1
 
     template = ComponentVector(
         phase = _template_tree(model.phase, nant, geom),
@@ -222,9 +205,12 @@ function plan_parameters(model::StationGainModel, nant::Integer, geom::DataGeome
     )
     length(template) == nθ || error(
         "plan_parameters: template length $(length(template)) disagrees with nθ = $nθ; " *
-            "the named leaves and the offset tables must span the same θ."
+            "the named leaves and the component ranges must span the same θ."
     )
-    return ParameterLayout(nθ, nant, ntimes(geom), nchannels(geom), nphase, plans, template, axes)
+    return ParameterLayout(
+        nθ, nant, ntimes(geom), nchannels(geom), nphase,
+        flat, (; phase = ptree, logamp = ltree), template, axes,
+    )
 end
 
 """
@@ -233,7 +219,7 @@ end
 Wrap a flat θ (length `layout.nθ`) as the layout's named, shaped
 `ComponentVector`, so `cv.phase.<name>` / `cv.logamp.<name>` view each
 component's block as a labelled array. The wrap shares data with `θ` (no copy);
-use it for inspection, not on the solve/AD hot path.
+use it for inspection.
 """
 function component_vector(layout::ParameterLayout, θ::AbstractVector)
     length(θ) == layout.nθ || throw(

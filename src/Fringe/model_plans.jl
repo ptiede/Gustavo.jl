@@ -38,7 +38,7 @@
 #     denoises it and, crucially, contributes ZERO R–L phase. A `PerFeed` adhoc lets
 #     per-AP solve noise differ between feeds and so injects spurious R–L (RL/RR)
 #     scatter on top of the stable global instrumental R–L offset.
-# Log-amplitude empty. `solve_station_systems!` reads the off1 columns this model
+# Log-amplitude empty. `solve_station_systems!` reads the θ columns this model
 # declares — so the global-vs-per-scan split is a model choice, not solver code.
 function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay::Symbol = :global)
     rl_delay in (:global, :perscan) ||

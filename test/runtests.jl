@@ -23,6 +23,9 @@ using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_pro
 using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using PolarizedTypes: RPol, LPol
 
+# Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
+include("plan_offsets.jl")
+
 include("test_calibration.jl")
 
 # FITS-IDI writer round-trip tests (Phase 2 of the fringe-fitter refactor).

@@ -83,14 +83,14 @@
         sol = fit(FringeFit(model = FringeModel(terms = rl_terms)), uvset)
         @test length(CAL.phase_components(sol.model)) == 6
         plan = sol.layout.plans[6]
-        solved = [sol.θ[plan.off1[a, 2, 1, 1]] for a in 1:4]
+        solved = [sol.θ[plan_off1(plan)[a, 2, 1, 1]] for a in 1:4]
         @test solved ≈ inj .- inj[1] atol = 1.0e-7
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         uv0, _ = _build_fringe_uvset()
         sol0 = fit(FringeFit(model = FringeModel(terms = rl_terms)), uv0)
         plan0 = sol0.layout.plans[6]
-        @test maximum(abs, [sol0.θ[plan0.off1[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
+        @test maximum(abs, [sol0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # R–L rate is tied ≡ 0.

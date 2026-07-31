@@ -269,8 +269,8 @@ end
 # The stage-B kinds cover exactly the single-parameter, band-wide terms whose
 # observable the search measures. Everything else is `nothing` and so unfittable
 # by this estimator rather than approximated: `_solve_kind_cols!` writes one θ
-# column per (station, feed, time) node — the block's `off1` at the FIRST
-# frequency segment — so a multi-parameter term (a polynomial) would have its
+# column per (station, feed, time) node — the block's first parameter at the
+# FIRST frequency segment — so a multi-parameter term (a polynomial) would have its
 # trailing parameters left at zero, and a frequency-resolved term (the bandpass,
 # `ConstantTerm × ChannelBlocks`) would have every segment but the first left at
 # zero while the search wrote its band-wide phase into that one.

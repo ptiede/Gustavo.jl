@@ -117,6 +117,22 @@ nfeed_blocks(::SharedFeeds) = 1
 nfeed_blocks(::ReferenceRelative) = 2
 nfeed_blocks(::FeedComponent) = 1
 
+# The feed-node (column of a component's leaf `:Feed`/`:node` axis) a feed reads
+# its PRIMARY block from, or 0 when the tying carries no block for that feed:
+# `PerFeed` keeps the two feeds as distinct nodes; `SharedFeeds` folds them to
+# one; `FeedComponent(k)` keeps only feed k; `ReferenceRelative`'s primary block
+# is the shared reference (node 1) for both feeds.
+_feed_node(::PerFeed, feed::Integer) = feed
+_feed_node(::SharedFeeds, feed::Integer) = 1
+_feed_node(::ReferenceRelative, feed::Integer) = 1
+_feed_node(t::FeedComponent, feed::Integer) = feed == t.feed ? 1 : 0
+
+# The SECONDARY block a feed also reads, or 0 for none. Only `ReferenceRelative`
+# has one: the partner feed (non-reference) adds its own relative block (node 2)
+# on top of the shared reference block.
+_feed_node2(::AbstractFeedTying, feed::Integer) = 0
+_feed_node2(t::ReferenceRelative, feed::Integer) = feed == 3 - t.reference_feed ? 2 : 0
+
 """
     StationGainModel(; phase = (;), logamp = (;))
 
