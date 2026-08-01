@@ -154,53 +154,47 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test_throws ArgumentError sol[:bogus]
         @test_throws "recorded stages: [:fringe, :bandpass, :adhoc]" sol[:bogus]
 
-        # Component θ ranges: contiguous, disjoint, and they tile 1:nθ.
-        rng = CAL.component_ranges(sol.layout)
-        @test length(rng) == length(sol.layout.plans)
-        nonempty = [r for r in rng if !isempty(r)]
-        @test first(first(nonempty)) == 1
-        @test last(last(nonempty)) == sol.layout.nθ
-        for i in 2:length(nonempty)
-            @test first(nonempty[i]) == last(nonempty[i - 1]) + 1
+        # Component θ ranges: contiguous, disjoint, and tile 1:nθ — a per-step
+        # property now (each step owns its own layout, not a merged one).
+        for step in sol.steps
+            rng = CAL.component_ranges(step.layout)
+            @test length(rng) == length(step.layout.plans)
+            nonempty = [r for r in rng if !isempty(r)]
+            isempty(nonempty) && continue
+            @test first(first(nonempty)) == 1
+            @test last(last(nonempty)) == step.layout.nθ
+            for i in 2:length(nonempty)
+                @test first(nonempty[i]) == last(nonempty[i - 1]) + 1
+            end
         end
 
         # The last stage's snapshot IS the full solution.
-        @test CAL.stage_solution(sol[:adhoc]).θ == sol.θ
+        @test stage_names(sol[:adhoc]) == stage_names(sol)
+        @test parent(gains(sol[:adhoc])) == parent(gains(sol))
 
-        # Earlier snapshots zero exactly the later stages' blocks.
-        owned(name) = begin
-            r = sol.stages[findfirst(s -> s.name === name, sol.stages)]
-            ix = Int[]
-            for c in r.phase_comps
-                append!(ix, rng[c])
-            end
-            for c in r.logamp_comps
-                append!(ix, rng[sol.layout.nphase + c])
-            end
-            ix
-        end
-        fr = CAL.stage_solution(sol[:fringe])
-        @test fr.θ[owned(:fringe)] == sol.θ[owned(:fringe)]
-        @test all(fr.θ[owned(:bandpass)] .== 0)
-        @test all(fr.θ[owned(:adhoc)] .== 0)
+        # Earlier snapshots carry only the steps up to and including that stage
+        # — a later stage contributes no gain there at all, rather than an
+        # explicit zeroed θ block over a shared layout.
+        fr = sol[:fringe]
         @test stage_names(fr) == [:fringe]
+        @test fr.steps[1].θ == sol.steps[1].θ
 
-        bp = CAL.stage_solution(sol[:bandpass])
-        @test bp.θ[owned(:fringe)] == sol.θ[owned(:fringe)]
-        @test bp.θ[owned(:bandpass)] == sol.θ[owned(:bandpass)]
-        @test all(bp.θ[owned(:adhoc)] .== 0)
+        bp = sol[:bandpass]
+        @test stage_names(bp) == [:fringe, :bandpass]
+        @test bp.steps[1].θ == sol.steps[1].θ
+        @test bp.steps[2].θ == sol.steps[2].θ
 
         # A snapshot is a valid solution: it applies cleanly.
         @test UVP.apply_calibration(uvset, fr) isa UVP.UVSet
-        @test stage_info(sol[:fringe]) isa NamedTuple
+        @test stage_info(sol, :fringe) isa NamedTuple
 
         # Gains factor multiplicatively over components: the elementwise
-        # product of per-component gains reproduces the full evaluation.
-        ev = CAL.GainEvaluator(sol.model, sol.layout)
-        g_full = CAL.evaluate_gains(ev, sol.θ, 1:CAL.nchannels(sol.geom), 1:CAL.ntimes(sol.geom))
+        # product of every step's every component's gain reproduces the full
+        # composed evaluation.
+        g_full = parent(gains(sol))
         g_prod = ones(ComplexF64, size(g_full))
-        for pi in eachindex(sol.layout.plans)
-            g_prod .*= CAL.component_gains(sol, pi)
+        for step in sol.steps, pi in eachindex(step.layout.plans)
+            g_prod .*= CAL.component_gains(sol, step.name, pi)
         end
         @test g_prod ≈ g_full
     end
@@ -213,7 +207,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
 
         sol_f, out_f = fitcalibrate(pipe, uvset; reduce = red)
         sol = fit(pipe, uvset)
-        @test sol.θ ≈ sol_f.θ
+        @test parent(gains(sol)) ≈ parent(gains(sol_f))
         # The solve's transform chain is recorded on the solution.
         @test length(sol.transforms) == 1
         @test sol.transforms[1] isa StationWeightScale
@@ -239,28 +233,30 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
             StationWeightScale(ws) |> StationWeightScale(ws) |> _full_chain())
         sol_b = fit(both, uvset)
         @test length(sol_b.transforms) == 2
-        @test fit(CalibrationPipeline(StationWeightScale(ws .* ws) |> _full_chain()), uvset).θ ≈ sol_b.θ
+        @test parent(gains(fit(CalibrationPipeline(StationWeightScale(ws .* ws) |> _full_chain()), uvset))) ≈
+            parent(gains(sol_b))
 
         # Chain convenience form ≡ the pipeline form.
-        @test fit(StationWeightScale(ws) |> _full_chain(), uvset).θ ≈ sol_f.θ
+        @test parent(gains(fit(StationWeightScale(ws) |> _full_chain(), uvset))) ≈ parent(gains(sol_f))
     end
 
-    @testset "solution serialization v4 round-trip; pre-v4 files refused" begin
+    @testset "solution serialization v5 round-trip; pre-v5 files refused" begin
         uvset, _ = _build_fringe_uvset()
         sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain()), uvset)
         path = joinpath(mktempdir(), "sol.jls")
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)
-        @test back.θ == sol.θ
+        @test all(s1.θ == s2.θ for (s1, s2) in zip(back.steps, sol.steps))
         @test stage_names(back) == stage_names(sol)
         @test back.transforms[1] isa StationWeightScale
-        @test CAL.stage_solution(back[:fringe]).θ == CAL.stage_solution(sol[:fringe]).θ
+        @test back[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
 
-        # Pre-v4 wrappers used a different θ layout; they are refused rather than
-        # misread, so a caller re-solves instead of loading a stale parameter vector.
+        # Pre-v5 wrappers used a different solution shape; they are refused
+        # rather than misread, so a caller re-solves instead of loading a stale
+        # parameter vector.
         v1path = joinpath(mktempdir(), "sol_v1.jls")
         Gustavo.Calibration.serialize(
-            v1path, (; version = 1, sol.model, sol.layout, sol.geom, sol.θ, sol.info)
+            v1path, (; version = 1, sol.steps, sol.geom, sol.info)
         )
         @test_throws "unsupported version" CAL.load_solution(v1path)
     end

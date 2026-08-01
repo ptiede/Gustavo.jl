@@ -118,14 +118,11 @@ end
 # empty-handed.
 
 # The feed-common wideband delay: NOT the per-band-group SBD delay
-# (`FrequencyBands`), NOT a feed-specific R–L delay (`FeedComponent`). This
-# signature is shared by TWO components once `DispersionSBDFit` is in the
-# pipeline — the fringe stage's own wideband delay (`FringeFit`'s `mbd`,
-# compiled FIRST) and `DispersionSBDFit`'s private per-scan delay-refinement
-# column (compiled LATER, on top of it — see `_dispersion_delay_plan`) — so
-# `_perscan_delay_plan` (`findfirst`) and `_dispersion_delay_plan` (`findlast`)
-# are the only correct way to address either one; `_is_perscan_delay` alone
-# cannot distinguish them.
+# (`FrequencyBands`), NOT a feed-specific R–L delay (`FeedComponent`). Shared by
+# `FringeFit`'s own wideband delay (`mbd`) and `DispersionSBDFit`'s private
+# per-scan delay-refinement column — but each lives in its OWN step's private
+# model, so `findfirst` over either step's own component list finds the right
+# one without ambiguity; no positional trick is needed to tell them apart.
 _is_perscan_delay(tc) =
     tc.component.term isa Delay && !(tc.component.time isa GlobalTime) &&
     tc.component.freq isa GlobalFrequency && tc.tying isa SharedFeeds
@@ -136,29 +133,14 @@ _is_sbd_delay(tc) = tc.component.term isa Delay && tc.component.freq isa Frequen
 _is_sbd_constant(tc) =
     tc.component.term isa ConstantTerm && tc.component.freq isa FrequencyBands
 
-# The fringe stage's OWN wideband delay (`FringeFit`'s `mbd`) — the FIRST
-# `_is_perscan_delay`-signatured component in compile order.
+# The step's own feed-common wideband delay — `FringeFit`'s `mbd` when called
+# on the fringe step's own `(model, layout)`, or `DispersionSBDFit`'s private
+# delay-refinement column when called on the refine step's own — either way
+# the ONLY `_is_perscan_delay`-signatured component in that step's private
+# model.
 function _perscan_delay_plan(model, layout)
     i = findfirst(_is_perscan_delay, phase_components(model))
     return i === nothing ? nothing : layout.plans[i]
-end
-
-# `DispersionSBDFit`'s private per-scan delay-refinement column — the LAST
-# `_is_perscan_delay`-signatured component in compile order, when a SECOND one
-# exists (compiled after the fringe stage's own `mbd`, per
-# `default_fringe_terms`/pipeline order); `nothing` when only `mbd` itself
-# matches — `findfirst`/`findlast` coincide on a single match, and returning
-# it here would double-count `mbd`'s own value. Gains compose multiplicatively,
-# so `mbd`'s gain times this column's is numerically the same total delay as
-# incrementing one shared column would be — this is a re-attribution across
-# two steps' θ blocks, not a different fit.
-function _dispersion_delay_plan(model, layout)
-    pcs = phase_components(model)
-    i = findfirst(_is_perscan_delay, pcs)
-    i === nothing && return nothing
-    j = findlast(_is_perscan_delay, pcs)
-    j == i && return nothing
-    return layout.plans[j]
 end
 
 # The SBD components' plans `(dplan, cplan, bands)` (per-scan per-band-group

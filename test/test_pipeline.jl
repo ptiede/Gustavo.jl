@@ -19,7 +19,9 @@ include("synthetic_uvset.jl")
         uvset,
     )
     @test sol isa CAL.CalibrationSolution
-    @test length(sol.θ) == sol.layout.nθ
+    for step in sol.steps
+        @test length(step.θ) == step.layout.nθ
+    end
 
     corr = Gustavo.apply_calibration(uvset, sol)
 
@@ -67,11 +69,15 @@ include("synthetic_uvset.jl")
         path = tempname()
         CAL.save_solution(path, sol)
         sol2 = CAL.load_solution(path)
-        @test sol2.θ == sol.θ
         @test sol2.geom.times == sol.geom.times
         @test sol2.geom.channel_freqs == sol.geom.channel_freqs
-        @test sol2.layout.nθ == sol.layout.nθ
-        @test length(CAL.phase_components(sol2.model)) == length(CAL.phase_components(sol.model))
+        @test length(sol2.steps) == length(sol.steps)
+        for step in sol.steps
+            step2 = CAL._step(sol2, step.name)
+            @test step2.θ == step.θ
+            @test step2.layout.nθ == step.layout.nθ
+            @test length(CAL.phase_components(step2.model)) == length(CAL.phase_components(step.model))
+        end
 
         corr2 = Gustavo.apply_calibration(uvset, sol2)
         for (k, leaf) in DimensionalData.branches(corr)
@@ -100,7 +106,7 @@ include("synthetic_uvset.jl")
         # `show` gives each type its own summary line instead of a raw dump.
         @test occursin("CalibrationSolution", sprint(show, sol))
         @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
-        @test occursin("StationGainModel", sprint(show, sol.model))
+        @test occursin("StationGainModel", sprint(show, CAL._step(sol, :fringe).model))
 
         # CalibrationPipeline is an ordered container over its steps.
         pipe = CalibrationPipeline(FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator())
@@ -204,7 +210,7 @@ end
     # No reduce steps → fused correction only (no reduction).
     sol_fused, out_fused = fitcalibrate(chain, uvset)
 
-    @test sol_fused.θ ≈ sol_ref.θ
+    @test parent(gains(sol_fused)) ≈ parent(gains(sol_ref))
     # Same tree keys.
     @test Set(keys(DimensionalData.branches(out_fused))) ==
         Set(keys(DimensionalData.branches(corr_ref)))
@@ -506,9 +512,10 @@ end
     # to per-band constant + slope components (the parts the per-band SBD and R–L
     # delay terms legitimately absorb). Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
-    plan = FP._bandpass_plan(sol_on.model, sol_on.layout)
+    bp_on = CAL._step(sol_on, :bandpass)
+    plan = FP._bandpass_plan(bp_on.model, bp_on.layout)
     @test plan_off1(plan)[1, 2, 1, 1] != 0
-    rec = [sol_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
+    rec = [bp_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
     worst = 0.0
     for b in 1:nbands
         cs = ((b - 1) * nchan + 1):(b * nchan)
@@ -553,7 +560,7 @@ end
     end
 
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    larec(sol, plan, a, f, gc) = (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : sol.θ[off])
+    larec(θ, plan, a, f, gc) = (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : θ[off])
     function amp_ripple(spec, don, p)
         rs = Float64[]
         for bi in eachindex(don.bl_pairs)
@@ -579,11 +586,12 @@ end
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, :parallel)
         @test amp_ripple(don.spec_after, don, p) < 1.08
-        plan = FP._amp_bandpass_plan(sol.model, sol.layout)
+        bp = CAL._step(sol, :bandpass)
+        plan = FP._amp_bandpass_plan(bp.model, bp.layout)
         for dg in dead_globals, a in 2:nant, f in 1:2
-            nbr = 0.5 * (larec(sol, plan, a, f, dg - 1) + larec(sol, plan, a, f, dg + 1))
-            @test isfinite(larec(sol, plan, a, f, dg))
-            @test abs(larec(sol, plan, a, f, dg) - nbr) < 0.1    # estimated, on the smooth curve
+            nbr = 0.5 * (larec(bp.θ, plan, a, f, dg - 1) + larec(bp.θ, plan, a, f, dg + 1))
+            @test isfinite(larec(bp.θ, plan, a, f, dg))
+            @test abs(larec(bp.θ, plan, a, f, dg) - nbr) < 0.1    # estimated, on the smooth curve
             @test abs(nbr) > 0.12                                 # ...curve far from |g|=1 (meaningful)
         end
     end
@@ -591,9 +599,10 @@ end
     # FreeBandpass does NOT estimate the killed channels — their θ slot is untouched
     # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
     solf = fit(ff |> BandpassEstimator(amp_model = FP.FreeBandpass()) |> TemporalSmoother(adhoc), uvset)
-    planf = FP._amp_bandpass_plan(solf.model, solf.layout)
+    bpf = CAL._step(solf, :bandpass)
+    planf = FP._amp_bandpass_plan(bpf.model, bpf.layout)
     for dg in dead_globals, a in 2:nant, f in 1:2
-        @test larec(solf, planf, a, f, dg) == 0.0
+        @test larec(bpf.θ, planf, a, f, dg) == 0.0
     end
 end
 
@@ -639,7 +648,7 @@ end
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )
-    @test all(>(10), filter(isfinite, sol.info.scan_max_snr))
+    @test all(>(10), filter(isfinite, CAL._step(sol, :fringe).info.scan_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
 
     corr = Gustavo.apply_calibration(uvset, sol)
@@ -698,17 +707,21 @@ end
     end
     @test any(e -> e[1] === :bandpass, events)                 # bandpass enabled by default
     inf = sol.info
-    @test inf.t_search_pass > 0 && inf.t_adhoc_pass > 0 && inf.t_bandpass_stage >= 0
+    fringe_step, bandpass_step, adhoc_step = CAL._step(sol, :fringe), CAL._step(sol, :bandpass), CAL._step(sol, :adhoc)
+    @test fringe_step.info.t_pass > 0 && adhoc_step.info.t_pass > 0 && bandpass_step.info.t_pass >= 0
     @test inf.ntasks_used >= 1 && inf.inner_tasks >= 1
-    for k in (:scan_t_decode, :scan_t_search, :scan_t_decode2, :scan_t_adhoc)
-        v = getproperty(inf, k)
-        @test length(v) == inf.nscan && all(>=(0), v)
+    # Every step publishes the SAME generic per-scan timing shape — no
+    # per-step-name code in the runner, so a third-party step gets this too.
+    for step in (fringe_step, bandpass_step, adhoc_step)
+        t = step.info.timing
+        @test length(t.decode) == inf.nscan
+        @test all(>=(0), t.decode) && all(>=(0), t.work) && all(>=(0), t.reduce)
     end
-    @test sum(inf.scan_t_search) > 0
+    @test sum(fringe_step.info.timing.work) > 0
     buf = IOBuffer()
     FP.print_solve_timing(sol; io = buf)
     out = String(take!(buf))
-    @test occursin("Fringe solve timing", out) && occursin("search pass", out)
+    @test occursin("Solve timing", out) && occursin("fringe", out)
 
     # Capping the bandpass accumulation to the best calibrator scan still
     # produces a working solve (the stage-B/bandpass/adhoc chain is intact).
@@ -729,7 +742,8 @@ end
     p2 = findfirst(pr -> pr[1] != pr[2], collect(bl2))
     @test _coherence(@view(parent(l2[:vis])[:, :, p2, 1]), @view(parent(l2[:weights])[:, :, p2, 1])) > 0.99
     # Solutions without timers degrade cleanly.
-    old = CAL.CalibrationSolution(sol.model, sol.layout, sol.geom, sol.θ, (;))
+    fringe = CAL._step(sol, :fringe)
+    old = CAL.CalibrationSolution(fringe.model, fringe.layout, sol.geom, fringe.θ, (;))
     @test_nowarn FP.print_solve_timing(old; io = IOBuffer())
 end
 
@@ -762,13 +776,14 @@ end
         ) |> DispersionSBDFit() |> TemporalSmoother(),        # no bandpass stage (see comment above)
         uvset,
     )
-    @test sol.info.dispersion_applied
-    dplan = CAL._dispersion_plan(sol.model, sol.layout)
+    refine = CAL._step(sol, :refine)
+    @test stage_info(sol, :refine).dispersion_applied
+    dplan = CAL._dispersion_plan(refine.model, refine.layout)
     @test dplan !== nothing
     for a in 1:4
         off = plan_off1(dplan)[a, 1, 1, 1]
         off == 0 && continue
-        @test isapprox(sol.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
+        @test isapprox(refine.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
     end
 
     # CROSS-BAND coherence: collapse each band leaf to one phasor per
@@ -808,7 +823,7 @@ end
         ) |> TemporalSmoother(),
         uvset,
     )
-    @test !sol0.info.dispersion_applied
+    @test :refine ∉ stage_names(sol0)     # no DispersionSBDFit step in this pipeline at all
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
     @test _crossband_eta(corr0) < 0.9
 
@@ -817,8 +832,9 @@ end
         path = joinpath(dir, "disp.h5")
         CAL.save_solution_hdf5(path, sol)
         sol2 = CAL.load_solution_hdf5(path)
-        @test sol2.θ == sol.θ
-        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(sol2.model))
+        refine2 = CAL._step(sol2, :refine)
+        @test refine2.θ == refine.θ
+        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(refine2.model))
     end
 end
 
@@ -879,14 +895,15 @@ end
         ) |> DispersionSBDFit(dispersion = nothing) |> TemporalSmoother(),
         uvset,
     )
-    @test sol.info.sbd_applied
-    @test !sol.info.dispersion_applied
-    sbd = FP._sbd_plans(sol.model, sol.layout)
+    refine = CAL._step(sol, :refine)
+    @test stage_info(sol, :refine).sbd_applied
+    @test !stage_info(sol, :refine).dispersion_applied
+    sbd = FP._sbd_plans(refine.model, refine.layout)
     @test sbd !== nothing
     # A common-mode slope across groups is gauge-shared with the wideband
     # stage-B delay (and its constants land in the SBD phase columns), so the
     # gauge-invariant recovery check is the ACROSS-GROUP DIFFERENCE.
-    Δ(a) = sol.θ[plan_off1(sbd.dplan)[a, 1, 1, 1]] - sol.θ[plan_off1(sbd.dplan)[a, 1, 1, 2]]
+    Δ(a) = refine.θ[plan_off1(sbd.dplan)[a, 1, 1, 1]] - refine.θ[plan_off1(sbd.dplan)[a, 1, 1, 2]]
     @test plan_off1(sbd.dplan)[2, 1, 1, 1] != 0
     @test isapprox(Δ(2), τ2[1] - τ2[2]; atol = 0.1e-9)          # injected 4 ns split
     @test abs(Δ(3)) < 0.1e-9                                    # clean station ≈ 0
@@ -902,7 +919,7 @@ end
         ) |> TemporalSmoother(),
         uvset,
     )
-    @test !sol0.info.sbd_applied
+    @test :refine ∉ stage_names(sol0)     # no DispersionSBDFit step in this pipeline at all
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
     @test _perchan_eta(corr0, 1) < 0.9
 end
@@ -953,13 +970,14 @@ end
         ) |> DispersionSBDFit(sbd = nothing) |> TemporalSmoother(),
         uvset,
     )
-    dplan = CAL._dispersion_plan(sol.model, sol.layout)
+    refine = CAL._step(sol, :refine)
+    dplan = CAL._dispersion_plan(refine.model, refine.layout)
     @test dplan !== nothing
     o3 = plan_off1(dplan)[3, 1, 1, 1]
     o4 = plan_off1(dplan)[4, 1, 1, 1]
     @test o3 != 0 && o4 != 0
-    @test sol.θ[o3] == sol.θ[o4]                                # tied EXACTLY
-    @test isapprox(sol.θ[o3], dtec_true[3] - dtec_true[1]; atol = 0.05)
+    @test refine.θ[o3] == refine.θ[o4]                                # tied EXACTLY
+    @test isapprox(refine.θ[o3], dtec_true[3] - dtec_true[1]; atol = 0.05)
 end
 
 @testset "Bandpass calibrator: total-SNR selection + coverage top-up" begin

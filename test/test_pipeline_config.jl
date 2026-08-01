@@ -18,8 +18,8 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         sol, out = fitcalibrate(pipe, uvset)
         @test sol isa CAL.CalibrationSolution
         @test out !== nothing                   # the full pipeline sets corrected output
-        # The fused output tail does not perturb the solve: θ ≡ the fit-only θ.
-        @test sol.θ == fit(pipe, uvset).θ
+        # The fused output tail does not perturb the solve: gains ≡ the fit-only gains.
+        @test parent(gains(sol)) == parent(gains(fit(pipe, uvset)))
         @test sol.info.nant == 4
         @test isempty(sol.postcal)              # no a-priori step
     end
@@ -127,7 +127,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         # End-to-end (new engine): code "A1" resolves to index 1 → identical solve.
         by_code = fit(FringeFit(model = FringeModel(ref_ant = "A1")), uvset)
         by_idx = fit(FringeFit(model = FringeModel(ref_ant = 1)), uvset)
-        @test by_code.θ ≈ by_idx.θ
+        @test parent(gains(by_code)) ≈ parent(gains(by_idx))
     end
 
     @testset "defaults" begin
@@ -192,7 +192,7 @@ end
         ctx = Gustavo.SolveContext(
             model, layout, geom, CAL.GainEvaluator(model, layout), zeros(layout.nθ),
             1, nant, antennas, ST.scan_stream(uvset; geom),
-            ExecutionConfig(), CAL.StageRecord[], Dict{Symbol, Any}(),
+            ExecutionConfig(), Dict{Symbol, Any}(),
         )
         @test isconcretetype(typeof(ctx))
         for f in (:model, :layout, :geom, :ev, :antennas, :stream, :exec)
@@ -231,8 +231,8 @@ end
         sol = fit(t |> FringeFit(), uvset)
         @test eltype(sol.transforms) === typeof(t)
         @test eltype(sol.postcal) === Any        # empty
-        # A stage view rebuilds the solution without widening the chain.
-        @test eltype(CAL.stage_solution(sol[:fringe]).transforms) === eltype(sol.transforms)
+        # A stage snapshot rebuilds the solution without widening the chain.
+        @test eltype(CAL.stage_solution(sol, :fringe).transforms) === eltype(sol.transforms)
     end
 
 
@@ -253,12 +253,16 @@ end
 @testset "a rewrapped θ corrects data identically" begin
     uvset, _ = _build_fringe_uvset()
     sol = fit(FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator(), uvset)
+    sold_steps = [
+        CAL.StepSolution(
+            s.name, s.model, s.layout, DimArray(copy(s.θ), Dim{:param}(1:(s.layout.nθ))), s.info,
+        )
+            for s in sol.steps
+    ]
     sold = CAL.CalibrationSolution(
-        sol.model, sol.layout, sol.geom,
-        DimArray(copy(sol.θ), Dim{:param}(1:(sol.layout.nθ))), sol.info;
-        stages = sol.stages, transforms = sol.transforms, postcal = sol.postcal,
+        sold_steps, sol.geom, sol.info; transforms = sol.transforms, postcal = sol.postcal,
     )
-    @test sold.θ isa DimArray
+    @test all(s.θ isa DimArray for s in sold.steps)
 
     a = Gustavo.apply_calibration(uvset, sol)
     b = Gustavo.apply_calibration(uvset, sold)

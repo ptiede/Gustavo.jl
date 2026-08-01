@@ -8,32 +8,42 @@
 # (`plot_fringe_spectrum`, `plot_fringe_phases`, `plot_fringe_snr`) are stubs in
 # `Fringe.jl`, implemented by `GustavoMakieExt`.
 
+# The `:fringe` step's own `StepSolution`, or `nothing` — every diagnostic
+# below degrades gracefully (empty/NaN) rather than erroring when the
+# solution carries no fringe stage (hand-built, or predates this design).
+_fringe_step(sol::CalibrationSolution) = begin
+    i = findfirst(s -> s.name === :fringe, sol.steps)
+    i === nothing ? nothing : sol.steps[i]
+end
+
 """
     fringe_snr_table(sol::CalibrationSolution) -> Vector{NamedTuple}
 
-Per-scan fringe-fit summary rows `(scan, max_snr, chi, ncomp, pfa)` pulled from
-the solver's `info` (`scan_max_snr` / `scan_chi` / `scan_ncomp` / `scan_ncells`,
-as populated by [`fit`](@ref)). `pfa` is the scan's false-alarm
-probability [`fringe_pfa`](@ref): the chance that pure noise, searched over the
-scan's full delay×rate×baseline×product space, would produce a peak of at least
-`max_snr` — `pfa ≪ 1` marks a secure detection, `pfa` near 1 a likely FALSE
-fringe (`NaN` when the solution predates `scan_ncells`). Returns an empty vector
-if the solution carries no per-scan diagnostics.
+Per-scan fringe-fit summary rows `(scan, max_snr, chi, ncomp, pfa)`, all pulled
+from the fringe step's own diagnostics (`stage_info(sol, :fringe)`). `chi`/
+`ncomp` are solve-wide scalars (the same value on every row, not literally
+per-scan). `pfa` is the scan's false-alarm probability [`fringe_pfa`](@ref):
+the chance that pure noise, searched over the scan's full
+delay×rate×baseline×product space, would produce a peak of at least `max_snr`
+— `pfa ≪ 1` marks a secure detection, `pfa` near 1 a likely FALSE fringe (`NaN`
+when the solution predates `scan_ncells`). Returns an empty vector if the
+solution carries no `:fringe` stage, or that stage no per-scan diagnostics.
 """
 function fringe_snr_table(sol::CalibrationSolution)
-    info = sol.info
-    (haskey(info, :scan_max_snr) && haskey(info, :scan_chi) && haskey(info, :scan_ncomp)) || return NamedTuple[]
-    snr = info.scan_max_snr
-    chi = info.scan_chi
-    ncomp = info.scan_ncomp
+    step = _fringe_step(sol)
+    step === nothing && return NamedTuple[]
+    info = step.info
+    (haskey(info, :scan_snr) && haskey(info, :chi) && haskey(info, :ncomp)) || return NamedTuple[]
+    snr = info.scan_snr
+    chi = Float64(info.chi)
+    ncomp = Int(info.ncomp)
     ncells = get(info, :scan_ncells, Float64[])
-    n = min(length(snr), length(chi), length(ncomp))
     return [
         (;
-                scan = s, max_snr = Float64(snr[s]), chi = Float64(chi[s]), ncomp = Int(ncomp[s]),
+                scan = s, max_snr = Float64(snr[s]), chi = chi, ncomp = ncomp,
                 pfa = s <= length(ncells) ? fringe_pfa(snr[s], ncells[s]) : NaN,
             )
-            for s in 1:n
+            for s in eachindex(snr)
     ]
 end
 
@@ -75,13 +85,14 @@ median per-scan max SNR.
 """
 function fringe_solution_summary(sol::CalibrationSolution)
     rows = fringe_snr_table(sol)
-    nant = get(sol.info, :nant, sol.layout.nant)
+    nant = get(sol.info, :nant, sol.steps[1].layout.nant)
     nscan = get(sol.info, :nscan, length(rows))
     snrs = [r.max_snr for r in rows if isfinite(r.max_snr)]
     medsnr = isempty(snrs) ? NaN : median(snrs)
+    nθ = sum(s.layout.nθ for s in sol.steps)
     return string(
         "FringeSolution: ", nant, " antennas, ", nscan, " scans, ",
-        sol.layout.nθ, " parameters; median scan max-SNR = ", _fmt(medsnr),
+        nθ, " parameters; median scan max-SNR = ", _fmt(medsnr),
     )
 end
 
@@ -98,17 +109,15 @@ Lazy — reads only leaf metadata (no visibilities), so it is cheap on a streame
 """
 function fringe_scan_groups(uvset::UVSet, sol::CalibrationSolution)
     specs = scan_stream(uvset; geom = sol.geom, ntasks = 1).groups
-    snr = get(sol.info, :scan_max_snr, Float64[])
-    out = NamedTuple[]
-    for (gi, g) in enumerate(specs)
-        push!(
-            out, (;
+    step = _fringe_step(sol)
+    snr = step === nothing ? Float64[] : get(step.info, :scan_snr, Float64[])
+    return [
+        (;
                 scan_index = gi, source = g.source, scan = g.scan,
                 max_snr = gi <= length(snr) ? Float64(snr[gi]) : NaN,
-            ),
-        )
-    end
-    return out
+            )
+            for (gi, g) in enumerate(specs)
+    ]
 end
 
 # ── Gain extractors (pure; consumed by the Makie plot stubs and tests) ─────────
@@ -123,13 +132,13 @@ shaped `(nchan, nant, 2)` (last axis = feed). The fringe model is phase-only, so
 offset at this time).
 """
 function fringe_gain_spectrum(sol::CalibrationSolution; ti::Integer = 1)
-    ev = GainEvaluator(sol.model, sol.layout)
-    ntime = sol.layout.ntime
+    ntime = length(sol.geom.times)
     1 <= ti <= ntime || error("fringe_gain_spectrum: ti=$ti out of range 1:$ntime")
+    nchan = length(sol.geom.channel_freqs)
     # Window to the single requested time — evaluating the full (nchan × ntime)
     # cube just to slice one column is O(ntime) wasted work (and memory) on long
     # tracks.
-    g = evaluate_gains(ev, sol.θ, 1:(sol.layout.nchan), ti:ti)   # (nchan, 1, nant, 2)
+    g = _composed_gains(sol, 1:nchan, ti:ti)   # (nchan, 1, nant, 2)
     return sol.geom.channel_freqs, g[:, 1, :, :]
 end
 
@@ -146,18 +155,18 @@ Returns `(channel_freqs, gains::(nchan, nant, 2))`. The bandpass is time-invaria
 so no time index is needed. Errors if the model carries no bandpass component.
 """
 function fringe_bandpass_spectrum(sol::CalibrationSolution)
-    layout = sol.layout
-    bp_i = findfirst(_is_bandpass, phase_components(sol.model))
+    step = _step(sol, :bandpass)
+    bp_i = findfirst(_is_bandpass, phase_components(step.model))
     bp_i === nothing &&
         error("fringe_bandpass_spectrum: model has no phase bandpass component")
     # θ with every parameter zeroed EXCEPT the bandpass component's own
     # contiguous range, so `evaluate_gains` returns the bandpass-only gain (all
     # other terms → unit gain).
-    θbp = fill!(similar(sol.θ), 0)
-    rng = component_ranges(layout)[bp_i]
-    θbp[rng] = sol.θ[rng]
-    ev = GainEvaluator(sol.model, sol.layout)
-    g = evaluate_gains(ev, θbp, 1:(layout.nchan), 1:1)   # time-invariant → any ti
+    θbp = fill!(similar(step.θ), 0)
+    rng = component_ranges(step.layout)[bp_i]
+    θbp[rng] = step.θ[rng]
+    ev = GainEvaluator(step.model, step.layout)
+    g = evaluate_gains(ev, θbp, 1:(step.layout.nchan), 1:1)   # time-invariant → any ti
     return sol.geom.channel_freqs, g[:, 1, :, :]
 end
 
@@ -170,11 +179,11 @@ geometry. Returns `(times::Vector, gains::Array{Complex,3})` with `gains` shaped
 per (station, feed).
 """
 function fringe_gain_time_series(sol::CalibrationSolution; ci::Integer = 1)
-    ev = GainEvaluator(sol.model, sol.layout)
-    nchan = sol.layout.nchan
+    nchan = length(sol.geom.channel_freqs)
     1 <= ci <= nchan || error("fringe_gain_time_series: ci=$ci out of range 1:$nchan")
+    ntime = length(sol.geom.times)
     # Window to the single requested channel (see fringe_gain_spectrum).
-    g = evaluate_gains(ev, sol.θ, ci:ci, 1:(sol.layout.ntime))   # (1, ntime, nant, 2)
+    g = _composed_gains(sol, ci:ci, 1:ntime)   # (1, ntime, nant, 2)
     return sol.geom.times, g[1, :, :, :]
 end
 
@@ -182,7 +191,8 @@ end
     fringe_station_solutions(sol::CalibrationSolution) -> Vector{NamedTuple}
 
 Decode the stationized per-scan delay/rate/constant-phase parameters straight out
-of `sol.θ` into a per-`(scan, station, feed)` table — no data read, no re-search.
+of the fringe step's own θ into a per-`(scan, station, feed)` table — no data
+read, no re-search.
 One row per (scan-group index `scan`, 1-based `station`, `feed ∈ {1, 2}`):
 
 - `delay_ns`  — station group delay (ns): the per-scan feed-common delay plus, on
@@ -195,10 +205,10 @@ One row per (scan-group index `scan`, 1-based `station`, `feed ∈ {1, 2}`):
 Summed from every stage-B component the fringe stage itself owns
 (`fringe_stage_components` — the delay/rate/constant terms, EXCLUDING the
 per-AP adhoc, the per-channel bandpass, dTEC and SBD) PLUS, if a
-`DispersionSBDFit` step ran, its private per-scan delay-refinement column
-(gains compose multiplicatively, so this is the same total delay as one
-incremented column would be — see `Fringe._dispersion_delay_plan`), so it
-tracks the model automatically. Values are gauge-fixed to the solve's
+`DispersionSBDFit` step ran, its own private per-scan delay-refinement column
+from its own `(model, layout, θ)` (gains compose multiplicatively, so this is
+the same total delay as one incremented column would be), so it tracks the
+model automatically. Values are gauge-fixed to the solve's
 reference pin; a within-scan difference against the SAME feed of a reference station
 is gauge-invariant (the reported `delay_rel`/`rate_rel`).
 
@@ -213,25 +223,25 @@ Scan index matches the scan-group ordering used by [`fringe_snr_table`](@ref) an
 `info.det_scan` (the per-scan time segmentation is the scan-group partition).
 """
 function fringe_station_solutions(sol::CalibrationSolution)
-    layout = sol.layout
-    θ = sol.θ
+    fringe_step = _step(sol, :fringe)
+    model, layout, θ = fringe_step.model, fringe_step.layout, fringe_step.θ
     nant = layout.nant
-    # Restricted to the fringe stage's OWN components: a LATER step (e.g.
-    # DispersionSBDFit) may compile a component sharing a stage-B signature by
-    # design (see `fringe_stage_components`), so scanning the whole model would
-    # double-count it here too. A solution with no recorded stages at all (e.g.
-    # hand-built directly, not through a pipeline) has no later step to guard
-    # against — scan everything.
-    fringe_i = findfirst(r -> r.name === :fringe, sol.stages)
-    nown = fringe_i === nothing ? length(phase_components(sol.model)) :
-        length(sol.stages[fringe_i].phase_comps)
-    comps = fringe_stage_components(sol.model, layout, nown)   # (plan, kind ∈ :delay/:rate/:phase)
-    refplan = _perscan_delay_plan(sol.model, layout)
+    # The fringe step's OWN model carries only its own components — a LATER
+    # step (e.g. `DispersionSBDFit`) compiling a component sharing a stage-B
+    # signature by design (see `fringe_stage_components`) lives in a SEPARATE
+    # step's own model and never appears here, so no restriction is needed.
+    comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate/:phase)
+    refplan = _perscan_delay_plan(model, layout)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
-    # DispersionSBDFit's own delay-refinement column, or `nothing` if that step
-    # didn't run — added to the fringe stage's own delay below.
-    delay_refine_plan = _dispersion_delay_plan(sol.model, layout)
+    # `DispersionSBDFit`'s own delay-refinement column, if that step ran — a
+    # SEPARATE step's own `(model, layout, θ)`, not a positional trick against
+    # a merged model, so its own plain `_perscan_delay_plan` finds it directly
+    # (its own model has only ONE such component).
+    refine_i = findfirst(s -> s.name === :refine, sol.steps)
+    delay_refine_plan = refine_i === nothing ? nothing :
+        _perscan_delay_plan(sol.steps[refine_i].model, sol.steps[refine_i].layout)
+    delay_refine_θ = refine_i === nothing ? nothing : sol.steps[refine_i].θ
     nscan = refplan.shape[4]                                # PerScan ⇒ ntseg == #scan groups
     # First time index landing in each scan segment — used to look up every plan's
     # own segment id for this scan (a `GlobalTime` R–L plan maps them all to 1, a
@@ -263,7 +273,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
             if delay_refine_plan !== nothing
                 node = _feed_node(delay_refine_plan.tying, f)
                 if node != 0
-                    d += _component_leaf(delay_refine_plan, θ)[1, node, 1, delay_refine_plan.tseg_id[ti], a]
+                    d += _component_leaf(delay_refine_plan, delay_refine_θ)[1, node, 1, delay_refine_plan.tseg_id[ti], a]
                     hd = true
                 end
             end
@@ -377,11 +387,11 @@ end
 # Scan group with the largest detection SNR (the most informative to inspect),
 # falling back to the first group when no per-scan SNR is recorded.
 function _max_snr_scan(sol::CalibrationSolution, ngroups::Integer)
-    haskey(sol.info, :scan_max_snr) || return 1
-    snr = sol.info.scan_max_snr
+    step = _fringe_step(sol)
+    step === nothing && return 1
+    snr = get(step.info, :scan_snr, Float64[])
     (isempty(snr) || all(!isfinite, snr)) && return 1
-    best = argmax(i -> (isfinite(snr[i]) ? snr[i] : -Inf), 1:min(length(snr), ngroups))
-    return best
+    return argmax(i -> (isfinite(snr[i]) ? snr[i] : -Inf), 1:min(length(snr), ngroups))
 end
 
 # Divide a weighted sum by its weight, leaving NaN where there was no data.
@@ -428,8 +438,7 @@ function baseline_fringe_data(
 
     info = UVData.metadata(last(first(groups[gi].leaves)))   # source/scan from the lazy leaf
     stack, win = materialize_cube(stream, groups[gi])
-    ev = GainEvaluator(sol.model, sol.layout)
-    g = evaluate_gains(ev, sol.θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
+    g = _composed_gains(sol, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
     fg = frequencies(stack)
     Vg = stack[:vis]
     Wg = stack[:weights]
@@ -478,8 +487,9 @@ function baseline_fringe_data(
         end
     end
 
-    msnr = (haskey(sol.info, :scan_max_snr) && gi <= length(sol.info.scan_max_snr)) ?
-        Float64(sol.info.scan_max_snr[gi]) : NaN
+    fstep = _fringe_step(sol)
+    fsnr = fstep === nothing ? Float64[] : get(fstep.info, :scan_snr, Float64[])
+    msnr = gi <= length(fsnr) ? Float64(fsnr[gi]) : NaN
     return BaselineFringeData(
         info.source_name, info.scan_name, gi, msnr,
         copy(UVData.baselines(stack).pairs), String.(collect(info.antennas.name)), copy(pol_products(stack)),
@@ -874,9 +884,11 @@ recording). Needs NO data read — inspect a flagged row with
     plot_fringe_search(m)
 """
 function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
-    info = sol.info
+    step = _fringe_step(sol)
+    step === nothing && return NamedTuple[]
+    info = step.info
     haskey(info, :det_pfa) || return NamedTuple[]
-    names = get(info, :ant_names, String[])
+    names = get(sol.info, :ant_names, String[])
     sta(i) = i <= length(names) ? String(names[i]) : string("ant", i)
     rows = [
         (;
@@ -893,43 +905,41 @@ end
 """
     print_solve_timing(sol::CalibrationSolution; io = stdout, top = 5)
 
-Profiling summary of a fringe solve from the timers the solve
-records in `sol.info`: wall time per stage, the decode vs. search vs. adhoc vs.
-reduce split summed over scans (task-seconds — with N concurrent group tasks the
-wall share is up to N× smaller), and the `top` slowest scans. Prints a notice
-when the solution predates the timers.
+Profiling summary of a solve, GENERIC over every step (built-in or
+third-party): one line per step that published timing (`stage_info(sol,
+name).t_pass`, the pass's total wall time, and `.timing`, a `Scan`-indexed
+`DimStack` of `decode`/`work`/`reduce` task-seconds — with N concurrent group
+tasks the wall share is up to N× smaller), then the `top` slowest scans of
+whichever step spent the most per-scan time. Prints a notice when the
+solution carries no step timing at all.
 """
 function print_solve_timing(sol::CalibrationSolution; io = stdout, top::Integer = 5)
-    info = sol.info
-    haskey(info, :t_search_pass) || return println(io, "No solve timing recorded in this solution")
-    sums(k) = haskey(info, k) ? sum(getproperty(info, k)) : 0.0
-    dec1 = sums(:scan_t_decode)
-    srch = sums(:scan_t_search)
-    dec2 = sums(:scan_t_decode2)
-    adh = sums(:scan_t_adhoc)
-    red = sums(:scan_t_reduce)
+    timed = [s for s in sol.steps if haskey(s.info, :t_pass)]
+    isempty(timed) && return println(io, "No solve timing recorded in this solution")
     println(io)
-    println(io, "Fringe solve timing (peak ", get(info, :ntasks_used, "?"), " concurrent groups × ", get(info, :inner_tasks, "?"), " inner tasks)")
-    println(io, @sprintf("  search pass   %8.1f s wall   (Σ decode %8.1f s, Σ search %8.1f s)", info.t_search_pass, dec1, srch))
-    println(io, @sprintf("  bandpass      %8.1f s wall", info.t_bandpass_stage))
-    if haskey(info, :scan_t_reduce)
-        println(io, @sprintf("  adhoc+reduce  %8.1f s wall   (Σ decode %8.1f s, Σ adhoc %8.1f s, Σ reduce %8.1f s)", info.t_adhoc_pass, dec2, adh, red))
-    else
-        println(io, @sprintf("  adhoc pass    %8.1f s wall   (Σ decode %8.1f s, Σ adhoc %8.1f s)", info.t_adhoc_pass, dec2, adh))
-    end
-    tot = [
-        info.scan_t_decode[i] + info.scan_t_search[i] + info.scan_t_decode2[i] + info.scan_t_adhoc[i] +
-            (haskey(info, :scan_t_reduce) ? info.scan_t_reduce[i] : 0.0) for i in eachindex(info.scan_t_decode)
-    ]
-    ord = sortperm(tot; rev = true)
-    println(io, "  slowest scans (decode₁/search/decode₂/adhoc s):")
-    for i in ord[1:min(Int(top), length(ord))]
-        println(
-            io, @sprintf(
-                "    scan %3d  %6.1f = %.1f/%.1f/%.1f/%.1f", i, tot[i],
-                info.scan_t_decode[i], info.scan_t_search[i], info.scan_t_decode2[i], info.scan_t_adhoc[i],
+    println(
+        io, "Solve timing (peak ", get(sol.info, :ntasks_used, "?"), " concurrent groups × ",
+        get(sol.info, :inner_tasks, "?"), " inner tasks)",
+    )
+    for s in timed
+        line = @sprintf("  %-10s %8.1f s wall", String(s.name), s.info.t_pass)
+        if haskey(s.info, :timing)
+            t = s.info.timing
+            line *= @sprintf(
+                "   (Σ decode %8.1f s, Σ work %8.1f s, Σ reduce %8.1f s)",
+                sum(t.decode), sum(t.work), sum(t.reduce),
             )
-        )
+        end
+        println(io, line)
+    end
+    heaviest = argmax(s -> haskey(s.info, :timing) ? sum(s.info.timing.work) : -Inf, timed)
+    haskey(heaviest.info, :timing) || return nothing
+    t = heaviest.info.timing
+    tot = t.decode .+ t.work .+ t.reduce
+    ord = sortperm(tot; rev = true)
+    println(io, "  slowest scans (", heaviest.name, ", decode/work/reduce s):")
+    for i in ord[1:min(Int(top), length(ord))]
+        println(io, @sprintf("    scan %3d  %6.1f = %.1f/%.1f/%.1f", i, tot[i], t.decode[i], t.work[i], t.reduce[i]))
     end
     return nothing
 end

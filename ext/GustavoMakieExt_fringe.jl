@@ -71,7 +71,7 @@ function Fringe.plot_fringe_spectrum(
 end
 
 function Fringe.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, band = nothing, residual::Bool = false)
-    nrow = length(_fringe_indices(sites, sol.layout.nant))
+    nrow = length(_fringe_indices(sites, sol.steps[1].layout.nant))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
     Fringe.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, band = band, residual = residual)
@@ -114,7 +114,7 @@ function Fringe.plot_fringe_phases(
 end
 
 function Fringe.plot_fringe_phases(sol::CalibrationSolution; sites = :all, feeds = :all, ci::Integer = 0)
-    nrow = length(_fringe_indices(sites, sol.layout.nant))
+    nrow = length(_fringe_indices(sites, sol.steps[1].layout.nant))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
     Fringe.plot_fringe_phases(fig, sol; sites = sites, feeds = feeds, ci = ci)

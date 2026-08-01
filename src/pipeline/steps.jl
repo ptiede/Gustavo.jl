@@ -146,9 +146,9 @@ function model_components(s::FringeFit, spec)
 end
 
 # The dispersion/SBD components: a private per-scan delay-refinement column
-# (shares the fringe stage's own wideband-delay SIGNATURE by design — see
-# `Fringe._dispersion_delay_plan` — but is a SEPARATE θ block) plus the dTEC
-# column, both compiled only when the DispersionModel/geometry combination
+# (shares the fringe stage's own wideband-delay SIGNATURE by design, but lives
+# in this step's own SEPARATE model/θ) plus the dTEC column, both compiled only
+# when the DispersionModel/geometry combination
 # enables dTEC; and the SBD delay + companion constant, compiled only when the
 # frequency axis has ≥ 2 band groups. Either half is dropped entirely by
 # setting the matching field to `nothing`.
@@ -233,22 +233,15 @@ end
 function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit)
     results = ctx.scratch[:pass_results]
     ngroups = length(ctx.stream.groups)
-    scan_snr = get!(() -> zeros(ngroups), ctx.scratch, :scan_snr)::Vector{Float64}
-    scan_ncells = get!(() -> zeros(ngroups), ctx.scratch, :scan_ncells)::Vector{Float64}
-    scan_dets = get!(() -> [Fringe.DetectionRow[] for _ in 1:ngroups], ctx.scratch, :scan_dets)
-    scan_t_decode = get!(() -> zeros(ngroups), ctx.scratch, :scan_t_decode)::Vector{Float64}
-    scan_t_search = get!(() -> zeros(ngroups), ctx.scratch, :scan_t_search)::Vector{Float64}
+    # `dets`/`scan_snr` are SOLVE-ESSENTIAL (drive `mask_unselected_cross_hands!`
+    # and the closure-screened WLS immediately below) — `AllScans()` covers
+    # every group every round, so a fresh build each round is exact, not just
+    # an approximation of the old `get!`-persisted array.
     dets = Vector{Any}(undef, ngroups)
     for res in results
-        gi = res.index
-        r = res.r
-        dets[gi] = r.det
-        scan_snr[gi] = r.max_snr
-        scan_ncells[gi] = r.ncells
-        scan_dets[gi] = r.rows
-        scan_t_decode[gi] += res.decode
-        scan_t_search[gi] += res.work
+        dets[res.index] = res.r.det
     end
+    scan_snr = scan_values(res -> res.r.max_snr, results, ngroups; default = 0.0)
     Fringe.mask_unselected_cross_hands!(dets, est.cross_hand_fit_on, ctx.stream.groups, scan_snr)
     # `ctx.model` holds only FringeFit's own components (each step solves on
     # its own private model/θ, never a merged one — CHUNK-069), so no
@@ -256,7 +249,7 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
     # signature by design (`DispersionSBDFit`'s private delay-refinement
     # column vs. this model's own wideband delay) lives in a SEPARATE model
     # and never appears here.
-    stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout, length(phase_components(ctx.model)))
+    stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout)
     # An opted-in R–L rate is a feed-specific Rate component in THIS step's own
     # model (other steps contribute no rate terms) — cross-hand rows must then
     # join the rate system.
@@ -270,9 +263,19 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
     # Another round re-searches the residual.
     round < max(est.rounds, 1) && return (; repeat_pass = true, chi, ncomp, rejected = nrej)
     # `scan_snr` is published for a LATER step's non-data input (e.g.
-    # `BandpassEstimator`'s SNR-aware `fit_selection` reads it off this
-    # step's `StepSolution.info` — see `_scan_snr`).
-    return (; chi, ncomp, rejected = nrej, scan_snr = copy(scan_snr))
+    # `BandpassEstimator`'s SNR-aware `fit_selection` reads it off this step's
+    # `StepSolution.info` — see `_scan_snr`). `scan_ncells` and the detection
+    # table are pure logging (`Fringe.diagnostics.jl`'s
+    # `fringe_snr_table`/`suspect_fringes` read them off this same
+    # `StepSolution.info`) — built only now, on the final round, via the same
+    # `scan_values` primitive every step's per-scan diagnostics use.
+    return (;
+        chi, ncomp, rejected = nrej, scan_snr,
+        scan_ncells = scan_values(res -> res.r.ncells, results, ngroups; default = 0.0),
+        Fringe.detection_table(
+            scan_values(res -> res.r.rows, results, ngroups; default = Fringe.DetectionRow[]),
+        )...,
+    )
 end
 
 # ── DispersionSBDFit visitor (per-scan joint (Δτ, dTEC) fit + SBD fit) ────────
@@ -315,7 +318,15 @@ end
 function finish_pass!(s::DispersionSBDFit, ctx::SolveContext)
     results = ctx.scratch[:pass_results]
     nrej = sum(res.r.nrej for res in results; init = 0)
-    return (; nscans = length(results), dtec_rejected = nrej)
+    setup = ctx.scratch[:disp_sbd_setup]
+    # This step's own compiled model alone says whether dTEC/SBD were fit —
+    # published here (not derived later from the model by a name-hardcoded
+    # lookup) so a solution-level consumer needs no knowledge of this step's
+    # name to ask "was dispersion/SBD applied?".
+    return (;
+        nscans = length(results), dtec_rejected = nrej,
+        dispersion_applied = setup.disp_plan !== nothing, sbd_applied = setup.sbd_plans !== nothing,
+    )
 end
 
 # ── BandpassEstimator visitor (accumulate per scan → per-channel solves) ─────
@@ -411,12 +422,5 @@ end
 
 function finish_pass!(s::TemporalSmoother, ctx::SolveContext)
     results = ctx.scratch[:pass_results]
-    ngroups = length(ctx.stream.groups)
-    scan_t_decode2 = get!(() -> zeros(ngroups), ctx.scratch, :scan_t_decode2)::Vector{Float64}
-    scan_t_adhoc = get!(() -> zeros(ngroups), ctx.scratch, :scan_t_adhoc)::Vector{Float64}
-    for res in results
-        scan_t_decode2[res.index] = res.decode
-        scan_t_adhoc[res.index] = res.work
-    end
     return (; nscans = length(results))
 end

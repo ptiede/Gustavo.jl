@@ -19,28 +19,29 @@
             uvset,
         )
         sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
-        @test length(sol.model.phase) == 5
-        rn = CAL.component_ranges(sol.layout)
-        rm = CAL.component_ranges(solm.layout)
+        fr, frm = CAL._step(sol, :fringe), CAL._step(solm, :fringe)
+        @test length(fr.model.phase) == 5
+        rn = CAL.component_ranges(fr.layout)
+        rm = CAL.component_ranges(frm.layout)
         for i in 1:5
-            @test sol.θ[rn[i]] == solm.θ[rm[i]]        # bit-identical
+            @test fr.θ[rn[i]] == frm.θ[rm[i]]        # bit-identical
         end
         @test stage_names(sol) == [:fringe]
         @test sol.info.nscan == solm.info.nscan
-        @test sol.info.scan_max_snr == solm.info.scan_max_snr
-        @test sol.info.scan_ncells == solm.info.scan_ncells
-        @test sol.info.det_snr == solm.info.det_snr
-        @test sol.info.det_pfa == solm.info.det_pfa
+        @test fr.info.scan_snr == frm.info.scan_snr
+        @test fr.info.scan_ncells == frm.info.scan_ncells
+        @test fr.info.det_snr == frm.info.det_snr
+        @test fr.info.det_pfa == frm.info.det_pfa
 
         # ref_ant as a station code resolves identically.
         sol_code = fit(
             FringeFit(model = FringeModel(ref_ant = "A1", terms = _fringe_terms(dispersion = false, sbd = false))),
             uvset,
         )
-        @test sol_code.θ == sol.θ
+        @test CAL._step(sol_code, :fringe).θ == fr.θ
 
         # The snapshot machinery works on a single-stage solution.
-        @test CAL.stage_solution(sol[:fringe]).θ == sol.θ
+        @test CAL._step(stage_solution(sol, :fringe), :fringe).θ == fr.θ
 
         # A fringe-only solution applies cleanly.
         corr = UVP.apply_calibration(uvset, sol)
@@ -62,10 +63,11 @@
                 estimator = MatchedFilter(rounds = 2),
             ), uvset,
         )
-        rn = CAL.component_ranges(sol.layout)
-        rm = CAL.component_ranges(solm.layout)
+        fr, frm = CAL._step(sol, :fringe), CAL._step(solm, :fringe)
+        rn = CAL.component_ranges(fr.layout)
+        rm = CAL.component_ranges(frm.layout)
         for i in 1:5
-            @test sol.θ[rn[i]] == solm.θ[rm[i]]
+            @test fr.θ[rn[i]] == frm.θ[rm[i]]
         end
     end
 
@@ -81,35 +83,42 @@
         )
 
         sol = fit(FringeFit(model = FringeModel(terms = rl_terms)), uvset)
-        @test length(CAL.phase_components(sol.model)) == 6
-        plan = sol.layout.plans[6]
-        solved = [sol.θ[plan_off1(plan)[a, 2, 1, 1]] for a in 1:4]
+        fr = CAL._step(sol, :fringe)
+        @test length(CAL.phase_components(fr.model)) == 6
+        plan = fr.layout.plans[6]
+        solved = [fr.θ[plan_off1(plan)[a, 2, 1, 1]] for a in 1:4]
         @test solved ≈ inj .- inj[1] atol = 1.0e-7
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         uv0, _ = _build_fringe_uvset()
         sol0 = fit(FringeFit(model = FringeModel(terms = rl_terms)), uv0)
-        plan0 = sol0.layout.plans[6]
-        @test maximum(abs, [sol0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
+        fr0 = CAL._step(sol0, :fringe)
+        plan0 = fr0.layout.plans[6]
+        @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # R–L rate is tied ≡ 0.
         sold = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
-        @test length(sold.model.phase) == 5
+        @test length(CAL._step(sold, :fringe).model.phase) == 5
     end
 
     @testset "cross_hand_fit_on masks cross-hand rows" begin
         uvset, _ = _build_fringe_uvset()      # per-feed delay/phi ⇒ real R–L offset
-        base = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
+        base = CAL._step(
+            fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset),
+            :fringe,
+        )
         # The global feed-2 delay offset (component 4) is solved.
         @test any(!iszero, base.θ[CAL.component_ranges(base.layout)[4]])
 
         # Selecting the (only) scan is a no-op: bit-identical to AllScans.
-        same = fit(
-            FringeFit(
-                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
-                estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(1)),
-            ), uvset,
+        same = CAL._step(
+            fit(
+                FringeFit(
+                    model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
+                    estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(1)),
+                ), uvset,
+            ), :fringe,
         )
         @test same.θ == base.θ
 
@@ -117,11 +126,13 @@
         # still succeeds (feed 2 gets its own gauge pin; the QQ parallel rows
         # keep its per-station columns constrained) and the feed-common delay
         # is unperturbed beyond solver precision on this noiseless synthetic.
-        masked = fit(
-            FringeFit(
-                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
-                estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(10_000)),
-            ), uvset,
+        masked = CAL._step(
+            fit(
+                FringeFit(
+                    model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
+                    estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(10_000)),
+                ), uvset,
+            ), :fringe,
         )
         @test all(isfinite, masked.θ)
         @test masked.θ[CAL.component_ranges(masked.layout)[3]] ≈
@@ -159,7 +170,7 @@
             uvset,
         )
         sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
-        @test sol_ws.θ == sol.θ
+        @test CAL._step(sol_ws, :fringe).θ == CAL._step(sol, :fringe).θ
         @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
 
         # CalFunction runs on the new path (it errors only when bridging), and
@@ -228,7 +239,7 @@
         # BandpassEstimator without TemporalSmoother still solves a :bandpass
         # stage (F |> B — no final pass).
         sol_fb = fit(CalibrationPipeline(FringeFit(), BandpassEstimator()), uvset)
-        @test any(r -> r.name === :bandpass, sol_fb.stages)
+        @test any(r -> r.name === :bandpass, sol_fb.steps)
     end
 
     @testset "term-list compilation: order, gating, duplicate rejection" begin
@@ -365,8 +376,8 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
             uvset,
         )
         # Bit-identical, not approximate: the seam must not perturb the solve.
-        @test sol.θ == ref.θ
         @test stage_names(sol) == stage_names(ref)
+        @test all(a.θ == b.θ for (a, b) in zip(sol.steps, ref.steps))
         @test probe.scans[] == sol.info.nscan
         @test probe.passes[] == 1
     end
@@ -380,17 +391,18 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
                 BandpassEstimator(),
             uvset,
         )
-        @test any(r -> r.name === :bandpass, sol.stages)
+        @test any(r -> r.name === :bandpass, sol.steps)
     end
 
     @testset "an estimator publishing no diagnostics still yields a solution" begin
         null = _NullEstimator()
         sol = fit(FringeFit(; model, estimator = null), uvset)
+        fringe = CAL._step(sol, :fringe)
         @test null.scans[] == sol.info.nscan
-        @test all(iszero, sol.θ)                 # it solved nothing, by construction
-        @test isempty(sol.info.det_snr)          # no detections reported
+        @test all(iszero, fringe.θ)     # it solved nothing, by construction
+        @test !haskey(fringe.info, :det_snr)     # no detections published at all
         @test isempty(sol.info.flagged_ant)
-        @test all(isnan, sol.info.scan_max_snr) || all(iszero, sol.info.scan_max_snr)
+        @test !haskey(fringe.info, :scan_snr)
         # `search` is MatchedFilter provenance, so this solution carries none.
         @test !haskey(sol.info, :search)
         @test haskey(fit(FringeFit(; model), uvset).info, :search)
@@ -514,22 +526,24 @@ end
     end
 
     @testset "the step decides whether an ionosphere is modelled at all" begin
-        # Whether the term is SOLVED end to end is `info.dispersion_applied`
-        # (see the dispersion testset in test_pipeline.jl). What this asserts
+        # Whether the term is SOLVED end to end is `stage_info(sol,
+        # :refine).dispersion_applied` (see the dispersion testset in
+        # test_pipeline.jl). What this asserts
         # is the model structure DispersionSBDFit's presence/field builds.
         ff = FringeFit(model = FringeModel(ref_ant = 1), estimator = mf)
         on = fit(ff |> DispersionSBDFit(), uvset)
         off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset)
-        @test CAL._dispersion_plan(on.model, on.layout) !== nothing
-        @test CAL._dispersion_plan(off.model, off.layout) === nothing
-        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(on.model))
-        @test !any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(off.model))
+        on_ref, off_ref = CAL._step(on, :refine), CAL._step(off, :refine)
+        @test CAL._dispersion_plan(on_ref.model, on_ref.layout) !== nothing
+        @test CAL._dispersion_plan(off_ref.model, off_ref.layout) === nothing
+        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(on_ref.model))
+        @test !any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(off_ref.model))
         # No dTEC term means no dTEC column in θ at all — but `off` still has
         # SBD's columns (untouched by the `dispersion` field), so `on` has
         # exactly one more (the private delay-refinement column that only
         # accompanies dTEC).
-        @test length(on.θ) - length(off.θ) == length(CAL._dispersion_plan(on.model, on.layout).range) +
-            length(FP._dispersion_delay_plan(on.model, on.layout).range)
+        @test length(on_ref.θ) - length(off_ref.θ) == length(CAL._dispersion_plan(on_ref.model, on_ref.layout).range) +
+            length(FP._perscan_delay_plan(on_ref.model, on_ref.layout).range)
     end
 
     @testset "require_band_separation gates on the band layout" begin
@@ -563,8 +577,9 @@ end
         # runs.
         ff = FringeFit(model = FringeModel(ref_ant = 1), estimator = mf)
         sol = fit(ff |> DispersionSBDFit(), uvset)
-        @test CAL._dispersion_plan(sol.model, sol.layout) !== nothing
-        @test FP._dispersion_delay_plan(sol.model, sol.layout) !== nothing
-        @test sol.info.dispersion_applied
+        refine = CAL._step(sol, :refine)
+        @test CAL._dispersion_plan(refine.model, refine.layout) !== nothing
+        @test FP._perscan_delay_plan(refine.model, refine.layout) !== nothing
+        @test stage_info(sol, :refine).dispersion_applied
     end
 end

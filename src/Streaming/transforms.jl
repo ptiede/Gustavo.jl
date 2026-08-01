@@ -128,7 +128,7 @@ destroyed by a bad precal cell).
 
 A solution fit on the SAME set applies index-aligned. A solution from ANOTHER
 run — the fit-once / apply-later workflow, e.g. a
-[`Gustavo.Calibration.bandpass_solution`](@ref) extraction — is portable when
+[`Gustavo.Calibration.step_solution`](@ref) extraction — is portable when
 it is globally TIME-CONSTANT (every component `GlobalTime`): stations are then
 matched BY NAME against the solution's recorded `ant_names` (stations it never
 solved keep identity gains, with a warning), and the channel layout must be
@@ -152,11 +152,10 @@ function validate_transform(t::ApplySolution, geom::DataGeometry, ant_names)
     )
     sol.geom.times == geom.times && return nothing
     # Cross-set apply (fit once, apply later — possibly another file/epoch).
-    ev = GainEvaluator(sol.model, sol.layout)
-    _globally_time_constant(ev) || error(
+    all(s -> _globally_time_constant(GainEvaluator(s.model, s.layout)), sol.steps) || error(
         "ApplySolution: the data's time axis differs from the solution's, and the solution " *
             "is not time-constant (it carries per-scan/per-integration components) — only " *
-            "time-constant solutions (e.g. `bandpass_solution(sol)`) are portable across sets."
+            "time-constant solutions (e.g. `step_solution(sol, name)`) are portable across sets."
     )
     hasproperty(sol.info, :ant_names) || error(
         "ApplySolution: cross-set application needs the solution's station names " *
@@ -169,10 +168,9 @@ function apply_transform!(
         t::ApplySolution, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler(),
     )
     sol = t.sol
-    ev = GainEvaluator(sol.model, sol.layout)
     if sol.geom.channel_freqs == win.geom.channel_freqs && sol.geom.times == win.geom.times
         # Same-set apply: stations index-aligned, full time mapping.
-        _divide_gains!(stack, win, ev, sol.θ, executor)
+        _divide_gains!(stack, win, sol, executor)
         return nothing
     end
     # Cross-set apply; the compatibility contract was already enforced by
@@ -186,7 +184,7 @@ function apply_transform!(
         missing_names = [n for (n, m) in zip(ant_names, amap) if m == 0]
         @warn "ApplySolution: stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
     end
-    _divide_gains!(stack, win, ev, sol.θ, executor; amap)
+    _divide_gains!(stack, win, sol, executor; amap)
     return nothing
 end
 
@@ -205,7 +203,10 @@ apply_transform(uvset::UVSet, t::ApplySolution) = UVData.apply_calibration(uvset
 
 # Divide evaluated gains out of one scan window in place — the transform-chain
 # port of `_divide_precal!`'s gain branch, with the same time-constant fast path
-# and the same skip-bad-cell semantics.
+# and the same skip-bad-cell semantics. The gain divided out is the ELEMENTWISE
+# PRODUCT of every step's own evaluator (see `Calibration._composed_gains`),
+# computed here rather than via that helper so the time-constant fast path
+# below still applies (one evaluation of `tsel`, shared by every step).
 #
 # `amap` selects the SAME-set or CROSS-set reading. `nothing` (same set) reads
 # gains at the data's own station indices over the window's times. A vector
@@ -219,7 +220,7 @@ apply_transform(uvset::UVSet, t::ApplySolution) = UVData.apply_calibration(uvset
 # `setindex!` is not `@propagate_inbounds`, so a `DimArray` here keeps bounds
 # checks the loop is written to elide.
 function _divide_gains!(
-        stack::AbstractDimStack, win::GeometryWindow, ev::GainEvaluator, θ,
+        stack::AbstractDimStack, win::GeometryWindow, sol::CalibrationSolution,
         executor; amap = nothing,
     )
     V = parent(stack[:vis])
@@ -228,9 +229,13 @@ function _divide_gains!(
     pols = pol_products(stack)
     nchan, nti, nbl, npol = size(V)
     ti = win.ti_idx
-    tconst = amap === nothing ? _precal_time_constant(ev, ti) : true
+    evs = [GainEvaluator(s.model, s.layout) for s in sol.steps]
+    tconst = amap === nothing ? all(ev -> _precal_time_constant(ev, ti), evs) : true
     tsel = amap === nothing ? (tconst ? (ti[1]:ti[1]) : ti) : (1:1)
-    g = evaluate_gains(ev, θ, win.chan_idx, tsel)
+    g = evaluate_gains(evs[1], sol.steps[1].θ, win.chan_idx, tsel)
+    for (ev, s) in Iterators.drop(zip(evs, sol.steps), 1)
+        g .*= evaluate_gains(ev, s.θ, win.chan_idx, tsel)
+    end
     cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
     tforeach(cols; scheduler = executor) do col
         bi, p = col

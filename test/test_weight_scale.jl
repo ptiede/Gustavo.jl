@@ -65,11 +65,13 @@
             TemporalSmoother(FP.NoSmoothing())
         base = fitcalibrate(chain0, uvset)
         fixd = fitcalibrate(FP.StationWeightScale(ws) |> chain0, uvset)
-        @test fixd[1].info.scan_max_snr == base[1].info.scan_max_snr
-        @test get(fixd[1].info, :det_snr, Float64[]) == get(base[1].info, :det_snr, Float64[])
-        @test get(fixd[1].info, :det_delay, Float64[]) == get(base[1].info, :det_delay, Float64[])
+        bfr, ffr = CAL._step(base[1], :fringe), CAL._step(fixd[1], :fringe)
+        @test ffr.info.scan_snr == bfr.info.scan_snr
+        @test ffr.info.det_snr == bfr.info.det_snr
         # …so the solution only shifts at the level of the re-weighted stages.
-        @test isapprox(fixd[1].θ, base[1].θ; atol = 1.0e-3)
+        @test all(
+            isapprox(s1.θ, s2.θ; atol = 1.0e-3) for (s1, s2) in zip(fixd[1].steps, base[1].steps)
+        )
 
         for (k, leaf) in UVP.branches(fixd[2])
             pairs = collect(UVP.baselines(leaf).pairs)

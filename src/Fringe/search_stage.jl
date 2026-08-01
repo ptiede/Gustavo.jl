@@ -288,19 +288,14 @@ function matched_kind(tc)
 end
 
 # Stage-B engine components `(plan, kind)` — the delay/rate/phase terms the
-# search + stationization solve, as declared by `matched_kind`, restricted to
-# the model's first `nown` phase components (FringeFit's own — `nown` is the
-# count `Fringe.fringe_phase_components(s.model, geom)` compiles). Components
-# past `nown` belong to LATER steps sharing the merged model/layout and may
-# structurally collide with a stage-B signature (e.g. `DispersionSBDFit`'s
-# private per-scan delay-refinement column has the SAME `Delay × GlobalFrequency
-# × SharedFeeds` signature as the fringe stage's own wideband delay, by design —
-# see `_dispersion_delay_plan`) — `matched_kind` alone cannot tell them apart by
-# signature, only position can.
-function fringe_stage_components(model, layout, nown::Int)
+# search + stationization solve, as declared by `matched_kind`, over EVERY
+# phase component of `model`. Called on a single step's own private model
+# (the fringe step's), so every component here genuinely belongs to that step
+# — no later step's component can structurally collide with a stage-B
+# signature, since it lives in a separate step's own model entirely.
+function fringe_stage_components(model, layout)
     comps = Tuple{ComponentPlan, Symbol}[]
     for (i, tc) in enumerate(phase_components(model))
-        i <= nown || break
         kind = matched_kind(tc)
         kind in (:delay, :rate, :phase) || continue
         push!(comps, (layout.plans[i], kind))

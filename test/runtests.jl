@@ -65,7 +65,7 @@ include("test_fringe_step.jl")
 
 # The BandpassEstimator step on the new engine (M4 gates): fringe+bandpass θ
 # vs the frozen monolith, refine-kernel bit parity, coverage top-up,
-# bandpass_solution extraction + portable ApplySolution.
+# step_solution extraction + portable ApplySolution.
 include("test_bandpass_step.jl")
 
 # The TemporalSmoother step + output sink: multi-scan full-pipeline solves
@@ -217,10 +217,10 @@ end
     top = names(Gustavo)
 
     # A bare `using Gustavo` spans the production path end to end: read a set,
-    # fit/calibrate it, name the per-stage view `sol[:fringe]` returns, write it.
+    # fit/calibrate it, name the per-stage snapshot `sol[:fringe]` returns, write it.
     for n in (
             :UVSet, :load_uvfits, :load_fitsidi, :write_uvfits, :write_fitsidi,
-            :fit, :calibrate, :fitcalibrate, :StageView,
+            :fit, :calibrate, :fitcalibrate, :StepSolution,
         )
         @test n in top
     end

@@ -9,20 +9,40 @@ module GustavoHDF5Ext
 
 using HDF5
 using Serialization: serialize, deserialize
-import Gustavo.Calibration: CalibrationSolution, GainEvaluator, evaluate_gains,
-    save_solution_hdf5, load_solution_hdf5
+import DimensionalData
+import Gustavo.Calibration: CalibrationSolution, save_solution_hdf5, load_solution_hdf5,
+    nchannels, ntimes, _composed_gains
+
+# Write `info` (the solution's or one step's diagnostics NamedTuple) into HDF5
+# group `g`, generically: vectors and numbers go straight in; a NamedTuple or
+# `DimStack` (e.g. a step's own `timing`) recurses into a subgroup under its
+# own key. A third-party step's custom diagnostics round-trip with no changes
+# needed here — anything else (a bare struct, e.g. an estimator's config) is
+# silently skipped, same as before.
+function _write_info!(g, info)
+    for k in keys(info)
+        v = info[k]
+        if v isa AbstractVector
+            g[String(k)] = collect(v)
+        elseif v isa Number
+            g[String(k)] = v
+        elseif v isa NamedTuple || v isa DimensionalData.AbstractDimStack
+            _write_info!(create_group(g, String(k)), v)
+        end
+    end
+    return nothing
+end
 
 function save_solution_hdf5(
         path::AbstractString, sol::CalibrationSolution;
         gains::Bool = true, time_block::Integer = 1024,
     )
     geom = sol.geom
-    layout = sol.layout
-    nchan, ntime, nant = layout.nchan, layout.ntime, layout.nant
+    nchan, ntime, nant = nchannels(geom), ntimes(geom), sol.steps[1].layout.nant
     h5open(path, "w") do f
         attrs = attributes(f)
         attrs["format"] = "GustavoCalibrationSolution"
-        attrs["version"] = 1
+        attrs["version"] = 2
         attrs["gains_layout"] = "(channel, time, antenna, feed)"
         attrs["gain_convention"] = "V_corr = V / (g_a * conj(g_b)); weight *= abs2(g_a * g_b)"
         attrs["nant"] = nant
@@ -40,14 +60,13 @@ function save_solution_hdf5(
         isempty(geom.spw_names) || (ax["spw_names"] = collect(geom.spw_names))
 
         ig = create_group(f, "info")
-        for k in keys(sol.info)
-            v = sol.info[k]
-            v isa AbstractVector ? (ig[String(k)] = collect(v)) :
-                (v isa Number ? (ig[String(k)] = v) : nothing)
+        _write_info!(ig, sol.info)
+        sg = create_group(ig, "steps")
+        for s in sol.steps
+            _write_info!(create_group(sg, String(s.name)), s.info)
         end
 
         if gains
-            ev = GainEvaluator(sol.model, sol.layout)
             blk = min(max(Int(time_block), 1), max(ntime, 1))
             dims = (nchan, ntime, nant, 2)
             ch = (nchan, min(blk, max(ntime, 1)), nant, 2)
@@ -56,7 +75,7 @@ function save_solution_hdf5(
             t = 1
             while t <= ntime
                 t2 = min(t + blk - 1, ntime)
-                g = evaluate_gains(ev, sol.θ, 1:nchan, t:t2)   # (nchan, block, nant, 2)
+                g = _composed_gains(sol, 1:nchan, t:t2)   # (nchan, block, nant, 2)
                 gr[:, t:t2, :, :] = Float32.(real.(g))
                 gi[:, t:t2, :, :] = Float32.(imag.(g))
                 t = t2 + 1
@@ -67,7 +86,7 @@ function save_solution_hdf5(
         # represent natively, so embed the Serialization bytes (external readers
         # ignore this dataset and use `gain/*` + `axes/*`).
         buf = IOBuffer()
-        serialize(buf, (; version = 2, sol.model, sol.layout, sol.geom, sol.θ, sol.info))
+        serialize(buf, (; version = 3, sol.steps, sol.geom, sol.info))
         jg = create_group(f, "julia")
         jg["blob"] = take!(buf)
     end
@@ -80,11 +99,11 @@ function load_solution_hdf5(path::AbstractString)
             error("load_solution_hdf5: $path has no julia/blob (not written by Gustavo, or gains-only export)")
         deserialize(IOBuffer(read(f["julia"]["blob"])))
     end
-    w.version == 2 || error(
+    w.version == 3 || error(
         "load_solution_hdf5: unsupported julia/blob version $(w.version) — saved by an " *
-            "incompatible Gustavo (the θ parameter layout changed); re-solve to produce a current file.",
+            "incompatible Gustavo (the solution shape changed); re-solve to produce a current file.",
     )
-    return CalibrationSolution(w.model, w.layout, w.geom, w.θ, w.info)
+    return CalibrationSolution(w.steps, w.geom, w.info)
 end
 
 end # module

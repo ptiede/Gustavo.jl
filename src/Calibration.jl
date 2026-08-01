@@ -69,13 +69,14 @@ export ParameterLayout, plan_parameters
 export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
 
 # Calibration solution container, apply, serialization
-export CalibrationSolution, build_geometry, GeometryWindow, leaf_window, save_solution, load_solution
+export CalibrationSolution, StepSolution, build_geometry, GeometryWindow, leaf_window
+export save_solution, load_solution
 export save_solution_hdf5, load_solution_hdf5
 
 # Per-stage provenance and snapshots (composable pipeline)
-export StageRecord, StageView, stage_names, stage_solution, stage_info
-export component_ranges, component_gains, gains, @comp
-# Fit-once / apply-later extraction (portable time-constant bandpass)
-export bandpass_solution
+export stage_names, stage_solution, stage_info
+export component_ranges, component_gains, component_names, gains, @comp
+# Fit-once / apply-later extraction (a single step, e.g. a portable bandpass)
+export step_solution
 
 end

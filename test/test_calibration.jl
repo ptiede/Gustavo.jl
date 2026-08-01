@@ -237,7 +237,7 @@ end
     rng = CAL.component_ranges(layout)
     @test vec(parent(a)) == θ[rng[1]]
     a[1, 1, 1, 1, 1] = -7.0
-    @test sol.θ[first(rng[1])] == -7.0
+    @test sol.steps[1].θ[first(rng[1])] == -7.0
 
     # No ant_names in info → the antenna axis falls back to 1:nant.
     soln = CAL.CalibrationSolution(model, layout, geom, θ, (; nant))
@@ -257,7 +257,7 @@ end
     @test dl isa DimArray
     @test name(dl) == :delay
     @test lookup(dl, UVD.Frequency) == [mean([1.0e9, 1.1e9]), mean([5.0e9, 5.1e9])]
-    @test vec(parent(dl)) == ssbd.θ[lsbd.plantree.phase.sbd.delay.range]
+    @test vec(parent(dl)) == ssbd.steps[1].θ[lsbd.plantree.phase.sbd.delay.range]
 
     # A path that stops at a group, or omits the `.θ` marker, is rejected.
     @test_throws ArgumentError (@comp ssbd.θ.phase.sbd)
@@ -401,7 +401,7 @@ end
     geom = CAL.DataGeometry(;
         times, channel_freqs = freqs, t0 = 0.0, f0 = sum(freqs) / length(freqs),
     )
-    # A delay term plus a per-channel bandpass, so `bandpass_solution` has
+    # A delay term plus a per-channel bandpass, so `step_solution` has
     # something to extract.
     model = CAL.StationGainModel(
         phase = (
@@ -411,27 +411,42 @@ end
     )
     layout = CAL.plan_parameters(model, nant, geom)
     θv = collect(1:(layout.nθ)) ./ 1.0e10
-    stages = [CAL.StageRecord(:fringe, 1, [1], Int[], (;)),
-        CAL.StageRecord(:bandpass, 2, [2], Int[], (;))]
 
-    solv = CAL.CalibrationSolution(model, layout, geom, θv, (; nant); stages)
-    @test solv.θ isa Vector{Float64}
+    solv = CAL.CalibrationSolution(model, layout, geom, θv, (; nant))
+    @test solv.steps[1].θ isa Vector{Float64}
 
     @testset "a DimArray θ survives construction and every derived path" begin
-        θd = DimArray(copy(θv), Dim{:param}(1:(layout.nθ)))
-        sold = CAL.CalibrationSolution(model, layout, geom, θd, (; nant); stages)
-        @test sold.θ isa DimArray
-        @test sold.θ == θd
+        # Split into the delay-only :fringe step and the bandpass-only
+        # :bandpass step so the step-scoped accessors (`stage_solution`,
+        # `step_solution`, `component_gains`) have real steps to address.
+        model_fr = CAL.StationGainModel(phase = (delay = model.phase.delay,))
+        model_bp = CAL.StationGainModel(phase = (bandpass = model.phase.bandpass,))
+        layout_fr = CAL.plan_parameters(model_fr, nant, geom)
+        layout_bp = CAL.plan_parameters(model_bp, nant, geom)
+        θv_fr = θv[1:(layout_fr.nθ)]
+        θv_bp = θv[(layout_fr.nθ + 1):end]
+        two_step(θfr, θbp) = CAL.CalibrationSolution(
+            [CAL.StepSolution(:fringe, model_fr, layout_fr, θfr),
+                CAL.StepSolution(:bandpass, model_bp, layout_bp, θbp)],
+            geom, (; nant),
+        )
+        solv2 = two_step(θv_fr, θv_bp)
+
+        θd_fr = DimArray(copy(θv_fr), Dim{:param}(1:(layout_fr.nθ)))
+        θd_bp = DimArray(copy(θv_bp), Dim{:param}(1:(layout_bp.nθ)))
+        sold2 = two_step(θd_fr, θd_bp)
+        @test sold2.steps[1].θ isa DimArray
+        @test sold2.steps[1].θ == θd_fr
         # Same numbers as the Vector-backed solution, not merely close.
-        ev = CAL.GainEvaluator(model, layout)
-        @test CAL.evaluate_gains(ev, sold.θ) == CAL.evaluate_gains(ev, solv.θ)
-        @test CAL.component_gains(sold, 1) == CAL.component_gains(solv, 1)
-        # A stage view is index-matched to θ, so it propagates the array type.
-        @test CAL.stage_solution(sold[:fringe]).θ isa DimArray
-        @test CAL.stage_solution(sold[:fringe]).θ == CAL.stage_solution(solv[:fringe]).θ
-        # `bandpass_solution` builds a DIFFERENT layout, so its θ shares no
-        # parameter identity with the original's — only the element type.
-        @test CAL.bandpass_solution(sold).θ == CAL.bandpass_solution(solv).θ
+        ev = CAL.GainEvaluator(model_fr, layout_fr)
+        @test CAL.evaluate_gains(ev, sold2.steps[1].θ) == CAL.evaluate_gains(ev, solv2.steps[1].θ)
+        @test CAL.component_gains(sold2, :fringe, 1) == CAL.component_gains(solv2, :fringe, 1)
+        # A stage snapshot is index-matched to θ, so it propagates the array type.
+        @test CAL.stage_solution(sold2, :fringe).steps[1].θ isa DimArray
+        @test CAL.stage_solution(sold2, :fringe).steps[1].θ == CAL.stage_solution(solv2, :fringe).steps[1].θ
+        # `step_solution` returns the named step's own solution — its θ shares
+        # no parameter identity with the merged original, only the element type.
+        @test CAL.step_solution(sold2, :bandpass).steps[1].θ == CAL.step_solution(solv2, :bandpass).steps[1].θ
     end
 
     @testset "gains(sol) labels the forward map for inspection" begin
@@ -440,15 +455,15 @@ end
         @test g isa DimArray
         @test size(g) == (length(freqs), length(times), nant, 2)
         # The same numbers `evaluate_gains` / `apply_calibration` use.
-        @test parent(g) == CAL.evaluate_gains(ev, solv.θ)
+        @test parent(g) == CAL.evaluate_gains(ev, solv.steps[1].θ)
         # Axes carry the geometry, so a user can index by physical coordinate.
         @test lookup(g, UVD.Frequency) == freqs
         @test lookup(g, Ti) == times
         @test lookup(g, UVD.Ant) == 1:nant           # no ant_names in info → 1:nant
         @test lookup(g, UVD.Feed) == 1:2
         # amp/phase recover from the complex gain, no separate accessor needed.
-        @test abs.(g) == abs.(CAL.evaluate_gains(ev, solv.θ))
-        @test angle.(g) == angle.(CAL.evaluate_gains(ev, solv.θ))
+        @test abs.(g) == abs.(CAL.evaluate_gains(ev, solv.steps[1].θ))
+        @test angle.(g) == angle.(CAL.evaluate_gains(ev, solv.steps[1].θ))
         # Indifferent to θ's array type.
         θd = DimArray(copy(θv), Dim{:param}(1:(layout.nθ)))
         @test gains(CAL.CalibrationSolution(model, layout, geom, θd, (; nant))) == g
@@ -466,7 +481,7 @@ end
     end
 
     @testset "the element type is carried, not coerced to Float64" begin
-        @test CAL.CalibrationSolution(model, layout, geom, Float32.(θv), (;)).θ isa Vector{Float32}
+        @test CAL.CalibrationSolution(model, layout, geom, Float32.(θv), (;)).steps[1].θ isa Vector{Float32}
     end
 
     @testset "the solution copies θ rather than aliasing it" begin
@@ -475,7 +490,7 @@ end
         θmut = copy(θv)
         s = CAL.CalibrationSolution(model, layout, geom, θmut, (;))
         θmut[1] = -999.0
-        @test s.θ[1] == θv[1]
+        @test s.steps[1].θ[1] == θv[1]
     end
 end
 

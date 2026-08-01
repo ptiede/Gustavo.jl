@@ -135,11 +135,23 @@ process_scan!(step::SolveStep, ctx, stack, win) = nothing
 
 Called once when the pass's streaming completes: run the step's global solve
 (stationization, bandpass solve, smoother fit, …), fill its θ block, and return
-the stage's diagnostics NamedTuple (recorded on the solution's `StageRecord`).
+the stage's diagnostics NamedTuple — THIS is the step logging interface: any
+key returned here ends up on the step's own `StepSolution.info`
+(`stage_info(sol, name)`), readable uniformly regardless of which step
+published it, and (for `Number`/`AbstractVector`/nested `NamedTuple`/`DimStack`
+values) written to `save_solution_hdf5`'s `info/steps/<name>/*` automatically.
+No separate logging hook is needed — return what you want recorded.
+
 `ctx.scratch[:pass_results]` holds the pass's collected per-group results —
-`(; index, decode, work, r)` per selected group in group-index order, where
-`index` is the stream group index, `decode`/`work` are seconds spent
-materializing / in `process_scan!`, and `r` is the step's per-scan return.
+`(; index, decode, work, reduce, r, out)` per selected group, in NO particular
+order (a group's `index` is its true position; use [`scan_values`](@ref) to
+scatter a per-`res` quantity back into GLOBAL scan-group order rather than
+assuming `results` is sorted or covers every group). `decode`/`work` are
+seconds spent materializing / in `process_scan!`; `r` is the step's own
+per-scan return. The runner adds `t_pass` (total pass wall time) and `timing`
+(a `scan_values`-built `DimStack` of `decode`/`work`/`reduce`) to whatever this
+returns, automatically, for every step — no extra code needed for that part.
+
 A step may request pass repetition (residual re-search rounds) by including
 `repeat_pass = true` in the returned NamedTuple — the runner streams the pass
 again (that key is stripped from the recorded diagnostics). Default: empty
@@ -152,6 +164,29 @@ consumes the residual of all previously-solved θ, so passes never share), and
 drives each pass through the streaming layer (`Fringe.map_groups`).
 """
 finish_pass!(step::SolveStep, ctx) = NamedTuple()
+
+"""
+    scan_values(f, results, ngroups::Integer; default) -> Vector
+
+The per-scan-group values `f(res)` extracts from `results`
+(`ctx.scratch[:pass_results]`, see [`finish_pass!`](@ref)), scattered into a
+dense length-`ngroups` array in GLOBAL scan-group index order. A group a
+step's [`fit_selection`](@ref) did not select reads back as `default`, not
+garbage — `results` need not be sorted, and need not cover every group. The
+shared primitive behind the runner's own per-step `timing` (in
+[`finish_pass!`](@ref)'s docs) and the built-in fringe estimator's per-scan
+`scan_snr`/`scan_ncells`/detection log — reach for it in a CUSTOM step's
+`finish_pass!` to publish a per-scan diagnostic the same way, e.g.
+
+    scan_values(res -> res.r.residual_rms, results, ngroups; default = NaN)
+"""
+function scan_values(f, results, ngroups::Integer; default)
+    out = fill(default, ngroups)
+    for res in results
+        out[res.index] = f(res)
+    end
+    return out
+end
 
 # ── Execution configuration (run-wide, not per-step) ─────────────────────────
 
@@ -202,15 +237,14 @@ the step's OWN compiled model (`model`/`layout`/`ev`/`θ` — that step's privat
 gain model, never merged with another step's, see [`StepSolution`](@ref)), the
 data geometry, the resolved gauge pin (`ref_ant`), the streaming layer
 (`stream` — REBUILT between steps as each finished solution is appended to its
-transform chain, see `_run_pipeline`), the run's `exec` resources, the
-per-stage provenance records accumulated so far (`stages`), and `scratch` — a
-`Dict{Symbol, Any}` for state PRIVATE to this step's own pass (e.g. per-group
-scratch accumulators across search rounds). Non-data info a LATER step wants
-from an earlier one (e.g. per-scan SNR) is never read through `scratch` — it's
-read off the ordered list of finished `StepSolution`s instead (see
-[`fit_selection`](@ref)); gain correction between steps is never read through
-`scratch` either — it flows through `stream`'s transform chain, so no step
-evaluates or mutates another step's θ.
+transform chain, see `_run_pipeline`), the run's `exec` resources, and
+`scratch` — a `Dict{Symbol, Any}` for state PRIVATE to this step's own pass
+(e.g. per-group scratch accumulators across search rounds). Non-data info a
+LATER step wants from an earlier one (e.g. per-scan SNR) is never read through
+`scratch` — it's read off the ordered list of finished `StepSolution`s instead
+(see [`fit_selection`](@ref)); gain correction between steps is never read
+through `scratch` either — it flows through `stream`'s transform chain, so no
+step evaluates or mutates another step's θ.
 
 `θ` is a [`ComponentVector`](@ref) over `layout.template`'s axes — its named
 blocks (`θ.phase.<name>` / `θ.logamp.<name>`) are directly addressable; wrap a
@@ -232,32 +266,7 @@ mutable struct SolveContext{
     antennas::A
     stream::S
     exec::X
-    stages::Vector{StageRecord}
     scratch::Dict{Symbol, Any}
-end
-
-"""
-    StepSolution(name, model, layout, θ, info)
-
-One finished [`SolveStep`](@ref)'s own gain model, solved parameters, and
-diagnostics — `model`/`layout` compiled from that step's own
-[`model_components`](@ref) alone, never merged with another step's, and `θ` a
-named [`ComponentVector`](@ref) over `layout.template`'s axes. The runner
-(`_run_pipeline`) keeps the ordered list of every step's `StepSolution` as
-it runs the pipeline, both to chain gain correction between steps (each
-finished one is appended to the scan stream's transform chain) and as the
-non-data-input channel hooks like [`fit_selection`](@ref) read (e.g.
-`BandpassEstimator`'s SNR-aware selection reads the fringe stage's
-`info.scan_snr`). Internal: `CalibrationSolution`'s public shape is unchanged
-by this — the runner composes one legacy-shaped solution from the finished
-`StepSolution`s at the end of the run.
-"""
-struct StepSolution{M <: StationGainModel, L <: ParameterLayout, V <: AbstractVector{Float64}}
-    name::Symbol
-    model::M
-    layout::L
-    θ::V
-    info::NamedTuple
 end
 
 # ── Transforms as pipeline steps ─────────────────────────────────────────────

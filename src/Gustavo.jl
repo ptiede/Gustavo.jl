@@ -50,7 +50,7 @@ export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagBandEdge
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate
 export SolveStep, StepChain, DataTransformStep, ExecutionConfig
-export start_pass!, process_scan!, finish_pass!
+export start_pass!, process_scan!, finish_pass!, scan_values
 export model_components, fit_selection, provides, requires, required_grouping
 # Re-export the transform / selection vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
@@ -62,6 +62,7 @@ export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, select_groups
 export search_scan
 export map_groups, foreach_group
-export StageRecord, StageView, stage_names, stage_solution, stage_info, component_gains, gains, @comp
-export bandpass_solution
+export StepSolution, stage_names, stage_solution, stage_info
+export component_gains, component_names, gains, @comp
+export step_solution
 end

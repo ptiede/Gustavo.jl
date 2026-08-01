@@ -24,15 +24,16 @@ using HDF5
         # PFA column: the solve records the per-scan effective search cells, and
         # the synthetic fringes are strong → secure detections on every scan.
         @test haskey(r1, :pfa)
-        @test length(sol.info.scan_ncells) == sol.info.nscan
-        @test all(>=(1), sol.info.scan_ncells)
+        fringe = CAL._step(sol, :fringe)
+        @test length(fringe.info.scan_ncells) == sol.info.nscan
+        @test all(>=(1), fringe.info.scan_ncells)
         @test sol.info.search isa FP.FringeSearch
         for r in rows
-            @test r.pfa ≈ FP.fringe_pfa(r.max_snr, sol.info.scan_ncells[r.scan])
+            @test r.pfa ≈ FP.fringe_pfa(r.max_snr, fringe.info.scan_ncells[r.scan])
             r.max_snr > 10 && @test r.pfa < 1.0e-10
         end
         # A marginal SNR on the same search space would NOT be secure.
-        @test FP.fringe_pfa(3.0, sol.info.scan_ncells[1]) > 0.01
+        @test FP.fringe_pfa(3.0, fringe.info.scan_ncells[1]) > 0.01
 
         buf = IOBuffer()
         @test_nowarn FP.print_fringe_snr_table(rows; io = buf)
@@ -47,14 +48,15 @@ using HDF5
 
     @testset "suspect_fringes (recorded detection table)" begin
         # The solve records every VALID detection it consumed as parallel plain
-        # vectors (HDF5-representable).
-        inf = sol.info
+        # vectors (HDF5-representable), on the fringe step's own info.
+        info = sol.info
+        inf = CAL._step(sol, :fringe).info
         n = length(inf.det_pfa)
         @test n > 0
         @test length(inf.det_scan) == length(inf.det_ant_a) == length(inf.det_ant_b) ==
             length(inf.det_pol) == length(inf.det_snr) == n
-        @test all(s -> 1 <= s <= inf.nscan, inf.det_scan)
-        @test all(>=(inf.search.snr_min), inf.det_snr)               # valid detections only
+        @test all(s -> 1 <= s <= info.nscan, inf.det_scan)
+        @test all(>=(info.search.snr_min), inf.det_snr)               # valid detections only
         @test all(p -> 0.0 <= p <= 1.0, inf.det_pfa)
 
         # Strong synthetic fringes → nothing suspect at the default threshold.
@@ -64,7 +66,7 @@ using HDF5
         @test length(rows) == n
         @test issorted([r.pfa for r in rows]; rev = true)
         r = first(rows)
-        @test r.sta_a == inf.ant_names[r.a] && r.sta_b == inf.ant_names[r.b]
+        @test r.sta_a == info.ant_names[r.a] && r.sta_b == info.ant_names[r.b]
         # A flagged row is directly inspectable with fringe_search_map (same
         # scan/baseline/product → the same detection, up to FFT-plan noise).
         m = FP.fringe_search_map(uvset, sol; scan_index = r.scan, baseline = (r.a, r.b), pol = r.pol)
@@ -73,19 +75,20 @@ using HDF5
         @test m.map.detection.snr ≈ r.snr rtol = 1.0e-6
 
         # Solutions without the table (e.g. loaded from an older file) degrade cleanly.
-        old = CAL.CalibrationSolution(sol.model, sol.layout, sol.geom, sol.θ, (; nscan = 1))
+        fs = CAL._step(sol, :fringe)
+        old = CAL.CalibrationSolution(fs.model, fs.layout, sol.geom, fs.θ, (; nscan = 1); name = :fringe)
         @test isempty(FP.suspect_fringes(old))
     end
 
     @testset "gain extractors" begin
         freqs, g = FP.fringe_gain_spectrum(sol; ti = 1)
         @test length(freqs) == length(sol.geom.channel_freqs)
-        @test size(g) == (length(sol.geom.channel_freqs), sol.layout.nant, 2)
+        @test size(g) == (length(sol.geom.channel_freqs), CAL._nant(sol), 2)
         @test eltype(g) <: Complex
 
         times, gt = FP.fringe_gain_time_series(sol; ci = 1)
         @test length(times) == length(sol.geom.times)
-        @test size(gt) == (length(sol.geom.times), sol.layout.nant, 2)
+        @test size(gt) == (length(sol.geom.times), CAL._nant(sol), 2)
 
         @test_throws ErrorException FP.fringe_gain_spectrum(sol; ti = 10_000)
         @test_throws ErrorException FP.fringe_gain_time_series(sol; ci = 10_000)
@@ -209,7 +212,7 @@ using HDF5
         @test fsm.detection.valid
         # The strongest baseline's map peak is the scan's recorded max SNR (up to
         # peak refinement; the scan max is over all baselines/products searched).
-        @test fsm.detection.snr <= sol.info.scan_max_snr[m.scan_index] * (1 + 1.0e-9)
+        @test fsm.detection.snr <= CAL._step(sol, :fringe).info.scan_snr[m.scan_index] * (1 + 1.0e-9)
         @test fsm.pfa < 1.0e-6
         # The map peak sits at the detection's (delay, rate) within a grid bin.
         pk = argmax(fsm.snr)
@@ -380,22 +383,28 @@ using HDF5
 
             # Lossless Julia round-trip via the embedded blob.
             sol2 = CAL.load_solution_hdf5(path)
-            @test sol2.θ == sol.θ
-            @test sol2.layout.nθ == sol.layout.nθ
+            @test [s.layout.nθ for s in sol2.steps] == [s.layout.nθ for s in sol.steps]
+            @test parent(gains(sol2)) == parent(gains(sol))
             @test sol2.geom.channel_freqs == sol.geom.channel_freqs
 
             # Language-neutral content: gains + axes + diagnostics readable directly.
-            nchan = sol.layout.nchan; ntime = sol.layout.ntime; nant = sol.layout.nant
+            nchan = length(sol.geom.channel_freqs); ntime = length(sol.geom.times); nant = CAL._nant(sol)
             HDF5.h5open(path, "r") do f
                 @test read(HDF5.attributes(f)["format"]) == "GustavoCalibrationSolution"
                 @test haskey(f, "gain") && haskey(f, "axes")
                 gr = read(f["gain"]["real"]); gi = read(f["gain"]["imag"])
                 @test size(gr) == (nchan, ntime, nant, 2)
                 @test read(f["axes"]["channel_freq_hz"]) == sol.geom.channel_freqs
-                @test haskey(f["info"], "scan_max_snr")
-                # gains in the file match the evaluator exactly (Float32 precision).
-                ev = CAL.GainEvaluator(sol.model, sol.layout)
-                g = CAL.evaluate_gains(ev, sol.θ, 1:nchan, 1:ntime)
+                # Run-wide diagnostics at `info/*`, each step's own under
+                # `info/steps/<name>/*` (generic — no per-step-name knowledge
+                # needed to write or read them).
+                @test haskey(f["info"], "ant_names")
+                @test haskey(f["info"]["steps"], "fringe")
+                @test haskey(f["info"]["steps"]["fringe"], "scan_snr")
+                @test haskey(f["info"]["steps"]["fringe"], "timing")
+                @test haskey(f["info"]["steps"]["fringe"]["timing"], "decode")
+                # gains in the file match the composed (product-over-steps) gains exactly (Float32 precision).
+                g = CAL._composed_gains(sol, 1:nchan, 1:ntime)
                 @test gr ≈ Float32.(real.(g))
                 @test gi ≈ Float32.(imag.(g))
             end
@@ -403,7 +412,7 @@ using HDF5
             # gains = false → compact (blob-only) file still round-trips.
             path2 = tempname() * ".h5"
             CAL.save_solution_hdf5(path2, sol; gains = false)
-            @test CAL.load_solution_hdf5(path2).θ == sol.θ
+            @test parent(gains(CAL.load_solution_hdf5(path2))) == parent(gains(sol))
             @test !HDF5.h5open(ff -> haskey(ff, "gain"), path2, "r")
             isfile(path2) && rm(path2)
         finally

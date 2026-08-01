@@ -19,9 +19,9 @@
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 using Dates
 
-# One component's θ block. `i` indexes `layout.plans` (phase components first,
-# then log-amplitude).
-_blk(sol, i) = sol.θ[CAL.component_ranges(sol.layout)[i]]
+# One component's θ block of a single STEP. `i` indexes that step's own
+# `layout.plans` (phase components first, then log-amplitude).
+_blk(step, i) = step.θ[CAL.component_ranges(step.layout)[i]]
 
 # Leaf-by-leaf equality of two UVSets' vis/weights.
 function _sets_equal(a, b; exact = true)
@@ -88,12 +88,13 @@ end
 
     @testset "3-scan full pipeline: structure, determinism, coherence" begin
         @test Gustavo.stage_names(sol_n) == [:fringe, :bandpass, :adhoc]
-        phases = CAL.phase_components(sol_n.model)
+        adhoc_step = CAL._step(sol_n, :adhoc)
+        phases = CAL.phase_components(adhoc_step.model)
         # The adhoc block is really solved (nonzero) on every scan.
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
-        @test any(!=(0), _blk(sol_n, ipi))
-        @test sol_n.info.t_adhoc_pass > 0
-        @test sol_n.info.dispersion_applied == false
+        @test any(!=(0), _blk(adhoc_step, ipi))
+        @test adhoc_step.info.t_pass > 0
+        @test :refine ∉ Gustavo.stage_names(sol_n)     # no DispersionSBDFit step in this pipeline at all
 
         # θ bit-deterministic across group concurrency (per-block partials fold
         # in a fixed order regardless of ntasks/inner).
@@ -101,7 +102,7 @@ end
             FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
         )
-        @test fit(pipe4, uvset).θ == sol_n.θ
+        @test parent(gains(fit(pipe4, uvset))) == parent(gains(sol_n))
 
         # The multi-scan solve flattens the data (bandpass + screen recovered).
         @test _worst_parallel_coherence(Gustavo.apply_calibration(uvset, sol_n)) > 0.99
@@ -109,7 +110,7 @@ end
 
     @testset "fitcalibrate fused ≡ standalone calibrate" begin
         sol_f, out_n = fitcalibrate(pipe, uvset; reduce = [AverageFrequency(nout = 1)])
-        @test sol_f.θ == sol_n.θ
+        @test parent(gains(sol_f)) == parent(gains(sol_n))
 
         # Standalone calibrate replays transforms + gains + reduce through the
         # SAME per-group tail as the fused output, agreeing to Float32
@@ -143,20 +144,21 @@ end
             exec = ExecutionConfig(ntasks = 1),
         )
         sol_nd = fit(pd, uvd)
-        @test sol_nd.info.dispersion_applied
+        @test stage_info(sol_nd, :refine).dispersion_applied
         @test Gustavo.stage_names(sol_nd) == [:fringe, :refine, :bandpass, :adhoc]
 
         # Injected per-station dTEC recovered on EVERY scan — DispersionSBDFit's
         # own pass covers the whole track unconditionally, regardless of which
         # scans the bandpass stage separately selected.
-        dplan = CAL._dispersion_plan(sol_nd.model, sol_nd.layout)
+        refine_step = CAL._step(sol_nd, :refine)
+        dplan = CAL._dispersion_plan(refine_step.model, refine_step.layout)
         @test dplan !== nothing
         nseg = size(plan_off1(dplan), 3)
         @test nseg >= 3                        # per-scan dTEC columns
         for a in 1:nant, s in 1:nseg
             off = plan_off1(dplan)[a, 1, s, 1]
             off == 0 && continue
-            @test isapprox(sol_nd.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
+            @test isapprox(refine_step.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
         end
 
         # Bit-deterministic across group concurrency through the whole
@@ -167,7 +169,7 @@ end
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
         )
-        @test fit(pd4, uvd).θ == sol_nd.θ
+        @test parent(gains(fit(pd4, uvd))) == parent(gains(sol_nd))
     end
 
     @testset "FringeFit |> TemporalSmoother (no bandpass)" begin
@@ -179,15 +181,16 @@ end
             uvset,
         )
         @test Gustavo.stage_names(sol_fs) == [:fringe, :adhoc]
-        phases = CAL.phase_components(sol_fs.model)
-        @test !any(CAL._is_bandpass, phases)
+        @test !any(CAL._is_bandpass, Iterators.flatten(CAL.phase_components(s.model) for s in sol_fs.steps))
+        adhoc_step_fs = CAL._step(sol_fs, :adhoc)
+        phases = CAL.phase_components(adhoc_step_fs.model)
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
-        @test any(!=(0), _blk(sol_fs, ipi))
+        @test any(!=(0), _blk(adhoc_step_fs, ipi))
         # Without the bandpass stage the injected per-channel bandpass survives,
         # so full coherence is NOT reached — but the delay/rate/adhoc solve must
         # still be sane (all θ finite, per-scan SNRs strong).
-        @test all(isfinite, sol_fs.θ)
-        @test all(>(10), filter(isfinite, sol_fs.info.scan_max_snr))
+        @test all(s -> all(isfinite, s.θ), sol_fs.steps)
+        @test all(>(10), filter(isfinite, CAL._step(sol_fs, :fringe).info.scan_snr))
     end
 
     @testset "AprioriAmplitude is an output-chain step" begin
@@ -219,7 +222,7 @@ end
         sol_ap, out_ap = fitcalibrate(pipe_ap, uvset)
         # Recorded on the solution; the solve's θ is untouched by it.
         @test length(sol_ap.postcal) == 1 && sol_ap.postcal[1] === ap
-        @test sol_ap.θ == sol_n.θ
+        @test parent(gains(sol_ap)) == parent(gains(sol_n))
         # Applied after the gains: relative to the no-apriori output every
         # visibility scales by SEFD = Tsys_band (flat gain, DPFU = 1).
         _, out_plain = fitcalibrate(pipe, uvset)
@@ -246,7 +249,7 @@ end
             sol_l = CAL.load_solution(path)
             @test length(sol_l.postcal) == 1
             @test sol_l.postcal[1] isa AprioriAmplitude
-            @test sol_l.θ == sol_ap.θ
+            @test all(s1.θ == s2.θ for (s1, s2) in zip(sol_l.steps, sol_ap.steps))
         finally
             isfile(path) && rm(path)
         end

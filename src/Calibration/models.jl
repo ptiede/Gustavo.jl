@@ -190,15 +190,6 @@ function _merge_components(a::NamedTuple, b::NamedTuple)
     return merge(a, b)
 end
 
-# The named top-level leaf components of `nt` whose `TiedComponent` satisfies
-# `pred`, preserving names and order — for extracting a sub-model by predicate
-# (e.g. the bandpass). Not type-stable (runtime key selection); used off the hot
-# path.
-function _named_subset(nt::NamedTuple, pred)
-    ks = filter(k -> nt[k] isa TiedComponent && pred(nt[k]), keys(nt))
-    return NamedTuple{ks}(map(k -> nt[k], ks))
-end
-
 # ── Model-list elements ──────────────────────────────────────────────────────
 
 """

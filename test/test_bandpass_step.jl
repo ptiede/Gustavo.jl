@@ -8,17 +8,17 @@
 #   per-scan accumulator contributions fold in group-index order).
 # - The refine kernels (dTEC, SBD) are inner-invariant and recover the
 #   injected dTEC standalone on a scan view.
-# - `bandpass_solution` extracts a portable bandpass-only solution and
+# - `step_solution` extracts a portable bandpass-only solution and
 #   `ApplySolution` applies it same-set (index-aligned) and cross-set
 #   (station-name-mapped, channel-layout-validated, time-constant only).
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 
-# One component's θ block. `i` indexes `layout.plans` (phase components first,
-# then log-amplitude).
-_blk(sol, i) = sol.θ[CAL.component_ranges(sol.layout)[i]]
-_pc_phase_idx(sol) = findfirst(CAL._is_bandpass, CAL.phase_components(sol.model))
-_pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
+# One component's θ block from a step's own layout. `i` indexes
+# `step.layout.plans` (phase components first, then log-amplitude).
+_blk(step, i) = step.θ[CAL.component_ranges(step.layout)[i]]
+_pc_phase_idx(step) = findfirst(CAL._is_bandpass, CAL.phase_components(step.model))
+_pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model))
 
 @testset "BandpassEstimator step (new engine)" begin
     nant, nbands, nchan = 4, 2, 8
@@ -52,26 +52,30 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
 
     @testset "θ blocks invariant under the appended smoother stage" begin
         # Stage-B fringe blocks: bit-identical (components 1..5 in both models).
+        fn = CAL._step(sol_n, :fringe); fo = CAL._step(sol_o, :fringe)
         for i in 1:5
-            @test _blk(sol_n, i) == _blk(sol_o, i)
+            @test _blk(fn, i) == _blk(fo, i)
         end
         # Per-channel phase + log-amp bandpass: rtol 1e-12 (fold association).
-        ipn = _pc_phase_idx(sol_n); ipo = _pc_phase_idx(sol_o)
-        @test isapprox(_blk(sol_n, ipn), _blk(sol_o, ipo); rtol = 1.0e-12, atol = 1.0e-12)
-        @test any(!=(0), _blk(sol_n, ipn))
-        jan = _pc_amp_idx(sol_n); jao = _pc_amp_idx(sol_o)
+        bn = CAL._step(sol_n, :bandpass); bo = CAL._step(sol_o, :bandpass)
+        ipn = _pc_phase_idx(bn); ipo = _pc_phase_idx(bo)
+        @test isapprox(_blk(bn, ipn), _blk(bo, ipo); rtol = 1.0e-12, atol = 1.0e-12)
+        @test any(!=(0), _blk(bn, ipn))
+        jan = _pc_amp_idx(bn); jao = _pc_amp_idx(bo)
         @test isapprox(
-            _blk(sol_n, sol_n.layout.nphase + jan), _blk(sol_o, sol_o.layout.nphase + jao);
+            _blk(bn, bn.layout.nphase + jan), _blk(bo, bo.layout.nphase + jao);
             rtol = 1.0e-12, atol = 1.0e-12,
         )
-        @test any(!=(0), _blk(sol_n, sol_n.layout.nphase + jan))
-        # Stage provenance: the bandpass stage owns exactly the bandpass blocks.
-        @test [r.name for r in sol_n.stages] == [:fringe, :bandpass]
-        bprec = sol_n.stages[2]
-        @test bprec.phase_comps == [ipn] && bprec.logamp_comps == [jan]
-        @test stage_info(sol_n[:bandpass]).nscans == length(FP.scan_stream(uvset).groups)
-        @test sol_n.info.t_bandpass_stage > 0
-        @test sol_n.info.dispersion_applied == false && sol_n.info.sbd_applied == false
+        @test any(!=(0), _blk(bn, bn.layout.nphase + jan))
+        # Stage provenance: the bandpass stage's own model carries only the
+        # bandpass component (nothing merged in from the fringe stage), so it
+        # is the sole entry of each group and `ipn`/`jan` (found above) sit at 1.
+        @test stage_names(sol_n) == [:fringe, :bandpass]
+        @test length(CAL.phase_components(bn.model)) == 1 && length(CAL.logamp_components(bn.model)) == 1
+        @test ipn == 1 && jan == 1
+        @test stage_info(sol_n, :bandpass).nscans == length(FP.scan_stream(uvset).groups)
+        @test stage_info(sol_n, :bandpass).t_pass > 0
+        @test :refine ∉ stage_names(sol_n)     # no DispersionSBDFit step in this pipeline at all
     end
 
     @testset "new-engine fold is deterministic across ntasks" begin
@@ -82,7 +86,7 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
             ),
             uvset,
         )
-        @test sol_n4.θ == sol_n.θ
+        @test all(a.θ == b.θ for (a, b) in zip(sol_n4.steps, sol_n.steps))
     end
 
     @testset "max_scans = 1 subset: blocks invariant under the smoother stage" begin
@@ -103,11 +107,12 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
             ),
             uvset,
         )
-        ipn = _pc_phase_idx(sol_nc); ipo = _pc_phase_idx(sol_oc)
-        @test _blk(sol_nc, ipn) == _blk(sol_oc, ipo)
-        jan = _pc_amp_idx(sol_nc); jao = _pc_amp_idx(sol_oc)
-        @test _blk(sol_nc, sol_nc.layout.nphase + jan) == _blk(sol_oc, sol_oc.layout.nphase + jao)
-        @test stage_info(sol_nc[:bandpass]).nscans == 1
+        bnc = CAL._step(sol_nc, :bandpass); boc = CAL._step(sol_oc, :bandpass)
+        ipn = _pc_phase_idx(bnc); ipo = _pc_phase_idx(boc)
+        @test _blk(bnc, ipn) == _blk(boc, ipo)
+        jan = _pc_amp_idx(bnc); jao = _pc_amp_idx(boc)
+        @test _blk(bnc, bnc.layout.nphase + jan) == _blk(boc, boc.layout.nphase + jao)
+        @test stage_info(sol_nc, :bandpass).nscans == 1
     end
 
     @testset "step order honors requires/provides" begin
@@ -147,13 +152,14 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
             ),
             uvset,
         )
-        ipg = _pc_phase_idx(sol_g)
-        @test length(_blk(sol_g, ipg)) * k == length(_blk(sol_n, _pc_phase_idx(sol_n)))
-        @test any(!=(0), _blk(sol_g, ipg))
+        bg = CAL._step(sol_g, :bandpass); bn = CAL._step(sol_n, :bandpass)
+        ipg = _pc_phase_idx(bg)
+        @test length(_blk(bg, ipg)) * k == length(_blk(bn, _pc_phase_idx(bn)))
+        @test any(!=(0), _blk(bg, ipg))
 
         # The tie is structural: every channel of a block addresses one θ slot,
         # so the evaluated bandpass gain is constant across the block.
-        plan = FP._bandpass_plan(sol_g.model, sol_g.layout)
+        plan = FP._bandpass_plan(bg.model, bg.layout)
         @test plan.fseg_id == repeat(1:(nglob ÷ k), inner = k)
         _, gbp = FP.fringe_bandpass_spectrum(sol_g)
         for a in 1:nant, f in 1:2, b in 1:(nglob ÷ k)
@@ -164,31 +170,34 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
         @test !all(≈(gbp[1, 2, 1]), gbp[:, 2, 1])
     end
 
-    @testset "bandpass_solution extraction" begin
-        bps = bandpass_solution(sol_n)
-        @test length(bps.model.phase) == 1 && length(bps.model.logamp) == 1
-        @test CAL._is_bandpass(bps.model.phase[1])
-        ipn = _pc_phase_idx(sol_n)
-        jan = _pc_amp_idx(sol_n)
-        @test _blk(bps, 1) == _blk(sol_n, ipn)
-        @test _blk(bps, bps.layout.nphase + 1) == _blk(sol_n, sol_n.layout.nphase + jan)
+    @testset "step_solution extraction" begin
+        bps = step_solution(sol_n, :bandpass)
+        bp = only(bps.steps)
+        @test length(bp.model.phase) == 1 && length(bp.model.logamp) == 1
+        @test CAL._is_bandpass(bp.model.phase[1])
+        bn = CAL._step(sol_n, :bandpass)
+        ipn = _pc_phase_idx(bn)
+        jan = _pc_amp_idx(bn)
+        @test _blk(bp, 1) == _blk(bn, ipn)
+        @test _blk(bp, bp.layout.nphase + 1) == _blk(bn, bn.layout.nphase + jan)
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
-        # A solution with no bandpass component refuses extraction.
+        # A solution with no bandpass STEP at all refuses extraction.
         sol_f = fit(FringeFit(model = fm), uvset)
-        @test_throws ArgumentError bandpass_solution(sol_f)
-        @test_throws "carries no bandpass component" bandpass_solution(sol_f)
+        @test_throws ArgumentError step_solution(sol_f, :bandpass)
+        @test_throws "no stage :bandpass" step_solution(sol_f, :bandpass)
     end
 
     @testset "portable ApplySolution: same-set + cross-set by station name" begin
-        bps = bandpass_solution(sol_n)
-        ev = CAL.GainEvaluator(bps.model, bps.layout)
+        bps = step_solution(sol_n, :bandpass)
+        bp = only(bps.steps)
+        ev = CAL.GainEvaluator(bp.model, bp.layout)
 
         # Same-set (identical geometry): index-aligned division.
         st0 = FP.scan_stream(uvset)
         stack0, win0 = FP.materialize_cube(st0, st0.groups[1])
         stt = FP.scan_stream(uvset; transforms = (FP.ApplySolution(bps),))
         stackt, _ = FP.materialize_cube(stt, stt.groups[1])
-        g = CAL.evaluate_gains(ev, bps.θ, win0.chan_idx, win0.ti_idx)
+        g = CAL.evaluate_gains(ev, bp.θ, win0.chan_idx, win0.ti_idx)
         Vm = copy(parent(stack0[:vis])); Wm = copy(parent(stack0[:weights]))
         for p in axes(Vm, 4), (bi, (a, b)) in enumerate(baselines(stack0).pairs)
             fa, fb = CAL.correlation_feed_pair(pol_products(stack0)[p])
@@ -209,7 +218,7 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
         stackx, _ = FP.materialize_cube(sts, sts.groups[1])
         st0s = FP.scan_stream(uvsub)
         stack0s, win0s = FP.materialize_cube(st0s, st0s.groups[1])
-        gx = CAL.evaluate_gains(ev, bps.θ, win0s.chan_idx, 1:1)   # A1..A3 ≡ solution rows 1..3
+        gx = CAL.evaluate_gains(ev, bp.θ, win0s.chan_idx, 1:1)   # A1..A3 ≡ solution rows 1..3
         Vx = copy(parent(stack0s[:vis])); Wx = copy(parent(stack0s[:weights]))
         for p in axes(Vx, 4), (bi, (a, b)) in enumerate(baselines(stack0s).pairs)
             fa, fb = CAL.correlation_feed_pair(pol_products(stack0s)[p])

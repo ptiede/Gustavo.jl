@@ -72,7 +72,7 @@ struct UnbackedExecutor end
         )
         sol_t, out_t = fitcalibrate(mk(ThreadsExecutor()), uvset; reduce = [AverageFrequency(nout = 1)])
         sol_d, out_d = fitcalibrate(mk(DaggerExecutor()), uvset; reduce = [AverageFrequency(nout = 1)])
-        @test sol_d.θ == sol_t.θ
+        @test parent(gains(sol_d)) == parent(gains(sol_t))
         @test Gustavo.stage_names(sol_d) == Gustavo.stage_names(sol_t)
         for (k, leaf) in UVP.branches(out_t)
             ld = UVP.branches(out_d)[k]
@@ -100,7 +100,7 @@ struct UnbackedExecutor end
         # order-fixed by the data layout, so θ is bit-identical.
         sol_ser, _ = fitcalibrate(mk(SerialScheduler()), uvset)
         sol_dyn, _ = fitcalibrate(mk(DynamicScheduler(; nchunks = 4)), uvset)
-        @test sol_ser.θ == sol_dyn.θ
+        @test parent(gains(sol_ser)) == parent(gains(sol_dyn))
     end
 
     @testset "the driver-facing stream carries both executors" begin

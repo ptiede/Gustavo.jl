@@ -33,7 +33,7 @@
         # The two GlobalFrequency delay plans: the feed-common per-scan one (has a
         # feed-1 column) and the R–L one (feed-2 only). Identified structurally.
         dplans = [
-            p for (p, k) in FP.fringe_stage_components(model, layout, length(CAL.phase_components(model)))
+            p for (p, k) in FP.fringe_stage_components(model, layout)
                 if k === :delay
         ]
         shared = only(filter(p -> plan_off1(p)[2, 1, 1, 1] != 0, dplans))
@@ -42,7 +42,7 @@
         θ = zeros(layout.nθ)
         θ[plan_off1(shared)[2, 1, 1, 1]] = 2.0e-9      # station 2 per-scan (feed-common) delay: 2 ns
         θ[plan_off1(rl)[2, 2, 1, 1]]     = 0.5e-9      # station 2 R–L delay: +0.5 ns on feed 2
-        sol = CAL.CalibrationSolution(model, layout, geom, θ, (; nscan = 1))
+        sol = CAL.CalibrationSolution(model, layout, geom, θ, (; nscan = 1); name = :fringe)
 
         rows = FP.fringe_station_solutions(sol)
         @test rows isa Vector{<:NamedTuple}
@@ -55,12 +55,12 @@
 
         # Rate (Hz → mHz) and phase (rad → deg) route through their own kinds.
         rplan = only(
-            p for (p, k) in FP.fringe_stage_components(model, layout, length(CAL.phase_components(model)))
+            p for (p, k) in FP.fringe_stage_components(model, layout)
                 if k === :rate
         )
         θ2 = zeros(layout.nθ)
         θ2[plan_off1(rplan)[3, 1, 1, 1]] = 1.0e-3       # 1 mHz
-        sol2 = CAL.CalibrationSolution(model, layout, geom, θ2, (; nscan = 1))
+        sol2 = CAL.CalibrationSolution(model, layout, geom, θ2, (; nscan = 1); name = :fringe)
         rows2 = FP.fringe_station_solutions(sol2)
         @test only(filter(r -> r.station == 3 && r.feed == 1, rows2)).rate_mHz ≈ 1.0
     end
@@ -82,7 +82,7 @@
             uvset,
         )
         rows = FP.fringe_station_solutions(sol)
-        @test length(rows) == sol.info.nscan * sol.layout.nant * 2
+        @test length(rows) == sol.info.nscan * sol.steps[1].layout.nant * 2
         val(st, fd) = only(filter(r -> r.scan == 1 && r.station == st && r.feed == fd, rows)).delay_ns
 
         # Gauge: reference station (1) is pinned to 0 on both feeds.
