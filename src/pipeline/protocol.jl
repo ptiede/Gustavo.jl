@@ -1,26 +1,31 @@
 # ── Step protocol: the composable-pipeline contract ──────────────────────────
 #
-# A pipeline is an ordered list of steps sharing ONE compiled gain model: at
-# fit time each `SolveStep` declares its model components, `plan_parameters`
-# lays out a single θ, and each step fills its own block — so gauge accounting
-# (feed tying, R–L pins) lives under one model while every stage remains
-# individually inspectable through the solution's per-stage records.
+# A pipeline is an ordered list of steps, each solving its OWN compiled gain
+# model: at fit time a `SolveStep` declares its model components and
+# `plan_parameters` lays out that step's own θ alone — no step's θ block is
+# ever shared with, or visible to, another step's. Gain correction between
+# steps flows through the scan stream's transform chain (each finished step's
+# solution is appended, so later steps read already-corrected data), and every
+# stage remains individually inspectable through the solution's per-stage
+# records (composed from the run's finished `StepSolution`s once every step
+# has solved).
 #
 # Hooks a step may implement (all have working defaults):
 # - `model_components(step, spec)` — the gain-model components this step solves.
 # - `transforms(step)`             — data transforms it contributes to the
 #                                    materialization chain (see `CalFunction`).
-# - `fit_selection(step)`          — which scans feed its accumulation
-#                                    (fit-on-subset / apply-everywhere).
+# - `fit_selection(step, prior_solutions)` — which scans feed its accumulation
+#                                    (fit-on-subset / apply-everywhere); reads
+#                                    non-data info from earlier steps (e.g.
+#                                    per-scan SNR) off their `StepSolution`s.
 # - `provides(step)` / `requires(step)` — stage ordering contract.
 # - `required_grouping(step)`      — leaf-grouping constraint.
 # - `start_pass!` / `process_scan!` / `finish_pass!` — the VISITOR CONTRACT:
 #   the executor owns all streaming (the scan group is the only unit of data
 #   flow — steps never see the uvset); a step accumulates from each
 #   materialized, transform-corrected scan view and runs its global solve when
-#   the pass completes. The compiler packs steps into a minimal number of
-#   full-data passes from `requires`/`provides`: independent steps share one
-#   pass; a step needing another's finalized θ starts a new one.
+#   the pass completes. Every step gets its own streaming pass, ordered by
+#   `requires`/`provides`.
 #
 # Run-wide resources (task/memory budgets, progress) live on the pipeline's
 # `ExecutionConfig`, NOT on steps: they are properties of a run, shared by
@@ -30,10 +35,10 @@
 """
     SolveStep <: CalibrationStep
 
-A pipeline stage that solves part of the shared gain model (fringe fit,
-bandpass estimation, temporal smoothing, …). Solve steps declare their model
-components via [`model_components`](@ref) and run under the executor-driven
-visitor contract — [`start_pass!`](@ref) / [`process_scan!`](@ref) /
+A pipeline stage that solves its own gain model (fringe fit, bandpass
+estimation, temporal smoothing, …). Solve steps declare their model components
+via [`model_components`](@ref) and run under the executor-driven visitor
+contract — [`start_pass!`](@ref) / [`process_scan!`](@ref) /
 [`finish_pass!`](@ref); reduce steps ([`ReduceStep`](@ref)) transform data
 instead.
 """
@@ -63,14 +68,16 @@ it is materialized. Default: none.
 transforms(step::CalibrationStep) = ()
 
 """
-    fit_selection(step::CalibrationStep) -> Fringe.AbstractScanSelection
+    fit_selection(step::CalibrationStep, prior_solutions) -> Fringe.AbstractScanSelection
 
 Which scans feed this step's accumulation. Time-global components solved by
 the step still apply to EVERY scan — fitting a bandpass or a global R–L delay
-from a few bright calibrator scans and applying it across the board. Default:
-[`Fringe.AllScans`](@ref)`()`.
+from a few bright calibrator scans and applying it across the board. `prior_solutions`
+is the ordered `Vector{StepSolution}` of every earlier step's finished solution —
+a step wanting non-data info from an earlier step (e.g. per-scan SNR) reads it
+off there. Default: [`Fringe.AllScans`](@ref)`()`.
 """
-fit_selection(step::CalibrationStep) = Fringe.AllScans()
+fit_selection(step::CalibrationStep, prior_solutions) = Fringe.AllScans()
 
 """
     provides(step::CalibrationStep) -> Symbol
@@ -191,24 +198,35 @@ end
     SolveContext
 
 The shared state of one pipeline solve, threaded through every visitor hook:
-the COMPILED model (`model`/`layout`/`ev` — one θ for all stages, each step
-filling its own block), the data geometry, the resolved gauge pin (`ref_ant`),
-the streaming layer (`stream`), the run's `exec` resources, the per-stage
-provenance records accumulated so far (`stages`), and `scratch` — a
-`Dict{Symbol, Any}` for cross-step state (the runner puts each pass's collected
-per-group results in `:pass_results`; the fringe stage publishes `:scan_snr`
-for SNR-aware scan selections and its `:refine` service for the dTEC/SBD
-θ slots it owns; the bandpass stage records `:refined_scans`).
+the step's OWN compiled model (`model`/`layout`/`ev`/`θ` — that step's private
+gain model, never merged with another step's, see [`StepSolution`](@ref)), the
+data geometry, the resolved gauge pin (`ref_ant`), the streaming layer
+(`stream` — REBUILT between steps as each finished solution is appended to its
+transform chain, see `_run_pipeline`), the run's `exec` resources, the
+per-stage provenance records accumulated so far (`stages`), and `scratch` — a
+`Dict{Symbol, Any}` for state PRIVATE to this step's own pass (e.g. per-group
+scratch accumulators across search rounds). Non-data info a LATER step wants
+from an earlier one (e.g. per-scan SNR) is never read through `scratch` — it's
+read off the ordered list of finished `StepSolution`s instead (see
+[`fit_selection`](@ref)); gain correction between steps is never read through
+`scratch` either — it flows through `stream`'s transform chain, so no step
+evaluates or mutates another step's θ.
+
+`θ` is a [`ComponentVector`](@ref) over `layout.template`'s axes — its named
+blocks (`θ.phase.<name>` / `θ.logamp.<name>`) are directly addressable; wrap a
+component's block as a labelled, dimensioned `DimArray` on demand with
+[`@comp`](@ref).
 """
 mutable struct SolveContext{
         M <: StationGainModel, L <: ParameterLayout, E <: GainEvaluator,
         A <: UVData.AntennaTable, S <: Streaming.ScanStream, X <: ExecutionConfig,
+        V <: AbstractVector{Float64},
     }
     model::M
     layout::L
     geom::DataGeometry
     ev::E
-    θ::Vector{Float64}
+    θ::V
     ref_ant::Int
     nant::Int
     antennas::A
@@ -216,6 +234,30 @@ mutable struct SolveContext{
     exec::X
     stages::Vector{StageRecord}
     scratch::Dict{Symbol, Any}
+end
+
+"""
+    StepSolution(name, model, layout, θ, info)
+
+One finished [`SolveStep`](@ref)'s own gain model, solved parameters, and
+diagnostics — `model`/`layout` compiled from that step's own
+[`model_components`](@ref) alone, never merged with another step's, and `θ` a
+named [`ComponentVector`](@ref) over `layout.template`'s axes. The runner
+(`_run_pipeline`) keeps the ordered list of every step's `StepSolution` as
+it runs the pipeline, both to chain gain correction between steps (each
+finished one is appended to the scan stream's transform chain) and as the
+non-data-input channel hooks like [`fit_selection`](@ref) read (e.g.
+`BandpassEstimator`'s SNR-aware selection reads the fringe stage's
+`info.scan_snr`). Internal: `CalibrationSolution`'s public shape is unchanged
+by this — the runner composes one legacy-shaped solution from the finished
+`StepSolution`s at the end of the run.
+"""
+struct StepSolution{M <: StationGainModel, L <: ParameterLayout, V <: AbstractVector{Float64}}
+    name::Symbol
+    model::M
+    layout::L
+    θ::V
+    info::NamedTuple
 end
 
 # ── Transforms as pipeline steps ─────────────────────────────────────────────

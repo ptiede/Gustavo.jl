@@ -192,9 +192,13 @@ One row per (scan-group index `scan`, 1-based `station`, `feed ∈ {1, 2}`):
 - `phase_deg` — station constant phase (deg): per-scan feed-common phase plus, on
   feed 2, the global R–L phase.
 
-Summed from every stage-B component (`fringe_stage_components` — the delay/rate/
-constant terms, EXCLUDING the per-AP adhoc, the per-channel bandpass, dTEC and SBD),
-so it tracks the model automatically. Values are gauge-fixed to the solve's
+Summed from every stage-B component the fringe stage itself owns
+(`fringe_stage_components` — the delay/rate/constant terms, EXCLUDING the
+per-AP adhoc, the per-channel bandpass, dTEC and SBD) PLUS, if a
+`DispersionSBDFit` step ran, its private per-scan delay-refinement column
+(gains compose multiplicatively, so this is the same total delay as one
+incremented column would be — see `Fringe._dispersion_delay_plan`), so it
+tracks the model automatically. Values are gauge-fixed to the solve's
 reference pin; a within-scan difference against the SAME feed of a reference station
 is gauge-invariant (the reported `delay_rel`/`rate_rel`).
 
@@ -212,10 +216,22 @@ function fringe_station_solutions(sol::CalibrationSolution)
     layout = sol.layout
     θ = sol.θ
     nant = layout.nant
-    comps = fringe_stage_components(sol.model, layout)     # (plan, kind ∈ :delay/:rate/:phase)
+    # Restricted to the fringe stage's OWN components: a LATER step (e.g.
+    # DispersionSBDFit) may compile a component sharing a stage-B signature by
+    # design (see `fringe_stage_components`), so scanning the whole model would
+    # double-count it here too. A solution with no recorded stages at all (e.g.
+    # hand-built directly, not through a pipeline) has no later step to guard
+    # against — scan everything.
+    fringe_i = findfirst(r -> r.name === :fringe, sol.stages)
+    nown = fringe_i === nothing ? length(phase_components(sol.model)) :
+        length(sol.stages[fringe_i].phase_comps)
+    comps = fringe_stage_components(sol.model, layout, nown)   # (plan, kind ∈ :delay/:rate/:phase)
     refplan = _perscan_delay_plan(sol.model, layout)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
+    # DispersionSBDFit's own delay-refinement column, or `nothing` if that step
+    # didn't run — added to the fringe stage's own delay below.
+    delay_refine_plan = _dispersion_delay_plan(sol.model, layout)
     nscan = refplan.shape[4]                                # PerScan ⇒ ntseg == #scan groups
     # First time index landing in each scan segment — used to look up every plan's
     # own segment id for this scan (a `GlobalTime` R–L plan maps them all to 1, a
@@ -242,6 +258,13 @@ function fringe_station_solutions(sol::CalibrationSolution)
                     r += v; hr = true
                 else
                     p += v; hp = true
+                end
+            end
+            if delay_refine_plan !== nothing
+                node = _feed_node(delay_refine_plan.tying, f)
+                if node != 0
+                    d += _component_leaf(delay_refine_plan, θ)[1, node, 1, delay_refine_plan.tseg_id[ti], a]
+                    hd = true
                 end
             end
             push!(

@@ -32,7 +32,10 @@
 
         # The two GlobalFrequency delay plans: the feed-common per-scan one (has a
         # feed-1 column) and the R–L one (feed-2 only). Identified structurally.
-        dplans = [p for (p, k) in FP.fringe_stage_components(model, layout) if k === :delay]
+        dplans = [
+            p for (p, k) in FP.fringe_stage_components(model, layout, length(CAL.phase_components(model)))
+                if k === :delay
+        ]
         shared = only(filter(p -> plan_off1(p)[2, 1, 1, 1] != 0, dplans))
         rl = only(filter(p -> plan_off1(p)[2, 1, 1, 1] == 0 && plan_off1(p)[2, 2, 1, 1] != 0, dplans))
 
@@ -51,7 +54,10 @@
         @test f(3, 2) ≈ 0.0
 
         # Rate (Hz → mHz) and phase (rad → deg) route through their own kinds.
-        rplan = only(p for (p, k) in FP.fringe_stage_components(model, layout) if k === :rate)
+        rplan = only(
+            p for (p, k) in FP.fringe_stage_components(model, layout, length(CAL.phase_components(model)))
+                if k === :rate
+        )
         θ2 = zeros(layout.nθ)
         θ2[plan_off1(rplan)[3, 1, 1, 1]] = 1.0e-3       # 1 mHz
         sol2 = CAL.CalibrationSolution(model, layout, geom, θ2, (; nscan = 1))

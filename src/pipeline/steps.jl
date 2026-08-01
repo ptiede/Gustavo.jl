@@ -1,41 +1,55 @@
 # ── Built-in solve steps of the composable pipeline ──────────────────────────
 #
-# The three stages of the fringe pipeline as SolveSteps. Each declares model
+# The stages of the fringe pipeline as SolveSteps. Each declares model
 # components / dependencies through the protocol hooks and implements the
 # executor-driven visitor contract (start_pass!/process_scan!/finish_pass! —
 # the runner in verbs.jl drives them). Every pipeline runs on this engine.
 
 """
-    FringeFit(; model = FringeModel(), estimator = MatchedFilter(),
-              reuse_bandpass_refine = true, polish_dtec = 20.0)
+    FringeFit(; model = FringeModel(), estimator = MatchedFilter())
 
 The fringe-fitting stage. WHAT is solved is `model` ([`FringeModel`](@ref)):
 the gauge pin plus the ordered phase-term list — per-scan constant/delay/rate,
-the R–L offsets, propagation ([`DispersionModel`](@ref)) and SBD
-([`SingleBandDelay`](@ref)) as list elements. HOW it is solved lives on
-`estimator`, a pluggable [`AbstractFringeEstimator`](@ref); by default
-[`MatchedFilter`](@ref) (per-baseline delay/rate search + closure-screened
-station WLS).
+the R–L offsets. HOW it is solved lives on `estimator`, a pluggable
+[`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
+(per-baseline delay/rate search + closure-screened station WLS).
 
-The terms are separate specifications but not separate estimates: delay and
-dTEC are near-degenerate over a finite band, so the estimator fits them
-jointly.
-
-The dTEC/SBD θ slots are owned by this step; `reuse_bandpass_refine` /
-`polish_dtec` control how later stages reuse or polish its per-scan
-refinements (see the legacy solver's kwargs of the same names).
+Ionospheric dispersion (dTEC) and single-band delay (SBD) are NOT part of this
+step — add a [`DispersionSBDFit`](@ref) step after it to fit them on the
+fringe-corrected residual.
 """
 Base.@kwdef struct FringeFit{M <: Fringe.FringeModel, E <: Fringe.AbstractFringeEstimator} <: SolveStep
     model::M = Fringe.FringeModel()
     estimator::E = Fringe.MatchedFilter()
-    reuse_bandpass_refine::Bool = true
-    polish_dtec::Float64 = 20.0
 end
 provides(::FringeFit) = :fringe
 required_grouping(::FringeFit) = :scan_complete
 # NOTE: no `fit_selection` method — the fringe pass streams EVERY scan (the
 # default `AllScans`); the estimator's `cross_hand_fit_on` masks cross-hand
 # ROWS inside its solve, it does not restrict which scans are read.
+
+"""
+    DispersionSBDFit(; dispersion = DispersionModel(), sbd = SingleBandDelay())
+
+The ionospheric-dispersion (dTEC) and single-band-delay (SBD) refinement
+stage: a per-scan joint (Δτ, dTEC) fit ([`DispersionModel`](@ref)) and a
+per-band-group delay fit ([`SingleBandDelay`](@ref)), on the fringe-corrected
+residual (`requires (:fringe,)`). Set either field to `nothing` to disable
+that term.
+
+The Δτ half of the joint fit lands in a PRIVATE per-scan delay column, not in
+`FringeFit`'s own wideband delay: gains compose multiplicatively, so this
+step's delay column times `FringeFit`'s is the same total correction as
+incrementing one shared column would be, without either step writing into the
+other's θ block.
+"""
+Base.@kwdef struct DispersionSBDFit{D, S} <: SolveStep
+    dispersion::D = Fringe.DispersionModel()
+    sbd::S = Fringe.SingleBandDelay()
+end
+provides(::DispersionSBDFit) = :refine
+requires(::DispersionSBDFit) = (:fringe,)
+required_grouping(::DispersionSBDFit) = :scan_complete
 
 """
     BandpassEstimator(; phase = true, amp = true,
@@ -75,7 +89,7 @@ required_grouping(::BandpassEstimator) = :scan_complete
 # selected scans never observe would get no bandpass (g = 1), so each such
 # station's best scan is added (any source — safe for the SHAPE, see
 # `Fringe.CoverageTopup`).
-fit_selection(s::BandpassEstimator) = Fringe.CoverageTopup(s.select)
+fit_selection(s::BandpassEstimator, prior_solutions) = Fringe.CoverageTopup(s.select)
 
 """
     TemporalSmoother(smoother = SavitzkyGolaySmoother(); pseudo_stokes = :auto)
@@ -83,11 +97,7 @@ fit_selection(s::BandpassEstimator) = Fringe.CoverageTopup(s.select)
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
 globally-closing per-AP station phase on the fringe/bandpass residual, through
 the pluggable [`AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
-`JointOUSmoother`, `OUSmoother`, `PenalizedSmoother`, …). Its pass also
-re-refines each scan's FringeFit-owned dTEC/SBD columns on the
-bandpass-corrected residual before the per-AP solve (scans the bandpass stage
-already fit are polished in a narrow window — see `FringeFit`'s
-`reuse_bandpass_refine`/`polish_dtec`).
+`JointOUSmoother`, `OUSmoother`, `PenalizedSmoother`, …).
 
 `pseudo_stokes` (`:auto`/`true`/`false`) collapses the four correlation
 products to one pseudo-Stokes-I row per (baseline, AP) for the per-AP solve —
@@ -135,6 +145,26 @@ function model_components(s::FringeFit, spec)
     return (; phase = tree, logamp = (;))
 end
 
+# The dispersion/SBD components: a private per-scan delay-refinement column
+# (shares the fringe stage's own wideband-delay SIGNATURE by design — see
+# `Fringe._dispersion_delay_plan` — but is a SEPARATE θ block) plus the dTEC
+# column, both compiled only when the DispersionModel/geometry combination
+# enables dTEC; and the SBD delay + companion constant, compiled only when the
+# frequency axis has ≥ 2 band groups. Either half is dropped entirely by
+# setting the matching field to `nothing`.
+function model_components(s::DispersionSBDFit, spec)
+    dispc = s.dispersion === nothing ? nothing : model_components(s.dispersion, spec.geom)
+    sbdc = s.sbd === nothing ? nothing : model_components(s.sbd, spec.geom)
+    phase = merge(
+        dispc === nothing ? (;) : (;
+            delay_refine = TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
+            dtec = dispc,
+        ),
+        sbdc === nothing ? (;) : (; sbd = sbdc),
+    )
+    return (; phase, logamp = (;))
+end
+
 # The bandpass components: phase and log-amp, per feed, time-stable, resolved in
 # frequency by `s.freq` (the legacy `_fringe_model` placement — after the fringe
 # terms).
@@ -160,27 +190,7 @@ end
 process_scan!(s::FringeFit, ctx::SolveContext, stack, win::GeometryWindow) =
     Fringe.estimate_scan!(s.estimator, ctx, s, stack, win)
 
-# Co-located stations see the same ionosphere, so a differential TEC between
-# them is pure solve error — but only a model that solves dTEC has any to tie.
-_dtec_ties(::Nothing, antennas) = nothing
-_dtec_ties(dm::DispersionModel, antennas) =
-    dm.tie_colocated ? UVData._colocated_ties(antennas) : nothing
-
-function finish_pass!(s::FringeFit, ctx::SolveContext)
-    info = Fringe.finish_estimate!(s.estimator, ctx, s)
-    # The refine service describes the per-scan θ columns THIS STEP owns, so it
-    # is the step's to publish and every estimator gets it. A pass that repeats
-    # has not finished writing those columns yet.
-    get(info, :repeat_pass, false) && return info
-    ctx.scratch[:refine] = Fringe.RefineService(
-        Calibration._dispersion_plan(ctx.model, ctx.layout),
-        Fringe._perscan_delay_plan(ctx.model, ctx.layout),
-        Fringe._sbd_plans(ctx.model, ctx.layout),
-        _dtec_ties(Fringe._dispersion_model(s.model), ctx.antennas),
-        s.reuse_bandpass_refine, s.polish_dtec,
-    )
-    return info
-end
+finish_pass!(s::FringeFit, ctx::SolveContext) = Fringe.finish_estimate!(s.estimator, ctx, s)
 
 # ── MatchedFilter: the per-baseline search + closure-screened station WLS ─────
 #
@@ -240,24 +250,75 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
         scan_t_search[gi] += res.work
     end
     Fringe.mask_unselected_cross_hands!(dets, est.cross_hand_fit_on, ctx.stream.groups, scan_snr)
-    stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout)
+    # `ctx.model` holds only FringeFit's own components (each step solves on
+    # its own private model/θ, never a merged one — CHUNK-069), so no
+    # restriction is needed: a later step's component sharing a stage-B
+    # signature by design (`DispersionSBDFit`'s private delay-refinement
+    # column vs. this model's own wideband delay) lives in a SEPARATE model
+    # and never appears here.
+    stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout, length(phase_components(ctx.model)))
     # An opted-in R–L rate is a feed-specific Rate component in THIS step's own
     # model (other steps contribute no rate terms) — cross-hand rows must then
     # join the rate system.
-    rl_rate_on = Fringe._has_feed_rate(Fringe.fringe_phase_components(s.model, ctx.geom))
+    rl_rate_on = Fringe._has_feed_rate(ctx.model.phase)
     opts = Fringe.resolve_closure(est, rl_rate_on)
     chi, ncomp, nrej, covered = Fringe.solve_station_systems!(
         ctx.θ, dets, stageB; ref_ant = ctx.ref_ant, opts = opts,
     )
     ctx.scratch[:fringe_flags] = Fringe.unconstrained_flags(dets, covered, ctx.geom)
     round = ctx.scratch[:fringe_round]::Int
-    # Another round re-searches the residual; the step holds back its refine
-    # service until the last one.
+    # Another round re-searches the residual.
     round < max(est.rounds, 1) && return (; repeat_pass = true, chi, ncomp, rejected = nrej)
-    return (; chi, ncomp, rejected = nrej)
+    # `scan_snr` is published for a LATER step's non-data input (e.g.
+    # `BandpassEstimator`'s SNR-aware `fit_selection` reads it off this
+    # step's `StepSolution.info` — see `_scan_snr`).
+    return (; chi, ncomp, rejected = nrej, scan_snr = copy(scan_snr))
 end
 
-# ── BandpassEstimator visitor (refine + accumulate per scan → per-channel solves) ──
+# ── DispersionSBDFit visitor (per-scan joint (Δτ, dTEC) fit + SBD fit) ────────
+
+# Co-located stations see the same ionosphere, so a differential TEC between
+# them is pure solve error — but only a model that solves dTEC has any to tie.
+_dtec_ties(::Nothing, antennas) = nothing
+_dtec_ties(dm::DispersionModel, antennas) =
+    dm.tie_colocated ? UVData._colocated_ties(antennas) : nothing
+
+function start_pass!(s::DispersionSBDFit, ctx::SolveContext)
+    disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
+    # `ctx.model` holds only this step's own components (CHUNK-069): the
+    # per-scan delay-refinement column — sharing FringeFit's wideband-delay
+    # SIGNATURE by design — is the only `_is_perscan_delay` match here, so
+    # the plain `findfirst` router (`_perscan_delay_plan`) finds it directly;
+    # `nothing` when dispersion is disabled (no such component was compiled).
+    delay_plan = disp_plan === nothing ? nothing : Fringe._perscan_delay_plan(ctx.model, ctx.layout)
+    ctx.scratch[:disp_sbd_setup] = (;
+        delay_plan, disp_plan,
+        sbd_plans = Fringe._sbd_plans(ctx.model, ctx.layout),
+        ties = _dtec_ties(s.dispersion, ctx.antennas),
+    )
+    return nothing
+end
+
+function process_scan!(s::DispersionSBDFit, ctx::SolveContext, stack, win::GeometryWindow)
+    setup = ctx.scratch[:disp_sbd_setup]
+    nrej = Fringe.refine_scan_dispersion!(
+        ctx.θ, stack, win, setup.delay_plan, setup.disp_plan, ctx.ref_ant, ctx.nant;
+        executor = ctx.stream.inner_executor, ties = setup.ties,
+    )
+    nrej += Fringe.refine_scan_sbd!(
+        ctx.θ, stack, win, setup.sbd_plans, ctx.ref_ant, ctx.nant;
+        executor = ctx.stream.inner_executor,
+    )
+    return (; nrej)
+end
+
+function finish_pass!(s::DispersionSBDFit, ctx::SolveContext)
+    results = ctx.scratch[:pass_results]
+    nrej = sum(res.r.nrej for res in results; init = 0)
+    return (; nscans = length(results), dtec_rejected = nrej)
+end
+
+# ── BandpassEstimator visitor (accumulate per scan → per-channel solves) ─────
 
 function start_pass!(s::BandpassEstimator, ctx::SolveContext)
     model = ctx.model
@@ -282,21 +343,14 @@ end
 
 function process_scan!(s::BandpassEstimator, ctx::SolveContext, stack, win::GeometryWindow)
     setup = ctx.scratch[:bp_setup]
-    # Dispersion/SBD-correct THIS scan before accumulating (FringeFit's refine
-    # service): scans with different ionospheres would otherwise decohere the
-    # frozen per-channel curve. Writes only this scan's θ columns — disjoint
-    # under the concurrent group tasks.
-    rf = get(ctx.scratch, :refine, nothing)::Union{Nothing, Fringe.RefineService}
-    nrej = rf === nothing ? 0 :
-        Fringe.refine_scan!(
-        ctx.θ, stack, win, ctx.ev, rf, ctx.ref_ant, ctx.nant;
-        executor = ctx.stream.inner_executor,
-    )
+    # `stack` arrives already fringe/dispersion/SBD-corrected through the
+    # pipeline's transform chain (every earlier step's finished solution) —
+    # this step just accumulates the residual, no correction of its own.
     pols = String.(pol_products(stack))
     nchan = length(ctx.geom.channel_freqs)
     rl, wl = Fringe.bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
-    Fringe.accumulate_bandpass!(rl, wl, setup.blidx, ctx.ev, ctx.θ, stack, win)
-    return (; rl, wl, nrej, pols, source = source_name(stack), t0 = first(win.ti_idx))
+    Fringe.accumulate_bandpass!(rl, wl, setup.blidx, stack, win)
+    return (; rl, wl, pols, source = source_name(stack))
 end
 
 function finish_pass!(s::BandpassEstimator, ctx::SolveContext)
@@ -307,11 +361,9 @@ function finish_pass!(s::BandpassEstimator, ctx::SolveContext)
     nchan = length(ctx.geom.channel_freqs)
     nbl = length(setup.bl_pairs)
     rbar, wbar = Fringe.bandpass_accumulators(nbl, length(pols), nchan)
-    nrej = 0
     for res in results                            # group-index order: the fold is
         rbar .+= res.r.rl                         # deterministic at ANY concurrency
         wbar .+= res.r.wl
-        nrej += res.r.nrej
     end
     setup.bp_plan === nothing || Fringe.solve_phase_bandpass!(
         ctx.θ, rbar, wbar, setup.bl_pairs, pols, ctx.nant, setup.bp_plan;
@@ -323,18 +375,9 @@ function finish_pass!(s::BandpassEstimator, ctx::SolveContext)
         spw_of_chan = ctx.geom.spw_of_chan, smoother = s.amp_model,
     )
     scans = Int[res.index for res in results]
-    # The scans whose per-scan dTEC/SBD θ columns were refined here — the
-    # temporal-smoother stage polishes these in a narrow window instead of
-    # re-fitting (`reuse_bandpass_refine`). `refined_t0` records them by the
-    # scan's first global time index (the identity a `process_scan!` can read
-    # off its view), `refined_scans` by stream group index (diagnostics).
-    ctx.scratch[:refined_scans] = Set(scans)
-    ctx.scratch[:refined_t0] = Set(Int[res.r.t0 for res in results])
-    ctx.scratch[:bp_dtec_rejected] = nrej
     return (;
         nscans = length(scans), scans,
         sources = unique(String[res.r.source for res in results]),
-        dtec_rejected = nrej,
     )
 end
 
@@ -355,28 +398,15 @@ end
 
 function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::GeometryWindow)
     setup = ctx.scratch[:adhoc_setup]
-    # Per-scan (Δτ, dTEC) + SBD refinement BEFORE the adhoc solve, so the per-AP
-    # phases fit dispersion-corrected residuals (FringeFit's refine service —
-    # writes only this scan's θ columns, disjoint under the concurrent group
-    # tasks). Scans the bandpass stage already fit are POLISHED in a narrow
-    # window (cheap) rather than re-run with the full grid search — keeps the
-    # weak-source increment a full skip would drop.
-    rf = get(ctx.scratch, :refine, nothing)::Union{Nothing, Fringe.RefineService}
-    nrej = 0
-    if rf !== nothing
-        polish = rf.reuse_bandpass &&
-            first(win.ti_idx) in get(() -> Set{Int}(), ctx.scratch, :refined_t0)
-        nrej = Fringe.refine_scan!(
-            ctx.θ, stack, win, ctx.ev, rf, ctx.ref_ant, ctx.nant;
-            executor = ctx.stream.inner_executor, polish = polish,
-        )
-    end
+    # `stack` arrives already fringe/dispersion/SBD/bandpass-corrected through
+    # the pipeline's transform chain — the per-AP phases fit that residual
+    # directly, no correction of its own.
     Fringe.adhoc_scan!(
-        ctx.θ, stack, win, ctx.ev, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
+        ctx.θ, stack, win, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
         shared_feeds = setup.shared, executor = ctx.stream.inner_executor,
         excl = ctx.scratch[:excl], psI = setup.psI,
     )
-    return (; nrej)
+    return nothing
 end
 
 function finish_pass!(s::TemporalSmoother, ctx::SolveContext)
@@ -384,12 +414,9 @@ function finish_pass!(s::TemporalSmoother, ctx::SolveContext)
     ngroups = length(ctx.stream.groups)
     scan_t_decode2 = get!(() -> zeros(ngroups), ctx.scratch, :scan_t_decode2)::Vector{Float64}
     scan_t_adhoc = get!(() -> zeros(ngroups), ctx.scratch, :scan_t_adhoc)::Vector{Float64}
-    nrej = 0
     for res in results
         scan_t_decode2[res.index] = res.decode
         scan_t_adhoc[res.index] = res.work
-        nrej += res.r.nrej
     end
-    ctx.scratch[:adhoc_dtec_rejected] = nrej
-    return (; nscans = length(results), dtec_rejected = nrej)
+    return (; nscans = length(results))
 end

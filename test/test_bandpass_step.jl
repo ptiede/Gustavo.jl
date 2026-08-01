@@ -250,7 +250,6 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
             dispersion = true, sbd_bands = FP.fringe_band_groups(geom.channel_freqs),
         )
         layout = CAL.plan_parameters(model, 4, geom)
-        ev = CAL.GainEvaluator(model, layout)
         disp_plan = CAL._dispersion_plan(model, layout)
         ps_delay = FP._perscan_delay_plan(model, layout)
         sbd = FP._sbd_plans(model, layout)
@@ -261,8 +260,11 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
 
         θn = zeros(layout.nθ)
         θ4 = zeros(layout.nθ)
-        nn = FP.refine_scan_dispersion!(θn, stack, win, ev, ps_delay, disp_plan, 1, 4; executor = SerialScheduler())
-        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ev, ps_delay, disp_plan, 1, 4; executor = DynamicScheduler(; nchunks = 4))
+        # `stack` is raw (no transform chain) — the kernel now assumes
+        # already-corrected data, and with no prior gains to divide out here
+        # that's exactly the raw visibilities.
+        nn = FP.refine_scan_dispersion!(θn, stack, win, ps_delay, disp_plan, 1, 4; executor = SerialScheduler())
+        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ps_delay, disp_plan, 1, 4; executor = DynamicScheduler(; nchunks = 4))
         # Per-block accumulation ⇒ bit-identical at any inner fan-out.
         @test nn == n4
         @test θn == θ4
@@ -272,8 +274,8 @@ _pc_amp_idx(sol) = findfirst(CAL._is_bandpass, CAL.logamp_components(sol.model))
             off = plan_off1(disp_plan)[a, 1, 1, 1]
             @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
         end
-        FP.refine_scan_sbd!(θn, stack, win, ev, sbd, 1, 4; executor = SerialScheduler())
-        FP.refine_scan_sbd!(θ4, stack, win, ev, sbd, 1, 4; executor = DynamicScheduler(; nchunks = 4))
+        FP.refine_scan_sbd!(θn, stack, win, sbd, 1, 4; executor = SerialScheduler())
+        FP.refine_scan_sbd!(θ4, stack, win, sbd, 1, 4; executor = DynamicScheduler(; nchunks = 4))
         @test θn == θ4
     end
 end

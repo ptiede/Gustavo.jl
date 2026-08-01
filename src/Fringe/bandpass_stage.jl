@@ -68,16 +68,16 @@ struct PenalizedBandpass <: AbstractBandpassSmoother
 end
 
 """
-    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, ev, θ, stack, win::GeometryWindow)
+    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow)
 
 Accumulate one scan window's contribution to the per-(global-baseline, product,
 GLOBAL channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for the
-bandpass solves. The residual is `V / (current θ gains)`; BEFORE summing over
-time each AP is counter-rotated by its OWN band-averaged residual phase,
-removing the per-AP time phase (residual rate/drift, and what the adhoc stage
-would later remove) so the time-average is coherent and isolates the
-per-channel SHAPE. `blidx` maps `(a, b) -> row` in the global baseline table
-(co-located pairs excluded there never contribute).
+bandpass solves, on data already gain-corrected through the pipeline's
+transform chain. BEFORE summing over time each AP is counter-rotated by its
+OWN band-averaged residual phase, removing the per-AP time phase (residual
+rate/drift, and what the adhoc stage would later remove) so the time-average
+is coherent and isolates the per-channel SHAPE. `blidx` maps `(a, b) -> row` in
+the global baseline table (co-located pairs excluded there never contribute).
 """
 # Fresh per-(baseline row, product, GLOBAL channel) bandpass accumulators. They
 # carry (Baseline, Pol, Frequency) dims so the accumulate/solve kernels below
@@ -92,17 +92,13 @@ function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
 end
 
 function accumulate_bandpass!(
-        rbar_bp, wbar_bp, blidx, ev::GainEvaluator, θ::AbstractVector,
-        stack::AbstractDimStack, win::GeometryWindow,
+        rbar_bp, wbar_bp, blidx, stack::AbstractDimStack, win::GeometryWindow,
     )
-    g = evaluate_gains(ev, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
     V = stack[:vis]                                      # the dims-carrying layers —
     W = stack[:weights]                                  # the loops below address axes BY NAME
     bl_pairs = UVData.baselines(stack).pairs
-    pols = pol_products(stack)
     g_ci = win.chan_idx
     for p in axes(V, Pol)
-        fa, fb = correlation_feed_pair(pols[p])
         for bi in axes(V, Baseline)
             a, b = bl_pairs[bi]
             a == b && continue # autocorrelation skip
@@ -110,33 +106,23 @@ function accumulate_bandpass!(
             idx == 0 && continue # baseline doesn't exist so skip
             for tt in axes(V, Ti)
                 # Band-averaged residual phase for this AP (the per-AP time phase).
-                # Weights carry the |den|² inverse-variance factor of the corrected
-                # data (see `_accumulate_leaf_rbar!`; a no-op while the gains here
-                # are phase-only — the amp bandpass is solved after this stage).
                 acc = zero(eltype(V))
                 for c in axes(V, Frequency)
                     w = W[c, tt, bi, p]
                     (w > 0 && isfinite(w)) || continue
-                    ga = g[c, tt, a, fa]; gb = g[c, tt, b, fb]
-                    den = ga * conj(gb)
-                    (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
-                    vv = V[c, tt, bi, p] / den
-                    acc += ifelse(isfinite(vv), w * abs2(den) * vv, zero(eltype(V)))
+                    vv = V[c, tt, bi, p]
+                    acc += ifelse(isfinite(vv), w * vv, zero(eltype(V)))
                 end
                 abs(acc) > 0 || continue
                 rot = conj(acc) / abs(acc)            # cis(-angle(acc)): de-rotate this AP
                 for c in axes(V, Frequency)
                     w = W[c, tt, bi, p]
                     (w > 0 && isfinite(w)) || continue
-                    ga = g[c, tt, a, fa]; gb = g[c, tt, b, fb]
-                    den = ga * conj(gb)
-                    (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
-                    vv = V[c, tt, bi, p] / den
+                    vv = V[c, tt, bi, p]
                     isfinite(vv) || continue
                     gc = g_ci[c]
-                    wd = w * abs2(den)
-                    rbar_bp[idx, p, gc] += wd * vv * rot
-                    wbar_bp[idx, p, gc] += wd
+                    rbar_bp[idx, p, gc] += w * vv * rot
+                    wbar_bp[idx, p, gc] += w
                 end
             end
         end

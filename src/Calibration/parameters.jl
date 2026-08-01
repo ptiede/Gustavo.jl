@@ -179,14 +179,21 @@ end
 _axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant, geom)
 
 """
-    plan_parameters(model::StationGainModel, nant, geom::DataGeometry) -> ParameterLayout
+    plan_parameters(model::StationGainModel, nant, geom::DataGeometry; require_nonempty = true) -> ParameterLayout
 
 Resolve `model` (shared across `nant` antennas) over `geom` into a
 `ParameterLayout`. The returned `nθ` is the length of the parameter vector that
 `evaluate_gains` consumes.
+
+`require_nonempty` runs [`validate_station_gain_model`](@ref) first, rejecting
+a `model` with neither phase nor log-amplitude components — the right default
+for a model meant to be solved. Pass `require_nonempty = false` when an empty
+model is a legitimate, expected state (e.g. one pipeline step's own model,
+which may legitimately compile no components while a sibling step's does);
+the returned layout then simply has `nθ == 0`.
 """
-function plan_parameters(model::StationGainModel, nant::Integer, geom::DataGeometry)
-    validate_station_gain_model(model)
+function plan_parameters(model::StationGainModel, nant::Integer, geom::DataGeometry; require_nonempty::Bool = true)
+    require_nonempty && validate_station_gain_model(model)
     nant = Int(nant)
     flat = ComponentPlan[]
     next = Ref(1)

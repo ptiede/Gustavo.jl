@@ -21,12 +21,24 @@ const FP = Gustavo.Fringe
 const ST = Gustavo.Streaming
 const UVP = Gustavo.UVData
 
-# The default fringe term list with the geometry-gated elements optionally
-# dropped — most stage tests want the instrument-only model (no dTEC, no SBD).
-_fringe_terms(; dispersion = true, sbd = true) = filter(
-    t -> (dispersion || !(t isa DispersionModel)) && (sbd || !(t isa SingleBandDelay)),
-    default_fringe_terms(),
-)
+# The default fringe term list. Dispersion (dTEC) and SBD are NOT part of
+# `default_fringe_terms()` — they are fit by a separate `DispersionSBDFit`
+# step, not by `FringeModel` — so `dispersion`/`sbd` are now no-op kwargs kept
+# only so existing call sites (almost all `dispersion = false, sbd = false`,
+# i.e. the now-default behavior) don't need touching. A test that wants
+# dispersion/SBD actually fit should compose a `_dispersion_sbd_step(...)`
+# into its pipeline instead.
+_fringe_terms(; dispersion = true, sbd = true) = default_fringe_terms()
+
+# `DispersionSBDFit`, or `nothing` when both halves are disabled — the
+# DispersionSBDFit-step equivalent of the old `_fringe_terms(dispersion, sbd)`
+# kwargs, for tests that want dTEC/SBD actually fit.
+_dispersion_sbd_step(; dispersion = true, sbd = true) =
+    !dispersion && !sbd ? nothing :
+    DispersionSBDFit(;
+        dispersion = dispersion ? DispersionModel() : nothing,
+        sbd = sbd ? SingleBandDelay() : nothing,
+    )
 
 # ── Synthetic UVSet with injected station fringe parameters ──────────────────
 #

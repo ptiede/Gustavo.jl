@@ -134,11 +134,10 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         f = FringeFit()
         @test f.model.ref_ant == 1
         @test f.model.terms == default_fringe_terms()
-        # The default list: 5 feed-by-feed instrument components + the two
-        # geometry-gated wrappers, in compiled order.
-        @test length(f.model.terms) == 7
-        @test any(t -> t === DispersionModel(), f.model.terms)
-        @test any(t -> t isa SingleBandDelay, f.model.terms)
+        # The default list: 5 feed-by-feed instrument components — dispersion
+        # (dTEC) and SBD are no longer part of FringeModel's term list; they
+        # are a separate DispersionSBDFit step.
+        @test length(f.model.terms) == 5
         # No feed-specific Rate element: the R–L rate is tied ≡ 0 by default.
         @test !any(
             t -> t isa CAL.TiedComponent && t.component.term isa CAL.Rate &&
@@ -150,7 +149,10 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test f.estimator.closure == FP.Stationization()
         @test f.estimator.rounds == 1
         @test f.estimator.cross_hand_fit_on isa AllScans
-        @test f.reuse_bandpass_refine && f.polish_dtec == 20.0
+
+        d = DispersionSBDFit()
+        @test d.dispersion == DispersionModel()
+        @test d.sbd isa SingleBandDelay
 
         b = BandpassEstimator()
         @test b.phase && b.amp
@@ -233,12 +235,6 @@ end
         @test eltype(CAL.stage_solution(sol[:fringe]).transforms) === eltype(sol.transforms)
     end
 
-    @testset "RefineService plans" begin
-        rf = FP.RefineService(nothing, nothing, nothing, [1, 2, 3, 4], false, 20.0)
-        @test isconcretetype(typeof(rf))
-        @test fieldtype(typeof(rf), :ties) === Vector{Int}
-        @test fieldtype(typeof(rf), :disp_plan) === Nothing
-    end
 
     @testset "AprioriAmplitude and FringeModel.ref_ant" begin
         bc = Dict(1 => :dummy)

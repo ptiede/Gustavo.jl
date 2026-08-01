@@ -76,10 +76,10 @@ component order = list order):
    opted into by ADDING `TiedComponent(Rate(), GlobalTime(),
    GlobalFrequency(), FeedComponent(2))` — cross-hand rows then join the rate
    solve.
-6. [`DispersionModel`](@ref)`()`: per-scan feed-common dTEC (emitted only when
-   the band layout can separate 1/ν from a linear delay).
-7. [`SingleBandDelay`](@ref)`()`: per-scan per-band-group delay (emitted only
-   when the frequency axis has ≥ 2 band groups).
+
+Ionospheric dispersion (dTEC) and single-band delay (SBD) are NOT modeled
+here — they are fit by a separate [`DispersionSBDFit`](@ref) pipeline step,
+on the fringe-corrected residual.
 
 Omit an element to drop the effect; add a `Calibration.TiedComponent` (term ×
 time segmentation × frequency segmentation × feed tying) to model a new one.
@@ -90,8 +90,6 @@ default_fringe_terms() = (
     mbd = TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
     rl_delay = TiedComponent(Delay(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
     rate = TiedComponent(Rate(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    dtec = DispersionModel(),
-    sbd = SingleBandDelay(),
 )
 
 """
@@ -104,26 +102,39 @@ the gauge pin plus an ordered list of phase-term elements.
   (`"PT"`). Part of the MODEL (it changes what is solved), not of the
   execution configuration.
 - `terms` — the ordered, NAMED term list (a `NamedTuple`; each key names the
-  component it compiles to). Each value is either a bare
-  `Calibration.TiedComponent` (the generic element — a gain term × time
-  segmentation × frequency segmentation × feed tying) or a wrapper that
-  consults the data geometry at model-compile time ([`DispersionModel`](@ref),
-  [`SingleBandDelay`](@ref)). Adding an effect is adding a named element; the
-  list order is the compiled component order. See [`default_fringe_terms`](@ref)
-  for the default list and how to modify it.
+  component it compiles to). Each value is a bare `Calibration.TiedComponent`
+  (a gain term × time segmentation × frequency segmentation × feed tying).
+  Adding an effect is adding a named element; the list order is the compiled
+  component order. See [`default_fringe_terms`](@ref) for the default list and
+  how to modify it.
+
+[`DispersionModel`](@ref) and [`SingleBandDelay`](@ref) are NOT valid `terms`
+elements: they are fit by a separate [`DispersionSBDFit`](@ref) pipeline step,
+not by the fringe search, so a `FringeModel` carrying one would compile a θ
+column no stage ever fits (a silent no-fit) — rejected at construction instead.
 """
 struct FringeModel{T <: NamedTuple}
     ref_ant::Union{Integer, AbstractString, Symbol}
     terms::T
     function FringeModel{T}(ref_ant, terms) where {T}
-        # Elements read back BY TYPE from the list (`_dispersion_model` reads
-        # `tie_colocated` off THE DispersionModel element) must be unique in it.
-        count(t -> t isa DispersionModel, values(terms)) <= 1 || throw(
-            ArgumentError("FringeModel: more than one DispersionModel element in `terms`."),
-        )
-        count(t -> t isa SingleBandDelay, values(terms)) <= 1 || throw(
-            ArgumentError("FringeModel: more than one SingleBandDelay element in `terms`."),
-        )
+        for (k, t) in pairs(terms)
+            t isa DispersionModel && throw(
+                ArgumentError(
+                    "FringeModel: `terms.$k` is a DispersionModel — dispersion is fit by a " *
+                        "separate DispersionSBDFit pipeline step, not by FringeModel's term " *
+                        "list. Remove it from `terms` and add `DispersionSBDFit(; dispersion = " *
+                        "$(t))` to the pipeline instead.",
+                ),
+            )
+            t isa SingleBandDelay && throw(
+                ArgumentError(
+                    "FringeModel: `terms.$k` is a SingleBandDelay — SBD is fit by a separate " *
+                        "DispersionSBDFit pipeline step, not by FringeModel's term list. Remove " *
+                        "it from `terms` and add `DispersionSBDFit(; sbd = $(t))` to the " *
+                        "pipeline instead.",
+                ),
+            )
+        end
         return new{T}(ref_ant, terms)
     end
 end
@@ -210,10 +221,7 @@ function _validate_fringe_components(comps::Tuple)
             ),
         )
     end
-    _at_most_one(_is_dispersion, comps, "the dispersion (dTEC) signature")
     _at_most_one(_is_perscan_delay, comps, "the per-scan feed-common delay signature")
-    _at_most_one(_is_sbd_delay, comps, "the per-band-group (SBD) delay signature")
-    _at_most_one(_is_sbd_constant, comps, "the per-band-group (SBD) constant signature")
     return comps
 end
 
@@ -245,22 +253,11 @@ _has_feed_rate(comps::NamedTuple) = _has_feed_rate(_flatten_components(comps))
 _has_feed_rate(comps) =
     any(tc -> tc.component.term isa Rate && tc.tying isa FeedComponent, comps)
 
-# The DispersionModel element of the term list, or `nothing`. An element-level
-# (not compiled) read: `tie_colocated` is configuration, wanted even on
-# geometries where the dTEC term gates itself off.
-function _dispersion_model(fm::FringeModel)
-    els = values(fm.terms)
-    i = findfirst(t -> t isa DispersionModel, els)
-    return i === nothing ? nothing : els[i]
-end
-
 # What `MatchedFilter` does with a compiled component's θ block:
 #
 #   :delay / :rate / :phase — stage B's station system of that kind writes it,
 #                             from the per-baseline search observable of the
 #                             same name.
-#   :refine                 — the refine pass fits it (`refine_scan_dispersion!`,
-#                             `refine_scan_sbd!`), by a mechanism of its own.
 #   nothing                 — the matched filter does not touch it.
 #
 # ONE estimator's vocabulary, hence private: a global least-squares fringe
@@ -273,13 +270,13 @@ end
 # FIRST frequency segment — so a multi-parameter term (a polynomial) would have its
 # trailing parameters left at zero, and a frequency-resolved term (the bandpass,
 # `ConstantTerm × ChannelBlocks`) would have every segment but the first left at
-# zero while the search wrote its band-wide phase into that one.
+# zero while the search wrote its band-wide phase into that one. A `Dispersion`
+# term or a `FrequencyBands`-segmented one (SBD) already falls through to
+# `nothing` here — the term/freq-type checks below exclude them without special
+# casing — so `can_fit` correctly rejects either if found in a `FringeModel`'s
+# own term list (they belong to a separate `DispersionSBDFit` step instead).
 function matched_kind(tc)
     tc.component.time isa PerIntegration && return nothing
-    _is_dispersion(tc) && return :refine
-    if tc.component.freq isa FrequencyBands
-        return (_is_sbd_delay(tc) || _is_sbd_constant(tc)) ? :refine : nothing
-    end
     # The per-baseline search measures ONE delay/rate/phase across the whole
     # band, so only a component spanning it can receive that estimate.
     tc.component.freq isa GlobalFrequency || return nothing
@@ -291,10 +288,19 @@ function matched_kind(tc)
 end
 
 # Stage-B engine components `(plan, kind)` — the delay/rate/phase terms the
-# search + stationization solve, as declared by `matched_kind`.
-function fringe_stage_components(model, layout)
+# search + stationization solve, as declared by `matched_kind`, restricted to
+# the model's first `nown` phase components (FringeFit's own — `nown` is the
+# count `Fringe.fringe_phase_components(s.model, geom)` compiles). Components
+# past `nown` belong to LATER steps sharing the merged model/layout and may
+# structurally collide with a stage-B signature (e.g. `DispersionSBDFit`'s
+# private per-scan delay-refinement column has the SAME `Delay × GlobalFrequency
+# × SharedFeeds` signature as the fringe stage's own wideband delay, by design —
+# see `_dispersion_delay_plan`) — `matched_kind` alone cannot tell them apart by
+# signature, only position can.
+function fringe_stage_components(model, layout, nown::Int)
     comps = Tuple{ComponentPlan, Symbol}[]
     for (i, tc) in enumerate(phase_components(model))
+        i <= nown || break
         kind = matched_kind(tc)
         kind in (:delay, :rate, :phase) || continue
         push!(comps, (layout.plans[i], kind))

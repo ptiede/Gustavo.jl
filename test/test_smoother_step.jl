@@ -112,41 +112,43 @@ end
         @test sol_f.θ == sol_n.θ
 
         # Standalone calibrate replays transforms + gains + reduce through the
-        # SAME per-group tail — bit-identical to the fused output.
+        # SAME per-group tail as the fused output, agreeing to Float32
+        # precision — NOT bit-identical: standalone divides by ONE combined
+        # gain (`sol_f`'s full θ), while the fused path composes earlier
+        # steps' corrections through the solve-time transform chain as
+        # separate sequential divisions (mathematically the same total gain,
+        # different floating-point rounding).
         out_s = calibrate(sol_f, uvset; reduce = [AverageFrequency(nout = 1)])
-        @test _sets_equal(out_n, out_s)
+        @test _sets_equal(out_n, out_s; exact = false)
 
         # And the fused output matches the explicit two-pass apply + reduce.
         red_ref = UVP.frequency_average(Gustavo.apply_calibration(uvset, sol_f); nout = 1)
         @test _sets_equal(out_n, red_ref; exact = false)
     end
 
-    @testset "polish split: dTEC recovery + determinism" begin
+    @testset "DispersionSBDFit: dTEC recovery + determinism" begin
         dtec_true = [0.0, 6.0, -4.0, 2.5]
         uvd, _ = _build_fringe_uvset(;
             nant, nbands = 8, nchan = 8, nscans = 3,
             ref_freq = 3.0e9, band_sep = 0.5e9, dtec = dtec_true,
             seed = 77, feed_common = true,
         )
-        # bandpass capped to the single best calibrator scan: that scan's
-        # dTEC/SBD columns take the narrow polish window in the smoother pass
-        # (`reuse_bandpass_refine`), the other scans the full grid.
-        # The default list with its DispersionModel element reconfigured in place
-        # (this band layout needs the gate off for the term to be emitted).
-        force_disp = map(
-            t -> t isa DispersionModel ? CAL.DispersionModel(require_band_separation = false) : t,
-            default_fringe_terms(),
-        )
+        # This band layout needs `require_band_separation` off for the dTEC
+        # term to be emitted at all.
+        ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
         pd = CalibrationPipeline(
-            FringeFit(model = FringeModel(terms = force_disp)),
+            FringeFit(model = fm), ds,
             BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 1),
         )
         sol_nd = fit(pd, uvd)
         @test sol_nd.info.dispersion_applied
+        @test Gustavo.stage_names(sol_nd) == [:fringe, :refine, :bandpass, :adhoc]
 
-        # Injected per-station dTEC recovered on EVERY scan through the split.
+        # Injected per-station dTEC recovered on EVERY scan — DispersionSBDFit's
+        # own pass covers the whole track unconditionally, regardless of which
+        # scans the bandpass stage separately selected.
         dplan = CAL._dispersion_plan(sol_nd.model, sol_nd.layout)
         @test dplan !== nothing
         nseg = size(plan_off1(dplan), 3)
@@ -158,9 +160,9 @@ end
         end
 
         # Bit-deterministic across group concurrency through the whole
-        # bandpass-refine + polish + adhoc chain.
+        # refine + bandpass + adhoc chain.
         pd4 = CalibrationPipeline(
-            FringeFit(model = FringeModel(terms = force_disp)),
+            FringeFit(model = fm), ds,
             BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
@@ -229,8 +231,10 @@ end
             m = isfinite.(va) .& isfinite.(vp) .& (abs.(vp) .> 0)
             @test isapprox(va[m], tsys_band[b] .* vp[m]; rtol = 1.0e-5)
         end
-        # The standalone apply replays sol.postcal — identical to the fused out.
-        @test _sets_equal(out_ap, calibrate(sol_ap, uvset))
+        # The standalone apply replays sol.postcal, agreeing with the fused
+        # output to Float32 precision (not bit-identical — see the fused ≡
+        # standalone comment above).
+        @test _sets_equal(out_ap, calibrate(sol_ap, uvset); exact = false)
         # …and refuses it in `reduce` (it is not a reduction).
         @test_throws ArgumentError fitcalibrate(pipe, uvset; reduce = [ap])
         @test_throws "is a pipeline step, not a reduction" calibrate(sol_n, uvset; reduce = [ap])

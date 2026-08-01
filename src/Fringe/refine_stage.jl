@@ -1,66 +1,15 @@
-# ── Per-scan dTEC/SBD refinement over scan windows (the carved-out service) ──
+# ── Per-scan dTEC/SBD refinement over scan windows ────────────────────────────
 #
 # The per-scan (Δτ, dTEC) band-phasor refinement and the per-band-group SBD
 # refinement, operating on a scan's `DimStack` and its `GeometryWindow`
 # (descended verbatim from the monolithic solver's concat-cube variants,
-# deleted at M5). The θ slots they
-# write are OWNED by the FringeFit step; other
-# stages invoke them through [`refine_scan!`](@ref) — the bandpass stage
-# dispersion/SBD-corrects each calibrator scan BEFORE accumulating (scans with
-# different ionospheres would otherwise decohere the frozen per-channel curve),
-# and the temporal-smoother stage re-refines every scan on the bandpass-
-# corrected residual. The pure fit/stationize back halves
-# (`_dispersion_fit_stationize!`, `_sbd_fit_stationize!`, `_fit_band_dispersion`,
-# `_fit_chunk_delay`, `_accumulate_leaf_band_phasor!`, `_accumulate_leaf_chunks!`)
-# live at the foot of this file.
-
-# The refine "service" bundle a FringeFit publishes for later stages: the plans
-# of the θ components it owns (per-scan delay, dTEC, SBD delay + constant), the
-# co-located dTEC ties, and the polish contract — whether scans another stage
-# already refined should be POLISHED in a narrow window instead of re-run with
-# the full grid (`reuse_bandpass`), and the polish dTEC half-window (TECU,
-# `polish_dtec`). `nothing` plans disable the matching refinement.
-struct RefineService{D, P, S, T}
-    disp_plan::D
-    ps_delay_plan::P
-    sbd_plans::S
-    ties::T
-    reuse_bandpass::Bool
-    polish_dtec::Float64
-end
-
-"""
-    refine_scan!(θ, stack, win::GeometryWindow, ev, rf::RefineService, ref_ant, nant;
-                 executor = DynamicScheduler(), polish = false) -> nrej
-
-Refine one scan's FringeFit-owned per-scan θ columns on the current residual:
-the joint (Δτ, dTEC) fit ([`refine_scan_dispersion!`](@ref)) followed by the
-per-band-group SBD fit ([`refine_scan_sbd!`](@ref), on the dispersion-corrected
-residual). Writes only this scan's θ columns — disjoint per scan, so concurrent
-groups may refine in parallel. `polish = true` runs the dispersion fit in the
-narrow window around the already-fit values (`rf.polish_dtec` TECU, the
-monolith's `reuse_bandpass_refine` reuse path — cheap, and keeps the increment
-a full skip would drop); SBD is cheap and always full-refines. Returns the
-number of detections the robust dispersion station solve excised.
-"""
-function refine_scan!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, ev, rf::RefineService, ref_ant, nant;
-        executor = DynamicScheduler(), polish::Bool = false,
-    )
-    nrej = polish ?
-        refine_scan_dispersion!(
-            θ, stack, win, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
-            executor, ties = rf.ties,
-            tau_max = _DTEC_POLISH_TAU, dtec_max = rf.polish_dtec,
-        ) :
-        refine_scan_dispersion!(
-            θ, stack, win, ev, rf.ps_delay_plan, rf.disp_plan, ref_ant, nant;
-            executor, ties = rf.ties,
-        )
-    rf.sbd_plans === nothing ||
-        refine_scan_sbd!(θ, stack, win, ev, rf.sbd_plans, ref_ant, nant; executor)
-    return nrej
-end
+# deleted at M5). Both are driven by `DispersionSBDFit`'s visitor hooks
+# (`src/pipeline/steps.jl`), on data already fringe-corrected through the
+# pipeline's transform chain — neither kernel evaluates a gain itself. The pure
+# fit/stationize back halves (`_dispersion_fit_stationize!`,
+# `_sbd_fit_stationize!`, `_fit_band_dispersion`, `_fit_chunk_delay`,
+# `_accumulate_leaf_band_phasor!`, `_accumulate_leaf_chunks!`) live at the foot
+# of this file.
 
 # The view's grp-local channel ranges per spectral window (the concat cube's
 # per-band blocks, recovered from the global channel indices).
@@ -79,19 +28,24 @@ function _spw_blocks(geom::DataGeometry, chan_idx)
 end
 
 """
-    refine_scan_dispersion!(θ, stack, win::GeometryWindow, ev, delay_plan, disp_plan,
+    refine_scan_dispersion!(θ, stack, win::GeometryWindow, delay_plan, disp_plan,
                             ref_ant, nant; opts, snr_min, tau_max, dtec_max,
                             executor, ties) -> nrej
 
-Joint per-scan (Δτ, dTEC) refinement of one scan window: per-spw band phasors →
-per-baseline joint fits → two station solves accumulating into the per-scan
-delay and dispersion θ columns. The window's per-spw channel blocks stand in for
-the band leaves (the concat-cube path). Returns the number of detections the
-robust station solves excised; a no-op (0) when `disp_plan === nothing` or
-fewer than 4 bands are present (1/ν is unconstrainable).
+Joint per-scan (Δτ, dTEC) refinement of one scan window, on data already
+gain-corrected through the pipeline's transform chain: per-spw band phasors →
+per-baseline joint fits → two station solves accumulating into `delay_plan`
+(a private per-scan delay REFINEMENT column, distinct from and additional to
+the wideband delay the fringe search already solved — gains compose
+multiplicatively, so this is the same total delay as incrementing one shared
+column) and `disp_plan` (the dispersion θ block). The window's per-spw channel
+blocks stand in for the band leaves (the concat-cube path). Returns the number
+of detections the robust station solves excised; a no-op (0) when
+`disp_plan === nothing` or fewer than 4 bands are present (1/ν is
+unconstrainable).
 """
 function refine_scan_dispersion!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, ev, delay_plan, disp_plan, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, delay_plan, disp_plan, ref_ant, nant;
         opts::Stationization = Stationization(reject_iters = 0), snr_min::Real = 8.0,
         tau_max::Real = 2.0e-8, dtec_max::Real = 45.0, executor = DynamicScheduler(),
         ties = nothing,
@@ -116,10 +70,9 @@ function refine_scan_dispersion!(
     fb = [sum(@view fg[r]) / length(r) for r in blocks]
     tforeach(1:nlf; scheduler = executor) do li
         r = blocks[li]
-        g = evaluate_gains(ev, θ, ci[r], ti)
         _accumulate_leaf_band_phasor!(
             view(z, :, :, li), view(w, :, :, li),
-            view(V, r, :, :, :), view(W, r, :, :, :), g,
+            view(V, r, :, :, :), view(W, r, :, :, :),
             bl_pairs, pols,
         )
     end
@@ -131,18 +84,19 @@ function refine_scan_dispersion!(
 end
 
 """
-    refine_scan_sbd!(θ, stack, win::GeometryWindow, ev, sbd, ref_ant, nant;
+    refine_scan_sbd!(θ, stack, win::GeometryWindow, sbd, ref_ant, nant;
                      nchunk = 4, snr_min = 8.0, tau_max = 6.0e-8, executor = DynamicScheduler()) -> nrej
 
 Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
-delay): each spw block's sub-band chunk phasors → per-(baseline, group) exact
+delay), on data already gain-corrected through the pipeline's transform chain:
+each spw block's sub-band chunk phasors → per-(baseline, group) exact
 matched-filter slope fits → guarded station solves accumulating into the
 per-scan `Delay × FrequencyBands` column and its companion constant. Run AFTER
 the dispersion refinement so the within-band slopes it fits are
 dispersion-corrected. A no-op (0) when `sbd === nothing`.
 """
 function refine_scan_sbd!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, ev, sbd, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, sbd, ref_ant, nant;
         nchunk::Integer = 4, snr_min::Real = 8.0, tau_max::Real = 6.0e-8, executor = DynamicScheduler(),
     )
     sbd === nothing && return 0
@@ -166,7 +120,6 @@ function refine_scan_sbd!(
     chunkgrp = zeros(Int, ntot)
     tforeach(1:nlf; scheduler = executor) do li
         r = blocks[li]
-        g = evaluate_gains(ev, θ, ci[r], ti)
         fs = fg[r]
         nc = length(fs)
         bgrp = findfirst(rr -> ci[first(r)] in rr, sbd.bands)
@@ -184,7 +137,7 @@ function refine_scan_sbd!(
         _accumulate_leaf_chunks!(
             view(z, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
             view(w, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
-            view(V, r, :, :, :), view(W, r, :, :, :), g,
+            view(V, r, :, :, :), view(W, r, :, :, :),
             bl_pairs, pols,
             coc .- (li - 1) * Int(nchunk),
         )
@@ -197,13 +150,12 @@ function refine_scan_sbd!(
 end
 
 """
-    adhoc_scan!(θ, stack, win::GeometryWindow, ev, adhoc_plan, adhoc, ref_ant, nant;
+    adhoc_scan!(θ, stack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
                 shared_feeds = false, executor = DynamicScheduler(), excl = nothing, psI = nothing) -> θ
 
-The per-integration atmospheric-phase (adhoc) solve of one scan window: accumulate
-the per-(baseline, product, AP) inverse-variance residual `V/g` (weight
-`w·|g|²` — the same reweighting `apply_calibration` applies; raw `w` would
-up-weight exactly the channels the amp bandpass marked low-|g|), solve the
+The per-integration atmospheric-phase (adhoc) solve of one scan window, on
+data already gain-corrected through the pipeline's transform chain: accumulate
+the per-(baseline, product, AP) inverse-variance residual, solve the
 globally-closing per-AP station phase through the pluggable `adhoc` smoother
 ([`solve_adhoc_phasing`](@ref)), and write this scan's `PerIntegration` θ slots
 (disjoint per scan — concurrent groups may solve in parallel). `excl` drops
@@ -212,7 +164,7 @@ data) collapses the four products to one pseudo-Stokes-I row per (baseline, AP)
 using the field-rotation coefficients.
 """
 function adhoc_scan!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, ev, adhoc_plan, adhoc, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
         shared_feeds::Bool = false, executor = DynamicScheduler(), excl = nothing, psI = nothing,
     )
     geom = win.geom
@@ -225,11 +177,11 @@ function adhoc_scan!(
     npol = length(pols)
     nap = length(tg)
     # Per-band accumulation (the window's per-spw channel blocks stand in for the
-    # band leaves) fanned out over the inner `executor` — this loop (gain
-    # evaluation + residual sum over every visibility) dominates the adhoc pass
-    # on many-band data. Each BLOCK gets its own partial and the partials fold in
-    # block order, so the float association is fixed by the data layout alone —
-    # the result is bit-deterministic at any chunking.
+    # band leaves) fanned out over the inner `executor` — this loop (the residual
+    # sum over every visibility) dominates the adhoc pass on many-band data. Each
+    # BLOCK gets its own partial and the partials fold in block order, so the
+    # float association is fixed by the data layout alone — the result is
+    # bit-deterministic at any chunking.
     blocks = _spw_blocks(geom, ci)
     nblk = length(blocks)
     parts = Vector{Tuple{Array{ComplexF64, 3}, Array{Float64, 3}}}(undef, nblk)
@@ -237,10 +189,8 @@ function adhoc_scan!(
         r = blocks[li]
         rl = zeros(ComplexF64, nbl, npol, nap)
         wl = zeros(Float64, nbl, npol, nap)
-        g = evaluate_gains(ev, θ, ci[r], g_ti)           # (nchan_block, nti, nant, 2)
         _accumulate_leaf_rbar!(
             rl, wl, view(stack[:vis], r, :, :, :), view(stack[:weights], r, :, :, :),
-            g, bl_pairs, pols,
         )
         parts[li] = (rl, wl)
     end
@@ -288,33 +238,20 @@ end
 # ── Pure fit kernels (relocated verbatim from the deleted monolith) ──────────
 
 # Accumulate one band leaf's per-AP residual into `rbar`/`wbar` as the
-# inverse-variance mean of the CORRECTED data: `V/den` has variance 1/(w·|den|²)
-# (Var(V) = 1/w), so its weight is `w·|den|²` — the same reweighting
-# `apply_calibration` applies. Accumulating with the RAW `w` instead is only
-# correct for |den| = 1 (phase-only gains); once the log-amp bandpass is in θ
-# it UP-weights exactly the channels the amp solution marked low-|g| —
-# amplitude-inflated noise dominating the per-AP phasor (on VR2505 this tripled
-# K2's adhoc track noise, since its low band's |g| dip encodes its own phase
-# scramble). Function barrier: `V`/`W` from `parent(leaf[...])` are
-# type-unstable at the call site.
-function _accumulate_leaf_rbar!(rbar, wbar, V, W, g, bl_pairs, pols)
+# inverse-variance mean of the data, already gain-corrected (and reweighted by
+# |gain|², matching `apply_calibration`) through the pipeline's transform chain
+# before this kernel ever sees it.
+function _accumulate_leaf_rbar!(rbar, wbar, V, W)
     nchan, nti, nbl, npol = size(V)
     @inbounds for p in 1:npol
-        fa, fb = correlation_feed_pair(pols[p])
         for bi in 1:nbl
-            a, b = bl_pairs[bi]
             for tt in 1:nti, c in 1:nchan
                 w = W[c, tt, bi, p]
                 (w > 0 && isfinite(w)) || continue
-                ga = g[c, tt, a, fa]
-                gb = g[c, tt, b, fb]
-                den = ga * conj(gb)
-                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
-                v = V[c, tt, bi, p] / den
+                v = V[c, tt, bi, p]
                 isfinite(v) || continue
-                wd = w * abs2(den)
-                rbar[bi, p, tt] += wd * v
-                wbar[bi, p, tt] += wd
+                rbar[bi, p, tt] += w * v
+                wbar[bi, p, tt] += w
             end
         end
     end
@@ -330,23 +267,19 @@ end
 # This stage measures both self-consistently from each scan's own residual —
 # fourfit's ionospheric search, done as a per-baseline (Δτ, dTEC) grid fit over
 # the scan's band phasors, then stationized through `solve_station_systems!`
-# (closure screen + robust rejection included) into the per-scan delay and
-# dispersion θ columns. Runs inside pass 2 on the already-materialized leaves, so
-# it costs no extra read; the adhoc solve then sees dispersion-corrected
-# residuals. Feed-common (ionosphere is non-birefringent to first order); cross
-# hands are skipped like the rate solve. It ALSO runs inside the bandpass stage
-# on each accumulated calibrator scan (see `_solve_bandpass_stage!`), so the
-# frozen phase bandpass is solved from dispersion-corrected residuals; each
-# scan's pass-2 refinement then measures the residual dTEC against that CLEAN
-# curve (θ increments compose — for the accumulated scans pass 2 is a small
-# polish on top of the bandpass-stage fit).
+# (closure screen + robust rejection included) into a private per-scan delay
+# REFINEMENT column (additional to, not shared with, the fringe stage's own
+# wideband delay — gains compose multiplicatively, so this is numerically the
+# same total delay as incrementing one shared column) and the dispersion θ
+# columns. Feed-common (ionosphere is non-birefringent to first order); cross
+# hands are skipped like the rate solve.
 
 # Collapse one band leaf to one residual phasor per (baseline, product):
-# `z[bi, p] = Σ w·|den|²·(V/den)`, `w[bi, p] = Σ w·|den|²` over the leaf's
-# channels × APs — the inverse-variance mean of the corrected data (see
-# `_accumulate_leaf_rbar!` for why the |den|² reweighting is required once
-# amp gains live in θ). Function barrier (V/W type-unstable at the call site).
-function _accumulate_leaf_band_phasor!(z, w, V, W, g, bl_pairs, pols)
+# `z[bi, p] = Σ w·V`, `w[bi, p] = Σ w` over the leaf's channels × APs — the
+# inverse-variance mean of the data, already gain-corrected (and reweighted by
+# |gain|², matching `apply_calibration`) through the pipeline's transform
+# chain before this kernel ever sees it.
+function _accumulate_leaf_band_phasor!(z, w, V, W, bl_pairs, pols)
     nchan, nti, nbl, npol = size(V)
     @inbounds for p in 1:npol
         fa, fb = correlation_feed_pair(pols[p])
@@ -359,15 +292,10 @@ function _accumulate_leaf_band_phasor!(z, w, V, W, g, bl_pairs, pols)
             for tt in 1:nti, c in 1:nchan
                 ww = W[c, tt, bi, p]
                 (ww > 0 && isfinite(ww)) || continue
-                ga = g[c, tt, a, fa]
-                gb = g[c, tt, b, fb]
-                den = ga * conj(gb)
-                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
-                v = V[c, tt, bi, p] / den
+                v = V[c, tt, bi, p]
                 isfinite(v) || continue
-                wd = ww * abs2(den)
-                acc += wd * v
-                wsum += wd
+                acc += ww * v
+                wsum += ww
             end
             z[bi, p] = acc
             w[bi, p] = wsum
@@ -440,16 +368,6 @@ function _fit_band_dispersion(
     snr = var > 0 ? sqrt(max(best_a^2 - var, 0.0) / var) : 0.0
     return (tau = best_t, dtec = best_d, amp = best_a, snr = snr)
 end
-
-# Narrow delay window for the pass-2 POLISH of a scan the bandpass stage already
-# fit (`reuse_bandpass_refine`): the residual on top of the stage's fit is small,
-# so a tight window keeps the fine-grid resolution/accuracy while shrinking the
-# dominant coarse sweep (its cost scales with window extent). The dTEC half-width
-# is the user-tunable `bandpass_polish_dtec` (a too-tight window CLIPS noisy weak-
-# scan residuals → the coherence regression a full skip caused; default ±20 TECU
-# covers the worst observed). The delay window stays fixed here — well within the
-# band-comb ambiguity clamp (`_band_delay_halfwindow`).
-const _DTEC_POLISH_TAU = 8.0e-9      # s
 
 # Refine one materialized scan group: band phasors → per-baseline (Δτ, dTEC) →
 # two station solves accumulating into the per-scan delay and dispersion columns
@@ -575,9 +493,9 @@ end
 # dTEC terms own is untouched). SNR-gated — quiet stations contribute nothing.
 
 # Accumulate one channel-block's inverse-variance chunk phasors:
-# `z[bi, p, chunk_of_chan[c]] += w·|den|²·(V/den)` (parallel hands only).
-# Function barrier (V/W type-unstable at the call site).
-function _accumulate_leaf_chunks!(z, w, V, W, g, bl_pairs, pols, chunk_of_chan)
+# `z[bi, p, chunk_of_chan[c]] += w·V` (parallel hands only), off data already
+# gain-corrected through the pipeline's transform chain.
+function _accumulate_leaf_chunks!(z, w, V, W, bl_pairs, pols, chunk_of_chan)
     nchan, nti, nbl, npol = size(V)
     @inbounds for p in 1:npol
         fa, fb = correlation_feed_pair(pols[p])
@@ -588,16 +506,11 @@ function _accumulate_leaf_chunks!(z, w, V, W, g, bl_pairs, pols, chunk_of_chan)
             for tt in 1:nti, c in 1:nchan
                 ww = W[c, tt, bi, p]
                 (ww > 0 && isfinite(ww)) || continue
-                ga = g[c, tt, a, fa]
-                gb = g[c, tt, b, fb]
-                den = ga * conj(gb)
-                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(den)) || continue
-                v = V[c, tt, bi, p] / den
+                v = V[c, tt, bi, p]
                 isfinite(v) || continue
-                wd = ww * abs2(den)
                 k = chunk_of_chan[c]
-                z[bi, p, k] += wd * v
-                w[bi, p, k] += wd
+                z[bi, p, k] += ww * v
+                w[bi, p, k] += ww
             end
         end
     end

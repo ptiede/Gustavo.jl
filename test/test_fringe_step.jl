@@ -239,9 +239,9 @@
             typeof(tc.component.freq), typeof(tc.tying),
         )
 
-        # The default list compiles IN LIST ORDER to the standard sequence: on
-        # this geometry the dispersion gate is closed (nb < 4) and the SBD gate
-        # open (2 band groups), so 7 elements → 7 components.
+        # The default list compiles IN LIST ORDER to the standard sequence — 5
+        # elements → 5 components; dispersion/SBD are DispersionSBDFit's, not
+        # FringeModel's, so they never appear here regardless of geometry.
         comps = FP.fringe_phase_components(FringeModel(), geom)
         @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -249,9 +249,17 @@
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+        ]
+
+        # DispersionSBDFit compiles its own private delay-refinement column +
+        # dTEC (gate closed on this narrow-fractional-bandwidth geometry) + SBD
+        # delay/constant pair (2 band groups here, so SBD's gate is open).
+        dscomps = Gustavo.model_components(DispersionSBDFit(), (; geom, antennas = nothing))
+        @test collect(map(sig, CAL._flatten_components(dscomps.phase))) == [
             (CAL.Delay, CAL.PerScan, CAL.FrequencyBands, CAL.SharedFeeds),
             (CAL.ConstantTerm, CAL.PerScan, CAL.FrequencyBands, CAL.SharedFeeds),
         ]
+        @test isempty(dscomps.logamp)
 
         # Geometry-gated elements emit nothing when unconstrainable.
         @test CAL.model_components(DispersionModel(), geom) === nothing
@@ -280,10 +288,11 @@
         @test_throws "per-scan feed-common delay signature" FP.fringe_phase_components(
             FringeModel(terms = collide), geom)
 
-        # Elements read back BY TYPE from the list are unique at construction.
-        @test_throws "more than one DispersionModel" FringeModel(
+        # DispersionModel/SingleBandDelay elements are rejected outright —
+        # dispersion/SBD are DispersionSBDFit's, not FringeModel's.
+        @test_throws "DispersionSBDFit" FringeModel(
             terms = (; default_fringe_terms()..., dtec2 = DispersionModel(tie_colocated = false)))
-        @test_throws "more than one SingleBandDelay" FringeModel(
+        @test_throws "DispersionSBDFit" FringeModel(
             terms = (; default_fringe_terms()..., sbd2 = SingleBandDelay()))
     end
 end
@@ -473,13 +482,16 @@ end
     )
     mf = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid()))
 
-    @testset "the ionosphere is a term-list element, not a field" begin
+    @testset "the ionosphere is DispersionSBDFit's own field, not FringeModel's" begin
         @test :dispersion ∉ fieldnames(FringeModel)
         @test :dtec_tie_colocated ∉ fieldnames(FringeModel)
-        # Instrumental terms stay in the instrument model's default list.
-        @test any(t -> t isa SingleBandDelay, FringeModel().terms)
-        @test any(t -> t isa DispersionModel, FringeModel().terms)
+        # Instrumental terms stay in the instrument model's default list;
+        # dispersion/SBD are DispersionSBDFit's own fields, not term-list
+        # elements — putting either type IN the term list is rejected outright.
+        @test !any(t -> t isa SingleBandDelay, FringeModel().terms)
+        @test !any(t -> t isa DispersionModel, FringeModel().terms)
         @test fieldnames(DispersionModel) == (:require_band_separation, :tie_colocated)
+        @test fieldnames(DispersionSBDFit) == (:dispersion, :sbd)
     end
 
     @testset "the propagation model is Calibration's, not Fringe's" begin
@@ -502,22 +514,22 @@ end
     end
 
     @testset "the step decides whether an ionosphere is modelled at all" begin
-        # Whether the term is SOLVED end to end is `info.dispersion_applied`, which
-        # additionally needs a stage that refines it (see the dispersion testset in
-        # test_pipeline.jl). What this asserts is the model structure the step built.
-        on = fit(FringeFit(model = FringeModel(ref_ant = 1), estimator = mf), uvset)
-        off = fit(
-            FringeFit(
-                model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false)),
-                estimator = mf,
-            ), uvset,
-        )
+        # Whether the term is SOLVED end to end is `info.dispersion_applied`
+        # (see the dispersion testset in test_pipeline.jl). What this asserts
+        # is the model structure DispersionSBDFit's presence/field builds.
+        ff = FringeFit(model = FringeModel(ref_ant = 1), estimator = mf)
+        on = fit(ff |> DispersionSBDFit(), uvset)
+        off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset)
         @test CAL._dispersion_plan(on.model, on.layout) !== nothing
         @test CAL._dispersion_plan(off.model, off.layout) === nothing
         @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(on.model))
         @test !any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(off.model))
-        # No dTEC term means no dTEC columns in θ at all.
-        @test length(off.θ) < length(on.θ)
+        # No dTEC term means no dTEC column in θ at all — but `off` still has
+        # SBD's columns (untouched by the `dispersion` field), so `on` has
+        # exactly one more (the private delay-refinement column that only
+        # accompanies dTEC).
+        @test length(on.θ) - length(off.θ) == length(CAL._dispersion_plan(on.model, on.layout).range) +
+            length(FP._dispersion_delay_plan(on.model, on.layout).range)
     end
 
     @testset "require_band_separation gates on the band layout" begin
@@ -532,9 +544,10 @@ end
         @test !CAL._dispersion_enabled(nothing, geom_n)
     end
 
-    @testset "tie_colocated reaches the refine service through the step" begin
-        # The tie is the dispersion model's, but RefineService is the step's to
-        # publish, so it must arrive without the estimator knowing about it.
+    @testset "tie_colocated reaches DispersionSBDFit's own start_pass! through the step" begin
+        # The tie is the dispersion model's, but DispersionSBDFit is the step
+        # that reads it (`_dtec_ties(s.dispersion, ctx.antennas)`), so it must
+        # arrive without the estimator knowing about it.
         ants = Gustavo.UVData.metadata(
             first(values(Gustavo.UVData.branches(uvset)))).antennas
         @test Gustavo._dtec_ties(DispersionModel(tie_colocated = true), ants) !== nothing
@@ -543,15 +556,15 @@ end
     end
 
     @testset "delay and dTEC are still estimated jointly" begin
-        # The separation is of the specification only: one RefineService carries
-        # both plans, because over a finite band the two are near-degenerate.
-        sol = fit(FringeFit(model = FringeModel(ref_ant = 1), estimator = mf), uvset)
-        rf = FP.RefineService(
-            CAL._dispersion_plan(sol.model, sol.layout),
-            FP._perscan_delay_plan(sol.model, sol.layout),
-            FP._sbd_plans(sol.model, sol.layout), nothing, true, 20.0,
-        )
-        @test rf.disp_plan !== nothing
-        @test rf.ps_delay_plan !== nothing
+        # The separation is of the specification only: DispersionSBDFit's own
+        # process_scan! fits both plans in one joint (Δτ, dTEC) grid search,
+        # because over a finite band the two are near-degenerate — confirmed by
+        # both plans existing (and being solved, not left at zero) once the step
+        # runs.
+        ff = FringeFit(model = FringeModel(ref_ant = 1), estimator = mf)
+        sol = fit(ff |> DispersionSBDFit(), uvset)
+        @test CAL._dispersion_plan(sol.model, sol.layout) !== nothing
+        @test FP._dispersion_delay_plan(sol.model, sol.layout) !== nothing
+        @test sol.info.dispersion_applied
     end
 end

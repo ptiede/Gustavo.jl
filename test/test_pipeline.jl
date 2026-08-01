@@ -208,14 +208,19 @@ end
     # Same tree keys.
     @test Set(keys(DimensionalData.branches(out_fused))) ==
         Set(keys(DimensionalData.branches(corr_ref)))
-    # Identical corrected visibilities/weights per leaf (NaN-aware).
+    # Corrected visibilities/weights per leaf agree to Float32 precision
+    # (NaN-aware) — NOT bit-identical: the two-pass reference divides by ONE
+    # combined gain (`apply_calibration`), while the fused path composes
+    # earlier steps' corrections through the transform chain as SEPARATE
+    # sequential divisions (mathematically the same total gain, different
+    # floating-point rounding).
     for (k, leaf) in DimensionalData.branches(corr_ref)
         Vr = parent(leaf[:vis]); Wr = parent(leaf[:weights])
         lf = DimensionalData.branches(out_fused)[k]
         Vf = parent(lf[:vis]); Wf = parent(lf[:weights])
         @test size(Vf) == size(Vr)
-        @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(Vr, Vf))
-        @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(Wr, Wf))
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5), zip(Vr, Vf))
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5), zip(Wr, Wf))
     end
 
     # With a reducer the fused output must equal applying the same reducer to the
@@ -315,31 +320,31 @@ end
     end
 end
 
-@testset "Residual accumulation is inverse-variance in the CORRECTED data" begin
-    # Regression: `Σ w·(V/g)` with the RAW weight `w` is only correct for
-    # |g| = 1. Var(V/g) = 1/(w·|g|²), so the weight must be w·|g|² — otherwise
-    # channels the amp bandpass marked low-|g| get their amplitude-inflated
-    # noise UP-weighted (this tripled K2's adhoc track noise on VR2505). The
-    # accumulated (rbar, wbar) must equal the inverse-variance mean.
+@testset "Residual accumulation is a plain weighted mean of pre-corrected data" begin
+    # `_accumulate_leaf_rbar!`/`_accumulate_leaf_band_phasor!` no longer divide
+    # out a gain themselves — the pipeline's transform chain (`_divide_gains!`,
+    # transforms.jl) corrects `V`/`W` BEFORE these kernels ever see them,
+    # including the |g|² weight reweighting (Var(V/g) = 1/(w·|g|²); this is
+    # what once tripled K2's adhoc track noise on VR2505 when a low-|g| amp
+    # channel's noise was up-weighted by a RAW, un-reweighted `w`). So feeding
+    # these kernels ALREADY-reweighted (V, W) must give back exactly that
+    # inverse-variance mean, with no further correction applied.
     nchan, nti, nbl, npol = 2, 1, 1, 1
     V = zeros(ComplexF32, nchan, nti, nbl, npol)
     W = zeros(Float32, nchan, nti, nbl, npol)
-    V[1, 1, 1, 1] = 1.0 + 0.0im          # channel 1: unit gain
-    V[2, 1, 1, 1] = 0.1im                # channel 2: |g|² = 0.01, data rotated 90°
-    W .= 1.0
-    g = ones(ComplexF64, nchan, nti, 2, 2)
-    g[2, 1, :, :] .= 0.1                 # station gains 0.1 ⇒ den = 0.01
+    V[1, 1, 1, 1] = 1.0 + 0.0im          # channel 1: unit gain ⇒ unchanged, weight 1
+    V[2, 1, 1, 1] = 10.0im               # channel 2: pre-corrected by |g|² = 0.01,
+    W[1, 1, 1, 1] = 1.0                  # so its weight is reweighted to 0.0001
+    W[2, 1, 1, 1] = 0.0001
     bl = [(1, 2)]
     rbar = zeros(ComplexF64, nbl, npol, nti)
     wbar = zeros(Float64, nbl, npol, nti)
-    FP._accumulate_leaf_rbar!(rbar, wbar, V, W, g, bl, ["PP"])
-    # corrected data: ch1 → 1+0i (weight 1), ch2 → 10i (weight 0.0001):
-    # inverse-variance mean ≈ ch1, NOT the raw-weight mean ≈ (1 + 10i)/2.
+    FP._accumulate_leaf_rbar!(rbar, wbar, V, W)
     @test wbar[1, 1, 1] ≈ 1.0001
     @test rbar[1, 1, 1] / wbar[1, 1, 1] ≈ (1.0 + 0.001im) / 1.0001
     z = zeros(ComplexF64, nbl, npol)
     wz = zeros(Float64, nbl, npol)
-    FP._accumulate_leaf_band_phasor!(z, wz, V, W, g, bl, ["PP"])
+    FP._accumulate_leaf_band_phasor!(z, wz, V, W, bl, ["PP"])
     @test wz[1, 1] ≈ 1.0001
     @test z[1, 1] / wz[1, 1] ≈ (1.0 + 0.001im) / 1.0001
 end
@@ -754,7 +759,7 @@ end
         FringeFit(
             model = FringeModel(ref_ant = 1),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> TemporalSmoother(),        # no bandpass stage (see comment above)
+        ) |> DispersionSBDFit() |> TemporalSmoother(),        # no bandpass stage (see comment above)
         uvset,
     )
     @test sol.info.dispersion_applied
@@ -794,10 +799,11 @@ end
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
     @test _crossband_eta(corr) > 0.99
 
-    # Without the term the dispersion survives as cross-band decoherence.
+    # Without the term (no DispersionSBDFit step) the dispersion survives as
+    # cross-band decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false)),
+            model = FringeModel(ref_ant = 1),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -864,14 +870,17 @@ end
         return abs(sum(acc)) / sum(abs, acc)
     end
 
+    # dispersion OFF: this geometry's spw count/fractional bandwidth would also
+    # enable the dTEC term, and this test isolates the SBD machinery.
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false)),
+            model = FringeModel(ref_ant = 1),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> TemporalSmoother(),
+        ) |> DispersionSBDFit(dispersion = nothing) |> TemporalSmoother(),
         uvset,
     )
     @test sol.info.sbd_applied
+    @test !sol.info.dispersion_applied
     sbd = FP._sbd_plans(sol.model, sol.layout)
     @test sbd !== nothing
     # A common-mode slope across groups is gauge-shared with the wideband
@@ -884,10 +893,11 @@ end
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
     @test _perchan_eta(corr, 1) > 0.98                          # baseline (1,2) flat
 
-    # Without the term the per-group slope survives as within-group decoherence.
+    # Without the term (no DispersionSBDFit step) the per-group slope survives
+    # as within-group decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false)),
+            model = FringeModel(ref_ant = 1),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -938,9 +948,9 @@ end
 
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, terms = _fringe_terms(sbd = false)),
+            model = FringeModel(ref_ant = 1),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> TemporalSmoother(),
+        ) |> DispersionSBDFit(sbd = nothing) |> TemporalSmoother(),
         uvset,
     )
     dplan = CAL._dispersion_plan(sol.model, sol.layout)
