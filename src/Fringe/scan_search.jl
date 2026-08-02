@@ -34,10 +34,12 @@ regardless of the fan-out `executor`.
 Returns a `DimStack` over `Baseline × Pol` whose layers are the six
 [`Detection`](@ref) fields (`:delay`/`:rate`/`:phase`/`:amp`/`:snr`/`:valid`),
 so one cell `det[bi, p]` reads back as a `Detection` `NamedTuple`, and its
-`Baseline` lookup carries the surviving `(a, b)` antenna pairs. The scan-level
-aggregates (max SNR, effective cell count, the detection table) are not stored
-here; a caller derives them from the cube's layers plus a cheap `_search_cells`
-recompute when it needs them.
+`Baseline` lookup carries the surviving `(a, b)` antenna pairs. The layers'
+element type tracks `Vsearch`'s own precision (`real(eltype(Vsearch))`) — a
+`ComplexF32` cube produces `Float32` layers. The scan-level aggregates (max
+SNR, effective cell count, the detection table) are not stored here; a caller
+derives them from the cube's layers plus a cheap `_search_cells` recompute when
+it needs them.
 
 Grid geometry (and its shared FFT plan) is built ONCE per scan; the independent
 per-(baseline, product) searches fan out over `executor`, each task reusing one
@@ -60,8 +62,13 @@ function search_scan(
     ncross = length(keep)
     npol = length(pols)
 
+    # The search's compute type: a ComplexF32 streaming caller runs its FFT
+    # natively in Float32 (see search.jl's precision-scope note); the detection
+    # layers below track the same precision.
+    C = eltype(Vsearch)
+    T = real(C)
     dims = (Baseline(bl_pairs), Pol(pols))
-    delay = zeros(dims...)
+    delay = zeros(T, dims...)
     rate = similar(delay)
     phase = similar(delay)
     amp = similar(delay)
@@ -74,7 +81,7 @@ function search_scan(
 
     fg = frequencies(data)
     times = timestamps(data) .* 3600.0
-    ax = _search_axes(fg, times, params)
+    ax = _search_axes(fg, times, params, C)
     # Family-wise PFA (Bonferroni): split pfa_max across all ncross×npol×ngroups
     # searches and resolve the per-search SNR gate once (cheap — no FFT plan).
     nsearch = max(ncross * npol, 1) * max(ngroups, 1)
@@ -86,7 +93,7 @@ function search_scan(
     # One reusable workspace per task (not per cell): the grids are tens of MB, so
     # a task processing many baselines allocates its scratch once. Each (j, p)
     # writes a distinct cell of every layer, so the concurrent writes never overlap.
-    workspace = TaskLocalValue{FringeWorkspace}(FringeWorkspace)
+    workspace = TaskLocalValue{FringeWorkspace{C}}(() -> FringeWorkspace(C))
     cells = [(j, p) for p in 1:npol for j in 1:ncross]
     tforeach(cells; scheduler = executor) do (j, p)
         bi = keep[j]

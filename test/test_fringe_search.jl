@@ -263,8 +263,8 @@ end
     auto = FR.FringeSearch()
     full = FR.FringeSearch(algorithm = FR.FullGrid())
     mbd = FR.FringeSearch(algorithm = FR.HierarchicalMBD())
-    @test FR._search_axes(freqs, times, auto).mbd !== nothing     # auto → hierarchical
-    @test FR._search_axes(freqs, times, full).mbd === nothing
+    @test FR._search_axes(freqs, times, auto, ComplexF64).mbd !== nothing     # auto → hierarchical
+    @test FR._search_axes(freqs, times, full, ComplexF64).mbd === nothing
 
     # Delay spanning MANY ambiguities (137.3 ns ≈ 8.8 × A) — the arbitration must
     # unfold it; plus a rate and phase.
@@ -317,7 +317,7 @@ end
     # Explicit :mbd on a CONTIGUOUS band falls back to the full path (single
     # block → no hierarchy), with identical results by construction.
     fc = 43.0e9 .+ (0:63) .* 0.5e6
-    @test FR._search_axes(fc, times, mbd).mbd === nothing
+    @test FR._search_axes(fc, times, mbd, ComplexF64).mbd === nothing
     Vc = inject_fringe(fc, times, mean(fc), t0; delay = 9.0e-9, rate = 3.0e-3, phase = 0.2)
     d1 = FR.baseline_fringe_search(Vc, ones(size(Vc)), fc, times, mean(fc), t0; opts = mbd)
     d2 = FR.baseline_fringe_search(Vc, ones(size(Vc)), fc, times, mean(fc), t0; opts = full)
@@ -336,7 +336,7 @@ end
     for off in (0.0, 192.0e6, 288.0e6, 352.0e6, 416.0e6)   # diffs 192/96/64/64
         append!(fv, 3.0e9 .+ off .+ (0:15) .* Δf)
     end
-    axv = FR._search_axes(fv, times, mbd)
+    axv = FR._search_axes(fv, times, mbd, ComplexF64)
     @test axv.mbd !== nothing
     @test axv.mbd.bc_step ≈ 32.0e6 rtol = 1.0e-9            # true GCD, not median/2^k
     @test axv.mbd.ambig ≈ 1 / 32.0e6 rtol = 1.0e-9
@@ -361,10 +361,63 @@ end
     @test isapprox(maximum(mn2.snr), mn2.detection.snr; rtol = 0.15)
 end
 
+@testset "Fringe search: ComplexF32 runs natively (not silently upcast)" begin
+    nchan, nt = 64, 30
+    freqs = 43.0e9 .+ (0:(nchan - 1)) .* 0.5e6
+    f0 = mean(freqs)
+    times = (0:(nt - 1)) .* 1.0
+    t0 = mean(times)
+    τ_true, ṙ_true, φ_true = 12.0e-9, 8.0e-3, 0.7
+
+    V64 = inject_fringe(freqs, times, f0, t0; delay = τ_true, rate = ṙ_true, phase = φ_true)
+    V32 = ComplexF32.(V64)
+    W32 = ones(Float32, size(V32))
+
+    # The search grid, FFT plan, and workspace buffers must be native ComplexF32
+    # — not the pre-CHUNK-084 behavior of silently upcasting into ComplexF64 —
+    # since that's the whole point of flowing the compute type from `V`'s eltype.
+    ax = FR._search_axes(freqs, times, FR.FringeSearch(), ComplexF32)
+    @test eltype(ax.delays) === Float32
+    @test eltype(ax.rates) === Float32
+
+    ws = FR.FringeWorkspace(ComplexF32)
+    det = FR.baseline_fringe_search(V32, W32, freqs, times, f0, t0; workspace = ws)
+    @test eltype(ws.G) === ComplexF32
+    @test eltype(ws.D) === ComplexF32
+    @test eltype(ws.dwin) === Float32
+    @test det isa FR.Detection{Float32}
+
+    @test det.valid
+    @test isapprox(det.delay, τ_true; atol = 5.0f-9)
+    @test isapprox(det.rate, ṙ_true; atol = 5.0f-4)
+    @test isapprox(rem2pi(det.phase - φ_true, RoundNearest), 0.0; atol = 2.0f-2)
+    @test isapprox(det.amp, 1.0f0; rtol = 2.0f-2)
+
+    # The hierarchical (MBD) path also stays native ComplexF32 in its workspace.
+    Δf = 1.0e6
+    nband, nchan_b = 8, 16
+    freqs_m = Float64[]
+    for b in 0:(nband - 1)
+        append!(freqs_m, 8.0e9 .+ b * 100.0e6 .+ (0:(nchan_b - 1)) .* Δf)
+    end
+    f0m = mean(freqs_m)
+    Vm64 = inject_fringe(freqs_m, times, f0m, t0; delay = 137.3e-9, rate = ṙ_true, phase = φ_true, amp = 0.7)
+    Vm32 = ComplexF32.(Vm64)
+    Wm32 = ones(Float32, size(Vm32))
+    mbd = FR.FringeSearch(algorithm = FR.HierarchicalMBD())
+    wsm = FR.FringeWorkspace(ComplexF32)
+    detm = FR.baseline_fringe_search(Vm32, Wm32, freqs_m, times, f0m, t0; opts = mbd, workspace = wsm)
+    @test detm isa FR.Detection{Float32}
+    @test wsm.mbd isa FR._MBDWorkspace{ComplexF32}
+    @test eltype(wsm.mbd.Gb) === ComplexF32
+    @test detm.valid
+    @test isapprox(detm.delay, 137.3e-9; atol = 5.0f-9)
+end
+
 # An algorithm defined OUTSIDE the package — the only thing that proves
 # `AbstractSearchAlgorithm` is a real extension point rather than a declared one.
 struct _ProbeFullGrid <: FR.AbstractSearchAlgorithm end
-FR._mbd_axes(::_ProbeFullGrid, freqs, fax, tax, rates, opts) = nothing
+FR._mbd_axes(::_ProbeFullGrid, freqs, fax, tax, rates, opts, ::Type{C}) where {C} = nothing
 
 # Subtypes the seam but implements nothing.
 struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
@@ -391,7 +444,7 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
 
     # The foreign algorithm reaches the search and selects the full-grid path.
     probe = FR.FringeSearch(algorithm = _ProbeFullGrid())
-    @test FR._search_axes(freqs, times, probe).mbd === nothing
+    @test FR._search_axes(freqs, times, probe, ComplexF64).mbd === nothing
     f0, t0 = mean(freqs), mean(times)
     V = inject_fringe(freqs, times, f0, t0; delay = 13.7e-9, rate = 6.0e-3, phase = -0.9)
     W = ones(Float64, size(V))
@@ -404,14 +457,14 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
     # No silent fallback: an algorithm with no `_mbd_axes` method is an error,
     # not a quiet switch to a different search.
     @test_throws "defines no `Gustavo.Fringe._mbd_axes` method" FR._search_axes(
-        freqs, times, FR.FringeSearch(algorithm = _ProbeUnimplemented()))
+        freqs, times, FR.FringeSearch(algorithm = _ProbeUnimplemented()), ComplexF64)
 
     # The sentinel is the ONLY Symbol accepted; the retired :full/:mbd names
     # fail loudly rather than being silently reinterpreted.
     for bogus in (:full, :mbd, :bogus)
         opts = FR.FringeSearch(algorithm = bogus)
-        @test_throws ArgumentError FR._search_axes(freqs, times, opts)
+        @test_throws ArgumentError FR._search_axes(freqs, times, opts, ComplexF64)
         @test_throws "algorithm must be :auto or an AbstractSearchAlgorithm" FR._search_axes(
-            freqs, times, opts)
+            freqs, times, opts, ComplexF64)
     end
 end

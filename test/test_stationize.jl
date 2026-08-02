@@ -18,7 +18,7 @@ _chisign(fa, fb) = fa == fb ? 0 : (fa < fb ? 1 : -1)
 function inject_detections(bl_pairs, pol_products, τ, ṙ, φ, χ; snr = 100.0)
     nbl, npol = length(bl_pairs), length(pol_products)
     feeds = [CALs.correlation_feed_pair(p) for p in pol_products]
-    D = Matrix{FR.Detection}(undef, nbl, npol)
+    D = Matrix{FR.Detection{Float64}}(undef, nbl, npol)
     for bi in 1:nbl, p in 1:npol
         a, b = bl_pairs[bi]
         fa, fb = feeds[p]
@@ -26,7 +26,7 @@ function inject_detections(bl_pairs, pol_products, τ, ṙ, φ, χ; snr = 100.0)
         delay = τ[a, fa] - τ[b, fb]
         rate = ṙ[a, fa] - ṙ[b, fb]
         phase = rem2pi(φ[a, fa] - φ[b, fb] + cs * χ, RoundNearest)
-        D[bi, p] = FR.Detection((delay, rate, phase, 1.0, snr, true))
+        D[bi, p] = FR.Detection{Float64}((delay, rate, phase, 1.0, snr, true))
     end
     return D
 end
@@ -183,7 +183,7 @@ end
     for bi in eachindex(bl), p in eachindex(pols)
         if feeds[p][1] != feeds[p][2]
             d = D[bi, p]
-            D[bi, p] = FR.Detection((d.delay, d.rate, d.phase, d.amp, 0.0, false))
+            D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 0.0, false))
         end
     end
     sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
@@ -236,12 +236,12 @@ end
 
     # Chain edges get the highest SNR so the spanning tree follows them.
     is_chain(a, b) = abs(a - b) == 1
-    D = Matrix{FR.Detection}(undef, length(bl), length(pols))
+    D = Matrix{FR.Detection{Float64}}(undef, length(bl), length(pols))
     for (bi, (a, b)) in enumerate(bl), (p, (fa, fb)) in enumerate(feeds)
         cs = _chisign(fa, fb)
         phase = rem2pi(φ[a, fa] - φ[b, fb] + cs * χ, RoundNearest)
         snr = is_chain(a, b) ? 200.0 : 100.0
-        D[bi, p] = FR.Detection((τ[a, fa] - τ[b, fb], ṙ[a, fa] - ṙ[b, fb], phase, 1.0, snr, true))
+        D[bi, p] = FR.Detection{Float64}((τ[a, fa] - τ[b, fb], ṙ[a, fa] - ṙ[b, fb], phase, 1.0, snr, true))
     end
 
     # At least one redundant baseline genuinely exceeds ±π in parallel hand.
@@ -332,7 +332,7 @@ end
     χs = [0.6, -0.4]
 
     function scan_det(s; with_cross)
-        D = Matrix{FR.Detection}(undef, length(bl), length(pols))
+        D = Matrix{FR.Detection{Float64}}(undef, length(bl), length(pols))
         for (bi, (a, b)) in enumerate(bl), (p, (fa, fb)) in enumerate(feeds)
             cs = _chisign(fa, fb)
             valid = with_cross || cs == 0
@@ -341,7 +341,7 @@ end
             φa = Φc[s][a] + (fa == 2 ? ε[a] : 0.0)
             φb = Φc[s][b] + (fb == 2 ? ε[b] : 0.0)
             phase = rem2pi(φa - φb + cs * χs[s], RoundNearest)
-            D[bi, p] = FR.Detection((τa - τb, 0.0, phase, 1.0, 100.0, valid))
+            D[bi, p] = FR.Detection{Float64}((τa - τb, 0.0, phase, 1.0, 100.0, valid))
         end
         return D
     end
@@ -425,14 +425,14 @@ end
     # disables rejection — the screen needs a genuine noise floor to cut against.
     for bi in eachindex(bl), p in eachindex(pols)
         d = D[bi, p]
-        D[bi, p] = FR.Detection((
+        D[bi, p] = FR.Detection{Float64}((
             d.delay + 1.0e-11 * randn(rng), d.rate + 1.0e-5 * randn(rng),
             d.phase + 0.01 * randn(rng), d.amp, d.snr, true,
         ))
     end
     poisoned = findfirst(==((5, 6)), bl)      # the "twin" baseline
     for p in eachindex(pols)
-        D[poisoned, p] = FR.Detection((-690.0e-9, 4.7e-3, 1.3, 1.0, 80.0, true))
+        D[poisoned, p] = FR.Detection{Float64}((-690.0e-9, 4.7e-3, 1.3, 1.0, 80.0, true))
     end
 
     sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)

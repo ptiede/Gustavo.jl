@@ -662,7 +662,7 @@ end
     # end-to-end solve flattens the data exactly like the full path does.
     uvset, _ = _build_fringe_uvset(nbands = 4, nchan = 8, band_sep = 1.5e8)
     geom = CAL.build_geometry(uvset)
-    ax = FP._search_axes(geom.channel_freqs, geom.times .* 3600.0, FP.FringeSearch())
+    ax = FP._search_axes(geom.channel_freqs, geom.times .* 3600.0, FP.FringeSearch(), ComplexF64)
     @test ax.mbd !== nothing
 
     sol = fit(

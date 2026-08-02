@@ -406,7 +406,7 @@ function mask_unselected_cross_hands!(dets, fit_on::AbstractScanSelection, group
             fa, fb = d.feeds[p]
             fa == fb && continue
             for bi in axes(d.det, 1)
-                d.det[bi, p] = _INVALID_DETECTION
+                d.det[bi, p] = _invalid_detection(typeof(d.det[bi, p]))
             end
         end
     end

@@ -75,7 +75,7 @@ end
     stationize_scan(detections, bl_pairs, pol_products, nant; ref_ant, opts) -> DimStack
 
 Solve per-(station, feed) delay, rate and phase from a scan's per-baseline
-`detections::AbstractMatrix{Detection}` (indexed `[baseline, product]`).
+`detections::AbstractMatrix{<:Detection}` (indexed `[baseline, product]`).
 `bl_pairs` are the `(a, b)` antenna-index pairs, `pol_products` the MSv4
 correlation labels (e.g. `["PP","PQ","QP","QQ"]`), `ref_ant` the gauge reference.
 
@@ -87,7 +87,7 @@ component count of the phase graph; ≥2 ⇒ disconnected array or feeds untied 
 cross hands).
 """
 function stationize_scan(
-        detections::AbstractMatrix{Detection},
+        detections::AbstractMatrix{<:Detection},
         bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
         pol_products::AbstractVector{<:AbstractString},
         nant::Integer;
@@ -798,7 +798,7 @@ quantities must cancel. For noiseless station-differenced data these are ≈ 0
 unused for the measured-closure check but accepted for API symmetry.
 """
 function station_closure_residuals(
-        detections::AbstractMatrix{Detection},
+        detections::AbstractMatrix{<:Detection},
         bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
         pol_products::AbstractVector{<:AbstractString},
         ::AbstractDimStack;

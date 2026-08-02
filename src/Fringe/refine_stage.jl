@@ -379,8 +379,8 @@ function _dispersion_fit_stationize!(
         delay_plan, disp_plan, ref_ant, opts, snr_min, tau_max, dtec_max, ties = nothing,
     )
     nbl, npol, nlf = size(z)
-    Dτ = fill(_INVALID_DETECTION, nbl, npol)
-    Dd = fill(_INVALID_DETECTION, nbl, npol)
+    Dτ = fill(_invalid_detection(Float64), nbl, npol)
+    Dd = fill(_invalid_detection(Float64), nbl, npol)
     for p in 1:npol
         feeds[p][1] == feeds[p][2] || continue
         for bi in 1:nbl
@@ -401,8 +401,8 @@ function _dispersion_fit_stationize!(
                 tau_max = _band_delay_halfwindow(rows_f, tau_max), dtec_max = dtec_max,
             )
             fit.snr >= snr_min || continue
-            Dτ[bi, p] = Detection((fit.tau, 0.0, 0.0, fit.amp, fit.snr, true))
-            Dd[bi, p] = Detection((fit.dtec, 0.0, 0.0, fit.amp, fit.snr, true))
+            Dτ[bi, p] = Detection{Float64}((fit.tau, 0.0, 0.0, fit.amp, fit.snr, true))
+            Dd[bi, p] = Detection{Float64}((fit.dtec, 0.0, 0.0, fit.amp, fit.snr, true))
         end
     end
 
@@ -433,7 +433,7 @@ function _dispersion_fit_stationize!(
             for bi in eachindex(pairs_s)
                 if pairs_s[bi][1] == pairs_s[bi][2]
                     for p in axes(Ds, 2)
-                        Ds[bi, p] = _INVALID_DETECTION
+                        Ds[bi, p] = _invalid_detection(Float64)
                     end
                 end
             end

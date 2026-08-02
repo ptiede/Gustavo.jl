@@ -809,8 +809,9 @@ function fringe_search_map(
     bi = if baseline === nothing
         # Default to the strongest detection at this product — the same search the
         # solver ran, sharing one workspace/axes across baselines.
-        ax = _search_axes(fg, times, opts)
-        ws = FringeWorkspace()
+        C = eltype(Vg)
+        ax = _search_axes(fg, times, opts, C)
+        ws = FringeWorkspace(C)
         snr_gate = _gate_snr_min(opts, ax)
         best = 0
         bestsnr = -Inf
