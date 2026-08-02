@@ -390,9 +390,9 @@ end
 # R–L fit-on-subset: invalidate the CROSS-HAND detections of every scan the
 # estimator's `cross_hand_fit_on` selection does NOT pick, so only the selected
 # scans' cross-hand rows feed the station solve — the solved time-global R–L
-# components still apply to every scan. Parallel-hand rows are untouched. `dets` is the per-scan
-# `StationScanDetections` vector (mutated); `snr` supplies per-scan SNRs for
-# selections that need them.
+# components still apply to every scan. Parallel-hand rows are untouched. `dets`
+# is the per-scan detection `DimStack` vector (mutated); `snr` supplies per-scan
+# SNRs for selections that need them.
 function mask_unselected_cross_hands!(dets, fit_on::AbstractScanSelection, groups, snr)
     fit_on isa AllScans && return dets
     recs = [
@@ -402,11 +402,12 @@ function mask_unselected_cross_hands!(dets, fit_on::AbstractScanSelection, group
     sel = Set(select_scans(fit_on, recs))
     for (gi, d) in enumerate(dets)
         gi in sel && continue
-        for p in eachindex(d.feeds)
-            fa, fb = d.feeds[p]
+        feeds = _scan_feeds(d)
+        for p in eachindex(feeds)
+            fa, fb = feeds[p]
             fa == fb && continue
-            for bi in axes(d.det, 1)
-                d.det[bi, p] = _invalid_detection(typeof(d.det[bi, p]))
+            for bi in axes(d, 1)
+                d[bi, p] = _invalid_detection(typeof(d[bi, p]))
             end
         end
     end
@@ -421,9 +422,9 @@ end
 function unconstrained_flags(dets, covered, geom::DataGeometry)
     flags = Tuple{Int, Int}[]
     for gi in eachindex(dets)
-        scanid = geom.scan_of_time[dets[gi].ti]
+        scanid = geom.scan_of_time[_scan_ti(dets[gi])]
         stations = Set{Int}()
-        for (a, b) in dets[gi].bl_pairs
+        for (a, b) in _scan_bl_pairs(dets[gi])
             a == b && continue
             push!(stations, a); push!(stations, b)
         end

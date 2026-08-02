@@ -440,7 +440,7 @@ function _dispersion_fit_stationize!(
             any(d -> d.valid, Ds) || continue
         end
         _, _, nr, _ = solve_station_systems!(
-            θ, (StationScanDetections(Ds, pairs_s, feeds, ti0),), ((plan, :delay),);
+            θ, (detection_stack(Ds, pairs_s, pols; ti = ti0),), ((plan, :delay),);
             ref_ant = tie ? ties[ref_ant] : ref_ant, opts = opts,
         )
         nrej += nr
@@ -695,6 +695,3 @@ function _sbd_fit_stationize!(
     end
     return nrej
 end
-
-# Leaf-group variant (pass 2): each band leaf is split into `nchunk` contiguous
-# channel chunks; their phasors feed `_sbd_fit_stationize!`.

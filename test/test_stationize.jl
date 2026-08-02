@@ -266,7 +266,6 @@ end
     ref = 1
     bl = all_baselines(nant)
     pols = ["PP", "PQ", "QP", "QQ"]
-    feeds = [CALs.correlation_feed_pair(p) for p in pols]
 
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
@@ -291,7 +290,7 @@ end
     cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
 
     θ = zeros(layout.nθ)
-    scans = (FR.StationScanDetections(D, bl, feeds, 1),)
+    scans = (FR.detection_stack(D, bl, pols; ti = 1),)
     chi, ncomp = FR.solve_station_systems!(
         θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref,
     )
@@ -367,7 +366,7 @@ end
     cf_sf, cf_g, d_sf, d_g, _ = layout.plans
 
     θ = zeros(layout.nθ)
-    scans = (FR.StationScanDetections(D1, bl, feeds, 1), FR.StationScanDetections(D2, bl, feeds, 4))
+    scans = (FR.detection_stack(D1, bl, pols; ti = 1), FR.detection_stack(D2, bl, pols; ti = 4))
     comps = (
         (cf_sf, :phase), (cf_g, :phase), (d_sf, :delay), (d_g, :delay), (layout.plans[5], :rate),
     )
@@ -415,7 +414,6 @@ end
     ref = 1
     bl = all_baselines(nant)
     pols = ["PP", "PQ", "QP", "QQ"]
-    feeds = [CALs.correlation_feed_pair(p) for p in pols]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)
@@ -460,7 +458,7 @@ end
     layout = CALs.plan_parameters(model, nant, geom)
     cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
     θ = zeros(layout.nθ)
-    scans = (FR.StationScanDetections(D, bl, feeds, 1),)
+    scans = (FR.detection_stack(D, bl, pols; ti = 1),)
     _, _, nrej = FR.solve_station_systems!(
         θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref,
     )

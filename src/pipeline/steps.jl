@@ -208,10 +208,9 @@ function Fringe.estimate_scan!(
         Vsearch, ngroups = length(ctx.stream.groups), executor = ctx.stream.inner_executor,
     )
     pols = pol_products(stack)
-    feeds = [correlation_feed_pair(p) for p in pols]
     # `res` covers only the surviving (cross) baselines; take its own pair list.
     bl_pairs = collect(UVData.DimensionalData.lookup(res, UVData.Baseline))
-    det = Fringe.StationScanDetections(res, bl_pairs, feeds, first(win.ti_idx))
+    det = Fringe._with_ti(res, first(win.ti_idx))
 
     # Per-scan detection log for the solution diagnostics: the detection table
     # (with per-baseline PFA), its max SNR, and the scan's effective cell count.

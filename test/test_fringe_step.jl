@@ -145,16 +145,14 @@
         stack, win = FP.materialize_cube(st, st.groups[1])
         res = FP.search_scan(stack, st.geom, FP.FringeSearch())
         feeds = [CAL.correlation_feed_pair(p) for p in pol_products(stack)]
-        d = FP.StationScanDetections(
-            copy(res), baselines(stack).pairs, feeds, first(win.ti_idx),
-        )
+        d = FP._with_ti(copy(res), first(win.ti_idx))
         FP.mask_unselected_cross_hands!([d], Gustavo.ScanIndices(10_000), st.groups, [NaN])
-        for p in eachindex(feeds), bi in axes(d.det, 1)
+        for p in eachindex(feeds), bi in axes(d, 1)
             fa, fb = feeds[p]
             if fa != fb
-                @test !d.det[bi, p].valid
+                @test !d[bi, p].valid
             else
-                @test d.det[bi, p] === res[bi, p]
+                @test d[bi, p] === res[bi, p]
             end
         end
     end

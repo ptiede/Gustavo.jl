@@ -102,7 +102,7 @@ function stationize_scan(
     # Closure pre-screen (see `_closure_screen`): drop every product of a
     # baseline whose delay/rate breaks triangle closure — a false fringe.
     excl = opts.reject_sigma > 0 ?
-        _closure_screen((StationScanDetections(detections, collect(Tuple{Int, Int}, bl_pairs), feeds, 1),), opts) :
+        _closure_screen((detection_stack(detections, bl_pairs, pol_products; ti = 1),), opts) :
         Set{Tuple{Int, Int}}()
 
     # Gather valid observation rows per observable.
@@ -159,15 +159,17 @@ end
 function _closure_screen(scans, opts::Stationization)
     excl = Set{Tuple{Int, Int}}()
     for (sidx, sc) in enumerate(scans)
-        nbl, npol = size(sc.det)
+        nbl, npol = size(sc)
+        bl_pairs = _scan_bl_pairs(sc)
+        feeds = _scan_feeds(sc)
         for getval in ((d -> d.delay), (d -> d.rate)), feed in 1:2
             # Weighted per-baseline value on this feed's parallel-hand subgraph.
             acc = Dict{Tuple{Int, Int}, Tuple{Float64, Float64}}()   # (a,b) → (Σw·v, Σw)
             for bi in 1:nbl, p in 1:npol
-                sc.feeds[p] == (feed, feed) || continue
-                det = sc.det[bi, p]
+                feeds[p] == (feed, feed) || continue
+                det = sc[bi, p]
                 (det.valid && det.snr >= opts.snr_min) || continue
-                a, b = sc.bl_pairs[bi]
+                a, b = bl_pairs[bi]
                 a == b && continue
                 s0 = get(acc, (a, b), (0.0, 0.0))
                 w = det.snr^2
@@ -201,7 +203,7 @@ function _closure_screen(scans, opts::Stationization)
             for ((a, b), sc_ab) in scores
                 sc_ab - med > opts.reject_sigma * s || continue
                 for bi in 1:nbl
-                    (sc.bl_pairs[bi] == (a, b) || sc.bl_pairs[bi] == (b, a)) &&
+                    (bl_pairs[bi] == (a, b) || bl_pairs[bi] == (b, a)) &&
                         push!(excl, (sidx, bi))
                 end
             end
@@ -446,20 +448,46 @@ end
 # across scans couples them) — the model is the extension point, this solver just
 # reads the θ columns each component declares.
 #
-# `scans` is a vector of `StationScanDetections`, each carrying one scan's
-# detection matrix, its `(a, b)` pairs, per-product feeds, and a representative
-# global time index `ti` for the `tseg_id` lookup. θ slots are ACCUMULATED into
-# (`+=`), matching `_pack_station!`, so `rounds > 1` (search on the residual)
-# stays correct.
+# `scans` is a vector of `Baseline × Pol` Detection `DimStack`s (the shape
+# `search_scan` returns — see `detection_stack`/`_with_ti`), each carrying its
+# `Baseline` lookup's `(a, b)` pairs, per-product feeds derived from its `Pol`
+# lookup, and a representative global time index `:ti` in metadata for the
+# `tseg_id` lookup. θ slots are ACCUMULATED into (`+=`), matching
+# `_pack_station!`, so `rounds > 1` (search on the residual) stays correct.
 
-struct StationScanDetections{D}
-    det::D                                   # [baseline, product] of Detection cells:
-                                             # a Baseline × Pol DimStack (search) or a
-                                             # Matrix{Detection} (refine/direct solve)
-    bl_pairs::Vector{Tuple{Int, Int}}
-    feeds::Vector{Tuple{Int, Int}}           # feed pair per product
-    ti::Int                                  # representative global time index (→ tseg)
+"""
+    detection_stack(D::AbstractMatrix{<:Detection}, bl_pairs, pol_products; ti) -> DimStack
+
+Package a plain `[baseline, product]` detection matrix as the `Baseline × Pol`
+DimStack shape `search_scan` returns, carrying `ti` (the representative global
+time index) in metadata — so a scan built directly (the refine stage, or a
+direct `stationize_scan`/`solve_station_systems!` call) has the same shape as
+one that came from the search, and every consumer reads pairs/feeds/ti off the
+stack uniformly.
+"""
+function detection_stack(D::AbstractMatrix{<:Detection}, bl_pairs, pol_products; ti::Integer)
+    gdims = (Baseline(collect(Tuple{Int, Int}, bl_pairs)), Pol(collect(pol_products)))
+    layers = (;
+        delay = DimArray(getfield.(D, :delay), gdims),
+        rate = DimArray(getfield.(D, :rate), gdims),
+        phase = DimArray(getfield.(D, :phase), gdims),
+        amp = DimArray(getfield.(D, :amp), gdims),
+        snr = DimArray(getfield.(D, :snr), gdims),
+        valid = DimArray(getfield.(D, :valid), gdims),
+    )
+    return DimensionalData.DimStack(layers; metadata = Dict{Symbol, Any}(:ti => Int(ti)))
 end
+
+# Attach a representative global time index to an existing detection stack (the
+# search's own `search_scan` return, which carries no `:ti` — the caller knows
+# which window it searched).
+_with_ti(stack::AbstractDimStack, ti::Integer) =
+    DimensionalData.rebuild(stack; metadata = Dict{Symbol, Any}(:ti => Int(ti)))
+
+_scan_bl_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Baseline))
+_scan_pols(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Pol))
+_scan_feeds(sc::AbstractDimStack) = [correlation_feed_pair(p) for p in _scan_pols(sc)]
+_scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc)[:ti]::Int
 
 """
     solve_station_systems!(θ, scans, components; ref_ant, opts) -> (chi, ncomp, nrejected)
@@ -490,8 +518,8 @@ function solve_station_systems!(
     excl = opts.reject_sigma > 0 ? _closure_screen(scans, opts) : Set{Tuple{Int, Int}}()
     nrej = 0
     for (sidx, bi) in excl
-        for p in axes(scans[sidx].det, 2)
-            scans[sidx].det[bi, p].valid && (nrej += 1)
+        for p in axes(scans[sidx], 2)
+            scans[sidx][bi, p].valid && (nrej += 1)
         end
     end
     # (station, scan-index) pairs CONSTRAINED by the surviving rows — the
@@ -555,23 +583,26 @@ function _solve_kind_cols!(
     rval = Float64[]; rw = Float64[]; rcs = Int[]; rscan = Int[]
     rsta_a = Int[]; rsta_b = Int[]
     for (sidx, sc) in enumerate(scans)
-        nbl, npol = size(sc.det)
+        nbl, npol = size(sc)
+        bl_pairs = _scan_bl_pairs(sc)
+        feeds = _scan_feeds(sc)
+        ti = _scan_ti(sc)
         for bi in 1:nbl, p in 1:npol
-            det = sc.det[bi, p]
+            det = sc[bi, p]
             (det.valid && det.snr >= opts.snr_min) || continue
             (sidx, bi) in excl && continue      # closure-inconsistent baseline
-            a, b = sc.bl_pairs[bi]
+            a, b = bl_pairs[bi]
             a == b && continue
-            fa, fb = sc.feeds[p]
+            fa, fb = feeds[p]
             cs = _chi_sign(fa, fb)
             (include_cross || cs == 0) || continue
             nsA = Int[]; nsB = Int[]
             for plan in plans
                 na = _feed_node(plan.tying, fa)
-                ca = na == 0 ? 0 : _block_index(plan, na, 1, plan.tseg_id[sc.ti], a)
+                ca = na == 0 ? 0 : _block_index(plan, na, 1, plan.tseg_id[ti], a)
                 ca != 0 && push!(nsA, getnode(ca, a, fa, sidx))
                 nb = _feed_node(plan.tying, fb)
-                cb = nb == 0 ? 0 : _block_index(plan, nb, 1, plan.tseg_id[sc.ti], b)
+                cb = nb == 0 ? 0 : _block_index(plan, nb, 1, plan.tseg_id[ti], b)
                 cb != 0 && push!(nsB, getnode(cb, b, fb, sidx))
             end
             (isempty(nsA) || isempty(nsB)) && continue
