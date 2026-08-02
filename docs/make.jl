@@ -14,6 +14,7 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
+        "Authoring a new gain term" => "authoring_terms.md",
     ],
 )
 

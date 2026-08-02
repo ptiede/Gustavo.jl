@@ -52,7 +52,8 @@ export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
 # Terms
 export AbstractGainTerm
 export ConstantTerm, Delay, Dispersion, Rate, Polynomial, PolynomialFreq, PolynomialTime
-export nparams_per_block
+# The term-authoring interface: the hooks a new `AbstractGainTerm` implements.
+export term_axes, param_shapes, term_eval, term_label, freq_coordinate, time_coordinate
 
 # Models and tying
 export GainComponent, TiedComponent, StationGainModel

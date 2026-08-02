@@ -58,6 +58,12 @@ end
     @test CAL.term_axes(CAL.PolynomialTime(3)) == (:Ti,)
     @test CAL.term_label(CAL.PolynomialFreq(3)) == "polyf3"
     @test CAL.term_label(CAL.PolynomialTime(2)) == "polyt2"
+
+    # `term_label` defaults to the type name, so a term author only needs to
+    # override it for a more evocative label.
+    @eval CAL struct _UnlabeledTerm <: AbstractGainTerm end
+    @test CAL.term_label(CAL._UnlabeledTerm()) == "_UnlabeledTerm"
+
     @test_throws ArgumentError CAL.PolynomialFreq(0)
     @test_throws "axis must be one of" CAL.Polynomial{:nope}(2)
 

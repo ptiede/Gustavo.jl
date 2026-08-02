@@ -6,9 +6,25 @@
 # parameter vector — `term_eval` hands it its own named parameters and the
 # coordinates it asked for.
 #
-# Writing a term means: a `term_axes`, a `param_shapes`, a `term_eval`, a
-# `term_label`, and a coordinate builder for each axis declared.
+# Writing a term means: a `term_axes`, a `param_shapes`, a `term_eval`, and a
+# coordinate builder for each axis declared. `term_label` is optional — it
+# defaults to the type name and only needs an override for a more evocative
+# diagnostic label.
 
+"""
+    AbstractGainTerm
+
+One physical contribution to a station's phase or log-amplitude response — a
+delay, a rate, a polynomial bandpass shape. A concrete term implements
+[`term_axes`](@ref), [`param_shapes`](@ref), a coordinate builder
+([`freq_coordinate`](@ref) / [`time_coordinate`](@ref)) for each axis
+declared, and [`term_eval`](@ref); [`term_label`](@ref) is optional. See the
+"Authoring a new gain term" documentation page for a worked example.
+
+A term lives inside a [`GainComponent`](@ref), which pins it to one
+(time-segment, frequency-segment) block of parameters, so a term itself never
+sees the global parameter vector.
+"""
 abstract type AbstractGainTerm end
 
 "Constant offset: phase/log-amp = `offset`. (Per-block constant — a fringe phase, or a flat gain.)"
@@ -66,13 +82,18 @@ Polynomial in a segment-scaled time coordinate. Dispatch on `Polynomial` (or
 PolynomialTime(degree::Integer) = Polynomial{:Ti}(degree)
 
 # ── Coordinate axes ──────────────────────────────────────────────────────────
-#
-# `term_axes(term)` names the coordinate axes a term reads: `:Frequency`, `:Ti`,
-# both, or neither. `term_eval` receives exactly these as a `NamedTuple` — a
-# term reading both writes `x.Frequency` and `x.Ti` — and the layout builds only
-# the axes that are declared. The names are checked at plan time, so a typo
-# fails there rather than evaluating against the wrong axis.
 const TERM_AXES = (:Frequency, :Ti)
+
+"""
+    term_axes(term) -> Tuple
+
+The coordinate axes `term` reads, drawn from `(:Frequency, :Ti)`, both, or
+neither. [`term_eval`](@ref) receives exactly these as a `NamedTuple` — a term
+reading both writes `x.Frequency` and `x.Ti` — and the layout builds only the
+axes that are declared. The names are checked at plan time, so a typo fails
+there rather than evaluating against the wrong axis.
+"""
+function term_axes end
 
 term_axes(::ConstantTerm) = ()
 term_axes(::Delay) = (:Frequency,)
@@ -81,23 +102,29 @@ term_axes(::Rate) = (:Ti,)
 term_axes(::Polynomial{C}) where {C} = (C,)
 
 # ── Parameter names and shapes ───────────────────────────────────────────────
-#
-# `param_shapes(term, nchan_seg)` names the parameters of one block and gives
-# each one a shape: `()` for a scalar, `(n,)` for a vector of length `n`.
-# `nchan_seg` is the number of channels in the term's frequency segment, for the
-# terms whose arity the data sets. How finely a term varies in frequency is said
-# by its frequency SEGMENTATION, not by its parameter count: a free value per
-# channel is `ConstantTerm` × `ChannelBlocks(1)`.
-#
-# `term_eval` receives these as a `NamedTuple`, so a term author writes `p.delay`
-# and never a position into a block whose length they would have to know. Shapes
-# are part of the type, not runtime data, so the `NamedTuple` is built statically
-# and costs nothing.
-#
-# The names are LOCAL to one term's own block and are never merged with another
-# term's: two terms may both name a parameter `:offset` without colliding. An
-# aggregate view of θ must therefore namespace by component, never by parameter
-# name.
+
+"""
+    param_shapes(term, nchan_seg) -> NamedTuple
+
+The parameters of one (time-segment, frequency-segment) block of `term`,
+named and shaped: `()` for a scalar, `(n,)` for a vector of length `n`.
+`nchan_seg` is the number of channels in the term's frequency segment, for
+terms whose arity the data sets. How finely a term varies in frequency is
+said by its frequency SEGMENTATION, not by its parameter count: a free value
+per channel is `ConstantTerm` paired with `ChannelBlocks(1)`.
+
+[`term_eval`](@ref) receives these as a `NamedTuple`, so a term author writes
+`p.delay` and never a position into a block whose length it would have to
+know. Shapes are part of the type, not runtime data, so the `NamedTuple` is
+built statically and costs nothing.
+
+The names are LOCAL to one term's own block and are never merged with
+another's: two terms may both name a parameter `:offset` without colliding.
+An aggregate view of θ must therefore namespace by component, never by
+parameter name.
+"""
+function param_shapes end
+
 param_shapes(::ConstantTerm, nchan_seg) = (offset = (),)
 param_shapes(::Delay, nchan_seg) = (delay = (),)
 param_shapes(::Dispersion, nchan_seg) = (dtec = (),)
@@ -115,15 +142,26 @@ nparams_per_block(t::AbstractGainTerm, nchan_seg) =
     sum(prod, values(param_shapes(t, nchan_seg)))
 
 # ── Coordinate builders ──────────────────────────────────────────────────────
-#
-# One builder per axis, because a term may read both: `freq_coordinate` gives the
-# `x.Frequency` a term sees, one entry per channel, and `time_coordinate` the
-# `x.Ti`, one entry per time sample. A term defines a builder for each axis it
-# declares in `term_axes`.
-#
-# There is deliberately NO generic fallback for either. `plan_parameters` calls a
-# builder for every axis a term declares, so a term that forgets one errors
-# loudly instead of silently evaluating that axis at zero.
+
+"""
+    freq_coordinate(term, channel_freqs, fseg_groups, f0) -> AbstractVector
+
+The `x.Frequency` array `term_eval` will index into, one entry per channel.
+Required for any term declaring `:Frequency` in [`term_axes`](@ref); there is
+deliberately no generic fallback — `plan_parameters` calls this for every
+term that declares the axis, so a term that forgets it errors loudly (a
+`MethodError`) instead of silently evaluating that axis at zero.
+"""
+function freq_coordinate end
+
+"""
+    time_coordinate(term, times, tseg_groups, t0) -> AbstractVector
+
+The `x.Ti` array `term_eval` will index into, one entry per time sample.
+Required for any term declaring `:Ti` in [`term_axes`](@ref); see
+[`freq_coordinate`](@ref) for why there is no generic fallback.
+"""
+function time_coordinate end
 
 # Delay uses the physical offset (f − f0) in Hz so θ is a delay in seconds.
 freq_coordinate(::Delay, channel_freqs, fseg_groups, f0) = Float64.(channel_freqs) .- f0
@@ -163,19 +201,23 @@ function _centered_scaled(values, groups)
 end
 
 # ── Pure scalar evaluation ───────────────────────────────────────────────────
-#
-#     term_eval(term, p, x)
-#
-# is a term's contribution to phase / log-amplitude at one (channel, time) cell.
-# `p` holds the term's own parameters, named and shaped as `param_shapes`
-# declares — a scalar per `()` name, a vector view per `(n,)` name. `x` holds the
-# coordinates `term_axes` declares, under those names: `x.Frequency`, `x.Ti`, or
-# both. A term never sees the global parameter vector, nor the layout that
-# addresses it, nor an index into either.
-#
-# This is the hot path of `evaluate_gains` — kept allocation-free and type-stable
-# so the whole forward map is inferrable (and Reactant-traceable). Read `p` by
-# field name; iterating a `NamedTuple` is not type-stable.
+
+"""
+    term_eval(term, p, x)
+
+`term`'s contribution to phase / log-amplitude at one (channel, time) cell.
+`p` holds the term's own parameters, named and shaped as [`param_shapes`](@ref)
+declares — a scalar per `()` name, a vector view per `(n,)` name. `x` holds
+the coordinates [`term_axes`](@ref) declares, under those names: `x.Frequency`,
+`x.Ti`, or both. A term never sees the global parameter vector, nor the
+layout that addresses it, nor an index into either.
+
+This is the hot path of `evaluate_gains` — kept allocation-free and
+type-stable so the whole forward map is inferrable (and Reactant-traceable).
+Read `p` and `x` by field name; iterating a `NamedTuple` is not type-stable.
+"""
+function term_eval end
+
 @inline term_eval(::ConstantTerm, p, x) = p.offset
 @inline term_eval(::Delay, p, x) = 2π * p.delay * x.Frequency
 @inline term_eval(::Dispersion, p, x) = p.dtec * x.Frequency
@@ -189,7 +231,14 @@ end
     return xa * evalpoly(xa, p.coeffs)
 end
 
-# Labels for diagnostics / summaries.
+"""
+    term_label(term) -> String
+
+A short diagnostic label for `term`, used in `show` and summaries. Defaults
+to the type name; override only for a more evocative label than the type
+itself provides.
+"""
+term_label(t::AbstractGainTerm) = string(nameof(typeof(t)))
 term_label(::ConstantTerm) = "const"
 term_label(::Delay) = "delay"
 term_label(::Dispersion) = "dtec"

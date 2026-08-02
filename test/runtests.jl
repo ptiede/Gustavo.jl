@@ -243,6 +243,14 @@ end
     # Solver-internal parameter bookkeeping: still reachable, no longer exported.
     @test !(:ComponentPlan in names(Gustavo.Calibration))
     @test Gustavo.Calibration.ComponentPlan isa Type
+
+    # The term-authoring interface: the hooks a new `AbstractGainTerm`
+    # implements, exported as Gustavo's documented extension point.
+    for n in (:term_axes, :param_shapes, :term_eval, :term_label, :freq_coordinate, :time_coordinate)
+        @test n in names(Gustavo.Calibration)
+    end
+    @test !(:nparams_per_block in names(Gustavo.Calibration))
+    @test Gustavo.Calibration.nparams_per_block isa Function
 end
 
 @testset "Baseline stability plots" begin
