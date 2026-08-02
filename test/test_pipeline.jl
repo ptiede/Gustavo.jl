@@ -241,6 +241,28 @@ end
     end
 end
 
+@testset "Cross-run step composition ≡ within-run pipeline" begin
+    # A multi-step pipeline's within-run composition (`_run_pipeline` appends
+    # each finished step's solution as an `ApplySolution` before the next
+    # step's pass) is the SAME mechanism a caller invokes by hand across
+    # separate `fit` calls via `step_solution`/`ApplySolution`. Fitting `A |>
+    # B` in one call must solve the SAME B-step θ as fitting `A` alone, then
+    # fitting `ApplySolution(step_solution(sol_a, :fringe)) |> B` in a later,
+    # unrelated call.
+    uvset, _ = _build_fringe_uvset()
+    ff = FringeFit(model = FringeModel())
+    bp = BandpassEstimator()
+
+    sol_within = fit(ff |> bp, uvset)
+
+    sol_a = fit(ff, uvset)
+    sol_cross = fit(FP.ApplySolution(CAL.step_solution(sol_a, :fringe)) |> bp, uvset)
+
+    θ_within = CAL.step_solution(sol_within, :bandpass).steps[1].θ
+    θ_cross = CAL.step_solution(sol_cross, :bandpass).steps[1].θ
+    @test θ_within == θ_cross
+end
+
 @testset "combine_spw: bands → IF axis" begin
     uvset, _ = _build_fringe_uvset(nbands = 3, nchan = 4)
     avg = UVP.frequency_average(uvset; nout = 1)          # each band → 1 channel

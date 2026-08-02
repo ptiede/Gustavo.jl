@@ -33,9 +33,17 @@ solution's θ and are ignored here (`AprioriAmplitude` is still RECORDED on the
 solution — `sol.postcal` — so `calibrate(sol, uvset)` replays it); they run in
 [`fitcalibrate`](@ref)'s output tail.
 
-The pipeline needs no [`FringeFit`](@ref) step — any composition of
-`SolveStep`s is legal, including a single standalone step (e.g. fitting a
-`BandpassEstimator` alone over data already corrected by an earlier run).
+**A single `SolveStep` fit alone is the primitive** — the pipeline needs no
+[`FringeFit`](@ref) step, and any composition of `SolveStep`s is legal,
+including one standalone step (e.g. fitting a `BandpassEstimator` alone over
+data already corrected by an earlier run). A multi-step `CalibrationPipeline`
+is a fusion convenience built FROM repeated single-step solves: solving
+`A |> B` in one call is equivalent to `sa = fit(A, uvset)` followed by
+`fit(Fringe.ApplySolution(step_solution(sa, provides(A))) |> B, uvset)` — the
+SAME mechanism ([`Fringe.ApplySolution`](@ref) dividing a finished step's
+gains out of the stream before the next step's pass), just run within one
+call instead of across two. See [`step_solution`](@ref) for the cross-run form
+of this composition.
 """
 function fit(pipe::CalibrationPipeline, uvset::UVSet)
     sol, _ = _run_pipeline(_parse_pipeline(pipe), pipe.exec, pipe.ref_ant, uvset)
@@ -248,7 +256,10 @@ end
 # out) is wrapped as an `ApplySolution` and appended, so every LATER step's
 # pass reads already-corrected data (this is solve-time-only bookkeeping — the
 # returned solution still records just `br.tfs`, the caller's own precal
-# chain). Non-data info an earlier step published (e.g. the fringe stage's
+# chain). This is the SAME `ApplySolution`-chaining a caller does explicitly
+# across separate `fit` calls via `step_solution` (see its docstring) — a
+# multi-step pipeline just runs the append within one call instead of two.
+# Non-data info an earlier step published (e.g. the fringe stage's
 # per-scan SNR) reaches a later step through the plain, ordered list of
 # finished `StepSolution`s (`fit_selection`), not a shared scratch dict. With a
 # `sink`, the output tail runs per group — fused into the final pass when that

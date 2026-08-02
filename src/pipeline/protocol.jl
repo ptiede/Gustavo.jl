@@ -330,8 +330,9 @@ An ordered list of [`CalibrationStep`](@ref)s (raw
 (`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`). A
 pipeline needs no [`FringeFit`](@ref) step; any `SolveStep` composition is
 legal, including a single standalone step (e.g. a `BandpassEstimator` fit over
-data already corrected by an earlier run). Solve with [`fit`](@ref) /
-[`fitcalibrate`](@ref).
+data already corrected by an earlier run) — the single-step solve is the
+primitive a multi-step pipeline is built from (see [`fit`](@ref)'s docstring).
+Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
 """
 struct CalibrationPipeline{X <: ExecutionConfig}
     steps::Vector{CalibrationStep}
