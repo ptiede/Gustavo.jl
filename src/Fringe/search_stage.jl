@@ -2,8 +2,9 @@
 #
 # The composable pipeline's fringe stage in three parts:
 #
-# - `FringeModel` — WHAT is solved: the gauge pin (`ref_ant`) plus an ordered
-#   list of phase-term elements. Each element declares its own feed scope
+# - `FringeModel` — WHAT is solved: an ordered list of phase-term elements
+#   (the gauge pin, `ref_ant`, is run-wide — see `CalibrationPipeline` in
+#   pipeline/protocol.jl). Each element declares its own feed scope
 #   through its tying (`SharedFeeds`, `FeedComponent(2)`, …), so the model is
 #   specified feed by feed; adding an effect is adding an element.
 #   `fringe_phase_components` compiles each element through
@@ -93,14 +94,12 @@ default_fringe_terms() = (
 )
 
 """
-    FringeModel(; ref_ant = 1, terms = default_fringe_terms())
+    FringeModel(; terms = default_fringe_terms())
 
 WHAT the fringe stage solves — the model specification of a `FringeFit` step:
-the gauge pin plus an ordered list of phase-term elements.
+an ordered list of phase-term elements. The gauge pin (`ref_ant`) is run-wide,
+not part of any one step's model — see [`CalibrationPipeline`](@ref).
 
-- `ref_ant` — the gauge pin: a 1-based antenna index or a station code
-  (`"PT"`). Part of the MODEL (it changes what is solved), not of the
-  execution configuration.
 - `terms` — the ordered, NAMED term list (a `NamedTuple`; each key names the
   component it compiles to). Each value is a bare `Calibration.TiedComponent`
   (a gain term × time segmentation × frequency segmentation × feed tying).
@@ -114,9 +113,8 @@ not by the fringe search, so a `FringeModel` carrying one would compile a θ
 column no stage ever fits (a silent no-fit) — rejected at construction instead.
 """
 struct FringeModel{T <: NamedTuple}
-    ref_ant::Union{Integer, AbstractString, Symbol}
     terms::T
-    function FringeModel{T}(ref_ant, terms) where {T}
+    function FringeModel{T}(terms) where {T}
         for (k, t) in pairs(terms)
             t isa DispersionModel && throw(
                 ArgumentError(
@@ -135,14 +133,14 @@ struct FringeModel{T <: NamedTuple}
                 ),
             )
         end
-        return new{T}(ref_ant, terms)
+        return new{T}(terms)
     end
 end
-function FringeModel(; ref_ant = 1, terms = default_fringe_terms())
+function FringeModel(; terms = default_fringe_terms())
     terms isa NamedTuple || throw(
         ArgumentError("FringeModel: `terms` must be a NamedTuple naming each element."),
     )
-    return FringeModel{typeof(terms)}(ref_ant, terms)
+    return FringeModel{typeof(terms)}(terms)
 end
 
 """

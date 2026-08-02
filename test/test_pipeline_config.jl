@@ -125,14 +125,25 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test Gustavo._resolve_ref_ant(:A4, uvset) == 4
         @test_throws ErrorException Gustavo._resolve_ref_ant("ZZ", uvset)
         # End-to-end (new engine): code "A1" resolves to index 1 → identical solve.
-        by_code = fit(FringeFit(model = FringeModel(ref_ant = "A1")), uvset)
-        by_idx = fit(FringeFit(model = FringeModel(ref_ant = 1)), uvset)
+        by_code = fit(FringeFit(), uvset; ref_ant = "A1")
+        by_idx = fit(FringeFit(), uvset; ref_ant = 1)
         @test parent(gains(by_code)) ≈ parent(gains(by_idx))
+    end
+
+    @testset "FringeFit-less pipeline" begin
+        uvset, _ = _build_fringe_uvset()
+        # A standalone BandpassEstimator fit needs no FringeFit step, no
+        # pipeline-level anchor check, and no fringe-estimator diagnostics.
+        sol = fit(BandpassEstimator(), uvset; ref_ant = 2)
+        @test stage_names(sol) == [:bandpass]
+        @test !haskey(sol.info, :search)
+        @test sol.info.nant == 4
+        _, out = fitcalibrate(BandpassEstimator(), uvset; ref_ant = 2)
+        @test out !== nothing
     end
 
     @testset "defaults" begin
         f = FringeFit()
-        @test f.model.ref_ant == 1
         @test f.model.terms == default_fringe_terms()
         # The default list: 5 feed-by-feed instrument components — dispersion
         # (dTEC) and SBD are no longer part of FringeModel's term list; they
@@ -165,6 +176,9 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         e = ExecutionConfig()
         @test e.mem_fraction == 0.6 && e.mem_budget === nothing && e.exclude_colocated
 
+        # ref_ant is run-wide, on CalibrationPipeline, not on FringeModel.
+        @test CalibrationPipeline([FringeFit()]).ref_ant == 1
+
         # AprioriAmplitude carries a pre-built band_cals (loading is the caller's job).
         bc = Dict(1 => :dummy)
         ap = AprioriAmplitude(bc; min_elevation_deg = 10.0)
@@ -182,7 +196,7 @@ end
     uvset, _ = _build_fringe_uvset()
 
     @testset "SolveContext" begin
-        ff = FringeFit(model = FringeModel(ref_ant = 1))
+        ff = FringeFit(model = FringeModel())
         geom = CAL.build_geometry(uvset)
         antennas = UVP.metadata(first(values(UVP.branches(uvset)))).antennas
         nant = length(antennas)
@@ -236,15 +250,15 @@ end
     end
 
 
-    @testset "AprioriAmplitude and FringeModel.ref_ant" begin
+    @testset "AprioriAmplitude and CalibrationPipeline.ref_ant" begin
         bc = Dict(1 => :dummy)
         @test fieldtype(typeof(AprioriAmplitude(bc)), :band_cals) === typeof(bc)
         # ref_ant's domain is what `_resolve_ref_ant` accepts: an antenna index
         # or a station code.
-        @test FringeModel(ref_ant = 2).ref_ant == 2
-        @test FringeModel(ref_ant = "A1").ref_ant == "A1"
-        @test FringeModel(ref_ant = :A1).ref_ant === :A1
-        @test_throws MethodError FringeModel(ref_ant = 2.5)
+        @test CalibrationPipeline([FringeFit()]; ref_ant = 2).ref_ant == 2
+        @test CalibrationPipeline([FringeFit()]; ref_ant = "A1").ref_ant == "A1"
+        @test CalibrationPipeline([FringeFit()]; ref_ant = :A1).ref_ant === :A1
+        @test_throws TypeError CalibrationPipeline([FringeFit()]; ref_ant = 2.5)
     end
 end
 
@@ -252,7 +266,7 @@ end
 # labelled `DimArray` — and the whole apply path must be indifferent to that.
 @testset "a rewrapped θ corrects data identically" begin
     uvset, _ = _build_fringe_uvset()
-    sol = fit(FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator(), uvset)
+    sol = fit(FringeFit(model = FringeModel()) |> BandpassEstimator(), uvset)
     sold_steps = [
         CAL.StepSolution(
             s.name, s.model, s.layout, DimArray(copy(s.θ), Dim{:param}(1:(s.layout.nθ))), s.info,

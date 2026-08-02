@@ -19,7 +19,7 @@
 
 """
     fit(pipe::CalibrationPipeline, uvset::UVSet) -> CalibrationSolution
-    fit(step_or_chain, uvset; exec = ExecutionConfig()) -> CalibrationSolution
+    fit(step_or_chain, uvset; exec = ExecutionConfig(), ref_ant = 1) -> CalibrationSolution
 
 Solve the pipeline's calibration on `uvset` WITHOUT producing corrected data —
 the estimation half of [`fitcalibrate`](@ref). The returned solution carries
@@ -32,16 +32,26 @@ and the standalone [`calibrate`](@ref) reproduce exactly what the solve saw.
 solution's θ and are ignored here (`AprioriAmplitude` is still RECORDED on the
 solution — `sol.postcal` — so `calibrate(sol, uvset)` replays it); they run in
 [`fitcalibrate`](@ref)'s output tail.
+
+The pipeline needs no [`FringeFit`](@ref) step — any composition of
+`SolveStep`s is legal, including a single standalone step (e.g. fitting a
+`BandpassEstimator` alone over data already corrected by an earlier run).
 """
 function fit(pipe::CalibrationPipeline, uvset::UVSet)
-    sol, _ = _run_pipeline(_parse_pipeline(pipe), pipe.exec, uvset)
+    sol, _ = _run_pipeline(_parse_pipeline(pipe), pipe.exec, pipe.ref_ant, uvset)
     return sol
 end
 
-fit(x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet; exec::ExecutionConfig = ExecutionConfig()) =
-    fit(CalibrationPipeline(x; exec), uvset)
-fit(chain::StepChain, uvset::UVSet; exec::ExecutionConfig = ExecutionConfig()) =
-    fit(CalibrationPipeline(chain; exec), uvset)
+fit(
+    x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
+    exec::ExecutionConfig = ExecutionConfig(),
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = fit(CalibrationPipeline(x; exec, ref_ant), uvset)
+fit(
+    chain::StepChain, uvset::UVSet;
+    exec::ExecutionConfig = ExecutionConfig(),
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = fit(CalibrationPipeline(chain; exec, ref_ant), uvset)
 
 """
     calibrate(sol::CalibrationSolution, uvset::UVSet;
@@ -105,18 +115,22 @@ function fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet; reduce = ReduceSt
     return sol, ctx.output
 end
 
-fitcalibrate(x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
-    exec::ExecutionConfig = ExecutionConfig(), kwargs...) =
-    fitcalibrate(CalibrationPipeline(x; exec), uvset; kwargs...)
-fitcalibrate(chain::StepChain, uvset::UVSet;
-    exec::ExecutionConfig = ExecutionConfig(), kwargs...) =
-    fitcalibrate(CalibrationPipeline(chain; exec), uvset; kwargs...)
+fitcalibrate(
+    x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
+    exec::ExecutionConfig = ExecutionConfig(),
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1, kwargs...,
+) = fitcalibrate(CalibrationPipeline(x; exec, ref_ant), uvset; kwargs...)
+fitcalibrate(
+    chain::StepChain, uvset::UVSet;
+    exec::ExecutionConfig = ExecutionConfig(),
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1, kwargs...,
+) = fitcalibrate(CalibrationPipeline(chain; exec, ref_ant), uvset; kwargs...)
 
 # Shared driver for fitcalibrate: returns (sol, ctx).
 function _run_fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet, reduce)
     br = _parse_pipeline(pipe)
     post = _compose_output_chain(br.post_steps, collect(reduce))
-    sol, output = _run_pipeline(br, pipe.exec, uvset; sink = OutputSink(post))
+    sol, output = _run_pipeline(br, pipe.exec, pipe.ref_ant, uvset; sink = OutputSink(post))
     ctx = CalibrationContext(
         uvset, sol, output,
         isempty(br.apriori) ? nothing : last(br.apriori).band_cals,
@@ -243,8 +257,10 @@ end
 # solved, the runner hands the finished `StepSolution`s straight to
 # `CalibrationSolution` — there is no merged model/layout/θ to assemble.
 # Returns `(sol, output)` (`output === nothing` without a sink).
-function _run_pipeline(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing)
-    ff = br.ff
+function _run_pipeline(
+        br, exec::ExecutionConfig, ref_ant_spec::Union{Integer, AbstractString, Symbol},
+        uvset::UVSet; sink = nothing,
+    )
     solve_steps = br.solve_steps
 
     geom = build_geometry(uvset)
@@ -252,7 +268,7 @@ function _run_pipeline(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing)
     antennas = UVData.metadata(first_leaf).antennas
     nant = length(antennas)
     spec = (; geom, antennas)
-    ref_ant = _resolve_ref_ant(ff.model.ref_ant, uvset)
+    ref_ant = _resolve_ref_ant(ref_ant_spec, uvset)
     # A fresh `ScanStream` over the given transform list — cheap (geometry-only,
     # no data read). Used both for the initial stream and to grow the SOLVE-time
     # transform chain between steps (below): `ScanStream`/`SolveContext` fix the
@@ -457,13 +473,15 @@ end
 # step) or by the step itself (e.g. the fringe estimator's `scan_snr`,
 # detection table). This function no longer needs to know any step's name to
 # expose its diagnostics; a third-party `SolveStep` needs no changes here.
+# `br.ff` is `nothing` for a FringeFit-less pipeline, so the estimator info is
+# omitted rather than assumed present.
 function _new_engine_info(ctx::SolveContext, br, step_solutions::Vector{StepSolution})
     return (;
         nant = ctx.nant,
         nscan = length(ctx.stream.groups),
         Fringe.flag_table(_fringe_flags(ctx), ctx.scratch[:excl])...,
         ant_names = String.(collect(ctx.antennas.name)),
-        Fringe.estimator_info(br.ff.estimator)...,
+        (br.ff === nothing ? NamedTuple() : Fringe.estimator_info(br.ff.estimator))...,
         precal_applied = any(t -> t isa Fringe.ApplySolution, br.tfs),
         ntasks_used = ctx.stream.ntasks,
         inner_tasks = ctx.stream.inner,
@@ -500,10 +518,13 @@ function _check_unique_provides(solve_steps::Vector{SolveStep})
     return nothing
 end
 
-# Parse a pipeline into (transforms, the FringeFit, every SolveStep in
-# declared order, and the output-tail steps — AprioriAmplitude and ReduceStep
-# — in their OWN declared relative order) — no per-step-type branch to
-# maintain as new `SolveStep`s appear.
+# Parse a pipeline into (transforms, the FringeFit if present, every SolveStep
+# in declared order, and the output-tail steps — AprioriAmplitude and
+# ReduceStep — in their OWN declared relative order) — no per-step-type branch
+# to maintain as new `SolveStep`s appear. A pipeline needs no FringeFit step —
+# `ff` is `nothing` when none is declared; a step that needs an earlier
+# FringeFit's correction and does not have one fails from its own solve
+# kernel, not from pipeline construction.
 function _parse_pipeline(pipe::CalibrationPipeline)
     tfs = Fringe.AbstractDataTransform[]
     solve_steps = SolveStep[]
@@ -528,12 +549,6 @@ function _parse_pipeline(pipe::CalibrationPipeline)
     end
     _check_unique_provides(solve_steps)
     ffi = findfirst(s -> s isa FringeFit, solve_steps)
-    ffi === nothing && throw(
-        ArgumentError("fit/fitcalibrate: the pipeline contains no FringeFit step.")
-    )
-    # FringeFit is the pipeline's anchor (its `estimator`/`model.ref_ant` seed
-    # the run) rather than just another `provides` participant — a concrete-type
-    # check, unrelated to the uniqueness check above.
     apriori = filter(s -> s isa AprioriAmplitude, post_steps)
-    return (; tfs, ff = solve_steps[ffi], solve_steps, apriori, post_steps)
+    return (; tfs, ff = ffi === nothing ? nothing : solve_steps[ffi], solve_steps, apriori, post_steps)
 end

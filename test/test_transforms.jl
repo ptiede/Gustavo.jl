@@ -16,7 +16,7 @@
     # A real solution to divide out (per-scan delays/rates + per-AP adhoc — the
     # time-VARYING precal branch; `_precal_time_constant` guards the fast path).
     precal = fit(
-        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )

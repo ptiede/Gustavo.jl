@@ -14,7 +14,7 @@
     @testset "fringe blocks invariant under later stages" begin
         uvset, _ = _build_fringe_uvset()
         solm = fit(
-            FringeFit(model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false))) |>
+            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))) |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )
@@ -35,8 +35,8 @@
 
         # ref_ant as a station code resolves identically.
         sol_code = fit(
-            FringeFit(model = FringeModel(ref_ant = "A1", terms = _fringe_terms(dispersion = false, sbd = false))),
-            uvset,
+            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            uvset; ref_ant = "A1",
         )
         @test CAL._step(sol_code, :fringe).θ == fr.θ
 
@@ -52,7 +52,7 @@
         uvset, _ = _build_fringe_uvset()
         solm = fit(
             FringeFit(
-                model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false)),
+                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
                 estimator = MatchedFilter(rounds = 2),
             ) |> TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
@@ -207,11 +207,12 @@
 
     @testset "model validation + full-pipeline option coverage" begin
         uvset, _ = _build_fringe_uvset()
-        # The model is the term list plus the gauge pin — no per-effect fields
-        # or keywords survive on FringeModel or FringeFit.
+        # The model is the term list alone (the gauge pin is run-wide, on
+        # CalibrationPipeline) — no per-effect fields or keywords survive on
+        # FringeModel or FringeFit.
         @test_throws MethodError FringeModel(dispersion = :maybe)
         @test_throws MethodError FringeModel(sbd = false)
-        @test fieldnames(FringeModel) == (:ref_ant, :terms)
+        @test fieldnames(FringeModel) == (:terms,)
         @test :dispersion ∉ fieldnames(typeof(FringeFit()))
 
         # The options the legacy bridge used to reject (custom Stationization,
@@ -361,7 +362,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
 
 @testset "fringe estimator seam" begin
     uvset, _ = _build_fringe_uvset()
-    model = FringeModel(ref_ant = 1)
+    model = FringeModel()
 
     @testset "an out-of-package estimator drives the whole pipeline" begin
         probe = _ProbeEstimator(MatchedFilter())
@@ -387,7 +388,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
         # without publishing it itself.
         probe = _ProbeEstimator(MatchedFilter())
         sol = fit(
-            FringeFit(; model = FringeModel(ref_ant = 1), estimator = probe) |>
+            FringeFit(; model = FringeModel(), estimator = probe) |>
                 BandpassEstimator(),
             uvset,
         )
@@ -436,7 +437,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
         terms = (; _fringe_terms()..., poly = CAL.TiedComponent(
             CAL.PolynomialFreq(2), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()))
         @test_throws "MatchedFilter cannot fit the model term" fit(
-            FringeFit(model = FringeModel(ref_ant = 1, terms = terms)), uvset,
+            FringeFit(model = FringeModel(terms = terms)), uvset,
         )
     end
 
@@ -447,7 +448,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
             _fringe_terms(),
         )
         @test_throws "requires a rate component" fit(
-            FringeFit(model = FringeModel(ref_ant = 1, terms = norate)), uvset,
+            FringeFit(model = FringeModel(terms = norate)), uvset,
         )
 
         # The kind is PRESENT and the router signature is not: the R–L delay is
@@ -458,7 +459,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
                 CAL.TiedComponent(t.component.term, CAL.GlobalTime(), t.component.freq, t.tying) : t
         end
         @test_throws "requires a per-scan feed-common wideband delay" fit(
-            FringeFit(model = FringeModel(ref_ant = 1, terms = globaldelay)), uvset,
+            FringeFit(model = FringeModel(terms = globaldelay)), uvset,
         )
     end
 
@@ -530,7 +531,7 @@ end
         # :refine).dispersion_applied` (see the dispersion testset in
         # test_pipeline.jl). What this asserts
         # is the model structure DispersionSBDFit's presence/field builds.
-        ff = FringeFit(model = FringeModel(ref_ant = 1), estimator = mf)
+        ff = FringeFit(model = FringeModel(), estimator = mf)
         on = fit(ff |> DispersionSBDFit(), uvset)
         off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset)
         on_ref, off_ref = CAL._step(on, :refine), CAL._step(off, :refine)
@@ -575,7 +576,7 @@ end
         # because over a finite band the two are near-degenerate — confirmed by
         # both plans existing (and being solved, not left at zero) once the step
         # runs.
-        ff = FringeFit(model = FringeModel(ref_ant = 1), estimator = mf)
+        ff = FringeFit(model = FringeModel(), estimator = mf)
         sol = fit(ff |> DispersionSBDFit(), uvset)
         refine = CAL._step(sol, :refine)
         @test CAL._dispersion_plan(refine.model, refine.layout) !== nothing

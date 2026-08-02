@@ -102,7 +102,7 @@ function _resolve_ref_ant(code::Union{AbstractString, Symbol}, uvset)
     names = _antenna_names(uvset)
     i = findfirst(==(String(code)), names)
     i === nothing &&
-        error("FringeFit ref_ant: station code \"$code\" not in antenna table $(names).")
+        error("ref_ant: station code \"$code\" not in antenna table $(names).")
     return i
 end
 

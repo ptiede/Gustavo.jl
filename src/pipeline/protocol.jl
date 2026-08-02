@@ -31,8 +31,11 @@
 #
 # Run-wide resources (task/memory budgets, progress) live on the pipeline's
 # `ExecutionConfig`, NOT on steps: they are properties of a run, shared by
-# every pass. Anything that changes WHAT is solved (the reference antenna
-# included) is model specification and lives on the steps.
+# every pass. Anything that changes WHAT a given step solves is model
+# specification and lives on that step. The reference antenna is neither: it
+# is a gauge convention shared by every step's pass, not a per-step choice, so
+# it lives on `CalibrationPipeline` itself (`ref_ant`), not on any one step or
+# on `ExecutionConfig`.
 
 """
     SolveStep <: CalibrationStep
@@ -192,10 +195,11 @@ end
                     outer_executor = ThreadsExecutor(), inner_executor = DynamicScheduler())
 
 Run-wide RESOURCES for a pipeline execution, shared by every pass — as opposed
-to per-step options, which shape an estimator or the model. Anything that
-changes WHAT is solved (including the reference antenna: the gauge pin is part
-of the model specification) lives on the steps' model options, never here —
-two runs differing only in their `ExecutionConfig` solve the same problem.
+to per-step options, which shape an estimator or a step's own model, and as
+opposed to the gauge convention (`ref_ant`, on `CalibrationPipeline` itself —
+see [`CalibrationPipeline`](@ref)), which is shared by every pass but is not a
+resource. Two runs differing only in their `ExecutionConfig` solve the same
+problem with the same gauge.
 
 - `ntasks`, `mem_fraction` / `mem_budget` — group concurrency under a
   DETERMINISTIC memory budget (`mem_budget` bytes if set, else `mem_fraction`
@@ -316,24 +320,36 @@ Base.:|>(a::StepChain, b::StepChain) = StepChain(vcat(a.steps, b.steps))
 # ── The pipeline ─────────────────────────────────────────────────────────────
 
 """
-    CalibrationPipeline(steps...; exec = ExecutionConfig())
-    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig())
-    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig())
+    CalibrationPipeline(steps...; exec = ExecutionConfig(), ref_ant = 1)
+    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), ref_ant = 1)
+    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), ref_ant = 1)
 
 An ordered list of [`CalibrationStep`](@ref)s (raw
 `Fringe.AbstractDataTransform`s are lifted automatically) plus the run-wide
-[`ExecutionConfig`](@ref). Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
+[`ExecutionConfig`](@ref) and `ref_ant` — the gauge pin every solve step reads
+(`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`). A
+pipeline needs no [`FringeFit`](@ref) step; any `SolveStep` composition is
+legal, including a single standalone step (e.g. a `BandpassEstimator` fit over
+data already corrected by an earlier run). Solve with [`fit`](@ref) /
+[`fitcalibrate`](@ref).
 """
 struct CalibrationPipeline{X <: ExecutionConfig}
     steps::Vector{CalibrationStep}
     exec::X
+    ref_ant::Union{Integer, AbstractString, Symbol}
 end
-CalibrationPipeline(steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig()) =
-    CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec)
-CalibrationPipeline(steps::_Chainable...; exec::ExecutionConfig = ExecutionConfig()) =
-    CalibrationPipeline(collect(steps); exec)
-CalibrationPipeline(chain::StepChain; exec::ExecutionConfig = ExecutionConfig()) =
-    CalibrationPipeline(chain.steps, exec)
+CalibrationPipeline(
+    steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig(),
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec, ref_ant)
+CalibrationPipeline(
+    steps::_Chainable...; exec::ExecutionConfig = ExecutionConfig(),
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = CalibrationPipeline(collect(steps); exec, ref_ant)
+CalibrationPipeline(
+    chain::StepChain; exec::ExecutionConfig = ExecutionConfig(),
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = CalibrationPipeline(chain.steps, exec, ref_ant)
 
 # Label a step by kind; a lifted transform is named for the transform it wraps.
 _step_label(s::CalibrationStep) = string(nameof(typeof(s)))

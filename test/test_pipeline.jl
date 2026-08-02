@@ -14,7 +14,7 @@ include("synthetic_uvset.jl")
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
     # keeps every well-determined AP in this high-SNR synthetic.
     sol = fit(
-        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )
@@ -109,7 +109,7 @@ include("synthetic_uvset.jl")
         @test occursin("StationGainModel", sprint(show, CAL._step(sol, :fringe).model))
 
         # CalibrationPipeline is an ordered container over its steps.
-        pipe = CalibrationPipeline(FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator())
+        pipe = CalibrationPipeline(FringeFit(model = FringeModel()) |> BandpassEstimator())
         @test length(pipe) == length(pipe.steps)
         @test eltype(typeof(pipe)) == CalibrationStep
         @test collect(pipe) == pipe.steps
@@ -201,7 +201,7 @@ end
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    chain = FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+    chain = FringeFit(model = FringeModel()) |> BandpassEstimator() |>
         TemporalSmoother(adhoc)
 
     sol_ref = fit(chain, uvset)
@@ -265,7 +265,7 @@ end
     # synthesize them. Reduce + combine bands to IFs, then round-trip via UVFITS.
     uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
     sol, reduced = fitcalibrate(
-        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
@@ -300,7 +300,7 @@ end
     # exactly and differ ONLY by that conjugation. This isolates the convention.
     uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
     _, reduced = fitcalibrate(
-        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
@@ -362,7 +362,7 @@ end
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     for r in (1, 2, 3)
         sol = fit(
-            FringeFit(model = FringeModel(ref_ant = 1), estimator = FP.MatchedFilter(rounds = r)) |>
+            FringeFit(model = FringeModel(), estimator = FP.MatchedFilter(rounds = r)) |>
                 BandpassEstimator() |> TemporalSmoother(adhoc),
             uvset,
         )
@@ -416,7 +416,7 @@ end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    ff = FringeFit(model = FringeModel(ref_ant = 1))
+    ff = FringeFit(model = FringeModel())
     sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
     sol_off = fit(ff |> BandpassEstimator(phase = false) |> TemporalSmoother(adhoc), uvset)
 
@@ -480,7 +480,7 @@ end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    ff = FringeFit(model = FringeModel(ref_ant = 1))
+    ff = FringeFit(model = FringeModel())
     sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
     sol_off = fit(ff |> BandpassEstimator(phase = false) |> TemporalSmoother(adhoc), uvset)
 
@@ -573,7 +573,7 @@ end
         isempty(rs) ? NaN : sum(rs) / length(rs)
     end
 
-    ff = FringeFit(model = FringeModel(ref_ant = 1))
+    ff = FringeFit(model = FringeModel())
     sol_off = fit(ff |> BandpassEstimator(amp = false) |> TemporalSmoother(adhoc), uvset)
     doff = FP.baseline_fringe_data(uvset, sol_off)
     poff = FP.baseline_pol_index(doff, :parallel)
@@ -611,7 +611,7 @@ end
     # selection). Verify the default path still flattens the per-baseline phase.
     uvset, _ = _build_fringe_uvset()
     sol = fit(
-        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother()),   # window = :auto
         uvset,
     )
@@ -644,7 +644,7 @@ end
     @test ax.mbd !== nothing
 
     sol = fit(
-        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )
@@ -689,7 +689,7 @@ end
     # fires per completed scan of each pass (plus a done=0 pass announcement).
     events = Tuple{Symbol, Int, Int}[]
     sol = fit(
-        FringeFit(model = FringeModel(ref_ant = 1)) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
@@ -727,7 +727,7 @@ end
     # working solve (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
     solc = fit(
-        FringeFit(model = FringeModel(ref_ant = 1)) |>
+        FringeFit(model = FringeModel()) |>
             BandpassEstimator(select = Gustavo.ScanIndices(1)) |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
@@ -771,7 +771,7 @@ end
 
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1),
+            model = FringeModel(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> DispersionSBDFit() |> TemporalSmoother(),        # no bandpass stage (see comment above)
         uvset,
@@ -818,7 +818,7 @@ end
     # cross-band decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1),
+            model = FringeModel(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -890,7 +890,7 @@ end
     # enable the dTEC term, and this test isolates the SBD machinery.
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1),
+            model = FringeModel(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> DispersionSBDFit(dispersion = nothing) |> TemporalSmoother(),
         uvset,
@@ -914,7 +914,7 @@ end
     # as within-group decoherence.
     sol0 = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1),
+            model = FringeModel(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,
@@ -965,7 +965,7 @@ end
 
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1),
+            model = FringeModel(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> DispersionSBDFit(sbd = nothing) |> TemporalSmoother(),
         uvset,
@@ -1036,7 +1036,7 @@ end
     end
     sol = fit(
         FringeFit(
-            model = FringeModel(ref_ant = 1, terms = _fringe_terms(dispersion = false, sbd = false)),
+            model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> TemporalSmoother(),
         uvset,

@@ -9,8 +9,9 @@
     FringeFit(; model = FringeModel(), estimator = MatchedFilter())
 
 The fringe-fitting stage. WHAT is solved is `model` ([`FringeModel`](@ref)):
-the gauge pin plus the ordered phase-term list — per-scan constant/delay/rate,
-the R–L offsets. HOW it is solved lives on `estimator`, a pluggable
+the ordered phase-term list — per-scan constant/delay/rate, the R–L offsets
+(the gauge pin, `ref_ant`, is run-wide — see [`CalibrationPipeline`](@ref)).
+HOW it is solved lives on `estimator`, a pluggable
 [`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
 (per-baseline delay/rate search + closure-screened station WLS).
 
