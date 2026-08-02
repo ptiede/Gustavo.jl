@@ -719,6 +719,116 @@ function solve_adhoc_phasing(
     ))
 end
 
+# ── Per-scan pipeline entry ───────────────────────────────────────────────────
+
+# Accumulate one band leaf's per-AP residual into `rbar`/`wbar` as the
+# inverse-variance mean of the data, already gain-corrected (and reweighted by
+# |gain|², matching `apply_calibration`) through the pipeline's transform chain
+# before this kernel ever sees it.
+function _accumulate_leaf_rbar!(rbar, wbar, V, W)
+    nchan, nti, nbl, npol = size(V)
+    @inbounds for p in 1:npol
+        for bi in 1:nbl
+            for tt in 1:nti, c in 1:nchan
+                w = W[c, tt, bi, p]
+                (w > 0 && isfinite(w)) || continue
+                v = V[c, tt, bi, p]
+                isfinite(v) || continue
+                rbar[bi, p, tt] += w * v
+                wbar[bi, p, tt] += w
+            end
+        end
+    end
+    return rbar, wbar
+end
+
+"""
+    adhoc_scan!(θ, stack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
+                shared_feeds = false, executor = DynamicScheduler(), excl = nothing, psI = nothing) -> θ
+
+The per-integration atmospheric-phase (adhoc) solve of one scan window — the
+"caller" the module docstring above refers to. On data already gain-corrected
+through the pipeline's transform chain: accumulate the per-(baseline, product,
+AP) inverse-variance residual, solve the globally-closing per-AP station phase
+through the pluggable `adhoc` smoother ([`solve_adhoc_phasing`](@ref)), and
+write this scan's `PerIntegration` θ slots
+(disjoint per scan — concurrent groups may solve in parallel). `excl` drops
+co-located (intra-site) baselines from the per-AP solve; `psI` (linear-feed
+data) collapses the four products to one pseudo-Stokes-I row per (baseline, AP)
+using the field-rotation coefficients.
+"""
+function adhoc_scan!(
+        θ, stack::AbstractDimStack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
+        shared_feeds::Bool = false, executor = DynamicScheduler(), excl = nothing, psI = nothing,
+    )
+    geom = win.geom
+    bl_pairs = collect(UVData.baselines(stack).pairs)
+    pols = String.(pol_products(stack))
+    tg = Float64.(timestamps(stack))
+    ci = win.chan_idx
+    g_ti = win.ti_idx
+    nbl = length(bl_pairs)
+    npol = length(pols)
+    nap = length(tg)
+    # Per-band accumulation (the window's per-spw channel blocks stand in for the
+    # band leaves) fanned out over the inner `executor` — this loop (the residual
+    # sum over every visibility) dominates the adhoc pass on many-band data. Each
+    # BLOCK gets its own partial and the partials fold in block order, so the
+    # float association is fixed by the data layout alone — the result is
+    # bit-deterministic at any chunking.
+    blocks = _spw_blocks(geom, ci)
+    nblk = length(blocks)
+    parts = Vector{Tuple{Array{ComplexF64, 3}, Array{Float64, 3}}}(undef, nblk)
+    tforeach(1:nblk; scheduler = executor) do li
+        r = blocks[li]
+        rl = zeros(ComplexF64, nbl, npol, nap)
+        wl = zeros(Float64, nbl, npol, nap)
+        _accumulate_leaf_rbar!(
+            rl, wl, view(stack[:vis], r, :, :, :), view(stack[:weights], r, :, :, :),
+        )
+        parts[li] = (rl, wl)
+    end
+    rbar = zeros(ComplexF64, nbl, npol, nap)
+    wbar = zeros(Float64, nbl, npol, nap)
+    for (rl, wl) in parts
+        rbar .+= rl
+        wbar .+= wl
+    end
+    # Drop co-located (intra-site) baselines from the per-AP solve — see
+    # `_colocated_pair_set`. Zero weight ⇒ `_adhoc_ap_rows` skips the rows.
+    if excl !== nothing
+        for bi in eachindex(bl_pairs)
+            bl_pairs[bi] in excl || continue
+            fill!(view(rbar, bi, :, :), zero(ComplexF64))
+            fill!(view(wbar, bi, :, :), 0.0)
+        end
+    end
+    # Linear-feed data: collapse the four products to one pseudo-Stokes-I row
+    # per (baseline, AP) using the field-rotation coefficients — see
+    # `_pseudo_stokes_collapse!` (rotation-robust; single products can null).
+    if psI !== nothing
+        m0 = DimensionalData.metadata(getfield(v, :data))
+        jds = [psI.base_jd + Float64(t) / 24.0 for t in tg]
+        ψ = _field_rotation_angles(m0.antennas, m0.ra, m0.dec, jds)
+        _pseudo_stokes_collapse!(rbar, wbar, bl_pairs, pols, ψ)
+    end
+    # `tg` is in hours; pass SECONDS so the adhoc's `:auto` window (T_AP / T_coh) is
+    # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.
+    as = solve_adhoc_phasing(rbar, wbar, bl_pairs, pols, nant, tg .* 3600.0; ref_ant = ref_ant, smoother = adhoc, shared_feeds = shared_feeds)
+    adhoc_leaf = _component_leaf(adhoc_plan, θ)
+    for (ap, gti) in enumerate(g_ti)
+        tseg = adhoc_plan.tseg_id[gti]
+        for ant in 1:nant, feed in 1:2
+            val = as.phase[ant, feed, ap]
+            isfinite(val) || continue
+            node = _feed_node(adhoc_plan.tying, feed)
+            node == 0 && continue
+            adhoc_leaf[1, node, 1, tseg, ant] = val
+        end
+    end
+    return θ
+end
+
 # Restitch per-AP gauges so the reference frame is consistent across APs even
 # when `ref_ant` drops out (K3). When `ref_ant` is solved in an AP, that AP's
 # per-AP solve already pins it (frame = ref_ant phase 0) and we trust it,

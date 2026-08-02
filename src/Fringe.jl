@@ -52,6 +52,7 @@ include("Fringe/threads.jl")
 include("Fringe/search_stage.jl")
 include("Fringe/model_plans.jl")
 include("Fringe/bandpass_stage.jl")
+include("Fringe/refine_search.jl")
 include("Fringe/refine_stage.jl")
 include("Fringe/diagnostics.jl")
 
