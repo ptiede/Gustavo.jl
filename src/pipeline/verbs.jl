@@ -94,10 +94,11 @@ end
 
 Solve AND produce the corrected, reduced output — the production path. The
 output chain is: the solution's gains/flags, then any [`AprioriAmplitude`](@ref)
-step in the pipeline, then the pipeline's `ReduceStep`s and the `reduce` kwarg's
-(in that order) — run per scan group while it is resident. When the pipeline
-ends in a [`TemporalSmoother`](@ref) the whole tail fuses into that final
-streaming pass (one read solves, corrects, and reduces each group).
+and `ReduceStep`s the pipeline declares, run in THEIR declared relative order,
+then the `reduce` kwarg's (always last) — run per scan group while it is
+resident. When the pipeline ends in a [`TemporalSmoother`](@ref) the whole
+tail fuses into that final streaming pass (one read solves, corrects, and
+reduces each group).
 """
 function fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet; reduce = ReduceStep[])
     sol, ctx = _run_fitcalibrate(pipe, uvset, reduce)
@@ -114,7 +115,7 @@ fitcalibrate(chain::StepChain, uvset::UVSet;
 # Shared driver for fitcalibrate: returns (sol, ctx).
 function _run_fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet, reduce)
     br = _parse_pipeline(pipe)
-    post = _compose_output_chain(br.apriori, vcat(br.post_reduce, collect(reduce)))
+    post = _compose_output_chain(br.post_steps, collect(reduce))
     sol, output = _run_pipeline(br, pipe.exec, uvset; sink = OutputSink(post))
     ctx = CalibrationContext(
         uvset, sol, output,
@@ -176,24 +177,33 @@ struct OutputSink
 end
 OutputSink(postprocess) = OutputSink(postprocess, true)
 
-# Compose the output chain: the AprioriAmplitude steps (after the fringe gains,
-# before any reductions — they need the native channels), then the ReduceSteps
-# in order, into one `UVSet -> UVSet` function.
-function _compose_output_chain(apriori, reduces)
+# Compose the output chain: `declared` runs first, in ITS OWN declared
+# relative order (an AprioriAmplitude and a ReduceStep interleave exactly as
+# `pipe.steps` listed them — no hardcoded "apriori before reductions" rule),
+# then `extra_reduces` (the `reduce` kwarg, supplied after the fact and always
+# appended last) — into one `UVSet -> UVSet` function.
+function _compose_output_chain(declared, extra_reduces)
     fs = Any[]
-    for s in apriori
-        s isa AprioriAmplitude || throw(
-            ArgumentError(
-                "output chain: recorded postcal entry $(typeof(s)) is not an AprioriAmplitude."
-            )
-        )
-        push!(fs, uv -> apply_calibration(
-            uv, s.band_cals;
-            min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
-        ))
-    end
     ctx = CalibrationContext()
-    for st in reduces
+    for s in declared
+        if s isa AprioriAmplitude
+            push!(fs, uv -> apply_calibration(
+                uv, s.band_cals;
+                min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
+            ))
+        elseif s isa ReduceStep
+            f, ctx = prepare_reducer(s, ctx)
+            push!(fs, f)
+        else
+            throw(
+                ArgumentError(
+                    "output chain: recorded postcal entry $(typeof(s)) is not an " *
+                        "AprioriAmplitude or a ReduceStep."
+                )
+            )
+        end
+    end
+    for st in extra_reduces
         st isa AprioriAmplitude && throw(
             ArgumentError(
                 "fitcalibrate/calibrate: AprioriAmplitude is a pipeline step, not a reduction " *
@@ -491,22 +501,20 @@ function _check_unique_provides(solve_steps::Vector{SolveStep})
 end
 
 # Parse a pipeline into (transforms, the FringeFit, every SolveStep in
-# declared order, AprioriAmplitude steps, trailing ReduceSteps) — no
-# per-step-type branch to maintain as new `SolveStep`s appear.
+# declared order, and the output-tail steps — AprioriAmplitude and ReduceStep
+# — in their OWN declared relative order) — no per-step-type branch to
+# maintain as new `SolveStep`s appear.
 function _parse_pipeline(pipe::CalibrationPipeline)
     tfs = Fringe.AbstractDataTransform[]
     solve_steps = SolveStep[]
-    apriori = AprioriAmplitude[]
-    post_reduce = ReduceStep[]
+    post_steps = Union{AprioriAmplitude, ReduceStep}[]
     for s in pipe.steps
         if s isa DataTransformStep
             push!(tfs, s.t)
         elseif s isa SolveStep
             push!(solve_steps, s)
-        elseif s isa AprioriAmplitude
-            push!(apriori, s)
-        elseif s isa ReduceStep
-            push!(post_reduce, s)
+        elseif s isa Union{AprioriAmplitude, ReduceStep}
+            push!(post_steps, s)
         else
             throw(
                 ArgumentError(
@@ -526,5 +534,6 @@ function _parse_pipeline(pipe::CalibrationPipeline)
     # FringeFit is the pipeline's anchor (its `estimator`/`model.ref_ant` seed
     # the run) rather than just another `provides` participant — a concrete-type
     # check, unrelated to the uniqueness check above.
-    return (; tfs, ff = solve_steps[ffi], solve_steps, apriori, post_reduce)
+    apriori = filter(s -> s isa AprioriAmplitude, post_steps)
+    return (; tfs, ff = solve_steps[ffi], solve_steps, apriori, post_steps)
 end

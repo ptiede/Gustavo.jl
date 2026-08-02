@@ -116,10 +116,12 @@ end
 
 Output-chain pipeline step (NOT a reduction): a-priori amplitude calibration.
 Applies a pre-built `band_cals` (`load_fitsidi_apriori(path)` — the caller's
-job) via `apply_calibration` on the fringe-corrected native channels, after the
-solution's gains and before any `ReduceStep`s. Place it in the
-`CalibrationPipeline`; it is RECORDED on the fitted solution (`sol.postcal`),
-so the standalone `calibrate(sol, uvset)` reproduces it without re-passing
+job) via `apply_calibration` on the fringe-corrected data, after the solution's
+gains and interleaved with any `ReduceStep`s in whatever relative order the
+`CalibrationPipeline` declares them — e.g. placed before a `ReduceStep` that
+merges bands, it sees the native per-band channels; placed after, it sees the
+reduced ones. It is RECORDED on the fitted solution (`sol.postcal`), so the
+standalone `calibrate(sol, uvset)` reproduces it without re-passing
 `band_cals`.
 """
 struct AprioriAmplitude{C} <: CalibrationStep

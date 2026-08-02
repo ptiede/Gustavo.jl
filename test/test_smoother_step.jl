@@ -254,4 +254,47 @@ end
             isfile(path) && rm(path)
         end
     end
+
+    @testset "AprioriAmplitude/ReduceStep compose in declared order" begin
+        BP = Gustavo.UVData
+        ant_names = String.(collect(UVP.union_antennas(uvset).name))
+        rdate = DimensionalData.metadata(uvset).array_obs.rdate
+        base_dt = DateTime(Date(rdate))
+        ts_all = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
+        times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+        times = [times[1] - Hour(1); times; times[end] + Hour(1)]
+        gain = BP.AntabGainCurve((1.0, 1.0), [1.0])
+        vals = repeat([100.0 100.0], length(times), 1)
+        stns = Dict(
+            nm => BP.AntabStation(nm, gain, BP.AntabTsysSeries(times, [(0, :R), (0, :L)], vals), 0)
+                for nm in ant_names
+        )
+        # Deliberately incomplete: this uvset has two bands (ddi 0 and 1), but
+        # the dict only covers band 1.
+        band_cals_1 = Dict(1 => BP.AntabCalibration("synthetic", "synth", 2000, stns))
+        ap = AprioriAmplitude(band_cals_1; min_elevation_deg = -Inf)
+
+        # AprioriAmplitude declared before any reduction: band 2's leaves are
+        # still native, and band_cals_1 has no entry for them — the SAME error
+        # `apply_calibration` would raise called directly, with no
+        # pipeline-level ordering check in front of it.
+        pipe_ap_first = CalibrationPipeline(
+            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc), ap;
+            exec = ExecutionConfig(ntasks = 1),
+        )
+        @test_throws "no a-priori calibration for band 2" fitcalibrate(pipe_ap_first, uvset)
+
+        # The identical AprioriAmplitude declared AFTER a CombineSpw ReduceStep
+        # runs against the merged, single-band output instead — succeeding on
+        # the very same `band_cals_1` that failed above. This only works if
+        # the output chain composes AprioriAmplitude/ReduceStep in their
+        # DECLARED relative order, not a hardcoded "apriori always first".
+        pipe_reduce_first = CalibrationPipeline(
+            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc),
+            CombineSpw(), ap;
+            exec = ExecutionConfig(ntasks = 1),
+        )
+        _, out = fitcalibrate(pipe_reduce_first, uvset)
+        @test all(UVP.metadata(leaf).ddi == 0 for (_, leaf) in pairs(UVP.branches(out)))
+    end
 end
