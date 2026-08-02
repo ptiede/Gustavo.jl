@@ -63,9 +63,9 @@ Runs concurrently across scan groups, so it may write only θ columns private to
 this scan; anything global belongs in [`finish_estimate!`](@ref). The returned
 NamedTuple is collected in group order and handed back there.
 
-Include a `max_snr::Real` field: scan selections that rank groups by strength
-([`BrightestCalibrator`](@ref)) read it, and an estimator with no notion of SNR
-should return `NaN` rather than omit it.
+Include a `max_snr::Real` field: a scan selection may rank or filter groups by
+strength (e.g. a [`ScanWhere`](@ref) predicate reading `s.snr`), and an
+estimator with no notion of SNR should return `NaN` rather than omit it.
 """
 function estimate_scan! end
 

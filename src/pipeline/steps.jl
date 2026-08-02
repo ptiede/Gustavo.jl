@@ -55,13 +55,13 @@ required_grouping(::DispersionSBDFit) = :scan_complete
     BandpassEstimator(; phase = true, amp = true,
                       freq = ChannelBlocks(1),
                       amp_model = PenalizedBandpass(1.0),
-                      select = BrightestCalibrator())
+                      select = AllScans())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass
-solved from the fringe-corrected residual of the scans `select` picks
-(fit-on-subset / apply-everywhere: the bandpass fit from a few bright
-calibrator scans applies to the whole track). `amp_model` is the
-amplitude-shape estimator ([`PenalizedBandpass`](@ref) /
+solved from the residual of whichever earlier steps have already applied
+their gains, over the scans `select` picks (fit-on-subset / apply-everywhere:
+a bandpass fit from a few bright calibrator scans still applies to the whole
+track). `amp_model` is the amplitude-shape estimator ([`PenalizedBandpass`](@ref) /
 [`PolynomialBandpass`](@ref) / [`FreeBandpass`](@ref)).
 
 `freq` sets how finely the bandpass is resolved in frequency: the default
@@ -70,20 +70,19 @@ amplitude-shape estimator ([`PenalizedBandpass`](@ref) /
 fewer parameters, and each fit from `k` channels' worth of signal, for tracks
 where the per-channel SNR will not support a free bandpass.
 
-`select` accepts any [`AbstractScanSelection`](@ref); the default
-[`BrightestCalibrator`](@ref) reproduces the legacy total-SNR calibrator pick
-(`BrightestCalibrator(max_scans = k)` caps the accumulation to the k
-highest-SNR scans).
+`select` accepts any [`AbstractScanSelection`](@ref) (`AllScans`, `SourceScans`,
+`ScanIndices`, `ScanWhere`, or a custom one); the default runs over every scan.
+The model is self-contained, so placing `BandpassEstimator` before or after
+`FringeFit` is equally legal.
 """
 Base.@kwdef struct BandpassEstimator <: SolveStep
     phase::Bool = true
     amp::Bool = true
     freq::ChannelBlocks = ChannelBlocks(1)
     amp_model::Fringe.AbstractBandpassSmoother = Fringe.PenalizedBandpass(1.0)
-    select::Fringe.AbstractScanSelection = Fringe.BrightestCalibrator()
+    select::Fringe.AbstractScanSelection = Fringe.AllScans()
 end
 provides(::BandpassEstimator) = :bandpass
-requires(::BandpassEstimator) = (:fringe,)
 required_grouping(::BandpassEstimator) = :scan_complete
 # The pass streams the user's selection PLUS the coverage top-up: stations the
 # selected scans never observe would get no bandpass (g = 1), so each such

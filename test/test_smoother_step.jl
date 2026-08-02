@@ -139,7 +139,7 @@ end
         ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
         pd = CalibrationPipeline(
             FringeFit(model = fm), ds,
-            BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
+            BandpassEstimator(select = ScanIndices(1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 1),
         )
@@ -165,7 +165,7 @@ end
         # refine + bandpass + adhoc chain.
         pd4 = CalibrationPipeline(
             FringeFit(model = fm), ds,
-            BandpassEstimator(select = BrightestCalibrator(max_scans = 1)),
+            BandpassEstimator(select = ScanIndices(1)),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
         )

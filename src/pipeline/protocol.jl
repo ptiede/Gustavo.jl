@@ -93,6 +93,12 @@ provides(step::CalibrationStep) = :nothing
 Capabilities that must have been provided by EARLIER steps (e.g. the bandpass
 estimator requires `:fringe` — it accumulates the fringe-corrected residual).
 Checked when the pipeline is compiled. Default: none.
+
+This pair is the ENTIRE step-ordering extension point: `_parse_pipeline`
+validates a pipeline's `SolveStep`s purely by walking each step's declared
+`provides`/`requires` in the order they appear, with no per-step-type case —
+a third-party `SolveStep` composes into any pipeline by implementing these
+two methods, same as a built-in one.
 """
 requires(step::CalibrationStep) = ()
 

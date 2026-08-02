@@ -215,11 +215,11 @@ end
 
 The stream's groups filtered by a scan selection (fit-on-subset: a selective
 pass materializes — and reads — only these). `snr` optionally supplies per-group
-stage-A SNRs (by stream group index) for selections that need them
-([`BrightestCalibrator`](@ref)); without it they see `NaN`. Each selection
-record also carries the group's `stations` set (from lazy-leaf metadata — no
-reads), consumed by coverage-aware selections and available to `ScanWhere`
-predicates.
+stage-A SNRs (by stream group index) for selections that need them (e.g. a
+[`ScanWhere`](@ref) predicate reading `s.snr`); without it they see `NaN`.
+Each selection record also carries the group's `stations` set (from lazy-leaf
+metadata — no reads), consumed by coverage-aware selections and available to
+`ScanWhere` predicates.
 """
 function select_groups(stream::ScanStream, sel::AbstractScanSelection; snr = nothing)
     recs = [

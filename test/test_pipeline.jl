@@ -723,12 +723,12 @@ end
     out = String(take!(buf))
     @test occursin("Solve timing", out) && occursin("fringe", out)
 
-    # Capping the bandpass accumulation to the best calibrator scan still
-    # produces a working solve (the stage-B/bandpass/adhoc chain is intact).
+    # Capping the bandpass accumulation to a single scan still produces a
+    # working solve (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
     solc = fit(
         FringeFit(model = FringeModel(ref_ant = 1)) |>
-            BandpassEstimator(select = Gustavo.BrightestCalibrator(max_scans = 1)) |>
+            BandpassEstimator(select = Gustavo.ScanIndices(1)) |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
@@ -980,17 +980,13 @@ end
     @test isapprox(refine.θ[o3], dtec_true[3] - dtec_true[1]; atol = 0.05)
 end
 
-@testset "Bandpass calibrator: total-SNR selection + coverage top-up" begin
-    # Total source SNR picks the workhorse source, not the single brightest scan
-    # (a one-scan source can carry the top scan while covering a fraction of the
-    # array — on VR2505 that left 10 of 17 stations with NO bandpass).
+@testset "Bandpass calibrator: SourceScans override + coverage top-up" begin
     srcs = ["A", "A", "A", "B"]
     snr = [500.0, 600.0, 550.0, 900.0]
     recs = [
         (index = i, source = srcs[i], scan = "No$i", snr = snr[i], stations = Set([1, 2]))
             for i in eachindex(srcs)
     ]
-    @test select_scans(Gustavo.BrightestCalibrator(), recs) == [1, 2, 3]
     @test select_scans(Gustavo.SourceScans("B"), recs) == [4]   # explicit override
 
     # Top-up is a no-op when the selected scans already cover every station.

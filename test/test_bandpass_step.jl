@@ -89,11 +89,11 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         @test all(a.θ == b.θ for (a, b) in zip(sol_n4.steps, sol_n.steps))
     end
 
-    @testset "max_scans = 1 subset: blocks invariant under the smoother stage" begin
+    @testset "one-scan subset: blocks invariant under the smoother stage" begin
         sol_oc = fit(
             CalibrationPipeline(
                 FringeFit(model = fm),
-                BandpassEstimator(select = FP.BrightestCalibrator(max_scans = 1)),
+                BandpassEstimator(select = FP.ScanIndices(1)),
                 TemporalSmoother(adhoc);
                 exec = ExecutionConfig(ntasks = 1),
             ),
@@ -102,7 +102,7 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         sol_nc = fit(
             CalibrationPipeline(
                 FringeFit(model = fm),
-                BandpassEstimator(select = FP.BrightestCalibrator(max_scans = 1));
+                BandpassEstimator(select = FP.ScanIndices(1));
                 exec = ExecutionConfig(ntasks = 1),
             ),
             uvset,
@@ -116,10 +116,17 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
     end
 
     @testset "step order honors requires/provides" begin
-        @test_throws ArgumentError fit(
-            CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
-        @test_throws "BandpassEstimator requires :fringe" fit(
-            CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
+        # DispersionSBDFit/TemporalSmoother still hard-require :fringe (their
+        # own estimators assume a fringe-corrected residual).
+        @test_throws "DispersionSBDFit requires :fringe" fit(
+            CalibrationPipeline(DispersionSBDFit(), FringeFit(model = fm)), uvset)
+        @test_throws "TemporalSmoother requires :fringe" fit(
+            CalibrationPipeline(TemporalSmoother(), FringeFit(model = fm)), uvset)
+        # BandpassEstimator no longer requires :fringe — its model is
+        # self-contained regardless of position, so bandpass-before-fringe is
+        # a legal pipeline.
+        solbf = fit(CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
+        @test solbf isa CAL.CalibrationSolution
     end
 
     @testset "CoverageTopup selection" begin

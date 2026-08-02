@@ -6,6 +6,14 @@
 # A throwaway solve step proving the protocol defaults exist.
 struct _ProtoProbe <: Gustavo.SolveStep end
 
+# A THIRD-PARTY-shaped solve step: declares provides/requires like a built-in
+# one, but `_parse_pipeline`/`_check_step_order` know nothing about its type —
+# proving the ordering check is genuinely declarative, not an isa-chain in
+# disguise.
+struct _ThirdPartyStep <: Gustavo.SolveStep end
+Gustavo.provides(::_ThirdPartyStep) = :thirdparty
+Gustavo.requires(::_ThirdPartyStep) = (:fringe,)
+
 # A transform with no apply_transform! implementation (error-path probe).
 struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
 
@@ -31,7 +39,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test Gustavo.provides(FringeFit()) == :fringe
         @test Gustavo.provides(BandpassEstimator()) == :bandpass
         @test Gustavo.provides(TemporalSmoother()) == :adhoc
-        @test Gustavo.requires(BandpassEstimator()) == (:fringe,)
+        @test Gustavo.requires(BandpassEstimator()) == ()
         @test Gustavo.requires(TemporalSmoother()) == (:fringe,)
         @test Gustavo.required_grouping(FringeFit()) == :scan_complete
         # The bandpass pass streams the user's selection wrapped in the station
@@ -44,6 +52,33 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         ) isa AllScans
         # Solve steps refuse the sequential run_step chain.
         @test_throws ErrorException Gustavo.run_step(FringeFit(), Gustavo.CalibrationContext())
+    end
+
+    @testset "declarative provides/requires ordering" begin
+        # A third-party SolveStep composes purely by declaring provides/
+        # requires — no isa-case anywhere in _check_step_order for it.
+        @test Gustavo._check_step_order(
+            Gustavo.SolveStep[FringeFit(), _ThirdPartyStep()]
+        ) === nothing
+        @test_throws "_ThirdPartyStep requires :fringe" Gustavo._check_step_order(
+            Gustavo.SolveStep[_ThirdPartyStep(), FringeFit()]
+        )
+        # Two steps providing the same capability are rejected, regardless of
+        # their concrete types.
+        @test_throws "more than one step provides :fringe" Gustavo._check_step_order(
+            Gustavo.SolveStep[FringeFit(), FringeFit()]
+        )
+        # provides(step) === :nothing never collides with itself.
+        @test Gustavo._check_step_order(
+            Gustavo.SolveStep[_ProtoProbe(), _ProtoProbe()]
+        ) === nothing
+        # _parse_pipeline routes any SolveStep (built-in or third-party) into
+        # solve_steps by abstract type alone, in declared order.
+        br = Gustavo._parse_pipeline(
+            CalibrationPipeline(FringeFit(), _ThirdPartyStep())
+        )
+        @test br.solve_steps == [FringeFit(), _ThirdPartyStep()]
+        @test br.ff == FringeFit()
     end
 
     @testset "chaining and lifting" begin
@@ -78,13 +113,6 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test select_scans(SourceScans("A", "B"), scans) == [1, 2, 3, 4]
         @test select_scans(ScanIndices(3, 1), scans) == [1, 3]
         @test select_scans(ScanWhere(s -> s.snr > 15), scans) == [2, 3]
-        # Brightest calibrator: source B has total 55 > A's 30; cap keeps the
-        # highest-SNR scans of the winning source only.
-        @test select_scans(BrightestCalibrator(), scans) == [2, 4]
-        @test select_scans(BrightestCalibrator(max_scans = 1), scans) == [2]
-        # No finite SNRs yet (pre-stage-A) → explicit error, not a silent pick.
-        blind = [(index = 1, source = "A", scan = "No1", snr = NaN)]
-        @test_throws ErrorException select_scans(BrightestCalibrator(), blind)
     end
 
     @testset "transforms on a scan stack + geometry window" begin

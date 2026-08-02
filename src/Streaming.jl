@@ -35,7 +35,7 @@ include("Streaming/stream.jl")
 export AbstractDataTransform, apply_transform!, apply_transform
 export ApplySolution, StationWeightScale, FlagChannels, CalFunction
 export station_weight_scale
-export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
+export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, ScanGroupSpec, select_groups

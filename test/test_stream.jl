@@ -98,14 +98,13 @@
         @test length(picked) == 1 && picked[1].index == 2
         @test map_groups(spec -> spec.index, stb; selection = sel) == [2]
 
-        # snr-aware selection resolves through select_groups' snr keyword. The
-        # synthetic set has ONE source, so uncapped BrightestCalibrator takes
-        # every group; max_scans = 1 keeps only the highest-SNR one.
+        # snr-aware selection resolves through select_groups' snr keyword —
+        # any ScanWhere predicate can read it generically.
         snrs = fill(NaN, n); snrs[1] = 10.0
-        bright = FP.select_groups(stb, Gustavo.BrightestCalibrator(); snr = snrs)
-        @test [s.index for s in bright] == collect(1:n)
-        top = FP.select_groups(stb, Gustavo.BrightestCalibrator(max_scans = 1); snr = snrs)
-        @test [s.index for s in top] == [1]
+        finite = FP.select_groups(stb, Gustavo.ScanWhere(s -> isfinite(s.snr)); snr = snrs)
+        @test [s.index for s in finite] == [1]
+        every = FP.select_groups(stb, Gustavo.ScanWhere(s -> true); snr = snrs)
+        @test [s.index for s in every] == collect(1:n)
 
         # A failing group rethrows after the pass drains. The wrapper differs
         # by executor (Threads task-wraps, the Dagger fetch unwraps to the

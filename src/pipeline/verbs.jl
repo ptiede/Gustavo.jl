@@ -235,10 +235,7 @@ end
 # Returns `(sol, output)` (`output === nothing` without a sink).
 function _run_pipeline(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing)
     ff = br.ff
-    solve_steps = SolveStep[ff]
-    br.ds === nothing || push!(solve_steps, br.ds)
-    br.bp === nothing || push!(solve_steps, br.bp)
-    br.sm === nothing || push!(solve_steps, br.sm)
+    solve_steps = br.solve_steps
 
     geom = build_geometry(uvset)
     first_leaf = first(values(UVData.branches(uvset)))
@@ -347,10 +344,11 @@ function _run_pipeline(br, exec::ExecutionConfig, uvset::UVSet; sink = nothing)
     return sol, assemble_output(uvset, ctx.scratch[:sink_pairs])
 end
 
-# The per-scan SNR a LATER step's selection may want (e.g. `BandpassEstimator`'s
-# `BrightestCalibrator`), read off the most recent finished `StepSolution` that
-# published one — never a shared scratch dict (CHUNK-067c). `nothing` when no
-# prior step published SNR (an estimator with no notion of it, or none yet).
+# The per-scan SNR a LATER step's selection may want (e.g. a `ScanWhere`
+# predicate filtering on `s.snr`), read off the most recent finished
+# `StepSolution` that published one — never a shared scratch dict
+# (CHUNK-067c). `nothing` when no prior step published SNR (an estimator with
+# no notion of it, or none yet).
 function _scan_snr(prior_solutions)
     for s in Iterators.reverse(prior_solutions)
         haskey(s.info, :scan_snr) && return s.info.scan_snr
@@ -467,57 +465,51 @@ _fringe_flags(ctx::SolveContext) = get(() -> Tuple{Int, Int}[], ctx.scratch, :fr
 
 # ── Pipeline parsing ─────────────────────────────────────────────────────────
 
-# Parse a pipeline into (transforms, the FringeFit, the optional
-# DispersionSBDFit / BandpassEstimator / TemporalSmoother, AprioriAmplitude
-# steps, trailing ReduceSteps), validating step order and multiplicity.
+# Every `requires`d capability must be `provides`d by an EARLIER step, and no
+# two steps `provides` the same non-`:nothing` capability — checked in
+# pipeline-declared order (this validates the user's order; it does not
+# reorder steps). This is the whole ordering contract: a third-party
+# `SolveStep` composes by declaring `provides`/`requires`, with no `isa` case
+# to add here for it.
+function _check_step_order(solve_steps::Vector{SolveStep})
+    provided = Symbol[]
+    for s in solve_steps
+        for r in requires(s)
+            r in provided || throw(
+                ArgumentError(
+                    "fit/fitcalibrate: $(nameof(typeof(s))) requires :$r, which no earlier " *
+                        "step provides — place a step with provides(step) === :$r before it."
+                )
+            )
+        end
+        p = provides(s)
+        if p !== :nothing
+            p in provided && throw(
+                ArgumentError(
+                    "fit/fitcalibrate: more than one step provides :$p — exactly one is " *
+                        "allowed per pipeline."
+                )
+            )
+            push!(provided, p)
+        end
+    end
+    return nothing
+end
+
+# Parse a pipeline into (transforms, the FringeFit, every SolveStep in
+# declared order, AprioriAmplitude steps, trailing ReduceSteps), validating
+# solve-step order and multiplicity declaratively against `provides`/
+# `requires` — no per-step-type branch to maintain as new `SolveStep`s appear.
 function _parse_pipeline(pipe::CalibrationPipeline)
     tfs = Fringe.AbstractDataTransform[]
-    ff = nothing
-    ds = nothing
-    bp = nothing
-    sm = nothing
+    solve_steps = SolveStep[]
     apriori = AprioriAmplitude[]
     post_reduce = ReduceStep[]
     for s in pipe.steps
         if s isa DataTransformStep
             push!(tfs, s.t)
-        elseif s isa FringeFit
-            ff === nothing ||
-                throw(ArgumentError("fit/fitcalibrate: exactly ONE FringeFit per pipeline."))
-            ff = s
-        elseif s isa DispersionSBDFit
-            ds === nothing || throw(
-                ArgumentError("fit/fitcalibrate: exactly ONE DispersionSBDFit per pipeline.")
-            )
-            ff === nothing && throw(
-                ArgumentError(
-                    "fit/fitcalibrate: DispersionSBDFit requires :fringe — place FringeFit " *
-                        "before it."
-                )
-            )
-            ds = s
-        elseif s isa BandpassEstimator
-            bp === nothing || throw(
-                ArgumentError("fit/fitcalibrate: exactly ONE BandpassEstimator per pipeline.")
-            )
-            ff === nothing && throw(
-                ArgumentError(
-                    "fit/fitcalibrate: BandpassEstimator requires :fringe — place FringeFit " *
-                        "before it."
-                )
-            )
-            bp = s
-        elseif s isa TemporalSmoother
-            sm === nothing || throw(
-                ArgumentError("fit/fitcalibrate: exactly ONE TemporalSmoother per pipeline.")
-            )
-            ff === nothing && throw(
-                ArgumentError(
-                    "fit/fitcalibrate: TemporalSmoother requires :fringe — place FringeFit " *
-                        "before it."
-                )
-            )
-            sm = s
+        elseif s isa SolveStep
+            push!(solve_steps, s)
         elseif s isa AprioriAmplitude
             push!(apriori, s)
         elseif s isa ReduceStep
@@ -526,14 +518,21 @@ function _parse_pipeline(pipe::CalibrationPipeline)
             throw(
                 ArgumentError(
                     "fit/fitcalibrate: step $(typeof(s)) is not runnable — supported: data " *
-                        "transforms, FringeFit, DispersionSBDFit, BandpassEstimator, " *
-                        "TemporalSmoother, AprioriAmplitude, and ReduceSteps."
+                        "transforms, SolveSteps (FringeFit, DispersionSBDFit, " *
+                        "BandpassEstimator, TemporalSmoother, or a third-party SolveStep), " *
+                        "AprioriAmplitude, and ReduceSteps."
                 )
             )
         end
     end
-    ff === nothing && throw(
+    _check_step_order(solve_steps)
+    ffi = findfirst(s -> s isa FringeFit, solve_steps)
+    ffi === nothing && throw(
         ArgumentError("fit/fitcalibrate: the pipeline contains no FringeFit step.")
     )
-    return (; tfs, ff, ds, bp, sm, apriori, post_reduce)
+    # FringeFit is the pipeline's anchor (its `estimator`/`model.ref_ant` seed
+    # the run) rather than just another `requires`/`provides` participant —
+    # that stays a concrete-type check, unrelated to the declarative ordering
+    # above.
+    return (; tfs, ff = solve_steps[ffi], solve_steps, apriori, post_reduce)
 end

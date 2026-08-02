@@ -56,7 +56,7 @@ export model_components, fit_selection, provides, requires, required_grouping
 # pipelines read naturally with a bare `using Gustavo`.
 export AbstractDataTransform, apply_transform!, apply_transform
 export CalFunction, ApplySolution, StationWeightScale, FlagChannels
-export AbstractScanSelection, AllScans, SourceScans, BrightestCalibrator, ScanIndices, ScanWhere
+export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
 export AbstractLeafGrouping, ByScan, ByBand, ByKey
 export ScanStream, scan_stream, select_groups

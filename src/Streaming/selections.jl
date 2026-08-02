@@ -12,7 +12,7 @@
 
 Selects the scans a solve stage accumulates from. Resolve with
 [`select_scans`](@ref). Built-ins: [`AllScans`](@ref), [`SourceScans`](@ref),
-[`BrightestCalibrator`](@ref), [`ScanIndices`](@ref), [`ScanWhere`](@ref).
+[`ScanIndices`](@ref), [`ScanWhere`](@ref).
 """
 abstract type AbstractScanSelection end
 
@@ -68,34 +68,3 @@ struct ScanWhere{F} <: AbstractScanSelection
 end
 select_scans(sel::ScanWhere, scans) =
     Int[s.index for s in scans if sel.pred(s)]
-
-"""
-    BrightestCalibrator(; max_scans = 0)
-
-The single source with the highest TOTAL stage-A detection SNR over its scans
-(the "brightest calibrator"), optionally capped to its `max_scans` highest-SNR
-scans (`0` = all of them). The bandpass stage's default: a time-stable solve
-needs only a few strong scans, and skipping the rest avoids reading them.
-Requires stage-A SNRs, so it resolves only after a fringe search has run.
-"""
-Base.@kwdef struct BrightestCalibrator <: AbstractScanSelection
-    max_scans::Int = 0
-end
-
-function select_scans(sel::BrightestCalibrator, scans)
-    isempty(scans) && return Int[]
-    total = Dict{String, Float64}()
-    for s in scans
-        isfinite(s.snr) || continue
-        total[s.source] = get(total, s.source, 0.0) + s.snr
-    end
-    isempty(total) &&
-        error("BrightestCalibrator: no scan carries a finite SNR — this selection resolves only after a fringe search has run.")
-    best = argmax(total)
-    picked = [s for s in scans if s.source == best]
-    if sel.max_scans > 0 && length(picked) > sel.max_scans
-        sort!(picked; by = s -> -s.snr)
-        picked = picked[1:sel.max_scans]
-    end
-    return sort!(Int[s.index for s in picked])
-end
