@@ -465,23 +465,17 @@ _fringe_flags(ctx::SolveContext) = get(() -> Tuple{Int, Int}[], ctx.scratch, :fr
 
 # ── Pipeline parsing ─────────────────────────────────────────────────────────
 
-# Every `requires`d capability must be `provides`d by an EARLIER step, and no
-# two steps `provides` the same non-`:nothing` capability — checked in
-# pipeline-declared order (this validates the user's order; it does not
-# reorder steps). This is the whole ordering contract: a third-party
-# `SolveStep` composes by declaring `provides`/`requires`, with no `isa` case
-# to add here for it.
-function _check_step_order(solve_steps::Vector{SolveStep})
+# Step order is never validated here — a step that cannot do its job with the
+# data it is handed fails at the point of use (its own estimator/solve
+# kernel), the same pattern `apply_calibration`'s data-level guards use. Only
+# `provides`'s NAMING role is checked: two steps sharing a non-`:nothing`
+# capability would silently collide in `stage_solution`/`step_solution`'s
+# by-name lookup (a `findfirst`, so the second step's solution would be
+# unreachable) — that is a naming conflict, not an ordering rule, so it stays
+# a construction-time error regardless of where the two steps sit.
+function _check_unique_provides(solve_steps::Vector{SolveStep})
     provided = Symbol[]
     for s in solve_steps
-        for r in requires(s)
-            r in provided || throw(
-                ArgumentError(
-                    "fit/fitcalibrate: $(nameof(typeof(s))) requires :$r, which no earlier " *
-                        "step provides — place a step with provides(step) === :$r before it."
-                )
-            )
-        end
         p = provides(s)
         if p !== :nothing
             p in provided && throw(
@@ -497,9 +491,8 @@ function _check_step_order(solve_steps::Vector{SolveStep})
 end
 
 # Parse a pipeline into (transforms, the FringeFit, every SolveStep in
-# declared order, AprioriAmplitude steps, trailing ReduceSteps), validating
-# solve-step order and multiplicity declaratively against `provides`/
-# `requires` — no per-step-type branch to maintain as new `SolveStep`s appear.
+# declared order, AprioriAmplitude steps, trailing ReduceSteps) — no
+# per-step-type branch to maintain as new `SolveStep`s appear.
 function _parse_pipeline(pipe::CalibrationPipeline)
     tfs = Fringe.AbstractDataTransform[]
     solve_steps = SolveStep[]
@@ -525,14 +518,13 @@ function _parse_pipeline(pipe::CalibrationPipeline)
             )
         end
     end
-    _check_step_order(solve_steps)
+    _check_unique_provides(solve_steps)
     ffi = findfirst(s -> s isa FringeFit, solve_steps)
     ffi === nothing && throw(
         ArgumentError("fit/fitcalibrate: the pipeline contains no FringeFit step.")
     )
     # FringeFit is the pipeline's anchor (its `estimator`/`model.ref_ant` seed
-    # the run) rather than just another `requires`/`provides` participant —
-    # that stays a concrete-type check, unrelated to the declarative ordering
-    # above.
+    # the run) rather than just another `provides` participant — a concrete-type
+    # check, unrelated to the uniqueness check above.
     return (; tfs, ff = solve_steps[ffi], solve_steps, apriori, post_reduce)
 end

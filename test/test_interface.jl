@@ -6,13 +6,11 @@
 # A throwaway solve step proving the protocol defaults exist.
 struct _ProtoProbe <: Gustavo.SolveStep end
 
-# A THIRD-PARTY-shaped solve step: declares provides/requires like a built-in
-# one, but `_parse_pipeline`/`_check_step_order` know nothing about its type —
-# proving the ordering check is genuinely declarative, not an isa-chain in
-# disguise.
+# A THIRD-PARTY-shaped solve step: declares provides like a built-in one, but
+# `_parse_pipeline` knows nothing about its type — proving it routes by
+# abstract type alone, not an isa-chain in disguise.
 struct _ThirdPartyStep <: Gustavo.SolveStep end
 Gustavo.provides(::_ThirdPartyStep) = :thirdparty
-Gustavo.requires(::_ThirdPartyStep) = (:fringe,)
 
 # A transform with no apply_transform! implementation (error-path probe).
 struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
@@ -27,7 +25,6 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test Gustavo.transforms(s) == ()
         @test Gustavo.fit_selection(s, Gustavo.StepSolution[]) isa AllScans
         @test Gustavo.provides(s) == :nothing
-        @test Gustavo.requires(s) == ()
         @test Gustavo.required_grouping(s) == :any
         # The executor-driven visitor contract has working defaults.
         @test Gustavo.start_pass!(s, nothing) === nothing
@@ -39,8 +36,6 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test Gustavo.provides(FringeFit()) == :fringe
         @test Gustavo.provides(BandpassEstimator()) == :bandpass
         @test Gustavo.provides(TemporalSmoother()) == :adhoc
-        @test Gustavo.requires(BandpassEstimator()) == ()
-        @test Gustavo.requires(TemporalSmoother()) == (:fringe,)
         @test Gustavo.required_grouping(FringeFit()) == :scan_complete
         # The bandpass pass streams the user's selection wrapped in the station
         # coverage top-up; the fringe pass always streams every scan
@@ -54,26 +49,29 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         @test_throws ErrorException Gustavo.run_step(FringeFit(), Gustavo.CalibrationContext())
     end
 
-    @testset "declarative provides/requires ordering" begin
-        # A third-party SolveStep composes purely by declaring provides/
-        # requires — no isa-case anywhere in _check_step_order for it.
-        @test Gustavo._check_step_order(
+    @testset "steps compose in any declared order" begin
+        # A third-party SolveStep composes purely by declaring provides — no
+        # isa-case anywhere in _parse_pipeline for it, and no construction-time
+        # veto on where it sits.
+        @test Gustavo._check_unique_provides(
             Gustavo.SolveStep[FringeFit(), _ThirdPartyStep()]
         ) === nothing
-        @test_throws "_ThirdPartyStep requires :fringe" Gustavo._check_step_order(
+        @test Gustavo._check_unique_provides(
             Gustavo.SolveStep[_ThirdPartyStep(), FringeFit()]
-        )
+        ) === nothing
         # Two steps providing the same capability are rejected, regardless of
-        # their concrete types.
-        @test_throws "more than one step provides :fringe" Gustavo._check_step_order(
+        # their concrete types or position — a naming conflict, not an
+        # ordering rule.
+        @test_throws "more than one step provides :fringe" Gustavo._check_unique_provides(
             Gustavo.SolveStep[FringeFit(), FringeFit()]
         )
         # provides(step) === :nothing never collides with itself.
-        @test Gustavo._check_step_order(
+        @test Gustavo._check_unique_provides(
             Gustavo.SolveStep[_ProtoProbe(), _ProtoProbe()]
         ) === nothing
         # _parse_pipeline routes any SolveStep (built-in or third-party) into
-        # solve_steps by abstract type alone, in declared order.
+        # solve_steps by abstract type alone, in declared order — it does not
+        # reorder or reject based on that order.
         br = Gustavo._parse_pipeline(
             CalibrationPipeline(FringeFit(), _ThirdPartyStep())
         )

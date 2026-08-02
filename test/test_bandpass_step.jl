@@ -115,16 +115,20 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         @test stage_info(sol_nc, :bandpass).nscans == 1
     end
 
-    @testset "step order honors requires/provides" begin
-        # DispersionSBDFit/TemporalSmoother still hard-require :fringe (their
-        # own estimators assume a fringe-corrected residual).
-        @test_throws "DispersionSBDFit requires :fringe" fit(
-            CalibrationPipeline(DispersionSBDFit(), FringeFit(model = fm)), uvset)
-        @test_throws "TemporalSmoother requires :fringe" fit(
-            CalibrationPipeline(TemporalSmoother(), FringeFit(model = fm)), uvset)
-        # BandpassEstimator no longer requires :fringe — its model is
-        # self-contained regardless of position, so bandpass-before-fringe is
-        # a legal pipeline.
+    @testset "steps compose in any declared order" begin
+        # No step vetoes its position at construction time — every SolveStep
+        # runs in whatever order the pipeline declares. DispersionSBDFit and
+        # TemporalSmoother still solve for a fringe-corrected residual, but
+        # that is now an assumption of their own solve kernel, not a checked
+        # precondition: placed ahead of FringeFit, they fit the UNCORRECTED
+        # residual instead and complete without error — a quietly worse fit,
+        # not a construction-time rejection.
+        solds = fit(CalibrationPipeline(DispersionSBDFit(), FringeFit(model = fm)), uvset)
+        @test solds isa CAL.CalibrationSolution
+        solts = fit(CalibrationPipeline(TemporalSmoother(), FringeFit(model = fm)), uvset)
+        @test solts isa CAL.CalibrationSolution
+        # BandpassEstimator's model is self-contained regardless of position,
+        # so bandpass-before-fringe was always legal and stays so.
         solbf = fit(CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
         @test solbf isa CAL.CalibrationSolution
     end

@@ -34,8 +34,8 @@ required_grouping(::FringeFit) = :scan_complete
 The ionospheric-dispersion (dTEC) and single-band-delay (SBD) refinement
 stage: a per-scan joint (Δτ, dTEC) fit ([`DispersionModel`](@ref)) and a
 per-band-group delay fit ([`SingleBandDelay`](@ref)), on the fringe-corrected
-residual (`requires (:fringe,)`). Set either field to `nothing` to disable
-that term.
+residual — place a [`FringeFit`](@ref) step earlier in the pipeline. Set
+either field to `nothing` to disable that term.
 
 The Δτ half of the joint fit lands in a PRIVATE per-scan delay column, not in
 `FringeFit`'s own wideband delay: gains compose multiplicatively, so this
@@ -48,7 +48,6 @@ Base.@kwdef struct DispersionSBDFit{D, S} <: SolveStep
     sbd::S = Fringe.SingleBandDelay()
 end
 provides(::DispersionSBDFit) = :refine
-requires(::DispersionSBDFit) = (:fringe,)
 required_grouping(::DispersionSBDFit) = :scan_complete
 
 """
@@ -109,7 +108,6 @@ end
 TemporalSmoother(smoother::Fringe.AbstractAdhocSmoother; pseudo_stokes = :auto) =
     TemporalSmoother(smoother, pseudo_stokes)
 provides(::TemporalSmoother) = :adhoc
-requires(::TemporalSmoother) = (:fringe,)
 required_grouping(::TemporalSmoother) = :scan_complete
 
 # Solve steps run through the pipeline verbs, never the sequential

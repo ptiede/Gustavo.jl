@@ -18,14 +18,16 @@
 #                                    (fit-on-subset / apply-everywhere); reads
 #                                    non-data info from earlier steps (e.g.
 #                                    per-scan SNR) off their `StepSolution`s.
-# - `provides(step)` / `requires(step)` — stage ordering contract.
+# - `provides(step)`               — names the step's solution slot.
 # - `required_grouping(step)`      — leaf-grouping constraint.
 # - `start_pass!` / `process_scan!` / `finish_pass!` — the VISITOR CONTRACT:
 #   the executor owns all streaming (the scan group is the only unit of data
 #   flow — steps never see the uvset); a step accumulates from each
 #   materialized, transform-corrected scan view and runs its global solve when
-#   the pass completes. Every step gets its own streaming pass, ordered by
-#   `requires`/`provides`.
+#   the pass completes. Every step gets its own streaming pass, run in the
+#   order the pipeline declares its steps — a step that needs an earlier
+#   step's correction and does not have it fails from its own solve kernel,
+#   not from pipeline construction.
 #
 # Run-wide resources (task/memory budgets, progress) live on the pipeline's
 # `ExecutionConfig`, NOT on steps: they are properties of a run, shared by
@@ -82,25 +84,13 @@ fit_selection(step::CalibrationStep, prior_solutions) = Fringe.AllScans()
 """
     provides(step::CalibrationStep) -> Symbol
 
-The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …),
-consumed by later steps' [`requires`](@ref). Default: `:nothing`.
+The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
+names its `StepSolution` slot (`stage_solution`/`step_solution`/`sol[:name]`)
+and labels its progress-callback stage. Two steps in the same pipeline must
+not share a non-`:nothing` value — their solutions would collide under the
+same name. Default: `:nothing`.
 """
 provides(step::CalibrationStep) = :nothing
-
-"""
-    requires(step::CalibrationStep) -> Tuple{Vararg{Symbol}}
-
-Capabilities that must have been provided by EARLIER steps (e.g. the bandpass
-estimator requires `:fringe` — it accumulates the fringe-corrected residual).
-Checked when the pipeline is compiled. Default: none.
-
-This pair is the ENTIRE step-ordering extension point: `_parse_pipeline`
-validates a pipeline's `SolveStep`s purely by walking each step's declared
-`provides`/`requires` in the order they appear, with no per-step-type case —
-a third-party `SolveStep` composes into any pipeline by implementing these
-two methods, same as a built-in one.
-"""
-requires(step::CalibrationStep) = ()
 
 """
     required_grouping(step::CalibrationStep) -> Symbol
@@ -165,8 +155,8 @@ diagnostics.
 
 Together with [`start_pass!`](@ref) and [`process_scan!`](@ref) this is the
 step execution contract: the runner gives each solve step its own streaming
-pass, ordered and validated by `requires`/`provides` (every built-in stage
-consumes the residual of all previously-solved θ, so passes never share), and
+pass, in the pipeline's declared order (every built-in stage consumes the
+residual of all previously-solved θ, so passes never share), and
 drives each pass through the streaming layer (`Fringe.map_groups`).
 """
 finish_pass!(step::SolveStep, ctx) = NamedTuple()
