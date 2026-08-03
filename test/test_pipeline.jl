@@ -263,29 +263,29 @@ end
     @test θ_within == θ_cross
 end
 
-@testset "combine_spw: bands → IF axis" begin
-    uvset, _ = _build_fringe_uvset(nbands = 3, nchan = 4)
-    avg = UVP.frequency_average(uvset; nout = 1)          # each band → 1 channel
-    @test length(UVP.union_frequency_axis(avg)) == 3      # 3 distinct band setups
+@testset "combine_spw: spws → Frequency axis" begin
+    uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
+    avg = UVP.frequency_average(uvset; nout = 1)          # each spw → 1 channel
+    @test length(UVP.union_frequency_axis(avg)) == 3      # 3 distinct spw setups
 
     combined = UVP.combine_spw(avg)
     @test length(DimensionalData.branches(combined)) == 1 # one leaf per (src,scan)
     setups = UVP.union_frequency_axis(combined)
     @test length(setups) == 1                             # single FREQID
     cf = collect(channel_freqs(first(setups)))
-    @test length(cf) == 3                                 # 3 IFs
-    @test issorted(cf)                                    # ascending IF freqs
-    # The combined channel frequencies are exactly the per-band averaged centers.
-    band_centers = sort([only(channel_freqs(fs)) for fs in UVP.union_frequency_axis(avg)])
-    @test cf ≈ band_centers
+    @test length(cf) == 3                                 # 3 channels
+    @test issorted(cf)                                    # ascending channel freqs
+    # The combined channel frequencies are exactly the per-spw averaged centers.
+    spw_centers = sort([only(channel_freqs(fs)) for fs in UVP.union_frequency_axis(avg)])
+    @test cf ≈ spw_centers
     leaf = first(values(DimensionalData.branches(combined)))
-    @test size(parent(leaf[:vis]), 1) == 3                # Frequency axis = 3 IFs
+    @test size(parent(leaf[:vis]), 1) == 3                # Frequency axis = 3 channels
 end
 
 @testset "write_uvfits on FITS-IDI-style UVSet (synthesized primary cards)" begin
     # `_build_fringe_uvset` registers NO primary cards, so write_uvfits must
-    # synthesize them. Reduce + combine bands to IFs, then round-trip via UVFITS.
-    uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
+    # synthesize them. Reduce + combine spws to channels, then round-trip via UVFITS.
+    uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     sol, reduced = fitcalibrate(
         FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
@@ -304,7 +304,7 @@ end
         @test length(DimensionalData.branches(rt)) == 1
         rt_setups = UVP.union_frequency_axis(rt)
         @test length(rt_setups) == 1
-        @test length(channel_freqs(first(rt_setups))) == 2          # 2 IFs survive
+        @test length(channel_freqs(first(rt_setups))) == 2          # 2 channels survive
         @test channel_freqs(first(rt_setups)) ≈ channel_freqs(first(UVP.union_frequency_axis(reduced)))
         rt_leaf = first(values(DimensionalData.branches(rt)))
         @test Set(String.(pol_products(rt_leaf))) == Set(["PP", "PQ", "QP", "QQ"])
@@ -320,7 +320,7 @@ end
     # :fitsidi round-trip comes back as the conjugate of the :aips round-trip — and
     # since both files traverse the identical write/load path, their records align
     # exactly and differ ONLY by that conjugation. This isolates the convention.
-    uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 6)
+    uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     _, reduced = fitcalibrate(
         FringeFit(model = FringeModel()) |> BandpassEstimator() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
@@ -413,11 +413,11 @@ end
     uvset_ok, _ = _build_fringe_uvset()
     @test CAL.build_geometry(uvset_ok) isa CAL.DataGeometry
 
-    # band_sep = 0 ⇒ the two bands share identical channel frequencies but carry
+    # spw_sep = 0 ⇒ the two bands share identical channel frequencies but carry
     # distinct spw_names ("band_1"/"band_2"), so a single concatenated channel
     # axis cannot dense-rank a frequency to one spw — build_geometry must error
     # instead of silently last-write-wins.
-    uvset_conflict, _ = _build_fringe_uvset(band_sep = 0.0)
+    uvset_conflict, _ = _build_fringe_uvset(spw_sep = 0.0)
     @test_throws ArgumentError CAL.build_geometry(uvset_conflict)
     @test_throws "conflicting spectral windows" CAL.build_geometry(uvset_conflict)
 end
@@ -426,8 +426,8 @@ end
     # Inject a smooth per-(station, feed, channel) phase bandpass (ref ant 1 = 0)
     # on top of the usual delay/rate/phase/screen. The bandpass stage should
     # flatten the per-channel phase; with it OFF the bandpass survives uncorrected.
-    nant, nbands, nchan = 4, 2, 8
-    nchg = nbands * nchan
+    nant, nspw, nchan = 4, 2, 8
+    nchg = nspw * nchan
     rng = MersenneTwister(0xBA9D)
     bp = zeros(nant, 2, nchg)
     for a in 2:nant, f in 1:2
@@ -436,7 +436,7 @@ end
             bp[a, f, gc] = off + 1.0 * sin(2π * gc / nchg + a + f)   # smooth shape + offset
         end
     end
-    uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
+    uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
     sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
@@ -477,8 +477,8 @@ end
     # `_solve_phase_bandpass!` must reassign χ's band-structure into the feed-2
     # block so the reference's relative R–L phase bandpass is SOLVED rather than
     # zeroed — otherwise it survives uncorrected in every cross-hand visibility.
-    nant, nbands, nchan = 4, 2, 8
-    nchg = nbands * nchan
+    nant, nspw, nchan = 4, 2, 8
+    nchg = nspw * nchan
     rng = MersenneTwister(0xEC9A)
     bp = zeros(nant, 2, nchg)
     # Reference (ant 1): feed 1 flat (the true per-channel gauge), feed 2 a smooth
@@ -488,7 +488,7 @@ end
     # and R–L delay stages, so leaving them in would make the earlier solves fight
     # an unmodelled feed-2-only per-band ramp instead of exercising the χ
     # re-gauge this test is about.
-    for b in 1:nbands
+    for b in 1:nspw
         cs = ((b - 1) * nchan + 1):(b * nchan)
         s = [0.6 * sin(2π * k / nchan + 0.9 * b) for k in 1:nchan]   # full period per band
         X = hcat(ones(nchan), collect(Float64, 1:nchan))
@@ -500,7 +500,7 @@ end
             bp[a, f, gc] = off + 1.0 * sin(2π * gc / nchg + a + f)
         end
     end
-    uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, bandpass = bp)
+    uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
     sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
@@ -539,7 +539,7 @@ end
     @test plan_off1(plan)[1, 2, 1, 1] != 0
     rec = [bp_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
     worst = 0.0
-    for b in 1:nbands
+    for b in 1:nspw
         cs = ((b - 1) * nchan + 1):(b * nchan)
         d = [rem2pi(rec[gc] - bp[1, 2, gc], RoundNearest) for gc in cs]
         X = hcat(ones(nchan), collect(Float64, 1:nchan))
@@ -558,8 +558,8 @@ end
     # baseline). The two SMOOTH estimators (polynomial, penalized) must flatten the
     # band AND estimate the killed channels from the in-spw shape; free_bandpass must
     # leave the killed channels untouched (|g| = 1).
-    nant, nbands, nchan = 4, 2, 8
-    nchg = nbands * nchan
+    nant, nspw, nchan = 4, 2, 8
+    nchg = nspw * nchan
     rng = MersenneTwister(0x5A11)
     locof(gc) = (gc - 1) % nchan + 1                                # local channel within its band
     rolloff(gc) = -0.5 * ((locof(gc) - 1) / (nchan - 1))^2          # per-band: 0 → −0.5 toward high edge
@@ -571,12 +571,12 @@ end
             abp[a, f, gc] = rolloff(gc) + dev + wig
         end
     end
-    uvset, _ = _build_fringe_uvset(; nant = nant, nbands = nbands, nchan = nchan, amp_bandpass = abp)
+    uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, amp_bandpass = abp)
 
     # Kill local channel 7 in every band (globals 7 and 15): zero its weight on all
     # baselines so the per-channel solve has NO data there.
     dead_local = 7
-    dead_globals = [(b - 1) * nchan + dead_local for b in 1:nbands]
+    dead_globals = [(b - 1) * nchan + dead_local for b in 1:nspw]
     for (_, leaf) in DimensionalData.branches(uvset)
         parent(leaf[:weights])[dead_local, :, :, :] .= 0.0f0
     end
@@ -660,7 +660,7 @@ end
     # common-Δf grid is ≈ 7× the real channel count, so the group search
     # auto-selects the hierarchical SBD→MBD path — verify, then check the
     # end-to-end solve flattens the data exactly like the full path does.
-    uvset, _ = _build_fringe_uvset(nbands = 4, nchan = 8, band_sep = 1.5e8)
+    uvset, _ = _build_fringe_uvset(nspw = 4, nchan = 8, spw_sep = 1.5e8)
     geom = CAL.build_geometry(uvset)
     ax = FP._search_axes(geom.channel_freqs, geom.times .* 3600.0, FP.FringeSearch(), ComplexF64)
     @test ax.mbd !== nothing
@@ -785,7 +785,7 @@ end
     # dispersion machinery itself.
     dtec_true = [0.0, 3.0, -5.0, 1.5]
     uvset, _ = _build_fringe_uvset(
-        nant = 4, nbands = 8, nchan = 8, ref_freq = 3.0e9, band_sep = 0.5e9,
+        nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
         dtec = dtec_true, seed = 77, feed_common = true,
     )
     geom = CAL.build_geometry(uvset)
@@ -870,7 +870,7 @@ end
     origins = [3.0e9, 3.1e9, 3.2e9, 3.3e9, 5.0e9, 5.1e9, 5.2e9, 5.3e9]
     nb, nch = length(origins), 16
     chf = vcat([o .+ (0:(nch - 1)) .* 2.0e6 for o in origins]...)
-    groups = FP.fringe_band_groups(chf)
+    groups = FP.fringe_freq_groups(chf)
     @test length(groups) == 2
     τ2 = [2.0e-9, -2.0e-9]
     ph = zeros(4, 2, nb * nch)
@@ -881,8 +881,8 @@ end
         end
     end
     uvset, _ = _build_fringe_uvset(
-        nant = 4, nbands = nb, nchan = nch, ref_freq = 3.0e9, chan_bw = 2.0e6,
-        band_origins = origins, bandpass = ph, seed = 99, feed_common = true,
+        nant = 4, nspw = nb, nchan = nch, ref_freq = 3.0e9, chan_bw = 2.0e6,
+        spw_origins = origins, bandpass = ph, seed = 99, feed_common = true,
     )
     geom = CAL.build_geometry(uvset)
     # The SingleBandDelay element emits its per-band pair on this geometry.
@@ -953,7 +953,7 @@ end
     positions = [[0.0, 0.0, 0.0], [1.0e5, 0.0, 0.0], [2.0e5, 0.0, 0.0], [2.0e5 + 60.0, 0.0, 0.0]]
     dtec_true = [0.0, 3.0, -5.0, -5.0]
     uvset, _ = _build_fringe_uvset(
-        nant = 4, nbands = 8, nchan = 8, ref_freq = 3.0e9, band_sep = 0.5e9,
+        nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
         dtec = dtec_true, seed = 77, feed_common = true,
         station_positions = positions,
     )
@@ -962,7 +962,7 @@ end
 
     # Degenerate positions (the default synthetic table, max sep ≪ 10 km) must
     # NOT tie anything — the guard against missing/zero station_xyz.
-    uvd, _ = _build_fringe_uvset(nant = 4, nbands = 2, nchan = 4)
+    uvd, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 4)
     antd = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uvd)))).antennas
     @test UVP._colocated_ties(antd) == [1, 2, 3, 4]
 
@@ -979,7 +979,7 @@ end
         [2.0e5, 0.0, 0.0], [2.0e5 + 60.0, 0.0, 0.0],
     ]
     uv2, _ = _build_fringe_uvset(
-        nant = 5, nbands = 2, nchan = 4, station_positions = pos2,
+        nant = 5, nspw = 2, nchan = 4, station_positions = pos2,
     )
     ant2 = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uv2)))).antennas
     @test UVP._colocated_ties(ant2) == [1, 2, 2, 4, 4]
@@ -1044,7 +1044,7 @@ end
     # strong detection constrains it: the EHT-HOPS flag criterion. Its gains
     # stay identity, and apply_calibration must zero-weight its baselines
     # instead of passing the uncalibrated data through at full weight.
-    uvset, _ = _build_fringe_uvset(nant = 4, nbands = 2, nchan = 8, ntime = 12, feed_common = true)
+    uvset, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 8, ntime = 12, feed_common = true)
     rng = MersenneTwister(0xF1A6)
     for (_, leaf) in Gustavo.UVData.leaves(uvset)
         V = parent(leaf[:vis])

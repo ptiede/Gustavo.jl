@@ -9,9 +9,9 @@
 # This single vocabulary covers everything both the bandpass solver and the
 # fringe fitter need: accumulation periods (`PerIntegration`), scans
 # (`PerScan`), instrument scans (`InstrumentScans`), fixed-duration stability
-# blocks (`TimeBlocks`); and spectral windows/IFs/bands (`PerSpectralWindow`)
-# and channel blocks (`ChannelBlocks`, with `ChannelBlocks(1)` the free
-# per-channel bandpass).
+# blocks (`TimeBlocks`); and spectral windows (`PerSpectralWindow`) and channel
+# blocks (`ChannelBlocks`, with `ChannelBlocks(1)` the free per-channel
+# bandpass).
 
 abstract type AbstractTimeSegmentation end
 
@@ -48,7 +48,7 @@ abstract type AbstractFrequencySegmentation end
 "One segment spanning all channels of all spectral windows."
 struct GlobalFrequency <: AbstractFrequencySegmentation end
 
-"One segment per spectral window / IF / band."
+"One segment per spectral window."
 struct PerSpectralWindow <: AbstractFrequencySegmentation end
 
 "Blocks of `block_size` consecutive channels, never straddling a spw boundary."
@@ -64,22 +64,22 @@ end
 """
 One segment per explicit global-channel range — for caller-defined frequency
 groupings the other segmentations cannot express, e.g. the widely-separated
-VGOS band groups (`Fringe.fringe_band_groups`). Ranges must be ascending,
+VGOS frequency groups (`Fringe.fringe_freq_groups`). Ranges must be ascending,
 contiguous, start at channel 1, and (checked against the geometry at plan
 time) cover every channel exactly once.
 """
-struct FrequencyBands <: AbstractFrequencySegmentation
+struct FreqGroups <: AbstractFrequencySegmentation
     ranges::Vector{UnitRange{Int}}
-    function FrequencyBands(ranges::AbstractVector{<:UnitRange{<:Integer}})
+    function FreqGroups(ranges::AbstractVector{<:UnitRange{<:Integer}})
         rs = [UnitRange{Int}(r) for r in ranges]
-        isempty(rs) && throw(ArgumentError("FrequencyBands: at least one range required"))
+        isempty(rs) && throw(ArgumentError("FreqGroups: at least one range required"))
         first(rs[1]) == 1 || throw(
-            ArgumentError("FrequencyBands: ranges must start at channel 1, got $(rs[1])")
+            ArgumentError("FreqGroups: ranges must start at channel 1, got $(rs[1])")
         )
         for i in 2:length(rs)
             first(rs[i]) == last(rs[i - 1]) + 1 || throw(
                 ArgumentError(
-                    "FrequencyBands: ranges must be contiguous and ascending; " *
+                    "FreqGroups: ranges must be contiguous and ascending; " *
                         "$(rs[i]) does not follow $(rs[i - 1])"
                 )
             )
@@ -102,7 +102,7 @@ Fields:
 - `scan_of_time`  : scan id for each time sample (any integer labels; need not
                     be 1-based or contiguous — `PerScan` dense-ranks them).
 - `channel_freqs` : concatenated channel center frequencies (Hz) across spws.
-- `spw_of_chan`   : spw/band id for each global channel (same labelling freedom).
+- `spw_of_chan`   : spw id for each global channel (same labelling freedom).
 - `t0`            : rate reference epoch (hours); rate phase ∝ (t − t0).
 - `f0`            : delay reference frequency (Hz); delay phase ∝ (f − f0).
 - `scan_names`    : human-readable scan labels (for diagnostics; optional).
@@ -204,11 +204,11 @@ Segment id (1..nseg) for each global channel under frequency segmentation `seg`.
 freq_segment_ids(::GlobalFrequency, geom::DataGeometry) = (ones(Int, nchannels(geom)), 1)
 freq_segment_ids(::PerSpectralWindow, geom::DataGeometry) = _dense_rank(geom.spw_of_chan)
 
-function freq_segment_ids(seg::FrequencyBands, geom::DataGeometry)
+function freq_segment_ids(seg::FreqGroups, geom::DataGeometry)
     n = nchannels(geom)
     last(seg.ranges[end]) == n || throw(
         DimensionMismatch(
-            "FrequencyBands: ranges cover $(last(seg.ranges[end])) channels; geometry has $n"
+            "FreqGroups: ranges cover $(last(seg.ranges[end])) channels; geometry has $n"
         )
     )
     ids = Vector{Int}(undef, n)

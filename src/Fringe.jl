@@ -112,10 +112,10 @@ baseline) overlaying the coherent visibility BEFORE and AFTER applying `sol`.
 slope that flattens after a good fit; `kind = :time` plots vs time — a fringe rate
 shows as a slope that flattens. `show = :phase` (default) or `:amp`. `pol` selects
 the correlation product (default `:parallel`); `baselines` selects which to draw.
-`band = k` restricts the view to the k-th band group ([`fringe_band_groups`](@ref)):
+`freqgroup = k` restricts the view to the k-th frequency group ([`fringe_freq_groups`](@ref)):
 `:freq` panels show only that group's channels on the real frequency axis, `:time`
 panels average over only that group — the readable view on wide multi-group data
-(VGOS), where the all-band view hides which group misfits.
+(VGOS), where the all-group view hides which group misfits.
 Provided by `GustavoMakieExt`.
 """
 function plot_baseline_fringes end
@@ -132,7 +132,7 @@ export free_bandpass, polynomial_bandpass, penalized_bandpass
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_station_solutions
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups
-export fringe_band_stats, fringe_band_groups
+export fringe_freq_group_stats, fringe_freq_groups
 export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags
 export delay_closure, print_delay_closure
 export AbstractDataTransform, apply_transform!, apply_transform
@@ -146,7 +146,7 @@ export MatchedFilter, FringeModel, SingleBandDelay, default_fringe_terms
 # `Dispersion` term it configures); re-exported so a caller driving the fringe
 # engine names it without a second `using`.
 export DispersionModel
-export AbstractLeafGrouping, ByScan, ByBand, ByKey
+export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ScanStream, scan_stream, ScanGroupSpec, select_groups
 export materialize_cube, materialize_leaves
 export search_scan

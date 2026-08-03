@@ -30,7 +30,7 @@
             stack_n, win_n = FP.materialize_cube(st, spec)
             @test isequal(stack_n[:vis], stack_s[:vis]) &&
                 isequal(stack_n[:weights], stack_s[:weights])
-            # The direct-decode fast path, WHEN it fires (lazy sibling-band IDI
+            # The direct-decode fast path, WHEN it fires (lazy sibling-spw IDI
             # spans), must agree with the stacked fallback bit-for-bit.
             direct = ST._direct_scan_group(spec, geom)
             if direct !== nothing
@@ -65,12 +65,12 @@
         @test all(all(res_ser[k] .=== res[k]) for k in keys(res))
     end
 
-    @testset "ByBand / ByKey grouping" begin
-        stb = FP.scan_stream(uvset; grouping = FP.ByBand(), geom = geom)
+    @testset "BySpw / ByKey grouping" begin
+        stb = FP.scan_stream(uvset; grouping = FP.BySpw(), geom = geom)
         nleaves = length(collect(UVP.branches(uvset)))
         @test length(stb.groups) == nleaves
         @test all(s -> length(s.leaves) == 1, stb.groups)
-        # A single-leaf group still materializes (one band's cube) with the
+        # A single-leaf group still materializes (one spw's cube) with the
         # leaf's own geometry window.
         _, win1 = FP.materialize_cube(stb, stb.groups[1])
         w1 = CAL.leaf_window(geom, last(first(stb.groups[1].leaves)))
@@ -82,7 +82,7 @@
     end
 
     @testset "map_groups: order, selection, progress" begin
-        stb = FP.scan_stream(uvset; grouping = FP.ByBand(), geom = geom)
+        stb = FP.scan_stream(uvset; grouping = FP.BySpw(), geom = geom)
         n = length(stb.groups)
         # Results in group order regardless of scheduling.
         @test map_groups(spec -> spec.index, stb) == collect(1:n)

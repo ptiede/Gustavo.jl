@@ -255,26 +255,26 @@ function apply_calibration(
 end
 
 """
-    apply_calibration(uvset, band_cals::AbstractDict{<:Integer, AntabCalibration}; on_missing_station = :warn) -> UVSet
+    apply_calibration(uvset, spw_cals::AbstractDict{<:Integer, AntabCalibration}; on_missing_station = :warn) -> UVSet
 
-A-priori flux calibration where each spectral band (spw) has its OWN
-`AntabCalibration`. Each leaf is calibrated with `band_cals[info.ddi + 1]`
-(1-based band index); otherwise identical to the single-`AntabCalibration`
+A-priori flux calibration where each spectral window (spw) has its OWN
+`AntabCalibration`. Each leaf is calibrated with `spw_cals[info.ddi + 1]`
+(1-based spw index); otherwise identical to the single-`AntabCalibration`
 method. Used for FITS-IDI `GAIN_CURVE` + `SYSTEM_TEMPERATURE` calibration
-(see `load_fitsidi_apriori`), where DPFU / gain-curve / Tsys are per band.
+(see `load_fitsidi_apriori`), where DPFU / gain-curve / Tsys are per spw.
 """
 function apply_calibration(
-        uvset::UVSet, band_cals::AbstractDict{<:Integer, AntabCalibration};
+        uvset::UVSet, spw_cals::AbstractDict{<:Integer, AntabCalibration};
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
     out = apply(uvset) do leaf, info, root
-        band = Int(info.ddi) + 1
-        haskey(band_cals, band) || error(
-            "apply_calibration: no a-priori calibration for band $(band) " *
-                "(spw $(info.spw_name)); have bands $(sort(collect(keys(band_cals))))",
+        spw = Int(info.ddi) + 1
+        haskey(spw_cals, spw) || error(
+            "apply_calibration: no a-priori calibration for spw $(spw) " *
+                "(spw_name $(info.spw_name)); have spws $(sort(collect(keys(spw_cals))))",
         )
         gains_pkg = _build_apriori_gains(
-            leaf, info, root, band_cals[band];
+            leaf, info, root, spw_cals[spw];
             on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
         )
         bl_pairs = baselines(leaf).pairs

@@ -37,7 +37,7 @@ export ApplySolution, StationWeightScale, FlagChannels, CalFunction
 export station_weight_scale
 export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
-export AbstractLeafGrouping, ByScan, ByBand, ByKey
+export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ScanStream, scan_stream, ScanGroupSpec, select_groups
 export materialize_cube, materialize_leaves
 export map_groups, foreach_group

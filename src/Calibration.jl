@@ -47,7 +47,7 @@ export unwrap_phase_track, phase_relative_to_ref
 # Segmentation vocabulary
 export AbstractTimeSegmentation, AbstractFrequencySegmentation
 export GlobalTime, PerScan, PerIntegration, TimeBlocks, InstrumentScans
-export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FrequencyBands
+export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FreqGroups
 export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
 
 # Terms
@@ -77,7 +77,7 @@ export save_solution_hdf5, load_solution_hdf5
 
 # Per-stage provenance and snapshots (composable pipeline)
 export stage_names, stage_solution, stage_info
-export component_ranges, component_gains, component_names, gains, @comp
+export component_ranges, component_gains, component_names, component_dimarray, gains
 # Fit-once / apply-later extraction (a single step, e.g. a portable bandpass)
 export step_solution
 

@@ -4,7 +4,7 @@
 Load a UVData file, returning a `UVSet` whose `branches` is a flat
 `OrderedDict` of MSv4-shaped per-scan leaf `DimTree`s keyed by sanitized
 `:<source>_scan_<n>` Symbols. Each leaf carries dense
-`(Ti, Baseline, Pol, IF)` cubes for `vis`/`weights` and
+`(Ti, Baseline, Pol, Frequency)` cubes for `vis`/`weights` and
 `(Ti, Baseline, UVW)` for `uvw`, mirroring xradio's MSv4 visibility schema.
 
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
@@ -120,7 +120,7 @@ function register_primary_cards! end
 Build per-band a-priori flux calibrations from a FITS-IDI file's `GAIN_CURVE`
 (DPFU + elevation gain polynomial) and `SYSTEM_TEMPERATURE` (Tsys) tables, one
 [`AntabCalibration`](@ref) per 1-based band index — ready to pass to
-`apply_calibration(uvset, band_cals)`. Tsys values that are non-positive, the
+`apply_calibration(uvset, spw_cals)`. Tsys values that are non-positive, the
 `999` placeholder, or `> tsys_max` are treated as missing and fall back to the
 other feed's value for the same (antenna, band, time); samples with no usable
 Tsys are flagged on apply. Provided by the `GustavoFITSFilesExt` extension.

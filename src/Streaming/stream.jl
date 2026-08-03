@@ -15,27 +15,27 @@
 """
     AbstractLeafGrouping
 
-How a `UVSet`'s band leaves are grouped into scan groups for streaming.
-Built-ins: [`ByScan`](@ref) (the default), [`ByBand`](@ref), [`ByKey`](@ref).
+How a `UVSet`'s spw leaves are grouped into scan groups for streaming.
+Built-ins: [`ByScan`](@ref) (the default), [`BySpw`](@ref), [`ByKey`](@ref).
 """
 abstract type AbstractLeafGrouping end
 
 """
     ByScan()
 
-Group leaves by `(source, scan)` — every band of a scan is materialized
+Group leaves by `(source, scan)` — every spw of a scan is materialized
 together (required by the multi-band fringe search and per-scan solves).
 """
 struct ByScan <: AbstractLeafGrouping end
 
 """
-    ByBand()
+    BySpw()
 
-One group per band leaf (`(source, scan, band)` granularity) — no frequency
-concatenation. For per-band streaming work; steps that declare
+One group per spw leaf (`(source, scan, spw)` granularity) — no frequency
+concatenation. For per-spw streaming work; steps that declare
 `required_grouping(step) == :scan_complete` cannot run under it.
 """
-struct ByBand <: AbstractLeafGrouping end
+struct BySpw <: AbstractLeafGrouping end
 
 """
     ByKey(f)
@@ -51,7 +51,7 @@ _group_key(::ByScan, k, leaf) = begin
     info = UVData.metadata(leaf)
     (info.source_name, info.scan_name)
 end
-_group_key(::ByBand, k, leaf) = begin
+_group_key(::BySpw, k, leaf) = begin
     info = UVData.metadata(leaf)
     (info.source_name, info.scan_name, k)
 end

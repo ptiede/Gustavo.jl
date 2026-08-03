@@ -29,8 +29,8 @@ which neither the wideband delay (one slope across all band groups) nor the
 time-invariant per-channel bandpass can track. Instrumental, not propagation.
 
 Compiles to a coupled per-band-group pair — a per-scan `Delay` plus its
-companion per-scan constant, over `FrequencyBands` ranges computed from the
-data geometry ([`fringe_band_groups`](@ref)) — or to nothing when the
+companion per-scan constant, over `FreqGroups` ranges computed from the
+data geometry ([`fringe_freq_groups`](@ref)) — or to nothing when the
 frequency axis has fewer than 2 band groups (a single group is fully
 degenerate with the wideband delay). Fit from within-band chunk slopes by the
 refine stage, nearly orthogonal to the cross-band observables that set the
@@ -39,16 +39,16 @@ wideband delay and dTEC.
 struct SingleBandDelay end
 
 function model_components(::SingleBandDelay, geom::DataGeometry)
-    bands = fringe_band_groups(geom.channel_freqs)
-    length(bands) >= 2 || return nothing
+    freqgroups = fringe_freq_groups(geom.channel_freqs)
+    length(freqgroups) >= 2 || return nothing
     # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a
     # group slope about the group's own centre νg needs the companion per-group
     # constant −2πτ(νg − f0): net phase 2πτ(f − νg), zero at the group centre —
     # the cross-band solution is untouched. The pair nests under the element's
     # key (`θ.phase.<key>.delay` / `.constant`).
     return (
-        delay = TiedComponent(Delay(), PerScan(), FrequencyBands(bands), SharedFeeds()),
-        constant = TiedComponent(ConstantTerm(), PerScan(), FrequencyBands(bands), SharedFeeds()),
+        delay = TiedComponent(Delay(), PerScan(), FreqGroups(freqgroups), SharedFeeds()),
+        constant = TiedComponent(ConstantTerm(), PerScan(), FreqGroups(freqgroups), SharedFeeds()),
     )
 end
 
@@ -242,7 +242,7 @@ _same_component_signature(a::TiedComponent, b::TiedComponent) =
     a.tying == b.tying
 
 _same_freq_segmentation(a, b) = a == b
-_same_freq_segmentation(a::FrequencyBands, b::FrequencyBands) = a.ranges == b.ranges
+_same_freq_segmentation(a::FreqGroups, b::FreqGroups) = a.ranges == b.ranges
 
 # Whether the compiled fringe components opt into a solvable feed-specific
 # rate (an R–L rate column) — cross-hand rows must then join the rate system.
@@ -269,7 +269,7 @@ _has_feed_rate(comps) =
 # trailing parameters left at zero, and a frequency-resolved term (the bandpass,
 # `ConstantTerm × ChannelBlocks`) would have every segment but the first left at
 # zero while the search wrote its band-wide phase into that one. A `Dispersion`
-# term or a `FrequencyBands`-segmented one (SBD) already falls through to
+# term or a `FreqGroups`-segmented one (SBD) already falls through to
 # `nothing` here — the term/freq-type checks below exclude them without special
 # casing — so `can_fit` correctly rejects either if found in a `FringeModel`'s
 # own term list (they belong to a separate `DispersionSBDFit` step instead).

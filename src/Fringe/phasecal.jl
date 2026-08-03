@@ -213,7 +213,7 @@ function phasecal_solution(
         sort!(v; by = r -> pcal.time[r])
     end
 
-    ntone, nband, nfeed, _ = size(pcal.tone)
+    ntone, nspw, nfeed, _ = size(pcal.tone)
     f0 = geom.f0
     sgn = Int(sign)
     nfit = 0
@@ -241,7 +241,7 @@ function phasecal_solution(
                 # this spw's frequency span.
                 empty!(νbuf)
                 empty!(zbuf)
-                for b in 1:nband, tn in 1:ntone
+                for b in 1:nspw, tn in 1:ntone
                     ν = pcal.freq[tn, b, feed, sel[1]]
                     (isfinite(ν) && flo[fs] <= ν <= fhi[fs]) || continue
                     acc = zero(ComplexF64)
@@ -273,7 +273,7 @@ function phasecal_solution(
     info = (;
         nant = nant,
         nscan = ntseg,
-        nspw = nfseg,
+        nfreqseg = nfseg,
         nblocks = nfit,
         nmissing = nmissing,
         fit_per_ant = fit_per_ant,

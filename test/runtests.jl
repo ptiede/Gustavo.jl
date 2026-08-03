@@ -217,7 +217,7 @@ end
     top = names(Gustavo)
 
     # A bare `using Gustavo` spans the production path end to end: read a set,
-    # fit/calibrate it, name the per-stage snapshot `sol[:fringe]` returns, write it.
+    # fit/calibrate it, extract the per-stage step `sol[:fringe]` returns, write it.
     for n in (
             :UVSet, :load_uvfits, :load_fitsidi, :write_uvfits, :write_fitsidi,
             :fit, :calibrate, :fitcalibrate, :StepSolution,
@@ -890,9 +890,9 @@ end
     axis = UV.union_frequency_axis(data)
     @test length(axis) == 1
     @test axis[1] == fs_root
-    # nchannels / band_center_frequency dispatch through freq_setup(uvset).
+    # nchannels / spw_center_frequency dispatch through freq_setup(uvset).
     @test UV.nchannels(data) == length(UV.channel_freqs(fs_root))
-    @test UV.band_center_frequency(data) == UV.band_center_frequency(fs_root)
+    @test UV.spw_center_frequency(data) == UV.spw_center_frequency(fs_root)
 
     # Round-trip through write/read keeps the per-leaf setup.
     tmp = tempname() * ".uvfits"

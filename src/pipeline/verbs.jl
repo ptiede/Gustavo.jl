@@ -23,10 +23,12 @@
 
 Solve the pipeline's calibration on `uvset` WITHOUT producing corrected data —
 the estimation half of [`fitcalibrate`](@ref). The returned solution carries
-per-stage provenance (`sol[:fringe]`, `sol[:bandpass]`, `sol[:adhoc]` —
-[`stage_solution`](@ref)/[`stage_info`](@ref)) and records the data-transform
-chain the scans were materialized through (`sol.transforms`), so diagnostics
-and the standalone [`calibrate`](@ref) reproduce exactly what the solve saw.
+per-stage provenance (`sol[:fringe]`, `sol[:bandpass]`, `sol[:adhoc]` — each a
+[`step_solution`](@ref) alone; [`stage_solution`](@ref) for the cumulative
+view through that stage, [`stage_info`](@ref) for its diagnostics) and records
+the data-transform chain the scans were materialized through
+(`sol.transforms`), so diagnostics and the standalone [`calibrate`](@ref)
+reproduce exactly what the solve saw.
 
 `ReduceStep`s and [`AprioriAmplitude`](@ref) in the pipeline do not affect the
 solution's θ and are ignored here (`AprioriAmplitude` is still RECORDED on the
@@ -141,7 +143,7 @@ function _run_fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet, reduce)
     sol, output = _run_pipeline(br, pipe.exec, pipe.ref_ant, uvset; sink = OutputSink(post))
     ctx = CalibrationContext(
         uvset, sol, output,
-        isempty(br.apriori) ? nothing : last(br.apriori).band_cals,
+        isempty(br.apriori) ? nothing : last(br.apriori).spw_cals,
     )
     return sol, ctx
 end
@@ -210,7 +212,7 @@ function _compose_output_chain(declared, extra_reduces)
     for s in declared
         if s isa AprioriAmplitude
             push!(fs, uv -> apply_calibration(
-                uv, s.band_cals;
+                uv, s.spw_cals;
                 min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
             ))
         elseif s isa ReduceStep

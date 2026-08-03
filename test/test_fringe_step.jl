@@ -266,8 +266,8 @@
         # delay/constant pair (2 band groups here, so SBD's gate is open).
         dscomps = Gustavo.model_components(DispersionSBDFit(), (; geom, antennas = nothing))
         @test collect(map(sig, CAL._flatten_components(dscomps.phase))) == [
-            (CAL.Delay, CAL.PerScan, CAL.FrequencyBands, CAL.SharedFeeds),
-            (CAL.ConstantTerm, CAL.PerScan, CAL.FrequencyBands, CAL.SharedFeeds),
+            (CAL.Delay, CAL.PerScan, CAL.FreqGroups, CAL.SharedFeeds),
+            (CAL.ConstantTerm, CAL.PerScan, CAL.FreqGroups, CAL.SharedFeeds),
         ]
         @test isempty(dscomps.logamp)
 
@@ -275,7 +275,7 @@
         @test CAL.model_components(DispersionModel(), geom) === nothing
         @test CAL.model_components(
             DispersionModel(require_band_separation = false), geom) isa CAL.TiedComponent
-        narrow, _ = _build_fringe_uvset(nbands = 1)
+        narrow, _ = _build_fringe_uvset(nspw = 1)
         @test CAL.model_components(SingleBandDelay(), CAL.build_geometry(narrow)) === nothing
         # A bare TiedComponent compiles to itself.
         tc = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2))
@@ -488,8 +488,8 @@ end
     # A VGOS-like layout: four sub-bands over a wide fractional bandwidth, which
     # is what lets 1/ν be separated from a linear delay at all.
     uvset, _ = _build_fringe_uvset(
-        nbands = 4, nchan = 8, dtec = [0.0, 3.0, -2.0, 1.5],
-        band_origins = [3.0e9, 5.0e9, 8.0e9, 1.03e10], feed_common = true,
+        nspw = 4, nchan = 8, dtec = [0.0, 3.0, -2.0, 1.5],
+        spw_origins = [3.0e9, 5.0e9, 8.0e9, 1.03e10], feed_common = true,
     )
     mf = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid()))
 
@@ -547,7 +547,7 @@ end
 
     @testset "require_band_separation gates on the band layout" begin
         # A single contiguous band cannot constrain the 1/ν curvature.
-        narrow, _ = _build_fringe_uvset(nbands = 1, nchan = 8)
+        narrow, _ = _build_fringe_uvset(nspw = 1, nchan = 8)
         geom_n = CAL.build_geometry(narrow)
         geom_w = CAL.build_geometry(uvset)
         @test !CAL._dispersion_enabled(DispersionModel(), geom_n)

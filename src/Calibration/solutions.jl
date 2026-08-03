@@ -78,8 +78,9 @@ residuals, …) — distinct from each step's own `info`.
 
 Component names are local to each step's own model and may repeat across
 steps (e.g. a `bandpass` step and a `fringe` step can both carry an `atmos`
-component) — [`@comp`](@ref) and [`component_gains`](@ref) always take the
-step explicitly rather than searching for a name across `steps`.
+component) — [`component_dimarray`](@ref) and [`component_gains`](@ref)
+always take the step explicitly rather than searching for a name across
+`steps`.
 
 `transforms` records the data-transform chain the solve materialized its scans
 through (precal, weight scaling, caller hooks), so diagnostics can replay it and
@@ -169,8 +170,25 @@ function _step(sol::CalibrationSolution, name::Symbol)
     return sol.steps[i]
 end
 
+# The step at position `i` in run order, or an ArgumentError reporting how
+# many steps `sol` actually has — the by-position counterpart to the
+# by-name lookup above, for callers that only know a step's position.
+function _step(sol::CalibrationSolution, i::Integer)
+    1 <= i <= length(sol.steps) || throw(
+        ArgumentError(
+            "solution has $(length(sol.steps)) step(s); no step at index $i."
+        )
+    )
+    return sol.steps[i]
+end
+
+"""
+    sol[name::Symbol] -> CalibrationSolution
+
+The step named `name`, alone — the same extraction as [`step_solution`](@ref).
+"""
 function Base.getindex(sol::CalibrationSolution, name::Symbol)
-    return stage_solution(sol, name)
+    return step_solution(sol, name)
 end
 
 """
@@ -189,7 +207,8 @@ it. Since gains compose multiplicatively across steps, this is exactly the
 composed gain of every step that ran up to that point — a later step
 contributes no gain at all here, rather than an explicit zeroed θ block over a
 shared layout. Apply it, plot it, or difference it against the next stage's
-snapshot. `sol[:name]` is the same operation.
+snapshot. For the step alone, not its predecessors, see [`step_solution`](@ref)
+(also `sol[:name]`).
 """
 function stage_solution(sol::CalibrationSolution, name::Symbol)
     i = findfirst(s -> s.name === name, sol.steps)
@@ -236,7 +255,7 @@ The top-level model component names across every step of `sol` (phase and
 log-amplitude groups combined, in step then declaration order, duplicates
 dropped) — what `show` lists under `Components:`. A name here can belong to
 several steps at once (component names are local to each step's own model);
-use [`stage_names`](@ref) and a step-qualified [`@comp`](@ref) or
+use [`stage_names`](@ref) and a step-qualified [`component_dimarray`](@ref) or
 [`component_gains`](@ref) call to reach one unambiguously.
 """
 function component_names(sol::CalibrationSolution)
@@ -300,76 +319,40 @@ function gains(sol::CalibrationSolution)
     )
 end
 
-# ── @comp: one component's θ leaf as a labelled DimArray ─────────────────────
+# ── component_dimarray: one component's θ leaf as a labelled DimArray ────────
 
 """
-    @comp solution.<step>.θ.phase.<name>
-    @comp solution.<step>.θ.logamp.<name>
+    component_dimarray(sol::CalibrationSolution, step, group::Symbol, name::Symbol...) -> DimArray
 
-The raw θ leaf of one model component of the step named `<step>`, wrapped as a
-labelled `DimArray` for inspection. The step must be given explicitly:
-component names are local to a step's own model and routinely repeat across
-steps (e.g. a `bandpass` step and a `fringe` step can both carry an `atmos`
-component), so a bare name would be ambiguous. The rest of the path mirrors
-the model's named component tree: `phase` or `logamp`, then the component's
-name, descending into a multi-emit wrapper's subtree
-(`solution.fringe.θ.phase.sbd.delay`).
+The raw θ leaf of one model component, wrapped as a labelled `DimArray` for
+inspection. `step` selects the owning step, by name (`Symbol`, see
+[`stage_names`](@ref)) or by position (`Integer`, into `sol.steps`) — always
+explicit, never searched for: component names are local to a step's own model
+and routinely repeat across steps (e.g. a `bandpass` step and a `fringe` step
+can both carry an `atmos` component). `group` is `:phase` or `:logamp`;
+further `name`s descend into a multi-emit wrapper's subtree
+(`component_dimarray(sol, :fringe, :phase, :sbd, :delay)`).
 
 The result carries the leaf's five axes `(param, feed, Frequency, Ti, Ant)` —
 the second is `Feed` when the component is fit per feed, else the tied `node`
-axis — with coordinates materialized from `solution`'s geometry: a `Frequency`
+axis — with coordinates materialized from `sol`'s geometry: a `Frequency`
 segment's centre channel frequency (Hz), a `Ti` segment's mean epoch (hours),
-feed/node ids, and antenna names (from `solution.info.ant_names` when present,
-else `1:nant`). Use [`stage_names`](@ref) to list the steps recorded on
-`solution`.
+feed/node ids, and antenna names (from `sol.info.ant_names` when present,
+else `1:nant`).
 
 The wrap shares data with θ (no copy): an inspection view, never stored on the
 solution and never fed through the solve or AD.
 """
-macro comp(ex)
-    sol, step, path = _parse_comp_path(ex)
-    pathexpr = Expr(:tuple, (QuoteNode(s) for s in path)...)
-    return :(_component_dimarray($(esc(sol)), $(QuoteNode(step)), $pathexpr))
-end
-
-# Split `solution.<step>.θ.group.name…` into the solution expression, the step
-# name, and the tuple of component-path symbols after `.θ`. Errors at
-# macro-expansion when the `.θ` marker is absent, ends the path, or has no
-# step name before it.
-function _parse_comp_path(ex)
-    syms = Symbol[]
-    e = ex
-    while e isa Expr && e.head === :. && length(e.args) == 2 && e.args[2] isa QuoteNode
-        push!(syms, e.args[2].value)
-        e = e.args[1]
-    end
-    reverse!(syms)
-    i = findfirst(==(:θ), syms)
-    (i === nothing || i < 2 || i == length(syms)) && error(
-        "@comp: expected a path of the form `solution.<step>.θ.phase.<name>`; got `$ex`. " *
-            "The step must be given explicitly — component names can repeat across steps."
-    )
-    sol = foldl((a, s) -> Expr(:., a, QuoteNode(s)), syms[1:(i - 2)]; init = e)
-    return sol, syms[i - 1], syms[(i + 1):end]
-end
-
-"""
-    _component_dimarray(sol::CalibrationSolution, step::Symbol, path::Tuple{Vararg{Symbol}}) -> DimArray
-
-Runtime behind [`@comp`](@ref): look up the step named `step` (failing loudly
-if no step has that name), descend its OWN `plantree`/`axes` by `path` to a
-component leaf, and wrap it as a labelled `DimArray`. See `@comp` for the path
-grammar and coordinate sourcing.
-"""
-function _component_dimarray(sol::CalibrationSolution, step::Symbol, path::Tuple{Vararg{Symbol}})
+function component_dimarray(sol::CalibrationSolution, step, group::Symbol, name::Symbol...)
+    path = (group, name...)
     s = _step(sol, step)
     ok, plan = _try_descend(s.layout.plantree, path)
     ok || throw(
-        ArgumentError("@comp: step $(repr(step)) has no component named $(join(path, '.')).")
+        ArgumentError("component_dimarray: step $(repr(step)) has no component named $(join(path, '.')).")
     )
     plan isa ComponentPlan || throw(
         ArgumentError(
-            "@comp: path $(join(path, '.')) names a component group, not a leaf; " *
+            "component_dimarray: path $(join(path, '.')) names a component group, not a leaf; " *
                 "descend to a named component."
         )
     )
@@ -416,12 +399,14 @@ end
 
 """
     step_solution(sol::CalibrationSolution, name::Symbol) -> CalibrationSolution
+    sol[name::Symbol]
 
 Extract ONE step alone from a fitted solution: the step named `name`'s own
-model/layout/θ, wrapped standalone — nothing else. A step whose own model is
-GLOBALLY TIME-CONSTANT (every component `GlobalTime`, e.g. `BandpassEstimator`'s)
-extracted this way is PORTABLE: apply it in a LATER pipeline run as a precal
-transform at the head of the chain,
+model/layout/θ, wrapped standalone — nothing else (contrast
+[`stage_solution`](@ref), which keeps every earlier step too). A step whose
+own model is GLOBALLY TIME-CONSTANT (every component `GlobalTime`, e.g.
+`BandpassEstimator`'s) extracted this way is PORTABLE: apply it in a LATER
+pipeline run as a precal transform at the head of the chain,
 
     bp = step_solution(sol_calibrators, :bandpass)
     fit(ApplySolution(bp) |> FringeFit(...), uvset_full)

@@ -23,10 +23,10 @@ using PolarizedTypes: RPol, LPol
 # `vis_value(band, ti, bl, pol_index)` lets each test inject distinguishable
 # values to catch permutation/band/stokes bugs.
 function build_synth_idi_uvset(;
-        nant = 3, nbands = 2, nchan = 4, nscan = 2, ntime = 3,
+        nant = 3, nspw = 2, nchan = 4, nscan = 2, ntime = 3,
         pol_labels = ["PP", "PQ", "QP", "QQ"],
         rdate = "2021-03-04",
-        ref_freq = 43.0e9, chan_bw = 2.0e6, band_sep = 1.0e8,
+        ref_freq = 43.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         weight_fn = (band, ti, bl, p) -> 1.0f0,
         vis_fn = (band, ti, bl, p, c) -> ComplexF32(band + 0.1 * ti + 0.01 * bl + 0.001 * p + 0.0001 * c, -0.5),
     )
@@ -57,8 +57,8 @@ function build_synth_idi_uvset(;
 
     # Per-band frequency setups.
     setups = UV.FrequencySetup[]
-    for b in 1:nbands
-        chf = ref_freq + (b - 1) * band_sep .+ (0:(nchan - 1)) .* chan_bw
+    for b in 1:nspw
+        chf = ref_freq + (b - 1) * spw_sep .+ (0:(nchan - 1)) .* chan_bw
         push!(
             setups, UV.FrequencySetup(;
                 name = "band_$(b)",
@@ -67,7 +67,7 @@ function build_synth_idi_uvset(;
                 ch_widths = fill(chan_bw, nchan),
                 total_bandwidths = fill(chan_bw * nchan, nchan),
                 sidebands = fill(1.0, nchan),
-                extras = (; bandfreq = (b - 1) * band_sep, band = b),
+                extras = (; bandfreq = (b - 1) * spw_sep, band = b),
             ),
         )
     end
@@ -102,7 +102,7 @@ function build_synth_idi_uvset(;
             (Ti(ti_vals), Baseline(baselines.labels), UVW(["U", "V", "W"])),
         )
 
-        for b in 1:nbands
+        for b in 1:nspw
             fs = setups[b]
             vis_dense = Array{ComplexF32}(undef, nchan, ntime, nbl, npol)
             w_dense = Array{Float32}(undef, nchan, ntime, nbl, npol)
@@ -247,12 +247,12 @@ const _F32EPS = 1.0f-4
     @testset "bulk group read ≡ per-leaf" begin
         # materialize_group reads a scan's whole contiguous row span in ONE read
         # and extracts every band — must be byte-identical to per-leaf reads.
-        uvset = build_synth_idi_uvset(; nbands = 3, nchan = 4, nscan = 2, ntime = 3)
+        uvset = build_synth_idi_uvset(; nspw = 3, nchan = 4, nscan = 2, ntime = 3)
         path = tempname() * ".idifits"
         try
             UV.write_fitsidi(path, uvset)
             lazy = UV.load_fitsidi(path; lazy = true)
-            # Group lazy leaves by scan (sibling bands share a row map → bulk path).
+            # Group lazy leaves by scan (sibling spws share a row map → bulk path).
             byscan = Dict{String, Vector{Any}}()
             for (_, leaf) in DimensionalData.branches(lazy)
                 push!(get!(byscan, DimensionalData.metadata(leaf).scan_name, Any[]), leaf)
@@ -293,7 +293,7 @@ const _F32EPS = 1.0f-4
         # perm-inversion bug would scramble these in the read-back MSv4 order.
         pol_mag = Dict(1 => 1.0, 2 => 2.0, 3 => 3.0, 4 => 4.0)  # p index in MSv4 order
         uvset = build_synth_idi_uvset(;
-            nbands = 1, nchan = 2, nscan = 1, ntime = 1,
+            nspw = 1, nchan = 2, nscan = 1, ntime = 1,
             vis_fn = (band, ti, bl, p, c) -> ComplexF32(pol_mag[p], 0.0),
         )
         path = tempname() * ".idifits"
@@ -314,7 +314,7 @@ const _F32EPS = 1.0f-4
     end
 
     @testset "band / freq round-trip" begin
-        uvset = build_synth_idi_uvset(; nbands = 2, band_sep = 5.0e8)
+        uvset = build_synth_idi_uvset(; nspw = 2, spw_sep = 5.0e8)
         path = tempname() * ".idifits"
         try
             UV.write_fitsidi(path, uvset)
@@ -341,7 +341,7 @@ const _F32EPS = 1.0f-4
     @testset "weights / flags" begin
         # Flag pol index 2 (PQ) on every cell via a non-positive weight.
         uvset = build_synth_idi_uvset(;
-            nbands = 1, nchan = 3, nscan = 1, ntime = 2,
+            nspw = 1, nchan = 3, nscan = 1, ntime = 2,
             weight_fn = (band, ti, bl, p) -> p == 2 ? -1.0f0 : 2.0f0,
         )
         path = tempname() * ".idifits"
@@ -367,7 +367,7 @@ const _F32EPS = 1.0f-4
         tau = 36.0                              # 0.01 h spacing → 36 s
         factor = 2 * chan_bw * tau              # η = 1
         uvset = build_synth_idi_uvset(;
-            nbands = 1, nchan = 3, nscan = 1, ntime = 3, chan_bw = chan_bw,
+            nspw = 1, nchan = 3, nscan = 1, ntime = 3, chan_bw = chan_bw,
             weight_fn = (band, ti, bl, p) -> p == 2 ? -1.0f0 : 2.0f0,
         )
         path = tempname() * ".idifits"
@@ -398,7 +398,7 @@ const _F32EPS = 1.0f-4
     end
 end
 
-# Per-band a-priori amplitude calibration: `apply_calibration(uvset, band_cals)`
+# Per-band a-priori amplitude calibration: `apply_calibration(uvset, spw_cals)`
 # selects a distinct AntabCalibration per band (info.ddi + 1). This is the
 # format-neutral half of the FITS-IDI a-priori path (`load_fitsidi_apriori`
 # builds the per-band cals from GAIN_CURVE + SYSTEM_TEMPERATURE).
@@ -408,7 +408,7 @@ end
 
     # Two bands; all weights 1. Flat gain (POLY=[1.0]) + DPFU=1 ⇒ SEFD = Tsys,
     # so the per-baseline amplitude factor is √(Tsys_a·Tsys_b) = Tsys_band.
-    uvset = build_synth_idi_uvset(; nant = 3, nbands = 2, nchan = 2, nscan = 1, ntime = 3)
+    uvset = build_synth_idi_uvset(; nant = 3, nspw = 2, nchan = 2, nscan = 1, ntime = 3)
     ant_names = UV.union_antennas(uvset).name
 
     rdate = DimensionalData.metadata(uvset).array_obs.rdate
@@ -418,7 +418,7 @@ end
     times = [times[1] - Hour(1); times; times[end] + Hour(1)]   # pad the window
 
     tsys_band = Dict(1 => 100.0, 2 => 400.0)
-    band_cals = Dict{Int, BP.AntabCalibration}()
+    spw_cals = Dict{Int, BP.AntabCalibration}()
     for (b, tsys) in tsys_band
         stns = Dict{String, BP.AntabStation}()
         for nm in ant_names
@@ -427,14 +427,14 @@ end
             series = BP.AntabTsysSeries(times, [(0, :R), (0, :L)], vals)
             stns[String(nm)] = BP.AntabStation(String(nm), gain, series, 0)
         end
-        band_cals[b] = BP.AntabCalibration("synthetic", "synth", 2000, stns)
+        spw_cals[b] = BP.AntabCalibration("synthetic", "synth", 2000, stns)
     end
 
     # min_elevation_deg = -Inf: synthetic station_xyz aren't real ECEF coords
     # (elevation ill-defined) and the gain curve is flat, so disable the
     # below-horizon cutoff — this test only checks per-band SEFD scaling.
     corr = BP.apply_calibration(
-        uvset, band_cals; on_missing_station = :error, min_elevation_deg = -Inf,
+        uvset, spw_cals; on_missing_station = :error, min_elevation_deg = -Inf,
     )
 
     seen_bands = Set{Int}()
@@ -510,12 +510,12 @@ end
         # 2 bands so the FLAG vector columns are length>1. Antennas NOSTA 1:3,
         # baselines (1,2),(1,3),(2,3). All weights positive so the only flags
         # come from the FLAG table.
-        nbands = 2
+        nspw = 2
         nchan = 4
         nant = 3
         ntime = 3
         uvset = build_synth_idi_uvset(;
-            nant = nant, nbands = nbands, nchan = nchan, nscan = 1, ntime = ntime,
+            nant = nant, nspw = nspw, nchan = nchan, nscan = 1, ntime = ntime,
             weight_fn = (band, ti, bl, p) -> 2.0f0,
         )
         # The synthetic scan times are 0.0, 0.01, 0.02 hours (scan 1).
@@ -537,7 +537,7 @@ end
         try
             write_idi_with_flags(
                 path, uvset, flag_rows;
-                no_band = nbands, no_stkd = 4, no_chan = nchan,
+                no_band = nspw, no_stkd = 4, no_chan = nchan,
             )
             rt = UV.load_fitsidi(path; lazy = true)
             idx = _index_leaves_by_scan_band(rt)
@@ -596,12 +596,12 @@ end
     end
 
     @testset "wildcard antenna + all-channel + pol flag" begin
-        nbands = 2
+        nspw = 2
         nchan = 3
         nant = 3
         ntime = 2
         uvset = build_synth_idi_uvset(;
-            nant = nant, nbands = nbands, nchan = nchan, nscan = 1, ntime = ntime,
+            nant = nant, nspw = nspw, nchan = nchan, nscan = 1, ntime = ntime,
             weight_fn = (band, ti, bl, p) -> 1.0f0,
         )
         # Wildcard antenna (ANTS=(0,0)), all channels (CHANS=(0,0)), all times
@@ -620,7 +620,7 @@ end
         try
             write_idi_with_flags(
                 path, uvset, flag_rows;
-                no_band = nbands, no_stkd = 4, no_chan = nchan,
+                no_band = nspw, no_stkd = 4, no_chan = nchan,
             )
             rt = UV.load_fitsidi(path; lazy = true)
             idx = _index_leaves_by_scan_band(rt)

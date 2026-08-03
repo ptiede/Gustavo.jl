@@ -37,10 +37,10 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
     new_obs_time = [t_center]
 
     pol_dim = dims(vis_l, Pol)
-    if_dim = dims(vis_l, Frequency)
+    freq_dim = dims(vis_l, Frequency)
     bl_dim = dims(vis_l, Baseline)
     # Storage layout: (Frequency, Ti, Baseline, Pol). uvw: (Ti, Baseline, UVW).
-    vis_da = DimArray(V, (if_dim, Ti(new_obs_time), bl_dim, pol_dim))
+    vis_da = DimArray(V, (freq_dim, Ti(new_obs_time), bl_dim, pol_dim))
     weights_da = DimArray(W_sum, dims(vis_da))
     uvw_da = DimArray(UVW_out, (Ti(new_obs_time), bl_dim, UVW(["U", "V", "W"])))
 
@@ -121,10 +121,10 @@ scan_average(uvset::UVSet) = apply(TimeAverage(), uvset)
     FrequencyAverage(nout = 1)
 
 Per-leaf reducer that inverse-variance-averages the `Frequency` axis into `nout`
-contiguous output channels (default 1 — collapse each band leaf to a single
+contiguous output channels (default 1 — collapse each spw leaf to a single
 channel). The leaf's `freq_setup` is updated to the averaged channels (center =
 mean channel frequency of each group, `ch_width`/`total_bandwidth` = the group's
-summed channel widths). Post-fringe-fit continuum reduction: a band's delay
+summed channel widths). Post-fringe-fit continuum reduction: a spw's delay
 structure has been removed, so coherently averaging channels is lossless for
 imaging while shrinking the data by `nchan/nout`.
 """
@@ -266,9 +266,9 @@ function _time_bin_average_partition(leaf::DimensionalData.AbstractDimTree, dt_s
     V, W, UVW_out, tcenters = _time_bin_average_kernel(vis_l, weights_l, uvw_l, ids, tvals, nbin)
 
     pol_dim = dims(vis_l, Pol)
-    if_dim = dims(vis_l, Frequency)
+    freq_dim = dims(vis_l, Frequency)
     bl_dim = dims(vis_l, Baseline)
-    vis_da = DimArray(V, (if_dim, Ti(tcenters), bl_dim, pol_dim))
+    vis_da = DimArray(V, (freq_dim, Ti(tcenters), bl_dim, pol_dim))
     weights_da = DimArray(W, dims(vis_da))
     uvw_da = DimArray(UVW_out, (Ti(tcenters), bl_dim, UVW(["U", "V", "W"])))
     info = DimensionalData.metadata(leaf)
@@ -339,14 +339,14 @@ Average each leaf's `Ti` axis into `dt_seconds`-wide bins. `apply(TimeBinAverage
 time_bin_average(uvset::UVSet, dt_seconds::Real) = apply(TimeBinAverage(dt_seconds), uvset)
 
 
-# ── Band-edge handling ───────────────────────────────────────────────────────
+# ── Spw-edge handling ────────────────────────────────────────────────────────
 
 """
-    BandEdgeFlag(mode, fraction)
+    SpwEdgeFlag(mode, fraction)
 
-Per-leaf reducer that handles polyphase-filterbank band edges. `fraction` is the
-fraction of channels removed at *each* edge of every band (so `2·fraction` of the
-band in total).
+Per-leaf reducer that handles polyphase-filterbank spectral-window edges.
+`fraction` is the fraction of channels removed at *each* edge of every spw
+(so `2·fraction` of the spw in total).
 
 - `:flag_fraction` — zero the `weights` (and set `flag`) on the outer `fraction`
   of channels at each edge; the `Frequency` axis length is unchanged.
@@ -355,22 +355,22 @@ band in total).
 
 `fraction = 0` (or a count that rounds to zero channels) is a no-op.
 """
-struct BandEdgeFlag <: AbstractPartitionReducer
+struct SpwEdgeFlag <: AbstractPartitionReducer
     mode::Symbol
     fraction::Float64
-    function BandEdgeFlag(mode::Symbol = :flag_fraction, fraction::Real = 0.0)
+    function SpwEdgeFlag(mode::Symbol = :flag_fraction, fraction::Real = 0.0)
         mode in (:flag_fraction, :trim) ||
-            error("BandEdgeFlag mode must be :flag_fraction or :trim, got :$mode")
+            error("SpwEdgeFlag mode must be :flag_fraction or :trim, got :$mode")
         (0.0 <= fraction < 0.5) ||
-            error("BandEdgeFlag fraction must be in [0, 0.5), got $fraction")
+            error("SpwEdgeFlag fraction must be in [0, 0.5), got $fraction")
         return new(mode, Float64(fraction))
     end
 end
 
-(r::BandEdgeFlag)(leaf::DimensionalData.AbstractDimTree, ::PartitionInfo, ::UVMetadata) =
-    _band_edge_partition(leaf, r.mode, r.fraction)
+(r::SpwEdgeFlag)(leaf::DimensionalData.AbstractDimTree, ::PartitionInfo, ::UVMetadata) =
+    _spw_edge_partition(leaf, r.mode, r.fraction)
 
-function _band_edge_partition(leaf::DimensionalData.AbstractDimTree, mode::Symbol, fraction::Real)
+function _spw_edge_partition(leaf::DimensionalData.AbstractDimTree, mode::Symbol, fraction::Real)
     vis_l = leaf[:vis]
     nchan = size(vis_l, 1)
     ne = floor(Int, fraction * nchan)
@@ -384,7 +384,7 @@ function _band_edge_partition(leaf::DimensionalData.AbstractDimTree, mode::Symbo
     else  # :trim
         keep = (ne + 1):(nchan - ne)
         isempty(keep) &&
-            error("BandEdgeFlag :trim removed all $nchan channels (fraction=$fraction)")
+            error("SpwEdgeFlag :trim removed all $nchan channels (fraction=$fraction)")
         return _trim_channels(leaf, keep)
     end
 end
@@ -418,34 +418,34 @@ function _trim_channels(leaf::DimensionalData.AbstractDimTree, keep::AbstractVec
 end
 
 """
-    flag_band_edges(uvset::UVSet; mode = :flag_fraction, fraction = 0.0) -> UVSet
+    flag_spw_edges(uvset::UVSet; mode = :flag_fraction, fraction = 0.0) -> UVSet
 
-Handle band edges on every leaf. `apply(BandEdgeFlag(mode, fraction), uvset)`.
+Handle spectral-window edges on every leaf. `apply(SpwEdgeFlag(mode, fraction), uvset)`.
 """
-flag_band_edges(uvset::UVSet; mode::Symbol = :flag_fraction, fraction::Real = 0.0) =
-    apply(BandEdgeFlag(mode, fraction), uvset)
+flag_spw_edges(uvset::UVSet; mode::Symbol = :flag_fraction, fraction::Real = 0.0) =
+    apply(SpwEdgeFlag(mode, fraction), uvset)
 
 
-# ── Combine spectral windows (bands) into one IF axis ────────────────────────
+# ── Combine spectral windows into one Frequency axis ──────────────────────────
 
 """
     combine_spw(uvset::UVSet) -> UVSet
 
-Merge the sibling spectral-window (band) leaves of each (source, scan, subarray)
-into a single leaf whose `Frequency` axis is the concatenation of all bands'
-channels (sorted by frequency). The per-band `FrequencySetup`s collapse into one
+Merge the sibling spectral-window leaves of each (source, scan, subarray)
+into a single leaf whose `Frequency` axis is the concatenation of all spws'
+channels (sorted by frequency). The per-spw `FrequencySetup`s collapse into one
 setup whose `channel_freqs`/`ch_widths`/`total_bandwidths`/`sidebands` are the
-concatenated band values.
+concatenated spw values.
 
 This is the shape a UVFITS export wants: `write_uvfits` maps a leaf's `Frequency`
-axis onto the AIPS IF axis (one channel per IF), so the combined bands become the
+axis onto the AIPS IF axis (one channel per IF), so the combined spws become the
 IFs of a single FREQID — the standard continuum layout — rather than one FREQID
-per band (which a reader also cannot serialize when a band carries a single
-channel). Apply after [`frequency_average`](@ref) so each band is one channel.
+per spw (which a reader also cannot serialize when a spw carries a single
+channel). Apply after [`frequency_average`](@ref) so each spw is one channel.
 
 All sibling leaves of a group must share their `Ti`, `Baseline`, and `Pol` axes
-(true for bands read from one FITS-IDI `UV_DATA` table); a mismatch errors.
-Groups with a single band are returned unchanged.
+(true for spws read from one FITS-IDI `UV_DATA` table); a mismatch errors.
+Groups with a single spw are returned unchanged.
 """
 function combine_spw(uvset::UVSet)
     groups = Dict{Tuple{String, String, String}, Vector{Any}}()
@@ -463,18 +463,18 @@ function combine_spw(uvset::UVSet)
     new_branches = DimensionalData.TreeDict()
     for key in order
         leaves = groups[key]
-        merged = length(leaves) == 1 ? only(leaves) : _combine_band_leaves(leaves)
+        merged = length(leaves) == 1 ? only(leaves) : _combine_spw_leaves(leaves)
         new_branches[partition_key(DimensionalData.metadata(merged))] = merged
     end
     return DimensionalData.rebuild(uvset; branches = new_branches)
 end
 
-# Concatenate sibling band leaves along Frequency into one leaf (one merged
+# Concatenate sibling spw leaves along Frequency into one leaf (one merged
 # FrequencySetup). Leaves must agree on Ti/Baseline/Pol; uvw is freq-independent
 # so the first leaf's is carried through.
-function _combine_band_leaves(leaves)
-    band_min(l) = minimum(channel_freqs(DimensionalData.metadata(l).freq_setup))
-    leaves = sort(collect(leaves); by = band_min)
+function _combine_spw_leaves(leaves)
+    spw_min(l) = minimum(channel_freqs(DimensionalData.metadata(l).freq_setup))
+    leaves = sort(collect(leaves); by = spw_min)
     l0 = first(leaves)
     info0 = DimensionalData.metadata(l0)
 
@@ -484,8 +484,8 @@ function _combine_band_leaves(leaves)
     for l in leaves
         (lookup(l[:vis], Ti) == ti0 && lookup(l[:vis], Baseline) == bl0 && lookup(l[:vis], Pol) == pol0) ||
             error(
-            "combine_spw: sibling band leaves must share Ti/Baseline/Pol axes. " *
-                "If you time-averaged first, each band got its own weighted bin-center " *
+            "combine_spw: sibling spw leaves must share Ti/Baseline/Pol axes. " *
+                "If you time-averaged first, each spw got its own weighted bin-center " *
                 "epochs — apply combine_spw BEFORE time_bin_average (after frequency_average, " *
                 "which preserves the integration axis).",
         )

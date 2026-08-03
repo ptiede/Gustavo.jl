@@ -158,7 +158,7 @@
 
     @testset "validation errors" begin
         # An incompatible ApplySolution is rejected at stream construction.
-        other, _ = _build_fringe_uvset(nbands = 3, nchan = 4)
+        other, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
         @test_throws ErrorException FP.scan_stream(other; transforms = [FP.ApplySolution(precal)])
         @test_throws ErrorException FP.StationWeightScale([1.0, -1.0])
         st_len = FP.scan_stream(uvset; geom = geom, transforms = [FP.FlagChannels(falses(3))])

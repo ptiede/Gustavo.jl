@@ -46,10 +46,10 @@ export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
 export FringeFit, FringeModel, DispersionModel, SingleBandDelay, default_fringe_terms,
     MatchedFilter, DispersionSBDFit, BandpassEstimator, TemporalSmoother
-export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagBandEdges
+export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate
-export SolveStep, StepChain, DataTransformStep, ExecutionConfig
+export SolveStep, StepChain, DataTransformStep, ExecutionConfig, ProgressLogger
 export start_pass!, process_scan!, finish_pass!, scan_values
 export model_components, fit_selection, provides, required_grouping
 # Re-export the transform / selection vocabulary and stage accessors so
@@ -58,11 +58,11 @@ export AbstractDataTransform, apply_transform!, apply_transform
 export CalFunction, ApplySolution, StationWeightScale, FlagChannels
 export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
-export AbstractLeafGrouping, ByScan, ByBand, ByKey
+export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ScanStream, scan_stream, select_groups
 export search_scan
 export map_groups, foreach_group
 export StepSolution, stage_names, stage_solution, stage_info
-export component_gains, component_names, gains, @comp
+export component_gains, component_names, component_dimarray, gains
 export step_solution
 end

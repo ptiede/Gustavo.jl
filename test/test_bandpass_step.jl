@@ -21,13 +21,13 @@ _pc_phase_idx(step) = findfirst(CAL._is_bandpass, CAL.phase_components(step.mode
 _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model))
 
 @testset "BandpassEstimator step (new engine)" begin
-    nant, nbands, nchan = 4, 2, 8
+    nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
-    nglob = nbands * nchan
+    nglob = nspw * nchan
     bp_true = 0.5 .* randn(rng, nant, 2, nglob)
     abp_true = 0.2 .* randn(rng, nant, 2, nglob)
     uvset, _ = _build_fringe_uvset(;
-        nant, nbands, nchan, bandpass = bp_true, amp_bandpass = abp_true,
+        nant, nspw, nchan, bandpass = bp_true, amp_bandpass = abp_true,
     )
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
@@ -223,7 +223,7 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
 
         # Cross-set: a different track (fewer times) with a station subset —
         # the time-constant bandpass ports, stations matched by name.
-        uvsub, _ = _build_fringe_uvset(; nant = 3, nbands, nchan, ntime = 5)
+        uvsub, _ = _build_fringe_uvset(; nant = 3, nspw, nchan, ntime = 5)
         sts = FP.scan_stream(uvsub; transforms = (FP.ApplySolution(bps),))
         @test CAL.build_geometry(uvsub).times != bps.geom.times
         stackx, _ = FP.materialize_cube(sts, sts.groups[1])
@@ -243,13 +243,13 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         @test isequal(parent(stackx[:vis]), Vx) && isequal(parent(stackx[:weights]), Wx)
 
         # A station the solution never saw keeps identity gains (with a warning).
-        uvbig, _ = _build_fringe_uvset(; nant = 5, nbands, nchan, ntime = 5)
+        uvbig, _ = _build_fringe_uvset(; nant = 5, nspw, nchan, ntime = 5)
         stb = FP.scan_stream(uvbig; transforms = (FP.ApplySolution(bps),))
         @test_logs (:warn, r"A5") match_mode = :any FP.materialize_cube(stb, stb.groups[1])
 
         # Guard rails: channel-layout mismatch and non-time-constant solutions
         # are rejected at STREAM CONSTRUCTION (fail-fast, before any read).
-        uvnc, _ = _build_fringe_uvset(; nant = 3, nbands, nchan = 4, ntime = 5)
+        uvnc, _ = _build_fringe_uvset(; nant = 3, nspw, nchan = 4, ntime = 5)
         @test_throws ErrorException FP.scan_stream(uvnc; transforms = (FP.ApplySolution(bps),))
         @test_throws ErrorException FP.scan_stream(uvsub; transforms = (FP.ApplySolution(sol_n),))
     end
@@ -261,13 +261,13 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         # now, so the gates are inner-invariance and truth recovery.)
         dtec_true = [0.0, 3.0, -5.0, 1.5]
         uvd, _ = _build_fringe_uvset(
-            nant = 4, nbands = 8, nchan = 8, ref_freq = 3.0e9, band_sep = 0.5e9,
+            nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
             dtec = dtec_true, seed = 77, feed_common = true,
         )
         geom = CAL.build_geometry(uvd)
         @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
         model = FP._fringe_model(
-            dispersion = true, sbd_bands = FP.fringe_band_groups(geom.channel_freqs),
+            dispersion = true, sbd_freq_groups = FP.fringe_freq_groups(geom.channel_freqs),
         )
         layout = CAL.plan_parameters(model, 4, geom)
         disp_plan = CAL._dispersion_plan(model, layout)

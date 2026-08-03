@@ -47,18 +47,18 @@ _dispersion_sbd_step(; dispersion = true, sbd = true) =
 #                          + Δscreen[ti] ])
 # with Δx = x[a, fa] − x[b, fb]. Times in seconds use t0_sec; freqs in Hz.
 function _build_fringe_uvset(;
-        nant = 4, nbands = 2, nchan = 8, ntime = 12, nscans = 1,
+        nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
         pol_labels = ["PP", "PQ", "QP", "QQ"],
-        ref_freq = 230.0e9, chan_bw = 2.0e6, band_sep = 1.0e8,
+        ref_freq = 230.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         seed = 1234,
-        bandpass = nothing,    # optional (nant, 2, nbands*nchan) per-channel phase (rad)
-        amp_bandpass = nothing, # optional (nant, 2, nbands*nchan) per-channel log-amp
+        bandpass = nothing,    # optional (nant, 2, nspw*nchan) per-channel phase (rad)
+        amp_bandpass = nothing, # optional (nant, 2, nspw*nchan) per-channel log-amp
         dtec = nothing,         # optional (nant,) station TEC (TECU, feed-common)
         feed_common = false,    # tie delay/phi across feeds (zero true R-L offset)
         rl_rate = nothing,      # optional (nant,) feed-2 − feed-1 rate offset (Hz) —
                                 #   exercises the opt-in RL(rate = ...) solve
 
-        band_origins = nothing, # optional (nbands,) explicit band start freqs (Hz) — overrides band_sep
+        spw_origins = nothing, # optional (nspw,) explicit band start freqs (Hz) — overrides spw_sep
         station_positions = nothing, # optional (nant,) xyz vectors (m) — for co-location tests
     )
     UV = Gustavo.UVData
@@ -87,8 +87,8 @@ function _build_fringe_uvset(;
     baselines = UV.BaselineIndex(bl_pairs, bl_pairs; antenna_names = collect(antennas.name))
 
     setups = UV.FrequencySetup[]
-    for b in 1:nbands
-        f_lo = band_origins === nothing ? ref_freq + (b - 1) * band_sep : Float64(band_origins[b])
+    for b in 1:nspw
+        f_lo = spw_origins === nothing ? ref_freq + (b - 1) * spw_sep : Float64(spw_origins[b])
         chf = f_lo .+ (0:(nchan - 1)) .* chan_bw
         push!(
             setups, UV.FrequencySetup(;
@@ -98,7 +98,7 @@ function _build_fringe_uvset(;
                 ch_widths = fill(chan_bw, nchan),
                 total_bandwidths = fill(chan_bw * nchan, nchan),
                 sidebands = fill(1.0, nchan),
-                extras = (; bandfreq = (b - 1) * band_sep, band = b),
+                extras = (; bandfreq = (b - 1) * spw_sep, band = b),
             ),
         )
     end
@@ -172,7 +172,7 @@ function _build_fringe_uvset(;
 
     src_name = "SRC1"
     branches = DimensionalData.TreeDict()
-    for s in 1:nscans, b in 1:nbands
+    for s in 1:nscans, b in 1:nspw
         fs = setups[b]
         fch = collect(channel_freqs(fs))
         ti_scan = ti_vals .+ (s - 1) * scan_span

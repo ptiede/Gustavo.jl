@@ -40,7 +40,7 @@
 #     scatter on top of the stable global instrumental R–L offset.
 # Log-amplitude empty. `solve_station_systems!` reads the θ columns this model
 # declares — so the global-vs-per-scan split is a model choice, not solver code.
-function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay::Symbol = :global)
+function _fringe_model(; dispersion::Bool = false, sbd_freq_groups = nothing, rl_delay::Symbol = :global)
     rl_delay in (:global, :perscan) ||
         error("rl_delay must be :global or :perscan (got $rl_delay)")
     # The R–L (feed-2−feed-1) delay's time basis: `GlobalTime` fits ONE offset per
@@ -66,12 +66,12 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
     # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a group
     # slope about the group's own centre νg needs the companion per-group
     # constant −2πτ(νg − f0): net phase 2πτ(f − νg), zero at the group centre —
-    # the cross-band solution is untouched. `FrequencyBands` is the routing
+    # the cross-band solution is untouched. `FreqGroups` is the routing
     # signature (excluded from stage-B).
-    sbd = sbd_bands === nothing ? (;) : (
+    sbd = sbd_freq_groups === nothing ? (;) : (
             sbd = (
-                delay = TiedComponent(GainComponent(Delay(), PerScan(), FrequencyBands(sbd_bands)), SharedFeeds()),
-                constant = TiedComponent(GainComponent(ConstantTerm(), PerScan(), FrequencyBands(sbd_bands)), SharedFeeds()),
+                delay = TiedComponent(GainComponent(Delay(), PerScan(), FreqGroups(sbd_freq_groups)), SharedFeeds()),
+                constant = TiedComponent(GainComponent(ConstantTerm(), PerScan(), FreqGroups(sbd_freq_groups)), SharedFeeds()),
             ),
         )
     return StationGainModel(
@@ -119,7 +119,7 @@ end
 # empty-handed.
 
 # The feed-common wideband delay: NOT the per-band-group SBD delay
-# (`FrequencyBands`), NOT a feed-specific R–L delay (`FeedComponent`). Shared by
+# (`FreqGroups`), NOT a feed-specific R–L delay (`FeedComponent`). Shared by
 # `FringeFit`'s own wideband delay (`mbd`) and `DispersionSBDFit`'s private
 # per-scan delay-refinement column — but each lives in its OWN step's private
 # model, so `findfirst` over either step's own component list finds the right
@@ -130,9 +130,9 @@ _is_perscan_delay(tc) =
 
 # The per-band-group single-band delay and its companion constant, which are
 # fit together by `refine_scan_sbd!`.
-_is_sbd_delay(tc) = tc.component.term isa Delay && tc.component.freq isa FrequencyBands
+_is_sbd_delay(tc) = tc.component.term isa Delay && tc.component.freq isa FreqGroups
 _is_sbd_constant(tc) =
-    tc.component.term isa ConstantTerm && tc.component.freq isa FrequencyBands
+    tc.component.term isa ConstantTerm && tc.component.freq isa FreqGroups
 
 # The step's own feed-common wideband delay — `FringeFit`'s `mbd` when called
 # on the fringe step's own `(model, layout)`, or `DispersionSBDFit`'s private
@@ -144,7 +144,7 @@ function _perscan_delay_plan(model, layout)
     return i === nothing ? nothing : layout.plans[i]
 end
 
-# The SBD components' plans `(dplan, cplan, bands)` (per-scan per-band-group
+# The SBD components' plans `(dplan, cplan, freqgroups)` (per-scan per-band-group
 # delay + companion constant), or `nothing` when the model carries none.
 function _sbd_plans(model, layout)
     pcs = phase_components(model)
@@ -152,7 +152,7 @@ function _sbd_plans(model, layout)
     i === nothing && return nothing
     j = findfirst(_is_sbd_constant, pcs)
     j === nothing && error("SBD delay component present without its companion constant")
-    return (dplan = layout.plans[i], cplan = layout.plans[j], bands = pcs[i].component.freq.ranges)
+    return (dplan = layout.plans[i], cplan = layout.plans[j], freqgroups = pcs[i].component.freq.ranges)
 end
 
 # Index of the adhoc component (the per-integration phase term) in the flat

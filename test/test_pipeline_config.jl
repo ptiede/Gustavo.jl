@@ -25,7 +25,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
     end
 
     @testset "pipeline ReduceSteps fuse into the streaming pass" begin
-        uvset, _ = _build_fringe_uvset(nbands = 3, nchan = 4)
+        uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
         chain = [FringeFit(), BandpassEstimator(), TemporalSmoother()]
         pipe = CalibrationPipeline(vcat(
             chain, [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 1.0e6)],
@@ -82,9 +82,9 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
     end
 
     @testset "band edges" begin
-        uvset, _ = _build_fringe_uvset(nbands = 2, nchan = 8)   # fraction 0.2 → 1 edge chan
+        uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 8)   # fraction 0.2 → 1 edge chan
 
-        flagged = UVP.flag_band_edges(uvset; mode = :flag_fraction, fraction = 0.2)
+        flagged = UVP.flag_spw_edges(uvset; mode = :flag_fraction, fraction = 0.2)
         for (k, leaf) in DimensionalData.branches(flagged)
             W = parent(leaf[:weights])
             W0 = parent(DimensionalData.branches(uvset)[k][:weights])
@@ -93,20 +93,20 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
             @test W[2:(end - 1), :, :, :] == W0[2:(end - 1), :, :, :]
         end
 
-        trimmed = UVP.flag_band_edges(uvset; mode = :trim, fraction = 0.2)
+        trimmed = UVP.flag_spw_edges(uvset; mode = :trim, fraction = 0.2)
         for (_, leaf) in DimensionalData.branches(trimmed)
             @test size(parent(leaf[:vis]), 1) == 6
             @test length(channel_freqs(DimensionalData.metadata(leaf).freq_setup)) == 6
         end
 
-        @test_throws ErrorException UVP.flag_band_edges(uvset; mode = :bogus, fraction = 0.1)
+        @test_throws ErrorException UVP.flag_spw_edges(uvset; mode = :bogus, fraction = 0.1)
 
         # As a fused reduce step on the corrected output.
         _, out = fitcalibrate(
             CalibrationPipeline(
                 [
                     FringeFit(), BandpassEstimator(), TemporalSmoother(),
-                    FlagBandEdges(mode = :flag_fraction, fraction = 0.2),
+                    FlagSpwEdges(mode = :flag_fraction, fraction = 0.2),
                 ]
             ),
             uvset,
@@ -179,10 +179,10 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         # ref_ant is run-wide, on CalibrationPipeline, not on FringeModel.
         @test CalibrationPipeline([FringeFit()]).ref_ant == 1
 
-        # AprioriAmplitude carries a pre-built band_cals (loading is the caller's job).
+        # AprioriAmplitude carries a pre-built spw_cals (loading is the caller's job).
         bc = Dict(1 => :dummy)
         ap = AprioriAmplitude(bc; min_elevation_deg = 10.0)
-        @test ap.band_cals === bc
+        @test ap.spw_cals === bc
         @test ap.min_elevation_deg == 10.0
         @test ap.on_missing_station == :warn
     end
@@ -229,6 +229,57 @@ end
         @test fieldtype(typeof(CalibrationPipeline([FringeFit()]; exec = e)), :exec) === typeof(e)
     end
 
+    @testset "ProgressLogger" begin
+        buf = IOBuffer()
+        p = ProgressLogger(min_interval = 0, io = buf)
+        p(:fringe, 0, 3)
+        p(:fringe, 1, 3)
+        p(:fringe, 2, 3)
+        p(:fringe, 3, 3)
+        lines = split(strip(String(take!(buf))), '\n')
+        @test length(lines) == 4
+        @test occursin("starting", lines[1]) && occursin("3 scan groups", lines[1])
+        @test occursin("ETA", lines[2]) && occursin("1/3", lines[2])
+        @test occursin("ETA", lines[3]) && occursin("2/3", lines[3])
+        @test occursin("done", lines[4]) && occursin("3/3", lines[4])
+
+        # Intermediate scans are throttled; only the always-on start/finish print.
+        buf2 = IOBuffer()
+        p2 = ProgressLogger(min_interval = 3600, io = buf2)
+        p2(:fringe, 0, 3)
+        p2(:fringe, 1, 3)
+        p2(:fringe, 2, 3)
+        p2(:fringe, 3, 3)
+        lines2 = split(strip(String(take!(buf2))), '\n')
+        @test length(lines2) == 2
+        @test occursin("starting", lines2[1])
+        @test occursin("done", lines2[2])
+
+        # A new stage (or a repeated pass restarting at done == 0) always
+        # reports, regardless of the throttle.
+        buf3 = IOBuffer()
+        p3 = ProgressLogger(min_interval = 3600, io = buf3)
+        p3(:fringe, 0, 2)
+        p3(:fringe, 2, 2)
+        p3(:bandpass, 0, 1)
+        p3(:bandpass, 1, 1)
+        lines3 = split(strip(String(take!(buf3))), '\n')
+        @test length(lines3) == 4
+        @test occursin("fringe", lines3[1]) && occursin("fringe", lines3[2])
+        @test occursin("bandpass", lines3[3]) && occursin("bandpass", lines3[4])
+
+        # Wired through a real fit: the pipeline's stages are named in the log.
+        buf4 = IOBuffer()
+        sol = fit(
+            FringeFit(model = FringeModel()) |> BandpassEstimator(),
+            uvset;
+            exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
+        )
+        @test sol isa CAL.CalibrationSolution
+        out = String(take!(buf4))
+        @test occursin("fringe", out) && occursin("bandpass", out)
+    end
+
     @testset "stream group specs and transforms" begin
         t = StationWeightScale(ones(4))
         stream = ST.scan_stream(uvset; transforms = (t,))
@@ -252,7 +303,7 @@ end
 
     @testset "AprioriAmplitude and CalibrationPipeline.ref_ant" begin
         bc = Dict(1 => :dummy)
-        @test fieldtype(typeof(AprioriAmplitude(bc)), :band_cals) === typeof(bc)
+        @test fieldtype(typeof(AprioriAmplitude(bc)), :spw_cals) === typeof(bc)
         # ref_ant's domain is what `_resolve_ref_ant` accepts: an antenna index
         # or a station code.
         @test CalibrationPipeline([FringeFit()]; ref_ant = 2).ref_ant == 2

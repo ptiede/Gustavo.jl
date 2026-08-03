@@ -188,7 +188,7 @@ end
     @test θ[1] == -99.0
 end
 
-@testset "@comp: a component leaf as a labelled DimArray" begin
+@testset "component_dimarray: a component leaf as a labelled DimArray" begin
     freqs = [1.0e9, 2.0e9, 3.0e9, 4.0e9]
     times = [0.0, 1.0, 2.0, 3.0]
     geom = CAL.DataGeometry(;
@@ -212,10 +212,10 @@ end
     sol = CAL.CalibrationSolution(model, layout, geom, θ, (; ant_names = ants))
 
     # A leaf's DimArray is shaped and rolled exactly as the layout stored it.
-    # The step name (`:solution`, the single-model constructor's default) is
-    # part of the path: components are addressed within one step, never by a
-    # bare name searched across steps.
-    a = @comp sol.solution.θ.phase.atmos
+    # The step (`:solution`, the single-model constructor's default) is always
+    # explicit: components are addressed within one step, never searched for
+    # by a bare name across steps.
+    a = CAL.component_dimarray(sol, :solution, :phase, :atmos)
     @test a isa DimArray
     @test size(a) == layout.axes.phase.atmos.dims
     @test name.(dims(a)) == layout.axes.phase.atmos.roles
@@ -224,14 +224,17 @@ end
     # PerFeed carries a physical Feed axis; the tied tyings carry a positional
     # node axis (ReferenceRelative: reference + relative, two nodes).
     @test name(dims(a, 2)) == :Feed
-    @test name(dims((@comp sol.solution.θ.phase.bp), 2)) == :node
-    @test size((@comp sol.solution.θ.phase.rl), 2) == 2
+    @test name(dims(CAL.component_dimarray(sol, :solution, :phase, :bp), 2)) == :node
+    @test size(CAL.component_dimarray(sol, :solution, :phase, :rl), 2) == 2
+
+    # The same lookup by step POSITION (not name) reaches the same leaf.
+    @test CAL.component_dimarray(sol, 1, :phase, :atmos) == a
 
     # Segment axes carry a representative physical coordinate per segment: a
     # frequency segment's centre, a time segment's mean epoch.
     @test lookup(a, UVD.Frequency) == [mean(freqs)]              # GlobalFrequency: one centre
     @test lookup(a, Ti) == [mean(times[1:2]), mean(times[3:4])]  # PerScan: per-scan mean epoch
-    @test lookup((@comp sol.solution.θ.phase.bp), UVD.Frequency) ==
+    @test lookup(CAL.component_dimarray(sol, :solution, :phase, :bp), UVD.Frequency) ==
         [mean(freqs[1:2]), mean(freqs[3:4])]                     # ChannelBlocks(2): block centres
 
     # Antennas take the solution's station names; feed is 1:2.
@@ -239,7 +242,7 @@ end
     @test lookup(a, UVD.Feed) == 1:2
 
     # logamp descends the same way.
-    @test (@comp sol.solution.θ.logamp.amp) isa DimArray
+    @test CAL.component_dimarray(sol, :solution, :logamp, :amp) isa DimArray
 
     # The leaf is a view onto θ (no copy): its data is the component's block, and
     # writing through it mirrors into θ.
@@ -250,7 +253,7 @@ end
 
     # No ant_names in info → the antenna axis falls back to 1:nant.
     soln = CAL.CalibrationSolution(model, layout, geom, θ, (; nant))
-    @test lookup((@comp soln.solution.θ.phase.atmos), UVD.Ant) == 1:nant
+    @test lookup(CAL.component_dimarray(soln, :solution, :phase, :atmos), UVD.Ant) == 1:nant
 
     # A multi-emit wrapper's nested subtree is reached leaf by leaf, the shape
     # SingleBandDelay compiles to (`sbd.delay` / `sbd.constant`).
@@ -262,27 +265,27 @@ end
     msbd = CAL.StationGainModel(phase = (sbd = sbd,))
     lsbd = CAL.plan_parameters(msbd, 2, gb)
     ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, Float64.(1:lsbd.nθ), (;))
-    dl = @comp ssbd.solution.θ.phase.sbd.delay
+    dl = CAL.component_dimarray(ssbd, :solution, :phase, :sbd, :delay)
     @test dl isa DimArray
     @test name(dl) == :delay
     @test lookup(dl, UVD.Frequency) == [mean([1.0e9, 1.1e9]), mean([5.0e9, 5.1e9])]
     @test vec(parent(dl)) == ssbd.steps[1].θ[lsbd.plantree.phase.sbd.delay.range]
 
-    # A path that stops at a group, omits the step name, or omits the `.θ`
-    # marker, is rejected.
-    @test_throws ArgumentError (@comp ssbd.solution.θ.phase.sbd)
-    @test_throws "names a component group" (@comp ssbd.solution.θ.phase.sbd)
-    @test_throws LoadError @eval @comp ssbd.θ.phase.sbd.delay
-    @test_throws "step must be given explicitly" (@eval @comp ssbd.θ.phase.sbd.delay)
-    @test_throws LoadError @eval @comp sol.solution.phase.atmos
+    # A path that stops at a group is rejected.
+    @test_throws ArgumentError CAL.component_dimarray(ssbd, :solution, :phase, :sbd)
+    @test_throws "names a component group" CAL.component_dimarray(ssbd, :solution, :phase, :sbd)
 
-    # An unknown step name fails loudly, naming the steps actually recorded.
-    @test_throws ArgumentError (@comp sol.nosuchstep.θ.phase.atmos)
-    @test_throws "recorded stages: [:solution]" (@comp sol.nosuchstep.θ.phase.atmos)
+    # An unknown step name, or an out-of-range step index, fails loudly,
+    # naming/counting the steps actually recorded.
+    @test_throws ArgumentError CAL.component_dimarray(sol, :nosuchstep, :phase, :atmos)
+    @test_throws "recorded stages: [:solution]" CAL.component_dimarray(sol, :nosuchstep, :phase, :atmos)
+    @test_throws ArgumentError CAL.component_dimarray(sol, 2, :phase, :atmos)
+    @test_throws "has 1 step(s); no step at index 2" CAL.component_dimarray(sol, 2, :phase, :atmos)
 
     # Component names are local to each step and may repeat across steps —
-    # splitting a solve into steps is exactly what makes that legal, so `@comp`
-    # must resolve by step, never by searching for a name across steps.
+    # splitting a solve into steps is exactly what makes that legal, so
+    # `component_dimarray` must resolve by step, never by searching for a name
+    # across steps.
     atmos2 = CAL.TiedComponent(
         CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()), CAL.SharedFeeds(),
     )
@@ -296,8 +299,10 @@ end
         ],
         geom, (; ant_names = ants),
     )
-    @test vec(parent(@comp twostep.bandpass.θ.phase.atmos)) == θ[rng[1]]
-    @test all(==(-1.0), @comp twostep.fringe.θ.phase.atmos)
+    @test vec(parent(CAL.component_dimarray(twostep, :bandpass, :phase, :atmos))) == θ[rng[1]]
+    @test all(==(-1.0), CAL.component_dimarray(twostep, :fringe, :phase, :atmos))
+    @test CAL.component_dimarray(twostep, 1, :phase, :atmos) == CAL.component_dimarray(twostep, :bandpass, :phase, :atmos)
+    @test CAL.component_dimarray(twostep, 2, :phase, :atmos) == CAL.component_dimarray(twostep, :fringe, :phase, :atmos)
 end
 
 @testset "Calibration evaluate_gains: correctness, purity, inference" begin
@@ -538,10 +543,10 @@ end
         @test_throws "duration_hr must be positive" CAL.TimeBlocks(-1.0)
         @test_throws ArgumentError CAL.ChannelBlocks(0)
         @test_throws "block_size must be at least 1" CAL.ChannelBlocks(-2)
-        @test_throws ArgumentError CAL.FrequencyBands(UnitRange{Int}[])
-        @test_throws "at least one range" CAL.FrequencyBands(UnitRange{Int}[])
-        @test_throws "must start at channel 1" CAL.FrequencyBands([2:4])
-        @test_throws "contiguous and ascending" CAL.FrequencyBands([1:4, 6:8])
+        @test_throws ArgumentError CAL.FreqGroups(UnitRange{Int}[])
+        @test_throws "at least one range" CAL.FreqGroups(UnitRange{Int}[])
+        @test_throws "must start at channel 1" CAL.FreqGroups([2:4])
+        @test_throws "contiguous and ascending" CAL.FreqGroups([1:4, 6:8])
     end
 
     @testset "geometry axis lengths" begin
@@ -554,10 +559,10 @@ end
         @test_throws "spw_of_chan length" CAL.DataGeometry(;
             times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1])
 
-        # `FrequencyBands` is structurally valid but must also cover the geometry.
+        # `FreqGroups` is structurally valid but must also cover the geometry.
         geom = CAL.DataGeometry(; times = [0.0], channel_freqs = collect(1.0:6.0) .* 1.0e9)
-        @test_throws DimensionMismatch CAL.freq_segment_ids(CAL.FrequencyBands([1:4]), geom)
-        @test_throws "geometry has 6" CAL.freq_segment_ids(CAL.FrequencyBands([1:4]), geom)
+        @test_throws DimensionMismatch CAL.freq_segment_ids(CAL.FreqGroups([1:4]), geom)
+        @test_throws "geometry has 6" CAL.freq_segment_ids(CAL.FreqGroups([1:4]), geom)
     end
 
     @testset "feed tying and empty models" begin

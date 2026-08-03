@@ -29,20 +29,20 @@ _feed_label(f::Integer) = string("feed", f)
 # ── plot_fringe_spectrum: phase vs frequency, rows = sites, cols = feeds ───────
 function Fringe.plot_fringe_spectrum(
         parent, sol::CalibrationSolution;
-        sites = :all, feeds = :all, ti::Integer = 1, band = nothing, residual::Bool = false,
+        sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false,
     )
     # `residual = true`: plot the per-channel bandpass ripple with the per-scan delay
     # slope removed (readable — otherwise a big station delay wraps 2π·τ·(f−f0) across
     # the band and hides the ripple). `false`: the full solved gain phase at time `ti`.
     freqs, g = residual ? fringe_bandpass_spectrum(sol) : fringe_gain_spectrum(sol; ti = ti)
     phaselab = residual ? "bandpass phase (rad)" : "phase (rad)"
-    # Optional restriction to one band group of the (possibly gappy) channel axis.
-    bandlab = ""
-    if band !== nothing
-        bgs = Fringe.fringe_band_groups(freqs)
-        (1 <= Int(band) <= length(bgs)) || error("band must be in 1:$(length(bgs)) (got $band)")
-        r = bgs[Int(band)]
-        bandlab = @sprintf(" — band %d/%d", Int(band), length(bgs))
+    # Optional restriction to one frequency group of the (possibly gappy) channel axis.
+    fglab = ""
+    if freqgroup !== nothing
+        fgs = Fringe.fringe_freq_groups(freqs)
+        (1 <= Int(freqgroup) <= length(fgs)) || error("freqgroup must be in 1:$(length(fgs)) (got $freqgroup)")
+        r = fgs[Int(freqgroup)]
+        fglab = @sprintf(" — freqgroup %d/%d", Int(freqgroup), length(fgs))
         freqs = freqs[r]
         g = g[r, :, :]
     end
@@ -57,7 +57,7 @@ function Fringe.plot_fringe_spectrum(
             ax = Axis(
                 parent[row, col];
                 xlabel = "frequency (GHz)", ylabel = _site_label(names, ai),
-                title = (row == 1 ? string(_feed_label(fi), " ", phaselab, bandlab) : ""),
+                title = (row == 1 ? string(_feed_label(fi), " ", phaselab, fglab) : ""),
             )
             scatter!(ax, fghz, vec(angle.(g[:, ai, fi])); markersize = 5, color = :steelblue)
             push!(axrow, ax)
@@ -70,11 +70,11 @@ function Fringe.plot_fringe_spectrum(
     return parent
 end
 
-function Fringe.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, band = nothing, residual::Bool = false)
+function Fringe.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false)
     nrow = length(_fringe_indices(sites, sol.steps[1].layout.nant))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
-    Fringe.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, band = band, residual = residual)
+    Fringe.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, freqgroup = freqgroup, residual = residual)
     return fig
 end
 
@@ -176,8 +176,8 @@ function _triangle_positions(data::BaselineFringeData, bls)
 end
 
 # Coherently bin per-channel complex means in bins of `bin` channels within one
-# band range (NaN channels skipped); returns (x_fraction_within_band, values).
-function _bin_band(spec_col, r::UnitRange{Int}, bin::Int)
+# frequency-group range (NaN channels skipped); returns (x_fraction_within_group, values).
+function _bin_freqgroup(spec_col, r::UnitRange{Int}, bin::Int)
     xs = Float64[]
     zs = ComplexF64[]
     lo = first(r)
@@ -200,13 +200,13 @@ end
 
 # Unit phasor of a complex sample's vector mean (the panel's mean phase direction),
 # or 1 if there is no finite signal. Used to re-centre phase panels so a flat "after"
-# track sitting near ±π is drawn as one band instead of split across the wrap.
+# track sitting near ±π is drawn as one group instead of split across the wrap.
 _unit_phasor(zs) = (s = sum(z -> isfinite(z) ? z : zero(z), zs); abs(s) > 0 ? s / abs(s) : one(ComplexF64))
 
 function Fringe.plot_baseline_fringes(
         parent, data::BaselineFringeData;
         kind::Symbol = :freq, show::Symbol = :phase, pol = :parallel, baselines = :all,
-        layout::Symbol = :triangle, bin::Integer = 0, band = nothing,
+        layout::Symbol = :triangle, bin::Integer = 0, freqgroup = nothing,
         recenter::Bool = true, drop_empty::Bool = true,
     )
     kind in (:freq, :time) || error("kind must be :freq or :time")
@@ -214,43 +214,44 @@ function Fringe.plot_baseline_fringes(
     layout in (:triangle, :grid) || error("layout must be :triangle or :grid")
     p = baseline_pol_index(data, pol)
     bls = _baseline_indices(data, baselines)
-    # Optional restriction to ONE band group (`band = k`): `:freq` panels show only
-    # that group's channels on the REAL frequency axis (delay slopes physical);
-    # `:time` panels average over only that group's channels. Essential on wide
-    # multi-group data (VGOS), where the all-band view hides which group misfits.
-    nbg = length(data.band_groups)
-    bsel = band === nothing ? 0 : Int(band)
-    bsel == 0 || (1 <= bsel <= nbg) || error("band must be in 1:$nbg (got $band)")
-    grpr = bsel == 0 ? (1:length(data.freqs)) : data.band_groups[bsel]
-    # Sub-band structure of the frequency axis: each band gets its own equal-width
-    # segment on a compressed x-axis (no dead space at the VGOS gaps), channels
-    # coherently binned so every plotted point carries real SNR. `bin = 0` picks
-    # ~12 points per band on many-channel data (and 1:1 below 32 channels/band).
-    bands = kind === :freq ? Fringe._band_ranges(data.freqs) : UnitRange{Int}[]
-    if bsel != 0 && kind === :freq
-        bands = [r for r in bands if first(r) >= first(grpr) && last(r) <= last(grpr)]
+    # Optional restriction to ONE frequency group (`freqgroup = k`): `:freq` panels
+    # show only that group's channels on the REAL frequency axis (delay slopes
+    # physical); `:time` panels average over only that group's channels. Essential
+    # on wide multi-group data (VGOS), where the all-group view hides which group
+    # misfits.
+    nbg = length(data.freq_groups)
+    fgsel = freqgroup === nothing ? 0 : Int(freqgroup)
+    fgsel == 0 || (1 <= fgsel <= nbg) || error("freqgroup must be in 1:$nbg (got $freqgroup)")
+    grpr = fgsel == 0 ? (1:length(data.freqs)) : data.freq_groups[fgsel]
+    # Frequency-group structure of the frequency axis: each group gets its own
+    # equal-width segment on a compressed x-axis (no dead space at the VGOS gaps),
+    # channels coherently binned so every plotted point carries real SNR. `bin = 0`
+    # picks ~12 points per group on many-channel data (and 1:1 below 32 channels/group).
+    freqgroups = kind === :freq ? Fringe._freq_group_ranges(data.freqs) : UnitRange{Int}[]
+    if fgsel != 0 && kind === :freq
+        freqgroups = [r for r in freqgroups if first(r) >= first(grpr) && last(r) <= last(grpr)]
     end
-    compressed = kind === :freq && bsel == 0 && length(bands) > 1
+    compressed = kind === :freq && fgsel == 0 && length(freqgroups) > 1
     if kind === :freq
-        binw = bin > 0 ? Int(bin) : max(1, maximum(length, bands) ÷ 12)
+        binw = bin > 0 ? Int(bin) : max(1, maximum(length, freqgroups) ÷ 12)
         x = data.freqs ./ 1.0e9
         before, after = data.spec_before, data.spec_after
-        xlab = compressed ? "band (centre GHz)" : "frequency (GHz)"
+        xlab = compressed ? "group (centre GHz)" : "frequency (GHz)"
     else
         binw = 1
         x = data.times
-        before, after = bsel == 0 ? (data.tser_before, data.tser_after) :
-            (view(data.tser_band_before, :, :, :, bsel), view(data.tser_band_after, :, :, :, bsel))
+        before, after = fgsel == 0 ? (data.tser_before, data.tser_after) :
+            (view(data.tser_freqgroup_before, :, :, :, fgsel), view(data.tser_freqgroup_after, :, :, :, fgsel))
         xlab = "time (h)"
     end
     reduce_y = show === :phase ? angle : abs
     ylab = show === :phase ? (recenter ? "phase − ⟨after⟩ (rad)" : "phase (rad)") : "amplitude"
-    # Compressed-axis tick positions/labels: band centres, thinned to ≤ 8 labels.
+    # Compressed-axis tick positions/labels: group centres, thinned to ≤ 8 labels.
     tickpos = Float64[]
     ticklab = String[]
     if compressed
-        stride = max(1, ceil(Int, length(bands) / 8))
-        for (k, r) in enumerate(bands)
+        stride = max(1, ceil(Int, length(freqgroups) / 8))
+        for (k, r) in enumerate(freqgroups)
             (k - 1) % stride == 0 || continue
             push!(tickpos, k - 0.5)
             push!(ticklab, string(round(sum(data.freqs[r]) / length(r) / 1.0e9; digits = 2)))
@@ -304,21 +305,21 @@ function Fringe.plot_baseline_fringes(
         if kind === :freq
             xb = Float64[]; zbv = ComplexF64[]
             xa = Float64[]; zav = ComplexF64[]
-            for (k, r) in enumerate(bands)
+            for (k, r) in enumerate(freqgroups)
                 x0 = compressed ? k - 1 + 0.05 : data.freqs[first(r)] / 1.0e9
                 xw = compressed ? 0.9 : (data.freqs[last(r)] - data.freqs[first(r)]) / 1.0e9
-                fx, fz = _bin_band(view(before, :, bi, p), r, binw)
+                fx, fz = _bin_freqgroup(view(before, :, bi, p), r, binw)
                 append!(xb, x0 .+ xw .* fx); append!(zbv, fz)
-                fx, fz = _bin_band(view(after, :, bi, p), r, binw)
+                fx, fz = _bin_freqgroup(view(after, :, bi, p), r, binw)
                 append!(xa, x0 .+ xw .* fx); append!(zav, fz)
             end
             # Phase only: rotate both traces so the "after" mean phase sits at 0, so a
-            # flat corrected track near ±π reads as one band, not a split at the wrap.
+            # flat corrected track near ±π reads as one group, not a split at the wrap.
             rot = (show === :phase && recenter) ? conj(_unit_phasor(zav)) : one(ComplexF64)
             sb = scatter!(ax, xb, reduce_y.(rot .* zbv); markersize = 5, color = (:steelblue, 0.6))
             sa = scatter!(ax, xa, reduce_y.(rot .* zav); markersize = 5, color = (:firebrick, 0.8))
-            compressed && length(bands) > 1 &&
-                vlines!(ax, collect(1.0:(length(bands) - 1)); color = (:gray, 0.3), linewidth = 0.5)
+            compressed && length(freqgroups) > 1 &&
+                vlines!(ax, collect(1.0:(length(freqgroups) - 1)); color = (:gray, 0.3), linewidth = 0.5)
         else
             rot = (show === :phase && recenter) ? conj(_unit_phasor(@view after[:, bi, p])) : one(ComplexF64)
             yb = reduce_y.(rot .* @view before[:, bi, p])
@@ -343,8 +344,8 @@ function Fringe.plot_baseline_fringes(
             data.source, "  scan ", data.scan, "  [", data.pol_products[p], "]  ",
             show, " vs ", kind === :freq ? "freq" : "time",
             isfinite(data.max_snr) ? string("  (max SNR ", round(data.max_snr; digits = 1), ")") : "",
-            bsel == 0 ? "" : @sprintf(
-                    "   band %d/%d (%.2f–%.2f GHz)", bsel, nbg,
+            fgsel == 0 ? "" : @sprintf(
+                    "   group %d/%d (%.2f–%.2f GHz)", fgsel, nbg,
                     data.freqs[first(grpr)] / 1.0e9, data.freqs[last(grpr)] / 1.0e9,
                 ),
         );

@@ -76,7 +76,7 @@ end
         end
     end
     uvset, _ = _build_fringe_uvset(;
-        nant, nbands = 2, nchan = 8, nscans = 3,
+        nant, nspw = 2, nchan = 8, nscans = 3,
         bandpass = bp_true, amp_bandpass = abp_true,
     )
     fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
@@ -130,8 +130,8 @@ end
     @testset "DispersionSBDFit: dTEC recovery + determinism" begin
         dtec_true = [0.0, 6.0, -4.0, 2.5]
         uvd, _ = _build_fringe_uvset(;
-            nant, nbands = 8, nchan = 8, nscans = 3,
-            ref_freq = 3.0e9, band_sep = 0.5e9, dtec = dtec_true,
+            nant, nspw = 8, nchan = 8, nscans = 3,
+            ref_freq = 3.0e9, spw_sep = 0.5e9, dtec = dtec_true,
             seed = 77, feed_common = true,
         )
         # This band layout needs `require_band_separation` off for the dTEC
@@ -202,7 +202,7 @@ end
         times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
         times = [times[1] - Hour(1); times; times[end] + Hour(1)]
         tsys_band = Dict(1 => 100.0, 2 => 400.0)
-        band_cals = Dict{Int, BP.AntabCalibration}()
+        spw_cals = Dict{Int, BP.AntabCalibration}()
         for (b, tsys) in tsys_band
             stns = Dict{String, BP.AntabStation}()
             for nm in ant_names
@@ -211,9 +211,9 @@ end
                 series = BP.AntabTsysSeries(times, [(0, :R), (0, :L)], vals)
                 stns[nm] = BP.AntabStation(nm, gain, series, 0)
             end
-            band_cals[b] = BP.AntabCalibration("synthetic", "synth", 2000, stns)
+            spw_cals[b] = BP.AntabCalibration("synthetic", "synth", 2000, stns)
         end
-        ap = AprioriAmplitude(band_cals; min_elevation_deg = -Inf)
+        ap = AprioriAmplitude(spw_cals; min_elevation_deg = -Inf)
 
         pipe_ap = CalibrationPipeline(
             FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc), ap;

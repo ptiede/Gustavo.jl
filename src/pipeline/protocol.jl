@@ -99,7 +99,7 @@ provides(step::CalibrationStep) = :nothing
     required_grouping(step::CalibrationStep) -> Symbol
 
 The leaf-grouping this step can run under: `:any`, or `:scan_complete` (the
-step needs every band of a scan materialized together — true of the fringe
+step needs every spw of a scan materialized together — true of the fringe
 search's multi-band concat and of per-scan θ-slot disjointness). Default `:any`.
 """
 required_grouping(step::CalibrationStep) = :any
@@ -227,6 +227,52 @@ Base.@kwdef struct ExecutionConfig{P, O, I}
     inner_executor::I = DynamicScheduler()
 end
 
+"""
+    ProgressLogger(; min_interval = 5.0, io = stdout)
+
+A ready-made [`ExecutionConfig`](@ref) `progress` callback: prints each pass's
+`(stage, done, total)` progress, throttled to at most one line every
+`min_interval` seconds, with an ETA extrapolated from the pass's mean
+completion rate so far. A pass's start (`done == 0`) and finish
+(`done == total`) always print, regardless of the throttle. Stateful — build
+one `ProgressLogger` per `fit`/`fitcalibrate` call; sharing an instance across
+concurrent runs mixes their timers.
+
+    fit(pipe, uvset; exec = ExecutionConfig(progress = ProgressLogger()))
+"""
+mutable struct ProgressLogger{IOT}
+    min_interval::Float64
+    io::IOT
+    stage::Symbol
+    t_start::Float64
+    t_last::Float64
+end
+ProgressLogger(; min_interval::Real = 5.0, io = stdout) =
+    ProgressLogger(Float64(min_interval), io, :nothing, 0.0, 0.0)
+
+function (p::ProgressLogger)(stage::Symbol, done::Integer, total::Integer)
+    t = time()
+    if stage !== p.stage || done == 0
+        p.stage, p.t_start, p.t_last = stage, t, t
+        println(p.io, "[$stage] starting ($total scan group$(total == 1 ? "" : "s"))")
+        return nothing
+    end
+    finished = done == total
+    if !finished && (t - p.t_last) < p.min_interval
+        return nothing
+    end
+    p.t_last = t
+    elapsed = t - p.t_start
+    if finished
+        println(p.io, "[$stage] $done/$total scan groups done ($(round(elapsed; digits = 1))s)")
+    else
+        eta = elapsed * (total - done) / done
+        pct = round(100 * done / total; digits = 1)
+        println(p.io, "[$stage] $done/$total scan groups ($(pct)%), ETA $(round(eta; digits = 1))s")
+    end
+    return nothing
+end
+
 # ── The solve context (shared state of a pipeline run) ───────────────────────
 
 """
@@ -247,9 +293,10 @@ through `scratch` either — it flows through `stream`'s transform chain, so no
 step evaluates or mutates another step's θ.
 
 `θ` is a [`ComponentVector`](@ref) over `layout.template`'s axes — its named
-blocks (`θ.phase.<name>` / `θ.logamp.<name>`) are directly addressable; wrap a
-component's block as a labelled, dimensioned `DimArray` on demand with
-[`@comp`](@ref).
+blocks (`θ.phase.<name>` / `θ.logamp.<name>`) are directly addressable. Once a
+step is finished and wrapped in a [`CalibrationSolution`](@ref),
+[`component_dimarray`](@ref) wraps one component's block as a labelled,
+dimensioned `DimArray` on demand.
 """
 mutable struct SolveContext{
         M <: StationGainModel, L <: ParameterLayout, E <: GainEvaluator,

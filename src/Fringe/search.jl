@@ -598,7 +598,7 @@ _in_window(x::Real, window::Tuple{<:Real, <:Real}, degenerate::Bool) =
 # the result carries no grid scalloping.
 #
 # Cost: the giant nf_pad×nt_pad grid (mostly zeros for VGOS layouts) is replaced
-# by nband small per-band FFTs plus nsbd tiny band-center FFTs — orders of
+# by nfreqgroup small per-band FFTs plus nsbd tiny band-center FFTs — orders of
 # magnitude less compute AND memory traffic. Noise/SNR conventions are identical
 # to the full path: every cube cell is a matched-filter output with variance Σw
 # under noise, so the same strided-median estimate applies.
@@ -627,17 +627,17 @@ end
 
 # Split a SORTED frequency axis into contiguous band blocks: a new block starts
 # wherever the spacing exceeds 1.5× the in-band spacing Δf.
-function _detect_bands(freqs::AbstractVector, Δf::Real)
-    bands = UnitRange{Int}[]
+function _detect_freq_groups(freqs::AbstractVector, Δf::Real)
+    freqgroups = UnitRange{Int}[]
     lo = 1
     for i in 1:(length(freqs) - 1)
         if freqs[i + 1] - freqs[i] > 1.5 * Δf
-            push!(bands, lo:i)
+            push!(freqgroups, lo:i)
             lo = i + 1
         end
     end
-    push!(bands, lo:length(freqs))
-    return bands
+    push!(freqgroups, lo:length(freqs))
+    return freqgroups
 end
 
 # Precomputed hierarchical-search geometry (per scan group, like `_SearchAxes`).
@@ -647,7 +647,7 @@ end
 # values and track the search's compute precision `T`, like `_SearchAxes`'s
 # `delays`/`rates`.
 struct _MBDAxes{T}
-    bands::Vector{UnitRange{Int}}   # channel-index blocks (ascending frequency)
+    freqgroups::Vector{UnitRange{Int}}   # channel-index blocks (ascending frequency)
     f_lo::Vector{Float64}           # per-band grid origin (first channel freq)
     bc_bin::Vector{Int}             # band-origin bin on the Δbc grid (1-based)
     bc_step::Float64                # Δbc: common band-origin grid spacing
@@ -693,21 +693,21 @@ _mbd_axes(::FullGrid, freqs, fax, tax, rates, opts, ::Type{C}) where {C} = nothi
 
 function _mbd_axes(::HierarchicalMBD, freqs, fax, tax, rates, opts, ::Type{C}) where {C}
     (fax.degenerate || !issorted(freqs)) && return nothing
-    bands = _detect_bands(freqs, fax.step)
-    length(bands) >= 2 || return nothing
-    return _build_mbd_axes(freqs, bands, fax, tax, rates, opts, C)
+    freqgroups = _detect_freq_groups(freqs, fax.step)
+    length(freqgroups) >= 2 || return nothing
+    return _build_mbd_axes(freqs, freqgroups, fax, tax, rates, opts, C)
 end
 
 _maybe_mbd_axes(freqs::AbstractVector, fax::_Axis, tax::_Axis, rates::AbstractVector, opts::FringeSearch, ::Type{C}) where {C} =
     _mbd_axes(_resolve_algorithm(opts.algorithm, freqs, fax), freqs, fax, tax, rates, opts, C)
 
 function _build_mbd_axes(
-        freqs::AbstractVector, bands::Vector{UnitRange{Int}},
+        freqs::AbstractVector, freqgroups::Vector{UnitRange{Int}},
         fax::_Axis, tax::_Axis, rates::AbstractVector{T}, opts::FringeSearch, ::Type{C},
     ) where {T, C}
     Δf = fax.step
-    f_lo = [Float64(freqs[first(b)]) for b in bands]
-    maxbins = maximum(round(Int, (freqs[last(b)] - freqs[first(b)]) / Δf) + 1 for b in bands)
+    f_lo = [Float64(freqs[first(b)]) for b in freqgroups]
+    maxbins = maximum(round(Int, (freqs[last(b)] - freqs[first(b)]) / Δf) + 1 for b in freqgroups)
     # The internal axes are tiny, so oversample them at least 4× regardless of
     # `opts.oversample` (which still governs the rate axis via `nt_pad`).
     osb = max(opts.oversample, 4)
@@ -765,7 +765,7 @@ function _build_mbd_axes(
     planb = plan_fft(zeros(C, nfb_pad, nt_pad); flags = MEASURE)
     planc = plan_fft(zeros(C, nbc_pad, length(rate_idx)), 1; flags = MEASURE)
     return _MBDAxes{T}(
-        bands, f_lo, bc_bin, Δbc, nbc_pad, nfb_pad, A, sbd_bin, A / nbc_pad,
+        freqgroups, f_lo, bc_bin, Δbc, nbc_pad, nfb_pad, A, sbd_bin, A / nbc_pad,
         sbd_idx, sbd_val, mbd, rate_idx, rate_val, rate_scan, planb, planc,
     )
 end
@@ -776,13 +776,13 @@ end
 mutable struct _MBDWorkspace{C}
     nfb::Int
     nt::Int
-    nband::Int
+    nfreqgroup::Int
     nsbd::Int
     nrw::Int
     nbc::Int
     Gb::Matrix{C}          # per-band gridding buffer (nfb_pad × nt_pad)
     Db::Matrix{C}
-    X::Array{C, 3}         # stage-1 outputs, windowed: (nsbd, nrw, nband)
+    X::Array{C, 3}         # stage-1 outputs, windowed: (nsbd, nrw, nfreqgroup)
     Mc::Matrix{C}          # stage-2 input (nbc_pad × nrw)
     Dc::Matrix{C}
 end
@@ -790,16 +790,16 @@ end
 function _ensure_mbd_workspace!(ws::FringeWorkspace{C}, mx::_MBDAxes, nt_pad::Int) where {C}
     nsbd = length(mx.sbd_idx)
     nrw = length(mx.rate_idx)
-    nband = length(mx.bands)
+    nfreqgroup = length(mx.freqgroups)
     w = ws.mbd
     if !(w isa _MBDWorkspace{C}) || w.nfb != mx.nfb_pad || w.nt != nt_pad ||
-            w.nband != nband || w.nsbd != nsbd || w.nrw != nrw || w.nbc != mx.nbc_pad
+            w.nfreqgroup != nfreqgroup || w.nsbd != nsbd || w.nrw != nrw || w.nbc != mx.nbc_pad
         Gb = zeros(C, mx.nfb_pad, nt_pad)
         Db = similar(Gb)
-        X = Array{C, 3}(undef, nsbd, nrw, nband)
+        X = Array{C, 3}(undef, nsbd, nrw, nfreqgroup)
         Mc = zeros(C, mx.nbc_pad, nrw)
         Dc = similar(Mc)
-        w = _MBDWorkspace{C}(mx.nfb_pad, nt_pad, nband, nsbd, nrw, mx.nbc_pad, Gb, Db, X, Mc, Dc)
+        w = _MBDWorkspace{C}(mx.nfb_pad, nt_pad, nfreqgroup, nsbd, nrw, mx.nbc_pad, Gb, Db, X, Mc, Dc)
         ws.mbd = w
     end
     return w::_MBDWorkspace{C}
@@ -810,7 +810,7 @@ end
 function _stage2_plane!(w::_MBDWorkspace{C}, mx::_MBDAxes, sj::Int) where {C}
     Mc = w.Mc
     fill!(Mc, zero(C))
-    @inbounds for b in 1:w.nband, rj in 1:w.nrw
+    @inbounds for b in 1:w.nfreqgroup, rj in 1:w.nrw
         Mc[mx.bc_bin[b], rj] += w.X[sj, rj, b]
     end
     mul!(w.Dc, mx.planc, Mc)
@@ -818,12 +818,12 @@ function _stage2_plane!(w::_MBDWorkspace{C}, mx::_MBDAxes, sj::Int) where {C}
 end
 
 # One (MBD row, rate col) value of the stage-2 sum for an arbitrary SBD row —
-# the direct nband-term sum, matching the FFT's index phase exactly. Used for
+# the direct nfreqgroup-term sum, matching the FFT's index phase exactly. Used for
 # quad refinement along the SBD axis without rebuilding whole planes.
 function _stage2_value(w::_MBDWorkspace{C}, mx::_MBDAxes, sj::Int, m::Int, rj::Int) where {C}
     acc = zero(C)
     ph = -2π * (m - 1) / mx.nbc_pad
-    @inbounds for b in 1:w.nband
+    @inbounds for b in 1:w.nfreqgroup
         acc += w.X[sj, rj, b] * cis(ph * (mx.bc_bin[b] - 1))
     end
     return acc
@@ -846,7 +846,7 @@ function _mbd_fringe_search(
     w = _ensure_mbd_workspace!(ws, mx, nt_pad)
     ntime = size(V, 2)
     Δf = ax.fax.step
-    nband = w.nband
+    nfreqgroup = w.nfreqgroup
 
     # Stage 1: per band, grid + 2-D FFT (in-band delay × rate); keep the windowed
     # (SBD row, rate col) block. The noise is estimated HERE, from a strided
@@ -858,11 +858,11 @@ function _mbd_fringe_search(
     noise2 = 0.0
     nnoise = 0
     dwin = ws.dwin
-    for bi in 1:nband
+    for bi in 1:nfreqgroup
         Gb = w.Gb
         fill!(Gb, zero(C))
         flo = mx.f_lo[bi]
-        @inbounds for ti in 1:ntime, ci in mx.bands[bi]
+        @inbounds for ti in 1:ntime, ci in mx.freqgroups[bi]
             wgt = W[ci, ti]
             v = V[ci, ti]
             (isfinite(wgt) && wgt > 0 && isfinite(v)) || continue
@@ -875,7 +875,7 @@ function _mbd_fringe_search(
         mul!(w.Db, mx.planb, Gb)
         empty!(dwin)
         ntot = length(w.Db)
-        stride = max(1, ntot ÷ max(64, 20000 ÷ nband))
+        stride = max(1, ntot ÷ max(64, 20000 ÷ nfreqgroup))
         @inbounds for idx in 1:stride:ntot
             push!(dwin, abs2(w.Db[idx]))
         end
@@ -888,7 +888,7 @@ function _mbd_fringe_search(
         end
     end
     Wsum > 0 || return _invalid_detection(T)
-    noise2 = (nnoise == nband && noise2 > 0) ? max(noise2, eps(Float64)) : Wsum
+    noise2 = (nnoise == nfreqgroup && noise2 > 0) ? max(noise2, eps(Float64)) : Wsum
 
     # Stage 2: scan the (SBD, MBD, rate) cube for the windowed peak.
     nsbd = w.nsbd

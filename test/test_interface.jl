@@ -117,7 +117,7 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
         # Built the way production builds them — a real (tiny) leaf, the stack
         # selected off it — there is no raw-array assembly path.
         uvsmall, _ = _build_fringe_uvset(
-            nant = 3, nbands = 1, nchan = 4, ntime = 3, pol_labels = ["PP", "QQ"],
+            nant = 3, nspw = 1, nchan = 4, ntime = 3, pol_labels = ["PP", "QQ"],
         )
         geom = CAL.build_geometry(uvsmall)
         leaf = UVP.materialize_leaf(last(first(UVP.branches(uvsmall))))
@@ -194,18 +194,24 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
             end
         end
 
-        # The last stage's snapshot IS the full solution.
-        @test stage_names(sol[:adhoc]) == stage_names(sol)
-        @test parent(gains(sol[:adhoc])) == parent(gains(sol))
+        # `sol[name]` extracts that step alone (== `step_solution`); the
+        # cumulative view through a stage is `stage_solution`, a separate call.
+        @test sol[:adhoc].steps[1].θ == CAL._step(sol, :adhoc).θ
+        @test stage_names(sol[:adhoc]) == [:adhoc]
+
+        # The last stage's cumulative snapshot IS the full solution.
+        @test stage_names(stage_solution(sol, :adhoc)) == stage_names(sol)
+        @test parent(gains(stage_solution(sol, :adhoc))) == parent(gains(sol))
 
         # Earlier snapshots carry only the steps up to and including that stage
         # — a later stage contributes no gain there at all, rather than an
         # explicit zeroed θ block over a shared layout.
-        fr = sol[:fringe]
+        fr = stage_solution(sol, :fringe)
         @test stage_names(fr) == [:fringe]
         @test fr.steps[1].θ == sol.steps[1].θ
+        @test fr.steps[1].θ == sol[:fringe].steps[1].θ   # same step, extracted either way
 
-        bp = sol[:bandpass]
+        bp = stage_solution(sol, :bandpass)
         @test stage_names(bp) == [:fringe, :bandpass]
         @test bp.steps[1].θ == sol.steps[1].θ
         @test bp.steps[2].θ == sol.steps[2].θ

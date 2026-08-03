@@ -300,24 +300,24 @@ a fringe `CalibrationSolution`. Produced by [`baseline_fringe_data`](@ref) and
 consumed by `plot_baseline_fringes`.
 
 Fields: `source`/`scan`/`scan_index`/`max_snr` identify the scan; `bl_pairs` and
-`pol_products` label the baseline and correlation axes; `freqs` (Hz, all bands
+`pol_products` label the baseline and correlation axes; `freqs` (Hz, all spws
 stacked) and `times` (h) the data axes. The four data arrays are weighted coherent
 means (vector averages, `NaN` where a cell has no unflagged data):
 
 - `spec_before`/`spec_after` — `(nchan, nbl, npol)`, averaged over time. `angle`
   vs frequency shows the group-delay slope (flat after a good fit); `abs` shows
-  the band-averaged coherence.
+  the group-averaged coherence.
 - `tser_before`/`tser_after` — `(ntime, nbl, npol)`, averaged over frequency.
   `angle` vs time shows the fringe-rate slope (flat after a good fit).
 
-Wide-band multi-group data (e.g. the four VGOS 3/5/6/10 GHz band groups) also
-carries the per-BAND-GROUP split, so diagnostics can be viewed one band group at
-a time (`plot_baseline_fringes(data; band = k)`):
+Wide-band multi-group data (e.g. the four VGOS 3/5/6/10 GHz frequency groups) also
+carries the per-FREQUENCY-GROUP split, so diagnostics can be viewed one frequency
+group at a time (`plot_baseline_fringes(data; freqgroup = k)`):
 
-- `band_groups` — channel ranges of each band group ([`fringe_band_groups`](@ref)
+- `freq_groups` — channel ranges of each frequency group ([`fringe_freq_groups`](@ref)
   of `freqs`; a single full range on contiguous data).
-- `tser_band_before`/`tser_band_after` — `(ntime, nbl, npol, ngroups)`, the time
-  series averaged over ONLY that band group's channels.
+- `tser_freqgroup_before`/`tser_freqgroup_after` — `(ntime, nbl, npol, ngroups)`, the time
+  series averaged over ONLY that frequency group's channels.
 """
 struct BaselineFringeData
     source::String
@@ -333,13 +333,13 @@ struct BaselineFringeData
     spec_after::Array{ComplexF64, 3}
     tser_before::Array{ComplexF64, 3}
     tser_after::Array{ComplexF64, 3}
-    band_groups::Vector{UnitRange{Int}}
-    tser_band_before::Array{ComplexF64, 4}
-    tser_band_after::Array{ComplexF64, 4}
+    freq_groups::Vector{UnitRange{Int}}
+    tser_freqgroup_before::Array{ComplexF64, 4}
+    tser_freqgroup_after::Array{ComplexF64, 4}
 end
 
-# Backwards-compatible constructor (no band-group split): one group spanning all
-# channels, band time series = the full-band ones.
+# Backwards-compatible constructor (no frequency-group split): one group spanning
+# all channels, per-group time series = the full-span ones.
 function BaselineFringeData(
         source, scan, scan_index, max_snr, bl_pairs, ant_names, pol_products,
         freqs, times, spec_before, spec_after, tser_before, tser_after,
@@ -444,8 +444,8 @@ function baseline_fringe_data(
     Wg = stack[:weights]
     nchan, nti, nbl, npol = size(Vg)
 
-    # Band-group split of the stacked frequency axis (per-channel group id).
-    bgs = fringe_band_groups(fg)
+    # Frequency-group split of the stacked frequency axis (per-channel group id).
+    bgs = fringe_freq_groups(fg)
     ngrp = length(bgs)
     gid = Vector{Int}(undef, nchan)
     for (k, r) in enumerate(bgs), c in r
@@ -511,9 +511,9 @@ default used by the plots) returns the first parallel-hand product.
 baseline_pol_index(data::BaselineFringeData, pol) = _pol_index(data.pol_products, pol)
 
 """
-    fringe_band_groups(freqs; gap_factor = 4.0) -> Vector{UnitRange{Int}}
+    fringe_freq_groups(freqs; gap_factor = 4.0) -> Vector{UnitRange{Int}}
 
-Group the contiguous sub-band blocks of a channel-frequency axis into BAND
+Group the contiguous sub-band blocks of a channel-frequency axis into FREQUENCY
 GROUPS. The inter-block gaps are split into "within-group" vs "between-group"
 scales at the largest ratio jump in their sorted values (must exceed
 `gap_factor`); when the gaps carry no such two-scale structure the axis is one
@@ -522,8 +522,8 @@ On VGOS this recovers the four widely-separated 3/5/6/10 GHz groups (each
 holding several 32 MHz sub-bands); on a contiguous axis (e.g. VLBA) it returns
 one full-range group. Channel ranges index the stacked frequency axis.
 """
-function fringe_band_groups(freqs::AbstractVector{<:Real}; gap_factor::Real = 4.0)
-    blocks = _band_ranges(freqs)
+function fringe_freq_groups(freqs::AbstractVector{<:Real}; gap_factor::Real = 4.0)
+    blocks = _freq_group_ranges(freqs)
     length(blocks) <= 1 && return blocks
     gaps = [Float64(freqs[first(blocks[i + 1])] - freqs[last(blocks[i])]) for i in 1:(length(blocks) - 1)]
     thr = Inf
@@ -557,9 +557,9 @@ function fringe_band_groups(freqs::AbstractVector{<:Real}; gap_factor::Real = 4.
     return groups
 end
 
-# Contiguous band ranges of a channel-frequency axis: split where the step
-# jumps by more than 3× the median spacing (the VGOS sub-band gaps).
-function _band_ranges(freqs::AbstractVector{<:Real})
+# Contiguous frequency-group ranges of a channel-frequency axis: split where the
+# step jumps by more than 3× the median spacing (the VGOS sub-band gaps).
+function _freq_group_ranges(freqs::AbstractVector{<:Real})
     n = length(freqs)
     n == 0 && return UnitRange{Int}[]
     n == 1 && return [1:1]
@@ -578,20 +578,20 @@ function _band_ranges(freqs::AbstractVector{<:Real})
 end
 
 """
-    fringe_band_stats(data::BaselineFringeData; pol = :parallel)
+    fringe_freq_group_stats(data::BaselineFringeData; pol = :parallel)
         -> Vector{@NamedTuple{f_lo, f_hi, nchan, eta_before, eta_after}}
 
-Per-band coherence summary of one scan's [`baseline_fringe_data`](@ref):
-for each contiguous sub-band, the within-band coherence `|Σ_c z_c| / Σ_c |z_c|`
+Per-frequency-group coherence summary of one scan's [`baseline_fringe_data`](@ref):
+for each contiguous frequency group, the within-group coherence `|Σ_c z_c| / Σ_c |z_c|`
 of the per-channel time-averaged visibilities, pooled over cross baselines —
-BEFORE and AFTER the fringe solution. A band whose `eta_after` lags its
+BEFORE and AFTER the fringe solution. A frequency group whose `eta_after` lags its
 neighbours localises residual frequency structure (RFI, station passband
-defect) to that band.
+defect) to that group.
 """
-function fringe_band_stats(data::BaselineFringeData; pol = :parallel)
+function fringe_freq_group_stats(data::BaselineFringeData; pol = :parallel)
     p = _pol_index(data.pol_products, pol)
     out = @NamedTuple{f_lo::Float64, f_hi::Float64, nchan::Int, eta_before::Float64, eta_after::Float64}[]
-    for r in _band_ranges(data.freqs)
+    for r in _freq_group_ranges(data.freqs)
         stats = map((data.spec_before, data.spec_after)) do spec
             num = 0.0
             den = 0.0

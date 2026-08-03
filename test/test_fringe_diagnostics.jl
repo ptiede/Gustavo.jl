@@ -258,12 +258,12 @@ using HDF5
         @test !isnothing(FP.plot_baseline_fringes(fig[1, 1], data; kind = :freq))
         figbl = FP.plot_baseline_fringes(data)
         @test (show(IOBuffer(), MIME("image/png"), figbl); true)
-        # per-band-group view (freq restricts channels; time uses the band tser)
-        nbg = length(data.band_groups)
-        @test !isnothing(FP.plot_baseline_fringes(data; kind = :freq, band = nbg))
-        @test !isnothing(FP.plot_baseline_fringes(data; kind = :time, band = 1))
-        @test_throws Exception FP.plot_baseline_fringes(data; band = nbg + 1)
-        @test !isnothing(FP.plot_fringe_spectrum(sol; band = 1))
+        # per-frequency-group view (freq restricts channels; time uses the freqgroup tser)
+        nbg = length(data.freq_groups)
+        @test !isnothing(FP.plot_baseline_fringes(data; kind = :freq, freqgroup = nbg))
+        @test !isnothing(FP.plot_baseline_fringes(data; kind = :time, freqgroup = 1))
+        @test_throws Exception FP.plot_baseline_fringes(data; freqgroup = nbg + 1)
+        @test !isnothing(FP.plot_fringe_spectrum(sol; freqgroup = 1))
     end
 
     @testset "coherence report (stage-agnostic)" begin
@@ -421,10 +421,10 @@ using HDF5
     end
 end
 
-@testset "fringe_band_stats: per-band coherence + band splitting" begin
+@testset "fringe_freq_group_stats: per-band coherence + band splitting" begin
     # 3 bands of 4 channels with gaps; after = flat phase (η=1), before = ramp.
     freqs = vcat(1.0e9 .+ (0:3) .* 1.0e6, 1.1e9 .+ (0:3) .* 1.0e6, 1.3e9 .+ (0:3) .* 1.0e6)
-    @test FP._band_ranges(freqs) == [1:4, 5:8, 9:12]
+    @test FP._freq_group_ranges(freqs) == [1:4, 5:8, 9:12]
     nchan = length(freqs)
     bl = [(1, 2)]
     spec_b = reshape(ComplexF64[cis(2π * c / 6) for c in 1:nchan], nchan, 1, 1)
@@ -434,7 +434,7 @@ end
         spec_b, spec_a,
         zeros(ComplexF64, 1, 1, 1), zeros(ComplexF64, 1, 1, 1),
     )
-    stats = FP.fringe_band_stats(data)
+    stats = FP.fringe_freq_group_stats(data)
     @test length(stats) == 3
     @test all(r -> r.nchan == 4, stats)
     @test all(r -> r.eta_after ≈ 1.0, stats)
@@ -443,14 +443,14 @@ end
 
     # Band GROUPS: comparable inter-block gaps merge into one group; a far-away
     # block splits off its own group (the VGOS 3/5/6/10 GHz situation).
-    @test FP.fringe_band_groups(freqs) == [1:12]
+    @test FP.fringe_freq_groups(freqs) == [1:12]
     freqs2 = vcat(freqs, 5.0e9 .+ (0:3) .* 1.0e6)
-    @test FP.fringe_band_groups(freqs2) == [1:12, 13:16]
-    @test FP.fringe_band_groups(freqs2[1:1]) == [1:1]
+    @test FP.fringe_freq_groups(freqs2) == [1:12, 13:16]
+    @test FP.fringe_freq_groups(freqs2[1:1]) == [1:1]
 
     # Compat constructor: one full-range group whose band time series mirror the
     # full-band ones.
-    @test data.band_groups == [1:12]
-    @test data.tser_band_before[:, :, :, 1] == data.tser_before
-    @test data.tser_band_after[:, :, :, 1] == data.tser_after
+    @test data.freq_groups == [1:12]
+    @test data.tser_freqgroup_before[:, :, :, 1] == data.tser_before
+    @test data.tser_freqgroup_after[:, :, :, 1] == data.tser_after
 end

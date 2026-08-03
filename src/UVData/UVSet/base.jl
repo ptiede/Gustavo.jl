@@ -325,7 +325,7 @@ function Base.show(io::IO, ::MIME"text/plain", uvset::UVSet)
     println(io, "  Array     : $(arr_name) ($ref_freq_ghz GHz)")
     println(io, "  Sources   : $(length(src_list)) ($(join(src_list, ", ")))")
     println(io, "  Partitions: $(n_part)")
-    println(io, "  Spectral  : $(length(setups)) setup(s), $(length(chan_freqs)) IFs total: $(flo)–$(fhi) GHz")
+    println(io, "  Spectral  : $(length(setups)) setup(s), $(length(chan_freqs)) channels total: $(flo)–$(fhi) GHz")
     print(io, "  Antennas ($(length(nms))): $(join(nms, ", "))")
     return io
 end
@@ -348,7 +348,7 @@ function scan_time_centers(uvset::UVSet)
     end
     return out
 end
-band_center_frequency(uvset::UVSet) = band_center_frequency(freq_setup(uvset))
+spw_center_frequency(uvset::UVSet) = spw_center_frequency(freq_setup(uvset))
 centered_channel_freqs(uvset::UVSet) = centered_channel_freqs(freq_setup(uvset))
 
 function baseline_sites(uvset::UVSet, bl::Tuple{String, String})
@@ -525,11 +525,12 @@ end
 Return a new leaf sharing `part`'s `uvw` layer and metadata, with
 `vis`/`weights` swapped in. A cell is flagged iff its weight is `≤ 0`.
 """
-function rebuild_visibilities(part::DimensionalData.AbstractDimTree, vis, weights)
+function rebuild_visibilities(part::DimensionalData.AbstractDimTree, vis=part[:vis], weights=part[:weights], uvw=part[:uvw])
     vis_l = _rewrap_like(vis, part[:vis])
     w_l = _rewrap_like(weights, part[:weights])
+    uvw_l = _rewrap_like(uvw, part[:uvw])
     return _build_leaf(
-        vis_l, w_l, part[:uvw];
+        vis_l, w_l, uvw_l;
         partition_info = DimensionalData.metadata(part),
     )
 end

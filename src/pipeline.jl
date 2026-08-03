@@ -33,7 +33,7 @@ abstract type ReduceStep <: CalibrationStep end
 
 State threaded through the pipeline (immutable; rebuilt per step). Fields:
 `uvset` (current, maybe lazy), `solution` (`CalibrationSolution`), `output`
-(corrected/reduced `UVSet`), `band_cals` (a-priori amplitude cal, if an
+(corrected/reduced `UVSet`), `spw_cals` (a-priori amplitude cal, if an
 [`AprioriAmplitude`](@ref) step ran). Data loading is the caller's job
 (`load_fitsidi`/`load_fitsidi_apriori`); the pipeline only transforms `uvset`.
 """
@@ -41,16 +41,16 @@ Base.@kwdef struct CalibrationContext
     uvset = nothing
     solution::Union{Nothing, CalibrationSolution} = nothing
     output = nothing
-    band_cals = nothing
+    spw_cals = nothing
 end
 
 # Rebuild a context with selected fields overridden.
 function _with(
         ctx::CalibrationContext;
         uvset = ctx.uvset, solution = ctx.solution,
-        output = ctx.output, band_cals = ctx.band_cals,
+        output = ctx.output, spw_cals = ctx.spw_cals,
     )
-    return CalibrationContext(uvset, solution, output, band_cals)
+    return CalibrationContext(uvset, solution, output, spw_cals)
 end
 
 """
@@ -112,30 +112,30 @@ function _antenna_names(uvset)
 end
 
 """
-    AprioriAmplitude(band_cals; min_elevation_deg = 0.0, on_missing_station = :warn)
+    AprioriAmplitude(spw_cals; min_elevation_deg = 0.0, on_missing_station = :warn)
 
 Output-chain pipeline step (NOT a reduction): a-priori amplitude calibration.
-Applies a pre-built `band_cals` (`load_fitsidi_apriori(path)` — the caller's
+Applies a pre-built `spw_cals` (`load_fitsidi_apriori(path)` — the caller's
 job) via `apply_calibration` on the fringe-corrected data, after the solution's
 gains and interleaved with any `ReduceStep`s in whatever relative order the
 `CalibrationPipeline` declares them — e.g. placed before a `ReduceStep` that
-merges bands, it sees the native per-band channels; placed after, it sees the
+merges spws, it sees the native per-spw channels; placed after, it sees the
 reduced ones. It is RECORDED on the fitted solution (`sol.postcal`), so the
 standalone `calibrate(sol, uvset)` reproduces it without re-passing
-`band_cals`.
+`spw_cals`.
 """
 struct AprioriAmplitude{C} <: CalibrationStep
-    band_cals::C
+    spw_cals::C
     min_elevation_deg::Float64
     on_missing_station::Symbol
 end
-AprioriAmplitude(band_cals; min_elevation_deg::Real = 0.0, on_missing_station::Symbol = :warn) =
-    AprioriAmplitude(band_cals, Float64(min_elevation_deg), on_missing_station)
+AprioriAmplitude(spw_cals; min_elevation_deg::Real = 0.0, on_missing_station::Symbol = :warn) =
+    AprioriAmplitude(spw_cals, Float64(min_elevation_deg), on_missing_station)
 
 """
     AverageFrequency(; nout = 1)
 
-Reduce step: inverse-variance-average each band's `Frequency` axis into `nout`
+Reduce step: inverse-variance-average each spw's `Frequency` axis into `nout`
 channels (`frequency_average`).
 """
 Base.@kwdef struct AverageFrequency <: ReduceStep
@@ -147,11 +147,15 @@ prepare_reducer(s::AverageFrequency, ctx::CalibrationContext) =
 """
     CombineSpw()
 
-Reduce step: merge sibling band leaves into one `Frequency` axis (`combine_spw`).
-Apply after [`AverageFrequency`](@ref) so each band is one channel.
+Reduce step: merge sibling spw leaves into one `Frequency` axis (`combine_spw`).
+Apply after [`AverageFrequency`](@ref) so each spw is one channel.
 """
 struct CombineSpw <: ReduceStep end
 prepare_reducer(::CombineSpw, ctx::CalibrationContext) = (combine_spw, ctx)
+
+
+struct ScanAverageTime <: ReduceStep end
+prepare_reducer(::ScanAverageTime, ctx::CalibrationContext) = (scan_average, ctx)
 
 """
     AverageTime(; seconds)
@@ -166,18 +170,18 @@ prepare_reducer(s::AverageTime, ctx::CalibrationContext) =
     ((uv -> time_bin_average(uv, s.seconds)), ctx)
 
 """
-    FlagBandEdges(; mode = :flag_fraction, fraction = 0.0)
+    FlagSpwEdges(; mode = :flag_fraction, fraction = 0.0)
 
-Reduce step: handle polyphase-filterbank band edges (`flag_band_edges`).
+Reduce step: handle polyphase-filterbank spectral-window edges (`flag_spw_edges`).
 `:flag_fraction` zeros the outer `fraction` of channels' weights at each edge;
 `:trim` drops them.
 """
-Base.@kwdef struct FlagBandEdges <: ReduceStep
+Base.@kwdef struct FlagSpwEdges <: ReduceStep
     mode::Symbol = :flag_fraction
     fraction::Float64 = 0.0
 end
-prepare_reducer(s::FlagBandEdges, ctx::CalibrationContext) =
-    ((uv -> flag_band_edges(uv; mode = s.mode, fraction = s.fraction)), ctx)
+prepare_reducer(s::FlagSpwEdges, ctx::CalibrationContext) =
+    ((uv -> flag_spw_edges(uv; mode = s.mode, fraction = s.fraction)), ctx)
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────

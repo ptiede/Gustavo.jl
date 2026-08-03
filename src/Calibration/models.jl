@@ -260,7 +260,7 @@ time_segmentation_label(::InstrumentScans) = "instrscans"
 frequency_segmentation_label(::GlobalFrequency) = "global"
 frequency_segmentation_label(::PerSpectralWindow) = "perspw"
 frequency_segmentation_label(s::ChannelBlocks) = "chblocks$(s.block_size)"
-frequency_segmentation_label(s::FrequencyBands) = "bands$(length(s.ranges))"
+frequency_segmentation_label(s::FreqGroups) = "freqgroups$(length(s.ranges))"
 
 function station_model_summary(name, m::StationGainModel)
     p, a = phase_components(m), logamp_components(m)

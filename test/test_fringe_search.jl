@@ -251,9 +251,9 @@ end
     # grid would be 716 bins for 128 real channels (>4× → mostly zeros), so
     # :auto picks the hierarchical path. MBD ambiguity A = 1/100 MHz = 10 ns.
     Δf = 1.0e6
-    nband, nchan_b, nt = 8, 16, 24
+    nfreqgroup, nchan_b, nt = 8, 16, 24
     freqs = Float64[]
-    for b in 0:(nband - 1)
+    for b in 0:(nfreqgroup - 1)
         append!(freqs, 8.0e9 .+ b * 100.0e6 .+ (0:(nchan_b - 1)) .* Δf)
     end
     f0 = mean(freqs)
@@ -395,9 +395,9 @@ end
 
     # The hierarchical (MBD) path also stays native ComplexF32 in its workspace.
     Δf = 1.0e6
-    nband, nchan_b = 8, 16
+    nfreqgroup, nchan_b = 8, 16
     freqs_m = Float64[]
-    for b in 0:(nband - 1)
+    for b in 0:(nfreqgroup - 1)
         append!(freqs_m, 8.0e9 .+ b * 100.0e6 .+ (0:(nchan_b - 1)) .* Δf)
     end
     f0m = mean(freqs_m)

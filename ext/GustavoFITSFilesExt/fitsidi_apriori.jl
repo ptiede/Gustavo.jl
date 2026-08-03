@@ -1,7 +1,7 @@
 # A-priori amplitude calibration from a FITS-IDI file's GAIN_CURVE (DPFU +
 # elevation gain polynomial) and SYSTEM_TEMPERATURE (Tsys) tables. Produces one
-# `UVData.AntabCalibration` per band, reusing Gustavo's existing SEFD/elevation
-# apply machinery (`apply_calibration(uvset, band_cals)`). FITS-IDI specifics
+# `UVData.AntabCalibration` per spw, reusing Gustavo's existing SEFD/elevation
+# apply machinery (`apply_calibration(uvset, spw_cals)`). FITS-IDI specifics
 # (table layout, NOSTA→name mapping, time convention) live here; the calibration
 # math stays format-neutral in `src/UVData/apriori.jl`.
 
@@ -86,8 +86,8 @@ function UVData.load_fitsidi_apriori(path; tsys_max::Real = 1.0e4)
         push!(get!(rows_of, st_nosta[r], Int[]), r)
     end
 
-    # ── Assemble one AntabCalibration per band ─────────────────────────────────
-    band_cals = Dict{Int, AntabCalibration}()
+    # ── Assemble one AntabCalibration per spw ──────────────────────────────────
+    spw_cals = Dict{Int, AntabCalibration}()
     for b in 1:no_band
         stations = Dict{String, AntabStation}()
         for (ant, rows) in rows_of
@@ -107,8 +107,8 @@ function UVData.load_fitsidi_apriori(path; tsys_max::Real = 1.0e4)
             tseries = AntabTsysSeries(times, [(0, :R), (0, :L)], vals)
             stations[nm] = AntabStation(nm, gain_of[(ant, b)], tseries, 0)
         end
-        band_cals[b] = AntabCalibration(String(path), label, yr, stations)
+        spw_cals[b] = AntabCalibration(String(path), label, yr, stations)
     end
 
-    return band_cals
+    return spw_cals
 end

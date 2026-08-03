@@ -92,7 +92,7 @@ Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
 delay), on data already gain-corrected through the pipeline's transform chain:
 each spw block's sub-band chunk phasors → per-(baseline, group) exact
 matched-filter slope fits → guarded station solves accumulating into the
-per-scan `Delay × FrequencyBands` column and its companion constant. Run AFTER
+per-scan `Delay × FreqGroups` column and its companion constant. Run AFTER
 the dispersion refinement so the within-band slopes it fits are
 dispersion-corrected. A no-op (0) when `sbd === nothing`.
 """
@@ -123,7 +123,7 @@ function refine_scan_sbd!(
         r = blocks[li]
         fs = fg[r]
         nc = length(fs)
-        bgrp = findfirst(rr -> ci[first(r)] in rr, sbd.bands)
+        bgrp = findfirst(rr -> ci[first(r)] in rr, sbd.freqgroups)
         bgrp === nothing && return
         edges = round.(Int, range(0, nc; length = Int(nchunk) + 1))
         coc = Vector{Int}(undef, nc)
@@ -259,7 +259,7 @@ function _sbd_fit_stationize!(
         snr_min::Float64 = 8.0, tau_max::Float64 = 6.0e-8,
     )
     nbl, npol, _ = size(z)
-    ngrp = length(sbd.bands)
+    ngrp = length(sbd.freqgroups)
     nrej = 0
     # ── Tier 1: per-group fits + within-group SLOPE guard ───────────────────
     # The per-baseline SNR gate cannot catch a BIASED fit: on a group whose
