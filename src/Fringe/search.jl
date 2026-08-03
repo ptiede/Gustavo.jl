@@ -1076,11 +1076,11 @@ by [`baseline_fringe_map`](@ref) — the classic false-fringe diagnostic. Always
 - `ncells` — effective number of independent search cells (see `fringe_pfa`).
 - `pfa` — `fringe_pfa(detection.snr, ncells)` for this single search.
 """
-struct FringeSearchMap
-    delays::Vector{Float64}
-    rates::Vector{Float64}
-    snr::Matrix{Float64}
-    detection::Detection{Float64}
+struct FringeSearchMap{D, R, S, Det}
+    delays::D
+    rates::R
+    snr::S
+    detection::Det
     ncells::Float64
     pfa::Float64
 end
@@ -1137,14 +1137,11 @@ function baseline_fringe_map(
     sort!(kidx; by = k -> axf.delays[k])
     sort!(lidx; by = l -> axf.rates[l])
     inv_noise = 1.0 / sqrt(noise2)
-    snrmap = Matrix{Float64}(undef, length(kidx), length(lidx))
-    @inbounds for (j, l) in enumerate(lidx), (i, k) in enumerate(kidx)
-        snrmap[i, j] = abs(D[k, l]) * inv_noise
-    end
+    snrmap = abs.(D[kidx, lidx]) .* inv_noise
 
     # The refined peak, via the standard search (re-grids + re-FFTs the same data
     # in `ws` — the map above is already copied out, and reusing the search keeps
     # the peak/refinement logic in one place).
     det = _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, ws, opts, _gate_snr_min(opts, ax))
-    return FringeSearchMap(Float64.(axf.delays[kidx]), Float64.(axf.rates[lidx]), snrmap, _detection64(det), ncells, fringe_pfa(det.snr, ncells))
+    return FringeSearchMap(axf.delays[kidx], axf.rates[lidx], snrmap, det, ncells, fringe_pfa(det.snr, ncells))
 end

@@ -653,6 +653,28 @@ end
     @test isfinite(xc[1]) && isfinite(xc[2])
 end
 
+@testset "Regularized WLS: penalty matrix generalizes the diagonal vector" begin
+    CALIB = Gustavo.Calibration
+    A = Float64[1.0 0.0; 1.0 1.0; 1.0 2.0; 1.0 3.0]
+    b = Float64[1.0, 2.0, 3.1, 3.9]
+    iv = ones(4)
+    lambda = [0.2, 0.7]
+
+    x_vec = CALIB.weighted_regularized_least_squares(A, b, iv, lambda)
+    x_mat = CALIB.weighted_regularized_least_squares(A, b, iv, Diagonal(sqrt.(lambda)))
+    @test x_vec ≈ x_mat rtol = 1.0e-10
+
+    # A non-diagonal R (a first-difference roughness penalty) must reduce to
+    # solving the row-stacked normal equations directly.
+    R = Float64[1.0 -1.0]
+    x_r = CALIB.weighted_regularized_least_squares(A, b, iv, R)
+    sw = sqrt.(iv)
+    Aw = A .* sw
+    bw = b .* sw
+    x_ref = vcat(Aw, R) \ vcat(bw, zeros(size(R, 1)))
+    @test x_r ≈ x_ref rtol = 1.0e-10
+end
+
 @testset "DimArray slicing" begin
     using DimensionalData
     UV = Gustavo.UVData

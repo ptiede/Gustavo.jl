@@ -138,17 +138,29 @@ function weighted_least_squares(A, b, inv_variances)
     return solve(LinearProblem(Aw, bw), QRFactorization()).u
 end
 
+"""
+    weighted_regularized_least_squares(A, b, inv_variances, penalties)
+
+Ridge-regularized WLS: solve `min_x ‖diag(√inv_variances)(Ax - b)‖² + ‖Rx‖²`
+by stacking `R` onto the weighted design matrix (`Rx = 0` as extra
+zero-target rows) and delegating to [`weighted_least_squares`](@ref).
+
+`penalties` is either a vector of per-column ridge weights `λᵢ ≥ 0` (the
+diagonal case, giving `R = Diagonal(√λ)`) or an arbitrary penalty matrix `R`
+with `size(R, 2) == size(A, 2)` — e.g. a (scaled) difference operator for
+roughness penalties. A vector of all-nonpositive entries (no columns
+penalized) short-circuits to the unregularized solve.
+"""
 function weighted_regularized_least_squares(A, b, inv_variances, penalties)
     isempty(penalties) && return weighted_least_squares(A, b, inv_variances)
-    all(≤(0), penalties) && return weighted_least_squares(A, b, inv_variances)
+    penalties isa AbstractVector && all(≤(0), penalties) && return weighted_least_squares(A, b, inv_variances)
 
     A, b, inv_variances = _promote_lsq(A, b, inv_variances)
     sw = _row_scale(inv_variances)
     Aw = A .* reshape(sw, :, 1)
     bw = b .* sw
-    reg = sqrt.(penalties)
-    Areg = Matrix(Diagonal(reg))
-    breg = zeros(eltype(Aw), size(A, 2))
+    Areg = penalties isa AbstractVector ? Diagonal(sqrt.(penalties)) : penalties
+    breg = zeros(eltype(Aw), size(Areg, 1))
     return solve(LinearProblem(vcat(Aw, Areg), vcat(bw, breg)), QRFactorization()).u
 end
 

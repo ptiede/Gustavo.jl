@@ -500,25 +500,22 @@ function _fit_bandpass_segment(sm::PenalizedBandpass, na, nb, ci, val, w, nnodes
     return la
 end
 
-# 1-D Whittaker smoother: minimise  Σ w_i (x_i − y_i)² + (λ·w̄) Σ (x_{i−1} − 2x_i + x_{i+1})².
-# `w_i = 0` (and `y_i` non-finite) where a channel had no data → the penalty alone
-# sets it (interpolation). `λ` is scaled by the median positive weight so it is
-# data-relative. Dense pentadiagonal normal-matrix solve (no SparseArrays).
+# 1-D Whittaker smoother: minimise  Σ w_i (x_i − y_i)² + (λ·w̄) Σ (x_{i−1} − 2x_i + x_{i+1})²
+# + ridge Σ x_i², via the generic penalized WLS solve with `A = I`, the ridge
+# term stacked as `√ridge · I` and the roughness term as `√λ · D` (`D` the
+# 2nd-difference operator). `w_i = 0` (and `y_i` non-finite) where a channel had
+# no data → the penalty alone sets it (interpolation). `λ` is scaled by the
+# median positive weight so it is data-relative.
 function _whittaker_smooth(y, w, lambda::Real, ridge::Real)
     n = length(y)
     pos = [w[i] for i in 1:n if w[i] > 0]
     λ = lambda * (isempty(pos) ? 1.0 : median(pos))
-    M = zeros(n, n); rhs = zeros(n)
-    @inbounds for i in 1:n
-        wi = (w[i] > 0 && isfinite(y[i])) ? float(w[i]) : 0.0
-        M[i, i] += wi + ridge
-        rhs[i] += wi * (wi > 0 ? y[i] : 0.0)
-    end
+    wi = [(w[i] > 0 && isfinite(y[i])) ? float(w[i]) : 0.0 for i in 1:n]
+    yi = [wi[i] > 0 ? float(y[i]) : 0.0 for i in 1:n]
+    D = zeros(n - 2, n)
     @inbounds for i in 1:(n - 2)                            # 2nd-difference rows [1, −2, 1]
-        c = (i, i + 1, i + 2); s = (1.0, -2.0, 1.0)
-        for a in 1:3, b in 1:3
-            M[c[a], c[b]] += λ * s[a] * s[b]
-        end
+        D[i, i] = 1.0; D[i, i + 1] = -2.0; D[i, i + 2] = 1.0
     end
-    return M \ rhs
+    R = vcat(sqrt(ridge) .* Matrix(1.0I, n, n), sqrt(λ) .* D)
+    return weighted_regularized_least_squares(Matrix(1.0I, n, n), yi, wi, R)
 end

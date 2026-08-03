@@ -887,28 +887,23 @@ function _restitch_refant_gauge!(phase, covered, track_w, ref_ant::Integer)
     return phase
 end
 
-# Dense first-difference penalized smoother (no SparseArrays — the system is
-# tridiagonal, solved densely): minimize Σ w_k(φ_k − y_k)² + λ Σ(φ_{k+1}−φ_k)².
-# Non-finite samples get zero data weight (interpolated by the penalty).
+# First-difference penalized smoother, via the generic penalized WLS solve
+# with `A = I`, the penalty stacked as `√λ · D` (`D` the 1st-difference
+# operator): minimize Σ w_k(φ_k − y_k)² + λ Σ(φ_{k+1}−φ_k)². Non-finite samples
+# get zero data weight (interpolated by the penalty).
 function _penalized_smooth(y::AbstractVector, w::AbstractVector, λ::Real)
     n = length(y)
     n == 0 && return collect(float.(y))
-    M = zeros(Float64, n, n)
-    rhs = zeros(Float64, n)
-    for k in 1:n
-        wk = (isfinite(y[k]) && isfinite(w[k]) && w[k] > 0) ? float(w[k]) : 0.0
-        M[k, k] += wk
-        rhs[k] += wk * (wk > 0 ? float(y[k]) : 0.0)
-    end
-    for k in 1:(n - 1)                                  # λ (φ_{k+1} − φ_k)²
-        M[k, k] += λ
-        M[k + 1, k + 1] += λ
-        M[k, k + 1] -= λ
-        M[k + 1, k] -= λ
-    end
+    wk = [(isfinite(y[k]) && isfinite(w[k]) && w[k] > 0) ? float(w[k]) : 0.0 for k in 1:n]
+    yk = [wk[k] > 0 ? float(y[k]) : 0.0 for k in 1:n]
     # Guard against an all-unconstrained component (no data, λ = 0).
-    all(iszero, M) && return collect(float.(y))
-    return M \ rhs
+    all(iszero, wk) && iszero(λ) && return collect(float.(y))
+    D = zeros(n - 1, n)
+    for k in 1:(n - 1)
+        D[k, k] = 1.0; D[k, k + 1] = -1.0
+    end
+    R = sqrt(λ) .* D
+    return weighted_regularized_least_squares(Matrix(1.0I, n, n), yk, wk, R)
 end
 
 # Remove the weighted mean and linear slope of a track over `times`.
