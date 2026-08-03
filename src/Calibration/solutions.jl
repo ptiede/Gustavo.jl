@@ -76,10 +76,10 @@ convenience — a hand-built or extracted solution with exactly one step, named
 over, and `info` a NamedTuple of solution-level diagnostics (per-scan SNR, χ,
 residuals, …) — distinct from each step's own `info`.
 
-Component names must be unique across every step's own model: [`@comp`](@ref),
-[`component_gains`](@ref), and [`component_names`](@ref) search by name across
-`steps` with no other disambiguation, so a clash between two steps is refused
-at construction.
+Component names are local to each step's own model and may repeat across
+steps (e.g. a `bandpass` step and a `fringe` step can both carry an `atmos`
+component) — [`@comp`](@ref) and [`component_gains`](@ref) always take the
+step explicitly rather than searching for a name across `steps`.
 
 `transforms` records the data-transform chain the solve materialized its scans
 through (precal, weight scaling, caller hooks), so diagnostics can replay it and
@@ -101,7 +101,6 @@ function CalibrationSolution(
         transforms = (), postcal = (),
     )
     isempty(steps) && throw(ArgumentError("CalibrationSolution: at least one step is required."))
-    _check_unique_component_names(steps)
     return CalibrationSolution(
         collect(StepSolution, steps), geom, info,
         UVData._narrow_eltype(transforms), UVData._narrow_eltype(postcal),
@@ -114,16 +113,6 @@ function CalibrationSolution(
         name::Symbol = :solution, transforms = (), postcal = (),
     )
     return CalibrationSolution([StepSolution(name, model, layout, θ, info)], geom, info; transforms, postcal)
-end
-
-# Every component name must be unique across every step's own model: the
-# name-keyed accessors (`@comp`, `component_gains`, `component_names`) search
-# `steps` in order with no other disambiguation, so a clash would silently
-# resolve to whichever step's component happens to come first.
-function _check_unique_component_names(steps)
-    reduce(_merge_components, (s.model.phase for s in steps); init = (;))
-    reduce(_merge_components, (s.model.logamp for s in steps); init = (;))
-    return nothing
 end
 
 # `nant` is a run-wide constant every step's own layout was planned with
@@ -245,8 +234,10 @@ end
 
 The top-level model component names across every step of `sol` (phase and
 log-amplitude groups combined, in step then declaration order, duplicates
-dropped) — what [`@comp`](@ref)/[`component_gains`](@ref) address by name, and
-what `show` lists under `Components:`.
+dropped) — what `show` lists under `Components:`. A name here can belong to
+several steps at once (component names are local to each step's own model);
+use [`stage_names`](@ref) and a step-qualified [`@comp`](@ref) or
+[`component_gains`](@ref) call to reach one unambiguously.
 """
 function component_names(sol::CalibrationSolution)
     names = Symbol[]
@@ -312,33 +303,39 @@ end
 # ── @comp: one component's θ leaf as a labelled DimArray ─────────────────────
 
 """
-    @comp solution.θ.phase.<name>
-    @comp solution.θ.logamp.<name>
+    @comp solution.<step>.θ.phase.<name>
+    @comp solution.<step>.θ.logamp.<name>
 
-The raw θ leaf of one model component, wrapped as a labelled `DimArray` for
-inspection. The path mirrors the model's named component tree: `phase` or
-`logamp`, then the component's name, descending into a multi-emit wrapper's
-subtree (`solution.θ.phase.sbd.delay`).
+The raw θ leaf of one model component of the step named `<step>`, wrapped as a
+labelled `DimArray` for inspection. The step must be given explicitly:
+component names are local to a step's own model and routinely repeat across
+steps (e.g. a `bandpass` step and a `fringe` step can both carry an `atmos`
+component), so a bare name would be ambiguous. The rest of the path mirrors
+the model's named component tree: `phase` or `logamp`, then the component's
+name, descending into a multi-emit wrapper's subtree
+(`solution.fringe.θ.phase.sbd.delay`).
 
 The result carries the leaf's five axes `(param, feed, Frequency, Ti, Ant)` —
 the second is `Feed` when the component is fit per feed, else the tied `node`
 axis — with coordinates materialized from `solution`'s geometry: a `Frequency`
 segment's centre channel frequency (Hz), a `Ti` segment's mean epoch (hours),
 feed/node ids, and antenna names (from `solution.info.ant_names` when present,
-else `1:nant`).
+else `1:nant`). Use [`stage_names`](@ref) to list the steps recorded on
+`solution`.
 
 The wrap shares data with θ (no copy): an inspection view, never stored on the
 solution and never fed through the solve or AD.
 """
 macro comp(ex)
-    sol, path = _parse_comp_path(ex)
+    sol, step, path = _parse_comp_path(ex)
     pathexpr = Expr(:tuple, (QuoteNode(s) for s in path)...)
-    return :(_component_dimarray($(esc(sol)), $pathexpr))
+    return :(_component_dimarray($(esc(sol)), $(QuoteNode(step)), $pathexpr))
 end
 
-# Split `solution.θ.group.name…` into the solution expression and the tuple of
-# component-path symbols after `.θ`. Errors at macro-expansion when the `.θ`
-# marker is absent or ends the path.
+# Split `solution.<step>.θ.group.name…` into the solution expression, the step
+# name, and the tuple of component-path symbols after `.θ`. Errors at
+# macro-expansion when the `.θ` marker is absent, ends the path, or has no
+# step name before it.
 function _parse_comp_path(ex)
     syms = Symbol[]
     e = ex
@@ -348,26 +345,27 @@ function _parse_comp_path(ex)
     end
     reverse!(syms)
     i = findfirst(==(:θ), syms)
-    (i === nothing || i == length(syms)) && error(
-        "@comp: expected a path of the form `solution.θ.phase.<name>`; got `$ex`."
+    (i === nothing || i < 2 || i == length(syms)) && error(
+        "@comp: expected a path of the form `solution.<step>.θ.phase.<name>`; got `$ex`. " *
+            "The step must be given explicitly — component names can repeat across steps."
     )
-    sol = foldl((a, s) -> Expr(:., a, QuoteNode(s)), syms[1:(i - 1)]; init = e)
-    return sol, syms[(i + 1):end]
+    sol = foldl((a, s) -> Expr(:., a, QuoteNode(s)), syms[1:(i - 2)]; init = e)
+    return sol, syms[i - 1], syms[(i + 1):end]
 end
 
 """
-    _component_dimarray(sol::CalibrationSolution, path::Tuple{Vararg{Symbol}}) -> DimArray
+    _component_dimarray(sol::CalibrationSolution, step::Symbol, path::Tuple{Vararg{Symbol}}) -> DimArray
 
-Runtime behind [`@comp`](@ref): find the step whose OWN `layout.plantree`
-carries `path` (component names are unique across steps, enforced on
-construction), descend its `plantree`/`axes` by `path` to a component leaf, and
-wrap it as a labelled `DimArray`. See `@comp` for the path grammar and
-coordinate sourcing.
+Runtime behind [`@comp`](@ref): look up the step named `step` (failing loudly
+if no step has that name), descend its OWN `plantree`/`axes` by `path` to a
+component leaf, and wrap it as a labelled `DimArray`. See `@comp` for the path
+grammar and coordinate sourcing.
 """
-function _component_dimarray(sol::CalibrationSolution, path::Tuple{Vararg{Symbol}})
-    step, plan = _find_component_step(sol, path)
-    step === nothing && throw(
-        ArgumentError("@comp: no component named $(join(path, '.')) in any step of this solution.")
+function _component_dimarray(sol::CalibrationSolution, step::Symbol, path::Tuple{Vararg{Symbol}})
+    s = _step(sol, step)
+    ok, plan = _try_descend(s.layout.plantree, path)
+    ok || throw(
+        ArgumentError("@comp: step $(repr(step)) has no component named $(join(path, '.')).")
     )
     plan isa ComponentPlan || throw(
         ArgumentError(
@@ -375,15 +373,15 @@ function _component_dimarray(sol::CalibrationSolution, path::Tuple{Vararg{Symbol
                 "descend to a named component."
         )
     )
-    _, axnode = _try_descend(step.layout.axes, path)
-    raw = _component_leaf(plan, step.θ)
+    _, axnode = _try_descend(s.layout.axes, path)
+    raw = _component_leaf(plan, s.θ)
     dims = ntuple(d -> _role_dim(axnode.roles[d], size(raw, d), sol, plan), ndims(raw))
     return DimArray(raw, dims; name = last(path))
 end
 
 # Attempt to descend `tree` (a step's own `layout.plantree` or `layout.axes`)
 # by `path`; `(false, nothing)` without throwing when a name is absent along
-# the way — that just means "not this step", not an error.
+# the way.
 function _try_descend(tree, path::Tuple{Vararg{Symbol}})
     node = tree
     for s in path
@@ -391,17 +389,6 @@ function _try_descend(tree, path::Tuple{Vararg{Symbol}})
         node = getproperty(node, s)
     end
     return true, node
-end
-
-# The step owning the named component `path` (checked against every step's
-# own `layout.plantree` in run order) and its resolved plan, or
-# `(nothing, nothing)` when no step's model carries it.
-function _find_component_step(sol::CalibrationSolution, path::Tuple{Vararg{Symbol}})
-    for s in sol.steps
-        ok, plan = _try_descend(s.layout.plantree, path)
-        ok && return s, plan
-    end
-    return nothing, nothing
 end
 
 # The DimensionalData dimension for one leaf axis, from its role and the

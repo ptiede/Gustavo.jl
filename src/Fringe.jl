@@ -128,7 +128,7 @@ export Stationization, stationize_scan, station_closure_residuals
 export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
 export station_weight_scale
-export AbstractBandpassSmoother, FreeBandpass, PolynomialBandpass, PenalizedBandpass
+export free_bandpass, polynomial_bandpass, penalized_bandpass
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_station_solutions
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups

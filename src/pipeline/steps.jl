@@ -54,15 +54,15 @@ required_grouping(::DispersionSBDFit) = :scan_complete
 """
     BandpassEstimator(; phase = true, amp = true,
                       freq = ChannelBlocks(1),
-                      amp_model = PenalizedBandpass(1.0),
+                      amp_model = penalized_bandpass(1.0),
                       select = AllScans())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass
 solved from the residual of whichever earlier steps have already applied
 their gains, over the scans `select` picks (fit-on-subset / apply-everywhere:
 a bandpass fit from a few bright calibrator scans still applies to the whole
-track). `amp_model` is the amplitude-shape estimator ([`PenalizedBandpass`](@ref) /
-[`PolynomialBandpass`](@ref) / [`FreeBandpass`](@ref)).
+track). `amp_model` is the amplitude-shape estimator ([`penalized_bandpass`](@ref) /
+[`polynomial_bandpass`](@ref) / [`free_bandpass`](@ref)).
 
 `freq` sets how finely the bandpass is resolved in frequency: the default
 [`ChannelBlocks`](@ref)`(1)` is one free value per channel, and
@@ -79,7 +79,7 @@ Base.@kwdef struct BandpassEstimator <: SolveStep
     phase::Bool = true
     amp::Bool = true
     freq::ChannelBlocks = ChannelBlocks(1)
-    amp_model::Fringe.AbstractBandpassSmoother = Fringe.PenalizedBandpass(1.0)
+    amp_model = Fringe.penalized_bandpass(1.0)
     select::Fringe.AbstractScanSelection = Fringe.AllScans()
 end
 provides(::BandpassEstimator) = :bandpass

@@ -175,21 +175,6 @@ _flatten_one(nt::NamedTuple) = _flatten_components(nt)
 phase_components(m::StationGainModel) = _flatten_components(m.phase)
 logamp_components(m::StationGainModel) = _flatten_components(m.logamp)
 
-# Merge two named component groups, failing loudly on a name clash — `merge`
-# alone would silently drop the earlier component. Names are unique WITHIN a
-# group (phase or log-amp), so this guards the assembly of a model from several
-# steps' contributions.
-function _merge_components(a::NamedTuple, b::NamedTuple)
-    dup = intersect(keys(a), keys(b))
-    isempty(dup) || throw(
-        ArgumentError(
-            "duplicate component name(s) $(collect(dup)): each component in a " *
-                "group must be uniquely named.",
-        ),
-    )
-    return merge(a, b)
-end
-
 # ── Model-list elements ──────────────────────────────────────────────────────
 
 """

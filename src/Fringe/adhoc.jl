@@ -24,7 +24,10 @@
 #
 # After the per-AP global solve (below) each (station, feed) phase track is
 # smoothed. WHICH smoother — and how it is parameterized — is a strategy TYPE, one
-# per method, mirroring the `AbstractBandpassSmoother` pattern in `bandpass_stage.jl`.
+# per method (unlike the amp-bandpass smoothers in `bandpass_stage.jl`, which are
+# `WLSEstimator`-based callables: most adhoc smoothers are NOT WLS problems —
+# `OUSmoother`/`JointOUSmoother` are Kalman/RTS filters, `NoSmoothing` is a no-op —
+# so a shared struct-dispatch interface is the right fit here instead).
 # Adding a method is "define a `<: AbstractAdhocSmoother` struct + one method",
 # nothing else. The informal interface a smoother participates in:
 #

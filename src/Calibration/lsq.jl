@@ -164,6 +164,33 @@ function weighted_regularized_least_squares(A, b, inv_variances, penalties)
     return solve(LinearProblem(vcat(Aw, Areg), vcat(bw, breg)), QRFactorization()).u
 end
 
+"""
+    WLSEstimator(observation_model, penalty = nothing)
+
+A weighted-least-squares estimator reified as a value: `observation_model`
+is a callable that, given whatever domain-specific data a fit needs, builds
+and returns `(A, b, inv_variances)`; `penalty` regularizes that system —
+`nothing` (unregularized), a per-column ridge vector, an arbitrary penalty
+matrix, or a function of `A` computing one of those (for penalties whose
+shape depends on the system size, e.g. one ridge entry per column).
+
+Calling `est(args...)` runs `observation_model(args...)` then dispatches to
+[`weighted_least_squares`](@ref) or [`weighted_regularized_least_squares`](@ref)
+according to `penalty`.
+"""
+struct WLSEstimator{O, P}
+    observation_model::O
+    penalty::P
+end
+WLSEstimator(observation_model) = WLSEstimator(observation_model, nothing)
+
+function (est::WLSEstimator)(args...)
+    A, b, inv_variances = est.observation_model(args...)
+    est.penalty === nothing && return weighted_least_squares(A, b, inv_variances)
+    penalty = est.penalty isa Function ? est.penalty(A) : est.penalty
+    return weighted_regularized_least_squares(A, b, inv_variances, penalty)
+end
+
 function weighted_constrained_least_squares(A, b, inv_variances, C, d; constraint_weight = 1.0e6)
     isempty(C) && return weighted_least_squares(A, b, inv_variances)
 

@@ -12,58 +12,134 @@
 # rtol ≤ 1e-12).
 #
 # The graph/solve helpers (`_ObsRow`, `_solve_observable`, `_track_noise2`,
-# `_node`, `_chi_sign`) live in stationize.jl/adhoc.jl; the amp-smoother family
-# (`AbstractBandpassSmoother`, `_fit_bandpass_segment`) lives below.
+# `_node`, `_chi_sign`) live in stationize.jl/adhoc.jl; the amp-bandpass
+# `WLSEstimator` presets (`free_bandpass`, `polynomial_bandpass`,
+# `penalized_bandpass`) live below.
 
-# ── Amplitude-bandpass smoothers (pluggable estimators) ───────────────────────────
+# ── Amplitude-bandpass estimators (pluggable WLSEstimator presets) ────────────
 #
 # The per-(station, feed) log-amp bandpass is solved from the SUM closure
 # `log|V̄_ab(ν)| = la_a(ν) + lb_b(ν)` over each spw (a +1/+1, signless-Laplacian
 # incidence — FULL RANK, so no reference state). HOW the per-channel shape is
-# estimated — and how low-/no-signal channels are filled — is a pluggable strategy:
-# add an `AbstractBandpassSmoother` subtype and a `_fit_bandpass_segment` method
-# (at the foot of this file) to extend.
-abstract type AbstractBandpassSmoother end
+# estimated — and how low-/no-signal channels are filled — is a pluggable
+# strategy: `free_bandpass`/`polynomial_bandpass`/`penalized_bandpass` each
+# return a callable of `(na, nb, ci, val, w, nnodes, nseg, xseg, ridge) ->
+# la_seg::Matrix` (nnodes × nseg, `NaN` where unestimable), built on
+# `WLSEstimator`; add a new one the same way to extend.
+
+# Signless-Laplacian (SUM) incidence for one frequency segment's gated
+# closure observations, restricted to the rows `idx` — the shared
+# `observation_model` behind both `free_bandpass` and `polynomial_bandpass`'s
+# per-segment special case.
+function _signless_incidence(na, nb, idx, nnodes, val, w)
+    A = zeros(length(idx), nnodes)
+    for (r, i) in enumerate(idx)
+        A[r, na[i]] += 1.0; A[r, nb[i]] += 1.0
+    end
+    return A, val[idx], w[idx]
+end
 
 """
-    FreeBandpass()
+    free_bandpass()
 
-Free per-channel closure: one independent WLS per channel, no regularisation.
-Follows the data but does NOT estimate low-/no-signal channels (left at |g| = 1).
+Free per-channel closure: one independent [`WLSEstimator`](@ref) call per
+frequency segment (ridge-only regularization), no roughness penalty. Follows
+the data but does NOT estimate low-/no-signal channels (left at |g| = 1).
 The `λ → 0` / `degree → ∞` limit of the others.
 """
-struct FreeBandpass <: AbstractBandpassSmoother end
+function free_bandpass()
+    return function (na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+        est = WLSEstimator((idx) -> _signless_incidence(na, nb, idx, nnodes, val, w), A -> fill(ridge, size(A, 2)))
+        la = fill(NaN, nnodes, nseg)
+        for (c, idx) in enumerate(_bandpass_obs_by_segment(ci, nseg))
+            isempty(idx) && continue
+            sol = est(idx)
+            for i in idx
+                la[na[i], c] = sol[na[i]]
+                la[nb[i], c] = sol[nb[i]]
+            end
+        end
+        return la
+    end
+end
+
+# Signless-Laplacian incidence over per-node polynomial-coefficient columns
+# (θ-column for (node, k) is `(node-1)*nbf + k`), evaluated at every segment
+# (incl. gaps) via the fitted basis coefficients.
+function _polynomial_incidence(na, nb, ci, val, w, nnodes, nbf, B)
+    A = zeros(length(val), nnodes * nbf)
+    @inbounds for i in eachindex(val)
+        oa = (na[i] - 1) * nbf; ob = (nb[i] - 1) * nbf
+        for k in 1:nbf
+            A[i, oa + k] += B[ci[i], k]; A[i, ob + k] += B[ci[i], k]
+        end
+    end
+    return A, val, w
+end
 
 """
-    PolynomialBandpass(degree = 4)
+    polynomial_bandpass(degree = 4)
 
 Smooth per-spw polynomial of `degree` in a centred/scaled frequency coordinate, fit
-by a single closure WLS (the `PolynomialFreq` design convention). Estimates gaps by
-the fit. Assumes the in-spw bandpass is ~a low-order polynomial (smooth passband +
-gentle roll-off); a high degree can ring (Runge) at the edges.
+by a single closure [`WLSEstimator`](@ref) call (the `PolynomialFreq` design
+convention). Estimates gaps by the fit. Assumes the in-spw bandpass is ~a
+low-order polynomial (smooth passband + gentle roll-off); a high degree can
+ring (Runge) at the edges.
 """
-struct PolynomialBandpass <: AbstractBandpassSmoother
-    degree::Int
-    function PolynomialBandpass(degree::Integer = 4)
-        degree >= 1 || error("PolynomialBandpass: degree must be ≥ 1")
-        return new(Int(degree))
+function polynomial_bandpass(degree::Integer = 4)
+    degree >= 1 || throw(ArgumentError("polynomial_bandpass: degree must be ≥ 1"))
+    return function (na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+        deg = clamp(degree, 1, max(1, nseg - 1))
+        nbf = deg + 1
+        B = Float64[xseg[c]^k for c in 1:nseg, k in 0:deg]      # nseg × nbf basis
+        est = WLSEstimator((na, nb, ci, val, w) -> _polynomial_incidence(na, nb, ci, val, w, nnodes, nbf, B), A -> fill(ridge, size(A, 2)))
+        coef = est(na, nb, ci, val, w)
+        touched = falses(nnodes)
+        for i in eachindex(val)
+            touched[na[i]] = true; touched[nb[i]] = true
+        end
+        la = fill(NaN, nnodes, nseg)
+        for node in 1:nnodes
+            touched[node] || continue
+            c0 = (node - 1) * nbf
+            for c in 1:nseg
+                v = 0.0
+                @inbounds for k in 1:nbf
+                    v += coef[c0 + k] * B[c, k]
+                end
+                la[node, c] = v
+            end
+        end
+        return la
     end
 end
 
 """
-    PenalizedBandpass(lambda = 1.0)
+    penalized_bandpass(lambda = 1.0)
 
-Roughness-penalised per-channel bandpass (a Whittaker smoother): a free value per
-channel plus a 2nd-difference smoothness penalty of strength `lambda` (relative to
-the per-channel data weight). Makes NO shape assumption — follows real structure
+Roughness-penalised per-channel bandpass (a Whittaker smoother): [`free_bandpass`](@ref)'s
+per-segment closure, then a per-node [`WLSEstimator`](@ref) 2nd-difference
+smoothness penalty of strength `lambda` (relative to the per-channel data
+weight) across segments. Makes NO shape assumption — follows real structure
 where the SNR supports it and smoothly interpolates gaps where it does not.
-`lambda → 0` ⇒ [`FreeBandpass`](@ref); large `lambda` ⇒ flat.
+`lambda → 0` ⇒ [`free_bandpass`](@ref); large `lambda` ⇒ flat.
 """
-struct PenalizedBandpass <: AbstractBandpassSmoother
-    lambda::Float64
-    function PenalizedBandpass(lambda::Real = 1.0)
-        lambda >= 0 || error("PenalizedBandpass: lambda must be ≥ 0")
-        return new(Float64(lambda))
+function penalized_bandpass(lambda::Real = 1.0)
+    lambda >= 0 || throw(ArgumentError("penalized_bandpass: lambda must be ≥ 0"))
+    free = free_bandpass()
+    return function (na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+        la0 = free(na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
+        (lambda <= 0 || nseg < 3) && return la0
+        prec = zeros(nnodes, nseg)                              # per-(node, channel) precision Σ w
+        for i in eachindex(val)
+            prec[na[i], ci[i]] += w[i]; prec[nb[i], ci[i]] += w[i]
+        end
+        la = copy(la0)
+        for node in 1:nnodes
+            any(>(0), @view prec[node, :]) || continue
+            la[node, :] .= _whittaker_smooth(view(la0, node, :), view(prec, node, :), lambda, ridge)
+        end
+        return la
     end
 end
 
@@ -248,7 +324,7 @@ _segment_snr2(r, w, w2, n2) =
 """
     solve_amp_bandpass!(θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan,
                         channel_freqs; snr_floor = 1.0, ridge = 1.0e-6,
-                        spw_of_chan = Int[], smoother = PenalizedBandpass(1.0),
+                        spw_of_chan = Int[], smoother = penalized_bandpass(1.0),
                         max_logamp = log(10.0), spike_sigma = 5.0)
 
 Solve the per-(station, feed) AMPLITUDE bandpass (log-amp) from the accumulated
@@ -256,16 +332,17 @@ residual and write it into the log-amp bandpass component's θ blocks —
 flattening the per-station instrumental frequency response. `plan`'s frequency
 segmentation sets the resolution: one solved value per (station, feed, frequency
 segment). Gated closure observations are gathered PER SPW and handed to
-`smoother` (an [`AbstractBandpassSmoother`](@ref)); narrow positive log-amp
-spikes (pcal tones, RFI — additive contamination the multiplicative model must
-not up-weight) are excised, and a zero-band-mean gauge per (station, feed) keeps
-the bandpass to SHAPE only.
+`smoother` (a callable as returned by [`free_bandpass`](@ref) /
+[`polynomial_bandpass`](@ref) / [`penalized_bandpass`](@ref)); narrow positive
+log-amp spikes (pcal tones, RFI — additive contamination the multiplicative
+model must not up-weight) are excised, and a zero-band-mean gauge per
+(station, feed) keeps the bandpass to SHAPE only.
 """
 function solve_amp_bandpass!(
         θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan, channel_freqs;
         snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
         spw_of_chan::AbstractVector{<:Integer} = Int[],
-        smoother::AbstractBandpassSmoother = PenalizedBandpass(1.0),
+        smoother = penalized_bandpass(1.0),
         max_logamp::Real = log(10.0),
         spike_sigma::Real = 5.0,
     )
@@ -315,7 +392,7 @@ function solve_amp_bandpass!(
             push!(vals, log(amp)); push!(wts, snr2)
         end
         isempty(vals) && continue
-        la_seg = _fit_bandpass_segment(smoother, na, nbn, cii, vals, wts, nnodes, nseg, xseg, ridge)
+        la_seg = smoother(na, nbn, cii, vals, wts, nnodes, nseg, xseg, ridge)
         for node in 1:nnodes
             ant = (node - 1) % nant + 1; feed = (node - 1) ÷ nant + 1
             for ci in 1:nseg
@@ -365,7 +442,7 @@ function solve_amp_bandpass!(
             node == 0 && continue
             val = v - m
             # Leave implausibly-large corrections UNAPPLIED (|g| = 1). A smoother (the
-            # default) interpolates gaps and self-regularizes, but `FreeBandpass` (or a
+            # default) interpolates gaps and self-regularizes, but `free_bandpass` (or a
             # near-zero `lambda`) can hand a low-SNR band-edge channel that barely
             # clears the gate a huge log-amp; applying it would up-weight that channel's
             # noise, since `apply_calibration` scales weights by |g|². The bound is
@@ -414,13 +491,6 @@ function select_scans(sel::CoverageTopup, scans)
     return sort!(vcat(picked, extra))
 end
 
-# ── Per-segment amplitude-shape fitters (relocated verbatim from the monolith) ──
-
-# smoother types (defined at the top of this file). Each takes ONE spw's gated closure
-# observations — `na`/`nb` node indices, `ci` the index of the frequency segment within
-# the spw, `val = log|V̄|`, `w = SNR²`, `xseg` the centred/scaled in-spw frequency
-# coordinate — and returns `la_seg::Matrix` (nnodes × nseg, `NaN` where unestimable).
-
 # Bucket observation indices by their frequency segment.
 function _bandpass_obs_by_segment(ci, nseg)
     byc = [Int[] for _ in 1:nseg]
@@ -430,82 +500,12 @@ function _bandpass_obs_by_segment(ci, nseg)
     return byc
 end
 
-# Free per-segment closure: independent signless-Laplacian WLS per frequency segment.
-function _fit_bandpass_segment(::FreeBandpass, na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
-    la = fill(NaN, nnodes, nseg)
-    pen = fill(float(ridge), nnodes)
-    for (c, idx) in enumerate(_bandpass_obs_by_segment(ci, nseg))
-        isempty(idx) && continue
-        A = zeros(length(idx), nnodes)
-        touched = falses(nnodes)
-        for (r, i) in enumerate(idx)
-            A[r, na[i]] += 1.0; A[r, nb[i]] += 1.0
-            touched[na[i]] = true; touched[nb[i]] = true
-        end
-        sol = weighted_regularized_least_squares(A, val[idx], w[idx], pen)
-        for node in 1:nnodes
-            touched[node] && (la[node, c] = sol[node])
-        end
-    end
-    return la
-end
-
-# Per-spw polynomial: one closure WLS over `nb = degree+1` coefficients per node;
-# θ-column for (node, k) is `(node-1)*nb + k`. Evaluated at every channel (incl. gaps).
-function _fit_bandpass_segment(sm::PolynomialBandpass, na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
-    deg = clamp(sm.degree, 1, max(1, nseg - 1))
-    nbf = deg + 1
-    B = Float64[xseg[c]^k for c in 1:nseg, k in 0:deg]      # nseg × nbf basis
-    ncol = nnodes * nbf
-    A = zeros(length(val), ncol)
-    touched = falses(nnodes)
-    @inbounds for i in eachindex(val)
-        oa = (na[i] - 1) * nbf; ob = (nb[i] - 1) * nbf
-        for k in 1:nbf
-            A[i, oa + k] += B[ci[i], k]; A[i, ob + k] += B[ci[i], k]
-        end
-        touched[na[i]] = true; touched[nb[i]] = true
-    end
-    coef = weighted_regularized_least_squares(A, val, w, fill(float(ridge), ncol))
-    la = fill(NaN, nnodes, nseg)
-    for node in 1:nnodes
-        touched[node] || continue
-        c0 = (node - 1) * nbf
-        for c in 1:nseg
-            v = 0.0
-            @inbounds for k in 1:nbf
-                v += coef[c0 + k] * B[c, k]
-            end
-            la[node, c] = v
-        end
-    end
-    return la
-end
-
-# Roughness-penalised: free per-channel closure, then a per-node Whittaker
-# (2nd-difference) penalised WLS across channels — interpolating gated channels via
-# the penalty, following the data elsewhere.
-function _fit_bandpass_segment(sm::PenalizedBandpass, na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
-    la0 = _fit_bandpass_segment(FreeBandpass(), na, nb, ci, val, w, nnodes, nseg, xseg, ridge)
-    (sm.lambda <= 0 || nseg < 3) && return la0
-    prec = zeros(nnodes, nseg)                              # per-(node, channel) precision Σ w
-    for i in eachindex(val)
-        prec[na[i], ci[i]] += w[i]; prec[nb[i], ci[i]] += w[i]
-    end
-    la = copy(la0)
-    for node in 1:nnodes
-        any(>(0), @view prec[node, :]) || continue
-        la[node, :] .= _whittaker_smooth(view(la0, node, :), view(prec, node, :), sm.lambda, ridge)
-    end
-    return la
-end
-
 # 1-D Whittaker smoother: minimise  Σ w_i (x_i − y_i)² + (λ·w̄) Σ (x_{i−1} − 2x_i + x_{i+1})²
-# + ridge Σ x_i², via the generic penalized WLS solve with `A = I`, the ridge
-# term stacked as `√ridge · I` and the roughness term as `√λ · D` (`D` the
-# 2nd-difference operator). `w_i = 0` (and `y_i` non-finite) where a channel had
-# no data → the penalty alone sets it (interpolation). `λ` is scaled by the
-# median positive weight so it is data-relative.
+# + ridge Σ x_i², via a WLSEstimator with `A = I`, the ridge term stacked as
+# `√ridge · I` and the roughness term as `√λ · D` (`D` the 2nd-difference
+# operator). `w_i = 0` (and `y_i` non-finite) where a channel had no data →
+# the penalty alone sets it (interpolation). `λ` is scaled by the median
+# positive weight so it is data-relative.
 function _whittaker_smooth(y, w, lambda::Real, ridge::Real)
     n = length(y)
     pos = [w[i] for i in 1:n if w[i] > 0]
@@ -516,6 +516,9 @@ function _whittaker_smooth(y, w, lambda::Real, ridge::Real)
     @inbounds for i in 1:(n - 2)                            # 2nd-difference rows [1, −2, 1]
         D[i, i] = 1.0; D[i, i + 1] = -2.0; D[i, i + 2] = 1.0
     end
-    R = vcat(sqrt(ridge) .* Matrix(1.0I, n, n), sqrt(λ) .* D)
-    return weighted_regularized_least_squares(Matrix(1.0I, n, n), yi, wi, R)
+    est = WLSEstimator(
+        (y, w) -> (Matrix(1.0I, n, n), y, w),
+        A -> vcat(sqrt(ridge) .* Matrix(1.0I, n, n), sqrt(λ) .* D),
+    )
+    return est(yi, wi)
 end

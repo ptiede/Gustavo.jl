@@ -98,9 +98,10 @@ function _fringe_model(; dispersion::Bool = false, sbd_bands = nothing, rl_delay
         # Amplitude bandpass: per-channel, time-stable, per-feed log-amplitude — the
         # per-station instrumental amplitude shape (filterbank passband), FLATTENED
         # from the calibrator. Solved by the bandpass stage via a pluggable
-        # `AbstractBandpassSmoother` (`solve_amp_bandpass!`); the SNR gate drops
-        # no-signal channels, which the smoother then estimates (or, for `FreeBandpass`,
-        # leaves at gain 1). The absolute level stays the a-priori amplitude cal's job.
+        # `WLSEstimator`-based smoother (`solve_amp_bandpass!`); the SNR gate drops
+        # no-signal channels, which the smoother then estimates (or, for
+        # `free_bandpass`, leaves at gain 1). The absolute level stays the a-priori
+        # amplitude cal's job.
         logamp = (
             bandpass = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
         ),

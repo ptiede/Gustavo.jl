@@ -556,7 +556,7 @@ end
     # band's high-channel edge) shared by all stations, plus a small per-station
     # ripple. THEN kill one interior channel per band (zero its weight on every
     # baseline). The two SMOOTH estimators (polynomial, penalized) must flatten the
-    # band AND estimate the killed channels from the in-spw shape; FreeBandpass must
+    # band AND estimate the killed channels from the in-spw shape; free_bandpass must
     # leave the killed channels untouched (|g| = 1).
     nant, nbands, nchan = 4, 2, 8
     nchg = nbands * nchan
@@ -603,7 +603,7 @@ end
 
     # The smooth estimators flatten the band AND fill the killed channels onto the
     # in-spw curve (≈ the mean of the live neighbours, well away from log-amp 0).
-    for sm in (FP.PolynomialBandpass(4), FP.PenalizedBandpass(0.1))
+    for sm in (FP.polynomial_bandpass(4), FP.penalized_bandpass(0.1))
         sol = fit(ff |> BandpassEstimator(amp_model = sm) |> TemporalSmoother(adhoc), uvset)
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, :parallel)
@@ -618,9 +618,9 @@ end
         end
     end
 
-    # FreeBandpass does NOT estimate the killed channels — their θ slot is untouched
+    # free_bandpass does NOT estimate the killed channels — their θ slot is untouched
     # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
-    solf = fit(ff |> BandpassEstimator(amp_model = FP.FreeBandpass()) |> TemporalSmoother(adhoc), uvset)
+    solf = fit(ff |> BandpassEstimator(amp_model = FP.free_bandpass()) |> TemporalSmoother(adhoc), uvset)
     bpf = CAL._step(solf, :bandpass)
     planf = FP._amp_bandpass_plan(bpf.model, bpf.layout)
     for dg in dead_globals, a in 2:nant, f in 1:2

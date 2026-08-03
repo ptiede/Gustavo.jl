@@ -36,6 +36,7 @@ export parallel_hand_indices, cross_hand_indices, build_parallel_hand_mask
 export design_matrices
 export weighted_least_squares, weighted_regularized_least_squares,
     weighted_constrained_least_squares
+export WLSEstimator
 export weighted_phase_mean, weighted_complex_correction
 export connected_components, savitzky_golay_smooth
 

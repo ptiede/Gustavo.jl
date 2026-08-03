@@ -212,7 +212,10 @@ end
     sol = CAL.CalibrationSolution(model, layout, geom, θ, (; ant_names = ants))
 
     # A leaf's DimArray is shaped and rolled exactly as the layout stored it.
-    a = @comp sol.θ.phase.atmos
+    # The step name (`:solution`, the single-model constructor's default) is
+    # part of the path: components are addressed within one step, never by a
+    # bare name searched across steps.
+    a = @comp sol.solution.θ.phase.atmos
     @test a isa DimArray
     @test size(a) == layout.axes.phase.atmos.dims
     @test name.(dims(a)) == layout.axes.phase.atmos.roles
@@ -221,14 +224,14 @@ end
     # PerFeed carries a physical Feed axis; the tied tyings carry a positional
     # node axis (ReferenceRelative: reference + relative, two nodes).
     @test name(dims(a, 2)) == :Feed
-    @test name(dims((@comp sol.θ.phase.bp), 2)) == :node
-    @test size((@comp sol.θ.phase.rl), 2) == 2
+    @test name(dims((@comp sol.solution.θ.phase.bp), 2)) == :node
+    @test size((@comp sol.solution.θ.phase.rl), 2) == 2
 
     # Segment axes carry a representative physical coordinate per segment: a
     # frequency segment's centre, a time segment's mean epoch.
     @test lookup(a, UVD.Frequency) == [mean(freqs)]              # GlobalFrequency: one centre
     @test lookup(a, Ti) == [mean(times[1:2]), mean(times[3:4])]  # PerScan: per-scan mean epoch
-    @test lookup((@comp sol.θ.phase.bp), UVD.Frequency) ==
+    @test lookup((@comp sol.solution.θ.phase.bp), UVD.Frequency) ==
         [mean(freqs[1:2]), mean(freqs[3:4])]                     # ChannelBlocks(2): block centres
 
     # Antennas take the solution's station names; feed is 1:2.
@@ -236,7 +239,7 @@ end
     @test lookup(a, UVD.Feed) == 1:2
 
     # logamp descends the same way.
-    @test (@comp sol.θ.logamp.amp) isa DimArray
+    @test (@comp sol.solution.θ.logamp.amp) isa DimArray
 
     # The leaf is a view onto θ (no copy): its data is the component's block, and
     # writing through it mirrors into θ.
@@ -247,7 +250,7 @@ end
 
     # No ant_names in info → the antenna axis falls back to 1:nant.
     soln = CAL.CalibrationSolution(model, layout, geom, θ, (; nant))
-    @test lookup((@comp soln.θ.phase.atmos), UVD.Ant) == 1:nant
+    @test lookup((@comp soln.solution.θ.phase.atmos), UVD.Ant) == 1:nant
 
     # A multi-emit wrapper's nested subtree is reached leaf by leaf, the shape
     # SingleBandDelay compiles to (`sbd.delay` / `sbd.constant`).
@@ -259,16 +262,42 @@ end
     msbd = CAL.StationGainModel(phase = (sbd = sbd,))
     lsbd = CAL.plan_parameters(msbd, 2, gb)
     ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, Float64.(1:lsbd.nθ), (;))
-    dl = @comp ssbd.θ.phase.sbd.delay
+    dl = @comp ssbd.solution.θ.phase.sbd.delay
     @test dl isa DimArray
     @test name(dl) == :delay
     @test lookup(dl, UVD.Frequency) == [mean([1.0e9, 1.1e9]), mean([5.0e9, 5.1e9])]
     @test vec(parent(dl)) == ssbd.steps[1].θ[lsbd.plantree.phase.sbd.delay.range]
 
-    # A path that stops at a group, or omits the `.θ` marker, is rejected.
-    @test_throws ArgumentError (@comp ssbd.θ.phase.sbd)
-    @test_throws "names a component group" (@comp ssbd.θ.phase.sbd)
-    @test_throws LoadError @eval @comp sol.phase.atmos
+    # A path that stops at a group, omits the step name, or omits the `.θ`
+    # marker, is rejected.
+    @test_throws ArgumentError (@comp ssbd.solution.θ.phase.sbd)
+    @test_throws "names a component group" (@comp ssbd.solution.θ.phase.sbd)
+    @test_throws LoadError @eval @comp ssbd.θ.phase.sbd.delay
+    @test_throws "step must be given explicitly" (@eval @comp ssbd.θ.phase.sbd.delay)
+    @test_throws LoadError @eval @comp sol.solution.phase.atmos
+
+    # An unknown step name fails loudly, naming the steps actually recorded.
+    @test_throws ArgumentError (@comp sol.nosuchstep.θ.phase.atmos)
+    @test_throws "recorded stages: [:solution]" (@comp sol.nosuchstep.θ.phase.atmos)
+
+    # Component names are local to each step and may repeat across steps —
+    # splitting a solve into steps is exactly what makes that legal, so `@comp`
+    # must resolve by step, never by searching for a name across steps.
+    atmos2 = CAL.TiedComponent(
+        CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()), CAL.SharedFeeds(),
+    )
+    model2 = CAL.StationGainModel(phase = (atmos = atmos2,))
+    layout2 = CAL.plan_parameters(model2, nant, geom)
+    θ2 = fill(-1.0, layout2.nθ)
+    twostep = CAL.CalibrationSolution(
+        [
+            CAL.StepSolution(:bandpass, model, layout, θ, (;)),
+            CAL.StepSolution(:fringe, model2, layout2, θ2, (;)),
+        ],
+        geom, (; ant_names = ants),
+    )
+    @test vec(parent(@comp twostep.bandpass.θ.phase.atmos)) == θ[rng[1]]
+    @test all(==(-1.0), @comp twostep.fringe.θ.phase.atmos)
 end
 
 @testset "Calibration evaluate_gains: correctness, purity, inference" begin
