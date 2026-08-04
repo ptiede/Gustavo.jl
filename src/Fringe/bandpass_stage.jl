@@ -247,35 +247,31 @@ function accumulate_bandpass!(
     W = stack[:weights]                                  # the loops below address axes BY NAME
     bl_pairs = UVData.baselines(stack).pairs
     g_ci = win.chan_idx
-    for p in axes(V, Pol)
-        for bi in axes(V, Baseline)
-            a, b = bl_pairs[bi]
-            a == b && continue # autocorrelation skip
-            idx = get(blidx, (a, b), 0)
-            idx == 0 && continue # baseline doesn't exist so skip
-            for tt in axes(V, Ti)
-                rot = one(eltype(V))
-                if derotate
-                    # Band-averaged residual phase for this AP (the per-AP time phase).
-                    acc = zero(eltype(V))
-                    for c in axes(V, Frequency)
-                        w = W[c, tt, bi, p]
-                        (w > 0 && isfinite(w)) || continue
-                        vv = V[c, tt, bi, p]
-                        acc += ifelse(isfinite(vv), w * vv, zero(eltype(V)))
-                    end
-                    abs(acc) > 0 || continue
-                    rot = conj(acc) / abs(acc)        # cis(-angle(acc)): de-rotate this AP
-                end
+    for p in axes(V, Pol), bi in axes(V, Baseline)
+        a, b = bl_pairs[bi]
+        a == b && continue # autocorrelation skip
+        idx = get(blidx, (a, b), 0)
+        idx == 0 && continue # baseline doesn't exist so skip
+        for tt in axes(V, Ti)
+            rot = one(eltype(V))
+            if derotate
+                # Band-averaged residual phase for this AP (the per-AP time phase).
+                acc = zero(eltype(V))
                 for c in axes(V, Frequency)
-                    w = W[c, tt, bi, p]
-                    (w > 0 && isfinite(w)) || continue
-                    vv = V[c, tt, bi, p]
-                    isfinite(vv) || continue
-                    gc = g_ci[c]
-                    rbar_bp[idx, p, gc] += w * vv * rot
-                    wbar_bp[idx, p, gc] += w
+                    w = W[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
+                    vv = V[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
+                    cond = (w > 0 && isfinite(w) && isfinite(vv))
+                    acc += ifelse(cond, w * vv, zero(eltype(V)))
                 end
+                rot = ifelse(abs(acc) > 0, conj(acc) / abs(acc), one(eltype(V))) # cis(-angle(acc)): de-rotate this AP
+            end
+            for c in axes(V, Frequency)
+                w = W[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
+                vv = V[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
+                cond = (w > 0 && isfinite(w) && isfinite(vv))
+                gc = g_ci[c]
+                rbar_bp[idx, p, gc] += ifelse(cond, w * vv * rot, zero(eltype(V)))
+                wbar_bp[idx, p, gc] += ifelse(cond, w, zero(eltype(W)))
             end
         end
     end

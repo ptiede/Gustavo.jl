@@ -747,7 +747,7 @@ end
 
 """
     adhoc_scan!(θ, stack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
-                shared_feeds = false, executor = DynamicScheduler(), excl = nothing, psI = nothing) -> θ
+                shared_feeds = false, executor = DynamicScheduler(), excl = nothing) -> θ
 
 The per-integration atmospheric-phase (adhoc) solve of one scan window — the
 "caller" the module docstring above refers to. On data already gain-corrected
@@ -756,13 +756,11 @@ AP) inverse-variance residual, solve the globally-closing per-AP station phase
 through the pluggable `adhoc` smoother ([`solve_adhoc_phasing`](@ref)), and
 write this scan's `PerIntegration` θ slots
 (disjoint per scan — concurrent groups may solve in parallel). `excl` drops
-co-located (intra-site) baselines from the per-AP solve; `psI` (linear-feed
-data) collapses the four products to one pseudo-Stokes-I row per (baseline, AP)
-using the field-rotation coefficients.
+co-located (intra-site) baselines from the per-AP solve.
 """
 function adhoc_scan!(
         θ, stack::AbstractDimStack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
-        shared_feeds::Bool = false, executor = DynamicScheduler(), excl = nothing, psI = nothing,
+        shared_feeds::Bool = false, executor = DynamicScheduler(), excl = nothing,
     )
     geom = win.geom
     bl_pairs = collect(UVData.baselines(stack).pairs)
@@ -805,15 +803,6 @@ function adhoc_scan!(
             fill!(view(rbar, bi, :, :), zero(ComplexF64))
             fill!(view(wbar, bi, :, :), 0.0)
         end
-    end
-    # Linear-feed data: collapse the four products to one pseudo-Stokes-I row
-    # per (baseline, AP) using the field-rotation coefficients — see
-    # `_pseudo_stokes_collapse!` (rotation-robust; single products can null).
-    if psI !== nothing
-        m0 = DimensionalData.metadata(getfield(v, :data))
-        jds = [psI.base_jd + Float64(t) / 24.0 for t in tg]
-        ψ = _field_rotation_angles(m0.antennas, m0.ra, m0.dec, jds)
-        _pseudo_stokes_collapse!(rbar, wbar, bl_pairs, pols, ψ)
     end
     # `tg` is in hours; pass SECONDS so the adhoc's `:auto` window (T_AP / T_coh) is
     # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.

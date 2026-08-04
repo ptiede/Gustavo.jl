@@ -41,7 +41,6 @@ include("Fringe/search.jl")
 include("Fringe/stationize.jl")
 include("Fringe/statespace.jl")
 include("Fringe/adhoc.jl")
-include("Fringe/pseudostokes.jl")
 include("Fringe/phasecal.jl")
 # The composable-pipeline engine: the pluggable fringe-estimator strategy, the
 # search over one streamed scan group, the model/plan routers, and the three

@@ -75,23 +75,16 @@ required_grouping(::Bandpass) = :scan_complete
 # No fit_selection override — every scan feeds the pass (protocol.jl's default AllScans).
 
 """
-    TemporalSmoother(smoother = SavitzkyGolaySmoother(); pseudo_stokes = :auto)
+    TemporalSmoother(smoother = SavitzkyGolaySmoother())
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
 globally-closing per-AP station phase on the fringe/bandpass residual, through
 the pluggable [`AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
 `JointOUSmoother`, `OUSmoother`, `PenalizedSmoother`, …).
-
-`pseudo_stokes` (`:auto`/`true`/`false`) collapses the four correlation
-products to one pseudo-Stokes-I row per (baseline, AP) for the per-AP solve —
-`:auto` enables it when the feeds are linear (X/Y).
 """
 Base.@kwdef struct TemporalSmoother <: SolveStep
     smoother::Fringe.AbstractAdhocSmoother = Fringe.SavitzkyGolaySmoother()
-    pseudo_stokes::Union{Bool, Symbol} = :auto
 end
-TemporalSmoother(smoother::Fringe.AbstractAdhocSmoother; pseudo_stokes = :auto) =
-    TemporalSmoother(smoother, pseudo_stokes)
 provides(::TemporalSmoother) = :adhoc
 required_grouping(::TemporalSmoother) = :scan_complete
 
@@ -365,14 +358,9 @@ end
 # ── TemporalSmoother visitor (refine + per-scan adhoc solve; final pass) ──────
 
 function start_pass!(s::TemporalSmoother, ctx::SolveContext)
-    uv = ctx.stream.uvset
-    first_leaf = first(values(UVData.branches(uv)))
     ctx.scratch[:adhoc_setup] = (;
         adhoc_plan = Fringe._adhoc_plan(ctx.model, ctx.layout),
         shared = Fringe._adhoc_shared(ctx.model),
-        psI = Fringe._pseudo_stokes_config(
-            s.pseudo_stokes, first_leaf, UVData.DimensionalData.metadata(uv),
-        ),
     )
     return nothing
 end
@@ -385,7 +373,7 @@ function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::Geome
     Fringe.adhoc_scan!(
         ctx.θ, stack, win, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
         shared_feeds = setup.shared, executor = ctx.stream.inner_executor,
-        excl = ctx.scratch[:excl], psI = setup.psI,
+        excl = ctx.scratch[:excl],
     )
     return nothing
 end
