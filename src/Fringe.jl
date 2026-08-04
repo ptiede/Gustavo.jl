@@ -16,7 +16,7 @@ module Fringe
 using ..Executors
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
-using ..UVData: Frequency, Baseline, Feed, Pol
+using ..UVData: Frequency, Baseline, Feed, Pol, Scan
 using ..Calibration
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_bandpass, _is_dispersion,
     _flatten_components, _component_leaf, _feed_node, _block_index, _step, _composed_gains
@@ -29,7 +29,7 @@ using ..Streaming
 # `select_scans` under a bare `using` would mint a second function of the same
 # name and leave the two ambiguous wherever both modules are in scope.
 import ..Streaming: select_scans
-using FFTW: fft, fftfreq, plan_fft, MEASURE
+using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import FFTW
 import DimensionalData
 using DimensionalData: lookup, dims, Ti, DimArray, AbstractDimStack
@@ -129,6 +129,8 @@ export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, Pena
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
 export station_weight_scale
 export free_bandpass, polynomial_bandpass, penalized_bandpass
+export BandpassModel, AbstractBandpassEstimator, JointALS, SplitWLS
+export bandpass_derotate, validate_bandpass, solve_bandpass!
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_station_solutions
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups

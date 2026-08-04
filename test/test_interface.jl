@@ -16,7 +16,7 @@ Gustavo.provides(::_ThirdPartyStep) = :thirdparty
 struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
 
 # The full three-stage production pipeline at defaults.
-_full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
+_full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
 
 @testset "Composable pipeline interface" begin
     @testset "step protocol defaults + visitor hooks" begin
@@ -34,14 +34,12 @@ _full_chain() = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
 
     @testset "built-in step declarations" begin
         @test Gustavo.provides(FringeFit()) == :fringe
-        @test Gustavo.provides(BandpassEstimator()) == :bandpass
+        @test Gustavo.provides(Bandpass()) == :bandpass
         @test Gustavo.provides(TemporalSmoother()) == :adhoc
         @test Gustavo.required_grouping(FringeFit()) == :scan_complete
-        # The bandpass pass streams the user's selection wrapped in the station
-        # coverage top-up; the fringe pass always streams every scan
-        # (the estimator's cross_hand_fit_on masks rows, not scans).
-        bsel = Gustavo.fit_selection(BandpassEstimator(select = SourceScans("X")), Gustavo.StepSolution[])
-        @test bsel isa FP.CoverageTopup && bsel.inner.sources == ["X"]
+        # Bandpass has no fit_selection override — the pass streams every scan,
+        # same as the fringe pass (whose estimator masks rows, not scans).
+        @test Gustavo.fit_selection(Bandpass(), Gustavo.StepSolution[]) isa AllScans
         @test Gustavo.fit_selection(
             FringeFit(estimator = MatchedFilter(cross_hand_fit_on = ScanIndices(1))), Gustavo.StepSolution[],
         ) isa AllScans

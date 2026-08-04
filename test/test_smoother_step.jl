@@ -1,6 +1,6 @@
 # ── TemporalSmoother step + output sink ───────────────────────────────────────
 #
-# The full three-stage pipeline (FringeFit |> BandpassEstimator |>
+# The full three-stage pipeline (FringeFit |> Bandpass |>
 # TemporalSmoother) on the composable engine. The M5 parity gates against the
 # frozen monolith (fringe blocks bit-identical, bandpass/adhoc to rtol 1e-12,
 # polish-split full-θ bit-identical) ran BEFORE its deletion; what this file
@@ -81,7 +81,7 @@ end
     )
     fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
     pipe = CalibrationPipeline(
-        FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc);
+        FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
         exec = ExecutionConfig(ntasks = 1),
     )
     sol_n = fit(pipe, uvset)
@@ -99,7 +99,7 @@ end
         # θ bit-deterministic across group concurrency (per-block partials fold
         # in a fixed order regardless of ntasks/inner).
         pipe4 = CalibrationPipeline(
-            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc);
+            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
         )
         @test parent(gains(fit(pipe4, uvset))) == parent(gains(sol_n))
@@ -139,7 +139,7 @@ end
         ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
         pd = CalibrationPipeline(
             FringeFit(model = fm), ds,
-            BandpassEstimator(select = ScanIndices(1)),
+            Bandpass(),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 1),
         )
@@ -148,8 +148,8 @@ end
         @test Gustavo.stage_names(sol_nd) == [:fringe, :refine, :bandpass, :adhoc]
 
         # Injected per-station dTEC recovered on EVERY scan — DispersionSBDFit's
-        # own pass covers the whole track unconditionally, regardless of which
-        # scans the bandpass stage separately selected.
+        # own pass covers the whole track unconditionally, same as the bandpass
+        # stage, which now also fits every scan.
         refine_step = CAL._step(sol_nd, :refine)
         dplan = CAL._dispersion_plan(refine_step.model, refine_step.layout)
         @test dplan !== nothing
@@ -165,7 +165,7 @@ end
         # refine + bandpass + adhoc chain.
         pd4 = CalibrationPipeline(
             FringeFit(model = fm), ds,
-            BandpassEstimator(select = ScanIndices(1)),
+            Bandpass(),
             TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 4),
         )
@@ -216,7 +216,7 @@ end
         ap = AprioriAmplitude(spw_cals; min_elevation_deg = -Inf)
 
         pipe_ap = CalibrationPipeline(
-            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc), ap;
+            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc), ap;
             exec = ExecutionConfig(ntasks = 1),
         )
         sol_ap, out_ap = fitcalibrate(pipe_ap, uvset)
@@ -279,7 +279,7 @@ end
         # `apply_calibration` would raise called directly, with no
         # pipeline-level ordering check in front of it.
         pipe_ap_first = CalibrationPipeline(
-            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc), ap;
+            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc), ap;
             exec = ExecutionConfig(ntasks = 1),
         )
         @test_throws "no a-priori calibration for band 2" fitcalibrate(pipe_ap_first, uvset)
@@ -290,7 +290,7 @@ end
         # the output chain composes AprioriAmplitude/ReduceStep in their
         # DECLARED relative order, not a hardcoded "apriori always first".
         pipe_reduce_first = CalibrationPipeline(
-            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc),
+            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc),
             CombineSpw(), ap;
             exec = ExecutionConfig(ntasks = 1),
         )

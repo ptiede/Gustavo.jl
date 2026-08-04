@@ -2,14 +2,18 @@
 #
 # The carved-out bandpass stage of the composable pipeline: the per-scan
 # residual accumulation ([`accumulate_bandpass!`](@ref)) and the two per-channel
-# solves ([`solve_phase_bandpass!`](@ref) / [`solve_amp_bandpass!`](@ref)) —
+# closure solves ([`solve_phase_bandpass!`](@ref) / [`solve_amp_bandpass!`](@ref)) —
 # descended verbatim from the monolithic solver (deleted at M5), retargeted
 # from its concat cube to a scan `DimStack` where they touch data. The
-# BandpassEstimator step visits each selected scan (refine → accumulate → return
-# the scan's contribution) and its `finish_pass!` folds the contributions in
-# GROUP-INDEX order — deterministic at ANY concurrency (unlike the monolith's
+# `Bandpass` step visits every scan (refine → accumulate → return the scan's
+# contribution) and its `finish_pass!` folds the contributions in GROUP-INDEX
+# order — deterministic at ANY concurrency (unlike the monolith's
 # ntasks-dependent chunk fold; the two agree to float-rounding, gated at
-# rtol ≤ 1e-12).
+# rtol ≤ 1e-12). WHAT is fit lives on `BandpassModel`; HOW it is solved is
+# pluggable through `AbstractBandpassEstimator` — `SplitWLS` runs the closure
+# solves above, `JointALS` runs [`solve_joint_bandpass!`](@ref), an alternative,
+# per-scan-aware solve that fits the actual complex visibilities against an
+# explicit per-scan source term instead of a closure that assumes it cancels.
 #
 # The graph/solve helpers (`_ObsRow`, `_solve_observable`, `_track_noise2`,
 # `_node`, `_chi_sign`) live in stationize.jl/adhoc.jl; the amp-bandpass
@@ -144,16 +148,84 @@ function penalized_bandpass(lambda::Real = 1.0)
 end
 
 """
-    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow)
+    BandpassModel(; phase = true, amp = true, freq = ChannelBlocks(1),
+                  amp_model = penalized_bandpass(1.0))
+
+WHAT the [`Bandpass`](@ref) step fits: whether to solve the phase bandpass,
+the log-amplitude bandpass, or both; how finely each is resolved in frequency
+(`freq`, a [`ChannelBlocks`](@ref) — the default is one free value per
+channel); and `amp_model`, the amplitude-shape estimator
+([`penalized_bandpass`](@ref) / [`polynomial_bandpass`](@ref) /
+[`free_bandpass`](@ref)) used by the [`SplitWLS`](@ref) estimator. Uniform
+across every antenna — no per-station segmentation.
+"""
+Base.@kwdef struct BandpassModel
+    phase::Bool = true
+    amp::Bool = true
+    freq::ChannelBlocks = ChannelBlocks(1)
+    amp_model = penalized_bandpass(1.0)
+end
+
+"""
+    AbstractBandpassEstimator
+
+HOW the [`Bandpass`](@ref) step solves the model `BandpassModel` describes.
+Concretely [`SplitWLS`](@ref) (independent phase/log-amp closures, the
+default) or [`JointALS`](@ref) (a joint complex-gain + per-scan source-term
+solve). Mirrors [`AbstractFringeEstimator`](@ref)'s split between WHAT a step
+fits and HOW.
+
+# Implementing an estimator
+
+Define:
+
+    Gustavo.Fringe.solve_bandpass!(est::MyEstimator, θ, results, setup, model::BandpassModel; ref_ant) -> nothing
+
+writing into `θ`'s bandpass blocks. `results` is the per-scan
+`(; rl, wl, pols, source)` accumulator list, in group-index order; `setup` is
+`(; bl_pairs, blidx, nant, bp_plan, amp_plan, channel_freqs, spw_of_chan)`,
+built once per pass. The fallback errors, naming what is missing.
+
+Two optional hooks:
+
+    Gustavo.Fringe.bandpass_derotate(est::MyEstimator) -> Bool   # default true
+    Gustavo.Fringe.validate_bandpass(est::MyEstimator, model::BandpassModel)  # default no-op
+
+[`bandpass_derotate`](@ref) controls whether [`accumulate_bandpass!`](@ref)
+counter-rotates each AP before accumulating (see its docstring) —
+`SplitWLS` needs this (it sums scans together), `JointALS` does not (it fits
+each scan's own coherent visibility). [`validate_bandpass`](@ref) is checked
+at model-compile time, before any data is read.
+"""
+abstract type AbstractBandpassEstimator end
+
+bandpass_derotate(::AbstractBandpassEstimator) = true
+validate_bandpass(::AbstractBandpassEstimator, model::BandpassModel) = nothing
+function solve_bandpass! end
+solve_bandpass!(est::AbstractBandpassEstimator, θ, results, setup, model::BandpassModel; ref_ant) =
+    error("$(typeof(est)) does not implement the bandpass estimator interface: define " *
+        "Gustavo.Fringe.solve_bandpass!(::$(typeof(est)), θ, results, setup, model; ref_ant).")
+
+"""
+    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow; derotate = true)
 
 Accumulate one scan window's contribution to the per-(global-baseline, product,
 GLOBAL channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for the
 bandpass solves, on data already gain-corrected through the pipeline's
-transform chain. BEFORE summing over time each AP is counter-rotated by its
-OWN band-averaged residual phase, removing the per-AP time phase (residual
-rate/drift, and what the adhoc stage would later remove) so the time-average
-is coherent and isolates the per-channel SHAPE. `blidx` maps `(a, b) -> row` in
-the global baseline table (co-located pairs excluded there never contribute).
+transform chain. `blidx` maps `(a, b) -> row` in the global baseline table
+(co-located pairs excluded there never contribute).
+
+`derotate` (default `true`) counter-rotates each AP, BEFORE summing over time,
+by its OWN band-averaged residual phase — removing the per-AP time phase
+(residual rate/drift, and what the adhoc stage would later remove) so summing
+COHERENT SCANS TOGETHER (the closure-based [`solve_phase_bandpass!`](@ref) /
+[`solve_amp_bandpass!`](@ref) path, which combines every selected scan's
+residual into one accumulator before solving) isolates the per-channel SHAPE
+despite each scan's uncontrolled source phase. [`solve_joint_bandpass!`](@ref)
+fits each scan's OWN coherent visibility against an explicit per-scan source
+term instead of summing scans together, so it passes `derotate = false` — the
+per-AP trick would otherwise erase the very source phase/amplitude that term
+is meant to absorb.
 """
 # Fresh per-(baseline row, product, GLOBAL channel) bandpass accumulators. They
 # carry (Baseline, Pol, Frequency) dims so the accumulate/solve kernels below
@@ -168,7 +240,8 @@ function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
 end
 
 function accumulate_bandpass!(
-        rbar_bp, wbar_bp, blidx, stack::AbstractDimStack, win::GeometryWindow,
+        rbar_bp, wbar_bp, blidx, stack::AbstractDimStack, win::GeometryWindow;
+        derotate::Bool = true,
     )
     V = stack[:vis]                                      # the dims-carrying layers —
     W = stack[:weights]                                  # the loops below address axes BY NAME
@@ -181,16 +254,19 @@ function accumulate_bandpass!(
             idx = get(blidx, (a, b), 0)
             idx == 0 && continue # baseline doesn't exist so skip
             for tt in axes(V, Ti)
-                # Band-averaged residual phase for this AP (the per-AP time phase).
-                acc = zero(eltype(V))
-                for c in axes(V, Frequency)
-                    w = W[c, tt, bi, p]
-                    (w > 0 && isfinite(w)) || continue
-                    vv = V[c, tt, bi, p]
-                    acc += ifelse(isfinite(vv), w * vv, zero(eltype(V)))
+                rot = one(eltype(V))
+                if derotate
+                    # Band-averaged residual phase for this AP (the per-AP time phase).
+                    acc = zero(eltype(V))
+                    for c in axes(V, Frequency)
+                        w = W[c, tt, bi, p]
+                        (w > 0 && isfinite(w)) || continue
+                        vv = V[c, tt, bi, p]
+                        acc += ifelse(isfinite(vv), w * vv, zero(eltype(V)))
+                    end
+                    abs(acc) > 0 || continue
+                    rot = conj(acc) / abs(acc)        # cis(-angle(acc)): de-rotate this AP
                 end
-                abs(acc) > 0 || continue
-                rot = conj(acc) / abs(acc)            # cis(-angle(acc)): de-rotate this AP
                 for c in axes(V, Frequency)
                     w = W[c, tt, bi, p]
                     (w > 0 && isfinite(w)) || continue
@@ -204,6 +280,36 @@ function accumulate_bandpass!(
         end
     end
     return rbar_bp, wbar_bp
+end
+
+"""
+    SplitWLS()
+
+The default [`AbstractBandpassEstimator`](@ref): independent per-channel
+closure solves for phase ([`solve_phase_bandpass!`](@ref)) and log-amplitude
+([`solve_amp_bandpass!`](@ref)), each summing every scan's residual into one
+accumulator before solving — the closure assumes a baseline's source term
+cancels out of the per-channel phase-difference/log-amp-sum, so it is not
+appropriate for a resolved or polarized calibrator (see [`JointALS`](@ref)).
+"""
+struct SplitWLS <: AbstractBandpassEstimator end
+
+function solve_bandpass!(::SplitWLS, θ, results, setup, model::BandpassModel; ref_ant::Integer)
+    pols = results[1].pols
+    nchan = length(setup.channel_freqs)
+    rbar, wbar = bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
+    for res in results
+        rbar .+= res.rl
+        wbar .+= res.wl
+    end
+    setup.bp_plan === nothing || solve_phase_bandpass!(
+        θ, rbar, wbar, setup.bl_pairs, pols, setup.nant, setup.bp_plan; ref_ant,
+    )
+    setup.amp_plan === nothing || solve_amp_bandpass!(
+        θ, rbar, wbar, setup.bl_pairs, pols, setup.nant, setup.amp_plan, setup.channel_freqs;
+        spw_of_chan = setup.spw_of_chan, smoother = model.amp_model,
+    )
+    return nothing
 end
 
 """
@@ -452,6 +558,319 @@ function solve_amp_bandpass!(
         end
     end
     return θ
+end
+
+# ── Joint complex bandpass + per-scan source coherence (ALS) ──────────────────
+#
+# solve_phase_bandpass!/solve_amp_bandpass! assume a baseline's source term
+# cancels out of the per-channel phase-difference/log-amp-sum closure — true
+# only for an unresolved, unpolarized source. solve_joint_bandpass! instead
+# fits the actual complex visibilities against
+#   V_ab(ν) | scan  ≈  g_a(ν) · S_{scan,ab,pol} · conj(g_b(ν)),
+# one frequency-flat complex `S` per (scan, baseline, polarization product),
+# so a resolved/polarized source's per-baseline structure is absorbed into `S`
+# instead of biasing the station bandpass. `g` is bilinear with `S`, so this
+# alternates a closed-form per-(scan, baseline, pol) solve of `S` (given the
+# current `g`, [`_update_source_coherence!`](@ref)) with a Gauss-Seidel
+# per-(station, feed) solve of `g` (given `S` and every OTHER station's
+# current gain, [`_update_station_gains!`](@ref)) at `phase_plan`/`amp_plan`'s
+# shared frequency-segment resolution, to convergence.
+#
+# Every array below carries (Scan, Baseline, Pol, Frequency) or (Ant, Feed,
+# Frequency) dims — the house style of this module — so the loops read by
+# axis NAME; `Frequency` here is the SEGMENT index (as elsewhere once a
+# solve moves past the raw per-channel accumulator). Indexing itself stays
+# plain-positional.
+
+# One scan's per-(baseline, pol, SEGMENT) coherent residual, written directly
+# into `rview`/`wview` (a (Baseline, Pol, Frequency) slice of the multi-scan
+# accumulator — no intermediate allocation) and SNR-gated exactly as the
+# closure solves gate it: `_track_noise2`/`_segment_snr2` read straight off
+# `sc.rl`/`sc.wl` (a fresh per-scan accumulator, not summed across scans), so
+# no new noise-estimation machinery is needed.
+function _reduce_scan_segments!(rview, wview, sc, segs)
+    nchan = size(sc.rl, Frequency)
+    for p in axes(rview, Pol), bi in axes(rview, Baseline)
+        noise2 = _track_noise2(sc.rl, sc.wl, bi, p, nchan)
+        for (fs, chans) in enumerate(segs)
+            rc, wc, w2c = _segment_residual(sc.rl, sc.wl, bi, p, chans)
+            keep = isfinite(rc) && abs(rc) > 0 && isfinite(wc) && wc > 0 &&
+                _segment_snr2(rc, wc, w2c, noise2) >= 1.0
+            rview[bi, p, fs] = keep ? rc : zero(rc)
+            wview[bi, p, fs] = keep ? wc : zero(wc)
+        end
+    end
+    return nothing
+end
+
+# Every scan's (Baseline, Pol, SEGMENT) residual, stacked over an added Scan
+# axis — NOT summed across scans (unlike solve_phase_bandpass!'s/
+# solve_amp_bandpass!'s fold), since the per-scan source coherence needs each
+# scan's own coherent visibility. Element types follow the scan accumulators'
+# own (`bandpass_accumulators`'), not a hardcoded precision.
+function _reduce_all_scans(scans, segs)
+    nscan = length(scans)
+    nbl, npol = size(first(scans).rl, Baseline), size(first(scans).rl, Pol)
+    nseg = length(segs)
+    C = eltype(first(scans).rl)
+    T = real(eltype(first(scans).wl))
+    d = (Scan(1:nscan), Baseline(1:nbl), Pol(1:npol), Frequency(1:nseg))
+    rseg = DimensionalData.DimArray(zeros(C, nscan, nbl, npol, nseg), d)
+    wseg = DimensionalData.DimArray(zeros(T, nscan, nbl, npol, nseg), d)
+    for (si, sc) in enumerate(scans)
+        _reduce_scan_segments!(view(rseg, si, :, :, :), view(wseg, si, :, :, :), sc, segs)
+    end
+    return rseg, wseg
+end
+
+# Every (baseline, pol) touching (ant, feed), tagged by which side of the
+# baseline it is — built once, reused by every ALS iteration's gain update.
+function _joint_bandpass_touching(bl_pairs, feeds, nant)
+    touching = [Tuple{Int, Int, Symbol}[] for _ in 1:nant, _ in 1:2]
+    for p in eachindex(feeds), bi in eachindex(bl_pairs)
+        a, b = bl_pairs[bi]
+        a == b && continue
+        fa, fb = feeds[p]
+        push!(touching[a, fa], (bi, p, :a))
+        push!(touching[b, fb], (bi, p, :b))
+    end
+    return touching
+end
+
+_ant_feed(node, nant) = ((node - 1) % nant + 1, (node - 1) ÷ nant + 1)
+
+# One reference (station, feed) node per connected component of the
+# (station, feed) graph, and which nodes the graph's baselines/pols actually
+# touch — mirrors `_solve_observable`'s pin selection in stationize.jl. The
+# pinned node is held fixed at `1.0 + 0.0im` for every segment throughout the
+# ALS iteration: per-channel-free `g` gives every (station, feed) its OWN
+# unconstrained value at every segment, so the model is invariant under
+# multiplying every station's gain at a given segment by ANY shared complex
+# factor and dividing every touching `S` by the same, AT THAT SEGMENT
+# INDEPENDENTLY — a per-antenna final gauge only removes a single constant per
+# (station, feed), so it cannot remove a factor that varies freely from
+# segment to segment the way this pin does.
+function _joint_bandpass_pins(bl_pairs, feeds, nant, ref_ant)
+    nnodes = 2 * nant
+    edges = Tuple{Int, Int}[]
+    for p in eachindex(feeds), bi in eachindex(bl_pairs)
+        a, b = bl_pairs[bi]
+        a == b && continue
+        fa, fb = feeds[p]
+        push!(edges, (_node(a, fa, nant), _node(b, fb, nant)))
+    end
+    compid, ncomp, graph_touched = connected_components(nnodes, edges)
+    pins = Set{Int}()
+    for c in 1:ncomp
+        comp_nodes = findall(==(c), compid)
+        r1, r2 = _node(ref_ant, 1, nant), _node(ref_ant, 2, nant)
+        push!(pins, r1 in comp_nodes ? r1 : (r2 in comp_nodes ? r2 : minimum(comp_nodes)))
+    end
+    return pins, graph_touched
+end
+
+# Closed-form per-(scan, baseline, pol) solve of the source coherence `S`
+# given the current station gains `g`: the weighted-least-squares minimizer of
+# `Σ_segment wseg·|rseg/wseg − g_a·S·conj(g_b)|²` over the single complex
+# unknown `S`.
+function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds)
+    T = real(eltype(S))
+    for p in axes(rseg, Pol), bi in axes(rseg, Baseline)
+        a, b = bl_pairs[bi]
+        a == b && continue
+        fa, fb = feeds[p]
+        for si in axes(rseg, Scan)
+            numer = zero(eltype(S))
+            denom = zero(T)
+            for fs in axes(rseg, Frequency)
+                w = wseg[si, bi, p, fs]
+                w > 0 || continue
+                u = g[a, fa, fs] * conj(g[b, fb, fs])
+                abs2(u) > 0 || continue
+                numer += conj(u) * rseg[si, bi, p, fs]
+                denom += w * abs2(u)
+            end
+            S[si, bi, p] = denom > 0 ? numer / denom : zero(eltype(S))
+        end
+    end
+    return nothing
+end
+
+# One Gauss-Seidel sweep over every non-pinned (station, feed): closed-form
+# per-segment solve of its complex gain given the current source coherence `S`
+# and every OTHER station's current gain (immediately visible to later
+# antennas in the same sweep — Gauss-Seidel, not Jacobi). Returns the largest
+# relative gain change, for the caller's convergence check.
+function _update_station_gains!(g, touched, S, rseg, wseg, touching, bl_pairs, feeds, pinned)
+    T = real(eltype(g))
+    maxrel = zero(T)
+    for feed in axes(g, Feed), ant in axes(g, Ant)
+        pinned[ant, feed] && continue
+        entries = touching[ant, feed]
+        isempty(entries) && continue
+        for fs in axes(g, Frequency)
+            numer = zero(eltype(g))
+            denom = zero(T)
+            for (bi, p, role) in entries
+                a, b = bl_pairs[bi]
+                fa, fb = feeds[p]
+                for si in axes(rseg, Scan)
+                    w = wseg[si, bi, p, fs]
+                    w > 0 || continue
+                    s = S[si, bi, p]
+                    if role === :a
+                        coeff = s * conj(g[b, fb, fs])
+                        abs2(coeff) > 0 || continue
+                        numer += conj(coeff) * rseg[si, bi, p, fs]
+                        denom += w * abs2(coeff)
+                    else
+                        coeff = conj(g[a, fa, fs] * s)
+                        abs2(coeff) > 0 || continue
+                        numer += conj(coeff) * conj(rseg[si, bi, p, fs])
+                        denom += w * abs2(coeff)
+                    end
+                end
+            end
+            denom > 0 || continue
+            gold = g[ant, feed, fs]
+            gnew = numer / denom
+            g[ant, feed, fs] = gnew
+            touched[ant, feed, fs] = true
+            maxrel = max(maxrel, abs(gnew - gold) / max(abs(gold), abs(gnew), eps(T)))
+        end
+    end
+    return maxrel
+end
+
+# Gauge-fix each (station, feed) track — zero band-mean log-amplitude,
+# circular-mean reference phase, matching solve_phase_bandpass!'s/
+# solve_amp_bandpass!'s convention — and write into phase_plan's/amp_plan's θ
+# blocks. A (station, feed) `touched` nowhere (no data ever reached it) is
+# left unwritten (still whatever θ already held, i.e. unit gain).
+function _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp)
+    phase_leaf = _component_leaf(phase_plan, θ)
+    amp_leaf = _component_leaf(amp_plan, θ)
+    for a in axes(g, Ant), f in axes(g, Feed)
+        valid = @view touched[a, f, :]
+        any(valid) || continue
+        logs = log.(abs.(@view g[a, f, :]))
+        m = sum(view(logs, valid)) / count(valid)
+        mphase = angle(sum(cis(angle(g[a, f, fs])) for fs in axes(g, Frequency) if touched[a, f, fs]))
+        pnode = _feed_node(phase_plan.tying, f)
+        anode = _feed_node(amp_plan.tying, f)
+        for fs in axes(g, Frequency)
+            touched[a, f, fs] || continue
+            la = logs[fs] - m
+            ph = rem2pi(angle(g[a, f, fs]) - mphase, RoundNearest)
+            anode == 0 || (amp_leaf[1, anode, fs, 1, a] = abs(la) > max_logamp ? 0.0 : la)
+            pnode == 0 || (phase_leaf[1, pnode, fs, 1, a] = ph)
+        end
+    end
+    return θ
+end
+
+"""
+    JointALS(; max_iterations = 8, tolerance = 1.0e-6)
+
+An [`AbstractBandpassEstimator`](@ref) that fits the actual complex
+visibilities per scan against an explicit per-scan, per-baseline,
+per-polarization source coherence ([`solve_joint_bandpass!`](@ref)), instead
+of the [`SplitWLS`](@ref) closure that assumes a baseline's source term
+cancels — the right choice when the calibrator is resolved or polarized
+enough that its per-baseline structure would otherwise bias the station
+bandpass. Requires both `model.phase` and `model.amp` (it solves one complex
+gain per (station, feed, segment), not independent phase/amp closures), and
+ignores `model.amp_model` — no post-hoc smoothing pass.
+"""
+Base.@kwdef struct JointALS <: AbstractBandpassEstimator
+    max_iterations::Int = 8
+    tolerance::Real = 1.0e-6
+end
+
+bandpass_derotate(::JointALS) = false
+
+function validate_bandpass(::JointALS, model::BandpassModel)
+    model.phase && model.amp || throw(ArgumentError(
+        "JointALS requires both model.phase = true and model.amp = true — it solves one " *
+            "complex gain per (station, feed, segment), not independent phase/log-amp closures.",
+    ))
+    return nothing
+end
+
+function solve_bandpass!(est::JointALS, θ, results, setup, model::BandpassModel; ref_ant::Integer)
+    solve_joint_bandpass!(
+        θ, results, setup.bl_pairs, results[1].pols, setup.nant, setup.bp_plan, setup.amp_plan;
+        ref_ant, max_iterations = est.max_iterations, tolerance = est.tolerance,
+    )
+    return nothing
+end
+
+"""
+    solve_joint_bandpass!(θ, scans, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+                          ref_ant = 1, max_iterations = 8, tolerance = 1.0e-6,
+                          max_logamp = log(10.0))
+
+Jointly solve the per-(station, feed) COMPLEX bandpass gain and a per-scan,
+per-baseline, per-polarization constant source coherence (see the module
+comment above [`_reduce_scan_segments!`](@ref) for the model and the
+alternating scheme), then gauge-fix each (station, feed) track and write the
+result into `phase_plan`'s and `amp_plan`'s θ blocks
+([`_write_joint_bandpass!`](@ref)).
+
+`scans` is the per-scan `(rl, wl)` accumulator pairs from
+[`accumulate_bandpass!`](@ref)`(...; derotate = false)` — NOT summed across
+scans, since the source term needs each scan's own coherent visibility.
+`phase_plan` and `amp_plan` must share one frequency segmentation (true by
+construction: [`BandpassModel`](@ref) compiles both from the same `freq`
+setting).
+
+Convergence is judged on the largest relative per-iteration gain change, not a
+tracked χ² (which would need a per-channel power accumulator this stage does
+not keep).
+"""
+function solve_joint_bandpass!(
+        θ, scans, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+        ref_ant::Integer = 1, max_iterations::Integer = 8, tolerance::Real = 1.0e-6,
+        max_logamp::Real = log(10.0),
+    )
+    phase_plan.fseg_id == amp_plan.fseg_id || throw(
+        ArgumentError(
+            "solve_joint_bandpass!: phase_plan and amp_plan must share one frequency segmentation",
+        ),
+    )
+    isempty(scans) && return θ
+
+    feeds = [correlation_feed_pair(p) for p in pol_products]
+    segs = segment_groups(phase_plan.fseg_id, length(phase_plan.nchan_seg))
+    nseg = length(segs)
+
+    rseg, wseg = _reduce_all_scans(scans, segs)
+    touching = _joint_bandpass_touching(bl_pairs, feeds, nant)
+    pins, graph_touched = _joint_bandpass_pins(bl_pairs, feeds, nant, ref_ant)
+    pinned = [_node(ant, feed, nant) in pins for ant in 1:nant, feed in 1:2]
+
+    C = eltype(rseg)
+    gd = (Ant(1:nant), Feed(1:2), Frequency(1:nseg))
+    g = DimensionalData.DimArray(ones(C, nant, 2, nseg), gd)
+    touched = DimensionalData.DimArray(falses(nant, 2, nseg), gd)
+    for node in pins
+        graph_touched[node] || continue
+        ant, feed = _ant_feed(node, nant)
+        touched[ant, feed, :] .= true
+    end
+    S = DimensionalData.DimArray(
+        zeros(C, length(scans), length(bl_pairs), length(pol_products)),
+        (Scan(1:length(scans)), Baseline(1:length(bl_pairs)), Pol(1:length(pol_products))),
+    )
+
+    _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds)
+    for _iter in 1:max_iterations
+        maxrel = _update_station_gains!(g, touched, S, rseg, wseg, touching, bl_pairs, feeds, pinned)
+        _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds)
+        maxrel < tolerance && break
+    end
+
+    return _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp)
 end
 
 # ── Coverage top-up selection (stations the calibrator never observed) ────────

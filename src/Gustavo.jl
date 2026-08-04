@@ -45,7 +45,7 @@ export DynamicScheduler, StaticScheduler, SerialScheduler
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
 export FringeFit, FringeModel, DispersionModel, SingleBandDelay, default_fringe_terms,
-    MatchedFilter, DispersionSBDFit, BandpassEstimator, TemporalSmoother
+    MatchedFilter, DispersionSBDFit, Bandpass, BandpassModel, JointALS, SplitWLS, TemporalSmoother
 export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate

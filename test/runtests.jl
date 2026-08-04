@@ -63,10 +63,14 @@ include("test_transforms.jl")
 # cross-feed rate opt-in, fit-on-subset masking, transforms on the new path.
 include("test_fringe_step.jl")
 
-# The BandpassEstimator step on the new engine (M4 gates): fringe+bandpass θ
+# The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
 # vs the frozen monolith, refine-kernel bit parity, coverage top-up,
 # step_solution extraction + portable ApplySolution.
 include("test_bandpass_step.jl")
+
+# Bandpass(estimator = JointALS()): the alternating complex-visibility + per-scan
+# source-coherence solve, vs. the closure-based SplitWLS default.
+include("test_joint_bandpass.jl")
 
 # The TemporalSmoother step + output sink: multi-scan full-pipeline solves
 # (incl. the refine polish split), standalone calibrate ≡ fused output,

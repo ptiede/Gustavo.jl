@@ -405,7 +405,7 @@ Extract ONE step alone from a fitted solution: the step named `name`'s own
 model/layout/θ, wrapped standalone — nothing else (contrast
 [`stage_solution`](@ref), which keeps every earlier step too). A step whose
 own model is GLOBALLY TIME-CONSTANT (every component `GlobalTime`, e.g.
-`BandpassEstimator`'s) extracted this way is PORTABLE: apply it in a LATER
+`Bandpass`'s) extracted this way is PORTABLE: apply it in a LATER
 pipeline run as a precal transform at the head of the chain,
 
     bp = step_solution(sol_calibrators, :bandpass)

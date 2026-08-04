@@ -14,7 +14,7 @@ include("synthetic_uvset.jl")
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
     # keeps every well-determined AP in this high-SNR synthetic.
     sol = fit(
-        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )
@@ -109,7 +109,7 @@ include("synthetic_uvset.jl")
         @test occursin("StationGainModel", sprint(show, CAL._step(sol, :fringe).model))
 
         # CalibrationPipeline is an ordered container over its steps.
-        pipe = CalibrationPipeline(FringeFit(model = FringeModel()) |> BandpassEstimator())
+        pipe = CalibrationPipeline(FringeFit(model = FringeModel()) |> Bandpass())
         @test length(pipe) == length(pipe.steps)
         @test eltype(typeof(pipe)) == CalibrationStep
         @test collect(pipe) == pipe.steps
@@ -201,7 +201,7 @@ end
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    chain = FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+    chain = FringeFit(model = FringeModel()) |> Bandpass() |>
         TemporalSmoother(adhoc)
 
     sol_ref = fit(chain, uvset)
@@ -251,7 +251,7 @@ end
     # unrelated call.
     uvset, _ = _build_fringe_uvset()
     ff = FringeFit(model = FringeModel())
-    bp = BandpassEstimator()
+    bp = Bandpass()
 
     sol_within = fit(ff |> bp, uvset)
 
@@ -287,7 +287,7 @@ end
     # synthesize them. Reduce + combine spws to channels, then round-trip via UVFITS.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     sol, reduced = fitcalibrate(
-        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
@@ -322,7 +322,7 @@ end
     # exactly and differ ONLY by that conjugation. This isolates the convention.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     _, reduced = fitcalibrate(
-        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
@@ -385,7 +385,7 @@ end
     for r in (1, 2, 3)
         sol = fit(
             FringeFit(model = FringeModel(), estimator = FP.MatchedFilter(rounds = r)) |>
-                BandpassEstimator() |> TemporalSmoother(adhoc),
+                Bandpass() |> TemporalSmoother(adhoc),
             uvset,
         )
         corr = Gustavo.apply_calibration(uvset, sol)
@@ -439,8 +439,8 @@ end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
-    sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
-    sol_off = fit(ff |> BandpassEstimator(phase = false) |> TemporalSmoother(adhoc), uvset)
+    sol_on = fit(ff |> Bandpass(model = BandpassModel(phase = true)) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(ff |> Bandpass(model = BandpassModel(phase = false)) |> TemporalSmoother(adhoc), uvset)
 
     don = FP.baseline_fringe_data(uvset, sol_on)
     doff = FP.baseline_fringe_data(uvset, sol_off)
@@ -503,8 +503,8 @@ end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
-    sol_on = fit(ff |> BandpassEstimator(phase = true) |> TemporalSmoother(adhoc), uvset)
-    sol_off = fit(ff |> BandpassEstimator(phase = false) |> TemporalSmoother(adhoc), uvset)
+    sol_on = fit(ff |> Bandpass(model = BandpassModel(phase = true)) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(ff |> Bandpass(model = BandpassModel(phase = false)) |> TemporalSmoother(adhoc), uvset)
 
     don = FP.baseline_fringe_data(uvset, sol_on)
     doff = FP.baseline_fringe_data(uvset, sol_off)
@@ -596,7 +596,7 @@ end
     end
 
     ff = FringeFit(model = FringeModel())
-    sol_off = fit(ff |> BandpassEstimator(amp = false) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(ff |> Bandpass(model = BandpassModel(amp = false)) |> TemporalSmoother(adhoc), uvset)
     doff = FP.baseline_fringe_data(uvset, sol_off)
     poff = FP.baseline_pol_index(doff, :parallel)
     @test amp_ripple(doff.spec_after, doff, poff) > 1.3    # roll-off ripple without the stage
@@ -604,7 +604,7 @@ end
     # The smooth estimators flatten the band AND fill the killed channels onto the
     # in-spw curve (≈ the mean of the live neighbours, well away from log-amp 0).
     for sm in (FP.polynomial_bandpass(4), FP.penalized_bandpass(0.1))
-        sol = fit(ff |> BandpassEstimator(amp_model = sm) |> TemporalSmoother(adhoc), uvset)
+        sol = fit(ff |> Bandpass(model = BandpassModel(amp_model = sm)) |> TemporalSmoother(adhoc), uvset)
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, :parallel)
         @test amp_ripple(don.spec_after, don, p) < 1.08
@@ -620,7 +620,7 @@ end
 
     # free_bandpass does NOT estimate the killed channels — their θ slot is untouched
     # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
-    solf = fit(ff |> BandpassEstimator(amp_model = FP.free_bandpass()) |> TemporalSmoother(adhoc), uvset)
+    solf = fit(ff |> Bandpass(model = BandpassModel(amp_model = FP.free_bandpass())) |> TemporalSmoother(adhoc), uvset)
     bpf = CAL._step(solf, :bandpass)
     planf = FP._amp_bandpass_plan(bpf.model, bpf.layout)
     for dg in dead_globals, a in 2:nant, f in 1:2
@@ -633,7 +633,7 @@ end
     # selection). Verify the default path still flattens the per-baseline phase.
     uvset, _ = _build_fringe_uvset()
     sol = fit(
-        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother()),   # window = :auto
         uvset,
     )
@@ -666,7 +666,7 @@ end
     @test ax.mbd !== nothing
 
     sol = fit(
-        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )
@@ -711,7 +711,7 @@ end
     # fires per completed scan of each pass (plus a done=0 pass announcement).
     events = Tuple{Symbol, Int, Int}[]
     sol = fit(
-        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
@@ -745,19 +745,19 @@ end
     out = String(take!(buf))
     @test occursin("Solve timing", out) && occursin("fringe", out)
 
-    # Capping the bandpass accumulation to a single scan still produces a
-    # working solve (the stage-B/bandpass/adhoc chain is intact).
+    # The bandpass/adhoc chain still produces a working solve on a
+    # single-scan uvset (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
     solc = fit(
         FringeFit(model = FringeModel()) |>
-            BandpassEstimator(select = Gustavo.ScanIndices(1)) |>
+            Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
     )
     @test solc isa CAL.CalibrationSolution
     bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
-    @test !isempty(bp2) && bp2[1][2] == 1                     # capped to one scan
+    @test !isempty(bp2) && bp2[1][2] == 1                     # one scan in this uvset
     corr2 = Gustavo.apply_calibration(uvset, solc)
     l2 = first(values(UVP.branches(corr2)))
     bl2 = UVP.baselines(l2).pairs

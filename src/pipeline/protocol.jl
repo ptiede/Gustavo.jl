@@ -351,7 +351,7 @@ _lift_step(x) = error(
     StepChain
 
 An ordered chain of pipeline steps built with `|>`:
-`CalFunction(f) |> FringeFit(...) |> BandpassEstimator(...)`. Pass it to
+`CalFunction(f) |> FringeFit(...) |> Bandpass(...)`. Pass it to
 [`CalibrationPipeline`](@ref) (or directly to [`fit`](@ref)).
 """
 struct StepChain
@@ -376,7 +376,7 @@ An ordered list of [`CalibrationStep`](@ref)s (raw
 [`ExecutionConfig`](@ref) and `ref_ant` — the gauge pin every solve step reads
 (`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`). A
 pipeline needs no [`FringeFit`](@ref) step; any `SolveStep` composition is
-legal, including a single standalone step (e.g. a `BandpassEstimator` fit over
+legal, including a single standalone step (e.g. a `Bandpass` fit over
 data already corrected by an earlier run) — the single-step solve is the
 primitive a multi-step pipeline is built from (see [`fit`](@ref)'s docstring).
 Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).

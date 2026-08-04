@@ -349,7 +349,11 @@ function resolve_closure(est::MatchedFilter, rl_rate_on::Bool)
         c = Stationization(snr_min = 0.0)
     end
     if rl_rate_on && !c.cross_hand_rate
-        c = Stationization(c.snr_min, true, c.phase_rewrap_iters, c.reject_sigma, c.reject_iters)
+        c = Stationization(;
+            snr_min = c.snr_min, cross_hand_rate = true, phase_rewrap_iters = c.phase_rewrap_iters,
+            reject_sigma = c.reject_sigma, reject_iters = c.reject_iters,
+            systematic_delay = c.systematic_delay, systematic_rate = c.systematic_rate,
+        )
     end
     return c
 end

@@ -403,12 +403,20 @@ end
     @test ncomp == 1                          # global offset ties everything into one component
 end
 
-@testset "Stationize: robust rejection excises a closure-breaking false fringe" begin
+@testset "Stationize: co-located pair exclusion is masking-immune" begin
     # A co-located telescope pair (e.g. the Onsala twins) can carry a coherent
     # crosstalk/tone fringe: ONE high-SNR baseline detection whose delay/rate is
-    # wildly closure-inconsistent with every other baseline. Without rejection
-    # the SNR²-weighted solve drags both stations' values; with it (the default)
-    # the poisoned rows are excised and the truth is recovered exactly.
+    # wildly inconsistent with every other baseline. Because delay/rate are
+    # STATION differences on a shared graph, this baseline doesn't just bias its
+    # own residual — the fit drags BOTH endpoint stations' values to partly
+    # accommodate it, spreading a comparably-sized residual onto every OTHER
+    # baseline touching either station too (with nant=6, that is 9 of 24 delay
+    # rows: the poisoned baseline plus its 8 collateral neighbors) — close
+    # enough to a MAD estimator's ~50% breakdown point that no post-fit
+    # residual check can reliably tell the contaminated rows from the clean
+    # ones. So exclusion has to be identity-based, not statistical: a known
+    # co-located pair (`excl`, e.g. `UVData._colocated_pair_set` in production)
+    # is dropped from every system before any solve runs.
     rng = MersenneTwister(0x0E0F)
     nant = 6
     ref = 1
@@ -418,9 +426,6 @@ end
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.5; snr = 30.0)
-    # Realistic measurement noise (CRB-scale, ∝ 1/snr): noiseless detections
-    # close EXACTLY, which makes every robust scale (MAD) zero and correctly
-    # disables rejection — the screen needs a genuine noise floor to cut against.
     for bi in eachindex(bl), p in eachindex(pols)
         d = D[bi, p]
         D[bi, p] = FR.Detection{Float64}((
@@ -432,19 +437,20 @@ end
     for p in eachindex(pols)
         D[poisoned, p] = FR.Detection{Float64}((-690.0e-9, 4.7e-3, 1.3, 1.0, 80.0, true))
     end
+    twins = Set{Tuple{Int, Int}}([(5, 6), (6, 5)])
 
-    sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
+    # Without exclusion, the poisoning drags stations 5/6 off truth: masking
+    # defeats post-fit rejection (Stationization's default reject_sigma = 7).
+    sol_unexcluded = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref)
+    @test abs(sol_unexcluded.delay[5, 1] - (τ[5, 1] - τ[ref, 1])) > 1.0e-9
+
+    # With the co-located pair excluded up front, truth is recovered exactly —
+    # stations 5/6 solve fine off their other (clean) baselines.
+    sol = FR.stationize_scan(D, bl, pols, nant; ref_ant = ref, excl = twins)
     for a in 1:nant, f in 1:2
         @test isapprox(sol.delay[a, f], τ[a, f] - τ[ref, 1]; atol = 1.0e-10)
         @test isapprox(sol.rate[a, f], ṙ[a, f] - ṙ[ref, f]; atol = 1.0e-4)
     end
-
-    # Rejection disabled: the false fringe drags stations 5/6 off truth.
-    sol0 = FR.stationize_scan(
-        D, bl, pols, nant; ref_ant = ref,
-        opts = FR.Stationization(reject_sigma = 0.0),
-    )
-    @test abs(sol0.delay[5, 1] - (τ[5, 1] - τ[ref, 1])) > 1.0e-9
 
     # Same through the model-driven pipeline path (solve_station_systems!).
     geom = CALs.DataGeometry(; times = [0.0, 1.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
@@ -460,9 +466,8 @@ end
     θ = zeros(layout.nθ)
     scans = (FR.detection_stack(D, bl, pols; ti = 1),)
     _, _, nrej = FR.solve_station_systems!(
-        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref,
+        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref, excl = twins,
     )
-    @test nrej >= 4                           # ≥ the 4 poisoned products (closure screen)
     for ant in 1:nant, feed in 1:2
         c = plan_off1(dplan)[ant, feed, 1, 1]
         c == 0 && continue

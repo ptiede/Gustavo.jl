@@ -61,7 +61,7 @@
         # detections — SNR, delay, rate — are bit-identical. What the fix moves
         # is the RELATIVE inter-baseline weighting of the stages that accumulate
         # ACROSS baselines (stage B / bandpass / adhoc) and the exported weights.
-        chain0 = FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        chain0 = FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.NoSmoothing())
         base = fitcalibrate(chain0, uvset)
         fixd = fitcalibrate(FP.StationWeightScale(ws) |> chain0, uvset)
@@ -86,7 +86,7 @@
     @testset "diagnostics replay the solve's recorded transforms" begin
         sol = fit(
             FP.StationWeightScale(ws) |> FringeFit(model = FringeModel()) |>
-                BandpassEstimator() |> TemporalSmoother(FP.NoSmoothing()),
+                Bandpass() |> TemporalSmoother(FP.NoSmoothing()),
             uvset,
         )
         # The old footgun (forgetting to re-pass weight_scale to a diagnostic)

@@ -188,17 +188,15 @@ function _ensure_workspace!(ws::FringeWorkspace{C}, ::Type{C}, nf::Integer, nt::
     return ws
 end
 
-# The scan's shared FFT plan at compute type `C`. FFT is ~96% of the search
-# cost, so plan with FFTW.MEASURE (≈1.8× faster transforms than the default
-# ESTIMATE) and let the plan pick up the process-wide FFTW thread count set by
-# the solve. The plan depends only on the padded grid size and `C`, so it is
-# built ONCE per scan and shared read-only across every baseline/task: FFTW
-# executes one plan concurrently across threads through out-of-place
-# `mul!(D, plan, G)`, which never mutates the plan. MEASURE's one-off planning
-# cost is amortized over the scan's thousands of searches; it may scribble on
-# this throwaway planning buffer, which is discarded (every search `fill!`s its
-# own `G` before gridding).
-_plan_grid(::Type{C}, nf::Integer, nt::Integer) where {C} = plan_fft(zeros(C, nf, nt); flags = MEASURE)
+# The scan's shared FFT plan at compute type `C`. FFTW.ESTIMATE selects a plan
+# by a fixed heuristic, with no timing-based benchmarking of the machine —
+# unlike MEASURE, whose algorithm choice depends on wall-clock trials and can
+# therefore pick a different transform (and different floating-point rounding)
+# on different runs of the same problem size. The plan depends only on the
+# padded grid size and `C`, so it is built ONCE per scan and shared read-only
+# across every baseline/task: FFTW executes one plan concurrently across
+# threads through out-of-place `mul!(D, plan, G)`, which never mutates the plan.
+_plan_grid(::Type{C}, nf::Integer, nt::Integer) where {C} = plan_fft(zeros(C, nf, nt); flags = ESTIMATE)
 
 # Uniform-grid descriptor for one axis: the origin, spacing, and grid length such
 # that every sample `x` lands at `round((x - origin)/Δ) + 1 ∈ 1:n`. Δ is the
@@ -762,8 +760,8 @@ function _build_mbd_axes(
     # type `C`, so build them here, once per scan, and share them across the
     # workspaces (see `_plan_grid`).
     nt_pad = length(rates)
-    planb = plan_fft(zeros(C, nfb_pad, nt_pad); flags = MEASURE)
-    planc = plan_fft(zeros(C, nbc_pad, length(rate_idx)), 1; flags = MEASURE)
+    planb = plan_fft(zeros(C, nfb_pad, nt_pad); flags = ESTIMATE)
+    planc = plan_fft(zeros(C, nbc_pad, length(rate_idx)), 1; flags = ESTIMATE)
     return _MBDAxes{T}(
         freqgroups, f_lo, bc_bin, Δbc, nbc_pad, nfb_pad, A, sbd_bin, A / nbc_pad,
         sbd_idx, sbd_val, mbd, rate_idx, rate_val, rate_scan, planb, planc,

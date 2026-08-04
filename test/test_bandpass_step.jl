@@ -1,8 +1,8 @@
-# ── BandpassEstimator step ────────────────────────────────────────────────────
+# ── Bandpass step ─────────────────────────────────────────────────────────────
 #
 # The bandpass stage on the composable engine. (The M4 parity gates against the
 # frozen monolith ran before its deletion.) Standing guarantees:
-# - FringeFit |> BandpassEstimator's fringe and per-channel bandpass blocks are
+# - FringeFit |> Bandpass's fringe and per-channel bandpass blocks are
 #   invariant under appending a TemporalSmoother stage (later stages never move
 #   earlier blocks), and θ is bit-deterministic across group concurrency (the
 #   per-scan accumulator contributions fold in group-index order).
@@ -20,7 +20,7 @@ _blk(step, i) = step.θ[CAL.component_ranges(step.layout)[i]]
 _pc_phase_idx(step) = findfirst(CAL._is_bandpass, CAL.phase_components(step.model))
 _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model))
 
-@testset "BandpassEstimator step (new engine)" begin
+@testset "Bandpass step (new engine)" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
     nglob = nspw * nchan
@@ -37,14 +37,14 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
     # so no later stage refines the compared slots).
     sol_o = fit(
         CalibrationPipeline(
-            FringeFit(model = fm), BandpassEstimator(), TemporalSmoother(adhoc);
+            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 1),
         ),
         uvset,
     )
     sol_n = fit(
         CalibrationPipeline(
-            FringeFit(model = fm), BandpassEstimator();
+            FringeFit(model = fm), Bandpass();
             exec = ExecutionConfig(ntasks = 1),
         ),
         uvset,
@@ -81,38 +81,12 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
     @testset "new-engine fold is deterministic across ntasks" begin
         sol_n4 = fit(
             CalibrationPipeline(
-                FringeFit(model = fm), BandpassEstimator();
+                FringeFit(model = fm), Bandpass();
                 exec = ExecutionConfig(ntasks = 4),
             ),
             uvset,
         )
         @test all(a.θ == b.θ for (a, b) in zip(sol_n4.steps, sol_n.steps))
-    end
-
-    @testset "one-scan subset: blocks invariant under the smoother stage" begin
-        sol_oc = fit(
-            CalibrationPipeline(
-                FringeFit(model = fm),
-                BandpassEstimator(select = FP.ScanIndices(1)),
-                TemporalSmoother(adhoc);
-                exec = ExecutionConfig(ntasks = 1),
-            ),
-            uvset,
-        )
-        sol_nc = fit(
-            CalibrationPipeline(
-                FringeFit(model = fm),
-                BandpassEstimator(select = FP.ScanIndices(1));
-                exec = ExecutionConfig(ntasks = 1),
-            ),
-            uvset,
-        )
-        bnc = CAL._step(sol_nc, :bandpass); boc = CAL._step(sol_oc, :bandpass)
-        ipn = _pc_phase_idx(bnc); ipo = _pc_phase_idx(boc)
-        @test _blk(bnc, ipn) == _blk(boc, ipo)
-        jan = _pc_amp_idx(bnc); jao = _pc_amp_idx(boc)
-        @test _blk(bnc, bnc.layout.nphase + jan) == _blk(boc, boc.layout.nphase + jao)
-        @test stage_info(sol_nc, :bandpass).nscans == 1
     end
 
     @testset "steps compose in any declared order" begin
@@ -127,9 +101,9 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         @test solds isa CAL.CalibrationSolution
         solts = fit(CalibrationPipeline(TemporalSmoother(), FringeFit(model = fm)), uvset)
         @test solts isa CAL.CalibrationSolution
-        # BandpassEstimator's model is self-contained regardless of position,
+        # Bandpass's model is self-contained regardless of position,
         # so bandpass-before-fringe was always legal and stays so.
-        solbf = fit(CalibrationPipeline(BandpassEstimator(), FringeFit(model = fm)), uvset)
+        solbf = fit(CalibrationPipeline(Bandpass(), FringeFit(model = fm)), uvset)
         @test solbf isa CAL.CalibrationSolution
     end
 
@@ -158,7 +132,7 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         k = 4
         sol_g = fit(
             CalibrationPipeline(
-                FringeFit(model = fm), BandpassEstimator(freq = CAL.ChannelBlocks(k));
+                FringeFit(model = fm), Bandpass(model = BandpassModel(freq = CAL.ChannelBlocks(k)));
                 exec = ExecutionConfig(ntasks = 1),
             ),
             uvset,

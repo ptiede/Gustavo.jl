@@ -14,7 +14,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 @testset "Calibration pipeline" begin
     @testset "fitcalibrate defaults (solve + corrected output)" begin
         uvset, _ = _build_fringe_uvset()
-        pipe = CalibrationPipeline([FringeFit(), BandpassEstimator(), TemporalSmoother()])
+        pipe = CalibrationPipeline([FringeFit(), Bandpass(), TemporalSmoother()])
         sol, out = fitcalibrate(pipe, uvset)
         @test sol isa CAL.CalibrationSolution
         @test out !== nothing                   # the full pipeline sets corrected output
@@ -26,7 +26,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
     @testset "pipeline ReduceSteps fuse into the streaming pass" begin
         uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
-        chain = [FringeFit(), BandpassEstimator(), TemporalSmoother()]
+        chain = [FringeFit(), Bandpass(), TemporalSmoother()]
         pipe = CalibrationPipeline(vcat(
             chain, [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 1.0e6)],
         ))
@@ -47,11 +47,11 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
     @testset "fitcalibrate reduce kwarg ≡ pipeline ReduceStep" begin
         uvset, _ = _build_fringe_uvset()
-        chain = FringeFit() |> BandpassEstimator() |> TemporalSmoother()
+        chain = FringeFit() |> Bandpass() |> TemporalSmoother()
         _, out_kw = fitcalibrate(chain, uvset; reduce = [AverageFrequency(nout = 1)])
         _, out_pl = fitcalibrate(
             CalibrationPipeline([
-                FringeFit(), BandpassEstimator(), TemporalSmoother(), AverageFrequency(nout = 1),
+                FringeFit(), Bandpass(), TemporalSmoother(), AverageFrequency(nout = 1),
             ]),
             uvset,
         )
@@ -68,7 +68,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         seen = Ref(false)
         sol, _ = fitcalibrate(
             CalibrationPipeline([
-                FringeFit(), BandpassEstimator(), TemporalSmoother(), _ProbeReduce(seen),
+                FringeFit(), Bandpass(), TemporalSmoother(), _ProbeReduce(seen),
             ]),
             uvset,
         )
@@ -105,7 +105,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         _, out = fitcalibrate(
             CalibrationPipeline(
                 [
-                    FringeFit(), BandpassEstimator(), TemporalSmoother(),
+                    FringeFit(), Bandpass(), TemporalSmoother(),
                     FlagSpwEdges(mode = :flag_fraction, fraction = 0.2),
                 ]
             ),
@@ -132,13 +132,13 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
     @testset "FringeFit-less pipeline" begin
         uvset, _ = _build_fringe_uvset()
-        # A standalone BandpassEstimator fit needs no FringeFit step, no
+        # A standalone Bandpass fit needs no FringeFit step, no
         # pipeline-level anchor check, and no fringe-estimator diagnostics.
-        sol = fit(BandpassEstimator(), uvset; ref_ant = 2)
+        sol = fit(Bandpass(), uvset; ref_ant = 2)
         @test stage_names(sol) == [:bandpass]
         @test !haskey(sol.info, :search)
         @test sol.info.nant == 4
-        _, out = fitcalibrate(BandpassEstimator(), uvset; ref_ant = 2)
+        _, out = fitcalibrate(Bandpass(), uvset; ref_ant = 2)
         @test out !== nothing
     end
 
@@ -165,10 +165,10 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test d.dispersion == DispersionModel()
         @test d.sbd isa SingleBandDelay
 
-        b = BandpassEstimator()
-        @test b.phase && b.amp
-        @test b.amp_model == FP.penalized_bandpass(1.0)
-        @test b.select == AllScans()
+        b = Bandpass()
+        @test b.model.phase && b.model.amp
+        @test b.model.amp_model == FP.penalized_bandpass(1.0)
+        @test b.estimator isa SplitWLS
 
         t = TemporalSmoother()
         @test t.smoother == FP.SavitzkyGolaySmoother()
@@ -271,7 +271,7 @@ end
         # Wired through a real fit: the pipeline's stages are named in the log.
         buf4 = IOBuffer()
         sol = fit(
-            FringeFit(model = FringeModel()) |> BandpassEstimator(),
+            FringeFit(model = FringeModel()) |> Bandpass(),
             uvset;
             exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
         )
@@ -317,7 +317,7 @@ end
 # labelled `DimArray` — and the whole apply path must be indifferent to that.
 @testset "a rewrapped θ corrects data identically" begin
     uvset, _ = _build_fringe_uvset()
-    sol = fit(FringeFit(model = FringeModel()) |> BandpassEstimator(), uvset)
+    sol = fit(FringeFit(model = FringeModel()) |> Bandpass(), uvset)
     sold_steps = [
         CAL.StepSolution(
             s.name, s.model, s.layout, DimArray(copy(s.θ), Dim{:param}(1:(s.layout.nθ))), s.info,

@@ -52,43 +52,27 @@ provides(::DispersionSBDFit) = :refine
 required_grouping(::DispersionSBDFit) = :scan_complete
 
 """
-    BandpassEstimator(; phase = true, amp = true,
-                      freq = ChannelBlocks(1),
-                      amp_model = penalized_bandpass(1.0),
-                      select = AllScans())
+    Bandpass(; model = BandpassModel(), estimator = SplitWLS())
 
-The bandpass stage: the time-global phase / log-amplitude station bandpass
+The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
-their gains, over the scans `select` picks (fit-on-subset / apply-everywhere:
-a bandpass fit from a few bright calibrator scans still applies to the whole
-track). `amp_model` is the amplitude-shape estimator ([`penalized_bandpass`](@ref) /
-[`polynomial_bandpass`](@ref) / [`free_bandpass`](@ref)).
-
-`freq` sets how finely the bandpass is resolved in frequency: the default
-[`ChannelBlocks`](@ref)`(1)` is one free value per channel, and
-`ChannelBlocks(k)` ties each `k` consecutive channels of a spw to one value —
-fewer parameters, and each fit from `k` channels' worth of signal, for tracks
-where the per-channel SNR will not support a free bandpass.
-
-`select` accepts any [`AbstractScanSelection`](@ref) (`AllScans`, `SourceScans`,
-`ScanIndices`, `ScanWhere`, or a custom one); the default runs over every scan.
-The model is self-contained, so placing `BandpassEstimator` before or after
-`FringeFit` is equally legal.
+their gains, over every scan (fit-on-subset / apply-everywhere: pre-filter the
+`UVSet` before fitting if only a scan subset should contribute). WHAT is fit
+is `model` ([`Fringe.BandpassModel`](@ref)): phase/amp/frequency-segmentation/
+amp-shape-smoother. HOW it is solved lives on `estimator`, a pluggable
+[`Fringe.AbstractBandpassEstimator`](@ref); by default
+[`Fringe.SplitWLS`](@ref) (independent phase/log-amp closures) — or
+[`Fringe.JointALS`](@ref), a joint complex-gain + per-scan source-coherence
+solve for a resolved or polarized calibrator. The model is self-contained, so
+placing `Bandpass` before or after `FringeFit` is equally legal.
 """
-Base.@kwdef struct BandpassEstimator <: SolveStep
-    phase::Bool = true
-    amp::Bool = true
-    freq::ChannelBlocks = ChannelBlocks(1)
-    amp_model = Fringe.penalized_bandpass(1.0)
-    select::Fringe.AbstractScanSelection = Fringe.AllScans()
+Base.@kwdef struct Bandpass{M <: Fringe.BandpassModel, E <: Fringe.AbstractBandpassEstimator} <: SolveStep
+    model::M = Fringe.BandpassModel()
+    estimator::E = Fringe.SplitWLS()
 end
-provides(::BandpassEstimator) = :bandpass
-required_grouping(::BandpassEstimator) = :scan_complete
-# The pass streams the user's selection PLUS the coverage top-up: stations the
-# selected scans never observe would get no bandpass (g = 1), so each such
-# station's best scan is added (any source — safe for the SHAPE, see
-# `Fringe.CoverageTopup`).
-fit_selection(s::BandpassEstimator, prior_solutions) = Fringe.CoverageTopup(s.select)
+provides(::Bandpass) = :bandpass
+required_grouping(::Bandpass) = :scan_complete
+# No fit_selection override — every scan feeds the pass (protocol.jl's default AllScans).
 
 """
     TemporalSmoother(smoother = SavitzkyGolaySmoother(); pseudo_stokes = :auto)
@@ -166,9 +150,10 @@ end
 # The bandpass components: phase and log-amp, per feed, time-stable, resolved in
 # frequency by `s.freq` (the legacy `_fringe_model` placement — after the fringe
 # terms).
-function model_components(s::BandpassEstimator, spec)
-    bpc = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), s.freq), PerFeed())
-    return (; phase = s.phase ? (bandpass = bpc,) : (;), logamp = s.amp ? (bandpass = bpc,) : (;))
+function model_components(s::Bandpass, spec)
+    Fringe.validate_bandpass(s.estimator, s.model)
+    bpc = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), s.model.freq), PerFeed())
+    return (; phase = s.model.phase ? (bandpass = bpc,) : (;), logamp = s.model.amp ? (bandpass = bpc,) : (;))
 end
 
 # The per-integration adhoc phase: per-AP, feed-common, solved per scan by the
@@ -253,19 +238,18 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
     rl_rate_on = Fringe._has_feed_rate(ctx.model.phase)
     opts = Fringe.resolve_closure(est, rl_rate_on)
     chi, ncomp, nrej, covered = Fringe.solve_station_systems!(
-        ctx.θ, dets, stageB; ref_ant = ctx.ref_ant, opts = opts,
+        ctx.θ, dets, stageB; ref_ant = ctx.ref_ant, opts = opts, excl = ctx.scratch[:excl],
     )
     ctx.scratch[:fringe_flags] = Fringe.unconstrained_flags(dets, covered, ctx.geom)
     round = ctx.scratch[:fringe_round]::Int
     # Another round re-searches the residual.
     round < max(est.rounds, 1) && return (; repeat_pass = true, chi, ncomp, rejected = nrej)
-    # `scan_snr` is published for a LATER step's non-data input (e.g.
-    # `BandpassEstimator`'s SNR-aware `fit_selection` reads it off this step's
-    # `StepSolution.info` — see `_scan_snr`). `scan_ncells` and the detection
-    # table are pure logging (`Fringe.diagnostics.jl`'s
-    # `fringe_snr_table`/`suspect_fringes` read them off this same
-    # `StepSolution.info`) — built only now, on the final round, via the same
-    # `scan_values` primitive every step's per-scan diagnostics use.
+    # `scan_snr` is published for a LATER step's non-data input (e.g. a
+    # `ScanWhere` selection reading it off this step's `StepSolution.info` —
+    # see `_scan_snr`). `scan_ncells` and the detection table are pure logging
+    # (`Fringe.diagnostics.jl`'s `fringe_snr_table`/`suspect_fringes` read them
+    # off this same `StepSolution.info`) — built only now, on the final round,
+    # via the same `scan_values` primitive every step's per-scan diagnostics use.
     return (;
         chi, ncomp, rejected = nrej, scan_snr,
         scan_ncells = scan_values(res -> res.r.ncells, results, ngroups; default = 0.0),
@@ -326,9 +310,9 @@ function finish_pass!(s::DispersionSBDFit, ctx::SolveContext)
     )
 end
 
-# ── BandpassEstimator visitor (accumulate per scan → per-channel solves) ─────
+# ── Bandpass visitor (accumulate per scan → per-channel/joint solves) ────────
 
-function start_pass!(s::BandpassEstimator, ctx::SolveContext)
+function start_pass!(s::Bandpass, ctx::SolveContext)
     model = ctx.model
     layout = ctx.layout
     nant = ctx.nant
@@ -342,45 +326,34 @@ function start_pass!(s::BandpassEstimator, ctx::SolveContext)
             if excl === nothing || bl_pairs[i] ∉ excl
     )
     ctx.scratch[:bp_setup] = (;
-        bl_pairs, blidx,
-        bp_plan = s.phase ? Fringe._bandpass_plan(model, layout) : nothing,
-        amp_plan = s.amp ? Fringe._amp_bandpass_plan(model, layout) : nothing,
+        bl_pairs, blidx, nant,
+        bp_plan = s.model.phase ? Fringe._bandpass_plan(model, layout) : nothing,
+        amp_plan = s.model.amp ? Fringe._amp_bandpass_plan(model, layout) : nothing,
+        channel_freqs = ctx.geom.channel_freqs, spw_of_chan = ctx.geom.spw_of_chan,
     )
     return nothing
 end
 
-function process_scan!(s::BandpassEstimator, ctx::SolveContext, stack, win::GeometryWindow)
+function process_scan!(s::Bandpass, ctx::SolveContext, stack, win::GeometryWindow)
     setup = ctx.scratch[:bp_setup]
     # `stack` arrives already fringe/dispersion/SBD-corrected through the
     # pipeline's transform chain (every earlier step's finished solution) —
     # this step just accumulates the residual, no correction of its own.
     pols = String.(pol_products(stack))
-    nchan = length(ctx.geom.channel_freqs)
+    nchan = length(setup.channel_freqs)
     rl, wl = Fringe.bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
-    Fringe.accumulate_bandpass!(rl, wl, setup.blidx, stack, win)
+    Fringe.accumulate_bandpass!(
+        rl, wl, setup.blidx, stack, win; derotate = Fringe.bandpass_derotate(s.estimator),
+    )
     return (; rl, wl, pols, source = source_name(stack))
 end
 
-function finish_pass!(s::BandpassEstimator, ctx::SolveContext)
+function finish_pass!(s::Bandpass, ctx::SolveContext)
     setup = ctx.scratch[:bp_setup]
     results = ctx.scratch[:pass_results]
-    isempty(results) && return (; nscans = 0)     # selection empty → bandpass stays 0
-    pols = results[1].r.pols
-    nchan = length(ctx.geom.channel_freqs)
-    nbl = length(setup.bl_pairs)
-    rbar, wbar = Fringe.bandpass_accumulators(nbl, length(pols), nchan)
-    for res in results                            # group-index order: the fold is
-        rbar .+= res.r.rl                         # deterministic at ANY concurrency
-        wbar .+= res.r.wl
-    end
-    setup.bp_plan === nothing || Fringe.solve_phase_bandpass!(
-        ctx.θ, rbar, wbar, setup.bl_pairs, pols, ctx.nant, setup.bp_plan;
-        ref_ant = ctx.ref_ant,
-    )
-    setup.amp_plan === nothing || Fringe.solve_amp_bandpass!(
-        ctx.θ, rbar, wbar, setup.bl_pairs, pols, ctx.nant, setup.amp_plan,
-        ctx.geom.channel_freqs;
-        spw_of_chan = ctx.geom.spw_of_chan, smoother = s.amp_model,
+    isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
+    Fringe.solve_bandpass!(
+        s.estimator, ctx.θ, [res.r for res in results], setup, s.model; ref_ant = ctx.ref_ant,
     )
     scans = Int[res.index for res in results]
     return (;

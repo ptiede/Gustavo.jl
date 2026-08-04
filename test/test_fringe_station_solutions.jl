@@ -77,7 +77,7 @@
         )
         sol = fit(
             FringeFit(model = FringeModel(terms = rl_perscan)) |>
-                BandpassEstimator() |>
+                Bandpass() |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )

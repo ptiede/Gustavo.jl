@@ -37,7 +37,7 @@ solution — `sol.postcal` — so `calibrate(sol, uvset)` replays it); they run 
 
 **A single `SolveStep` fit alone is the primitive** — the pipeline needs no
 [`FringeFit`](@ref) step, and any composition of `SolveStep`s is legal,
-including one standalone step (e.g. fitting a `BandpassEstimator` alone over
+including one standalone step (e.g. fitting a `Bandpass` alone over
 data already corrected by an earlier run). A multi-step `CalibrationPipeline`
 is a fusion convenience built FROM repeated single-step solves: solving
 `A |> B` in one call is equivalent to `sa = fit(A, uvset)` followed by
@@ -554,7 +554,7 @@ function _parse_pipeline(pipe::CalibrationPipeline)
                 ArgumentError(
                     "fit/fitcalibrate: step $(typeof(s)) is not runnable — supported: data " *
                         "transforms, SolveSteps (FringeFit, DispersionSBDFit, " *
-                        "BandpassEstimator, TemporalSmoother, or a third-party SolveStep), " *
+                        "Bandpass, TemporalSmoother, or a third-party SolveStep), " *
                         "AprioriAmplitude, and ReduceSteps."
                 )
             )

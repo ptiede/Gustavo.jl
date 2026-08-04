@@ -67,7 +67,7 @@ struct UnbackedExecutor end
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
         mk(ex) = CalibrationPipeline(
             FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
-            BandpassEstimator(), TemporalSmoother(adhoc);
+            Bandpass(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 2, outer_executor = ex),
         )
         sol_t, out_t = fitcalibrate(mk(ThreadsExecutor()), uvset; reduce = [AverageFrequency(nout = 1)])
@@ -93,7 +93,7 @@ struct UnbackedExecutor end
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
         mk(inner) = CalibrationPipeline(
             FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
-            BandpassEstimator(), TemporalSmoother(adhoc);
+            Bandpass(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(ntasks = 2, inner_executor = inner),
         )
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are

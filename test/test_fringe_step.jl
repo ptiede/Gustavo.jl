@@ -229,15 +229,15 @@
                         cross_hand_fit_on = Gustavo.ScanIndices(1),
                     ),
                 ),
-                BandpassEstimator(), TemporalSmoother();
+                Bandpass(), TemporalSmoother();
                 exec = ExecutionConfig(ntasks = 1),
             ),
             uvset,
         )
         @test Gustavo.stage_names(sol_full) == [:fringe, :bandpass, :adhoc]
-        # BandpassEstimator without TemporalSmoother still solves a :bandpass
+        # Bandpass without TemporalSmoother still solves a :bandpass
         # stage (F |> B — no final pass).
-        sol_fb = fit(CalibrationPipeline(FringeFit(), BandpassEstimator()), uvset)
+        sol_fb = fit(CalibrationPipeline(FringeFit(), Bandpass()), uvset)
         @test any(r -> r.name === :bandpass, sol_fb.steps)
     end
 
@@ -365,12 +365,12 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
     @testset "an out-of-package estimator drives the whole pipeline" begin
         probe = _ProbeEstimator(MatchedFilter())
         sol = fit(
-            FringeFit(; model, estimator = probe) |> BandpassEstimator() |>
+            FringeFit(; model, estimator = probe) |> Bandpass() |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )
         ref = fit(
-            FringeFit(; model) |> BandpassEstimator() |>
+            FringeFit(; model) |> Bandpass() |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
             uvset,
         )
@@ -387,7 +387,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
         probe = _ProbeEstimator(MatchedFilter())
         sol = fit(
             FringeFit(; model = FringeModel(), estimator = probe) |>
-                BandpassEstimator(),
+                Bandpass(),
             uvset,
         )
         @test any(r -> r.name === :bandpass, sol.steps)

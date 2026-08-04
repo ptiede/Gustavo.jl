@@ -87,7 +87,7 @@ end
 # ExecutionConfig, step chaining (`|>`), and the CalibrationPipeline itself.
 include("pipeline/protocol.jl")
 
-# The built-in solve steps: FringeFit (model + estimator), BandpassEstimator,
+# The built-in solve steps: FringeFit (model + estimator), Bandpass,
 # TemporalSmoother.
 include("pipeline/steps.jl")
 

@@ -7,7 +7,7 @@ using HDF5
 @testset "Fringe diagnostics" begin
     uvset, _truth = _build_fringe_uvset()
     sol = fit(
-        FringeFit(model = FringeModel()) |> BandpassEstimator() |>
+        FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )
