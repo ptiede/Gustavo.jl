@@ -1,6 +1,5 @@
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
-Dagger = "d58978e5-989f-55fb-8d15-ea34adc7bf54"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"

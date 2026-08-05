@@ -82,7 +82,7 @@ end
     fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
     pipe = CalibrationPipeline(
         FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
-        exec = ExecutionConfig(ntasks = 1),
+        exec = ExecutionConfig(),
     )
     sol_n = fit(pipe, uvset)
 
@@ -100,7 +100,7 @@ end
         # in a fixed order regardless of ntasks/inner).
         pipe4 = CalibrationPipeline(
             FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
-            exec = ExecutionConfig(ntasks = 4),
+            exec = ExecutionConfig(),
         )
         @test parent(gains(fit(pipe4, uvset))) == parent(gains(sol_n))
 
@@ -141,7 +141,7 @@ end
             FringeFit(model = fm), ds,
             Bandpass(),
             TemporalSmoother(adhoc);
-            exec = ExecutionConfig(ntasks = 1),
+            exec = ExecutionConfig(),
         )
         sol_nd = fit(pd, uvd)
         @test stage_info(sol_nd, :refine).dispersion_applied
@@ -167,7 +167,7 @@ end
             FringeFit(model = fm), ds,
             Bandpass(),
             TemporalSmoother(adhoc);
-            exec = ExecutionConfig(ntasks = 4),
+            exec = ExecutionConfig(),
         )
         @test parent(gains(fit(pd4, uvd))) == parent(gains(sol_nd))
     end
@@ -176,7 +176,7 @@ end
         sol_fs = fit(
             CalibrationPipeline(
                 FringeFit(model = fm), TemporalSmoother(adhoc);
-                exec = ExecutionConfig(ntasks = 1),
+                exec = ExecutionConfig(),
             ),
             uvset,
         )
@@ -217,7 +217,7 @@ end
 
         pipe_ap = CalibrationPipeline(
             FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc), ap;
-            exec = ExecutionConfig(ntasks = 1),
+            exec = ExecutionConfig(),
         )
         sol_ap, out_ap = fitcalibrate(pipe_ap, uvset)
         # Recorded on the solution; the solve's θ is untouched by it.
@@ -280,9 +280,9 @@ end
         # pipeline-level ordering check in front of it.
         pipe_ap_first = CalibrationPipeline(
             FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc), ap;
-            exec = ExecutionConfig(ntasks = 1),
+            exec = ExecutionConfig(),
         )
-        @test_throws "no a-priori calibration for band 2" fitcalibrate(pipe_ap_first, uvset)
+        @test_throws "no a-priori calibration for spw 2" fitcalibrate(pipe_ap_first, uvset)
 
         # The identical AprioriAmplitude declared AFTER a CombineSpw ReduceStep
         # runs against the merged, single-band output instead — succeeding on
@@ -292,7 +292,7 @@ end
         pipe_reduce_first = CalibrationPipeline(
             FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc),
             CombineSpw(), ap;
-            exec = ExecutionConfig(ntasks = 1),
+            exec = ExecutionConfig(),
         )
         _, out = fitcalibrate(pipe_reduce_first, uvset)
         @test all(UVP.metadata(leaf).ddi == 0 for (_, leaf) in pairs(UVP.branches(out)))

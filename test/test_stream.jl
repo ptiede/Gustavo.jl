@@ -32,7 +32,7 @@
                 isequal(stack_n[:weights], stack_s[:weights])
             # The direct-decode fast path, WHEN it fires (lazy sibling-spw IDI
             # spans), must agree with the stacked fallback bit-for-bit.
-            direct = ST._direct_scan_group(spec, geom)
+            direct = ST._direct_scan_group(spec, geom, ST.inner_executor(st))
             if direct !== nothing
                 stack_d, win_d = direct
                 @test isequal(stack_d[:vis], stack_s[:vis]) &&
@@ -106,9 +106,9 @@
         every = FP.select_groups(stb, Gustavo.ScanWhere(s -> true); snr = snrs)
         @test [s.index for s in every] == collect(1:n)
 
-        # A failing group rethrows after the pass drains. The wrapper differs
-        # by executor (Threads task-wraps, the Dagger fetch unwraps to the
-        # original) — the contract is that the ROOT CAUSE surfaces.
+        # A failing group rethrows after the pass drains. A concurrent
+        # scheduler task-wraps it — the contract is that the ROOT CAUSE
+        # surfaces.
         err = try
             map_groups(stb) do spec
                 spec.index == 1 ? error("boom") : nothing
@@ -121,15 +121,32 @@
         @test root isa ErrorException && root.msg == "boom"
     end
 
-    @testset "deterministic sizing" begin
-        @test st.ntasks ≥ 1
-        @test st.inner == max(1, Threads.nthreads() ÷ st.ntasks)
-        # Tiny synthetic charges never cap ntasks below the request.
-        @test st.ntasks == max(1, min(Threads.nthreads(), length(st.groups)))
-        # An explicit budget smaller than one group's charge still admits it (clamped).
-        st_small = FP.scan_stream(uvset; geom = geom, mem_budget = 1.0)
-        @test st_small.ntasks == 1
-        @test map_groups(spec -> spec.index, st_small) == collect(1:length(st_small.groups))
+    @testset "the memory budget gates the outer scheduler" begin
+        # The schedulers are used as configured, so a budget that cannot hold
+        # the groups they would keep resident is an error at construction —
+        # never a silently reduced task count. `BySpw` so the set has more than
+        # one group to hold at once.
+        @test_throws "memory budget" FP.scan_stream(
+            uvset; geom = geom, grouping = FP.BySpw(),
+            exec = ExecutionConfig(
+                mem_budget = 1.0, outer_executor = GreedyScheduler(; ntasks = 4),
+            ),
+        )
+        # One group at a time is the floor — no task count would make an
+        # oversized group fit, so a serial stream builds however tight the
+        # budget, and runs.
+        st_tight = FP.scan_stream(
+            uvset; geom = geom, grouping = FP.BySpw(),
+            exec = ExecutionConfig(mem_budget = 1.0),
+        )
+        @test map_groups(spec -> spec.index, st_tight) == collect(1:length(st_tight.groups))
+
+        @test ST.max_tasks(SerialScheduler()) == 1
+        @test ST.max_tasks(GreedyScheduler(; ntasks = 3)) == 3
+        @test ST.max_tasks(DynamicScheduler(; nchunks = 5)) == 5
+        # A chunksize-configured scheduler's count follows the data, so the
+        # bound falls back to the thread count.
+        @test ST.max_tasks(DynamicScheduler(; chunksize = 2)) == Threads.nthreads()
     end
 end
 
@@ -145,7 +162,7 @@ struct HalveWeights <: AbstractDataTransform end
 apply_transform!(::HalveWeights, stack, win; executor = SerialScheduler()) =
     (stack[:weights] .*= 0.5; nothing)
 
-# One budget-admitted pass: materialize every group through the chain and
+# One pass: materialize every group through the chain and
 # report each group's total weight.
 function pass(uvset, geom)
     stream = scan_stream(uvset; geom = geom, transforms = (HalveWeights(),))

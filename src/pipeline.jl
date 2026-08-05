@@ -83,8 +83,8 @@ function run_step(step::ReduceStep, ctx::CalibrationContext)
     return _with(ctx; output = f(target))
 end
 
-# The composable-pipeline step protocol: SolveStep, the step hooks,
-# ExecutionConfig, step chaining (`|>`), and the CalibrationPipeline itself.
+# The composable-pipeline step protocol: SolveStep, the step hooks, step
+# chaining (`|>`), and the CalibrationPipeline itself.
 include("pipeline/protocol.jl")
 
 # The built-in solve steps: FringeFit (model + estimator), Bandpass,

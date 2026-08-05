@@ -50,7 +50,7 @@
     fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
     ref_ant = 1     # Bandpass's/CalibrationPipeline's default
     sol_closure = fit(
-        CalibrationPipeline(FringeFit(model = fm), Bandpass(); exec = ExecutionConfig(ntasks = 1)),
+        CalibrationPipeline(FringeFit(model = fm), Bandpass(); exec = ExecutionConfig()),
         uvset,
     )
     # This synthetic truth is i.i.d. RANDOM per channel (a deliberately hard,
@@ -61,7 +61,7 @@
         CalibrationPipeline(
             FringeFit(model = fm),
             Bandpass(estimator = JointALS(max_iterations = 60, tolerance = 1.0e-10));
-            exec = ExecutionConfig(ntasks = 1),
+            exec = ExecutionConfig(),
         ),
         uvset,
     )

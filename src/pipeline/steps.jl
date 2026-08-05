@@ -183,7 +183,7 @@ function Fringe.estimate_scan!(
     Vsearch = round > 1 ? Fringe.residual_vis(ctx.ev, ctx.θ, stack, win) : stack[:vis]
     res = Fringe.search_scan(
         stack, ctx.stream.geom, est.search;
-        Vsearch, ngroups = length(ctx.stream.groups), executor = ctx.stream.inner_executor,
+        Vsearch, ngroups = length(ctx.stream.groups), executor = inner_executor(ctx.stream),
     )
     pols = pol_products(stack)
     # `res` covers only the surviving (cross) baselines; take its own pair list.
@@ -280,11 +280,11 @@ function process_scan!(s::DispersionSBDFit, ctx::SolveContext, stack, win::Geome
     setup = ctx.scratch[:disp_sbd_setup]
     nrej = Fringe.refine_scan_dispersion!(
         ctx.θ, stack, win, setup.delay_plan, setup.disp_plan, ctx.ref_ant, ctx.nant;
-        executor = ctx.stream.inner_executor, ties = setup.ties,
+        executor = inner_executor(ctx.stream), ties = setup.ties,
     )
     nrej += Fringe.refine_scan_sbd!(
         ctx.θ, stack, win, setup.sbd_plans, ctx.ref_ant, ctx.nant;
-        executor = ctx.stream.inner_executor,
+        executor = inner_executor(ctx.stream),
     )
     return (; nrej)
 end
@@ -372,7 +372,7 @@ function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::Geome
     # directly, no correction of its own.
     Fringe.adhoc_scan!(
         ctx.θ, stack, win, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
-        shared_feeds = setup.shared, executor = ctx.stream.inner_executor,
+        shared_feeds = setup.shared, executor = inner_executor(ctx.stream),
         excl = ctx.scratch[:excl],
     )
     return nothing

@@ -174,10 +174,12 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test t.smoother == FP.SavitzkyGolaySmoother()
 
         e = ExecutionConfig()
-        @test e.mem_fraction == 0.6 && e.mem_budget === nothing && e.exclude_colocated
+        @test e.mem_fraction == 0.6 && e.mem_budget === nothing
 
-        # ref_ant is run-wide, on CalibrationPipeline, not on FringeModel.
+        # ref_ant and exclude_colocated are run-wide, on CalibrationPipeline,
+        # not on FringeModel or ExecutionConfig.
         @test CalibrationPipeline([FringeFit()]).ref_ant == 1
+        @test CalibrationPipeline([FringeFit()]).exclude_colocated
 
         # AprioriAmplitude carries a pre-built spw_cals (loading is the caller's job).
         bc = Dict(1 => :dummy)
@@ -205,11 +207,10 @@ end
         layout = CAL.plan_parameters(model, nant, geom)
         ctx = Gustavo.SolveContext(
             model, layout, geom, CAL.GainEvaluator(model, layout), zeros(layout.nθ),
-            1, nant, antennas, ST.scan_stream(uvset; geom),
-            ExecutionConfig(), Dict{Symbol, Any}(),
+            1, nant, antennas, ST.scan_stream(uvset; geom), Dict{Symbol, Any}(),
         )
         @test isconcretetype(typeof(ctx))
-        for f in (:model, :layout, :geom, :ev, :antennas, :stream, :exec)
+        for f in (:model, :layout, :geom, :ev, :antennas, :stream)
             @test isconcretetype(fieldtype(typeof(ctx), f))
         end
         # `scratch` stays a `Dict{Symbol, Any}` by design — it is the untyped

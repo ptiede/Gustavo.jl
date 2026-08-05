@@ -774,26 +774,25 @@ function adhoc_scan!(
     # Per-band accumulation (the window's per-spw channel blocks stand in for the
     # band leaves) fanned out over the inner `executor` — this loop (the residual
     # sum over every visibility) dominates the adhoc pass on many-band data. Each
-    # BLOCK gets its own partial and the partials fold in block order, so the
-    # float association is fixed by the data layout alone — the result is
-    # bit-deterministic at any chunking.
+    # BLOCK owns the trailing slice `li` of the partial buffers and the slices
+    # fold in block order, so the float association is fixed by the data layout
+    # alone — the result is bit-deterministic at any chunking.
     blocks = _spw_blocks(geom, ci)
     nblk = length(blocks)
-    parts = Vector{Tuple{Array{ComplexF64, 3}, Array{Float64, 3}}}(undef, nblk)
+    rparts = zeros(ComplexF64, nbl, npol, nap, nblk)
+    wparts = zeros(Float64, nbl, npol, nap, nblk)
     tforeach(1:nblk; scheduler = executor) do li
         r = blocks[li]
-        rl = zeros(ComplexF64, nbl, npol, nap)
-        wl = zeros(Float64, nbl, npol, nap)
         _accumulate_leaf_rbar!(
-            rl, wl, view(stack[:vis], r, :, :, :), view(stack[:weights], r, :, :, :),
+            view(rparts, :, :, :, li), view(wparts, :, :, :, li),
+            view(stack[:vis], r, :, :, :), view(stack[:weights], r, :, :, :),
         )
-        parts[li] = (rl, wl)
     end
     rbar = zeros(ComplexF64, nbl, npol, nap)
     wbar = zeros(Float64, nbl, npol, nap)
-    for (rl, wl) in parts
-        rbar .+= rl
-        wbar .+= wl
+    for li in 1:nblk
+        rbar .+= view(rparts, :, :, :, li)
+        wbar .+= view(wparts, :, :, :, li)
     end
     # Drop co-located (intra-site) baselines from the per-AP solve — see
     # `_colocated_pair_set`. Zero weight ⇒ `_adhoc_ap_rows` skips the rows.

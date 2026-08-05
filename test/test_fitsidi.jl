@@ -27,6 +27,7 @@ function build_synth_idi_uvset(;
         pol_labels = ["PP", "PQ", "QP", "QQ"],
         rdate = "2021-03-04",
         ref_freq = 43.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
+        include_autocorr = false,
         weight_fn = (band, ti, bl, p) -> 1.0f0,
         vis_fn = (band, ti, bl, p, c) -> ComplexF32(band + 0.1 * ti + 0.01 * bl + 0.001 * p + 0.0001 * c, -0.5),
     )
@@ -50,8 +51,11 @@ function build_synth_idi_uvset(;
         (; NOSTA = Int32.(1:nant), DIAMETER = fill(25.0f0, nant)),
     )
 
-    # Baselines: all (a, b) with a < b.
-    bl_pairs = Tuple{Int, Int}[(a, b) for a in 1:nant for b in (a + 1):nant]
+    # Baselines: all (a, b) with a < b, plus the (a, a) autocorrelations when
+    # `include_autocorr` (which the reader consumes as normalizers).
+    bl_pairs = Tuple{Int, Int}[
+        (a, b) for a in 1:nant for b in (include_autocorr ? a : a + 1):nant
+    ]
     nbl = length(bl_pairs)
     baselines = UV.BaselineIndex(bl_pairs, bl_pairs; antenna_names = collect(antennas.name))
 
@@ -271,17 +275,161 @@ const _F32EPS = 1.0f-4
                 end
                 # Threaded decode (per-leaf baseline threading) must be identical to
                 # the sequential path — tasks write disjoint baseline columns.
-                old = UV._DECODE_NTASKS[]
-                UV._DECODE_NTASKS[] = 4
-                try
-                    threaded = UV.materialize_group(leaves)
-                    for (t, b) in zip(threaded, bulk)
-                        @test parent(t[:vis]) == parent(b[:vis])
-                        @test parent(t[:weights]) == parent(b[:weights])
-                    end
-                finally
-                    UV._DECODE_NTASKS[] = old
+                threaded = UV.materialize_group(leaves; executor = DynamicScheduler(ntasks = 4))
+                for (t, b) in zip(threaded, bulk)
+                    @test parent(t[:vis]) == parent(b[:vis])
+                    @test parent(t[:weights]) == parent(b[:weights])
                 end
+            end
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "merge_spws: bands → one Frequency axis" begin
+        # `merge_spws=true` yields one leaf per scan whose Frequency axis is every
+        # band's channels concatenated, and that leaf stays lazy: nothing is read
+        # until it is materialized.
+        uvset = build_synth_idi_uvset(; nspw = 3, nchan = 4, nscan = 2, ntime = 3)
+        path = tempname() * ".idifits"
+        try
+            UV.write_fitsidi(path, uvset)
+            perband = UV.load_fitsidi(path; lazy = true)
+            merged = UV.load_fitsidi(path; lazy = true, merge_spws = true)
+
+            # One leaf per scan instead of one per (scan, band).
+            @test length(DimensionalData.branches(merged)) == 2
+            @test length(DimensionalData.branches(perband)) == 6
+
+            # Merged leaves are still disk-backed, and still take the bulk path.
+            for (_, leaf) in DimensionalData.branches(merged)
+                @test UV.is_lazy(leaf)
+                @test DimensionalData.metadata(leaf).spw_name == "combined"
+            end
+
+            # Per-scan: the merged data equals the per-band leaves concatenated
+            # along Frequency (bands ordered by ascending frequency).
+            byscan = Dict{String, Vector{Any}}()
+            for (_, leaf) in DimensionalData.branches(perband)
+                push!(get!(byscan, DimensionalData.metadata(leaf).scan_name, Any[]), leaf)
+            end
+            for (_, mleaf) in DimensionalData.branches(merged)
+                scan = DimensionalData.metadata(mleaf).scan_name
+                bands = sort(
+                    byscan[scan];
+                    by = l -> minimum(channel_freqs(DimensionalData.metadata(l).freq_setup)),
+                )
+                mat = UV.materialize_leaf(mleaf)
+
+                exp_vis = cat([parent(UV.materialize_leaf(l)[:vis]) for l in bands]...; dims = 1)
+                exp_w = cat([parent(UV.materialize_leaf(l)[:weights]) for l in bands]...; dims = 1)
+                @test parent(mat[:vis]) == exp_vis
+                @test parent(mat[:weights]) == exp_w
+
+                # Frequency axis is the concatenation, ascending; uvw is
+                # frequency-independent and carries through unchanged.
+                exp_freqs = reduce(
+                    vcat, [collect(lookup(l[:vis], Frequency)) for l in bands],
+                )
+                @test collect(lookup(mat[:vis], Frequency)) ≈ exp_freqs
+                @test issorted(exp_freqs)
+                @test parent(mat[:uvw]) == parent(UV.materialize_leaf(bands[1])[:uvw])
+
+                # Partial reads: a channel sub-range spanning a band boundary must
+                # decode the same values as the full read (exercises the scalar
+                # span path rather than the whole-band fast path).
+                @test mleaf[:vis][3:9, :, :, :] == exp_vis[3:9, :, :, :]
+                @test mleaf[:weights][3:9, :, :, :] == exp_w[3:9, :, :, :]
+                @test mleaf[:vis][2:3, 1:2, :, 1:2] == exp_vis[2:3, 1:2, :, 1:2]
+            end
+
+            # Equivalent to applying combine_spw to the per-band set.
+            viacombine = UV.combine_spw(UV.load_fitsidi(path; lazy = false))
+            mkey(s) = DimensionalData.metadata(s).scan_name
+            cidx = Dict(mkey(l) => l for (_, l) in DimensionalData.branches(viacombine))
+            for (_, mleaf) in DimensionalData.branches(merged)
+                cleaf = cidx[mkey(mleaf)]
+                mat = UV.materialize_leaf(mleaf)
+                @test parent(mat[:vis]) == parent(cleaf[:vis])
+                @test parent(mat[:weights]) == parent(cleaf[:weights])
+                @test collect(lookup(mat[:vis], Frequency)) ≈
+                    collect(lookup(cleaf[:vis], Frequency))
+            end
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "merge_spws: autocorr normalization" begin
+        # `normalize_autocorr` (on by default) divides each cross by √(A_a·A_b),
+        # which the merged reader must apply per band out of the shared row span.
+        # Give each antenna a distinct autocorr amplitude so a mis-indexed
+        # normalizer cannot coincidentally produce the right answer.
+        uvset = build_synth_idi_uvset(;
+            nant = 3, nspw = 2, nchan = 4, nscan = 1, ntime = 2,
+            include_autocorr = true,
+            vis_fn = (band, ti, bl, p, c) ->
+                ComplexF32(band + 0.1 * ti + 0.37 * bl + 0.001 * p + 0.0001 * c, -0.5),
+        )
+        path = tempname() * ".idifits"
+        try
+            UV.write_fitsidi(path, uvset)
+            perband = UV.load_fitsidi(path; lazy = true, normalize_autocorr = true)
+            merged = UV.load_fitsidi(
+                path; lazy = true, merge_spws = true, normalize_autocorr = true,
+            )
+
+            # Autocorrelations are consumed, so only cross baselines remain.
+            for (_, leaf) in DimensionalData.branches(merged)
+                @test all(a != b for (a, b) in DimensionalData.metadata(leaf).baselines.pairs)
+            end
+
+            bands = sort(
+                collect(values(DimensionalData.branches(perband)));
+                by = l -> minimum(channel_freqs(DimensionalData.metadata(l).freq_setup)),
+            )
+            exp_vis = cat([parent(UV.materialize_leaf(l)[:vis]) for l in bands]...; dims = 1)
+            exp_w = cat([parent(UV.materialize_leaf(l)[:weights]) for l in bands]...; dims = 1)
+
+            mleaf = only(values(DimensionalData.branches(merged)))
+            mat = UV.materialize_leaf(mleaf)
+            @test parent(mat[:vis]) == exp_vis
+            @test parent(mat[:weights]) == exp_w
+            # Partial read across the band boundary takes the scalar span path,
+            # which recomputes the normalizer for its own sub-range.
+            @test mleaf[:vis][3:6, :, :, :] == exp_vis[3:6, :, :, :]
+
+            # Normalization actually changed the data (guards against the test
+            # passing because both sides skipped it).
+            plain = UV.load_fitsidi(
+                path; lazy = true, merge_spws = true, normalize_autocorr = false,
+                drop_autocorr = true,
+            )
+            @test parent(UV.materialize_leaf(only(values(DimensionalData.branches(plain))))[:vis]) !=
+                parent(mat[:vis])
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "merge_spws: single band is a no-op" begin
+        # With one band per scan there is nothing to concatenate; the leaf keeps
+        # its own band identity rather than becoming a "combined" leaf.
+        uvset = build_synth_idi_uvset(; nspw = 1, nchan = 4, nscan = 1, ntime = 2)
+        path = tempname() * ".idifits"
+        try
+            UV.write_fitsidi(path, uvset)
+            merged = UV.load_fitsidi(path; lazy = true, merge_spws = true)
+            @test length(DimensionalData.branches(merged)) == 1
+            for (_, leaf) in DimensionalData.branches(merged)
+                @test DimensionalData.metadata(leaf).spw_name == "band_1"
+            end
+            plain = UV.load_fitsidi(path; lazy = true)
+            for ((_, m), (_, p)) in zip(
+                    DimensionalData.branches(merged), DimensionalData.branches(plain),
+                )
+                @test parent(UV.materialize_leaf(m)[:vis]) ==
+                    parent(UV.materialize_leaf(p)[:vis])
             end
         finally
             isfile(path) && rm(path)

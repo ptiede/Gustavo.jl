@@ -1,43 +1,55 @@
 # ── The executor seam ─────────────────────────────────────────────────────────
 #
 # A run parallelizes at two independently-selected levels (see `ExecutionConfig`):
-# the OUTER across-scan group scheduler (`ThreadsExecutor`/`DaggerExecutor`,
-# driving the budget-admission pass runner) and the INNER within-scan fan-out
-# (an OhMyThreads scheduler). The contract under test: θ and outputs are
-# bit-identical across BOTH choices, the group admission semantics hold on both
-# outer backends, and a failed group task surfaces its exception.
+# the OUTER across-scan group scheduler driving the pass runner, and the INNER
+# within-scan fan-out — each an OhMyThreads `Scheduler`. The contract under
+# test: groups are dispatched heaviest-first and run at the outer scheduler's
+# own task count, θ and outputs are bit-identical across BOTH choices, and a
+# failed group task surfaces its exception.
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
-using Dagger      # activates GustavoDaggerExt (the DaggerExecutor backend)
-using Gustavo.Executors: ThreadsExecutor, DaggerExecutor
-using Gustavo: DynamicScheduler, SerialScheduler
+using Gustavo: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 
-# An outer executor with no `_scheduled_map`/`_spawn` backend, for the fallback.
+# An outer executor with no `_scheduled_map` method, for the fallback.
 struct UnbackedExecutor end
 
+# The same scheduler kind at a chosen task count — the schedulers own their own
+# concurrency now, so a test that needs a specific one constructs it.
+_cap(::DynamicScheduler, n) = DynamicScheduler(; nchunks = n)
+_cap(::StaticScheduler, n) = StaticScheduler(; nchunks = n)
+_cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
+
 @testset "Executor seam" begin
-    @testset "group admission: Dagger matches Threads" begin
-        for ex in (ThreadsExecutor(), DaggerExecutor())
-            res, peak = ST._scheduled_map(
-                x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2], 12;
-                max_tasks = 4, executor = ex,
+    @testset "group dispatch across outer schedulers" begin
+        for ex in (DynamicScheduler(), StaticScheduler(), GreedyScheduler())
+            res = ST._scheduled_map(
+                x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2]; executor = _cap(ex, 4),
             )
             @test res == [10, 20, 30, 40, 50, 60, 70, 80]   # items order
-            @test 1 <= peak <= 4                            # in-flight cap held
-            # Over-budget item is clamped so it still runs.
-            res2, _ = ST._scheduled_map(
-                x -> x + 1, 1:3, [100, 1, 1], 10; max_tasks = 4, executor = ex,
+            # Heaviest item first: with a single task, dispatch order IS run order.
+            seen = Int[]
+            ST._scheduled_map(
+                x -> push!(seen, x), 1:4, [1, 9, 3, 5]; executor = _cap(ex, 1),
             )
-            @test res2 == [2, 3, 4]
+            @test seen == [2, 4, 3, 1]
+            # The task cap holds — it is what bounds resident scan groups.
+            live = Threads.Atomic{Int}(0)
+            peak = Threads.Atomic{Int}(0)
+            ST._scheduled_map(1:16, collect(16:-1:1); executor = _cap(ex, 3)) do x
+                Threads.atomic_max!(peak, Threads.atomic_add!(live, 1) + 1)
+                sleep(0.02)
+                Threads.atomic_sub!(live, 1)
+                x
+            end
+            @test peak[] <= 3
             # Empty input.
-            res0, peak0 = ST._scheduled_map(identity, Int[], Float64[], 10; max_tasks = 2, executor = ex)
-            @test isempty(res0) && peak0 == 0
-            # A failed group task rethrows its own exception (Dagger's wrappers
-            # are peeled by exec_fetch, so both expose the ErrorException).
+            @test isempty(
+                ST._scheduled_map(identity, Int[], Float64[]; executor = _cap(ex, 2)),
+            )
+            # A failed group task rethrows its own exception.
             err = try
                 ST._scheduled_map(
-                    x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1], 10;
-                    max_tasks = 2, executor = ex,
+                    x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1]; executor = _cap(ex, 1),
                 )
                 nothing
             catch e
@@ -52,14 +64,11 @@ struct UnbackedExecutor end
         # No `_scheduled_map(::UnbackedExecutor, …)` method — a custom backend
         # must add one (the seam is open by dispatch, not by subtyping).
         @test_throws MethodError ST._scheduled_map(
-            identity, 1:3, [1, 1, 1], 10; max_tasks = 2, executor = UnbackedExecutor(),
+            identity, 1:3, [1, 1, 1]; executor = UnbackedExecutor(),
         )
-        # The `_spawn` fallback names the missing backend; the Dagger method wins
-        # when the extension is loaded.
-        @test_throws "has no spawn backend loaded" Gustavo.Executors._spawn(
-            UnbackedExecutor(), () -> 1, false,
-        )
-        @test Gustavo.Executors._spawn(DaggerExecutor(), () -> 1, false) isa Dagger.DTask
+        # Likewise for the memory gate: a scheduler whose task count cannot be
+        # read cannot be checked against the budget.
+        @test_throws MethodError ST.max_tasks(UnbackedExecutor())
     end
 
     @testset "full pipeline: θ and output bit-identical across OUTER executors" begin
@@ -68,10 +77,10 @@ struct UnbackedExecutor end
         mk(ex) = CalibrationPipeline(
             FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
             Bandpass(), TemporalSmoother(adhoc);
-            exec = ExecutionConfig(ntasks = 2, outer_executor = ex),
+            exec = ExecutionConfig(outer_executor = ex),
         )
-        sol_t, out_t = fitcalibrate(mk(ThreadsExecutor()), uvset; reduce = [AverageFrequency(nout = 1)])
-        sol_d, out_d = fitcalibrate(mk(DaggerExecutor()), uvset; reduce = [AverageFrequency(nout = 1)])
+        sol_t, out_t = fitcalibrate(mk(DynamicScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
+        sol_d, out_d = fitcalibrate(mk(GreedyScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
         @test parent(gains(sol_d)) == parent(gains(sol_t))
         @test Gustavo.stage_names(sol_d) == Gustavo.stage_names(sol_t)
         for (k, leaf) in UVP.branches(out_t)
@@ -81,8 +90,8 @@ struct UnbackedExecutor end
         end
 
         # Standalone calibrate matches across outer executors too.
-        c_t = calibrate(sol_t, uvset; outer_executor = ThreadsExecutor())
-        c_d = calibrate(sol_t, uvset; outer_executor = DaggerExecutor())
+        c_t = calibrate(sol_t, uvset; exec = ExecutionConfig(outer_executor = DynamicScheduler()))
+        c_d = calibrate(sol_t, uvset; exec = ExecutionConfig(outer_executor = GreedyScheduler()))
         for (k, leaf) in UVP.branches(c_t)
             @test isequal(parent(leaf[:vis]), parent(UVP.branches(c_d)[k][:vis]))
         end
@@ -94,7 +103,7 @@ struct UnbackedExecutor end
         mk(inner) = CalibrationPipeline(
             FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
             Bandpass(), TemporalSmoother(adhoc);
-            exec = ExecutionConfig(ntasks = 2, inner_executor = inner),
+            exec = ExecutionConfig(inner_executor = inner),
         )
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are
         # order-fixed by the data layout, so θ is bit-identical.
@@ -107,13 +116,15 @@ struct UnbackedExecutor end
         uvset, _ = _build_fringe_uvset()
         st = FP.scan_stream(
             uvset;
-            outer_executor = DaggerExecutor(), inner_executor = SerialScheduler(),
+            exec = ExecutionConfig(
+                outer_executor = GreedyScheduler(), inner_executor = SerialScheduler(),
+            ),
         )
-        @test st.outer_executor isa DaggerExecutor
-        @test st.inner_executor isa SerialScheduler
-        # The bare default follows the process-wide outer default.
+        @test FP.outer_executor(st) isa GreedyScheduler
+        @test FP.inner_executor(st) isa SerialScheduler
+        # The bare default runs scan groups serially.
         st0 = FP.scan_stream(uvset)
-        @test st0.outer_executor == Gustavo.Executors.DEFAULT_EXECUTOR[]
+        @test FP.outer_executor(st0) isa SerialScheduler
         # Same search results whichever inner executor runs the fan-out.
         stack, _ = FP.materialize_cube(st, st.groups[1])
         stack0, _ = FP.materialize_cube(st0, st0.groups[1])

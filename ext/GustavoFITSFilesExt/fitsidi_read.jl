@@ -25,13 +25,7 @@
 
 using DiskArrays
 using Statistics: median
-using OhMyThreads: tforeach
-
-# Tasks to spread one leaf's vis/weights decode over (bounded by the baseline
-# count). Reads the solve-set knob in UVData; defaults to 1 (sequential). Decode
-# is byte-repacking I/O, always on local threads — independent of the run's
-# outer/inner executors.
-_decode_ntasks(nbl::Int) = max(1, min(nbl, UVData._DECODE_NTASKS[]))
+using OhMyThreads: tforeach, SerialScheduler
 
 # ── Small helpers ────────────────────────────────────────────────────────────
 
@@ -699,26 +693,21 @@ end
 # Outer method: resolve the abstract on-disk dtype `a.flux_field.type` to a
 # concrete `Type{D}` ONCE, then dispatch into the typed kernel. Everything past
 # the barrier is type-stable (no per-row dynamic dispatch on the FLUX dtype).
-function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int) where {T}
-    return _fill_vis_dense!(out, a, span, rmin, a.flux_field.type)
+function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int, executor) where {T}
+    return _fill_vis_dense!(out, a, span, rmin, executor, a.flux_field.type)
 end
 
-@noinline function _fill_vis_dense!(out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int, ::Type{D}) where {T, D}
+@noinline function _fill_vis_dense!(
+        out, a::IDIChunkArray{T, Val{:vis}}, span, rmin::Int, executor, ::Type{D},
+    ) where {T, D}
     nbl = size(a.row_of, 2)
     # Thread over baseline columns: decode is CPU-bound (byte-swap + complex repack
     # + permute), so spreading columns across the cores the memory cap leaves idle
     # lifts materialize throughput. The per-baseline work is a NAMED function (not a
-    # `do`-closure) so it specializes cleanly — a closure here boxed its captures
-    # and halved single-thread speed. Nested under the solve's group-level `tmap`,
-    # but Julia's scheduler caps live tasks at `nthreads`, so it composes.
-    nt = _decode_ntasks(nbl)
-    if nt == 1
-        for bl in 1:nbl
-            _decode_vis_bl!(out, a, span, rmin, D, bl)
-        end
-    else
-        tforeach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
-    end
+    # `do`-closure) so it specializes cleanly — a closure whose captures box halves
+    # single-thread speed. Nested under the solve's group-level fan-out, but
+    # Julia's scheduler caps live tasks at `nthreads`, so it composes.
+    tforeach(bl -> _decode_vis_bl!(out, a, span, rmin, D, bl), 1:nbl; scheduler = executor)
     if a.normalize
         Aspec = _aspec_from_span(a, span, rmin, D)
         _normalize_vis!(out, a, Aspec, 1:a.no_chan, 1:size(a.row_of, 1), 1:nbl, 1:a.no_stkd)
@@ -760,21 +749,16 @@ end
 # Barrier: resolve the abstract on-disk WEIGHT dtype once (Float32 placeholder when
 # there is no WEIGHT column — `_weights_from_span!` fills 1.0 then), then run the
 # type-stable, baseline-threaded kernel.
-function _fill_weights_dense!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int) where {T}
+function _fill_weights_dense!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int, executor) where {T}
     D = a.weight_col === nothing ? Float32 : a.weight_col.fields[1].type
-    return _fill_weights_dense!(out, a, span, rmin, D)
+    return _fill_weights_dense!(out, a, span, rmin, executor, D)
 end
 
-@noinline function _fill_weights_dense!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int, ::Type{D}) where {T, D}
+@noinline function _fill_weights_dense!(
+        out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int, executor, ::Type{D},
+    ) where {T, D}
     nbl = size(a.row_of, 2)
-    nt = _decode_ntasks(nbl)
-    if nt == 1
-        for bl in 1:nbl
-            _decode_weights_bl!(out, a, span, rmin, D, bl)
-        end
-    else
-        tforeach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; ntasks = nt)
-    end
+    tforeach(bl -> _decode_weights_bl!(out, a, span, rmin, D, bl), 1:nbl; scheduler = executor)
     if a.normalize
         Aspec = _aspec_from_span(a, span, rmin, a.flux_field.type)
         _scale_weights!(out, a, Aspec, 1:a.no_chan, 1:size(a.row_of, 1), 1:nbl, 1:a.no_stkd)
@@ -817,7 +801,7 @@ end
 # Mark IDI-backed leaves as bulk-capable and provide the one-read group reader.
 UVData._bulk_backend(a::IDIChunkArray) = a
 
-function UVData._materialize_group_bulk(leaves)
+function UVData._materialize_group_bulk(leaves, executor)
     isempty(leaves) && return nothing
     a1 = parent(first(leaves)[:vis])
     a1 isa IDIChunkArray || return nothing
@@ -858,9 +842,9 @@ function UVData._materialize_group_bulk(leaves)
         aw = parent(l[:weights])
         nti, nbl = size(av.row_of)
         vis_dense = Array{eltype(av)}(undef, av.no_chan, nti, nbl, av.no_stkd)
-        _fill_vis_dense!(vis_dense, av, span, rmin)
+        _fill_vis_dense!(vis_dense, av, span, rmin, executor)
         w_dense = Array{Float32}(undef, aw.no_chan, nti, nbl, aw.no_stkd)
-        _fill_weights_dense!(w_dense, aw, span, rmin)
+        _fill_weights_dense!(w_dense, aw, span, rmin, executor)
         vis_da = DimArray(vis_dense, dims(l[:vis]))
         w_da = DimArray(w_dense, dims(l[:weights]))
         uvw_da = DimArray(UVData._materialize_layer(parent(l[:uvw])), dims(l[:uvw]))
@@ -876,7 +860,7 @@ end
 # `out[c, ti, bl, p]` generically, so a SubArray destination works (axis-1 = the
 # band's channel block, stride 1). Returns `false` to fall back if the leaves are
 # not a single sibling-band scan span (then the caller uses materialize_group + copy).
-function UVData._materialize_group_bulk_into!(dests, leaves)
+function UVData._materialize_group_bulk_into!(dests, leaves, executor)
     isempty(leaves) && return false
     a1 = parent(first(leaves)[:vis])
     a1 isa IDIChunkArray || return false
@@ -912,8 +896,8 @@ function UVData._materialize_group_bulk_into!(dests, leaves)
         av = parent(l[:vis])
         aw = parent(l[:weights])
         vis_dest, w_dest = dests[i]
-        _fill_vis_dense!(vis_dest, av, span, rmin)
-        _fill_weights_dense!(w_dest, aw, span, rmin)
+        _fill_vis_dense!(vis_dest, av, span, rmin, executor)
+        _fill_weights_dense!(w_dest, aw, span, rmin, executor)
     end
     return true
 end
@@ -1056,6 +1040,277 @@ function DiskArrays.readblock!(
     return out
 end
 
+# ── Lazy multi-band (merged spw) chunk array ─────────────────────────────────
+#
+# `load_fitsidi(...; merge_spws=true)` wants ONE leaf per scan spanning every
+# band's channels, instead of one leaf per (scan, band). Naively concatenating
+# the per-band `IDIChunkArray`s (`cat(vis1, vis2, ...; dims=1)`) does stay lazy
+# (DiskArrays gives `cat` on `AbstractDiskArray`s a lazy `ConcatDiskArray`), but
+# it loses the scan-wide bulk read: `ConcatDiskArray` has no `_bulk_backend`, so
+# a solver's `materialize_group` falls back to each band's per-cell seek path.
+#
+# `IDIMergedChunkArray` instead wraps the scan's sibling per-band chunk arrays
+# directly and does the scan's one-read-per-materialize itself: `readblock!`
+# computes the on-disk row span covering the requested cells (`_merged_row_span`,
+# mirroring `_materialize_group_bulk`'s span computation), bulk-reads it once via
+# `_read_row_span`, and decodes every covered band's slice out of that shared
+# buffer — reusing `_fill_vis_dense!`/`_fill_weights_dense!` (threaded, type-
+# resolved) when the request covers a band's whole extent, the scalar span
+# decoders below otherwise. A too-large span (`_read_row_span` returning
+# `nothing`) falls back to each band's own seek-per-cell `readblock!`.
+#
+# Because the reads happen inside `readblock!`, nothing is touched until the
+# merged leaf is actually materialized (`Array`/`materialize_leaf`/…) — same
+# laziness contract as the per-band `IDIChunkArray`, just with the scan's bands
+# already fused into one `Frequency` axis.
+
+"""
+    IDIMergedChunkArray{T, K} <: DiskArrays.AbstractDiskArray{T, 4}
+
+Disk-backed `(Frequency, Ti, Baseline, Pol)` view spanning every band of one
+FITS-IDI scan, concatenated along `Frequency` in `chunks` order. `chunks[b]` is
+the `IDIChunkArray` that would back band `b`'s leaf alone; all must share one
+scan's UV_DATA rows (`data`/`row_of`/`begpos`/`L`), enforced by `_idi_merged_chunk`.
+"""
+struct IDIMergedChunkArray{T, K, CA} <: DiskArrays.AbstractDiskArray{T, 4}
+    chunks::Vector{CA}          # per-band IDIChunkArray{T,K,...}, one scan's rows
+    chan_offsets::Vector{Int}   # band b's channels occupy chan_offsets[b]+1 : chan_offsets[b]+no_chan
+    kind::K
+end
+
+# Wrap sibling per-band chunk arrays (one scan, ordered by the caller — typically
+# by ascending band-minimum frequency) into a single lazy multi-band array.
+function _idi_merged_chunk(chunks::AbstractVector{<:IDIChunkArray{T, K}}) where {T, K}
+    isempty(chunks) && error("_idi_merged_chunk: no bands to merge")
+    chunks = collect(chunks)
+    a1 = chunks[1]
+    for c in chunks
+        (c.data === a1.data && c.row_of === a1.row_of && c.begpos == a1.begpos && c.L == a1.L) ||
+            error(
+            "_idi_merged_chunk: sibling bands must share one scan's UV_DATA rows " *
+                "(same data/row_of/begpos/L).",
+        )
+    end
+    offsets = Vector{Int}(undef, length(chunks))
+    acc = 0
+    for (i, c) in enumerate(chunks)
+        offsets[i] = acc
+        acc += c.no_chan
+    end
+    return IDIMergedChunkArray{T, K, eltype(chunks)}(chunks, offsets, a1.kind)
+end
+
+Base.size(a::IDIMergedChunkArray) = (
+    a.chan_offsets[end] + a.chunks[end].no_chan,
+    size(a.chunks[1].row_of)...,
+    a.chunks[1].no_stkd,
+)
+
+DiskArrays.haschunks(::IDIMergedChunkArray) = DiskArrays.Unchunked()
+
+UVData._layer_is_lazy(::IDIMergedChunkArray) = true
+
+# Row range [rmin, rmax] covering `M[ti, bl]` for ti ∈ rti, bl ∈ rbl (0 entries
+# skipped). `rmax` stays 0 when every selected cell is missing.
+function _row_span(M::AbstractMatrix{Int}, rti, rbl)
+    rmin = typemax(Int)
+    rmax = 0
+    @inbounds for bl in rbl, ti in rti
+        r = M[ti, bl]
+        r == 0 && continue
+        r < rmin && (rmin = r)
+        r > rmax && (rmax = r)
+    end
+    return rmin, rmax
+end
+
+# Row span `readblock!` must bulk-read to decode a merged (rti, rbl) block:
+# every covered band's requested cells, plus (for any normalizing band) its
+# autocorrelation rows within `rti` (needed to form correlation coefficients).
+function _merged_row_span(a::IDIMergedChunkArray, rti, rbl)
+    rmin, rmax = _row_span(a.chunks[1].row_of, rti, rbl)
+    for c in a.chunks
+        (c.normalize && !isempty(c.auto_row)) || continue
+        armin, armax = _row_span(c.auto_row, rti, axes(c.auto_row, 2))
+        armax == 0 && continue
+        rmin = min(rmin, armin)
+        rmax = max(rmax, armax)
+    end
+    return rmin, rmax
+end
+
+# Decode band `chunk`'s (rchan, rti, rbl, rpol) vis block from `span` into
+# `out`'s channel columns starting at `coff` (0-based) — mirrors the io-based
+# `readblock!` for `IDIChunkArray{T,Val{:vis}}` above, sourcing each row's FLUX
+# slice from the shared scan span (`_flux_from_span!`) instead of a per-cell seek.
+function _decode_vis_from_span!(
+        out, coff::Int, chunk::IDIChunkArray{T, Val{:vis}}, span, rmin::Int,
+        ::Type{D}, rchan, rti, rbl, rpol,
+    ) where {T, D}
+    cube = Vector{Float32}(undef, chunk.nperband)
+    twostk = 2 * chunk.no_stkd
+    nan = T(complex(NaN32, NaN32))
+    @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
+        r = chunk.row_of[ti, bl]
+        if r == 0
+            for (pj, _) in enumerate(rpol), cj in eachindex(rchan)
+                out[coff + cj, tj, bj, pj] = nan
+            end
+            continue
+        end
+        _flux_from_span!(cube, span, chunk, r, rmin, D)
+        for (pj, p) in enumerate(rpol)
+            s = chunk.perm[p]
+            base = (s - 1) * 2
+            for (cj, c) in enumerate(rchan)
+                o = (c - 1) * twostk + base
+                out[coff + cj, tj, bj, pj] = T(complex(cube[o + 1], cube[o + 2]))
+            end
+        end
+    end
+    if chunk.normalize
+        Aspec = _aspec_from_span(chunk, span, rmin, D)
+        _normalize_vis!(
+            view(out, (coff + 1):(coff + length(rchan)), :, :, :), chunk, Aspec, rchan, rti, rbl, rpol,
+        )
+    end
+    return out
+end
+
+# Full-band shortcut: when the request covers this band's whole (chan, ti, bl,
+# pol) extent (the common "materialize the whole merged leaf" case), reuse the
+# type-barrier-resolved `_fill_vis_dense!` instead of the scalar loop. Decode
+# runs serially here: this is a DiskArrays `readblock!`, which takes only the
+# requested indices, so there is no scheduler to receive (the bulk group path
+# in `_materialize_group_bulk` is the one a solve threads its executor into).
+function _decode_vis_band!(out, coff::Int, chunk::IDIChunkArray{T, Val{:vis}}, span, rmin::Int, rchan, rti, rbl, rpol) where {T}
+    nti, nbl = size(chunk.row_of)
+    if rchan == 1:(chunk.no_chan) && rti == 1:nti && rbl == 1:nbl && rpol == 1:(chunk.no_stkd)
+        _fill_vis_dense!(
+            view(out, (coff + 1):(coff + chunk.no_chan), :, :, :), chunk, span, rmin, SerialScheduler(),
+        )
+    else
+        _decode_vis_from_span!(out, coff, chunk, span, rmin, chunk.flux_field.type, rchan, rti, rbl, rpol)
+    end
+    return nothing
+end
+
+# Weights mirror of `_decode_vis_from_span!` (FLAG-aware, mirrors the io-based
+# `readblock!` for `IDIChunkArray{T,Val{:weights}}` above).
+function _decode_weights_from_span!(
+        out, coff::Int, chunk::IDIChunkArray{T, Val{:weights}}, span, rmin::Int,
+        ::Type{D}, rchan, rti, rbl, rpol,
+    ) where {T, D}
+    wbuf = Vector{Float32}(undef, chunk.no_stkd)
+    wscale = _weight_scale(chunk)
+    have_flags = !isempty(chunk.flags)
+    @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
+        r = chunk.row_of[ti, bl]
+        r != 0 && _weights_from_span!(wbuf, span, chunk, r, rmin, wscale, D)
+        sc = r == 0 ? 1.0f0 : _wscale_phys(chunk, r)
+        ea, eb = chunk.bl_ants[bl]
+        t = chunk.times[ti]
+        for (pj, p) in enumerate(rpol)
+            wv = r == 0 ? 0.0f0 : wbuf[chunk.perm[p]]
+            w = wv > 0 ? T(wv * sc) : T(wv)
+            if have_flags && r != 0 && w > 0
+                for (cj, c) in enumerate(rchan)
+                    out[coff + cj, tj, bj, pj] = _idi_cell_flagged(chunk, c, t, ea, eb, p) ? zero(T) : w
+                end
+            else
+                for cj in eachindex(rchan)
+                    out[coff + cj, tj, bj, pj] = w
+                end
+            end
+        end
+    end
+    if chunk.normalize
+        Aspec = _aspec_from_span(chunk, span, rmin, D)
+        _scale_weights!(
+            view(out, (coff + 1):(coff + length(rchan)), :, :, :), chunk, Aspec, rchan, rti, rbl, rpol,
+        )
+    end
+    return out
+end
+
+function _decode_weights_band!(out, coff::Int, chunk::IDIChunkArray{T, Val{:weights}}, span, rmin::Int, rchan, rti, rbl, rpol) where {T}
+    nti, nbl = size(chunk.row_of)
+    D = chunk.weight_col === nothing ? Float32 : chunk.weight_col.fields[1].type
+    if rchan == 1:(chunk.no_chan) && rti == 1:nti && rbl == 1:nbl && rpol == 1:(chunk.no_stkd)
+        _fill_weights_dense!(
+            view(out, (coff + 1):(coff + chunk.no_chan), :, :, :), chunk, span, rmin, SerialScheduler(),
+        )
+    else
+        _decode_weights_from_span!(out, coff, chunk, span, rmin, D, rchan, rti, rbl, rpol)
+    end
+    return nothing
+end
+
+# Span too large for `_read_row_span`'s cap: decode band-by-band via each
+# chunk's own seek-per-cell `readblock!` (the pre-merge behavior).
+function _readblock_merged_fallback!(a::IDIMergedChunkArray, out, rchan, rti, rbl, rpol)
+    for (b, chunk) in enumerate(a.chunks)
+        lo = a.chan_offsets[b] + 1
+        hi = a.chan_offsets[b] + chunk.no_chan
+        glo = max(first(rchan), lo)
+        ghi = min(last(rchan), hi)
+        glo > ghi && continue
+        local_rchan = (glo - lo + 1):(ghi - lo + 1)
+        coff = glo - first(rchan)
+        DiskArrays.readblock!(
+            chunk, view(out, (coff + 1):(coff + length(local_rchan)), :, :, :),
+            local_rchan, rti, rbl, rpol,
+        )
+    end
+    return out
+end
+
+# Shared span-fetch + per-band dispatch for both kinds; `decode_band!` is
+# `_decode_vis_band!` or `_decode_weights_band!`.
+function _merged_readblock!(decode_band!::F, a::IDIMergedChunkArray{T}, out, rchan, rti, rbl, rpol, nanfill::T) where {T, F}
+    rmin, rmax = _merged_row_span(a, rti, rbl)
+    if rmax == 0
+        fill!(out, nanfill)
+        return out
+    end
+    a1 = a.chunks[1]
+    io = FITSFiles.open_lazy_source(a1.data)
+    local span
+    try
+        span = _read_row_span(io, a1, rmin, rmax)
+    finally
+        close(io)
+    end
+    span === nothing && return _readblock_merged_fallback!(a, out, rchan, rti, rbl, rpol)
+    for (b, chunk) in enumerate(a.chunks)
+        lo = a.chan_offsets[b] + 1
+        hi = a.chan_offsets[b] + chunk.no_chan
+        glo = max(first(rchan), lo)
+        ghi = min(last(rchan), hi)
+        glo > ghi && continue
+        local_rchan = (glo - lo + 1):(ghi - lo + 1)
+        coff = glo - first(rchan)
+        decode_band!(out, coff, chunk, span, rmin, local_rchan, rti, rbl, rpol)
+    end
+    return out
+end
+
+function DiskArrays.readblock!(
+        a::IDIMergedChunkArray{T, Val{:vis}}, out,
+        rchan::AbstractUnitRange, rti::AbstractUnitRange,
+        rbl::AbstractUnitRange, rpol::AbstractUnitRange,
+    ) where {T}
+    return _merged_readblock!(_decode_vis_band!, a, out, rchan, rti, rbl, rpol, T(complex(NaN32, NaN32)))
+end
+
+function DiskArrays.readblock!(
+        a::IDIMergedChunkArray{T, Val{:weights}}, out,
+        rchan::AbstractUnitRange, rti::AbstractUnitRange,
+        rbl::AbstractUnitRange, rpol::AbstractUnitRange,
+    ) where {T}
+    return _merged_readblock!(_decode_weights_band!, a, out, rchan, rti, rbl, rpol, zero(T))
+end
+
 # ── Index pass ───────────────────────────────────────────────────────────────
 #
 # Reading the small per-row columns (DATE/TIME/BASELINE/SOURCE/FREQID/INTTIM/
@@ -1143,10 +1398,19 @@ end
 # ── Public entry point ───────────────────────────────────────────────────────
 
 """
-    load_fitsidi(path; lazy=true, scans=:, bands=:,
+    load_fitsidi(path; lazy=true, scans=:, bands=:, merge_spws=false,
                  weight_mode=:auto, weight_efficiency=1.0, drop_autocorr=true) -> UVSet
 
 Load a FITS-IDI file into a (lazily streamed) `UVSet`.
+
+`merge_spws` (default `false`) concatenates every scan's bands into a single
+leaf with one `Frequency` axis spanning all of them, instead of one leaf per
+(scan, band) — equivalent to [`UVData.combine_spw`](@ref) applied to the
+result, but the merged leaf stays disk-backed under `lazy=true`: reading it
+does ONE bulk sequential read of the scan's row span (the same fast path
+`materialize_group` uses for sibling per-band leaves), not `combine_spw`'s
+generic `cat`, which forces the slower per-cell seek path once concatenated.
+Scans left with a single band after the `bands` selection are unaffected.
 
 `normalize_autocorr` (default `true`) divides each cross-correlation by the
 per-(channel, integration, feed) autocorrelations, `V_ab ← V_ab/√(A_a·A_b)`,
@@ -1190,7 +1454,7 @@ per-complex-variance convention, ≈2 for the per-quadrature convention many
 packages use).
 """
 function UVData.load_fitsidi(
-        path; lazy = true, scans = :, bands = :,
+        path; lazy = true, scans = :, bands = :, merge_spws::Bool = false,
         weight_mode::Symbol = :auto, weight_efficiency::Real = 1.0,
         weight_norm::Real = 1.0,
         drop_autocorr::Bool = true, normalize_autocorr::Bool = true,
@@ -1430,13 +1694,11 @@ function UVData.load_fitsidi(
         scan_t_hi = isempty(unique_times) ? Inf : last(unique_times)
         no_flags = FlagEntry[]
 
-        for band in band_sel
+        # Build every selected band's (fsetup, vis_chunk, w_chunk); merge_spws
+        # decides below whether these become one leaf per band (as always) or
+        # one leaf for the whole scan.
+        band_chunks = map(band_sel) do band
             fsetup = freq_setups[band]
-            chf = channel_freqs(fsetup)
-            vis_dims = (
-                Frequency(chf), Ti(unique_times),
-                Baseline(baselines.labels), Pol(msv4_labels),
-            )
 
             # Radiometer weight factor for this band: 2·Δν·η² / weight_norm (per-row
             # τ = INTTIM is applied at decode). Disabled (0) for :validity mode, or
@@ -1476,9 +1738,29 @@ function UVData.load_fitsidi(
                 leaf_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
                 auto_row, scale_w_by_auto, feed_pairs, auto_stokes,
             )
+            (; band, fsetup, vis_chunk, w_chunk)
+        end
 
-            vis_part = DimArray(vis_chunk, vis_dims)
-            w_part = DimArray(w_chunk, vis_dims)
+        if merge_spws && length(band_chunks) > 1
+            sorted = sort(band_chunks; by = bc -> minimum(channel_freqs(bc.fsetup)))
+            fsetups = [bc.fsetup for bc in sorted]
+            new_freqs = reduce(vcat, [collect(channel_freqs(fs)) for fs in fsetups])
+            # `ref_freq` here is the REF_FREQ header value every band's setup was
+            # built from; the accessor of the same name is shadowed by that local.
+            merged_fs = FrequencySetup(;
+                name = setup_name(first(fsetups)), ref_freq,
+                channel_freqs = new_freqs,
+                ch_widths = reduce(vcat, [collect(ch_widths(fs)) for fs in fsetups]),
+                total_bandwidths = reduce(vcat, [collect(total_bandwidths(fs)) for fs in fsetups]),
+                sidebands = reduce(vcat, [collect(sidebands(fs)) for fs in fsetups]),
+                extras = (; frqsel = Int32(1)),
+            )
+            vis_dims = (
+                Frequency(new_freqs), Ti(unique_times),
+                Baseline(baselines.labels), Pol(msv4_labels),
+            )
+            vis_part = DimArray(_idi_merged_chunk([bc.vis_chunk for bc in sorted]), vis_dims)
+            w_part = DimArray(_idi_merged_chunk([bc.w_chunk for bc in sorted]), vis_dims)
 
             info = UVData.PartitionInfo(;
                 source_name = si.name,
@@ -1488,18 +1770,43 @@ function UVData.load_fitsidi(
                 antennas = antennas,
                 baselines = baselines,
                 record_order = record_order,
-                freq_setup = fsetup,
-                spw_name = "band_$(band)",
-                ddi = band - 1,
+                freq_setup = merged_fs,
+                spw_name = "combined",
+                ddi = 0,
                 basename = base_name,
             )
-            leaf = UVData._build_leaf(
-                vis_part, w_part, uvw_part;
-                partition_info = info,
-            )
+            leaf = UVData._build_leaf(vis_part, w_part, uvw_part; partition_info = info)
             key = UVData.partition_key(info)
             haskey(branches, key) && error("load_fitsidi: duplicate partition key $(key)")
             branches[key] = leaf
+        else
+            for bc in band_chunks
+                chf = channel_freqs(bc.fsetup)
+                vis_dims = (
+                    Frequency(chf), Ti(unique_times),
+                    Baseline(baselines.labels), Pol(msv4_labels),
+                )
+                vis_part = DimArray(bc.vis_chunk, vis_dims)
+                w_part = DimArray(bc.w_chunk, vis_dims)
+
+                info = UVData.PartitionInfo(;
+                    source_name = si.name,
+                    source_key = source_key,
+                    scan_name = string(scan_i),
+                    ra = si.ra, dec = si.dec,
+                    antennas = antennas,
+                    baselines = baselines,
+                    record_order = record_order,
+                    freq_setup = bc.fsetup,
+                    spw_name = "band_$(bc.band)",
+                    ddi = bc.band - 1,
+                    basename = base_name,
+                )
+                leaf = UVData._build_leaf(vis_part, w_part, uvw_part; partition_info = info)
+                key = UVData.partition_key(info)
+                haskey(branches, key) && error("load_fitsidi: duplicate partition key $(key)")
+                branches[key] = leaf
+            end
         end
     end
 

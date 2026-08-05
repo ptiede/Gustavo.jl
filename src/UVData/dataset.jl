@@ -52,7 +52,7 @@ function materialize_leaf(leaf::DimensionalData.AbstractDimTree)
 end
 
 """
-    materialize_group(leaves) -> Vector
+    materialize_group(leaves; executor = SerialScheduler()) -> Vector
 
 Materialize a group of lazy leaves. A reader extension can mark its backing array
 bulk-capable (`_bulk_backend`) and provide `_materialize_group_bulk` to read the
@@ -61,10 +61,16 @@ contiguous row span in a single sequential read and extracts every spw's
 visibilities from it, instead of per-leaf, per-row `seek`+`read`s. Falls back to
 per-leaf [`materialize_leaf`](@ref) when no bulk path applies (including for
 already-eager leaves).
+
+`executor` is the OhMyThreads scheduler the bulk path decodes each leaf under
+(decode — byte-swap, complex repack, pol permute — is CPU-bound and fans out
+over baseline columns). It defaults to `SerialScheduler()`; a streaming solve
+passes its within-scan scheduler, so decode reuses the same fan-out budget as
+the rest of the group's work.
 """
-function materialize_group(leaves)
+function materialize_group(leaves; executor = SerialScheduler())
     if !isempty(leaves) && _bulk_backend(parent(first(leaves)[:vis])) !== nothing
-        bulk = _materialize_group_bulk(leaves)
+        bulk = _materialize_group_bulk(leaves, executor)
         bulk === nothing || return bulk
     end
     return [materialize_leaf(l) for l in leaves]
@@ -72,13 +78,13 @@ end
 
 # Bulk-read hooks: an I/O extension overrides `_bulk_backend` for its disk-backed
 # array type (returning a non-`nothing` marker) and provides a method of
-# `_materialize_group_bulk(leaves)`. Defaults keep `src/` format-neutral
+# `_materialize_group_bulk(leaves, executor)`. Defaults keep `src/` format-neutral
 # and make the bulk path inert when no extension is loaded.
 _bulk_backend(::AbstractArray) = nothing
 function _materialize_group_bulk end
 
 """
-    materialize_group_into!(dests, leaves) -> Bool
+    materialize_group_into!(dests, leaves; executor = SerialScheduler()) -> Bool
 
 Decode a group of sibling-spw lazy `leaves` DIRECTLY into caller-provided
 destination arrays — no per-spw intermediate dense copy. `dests[i]` is a
@@ -91,23 +97,17 @@ materialize-then-copy round trip and one full in-RAM data copy).
 Returns `true` if a bulk backend handled it; `false` otherwise (the caller then
 falls back to [`materialize_group`](@ref) + an explicit copy). Format-neutral: the
 actual one-read decode lives in the I/O extension's `_materialize_group_bulk_into!`.
+`executor` is the decode scheduler, as for [`materialize_group`](@ref).
 """
-function materialize_group_into!(dests, leaves)
+function materialize_group_into!(dests, leaves; executor = SerialScheduler())
     if !isempty(leaves) && _bulk_backend(parent(first(leaves)[:vis])) !== nothing
-        _materialize_group_bulk_into!(dests, leaves) && return true
+        _materialize_group_bulk_into!(dests, leaves, executor) && return true
     end
     return false
 end
 # Method provided by the I/O extension (mirrors `_materialize_group_bulk`); the
 # `_bulk_backend` guard above ensures we only dispatch when a backend is loaded.
 function _materialize_group_bulk_into! end
-
-# Decode concurrency for the bulk reader: how many tasks a single leaf's
-# vis/weights fill spreads its baseline columns over. Decode (byte-swap + complex
-# repack + pol permute) is CPU-bound, so threading it uses the cores the solve's
-# memory cap otherwise leaves idle. Default 1 = sequential (unchanged behavior for
-# tests and any non-solver caller); the fringe solve raises it around its passes.
-const _DECODE_NTASKS = Ref(1)
 
 """
     materialize(uvset::UVSet) -> UVSet

@@ -32,10 +32,11 @@
 # Run-wide resources (task/memory budgets, progress) live on the pipeline's
 # `ExecutionConfig`, NOT on steps: they are properties of a run, shared by
 # every pass. Anything that changes WHAT a given step solves is model
-# specification and lives on that step. The reference antenna is neither: it
-# is a gauge convention shared by every step's pass, not a per-step choice, so
-# it lives on `CalibrationPipeline` itself (`ref_ant`), not on any one step or
-# on `ExecutionConfig`.
+# specification and lives on that step. The reference antenna and the
+# co-located-baseline exclusion are neither: both are run-wide choices shared
+# by every step's pass rather than resources, so they live on
+# `CalibrationPipeline` itself (`ref_ant`, `exclude_colocated`), not on any one
+# step or on `ExecutionConfig`.
 
 """
     SolveStep <: CalibrationStep
@@ -116,8 +117,8 @@ start_pass!(step::SolveStep, ctx) = nothing
     process_scan!(step::SolveStep, ctx::SolveContext, stack, win::GeometryWindow) -> Any
 
 Accumulate one scan group into the step's state. The EXECUTOR has already
-materialized the group, applied the pipeline's transform chain, and admitted it
-against the memory budget — the step only consumes the scan's `DimStack` and the
+materialized the group and applied the pipeline's transform chain — the step
+only consumes the scan's `DimStack` and the
 [`GeometryWindow`](@ref) addressing it in the solve's index space (and may
 read/write its own per-scan θ slots through `ctx`). Called once per selected scan group
 (see [`fit_selection`](@ref)), possibly concurrently across groups; per-scan θ
@@ -187,92 +188,6 @@ function scan_values(f, results, ngroups::Integer; default)
     return out
 end
 
-# ── Execution configuration (run-wide, not per-step) ─────────────────────────
-
-"""
-    ExecutionConfig(; ntasks = Threads.nthreads(), mem_fraction = 0.6,
-                    mem_budget = nothing, progress = nothing, exclude_colocated = true,
-                    outer_executor = ThreadsExecutor(), inner_executor = DynamicScheduler())
-
-Run-wide RESOURCES for a pipeline execution, shared by every pass — as opposed
-to per-step options, which shape an estimator or a step's own model, and as
-opposed to the gauge convention (`ref_ant`, on `CalibrationPipeline` itself —
-see [`CalibrationPipeline`](@ref)), which is shared by every pass but is not a
-resource. Two runs differing only in their `ExecutionConfig` solve the same
-problem with the same gauge.
-
-- `ntasks`, `mem_fraction` / `mem_budget` — group concurrency under a
-  DETERMINISTIC memory budget (`mem_budget` bytes if set, else `mem_fraction`
-  of physical RAM).
-- `progress` — `(stage, done, total)` callback per completed scan of each pass.
-- `exclude_colocated` — drop intra-site (co-located twin) baselines from the
-  bandpass/adhoc accumulations (their non-closing crosstalk pollutes both).
-- `outer_executor` — the ACROSS-scan (group scheduling) backend:
-  [`ThreadsExecutor`](@ref) by default (the budget-admission worker pool on
-  `Threads.@spawn`), or [`DaggerExecutor`](@ref) for a distributed run. The
-  admission policy (memory budget, largest-first, `ntasks` cap) is identical
-  under both.
-- `inner_executor` — the WITHIN-scan fan-out scheduler, an OhMyThreads
-  `Scheduler` (`DynamicScheduler()` by default; `SerialScheduler()` to run the
-  within-scan solves single-threaded). `scan_stream` fixes its chunk count to
-  the inner parallelism the memory budget leaves per group.
-"""
-Base.@kwdef struct ExecutionConfig{P, O, I}
-    ntasks::Int = Threads.nthreads()
-    mem_fraction::Float64 = 0.6
-    mem_budget::Union{Nothing, Float64} = nothing
-    progress::P = nothing
-    exclude_colocated::Bool = true
-    outer_executor::O = Executors.DEFAULT_EXECUTOR[]
-    inner_executor::I = DynamicScheduler()
-end
-
-"""
-    ProgressLogger(; min_interval = 5.0, io = stdout)
-
-A ready-made [`ExecutionConfig`](@ref) `progress` callback: prints each pass's
-`(stage, done, total)` progress, throttled to at most one line every
-`min_interval` seconds, with an ETA extrapolated from the pass's mean
-completion rate so far. A pass's start (`done == 0`) and finish
-(`done == total`) always print, regardless of the throttle. Stateful — build
-one `ProgressLogger` per `fit`/`fitcalibrate` call; sharing an instance across
-concurrent runs mixes their timers.
-
-    fit(pipe, uvset; exec = ExecutionConfig(progress = ProgressLogger()))
-"""
-mutable struct ProgressLogger{IOT}
-    min_interval::Float64
-    io::IOT
-    stage::Symbol
-    t_start::Float64
-    t_last::Float64
-end
-ProgressLogger(; min_interval::Real = 5.0, io = stdout) =
-    ProgressLogger(Float64(min_interval), io, :nothing, 0.0, 0.0)
-
-function (p::ProgressLogger)(stage::Symbol, done::Integer, total::Integer)
-    t = time()
-    if stage !== p.stage || done == 0
-        p.stage, p.t_start, p.t_last = stage, t, t
-        println(p.io, "[$stage] starting ($total scan group$(total == 1 ? "" : "s"))")
-        return nothing
-    end
-    finished = done == total
-    if !finished && (t - p.t_last) < p.min_interval
-        return nothing
-    end
-    p.t_last = t
-    elapsed = t - p.t_start
-    if finished
-        println(p.io, "[$stage] $done/$total scan groups done ($(round(elapsed; digits = 1))s)")
-    else
-        eta = elapsed * (total - done) / done
-        pct = round(100 * done / total; digits = 1)
-        println(p.io, "[$stage] $done/$total scan groups ($(pct)%), ETA $(round(eta; digits = 1))s")
-    end
-    return nothing
-end
-
 # ── The solve context (shared state of a pipeline run) ───────────────────────
 
 """
@@ -283,7 +198,8 @@ the step's OWN compiled model (`model`/`layout`/`ev`/`θ` — that step's privat
 gain model, never merged with another step's, see [`StepSolution`](@ref)), the
 data geometry, the resolved gauge pin (`ref_ant`), the streaming layer
 (`stream` — REBUILT between steps as each finished solution is appended to its
-transform chain, see `_run_pipeline`), the run's `exec` resources, and
+transform chain, see `_run_pipeline` — which also carries the run's
+[`ExecutionConfig`](@ref) resources), and
 `scratch` — a `Dict{Symbol, Any}` for state PRIVATE to this step's own pass
 (e.g. per-group scratch accumulators across search rounds). Non-data info a
 LATER step wants from an earlier one (e.g. per-scan SNR) is never read through
@@ -300,7 +216,7 @@ dimensioned `DimArray` on demand.
 """
 mutable struct SolveContext{
         M <: StationGainModel, L <: ParameterLayout, E <: GainEvaluator,
-        A <: UVData.AntennaTable, S <: Streaming.ScanStream, X <: ExecutionConfig,
+        A <: UVData.AntennaTable, S <: Streaming.ScanStream,
         V <: AbstractVector{Float64},
     }
     model::M
@@ -312,7 +228,6 @@ mutable struct SolveContext{
     nant::Int
     antennas::A
     stream::S
-    exec::X
     scratch::Dict{Symbol, Any}
 end
 
@@ -367,37 +282,42 @@ Base.:|>(a::StepChain, b::StepChain) = StepChain(vcat(a.steps, b.steps))
 # ── The pipeline ─────────────────────────────────────────────────────────────
 
 """
-    CalibrationPipeline(steps...; exec = ExecutionConfig(), ref_ant = 1)
-    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), ref_ant = 1)
-    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), ref_ant = 1)
+    CalibrationPipeline(steps...; exec = ExecutionConfig(), ref_ant = 1, exclude_colocated = true)
+    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), ref_ant = 1, exclude_colocated = true)
+    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), ref_ant = 1, exclude_colocated = true)
 
 An ordered list of [`CalibrationStep`](@ref)s (raw
 `Fringe.AbstractDataTransform`s are lifted automatically) plus the run-wide
-[`ExecutionConfig`](@ref) and `ref_ant` — the gauge pin every solve step reads
-(`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`). A
-pipeline needs no [`FringeFit`](@ref) step; any `SolveStep` composition is
-legal, including a single standalone step (e.g. a `Bandpass` fit over
-data already corrected by an earlier run) — the single-step solve is the
-primitive a multi-step pipeline is built from (see [`fit`](@ref)'s docstring).
-Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
+[`ExecutionConfig`](@ref), `ref_ant` — the gauge pin every solve step reads
+(`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`) — and
+`exclude_colocated` — whether intra-site (co-located twin) baselines are
+dropped from the bandpass/adhoc accumulations (their non-closing crosstalk
+pollutes both). A pipeline needs no [`FringeFit`](@ref) step; any `SolveStep`
+composition is legal, including a single standalone step (e.g. a `Bandpass`
+fit over data already corrected by an earlier run) — the single-step solve is
+the primitive a multi-step pipeline is built from (see [`fit`](@ref)'s
+docstring). Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
 """
 struct CalibrationPipeline{X <: ExecutionConfig}
     steps::Vector{CalibrationStep}
     exec::X
     ref_ant::Union{Integer, AbstractString, Symbol}
+    exclude_colocated::Bool
 end
 CalibrationPipeline(
     steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec, ref_ant)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
+) = CalibrationPipeline(
+    CalibrationStep[_lift_step(s) for s in steps], exec, ref_ant, exclude_colocated,
+)
 CalibrationPipeline(
     steps::_Chainable...; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = CalibrationPipeline(collect(steps); exec, ref_ant)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
+) = CalibrationPipeline(collect(steps); exec, ref_ant, exclude_colocated)
 CalibrationPipeline(
     chain::StepChain; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = CalibrationPipeline(chain.steps, exec, ref_ant)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
+) = CalibrationPipeline(chain.steps, exec, ref_ant, exclude_colocated)
 
 # Label a step by kind; a lifted transform is named for the transform it wraps.
 _step_label(s::CalibrationStep) = string(nameof(typeof(s)))
@@ -409,8 +329,8 @@ function Base.show(io::IO, ::MIME"text/plain", p::CalibrationPipeline)
         println(io, "  ", i, ". ", _step_label(s))
     end
     print(
-        io, "  exec: outer=", nameof(typeof(p.exec.outer_executor)),
-        ", inner=", nameof(typeof(p.exec.inner_executor)), ", ntasks=", p.exec.ntasks,
+        io, "  exec: outer=", nameof(typeof(outer_executor(p.exec))),
+        ", inner=", nameof(typeof(inner_executor(p.exec))),
     )
     return io
 end

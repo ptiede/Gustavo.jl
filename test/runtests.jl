@@ -1,14 +1,5 @@
 using Gustavo
 using Test
-using Dagger      # activates GustavoDaggerExt — the executor A/B tests need it
-
-# The whole suite honors GUSTAVO_TEST_EXECUTOR=dagger (default: the package
-# default, a threads worker pool): `DEFAULT_EXECUTOR` is the default OUTER
-# (across-scan) backend every `ExecutionConfig`/`scan_stream` reads when built
-# without one, so this one flip A/Bs the entire suite's group scheduling across
-# backends.
-get(ENV, "GUSTAVO_TEST_EXECUTOR", "") == "dagger" &&
-    (Gustavo.Executors.DEFAULT_EXECUTOR[] = Gustavo.DaggerExecutor())
 using LinearAlgebra
 using Statistics
 using Random
@@ -92,8 +83,8 @@ include("test_phasecal.jl")
 # Reuses _build_fringe_uvset + the FP/CAL/UVP aliases from test_pipeline.jl.
 include("test_weight_scale.jl")
 
-# The executor seam (M7): Threads/Dagger A/B — bit-identical θ/outputs, shared
-# admission semantics, nested spawn safety, comparable error surface.
+# The executor seam: the group scheduler under each outer scheduler — dispatch
+# order, task cap, and bit-identical θ/outputs whichever one runs the pass.
 include("test_executors.jl")
 
 function synthetic_uvdata()
@@ -1722,7 +1713,7 @@ end
 # loads HDF5 from `synthetic_uvset.jl` rather than at the top of this file.
 @testset "extensions load" begin
     for name in (
-            :GustavoFITSFilesExt, :GustavoDaggerExt,
+            :GustavoFITSFilesExt,
             :GustavoHDF5Ext, :GustavoMakieExt,
         )
         @test Base.get_extension(Gustavo, name) !== nothing

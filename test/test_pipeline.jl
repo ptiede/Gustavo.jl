@@ -716,7 +716,7 @@ end
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
     )
-    ngroups = length(FP.scan_stream(uvset; ntasks = 1).groups)
+    ngroups = length(FP.scan_stream(uvset).groups)
     # Stages report under the pass names of the composable pipeline
     # (:fringe/:bandpass/:adhoc — the monolith's :search stage died with it).
     for st in (:fringe, :adhoc)
@@ -1019,22 +1019,21 @@ end
     @test select_scans(FP.CoverageTopup(Gustavo.AllScans()), full) == [1, 2, 3]
 end
 
-@testset "Budget-scheduled group map" begin
-    # Results come back in index order regardless of completion order, and
-    # groups pack by their own charge (not the largest group's).
-    res, peak = ST._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2], 12; max_tasks = 4)
+@testset "Largest-first group map" begin
+    # Results come back in index order regardless of completion order.
+    res = ST._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2])
     @test res == [10, 20, 30, 40, 50, 60, 70, 80]
-    @test 1 <= peak <= 4
-
-    # A group charged more than the whole budget is clamped so it still runs.
-    res2, _ = ST._scheduled_map(x -> x + 1, 1:3, [100, 1, 1], 10; max_tasks = 4)
-    @test res2 == [2, 3, 4]
+    @test res isa Vector{Int}   # `work`'s return type, not `Any`
 
     # Empty input and worker-error propagation.
-    res3, peak3 = ST._scheduled_map(identity, Int[], Float64[], 10; max_tasks = 2)
-    @test isempty(res3) && peak3 == 0
+    @test isempty(ST._scheduled_map(identity, Int[], Float64[]))
     @test_throws Exception ST._scheduled_map(
-        x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1], 10; max_tasks = 2,
+        x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1],
+    )
+
+    # A charge per item is required.
+    @test_throws "items and charges must match" ST._scheduled_map(
+        identity, 1:3, [1, 1],
     )
 end
 

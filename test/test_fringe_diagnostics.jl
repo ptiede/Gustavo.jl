@@ -132,7 +132,7 @@ using HDF5
         @test size(data.spec_before) == (nchan, nbl, npol)
         @test size(data.spec_after) == (nchan, nbl, npol)
         @test size(data.tser_before, 1) == length(data.times)
-        @test data.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset; ntasks = 1).groups))
+        @test data.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset).groups))
 
         p = FP.baseline_pol_index(data, :parallel)
         @test 1 <= p <= npol
@@ -159,7 +159,7 @@ using HDF5
 
     @testset "fringe_scan_groups" begin
         g = FP.fringe_scan_groups(uvset, sol)
-        ngroups = length(FP.scan_stream(uvset; ntasks = 1).groups)
+        ngroups = length(FP.scan_stream(uvset).groups)
         @test length(g) == ngroups
         @test all(r -> haskey(r, :scan_index) && haskey(r, :source) && haskey(r, :scan) && haskey(r, :max_snr), g)
         @test [r.scan_index for r in g] == collect(1:ngroups)        # solver order, 1-based
@@ -203,7 +203,7 @@ using HDF5
         m = FP.fringe_search_map(uvset, sol)
         @test m isa FP.BaselineFringeMap
         # Defaults: the highest-SNR scan, the strongest baseline, a parallel hand.
-        @test m.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset; ntasks = 1).groups))
+        @test m.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset).groups))
         @test m.ant_names == ["A1", "A2", "A3", "A4"]
         fa, fb = CAL.correlation_feed_pair(m.pol)
         @test fa == fb

@@ -108,7 +108,7 @@ Lazy — reads only leaf metadata (no visibilities), so it is cheap on a streame
     best = argmax(r -> r.max_snr, filter(r -> r.source == "M87", g))
 """
 function fringe_scan_groups(uvset::UVSet, sol::CalibrationSolution)
-    specs = scan_stream(uvset; geom = sol.geom, ntasks = 1).groups
+    specs = scan_stream(uvset; geom = sol.geom).groups
     step = _fringe_step(sol)
     snr = step === nothing ? Float64[] : get(step.info, :scan_snr, Float64[])
     return [
@@ -381,7 +381,13 @@ function _diag_stream(
         "diagnostics: the solution records a transform that did not survive " *
             "serialization — pass the chain explicitly (precal/flag_channels/weight_scale)."
     )
-    return scan_stream(uvset; geom = sol.geom, transforms = tfs, ntasks = 1)
+    # Diagnostics inspect one group at a time, so both fan-out levels stay serial.
+    return scan_stream(
+        uvset; geom = sol.geom, transforms = tfs,
+        exec = ExecutionConfig(
+            outer_executor = SerialScheduler(), inner_executor = SerialScheduler(),
+        ),
+    )
 end
 
 # Scan group with the largest detection SNR (the most informative to inspect),

@@ -2,9 +2,9 @@
 #
 # A pass sees a lazy `UVSet` one SCAN GROUP at a time and never the set itself:
 #
-#   stream = scan_stream(uvset; transforms = [...])   # group + budget, no read
+#   stream = scan_stream(uvset; transforms = [...])   # group + schedule, no read
 #   stack, win = materialize_cube(stream, spec)       # one group, transforms applied
-#   map_groups(stream) do spec ... end                # budget-admitted pass runner
+#   map_groups(stream) do spec ... end                # concurrent pass runner
 #
 # The data hook is the stream's TRANSFORM CHAIN (`AbstractDataTransform`, see
 # transforms.jl), applied at every materialization, so a solve, a re-run, and a
@@ -63,8 +63,10 @@ _group_key(g::ByKey, k, leaf) = g.f(k, leaf)
     ScanGroupSpec
 
 One scheduled scan group: its `index` in stream order, `source`/`scan` names,
-the `(partition_key, lazy_leaf)` pairs, and the memory `charge` (bytes) used by
-the budget scheduler. Nothing is read until the group is materialized.
+the `(partition_key, lazy_leaf)` pairs, and the memory `charge` (bytes) the
+group costs while resident — what the outer scheduler's task count is checked
+against, and what orders dispatch (heaviest first). Nothing is read until the
+group is materialized.
 """
 struct ScanGroupSpec{L}
     index::Int
@@ -78,28 +80,28 @@ end
     ScanStream
 
 A `UVSet` prepared for scan-group streaming: the ordered [`ScanGroupSpec`](@ref)s,
-the data-transform chain applied at every materialization, and the run's
-deterministic resource sizing (memory budget, group concurrency `ntasks`,
-per-group task budget `inner`). Build with [`scan_stream`](@ref); consume with
-[`materialize_cube`](@ref) / [`materialize_leaves`](@ref) / [`map_groups`](@ref).
+the data-transform chain applied at every materialization, and the
+[`ExecutionConfig`](@ref) the run's parallelism, memory budget and progress
+reporting come from. Build with [`scan_stream`](@ref); consume with
+[`materialize_cube`](@ref) / [`materialize_leaves`](@ref) /
+[`map_groups`](@ref).
 
 `S` and `T` carry the group-spec and transform types the stream was built from.
-`O` and `I` are the outer (across-scan group scheduling) and inner (within-scan
-fan-out) executors — see [`ExecutionConfig`](@ref).
+Reach the schedulers with [`outer_executor`](@ref) / [`inner_executor`](@ref).
 """
-struct ScanStream{G <: AbstractLeafGrouping, S <: ScanGroupSpec, T, O, I}
+struct ScanStream{G <: AbstractLeafGrouping, S <: ScanGroupSpec, T, X <: ExecutionConfig}
     uvset::UVSet
     geom::DataGeometry
     grouping::G
     groups::Vector{S}
     transforms::Vector{T}
     ant_names::Vector{String}
-    budget::Float64
-    ntasks::Int
-    inner::Int
-    outer_executor::O
-    inner_executor::I
+    exec::X
 end
+
+outer_executor(s::ScanStream) = outer_executor(s.exec)
+inner_executor(s::ScanStream) = inner_executor(s.exec)
+progress_callback(s::ScanStream) = progress_callback(s.exec)
 
 # Ordered container over its scan-group specs — iteration reads only the
 # precomputed group metadata, never visibilities.
@@ -133,37 +135,45 @@ end
 
 # The deterministic memory budget (bytes): an explicit `mem_budget` if given,
 # else `mem_fraction` of TOTAL physical RAM — total, not available, so the
-# admission decisions a run makes are reproducible on a given box.
+# group concurrency a run picks is reproducible on a given box.
 function _stream_budget(mem_fraction, mem_budget)
     mem_budget === nothing || return Float64(mem_budget)
     return mem_fraction * Float64(Sys.total_memory())
 end
 
+# The most tasks `sched` runs at once: what the memory budget is checked
+# against, and what the nested decode pool is sized to. An UPPER BOUND — a
+# scheduler whose chunk count follows the collection (`chunksize`), or that
+# spawns one task per element (`chunking = false`), is bounded by the thread
+# count instead. Read-only: a scheduler is used exactly as its owner configured
+# it, never rebuilt (`nchunks` and `chunksize` are mutually exclusive, so there
+# is no lossless way to override one).
+max_tasks(::SerialScheduler) = 1
+max_tasks(s::GreedyScheduler) = s.ntasks
+max_tasks(s::Union{DynamicScheduler, StaticScheduler}) =
+    (chunking_enabled(s) && has_nchunks(s)) ? nchunks(s) : Threads.nthreads()
+
 """
     scan_stream(uvset::UVSet; grouping = ByScan(), transforms = (),
-                geom = build_geometry(uvset), ntasks = Threads.nthreads(),
-                mem_fraction = 0.6, mem_budget = nothing,
-                outer_executor = ThreadsExecutor(),
-                inner_executor = DynamicScheduler()) -> ScanStream
+                geom = build_geometry(uvset), exec = ExecutionConfig()) -> ScanStream
 
 Prepare `uvset` for scan-group streaming WITHOUT reading data: group the lazy
-leaves under `grouping`, charge each group's peak bytes, and size the run's
-deterministic concurrency — `ntasks` is capped so `ntasks × largest-group
-charge` fits the memory budget, and the leftover threads become each group's
-`inner` fan-out. `transforms` (a sequence of [`AbstractDataTransform`](@ref))
-are applied, in order, to every group as it is materialized — every consumer of
-the stream sees identical, consistently-corrected data.
+leaves under `grouping` and charge each group's peak bytes. `exec` (an
+[`ExecutionConfig`](@ref)) supplies the run-wide resources and is carried on the
+stream: its two schedulers own the parallelism — the outer one decides how many
+scan groups are resident at once, the inner one the within-scan fan-out — and
+each is used exactly as configured. Construction FAILS if the outer scheduler's
+task count times the largest group's charge exceeds `exec`'s memory budget.
+`transforms` (a sequence of [`AbstractDataTransform`](@ref)) are applied, in
+order, to every group as it is materialized — every consumer of the stream sees
+identical, consistently-corrected data.
 """
 function scan_stream(
         uvset::UVSet;
         grouping::AbstractLeafGrouping = ByScan(),
         transforms = (),
         geom::DataGeometry = build_geometry(uvset),
-        ntasks::Integer = Threads.nthreads(),
-        mem_fraction::Real = 0.6,
-        mem_budget = nothing,
-        outer_executor = Executors.DEFAULT_EXECUTOR[],
-        inner_executor = DynamicScheduler(),
+        exec::ExecutionConfig = ExecutionConfig(),
     )
     # Group lazy leaf references in branch order, first-seen key order.
     groups = Dict{Any, Vector{Any}}()
@@ -191,21 +201,35 @@ function scan_stream(
         validate_transform(t, geom, ant_names)
     end
 
-    budget = _stream_budget(mem_fraction, mem_budget)
-    requested = max(1, min(Int(ntasks), max(length(specs), 1)))
-    peak = maximum(s -> s.charge, specs; init = 0)
-    ntasks_use = peak <= 0 ? requested : min(requested, max(1, Int(floor(budget / peak))))
-    inner = max(1, Threads.nthreads() ÷ ntasks_use)
-
-    # The inner executor fans out every within-scan loop; fix its chunk count to
-    # the parallelism the memory budget leaves per group (`ntasks_use × inner ≈
-    # nthreads`, so nested fan-outs don't oversubscribe). ChunkSplitters clamps
-    # the count down to each loop's length, so one scheduler serves them all.
-    inner_exec = Executors.with_nchunks(inner_executor, inner)
-
+    _check_memory_budget(
+        specs, outer_executor(exec), _stream_budget(exec.mem_fraction, exec.mem_budget),
+    )
     return ScanStream(
-        uvset, geom, grouping, specs, UVData._narrow_eltype(transforms), ant_names,
-        budget, ntasks_use, inner, outer_executor, inner_exec,
+        uvset, geom, grouping, specs, UVData._narrow_eltype(transforms), ant_names, exec,
+    )
+end
+
+# The memory gate, checked once at construction rather than imposed by capping
+# the caller's scheduler: the outer scheduler decides how many groups run at
+# once, so a configuration that cannot fit is an error, not something to
+# silently rewrite.
+function _check_memory_budget(specs, outer, budget)
+    peak = maximum(s -> s.charge, specs; init = 0)
+    peak > 0 || return nothing
+    concurrent = min(max_tasks(outer), max(length(specs), 1))
+    # One group at a time is the floor: a single group larger than the budget is
+    # the data's problem, not the schedule's, and there is no task count that
+    # would fix it — run it and let the machine decide.
+    concurrent <= 1 && return nothing
+    concurrent * peak <= budget && return nothing
+    gib(x) = round(x / 2^30; digits = 2)
+    throw(
+        ArgumentError(
+            "the outer executor runs up to $concurrent scan groups at once (≈ $(gib(concurrent * peak)) " *
+                "GiB at the largest group's charge) but the memory budget is $(gib(budget)) GiB — " *
+                "lower the outer scheduler's task count, or raise the ExecutionConfig's " *
+                "mem_fraction/mem_budget."
+        )
     )
 end
 
@@ -248,7 +272,7 @@ end
 
 """
     materialize_cube(stream::ScanStream, spec::ScanGroupSpec;
-                     executor = stream.inner_executor) -> (stack, win)
+                     executor = inner_executor(stream)) -> (stack, win)
 
 Materialize one scan group as a frequency-concatenated cube and apply the
 stream's transform chain to it. Fast path decodes each band directly into its
@@ -264,10 +288,10 @@ concatenated axis lives on the `Frequency` lookup, NOT in
 `metadata.frequencies`, which still describes that one band). `win` is the
 group's [`GeometryWindow`](@ref) into the solve's index space.
 """
-function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; executor = stream.inner_executor)
-    grp = _direct_scan_group(spec, stream.geom)
+function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; executor = inner_executor(stream))
+    grp = _direct_scan_group(spec, stream.geom, executor)
     if grp === nothing
-        leaves = UVData.materialize_group([l for (_, l) in spec.leaves])
+        leaves = UVData.materialize_group([l for (_, l) in spec.leaves]; executor)
         grp = _stacked_scan_group(leaves, stream.geom)
     end
     stack, win = grp
@@ -278,8 +302,8 @@ end
 # Direct decode into the stacked cube: returns `nothing` (caller falls back) unless
 # every band leaf maps to ONE full contiguous ascending channel block of the
 # stacked frequency axis. Metadata comes from the LAZY leaves, so nothing is
-# materialized until the decode.
-function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry)
+# materialized until the decode, which runs under `executor`.
+function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry, executor)
     lazy = [l for (_, l) in spec.leaves]
     l0 = first(lazy)
     bl_pairs = collect(UVData.baselines(l0).pairs)
@@ -333,7 +357,7 @@ function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry)
         (view(Vg, blocks[li], :, :, :), view(Wg, blocks[li], :, :, :))
             for li in eachindex(lazy)
     ]
-    UVData.materialize_group_into!(dests, lazy) || return nothing
+    UVData.materialize_group_into!(dests, lazy; executor) || return nothing
 
     info = UVData.metadata(l0)
     d = (Frequency(fg), Ti(tg), Baseline(copy(info.baselines.labels)), Pol(pols))
@@ -418,7 +442,7 @@ end
 
 """
     materialize_leaves(stream::ScanStream, spec::ScanGroupSpec;
-                       executor = stream.inner_executor) -> Vector{Tuple}
+                       executor = inner_executor(stream)) -> Vector{Tuple}
 
 Materialize one scan group as its per-band `(partition_key, leaf)` pairs — no
 concatenated copy (the memory-lean path for leaf-wise passes) — with the
@@ -427,21 +451,21 @@ transformed in place (their arrays are freshly materialized, hence private); an
 eager source's leaf is the caller's own data, so it is copied first — the
 caller's `UVSet` is never mutated.
 """
-function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; executor = stream.inner_executor)
+function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; executor = inner_executor(stream))
     keyed = [
         (k, m) for ((k, _), m) in zip(
             spec.leaves,
-            UVData.materialize_group([l for (_, l) in spec.leaves]),
+            UVData.materialize_group([l for (_, l) in spec.leaves]; executor),
         )
     ]
     isempty(stream.transforms) && return keyed
     private = all(((_, l),) -> UVData.is_lazy(l), spec.leaves)
-    out = Vector{Any}(undef, length(keyed))
-    tforeach(eachindex(keyed); scheduler = executor) do i
-        k, m = keyed[i]
-        out[i] = (k, _transform_leaf(stream, spec, m; copy_arrays = !private))
+    # `Tuple` is spelled out because the untyped `tmap` rejects `GreedyScheduler`,
+    # which `inner_executor` accepts; the typed form writes the output by index
+    # under every scheduler.
+    return tmap(Tuple, keyed; scheduler = executor) do (k, m)
+        (k, _transform_leaf(stream, spec, m; copy_arrays = !private))
     end
-    return [out[i]::Tuple for i in eachindex(out)]
 end
 
 # Run the transform chain over one materialized band leaf: the chain's stack is
@@ -462,7 +486,7 @@ function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arr
     return base
 end
 
-# ── The pass runner: budget-admitted group execution (the executor seam) ─────
+# ── The pass runner: concurrent group execution (the executor seam) ──────────
 
 const _STREAM_PROGRESS_LOCK = ReentrantLock()
 
@@ -480,23 +504,25 @@ end
 
 """
     map_groups(work, stream::ScanStream; selection = AllScans(), snr = nothing,
-               progress = nothing, stage = :pass) -> Vector
+               progress = progress_callback(stream), stage = :pass) -> Vector
 
-Run `work(spec::ScanGroupSpec)` over the stream's (selected) groups under
-budget-admitted concurrency: each group is admitted against the stream's memory
-budget by ITS OWN charge — big groups run (nearly) alone, small groups pack
-into the leftover budget, largest-first so the long poles start immediately.
-Results return in group order. `work` must be independent across groups (all
-fringe passes qualify: disjoint per-scan θ slots / per-scan outputs).
+Run `work(spec::ScanGroupSpec)` over the stream's (selected) groups on the
+stream's outer scheduler, heaviest group first so the long poles start
+immediately. Results return in group order. `work` must be independent across
+groups (all fringe passes qualify: disjoint per-scan θ slots / per-scan outputs).
+
+The outer scheduler alone decides how many groups run at once; [`scan_stream`](@ref)
+has already checked that many against the run's memory budget.
 
 This is the EXECUTOR SEAM: every full-data pass of the pipeline runs through
-here (and the Dagger executor later replaces only this implementation).
-`progress`, if given, is called `(stage, done, total)` per completed group.
+here. `progress` defaults to the callback on the stream's
+[`ExecutionConfig`](@ref) and, when not `nothing`, is called
+`(stage, done, total)` per completed group.
 """
 function map_groups(
         work::F, stream::ScanStream;
         selection::AbstractScanSelection = AllScans(), snr = nothing,
-        progress = nothing, stage::Symbol = :pass,
+        progress = progress_callback(stream), stage::Symbol = :pass,
     ) where {F}
     specs = selection isa AllScans ? stream.groups : select_groups(stream, selection; snr)
     total = length(specs)
@@ -507,11 +533,10 @@ function map_groups(
         _stream_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
         return r
     end
-    results, _ = _scheduled_map(
-        wrapped, specs, [s.charge for s in specs], stream.budget;
-        max_tasks = stream.ntasks, executor = stream.outer_executor,
+    return _scheduled_map(
+        wrapped, specs, [s.charge for s in specs];
+        executor = outer_executor(stream),
     )
-    return results
 end
 
 """
@@ -522,160 +547,41 @@ end
 foreach_group(work::F, stream::ScanStream; kwargs...) where {F} =
     (map_groups(work, stream; kwargs...); nothing)
 
-# Budget-admission scheduler: admit each item by its own charge against a shared budget; among the items
-# that currently fit, the LARGEST starts first; an item charged more than the
-# whole budget is clamped so it still runs (alone). Results in `items` order;
-# returns `(results, peak_concurrency)`. A failed worker rethrows after the
-# other workers drain the queue. The `executor` picks the task backend — the
-# ADMISSION policy (budget, largest-first, max_tasks cap) is identical under
-# both, so which groups ever run concurrently does not depend on the backend.
-function _scheduled_map(
-        work::F, items, charges, budget;
-        max_tasks::Integer, executor = Executors.ThreadsExecutor(),
-    ) where {F}
-    length(items) == 0 && return Any[], 0
-    return _scheduled_map(executor, work, items, charges, budget, max_tasks)
+# Largest-first parallel map: run `work` over `items` on `executor`, dispatching
+# the heaviest item (by `charges`) first so the long poles start immediately.
+# Results in `items` order. A failed worker rethrows after the other workers
+# drain the queue. `executor` is used exactly as configured — how many items run
+# at once is ITS decision, checked against the memory budget upstream.
+#
+# Each backend fills an `Any` sink and returns `map(identity, sink)`: `work`'s
+# return type is not known before it runs, and tasks write their slots
+# concurrently, so the sink has to admit any value; `map` then recovers the
+# concrete element type for whatever consumes the pass.
+function _scheduled_map(work::F, items, charges; executor = SerialScheduler()) where {F}
+    length(items) == length(charges) || throw(
+        DimensionMismatch("items and charges must match: $(length(items)) vs $(length(charges))"),
+    )
+    Base.require_one_based_indexing(items, charges)
+    return _scheduled_map(executor, work, items, charges)
 end
 
-# The default OUTER backend: a `Threads.@spawn` worker pool. A backend that
-# needs different task-lifetime management overrides this on its executor type
-# (the Dagger backend does, to force per-group GC — see `_scheduled_map_dagger`).
-function _scheduled_map(
-        ::Executors.ThreadsExecutor, work::F, items, charges, budget, max_tasks::Integer,
-    ) where {F}
-    n = length(items)
-    out = Vector{Any}(undef, n)
-    remaining = sort(collect(1:n); by = k -> -Float64(charges[k]))
-    cond = Threads.Condition()
-    avail = Ref(Float64(budget))
-    inflight = Ref(0)
-    peak = Ref(0)
-    workers = map(1:max(1, min(Int(max_tasks), n))) do _
-        Threads.@spawn while true
-            k = 0
-            amt = 0.0
-            lock(cond)
-            try
-                while true
-                    isempty(remaining) && break
-                    # First (= largest) not-yet-started item that fits; when none
-                    # fits, wait for a release. An over-budget item is clamped, so
-                    # with nothing in flight SOMETHING always fits — no deadlock.
-                    j = findfirst(kk -> min(Float64(charges[kk]), Float64(budget)) <= avail[], remaining)
-                    if j === nothing
-                        wait(cond)
-                    else
-                        k = remaining[j]
-                        deleteat!(remaining, j)
-                        amt = min(Float64(charges[k]), Float64(budget))
-                        avail[] -= amt
-                        inflight[] += 1
-                        peak[] = max(peak[], inflight[])
-                        break
-                    end
-                end
-            finally
-                unlock(cond)
-            end
-            k == 0 && break
-            try
-                out[k] = work(items[k])
-            finally
-                lock(cond)
-                try
-                    avail[] += amt
-                    inflight[] -= 1
-                    notify(cond)
-                finally
-                    unlock(cond)
-                end
-            end
-        end
-    end
-    foreach(wait, workers)
-    return map(identity, out), peak[]
+# The SERIAL outer backend: each group runs to completion on the calling task in
+# `items` order — with one worker the dispatch order cannot matter. Within-scan
+# fan-out still goes through the inner executor.
+function _scheduled_map(::SerialScheduler, work::F, items, charges) where {F}
+    return map(work, items)
 end
 
-_scheduled_map(
-    ::Executors.DaggerExecutor, work::F, items, charges, budget, max_tasks::Integer,
-) where {F} = _scheduled_map_dagger(work, items, charges, budget; max_tasks)
-
-# The Dagger backend of `_scheduled_map`: one `Dagger.@spawn` per item instead
-# of a worker pool, submitted by the SAME admission policy (largest-first, own
-# charge against the shared budget, `max_tasks` in-flight cap). Each task
-# releases its charge as it finishes; the submitter blocks on the condition
-# when nothing fits. Results are fetched — and a failed task rethrown — in
-# `items` order after all submissions.
-function _scheduled_map_dagger(work::F, items, charges, budget; max_tasks::Integer) where {F}
-    n = length(items)
-    cap = max(1, min(Int(max_tasks), n))
-    tasks = Vector{Any}(undef, n)
-    remaining = sort(collect(1:n); by = k -> -Float64(charges[k]))
-    cond = Threads.Condition()
-    avail = Ref(Float64(budget))
-    inflight = Ref(0)
-    peak = Ref(0)
-    while !isempty(remaining)
-        k = 0
-        amt = 0.0
-        lock(cond)
-        try
-            while true
-                # First (= largest) not-yet-started item that fits; when none
-                # fits (or the in-flight cap is reached), wait for a release.
-                # An over-budget item is clamped, so with nothing in flight
-                # SOMETHING always fits — no deadlock.
-                j = inflight[] < cap ?
-                    findfirst(kk -> min(Float64(charges[kk]), Float64(budget)) <= avail[], remaining) :
-                    nothing
-                if j === nothing
-                    wait(cond)
-                else
-                    k = remaining[j]
-                    deleteat!(remaining, j)
-                    amt = min(Float64(charges[k]), Float64(budget))
-                    avail[] -= amt
-                    inflight[] += 1
-                    peak[] = max(peak[], inflight[])
-                    break
-                end
-            end
-        finally
-            unlock(cond)
-        end
-        body = let k = k, amt = amt
-            function ()
-                try
-                    return work(items[k])
-                finally
-                    lock(cond)
-                    try
-                        avail[] += amt
-                        inflight[] -= 1
-                        notify(cond)
-                    finally
-                        unlock(cond)
-                    end
-                    # Dagger retention: a completed thunk — and the scan-sized
-                    # data its closure captured — is freed only after a GC run
-                    # collects the dropped DTask handles, their finalizers
-                    # enqueue the scheduler cleanup, and the scheduler
-                    # processes it. Julia's GC pacing lags that pipeline under
-                    # load (RSS climbs by ~a cube per scan), so force the
-                    # collection as each group retires — the same per-scan GC
-                    # discipline the drivers use (<1 s against a ~15 s scan).
-                    GC.gc()
-                end
-            end
-        end
-        # blocking = true: group tasks spend much of their time fetching their
-        # own nested fan-outs (decode/search/refine chunks).
-        tasks[k] = Executors._spawn(Executors.DaggerExecutor(), body, true)
+# The THREADED outer backend: `sched` runs the groups over the charge-sorted
+# index order. `GreedyScheduler` is the one that keeps largest-first meaningful
+# under uneven charges — it hands each task the next group off the queue — where
+# a chunking scheduler assigns groups to tasks up front. A backend with
+# different task-lifetime needs adds its own method on its executor type; the
+# seam is open by dispatch.
+function _scheduled_map(sched::Scheduler, work::F, items, charges) where {F}
+    out = Vector{Any}(undef, length(items))
+    tforeach(sortperm(charges; rev = true); scheduler = sched) do k
+        out[k] = work(items[k])
     end
-    out = Vector{Any}(undef, n)
-    for k in 1:n
-        out[k] = Executors.exec_fetch(tasks[k])
-    end
-    return map(identity, out), peak[]
+    return map(identity, out)
 end
-

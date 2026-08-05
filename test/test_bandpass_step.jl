@@ -38,14 +38,14 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
     sol_o = fit(
         CalibrationPipeline(
             FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
-            exec = ExecutionConfig(ntasks = 1),
+            exec = ExecutionConfig(),
         ),
         uvset,
     )
     sol_n = fit(
         CalibrationPipeline(
             FringeFit(model = fm), Bandpass();
-            exec = ExecutionConfig(ntasks = 1),
+            exec = ExecutionConfig(),
         ),
         uvset,
     )
@@ -82,7 +82,7 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         sol_n4 = fit(
             CalibrationPipeline(
                 FringeFit(model = fm), Bandpass();
-                exec = ExecutionConfig(ntasks = 4),
+                exec = ExecutionConfig(),
             ),
             uvset,
         )
@@ -133,7 +133,7 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         sol_g = fit(
             CalibrationPipeline(
                 FringeFit(model = fm), Bandpass(model = BandpassModel(freq = CAL.ChannelBlocks(k)));
-                exec = ExecutionConfig(ntasks = 1),
+                exec = ExecutionConfig(),
             ),
             uvset,
         )

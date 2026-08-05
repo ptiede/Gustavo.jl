@@ -13,7 +13,6 @@ the fringe engine reaches it without a second `using`.
 """
 module Fringe
 
-using ..Executors
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
 using ..UVData: Frequency, Baseline, Feed, Pol, Scan
@@ -30,7 +29,6 @@ using ..Streaming
 # name and leave the two ambiguous wherever both modules are in scope.
 import ..Streaming: select_scans
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
-import FFTW
 import DimensionalData
 using DimensionalData: lookup, dims, Ti, DimArray, AbstractDimStack
 using Statistics: median, mean
@@ -47,7 +45,6 @@ include("Fringe/phasecal.jl")
 # carved-out stage implementations the step visitors call into.
 include("Fringe/estimators.jl")
 include("Fringe/scan_search.jl")
-include("Fringe/threads.jl")
 include("Fringe/search_stage.jl")
 include("Fringe/model_plans.jl")
 include("Fringe/bandpass_stage.jl")
@@ -148,6 +145,7 @@ export MatchedFilter, FringeModel, SingleBandDelay, default_fringe_terms
 # engine names it without a second `using`.
 export DispersionModel
 export AbstractLeafGrouping, ByScan, BySpw, ByKey
+export ExecutionConfig, ProgressLogger, outer_executor, inner_executor
 export ScanStream, scan_stream, ScanGroupSpec, select_groups
 export materialize_cube, materialize_leaves
 export search_scan

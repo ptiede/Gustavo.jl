@@ -230,7 +230,7 @@
                     ),
                 ),
                 Bandpass(), TemporalSmoother();
-                exec = ExecutionConfig(ntasks = 1),
+                exec = ExecutionConfig(),
             ),
             uvset,
         )
