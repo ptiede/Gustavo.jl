@@ -156,16 +156,17 @@ end
     # The fringe model MUST tie the per-scan RATE and the per-AP ADHOC phase across
     # feeds (`SharedFeeds`). Both are feed-common physics: the fringe rate is shared
     # by the two feeds and the residual atmospheric screen is non-birefringent. A
-    # revert to `PerFeed` lets a spurious R–L rate (rate₂ − rate₁) / adhoc phase
+    # revert to `PerFeed` lets a spurious inter-feed rate (rate₂ − rate₁) / adhoc phase
     # float on noise and — multiplied by the whole-track Rate lever arm
     # `2π·rate·(t − t0_global)`, hours long — inject large, arbitrary scan-to-scan
-    # R–L (RL/RR) phase jumps (see the rationale comment on `_fringe_model` in
+    # cross-hand phase jumps (see the rationale comment on `_fringe_model` in
     # model_plans.jl and the `fringe-rate-must-be-sharedfeeds` decision).
     #
     # The end-to-end coherence test injects FEED-COMMON truth, so a `PerFeed` revert
     # would still recover it at high SNR and pass — it does NOT guard this decision.
     # Assert the tying structurally (the model) AND that the layout realises it (both
-    # feeds share one θ column per (station, time-seg), so the solved R–L is ≡ 0).
+    # feeds share one θ column per (station, time-seg), so the solved inter-feed
+    # rate is ≡ 0).
     model = FP._fringe_model()
     phase = CAL.phase_components(model)
 
@@ -471,23 +472,23 @@ end
     @test isapprox(mx(c_on.closure_before), mx(c_off.closure_before); rtol = 0.2)
 end
 
-@testset "Phase bandpass: reference R–L shape solved (χ re-gauge)" begin
-    # The per-channel bandpass solve pins the REFERENCE's feed-2 node per channel
-    # (a rank device against the χ ↔ feed-2-offset degeneracy); the χ re-gauge in
-    # `_solve_phase_bandpass!` must reassign χ's band-structure into the feed-2
-    # block so the reference's relative R–L phase bandpass is SOLVED rather than
-    # zeroed — otherwise it survives uncorrected in every cross-hand visibility.
+@testset "Phase bandpass: reference inter-feed shape solved" begin
+    # Cross-hand rows tie the two feed blocks at every frequency segment, so the
+    # reference's relative inter-feed phase bandpass is SOLVED across the band
+    # rather than zeroed — otherwise it survives uncorrected in every cross-hand
+    # visibility. Only the one band-constant inter-feed offset is conventional,
+    # and the circular-mean referencing removes it.
     nant, nspw, nchan = 4, 2, 8
     nchg = nspw * nchan
     rng = MersenneTwister(0xEC9A)
     bp = zeros(nant, 2, nchg)
     # Reference (ant 1): feed 1 flat (the true per-channel gauge), feed 2 a smooth
-    # NONZERO shape — the relative R–L phase bandpass under test. The shape is
+    # NONZERO shape — the relative inter-feed phase bandpass under test. The shape is
     # orthogonalized against per-band constant + slope: those components are
     # legitimately (and feed-COMMONLY) absorbed by the per-band SBD delay/const
-    # and R–L delay stages, so leaving them in would make the earlier solves fight
-    # an unmodelled feed-2-only per-band ramp instead of exercising the χ
-    # re-gauge this test is about.
+    # and inter-feed delay stages, so leaving them in would make the earlier solves fight
+    # an unmodelled feed-2-only per-band ramp instead of exercising the band shape
+    # this test is about.
     for b in 1:nspw
         cs = ((b - 1) * nchan + 1):(b * nchan)
         s = [0.6 * sin(2π * k / nchan + 0.9 * b) for k in 1:nchan]   # full period per band
@@ -510,8 +511,8 @@ end
     doff = FP.baseline_fringe_data(uvset, sol_off)
     # Per-channel phase coherence R = |Σ_c V̄_c| / Σ_c |V̄_c| over a product set.
     # The source is unpolarized, so a correct solve leaves the corrected CROSS
-    # spectra flat; a SIGN error in the re-gauge doubles the ref R–L ripple
-    # instead of removing it, so the cross coherence is also the convention check.
+    # spectra flat; a SIGN error in the feed-2 block doubles the ref inter-feed
+    # ripple instead of removing it, so the cross coherence is also a sign check.
     function freq_coh(spec, ps)
         rs = Float64[]
         for bi in eachindex(don.bl_pairs), p in ps
@@ -527,15 +528,15 @@ end
     R_on = freq_coh(don.spec_after, cross_ps)
     R_off = freq_coh(doff.spec_after, cross_ps)
     @test R_on > R_off
-    @test R_on > 0.97                   # ref R–L shape corrected in the cross hands
+    @test R_on > 0.97                   # ref inter-feed shape corrected in the cross hands
     @test R_off < 0.95                  # ...and survives with the stage off
 
     # θ recovery: the (ref, feed 2) bandpass slots carry the injected shape up
-    # to per-band constant + slope components (the parts the per-band SBD and R–L
+    # to per-band constant + slope components (the parts the per-band SBD and inter-feed
     # delay terms legitimately absorb). Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
     bp_on = CAL._step(sol_on, :bandpass)
-    plan = FP._bandpass_plan(bp_on.model, bp_on.layout)
+    plan = bp_on.layout.plantree.phase.bandpass
     @test plan_off1(plan)[1, 2, 1, 1] != 0
     rec = [bp_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
     worst = 0.0
@@ -609,7 +610,7 @@ end
         p = FP.baseline_pol_index(don, :parallel)
         @test amp_ripple(don.spec_after, don, p) < 1.08
         bp = CAL._step(sol, :bandpass)
-        plan = FP._amp_bandpass_plan(bp.model, bp.layout)
+        plan = bp.layout.plantree.logamp.bandpass
         for dg in dead_globals, a in 2:nant, f in 1:2
             nbr = 0.5 * (larec(bp.θ, plan, a, f, dg - 1) + larec(bp.θ, plan, a, f, dg + 1))
             @test isfinite(larec(bp.θ, plan, a, f, dg))
@@ -622,7 +623,7 @@ end
     # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
     solf = fit(ff |> Bandpass(model = BandpassModel(amp_model = FP.free_bandpass())) |> TemporalSmoother(adhoc), uvset)
     bpf = CAL._step(solf, :bandpass)
-    planf = FP._amp_bandpass_plan(bpf.model, bpf.layout)
+    planf = bpf.layout.plantree.logamp.bandpass
     for dg in dead_globals, a in 2:nant, f in 1:2
         @test larec(bpf.θ, planf, a, f, dg) == 0.0
     end
@@ -776,13 +777,11 @@ end
     # global per-channel bandpass is degenerate with the dispersion curvature
     # (on real multi-scan data the bandpass absorbs only the CALIBRATOR scan's
     # ionosphere and per-scan dTEC is measured relative to it).
-    # `feed_common = true` (zero true R-L offset): dispersion smears the stage-B
-    # delay peak, so each correlation product's argmax scatters within the smeared
-    # peak and that scatter lands in the GLOBAL R-L delay offset — which the
-    # (correctly feed-common) refinement cannot repair. A multi-scan track
-    # averages that offset error to ~10 ps; a single-scan noiseless synthetic
-    # eats the full smear, so the test removes the coupling to isolate the
-    # dispersion machinery itself.
+    # `feed_common = true` (zero true inter-feed offset): dispersion smears the
+    # stage-B delay peak, so each correlation product's argmax scatters within the
+    # smeared peak and that scatter lands in the inter-feed delay offset — which
+    # the (correctly feed-common) refinement cannot repair. The test removes the
+    # coupling to isolate the dispersion machinery itself.
     dtec_true = [0.0, 3.0, -5.0, 1.5]
     uvset, _ = _build_fringe_uvset(
         nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,

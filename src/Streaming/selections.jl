@@ -2,7 +2,7 @@
 #
 # An `AbstractScanSelection` names WHICH scans feed a solve stage's
 # accumulation. Time-global model components (a track-wide bandpass, a global
-# R–L delay) then apply to every scan even when fit from a few — the
+# inter-feed delay) then apply to every scan even when fit from a few — the
 # "fit on bright calibrator scans, apply across the board" pattern. Selections
 # are resolved against a table of per-scan records `(index, source, scan, snr)`
 # (snr = the stage-A per-scan max detection SNR; NaN before stage A has run).

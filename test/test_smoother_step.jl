@@ -181,7 +181,7 @@ end
             uvset,
         )
         @test Gustavo.stage_names(sol_fs) == [:fringe, :adhoc]
-        @test !any(CAL._is_bandpass, Iterators.flatten(CAL.phase_components(s.model) for s in sol_fs.steps))
+        @test !any(s -> haskey(s.layout.plantree.phase, :bandpass), sol_fs.steps)
         adhoc_step_fs = CAL._step(sol_fs, :adhoc)
         phases = CAL.phase_components(adhoc_step_fs.model)
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
@@ -191,6 +191,47 @@ end
         # still be sane (all θ finite, per-scan SNRs strong).
         @test all(s -> all(isfinite, s.θ), sol_fs.steps)
         @test all(>(10), filter(isfinite, CAL._step(sol_fs, :fringe).info.scan_snr))
+    end
+
+    @testset "scan-local fusion ≡ a pass per step" begin
+        # `DispersionSBDFit |> TemporalSmoother` is the one adjacent pair of
+        # scan-local steps among the built-ins, so the runner solves both in ONE
+        # read of the data. The oracle is the composition a caller can write by
+        # hand — separate `fit` calls of one step each, which never fuse.
+        ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
+        pre = FP.ApplySolution(CAL.step_solution(sol_n, :fringe))
+
+        sol_fused = fit(pre |> ds |> TemporalSmoother(adhoc), uvset)
+        @test Gustavo.stage_names(sol_fused) == [:refine, :adhoc]
+        # Neither half of the fused run is vacuous.
+        @test CAL._step(sol_fused, :refine).layout.nθ > 0
+        @test any(!=(0), CAL._step(sol_fused, :refine).θ)
+        @test any(!=(0), CAL._step(sol_fused, :adhoc).θ)
+
+        sol_a = fit(pre |> ds, uvset)
+        refine_tf = FP.ApplySolution(CAL.step_solution(sol_a, :refine))
+        sol_b = fit(pre |> refine_tf |> TemporalSmoother(adhoc), uvset)
+        @test CAL._step(sol_fused, :refine).θ == CAL._step(sol_a, :refine).θ
+        @test CAL._step(sol_fused, :adhoc).θ == CAL._step(sol_b, :adhoc).θ
+
+        # The same holds with the output tail fused into that one pass.
+        _, out_fused = fitcalibrate(pre |> ds |> TemporalSmoother(adhoc), uvset)
+        _, out_ref = fitcalibrate(pre |> refine_tf |> TemporalSmoother(adhoc), uvset)
+        @test _sets_equal(out_fused, out_ref)
+
+        # A fused run divides each step's gains out of the resident scan in
+        # place, so with no transform chain in front of it — the one case where
+        # materialization hands back an eager set's own arrays — it must work on
+        # copies. The caller's data is never written.
+        snap = Dict(
+            k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
+                for (k, l) in pairs(UVP.branches(uvset))
+        )
+        fitcalibrate(ds |> TemporalSmoother(adhoc), uvset)
+        @test all(
+            isequal(snap[k][1], parent(l[:vis])) && isequal(snap[k][2], parent(l[:weights]))
+                for (k, l) in pairs(UVP.branches(uvset))
+        )
     end
 
     @testset "AprioriAmplitude is an output-chain step" begin

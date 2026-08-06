@@ -37,20 +37,24 @@ and the log marginal likelihood `Σ_k log N(v_k | 0, S_k)` over observed samples
 (the quantity maximized to fit (τ, σ2)).
 """
 function kalman_ou_filter(y, r, times; τ::Real, σ2::Real)
+    Base.require_one_based_indexing(y, r, times)
+    T = float(
+        promote_type(eltype(y), eltype(r), eltype(times), typeof(τ), typeof(σ2)),
+    )
     n = length(y)
-    μf = zeros(n)
-    Pf = zeros(n)
-    μp = zeros(n)
-    Pp = zeros(n)
-    avec = zeros(n)
-    loglik = 0.0
-    μprev = 0.0
-    Pprev = float(σ2)
-    @inbounds for k in 1:n
+    μf = zeros(T, n)
+    Pf = zeros(T, n)
+    μp = zeros(T, n)
+    Pp = zeros(T, n)
+    avec = zeros(T, n)
+    loglik = zero(T)
+    μprev = zero(T)
+    Pprev = T(σ2)
+    for k in eachindex(y, r, times)
         if k == 1
-            a = 0.0
-            μpr = 0.0
-            Ppr = float(σ2)
+            a = zero(T)
+            μpr = zero(T)
+            Ppr = T(σ2)
         else
             a, q = ou_step(τ, σ2, times[k] - times[k - 1])
             μpr = a * μprev
@@ -67,7 +71,7 @@ function kalman_ou_filter(y, r, times; τ::Real, σ2::Real)
             K = Ppr / S
             μc = μpr + K * v
             Pc = (1 - K) * Ppr
-            loglik += -0.5 * (log(2π * S) + v * v / S)
+            loglik -= (log(2 * T(π) * S) + v * v / S) / 2
         else
             μc = μpr
             Pc = Ppr
@@ -109,12 +113,10 @@ variance `r = 1/w`; `w ≤ 0` or non-finite ⇒ missing). Returns the smoothed t
 with gaps interpolated (matching `_penalized_smooth`).
 """
 function smooth_ou_track(y, w, times; τ::Real, σ2::Real)
-    n = length(y)
-    r = Vector{Float64}(undef, n)
-    @inbounds for k in 1:n
-        wk = w[k]
-        r[k] = (isfinite(wk) && wk > 0) ? 1.0 / wk : Inf
-    end
+    T = float(
+        promote_type(eltype(y), eltype(w), eltype(times), typeof(τ), typeof(σ2)),
+    )
+    r = [(isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf) for wk in w]
     μf, Pf, μp, Pp, avec, _ = kalman_ou_filter(y, r, times; τ = τ, σ2 = σ2)
     μs, _ = rts_smooth(μf, Pf, μp, Pp, avec)
     return μs
@@ -123,19 +125,24 @@ end
 # Compact fixed-budget Nelder–Mead for low-dimensional unconstrained minimization
 # — enough for the 2-parameter (log τ, log σ2) ML fit, avoiding an Optim dependency.
 # Standard coefficients (reflect 1, expand 2, contract 1/2, shrink 1/2).
-function _nelder_mead(f, x0::Vector{Float64}; step::Real = 0.5, iters::Integer = 200, tol::Real = 1.0e-6)
+function _nelder_mead(f, x0::AbstractVector{<:Real}; step::Real = 0.5, iters::Integer = 200, tol::Real = 1.0e-6)
+    # The working precision is the starting point's — `step`/`tol` are scale
+    # hyperparameters and are converted into it rather than promoted against it.
+    T = float(eltype(x0))
     n = length(x0)
-    simplex = [copy(x0) for _ in 1:(n + 1)]
+    simplex = [collect(T, x0) for _ in 1:(n + 1)]
     for i in 1:n
-        simplex[i + 1][i] += step
+        simplex[i + 1][i] += T(step)
     end
     fval = [f(s) for s in simplex]
+    # Never demand more agreement than the working precision can express.
+    rtol = max(T(tol), eps(T))
     for _ in 1:iters
         order = sortperm(fval)
         simplex = simplex[order]
         fval = fval[order]
-        (abs(fval[end] - fval[1]) <= tol * (abs(fval[1]) + tol)) && break
-        c = zeros(n)                                  # centroid of all but worst
+        (abs(fval[end] - fval[1]) <= rtol * (abs(fval[1]) + rtol)) && break
+        c = zeros(T, n)                               # centroid of all but worst
         for i in 1:n
             c .+= simplex[i]
         end
@@ -144,7 +151,7 @@ function _nelder_mead(f, x0::Vector{Float64}; step::Real = 0.5, iters::Integer =
         xr = c .+ (c .- xw)                           # reflection
         fr = f(xr)
         if fr < fval[1]
-            xe = c .+ 2.0 .* (c .- xw)                # expansion
+            xe = c .+ 2 .* (c .- xw)                  # expansion
             fe = f(xe)
             if fe < fr
                 simplex[end] = xe
@@ -157,14 +164,14 @@ function _nelder_mead(f, x0::Vector{Float64}; step::Real = 0.5, iters::Integer =
             simplex[end] = xr
             fval[end] = fr
         else
-            xc = c .+ 0.5 .* (xw .- c)                # contraction toward centroid
+            xc = c .+ (xw .- c) ./ 2                  # contraction toward centroid
             fc = f(xc)
             if fc < fval[end]
                 simplex[end] = xc
                 fval[end] = fc
             else
                 for i in 2:(n + 1)                    # shrink toward best
-                    simplex[i] = simplex[1] .+ 0.5 .* (simplex[i] .- simplex[1])
+                    simplex[i] = simplex[1] .+ (simplex[i] .- simplex[1]) ./ 2
                     fval[i] = f(simplex[i])
                 end
             end
@@ -176,27 +183,29 @@ end
 
 # Weighted mean of the finite entries of a track (weights ≤ 0 / non-finite skipped).
 function _weighted_mean_finite(y, w)
-    sw = 0.0
-    sy = 0.0
-    @inbounds for k in eachindex(y)
+    T = float(promote_type(eltype(y), eltype(w)))
+    sw = zero(T)
+    sy = zero(T)
+    for k in eachindex(y, w)
         yk = y[k]
         wk = w[k]
         (isfinite(yk) && isfinite(wk) && wk > 0) || continue
         sw += wk
         sy += wk * yk
     end
-    return sw > 0 ? sy / sw : 0.0
+    return sw > 0 ? sy / sw : zero(T)
 end
 
 # Seed for the OU stationary variance σ2: the weighted sample variance of the
 # track minus its expected noise contribution (what's left is signal), floored to
 # stay positive.
 function _init_track_var(y, w)
+    T = float(promote_type(eltype(y), eltype(w)))
     m = _weighted_mean_finite(y, w)
-    sw = 0.0
-    s2 = 0.0
+    sw = zero(T)
+    s2 = zero(T)
     nobs = 0
-    @inbounds for k in eachindex(y)
+    for k in eachindex(y, w)
         yk = y[k]
         wk = w[k]
         (isfinite(yk) && isfinite(wk) && wk > 0) || continue
@@ -204,14 +213,14 @@ function _init_track_var(y, w)
         s2 += wk * (yk - m)^2
         nobs += 1
     end
-    nobs > 0 || return 1.0e-4
+    nobs > 0 || return T(1.0e-4)
     var_y = s2 / sw
     # Expected noise contribution to the weight-averaged variance var_y = Σw(y-m)²/Σw
     # is Σ w_k·r_k / Σ w_k = Σ1 / Σw = nobs/sw (since r_k = 1/w_k). Subtracting
     # mean(1/w) instead would be correct only for uniform weights (by AM–HM it
     # over-subtracts, collapsing σ² to the floor for heteroscedastic weights).
     r_bar = nobs / sw
-    return max(var_y - r_bar, 1.0e-4)
+    return max(var_y - r_bar, T(1.0e-4))
 end
 
 """
@@ -224,30 +233,31 @@ Falls back to the seeds when fewer than 5 samples are observed. `τ` is clamped 
 `[τ_lo, τ_hi]` and `σ2` to a small positive floor.
 """
 function fit_ou_hypers(y, w, times; τ0::Real, σ2_0::Real, τ_lo::Real, τ_hi::Real)
-    nobs = count(k -> isfinite(y[k]) && isfinite(w[k]) && w[k] > 0, eachindex(y))
-    nobs >= 5 || return float(τ0), float(σ2_0)
-    n = length(y)
-    r = Vector{Float64}(undef, n)
-    @inbounds for k in 1:n
-        wk = w[k]
-        r[k] = (isfinite(wk) && wk > 0) ? 1.0 / wk : Inf
-    end
-    σ2_lo = 1.0e-8
-    lτ_lo = log(τ_lo)
-    lτ_hi = log(τ_hi)
+    T = float(
+        promote_type(
+            eltype(y), eltype(w), eltype(times),
+            typeof(τ0), typeof(σ2_0), typeof(τ_lo), typeof(τ_hi),
+        ),
+    )
+    nobs = count(k -> isfinite(y[k]) && isfinite(w[k]) && w[k] > 0, eachindex(y, w))
+    nobs >= 5 || return T(τ0), T(σ2_0)
+    r = [(isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf) for wk in w]
+    σ2_lo = T(1.0e-8)
+    lτ_lo = log(T(τ_lo))
+    lτ_hi = log(T(τ_hi))
     function negll(p)
         τ = exp(clamp(p[1], lτ_lo, lτ_hi))
         σ2 = max(exp(p[2]), σ2_lo)
         ll = kalman_ou_filter(y, r, times; τ = τ, σ2 = σ2)[6]
-        val = isfinite(ll) ? -ll : Inf
+        val = isfinite(ll) ? -ll : T(Inf)
         # Soft barrier: outside the [lτ_lo, lτ_hi] box τ saturates (clamped), so the
         # objective would be flat there and Nelder–Mead could converge on a
         # non-optimal boundary. Penalize the excursion so the simplex is driven back
         # into the box toward the true constrained optimum.
-        excursion = max(lτ_lo - p[1], 0.0) + max(p[1] - lτ_hi, 0.0)
-        return val + 100.0 * excursion
+        excursion = max(lτ_lo - p[1], zero(T)) + max(p[1] - lτ_hi, zero(T))
+        return val + 100 * excursion
     end
-    x0 = [clamp(log(τ0), lτ_lo, lτ_hi), log(max(σ2_0, σ2_lo))]
+    x0 = T[clamp(log(T(τ0)), lτ_lo, lτ_hi), log(max(T(σ2_0), σ2_lo))]
     xbest, _ = _nelder_mead(negll, x0)
     τ = exp(clamp(xbest[1], lτ_lo, lτ_hi))
     σ2 = max(exp(xbest[2]), σ2_lo)
@@ -258,11 +268,12 @@ end
 # `:gp_joint` adhoc modes so both fit hypers under the same prior: `τ_lo` is one AP
 # spacing (floored), `τ_hi` is 10× the observed track span.
 function _ou_tau_bounds(times)
-    tsec = Float64.(collect(times))
-    dts = filter(>(0), diff(sort(tsec)))
-    t_ap = isempty(dts) ? 1.0 : median(dts)
-    span = length(tsec) > 1 ? (maximum(tsec) - minimum(tsec)) : t_ap
-    τ_lo = max(t_ap, 1.0e-3)
+    T = float(eltype(times))
+    ts = sort!(collect(T, times))
+    dts = filter(>(zero(T)), diff(ts))
+    t_ap = isempty(dts) ? one(T) : T(median(dts))
+    span = length(ts) > 1 ? (last(ts) - first(ts)) : t_ap
+    τ_lo = max(t_ap, T(1.0e-3))
     τ_hi = max(10 * span, 10 * τ_lo)
     return τ_lo, τ_hi
 end
@@ -272,10 +283,11 @@ end
 # track `yc` (OU reverts to 0), and the OU coherence time / stationary variance —
 # ML-fit by Kalman marginal likelihood when `fit`, else `(τ0, seed)`.
 function _track_ou_hypers(trk, w, times; τ0::Real, τ_lo::Real, τ_hi::Real, fit::Bool)
+    T = float(promote_type(eltype(trk), eltype(w)))
     m = _weighted_mean_finite(trk, w)
-    yc = [isfinite(x) ? x - m : NaN for x in trk]
+    yc = [isfinite(x) ? T(x) - m : T(NaN) for x in trk]
     σ2_0 = _init_track_var(yc, w)
-    τ, σ2 = fit ? fit_ou_hypers(yc, w, times; τ0 = τ0, σ2_0 = σ2_0, τ_lo = τ_lo, τ_hi = τ_hi) : (float(τ0), σ2_0)
+    τ, σ2 = fit ? fit_ou_hypers(yc, w, times; τ0, σ2_0, τ_lo, τ_hi) : (T(τ0), σ2_0)
     return m, yc, τ, σ2
 end
 
@@ -289,93 +301,132 @@ end
 # a single AP is poorly conditioned and temporal structure resolves it). Each state
 # dimension has its own OU `(τ_i, σ_i²)`; the transition is diagonal, so `A P Aᵀ`
 # is just `(a_i a_j)·P_ij`. A dimension with `τ_i ≤ 0` is treated as independent
-# per step (`a = 0`) with a diffuse prior — used for the per-AP source cross-hand
-# phase χ carried as an augmented, temporally-uncorrelated state.
+# per step (`a = 0`) with a diffuse prior — a state with no temporal correlation
+# to carry.
 
 # Per-dimension exact OU transition, guarding the diffuse (`τ ≤ 0`) dimension.
 @inline function _ou_ab(τ::Real, σ2::Real, Δt::Real)
-    (τ > 0 && Δt != 0) || return (τ > 0 ? 1.0 : 0.0), (τ > 0 ? 0.0 : σ2)
+    T = float(promote_type(typeof(τ), typeof(σ2), typeof(Δt)))
+    (τ > 0 && Δt != 0) || return (τ > 0 ? one(T) : zero(T)), (τ > 0 ? zero(T) : T(σ2))
     a = exp(-abs(Δt) / τ)
-    return a, σ2 * (1 - a * a)
+    return T(a), T(σ2 * (1 - a * a))
 end
 
 """
-    kalman_ou_mv_filter(Hs, ys, rs, times; τ, σ2) -> (xf, Pf, xp, Pp, avecs, loglik)
+    kalman_ou_mv_filter(rows, ys, rs, times; τ, σ2) -> (xf, Pf, xp, Pp, avecs, loglik)
 
-Forward multivariate OU Kalman filter. At step `k` the observations are
-`ys[k] = Hs[k]·x_k + ε`, `ε ~ N(0, Diagonal(rs[k]))`; rows are processed as
-independent sequential scalar updates (diagonal `R`, so this is exact and avoids an
-`m×m` inverse). `τ`/`σ2` are per-dimension OU parameters (`τ[i] ≤ 0` ⇒ diffuse,
-temporally-independent dimension). The prior is `x_0 ~ N(0, Diagonal(σ2))`.
-Returns filtered/predicted means and covariances, the per-step diagonal transition
-`avecs`, and the joint log marginal likelihood.
+Forward multivariate OU Kalman filter over closure rows. At step `k`, row `j`
+observes a station-phase DIFFERENCE,
+
+    ys[k][j] = x[a] − x[b] + ε,   ε ~ N(0, rs[k][j])
+
+with `(a, b)` read from `rows[k][j]` — an [`_ObsRow`](@ref), whose `val`/`w`/feed
+fields are ignored here: the caller passes the processed observation and its
+variance in `ys`/`rs`.
+
+Rows are applied as sequential scalar updates (diagonal `R`, so this is exact and
+avoids an `m×m` inverse). A row has two nonzero design entries whatever `n` is, so
+an update costs `O(n²)` — the covariance rank-2 update — where a dense design row
+would cost `O(n³)`.
+
+`τ`/`σ2` are per-dimension OU parameters (`τ[i] ≤ 0` ⇒ diffuse, temporally
+independent dimension). The prior is `x_0 ~ N(0, Diagonal(σ2))`.
+
+Returns the filtered and predicted means as `n × nsteps` matrices, their covariances
+as `n × n × nsteps` arrays, the per-step diagonal transition `avecs` (`n × nsteps`),
+and the joint log marginal likelihood — so step `k` is `view(xf, :, k)` /
+`view(Pf, :, :, k)`. The element type is promoted from `ys`, `rs`, `τ`, `σ2` and
+`times`.
 """
-function kalman_ou_mv_filter(Hs, ys, rs, times; τ::AbstractVector, σ2::AbstractVector)
-    T = length(times)
+function kalman_ou_mv_filter(rows, ys, rs, times; τ::AbstractVector, σ2::AbstractVector)
+    # Steps and state dimensions are addressed as 1:nsteps / 1:n throughout.
+    Base.require_one_based_indexing(τ, σ2, times, rows, ys, rs)
+    T = float(
+        promote_type(
+            eltype(eltype(ys)), eltype(eltype(rs)), eltype(τ), eltype(σ2), eltype(times),
+        ),
+    )
+    nsteps = length(times)
     n = length(τ)
-    xf = [zeros(n) for _ in 1:T]
-    Pf = [zeros(n, n) for _ in 1:T]
-    xp = [zeros(n) for _ in 1:T]
-    Pp = [zeros(n, n) for _ in 1:T]
-    avecs = [ones(n) for _ in 1:T]
-    loglik = 0.0
-    xprev = zeros(n)
-    Pprev = Matrix(Diagonal(float.(σ2)))
-    for k in 1:T
+    length(σ2) == n ||
+        throw(DimensionMismatch("τ and σ2 must have equal length: $n vs $(length(σ2))"))
+    xf = zeros(T, n, nsteps)
+    Pf = zeros(T, n, n, nsteps)
+    xp = zeros(T, n, nsteps)
+    Pp = zeros(T, n, n, nsteps)
+    avecs = ones(T, n, nsteps)
+    loglik = zero(T)
+    # Reused across every row of every step: the update touches no other temporary.
+    Ph = Vector{T}(undef, n)
+    K = Vector{T}(undef, n)
+    q = Vector{T}(undef, n)
+    for k in 1:nsteps
+        a = view(avecs, :, k)
+        x = view(xf, :, k)
+        P = view(Pf, :, :, k)
         if k == 1
-            a = ones(n)
-            xpr = zeros(n)
-            Ppr = Matrix(Diagonal(float.(σ2)))
+            for i in 1:n
+                P[i, i] = σ2[i]
+            end
         else
             Δt = times[k] - times[k - 1]
-            a = Vector{Float64}(undef, n)
-            Ppr = Matrix{Float64}(undef, n, n)
-            q = Vector{Float64}(undef, n)
-            @inbounds for i in 1:n
+            xprev = view(xf, :, k - 1)
+            Pprev = view(Pf, :, :, k - 1)
+            for i in 1:n
                 a[i], q[i] = _ou_ab(τ[i], σ2[i], Δt)
             end
-            @inbounds for j in 1:n, i in 1:n
-                Ppr[i, j] = a[i] * a[j] * Pprev[i, j]
+            for j in 1:n, i in 1:n
+                P[i, j] = a[i] * a[j] * Pprev[i, j]
             end
-            @inbounds for i in 1:n
-                Ppr[i, i] += q[i]
+            for i in 1:n
+                P[i, i] += q[i]
+                x[i] = a[i] * xprev[i]
             end
-            xpr = a .* xprev
         end
-        avecs[k] = a
-        xp[k] = copy(xpr)
-        Pp[k] = copy(Ppr)
-        x = copy(xpr)
-        P = Ppr
-        H = Hs[k]
-        y = ys[k]
-        r = rs[k]
-        @inbounds for jrow in eachindex(y)
-            yj = y[jrow]
-            rj = r[jrow]
+        copyto!(view(xp, :, k), x)
+        copyto!(view(Pp, :, :, k), P)
+
+        rowsk = rows[k]
+        yk = ys[k]
+        rk = rs[k]
+        for j in eachindex(rowsk, yk, rk)
+            yj = yk[j]
+            rj = rk[j]
             (isfinite(yj) && isfinite(rj) && rj > 0) || continue
-            h = @view H[jrow, :]
-            Ph = P * h                       # n-vector
-            s = dot(h, Ph) + rj
+            row = rowsk[j]
+            ia, ib = row.a, row.b
+            (1 <= ia <= n && 1 <= ib <= n) || throw(
+                ArgumentError(
+                    "observation row references states $ia/$ib outside the state 1:$n",
+                ),
+            )
+            # h has nonzeros only at ia and ib, so P·h is a difference of two COLUMNS
+            # of P and hᵀv is two of its entries.
+            for i in 1:n
+                Ph[i] = P[i, ia] - P[i, ib]
+            end
+            s = Ph[ia] - Ph[ib] + rj
+            innov = yj - (x[ia] - x[ib])
             s > 0 || continue
-            innov = yj - dot(h, x)
-            invs = 1.0 / s
-            K = Ph .* invs                   # Kalman gain (n-vector)
-            @inbounds for i in 1:n
+            invs = inv(s)
+            for i in 1:n
+                K[i] = Ph[i] * invs
                 x[i] += K[i] * innov
             end
-            # Joseph-form covariance update P ← (I − K hᵀ) P (I − K hᵀ)ᵀ + r K Kᵀ:
-            # algebraically equal to P − Ph Phᵀ/s but numerically PSD-stable, so P
-            # cannot drift negative-definite and silently drop later rows (via the
-            # `s > 0` gate) or break the RTS solve downstream.
-            ImKh = I - K * transpose(h)
-            P .= ImKh * P * transpose(ImKh) .+ (rj .* (K * transpose(K)))
-            loglik += -0.5 * (log(2π * s) + innov * innov * invs)
+            # Joseph-form covariance update, in the rank-2 form it collapses to for a
+            # scalar row: P ← P − K(Ph)ᵀ − (Ph)Kᵀ + s·KKᵀ. Algebraically this is
+            # P − (Ph)(Ph)ᵀ/s, but the grouping keeps P symmetric and PSD, so it cannot
+            # drift negative-definite and silently drop later rows (via the `s > 0`
+            # gate) or break the RTS solve downstream.
+            for jj in 1:n
+                Kj = K[jj]
+                Phj = Ph[jj]
+                for i in 1:n
+                    P[i, jj] -= K[i] * Phj + Ph[i] * Kj - s * K[i] * Kj
+                end
+            end
+            loglik -= (log(2 * T(π) * s) + innov * innov * invs) / 2
         end
-        xf[k] = x
-        Pf[k] = P
-        xprev = x
-        Pprev = P
     end
     return xf, Pf, xp, Pp, avecs, loglik
 end
@@ -384,25 +435,28 @@ end
     rts_smooth_mv(xf, Pf, xp, Pp, avecs) -> (xs, Ps)
 
 Rauch–Tung–Striebel backward smoother paired with [`kalman_ou_mv_filter`](@ref)
-(diagonal transition `Diagonal(avecs[k])`).
+(diagonal transition `Diagonal(view(avecs, :, k))`), in the same step-sliced layout:
+`xs` is `n × nsteps` and `Ps` is `n × n × nsteps`.
 """
 function rts_smooth_mv(xf, Pf, xp, Pp, avecs)
-    T = length(xf)
-    xs = deepcopy(xf)
-    Ps = deepcopy(Pf)
-    for k in (T - 1):-1:1
-        a = avecs[k + 1]
+    nsteps = size(xf, 2)
+    n = size(xf, 1)
+    xs = copy(xf)
+    Ps = copy(Pf)
+    for k in (nsteps - 1):-1:1
+        a = view(avecs, :, k + 1)
         # Guard the predicted covariance before inverting — mirror the scalar
         # `rts_smooth`'s `Ppk > 0 || continue`. A zero-gap step (Δt = 0 ⇒ q = 0) or
-        # an ill-conditioned common-mode direction can make Pp[k+1] singular; skip
-        # the smoothing update there (leaving xs[k] = xf[k], Ps[k] = Pf[k]).
-        F = cholesky(Symmetric(Pp[k + 1]), check = false)
+        # an ill-conditioned common-mode direction can make Pp[:, :, k+1] singular;
+        # skip the smoothing update there (leaving step `k` at its filtered value).
+        F = cholesky(Symmetric(Pp[:, :, k + 1]), check = false)
         issuccess(F) || continue
         # G = Pf[k]·Aᵀ·inv(Pp[k+1]); Aᵀ diagonal scales COLUMNS of Pf[k] by a.
-        PfA = Pf[k] .* reshape(a, 1, :)
-        G = PfA / F
-        xs[k] = xf[k] .+ G * (xs[k + 1] .- xp[k + 1])
-        Ps[k] = Pf[k] .+ G * (Ps[k + 1] .- Pp[k + 1]) * transpose(G)
+        G = (view(Pf, :, :, k) .* reshape(a, 1, :)) / F
+        dx = view(xs, :, k + 1) .- view(xp, :, k + 1)
+        dP = view(Ps, :, :, k + 1) .- view(Pp, :, :, k + 1)
+        mul!(view(xs, :, k), G, dx, true, true)
+        mul!(view(Ps, :, :, k), G * dP, transpose(G), true, true)
     end
     return xs, Ps
 end

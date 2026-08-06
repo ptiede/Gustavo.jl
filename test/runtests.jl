@@ -71,7 +71,7 @@ include("test_smoother_step.jl")
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
 
-# fringe_station_solutions θ-decode + rl_delay :global/:perscan model option.
+# fringe_station_solutions θ-decode + the `rel_time` model option.
 # Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
 include("test_fringe_station_solutions.jl")
 

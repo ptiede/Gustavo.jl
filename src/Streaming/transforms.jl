@@ -138,65 +138,24 @@ struct ApplySolution{S <: CalibrationSolution} <: AbstractDataTransform
     sol::S
 end
 
-# Fail-fast compatibility check of an ApplySolution against a target geometry —
-# run at STREAM CONSTRUCTION (`scan_stream` / the verbs), so an incompatible
-# precal raises a plain error before any data is read instead of surfacing as a
-# TaskFailedException from a worker mid-pass.
-function validate_transform(t::ApplySolution, geom::DataGeometry, ant_names)
-    sol = t.sol
-    sol.geom.channel_freqs == geom.channel_freqs || error(
-        "ApplySolution: channel layout differs from the solution's " *
-            "($(length(geom.channel_freqs)) vs $(length(sol.geom.channel_freqs)) channels, " *
-            "or different frequencies) — a per-channel solution only ports across sets with " *
-            "the identical correlator setup."
-    )
-    sol.geom.times == geom.times && return nothing
-    # Cross-set apply (fit once, apply later — possibly another file/epoch).
-    all(s -> _globally_time_constant(GainEvaluator(s.model, s.layout)), sol.steps) || error(
-        "ApplySolution: the data's time axis differs from the solution's, and the solution " *
-            "is not time-constant (it carries per-scan/per-integration components) — only " *
-            "time-constant solutions (e.g. `step_solution(sol, name)`) are portable across sets."
-    )
-    hasproperty(sol.info, :ant_names) || error(
-        "ApplySolution: cross-set application needs the solution's station names " *
-            "(`sol.info.ant_names`) to match stations by name — this solution has none."
-    )
-    return nothing
-end
-
 function apply_transform!(
         t::ApplySolution, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler(),
     )
     sol = t.sol
-    if sol.geom.channel_freqs == win.geom.channel_freqs && sol.geom.times == win.geom.times
-        # Same-set apply: stations index-aligned, full time mapping.
-        _divide_gains!(stack, win, sol, executor)
-        return nothing
-    end
-    # Cross-set apply; the compatibility contract was already enforced by
-    # `validate_transform` at stream construction, re-checked here for direct
-    # (stream-less) callers.
     ant_names = String.(UVData.antennas(stack).name)
-    validate_transform(t, win.geom, ant_names)
-    solnames = String.(collect(sol.info.ant_names))
-    amap = [something(findfirst(==(n), solnames), 0) for n in ant_names]
-    if any(iszero, amap)
-        missing_names = [n for (n, m) in zip(ant_names, amap) if m == 0]
-        @warn "ApplySolution: stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
+    solnames = hasproperty(sol.info, :ant_names) ? String.(collect(sol.info.ant_names)) : ant_names
+    amap = if solnames == ant_names
+        nothing                                      # index-aligned
+    else
+        m = [something(findfirst(==(n), solnames), 0) for n in ant_names]
+        if any(iszero, m)
+            missing_names = [n for (n, k) in zip(ant_names, m) if k == 0]
+            @warn "ApplySolution: stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
+        end
+        m
     end
     _divide_gains!(stack, win, sol, executor; amap)
     return nothing
-end
-
-# Every component time-constant (GlobalTime, no time coordinate) — the
-# portability requirement for applying a solution onto a different time axis.
-function _globally_time_constant(ev::GainEvaluator)
-    for plan in ev.layout.plans
-        :Ti in Calibration.term_axes(plan.term) && return false
-        ts1 = plan.tseg_id[1]
-        all(==(ts1), plan.tseg_id) || return false
-    end
-    return true
 end
 
 apply_transform(uvset::UVSet, t::ApplySolution) = UVData.apply_calibration(uvset, t.sol)

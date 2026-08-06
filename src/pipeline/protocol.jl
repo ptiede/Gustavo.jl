@@ -20,14 +20,18 @@
 #                                    per-scan SNR) off their `StepSolution`s.
 # - `provides(step)`               — names the step's solution slot.
 # - `required_grouping(step)`      — leaf-grouping constraint.
+# - `fusable_grouping(step)`       — accumulation scope; `:scan` lets the step
+#                                    share one streaming pass with its
+#                                    neighbors.
 # - `start_pass!` / `process_scan!` / `finish_pass!` — the VISITOR CONTRACT:
 #   the executor owns all streaming (the scan group is the only unit of data
 #   flow — steps never see the uvset); a step accumulates from each
 #   materialized, transform-corrected scan view and runs its global solve when
-#   the pass completes. Every step gets its own streaming pass, run in the
-#   order the pipeline declares its steps — a step that needs an earlier
-#   step's correction and does not have it fails from its own solve kernel,
-#   not from pipeline construction.
+#   the pass completes. Steps are run in the order the pipeline declares them,
+#   each in its own streaming pass unless consecutive steps declare themselves
+#   scan-local (`fusable_grouping`), in which case they share one — a step that
+#   needs an earlier step's correction and does not have it fails from its own
+#   solve kernel, not from pipeline construction.
 #
 # Run-wide resources (task/memory budgets, progress) live on the pipeline's
 # `ExecutionConfig`, NOT on steps: they are properties of a run, shared by
@@ -77,7 +81,7 @@ transforms(step::CalibrationStep) = ()
     fit_selection(step::CalibrationStep, prior_solutions) -> Fringe.AbstractScanSelection
 
 Which scans feed this step's accumulation. Time-global components solved by
-the step still apply to EVERY scan — fitting a bandpass or a global R–L delay
+the step still apply to EVERY scan — fitting a bandpass or a track-global delay
 from a few bright calibrator scans and applying it across the board. `prior_solutions`
 is the ordered `Vector{StepSolution}` of every earlier step's finished solution —
 a step wanting non-data info from an earlier step (e.g. per-scan SNR) reads it
@@ -104,6 +108,34 @@ step needs every spw of a scan materialized together — true of the fringe
 search's multi-band concat and of per-scan θ-slot disjointness). Default `:any`.
 """
 required_grouping(step::CalibrationStep) = :any
+
+"""
+    fusable_grouping(step::CalibrationStep) -> Symbol
+
+The accumulation scope this step's solve needs: `:scan` when the step is
+finalizable from ONE scan group alone — every θ slot it writes for a scan is
+written from that scan's data, by the time its `process_scan!` returns — or
+`:global` when finishing needs the whole pass (one system closed over every
+scan, a statistic pooled across scans, a residual re-search round). Default
+`:global`, so a step that has not declared otherwise is never fused.
+
+Consecutive `:scan` steps share ONE streaming pass: the scan group is
+materialized once, each step's [`process_scan!`](@ref) runs on it in declared
+order, and each step's just-solved gains are divided out of the resident scan
+before the next step sees it — the same correction the transform chain applies
+between un-fused passes, on data already in memory. A lazy `UVSet` re-reads and
+decodes the dataset once per pass, so this is the difference between N reads of
+the data and one; it changes no step's result.
+
+Fusion additionally requires every step in the run to accumulate from every
+scan ([`fit_selection`](@ref) returning [`Fringe.AllScans`](@ref)`()`), since
+one pass materializes one set of groups, and forbids pass repetition
+(`repeat_pass`), which is by definition not scan-local.
+
+Dispatches on the step INSTANCE, not just its type, so a step whose
+configuration decides the answer can answer for itself.
+"""
+fusable_grouping(step::CalibrationStep) = :global
 
 """
     start_pass!(step::SolveStep, ctx) -> nothing
@@ -154,14 +186,16 @@ returns, automatically, for every step — no extra code needed for that part.
 
 A step may request pass repetition (residual re-search rounds) by including
 `repeat_pass = true` in the returned NamedTuple — the runner streams the pass
-again (that key is stripped from the recorded diagnostics). Default: empty
-diagnostics.
+again (that key is stripped from the recorded diagnostics). A step declaring
+itself scan-local ([`fusable_grouping`](@ref)) may not: it is rejected, since a
+step needing the pass run again is not finalizable from one scan. Default:
+empty diagnostics.
 
 Together with [`start_pass!`](@ref) and [`process_scan!`](@ref) this is the
-step execution contract: the runner gives each solve step its own streaming
-pass, in the pipeline's declared order (every built-in stage consumes the
-residual of all previously-solved θ, so passes never share), and
-drives each pass through the streaming layer (`Fringe.map_groups`).
+step execution contract: the runner drives the steps in the pipeline's declared
+order through the streaming layer (`Fringe.map_groups`), each in its own pass —
+every built-in stage consumes the residual of all previously-solved θ — except
+where consecutive scan-local steps share one.
 """
 finish_pass!(step::SolveStep, ctx) = NamedTuple()
 

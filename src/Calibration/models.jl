@@ -221,21 +221,6 @@ function validate_station_gain_model(m::StationGainModel)
     return m
 end
 
-# ── Routing signatures ───────────────────────────────────────────────────────
-
-# The bandpass component's routing signature: a time-invariant offset resolved
-# in frequency by `ChannelBlocks` — one free value per block of channels, the
-# station's instrumental frequency response. `ChannelBlocks(1)` is the classic
-# free per-channel bandpass; a larger block ties channels together.
-#
-# The frequency segmentation IS the signature. The R–L offset is the same term
-# and the same time segmentation over `GlobalFrequency`, and the searched
-# per-scan constant differs only in time — so a term-level test cannot tell
-# them apart, and only this one says "resolved in frequency".
-_is_bandpass(tc) =
-    tc.component.term isa ConstantTerm && tc.component.time isa GlobalTime &&
-    tc.component.freq isa ChannelBlocks
-
 # ── Summaries ────────────────────────────────────────────────────────────────
 tying_label(::PerFeed) = "perfeed"
 tying_label(::SharedFeeds) = "shared"

@@ -12,6 +12,18 @@ struct _ProtoProbe <: Gustavo.SolveStep end
 struct _ThirdPartyStep <: Gustavo.SolveStep end
 Gustavo.provides(::_ThirdPartyStep) = :thirdparty
 
+# A scan-local step that accumulates from a SUBSET of the scans — the one
+# property that keeps a `:scan` step out of a shared pass.
+struct _SubsetScanStep <: Gustavo.SolveStep end
+Gustavo.fusable_grouping(::_SubsetScanStep) = :scan
+Gustavo.fit_selection(::_SubsetScanStep, _) = ScanIndices(1)
+
+# A step whose declaration contradicts itself: scan-local, yet asking for the
+# pass to be run again.
+struct _RepeatingScanStep <: Gustavo.SolveStep end
+Gustavo.fusable_grouping(::_RepeatingScanStep) = :scan
+Gustavo.finish_pass!(::_RepeatingScanStep, ctx) = (; repeat_pass = true)
+
 # A transform with no apply_transform! implementation (error-path probe).
 struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
 
@@ -26,6 +38,8 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test Gustavo.fit_selection(s, Gustavo.StepSolution[]) isa AllScans
         @test Gustavo.provides(s) == :nothing
         @test Gustavo.required_grouping(s) == :any
+        # A step that has not declared itself scan-local is never fused.
+        @test Gustavo.fusable_grouping(s) == :global
         # The executor-driven visitor contract has working defaults.
         @test Gustavo.start_pass!(s, nothing) === nothing
         @test Gustavo.process_scan!(s, nothing, nothing, nothing) === nothing
@@ -37,14 +51,44 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test Gustavo.provides(Bandpass()) == :bandpass
         @test Gustavo.provides(TemporalSmoother()) == :adhoc
         @test Gustavo.required_grouping(FringeFit()) == :scan_complete
-        # Bandpass has no fit_selection override — the pass streams every scan,
-        # same as the fringe pass (whose estimator masks rows, not scans).
+        # Both fits that finalize a scan inside `process_scan!` declare
+        # themselves scan-local; the two that close one system over every scan
+        # do not.
+        @test Gustavo.fusable_grouping(DispersionSBDFit()) == :scan
+        @test Gustavo.fusable_grouping(TemporalSmoother()) == :scan
+        @test Gustavo.fusable_grouping(FringeFit()) == :global
+        @test Gustavo.fusable_grouping(Bandpass()) == :global
+        # Neither Bandpass nor FringeFit overrides fit_selection — both passes
+        # stream every scan.
         @test Gustavo.fit_selection(Bandpass(), Gustavo.StepSolution[]) isa AllScans
-        @test Gustavo.fit_selection(
-            FringeFit(estimator = MatchedFilter(cross_hand_fit_on = ScanIndices(1))), Gustavo.StepSolution[],
-        ) isa AllScans
+        @test Gustavo.fit_selection(FringeFit(), Gustavo.StepSolution[]) isa AllScans
         # Solve steps refuse the sequential run_step chain.
         @test_throws ErrorException Gustavo.run_step(FringeFit(), Gustavo.CalibrationContext())
+    end
+
+    @testset "pass partitioning: which steps share one read" begin
+        prior = Gustavo.StepSolution[]
+        steps = Gustavo.SolveStep[
+            FringeFit(), DispersionSBDFit(), TemporalSmoother(), Bandpass(),
+        ]
+        @test Gustavo._fusable_run(steps, 1, prior) == 1:1   # :global, runs alone
+        @test Gustavo._fusable_run(steps, 2, prior) == 2:3   # the scan-local pair shares a pass
+        @test Gustavo._fusable_run(steps, 4, prior) == 4:4
+        # A scan-local step accumulating from a SUBSET of the scans still runs
+        # alone: one pass materializes one set of groups.
+        @test Gustavo._fusable_run(
+            Gustavo.SolveStep[DispersionSBDFit(), _SubsetScanStep()], 1, prior
+        ) == 1:1
+        @test Gustavo._fusable_run(
+            Gustavo.SolveStep[_SubsetScanStep(), DispersionSBDFit()], 1, prior
+        ) == 1:1
+    end
+
+    @testset "a fused step may not ask for its pass again" begin
+        uvset, _ = _build_fringe_uvset()
+        @test_throws "is not scan-local" fit(
+            TemporalSmoother() |> _RepeatingScanStep(), uvset,
+        )
     end
 
     @testset "steps compose in any declared order" begin

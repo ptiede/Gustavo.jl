@@ -11,13 +11,12 @@
 #   `model_components(element, geom)` and concatenates in list order.
 # - `MatchedFilter <: AbstractFringeEstimator` — HOW it is estimated: today's
 #   stage A (per-baseline delay/rate matched-filter search + closure-screened
-#   station WLS). The search, `Stationization`, and the cross-hand
-#   fit-on-subset selection live HERE, not on the model — an alternative
-#   estimator (e.g. a Schwab–Cotton-style global LS) plugs in with no
-#   vestigial search/stationization options.
+#   station WLS). The search and `Stationization` live HERE, not on the model —
+#   an alternative estimator (e.g. a Schwab–Cotton-style global LS) plugs in
+#   with no vestigial search/stationization options.
 # - The stage machinery the runner drives through the streaming layer:
-#   residual cubes for `rounds > 1`, R–L fit-on-subset masking, the stage-B
-#   component filter, and the detection/flag tables recorded on the solution.
+#   residual cubes for `rounds > 1`, the stage-B component filter, and the
+#   detection/flag tables recorded on the solution.
 
 """
     SingleBandDelay()
@@ -53,30 +52,51 @@ function model_components(::SingleBandDelay, geom::DataGeometry)
 end
 
 """
-    default_fringe_terms() -> NamedTuple
+    default_fringe_terms(; rel_time = PerScan()) -> NamedTuple
 
 The default [`FringeModel`](@ref) term list — the standard VLBI fringe model,
 specified feed by feed as a named list (the key names the component; compiled
 component order = list order):
 
 1. per-scan constant phase, feed-common (`SharedFeeds`): atmosphere/clock.
-2. R–L constant offset, `GlobalTime × FeedComponent(2)`: the instrumental
-   feed-2 − feed-1 phase offset, stable across the observation (EHT-HOPS /
-   rPICARD assumption) — solved once from all scans' cross hands, so bright
-   polarized scans pin it and weak scans inherit it.
+2. relative constant offset, `rel_time × FeedComponent(2)`: the instrumental
+   feed-2 − feed-1 phase offset.
 3. per-scan wideband (multi-band) delay, feed-common.
-4. R–L delay offset, `GlobalTime × FeedComponent(2)`: one instrumental offset
-   per station for the whole track. Replace `GlobalTime()` with `PerScan()` to
-   fit it per scan — its scatter is an instrument-stability diagnostic, at the
-   cost that a scan with no cross-hand detection leaves feed 2 untied.
+4. relative delay offset, `rel_time × FeedComponent(2)`: the instrumental
+   feed-2 − feed-1 group-delay offset.
 5. per-scan rate, feed-common: the fringe rate is common to both feeds. There
    is deliberately NO feed-specific rate here — the Rate phase is
    `2π·rate·(t − t0_global)` with the WHOLE-TRACK reference, so per-feed rate
-   noise is levered by hours into large, arbitrary scan-to-scan R–L phase
-   jumps; R–L rate is negligible (EHT-HOPS convention). A genuine offset is
-   opted into by ADDING `TiedComponent(Rate(), GlobalTime(),
-   GlobalFrequency(), FeedComponent(2))` — cross-hand rows then join the rate
-   solve.
+   noise is levered by hours into large, arbitrary scan-to-scan inter-feed
+   phase jumps; the inter-feed rate is negligible (EHT-HOPS convention). A
+   genuine offset is opted into by ADDING `TiedComponent(Rate(), GlobalTime(),
+   GlobalFrequency(), FeedComponent(2))`, which gives the inter-feed rate its
+   own column. Every correlation product's rate row enters the system either
+   way; the tying alone decides whether it reads as `ṙ_a − ṙ_b` (feed-common)
+   or `ṙ_{a,p} − ṙ_{b,q}` (feed-specific).
+
+`rel_time` is the time segmentation of BOTH inter-feed offsets (elements 2 and
+4), an `AbstractTimeSegmentation`:
+
+- `PerScan()` (default) fits an offset per scan, so its scan-to-scan scatter is
+  a direct instrument-stability diagnostic, and the model has no cross-scan
+  column — each scan's system is independent, which is what lets consecutive
+  scan-local steps share one pass over the data.
+- `GlobalTime()` fits ONE offset per station for the whole track (the EHT-HOPS
+  / rPICARD assumption that the instrumental offset is stable): bright
+  polarized scans pin it and weak scans inherit it, so a scan with no
+  cross-hand detection still has feed 2 tied. The cost is that a track-global
+  column couples every scan into one system, which forgoes scan fusion.
+
+The phase offset (element 2) also absorbs the source's cross-hand phase, which
+is not separable from it — both are a rigid shift of the feed-2 block. So the
+offset is estimable only up to that constant, and calibrated cross-hand phase
+carries one conventional constant per segment: per scan under `PerScan()`
+(scan-to-scan jitter, since each scan estimates its own), one for the track
+under `GlobalTime()`. `GlobalTime()` is therefore also how to ask for a
+track-constant cross-hand phase convention. A source whose cross-hand phase
+genuinely varies scan to scan cannot be represented under `GlobalTime()`: the
+variation lands in the residuals, where the robust loss downweights it.
 
 Ionospheric dispersion (dTEC) and single-band delay (SBD) are NOT modeled
 here — they are fit by a separate [`DispersionSBDFit`](@ref) pipeline step,
@@ -85,11 +105,11 @@ on the fringe-corrected residual.
 Omit an element to drop the effect; add a `Calibration.TiedComponent` (term ×
 time segmentation × frequency segmentation × feed tying) to model a new one.
 """
-default_fringe_terms() = (
+default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = (
     atmos = TiedComponent(ConstantTerm(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    rl_phase = TiedComponent(ConstantTerm(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
+    rel_phase = TiedComponent(ConstantTerm(), rel_time, GlobalFrequency(), FeedComponent(2)),
     mbd = TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    rl_delay = TiedComponent(Delay(), GlobalTime(), GlobalFrequency(), FeedComponent(2)),
+    rel_delay = TiedComponent(Delay(), rel_time, GlobalFrequency(), FeedComponent(2)),
     rate = TiedComponent(Rate(), PerScan(), GlobalFrequency(), SharedFeeds()),
 )
 
@@ -144,8 +164,7 @@ function FringeModel(; terms = default_fringe_terms())
 end
 
 """
-    MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1,
-                  cross_hand_fit_on = AllScans())
+    MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1)
 
 HOW the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)):
 today's stage A — a per-baseline delay/rate matched-filter `search` on every
@@ -154,19 +173,14 @@ the feeds and solves any track-global columns. `rounds` re-runs the search on
 the residual (each round divides out the current solution and accumulates the
 leftover) — an iteration knob of THIS estimator.
 
-`cross_hand_fit_on` selects which scans' CROSS-HAND rows feed the station
-solve (fit-on-subset / apply-everywhere: fit the R–L offsets from a few bright
-polarized scans, apply them track-wide). Parallel-hand rows are unaffected.
-
 When `search.pfa_max` is finite and `closure` is left at its default, the
 stationization's fixed SNR floor is dropped (`snr_min = 0`): the PFA gate IS
 the acceptance decision. A custom `closure` is used as given.
 """
-Base.@kwdef struct MatchedFilter{S <: AbstractScanSelection} <: AbstractFringeEstimator
+Base.@kwdef struct MatchedFilter <: AbstractFringeEstimator
     search::FringeSearch = FringeSearch()
     closure::Stationization = Stationization()
     rounds::Int = 1
-    cross_hand_fit_on::S = AllScans()
 end
 
 # ── Model compilation ─────────────────────────────────────────────────────────
@@ -243,13 +257,6 @@ _same_component_signature(a::TiedComponent, b::TiedComponent) =
 
 _same_freq_segmentation(a, b) = a == b
 _same_freq_segmentation(a::FreqGroups, b::FreqGroups) = a.ranges == b.ranges
-
-# Whether the compiled fringe components opt into a solvable feed-specific
-# rate (an R–L rate column) — cross-hand rows must then join the rate system.
-# Accepts the named component tree (or any component collection).
-_has_feed_rate(comps::NamedTuple) = _has_feed_rate(_flatten_components(comps))
-_has_feed_rate(comps) =
-    any(tc -> tc.component.term isa Rate && tc.tying isa FeedComponent, comps)
 
 # What `MatchedFilter` does with a compiled component's θ block:
 #
@@ -340,22 +347,11 @@ end
 
 # The effective Stationization for a MatchedFilter run: with the PFA gate
 # active and the DEFAULT closure, the search's `valid` IS the acceptance
-# decision — drop the fixed SNR floor (the legacy solver's rule). A customized
-# closure is honored as given. An opt-in R–L rate needs the cross-hand rows in
-# the rate system, so `cross_hand_rate` is forced on.
-function resolve_closure(est::MatchedFilter, rl_rate_on::Bool)
+# decision — drop the fixed SNR floor. A customized closure is honored as given.
+function resolve_closure(est::MatchedFilter)
     c = est.closure
-    if isfinite(est.search.pfa_max) && c == Stationization()
-        c = Stationization(snr_min = 0.0)
-    end
-    if rl_rate_on && !c.cross_hand_rate
-        c = Stationization(;
-            snr_min = c.snr_min, cross_hand_rate = true, phase_rewrap_iters = c.phase_rewrap_iters,
-            reject_sigma = c.reject_sigma, reject_iters = c.reject_iters,
-            systematic_delay = c.systematic_delay, systematic_rate = c.systematic_rate,
-        )
-    end
-    return c
+    return isfinite(est.search.pfa_max) && c == Stationization() ?
+        Stationization(snr_min = 0.0) : c
 end
 
 # ── Stage machinery over the streaming layer ─────────────────────────────────
@@ -389,33 +385,6 @@ function residual_vis(
     ga = view(g, :, :, first.(ants), first.(feeds))
     gb = view(g, :, :, last.(ants), last.(feeds))
     return _residual_cell.(stack[:vis], ga, gb)
-end
-
-# R–L fit-on-subset: invalidate the CROSS-HAND detections of every scan the
-# estimator's `cross_hand_fit_on` selection does NOT pick, so only the selected
-# scans' cross-hand rows feed the station solve — the solved time-global R–L
-# components still apply to every scan. Parallel-hand rows are untouched. `dets`
-# is the per-scan detection `DimStack` vector (mutated); `snr` supplies per-scan
-# SNRs for selections that need them.
-function mask_unselected_cross_hands!(dets, fit_on::AbstractScanSelection, groups, snr)
-    fit_on isa AllScans && return dets
-    recs = [
-        (; index = s.index, source = s.source, scan = s.scan, snr = Float64(snr[s.index]))
-            for s in groups
-    ]
-    sel = Set(select_scans(fit_on, recs))
-    for (gi, d) in enumerate(dets)
-        gi in sel && continue
-        feeds = _scan_feeds(d)
-        for p in eachindex(feeds)
-            fa, fb = feeds[p]
-            fa == fb && continue
-            for bi in axes(d, 1)
-                d[bi, p] = _invalid_detection(typeof(d[bi, p]))
-            end
-        end
-    end
-    return dets
 end
 
 # EHT-HOPS-style station flags: a station that PARTICIPATES in a scan (has

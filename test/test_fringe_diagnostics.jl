@@ -18,7 +18,7 @@ using HDF5
         @test !isempty(rows)
         @test length(rows) == sol.info.nscan
         r1 = first(rows)
-        @test haskey(r1, :scan) && haskey(r1, :max_snr) && haskey(r1, :chi) && haskey(r1, :ncomp)
+        @test haskey(r1, :scan) && haskey(r1, :max_snr) && haskey(r1, :ncomp)
         @test all(r -> r.max_snr >= 0, rows)
 
         # PFA column: the solve records the per-scan effective search cells, and

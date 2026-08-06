@@ -68,8 +68,8 @@
 
     function bp_leaves(sol)
         bstep = CAL._step(sol, :bandpass)
-        pplan = FP._bandpass_plan(bstep.model, bstep.layout)
-        aplan = FP._amp_bandpass_plan(bstep.model, bstep.layout)
+        pplan = bstep.layout.plantree.phase.bandpass
+        aplan = bstep.layout.plantree.logamp.bandpass
         return CAL._component_leaf(pplan, bstep.θ), CAL._component_leaf(aplan, bstep.θ)
     end
     pleaf_c, aleaf_c = bp_leaves(sol_closure)

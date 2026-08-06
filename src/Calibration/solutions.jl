@@ -73,7 +73,7 @@ A solved calibration: the composition of every pipeline step's own finished
 [`StepSolution`](@ref). The second form is the common single-model
 convenience — a hand-built or extracted solution with exactly one step, named
 `name`. `geom::DataGeometry` is the grid every step's own layout was planned
-over, and `info` a NamedTuple of solution-level diagnostics (per-scan SNR, χ,
+over, and `info` a NamedTuple of solution-level diagnostics (per-scan SNR,
 residuals, …) — distinct from each step's own `info`.
 
 Component names are local to each step's own model and may repeat across
@@ -160,34 +160,15 @@ The pipeline steps recorded on `sol`, in run order.
 """
 stage_names(sol::CalibrationSolution) = Symbol[s.name for s in sol.steps]
 
-# The step named `name`, or an ArgumentError naming the steps actually
-# recorded — the shared lookup behind every by-stage-name accessor.
-function _step(sol::CalibrationSolution, name::Symbol)
-    i = findfirst(s -> s.name === name, sol.steps)
-    i === nothing && throw(
-        ArgumentError("solution has no stage $(repr(name)); recorded stages: $(stage_names(sol)).")
-    )
-    return sol.steps[i]
-end
 
-# The step at position `i` in run order, or an ArgumentError reporting how
-# many steps `sol` actually has — the by-position counterpart to the
-# by-name lookup above, for callers that only know a step's position.
-function _step(sol::CalibrationSolution, i::Integer)
-    1 <= i <= length(sol.steps) || throw(
-        ArgumentError(
-            "solution has $(length(sol.steps)) step(s); no step at index $i."
-        )
-    )
-    return sol.steps[i]
-end
 
 """
-    sol[name::Symbol] -> CalibrationSolution
+    getindex(sol::CalibrationSolution, name::Symbol) -> CalibrationSolution
+    getindex(sol::CalibrationSolution, index::Integer) -> CalibrationSolution
 
 The step named `name`, alone — the same extraction as [`step_solution`](@ref).
 """
-function Base.getindex(sol::CalibrationSolution, name::Symbol)
+function Base.getindex(sol::CalibrationSolution, name)
     return step_solution(sol, name)
 end
 
@@ -397,34 +378,22 @@ function _role_dim(role::Symbol, n::Int, sol::CalibrationSolution, plan::Compone
     end
 end
 
-"""
-    step_solution(sol::CalibrationSolution, name::Symbol) -> CalibrationSolution
-    sol[name::Symbol]
-
-Extract ONE step alone from a fitted solution: the step named `name`'s own
-model/layout/θ, wrapped standalone — nothing else (contrast
-[`stage_solution`](@ref), which keeps every earlier step too). A step whose
-own model is GLOBALLY TIME-CONSTANT (every component `GlobalTime`, e.g.
-`Bandpass`'s) extracted this way is PORTABLE: apply it in a LATER
-pipeline run as a precal transform at the head of the chain,
-
-    bp = step_solution(sol_calibrators, :bandpass)
-    fit(ApplySolution(bp) |> FringeFit(...), uvset_full)
-
-so the fringe search runs on bandpass-corrected data and the new solve fits the
-correction ON TOP of it (fit-on-a-few-scans / apply-everywhere, across runs —
-the transform is recorded on the new solution and replayed by `calibrate`).
-Cross-set application matches stations BY NAME and requires the identical
-channel layout (see [`Gustavo.Fringe.ApplySolution`](@ref)); stations absent
-from the extraction get identity gains.
-"""
-function step_solution(sol::CalibrationSolution, name::Symbol)
-    step = _step(sol, name)
-    names = hasproperty(sol.info, :ant_names) ?
-        (; ant_names = sol.info.ant_names) : NamedTuple()
-    info = (; nant = step.layout.nant, nscan = 0, extracted = name, names...)
-    return CalibrationSolution([step], sol.geom, info)
+function step_solution(sol::CalibrationSolution, index)
+    stp = sol.steps[index]
+    stpout = stp isa AbstractVector ? stp : [stp]
+    return CalibrationSolution(stpout, sol.geom, sol.info)
 end
+
+function step_solution(sol::CalibrationSolution, name::Symbol)
+    i = findfirst(s -> s.name === name, sol.steps)
+    i === nothing && throw(
+        ArgumentError("solution has no stage $(repr(name)); recorded stages: $(stage_names(sol)).")
+    )
+    return step_solution(sol, i)
+end
+
+
+
 
 # ── Geometry from a UVSet ────────────────────────────────────────────────────
 
@@ -554,32 +523,83 @@ struct GeometryWindow
 end
 
 """
-    leaf_window(geom, leaf) -> GeometryWindow
+    leaf_window(geom::DataGeometry, leaf) -> GeometryWindow
+    leaf_window(sol::CalibrationSolution, leaf) -> GeometryWindow
 
 The [`GeometryWindow`](@ref) addressing the channels and times `leaf` carries,
-matched by value against `geom` (frequency by `isapprox` rtol 1e-9, time by atol
-1e-9 h). Errors if any leaf sample has no match in the geometry.
+matched by value against the geometry (frequency by `isapprox` rtol 1e-9, time by
+atol 1e-9 h). Errors if any leaf sample has no match.
+
+Addressing a solution rather than a bare geometry resolves the time axis
+according to the solution itself: a [`is_time_constant`](@ref) solution has no
+time dependence to locate, so its window carries the one time segment that
+exists and the leaf's epochs need not appear in the geometry at all. Anything
+that reads a per-time quantity off the window — a scan id, say — must address a
+`DataGeometry`, whose times are the fit grid itself.
 """
-function leaf_window(geom::DataGeometry, leaf)
+leaf_window(geom::DataGeometry, leaf) =
+    GeometryWindow(geom, _channel_indices(geom, leaf), _time_indices(geom, leaf))
+
+function leaf_window(sol::CalibrationSolution, leaf)
+    geom = sol.geom
+    chan_idx = _channel_indices(geom, leaf)
+    is_time_constant(sol) ||
+        return GeometryWindow(geom, chan_idx, _time_indices(geom, leaf))
+    isempty(geom.times) &&
+        throw(ArgumentError("leaf_window: the solution's geometry carries no times."))
+    # Uniform `tseg_id`: any in-range time addresses the single segment.
+    nt = length(lookup(leaf[:vis], Ti))
+    return GeometryWindow(geom, chan_idx, fill(firstindex(geom.times), nt))
+end
+
+function _channel_indices(geom::DataGeometry, leaf)
     fs = lookup(leaf[:vis], Frequency)
-    ts = lookup(leaf[:vis], Ti)
-    chan_idx = Vector{Int}(undef, length(fs))
+    idx = Vector{Int}(undef, length(fs))
     for (i, f) in enumerate(fs)
         j = findfirst(g -> isapprox(g, Float64(f); rtol = 1.0e-9), geom.channel_freqs)
         isnothing(j) &&
             throw(ArgumentError("leaf_window: channel frequency $f not found in geometry"))
-        chan_idx[i] = j
+        idx[i] = j
     end
-    ti_idx = Vector{Int}(undef, length(ts))
+    return idx
+end
+
+function _time_indices(geom::DataGeometry, leaf)
+    ts = lookup(leaf[:vis], Ti)
+    idx = Vector{Int}(undef, length(ts))
     for (i, t) in enumerate(ts)
         j = findfirst(g -> isapprox(g, Float64(t); atol = 1.0e-9), geom.times)
         isnothing(j) && throw(ArgumentError("leaf_window: time $t not found in geometry"))
-        ti_idx[i] = j
+        idx[i] = j
     end
-    return GeometryWindow(geom, chan_idx, ti_idx)
+    return idx
 end
 
 # ── Apply ────────────────────────────────────────────────────────────────────
+
+"""
+    is_time_constant(sol::CalibrationSolution) -> Bool
+    is_time_constant(ev::GainEvaluator) -> Bool
+
+Whether the gains carry no time dependence at all: every component's term
+declares no `:Ti` coordinate AND its time segmentation resolves to a single
+segment (a [`Bandpass`](@ref Gustavo.Bandpass) step's `GlobalTime` components,
+for instance). Such gains are a function of channel, station and feed alone, so
+they apply to data on ANY time axis — the fit-once / apply-anywhere property
+[`step_solution`](@ref), [`leaf_window`](@ref) and
+[`Gustavo.Fringe.ApplySolution`](@ref) rest on.
+"""
+is_time_constant(sol::CalibrationSolution) =
+    all(s -> is_time_constant(GainEvaluator(s.model, s.layout)), sol.steps)
+
+function is_time_constant(ev::GainEvaluator)
+    for plan in ev.layout.plans
+        :Ti in term_axes(plan.term) && return false
+        isempty(plan.tseg_id) && continue
+        all(==(first(plan.tseg_id)), plan.tseg_id) || return false
+    end
+    return true
+end
 
 """
     apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true) -> UVSet
@@ -590,6 +610,12 @@ baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
     V_corr = V / (g_a[fa] · conj(g_b[fb])),    W_corr = W · |g_a · g_b|²
 
 Samples where either gain magnitude underflows are flagged (weight 0, vis NaN).
+
+Channels are located in `sol`'s geometry by frequency, so `uvset` may carry any
+subset of the channels the solve covered. Times are located the same way unless
+`sol` [`is_time_constant`](@ref), in which case the time axis is free: a
+bandpass fit on scan-averaged data, or on a different observation, corrects data
+at full time resolution.
 
 `apply_flags` (default `true`) additionally zero-weights the solution's
 recorded flags, when present in `sol.info` (the fringe solver records both):
@@ -614,7 +640,7 @@ function UVData.apply_calibration(
         private || (leaf = rebuild_visibilities(
             leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights])),
         ))
-        win = leaf_window(sol.geom, leaf)
+        win = leaf_window(sol, leaf)
         g = _composed_gains(sol, win.chan_idx, win.ti_idx)   # (nchan_leaf, nti_leaf, nant, 2)
         _apply_gains!(leaf, g; executor)
         _flag_solution_rows!(

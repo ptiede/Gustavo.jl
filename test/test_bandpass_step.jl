@@ -17,8 +17,12 @@
 # One component's θ block from a step's own layout. `i` indexes
 # `step.layout.plans` (phase components first, then log-amplitude).
 _blk(step, i) = step.θ[CAL.component_ranges(step.layout)[i]]
-_pc_phase_idx(step) = findfirst(CAL._is_bandpass, CAL.phase_components(step.model))
-_pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model))
+
+# The bandpass step's own components, reached by the names its model gives them.
+_bp_phase_plan(step) = step.layout.plantree.phase.bandpass
+_bp_amp_plan(step) = step.layout.plantree.logamp.bandpass
+_bp_phase(step) = step.θ[_bp_phase_plan(step).range]
+_bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
 @testset "Bandpass step (new engine)" begin
     nant, nspw, nchan = 4, 2, 8
@@ -58,21 +62,16 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         end
         # Per-channel phase + log-amp bandpass: rtol 1e-12 (fold association).
         bn = CAL._step(sol_n, :bandpass); bo = CAL._step(sol_o, :bandpass)
-        ipn = _pc_phase_idx(bn); ipo = _pc_phase_idx(bo)
-        @test isapprox(_blk(bn, ipn), _blk(bo, ipo); rtol = 1.0e-12, atol = 1.0e-12)
-        @test any(!=(0), _blk(bn, ipn))
-        jan = _pc_amp_idx(bn); jao = _pc_amp_idx(bo)
-        @test isapprox(
-            _blk(bn, bn.layout.nphase + jan), _blk(bo, bo.layout.nphase + jao);
-            rtol = 1.0e-12, atol = 1.0e-12,
-        )
-        @test any(!=(0), _blk(bn, bn.layout.nphase + jan))
+        @test isapprox(_bp_phase(bn), _bp_phase(bo); rtol = 1.0e-12, atol = 1.0e-12)
+        @test any(!=(0), _bp_phase(bn))
+        @test isapprox(_bp_amp(bn), _bp_amp(bo); rtol = 1.0e-12, atol = 1.0e-12)
+        @test any(!=(0), _bp_amp(bn))
         # Stage provenance: the bandpass stage's own model carries only the
-        # bandpass component (nothing merged in from the fringe stage), so it
-        # is the sole entry of each group and `ipn`/`jan` (found above) sit at 1.
+        # bandpass component (nothing merged in from the fringe stage), so it is
+        # the sole entry of each group and spans that group's whole θ block.
         @test stage_names(sol_n) == [:fringe, :bandpass]
         @test length(CAL.phase_components(bn.model)) == 1 && length(CAL.logamp_components(bn.model)) == 1
-        @test ipn == 1 && jan == 1
+        @test _bp_phase(bn) == _blk(bn, 1) && _bp_amp(bn) == _blk(bn, bn.layout.nphase + 1)
         @test stage_info(sol_n, :bandpass).nscans == length(FP.scan_stream(uvset).groups)
         @test stage_info(sol_n, :bandpass).t_pass > 0
         @test :refine ∉ stage_names(sol_n)     # no DispersionSBDFit step in this pipeline at all
@@ -138,13 +137,12 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
             uvset,
         )
         bg = CAL._step(sol_g, :bandpass); bn = CAL._step(sol_n, :bandpass)
-        ipg = _pc_phase_idx(bg)
-        @test length(_blk(bg, ipg)) * k == length(_blk(bn, _pc_phase_idx(bn)))
-        @test any(!=(0), _blk(bg, ipg))
+        @test length(_bp_phase(bg)) * k == length(_bp_phase(bn))
+        @test any(!=(0), _bp_phase(bg))
 
         # The tie is structural: every channel of a block addresses one θ slot,
         # so the evaluated bandpass gain is constant across the block.
-        plan = FP._bandpass_plan(bg.model, bg.layout)
+        plan = _bp_phase_plan(bg)
         @test plan.fseg_id == repeat(1:(nglob ÷ k), inner = k)
         _, gbp = FP.fringe_bandpass_spectrum(sol_g)
         for a in 1:nant, f in 1:2, b in 1:(nglob ÷ k)
@@ -159,17 +157,30 @@ _pc_amp_idx(step) = findfirst(CAL._is_bandpass, CAL.logamp_components(step.model
         bps = step_solution(sol_n, :bandpass)
         bp = only(bps.steps)
         @test length(bp.model.phase) == 1 && length(bp.model.logamp) == 1
-        @test CAL._is_bandpass(bp.model.phase[1])
+        @test keys(bp.layout.plantree.phase) == (:bandpass,)
         bn = CAL._step(sol_n, :bandpass)
-        ipn = _pc_phase_idx(bn)
-        jan = _pc_amp_idx(bn)
-        @test _blk(bp, 1) == _blk(bn, ipn)
-        @test _blk(bp, bp.layout.nphase + 1) == _blk(bn, bn.layout.nphase + jan)
+        @test _bp_phase(bp) == _bp_phase(bn)
+        @test _bp_amp(bp) == _bp_amp(bn)
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
         # A solution with no bandpass STEP at all refuses extraction.
         sol_f = fit(FringeFit(model = fm), uvset)
         @test_throws ArgumentError step_solution(sol_f, :bandpass)
         @test_throws "no stage :bandpass" step_solution(sol_f, :bandpass)
+    end
+
+    @testset "validate_bandpass rejects a model the estimator cannot solve" begin
+        # Both halves off compiles no component at all, so the step would
+        # accumulate every scan and write nowhere — rejected at compile time,
+        # before any data is read.
+        @test_throws ArgumentError fit(Bandpass(model = BandpassModel(phase = false, amp = false)), uvset)
+        @test_throws "BandpassModel fits nothing" fit(
+            Bandpass(model = BandpassModel(phase = false, amp = false)), uvset,
+        )
+        # JointALS is stricter: one complex gain per (station, feed, segment)
+        # needs both halves, not just one.
+        @test_throws "JointALS requires" fit(
+            Bandpass(model = BandpassModel(amp = false), estimator = JointALS()), uvset,
+        )
     end
 
     @testset "portable ApplySolution: same-set + cross-set by station name" begin

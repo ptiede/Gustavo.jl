@@ -17,7 +17,7 @@ using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
 using ..UVData: Frequency, Baseline, Feed, Pol, Scan
 using ..Calibration
-using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_bandpass, _is_dispersion,
+using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,
     _flatten_components, _component_leaf, _feed_node, _block_index, _step, _composed_gains
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
 # the model layer's element-compilation generic.
@@ -76,7 +76,7 @@ function plot_fringe_phases end
     plot_fringe_snr(sol)
     plot_fringe_snr(parent, sol)
 
-Per-scan max detection SNR (and χ) from the solver diagnostics. Provided by
+Per-scan max detection SNR from the solver diagnostics. Provided by
 `GustavoMakieExt`.
 """
 function plot_fringe_snr end
@@ -120,7 +120,8 @@ export FringeSearch, baseline_fringe_search
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
 export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask
-export Stationization, stationize_scan, station_closure_residuals
+export Stationization, station_closure_residuals
+export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
 export station_weight_scale

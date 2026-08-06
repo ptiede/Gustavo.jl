@@ -110,6 +110,33 @@ end
     @test 0.6 <= mean(σ2s) <= 1.5                   # ML σ² near truth
 end
 
+@testset "Scalar OU path: element type follows the data" begin
+    N, dt = 200, 1.0f0
+    times = collect(0.0f0:dt:(dt * (N - 1)))
+    θ = Float32[0.8 * sin(2π * k / 60) for k in 1:N]
+    y = θ .+ 0.1f0 .* Float32[sin(11k) for k in 1:N]
+    w = fill(100.0f0, N)
+
+    μf, Pf, μp, Pp, avec, ll = FRs.kalman_ou_filter(y, 1 ./ w, times; τ = 20.0f0, σ2 = 1.0f0)
+    @test eltype(μf) === Float32
+    @test eltype(avec) === Float32
+    @test ll isa Float32
+    @test eltype(FRs.rts_smooth(μf, Pf, μp, Pp, avec)[1]) === Float32
+    @test eltype(FRs.smooth_ou_track(y, w, times; τ = 20.0f0, σ2 = 1.0f0)) === Float32
+    @test FRs._init_track_var(y, w) isa Float32
+
+    τh, σ2h = FRs.fit_ou_hypers(y, w, times; τ0 = 10.0f0, σ2_0 = 0.5f0, τ_lo = 1.0f0, τ_hi = 1.0f4)
+    @test τh isa Float32
+    @test σ2h isa Float32
+    # The Float32 fit lands near the Float64 fit on the same data.
+    τ64, σ264 = FRs.fit_ou_hypers(
+        Float64.(y), Float64.(w), Float64.(times);
+        τ0 = 10.0, σ2_0 = 0.5, τ_lo = 1.0, τ_hi = 1.0e4,
+    )
+    @test isapprox(τh, τ64; rtol = 0.05)
+    @test isapprox(σ2h, σ264; rtol = 0.05)
+end
+
 @testset "fit_ou_hypers falls back on too-few samples" begin
     y = [0.1, NaN, 0.2, NaN]
     w = [1.0, 0.0, 1.0, 0.0]
@@ -150,47 +177,84 @@ function _dense_joint_gp(Hs, ys, rs, times, τ, σ2)
     return ll, Xgp
 end
 
+# A closure row for the multivariate filter: `x[a] − x[b]`. Only the geometry
+# fields are read there, so `val`/`w`/feeds are inert.
+_row(a, b) = FRs._ObsRow(a, b, 1, 1, 0.0, 1.0)
+
+# The dense design row the filter's `(a, b)` geometry stands for, for validating
+# against `_dense_joint_gp`.
+function _dense_rows(rows, n)
+    H = zeros(length(rows), n)
+    for (j, r) in enumerate(rows)
+        H[j, r.a] += 1.0
+        H[j, r.b] -= 1.0
+    end
+    return H
+end
+
 @testset "Multivariate OU Kalman ≡ dense joint GP" begin
     rng = MersenneTwister(0x515C)
     n, T = 3, 8
     τ = [3.0, 5.0, 8.0]
     σ2 = [0.6, 0.9, 0.4]
     times = sort(cumsum(rand(rng, T)) .* 2.0)
-    pairs = [(1, 2), (1, 3), (2, 3)]
-    Hs = Vector{Matrix{Float64}}(undef, T)
-    for k in 1:T
-        rows = Vector{Float64}[]
-        for (a, b) in pairs
-            h = zeros(n); h[a] = 1.0; h[b] = -1.0
-            push!(rows, h)
-        end
-        h = zeros(n); h[1] = 1.0; push!(rows, h)   # one anchor row keeps the GP well-posed
-        Hs[k] = Matrix(reduce(vcat, transpose.(rows)))
-    end
-    m = size(Hs[1], 1)
+    # Differences only — as in the joint adhoc solve, the proper OU prior (not an
+    # anchor row) is what leaves the common mode well-posed.
+    rows = [_row(1, 2), _row(1, 3), _row(2, 3)]
+    rowss = [rows for _ in 1:T]
+    Hs = [_dense_rows(rows, n) for _ in 1:T]
+    m = length(rows)
     ys = [randn(rng, m) .* 0.4 for _ in 1:T]
     rs = [fill(0.02, m) for _ in 1:T]
 
-    xf, Pf, xp, Pp, avecs, kal_ll = FRs.kalman_ou_mv_filter(Hs, ys, rs, times; τ = τ, σ2 = σ2)
+    xf, Pf, xp, Pp, avecs, kal_ll = FRs.kalman_ou_mv_filter(rowss, ys, rs, times; τ = τ, σ2 = σ2)
     xs, Ps = FRs.rts_smooth_mv(xf, Pf, xp, Pp, avecs)
     dense_ll, Xgp = _dense_joint_gp(Hs, ys, rs, times, τ, σ2)
 
     @test isapprox(kal_ll, dense_ll; atol = 1.0e-8)
-    @test maximum(abs(xs[k][i] - Xgp[i, k]) for k in 1:T for i in 1:n) < 1.0e-8
+    @test maximum(abs(xs[i, k] - Xgp[i, k]) for k in 1:T for i in 1:n) < 1.0e-8
 end
 
 @testset "Multivariate OU: diffuse (τ=0) dim is temporally independent" begin
-    # A τ=0 dimension carries a diffuse per-step prior and no temporal coupling —
-    # its RTS-smoothed value equals its filtered value (nothing to propagate back).
-    n, T = 2, 6
-    τ = [4.0, 0.0]             # dim 2 diffuse (the augmented χ pattern)
-    σ2 = [0.5, (2π)^2]
+    # A τ ≤ 0 dimension carries a diffuse per-step prior and no temporal coupling,
+    # so the RTS pass has nothing to propagate back: the smoothed track equals the
+    # filtered one exactly. Every dimension here is diffuse AND observed, so the
+    # equality is a statement about the transition, not about an idle state.
+    n, T = 3, 6
+    τ = zeros(3)
+    σ2 = [0.5, 0.5, (2π)^2]
     times = collect(0.0:(T - 1))
-    Hs = [Matrix{Float64}([1.0 0.0; 0.0 1.0]) for _ in 1:T]   # observe both dims directly
-    ys = [[0.1 * k, sin(k)] for k in 1:T]
-    rs = [fill(0.05, 2) for _ in 1:T]
-    xf, Pf, xp, Pp, avecs, _ = FRs.kalman_ou_mv_filter(Hs, ys, rs, times; τ = τ, σ2 = σ2)
+    rows = [_row(1, 2), _row(1, 3), _row(2, 3)]
+    rowss = [rows for _ in 1:T]
+    ys = [[0.1 * k, sin(k), cos(k)] for k in 1:T]
+    rs = [fill(0.05, 3) for _ in 1:T]
+    xf, Pf, xp, Pp, avecs, _ = FRs.kalman_ou_mv_filter(rowss, ys, rs, times; τ = τ, σ2 = σ2)
     xs, _ = FRs.rts_smooth_mv(xf, Pf, xp, Pp, avecs)
-    @test all(avecs[k][2] == 0.0 for k in 2:T)                # diffuse transition
-    @test maximum(abs(xs[k][2] - xf[k][2]) for k in 1:T) < 1.0e-10   # not smoothed across time
+    @test all(avecs[i, k] == 0.0 for i in 1:n, k in 2:T)             # diffuse transition
+    @test maximum(abs(xs[i, k] - xf[i, k]) for i in 1:n, k in 1:T) < 1.0e-12
+    @test any(!iszero, xf)                                           # the states ARE observed
+end
+
+@testset "Multivariate OU: element type follows the data" begin
+    n, T = 3, 5
+    rows = [_row(1, 2), _row(1, 3), _row(2, 3)]
+    rowss = [rows for _ in 1:T]
+    ys = [Float32[0.1, -0.2, 0.3] for _ in 1:T]
+    rs = [fill(0.02f0, 3) for _ in 1:T]
+    times = collect(0.0f0:(T - 1))
+    xf, Pf, xp, Pp, avecs, ll = FRs.kalman_ou_mv_filter(
+        rowss, ys, rs, times; τ = Float32[3, 5, 8], σ2 = Float32[0.6, 0.9, 0.4],
+    )
+    @test eltype(xf) === Float32
+    @test eltype(Pf) === Float32
+    @test ll isa Float32
+    xs, _ = FRs.rts_smooth_mv(xf, Pf, xp, Pp, avecs)
+    @test eltype(xs) === Float32
+end
+
+@testset "Multivariate OU: a row outside the state is an error" begin
+    rows = [_row(1, 4)]
+    @test_throws "outside the state 1:3" FRs.kalman_ou_mv_filter(
+        [rows], [[0.1]], [[0.02]], [0.0]; τ = [3.0, 5.0, 8.0], σ2 = [0.6, 0.9, 0.4],
+    )
 end

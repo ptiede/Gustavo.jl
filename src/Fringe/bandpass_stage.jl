@@ -16,7 +16,7 @@
 # explicit per-scan source term instead of a closure that assumes it cancels.
 #
 # The graph/solve helpers (`_ObsRow`, `_solve_observable`, `_track_noise2`,
-# `_node`, `_chi_sign`) live in stationize.jl/adhoc.jl; the amp-bandpass
+# `_node`) live in stationize.jl/adhoc.jl; the amp-bandpass
 # `WLSEstimator` presets (`free_bandpass`, `polynomial_bandpass`,
 # `penalized_bandpass`) live below.
 
@@ -189,18 +189,39 @@ built once per pass. The fallback errors, naming what is missing.
 Two optional hooks:
 
     Gustavo.Fringe.bandpass_derotate(est::MyEstimator) -> Bool   # default true
-    Gustavo.Fringe.validate_bandpass(est::MyEstimator, model::BandpassModel)  # default no-op
+    Gustavo.Fringe.validate_bandpass(est::MyEstimator, model::BandpassModel)
 
 [`bandpass_derotate`](@ref) controls whether [`accumulate_bandpass!`](@ref)
 counter-rotates each AP before accumulating (see its docstring) —
 `SplitWLS` needs this (it sums scans together), `JointALS` does not (it fits
 each scan's own coherent visibility). [`validate_bandpass`](@ref) is checked
-at model-compile time, before any data is read.
+at model-compile time, before any data is read; a method for a new estimator
+REPLACES the default, so it must state at least as strong a requirement.
 """
 abstract type AbstractBandpassEstimator end
 
 bandpass_derotate(::AbstractBandpassEstimator) = true
-validate_bandpass(::AbstractBandpassEstimator, model::BandpassModel) = nothing
+
+"""
+    validate_bandpass(est::AbstractBandpassEstimator, model::BandpassModel)
+
+Reject a [`BandpassModel`](@ref) that `est` cannot solve, at the point the
+[`Bandpass`](@ref) step compiles its components — before any data is read.
+
+The default requires a model that fits SOMETHING: with both `phase` and `amp`
+off the step compiles no components at all, so it would accumulate every scan
+and write nowhere. An estimator with stricter needs defines its own method
+(see [`JointALS`](@ref)), which replaces this one.
+"""
+function validate_bandpass(::AbstractBandpassEstimator, model::BandpassModel)
+    # The step indexes its compiled components by name
+    # (`layout.plantree.phase.bandpass` and its log-amp twin) under exactly
+    # these two flags, so a model with neither set has nothing to solve into.
+    model.phase || model.amp || throw(
+        ArgumentError("BandpassModel fits nothing: at least one of `phase` or `amp` must be true."),
+    )
+    return nothing
+end
 function solve_bandpass! end
 solve_bandpass!(est::AbstractBandpassEstimator, θ, results, setup, model::BandpassModel; ref_ant) =
     error("$(typeof(est)) does not implement the bandpass estimator interface: define " *
@@ -317,10 +338,12 @@ residual and write it into the bandpass component's θ blocks. `plan`'s frequenc
 segmentation sets the resolution: one solved value per (station, feed, frequency
 segment), from the residual of every channel the segment holds. Per segment, the
 globally-closing per-feed phase is solved on the (station, feed) graph with a
-scale-invariant SNR gate; the per-segment χ's band-structure (the reference's
-R–L phase shape, parked in χ by the per-segment EVPA pin) is re-gauged into the
-feed-2 block, and each (station, feed) track is referenced to its circular-mean
-phase over segments (zero net applied phase).
+scale-invariant SNR gate, and each (station, feed) track is referenced to its
+circular-mean phase over segments (zero net applied phase). Cross-hand rows tie
+the two feed blocks per segment, so the inter-feed phase shape across the band is
+solved rather than conventional; the one band-constant inter-feed offset is not
+separable from the source's cross-hand phase and is removed by the circular-mean
+referencing.
 """
 function solve_phase_bandpass!(
         θ, rbar_bp, wbar_bp, bl_pairs, pol_products, nant, plan;
@@ -332,7 +355,6 @@ function solve_phase_bandpass!(
     segs = segment_groups(plan.fseg_id, length(plan.nchan_seg))
     nseg = length(segs)
     phase = fill(NaN, nant, 2, nseg)
-    chis = fill(NaN, nseg)
     for (fs, chans) in enumerate(segs)
         rows = _ObsRow[]
         for bi in axes(rbar_bp, Baseline), p in axes(rbar_bp, Pol)
@@ -343,32 +365,10 @@ function solve_phase_bandpass!(
             snr2 = _segment_snr2(r, w, w2, noise2[bi, p])
             snr2 >= snr_floor^2 || continue
             fa, fb = feeds[p]
-            push!(rows, _ObsRow(a, b, fa, fb, angle(r), snr2, _chi_sign(fa, fb)))
+            push!(rows, _ObsRow(a, b, fa, fb, angle(r), snr2))
         end
-        ph, chi, _, _ = _solve_observable(rows, nant, ref_ant; use_chi = true, rewrap = 0)
+        ph, _, _, _ = _solve_observable(rows, nant, ref_ant; rewrap = 0)
         phase[:, :, fs] .= ph
-        chis[fs] = chi
-    end
-
-    # Reassign χ's band-structure into the feed-2 block: the per-segment EVPA pin
-    # parked the reference's R–L phase shape in χ̂_s; subtract δ_s = χ̂_s − χ̄ from
-    # all feed-2 nodes so only the band-constant χ̄ stays conventional. Segments
-    # with no finite χ̂ (no cross-hand row cleared the SNR gate) are left
-    # unshifted — the R–L alignment is unobservable there.
-    acc_chi = zero(eltype(rbar_bp))
-    for fs in 1:nseg
-        isfinite(chis[fs]) && (acc_chi += cis(chis[fs]))
-    end
-    if abs(acc_chi) > 0
-        chibar = angle(acc_chi)
-        for fs in 1:nseg
-            isfinite(chis[fs]) || continue
-            δ = rem2pi(chis[fs] - chibar, RoundNearest)
-            @inbounds for a in 1:nant
-                v = phase[a, 2, fs]
-                isfinite(v) && (phase[a, 2, fs] = v - δ)
-            end
-        end
     end
 
     # Circular-mean reference per (station, feed) → zero net applied phase (gauge).

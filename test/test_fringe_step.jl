@@ -73,16 +73,16 @@
 
     @testset "opt-in cross-feed rate (a feed-2 Rate list element)" begin
         inj = [0.0, 2.0e-4, -1.0e-4, 5.0e-5]
-        uvset, _ = _build_fringe_uvset(rl_rate = inj)
-        # A solvable R–L rate is ADDED to the term list — a feed-specific Rate
+        uvset, _ = _build_fringe_uvset(rel_rate = inj)
+        # A solvable inter-feed rate is ADDED to the term list — a feed-specific Rate
         # component; the estimator detects it structurally and includes the
         # cross-hand rows in the rate system.
-        rl_terms = (;
+        rel_terms = (;
             _fringe_terms(dispersion = false, sbd = false)...,
-            rl_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
+            rel_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
         )
 
-        sol = fit(FringeFit(model = FringeModel(terms = rl_terms)), uvset)
+        sol = fit(FringeFit(model = FringeModel(terms = rel_terms)), uvset)
         fr = CAL._step(sol, :fringe)
         @test length(CAL.phase_components(fr.model)) == 6
         plan = fr.layout.plans[6]
@@ -91,70 +91,15 @@
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         uv0, _ = _build_fringe_uvset()
-        sol0 = fit(FringeFit(model = FringeModel(terms = rl_terms)), uv0)
+        sol0 = fit(FringeFit(model = FringeModel(terms = rel_terms)), uv0)
         fr0 = CAL._step(sol0, :fringe)
         plan0 = fr0.layout.plans[6]
         @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
-        # R–L rate is tied ≡ 0.
+        # The inter-feed rate is tied ≡ 0.
         sold = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
         @test length(CAL._step(sold, :fringe).model.phase) == 5
-    end
-
-    @testset "cross_hand_fit_on masks cross-hand rows" begin
-        uvset, _ = _build_fringe_uvset()      # per-feed delay/phi ⇒ real R–L offset
-        base = CAL._step(
-            fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset),
-            :fringe,
-        )
-        # The global feed-2 delay offset (component 4) is solved.
-        @test any(!iszero, base.θ[CAL.component_ranges(base.layout)[4]])
-
-        # Selecting the (only) scan is a no-op: bit-identical to AllScans.
-        same = CAL._step(
-            fit(
-                FringeFit(
-                    model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
-                    estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(1)),
-                ), uvset,
-            ), :fringe,
-        )
-        @test same.θ == base.θ
-
-        # Deselecting every scan removes the feed-tying cross rows: the solve
-        # still succeeds (feed 2 gets its own gauge pin; the QQ parallel rows
-        # keep its per-station columns constrained) and the feed-common delay
-        # is unperturbed beyond solver precision on this noiseless synthetic.
-        masked = CAL._step(
-            fit(
-                FringeFit(
-                    model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
-                    estimator = MatchedFilter(cross_hand_fit_on = Gustavo.ScanIndices(10_000)),
-                ), uvset,
-            ), :fringe,
-        )
-        @test all(isfinite, masked.θ)
-        @test masked.θ[CAL.component_ranges(masked.layout)[3]] ≈
-            base.θ[CAL.component_ranges(base.layout)[3]] atol = 1.0e-12
-
-        # The masker's direct contract: with an empty selection every
-        # CROSS-HAND detection is invalidated, parallel hands untouched.
-        geom = CAL.build_geometry(uvset)
-        st = FP.scan_stream(uvset; geom = geom)
-        stack, win = FP.materialize_cube(st, st.groups[1])
-        res = FP.search_scan(stack, st.geom, FP.FringeSearch())
-        feeds = [CAL.correlation_feed_pair(p) for p in pol_products(stack)]
-        d = FP._with_ti(copy(res), first(win.ti_idx))
-        FP.mask_unselected_cross_hands!([d], Gustavo.ScanIndices(10_000), st.groups, [NaN])
-        for p in eachindex(feeds), bi in axes(d, 1)
-            fa, fb = feeds[p]
-            if fa != fb
-                @test !d[bi, p].valid
-            else
-                @test d[bi, p] === res[bi, p]
-            end
-        end
     end
 
     @testset "transforms on the new path (incl. CalFunction)" begin
@@ -214,20 +159,17 @@
         @test :dispersion ∉ fieldnames(typeof(FringeFit()))
 
         # The options the legacy bridge used to reject (custom Stationization,
-        # the R–L rate opt-in, fit_on subsetting, arbitrary CalFunction
-        # transforms) run in FULL pipelines now — every pipeline is new-engine.
+        # the inter-feed rate opt-in, arbitrary CalFunction transforms) run in
+        # FULL pipelines now — every pipeline is new-engine.
         sol_full = fit(
             CalibrationPipeline(
                 CalFunction((stack, win) -> nothing),
                 FringeFit(
                     model = FringeModel(terms = (;
                         default_fringe_terms()...,
-                        rl_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
+                        rel_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
                     )),
-                    estimator = MatchedFilter(
-                        closure = FP.Stationization(snr_min = 3.0),
-                        cross_hand_fit_on = Gustavo.ScanIndices(1),
-                    ),
+                    estimator = MatchedFilter(closure = FP.Stationization(snr_min = 3.0)),
                 ),
                 Bandpass(), TemporalSmoother();
                 exec = ExecutionConfig(),
@@ -254,6 +196,17 @@
         # FringeModel's, so they never appear here regardless of geometry.
         comps = FP.fringe_phase_components(FringeModel(), geom)
         @test collect(map(sig, CAL._flatten_components(comps))) == [
+            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.FeedComponent),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.FeedComponent),
+            (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+        ]
+
+        # `rel_time` moves BOTH inter-feed offsets onto a track-global column.
+        gcomps = FP.fringe_phase_components(
+            FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime())), geom)
+        @test collect(map(sig, CAL._flatten_components(gcomps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.ConstantTerm, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -350,13 +303,13 @@ function FP.estimate_scan!(e::_NullEstimator, ctx, step, stack, win)
     e.scans[] += 1
     return (; max_snr = NaN)
 end
-FP.finish_estimate!(::_NullEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, rejected = 0)
+FP.finish_estimate!(::_NullEstimator, ctx, step) = (; ncomp = 0)
 FP.can_fit(::_NullEstimator, tc) = true
 
 # Declares no capability at all — the default. Every model term is unclaimed.
 struct _UnclaimingEstimator <: FP.AbstractFringeEstimator end
 FP.estimate_scan!(::_UnclaimingEstimator, ctx, step, stack, win) = (; max_snr = NaN)
-FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0, rejected = 0)
+FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
 
 @testset "fringe estimator seam" begin
     uvset, _ = _build_fringe_uvset()
@@ -449,7 +402,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; chi = 0.0, ncomp = 0
             FringeFit(model = FringeModel(terms = norate)), uvset,
         )
 
-        # The kind is PRESENT and the router signature is not: the R–L delay is
+        # The kind is PRESENT and the router signature is not: the inter-feed delay is
         # still a `:delay`, so only a signature-level check catches a wideband
         # delay tied across the whole track.
         globaldelay = map(_fringe_terms()) do t

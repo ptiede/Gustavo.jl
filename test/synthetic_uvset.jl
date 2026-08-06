@@ -54,8 +54,8 @@ function _build_fringe_uvset(;
         bandpass = nothing,    # optional (nant, 2, nspw*nchan) per-channel phase (rad)
         amp_bandpass = nothing, # optional (nant, 2, nspw*nchan) per-channel log-amp
         dtec = nothing,         # optional (nant,) station TEC (TECU, feed-common)
-        feed_common = false,    # tie delay/phi across feeds (zero true R-L offset)
-        rl_rate = nothing,      # optional (nant,) feed-2 − feed-1 rate offset (Hz) —
+        feed_common = false,    # tie delay/phi across feeds (zero true inter-feed offset)
+        rel_rate = nothing,      # optional (nant,) feed-2 − feed-1 rate offset (Hz) —
                                 #   exercises the opt-in RL(rate = ...) solve
 
         spw_origins = nothing, # optional (nspw,) explicit band start freqs (Hz) — overrides spw_sep
@@ -126,10 +126,10 @@ function _build_fringe_uvset(;
     t0_sec = ti_vals[1] * 3600.0
 
     # Injected parameters. Reference antenna 1 = 0 (so the recovered solution matches
-    # the gauge), others drawn small. `delay`/`phi` are PER-FEED (their constant R–L
+    # the gauge), others drawn small. `delay`/`phi` are PER-FEED (their constant inter-feed
     # offset is recovered by the model's global `FeedComponent(2)` delay/const terms);
     # `rate` is FEED-COMMON by default because the fringe model ties rate
-    # `SharedFeeds` (R–L rate tied ≡ 0); pass `rl_rate` to inject a feed-2
+    # `SharedFeeds` (the inter-feed rate tied ≡ 0); pass `rel_rate` to inject a feed-2
     # offset for the opt-in `RL(rate = ...)` solve.
     delay = zeros(nant, 2)         # seconds (per feed)
     rate = zeros(nant, 2)          # Hz (feed-common)
@@ -143,7 +143,7 @@ function _build_fringe_uvset(;
         end
     end
 
-    rl_rate === nothing || (rate[:, 2] .= rate[:, 1] .+ rl_rate)
+    rel_rate === nothing || (rate[:, 2] .= rate[:, 1] .+ rel_rate)
 
     if feed_common
         delay[:, 2] .= delay[:, 1]

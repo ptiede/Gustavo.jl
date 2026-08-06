@@ -11,7 +11,7 @@ using HDF5
 using Serialization: serialize, deserialize
 import DimensionalData
 import Gustavo.Calibration: CalibrationSolution, save_solution_hdf5, load_solution_hdf5,
-    nchannels, ntimes, _composed_gains
+    nchannels, ntimes, _composed_gains, _serializable_transforms
 
 # Write `info` (the solution's or one step's diagnostics NamedTuple) into HDF5
 # group `g`, generically: vectors and numbers go straight in; a NamedTuple or
@@ -84,9 +84,18 @@ function save_solution_hdf5(
 
         # Lossless Julia round-trip: the model carries Julia types HDF5 can't
         # represent natively, so embed the Serialization bytes (external readers
-        # ignore this dataset and use `gain/*` + `axes/*`).
+        # ignore this dataset and use `gain/*` + `axes/*`). The blob must carry
+        # `transforms`/`postcal` too: they are part of the correction
+        # `calibrate(sol, uvset)` reproduces, so a solution reloaded without them
+        # would apply strictly less than it was fit with.
         buf = IOBuffer()
-        serialize(buf, (; version = 3, sol.steps, sol.geom, sol.info))
+        serialize(
+            buf, (;
+                version = 4, sol.steps, sol.geom, sol.info,
+                transforms = _serializable_transforms(sol.transforms),
+                postcal = _serializable_transforms(sol.postcal),
+            ),
+        )
         jg = create_group(f, "julia")
         jg["blob"] = take!(buf)
     end
@@ -99,11 +108,13 @@ function load_solution_hdf5(path::AbstractString)
             error("load_solution_hdf5: $path has no julia/blob (not written by Gustavo, or gains-only export)")
         deserialize(IOBuffer(read(f["julia"]["blob"])))
     end
-    w.version == 3 || error(
+    w.version == 4 || error(
         "load_solution_hdf5: unsupported julia/blob version $(w.version) — saved by an " *
-            "incompatible Gustavo (the solution shape changed); re-solve to produce a current file.",
+            "incompatible Gustavo (version 3 and earlier did not record the solution's " *
+            "`transforms`/`postcal` chains, so such a file cannot reproduce the correction it " *
+            "was fit with); re-solve to produce a current file.",
     )
-    return CalibrationSolution(w.steps, w.geom, w.info)
+    return CalibrationSolution(w.steps, w.geom, w.info; transforms = w.transforms, postcal = w.postcal)
 end
 
 end # module

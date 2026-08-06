@@ -121,28 +121,21 @@ function Fringe.plot_fringe_phases(sol::CalibrationSolution; sites = :all, feeds
     return fig
 end
 
-# ── plot_fringe_snr: per-scan max SNR (+ χ) ───────────────────────────────────
+# ── plot_fringe_snr: per-scan max SNR ─────────────────────────────────────────
 function Fringe.plot_fringe_snr(parent, sol::CalibrationSolution)
     rows = fringe_snr_table(sol)
     scans = [Float64(r.scan) for r in rows]
     snr = [r.max_snr for r in rows]
-    chi = [r.chi for r in rows]
     ax = Axis(parent[1, 1]; xlabel = "scan", ylabel = "max detection SNR", title = "Fringe per-scan SNR")
     if !isempty(scans)
         scatter!(ax, scans, snr; markersize = 8, color = :seagreen)
         lines!(ax, scans, snr; color = (:seagreen, 0.5))
     end
-    axχ = Axis(parent[2, 1]; xlabel = "scan", ylabel = "stationization χ", title = "")
-    if !isempty(scans)
-        finite = isfinite.(chi)
-        any(finite) && scatter!(axχ, scans[finite], chi[finite]; markersize = 8, color = :firebrick)
-    end
-    linkxaxes!(ax, axχ)
     return parent
 end
 
 function Fringe.plot_fringe_snr(sol::CalibrationSolution)
-    fig = Figure(size = (640, 520))
+    fig = Figure(size = (640, 280))
     Fringe.plot_fringe_snr(fig, sol)
     return fig
 end

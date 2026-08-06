@@ -3,7 +3,7 @@
 # Report-style (non-plotting) diagnostics for a fringe `CalibrationSolution`,
 # plus the pure gain-extraction helpers the Makie plot stubs consume. Everything
 # here works off the solved model/θ/geometry and the solver's `info` NamedTuple
-# (per-scan max SNR / χ / component count), so it is Makie-free and unit-testable
+# (per-scan max SNR / component count), so it is Makie-free and unit-testable
 # without loading a plotting backend. The plot entry points themselves
 # (`plot_fringe_spectrum`, `plot_fringe_phases`, `plot_fringe_snr`) are stubs in
 # `Fringe.jl`, implemented by `GustavoMakieExt`.
@@ -19,10 +19,9 @@ end
 """
     fringe_snr_table(sol::CalibrationSolution) -> Vector{NamedTuple}
 
-Per-scan fringe-fit summary rows `(scan, max_snr, chi, ncomp, pfa)`, all pulled
-from the fringe step's own diagnostics (`stage_info(sol, :fringe)`). `chi`/
-`ncomp` are solve-wide scalars (the same value on every row, not literally
-per-scan). `pfa` is the scan's false-alarm probability [`fringe_pfa`](@ref):
+Per-scan fringe-fit summary rows `(scan, max_snr, ncomp, pfa)`, all pulled
+from the fringe step's own diagnostics (`stage_info(sol, :fringe)`). `ncomp` is a
+solve-wide scalar (the same value on every row, not literally per-scan). `pfa` is the scan's false-alarm probability [`fringe_pfa`](@ref):
 the chance that pure noise, searched over the scan's full
 delay×rate×baseline×product space, would produce a peak of at least `max_snr`
 — `pfa ≪ 1` marks a secure detection, `pfa` near 1 a likely FALSE fringe (`NaN`
@@ -33,14 +32,13 @@ function fringe_snr_table(sol::CalibrationSolution)
     step = _fringe_step(sol)
     step === nothing && return NamedTuple[]
     info = step.info
-    (haskey(info, :scan_snr) && haskey(info, :chi) && haskey(info, :ncomp)) || return NamedTuple[]
+    (haskey(info, :scan_snr) && haskey(info, :ncomp)) || return NamedTuple[]
     snr = info.scan_snr
-    chi = Float64(info.chi)
     ncomp = Int(info.ncomp)
     ncells = get(info, :scan_ncells, Float64[])
     return [
         (;
-                scan = s, max_snr = Float64(snr[s]), chi = chi, ncomp = ncomp,
+                scan = s, max_snr = Float64(snr[s]), ncomp = ncomp,
                 pfa = s <= length(ncells) ? fringe_pfa(snr[s], ncells[s]) : NaN,
             )
             for s in eachindex(snr)
@@ -56,13 +54,12 @@ function print_fringe_snr_table(rows; io = stdout)
     isempty(rows) && return println(io, "No per-scan fringe diagnostics available")
     println(io)
     println(io, "Fringe per-scan summary")
-    println(io, "scan   max_snr      chi   ncomp        pfa")
+    println(io, "scan   max_snr   ncomp        pfa")
     for r in rows
         println(
             io,
             lpad(string(r.scan), 4), "   ",
             lpad(_fmt(r.max_snr), 7), "   ",
-            lpad(_fmt(r.chi), 6), "   ",
             lpad(string(r.ncomp), 5), "   ",
             lpad(_fmt_pfa(get(r, :pfa, NaN)), 8),
         )
@@ -146,24 +143,24 @@ end
     fringe_bandpass_spectrum(sol::CalibrationSolution) -> (freqs, gains)
 
 Like [`fringe_gain_spectrum`](@ref) but evaluates ONLY the phase bandpass
-component — the per-scan delay slope (`2π·τ·(f−f0)`), constant, rate and R–L
+component — the per-scan delay slope (`2π·τ·(f−f0)`), constant, rate and inter-feed
 terms are zeroed — so `angle.(gains)` is the RESIDUAL instrumental passband
 ripple with the (large, station-dependent) delay wrap removed. This is the
 readable bandpass diagnostic: without it, a station with a big group delay shows a
 `2π·τ·(f−f0)` sawtooth that wraps many times across the band and buries the ripple.
 Returns `(channel_freqs, gains::(nchan, nant, 2))`. The bandpass is time-invariant,
-so no time index is needed. Errors if the model carries no bandpass component.
+so no time index is needed. Errors if the bandpass step fits no phase bandpass.
 """
 function fringe_bandpass_spectrum(sol::CalibrationSolution)
     step = _step(sol, :bandpass)
-    bp_i = findfirst(_is_bandpass, phase_components(step.model))
-    bp_i === nothing &&
-        error("fringe_bandpass_spectrum: model has no phase bandpass component")
-    # θ with every parameter zeroed EXCEPT the bandpass component's own
+    haskey(step.layout.plantree.phase, :bandpass) ||
+        error("fringe_bandpass_spectrum: the bandpass step fits no phase bandpass component")
+    # θ with every parameter zeroed EXCEPT the phase-bandpass component's own
     # contiguous range, so `evaluate_gains` returns the bandpass-only gain (all
-    # other terms → unit gain).
+    # other terms → unit gain) — including the log-amp bandpass, which shares
+    # this step's θ.
     θbp = fill!(similar(step.θ), 0)
-    rng = component_ranges(step.layout)[bp_i]
+    rng = step.layout.plantree.phase.bandpass.range
     θbp[rng] = step.θ[rng]
     ev = GainEvaluator(step.model, step.layout)
     g = evaluate_gains(ev, θbp, 1:(step.layout.nchan), 1:1)   # time-invariant → any ti
@@ -196,11 +193,11 @@ read, no re-search.
 One row per (scan-group index `scan`, 1-based `station`, `feed ∈ {1, 2}`):
 
 - `delay_ns`  — station group delay (ns): the per-scan feed-common delay plus, on
-  feed 2, the R–L delay the model fit (whether `:global` — the same offset every
-  scan — or `:perscan`; see `_fringe_model`'s `rl_delay`).
+  feed 2, the inter-feed delay offset the model fit (per scan, or one offset for
+  the whole track — see `default_fringe_terms`' `rel_time`).
 - `rate_mHz`  — station fringe rate (mHz).
 - `phase_deg` — station constant phase (deg): per-scan feed-common phase plus, on
-  feed 2, the global R–L phase.
+  feed 2, the inter-feed phase offset.
 
 Summed from every stage-B component the fringe stage itself owns
 (`fringe_stage_components` — the delay/rate/constant terms, EXCLUDING the
@@ -244,7 +241,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
     delay_refine_θ = refine_i === nothing ? nothing : sol.steps[refine_i].θ
     nscan = refplan.shape[4]                                # PerScan ⇒ ntseg == #scan groups
     # First time index landing in each scan segment — used to look up every plan's
-    # own segment id for this scan (a `GlobalTime` R–L plan maps them all to 1, a
+    # own segment id for this scan (a `GlobalTime` inter-feed plan maps them all to 1, a
     # `PerScan` one to the scan itself, so the same lookup handles both bases).
     t0 = zeros(Int, nscan)
     for ti in eachindex(refplan.tseg_id)

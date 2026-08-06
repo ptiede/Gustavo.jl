@@ -149,7 +149,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         # (dTEC) and SBD are no longer part of FringeModel's term list; they
         # are a separate DispersionSBDFit step.
         @test length(f.model.terms) == 5
-        # No feed-specific Rate element: the R–L rate is tied ≡ 0 by default.
+        # No feed-specific Rate element: the inter-feed rate is tied ≡ 0 by default.
         @test !any(
             t -> t isa CAL.TiedComponent && t.component.term isa CAL.Rate &&
                 t.tying isa CAL.FeedComponent,
@@ -159,7 +159,6 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test f.estimator.search == FP.FringeSearch()
         @test f.estimator.closure == FP.Stationization()
         @test f.estimator.rounds == 1
-        @test f.estimator.cross_hand_fit_on isa AllScans
 
         d = DispersionSBDFit()
         @test d.dispersion == DispersionModel()

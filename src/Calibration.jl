@@ -10,9 +10,8 @@ module Calibration
 
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 using ..UVData
-using ..UVData: correlation_feed_pair, is_parallel_hand, same_feed_label,
-    parallel_hand_indices, cross_hand_indices, build_parallel_hand_mask,
-    phase_relative_to_ref
+using ..UVData: correlation_feed_pair, is_parallel_hand,
+    parallel_hand_indices, cross_hand_indices, phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,
     is_lazy, pol_products, baselines
 using LinearAlgebra
@@ -29,8 +28,8 @@ include("Calibration/evaluate.jl")
 include("Calibration/solutions.jl")
 
 # Feed / correlation-product conventions
-export correlation_feed_pair, is_parallel_hand, same_feed_label
-export parallel_hand_indices, cross_hand_indices, build_parallel_hand_mask
+export correlation_feed_pair, is_parallel_hand
+export parallel_hand_indices, cross_hand_indices
 
 # Weighted least squares (weights are always inverse variances)
 export design_matrices
@@ -72,6 +71,7 @@ export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
 
 # Calibration solution container, apply, serialization
 export CalibrationSolution, StepSolution, build_geometry, GeometryWindow, leaf_window
+export is_time_constant
 export save_solution, load_solution
 export save_solution_hdf5, load_solution_hdf5
 
