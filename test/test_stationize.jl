@@ -674,3 +674,99 @@ end
         end
     end
 end
+
+@testset "Stationize: per-product systematic floor" begin
+    # A delay outlier on one cross-hand row stands in for leakage: error that
+    # does not shrink with SNR, which is what the `_cross` floors exist to put
+    # into the weights.
+    rng = MersenneTwister(0x77)
+    nant, ref = 5, 1
+    bl = all_baselines(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    τ = 1.0e-9 .* randn(rng, nant, 2)
+    φ = 0.3 .* randn(rng, nant, 2)
+    D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0)
+    d = D[3, 2]                                   # a PQ row
+    D[3, 2] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, true))
+
+    @testset "defaulted cross floors reproduce the single-scalar path bit-for-bit" begin
+        uniform = stationize(
+            D, bl, pols, nant; ref_ant = ref,
+            opts = FR.Stationization(systematic_delay = 1.0e-12, systematic_rate = 1.0e-3),
+        )
+        explicit = stationize(
+            D, bl, pols, nant; ref_ant = ref,
+            opts = FR.Stationization(
+                systematic_delay = 1.0e-12, systematic_rate = 1.0e-3,
+                systematic_delay_cross = 1.0e-12, systematic_rate_cross = 1.0e-3,
+            ),
+        )
+        @test uniform.delay == explicit.delay
+        @test uniform.rate == explicit.rate
+        @test uniform.phase == explicit.phase
+    end
+
+    @testset "with no cross-hand rows the cross floors are inert" begin
+        pols_par = ["PP", "QQ"]
+        Dp = inject_detections(bl, pols_par, τ, zeros(nant, 2), φ, 0.0)
+        dp = Dp[2, 1]
+        Dp[2, 1] = FR.Detection{Float64}((10.0e-9, dp.rate, dp.phase, dp.amp, dp.snr, true))
+        base = stationize(
+            Dp, bl, pols_par, nant; ref_ant = ref,
+            opts = FR.Stationization(systematic_delay = 1.0e-12),
+        )
+        crossed = stationize(
+            Dp, bl, pols_par, nant; ref_ant = ref,
+            opts = FR.Stationization(
+                systematic_delay = 1.0e-12,
+                systematic_delay_cross = 1.0e-8, systematic_rate_cross = 1.0,
+            ),
+        )
+        @test isequal(base.delay, crossed.delay)
+        @test isequal(base.rate, crossed.rate)
+        @test isequal(base.phase, crossed.phase)
+    end
+
+    @testset "a cross-only floor reweights exactly the cross-hand rows" begin
+        # `LeastSquares` isolates the floor's effect from IRLS reweighting.
+        derr1(sol) = maximum(abs(sol.delay[a, 1] - (τ[a, 1] - τ[ref, 1])) for a in 1:nant)
+        # Within-feed-2 differences are set by the (consistent) QQ rows alone
+        # once the cross rows are floored away; the inter-feed offset stays with
+        # the cross rows, so it is excluded by differencing against station 1.
+        derr2(sol) = maximum(
+            abs((sol.delay[a, 2] - sol.delay[1, 2]) - (τ[a, 2] - τ[1, 2])) for a in 1:nant
+        )
+        uniform = stationize(
+            D, bl, pols, nant; ref_ant = ref,
+            opts = FR.Stationization(loss = FR.LeastSquares(), systematic_delay = 1.0e-12),
+        )
+        floored = stationize(
+            D, bl, pols, nant; ref_ant = ref,
+            opts = FR.Stationization(
+                loss = FR.LeastSquares(),
+                systematic_delay = 1.0e-12, systematic_delay_cross = 1.0e-8,
+            ),
+        )
+        # The floor moved the cross rows' delay weight, so the delay solution
+        # moved — away from the outlier: parallel-hand structure comes back.
+        @test floored.delay != uniform.delay
+        @test derr1(uniform) > 1.0e-11                # dragged by the 50 ns outlier
+        @test derr1(floored) < 1.0e-13
+        @test derr2(floored) < 1.0e-13
+        # Rate and phase carry no cross delay floor, so they are untouched.
+        @test floored.rate == uniform.rate
+        @test floored.phase == uniform.phase
+        # A floored row is still a row: coverage cannot change.
+        @test all(floored.covered)
+    end
+
+    @testset "constructor defaults" begin
+        o = FR.Stationization(systematic_delay = 3.0e-12, systematic_rate = 2.0e-3)
+        @test o.systematic_delay_cross == 3.0e-12
+        @test o.systematic_rate_cross == 2.0e-3
+        o2 = FR.Stationization(systematic_delay = 1.0e-12, systematic_delay_cross = 2.0e-11)
+        @test o2.systematic_delay == 1.0e-12
+        @test o2.systematic_delay_cross == 2.0e-11
+        @test FR.Stationization() == FR.Stationization()
+    end
+end

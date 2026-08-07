@@ -97,7 +97,8 @@ robust_weight(::Cauchy, u::Real) = inv(1 + u)
 
 """
     Stationization(; snr_min, phase_rewrap_iters, loss,
-                     loss_scale, irls_iters, systematic_delay, systematic_rate)
+                     loss_scale, irls_iters, systematic_delay, systematic_rate,
+                     systematic_delay_cross, systematic_rate_cross)
 
 Options for [`solve_station_systems!`](@ref). `snr_min` drops detections below
 this SNR; `phase_rewrap_iters` re-wraps phase residuals to handle differences
@@ -129,7 +130,13 @@ added in quadrature to the CRB uncertainty of delay/rate rows:
 systematics (or synthetic data) drives `z` to the numerical noise floor, where
 the loss has no real outlier to find and merely reweights rounding noise; a
 nonzero floor keeps the residual distribution meaningful at whatever precision
-the instrument actually delivers. Phase rows carry no systematic term.
+the instrument actually delivers.
+
+The `_cross` variants floor cross-hand rows (the row's two feeds differ) and
+default to their parallel-hand counterparts. A larger cross floor expresses
+error that does not shrink with SNR — leakage, and residual field rotation while
+no feed-rotation term is modeled — so the CRB weight cannot capture it. Phase
+rows carry no systematic term.
 """
 Base.@kwdef struct Stationization
     snr_min::Float64 = 6.0
@@ -139,6 +146,8 @@ Base.@kwdef struct Stationization
     irls_iters::Int = 5
     systematic_delay::Float64 = 0.0
     systematic_rate::Float64 = 0.0
+    systematic_delay_cross::Float64 = systematic_delay
+    systematic_rate_cross::Float64 = systematic_rate
 end
 
 # IRLS weight update. `w` (mutated) is the effective weight vector fed to the
@@ -560,7 +569,9 @@ function _solve_kind_cols!(
         θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol,
     )
     getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
-    sys_err = kind === :delay ? opts.systematic_delay : kind === :rate ? opts.systematic_rate : 0.0
+    sys_par = kind === :delay ? opts.systematic_delay : kind === :rate ? opts.systematic_rate : 0.0
+    sys_cross = kind === :delay ? opts.systematic_delay_cross :
+        kind === :rate ? opts.systematic_rate_cross : 0.0
     spread_key = kind === :delay ? :freq_rms : :time_rms
     rewrap = kind === :phase ? opts.phase_rewrap_iters : 0
 
@@ -615,7 +626,7 @@ function _solve_kind_cols!(
             (isempty(nsA) || isempty(nsB)) && continue
             push!(rowA, nsA); push!(rowB, nsB)
             push!(rval, getval(det))
-            push!(rw, _row_weight(_sigma_stat(kind, det.snr, σν, σt), sys_err))
+            push!(rw, _row_weight(_sigma_stat(kind, det.snr, σν, σt), cross ? sys_cross : sys_par))
             push!(rcross, cross); push!(rscan, sidx)
             push!(rsta_a, a); push!(rsta_b, b)
         end
