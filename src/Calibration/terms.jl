@@ -6,10 +6,10 @@
 # parameter vector — `term_eval` hands it its own named parameters and the
 # coordinates it asked for.
 #
-# Writing a term means: a `term_axes`, a `param_shapes`, a `term_eval`, and a
-# coordinate builder for each axis declared. `term_label` is optional — it
-# defaults to the type name and only needs an override for a more evocative
-# diagnostic label.
+# Writing a term means: a `term_axes`, a `param_shapes`, a `term_eval`, and —
+# for each axis declared — a coordinate builder plus the resolved state that
+# builder reads. `term_label` is optional; it defaults to the type name and only
+# needs an override for a more evocative diagnostic label.
 
 """
     AbstractGainTerm
@@ -17,7 +17,8 @@
 One physical contribution to a station's phase or log-amplitude response — a
 delay, a rate, a polynomial bandpass shape. A concrete term implements
 [`term_axes`](@ref), [`param_shapes`](@ref), a coordinate builder
-([`freq_coordinate`](@ref) / [`time_coordinate`](@ref)) for each axis
+([`freq_coordinate`](@ref) / [`time_coordinate`](@ref)) and its resolved state
+([`freq_coord_state`](@ref) / [`time_coord_state`](@ref)) for each axis
 declared, and [`term_eval`](@ref); [`term_label`](@ref) is optional. See the
 "Authoring a new gain term" documentation page for a worked example.
 
@@ -144,60 +145,112 @@ nparams_per_block(t::AbstractGainTerm, nchan_seg) =
 # ── Coordinate builders ──────────────────────────────────────────────────────
 
 """
-    freq_coordinate(term, channel_freqs, fseg_groups, f0) -> AbstractVector
+    freq_coordinate(term, f, state, seg::Integer) -> Real
 
-The `x.Frequency` array `term_eval` will index into, one entry per channel.
-Required for any term declaring `:Frequency` in [`term_axes`](@ref); there is
-deliberately no generic fallback — `plan_parameters` calls this for every
-term that declares the axis, so a term that forgets it errors loudly (a
-`MethodError`) instead of silently evaluating that axis at zero.
+`term`'s `x.Frequency` at frequency `f` (Hz), lying in the SOLVE's frequency
+segment `seg`. `state` is whatever [`freq_coord_state`](@ref) resolved for this
+term — a reference frequency, a per-segment normalization, whatever the term's
+coordinate needs. Required for any term declaring `:Frequency` in
+[`term_axes`](@ref); there is deliberately no generic fallback —
+`plan_parameters` calls this for every term that declares the axis, so a term
+that forgets it errors loudly (a `MethodError`) instead of silently evaluating
+that axis at zero.
+
+Pointwise in `f`, so the same definition serves the solve grid and any
+coordinate off it (see `evaluate_gains`).
 """
 function freq_coordinate end
 
 """
-    time_coordinate(term, times, tseg_groups, t0) -> AbstractVector
+    time_coordinate(term, t, state, seg::Integer) -> Real
 
-The `x.Ti` array `term_eval` will index into, one entry per time sample.
-Required for any term declaring `:Ti` in [`term_axes`](@ref); see
-[`freq_coordinate`](@ref) for why there is no generic fallback.
+`term`'s `x.Ti` at epoch `t` (hours), lying in the SOLVE's time segment `seg`,
+against the state [`time_coord_state`](@ref) resolved. Required for any term
+declaring `:Ti` in [`term_axes`](@ref); see [`freq_coordinate`](@ref) for why
+there is no generic fallback.
 """
 function time_coordinate end
 
+"""
+    freq_coord_state(term, geom::DataGeometry, fseg_id, nfseg)
+    time_coord_state(term, geom::DataGeometry, tseg_id, ntseg)
+
+The constants `term`'s coordinate reads, resolved against the solve geometry
+once at plan time and stored on the [`ComponentPlan`](@ref) as `fstate`/`tstate`.
+They are not θ parameters (nothing fits them) and not fields of the term (a term
+is a user declaration, written before any geometry exists), so each term defines
+its own state and a new term needing new constants widens nothing shared.
+
+Required for any term declaring the corresponding axis in [`term_axes`](@ref),
+with no generic fallback, for the same reason [`freq_coordinate`](@ref) has
+none. An undeclared axis stores `nothing` and needs no method.
+"""
+function freq_coord_state end
+
+@doc (@doc freq_coord_state)
+function time_coord_state end
+
 # Delay uses the physical offset (f − f0) in Hz so θ is a delay in seconds.
-freq_coordinate(::Delay, channel_freqs, fseg_groups, f0) = Float64.(channel_freqs) .- f0
+freq_coord_state(::Delay, geom::DataGeometry, fseg_id, nfseg) = geom.f0
+freq_coordinate(::Delay, f, f0, seg::Integer) = f - f0
 
 # Dispersion uses K·(1/f0 − 1/f) so θ is a differential TEC in TECU. The
 # f0-referencing keeps it orthogonal to the constant term at f0 (not globally —
 # the delay↔dTEC covariance over a finite band is physical; solvers fit them
 # jointly).
-freq_coordinate(::Dispersion, channel_freqs, fseg_groups, f0) =
-    DISPERSION_K .* (1.0 / f0 .- 1.0 ./ Float64.(channel_freqs))
+freq_coord_state(::Dispersion, geom::DataGeometry, fseg_id, nfseg) = geom.f0
+freq_coordinate(::Dispersion, f, f0, seg::Integer) = DISPERSION_K * (1.0 / f0 - 1.0 / f)
 
 # Rate uses (t − t0) in seconds (t given in hours) so θ is a rate in Hz.
-time_coordinate(::Rate, times, tseg_groups, t0) = (Float64.(times) .- t0) .* 3600.0
+time_coord_state(::Rate, geom::DataGeometry, tseg_id, ntseg) = geom.t0
+time_coordinate(::Rate, t, t0, seg::Integer) = (t - t0) * 3600.0
 
-# A polynomial uses a per-segment centered/scaled coordinate in ~[-1, 1] so the
+"""
+    PolyNorm(center, scale)
+
+Per-segment centering and scaling of a [`Polynomial`](@ref) term's coordinate:
+segment `s` reads `(x − center[s]) / scale[s]`. Fixed by the solve grid, so a
+solution evaluated on foreign data keeps the basis it was fit in.
+"""
+struct PolyNorm
+    center::Vector{Float64}
+    scale::Vector{Float64}
+end
+
+freq_coord_state(::Polynomial{:Frequency}, geom::DataGeometry, fseg_id, nfseg) =
+    _poly_norm(geom.channel_freqs, fseg_id, nfseg)
+time_coord_state(::Polynomial{:Ti}, geom::DataGeometry, tseg_id, ntseg) =
+    _poly_norm(geom.times, tseg_id, ntseg)
+
+# A polynomial uses its segment's centered/scaled coordinate in ~[-1, 1] so the
 # basis is well conditioned; the same construction serves either axis, which is
 # why one `Polynomial` term covers both.
-freq_coordinate(::Polynomial{:Frequency}, channel_freqs, fseg_groups, f0) =
-    _centered_scaled(channel_freqs, fseg_groups)
-time_coordinate(::Polynomial{:Ti}, times, tseg_groups, t0) =
-    _centered_scaled(times, tseg_groups)
+freq_coordinate(::Polynomial{:Frequency}, f, st, seg::Integer) =
+    @inbounds (f - st.center[seg]) / st.scale[seg]
+time_coordinate(::Polynomial{:Ti}, t, st, seg::Integer) =
+    @inbounds (t - st.center[seg]) / st.scale[seg]
 
-# Center = segment mean; scale = max|v − center|.
-function _centered_scaled(values, groups)
-    x = zeros(Float64, length(values))
-    for grp in groups
-        isempty(grp) && continue
-        vs = @view values[grp]
-        center = sum(vs) / length(vs)
-        scale = maximum(abs.(vs .- center))
-        scale = scale > 0 ? scale : 1.0
-        for i in grp
-            x[i] = (values[i] - center) / scale
-        end
+# Center each segment on the mean of its coordinates and scale by the widest
+# excursion from it. A single-sample segment has zero spread; its scale is
+# REPLACED by 1 rather than floored — the coordinate is then identically zero
+# either way, and a floor in physical units would mean nothing shared between a
+# frequency axis (Hz) and a time axis (hours).
+function _poly_norm(coords::AbstractVector{<:Real}, ids::AbstractVector{<:Integer}, nseg::Integer)
+    sums = zeros(Float64, nseg)
+    cnt = zeros(Int, nseg)
+    for i in eachindex(ids, coords)
+        sums[ids[i]] += coords[i]
+        cnt[ids[i]] += 1
     end
-    return x
+    center = [cnt[s] > 0 ? sums[s] / cnt[s] : 0.0 for s in 1:nseg]
+    scale = zeros(Float64, nseg)
+    for i in eachindex(ids, coords)
+        scale[ids[i]] = max(scale[ids[i]], abs(coords[i] - center[ids[i]]))
+    end
+    for s in eachindex(scale)
+        scale[s] > 0 || (scale[s] = 1.0)
+    end
+    return PolyNorm(center, scale)
 end
 
 # ── Pure scalar evaluation ───────────────────────────────────────────────────

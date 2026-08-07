@@ -24,7 +24,7 @@ using HDF5
         # PFA column: the solve records the per-scan effective search cells, and
         # the synthetic fringes are strong → secure detections on every scan.
         @test haskey(r1, :pfa)
-        fringe = CAL._step(sol, :fringe)
+        fringe = sol[:fringe].steps[1]
         @test length(fringe.info.scan_ncells) == sol.info.nscan
         @test all(>=(1), fringe.info.scan_ncells)
         @test sol.info.search isa FP.FringeSearch
@@ -50,7 +50,7 @@ using HDF5
         # The solve records every VALID detection it consumed as parallel plain
         # vectors (HDF5-representable), on the fringe step's own info.
         info = sol.info
-        inf = CAL._step(sol, :fringe).info
+        inf = sol[:fringe].steps[1].info
         n = length(inf.det_pfa)
         @test n > 0
         @test length(inf.det_scan) == length(inf.det_ant_a) == length(inf.det_ant_b) ==
@@ -75,7 +75,7 @@ using HDF5
         @test m.map.detection.snr ≈ r.snr rtol = 1.0e-6
 
         # Solutions without the table (e.g. loaded from an older file) degrade cleanly.
-        fs = CAL._step(sol, :fringe)
+        fs = sol[:fringe].steps[1]
         old = CAL.CalibrationSolution(fs.model, fs.layout, sol.geom, fs.θ, (; nscan = 1); name = :fringe)
         @test isempty(FP.suspect_fringes(old))
     end
@@ -212,7 +212,7 @@ using HDF5
         @test fsm.detection.valid
         # The strongest baseline's map peak is the scan's recorded max SNR (up to
         # peak refinement; the scan max is over all baselines/products searched).
-        @test fsm.detection.snr <= CAL._step(sol, :fringe).info.scan_snr[m.scan_index] * (1 + 1.0e-9)
+        @test fsm.detection.snr <= sol[:fringe].steps[1].info.scan_snr[m.scan_index] * (1 + 1.0e-9)
         @test fsm.pfa < 1.0e-6
         # The map peak sits at the detection's (delay, rate) within a grid bin.
         pk = argmax(fsm.snr)

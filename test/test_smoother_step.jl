@@ -88,7 +88,7 @@ end
 
     @testset "3-scan full pipeline: structure, determinism, coherence" begin
         @test Gustavo.stage_names(sol_n) == [:fringe, :bandpass, :adhoc]
-        adhoc_step = CAL._step(sol_n, :adhoc)
+        adhoc_step = sol_n[:adhoc].steps[1]
         phases = CAL.phase_components(adhoc_step.model)
         # The adhoc block is really solved (nonzero) on every scan.
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
@@ -150,7 +150,7 @@ end
         # Injected per-station dTEC recovered on EVERY scan — DispersionSBDFit's
         # own pass covers the whole track unconditionally, same as the bandpass
         # stage, which now also fits every scan.
-        refine_step = CAL._step(sol_nd, :refine)
+        refine_step = sol_nd[:refine].steps[1]
         dplan = CAL._dispersion_plan(refine_step.model, refine_step.layout)
         @test dplan !== nothing
         nseg = size(plan_off1(dplan), 3)
@@ -182,7 +182,7 @@ end
         )
         @test Gustavo.stage_names(sol_fs) == [:fringe, :adhoc]
         @test !any(s -> haskey(s.layout.plantree.phase, :bandpass), sol_fs.steps)
-        adhoc_step_fs = CAL._step(sol_fs, :adhoc)
+        adhoc_step_fs = sol_fs[:adhoc].steps[1]
         phases = CAL.phase_components(adhoc_step_fs.model)
         ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(adhoc_step_fs, ipi))
@@ -190,7 +190,7 @@ end
         # so full coherence is NOT reached — but the delay/rate/adhoc solve must
         # still be sane (all θ finite, per-scan SNRs strong).
         @test all(s -> all(isfinite, s.θ), sol_fs.steps)
-        @test all(>(10), filter(isfinite, CAL._step(sol_fs, :fringe).info.scan_snr))
+        @test all(>(10), filter(isfinite, sol_fs[:fringe].steps[1].info.scan_snr))
     end
 
     @testset "scan-local fusion ≡ a pass per step" begin
@@ -204,15 +204,15 @@ end
         sol_fused = fit(pre |> ds |> TemporalSmoother(adhoc), uvset)
         @test Gustavo.stage_names(sol_fused) == [:refine, :adhoc]
         # Neither half of the fused run is vacuous.
-        @test CAL._step(sol_fused, :refine).layout.nθ > 0
-        @test any(!=(0), CAL._step(sol_fused, :refine).θ)
-        @test any(!=(0), CAL._step(sol_fused, :adhoc).θ)
+        @test sol_fused[:refine].steps[1].layout.nθ > 0
+        @test any(!=(0), sol_fused[:refine].steps[1].θ)
+        @test any(!=(0), sol_fused[:adhoc].steps[1].θ)
 
         sol_a = fit(pre |> ds, uvset)
         refine_tf = FP.ApplySolution(CAL.step_solution(sol_a, :refine))
         sol_b = fit(pre |> refine_tf |> TemporalSmoother(adhoc), uvset)
-        @test CAL._step(sol_fused, :refine).θ == CAL._step(sol_a, :refine).θ
-        @test CAL._step(sol_fused, :adhoc).θ == CAL._step(sol_b, :adhoc).θ
+        @test sol_fused[:refine].steps[1].θ == sol_a[:refine].steps[1].θ
+        @test sol_fused[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
 
         # The same holds with the output tail fused into that one pass.
         _, out_fused = fitcalibrate(pre |> ds |> TemporalSmoother(adhoc), uvset)

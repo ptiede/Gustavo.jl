@@ -246,7 +246,7 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
     stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout)
     opts = Fringe.resolve_closure(est)
     ncomp, covered = Fringe.solve_station_systems!(
-        ctx.θ, dets, stageB; ref_ant = ctx.ref_ant, opts = opts, excl = ctx.scratch[:excl],
+        ctx.θ, dets, stageB; ref_ant = ctx.ref_ant, opts = opts,
     )
     ctx.scratch[:fringe_flags] = Fringe.unconstrained_flags(dets, covered, ctx.geom)
     round = ctx.scratch[:fringe_round]::Int
@@ -270,10 +270,12 @@ end
 # ── DispersionSBDFit visitor (per-scan joint (Δτ, dTEC) fit + SBD fit) ────────
 
 # Co-located stations see the same ionosphere, so a differential TEC between
-# them is pure solve error — but only a model that solves dTEC has any to tie.
+# them is pure solve error — but only a model that solves dTEC has any to tie,
+# and only the caller knows the separation that counts as co-located here.
 _dtec_ties(::Nothing, antennas) = nothing
 _dtec_ties(dm::DispersionModel, antennas) =
-    dm.tie_colocated ? UVData._colocated_ties(antennas) : nothing
+    dm.colocated_sep === nothing ? nothing :
+    UVData._colocated_ties(antennas; max_sep = dm.colocated_sep)
 
 function start_pass!(s::DispersionSBDFit, ctx::SolveContext)
     disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
@@ -322,15 +324,9 @@ end
 function start_pass!(s::Bandpass, ctx::SolveContext)
     layout = ctx.layout
     nant = ctx.nant
-    excl = ctx.scratch[:excl]
-    # The GLOBAL baseline table of the accumulation (all cross pairs); co-located
-    # (intra-site) pairs are excluded from `blidx` up front — their non-closing
-    # crosstalk would otherwise pull the ~snr²-weighted per-channel solves.
+    # The GLOBAL baseline table of the accumulation: every cross pair.
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
-    blidx = Dict(
-        bl_pairs[i] => i for i in eachindex(bl_pairs)
-            if excl === nothing || bl_pairs[i] ∉ excl
-    )
+    blidx = Dict(bl_pairs[i] => i for i in eachindex(bl_pairs))
     # This step's own model names its components (`model_components` above), so
     # the plans come straight off the named tree — the same `phase`/`amp` flags
     # decide both what was compiled and what is fetched.
@@ -387,7 +383,7 @@ function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::Geome
     # directly, no correction of its own.
     Fringe.adhoc_scan!(
         ctx.θ, stack, win, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
-        executor = inner_executor(ctx.stream), excl = ctx.scratch[:excl],
+        executor = inner_executor(ctx.stream),
     )
     return nothing
 end

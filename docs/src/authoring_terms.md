@@ -20,13 +20,14 @@ evaluation loop.
 
 ## The interface
 
-A new term is a `struct` subtyping [`AbstractGainTerm`](@ref) plus four
-methods (a fifth, [`term_label`](@ref), is optional):
+A new term is a `struct` subtyping [`AbstractGainTerm`](@ref) plus five
+methods (a sixth, [`term_label`](@ref), is optional):
 
   - [`term_axes`](@ref) — which coordinate axes the term reads.
   - [`param_shapes`](@ref) — the term's own parameter names and shapes.
   - a coordinate builder ([`freq_coordinate`](@ref) / [`time_coordinate`](@ref))
-    for each axis declared.
+    and its resolved state ([`freq_coord_state`](@ref) /
+    [`time_coord_state`](@ref)) for each axis declared.
   - [`term_eval`](@ref) — the scalar evaluation itself.
   - [`term_label`](@ref) — optional; defaults to the type name.
 
@@ -65,18 +66,32 @@ a value that is free per channel is `ConstantTerm` paired with
 
 ### Coordinate builders
 
-One builder per axis declared, because a term may read both. Each builds the
-`x.Frequency` (or `x.Ti`) array `term_eval` will index into — one entry per
-channel (or per time sample):
+One pair per axis declared, because a term may read both. The builder is a
+scalar function of one coordinate and the segment it lies in, so the same
+definition serves the solve grid and any grid a solution is later applied to:
 
 ```julia
-freq_coordinate(::Quadratic, channel_freqs, fseg_groups, f0) =
-    Float64.(channel_freqs) .- f0
+freq_coordinate(::Quadratic, f, f0, seg) = f - f0
 ```
 
-There is deliberately no generic fallback: a term that declares an axis in
-`term_axes` but defines no matching coordinate builder errors at plan time
-(a `MethodError`), rather than silently evaluating that axis at zero.
+Its third argument is the term's RESOLVED STATE — the constants its coordinate
+reads, whatever they are. They are not parameters (nothing fits them) and not
+fields of the term (a term is a declaration, written before any geometry
+exists), so a term resolves its own against the solve geometry once at plan
+time:
+
+```julia
+freq_coord_state(::Quadratic, geom, fseg_id, nfseg) = geom.f0
+```
+
+`Delay` and `Dispersion` resolve a reference frequency this way, `Rate` a
+reference epoch, and `Polynomial` a per-segment centre and scale (which is why
+the builder is given `seg`). A term needing nothing stores whatever it likes,
+including `nothing`.
+
+There is deliberately no generic fallback for either: a term that declares an
+axis in `term_axes` but defines no matching builder or state errors at plan
+time (a `MethodError`), rather than silently evaluating that axis at zero.
 
 ### `term_eval`
 
@@ -117,8 +132,8 @@ struct Quadratic <: AbstractGainTerm end
 
 term_axes(::Quadratic) = (:Frequency,)
 param_shapes(::Quadratic, nchan_seg) = (quad = (),)
-freq_coordinate(::Quadratic, channel_freqs, fseg_groups, f0) =
-    Float64.(channel_freqs) .- f0
+freq_coord_state(::Quadratic, geom, fseg_id, nfseg) = geom.f0
+freq_coordinate(::Quadratic, f, f0, seg) = f - f0
 @inline term_eval(::Quadratic, p, x) = p.quad * x.Frequency^2
 term_label(::Quadratic) = "quad"
 ```

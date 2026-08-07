@@ -36,11 +36,10 @@
 # Run-wide resources (task/memory budgets, progress) live on the pipeline's
 # `ExecutionConfig`, NOT on steps: they are properties of a run, shared by
 # every pass. Anything that changes WHAT a given step solves is model
-# specification and lives on that step. The reference antenna and the
-# co-located-baseline exclusion are neither: both are run-wide choices shared
-# by every step's pass rather than resources, so they live on
-# `CalibrationPipeline` itself (`ref_ant`, `exclude_colocated`), not on any one
-# step or on `ExecutionConfig`.
+# specification and lives on that step. The reference antenna is neither: it is
+# a run-wide choice shared by every step's pass rather than a resource, so it
+# lives on `CalibrationPipeline` itself (`ref_ant`), not on any one step or on
+# `ExecutionConfig`.
 
 """
     SolveStep <: CalibrationStep
@@ -93,7 +92,7 @@ fit_selection(step::CalibrationStep, prior_solutions) = Fringe.AllScans()
     provides(step::CalibrationStep) -> Symbol
 
 The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
-names its `StepSolution` slot (`stage_solution`/`step_solution`/`sol[:name]`)
+names its `StepSolution` slot (`sol[:name]`)
 and labels its progress-callback stage. Two steps in the same pipeline must
 not share a non-`:nothing` value — their solutions would collide under the
 same name. Default: `:nothing`.
@@ -316,17 +315,15 @@ Base.:|>(a::StepChain, b::StepChain) = StepChain(vcat(a.steps, b.steps))
 # ── The pipeline ─────────────────────────────────────────────────────────────
 
 """
-    CalibrationPipeline(steps...; exec = ExecutionConfig(), ref_ant = 1, exclude_colocated = true)
-    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), ref_ant = 1, exclude_colocated = true)
-    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), ref_ant = 1, exclude_colocated = true)
+    CalibrationPipeline(steps...; exec = ExecutionConfig(), ref_ant = 1)
+    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), ref_ant = 1)
+    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), ref_ant = 1)
 
 An ordered list of [`CalibrationStep`](@ref)s (raw
 `Fringe.AbstractDataTransform`s are lifted automatically) plus the run-wide
 [`ExecutionConfig`](@ref), `ref_ant` — the gauge pin every solve step reads
-(`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`) — and
-`exclude_colocated` — whether intra-site (co-located twin) baselines are
-dropped from the bandpass/adhoc accumulations (their non-closing crosstalk
-pollutes both). A pipeline needs no [`FringeFit`](@ref) step; any `SolveStep`
+(`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`). A
+pipeline needs no [`FringeFit`](@ref) step; any `SolveStep`
 composition is legal, including a single standalone step (e.g. a `Bandpass`
 fit over data already corrected by an earlier run) — the single-step solve is
 the primitive a multi-step pipeline is built from (see [`fit`](@ref)'s
@@ -336,22 +333,19 @@ struct CalibrationPipeline{X <: ExecutionConfig}
     steps::Vector{CalibrationStep}
     exec::X
     ref_ant::Union{Integer, AbstractString, Symbol}
-    exclude_colocated::Bool
 end
 CalibrationPipeline(
     steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
-) = CalibrationPipeline(
-    CalibrationStep[_lift_step(s) for s in steps], exec, ref_ant, exclude_colocated,
-)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec, ref_ant)
 CalibrationPipeline(
     steps::_Chainable...; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
-) = CalibrationPipeline(collect(steps); exec, ref_ant, exclude_colocated)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = CalibrationPipeline(collect(steps); exec, ref_ant)
 CalibrationPipeline(
     chain::StepChain; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
-) = CalibrationPipeline(chain.steps, exec, ref_ant, exclude_colocated)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = CalibrationPipeline(chain.steps, exec, ref_ant)
 
 # Label a step by kind; a lifted transform is named for the transform it wraps.
 _step_label(s::CalibrationStep) = string(nameof(typeof(s)))

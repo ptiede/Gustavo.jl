@@ -32,9 +32,23 @@ place a cell in its segment, `xf`/`xt` for the term's coordinates, and
 `nchan_seg` for the term's per-segment arity, then addresses the leaf block at
 `(node, fs, ts, ant)` with `node = _feed_node(tying, feed)`. A block holds the
 parameters `param_shapes(term, nchan_seg[fs])` declares, in declaration order.
+
+Those four tables are indexed by position on the SOLVE GRID. `tseg`/`fseg` are
+the segmentations they resolve, so the identical tables can be rebuilt for data
+sampled anywhere by placing each foreign sample in its segment
+([`time_segment_ids`](@ref) / [`freq_segment_ids`](@ref)) — the basis for
+applying a solution to a different time or channel sampling. `fstate`/`tstate`
+are the term's own coordinate constants, resolved once against the solve
+geometry ([`freq_coord_state`](@ref)), `nothing` on an axis the term does not
+declare.
 """
-struct ComponentPlan{T <: AbstractGainTerm, Ty <: AbstractFeedTying}
+struct ComponentPlan{
+        T <: AbstractGainTerm, Ty <: AbstractFeedTying,
+        TS <: AbstractTimeSegmentation, FS <: AbstractFrequencySegmentation, TC, FC,
+    }
     term::T
+    tseg::TS                    # the time segmentation `tseg_id` resolves
+    fseg::FS                    # the frequency segmentation `fseg_id` resolves
     tseg_id::Vector{Int}        # length ntime  → time-segment id
     fseg_id::Vector{Int}        # length nchan  → freq-segment id
     xf::Vector{Float64}         # length nchan  → frequency coordinate
@@ -43,6 +57,8 @@ struct ComponentPlan{T <: AbstractGainTerm, Ty <: AbstractFeedTying}
     tying::Ty
     range::UnitRange{Int}       # the component's contiguous θ span
     shape::NTuple{5, Int}       # (param, feed-node, freq-seg, time-seg, ant)
+    fstate::FC                  # the term's resolved frequency-coordinate constants
+    tstate::TC                  # …and its time-coordinate constants
 end
 
 """
@@ -94,7 +110,6 @@ function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
     tseg_id, ntseg = time_segment_ids(time_segmentation(tc), geom)
     fseg_id, nfseg = freq_segment_ids(freq_segmentation(tc), geom)
     fseg_groups = segment_groups(fseg_id, nfseg)
-    tseg_groups = segment_groups(tseg_id, ntseg)
 
     # Build only the axes the term declares; the rest stay zero. Calling a
     # builder solely for a declared axis means a term that declares one but is
@@ -107,10 +122,14 @@ function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
                 "term_axes must be drawn from $TERM_AXES"
         )
     )
-    xf = :Frequency in axes ? freq_coordinate(t, geom.channel_freqs, fseg_groups, geom.f0) :
-        zeros(Float64, nchannels(geom))
-    xt = :Ti in axes ? time_coordinate(t, geom.times, tseg_groups, geom.t0) :
-        zeros(Float64, ntimes(geom))
+    fstate = :Frequency in axes ? freq_coord_state(t, geom, fseg_id, nfseg) : nothing
+    tstate = :Ti in axes ? time_coord_state(t, geom, tseg_id, ntseg) : nothing
+    xf = :Frequency in axes ?
+        [freq_coordinate(t, geom.channel_freqs[c], fstate, fseg_id[c]) for c in eachindex(fseg_id)] :
+        zeros(float(eltype(geom.channel_freqs)), nchannels(geom))
+    xt = :Ti in axes ?
+        [time_coordinate(t, geom.times[i], tstate, tseg_id[i]) for i in eachindex(tseg_id)] :
+        zeros(float(eltype(geom.times)), ntimes(geom))
 
     # Channels per freq segment, and the block length each implies (only terms
     # whose arity comes from the data vary with it).
@@ -127,7 +146,10 @@ function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
     )
     shape, roles = _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tc.tying)
 
-    return (; tseg_id, fseg_id, xf, xt, nchan_seg, tying = tc.tying, shape, roles)
+    return (;
+        tseg = time_segmentation(tc), fseg = freq_segmentation(tc),
+        tseg_id, fseg_id, xf, xt, nchan_seg, tying = tc.tying, shape, roles, fstate, tstate,
+    )
 end
 
 # Column-major leaf shape (fastest → slowest: parameters, feed-node, freq
@@ -162,7 +184,8 @@ function _plans_node(tc::TiedComponent, nant::Int, geom::DataGeometry, flat::Vec
     range = next[]:(next[] + dof - 1)
     next[] += dof
     plan = ComponentPlan(
-        term(tc), cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg, cl.tying, range, cl.shape,
+        term(tc), cl.tseg, cl.fseg, cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg,
+        cl.tying, range, cl.shape, cl.fstate, cl.tstate,
     )
     push!(flat, plan)
     return plan

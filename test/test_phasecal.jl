@@ -141,9 +141,13 @@
         lw = first(values(UVP.branches(worse)))
         @test !isapprox(parent(lw[:vis]), parent(l0[:vis]); rtol = 1.0e-2)
 
-        # Geometry mismatch is refused (fail-fast at stream construction).
+        # The solution is per scan × per spw, so it ports to a set that samples
+        # the same scan and spws differently — 6 channels per band instead of 8.
         other, _ = _build_fringe_uvset(nchan = 6)
-        @test_throws ErrorException fit(FP.ApplySolution(sol) |> FringeFit(), other)
+        @test fit(FP.ApplySolution(sol) |> FringeFit(), other) isa CAL.CalibrationSolution
+        # A scan it never saw is refused, fail-fast at stream construction.
+        twoscan, _ = _build_fringe_uvset(nscans = 2)
+        @test_throws "is not in the solution" fit(FP.ApplySolution(sol) |> FringeFit(), twoscan)
 
         # Diagnostics see the pre-calibrated data when the same precal is passed:
         # the "before" spectra of the corrupted set + precal equal the clean

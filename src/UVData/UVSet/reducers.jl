@@ -49,8 +49,16 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
         info;
         record_order = Tuple{Int, Int}[],
         extra_columns = NamedTuple(),
+        time_span = [_collapsed_span(obs_time(leaf), info.time_span)],
     )
     return _build_leaf(vis_da, weights_da, uvw_da; partition_info = new_info)
+end
+
+# The interval an averaged sample now integrates over: the extent of the epochs
+# collapsed into it, widened by whatever span those epochs already carried.
+function _collapsed_span(ts, prior)
+    isempty(ts) && return zero(eltype(ts))
+    return (maximum(ts) - minimum(ts)) + (isempty(prior) ? zero(eltype(prior)) : maximum(prior))
 end
 
 # Type-stable kernel for inverse-variance time-averaging. Hot loop sees
@@ -272,7 +280,10 @@ function _time_bin_average_partition(leaf::DimensionalData.AbstractDimTree, dt_s
     weights_da = DimArray(W, dims(vis_da))
     uvw_da = DimArray(UVW_out, (Ti(tcenters), bl_dim, UVW(["U", "V", "W"])))
     info = DimensionalData.metadata(leaf)
-    new_info = update(info; record_order = Tuple{Int, Int}[], extra_columns = NamedTuple())
+    spans = [_collapsed_span(view(tvals, findall(==(b), ids)), info.time_span) for b in 1:nbin]
+    new_info = update(
+        info; record_order = Tuple{Int, Int}[], extra_columns = NamedTuple(), time_span = spans,
+    )
     return _build_leaf(vis_da, weights_da, uvw_da; partition_info = new_info)
 end
 

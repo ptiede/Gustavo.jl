@@ -869,7 +869,7 @@ end
 
 """
     adhoc_scan!(θ, stack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
-                executor = DynamicScheduler(), excl = nothing) -> θ
+                executor = DynamicScheduler()) -> θ
 
 The per-integration atmospheric-phase (adhoc) solve of one scan window — the
 "caller" the module docstring above refers to. On data already gain-corrected
@@ -877,14 +877,13 @@ through the pipeline's transform chain: accumulate the per-(baseline, product,
 AP) inverse-variance residual, solve the globally-closing per-AP station phase
 through the pluggable `adhoc` smoother ([`solve_adhoc_phasing`](@ref)), and
 write this scan's `PerIntegration` θ slots
-(disjoint per scan — concurrent groups may solve in parallel). `excl` drops
-co-located (intra-site) baselines from the per-AP solve. The feed tying comes
-from `adhoc_plan`, so the number of phase nodes per station is the model's
-choice and needs no separate argument.
+(disjoint per scan — concurrent groups may solve in parallel). The feed tying
+comes from `adhoc_plan`, so the number of phase nodes per station is the
+model's choice and needs no separate argument.
 """
 function adhoc_scan!(
         θ, stack::AbstractDimStack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
-        executor = DynamicScheduler(), excl = nothing,
+        executor = DynamicScheduler(),
     )
     geom = win.geom
     bl_pairs = collect(UVData.baselines(stack).pairs)
@@ -917,15 +916,6 @@ function adhoc_scan!(
     for li in 1:nblk
         rbar .+= view(rparts, :, :, :, li)
         wbar .+= view(wparts, :, :, :, li)
-    end
-    # Drop co-located (intra-site) baselines from the per-AP solve — see
-    # `_colocated_pair_set`. Zero weight ⇒ `_adhoc_ap_rows` skips the rows.
-    if excl !== nothing
-        for bi in eachindex(bl_pairs)
-            bl_pairs[bi] in excl || continue
-            fill!(view(rbar, bi, :, :), zero(ComplexF64))
-            fill!(view(wbar, bi, :, :), 0.0)
-        end
     end
     # `tg` is in hours; pass SECONDS so the adhoc's `:auto` window (T_AP / T_coh) is
     # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.

@@ -73,7 +73,7 @@ include("synthetic_uvset.jl")
         @test sol2.geom.channel_freqs == sol.geom.channel_freqs
         @test length(sol2.steps) == length(sol.steps)
         for step in sol.steps
-            step2 = CAL._step(sol2, step.name)
+            step2 = sol2[step.name].steps[1]
             @test step2.θ == step.θ
             @test step2.layout.nθ == step.layout.nθ
             @test length(CAL.phase_components(step2.model)) == length(CAL.phase_components(step.model))
@@ -106,7 +106,7 @@ include("synthetic_uvset.jl")
         # `show` gives each type its own summary line instead of a raw dump.
         @test occursin("CalibrationSolution", sprint(show, sol))
         @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
-        @test occursin("StationGainModel", sprint(show, CAL._step(sol, :fringe).model))
+        @test occursin("StationGainModel", sprint(show, sol[:fringe].steps[1].model))
 
         # CalibrationPipeline is an ordered container over its steps.
         pipe = CalibrationPipeline(FringeFit(model = FringeModel()) |> Bandpass())
@@ -535,7 +535,7 @@ end
     # to per-band constant + slope components (the parts the per-band SBD and inter-feed
     # delay terms legitimately absorb). Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
-    bp_on = CAL._step(sol_on, :bandpass)
+    bp_on = sol_on[:bandpass].steps[1]
     plan = bp_on.layout.plantree.phase.bandpass
     @test plan_off1(plan)[1, 2, 1, 1] != 0
     rec = [bp_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
@@ -609,7 +609,7 @@ end
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, :parallel)
         @test amp_ripple(don.spec_after, don, p) < 1.08
-        bp = CAL._step(sol, :bandpass)
+        bp = sol[:bandpass].steps[1]
         plan = bp.layout.plantree.logamp.bandpass
         for dg in dead_globals, a in 2:nant, f in 1:2
             nbr = 0.5 * (larec(bp.θ, plan, a, f, dg - 1) + larec(bp.θ, plan, a, f, dg + 1))
@@ -622,7 +622,7 @@ end
     # free_bandpass does NOT estimate the killed channels — their θ slot is untouched
     # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
     solf = fit(ff |> Bandpass(model = BandpassModel(amp_model = FP.free_bandpass())) |> TemporalSmoother(adhoc), uvset)
-    bpf = CAL._step(solf, :bandpass)
+    bpf = solf[:bandpass].steps[1]
     planf = bpf.layout.plantree.logamp.bandpass
     for dg in dead_globals, a in 2:nant, f in 1:2
         @test larec(bpf.θ, planf, a, f, dg) == 0.0
@@ -671,7 +671,7 @@ end
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
         uvset,
     )
-    @test all(>(10), filter(isfinite, CAL._step(sol, :fringe).info.scan_snr))
+    @test all(>(10), filter(isfinite, sol[:fringe].steps[1].info.scan_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
 
     corr = Gustavo.apply_calibration(uvset, sol)
@@ -730,7 +730,7 @@ end
     end
     @test any(e -> e[1] === :bandpass, events)                 # bandpass enabled by default
     inf = sol.info
-    fringe_step, bandpass_step, adhoc_step = CAL._step(sol, :fringe), CAL._step(sol, :bandpass), CAL._step(sol, :adhoc)
+    fringe_step, bandpass_step, adhoc_step = sol[:fringe].steps[1], sol[:bandpass].steps[1], sol[:adhoc].steps[1]
     @test fringe_step.info.t_pass > 0 && adhoc_step.info.t_pass > 0 && bandpass_step.info.t_pass >= 0
     @test inf.ntasks_used >= 1 && inf.inner_tasks >= 1
     # Every step publishes the SAME generic per-scan timing shape — no
@@ -765,7 +765,7 @@ end
     p2 = findfirst(pr -> pr[1] != pr[2], collect(bl2))
     @test _coherence(@view(parent(l2[:vis])[:, :, p2, 1]), @view(parent(l2[:weights])[:, :, p2, 1])) > 0.99
     # Solutions without timers degrade cleanly.
-    fringe = CAL._step(sol, :fringe)
+    fringe = sol[:fringe].steps[1]
     old = CAL.CalibrationSolution(fringe.model, fringe.layout, sol.geom, fringe.θ, (;))
     @test_nowarn FP.print_solve_timing(old; io = IOBuffer())
 end
@@ -797,7 +797,7 @@ end
         ) |> DispersionSBDFit() |> TemporalSmoother(),        # no bandpass stage (see comment above)
         uvset,
     )
-    refine = CAL._step(sol, :refine)
+    refine = sol[:refine].steps[1]
     @test stage_info(sol, :refine).dispersion_applied
     dplan = CAL._dispersion_plan(refine.model, refine.layout)
     @test dplan !== nothing
@@ -853,7 +853,7 @@ end
         path = joinpath(dir, "disp.h5")
         CAL.save_solution_hdf5(path, sol)
         sol2 = CAL.load_solution_hdf5(path)
-        refine2 = CAL._step(sol2, :refine)
+        refine2 = sol2[:refine].steps[1]
         @test refine2.θ == refine.θ
         @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(refine2.model))
     end
@@ -916,7 +916,7 @@ end
         ) |> DispersionSBDFit(dispersion = nothing) |> TemporalSmoother(),
         uvset,
     )
-    refine = CAL._step(sol, :refine)
+    refine = sol[:refine].steps[1]
     @test stage_info(sol, :refine).sbd_applied
     @test !stage_info(sol, :refine).dispersion_applied
     sbd = FP._sbd_plans(refine.model, refine.layout)
@@ -947,8 +947,8 @@ end
 
 @testset "dTEC co-located tie (the Onsala-twin constraint)" begin
     # Station 4 sits 60 m from station 3 (same ionosphere); stations are
-    # otherwise 100 km apart. `_colocated_ties` groups them; the dispersion
-    # solve then fits ONE dTEC for the pair and both θ columns carry it.
+    # otherwise 100 km apart. At `colocated_sep = 1 km` the pair groups, and the
+    # dispersion solve fits ONE dTEC for it that both θ columns carry.
     positions = [[0.0, 0.0, 0.0], [1.0e5, 0.0, 0.0], [2.0e5, 0.0, 0.0], [2.0e5 + 60.0, 0.0, 0.0]]
     dtec_true = [0.0, 3.0, -5.0, -5.0]
     uvset, _ = _build_fringe_uvset(
@@ -957,18 +957,18 @@ end
         station_positions = positions,
     )
     ants = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uvset)))).antennas
-    @test UVP._colocated_ties(ants) == [1, 2, 3, 3]
+    @test UVP._colocated_ties(ants; max_sep = 1000.0) == [1, 2, 3, 3]
 
-    # Degenerate positions (the default synthetic table, max sep ≪ 10 km) must
-    # NOT tie anything — the guard against missing/zero station_xyz.
-    uvd, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 4)
+    # Missing or degenerate positions are rejected: without a real array, no
+    # separation threshold distinguishes a twin from the whole array.
+    uvd, _ = _build_fringe_uvset(
+        nant = 4, nspw = 2, nchan = 4,
+        station_positions = [[100.0 * i, 200.0 * i, 300.0 * i] for i in 1:4],
+    )
     antd = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uvd)))).antennas
-    @test UVP._colocated_ties(antd) == [1, 2, 3, 4]
-
-    # The intra-site baseline set derived from the same grouping: exactly the
-    # (3,4) twin pair, both orders; empty when the position guard trips.
-    @test UVP._colocated_pair_set(ants) == Set([(3, 4), (4, 3)])
-    @test isempty(UVP._colocated_pair_set(antd))
+    @test_throws "co-located grouping needs real station positions" UVP._colocated_ties(
+        antd; max_sep = 1000.0,
+    )
 
     # TWO co-located pairs must BOTH tie (regression: a `break` in the old
     # comma-nested loop exited both levels after the first pair — on VR2505
@@ -981,17 +981,18 @@ end
         nant = 5, nspw = 2, nchan = 4, station_positions = pos2,
     )
     ant2 = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uv2)))).antennas
-    @test UVP._colocated_ties(ant2) == [1, 2, 2, 4, 4]
-    @test UVP._colocated_pair_set(ant2) == Set([(2, 3), (3, 2), (4, 5), (5, 4)])
+    @test UVP._colocated_ties(ant2; max_sep = 1000.0) == [1, 2, 2, 4, 4]
 
     sol = fit(
         FringeFit(
             model = FringeModel(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> DispersionSBDFit(sbd = nothing) |> TemporalSmoother(),
+        ) |> DispersionSBDFit(
+            dispersion = DispersionModel(colocated_sep = 1000.0), sbd = nothing,
+        ) |> TemporalSmoother(),
         uvset,
     )
-    refine = CAL._step(sol, :refine)
+    refine = sol[:refine].steps[1]
     dplan = CAL._dispersion_plan(refine.model, refine.layout)
     @test dplan !== nothing
     o3 = plan_off1(dplan)[3, 1, 1, 1]

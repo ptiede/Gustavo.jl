@@ -80,12 +80,16 @@ end
 """
     validate_transform(t::AbstractDataTransform, geom::DataGeometry, ant_names)
 
-Fail-fast compatibility check of a transform against the target set's geometry,
-run once at stream construction — so an incompatible transform (e.g. an
-`ApplySolution` from a different correlator setup) raises a plain error before
-any data is read, not a `TaskFailedException` from a worker mid-pass. The
-default accepts anything; transforms with compatibility requirements add
-methods.
+Fail-fast compatibility check of a transform against the target set, run once at
+stream construction — so a transform that can never apply raises a plain error
+before any data is read, not a `TaskFailedException` from a worker mid-pass. The
+default accepts anything; transforms with requirements add methods.
+
+Reserve this for what is wrong about the PAIRING of transform and set, whatever
+data is read: an [`ApplySolution`](@ref) checks that its stations can be matched
+to `ant_names` at all. Per-sample compatibility does not belong here — it is
+checked where the sample is used, against the window actually materialized,
+rather than eagerly against every sample the run might never visit.
 """
 validate_transform(t::AbstractDataTransform, geom::DataGeometry, ant_names) = nothing
 
@@ -126,13 +130,22 @@ gain = `sol ∘ solution`). Cells where the gain is non-finite or zero are left
 untouched (matching the solver's precal semantics — no data is invented or
 destroyed by a bad precal cell).
 
-A solution fit on the SAME set applies index-aligned. A solution from ANOTHER
-run — the fit-once / apply-later workflow, e.g. a
-[`Gustavo.Calibration.step_solution`](@ref) extraction — is portable when
-it is globally TIME-CONSTANT (every component `GlobalTime`): stations are then
-matched BY NAME against the solution's recorded `ant_names` (stations it never
-solved keep identity gains, with a warning), and the channel layout must be
-identical (same channel frequencies — same correlator setup).
+The solution need not have been fit on this set, nor on its sampling. Each
+target sample is placed in the segment of `sol` it BELONGS to, by the identity
+the segmentation is defined on: a `PerScan` component by scan name, a
+`PerSpectralWindow` one by spw name, a `TimeBlocks` or `InstrumentScans` one by
+the solve's own bin formula, a `PerIntegration` one by exact epoch. So a
+solution segmented more COARSELY than the target applies — a bandpass fit on
+scan-averaged data corrects at full time resolution — while one segmented more
+finely has no answer and is refused. `ChannelBlocks` and `FreqGroups` cut the
+channel-index axis, so they require the target to index the same channels.
+
+Stations are matched BY NAME against the solution's recorded `ant_names` — a
+name is the whole of a station's identity here, never its position — and
+stations the solution never solved keep identity gains, with a warning. A
+solution that records no `ant_names`, or that shares no station with the set at
+all, is refused by [`validate_transform`](@ref) at stream construction. Placement
+is checked per scan group, as each window is materialized.
 """
 struct ApplySolution{S <: CalibrationSolution} <: AbstractDataTransform
     sol::S
@@ -141,39 +154,96 @@ end
 function apply_transform!(
         t::ApplySolution, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler(),
     )
-    sol = t.sol
-    ant_names = String.(UVData.antennas(stack).name)
-    solnames = hasproperty(sol.info, :ant_names) ? String.(collect(sol.info.ant_names)) : ant_names
-    amap = if solnames == ant_names
-        nothing                                      # index-aligned
-    else
-        m = [something(findfirst(==(n), solnames), 0) for n in ant_names]
-        if any(iszero, m)
-            missing_names = [n for (n, k) in zip(ant_names, m) if k == 0]
-            @warn "ApplySolution: stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
-        end
-        m
-    end
-    _divide_gains!(stack, win, sol, executor; amap)
+    _divide_gains!(stack, win, t.sol, executor; amap = _station_map(t.sol, String.(UVData.antennas(stack).name)))
     return nothing
 end
 
 apply_transform(uvset::UVSet, t::ApplySolution) = UVData.apply_calibration(uvset, t.sol)
 
-# Divide evaluated gains out of one scan window in place — the transform-chain
-# port of `_divide_precal!`'s gain branch, with the same time-constant fast path
-# and the same skip-bad-cell semantics. The gain divided out is the ELEMENTWISE
-# PRODUCT of every step's own evaluator (see `Calibration._composed_gains`),
-# computed here rather than via that helper so the time-constant fast path
-# below still applies (one evaluation of `tsel`, shared by every step).
+# Target station index → the solution's own (0 = absent from the solution).
+# `nothing` when the two agree position for position and no mapping is needed.
+function _station_map(sol::CalibrationSolution, ant_names)
+    solnames = _solution_ant_names(sol)
+    solnames == ant_names && return nothing
+    m = [something(findfirst(==(n), solnames), 0) for n in ant_names]
+    if any(iszero, m)
+        missing_names = [n for (n, k) in zip(ant_names, m) if k == 0]
+        @warn "ApplySolution: stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
+    end
+    return m
+end
+
+# The station names a solution matches on. One that records none has no station
+# identity at all — only its own set's positional order, which means nothing
+# anywhere else — so it cannot be applied, here or at the construction gate.
+function _solution_ant_names(sol::CalibrationSolution)
+    (hasproperty(sol.info, :ant_names) && !isempty(sol.info.ant_names)) || throw(
+        ArgumentError(
+            "ApplySolution: the solution records no station names, so its θ rows could only be " *
+                "matched to a set's stations by position — which means nothing across sets. " *
+                "Re-solve so the solution records `ant_names`."
+        )
+    )
+    return String.(collect(sol.info.ant_names))
+end
+
+"""
+    validate_transform(t::ApplySolution, geom::DataGeometry, ant_names)
+
+Check that the solution's stations can be matched to this set's at all: a
+station is identified by its NAME and nothing else, so the solution must record
+`ant_names`, and at least one of `ant_names` must appear in them. Stations the
+solution is missing are not an error — they keep identity gains, with a warning
+from the apply — but a solution sharing NO station with the set corrects
+nothing at all, and silently doing nothing is the outcome worth refusing.
+
+Whether an individual channel or time can be PLACED in the solution is not
+checked here. It is checked where the sample is used, against the window
+actually materialized; validating the whole geometry up front would reject a
+run over samples it never visits.
+"""
+function validate_transform(t::ApplySolution, geom::DataGeometry, ant_names)
+    solnames = _solution_ant_names(t.sol)
+    any(in(solnames), ant_names) || throw(
+        ArgumentError(
+            "ApplySolution: the solution shares no station with this set, so it would correct " *
+                "nothing. It knows $(join(map(repr, solnames), ", ")); the set has " *
+                "$(join(map(repr, ant_names), ", "))."
+        )
+    )
+    return nothing
+end
+
+# Whether the solution's gains are the same at every time in the window: no
+# component reads a time coordinate, and every sample places in one time segment.
+# A precal is usually such a solution (PerScan × PerSpectralWindow with no time
+# term), and evaluating ONE time column instead of `nti` of them saves the
+# `cis`/`exp` work that dominates applying the correction.
 #
-# `amap` selects the SAME-set or CROSS-set reading. `nothing` (same set) reads
-# gains at the data's own station indices over the window's times. A vector
-# (target ant index → solution ant index, 0 = absent from the solution → cell
-# untouched) matches stations BY NAME and evaluates at the solution's single
-# time column, which is well-defined because `validate_transform` has already
-# established the solution is globally time-constant — the window's `ti_idx`
-# addresses the DATA's time axis and means nothing in the solution's.
+# Placement runs over the WHOLE window here, so a sample the solution cannot
+# place — or whose span straddles a bin boundary — raises exactly as it would in
+# the full evaluation. This decides how many columns to evaluate, never whether
+# to check.
+function _time_constant_over(sol::CalibrationSolution, win::GeometryWindow, tspan)
+    length(win.ti_idx) <= 1 && return true
+    for s in sol.steps, plan in s.layout.plans
+        :Ti in Calibration.term_axes(plan.term) && return false
+        ids = Calibration.time_segment_ids(
+            plan.tseg, sol.geom, win.geom; ti_idx = win.ti_idx, time_span = tspan,
+        )
+        allequal(ids) || return false
+    end
+    return true
+end
+
+# Divide evaluated gains out of one scan window in place, with the same
+# skip-bad-cell semantics as `_divide_precal!`'s gain branch. Gains are placed
+# through `win` — the target set's own geometry plus the global indices this
+# window covers — so each sample reads the solution segment it belongs to
+# whatever the solve was sampled on.
+#
+# `amap` maps a target station index to the solution's (0 = absent from the
+# solution → cell untouched).
 #
 # The elementwise write loop is the one place a raw `Array` earns its keep: DD's
 # `setindex!` is not `@propagate_inbounds`, so a `DimArray` here keeps bounds
@@ -187,14 +257,14 @@ function _divide_gains!(
     bl_pairs = UVData.baselines(stack).pairs
     pols = pol_products(stack)
     nchan, nti, nbl, npol = size(V)
-    ti = win.ti_idx
-    evs = [GainEvaluator(s.model, s.layout) for s in sol.steps]
-    tconst = amap === nothing ? all(ev -> _precal_time_constant(ev, ti), evs) : true
-    tsel = amap === nothing ? (tconst ? (ti[1]:ti[1]) : ti) : (1:1)
-    g = evaluate_gains(evs[1], sol.steps[1].θ, win.chan_idx, tsel)
-    for (ev, s) in Iterators.drop(zip(evs, sol.steps), 1)
-        g .*= evaluate_gains(ev, s.θ, win.chan_idx, tsel)
-    end
+    tspan = UVData.metadata(stack).time_span
+    tconst = _time_constant_over(sol, win, tspan)
+    g = Calibration._composed_gains(
+        sol, win.geom;
+        chan_idx = win.chan_idx,
+        ti_idx = tconst ? win.ti_idx[1:1] : win.ti_idx,
+        time_span = tconst ? _head_span(tspan) : tspan,
+    )
     cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
@@ -219,6 +289,9 @@ function _divide_gains!(
     end
     return nothing
 end
+
+# The span of just the first sample, to match a single evaluated time column.
+_head_span(span) = span === nothing || isempty(span) ? span : span[1:1]
 
 # ── Built-in: per-station weight scaling ──────────────────────────────────────
 
@@ -366,21 +439,4 @@ function station_weight_scale(names::AbstractVector{<:AbstractString}, factors; 
         s[i] = Float64(f)
     end
     return s
-end
-
-# A precal's gains are usually CONSTANT IN TIME across one scan's window (the
-# phase-cal model is PerScan × PerSpectralWindow with no time-coordinate term),
-# so evaluating the full (nchan × nti) gain cube wastes nti× the `cis` work —
-# the dominant cost of applying the correction. True when no component reads a
-# time coordinate and every component sees a single time segment in the window.
-function _precal_time_constant(ev::GainEvaluator, g_ti)
-    length(g_ti) <= 1 && return true
-    for plan in ev.layout.plans
-        :Ti in Calibration.term_axes(plan.term) && return false
-        ts = plan.tseg_id[g_ti[1]]
-        for gti in g_ti
-            plan.tseg_id[gti] == ts || return false
-        end
-    end
-    return true
 end

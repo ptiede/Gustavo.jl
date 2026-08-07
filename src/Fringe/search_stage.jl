@@ -425,14 +425,10 @@ function detection_table(scan_dets)
 end
 
 # The flag block for the solution `info` (plain parallel vectors,
-# HDF5-representable): stage-B-unconstrained (station, scan) pairs and any
-# intra-site baselines excluded for crosstalk.
-function flag_table(station_flags, excl)
-    pairs_ab = excl === nothing ? Tuple{Int, Int}[] : sort!([p for p in excl if p[1] < p[2]])
+# HDF5-representable): the stage-B-unconstrained (station, scan) pairs.
+function flag_table(station_flags)
     return (;
         flagged_ant = Int[f[1] for f in station_flags],
         flagged_scan = Int[f[2] for f in station_flags],
-        excluded_ant_a = Int[p[1] for p in pairs_ab],
-        excluded_ant_b = Int[p[2] for p in pairs_ab],
     )
 end

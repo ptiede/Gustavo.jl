@@ -236,27 +236,34 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
             end
         end
 
-        # `sol[name]` extracts that step alone (== `step_solution`); the
-        # cumulative view through a stage is `stage_solution`, a separate call.
-        @test sol[:adhoc].steps[1].θ == CAL._step(sol, :adhoc).θ
+        # A `Symbol` selects that step alone; a range selects a run of them.
         @test stage_names(sol[:adhoc]) == [:adhoc]
 
-        # The last stage's cumulative snapshot IS the full solution.
-        @test stage_names(stage_solution(sol, :adhoc)) == stage_names(sol)
-        @test parent(gains(stage_solution(sol, :adhoc))) == parent(gains(sol))
+        # Selecting every step reproduces the solution.
+        @test stage_names(sol[:]) == stage_names(sol)
+        @test parent(gains(sol[:])) == parent(gains(sol))
 
-        # Earlier snapshots carry only the steps up to and including that stage
-        # — a later stage contributes no gain there at all, rather than an
+        # A leading run carries only the steps up to and including that one —
+        # a later step contributes no gain there at all, rather than an
         # explicit zeroed θ block over a shared layout.
-        fr = stage_solution(sol, :fringe)
+        fr = sol[1:1]
         @test stage_names(fr) == [:fringe]
         @test fr.steps[1].θ == sol.steps[1].θ
-        @test fr.steps[1].θ == sol[:fringe].steps[1].θ   # same step, extracted either way
+        @test fr.steps[1].θ == sol[:fringe].steps[1].θ   # same step, selected either way
 
-        bp = stage_solution(sol, :bandpass)
+        bp = sol[begin:2]
         @test stage_names(bp) == [:fringe, :bandpass]
         @test bp.steps[1].θ == sol.steps[1].θ
         @test bp.steps[2].θ == sol.steps[2].θ
+
+        # `end` addresses the last step, and a selection keeps the provenance
+        # chains, so it stays replayable by `calibrate`.
+        @test stage_names(sol[end]) == [last(stage_names(sol))]
+        @test sol[:].transforms == sol.transforms
+        @test sol[:].postcal == sol.postcal
+        # A solution has at least one step, so an empty selection is refused.
+        @test_throws ArgumentError sol[2:1]
+        @test_throws "at least one step" sol[2:1]
 
         # A snapshot is a valid solution: it applies cleanly.
         @test UVP.apply_calibration(uvset, fr) isa UVP.UVSet

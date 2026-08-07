@@ -67,7 +67,7 @@
     )
 
     function bp_leaves(sol)
-        bstep = CAL._step(sol, :bandpass)
+        bstep = sol[:bandpass].steps[1]
         pplan = bstep.layout.plantree.phase.bandpass
         aplan = bstep.layout.plantree.logamp.bandpass
         return CAL._component_leaf(pplan, bstep.θ), CAL._component_leaf(aplan, bstep.θ)

@@ -6,7 +6,7 @@
 # in `Gustavo.Fringe`.
 
 """
-    DispersionModel(; require_band_separation = true, tie_colocated = true)
+    DispersionModel(; require_band_separation = true, colocated_sep = 1000.0)
 
 The differential-ionosphere (dTEC) term: a per-scan, feed-common phase ∝ 1/ν.
 A `FringeModel` term-list element — include it in the list to model the
@@ -17,9 +17,12 @@ ionosphere, omit it for a fit that models no ionosphere at all.
   fractional bandwidth (VGOS 3–10.7 GHz qualifies; a single contiguous band
   cannot constrain the curvature and the term would just soak up delay). Set
   `false` to solve it regardless.
-- `tie_colocated` — tie co-located stations (< 1 km apart) to one dTEC. They
-  see the same ionosphere, so a differential TEC between them is pure solve
-  error.
+- `colocated_sep` — the station separation (meters) below which two stations are
+  taken to see the same ionosphere and are tied to ONE dTEC, a differential TEC
+  between them being pure solve error. The default 1 km ties twins such as
+  Onsala's OE/OW at ~75 m; `nothing` ties nothing. The grouping is computed from
+  the antenna table's station positions, and errors if they are missing or
+  degenerate — a threshold means nothing without real positions.
 
 Estimating dispersion is NOT separable from estimating delay: over a finite
 band the two are near-degenerate, so the fringe estimator fits Δτ and dTEC
@@ -27,7 +30,7 @@ jointly. The separation here is of the model, not of the solve.
 """
 Base.@kwdef struct DispersionModel
     require_band_separation::Bool = true
-    tie_colocated::Bool = true
+    colocated_sep::Union{Nothing, Float64} = 1000.0
 end
 
 # The element compiles to the dTEC component, or to nothing when the band

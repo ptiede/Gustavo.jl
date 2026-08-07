@@ -53,7 +53,8 @@ export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
 export AbstractGainTerm
 export ConstantTerm, Delay, Dispersion, Rate, Polynomial, PolynomialFreq, PolynomialTime
 # The term-authoring interface: the hooks a new `AbstractGainTerm` implements.
-export term_axes, param_shapes, term_eval, term_label, freq_coordinate, time_coordinate
+export term_axes, param_shapes, term_eval, term_label
+export freq_coordinate, time_coordinate, freq_coord_state, time_coord_state
 
 # Models and tying
 export GainComponent, TiedComponent, StationGainModel
@@ -71,12 +72,11 @@ export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
 
 # Calibration solution container, apply, serialization
 export CalibrationSolution, StepSolution, build_geometry, GeometryWindow, leaf_window
-export is_time_constant
 export save_solution, load_solution
 export save_solution_hdf5, load_solution_hdf5
 
 # Per-stage provenance and snapshots (composable pipeline)
-export stage_names, stage_solution, stage_info
+export stage_names, stage_info
 export component_ranges, component_gains, component_names, component_dimarray, gains
 # Fit-once / apply-later extraction (a single step, e.g. a portable bandpass)
 export step_solution

@@ -7,21 +7,13 @@
 #     baseline (a,b), product p with feeds (fa, fb) = correlation_feed_pair(p):
 #         delay_ab^p = τ_{a,fa} − τ_{b,fb}
 #         rate_ab^p  = ṙ_{a,fa} − ṙ_{b,fb}
-#         phase_ab^p = φ_{a,fa} − φ_{b,fb}  (+ source cross-hand phase, below)
+#         phase_ab^p = φ_{a,fa} − φ_{b,fb}
 #
 # Using ALL FOUR products (not just parallel hands) is deliberate: cross-hand
 # rows connect feed-1 and feed-2 nodes, so the inter-feed (feed-2 − feed-1)
 # delay/phase offset is pinned by the data and falls out of the solution — no
 # separate alignment stage. Closure holds by construction within each product
 # and across mixed-hand triangles.
-#
-# Cross-hand source phase: there is no source term in the model. A cross-hand
-# phase that is one constant over an inter-feed segment is degenerate with that
-# segment's inter-feed offset column — one unknown, only the sum estimable — so
-# the reported cross-hand phase is conventional up to that constant (`rel_time`
-# in `default_fringe_terms` sets the segmentation) and absolute EVPA needs
-# external polarization calibration. Any baseline-dependent part has no station
-# decomposition and stays in the residuals.
 #
 # What the model omits. The per-antenna response is taken as diagonal, so
 # leakage goes to the residuals. There is no parallactic-angle term: with
@@ -538,7 +530,6 @@ each scan's system is independent and solves exactly as it would alone.
 function solve_station_systems!(
         θ::AbstractVector, scans, components;
         ref_ant::Integer = 1, opts::Stationization = Stationization(),
-        excl::Union{Nothing, Set{Tuple{Int, Int}}} = nothing,
     )
     ncomp = 0
     # (station, scan-index) pairs carrying a TRANSFERABLE solution — the
@@ -553,7 +544,7 @@ function solve_station_systems!(
     for kind in (:delay, :rate, :phase)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        nc, cov = _solve_kind_cols!(θ, scans, plans, ref_ant, opts, kind, excl)
+        nc, cov = _solve_kind_cols!(θ, scans, plans, ref_ant, opts, kind)
         covered = first_kind ? cov : intersect(covered, cov)
         first_kind = false
         kind === :phase && (ncomp = nc)
@@ -564,12 +555,9 @@ end
 # Solve one observable kind across all scans, accumulating into θ. Each detection
 # becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
 # θ columns for that (station, feed, time) — a feed-common per-scan column and,
-# when present, a global feed-offset column. `excl` (both `(a,b)` orders) drops
-# a baseline from the system entirely (co-located pairs; see `Stationization`).
-# Returns (ncomp, covered).
+# when present, a global feed-offset column. Returns (ncomp, covered).
 function _solve_kind_cols!(
         θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol,
-        excl::Union{Nothing, Set{Tuple{Int, Int}}} = nothing,
     )
     getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
     sys_err = kind === :delay ? opts.systematic_delay : kind === :rate ? opts.systematic_rate : 0.0
@@ -613,7 +601,6 @@ function _solve_kind_cols!(
             (det.valid && det.snr >= opts.snr_min) || continue
             a, b = bl_pairs[bi]
             a == b && continue
-            (excl === nothing || (a, b) ∉ excl) || continue
             fa, fb = feeds[p]
             cross = fa != fb
             nsA = Int[]; nsB = Int[]

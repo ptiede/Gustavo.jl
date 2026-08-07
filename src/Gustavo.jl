@@ -61,7 +61,7 @@ export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ScanStream, scan_stream, select_groups
 export search_scan
 export map_groups, foreach_group
-export StepSolution, stage_names, stage_solution, stage_info
+export StepSolution, stage_names, stage_info
 export component_gains, component_names, component_dimarray, gains
 export step_solution
 end

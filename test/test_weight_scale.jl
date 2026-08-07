@@ -65,7 +65,7 @@
             TemporalSmoother(FP.NoSmoothing())
         base = fitcalibrate(chain0, uvset)
         fixd = fitcalibrate(FP.StationWeightScale(ws) |> chain0, uvset)
-        bfr, ffr = CAL._step(base[1], :fringe), CAL._step(fixd[1], :fringe)
+        bfr, ffr = base[1][:fringe].steps[1], fixd[1][:fringe].steps[1]
         @test ffr.info.scan_snr == bfr.info.scan_snr
         @test ffr.info.det_snr == bfr.info.det_snr
         # …so the solution only shifts at the level of the re-weighted stages.

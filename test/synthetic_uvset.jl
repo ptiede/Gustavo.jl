@@ -68,8 +68,10 @@ function _build_fringe_uvset(;
     ants_v = [
         UV.Antenna(;
                 name = "A$(i)",
+                # VLBI-scale by default (tens of km apart): co-located grouping
+                # rejects a table whose stations sit within a single site.
                 station_xyz = station_positions === nothing ?
-                Float64[100.0 * i, 200.0 * i, 300.0 * i] : Float64.(station_positions[i]),
+                Float64[1.0e4 * i, 2.0e4 * i, 3.0e4 * i] : Float64.(station_positions[i]),
                 mount = UV.MountAltAz(),
                 nominal_basis = (RPol(), LPol()),
                 response = Diagonal(ones(ComplexF32, 2)),

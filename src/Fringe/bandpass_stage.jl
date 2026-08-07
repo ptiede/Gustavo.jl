@@ -233,8 +233,8 @@ solve_bandpass!(est::AbstractBandpassEstimator, θ, results, setup, model::Bandp
 Accumulate one scan window's contribution to the per-(global-baseline, product,
 GLOBAL channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for the
 bandpass solves, on data already gain-corrected through the pipeline's
-transform chain. `blidx` maps `(a, b) -> row` in the global baseline table
-(co-located pairs excluded there never contribute).
+transform chain. `blidx` maps `(a, b) -> row` in the global baseline table;
+a pair absent from it never contributes.
 
 `derotate` (default `true`) counter-rotates each AP, BEFORE summing over time,
 by its OWN band-averaged residual phase — removing the per-AP time phase

@@ -56,12 +56,12 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
     @testset "θ blocks invariant under the appended smoother stage" begin
         # Stage-B fringe blocks: bit-identical (components 1..5 in both models).
-        fn = CAL._step(sol_n, :fringe); fo = CAL._step(sol_o, :fringe)
+        fn = sol_n[:fringe].steps[1]; fo = sol_o[:fringe].steps[1]
         for i in 1:5
             @test _blk(fn, i) == _blk(fo, i)
         end
         # Per-channel phase + log-amp bandpass: rtol 1e-12 (fold association).
-        bn = CAL._step(sol_n, :bandpass); bo = CAL._step(sol_o, :bandpass)
+        bn = sol_n[:bandpass].steps[1]; bo = sol_o[:bandpass].steps[1]
         @test isapprox(_bp_phase(bn), _bp_phase(bo); rtol = 1.0e-12, atol = 1.0e-12)
         @test any(!=(0), _bp_phase(bn))
         @test isapprox(_bp_amp(bn), _bp_amp(bo); rtol = 1.0e-12, atol = 1.0e-12)
@@ -136,7 +136,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             ),
             uvset,
         )
-        bg = CAL._step(sol_g, :bandpass); bn = CAL._step(sol_n, :bandpass)
+        bg = sol_g[:bandpass].steps[1]; bn = sol_n[:bandpass].steps[1]
         @test length(_bp_phase(bg)) * k == length(_bp_phase(bn))
         @test any(!=(0), _bp_phase(bg))
 
@@ -158,7 +158,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         bp = only(bps.steps)
         @test length(bp.model.phase) == 1 && length(bp.model.logamp) == 1
         @test keys(bp.layout.plantree.phase) == (:bandpass,)
-        bn = CAL._step(sol_n, :bandpass)
+        bn = sol_n[:bandpass].steps[1]
         @test _bp_phase(bp) == _bp_phase(bn)
         @test _bp_amp(bp) == _bp_amp(bn)
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
@@ -232,11 +232,34 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         stb = FP.scan_stream(uvbig; transforms = (FP.ApplySolution(bps),))
         @test_logs (:warn, r"A5") match_mode = :any FP.materialize_cube(stb, stb.groups[1])
 
-        # Guard rails: channel-layout mismatch and non-time-constant solutions
-        # are rejected at STREAM CONSTRUCTION (fail-fast, before any read).
+        # A time-VARYING solution ports the same way: `sol_n`'s fringe terms are
+        # per scan, and `uvsub` is the same scan sampled over fewer APs, so every
+        # target sample places in the scan it belongs to.
+        stn = FP.scan_stream(uvsub; transforms = (FP.ApplySolution(sol_n),))
+        @test FP.materialize_cube(stn, stn.groups[1]) isa Tuple
+
+        # Guard rails: a bandpass cuts the channel-INDEX axis, so a set indexing
+        # different channels has no segment to place against…
         uvnc, _ = _build_fringe_uvset(; nant = 3, nspw, nchan = 4, ntime = 5)
-        @test_throws ErrorException FP.scan_stream(uvnc; transforms = (FP.ApplySolution(bps),))
-        @test_throws ErrorException FP.scan_stream(uvsub; transforms = (FP.ApplySolution(sol_n),))
+        stnc = FP.scan_stream(uvnc; transforms = (FP.ApplySolution(bps),))
+        @test_throws "identical channel layout" FP.materialize_cube(stnc, stnc.groups[1])
+        # …and a scan the solve never saw is refused, not served by a neighbour.
+        uv2, _ = _build_fringe_uvset(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
+        st2 = FP.scan_stream(uv2; transforms = (FP.ApplySolution(sol_n),))
+        @test_throws "is not in the solution" [
+            FP.materialize_cube(st2, g) for g in st2.groups
+        ]
+        # Station identity is what construction checks, and a name is all of it.
+        @test_throws "shares no station with this set" FP.scan_stream(
+            uvsub;
+            transforms = (
+                FP.ApplySolution(
+                    CAL.CalibrationSolution(
+                        bps.steps, bps.geom, merge(bps.info, (; ant_names = ["QQ", "RR"])),
+                    ),
+                ),
+            ),
+        )
     end
 
     @testset "refine kernels: standalone on a scan view (determinism + recovery)" begin

@@ -27,7 +27,7 @@ solver diagnostics. A [`CalibrationSolution`](@ref) is the ordered
 run order; gains compose multiplicatively across them ([`gains`](@ref),
 [`apply_calibration`](@ref)), and `name` (the step's `provides(step)`
 capability, e.g. `:fringe`/`:bandpass`/`:refine`/`:adhoc`) is how a later
-step's `fit_selection` or a user's [`stage_info`](@ref)/[`stage_solution`](@ref)
+step's `fit_selection` or a user's [`stage_info`](@ref) or `sol[name]`
 looks a step up.
 
 `θ` keeps whatever array type it is given — a labelled `DimArray` as readily as
@@ -160,17 +160,31 @@ The pipeline steps recorded on `sol`, in run order.
 """
 stage_names(sol::CalibrationSolution) = Symbol[s.name for s in sol.steps]
 
-
-
 """
     getindex(sol::CalibrationSolution, name::Symbol) -> CalibrationSolution
-    getindex(sol::CalibrationSolution, index::Integer) -> CalibrationSolution
+    getindex(sol::CalibrationSolution, index) -> CalibrationSolution
 
-The step named `name`, alone — the same extraction as [`step_solution`](@ref).
+Select steps out of `sol`, in run order, as a solution in its own right. A
+`Symbol` names one step (see [`stage_names`](@ref)); anything `sol.steps`
+accepts selects positionally — `sol[2]` the second step alone, `sol[1:2]` the
+first two, `sol[[1, 3]]` the first and third, `sol[:]` every one.
+
+Gains compose multiplicatively across steps, so a selection's gain is exactly
+the product of the selected steps' own gains — a step left out contributes no
+gain at all, rather than an explicit zeroed θ block over a shared layout. A
+leading run `sol[1:i]` is thus the solution AS OF step `i`: apply it, plot it,
+or difference it against the next one. Geometry, `info` and both provenance
+chains carry over unchanged, so every selection is a valid solution for
+[`apply_calibration`](@ref) and `calibrate`, and `sol[:]` reproduces `sol`.
+
+Selecting no step at all is an error: a solution has at least one.
 """
-function Base.getindex(sol::CalibrationSolution, name)
-    return step_solution(sol, name)
+function Base.getindex(sol::CalibrationSolution, index)
+    return step_solution(sol, index)
 end
+
+Base.firstindex(sol::CalibrationSolution) = firstindex(sol.steps)
+Base.lastindex(sol::CalibrationSolution) = lastindex(sol.steps)
 
 """
     stage_info(sol::CalibrationSolution, name::Symbol) -> NamedTuple
@@ -178,28 +192,7 @@ end
 The diagnostics recorded by the step named `name` (detections and per-scan SNR
 for the fringe stage, calibrator choice for the bandpass stage, …).
 """
-stage_info(sol::CalibrationSolution, name::Symbol) = _step(sol, name).info
-
-"""
-    stage_solution(sol::CalibrationSolution, name::Symbol) -> CalibrationSolution
-
-The solution AS OF the step named `name`: just the steps up to and including
-it. Since gains compose multiplicatively across steps, this is exactly the
-composed gain of every step that ran up to that point — a later step
-contributes no gain at all here, rather than an explicit zeroed θ block over a
-shared layout. Apply it, plot it, or difference it against the next stage's
-snapshot. For the step alone, not its predecessors, see [`step_solution`](@ref)
-(also `sol[:name]`).
-"""
-function stage_solution(sol::CalibrationSolution, name::Symbol)
-    i = findfirst(s -> s.name === name, sol.steps)
-    i === nothing && throw(
-        ArgumentError("solution has no stage $(repr(name)); recorded stages: $(stage_names(sol)).")
-    )
-    return CalibrationSolution(
-        sol.steps[1:i], sol.geom, sol.info; transforms = sol.transforms, postcal = sol.postcal,
-    )
-end
+stage_info(sol::CalibrationSolution, name::Symbol) = sol[name].steps[1].info
 
 """
     component_gains(sol::CalibrationSolution, step::Symbol, plan_index::Integer; ci = :, ti = :)
@@ -213,7 +206,7 @@ every component of every step reproduces [`gains`](@ref). `plan_index` follows
 that step's OWN `layout.plans` (phase components first, then log-amplitude).
 """
 function component_gains(sol::CalibrationSolution, step::Symbol, plan_index::Integer; ci = Colon(), ti = Colon())
-    s = _step(sol, step)
+    s = sol[step].steps[1]
     1 <= plan_index <= length(s.layout.plans) || throw(
         ArgumentError(
             "component_gains: plan_index $plan_index out of range 1:$(length(s.layout.plans)) " *
@@ -275,6 +268,26 @@ function _composed_gains(
     return g
 end
 
+# Foreign-grid counterpart: each target sample placed in the solve segment it
+# belongs to, so the data need not be sampled on the solve grid.
+function _composed_gains(
+        sol::CalibrationSolution, target::DataGeometry;
+        chan_idx::AbstractVector{<:Integer} = Base.OneTo(nchannels(target)),
+        ti_idx::AbstractVector{<:Integer} = Base.OneTo(ntimes(target)),
+        time_span = nothing,
+    )
+    s1 = sol.steps[1]
+    g = evaluate_gains(
+        GainEvaluator(s1.model, s1.layout), s1.θ, sol.geom, target; chan_idx, ti_idx, time_span,
+    )
+    for s in view(sol.steps, 2:length(sol.steps))
+        g .*= evaluate_gains(
+            GainEvaluator(s.model, s.layout), s.θ, sol.geom, target; chan_idx, ti_idx, time_span,
+        )
+    end
+    return g
+end
+
 """
     gains(sol::CalibrationSolution) -> DimArray
 
@@ -326,7 +339,7 @@ solution and never fed through the solve or AD.
 """
 function component_dimarray(sol::CalibrationSolution, step, group::Symbol, name::Symbol...)
     path = (group, name...)
-    s = _step(sol, step)
+    s = sol[step].steps[1]
     ok, plan = _try_descend(s.layout.plantree, path)
     ok || throw(
         ArgumentError("component_dimarray: step $(repr(step)) has no component named $(join(path, '.')).")
@@ -381,7 +394,9 @@ end
 function step_solution(sol::CalibrationSolution, index)
     stp = sol.steps[index]
     stpout = stp isa AbstractVector ? stp : [stp]
-    return CalibrationSolution(stpout, sol.geom, sol.info)
+    return CalibrationSolution(
+        stpout, sol.geom, sol.info; transforms = sol.transforms, postcal = sol.postcal,
+    )
 end
 
 function step_solution(sol::CalibrationSolution, name::Symbol)
@@ -524,33 +539,13 @@ end
 
 """
     leaf_window(geom::DataGeometry, leaf) -> GeometryWindow
-    leaf_window(sol::CalibrationSolution, leaf) -> GeometryWindow
 
 The [`GeometryWindow`](@ref) addressing the channels and times `leaf` carries,
-matched by value against the geometry (frequency by `isapprox` rtol 1e-9, time by
-atol 1e-9 h). Errors if any leaf sample has no match.
-
-Addressing a solution rather than a bare geometry resolves the time axis
-according to the solution itself: a [`is_time_constant`](@ref) solution has no
-time dependence to locate, so its window carries the one time segment that
-exists and the leaf's epochs need not appear in the geometry at all. Anything
-that reads a per-time quantity off the window — a scan id, say — must address a
-`DataGeometry`, whose times are the fit grid itself.
+matched by value against `geom` (frequency by `isapprox` rtol 1e-9, time by atol
+1e-9 h). Errors if any leaf sample has no match in the geometry.
 """
 leaf_window(geom::DataGeometry, leaf) =
     GeometryWindow(geom, _channel_indices(geom, leaf), _time_indices(geom, leaf))
-
-function leaf_window(sol::CalibrationSolution, leaf)
-    geom = sol.geom
-    chan_idx = _channel_indices(geom, leaf)
-    is_time_constant(sol) ||
-        return GeometryWindow(geom, chan_idx, _time_indices(geom, leaf))
-    isempty(geom.times) &&
-        throw(ArgumentError("leaf_window: the solution's geometry carries no times."))
-    # Uniform `tseg_id`: any in-range time addresses the single segment.
-    nt = length(lookup(leaf[:vis], Ti))
-    return GeometryWindow(geom, chan_idx, fill(firstindex(geom.times), nt))
-end
 
 function _channel_indices(geom::DataGeometry, leaf)
     fs = lookup(leaf[:vis], Frequency)
@@ -578,30 +573,6 @@ end
 # ── Apply ────────────────────────────────────────────────────────────────────
 
 """
-    is_time_constant(sol::CalibrationSolution) -> Bool
-    is_time_constant(ev::GainEvaluator) -> Bool
-
-Whether the gains carry no time dependence at all: every component's term
-declares no `:Ti` coordinate AND its time segmentation resolves to a single
-segment (a [`Bandpass`](@ref Gustavo.Bandpass) step's `GlobalTime` components,
-for instance). Such gains are a function of channel, station and feed alone, so
-they apply to data on ANY time axis — the fit-once / apply-anywhere property
-[`step_solution`](@ref), [`leaf_window`](@ref) and
-[`Gustavo.Fringe.ApplySolution`](@ref) rest on.
-"""
-is_time_constant(sol::CalibrationSolution) =
-    all(s -> is_time_constant(GainEvaluator(s.model, s.layout)), sol.steps)
-
-function is_time_constant(ev::GainEvaluator)
-    for plan in ev.layout.plans
-        :Ti in term_axes(plan.term) && return false
-        isempty(plan.tseg_id) && continue
-        all(==(first(plan.tseg_id)), plan.tseg_id) || return false
-    end
-    return true
-end
-
-"""
     apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true) -> UVSet
 
 Divide every leaf's visibilities by the solution's per-antenna gains. For a
@@ -611,26 +582,30 @@ baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
 
 Samples where either gain magnitude underflows are flagged (weight 0, vis NaN).
 
-Channels are located in `sol`'s geometry by frequency, so `uvset` may carry any
-subset of the channels the solve covered. Times are located the same way unless
-`sol` [`is_time_constant`](@ref), in which case the time axis is free: a
-bandpass fit on scan-averaged data, or on a different observation, corrects data
-at full time resolution.
+Each channel and time is placed in the segment of `sol` it belongs to — matched
+by spw and scan identity — so `uvset` may be sampled differently from the solve:
+a bandpass fit on scan-averaged data corrects data at full time resolution. A
+sample the solution has no segment for is rejected, as is one whose recorded
+span crosses a bin boundary — see `evaluate_gains`.
 
-`apply_flags` (default `true`) additionally zero-weights the solution's
-recorded flags, when present in `sol.info` (the fringe solver records both):
-(station, scan) pairs the solve left UNCONSTRAINED — identity gains, i.e. the
-data would pass through uncalibrated — and baselines excluded for cause (the
-intra-site crosstalk pairs). This is the EHT-HOPS flag semantic: a station is
-flagged per scan only when, after the closure-screened global solve, no strong
-detection constrains it; a merely weak baseline between two constrained
-stations is NOT flagged (it is calibrated by SNR transfer).
+`apply_flags` (default `true`) additionally zero-weights baselines touching a
+(station, scan) the solve left UNCONSTRAINED, when `sol.info` records them —
+identity gains, i.e. the data would pass through uncalibrated. This is the
+EHT-HOPS flag semantic: a station is flagged per scan only when, after the
+closure-screened global solve, no strong detection constrains it; a merely weak
+baseline between two constrained stations is NOT flagged (it is calibrated by
+SNR transfer).
 """
 function UVData.apply_calibration(
         uvset::UVSet, sol::CalibrationSolution;
         apply_flags::Bool = true, executor = DynamicScheduler(),
     )
-    flagged, exclbl = apply_flags ? _solution_flag_sets(sol.info) : (nothing, nothing)
+    flagged = apply_flags ? _solution_flag_sets(sol.info) : nothing
+    # Placement is against the TARGET SET's own geometry, not a leaf's: a
+    # channel-index segmentation (`ChannelBlocks`, `FreqGroups`) is defined on
+    # the set's whole concatenated channel axis, which one band's leaf does not
+    # carry. `leaf_window` then says which of its samples each leaf holds.
+    target = build_geometry(uvset)
     return UVData.apply(uvset) do leaf, info, root
         # A lazy leaf materializes to freshly-decoded private arrays we correct
         # in place; an eager leaf is caller-owned, so copy it first. Capture
@@ -640,57 +615,45 @@ function UVData.apply_calibration(
         private || (leaf = rebuild_visibilities(
             leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights])),
         ))
-        win = leaf_window(sol, leaf)
-        g = _composed_gains(sol, win.chan_idx, win.ti_idx)   # (nchan_leaf, nti_leaf, nant, 2)
+        win = leaf_window(target, leaf)
+        g = _composed_gains(                                 # (nchan_leaf, nti_leaf, nant, 2)
+            sol, target;
+            chan_idx = win.chan_idx, ti_idx = win.ti_idx, time_span = info.time_span,
+        )
         _apply_gains!(leaf, g; executor)
         _flag_solution_rows!(
-            leaf[:vis], leaf[:weights], UVData.baselines(leaf).pairs, sol.geom, win.ti_idx, flagged, exclbl,
+            leaf[:vis], leaf[:weights], UVData.baselines(leaf).pairs,
+            _geom_scan_id(sol.geom, info.scan_name), flagged,
         )
         return leaf
     end
 end
 
-# The solution's recorded flags as lookup sets: `flagged` = (station, geometry
-# scan id) pairs with no constraint (identity gains), `exclbl` = excluded
-# baselines (both orders). `nothing` when the solution carries none.
+# The solution's unconstrained (station, geometry scan id) pairs as a lookup set,
+# `nothing` when the solution records none.
 function _solution_flag_sets(info::NamedTuple)
-    flagged = if haskey(info, :flagged_ant) && !isempty(info.flagged_ant)
-        Set{Tuple{Int, Int}}(
-            (Int(info.flagged_ant[i]), Int(info.flagged_scan[i]))
-                for i in eachindex(info.flagged_ant)
-        )
-    else
-        nothing
-    end
-    exclbl = if haskey(info, :excluded_ant_a) && !isempty(info.excluded_ant_a)
-        s = Set{Tuple{Int, Int}}()
-        for i in eachindex(info.excluded_ant_a)
-            a, b = Int(info.excluded_ant_a[i]), Int(info.excluded_ant_b[i])
-            push!(s, (a, b))
-            push!(s, (b, a))
-        end
-        s
-    else
-        nothing
-    end
-    return flagged, exclbl
+    (haskey(info, :flagged_ant) && !isempty(info.flagged_ant)) || return nothing
+    return Set{Tuple{Int, Int}}(
+        (Int(info.flagged_ant[i]), Int(info.flagged_scan[i]))
+            for i in eachindex(info.flagged_ant)
+    )
 end
 
-# Zero-weight (and NaN) whole baseline rows per the solution flags: baselines
-# touching a (station, scan) the solve left unconstrained, and the excluded
-# (intra-site) baselines. A leaf spans ONE scan, so the scan id comes from its
-# first time index.
-function _flag_solution_rows!(Vc, Wc, bl_pairs, geom, ti_idx, flagged, exclbl)
-    (flagged === nothing && exclbl === nothing) && return nothing
-    isempty(ti_idx) && return nothing
-    scanid = geom.scan_of_time[first(ti_idx)]
+# The solution's own scan id for a scan label, 0 when the solve never saw it.
+# Flags are recorded against these ids, so a label join is what locates them —
+# the leaf's epochs need not appear in the solve grid.
+_geom_scan_id(geom::DataGeometry, scan_name) =
+    something(findfirst(==(String(scan_name)), geom.scan_names), 0)
+
+# Zero-weight (and NaN) whole baseline rows touching a (station, scan) the solve
+# left unconstrained — identity gains, so the data would pass through
+# uncalibrated. A leaf spans ONE scan, hence one scan id.
+function _flag_solution_rows!(Vc, Wc, bl_pairs, scanid::Integer, flagged)
+    flagged === nothing && return nothing
     @inbounds for bi in eachindex(bl_pairs)
         a, b = bl_pairs[bi]
         a == b && continue
-        bad = (exclbl !== nothing && (a, b) in exclbl) || (
-            flagged !== nothing && ((a, scanid) in flagged || (b, scanid) in flagged)
-        )
-        bad || continue
+        ((a, scanid) in flagged || (b, scanid) in flagged) || continue
         Wc[:, :, bi, :] .= zero(eltype(Wc))
         Vc[:, :, bi, :] .= convert(eltype(Vc), NaN)
     end

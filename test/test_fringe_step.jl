@@ -19,7 +19,7 @@
             uvset,
         )
         sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
-        fr, frm = CAL._step(sol, :fringe), CAL._step(solm, :fringe)
+        fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
         @test length(fr.model.phase) == 5
         rn = CAL.component_ranges(fr.layout)
         rm = CAL.component_ranges(frm.layout)
@@ -38,10 +38,10 @@
             FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
             uvset; ref_ant = "A1",
         )
-        @test CAL._step(sol_code, :fringe).θ == fr.θ
+        @test sol_code[:fringe].steps[1].θ == fr.θ
 
-        # The snapshot machinery works on a single-stage solution.
-        @test CAL._step(stage_solution(sol, :fringe), :fringe).θ == fr.θ
+        # Step selection works on a single-step solution.
+        @test sol[1:1][:fringe].steps[1].θ == fr.θ
 
         # A fringe-only solution applies cleanly.
         corr = UVP.apply_calibration(uvset, sol)
@@ -63,7 +63,7 @@
                 estimator = MatchedFilter(rounds = 2),
             ), uvset,
         )
-        fr, frm = CAL._step(sol, :fringe), CAL._step(solm, :fringe)
+        fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
         rn = CAL.component_ranges(fr.layout)
         rm = CAL.component_ranges(frm.layout)
         for i in 1:5
@@ -83,7 +83,7 @@
         )
 
         sol = fit(FringeFit(model = FringeModel(terms = rel_terms)), uvset)
-        fr = CAL._step(sol, :fringe)
+        fr = sol[:fringe].steps[1]
         @test length(CAL.phase_components(fr.model)) == 6
         plan = fr.layout.plans[6]
         solved = [fr.θ[plan_off1(plan)[a, 2, 1, 1]] for a in 1:4]
@@ -92,14 +92,14 @@
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         uv0, _ = _build_fringe_uvset()
         sol0 = fit(FringeFit(model = FringeModel(terms = rel_terms)), uv0)
-        fr0 = CAL._step(sol0, :fringe)
+        fr0 = sol0[:fringe].steps[1]
         plan0 = fr0.layout.plans[6]
         @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
         sold = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
-        @test length(CAL._step(sold, :fringe).model.phase) == 5
+        @test length(sold[:fringe].steps[1].model.phase) == 5
     end
 
     @testset "transforms on the new path (incl. CalFunction)" begin
@@ -113,7 +113,7 @@
             uvset,
         )
         sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
-        @test CAL._step(sol_ws, :fringe).θ == CAL._step(sol, :fringe).θ
+        @test sol_ws[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
         @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
 
         # CalFunction runs on the new path (it errors only when bridging), and
@@ -254,7 +254,7 @@
         # DispersionModel/SingleBandDelay elements are rejected outright —
         # dispersion/SBD are DispersionSBDFit's, not FringeModel's.
         @test_throws "DispersionSBDFit" FringeModel(
-            terms = (; default_fringe_terms()..., dtec2 = DispersionModel(tie_colocated = false)))
+            terms = (; default_fringe_terms()..., dtec2 = DispersionModel(colocated_sep = nothing)))
         @test_throws "DispersionSBDFit" FringeModel(
             terms = (; default_fringe_terms()..., sbd2 = SingleBandDelay()))
     end
@@ -349,7 +349,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
     @testset "an estimator publishing no diagnostics still yields a solution" begin
         null = _NullEstimator()
         sol = fit(FringeFit(; model, estimator = null), uvset)
-        fringe = CAL._step(sol, :fringe)
+        fringe = sol[:fringe].steps[1]
         @test null.scans[] == sol.info.nscan
         @test all(iszero, fringe.θ)     # it solved nothing, by construction
         @test !haskey(fringe.info, :det_snr)     # no detections published at all
@@ -448,13 +448,13 @@ end
 
     @testset "the ionosphere is DispersionSBDFit's own field, not FringeModel's" begin
         @test :dispersion ∉ fieldnames(FringeModel)
-        @test :dtec_tie_colocated ∉ fieldnames(FringeModel)
+        @test :dtec_colocated_sep ∉ fieldnames(FringeModel)
         # Instrumental terms stay in the instrument model's default list;
         # dispersion/SBD are DispersionSBDFit's own fields, not term-list
         # elements — putting either type IN the term list is rejected outright.
         @test !any(t -> t isa SingleBandDelay, FringeModel().terms)
         @test !any(t -> t isa DispersionModel, FringeModel().terms)
-        @test fieldnames(DispersionModel) == (:require_band_separation, :tie_colocated)
+        @test fieldnames(DispersionModel) == (:require_band_separation, :colocated_sep)
         @test fieldnames(DispersionSBDFit) == (:dispersion, :sbd)
     end
 
@@ -470,10 +470,9 @@ end
         @test FP.DispersionModel === CAL.DispersionModel === Gustavo.DispersionModel
         @test !isdefined(FP, :_dispersion_plan)
         @test FP._dispersion_enabled === CAL._dispersion_enabled
-        # Co-location is array geometry with two unrelated consumers — the dTEC
-        # tie and the intra-site baseline exclusion — so it belongs to UVData.
+        # Co-location is array geometry, not a fringe concept, so the dTEC
+        # tie's grouping belongs to UVData.
         @test parentmodule(UVP._colocated_ties) === Gustavo.UVData
-        @test parentmodule(UVP._colocated_pair_set) === Gustavo.UVData
         @test !isdefined(FP, :_colocated_ties)
     end
 
@@ -485,7 +484,7 @@ end
         ff = FringeFit(model = FringeModel(), estimator = mf)
         on = fit(ff |> DispersionSBDFit(), uvset)
         off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset)
-        on_ref, off_ref = CAL._step(on, :refine), CAL._step(off, :refine)
+        on_ref, off_ref = on[:refine].steps[1], off[:refine].steps[1]
         @test CAL._dispersion_plan(on_ref.model, on_ref.layout) !== nothing
         @test CAL._dispersion_plan(off_ref.model, off_ref.layout) === nothing
         @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(on_ref.model))
@@ -510,14 +509,14 @@ end
         @test !CAL._dispersion_enabled(nothing, geom_n)
     end
 
-    @testset "tie_colocated reaches DispersionSBDFit's own start_pass! through the step" begin
+    @testset "colocated_sep reaches DispersionSBDFit's own start_pass! through the step" begin
         # The tie is the dispersion model's, but DispersionSBDFit is the step
         # that reads it (`_dtec_ties(s.dispersion, ctx.antennas)`), so it must
         # arrive without the estimator knowing about it.
         ants = Gustavo.UVData.metadata(
             first(values(Gustavo.UVData.branches(uvset)))).antennas
-        @test Gustavo._dtec_ties(DispersionModel(tie_colocated = true), ants) !== nothing
-        @test Gustavo._dtec_ties(DispersionModel(tie_colocated = false), ants) === nothing
+        @test Gustavo._dtec_ties(DispersionModel(colocated_sep = 1000.0), ants) !== nothing
+        @test Gustavo._dtec_ties(DispersionModel(colocated_sep = nothing), ants) === nothing
         @test Gustavo._dtec_ties(nothing, ants) === nothing
     end
 
@@ -529,7 +528,7 @@ end
         # runs.
         ff = FringeFit(model = FringeModel(), estimator = mf)
         sol = fit(ff |> DispersionSBDFit(), uvset)
-        refine = CAL._step(sol, :refine)
+        refine = sol[:refine].steps[1]
         @test CAL._dispersion_plan(refine.model, refine.layout) !== nothing
         @test FP._perscan_delay_plan(refine.model, refine.layout) !== nothing
         @test stage_info(sol, :refine).dispersion_applied

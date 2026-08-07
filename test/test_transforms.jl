@@ -157,9 +157,35 @@
     end
 
     @testset "validation errors" begin
-        # An incompatible ApplySolution is rejected at stream construction.
+        # Station identity is what stream construction checks: a name is the
+        # whole of it, so a solution that records none, or none this set shares,
+        # can never correct anything and is refused before any data is read.
+        anon = CAL.CalibrationSolution(
+            precal.steps, precal.geom, Base.structdiff(precal.info, (; ant_names = nothing)),
+        )
+        @test_throws "records no station names" FP.scan_stream(
+            uvset; transforms = [FP.ApplySolution(anon)],
+        )
+        strangers = CAL.CalibrationSolution(
+            precal.steps, precal.geom, merge(precal.info, (; ant_names = ["XX", "YY", "ZZ", "WW"])),
+        )
+        @test_throws "shares no station with this set" FP.scan_stream(
+            uvset; transforms = [FP.ApplySolution(strangers)],
+        )
+
+        # Placement is checked per window instead, as each is materialized:
+        # `precal`'s bandpass cuts the channel-INDEX axis, so it means nothing
+        # on a set that indexes different channels.
         other, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
-        @test_throws ErrorException FP.scan_stream(other; transforms = [FP.ApplySolution(precal)])
+        sto = FP.scan_stream(other; transforms = [FP.ApplySolution(precal)])
+        @test_throws "identical channel layout" FP.materialize_cube(sto, sto.groups[1])
+        # A scan the solve never saw is refused rather than served by the
+        # neighbouring scan the solution does have.
+        twoscan, _ = _build_fringe_uvset(nscans = 2)
+        st2 = FP.scan_stream(twoscan; transforms = [FP.ApplySolution(precal)])
+        @test_throws "is not in the solution" [
+            FP.materialize_cube(st2, g) for g in st2.groups
+        ]
         @test_throws ErrorException FP.StationWeightScale([1.0, -1.0])
         st_len = FP.scan_stream(uvset; geom = geom, transforms = [FP.FlagChannels(falses(3))])
         @test_throws ErrorException FP.materialize_cube(st_len, st_len.groups[1])

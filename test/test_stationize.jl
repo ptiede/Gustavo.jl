@@ -90,7 +90,7 @@ end
 
 # The (station, feed) cells at least one usable detection touches — the cells a
 # solve can say anything about.
-function touched_cells(D, bl, pols, nant, opts, excl)
+function touched_cells(D, bl, pols, nant, opts)
     feeds = [CALs.correlation_feed_pair(p) for p in pols]
     t = falses(nant, 2)
     for bi in eachindex(bl), p in eachindex(pols)
@@ -98,7 +98,6 @@ function touched_cells(D, bl, pols, nant, opts, excl)
         (det.valid && det.snr >= opts.snr_min) || continue
         a, b = bl[bi]
         a == b && continue
-        (excl === nothing || (a, b) ∉ excl) || continue
         fa, fb = feeds[p]
         t[a, fa] = true
         t[b, fb] = true
@@ -111,7 +110,7 @@ end
 # indistinguishable from a solved zero correction.
 function stationize(
         D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(),
-        excl = nothing, spreads = SCAN_SPREAD,
+        spreads = SCAN_SPREAD,
     )
     layout = perfeed_scan_layout(nant)
     cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
@@ -119,9 +118,9 @@ function stationize(
     scans = (FR.detection_stack(D, bl, pols; ti = 1, spreads...),)
     ncomp, ref_covered = FR.solve_station_systems!(
         θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate));
-        ref_ant = ref_ant, opts = opts, excl = excl,
+        ref_ant = ref_ant, opts = opts,
     )
-    touched = touched_cells(D, bl, pols, nant, opts, excl)
+    touched = touched_cells(D, bl, pols, nant, opts)
     readcols(plan) = [
         let c = plan_off1(plan)[a, f, 1, 1]
             (c == 0 || !touched[a, f]) ? NaN : θ[c]
@@ -466,80 +465,6 @@ end
     end
     @test worst < 1.0e-13
     @test ncomp == 1                          # global offset ties everything into one component
-end
-
-@testset "Stationize: co-located pair exclusion is masking-immune" begin
-    # A co-located telescope pair (e.g. the Onsala twins) can carry a coherent
-    # crosstalk/tone fringe: ONE high-SNR baseline detection whose delay/rate is
-    # wildly inconsistent with every other baseline. Because delay/rate are
-    # STATION differences on a shared graph, this baseline doesn't just bias its
-    # own residual — the fit drags BOTH endpoint stations' values to partly
-    # accommodate it, spreading a comparably-sized residual onto every OTHER
-    # baseline touching either station too (with nant=6, that is 9 of 24 delay
-    # rows: the poisoned baseline plus its 8 collateral neighbors) — close
-    # enough to a MAD estimator's ~50% breakdown point that no post-fit
-    # residual check can reliably tell the contaminated rows from the clean
-    # ones. So exclusion has to be identity-based, not statistical: a known
-    # co-located pair (`excl`, e.g. `UVData._colocated_pair_set` in production)
-    # is dropped from every system before any solve runs.
-    rng = MersenneTwister(0x0E0F)
-    nant = 6
-    ref = 1
-    bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
-    τ = 1.0e-9 .* randn(rng, nant, 2)
-    ṙ = 1.0e-3 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)
-    D = inject_detections(bl, pols, τ, ṙ, φ, 0.5; snr = 30.0)
-    for bi in eachindex(bl), p in eachindex(pols)
-        d = D[bi, p]
-        D[bi, p] = FR.Detection{Float64}((
-            d.delay + 1.0e-11 * randn(rng), d.rate + 1.0e-5 * randn(rng),
-            d.phase + 0.01 * randn(rng), d.amp, d.snr, true,
-        ))
-    end
-    poisoned = findfirst(==((5, 6)), bl)      # the "twin" baseline
-    for p in eachindex(pols)
-        D[poisoned, p] = FR.Detection{Float64}((-690.0e-9, 4.7e-3, 1.3, 1.0, 80.0, true))
-    end
-    twins = Set{Tuple{Int, Int}}([(5, 6), (6, 5)])
-
-    # Without exclusion, the poisoning drags stations 5/6 off truth: a
-    # closure-consistent false fringe on BOTH endpoints of the twin baseline is
-    # not an outlier to the robust loss — its residual is small, so it keeps
-    # full weight. Only exclusion by identity removes it.
-    sol_unexcluded = stationize(D, bl, pols, nant; ref_ant = ref)
-    @test abs(sol_unexcluded.delay[5, 1] - (τ[5, 1] - τ[ref, 1])) > 1.0e-9
-
-    # With the co-located pair excluded up front, truth is recovered exactly —
-    # stations 5/6 solve fine off their other (clean) baselines.
-    sol = stationize(D, bl, pols, nant; ref_ant = ref, excl = twins)
-    for a in 1:nant, f in 1:2
-        @test isapprox(sol.delay[a, f], τ[a, f] - τ[ref, 1]; atol = 1.0e-10)
-        @test isapprox(sol.rate[a, f], ṙ[a, f] - ṙ[ref, 1]; atol = 1.0e-4)
-    end
-
-    # Same through the model-driven pipeline path (solve_station_systems!).
-    geom = CALs.DataGeometry(; times = [0.0, 1.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
-    model = CALs.StationGainModel(
-        phase = (
-            offset = CALs.TiedComponent(CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
-            delay = CALs.TiedComponent(CALs.GainComponent(CALs.Delay(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
-            rate = CALs.TiedComponent(CALs.GainComponent(CALs.Rate(), CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed()),
-        ),
-    )
-    layout = CALs.plan_parameters(model, nant, geom)
-    cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
-    θ = zeros(layout.nθ)
-    scans = (detstack(D, bl, pols; ti = 1),)
-    FR.solve_station_systems!(
-        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate)); ref_ant = ref, excl = twins,
-    )
-    for ant in 1:nant, feed in 1:2
-        c = plan_off1(dplan)[ant, feed, 1, 1]
-        c == 0 && continue
-        @test isapprox(θ[c], τ[ant, feed] - τ[ref, 1]; atol = 1.0e-10)
-    end
 end
 
 # Robust loss on the PHASE system, where `w = snr²` is a true inverse variance

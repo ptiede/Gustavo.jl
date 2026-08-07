@@ -145,6 +145,82 @@ function evaluate_gains(
 end
 
 """
+    evaluate_gains(ev::GainEvaluator, θ, solve_geom::DataGeometry, target::DataGeometry;
+                   chan_idx = …, ti_idx = …, time_span = nothing)
+
+Forward map onto a FOREIGN grid: gains of shape `(length(chan_idx),
+length(ti_idx), nant, 2)` for the samples of `target` selected by
+`chan_idx`/`ti_idx`, evaluated from a θ laid out over `solve_geom` (the geometry
+`ev.layout` was planned on).
+
+Each target sample is placed in the solve segment it BELONGS to — matched by
+scan and spw label, or by the segmentation's own bin formula evaluated with the
+solve's parameters — so a solution applies to data sampled differently from the
+grid it was fit on: a segmentation coarser than the data has a segment covering
+every sample, which is exactly the statement that the gain is constant across
+it. A sample with no such segment is an error, naming the segmentation that
+could not place it; that is the "coarser is fine, finer is not" contract.
+
+`time_span[k]` is the interval the `k`-th selected sample integrates over (see
+`PartitionInfo.time_span`); where the segmentation bins a coordinate, a sample
+whose span crosses a bin boundary is rejected rather than assigned by its centre.
+
+Coordinates (a `Delay`'s `f − f0`, a `Polynomial`'s scaled offset) are read
+pointwise from the solution's own resolved state, so they stay in the basis θ
+was fit in.
+"""
+function evaluate_gains(
+        ev::GainEvaluator, θ::AbstractVector, solve_geom::DataGeometry, target::DataGeometry;
+        chan_idx::AbstractVector{<:Integer} = Base.OneTo(nchannels(target)),
+        ti_idx::AbstractVector{<:Integer} = Base.OneTo(ntimes(target)),
+        time_span = nothing,
+    )
+    lay = ev.layout
+    length(θ) == lay.nθ ||
+        error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
+    pp = _resolve_tree(lay.plantree.phase, solve_geom, target, chan_idx, ti_idx, time_span)
+    lp = _resolve_tree(lay.plantree.logamp, solve_geom, target, chan_idx, ti_idx, time_span)
+    T = float(eltype(θ))
+    gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
+    @inbounds for feed in 1:2, ant in 1:lay.nant
+        for ti in axes(gains, 2), c in axes(gains, 1)
+            phase = _sum_group(pp, θ, ant, feed, ti, c)
+            logamp = _sum_group(lp, θ, ant, feed, ti, c)
+            gains[c, ti, ant, feed] = exp(logamp) * cis(phase)
+        end
+    end
+    return gains
+end
+
+# Rebuild each plan's grid-indexed tables for the target samples asked for. The
+# result is a `ComponentPlan` like any other — tables sized to those samples
+# rather than to the solve grid, but still holding SOLVE-side segment ids, which
+# is what makes the θ leaf and the coordinate state index correctly — so the
+# forward map above is the same walk. Nothing is cached: the tables are
+# recomputed per call, O(nchan + ntime) lookups.
+_resolve_tree(nt::NamedTuple, solve, target, chan_idx, ti_idx, tspan) =
+    map(v -> _resolve_node(v, solve, target, chan_idx, ti_idx, tspan), nt)
+_resolve_node(nt::NamedTuple, solve, target, chan_idx, ti_idx, tspan) =
+    _resolve_tree(nt, solve, target, chan_idx, ti_idx, tspan)
+
+function _resolve_node(plan::ComponentPlan, solve, target, chan_idx, ti_idx, tspan)
+    t = plan.term
+    ax = term_axes(t)
+    fseg = freq_segment_ids(plan.fseg, solve, target; chan_idx)
+    tseg = time_segment_ids(plan.tseg, solve, target; ti_idx, time_span = tspan)
+    xf = :Frequency in ax ?
+        [freq_coordinate(t, target.channel_freqs[c], plan.fstate, fseg[k]) for (k, c) in enumerate(chan_idx)] :
+        zeros(Float64, length(chan_idx))
+    xt = :Ti in ax ?
+        [time_coordinate(t, target.times[i], plan.tstate, tseg[k]) for (k, i) in enumerate(ti_idx)] :
+        zeros(Float64, length(ti_idx))
+    return ComponentPlan(
+        t, plan.tseg, plan.fseg, tseg, fseg, xf, xt, plan.nchan_seg, plan.tying,
+        plan.range, plan.shape, plan.fstate, plan.tstate,
+    )
+end
+
+"""
     predict_visibilities(gains, coh, bl_a, bl_b, feed_a, feed_b) -> Array{Complex,4}
 
 Pure visibility prediction `V̂[c,ti,bi,p] = g_a · coh · conj(g_b)` from antenna

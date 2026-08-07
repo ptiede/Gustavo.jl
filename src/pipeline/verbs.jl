@@ -34,13 +34,13 @@ end
 
 """
     fit(pipe::CalibrationPipeline, uvset::UVSet) -> CalibrationSolution
-    fit(step_or_chain, uvset; exec = ExecutionConfig(), ref_ant = 1, exclude_colocated = true) -> CalibrationSolution
+    fit(step_or_chain, uvset; exec = ExecutionConfig(), ref_ant = 1) -> CalibrationSolution
 
 Solve the pipeline's calibration on `uvset` WITHOUT producing corrected data —
 the estimation half of [`fitcalibrate`](@ref). The returned solution carries
 per-stage provenance (`sol[:fringe]`, `sol[:bandpass]`, `sol[:adhoc]` — each a
-[`step_solution`](@ref) alone; [`stage_solution`](@ref) for the cumulative
-view through that stage, [`stage_info`](@ref) for its diagnostics) and records
+step alone; `sol[1:i]` for the cumulative view through step `i`,
+[`stage_info`](@ref) for its diagnostics) and records
 the data-transform chain the scans were materialized through
 (`sol.transforms`), so diagnostics and the standalone [`calibrate`](@ref)
 reproduce exactly what the solve saw.
@@ -65,7 +65,7 @@ of this composition.
 function fit(pipe::CalibrationPipeline, uvset::UVSet)
     _check_blas_threads()
     sol, _ = _run_pipeline(
-        _parse_pipeline(pipe), pipe.exec, pipe.ref_ant, pipe.exclude_colocated, uvset,
+        _parse_pipeline(pipe), pipe.exec, pipe.ref_ant, uvset,
     )
     return sol
 end
@@ -73,13 +73,13 @@ end
 fit(
     x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
-) = fit(CalibrationPipeline(x; exec, ref_ant, exclude_colocated), uvset)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = fit(CalibrationPipeline(x; exec, ref_ant), uvset)
 fit(
     chain::StepChain, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
-) = fit(CalibrationPipeline(chain; exec, ref_ant, exclude_colocated), uvset)
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+) = fit(CalibrationPipeline(chain; exec, ref_ant), uvset)
 
 """
     calibrate(sol::CalibrationSolution, uvset::UVSet;
@@ -146,22 +146,22 @@ end
 fitcalibrate(
     x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
     kwargs...,
-) = fitcalibrate(CalibrationPipeline(x; exec, ref_ant, exclude_colocated), uvset; kwargs...)
+) = fitcalibrate(CalibrationPipeline(x; exec, ref_ant), uvset; kwargs...)
 fitcalibrate(
     chain::StepChain, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1, exclude_colocated::Bool = true,
+    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
     kwargs...,
-) = fitcalibrate(CalibrationPipeline(chain; exec, ref_ant, exclude_colocated), uvset; kwargs...)
+) = fitcalibrate(CalibrationPipeline(chain; exec, ref_ant), uvset; kwargs...)
 
 # Shared driver for fitcalibrate: returns (sol, ctx).
 function _run_fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet, reduce)
     br = _parse_pipeline(pipe)
     post = _compose_output_chain(br.post_steps, collect(reduce))
     sol, output = _run_pipeline(
-        br, pipe.exec, pipe.ref_ant, pipe.exclude_colocated, uvset; sink = OutputSink(post),
+        br, pipe.exec, pipe.ref_ant, uvset; sink = OutputSink(post),
     )
     ctx = CalibrationContext(
         uvset, sol, output,
@@ -297,7 +297,7 @@ end
 # Returns `(sol, output)` (`output === nothing` without a sink).
 function _run_pipeline(
         br, exec::ExecutionConfig, ref_ant_spec::Union{Integer, AbstractString, Symbol},
-        exclude_colocated::Bool, uvset::UVSet; sink = nothing,
+        uvset::UVSet; sink = nothing,
     )
     solve_steps = br.solve_steps
 
@@ -318,14 +318,6 @@ function _run_pipeline(
     # SolveContext below (only `model`/`layout`/`ev`/`θ` and `stream` change
     # per step — the rest is the run-wide part CHUNK-069 splits out).
     scratch = Dict{Symbol, Any}()
-    # Intra-site (co-located) baseline exclusion, shared by the residual-pooling
-    # stages and the exported flags (the monolith's `excl`).
-    scratch[:excl] = if exclude_colocated
-        s = UVData._colocated_pair_set(antennas)
-        isempty(s) ? nothing : s
-    else
-        nothing
-    end
     # The final pass fuses the output tail only when it is a TemporalSmoother's:
     # that pass never repeats and finishes each group's θ before the tail runs
     # (the monolith's pass-2 structure). Anything else gets a dedicated pass.
@@ -375,14 +367,7 @@ function _run_pipeline(
         # step's θ block. Within a fused run the same corrections were applied
         # to the resident scan instead, in the same order.
         for (st, c) in zip(run_steps, contexts)
-            push!(
-                tfs_solve,
-                Fringe.ApplySolution(
-                    CalibrationSolution(
-                        c.model, c.layout, geom, c.θ, NamedTuple(); name = provides(st),
-                    ),
-                ),
-            )
+            push!(tfs_solve, Fringe.ApplySolution(_step_precal(st, c, geom)))
         end
         stream = _build_stream(tfs_solve)
     end
@@ -465,7 +450,7 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, prior_solutions; sink = 
     while true
         start_pass!(step, ctx)
         flag_nt = sink === nothing ? nothing :
-            Fringe.flag_table(_fringe_flags(ctx), ctx.scratch[:excl])
+            Fringe.flag_table(_fringe_flags(ctx))
         results = Fringe.map_groups(
             ctx.stream; selection = fit_selection(step, prior_solutions),
             snr = _scan_snr(prior_solutions), stage = stage,
@@ -537,7 +522,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
     end
     ctx_n = last(contexts)
     flag_nt = sink === nothing ? nothing :
-        Fringe.flag_table(_fringe_flags(ctx_n), ctx_n.scratch[:excl])
+        Fringe.flag_table(_fringe_flags(ctx_n))
     results = Fringe.map_groups(stream; stage = provides(last(steps))) do gspec
         ta = time_ns()
         if sink === nothing
@@ -557,12 +542,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
                 # `_stacked_scan_group` copied the leaves' data into the cube, so
                 # the solve stack and the output leaves are separate arrays and
                 # each needs the correction applied to it.
-                as = Fringe.ApplySolution(
-                    CalibrationSolution(
-                        contexts[k].model, contexts[k].layout, contexts[k].geom,
-                        contexts[k].θ, NamedTuple(); name = provides(steps[k]),
-                    ),
-                )
+                as = Fringe.ApplySolution(_step_precal(steps[k], contexts[k], contexts[k].geom))
                 apply_transform!(as, stack, win; executor = inner_executor(stream))
                 if keyed !== nothing
                     for (_, m) in keyed
@@ -658,6 +638,15 @@ function _pass_diagnostics(out, results, ngroups::Integer, t0::UInt64)
     )
 end
 
+# One finished step's own solution, as the precal a later pass divides out.
+# `ApplySolution` matches stations by NAME and refuses a solution that names
+# none, so the station table is recorded here as it is on the run's own
+# solution — a solve-time transform is no exception to the apply contract.
+_step_precal(st, c::SolveContext, geom::DataGeometry) = CalibrationSolution(
+    c.model, c.layout, geom, c.θ, (; ant_names = String.(collect(c.antennas.name)));
+    name = provides(st),
+)
+
 # The solution-level `info` NamedTuple of a new-engine fit: RUN-WIDE fields
 # only. Every per-step diagnostic (per-scan SNR/detections, pass timing, …) now
 # lives on that step's own `StepSolution.info` instead (`stage_info(sol,
@@ -671,7 +660,7 @@ function _new_engine_info(ctx::SolveContext, br, step_solutions::Vector{StepSolu
     return (;
         nant = ctx.nant,
         nscan = length(ctx.stream.groups),
-        Fringe.flag_table(_fringe_flags(ctx), ctx.scratch[:excl])...,
+        Fringe.flag_table(_fringe_flags(ctx))...,
         ant_names = String.(collect(ctx.antennas.name)),
         (br.ff === nothing ? NamedTuple() : Fringe.estimator_info(br.ff.estimator))...,
         precal_applied = any(t -> t isa Fringe.ApplySolution, br.tfs),
@@ -689,9 +678,8 @@ _fringe_flags(ctx::SolveContext) = get(() -> Tuple{Int, Int}[], ctx.scratch, :fr
 # data it is handed fails at the point of use (its own estimator/solve
 # kernel), the same pattern `apply_calibration`'s data-level guards use. Only
 # `provides`'s NAMING role is checked: two steps sharing a non-`:nothing`
-# capability would silently collide in `stage_solution`/`step_solution`'s
-# by-name lookup (a `findfirst`, so the second step's solution would be
-# unreachable) — that is a naming conflict, not an ordering rule, so it stays
+# capability would silently collide in the by-name lookup behind `sol[name]`
+# (a `findfirst`, so the second step's solution would be unreachable) — that is a naming conflict, not an ordering rule, so it stays
 # a construction-time error regardless of where the two steps sit.
 function _check_unique_provides(solve_steps::Vector{SolveStep})
     provided = Symbol[]

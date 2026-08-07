@@ -175,10 +175,9 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         e = ExecutionConfig()
         @test e.mem_fraction == 0.6 && e.mem_budget === nothing
 
-        # ref_ant and exclude_colocated are run-wide, on CalibrationPipeline,
-        # not on FringeModel or ExecutionConfig.
+        # ref_ant is run-wide, on CalibrationPipeline, not on FringeModel or
+        # ExecutionConfig.
         @test CalibrationPipeline([FringeFit()]).ref_ant == 1
-        @test CalibrationPipeline([FringeFit()]).exclude_colocated
 
         # AprioriAmplitude carries a pre-built spw_cals (loading is the caller's job).
         bc = Dict(1 => :dummy)
@@ -296,8 +295,8 @@ end
         sol = fit(t |> FringeFit(), uvset)
         @test eltype(sol.transforms) === typeof(t)
         @test eltype(sol.postcal) === Any        # empty
-        # A stage snapshot rebuilds the solution without widening the chain.
-        @test eltype(CAL.stage_solution(sol, :fringe).transforms) === eltype(sol.transforms)
+        # A step selection rebuilds the solution without widening the chain.
+        @test eltype(sol[1:1].transforms) === eltype(sol.transforms)
     end
 
 

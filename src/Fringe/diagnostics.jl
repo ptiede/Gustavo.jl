@@ -152,7 +152,7 @@ Returns `(channel_freqs, gains::(nchan, nant, 2))`. The bandpass is time-invaria
 so no time index is needed. Errors if the bandpass step fits no phase bandpass.
 """
 function fringe_bandpass_spectrum(sol::CalibrationSolution)
-    step = _step(sol, :bandpass)
+    step = sol[:bandpass].steps[1]
     haskey(step.layout.plantree.phase, :bandpass) ||
         error("fringe_bandpass_spectrum: the bandpass step fits no phase bandpass component")
     # θ with every parameter zeroed EXCEPT the phase-bandpass component's own
@@ -220,7 +220,7 @@ Scan index matches the scan-group ordering used by [`fringe_snr_table`](@ref) an
 `info.det_scan` (the per-scan time segmentation is the scan-group partition).
 """
 function fringe_station_solutions(sol::CalibrationSolution)
-    fringe_step = _step(sol, :fringe)
+    fringe_step = sol[:fringe].steps[1]
     model, layout, θ = fringe_step.model, fringe_step.layout, fringe_step.θ
     nant = layout.nant
     # The fringe step's OWN model carries only its own components — a LATER

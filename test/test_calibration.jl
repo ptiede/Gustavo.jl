@@ -42,6 +42,214 @@ const CAL = Gustavo.Calibration
     @test CAL.freq_segment_ids(CAL.ChannelBlocks(4), geom) == ([1, 1, 1, 2, 2, 2], 2)
 
     @test CAL.segment_groups([1, 1, 2, 3, 3, 4], 4) == [[1, 2], [3], [4, 5], [6]]
+
+    # A name vector names every segment or none; a partial one would silently
+    # label the wrong segment when a foreign grid is placed against it.
+    @test_throws "must name every segment or be empty" CAL.DataGeometry(;
+        times = [0.0, 1.0], scan_of_time = [1, 2], channel_freqs = [1.0e9],
+        scan_names = ["only-one"],
+    )
+end
+
+@testset "Placement on a foreign grid" begin
+    # Solve grid: 2 scans × 2 epochs, 2 spws × 3 channels.
+    solve = CAL.DataGeometry(;
+        times = [0.0, 0.1, 1.0, 1.1], scan_of_time = [7, 7, 9, 9],
+        channel_freqs = [1.0, 1.1, 1.2, 2.0, 2.1, 2.2] .* 1.0e9,
+        spw_of_chan = [3, 3, 3, 4, 4, 4],
+        scan_names = ["No001", "No002"], spw_names = ["A", "B"],
+    )
+    # The same scans and spws, sampled three times as finely in time.
+    fine = CAL.DataGeometry(;
+        times = [0.0, 0.05, 0.1, 1.0, 1.05, 1.1], scan_of_time = [1, 1, 1, 2, 2, 2],
+        channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
+        scan_names = ["No001", "No002"], spw_names = ["A", "B"],
+    )
+
+    @testset "a coarser solution covers every finer sample" begin
+        @test CAL.time_segment_ids(CAL.GlobalTime(), solve, fine) == fill(1, 6)
+        @test CAL.time_segment_ids(CAL.PerScan(), solve, fine) == [1, 1, 1, 2, 2, 2]
+        @test CAL.freq_segment_ids(CAL.GlobalFrequency(), solve, fine) == fill(1, 6)
+        @test CAL.freq_segment_ids(CAL.PerSpectralWindow(), solve, fine) == [1, 1, 1, 2, 2, 2]
+        # A window places exactly the samples it selects, in their order.
+        @test CAL.time_segment_ids(CAL.PerScan(), solve, fine; ti_idx = [5, 2]) == [2, 1]
+        @test CAL.freq_segment_ids(CAL.PerSpectralWindow(), solve, fine; chan_idx = 4:6) == [2, 2, 2]
+
+        # A scan-averaged solve — one epoch per scan — applies at full time
+        # resolution: the scan name says which segment, not the epoch.
+        averaged = CAL.DataGeometry(;
+            times = [0.05, 1.05], scan_of_time = [7, 9],
+            channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
+            scan_names = ["No001", "No002"], spw_names = ["A", "B"],
+        )
+        @test CAL.time_segment_ids(CAL.PerScan(), averaged, fine) == [1, 1, 1, 2, 2, 2]
+    end
+
+    @testset "a scan or spw the solve never saw errors" begin
+        stranger = CAL.DataGeometry(;
+            times = [0.0, 2.0], scan_of_time = [1, 2],
+            channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
+            scan_names = ["No001", "No009"], spw_names = ["A", "B"],
+        )
+        # Named, not borrowed from the neighbouring scan it sits closest to.
+        @test_throws "PerScan" CAL.time_segment_ids(CAL.PerScan(), solve, stranger)
+        @test_throws "\"No009\" is not in the solution" CAL.time_segment_ids(
+            CAL.PerScan(), solve, stranger,
+        )
+        other_band = CAL.DataGeometry(;
+            times = solve.times, scan_of_time = solve.scan_of_time,
+            channel_freqs = solve.channel_freqs, spw_of_chan = [1, 1, 1, 2, 2, 2],
+            scan_names = ["No001", "No002"], spw_names = ["A", "C"],
+        )
+        @test_throws "\"C\" is not in the solution" CAL.freq_segment_ids(
+            CAL.PerSpectralWindow(), solve, other_band,
+        )
+    end
+
+    @testset "identity placement needs names, not raw ids" begin
+        # Raw ids agree with themselves, so an identical labelling still places:
+        # the two grids then correspond sample for sample and no name is needed.
+        unnamed = CAL.DataGeometry(;
+            times = solve.times, scan_of_time = solve.scan_of_time,
+            channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
+        )
+        @test CAL.time_segment_ids(CAL.PerScan(), unnamed, unnamed) == [1, 1, 2, 2]
+        @test CAL.freq_segment_ids(CAL.PerSpectralWindow(), unnamed, unnamed) == [1, 1, 1, 2, 2, 2]
+
+        # Across two differently-labelled grids they do not: matching id 1 to
+        # id 1 is positional matching, which identity placement exists to avoid.
+        unnamed_fine = CAL.DataGeometry(;
+            times = fine.times, scan_of_time = fine.scan_of_time,
+            channel_freqs = fine.channel_freqs, spw_of_chan = [1, 1, 1, 2, 2, 2],
+        )
+        @test_throws "SOLUTION's geometry carries no scan names" CAL.time_segment_ids(
+            CAL.PerScan(), unnamed, fine,
+        )
+        @test_throws "TARGET geometry carries no scan names" CAL.time_segment_ids(
+            CAL.PerScan(), solve, unnamed_fine,
+        )
+        @test_throws "SOLUTION's geometry carries no spectral-window names" CAL.freq_segment_ids(
+            CAL.PerSpectralWindow(), unnamed, unnamed_fine,
+        )
+    end
+
+    @testset "formula rows: raw bins map through the solve's own dense ranking" begin
+        # Solve epochs in blocks 0 and 2 — block 1 is never populated, so it has
+        # no segment id at all and block 2's parameters live at id 2, not 3.
+        gapped = CAL.DataGeometry(; times = [0.0, 0.1, 2.0, 2.1], channel_freqs = [1.0e9])
+        seg = CAL.TimeBlocks(1.0)
+        @test CAL.time_segment_ids(seg, gapped) == ([1, 1, 2, 2], 2)
+        either_side = CAL.DataGeometry(; times = [0.5, 2.5], channel_freqs = [1.0e9])
+        @test CAL.time_segment_ids(seg, gapped, either_side) == [1, 2]
+        inside = CAL.DataGeometry(; times = [1.5], channel_freqs = [1.0e9])
+        @test_throws "no solve epoch populated" CAL.time_segment_ids(seg, gapped, inside)
+
+        # The solve's own block origin is used, never the target's: a target
+        # starting an hour later must still land in the solve's blocks.
+        later = CAL.DataGeometry(; times = [2.05], channel_freqs = [1.0e9])
+        @test CAL.time_segment_ids(seg, gapped, later) == [2]
+
+        # A sample integrating ACROSS a block boundary has no single segment.
+        @test_throws "crosses a segment boundary" CAL.time_segment_ids(
+            seg, gapped, either_side; time_span = [1.2, 0.1],
+        )
+        iscans = CAL.InstrumentScans([1.0])
+        @test CAL.time_segment_ids(iscans, gapped, either_side) == [1, 2]
+        @test_throws "InstrumentScans" CAL.time_segment_ids(
+            iscans, gapped, either_side; time_span = [1.2, 0.1],
+        )
+    end
+
+    @testset "PerIntegration: exact epochs, and averaging caught by the span" begin
+        aps = CAL.DataGeometry(; times = [1.0, 2.0, 3.0], channel_freqs = [1.0e9])
+        @test CAL.time_segment_ids(CAL.PerIntegration(), aps, aps) == [1, 2, 3]
+        # Untouched data carries a span narrower than the AP spacing.
+        @test CAL.time_segment_ids(CAL.PerIntegration(), aps, aps; time_span = fill(0.9, 3)) ==
+            [1, 2, 3]
+
+        # A near miss names both epochs, so a unit slip is diagnosable at a glance.
+        off = CAL.DataGeometry(; times = [2.25], channel_freqs = [1.0e9])
+        @test_throws "2.25" CAL.time_segment_ids(CAL.PerIntegration(), aps, off)
+        @test_throws "nearest is 2.0" CAL.time_segment_ids(CAL.PerIntegration(), aps, off)
+
+        # Averaging {1, 2, 3} h lands exactly ON a solve epoch, so the epoch
+        # match alone would accept it; the span it now carries does not.
+        avg = CAL.DataGeometry(; times = [2.0], channel_freqs = [1.0e9])
+        @test CAL.time_segment_ids(CAL.PerIntegration(), aps, avg) == [2]
+        @test_throws "covering solve epochs 1.0, 2.0, 3.0" CAL.time_segment_ids(
+            CAL.PerIntegration(), aps, avg; time_span = [2.5],
+        )
+    end
+
+    @testset "channel-index segmentations require the same channel layout" begin
+        narrow = CAL.DataGeometry(;
+            times = solve.times, scan_of_time = solve.scan_of_time,
+            channel_freqs = solve.channel_freqs[1:4], spw_of_chan = solve.spw_of_chan[1:4],
+        )
+        @test_throws "target has 4 channels and the solution 6" CAL.freq_segment_ids(
+            CAL.ChannelBlocks(1), solve, narrow,
+        )
+        shifted = CAL.DataGeometry(;
+            times = solve.times, scan_of_time = solve.scan_of_time,
+            channel_freqs = solve.channel_freqs .+ 1.0e6, spw_of_chan = solve.spw_of_chan,
+        )
+        # The near miss prints both frequencies, so a unit slip or a shifted
+        # correlator setup is diagnosable at a glance.
+        @test_throws "target channel 1 is at 1.001e9 Hz" CAL.freq_segment_ids(
+            CAL.ChannelBlocks(2), solve, shifted,
+        )
+        @test_throws "solution's at 1.0e9 Hz" CAL.freq_segment_ids(
+            CAL.ChannelBlocks(2), solve, shifted,
+        )
+        @test CAL.freq_segment_ids(CAL.ChannelBlocks(2), solve, solve) == [1, 1, 2, 3, 3, 4]
+        groups = CAL.FreqGroups([1:3, 4:6])
+        @test CAL.freq_segment_ids(groups, solve, solve) == [1, 1, 1, 2, 2, 2]
+        @test_throws "FreqGroups" CAL.freq_segment_ids(groups, solve, narrow)
+    end
+
+    @testset "gains evaluate on the foreign grid in the solve's own basis" begin
+        model = CAL.StationGainModel(
+            phase = (
+                atmos = CAL.TiedComponent(
+                    CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()),
+                    CAL.SharedFeeds(),
+                ),
+                mbd = CAL.TiedComponent(
+                    CAL.GainComponent(CAL.Delay(), CAL.PerScan(), CAL.GlobalFrequency()),
+                    CAL.SharedFeeds(),
+                ),
+            ),
+        )
+        nant = 2
+        ev = CAL.GainEvaluator(model, solve; nant)
+        θ = collect(range(0.1; step = 0.05, length = ev.layout.nθ))
+        θ[(end ÷ 2 + 1):end] .*= 1.0e-9         # the delay block, in seconds
+
+        # Placing the solve grid against itself reproduces the index form
+        # exactly — same-grid apply is the degenerate case, not a separate path.
+        @test CAL.evaluate_gains(ev, θ, solve, solve) == CAL.evaluate_gains(ev, θ)
+
+        # On the finer grid, each sample takes its own scan's parameters, and
+        # the delay still reads (f − f0) against the SOLUTION's f0.
+        gf = CAL.evaluate_gains(ev, θ, solve, fine)
+        gs = CAL.evaluate_gains(ev, θ)
+        @test size(gf) == (6, 6, nant, 2)
+        for (k, ti) in enumerate([1, 1, 2, 3, 3, 4])   # fine sample → a solve sample in its scan
+            @test gf[:, k, :, :] ≈ gs[:, ti, :, :]
+        end
+
+        # A window of the foreign grid is the same gains, sliced.
+        @test CAL.evaluate_gains(ev, θ, solve, fine; chan_idx = 2:4, ti_idx = [2, 5]) ≈
+            gf[2:4, [2, 5], :, :]
+
+        # A scan the solution never saw is refused, naming the segmentation.
+        stranger = CAL.DataGeometry(;
+            times = [5.0], scan_of_time = [1],
+            channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
+            scan_names = ["No042"], spw_names = ["A", "B"],
+        )
+        @test_throws "PerScan" CAL.evaluate_gains(ev, θ, solve, stranger)
+    end
 end
 
 @testset "Calibration terms: names, nparams, eval" begin
@@ -275,12 +483,11 @@ end
     @test_throws ArgumentError CAL.component_dimarray(ssbd, :solution, :phase, :sbd)
     @test_throws "names a component group" CAL.component_dimarray(ssbd, :solution, :phase, :sbd)
 
-    # An unknown step name, or an out-of-range step index, fails loudly,
-    # naming/counting the steps actually recorded.
+    # An unknown step NAME needs the recorded stages spelled out; an
+    # out-of-range index does not — `BoundsError` already says it.
     @test_throws ArgumentError CAL.component_dimarray(sol, :nosuchstep, :phase, :atmos)
     @test_throws "recorded stages: [:solution]" CAL.component_dimarray(sol, :nosuchstep, :phase, :atmos)
-    @test_throws ArgumentError CAL.component_dimarray(sol, 2, :phase, :atmos)
-    @test_throws "has 1 step(s); no step at index 2" CAL.component_dimarray(sol, 2, :phase, :atmos)
+    @test_throws BoundsError CAL.component_dimarray(sol, 2, :phase, :atmos)
 
     # Component names are local to each step and may repeat across steps —
     # splitting a solve into steps is exactly what makes that legal, so
@@ -457,8 +664,8 @@ end
 
     @testset "a DimArray θ survives construction and every derived path" begin
         # Split into the delay-only :fringe step and the bandpass-only
-        # :bandpass step so the step-scoped accessors (`stage_solution`,
-        # `step_solution`, `component_gains`) have real steps to address.
+        # :bandpass step so the step-scoped accessors (`sol[i]`,
+        # `component_gains`) have real steps to address.
         model_fr = CAL.StationGainModel(phase = (delay = model.phase.delay,))
         model_bp = CAL.StationGainModel(phase = (bandpass = model.phase.bandpass,))
         layout_fr = CAL.plan_parameters(model_fr, nant, geom)
@@ -481,9 +688,9 @@ end
         ev = CAL.GainEvaluator(model_fr, layout_fr)
         @test CAL.evaluate_gains(ev, sold2.steps[1].θ) == CAL.evaluate_gains(ev, solv2.steps[1].θ)
         @test CAL.component_gains(sold2, :fringe, 1) == CAL.component_gains(solv2, :fringe, 1)
-        # A stage snapshot is index-matched to θ, so it propagates the array type.
-        @test CAL.stage_solution(sold2, :fringe).steps[1].θ isa DimArray
-        @test CAL.stage_solution(sold2, :fringe).steps[1].θ == CAL.stage_solution(solv2, :fringe).steps[1].θ
+        # A step selection is index-matched to θ, so it propagates the array type.
+        @test sold2[1:1].steps[1].θ isa DimArray
+        @test sold2[1:1].steps[1].θ == solv2[1:1].steps[1].θ
         # `step_solution` returns the named step's own solution — its θ shares
         # no parameter identity with the merged original, only the element type.
         @test CAL.step_solution(sold2, :bandpass).steps[1].θ == CAL.step_solution(solv2, :bandpass).steps[1].θ

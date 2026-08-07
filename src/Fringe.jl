@@ -18,7 +18,7 @@ using ..UVData
 using ..UVData: Frequency, Baseline, Feed, Pol, Scan
 using ..Calibration
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,
-    _flatten_components, _component_leaf, _feed_node, _block_index, _step, _composed_gains
+    _flatten_components, _component_leaf, _feed_node, _block_index, _composed_gains
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
 # the model layer's element-compilation generic.
 import ..Calibration: model_components

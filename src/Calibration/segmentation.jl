@@ -105,8 +105,17 @@ Fields:
 - `spw_of_chan`   : spw id for each global channel (same labelling freedom).
 - `t0`            : rate reference epoch (hours); rate phase ∝ (t − t0).
 - `f0`            : delay reference frequency (Hz); delay phase ∝ (f − f0).
-- `scan_names`    : human-readable scan labels (for diagnostics; optional).
-- `spw_names`     : human-readable spw labels (for diagnostics; optional).
+- `scan_names`    : scan label of each distinct `scan_of_time` id, in the order
+                    the ids are dense-ranked (`scan_names[s]` names segment `s`).
+- `spw_names`     : spw label of each distinct `spw_of_chan` id, likewise.
+
+The names are the IDENTITY a solution is applied on: placing a foreign sample in
+a `PerScan` or `PerSpectralWindow` segment matches the label, never the raw
+integer id (which means nothing across two geometries) and never the coordinate.
+They may be left empty, and then a solution carrying such a segmentation applies
+only to a grid with the same labelling. The `scan_names[s] ↔ id s`
+correspondence is checked here: a name vector must either be empty or have one
+entry per distinct id.
 """
 struct DataGeometry
     times::Vector{Float64}
@@ -140,6 +149,8 @@ function DataGeometry(;
                 "channel_freqs length $(length(channel_freqs))"
         )
     )
+    _check_names("scan_names", scan_names, scan_of_time)
+    _check_names("spw_names", spw_names, spw_of_chan)
     return DataGeometry(
         Float64.(collect(times)), Int.(collect(scan_of_time)),
         Float64.(collect(channel_freqs)), Int.(collect(spw_of_chan)),
@@ -150,6 +161,21 @@ end
 
 ntimes(geom::DataGeometry) = length(geom.times)
 nchannels(geom::DataGeometry) = length(geom.channel_freqs)
+
+# Segment id `s` is named `names[s]`, so a name vector either covers every
+# distinct label or is absent entirely. A partial one would silently name the
+# wrong segment in a foreign apply.
+function _check_names(what::String, names, labels)
+    isempty(names) && return nothing
+    n = length(Set(labels))
+    length(names) == n || throw(
+        DimensionMismatch(
+            "DataGeometry: $what has $(length(names)) entries but the geometry has $n " *
+                "distinct segments; a name vector must name every segment or be empty."
+        )
+    )
+    return nothing
+end
 
 # Map arbitrary integer labels to dense 1..k ids preserving first-appearance
 # order. The basis of every segment-id computation below.
@@ -181,18 +207,19 @@ time_segment_ids(::PerIntegration, geom::DataGeometry) =
     (collect(1:ntimes(geom)), ntimes(geom))
 time_segment_ids(::PerScan, geom::DataGeometry) = _dense_rank(geom.scan_of_time)
 
-function time_segment_ids(seg::TimeBlocks, geom::DataGeometry)
-    n = ntimes(geom)
-    n == 0 && return (Int[], 0)
-    t_start = minimum(geom.times)
-    blocks = [floor(Int, (t - t_start) / seg.duration_hr) for t in geom.times]
-    return _dense_rank(blocks)
-end
+time_segment_ids(seg::Union{TimeBlocks, InstrumentScans}, geom::DataGeometry) =
+    _dense_rank(map(_time_binner(seg, geom), geom.times))
 
-function time_segment_ids(seg::InstrumentScans, geom::DataGeometry)
-    bins = [searchsortedlast(seg.boundaries_hr, t) + 1 for t in geom.times]
-    return _dense_rank(bins)
+# The raw-bin formula of a time segmentation that bins a coordinate, closed over
+# the geometry parameters it reads. Placing a foreign sample evaluates the SOLVE
+# geometry's binner at the target's epoch, so both grids are binned identically;
+# a `TimeBlocks` origin is the solve's first epoch, never the target's.
+function _time_binner(seg::TimeBlocks, geom::DataGeometry)
+    t_start = isempty(geom.times) ? 0.0 : minimum(geom.times)
+    return t -> floor(Int, (t - t_start) / seg.duration_hr)
 end
+_time_binner(seg::InstrumentScans, ::DataGeometry) =
+    t -> searchsortedlast(seg.boundaries_hr, t) + 1
 
 # ── Frequency segment ids ────────────────────────────────────────────────────
 
@@ -252,3 +279,254 @@ function segment_groups(ids::AbstractVector{<:Integer}, nseg::Integer)
     end
     return groups
 end
+
+# ── Placement on a foreign grid ──────────────────────────────────────────────
+#
+# Applying a solution to data it was not fit on asks one question per target
+# sample: which segment of the SOLVE does this sample belong to? It is answered
+# by the identity the segmentation is defined on — a scan is a scan name, a spw
+# is a spw name, a block is a bin of the solve's own formula — never by
+# comparing coordinates against segment intervals, which would replace an exact
+# answer with midpoints and boundary tolerances.
+#
+# A target sample with no such segment is an error. That is the whole of the
+# "coarser is fine, finer is not" contract: a segmentation coarser than the data
+# has a segment covering every sample by construction, and a finer one does not.
+
+# Epoch/frequency identity tolerances — the same ones `leaf_window` joins a leaf
+# to a geometry with, so a solution and the data it was solved on always agree.
+const _EPOCH_ATOL = 1.0e-9      # hours
+const _FREQ_RTOL = 1.0e-9
+
+"""
+    time_segment_ids(seg, solve::DataGeometry, target::DataGeometry;
+                     ti_idx = eachindex(target.times), time_span = nothing) -> Vector{Int}
+
+The SOLVE-side time segment id of each `target` epoch selected by `ti_idx` — the
+space `ComponentPlan.tseg_id` and a component's θ leaf are indexed by, so a
+solution evaluates on `target`'s grid by reading these ids. `ti_idx` selects the
+window to place; `time_span[k]` is the interval the `k`-th selected sample
+integrates over (see `PartitionInfo.time_span`), checked against the solution's
+own bins where the segmentation places by a formula on a coordinate.
+
+Throws when a target sample falls in no segment of `seg` as the solve resolved
+it, naming the segmentation and the sample.
+"""
+function time_segment_ids end
+
+"""
+    freq_segment_ids(seg, solve::DataGeometry, target::DataGeometry;
+                     chan_idx = eachindex(target.channel_freqs)) -> Vector{Int}
+
+The SOLVE-side frequency segment id of each `target` channel selected by
+`chan_idx`; the frequency counterpart of the foreign-grid
+[`time_segment_ids`](@ref).
+"""
+function freq_segment_ids end
+
+time_segment_ids(
+    ::GlobalTime, ::DataGeometry, target::DataGeometry;
+    ti_idx = eachindex(target.times), time_span = nothing,
+) = ones(Int, length(ti_idx))
+
+freq_segment_ids(
+    ::GlobalFrequency, ::DataGeometry, target::DataGeometry;
+    chan_idx = eachindex(target.channel_freqs),
+) = ones(Int, length(chan_idx))
+
+function time_segment_ids(
+        seg::PerScan, solve::DataGeometry, target::DataGeometry;
+        ti_idx = eachindex(target.times), time_span = nothing,
+    )
+    ids, _ = _dense_rank(solve.scan_of_time)
+    # An identical labelling IS the identity — the two grids agree sample for
+    # sample, so no name is needed to say which scan a sample belongs to.
+    solve.scan_of_time == target.scan_of_time && return ids[ti_idx]
+    _require_names(seg, "scan", solve.scan_names, target.scan_names)
+    tids, _ = _dense_rank(target.scan_of_time)
+    of_name = Dict(solve.scan_names[s] => s for s in eachindex(solve.scan_names))
+    return [
+        _named_segment(seg, "scan", target.scan_names[tids[i]], of_name, solve.scan_names)
+            for i in ti_idx
+    ]
+end
+
+function freq_segment_ids(
+        seg::PerSpectralWindow, solve::DataGeometry, target::DataGeometry;
+        chan_idx = eachindex(target.channel_freqs),
+    )
+    ids, _ = _dense_rank(solve.spw_of_chan)
+    solve.spw_of_chan == target.spw_of_chan && return ids[chan_idx]
+    _require_names(seg, "spectral-window", solve.spw_names, target.spw_names)
+    tids, _ = _dense_rank(target.spw_of_chan)
+    of_name = Dict(solve.spw_names[s] => s for s in eachindex(solve.spw_names))
+    return [
+        _named_segment(seg, "spectral window", target.spw_names[tids[c]], of_name, solve.spw_names)
+            for c in chan_idx
+    ]
+end
+
+function _require_names(seg, what::String, solve_names, target_names)
+    isempty(solve_names) && throw(
+        ArgumentError(
+            "$(_seg_label(seg)): the SOLUTION's geometry carries no $what names, so a foreign " *
+                "grid cannot be placed — matching raw $what ids across two geometries is " *
+                "positional matching, not identity. Build it with `build_geometry`, which names them."
+        )
+    )
+    isempty(target_names) && throw(
+        ArgumentError(
+            "$(_seg_label(seg)): the TARGET geometry carries no $what names, so its samples " *
+                "cannot be matched to the solution's $what segments by identity."
+        )
+    )
+    return nothing
+end
+
+function _named_segment(seg, what::String, name::String, of_name, solved)
+    s = get(of_name, name, 0)
+    s == 0 && throw(
+        ArgumentError(
+            "$(_seg_label(seg)): the target $what $(repr(name)) is not in the solution, which " *
+                "covers $(join(map(repr, solved), ", ")). A solution has no segment for data " *
+                "it never saw; it is not extended to one."
+        )
+    )
+    return s
+end
+
+function time_segment_ids(
+        seg::Union{TimeBlocks, InstrumentScans}, solve::DataGeometry, target::DataGeometry;
+        ti_idx = eachindex(target.times), time_span = nothing,
+    )
+    bin = _time_binner(seg, solve)
+    of_bin = _bin_ids(map(bin, solve.times))
+    _check_span_length(seg, time_span, ti_idx)
+    out = Vector{Int}(undef, length(ti_idx))
+    for (k, i) in enumerate(ti_idx)
+        t = target.times[i]
+        b = bin(t)
+        # A sample integrating ACROSS a bin boundary would silently take
+        # whichever bin its center landed in — the one place identity placement
+        # still rests on a coordinate, so the span closes it.
+        w = _span_at(time_span, k)
+        (w <= 0 || (bin(t - w / 2) == b && bin(t + w / 2) == b)) || throw(
+            ArgumentError(
+                "$(_seg_label(seg)): the target epoch $t h integrates over $w h and crosses a " *
+                    "segment boundary of the solution, which is segmented more finely than the " *
+                    "data — no single segment applies."
+            )
+        )
+        s = get(of_bin, b, 0)
+        s == 0 && throw(
+            ArgumentError(
+                "$(_seg_label(seg)): the target epoch $t h falls in bin $b, which no solve " *
+                    "epoch populated, so the solution has no segment covering it."
+            )
+        )
+        out[k] = s
+    end
+    return out
+end
+
+function time_segment_ids(
+        seg::PerIntegration, solve::DataGeometry, target::DataGeometry;
+        ti_idx = eachindex(target.times), time_span = nothing,
+    )
+    perm = sortperm(solve.times)
+    st = solve.times[perm]
+    _check_span_length(seg, time_span, ti_idx)
+    out = Vector{Int}(undef, length(ti_idx))
+    for (k, i) in enumerate(ti_idx)
+        t = target.times[i]
+        j = searchsortedfirst(st, t - _EPOCH_ATOL)
+        (j <= length(st) && abs(st[j] - t) <= _EPOCH_ATOL) || throw(
+            ArgumentError(
+                "$(_seg_label(seg)): the target epoch $t h is not a solve epoch — the nearest " *
+                    "is $(_nearest(st, t)) h. One segment per solve integration cannot be " *
+                    "resampled onto a different time grid."
+            )
+        )
+        # Averaging epochs {1, 2, 3} h yields 2.0 h, which IS a solve epoch, so
+        # the match above does not by itself catch time-averaged data; the span
+        # does — it still covers the epochs that were averaged away.
+        w = _span_at(time_span, k)
+        if w > 0
+            lo = searchsortedfirst(st, t - w / 2)
+            hi = searchsortedlast(st, t + w / 2)
+            hi > lo && throw(
+                ArgumentError(
+                    "$(_seg_label(seg)): the target epoch $t h integrates over $w h, covering " *
+                        "solve epochs $(join(st[lo:hi], ", ")) h — the solution is segmented " *
+                        "more finely than the data and no single segment applies."
+                )
+            )
+        end
+        out[k] = perm[j]
+    end
+    return out
+end
+
+# `FreqGroups` and `ChannelBlocks` cut the CHANNEL INDEX axis, so they mean the
+# same thing on another grid only when that grid indexes the same channels.
+function freq_segment_ids(
+        seg::Union{FreqGroups, ChannelBlocks}, solve::DataGeometry, target::DataGeometry;
+        chan_idx = eachindex(target.channel_freqs),
+    )
+    _require_same_channels(seg, solve, target)
+    ids, _ = freq_segment_ids(seg, solve)
+    return ids[chan_idx]
+end
+
+function _require_same_channels(seg, solve::DataGeometry, target::DataGeometry)
+    ns = nchannels(solve)
+    nt = nchannels(target)
+    ns == nt || throw(
+        ArgumentError(
+            "$(_seg_label(seg)) segments the channel axis by index, so it applies only to an " *
+                "identical channel layout; the target has $nt channels and the solution $ns."
+        )
+    )
+    for c in 1:ns
+        isapprox(target.channel_freqs[c], solve.channel_freqs[c]; rtol = _FREQ_RTOL) || throw(
+            ArgumentError(
+                "$(_seg_label(seg)) segments the channel axis by index, so it applies only to " *
+                    "an identical channel layout; target channel $c is at " *
+                    "$(target.channel_freqs[c]) Hz and the solution's at " *
+                    "$(solve.channel_freqs[c]) Hz."
+            )
+        )
+    end
+    return nothing
+end
+
+# First-appearance raw bin → dense segment id, the map `_dense_rank` builds
+# implicitly. A bin no solve sample populated is absent from it and has no id,
+# so a target sample landing there fails rather than reading the next
+# populated bin's parameters.
+function _bin_ids(bins)
+    ids = Dict{Int, Int}()
+    for b in bins
+        get!(ids, b, length(ids) + 1)
+    end
+    return ids
+end
+
+_span_at(::Nothing, k) = 0.0
+_span_at(span, k) = isempty(span) ? 0.0 : span[k]
+
+function _check_span_length(seg, span, ti_idx)
+    (span === nothing || isempty(span) || length(span) == length(ti_idx)) || throw(
+        DimensionMismatch(
+            "$(_seg_label(seg)): time_span has $(length(span)) entries for $(length(ti_idx)) " *
+                "placed samples."
+        )
+    )
+    return nothing
+end
+
+_nearest(sorted, t) = argmin(x -> abs(x - t), sorted)
+
+_seg_label(seg::TimeBlocks) = "TimeBlocks($(seg.duration_hr))"
+_seg_label(seg::ChannelBlocks) = "ChannelBlocks($(seg.block_size))"
+_seg_label(seg) = string(nameof(typeof(seg)))
