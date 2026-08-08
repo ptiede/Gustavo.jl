@@ -220,7 +220,7 @@ Fringe.estimator_info(est::Fringe.MatchedFilter) = (; search = est.search)
 function _station_solve!(est::Fringe.MatchedFilter, ctx::SolveContext, dets)
     ncomp, covered = Fringe.solve_station_systems!(
         ctx.θ, dets, ctx.scratch[:fringe_setup].stageB;
-        ref_ant = ctx.ref_ant, opts = Fringe.resolve_closure(est),
+        ref_ant = ctx.ref_ant, opts = est.closure,
     )
     return ncomp, Fringe.unconstrained_flags(dets, covered, ctx.geom)
 end
@@ -261,18 +261,21 @@ function Fringe.estimate_scan!(
         time_rms = Fringe._rms_spread(timestamps(stack) .* 3600.0),
     )
 
-    # Per-scan detection log for the solution diagnostics: the detection table
-    # (with per-baseline PFA), its max SNR, and the scan's effective cell count.
-    # The search cube is transient (consumed by the station solve), so these are
-    # read off it here; `cells1` is the only piece not already in the cube.
+    # Per-scan search log for the solution diagnostics: every MEASURED cell, its
+    # family-wise PFA, and whether that PFA accepts it as a real fringe. Recording
+    # the rejected cells too is what makes the near-threshold population visible;
+    # `detected` is the column that separates them. The search cube is transient
+    # (consumed by the station solve), so these are read off it here; `cells1` is
+    # the only piece not already in the cube.
     cells1 = Fringe._search_cells(frequencies(stack), timestamps(stack) .* 3600.0, est.search)
     ncells = cells1 * max(length(bl_pairs) * length(pols), 1)
+    pfa_max = est.closure.pfa_max
     rows = [
         (; a = bl_pairs[j][1], b = bl_pairs[j][2], pol = pols[p],
-           snr = res.snr[j, p], pfa = Fringe.fringe_pfa(res.snr[j, p], cells1))
+           snr = res.snr[j, p], pfa = res.pfa[j, p], detected = res.pfa[j, p] <= pfa_max)
             for p in eachindex(pols) for j in eachindex(bl_pairs) if res.valid[j, p]
     ]
-    max_snr = isempty(rows) ? 0.0 : maximum(r.snr for r in rows)
+    max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
     if Fringe.scan_local_solve(est, s.model)
         # Block-diagonal model: this scan's station systems close from its own
         # detections, so its θ columns are complete before this returns. The
@@ -405,13 +408,17 @@ function finish_pass!(s::Bandpass, ctx::SolveContext)
     setup = ctx.scratch[:bp_setup]
     results = ctx.scratch[:pass_results]
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
-    Fringe.solve_bandpass!(
+    report = Fringe.solve_bandpass!(
         s.smoother, ctx.θ, [res.r for res in results], setup, s.model; ref_ant = ctx.ref_ant,
     )
     scans = Int[res.index for res in results]
+    # The smoother's own per-track record travels with the step's info, so a
+    # consumer can tell a measured bandpass track from a placeholder without
+    # re-deriving it from the gains (where the two look identical).
     return (;
         nscans = length(scans), scans,
         sources = unique(String[res.r.source for res in results]),
+        (report === nothing ? (;) : report)...,
     )
 end
 

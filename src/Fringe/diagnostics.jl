@@ -378,11 +378,12 @@ function _diag_stream(
         "diagnostics: the solution records a transform that did not survive " *
             "serialization — pass the chain explicitly (precal/flag_channels/weight_scale)."
     )
-    # Diagnostics inspect one group at a time, so both fan-out levels stay serial.
+    # Diagnostics inspect one group at a time, so the OUTER level stays serial; the
+    # inner level still fans out across the group's leaves and baselines.
     return scan_stream(
         uvset; geom = sol.geom, transforms = tfs,
         exec = ExecutionConfig(
-            outer_executor = SerialScheduler(), inner_executor = SerialScheduler(),
+            outer_executor = SerialScheduler(), inner_executor = DynamicScheduler(),
         ),
     )
 end
@@ -403,6 +404,47 @@ function _coherent_mean!(sum::Array{ComplexF64}, w::Array{Float64})
         sum[i] = w[i] > 0 ? sum[i] / w[i] : ComplexF64(NaN, NaN)
     end
     return sum
+end
+
+# Per-cell accumulation for `baseline_fringe_data`, in its own method so it
+# specializes on the cube's concrete array types — inlined in the caller it runs
+# untyped, at ~1 µs per cell over ~10^8 cells. One task per baseline: every
+# accumulator is indexed by `bi`, so the tasks write to disjoint slices and the
+# fan-out needs no reduction.
+function _accumulate_baseline_fringes!(
+        acc, Vg, Wg, g, gid, bl_pairs, feeds,
+        nchan::Int, nti::Int, nbl::Int, npol::Int, executor,
+    )
+    tforeach(1:nbl; scheduler = executor) do bi
+        a, b = bl_pairs[bi]
+        a == b && return                                # skip autocorrelations
+        for p in 1:npol
+            fa, fb = feeds[p]
+            @inbounds for ti in 1:nti, c in 1:nchan
+                w = Wg[c, ti, bi, p]
+                v = Vg[c, ti, bi, p]
+                (w > 0 && isfinite(w) && isfinite(v)) || continue
+                k = gid[c]
+                acc.sb[c, bi, p] += w * v; acc.swb[c, bi, p] += w
+                acc.tb[ti, bi, p] += w * v; acc.twb[ti, bi, p] += w
+                acc.tbb[ti, bi, p, k] += w * v; acc.twbb[ti, bi, p, k] += w
+                ga = g[c, ti, a, fa]; gb = g[c, ti, b, fb]
+                denom = ga * conj(gb)
+                # Squared magnitudes: the guard is a threshold test, and `abs` on a
+                # complex number costs a `hypot` per cell.
+                (abs2(ga) > 1.0e-24 && abs2(gb) > 1.0e-24 && isfinite(denom)) || continue
+                vc = v / denom
+                isfinite(vc) || continue
+                # inverse-variance weight of the CORRECTED datum (Var(V/g) =
+                # 1/(w·|g|²)) — matches apply_calibration's reweighting.
+                wd = w * abs2(denom)
+                acc.sa[c, bi, p] += wd * vc; acc.swa[c, bi, p] += wd
+                acc.ta[ti, bi, p] += wd * vc; acc.twa[ti, bi, p] += wd
+                acc.tab[ti, bi, p, k] += wd * vc; acc.twab[ti, bi, p, k] += wd
+            end
+        end
+    end
+    return nothing
 end
 
 """
@@ -440,6 +482,7 @@ function baseline_fringe_data(
     (1 <= gi <= length(groups)) || error("baseline_fringe_data: scan_index $gi out of range 1:$(length(groups))")
 
     info = UVData.metadata(last(first(groups[gi].leaves)))   # source/scan from the lazy leaf
+    executor = inner_executor(stream)                   # within-group fan-out
     stack, win = materialize_cube(stream, groups[gi])
     g = _composed_gains(sol, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
     fg = frequencies(stack)
@@ -462,33 +505,12 @@ function baseline_fringe_data(
     tbb = zeros(ComplexF64, nti, nbl, npol, ngrp); twbb = zeros(Float64, nti, nbl, npol, ngrp)
     tab = zeros(ComplexF64, nti, nbl, npol, ngrp); twab = zeros(Float64, nti, nbl, npol, ngrp)
 
-    @inbounds for p in 1:npol
-        fa, fb = correlation_feed_pair(pol_products(stack)[p])
-        for bi in 1:nbl
-            a, b = UVData.baselines(stack).pairs[bi]
-            a == b && continue                          # skip autocorrelations
-            for ti in 1:nti, c in 1:nchan
-                w = Wg[c, ti, bi, p]
-                v = Vg[c, ti, bi, p]
-                (w > 0 && isfinite(w) && isfinite(v)) || continue
-                k = gid[c]
-                sb[c, bi, p] += w * v; swb[c, bi, p] += w
-                tb[ti, bi, p] += w * v; twb[ti, bi, p] += w
-                tbb[ti, bi, p, k] += w * v; twbb[ti, bi, p, k] += w
-                ga = g[c, ti, a, fa]; gb = g[c, ti, b, fb]
-                denom = ga * conj(gb)
-                (abs(ga) > 1.0e-12 && abs(gb) > 1.0e-12 && isfinite(denom)) || continue
-                vc = v / denom
-                isfinite(vc) || continue
-                # inverse-variance weight of the CORRECTED datum (Var(V/g) =
-                # 1/(w·|g|²)) — matches apply_calibration's reweighting.
-                wd = w * abs2(denom)
-                sa[c, bi, p] += wd * vc; swa[c, bi, p] += wd
-                ta[ti, bi, p] += wd * vc; twa[ti, bi, p] += wd
-                tab[ti, bi, p, k] += wd * vc; twab[ti, bi, p, k] += wd
-            end
-        end
-    end
+    _accumulate_baseline_fringes!(
+        (; sb, swb, sa, swa, tb, twb, ta, twa, tbb, twbb, tab, twab),
+        Vg, Wg, g, gid, UVData.baselines(stack).pairs,
+        [correlation_feed_pair(pol_products(stack)[p]) for p in 1:npol],
+        nchan, nti, nbl, npol, executor,
+    )
 
     fstep = _fringe_step(sol)
     fsnr = fstep === nothing ? Float64[] : get(fstep.info, :scan_snr, Float64[])
@@ -815,7 +837,7 @@ function fringe_search_map(
         C = eltype(Vg)
         ax = _search_axes(fg, times, opts, C)
         ws = FringeWorkspace(C)
-        snr_gate = _gate_snr_min(opts, ax)
+        family_cells = _search_cells(ax, opts)
         best = 0
         bestsnr = -Inf
         for k in eachindex(UVData.baselines(stack).pairs)
@@ -823,7 +845,7 @@ function fringe_search_map(
             a == b && continue
             d = _baseline_fringe_search(
                 view(Vg, :, :, k, p), view(Wg, :, :, k, p),
-                fg, times, f0, t0, ax, ws, opts, snr_gate,
+                fg, times, f0, t0, ax, ws, opts, family_cells,
             )
             d.snr > bestsnr && (bestsnr = d.snr; best = k)
         end
@@ -849,9 +871,11 @@ end
 """
     fringe_station_flags(sol::CalibrationSolution) -> Vector{NamedTuple}
 
-The (station, scan) pairs the stage-B solve left UNCONSTRAINED — no strong
-detection on any of the station's baselines survived the closure screen and
-the robust rejection (the EHT-HOPS flag criterion). These stations carry
+The (station, scan) pairs the stage-B solve left UNCONSTRAINED — no ACCEPTED
+detection (`pfa <= Stationization.pfa_max`) on any of the station's baselines,
+so nothing put it in a fringe group (the EHT-HOPS flag criterion). A measured
+but rejected baseline does not rescue it: such a row constrains the fit without
+fixing a fringe location. These stations carry
 identity gains for those scans, and [`apply_calibration`](@ref) zero-weights
 their baselines there (`apply_flags = true`). Rows
 `(; scan, scan_name, ant, station)`; empty when every participating station
@@ -877,12 +901,19 @@ end
 """
     suspect_fringes(sol::CalibrationSolution; pfa_max = 1.0e-4) -> Vector{NamedTuple}
 
-Screen the fringe solution for possible FALSE fringes: every valid detection the
-stage-B solve consumed (recorded per baseline during the search pass) whose
-per-baseline false-alarm probability exceeds `pfa_max`. Rows
-`(; scan, a, b, sta_a, sta_b, pol, snr, pfa)`, most-suspect (largest `pfa`)
-first; empty when every detection is secure (or the solution predates detection
-recording). Needs NO data read — inspect a flagged row with
+Screen the solution's ACCEPTED detections against a false-alarm probability of
+`pfa_max`: the rows the stage-B solve treated as real fringes whose PFA exceeds
+the threshold given here. The search pass records every measured cell, accepted
+or not, so this reads the `detected` ones only — a rejected cell is not a suspect
+fringe, it is a non-detection.
+
+At the default this returns the empty set by construction, since acceptance IS a
+PFA test at the solve's own `Stationization.pfa_max`. It earns its keep when
+passed something STRICTER than the solve used: those are the accepted detections
+that would flip under a tighter threshold, i.e. the marginal ones worth eyeballing.
+
+Rows `(; scan, a, b, sta_a, sta_b, pol, snr, pfa)`, most-suspect (largest `pfa`)
+first. Needs NO data read — inspect a flagged row with
 
     m = fringe_search_map(uvset, sol; scan_index = r.scan, baseline = (r.a, r.b), pol = r.pol)
     plot_fringe_search(m)
@@ -894,13 +925,17 @@ function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
     haskey(info, :det_pfa) || return NamedTuple[]
     names = get(sol.info, :ant_names, String[])
     sta(i) = i <= length(names) ? String(names[i]) : string("ant", i)
+    # A solution written before the table recorded rejected cells holds detections
+    # only, so every row of one counts as accepted.
+    detected = get(info, :det_detected, nothing)
+    accepted(i) = detected === nothing || detected[i]
     rows = [
         (;
                 scan = Int(info.det_scan[i]), a = Int(info.det_ant_a[i]), b = Int(info.det_ant_b[i]),
                 sta_a = sta(Int(info.det_ant_a[i])), sta_b = sta(Int(info.det_ant_b[i])),
                 pol = String(info.det_pol[i]), snr = Float64(info.det_snr[i]), pfa = Float64(info.det_pfa[i]),
             )
-            for i in eachindex(info.det_pfa) if info.det_pfa[i] > pfa_max
+            for i in eachindex(info.det_pfa) if accepted(i) && info.det_pfa[i] > pfa_max
     ]
     sort!(rows; by = r -> r.pfa, rev = true)
     return rows

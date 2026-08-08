@@ -205,5 +205,5 @@ end
     stack, _ = FP.materialize_cube(stream, stream.groups[1])
     res = FP.search_scan(stack, stream.geom, FP.FringeSearch())
     @test res isa DimStack
-    @test keys(res) == (:delay, :rate, :phase, :amp, :snr, :valid)
+    @test keys(res) == (:delay, :rate, :phase, :amp, :snr, :pfa, :valid)
 end

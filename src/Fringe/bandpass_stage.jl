@@ -67,12 +67,19 @@ explicit per-scan source term with the specs as priors. Mirrors
 
 Define:
 
-    Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup, model::BandpassModel; ref_ant) -> nothing
+    Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup, model::BandpassModel; ref_ant) -> report
 
 writing into `θ`'s bandpass blocks. `results` is the per-scan
 `(; rl, wl, pols, source)` accumulator list, in group-index order; `setup` is
 `(; bl_pairs, blidx, nant, bp_plan, amp_plan, channel_freqs, spw_of_chan)`,
 built once per pass. The fallback errors, naming what is missing.
+
+`report` is published on the [`Bandpass`](@ref) step's solution record and should
+say which tracks the solve actually measured — see
+[`bandpass_track_report`](@ref), which builds it from per-track outcome codes.
+Return `nothing` if a smoother has nothing to report; θ alone cannot express the
+difference between a measured flat response and an unfitted one, so a smoother
+that can tell them apart should.
 
 Two optional hooks:
 
@@ -409,6 +416,34 @@ end
 const _BP_SPIKE_SIGMA = 5.0
 const _BP_MAX_LOGAMP = log(10.0)
 
+# Outcome of fitting ONE (station, feed, spw) bandpass track, reported per track by
+# `bandpass_track_report` so a caller can tell a measurement from a placeholder.
+# `θ` carries no such distinction: an unfitted track reads back as unit gain and a
+# starved one as a constant, both indistinguishable from a real flat response.
+const _BP_TRACK_NODATA = Int8(0)      # no usable segment; left at unit gain
+const _BP_TRACK_SOLVED = Int8(1)      # fit, with frequency structure
+const _BP_TRACK_FLAT = Int8(2)        # fit, but constant to within `_BP_FLAT_SPAN`
+const _BP_TRACK_DECLINED = Int8(3)    # phase branch undetermined; not fit
+
+const _BP_TRACK_LABELS = ("nodata", "solved", "flat", "declined")
+
+# A fitted track this flat carries no shape: reported as `_BP_TRACK_FLAT` rather
+# than silently passed off as a measured response. In radians for a phase track and
+# nepers for a log-amplitude one — both are the observable's own natural unit and a
+# hundredth of it is far below any real passband feature.
+const _BP_FLAT_SPAN = 0.01
+
+# Above this fraction of coin-flip steps (`phase_unwrap_ambiguity`) a phase track's
+# 2π branch is not determined by the data, and the smooth trend a shape spec then
+# fits through the unwrap's random walk is an artifact of the walk. Such a track is
+# declined rather than fit: unit gain is honest about knowing nothing, an invented
+# multi-radian ramp is not.
+const _BP_MAX_UNWRAP_AMBIGUITY = 0.25
+
+# Fraction of a solve's tracks that may come back flat or declined before the
+# bandpass as a whole is worth a warning.
+const _BP_DEGENERATE_WARN_FRACTION = 0.25
+
 """
     PerTrackSmoother(; phase = FreeShape(), amp = WhittakerShape(1.0))
 
@@ -435,40 +470,134 @@ end
 PerTrackSmoother(; phase::AbstractShapeSpec = FreeShape(), amp::AbstractShapeSpec = WhittakerShape(1.0)) =
     PerTrackSmoother(phase, amp)
 
-# Fit one segment-indexed track under `spec`, one spw at a time — a shape
-# describes the response WITHIN a band, so segments never pool across spws.
+# The outcome code for one fitted spw track: nothing estimated, a constant, or a
+# real shape.
+function _band_track_status(fitted)
+    obs = [v for v in fitted if isfinite(v)]
+    isempty(obs) && return _BP_TRACK_NODATA
+    return (maximum(obs) - minimum(obs)) < _BP_FLAT_SPAN ? _BP_TRACK_FLAT : _BP_TRACK_SOLVED
+end
+
+# Fit one segment-indexed track under `spec`, split at the spw boundaries — a
+# shape describes the response WITHIN a band, so segments never pool across spws
+# and each band keeps its own free level. `fit_track_group` decides what, if
+# anything, the bands share: only a spec that ESTIMATES its shape parameters pools
+# them, and it pools the parameters alone, never the levels.
+#
 # `unwrap` re-references a phase track to a continuous branch along frequency
 # first: the specs fit a real track, and the ±π branch cuts of a raw phase solve
-# would otherwise read as genuine structure.
-function _fit_track_bands(spec::AbstractShapeSpec, y, w, seg_spw, seg_freq; unwrap::Bool = false)
+# would otherwise read as genuine structure. A band whose branch the data does not
+# determine (`phase_unwrap_ambiguity` past `_BP_MAX_UNWRAP_AMBIGUITY`) is dropped
+# instead — see that constant.
+#
+# `status` receives one `_BP_TRACK_*` code per band, in ascending band order.
+function _fit_track_bands(
+        spec::AbstractShapeSpec, y, w, seg_spw, seg_freq;
+        unwrap::Bool = false, status = nothing,
+    )
     out = fill(NaN, length(y))
-    for bnd in sort(unique(seg_spw))
-        sidx = [s for s in eachindex(seg_spw) if seg_spw[s] == bnd]
-        yy = [y[s] for s in sidx]
-        ww = [w[s] for s in sidx]
-        xx = [seg_freq[s] for s in sidx]
-        unwrap && (yy = unwrap_phase_track(yy; weights = ww))
-        fitted = fit_track(spec, yy, ww, xx)
-        for (i, s) in enumerate(sidx)
-            out[s] = fitted[i]
+    bands = sort(unique(seg_spw))
+    members = [[s for s in eachindex(seg_spw) if seg_spw[s] == bnd] for bnd in bands]
+    ys = Vector{Vector{Float64}}(undef, length(bands))
+    ws = Vector{Vector{Float64}}(undef, length(bands))
+    xs = Vector{Vector{Float64}}(undef, length(bands))
+    declined = falses(length(bands))
+    for (j, sidx) in enumerate(members)
+        yy = Float64[y[s] for s in sidx]
+        ws[j] = Float64[w[s] for s in sidx]
+        xs[j] = Float64[seg_freq[s] for s in sidx]
+        if unwrap
+            if phase_unwrap_ambiguity(yy; weights = ws[j]) > _BP_MAX_UNWRAP_AMBIGUITY
+                declined[j] = true
+                fill!(yy, NaN)
+            else
+                yy = unwrap_phase_track(yy; weights = ws[j])
+            end
         end
+        ys[j] = yy
+    end
+    fitted = fit_track_group(spec, ys, ws, xs)
+    for (j, sidx) in enumerate(members)
+        for (i, s) in enumerate(sidx)
+            out[s] = fitted[j][i]
+        end
+        status === nothing && continue
+        status[j] = declined[j] ? _BP_TRACK_DECLINED : _band_track_status(fitted[j])
     end
     return out
 end
 
 # Fit every (station, feed, spw) track of `tracks` in place under `spec`, each
-# segment weighted by its seed precision.
-function _shape_tracks!(tracks, prec, seg_spw, seg_freq, spec::AbstractShapeSpec; unwrap::Bool)
+# segment weighted by its seed precision. `status`, when given, is an
+# `(Ant, Feed, band)` array receiving each track's `_BP_TRACK_*` outcome.
+function _shape_tracks!(
+        tracks, prec, seg_spw, seg_freq, spec::AbstractShapeSpec; unwrap::Bool, status = nothing,
+    )
     nant, _, nfseg = size(tracks)
     for a in 1:nant, f in 1:2
         y = [tracks[a, f, s] for s in 1:nfseg]
         w = [prec[a, f, s] for s in 1:nfseg]
-        fitted = _fit_track_bands(spec, y, w, seg_spw, seg_freq; unwrap)
+        st = status === nothing ? nothing : view(status, a, f, :)
+        fitted = _fit_track_bands(spec, y, w, seg_spw, seg_freq; unwrap, status = st)
         for s in 1:nfseg
             tracks[a, f, s] = fitted[s]
         end
     end
     return tracks
+end
+
+"""
+    bandpass_track_report(phase_status, amp_status, band_ids) -> NamedTuple
+
+Summarize a bandpass solve's per-(station, feed, spw) outcomes into the record the
+[`Bandpass`](@ref) step publishes. `phase_status`/`amp_status` are `(Ant, Feed,
+band)` arrays of `_BP_TRACK_*` codes (either may be `nothing` when that half was
+not fit); `band_ids` names the spw each band slot came from.
+
+Returns the two arrays as `phase_status`/`amp_status` alongside `band_ids`,
+`track_labels` (the code → name mapping, so a reader needs no constant from this
+module) and the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata` summed over both
+observables. `flat` and `declined` are the two ways a track can occupy a slot
+without measuring anything, and they are what the counts exist to expose: θ itself
+records an unfitted track as unit gain and a starved one as a constant, neither
+distinguishable there from a genuinely flat response.
+"""
+function bandpass_track_report(phase_status, amp_status, band_ids)
+    counts = zeros(Int, 4)
+    for st in (phase_status, amp_status), c in something(st, Int8[])
+        counts[Int(c) + 1] += 1
+    end
+    # Concrete arrays throughout — the record is serialized with the solution, and
+    # an observable that was not fit is an EMPTY status rather than a missing field.
+    empty_status = Array{Int8, 3}(undef, 0, 0, 0)
+    return (;
+        phase_status = something(phase_status, empty_status),
+        amp_status = something(amp_status, empty_status),
+        band_ids = collect(Int, band_ids),
+        track_labels = collect(String, _BP_TRACK_LABELS),
+        n_nodata = counts[1], n_solved = counts[2],
+        n_flat = counts[3], n_declined = counts[4],
+    )
+end
+
+# Warn when a large share of the tracks measured nothing. Silence here would leave
+# a bandpass that is mostly placeholder looking exactly like one that is mostly
+# measured — the caller cannot tell from θ, which is why this is a warning and not
+# only a record.
+function _warn_degenerate_bandpass(report)
+    total = report.n_nodata + report.n_solved + report.n_flat + report.n_declined
+    total > 0 || return nothing
+    degenerate = report.n_flat + report.n_declined + report.n_nodata
+    frac = degenerate / total
+    frac > _BP_DEGENERATE_WARN_FRACTION || return nothing
+    @warn """
+    Bandpass: $(round(100 * frac; digits = 1))% of (station, feed, spw) tracks carry no measured \
+    frequency shape — $(report.n_flat) fit flat, $(report.n_declined) declined for an \
+    undetermined phase branch, $(report.n_nodata) with no usable data (of $total). \
+    They are unit gain or a constant in the solution, not a measured response. \
+    Check per-spw SNR and the detection coverage of the bandpass scans.
+    """ n_solved = report.n_solved
+    return nothing
 end
 
 function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup, model::BandpassModel; ref_ant::Integer)
@@ -479,24 +608,33 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup, model::Bandpa
         rbar .+= res.rl
         wbar .+= res.wl
     end
+    phase_status = nothing
+    amp_status = nothing
+    band_ids = Int[]
     if setup.bp_plan !== nothing
         plan = setup.bp_plan
         fsegs, seg_spw, seg_freq = _segment_bands(plan, setup.channel_freqs, setup.spw_of_chan)
+        band_ids = sort(unique(seg_spw))
         phase, prec = _seed_phase_tracks(
             rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs; ref_ant,
         )
-        _shape_tracks!(phase, prec, seg_spw, seg_freq, sm.phase; unwrap = true)
+        phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
+        _shape_tracks!(phase, prec, seg_spw, seg_freq, sm.phase; unwrap = true, status = phase_status)
         _write_phase_bandpass!(θ, plan, phase)
     end
     if setup.amp_plan !== nothing
         plan = setup.amp_plan
         fsegs, seg_spw, seg_freq = _segment_bands(plan, setup.channel_freqs, setup.spw_of_chan)
+        band_ids = sort(unique(seg_spw))
         la, prec = _seed_amp_tracks(rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs)
         _spike_guard!(la, seg_spw, _BP_SPIKE_SIGMA)
-        _shape_tracks!(la, prec, seg_spw, seg_freq, sm.amp; unwrap = false)
+        amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
+        _shape_tracks!(la, prec, seg_spw, seg_freq, sm.amp; unwrap = false, status = amp_status)
         _write_amp_bandpass!(θ, plan, la, _BP_MAX_LOGAMP)
     end
-    return nothing
+    report = bandpass_track_report(phase_status, amp_status, band_ids)
+    _warn_degenerate_bandpass(report)
+    return report
 end
 
 # ── Joint complex bandpass + per-scan source coherence (ALS) ──────────────────
@@ -669,6 +807,7 @@ end
 function _update_station_gains!(
         g, φ, touched, S, rseg, wseg, touching, bl_pairs, feeds, pinned,
         phase_spec, amp_spec, seg_spw, seg_freq; seed::Bool,
+        phase_status = nothing, amp_status = nothing,
     )
     T = real(eltype(g))
     C = eltype(g)
@@ -725,9 +864,19 @@ function _update_station_gains!(
                 φ̃[fs] = T(NaN)
             end
         end
-        la_new = _fit_track_bands(amp_spec, la, wf, seg_spw, seg_freq)
-        φ_new = ispin ? zeros(T, nseg) :
-            _fit_track_bands(phase_spec, φ̃, wf, seg_spw, seg_freq; unwrap = seed)
+        # The status of the LAST sweep is the status of the solve: each sweep
+        # overwrites the previous one's codes for this node.
+        ast = amp_status === nothing ? nothing : view(amp_status, ant, feed, :)
+        pst = phase_status === nothing ? nothing : view(phase_status, ant, feed, :)
+        la_new = _fit_track_bands(amp_spec, la, wf, seg_spw, seg_freq; status = ast)
+        φ_new = if ispin
+            # The pin's phase is fixed by the gauge at every segment, so it is known
+            # rather than fitted: report it as such instead of leaving it at NODATA.
+            pst === nothing || fill!(pst, _BP_TRACK_SOLVED)
+            zeros(T, nseg)
+        else
+            _fit_track_bands(phase_spec, φ̃, wf, seg_spw, seg_freq; unwrap = seed, status = pst)
+        end
         for fs in 1:nseg
             (isfinite(la_new[fs]) && isfinite(φ_new[fs])) || continue
             gold = g[ant, feed, fs]
@@ -814,12 +963,18 @@ end
 
 function solve_bandpass!(sm::JointSmoother, θ, results, setup, model::BandpassModel; ref_ant::Integer)
     _, seg_spw, seg_freq = _segment_bands(setup.bp_plan, setup.channel_freqs, setup.spw_of_chan)
+    band_ids = sort(unique(seg_spw))
+    phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
+    amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
     solve_joint_bandpass!(
         θ, results, setup.bl_pairs, results[1].pols, setup.nant, setup.bp_plan, setup.amp_plan;
         ref_ant, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
         phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq,
+        phase_status, amp_status,
     )
-    return nothing
+    report = bandpass_track_report(phase_status, amp_status, band_ids)
+    _warn_degenerate_bandpass(report)
+    return report
 end
 
 """
@@ -844,6 +999,9 @@ setting).
 Convergence is judged on the largest relative per-iteration gain change, not a
 tracked χ² (which would need a per-channel power accumulator this stage does
 not keep).
+
+`phase_status`/`amp_status`, when given, are `(Ant, Feed, band)` arrays that
+receive each track's `_BP_TRACK_*` outcome code from the final sweep.
 """
 function solve_joint_bandpass!(
         θ, scans, bl_pairs, pol_products, nant, phase_plan, amp_plan;
@@ -853,6 +1011,8 @@ function solve_joint_bandpass!(
         amp_spec::AbstractShapeSpec = FreeShape(),
         seg_spw::Union{Nothing, AbstractVector{<:Integer}} = nothing,
         seg_freq::Union{Nothing, AbstractVector{<:Real}} = nothing,
+        phase_status = nothing,
+        amp_status = nothing,
     )
     phase_plan.fseg_id == amp_plan.fseg_id || throw(
         ArgumentError(
@@ -896,6 +1056,7 @@ function solve_joint_bandpass!(
         maxrel = _update_station_gains!(
             g, φ, touched, S, rseg, wseg, touching, bl_pairs, feeds, pinned,
             phase_spec, amp_spec, bands, coords; seed = iter == 1,
+            phase_status, amp_status,
         )
         _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds)
         maxrel < tolerance && break

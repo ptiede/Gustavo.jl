@@ -5,9 +5,13 @@
 # (baseline, product) cell. The caller (`Streaming`/the pipeline) owns the
 # group/budget/transform machinery and supplies the cube and geometry here.
 
-# One recorded fringe detection row: baseline antennas, correlation product,
-# SNR, and the PER-BASELINE false-alarm probability (single-search null).
-const DetectionRow = @NamedTuple{a::Int, b::Int, pol::String, snr::Float64, pfa::Float64}
+# One recorded search row: baseline antennas, correlation product, SNR, the
+# family-wise false-alarm probability, and whether that PFA accepted it as a real
+# fringe. Every measured cell gets a row, so `detected` — not the row's presence
+# — is what marks a detection.
+const DetectionRow = @NamedTuple{
+    a::Int, b::Int, pol::String, snr::Float64, pfa::Float64, detected::Bool,
+}
 
 """
     search_scan(data, geom::DataGeometry, params::FringeSearch;
@@ -21,18 +25,19 @@ geometry window. Autocorrelation baselines (antenna `a == a`, total power) are
 dropped up front, so the result covers only interferometric baselines. `geom`
 supplies the reference frequency `f0` and the default phase epoch `t0`.
 `Vsearch` lets a caller search a residual cube in place of the raw one
-(`rounds > 1`). `ngroups` sets the family-wise Bonferroni denominator:
-`params.pfa_max` budgets the whole family of `ncross×npol×ngroups` searches, so
-each individual search runs at `pfa_max` divided by that count; the default
-`ngroups = 1` is standalone per-scan gating (the QA convention), a whole-track
-solve passes its scan count. `t0` (seconds) is the epoch the detection PHASES
+(`rounds > 1`). `ngroups` sizes the false-alarm family each cell's `pfa` is
+computed over: the whole family of `ncross×npol×ngroups` searches shares one
+budget (Bonferroni), so a recorded `pfa` already accounts for every search it
+competes with and can be compared directly against `Stationization.pfa_max`. The
+default `ngroups = 1` scopes the family to this scan alone (the QA convention); a
+whole-track solve passes its scan count. `t0` (seconds) is the epoch the detection PHASES
 are referenced to — delay/rate/SNR are epoch-invariant; the default is `geom`'s
 track epoch, a standalone QA caller typically wants the scan midpoint
 (`mean(timestamps(data)) * 3600`). Results are bit-identical to the serial loop
 regardless of the fan-out `executor`.
 
-Returns a `DimStack` over `Baseline × Pol` whose layers are the six
-[`Detection`](@ref) fields (`:delay`/`:rate`/`:phase`/`:amp`/`:snr`/`:valid`),
+Returns a `DimStack` over `Baseline × Pol` whose layers are the seven
+[`Detection`](@ref) fields (`:delay`/`:rate`/`:phase`/`:amp`/`:snr`/`:pfa`/`:valid`),
 so one cell `det[bi, p]` reads back as a `Detection` `NamedTuple`, and its
 `Baseline` lookup carries the surviving `(a, b)` antenna pairs. The layers'
 element type tracks `Vsearch`'s own precision (`real(eltype(Vsearch))`) — a
@@ -77,15 +82,18 @@ function search_scan(
     # distinct cells concurrently, and adjacent bits of a BitArray share a word,
     # so `zeros(Bool, …)` is race-free where `falses(…)` is not.
     valid = zeros(Bool, dims...)
-    scube = DimensionalData.DimStack((; delay, rate, phase, amp, snr, valid))
+    pfa = similar(delay)
+    scube = DimensionalData.DimStack((; delay, rate, phase, amp, snr, pfa, valid))
 
     fg = frequencies(data)
     times = timestamps(data) .* 3600.0
     ax = _search_axes(fg, times, params, C)
-    # Family-wise PFA (Bonferroni): split pfa_max across all ncross×npol×ngroups
-    # searches and resolve the per-search SNR gate once (cheap — no FFT plan).
+    # The false-alarm family: every ncross×npol×ngroups search sharing one budget.
+    # Scaling one search's cell count by the family size is the Bonferroni
+    # correction, so each cell's recorded `pfa` is a family-wise probability and is
+    # directly comparable to `Stationization.pfa_max`.
     nsearch = max(ncross * npol, 1) * max(ngroups, 1)
-    snr_gate = _snr_gate(fg, times, params, nsearch)
+    family_cells = _search_cells(fg, times, params) * nsearch
 
     f0 = geom.f0
     t0_sec = Float64(t0)
@@ -99,7 +107,7 @@ function search_scan(
         bi = keep[j]
         scube[j, p] = _baseline_fringe_search(
             view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),
-            fg, times, f0, t0_sec, ax, workspace[], params, snr_gate,
+            fg, times, f0, t0_sec, ax, workspace[], params, family_cells,
         )
     end
     return scube

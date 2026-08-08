@@ -6,7 +6,7 @@ using Gustavo
 using Test
 using Random
 using LinearAlgebra
-using Statistics: mean, median
+using Statistics: mean, median, std
 
 const FRsh = Gustavo.Fringe
 
@@ -184,4 +184,88 @@ end
         @test_throws DimensionMismatch FRsh.fit_track(spec, ones(6), ones(5), x)
         @test_throws DimensionMismatch FRsh.fit_track(spec, ones(6), ones(6), x[1:5])
     end
+end
+
+# A group of `nband` spws, each `nchan` segments wide, drawn from one shared OU
+# process per band plus independent noise. Returns `(ys, ws, xs, truths)` in
+# `fit_track_group` order, each band centred so a fit's own level is free.
+function _spw_group(rng; nband = 8, nchan = 64, df = 5.0e5, span = 3.2e7, ν = 8.0e6, rms = 0.15, noise = 0.4)
+    ys, ws, xs, truths = Vector{Float64}[], Vector{Float64}[], Vector{Float64}[], Vector{Float64}[]
+    for b in 1:nband
+        x = (b - 1) * span .+ df .* (0:(nchan - 1))
+        a = exp(-df / ν)
+        t = zeros(nchan)
+        t[1] = randn(rng)
+        for k in 2:nchan
+            t[k] = a * t[k - 1] + sqrt(1 - a^2) * randn(rng)
+        end
+        t .*= rms / std(t)
+        t .-= mean(t)
+        push!(truths, t)
+        push!(ys, t .+ noise .* randn(rng, nchan))
+        push!(ws, fill(1 / noise^2, nchan))
+        push!(xs, collect(x))
+    end
+    return ys, ws, xs, truths
+end
+
+@testset "fit_track_group: default is the per-track fit" begin
+    rng = MersenneTwister(4242)
+    ys, ws, xs, _ = _spw_group(rng; nband = 3, nchan = 16)
+    # Every spec whose shape parameters are SUPPLIED estimates nothing across
+    # members, so grouping them must not change a single fitted value.
+    for spec in (FRsh.FreeShape(), FRsh.PolynomialShape(2), FRsh.WhittakerShape(1.0))
+        grouped = FRsh.fit_track_group(spec, ys, ws, xs)
+        for b in eachindex(ys)
+            @test grouped[b] == FRsh.fit_track(spec, ys[b], ws[b], xs[b])
+        end
+    end
+    # ARShape with the hypers held fixed has nothing to pool either.
+    fixed = FRsh.ARShape(1.6e7; fit_hypers = false)
+    for (b, g) in enumerate(FRsh.fit_track_group(fixed, ys, ws, xs))
+        @test g == FRsh.fit_track(fixed, ys[b], ws[b], xs[b])
+    end
+end
+
+@testset "fit_track_group: ARShape pools the hypers, not the levels" begin
+    rng = MersenneTwister(90210)
+    nband, nchan = 6, 48
+    xs = [collect((b - 1) * 3.2e7 .+ 5.0e5 .* (0:(nchan - 1))) for b in 1:nband]
+    ws = [fill(1.0e4, nchan) for _ in 1:nband]
+    levels = [2.0 * b for b in 1:nband]
+    ys = [fill(levels[b], nchan) .+ 0.01 .* randn(rng, nchan) for b in 1:nband]
+
+    fitted = FRsh.fit_track_group(FRsh.ARShape(1.6e7), ys, ws, xs)
+    # Each member keeps its own free level: a shared shape must not pull the bands
+    # toward a common mean, which is what makes a real spw discontinuity
+    # representable.
+    for b in 1:nband
+        @test mean(fitted[b]) ≈ levels[b] atol = 0.02
+    end
+end
+
+@testset "ARShape: pooling beats per-spw fitting on starved windows" begin
+    rng = MersenneTwister(31337)
+    spec = FRsh.ARShape(1.6e7)
+    eind = Float64[]
+    epool = Float64[]
+    flat_ind = Float64[]
+    flat_pool = Float64[]
+    for _ in 1:6
+        ys, ws, xs, truths = _spw_group(rng; nband = 16, nchan = 64, noise = 0.4)
+        indep = [FRsh.fit_track(spec, ys[b], ws[b], xs[b]) for b in eachindex(ys)]
+        pooled = FRsh.fit_track_group(spec, ys, ws, xs)
+        err(f, t) = sqrt(mean(abs2, (f .- mean(f)) .- t))
+        push!(eind, mean(err(indep[b], truths[b]) for b in eachindex(ys)))
+        push!(epool, mean(err(pooled[b], truths[b]) for b in eachindex(ys)))
+        isflat(f) = (maximum(f) - minimum(f)) < 0.01
+        push!(flat_ind, mean(isflat, indep))
+        push!(flat_pool, mean(isflat, pooled))
+    end
+    # One window of 64 noisy channels frequently cannot separate the ripple from
+    # the noise, and the per-window ML then returns that window's mean. Estimating
+    # the pair from every window at once both recovers more of the truth and stops
+    # the outcome flipping between neighbouring windows of identical quality.
+    @test median(epool) < median(eind)
+    @test median(flat_pool) < median(flat_ind)
 end

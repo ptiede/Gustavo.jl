@@ -87,25 +87,20 @@ fewer than two band blocks, a degenerate or unsorted frequency axis.
 struct HierarchicalMBD <: AbstractSearchAlgorithm end
 
 """
-    FringeSearch(; delay_window, rate_window, oversample, snr_min, quad_interp, algorithm, pfa_max)
+    FringeSearch(; delay_window, rate_window, oversample, quad_interp, algorithm)
 
 Options for [`baseline_fringe_search`](@ref).
+
+The search measures; it does not judge. Every cell holding usable data yields a
+peak with its signal-to-noise and false-alarm probability, and no detection
+threshold is applied here — admission to the station solve is
+[`Stationization`](@ref)'s decision, taken on the recorded `pfa`.
 
 - `delay_window`  : `(lo, hi)` delay search window in seconds. Default ±1 µs.
 - `rate_window`   : `(lo, hi)` fringe-rate search window in Hz. Default ±50 mHz.
 - `oversample`    : zero-padding factor per axis (finer delay/rate grid). Default 8.
   Widely-separated narrow bands may need a larger value (or a tight
   `delay_window`) to avoid locking onto a multi-band alias peak.
-- `snr_min`       : detection threshold; `valid = snr ≥ snr_min`. Default 6.
-- `pfa_max`       : false-alarm-probability detection gate. When set (finite),
-  `valid` requires the peak's false-alarm probability over this search's
-  independent (delay, rate) cells to satisfy `fringe_pfa(snr, ncells) ≤ pfa_max`
-  — an SNR cut of `fringe_snr_cut(pfa_max, ncells)` that scales itself with the
-  search size instead of being a fixed number; `snr_min` then acts only as an
-  additional floor (set `snr_min = 0` to gate purely on PFA). Default `NaN`
-  (disabled: the fixed `snr_min` cut alone). The group search divides `pfa_max`
-  by the number of searches sharing it (Bonferroni), making it a per-solve
-  false-alarm budget — see `search_scan`.
 - `quad_interp`   : polish the peak on the exact matched filter (sub-cell, per-axis
   parabolic steps on the true objective — `_polish_peak_exact!`). Default true.
 - `algorithm`     : an [`AbstractSearchAlgorithm`](@ref) — [`FullGrid`](@ref) or
@@ -119,32 +114,44 @@ Base.@kwdef struct FringeSearch
     delay_window::Tuple{Float64, Float64} = (-1.0e-6, 1.0e-6)
     rate_window::Tuple{Float64, Float64} = (-0.05, 0.05)
     oversample::Int = 8
-    snr_min::Float64 = 6.0
     quad_interp::Bool = true
     algorithm::Union{Symbol, AbstractSearchAlgorithm} = :auto
-    pfa_max::Float64 = NaN
 end
 
 """
-    Detection{T} = @NamedTuple{delay, rate, phase, amp, snr, valid}
+    Detection{T} = @NamedTuple{delay, rate, phase, amp, snr, pfa, valid}
 
 The result of a single-baseline fringe search. `delay` (s) and `rate` (Hz) are
 the station-pair group delay and fringe rate; `phase` (rad) is the constant
 phase φ referenced to `(f0, t0)`; `amp` is the coherent amplitude; `snr` the
-detection signal-to-noise; `valid = snr ≥ snr_min`. `T` is the search's compute
-precision (`real(C)` for a `ComplexF32`/`ComplexF64` visibility block).
+detection signal-to-noise.
+
+`pfa` is the probability that noise alone would produce a peak this strong
+somewhere in the search family the measurement belongs to — the whole family of
+(baseline × product × scan) searches sharing one false-alarm budget, not this
+one search in isolation, so it is directly comparable to
+`Stationization.pfa_max` (see [`search_scan`](@ref)).
+
+`valid` says a peak was MEASURED here, not that it passed any threshold: it is
+false only for a cell with no usable data (zero total weight, no peak), whose
+other fields are all zero and carry no information. `pfa` is the quantity that
+separates a real fringe from noise.
+
+`T` is the search's compute precision (`real(C)` for a `ComplexF32`/`ComplexF64`
+visibility block).
 """
 const Detection{T} = @NamedTuple{
     delay::T, rate::T, phase::T,
-    amp::T, snr::T, valid::Bool,
+    amp::T, snr::T, pfa::T, valid::Bool,
 }
 
-# The zeroed, invalid detection at precision `T` (replaces a fixed singleton now
-# that `Detection` is precision-generic). The second method lets a caller derive
-# `T` from an existing cell's own type (`_invalid_detection(typeof(d))`) without
-# naming `T` explicitly.
+# The zeroed detection of a cell with no usable data, at precision `T`. `pfa` is
+# 1 — certainty that noise explains it — so a cell that reaches an admission test
+# despite `valid = false` is rejected rather than admitted on a zero `pfa`. The
+# second method lets a caller derive `T` from an existing cell's own type
+# (`_invalid_detection(typeof(d))`) without naming `T` explicitly.
 _invalid_detection(::Type{T}) where {T} =
-    Detection{T}((zero(T), zero(T), zero(T), zero(T), zero(T), false))
+    Detection{T}((zero(T), zero(T), zero(T), zero(T), zero(T), one(T), false))
 _invalid_detection(::Type{Detection{T}}) where {T} = _invalid_detection(T)
 
 """
@@ -290,7 +297,8 @@ function baseline_fringe_search(
         )
     )
     ax = _search_axes(freqs, times, opts, C)
-    return _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, _gate_snr_min(opts, ax))
+    # A standalone search is a family of one, so its own cell count is the family's.
+    return _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, _search_cells(ax, opts))
 end
 
 # Grid the weighted visibilities onto the workspace's zero-padded uniform grid
@@ -347,11 +355,11 @@ function _baseline_fringe_search(
         V::AbstractMatrix{C}, W::AbstractMatrix,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
         ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
-        snr_gate::Real,
+        family_cells::Real,
     ) where {C}
     # Hierarchical multi-band path (never allocates the big common-Δf grid).
     ax.mbd === nothing ||
-        return _mbd_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, snr_gate)
+        return _mbd_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, family_cells)
 
     T = real(C)
     nchan, ntime = size(V)
@@ -426,12 +434,12 @@ function _baseline_fringe_search(
     # true inverse-variances — so this reduces to the matched-filter |Dref|/√Σw
     # for calibrated data, but stays correct when the WEIGHT column is
     # uncalibrated / uniform (common in raw correlator output), where √Σw badly
-    # mis-scales the SNR and silently fails the snr_min gate. Falls back to √Σw if
+    # mis-scales the SNR and so its false-alarm probability. Falls back to √Σw if
     # the window is too small to estimate noise.
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
 
-    return Detection{T}((delay, rate, phase, amp, snr, snr >= snr_gate))
+    return Detection{T}((delay, rate, phase, amp, snr, T(fringe_pfa(snr, family_cells)), true))
 end
 
 # Vector overloads: single-time (delay only) and the general fallback.
@@ -906,7 +914,7 @@ function _mbd_fringe_search(
         V::AbstractMatrix{C}, W::AbstractMatrix,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
         ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
-        snr_gate::Real,
+        family_cells::Real,
     ) where {C}
     T = real(C)
     mx = ax.mbd
@@ -1047,7 +1055,7 @@ function _mbd_fringe_search(
     amp = absref / Wsum
     snr = absref / sqrt(noise2)
     phase = rem2pi(angle(Dref), RoundNearest)
-    return Detection{T}((delay, rate_ref, phase, amp, snr, snr >= snr_gate))
+    return Detection{T}((delay, rate_ref, phase, amp, snr, T(fringe_pfa(snr, family_cells)), true))
 end
 
 # ── False-fringe statistics + the delay–rate map extractor ─────────────────────
@@ -1115,21 +1123,6 @@ function fringe_snr_cut(pfa::Real, ncells::Real)
     return sqrt(-log(p1))
 end
 
-# Per-search detection SNR gate: the fixed `snr_min`, or — when a family-wise
-# `pfa_max` is set — the SNR at which one search over `cells1` independent cells
-# clears `pfa_max` split across the `nsearch`-strong Bonferroni family (`nsearch`
-# = the cross-baseline×product×scan searches sharing the budget; `1` for a lone
-# search).
-_snr_gate(opts::FringeSearch, cells1::Real, nsearch::Integer) =
-    isfinite(opts.pfa_max) ?
-        max(opts.snr_min, fringe_snr_cut(opts.pfa_max / nsearch, cells1)) :
-        opts.snr_min
-_snr_gate(freqs::AbstractVector, times::AbstractVector, opts::FringeSearch, nsearch::Integer) =
-    _snr_gate(opts, _search_cells(freqs, times, opts), nsearch)
-
-# Single-search gate from the built axes (no family division).
-_gate_snr_min(opts::FringeSearch, ax::_SearchAxes) = _snr_gate(opts, _search_cells(ax, opts), 1)
-
 """
     FringeSearchMap
 
@@ -1191,7 +1184,7 @@ function baseline_fringe_map(
     )
     ax = _search_axes(freqs, times, opts, C)              # detection axes (honour opts.algorithm)
     axf = ax.mbd === nothing ? ax :                       # plane axes: always the full grid
-        _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.snr_min, opts.quad_interp, FullGrid(), opts.pfa_max), C)
+        _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.quad_interp, FullGrid()), C)
     ncells = _search_cells(axf, opts)
     ws = _ensure_workspace!(workspace, C, axf.nf_pad, axf.nt_pad)
     Wsum = _grid_visibilities!(ws, V, W, freqs, times, axf)
@@ -1212,6 +1205,6 @@ function baseline_fringe_map(
     # The refined peak, via the standard search (re-grids + re-FFTs the same data
     # in `ws` — the map above is already copied out, and reusing the search keeps
     # the peak/refinement logic in one place).
-    det = _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, ws, opts, _gate_snr_min(opts, ax))
+    det = _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, ws, opts, ncells)
     return FringeSearchMap(axf.delays[kidx], axf.rates[lidx], snrmap, det, ncells, fringe_pfa(det.snr, ncells))
 end

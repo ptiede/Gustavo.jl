@@ -446,3 +446,97 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test θn == θ4
     end
 end
+
+# ── Per-track outcome reporting and the undetermined-branch gate ──────────────
+#
+# θ records an unfitted bandpass track as unit gain and a starved one as a
+# constant, neither distinguishable there from a genuinely flat response. These
+# cover the record that makes the difference visible, and the gate that keeps an
+# undetermined phase branch from being reported as a measured ramp.
+
+@testset "Bandpass: per-track outcome codes" begin
+    rng = MersenneTwister(24601)
+    nband, nchan = 4, 32
+    seg_spw = repeat(1:nband; inner = nchan)
+    seg_freq = collect(range(8.6e10, 8.6e10 + 1.28e8; length = nband * nchan))
+    spec = FP.ARShape(1.6e7)
+
+    # A clean, structured track: every band solved.
+    smooth = 0.3 .* sin.(range(0, 6π; length = nband * nchan))
+    w = fill(1.0e4, nband * nchan)
+    st = fill(Int8(-1), nband)
+    FP._fit_track_bands(spec, smooth, w, seg_spw, seg_freq; unwrap = true, status = st)
+    @test all(==(FP._BP_TRACK_SOLVED), st)
+
+    # A band with no usable segment estimates nothing and says so.
+    gappy = copy(smooth)
+    wg = copy(w)
+    gappy[1:nchan] .= NaN
+    wg[1:nchan] .= 0
+    st = fill(Int8(-1), nband)
+    out = FP._fit_track_bands(spec, gappy, wg, seg_spw, seg_freq; unwrap = true, status = st)
+    @test st[1] == FP._BP_TRACK_NODATA
+    @test all(isnan, out[1:nchan])
+
+    # A constant band is fit, but carries no shape — reported as flat rather than
+    # passed off as a measured response.
+    flat = fill(0.2, nband * nchan)
+    st = fill(Int8(-1), nband)
+    FP._fit_track_bands(spec, flat, w, seg_spw, seg_freq; unwrap = true, status = st)
+    @test all(==(FP._BP_TRACK_FLAT), st)
+
+    # Phase noise past a radian leaves the 2π branch undetermined: the band is
+    # declined, not fit, so nothing is written for it and no invented trend can
+    # reach θ. The amplitude path is never unwrapped and so is never declined.
+    noisy = 2.0 .* randn(rng, nband * nchan)
+    st = fill(Int8(-1), nband)
+    out = FP._fit_track_bands(spec, noisy, w, seg_spw, seg_freq; unwrap = true, status = st)
+    @test all(==(FP._BP_TRACK_DECLINED), st)
+    @test all(isnan, out)
+    st = fill(Int8(-1), nband)
+    FP._fit_track_bands(spec, noisy, w, seg_spw, seg_freq; unwrap = false, status = st)
+    @test !any(==(FP._BP_TRACK_DECLINED), st)
+end
+
+@testset "bandpass_track_report: counts and the unfitted observable" begin
+    ph = Int8[FP._BP_TRACK_SOLVED FP._BP_TRACK_FLAT; FP._BP_TRACK_NODATA FP._BP_TRACK_DECLINED]
+    phase_status = reshape(ph, 2, 2, 1)
+    rep = FP.bandpass_track_report(phase_status, nothing, [3])
+    @test (rep.n_solved, rep.n_flat, rep.n_nodata, rep.n_declined) == (1, 1, 1, 1)
+    @test rep.band_ids == [3]
+    @test rep.track_labels[FP._BP_TRACK_SOLVED + 1] == "solved"
+    # An observable that was not fit is an EMPTY status, not a missing one: the
+    # record is serialized with the solution and every field must carry a value.
+    @test rep.amp_status isa AbstractArray && isempty(rep.amp_status)
+    @test rep.phase_status === phase_status
+end
+
+@testset "Bandpass: the solve publishes its per-track record" begin
+    nant, nspw, nchan, ntime, nscans = 4, 2, 8, 6, 4
+    rng = MersenneTwister(777)
+    nglob = nspw * nchan
+    uvset, _ = _build_fringe_uvset(;
+        nant, nspw, nchan, ntime, nscans,
+        bandpass = 0.3 .* randn(rng, nant, 2, nglob),
+        amp_bandpass = 0.1 .* randn(rng, nant, 2, nglob),
+        seed = 5,
+    )
+    sol = fit(
+        CalibrationPipeline(
+            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            Bandpass();
+            exec = ExecutionConfig(),
+        ),
+        uvset,
+    )
+    info = stage_info(sol, :bandpass)
+    @test size(info.phase_status) == (nant, 2, nspw)
+    @test size(info.amp_status) == (nant, 2, nspw)
+    @test info.band_ids == collect(1:nspw)
+    total = info.n_solved + info.n_flat + info.n_declined + info.n_nodata
+    @test total == 2 * nant * 2 * nspw
+    # High-SNR synthetic data with real injected structure: the tracks are
+    # measured, not placeholders.
+    @test info.n_solved > total ÷ 2
+    @test info.n_declined == 0
+end

@@ -30,7 +30,7 @@ end
 
 """
     refine_scan_dispersion!(θ, stack, win::GeometryWindow, delay_plan, disp_plan,
-                            ref_ant, nant; opts, snr_min, tau_max, dtec_max,
+                            ref_ant, nant; opts, tau_max, dtec_max,
                             executor, ties) -> nothing
 
 Joint per-scan (Δτ, dTEC) refinement of one scan window, on data already
@@ -47,7 +47,7 @@ unconstrainable).
 """
 function refine_scan_dispersion!(
         θ, stack::AbstractDimStack, win::GeometryWindow, delay_plan, disp_plan, ref_ant, nant;
-        opts::Stationization = Stationization(loss = LeastSquares()), snr_min::Real = 8.0,
+        opts::Stationization = Stationization(loss = LeastSquares()),
         tau_max::Real = 2.0e-8, dtec_max::Real = 45.0, executor = DynamicScheduler(),
         ties = nothing,
     )
@@ -80,13 +80,13 @@ function refine_scan_dispersion!(
     return _dispersion_fit_stationize!(
         θ, z, w, fb, bl_pairs, pols, feeds, first(ti), geom,
         delay_plan, disp_plan, ref_ant, opts,
-        Float64(snr_min), Float64(tau_max), Float64(dtec_max), ties,
+        Float64(tau_max), Float64(dtec_max), ties,
     )
 end
 
 """
     refine_scan_sbd!(θ, stack, win::GeometryWindow, sbd, ref_ant, nant;
-                     nchunk = 4, snr_min = 8.0, tau_max = 6.0e-8, executor = DynamicScheduler()) -> nrej
+                     nchunk = 4, tau_max = 6.0e-8, executor = DynamicScheduler()) -> nrej
 
 Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
 delay), on data already gain-corrected through the pipeline's transform chain:
@@ -98,7 +98,7 @@ dispersion-corrected. A no-op (0) when `sbd === nothing`.
 """
 function refine_scan_sbd!(
         θ, stack::AbstractDimStack, win::GeometryWindow, sbd, ref_ant, nant;
-        nchunk::Integer = 4, snr_min::Real = 8.0, tau_max::Real = 6.0e-8, executor = DynamicScheduler(),
+        nchunk::Integer = 4, tau_max::Real = 6.0e-8, executor = DynamicScheduler(),
     )
     sbd === nothing && return 0
     geom = win.geom
@@ -146,7 +146,7 @@ function refine_scan_sbd!(
     return _sbd_fit_stationize!(
         θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds,
         first(ti), geom, sbd, ref_ant, nant;
-        snr_min = Float64(snr_min), tau_max = Float64(tau_max),
+        tau_max = Float64(tau_max),
     )
 end
 
@@ -156,7 +156,7 @@ end
 # number of detections the robust station solves excised.
 function _dispersion_fit_stationize!(
         θ, z, w, fb, bl_pairs, pols, feeds, ti0, geom,
-        delay_plan, disp_plan, ref_ant, opts, snr_min, tau_max, dtec_max, ties = nothing,
+        delay_plan, disp_plan, ref_ant, opts, tau_max, dtec_max, ties = nothing,
     )
     nbl, npol, nlf = size(z)
     Dτ = fill(_invalid_detection(Float64), nbl, npol)
@@ -180,9 +180,11 @@ function _dispersion_fit_stationize!(
                 rows_f, rows_z, rows_w, geom.f0;
                 tau_max = _band_delay_halfwindow(rows_f, tau_max), dtec_max = dtec_max,
             )
-            fit.snr >= snr_min || continue
-            Dτ[bi, p] = Detection{Float64}((fit.tau, 0.0, 0.0, fit.amp, fit.snr, true))
-            Dd[bi, p] = Detection{Float64}((fit.dtec, 0.0, 0.0, fit.amp, fit.snr, true))
+            # Every fit is recorded with its false-alarm probability; `opts.pfa_max`
+            # decides which are real, exactly as it does for a search detection.
+            pfa = fringe_pfa(fit.snr, fit.ncells)
+            Dτ[bi, p] = Detection{Float64}((fit.tau, 0.0, 0.0, fit.amp, fit.snr, pfa, true))
+            Dd[bi, p] = Detection{Float64}((fit.dtec, 0.0, 0.0, fit.amp, fit.snr, pfa, true))
         end
     end
 
@@ -257,7 +259,7 @@ end
 function _sbd_fit_stationize!(
         θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds, ti0, geom, sbd, ref_ant, nant;
         opts::Stationization = Stationization(loss = LeastSquares()),
-        snr_min::Float64 = 8.0, tau_max::Float64 = 6.0e-8,
+        tau_max::Float64 = 6.0e-8,
     )
     nbl, npol, _ = size(z)
     ngrp = length(sbd.freqgroups)
@@ -301,12 +303,15 @@ function _sbd_fit_stationize!(
                 end
                 length(fs) >= 3 || continue
                 fit = _fit_chunk_delay(fs, zs, ws, fc; tau_max = _band_delay_halfwindow(fs, tau_max))
-                fit.snr >= snr_min || continue
+                # A fit above `pfa_max` still constrains, at `weak_sys_scale`-inflated
+                # σ — i.e. its weight (an inverse variance) divided by that squared.
+                accept = fringe_pfa(fit.snr, fit.ncells) <= opts.pfa_max
+                rw = accept ? fit.snr^2 : fit.snr^2 / opts.weak_sys_scale^2
                 φs = angle(sum(zs[k] * cis(-2π * fit.tau * (fs[k] - fc)) for k in eachindex(fs)))
                 φ0 = angle(sum(zs))
                 # feed-common node (SharedFeeds model): both hands constrain feed 1.
-                push!(rows_τ, _ObsRow(a, b, 1, 1, fit.tau, fit.snr^2))
-                push!(φrows, (a, b, φs, φ0, fit.snr^2))
+                push!(rows_τ, _ObsRow(a, b, 1, 1, fit.tau, rw))
+                push!(φrows, (a, b, φs, φ0, rw))
             end
         end
         isempty(rows_τ) && continue

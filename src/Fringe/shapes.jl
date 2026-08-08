@@ -234,3 +234,79 @@ function fit_track(spec::ARShape, y, w, x)
     )
     return smooth_ou_track(yc, w, x; τ = ν, σ2 = σ2) .+ m
 end
+
+"""
+    fit_track_group(spec::AbstractShapeSpec, ys, ws, xs) -> Vector
+
+Fit a GROUP of tracks that share one shape assumption but not one level — the
+per-spw pieces of one (station, feed) response. `ys`, `ws` and `xs` hold one
+[`fit_track`](@ref) argument triple per member; the result holds one fitted track
+per member, in the order given, `NaN` wherever `fit_track` would put it.
+
+The members are independent in everything the shape does not tie together: each
+keeps its own free level, so a genuine discontinuity between them is represented
+exactly, never smoothed across.
+
+The default fits each member on its own, which is exact for every spec whose shape
+parameters are SUPPLIED rather than estimated ([`FreeShape`](@ref),
+[`PolynomialShape`](@ref), [`WhittakerShape`](@ref)). [`ARShape`](@ref) overrides
+it, because its correlation bandwidth and prior scatter are estimated from the
+data and one member frequently cannot determine them.
+
+A new spec needs no method here unless it estimates something from the data.
+"""
+function fit_track_group end
+
+_fit_tracks_independently(spec::AbstractShapeSpec, ys, ws, xs) =
+    [fit_track(spec, ys[i], ws[i], xs[i]) for i in eachindex(ys, ws, xs)]
+
+fit_track_group(spec::AbstractShapeSpec, ys, ws, xs) = _fit_tracks_independently(spec, ys, ws, xs)
+
+# One `(bandwidth, σ²)` for the whole group, then a per-member posterior under it.
+#
+# The correlation bandwidth is a property of the instrument's frequency response,
+# not of the individual window it is measured in, so estimating it once from every
+# window is both the physically right assumption and the numerically stable one: a
+# single 64-channel window at low SNR routinely cannot separate real ripple from
+# noise, and the per-window ML then drives σ² to its floor and returns that window's
+# mean — a track that is flat because it was starved, indistinguishable from one
+# that is flat because the instrument is.
+function fit_track_group(spec::ARShape, ys, ws, xs)
+    # With the hypers given rather than fitted there is nothing to pool: every
+    # member is already fit under the same pair.
+    spec.fit_hypers || return _fit_tracks_independently(spec, ys, ws, xs)
+    T = float(
+        promote_type(
+            (eltype(y) for y in ys)..., (eltype(w) for w in ws)..., (eltype(x) for x in xs)...,
+        ),
+    )
+    out = [fill(T(NaN), length(y)) for y in ys]
+    usable = [
+        i for i in eachindex(ys, ws, xs)
+            if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i], xs[i]))
+    ]
+    isempty(usable) && return out
+
+    # The OU prior reverts to zero, so each member is centred on its OWN weighted
+    # mean for the solve and that mean is restored afterwards — this is what leaves
+    # the levels free while the shape is shared.
+    ms = [_weighted_mean_finite(ys[i], ws[i]) for i in usable]
+    ycs = [
+        [_shape_usable(ys[i][k], ws[i][k]) ? T(ys[i][k]) - ms[j] : T(NaN) for k in eachindex(ys[i], ws[i])]
+            for (j, i) in enumerate(usable)
+    ]
+    wus = [ws[i] for i in usable]
+    xus = [xs[i] for i in usable]
+    ν_lo, ν_hi = _group_ou_tau_bounds(xus)
+    # The scatter seed is read off the centred members together, so it too is
+    # informed by every window rather than by one.
+    σ2_seed = spec.sigma === :auto ?
+        _init_track_var(reduce(vcat, ycs), reduce(vcat, wus)) : T(spec.sigma)^2
+    ν, σ2 = fit_ou_hypers_pooled(
+        ycs, wus, xus; τ0 = spec.bandwidth, σ2_0 = σ2_seed, τ_lo = ν_lo, τ_hi = ν_hi,
+    )
+    for (j, i) in enumerate(usable)
+        out[i] = smooth_ou_track(ycs[j], wus[j], xus[j]; τ = ν, σ2 = σ2) .+ ms[j]
+    end
+    return out
+end

@@ -187,7 +187,7 @@
                         default_fringe_terms()...,
                         rel_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
                     )),
-                    estimator = MatchedFilter(closure = FP.Stationization(snr_min = 3.0)),
+                    estimator = MatchedFilter(closure = FP.Stationization(pfa_max = 1.0e-2)),
                 ),
                 Bandpass(), TemporalSmoother();
                 exec = ExecutionConfig(),

@@ -113,7 +113,10 @@ function _fit_band_dispersion(
     end
     var = sum(ws)
     snr = var > 0 ? sqrt(max(best_a^2 - var, 0.0) / var) : 0.0
-    return (tau = best_t, dtec = best_d, amp = best_a, snr = snr)
+    # Independent trials this SNR competes against: the coarse (dTEC, τ) sweep.
+    # The refinement passes re-examine the same lobe, so they add no trials.
+    ncells = length(-dtec_max:0.25:dtec_max) * length(-tau_max:2.0e-11:tau_max)
+    return (tau = best_t, dtec = best_d, amp = best_a, snr = snr, ncells = float(ncells))
 end
 
 # Half the band-comb delay ambiguity: band/chunk phasors sampled on centers with
@@ -198,5 +201,8 @@ function _fit_chunk_delay(
     end
     var = sum(ws)
     snr = var > 0 ? sqrt(max(best_a^2 - var, 0.0) / var) : 0.0
-    return (tau = best_t, amp = best_a, snr = snr)
+    # Independent trials this SNR competes against: the coarse τ sweep. The fine
+    # pass re-examines the same lobe, so it adds no trials.
+    ncells = length((-tau_max):coarse:tau_max)
+    return (tau = best_t, amp = best_a, snr = snr, ncells = float(ncells))
 end

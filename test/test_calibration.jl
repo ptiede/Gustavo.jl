@@ -6,7 +6,8 @@ using Gustavo
 using Test
 using LinearAlgebra
 using DimensionalData: DimArray, Dim, lookup, Ti, name, dims
-using Statistics: mean
+using Statistics: mean, median
+using Random
 import OffsetArrays
 
 const UVD = Gustavo.UVData
@@ -781,4 +782,63 @@ end
         @test_throws "neither phase nor log-amplitude" CAL.validate_station_gain_model(
             CAL.StationGainModel())
     end
+end
+
+@testset "unwrap_phase_track removes the trend before the walk" begin
+    n = 64
+    k = 0:(n - 1)
+    w = fill(100.0, n)
+
+    # A trend of 1.1 rad/sample plus real structure. A nearest-branch walk on the
+    # raw phases sees every step biased toward the same branch; detrending puts the
+    # steps back at zero, where the branch is unambiguous.
+    truth = 1.1 .* k .+ 0.3 .* sin.(k ./ 7)
+    got = CAL.unwrap_phase_track(rem2pi.(truth, RoundNearest); weights = w)
+    @test maximum(abs, (got .- got[1]) .- (truth .- truth[1])) < 1.0e-8
+
+    # Steeper than π per sample the trend is aliased in the samples themselves, so
+    # no estimator recovers it — but the result must still be a continuous branch.
+    steep = rem2pi.(2.9 .* k, RoundNearest)
+    @test all(isfinite, CAL.unwrap_phase_track(steep; weights = w))
+
+    # A track with no trend is untouched by the detrend.
+    flat = rem2pi.(0.2 .* sin.(k ./ 5), RoundNearest)
+    @test CAL.unwrap_phase_track(flat; weights = w) ≈
+        CAL.unwrap_phase_track(flat; weights = w)
+
+    # Gaps carry no increment, so they neither seed nor bias the trend.
+    gappy = collect(rem2pi.(truth, RoundNearest))
+    gappy[20:30] .= NaN
+    wg = copy(w)
+    wg[20:30] .= 0
+    out = CAL.unwrap_phase_track(gappy; weights = wg)
+    @test all(isnan, out[20:30])
+    @test maximum(abs, (out[31:end] .- out[31]) .- (truth[31:end] .- truth[31])) < 1.0e-8
+end
+
+@testset "phase_unwrap_ambiguity flags an undetermined branch" begin
+    rng = MersenneTwister(5150)
+    n = 64
+    k = 0:(n - 1)
+    w = fill(100.0, n)
+
+    # A clean trended track: every step sits far from the ±π boundary.
+    clean = rem2pi.(1.1 .* k .+ 0.3 .* sin.(k ./ 7), RoundNearest)
+    @test CAL.phase_unwrap_ambiguity(clean; weights = w) == 0
+
+    # Pure noise well below a radian stays resolvable; past it the walk is a coin
+    # flip at a large fraction of its steps and the branch is not determined.
+    amb(σ) = median(
+        [
+            CAL.phase_unwrap_ambiguity(rem2pi.(σ .* randn(rng, n), RoundNearest); weights = fill(1 / σ^2, n))
+                for _ in 1:40
+        ],
+    )
+    @test amb(0.2) < 0.05
+    @test amb(0.4) < 0.1
+    @test amb(1.5) > 0.25
+
+    # No adjacent pair to compare ⇒ nothing to be ambiguous about.
+    @test CAL.phase_unwrap_ambiguity(fill(NaN, 8)) == 0
+    @test CAL.phase_unwrap_ambiguity(Float64[]) == 0
 end

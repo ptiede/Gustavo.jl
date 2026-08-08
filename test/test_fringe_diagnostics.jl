@@ -47,8 +47,9 @@ using HDF5
     end
 
     @testset "suspect_fringes (recorded detection table)" begin
-        # The solve records every VALID detection it consumed as parallel plain
-        # vectors (HDF5-representable), on the fringe step's own info.
+        # The solve records every MEASURED cell as parallel plain vectors
+         # (HDF5-representable), on the fringe step's own info, with `det_detected`
+         # marking the ones it accepted as real fringes.
         info = sol.info
         inf = sol[:fringe].steps[1].info
         n = length(inf.det_pfa)
@@ -56,14 +57,19 @@ using HDF5
         @test length(inf.det_scan) == length(inf.det_ant_a) == length(inf.det_ant_b) ==
             length(inf.det_pol) == length(inf.det_snr) == n
         @test all(s -> 1 <= s <= info.nscan, inf.det_scan)
-        @test all(>=(info.search.snr_min), inf.det_snr)               # valid detections only
+        @test length(inf.det_detected) == n
         @test all(p -> 0.0 <= p <= 1.0, inf.det_pfa)
+        # `detected` IS the PFA test at the solve's own threshold — nothing else.
+        pfa_max = FP.Stationization().pfa_max
+        @test inf.det_detected == (inf.det_pfa .<= pfa_max)
+        # Strong synthetic fringes: every accepted row outscores every rejected one.
+        @test all(inf.det_snr[inf.det_detected] .> maximum(inf.det_snr[.!inf.det_detected]; init = -Inf))
 
         # Strong synthetic fringes → nothing suspect at the default threshold.
         @test isempty(FP.suspect_fringes(sol))
         # ...and an all-pass threshold returns every recorded row, most-suspect first.
         rows = FP.suspect_fringes(sol; pfa_max = -1.0)
-        @test length(rows) == n
+        @test length(rows) == count(inf.det_detected)     # accepted rows only
         @test issorted([r.pfa for r in rows]; rev = true)
         r = first(rows)
         @test r.sta_a == info.ant_names[r.a] && r.sta_b == info.ant_names[r.b]

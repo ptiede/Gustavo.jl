@@ -129,9 +129,10 @@ export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, Pena
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
 export station_weight_scale
 export AbstractShapeSpec, FreeShape, PolynomialShape, WhittakerShape, ARShape, fit_track
+export fit_track_group
 export BandpassModel
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
-export bandpass_derotate, validate_bandpass, solve_bandpass!
+export bandpass_derotate, validate_bandpass, solve_bandpass!, bandpass_track_report
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_station_solutions
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups

@@ -163,21 +163,21 @@ end
         V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = 0.0, amp = A)
         V .+= σ .* (randn(rng, size(V)) .+ im .* randn(rng, size(V))) ./ sqrt(2)
         W = fill(1 / σ^2, size(V))
-        det = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = FR.FringeSearch(snr_min = 6.0))
+        det = FR.baseline_fringe_search(V, W, freqs, times, f0, t0)
         push!(snrs, det.snr)
         @test det.valid
+        @test det.pfa < 1.0e-4
         @test isapprox(det.delay, τ; atol = 2.0e-9)
     end
     # Measured SNR should track the matched-filter prediction within ~15%.
     @test isapprox(mean(snrs), expected_snr; rtol = 0.15)
 
-    # Pure noise (no fringe) should usually fall below a high threshold.
+    # Pure noise (no fringe): still MEASURED — the search reports the best peak it
+    # found and leaves the verdict to `pfa`, which here is nowhere near a detection.
     Vn = σ .* (randn(rng, nchan, nt) .+ im .* randn(rng, nchan, nt)) ./ sqrt(2)
-    detn = FR.baseline_fringe_search(
-        Vn, fill(1 / σ^2, nchan, nt), freqs, times, f0, t0;
-        opts = FR.FringeSearch(snr_min = 7.0)
-    )
-    @test !detn.valid
+    detn = FR.baseline_fringe_search(Vn, fill(1 / σ^2, nchan, nt), freqs, times, f0, t0)
+    @test detn.valid
+    @test detn.pfa > 1.0e-4
 end
 
 @testset "Fringe search map + PFA" begin
@@ -226,7 +226,8 @@ end
     rng = MersenneTwister(0x000FA15E)
     Vn = (randn(rng, nchan, nt) .+ im .* randn(rng, nchan, nt)) ./ sqrt(2)
     mn = FR.baseline_fringe_map(Vn, W, freqs, times, f0, t0)
-    @test !mn.detection.valid
+    @test mn.detection.valid                 # measured, not accepted
+    @test mn.detection.pfa > 1.0e-3
     @test mn.pfa > 1.0e-3
 
     # All-flagged block → empty map, invalid detection.

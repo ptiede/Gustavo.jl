@@ -269,6 +269,58 @@ function fit_ou_hypers(y, w, times; τ0::Real, σ2_0::Real, τ_lo::Real, τ_hi::
     return τ, σ2
 end
 
+"""
+    fit_ou_hypers_pooled(ys, ws, xs; τ0, σ2_0, τ_lo, τ_hi) -> (τ, σ2)
+
+Maximum-likelihood `(τ, σ²)` SHARED by a group of tracks, by maximizing the SUM of
+their Kalman marginal likelihoods ([`kalman_ou_filter`](@ref)) over `(log τ,
+log σ2)`. Each track keeps its own level — pass centered tracks — and its own
+coordinate vector, so the tracks need neither a common length nor a common
+sampling.
+
+The pooled fit is what makes the estimate identifiable when no single track
+determines it: `nobs` counts every track's observations together, and a track too
+short or too noisy to constrain the pair on its own still contributes its share of
+the likelihood. Falls back to the seeds when fewer than 5 observations are
+available in total. `τ` is clamped to `[τ_lo, τ_hi]` and `σ2` to a small positive
+floor, exactly as [`fit_ou_hypers`](@ref) does for one track.
+"""
+function fit_ou_hypers_pooled(ys, ws, xs; τ0::Real, σ2_0::Real, τ_lo::Real, τ_hi::Real)
+    T = float(
+        promote_type(
+            typeof(τ0), typeof(σ2_0), typeof(τ_lo), typeof(τ_hi),
+            (eltype(y) for y in ys)..., (eltype(w) for w in ws)..., (eltype(x) for x in xs)...,
+        ),
+    )
+    nobs = 0
+    for i in eachindex(ys, ws)
+        nobs += count(k -> isfinite(ys[i][k]) && isfinite(ws[i][k]) && ws[i][k] > 0, eachindex(ys[i], ws[i]))
+    end
+    nobs >= 5 || return T(τ0), T(σ2_0)
+    rs = [[(isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf) for wk in w] for w in ws]
+    σ2_lo = T(1.0e-8)
+    lτ_lo = log(T(τ_lo))
+    lτ_hi = log(T(τ_hi))
+    function negll(p)
+        τ = exp(clamp(p[1], lτ_lo, lτ_hi))
+        σ2 = max(exp(p[2]), σ2_lo)
+        ll = zero(T)
+        for i in eachindex(ys, rs, xs)
+            ll += kalman_ou_filter(ys[i], rs[i], xs[i]; τ = τ, σ2 = σ2)[6]
+        end
+        val = isfinite(ll) ? -ll : T(Inf)
+        # Soft barrier, as in `fit_ou_hypers`: outside the box τ saturates and the
+        # objective would be flat, so penalize the excursion to drive the simplex back.
+        excursion = max(lτ_lo - p[1], zero(T)) + max(p[1] - lτ_hi, zero(T))
+        return val + 100 * excursion
+    end
+    x0 = T[clamp(log(T(τ0)), lτ_lo, lτ_hi), log(max(T(σ2_0), σ2_lo))]
+    xbest, _ = _nelder_mead(negll, x0)
+    τ = exp(clamp(xbest[1], lτ_lo, lτ_hi))
+    σ2 = max(exp(xbest[2]), σ2_lo)
+    return τ, σ2
+end
+
 # OU correlation-scale search bounds read off the sample coordinate itself, so every
 # caller fits hypers under the same prior: `τ_lo` is one median sample spacing
 # (floored), `τ_hi` is 10× the observed span. The coordinate is time for the adhoc
@@ -282,6 +334,26 @@ function _ou_tau_bounds(times)
     τ_lo = max(t_ap, T(1.0e-3))
     τ_hi = max(10 * span, 10 * τ_lo)
     return τ_lo, τ_hi
+end
+
+# The same bounds for a GROUP of tracks sharing one correlation scale: the
+# tightest `τ_lo` and the widest `τ_hi` any member would impose alone.
+#
+# Each member's bounds come from its OWN coordinates, never from the concatenation:
+# the scale describes structure inside one track, so the gaps BETWEEN tracks — the
+# jump from one spectral window to the next — carry no shape information and must
+# not be mistaken for sample spacing or for span.
+function _group_ou_tau_bounds(xs)
+    T = float(promote_type((eltype(x) for x in xs)...))
+    τ_lo = T(Inf)
+    τ_hi = zero(T)
+    for x in xs
+        lo, hi = _ou_tau_bounds(x)
+        τ_lo = min(τ_lo, T(lo))
+        τ_hi = max(τ_hi, T(hi))
+    end
+    isfinite(τ_lo) || return T(1.0e-3), T(1.0e-2)
+    return τ_lo, max(τ_hi, 10 * τ_lo)
 end
 
 # Center a track and fit (or seed) its OU hypers, consistently for every caller.

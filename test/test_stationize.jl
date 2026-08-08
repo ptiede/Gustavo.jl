@@ -21,7 +21,7 @@ _cross_sign(fa, fb) = fa == fb ? 0 : (fa < fb ? 1 : -1)
 # phase, so it is not separable from the instrumental inter-feed offset — the
 # solve absorbs it rather than estimating it. `absorbed_phase` is the station
 # phase the solve can actually recover from data built this way.
-function inject_detections(bl_pairs, pol_products, τ, ṙ, φ, χ; snr = 100.0)
+function inject_detections(bl_pairs, pol_products, τ, ṙ, φ, χ; snr = 100.0, pfa = 0.0)
     nbl, npol = length(bl_pairs), length(pol_products)
     feeds = [CALs.correlation_feed_pair(p) for p in pol_products]
     D = Matrix{FR.Detection{Float64}}(undef, nbl, npol)
@@ -32,7 +32,7 @@ function inject_detections(bl_pairs, pol_products, τ, ṙ, φ, χ; snr = 100.0)
         delay = τ[a, fa] - τ[b, fb]
         rate = ṙ[a, fa] - ṙ[b, fb]
         phase = rem2pi(φ[a, fa] - φ[b, fb] + cs * χ, RoundNearest)
-        D[bi, p] = FR.Detection{Float64}((delay, rate, phase, 1.0, snr, true))
+        D[bi, p] = FR.Detection{Float64}((delay, rate, phase, 1.0, snr, pfa, true))
     end
     return D
 end
@@ -95,7 +95,7 @@ function touched_cells(D, bl, pols, nant, opts)
     t = falses(nant, 2)
     for bi in eachindex(bl), p in eachindex(pols)
         det = D[bi, p]
-        (det.valid && det.snr >= opts.snr_min) || continue
+        (det.valid && det.pfa <= opts.pfa_max) || continue
         a, b = bl[bi]
         a == b && continue
         fa, fb = feeds[p]
@@ -298,7 +298,7 @@ end
     for bi in eachindex(bl), p in eachindex(pols)
         if feeds[p][1] != feeds[p][2]
             d = D[bi, p]
-            D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 0.0, false))
+            D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 0.0, 1.0, false))
         end
     end
     sol = stationize(D, bl, pols, nant; ref_ant = ref)
@@ -387,7 +387,7 @@ end
     for bi in eachindex(bl), p in eachindex(pols)
         3 in bl[bi] || continue
         d = D[bi, p]
-        D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 1.0e4, true))
+        D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 1.0e4, 0.0, true))
     end
     strong = stationize(D, bl, pols, nant; ref_ant = absent_ref)
     @test gauge_zero(strong.delay) == CartesianIndex(3, 1)
@@ -396,18 +396,42 @@ end
     @test recon_residuals(D, strong, bl, pols).delay < 1.0e-20
 end
 
-@testset "Stationize: snr_min drops low-SNR detections" begin
+@testset "Stationize: pfa_max decides which detections are real" begin
     nant = 4
     bl = all_baselines(nant)
     pols = ["PP", "PQ", "QP", "QQ"]
     τ = 1.0e-9 .* randn(MersenneTwister(0x33), nant, 2)
-    D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 5.0)
-    # All detections at SNR 5: snr_min=2 solves, snr_min=6 drops everything.
-    sol_lo = stationize(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(snr_min = 2.0))
+    D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 5.0, pfa = 1.0e-3)
+    # Every detection at PFA 1e-3: a looser threshold accepts them and the solve
+    # covers the array; a stricter one accepts nothing, so no station is
+    # calibrated even though every row still entered the system.
+    sol_lo = stationize(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(pfa_max = 1.0e-2))
     @test any(sol_lo.covered)
-    sol_hi = stationize(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(snr_min = 6.0))
+    sol_hi = stationize(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(pfa_max = 1.0e-4))
     @test !any(sol_hi.covered)
     @test all(isnan, sol_hi.delay)
+end
+
+@testset "Stationize: rejected rows constrain but never connect" begin
+    nant = 4
+    bl = all_baselines(nant)
+    pols = ["PP", "QQ"]
+    τ = 1.0e-9 .* randn(MersenneTwister(0x51), nant, 2)
+    # One weak baseline among strong ones: it must not extend coverage, and the
+    # accepted detections must still solve exactly.
+    D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 100.0)
+    strong = stationize(D, bl, pols, nant; ref_ant = 1)
+    Dw = copy(D)
+    for p in eachindex(pols)
+        d = Dw[1, p]
+        Dw[1, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 3.0, 0.5, true))
+    end
+    weak = stationize(Dw, bl, pols, nant; ref_ant = 1)
+    # Coverage is unchanged: the remaining strong baselines already reach every
+    # station, and the weak row adds no connectivity of its own.
+    @test weak.covered == strong.covered
+    # And a weak row is ~1e6x downweighted, so it cannot move the fit measurably.
+    @test maximum(abs, filter(isfinite, weak.delay .- strong.delay)) < 1.0e-15
 end
 
 @testset "Stationize: spanning-tree re-wrap recovers |Δφ| > π (K1)" begin
@@ -441,7 +465,7 @@ end
         cs = _cross_sign(fa, fb)
         phase = rem2pi(φ[a, fa] - φ[b, fb] + cs * χ, RoundNearest)
         snr = is_chain(a, b) ? 200.0 : 100.0
-        D[bi, p] = FR.Detection{Float64}((τ[a, fa] - τ[b, fb], ṙ[a, fa] - ṙ[b, fb], phase, 1.0, snr, true))
+        D[bi, p] = FR.Detection{Float64}((τ[a, fa] - τ[b, fb], ṙ[a, fa] - ṙ[b, fb], phase, 1.0, snr, 0.0, true))
     end
 
     # At least one redundant baseline genuinely exceeds ±π in parallel hand.
@@ -487,7 +511,7 @@ end
             φa = Φc[s][a] + (fa == 2 ? ε[a] : 0.0)
             φb = Φc[s][b] + (fb == 2 ? ε[b] : 0.0)
             phase = rem2pi(φa - φb + cs * χs[s], RoundNearest)
-            D[bi, p] = FR.Detection{Float64}((τa - τb, 0.0, phase, 1.0, 100.0, valid))
+            D[bi, p] = FR.Detection{Float64}((τa - τb, 0.0, phase, 1.0, 100.0, valid ? 0.0 : 1.0, valid))
         end
         return D
     end
@@ -571,7 +595,7 @@ end
         # absorbed by any station solution.
         d = D[2, 1]
         D[2, 1] = FR.Detection{Float64}(
-            (d.delay, d.rate, rem2pi(d.phase + offset, RoundNearest), d.amp, d.snr, true),
+            (d.delay, d.rate, rem2pi(d.phase + offset, RoundNearest), d.amp, d.snr, 0.0, true),
         )
         return (; bl, pols, τ, φ, D)
     end
@@ -665,7 +689,7 @@ end
         φ = 0.3 .* randn(rng, nant, 2)
         D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0)
         d = D[3, 1]
-        D[3, 1] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, true))
+        D[3, 1] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, 0.0, true))
 
         derr(sol) = maximum(abs(sol.delay[a, f] - (τ[a, f] - τ[ref, 1]))
                                 for a in 1:nant, f in 1:2)
@@ -796,7 +820,7 @@ end
             d = D[2, 1]
             D[2, 1] = FR.Detection{Float64}((
                 d.delay + 50.0e-9, d.rate, rem2pi(d.phase + 2.0, RoundNearest),
-                d.amp, d.snr, true,
+                d.amp, d.snr, 0.0, true,
             ))
         end
         return D
@@ -832,7 +856,7 @@ end
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0)
     d = D[3, 2]                                   # a PQ row
-    D[3, 2] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, true))
+    D[3, 2] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, 0.0, true))
 
     @testset "defaulted cross floors reproduce the single-scalar path bit-for-bit" begin
         uniform = stationize(
@@ -855,7 +879,7 @@ end
         pols_par = ["PP", "QQ"]
         Dp = inject_detections(bl, pols_par, τ, zeros(nant, 2), φ, 0.0)
         dp = Dp[2, 1]
-        Dp[2, 1] = FR.Detection{Float64}((10.0e-9, dp.rate, dp.phase, dp.amp, dp.snr, true))
+        Dp[2, 1] = FR.Detection{Float64}((10.0e-9, dp.rate, dp.phase, dp.amp, dp.snr, 0.0, true))
         base = stationize(
             Dp, bl, pols_par, nant; ref_ant = ref,
             opts = FR.Stationization(systematic_delay = 1.0e-12),

@@ -204,9 +204,9 @@ of the pass. `rounds` re-runs the search on the residual (each round divides
 out the current solution and accumulates the leftover) — an iteration knob of
 THIS estimator.
 
-When `search.pfa_max` is finite and `closure` is left at its default, the
-stationization's fixed SNR floor is dropped (`snr_min = 0`): the PFA gate IS
-the acceptance decision. A custom `closure` is used as given.
+The `search` measures every baseline and gates nothing; `closure.pfa_max` is the
+one detection threshold, deciding which measurements are real fringes and so
+which stations are calibrated (see [`Stationization`](@ref)).
 """
 Base.@kwdef struct MatchedFilter <: AbstractFringeEstimator
     search::FringeSearch = FringeSearch()
@@ -386,15 +386,6 @@ function validate_model(est::MatchedFilter, comps)
     return nothing
 end
 
-# The effective Stationization for a MatchedFilter run: with the PFA gate
-# active and the DEFAULT closure, the search's `valid` IS the acceptance
-# decision — drop the fixed SNR floor. A customized closure is honored as given.
-function resolve_closure(est::MatchedFilter)
-    c = est.closure
-    return isfinite(est.search.pfa_max) && c == Stationization() ?
-        Stationization(snr_min = 0.0) : c
-end
-
 # ── Stage machinery over the streaming layer ─────────────────────────────────
 
 # One residual cell: the visibility divided by its baseline's gain product. A
@@ -449,20 +440,23 @@ function unconstrained_flags(dets, covered, geom::DataGeometry)
     return flags
 end
 
-# Flatten per-scan detection rows into parallel plain vectors for the solution
-# `info` — HDF5-representable and cheap to filter (`suspect_fringes`).
+# Flatten per-scan search rows into parallel plain vectors for the solution
+# `info` — HDF5-representable and cheap to filter (`suspect_fringes`). Every
+# measured cell is here, so `det_detected` is what selects the real fringes.
 function detection_table(scan_dets)
     n = sum(length, scan_dets; init = 0)
     det_scan = Vector{Int}(undef, n); det_ant_a = Vector{Int}(undef, n)
     det_ant_b = Vector{Int}(undef, n); det_pol = Vector{String}(undef, n)
     det_snr = Vector{Float64}(undef, n); det_pfa = Vector{Float64}(undef, n)
+    det_detected = Vector{Bool}(undef, n)
     i = 0
     for (gi, rows) in enumerate(scan_dets), r in rows
         i += 1
         det_scan[i] = gi; det_ant_a[i] = r.a; det_ant_b[i] = r.b
         det_pol[i] = r.pol; det_snr[i] = r.snr; det_pfa[i] = r.pfa
+        det_detected[i] = r.detected
     end
-    return (; det_scan, det_ant_a, det_ant_b, det_pol, det_snr, det_pfa)
+    return (; det_scan, det_ant_a, det_ant_b, det_pol, det_snr, det_pfa, det_detected)
 end
 
 # The flag block for the solution `info` (plain parallel vectors,

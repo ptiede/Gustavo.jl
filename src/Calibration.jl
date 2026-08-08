@@ -40,7 +40,7 @@ export weighted_phase_mean, weighted_complex_correction
 export connected_components, savitzky_golay_smooth
 
 # Phase-track utilities
-export unwrap_phase_track, phase_relative_to_ref
+export unwrap_phase_track, phase_unwrap_ambiguity, phase_relative_to_ref
 
 # ── Unified gain-model framework ─────────────────────────────────────────────
 # Segmentation vocabulary

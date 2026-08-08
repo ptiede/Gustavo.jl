@@ -96,20 +96,36 @@ robust_weight(::Huber, u::Real) = u <= 1 ? one(u) : inv(sqrt(u))
 robust_weight(::Cauchy, u::Real) = inv(1 + u)
 
 """
-    Stationization(; snr_min, phase_rewrap_iters, loss,
+    Stationization(; pfa_max, weak_sys_scale, phase_rewrap_iters, loss,
                      loss_scale, irls_iters, systematic_delay, systematic_rate,
-                     systematic_delay_cross, systematic_rate_cross)
+                     systematic_phase, systematic_delay_cross, systematic_rate_cross)
 
-Options for [`solve_station_systems!`](@ref). `snr_min` drops detections below
-this SNR; `phase_rewrap_iters` re-wraps phase residuals to handle differences
-exceeding ±π.
+Options for [`solve_station_systems!`](@ref). `phase_rewrap_iters` re-wraps phase
+residuals to handle differences exceeding ±π.
 
-Every correlation product a detection survives the SNR gate on contributes a row
-to every observable's system — parallel and cross hands alike. Which parameters
-a row touches is the MODEL's business, not this type's: under `SharedFeeds` both
-sides map to one per-station column, under `PerFeed` to the row's own two feed
-columns. Withholding cross-hand rows would silently substitute a different
-estimator for the one the model declares.
+`pfa_max` is the single detection threshold of the whole solve, read against each
+detection's family-wise false-alarm probability (see [`Detection`](@ref)), and it
+governs CONNECTIVITY alone:
+
+- A detection at or below `pfa_max` is real. It joins the two stations it touches
+  into one fringe group, and a `(station, scan)` is calibrated only if some such
+  detection reaches it.
+- A detection above `pfa_max` still contributes its row, with every systematic
+  floor multiplied by `weak_sys_scale` — so it constrains a parameter no accepted
+  detection constrains, and is otherwise invisible beside one that does. It can
+  never join stations into a group: a noise peak sits at an arbitrary delay, and
+  a station reachable only through one is uncalibrated, not weakly calibrated.
+
+Constraining without connecting is what lets a marginal baseline be measured at a
+fringe location the accepted detections have already fixed, rather than being
+discarded for failing to fix that location by itself.
+
+Every correlation product contributes a row to every observable's system —
+parallel and cross hands alike. Which parameters a row touches is the MODEL's
+business, not this type's: under `SharedFeeds` both sides map to one per-station
+column, under `PerFeed` to the row's own two feed columns. Withholding cross-hand
+rows would silently substitute a different estimator for the one the model
+declares.
 
 `loss`/`loss_scale`/`irls_iters` control robust downweighting. After each solve,
 every row's weight is rescaled by `robust_weight(loss, (z/loss_scale)^2)` at its
@@ -124,8 +140,8 @@ to the residuals, `loss_scale` means the same thing in every system regardless
 of how many rows it holds — a two-station scan and a full-array scan are cut at
 the same effective threshold.
 
-`systematic_delay`/`systematic_rate` (seconds / Hz) are a systematic-error floor
-added in quadrature to the CRB uncertainty of delay/rate rows:
+`systematic_delay`/`systematic_rate`/`systematic_phase` (seconds / Hz / radians)
+are a systematic-error floor added in quadrature to the CRB uncertainty of a row:
 `w = 1/(σ_CRB² + systematic²)`. Without a floor, an array with no real
 systematics (or synthetic data) drives `z` to the numerical noise floor, where
 the loss has no real outlier to find and merely reweights rounding noise; a
@@ -135,17 +151,22 @@ the instrument actually delivers.
 The `_cross` variants floor cross-hand rows (the row's two feeds differ) and
 default to their parallel-hand counterparts. A larger cross floor expresses
 error that does not shrink with SNR — leakage, and residual field rotation while
-no feed-rotation term is modeled — so the CRB weight cannot capture it. Phase
-rows carry no systematic term.
+no feed-rotation term is modeled — so the CRB weight cannot capture it.
+
+`weak_sys_scale` multiplies the TOTAL σ of an above-`pfa_max` row, floor
+included, rather than the floor alone: the floors default to zero, and a
+multiple of zero would leave a noise row at full CRB weight.
 """
 Base.@kwdef struct Stationization
-    snr_min::Float64 = 6.0
+    pfa_max::Float64 = 1.0e-4
+    weak_sys_scale::Float64 = 1.0e3
     phase_rewrap_iters::Int = 3
     loss::AbstractRobustLoss = SoftL1()
     loss_scale::Float64 = 8.0
     irls_iters::Int = 5
     systematic_delay::Float64 = 0.0
     systematic_rate::Float64 = 0.0
+    systematic_phase::Float64 = 0.0
     systematic_delay_cross::Float64 = systematic_delay
     systematic_rate_cross::Float64 = systematic_rate
 end
@@ -204,8 +225,11 @@ _sigma_stat(kind::Symbol, snr::Real, σ_ν::Real, σ_t::Real) =
     kind === :delay ? inv(2π * σ_ν * snr) :
     kind === :rate ? inv(2π * σ_t * snr) : inv(snr)
 
-# Inverse-variance weight: statistical σ with a systematic floor in quadrature.
-_row_weight(σ_stat::Real, σ_sys::Real) = inv(σ_stat^2 + σ_sys^2)
+# Inverse-variance weight: statistical σ with a systematic floor in quadrature,
+# the whole σ then inflated by `scale` (1 for an accepted detection, and
+# `weak_sys_scale` for one above `pfa_max` — see `Stationization`).
+_row_weight(σ_stat::Real, σ_sys::Real, scale::Real = 1.0) =
+    inv(scale^2 * (σ_stat^2 + σ_sys^2))
 
 # The scan geometry a delay/rate weight needs, or an error naming what is
 # missing. A robust loss cannot normalize a delay residual without knowing the
@@ -514,6 +538,7 @@ function detection_stack(
         phase = DimArray(getfield.(D, :phase), gdims),
         amp = DimArray(getfield.(D, :amp), gdims),
         snr = DimArray(getfield.(D, :snr), gdims),
+        pfa = DimArray(getfield.(D, :pfa), gdims),
         valid = DimArray(getfield.(D, :valid), gdims),
     )
     return DimensionalData.DimStack(
@@ -589,9 +614,12 @@ function _solve_kind_cols!(
         θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol,
     )
     getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
-    sys_par = kind === :delay ? opts.systematic_delay : kind === :rate ? opts.systematic_rate : 0.0
+    # Phase has no cross-hand variant: its floor is dimensionless (radians), so
+    # leakage and field rotation enter it at the same scale on either hand.
+    sys_par = kind === :delay ? opts.systematic_delay :
+        kind === :rate ? opts.systematic_rate : opts.systematic_phase
     sys_cross = kind === :delay ? opts.systematic_delay_cross :
-        kind === :rate ? opts.systematic_rate_cross : 0.0
+        kind === :rate ? opts.systematic_rate_cross : opts.systematic_phase
     spread_key = kind === :delay ? :freq_rms : :time_rms
     rewrap = kind === :phase ? opts.phase_rewrap_iters : 0
 
@@ -616,6 +644,9 @@ function _solve_kind_cols!(
     rowA = Vector{Int}[]; rowB = Vector{Int}[]
     rval = Float64[]; rw = Float64[]; rcross = Bool[]; rscan = Int[]
     rsta_a = Int[]; rsta_b = Int[]
+    # Per row: whether its detection is real (`pfa <= pfa_max`). Only these
+    # connect stations into a fringe group; the rest constrain and no more.
+    raccept = Bool[]
     for (sidx, sc) in enumerate(scans)
         nbl, npol = size(sc)
         bl_pairs = _scan_bl_pairs(sc)
@@ -629,11 +660,12 @@ function _solve_kind_cols!(
         σt = kind === :rate ? σ : 1.0
         for bi in 1:nbl, p in 1:npol
             det = sc[bi, p]
-            (det.valid && det.snr >= opts.snr_min) || continue
+            det.valid || continue                   # no data in this cell, no measurement
             a, b = bl_pairs[bi]
             a == b && continue
             fa, fb = feeds[p]
             cross = fa != fb
+            accept = det.pfa <= opts.pfa_max
             nsA = Int[]; nsB = Int[]
             for plan in plans
                 na = _feed_node(plan.tying, fa)
@@ -646,7 +678,13 @@ function _solve_kind_cols!(
             (isempty(nsA) || isempty(nsB)) && continue
             push!(rowA, nsA); push!(rowB, nsB)
             push!(rval, getval(det))
-            push!(rw, _row_weight(_sigma_stat(kind, det.snr, σν, σt), cross ? sys_cross : sys_par))
+            push!(
+                rw, _row_weight(
+                    _sigma_stat(kind, det.snr, σν, σt), cross ? sys_cross : sys_par,
+                    accept ? 1.0 : opts.weak_sys_scale,
+                ),
+            )
+            push!(raccept, accept)
             push!(rcross, cross); push!(rscan, sidx)
             push!(rsta_a, a); push!(rsta_b, b)
         end
@@ -681,12 +719,17 @@ function _solve_kind_cols!(
     @inbounds for n in eachindex(node_col)
         θ[node_col[n]] += x[n]
     end
-    return ncomp, _covered_stations(rsta_a, rsta_b, rscan)
+    return ncomp, _covered_stations(rsta_a, rsta_b, rscan, raccept)
 end
 
 # The (station, scan) pairs this system actually calibrates: those carrying at
-# least one accepted detection, and so constrained by the solve rather than left
+# least one ACCEPTED detection, and so constrained by the solve rather than left
 # at θ = 0 (identity gain). Everything else is flagged downstream.
+#
+# `raccept` is what keeps this honest. Every measured cell contributes a row, so
+# reading coverage off the rows alone would call a station calibrated on the
+# strength of a noise peak — which sits at an arbitrary delay and fixes nothing.
+# Only a detection at or below `pfa_max` joins stations into a fringe group.
 #
 # Coverage does NOT depend on the reference antenna, and so is invariant to the
 # gauge pin. Each connected component of the (station, feed) graph carries its own
@@ -697,14 +740,15 @@ end
 # every station of a scan the reference happens to sit out, including scans whose
 # own closure is perfectly well determined.
 #
-# Connectivity and weighting are separate questions: the `snr_min` gate decides
-# which rows are real detections and therefore what the graph looks like, and the
-# robust loss then arbitrates inconsistency AMONG those rows without removing any.
-# A station with no detection at all is uncalibrated no matter how the surviving
-# rows are weighted.
-function _covered_stations(rsta_a, rsta_b, rscan)
+# Connectivity and weighting are separate questions: `pfa_max` decides which rows
+# are real detections and therefore what the graph looks like, and the robust loss
+# then arbitrates inconsistency AMONG those rows without removing any. A station
+# with no accepted detection is uncalibrated no matter how the surviving rows are
+# weighted.
+function _covered_stations(rsta_a, rsta_b, rscan, raccept)
     cov = Set{Tuple{Int, Int}}()
-    for i in eachindex(rsta_a, rsta_b, rscan)
+    for i in eachindex(rsta_a, rsta_b, rscan, raccept)
+        raccept[i] || continue
         push!(cov, (rsta_a[i], rscan[i]))
         push!(cov, (rsta_b[i], rscan[i]))
     end
@@ -847,7 +891,8 @@ function _seed_tagged(rowA, rowB, rval, rw, rcross, pins, nnodes::Integer)
 end
 
 """
-    station_closure_residuals(detections, bl_pairs, pol_products; observable = :phase) -> Vector
+    station_closure_residuals(detections, bl_pairs, pol_products;
+                              observable = :phase, product = 1, pfa_max) -> Vector
 
 For every closed triangle of baselines present in `bl_pairs`, the residual
 closure quantity of the chosen `observable` (`:delay`/`:rate`/`:phase`) using the
@@ -855,6 +900,10 @@ closure quantity of the chosen `observable` (`:delay`/`:rate`/`:phase`) using th
 quantities must cancel. For noiseless station-differenced data these are ≈ 0
 (including mixed-hand triangles); large values flag non-closing data. This is a
 property of the data alone, so no solution is needed to evaluate it.
+
+A triangle counts only when all three legs are accepted detections
+(`pfa <= pfa_max`); a leg above that threshold carries an arbitrary delay, which
+would enter the sum as noise rather than as evidence of non-closure.
 """
 function station_closure_residuals(
         detections::AbstractMatrix{<:Detection},
@@ -862,6 +911,7 @@ function station_closure_residuals(
         pol_products::AbstractVector{<:AbstractString};
         observable::Symbol = :phase,
         product::Integer = 1,
+        pfa_max::Real = Stationization().pfa_max,
     )
     getval = observable === :delay ? (d -> d.delay) :
         observable === :rate ? (d -> d.rate) :
@@ -875,7 +925,9 @@ function station_closure_residuals(
         (a < b < c) || continue
         (haskey(blindex, (a, b)) && haskey(blindex, (b, c)) && haskey(blindex, (a, c))) || continue
         dab, dbc, dac = detections[blindex[(a, b)], product], detections[blindex[(b, c)], product], detections[blindex[(a, c)], product]
-        (dab.valid && dbc.valid && dac.valid) || continue
+        # Accepted detections only: a triangle closed through a noise peak sits at
+        # an arbitrary delay and its residual measures nothing.
+        (dab.pfa <= pfa_max && dbc.pfa <= pfa_max && dac.pfa <= pfa_max) || continue
         s = getval(dab) + getval(dbc) - getval(dac)
         observable === :phase && (s = rem2pi(s, RoundNearest))
         push!(res, s)
