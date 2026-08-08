@@ -784,36 +784,55 @@ end
     end
 end
 
-@testset "unwrap_phase_track removes the trend before the walk" begin
+@testset "unwrap_phase_track resolves a trend the walk alone cannot" begin
+    rng = MersenneTwister(8675309)
     n = 64
     k = 0:(n - 1)
-    w = fill(100.0, n)
+    σ = 0.25
+    w = fill(1 / σ^2, n)
+    drift(u, t) = sqrt(mean(abs2, (u .- u[1]) .- (t .- t[1])))
 
-    # A trend of 1.1 rad/sample plus real structure. A nearest-branch walk on the
-    # raw phases sees every step biased toward the same branch; detrending puts the
-    # steps back at zero, where the branch is unambiguous.
-    truth = 1.1 .* k .+ 0.3 .* sin.(k ./ 7)
-    got = CAL.unwrap_phase_track(rem2pi.(truth, RoundNearest); weights = w)
-    @test maximum(abs, (got .- got[1]) .- (truth .- truth[1])) < 1.0e-8
+    # Noiseless and shallow: every step is unambiguous either way, and the trend
+    # comes back exactly.
+    gentle = 1.1 .* k .+ 0.3 .* sin.(k ./ 7)
+    got = CAL.unwrap_phase_track(rem2pi.(gentle, RoundNearest); weights = w)
+    @test drift(got, gentle) < 1.0e-8
 
-    # Steeper than π per sample the trend is aliased in the samples themselves, so
-    # no estimator recovers it — but the result must still be a continuous branch.
-    steep = rem2pi.(2.9 .* k, RoundNearest)
-    @test all(isfinite, CAL.unwrap_phase_track(steep; weights = w))
+    # Steep enough that noise carries individual raw steps past ±π. Resolving each
+    # step against the trend rather than against zero is the whole difference here:
+    # a walk centred on zero lands tens of radians out, since its errors are 2π
+    # apiece and all of one sign.
+    steep = 2.7 .* k
+    err = [
+        drift(
+            CAL.unwrap_phase_track(rem2pi.(steep .+ σ .* randn(rng, n), RoundNearest); weights = w),
+            steep,
+        ) for _ in 1:20
+    ]
+    @test median(err) < 1.0
 
-    # A track with no trend is untouched by the detrend.
-    flat = rem2pi.(0.2 .* sin.(k ./ 5), RoundNearest)
-    @test CAL.unwrap_phase_track(flat; weights = w) ≈
-        CAL.unwrap_phase_track(flat; weights = w)
+    # That trend is a determined branch, not an ambiguous one — the gate must not
+    # mistake a real delay for noise.
+    @test CAL.phase_unwrap_ambiguity(
+        rem2pi.(steep .+ σ .* randn(rng, n), RoundNearest); weights = w,
+    ) < 0.05
+
+    # Past π per sample the trend is aliased in the samples themselves, so no
+    # estimator recovers it — but the result must still be a continuous branch.
+    @test all(isfinite, CAL.unwrap_phase_track(rem2pi.(4.0 .* k, RoundNearest); weights = w))
+
+    # A track with no trend is left where the plain walk puts it.
+    flat = collect(rem2pi.(0.2 .* sin.(k ./ 5), RoundNearest))
+    @test CAL.unwrap_phase_track(flat; weights = w) ≈ flat
 
     # Gaps carry no increment, so they neither seed nor bias the trend.
-    gappy = collect(rem2pi.(truth, RoundNearest))
+    gappy = collect(rem2pi.(gentle, RoundNearest))
     gappy[20:30] .= NaN
     wg = copy(w)
     wg[20:30] .= 0
     out = CAL.unwrap_phase_track(gappy; weights = wg)
     @test all(isnan, out[20:30])
-    @test maximum(abs, (out[31:end] .- out[31]) .- (truth[31:end] .- truth[31])) < 1.0e-8
+    @test maximum(abs, (out[31:end] .- out[31]) .- (gentle[31:end] .- gentle[31])) < 1.0e-8
 end
 
 @testset "phase_unwrap_ambiguity flags an undetermined branch" begin

@@ -242,15 +242,25 @@ samples. The walk seeds from a single reference index, picked internally as
 otherwise.
 
 The track's dominant linear trend — a group delay along frequency, a fringe rate
-along time — is estimated and removed before the walk, then restored. A
-nearest-branch walk resolves each step only while the true increment stays inside
-±π, so on a trended track it fails systematically: every step is biased toward the
-same branch and the errors accumulate rather than cancel. Detrending moves the
-steps back to zero-centered, where only noise can push one over.
+along time — is estimated and removed before the walk, then restored, so each step
+is resolved against zero rather than against the trend.
 
-Noise alone can still do that. [`phase_unwrap_ambiguity`](@ref) measures how close
-to the branch boundary this track's steps actually sit; consult it before trusting
-an unwrapped track or anything fit to one.
+This matters only for a STEEP trend. A nearest-branch walk resolves a step whenever
+the true increment plus its noise stays inside ±π, so a trend of up to ~2 rad per
+sample costs nothing and only past ~2.4 does the walk break down (and past π the
+trend is aliased in the samples themselves and no estimator recovers it). A track
+whose trend a delay/rate fit has already removed is far below that and unaffected;
+the detrend is what keeps the walk correct on one where it has not, such as a
+bandpass solved ahead of the fringe fit.
+
+The estimated trend also sets the baseline [`phase_unwrap_ambiguity`](@ref)
+measures against, and there it matters from ~1 rad per sample — without it a track
+carrying a real delay reads as ambiguous when it is perfectly determined.
+
+Noise, unlike a trend, cannot be removed this way: it puts individual steps over
+the boundary at random and the walk then accumulates 2π errors that any subsequent
+smooth fit reports as a large trend. [`phase_unwrap_ambiguity`](@ref) is what
+detects that; consult it before trusting an unwrapped track or anything fit to one.
 
 This is an algorithmic anchor only — downstream gauge code should fix the
 phase gauge itself (by centering via a weighted mean, or by removing a
