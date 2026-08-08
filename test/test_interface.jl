@@ -27,6 +27,14 @@ Gustavo.finish_pass!(::_RepeatingScanStep, ctx) = (; repeat_pass = true)
 # A transform with no apply_transform! implementation (error-path probe).
 struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
 
+# A FringeModel term that is not a TiedComponent: its compiled segmentation is
+# unknowable without the geometry, so the scan-locality answer must be the
+# conservative :global.
+struct _OpaqueTerm end
+
+# An estimator that declares nothing — `scan_local_solve`'s safe default.
+struct _OpaqueEstimator <: Gustavo.Fringe.AbstractFringeEstimator end
+
 # The full three-stage production pipeline at defaults.
 _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
 
@@ -44,6 +52,9 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test Gustavo.start_pass!(s, nothing) === nothing
         @test Gustavo.process_scan!(s, nothing, nothing, nothing) === nothing
         @test Gustavo.finish_pass!(s, nothing) == NamedTuple()
+        # A step that flags nothing per scan contributes nothing to a fused
+        # output tail, whatever its `process_scan!` returned.
+        @test Gustavo.scan_flags(s, nothing) == Tuple{Int, Int}[]
     end
 
     @testset "built-in step declarations" begin
@@ -51,13 +62,31 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test Gustavo.provides(Bandpass()) == :bandpass
         @test Gustavo.provides(TemporalSmoother()) == :adhoc
         @test Gustavo.required_grouping(FringeFit()) == :scan_complete
-        # Both fits that finalize a scan inside `process_scan!` declare
-        # themselves scan-local; the two that close one system over every scan
-        # do not.
+        # Steps that finalize a scan inside `process_scan!` declare themselves
+        # scan-local; a pass that closes one system over every scan does not.
         @test Gustavo.fusable_grouping(DispersionSBDFit()) == :scan
         @test Gustavo.fusable_grouping(TemporalSmoother()) == :scan
-        @test Gustavo.fusable_grouping(FringeFit()) == :global
         @test Gustavo.fusable_grouping(Bandpass()) == :global
+        # FringeFit answers per instance (`Fringe.scan_local_solve`): the
+        # default — one round, every term per-scan — solves each scan's
+        # station systems as the scan is searched, so the pass is scan-local.
+        @test Gustavo.fusable_grouping(FringeFit()) == :scan
+        # Any cross-scan coupling forces the pooled pass: a residual re-search
+        # round, a track-global inter-feed column, an opaque term (compiled
+        # segmentation unknowable without the geometry), or an estimator that
+        # declares nothing (the seam's safe default).
+        @test Gustavo.fusable_grouping(FringeFit(estimator = MatchedFilter(rounds = 2))) == :global
+        @test Gustavo.fusable_grouping(
+            FringeFit(model = FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime()))),
+        ) == :global
+        @test Gustavo.fusable_grouping(
+            FringeFit(model = FringeModel(terms = merge(default_fringe_terms(), (; x = _OpaqueTerm())))),
+        ) == :global
+        @test Gustavo.fusable_grouping(FringeFit(estimator = _OpaqueEstimator())) == :global
+        # A scan-local FringeFit finishes each scan's unconstrained-station
+        # flags inside `process_scan!`, so the fused output tail reads them off
+        # that scan's return rather than waiting for the pass to end.
+        @test Gustavo.scan_flags(FringeFit(), (; flags = [(4, 2)])) == [(4, 2)]
         # Neither Bandpass nor FringeFit overrides fit_selection — both passes
         # stream every scan.
         @test Gustavo.fit_selection(Bandpass(), Gustavo.StepSolution[]) isa AllScans
@@ -71,9 +100,17 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         steps = Gustavo.SolveStep[
             FringeFit(), DispersionSBDFit(), TemporalSmoother(), Bandpass(),
         ]
-        @test Gustavo._fusable_run(steps, 1, prior) == 1:1   # :global, runs alone
-        @test Gustavo._fusable_run(steps, 2, prior) == 2:3   # the scan-local pair shares a pass
+        @test Gustavo._fusable_run(steps, 1, prior) == 1:3   # the scan-local run shares a pass
         @test Gustavo._fusable_run(steps, 4, prior) == 4:4
+        # A pooled FringeFit instance (rounds > 1) runs alone, and the
+        # scan-local pair after it still shares its own pass.
+        steps2 = Gustavo.SolveStep[
+            FringeFit(estimator = MatchedFilter(rounds = 2)),
+            DispersionSBDFit(), TemporalSmoother(), Bandpass(),
+        ]
+        @test Gustavo._fusable_run(steps2, 1, prior) == 1:1
+        @test Gustavo._fusable_run(steps2, 2, prior) == 2:3
+        @test Gustavo._fusable_run(steps2, 4, prior) == 4:4
         # A scan-local step accumulating from a SUBSET of the scans still runs
         # alone: one pass materializes one set of groups.
         @test Gustavo._fusable_run(

@@ -10,7 +10,7 @@ using FITSFiles: Card
 using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
-using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products
+using Gustavo.UVData: Pol, Frequency, UVW, Baseline, UVSet, pol_products
 using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using PolarizedTypes: RPol, LPol
 
@@ -30,6 +30,10 @@ include("test_stationize.jl")
 
 # OU / Matérn-1/2 state-space phase smoother primitives (underpins adhoc :gp).
 include("test_statespace.jl")
+
+# Per-observable frequency-shape specs and their per-track fit (the bandpass
+# smoother's shape assumptions; ARShape rides the OU primitives above).
+include("test_shapes.jl")
 
 # Globally-closing adhoc phasing (Phase 5 of the fringe-fitter refactor).
 include("test_adhoc.jl")
@@ -59,8 +63,9 @@ include("test_fringe_step.jl")
 # step_solution extraction + portable ApplySolution.
 include("test_bandpass_step.jl")
 
-# Bandpass(estimator = JointALS()): the alternating complex-visibility + per-scan
-# source-coherence solve, vs. the closure-based SplitWLS default.
+# Bandpass(smoother = JointSmoother()): the alternating complex-visibility +
+# per-scan source-coherence solve, vs. the closure-based PerTrackSmoother
+# default, and the shape specs acting as priors inside its gain update.
 include("test_joint_bandpass.jl")
 
 # The TemporalSmoother step + output sink: multi-scan full-pipeline solves
@@ -109,9 +114,9 @@ function synthetic_uvdata()
     # order — the round-trip test exercises the read/write permutation.
     pol_labels_synth = ["PP", "PQ", "QP", "QQ"]
     channel_freqs_synth = collect(1.0:4.0)
-    vis = DimArray(vis, (Integration(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
-    weights = DimArray(weights, (Integration(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
-    uvw = DimArray(zeros(Float32, 2, 3), (Integration(obs_time_synth), UVW(["U", "V", "W"])))
+    vis = DimArray(vis, (Ti(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
+    weights = DimArray(weights, (Ti(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
+    uvw = DimArray(zeros(Float32, 2, 3), (Ti(obs_time_synth), UVW(["U", "V", "W"])))
 
     UV = Gustavo.UVData
     nominal_basis_v = [(RPol(), LPol()), (RPol(), LPol())]
@@ -234,6 +239,15 @@ end
     for n in (:UVData, :Calibration, :Streaming, :Fringe)
         @test n in top
     end
+
+    # Every axis name a stored or returned array can carry, so scripts index
+    # leaves with a bare `using Gustavo`. `Ti` is DimensionalData's dim under
+    # both names — the same binding, so no ambiguity when both are loaded.
+    for n in (:Pol, :Frequency, :Ant, :Baseline, :Ti, :UVW, :Feed, :Scan)
+        @test n in top
+        @test getproperty(Gustavo, n) <: DimensionalData.Dimension
+    end
+    @test Gustavo.Ti === DimensionalData.Ti
 
     # Solver-internal parameter bookkeeping: still reachable, no longer exported.
     @test !(:ComponentPlan in names(Gustavo.Calibration))
@@ -444,7 +458,7 @@ end
             push!(scan_indices, info.scan_name)
             push!(bl_pairs_per_record, bls.pairs[bi])
             # Slice (Frequency, Pol) for one (ti, bi); transpose to (Pol, Frequency)
-            # to match the flat fixture's (Integration, Pol, Frequency) layout.
+            # to match the flat fixture's (Ti, Pol, Frequency) layout.
             push!(vis_chunks, copy(transpose(vis_p[:, ti, bi, :])))
             push!(weights_chunks, copy(transpose(w_p[:, ti, bi, :])))
             push!(uvw_chunks, uvw_p[ti, bi, :])
@@ -463,9 +477,9 @@ end
     end
     pol_labels = pol_products(base)
     chan_freqs = UV.channel_freqs(UV.freq_setup(base))
-    vis_da = DimArray(vis_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
-    weights_da = DimArray(weights_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
-    uvw_da = DimArray(uvw_flat, (UV.Integration(obs_times), UV.UVW(["U", "V", "W"])))
+    vis_da = DimArray(vis_flat, (Ti(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
+    weights_da = DimArray(weights_flat, (Ti(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
+    uvw_da = DimArray(uvw_flat, (Ti(obs_times), UV.UVW(["U", "V", "W"])))
 
     unique_pairs = sort(unique(bl_pairs_per_record))
     bls = UV.BaselineIndex(bl_pairs_per_record, unique_pairs; antenna_names = UV.union_antennas(base).name)
@@ -967,9 +981,9 @@ function synthetic_two_spw_flat()
     chan_freq = collect(1.0:4.0)
     vis = ComplexF32.(rand(ComplexF32, 2, 4, 4))
     weights = fill(1.0f0, 2, 4, 4)
-    vis_da = DimArray(vis, (Integration(obs_t), Pol(pol_lab), Frequency(chan_freq)))
-    weights_da = DimArray(weights, (Integration(obs_t), Pol(pol_lab), Frequency(chan_freq)))
-    uvw_da = DimArray(zeros(Float32, 2, 3), (Integration(obs_t), UVW(["U", "V", "W"])))
+    vis_da = DimArray(vis, (Ti(obs_t), Pol(pol_lab), Frequency(chan_freq)))
+    weights_da = DimArray(weights, (Ti(obs_t), Pol(pol_lab), Frequency(chan_freq)))
+    uvw_da = DimArray(zeros(Float32, 2, 3), (Ti(obs_t), UVW(["U", "V", "W"])))
 
     # Reuse antennas / array_config / array_obs / primary_cards from the
     # single-source fixture. Same structure, just two SPWs.

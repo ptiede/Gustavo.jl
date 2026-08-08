@@ -12,7 +12,7 @@ using Gustavo.UVData:
     UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup,
     Antenna, AntennaTable, BaselineIndex,
     Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL,
-    Integration, Pol, Frequency, UVW, Baseline,
+    Pol, Frequency, UVW, Baseline,
     sources, parallactic_mount, elevation_mount, offset_mount,
     array_xyz, array_name, extras,
     channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name,
@@ -771,7 +771,7 @@ function _load_uvfits_flat(path)
     uvw_raw::Matrix{Float32} = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
     cfq::Vector{Float64} = channel_freqs(first(freq_setups))
-    dims = (Integration(obs_time), Pol(msv4_labels), Frequency(cfq))
+    dims = (Ti(obs_time), Pol(msv4_labels), Frequency(cfq))
 
     vis, weights, uvw = _build_arrays(vis_raw, weights_raw, uvw_raw, dims)
 
@@ -810,9 +810,9 @@ function _load_uvfits_flat(path)
         record_scan_name = record_scan_name[valid]
         record_nx_row = record_nx_row[valid]
         bl_codes = bl_codes[valid]
-        vis = vis[Integration = valid]
-        weights = weights[Integration = valid]
-        uvw = uvw[Integration = valid]
+        vis = vis[Ti = valid]
+        weights = weights[Ti = valid]
+        uvw = uvw[Ti = valid]
         extra_columns = NamedTuple{keys(extra_columns)}(
             ntuple(i -> extra_columns[i][valid], length(extra_columns))
         )
@@ -1034,7 +1034,7 @@ end
 
 _wrap_int_pol_if(arr, obs_time, pol_labels, channel_freqs) = DimArray(
     arr,
-    (Integration(obs_time), Pol(pol_labels), Frequency(channel_freqs)),
+    (Ti(obs_time), Pol(pol_labels), Frequency(channel_freqs)),
 )
 
 # Warn if the AIPS Stokes axis (circular vs linear block) doesn't match the
@@ -1058,7 +1058,7 @@ function _check_stokes_vs_poltya(aips_codes, antennas)
     return nothing
 end
 
-_wrap_uvw(arr, obs_time) = DimArray(arr, (Integration(obs_time), UVW(["U", "V", "W"])))
+_wrap_uvw(arr, obs_time) = DimArray(arr, (Ti(obs_time), UVW(["U", "V", "W"])))
 
 function _collect_extra_columns(dt, primary_cards)
     canonical_prefixes = Set(["UU", "VV", "WW", "BASELINE", "DATE"])

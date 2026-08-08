@@ -549,7 +549,11 @@ function _solve_gp_joint!(
 
     # Per-row measurement variance (1/snr²). The observation GEOMETRY needs no
     # buffer: `ap_rows` goes to the filter as-is, which reads `a`/`b` from each row.
-    rs = [[inv(T(row.w)) for row in ap_rows[ap]] for ap in 1:nap]
+    # `T[...]`, not `[...]`: `T` is a runtime value, so an AP with no rows would
+    # otherwise collect to `Vector{Any}` while a populated one gives `Vector{T}`,
+    # widening `rs` to `Vector{Vector}` — and the filter promotes its working type
+    # from `eltype(eltype(rs))`.
+    rs = [T[inv(T(row.w)) for row in ap_rows[ap]] for ap in 1:nap]
     ys = [Vector{T}(undef, length(ap_rows[ap])) for ap in 1:nap]
 
     # Current full (uncentered) estimate, seeded from the per-AP solve.

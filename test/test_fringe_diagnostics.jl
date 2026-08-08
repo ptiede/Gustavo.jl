@@ -326,14 +326,21 @@ using HDF5
     end
 
     @testset "coherence thermal debias" begin
-        # One (baseline, pol) of `nchan` cells with inverse-variance weights (w = 1/σ²):
+        # One (baseline, pol) of `nchan` cells with inverse-variance weights:
         # flat phase + noise should debias to η ≈ 1 (raw is pulled below by the noise);
         # a real per-cell phase scatter must keep η < 1 even debiased.
+        #
+        # The weight is the inverse variance of ONE REAL COMPONENT (`w = 1/Var(Re V)`,
+        # the FITS-IDI convention the reader delivers), so the noise is generated with
+        # per-component σ and the cell's complex noise power is `2σ²` — matching the
+        # factor of 2 the debias subtracts. Generating `σ·(randn + im·randn)/√2`
+        # instead would be the complex convention (`E|n|² = 1/w`) and would silently
+        # test the debias against data no reader produces.
         function freq_eta(; sigma, phase_rms, debias, nchan = 600, seed = 7)
             rng = MersenneTwister(seed); w = 1 / sigma^2
             V = Array{ComplexF64}(undef, nchan, 1, 1, 1); W = fill(w, nchan, 1, 1, 1)
             for c in 1:nchan
-                V[c, 1, 1, 1] = cis(phase_rms * randn(rng)) + sigma * (randn(rng) + im * randn(rng)) / sqrt(2)
+                V[c, 1, 1, 1] = cis(phase_rms * randn(rng)) + sigma * (randn(rng) + im * randn(rng))
             end
             freqs = collect(range(1.0e9, 1.1e9; length = nchan))
             numF = zeros(1, 1); den = zeros(1); npts = zeros(Int, 1)
@@ -355,10 +362,13 @@ using HDF5
         # but marginalizing (band-average per AP → high SNR) recovers η ≈ 1.
         rng = MersenneTwister(9)
         nchan, nti = 64, 40
-        sigma = 2.5; w = 1 / sigma^2
+        # Per-component σ (see the convention note in the debias testset above), chosen
+        # so the cell's complex noise power `2σ²` — and hence the per-cell amplitude
+        # SNR `|S|/√(2σ²)` ≈ 0.4 — matches what this test was written around.
+        sigma = 2.5 / sqrt(2); w = 1 / sigma^2
         V = Array{ComplexF64}(undef, nchan, nti, 1, 1); W = fill(w, nchan, nti, 1, 1)
         for c in 1:nchan, t in 1:nti
-            V[c, t, 1, 1] = 1.0 + sigma * (randn(rng) + im * randn(rng)) / sqrt(2)
+            V[c, t, 1, 1] = 1.0 + sigma * (randn(rng) + im * randn(rng))
         end
         times = collect(1.0:nti); freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6)
         dts = [Float64(nti)]

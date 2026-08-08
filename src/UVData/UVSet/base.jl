@@ -510,13 +510,12 @@ function participating_antennas(part::DimensionalData.AbstractDimTree)
     return sort!(collect(Set{String}(vcat(bls.ant1_names, bls.ant2_names))))
 end
 
-# Time axis lookup. Leaves use `Ti`. Values are Float64 fractional hours
-# since RDATE 00:00 UTC (the AIPS RDATE card on the AN HDU). For a
-# single-night track, magnitudes are bounded by ~24; multi-night tracks
-# accumulate as 24·days_offset + hour_within_day.
+# Time axis lookup. Values are Float64 fractional hours since RDATE 00:00 UTC
+# (the AIPS RDATE card on the AN HDU). For a single-night track, magnitudes
+# are bounded by ~24; multi-night tracks accumulate as
+# 24·days_offset + hour_within_day.
 function obs_time(part::DimensionalData.AbstractDimTree)
-    vis = part[:vis]
-    return hasdim(vis, Ti) ? lookup(vis, Ti) : lookup(vis, Integration)
+    return lookup(part[:vis], Ti)
 end
 
 """

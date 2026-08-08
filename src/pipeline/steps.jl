@@ -25,11 +25,17 @@ Base.@kwdef struct FringeFit{M <: Fringe.FringeModel, E <: Fringe.AbstractFringe
 end
 provides(::FringeFit) = :fringe
 required_grouping(::FringeFit) = :scan_complete
-# The station solve runs in `finish_estimate!`, over the detections of EVERY
-# scan at once (`solve_station_systems!`): a scan's θ does not exist until the
-# pass ends, whatever the model's time segmentation says, so the pass is not
-# scan-local even when the columns it solves are block-diagonal.
-fusable_grouping(::FringeFit) = :global
+# WHERE θ is written decides the scope, and the estimator answers for its own
+# configuration (`Fringe.scan_local_solve`): the default `MatchedFilter` with
+# one round and an all-per-scan term list solves each scan's station systems
+# inside `process_scan!`, so the pass is scan-local; any cross-scan coupling —
+# a residual re-search round, a `GlobalTime`-tied inter-feed column, an
+# estimator that pools every scan's detections — forces `:global`.
+fusable_grouping(s::FringeFit) =
+    Fringe.scan_local_solve(s.estimator, s.model) ? :scan : :global
+# Consulted only inside a fused run — exactly the scan-local configuration,
+# whose `estimate_scan!` return carries the scan's own unconstrained flags.
+scan_flags(s::FringeFit, r) = r.flags
 # NOTE: no `fit_selection` method — the fringe pass streams EVERY scan (the
 # default `AllScans`).
 
@@ -59,23 +65,27 @@ required_grouping(::DispersionSBDFit) = :scan_complete
 fusable_grouping(::DispersionSBDFit) = :scan
 
 """
-    Bandpass(; model = BandpassModel(), estimator = SplitWLS())
+    Bandpass(; model = BandpassModel(), smoother = JointSmoother())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan (fit-on-subset / apply-everywhere: pre-filter the
 `UVSet` before fitting if only a scan subset should contribute). WHAT is fit
-is `model` ([`Fringe.BandpassModel`](@ref)): phase/amp/frequency-segmentation/
-amp-shape-smoother. HOW it is solved lives on `estimator`, a pluggable
-[`Fringe.AbstractBandpassEstimator`](@ref); by default
-[`Fringe.SplitWLS`](@ref) (independent phase/log-amp closures) — or
-[`Fringe.JointALS`](@ref), a joint complex-gain + per-scan source-coherence
-solve for a resolved or polarized calibrator. The model is self-contained, so
-placing `Bandpass` before or after `FringeFit` is equally legal.
+is `model` ([`Fringe.BandpassModel`](@ref)): phase/amp and the frequency
+segmentation. HOW it is solved lives on `smoother`, a pluggable
+[`Fringe.AbstractBandpassSmoother`](@ref) carrying one shape spec per
+observable; by default [`Fringe.JointSmoother`](@ref), which fits the complex
+visibilities against an explicit per-scan source coherence and so does not
+assume the calibrator is unresolved and unpolarized. It solves one complex gain
+per (station, feed, segment), so it needs both halves of the model — a
+phase-only or amplitude-only `BandpassModel` must name
+[`Fringe.PerTrackSmoother`](@ref) instead, which runs the per-channel closure
+solves and then fits each track. The model is self-contained, so placing
+`Bandpass` before or after `FringeFit` is equally legal.
 """
-Base.@kwdef struct Bandpass{M <: Fringe.BandpassModel, E <: Fringe.AbstractBandpassEstimator} <: SolveStep
+Base.@kwdef struct Bandpass{M <: Fringe.BandpassModel, S <: Fringe.AbstractBandpassSmoother} <: SolveStep
     model::M = Fringe.BandpassModel()
-    estimator::E = Fringe.SplitWLS()
+    smoother::S = Fringe.JointSmoother()
 end
 provides(::Bandpass) = :bandpass
 required_grouping(::Bandpass) = :scan_complete
@@ -158,7 +168,7 @@ end
 # frequency by `s.freq` (the legacy `_fringe_model` placement — after the fringe
 # terms).
 function model_components(s::Bandpass, spec)
-    Fringe.validate_bandpass(s.estimator, s.model)
+    Fringe.validate_bandpass(s.smoother, s.model)
     bpc = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), s.model.freq), PerFeed())
     return (; phase = s.model.phase ? (bandpass = bpc,) : (;), logamp = s.model.amp ? (bandpass = bpc,) : (;))
 end
@@ -170,10 +180,24 @@ model_components(s::TemporalSmoother, spec) = (;
     logamp = (;),
 )
 
-# ── FringeFit visitor (stage A: per-scan search → one global station solve) ───
+# ── FringeFit visitor (stage A: per-scan search + station solve) ─────────────
+#
+# The station solve runs where `scan_local_solve` says it can: per scan inside
+# `estimate_scan!` when the systems are block-diagonal (each scan's θ is
+# complete before its `process_scan!` returns — what a `:scan` declaration
+# promises), or once over every scan's detections in `finish_estimate!` when a
+# cross-scan column or a re-search round couples them.
 
 function start_pass!(s::FringeFit, ctx::SolveContext)
     ctx.scratch[:fringe_round] = get(ctx.scratch, :fringe_round, 0) + 1
+    # `ctx.model` holds only FringeFit's own components (each step solves on its
+    # own private model/θ, never a merged one), so no restriction is needed: a
+    # later step's component sharing a stage-B signature by design
+    # (`DispersionSBDFit`'s private delay-refinement column vs. this model's own
+    # wideband delay) lives in a SEPARATE model and never appears here.
+    ctx.scratch[:fringe_setup] = (;
+        stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout),
+    )
     return nothing
 end
 
@@ -188,6 +212,32 @@ finish_pass!(s::FringeFit, ctx::SolveContext) = Fringe.finish_estimate!(s.estima
 # which would mint a second function here and leave the seam's fallback in place.
 
 Fringe.estimator_info(est::Fringe.MatchedFilter) = (; search = est.search)
+
+# Solve into `ctx.θ` the station systems `dets` closes, reporting the components
+# written and the (station, geometry scan id) pairs left unconstrained. `dets`
+# is one scan's detections where the systems are block-diagonal, every scan's
+# where they couple — the two paths differ only in that argument.
+function _station_solve!(est::Fringe.MatchedFilter, ctx::SolveContext, dets)
+    ncomp, covered = Fringe.solve_station_systems!(
+        ctx.θ, dets, ctx.scratch[:fringe_setup].stageB;
+        ref_ant = ctx.ref_ant, opts = Fringe.resolve_closure(est),
+    )
+    return ncomp, Fringe.unconstrained_flags(dets, covered, ctx.geom)
+end
+
+# The pass diagnostics both solve paths report. `scan_snr` is a LATER step's
+# non-data input (e.g. a `ScanWhere` selection reading it off this step's
+# `StepSolution.info` — see `_scan_snr`); `scan_ncells` and the detection table
+# are pure logging (`Fringe.diagnostics.jl`'s `fringe_snr_table` /
+# `suspect_fringes` read them off that same `info`), built on the final round
+# only, via the `scan_values` primitive every step's per-scan diagnostics use.
+_fringe_report(results, ngroups) = (;
+    scan_snr = scan_values(res -> res.r.max_snr, results, ngroups; default = 0.0),
+    scan_ncells = scan_values(res -> res.r.ncells, results, ngroups; default = 0.0),
+    Fringe.detection_table(
+        scan_values(res -> res.r.rows, results, ngroups; default = Fringe.DetectionRow[]),
+    )...,
+)
 
 function Fringe.estimate_scan!(
         est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit,
@@ -223,12 +273,33 @@ function Fringe.estimate_scan!(
             for p in eachindex(pols) for j in eachindex(bl_pairs) if res.valid[j, p]
     ]
     max_snr = isempty(rows) ? 0.0 : maximum(r.snr for r in rows)
+    if Fringe.scan_local_solve(est, s.model)
+        # Block-diagonal model: this scan's station systems close from its own
+        # detections, so its θ columns are complete before this returns. The
+        # slots are disjoint per scan, so concurrent groups write without
+        # contention.
+        ncomp, flags = _station_solve!(est, ctx, (det,))
+        return (; ncomp, flags, max_snr, ncells, rows)
+    end
     return (; det, max_snr, ncells, rows)
 end
 
 function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s::FringeFit)
     results = ctx.scratch[:pass_results]
     ngroups = length(ctx.stream.groups)
+    if Fringe.scan_local_solve(est, s.model)
+        # θ was written scan by scan in `estimate_scan!`; what remains is the
+        # aggregation the pooled solve would report: block-diagonal systems are
+        # disjoint, so the component counts sum and the flags concatenate in
+        # scan order.
+        ctx.scratch[:fringe_flags] = reduce(
+            append!,
+            scan_values(res -> res.r.flags, results, ngroups; default = Tuple{Int, Int}[]);
+            init = Tuple{Int, Int}[],
+        )
+        ncomp = sum(scan_values(res -> res.r.ncomp, results, ngroups; default = 0))
+        return (; ncomp, _fringe_report(results, ngroups)...)
+    end
     # `dets` is SOLVE-ESSENTIAL (it feeds the closure-screened WLS immediately
     # below) — the pass covers every group every round, so a fresh build each
     # round is exact.
@@ -236,35 +307,12 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
     for res in results
         dets[res.index] = res.r.det
     end
-    scan_snr = scan_values(res -> res.r.max_snr, results, ngroups; default = 0.0)
-    # `ctx.model` holds only FringeFit's own components (each step solves on
-    # its own private model/θ, never a merged one — CHUNK-069), so no
-    # restriction is needed: a later step's component sharing a stage-B
-    # signature by design (`DispersionSBDFit`'s private delay-refinement
-    # column vs. this model's own wideband delay) lives in a SEPARATE model
-    # and never appears here.
-    stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout)
-    opts = Fringe.resolve_closure(est)
-    ncomp, covered = Fringe.solve_station_systems!(
-        ctx.θ, dets, stageB; ref_ant = ctx.ref_ant, opts = opts,
-    )
-    ctx.scratch[:fringe_flags] = Fringe.unconstrained_flags(dets, covered, ctx.geom)
-    round = ctx.scratch[:fringe_round]::Int
+    ncomp, flags = _station_solve!(est, ctx, dets)
+    ctx.scratch[:fringe_flags] = flags
     # Another round re-searches the residual.
-    round < max(est.rounds, 1) && return (; repeat_pass = true, ncomp)
-    # `scan_snr` is published for a LATER step's non-data input (e.g. a
-    # `ScanWhere` selection reading it off this step's `StepSolution.info` —
-    # see `_scan_snr`). `scan_ncells` and the detection table are pure logging
-    # (`Fringe.diagnostics.jl`'s `fringe_snr_table`/`suspect_fringes` read them
-    # off this same `StepSolution.info`) — built only now, on the final round,
-    # via the same `scan_values` primitive every step's per-scan diagnostics use.
-    return (;
-        ncomp, scan_snr,
-        scan_ncells = scan_values(res -> res.r.ncells, results, ngroups; default = 0.0),
-        Fringe.detection_table(
-            scan_values(res -> res.r.rows, results, ngroups; default = Fringe.DetectionRow[]),
-        )...,
-    )
+    ctx.scratch[:fringe_round]::Int < max(est.rounds, 1) &&
+        return (; repeat_pass = true, ncomp)
+    return (; ncomp, _fringe_report(results, ngroups)...)
 end
 
 # ── DispersionSBDFit visitor (per-scan joint (Δτ, dTEC) fit + SBD fit) ────────
@@ -348,7 +396,7 @@ function process_scan!(s::Bandpass, ctx::SolveContext, stack, win::GeometryWindo
     nchan = length(setup.channel_freqs)
     rl, wl = Fringe.bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
     Fringe.accumulate_bandpass!(
-        rl, wl, setup.blidx, stack, win; derotate = Fringe.bandpass_derotate(s.estimator),
+        rl, wl, setup.blidx, stack, win; derotate = Fringe.bandpass_derotate(s.smoother),
     )
     return (; rl, wl, pols, source = source_name(stack))
 end
@@ -358,7 +406,7 @@ function finish_pass!(s::Bandpass, ctx::SolveContext)
     results = ctx.scratch[:pass_results]
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
     Fringe.solve_bandpass!(
-        s.estimator, ctx.θ, [res.r for res in results], setup, s.model; ref_ant = ctx.ref_ant,
+        s.smoother, ctx.θ, [res.r for res in results], setup, s.model; ref_ant = ctx.ref_ant,
     )
     scans = Int[res.index for res in results]
     return (;

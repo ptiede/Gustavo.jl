@@ -19,26 +19,53 @@
 #   detection/flag tables recorded on the solution.
 
 """
-    SingleBandDelay()
+    BandGroups(; gap_factor = 4.0)
 
-Per-scan per-band-group single-band delay (fourfit's SBD) — a
-[`FringeModel`](@ref) term-list element. A station's per-band signal path can
-move relative to its phase-cal tones between scans (~30 ns has been observed),
-which neither the wideband delay (one slope across all band groups) nor the
-time-invariant per-channel bandpass can track. Instrumental, not propagation.
-
-Compiles to a coupled per-band-group pair — a per-scan `Delay` plus its
-companion per-scan constant, over `FreqGroups` ranges computed from the
-data geometry ([`fringe_freq_groups`](@ref)) — or to nothing when the
-frequency axis has fewer than 2 band groups (a single group is fully
-degenerate with the wideband delay). Fit from within-band chunk slopes by the
-refine stage, nearly orthogonal to the cross-band observables that set the
-wideband delay and dTEC.
+Frequency groups read off the channel-frequency axis' own gap structure
+([`fringe_freq_groups`](@ref)): the widely-separated VGOS 3/5/6/10 GHz groups,
+or one full-range group on a contiguous axis. `gap_factor` is the ratio an
+inter-block gap must exceed to count as a between-group one.
 """
-struct SingleBandDelay end
+Base.@kwdef struct BandGroups
+    gap_factor::Float64 = 4.0
+end
 
-function model_components(::SingleBandDelay, geom::DataGeometry)
-    freqgroups = fringe_freq_groups(geom.channel_freqs)
+"""
+    SingleBandDelay(; freq = BandGroups())
+
+Per-scan single-band delay (fourfit's SBD) — a [`FringeModel`](@ref) term-list
+element. A station's signal path can move relative to its phase-cal tones
+between scans (~30 ns has been observed), which neither the wideband delay (one
+slope across the whole band) nor the time-invariant per-channel bandpass can
+track. Instrumental, not propagation.
+
+`freq` is the frequency partition the delay is resolved on. `BandGroups()` (the
+default) gives one delay per gap-detected band group; `PerSpectralWindow()`
+gives every spectral window its own delay and offset, which is what a per-spw
+signal-path difference that MOVES between scans needs — a `GlobalTime` bandpass
+can only fit such a step's track average. A `FreqGroups` is taken as the
+partition itself.
+
+Compiles to a coupled per-group pair — a per-scan `Delay` plus its companion
+per-scan constant over that partition — or to nothing when the partition holds
+fewer than 2 groups (a single group is fully degenerate with the wideband
+delay). Fit from within-group chunk slopes by the refine stage, nearly
+orthogonal to the cross-band observables that set the wideband delay and dTEC.
+"""
+Base.@kwdef struct SingleBandDelay{F}
+    freq::F = BandGroups()
+end
+
+# The global-channel ranges a partition resolves to on `geom`. `FreqGroups`
+# checks the result: ascending, contiguous, covering every channel exactly once.
+_sbd_ranges(b::BandGroups, geom::DataGeometry) =
+    fringe_freq_groups(geom.channel_freqs; gap_factor = b.gap_factor)
+_sbd_ranges(::PerSpectralWindow, geom::DataGeometry) =
+    _spw_blocks(geom, eachindex(geom.spw_of_chan))
+_sbd_ranges(f::FreqGroups, ::DataGeometry) = f.ranges
+
+function model_components(s::SingleBandDelay, geom::DataGeometry)
+    freqgroups = _sbd_ranges(s.freq, geom)
     length(freqgroups) >= 2 || return nothing
     # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a
     # group slope about the group's own centre νg needs the companion per-group
@@ -168,10 +195,14 @@ end
 
 HOW the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)):
 today's stage A — a per-baseline delay/rate matched-filter `search` on every
-scan group, then ONE global closure-screened station WLS (`closure`) that ties
-the feeds and solves any track-global columns. `rounds` re-runs the search on
-the residual (each round divides out the current solution and accumulates the
-leftover) — an iteration knob of THIS estimator.
+scan group, then the closure-screened station WLS (`closure`) that ties the
+feeds. With one round and an all-per-scan term list the station systems are
+block-diagonal, and each scan's system is solved as its scan is searched, so
+the pass is scan-local ([`scan_local_solve`](@ref)); a track-global column or
+`rounds > 1` instead pools every scan's detections into one solve at the end
+of the pass. `rounds` re-runs the search on the residual (each round divides
+out the current solution and accumulates the leftover) — an iteration knob of
+THIS estimator.
 
 When `search.pfa_max` is finite and `closure` is left at its default, the
 stationization's fixed SNR floor is dropped (`snr_min = 0`): the PFA gate IS
@@ -311,6 +342,16 @@ end
 # ── MatchedFilter's capability ───────────────────────────────────────────────
 
 can_fit(::MatchedFilter, tc) = matched_kind(tc) !== nothing
+
+# One round and an all-per-scan term list make the station systems
+# block-diagonal per scan, so each scan's WLS closes inside `estimate_scan!`
+# and the pass is scan-local. A cross-scan time segmentation (a `GlobalTime`
+# inter-feed offset shares a column across scans), an opaque term (its
+# compiled segmentation is unknowable without the geometry), or `rounds > 1`
+# (the re-search reads the whole pass's residual) each force the pooled path.
+scan_local_solve(est::MatchedFilter, fm::FringeModel) =
+    est.rounds <= 1 &&
+    all(t -> t isa TiedComponent && component_is_per_scan(t), values(fm.terms))
 
 # What the matched filter REQUIRES to exist. Each absent item costs the
 # estimator its own output silently rather than crashing: `solve_station_systems!`

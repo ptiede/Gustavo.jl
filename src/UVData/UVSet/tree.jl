@@ -80,7 +80,7 @@ function _extract_scan_leaf(
         ti = time_lookup[obs_times_per_int[rec_i]]
         bi = bl_lookup_scan[bl_pairs_per_record[rec_i]]
         record_order[rec_i] = (ti, bi)
-        # flat layout is (Integration, Pol, Frequency); permute into
+        # flat layout is (Ti, Pol, Frequency); permute into
         # (Frequency, Ti, Baseline, Pol).
         for p in 1:npol, c in 1:nchan
             vis_dense[c, ti, bi, p] = vis_flat[int_i, p, c]

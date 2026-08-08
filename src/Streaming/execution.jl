@@ -91,6 +91,7 @@ function (p::ProgressLogger)(stage::Symbol, done::Integer, total::Integer)
     if stage !== p.stage || done == 0
         p.stage, p.t_start, p.t_last = stage, t, t
         println(p.io, "[$stage] starting ($total scan group$(total == 1 ? "" : "s"))")
+        flush(p.io)
         return nothing
     end
     finished = done == total
@@ -106,5 +107,8 @@ function (p::ProgressLogger)(stage::Symbol, done::Integer, total::Integer)
         pct = round(100 * done / total; digits = 1)
         println(p.io, "[$stage] $done/$total scan groups ($(pct)%), ETA $(round(eta; digits = 1))s")
     end
+    # A redirected stdout is block-buffered, so progress on a long pass would otherwise
+    # not reach the file until the stream closes — exactly when it is no longer useful.
+    flush(p.io)
     return nothing
 end

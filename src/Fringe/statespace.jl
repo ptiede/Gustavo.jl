@@ -28,8 +28,11 @@ end
 Forward Kalman filter for a scalar Ornstein–Uhlenbeck (Matérn-1/2) state observed
 as `y_k = θ_k + ε_k`, `ε_k ~ N(0, r_k)`. A sample with non-finite `y_k` or
 non-finite/non-positive `r_k` is treated as MISSING (predict-only, no update).
-The prior is the OU stationary distribution `θ_0 ~ N(0, σ2)`; `times` are the
-sample epochs (seconds — irregular spacing and gaps allowed).
+The prior is the OU stationary distribution `θ_0 ~ N(0, σ2)`.
+
+`times` holds the sample coordinates and `τ` the correlation scale in the same
+unit — seconds along a time track, Hz along a frequency track; only their
+differences enter. Irregular spacing and gaps are allowed.
 
 Returns the filtered mean/variance `μf`/`Pf`, the one-step predicted mean/variance
 `μp`/`Pp`, the per-step transition `avec` (`avec[k]` links k-1→k, `avec[1]=0`),
@@ -107,10 +110,12 @@ end
 """
     smooth_ou_track(y, w, times; τ, σ2) -> ŷ
 
-OU Kalman filter + RTS smoother of a per-AP phase track `y` (radians, already
-unwrapped and mean-subtracted) with per-sample precision weights `w` (measurement
-variance `r = 1/w`; `w ≤ 0` or non-finite ⇒ missing). Returns the smoothed track
-with gaps interpolated (matching `_penalized_smooth`).
+OU Kalman filter + RTS smoother of a real track `y`, mean-subtracted (the process
+reverts to zero) and, for a phase track, already unwrapped. `w` holds per-sample
+precision weights (measurement variance `r = 1/w`; `w ≤ 0` or non-finite ⇒
+missing) and `times` the sample coordinates, in `τ`'s unit — a phase track over
+APs or a bandpass track over channel frequencies. Returns the smoothed track with
+gaps interpolated (matching `_penalized_smooth`).
 """
 function smooth_ou_track(y, w, times; τ::Real, σ2::Real)
     T = float(
@@ -264,9 +269,10 @@ function fit_ou_hypers(y, w, times; τ0::Real, σ2_0::Real, τ_lo::Real, τ_hi::
     return τ, σ2
 end
 
-# Physical OU coherence-time search bounds from the AP grid, shared by the `:gp` and
-# `:gp_joint` adhoc modes so both fit hypers under the same prior: `τ_lo` is one AP
-# spacing (floored), `τ_hi` is 10× the observed track span.
+# OU correlation-scale search bounds read off the sample coordinate itself, so every
+# caller fits hypers under the same prior: `τ_lo` is one median sample spacing
+# (floored), `τ_hi` is 10× the observed span. The coordinate is time for the adhoc
+# phase smoothers and frequency for the bandpass shape specs.
 function _ou_tau_bounds(times)
     T = float(eltype(times))
     ts = sort!(collect(T, times))
@@ -278,16 +284,20 @@ function _ou_tau_bounds(times)
     return τ_lo, τ_hi
 end
 
-# Center a phase track and fit (or seed) its OU hypers, consistently for both GP
-# adhoc modes. Returns `(m, yc, τ, σ2)`: the weighted mean `m`, the mean-subtracted
-# track `yc` (OU reverts to 0), and the OU coherence time / stationary variance —
-# ML-fit by Kalman marginal likelihood when `fit`, else `(τ0, seed)`.
-function _track_ou_hypers(trk, w, times; τ0::Real, τ_lo::Real, τ_hi::Real, fit::Bool)
+# Center a track and fit (or seed) its OU hypers, consistently for every caller.
+# Returns `(m, yc, τ, σ2)`: the weighted mean `m`, the mean-subtracted track `yc`
+# (OU reverts to 0), and the OU correlation scale / stationary variance — ML-fit
+# by Kalman marginal likelihood when `fit`, else `(τ0, seed)`. `σ2_0` seeds the
+# stationary variance; `nothing` takes the seed from the track's own scatter.
+function _track_ou_hypers(
+        trk, w, times; τ0::Real, τ_lo::Real, τ_hi::Real, fit::Bool,
+        σ2_0::Union{Nothing, Real} = nothing,
+    )
     T = float(promote_type(eltype(trk), eltype(w)))
     m = _weighted_mean_finite(trk, w)
     yc = [isfinite(x) ? T(x) - m : T(NaN) for x in trk]
-    σ2_0 = _init_track_var(yc, w)
-    τ, σ2 = fit ? fit_ou_hypers(yc, w, times; τ0, σ2_0, τ_lo, τ_hi) : (T(τ0), σ2_0)
+    σ2_seed = σ2_0 === nothing ? _init_track_var(yc, w) : T(σ2_0)
+    τ, σ2 = fit ? fit_ou_hypers(yc, w, times; τ0, σ2_0 = σ2_seed, τ_lo, τ_hi) : (T(τ0), σ2_seed)
     return m, yc, τ, σ2
 end
 

@@ -419,7 +419,11 @@ struct IDIChunkArray{T, K, TD, TFF, TW} <: DiskArrays.AbstractDiskArray{T, 4}
     bl_ants::Vector{Tuple{Int, Int}}  # global antenna pair per baseline column
     times::Vector{Float64}  # per-ti time (hours since RDATE) for TIMERANG match
     wfactor::Float32        # radiometer weight factor 2·Δν·η² for this band (0 ⇒ no scaling)
-    inttim::Vector{Float32} # per-(global-row) INTTIM (s); empty when wfactor == 0
+    # Per-(global-row) INTTIM (s); empty when wfactor == 0. Indexed by GLOBAL row, so
+    # every leaf of the file needs the same full-length vector and they SHARE one
+    # instance — read-only here (see `_wscale`). Copying it per leaf would cost
+    # nrow · 4 B once per leaf per layer, which on a 16-band file is gigabytes.
+    inttim::Vector{Float32}
     # Per-integration autocorrelation normalization (correlation coefficients):
     auto_row::Matrix{Int}   # (nti, nant) UV_DATA row of the (a,a) record, 0 = absent
     normalize::Bool         # divide cross by √(A_a·A_b) per (chan, ti, feed); empty auto_row ⇒ no-op
@@ -442,7 +446,7 @@ function _idi_chunk(
         Int(band), Int(no_stkd), Int(no_chan), Int(no_band), nperband,
         Vector{Int}(perm), Bool(flux_scale), row_of,
         flags, bl_ants, Vector{Float64}(times),
-        Float32(wfactor), Vector{Float32}(inttim),
+        Float32(wfactor), convert(Vector{Float32}, inttim)::Vector{Float32},
         auto_row, Bool(normalize), Vector{Tuple{Int, Int}}(feed_pairs),
         (Int(auto_stokes[1]), Int(auto_stokes[2])), kind,
     )

@@ -166,8 +166,9 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
         b = Bandpass()
         @test b.model.phase && b.model.amp
-        @test b.model.amp_model == FP.penalized_bandpass(1.0)
-        @test b.estimator isa SplitWLS
+        @test b.smoother isa FP.JointSmoother
+        @test b.smoother.phase == FP.FreeShape()
+        @test b.smoother.amp == FP.FreeShape()
 
         t = TemporalSmoother()
         @test t.smoother == FP.SavitzkyGolaySmoother()

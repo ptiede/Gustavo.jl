@@ -11,7 +11,7 @@ using LinearAlgebra: Diagonal
 using StructArrays
 using DimensionalData
 using DimensionalData: DimArray, Ti, dims, lookup
-using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products, channel_freqs
+using Gustavo.UVData: Pol, Frequency, UVW, Baseline, UVSet, pol_products, channel_freqs
 using PolarizedTypes: RPol, LPol
 
 # ── Synthetic multi-band UVSet builder ───────────────────────────────────────

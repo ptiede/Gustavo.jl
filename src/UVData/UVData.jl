@@ -64,7 +64,6 @@ export plot_stability, plot_baseline_phases, plot_gain_solutions
 export scan_time_centers, spw_center_frequency, centered_channel_freqs
 export baseline_sites, baseline_number
 export antenna_names, nbaselines, nscans, nchannels, npols, nintegrations
-export Pol, Frequency, Ant
 export pol_products
 
 end

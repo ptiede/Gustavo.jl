@@ -521,8 +521,10 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
         start_pass!(st, ctx)
     end
     ctx_n = last(contexts)
-    flag_nt = sink === nothing ? nothing :
-        Fringe.flag_table(_fringe_flags(ctx_n))
+    # Flags already finished by EARLIER passes (shared scratch). A `:scan` step
+    # in THIS run finishes each scan's flags inside `process_scan!`
+    # (`scan_flags`), never pass-wide — the tail collects them per group below.
+    base_flags = sink === nothing ? nothing : _fringe_flags(ctx_n)
     results = Fringe.map_groups(stream; stage = provides(last(steps))) do gspec
         ta = time_ns()
         if sink === nothing
@@ -562,8 +564,13 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
             # `keyed` above, exactly as an un-fused pass's transform chain would
             # have, so the tail's group-local solution carries only the LAST
             # step's own (model, layout, θ).
+            flags = copy(base_flags)
+            for k in 1:n
+                append!(flags, scan_flags(steps[k], rs[k]))
+            end
             sol_local = CalibrationSolution(
-                ctx_n.model, ctx_n.layout, ctx_n.geom, ctx_n.θ, flag_nt; name = provides(last(steps)),
+                ctx_n.model, ctx_n.layout, ctx_n.geom, ctx_n.θ, Fringe.flag_table(flags);
+                name = provides(last(steps)),
             )
             out = reduce_scan_output(
                 stream.uvset, keyed, sol_local, sink.postprocess;

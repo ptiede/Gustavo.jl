@@ -44,6 +44,11 @@ is rejected rather than quietly leaving θ columns unwritten;
 [`validate_model`](@ref) defaults to a no-op, since requiring nothing is
 legitimate. See both for the two directions of the check.
 
+An estimator whose solve completes per scan under some configurations may
+additionally declare [`scan_local_solve`](@ref), which lets a `FringeFit`
+carrying it share one streaming pass with adjacent scan-local steps; the
+default (`false`) is always correct, just never fused.
+
 The step, not the estimator, owns the θ slots `FringeModel` declared and the
 dTEC/SBD refine service it publishes for later stages — an estimator only has
 to fill θ and report.
@@ -60,8 +65,9 @@ solve context (`ctx.θ`, `ctx.ev`, `ctx.geom`, `ctx.stream`, `ctx.scratch`),
 [`GeometryWindow`](@ref) into the solve's index space.
 
 Runs concurrently across scan groups, so it may write only θ columns private to
-this scan; anything global belongs in [`finish_estimate!`](@ref). The returned
-NamedTuple is collected in group order and handed back there.
+this scan; anything global belongs in [`finish_estimate!`](@ref). A scan-local
+configuration ([`scan_local_solve`](@ref)) writes ALL of this scan's columns
+here. The returned NamedTuple is collected in group order and handed back there.
 
 Include a `max_snr::Real` field: a scan selection may rank or filter groups by
 strength (e.g. a [`ScanWhere`](@ref) predicate reading `s.snr`), and an
@@ -97,6 +103,23 @@ finish_estimate!(est::AbstractFringeEstimator, ctx, step) = error(
         "Gustavo.Fringe.finish_estimate!(::$(typeof(est)), ctx, step) " *
         "solving the cross-scan parameters (see `AbstractFringeEstimator`)."
 )
+
+"""
+    scan_local_solve(est::AbstractFringeEstimator, model) -> Bool
+
+Whether `est`, fitting `model` (the `FringeFit`'s own `FringeModel`), finalizes
+each scan from that scan's data alone: every θ column of a scan is written by
+the time its [`estimate_scan!`](@ref) returns, and [`finish_estimate!`](@ref)
+neither writes θ nor requests `repeat_pass`. `FringeFit` declares itself
+scan-local (`fusable_grouping` = `:scan`) exactly when this is `true`, letting
+it share one streaming pass with adjacent scan-local steps.
+
+**The default is `false`** — a pass-global estimator is always correct, just
+never fused. Declare `true` only for configurations whose solve genuinely
+completes per scan. The answer is read before any data is, so it must depend
+only on the estimator's and model's declared options, never on the geometry.
+"""
+scan_local_solve(::AbstractFringeEstimator, model) = false
 
 """
     can_fit(est::AbstractFringeEstimator, tc::Calibration.TiedComponent) -> Bool

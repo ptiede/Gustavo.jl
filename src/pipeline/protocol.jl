@@ -137,6 +137,18 @@ configuration decides the answer can answer for itself.
 fusable_grouping(step::CalibrationStep) = :global
 
 """
+    scan_flags(step::CalibrationStep, r) -> Vector{Tuple{Int, Int}}
+
+The `(station, geometry scan id)` pairs `step`'s solve left unconstrained in
+one scan, read off that scan's [`process_scan!`](@ref) return `r`. A fused
+output tail corrects each scan group while it is resident — before any step's
+`finish_pass!` runs — so flags a `:scan` step finishes inside `process_scan!`
+reach the tail through this accessor: like θ, they must be complete for the
+scan when `process_scan!` returns. Default: none.
+"""
+scan_flags(step::CalibrationStep, r) = Tuple{Int, Int}[]
+
+"""
     start_pass!(step::SolveStep, ctx) -> nothing
 
 Called once when the streaming pass containing `step` begins, before any scan

@@ -88,18 +88,17 @@ function _fringe_model(;
                 # observation (HOPS-style), per feed. Captures the residual
                 # nonlinear-in-frequency instrumental phase that the per-scan (linear) delay
                 # cannot represent. Solved by a dedicated frequency-stationization stage
-                # (`solve_phase_bandpass!`), not by the delay/rate search.
+                # (the `Bandpass` step), not by the delay/rate search.
                 bandpass = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
                 adhoc = TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),
             ),
         ),
         # Amplitude bandpass: per-channel, time-stable, per-feed log-amplitude — the
         # per-station instrumental amplitude shape (filterbank passband), FLATTENED
-        # from the calibrator. Solved by the bandpass stage via a pluggable
-        # `WLSEstimator`-based smoother (`solve_amp_bandpass!`); the SNR gate drops
-        # no-signal channels, which the smoother then estimates (or, for
-        # `free_bandpass`, leaves at gain 1). The absolute level stays the a-priori
-        # amplitude cal's job.
+        # from the calibrator. Solved by the bandpass stage under a pluggable shape
+        # spec; the SNR gate drops no-signal channels, which a gap-estimating spec
+        # then fills (or, for `FreeShape`, leaves at gain 1). The absolute level
+        # stays the a-priori amplitude cal's job.
         logamp = (
             bandpass = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), ChannelBlocks(1)), PerFeed()),
         ),

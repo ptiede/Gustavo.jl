@@ -12,7 +12,7 @@ Per-baseline (each vector has one entry per unique baseline):
 - `ant2_names`   — antenna-2 (POLB-side) name (parallel to `pairs`).
 
 Per-record (length `nrecord`, only meaningful in the legacy flat
-layout where `(time, baseline)` are fused on the `Integration` axis;
+layout where `(time, baseline)` are fused on the `Ti` axis;
 not used by the partitioned `UVSet` storage):
 - `pairs_per_record` — `(a, b)` pair per record.
 

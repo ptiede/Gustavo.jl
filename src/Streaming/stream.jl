@@ -528,7 +528,7 @@ function map_groups(
     total = length(specs)
     _stream_progress(progress, stage, 0, total)
     done = Threads.Atomic{Int}(0)
-    wrapped = function (spec)
+    function wrapped(spec)
         r = work(spec)
         _stream_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
         return r

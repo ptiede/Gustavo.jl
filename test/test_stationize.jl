@@ -675,6 +675,65 @@ end
     end
 end
 
+# The engine contract behind `FringeFit`'s scan-local mode: on a model whose
+# every column is per-scan, solving each scan's system alone accumulates the
+# same solution as one pooled call over all scans. The graph aggregation is
+# EXACT — connectivity is weight-independent, so component counts sum and the
+# covered sets are equal — while θ agrees only to solver rounding: the pooled
+# IRLS couples its stopping rule across the (independent) blocks, and the
+# stacked QR rounds differently than the per-block ones.
+@testset "Stationize: per-scan solves ≡ the pooled block-diagonal system" begin
+    nant, ref = 5, 1
+    geom = CALs.DataGeometry(;
+        times = [0.0, 1.0, 100.0, 101.0, 200.0, 201.0], scan_of_time = [1, 1, 2, 2, 3, 3],
+        channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
+    )
+    mk(term) = CALs.TiedComponent(
+        CALs.GainComponent(term, CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed(),
+    )
+    model = CALs.StationGainModel(
+        phase = (phi = mk(CALs.ConstantTerm()), mbd = mk(CALs.Delay()), rate = mk(CALs.Rate())),
+    )
+    layout = CALs.plan_parameters(model, nant, geom)
+    comps = ((layout.plans[1], :phase), (layout.plans[2], :delay), (layout.plans[3], :rate))
+    bl = all_baselines(nant)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    # Scan 2 carries a closure-breaking delay+phase outlier, so the robust loss
+    # genuinely iterates and the pooled stopping-rule coupling is exercised.
+    function scan_D(seed; poison)
+        rng = MersenneTwister(seed)
+        D = inject_detections(
+            bl, pols, 1.0e-9 .* randn(rng, nant, 2), 1.0e-12 .* randn(rng, nant, 2),
+            0.3 .* randn(rng, nant, 2), 0.0,
+        )
+        if poison
+            d = D[2, 1]
+            D[2, 1] = FR.Detection{Float64}((
+                d.delay + 50.0e-9, d.rate, rem2pi(d.phase + 2.0, RoundNearest),
+                d.amp, d.snr, true,
+            ))
+        end
+        return D
+    end
+    stacks = [detstack(scan_D(0x40 + i; poison = i == 2), bl, pols; ti = 2i - 1) for i in 1:3]
+    opts = FR.Stationization(loss = FR.SoftL1())
+
+    θp = zeros(layout.nθ)
+    ncomp_p, cov_p = FR.solve_station_systems!(θp, Tuple(stacks), comps; ref_ant = ref, opts)
+    θs = zeros(layout.nθ)
+    ncomp_s = 0
+    cov_s = Set{Tuple{Int, Int}}()
+    for (gi, st) in enumerate(stacks)
+        nc, cov = FR.solve_station_systems!(θs, (st,), comps; ref_ant = ref, opts)
+        ncomp_s += nc
+        union!(cov_s, Set((a, gi) for (a, _) in cov))
+    end
+    @test ncomp_s == ncomp_p
+    @test cov_s == cov_p
+    @test θs ≈ θp rtol = 1.0e-9
+    @test maximum(abs, θs .- θp) < 1.0e-11
+end
+
 @testset "Stationize: per-product systematic floor" begin
     # A delay outlier on one cross-hand row stands in for leakage: error that
     # does not shrink with SNR, which is what the `_cross` floors exist to put

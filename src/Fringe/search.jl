@@ -488,12 +488,73 @@ function _exact_matched_filter(
     return Dref
 end
 
+# ── Separable evaluation: collapse one axis, then sweep the other ─────────────
+#
+# The matched-filter phase is separable, so collapsing the cube along one axis
+# leaves a vector the CONJUGATE coordinate can be swept over in O(length):
+#
+#     S[c] = Σ_t w·V[c,t]·cis(−2π·ṙ(t−t0))   ⇒  D(τ, ṙ) = Σ_c S[c]·cis(−2π·τ(f_c−f0))
+#     T[t] = Σ_c w·V[c,t]·cis(−2π·τ(f_c−f0)) ⇒  D(τ, ṙ) = Σ_t T[t]·cis(−2π·ṙ(t−t0))
+#
+# A coordinate-descent step therefore costs ONE sweep of the cube for the whole
+# axis, not one per probe — which is what `_polish_peak_exact!` is built on.
+# `_collapse_freq!` sums in `_exact_matched_filter`'s own order, so the two agree
+# exactly; `_collapse_time!` sums time-major and agrees to float rounding.
+
+function _collapse_time!(S, V::AbstractMatrix{C}, W, times, t0::Real, rate::Real) where {C}
+    fill!(S, zero(C))
+    @inbounds for ti in axes(V, 2)
+        ph = cis(-2π * rate * (times[ti] - t0))
+        for ci in axes(V, 1)
+            w = W[ci, ti]
+            v = V[ci, ti]
+            (isfinite(w) && w > 0 && isfinite(v)) || continue
+            S[ci] += w * v * ph
+        end
+    end
+    return S
+end
+
+function _collapse_freq!(Tt, cf, V::AbstractMatrix{C}, W, freqs, f0::Real, delay::Real) where {C}
+    @inbounds for ci in axes(V, 1)
+        cf[ci] = cis(-2π * delay * (freqs[ci] - f0))
+    end
+    @inbounds for ti in axes(V, 2)
+        acc = zero(C)
+        for ci in axes(V, 1)
+            w = W[ci, ti]
+            v = V[ci, ti]
+            (isfinite(w) && w > 0 && isfinite(v)) || continue
+            acc += w * v * cf[ci]
+        end
+        Tt[ti] = acc
+    end
+    return Tt
+end
+
+# `Σ_k z[k]·cis(−2π·x·(coord[k] − origin))` — the collapsed cube evaluated at one
+# conjugate coordinate.
+function _phase_sum(z, coord, origin::Real, x::Real)
+    D = zero(eltype(z))
+    @inbounds for k in eachindex(z, coord)
+        D += z[k] * cis(-2π * x * (coord[k] - origin))
+    end
+    return D
+end
+
 # Refine a coarse (delay, rate) peak by maximizing the EXACT matched filter
 # |Σ w·V·exp(−2πi[τ(f−f0)+ṙ(t−t0)])| directly, rather than fitting a parabola to
 # the coarse FFT |D| (whose bias grows with the grid cell size, i.e. shrinks with
-# `oversample`). Two passes of a per-axis 3-point parabolic step evaluated on the
+# `oversample`). Four passes of a per-axis 3-point parabolic step evaluated on the
 # exact objective, seeded at the FFT peak cell with a half-bin probe — the same
 # coordinate-descent polish `_fit_band_dispersion` uses over its band phasors.
+# Each axis is swept on its collapsed vector (`_collapse_time!`/`_collapse_freq!`),
+# so a pass costs two sweeps of the cube rather than one per probe.
+#
+# Four passes shrink the probe bracket to `bin/32`, over which the main lobe
+# (first null at ~1/B, i.e. `oversample` bins away) is quadratic to well within
+# the noise; the accepted step is the parabola VERTEX, a continuous estimate, so
+# the achieved resolution is not the bracket width.
 # Optimizing the true objective can only raise |D|, so the refined SNR is ≥ the
 # on-grid SNR; steps that leave the seed cell or head downhill are rejected, so a
 # coarse (low-`oversample`) grid still seeds it safely. Returns the refined
@@ -509,7 +570,6 @@ function _polish_peak_exact!(
         refine_delay::Bool, refine_rate::Bool,
     )
     Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate)
-    best = abs(Dref)
     # Per-axis probe half-width, shrunk geometrically each pass so the search hones
     # from the coarse seed cell down to well below the fringe resolution regardless
     # of `oversample`. The seed is the FFT argmax, so the true peak lies within
@@ -517,33 +577,45 @@ function _polish_peak_exact!(
     # concave we take the parabolic vertex, else step toward the taller side; the
     # step is CLAMPED to one probe width (a coarse-grid parabola can overshoot the
     # sinc peak) rather than rejected, so the point always walks toward the peak,
-    # and only an uphill move is kept.
+    # and only an uphill move is kept. Each axis' three probes and its centre are
+    # read off the SAME collapsed vector, so the parabola is built from mutually
+    # consistent values.
     hd = refine_delay ? delay_bin / 2 : 0.0
     hr = refine_rate ? rate_bin / 2 : 0.0
-    for _ in 1:8
-        (hd > 0 || hr > 0) || break
+    (hd > 0 || hr > 0) || return (delay = delay, rate = rate, Dref = Dref)
+    # Index-matched to the cube's own axes, so `_phase_sum`'s `eachindex(z, coord)`
+    # checks each collapsed vector against the coordinate it is swept over.
+    C = eltype(V)
+    S = similar(V, C, (axes(V, 1),))
+    Tt = similar(V, C, (axes(V, 2),))
+    cf = similar(V, C, (axes(V, 1),))
+    for _ in 1:4
         if hd > 0
-            am = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay - hd, rate))
-            ap = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay + hd, rate))
-            den = am - 2 * best + ap
+            _collapse_time!(S, V, W, times, t0, rate)
+            b0 = abs(_phase_sum(S, freqs, f0, delay))
+            am = abs(_phase_sum(S, freqs, f0, delay - hd))
+            ap = abs(_phase_sum(S, freqs, f0, delay + hd))
+            den = am - 2 * b0 + ap
             δ = den < 0 ? clamp(0.5 * hd * (am - ap) / den, -hd, hd) : (ap > am ? hd : (am > ap ? -hd : 0.0))
             if δ != 0.0
-                Dn = _exact_matched_filter(V, W, freqs, times, f0, t0, delay + δ, rate)
-                if abs(Dn) >= best
-                    best = abs(Dn); Dref = Dn; delay += δ
+                Dn = _phase_sum(S, freqs, f0, delay + δ)
+                if abs(Dn) >= b0
+                    Dref = Dn; delay += δ
                 end
             end
             hd *= 0.5
         end
         if hr > 0
-            am = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate - hr))
-            ap = abs(_exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate + hr))
-            den = am - 2 * best + ap
+            _collapse_freq!(Tt, cf, V, W, freqs, f0, delay)
+            b0 = abs(_phase_sum(Tt, times, t0, rate))
+            am = abs(_phase_sum(Tt, times, t0, rate - hr))
+            ap = abs(_phase_sum(Tt, times, t0, rate + hr))
+            den = am - 2 * b0 + ap
             δ = den < 0 ? clamp(0.5 * hr * (am - ap) / den, -hr, hr) : (ap > am ? hr : (am > ap ? -hr : 0.0))
             if δ != 0.0
-                Dn = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate + δ)
-                if abs(Dn) >= best
-                    best = abs(Dn); Dref = Dn; rate += δ
+                Dn = _phase_sum(Tt, times, t0, rate + δ)
+                if abs(Dn) >= b0
+                    Dref = Dn; rate += δ
                 end
             end
             hr *= 0.5

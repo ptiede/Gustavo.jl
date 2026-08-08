@@ -230,6 +230,30 @@
             DispersionModel(require_band_separation = false), geom) isa CAL.TiedComponent
         narrow, _ = _build_fringe_uvset(nspw = 1)
         @test CAL.model_components(SingleBandDelay(), CAL.build_geometry(narrow)) === nothing
+
+        # `freq` chooses the partition the SBD pair is resolved on. On a
+        # geometry whose spws fall in two gap-separated groups, `BandGroups`
+        # emits one delay per GROUP and `PerSpectralWindow` one per SPW.
+        gsbd = CAL.DataGeometry(;
+            times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 1.2e9, 5.0e9],
+            scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 3], t0 = 0.0, f0 = 3.0e9,
+        )
+        bandranges(sbd, g) = CAL.model_components(sbd, g).delay.component.freq.ranges
+        @test bandranges(SingleBandDelay(), gsbd) == [1:3, 4:4]
+        @test bandranges(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd) ==
+            [1:2, 3:3, 4:4]
+        # An explicit partition is taken as given.
+        @test bandranges(SingleBandDelay(freq = CAL.FreqGroups([1:1, 2:4])), gsbd) ==
+            [1:1, 2:4]
+        # The < 2 group gate is on the resolved partition, so a one-spw axis
+        # emits nothing under PerSpectralWindow too.
+        @test CAL.model_components(
+            SingleBandDelay(freq = CAL.PerSpectralWindow()), CAL.build_geometry(narrow),
+        ) === nothing
+        # Both halves of the pair share the partition.
+        psbd = CAL.model_components(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd)
+        @test psbd.constant.component.freq.ranges == psbd.delay.component.freq.ranges
+
         # A bare TiedComponent compiles to itself.
         tc = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2))
         @test CAL.model_components(tc, geom) === tc

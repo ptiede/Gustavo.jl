@@ -29,7 +29,7 @@
 # noise-inflated while the coherent sum averages noise down), so at native per-cell
 # SNR the absolute η UNDERSTATES a good solution — read the *shape* and the
 # *before/after* comparison, not the absolute value. Pass `debias = true` (REQUIRES
-# inverse-variance weights, `w = 1/σ²`) to subtract that bias: η then reflects the
+# per-component inverse-variance weights, `w = 1/Var(Re V)`) to subtract that bias: η then reflects the
 # genuine residual-phase coherence (≈1 for a flat-phase solution regardless of SNR).
 
 """
@@ -152,8 +152,9 @@ parallel-hand only — cross hands are mostly noise and would bias η down), `:a
 an index, or product label(s).
 
 `debias` (default `false`) subtracts the thermal-noise bias from η — REQUIRES the
-weights to be inverse variances (`w = 1/σ²`, e.g. `load_fitsidi(weight_mode =
-:radiometer)`). Without it the raw η is pulled below 1 at coarse averaging by
+weights to be inverse variances of ONE REAL COMPONENT of the visibility (`w = 1/σ²`
+with `Var(Re V) = Var(Im V) = 1/w`, so the complex noise power is `E|n|² = 2/w`;
+e.g. `load_fitsidi(weight_mode = :radiometer)`). Without it the raw η is pulled below 1 at coarse averaging by
 noise alone (the incoherent Σ w·|V| is noise-inflated), so it understates a good
 solution at native per-cell SNR; with it η reflects the genuine residual-phase
 coherence (η ≈ 1 for a flat-phase solution regardless of SNR).
@@ -351,12 +352,14 @@ function _coherence_accumulate!(
     accF = Vector{ComplexF64}(undef, nF); swF = Vector{Float64}(undef, nF)
     curF = Vector{Int}(undef, nF); haveF = Vector{Bool}(undef, nF)
 
-    # Debiased coherent-bin amplitude: with inverse-variance weights (`w = 1/σ²`),
-    # `|Σ w·V|²` is noise-inflated by `Σw`, so the unbiased amplitude is
-    # `√(max(|Σ w·V|² − Σw, 0))` (and `|Σ w·V|` otherwise). At native resolution
-    # (one cell: `s = w·V`, `sw = w`) this equals the debiased denominator cell, so
-    # η ≡ 1 there for noise-free data.
-    binamp(s::ComplexF64, sw::Float64) = debias ? sqrt(max(abs2(s) - sw, 0.0)) : abs(s)
+    # Debiased coherent-bin amplitude. The weight is the inverse variance of ONE REAL
+    # COMPONENT (`w = 1/σ²` with `Var(Re n) = Var(Im n) = 1/w`), so a cell's COMPLEX
+    # noise power is `E|n|² = 2/w` — the factor of 2 below is that, not a fudge.
+    # Hence `|Σ w·V|²` is noise-inflated by `Σ w²·E|n|² = 2Σw`, and the unbiased
+    # amplitude is `√(max(|Σ w·V|² − 2Σw, 0))` (and `|Σ w·V|` otherwise). At native
+    # resolution (one cell: `s = w·V`, `sw = w`) this equals the debiased denominator
+    # cell, so η ≡ 1 there for noise-free data — an identity the factor preserves.
+    binamp(s::ComplexF64, sw::Float64) = debias ? sqrt(max(abs2(s) - 2 * sw, 0.0)) : abs(s)
 
     @inbounds for bli in 1:nbl
         bl = blmap[bli]
@@ -366,13 +369,14 @@ function _coherence_accumulate!(
             p in 1:npol || continue
 
             # Denominator Σ w·|V| and cell count (interval-independent). With
-            # `debias`, the incoherent |V| = √(|V_true|² + 1/w) is noise-inflated, so
-            # use √(max(|V|² − 1/w, 0)) (w = 1/σ²).
+            # `debias`, the incoherent |V| = √(|V_true|² + 2/w) is noise-inflated by
+            # the cell's COMPLEX noise power `E|n|² = 2/w` (`w` is the per-component
+            # inverse variance), so use √(max(|V|² − 2/w, 0)).
             for ti in 1:nti, c in 1:nchan
                 w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
                 a2 = abs2(ComplexF64(v))
-                den[bl] += w * (debias ? sqrt(max(a2 - inv(Float64(w)), 0.0)) : sqrt(a2))
+                den[bl] += w * (debias ? sqrt(max(a2 - 2 * inv(Float64(w)), 0.0)) : sqrt(a2))
                 npts[bl] += 1
             end
 

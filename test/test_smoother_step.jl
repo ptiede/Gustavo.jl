@@ -219,6 +219,25 @@ end
         _, out_ref = fitcalibrate(pre |> refine_tf |> TemporalSmoother(adhoc), uvset)
         @test _sets_equal(out_fused, out_ref)
 
+        # A default FringeFit (one round, all-per-scan terms) solves each
+        # scan's station systems inside its own `process_scan!`, so the whole
+        # default chain is one run of THREE scan-local steps — one read of the
+        # data — and still ≡ the same steps fit separately.
+        sol_3 = fit(FringeFit() |> ds |> TemporalSmoother(adhoc), uvset)
+        @test Gustavo.stage_names(sol_3) == [:fringe, :refine, :adhoc]
+        sol_f1 = fit(FringeFit(), uvset)
+        pre_f = FP.ApplySolution(CAL.step_solution(sol_f1, :fringe))
+        sol_r1 = fit(pre_f |> ds, uvset)
+        pre_r = FP.ApplySolution(CAL.step_solution(sol_r1, :refine))
+        sol_a1 = fit(pre_f |> pre_r |> TemporalSmoother(adhoc), uvset)
+        @test sol_3[:fringe].steps[1].θ == sol_f1[:fringe].steps[1].θ
+        @test sol_3[:refine].steps[1].θ == sol_r1[:refine].steps[1].θ
+        @test sol_3[:adhoc].steps[1].θ == sol_a1[:adhoc].steps[1].θ
+        # The scan-local fringe pass reports the same flags/diagnostics shape.
+        @test sol_3.info.flagged_ant == sol_f1.info.flagged_ant
+        @test sol_3.info.flagged_scan == sol_f1.info.flagged_scan
+        @test sol_3[:fringe].steps[1].info.scan_snr == sol_f1[:fringe].steps[1].info.scan_snr
+
         # A fused run divides each step's gains out of the resident scan in
         # place, so with no transform chain in front of it — the one case where
         # materialization hands back an eager set's own arrays — it must work on

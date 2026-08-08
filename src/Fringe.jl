@@ -38,6 +38,9 @@ using Printf: @sprintf
 include("Fringe/search.jl")
 include("Fringe/stationize.jl")
 include("Fringe/statespace.jl")
+# Per-observable frequency-shape specs and their per-track fit — pure functions
+# over one (station, feed, spw) track, independent of any solver stage.
+include("Fringe/shapes.jl")
 include("Fringe/adhoc.jl")
 include("Fringe/phasecal.jl")
 # The composable-pipeline engine: the pluggable fringe-estimator strategy, the
@@ -125,8 +128,9 @@ export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
 export station_weight_scale
-export free_bandpass, polynomial_bandpass, penalized_bandpass
-export BandpassModel, AbstractBandpassEstimator, JointALS, SplitWLS
+export AbstractShapeSpec, FreeShape, PolynomialShape, WhittakerShape, ARShape, fit_track
+export BandpassModel
+export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 export bandpass_derotate, validate_bandpass, solve_bandpass!
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_station_solutions
@@ -140,7 +144,7 @@ export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
 export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info
 export can_fit, validate_model
-export MatchedFilter, FringeModel, SingleBandDelay, default_fringe_terms
+export MatchedFilter, FringeModel, SingleBandDelay, BandGroups, default_fringe_terms
 # `DispersionModel` is `Calibration`'s (the propagation model beside the
 # `Dispersion` term it configures); re-exported so a caller driving the fringe
 # engine names it without a second `using`.

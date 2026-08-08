@@ -168,19 +168,158 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test_throws "no stage :bandpass" step_solution(sol_f, :bandpass)
     end
 
-    @testset "validate_bandpass rejects a model the estimator cannot solve" begin
+    @testset "validate_bandpass rejects a model the smoother cannot solve" begin
         # Both halves off compiles no component at all, so the step would
         # accumulate every scan and write nowhere — rejected at compile time,
         # before any data is read.
-        @test_throws ArgumentError fit(Bandpass(model = BandpassModel(phase = false, amp = false)), uvset)
+        nothing_model = BandpassModel(phase = false, amp = false)
+        pertrack = FP.PerTrackSmoother()
+        @test_throws ArgumentError fit(Bandpass(model = nothing_model, smoother = pertrack), uvset)
         @test_throws "BandpassModel fits nothing" fit(
-            Bandpass(model = BandpassModel(phase = false, amp = false)), uvset,
+            Bandpass(model = nothing_model, smoother = pertrack), uvset,
         )
-        # JointALS is stricter: one complex gain per (station, feed, segment)
-        # needs both halves, not just one.
-        @test_throws "JointALS requires" fit(
-            Bandpass(model = BandpassModel(amp = false), estimator = JointALS()), uvset,
+        # JointSmoother is stricter: one complex gain per (station, feed, segment)
+        # needs both halves, not just one — so it rejects a model PerTrackSmoother
+        # would happily solve.
+        @test_throws "JointSmoother requires" fit(
+            Bandpass(model = BandpassModel(amp = false)), uvset,
         )
+        @test fit(Bandpass(model = BandpassModel(amp = false), smoother = pertrack), uvset) isa
+            CAL.CalibrationSolution
+    end
+
+    @testset "PerTrackSmoother: a shape on both observables" begin
+        # θ slot for one (station, feed, GLOBAL channel) of a bandpass component.
+        bpθ(θ, plan, a, f, gc) =
+            (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : θ[off])
+
+        ffb = FringeFit(model = fm)
+        sol_free = fit(
+            ffb |> Bandpass(smoother = FP.PerTrackSmoother(phase = FP.FreeShape(), amp = FP.FreeShape())),
+            uvset,
+        )
+        sfree = sol_free[:bandpass].steps[1]
+
+        # A stiff roughness penalty on the PHASE leaves only the second-difference
+        # null space — a straight line in frequency, per spw. Phase carried no shape
+        # hook at all before, so this is the capability the spec pair adds.
+        sol_stiff = fit(
+            ffb |> Bandpass(smoother = FP.PerTrackSmoother(phase = FP.WhittakerShape(1.0e8))),
+            uvset,
+        )
+        sstiff = sol_stiff[:bandpass].steps[1]
+        pplan = _bp_phase_plan(sstiff)
+        for a in 1:nant, f in 1:2, s in 1:nspw
+            gcs = ((s - 1) * nchan + 1):(s * nchan)
+            trk = [bpθ(sstiff.θ, pplan, a, f, gc) for gc in gcs]
+            all(isfinite, trk) || continue
+            @test maximum(abs, diff(diff(CAL.unwrap_phase_track(trk)))) < 1.0e-3
+        end
+        # ...and the free fit is genuinely rougher, so the flatness above is the
+        # spec acting rather than a featureless track.
+        pplan_f = _bp_phase_plan(sfree)
+        rough = Float64[]
+        for a in 1:nant, f in 1:2, s in 1:nspw
+            gcs = ((s - 1) * nchan + 1):(s * nchan)
+            trk = [bpθ(sfree.θ, pplan_f, a, f, gc) for gc in gcs]
+            all(isfinite, trk) || continue
+            push!(rough, maximum(abs, diff(diff(CAL.unwrap_phase_track(trk)))))
+        end
+        @test !isempty(rough)
+        @test maximum(rough) > 0.1
+
+        # The zero band-mean log-amp gauge is applied AFTER the shape fit, so a spec
+        # that rewrites every segment (this solve's default `WhittakerShape(1.0)`
+        # amp) still leaves the bandpass SHAPE only.
+        aplan = _bp_amp_plan(sstiff)
+        for a in 1:nant, f in 1:2
+            la = [bpθ(sstiff.θ, aplan, a, f, gc) for gc in 1:nglob]
+            @test all(isfinite, la)
+            @test abs(sum(la) / length(la)) < 1.0e-8
+        end
+    end
+
+    @testset "gate → spike guard → shape: a contaminated channel is excised, then estimated" begin
+        # The synthetic visibilities carry no thermal noise, so an unconstrained
+        # per-segment solve reproduces the injected bandpass exactly and nothing
+        # about rejection would be exercised. The case that does exercise it is a
+        # channel the multiplicative gain model does NOT describe: one narrowband
+        # contaminant, on the baselines of a single station. It shows as EXCESS
+        # amplitude, so the Fisher weight of the very segment carrying it is the
+        # LARGEST on the track — no Gaussian prior can outvote it, and rejection
+        # is the narrow-spike guard's job, not the spec's. What the spec then
+        # supplies is the estimate of the excised channel.
+        nspwc, nchanc, ntimec, nscansc = 1, 32, 4, 2
+        nglobc = nspwc * nchanc
+        chan_bw = 2.0e6
+        rngc = MersenneTwister(0xA51DE)
+        # Injected truth: an OU (AR(1)) draw along frequency per (station, feed) —
+        # the process `ARShape` assumes, correlated over 6 channels.
+        nu = 6 * chan_bw
+        sigma_bp = 0.15
+        a1 = exp(-chan_bw / nu)
+        bpc = zeros(nant, 2, nglobc)
+        abpc = zeros(nant, 2, nglobc)
+        for trk in (bpc, abpc), a in 1:nant, f in 1:2
+            trk[a, f, 1] = sigma_bp * randn(rngc)
+            for c in 2:nglobc
+                trk[a, f, c] = a1 * trk[a, f, c - 1] + sqrt(sigma_bp^2 * (1 - a1^2)) * randn(rngc)
+            end
+        end
+        uvc, truthc = _build_fringe_uvset(;
+            nant, nspw = nspwc, nchan = nchanc, ntime = ntimec, nscans = nscansc,
+            chan_bw, bandpass = bpc, amp_bandpass = abpc, seed = 7,
+        )
+        bad_chan, bad_ant = 17, 2
+        for (_, leaf) in DimensionalData.branches(uvc)
+            for (bi, (a, b)) in enumerate(truthc.bl_pairs)
+                (a == bad_ant || b == bad_ant) || continue
+                leaf[:vis][bad_chan, :, bi, :] .*= 8.0f0
+            end
+        end
+
+        fmc = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+        runc(sm) = fit(
+            CalibrationPipeline(
+                FringeFit(model = fmc), Bandpass(smoother = sm); exec = ExecutionConfig(),
+            ), uvc,
+        )[:bandpass].steps[1]
+        track(s, a, f) = (
+            L = CAL._component_leaf(s.layout.plantree.logamp.bandpass, s.θ);
+            Float64[L[1, f, c, 1, a] for c in 1:nglobc]
+        )
+        gauge(x) = x .- sum(x) / length(x)
+        cleanc = [c for c in 1:nglobc if abs(c - bad_chan) > 2]
+        rms_clean(v, a, f) =
+            sqrt(sum(abs2, gauge(v)[cleanc] .- gauge(abpc[a, f, :])[cleanc]) / length(cleanc))
+
+        s_free = runc(FP.PerTrackSmoother(amp = FP.FreeShape()))
+        s_ar = runc(FP.PerTrackSmoother(amp = FP.ARShape(nu)))
+        s_wh = runc(FP.PerTrackSmoother(amp = FP.WhittakerShape(1.0)))
+
+        # The guard excises the contaminated segment; `FreeShape` estimates
+        # nothing it has no datum for, so that slot stays UNAPPLIED (log-amp 0)
+        # while every uncontaminated channel is recovered exactly.
+        vfree = track(s_free, bad_ant, 1)
+        @test vfree[bad_chan] == 0.0
+        @test rms_clean(vfree, bad_ant, 1) < 1.0e-2
+        for a in (1, 3, 4)                       # stations the contaminant never touched
+            @test rms_clean(track(s_free, a, 1), a, 1) < 1.0e-6
+        end
+
+        # A spec that estimates gaps fills that slot from the in-band shape, and
+        # lands far closer to the truth than leaving it unapplied did.
+        var = track(s_ar, bad_ant, 1)
+        err_at(v) = abs(gauge(v)[bad_chan] - gauge(abpc[bad_ant, 1, :])[bad_chan])
+        @test var[bad_chan] != 0.0
+        @test err_at(var) < 0.5 * err_at(vfree)
+
+        # The AR prior is the correctly-specified one for this track (the truth IS
+        # an OU draw along frequency), so on the uncontaminated channels it costs
+        # less than the shape-agnostic roughness penalty.
+        ar_rms = mean(rms_clean(track(s_ar, a, f), a, f) for a in 1:nant, f in 1:2)
+        wh_rms = mean(rms_clean(track(s_wh, a, f), a, f) for a in 1:nant, f in 1:2)
+        @test ar_rms < 0.85 * wh_rms
     end
 
     @testset "portable ApplySolution: same-set + cross-set by station name" begin

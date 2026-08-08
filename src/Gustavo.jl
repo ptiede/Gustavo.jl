@@ -36,21 +36,26 @@ using .Fringe
 include("pipeline.jl")
 
 export UVData, Calibration, Streaming, Fringe
+# Axis names for every array Gustavo stores or returns, so scripts can index
+# and slice leaves without reaching into `UVData` or `DimensionalData`.
+# `Ti` is DimensionalData's own dim, re-exported here for the same reason.
+export Pol, Frequency, Ant, Baseline, Ti, UVW, Feed, Scan
 # Data entry and exit: the set type plus the reader/writer pair for each
 # supported format, so a bare `using Gustavo` spans load → fitcalibrate → write.
 export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
-export FringeFit, FringeModel, DispersionModel, SingleBandDelay, default_fringe_terms,
-    MatchedFilter, DispersionSBDFit, Bandpass, BandpassModel, JointALS, SplitWLS, TemporalSmoother
+export FringeFit, FringeModel, DispersionModel, SingleBandDelay, BandGroups, default_fringe_terms,
+    MatchedFilter, DispersionSBDFit, Bandpass, BandpassModel, TemporalSmoother,
+    AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate
 export SolveStep, StepChain, DataTransformStep, ExecutionConfig, ProgressLogger
 export outer_executor, inner_executor
 export start_pass!, process_scan!, finish_pass!, scan_values
-export model_components, fit_selection, provides, required_grouping, fusable_grouping
+export model_components, fit_selection, provides, required_grouping, fusable_grouping, scan_flags
 # Re-export the transform / selection vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
 export AbstractDataTransform, apply_transform!, apply_transform

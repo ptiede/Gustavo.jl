@@ -441,7 +441,10 @@ end
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
     sol_on = fit(ff |> Bandpass(model = BandpassModel(phase = true)) |> TemporalSmoother(adhoc), uvset)
-    sol_off = fit(ff |> Bandpass(model = BandpassModel(phase = false)) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(
+        ff |> Bandpass(model = BandpassModel(phase = false), smoother = FP.PerTrackSmoother()) |>
+            TemporalSmoother(adhoc), uvset,
+    )
 
     don = FP.baseline_fringe_data(uvset, sol_on)
     doff = FP.baseline_fringe_data(uvset, sol_off)
@@ -505,7 +508,10 @@ end
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
     sol_on = fit(ff |> Bandpass(model = BandpassModel(phase = true)) |> TemporalSmoother(adhoc), uvset)
-    sol_off = fit(ff |> Bandpass(model = BandpassModel(phase = false)) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(
+        ff |> Bandpass(model = BandpassModel(phase = false), smoother = FP.PerTrackSmoother()) |>
+            TemporalSmoother(adhoc), uvset,
+    )
 
     don = FP.baseline_fringe_data(uvset, sol_on)
     doff = FP.baseline_fringe_data(uvset, sol_off)
@@ -552,12 +558,12 @@ end
     @test freq_coh(don.spec_after, (FP.baseline_pol_index(don, :parallel),)) > 0.97
 end
 
-@testset "Amplitude bandpass: pluggable estimators (poly / penalized / free)" begin
+@testset "Amplitude bandpass: pluggable shape specs (poly / Whittaker / free)" begin
     # Inject a per-BAND log-amp roll-off (the filterbank passband, deep toward each
     # band's high-channel edge) shared by all stations, plus a small per-station
     # ripple. THEN kill one interior channel per band (zero its weight on every
-    # baseline). The two SMOOTH estimators (polynomial, penalized) must flatten the
-    # band AND estimate the killed channels from the in-spw shape; free_bandpass must
+    # baseline). The two GAP-ESTIMATING specs (polynomial, Whittaker) must flatten
+    # the band AND estimate the killed channels from the in-spw shape; FreeShape must
     # leave the killed channels untouched (|g| = 1).
     nant, nspw, nchan = 4, 2, 8
     nchg = nspw * nchan
@@ -597,15 +603,21 @@ end
     end
 
     ff = FringeFit(model = FringeModel())
-    sol_off = fit(ff |> Bandpass(model = BandpassModel(amp = false)) |> TemporalSmoother(adhoc), uvset)
+    sol_off = fit(
+        ff |> Bandpass(model = BandpassModel(amp = false), smoother = FP.PerTrackSmoother()) |>
+            TemporalSmoother(adhoc), uvset,
+    )
     doff = FP.baseline_fringe_data(uvset, sol_off)
     poff = FP.baseline_pol_index(doff, :parallel)
     @test amp_ripple(doff.spec_after, doff, poff) > 1.3    # roll-off ripple without the stage
 
-    # The smooth estimators flatten the band AND fill the killed channels onto the
+    # The gap-estimating specs flatten the band AND fill the killed channels onto the
     # in-spw curve (≈ the mean of the live neighbours, well away from log-amp 0).
-    for sm in (FP.polynomial_bandpass(4), FP.penalized_bandpass(0.1))
-        sol = fit(ff |> Bandpass(model = BandpassModel(amp_model = sm)) |> TemporalSmoother(adhoc), uvset)
+    for sm in (FP.PolynomialShape(4), FP.WhittakerShape(0.1))
+        sol = fit(
+            ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = sm)) |>
+                TemporalSmoother(adhoc), uvset,
+        )
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, :parallel)
         @test amp_ripple(don.spec_after, don, p) < 1.08
@@ -619,9 +631,12 @@ end
         end
     end
 
-    # free_bandpass does NOT estimate the killed channels — their θ slot is untouched
-    # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothers.
-    solf = fit(ff |> Bandpass(model = BandpassModel(amp_model = FP.free_bandpass())) |> TemporalSmoother(adhoc), uvset)
+    # FreeShape does NOT estimate the killed channels — their θ slot is untouched
+    # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothing specs.
+    solf = fit(
+        ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = FP.FreeShape())) |>
+            TemporalSmoother(adhoc), uvset,
+    )
     bpf = solf[:bandpass].steps[1]
     planf = bpf.layout.plantree.logamp.bandpass
     for dg in dead_globals, a in 2:nant, f in 1:2
@@ -1055,13 +1070,15 @@ end
             end
         end
     end
-    sol = fit(
-        FringeFit(
-            model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> TemporalSmoother(),
-        uvset,
+    ff = FringeFit(
+        model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
+        estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
     )
+    # Scan-local, so the whole chain below fuses into one pass — the
+    # configuration whose flags exist only per scan (`scan_flags`), never in
+    # scratch while the pass runs.
+    @test fusable_grouping(ff) === :scan
+    sol = fit(ff |> TemporalSmoother(), uvset)
     flags = FP.fringe_station_flags(sol)
     @test !isempty(flags)
     @test all(r -> r.ant == 4, flags)                 # only station 4 unconstrained
@@ -1086,4 +1103,24 @@ end
     prs0 = Gustavo.UVData.baselines(l0f).pairs
     bi4 = findfirst(p -> p[1] != p[2] && (p[1] == 4 || p[2] == 4), prs0)
     @test any(>(0), @view parent(l0f[:weights])[:, :, bi4, :])
+
+    # The fused fitcalibrate tail applies the same flags: it corrects each scan
+    # group while resident, before any `finish_pass!` has run, so it must read
+    # the scan's flags off the fringe step's own `process_scan!` return
+    # (`scan_flags`) — scratch holds nothing yet.
+    sol_fc, out = fitcalibrate(ff |> TemporalSmoother(), uvset)
+    @test sol_fc.info.flagged_ant == sol.info.flagged_ant
+    @test sol_fc.info.flagged_scan == sol.info.flagged_scan
+    for (_, leaf) in Gustavo.UVData.leaves(out)
+        W = parent(leaf[:weights])
+        prs = Gustavo.UVData.baselines(leaf).pairs
+        for bi in eachindex(prs)
+            prs[bi][1] == prs[bi][2] && continue
+            if prs[bi][1] == 4 || prs[bi][2] == 4
+                @test all(iszero, @view W[:, :, bi, :])
+            else
+                @test any(>(0), @view W[:, :, bi, :])
+            end
+        end
+    end
 end
