@@ -60,6 +60,8 @@ function _build_fringe_uvset(;
 
         spw_origins = nothing, # optional (nspw,) explicit band start freqs (Hz) — overrides spw_sep
         station_positions = nothing, # optional (nant,) xyz vectors (m) — for co-location tests
+        omit_station = nothing, # optional station index present in the antenna table but
+                                #   observing no baseline — a station that dropped out
     )
     UV = Gustavo.UVData
     rng = MersenneTwister(seed)
@@ -85,6 +87,7 @@ function _build_fringe_uvset(;
     )
 
     bl_pairs = Tuple{Int, Int}[(a, b) for a in 1:nant for b in (a + 1):nant]
+    omit_station === nothing || filter!(p -> omit_station ∉ p, bl_pairs)
     nbl = length(bl_pairs)
     baselines = UV.BaselineIndex(bl_pairs, bl_pairs; antenna_names = collect(antennas.name))
 

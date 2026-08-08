@@ -596,18 +596,26 @@ end
 function _joint_bandpass_pins(bl_pairs, feeds, nant, ref_ant)
     nnodes = 2 * nant
     edges = Tuple{Int, Int}[]
+    # Node degree stands in for the row weight `_best_node` scores elsewhere: this
+    # graph is built from the baselines that EXIST, before any per-channel gating,
+    # so the number of correlations touching a node is the observation count
+    # available to anchor it.
+    deg = zeros(Int, nnodes)
     for p in eachindex(feeds), bi in eachindex(bl_pairs)
         a, b = bl_pairs[bi]
         a == b && continue
         fa, fb = feeds[p]
-        push!(edges, (_node(a, fa, nant), _node(b, fb, nant)))
+        na, nb = _node(a, fa, nant), _node(b, fb, nant)
+        push!(edges, (na, nb))
+        deg[na] += 1
+        deg[nb] += 1
     end
     compid, ncomp, _ = connected_components(nnodes, edges)
     pins = Set{Int}()
     for c in 1:ncomp
         comp_nodes = findall(==(c), compid)
         r1, r2 = _node(ref_ant, 1, nant), _node(ref_ant, 2, nant)
-        push!(pins, r1 in comp_nodes ? r1 : (r2 in comp_nodes ? r2 : minimum(comp_nodes)))
+        push!(pins, r1 in comp_nodes ? r1 : (r2 in comp_nodes ? r2 : _best_node(comp_nodes, deg)))
     end
     return pins
 end

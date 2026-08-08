@@ -232,6 +232,22 @@ end
 # Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 
+# The gauge pin for a component that holds no reference node: its best-OBSERVED
+# node, i.e. the one carrying the most total row weight (`score`), ties broken by
+# lowest node index. Such a component's gauge is arbitrary by construction — there
+# is no reference to express it against — so the only properties that matter are
+# determinism and stability, and anchoring on the best-observed node is what buys
+# the second: a structurally-chosen pin (the lowest node, say) hops as soon as a
+# marginal station's coverage flickers between solves, moving the whole
+# component's zero with it.
+function _best_node(comp_nodes, score)
+    best = first(comp_nodes)
+    for n in comp_nodes
+        (score[n] > score[best] || (score[n] == score[best] && n < best)) && (best = n)
+    end
+    return best
+end
+
 # One observation row contributing to a node system. `na`/`nb` are the PARAMETER
 # NODES the row's two stations contribute to — `_feed_node(tying, feed)` of the
 # correlation product's feeds, so they coincide with the feed indices only under
@@ -298,13 +314,19 @@ function _solve_observable(
     nrow = length(rows)
 
     # Gauge pins: one reference node per component (prefer ref_ant's feed-1, then
-    # feed-2, then the lowest node in the component).
+    # feed-2, then the component's best-observed node — see `_best_node`).
+    nodew = zeros(Float64, nnodes)
+    for (i, r) in enumerate(rows)
+        wi = weights === nothing ? r.w : weights[i]
+        nodew[_node(r.a, r.na, nant)] += wi
+        nodew[_node(r.b, r.nb, nant)] += wi
+    end
     pins = Int[]
     for c in 1:ncomp
         comp_nodes = findall(==(c), compid)
         r1 = _node(ref_ant, 1, nant)
         r2 = _node(ref_ant, 2, nant)
-        rn = r1 in comp_nodes ? r1 : (r2 in comp_nodes ? r2 : minimum(comp_nodes))
+        rn = r1 in comp_nodes ? r1 : (r2 in comp_nodes ? r2 : _best_node(comp_nodes, nodew))
         push!(pins, rn)
     end
     # Pin every UNTOUCHED node — an (antenna, feed) with no observation in this
@@ -531,9 +553,9 @@ plus a `GlobalTime × FeedComponent(2)` inter-feed offset both feed the delay
 system, so a feed-2 row touches both columns and a stable inter-feed offset is solved
 once across the track (bright scans pin it; weak scans inherit it, tying feeds
 that would otherwise split). Returns the phase-system component count and
-`covered` — the `(station, scan-index)` pairs
-carrying a transferable solution (see `Stationization` for how inconsistent rows
-are weighted). With a single per-scan/per-feed component per kind and one scan,
+`covered` — the `(station, scan-index)` pairs the solve CONSTRAINS, which is
+independent of `ref_ant` (see `Stationization` for how inconsistent rows are
+weighted). With a single per-scan/per-feed component per kind and one scan,
 each scan's system is independent and solves exactly as it would alone.
 """
 function solve_station_systems!(
@@ -541,13 +563,11 @@ function solve_station_systems!(
         ref_ant::Integer = 1, opts::Stationization = Stationization(),
     )
     ncomp = 0
-    # (station, scan-index) pairs carrying a TRANSFERABLE solution — the
-    # EHT-HOPS flag criterion, inverted: a station outside the reference's
-    # fringe group in a scan is uncalibrated there (its θ is gauged to some
-    # other arbitrary pin, or stays 0 ⇒ identity gain) and must be FLAGGED
-    # downstream, not silently passed through. Intersected over the solved
-    # kinds: a station must be constrained in delay AND rate AND phase to
-    # count as calibrated.
+    # (station, scan-index) pairs the solve CONSTRAINS. A station with no
+    # accepted detection in a scan keeps θ = 0 there ⇒ identity gain, and must
+    # be FLAGGED downstream rather than silently passed through uncalibrated.
+    # Intersected over the solved kinds: a station must be constrained in delay
+    # AND rate AND phase to count as calibrated.
     covered = Set{Tuple{Int, Int}}()
     first_kind = true
     for kind in (:delay, :rate, :phase)
@@ -644,15 +664,15 @@ function _solve_kind_cols!(
     # assignment. Reversing them would downweight rows whose residual is still a
     # wrap away from its final value.
     w = copy(rw)
-    local x, ncomp, compid
-    x, ncomp, resid, compid = _solve_tagged_system(
+    local x, ncomp
+    x, ncomp, resid = _solve_tagged_system(
         rowA, rowB, rval, w, rcross, length(node_col),
         node_feed, node_station, node_scan, ref_ant; rewrap = rewrap,
     )
     if !(opts.loss isa LeastSquares)
         for _ in 1:max(opts.irls_iters, 0)
             _irls_weights!(w, rw, opts.loss, opts.loss_scale, resid) || break
-            x, ncomp, resid, compid = _solve_tagged_system(
+            x, ncomp, resid = _solve_tagged_system(
                 rowA, rowB, rval, w, rcross, length(node_col),
                 node_feed, node_station, node_scan, ref_ant; rewrap = rewrap,
             )
@@ -661,35 +681,30 @@ function _solve_kind_cols!(
     @inbounds for n in eachindex(node_col)
         θ[node_col[n]] += x[n]
     end
-    return ncomp, _covered_stations(rowA, rsta_a, rsta_b, rscan, compid, node_station, ref_ant)
+    return ncomp, _covered_stations(rsta_a, rsta_b, rscan)
 end
 
-# The (station, scan) pairs this system actually calibrates: those reached by a
-# row inside the REFERENCE's connected component. This is EHT-HOPS's fringe-group
-# criterion — a station outside the reference's group of mutually-linked stations
-# has a solution, but one gauged to a different arbitrary pin, so it is not
-# transferable and must be flagged rather than silently applied.
+# The (station, scan) pairs this system actually calibrates: those carrying at
+# least one accepted detection, and so constrained by the solve rather than left
+# at θ = 0 (identity gain). Everything else is flagged downstream.
+#
+# Coverage does NOT depend on the reference antenna, and so is invariant to the
+# gauge pin. Each connected component of the (station, feed) graph carries its own
+# arbitrary additive zero, but a correction enters the data only as the difference
+# `g_a − g_b` along a baseline, and a baseline exists only WITHIN a component — so
+# a component's gauge cancels wherever it is applied, whether or not the reference
+# is one of its stations. Requiring reference connectivity instead would discard
+# every station of a scan the reference happens to sit out, including scans whose
+# own closure is perfectly well determined.
 #
 # Connectivity and weighting are separate questions: the `snr_min` gate decides
 # which rows are real detections and therefore what the graph looks like, and the
 # robust loss then arbitrates inconsistency AMONG those rows without removing any.
-# A station with no reference-linked detection is uncalibrated no matter how the
-# surviving rows are weighted.
-#
-# With the reference absent from the system entirely there is no group to be
-# transferable to, so nothing is covered.
-function _covered_stations(rowA, rsta_a, rsta_b, rscan, compid, node_station, ref_ant)
+# A station with no detection at all is uncalibrated no matter how the surviving
+# rows are weighted.
+function _covered_stations(rsta_a, rsta_b, rscan)
     cov = Set{Tuple{Int, Int}}()
-    # EVERY component holding a reference node, not just one: under a per-scan
-    # model the scans are block-diagonal, so each scan contributes its own
-    # reference-linked component. A track-global column instead fuses them into
-    # one — either way this is "the groups the reference reaches".
-    refcomps = Set(compid[n] for n in eachindex(node_station) if node_station[n] == ref_ant)
-    isempty(refcomps) && return cov
-    for i in eachindex(rowA)
-        # A row's columns are unioned into one component, so any of its nodes
-        # answers for the whole row.
-        compid[first(rowA[i])] in refcomps || continue
+    for i in eachindex(rsta_a, rsta_b, rscan)
         push!(cov, (rsta_a[i], rscan[i]))
         push!(cov, (rsta_b[i], rscan[i]))
     end
@@ -720,21 +735,31 @@ function _solve_tagged_system(
     end
     compid, ncomp, _ = connected_components(nnodes, edges)
 
-    # feed-1-or-shared nodes sort before feed-2; then by station, then scan.
-    nodekey(n) = (node_feed[n] == 2 ? 1 : 0, node_station[n], node_scan[n])
     is_ref(n) = node_station[n] == ref_ant
     is_feed1(n) = node_feed[n] != 2
 
+    # Total row weight on each node — the score the pin falls back to when a
+    # component holds no reference node.
+    nodew = zeros(Float64, nnodes)
+    for i in eachindex(rowA)
+        for n in rowA[i]
+            nodew[n] += rw[i]
+        end
+        for n in rowB[i]
+            nodew[n] += rw[i]
+        end
+    end
+
     pins = Int[]
     # One reference pin per component: prefer ref_ant feed-1/shared, then feed-2,
-    # then the lowest (feed, station, scan) node.
+    # then the component's best-observed node (see `_best_node`).
     for c in 1:ncomp
         comp = [n for n in 1:nnodes if compid[n] == c]
         isempty(comp) && continue
         r1 = findfirst(n -> is_ref(n) && is_feed1(n), comp)
         r2 = findfirst(n -> is_ref(n) && node_feed[n] == 2, comp)
         pin = r1 !== nothing ? comp[r1] :
-            r2 !== nothing ? comp[r2] : comp[argmin(map(nodekey, comp))]
+            r2 !== nothing ? comp[r2] : _best_node(comp, nodew)
         push!(pins, pin)
     end
     nrow = length(rowA)

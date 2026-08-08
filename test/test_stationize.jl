@@ -310,6 +310,92 @@ end
     end
 end
 
+@testset "Stationize: coverage does not depend on the reference antenna" begin
+    # A scan the reference sits out. The remaining stations form a perfectly
+    # well-determined system, and the solve must report them covered — coverage
+    # asks whether a station is CONSTRAINED, not whether it is linked to the
+    # reference, so an absent reference costs the scan nothing.
+    nant = 5
+    absent_ref = 5                                  # observes no baseline below
+    bl = all_baselines(4)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    rng = MersenneTwister(0x9c31)
+    τ = 1.0e-9 .* randn(rng, nant, 2)
+    ṙ = 1.0e-3 .* randn(rng, nant, 2)
+    φ = 0.3 .* randn(rng, nant, 2)
+    D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
+
+    sol = stationize(D, bl, pols, nant; ref_ant = absent_ref)
+    @test sol.ref_covered == Set((a, 1) for a in 1:4)
+    @test !((absent_ref, 1) in sol.ref_covered)     # never fabricated
+    # The solution is exact despite the missing reference: only its gauge is
+    # arbitrary, and a gauge cancels on every baseline of its own component.
+    r = recon_residuals(D, sol, bl, pols)
+    @test r.delay < 1.0e-20
+    @test r.rate < 1.0e-15
+    @test r.phase < 1.0e-10
+
+    # Pin-invariance: the same data referenced to a present station reports the
+    # same coverage, so a reporting reference can be chosen after the solve.
+    @test stationize(D, bl, pols, nant; ref_ant = 1).ref_covered == sol.ref_covered
+    @test stationize(D, bl, pols, nant; ref_ant = 3).ref_covered == sol.ref_covered
+end
+
+@testset "Stationize: disconnected islands are each covered on their own gauge" begin
+    # Two mutually unlinked subarrays in one scan. Each carries its own additive
+    # zero, which is unobservable and cancels within the island, so both are
+    # solved and both are covered — including the island holding no reference.
+    nant = 5
+    bl = [(1, 2), (1, 3), (2, 3), (4, 5)]
+    pols = ["PP", "PQ", "QP", "QQ"]
+    rng = MersenneTwister(0x4a17)
+    τ = 1.0e-9 .* randn(rng, nant, 2)
+    ṙ = 1.0e-3 .* randn(rng, nant, 2)
+    φ = 0.3 .* randn(rng, nant, 2)
+    D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
+
+    sol = stationize(D, bl, pols, nant; ref_ant = 1)
+    @test sol.ref_covered == Set((a, 1) for a in 1:nant)
+    r = recon_residuals(D, sol, bl, pols)
+    @test r.delay < 1.0e-20
+    @test r.phase < 1.0e-10
+end
+
+@testset "Stationize: a reference-free component pins its best-observed node" begin
+    # With no reference node to pin, the gauge falls to the node carrying the most
+    # row weight, so the zero sits on the best-observed station rather than
+    # wherever the node numbering happens to start.
+    nant = 5
+    absent_ref = 5
+    bl = all_baselines(4)
+    pols = ["PP", "PQ", "QP", "QQ"]
+    rng = MersenneTwister(0x1d05)
+    τ = 1.0e-9 .* randn(rng, nant, 2)
+    D0 = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 100.0)
+
+    # The pin is imposed as a constraint row, so the gauge zero is zero to solver
+    # precision against a ~ns signal, not bit-exactly.
+    gauge_zero(m) = argmin(abs.(@view m[1:4, :]))
+
+    # Uniform weights: the tie resolves to the lowest node, i.e. station 1 feed 1.
+    uniform = stationize(D0, bl, pols, nant; ref_ant = absent_ref)
+    @test gauge_zero(uniform.delay) == CartesianIndex(1, 1)
+    @test abs(uniform.delay[1, 1]) < 1.0e-15
+
+    # Station 3 observed far more strongly: the pin moves to it.
+    D = copy(D0)
+    for bi in eachindex(bl), p in eachindex(pols)
+        3 in bl[bi] || continue
+        d = D[bi, p]
+        D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 1.0e4, true))
+    end
+    strong = stationize(D, bl, pols, nant; ref_ant = absent_ref)
+    @test gauge_zero(strong.delay) == CartesianIndex(3, 1)
+    @test abs(strong.delay[3, 1]) < 1.0e-15
+    # Regauging is all that changed: baseline differences are untouched.
+    @test recon_residuals(D, strong, bl, pols).delay < 1.0e-20
+end
+
 @testset "Stationize: snr_min drops low-SNR detections" begin
     nant = 4
     bl = all_baselines(nant)

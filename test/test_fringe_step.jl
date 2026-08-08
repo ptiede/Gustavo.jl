@@ -48,6 +48,24 @@
         @test corr isa UVP.UVSet
     end
 
+    @testset "a scan the reference sits out still calibrates" begin
+        # The reference antenna is in the table but observes no baseline. The
+        # stations that DID observe are constrained by their own closure, so none
+        # of them is flagged and their data is calibrated rather than blanked.
+        uvset, _ = _build_fringe_uvset(nant = 4, omit_station = 4)
+        model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+
+        sol = fit(FringeFit(; model), uvset; ref_ant = "A4")
+        @test isempty(sol.info.flagged_ant)
+        @test isempty(FP.fringe_station_flags(sol))
+        @test UVP.apply_calibration(uvset, sol) isa UVP.UVSet
+
+        # The flags do not depend on which station holds the gauge.
+        present = fit(FringeFit(; model), uvset; ref_ant = "A1")
+        @test present.info.flagged_ant == sol.info.flagged_ant
+        @test present.info.flagged_scan == sol.info.flagged_scan
+    end
+
     @testset "rounds > 1: fringe blocks invariant under later stages" begin
         uvset, _ = _build_fringe_uvset()
         solm = fit(
