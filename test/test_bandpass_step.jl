@@ -55,9 +55,9 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
     )
 
     @testset "θ blocks invariant under the appended smoother stage" begin
-        # Stage-B fringe blocks: bit-identical (components 1..5 in both models).
+        # Stage-B fringe blocks: bit-identical (components 1..4 in both models).
         fn = sol_n[:fringe].steps[1]; fo = sol_o[:fringe].steps[1]
-        for i in 1:5
+        for i in 1:4
             @test _blk(fn, i) == _blk(fo, i)
         end
         # Per-channel phase + log-amp bandpass: rtol 1e-12 (fold association).

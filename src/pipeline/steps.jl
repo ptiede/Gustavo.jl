@@ -245,9 +245,23 @@ function Fringe.estimate_scan!(
     )
     round = ctx.scratch[:fringe_round]::Int
     Vsearch = round > 1 ? Fringe.residual_vis(ctx.ev, ctx.θ, stack, win) : stack[:vis]
+    # Reference the detection phases to the epoch this scan's constant phase
+    # columns are the phase AT (`scan_phase_epoch`), not to the track epoch
+    # `search_scan` defaults to for a standalone caller. The station solve reads
+    # each phase as a constant, so any gap between the two epochs pours that
+    # row's rate uncertainty into the constant — and the inter-feed offset,
+    # which the model gives no rate of its own, has nothing to absorb it with.
+    # A model with no rate column pins no epoch; the scan's own mean time is
+    # then the natural place to measure a constant.
+    epoch = Fringe.scan_phase_epoch(ctx.model, ctx.layout, first(win.ti_idx))
+    if epoch === nothing
+        ts = @view ctx.stream.geom.times[win.ti_idx]
+        epoch = sum(ts) / length(ts)
+    end
     res = Fringe.search_scan(
         stack, ctx.stream.geom, est.search;
         Vsearch, ngroups = length(ctx.stream.groups), executor = inner_executor(ctx.stream),
+        t0 = epoch * 3600.0,
     )
     pols = pol_products(stack)
     # `res` covers only the surviving (cross) baselines; take its own pair list.
@@ -256,7 +270,7 @@ function Fringe.estimate_scan!(
     # the CRB uncertainty of a delay and a rate, which is what puts the station
     # solve's residuals in units of σ (see `Stationization`).
     det = Fringe._with_ti(
-        res, first(win.ti_idx);
+        res, first(win.ti_idx); epoch,
         freq_rms = Fringe._rms_spread(frequencies(stack)),
         time_rms = Fringe._rms_spread(timestamps(stack) .* 3600.0),
     )
@@ -270,20 +284,59 @@ function Fringe.estimate_scan!(
     cells1 = Fringe._search_cells(frequencies(stack), timestamps(stack) .* 3600.0, est.search)
     ncells = cells1 * max(length(bl_pairs) * length(pols), 1)
     pfa_max = est.closure.pfa_max
-    rows = [
-        (; a = bl_pairs[j][1], b = bl_pairs[j][2], pol = pols[p],
-           snr = res.snr[j, p], pfa = res.pfa[j, p], detected = res.pfa[j, p] <= pfa_max)
-            for p in eachindex(pols) for j in eachindex(bl_pairs) if res.valid[j, p]
-    ]
-    max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
-    if Fringe.scan_local_solve(est, s.model)
+    local_solve = Fringe.scan_local_solve(est, s.model)
+    ncomp, flags = 0, Tuple{Int, Int}[]
+    # Steering needs θ for THIS scan, so it can only run where the station solve
+    # closes here (`scan_local_solve`); a pooled solve has no station parameters
+    # until every group has been read and the cube is long gone.
+    steer = nothing
+    if local_solve
         # Block-diagonal model: this scan's station systems close from its own
         # detections, so its θ columns are complete before this returns. The
         # slots are disjoint per scan, so concurrent groups write without
         # contention.
         ncomp, flags = _station_solve!(est, ctx, (det,))
-        return (; ncomp, flags, max_snr, ncells, rows)
+        if est.steer_cells > 0
+            ti = first(win.ti_idx)
+            sd, sr = Fringe.scan_station_terms(ctx.model, ctx.layout, ctx.θ, ti)
+            # θ is dense: a station this scan never constrained reads back as an
+            # identity 0, indistinguishable from a solved zero delay. Steering to
+            # it would invent a prediction and manufacture detections, so the
+            # solve's own unconstrained list is what makes those nodes unusable.
+            for (a, _) in flags
+                (1 <= a <= size(sd, 1)) || continue
+                sd[a, :] .= NaN
+                sr[a, :] .= NaN
+            end
+            steer = Fringe.steer_scan(
+                # The SAME epoch the search above referenced: `sr` is a rate
+                # about it, as is the model's own Rate component.
+                stack, res, bl_pairs, pols, ctx.stream.geom.f0,
+                epoch * 3600.0, sd, sr;
+                cells = est.steer_cells,
+            )
+        end
     end
+    _st(field, j, p) = steer === nothing ? NaN : steer[field][j, p]
+    rows = [
+        (; a = bl_pairs[j][1], b = bl_pairs[j][2], pol = pols[p],
+           snr = res.snr[j, p], pfa = res.pfa[j, p],
+           delay = res.delay[j, p], rate = res.rate[j, p],
+           phase = res.phase[j, p],
+           detected = res.pfa[j, p] <= pfa_max,
+           snr_steer = _st(:snr, j, p), pfa_steer = _st(:pfa, j, p),
+           delay_steer = _st(:delay, j, p), rate_steer = _st(:rate, j, p),
+           # Measured at the station solution's delay and rate rather than found
+           # blind. There is NO threshold here: `pfa_max` decides fringe-group
+           # membership on the blind pass, and once a station is in that group
+           # its baselines are measured at the known fringe location to
+           # arbitrarily low SNR. `pfa_steer` records the significance of what
+           # was measured; it does not gate it.
+           steered = res.pfa[j, p] > pfa_max && isfinite(_st(:snr, j, p)))
+            for p in eachindex(pols) for j in eachindex(bl_pairs) if res.valid[j, p]
+    ]
+    max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
+    local_solve && return (; ncomp, flags, max_snr, ncells, rows)
     return (; det, max_snr, ncells, rows)
 end
 

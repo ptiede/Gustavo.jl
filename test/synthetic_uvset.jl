@@ -48,6 +48,10 @@ _dispersion_sbd_step(; dispersion = true, sbd = true) =
 # with Δx = x[a, fa] − x[b, fb]. Times in seconds use t0_sec; freqs in Hz.
 function _build_fringe_uvset(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
+        scan_gap = nothing,     # hours between scan starts (default: back-to-back)
+        noise = nothing,        # σ per visibility sample (same units as the A0 = 2.5 signal);
+                                #   without it every estimate is exact and no
+                                #   uncertainty-driven effect is observable
         pol_labels = ["PP", "PQ", "QP", "QQ"],
         ref_freq = 230.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         seed = 1234,
@@ -118,7 +122,7 @@ function _build_fringe_uvset(;
     # Times (hours): `nscans` scans of `ntime` APs spaced 30 s, scans separated
     # by a 2-AP gap. Scan 1 keeps the historical single-scan time axis.
     ti_vals = collect((0:(ntime - 1)) .* (30.0 / 3600.0))
-    scan_span = (ntime + 2) * (30.0 / 3600.0)
+    scan_span = scan_gap === nothing ? (ntime + 2) * (30.0 / 3600.0) : Float64(scan_gap)
 
     # Reference geometry constants (must match what the solve derives):
     # f0 = mean of all channel freqs across both bands; t0 = first time (hours).
@@ -198,7 +202,10 @@ function _build_fringe_uvset(;
             ddt = dtec === nothing ? 0.0 :
                 CAL.DISPERSION_K * (dtec[a] - dtec[bb]) * (1.0 / f0 - 1.0 / f)
             ph = dφ + 2π * dτ * (f - f0) + 2π * dṙ * (tsec - t0_sec) + dscr + dbp + ddt
-            vis_dense[c, ti, bl, p] = ComplexF32(A0 * exp(dla) * cis(ph))
+            z = A0 * exp(dla) * cis(ph)
+            noise === nothing ||
+                (z += noise * complex(randn(rng), randn(rng)) / sqrt(2))
+            vis_dense[c, ti, bl, p] = ComplexF32(z)
         end
         vis_part = DimArray(
             vis_dense,

@@ -14,29 +14,20 @@
 # The shared fringe model. Phase, over the global frequency band:
 #   - feed-COMMON per-scan constant + delay (`SharedFeeds`): the atmosphere/clock
 #     terms that vary scan-to-scan and are the same for both polarization feeds;
-#   - an inter-feed offset CONSTANT and an inter-feed offset DELAY
-#     (`rel_time × FeedComponent(2)`): the instrumental feed-2−feed-1 phase and
-#     group-delay offsets. Their shared time basis is the `rel_time` option.
-#     `PerScan()` (the default) fits them per scan, so their scan-to-scan scatter
-#     is an instrument-stability diagnostic and no column couples scans; a scan
-#     whose cross hands don't detect then leaves feed 2 untied, so its feed-2
-#     component can split (`ncomp = 2`) and take an arbitrary per-scan pin — that
-#     is harmless to the feed-relative delay (differenced against the SAME feed of
-#     the reference, gauge-invariant) but leaves feed 2 meaningful only on scans
-#     that actually detect cross hands. `GlobalTime()` fits one offset per station
-#     for the whole track (EHT-HOPS / rPICARD assumption), so bright polarized
-#     scans pin it and weak scans inherit it through the shared column. Either way
-#     the offset absorbs the source's cross-hand phase, which shares its column, so
-#     it is estimable only up to that constant;
+#   - an inter-feed offset DELAY (`rel_time × FeedComponent(2)`): the instrumental
+#     feed-2−feed-1 group-delay offset, on the `rel_time` time basis.
+#     `PerScan()` (the default) fits it per scan, so its scan-to-scan scatter is
+#     an instrument-stability diagnostic and no column couples scans;
+#     `GlobalTime()` fits one offset per station for the whole track (EHT-HOPS /
+#     rPICARD assumption), so bright scans pin it and weak scans inherit it
+#     through the shared column. There is deliberately no inter-feed PHASE
+#     offset — see `default_fringe_terms`;
 #   - per-scan rate (`SharedFeeds`): the fringe rate is common to both feeds, so it
 #     is tied across them — exactly like the per-scan constant/delay. Solving it
 #     `PerFeed` instead lets a spurious inter-feed rate (`rate₂ − rate₁`) float on
-#     noise; since the Rate phase is `2π·rate·(t − t0_global)` with `t0` the
-#     WHOLE-TRACK reference, that per-feed noise is multiplied by a per-scan lever
-#     arm of hours, injecting a large, arbitrary, scan-to-scan cross-hand phase
-#     jump. The inter-feed rate is negligible (EHT-HOPS), so tie it; a genuine
-#     offset would be a `GlobalTime × FeedComponent(2)` rate term (the analog of
-#     the inter-feed constant/delay), not PerFeed;
+#     noise. The inter-feed rate is negligible (EHT-HOPS), so tie it; a genuine
+#     offset would be a `PerScan × FeedComponent(2)` rate term (the analog of the
+#     inter-feed delay), not PerFeed;
 #   - a per-AP adhoc-phase constant (`SharedFeeds`): residual atmospheric phase is
 #     non-birefringent (common to both feeds), so it is solved feed-common — which
 #     denoises it and, crucially, contributes ZERO inter-feed phase. A `PerFeed`
@@ -77,7 +68,6 @@ function _fringe_model(;
         phase = merge(
             (
                 atmos = TiedComponent(GainComponent(ConstantTerm(), PerScan(), GlobalFrequency()), SharedFeeds()),
-                rel_phase = TiedComponent(GainComponent(ConstantTerm(), rel_time, GlobalFrequency()), FeedComponent(2)),
                 mbd = TiedComponent(GainComponent(Delay(), PerScan(), GlobalFrequency()), SharedFeeds()),
                 rel_delay = TiedComponent(GainComponent(Delay(), rel_time, GlobalFrequency()), FeedComponent(2)),
                 rate = TiedComponent(GainComponent(Rate(), PerScan(), GlobalFrequency()), SharedFeeds()),

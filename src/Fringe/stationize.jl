@@ -525,10 +525,16 @@ time index) in metadata — so a scan built directly (the refine stage, or a
 direct `solve_station_systems!` call) has the same shape as
 one that came from the search, and every consumer reads pairs/feeds/ti off the
 stack uniformly.
+
+`epoch` (hours) is where the phases were measured, which the station solve needs
+to read them as constants. Omitting it asserts they sit wherever the model's
+rate components are referenced, and is an error when those disagree among
+themselves — see `Fringe.scan_phase_epoch`.
 """
 function detection_stack(
         D::AbstractMatrix{<:Detection}, bl_pairs, pol_products;
-        ti::Integer, freq_rms::Union{Nothing, Real} = nothing,
+        ti::Integer, epoch::Union{Nothing, Real} = nothing,
+        freq_rms::Union{Nothing, Real} = nothing,
         time_rms::Union{Nothing, Real} = nothing,
     )
     gdims = (Baseline(collect(Tuple{Int, Int}, bl_pairs)), Pol(collect(pol_products)))
@@ -542,28 +548,30 @@ function detection_stack(
         valid = DimArray(getfield.(D, :valid), gdims),
     )
     return DimensionalData.DimStack(
-        layers; metadata = _scan_meta(ti, freq_rms, time_rms),
+        layers; metadata = _scan_meta(ti, epoch, freq_rms, time_rms),
     )
 end
 
 # A detection stack's scan-level provenance: the representative global time
-# index plus the RMS frequency/time spreads its weights need.
-_scan_meta(ti, freq_rms, time_rms) = Dict{Symbol, Any}(
-    :ti => Int(ti), :freq_rms => freq_rms, :time_rms => time_rms,
+# index, the epoch (hours) the phases are referenced to, and the RMS
+# frequency/time spreads the weights need.
+_scan_meta(ti, epoch, freq_rms, time_rms) = Dict{Symbol, Any}(
+    :ti => Int(ti), :epoch => epoch, :freq_rms => freq_rms, :time_rms => time_rms,
 )
 
 # Attach a representative global time index to an existing detection stack (the
 # search's own `search_scan` return, which carries no `:ti` — the caller knows
 # which window it searched).
 _with_ti(
-    stack::AbstractDimStack, ti::Integer;
+    stack::AbstractDimStack, ti::Integer; epoch::Union{Nothing, Real} = nothing,
     freq_rms::Union{Nothing, Real} = nothing, time_rms::Union{Nothing, Real} = nothing,
-) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, freq_rms, time_rms))
+) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, epoch, freq_rms, time_rms))
 
 _scan_bl_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Baseline))
 _scan_pols(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Pol))
 _scan_feeds(sc::AbstractDimStack) = [correlation_feed_pair(p) for p in _scan_pols(sc)]
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc)[:ti]::Int
+_scan_epoch(sc::AbstractDimStack) = get(DimensionalData.metadata(sc), :epoch, nothing)
 _scan_spread(sc::AbstractDimStack, key::Symbol) = get(DimensionalData.metadata(sc), key, nothing)
 
 """
@@ -595,10 +603,20 @@ function solve_station_systems!(
     # AND rate AND phase to count as calibrated.
     covered = Set{Tuple{Int, Int}}()
     first_kind = true
+    rate_plans = [c[1] for c in components if c[2] === :rate]
+    rate_solved = Dict{Int, Float64}()
+    # :rate before :phase — a detection's phase is a constant only at the epoch
+    # where every rate coordinate vanishes, so a rate referenced to some OTHER
+    # epoch has to be subtracted off the phase rows, and that needs it solved.
     for kind in (:delay, :rate, :phase)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        nc, cov = _solve_kind_cols!(θ, scans, plans, ref_ant, opts, kind)
+        nc, cov, solved = _solve_kind_cols!(
+            θ, scans, plans, ref_ant, opts, kind;
+            rate_plans = kind === :phase ? rate_plans : ComponentPlan[],
+            rate_solved,
+        )
+        kind === :rate && (rate_solved = solved)
         covered = first_kind ? cov : intersect(covered, cov)
         first_kind = false
         kind === :phase && (ncomp = nc)
@@ -609,9 +627,15 @@ end
 # Solve one observable kind across all scans, accumulating into θ. Each detection
 # becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
 # θ columns for that (station, feed, time) — a feed-common per-scan column and,
-# when present, a global feed-offset column. Returns (ncomp, covered).
+# when present, a global feed-offset column. Returns (ncomp, covered, solved),
+# `solved` mapping each θ column this kind touched to the value it just added.
+#
+# `rate_plans`/`rate_solved` are non-empty only for `:phase`, and only matter
+# where a rate component's origin differs from the epoch the phases were
+# measured at — see `_phase_epoch_offset`.
 function _solve_kind_cols!(
-        θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol,
+        θ::AbstractVector, scans, plans, ref_ant::Integer, opts::Stationization, kind::Symbol;
+        rate_plans = ComponentPlan[], rate_solved::Dict{Int, Float64} = Dict{Int, Float64}(),
     )
     getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
     # Phase has no cross-hand variant: its floor is dimensionless (radians), so
@@ -652,6 +676,8 @@ function _solve_kind_cols!(
         bl_pairs = _scan_bl_pairs(sc)
         feeds = _scan_feeds(sc)
         ti = _scan_ti(sc)
+        epoch = _scan_epoch(sc)
+        epoch === nothing && _require_common_epoch(rate_plans, ti)
         # Per SCAN, not per row: the band and duration are properties of the
         # observation, so every row of one scan shares this lever arm.
         σ = kind === :phase ? 1.0 :
@@ -677,7 +703,11 @@ function _solve_kind_cols!(
             end
             (isempty(nsA) || isempty(nsB)) && continue
             push!(rowA, nsA); push!(rowB, nsB)
-            push!(rval, getval(det))
+            push!(
+                rval, getval(det) -
+                    _phase_epoch_offset(rate_plans, rate_solved, ti, epoch, a, fa) +
+                    _phase_epoch_offset(rate_plans, rate_solved, ti, epoch, b, fb),
+            )
             push!(
                 rw, _row_weight(
                     _sigma_stat(kind, det.snr, σν, σt), cross ? sys_cross : sys_par,
@@ -689,7 +719,7 @@ function _solve_kind_cols!(
             push!(rsta_a, a); push!(rsta_b, b)
         end
     end
-    isempty(rowA) && return (0, Set{Tuple{Int, Int}}())
+    isempty(rowA) && return (0, Set{Tuple{Int, Int}}(), Dict{Int, Float64}())
 
     # Robust solve: IRLS over `opts.loss`, rescaling each row's noise-model
     # weight by the loss's derivative at that row's normalized residual (see
@@ -716,10 +746,62 @@ function _solve_kind_cols!(
             )
         end
     end
-    @inbounds for n in eachindex(node_col)
+    solved = Dict{Int, Float64}()
+    for n in eachindex(node_col)
         θ[node_col[n]] += x[n]
+        solved[node_col[n]] = x[n]
     end
-    return ncomp, _covered_stations(rsta_a, rsta_b, rscan, raccept)
+    return ncomp, _covered_stations(rsta_a, rsta_b, rscan, raccept), solved
+end
+
+# The phase a rate component contributes at `epoch` to one (station, feed) —
+# `2π·ṙ·(epoch − t0_k)` over the rate columns, in radians.
+#
+# A detection's phase is the phase at the epoch its search referenced, and the
+# station solve reads it as a sum of CONSTANTS. That holds only where every rate
+# coordinate is zero, i.e. at each rate component's own origin. A component
+# segmented like the constants beside it (the default: everything `PerScan`) has
+# its origin exactly there and contributes nothing here — the subtraction is
+# identically zero and the rows are the measured phases unchanged. A component
+# segmented more coarsely (a track-global inter-feed rate against per-scan
+# constants) is referenced elsewhere, and its share of the measured phase is
+# removed here rather than being left for a per-scan constant to absorb.
+#
+# `solved` is this round's rate increment per θ column, which is what the phases
+# of this round — measured on the residual of the previous one — contain.
+function _phase_epoch_offset(rate_plans, solved, ti::Integer, epoch, a::Integer, feed::Integer)
+    isempty(rate_plans) && return 0.0
+    off = 0.0
+    for plan in rate_plans
+        node = _feed_node(plan.tying, feed)
+        node == 0 && continue
+        seg = plan.tseg_id[ti]
+        Δt = epoch === nothing ? 0.0 : (Float64(epoch) - Float64(plan.tstate[seg]))
+        Δt == 0.0 && continue
+        col = _block_index(plan, node, 1, seg, a)
+        col == 0 && continue
+        off += 2π * get(solved, col, 0.0) * Δt * 3600.0
+    end
+    return off
+end
+
+# A detection stack that records no epoch says only "referenced wherever the
+# model's rate columns vanish". That is a complete answer when they all vanish
+# in the same place, and no answer at all when they do not.
+function _require_common_epoch(rate_plans, ti::Integer)
+    isempty(rate_plans) && return nothing
+    o1 = Float64(first(rate_plans).tstate[first(rate_plans).tseg_id[ti]])
+    for plan in rate_plans
+        o = Float64(plan.tstate[plan.tseg_id[ti]])
+        isapprox(o, o1; atol = 1.0e-9) || error(
+            "solve_station_systems!: the rate components are referenced to different " *
+                "epochs at time index $ti ($o1 h vs $o h), so no single epoch makes a " *
+                "detection's phase a sum of constants. Record the epoch the phases were " *
+                "measured at (`detection_stack(...; epoch)`) so the rates referenced " *
+                "elsewhere can be subtracted from the phase rows.",
+        )
+    end
+    return nothing
 end
 
 # The (station, scan) pairs this system actually calibrates: those carrying at

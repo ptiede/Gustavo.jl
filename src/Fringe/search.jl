@@ -97,7 +97,13 @@ threshold is applied here — admission to the station solve is
 [`Stationization`](@ref)'s decision, taken on the recorded `pfa`.
 
 - `delay_window`  : `(lo, hi)` delay search window in seconds. Default ±1 µs.
-- `rate_window`   : `(lo, hi)` fringe-rate search window in Hz. Default ±50 mHz.
+- `rate_window`   : `(lo, hi)` fringe-rate search window in Hz. Default ±0.8 Hz.
+  Narrowing it buys no speed — the FFT spans the whole plane either way — only a
+  smaller false-alarm trial count, while a window narrower than the true rate
+  spread hides a station outright. A station off the array's clock reaches
+  several hundred mHz at mm wavelengths, so the default is generous; keep any
+  choice well inside the ±1/(2Δt) Nyquist rate, past which a peak is an alias of
+  its own wrap.
 - `oversample`    : zero-padding factor per axis (finer delay/rate grid). Default 8.
   Widely-separated narrow bands may need a larger value (or a tight
   `delay_window`) to avoid locking onto a multi-band alias peak.
@@ -112,7 +118,7 @@ threshold is applied here — admission to the station solve is
 """
 Base.@kwdef struct FringeSearch
     delay_window::Tuple{Float64, Float64} = (-1.0e-6, 1.0e-6)
-    rate_window::Tuple{Float64, Float64} = (-0.05, 0.05)
+    rate_window::Tuple{Float64, Float64} = (-0.8, 0.8)
     oversample::Int = 8
     quad_interp::Bool = true
     algorithm::Union{Symbol, AbstractSearchAlgorithm} = :auto
@@ -249,10 +255,61 @@ struct _SearchAxes{T, M}
     plan::Any                  # full-grid FFT plan (at compute type C); `nothing` when `mbd` owns the plans
 end
 
+# The rate axis spans ±1/(2Δt); a window reaching into that wrap admits peaks
+# indistinguishable from aliases of their own conjugate. The window is a
+# configuration choice rather than a per-group event, hence `maxlog`.
+function _check_rate_window(tax::_Axis, opts::FringeSearch)
+    tax.degenerate && return nothing
+    nyquist = 1 / (2 * tax.step)
+    half = max(abs(opts.rate_window[1]), abs(opts.rate_window[2]))
+    half > 0.8 * nyquist && @warn(
+        "FringeSearch rate_window half-width $(round(half, sigdigits = 3)) Hz reaches " *
+            "$(round(Int, 100 * half / nyquist))% of the ±$(round(nyquist, sigdigits = 3)) Hz Nyquist " *
+            "rate of a $(round(tax.step, sigdigits = 3)) s integration — peaks near the wrap are aliases.",
+        maxlog = 1,
+    )
+    return nothing
+end
+
+# False-alarm level at which an edge-pinned peak is worth reporting. This is a
+# diagnostic level only; admission to the station solve is
+# `Stationization.pfa_max`'s decision.
+const _EDGE_WARN_PFA = 1.0e-4
+
+"""
+    _warn_edge_peaks(scube, opts, ax)
+
+Warn when a peak strong enough to be a detection sits on the `rate_window`
+boundary. The window, not the data, then chose that peak: the true fringe rate
+lies outside it, and the station it belongs to is being hidden rather than
+measured.
+"""
+function _warn_edge_peaks(scube, opts::FringeSearch, ax::_SearchAxes)
+    ax.tax.degenerate && return nothing
+    lo, hi = opts.rate_window
+    (isfinite(lo) && isfinite(hi)) || return nothing
+    drate = 1 / (ax.tax.step * ax.nt_pad)
+    rate = scube[:rate]
+    pfa = scube[:pfa]
+    valid = scube[:valid]
+    n = 0
+    for i in eachindex(rate, pfa, valid)
+        (valid[i] && pfa[i] <= _EDGE_WARN_PFA) || continue
+        (rate[i] - lo <= drate || hi - rate[i] <= drate) && (n += 1)
+    end
+    n > 0 && @warn(
+        "$n detection(s) peak within one grid step of the rate_window boundary " *
+            "(±$(round(max(abs(lo), abs(hi)), sigdigits = 3)) Hz): their fringe rate lies outside the window.",
+        maxlog = 1,
+    )
+    return nothing
+end
+
 function _search_axes(freqs::AbstractVector, times::AbstractVector, opts::FringeSearch, ::Type{C}) where {C}
     T = real(C)
     fax = _uniform_axis(freqs)
     tax = _uniform_axis(times)
+    _check_rate_window(tax, opts)
     nf_pad = fax.degenerate ? 1 : _fast_fft_size(opts.oversample * fax.n)
     nt_pad = tax.degenerate ? 1 : _fast_fft_size(opts.oversample * tax.n)
     delays = fax.degenerate ? [zero(T)] : collect(fftfreq(nf_pad, T(1.0 / fax.step)))

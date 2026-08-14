@@ -45,7 +45,12 @@ lands in the accompanying constant/phase term, keeping this term pure shape.
 """
 struct Dispersion <: AbstractGainTerm end
 
-"Fringe rate: phase = 2π·`rate`·(t − t0)·3600, `rate` in Hz (t in hours)."
+"""
+Fringe rate: phase = 2π·`rate`·(t − t0)·3600, `rate` in Hz (t in hours), with t0
+the mean epoch of the term's OWN time segment. A companion constant term is
+therefore the phase at the middle of each segment, not at a track-wide epoch —
+see `time_coord_state(::Rate, …)` for why the distinction is not cosmetic.
+"""
 struct Rate <: AbstractGainTerm end
 
 """
@@ -201,9 +206,19 @@ freq_coordinate(::Delay, f, f0, seg::Integer) = f - f0
 freq_coord_state(::Dispersion, geom::DataGeometry, fseg_id, nfseg) = geom.f0
 freq_coordinate(::Dispersion, f, f0, seg::Integer) = DISPERSION_K * (1.0 / f0 - 1.0 / f)
 
-# Rate uses (t − t0) in seconds (t given in hours) so θ is a rate in Hz.
-time_coord_state(::Rate, geom::DataGeometry, tseg_id, ntseg) = geom.t0
-time_coordinate(::Rate, t, t0, seg::Integer) = (t - t0) * 3600.0
+# Rate uses (t − t0) in seconds (t given in hours) so θ is a rate in Hz, with t0
+# the SEGMENT's own mean epoch rather than a track-wide one.
+#
+# The origin is where the co-located constant phase lives: phase = φ + 2π·ṙ·(t −
+# t0), so φ is the phase at t0. A rate carries an uncertainty σ_ṙ, and quoting
+# the constant at an epoch a lever arm Δt away costs it 2π·σ_ṙ·Δt — for a
+# milli-hertz-scale σ_ṙ that is a full turn within the hour, so a per-scan
+# constant referenced to the far end of a multi-hour track is pure noise. Keeping
+# each segment's origin inside the segment holds the lever arm to the segment's
+# own extent, where σ_φ = 1/snr is the whole story.
+time_coord_state(::Rate, geom::DataGeometry, tseg_id, ntseg) =
+    _segment_center(geom.times, tseg_id, ntseg, geom.t0)
+time_coordinate(::Rate, t, t0, seg::Integer) = @inbounds (t - t0[seg]) * 3600.0
 
 """
     PolyNorm(center, scale)
@@ -236,13 +251,7 @@ time_coordinate(::Polynomial{:Ti}, t, st, seg::Integer) =
 # either way, and a floor in physical units would mean nothing shared between a
 # frequency axis (Hz) and a time axis (hours).
 function _poly_norm(coords::AbstractVector{<:Real}, ids::AbstractVector{<:Integer}, nseg::Integer)
-    sums = zeros(Float64, nseg)
-    cnt = zeros(Int, nseg)
-    for i in eachindex(ids, coords)
-        sums[ids[i]] += coords[i]
-        cnt[ids[i]] += 1
-    end
-    center = [cnt[s] > 0 ? sums[s] / cnt[s] : 0.0 for s in 1:nseg]
+    center = _segment_center(coords, ids, nseg, 0.0)
     scale = zeros(Float64, nseg)
     for i in eachindex(ids, coords)
         scale[ids[i]] = max(scale[ids[i]], abs(coords[i] - center[ids[i]]))
@@ -251,6 +260,22 @@ function _poly_norm(coords::AbstractVector{<:Real}, ids::AbstractVector{<:Intege
         scale[s] > 0 || (scale[s] = 1.0)
     end
     return PolyNorm(center, scale)
+end
+
+# Mean of each segment's coordinates. A segment the solve grid never populates
+# has no mean of its own and takes `empty`, so the coordinate it hands a term
+# stays finite.
+function _segment_center(
+        coords::AbstractVector{<:Real}, ids::AbstractVector{<:Integer},
+        nseg::Integer, empty::Real,
+    )
+    sums = zeros(Float64, nseg)
+    cnt = zeros(Int, nseg)
+    for i in eachindex(ids, coords)
+        sums[ids[i]] += coords[i]
+        cnt[ids[i]] += 1
+    end
+    return [cnt[s] > 0 ? sums[s] / cnt[s] : Float64(empty) for s in 1:nseg]
 end
 
 # ── Pure scalar evaluation ───────────────────────────────────────────────────

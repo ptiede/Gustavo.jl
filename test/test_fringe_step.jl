@@ -20,10 +20,10 @@
         )
         sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
-        @test length(fr.model.phase) == 5
+        @test length(fr.model.phase) == 4
         rn = CAL.component_ranges(fr.layout)
         rm = CAL.component_ranges(frm.layout)
-        for i in 1:5
+        for i in 1:4
             @test fr.θ[rn[i]] == frm.θ[rm[i]]        # bit-identical
         end
         @test stage_names(sol) == [:fringe]
@@ -84,7 +84,7 @@
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
         rn = CAL.component_ranges(fr.layout)
         rm = CAL.component_ranges(frm.layout)
-        for i in 1:5
+        for i in 1:4
             @test fr.θ[rn[i]] == frm.θ[rm[i]]
         end
     end
@@ -102,8 +102,8 @@
 
         sol = fit(FringeFit(model = FringeModel(terms = rel_terms)), uvset)
         fr = sol[:fringe].steps[1]
-        @test length(CAL.phase_components(fr.model)) == 6
-        plan = fr.layout.plans[6]
+        @test length(CAL.phase_components(fr.model)) == 5
+        plan = fr.layout.plans[5]
         solved = [fr.θ[plan_off1(plan)[a, 2, 1, 1]] for a in 1:4]
         @test solved ≈ inj .- inj[1] atol = 1.0e-7
 
@@ -111,13 +111,43 @@
         uv0, _ = _build_fringe_uvset()
         sol0 = fit(FringeFit(model = FringeModel(terms = rel_terms)), uv0)
         fr0 = sol0[:fringe].steps[1]
-        plan0 = fr0.layout.plans[6]
+        plan0 = fr0.layout.plans[5]
         @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
         sold = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
-        @test length(sold[:fringe].steps[1].model.phase) == 5
+        @test length(sold[:fringe].steps[1].model.phase) == 4
+    end
+
+    @testset "a constant phase is referenced to its own scan" begin
+        # A rate is measured only to within its own uncertainty, so a constant
+        # phase quoted a lever arm Δt from the data carries 2π·σ_ṙ·Δt of it.
+        # A feed-COMMON constant hides that — the station rate solved from the
+        # same rows moves with it — so the probe is a feed-2 constant, which the
+        # model gives no rate of its own: it keeps the whole lever arm. Referred
+        # to a track-wide epoch instead of its own scan's, hours of lever arm
+        # randomize it outright. Noise is what makes this visible; with exact
+        # rates there is no uncertainty to lever.
+        #
+        # Not part of `default_fringe_terms` (see there for why the inter-feed
+        # phase offset is deliberately absent) — added here precisely because it
+        # is the column most sensitive to the epoch.
+        nscans = 4
+        terms = (;
+            _fringe_terms(dispersion = false, sbd = false)...,
+            rel_phase = CAL.TiedComponent(
+                CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency(), CAL.FeedComponent(2),
+            ),
+        )
+        uvset, truth = _build_fringe_uvset(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
+        sol = fit(FringeFit(model = FringeModel(; terms)), uvset)
+        rel = CAL.component_dimarray(sol, :fringe, :phase, :rel_phase)
+        want = truth.phi[:, 2] .- truth.phi[:, 1]
+        for a in eachindex(want), s in 1:nscans
+            got = only(rel[1, :, 1, s, a])
+            @test abs(rem2pi(got - want[a], RoundNearest)) < 0.2
+        end
     end
 
     @testset "transforms on the new path (incl. CalFunction)" begin
@@ -209,24 +239,23 @@
             typeof(tc.component.freq), typeof(tc.tying),
         )
 
-        # The default list compiles IN LIST ORDER to the standard sequence — 5
-        # elements → 5 components; dispersion/SBD are DispersionSBDFit's, not
-        # FringeModel's, so they never appear here regardless of geometry.
+        # The default list compiles IN LIST ORDER to the standard sequence — 4
+        # elements → 4 components; dispersion/SBD are DispersionSBDFit's, not
+        # FringeModel's, so they never appear here regardless of geometry, and
+        # there is no inter-feed CONSTANT (see `default_fringe_terms`).
         comps = FP.fringe_phase_components(FringeModel(), geom)
         @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
-            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.FeedComponent),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.FeedComponent),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
         ]
 
-        # `rel_time` moves BOTH inter-feed offsets onto a track-global column.
+        # `rel_time` moves the inter-feed delay onto a track-global column.
         gcomps = FP.fringe_phase_components(
             FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime())), geom)
         @test collect(map(sig, CAL._flatten_components(gcomps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
-            (CAL.ConstantTerm, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),

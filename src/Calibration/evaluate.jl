@@ -22,6 +22,7 @@ end
 GainEvaluator(model::StationGainModel, geom::DataGeometry; nant::Integer) =
     GainEvaluator(model, plan_parameters(model, nant, geom))
 
+
 nparameters(ev::GainEvaluator) = ev.layout.nθ
 
 # Sum a group's (phase or log-amp) component contributions for one

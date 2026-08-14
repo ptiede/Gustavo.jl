@@ -213,15 +213,15 @@ function _increment_weight(weights, k)
     return wa * wb / (wa + wb)
 end
 
-# The track's dominant per-sample phase trend: the weighted circular mean of the
-# wrapped increments between ADJACENT finite samples. Only strictly adjacent pairs
-# contribute — across a gap the true increment is unknown modulo 2π, so a
-# gap-spanning pair carries no trend information.
+# Where a track's step-to-step increments CENTER: the weighted circular mean of the
+# wrapped increments between ADJACENT finite samples, which is also the track's
+# dominant per-sample trend. Only strictly adjacent pairs contribute — across a gap
+# the true increment is unknown modulo 2π, so a gap-spanning pair says nothing about
+# either.
 #
-# `angle` returns the mean in (-π, π], which is exactly the range a sampled phase
-# can resolve: a trend steeper than π per sample is aliased in the data itself and
-# no estimator recovers it.
-function _phase_track_slope(phases, weights)
+# `angle` returns the mean in (-π, π], the range a sampled phase can resolve at all:
+# a trend steeper than π per sample is aliased in the data itself.
+function _increment_center(phases, weights)
     T = float(eltype(phases))
     acc = zero(Complex{T})
     for k in firstindex(phases):(lastindex(phases) - 1)
@@ -241,26 +241,23 @@ samples. The walk seeds from a single reference index, picked internally as
 `argmax(weights[finite])` when `weights` is provided, or the first finite phase
 otherwise.
 
-The track's dominant linear trend — a group delay along frequency, a fringe rate
-along time — is estimated and removed before the walk, then restored, so each step
-is resolved against zero rather than against the trend.
+Each step is resolved against zero: the branch chosen is the one putting the
+increment nearest the previous sample. This does ONE thing to the track — it moves
+samples by whole multiples of 2π. No trend is estimated, removed or restored, so a
+delay or rate the caller has not fitted out is still present in the result, exactly
+as it was in the input.
 
-This matters only for a STEEP trend. A nearest-branch walk resolves a step whenever
-the true increment plus its noise stays inside ±π, so a trend of up to ~2 rad per
-sample costs nothing and only past ~2.4 does the walk break down (and past π the
-trend is aliased in the samples themselves and no estimator recovers it). A track
-whose trend a delay/rate fit has already removed is far below that and unaffected;
-the detrend is what keeps the walk correct on one where it has not, such as a
-bandpass solved ahead of the fringe fit.
+That is also the walk's limit. A step is resolved only while the true increment
+plus its noise stays inside ±π, so a track carrying a steep trend — a group delay
+along frequency, a fringe rate along time — is walked onto the wrong branch
+systematically once the per-sample increment approaches π. Fit the trend out before
+unwrapping if it is that steep; a bandpass solved after a fringe fit is orders of
+magnitude below it and unaffected.
 
-The estimated trend also sets the baseline [`phase_unwrap_ambiguity`](@ref)
-measures against, and there it matters from ~1 rad per sample — without it a track
-carrying a real delay reads as ambiguous when it is perfectly determined.
-
-Noise, unlike a trend, cannot be removed this way: it puts individual steps over
-the boundary at random and the walk then accumulates 2π errors that any subsequent
-smooth fit reports as a large trend. [`phase_unwrap_ambiguity`](@ref) is what
-detects that; consult it before trusting an unwrapped track or anything fit to one.
+Noise puts individual steps over the boundary at random, and the walk then
+accumulates 2π errors that any subsequent smooth fit reports as a large trend.
+[`phase_unwrap_ambiguity`](@ref) detects that; consult it before trusting an
+unwrapped track or anything fit to one.
 
 This is an algorithmic anchor only — downstream gauge code should fix the
 phase gauge itself (by centering via a weighted mean, or by removing a
@@ -294,16 +291,6 @@ function unwrap_phase_track(phases; weights = nothing)
     end
     isnothing(ref_idx) && return unwrapped
 
-    # Walk the detrended track, then restore the trend. The trend is centred on the
-    # seed, so that sample is untouched and the walk still anchors there; what the
-    # detour changes is only which 2π branch each other sample lands on.
-    slope = _phase_track_slope(phases, weights)
-    if !iszero(slope)
-        @inbounds for i in 1:n
-            finite[i] && (unwrapped[i] -= slope * (i - ref_idx))
-        end
-    end
-
     last = unwrapped[ref_idx]
     for i in (ref_idx + 1):n
         isfinite(unwrapped[i]) || continue
@@ -318,42 +305,43 @@ function unwrap_phase_track(phases; weights = nothing)
         last = unwrapped[i]
     end
 
-    if !iszero(slope)
-        @inbounds for i in 1:n
-            finite[i] && (unwrapped[i] += slope * (i - ref_idx))
-        end
-    end
-
     return unwrapped
 end
 
 """
     phase_unwrap_ambiguity(phases; weights=nothing) -> Float64
 
-Fraction of [`unwrap_phase_track`](@ref)'s steps whose branch choice is close to a
-coin flip: the share of adjacent finite pairs whose detrended wrapped increment
-exceeds π/2 in magnitude, i.e. sits nearer the ±π branch boundary than the zero
-the detrended step should hold.
+How far a phase track's step-to-step increments SCATTER: the fraction of adjacent
+finite pairs whose wrapped increment lies more than π/2 from the increments' own
+weighted circular mean. A pure measurement — the track is read, never modified.
 
-0 means every step is unambiguous and the unwrapped track is determined. As the
-fraction grows the sequential walk degenerates into a random walk whose
-accumulated 2π errors look, to any subsequent smooth fit, like a large genuine
-trend — so a track above roughly a quarter should be treated as carrying no
-recoverable branch, not as evidence of the trend that fit reports.
+Scatter is what decides whether [`unwrap_phase_track`](@ref)'s walk is meaningful.
+0 means every step falls in a tight cluster and the branch it picks is determined;
+as the fraction grows the walk degenerates into a random walk whose accumulated 2π
+errors look, to any subsequent smooth fit, like a large genuine trend. Above
+roughly a quarter a track should be treated as carrying no recoverable branch,
+rather than as evidence of the trend that fit reports.
+
+The circular mean is a location parameter here, nothing more: it is what makes this
+a measure of scatter rather than of the trend the track happens to carry, so a
+steadily-trending track reads near 0 however steep its trend. Steepness is a
+SEPARATE failure of the walk (increments approaching ±π go onto the wrong branch
+systematically) and this statistic does not report it — fit the trend out first if
+a caller can carry one that large.
 
 Returns 0 for a track with no adjacent finite pair to compare.
 """
 function phase_unwrap_ambiguity(phases; weights = nothing)
     Base.require_one_based_indexing(phases)
     weights === nothing || Base.require_one_based_indexing(weights)
-    slope = _phase_track_slope(phases, weights)
+    center = _increment_center(phases, weights)
     nstep = 0
     namb = 0
     for k in firstindex(phases):(lastindex(phases) - 1)
         (isfinite(phases[k]) && isfinite(phases[k + 1])) || continue
         _increment_weight(weights, k) > 0 || continue
         nstep += 1
-        abs(rem2pi(phases[k + 1] - phases[k] - slope, RoundNearest)) > π / 2 && (namb += 1)
+        abs(rem2pi(phases[k + 1] - phases[k] - center, RoundNearest)) > π / 2 && (namb += 1)
     end
     return nstep == 0 ? 0.0 : namb / nstep
 end

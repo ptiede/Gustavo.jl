@@ -409,7 +409,9 @@ end
     station_weight_scale(uvset_or_names, factors; default = 1.0) -> Vector{Float64}
 
 Per-station weight correction factors, indexed by the solver's station index, built
-from a station-code => factor map (e.g. `Dict("HS" => 0.5, "GL" => 0.5)`). Wrap the
+from a station-code => factor map (e.g. `Dict("HS" => 2.0, "GL" => 2.0)`). A factor
+ABOVE 1 raises a station's weights, which is what a correlator claiming MORE noise
+than the data carries needs. Wrap the
 result in a [`StationWeightScale`](@ref) transform in the pipeline's step chain
 and every scan's weights are corrected as
 `w → w·s_a·s_b` at materialization — so a baseline with ONE affected station gets
@@ -423,7 +425,7 @@ weights. Codes absent from the data are ignored; stations absent from `factors`
 get `default`.
 
     uvset = load_fitsidi(path; lazy = true)
-    ws = station_weight_scale(uvset, Dict("HS" => 0.5, "GL" => 0.5))
+    ws = station_weight_scale(uvset, Dict("HS" => 2.0, "GL" => 2.0))
     FringeFit(weight_scale = ws, …)
 """
 station_weight_scale(uvset::UVSet, factors; default::Real = 1.0) = station_weight_scale(

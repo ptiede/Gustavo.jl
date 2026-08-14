@@ -1338,12 +1338,17 @@ end
 # collapsed grid — for those we densify to the full (ti, baseline) grid of the
 # leaf's own axes (every cell is a record; flagged/empty cells carry zero
 # weight). This is what lets a reduced UVSet be written out.
+#
+# The densified order is TIME-MAJOR: a leaf's `obs_time` is one vector shared by
+# every baseline, so emitting all baselines of one epoch before advancing keeps
+# the DATE random parameter non-decreasing. AIPS, CASA and DIFMAP require
+# time-ordered records and warn or mis-sort otherwise.
 function _leaf_record_order(leaf)
     ro = DimensionalData.metadata(leaf).record_order
     isempty(ro) || return ro
     sz = size(parent(leaf[:vis]))     # (Frequency, Ti, Baseline, Pol)
     nti, nbl = sz[2], sz[3]
-    return [(ti, bl) for bl in 1:nbl for ti in 1:nti]
+    return [(ti, bl) for ti in 1:nti for bl in 1:nbl]
 end
 
 function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :aips)
@@ -1498,6 +1503,23 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
         end
         rec_offset += length(ro)
     end
+
+    # AIPS/CASA/DIFMAP require records in ascending time. Densified leaves are
+    # emitted time-major, and leaves are written in scan-start order, so the
+    # only remaining source of disorder is a `record_order` inherited from an
+    # unordered input file. Sum the DATE columns in Float64: Float32 cannot
+    # hold integer JD plus the sub-day fraction (its spacing at 2.46e6 is 0.25 d).
+    nback = count(
+        i -> (Float64(date_param_cat[i + 1, 1]) + Float64(date_param_cat[i + 1, 2])) <
+            (Float64(date_param_cat[i, 1]) + Float64(date_param_cat[i, 2])),
+        1:(nrec_total - 1),
+    )
+    nback == 0 || @warn(
+        "write_uvfits: $nback of $(nrec_total - 1) consecutive record pairs step " *
+            "BACKWARD in time; the file is not time-ordered and AIPS/CASA/DIFMAP " *
+            "will warn on it. The record order was inherited from the input file's " *
+            "`record_order`.",
+    )
 
     extras_cat = NamedTuple{extras_keys}(extras_bufs)
     primary_data = _build_primary_data(uvset, uu, vv, ww_, bl_codes, date_param_cat, extras_cat, raw_data)

@@ -9,8 +9,18 @@
 # family-wise false-alarm probability, and whether that PFA accepted it as a real
 # fringe. Every measured cell gets a row, so `detected` — not the row's presence
 # — is what marks a detection.
+#
+# `phase` (rad) is the measured constant phase at the epoch the search referenced
+# (`scan_phase_epoch`). It is the only stage-A observable a station solve cannot
+# be inverted for: the parallel-hand pair of one baseline gives the inter-feed
+# offset DIFFERENCE `ρ_a − ρ_b` directly as `QQ − PP`, with the source and
+# atmospheric terms cancelling, at parallel-hand SNR and without cross-hand data
+# or any station fit in between.
 const DetectionRow = @NamedTuple{
-    a::Int, b::Int, pol::String, snr::Float64, pfa::Float64, detected::Bool,
+    a::Int, b::Int, pol::String, snr::Float64, pfa::Float64,
+    delay::Float64, rate::Float64, phase::Float64, detected::Bool,
+    snr_steer::Float64, pfa_steer::Float64,
+    delay_steer::Float64, rate_steer::Float64, steered::Bool,
 }
 
 """
@@ -31,9 +41,13 @@ budget (Bonferroni), so a recorded `pfa` already accounts for every search it
 competes with and can be compared directly against `Stationization.pfa_max`. The
 default `ngroups = 1` scopes the family to this scan alone (the QA convention); a
 whole-track solve passes its scan count. `t0` (seconds) is the epoch the detection PHASES
-are referenced to — delay/rate/SNR are epoch-invariant; the default is `geom`'s
-track epoch, a standalone QA caller typically wants the scan midpoint
-(`mean(timestamps(data)) * 3600`). Results are bit-identical to the serial loop
+are referenced to — delay/rate/SNR are epoch-invariant. A phase is only as good
+as its epoch is close to the data: quoting it a lever arm away costs it
+`2π·σ_rate·Δt`, so anything comparing phases against a model must reference them
+where that model's constant lives ([`scan_phase_epoch`](@ref)), and a standalone
+QA caller wants the scan midpoint (`mean(timestamps(data)) * 3600`). The default
+is `geom`'s track epoch, which is the right answer only for a single-scan
+geometry. Results are bit-identical to the serial loop
 regardless of the fan-out `executor`.
 
 Returns a `DimStack` over `Baseline × Pol` whose layers are the seven
@@ -110,5 +124,6 @@ function search_scan(
             fg, times, f0, t0_sec, ax, workspace[], params, family_cells,
         )
     end
+    _warn_edge_peaks(scube, params, ax)
     return scube
 end

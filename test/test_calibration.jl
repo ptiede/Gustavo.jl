@@ -550,7 +550,8 @@ end
     # Type stability of the forward map.
     @inferred CAL.evaluate_gains(ev, τ)
 
-    # Rate term: phase grows linearly in time, flat in frequency.
+    # Rate term: phase grows linearly in time, flat in frequency, about the
+    # segment's OWN mean epoch (one segment here, so the whole track's).
     rate_model = CAL.StationGainModel(
         phase = (rate = CAL.TiedComponent(CAL.GainComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),),
     )
@@ -558,9 +559,10 @@ end
     ṙ = 1.0e-3 .* collect(1:nant)                          # mHz-scale rates
     gr = CAL.evaluate_gains(evr, ṙ)
     pr = evr.layout.plans[1]
+    @test pr.tstate ≈ [sum(times) / length(times)]
     for ant in 1:nant, ti in eachindex(times)
         off = plan_off1(pr)[ant, 1, 1, 1]
-        expected = cis(2π * ṙ[off] * (times[ti] - 0.0) * 3600.0)
+        expected = cis(2π * ṙ[off] * (times[ti] - pr.tstate[1]) * 3600.0)
         @test gr[1, ti, ant, 1] ≈ expected
         @test gr[1, ti, ant, 2] ≈ expected               # shared across feeds
     end
@@ -784,48 +786,32 @@ end
     end
 end
 
-@testset "unwrap_phase_track resolves a trend the walk alone cannot" begin
-    rng = MersenneTwister(8675309)
+@testset "unwrap_phase_track moves samples by 2π and nothing else" begin
     n = 64
     k = 0:(n - 1)
-    σ = 0.25
-    w = fill(1 / σ^2, n)
-    drift(u, t) = sqrt(mean(abs2, (u .- u[1]) .- (t .- t[1])))
+    w = fill(100.0, n)
 
-    # Noiseless and shallow: every step is unambiguous either way, and the trend
-    # comes back exactly.
+    # Every sample comes back on some 2π branch of the value it went in as: the walk
+    # chooses a branch, it does not adjust the track toward a trend or a smooth
+    # shape.
+    raw = rem2pi.(1.1 .* k .+ 0.3 .* sin.(k ./ 7), RoundNearest)
+    got = CAL.unwrap_phase_track(raw; weights = w)
+    @test all(abs(rem2pi(got[i] - raw[i], RoundNearest)) < 1.0e-9 for i in 1:n)
+
+    # A trend gentle enough that every step's increment stays well inside ±π is
+    # recovered exactly by that walk alone.
     gentle = 1.1 .* k .+ 0.3 .* sin.(k ./ 7)
-    got = CAL.unwrap_phase_track(rem2pi.(gentle, RoundNearest); weights = w)
-    @test drift(got, gentle) < 1.0e-8
+    @test maximum(abs, (got .- got[1]) .- (gentle .- gentle[1])) < 1.0e-8
 
-    # Steep enough that noise carries individual raw steps past ±π. Resolving each
-    # step against the trend rather than against zero is the whole difference here:
-    # a walk centred on zero lands tens of radians out, since its errors are 2π
-    # apiece and all of one sign.
-    steep = 2.7 .* k
-    err = [
-        drift(
-            CAL.unwrap_phase_track(rem2pi.(steep .+ σ .* randn(rng, n), RoundNearest); weights = w),
-            steep,
-        ) for _ in 1:20
-    ]
-    @test median(err) < 1.0
-
-    # That trend is a determined branch, not an ambiguous one — the gate must not
-    # mistake a real delay for noise.
-    @test CAL.phase_unwrap_ambiguity(
-        rem2pi.(steep .+ σ .* randn(rng, n), RoundNearest); weights = w,
-    ) < 0.05
-
-    # Past π per sample the trend is aliased in the samples themselves, so no
-    # estimator recovers it — but the result must still be a continuous branch.
-    @test all(isfinite, CAL.unwrap_phase_track(rem2pi.(4.0 .* k, RoundNearest); weights = w))
-
-    # A track with no trend is left where the plain walk puts it.
+    # A track with no trend keeps the branch it arrived on.
     flat = collect(rem2pi.(0.2 .* sin.(k ./ 5), RoundNearest))
     @test CAL.unwrap_phase_track(flat; weights = w) ≈ flat
 
-    # Gaps carry no increment, so they neither seed nor bias the trend.
+    # Past π per sample the trend is aliased in the samples themselves, so no walk
+    # recovers it — the result must still be finite rather than an error.
+    @test all(isfinite, CAL.unwrap_phase_track(rem2pi.(4.0 .* k, RoundNearest); weights = w))
+
+    # Gaps are carried through untouched and do not anchor the walk.
     gappy = collect(rem2pi.(gentle, RoundNearest))
     gappy[20:30] .= NaN
     wg = copy(w)
@@ -841,9 +827,12 @@ end
     k = 0:(n - 1)
     w = fill(100.0, n)
 
-    # A clean trended track: every step sits far from the ±π boundary.
+    # A clean track: its increments sit in a tight cluster, so there is no scatter
+    # to report however steep the trend that cluster is centred on. Steepness is a
+    # separate failure of the walk and deliberately not this statistic's business.
     clean = rem2pi.(1.1 .* k .+ 0.3 .* sin.(k ./ 7), RoundNearest)
     @test CAL.phase_unwrap_ambiguity(clean; weights = w) == 0
+    @test CAL.phase_unwrap_ambiguity(rem2pi.(2.7 .* k, RoundNearest); weights = w) == 0
 
     # Pure noise well below a radian stays resolvable; past it the walk is a coin
     # flip at a large fraction of its steps and the branch is not determined.

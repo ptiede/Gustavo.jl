@@ -197,7 +197,10 @@ One row per (scan-group index `scan`, 1-based `station`, `feed ∈ {1, 2}`):
   the whole track — see `default_fringe_terms`' `rel_time`).
 - `rate_mHz`  — station fringe rate (mHz).
 - `phase_deg` — station constant phase (deg): per-scan feed-common phase plus, on
-  feed 2, the inter-feed phase offset.
+  feed 2, the inter-feed phase offset. It is the phase at the epoch that scan's
+  rate column is referenced to — the scan's own mean time, not a track-wide one
+  (see `Calibration.Rate`), so it is comparable across scans only through a
+  difference taken within one.
 
 Summed from every stage-B component the fringe stage itself owns
 (`fringe_stage_components` — the delay/rate/constant terms, EXCLUDING the

@@ -4,23 +4,23 @@
 
 @testset "rel_time model option + fringe_station_solutions" begin
 
-    @testset "rel_time switches both inter-feed offsets' time basis" begin
+    @testset "rel_time switches the inter-feed delay's time basis" begin
         mg = FP._fringe_model(rel_time = CAL.GlobalTime())
         mp = FP._fringe_model(rel_time = CAL.PerScan())
         @test length(mg.phase) == length(mp.phase)
-        # Exactly the two `FeedComponent`-tied offsets differ between the models,
-        # and only in their time-segmentation type.
+        # Exactly the one `FeedComponent`-tied offset differs between the models,
+        # and only in its time-segmentation type. (There is no inter-feed
+        # CONSTANT — see `default_fringe_terms`.)
         diff = findall(i -> typeof(mg.phase[i].component.time) != typeof(mp.phase[i].component.time),
                        eachindex(mg.phase))
-        @test length(diff) == 2
+        @test length(diff) == 1
         for i in diff
             @test mg.phase[i].tying isa CAL.FeedComponent
             @test mg.phase[i].component.time isa CAL.GlobalTime
             @test mp.phase[i].component.time isa CAL.PerScan
         end
-        # The two offsets are the constant phase and the delay.
-        @test sort([nameof(typeof(mg.phase[i].component.term)) for i in diff]) ==
-            [:ConstantTerm, :Delay]
+        # The offset is the delay.
+        @test sort([nameof(typeof(mg.phase[i].component.term)) for i in diff]) == [:Delay]
 
         # Per-scan is the default: the inter-feed offsets carry no cross-scan column.
         md = FP._fringe_model()

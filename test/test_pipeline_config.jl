@@ -145,10 +145,11 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
     @testset "defaults" begin
         f = FringeFit()
         @test f.model.terms == default_fringe_terms()
-        # The default list: 5 feed-by-feed instrument components — dispersion
-        # (dTEC) and SBD are no longer part of FringeModel's term list; they
-        # are a separate DispersionSBDFit step.
-        @test length(f.model.terms) == 5
+        # The default list: 4 feed-by-feed instrument components. Dispersion
+        # (dTEC) and SBD are a separate DispersionSBDFit step, and there is no
+        # inter-feed PHASE offset — see `default_fringe_terms`.
+        @test length(f.model.terms) == 4
+        @test !haskey(f.model.terms, :rel_phase)
         # No feed-specific Rate element: the inter-feed rate is tied ≡ 0 by default.
         @test !any(
             t -> t isa CAL.TiedComponent && t.component.term isa CAL.Rate &&

@@ -86,44 +86,52 @@ specified feed by feed as a named list (the key names the component; compiled
 component order = list order):
 
 1. per-scan constant phase, feed-common (`SharedFeeds`): atmosphere/clock.
-2. relative constant offset, `rel_time × FeedComponent(2)`: the instrumental
-   feed-2 − feed-1 phase offset.
-3. per-scan wideband (multi-band) delay, feed-common.
-4. relative delay offset, `rel_time × FeedComponent(2)`: the instrumental
+2. per-scan wideband (multi-band) delay, feed-common.
+3. relative delay offset, `rel_time × FeedComponent(2)`: the instrumental
    feed-2 − feed-1 group-delay offset.
-5. per-scan rate, feed-common: the fringe rate is common to both feeds. There
-   is deliberately NO feed-specific rate here — the Rate phase is
-   `2π·rate·(t − t0_global)` with the WHOLE-TRACK reference, so per-feed rate
-   noise is levered by hours into large, arbitrary scan-to-scan inter-feed
-   phase jumps; the inter-feed rate is negligible (EHT-HOPS convention). A
-   genuine offset is opted into by ADDING `TiedComponent(Rate(), GlobalTime(),
-   GlobalFrequency(), FeedComponent(2))`, which gives the inter-feed rate its
-   own column. Every correlation product's rate row enters the system either
-   way; the tying alone decides whether it reads as `ṙ_a − ṙ_b` (feed-common)
-   or `ṙ_{a,p} − ṙ_{b,q}` (feed-specific).
+4. per-scan rate, feed-common: the fringe rate is common to both feeds. There
+   is deliberately NO feed-specific rate here — the inter-feed rate is
+   negligible (EHT-HOPS convention), so a column for it would buy little but
+   the noise of fitting one. A genuine offset is opted into by ADDING
+   `TiedComponent(Rate(), PerScan(), GlobalFrequency(), FeedComponent(2))`,
+   which gives the inter-feed rate its own column. Every correlation product's
+   rate row enters the system either way; the tying alone decides whether it
+   reads as `ṙ_a − ṙ_b` (feed-common) or `ṙ_{a,p} − ṙ_{b,q}` (feed-specific).
+   An added rate component must carry the same time segmentation as the
+   constants beside it, so that one epoch zeroes every rate coordinate at once —
+   see [`scan_phase_epoch`](@ref).
 
-`rel_time` is the time segmentation of BOTH inter-feed offsets (elements 2 and
-4), an `AbstractTimeSegmentation`:
+`rel_time` is the inter-feed delay offset's time segmentation, an
+`AbstractTimeSegmentation`:
 
 - `PerScan()` (default) fits an offset per scan, so its scan-to-scan scatter is
   a direct instrument-stability diagnostic, and the model has no cross-scan
   column — each scan's system is independent, which is what lets consecutive
   scan-local steps share one pass over the data.
 - `GlobalTime()` fits ONE offset per station for the whole track (the EHT-HOPS
-  / rPICARD assumption that the instrumental offset is stable): bright
-  polarized scans pin it and weak scans inherit it, so a scan with no
-  cross-hand detection still has feed 2 tied. The cost is that a track-global
-  column couples every scan into one system, which forgoes scan fusion.
+  / rPICARD assumption that the instrumental offset is stable): bright scans pin
+  it and weak scans inherit it. The cost is that a track-global column couples
+  every scan into one system, which forgoes scan fusion.
 
-The phase offset (element 2) also absorbs the source's cross-hand phase, which
-is not separable from it — both are a rigid shift of the feed-2 block. So the
-offset is estimable only up to that constant, and calibrated cross-hand phase
-carries one conventional constant per segment: per scan under `PerScan()`
-(scan-to-scan jitter, since each scan estimates its own), one for the track
-under `GlobalTime()`. `GlobalTime()` is therefore also how to ask for a
-track-constant cross-hand phase convention. A source whose cross-hand phase
-genuinely varies scan to scan cannot be represented under `GlobalTime()`: the
-variation lands in the residuals, where the robust loss downweights it.
+There is deliberately NO inter-feed PHASE offset. A feed-2 constant is not
+separable from the source's cross-hand phase — both are a rigid shift of the
+feed-2 block, and the model has no source column — so fitting one and dividing
+it out removes the source's polarization angle along with the instrument's
+offset. Omitting it removes nothing instead: the R–L phase is left in the data
+for a downstream polarization fit, which is where the source and the instrument
+can be separated with a source model. Nothing else in the model is disturbed by
+the omission, because the offset it would have carried lands in the feed-COMMON
+constant, and a feed-common term cancels identically in every feed difference —
+`QQ − PP` and the cross hands are untouched.
+
+The R–L phase is still MEASURABLE without the column, and better: `QQ − PP` on
+one baseline is `ρ_a − ρ_b` with the source and atmospheric terms cancelling
+algebraically, at parallel-hand SNR and with no fit in between (see
+`DetectionRow`'s `phase`).
+
+The inter-feed DELAY is a different case and is kept: a delay decoheres across
+the band, so leaving it in costs signal, while a constant phase costs nothing to
+carry.
 
 Ionospheric dispersion (dTEC) and single-band delay (SBD) are NOT modeled
 here — they are fit by a separate [`DispersionSBDFit`](@ref) pipeline step,
@@ -134,7 +142,6 @@ time segmentation × frequency segmentation × feed tying) to model a new one.
 """
 default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = (
     atmos = TiedComponent(ConstantTerm(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    rel_phase = TiedComponent(ConstantTerm(), rel_time, GlobalFrequency(), FeedComponent(2)),
     mbd = TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
     rel_delay = TiedComponent(Delay(), rel_time, GlobalFrequency(), FeedComponent(2)),
     rate = TiedComponent(Rate(), PerScan(), GlobalFrequency(), SharedFeeds()),
@@ -207,11 +214,22 @@ THIS estimator.
 The `search` measures every baseline and gates nothing; `closure.pfa_max` is the
 one detection threshold, deciding which measurements are real fringes and so
 which stations are calibrated (see [`Stationization`](@ref)).
+
+After the station solve closes, every cell is re-measured AT the delay and rate
+that solution predicts for it ([`steer_scan`](@ref)). That measurement is NOT
+gated: `pfa_max` decides fringe-group membership on the blind pass, and a
+station in that group has its baselines measured at the known fringe location to
+arbitrarily low SNR. `steer_cells` sizes the trial count of the recorded
+`pfa_steer` — a significance a caller may read, not a threshold the pass
+applies — and `steer_cells = 0` skips the pass entirely. It runs only where the
+solve is scan-local; a pooled solve has no station parameters while the data is
+still resident, and the steered columns come back `NaN`.
 """
 Base.@kwdef struct MatchedFilter <: AbstractFringeEstimator
     search::FringeSearch = FringeSearch()
     closure::Stationization = Stationization()
     rounds::Int = 1
+    steer_cells::Float64 = 9.0
 end
 
 # ── Model compilation ─────────────────────────────────────────────────────────
@@ -448,15 +466,165 @@ function detection_table(scan_dets)
     det_scan = Vector{Int}(undef, n); det_ant_a = Vector{Int}(undef, n)
     det_ant_b = Vector{Int}(undef, n); det_pol = Vector{String}(undef, n)
     det_snr = Vector{Float64}(undef, n); det_pfa = Vector{Float64}(undef, n)
+    det_delay = Vector{Float64}(undef, n); det_rate = Vector{Float64}(undef, n)
+    det_phase = Vector{Float64}(undef, n)
     det_detected = Vector{Bool}(undef, n)
+    det_snr_steer = Vector{Float64}(undef, n); det_pfa_steer = Vector{Float64}(undef, n)
+    det_delay_steer = Vector{Float64}(undef, n); det_rate_steer = Vector{Float64}(undef, n)
+    det_steered = Vector{Bool}(undef, n)
     i = 0
     for (gi, rows) in enumerate(scan_dets), r in rows
         i += 1
         det_scan[i] = gi; det_ant_a[i] = r.a; det_ant_b[i] = r.b
         det_pol[i] = r.pol; det_snr[i] = r.snr; det_pfa[i] = r.pfa
+        det_delay[i] = r.delay; det_rate[i] = r.rate; det_phase[i] = r.phase
         det_detected[i] = r.detected
+        det_snr_steer[i] = r.snr_steer; det_pfa_steer[i] = r.pfa_steer
+        det_delay_steer[i] = r.delay_steer; det_rate_steer[i] = r.rate_steer
+        det_steered[i] = r.steered
     end
-    return (; det_scan, det_ant_a, det_ant_b, det_pol, det_snr, det_pfa, det_detected)
+    return (;
+        det_scan, det_ant_a, det_ant_b, det_pol, det_snr, det_pfa,
+        det_delay, det_rate, det_phase, det_detected,
+        det_snr_steer, det_pfa_steer, det_delay_steer, det_rate_steer, det_steered,
+    )
+end
+
+"""
+    scan_station_terms(model, layout, θ, ti) -> (delay, rate)
+
+Per-`(station, feed)` group delay (s) and fringe rate (Hz) at time index `ti`,
+summed over the stage-B components of `model`. This is the decode
+[`fringe_station_solutions`](@ref) reports, for ONE scan and without a finished
+solution, so a solve step can read its own station parameters while the scan's
+data is still resident. Entries are `NaN` where no component constrains that node.
+"""
+function scan_station_terms(model, layout, θ, ti::Integer)
+    nant = layout.nant
+    comps = fringe_stage_components(model, layout)
+    delay = fill(NaN, nant, 2)
+    rate = fill(NaN, nant, 2)
+    for a in 1:nant, f in 1:2
+        d = 0.0; r = 0.0; hd = false; hr = false
+        for (plan, kind) in comps
+            node = _feed_node(plan.tying, f)        # fseg 1: stage-B terms are GlobalFrequency
+            node == 0 && continue
+            v = _component_leaf(plan, θ)[1, node, 1, plan.tseg_id[ti], a]
+            if kind === :delay
+                d += v; hd = true
+            elseif kind === :rate
+                r += v; hr = true
+            end
+        end
+        hd && (delay[a, f] = d)
+        hr && (rate[a, f] = r)
+    end
+    return (delay, rate)
+end
+
+"""
+    scan_phase_epoch(model, layout, ti) -> Union{Float64, Nothing}
+
+The epoch (hours) at which `model`'s constant phase terms are the phase, for the
+time segment holding time index `ti`: the origin of the rate columns covering
+that segment, since a rate contributes `2π·ṙ·(t − t0)` and vanishes only there.
+`nothing` when the model carries no rate component, which leaves the constant
+free of any epoch.
+
+A search must reference its detection phases to this epoch, or the station
+solve reads them as a constant they are not. Getting it wrong is not a bias but
+a variance: a phase quoted a lever arm `Δt` from where it was measured inherits
+`2π·σ_ṙ·Δt` of the rate's own uncertainty, which the feed-common columns can
+absorb through their rate but a feed-relative offset — modeled with no rate of
+its own — cannot.
+
+Rate components of different time segmentations put their origins in different
+places, and no single epoch then zeroes them all; that model is rejected rather
+than silently referenced to one of them.
+"""
+function scan_phase_epoch(model, layout, ti::Integer)
+    epoch = nothing
+    for (plan, kind) in fringe_stage_components(model, layout)
+        kind === :rate || continue
+        o = Float64(plan.tstate[plan.tseg_id[ti]])
+        if epoch === nothing
+            epoch = o
+        elseif !isapprox(o, epoch; atol = 1.0e-9)
+            error(
+                "scan_phase_epoch: the model's rate components disagree on the epoch of " *
+                    "time index $ti ($epoch h vs $o h). A constant phase is the phase at " *
+                    "the epoch where every rate coordinate vanishes, and rate components " *
+                    "with different time segmentations have no such epoch in common. Give " *
+                    "every Rate term the same time segmentation as the constant it " *
+                    "accompanies (`PerScan()` for the default fringe term list).",
+            )
+        end
+    end
+    return epoch
+end
+
+"""
+    steer_scan(stack, res, bl_pairs, pols, f0, t0, sta_delay, sta_rate; cells)
+
+Re-measure every `(baseline, product)` of a materialized scan group AT the delay
+and rate the station solution predicts for it — `τ_{a,fa} − τ_{b,fb}` and the
+same difference in rate — rather than wherever a blind search found its peak.
+
+This is what recovers a fringe too weak to survive a blind search: the trial
+count collapses from the search plane's ~1e4 cells to the handful `cells`
+covering the prediction's uncertainty, so the SNR needed to clear a given
+false-alarm probability drops by roughly 1.5σ. Nothing about the measurement
+changes — only how many chances noise had to fake it.
+
+The steered SNR is directly comparable to the blind one because it is formed
+against the SAME noise: the blind pass reports `snr = |D_blind|/σ`, so
+re-evaluating the exact matched filter at the blind peak recovers `σ = |D_blind|/snr`
+without needing the search plane. Cells with no usable data, or whose two
+stations are not both solved this scan, come back `NaN`.
+"""
+function steer_scan(
+        stack, res, bl_pairs, pols, f0::Real, t0::Real,
+        sta_delay::AbstractMatrix, sta_rate::AbstractMatrix;
+        cells::Real = 9.0,
+    )
+    V = stack[:vis]
+    W = stack[:weights]
+    freqs = frequencies(stack)
+    times = timestamps(stack) .* 3600.0
+    # `res` covers only cross baselines; `keep` maps its column back to the cube's.
+    keep = findall(pr -> pr[1] != pr[2], UVData.baselines(stack).pairs)
+    dims = (length(bl_pairs), length(pols))
+    sdelay = fill(NaN, dims); srate = fill(NaN, dims)
+    samp = fill(NaN, dims); ssnr = fill(NaN, dims); spfa = fill(NaN, dims)
+    for p in eachindex(pols), j in eachindex(bl_pairs)
+        res[:valid][j, p] || continue
+        snr0 = res[:snr][j, p]
+        snr0 > 0 || continue
+        a, b = bl_pairs[j]
+        fa, fb = correlation_feed_pair(pols[p])
+        dpred = sta_delay[a, fa] - sta_delay[b, fb]
+        rpred = sta_rate[a, fa] - sta_rate[b, fb]
+        (isfinite(dpred) && isfinite(rpred)) || continue
+        bi = keep[j]
+        Vb = view(V, :, :, bi, p)
+        Wb = view(W, :, :, bi, p)
+        # σ of the blind pass, recovered from its own reported SNR.
+        σ = abs(_exact_matched_filter(Vb, Wb, freqs, times, f0, t0,
+                                      res[:delay][j, p], res[:rate][j, p])) / snr0
+        σ > 0 || continue
+        D = _exact_matched_filter(Vb, Wb, freqs, times, f0, t0, dpred, rpred)
+        Wsum = 0.0
+        for i in eachindex(Wb)
+            w = Wb[i]
+            (isfinite(w) && w > 0) && (Wsum += w)
+        end
+        sdelay[j, p] = dpred
+        srate[j, p] = rpred
+        samp[j, p] = Wsum > 0 ? abs(D) / Wsum : NaN
+        ssnr[j, p] = abs(D) / σ
+        spfa[j, p] = fringe_pfa(ssnr[j, p], cells)
+    end
+    return (delay = sdelay, rate = srate, amp = samp, snr = ssnr, pfa = spfa)
 end
 
 # The flag block for the solution `info` (plain parallel vectors,

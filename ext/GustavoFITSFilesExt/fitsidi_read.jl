@@ -1403,7 +1403,8 @@ end
 
 """
     load_fitsidi(path; lazy=true, scans=:, bands=:, merge_spws=false,
-                 weight_mode=:auto, weight_efficiency=1.0, drop_autocorr=true) -> UVSet
+                 weight_mode=:auto, weight_efficiency=1.0, drop_autocorr=true,
+                 apply_flags=true) -> UVSet
 
 Load a FITS-IDI file into a (lazily streamed) `UVSet`.
 
@@ -1427,6 +1428,13 @@ on data with no autocorrelations.
 `a == a`) from the visibility set even when not normalizing (total power, not
 interferometric). `normalize_autocorr=true` implies the autocorrelations are
 dropped from the output regardless. Pass both `false` to keep autocorrelations.
+
+`apply_flags` (default `true`) honors the FITS-IDI FLAG table, zeroing the weight of
+every cell its rows select. Pass `false` to ignore the table and keep those cells:
+the flags a correlator writes are operator/monitor assertions rather than
+measurements, and an over-flagging monitor can blank a whole station on a scan whose
+data is in fact good. The visibilities are identical either way — only which cells
+carry weight changes.
 
 `weight_mode` controls how the on-disk `WEIGHT` column becomes the output weight.
 Its meaning is set by the `WEIGHTYP` header keyword (AIPS Memo 114, Table 14),
@@ -1462,6 +1470,7 @@ function UVData.load_fitsidi(
         weight_mode::Symbol = :auto, weight_efficiency::Real = 1.0,
         weight_norm::Real = 1.0,
         drop_autocorr::Bool = true, normalize_autocorr::Bool = true,
+        apply_flags::Bool = true,
     )
     weight_mode in (:auto, :validity, :radiometer) || error(
         "load_fitsidi: weight_mode must be :auto (infer from the WEIGHTYP header — " *
@@ -1568,7 +1577,11 @@ function UVData.load_fitsidi(
     auto_stokes = (_idx("PP"), _idx("QQ"))
 
     # Parse the FLAG table eagerly (small; the FLUX matrix is never touched).
-    flag_entries = _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stkd)
+    # `apply_flags = false` leaves the entry list empty, so no cell is ever flagged
+    # by the table and every other code path sees the same "no FLAG HDU" case.
+    flag_entries = _build_idi_flags(
+        apply_flags ? flag_hdu : nothing, nosta_to_idx, perm, no_band, no_chan, no_stkd,
+    )
 
     # Index pass: small per-row columns only (no WEIGHT / FLUX). Read in ONE
     # strided pass over the row prefixes (see `_idi_read_small_columns`); doing
