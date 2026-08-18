@@ -118,15 +118,20 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         end
     end
 
-    @testset "ref_ant by station code" begin
+    @testset "gauge by station code" begin
         uvset, _ = _build_fringe_uvset()    # antennas named A1..A4
-        @test Gustavo._resolve_ref_ant(3, uvset) == 3
-        @test Gustavo._resolve_ref_ant("A2", uvset) == 2
-        @test Gustavo._resolve_ref_ant(:A4, uvset) == 4
-        @test_throws ErrorException Gustavo._resolve_ref_ant("ZZ", uvset)
+        names = Gustavo._antenna_names(uvset)
+        @test resolve_gauge(PinAntenna(3), names).refs == [3]
+        @test resolve_gauge(PinAntenna("A2"), names).refs == [2]
+        @test resolve_gauge(PinAntenna(:A4), names).refs == [4]
+        # A ranked list resolves entry by entry, keeping order.
+        @test resolve_gauge(PinAntenna(["A4", 1]), names).refs == [4, 1]
+        @test resolve_gauge(ZeroSumPhase(antennas = ["A2", "A4"]), names).antennas == [2, 4]
+        @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
+        @test_throws ErrorException resolve_gauge(ZeroSumPhase(antennas = ["ZZ"]), names)
         # End-to-end (new engine): code "A1" resolves to index 1 → identical solve.
-        by_code = fit(FringeFit(), uvset; ref_ant = "A1")
-        by_idx = fit(FringeFit(), uvset; ref_ant = 1)
+        by_code = fit(FringeFit(), uvset; gauge = PinAntenna("A1"))
+        by_idx = fit(FringeFit(), uvset; gauge = PinAntenna(1))
         @test parent(gains(by_code)) ≈ parent(gains(by_idx))
     end
 
@@ -134,11 +139,11 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         uvset, _ = _build_fringe_uvset()
         # A standalone Bandpass fit needs no FringeFit step, no
         # pipeline-level anchor check, and no fringe-estimator diagnostics.
-        sol = fit(Bandpass(), uvset; ref_ant = 2)
+        sol = fit(Bandpass(), uvset; gauge = PinAntenna(2))
         @test stage_names(sol) == [:bandpass]
         @test !haskey(sol.info, :search)
         @test sol.info.nant == 4
-        _, out = fitcalibrate(Bandpass(), uvset; ref_ant = 2)
+        _, out = fitcalibrate(Bandpass(), uvset; gauge = PinAntenna(2))
         @test out !== nothing
     end
 
@@ -177,9 +182,9 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         e = ExecutionConfig()
         @test e.mem_fraction == 0.6 && e.mem_budget === nothing
 
-        # ref_ant is run-wide, on CalibrationPipeline, not on FringeModel or
+        # gauge is run-wide, on CalibrationPipeline, not on FringeModel or
         # ExecutionConfig.
-        @test CalibrationPipeline([FringeFit()]).ref_ant == 1
+        @test CalibrationPipeline([FringeFit()]).gauge.refs == 1
 
         # AprioriAmplitude carries a pre-built spw_cals (loading is the caller's job).
         bc = Dict(1 => :dummy)
@@ -207,7 +212,7 @@ end
         layout = CAL.plan_parameters(model, nant, geom)
         ctx = Gustavo.SolveContext(
             model, layout, geom, CAL.GainEvaluator(model, layout), zeros(layout.nθ),
-            1, nant, antennas, ST.scan_stream(uvset; geom), Dict{Symbol, Any}(),
+            PinAntenna(1), nant, antennas, ST.scan_stream(uvset; geom), Dict{Symbol, Any}(),
         )
         @test isconcretetype(typeof(ctx))
         for f in (:model, :layout, :geom, :ev, :antennas, :stream)
@@ -302,15 +307,18 @@ end
     end
 
 
-    @testset "AprioriAmplitude and CalibrationPipeline.ref_ant" begin
+    @testset "AprioriAmplitude and CalibrationPipeline.gauge" begin
         bc = Dict(1 => :dummy)
         @test fieldtype(typeof(AprioriAmplitude(bc)), :spw_cals) === typeof(bc)
-        # ref_ant's domain is what `_resolve_ref_ant` accepts: an antenna index
-        # or a station code.
-        @test CalibrationPipeline([FringeFit()]; ref_ant = 2).ref_ant == 2
-        @test CalibrationPipeline([FringeFit()]; ref_ant = "A1").ref_ant == "A1"
-        @test CalibrationPipeline([FringeFit()]; ref_ant = :A1).ref_ant === :A1
-        @test_throws TypeError CalibrationPipeline([FringeFit()]; ref_ant = 2.5)
+        # The gauge is an AbstractGauge; a station code or index is what the
+        # gauge itself accepts, not what the pipeline field takes.
+        @test CalibrationPipeline([FringeFit()]; gauge = PinAntenna(2)).gauge.refs == 2
+        @test CalibrationPipeline([FringeFit()]; gauge = PinAntenna("A1")).gauge.refs == "A1"
+        @test CalibrationPipeline([FringeFit()]).gauge isa PinAntenna
+        @test CalibrationPipeline([FringeFit()]; gauge = ZeroSumPhase()).gauge isa ZeroSumPhase
+        # The field is typed, so a bare index is rejected at construction rather
+        # than silently treated as a gauge.
+        @test_throws TypeError CalibrationPipeline([FringeFit()]; gauge = 2)
     end
 end
 

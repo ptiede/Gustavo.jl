@@ -44,6 +44,7 @@ export Pol, Frequency, Ant, Baseline, Ti, UVW, Feed, Scan
 # supported format, so a bare `using Gustavo` spans load → fitcalibrate → write.
 export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
+export AbstractGauge, PinAntenna, ZeroSumPhase, resolve_gauge
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
 export FringeFit, FringeModel, DispersionModel, SingleBandDelay, BandGroups, default_fringe_terms,

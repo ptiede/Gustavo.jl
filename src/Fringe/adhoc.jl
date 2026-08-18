@@ -53,7 +53,7 @@
 # Adding a method is "define a `<: AbstractAdhocSmoother` struct + one method",
 # nothing else. The informal interface a smoother participates in:
 #
-#   - `apply_adhoc!(sm, phase, track_w, times; ref_ant, nant, ap_rows)` — the
+#   - `apply_adhoc!(sm, phase, track_w, times; anchor, nant, ap_rows)` — the
 #     single dispatch point; mutates `phase` in place. `ap_rows` holds the
 #     SNR-gated observation rows per AP, source-corrected, identical for every
 #     smoother. Per-track smoothers subtype `PerTrackAdhocSmoother` and instead
@@ -67,8 +67,12 @@
 #     station). Default `false`.
 #
 # The shared solve options (`snr_floor`, `phase_rewrap_iters`, `source_iters`,
-# `source_tol`, `detrend`) are fields on EVERY smoother, so a smoother value
-# fully specifies the adhoc stage.
+# `source_tol`, `detrend`, `complex_iters`) are fields on EVERY smoother, so a
+# smoother value fully specifies the adhoc stage. `snr_floor` gates the SEED
+# pass only — the phase-extraction solve whose job is the global 2π branch;
+# `complex_iters` Gauss–Newton passes then re-fit the tracks against the
+# complex residuals themselves, every AP entering ungated at its exact
+# first-order information (`complex_iters = 0` keeps the seed as the answer).
 abstract type AbstractAdhocSmoother end
 
 # A smoother that acts INDEPENDENTLY on each (station, feed) phase track: it
@@ -95,7 +99,7 @@ Pass an integer to fix it.
   2/3 = 2D). Only used when `window = :auto`.
 
 See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`.
+`source_iters`/`source_tol`/`detrend`/`complex_iters`.
 """
 Base.@kwdef struct SavitzkyGolaySmoother <: PerTrackAdhocSmoother
     window::Union{Int, Symbol} = :auto
@@ -107,6 +111,7 @@ Base.@kwdef struct SavitzkyGolaySmoother <: PerTrackAdhocSmoother
     source_iters::Int = 10
     source_tol::Float64 = 1.0e-6
     detrend::Bool = true
+    complex_iters::Int = 2
 end
 
 """
@@ -118,7 +123,7 @@ Dense first-difference (random-walk) penalized per-track smoother: minimizes
 tridiagonal, solved densely). Larger `smoothness` ⇒ stiffer track.
 
 See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`.
+`source_iters`/`source_tol`/`detrend`/`complex_iters`.
 """
 Base.@kwdef struct PenalizedSmoother <: PerTrackAdhocSmoother
     smoothness::Float64 = 1.0
@@ -127,6 +132,7 @@ Base.@kwdef struct PenalizedSmoother <: PerTrackAdhocSmoother
     source_iters::Int = 10
     source_tol::Float64 = 1.0e-6
     detrend::Bool = true
+    complex_iters::Int = 2
 end
 
 """
@@ -140,7 +146,7 @@ OU `(τ, σ²)` are fit by maximum Kalman marginal likelihood; when `false`,
 `τ = coherence_time` and `σ²` is seeded from the track scatter (no optimization).
 
 See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`.
+`source_iters`/`source_tol`/`detrend`/`complex_iters`.
 """
 Base.@kwdef struct OUSmoother <: PerTrackAdhocSmoother
     coherence_time::Float64 = 10.0
@@ -150,6 +156,7 @@ Base.@kwdef struct OUSmoother <: PerTrackAdhocSmoother
     source_iters::Int = 10
     source_tol::Float64 = 1.0e-6
     detrend::Bool = true
+    complex_iters::Int = 2
 end
 
 """
@@ -165,7 +172,7 @@ solve; see [`_solve_gp_joint!`](@ref). Requires one phase node per station (e.g.
 [`OUSmoother`](@ref).
 
 See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`.
+`source_iters`/`source_tol`/`detrend`/`complex_iters`.
 """
 Base.@kwdef struct JointOUSmoother <: AbstractAdhocSmoother
     coherence_time::Float64 = 10.0
@@ -175,6 +182,7 @@ Base.@kwdef struct JointOUSmoother <: AbstractAdhocSmoother
     source_iters::Int = 10
     source_tol::Float64 = 1.0e-6
     detrend::Bool = true
+    complex_iters::Int = 2
 end
 
 """
@@ -183,7 +191,7 @@ end
 No smoothing: the raw per-AP global solve only (unwrap + optional detrend still run).
 
 See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`.
+`source_iters`/`source_tol`/`detrend`/`complex_iters`.
 """
 Base.@kwdef struct NoSmoothing <: AbstractAdhocSmoother
     snr_floor::Float64 = 1.0
@@ -191,6 +199,7 @@ Base.@kwdef struct NoSmoothing <: AbstractAdhocSmoother
     source_iters::Int = 10
     source_tol::Float64 = 1.0e-6
     detrend::Bool = true
+    complex_iters::Int = 2
 end
 
 # ── Smoother interface traits ─────────────────────────────────────────────────
@@ -214,7 +223,7 @@ _requires_single_node(::JointOUSmoother) = true
 # every smoother sees the same observations; per-track smoothers ignore it.
 
 # Per-track smoothers: loop the (station, node) tracks and apply the per-track hook.
-function apply_adhoc!(sm::PerTrackAdhocSmoother, phase, track_w, times; ref_ant, nant, ap_rows)
+function apply_adhoc!(sm::PerTrackAdhocSmoother, phase, track_w, times; anchor, nant, ap_rows)
     for a in 1:nant, f in 1:2
         any(isfinite, @view phase[a, f, :]) || continue
         phase[a, f, :] .= smooth_track(sm, phase[a, f, :], @view(track_w[a, f, :]), times)
@@ -223,12 +232,12 @@ function apply_adhoc!(sm::PerTrackAdhocSmoother, phase, track_w, times; ref_ant,
 end
 
 # No smoothing — the per-AP solve stands as is.
-apply_adhoc!(::NoSmoothing, phase, track_w, times; ref_ant, nant, ap_rows) = phase
+apply_adhoc!(::NoSmoothing, phase, track_w, times; anchor, nant, ap_rows) = phase
 
 # Joint state-space solve: one multivariate OU Kalman over all station phases
 # observing baseline differences directly, seeded/rewrapped from the per-AP solve.
-function apply_adhoc!(sm::JointOUSmoother, phase, track_w, times; ref_ant, nant, ap_rows)
-    _solve_gp_joint!(phase, track_w, ap_rows, nant, times, ref_ant, sm)
+function apply_adhoc!(sm::JointOUSmoother, phase, track_w, times; anchor, nant, ap_rows)
+    _solve_gp_joint!(phase, track_w, ap_rows, nant, times, anchor, sm)
     return phase
 end
 
@@ -275,7 +284,7 @@ end
 
 """
     solve_adhoc_phasing(rbar, wbar, bl_pairs, pol_products, nant, times;
-                        ref_ant, smoother, tying) -> DimStack
+                        gauge, smoother, tying) -> DimStack
 
 Returns a `DimStack` whose `:phase` layer (`Ant × Feed × Ti`, `Ti` carrying the AP
 epochs) is the per-(station, feed) adhoc phase in radians, `NaN` where unsolved,
@@ -297,7 +306,8 @@ polarization basis.
 `wbar[baseline, product, ap]` is `Σ_chan w` for each AP, so the coherent SNR² is
 `|rbar|²/wbar`. `times` are the AP epochs in SECONDS — their spacing sets `T_AP`
 for the `:auto` smoothing window (otherwise unused, the detrend removes only the
-mean). `ref_ant` sets the per-AP gauge (its adhoc phase is held at 0).
+mean). `gauge` sets the per-AP convention; a `PinAntenna` holds its reference's
+adhoc phase at 0, a `ZeroSumPhase` centers each AP on zero mean.
 
 `tying` is the adhoc component's [`AbstractFeedTying`](@ref); `_feed_node` maps
 each feed onto the node it constrains. `PerFeed()` (the default, matching
@@ -496,10 +506,10 @@ end
 # State = `nant` station phases. `ap_rows` arrive with each row's source term
 # already removed, so a row is a pure node difference and the filter needs no
 # augmented source dimension. The unobservable common mode is pinned near 0 by the
-# OU prior (the paper needs no reference station); we re-gauge to `ref_ant`
+# OU prior (the paper needs no reference station); we re-gauge to the anchor
 # afterwards for pipeline consistency. Requires one node per station.
 function _solve_gp_joint!(
-        phase, track_w, ap_rows, nant::Integer, times, ref_ant::Integer, sm::JointOUSmoother,
+        phase, track_w, ap_rows, nant::Integer, times, anchor::Integer, sm::JointOUSmoother,
     )
     nap = length(times)
     # Compute type flows from the data, not from the smoother's field types.
@@ -527,7 +537,7 @@ function _solve_gp_joint!(
     τ_lo, τ_hi = _ou_tau_bounds(times)
     τv = fill(T(sm.coherence_time), nant)
     σ2v = fill(T(1.0e-2), nant)
-    welldet = [seen[i] && i != ref_ant for i in 1:nant]
+    welldet = [seen[i] && i != anchor for i in 1:nant]
     for i in 1:nant
         welldet[i] || continue
         _, _, τv[i], σ2v[i] = _track_ou_hypers(
@@ -583,9 +593,9 @@ function _solve_gp_joint!(
         end
     end
 
-    # Re-gauge to the reference (its phase → 0 per AP), matching the per-AP path.
+    # Re-gauge to the anchor (its phase → 0 per AP), matching the per-AP path.
     for ap in 1:nap
-        θref = θf[ref_ant, ap]
+        θref = θf[anchor, ap]
         isfinite(θref) || continue
         for i in 1:nant
             θf[i, ap] -= θref
@@ -602,12 +612,159 @@ function _solve_gp_joint!(
     return phase
 end
 
+# One full per-AP sweep: solve every AP's station phases from `ap_rows` (with
+# the anchor-gauged warm-start snapshot carrying 2π-branch continuity across
+# APs), restitch anchor-dropout APs, and unwrap each (station, node) track.
+# Shared by the seed alternation passes and the complex-domain refinement
+# passes, which differ only in how their rows were built.
+function _solve_ap_sweep!(
+        phase, covered, track_w, ap_rows, nant::Integer, anchor::Integer,
+        rewrap::Integer, max_stale::Integer,
+    )
+    nap = length(ap_rows)
+    fill!(phase, convert(eltype(phase), NaN))
+    fill!(covered, false)
+    fill!(track_w, zero(eltype(track_w)))
+    prev_phase = fill(convert(eltype(phase), NaN), nant, 2)  # cells no anchor-present AP has covered yet
+    prev_age = zeros(Int, nant, 2)    # APs since a cell was last refreshed (staleness)
+    for ap in 1:nap
+        rows = ap_rows[ap]
+        for row in rows
+            track_w[row.a, row.na, ap] += row.w
+            track_w[row.b, row.nb, ap] += row.w
+        end
+        # The anchor has data this AP iff some observation touches it (⇒ the solve
+        # is pinned at anchor=0). Seed only then, and only with fresh cells in the
+        # anchor gauge.
+        ref_here = any(r -> r.a == anchor || r.b == anchor, rows)
+        seed = nothing
+        if ref_here
+            seed = fill(NaN, nant, 2)
+            for a in 1:nant, n in 1:2
+                (isfinite(prev_phase[a, n]) && prev_age[a, n] <= max_stale) &&
+                    (seed[a, n] = prev_phase[a, n])
+            end
+        end
+        # No usable warm-start snapshot (first AP, all cells stale, or an
+        # anchor-dropout AP): seed from the circular phasor solve instead of
+        # trusting the tree-initialized linear solve's 2π branch — see
+        # `_circular_ap_seed`.
+        if seed === nothing || !any(isfinite, seed)
+            seed = _circular_ap_seed(rows, nant, anchor)
+        end
+        ph, cov, _, _ = _solve_observable(
+            rows, nant, PinAntenna(anchor); rewrap = rewrap,
+            seed_phase = seed,
+        )
+        phase[:, :, ap] .= ph
+        covered[:, :, ap] .= cov
+        # Refresh the anchor-gauged snapshot ONLY from anchor-present APs (keep the
+        # last known value for a station absent this AP, so a brief dropout does not
+        # reset the branch); age every cell and zero the ones refreshed here.
+        prev_age .+= 1
+        if ref_here
+            for a in 1:nant, n in 1:2
+                if cov[a, n] && isfinite(ph[a, n])
+                    prev_phase[a, n] = ph[a, n]
+                    prev_age[a, n] = 0
+                end
+            end
+        end
+    end
+
+    # Restitch the per-AP gauge when the anchor drops out (K3). Each per-AP solve
+    # pins the anchor; in APs where it has no data the solve falls back to a
+    # different pin node, so that AP's whole solution is offset by an arbitrary
+    # (non-2π) constant — which would otherwise inject a spurious common-mode jump
+    # into every station's track. Re-reference those APs to the trusted frame from
+    # neighbouring anchor-present APs via the overlapping stations.
+    _restitch_refant_gauge!(phase, covered, track_w, anchor)
+
+    # Unwrap each (station, node) track across APs (per-AP solves share the ref
+    # gauge, so a track is continuous up to ±2π steps the unwrap removes).
+    for a in 1:nant, n in 1:2
+        any(isfinite, @view phase[a, n, :]) || continue
+        phase[a, n, :] .= unwrap_phase_track(phase[a, n, :]; weights = track_w[a, n, :])
+    end
+    return phase
+end
+
+# Per-(baseline, product) complex source term for the Gauss–Newton refinement:
+# the inverse-variance mean of the model-derotated per-AP visibilities over the
+# WHOLE scan, so its SNR is the track's rather than one AP's, and its |s̄|² is
+# the signal power the linearized rows are weighted by. Also returns how many
+# APs informed each term (its identifiability count).
+function _complex_source_means(rbar, wbar, phase, bl_pairs, feeds, tying)
+    nbl, npol, nap = size(rbar)
+    sbar = zeros(ComplexF64, nbl, npol)
+    nrm = zeros(Float64, nbl, npol)
+    napu = zeros(Int, nbl, npol)
+    for bi in 1:nbl, p in 1:npol
+        a, b = bl_pairs[bi]
+        a == b && continue
+        na = _feed_node(tying, feeds[p][1])
+        nb = _feed_node(tying, feeds[p][2])
+        (na == 0 || nb == 0) && continue
+        for ap in 1:nap
+            w = wbar[bi, p, ap]
+            r = rbar[bi, p, ap]
+            (isfinite(r) && isfinite(w) && w > 0) || continue
+            dphi = phase[a, na, ap] - phase[b, nb, ap]
+            isfinite(dphi) || continue
+            sbar[bi, p] += r * cis(-dphi)     # r = Σ w·V ⇒ this is Σ w·V·e^{-iΔφ̂}
+            nrm[bi, p] += Float64(w)
+            napu[bi, p] += 1
+        end
+        nrm[bi, p] > 0 && (sbar[bi, p] /= nrm[bi, p])
+    end
+    return sbar, napu
+end
+
+# Linearized (Gauss–Newton) rows for one AP, in the complex domain. Around the
+# current tracks, `V̄·conj(s̄)e^{-iΔφ̂} ≈ |s̄|²(1 + i(Δφ − Δφ̂)) + n·conj(s̄)`, so
+#
+#     val  = Δφ̂ + Im(V̄·conj(s̄)e^{-iΔφ̂}) / |s̄|²
+#     info = 2|s̄|² / σ²        (σ² the complex noise power of V̄, data-driven)
+#
+# is a LINEAR measurement of Δφ with exactly Gaussian noise — valid at any
+# per-AP SNR, so every AP with data and a track enters, ungated: unlike a
+# per-AP extracted phase, whose information collapses nonlinearly below
+# SNR ≈ 1, the low-SNR APs here simply carry their honest (small) weight.
+# `src = 0`: the source term is already divided out through `conj(s̄)`.
+function _linearized_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, tying, phase, sbar)
+    rows = _ObsRow[]
+    nbl = length(bl_pairs)
+    @inbounds for bi in 1:nbl, p in eachindex(feeds)
+        a, b = bl_pairs[bi]
+        a == b && continue
+        na = _feed_node(tying, feeds[p][1])
+        nb = _feed_node(tying, feeds[p][2])
+        (na == 0 || nb == 0) && continue
+        w = wbar[bi, p, ap]
+        r = rbar[bi, p, ap]
+        (isfinite(r) && isfinite(w) && w > 0) || continue
+        dphi = phase[a, na, ap] - phase[b, nb, ap]
+        isfinite(dphi) || continue
+        s = sbar[bi, p]
+        s2 = abs2(s)
+        (isfinite(s2) && s2 > 0) || continue
+        z = imag((r / w) * conj(s) * cis(-dphi)) / s2
+        isfinite(z) || continue
+        n2 = noise2[bi, p]
+        # Fall back to the WEIGHT column's noise claim when the track is too
+        # short to estimate its own (mirrors `_adhoc_ap_rows`'s fallback).
+        wrow = isfinite(n2) && n2 > 0 ? 2 * s2 / n2 : s2 * Float64(w)
+        push!(rows, _ObsRow(a, b, na, nb, dphi + z, wrow, 0))
+    end
+    return rows
+end
+
 function solve_adhoc_phasing(
         rbar::AbstractArray{<:Complex, 3}, wbar::AbstractArray{<:Real, 3},
         bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
         pol_products::AbstractVector{<:AbstractString},
         nant::Integer, times::AbstractVector;
-        ref_ant::Integer = 1,
+        gauge::AbstractGauge = PinAntenna(1),
         smoother::AbstractAdhocSmoother = SavitzkyGolaySmoother(),
         tying::AbstractFeedTying = PerFeed(),
     )
@@ -644,11 +801,11 @@ function solve_adhoc_phasing(
     # weights `noise² → 1/wbar`, so this reduces to the old `|rbar|²/wbar` exactly.
     noise2 = [_track_noise2(rbar, wbar, bi, p, nap) for bi in 1:nbl, p in 1:npol]
 
-    # Effective per-scan ANCHOR station: `ref_ant` when it observes in this scan,
+    # Effective per-scan ANCHOR station: the gauge's preferred station when it observes in this scan,
     # else the best-covered station (largest total gated row weight). Everything
     # gauge-related below — the per-AP pin, the warm-start seed condition, the
     # gauge restitch, and the joint solve's re-gauge — keys on the anchor being
-    # PRESENT. Keying on the literal `ref_ant` disabled ALL of it on scans that
+    # PRESENT. Keying on the literal reference disabled ALL of it on scans that
     # never see the reference (common in multi-subarray tracks: VR2505's
     # 0607-157 scan has no GS): the warm start never armed, so the K3 per-AP 2π
     # branch flips returned on weakly-constrained stations, and the per-AP pin
@@ -689,11 +846,11 @@ function solve_adhoc_phasing(
     end
     ap_rows = [_source_corrected_rows(raw_rows[ap], x, keep) for ap in 1:nap]
 
-    # Effective per-scan ANCHOR station: `ref_ant` when it observes in this scan,
+    # Effective per-scan ANCHOR station: the gauge's preferred station when it observes in this scan,
     # else the best-covered station (largest total gated row weight). Everything
     # gauge-related below — the per-AP pin, the warm-start seed condition, the
     # gauge restitch, and the joint solve's re-gauge — keys on the anchor being
-    # PRESENT. Keying on the literal `ref_ant` disabled ALL of it on scans that
+    # PRESENT. Keying on the literal reference disabled ALL of it on scans that
     # never see the reference (common in multi-subarray tracks: VR2505's
     # 0607-157 scan has no GS): the warm start never armed, so the K3 per-AP 2π
     # branch flips returned on weakly-constrained stations, and the per-AP pin
@@ -706,7 +863,12 @@ function solve_adhoc_phasing(
             wtot[row.a] += row.w
             wtot[row.b] += row.w
         end
-        wtot[ref_ant] > 0 || all(iszero, wtot) ? Int(ref_ant) : argmax(wtot)
+        # A ranked gauge walks its references before falling back to the
+        # best-observed station, so a dropout costs the next choice, not an
+        # arbitrary hop.
+        cand = gauge_station_order(gauge, nant)
+        j = findfirst(a -> 1 <= a <= nant && wtot[a] > 0, cand)
+        j !== nothing ? Int(cand[j]) : (all(iszero, wtot) ? 1 : argmax(wtot))
     end
 
     # Carry solved node phases forward as a temporal warm-start for the next AP's
@@ -734,71 +896,10 @@ function solve_adhoc_phasing(
     # With `source_iters == 1` the source terms are never fitted and stay at 0, so
     # the model reduces to a pure station-difference solve.
     for iter in 1:max(smoother.source_iters, 1)
-        fill!(phase, convert(eltype(wbar), NaN))
-        fill!(covered, false)
-        fill!(track_w, zero(eltype(wbar)))
-        prev_phase = fill(convert(eltype(wbar), NaN), nant, 2)  # cells no anchor-present AP has covered yet
-        prev_age = zeros(Int, nant, 2)    # APs since a cell was last refreshed (staleness)
-        for ap in 1:nap
-            rows = ap_rows[ap]
-            for row in rows
-                track_w[row.a, row.na, ap] += row.w
-                track_w[row.b, row.nb, ap] += row.w
-            end
-            # The anchor has data this AP iff some observation touches it (⇒ the solve
-            # is pinned at anchor=0). Seed only then, and only with fresh cells in the
-            # anchor gauge.
-            ref_here = any(r -> r.a == anchor || r.b == anchor, rows)
-            seed = nothing
-            if ref_here
-                seed = fill(NaN, nant, 2)
-                for a in 1:nant, n in 1:2
-                    (isfinite(prev_phase[a, n]) && prev_age[a, n] <= max_stale) &&
-                        (seed[a, n] = prev_phase[a, n])
-                end
-            end
-            # No usable warm-start snapshot (first AP, all cells stale, or an
-            # anchor-dropout AP): seed from the circular phasor solve instead of
-            # trusting the tree-initialized linear solve's 2π branch — see
-            # `_circular_ap_seed`.
-            if seed === nothing || !any(isfinite, seed)
-                seed = _circular_ap_seed(rows, nant, anchor)
-            end
-            ph, cov, _, _ = _solve_observable(
-                rows, nant, anchor; rewrap = smoother.phase_rewrap_iters,
-                seed_phase = seed,
-            )
-            phase[:, :, ap] .= ph
-            covered[:, :, ap] .= cov
-            # Refresh the anchor-gauged snapshot ONLY from anchor-present APs (keep the
-            # last known value for a station absent this AP, so a brief dropout does not
-            # reset the branch); age every cell and zero the ones refreshed here.
-            prev_age .+= 1
-            if ref_here
-                for a in 1:nant, n in 1:2
-                    if cov[a, n] && isfinite(ph[a, n])
-                        prev_phase[a, n] = ph[a, n]
-                        prev_age[a, n] = 0
-                    end
-                end
-            end
-        end
-
-        # Restitch the per-AP gauge when the anchor drops out (K3). Each per-AP solve
-        # pins the anchor; in APs where it has no data the solve falls back to a
-        # different pin node, so that AP's whole solution is offset by an arbitrary
-        # (non-2π) constant — which would otherwise inject a spurious common-mode jump
-        # into every station's track. Re-reference those APs to the trusted frame from
-        # neighbouring anchor-present APs via the overlapping stations.
-        _restitch_refant_gauge!(phase, covered, track_w, anchor)
-
-        # Unwrap each (station, node) track across APs (per-AP solves share the ref
-        # gauge, so a track is continuous up to ±2π steps the unwrap removes).
-        for a in 1:nant, n in 1:2
-            any(isfinite, @view phase[a, n, :]) || continue
-            phase[a, n, :] .= unwrap_phase_track(phase[a, n, :]; weights = track_w[a, n, :])
-        end
-
+        _solve_ap_sweep!(
+            phase, covered, track_w, ap_rows, nant, anchor,
+            smoother.phase_rewrap_iters, max_stale,
+        )
         (fit_source && iter < smoother.source_iters) || break
         moved = _update_source_terms!(x, raw_rows, phase, nap)
         for ap in 1:nap
@@ -812,7 +913,36 @@ function solve_adhoc_phasing(
     # EHT-HOPS `T_dof`, Eqs 21–22); the joint solve runs one multivariate OU Kalman
     # over all station phases (re-gauged to the anchor, matching the per-AP path);
     # `NoSmoothing` is a no-op. See `apply_adhoc!`.
-    apply_adhoc!(smoother, phase, track_w, times; ref_ant = anchor, nant = nant, ap_rows = ap_rows)
+    apply_adhoc!(smoother, phase, track_w, times; anchor = anchor, nant = nant, ap_rows = ap_rows)
+
+    # Gauss–Newton refinement in the COMPLEX domain. Everything above is the
+    # SEED: the phase-extraction solve's spanning-tree unwrap and warm starts
+    # settle the global 2π branch, which no local linearization can, and the
+    # SNR gate is confined to that seeding role. Each pass here re-derives the
+    # per-(baseline, product) complex source terms from the whole scan,
+    # linearizes every AP's residual around the current tracks
+    # (`_linearized_ap_rows`), and re-solves and re-smooths on those rows —
+    # every AP entering at its exact first-order information, ungated. With
+    # the smoothing pass inside, each iteration is an extended-Kalman/RTS
+    # step and the loop is Gauss–Newton on the MAP objective of the complex
+    # data; the innovations start on the seed's branch, so the linearization
+    # stays inside ±π by construction.
+    sbar_ref = nothing
+    nap_ref = nothing
+    for _ in 1:max(smoother.complex_iters, 0)
+        sbar, napu = _complex_source_means(rbar, wbar, phase, bl_pairs, feeds, tying)
+        sbar_ref = sbar
+        nap_ref = napu
+        ref_rows = [
+            _linearized_ap_rows(rbar, wbar, ap, bl_pairs, feeds, noise2, tying, phase, sbar)
+                for ap in 1:nap
+        ]
+        _solve_ap_sweep!(
+            phase, covered, track_w, ref_rows, nant, anchor,
+            smoother.phase_rewrap_iters, max_stale,
+        )
+        apply_adhoc!(smoother, phase, track_w, times; anchor = anchor, nant = nant, ap_rows = ref_rows)
+    end
 
     # Demean per track: remove the per-scan mean so adhoc does not alias the Stage-B
     # constant phase — this also fixes the (per-station constant ↔ source term)
@@ -822,6 +952,14 @@ function solve_adhoc_phasing(
             _detrend_track!(@view(phase[a, n, :]), @view(track_w[a, n, :]))
         end
     end
+
+    # Impose the gauge LAST. Detrending removes each track's temporal mean, which
+    # offsets every AP by the same constant, so applying the gauge after it leaves
+    # the per-AP convention exact and the detrended tracks zero-mean up to one
+    # global constant — and that constant is a per-AP common mode, which cancels on
+    # every baseline. The two conventions are compatible only up to that constant;
+    # this order is what makes the gauge the exact one.
+    _apply_ap_gauge!(phase, covered, gauge, 2)
 
     # Expand the (station, NODE) solution onto the feed axis the caller indexes:
     # feeds sharing a node get identical tracks (so a `SharedFeeds` adhoc contributes
@@ -834,6 +972,22 @@ function solve_adhoc_phasing(
         n == 0 && continue
         phase_out[:, f, :] .= @view phase[:, n, :]
         covered_out[:, f, :] .= @view covered[:, n, :]
+    end
+
+    # The refinement's complex source means supersede the seed's phase-only
+    # alternation estimates: same per-(baseline, product) constant, measured
+    # against the final tracks over every usable AP. Two APs stays the
+    # identifiability threshold.
+    if sbar_ref !== nothing
+        for p in 1:npol, bi in 1:nbl
+            k = (p - 1) * nbl + bi
+            if nap_ref[bi, p] >= 2 && abs2(sbar_ref[bi, p]) > 0
+                x[k] = angle(sbar_ref[bi, p])
+                keep[k] = true
+            else
+                keep[k] = false
+            end
+        end
     end
 
     # Source terms as measured, `NaN` where too poorly sampled to identify.
@@ -872,7 +1026,7 @@ function _accumulate_leaf_rbar!(rbar, wbar, V, W)
 end
 
 """
-    adhoc_scan!(θ, stack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
+    adhoc_scan!(θ, stack, win::GeometryWindow, adhoc_plan, adhoc, gauge, nant;
                 executor = DynamicScheduler()) -> θ
 
 The per-integration atmospheric-phase (adhoc) solve of one scan window — the
@@ -886,7 +1040,7 @@ comes from `adhoc_plan`, so the number of phase nodes per station is the
 model's choice and needs no separate argument.
 """
 function adhoc_scan!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, adhoc_plan, adhoc, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, adhoc_plan, adhoc, gauge, nant;
         executor = DynamicScheduler(),
     )
     geom = win.geom
@@ -925,7 +1079,7 @@ function adhoc_scan!(
     # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.
     as = solve_adhoc_phasing(
         rbar, wbar, bl_pairs, pols, nant, tg .* 3600.0;
-        ref_ant = ref_ant, smoother = adhoc, tying = adhoc_plan.tying,
+        gauge = gauge, smoother = adhoc, tying = adhoc_plan.tying,
     )
     adhoc_leaf = _component_leaf(adhoc_plan, θ)
     for (ap, gti) in enumerate(g_ti)
@@ -942,31 +1096,83 @@ function adhoc_scan!(
 end
 
 # Restitch per-AP gauges so the reference frame is consistent across APs even
-# when `ref_ant` drops out (K3). When `ref_ant` is solved in an AP, that AP's
-# per-AP solve already pins it (frame = ref_ant phase 0) and we trust it,
+# when the anchor drops out (K3). When the anchor is solved in an AP, that AP's
+# per-AP solve already pins it (frame = anchor phase 0) and we trust it,
 # refreshing the running anchor from this AP's solved cells (so real drift
-# propagates). When `ref_ant` is ABSENT, the AP's solve anchored on a different
+# propagates). When the anchor is ABSENT, the AP's solve anchored on a different
 # node, so it carries an arbitrary global offset δ; we estimate δ as the
 # weighted circular mean over the cells common to this AP and the anchor, and
-# subtract it from every solved cell of the AP. This is a no-op when `ref_ant` is
+# subtract it from every solved cell of the AP. This is a no-op when the anchor is
 # present in every AP (so it never perturbs the well-anchored case), and it only
 # removes a single global per-AP constant — per-(station, feed) means and slopes
 # are still handled later by `_detrend_track!`. Leading APs with no trusted
 # anchor yet are left untouched (best effort). A multi-component AP keeps one
 # global δ dominated by the largest overlap; per-island offsets remain a
 # fundamental gauge freedom (one additive freedom per connected component).
-function _restitch_refant_gauge!(phase, covered, track_w, ref_ant::Integer)
+# Put each AP on the gauge's own convention, over a station set that does NOT move
+# between APs.
+#
+# The per-AP common mode is unobservable — it cancels on every baseline — so this
+# changes how the tracks read, never the applied correction. That is exactly why
+# the set must be fixed: a sum taken over whatever stations happen to be covered
+# shifts frame whenever coverage flickers, putting steps into every track for a
+# quantity that carries no information. Summing over the stations covered in EVERY
+# AP keeps one frame for the whole scan.
+#
+# A pinned gauge needs nothing here: the per-AP solves already pin the anchor and
+# `_restitch_refant_gauge!` has carried that frame across the APs where it drops out.
+_apply_ap_gauge!(phase, covered, ::AbstractGauge, nnode::Integer) = phase
+
+function _apply_ap_gauge!(phase, covered, gauge::ZeroSumPhase, nnode::Integer)
+    nant, _, nap = size(phase)
+    # ONE constant per AP, across BOTH feed nodes. Cross-hand rows join the two
+    # feeds into a single connected component carrying a single additive freedom,
+    # so a separate constant per feed would invent a second one and shift every
+    # cross-hand difference `φ_{a,1} − φ_{b,2}` by the gap between them — breaking
+    # the reconstruction the gauge must leave untouched. Subtracting the same
+    # constant from every cell cancels in every baseline difference, parallel and
+    # cross alike.
+    #
+    # The summed cells are those covered in EVERY AP: a sum over whatever happens
+    # to be covered moves frame with coverage, putting steps into every track for a
+    # quantity that carries no information.
+    #
+    # `weights` describes the station-solve constraint row, whose nodes are not
+    # these cells, so the per-AP frame is unweighted.
+    cells = [(a, n) for a in 1:nant for n in 1:nnode
+        if all(covered[a, n, ap] for ap in 1:nap) &&
+            (gauge.antennas === nothing || a in gauge.antennas)]
+    isempty(cells) && return phase
+    for ap in 1:nap
+        tot = zero(eltype(phase))
+        cnt = 0
+        for (a, n) in cells
+            v = phase[a, n, ap]
+            isfinite(v) || continue
+            tot += v
+            cnt += 1
+        end
+        cnt == 0 && continue
+        d = tot / cnt
+        for a in 1:nant, n in 1:nnode
+            isfinite(phase[a, n, ap]) && (phase[a, n, ap] -= d)
+        end
+    end
+    return phase
+end
+
+function _restitch_refant_gauge!(phase, covered, track_w, ref_station::Integer)
     nant, _, nap = size(phase)
     anchor = fill(NaN, nant, 2)
     have_anchor = false
     for ap in 1:nap
-        ref_present = covered[ref_ant, 1, ap] || covered[ref_ant, 2, ap]
+        ref_present = covered[ref_station, 1, ap] || covered[ref_station, 2, ap]
         if !ref_present && have_anchor
             # Register PER FEED. With cross hands the two feeds share a component
             # but carry two gauge freedoms (the overall phase pin and the feed-2
-            # EVPA pin); when ref_ant drops out both fall back to a different
+            # EVPA pin); when the anchor drops out both fall back to a different
             # antenna, shifting each feed by its own constant. The per-feed
-            # convention (each feed gauged relative to ref_ant's feed) matches the
+            # convention (each feed gauged relative to the anchor's feed) matches the
             # rest of the adhoc solve, so a separate δ per feed restores it.
             for f in 1:2
                 num_s = 0.0

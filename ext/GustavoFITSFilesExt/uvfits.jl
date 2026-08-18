@@ -1345,10 +1345,40 @@ end
 # time-ordered records and warn or mis-sort otherwise.
 function _leaf_record_order(leaf)
     ro = DimensionalData.metadata(leaf).record_order
-    isempty(ro) || return ro
     sz = size(parent(leaf[:vis]))     # (Frequency, Ti, Baseline, Pol)
     nti, nbl = sz[2], sz[3]
-    return [(ti, bl) for ti in 1:nti for bl in 1:nbl]
+    # A recorded order is filtered on the same rule as a densified one: where a
+    # record comes from does not change whether it can be placed on the uv plane.
+    cand = isempty(ro) ? ((ti, bl) for ti in 1:nti for bl in 1:nbl) : ro
+    # Densifying the (time, baseline) grid names cells the observation never
+    # sampled — a baseline absent from an epoch, or one the reduction dropped.
+    # Those carry no uv position, and a record whose (u,v,w) is not finite cannot
+    # be placed on the uv plane: a reader that grids it, takes a uv range over it,
+    # or forms `Σ V·w` (where `NaN * 0` is NaN, not 0) is corrupted by a row that
+    # holds nothing. Emit only the cells with a real position.
+    uvw = parent(leaf[:uvw])          # (Ti, Baseline, UVW)
+    w = parent(leaf[:weights])        # (Frequency, Ti, Baseline, Pol)
+    nchan, npol = sz[1], sz[4]
+    out = Tuple{Int, Int}[]
+    sizehint!(out, nti * nbl)
+    for (ti, bl) in cand
+        if isfinite(uvw[ti, bl, 1]) && isfinite(uvw[ti, bl, 2]) && isfinite(uvw[ti, bl, 3])
+            push!(out, (ti, bl))
+            continue
+        end
+        # A cell with weight but no position is a bug upstream, not padding:
+        # dropping it would silently discard data, so it stops the write.
+        for p in 1:npol, c in 1:nchan
+            wc = w[c, ti, bl, p]
+            isfinite(wc) && wc > 0 && error(
+                "write_uvfits: (time $ti, baseline $bl) carries weight $wc at " *
+                    "(channel $c, pol $p) but its (u,v,w) is $(uvw[ti, bl, 1]), " *
+                    "$(uvw[ti, bl, 2]), $(uvw[ti, bl, 3]) — a record with no uv " *
+                    "position cannot be written.",
+            )
+        end
+    end
+    return out
 end
 
 function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :aips)
@@ -1580,11 +1610,29 @@ function _write_records_kernel!(
             pmem = pol_perm[pdisk]
             for c in 1:nchan
                 v = vis_dense[c, ti, bi, pmem]
-                raw_data[row, 1, pdisk, 1, c, 1, 1] = real(v)
-                # imag_sign = -1 (:aips) conjugates to the AIPS/UVFITS phase
-                # convention; +1 (:fitsidi) writes the internal phase verbatim.
-                raw_data[row, 2, pdisk, 1, c, 1, 1] = imag_sign * imag(v)
-                raw_data[row, 3, pdisk, 1, c, 1, 1] = w_dense[c, ti, bi, pmem]
+                wc = w_dense[c, ti, bi, pmem]
+                if isfinite(real(v)) && isfinite(imag(v)) && isfinite(wc) && wc > 0
+                    raw_data[row, 1, pdisk, 1, c, 1, 1] = real(v)
+                    # imag_sign = -1 (:aips) conjugates to the AIPS/UVFITS phase
+                    # convention; +1 (:fitsidi) writes the internal phase verbatim.
+                    raw_data[row, 2, pdisk, 1, c, 1, 1] = imag_sign * imag(v)
+                    raw_data[row, 3, pdisk, 1, c, 1, 1] = wc
+                elseif isfinite(wc) && wc > 0
+                    # A weighted cell with a non-finite visibility is corrupted
+                    # data, not padding: exporting it as zero would silently
+                    # discard a measurement.
+                    error(
+                        "write_uvfits: (time $ti, baseline $bi, channel $c, pol $pdisk) " *
+                            "carries weight $wc but a non-finite visibility $v.",
+                    )
+                else
+                    # Empty cells are NaN + zero weight in memory; on disk they
+                    # must be literal zeros. Readers form Σ V·w without masking
+                    # first, and NaN * 0 is NaN.
+                    raw_data[row, 1, pdisk, 1, c, 1, 1] = 0
+                    raw_data[row, 2, pdisk, 1, c, 1, 1] = 0
+                    raw_data[row, 3, pdisk, 1, c, 1, 1] = 0
+                end
             end
         end
         # (u,v,w) written verbatim: FITS-IDI and AIPS UVFITS share the same

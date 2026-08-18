@@ -33,10 +33,10 @@
         @test fr.info.det_snr == frm.info.det_snr
         @test fr.info.det_pfa == frm.info.det_pfa
 
-        # ref_ant as a station code resolves identically.
+        # A gauge naming a station code resolves identically.
         sol_code = fit(
             FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
-            uvset; ref_ant = "A1",
+            uvset; gauge = PinAntenna("A1"),
         )
         @test sol_code[:fringe].steps[1].θ == fr.θ
 
@@ -55,13 +55,13 @@
         uvset, _ = _build_fringe_uvset(nant = 4, omit_station = 4)
         model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
 
-        sol = fit(FringeFit(; model), uvset; ref_ant = "A4")
+        sol = fit(FringeFit(; model), uvset; gauge = PinAntenna("A4"))
         @test isempty(sol.info.flagged_ant)
         @test isempty(FP.fringe_station_flags(sol))
         @test UVP.apply_calibration(uvset, sol) isa UVP.UVSet
 
         # The flags do not depend on which station holds the gauge.
-        present = fit(FringeFit(; model), uvset; ref_ant = "A1")
+        present = fit(FringeFit(; model), uvset; gauge = PinAntenna("A1"))
         @test present.info.flagged_ant == sol.info.flagged_ant
         @test present.info.flagged_scan == sol.info.flagged_scan
     end

@@ -67,7 +67,7 @@ explicit per-scan source term with the specs as priors. Mirrors
 
 Define:
 
-    Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup, model::BandpassModel; ref_ant) -> report
+    Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup, model::BandpassModel; gauge) -> report
 
 writing into `θ`'s bandpass blocks. `results` is the per-scan
 `(; rl, wl, pols, source)` accumulator list, in group-index order; `setup` is
@@ -118,9 +118,9 @@ function validate_bandpass(::AbstractBandpassSmoother, model::BandpassModel)
     return nothing
 end
 function solve_bandpass! end
-solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup, model::BandpassModel; ref_ant) =
+solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup, model::BandpassModel; gauge) =
     error("$(typeof(sm)) does not implement the bandpass smoother interface: define " *
-        "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup, model; ref_ant).")
+        "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup, model; gauge).")
 
 """
     accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow; derotate = true)
@@ -202,7 +202,7 @@ end
 # per-segment precision a shape fit weights the track by.
 function _seed_phase_tracks(
         rbar_bp, wbar_bp, bl_pairs, pol_products, nant, segs;
-        ref_ant::Integer = 1, snr_floor::Real = 1.0,
+        gauge::AbstractGauge = PinAntenna(1), snr_floor::Real = 1.0,
     )
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
@@ -224,7 +224,7 @@ function _seed_phase_tracks(
             prec[a, fa, fs] += snr2
             prec[b, fb, fs] += snr2
         end
-        ph, _, _, _ = _solve_observable(rows, nant, ref_ant; rewrap = 0)
+        ph, _, _, _ = _solve_observable(rows, nant, gauge; rewrap = 0)
         phase[:, :, fs] .= ph
     end
     return phase, prec
@@ -600,7 +600,7 @@ function _warn_degenerate_bandpass(report)
     return nothing
 end
 
-function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup, model::BandpassModel; ref_ant::Integer)
+function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup, model::BandpassModel; gauge::AbstractGauge)
     pols = results[1].pols
     nchan = length(setup.channel_freqs)
     rbar, wbar = bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
@@ -616,7 +616,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup, model::Bandpa
         fsegs, seg_spw, seg_freq = _segment_bands(plan, setup.channel_freqs, setup.spw_of_chan)
         band_ids = sort(unique(seg_spw))
         phase, prec = _seed_phase_tracks(
-            rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs; ref_ant,
+            rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs; gauge,
         )
         phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
         _shape_tracks!(phase, prec, seg_spw, seg_freq, sm.phase; unwrap = true, status = phase_status)
@@ -661,18 +661,23 @@ end
 
 # One scan's per-(baseline, pol, SEGMENT) coherent residual, written directly
 # into `rview`/`wview` (a (Baseline, Pol, Frequency) slice of the multi-scan
-# accumulator — no intermediate allocation) and SNR-gated exactly as the
-# closure solves gate it: `_track_noise2`/`_segment_snr2` read straight off
-# `sc.rl`/`sc.wl` (a fresh per-scan accumulator, not summed across scans), so
-# no new noise-estimation machinery is needed.
+# accumulator — no intermediate allocation).
+#
+# NOT SNR-gated, deliberately. The joint solve consumes these as COMPLEX
+# residuals under inverse-variance weights, and that accumulation is unbiased
+# at any SNR — a weak cell contributes its information at its honest weight
+# and costs variance, never validity. An SNR gate here (the closure tier's,
+# which is justified THERE because that tier extracts a per-segment PHASE, a
+# meaningless quantity below the noise) would preferentially delete the
+# cross-hand cells — the only rows that tie the feed-2 gain block to feed-1
+# and so the only measurement of the relative (R–L) bandpass — leaving that
+# block at its initialization. Outlier handling is a pipeline concern (a
+# dedicated flagging step upstream of the solve), not a cell gate's.
 function _reduce_scan_segments!(rview, wview, sc, segs)
-    nchan = size(sc.rl, Frequency)
     for p in axes(rview, Pol), bi in axes(rview, Baseline)
-        noise2 = _track_noise2(sc.rl, sc.wl, bi, p, nchan)
         for (fs, chans) in enumerate(segs)
-            rc, wc, w2c = _segment_residual(sc.rl, sc.wl, bi, p, chans)
-            keep = isfinite(rc) && abs(rc) > 0 && isfinite(wc) && wc > 0 &&
-                _segment_snr2(rc, wc, w2c, noise2) >= 1.0
+            rc, wc, _ = _segment_residual(sc.rl, sc.wl, bi, p, chans)
+            keep = isfinite(rc) && isfinite(wc) && wc > 0
             rview[bi, p, fs] = keep ? rc : zero(rc)
             wview[bi, p, fs] = keep ? wc : zero(wc)
         end
@@ -731,10 +736,10 @@ end
 # structure that IS identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 # over the band eliminates `ls` and leaves the full-rank signless-Laplacian
 # system) and biasing every other station through the inconsistency.
-function _joint_bandpass_pins(bl_pairs, feeds, nant, ref_ant)
+function _joint_bandpass_pins(bl_pairs, feeds, nant, gauge)
     nnodes = 2 * nant
     edges = Tuple{Int, Int}[]
-    # Node degree stands in for the row weight `_best_node` scores elsewhere: this
+    # Node degree stands in for the row weight the gauge scores elsewhere: this
     # graph is built from the baselines that EXIST, before any per-channel gating,
     # so the number of correlations touching a node is the observation count
     # available to anchor it.
@@ -749,11 +754,13 @@ function _joint_bandpass_pins(bl_pairs, feeds, nant, ref_ant)
         deg[nb] += 1
     end
     compid, ncomp, _ = connected_components(nnodes, edges)
+    # Inverse of `_node`: feed-1 block 1:nant, feed-2 nant+1:2nant.
+    station_of(n) = (n - 1) % nant + 1
+    feed_of(n) = n > nant ? 2 : 1
     pins = Set{Int}()
     for c in 1:ncomp
         comp_nodes = findall(==(c), compid)
-        r1, r2 = _node(ref_ant, 1, nant), _node(ref_ant, 2, nant)
-        push!(pins, r1 in comp_nodes ? r1 : (r2 in comp_nodes ? r2 : _best_node(comp_nodes, deg)))
+        push!(pins, gauge_anchor(gauge, comp_nodes, deg, station_of, feed_of))
     end
     return pins
 end
@@ -961,14 +968,14 @@ function validate_bandpass(::JointSmoother, model::BandpassModel)
     return nothing
 end
 
-function solve_bandpass!(sm::JointSmoother, θ, results, setup, model::BandpassModel; ref_ant::Integer)
+function solve_bandpass!(sm::JointSmoother, θ, results, setup, model::BandpassModel; gauge::AbstractGauge)
     _, seg_spw, seg_freq = _segment_bands(setup.bp_plan, setup.channel_freqs, setup.spw_of_chan)
     band_ids = sort(unique(seg_spw))
     phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
     amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
     solve_joint_bandpass!(
         θ, results, setup.bl_pairs, results[1].pols, setup.nant, setup.bp_plan, setup.amp_plan;
-        ref_ant, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
+        gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
         phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq,
         phase_status, amp_status,
     )
@@ -979,7 +986,7 @@ end
 
 """
     solve_joint_bandpass!(θ, scans, bl_pairs, pol_products, nant, phase_plan, amp_plan;
-                          ref_ant = 1, max_iterations = 8, tolerance = 1.0e-6,
+                          gauge = PinAntenna(1), max_iterations = 8, tolerance = 1.0e-6,
                           max_logamp = log(10.0))
 
 Jointly solve the per-(station, feed) COMPLEX bandpass gain and a per-scan,
@@ -1005,7 +1012,7 @@ receive each track's `_BP_TRACK_*` outcome code from the final sweep.
 """
 function solve_joint_bandpass!(
         θ, scans, bl_pairs, pol_products, nant, phase_plan, amp_plan;
-        ref_ant::Integer = 1, max_iterations::Integer = 8, tolerance::Real = 1.0e-6,
+        gauge::AbstractGauge = PinAntenna(1), max_iterations::Integer = 8, tolerance::Real = 1.0e-6,
         max_logamp::Real = _BP_MAX_LOGAMP,
         phase_spec::AbstractShapeSpec = FreeShape(),
         amp_spec::AbstractShapeSpec = FreeShape(),
@@ -1027,7 +1034,7 @@ function solve_joint_bandpass!(
 
     rseg, wseg = _reduce_all_scans(scans, segs)
     touching = _joint_bandpass_touching(bl_pairs, feeds, nant)
-    pins = _joint_bandpass_pins(bl_pairs, feeds, nant, ref_ant)
+    pins = _joint_bandpass_pins(bl_pairs, feeds, nant, gauge)
     pinned = [_node(ant, feed, nant) in pins for ant in 1:nant, feed in 1:2]
 
     # A shape describes the response within one band; with no segmentation given

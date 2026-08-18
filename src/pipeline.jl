@@ -92,19 +92,7 @@ include("pipeline/protocol.jl")
 include("pipeline/steps.jl")
 
 
-# ── Reference-antenna resolution (shared by the bridge and the runner) ───────
-
-# Resolve a reference antenna to its 1-based index. An Integer passes through; a
-# station code (String/Symbol) is matched against the data's antenna table (the
-# reader maps NOSTA → 1-based row, so the row index is the solver's station index).
-_resolve_ref_ant(r::Integer, uvset) = Int(r)
-function _resolve_ref_ant(code::Union{AbstractString, Symbol}, uvset)
-    names = _antenna_names(uvset)
-    i = findfirst(==(String(code)), names)
-    i === nothing &&
-        error("ref_ant: station code \"$code\" not in antenna table $(names).")
-    return i
-end
+# ── Antenna-name lookup (shared by the bridge and the runner) ───────────────
 
 function _antenna_names(uvset)
     leaf = first(values(UVData.branches(uvset)))

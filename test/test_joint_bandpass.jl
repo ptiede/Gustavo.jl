@@ -12,7 +12,7 @@
 #
 # A single station's ABSOLUTE per-channel bandpass is never observable from
 # baseline data alone (only differences between stations are), so both paths'
-# recovered bandpass is relative to `ref_ant`'s — truth is gauged the same way
+# recovered bandpass is relative to the gauge's reference — truth is gauged the same way
 # before comparing. The injected factor is frequency-FLAT (matching "constant
 # per scan"), which the closure path's per-AP de-rotation heuristic already
 # absorbs incidentally for PHASE (it isn't targeted at this, but a band-flat
@@ -48,7 +48,9 @@
     end
 
     fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
-    ref_ant = 1     # Bandpass's/CalibrationPipeline's default
+    # `ref_ant` indexes the truth arrays below; `gauge` is what the solve takes.
+    ref_ant = 1
+    gauge = PinAntenna(ref_ant)     # Bandpass's/CalibrationPipeline's default
     sol_closure = fit(
         CalibrationPipeline(
             FringeFit(model = fm), Bandpass(smoother = FP.PerTrackSmoother());
@@ -79,7 +81,7 @@
     pleaf_j, aleaf_j = bp_leaves(sol_joint)
 
     wrapped_err(x, y) = maximum(abs, rem2pi.(x .- y, RoundNearest))
-    # PHASE is recovered relative to ref_ant's feed 1 — the joint tier pins that
+    # PHASE is recovered relative to the reference's feed 1 — the joint tier pins that
     # node's phase at every segment, and the closure tier references its solve to
     # it — so truth is gauged the same way before comparing, then to its own
     # circular mean.
@@ -208,7 +210,7 @@ end
         Float64[L[1, f, c, 1, a] for c in 1:nglob]
     )
     gauge(x) = x .- sum(x) / length(x)
-    # ref_ant = 1, feed 1 is the pinned node (Bandpass's/CalibrationPipeline's
+    # gauge = PinAntenna(1), feed 1 is the pinned node (Bandpass's/CalibrationPipeline's
     # default reference). Its amplitude bandpass must come back, not flat.
     ref_true = gauge(abp_true[1, 1, :])
     ref_got = gauge(la(s_joint, 1, 1))

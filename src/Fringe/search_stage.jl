@@ -3,7 +3,7 @@
 # The composable pipeline's fringe stage in three parts:
 #
 # - `FringeModel` — WHAT is solved: an ordered list of phase-term elements
-#   (the gauge pin, `ref_ant`, is run-wide — see `CalibrationPipeline` in
+#   (the gauge pin, `gauge`, is run-wide — see `CalibrationPipeline` in
 #   pipeline/protocol.jl). Each element declares its own feed scope
 #   through its tying (`SharedFeeds`, `FeedComponent(2)`, …), so the model is
 #   specified feed by feed; adding an effect is adding an element.
@@ -151,7 +151,7 @@ default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = (
     FringeModel(; terms = default_fringe_terms())
 
 WHAT the fringe stage solves — the model specification of a `FringeFit` step:
-an ordered list of phase-term elements. The gauge pin (`ref_ant`) is run-wide,
+an ordered list of phase-term elements. The gauge pin (`gauge`) is run-wide,
 not part of any one step's model — see [`CalibrationPipeline`](@ref).
 
 - `terms` — the ordered, NAMED term list (a `NamedTuple`; each key names the

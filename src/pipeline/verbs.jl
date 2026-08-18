@@ -34,7 +34,7 @@ end
 
 """
     fit(pipe::CalibrationPipeline, uvset::UVSet) -> CalibrationSolution
-    fit(step_or_chain, uvset; exec = ExecutionConfig(), ref_ant = 1) -> CalibrationSolution
+    fit(step_or_chain, uvset; exec = ExecutionConfig(), gauge = PinAntenna(1)) -> CalibrationSolution
 
 Solve the pipeline's calibration on `uvset` WITHOUT producing corrected data —
 the estimation half of [`fitcalibrate`](@ref). The returned solution carries
@@ -65,7 +65,7 @@ of this composition.
 function fit(pipe::CalibrationPipeline, uvset::UVSet)
     _check_blas_threads()
     sol, _ = _run_pipeline(
-        _parse_pipeline(pipe), pipe.exec, pipe.ref_ant, uvset,
+        _parse_pipeline(pipe), pipe.exec, pipe.gauge, uvset,
     )
     return sol
 end
@@ -73,13 +73,13 @@ end
 fit(
     x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = fit(CalibrationPipeline(x; exec, ref_ant), uvset)
+    gauge::AbstractGauge = PinAntenna(1),
+) = fit(CalibrationPipeline(x; exec, gauge), uvset)
 fit(
     chain::StepChain, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = fit(CalibrationPipeline(chain; exec, ref_ant), uvset)
+    gauge::AbstractGauge = PinAntenna(1),
+) = fit(CalibrationPipeline(chain; exec, gauge), uvset)
 
 """
     calibrate(sol::CalibrationSolution, uvset::UVSet;
@@ -146,22 +146,22 @@ end
 fitcalibrate(
     x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+    gauge::AbstractGauge = PinAntenna(1),
     kwargs...,
-) = fitcalibrate(CalibrationPipeline(x; exec, ref_ant), uvset; kwargs...)
+) = fitcalibrate(CalibrationPipeline(x; exec, gauge), uvset; kwargs...)
 fitcalibrate(
     chain::StepChain, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
+    gauge::AbstractGauge = PinAntenna(1),
     kwargs...,
-) = fitcalibrate(CalibrationPipeline(chain; exec, ref_ant), uvset; kwargs...)
+) = fitcalibrate(CalibrationPipeline(chain; exec, gauge), uvset; kwargs...)
 
 # Shared driver for fitcalibrate: returns (sol, ctx).
 function _run_fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet, reduce)
     br = _parse_pipeline(pipe)
     post = _compose_output_chain(br.post_steps, collect(reduce))
     sol, output = _run_pipeline(
-        br, pipe.exec, pipe.ref_ant, uvset; sink = OutputSink(post),
+        br, pipe.exec, pipe.gauge, uvset; sink = OutputSink(post),
     )
     ctx = CalibrationContext(
         uvset, sol, output,
@@ -193,7 +193,9 @@ function reduce_scan_output(
         sub_branches[k] = leaf
     end
     sub = DimensionalData.rebuild(uvset; branches = sub_branches)
-    reduced = postprocess(UVData.apply_calibration(sub, sol; executor, apply_flags))
+    # Gains only: the streaming pass that produced `keyed` already applied
+    # `sol.transforms`; the default recorded-chain replay would apply them twice.
+    reduced = postprocess(UVData.apply_calibration(sub, sol; executor, apply_flags, transforms = ()))
     return collect(pairs(UVData.branches(reduced)))
 end
 
@@ -296,7 +298,7 @@ end
 # `CalibrationSolution` — there is no merged model/layout/θ to assemble.
 # Returns `(sol, output)` (`output === nothing` without a sink).
 function _run_pipeline(
-        br, exec::ExecutionConfig, ref_ant_spec::Union{Integer, AbstractString, Symbol},
+        br, exec::ExecutionConfig, gauge_spec::AbstractGauge,
         uvset::UVSet; sink = nothing,
     )
     solve_steps = br.solve_steps
@@ -306,7 +308,7 @@ function _run_pipeline(
     antennas = UVData.metadata(first_leaf).antennas
     nant = length(antennas)
     spec = (; geom, antennas)
-    ref_ant = _resolve_ref_ant(ref_ant_spec, uvset)
+    gauge = resolve_gauge(gauge_spec, _antenna_names(uvset))
     # A fresh `ScanStream` over the given transform list — cheap (geometry-only,
     # no data read). Used both for the initial stream and to grow the SOLVE-time
     # transform chain between steps (below): `ScanStream`/`SolveContext` fix the
@@ -338,7 +340,7 @@ function _run_pipeline(
         return SolveContext(
             step_model, step_layout, geom, GainEvaluator(step_model, step_layout),
             Calibration.component_vector(step_layout, zeros(step_layout.nθ)),
-            ref_ant, nant, antennas, stream, scratch,
+            gauge, nant, antennas, stream, scratch,
         )
     end
     si = 1

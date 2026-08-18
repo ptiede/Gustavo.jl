@@ -85,9 +85,9 @@ Per-scan max detection SNR from the solver diagnostics. Provided by
 function plot_fringe_snr end
 
 """
-    plot_fringe_search(uvset, sol; scan_index, baseline, pol, search)
-    plot_fringe_search(m::BaselineFringeMap)
-    plot_fringe_search(parent, m)
+    plot_fringe_search(uvset, sol; scan_index, baseline, pol, search, zoom)
+    plot_fringe_search(m::BaselineFringeMap; zoom)
+    plot_fringe_search(parent, m; zoom)
 
 HOPS-style fringe-search diagnostic for one baseline of one scan — THE plot for
 judging a suspected false fringe. Draws the delay–rate matched-filter SNR
@@ -97,6 +97,13 @@ fringe is a single sharp peak far above the sidelobe forest with `pfa ≪ 1`; a
 false fringe barely clears the forest (`pfa` not small) and shows several
 comparable-height peaks. Selectors as [`fringe_search_map`](@ref). Provided by
 `GustavoMakieExt`.
+
+`zoom` sets the view: `true` (default) centres both axes on the peak over a span
+of a dozen main-lobe widths, a `Real` gives that span in main-lobe widths, and
+`false` shows the whole searched window. The main lobe is a few grid cells wide
+against a window sized for the clock search, so the unzoomed plane resolves the
+alias structure but not the peak itself. `pfa` and the SNR normalization come
+from the full plane either way.
 """
 function plot_fringe_search end
 

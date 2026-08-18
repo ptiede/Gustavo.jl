@@ -251,6 +251,22 @@ using HDF5
         @test !isnothing(FP.plot_fringe_search(fig[1, 1], m))
         figm = FP.plot_fringe_search(m)
         @test (show(IOBuffer(), MIME("image/png"), figm); true)
+
+        # Zoom: the default view is a window around the peak, `false` the whole
+        # searched plane, a number that span in main-lobe widths.
+        @test !isnothing(FP.plot_fringe_search(m; zoom = 30))
+        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair, zoom = false))
+        @test_throws ErrorException FP.plot_fringe_search(m; zoom = 0)
+
+        figfull = FP.plot_fringe_search(m; zoom = false)
+        show(IOBuffer(), MIME("image/png"), figfull)          # lay out, so limits are final
+        map_axis(f) = only(filter(c -> c isa Axis && c.xlabel[] == "delay (ns)", contents(f.layout)))
+        zoomed = map_axis(figm).finallimits[]
+        full = map_axis(figfull).finallimits[]
+        @test zoomed.widths[1] < full.widths[1]
+        @test zoomed.widths[2] < full.widths[2]
+        @test zoomed.origin[1] <= m.map.detection.delay * 1.0e9 <= zoomed.origin[1] + zoomed.widths[1]
+        @test zoomed.origin[2] <= m.map.detection.rate * 1.0e3 <= zoomed.origin[2] + zoomed.widths[2]
     end
 
     @testset "plot_baseline_fringes smoke" begin
@@ -349,11 +365,16 @@ using HDF5
                 V[c, 1, 1, 1] = cis(phase_rms * randn(rng)) + sigma * (randn(rng) + im * randn(rng))
             end
             freqs = collect(range(1.0e9, 1.1e9; length = nchan))
-            numF = zeros(1, 1); den = zeros(1); npts = zeros(Int, 1)
+            numF = zeros(1, 1); den = zeros(1); dvar = zeros(1); npts = zeros(Int, 1)
             UVP._coherence_accumulate!(
-                zeros(0, 1), numF, den, npts, V, W, [1], [1], [0.0], freqs, Float64[], [2.0e8], debias,
+                zeros(0, 1), numF, den, dvar, npts, V, W, [1], [1], [0.0], freqs,
+                Float64[], [2.0e8], debias, ones(1, 1),
             )
-            return den[1] > 0 ? min(numF[1, 1] / den[1], 1.0) : NaN   # clamp as `_curve_from_sums` does
+            # ratio as `_curve_from_sums` forms it: debiased sums are POWERS
+            # (η = √ of the clamped ratio), raw sums are amplitudes.
+            den[1] > 0 || return NaN
+            r = numF[1, 1] / den[1]
+            return debias ? sqrt(clamp(r, 0.0, 1.0)) : min(r, 1.0)
         end
         # Flat phase, high per-cell SNR: raw is biased below 1, debias ≈ 1.
         @test freq_eta(; sigma = 0.2, phase_rms = 0.0, debias = false) < 0.995
@@ -370,7 +391,7 @@ using HDF5
         nchan, nti = 64, 40
         # Per-component σ (see the convention note in the debias testset above), chosen
         # so the cell's complex noise power `2σ²` — and hence the per-cell amplitude
-        # SNR `|S|/√(2σ²)` ≈ 0.4 — matches what this test was written around.
+        # SNR `|S|/√(2σ²)` ≈ 0.4 — a faint/resolved-baseline regime.
         sigma = 2.5 / sqrt(2); w = 1 / sigma^2
         V = Array{ComplexF64}(undef, nchan, nti, 1, 1); W = fill(w, nchan, nti, 1, 1)
         for c in 1:nchan, t in 1:nti
@@ -378,18 +399,22 @@ using HDF5
         end
         times = collect(1.0:nti); freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6)
         dts = [Float64(nti)]
-        # per-channel time η at full averaging (debiased)
+        eta(num, den) = den[1] > 0 ? sqrt(clamp(num[1, 1] / den[1], 0.0, 1.0)) : NaN
+        # per-channel time η at full averaging (debiased): unbiased even at
+        # per-cell SNR ≈ 0.4, so ≈ 1 for a flat-phase source — just noisier
+        # than the marginalized version below.
         nT = zeros(1, 1); den = zeros(1)
-        UVP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(Int, 1), V, W, [1], [1], times, freqs, dts, [1.0e8], true)
-        eta_perchan = den[1] > 0 ? min(nT[1, 1] / den[1], 1.0) : NaN
-        # marginalized: band-average per AP, then time η
+        UVP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(1), zeros(Int, 1), V, W, [1], [1], times, freqs, dts, [1.0e8], true, ones(1, 1))
+        eta_perchan = eta(nT, den)
+        @test eta_perchan > 0.9
+        # marginalized: band-average per AP, then time η — same estimand,
+        # measured on high-SNR samples, so lower variance.
         Vt, Wt = UVP._collapse_axis(V, W, 1)
         @test size(Vt) == (1, nti, 1, 1)
         nT2 = zeros(1, 1); denT = zeros(1)
-        UVP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(Int, 1), Vt, Wt, [1], [1], times, [1.5e9], dts, [1.0], true)
-        eta_marg = denT[1] > 0 ? min(nT2[1, 1] / denT[1], 1.0) : NaN
-        @test eta_marg > eta_perchan        # marginalize recovers what per-channel loses
-        @test eta_marg > 0.95               # ...to ≈ 1 for a flat-phase source
+        UVP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(1), zeros(Int, 1), Vt, Wt, [1], [1], times, [1.5e9], dts, [1.0], true, ones(1, 1))
+        eta_marg = eta(nT2, denT)
+        @test eta_marg > 0.95               # ≈ 1 for a flat-phase source
     end
 
     @testset "HDF5 caltable: round-trip + external-readable" begin

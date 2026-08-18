@@ -30,7 +30,7 @@ end
 
 """
     refine_scan_dispersion!(θ, stack, win::GeometryWindow, delay_plan, disp_plan,
-                            ref_ant, nant; opts, tau_max, dtec_max,
+                            gauge, nant; opts, tau_max, dtec_max,
                             executor, ties) -> nothing
 
 Joint per-scan (Δτ, dTEC) refinement of one scan window, on data already
@@ -46,7 +46,7 @@ of detections the robust station solves excised; a no-op (0) when
 unconstrainable).
 """
 function refine_scan_dispersion!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, delay_plan, disp_plan, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, delay_plan, disp_plan, gauge, nant;
         opts::Stationization = Stationization(loss = LeastSquares()),
         tau_max::Real = 2.0e-8, dtec_max::Real = 45.0, executor = DynamicScheduler(),
         ties = nothing,
@@ -79,13 +79,13 @@ function refine_scan_dispersion!(
     end
     return _dispersion_fit_stationize!(
         θ, z, w, fb, bl_pairs, pols, feeds, first(ti), geom,
-        delay_plan, disp_plan, ref_ant, opts,
+        delay_plan, disp_plan, gauge, opts,
         Float64(tau_max), Float64(dtec_max), ties,
     )
 end
 
 """
-    refine_scan_sbd!(θ, stack, win::GeometryWindow, sbd, ref_ant, nant;
+    refine_scan_sbd!(θ, stack, win::GeometryWindow, sbd, gauge, nant;
                      nchunk = 4, tau_max = 6.0e-8, executor = DynamicScheduler()) -> nrej
 
 Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
@@ -97,7 +97,7 @@ the dispersion refinement so the within-band slopes it fits are
 dispersion-corrected. A no-op (0) when `sbd === nothing`.
 """
 function refine_scan_sbd!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, sbd, ref_ant, nant;
+        θ, stack::AbstractDimStack, win::GeometryWindow, sbd, gauge, nant;
         nchunk::Integer = 4, tau_max::Real = 6.0e-8, executor = DynamicScheduler(),
     )
     sbd === nothing && return 0
@@ -145,7 +145,7 @@ function refine_scan_sbd!(
     end
     return _sbd_fit_stationize!(
         θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds,
-        first(ti), geom, sbd, ref_ant, nant;
+        first(ti), geom, sbd, gauge, nant;
         tau_max = Float64(tau_max),
     )
 end
@@ -156,7 +156,7 @@ end
 # number of detections the robust station solves excised.
 function _dispersion_fit_stationize!(
         θ, z, w, fb, bl_pairs, pols, feeds, ti0, geom,
-        delay_plan, disp_plan, ref_ant, opts, tau_max, dtec_max, ties = nothing,
+        delay_plan, disp_plan, gauge, opts, tau_max, dtec_max, ties = nothing,
     )
     nbl, npol, nlf = size(z)
     Dτ = fill(_invalid_detection(Float64), nbl, npol)
@@ -226,7 +226,7 @@ function _dispersion_fit_stationize!(
         end
         solve_station_systems!(
             θ, (detection_stack(Ds, pairs_s, pols; ti = ti0, freq_rms, time_rms),), ((plan, :delay),);
-            ref_ant = tie ? ties[ref_ant] : ref_ant, opts = opts,
+            gauge = tie ? remap_gauge(gauge, ties) : gauge, opts = opts,
         )
         if tie
             # Members inherit the representative's solved value (assignment, not
@@ -257,7 +257,7 @@ end
 # 2πτ(f − νg) + φg, referenced to the group centre. `chunkf`/`chunkgrp` label
 # each accumulated chunk with its centre frequency and band-group id.
 function _sbd_fit_stationize!(
-        θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds, ti0, geom, sbd, ref_ant, nant;
+        θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds, ti0, geom, sbd, gauge, nant;
         opts::Stationization = Stationization(loss = LeastSquares()),
         tau_max::Float64 = 6.0e-8,
     )
@@ -315,7 +315,7 @@ function _sbd_fit_stationize!(
             end
         end
         isempty(rows_τ) && continue
-        τv, covτ, _ = _solve_observable_robust(rows_τ, nant, ref_ant, opts; rewrap = 0)
+        τv, covτ, _ = _solve_observable_robust(rows_τ, nant, gauge, opts; rewrap = 0)
         num0 = 0.0
         num1 = 0.0
         for p in 1:npol
@@ -342,7 +342,7 @@ function _sbd_fit_stationize!(
             fill!(τv, 0.0)
         end
         rows_φ = [_ObsRow(r[1], r[2], 1, 1, slope_ok ? r[3] : r[4], r[5]) for r in φrows]
-        φv, covφ, _ = _solve_observable_robust(rows_φ, nant, ref_ant, opts; rewrap = 2)
+        φv, covφ, _ = _solve_observable_robust(rows_φ, nant, gauge, opts; rewrap = 2)
         push!(gsols, (; gidx, ks, fc, τv, covτ, φv, covφ))
     end
     isempty(gsols) && return nrej

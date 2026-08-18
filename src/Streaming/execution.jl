@@ -6,7 +6,7 @@
 
 Run-wide RESOURCES for a streaming run, shared by every pass over the data — as
 opposed to per-step options, which shape an estimator or a step's own model, and
-as opposed to the gauge convention (`ref_ant`, on `CalibrationPipeline` itself),
+as opposed to the gauge convention (`gauge`, on `CalibrationPipeline` itself),
 which is shared by every pass but is not a resource. Two runs differing only in
 their `ExecutionConfig` solve the same problem with the same gauge.
 

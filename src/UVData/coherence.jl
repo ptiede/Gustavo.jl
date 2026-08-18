@@ -28,9 +28,27 @@
 # noise alone pulls η below 1 at coarse averaging (the incoherent |V| is
 # noise-inflated while the coherent sum averages noise down), so at native per-cell
 # SNR the absolute η UNDERSTATES a good solution — read the *shape* and the
-# *before/after* comparison, not the absolute value. Pass `debias = true` (REQUIRES
-# per-component inverse-variance weights, `w = 1/Var(Re V)`) to subtract that bias: η then reflects the
-# genuine residual-phase coherence (≈1 for a flat-phase solution regardless of SNR).
+# *before/after* comparison, not the absolute value. Pass `debias = true` to
+# remove that bias; the weights then set the RELATIVE cell weighting
+# (`w ∝ 1/Var(Re V)`), while the absolute noise scale is estimated from the
+# data itself (`_noise_scale`), so a mis-calibrated WEIGHT column does not
+# corrupt η.
+#
+# The debiased estimator works in POWER, with a single square root at the end:
+# per averaging bin, `|Σ w·V|² − 2αΣw` is an unbiased estimate of the bin's
+# coherent signal power `|s̄|²(Σw)²` at ANY SNR (α the measured noise scale), so
+# bins (and cells, and baselines) are pooled as `Σ (|Σ w·V|² − 2αΣw)/Σw` — no
+# per-bin clip, no per-bin square root — and η = √(pooled power at Δ / pooled
+# power at native binning). A per-bin amplitude `√(max(|Σ w·V|² − 2Σw, 0))`
+# would fold noise at bin SNR ≲ 1 (the clip and the root are both nonlinear),
+# which draws a spurious dip-and-recover curve for a perfectly coherent weak
+# baseline and drags a pooled η down through its noise-only members; in the
+# power domain those fluctuations cancel in expectation instead. The price is
+# variance, and it is reported honestly: a denominator that does not DETECT
+# signal power at 3σ of its null fluctuation (see `_curve_from_sums`) has no
+# coherence measurement and reads NaN — never a clamped ratio of noise over
+# noise — and a weak baseline's trace is noisy-but-unbiased rather than
+# smoothly wrong.
 
 """
     CoherenceCurve
@@ -151,13 +169,22 @@ materialized one at a time (memory-safe on a streamed set).
 parallel-hand only — cross hands are mostly noise and would bias η down), `:all`,
 an index, or product label(s).
 
-`debias` (default `false`) subtracts the thermal-noise bias from η — REQUIRES the
-weights to be inverse variances of ONE REAL COMPONENT of the visibility (`w = 1/σ²`
-with `Var(Re V) = Var(Im V) = 1/w`, so the complex noise power is `E|n|² = 2/w`;
-e.g. `load_fitsidi(weight_mode = :radiometer)`). Without it the raw η is pulled below 1 at coarse averaging by
-noise alone (the incoherent Σ w·|V| is noise-inflated), so it understates a good
-solution at native per-cell SNR; with it η reflects the genuine residual-phase
-coherence (η ≈ 1 for a flat-phase solution regardless of SNR).
+`debias` (default `false`) removes the thermal-noise bias from η. The weights
+set the RELATIVE cell weighting (`w ∝ 1/Var(Re V)`, one real component; e.g.
+`load_fitsidi(weight_mode = :radiometer)`); the absolute noise scale is
+estimated per (baseline, product) from adjacent-sample differences of the data,
+so a mis-calibrated WEIGHT column (a per-station factor, a uniform offset) does
+not corrupt η. Without `debias` the raw η is pulled below 1 at coarse averaging
+by noise alone (the incoherent Σ w·|V| is noise-inflated), so it understates a
+good solution at native per-cell SNR. The debiased estimator pools unbiased
+per-bin POWER estimates `(|Σ w·V|² − 2αΣw)/Σw` and takes one square root at the
+end, so η ≈ 1 for a flat-phase solution at any SNR — including bins and
+baselines with per-bin SNR ≲ 1, which a per-bin debiased amplitude would fold
+noise into. A baseline (or pooled aggregate) whose measured signal power does
+not clear 3σ of its null fluctuation has no coherence measurement and reads
+`NaN` — never a clamped noise-over-noise ratio. A NaN baseline still enters the
+pooled aggregate (its expected contribution to both sums is zero, so excluding
+it on the realized sign would bias the pool).
 
 `marginalize` (default `true`) measures each curve on the data coherently averaged
 over the OTHER axis first — the time curve on the per-AP band-average, the freq
@@ -224,6 +251,10 @@ function coherence_report(
     # time-averaged amplitude), so keep them separate; non-marginalized shares one.
     denT = zeros(Float64, nbl)
     denF = zeros(Float64, nbl)
+    # Null variance of each debiased denominator (Σ 4α² over its cells): the
+    # scale against which a denominator counts as a DETECTION of signal power.
+    dvarT = zeros(Float64, nbl)
+    dvarF = zeros(Float64, nbl)
     npts = zeros(Int, nbl)
     dumF = zeros(Float64, 1, nbl)
     dumT = zeros(Float64, 1, nbl)
@@ -251,22 +282,28 @@ function coherence_report(
         blmap = [get(blidx, p, 0) for p in baselines(m).pairs]
         times_sec = Float64.(lookup(m[:vis], Ti)) .* 3600.0
         freqs = Float64.(lookup(m[:vis], Frequency))
+        # Per-(baseline, product) noise scale α, from adjacent-sample differences
+        # of the NATIVE cube (signal cancels in the difference; noise does not),
+        # so the debias trusts the weights only for RELATIVE cell weighting. α is
+        # a property of the weights against the true noise and is preserved
+        # exactly by the weighted averaging `_collapse_axis` performs.
+        alpha = debias ? _noise_scale(V, W, plist) : ones(Float64, size(V, 3), size(V, 4))
         if marginalize
             # Coherently average the OTHER axis first (incoherent/segmented style), so
             # each curve is measured on high-SNR samples and the debias is reliable.
             f0m = isempty(freqs) ? 0.0 : sum(freqs) / length(freqs)
             t0m = isempty(times_sec) ? 0.0 : sum(times_sec) / length(times_sec)
             Vt, Wt = _collapse_axis(V, W, 1)        # band-average per AP → time curve
-            _coherence_accumulate!(numT, dumF, denT, npts, Vt, Wt, blmap, plist, times_sec, [f0m], dts, [1.0], debias)
+            _coherence_accumulate!(numT, dumF, denT, dvarT, npts, Vt, Wt, blmap, plist, times_sec, [f0m], dts, [1.0], debias, alpha)
             Vf, Wf = _collapse_axis(V, W, 2)        # time-average per channel → freq curve
-            _coherence_accumulate!(dumT, numF, denF, dumN, Vf, Wf, blmap, plist, [t0m], freqs, [1.0], dnus, debias)
+            _coherence_accumulate!(dumT, numF, denF, dvarF, dumN, Vf, Wf, blmap, plist, [t0m], freqs, [1.0], dnus, debias, alpha)
         else
-            _coherence_accumulate!(numT, numF, denT, npts, V, W, blmap, plist, times_sec, freqs, dts, dnus, debias)
+            _coherence_accumulate!(numT, numF, denT, dvarT, npts, V, W, blmap, plist, times_sec, freqs, dts, dnus, debias, alpha)
         end
     end
 
-    etaT, aggT = _curve_from_sums(numT, denT)
-    etaF, aggF = _curve_from_sums(numF, marginalize ? denF : denT)
+    etaT, aggT = _curve_from_sums(numT, denT, dvarT, debias)
+    etaF, aggF = _curve_from_sums(numF, marginalize ? denF : denT, marginalize ? dvarF : dvarT, debias)
     return CoherenceReport(
         bl_pairs, ant_names, pol_labels, npts,
         CoherenceCurve(:time, dts, aggT, etaT),
@@ -274,23 +311,50 @@ function coherence_report(
     )
 end
 
-# Per-baseline η = num/den and the pooled aggregate η = Σnum/Σden, per interval.
-# Raw η is ≤ 1 by the triangle inequality; with `debias` the per-cell denominator
-# debias is slightly Jensen-biased low at low per-cell SNR (accurate at high SNR),
-# which can nudge η just above 1, so clamp to the physical ceiling.
-function _curve_from_sums(num::Matrix{Float64}, den::Vector{Float64})
+# Per-baseline η and the pooled aggregate, per interval.
+#
+# Amplitude mode (`power = false`, the raw estimator): η = num/den with
+# num = Σ|Σ w·V| and den = Σ w·|V|; ≤ 1 by the triangle inequality, clamped to
+# the ceiling against rounding. A baseline with no data (den = 0) is skipped.
+#
+# Power mode (`power = true`, the debiased estimator): num and den are pooled
+# unbiased signal powers, and η = √(num/den) — one square root, on the ratio.
+# The ratio is clamped to [0, 1] (its fluctuations are unbounded either way for
+# weak data; the estimand is). A baseline whose OWN measured power is not
+# positive has no coherence measurement and reads NaN — but it still enters the
+# pooled sums: its expected contribution to both is zero, and excluding it on
+# the realized sign of a noise fluctuation would bias the aggregate.
+# In power mode a ratio is reported only where its denominator DETECTS signal
+# power: `den > 3·√denvar`, with `denvar` the exact null variance of the pooled
+# power sum (Σ 4α² over its cells). Below that there is no coherence
+# measurement — the ratio of two near-zero fluctuations would clamp into
+# [0, 1] and read as a confident number — so the entry is NaN instead.
+function _curve_from_sums(
+        num::Matrix{Float64}, den::Vector{Float64}, denvar::Vector{Float64}, power::Bool,
+    )
     nrow, nbl = size(num)
     eta_bl = fill(NaN, nrow, nbl)
     agg = fill(NaN, nrow)
     for k in 1:nrow
-        sn = 0.0; sd = 0.0
+        sn = 0.0; sd = 0.0; sv = 0.0
         for bl in 1:nbl
             d = den[bl]
-            d > 0 || continue
-            eta_bl[k, bl] = min(num[k, bl] / d, 1.0)
-            sn += num[k, bl]; sd += d
+            if power
+                d == 0.0 && num[k, bl] == 0.0 && continue      # no data at all
+                d > 3 * sqrt(max(denvar[bl], 0.0)) &&
+                    (eta_bl[k, bl] = sqrt(clamp(num[k, bl] / d, 0.0, 1.0)))
+                sn += num[k, bl]; sd += d; sv += denvar[bl]
+            else
+                d > 0 || continue
+                eta_bl[k, bl] = min(num[k, bl] / d, 1.0)
+                sn += num[k, bl]; sd += d
+            end
         end
-        sd > 0 && (agg[k] = min(sn / sd, 1.0))
+        if power
+            sd > 3 * sqrt(max(sv, 0.0)) && (agg[k] = sqrt(clamp(sn / sd, 0.0, 1.0)))
+        else
+            sd > 0 && (agg[k] = min(sn / sd, 1.0))
+        end
     end
     return eta_bl, agg
 end
@@ -317,10 +381,11 @@ end
 # once. Intervals are used as given (the auto sweep nudges its terminal just above
 # the span so the whole leaf lands in one bin).
 function _coherence_accumulate!(
-        numT::Matrix{Float64}, numF::Matrix{Float64}, den::Vector{Float64}, npts::Vector{Int},
+        numT::Matrix{Float64}, numF::Matrix{Float64}, den::Vector{Float64}, dvar::Vector{Float64},
+        npts::Vector{Int},
         V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, blmap::Vector{Int}, plist::Vector{Int},
         times_sec::Vector{Float64}, freqs::Vector{Float64}, dts::Vector{Float64}, dnus::Vector{Float64},
-        debias::Bool,
+        debias::Bool, alpha::Matrix{Float64},
     ) where {Tv, Tw}
     nchan, nti, nbl, npol = size(V)
     nT = length(dts); nF = length(dnus)
@@ -352,14 +417,19 @@ function _coherence_accumulate!(
     accF = Vector{ComplexF64}(undef, nF); swF = Vector{Float64}(undef, nF)
     curF = Vector{Int}(undef, nF); haveF = Vector{Bool}(undef, nF)
 
-    # Debiased coherent-bin amplitude. The weight is the inverse variance of ONE REAL
+    # Per-bin contribution. The weight is the inverse variance of ONE REAL
     # COMPONENT (`w = 1/σ²` with `Var(Re n) = Var(Im n) = 1/w`), so a cell's COMPLEX
     # noise power is `E|n|² = 2/w` — the factor of 2 below is that, not a fudge.
-    # Hence `|Σ w·V|²` is noise-inflated by `Σ w²·E|n|² = 2Σw`, and the unbiased
-    # amplitude is `√(max(|Σ w·V|² − 2Σw, 0))` (and `|Σ w·V|` otherwise). At native
-    # resolution (one cell: `s = w·V`, `sw = w`) this equals the debiased denominator
-    # cell, so η ≡ 1 there for noise-free data — an identity the factor preserves.
-    binamp(s::ComplexF64, sw::Float64) = debias ? sqrt(max(abs2(s) - 2 * sw, 0.0)) : abs(s)
+    # Hence `|Σ w·V|²` is noise-inflated by `Σ w²·E|n|² = 2Σw`.
+    #
+    # With `debias` the contribution is the unbiased PER-BIN SIGNAL POWER
+    # `(|Σ w·V|² − 2Σw)/Σw` — unclipped, no per-bin square root, so noise
+    # fluctuations cancel across bins instead of folding at bin SNR ≲ 1; the
+    # single square root is taken on the pooled ratio in `_curve_from_sums`.
+    # Without it, the raw coherent amplitude `|Σ w·V|`. At native resolution
+    # (one cell: `s = w·V`, `sw = w`) either form equals its denominator cell,
+    # so η ≡ 1 there — an identity both estimators preserve.
+    binval(s::ComplexF64, sw::Float64, a::Float64) = debias ? (abs2(s) - 2 * a * sw) / sw : abs(s)
 
     @inbounds for bli in 1:nbl
         bl = blmap[bli]
@@ -367,16 +437,25 @@ function _coherence_accumulate!(
         for pli in eachindex(plist)
             p = plist[pli]
             p in 1:npol || continue
+            a = alpha[bli, p]
 
-            # Denominator Σ w·|V| and cell count (interval-independent). With
-            # `debias`, the incoherent |V| = √(|V_true|² + 2/w) is noise-inflated by
-            # the cell's COMPLEX noise power `E|n|² = 2/w` (`w` is the per-component
-            # inverse variance), so use √(max(|V|² − 2/w, 0)).
+            # Denominator (interval-independent). Without `debias`, the incoherent
+            # Σ w·|V|. With it, the numerator's own expression at NATIVE binning —
+            # the per-cell unbiased power `(w²|V|² − 2w)/w = w|V|² − 2` — so η ≡ 1
+            # at native resolution stays an identity and the ratio's denominator
+            # is unbiased at any SNR (a per-cell clipped amplitude would sit
+            # noise-inflated above the true signal for weak cells, holding η
+            # below 1 even after the numerator's bins reach high SNR).
             for ti in 1:nti, c in 1:nchan
                 w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
                 a2 = abs2(ComplexF64(v))
-                den[bl] += w * (debias ? sqrt(max(a2 - 2 * inv(Float64(w)), 0.0)) : sqrt(a2))
+                if debias
+                    den[bl] += Float64(w) * a2 - 2.0 * a
+                    dvar[bl] += 4.0 * a^2
+                else
+                    den[bl] += Float64(w) * sqrt(a2)
+                end
                 npts[bl] += 1
             end
 
@@ -395,14 +474,14 @@ function _coherence_accumulate!(
                         if !haveT[k]
                             curT[k] = id; haveT[k] = true
                         elseif id != curT[k]
-                            numT[k, bl] += binamp(accT[k], swT[k])
+                            numT[k, bl] += binval(accT[k], swT[k], a)
                             accT[k] = zero(ComplexF64); swT[k] = 0.0; curT[k] = id
                         end
                         accT[k] += wv; swT[k] += w
                     end
                 end
                 for k in 1:nT
-                    haveT[k] && (numT[k, bl] += binamp(accT[k], swT[k]))
+                    haveT[k] && (numT[k, bl] += binval(accT[k], swT[k], a))
                 end
             end
 
@@ -421,19 +500,70 @@ function _coherence_accumulate!(
                         if !haveF[k]
                             curF[k] = id; haveF[k] = true
                         elseif id != curF[k]
-                            numF[k, bl] += binamp(accF[k], swF[k])
+                            numF[k, bl] += binval(accF[k], swF[k], a)
                             accF[k] = zero(ComplexF64); swF[k] = 0.0; curF[k] = id
                         end
                         accF[k] += wv; swF[k] += w
                     end
                 end
                 for k in 1:nF
-                    haveF[k] && (numF[k, bl] += binamp(accF[k], swF[k]))
+                    haveF[k] && (numF[k, bl] += binval(accF[k], swF[k], a))
                 end
             end
         end
     end
     return nothing
+end
+
+# Per-(baseline, product) noise scale α = w·Var(Re V), from the data itself.
+#
+# The debias terms need the ABSOLUTE per-cell noise power, and the weights only
+# promise it up to calibration: a WEIGHT column mis-scaled by 10% in σ is a 21%
+# error in noise power, which — summed over ~10⁵ near-zero-signal cells — can
+# exceed a faint source's entire measured power and drive the pooled
+# denominator negative. Adjacent-sample differences measure the true noise
+# independently of that calibration: the (continuum, or slowly-varying) signal
+# cancels in `V₁ − V₂` while the noise adds, so
+# `E|V₁ − V₂|² = 2α(1/w₁ + 1/w₂)`. α is estimated per (baseline, product) — a
+# per-station weight miscalibration factorizes onto baselines — as a MEDIAN
+# (robust to outliers; |ΔV|² is exponential under the null, so the median is
+# `ln 2` of the mean). Adjacent channels are differenced first; a
+# single-channel axis (already band-averaged data) falls back to adjacent
+# integrations. Fewer than 32 usable pairs leaves α = 1 (trust the weights).
+#
+# Residual signal leakage into the difference (a delay slope across adjacent
+# channels of RAW data) inflates α slightly at high SNR, where the debias is
+# negligible anyway; on corrected data the signal is flat and cancels exactly.
+function _noise_scale(V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, plist::Vector{Int}) where {Tv, Tw}
+    nchan, nti, nbl, npol = size(V)
+    alpha = ones(Float64, nbl, npol)
+    buf = Float64[]
+    @inbounds for bli in 1:nbl, p in plist
+        p in 1:npol || continue
+        empty!(buf)
+        if nchan > 1
+            for ti in 1:nti, c in 1:(nchan - 1)
+                w1 = W[c, ti, bli, p]; w2 = W[c + 1, ti, bli, p]
+                v1 = V[c, ti, bli, p]; v2 = V[c + 1, ti, bli, p]
+                (w1 > 0 && w2 > 0 && isfinite(w1) && isfinite(w2) && isfinite(v1) && isfinite(v2)) || continue
+                push!(buf, abs2(ComplexF64(v1) - ComplexF64(v2)) /
+                    (2 * (inv(Float64(w1)) + inv(Float64(w2)))))
+            end
+        end
+        if length(buf) < 32 && nti > 1
+            empty!(buf)
+            for c in 1:nchan, ti in 1:(nti - 1)
+                w1 = W[c, ti, bli, p]; w2 = W[c, ti + 1, bli, p]
+                v1 = V[c, ti, bli, p]; v2 = V[c, ti + 1, bli, p]
+                (w1 > 0 && w2 > 0 && isfinite(w1) && isfinite(w2) && isfinite(v1) && isfinite(v2)) || continue
+                push!(buf, abs2(ComplexF64(v1) - ComplexF64(v2)) /
+                    (2 * (inv(Float64(w1)) + inv(Float64(w2)))))
+            end
+        end
+        length(buf) >= 32 || continue
+        alpha[bli, p] = median(buf) / log(2)
+    end
+    return alpha
 end
 
 # Coherently weighted-average `V` (with weights `W`) over `axis` (1 = Frequency,

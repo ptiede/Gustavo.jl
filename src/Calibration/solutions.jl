@@ -573,14 +573,24 @@ end
 # ── Apply ────────────────────────────────────────────────────────────────────
 
 """
-    apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true) -> UVSet
+    apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true,
+                      transforms = sol.transforms) -> UVSet
 
-Divide every leaf's visibilities by the solution's per-antenna gains. For a
+Apply the solution's RECORDED transform chain (`sol.transforms` — e.g. a
+station weight scale and an earlier solution applied as a data transform), then
+divide every leaf's visibilities by the solution's per-antenna gains. For a
 baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
 
     V_corr = V / (g_a[fa] · conj(g_b[fb])),    W_corr = W · |g_a · g_b|²
 
 Samples where either gain magnitude underflows are flagged (weight 0, vis NaN).
+
+`transforms` defaults to the solution's own recorded chain, so the corrected
+set carries the SAME total correction `calibrate(sol, uvset)` produces (minus
+its `postcal`/`reduce` tail) — weights included, which matters to anything
+that reads them as noise claims. Pass `transforms = ()` to apply the gains
+alone: the right call when the data has already been transform-corrected (the
+streaming passes do this), and the semantics every internal replay site uses.
 
 Each channel and time is placed in the segment of `sol` it belongs to — matched
 by spw and scan identity — so `uvset` may be sampled differently from the solve:
@@ -596,10 +606,27 @@ closure-screened global solve, no strong detection constrains it; a merely weak
 baseline between two constrained stations is NOT flagged (it is calibrated by
 SNR transfer).
 """
+# Whole-set replay of a recorded transform chain. The transform types (and the
+# working method) live in the Streaming layer, which loads after this module;
+# the stub exists so `apply_calibration` can replay a chain without a layering
+# inversion.
+function _replay_transforms end
+
 function UVData.apply_calibration(
         uvset::UVSet, sol::CalibrationSolution;
         apply_flags::Bool = true, executor = DynamicScheduler(),
+        transforms = sol.transforms,
     )
+    for t in transforms
+        t === missing && throw(
+            ArgumentError(
+                "apply_calibration: this solution records a transform that did not survive " *
+                    "serialization (saved as `missing`) — re-fit, or apply the original " *
+                    "transform chain manually (pass `transforms = ()` to apply gains alone).",
+            )
+        )
+    end
+    isempty(transforms) || (uvset = _replay_transforms(uvset, transforms))
     flagged = apply_flags ? _solution_flag_sets(sol.info) : nothing
     # Placement is against the TARGET SET's own geometry, not a leaf's: a
     # channel-index segmentation (`ChannelBlocks`, `FreqGroups`) is defined on

@@ -430,8 +430,8 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # `stack` is raw (no transform chain) — the kernel now assumes
         # already-corrected data, and with no prior gains to divide out here
         # that's exactly the raw visibilities.
-        nn = FP.refine_scan_dispersion!(θn, stack, win, ps_delay, disp_plan, 1, 4; executor = SerialScheduler())
-        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ps_delay, disp_plan, 1, 4; executor = DynamicScheduler(; nchunks = 4))
+        nn = FP.refine_scan_dispersion!(θn, stack, win, ps_delay, disp_plan, PinAntenna(1), 4; executor = SerialScheduler())
+        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ps_delay, disp_plan, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
         # Per-block accumulation ⇒ bit-identical at any inner fan-out.
         @test nn == n4
         @test θn == θ4
@@ -441,8 +441,8 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             off = plan_off1(disp_plan)[a, 1, 1, 1]
             @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
         end
-        FP.refine_scan_sbd!(θn, stack, win, sbd, 1, 4; executor = SerialScheduler())
-        FP.refine_scan_sbd!(θ4, stack, win, sbd, 1, 4; executor = DynamicScheduler(; nchunks = 4))
+        FP.refine_scan_sbd!(θn, stack, win, sbd, PinAntenna(1), 4; executor = SerialScheduler())
+        FP.refine_scan_sbd!(θ4, stack, win, sbd, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
         @test θn == θ4
     end
 end

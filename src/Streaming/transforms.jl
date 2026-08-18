@@ -103,6 +103,10 @@ indices and have no standalone whole-set form). This is the replay of the chain
 a solution records (`sol.transforms`), used by the standalone `calibrate`. Leaf
 arrays are copied; the input set is never mutated.
 """
+# `apply_calibration`'s recorded-chain replay (see the stub in
+# `Calibration/solutions.jl` for why it is wired through this layer).
+Calibration._replay_transforms(uvset::UVSet, transforms) = apply_transforms(uvset, transforms)
+
 function apply_transforms(uvset::UVSet, transforms; geom::DataGeometry = build_geometry(uvset))
     ts = collect(Any, transforms)
     isempty(ts) && return uvset

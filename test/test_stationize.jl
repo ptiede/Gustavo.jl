@@ -109,7 +109,7 @@ end
 # An untouched cell reads `NaN`: its θ stays 0, which would otherwise be
 # indistinguishable from a solved zero correction.
 function stationize(
-        D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(),
+        D, bl, pols, nant; gauge = PinAntenna(1), opts = FR.Stationization(),
         spreads = SCAN_SPREAD,
     )
     layout = perfeed_scan_layout(nant)
@@ -118,7 +118,7 @@ function stationize(
     scans = (FR.detection_stack(D, bl, pols; ti = 1, spreads...),)
     ncomp, ref_covered = FR.solve_station_systems!(
         θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate));
-        ref_ant = ref_ant, opts = opts,
+        gauge = gauge, opts = opts,
     )
     touched = touched_cells(D, bl, pols, nant, opts)
     readcols(plan) = [
@@ -145,7 +145,7 @@ end
     χ = 0.6
 
     D = inject_detections(bl, pols, τ, ṙ, φ, χ)
-    sol = stationize(D, bl, pols, nant; ref_ant = ref)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
 
     @test size(sol.delay) == size(sol.rate) == size(sol.phase) == (nant, 2)
 
@@ -189,9 +189,9 @@ end
     φ = 0.3 .* randn(rng, nant, 2)
     χ = 0.8
 
-    sol0 = stationize(inject_detections(bl, pols, τ, ṙ, φ, 0.0), bl, pols, nant; ref_ant = ref)
+    sol0 = stationize(inject_detections(bl, pols, τ, ṙ, φ, 0.0), bl, pols, nant; gauge = PinAntenna(ref))
     Dχ = inject_detections(bl, pols, τ, ṙ, φ, χ)
-    solχ = stationize(Dχ, bl, pols, nant; ref_ant = ref)
+    solχ = stationize(Dχ, bl, pols, nant; gauge = PinAntenna(ref))
 
     # Feed 1 is untouched.
     for a in 1:nant
@@ -225,7 +225,7 @@ end
     χ = -0.3
 
     D = inject_detections(bl, pols, τ, ṙ, φ, χ)
-    sol = stationize(D, bl, pols, nant; ref_ant = ref)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
 
     # Delay is ONE component (both feeds share the ref-feed-1 gauge via cross-hand
     # delay), so the per-station inter-feed offset is recovered *absolutely*.
@@ -242,7 +242,7 @@ end
     bl = all_baselines(nant)
     pols = ["PP", "PQ", "QP", "QQ"]
     D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), zeros(nant, 2), 0.25 .* randn(rng, nant, 2), 0.5)
-    sol = stationize(D, bl, pols, nant; ref_ant = 1)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     # Parallel-hand products (PP=1, QQ=4) close exactly on noiseless data.
     for prod in (1, 4), obs in (:delay, :phase)
         res = FR.station_closure_residuals(D, bl, pols; observable = obs, product = prod)
@@ -261,7 +261,7 @@ end
     # ±π and wrap (realistic residual-phase scale after delay/rate removal).
     φ = 1.2 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, zeros(nant, 2), zeros(nant, 2), φ, 0.0)
-    sol = stationize(D, bl, pols, nant; ref_ant = ref, opts = FR.Stationization(phase_rewrap_iters = 6))
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref), opts = FR.Stationization(phase_rewrap_iters = 6))
     r = recon_residuals(D, sol, bl, pols)
     @test r.phase < 1.0e-8                              # re-wrap closes despite wrapping
 end
@@ -276,7 +276,7 @@ end
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.4)
-    sol = stationize(D, bl, pols, nant; ref_ant = 1)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     @test sol.ncomp == 2                                # one component per island (feeds tied within each)
     # Reconstruction is gauge-invariant → residuals close within each island.
     r = recon_residuals(D, sol, bl, pols)
@@ -301,7 +301,7 @@ end
             D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 0.0, 1.0, false))
         end
     end
-    sol = stationize(D, bl, pols, nant; ref_ant = ref)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
     @test sol.ncomp == 2                                # feeds NOT tied without cross hands
     # Each feed gauged independently; delay relative to that feed's ref.
     for a in 1:nant, f in 1:2
@@ -325,7 +325,7 @@ end
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
 
-    sol = stationize(D, bl, pols, nant; ref_ant = absent_ref)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(absent_ref))
     @test sol.ref_covered == Set((a, 1) for a in 1:4)
     @test !((absent_ref, 1) in sol.ref_covered)     # never fabricated
     # The solution is exact despite the missing reference: only its gauge is
@@ -337,8 +337,8 @@ end
 
     # Pin-invariance: the same data referenced to a present station reports the
     # same coverage, so a reporting reference can be chosen after the solve.
-    @test stationize(D, bl, pols, nant; ref_ant = 1).ref_covered == sol.ref_covered
-    @test stationize(D, bl, pols, nant; ref_ant = 3).ref_covered == sol.ref_covered
+    @test stationize(D, bl, pols, nant; gauge = PinAntenna(1)).ref_covered == sol.ref_covered
+    @test stationize(D, bl, pols, nant; gauge = PinAntenna(3)).ref_covered == sol.ref_covered
 end
 
 @testset "Stationize: disconnected islands are each covered on their own gauge" begin
@@ -354,7 +354,7 @@ end
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
 
-    sol = stationize(D, bl, pols, nant; ref_ant = 1)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     @test sol.ref_covered == Set((a, 1) for a in 1:nant)
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-20
@@ -378,7 +378,7 @@ end
     gauge_zero(m) = argmin(abs.(@view m[1:4, :]))
 
     # Uniform weights: the tie resolves to the lowest node, i.e. station 1 feed 1.
-    uniform = stationize(D0, bl, pols, nant; ref_ant = absent_ref)
+    uniform = stationize(D0, bl, pols, nant; gauge = PinAntenna(absent_ref))
     @test gauge_zero(uniform.delay) == CartesianIndex(1, 1)
     @test abs(uniform.delay[1, 1]) < 1.0e-15
 
@@ -389,7 +389,7 @@ end
         d = D[bi, p]
         D[bi, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 1.0e4, 0.0, true))
     end
-    strong = stationize(D, bl, pols, nant; ref_ant = absent_ref)
+    strong = stationize(D, bl, pols, nant; gauge = PinAntenna(absent_ref))
     @test gauge_zero(strong.delay) == CartesianIndex(3, 1)
     @test abs(strong.delay[3, 1]) < 1.0e-15
     # Regauging is all that changed: baseline differences are untouched.
@@ -405,9 +405,9 @@ end
     # Every detection at PFA 1e-3: a looser threshold accepts them and the solve
     # covers the array; a stricter one accepts nothing, so no station is
     # calibrated even though every row still entered the system.
-    sol_lo = stationize(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(pfa_max = 1.0e-2))
+    sol_lo = stationize(D, bl, pols, nant; gauge = PinAntenna(1), opts = FR.Stationization(pfa_max = 1.0e-2))
     @test any(sol_lo.covered)
-    sol_hi = stationize(D, bl, pols, nant; ref_ant = 1, opts = FR.Stationization(pfa_max = 1.0e-4))
+    sol_hi = stationize(D, bl, pols, nant; gauge = PinAntenna(1), opts = FR.Stationization(pfa_max = 1.0e-4))
     @test !any(sol_hi.covered)
     @test all(isnan, sol_hi.delay)
 end
@@ -420,13 +420,13 @@ end
     # One weak baseline among strong ones: it must not extend coverage, and the
     # accepted detections must still solve exactly.
     D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 100.0)
-    strong = stationize(D, bl, pols, nant; ref_ant = 1)
+    strong = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     Dw = copy(D)
     for p in eachindex(pols)
         d = Dw[1, p]
         Dw[1, p] = FR.Detection{Float64}((d.delay, d.rate, d.phase, d.amp, 3.0, 0.5, true))
     end
-    weak = stationize(Dw, bl, pols, nant; ref_ant = 1)
+    weak = stationize(Dw, bl, pols, nant; gauge = PinAntenna(1))
     # Coverage is unchanged: the remaining strong baselines already reach every
     # station, and the weak row adds no connectivity of its own.
     @test weak.covered == strong.covered
@@ -471,7 +471,7 @@ end
     # At least one redundant baseline genuinely exceeds ±π in parallel hand.
     @test any(!is_chain(a, b) && abs(φ[a, 1] - φ[b, 1]) > π for (a, b) in bl)
 
-    sol = stationize(D, bl, pols, nant; ref_ant = ref)
+    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
 
     # Model reproduces every measured phase (closure after correct unwrap).
     @test recon_residuals(D, sol, bl, pols).phase < 1.0e-6
@@ -541,7 +541,7 @@ end
     comps = (
         (cf_sf, :phase), (cf_g, :phase), (d_sf, :delay), (d_g, :delay), (layout.plans[5], :rate),
     )
-    ncomp, = FR.solve_station_systems!(θ, scans, comps; ref_ant = ref)
+    ncomp, = FR.solve_station_systems!(θ, scans, comps; gauge = PinAntenna(ref))
 
     # The track-global inter-feed delay offset is recovered absolutely (cross hands pin it).
     δrec = [plan_off1(d_g)[a, 2, 1, 1] == 0 ? NaN : θ[plan_off1(d_g)[a, 2, 1, 1]] for a in 1:nant]
@@ -611,11 +611,11 @@ end
         # so capping the iteration at zero isolates it — `LeastSquares` must
         # reproduce it BIT-for-bit, not approximately.
         ls = stationize(
-            s.D, s.bl, s.pols, 5; ref_ant = 1,
+            s.D, s.bl, s.pols, 5; gauge = PinAntenna(1),
             opts = FR.Stationization(loss = FR.LeastSquares()),
         )
         wls = stationize(
-            s.D, s.bl, s.pols, 5; ref_ant = 1,
+            s.D, s.bl, s.pols, 5; gauge = PinAntenna(1),
             opts = FR.Stationization(loss = FR.SoftL1(), irls_iters = 0),
         )
         @test ls.phase == wls.phase
@@ -628,11 +628,11 @@ end
     @testset "SoftL1 recovers truth through an outlier" begin
         s = poisoned_scan(5)
         rob = stationize(
-            s.D, s.bl, s.pols, 5; ref_ant = 1,
+            s.D, s.bl, s.pols, 5; gauge = PinAntenna(1),
             opts = FR.Stationization(loss = FR.SoftL1()),
         )
         ls = stationize(
-            s.D, s.bl, s.pols, 5; ref_ant = 1,
+            s.D, s.bl, s.pols, 5; gauge = PinAntenna(1),
             opts = FR.Stationization(loss = FR.LeastSquares()),
         )
         @test pherr(rob, s.φ, 1, 5) < 0.1
@@ -647,7 +647,7 @@ end
         s = poisoned_scan(5)
         errs = map((FR.SoftL1(), FR.Huber(), FR.Cauchy())) do loss
             sol = stationize(
-                s.D, s.bl, s.pols, 5; ref_ant = 1, opts = FR.Stationization(; loss),
+                s.D, s.bl, s.pols, 5; gauge = PinAntenna(1), opts = FR.Stationization(; loss),
             )
             pherr(sol, s.φ, 1, 5)
         end
@@ -664,11 +664,11 @@ end
         for nant in (3, 8)
             s = poisoned_scan(nant)
             rob = stationize(
-                s.D, s.bl, s.pols, nant; ref_ant = 1,
+                s.D, s.bl, s.pols, nant; gauge = PinAntenna(1),
                 opts = FR.Stationization(loss = FR.SoftL1()),
             )
             ls = stationize(
-                s.D, s.bl, s.pols, nant; ref_ant = 1,
+                s.D, s.bl, s.pols, nant; gauge = PinAntenna(1),
                 opts = FR.Stationization(loss = FR.LeastSquares()),
             )
             @test pherr(rob, s.φ, 1, nant) < 0.1
@@ -693,9 +693,9 @@ end
 
         derr(sol) = maximum(abs(sol.delay[a, f] - (τ[a, f] - τ[ref, 1]))
                                 for a in 1:nant, f in 1:2)
-        rob = stationize(D, bl, pols, nant; ref_ant = ref,
+        rob = stationize(D, bl, pols, nant; gauge = PinAntenna(ref),
                          opts = FR.Stationization(loss = FR.SoftL1()))
-        ls = stationize(D, bl, pols, nant; ref_ant = ref,
+        ls = stationize(D, bl, pols, nant; gauge = PinAntenna(ref),
                         opts = FR.Stationization(loss = FR.LeastSquares()))
         @test derr(ls) > 1.0e-9                       # dragged by the 50 ns outlier
         @test derr(rob) < 1.0e-11                     # suppressed
@@ -707,26 +707,26 @@ end
         # reporting a robust solve.
         s = poisoned_scan(4)
         @test_throws ArgumentError stationize(
-            s.D, s.bl, s.pols, 4; ref_ant = 1, spreads = (;),
+            s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (;),
             opts = FR.Stationization(loss = FR.SoftL1()),
         )
         @test_throws "needs the scan's RMS frequency spread" stationize(
-            s.D, s.bl, s.pols, 4; ref_ant = 1, spreads = (;),
+            s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (;),
             opts = FR.Stationization(loss = FR.SoftL1()),
         )
         @test_throws "RMS time spread" stationize(
-            s.D, s.bl, s.pols, 4; ref_ant = 1, spreads = (freq_rms = SCAN_SPREAD.freq_rms,),
+            s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (freq_rms = SCAN_SPREAD.freq_rms,),
             opts = FR.Stationization(loss = FR.SoftL1()),
         )
         # `LeastSquares` needs no geometry: scaling every weight in a system by
         # a common factor leaves the solution invariant (to rounding — the QR
         # runs on differently scaled numbers, so this is not bit-identical).
         bare = stationize(
-            s.D, s.bl, s.pols, 4; ref_ant = 1, spreads = (;),
+            s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (;),
             opts = FR.Stationization(loss = FR.LeastSquares()),
         ).delay
         scaled = stationize(
-            s.D, s.bl, s.pols, 4; ref_ant = 1,
+            s.D, s.bl, s.pols, 4; gauge = PinAntenna(1),
             opts = FR.Stationization(loss = FR.LeastSquares()),
         ).delay
         @test bare ≈ scaled atol = 1.0e-18
@@ -761,12 +761,12 @@ end
         FR.solve_station_systems!(
             θ, (detstack(s1.D, s1.bl, s1.pols; ti = 1),
                 detstack(s2.D, s2.bl, s2.pols; ti = 3)),
-            ((cplan, :phase),); ref_ant = ref, opts = opts,
+            ((cplan, :phase),); gauge = PinAntenna(ref), opts = opts,
         )
         θ1 = zeros(layout.nθ)
         FR.solve_station_systems!(
             θ1, (detstack(s1.D, s1.bl, s1.pols; ti = 1),),
-            ((cplan, :phase),); ref_ant = ref, opts = opts,
+            ((cplan, :phase),); gauge = PinAntenna(ref), opts = opts,
         )
         # Scan 1's columns are untouched by scan 2's outlier: with a per-scan
         # model the systems are block-diagonal, and the loss keeps them that way
@@ -829,12 +829,12 @@ end
     opts = FR.Stationization(loss = FR.SoftL1())
 
     θp = zeros(layout.nθ)
-    ncomp_p, cov_p = FR.solve_station_systems!(θp, Tuple(stacks), comps; ref_ant = ref, opts)
+    ncomp_p, cov_p = FR.solve_station_systems!(θp, Tuple(stacks), comps; gauge = PinAntenna(ref), opts)
     θs = zeros(layout.nθ)
     ncomp_s = 0
     cov_s = Set{Tuple{Int, Int}}()
     for (gi, st) in enumerate(stacks)
-        nc, cov = FR.solve_station_systems!(θs, (st,), comps; ref_ant = ref, opts)
+        nc, cov = FR.solve_station_systems!(θs, (st,), comps; gauge = PinAntenna(ref), opts)
         ncomp_s += nc
         union!(cov_s, Set((a, gi) for (a, _) in cov))
     end
@@ -860,11 +860,11 @@ end
 
     @testset "defaulted cross floors reproduce the single-scalar path bit-for-bit" begin
         uniform = stationize(
-            D, bl, pols, nant; ref_ant = ref,
+            D, bl, pols, nant; gauge = PinAntenna(ref),
             opts = FR.Stationization(systematic_delay = 1.0e-12, systematic_rate = 1.0e-3),
         )
         explicit = stationize(
-            D, bl, pols, nant; ref_ant = ref,
+            D, bl, pols, nant; gauge = PinAntenna(ref),
             opts = FR.Stationization(
                 systematic_delay = 1.0e-12, systematic_rate = 1.0e-3,
                 systematic_delay_cross = 1.0e-12, systematic_rate_cross = 1.0e-3,
@@ -881,11 +881,11 @@ end
         dp = Dp[2, 1]
         Dp[2, 1] = FR.Detection{Float64}((10.0e-9, dp.rate, dp.phase, dp.amp, dp.snr, 0.0, true))
         base = stationize(
-            Dp, bl, pols_par, nant; ref_ant = ref,
+            Dp, bl, pols_par, nant; gauge = PinAntenna(ref),
             opts = FR.Stationization(systematic_delay = 1.0e-12),
         )
         crossed = stationize(
-            Dp, bl, pols_par, nant; ref_ant = ref,
+            Dp, bl, pols_par, nant; gauge = PinAntenna(ref),
             opts = FR.Stationization(
                 systematic_delay = 1.0e-12,
                 systematic_delay_cross = 1.0e-8, systematic_rate_cross = 1.0,
@@ -906,11 +906,11 @@ end
             abs((sol.delay[a, 2] - sol.delay[1, 2]) - (τ[a, 2] - τ[1, 2])) for a in 1:nant
         )
         uniform = stationize(
-            D, bl, pols, nant; ref_ant = ref,
+            D, bl, pols, nant; gauge = PinAntenna(ref),
             opts = FR.Stationization(loss = FR.LeastSquares(), systematic_delay = 1.0e-12),
         )
         floored = stationize(
-            D, bl, pols, nant; ref_ant = ref,
+            D, bl, pols, nant; gauge = PinAntenna(ref),
             opts = FR.Stationization(
                 loss = FR.LeastSquares(),
                 systematic_delay = 1.0e-12, systematic_delay_cross = 1.0e-8,
@@ -937,5 +937,82 @@ end
         @test o2.systematic_delay == 1.0e-12
         @test o2.systematic_delay_cross == 2.0e-11
         @test FR.Stationization() == FR.Stationization()
+    end
+end
+
+# ── Feed-blind phase solve: nuisance feed-2 offsets ──────────────────────────
+#
+# Under a SharedFeeds phase model the QQ rows sit a station-based R–L offset
+# away from their PP siblings and the cross hands add the source's cross-hand
+# phase on top. The shared column must come back as the FEED-1 phase — the
+# offsets and χ land in discarded nuisance columns, never in a weighted
+# compromise — while a single-feed station (no feed-1 data) keeps its full
+# feed-2 phase in the shared column so its data is completely corrected.
+
+function sharedfeeds_scan_layout(nant)
+    geom = CALs.DataGeometry(;
+        times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
+    )
+    mk(term) = CALs.TiedComponent(
+        CALs.GainComponent(term, CALs.PerScan(), CALs.GlobalFrequency()), CALs.SharedFeeds(),
+    )
+    model = CALs.StationGainModel(
+        phase = (
+            offset = mk(CALs.ConstantTerm()), delay = mk(CALs.Delay()), rate = mk(CALs.Rate()),
+        ),
+    )
+    return CALs.plan_parameters(model, nant, geom)
+end
+
+@testset "Stationize: feed-blind phase is the feed-1 phase, offsets discarded" begin
+    rng = MersenneTwister(0x7a11)
+    nant = 5
+    single = 4                                    # single-feed station: feed 2 only
+    bl = all_baselines(nant)
+    pols = ["PP", "QQ", "PQ", "QP"]
+    pfeeds = [CALs.correlation_feed_pair(p) for p in pols]
+
+    τ = repeat(randn(rng, nant) .* 1.0e-9, 1, 2)  # feed-independent delay/rate, so
+    ṙ = repeat(randn(rng, nant) .* 1.0e-3, 1, 2)  # those systems stay consistent
+    φ1 = 0.5 .* randn(rng, nant)
+    ρ = 1.2 .* (2 .* rand(rng, nant) .- 1)        # station R–L phase offsets
+    φ = hcat(φ1, φ1 .+ ρ)
+    χ = 0.9                                       # source cross-hand phase
+
+    D = inject_detections(bl, pols, τ, ṙ, φ, χ)
+    for bi in eachindex(bl), p in eachindex(pols)
+        a, b = bl[bi]
+        fa, fb = pfeeds[p]
+        if (a == single && fa == 1) || (b == single && fb == 1)
+            D[bi, p] = FR.Detection{Float64}((NaN, NaN, NaN, NaN, NaN, NaN, false))
+        end
+    end
+
+    layout = sharedfeeds_scan_layout(nant)
+    cplan, dplan, rplan = layout.plans
+    θ = zeros(layout.nθ)
+    scans = (detstack(D, bl, pols; ti = 1),)
+    FR.solve_station_systems!(
+        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate));
+        gauge = PinAntenna(1),
+    )
+
+    col(plan, a) = plan_off1(plan)[a, 1, 1, 1]
+    # Dual-feed stations: the shared column is the feed-1 phase (gauge zero at
+    # station 1), untouched by ρ and χ.
+    for a in 2:nant
+        a == single && continue
+        @test θ[col(cplan, a)] ≈ φ[a, 1] - φ[1, 1] atol = 1.0e-8
+    end
+    # The single-feed station's shared column carries its feed-2 phase in the
+    # reference's feed-2 frame: the parallel hands cannot separate it from the
+    # offsets' common mode, which the nuisance-block gauge pins at station 1
+    # (so station 1's offset ρ[1] is the frame shift).
+    @test θ[col(cplan, single)] ≈ φ[single, 2] - φ[1, 1] - ρ[1] atol = 1.0e-8
+    # Delay and rate keep every row (cross hands included) and are untouched by
+    # the nuisance machinery.
+    for a in 2:nant
+        @test θ[col(dplan, a)] ≈ τ[a, 1] - τ[1, 1] atol = 1.0e-18
+        @test θ[col(rplan, a)] ≈ ṙ[a, 1] - ṙ[1, 1] atol = 1.0e-12
     end
 end

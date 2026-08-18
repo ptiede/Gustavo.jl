@@ -38,7 +38,7 @@
 # every pass. Anything that changes WHAT a given step solves is model
 # specification and lives on that step. The reference antenna is neither: it is
 # a run-wide choice shared by every step's pass rather than a resource, so it
-# lives on `CalibrationPipeline` itself (`ref_ant`), not on any one step or on
+# lives on `CalibrationPipeline` itself (`gauge`), not on any one step or on
 # `ExecutionConfig`.
 
 """
@@ -241,7 +241,7 @@ end
 The shared state of one pipeline solve, threaded through every visitor hook:
 the step's OWN compiled model (`model`/`layout`/`ev`/`θ` — that step's private
 gain model, never merged with another step's, see [`StepSolution`](@ref)), the
-data geometry, the resolved gauge pin (`ref_ant`), the streaming layer
+data geometry, the resolved gauge (`gauge`), the streaming layer
 (`stream` — REBUILT between steps as each finished solution is appended to its
 transform chain, see `_run_pipeline` — which also carries the run's
 [`ExecutionConfig`](@ref) resources), and
@@ -269,7 +269,7 @@ mutable struct SolveContext{
     geom::DataGeometry
     ev::E
     θ::V
-    ref_ant::Int
+    gauge::AbstractGauge
     nant::Int
     antennas::A
     stream::S
@@ -327,14 +327,15 @@ Base.:|>(a::StepChain, b::StepChain) = StepChain(vcat(a.steps, b.steps))
 # ── The pipeline ─────────────────────────────────────────────────────────────
 
 """
-    CalibrationPipeline(steps...; exec = ExecutionConfig(), ref_ant = 1)
-    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), ref_ant = 1)
-    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), ref_ant = 1)
+    CalibrationPipeline(steps...; exec = ExecutionConfig(), gauge = PinAntenna(1))
+    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), gauge = PinAntenna(1))
+    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), gauge = PinAntenna(1))
 
 An ordered list of [`CalibrationStep`](@ref)s (raw
 `Fringe.AbstractDataTransform`s are lifted automatically) plus the run-wide
-[`ExecutionConfig`](@ref), `ref_ant` — the gauge pin every solve step reads
-(`ctx.ref_ant`): a 1-based antenna index or a station code (`"PT"`). A
+[`ExecutionConfig`](@ref), `gauge` — the gauge convention every solve step reads
+(`ctx.gauge`): an [`AbstractGauge`](@ref), e.g. `PinAntenna("PT")`,
+`PinAntenna(["PT", "LA"])` for a ranked fallback, or `ZeroSumPhase()`. A
 pipeline needs no [`FringeFit`](@ref) step; any `SolveStep`
 composition is legal, including a single standalone step (e.g. a `Bandpass`
 fit over data already corrected by an earlier run) — the single-step solve is
@@ -344,20 +345,20 @@ docstring). Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
 struct CalibrationPipeline{X <: ExecutionConfig}
     steps::Vector{CalibrationStep}
     exec::X
-    ref_ant::Union{Integer, AbstractString, Symbol}
+    gauge::AbstractGauge
 end
 CalibrationPipeline(
     steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec, ref_ant)
+    gauge::AbstractGauge = PinAntenna(1),
+) = CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec, gauge)
 CalibrationPipeline(
     steps::_Chainable...; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = CalibrationPipeline(collect(steps); exec, ref_ant)
+    gauge::AbstractGauge = PinAntenna(1),
+) = CalibrationPipeline(collect(steps); exec, gauge)
 CalibrationPipeline(
     chain::StepChain; exec::ExecutionConfig = ExecutionConfig(),
-    ref_ant::Union{Integer, AbstractString, Symbol} = 1,
-) = CalibrationPipeline(chain.steps, exec, ref_ant)
+    gauge::AbstractGauge = PinAntenna(1),
+) = CalibrationPipeline(chain.steps, exec, gauge)
 
 # Label a step by kind; a lifted transform is named for the transform it wraps.
 _step_label(s::CalibrationStep) = string(nameof(typeof(s)))

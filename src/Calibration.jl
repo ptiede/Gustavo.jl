@@ -18,6 +18,7 @@ using LinearAlgebra
 using LinearSolve
 using ComponentArrays: ComponentVector, ComponentArray, getaxes
 
+include("Calibration/gauge.jl")
 include("Calibration/lsq.jl")
 include("Calibration/segmentation.jl")
 include("Calibration/terms.jl")
@@ -30,6 +31,11 @@ include("Calibration/solutions.jl")
 # Feed / correlation-product conventions
 export correlation_feed_pair, is_parallel_hand
 export parallel_hand_indices, cross_hand_indices
+
+# Gauge conventions for station-based solves
+export AbstractGauge, PinAntenna, ZeroSumPhase
+export gauge_anchor, gauge_row!, regauge!, resolve_gauge, gauge_primary, remap_gauge
+export gauge_station_order
 
 # Weighted least squares (weights are always inverse variances)
 export design_matrices

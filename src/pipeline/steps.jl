@@ -10,7 +10,7 @@
 
 The fringe-fitting stage. WHAT is solved is `model` ([`FringeModel`](@ref)):
 the ordered phase-term list — per-scan constant/delay/rate, the inter-feed offsets
-(the gauge pin, `ref_ant`, is run-wide — see [`CalibrationPipeline`](@ref)).
+(the gauge pin, `gauge`, is run-wide — see [`CalibrationPipeline`](@ref)).
 HOW it is solved lives on `estimator`, a pluggable
 [`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
 (per-baseline delay/rate search + closure-screened station WLS).
@@ -220,7 +220,7 @@ Fringe.estimator_info(est::Fringe.MatchedFilter) = (; search = est.search)
 function _station_solve!(est::Fringe.MatchedFilter, ctx::SolveContext, dets)
     ncomp, covered = Fringe.solve_station_systems!(
         ctx.θ, dets, ctx.scratch[:fringe_setup].stageB;
-        ref_ant = ctx.ref_ant, opts = est.closure,
+        gauge = ctx.gauge, opts = est.closure,
     )
     return ncomp, Fringe.unconstrained_flags(dets, covered, ctx.geom)
 end
@@ -400,11 +400,11 @@ end
 function process_scan!(s::DispersionSBDFit, ctx::SolveContext, stack, win::GeometryWindow)
     setup = ctx.scratch[:disp_sbd_setup]
     Fringe.refine_scan_dispersion!(
-        ctx.θ, stack, win, setup.delay_plan, setup.disp_plan, ctx.ref_ant, ctx.nant;
+        ctx.θ, stack, win, setup.delay_plan, setup.disp_plan, ctx.gauge, ctx.nant;
         executor = inner_executor(ctx.stream), ties = setup.ties,
     )
     Fringe.refine_scan_sbd!(
-        ctx.θ, stack, win, setup.sbd_plans, ctx.ref_ant, ctx.nant;
+        ctx.θ, stack, win, setup.sbd_plans, ctx.gauge, ctx.nant;
         executor = inner_executor(ctx.stream),
     )
     return nothing
@@ -462,7 +462,7 @@ function finish_pass!(s::Bandpass, ctx::SolveContext)
     results = ctx.scratch[:pass_results]
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
     report = Fringe.solve_bandpass!(
-        s.smoother, ctx.θ, [res.r for res in results], setup, s.model; ref_ant = ctx.ref_ant,
+        s.smoother, ctx.θ, [res.r for res in results], setup, s.model; gauge = ctx.gauge,
     )
     scans = Int[res.index for res in results]
     # The smoother's own per-track record travels with the step's info, so a
@@ -490,7 +490,7 @@ function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::Geome
     # the pipeline's transform chain — the per-AP phases fit that residual
     # directly, no correction of its own.
     Fringe.adhoc_scan!(
-        ctx.θ, stack, win, setup.adhoc_plan, s.smoother, ctx.ref_ant, ctx.nant;
+        ctx.θ, stack, win, setup.adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
         executor = inner_executor(ctx.stream),
     )
     return nothing

@@ -19,6 +19,9 @@ include("plan_offsets.jl")
 
 include("test_calibration.jl")
 
+# Gauge conventions: which constraint fixes each component's additive freedom.
+include("test_gauge.jl")
+
 # FITS-IDI writer round-trip tests (Phase 2 of the fringe-fitter refactor).
 include("test_fitsidi.jl")
 
@@ -91,6 +94,9 @@ include("test_weight_scale.jl")
 # The executor seam: the group scheduler under each outer scheduler — dispatch
 # order, task cap, and bit-identical θ/outputs whichever one runs the pass.
 include("test_executors.jl")
+
+# The coherence QA estimator: the debiased η must stay unbiased at low SNR.
+include("test_coherence.jl")
 
 function synthetic_uvdata()
     vis = ComplexF64[
@@ -380,6 +386,59 @@ end
         @test filesize(tmp) > 0
     finally
         isfile(tmp) && rm(tmp; force = true)
+    end
+end
+
+@testset "write_uvfits emits no record without a uv position" begin
+    UV = Gustavo.UVData
+    # An in-memory fixture: the lazy one is backed by a DiskArray that cannot be
+    # mutated in place, and this test has to blank a cell.
+    uvset, _ = _build_fringe_uvset()
+    leaf = first(values(UV.branches(uvset)))
+    uvw = parent(leaf[:uvw])            # (Ti, Baseline, UVW)
+    wts = parent(leaf[:weights])        # (Frequency, Ti, Baseline, Pol)
+
+    # Blank one (time, baseline) cell the way a reduction leaves an unsampled
+    # one: no uv position, no weight.
+    uvw[1, 1, :] .= NaN
+    wts[:, 1, 1, :] .= 0
+
+    tmp = tempname() * ".uvfits"
+    try
+        UV.write_uvfits(tmp, uvset)
+        # The record is judged in the FILE: `load_uvfits` densifies the (time,
+        # baseline) grid, marking a cell absent from the file with NaN uvw in
+        # memory, so a round-tripped cube cannot distinguish a dropped record
+        # from a written NaN one. The group count can.
+        ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+        expected = sum(
+            l -> size(parent(l[:uvw]), 1) * size(parent(l[:uvw]), 2),
+            values(UV.branches(uvset)),
+        ) - 1
+        @test Int(ext.card_value(FITSFiles.fits(tmp)[1].cards, "GCOUNT")) == expected
+        back = UV.load_uvfits(tmp)
+        for l in values(UV.branches(back))
+            u = parent(l[:uvw])
+            wb = parent(l[:weights])
+            # In-memory NaN uvw marks a record absent from the file; such a
+            # cell must be weightless.
+            @test all(
+                all(isfinite, @view u[t, b, :]) || all(iszero, @view wb[:, t, b, :])
+                    for t in axes(u, 1), b in axes(u, 2)
+            )
+        end
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
+
+    # A cell with weight but no position is a bug upstream; dropping it would
+    # silently lose data, so the write stops instead.
+    wts[1, 1, 1, 1] = 1.0
+    tmp2 = tempname() * ".uvfits"
+    try
+        @test_throws ErrorException UV.write_uvfits(tmp2, uvset)
+    finally
+        isfile(tmp2) && rm(tmp2; force = true)
     end
 end
 
