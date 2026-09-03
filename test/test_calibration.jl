@@ -781,7 +781,7 @@ end
     geom = CAL.DataGeometry(;
         times, channel_freqs = freqs, t0 = 0.0, f0 = sum(freqs) / length(freqs),
     )
-    # A delay term plus a per-channel bandpass, so `step_solution` has
+    # A delay term plus a per-channel bandpass, so step selection has
     # something to extract.
     model = CAL.StationGainModel(
         phase = (
@@ -826,9 +826,9 @@ end
         # A step selection is index-matched to θ, so it propagates the array type.
         @test sold2[1:1].steps[1].θ isa DimArray
         @test sold2[1:1].steps[1].θ == solv2[1:1].steps[1].θ
-        # `step_solution` returns the named step's own solution — its θ shares
+        # `sol[name]` returns the named step's own solution — its θ shares
         # no parameter identity with the merged original, only the element type.
-        @test CAL.step_solution(sold2, :bandpass).steps[1].θ == CAL.step_solution(solv2, :bandpass).steps[1].θ
+        @test sold2[:bandpass].steps[1].θ == solv2[:bandpass].steps[1].θ
     end
 
     @testset "gains(sol) labels the forward map for inspection" begin

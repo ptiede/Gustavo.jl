@@ -122,10 +122,13 @@ built-in terms do, e.g. `term_label(::Delay) = "delay"`,
 ## Worked example: a quadratic frequency term
 
 A term whose phase grows as the square of the offset from `f0` — not
-physical, but a compact illustration of every hook:
+physical, but a compact illustration of every hook. The hooks are functions of
+`Gustavo.Calibration`, so a new term imports the ones it extends by name:
 
 ```julia
-using Gustavo.Calibration
+using Gustavo
+import Gustavo.Calibration: term_axes, param_shapes, freq_coord_state,
+    freq_coordinate, term_eval, term_label
 
 "Quadratic phase in frequency: phase = `quad`·(f − f0)², `quad` in rad/Hz²."
 struct Quadratic <: AbstractGainTerm end

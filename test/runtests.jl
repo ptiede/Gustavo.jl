@@ -63,7 +63,7 @@ include("test_fringe_step.jl")
 
 # The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
 # vs the frozen monolith, refine-kernel bit parity, coverage top-up,
-# step_solution extraction + portable ApplySolution.
+# step-selection extraction + portable ApplySolution.
 include("test_bandpass_step.jl")
 
 # Bandpass(smoother = JointSmoother()): the alternating complex-visibility +

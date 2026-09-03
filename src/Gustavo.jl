@@ -47,9 +47,21 @@ export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, resolve_gauge
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
-export FringeFit, FringeModel, DispersionModel, SingleBandDelay, BandGroups, default_fringe_terms,
+export FringeFit, FringeModel, DispersionModel, SingleBandDelay, default_fringe_terms,
     MatchedFilter, DispersionSBDFit, Bandpass, default_bandpass_terms, TemporalSmoother,
     default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
+# The gain-model vocabulary: everything a step's `model =` argument is written
+# in — components, terms, segmentations, feed tyings — under a bare
+# `using Gustavo`.
+export AbstractGainModel, GainComponent, StationGainModel, as_gain_model
+export station_components, station_model_summary, component_label
+export AbstractGainTerm, ConstantTerm, Delay, Dispersion, Rate, Polynomial,
+    PolynomialFreq, PolynomialTime
+export AbstractFeedTying, PerFeed, SharedFeeds, ReferenceRelative, SingleFeed
+export AbstractTimeSegmentation, GlobalTime, PerScan, PerIntegration, TimeBlocks,
+    InstrumentScans
+export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
+    ChannelBlocks, FreqGroups, BandGroups
 export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate
@@ -68,7 +80,9 @@ export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ScanStream, scan_stream, select_groups
 export search_scan
 export map_groups, foreach_group
-export StepSolution, stage_info
+# The solution surface: the container, selection (`sol[...]`), the two verbs,
+# and serialization.
+export CalibrationSolution, StepSolution, stage_info
 export component_names, gains, parameters
-export step_solution
+export save_solution, load_solution
 end

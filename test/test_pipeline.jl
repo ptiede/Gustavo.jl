@@ -309,9 +309,9 @@ end
     # A multi-step pipeline's within-run composition (`_run_pipeline` appends
     # each finished step's solution as an `ApplySolution` before the next
     # step's pass) is the SAME mechanism a caller invokes by hand across
-    # separate `fit` calls via `step_solution`/`ApplySolution`. Fitting `A |>
+    # separate `fit` calls via selection/`ApplySolution`. Fitting `A |>
     # B` in one call must solve the SAME B-step θ as fitting `A` alone, then
-    # fitting `ApplySolution(step_solution(sol_a, :fringe)) |> B` in a later,
+    # fitting `ApplySolution(sol_a[:fringe]) |> B` in a later,
     # unrelated call.
     uvset, _ = _build_fringe_uvset()
     ff = FringeFit(model = FringeModel())
@@ -320,10 +320,10 @@ end
     sol_within = fit(ff |> bp, uvset)
 
     sol_a = fit(ff, uvset)
-    sol_cross = fit(FP.ApplySolution(CAL.step_solution(sol_a, :fringe)) |> bp, uvset)
+    sol_cross = fit(FP.ApplySolution(sol_a[:fringe]) |> bp, uvset)
 
-    θ_within = CAL.step_solution(sol_within, :bandpass).steps[1].θ
-    θ_cross = CAL.step_solution(sol_cross, :bandpass).steps[1].θ
+    θ_within = sol_within[:bandpass].steps[1].θ
+    θ_cross = sol_cross[:bandpass].steps[1].θ
     @test θ_within == θ_cross
 end
 

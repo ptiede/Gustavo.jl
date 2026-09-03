@@ -8,7 +8,7 @@
 #   per-scan accumulator contributions fold in group-index order).
 # - The refine kernels (dTEC, SBD) are inner-invariant and recover the
 #   injected dTEC standalone on a scan view.
-# - `step_solution` extracts a portable bandpass-only solution and
+# - selection (`sol[:bandpass]`) extracts a portable bandpass-only solution and
 #   `ApplySolution` applies it same-set (index-aligned) and cross-set
 #   (station-name-mapped, channel-layout-validated, time-constant only).
 
@@ -153,8 +153,8 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test !all(≈(gbp[1, 2, 1]), gbp[:, 2, 1])
     end
 
-    @testset "step_solution extraction" begin
-        bps = step_solution(sol_n, :bandpass)
+    @testset "step-selection extraction" begin
+        bps = sol_n[:bandpass]
         bp = only(bps.steps)
         @test length(bp.model.phase) == 1 && length(bp.model.logamp) == 1
         @test keys(bp.layout.plantree.phase) == (:bandpass,)
@@ -164,8 +164,8 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
         # A solution with no bandpass STEP at all refuses extraction.
         sol_f = fit(FringeFit(model = fm), uvset)
-        @test_throws ArgumentError step_solution(sol_f, :bandpass)
-        @test_throws "no stage :bandpass" step_solution(sol_f, :bandpass)
+        @test_throws ArgumentError sol_f[:bandpass]
+        @test_throws "no stage :bandpass" sol_f[:bandpass]
     end
 
     @testset "compile-time model vetting (can_fit / validate_model)" begin
@@ -401,7 +401,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
     end
 
     @testset "portable ApplySolution: same-set + cross-set by station name" begin
-        bps = step_solution(sol_n, :bandpass)
+        bps = sol_n[:bandpass]
         bp = only(bps.steps)
         ev = CAL.GainEvaluator(bp.model, bp.layout)
 

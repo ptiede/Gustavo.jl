@@ -56,11 +56,12 @@ including one standalone step (e.g. fitting a `Bandpass` alone over
 data already corrected by an earlier run). A multi-step `CalibrationPipeline`
 is a fusion convenience built FROM repeated single-step solves: solving
 `A |> B` in one call is equivalent to `sa = fit(A, uvset)` followed by
-`fit(Fringe.ApplySolution(step_solution(sa, provides(A))) |> B, uvset)` — the
+`fit(Fringe.ApplySolution(sa[provides(A)]) |> B, uvset)` — the
 SAME mechanism ([`Fringe.ApplySolution`](@ref) dividing a finished step's
 gains out of the stream before the next step's pass), just run within one
-call instead of across two. See [`step_solution`](@ref) for the cross-run form
-of this composition.
+call instead of across two. Selection (`sol[name]` — see the
+`getindex` docstring on `CalibrationSolution`) extracts the finished step for
+the cross-run form of this composition.
 """
 function fit(pipe::CalibrationPipeline, uvset::UVSet)
     _check_blas_threads()
@@ -287,7 +288,7 @@ end
 # pass reads already-corrected data (this is solve-time-only bookkeeping — the
 # returned solution still records just `br.tfs`, the caller's own precal
 # chain). This is the SAME `ApplySolution`-chaining a caller does explicitly
-# across separate `fit` calls via `step_solution` (see its docstring) — a
+# across separate `fit` calls via selection (`sol[name]`) — a
 # multi-step pipeline just runs the append within one call instead of two, and
 # within a fused run applies the identical division to the resident scan.
 # Non-data info an earlier step published (e.g. the fringe stage's

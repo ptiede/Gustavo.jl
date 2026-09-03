@@ -44,17 +44,6 @@ export AbstractGauge, PinAntenna, ZeroSumPhase
 export gauge_anchor, gauge_row!, regauge!, resolve_gauge, gauge_primary, remap_gauge
 export gauge_station_order
 
-# Weighted least squares (weights are always inverse variances)
-export design_matrices
-export weighted_least_squares, weighted_regularized_least_squares,
-    weighted_constrained_least_squares
-export WLSEstimator
-export weighted_phase_mean, weighted_complex_correction
-export connected_components, savitzky_golay_smooth
-
-# Phase-track utilities
-export unwrap_phase_track, phase_unwrap_ambiguity, phase_relative_to_ref
-
 # ── Unified gain-model framework ─────────────────────────────────────────────
 # Segmentation vocabulary
 export AbstractTimeSegmentation, AbstractFrequencySegmentation
@@ -93,7 +82,10 @@ export save_solution_hdf5, load_solution_hdf5
 # Per-stage provenance and snapshots (composable pipeline)
 export stage_info
 export component_ranges, component_names, gains, parameters
-# Fit-once / apply-later extraction (a single step, e.g. a portable bandpass)
-export step_solution
+
+# Documented interface without an exported name; callers qualify it.
+@static if VERSION >= v"1.11"
+    eval(Meta.parse("public component_vector"))
+end
 
 end

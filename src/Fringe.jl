@@ -20,6 +20,9 @@ using ..Calibration
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,
     _flatten_components, _component_leaf, _feed_node, _block_index, _composed_gains,
     _freq_group_ranges
+# Numeric kernels the model layer keeps off its public surface.
+using ..Calibration: weighted_regularized_least_squares, weighted_constrained_least_squares,
+    unwrap_phase_track, phase_unwrap_ambiguity, connected_components, savitzky_golay_smooth
 # `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
 # the model layer's element-compilation generic.
 import ..Calibration: model_components
@@ -166,5 +169,10 @@ export search_scan
 export map_groups, foreach_group
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
 export plot_fringe_search
+
+# Documented estimator hook without an exported name; callers qualify it.
+@static if VERSION >= v"1.11"
+    eval(Meta.parse("public scan_local_solve"))
+end
 
 end

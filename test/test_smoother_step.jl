@@ -199,7 +199,7 @@ end
         # read of the data. The oracle is the composition a caller can write by
         # hand — separate `fit` calls of one step each, which never fuse.
         ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
-        pre = FP.ApplySolution(CAL.step_solution(sol_n, :fringe))
+        pre = FP.ApplySolution(sol_n[:fringe])
 
         sol_fused = fit(pre |> ds |> TemporalSmoother(adhoc), uvset)
         @test keys(sol_fused) == [:refine, :adhoc]
@@ -209,7 +209,7 @@ end
         @test any(!=(0), sol_fused[:adhoc].steps[1].θ)
 
         sol_a = fit(pre |> ds, uvset)
-        refine_tf = FP.ApplySolution(CAL.step_solution(sol_a, :refine))
+        refine_tf = FP.ApplySolution(sol_a[:refine])
         sol_b = fit(pre |> refine_tf |> TemporalSmoother(adhoc), uvset)
         @test sol_fused[:refine].steps[1].θ == sol_a[:refine].steps[1].θ
         @test sol_fused[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
@@ -226,9 +226,9 @@ end
         sol_3 = fit(FringeFit() |> ds |> TemporalSmoother(adhoc), uvset)
         @test keys(sol_3) == [:fringe, :refine, :adhoc]
         sol_f1 = fit(FringeFit(), uvset)
-        pre_f = FP.ApplySolution(CAL.step_solution(sol_f1, :fringe))
+        pre_f = FP.ApplySolution(sol_f1[:fringe])
         sol_r1 = fit(pre_f |> ds, uvset)
-        pre_r = FP.ApplySolution(CAL.step_solution(sol_r1, :refine))
+        pre_r = FP.ApplySolution(sol_r1[:refine])
         sol_a1 = fit(pre_f |> pre_r |> TemporalSmoother(adhoc), uvset)
         @test sol_3[:fringe].steps[1].θ == sol_f1[:fringe].steps[1].θ
         @test sol_3[:refine].steps[1].θ == sol_r1[:refine].steps[1].θ
