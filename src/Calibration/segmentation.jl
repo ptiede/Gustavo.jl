@@ -88,6 +88,10 @@ struct FreqGroups <: AbstractFrequencySegmentation
     end
 end
 
+# `ranges` is a `Vector`, so the default struct `==` would compare by identity.
+Base.:(==)(a::FreqGroups, b::FreqGroups) = a.ranges == b.ranges
+Base.hash(s::FreqGroups, h::UInt) = hash(s.ranges, hash(:FreqGroups, h))
+
 # ── DataGeometry ─────────────────────────────────────────────────────────────
 
 """

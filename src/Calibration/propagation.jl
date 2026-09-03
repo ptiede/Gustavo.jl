@@ -37,7 +37,7 @@ end
 # layout cannot constrain it (see `_dispersion_enabled`).
 model_components(dm::DispersionModel, geom::DataGeometry) =
     _dispersion_enabled(dm, geom) ?
-    TiedComponent(Dispersion(), PerScan(), GlobalFrequency(), SharedFeeds()) : nothing
+    GainComponent(Dispersion(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()) : nothing
 
 # Whether this geometry gets a dTEC term. No model, no term. With one, the
 # `require_band_separation` gate asks whether the band layout can separate 1/ν
@@ -54,7 +54,7 @@ end
 
 # The dTEC component's routing signature: located by TERM TYPE rather than by
 # index, so the model may carry it anywhere in its component order.
-_is_dispersion(tc) = tc.component.term isa Dispersion
+_is_dispersion(tc) = tc.term isa Dispersion
 
 # The dispersion component's plan, or `nothing` when the model carries no dTEC term.
 function _dispersion_plan(model, layout)

@@ -97,7 +97,7 @@ end
 
 # ── Per-component layout ─────────────────────────────────────────────────────
 #
-# One resolution of a `TiedComponent` over a geometry: the segment ids and
+# One resolution of an `GainComponent` over a geometry: the segment ids and
 # coordinates the `ComponentPlan` needs, plus the shaped-leaf description the
 # template and range build from. The leaf `shape`/`roles` describe the block run
 # as a fixed-rank column-major array: fastest to slowest over parameters,
@@ -105,10 +105,10 @@ end
 # every component reshapes to the same five axes and any consumer addresses it
 # the same way. A term whose block length varies across frequency segments has no
 # rectangular leaf and is rejected here.
-function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
-    t = term(tc)
-    tseg_id, ntseg = time_segment_ids(time_segmentation(tc), geom)
-    fseg_id, nfseg = freq_segment_ids(freq_segmentation(tc), geom)
+function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
+    t = e.term
+    tseg_id, ntseg = time_segment_ids(e.Ti, geom)
+    fseg_id, nfseg = freq_segment_ids(e.Frequency, geom)
     fseg_groups = segment_groups(fseg_id, nfseg)
 
     # Build only the axes the term declares; the rest stay zero. Calling a
@@ -136,7 +136,7 @@ function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
     nchan_seg = [length(grp) for grp in fseg_groups]
     blocklen = [nparams_per_block(t, n) for n in nchan_seg]
 
-    nfeed = nfeed_blocks(tc.tying)
+    nfeed = nfeed_blocks(e.Feed)
     bl = first(blocklen)                         # nchan_seg has one entry per segment (nfseg ≥ 1)
     all(==(bl), blocklen) || throw(
         ArgumentError(
@@ -144,11 +144,11 @@ function _component_layout(tc::TiedComponent, nant::Int, geom::DataGeometry)
                 "$blocklen); the named-leaf layout requires one rectangular leaf per component."
         )
     )
-    shape, roles = _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tc.tying)
+    shape, roles = _leaf_shape(bl, nfeed, nfseg, ntseg, nant, e.Feed)
 
     return (;
-        tseg = time_segmentation(tc), fseg = freq_segmentation(tc),
-        tseg_id, fseg_id, xf, xt, nchan_seg, tying = tc.tying, shape, roles, fstate, tstate,
+        tseg = e.Ti, fseg = e.Frequency,
+        tseg_id, fseg_id, xf, xt, nchan_seg, tying = e.Feed, shape, roles, fstate, tstate,
     )
 end
 
@@ -171,20 +171,20 @@ end
 # component's `range` matches the position of its leaf in the `ComponentVector`.
 _template_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
     map(v -> _template_node(v, nant, geom), nt)
-_template_node(tc::TiedComponent, nant::Int, geom::DataGeometry) =
-    zeros(_component_layout(tc, nant, geom).shape...)
+_template_node(e::GainComponent, nant::Int, geom::DataGeometry) =
+    zeros(_component_layout(e, nant, geom).shape...)
 _template_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _template_tree(nt, nant, geom)
 
 function _plans_tree(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
     return NamedTuple{keys(nt)}(map(v -> _plans_node(v, nant, geom, flat, next), values(nt)))
 end
-function _plans_node(tc::TiedComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
-    cl = _component_layout(tc, nant, geom)
+function _plans_node(e::GainComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
+    cl = _component_layout(e, nant, geom)
     dof = prod(cl.shape)
     range = next[]:(next[] + dof - 1)
     next[] += dof
     plan = ComponentPlan(
-        term(tc), cl.tseg, cl.fseg, cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg,
+        e.term, cl.tseg, cl.fseg, cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg,
         cl.tying, range, cl.shape, cl.fstate, cl.tstate,
     )
     push!(flat, plan)
@@ -195,8 +195,8 @@ _plans_node(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::B
 
 _axes_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
     map(v -> _axes_node(v, nant, geom), nt)
-function _axes_node(tc::TiedComponent, nant::Int, geom::DataGeometry)
-    cl = _component_layout(tc, nant, geom)
+function _axes_node(e::GainComponent, nant::Int, geom::DataGeometry)
+    cl = _component_layout(e, nant, geom)
     return (; dims = cl.shape, roles = cl.roles)
 end
 _axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant, geom)

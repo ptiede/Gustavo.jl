@@ -77,9 +77,7 @@ function perfeed_scan_layout(nant)
     geom = CALs.DataGeometry(;
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
-    mk(term) = CALs.TiedComponent(
-        CALs.GainComponent(term, CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed(),
-    )
+    mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
     model = CALs.StationGainModel(
         phase = (
             offset = mk(CALs.ConstantTerm()), delay = mk(CALs.Delay()), rate = mk(CALs.Rate()),
@@ -486,7 +484,7 @@ end
     # Two scans share ONE stable inter-feed (feed-2 − feed-1) delay/phase offset per
     # station; the per-scan feed-common delays/phases differ. Scan 2 has NO
     # cross-hand detections (the weak case that splits into ncomp=2 per-scan). The
-    # global FeedComponent(2) × GlobalTime offset, pinned by scan 1's cross hands,
+    # global SingleFeed(2) × GlobalTime offset, pinned by scan 1's cross hands,
     # must tie scan 2's feeds too.
     rng = MersenneTwister(0x5EED)
     nant = 4
@@ -523,13 +521,13 @@ end
         scan_of_time = [1, 1, 1, 2, 2, 2],
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
-    mkc(term, tseg, tying) = CALs.TiedComponent(CALs.GainComponent(term, tseg, CALs.GlobalFrequency()), tying)
+    mkc(term, tseg, tying) = CALs.GainComponent(term; Ti = tseg, Frequency = CALs.GlobalFrequency(), Feed = tying)
     model = CALs.StationGainModel(
         phase = (
             atmos = mkc(CALs.ConstantTerm(), CALs.PerScan(), CALs.SharedFeeds()),
-            rel_phase = mkc(CALs.ConstantTerm(), CALs.GlobalTime(), CALs.FeedComponent(2)),
+            rel_phase = mkc(CALs.ConstantTerm(), CALs.GlobalTime(), CALs.SingleFeed(2)),
             mbd = mkc(CALs.Delay(), CALs.PerScan(), CALs.SharedFeeds()),
-            rel_delay = mkc(CALs.Delay(), CALs.GlobalTime(), CALs.FeedComponent(2)),
+            rel_delay = mkc(CALs.Delay(), CALs.GlobalTime(), CALs.SingleFeed(2)),
             rate = mkc(CALs.Rate(), CALs.PerScan(), CALs.PerFeed()),
         ),
     )
@@ -602,8 +600,10 @@ end
     # Cross hands merge the feeds into one component, so BOTH feeds are gauged
     # against the reference's feed-1 node.
     pherr(sol, φ, ref, nant) =
-        maximum(abs(rem2pi(sol.phase[a, f] - (φ[a, f] - φ[ref, 1]), RoundNearest))
-                    for a in 1:nant, f in 1:2)
+        maximum(
+        abs(rem2pi(sol.phase[a, f] - (φ[a, f] - φ[ref, 1]), RoundNearest))
+            for a in 1:nant, f in 1:2
+    )
 
     @testset "the identity element is plain weighted least squares" begin
         s = poisoned_scan(5)
@@ -691,12 +691,18 @@ end
         d = D[3, 1]
         D[3, 1] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, 0.0, true))
 
-        derr(sol) = maximum(abs(sol.delay[a, f] - (τ[a, f] - τ[ref, 1]))
-                                for a in 1:nant, f in 1:2)
-        rob = stationize(D, bl, pols, nant; gauge = PinAntenna(ref),
-                         opts = FR.Stationization(loss = FR.SoftL1()))
-        ls = stationize(D, bl, pols, nant; gauge = PinAntenna(ref),
-                        opts = FR.Stationization(loss = FR.LeastSquares()))
+        derr(sol) = maximum(
+            abs(sol.delay[a, f] - (τ[a, f] - τ[ref, 1]))
+                for a in 1:nant, f in 1:2
+        )
+        rob = stationize(
+            D, bl, pols, nant; gauge = PinAntenna(ref),
+            opts = FR.Stationization(loss = FR.SoftL1())
+        )
+        ls = stationize(
+            D, bl, pols, nant; gauge = PinAntenna(ref),
+            opts = FR.Stationization(loss = FR.LeastSquares())
+        )
         @test derr(ls) > 1.0e-9                       # dragged by the 50 ns outlier
         @test derr(rob) < 1.0e-11                     # suppressed
         @test derr(rob) < 1.0e-3 * derr(ls)
@@ -747,10 +753,7 @@ end
         )
         model = CALs.StationGainModel(
             phase = (
-                offset = CALs.TiedComponent(
-                    CALs.GainComponent(CALs.ConstantTerm(), CALs.PerScan(), CALs.GlobalFrequency()),
-                    CALs.PerFeed(),
-                ),
+                offset = CALs.GainComponent(CALs.ConstantTerm(); Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed()),
             ),
         )
         layout = CALs.plan_parameters(model, nant, geom)
@@ -759,8 +762,10 @@ end
 
         θ = zeros(layout.nθ)
         FR.solve_station_systems!(
-            θ, (detstack(s1.D, s1.bl, s1.pols; ti = 1),
-                detstack(s2.D, s2.bl, s2.pols; ti = 3)),
+            θ, (
+                detstack(s1.D, s1.bl, s1.pols; ti = 1),
+                detstack(s2.D, s2.bl, s2.pols; ti = 3),
+            ),
             ((cplan, :phase),); gauge = PinAntenna(ref), opts = opts,
         )
         θ1 = zeros(layout.nθ)
@@ -798,9 +803,7 @@ end
         times = [0.0, 1.0, 100.0, 101.0, 200.0, 201.0], scan_of_time = [1, 1, 2, 2, 3, 3],
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
-    mk(term) = CALs.TiedComponent(
-        CALs.GainComponent(term, CALs.PerScan(), CALs.GlobalFrequency()), CALs.PerFeed(),
-    )
+    mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
     model = CALs.StationGainModel(
         phase = (phi = mk(CALs.ConstantTerm()), mbd = mk(CALs.Delay()), rate = mk(CALs.Rate())),
     )
@@ -818,10 +821,12 @@ end
         )
         if poison
             d = D[2, 1]
-            D[2, 1] = FR.Detection{Float64}((
-                d.delay + 50.0e-9, d.rate, rem2pi(d.phase + 2.0, RoundNearest),
-                d.amp, d.snr, 0.0, true,
-            ))
+            D[2, 1] = FR.Detection{Float64}(
+                (
+                    d.delay + 50.0e-9, d.rate, rem2pi(d.phase + 2.0, RoundNearest),
+                    d.amp, d.snr, 0.0, true,
+                )
+            )
         end
         return D
     end
@@ -953,9 +958,7 @@ function sharedfeeds_scan_layout(nant)
     geom = CALs.DataGeometry(;
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
-    mk(term) = CALs.TiedComponent(
-        CALs.GainComponent(term, CALs.PerScan(), CALs.GlobalFrequency()), CALs.SharedFeeds(),
-    )
+    mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.SharedFeeds())
     model = CALs.StationGainModel(
         phase = (
             offset = mk(CALs.ConstantTerm()), delay = mk(CALs.Delay()), rate = mk(CALs.Rate()),

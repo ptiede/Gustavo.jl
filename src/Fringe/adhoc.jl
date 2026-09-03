@@ -311,7 +311,7 @@ adhoc phase at 0, a `ZeroSumPhase` centers each AP on zero mean.
 
 `tying` is the adhoc component's [`AbstractFeedTying`](@ref); `_feed_node` maps
 each feed onto the node it constrains. `PerFeed()` (the default, matching
-[`TiedComponent`](@ref)) solves an independent track per feed; `SharedFeeds()`
+[`GainComponent`](@ref)) solves an independent track per feed; `SharedFeeds()`
 solves ONE feed-common station phase that all four correlation products constrain
 and that therefore contributes exactly zero inter-feed phase. `ReferenceRelative` is rejected: its partner feed reads two
 parameter blocks, which a single-node-per-row solve cannot represent.
@@ -442,7 +442,7 @@ function _adhoc_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, snr_fl
         fa, fb = feeds[p]
         na = _feed_node(tying, fa)
         nb = _feed_node(tying, fb)
-        # A feed the component does not parameterize (node 0, e.g. `FeedComponent`)
+        # A feed the component does not parameterize (node 0, e.g. `SingleFeed`)
         # has no column for this row to constrain.
         (na == 0 || nb == 0) && continue
         r = rbar[bi, p, ap]
@@ -995,11 +995,13 @@ function solve_adhoc_phasing(
 
     tdim = Ti(float.(times))
     axs = (Ant(1:nant), Feed(1:2), tdim)
-    return DimensionalData.DimStack((
-        phase = DimArray(phase_out, axs),
-        covered = DimArray(covered_out, axs),
-        source = DimArray(source, (Baseline(1:nbl), Pol(1:npol))),
-    ))
+    return DimensionalData.DimStack(
+        (
+            phase = DimArray(phase_out, axs),
+            covered = DimArray(covered_out, axs),
+            source = DimArray(source, (Baseline(1:nbl), Pol(1:npol))),
+        )
+    )
 end
 
 # ── Per-scan pipeline entry ───────────────────────────────────────────────────
@@ -1139,9 +1141,11 @@ function _apply_ap_gauge!(phase, covered, gauge::ZeroSumPhase, nnode::Integer)
     #
     # `weights` describes the station-solve constraint row, whose nodes are not
     # these cells, so the per-AP frame is unweighted.
-    cells = [(a, n) for a in 1:nant for n in 1:nnode
-        if all(covered[a, n, ap] for ap in 1:nap) &&
-            (gauge.antennas === nothing || a in gauge.antennas)]
+    cells = [
+        (a, n) for a in 1:nant for n in 1:nnode
+            if all(covered[a, n, ap] for ap in 1:nap) &&
+            (gauge.antennas === nothing || a in gauge.antennas)
+    ]
     isempty(cells) && return phase
     for ap in 1:nap
         tot = zero(eltype(phase))

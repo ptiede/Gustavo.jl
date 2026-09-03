@@ -91,7 +91,7 @@ end
         adhoc_step = sol_n[:adhoc].steps[1]
         phases = CAL.phase_components(adhoc_step.model)
         # The adhoc block is really solved (nonzero) on every scan.
-        ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
+        ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(adhoc_step, ipi))
         @test adhoc_step.info.t_pass > 0
         @test :refine ∉ Gustavo.stage_names(sol_n)     # no DispersionSBDFit step in this pipeline at all
@@ -184,7 +184,7 @@ end
         @test !any(s -> haskey(s.layout.plantree.phase, :bandpass), sol_fs.steps)
         adhoc_step_fs = sol_fs[:adhoc].steps[1]
         phases = CAL.phase_components(adhoc_step_fs.model)
-        ipi = findfirst(tc -> CAL.time_segmentation(tc) isa CAL.PerIntegration, phases)
+        ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(adhoc_step_fs, ipi))
         # Without the bandpass stage the injected per-channel bandpass survives,
         # so full coherence is NOT reached — but the delay/rate/adhoc solve must

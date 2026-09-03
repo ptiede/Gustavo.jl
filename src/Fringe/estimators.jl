@@ -122,7 +122,7 @@ only on the estimator's and model's declared options, never on the geometry.
 scan_local_solve(::AbstractFringeEstimator, model) = false
 
 """
-    can_fit(est::AbstractFringeEstimator, tc::Calibration.TiedComponent) -> Bool
+    can_fit(est::AbstractFringeEstimator, tc::Calibration.GainComponent) -> Bool
 
 Whether `est` fits the θ block of the compiled component `tc`. `FringeFit`
 calls this once per component ITS OWN model contributed, at model-compile

@@ -583,7 +583,7 @@ accumulate the per-(station, feed) values into `θ` at the columns the model
 declares. `components` is a vector of `(plan::ComponentPlan, kind::Symbol)` with
 `kind ∈ (:delay, :rate, :phase)`. Multiple components of the SAME kind are summed
 per (station, feed) observation: e.g. a feed-common `PerScan × SharedFeeds` term
-plus a `GlobalTime × FeedComponent(2)` inter-feed offset both feed the delay
+plus a `GlobalTime × SingleFeed(2)` inter-feed offset both feed the delay
 system, so a feed-2 row touches both columns and a stable inter-feed offset is solved
 once across the track (bright scans pin it; weak scans inherit it, tying feeds
 that would otherwise split). Returns the phase-system component count and

@@ -211,14 +211,8 @@ end
     @testset "gains evaluate on the foreign grid in the solve's own basis" begin
         model = CAL.StationGainModel(
             phase = (
-                atmos = CAL.TiedComponent(
-                    CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()),
-                    CAL.SharedFeeds(),
-                ),
-                mbd = CAL.TiedComponent(
-                    CAL.GainComponent(CAL.Delay(), CAL.PerScan(), CAL.GlobalFrequency()),
-                    CAL.SharedFeeds(),
-                ),
+                atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
+                mbd = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
             ),
         )
         nant = 2
@@ -317,11 +311,70 @@ end
     @test !isdefined(CAL, :basis_columns)
 end
 
+@testset "GainComponent: construction, label, equality" begin
+    # The single vocabulary: the flat `GainComponent` replaces the nested
+    # TiedComponent wrapper.
+    @test :GainComponent in names(CAL)
+    @test !isdefined(CAL, :TiedComponent)
+
+    # The keyword form is the one public spelling; `feeds` defaults to PerFeed.
+    e = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency())
+    @test e.term isa CAL.Delay
+    @test e.Ti isa CAL.PerScan
+    @test e.Frequency isa CAL.GlobalFrequency
+    @test e.Feed isa CAL.PerFeed
+
+    # `component_label` prints the constructor call, and the printed form
+    # evaluates back to an equal GainComponent.
+    lbl = CAL.component_label(
+        CAL.GainComponent(
+            CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(),
+            Feed = CAL.SharedFeeds(),
+        )
+    )
+    @test lbl ==
+        "GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds())"
+    @test Core.eval(CAL, Meta.parse(lbl)) == CAL.GainComponent(
+        CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(),
+        Feed = CAL.SharedFeeds(),
+    )
+    # Types whose public constructor is not `TypeName(fields...)` print their
+    # public form; parameterized fields print pasteable values.
+    for (x, want) in (
+            (CAL.PolynomialFreq(2), "PolynomialFreq(2)"),
+            (CAL.PolynomialTime(3), "PolynomialTime(3)"),
+            (CAL.TimeBlocks(1.5), "TimeBlocks(1.5)"),
+            (CAL.ChannelBlocks(4), "ChannelBlocks(4)"),
+            (CAL.ReferenceRelative(1), "ReferenceRelative(1)"),
+            (CAL.SingleFeed(2), "SingleFeed(2)"),
+        )
+        @test CAL._call_string(x) == want
+    end
+
+    # Value equality reaches through Vector-holding fields: two independently
+    # built FreqGroups (and components/models holding them) compare and hash equal.
+    fg1 = CAL.FreqGroups([1:4, 5:8])
+    fg2 = CAL.FreqGroups([1:4, 5:8])
+    @test fg1 == fg2 && hash(fg1) == hash(fg2)
+    @test fg1 != CAL.FreqGroups([1:2, 3:8])
+    mk(fg) = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = fg, Feed = CAL.SharedFeeds())
+    @test mk(fg1) == mk(fg2) && hash(mk(fg1)) == hash(mk(fg2))
+    @test mk(fg1) != CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = fg1)  # Feed differs
+    @test mk(fg1) != CAL.GainComponent(CAL.Rate(); Ti = CAL.PerScan(), Frequency = fg1, Feed = CAL.SharedFeeds())
+    m1 = CAL.StationGainModel(phase = (sbd = mk(fg1),))
+    m2 = CAL.StationGainModel(phase = (sbd = mk(fg2),))
+    @test m1 == m2 && hash(m1) == hash(m2)
+    @test m1 != CAL.StationGainModel(logamp = (sbd = mk(fg1),))
+
+    # Unnamed components are rejected with the constructor the message shows.
+    @test_throws "pass a NamedTuple" CAL.StationGainModel(phase = (mk(fg1),))
+end
+
 @testset "Calibration feed tying offset algebra" begin
     geom = CAL.DataGeometry(; times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
     # One ConstantTerm, GlobalTime × GlobalFrequency, 2 antennas.
     mk(tying) = CAL.StationGainModel(
-        phase = (c = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), tying),),
+        phase = (c = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = tying),),
     )
 
     lay_pf = CAL.plan_parameters(mk(CAL.PerFeed()), 2, geom)
@@ -350,11 +403,11 @@ end
     nant = 2
     model = CAL.StationGainModel(
         phase = (
-            a = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),
-            bp = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.ChannelBlocks(1)), CAL.SharedFeeds()),
+            a = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
+            bp = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.SharedFeeds()),
             grp = (                                  # one element compiling to a nested subtree
-                d = CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
-                c = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
+                d = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
+                c = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
             ),
         ),
     )
@@ -408,12 +461,12 @@ end
     ants = ["PT", "LM", "AA"]
     model = CAL.StationGainModel(
         phase = (
-            atmos = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()), CAL.PerFeed()),
-            bp = CAL.TiedComponent(CAL.GainComponent(CAL.PolynomialFreq(2), CAL.GlobalTime(), CAL.ChannelBlocks(2)), CAL.SharedFeeds()),
-            rl = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.ReferenceRelative(1)),
+            atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
+            bp = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(2), Feed = CAL.SharedFeeds()),
+            rl = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.ReferenceRelative(1)),
         ),
         logamp = (
-            amp = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()), CAL.SharedFeeds()),
+            amp = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
         ),
     )
     layout = CAL.plan_parameters(model, nant, geom)
@@ -494,9 +547,7 @@ end
     # splitting a solve into steps is exactly what makes that legal, so
     # `component_dimarray` must resolve by step, never by searching for a name
     # across steps.
-    atmos2 = CAL.TiedComponent(
-        CAL.GainComponent(CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency()), CAL.SharedFeeds(),
-    )
+    atmos2 = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds())
     model2 = CAL.StationGainModel(phase = (atmos = atmos2,))
     layout2 = CAL.plan_parameters(model2, nant, geom)
     θ2 = fill(-1.0, layout2.nθ)
@@ -522,7 +573,7 @@ end
 
     # Pure per-feed delay model: phase = 2π τ (f − f0), one τ per (ant, feed).
     model = CAL.StationGainModel(
-        phase = (delay = CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+        phase = (delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
     ev = CAL.GainEvaluator(model, geom; nant)
     @test CAL.nparameters(ev) == nant * 2
@@ -553,7 +604,7 @@ end
     # Rate term: phase grows linearly in time, flat in frequency, about the
     # segment's OWN mean epoch (one segment here, so the whole track's).
     rate_model = CAL.StationGainModel(
-        phase = (rate = CAL.TiedComponent(CAL.GainComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.SharedFeeds()),),
+        phase = (rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),),
     )
     evr = CAL.GainEvaluator(rate_model, geom; nant)
     ṙ = 1.0e-3 .* collect(1:nant)                          # mHz-scale rates
@@ -572,8 +623,8 @@ end
     nant = 3
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [2.28e11, 2.281e11], t0 = 0.0)
     model = CAL.StationGainModel(
-        phase = (offset = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
-        logamp = (offset = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+        phase = (offset = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
+        logamp = (offset = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
     ev = CAL.GainEvaluator(model, geom; nant)
     θ = randn(CAL.nparameters(ev))
@@ -639,7 +690,7 @@ end
     end
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [1.0e9, 2.0e9])
     model = CAL.StationGainModel(
-        phase = (bad = CAL.TiedComponent(CAL.GainComponent(CAL._AuditBadFreqTerm(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),),
+        phase = (bad = CAL.GainComponent(CAL._AuditBadFreqTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
     @test_throws MethodError CAL.plan_parameters(model, 1, geom)
 end
@@ -655,8 +706,8 @@ end
     # something to extract.
     model = CAL.StationGainModel(
         phase = (
-            delay = CAL.TiedComponent(CAL.GainComponent(CAL.Delay(), CAL.GlobalTime(), CAL.GlobalFrequency()), CAL.PerFeed()),
-            bandpass = CAL.TiedComponent(CAL.GainComponent(CAL.ConstantTerm(), CAL.GlobalTime(), CAL.ChannelBlocks(1)), CAL.SharedFeeds()),
+            delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
+            bandpass = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.SharedFeeds()),
         ),
     )
     layout = CAL.plan_parameters(model, nant, geom)
@@ -676,8 +727,10 @@ end
         θv_fr = θv[1:(layout_fr.nθ)]
         θv_bp = θv[(layout_fr.nθ + 1):end]
         two_step(θfr, θbp) = CAL.CalibrationSolution(
-            [CAL.StepSolution(:fringe, model_fr, layout_fr, θfr),
-                CAL.StepSolution(:bandpass, model_bp, layout_bp, θbp)],
+            [
+                CAL.StepSolution(:fringe, model_fr, layout_fr, θfr),
+                CAL.StepSolution(:bandpass, model_bp, layout_bp, θbp),
+            ],
             geom, (; nant),
         )
         solv2 = two_step(θv_fr, θv_bp)
@@ -726,7 +779,8 @@ end
         θoff = OffsetArrays.OffsetArray(copy(θv), 0:(layout.nθ - 1))
         @test_throws ArgumentError CAL.CalibrationSolution(model, layout, geom, θoff, (;))
         @test_throws DimensionMismatch CAL.CalibrationSolution(
-            model, layout, geom, θv[1:(end - 1)], (;))
+            model, layout, geom, θv[1:(end - 1)], (;)
+        )
         @test_throws "θ has length" CAL.CalibrationSolution(model, layout, geom, θv[1:(end - 1)], (;))
     end
 
@@ -761,13 +815,17 @@ end
 
     @testset "geometry axis lengths" begin
         @test_throws DimensionMismatch CAL.DataGeometry(;
-            times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1])
+            times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1]
+        )
         @test_throws "scan_of_time length" CAL.DataGeometry(;
-            times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1])
+            times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1]
+        )
         @test_throws DimensionMismatch CAL.DataGeometry(;
-            times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1])
+            times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1]
+        )
         @test_throws "spw_of_chan length" CAL.DataGeometry(;
-            times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1])
+            times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1]
+        )
 
         # `FreqGroups` is structurally valid but must also cover the geometry.
         geom = CAL.DataGeometry(; times = [0.0], channel_freqs = collect(1.0:6.0) .* 1.0e9)
@@ -778,11 +836,12 @@ end
     @testset "feed tying and empty models" begin
         @test_throws ArgumentError CAL.ReferenceRelative(3)
         @test_throws "reference_feed must be 1 or 2" CAL.ReferenceRelative(0)
-        @test_throws ArgumentError CAL.FeedComponent(3)
-        @test_throws "feed must be 1 or 2" CAL.FeedComponent(0)
+        @test_throws ArgumentError CAL.SingleFeed(3)
+        @test_throws "feed must be 1 or 2" CAL.SingleFeed(0)
         @test_throws ArgumentError CAL.validate_station_gain_model(CAL.StationGainModel())
         @test_throws "neither phase nor log-amplitude" CAL.validate_station_gain_model(
-            CAL.StationGainModel())
+            CAL.StationGainModel()
+        )
     end
 end
 

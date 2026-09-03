@@ -27,7 +27,7 @@ Gustavo.finish_pass!(::_RepeatingScanStep, ctx) = (; repeat_pass = true)
 # A transform with no apply_transform! implementation (error-path probe).
 struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
 
-# A FringeModel term that is not a TiedComponent: its compiled segmentation is
+# A FringeModel term that is not an GainComponent: its compiled segmentation is
 # unknowable without the geometry, so the scan-locality answer must be the
 # conservative :global.
 struct _OpaqueTerm end
@@ -348,7 +348,8 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         # order, w·(s_a s_b)²) — the old bridge's "specified twice" error died
         # with it. Both are recorded on the solution.
         both = CalibrationPipeline(
-            StationWeightScale(ws) |> StationWeightScale(ws) |> _full_chain())
+            StationWeightScale(ws) |> StationWeightScale(ws) |> _full_chain()
+        )
         sol_b = fit(both, uvset)
         @test length(sol_b.transforms) == 2
         @test parent(gains(fit(CalibrationPipeline(StationWeightScale(ws .* ws) |> _full_chain()), uvset))) ≈

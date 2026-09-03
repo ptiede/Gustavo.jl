@@ -8,25 +8,27 @@
         mg = FP._fringe_model(rel_time = CAL.GlobalTime())
         mp = FP._fringe_model(rel_time = CAL.PerScan())
         @test length(mg.phase) == length(mp.phase)
-        # Exactly the one `FeedComponent`-tied offset differs between the models,
+        # Exactly the one `SingleFeed`-tied offset differs between the models,
         # and only in its time-segmentation type. (There is no inter-feed
         # CONSTANT — see `default_fringe_terms`.)
-        diff = findall(i -> typeof(mg.phase[i].component.time) != typeof(mp.phase[i].component.time),
-                       eachindex(mg.phase))
+        diff = findall(
+            i -> typeof(mg.phase[i].Ti) != typeof(mp.phase[i].Ti),
+            eachindex(mg.phase)
+        )
         @test length(diff) == 1
         for i in diff
-            @test mg.phase[i].tying isa CAL.FeedComponent
-            @test mg.phase[i].component.time isa CAL.GlobalTime
-            @test mp.phase[i].component.time isa CAL.PerScan
+            @test mg.phase[i].Feed isa CAL.SingleFeed
+            @test mg.phase[i].Ti isa CAL.GlobalTime
+            @test mp.phase[i].Ti isa CAL.PerScan
         end
         # The offset is the delay.
-        @test sort([nameof(typeof(mg.phase[i].component.term)) for i in diff]) == [:Delay]
+        @test sort([nameof(typeof(mg.phase[i].term)) for i in diff]) == [:Delay]
 
         # Per-scan is the default: the inter-feed offsets carry no cross-scan column.
         md = FP._fringe_model()
         @test all(
-            tc -> tc.component.time isa CAL.PerScan,
-            filter(tc -> tc.tying isa CAL.FeedComponent, collect(md.phase)),
+            tc -> tc.Ti isa CAL.PerScan,
+            filter(tc -> tc.Feed isa CAL.SingleFeed, collect(md.phase)),
         )
     end
 
@@ -47,7 +49,7 @@
 
         θ = zeros(layout.nθ)
         θ[plan_off1(shared)[2, 1, 1, 1]] = 2.0e-9      # station 2 per-scan (feed-common) delay: 2 ns
-        θ[plan_off1(rel)[2, 2, 1, 1]]    = 0.5e-9      # station 2 inter-feed delay: +0.5 ns on feed 2
+        θ[plan_off1(rel)[2, 2, 1, 1]] = 0.5e-9      # station 2 inter-feed delay: +0.5 ns on feed 2
         sol = CAL.CalibrationSolution(model, layout, geom, θ, (; nscan = 1); name = :fringe)
 
         rows = FP.fringe_station_solutions(sol)

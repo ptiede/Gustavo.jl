@@ -170,15 +170,15 @@ end
     model = FP._fringe_model()
     phase = CAL.phase_components(model)
 
-    rate_i = findfirst(tc -> tc.component.term isa CAL.Rate, phase)
+    rate_i = findfirst(tc -> tc.term isa CAL.Rate, phase)
     @test rate_i !== nothing
-    @test phase[rate_i].tying isa CAL.SharedFeeds
-    @test !(phase[rate_i].tying isa CAL.PerFeed)
+    @test phase[rate_i].Feed isa CAL.SharedFeeds
+    @test !(phase[rate_i].Feed isa CAL.PerFeed)
 
-    adhoc_i = findfirst(tc -> tc.component.time isa CAL.PerIntegration, phase)
+    adhoc_i = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phase)
     @test adhoc_i !== nothing
-    @test phase[adhoc_i].tying isa CAL.SharedFeeds
-    @test !(phase[adhoc_i].tying isa CAL.PerFeed)
+    @test phase[adhoc_i].Feed isa CAL.SharedFeeds
+    @test !(phase[adhoc_i].Feed isa CAL.PerFeed)
 
     # Layout: `SharedFeeds` folds both feeds to ONE node (θ column), `PerFeed` keeps
     # two distinct ones. So feed-1 and feed-2 share every column iff the tie holds —
@@ -870,7 +870,7 @@ end
         sol2 = CAL.load_solution_hdf5(path)
         refine2 = sol2[:refine].steps[1]
         @test refine2.θ == refine.θ
-        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(refine2.model))
+        @test any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(refine2.model))
     end
 end
 

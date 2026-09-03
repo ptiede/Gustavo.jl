@@ -138,16 +138,15 @@ freq_coordinate(::Quadratic, f, f0, seg) = f - f0
 term_label(::Quadratic) = "quad"
 ```
 
-A term is not fit on its own — it is wrapped in a [`GainComponent`](@ref)
-(which pins its time/frequency segmentation) and a [`TiedComponent`](@ref)
-(which pins how it ties across feeds), then placed in a
-[`StationGainModel`](@ref) alongside the other components:
+A term is not fit on its own — it is wrapped in an [`GainComponent`](@ref)
+(which pins its time/frequency segmentation and how it ties across feeds),
+then placed in a [`StationGainModel`](@ref) alongside the other components:
 
 ```julia
 model = StationGainModel(
     phase = (
-        d = TiedComponent(GainComponent(Delay(), GlobalTime(), GlobalFrequency()), SharedFeeds()),
-        q = TiedComponent(GainComponent(Quadratic(), GlobalTime(), GlobalFrequency()), SharedFeeds()),
+        d = GainComponent(Delay(); Ti = GlobalTime(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+        q = GainComponent(Quadratic(); Ti = GlobalTime(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
     ),
 )
 ```

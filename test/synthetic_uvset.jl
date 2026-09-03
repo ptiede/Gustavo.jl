@@ -50,8 +50,8 @@ function _build_fringe_uvset(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
         scan_gap = nothing,     # hours between scan starts (default: back-to-back)
         noise = nothing,        # σ per visibility sample (same units as the A0 = 2.5 signal);
-                                #   without it every estimate is exact and no
-                                #   uncertainty-driven effect is observable
+        #   without it every estimate is exact and no
+        #   uncertainty-driven effect is observable
         pol_labels = ["PP", "PQ", "QP", "QQ"],
         ref_freq = 230.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         seed = 1234,
@@ -60,12 +60,12 @@ function _build_fringe_uvset(;
         dtec = nothing,         # optional (nant,) station TEC (TECU, feed-common)
         feed_common = false,    # tie delay/phi across feeds (zero true inter-feed offset)
         rel_rate = nothing,      # optional (nant,) feed-2 − feed-1 rate offset (Hz) —
-                                #   exercises the opt-in RL(rate = ...) solve
+        #   exercises the opt-in RL(rate = ...) solve
 
         spw_origins = nothing, # optional (nspw,) explicit band start freqs (Hz) — overrides spw_sep
         station_positions = nothing, # optional (nant,) xyz vectors (m) — for co-location tests
         omit_station = nothing, # optional station index present in the antenna table but
-                                #   observing no baseline — a station that dropped out
+        #   observing no baseline — a station that dropped out
     )
     UV = Gustavo.UVData
     rng = MersenneTwister(seed)
@@ -73,16 +73,16 @@ function _build_fringe_uvset(;
 
     ants_v = [
         UV.Antenna(;
-                name = "A$(i)",
-                # VLBI-scale by default (tens of km apart): co-located grouping
-                # rejects a table whose stations sit within a single site.
-                station_xyz = station_positions === nothing ?
+            name = "A$(i)",
+            # VLBI-scale by default (tens of km apart): co-located grouping
+            # rejects a table whose stations sit within a single site.
+            station_xyz = station_positions === nothing ?
                 Float64[1.0e4 * i, 2.0e4 * i, 3.0e4 * i] : Float64.(station_positions[i]),
-                mount = UV.MountAltAz(),
-                nominal_basis = (RPol(), LPol()),
-                response = Diagonal(ones(ComplexF32, 2)),
-                pol_angles = (0.0f0, 0.0f0),
-            )
+            mount = UV.MountAltAz(),
+            nominal_basis = (RPol(), LPol()),
+            response = Diagonal(ones(ComplexF32, 2)),
+            pol_angles = (0.0f0, 0.0f0),
+        )
             for i in 1:nant
     ]
     antennas = UV.AntennaTable(
@@ -136,7 +136,7 @@ function _build_fringe_uvset(;
 
     # Injected parameters. Reference antenna 1 = 0 (so the recovered solution matches
     # the gauge), others drawn small. `delay`/`phi` are PER-FEED (their constant inter-feed
-    # offset is recovered by the model's global `FeedComponent(2)` delay/const terms);
+    # offset is recovered by the model's global `SingleFeed(2)` delay/const terms);
     # `rate` is FEED-COMMON by default because the fringe model ties rate
     # `SharedFeeds` (the inter-feed rate tied ≡ 0); pass `rel_rate` to inject a feed-2
     # offset for the opt-in `RL(rate = ...)` solve.
@@ -246,10 +246,10 @@ function _build_fringe_uvset(;
 
     uvset = Gustavo.UVData.UVSet(; metadata = UV.UVMetadata(array_obs), branches = branches)
     return uvset, (;
-        delay, rate, phi,
-        screen = nscans == 1 ? reshape(screen, nant, 2, ntime) : screen,
-        bandpass, amp_bandpass, dtec, f0, t0_sec, bl_pairs, pol_labels, feeds,
-    )
+            delay, rate, phi,
+            screen = nscans == 1 ? reshape(screen, nant, 2, ntime) : screen,
+            bandpass, amp_bandpass, dtec, f0, t0_sec, bl_pairs, pol_labels, feeds,
+        )
 end
 
 # Coherence of a (baseline, product) block: |Σ w·V| / Σ (w·|V|). 1 ⇒ phase flat.

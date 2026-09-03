@@ -97,7 +97,7 @@
         # cross-hand rows in the rate system.
         rel_terms = (;
             _fringe_terms(dispersion = false, sbd = false)...,
-            rel_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
+            rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2)),
         )
 
         sol = fit(FringeFit(model = FringeModel(terms = rel_terms)), uvset)
@@ -136,9 +136,7 @@
         nscans = 4
         terms = (;
             _fringe_terms(dispersion = false, sbd = false)...,
-            rel_phase = CAL.TiedComponent(
-                CAL.ConstantTerm(), CAL.PerScan(), CAL.GlobalFrequency(), CAL.FeedComponent(2),
-            ),
+            rel_phase = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2)),
         )
         uvset, truth = _build_fringe_uvset(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
         sol = fit(FringeFit(model = FringeModel(; terms)), uvset)
@@ -213,10 +211,12 @@
             CalibrationPipeline(
                 CalFunction((stack, win) -> nothing),
                 FringeFit(
-                    model = FringeModel(terms = (;
-                        default_fringe_terms()...,
-                        rel_rate = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2)),
-                    )),
+                    model = FringeModel(
+                        terms = (;
+                            default_fringe_terms()...,
+                            rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2)),
+                        )
+                    ),
                     estimator = MatchedFilter(closure = FP.Stationization(pfa_max = 1.0e-2)),
                 ),
                 Bandpass(), TemporalSmoother();
@@ -235,8 +235,8 @@
         uvset, _ = _build_fringe_uvset()   # 2 band groups; narrow fractional bandwidth
         geom = CAL.build_geometry(uvset)
         sig(tc) = (
-            typeof(tc.component.term), typeof(tc.component.time),
-            typeof(tc.component.freq), typeof(tc.tying),
+            typeof(tc.term), typeof(tc.Ti),
+            typeof(tc.Frequency), typeof(tc.Feed),
         )
 
         # The default list compiles IN LIST ORDER to the standard sequence — 4
@@ -247,17 +247,18 @@
         @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
-            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.FeedComponent),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SingleFeed),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
         ]
 
         # `rel_time` moves the inter-feed delay onto a track-global column.
         gcomps = FP.fringe_phase_components(
-            FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime())), geom)
+            FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime())), geom
+        )
         @test collect(map(sig, CAL._flatten_components(gcomps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
-            (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.FeedComponent),
+            (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.SingleFeed),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
         ]
 
@@ -274,7 +275,8 @@
         # Geometry-gated elements emit nothing when unconstrainable.
         @test CAL.model_components(DispersionModel(), geom) === nothing
         @test CAL.model_components(
-            DispersionModel(require_band_separation = false), geom) isa CAL.TiedComponent
+            DispersionModel(require_band_separation = false), geom
+        ) isa CAL.GainComponent
         narrow, _ = _build_fringe_uvset(nspw = 1)
         @test CAL.model_components(SingleBandDelay(), CAL.build_geometry(narrow)) === nothing
 
@@ -285,7 +287,7 @@
             times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 1.2e9, 5.0e9],
             scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 3], t0 = 0.0, f0 = 3.0e9,
         )
-        bandranges(sbd, g) = CAL.model_components(sbd, g).delay.component.freq.ranges
+        bandranges(sbd, g) = CAL.model_components(sbd, g).delay.Frequency.ranges
         @test bandranges(SingleBandDelay(), gsbd) == [1:3, 4:4]
         @test bandranges(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd) ==
             [1:2, 3:3, 4:4]
@@ -299,35 +301,39 @@
         ) === nothing
         # Both halves of the pair share the partition.
         psbd = CAL.model_components(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd)
-        @test psbd.constant.component.freq.ranges == psbd.delay.component.freq.ranges
+        @test psbd.constant.Frequency.ranges == psbd.delay.Frequency.ranges
 
-        # A bare TiedComponent compiles to itself.
-        tc = CAL.TiedComponent(CAL.Rate(), CAL.GlobalTime(), CAL.GlobalFrequency(), CAL.FeedComponent(2))
+        # A bare GainComponent compiles to itself.
+        tc = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2))
         @test CAL.model_components(tc, geom) === tc
 
         # Exact duplicate components are rejected by message.
         dup = (;
             default_fringe_terms()...,
-            mbd2 = CAL.TiedComponent(CAL.Delay(), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()),
+            mbd2 = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
         )
         @test_throws "two identical components" FP.fringe_phase_components(
-            FringeModel(terms = dup), geom)
+            FringeModel(terms = dup), geom
+        )
 
         # A second component matching a findfirst router's signature — without
         # being an exact duplicate — is rejected naming the signature.
         collide = (;
             default_fringe_terms()...,
-            mbd_tb = CAL.TiedComponent(CAL.Delay(), CAL.TimeBlocks(1.0), CAL.GlobalFrequency(), CAL.SharedFeeds()),
+            mbd_tb = CAL.GainComponent(CAL.Delay(); Ti = CAL.TimeBlocks(1.0), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
         )
         @test_throws "per-scan feed-common delay signature" FP.fringe_phase_components(
-            FringeModel(terms = collide), geom)
+            FringeModel(terms = collide), geom
+        )
 
         # DispersionModel/SingleBandDelay elements are rejected outright —
         # dispersion/SBD are DispersionSBDFit's, not FringeModel's.
         @test_throws "DispersionSBDFit" FringeModel(
-            terms = (; default_fringe_terms()..., dtec2 = DispersionModel(colocated_sep = nothing)))
+            terms = (; default_fringe_terms()..., dtec2 = DispersionModel(colocated_sep = nothing))
+        )
         @test_throws "DispersionSBDFit" FringeModel(
-            terms = (; default_fringe_terms()..., sbd2 = SingleBandDelay()))
+            terms = (; default_fringe_terms()..., sbd2 = SingleBandDelay())
+        )
     end
 end
 
@@ -456,8 +462,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         # A polynomial-in-frequency phase is a legitimate gain term that the
         # matched filter has no observable for: its θ block would stay at zero
         # while the solution looked fitted.
-        terms = (; _fringe_terms()..., poly = CAL.TiedComponent(
-            CAL.PolynomialFreq(2), CAL.PerScan(), CAL.GlobalFrequency(), CAL.SharedFeeds()))
+        terms = (; _fringe_terms()..., poly = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()))
         @test_throws "MatchedFilter cannot fit the model term" fit(
             FringeFit(model = FringeModel(terms = terms)), uvset,
         )
@@ -466,7 +471,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
     @testset "a model missing a term the estimator requires is rejected by name" begin
         # The kind is missing outright: nothing to write the rate search into.
         norate = filter(
-            t -> !(t isa CAL.TiedComponent && t.component.term isa CAL.Rate),
+            t -> !(t isa CAL.GainComponent && t.term isa CAL.Rate),
             _fringe_terms(),
         )
         @test_throws "requires a rate component" fit(
@@ -477,8 +482,8 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         # still a `:delay`, so only a signature-level check catches a wideband
         # delay tied across the whole track.
         globaldelay = map(_fringe_terms()) do t
-            t isa CAL.TiedComponent && FP._is_perscan_delay(t) ?
-                CAL.TiedComponent(t.component.term, CAL.GlobalTime(), t.component.freq, t.tying) : t
+            t isa CAL.GainComponent && FP._is_perscan_delay(t) ?
+                CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
         end
         @test_throws "requires a per-scan feed-common wideband delay" fit(
             FringeFit(model = FringeModel(terms = globaldelay)), uvset,
@@ -558,8 +563,8 @@ end
         on_ref, off_ref = on[:refine].steps[1], off[:refine].steps[1]
         @test CAL._dispersion_plan(on_ref.model, on_ref.layout) !== nothing
         @test CAL._dispersion_plan(off_ref.model, off_ref.layout) === nothing
-        @test any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(on_ref.model))
-        @test !any(tc -> tc.component.term isa CAL.Dispersion, CAL.phase_components(off_ref.model))
+        @test any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(on_ref.model))
+        @test !any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(off_ref.model))
         # No dTEC term means no dTEC column in θ at all — but `off` still has
         # SBD's columns (untouched by the `dispersion` field), so `on` has
         # exactly one more (the private delay-refinement column that only
@@ -585,7 +590,8 @@ end
         # that reads it (`_dtec_ties(s.dispersion, ctx.antennas)`), so it must
         # arrive without the estimator knowing about it.
         ants = Gustavo.UVData.metadata(
-            first(values(Gustavo.UVData.branches(uvset)))).antennas
+            first(values(Gustavo.UVData.branches(uvset)))
+        ).antennas
         @test Gustavo._dtec_ties(DispersionModel(colocated_sep = 1000.0), ants) !== nothing
         @test Gustavo._dtec_ties(DispersionModel(colocated_sep = nothing), ants) === nothing
         @test Gustavo._dtec_ties(nothing, ants) === nothing

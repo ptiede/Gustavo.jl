@@ -5,8 +5,8 @@
 # - `FringeModel` — WHAT is solved: an ordered list of phase-term elements
 #   (the gauge pin, `gauge`, is run-wide — see `CalibrationPipeline` in
 #   pipeline/protocol.jl). Each element declares its own feed scope
-#   through its tying (`SharedFeeds`, `FeedComponent(2)`, …), so the model is
-#   specified feed by feed; adding an effect is adding an element.
+#   through its tying (`SharedFeeds`, `SingleFeed(2)`, …), so the model is
+#   specified feed by feed; adding a component is adding an element.
 #   `fringe_phase_components` compiles each element through
 #   `model_components(element, geom)` and concatenates in list order.
 # - `MatchedFilter <: AbstractFringeEstimator` — HOW it is estimated: today's
@@ -73,8 +73,8 @@ function model_components(s::SingleBandDelay, geom::DataGeometry)
     # the cross-band solution is untouched. The pair nests under the element's
     # key (`θ.phase.<key>.delay` / `.constant`).
     return (
-        delay = TiedComponent(Delay(), PerScan(), FreqGroups(freqgroups), SharedFeeds()),
-        constant = TiedComponent(ConstantTerm(), PerScan(), FreqGroups(freqgroups), SharedFeeds()),
+        delay = GainComponent(Delay(); Ti = PerScan(), Frequency = FreqGroups(freqgroups), Feed = SharedFeeds()),
+        constant = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = FreqGroups(freqgroups), Feed = SharedFeeds()),
     )
 end
 
@@ -87,13 +87,13 @@ component order = list order):
 
 1. per-scan constant phase, feed-common (`SharedFeeds`): atmosphere/clock.
 2. per-scan wideband (multi-band) delay, feed-common.
-3. relative delay offset, `rel_time × FeedComponent(2)`: the instrumental
+3. relative delay offset, `Ti = rel_time`, `Feed = SingleFeed(2)`: the instrumental
    feed-2 − feed-1 group-delay offset.
 4. per-scan rate, feed-common: the fringe rate is common to both feeds. There
    is deliberately NO feed-specific rate here — the inter-feed rate is
    negligible (EHT-HOPS convention), so a column for it would buy little but
    the noise of fitting one. A genuine offset is opted into by ADDING
-   `TiedComponent(Rate(), PerScan(), GlobalFrequency(), FeedComponent(2))`,
+   `GainComponent(Rate(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SingleFeed(2))`,
    which gives the inter-feed rate its own column. Every correlation product's
    rate row enters the system either way; the tying alone decides whether it
    reads as `ṙ_a − ṙ_b` (feed-common) or `ṙ_{a,p} − ṙ_{b,q}` (feed-specific).
@@ -137,14 +137,14 @@ Ionospheric dispersion (dTEC) and single-band delay (SBD) are NOT modeled
 here — they are fit by a separate [`DispersionSBDFit`](@ref) pipeline step,
 on the fringe-corrected residual.
 
-Omit an element to drop the effect; add a `Calibration.TiedComponent` (term ×
-time segmentation × frequency segmentation × feed tying) to model a new one.
+Omit an element to drop the component; add a `Calibration.GainComponent` (a term with its
+time segmentation, frequency segmentation, and feed tying) to model a new one.
 """
 default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = (
-    atmos = TiedComponent(ConstantTerm(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    mbd = TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
-    rel_delay = TiedComponent(Delay(), rel_time, GlobalFrequency(), FeedComponent(2)),
-    rate = TiedComponent(Rate(), PerScan(), GlobalFrequency(), SharedFeeds()),
+    atmos = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+    mbd = GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+    rel_delay = GainComponent(Delay(); Ti = rel_time, Frequency = GlobalFrequency(), Feed = SingleFeed(2)),
+    rate = GainComponent(Rate(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
 )
 
 """
@@ -155,9 +155,9 @@ an ordered list of phase-term elements. The gauge pin (`gauge`) is run-wide,
 not part of any one step's model — see [`CalibrationPipeline`](@ref).
 
 - `terms` — the ordered, NAMED term list (a `NamedTuple`; each key names the
-  component it compiles to). Each value is a bare `Calibration.TiedComponent`
-  (a gain term × time segmentation × frequency segmentation × feed tying).
-  Adding an effect is adding a named element; the list order is the compiled
+  component it compiles to). Each value is a bare `Calibration.GainComponent`
+  (a gain term with its time segmentation, frequency segmentation, and feed tying).
+  Adding a component is adding a named element; the list order is the compiled
   component order. See [`default_fringe_terms`](@ref) for the default list and
   how to modify it.
 
@@ -298,14 +298,9 @@ function _at_most_one(pred, comps::Tuple, what::String)
     return nothing
 end
 
-_same_component_signature(a::TiedComponent, b::TiedComponent) =
-    typeof(a.component.term) === typeof(b.component.term) &&
-    a.component.time == b.component.time &&
-    _same_freq_segmentation(a.component.freq, b.component.freq) &&
-    a.tying == b.tying
-
-_same_freq_segmentation(a, b) = a == b
-_same_freq_segmentation(a::FreqGroups, b::FreqGroups) = a.ranges == b.ranges
+_same_component_signature(a::GainComponent, b::GainComponent) =
+    typeof(a.term) === typeof(b.term) &&
+    a.Ti == b.Ti && a.Frequency == b.Frequency && a.Feed == b.Feed
 
 # What `MatchedFilter` does with a compiled component's θ block:
 #
@@ -323,18 +318,18 @@ _same_freq_segmentation(a::FreqGroups, b::FreqGroups) = a.ranges == b.ranges
 # column per (station, feed, time) node — the block's first parameter at the
 # FIRST frequency segment — so a multi-parameter term (a polynomial) would have its
 # trailing parameters left at zero, and a frequency-resolved term (the bandpass,
-# `ConstantTerm × ChannelBlocks`) would have every segment but the first left at
+# `ConstantTerm` over `ChannelBlocks`) would have every segment but the first left at
 # zero while the search wrote its band-wide phase into that one. A `Dispersion`
 # term or a `FreqGroups`-segmented one (SBD) already falls through to
 # `nothing` here — the term/freq-type checks below exclude them without special
 # casing — so `can_fit` correctly rejects either if found in a `FringeModel`'s
 # own term list (they belong to a separate `DispersionSBDFit` step instead).
 function matched_kind(tc)
-    tc.component.time isa PerIntegration && return nothing
+    tc.Ti isa PerIntegration && return nothing
     # The per-baseline search measures ONE delay/rate/phase across the whole
     # band, so only a component spanning it can receive that estimate.
-    tc.component.freq isa GlobalFrequency || return nothing
-    term = tc.component.term
+    tc.Frequency isa GlobalFrequency || return nothing
+    term = tc.term
     term isa Delay && return :delay
     term isa Rate && return :rate
     term isa ConstantTerm && return :phase
@@ -369,7 +364,7 @@ can_fit(::MatchedFilter, tc) = matched_kind(tc) !== nothing
 # (the re-search reads the whole pass's residual) each force the pooled path.
 scan_local_solve(est::MatchedFilter, fm::FringeModel) =
     est.rounds <= 1 &&
-    all(t -> t isa TiedComponent && component_is_per_scan(t), values(fm.terms))
+    all(t -> t isa GainComponent && component_is_per_scan(t), values(fm.terms))
 
 # What the matched filter REQUIRES to exist. Each absent item costs the
 # estimator its own output silently rather than crashing: `solve_station_systems!`
@@ -394,8 +389,8 @@ function validate_model(est::MatchedFilter, comps)
     any(_is_perscan_delay, comps) || throw(
         ArgumentError(
             "$(nameof(typeof(est))) requires a per-scan feed-common wideband delay " *
-                "component (`Delay` × a non-`GlobalTime` time segmentation × " *
-                "`GlobalFrequency` × `SharedFeeds`): the refine stage fits it jointly " *
+                "component (a `Delay` with a non-`GlobalTime` time segmentation, " *
+                "`Frequency = GlobalFrequency()`, `Feed = SharedFeeds()`): the refine stage fits it jointly " *
                 "with dTEC, and a delay tied any other way leaves that fit with only " *
                 "its degenerate half. Add one to the FringeModel's `terms` — see " *
                 "`default_fringe_terms`.",
@@ -609,8 +604,12 @@ function steer_scan(
         Vb = view(V, :, :, bi, p)
         Wb = view(W, :, :, bi, p)
         # σ of the blind pass, recovered from its own reported SNR.
-        σ = abs(_exact_matched_filter(Vb, Wb, freqs, times, f0, t0,
-                                      res[:delay][j, p], res[:rate][j, p])) / snr0
+        σ = abs(
+            _exact_matched_filter(
+                Vb, Wb, freqs, times, f0, t0,
+                res[:delay][j, p], res[:rate][j, p]
+            )
+        ) / snr0
         σ > 0 || continue
         D = _exact_matched_filter(Vb, Wb, freqs, times, f0, t0, dpred, rpred)
         Wsum = 0.0

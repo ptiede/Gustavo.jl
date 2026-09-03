@@ -1,7 +1,7 @@
 # ── Atomic gain terms ────────────────────────────────────────────────────────
 #
 # A term is one physical contribution to a station's phase or log-amplitude
-# response. It lives inside a `GainComponent` that pins it to one (time-segment,
+# response. It lives inside an `GainComponent` that pins it to one (time-segment,
 # frequency-segment) block of parameters, so a term never sees the global
 # parameter vector — `term_eval` hands it its own named parameters and the
 # coordinates it asked for.
@@ -22,7 +22,7 @@ delay, a rate, a polynomial bandpass shape. A concrete term implements
 declared, and [`term_eval`](@ref); [`term_label`](@ref) is optional. See the
 "Authoring a new gain term" documentation page for a worked example.
 
-A term lives inside a [`GainComponent`](@ref), which pins it to one
+A term lives inside an [`GainComponent`](@ref), which pins it to one
 (time-segment, frequency-segment) block of parameters, so a term itself never
 sees the global parameter vector.
 """

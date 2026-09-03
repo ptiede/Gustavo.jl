@@ -57,7 +57,7 @@ abstract type SolveStep <: CalibrationStep end
     model_components(step::SolveStep, spec) -> (; phase, logamp)
 
 The gain-model components `step` solves, as named component trees (`NamedTuple`s
-of `TiedComponent`s) to merge into the compiled `StationGainModel`'s phase /
+of `GainComponent`s) to merge into the compiled `StationGainModel`'s phase /
 log-amplitude groups. `spec` carries the data geometry and antenna table the
 step may consult (e.g. to resolve an `:auto` option). Default: no components.
 

@@ -156,9 +156,9 @@ function model_components(s::DispersionSBDFit, spec)
     sbdc = s.sbd === nothing ? nothing : model_components(s.sbd, spec.geom)
     phase = merge(
         dispc === nothing ? (;) : (;
-            delay_refine = TiedComponent(Delay(), PerScan(), GlobalFrequency(), SharedFeeds()),
-            dtec = dispc,
-        ),
+                delay_refine = GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+                dtec = dispc,
+            ),
         sbdc === nothing ? (;) : (; sbd = sbdc),
     )
     return (; phase, logamp = (;))
@@ -169,14 +169,14 @@ end
 # terms).
 function model_components(s::Bandpass, spec)
     Fringe.validate_bandpass(s.smoother, s.model)
-    bpc = TiedComponent(GainComponent(ConstantTerm(), GlobalTime(), s.model.freq), PerFeed())
+    bpc = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = s.model.freq, Feed = PerFeed())
     return (; phase = s.model.phase ? (bandpass = bpc,) : (;), logamp = s.model.amp ? (bandpass = bpc,) : (;))
 end
 
 # The per-integration adhoc phase: per-AP, feed-common, solved per scan by the
 # temporal-smoother pass (the legacy `_fringe_model` placement — last).
 model_components(s::TemporalSmoother, spec) = (;
-    phase = (adhoc = TiedComponent(GainComponent(ConstantTerm(), PerIntegration(), GlobalFrequency()), SharedFeeds()),),
+    phase = (adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),),
     logamp = (;),
 )
 
@@ -319,20 +319,22 @@ function Fringe.estimate_scan!(
     end
     _st(field, j, p) = steer === nothing ? NaN : steer[field][j, p]
     rows = [
-        (; a = bl_pairs[j][1], b = bl_pairs[j][2], pol = pols[p],
-           snr = res.snr[j, p], pfa = res.pfa[j, p],
-           delay = res.delay[j, p], rate = res.rate[j, p],
-           phase = res.phase[j, p],
-           detected = res.pfa[j, p] <= pfa_max,
-           snr_steer = _st(:snr, j, p), pfa_steer = _st(:pfa, j, p),
-           delay_steer = _st(:delay, j, p), rate_steer = _st(:rate, j, p),
-           # Measured at the station solution's delay and rate rather than found
-           # blind. There is NO threshold here: `pfa_max` decides fringe-group
-           # membership on the blind pass, and once a station is in that group
-           # its baselines are measured at the known fringe location to
-           # arbitrarily low SNR. `pfa_steer` records the significance of what
-           # was measured; it does not gate it.
-           steered = res.pfa[j, p] > pfa_max && isfinite(_st(:snr, j, p)))
+        (;
+            a = bl_pairs[j][1], b = bl_pairs[j][2], pol = pols[p],
+            snr = res.snr[j, p], pfa = res.pfa[j, p],
+            delay = res.delay[j, p], rate = res.rate[j, p],
+            phase = res.phase[j, p],
+            detected = res.pfa[j, p] <= pfa_max,
+            snr_steer = _st(:snr, j, p), pfa_steer = _st(:pfa, j, p),
+            delay_steer = _st(:delay, j, p), rate_steer = _st(:rate, j, p),
+            # Measured at the station solution's delay and rate rather than found
+            # blind. There is NO threshold here: `pfa_max` decides fringe-group
+            # membership on the blind pass, and once a station is in that group
+            # its baselines are measured at the known fringe location to
+            # arbitrarily low SNR. `pfa_steer` records the significance of what
+            # was measured; it does not gate it.
+            steered = res.pfa[j, p] > pfa_max && isfinite(_st(:snr, j, p)),
+        )
             for p in eachindex(pols) for j in eachindex(bl_pairs) if res.valid[j, p]
     ]
     max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)

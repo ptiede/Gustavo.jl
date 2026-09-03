@@ -27,9 +27,11 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
     @testset "pipeline ReduceSteps fuse into the streaming pass" begin
         uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
         chain = [FringeFit(), Bandpass(), TemporalSmoother()]
-        pipe = CalibrationPipeline(vcat(
-            chain, [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 1.0e6)],
-        ))
+        pipe = CalibrationPipeline(
+            vcat(
+                chain, [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 1.0e6)],
+            )
+        )
         sol, out = fitcalibrate(pipe, uvset)
         # Equivalent hand-written reducer chain (same order) on the two-pass
         # corrected set.
@@ -50,9 +52,11 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         chain = FringeFit() |> Bandpass() |> TemporalSmoother()
         _, out_kw = fitcalibrate(chain, uvset; reduce = [AverageFrequency(nout = 1)])
         _, out_pl = fitcalibrate(
-            CalibrationPipeline([
-                FringeFit(), Bandpass(), TemporalSmoother(), AverageFrequency(nout = 1),
-            ]),
+            CalibrationPipeline(
+                [
+                    FringeFit(), Bandpass(), TemporalSmoother(), AverageFrequency(nout = 1),
+                ]
+            ),
             uvset,
         )
         for (k, leaf) in DimensionalData.branches(out_kw)
@@ -67,9 +71,11 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         uvset, _ = _build_fringe_uvset()
         seen = Ref(false)
         sol, _ = fitcalibrate(
-            CalibrationPipeline([
-                FringeFit(), Bandpass(), TemporalSmoother(), _ProbeReduce(seen),
-            ]),
+            CalibrationPipeline(
+                [
+                    FringeFit(), Bandpass(), TemporalSmoother(), _ProbeReduce(seen),
+                ]
+            ),
             uvset,
         )
         @test seen[]
@@ -157,8 +163,8 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test !haskey(f.model.terms, :rel_phase)
         # No feed-specific Rate element: the inter-feed rate is tied ≡ 0 by default.
         @test !any(
-            t -> t isa CAL.TiedComponent && t.component.term isa CAL.Rate &&
-                t.tying isa CAL.FeedComponent,
+            t -> t isa CAL.GainComponent && t.term isa CAL.Rate &&
+                t.Feed isa CAL.SingleFeed,
             f.model.terms,
         )
         @test f.estimator isa MatchedFilter
