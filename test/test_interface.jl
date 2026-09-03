@@ -405,7 +405,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test parent(gains(fit(StationWeightScale(ws) |> _full_chain(), uvset))) ≈ parent(gains(sol_f))
     end
 
-    @testset "solution serialization v6 round-trip; pre-v6 files refused" begin
+    @testset "solution serialization round-trip; older files refused" begin
         uvset, _ = _build_fringe_uvset()
         sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain()), uvset)
         path = joinpath(mktempdir(), "sol.jls")
@@ -415,6 +415,24 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test keys(back) == keys(sol)
         @test back.transforms[1] isa StationWeightScale
         @test back[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
+
+        # The solve's pipeline is recorded on the solution, survives the
+        # round-trip, and rides along through selections.
+        @test sol.pipeline isa CalibrationPipeline
+        @test back.pipeline isa CalibrationPipeline
+        @test length(back.pipeline.steps) == length(sol.pipeline.steps)
+        @test sol[:fringe].pipeline === sol.pipeline
+
+        # A `missing` pipeline (one that did not survive an earlier save)
+        # round-trips as `missing` and never blocks applying the solution.
+        solm = CAL.CalibrationSolution(
+            sol.steps, sol.geom, sol.info;
+            transforms = sol.transforms, postcal = sol.postcal, pipeline = missing,
+        )
+        pathm = joinpath(mktempdir(), "solm.jls")
+        CAL.save_solution(pathm, solm)
+        @test CAL.load_solution(pathm).pipeline === missing
+        @test calibrate(solm, uvset) isa UVP.UVSet
 
         # Pre-v6 wrappers used a different solution shape; they are refused
         # rather than misread, so a caller re-solves instead of loading a stale

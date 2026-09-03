@@ -451,7 +451,7 @@ _dtec_ties(dm::DispersionModel, antennas) =
 
 function start_pass!(s::DispersionSBDFit, ctx::SolveContext)
     disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
-    # `ctx.model` holds only this step's own components (CHUNK-069): the
+    # `ctx.model` holds only this step's own components: the
     # per-scan delay-refinement column — sharing FringeFit's wideband-delay
     # SIGNATURE by design — is the only `_is_perscan_delay` match here, so
     # the plain `findfirst` router (`_perscan_delay_plan`) finds it directly;

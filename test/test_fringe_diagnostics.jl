@@ -423,10 +423,16 @@ using HDF5
     @testset "HDF5 caltable: round-trip + external-readable" begin
         path = tempname() * ".h5"
         try
-            CAL.save_solution_hdf5(path, sol; time_block = 4)
+            # `info/search` (a bare FringeSearch struct) has no HDF5-native
+            # form; the writer names the omission instead of dropping it
+            # silently.
+            @test_logs (:warn, r"no HDF5 representation") match_mode = :any CAL.save_solution_hdf5(
+                path, sol; time_block = 4,
+            )
 
             # Lossless Julia round-trip via the embedded blob.
             sol2 = CAL.load_solution_hdf5(path)
+            @test sol2.pipeline isa CalibrationPipeline
             @test [s.layout.nθ for s in sol2.steps] == [s.layout.nθ for s in sol.steps]
             @test parent(gains(sol2)) == parent(gains(sol))
             @test sol2.geom.channel_freqs == sol.geom.channel_freqs
@@ -455,7 +461,9 @@ using HDF5
 
             # gains = false → compact (blob-only) file still round-trips.
             path2 = tempname() * ".h5"
-            CAL.save_solution_hdf5(path2, sol; gains = false)
+            @test_logs (:warn, r"no HDF5 representation") match_mode = :any CAL.save_solution_hdf5(
+                path2, sol; gains = false,
+            )
             @test parent(gains(CAL.load_solution_hdf5(path2))) == parent(gains(sol))
             @test !HDF5.h5open(ff -> haskey(ff, "gain"), path2, "r")
             isfile(path2) && rm(path2)

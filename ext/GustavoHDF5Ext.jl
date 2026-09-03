@@ -11,15 +11,17 @@ using HDF5
 using Serialization: serialize, deserialize
 import DimensionalData
 import Gustavo.Calibration: CalibrationSolution, save_solution_hdf5, load_solution_hdf5,
-    nchannels, ntimes, _composed_gains, _serializable_transforms
+    nchannels, ntimes, _composed_gains, _serializable_transforms, _serializable_pipeline
 
 # Write `info` (the solution's or one step's diagnostics NamedTuple) into HDF5
 # group `g`, generically: vectors and numbers go straight in; a NamedTuple or
 # `DimStack` (e.g. a step's own `timing`) recurses into a subgroup under its
 # own key. A third-party step's custom diagnostics round-trip with no changes
-# needed here — anything else (a bare struct, e.g. an estimator's config) is
-# silently skipped, same as before.
-function _write_info!(g, info)
+# needed here — anything else (a bare struct, e.g. an estimator's config) has
+# no HDF5 representation and is omitted from the external file; every omission
+# is appended to `skipped` so the caller reports them (the entries still
+# round-trip via julia/blob).
+function _write_info!(g, info, skipped::Vector{String} = String[])
     for k in keys(info)
         v = info[k]
         if v isa AbstractVector
@@ -27,10 +29,12 @@ function _write_info!(g, info)
         elseif v isa Number
             g[String(k)] = v
         elseif v isa NamedTuple || v isa DimensionalData.AbstractDimStack
-            _write_info!(create_group(g, String(k)), v)
+            _write_info!(create_group(g, String(k)), v, skipped)
+        else
+            push!(skipped, string(HDF5.name(g), "/", k, " (", typeof(v), ")"))
         end
     end
-    return nothing
+    return skipped
 end
 
 function save_solution_hdf5(
@@ -59,12 +63,18 @@ function save_solution_hdf5(
         isempty(geom.scan_names) || (ax["scan_names"] = collect(geom.scan_names))
         isempty(geom.spw_names) || (ax["spw_names"] = collect(geom.spw_names))
 
+        skipped = String[]
         ig = create_group(f, "info")
-        _write_info!(ig, sol.info)
+        _write_info!(ig, sol.info, skipped)
         sg = create_group(ig, "steps")
         for s in sol.steps
-            _write_info!(create_group(sg, String(s.name)), s.info)
+            _write_info!(create_group(sg, String(s.name)), s.info, skipped)
         end
+        isempty(skipped) || @warn(
+            "save_solution_hdf5: info entries with no HDF5 representation were " *
+                "omitted from the external file (they still round-trip via " *
+                "julia/blob): " * join(skipped, ", ")
+        )
 
         if gains
             blk = min(max(Int(time_block), 1), max(ntime, 1))
@@ -91,9 +101,10 @@ function save_solution_hdf5(
         buf = IOBuffer()
         serialize(
             buf, (;
-                version = 5, sol.steps, sol.geom, sol.info,
+                version = 6, sol.steps, sol.geom, sol.info,
                 transforms = _serializable_transforms(sol.transforms),
                 postcal = _serializable_transforms(sol.postcal),
+                pipeline = _serializable_pipeline(sol.pipeline),
             ),
         )
         jg = create_group(f, "julia")
@@ -108,12 +119,15 @@ function load_solution_hdf5(path::AbstractString)
             error("load_solution_hdf5: $path has no julia/blob (not written by Gustavo, or gains-only export)")
         deserialize(IOBuffer(read(f["julia"]["blob"])))
     end
-    w.version == 5 || error(
+    w.version == 6 || error(
         "load_solution_hdf5: unsupported julia/blob version $(w.version) — saved by an " *
             "incompatible Gustavo (the solution shape changed); re-solve to produce a " *
             "current file.",
     )
-    return CalibrationSolution(w.steps, w.geom, w.info; transforms = w.transforms, postcal = w.postcal)
+    return CalibrationSolution(
+        w.steps, w.geom, w.info;
+        transforms = w.transforms, postcal = w.postcal, pipeline = w.pipeline,
+    )
 end
 
 end # module

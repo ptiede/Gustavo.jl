@@ -43,7 +43,9 @@ step alone; `sol[1:i]` for the cumulative view through step `i`,
 [`stage_info`](@ref) for its diagnostics) and records
 the data-transform chain the scans were materialized through
 (`sol.transforms`), so diagnostics and the standalone [`calibrate`](@ref)
-reproduce exactly what the solve saw.
+reproduce exactly what the solve saw. The pipeline itself is recorded too
+(`sol.pipeline` — steps, execution config, gauge), so the run is reproducible
+from its output: `fit(sol.pipeline, uvset)`.
 
 `ReduceStep`s and [`AprioriAmplitude`](@ref) in the pipeline do not affect the
 solution's θ and are ignored here (`AprioriAmplitude` is still RECORDED on the
@@ -66,7 +68,7 @@ the cross-run form of this composition.
 function fit(pipe::CalibrationPipeline, uvset::UVSet)
     _check_blas_threads()
     sol, _ = _run_pipeline(
-        _parse_pipeline(pipe), pipe.exec, pipe.gauge, uvset,
+        _parse_pipeline(pipe), pipe.exec, pipe.gauge, uvset; pipeline = pipe,
     )
     return sol
 end
@@ -180,7 +182,7 @@ function _run_fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet, reduce)
     br = _parse_pipeline(pipe)
     post = _compose_output_chain(br.post_steps, collect(reduce))
     sol, output = _run_pipeline(
-        br, pipe.exec, pipe.gauge, uvset; sink = OutputSink(post),
+        br, pipe.exec, pipe.gauge, uvset; sink = OutputSink(post), pipeline = pipe,
     )
     ctx = CalibrationContext(
         uvset, sol, output,
@@ -320,7 +322,7 @@ end
 # Returns `(sol, output)` (`output === nothing` without a sink).
 function _run_pipeline(
         br, exec::ExecutionConfig, gauge_spec::AbstractGauge,
-        uvset::UVSet; sink = nothing,
+        uvset::UVSet; sink = nothing, pipeline = nothing,
     )
     solve_steps = br.solve_steps
 
@@ -339,7 +341,7 @@ function _run_pipeline(
     stream = _build_stream(br.tfs)
     # Run-wide state shared, unmodified in identity, across every step's own
     # SolveContext below (only `model`/`layout`/`ev`/`θ` and `stream` change
-    # per step — the rest is the run-wide part CHUNK-069 splits out).
+    # per step — the rest is run-wide).
     scratch = Dict{Symbol, Any}()
     # The final pass fuses the output tail only when it is a TemporalSmoother's:
     # that pass never repeats and finishes each group's θ before the tail runs
@@ -403,7 +405,7 @@ function _run_pipeline(
     end
     sol = CalibrationSolution(
         step_solutions, geom, _new_engine_info(ctx, br, step_solutions);
-        transforms = br.tfs, postcal = br.apriori,
+        transforms = br.tfs, postcal = br.apriori, pipeline,
     )
     sink === nothing && return sol, nothing
     if !fused
@@ -427,8 +429,8 @@ end
 
 # The per-scan SNR a LATER step's selection may want (e.g. a `ScanWhere`
 # predicate filtering on `s.snr`), read off the most recent finished
-# `StepSolution` that published one — never a shared scratch dict
-# (CHUNK-067c). `nothing` when no prior step published SNR (an estimator with
+# `StepSolution` that published one — never a shared scratch dict.
+# `nothing` when no prior step published SNR (an estimator with
 # no notion of it, or none yet).
 function _scan_snr(prior_solutions)
     for s in Iterators.reverse(prior_solutions)
