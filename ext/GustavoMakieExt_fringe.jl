@@ -8,7 +8,7 @@
 
 import Gustavo.Fringe
 using Gustavo.UVData: UVSet
-using Gustavo.Calibration: CalibrationSolution
+using Gustavo.Calibration: CalibrationSolution, _freq_group_ranges
 using Gustavo.Fringe: fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_snr_table
 using Gustavo.Fringe: BaselineFringeData, baseline_fringe_data, baseline_pol_index
 using Gustavo.Fringe: FringeSearchMap, BaselineFringeMap, fringe_search_map, _fmt_pfa
@@ -220,7 +220,7 @@ function Fringe.plot_baseline_fringes(
     # equal-width segment on a compressed x-axis (no dead space at the VGOS gaps),
     # channels coherently binned so every plotted point carries real SNR. `bin = 0`
     # picks ~12 points per group on many-channel data (and 1:1 below 32 channels/group).
-    freqgroups = kind === :freq ? Fringe._freq_group_ranges(data.freqs) : UnitRange{Int}[]
+    freqgroups = kind === :freq ? _freq_group_ranges(data.freqs) : UnitRange{Int}[]
     if fgsel != 0 && kind === :freq
         freqgroups = [r for r in freqgroups if first(r) >= first(grpr) && last(r) <= last(grpr)]
     end

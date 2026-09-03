@@ -37,7 +37,8 @@ Those four tables are indexed by position on the SOLVE GRID. `tseg`/`fseg` are
 the segmentations they resolve, so the identical tables can be rebuilt for data
 sampled anywhere by placing each foreign sample in its segment
 ([`time_segment_ids`](@ref) / [`freq_segment_ids`](@ref)) — the basis for
-applying a solution to a different time or channel sampling. `fstate`/`tstate`
+applying a solution to a different time or channel sampling. `fseg` is stored
+[`materialize`](@ref)d, so a data-dependent segmentation never reaches a plan. `fstate`/`tstate`
 are the term's own coordinate constants, resolved once against the solve
 geometry ([`freq_coord_state`](@ref)), `nothing` on an axis the term does not
 declare.
@@ -108,7 +109,10 @@ end
 function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     t = e.term
     tseg_id, ntseg = time_segment_ids(e.Ti, geom)
-    fseg_id, nfseg = freq_segment_ids(e.Frequency, geom)
+    # A data-dependent segmentation (`BandGroups`) resolves to its concrete form
+    # here, so ids, plans, and provenance only ever hold materialized ones.
+    fseg = materialize(e.Frequency, geom)
+    fseg_id, nfseg = freq_segment_ids(fseg, geom)
     fseg_groups = segment_groups(fseg_id, nfseg)
 
     # Build only the axes the term declares; the rest stay zero. Calling a
@@ -147,7 +151,7 @@ function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     shape, roles = _leaf_shape(bl, nfeed, nfseg, ntseg, nant, e.Feed)
 
     return (;
-        tseg = e.Ti, fseg = e.Frequency,
+        tseg = e.Ti, fseg,
         tseg_id, fseg_id, xf, xt, nchan_seg, tying = e.Feed, shape, roles, fstate, tstate,
     )
 end

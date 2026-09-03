@@ -64,7 +64,7 @@ end
 """
 One segment per explicit global-channel range — for caller-defined frequency
 groupings the other segmentations cannot express, e.g. the widely-separated
-VGOS frequency groups (`Fringe.fringe_freq_groups`). Ranges must be ascending,
+VGOS frequency groups ([`fringe_freq_groups`](@ref)). Ranges must be ascending,
 contiguous, start at channel 1, and (checked against the geometry at plan
 time) cover every channel exactly once.
 """
@@ -91,6 +91,23 @@ end
 # `ranges` is a `Vector`, so the default struct `==` would compare by identity.
 Base.:(==)(a::FreqGroups, b::FreqGroups) = a.ranges == b.ranges
 Base.hash(s::FreqGroups, h::UInt) = hash(s.ranges, hash(:FreqGroups, h))
+
+"""
+    BandGroups(; gap_factor = 4.0)
+
+Frequency groups read off the channel-frequency axis' own gap structure
+([`fringe_freq_groups`](@ref)): the widely-separated VGOS 3/5/6/10 GHz groups,
+or one full-range group on a contiguous axis. `gap_factor` is the ratio an
+inter-block gap must exceed to count as a between-group one.
+
+Data-dependent: it names the partition RULE, not the partition.
+[`materialize`](@ref) resolves it against a `DataGeometry` into the concrete
+[`FreqGroups`](@ref) that layouts, solutions, and foreign-grid placement work
+with, so `BandGroups` itself needs no `freq_segment_ids` methods.
+"""
+Base.@kwdef struct BandGroups <: AbstractFrequencySegmentation
+    gap_factor::Float64 = 4.0
+end
 
 # ── DataGeometry ─────────────────────────────────────────────────────────────
 
@@ -282,6 +299,125 @@ function segment_groups(ids::AbstractVector{<:Integer}, nseg::Integer)
         push!(groups[ids[i]], i)
     end
     return groups
+end
+
+# ── Materialization and the range form ───────────────────────────────────────
+
+"""
+    materialize(seg::AbstractFrequencySegmentation, geom::DataGeometry)
+        -> AbstractFrequencySegmentation
+
+Resolve a frequency segmentation against the concrete geometry it partitions.
+Identity for a segmentation that already names its partition; a data-dependent
+one ([`BandGroups`](@ref)) resolves to the concrete segmentation its rule finds
+on `geom`. Parameter layouts materialize every component's frequency
+segmentation, so segment ids, solutions, and foreign-grid placement only ever
+see the materialized form.
+"""
+materialize(seg::AbstractFrequencySegmentation, ::DataGeometry) = seg
+materialize(b::BandGroups, geom::DataGeometry) =
+    FreqGroups(fringe_freq_groups(geom.channel_freqs; gap_factor = b.gap_factor))
+
+"""
+    fringe_freq_groups(freqs; gap_factor = 4.0) -> Vector{UnitRange{Int}}
+
+Group the contiguous sub-band blocks of a channel-frequency axis into FREQUENCY
+GROUPS. The inter-block gaps are split into "within-group" vs "between-group"
+scales at the largest ratio jump in their sorted values (must exceed
+`gap_factor`); when the gaps carry no such two-scale structure the axis is one
+group (a single far-flung pair is arbitrated against the block widths instead).
+On VGOS this recovers the four widely-separated 3/5/6/10 GHz groups (each
+holding several 32 MHz sub-bands); on a contiguous axis (e.g. VLBA) it returns
+one full-range group. Channel ranges index the stacked frequency axis.
+"""
+function fringe_freq_groups(freqs::AbstractVector{<:Real}; gap_factor::Real = 4.0)
+    blocks = _freq_group_ranges(freqs)
+    length(blocks) <= 1 && return blocks
+    gaps = [Float64(freqs[first(blocks[i + 1])] - freqs[last(blocks[i])]) for i in 1:(length(blocks) - 1)]
+    thr = Inf
+    if length(gaps) == 1
+        # No gap statistics: a lone pair of blocks splits when the gap dwarfs the
+        # blocks themselves.
+        wmed = median([Float64(freqs[last(r)] - freqs[first(r)]) for r in blocks])
+        gaps[1] > gap_factor * wmed && (thr = gap_factor * wmed)
+    else
+        s = sort(gaps)
+        best = 0.0
+        for i in 1:(length(s) - 1)
+            s[i] > 0 || continue
+            r = s[i + 1] / s[i]
+            if r > best
+                best = r
+                thr = 0.5 * (s[i] + s[i + 1])
+            end
+        end
+        best > gap_factor || (thr = Inf)
+    end
+    groups = UnitRange{Int}[]
+    lo = first(blocks[1])
+    for i in 1:(length(blocks) - 1)
+        if gaps[i] > thr
+            push!(groups, lo:last(blocks[i]))
+            lo = first(blocks[i + 1])
+        end
+    end
+    push!(groups, lo:last(blocks[end]))
+    return groups
+end
+
+# Contiguous frequency-group ranges of a channel-frequency axis: split where the
+# step jumps by more than 3× the median spacing (the VGOS sub-band gaps).
+function _freq_group_ranges(freqs::AbstractVector{<:Real})
+    n = length(freqs)
+    n == 0 && return UnitRange{Int}[]
+    n == 1 && return [1:1]
+    dfs = abs.(diff(Float64.(freqs)))
+    step = median(dfs)
+    ranges = UnitRange{Int}[]
+    lo = 1
+    for i in 1:(n - 1)
+        if dfs[i] > 3 * step
+            push!(ranges, lo:i)
+            lo = i + 1
+        end
+    end
+    push!(ranges, lo:n)
+    return ranges
+end
+
+"""
+    segment_ranges(seg::AbstractFrequencySegmentation, geom::DataGeometry)
+        -> Vector{UnitRange{Int}}
+
+The global-channel range of each frequency segment of `seg` on `geom`, in
+segment-id order. Defined wherever every segment is a contiguous channel run —
+true of each shipped segmentation on the layouts it is meant for; a
+segmentation whose segments interleave on `geom` (e.g. `PerSpectralWindow`
+over interleaved spectral windows) has no range form and throws.
+"""
+function segment_ranges(seg::AbstractFrequencySegmentation, geom::DataGeometry)
+    ids, nseg = freq_segment_ids(seg, geom)
+    lo = fill(typemax(Int), nseg)
+    hi = zeros(Int, nseg)
+    count = zeros(Int, nseg)
+    for (c, s) in pairs(ids)
+        lo[s] = min(lo[s], c)
+        hi[s] = max(hi[s], c)
+        count[s] += 1
+    end
+    for s in 1:nseg
+        count[s] > 0 || throw(
+            ArgumentError("$(_seg_label(seg)): segment $s of $nseg covers no channel")
+        )
+        hi[s] - lo[s] + 1 == count[s] || throw(
+            ArgumentError(
+                "$(_seg_label(seg)): segment $s spans channels $(lo[s]):$(hi[s]) but holds " *
+                    "only $(count[s]) of them — its channels interleave with another " *
+                    "segment's, so it has no contiguous channel range."
+            )
+        )
+    end
+    return [lo[s]:hi[s] for s in 1:nseg]
 end
 
 # ── Placement on a foreign grid ──────────────────────────────────────────────

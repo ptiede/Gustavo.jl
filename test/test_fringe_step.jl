@@ -299,6 +299,10 @@
         @test CAL.model_components(
             SingleBandDelay(freq = CAL.PerSpectralWindow()), CAL.build_geometry(narrow),
         ) === nothing
+        # `GlobalFrequency` resolves to one group on any axis: fully degenerate
+        # with the wideband delay, so the element always compiles to nothing.
+        @test CAL.model_components(SingleBandDelay(freq = CAL.GlobalFrequency()), gsbd) ===
+            nothing
         # Both halves of the pair share the partition.
         psbd = CAL.model_components(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd)
         @test psbd.constant.Frequency.ranges == psbd.delay.Frequency.ranges

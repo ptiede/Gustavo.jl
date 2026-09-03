@@ -19,18 +19,6 @@
 #   detection/flag tables recorded on the solution.
 
 """
-    BandGroups(; gap_factor = 4.0)
-
-Frequency groups read off the channel-frequency axis' own gap structure
-([`fringe_freq_groups`](@ref)): the widely-separated VGOS 3/5/6/10 GHz groups,
-or one full-range group on a contiguous axis. `gap_factor` is the ratio an
-inter-block gap must exceed to count as a between-group one.
-"""
-Base.@kwdef struct BandGroups
-    gap_factor::Float64 = 4.0
-end
-
-"""
     SingleBandDelay(; freq = BandGroups())
 
 Per-scan single-band delay (fourfit's SBD) — a [`FringeModel`](@ref) term-list
@@ -39,12 +27,13 @@ between scans (~30 ns has been observed), which neither the wideband delay (one
 slope across the whole band) nor the time-invariant per-channel bandpass can
 track. Instrumental, not propagation.
 
-`freq` is the frequency partition the delay is resolved on. `BandGroups()` (the
-default) gives one delay per gap-detected band group; `PerSpectralWindow()`
-gives every spectral window its own delay and offset, which is what a per-spw
-signal-path difference that MOVES between scans needs — a `GlobalTime` bandpass
-can only fit such a step's track average. A `FreqGroups` is taken as the
-partition itself.
+`freq` is the frequency partition the delay is resolved on — any
+`AbstractFrequencySegmentation`, resolved through `Calibration.materialize` and
+`Calibration.segment_ranges`. `BandGroups()` (the default) gives one delay per
+gap-detected band group; `PerSpectralWindow()` gives every spectral window its
+own delay and offset, which is what a per-spw signal-path difference that MOVES
+between scans needs — a `GlobalTime` bandpass can only fit such a step's track
+average. A `FreqGroups` is taken as the partition itself.
 
 Compiles to a coupled per-group pair — a per-scan `Delay` plus its companion
 per-scan constant over that partition — or to nothing when the partition holds
@@ -56,16 +45,8 @@ Base.@kwdef struct SingleBandDelay{F}
     freq::F = BandGroups()
 end
 
-# The global-channel ranges a partition resolves to on `geom`. `FreqGroups`
-# checks the result: ascending, contiguous, covering every channel exactly once.
-_sbd_ranges(b::BandGroups, geom::DataGeometry) =
-    fringe_freq_groups(geom.channel_freqs; gap_factor = b.gap_factor)
-_sbd_ranges(::PerSpectralWindow, geom::DataGeometry) =
-    _spw_blocks(geom, eachindex(geom.spw_of_chan))
-_sbd_ranges(f::FreqGroups, ::DataGeometry) = f.ranges
-
 function model_components(s::SingleBandDelay, geom::DataGeometry)
-    freqgroups = _sbd_ranges(s.freq, geom)
+    freqgroups = segment_ranges(materialize(s.freq, geom), geom)
     length(freqgroups) >= 2 || return nothing
     # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a
     # group slope about the group's own centre νg needs the companion per-group

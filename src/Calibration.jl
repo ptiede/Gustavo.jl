@@ -14,8 +14,15 @@ using ..UVData: correlation_feed_pair, is_parallel_hand,
     parallel_hand_indices, cross_hand_indices, phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,
     is_lazy, pol_products, baselines
+# Segmentation materialization is a METHOD of the data layer's `materialize`
+# generic — one package-wide verb for resolving a deferred form (a lazy leaf, a
+# data-dependent segmentation) into its concrete one. A bare `using` definition
+# would mint a second function of the same name and leave the two ambiguous
+# wherever both modules are in scope.
+import ..UVData: materialize
 using LinearAlgebra
 using LinearSolve
+using Statistics: median
 using ComponentArrays: ComponentVector, ComponentArray, getaxes
 
 include("Calibration/gauge.jl")
@@ -52,8 +59,9 @@ export unwrap_phase_track, phase_unwrap_ambiguity, phase_relative_to_ref
 # Segmentation vocabulary
 export AbstractTimeSegmentation, AbstractFrequencySegmentation
 export GlobalTime, PerScan, PerIntegration, TimeBlocks, InstrumentScans
-export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FreqGroups
+export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FreqGroups, BandGroups
 export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
+export materialize, segment_ranges, fringe_freq_groups
 
 # Terms
 export AbstractGainTerm

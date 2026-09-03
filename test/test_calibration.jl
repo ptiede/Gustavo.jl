@@ -52,6 +52,59 @@ const CAL = Gustavo.Calibration
     )
 end
 
+@testset "Materialization and segment_ranges" begin
+    # 4 channels: a gap-separated pair of groups, in 3 spws.
+    geom = CAL.DataGeometry(;
+        times = [0.0, 1.0],
+        channel_freqs = [1.0e9, 1.1e9, 1.2e9, 5.0e9],
+        spw_of_chan = [1, 1, 2, 3],
+    )
+
+    # Concrete segmentations materialize to themselves; the data-dependent
+    # `BandGroups` resolves to the `FreqGroups` its gap detection finds.
+    @test CAL.BandGroups() isa CAL.AbstractFrequencySegmentation
+    for seg in (
+            CAL.GlobalFrequency(), CAL.PerSpectralWindow(), CAL.ChannelBlocks(2),
+            CAL.FreqGroups([1:3, 4:4]),
+        )
+        @test CAL.materialize(seg, geom) === seg
+    end
+    @test CAL.materialize(CAL.BandGroups(), geom) == CAL.FreqGroups([1:3, 4:4])
+    # `gap_factor` reaches the gap detection: an unreachable ratio keeps one group.
+    @test CAL.materialize(CAL.BandGroups(gap_factor = 1.0e9), geom) ==
+        CAL.FreqGroups([1:4])
+
+    # The range form of each shipped concrete segmentation.
+    @test CAL.segment_ranges(CAL.GlobalFrequency(), geom) == [1:4]
+    @test CAL.segment_ranges(CAL.PerSpectralWindow(), geom) == [1:2, 3:3, 4:4]
+    @test CAL.segment_ranges(CAL.ChannelBlocks(2), geom) == [1:2, 3:3, 4:4]
+    @test CAL.segment_ranges(CAL.FreqGroups([1:1, 2:4]), geom) == [1:1, 2:4]
+
+    # A segmentation whose segments interleave has no range form.
+    inter = CAL.DataGeometry(;
+        times = [0.0], channel_freqs = [1.0e9, 1.1e9, 1.2e9], spw_of_chan = [1, 2, 1],
+    )
+    @test_throws "no contiguous channel range" CAL.segment_ranges(
+        CAL.PerSpectralWindow(), inter
+    )
+
+    # Layouts materialize: a plan built from a `BandGroups` component records the
+    # concrete `FreqGroups`, so solutions and foreign-grid placement never see
+    # the data-dependent form.
+    model = CAL.StationGainModel(
+        phase = (
+            sbd = CAL.GainComponent(
+                CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.BandGroups(),
+                Feed = CAL.SharedFeeds(),
+            ),
+        ),
+    )
+    layout = CAL.plan_parameters(model, 3, geom)
+    plan = only(layout.plans)
+    @test plan.fseg == CAL.FreqGroups([1:3, 4:4])
+    @test plan.fseg_id == [1, 1, 1, 2]
+end
+
 @testset "Placement on a foreign grid" begin
     # Solve grid: 2 scans × 2 epochs, 2 spws × 3 channels.
     solve = CAL.DataGeometry(;
