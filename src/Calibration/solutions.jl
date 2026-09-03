@@ -1024,6 +1024,19 @@ function load_solution(path::AbstractString)
 end
 
 """
+    external_info(x) -> Union{NamedTuple, Nothing}
+
+The plain-data form (numbers, vectors, strings, nested NamedTuples) of a
+solution `info` entry for language-neutral export —
+[`save_solution_hdf5`](@ref)'s `info/*` groups. The fallback `nothing` means
+`x` has no external form: the exporter omits it, reports the omission, and the
+entry survives only in the Julia blob. A step or estimator whose diagnostics
+record a custom config type makes it externally readable by defining one
+method.
+"""
+external_info(::Any) = nothing
+
+"""
     save_solution_hdf5(path, sol::CalibrationSolution; gains = true, time_block = 1024)
 
 Write `sol` to an HDF5 caltable readable from any language (Python/h5py, CASA, …),

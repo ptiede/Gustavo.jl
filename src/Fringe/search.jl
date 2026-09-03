@@ -124,6 +124,16 @@ Base.@kwdef struct FringeSearch
     algorithm::Union{Symbol, AbstractSearchAlgorithm} = :auto
 end
 
+# The external (caltable `info/search/*`) form of the recorded search config;
+# a custom algorithm object exports as its type name.
+Calibration.external_info(s::FringeSearch) = (;
+    delay_window_s = collect(s.delay_window),
+    rate_window_hz = collect(s.rate_window),
+    s.oversample, s.quad_interp,
+    algorithm = s.algorithm isa Symbol ? String(s.algorithm) :
+        string(nameof(typeof(s.algorithm))),
+)
+
 """
     Detection{T} = @NamedTuple{delay, rate, phase, amp, snr, pfa, valid}
 

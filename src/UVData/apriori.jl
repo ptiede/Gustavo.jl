@@ -81,8 +81,10 @@ function _build_apriori_gains(
         leaf, info, root_meta, antab::AntabCalibration;
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    on_missing_station in (:warn, :error, :ignore) || error(
-        "apply_calibration: on_missing_station must be :warn, :error, or :ignore"
+    on_missing_station in (:warn, :error, :ignore) || throw(
+        ArgumentError(
+            "on_missing_station must be :warn, :error, or :ignore (got :$(on_missing_station))"
+        )
     )
     ant_table = info.antennas
     ant_names = ant_table.name
@@ -177,7 +179,14 @@ function _build_apriori_gains(
 
     if !isempty(missing_stations)
         if on_missing_station === :error
-            error("apply_calibration: ANTAB has no record for stations $(missing_stations)")
+            throw(
+                ArgumentError(
+                    "ANTAB $(repr(antab.track_label)) has no record for stations " *
+                        "$(missing_stations); baselines involving them would pass through " *
+                        "uncalibrated. Pass `on_missing_station = :warn` or `:ignore` to " *
+                        "allow that.",
+                )
+            )
         elseif on_missing_station === :warn
             @warn "apply_calibration: ANTAB has no record for stations; baselines involving them are left unchanged" stations = missing_stations track = antab.track_label
         end

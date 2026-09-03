@@ -261,9 +261,11 @@ function start_pass!(s::FringeFit, ctx::SolveContext)
     # later step's component sharing a stage-B signature by design
     # (`DispersionSBDFit`'s private delay-refinement column vs. this model's own
     # wideband delay) lives in a SEPARATE model and never appears here.
-    ctx.scratch[:fringe_setup] = (;
-        stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout),
-    )
+    stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout)
+    # A model whose rate components disagree on any constant-phase epoch is
+    # rejected here, before the pass reads any data (see `scan_phase_epoch`).
+    Fringe.validate_scan_epochs(stageB, length(ctx.stream.geom.times))
+    ctx.scratch[:fringe_setup] = (; stageB)
     return nothing
 end
 
@@ -277,6 +279,9 @@ finish_pass!(s::FringeFit, ctx::SolveContext) = Fringe.finish_estimate!(s.estima
 # Defined qualified on the `Fringe` generics, not as bare `estimate_scan!`,
 # which would mint a second function here and leave the seam's fallback in place.
 
+# The struct itself, not a flattened copy: `fringe_search_map` replays it to
+# reproduce the solve's search for diagnostics. Its external (caltable) form
+# comes from `Calibration.external_info(::FringeSearch)`.
 Fringe.estimator_info(est::Fringe.MatchedFilter) = (; search = est.search)
 
 # Solve into `ctx.θ` the station systems `dets` closes, reporting the components

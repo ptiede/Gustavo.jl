@@ -423,12 +423,7 @@ using HDF5
     @testset "HDF5 caltable: round-trip + external-readable" begin
         path = tempname() * ".h5"
         try
-            # `info/search` (a bare FringeSearch struct) has no HDF5-native
-            # form; the writer names the omission instead of dropping it
-            # silently.
-            @test_logs (:warn, r"no HDF5 representation") match_mode = :any CAL.save_solution_hdf5(
-                path, sol; time_block = 4,
-            )
+            CAL.save_solution_hdf5(path, sol; time_block = 4)
 
             # Lossless Julia round-trip via the embedded blob.
             sol2 = CAL.load_solution_hdf5(path)
@@ -449,6 +444,11 @@ using HDF5
                 # `info/steps/<name>/*` (generic — no per-step-name knowledge
                 # needed to write or read them).
                 @test haskey(f["info"], "ant_names")
+                # The search configuration is exported flat, so external
+                # readers get the full search provenance.
+                @test read(f["info"]["search"]["algorithm"]) == "auto"
+                @test read(f["info"]["search"]["oversample"]) == 8
+                @test read(f["info"]["search"]["delay_window_s"]) == [-1.0e-6, 1.0e-6]
                 @test haskey(f["info"]["steps"], "fringe")
                 @test haskey(f["info"]["steps"]["fringe"], "scan_snr")
                 @test haskey(f["info"]["steps"]["fringe"], "timing")
@@ -461,12 +461,22 @@ using HDF5
 
             # gains = false → compact (blob-only) file still round-trips.
             path2 = tempname() * ".h5"
-            @test_logs (:warn, r"no HDF5 representation") match_mode = :any CAL.save_solution_hdf5(
-                path2, sol; gains = false,
-            )
+            CAL.save_solution_hdf5(path2, sol; gains = false)
             @test parent(gains(CAL.load_solution_hdf5(path2))) == parent(gains(sol))
             @test !HDF5.h5open(ff -> haskey(ff, "gain"), path2, "r")
             isfile(path2) && rm(path2)
+
+            # An info entry with no HDF5 form is omitted from the external
+            # file and reported, by name, in one warning per save.
+            solx = CAL.CalibrationSolution(
+                sol.steps, sol.geom, (; sol.info..., opaque = Ref(1));
+                transforms = sol.transforms, postcal = sol.postcal,
+            )
+            path3 = tempname() * ".h5"
+            @test_logs (:warn, r"no HDF5 representation.*opaque"s) match_mode = :any CAL.save_solution_hdf5(
+                path3, solx; gains = false,
+            )
+            isfile(path3) && rm(path3)
         finally
             isfile(path) && rm(path)
         end

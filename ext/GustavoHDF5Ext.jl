@@ -11,16 +11,17 @@ using HDF5
 using Serialization: serialize, deserialize
 import DimensionalData
 import Gustavo.Calibration: CalibrationSolution, save_solution_hdf5, load_solution_hdf5,
-    nchannels, ntimes, _composed_gains, _serializable_transforms, _serializable_pipeline
+    nchannels, ntimes, _composed_gains, _serializable_transforms, _serializable_pipeline,
+    external_info
 
 # Write `info` (the solution's or one step's diagnostics NamedTuple) into HDF5
-# group `g`, generically: vectors and numbers go straight in; a NamedTuple or
+# group `g`, generically: vectors, numbers, and strings go straight in; a NamedTuple or
 # `DimStack` (e.g. a step's own `timing`) recurses into a subgroup under its
 # own key. A third-party step's custom diagnostics round-trip with no changes
-# needed here — anything else (a bare struct, e.g. an estimator's config) has
-# no HDF5 representation and is omitted from the external file; every omission
-# is appended to `skipped` so the caller reports them (the entries still
-# round-trip via julia/blob).
+# needed here. A bare struct (e.g. an estimator's config) is asked for a
+# plain-data form via `Calibration.external_info`; one that has none is
+# omitted from the external file, appended to `skipped` so the caller reports
+# every omission (the entries still round-trip via julia/blob).
 function _write_info!(g, info, skipped::Vector{String} = String[])
     for k in keys(info)
         v = info[k]
@@ -28,8 +29,12 @@ function _write_info!(g, info, skipped::Vector{String} = String[])
             g[String(k)] = collect(v)
         elseif v isa Number
             g[String(k)] = v
+        elseif v isa AbstractString
+            g[String(k)] = String(v)
         elseif v isa NamedTuple || v isa DimensionalData.AbstractDimStack
             _write_info!(create_group(g, String(k)), v, skipped)
+        elseif (nt = external_info(v)) !== nothing
+            _write_info!(create_group(g, String(k)), nt, skipped)
         else
             push!(skipped, string(HDF5.name(g), "/", k, " (", typeof(v), ")"))
         end

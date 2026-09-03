@@ -520,25 +520,48 @@ Rate components of different time segmentations put their origins in different
 places, and no single epoch then zeroes them all; that model is rejected rather
 than silently referenced to one of them.
 """
-function scan_phase_epoch(model, layout, ti::Integer)
+scan_phase_epoch(model, layout, ti::Integer) =
+    _scan_epoch(fringe_stage_components(model, layout), ti)
+
+function _scan_epoch(comps, ti::Integer)
     epoch = nothing
-    for (plan, kind) in fringe_stage_components(model, layout)
+    for (plan, kind) in comps
         kind === :rate || continue
         o = Float64(plan.tstate[plan.tseg_id[ti]])
         if epoch === nothing
             epoch = o
         elseif !isapprox(o, epoch; atol = 1.0e-9)
-            error(
-                "scan_phase_epoch: the model's rate components disagree on the epoch of " *
-                    "time index $ti ($epoch h vs $o h). A constant phase is the phase at " *
-                    "the epoch where every rate coordinate vanishes, and rate components " *
-                    "with different time segmentations have no such epoch in common. Give " *
-                    "every Rate term the same time segmentation as the constant it " *
-                    "accompanies (`PerScan()` for the default fringe term list).",
+            throw(
+                ArgumentError(
+                    "scan_phase_epoch: the model's rate components disagree on the epoch of " *
+                        "time index $ti ($epoch h vs $o h). A constant phase is the phase at " *
+                        "the epoch where every rate coordinate vanishes, and rate components " *
+                        "with different time segmentations have no such epoch in common. Give " *
+                        "every Rate term the same time segmentation as the constant it " *
+                        "accompanies (`PerScan()` for the default fringe term list).",
+                )
             )
         end
     end
     return epoch
+end
+
+"""
+    validate_scan_epochs(comps, ntimes)
+
+Reject a model whose rate components disagree on the constant-phase epoch at
+ANY time index — the [`scan_phase_epoch`](@ref) error, raised over the whole
+time axis at once so a fringe pass fails before it reads any data rather than
+mid-stream at the first offending scan. `comps` is
+[`fringe_stage_components`](@ref)' output; a model with at most one rate
+component cannot disagree and is skipped outright.
+"""
+function validate_scan_epochs(comps, ntimes::Integer)
+    count(((plan, kind),) -> kind === :rate, comps) < 2 && return nothing
+    for ti in 1:ntimes
+        _scan_epoch(comps, ti)
+    end
+    return nothing
 end
 
 """

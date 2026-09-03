@@ -405,6 +405,27 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test parent(gains(fit(StationWeightScale(ws) |> _full_chain(), uvset))) ≈ parent(gains(sol_f))
     end
 
+    @testset "rate components must share the constant-phase epoch" begin
+        # Two scans: the per-scan rate's origins (scan centers) then cannot
+        # all coincide with the track-wide rate's single origin.
+        uvset, _ = _build_fringe_uvset(nscans = 2)
+        # A second rate on a different time segmentation puts its origin in a
+        # different place, so no single epoch zeroes both rate coordinates;
+        # the fit rejects the model before its fringe pass reads any data.
+        bad = FringeModel(
+            terms = merge(
+                default_fringe_terms(),
+                (;
+                    rate2 = GainComponent(
+                        Rate(); Ti = GlobalTime(), Frequency = GlobalFrequency(),
+                        Feed = SingleFeed(2),
+                    ),
+                ),
+            ),
+        )
+        @test_throws "disagree on the epoch" fit(FringeFit(model = bad), uvset)
+    end
+
     @testset "solution serialization round-trip; older files refused" begin
         uvset, _ = _build_fringe_uvset()
         sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain()), uvset)

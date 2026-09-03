@@ -1655,8 +1655,11 @@ end
     @test out isa Gustavo.UVData.UVSet
     flux = BP.apriori_flux_gains(base, antab; on_missing_station = :ignore)
     @test all(g -> "AX" in g.missing_stations, values(flux))
-    @test_throws ErrorException BP.apply_calibration(
+    @test_throws "has no record for stations" BP.apply_calibration(
         base, antab; on_missing_station = :error,
+    )
+    @test_throws "must be :warn, :error, or :ignore" BP.apply_calibration(
+        base, antab; on_missing_station = :bogus,
     )
 end
 
