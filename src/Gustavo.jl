@@ -49,7 +49,7 @@ export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
 export FringeFit, FringeModel, DispersionModel, SingleBandDelay, BandGroups, default_fringe_terms,
     MatchedFilter, DispersionSBDFit, Bandpass, default_bandpass_terms, TemporalSmoother,
-    AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
+    default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit, fitcalibrate

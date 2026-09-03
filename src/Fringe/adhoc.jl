@@ -50,34 +50,70 @@
 # `WLSEstimator`-based callables: most adhoc smoothers are NOT WLS problems —
 # `OUSmoother`/`JointOUSmoother` are Kalman/RTS filters, `NoSmoothing` is a no-op —
 # so a shared struct-dispatch interface is the right fit here instead).
-# Adding a method is "define a `<: AbstractAdhocSmoother` struct + one method",
-# nothing else. The informal interface a smoother participates in:
-#
-#   - `apply_adhoc!(sm, phase, track_w, times; anchor, nant, ap_rows)` — the
-#     single dispatch point; mutates `phase` in place. `ap_rows` holds the
-#     SNR-gated observation rows per AP, source-corrected, identical for every
-#     smoother. Per-track smoothers subtype `PerTrackAdhocSmoother` and instead
-#     implement the per-track hook `smooth_track(sm, track, w, times)`; the shared
-#     `apply_adhoc!` loops over the (station, node) tracks for them.
-#   - `_adhoc_coherence_time(sm)` — the assumed atmospheric `T_coh` (seconds); used
-#     by the per-AP warm-start staleness. Default `10.0`; smoothers with a coherence
-#     time override it.
-#   - `_requires_single_node(sm)` — whether the smoother needs one phase node per
-#     station (only the joint solve, whose Kalman state is one dimension per
-#     station). Default `false`.
-#
-# The shared solve options (`snr_floor`, `phase_rewrap_iters`, `source_iters`,
-# `source_tol`, `detrend`, `complex_iters`) are fields on EVERY smoother, so a
-# smoother value fully specifies the adhoc stage. `snr_floor` gates the SEED
-# pass only — the phase-extraction solve whose job is the global 2π branch;
-# `complex_iters` Gauss–Newton passes then re-fit the tracks against the
-# complex residuals themselves, every AP entering ungated at its exact
-# first-order information (`complex_iters = 0` keeps the seed as the answer).
+# Internal traits (defaults in the traits section below): `_adhoc_coherence_time(sm)`
+# — the assumed atmospheric `T_coh` (seconds), used by the per-AP warm-start
+# staleness; `_requires_single_node(sm)` — whether the smoother needs one phase
+# node per station (only the joint solve, whose Kalman state is one dimension per
+# station).
+
+"""
+    AbstractAdhocSmoother
+
+HOW the [`TemporalSmoother`](@ref) step smooths the per-AP station phase tracks
+the globally-closing adhoc solve produces ([`solve_adhoc_phasing`](@ref)).
+Concretely `SavitzkyGolaySmoother` (the default), `PenalizedSmoother`,
+`OUSmoother`, `JointOUSmoother`, or `NoSmoothing`.
+
+# Implementing a smoother
+
+Define a struct and:
+
+    Gustavo.Fringe.apply_adhoc!(sm::MySmoother, phase, track_w, times; anchor, nant, ap_rows)
+
+the single dispatch point; mutates `phase` in place. `ap_rows` holds the
+SNR-gated observation rows per AP, source-corrected, identical for every
+smoother. A smoother that acts independently on each (station, node) track
+subtypes [`PerTrackAdhocSmoother`](@ref) and instead implements the per-track
+hook `smooth_track(sm, track, w, times)`; the shared `apply_adhoc!` loops over
+the tracks for it.
+
+    Gustavo.Fringe.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
+
+declares which adhoc components the smoother can solve, checked by the
+[`TemporalSmoother`](@ref) step at model-compile time (the same seam the fringe
+estimators and bandpass smoothers use; the default is `false`, so an
+undeclared smoother rejects every model loudly). A `PerTrackAdhocSmoother`
+inherits the shared machinery's capability — per-AP constant phase over the
+global band, feeds tied `SharedFeeds` or solved `PerFeed` — since its hook only
+ever sees finished tracks; `JointOUSmoother` restricts to `SharedFeeds` (its
+Kalman state is one dimension per station).
+
+# Shared solve options
+
+`snr_floor`, `phase_rewrap_iters`, `source_iters`, `source_tol`, `detrend`, and
+`complex_iters` are fields on EVERY smoother, so a smoother value fully
+specifies the adhoc stage. `snr_floor` gates the SEED pass only — the
+phase-extraction solve whose job is the global 2π branch; `complex_iters`
+Gauss–Newton passes then re-fit the tracks against the complex residuals
+themselves, every AP entering ungated at its exact first-order information
+(`complex_iters = 0` keeps the seed as the answer).
+
+`detrend` (default `true`) is a degeneracy-ownership statement: it removes each
+track's per-scan weighted mean, so the adhoc component carries per-AP phase
+STRUCTURE only and the per-scan constant phase stays with the fringe stage's
+own constant term (which also fixes the per-station-constant ↔ source-term
+gauge). The residual-rate slope is intentionally kept. Disable it only when the
+model has no other per-scan constant to alias against.
+"""
 abstract type AbstractAdhocSmoother end
 
-# A smoother that acts INDEPENDENTLY on each (station, feed) phase track: it
-# implements `smooth_track(sm, track, w, times) -> ŷ` and inherits the shared
-# `apply_adhoc!` loop below.
+"""
+    PerTrackAdhocSmoother <: AbstractAdhocSmoother
+
+A smoother that acts INDEPENDENTLY on each (station, node) phase track: it
+implements `smooth_track(sm, track, w, times) -> ŷ` and inherits the shared
+`apply_adhoc!` loop and the shared component capability (`can_fit`).
+"""
 abstract type PerTrackAdhocSmoother <: AbstractAdhocSmoother end
 
 """
@@ -216,6 +252,70 @@ _adhoc_coherence_time(sm::JointOUSmoother) = sm.coherence_time
 # tracks.
 _requires_single_node(::AbstractAdhocSmoother) = false
 _requires_single_node(::JointOUSmoother) = true
+
+"""
+    default_adhoc_terms(; feed = SharedFeeds()) -> NamedTuple
+
+The default [`TemporalSmoother`](@ref) step model: one per-AP constant phase
+over the global band — a `phase.adhoc` component with `Ti = PerIntegration()`.
+`feed` is its feed tying: `SharedFeeds()` (the default) solves one track per
+station — residual atmospheric phase is non-birefringent, and a feed-common
+track contributes ZERO inter-feed phase, where a `PerFeed()` solve lets per-AP
+noise differ between feeds and so injects spurious cross-hand scatter.
+`PerFeed()` fits each feed's own track when the per-feed structure is real.
+
+A `TemporalSmoother` model is a `(; phase, logamp)` tree of named
+`Calibration.GainComponent`s (or a `StationGainModel`), like every solve
+step's; the adhoc stage solves exactly one phase component and no logamp.
+"""
+default_adhoc_terms(; feed::AbstractFeedTying = SharedFeeds()) = (;
+    phase = (;
+        adhoc = GainComponent(
+            ConstantTerm(); Ti = PerIntegration(), Frequency = GlobalFrequency(), Feed = feed,
+        ),
+    ),
+)
+
+# Capability declarations for the compile-time `can_fit`/`validate_model` seam
+# (shared with the fringe estimators and bandpass smoothers; the step drives the
+# checks in `model_components(::TemporalSmoother, spec)`).
+#
+# What the solve machinery addresses: one constant per (feed node, AP) —
+# `adhoc_scan!` writes leaf slot (param 1, node, freq segment 1, time segment,
+# ant), and `solve_adhoc_phasing`'s single-node-per-row systems can tie feeds
+# (`SharedFeeds`) or solve them independently (`PerFeed`) but cannot represent
+# `ReferenceRelative`'s two-block partner feed or a `SingleFeed` scope.
+_fits_adhoc_track(tc) =
+    tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
+    tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds)
+
+can_fit(::AbstractAdhocSmoother, tc) = false
+can_fit(::PerTrackAdhocSmoother, tc) = _fits_adhoc_track(tc)
+can_fit(::NoSmoothing, tc) = _fits_adhoc_track(tc)
+# The joint solve needs one phase node per station (`_requires_single_node`).
+can_fit(::JointOUSmoother, tc) = _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds
+
+# The structural contract of the adhoc pass: exactly one per-integration phase
+# component (the stage runs one globally-closing phase solve and writes one θ
+# block), nothing in logamp.
+function validate_model(sm::AbstractAdhocSmoother, model)
+    ph = Calibration._flatten_components(model.phase)
+    la = Calibration._flatten_components(model.logamp)
+    length(ph) == 1 || throw(
+        ArgumentError(
+            "the adhoc stage solves exactly one per-integration phase component; the " *
+                "model's phase group holds $(length(ph)). `default_adhoc_terms()` is the " *
+                "standard model.",
+        ),
+    )
+    isempty(la) || throw(
+        ArgumentError(
+            "the adhoc stage solves phase only; the model's logamp group must be empty, " *
+                "got $(length(la)) component(s).",
+        ),
+    )
+    return nothing
+end
 
 # ── apply_adhoc!: the single smoothing dispatch point ─────────────────────────
 # Mutates the per-(station, node) phase track array `phase` in place. `ap_rows` is

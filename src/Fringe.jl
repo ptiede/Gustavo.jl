@@ -133,7 +133,7 @@ export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mas
 export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, PerTrackAdhocSmoother, SavitzkyGolaySmoother, PenalizedSmoother
-export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing
+export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing, default_adhoc_terms
 export station_weight_scale
 export AbstractShapeSpec, FreeShape, PolynomialShape, WhittakerShape, ARShape, fit_track
 export fit_track_group

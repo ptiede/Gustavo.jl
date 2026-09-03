@@ -194,6 +194,69 @@ end
         @test off1[:, 1, :, :] == off1[:, 2, :, :]   # both feeds → same θ columns
         @test any(!=(0), off1[:, 1, :, :])           # ...and the plan is non-trivial
     end
+
+    # The pipeline's own default carries the same tie: the TemporalSmoother
+    # step's compiled component is the feed-common adhoc form.
+    t = Gustavo.model_components(TemporalSmoother(), nothing)
+    @test t.phase.adhoc.Feed isa CAL.SharedFeeds
+    @test isempty(t.logamp)
+end
+
+@testset "TemporalSmoother model surface: vetting + per-feed adhoc" begin
+    sm = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+    # One-argument form: the smoother, with the default model.
+    @test TemporalSmoother(sm).model == default_adhoc_terms()
+    @test TemporalSmoother(sm).smoother === sm
+
+    # Compile-time vetting. The joint smoother cannot solve a per-feed model
+    # (its Kalman state is one node per station)...
+    pf = default_adhoc_terms(feed = CAL.PerFeed())
+    @test_throws "JointOUSmoother cannot fit" Gustavo.model_components(
+        TemporalSmoother(model = pf, smoother = FP.JointOUSmoother()), nothing,
+    )
+    # ...no adhoc smoother can address a ReferenceRelative tying...
+    @test_throws "cannot fit the component" Gustavo.model_components(
+        TemporalSmoother(model = default_adhoc_terms(feed = CAL.ReferenceRelative(1))),
+        nothing,
+    )
+    # ...and the stage solves exactly one phase component, nothing in logamp.
+    two = (; phase = (; a = pf.phase.adhoc, b = pf.phase.adhoc))
+    @test_throws "exactly one" Gustavo.model_components(
+        TemporalSmoother(model = two), nothing,
+    )
+    la = (; phase = pf.phase, logamp = pf.phase)
+    @test_throws "phase only" Gustavo.model_components(
+        TemporalSmoother(model = la), nothing,
+    )
+
+    # End-to-end per-feed adhoc: the layout realizes two nodes per station, both
+    # feed tracks are solved, and (the screen being feed-common) the corrected
+    # parallel hands still flatten.
+    uvset, _ = _build_fringe_uvset()
+    sol = fit(
+        FringeFit(model = FringeModel()) |> TemporalSmoother(model = pf, smoother = sm),
+        uvset,
+    )
+    st = sol[:adhoc].steps[1]
+    plan = FP._adhoc_plan(st.model, st.layout)
+    @test plan.tying isa CAL.PerFeed
+    leaf = CAL._component_leaf(plan, st.θ)     # (param, node, fseg, tseg, ant)
+    @test any(!=(0), @view leaf[1, 1, 1, :, :])
+    @test any(!=(0), @view leaf[1, 2, 1, :, :])
+    corr = Gustavo.apply_calibration(uvset, sol)
+    for (_, leaf2) in DimensionalData.branches(corr)
+        V = parent(leaf2[:vis])
+        W = parent(leaf2[:weights])
+        bl_pairs = UVP.baselines(leaf2).pairs
+        lp = pol_products(leaf2)
+        for p in eachindex(lp)
+            Gustavo.Calibration.is_parallel_hand(lp[p]) || continue
+            for bi in eachindex(bl_pairs)
+                bl_pairs[bi][1] == bl_pairs[bi][2] && continue
+                @test _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])) > 0.99
+            end
+        end
+    end
 end
 
 @testset "Fused fitcalibrate ≡ two-pass fit + apply" begin

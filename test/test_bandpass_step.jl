@@ -200,7 +200,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
                 ),
             ),
         )
-        @test_throws "cannot fit the bandpass component" model_components(
+        @test_throws "cannot fit the component" model_components(
             Bandpass(model = delay_model), nothing,
         )
         # One track set per observable: a second component in a group is

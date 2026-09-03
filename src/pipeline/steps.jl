@@ -97,16 +97,24 @@ fusable_grouping(::Bandpass) = :global
 # No fit_selection override — every scan feeds the pass (protocol.jl's default AllScans).
 
 """
-    TemporalSmoother(smoother = SavitzkyGolaySmoother())
+    TemporalSmoother(; model = default_adhoc_terms(), smoother = SavitzkyGolaySmoother())
+    TemporalSmoother(smoother)
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
-globally-closing per-AP station phase on the fringe/bandpass residual, through
-the pluggable [`AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
-`JointOUSmoother`, `OUSmoother`, `PenalizedSmoother`, …).
+globally-closing per-AP station phase on the fringe/bandpass residual. WHAT is
+fit is `model`: a `(; phase, logamp)` tree holding the single adhoc component —
+see [`Fringe.default_adhoc_terms`](@ref) for the default (feed-common) form and
+its `feed` tying knob. HOW the solved tracks are smoothed lives on `smoother`,
+a pluggable [`Fringe.AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
+`JointOUSmoother`, `OUSmoother`, `PenalizedSmoother`, …); `JointOUSmoother`
+requires the feed-common (`SharedFeeds`) model. The one-argument form takes the
+smoother and keeps the default model.
 """
-Base.@kwdef struct TemporalSmoother <: SolveStep
-    smoother::Fringe.AbstractAdhocSmoother = Fringe.SavitzkyGolaySmoother()
+Base.@kwdef struct TemporalSmoother{M, S <: Fringe.AbstractAdhocSmoother} <: SolveStep
+    model::M = Fringe.default_adhoc_terms()
+    smoother::S = Fringe.SavitzkyGolaySmoother()
 end
+TemporalSmoother(smoother::Fringe.AbstractAdhocSmoother) = TemporalSmoother(; smoother)
 provides(::TemporalSmoother) = :adhoc
 required_grouping(::TemporalSmoother) = :scan_complete
 # `adhoc_scan!` fits the scan's per-AP track from that scan's stack alone and
@@ -191,33 +199,39 @@ _step_model_tree(m) = throw(
     ),
 )
 
-# The bandpass components come straight from the step's model argument; the
-# smoother vets them here, at compile time, before any data is read — the same
-# two-sided check as `FringeFit`'s: no component the smoother cannot fit (its θ
-# block would stay at zero and the solution would look fitted), and the
-# smoother's own whole-tree requirements (`validate_model`).
-function model_components(s::Bandpass, spec)
-    tree = _step_model_tree(s.model)
+# Vet a step's model argument against its solver's declared capability, at
+# compile time, before any data is read — the same two-sided check as
+# `FringeFit`'s: no component the solver cannot fit (`can_fit`; its θ block
+# would stay at zero and the solution would look fitted), then the solver's own
+# whole-tree requirements (`validate_model`). `accepted` finishes the can_fit
+# error with the component form the solver family does fit.
+function _vet_step_model(solver, model, accepted)
+    tree = _step_model_tree(model)
     for tc in Calibration._flatten_components(tree)
-        Fringe.can_fit(s.smoother, tc) || throw(
+        Fringe.can_fit(solver, tc) || throw(
             ArgumentError(
-                "$(nameof(typeof(s.smoother))) cannot fit the bandpass component " *
+                "$(nameof(typeof(solver))) cannot fit the component " *
                     "$(Calibration.component_label(tc)); its parameters would never be " *
-                    "solved. Both shipped smoothers fit " *
-                    "`GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = <any " *
-                    "segmentation>, Feed = PerFeed())` — see `default_bandpass_terms`.",
+                    "solved. " * accepted,
             ),
         )
     end
-    Fringe.validate_model(s.smoother, tree)
+    Fringe.validate_model(solver, tree)
     return tree
 end
 
-# The per-integration adhoc phase: per-AP, feed-common, solved per scan by the
-# temporal-smoother pass (the legacy `_fringe_model` placement — last).
-model_components(s::TemporalSmoother, spec) = (;
-    phase = (adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),),
-    logamp = (;),
+model_components(s::Bandpass, spec) = _vet_step_model(
+    s.smoother, s.model,
+    "Both shipped bandpass smoothers fit `GainComponent(ConstantTerm(); " *
+        "Ti = GlobalTime(), Frequency = <any segmentation>, Feed = PerFeed())` — " *
+        "see `default_bandpass_terms`.",
+)
+
+model_components(s::TemporalSmoother, spec) = _vet_step_model(
+    s.smoother, s.model,
+    "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
+        "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed())` " *
+        "(`JointOUSmoother`: `SharedFeeds()` only) — see `default_adhoc_terms`.",
 )
 
 # ── FringeFit visitor (stage A: per-scan search + station solve) ─────────────

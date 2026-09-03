@@ -183,6 +183,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test b.smoother.amp == FP.FreeShape()
 
         t = TemporalSmoother()
+        @test t.model == default_adhoc_terms()
         @test t.smoother == FP.SavitzkyGolaySmoother()
 
         e = ExecutionConfig()
