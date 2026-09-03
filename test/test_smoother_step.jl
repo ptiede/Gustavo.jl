@@ -105,7 +105,7 @@ end
         @test parent(gains(fit(pipe4, uvset))) == parent(gains(sol_n))
 
         # The multi-scan solve flattens the data (bandpass + screen recovered).
-        @test _worst_parallel_coherence(Gustavo.apply_calibration(uvset, sol_n)) > 0.99
+        @test _worst_parallel_coherence(Gustavo.UVData.apply_calibration(uvset, sol_n)) > 0.99
     end
 
     @testset "fitcalibrate fused ≡ standalone calibrate" begin
@@ -123,7 +123,7 @@ end
         @test _sets_equal(out_n, out_s; exact = false)
 
         # And the fused output matches the explicit two-pass apply + reduce.
-        red_ref = UVP.frequency_average(Gustavo.apply_calibration(uvset, sol_f); nout = 1)
+        red_ref = UVP.frequency_average(Gustavo.UVData.apply_calibration(uvset, sol_f); nout = 1)
         @test _sets_equal(out_n, red_ref; exact = false)
     end
 

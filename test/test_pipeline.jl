@@ -23,7 +23,7 @@ include("synthetic_uvset.jl")
         @test length(step.θ) == step.layout.nθ
     end
 
-    corr = Gustavo.apply_calibration(uvset, sol)
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
 
     @testset "parallel-hand coherence ≈ 1" begin
         worst = 1.0
@@ -79,7 +79,7 @@ include("synthetic_uvset.jl")
             @test length(CAL.phase_components(step2.model)) == length(CAL.phase_components(step.model))
         end
 
-        corr2 = Gustavo.apply_calibration(uvset, sol2)
+        corr2 = Gustavo.UVData.apply_calibration(uvset, sol2)
         for (k, leaf) in DimensionalData.branches(corr)
             V = parent(leaf[:vis])
             V2 = parent(DimensionalData.branches(corr2)[k][:vis])
@@ -95,7 +95,7 @@ include("synthetic_uvset.jl")
             k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
                 for (k, l) in DimensionalData.branches(uvset)
         )
-        Gustavo.apply_calibration(uvset, sol)
+        Gustavo.UVData.apply_calibration(uvset, sol)
         for (k, l) in DimensionalData.branches(uvset)
             @test parent(l[:vis]) == snap[k][1]
             @test parent(l[:weights]) == snap[k][2]
@@ -243,7 +243,7 @@ end
     leaf = CAL._component_leaf(plan, st.θ)     # (param, node, fseg, tseg, ant)
     @test any(!=(0), @view leaf[1, 1, 1, :, :])
     @test any(!=(0), @view leaf[1, 2, 1, :, :])
-    corr = Gustavo.apply_calibration(uvset, sol)
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
     for (_, leaf2) in DimensionalData.branches(corr)
         V = parent(leaf2[:vis])
         W = parent(leaf2[:weights])
@@ -269,7 +269,7 @@ end
         TemporalSmoother(adhoc)
 
     sol_ref = fit(chain, uvset)
-    corr_ref = Gustavo.apply_calibration(uvset, sol_ref)
+    corr_ref = Gustavo.UVData.apply_calibration(uvset, sol_ref)
 
     # No reduce steps → fused correction only (no reduction).
     sol_fused, out_fused = fitcalibrate(chain, uvset)
@@ -452,7 +452,7 @@ end
                 Bandpass() |> TemporalSmoother(adhoc),
             uvset,
         )
-        corr = Gustavo.apply_calibration(uvset, sol)
+        corr = Gustavo.UVData.apply_calibration(uvset, sol)
         worst = 1.0
         for (_, leaf) in DimensionalData.branches(corr)
             V = parent(leaf[:vis])
@@ -716,7 +716,7 @@ end
             TemporalSmoother(FP.SavitzkyGolaySmoother()),   # window = :auto
         uvset,
     )
-    corr = Gustavo.apply_calibration(uvset, sol)
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
     worst = 1.0
     for (_, leaf) in DimensionalData.branches(corr)
         V = parent(leaf[:vis]); W = parent(leaf[:weights])
@@ -752,7 +752,7 @@ end
     @test all(>(10), filter(isfinite, sol[:fringe].steps[1].info.scan_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
 
-    corr = Gustavo.apply_calibration(uvset, sol)
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
     worst = 1.0
     for (_, leaf) in DimensionalData.branches(corr)
         V = parent(leaf[:vis])
@@ -837,7 +837,7 @@ end
     @test solc isa CAL.CalibrationSolution
     bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
     @test !isempty(bp2) && bp2[1][2] == 1                     # one scan in this uvset
-    corr2 = Gustavo.apply_calibration(uvset, solc)
+    corr2 = Gustavo.UVData.apply_calibration(uvset, solc)
     l2 = first(values(UVP.branches(corr2)))
     bl2 = UVP.baselines(l2).pairs
     p2 = findfirst(pr -> pr[1] != pr[2], collect(bl2))

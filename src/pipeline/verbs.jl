@@ -127,6 +127,24 @@ function calibrate(
 end
 
 """
+    calibrate(antab::UVData.AntabCalibration, uvset::UVSet; kwargs...) -> UVSet
+    calibrate(spw_cals::AbstractDict{<:Integer, UVData.AntabCalibration}, uvset::UVSet; kwargs...) -> UVSet
+
+Apply an a-priori amplitude calibration — a single ANTAB table, or one per
+1-based band index as [`load_fitsidi_apriori`](@ref) returns — scaling
+visibilities and weights by the SEFD-derived gains. Keywords
+(`min_elevation_deg`, `on_missing_station`) pass through. To record the
+application on a fitted solution instead, put an [`AprioriAmplitude`](@ref)
+step in the pipeline.
+"""
+calibrate(antab::UVData.AntabCalibration, uvset::UVSet; kwargs...) =
+    UVData.apply_calibration(uvset, antab; kwargs...)
+calibrate(
+    spw_cals::AbstractDict{<:Integer, <:UVData.AntabCalibration}, uvset::UVSet;
+    kwargs...,
+) = UVData.apply_calibration(uvset, spw_cals; kwargs...)
+
+"""
     fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet; reduce = ReduceStep[])
         -> (sol::CalibrationSolution, out::UVSet)
 
@@ -237,7 +255,7 @@ function _compose_output_chain(declared, extra_reduces)
     for s in declared
         if s isa AprioriAmplitude
             push!(
-                fs, uv -> apply_calibration(
+                fs, uv -> UVData.apply_calibration(
                     uv, s.spw_cals;
                     min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
                 )

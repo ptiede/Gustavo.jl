@@ -292,7 +292,7 @@ using HDF5
     end
 
     @testset "coherence report (stage-agnostic)" begin
-        corr = Gustavo.apply_calibration(uvset, sol)
+        corr = Gustavo.UVData.apply_calibration(uvset, sol)
         raw = UVP.coherence_report(uvset)
         rep = UVP.coherence_report(corr)
 

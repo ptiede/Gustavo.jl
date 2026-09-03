@@ -36,7 +36,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         # Equivalent hand-written reducer chain (same order) on the two-pass
         # corrected set.
         reducer = uv -> UVP.time_bin_average(UVP.combine_spw(UVP.frequency_average(uv; nout = 1)), 1.0e6)
-        out_ref = reducer(Gustavo.apply_calibration(uvset, sol))
+        out_ref = reducer(Gustavo.UVData.apply_calibration(uvset, sol))
         @test Set(keys(DimensionalData.branches(out))) ==
             Set(keys(DimensionalData.branches(out_ref)))
         for (k, leaf) in DimensionalData.branches(out_ref)
@@ -85,6 +85,40 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         # pipeline (solve steps share one compiled model + streaming passes).
         struct_probe = Gustavo.DataTransformStep(CalFunction((stack, win) -> nothing))
         @test_throws ErrorException Gustavo.run_step(struct_probe, Gustavo.CalibrationContext())
+    end
+
+    @testset "reduce steps apply eagerly as functors" begin
+        uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 8)
+
+        # The ReduceStep types are the one public spelling of each reduction;
+        # calling one on a `UVSet` (or piping into it) applies it eagerly and
+        # matches the internal kernels.
+        red = uvset |> AverageFrequency(nout = 1) |> CombineSpw()
+        red_ref = UVP.combine_spw(UVP.frequency_average(uvset; nout = 1))
+        @test Set(keys(DimensionalData.branches(red))) ==
+            Set(keys(DimensionalData.branches(red_ref)))
+        for (k, leaf) in DimensionalData.branches(red)
+            @test isequal(
+                parent(leaf[:vis]), parent(DimensionalData.branches(red_ref)[k][:vis])
+            )
+        end
+
+        # `AverageTime()` with no bin width collapses each scan to one sample.
+        per_scan = AverageTime()(uvset)
+        per_scan_ref = UVP.scan_average(uvset)
+        for (k, leaf) in DimensionalData.branches(per_scan)
+            @test size(parent(leaf[:vis]), 2) == 1
+            @test isequal(
+                parent(leaf[:vis]), parent(DimensionalData.branches(per_scan_ref)[k][:vis])
+            )
+        end
+
+        flag_eager = FlagSpwEdges(mode = :flag_fraction, fraction = 0.2)(uvset)
+        flag_ref = UVP.flag_spw_edges(uvset; mode = :flag_fraction, fraction = 0.2)
+        for (k, leaf) in DimensionalData.branches(flag_eager)
+            @test parent(leaf[:weights]) ==
+                parent(DimensionalData.branches(flag_ref)[k][:weights])
+        end
     end
 
     @testset "band edges" begin
@@ -345,8 +379,8 @@ end
     )
     @test all(s.θ isa DimArray for s in sold.steps)
 
-    a = Gustavo.apply_calibration(uvset, sol)
-    b = Gustavo.apply_calibration(uvset, sold)
+    a = Gustavo.UVData.apply_calibration(uvset, sol)
+    b = Gustavo.UVData.apply_calibration(uvset, sold)
     @test Set(keys(DimensionalData.branches(a))) == Set(keys(DimensionalData.branches(b)))
     for (k, leaf) in DimensionalData.branches(a)
         Va = parent(leaf[:vis])

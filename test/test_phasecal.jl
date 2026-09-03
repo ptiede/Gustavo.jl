@@ -104,7 +104,7 @@
         end
 
         sol = FP.phasecal_solution(pcal, uvset; sign = 1)
-        fixed = Gustavo.apply_calibration(corrupt, sol)
+        fixed = Gustavo.UVData.apply_calibration(corrupt, sol)
         l0 = first(values(UVP.branches(uvset)))
         lf = first(values(UVP.branches(fixed)))
         @test isapprox(parent(lf[:vis]), parent(l0[:vis]); rtol = 1.0e-5)
@@ -137,7 +137,7 @@
 
         # The WRONG sign doubles the corruption instead of removing it.
         wrong = FP.phasecal_solution(pcal, uvset; sign = -1)
-        worse = Gustavo.apply_calibration(corrupt, wrong)
+        worse = Gustavo.UVData.apply_calibration(corrupt, wrong)
         lw = first(values(UVP.branches(worse)))
         @test !isapprox(parent(lw[:vis]), parent(l0[:vis]); rtol = 1.0e-2)
 

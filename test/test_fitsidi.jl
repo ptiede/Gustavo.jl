@@ -585,6 +585,14 @@ end
         uvset, spw_cals; on_missing_station = :error, min_elevation_deg = -Inf,
     )
 
+    # The public verb is `calibrate(spw_cals, uvset)`; same correction.
+    corr_pub = calibrate(
+        spw_cals, uvset; on_missing_station = :error, min_elevation_deg = -Inf,
+    )
+    for (k, leaf) in UV.branches(corr_pub)
+        @test isequal(parent(leaf[:vis]), parent(UV.branches(corr)[k][:vis]))
+    end
+
     seen_bands = Set{Int}()
     for (k, leaf_in) in UV.branches(uvset)
         leaf_out = UV.branches(corr)[k]

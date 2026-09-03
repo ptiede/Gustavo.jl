@@ -1569,6 +1569,12 @@ end
     # cutoff to keep it purely a SEFD-scaling check.
     corr = BP.apply_calibration(base, antab; min_elevation_deg = -Inf)
 
+    # The public verb `calibrate(antab, uvset)` applies the same correction.
+    corr_pub = calibrate(antab, base; min_elevation_deg = -Inf)
+    for (k, leaf) in UV.branches(corr_pub)
+        @test isequal(parent(leaf[:vis]), parent(UV.branches(corr)[k][:vis]))
+    end
+
     # The synthetic `synthetic_uvdata` fakes `station_xyz = zeros(3)` —
     # the elevation calculation will be ill-defined there, but the test
     # antab has POLY=[1.0] so g_E always evaluates to 1 regardless. We

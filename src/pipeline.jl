@@ -11,6 +11,11 @@
 # full file. The same `ReduceStep`s also run standalone at the top level (eagerly,
 # on the already-reduced `output`).
 
+# The per-operation `UVSet -> UVSet` kernels backing the `ReduceStep` types;
+# internal to `UVData` (the step types are their one public spelling).
+using .UVData: scan_average, time_bin_average, frequency_average, flag_spw_edges,
+    combine_spw
+
 """
     CalibrationStep
 
@@ -83,6 +88,19 @@ function run_step(step::ReduceStep, ctx::CalibrationContext)
     return _with(ctx; output = f(target))
 end
 
+"""
+    (step::ReduceStep)(uvset::UVSet) -> UVSet
+
+Apply a reduce step eagerly to a whole `UVSet`, so the pipeline vocabulary
+also composes in scripts: `uvset |> AverageFrequency(nout = 1) |> CombineSpw()`.
+On a lazy set this forces a full materialization; put the step in a
+`reduce = [...]` list to fuse it into a streaming pass instead.
+"""
+function (step::ReduceStep)(uvset::UVSet)
+    f, _ = prepare_reducer(step, CalibrationContext(; uvset))
+    return f(uvset)
+end
+
 # The composable-pipeline step protocol: SolveStep, the step hooks, step
 # chaining (`|>`), and the CalibrationPipeline itself.
 include("pipeline/protocol.jl")
@@ -104,8 +122,8 @@ end
 
 Output-chain pipeline step (NOT a reduction): a-priori amplitude calibration.
 Applies a pre-built `spw_cals` (`load_fitsidi_apriori(path)` — the caller's
-job) via `apply_calibration` on the fringe-corrected data, after the solution's
-gains and interleaved with any `ReduceStep`s in whatever relative order the
+job) to the fringe-corrected data, after the solution's gains and
+interleaved with any `ReduceStep`s in whatever relative order the
 `CalibrationPipeline` declares them — e.g. placed before a `ReduceStep` that
 merges spws, it sees the native per-spw channels; placed after, it sees the
 reduced ones. It is RECORDED on the fitted solution (`sol.postcal`), so the
@@ -142,20 +160,18 @@ struct CombineSpw <: ReduceStep end
 prepare_reducer(::CombineSpw, ctx::CalibrationContext) = (combine_spw, ctx)
 
 
-struct ScanAverageTime <: ReduceStep end
-prepare_reducer(::ScanAverageTime, ctx::CalibrationContext) = (scan_average, ctx)
-
 """
-    AverageTime(; seconds)
+    AverageTime(; seconds = nothing)
 
-Reduce step: inverse-variance-average the `Ti` axis into `seconds`-wide bins
-(`time_bin_average`).
+Reduce step: inverse-variance-average each leaf's `Ti` axis — into
+`seconds`-wide bins, or, with no `seconds`, collapsing each scan to a single
+sample.
 """
 Base.@kwdef struct AverageTime <: ReduceStep
-    seconds::Float64
+    seconds::Union{Nothing, Float64} = nothing
 end
 prepare_reducer(s::AverageTime, ctx::CalibrationContext) =
-    ((uv -> time_bin_average(uv, s.seconds)), ctx)
+    (s.seconds === nothing ? scan_average : (uv -> time_bin_average(uv, s.seconds)), ctx)
 
 """
     FlagSpwEdges(; mode = :flag_fraction, fraction = 0.0)

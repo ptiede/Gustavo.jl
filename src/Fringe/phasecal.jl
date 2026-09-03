@@ -136,7 +136,7 @@ Fit the fourfit-style multitone instrumental correction from `pcal` on the
 geometry of `uvset`: per (station, feed, scan, spectral window), a robust tone
 delay + constant phase (see `_fit_tone_block`), packed as a phase-only
 `CalibrationSolution` (`Delay` + `ConstantTerm`, `PerScan` × `PerSpectralWindow`,
-`PerFeed`). Apply it with `apply_calibration(uvset, sol)` or put
+`PerFeed`). Apply it with `calibrate(sol, uvset)` or put
 `ApplySolution(pcal)` in the pipeline's transform chain (applied in-stream, no
 materialization of the full set).
 
