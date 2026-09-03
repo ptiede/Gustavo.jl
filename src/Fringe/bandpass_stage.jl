@@ -8,7 +8,8 @@
 # contribution) and its `finish_pass!` folds the contributions in GROUP-INDEX
 # order — deterministic at ANY concurrency (unlike the monolith's
 # ntasks-dependent chunk fold; the two agree to float-rounding, gated at
-# rtol ≤ 1e-12). WHAT is fit lives on `BandpassModel`; HOW it is solved is
+# rtol ≤ 1e-12). WHAT is fit is the step's model tree (see
+# [`default_bandpass_terms`](@ref)); HOW it is solved is
 # pluggable through `AbstractBandpassSmoother`, in two tiers. `PerTrackSmoother`
 # sums every scan's residual into one accumulator, runs the per-channel closure
 # solves (which assume a baseline's source term cancels) and fits each resulting
@@ -38,19 +39,31 @@ function _signless_incidence(na, nb, idx, nnodes, val, w)
 end
 
 """
-    BandpassModel(; phase = true, amp = true, freq = ChannelBlocks(1))
+    default_bandpass_terms(; freq = ChannelBlocks(1)) -> NamedTuple
 
-WHAT the [`Bandpass`](@ref) step fits: whether to solve the phase bandpass, the
-log-amplitude bandpass, or both, and how finely each is resolved in frequency
-(`freq`, a [`ChannelBlocks`](@ref) — the default is one free value per channel).
-Uniform across every antenna — no per-station segmentation. HOW each observable
-is shaped lives on the step's smoother (see [`AbstractBandpassSmoother`](@ref)).
+The default [`Bandpass`](@ref) step model: a time-stable, per-feed constant per
+frequency segment for each observable — a `phase.bandpass` and a
+`logamp.bandpass` component, both resolved by `freq` (an
+`AbstractFrequencySegmentation`; the default is one free value per channel).
+
+A `Bandpass` model is a `(; phase, logamp)` tree of named
+`Calibration.GainComponent`s (or a `StationGainModel`); either group may be
+absent or empty. Fit one observable only by keeping just that group, e.g.
+
+    Bandpass(model = (; phase = default_bandpass_terms().phase),
+             smoother = PerTrackSmoother())
+
+fits the phase bandpass alone. Uniform across every antenna. HOW each
+observable is shaped lives on the step's smoother (see
+[`AbstractBandpassSmoother`](@ref)).
 """
-Base.@kwdef struct BandpassModel
-    phase::Bool = true
-    amp::Bool = true
-    freq::ChannelBlocks = ChannelBlocks(1)
-end
+default_bandpass_terms(; freq::AbstractFrequencySegmentation = ChannelBlocks(1)) = (;
+    phase = (; bandpass = _bandpass_component(freq)),
+    logamp = (; bandpass = _bandpass_component(freq)),
+)
+
+_bandpass_component(freq) =
+    GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = freq, Feed = PerFeed())
 
 """
     AbstractBandpassSmoother
@@ -67,9 +80,18 @@ explicit per-scan source term with the specs as priors. Mirrors
 
 Define:
 
-    Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup, model::BandpassModel; gauge) -> report
+    Gustavo.Fringe.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
+    Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup; gauge) -> report
 
-writing into `θ`'s bandpass blocks. `results` is the per-scan
+[`can_fit`](@ref) declares which model components the smoother can solve; it
+defaults to `false`, so a smoother that declares nothing rejects every model at
+compile time rather than leaving θ blocks silently unsolved. Both shipped
+smoothers accept `GainComponent(ConstantTerm(); Ti = GlobalTime(),
+Frequency = <any segmentation>, Feed = PerFeed())` and nothing else — that is
+what the θ writes address: one constant per (feed, frequency segment),
+time-stable, one feed node per feed.
+
+`solve_bandpass!` writes into `θ`'s bandpass blocks. `results` is the per-scan
 `(; rl, wl, pols, source)` accumulator list, in group-index order; `setup` is
 `(; bl_pairs, blidx, nant, bp_plan, amp_plan, channel_freqs, spw_of_chan)`,
 built once per pass. The fallback errors, naming what is missing.
@@ -84,44 +106,77 @@ that can tell them apart should.
 Two optional hooks:
 
     Gustavo.Fringe.bandpass_derotate(sm::MySmoother) -> Bool   # default true
-    Gustavo.Fringe.validate_bandpass(sm::MySmoother, model::BandpassModel)
+    Gustavo.Fringe.validate_model(sm::MySmoother, model)
 
 [`bandpass_derotate`](@ref) controls whether [`accumulate_bandpass!`](@ref)
 counter-rotates each AP before accumulating (see its docstring) — a smoother that
 sums scans together needs it, one that fits each scan's own coherent visibility
-does not. [`validate_bandpass`](@ref) is checked at model-compile time, before any
-data is read; a method for a new smoother REPLACES the default, so it must state
-at least as strong a requirement.
+does not. `validate_model` receives the whole `(; phase, logamp)` component tree
+at model-compile time, before any data is read, for requirements `can_fit`'s
+per-component view cannot express (see [`JointSmoother`](@ref), which requires
+both observables); a method for a new smoother REPLACES the default, so it must
+state at least as strong a requirement — the default's checks are available as
+[`validate_bandpass_groups`](@ref).
 """
 abstract type AbstractBandpassSmoother end
 
 bandpass_derotate(::AbstractBandpassSmoother) = true
 
-"""
-    validate_bandpass(sm::AbstractBandpassSmoother, model::BandpassModel)
+# `can_fit`/`validate_model` are the same compile-time capability seam the
+# fringe estimators use (see estimators.jl); the `false` default makes an
+# undeclared smoother reject loudly instead of accepting silently.
+can_fit(::AbstractBandpassSmoother, tc) = false
 
-Reject a [`BandpassModel`](@ref) that `sm` cannot solve, at the point the
-[`Bandpass`](@ref) step compiles its components — before any data is read.
+# The component both shipped smoothers solve: one constant per (feed, frequency
+# segment), any frequency segmentation, time-stable, per-feed. The θ writes
+# (`_write_phase_bandpass!`, `_write_amp_bandpass!`, `_write_joint_bandpass!`)
+# address leaf slot (param 1, feed node, segment, time segment 1, ant) with one
+# node per feed, so a different term, time segmentation, or feed tying would be
+# left unsolved or overwritten.
+_fits_bandpass_track(tc) =
+    tc.term isa ConstantTerm && tc.Ti isa GlobalTime && tc.Feed isa PerFeed
 
-The default requires a model that fits SOMETHING: with both `phase` and `amp`
-off the step compiles no components at all, so it would accumulate every scan
-and write nowhere. A smoother with stricter needs defines its own method
-(see [`JointSmoother`](@ref)), which replaces this one.
 """
-function validate_bandpass(::AbstractBandpassSmoother, model::BandpassModel)
-    # The step indexes its compiled components by name
-    # (`layout.plantree.phase.bandpass` and its log-amp twin) under exactly
-    # these two flags, so a model with neither set has nothing to solve into.
-    model.phase || model.amp || throw(
-        ArgumentError("BandpassModel fits nothing: at least one of `phase` or `amp` must be true."),
+    validate_bandpass_groups(model)
+
+The structural requirement the [`Bandpass`](@ref) step's solve loop places on
+every smoother's model — the default `validate_model` for
+[`AbstractBandpassSmoother`](@ref), and the base a smoother's own method must
+re-establish. `model` is the `(; phase, logamp)` named component tree.
+
+The step hands `solve_bandpass!` one plan per observable (`setup.bp_plan` /
+`setup.amp_plan`), so each group may hold at most one component; and a model
+with no component at all would accumulate every scan and write nowhere, so at
+least one group must be non-empty.
+"""
+function validate_bandpass_groups(model)
+    np = length(Calibration._flatten_components(model.phase))
+    na = length(Calibration._flatten_components(model.logamp))
+    np + na >= 1 || throw(
+        ArgumentError(
+            "Bandpass model fits nothing: the model compiles no components, so the step " *
+                "would accumulate every scan and write nowhere. Add a phase and/or logamp " *
+                "component — `default_bandpass_terms()` is the standard model.",
+        ),
     )
+    for (name, n) in ((:phase, np), (:logamp, na))
+        n <= 1 || throw(
+            ArgumentError(
+                "Bandpass model group `$name` holds $n components; the bandpass solve fits " *
+                    "one track set per observable, so each group holds at most one.",
+            ),
+        )
+    end
     return nothing
 end
+
+validate_model(sm::AbstractBandpassSmoother, model) = validate_bandpass_groups(model)
+
 function solve_bandpass! end
-solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup, model::BandpassModel; gauge) =
+solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
     error(
     "$(typeof(sm)) does not implement the bandpass smoother interface: define " *
-        "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup, model; gauge)."
+        "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup; gauge)."
 )
 
 """
@@ -471,6 +526,8 @@ end
 PerTrackSmoother(; phase::AbstractShapeSpec = FreeShape(), amp::AbstractShapeSpec = WhittakerShape(1.0)) =
     PerTrackSmoother(phase, amp)
 
+can_fit(::PerTrackSmoother, tc) = _fits_bandpass_track(tc)
+
 # The outcome code for one fitted spw track: nothing estimated, a constant, or a
 # real shape.
 function _band_track_status(fitted)
@@ -601,7 +658,7 @@ function _warn_degenerate_bandpass(report)
     return nothing
 end
 
-function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup, model::BandpassModel; gauge::AbstractGauge)
+function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::AbstractGauge)
     pols = results[1].pols
     nchan = length(setup.channel_freqs)
     rbar, wbar = bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
@@ -939,7 +996,8 @@ convergence that is MAP estimation under the two priors.
 Because the per-scan source term absorbs a baseline's own structure, this suits a
 resolved or polarized calibrator, where [`PerTrackSmoother`](@ref)'s closure
 assumption would bias the bandpass. It solves one complex gain per
-(station, feed, segment), so it requires both `model.phase` and `model.amp`.
+(station, feed, segment), so it requires a model with both a phase and a
+log-amplitude component, sharing one frequency segmentation.
 """
 struct JointSmoother{P <: AbstractShapeSpec, A <: AbstractShapeSpec} <: AbstractBandpassSmoother
     phase::P
@@ -959,17 +1017,31 @@ end
 # erase the very source phase that term absorbs.
 bandpass_derotate(::JointSmoother) = false
 
-function validate_bandpass(::JointSmoother, model::BandpassModel)
-    model.phase && model.amp || throw(
+can_fit(::JointSmoother, tc) = _fits_bandpass_track(tc)
+
+function validate_model(::JointSmoother, model)
+    validate_bandpass_groups(model)
+    ph = Calibration._flatten_components(model.phase)
+    la = Calibration._flatten_components(model.logamp)
+    length(ph) == 1 && length(la) == 1 || throw(
         ArgumentError(
-            "JointSmoother requires both model.phase = true and model.amp = true — it solves " *
-                "one complex gain per (station, feed, segment), not independent phase/log-amp tracks.",
+            "JointSmoother requires both a phase and a logamp component — it solves one " *
+                "COMPLEX gain per (station, feed, segment), not independent phase/log-amp " *
+                "tracks. Use `smoother = PerTrackSmoother()` for a phase-only or " *
+                "amplitude-only bandpass.",
+        ),
+    )
+    only(ph).Frequency == only(la).Frequency || throw(
+        ArgumentError(
+            "JointSmoother requires the phase and logamp components to share one frequency " *
+                "segmentation — it solves one COMPLEX gain per (station, feed, segment). Got " *
+                "$(repr(only(ph).Frequency)) (phase) vs $(repr(only(la).Frequency)) (logamp).",
         ),
     )
     return nothing
 end
 
-function solve_bandpass!(sm::JointSmoother, θ, results, setup, model::BandpassModel; gauge::AbstractGauge)
+function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge)
     _, seg_spw, seg_freq = _segment_bands(setup.bp_plan, setup.channel_freqs, setup.spw_of_chan)
     band_ids = sort(unique(seg_spw))
     phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
@@ -1000,9 +1072,9 @@ result into `phase_plan`'s and `amp_plan`'s θ blocks
 `scans` is the per-scan `(rl, wl)` accumulator pairs from
 [`accumulate_bandpass!`](@ref)`(...; derotate = false)` — NOT summed across
 scans, since the source term needs each scan's own coherent visibility.
-`phase_plan` and `amp_plan` must share one frequency segmentation (true by
-construction: [`BandpassModel`](@ref) compiles both from the same `freq`
-setting).
+`phase_plan` and `amp_plan` must share one frequency segmentation (which
+`validate_model(::JointSmoother, model)` already enforces at model-compile
+time; the throw here guards direct callers).
 
 Convergence is judged on the largest relative per-iteration gain change, not a
 tracked χ² (which would need a per-channel power accumulator this stage does

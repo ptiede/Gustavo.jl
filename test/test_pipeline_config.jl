@@ -177,7 +177,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test d.sbd isa SingleBandDelay
 
         b = Bandpass()
-        @test b.model.phase && b.model.amp
+        @test b.model == default_bandpass_terms()
         @test b.smoother isa FP.JointSmoother
         @test b.smoother.phase == FP.FreeShape()
         @test b.smoother.amp == FP.FreeShape()

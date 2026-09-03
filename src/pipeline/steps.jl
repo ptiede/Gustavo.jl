@@ -65,26 +65,27 @@ required_grouping(::DispersionSBDFit) = :scan_complete
 fusable_grouping(::DispersionSBDFit) = :scan
 
 """
-    Bandpass(; model = BandpassModel(), smoother = JointSmoother())
+    Bandpass(; model = default_bandpass_terms(), smoother = JointSmoother())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan (fit-on-subset / apply-everywhere: pre-filter the
 `UVSet` before fitting if only a scan subset should contribute). WHAT is fit
-is `model` ([`Fringe.BandpassModel`](@ref)): phase/amp and the frequency
-segmentation. HOW it is solved lives on `smoother`, a pluggable
-[`Fringe.AbstractBandpassSmoother`](@ref) carrying one shape spec per
-observable; by default [`Fringe.JointSmoother`](@ref), which fits the complex
-visibilities against an explicit per-scan source coherence and so does not
-assume the calibrator is unresolved and unpolarized. It solves one complex gain
-per (station, feed, segment), so it needs both halves of the model — a
-phase-only or amplitude-only `BandpassModel` must name
+is `model`: a `(; phase, logamp)` tree of named `Calibration.GainComponent`s
+(or a `StationGainModel`) — see [`Fringe.default_bandpass_terms`](@ref) for the
+default and the component form the smoothers accept. HOW it is solved lives on
+`smoother`, a pluggable [`Fringe.AbstractBandpassSmoother`](@ref) carrying one
+shape spec per observable; by default [`Fringe.JointSmoother`](@ref), which
+fits the complex visibilities against an explicit per-scan source coherence and
+so does not assume the calibrator is unresolved and unpolarized. It solves one
+complex gain per (station, feed, segment), so it needs both halves of the
+model — a phase-only or amplitude-only model must name
 [`Fringe.PerTrackSmoother`](@ref) instead, which runs the per-channel closure
 solves and then fits each track. The model is self-contained, so placing
 `Bandpass` before or after `FringeFit` is equally legal.
 """
-Base.@kwdef struct Bandpass{M <: Fringe.BandpassModel, S <: Fringe.AbstractBandpassSmoother} <: SolveStep
-    model::M = Fringe.BandpassModel()
+Base.@kwdef struct Bandpass{M, S <: Fringe.AbstractBandpassSmoother} <: SolveStep
+    model::M = Fringe.default_bandpass_terms()
     smoother::S = Fringe.JointSmoother()
 end
 provides(::Bandpass) = :bandpass
@@ -164,13 +165,52 @@ function model_components(s::DispersionSBDFit, spec)
     return (; phase, logamp = (;))
 end
 
-# The bandpass components: phase and log-amp, per feed, time-stable, resolved in
-# frequency by `s.freq` (the legacy `_fringe_model` placement — after the fringe
-# terms).
+# A step's model argument, lifted to the `(; phase, logamp)` tree
+# `model_components` returns: a `StationGainModel` contributes its two groups; a
+# bare NamedTuple tree may omit either group but no other key is legal — the
+# likely mistake is writing a component name at the top level.
+_step_model_tree(m::Calibration.StationGainModel) = (; phase = m.phase, logamp = m.logamp)
+function _step_model_tree(m::NamedTuple)
+    unknown = setdiff(keys(m), (:phase, :logamp))
+    isempty(unknown) || throw(
+        ArgumentError(
+            "step model tree has unexpected key(s) $(Tuple(unknown)): a model is " *
+                "`(; phase, logamp)` — component names nest INSIDE the groups, e.g. " *
+                "`(; phase = (; bandpass = GainComponent(...)))`.",
+        ),
+    )
+    return (;
+        phase = Calibration._named_components(get(m, :phase, (;))),
+        logamp = Calibration._named_components(get(m, :logamp, (;))),
+    )
+end
+_step_model_tree(m) = throw(
+    ArgumentError(
+        "a step model must be a `StationGainModel` or a `(; phase, logamp)` NamedTuple " *
+            "tree of named `GainComponent`s, got $(typeof(m)).",
+    ),
+)
+
+# The bandpass components come straight from the step's model argument; the
+# smoother vets them here, at compile time, before any data is read — the same
+# two-sided check as `FringeFit`'s: no component the smoother cannot fit (its θ
+# block would stay at zero and the solution would look fitted), and the
+# smoother's own whole-tree requirements (`validate_model`).
 function model_components(s::Bandpass, spec)
-    Fringe.validate_bandpass(s.smoother, s.model)
-    bpc = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = s.model.freq, Feed = PerFeed())
-    return (; phase = s.model.phase ? (bandpass = bpc,) : (;), logamp = s.model.amp ? (bandpass = bpc,) : (;))
+    tree = _step_model_tree(s.model)
+    for tc in Calibration._flatten_components(tree)
+        Fringe.can_fit(s.smoother, tc) || throw(
+            ArgumentError(
+                "$(nameof(typeof(s.smoother))) cannot fit the bandpass component " *
+                    "$(Calibration.component_label(tc)); its parameters would never be " *
+                    "solved. Both shipped smoothers fit " *
+                    "`GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = <any " *
+                    "segmentation>, Feed = PerFeed())` — see `default_bandpass_terms`.",
+            ),
+        )
+    end
+    Fringe.validate_model(s.smoother, tree)
+    return tree
 end
 
 # The per-integration adhoc phase: per-AP, feed-common, solved per scan by the
@@ -433,13 +473,14 @@ function start_pass!(s::Bandpass, ctx::SolveContext)
     # The GLOBAL baseline table of the accumulation: every cross pair.
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
     blidx = Dict(bl_pairs[i] => i for i in eachindex(bl_pairs))
-    # This step's own model names its components (`model_components` above), so
-    # the plans come straight off the named tree — the same `phase`/`amp` flags
-    # decide both what was compiled and what is fetched.
+    # `ctx.layout` holds only this step's own components, in phase-then-logamp
+    # order, and `validate_bandpass_groups` capped each group at one — so the
+    # plan list positions ARE the two observables, whatever the user named them.
+    plans = layout.plans
     ctx.scratch[:bp_setup] = (;
         bl_pairs, blidx, nant,
-        bp_plan = s.model.phase ? layout.plantree.phase.bandpass : nothing,
-        amp_plan = s.model.amp ? layout.plantree.logamp.bandpass : nothing,
+        bp_plan = layout.nphase == 1 ? plans[1] : nothing,
+        amp_plan = length(plans) == layout.nphase + 1 ? plans[end] : nothing,
         channel_freqs = ctx.geom.channel_freqs, spw_of_chan = ctx.geom.spw_of_chan,
     )
     return nothing
@@ -464,7 +505,7 @@ function finish_pass!(s::Bandpass, ctx::SolveContext)
     results = ctx.scratch[:pass_results]
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
     report = Fringe.solve_bandpass!(
-        s.smoother, ctx.θ, [res.r for res in results], setup, s.model; gauge = ctx.gauge,
+        s.smoother, ctx.θ, [res.r for res in results], setup; gauge = ctx.gauge,
     )
     scans = Int[res.index for res in results]
     # The smoother's own per-track record travels with the step's info, so a

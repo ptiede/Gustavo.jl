@@ -440,9 +440,9 @@ end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
-    sol_on = fit(ff |> Bandpass(model = BandpassModel(phase = true)) |> TemporalSmoother(adhoc), uvset)
+    sol_on = fit(ff |> Bandpass() |> TemporalSmoother(adhoc), uvset)
     sol_off = fit(
-        ff |> Bandpass(model = BandpassModel(phase = false), smoother = FP.PerTrackSmoother()) |>
+        ff |> Bandpass(model = (; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
             TemporalSmoother(adhoc), uvset,
     )
 
@@ -507,9 +507,9 @@ end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
     ff = FringeFit(model = FringeModel())
-    sol_on = fit(ff |> Bandpass(model = BandpassModel(phase = true)) |> TemporalSmoother(adhoc), uvset)
+    sol_on = fit(ff |> Bandpass() |> TemporalSmoother(adhoc), uvset)
     sol_off = fit(
-        ff |> Bandpass(model = BandpassModel(phase = false), smoother = FP.PerTrackSmoother()) |>
+        ff |> Bandpass(model = (; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
             TemporalSmoother(adhoc), uvset,
     )
 
@@ -604,7 +604,7 @@ end
 
     ff = FringeFit(model = FringeModel())
     sol_off = fit(
-        ff |> Bandpass(model = BandpassModel(amp = false), smoother = FP.PerTrackSmoother()) |>
+        ff |> Bandpass(model = (; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother()) |>
             TemporalSmoother(adhoc), uvset,
     )
     doff = FP.baseline_fringe_data(uvset, sol_off)

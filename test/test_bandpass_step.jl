@@ -131,7 +131,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         k = 4
         sol_g = fit(
             CalibrationPipeline(
-                FringeFit(model = fm), Bandpass(model = BandpassModel(freq = CAL.ChannelBlocks(k)));
+                FringeFit(model = fm), Bandpass(model = default_bandpass_terms(freq = CAL.ChannelBlocks(k)));
                 exec = ExecutionConfig(),
             ),
             uvset,
@@ -168,24 +168,65 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test_throws "no stage :bandpass" step_solution(sol_f, :bandpass)
     end
 
-    @testset "validate_bandpass rejects a model the smoother cannot solve" begin
-        # Both halves off compiles no component at all, so the step would
+    @testset "compile-time model vetting (can_fit / validate_model)" begin
+        pertrack = FP.PerTrackSmoother()
+        phase_only = (; phase = default_bandpass_terms().phase)
+        # An empty tree compiles no component at all, so the step would
         # accumulate every scan and write nowhere — rejected at compile time,
         # before any data is read.
-        nothing_model = BandpassModel(phase = false, amp = false)
-        pertrack = FP.PerTrackSmoother()
-        @test_throws ArgumentError fit(Bandpass(model = nothing_model, smoother = pertrack), uvset)
-        @test_throws "BandpassModel fits nothing" fit(
-            Bandpass(model = nothing_model, smoother = pertrack), uvset,
-        )
+        @test_throws ArgumentError fit(Bandpass(model = (;), smoother = pertrack), uvset)
+        @test_throws "fits nothing" fit(Bandpass(model = (;), smoother = pertrack), uvset)
         # JointSmoother is stricter: one complex gain per (station, feed, segment)
-        # needs both halves, not just one — so it rejects a model PerTrackSmoother
-        # would happily solve.
-        @test_throws "JointSmoother requires" fit(
-            Bandpass(model = BandpassModel(amp = false)), uvset,
-        )
-        @test fit(Bandpass(model = BandpassModel(amp = false), smoother = pertrack), uvset) isa
+        # needs both observables, not just one — so it rejects a model
+        # PerTrackSmoother would happily solve.
+        @test_throws "JointSmoother requires" fit(Bandpass(model = phase_only), uvset)
+        @test fit(Bandpass(model = phase_only, smoother = pertrack), uvset) isa
             CAL.CalibrationSolution
+        # ...and its two components must share one frequency segmentation.
+        mixed = (;
+            phase = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(1))),
+            logamp = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(2))),
+        )
+        @test_throws "share one frequency segmentation" model_components(
+            Bandpass(model = mixed), nothing,
+        )
+        # A component the smoothers' θ writes cannot address (here: a Delay
+        # term) is rejected by `can_fit`, naming the component.
+        delay_model = (;
+            phase = (;
+                bandpass = CAL.GainComponent(
+                    CAL.Delay(); Ti = CAL.GlobalTime(),
+                    Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
+                ),
+            ),
+        )
+        @test_throws "cannot fit the bandpass component" model_components(
+            Bandpass(model = delay_model), nothing,
+        )
+        # One track set per observable: a second component in a group is
+        # structurally unsolvable, whatever its form.
+        doubled = (;
+            phase = (;
+                bandpass = FP._bandpass_component(CAL.ChannelBlocks(1)),
+                ripple = FP._bandpass_component(CAL.ChannelBlocks(4)),
+            ),
+        )
+        @test_throws "at most one" model_components(Bandpass(model = doubled), nothing)
+        # The tree's only legal top-level keys are the two groups — a component
+        # name written at the top level is the likely mistake.
+        @test_throws "unexpected key" model_components(
+            Bandpass(model = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(1)))),
+            nothing,
+        )
+        # Anything that is neither a tree nor a StationGainModel is rejected
+        # with the expected forms named.
+        @test_throws "must be a `StationGainModel`" model_components(
+            Bandpass(model = CAL.ChannelBlocks(1)), nothing,
+        )
+        # A StationGainModel is accepted verbatim as the model argument.
+        sgm = CAL.StationGainModel(; default_bandpass_terms()...)
+        @test model_components(Bandpass(model = sgm), nothing) ==
+            model_components(Bandpass(), nothing)
     end
 
     @testset "PerTrackSmoother: a shape on both observables" begin
