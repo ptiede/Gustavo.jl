@@ -137,7 +137,7 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 # check covers only THIS step's contributions — the adhoc and bandpass
 # components come from steps that solve them themselves.
 function model_components(s::FringeFit, spec)
-    tree = Fringe.fringe_phase_components(s.model, spec.geom)
+    tree = Fringe.fringe_phase_components(s.model, spec)
     comps = Calibration._flatten_components(tree)
     for tc in comps
         Fringe.can_fit(s.estimator, tc) || throw(
@@ -161,8 +161,8 @@ end
 # frequency axis has ≥ 2 band groups. Either half is dropped entirely by
 # setting the matching field to `nothing`.
 function model_components(s::DispersionSBDFit, spec)
-    dispc = s.dispersion === nothing ? nothing : model_components(s.dispersion, spec.geom)
-    sbdc = s.sbd === nothing ? nothing : model_components(s.sbd, spec.geom)
+    dispc = s.dispersion === nothing ? nothing : model_components(s.dispersion, spec)
+    sbdc = s.sbd === nothing ? nothing : model_components(s.sbd, spec)
     phase = merge(
         dispc === nothing ? (;) : (;
                 delay_refine = GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
@@ -173,51 +173,61 @@ function model_components(s::DispersionSBDFit, spec)
     return (; phase, logamp = (;))
 end
 
-# A step's model argument, lifted to the `(; phase, logamp)` tree
-# `model_components` returns: a `StationGainModel` contributes its two groups; a
-# bare NamedTuple tree may omit either group but no other key is legal — the
-# likely mistake is writing a component name at the top level.
-_step_model_tree(m::Calibration.StationGainModel) = (; phase = m.phase, logamp = m.logamp)
-function _step_model_tree(m::NamedTuple)
-    unknown = setdiff(keys(m), (:phase, :logamp))
-    isempty(unknown) || throw(
-        ArgumentError(
-            "step model tree has unexpected key(s) $(Tuple(unknown)): a model is " *
-                "`(; phase, logamp)` — component names nest INSIDE the groups, e.g. " *
-                "`(; phase = (; bandpass = GainComponent(...)))`.",
-        ),
-    )
-    return (;
-        phase = Calibration._named_components(get(m, :phase, (;))),
-        logamp = Calibration._named_components(get(m, :logamp, (;))),
-    )
-end
-_step_model_tree(m) = throw(
-    ArgumentError(
-        "a step model must be a `StationGainModel` or a `(; phase, logamp)` NamedTuple " *
-            "tree of named `GainComponent`s, got $(typeof(m)).",
-    ),
-)
-
 # Vet a step's model argument against its solver's declared capability, at
 # compile time, before any data is read — the same two-sided check as
 # `FringeFit`'s: no component the solver cannot fit (`can_fit`; its θ block
 # would stay at zero and the solution would look fitted), then the solver's own
-# whole-tree requirements (`validate_model`). `accepted` finishes the can_fit
-# error with the component form the solver family does fit.
-function _vet_step_model(solver, model, accepted)
-    tree = _step_model_tree(model)
-    for tc in Calibration._flatten_components(tree)
-        Fringe.can_fit(solver, tc) || throw(
-            ArgumentError(
-                "$(nameof(typeof(solver))) cannot fit the component " *
-                    "$(Calibration.component_label(tc)); its parameters would never be " *
-                    "solved. " * accepted,
-            ),
-        )
+# whole-tree requirements (`validate_model`). Both checks run once per distinct
+# station tree — the base and each `stations` entry's effective pair — with
+# the can_fit error naming the station whose entry carries the component.
+# `accepted` finishes that error with the component form the solver family
+# does fit. Returns the model lifted to an `AbstractGainModel`
+# (`Calibration.as_gain_model`); the runner materializes it against the
+# antenna table.
+function _vet_step_model(solver, model, accepted, spec = nothing)
+    m = Calibration.as_gain_model(model)
+    for (station, tree) in _station_variants(m, spec)
+        at = station === nothing ? "" : " (station $(repr(station)) entry)"
+        for tc in Calibration._flatten_components(tree)
+            Fringe.can_fit(solver, tc) || throw(
+                ArgumentError(
+                    "$(nameof(typeof(solver))) cannot fit the component " *
+                        "$(Calibration.component_label(tc))$at; its parameters would " *
+                        "never be solved. " * accepted,
+                ),
+            )
+        end
+        Fringe.validate_model(solver, tree)
     end
-    Fringe.validate_model(solver, tree)
-    return tree
+    return m
+end
+
+# The distinct station trees a model assigns, as `station => (; phase, logamp)`
+# pairs (`nothing` for the base). A `StationGainModel` enumerates structurally;
+# any other `AbstractGainModel` can only be enumerated against a concrete
+# antenna table, so it needs `spec.antennas`.
+function _station_variants(m::Calibration.StationGainModel, spec)
+    vars = Pair{Any, Any}[nothing => (; phase = m.phase, logamp = m.logamp)]
+    for k in keys(m.stations)
+        push!(vars, k => Calibration.station_components(m, k))
+    end
+    return vars
+end
+function _station_variants(m::Calibration.AbstractGainModel, spec)
+    (spec === nothing || spec.antennas === nothing) && throw(
+        ArgumentError(
+            "cannot vet a $(nameof(typeof(m))) without the antenna table: its " *
+                "station trees come from `station_components(model, station)`, so " *
+                "compile it with a `spec = (; geom, antennas)` carrying the antennas.",
+        ),
+    )
+    names = Calibration._station_names(spec.antennas)
+    vars = Pair{Any, Any}[]
+    for n in names
+        t = Calibration._full_tree(Calibration.station_components(m, n))
+        any(p -> p.second == t, vars) || push!(vars, n => t)
+    end
+    return vars
 end
 
 model_components(s::Bandpass, spec) = _vet_step_model(
@@ -225,6 +235,7 @@ model_components(s::Bandpass, spec) = _vet_step_model(
     "Both shipped bandpass smoothers fit `GainComponent(ConstantTerm(); " *
         "Ti = GlobalTime(), Frequency = <any segmentation>, Feed = PerFeed())` — " *
         "see `default_bandpass_terms`.",
+    spec,
 )
 
 model_components(s::TemporalSmoother, spec) = _vet_step_model(
@@ -232,6 +243,7 @@ model_components(s::TemporalSmoother, spec) = _vet_step_model(
     "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
         "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed())` " *
         "(`JointOUSmoother`: `SharedFeeds()` only) — see `default_adhoc_terms`.",
+    spec,
 )
 
 # ── FringeFit visitor (stage A: per-scan search + station solve) ─────────────

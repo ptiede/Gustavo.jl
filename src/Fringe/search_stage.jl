@@ -8,7 +8,7 @@
 #   through its tying (`SharedFeeds`, `SingleFeed(2)`, …), so the model is
 #   specified feed by feed; adding a component is adding an element.
 #   `fringe_phase_components` compiles each element through
-#   `model_components(element, geom)` and concatenates in list order.
+#   `model_components(element, spec)` and concatenates in list order.
 # - `MatchedFilter <: AbstractFringeEstimator` — HOW it is estimated: today's
 #   stage A (per-baseline delay/rate matched-filter search + closure-screened
 #   station WLS). The search and `Stationization` live HERE, not on the model —
@@ -45,7 +45,8 @@ Base.@kwdef struct SingleBandDelay{F}
     freq::F = BandGroups()
 end
 
-function model_components(s::SingleBandDelay, geom::DataGeometry)
+function model_components(s::SingleBandDelay, spec)
+    geom = spec.geom
     freqgroups = segment_ranges(materialize(s.freq, geom), geom)
     length(freqgroups) >= 2 || return nothing
     # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a
@@ -216,11 +217,12 @@ end
 # ── Model compilation ─────────────────────────────────────────────────────────
 
 """
-    fringe_phase_components(fm::FringeModel, geom::DataGeometry) -> NamedTuple
+    fringe_phase_components(fm::FringeModel, spec) -> NamedTuple
 
 The fringe stage's gain-model phase components as a named tree: each element of
-`fm.terms` compiled through `model_components(element, geom)` under its list key,
-in list order — the list order IS the compiled component order. An element that
+`fm.terms` compiled through `model_components(element, spec)` under its list
+key, in list order — the list order IS the compiled component order
+(`spec = (; geom, antennas)`, the step compile spec). An element that
 compiles to nothing contributes no key; one that compiles to several components
 nests them under its key.
 
@@ -230,8 +232,8 @@ the structural plan routers (`_perscan_delay_plan`, `_sbd_plans`,
 segmentation, tying) types, so a second matching component would compile θ
 columns no stage ever writes — a silent no-fit.
 """
-function fringe_phase_components(fm::FringeModel, geom::DataGeometry)
-    comps = _compile_named(fm.terms, geom)
+function fringe_phase_components(fm::FringeModel, spec)
+    comps = _compile_named(fm.terms, spec)
     _validate_fringe_components(_flatten_components(comps))
     return comps
 end
@@ -240,13 +242,13 @@ end
 # its list name, dropped when it emits nothing, nested when it emits several.
 # The names come from the type parameter so the keys stay compile-time constants
 # and the tree's type is inferred.
-_compile_named(terms::NamedTuple{names}, geom::DataGeometry) where {names} =
-    _compile_named(names, terms, geom)
-_compile_named(::Tuple{}, terms, geom::DataGeometry) = (;)
-function _compile_named(names::Tuple, terms, geom::DataGeometry)
+_compile_named(terms::NamedTuple{names}, spec) where {names} =
+    _compile_named(names, terms, spec)
+_compile_named(::Tuple{}, terms, spec) = (;)
+function _compile_named(names::Tuple, terms, spec)
     k = first(names)
-    v = model_components(terms[k], geom)
-    return _prepend_named(Val(k), v, _compile_named(Base.tail(names), terms, geom))
+    v = model_components(terms[k], spec)
+    return _prepend_named(Val(k), v, _compile_named(Base.tail(names), terms, spec))
 end
 _prepend_named(::Val, ::Nothing, rest) = rest
 _prepend_named(::Val{k}, v, rest) where {k} = merge(NamedTuple{(k,)}((v,)), rest)

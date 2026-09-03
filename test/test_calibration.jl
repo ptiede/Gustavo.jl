@@ -576,7 +576,7 @@ end
         times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9],
         scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 2], t0 = 0.0, f0 = 3.0e9,
     )
-    sbd = CAL.model_components(SingleBandDelay(), gb)
+    sbd = CAL.model_components(SingleBandDelay(), (; geom = gb, antennas = nothing))
     msbd = CAL.StationGainModel(phase = (sbd = sbd,))
     lsbd = CAL.plan_parameters(msbd, 2, gb)
     ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, Float64.(1:lsbd.nθ), (;))
@@ -961,4 +961,241 @@ end
     # No adjacent pair to compare ⇒ nothing to be ambiguous about.
     @test CAL.phase_unwrap_ambiguity(fill(NaN, 8)) == 0
     @test CAL.phase_unwrap_ambiguity(Float64[]) == 0
+end
+
+# A rule-based gain model: stations named in `special` get `tree`, the rest
+# `base`. Exercises the `station_components` seam a user subtype implements.
+struct _RuleModel{B, T} <: CAL.AbstractGainModel
+    special::Vector{String}
+    base::B
+    tree::T
+end
+CAL.station_components(m::_RuleModel, station) =
+    String(station) in m.special ? m.tree : m.base
+
+@testset "Per-station heterogeneity" begin
+    geom = CAL.DataGeometry(;
+        times = [0.0, 0.1, 1.0, 1.1],
+        scan_of_time = [1, 1, 2, 2],
+        channel_freqs = collect(1.0:6.0) .* 1.0e9,
+        spw_of_chan = [1, 1, 1, 2, 2, 2],
+        t0 = 0.0, f0 = 3.5e9,
+    )
+    names = ["AA", "BB", "CC"]
+    bp(seg) = CAL.GainComponent(
+        CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = seg, Feed = CAL.PerFeed(),
+    )
+    atmos = CAL.GainComponent(
+        CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(),
+        Feed = CAL.SharedFeeds(),
+    )
+    base = (; phase = (bandpass = bp(CAL.ChannelBlocks(1)), atmos))
+
+    @testset "stations constructor and seam" begin
+        m = CAL.StationGainModel(;
+            base..., stations = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()),)),),
+        )
+        # Replacement is verbatim and whole-group: AA's phase tree is the
+        # entry's alone (no `atmos`), its logamp inherited from the base.
+        aa = CAL.station_components(m, "AA")
+        @test keys(aa.phase) == (:bandpass,)
+        @test aa.phase.bandpass.Frequency isa CAL.GlobalFrequency
+        @test aa.logamp == m.logamp
+        # A station without an entry gets the base pair, and Symbol/String
+        # address the same station.
+        @test CAL.station_components(m, "BB") == (; phase = m.phase, logamp = m.logamp)
+        @test CAL.station_components(m, :AA) == aa
+
+        # Entry keys other than phase/logamp error — the likely mistake is a
+        # component name at the top level.
+        @test_throws "unexpected key" CAL.StationGainModel(;
+            base..., stations = (AA = (; bandpass = bp(CAL.GlobalFrequency())),),
+        )
+        @test_throws "must be a `(; phase, logamp)` NamedTuple" CAL.StationGainModel(;
+            base..., stations = (AA = bp(CAL.GlobalFrequency()),),
+        )
+
+        # Equality and hashing are order-insensitive in `stations`.
+        ma = CAL.StationGainModel(;
+            base..., stations = (AA = (; phase = (;)), BB = (; logamp = (;))),
+        )
+        mb = CAL.StationGainModel(;
+            base..., stations = (BB = (; logamp = (;)), AA = (; phase = (;))),
+        )
+        @test ma == mb
+        @test hash(ma) == hash(mb)
+        @test ma != CAL.StationGainModel(; base...)
+    end
+
+    @testset "as_gain_model lift" begin
+        m = CAL.StationGainModel(; base...)
+        @test CAL.as_gain_model(m) === m
+        @test CAL.as_gain_model(base) == m
+        @test CAL.as_gain_model((; phase = base.phase)) == m
+        @test_throws "unexpected key" CAL.as_gain_model((; bandpass = bp(CAL.GlobalFrequency())))
+        @test_throws "must be a `StationGainModel`" CAL.as_gain_model(CAL.ChannelBlocks(1))
+    end
+
+    @testset "materialize" begin
+        # Segmentations materialize inside per-station trees, and an entry
+        # equal to the base (after materialization) collapses away.
+        m = CAL.StationGainModel(
+            phase = (bandpass = bp(CAL.BandGroups()), atmos),
+            stations = (
+                BB = (; phase = (bandpass = bp(CAL.BandGroups()), atmos)),
+                CC = (; phase = (bandpass = bp(CAL.GlobalFrequency()),)),
+            ),
+        )
+        mat = CAL.materialize(m, names, geom)
+        @test mat.phase.bandpass.Frequency isa CAL.FreqGroups
+        @test keys(mat.stations) == (:CC,)
+        @test CAL.materialize(mat, names, geom) == mat        # idempotent
+
+        # Unknown station codes error, naming the known stations.
+        bad = CAL.StationGainModel(; base..., stations = (XX = (; phase = base.phase),))
+        @test_throws "unknown station :XX" CAL.materialize(bad, names, geom)
+        @test_throws "AA, BB, CC" CAL.materialize(bad, names, geom)
+
+        # A rule-based model materializes through its seam: the majority tree
+        # becomes the base, the outlier an entry — provenance holds exactly
+        # the per-station trees the model assigned.
+        rm = _RuleModel(["CC"], base, (; phase = (bandpass = bp(CAL.GlobalFrequency()),)))
+        rmat = CAL.materialize(rm, names, geom)
+        @test rmat isa CAL.StationGainModel
+        @test rmat.phase == base.phase
+        @test keys(rmat.stations) == (:CC,)
+        @test CAL.station_components(rmat, "CC").phase.bandpass.Frequency isa CAL.GlobalFrequency
+    end
+
+    mu = CAL.StationGainModel(; base...)
+    mh = CAL.StationGainModel(;
+        base...,
+        stations = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()), atmos)),),
+    )
+
+    @testset "uniform model reproduces the rectangular layout exactly" begin
+        l1 = CAL.plan_parameters(mu, 3, geom)
+        l2 = CAL.plan_parameters(mu, names, geom)
+        @test l1.nθ == l2.nθ
+        @test [p.range for p in l1.plans] == [p.range for p in l2.plans]
+        @test [p.shape for p in l1.plans] == [p.shape for p in l2.plans]
+        @test typeof(l1.plantree) == typeof(l2.plantree)
+        @test l1.axes == l2.axes
+        # The count form cannot resolve station codes, so a model carrying
+        # `stations` demands the antenna table.
+        @test_throws "antenna COUNT" CAL.plan_parameters(mh, 3, geom)
+    end
+
+    lh = CAL.plan_parameters(mh, names, geom)
+
+    @testset "canonicalizer groups by signature" begin
+        node = lh.plantree.phase.bandpass
+        @test node isa CAL.GroupedComponentPlan
+        @test keys(node.groups) == (:g1, :g2)
+        @test node.stations == [[1], [2, 3]]
+        @test node.group_of == [1, 2, 2]
+        @test node.local_of == [1, 1, 2]
+        # Ragged: AA's global-frequency block vs the others' per-channel one.
+        @test node.groups.g1.shape == (1, 2, 1, 1, 1)
+        @test node.groups.g2.shape == (1, 2, 6, 1, 2)
+        # θ leaves nest under the group keys and spans stay contiguous.
+        @test length(lh.template.phase.bandpass.g1) == 2
+        @test node.groups.g2.range == last(node.groups.g1.range) .+ (1:24)
+        # A component every station shares (here at a different resolution per
+        # the entry, but with an identical signature) stays a plain plan with
+        # the full antenna axis: the grouped machinery has zero footprint on it.
+        @test lh.plantree.phase.atmos isa CAL.ComponentPlan
+        @test lh.plantree.phase.atmos.shape[5] == 3
+
+        # A name that is a leaf at one station and a subtree at another has no
+        # honest layout.
+        conflict = CAL.StationGainModel(;
+            base...,
+            stations = (AA = (; phase = (bandpass = (; a = bp(CAL.GlobalFrequency())),)),),
+        )
+        @test_throws "disagree structurally" CAL.plan_parameters(conflict, names, geom)
+    end
+
+    @testset "evaluator routes stations through their groups" begin
+        θ = zeros(lh.nθ)
+        cv = CAL.component_vector(lh, θ)
+        cv.phase.bandpass.g1 .= 0.5                    # AA: one phase, all channels
+        cv.phase.bandpass.g2[1, 1, 3, 1, 2] = 0.25     # CC (local index 2), feed 1, chan 3
+        ev = CAL.GainEvaluator(mh, lh)
+        g = @inferred CAL.evaluate_gains(ev, θ)
+        @test size(g) == (6, 4, 3, 2)
+        @test all(angle.(g[:, :, 1, :]) .≈ 0.5)
+        @test angle(g[3, 1, 3, 1]) ≈ 0.25
+        @test angle(g[2, 1, 3, 1]) ≈ 0.0
+        @test all(angle.(g[:, :, 2, :]) .≈ 0.0)
+
+        # The windowed and foreign-grid maps run the same grouped walk.
+        gw = CAL.evaluate_gains(ev, θ, [3], [1])
+        @test angle(gw[1, 1, 3, 1]) ≈ 0.25
+        gf = CAL.evaluate_gains(ev, θ, geom, geom)
+        @test gf ≈ g
+    end
+
+    @testset "station_blocks" begin
+        θ = collect(1.0:lh.nθ)
+        blocks = CAL.station_blocks(lh, θ, :phase, :bandpass)
+        @test length(blocks) == 2
+        @test blocks[1].stations == [1]
+        @test blocks[2].stations == [2, 3]
+        @test size(blocks[2].θ) == (1, 2, 6, 1, 2)
+        @test vec(blocks[1].θ) == θ[blocks[1].plan.range]
+        # Writing through a block's θ view writes into the solve's θ.
+        blocks[1].θ[1] = -3.0
+        @test θ[first(blocks[1].plan.range)] == -3.0
+        # A uniform component yields one block spanning every station.
+        ub = CAL.station_blocks(lh, θ, :phase, :atmos)
+        @test length(ub) == 1
+        @test ub[1].stations == [1, 2, 3]
+        # Path errors: an unknown name, and a stop at a subtree.
+        @test_throws "no component at path" CAL.station_blocks(lh, θ, :phase, :nope)
+        @test_throws "names a component subtree" CAL.station_blocks(lh, θ, :phase)
+    end
+
+    @testset "require_station_uniform" begin
+        mat = CAL.materialize(mh, names, geom)
+        err = try
+            CAL.require_station_uniform(mat, names, "Bandpass")
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("station-uniform", err.msg)
+        @test occursin("phase.bandpass", err.msg)
+        @test occursin("[AA]", err.msg)
+        @test occursin("[BB, CC]", err.msg)
+        @test occursin("supports_station_heterogeneity", err.msg)
+        # `atmos` is identical everywhere, so it is not reported.
+        @test !occursin("atmos", err.msg)
+        # A uniform model passes through, entries collapsed or not.
+        @test CAL.require_station_uniform(
+            CAL.materialize(mu, names, geom), names, "Bandpass",
+        ) isa CAL.StationGainModel
+    end
+
+    @testset "component_dimarray on a grouped leaf" begin
+        soln = CAL.CalibrationSolution(
+            CAL.materialize(mh, names, geom), lh, geom, collect(1.0:lh.nθ),
+            (; ant_names = names),
+        )
+        # The grouped name itself is not a leaf; the error points at the groups.
+        @test_throws "station-heterogeneous" CAL.component_dimarray(
+            soln, :solution, :phase, :bandpass,
+        )
+        # Each group's leaf carries ITS stations on the Ant axis.
+        g1 = CAL.component_dimarray(soln, :solution, :phase, :bandpass, :g1)
+        g2 = CAL.component_dimarray(soln, :solution, :phase, :bandpass, :g2)
+        @test lookup(g1, UVD.Ant) == ["AA"]
+        @test lookup(g2, UVD.Ant) == ["BB", "CC"]
+        @test vec(parent(g2)) ==
+            soln.steps[1].θ[lh.plantree.phase.bandpass.groups.g2.range]
+        # The uniform component still labels with the full antenna list.
+        at = CAL.component_dimarray(soln, :solution, :phase, :atmos)
+        @test lookup(at, UVD.Ant) == names
+    end
 end

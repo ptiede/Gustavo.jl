@@ -334,11 +334,18 @@ function _run_pipeline(
     # dispersion disabled and a band layout that can't support SBD either) — it
     # still runs under the visitor contract, just with nothing to solve, so the
     # empty-model guard (meant for a whole pipeline's compiled model) doesn't
-    # apply per-step.
+    # apply per-step. The model is materialized against the run's antenna
+    # table here, so the context (and the solution's provenance) holds the
+    # concrete per-station trees the solve uses; a step that has not opted
+    # into station heterogeneity (`supports_station_heterogeneity`) is handed
+    # uniform models only — anything else is rejected before any data is read.
     function _step_context(st, stream)
-        mc = model_components(st, spec)
-        step_model = StationGainModel(phase = mc.phase, logamp = mc.logamp)
-        step_layout = plan_parameters(step_model, nant, geom; require_nonempty = false)
+        step_model = Calibration.materialize(
+            Calibration.as_gain_model(model_components(st, spec)), antennas, geom,
+        )
+        supports_station_heterogeneity(st) ||
+            Calibration.require_station_uniform(step_model, antennas, string(nameof(typeof(st))))
+        step_layout = plan_parameters(step_model, antennas, geom; require_nonempty = false)
         return SolveContext(
             step_model, step_layout, geom, GainEvaluator(step_model, step_layout),
             Calibration.component_vector(step_layout, zeros(step_layout.nθ)),

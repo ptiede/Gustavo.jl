@@ -963,7 +963,7 @@ end
     )
     geom = CAL.build_geometry(uvset)
     # The SingleBandDelay element emits its per-band pair on this geometry.
-    @test length(CAL.model_components(SingleBandDelay(), geom)) == 2
+    @test length(CAL.model_components(SingleBandDelay(), (; geom, antennas = nothing))) == 2
 
     # Per-channel pooled coherence of one baseline after correction (time-avg
     # per channel, |Σ_c z| / Σ_c |z| across all channels).

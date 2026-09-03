@@ -243,7 +243,7 @@
         # elements → 4 components; dispersion/SBD are DispersionSBDFit's, not
         # FringeModel's, so they never appear here regardless of geometry, and
         # there is no inter-feed CONSTANT (see `default_fringe_terms`).
-        comps = FP.fringe_phase_components(FringeModel(), geom)
+        comps = FP.fringe_phase_components(FringeModel(), (; geom, antennas = nothing))
         @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -253,7 +253,8 @@
 
         # `rel_time` moves the inter-feed delay onto a track-global column.
         gcomps = FP.fringe_phase_components(
-            FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime())), geom
+            FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime())),
+            (; geom, antennas = nothing),
         )
         @test collect(map(sig, CAL._flatten_components(gcomps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -273,12 +274,12 @@
         @test isempty(dscomps.logamp)
 
         # Geometry-gated elements emit nothing when unconstrainable.
-        @test CAL.model_components(DispersionModel(), geom) === nothing
+        @test CAL.model_components(DispersionModel(), (; geom, antennas = nothing)) === nothing
         @test CAL.model_components(
-            DispersionModel(require_band_separation = false), geom
+            DispersionModel(require_band_separation = false), (; geom, antennas = nothing)
         ) isa CAL.GainComponent
         narrow, _ = _build_fringe_uvset(nspw = 1)
-        @test CAL.model_components(SingleBandDelay(), CAL.build_geometry(narrow)) === nothing
+        @test CAL.model_components(SingleBandDelay(), (; geom = CAL.build_geometry(narrow), antennas = nothing)) === nothing
 
         # `freq` chooses the partition the SBD pair is resolved on. On a
         # geometry whose spws fall in two gap-separated groups, `BandGroups`
@@ -287,7 +288,7 @@
             times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 1.2e9, 5.0e9],
             scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 3], t0 = 0.0, f0 = 3.0e9,
         )
-        bandranges(sbd, g) = CAL.model_components(sbd, g).delay.Frequency.ranges
+        bandranges(sbd, g) = CAL.model_components(sbd, (; geom = g, antennas = nothing)).delay.Frequency.ranges
         @test bandranges(SingleBandDelay(), gsbd) == [1:3, 4:4]
         @test bandranges(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd) ==
             [1:2, 3:3, 4:4]
@@ -297,19 +298,21 @@
         # The < 2 group gate is on the resolved partition, so a one-spw axis
         # emits nothing under PerSpectralWindow too.
         @test CAL.model_components(
-            SingleBandDelay(freq = CAL.PerSpectralWindow()), CAL.build_geometry(narrow),
+            SingleBandDelay(freq = CAL.PerSpectralWindow()),
+            (; geom = CAL.build_geometry(narrow), antennas = nothing),
         ) === nothing
         # `GlobalFrequency` resolves to one group on any axis: fully degenerate
         # with the wideband delay, so the element always compiles to nothing.
-        @test CAL.model_components(SingleBandDelay(freq = CAL.GlobalFrequency()), gsbd) ===
-            nothing
+        @test CAL.model_components(
+            SingleBandDelay(freq = CAL.GlobalFrequency()), (; geom = gsbd, antennas = nothing),
+        ) === nothing
         # Both halves of the pair share the partition.
-        psbd = CAL.model_components(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd)
+        psbd = CAL.model_components(SingleBandDelay(freq = CAL.PerSpectralWindow()), (; geom = gsbd, antennas = nothing))
         @test psbd.constant.Frequency.ranges == psbd.delay.Frequency.ranges
 
         # A bare GainComponent compiles to itself.
         tc = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2))
-        @test CAL.model_components(tc, geom) === tc
+        @test CAL.model_components(tc, (; geom, antennas = nothing)) === tc
 
         # Exact duplicate components are rejected by message.
         dup = (;
@@ -317,7 +320,7 @@
             mbd2 = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
         )
         @test_throws "two identical components" FP.fringe_phase_components(
-            FringeModel(terms = dup), geom
+            FringeModel(terms = dup), (; geom, antennas = nothing)
         )
 
         # A second component matching a findfirst router's signature — without
@@ -327,7 +330,7 @@
             mbd_tb = CAL.GainComponent(CAL.Delay(); Ti = CAL.TimeBlocks(1.0), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
         )
         @test_throws "per-scan feed-common delay signature" FP.fringe_phase_components(
-            FringeModel(terms = collide), geom
+            FringeModel(terms = collide), (; geom, antennas = nothing)
         )
 
         # DispersionModel/SingleBandDelay elements are rejected outright —

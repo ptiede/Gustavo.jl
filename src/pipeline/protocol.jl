@@ -54,18 +54,38 @@ instead.
 abstract type SolveStep <: CalibrationStep end
 
 """
-    model_components(step::SolveStep, spec) -> (; phase, logamp)
+    model_components(step::SolveStep, spec) -> AbstractGainModel | (; phase, logamp)
 
-The gain-model components `step` solves, as named component trees (`NamedTuple`s
-of `GainComponent`s) to merge into the compiled `StationGainModel`'s phase /
-log-amplitude groups. `spec` carries the data geometry and antenna table the
-step may consult (e.g. to resolve an `:auto` option). Default: no components.
+The gain model `step` solves: an [`Calibration.AbstractGainModel`](@ref), or a
+bare `(; phase, logamp)` tree of named `GainComponent`s that the runner lifts
+to a station-uniform [`StationGainModel`](@ref)
+([`Calibration.as_gain_model`](@ref)). `spec = (; geom, antennas)` carries the
+data geometry and antenna table the step may consult (e.g. to resolve an
+`:auto` option). Default: no components.
 
 A method of the same generic that compiles a `FringeModel` term-list element —
-`model_components(element, geom::DataGeometry)` — so steps and model-list
-elements compose through one mechanism.
+`model_components(element, spec)` — so steps and model-list elements compose
+through one mechanism.
 """
 model_components(step::SolveStep, spec) = (; phase = (;), logamp = (;))
+
+"""
+    supports_station_heterogeneity(step::SolveStep) -> Bool
+
+Whether `step`'s solver handles a gain model whose component signatures differ
+across stations. Default `false`: the runner then rejects a heterogeneous
+compiled model aimed at the step
+([`Calibration.require_station_uniform`](@ref)), naming the differing
+components and their per-station signatures, so an undeclared solver never
+receives θ blocks it would silently leave unsolved.
+
+A step that declares `true` must write its solve as a loop over the station
+blocks the layout supplies — [`Calibration.station_blocks`](@ref) — rather
+than assuming one rectangular `(…, nant)` leaf per component. A step whose
+solving is delegated to a pluggable solver object should forward this question
+to it.
+"""
+supports_station_heterogeneity(step::CalibrationStep) = false
 
 """
     transforms(step::CalibrationStep) -> Tuple

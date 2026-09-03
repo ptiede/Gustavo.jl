@@ -14,7 +14,7 @@
 # the hot path. `θ` is a plain vector; `component_vector` wraps it for named
 # inspection, but the map does not need that view.
 
-struct GainEvaluator{M <: StationGainModel, L <: ParameterLayout}
+struct GainEvaluator{M <: AbstractGainModel, L <: ParameterLayout}
     model::M
     layout::L
 end
@@ -40,6 +40,25 @@ end
 # A nested group (e.g. `sbd`) recurses; a leaf component evaluates its term.
 @inline _node_value(sub::NamedTuple, θ, ant, feed, ti, c) =
     _sum_group(sub, θ, ant, feed, ti, c)
+
+# A station-heterogeneous name routes the station through its own signature
+# group's plan — with the group-LOCAL antenna index, since each group's leaf
+# spans only its own stations. A station in no group carries the component
+# not at all: zero contribution, i.e. a unit gain factor.
+@inline function _node_value(g::GroupedComponentPlan, θ, ant, feed, ti, c)
+    gi = g.group_of[ant]
+    gi == 0 && return zero(eltype(θ))
+    return _grouped_value(values(g.groups), gi, θ, g.local_of[ant], feed, ti, c)
+end
+
+# Recursion over the concretely typed plan tuple, peeling until the station's
+# group is first — so each plan's type stays known and `term_eval` dispatches
+# statically, as in `_sum_nodes`.
+@inline _grouped_value(::Tuple{}, gi, θ, ant, feed, ti, c) = zero(eltype(θ))
+@inline function _grouped_value(plans::Tuple, gi, θ, ant, feed, ti, c)
+    gi == 1 && return _node_value(first(plans), θ, ant, feed, ti, c)
+    return _grouped_value(Base.tail(plans), gi - 1, θ, ant, feed, ti, c)
+end
 @inline function _node_value(plan::ComponentPlan, θ, ant, feed, ti, c)
     t = plan.term
     @inbounds ts = plan.tseg_id[ti]
@@ -203,6 +222,11 @@ _resolve_tree(nt::NamedTuple, solve, target, chan_idx, ti_idx, tspan) =
     map(v -> _resolve_node(v, solve, target, chan_idx, ti_idx, tspan), nt)
 _resolve_node(nt::NamedTuple, solve, target, chan_idx, ti_idx, tspan) =
     _resolve_tree(nt, solve, target, chan_idx, ti_idx, tspan)
+_resolve_node(g::GroupedComponentPlan, solve, target, chan_idx, ti_idx, tspan) =
+    GroupedComponentPlan(
+    map(p -> _resolve_node(p, solve, target, chan_idx, ti_idx, tspan), g.groups),
+    g.stations, g.group_of, g.local_of,
+)
 
 function _resolve_node(plan::ComponentPlan, solve, target, chan_idx, ti_idx, tspan)
     t = plan.term

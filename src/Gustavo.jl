@@ -57,6 +57,7 @@ export SolveStep, StepChain, DataTransformStep, ExecutionConfig, ProgressLogger
 export outer_executor, inner_executor
 export start_pass!, process_scan!, finish_pass!, scan_values
 export model_components, fit_selection, provides, required_grouping, fusable_grouping, scan_flags
+export supports_station_heterogeneity
 # Re-export the transform / selection vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
 export AbstractDataTransform, apply_transform!, apply_transform

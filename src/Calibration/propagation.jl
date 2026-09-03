@@ -35,8 +35,8 @@ end
 
 # The element compiles to the dTEC component, or to nothing when the band
 # layout cannot constrain it (see `_dispersion_enabled`).
-model_components(dm::DispersionModel, geom::DataGeometry) =
-    _dispersion_enabled(dm, geom) ?
+model_components(dm::DispersionModel, spec) =
+    _dispersion_enabled(dm, spec.geom) ?
     GainComponent(Dispersion(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()) : nothing
 
 # Whether this geometry gets a dTEC term. No model, no term. With one, the

@@ -344,6 +344,16 @@ function component_dimarray(sol::CalibrationSolution, step, group::Symbol, name:
     ok || throw(
         ArgumentError("component_dimarray: step $(repr(step)) has no component named $(join(path, '.')).")
     )
+    if plan isa GroupedComponentPlan
+        gk = join(keys(plan.groups), ", ")
+        throw(
+            ArgumentError(
+                "component_dimarray: $(join(path, '.')) is station-heterogeneous; " *
+                    "descend to one of its signature groups ($gk), or iterate them " *
+                    "with `station_blocks`."
+            )
+        )
+    end
     plan isa ComponentPlan || throw(
         ArgumentError(
             "component_dimarray: path $(join(path, '.')) names a component group, not a leaf; " *
@@ -351,19 +361,22 @@ function component_dimarray(sol::CalibrationSolution, step, group::Symbol, name:
         )
     )
     _, axnode = _try_descend(s.layout.axes, path)
+    stations = hasproperty(axnode, :stations) ? axnode.stations : nothing
     raw = _component_leaf(plan, s.θ)
-    dims = ntuple(d -> _role_dim(axnode.roles[d], size(raw, d), sol, plan), ndims(raw))
+    dims = ntuple(d -> _role_dim(axnode.roles[d], size(raw, d), sol, plan; stations), ndims(raw))
     return DimArray(raw, dims; name = last(path))
 end
 
 # Attempt to descend `tree` (a step's own `layout.plantree` or `layout.axes`)
 # by `path`; `(false, nothing)` without throwing when a name is absent along
-# the way.
+# the way. A `GroupedComponentPlan` descends into its signature groups, so a
+# path may address one group's leaf directly (`:phase, :bandpass, :g1`).
 function _try_descend(tree, path::Tuple{Vararg{Symbol}})
     node = tree
     for s in path
-        (node isa NamedTuple && haskey(node, s)) || return false, nothing
-        node = getproperty(node, s)
+        children = node isa GroupedComponentPlan ? node.groups : node
+        (children isa NamedTuple && haskey(children, s)) || return false, nothing
+        node = getproperty(children, s)
     end
     return true, node
 end
@@ -371,9 +384,10 @@ end
 # The DimensionalData dimension for one leaf axis, from its role and the
 # solution's geometry. A segment axis takes a representative coordinate per
 # segment (a frequency segment's centre, a time segment's mean epoch); the
-# antenna axis takes station names when the solution carries them; `:param` and
-# `:node` are positional id spaces with no physical coordinate.
-function _role_dim(role::Symbol, n::Int, sol::CalibrationSolution, plan::ComponentPlan)
+# antenna axis takes station names when the solution carries them — for a
+# signature group's leaf, the names of just the group's `stations`; `:param`
+# and `:node` are positional id spaces with no physical coordinate.
+function _role_dim(role::Symbol, n::Int, sol::CalibrationSolution, plan::ComponentPlan; stations = nothing)
     if role === :Frequency
         groups = segment_groups(plan.fseg_id, n)
         return Frequency([mean(view(sol.geom.channel_freqs, g)) for g in groups])
@@ -381,8 +395,13 @@ function _role_dim(role::Symbol, n::Int, sol::CalibrationSolution, plan::Compone
         groups = segment_groups(plan.tseg_id, n)
         return Ti([mean(view(sol.geom.times, g)) for g in groups])
     elseif role === :Ant
-        ants = hasproperty(sol.info, :ant_names) && length(sol.info.ant_names) == n ?
-            collect(sol.info.ant_names) : (1:n)
+        an = hasproperty(sol.info, :ant_names) ? sol.info.ant_names : nothing
+        ants = if stations === nothing
+            an !== nothing && length(an) == n ? collect(an) : (1:n)
+        else
+            an !== nothing && all(i -> 1 <= i <= length(an), stations) ?
+                collect(an)[stations] : collect(stations)
+        end
         return Ant(ants)
     elseif role === :Feed
         return Feed(1:n)

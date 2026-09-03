@@ -6,6 +6,7 @@
 #     .phase  :: NamedTuple, name → GainComponent   →  Σ phase contributions
 #     .logamp :: NamedTuple, name → GainComponent   →  Σ log-amplitude contributions
 #       gain(t, f) = exp(Σ logamp) · cis(Σ phase)
+#     .stations :: NamedTuple, station → replacement `(; phase, logamp)` entry
 #
 # Each component carries a user-specified name (the NamedTuple key), unique
 # within its group. A value that is itself a NamedTuple is a named subtree — one
@@ -15,8 +16,9 @@
 # and the forward map consume the depth-first flat view `phase_components` /
 # `logamp_components`, whose order is the list order.
 #
-# One `StationGainModel` is shared by all antennas in a solve: each antenna gets
-# its own parameter values, not its own structure.
+# The model structure is shared by all antennas in a solve — each antenna gets
+# its own parameter values, not its own structure — except where a `stations`
+# entry replaces a whole group for one station (see `station_components`).
 
 # ── Feed tying ───────────────────────────────────────────────────────────────
 
@@ -123,20 +125,60 @@ _feed_node2(::AbstractFeedTying, feed::Integer) = 0
 _feed_node2(t::ReferenceRelative, feed::Integer) = feed == 3 - t.reference_feed ? 2 : 0
 
 """
-    StationGainModel(; phase = (;), logamp = (;))
+    AbstractGainModel
+
+A station gain model: the assignment of a `(; phase, logamp)` pair of named
+[`GainComponent`](@ref) trees to every station of an observation.
+`gain = exp(Σ logamp) · cis(Σ phase)` per station.
+
+The one required method is the station seam,
+[`station_components`](@ref)`(model, station) -> (; phase, logamp)` — the trees
+the named station solves. [`StationGainModel`](@ref) is the shipped
+implementation; a rule-based model (e.g. "every station whose code starts with
+a given prefix gets a smoother bandpass") is a subtype implementing that one
+method. Before a solve, a model is resolved against the observation's antenna
+table by [`materialize`](@ref)`(model, antennas, geom)`, which records the
+per-station trees the solve actually uses.
+"""
+abstract type AbstractGainModel end
+
+"""
+    StationGainModel(; phase = (;), logamp = (;), stations = (;))
 
 The gain model for a station: a `NamedTuple` of named phase [`GainComponent`](@ref)s
 and a `NamedTuple` of named log-amplitude `GainComponent`s.
 `gain = exp(Σ logamp) · cis(Σ phase)`. The keys are the component names, unique
 within each group; a value may itself be a `NamedTuple` — a named subtree for
 one element that compiled to several components.
+
+`stations` maps a station code to a replacement entry used verbatim for that
+station: a `NamedTuple` whose `phase` and/or `logamp` tree REPLACES the
+corresponding base group wholesale — the model never merges within a group. A
+group the entry omits is inherited from the base. Replacement is whole-group
+because components within a group interact (they sum and share degeneracies)
+while the two groups do not. An entry key other than `phase`/`logamp` errors at
+construction — the likely mistake is writing a component name at the top level.
+
+```julia
+StationGainModel(
+    phase = (bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1)),),
+    stations = (AA = (; phase = (bandpass = GainComponent(PolynomialFreq(3); Ti = GlobalTime(), Frequency = GlobalFrequency()),)),),
+)
+```
+
+Station codes resolve against the observation's antenna table when the model is
+[`materialize`](@ref)d for a solve; an unknown code errors there, naming the
+known stations. Equality is order-insensitive in `stations`.
 """
-struct StationGainModel{P <: NamedTuple, A <: NamedTuple}
+struct StationGainModel{P <: NamedTuple, A <: NamedTuple, S <: NamedTuple} <: AbstractGainModel
     phase::P
     logamp::A
+    stations::S
 end
-StationGainModel(; phase = (;), logamp = (;)) =
-    StationGainModel(_named_components(phase), _named_components(logamp))
+StationGainModel(; phase = (;), logamp = (;), stations = (;)) =
+    StationGainModel(
+    _named_components(phase), _named_components(logamp), _station_entries(stations)
+)
 
 _named_components(nt::NamedTuple) = map(_as_component, nt)
 _named_components(::Tuple{}) = (;)
@@ -148,6 +190,79 @@ _named_components(t::Tuple) = throw(
 )
 _as_component(e::GainComponent) = e
 _as_component(nt::NamedTuple) = map(_as_component, nt)   # a named subtree
+
+_station_entries(nt::NamedTuple) = map(_station_entry, nt)
+_station_entries(::Tuple{}) = (;)
+function _station_entry(e::NamedTuple)
+    unknown = setdiff(keys(e), (:phase, :logamp))
+    isempty(unknown) || throw(
+        ArgumentError(
+            "station entry has unexpected key(s) $(Tuple(unknown)): an entry replaces " *
+                "whole groups — `(; phase = ..., logamp = ...)`, either may be omitted — " *
+                "and component names nest INSIDE the groups, e.g. " *
+                "`(; phase = (; bandpass = GainComponent(...)))`.",
+        ),
+    )
+    return map(_named_components, e)
+end
+_station_entry(x) = throw(
+    ArgumentError(
+        "a station entry must be a `(; phase, logamp)` NamedTuple (either key may be " *
+            "omitted), got $(typeof(x)).",
+    ),
+)
+
+"""
+    station_components(model::AbstractGainModel, station) -> (; phase, logamp)
+
+The named component trees `station` (a station code, `String` or `Symbol`)
+solves under `model`. This is the extension seam of [`AbstractGainModel`](@ref):
+a model subtype implements this one method and the layout machinery does the
+rest. Solves consult it only through [`materialize`](@ref), so what a solve
+records and what this returns coincide.
+
+For a [`StationGainModel`](@ref): the base `phase`/`logamp` trees, except where
+a `stations` entry replaces a whole group for this station.
+"""
+function station_components end
+
+function station_components(m::StationGainModel, station)
+    e = get(m.stations, Symbol(station), nothing)
+    e === nothing && return (; phase = m.phase, logamp = m.logamp)
+    return (;
+        phase = haskey(e, :phase) ? e.phase : m.phase,
+        logamp = haskey(e, :logamp) ? e.logamp : m.logamp,
+    )
+end
+
+"""
+    as_gain_model(m) -> AbstractGainModel
+
+Lift a model specification to an [`AbstractGainModel`](@ref): an
+`AbstractGainModel` passes through; a bare `(; phase, logamp)` `NamedTuple`
+tree (either key may be omitted, no other key is legal) lifts to a uniform
+[`StationGainModel`](@ref). Anything else errors. This is how the pipeline
+accepts a step's `model_components` return and a step's own `model` argument in
+either form.
+"""
+as_gain_model(m::AbstractGainModel) = m
+function as_gain_model(m::NamedTuple)
+    unknown = setdiff(keys(m), (:phase, :logamp))
+    isempty(unknown) || throw(
+        ArgumentError(
+            "step model tree has unexpected key(s) $(Tuple(unknown)): a model is " *
+                "`(; phase, logamp)` — component names nest INSIDE the groups, e.g. " *
+                "`(; phase = (; bandpass = GainComponent(...)))`.",
+        ),
+    )
+    return StationGainModel(phase = get(m, :phase, (;)), logamp = get(m, :logamp, (;)))
+end
+as_gain_model(m) = throw(
+    ArgumentError(
+        "a step model must be a `StationGainModel` or a `(; phase, logamp)` NamedTuple " *
+            "tree of named `GainComponent`s, got $(typeof(m)).",
+    ),
+)
 
 # Depth-first flat tuple of the `GainComponent`s in a named component tree, names
 # dropped — the order the layout and forward map consume. Type-stable: the tree
@@ -165,11 +280,14 @@ logamp_components(m::StationGainModel) = _flatten_components(m.logamp)
 # ── Model-list elements ──────────────────────────────────────────────────────
 
 """
-    model_components(element, geom::DataGeometry) -> GainComponent | NamedTuple | Nothing
+    model_components(element, spec) -> GainComponent | NamedTuple | Nothing
 
-Compile one model-list element for the data geometry `geom`. The result is named
-by the element's key in the term list, so an element returns only its own
-internal structure:
+Compile one model-list element for an observation. `spec = (; geom, antennas)`
+carries the `DataGeometry` and the antenna table — the same spec a pipeline
+step's `model_components` receives, so steps and list elements compose through
+one mechanism (the same generic applied to a step returns the step's whole
+model). The result is named by the element's key in the term list, so an
+element returns only its own internal structure:
 
 - a single [`GainComponent`](@ref) — the element's list key names it (`θ.phase.<key>`);
 - a `NamedTuple` of `GainComponent`s — one element that compiles to several
@@ -178,13 +296,11 @@ internal structure:
   component (and no key).
 
 A bare `GainComponent` compiles to itself; wrapper elements (e.g.
-[`DispersionModel`](@ref)) consult the geometry. The same generic applied to a
-pipeline step returns the step's `(; phase, logamp)` named component trees —
-steps and list elements compose through one mechanism.
+[`DispersionModel`](@ref)) consult `spec.geom`.
 """
 function model_components end
 
-model_components(e::GainComponent, ::DataGeometry) = e
+model_components(e::GainComponent, spec) = e
 
 # ── Per-component / per-model time-segmentation queries ─────────────────────────
 # Used by solvers to route global-time vs per-scan components.
@@ -193,15 +309,23 @@ is_per_scan(::PerScan) = true
 is_per_scan(::PerIntegration) = true
 component_is_per_scan(e::GainComponent) = is_per_scan(e.Ti)
 
-phase_is_per_scan(m::StationGainModel) = any(component_is_per_scan, phase_components(m))
-amplitude_is_per_scan(m::StationGainModel) = any(component_is_per_scan, logamp_components(m))
+# The per-scan queries answer for the whole model: the base groups plus every
+# station entry's replacement groups.
+phase_is_per_scan(m::StationGainModel) =
+    any(component_is_per_scan, phase_components(m)) ||
+    any(e -> haskey(e, :phase) && any(component_is_per_scan, _flatten_components(e.phase)), values(m.stations))
+amplitude_is_per_scan(m::StationGainModel) =
+    any(component_is_per_scan, logamp_components(m)) ||
+    any(e -> haskey(e, :logamp) && any(component_is_per_scan, _flatten_components(e.logamp)), values(m.stations))
 
 # ── Validation ───────────────────────────────────────────────────────────────
 # A frequency-only / time-only term must not be paired with a segmentation that
 # makes it degenerate-free; the linear-algebra layer tolerates redundancy, so
 # validation here is light — mainly catching empty models.
 function validate_station_gain_model(m::StationGainModel)
-    (isempty(phase_components(m)) && isempty(logamp_components(m))) && throw(
+    isempty(phase_components(m)) && isempty(logamp_components(m)) &&
+        all(e -> all(isempty ∘ _flatten_components, values(e)), values(m.stations)) &&
+        throw(
         ArgumentError("StationGainModel has neither phase nor log-amplitude components")
     )
     return m
@@ -210,16 +334,35 @@ end
 # ── Equality ─────────────────────────────────────────────────────────────────
 # Field-wise value equality. The default struct `==` compares `Vector`-holding
 # fields (e.g. a `FreqGroups` segmentation) by identity, so two independently
-# built but identical models would compare unequal without these.
+# built but identical models would compare unequal without these. `stations` is
+# order-insensitive: it is a station → entry map, and no consumer reads its
+# entry order.
 Base.:(==)(a::GainComponent, b::GainComponent) =
     a.term == b.term && a.Ti == b.Ti && a.Frequency == b.Frequency && a.Feed == b.Feed
 Base.hash(e::GainComponent, h::UInt) =
     hash(e.Feed, hash(e.Frequency, hash(e.Ti, hash(e.term, hash(:GainComponent, h)))))
 
 Base.:(==)(a::StationGainModel, b::StationGainModel) =
-    a.phase == b.phase && a.logamp == b.logamp
+    a.phase == b.phase && a.logamp == b.logamp && _stations_equal(a.stations, b.stations)
+
+function _stations_equal(a::NamedTuple, b::NamedTuple)
+    length(a) == length(b) || return false
+    for k in keys(a)
+        haskey(b, k) || return false
+        a[k] == b[k] || return false
+    end
+    return true
+end
+
+function _stations_hash(s::NamedTuple, h::UInt)
+    for k in sort(collect(keys(s)))
+        h = hash(s[k], hash(k, h))
+    end
+    return h
+end
+
 Base.hash(m::StationGainModel, h::UInt) =
-    hash(m.logamp, hash(m.phase, hash(:StationGainModel, h)))
+    _stations_hash(m.stations, hash(m.logamp, hash(m.phase, hash(:StationGainModel, h))))
 
 # ── Summaries ────────────────────────────────────────────────────────────────
 
@@ -253,12 +396,111 @@ function station_model_summary(name, m::StationGainModel)
     p, a = phase_components(m), logamp_components(m)
     ph = isempty(p) ? "—" : join(component_label.(p), " + ")
     am = isempty(a) ? "—" : join(component_label.(a), " + ")
-    return string(name, "  phase(", ph, ")  logamp(", am, ")")
+    return string(name, "  phase(", ph, ")  logamp(", am, ")", _stations_suffix(m))
 end
+
+_stations_suffix(m::StationGainModel) =
+    isempty(m.stations) ? "" :
+    string("  stations(", join(string.(keys(m.stations)), ", "), ")")
 
 function Base.show(io::IO, m::StationGainModel)
     p, a = phase_components(m), logamp_components(m)
     ph = isempty(p) ? "—" : join(component_label.(p), " + ")
     am = isempty(a) ? "—" : join(component_label.(a), " + ")
-    return print(io, "StationGainModel(phase: ", ph, ", logamp: ", am, ")")
+    return print(io, "StationGainModel(phase: ", ph, ", logamp: ", am, _stations_suffix(m), ")")
+end
+
+# ── Materialization against an observation ───────────────────────────────────
+#
+# `materialize(model, antennas, geom)` resolves a gain model into the concrete
+# `StationGainModel` a solve uses and a solution records: station codes checked
+# against the antenna table, every component's data-dependent frequency
+# segmentation resolved (`materialize(seg, geom)`), and `stations` entries that
+# turn out identical to the base dropped. The result is idempotent under
+# re-materialization, and is what provenance stores — a rule-based model
+# round-trips as the per-station trees it actually solved.
+
+materialize(e::GainComponent, geom::DataGeometry) =
+    GainComponent(e.term, e.Ti, materialize(e.Frequency, geom), e.Feed)
+materialize(nt::NamedTuple, geom::DataGeometry) = map(v -> materialize(v, geom), nt)
+
+# Station codes of an antenna table or an iterable of codes, as `String`s.
+_station_names(antennas::UVData.AntennaTable) = String.(collect(antennas.name))
+_station_names(names) = String.(collect(names))
+_station_names(n::Integer) = throw(
+    ArgumentError(
+        "an antenna COUNT cannot resolve station codes; pass the antenna table " *
+            "or the station codes themselves.",
+    ),
+)
+
+function _validate_station_keys(stations::NamedTuple, names)
+    for k in keys(stations)
+        String(k) in names || throw(
+            ArgumentError(
+                "unknown station $(repr(k)) in `stations`; the antenna table has: " *
+                    join(names, ", ") * ".",
+            ),
+        )
+    end
+    return nothing
+end
+
+"""
+    materialize(model::AbstractGainModel, antennas, geom::DataGeometry) -> StationGainModel
+
+Resolve `model` against an observation: `antennas` (an `AntennaTable` or an
+iterable of station codes) fixes the station set, and `geom` resolves every
+component's data-dependent frequency segmentation to its concrete form. The
+result holds the per-station trees the solve actually uses — `stations` entries
+only for stations whose trees differ from the base — and is what a solution
+records as provenance. A `stations` key not in the antenna table errors, naming
+the known stations.
+"""
+function materialize(m::StationGainModel, antennas, geom::DataGeometry)
+    names = _station_names(antennas)
+    _validate_station_keys(m.stations, names)
+    phase = materialize(m.phase, geom)
+    logamp = materialize(m.logamp, geom)
+    ents = Pair{Symbol, Any}[]
+    for k in keys(m.stations)
+        e = map(nt -> materialize(nt, geom), m.stations[k])
+        full = (;
+            phase = haskey(e, :phase) ? e.phase : phase,
+            logamp = haskey(e, :logamp) ? e.logamp : logamp,
+        )
+        (full.phase == phase && full.logamp == logamp) || push!(ents, k => full)
+    end
+    return StationGainModel(phase, logamp, NamedTuple(ents))
+end
+
+# A `station_components` return with either group omitted, completed to the
+# full `(; phase, logamp)` pair — the same tolerance the model-tree lift
+# gives — with any other key rejected.
+function _full_tree(t::NamedTuple)
+    unknown = setdiff(keys(t), (:phase, :logamp))
+    isempty(unknown) || throw(
+        ArgumentError(
+            "station_components must return a `(; phase, logamp)` NamedTuple " *
+                "(either key may be omitted); got unexpected key(s) $(Tuple(unknown)).",
+        ),
+    )
+    return (; phase = get(t, :phase, (;)), logamp = get(t, :logamp, (;)))
+end
+
+# A model subtype is resolved through its station seam: one tree per station,
+# with the most common tree as the base (ties to first appearance) so a
+# mostly-uniform model records compactly.
+function materialize(model::AbstractGainModel, antennas, geom::DataGeometry)
+    names = _station_names(antennas)
+    trees = [
+        map(nt -> materialize(nt, geom), _full_tree(station_components(model, n)))
+            for n in names
+    ]
+    counts = [count(==(t), trees) for t in trees]
+    base = trees[findmax(counts)[2]]
+    ents = Pair{Symbol, Any}[
+        Symbol(names[i]) => trees[i] for i in eachindex(names) if trees[i] != base
+    ]
+    return StationGainModel(base.phase, base.logamp, NamedTuple(ents))
 end

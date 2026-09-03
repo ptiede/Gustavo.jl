@@ -227,6 +227,43 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         sgm = CAL.StationGainModel(; default_bandpass_terms()...)
         @test model_components(Bandpass(model = sgm), nothing) ==
             model_components(Bandpass(), nothing)
+
+        # A `stations` entry is vetted like the base, with the can_fit error
+        # naming the station whose entry carries the unfittable component.
+        bad_entry = CAL.StationGainModel(;
+            default_bandpass_terms()...,
+            stations = (
+                A1 = (;
+                    phase = (;
+                        bandpass = CAL.GainComponent(
+                            CAL.Delay(); Ti = CAL.GlobalTime(),
+                            Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        @test_throws "station :A1 entry" model_components(
+            Bandpass(model = bad_entry), nothing,
+        )
+
+        # A heterogeneous model that vets cleanly still cannot reach a step
+        # that has not opted in (`supports_station_heterogeneity` defaults to
+        # false): the runner rejects it at compile time, naming the differing
+        # component and its per-station signatures.
+        @test !Gustavo.supports_station_heterogeneity(Bandpass())
+        het = CAL.StationGainModel(;
+            default_bandpass_terms()...,
+            stations = (
+                A1 = (;
+                    phase = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
+                    logamp = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
+                ),
+            ),
+        )
+        @test model_components(Bandpass(model = het), nothing) isa CAL.StationGainModel
+        @test_throws "station-uniform" fit(Bandpass(model = het), uvset)
+        @test_throws "phase.bandpass" fit(Bandpass(model = het), uvset)
     end
 
     @testset "PerTrackSmoother: a shape on both observables" begin

@@ -71,9 +71,10 @@ export term_axes, param_shapes, term_eval, term_label
 export freq_coordinate, time_coordinate, freq_coord_state, time_coord_state
 
 # Models and tying
-export GainComponent, StationGainModel
+export AbstractGainModel, GainComponent, StationGainModel
 export AbstractFeedTying, PerFeed, SharedFeeds, ReferenceRelative, SingleFeed
 export phase_components, logamp_components, model_components
+export station_components, as_gain_model
 export phase_is_per_scan, amplitude_is_per_scan, component_is_per_scan
 export validate_station_gain_model, station_model_summary, component_label
 
@@ -81,7 +82,7 @@ export validate_station_gain_model, station_model_summary, component_label
 export DispersionModel
 
 # Parameter layout and pure evaluation
-export ParameterLayout, plan_parameters
+export ParameterLayout, plan_parameters, station_blocks
 export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
 
 # Calibration solution container, apply, serialization
