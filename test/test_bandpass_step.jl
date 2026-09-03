@@ -252,7 +252,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         nspwc, nchanc, ntimec, nscansc = 1, 32, 4, 2
         nglobc = nspwc * nchanc
         chan_bw = 2.0e6
-        rngc = MersenneTwister(0xA51DE)
+        rngc = MersenneTwister(0x000A51DE)
         # Injected truth: an OU (AR(1)) draw along frequency per (station, feed) —
         # the process `ARShape` assumes, correlated over 6 channels.
         nu = 6 * chan_bw

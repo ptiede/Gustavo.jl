@@ -138,12 +138,14 @@ function flatmap(f, uvset::UVSet)
     state === nothing && return Any[]
     leaf1, st = state
     first_piece = _call_leaf_fn(f, leaf1, DimensionalData.metadata(leaf1), root_meta)
-    first_piece isa AbstractVector || throw(ArgumentError(
-        "flatmap: callable must return an `AbstractVector` per leaf (got " *
-            "$(typeof(first_piece))). Use `mapleaves` if you want per-leaf " *
-            "results collected into an OrderedDict, or `apply` if you want " *
-            "to rebuild a `UVSet` with new leaf data.",
-    ))
+    first_piece isa AbstractVector || throw(
+        ArgumentError(
+            "flatmap: callable must return an `AbstractVector` per leaf (got " *
+                "$(typeof(first_piece))). Use `mapleaves` if you want per-leaf " *
+                "results collected into an OrderedDict, or `apply` if you want " *
+                "to rebuild a `UVSet` with new leaf data.",
+        )
+    )
     return _flatmap_collect(f, iter, st, root_meta, first_piece, length(src))
 end
 

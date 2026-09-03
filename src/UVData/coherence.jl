@@ -546,8 +546,10 @@ function _noise_scale(V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, plist::V
                 w1 = W[c, ti, bli, p]; w2 = W[c + 1, ti, bli, p]
                 v1 = V[c, ti, bli, p]; v2 = V[c + 1, ti, bli, p]
                 (w1 > 0 && w2 > 0 && isfinite(w1) && isfinite(w2) && isfinite(v1) && isfinite(v2)) || continue
-                push!(buf, abs2(ComplexF64(v1) - ComplexF64(v2)) /
-                    (2 * (inv(Float64(w1)) + inv(Float64(w2)))))
+                push!(
+                    buf, abs2(ComplexF64(v1) - ComplexF64(v2)) /
+                        (2 * (inv(Float64(w1)) + inv(Float64(w2))))
+                )
             end
         end
         if length(buf) < 32 && nti > 1
@@ -556,8 +558,10 @@ function _noise_scale(V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, plist::V
                 w1 = W[c, ti, bli, p]; w2 = W[c, ti + 1, bli, p]
                 v1 = V[c, ti, bli, p]; v2 = V[c, ti + 1, bli, p]
                 (w1 > 0 && w2 > 0 && isfinite(w1) && isfinite(w2) && isfinite(v1) && isfinite(v2)) || continue
-                push!(buf, abs2(ComplexF64(v1) - ComplexF64(v2)) /
-                    (2 * (inv(Float64(w1)) + inv(Float64(w2)))))
+                push!(
+                    buf, abs2(ComplexF64(v1) - ComplexF64(v2)) /
+                        (2 * (inv(Float64(w1)) + inv(Float64(w2))))
+                )
             end
         end
         length(buf) >= 32 || continue

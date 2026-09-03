@@ -1373,11 +1373,11 @@ end
     orig = info.antennas
     perturbed_v = [
         UV.Antenna(;
-                name = orig.name[i],
-                station_xyz = i == 1 ? orig.station_xyz[i] .+ 1.0 : orig.station_xyz[i],
-                mount = orig.mount[i], nominal_basis = orig.nominal_basis[i],
-                response = orig.response[i], pol_angles = orig.pol_angles[i],
-            ) for i in 1:length(orig)
+            name = orig.name[i],
+            station_xyz = i == 1 ? orig.station_xyz[i] .+ 1.0 : orig.station_xyz[i],
+            mount = orig.mount[i], nominal_basis = orig.nominal_basis[i],
+            response = orig.response[i], pol_angles = orig.pol_angles[i],
+        ) for i in 1:length(orig)
     ]
     perturbed = UV.AntennaTable(
         StructArray(perturbed_v),
@@ -1583,7 +1583,7 @@ end
         w_out = parent(leaf_out[:weights])
         idx = findfirst(i -> isfinite(vis_in[i]) && w_out[i] > 0, eachindex(vis_in))
         @test idx !== nothing
-        @test abs(vis_out[idx]) ≈ abs(vis_in[idx]) * expected_factor rtol = 1e-6
+        @test abs(vis_out[idx]) ≈ abs(vis_in[idx]) * expected_factor rtol = 1.0e-6
     end
 end
 
@@ -1594,14 +1594,15 @@ end
     # in-window rows and never see the outlier.
     base_dt = DateTime(2022, 3, 27, 0, 0, 0)
     times = [base_dt, base_dt + Minute(2), base_dt + Minute(10), base_dt + Minute(20)]
-    cols  = [(0, :R), (0, :L)]
-    vals  = Float64[
+    cols = [(0, :R), (0, :L)]
+    vals = Float64[
         100.0   120.0;
         110.0   130.0;
         1.0e6   1.0e6;        # slew/outlier — outside the scan window below
         105.0   125.0;
     ]
-    st = BP.AntabStation("XX",
+    st = BP.AntabStation(
+        "XX",
         BP.AntabGainCurve((1.0, 1.0), [1.0]),
         BP.AntabTsysSeries(times, cols, vals),
         0,
@@ -1674,8 +1675,10 @@ end
     nleaves_3 = UV.mapleaves(base) do leaf, info, root
         (; scan = info.scan_name, telescope = root.array_obs.telescope)
     end
-    @test all(getproperty(v, :telescope) == UV.metadata(base).array_obs.telescope
-              for v in values(nleaves_3))
+    @test all(
+        getproperty(v, :telescope) == UV.metadata(base).array_obs.telescope
+            for v in values(nleaves_3)
+    )
 
     # `flatmap` produces a vcat'd Vector
     rows = UV.flatmap(base) do leaf

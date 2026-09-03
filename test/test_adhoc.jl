@@ -94,9 +94,11 @@ end
     # constant would pass a per-feed check while breaking every cross-hand
     # difference, so the spread is taken across feeds together.
     for ap in 1:nap
-        d = [zs.phase[a, f, ap] - pin.phase[a, f, ap]
-             for a in 1:nant for f in 1:2
-             if zs.covered[a, f, ap] && pin.covered[a, f, ap]]
+        d = [
+            zs.phase[a, f, ap] - pin.phase[a, f, ap]
+                for a in 1:nant for f in 1:2
+                if zs.covered[a, f, ap] && pin.covered[a, f, ap]
+        ]
         length(d) < 2 && continue
         @test maximum(d) - minimum(d) ≈ 0 atol = 1.0e-8
     end
@@ -212,7 +214,7 @@ end
     # Its partner feed reads the reference block PLUS a relative block, so a row
     # would touch two parameter columns per station — outside what the node solve
     # can express. Refuse rather than silently treat it as SharedFeeds.
-    rng = MersenneTwister(0xFEED01)
+    rng = MersenneTwister(0x00FEED01)
     nant, nap = 3, 8
     bl = all_bl_a(nant)
     pols = ["PP", "PQ", "QP", "QQ"]
@@ -227,7 +229,7 @@ end
 @testset "Adhoc: a one-AP (baseline, product) is dropped, not fitted" begin
     # Its source term absorbs its single row exactly, so the row constrains no
     # station phase; admitting it would only inflate `covered`.
-    rng = MersenneTwister(0x1AF)
+    rng = MersenneTwister(0x01AF)
     nant, nap = 4, 12
     bl = all_bl_a(nant)
     pols = ["PP", "PQ", "QP", "QQ"]
@@ -740,7 +742,7 @@ end
 # seed-only tracks where weak data dominates, and stay equivalent where the
 # seed was already near-optimal.
 @testset "Adhoc: complex-domain refinement exploits weak baselines" begin
-    function screen_scenario(snrs; seed = 0xADC, nap = 240, nant = 6)
+    function screen_scenario(snrs; seed = 0x0ADC, nap = 240, nant = 6)
         rng = MersenneTwister(seed)
         bl = all_bl_a(nant)
         pols = ["PP", "QQ"]

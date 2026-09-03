@@ -1,4 +1,3 @@
-
 """
     AntabGainCurve(dpfu, poly)
 
@@ -209,9 +208,9 @@ end
 
 # Strip an inline `!`-introduced comment.
 _strip_comment(line::AbstractString) =
-    let i = findfirst('!', line)
-        i === nothing ? line : line[1:prevind(line, i)]
-    end
+let i = findfirst('!', line)
+    i === nothing ? line : line[1:prevind(line, i)]
+end
 
 """
     load_antab(path::AbstractString; year::Union{Nothing, Int} = nothing) -> AntabCalibration

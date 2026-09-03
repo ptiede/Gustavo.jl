@@ -119,8 +119,10 @@ function validate_bandpass(::AbstractBandpassSmoother, model::BandpassModel)
 end
 function solve_bandpass! end
 solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup, model::BandpassModel; gauge) =
-    error("$(typeof(sm)) does not implement the bandpass smoother interface: define " *
-        "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup, model; gauge).")
+    error(
+    "$(typeof(sm)) does not implement the bandpass smoother interface: define " *
+        "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup, model; gauge)."
+)
 
 """
     accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow; derotate = true)
@@ -173,16 +175,16 @@ function accumulate_bandpass!(
                 # Band-averaged residual phase for this AP (the per-AP time phase).
                 acc = zero(eltype(V))
                 for c in axes(V, Frequency)
-                    w = W[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
-                    vv = V[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
+                    w = W[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
+                    vv = V[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
                     cond = (w > 0 && isfinite(w) && isfinite(vv))
                     acc += ifelse(cond, w * vv, zero(eltype(V)))
                 end
                 rot = ifelse(abs(acc) > 0, conj(acc) / abs(acc), one(eltype(V))) # cis(-angle(acc)): de-rotate this AP
             end
             for c in axes(V, Frequency)
-                w = W[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
-                vv = V[Frequency=c, Ti=tt, Baseline=bi, Pol=p]
+                w = W[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
+                vv = V[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
                 cond = (w > 0 && isfinite(w) && isfinite(vv))
                 gc = g_ci[c]
                 rbar_bp[idx, p, gc] += ifelse(cond, w * vv * rot, zero(eltype(V)))
@@ -192,7 +194,6 @@ function accumulate_bandpass!(
     end
     return rbar_bp, wbar_bp
 end
-
 
 
 # Free per-segment closure seed for the phase bandpass: the globally-closing
@@ -1108,5 +1109,3 @@ function select_scans(sel::CoverageTopup, scans)
     end
     return sort!(vcat(picked, extra))
 end
-
-

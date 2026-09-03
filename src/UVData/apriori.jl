@@ -1,4 +1,3 @@
-
 # ECEF (m) → geodetic (lat_rad, lon_rad, h_m). WGS84.
 function _ecef_to_geodetic(xyz::AbstractVector{<:Real})
     a = 6378137.0                              # WGS84 semi-major axis (m)

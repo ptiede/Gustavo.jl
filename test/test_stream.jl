@@ -155,22 +155,22 @@ end
 # the transform contract and the pass runner.
 module StreamingWithoutFringe
 
-using Gustavo.Streaming
-import Gustavo.Streaming: apply_transform!
+    using Gustavo.Streaming
+    import Gustavo.Streaming: apply_transform!
 
-struct HalveWeights <: AbstractDataTransform end
-apply_transform!(::HalveWeights, stack, win; executor = SerialScheduler()) =
-    (stack[:weights] .*= 0.5; nothing)
+    struct HalveWeights <: AbstractDataTransform end
+    apply_transform!(::HalveWeights, stack, win; executor = SerialScheduler()) =
+        (stack[:weights] .*= 0.5; nothing)
 
-# One pass: materialize every group through the chain and
-# report each group's total weight.
-function pass(uvset, geom)
-    stream = scan_stream(uvset; geom = geom, transforms = (HalveWeights(),))
-    sums = map_groups(stream) do spec
-        sum(first(materialize_cube(stream, spec))[:weights])
+    # One pass: materialize every group through the chain and
+    # report each group's total weight.
+    function pass(uvset, geom)
+        stream = scan_stream(uvset; geom = geom, transforms = (HalveWeights(),))
+        sums = map_groups(stream) do spec
+            sum(first(materialize_cube(stream, spec))[:weights])
+        end
+        return stream, sums
     end
-    return stream, sums
-end
 
 end
 

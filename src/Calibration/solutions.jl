@@ -408,8 +408,6 @@ function step_solution(sol::CalibrationSolution, name::Symbol)
 end
 
 
-
-
 # ── Geometry from a UVSet ────────────────────────────────────────────────────
 
 """
@@ -639,9 +637,11 @@ function UVData.apply_calibration(
         # laziness before `materialize_leaf` collapses it.
         private = is_lazy(leaf)
         leaf = materialize_leaf(leaf)
-        private || (leaf = rebuild_visibilities(
-            leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights])),
-        ))
+        private || (
+            leaf = rebuild_visibilities(
+                leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights])),
+            )
+        )
         win = leaf_window(target, leaf)
         g = _composed_gains(                                 # (nchan_leaf, nti_leaf, nant, 2)
             sol, target;

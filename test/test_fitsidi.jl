@@ -37,13 +37,13 @@ function build_synth_idi_uvset(;
     # Antennas (NOSTA = 1:nant).
     ants_v = [
         UV.Antenna(;
-                name = "A$(i)",
-                station_xyz = Float64[100.0 * i, 200.0 * i, 300.0 * i],
-                mount = UV.MountAltAz(),
-                nominal_basis = (RPol(), LPol()),
-                response = Diagonal(ones(ComplexF32, 2)),
-                pol_angles = (0.0f0, 0.0f0),
-            )
+            name = "A$(i)",
+            station_xyz = Float64[100.0 * i, 200.0 * i, 300.0 * i],
+            mount = UV.MountAltAz(),
+            nominal_basis = (RPol(), LPol()),
+            response = Diagonal(ones(ComplexF32, 2)),
+            pol_angles = (0.0f0, 0.0f0),
+        )
             for i in 1:nant
     ]
     antennas = UV.AntennaTable(
@@ -369,7 +369,7 @@ const _F32EPS = 1.0f-4
             nant = 3, nspw = 2, nchan = 4, nscan = 1, ntime = 2,
             include_autocorr = true,
             vis_fn = (band, ti, bl, p, c) ->
-                ComplexF32(band + 0.1 * ti + 0.37 * bl + 0.001 * p + 0.0001 * c, -0.5),
+            ComplexF32(band + 0.1 * ti + 0.37 * bl + 0.001 * p + 0.0001 * c, -0.5),
         )
         path = tempname() * ".idifits"
         try

@@ -131,9 +131,11 @@ _POL_FEED_LETTERS = ('P', 'Q', 'R', 'L', 'X', 'Y')
 
 function _canonical_pol_label(label::AbstractString)
     s = uppercase(strip(String(label)))
-    length(s) == 2 || throw(ArgumentError(
-        "pol_index: expected a 2-character label like \"PP\" / \"RR\" / \"XY\", got \"$label\""
-    ))
+    length(s) == 2 || throw(
+        ArgumentError(
+            "pol_index: expected a 2-character label like \"PP\" / \"RR\" / \"XY\", got \"$label\""
+        )
+    )
     return string(_canonical_feed(s[1]), _canonical_feed(s[2]))
 end
 _canonical_feed(c::Char) = c in ('P', 'R', 'X') ? 'P' :
@@ -166,9 +168,9 @@ pol_index(x, label::Tuple{<:PolTypes, <:PolTypes}) =
     _pol_index_lookup(x, _canonical_pol_label(label))
 
 _pol_index_lookup(products::AbstractVector{<:AbstractString}, canon::AbstractString) =
-    let i = findfirst(==(canon), products)
-        i === nothing ? throw(KeyError(canon)) : i
-    end
+let i = findfirst(==(canon), products)
+    i === nothing ? throw(KeyError(canon)) : i
+end
 _pol_index_lookup(x, canon) = _pol_index_lookup(pol_products(x), canon)
 
 """

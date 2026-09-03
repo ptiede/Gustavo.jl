@@ -57,13 +57,15 @@
     @testset "CalFunction: stack metadata + targeted mutation" begin
         seen = []
         probe = FP.CalFunction() do stack, win
-            push!(seen, (;
-                source = source_name(stack), scan = scan_name(stack),
-                nchan = length(frequencies(stack)),
-                ant_names = String.(antennas(stack).name),
-                ci = copy(win.chan_idx), ti = copy(win.ti_idx),
-                pol_products = pol_products(stack),
-            ))
+            push!(
+                seen, (;
+                    source = source_name(stack), scan = scan_name(stack),
+                    nchan = length(frequencies(stack)),
+                    ant_names = String.(antennas(stack).name),
+                    ci = copy(win.chan_idx), ti = copy(win.ti_idx),
+                    pol_products = pol_products(stack),
+                )
+            )
         end
         stp = FP.scan_stream(uvset; geom = geom, transforms = (probe,))
         stack, win = FP.materialize_cube(stp, stp.groups[1])
@@ -130,10 +132,12 @@
         captured = []
         probe = FP.CalFunction() do stack, win
             lock(lk) do
-                push!(captured, (;
-                    stack, source = source_name(stack),
-                    ant_names = String.(antennas(stack).name),
-                ))
+                push!(
+                    captured, (;
+                        stack, source = source_name(stack),
+                        ant_names = String.(antennas(stack).name),
+                    )
+                )
             end
         end
         stp = FP.scan_stream(uvset; geom = geom, transforms = (probe, FP.FlagChannels(mask)))

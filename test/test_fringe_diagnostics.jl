@@ -48,8 +48,8 @@ using HDF5
 
     @testset "suspect_fringes (recorded detection table)" begin
         # The solve records every MEASURED cell as parallel plain vectors
-         # (HDF5-representable), on the fringe step's own info, with `det_detected`
-         # marking the ones it accepted as real fringes.
+        # (HDF5-representable), on the fringe step's own info, with `det_detected`
+        # marking the ones it accepted as real fringes.
         info = sol.info
         inf = sol[:fringe].steps[1].info
         n = length(inf.det_pfa)

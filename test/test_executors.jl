@@ -129,7 +129,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         stack, _ = FP.materialize_cube(st, st.groups[1])
         stack0, _ = FP.materialize_cube(st0, st0.groups[1])
         @test isequal(stack[:vis], stack0[:vis]) && isequal(stack[:weights], stack0[:weights])
-        r  = FP.search_scan(stack,  st.geom,  FP.FringeSearch(); ngroups = 1)
+        r = FP.search_scan(stack, st.geom, FP.FringeSearch(); ngroups = 1)
         r0 = FP.search_scan(stack0, st0.geom, FP.FringeSearch(); ngroups = 1)
         # Same detections whichever inner executor runs the fan-out, per layer
         # (subsumes any derived aggregate like max SNR).

@@ -247,9 +247,11 @@ metadata — no reads), consumed by coverage-aware selections and available to
 """
 function select_groups(stream::ScanStream, sel::AbstractScanSelection; snr = nothing)
     recs = [
-        (; index = s.index, source = s.source, scan = s.scan,
+        (;
+            index = s.index, source = s.source, scan = s.scan,
             snr = snr === nothing ? NaN : Float64(snr[s.index]),
-            stations = _spec_stations(s))
+            stations = _spec_stations(s),
+        )
             for s in stream.groups
     ]
     return stream.groups[select_scans(sel, recs)]
@@ -454,9 +456,9 @@ caller's `UVSet` is never mutated.
 function materialize_leaves(stream::ScanStream, spec::ScanGroupSpec; executor = inner_executor(stream))
     keyed = [
         (k, m) for ((k, _), m) in zip(
-            spec.leaves,
-            UVData.materialize_group([l for (_, l) in spec.leaves]; executor),
-        )
+                spec.leaves,
+                UVData.materialize_group([l for (_, l) in spec.leaves]; executor),
+            )
     ]
     isempty(stream.transforms) && return keyed
     private = all(((_, l),) -> UVData.is_lazy(l), spec.leaves)

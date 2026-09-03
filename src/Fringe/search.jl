@@ -805,10 +805,12 @@ end
 # reads the frequency axis; an explicit algorithm passes through untouched.
 _resolve_algorithm(alg::AbstractSearchAlgorithm, freqs, fax::_Axis) = alg
 function _resolve_algorithm(alg::Symbol, freqs, fax::_Axis)
-    alg === :auto || throw(ArgumentError(
+    alg === :auto || throw(
+        ArgumentError(
             "FringeSearch: algorithm must be :auto or an AbstractSearchAlgorithm " *
                 "(FullGrid(), HierarchicalMBD()); got :$(alg)"
-        ))
+        )
+    )
     # Hierarchical only when the common grid is mostly padding (> 4× the real
     # channel count) — else the single FFT is simple and fast enough.
     hierarchical = !fax.degenerate && issorted(freqs) && fax.n > 4 * length(freqs)
@@ -820,9 +822,11 @@ end
 # dispatch is on the algorithm alone, so the remaining arguments stay
 # unannotated and an out-of-package method is unambiguously more specific.
 _mbd_axes(alg::AbstractSearchAlgorithm, freqs, fax, tax, rates, opts, ::Type{C}) where {C} =
-    throw(ArgumentError(
+    throw(
+    ArgumentError(
         "FringeSearch: $(typeof(alg)) defines no `Gustavo.Fringe._mbd_axes` method"
-    ))
+    )
+)
 
 _mbd_axes(::FullGrid, freqs, fax, tax, rates, opts, ::Type{C}) where {C} = nothing
 

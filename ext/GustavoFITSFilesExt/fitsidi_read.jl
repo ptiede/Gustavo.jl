@@ -106,13 +106,13 @@ function _build_idi_antenna_table(ag_hdu, an_hdu)
 
     antennas = [
         Antenna(;
-                name = names[i],
-                station_xyz = station_xyz[i],
-                mount = mounts[i],
-                nominal_basis = nominal_basis[i],
-                response = response[i],
-                pol_angles = pol_angles[i],
-            )
+            name = names[i],
+            station_xyz = station_xyz[i],
+            mount = mounts[i],
+            nominal_basis = nominal_basis[i],
+            response = response[i],
+            pol_angles = pol_angles[i],
+        )
             for i in 1:nant
     ]
 

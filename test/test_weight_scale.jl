@@ -49,8 +49,10 @@
             pairs = collect(UVP.baselines(lf).pairs)
             @test parent(lf[:vis]) == parent(lp[:vis])
             for (bi, (a, b)) in enumerate(pairs)
-                @test all(parent(lf[:weights])[:, :, bi, :] .≈
-                          Float32(ws[a] * ws[b]) .* parent(lp[:weights])[:, :, bi, :])
+                @test all(
+                    parent(lf[:weights])[:, :, bi, :] .≈
+                        Float32(ws[a] * ws[b]) .* parent(lp[:weights])[:, :, bi, :]
+                )
             end
         end
     end

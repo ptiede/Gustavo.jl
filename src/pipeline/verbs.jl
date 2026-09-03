@@ -235,10 +235,12 @@ function _compose_output_chain(declared, extra_reduces)
     ctx = CalibrationContext()
     for s in declared
         if s isa AprioriAmplitude
-            push!(fs, uv -> apply_calibration(
-                uv, s.spw_cals;
-                min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
-            ))
+            push!(
+                fs, uv -> apply_calibration(
+                    uv, s.spw_cals;
+                    min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
+                )
+            )
         elseif s isa ReduceStep
             f, ctx = prepare_reducer(s, ctx)
             push!(fs, f)
@@ -483,8 +485,10 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, prior_solutions; sink = 
                     executor = inner_executor(ctx.stream), apply_flags = sink.apply_flags,
                 )
             end
-            (; index = gspec.index, decode = (tb - ta) / 1.0e9,
-                work = (tc - tb) / 1.0e9, reduce = (time_ns() - tc) / 1.0e9, r, out)
+            (;
+                index = gspec.index, decode = (tb - ta) / 1.0e9,
+                work = (tc - tb) / 1.0e9, reduce = (time_ns() - tc) / 1.0e9, r, out,
+            )
         end
         ctx.scratch[:pass_results] = results
         sink === nothing || (ctx.scratch[:sink_pairs] = [res.out for res in results])
@@ -493,6 +497,7 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, prior_solutions; sink = 
         info = finish_pass!(step, ctx)
         get(info, :repeat_pass, false) || return _pass_diagnostics(info, results, ngroups, t0)
     end
+    return
 end
 
 # ONE streaming pass shared by a run of scan-local steps (see
@@ -579,8 +584,10 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
                 executor = inner_executor(stream), apply_flags = sink.apply_flags,
             )
         end
-        (; index = gspec.index, decode = (tb - ta) / 1.0e9, work,
-            reduce = (time_ns() - tc) / 1.0e9, rs, out)
+        (;
+            index = gspec.index, decode = (tb - ta) / 1.0e9, work,
+            reduce = (time_ns() - tc) / 1.0e9, rs, out,
+        )
     end
     sink === nothing || (ctx_n.scratch[:sink_pairs] = [res.out for res in results])
     infos = NamedTuple[]

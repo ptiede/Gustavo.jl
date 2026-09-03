@@ -72,7 +72,7 @@ end
 end
 
 @testset "WhittakerShape smooths, interpolates, and spans Free ↔ a line" begin
-    rng = MersenneTwister(0x5A1AD)
+    rng = MersenneTwister(0x0005A1AD)
     x = _spw_freqs(40)
     u = (x .- first(x)) ./ (last(x) - first(x))
     ytrue = 0.5 .* sinpi.(2 .* u)
@@ -134,7 +134,7 @@ end
 end
 
 @testset "ARShape interpolates gaps and fits its hypers" begin
-    rng = MersenneTwister(0xC0FFEE)
+    rng = MersenneTwister(0x00C0FFEE)
     n = 64
     x = _spw_freqs(n)
     ν = 12.0e6

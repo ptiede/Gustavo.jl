@@ -524,7 +524,7 @@ end
 Return a new leaf sharing `part`'s `uvw` layer and metadata, with
 `vis`/`weights` swapped in. A cell is flagged iff its weight is `≤ 0`.
 """
-function rebuild_visibilities(part::DimensionalData.AbstractDimTree, vis=part[:vis], weights=part[:weights], uvw=part[:uvw])
+function rebuild_visibilities(part::DimensionalData.AbstractDimTree, vis = part[:vis], weights = part[:weights], uvw = part[:uvw])
     vis_l = _rewrap_like(vis, part[:vis])
     w_l = _rewrap_like(weights, part[:weights])
     uvw_l = _rewrap_like(uvw, part[:uvw])

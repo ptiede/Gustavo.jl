@@ -82,9 +82,11 @@ end
 
     # A vector that matches neither axis is a shape error, not a search failure.
     @test_throws DimensionMismatch FR.baseline_fringe_search(
-        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0)
+        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0
+    )
     @test_throws "matches neither" FR.baseline_fringe_search(
-        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0)
+        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0
+    )
 end
 
 @testset "Fringe search: shape validation" begin
@@ -94,13 +96,17 @@ end
     V = ones(ComplexF64, nchan, nt)
 
     @test_throws DimensionMismatch FR.baseline_fringe_search(
-        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0)
+        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0
+    )
     @test_throws "same shape" FR.baseline_fringe_search(
-        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0)
+        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0
+    )
     @test_throws DimensionMismatch FR.baseline_fringe_search(
-        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0)
+        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0
+    )
     @test_throws "expected (length(freqs), length(times))" FR.baseline_fringe_map(
-        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0)
+        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0
+    )
 end
 
 @testset "Fringe search: multi-band gapped frequency axis" begin
@@ -451,14 +457,16 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
     W = ones(Float64, size(V))
     d_probe = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = probe)
     d_full = FR.baseline_fringe_search(
-        V, W, freqs, times, f0, t0; opts = FR.FringeSearch(algorithm = FR.FullGrid()))
+        V, W, freqs, times, f0, t0; opts = FR.FringeSearch(algorithm = FR.FullGrid())
+    )
     @test d_probe.delay == d_full.delay
     @test d_probe.snr == d_full.snr
 
     # No silent fallback: an algorithm with no `_mbd_axes` method is an error,
     # not a quiet switch to a different search.
     @test_throws "defines no `Gustavo.Fringe._mbd_axes` method" FR._search_axes(
-        freqs, times, FR.FringeSearch(algorithm = _ProbeUnimplemented()), ComplexF64)
+        freqs, times, FR.FringeSearch(algorithm = _ProbeUnimplemented()), ComplexF64
+    )
 
     # The sentinel is the ONLY Symbol accepted; the retired :full/:mbd names
     # fail loudly rather than being silently reinterpreted.
@@ -466,6 +474,7 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
         opts = FR.FringeSearch(algorithm = bogus)
         @test_throws ArgumentError FR._search_axes(freqs, times, opts, ComplexF64)
         @test_throws "algorithm must be :auto or an AbstractSearchAlgorithm" FR._search_axes(
-            freqs, times, opts, ComplexF64)
+            freqs, times, opts, ComplexF64
+        )
     end
 end

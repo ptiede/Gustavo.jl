@@ -47,8 +47,8 @@ end
     # baseline's denominator fails the 3σ power-detection guard — NaN, never a
     # fabricated (clamped) η.
     rep = _coherence_fixture_report(snr_cell = 0.3, noise_only_bls = [2, 3])
-    @test all(η -> 0.90 <= η <= 1.0, rep.time.eta)
-    @test rep.time.eta_baseline[end, 1] > 0.90
+    @test all(η -> 0.9 <= η <= 1.0, rep.time.eta)
+    @test rep.time.eta_baseline[end, 1] > 0.9
     @test isnan(rep.time.eta_baseline[end, 2])
     @test isnan(rep.time.eta_baseline[end, 3])
 

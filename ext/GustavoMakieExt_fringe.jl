@@ -255,8 +255,10 @@ function Fringe.plot_baseline_fringes(
     # out of this scan), so the grid isn't padded with blank panels. Guard against
     # dropping everything.
     if drop_empty
-        keep = [bi for bi in bls
-                if any(isfinite, @view(after[:, bi, p])) || any(isfinite, @view(before[:, bi, p]))]
+        keep = [
+            bi for bi in bls
+                if any(isfinite, @view(after[:, bi, p])) || any(isfinite, @view(before[:, bi, p]))
+        ]
         isempty(keep) || (bls = keep)
     end
 
@@ -267,9 +269,9 @@ function Fringe.plot_baseline_fringes(
     if layout === :triangle
         cells = [
             (
-                    min(pos[data.bl_pairs[bi][1]], pos[data.bl_pairs[bi][2]]),
-                    max(pos[data.bl_pairs[bi][1]], pos[data.bl_pairs[bi][2]]),
-                ) for bi in bls
+                min(pos[data.bl_pairs[bi][1]], pos[data.bl_pairs[bi][2]]),
+                max(pos[data.bl_pairs[bi][1]], pos[data.bl_pairs[bi][2]]),
+            ) for bi in bls
         ]
         nrows, ncols = M, M
     else

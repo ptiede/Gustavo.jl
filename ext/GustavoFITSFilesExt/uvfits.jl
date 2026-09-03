@@ -248,13 +248,13 @@ function _build_antenna_table(an_hdu)
 
     antennas = [
         Antenna(;
-                name = names[i],
-                station_xyz = station_xyz[i],
-                mount = mnts[i],
-                nominal_basis = nominal_basis[i],
-                response = response[i],
-                pol_angles = pol_angles[i],
-            )
+            name = names[i],
+            station_xyz = station_xyz[i],
+            mount = mnts[i],
+            nominal_basis = nominal_basis[i],
+            response = response[i],
+            pol_angles = pol_angles[i],
+        )
             for i in 1:nant
     ]
 
@@ -849,7 +849,7 @@ function _load_uvfits_flat(path)
             end
             record_spw_index = [
                 get(remap, Int32(s)) do
-                        error("record FRQSEL $s not present in FQ table $(fq_frqsels)")
+                    error("record FRQSEL $s not present in FQ table $(fq_frqsels)")
                 end for s in record_spw_index
             ]
         end
@@ -1564,9 +1564,9 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
     freqid_v = Int(get(first_setup.extras, :frqsel, Int32(1)))
     an_hdus = HDU[
         _build_an_hdu(
-                ants, root.array_obs, ref_freq(first_setup);
-                extver = extver_lookup[ants], no_if = no_if_v, freqid = freqid_v,
-            ) for ants in unique_antennas
+            ants, root.array_obs, ref_freq(first_setup);
+            extver = extver_lookup[ants], no_if = no_if_v, freqid = freqid_v,
+        ) for ants in unique_antennas
     ]
     fq_hdu = _build_fq_hdu(setups, [freqid_lookup[fs] for fs in setups])
     nx_hdu = _build_nx_hdu(

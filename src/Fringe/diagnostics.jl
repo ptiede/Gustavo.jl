@@ -38,9 +38,9 @@ function fringe_snr_table(sol::CalibrationSolution)
     ncells = get(info, :scan_ncells, Float64[])
     return [
         (;
-                scan = s, max_snr = Float64(snr[s]), ncomp = ncomp,
-                pfa = s <= length(ncells) ? fringe_pfa(snr[s], ncells[s]) : NaN,
-            )
+            scan = s, max_snr = Float64(snr[s]), ncomp = ncomp,
+            pfa = s <= length(ncells) ? fringe_pfa(snr[s], ncells[s]) : NaN,
+        )
             for s in eachindex(snr)
     ]
 end
@@ -110,9 +110,9 @@ function fringe_scan_groups(uvset::UVSet, sol::CalibrationSolution)
     snr = step === nothing ? Float64[] : get(step.info, :scan_snr, Float64[])
     return [
         (;
-                scan_index = gi, source = g.source, scan = g.scan,
-                max_snr = gi <= length(snr) ? Float64(snr[gi]) : NaN,
-            )
+            scan_index = gi, source = g.source, scan = g.scan,
+            max_snr = gi <= length(snr) ? Float64(snr[gi]) : NaN,
+        )
             for (gi, g) in enumerate(specs)
     ]
 end
@@ -280,8 +280,8 @@ function fringe_station_solutions(sol::CalibrationSolution)
             push!(
                 out, (;
                     scan = k, station = a, feed = f,
-                    delay_ns = hd ? d * 1e9 : NaN,       # τ (s) → ns
-                    rate_mHz = hr ? r * 1e3 : NaN,       # ṙ (Hz) → mHz
+                    delay_ns = hd ? d * 1.0e9 : NaN,       # τ (s) → ns
+                    rate_mHz = hr ? r * 1.0e3 : NaN,       # ṙ (Hz) → mHz
                     phase_deg = hp ? rad2deg(p) : NaN,   # φ (rad) → deg
                 ),
             )
@@ -892,9 +892,9 @@ function fringe_station_flags(sol::CalibrationSolution)
     scname(s) = s <= length(sol.geom.scan_names) ? String(sol.geom.scan_names[s]) : string(s)
     rows = [
         (;
-                scan = Int(info.flagged_scan[i]), scan_name = scname(Int(info.flagged_scan[i])),
-                ant = Int(info.flagged_ant[i]), station = sta(Int(info.flagged_ant[i])),
-            )
+            scan = Int(info.flagged_scan[i]), scan_name = scname(Int(info.flagged_scan[i])),
+            ant = Int(info.flagged_ant[i]), station = sta(Int(info.flagged_ant[i])),
+        )
             for i in eachindex(info.flagged_ant)
     ]
     sort!(rows; by = r -> (r.scan, r.ant))
@@ -934,10 +934,10 @@ function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
     accepted(i) = detected === nothing || detected[i]
     rows = [
         (;
-                scan = Int(info.det_scan[i]), a = Int(info.det_ant_a[i]), b = Int(info.det_ant_b[i]),
-                sta_a = sta(Int(info.det_ant_a[i])), sta_b = sta(Int(info.det_ant_b[i])),
-                pol = String(info.det_pol[i]), snr = Float64(info.det_snr[i]), pfa = Float64(info.det_pfa[i]),
-            )
+            scan = Int(info.det_scan[i]), a = Int(info.det_ant_a[i]), b = Int(info.det_ant_b[i]),
+            sta_a = sta(Int(info.det_ant_a[i])), sta_b = sta(Int(info.det_ant_b[i])),
+            pol = String(info.det_pol[i]), snr = Float64(info.det_snr[i]), pfa = Float64(info.det_pfa[i]),
+        )
             for i in eachindex(info.det_pfa) if accepted(i) && info.det_pfa[i] > pfa_max
     ]
     sort!(rows; by = r -> r.pfa, rev = true)
