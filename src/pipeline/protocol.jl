@@ -276,8 +276,8 @@ step evaluates or mutates another step's θ.
 `θ` is a [`ComponentVector`](@ref) over `layout.template`'s axes — its named
 blocks (`θ.phase.<name>` / `θ.logamp.<name>`) are directly addressable. Once a
 step is finished and wrapped in a [`CalibrationSolution`](@ref),
-[`component_dimarray`](@ref) wraps one component's block as a labelled,
-dimensioned `DimArray` on demand.
+[`parameters`](@ref) wraps its components' blocks as labelled, dimensioned
+`DimArray`s on demand.
 """
 mutable struct SolveContext{
         M <: StationGainModel, L <: ParameterLayout, E <: GainEvaluator,

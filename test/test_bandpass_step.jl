@@ -69,12 +69,12 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # Stage provenance: the bandpass stage's own model carries only the
         # bandpass component (nothing merged in from the fringe stage), so it is
         # the sole entry of each group and spans that group's whole θ block.
-        @test stage_names(sol_n) == [:fringe, :bandpass]
+        @test keys(sol_n) == [:fringe, :bandpass]
         @test length(CAL.phase_components(bn.model)) == 1 && length(CAL.logamp_components(bn.model)) == 1
         @test _bp_phase(bn) == _blk(bn, 1) && _bp_amp(bn) == _blk(bn, bn.layout.nphase + 1)
         @test stage_info(sol_n, :bandpass).nscans == length(FP.scan_stream(uvset).groups)
         @test stage_info(sol_n, :bandpass).t_pass > 0
-        @test :refine ∉ stage_names(sol_n)     # no DispersionSBDFit step in this pipeline at all
+        @test :refine ∉ keys(sol_n)     # no DispersionSBDFit step in this pipeline at all
     end
 
     @testset "new-engine fold is deterministic across ntasks" begin
@@ -144,7 +144,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # so the evaluated bandpass gain is constant across the block.
         plan = _bp_phase_plan(bg)
         @test plan.fseg_id == repeat(1:(nglob ÷ k), inner = k)
-        _, gbp = FP.fringe_bandpass_spectrum(sol_g)
+        gbp = parent(gains(sol_g[:bandpass, :phase, :bandpass]; Ti = 1))
         for a in 1:nant, f in 1:2, b in 1:(nglob ÷ k)
             cs = ((b - 1) * k + 1):(b * k)
             @test all(≈(gbp[first(cs), a, f]), gbp[cs, a, f])

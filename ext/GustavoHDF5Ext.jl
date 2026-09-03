@@ -91,7 +91,7 @@ function save_solution_hdf5(
         buf = IOBuffer()
         serialize(
             buf, (;
-                version = 4, sol.steps, sol.geom, sol.info,
+                version = 5, sol.steps, sol.geom, sol.info,
                 transforms = _serializable_transforms(sol.transforms),
                 postcal = _serializable_transforms(sol.postcal),
             ),
@@ -108,11 +108,10 @@ function load_solution_hdf5(path::AbstractString)
             error("load_solution_hdf5: $path has no julia/blob (not written by Gustavo, or gains-only export)")
         deserialize(IOBuffer(read(f["julia"]["blob"])))
     end
-    w.version == 4 || error(
+    w.version == 5 || error(
         "load_solution_hdf5: unsupported julia/blob version $(w.version) — saved by an " *
-            "incompatible Gustavo (version 3 and earlier did not record the solution's " *
-            "`transforms`/`postcal` chains, so such a file cannot reproduce the correction it " *
-            "was fit with); re-solve to produce a current file.",
+            "incompatible Gustavo (the solution shape changed); re-solve to produce a " *
+            "current file.",
     )
     return CalibrationSolution(w.steps, w.geom, w.info; transforms = w.transforms, postcal = w.postcal)
 end

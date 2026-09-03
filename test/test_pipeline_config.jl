@@ -146,7 +146,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         # A standalone Bandpass fit needs no FringeFit step, no
         # pipeline-level anchor check, and no fringe-estimator diagnostics.
         sol = fit(Bandpass(), uvset; gauge = PinAntenna(2))
-        @test stage_names(sol) == [:bandpass]
+        @test keys(sol) == [:bandpass]
         @test !haskey(sol.info, :search)
         @test sol.info.nant == 4
         _, out = fitcalibrate(Bandpass(), uvset; gauge = PinAntenna(2))

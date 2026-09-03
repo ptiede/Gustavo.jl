@@ -87,14 +87,14 @@ end
     sol_n = fit(pipe, uvset)
 
     @testset "3-scan full pipeline: structure, determinism, coherence" begin
-        @test Gustavo.stage_names(sol_n) == [:fringe, :bandpass, :adhoc]
+        @test keys(sol_n) == [:fringe, :bandpass, :adhoc]
         adhoc_step = sol_n[:adhoc].steps[1]
         phases = CAL.phase_components(adhoc_step.model)
         # The adhoc block is really solved (nonzero) on every scan.
         ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(adhoc_step, ipi))
         @test adhoc_step.info.t_pass > 0
-        @test :refine ∉ Gustavo.stage_names(sol_n)     # no DispersionSBDFit step in this pipeline at all
+        @test :refine ∉ keys(sol_n)     # no DispersionSBDFit step in this pipeline at all
 
         # θ bit-deterministic across group concurrency (per-block partials fold
         # in a fixed order regardless of ntasks/inner).
@@ -145,7 +145,7 @@ end
         )
         sol_nd = fit(pd, uvd)
         @test stage_info(sol_nd, :refine).dispersion_applied
-        @test Gustavo.stage_names(sol_nd) == [:fringe, :refine, :bandpass, :adhoc]
+        @test keys(sol_nd) == [:fringe, :refine, :bandpass, :adhoc]
 
         # Injected per-station dTEC recovered on EVERY scan — DispersionSBDFit's
         # own pass covers the whole track unconditionally, same as the bandpass
@@ -180,7 +180,7 @@ end
             ),
             uvset,
         )
-        @test Gustavo.stage_names(sol_fs) == [:fringe, :adhoc]
+        @test keys(sol_fs) == [:fringe, :adhoc]
         @test !any(s -> haskey(s.layout.plantree.phase, :bandpass), sol_fs.steps)
         adhoc_step_fs = sol_fs[:adhoc].steps[1]
         phases = CAL.phase_components(adhoc_step_fs.model)
@@ -202,7 +202,7 @@ end
         pre = FP.ApplySolution(CAL.step_solution(sol_n, :fringe))
 
         sol_fused = fit(pre |> ds |> TemporalSmoother(adhoc), uvset)
-        @test Gustavo.stage_names(sol_fused) == [:refine, :adhoc]
+        @test keys(sol_fused) == [:refine, :adhoc]
         # Neither half of the fused run is vacuous.
         @test sol_fused[:refine].steps[1].layout.nθ > 0
         @test any(!=(0), sol_fused[:refine].steps[1].θ)
@@ -224,7 +224,7 @@ end
         # default chain is one run of THREE scan-local steps — one read of the
         # data — and still ≡ the same steps fit separately.
         sol_3 = fit(FringeFit() |> ds |> TemporalSmoother(adhoc), uvset)
-        @test Gustavo.stage_names(sol_3) == [:fringe, :refine, :adhoc]
+        @test keys(sol_3) == [:fringe, :refine, :adhoc]
         sol_f1 = fit(FringeFit(), uvset)
         pre_f = FP.ApplySolution(CAL.step_solution(sol_f1, :fringe))
         sol_r1 = fit(pre_f |> ds, uvset)

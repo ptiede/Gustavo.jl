@@ -3,13 +3,14 @@
 # Implements the plot stubs declared in `Gustavo.Fringe`. Each entry point has a
 # `(parent, sol; …)` form that draws into a `Figure`/`GridPosition` and a
 # `(sol; …)` convenience form that creates and returns a `Figure`. Gains are
-# pulled through the pure extractors in `Fringe/diagnostics.jl`, so all the data
-# wrangling stays Makie-free and tested without a backend.
+# pulled through `gains` on a solution selection, so all the data wrangling
+# stays Makie-free and tested without a backend.
 
 import Gustavo.Fringe
-using Gustavo.UVData: UVSet
-using Gustavo.Calibration: CalibrationSolution, _freq_group_ranges
-using Gustavo.Fringe: fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_snr_table
+using Gustavo.UVData: UVSet, Frequency
+using Gustavo.Calibration: CalibrationSolution, gains, _freq_group_ranges
+using DimensionalData: lookup, Ti
+using Gustavo.Fringe: fringe_snr_table
 using Gustavo.Fringe: BaselineFringeData, baseline_fringe_data, baseline_pol_index
 using Gustavo.Fringe: FringeSearchMap, BaselineFringeMap, fringe_search_map, _fmt_pfa
 
@@ -33,8 +34,12 @@ function Fringe.plot_fringe_spectrum(
     )
     # `residual = true`: plot the per-channel bandpass ripple with the per-scan delay
     # slope removed (readable — otherwise a big station delay wraps 2π·τ·(f−f0) across
-    # the band and hides the ripple). `false`: the full solved gain phase at time `ti`.
-    freqs, g = residual ? fringe_bandpass_spectrum(sol) : fringe_gain_spectrum(sol; ti = ti)
+    # the band and hides the ripple; the bandpass is time-invariant, so any time
+    # sample works). `false`: the full solved gain phase at time `ti`.
+    # NB: `parent` here is the Figure argument — keep the labelled DimArray and
+    # index it positionally; its lookups carry the coordinates the plot needs.
+    g = residual ? gains(sol[:bandpass, :phase, :bandpass]; Ti = 1) : gains(sol; Ti = ti)
+    freqs = lookup(g, Frequency)
     phaselab = residual ? "bandpass phase (rad)" : "phase (rad)"
     # Optional restriction to one frequency group of the (possibly gappy) channel axis.
     fglab = ""
@@ -88,7 +93,8 @@ function Fringe.plot_fringe_phases(
         sites = :all, feeds = :all, ci::Integer = 0,
     )
     ci0 = ci > 0 ? Int(ci) : argmin(abs.(sol.geom.channel_freqs .- sol.geom.f0))
-    times, g = fringe_gain_time_series(sol; ci = ci0)
+    g = gains(sol; Frequency = ci0)
+    times = lookup(g, Ti)
     fghz = sol.geom.channel_freqs[ci0] / 1.0e9
     nant = size(g, 2)
     names = get(sol.info, :ant_names, nothing)

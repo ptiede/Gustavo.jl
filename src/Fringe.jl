@@ -142,7 +142,7 @@ export default_bandpass_terms
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 export bandpass_derotate, validate_bandpass_groups, solve_bandpass!, bandpass_track_report
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
-export fringe_gain_spectrum, fringe_bandpass_spectrum, fringe_gain_time_series, fringe_station_solutions
+export fringe_station_solutions
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups
 export fringe_freq_group_stats, fringe_freq_groups
 export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags

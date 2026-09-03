@@ -135,6 +135,21 @@ function evaluate_gains(ev::GainEvaluator, θ::AbstractVector)
     return gains
 end
 
+# The evaluation loop reads the plans' grid tables at these indices under
+# `@inbounds`, so an out-of-range index must be rejected up front — the
+# alternative is a silent read of arbitrary memory, not a `BoundsError`.
+function _check_window(idx, n::Int, argname::AbstractString, axis::AbstractString)
+    isempty(idx) && return nothing
+    lo, hi = extrema(idx)
+    (1 <= lo && hi <= n) || throw(
+        ArgumentError(
+            "evaluate_gains: $argname has indices spanning $lo:$hi, outside the " *
+                "layout's $axis grid 1:$n"
+        )
+    )
+    return nothing
+end
+
 """
     evaluate_gains(ev::GainEvaluator, θ, chan_idx, ti_idx) -> Array{Complex,4}
 
@@ -150,6 +165,8 @@ function evaluate_gains(
     lay = ev.layout
     length(θ) == lay.nθ ||
         error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
+    _check_window(chan_idx, lay.nchan, "chan_idx", "channel")
+    _check_window(ti_idx, lay.ntime, "ti_idx", "time")
     T = float(eltype(θ))
     gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
     pp = lay.plantree.phase

@@ -82,7 +82,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         sol_t, out_t = fitcalibrate(mk(DynamicScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
         sol_d, out_d = fitcalibrate(mk(GreedyScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
         @test parent(gains(sol_d)) == parent(gains(sol_t))
-        @test Gustavo.stage_names(sol_d) == Gustavo.stage_names(sol_t)
+        @test keys(sol_d) == keys(sol_t)
         for (k, leaf) in UVP.branches(out_t)
             ld = UVP.branches(out_d)[k]
             @test isequal(parent(leaf[:vis]), parent(ld[:vis]))

@@ -922,7 +922,7 @@ end
         ) |> TemporalSmoother(),
         uvset,
     )
-    @test :refine ∉ stage_names(sol0)     # no DispersionSBDFit step in this pipeline at all
+    @test :refine ∉ keys(sol0)     # no DispersionSBDFit step in this pipeline at all
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
     @test _crossband_eta(corr0) < 0.9
 
@@ -1018,7 +1018,7 @@ end
         ) |> TemporalSmoother(),
         uvset,
     )
-    @test :refine ∉ stage_names(sol0)     # no DispersionSBDFit step in this pipeline at all
+    @test :refine ∉ keys(sol0)     # no DispersionSBDFit step in this pipeline at all
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
     @test _perchan_eta(corr0, 1) < 0.9
 end

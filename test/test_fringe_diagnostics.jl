@@ -86,18 +86,20 @@ using HDF5
         @test isempty(FP.suspect_fringes(old))
     end
 
-    @testset "gain extractors" begin
-        freqs, g = FP.fringe_gain_spectrum(sol; ti = 1)
-        @test length(freqs) == length(sol.geom.channel_freqs)
+    @testset "windowed gain evaluation for plots" begin
+        # The plot entry points read a spectrum as `gains(sol; Ti = ti)` and a
+        # time series as `gains(sol; Frequency = ci)` — an integer selector
+        # windows the evaluation to that sample and drops the dimension.
+        g = gains(sol; Ti = 1)
         @test size(g) == (length(sol.geom.channel_freqs), CAL._nant(sol), 2)
         @test eltype(g) <: Complex
+        @test lookup(g, UVP.Frequency) == sol.geom.channel_freqs
 
-        times, gt = FP.fringe_gain_time_series(sol; ci = 1)
-        @test length(times) == length(sol.geom.times)
+        gt = gains(sol; Frequency = 1)
         @test size(gt) == (length(sol.geom.times), CAL._nant(sol), 2)
+        @test lookup(gt, Ti) == sol.geom.times
 
-        @test_throws ErrorException FP.fringe_gain_spectrum(sol; ti = 10_000)
-        @test_throws ErrorException FP.fringe_gain_time_series(sol; ci = 10_000)
+        @test_throws BoundsError gains(sol; Ti = 10_000)
     end
 
     @testset "station codes available for plot labels" begin
@@ -112,6 +114,7 @@ using HDF5
     @testset "Makie plot smoke" begin
         @test !isnothing(FP.plot_fringe_spectrum(sol))
         @test !isnothing(FP.plot_fringe_spectrum(sol; sites = 1, feeds = [1]))
+        @test !isnothing(FP.plot_fringe_spectrum(sol; sites = 1, residual = true))
         @test !isnothing(FP.plot_fringe_phases(sol))
         @test !isnothing(FP.plot_fringe_phases(sol; sites = [1, 2], feeds = :all, ci = 2))
         @test !isnothing(FP.plot_fringe_snr(sol))

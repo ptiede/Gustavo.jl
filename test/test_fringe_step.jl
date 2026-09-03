@@ -26,7 +26,7 @@
         for i in 1:4
             @test fr.θ[rn[i]] == frm.θ[rm[i]]        # bit-identical
         end
-        @test stage_names(sol) == [:fringe]
+        @test keys(sol) == [:fringe]
         @test sol.info.nscan == solm.info.nscan
         @test fr.info.scan_snr == frm.info.scan_snr
         @test fr.info.scan_ncells == frm.info.scan_ncells
@@ -140,7 +140,7 @@
         )
         uvset, truth = _build_fringe_uvset(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
         sol = fit(FringeFit(model = FringeModel(; terms)), uvset)
-        rel = CAL.component_dimarray(sol, :fringe, :phase, :rel_phase)
+        rel = CAL.parameters(sol[:fringe, :phase, :rel_phase])
         want = truth.phi[:, 2] .- truth.phi[:, 1]
         for a in eachindex(want), s in 1:nscans
             got = only(rel[1, :, 1, s, a])
@@ -224,7 +224,7 @@
             ),
             uvset,
         )
-        @test Gustavo.stage_names(sol_full) == [:fringe, :bandpass, :adhoc]
+        @test keys(sol_full) == [:fringe, :bandpass, :adhoc]
         # Bandpass without TemporalSmoother still solves a :bandpass
         # stage (F |> B — no final pass).
         sol_fb = fit(CalibrationPipeline(FringeFit(), Bandpass()), uvset)
@@ -412,7 +412,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
             uvset,
         )
         # Bit-identical, not approximate: the seam must not perturb the solve.
-        @test stage_names(sol) == stage_names(ref)
+        @test keys(sol) == keys(ref)
         @test all(a.θ == b.θ for (a, b) in zip(sol.steps, ref.steps))
         @test probe.scans[] == sol.info.nscan
         @test probe.passes[] == 1

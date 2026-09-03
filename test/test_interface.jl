@@ -255,7 +255,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         sol = fit(CalibrationPipeline(_full_chain()), uvset)
 
         @test sol isa CAL.CalibrationSolution
-        @test stage_names(sol) == [:fringe, :bandpass, :adhoc]
+        @test keys(sol) == [:fringe, :bandpass, :adhoc]
         @test_throws ArgumentError sol[:bogus]
         @test_throws "recorded stages: [:fringe, :bandpass, :adhoc]" sol[:bogus]
 
@@ -274,28 +274,28 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         end
 
         # A `Symbol` selects that step alone; a range selects a run of them.
-        @test stage_names(sol[:adhoc]) == [:adhoc]
+        @test keys(sol[:adhoc]) == [:adhoc]
 
         # Selecting every step reproduces the solution.
-        @test stage_names(sol[:]) == stage_names(sol)
+        @test keys(sol[:]) == keys(sol)
         @test parent(gains(sol[:])) == parent(gains(sol))
 
         # A leading run carries only the steps up to and including that one —
         # a later step contributes no gain there at all, rather than an
         # explicit zeroed θ block over a shared layout.
         fr = sol[1:1]
-        @test stage_names(fr) == [:fringe]
+        @test keys(fr) == [:fringe]
         @test fr.steps[1].θ == sol.steps[1].θ
         @test fr.steps[1].θ == sol[:fringe].steps[1].θ   # same step, selected either way
 
         bp = sol[begin:2]
-        @test stage_names(bp) == [:fringe, :bandpass]
+        @test keys(bp) == [:fringe, :bandpass]
         @test bp.steps[1].θ == sol.steps[1].θ
         @test bp.steps[2].θ == sol.steps[2].θ
 
         # `end` addresses the last step, and a selection keeps the provenance
         # chains, so it stays replayable by `calibrate`.
-        @test stage_names(sol[end]) == [last(stage_names(sol))]
+        @test keys(sol[end]) == [last(keys(sol))]
         @test sol[:].transforms == sol.transforms
         @test sol[:].postcal == sol.postcal
         # A solution has at least one step, so an empty selection is refused.
@@ -307,14 +307,60 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test stage_info(sol, :fringe) isa NamedTuple
 
         # Gains factor multiplicatively over components: the elementwise
-        # product of every step's every component's gain reproduces the full
-        # composed evaluation.
+        # product of every step's every top-level component selection's gain
+        # reproduces the full composed evaluation.
         g_full = parent(gains(sol))
         g_prod = ones(ComplexF64, size(g_full))
-        for step in sol.steps, pi in eachindex(step.layout.plans)
-            g_prod .*= CAL.component_gains(sol, step.name, pi)
+        for (si, step) in enumerate(sol.steps), group in (:phase, :logamp)
+            for cname in keys(step.layout.plantree[group])
+                g_prod .*= parent(gains(sol[si, group, cname]))
+            end
         end
         @test g_prod ≈ g_full
+    end
+
+    @testset "solution container and selection algebra" begin
+        uvset, _ = _build_fringe_uvset()
+        sol = fit(CalibrationPipeline(_full_chain()), uvset)
+
+        # Container contract: length/eachindex/keys/haskey, and iteration
+        # yields each step as a single-step solution.
+        @test length(sol) == 3
+        @test eachindex(sol) == 1:3
+        @test keys(sol) == [:fringe, :bandpass, :adhoc]
+        @test haskey(sol, :bandpass) && !haskey(sol, :bogus)
+        @test collect(sol) == [sol[i] for i in eachindex(sol)]
+        @test [only(s.steps).name for s in sol] == [:fringe, :bandpass, :adhoc]
+
+        # A duplicated stage name refuses Symbol lookup; positions still work.
+        st = sol[:fringe].steps[1]
+        dup = CAL.CalibrationSolution([st, st], sol.geom, sol.info)
+        @test_throws ArgumentError dup[:fringe]
+        @test_throws "recorded 2 times" dup[:fringe]
+        @test dup[1].steps[1].name === :fringe
+
+        # A component selection is a solution: it applies like any other, and
+        # composing it with its complement reproduces the full step.
+        fr = sol[:fringe]
+        comps = keys(fr.steps[1].layout.plantree.phase)
+        @test !isempty(comps)
+        csel = sol[:fringe, :phase, first(comps)]
+        @test csel isa CAL.CalibrationSolution
+        @test UVP.apply_calibration(uvset, csel) isa UVP.UVSet
+        # Chained selection descends into the selected subtree.
+        @test parent(gains(sol[:fringe, :phase][:fringe, first(comps)])) ==
+            parent(gains(csel))
+
+        # `gains` keywords are DD dimension selectors, windowing the
+        # evaluation under the invariant gains(sol; kw...) == gains(sol)[kw...].
+        G = gains(sol)
+        @test gains(sol; Ti = 1) == G[Ti = 1]
+        @test gains(sol; Frequency = 2:3, Feed = 2) == G[Frequency = 2:3, Feed = 2]
+        f2 = sol.geom.channel_freqs[2]
+        @test gains(sol; Frequency = At(f2), Ant = 2) == G[Frequency = At(f2), Ant = 2]
+        @test gains(sol; Ti = Near(sol.geom.times[end])) == G[Ti = Near(sol.geom.times[end])]
+        @test_throws ArgumentError gains(sol; Pol = 1)
+        @test_throws "unknown dimension keyword" gains(sol; Pol = 1)
     end
 
     @testset "fit + calibrate ≡ fitcalibrate (weight-scale transform)" begin
@@ -359,18 +405,18 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test parent(gains(fit(StationWeightScale(ws) |> _full_chain(), uvset))) ≈ parent(gains(sol_f))
     end
 
-    @testset "solution serialization v5 round-trip; pre-v5 files refused" begin
+    @testset "solution serialization v6 round-trip; pre-v6 files refused" begin
         uvset, _ = _build_fringe_uvset()
         sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain()), uvset)
         path = joinpath(mktempdir(), "sol.jls")
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)
         @test all(s1.θ == s2.θ for (s1, s2) in zip(back.steps, sol.steps))
-        @test stage_names(back) == stage_names(sol)
+        @test keys(back) == keys(sol)
         @test back.transforms[1] isa StationWeightScale
         @test back[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
 
-        # Pre-v5 wrappers used a different solution shape; they are refused
+        # Pre-v6 wrappers used a different solution shape; they are refused
         # rather than misread, so a caller re-solves instead of loading a stale
         # parameter vector.
         v1path = joinpath(mktempdir(), "sol_v1.jls")
