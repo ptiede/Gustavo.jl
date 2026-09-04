@@ -4,34 +4,28 @@
     ExecutionConfig(; mem_fraction = 0.6, mem_budget = nothing, progress = nothing,
                     outer_executor = SerialScheduler(), inner_executor = DynamicScheduler())
 
-Run-wide RESOURCES for a streaming run, shared by every pass over the data — as
-opposed to per-step options, which shape an estimator or a step's own model, and
-as opposed to the gauge convention (`gauge`, on `CalibrationPipeline` itself),
-which is shared by every pass but is not a resource. Two runs differing only in
-their `ExecutionConfig` solve the same problem with the same gauge.
+Run-wide resources for a streaming run, shared by every pass over the data;
+per-step options live on the steps, and the gauge convention on
+`CalibrationPipeline`. Two runs differing only in their `ExecutionConfig`
+solve the same problem. A [`ScanStream`](@ref) carries the config it was
+built from; read the schedulers back with [`outer_executor`](@ref) /
+[`inner_executor`](@ref). Each scheduler is used exactly as configured, so
+the task count you set is the concurrency you get.
 
-A [`ScanStream`](@ref) carries the config it was built from, so every pass over
-that stream draws its schedulers and progress reporting from one place; read
-them back with [`outer_executor`](@ref) / [`inner_executor`](@ref).
-
-THE TWO SCHEDULERS OWN THE RUN'S PARALLELISM. Each is used exactly as
-configured — nothing here rewrites a scheduler you passed — so the task count
-you set on one is the concurrency you get.
-
-- `mem_fraction` / `mem_budget` — the DETERMINISTIC memory budget (`mem_budget`
-  bytes if set, else `mem_fraction` of physical RAM) the outer scheduler's task
-  count is checked against when a stream is built. A configuration that cannot
-  fit is an error, not something silently reduced.
-- `progress` — `(stage, done, total)` callback per completed scan of each pass.
-- `outer_executor` — the ACROSS-scan (group scheduling) scheduler, and thus how
-  many scan groups are resident at once: `SerialScheduler()` by default (one
-  group at a time on the calling task); any other OhMyThreads `Scheduler` to run
-  its task count of groups concurrently (`GreedyScheduler(; ntasks)` keeps a
-  task pulling the next-heaviest group as it frees up, which balances uneven
-  scan lengths best). Groups are dispatched heaviest-first under every scheduler.
-- `inner_executor` — the WITHIN-scan fan-out scheduler, an OhMyThreads
-  `Scheduler` (`DynamicScheduler()` by default; `SerialScheduler()` to run the
-  within-scan solves single-threaded).
+- `mem_fraction` / `mem_budget` — the memory budget (`mem_budget` bytes if
+  set, else `mem_fraction` of physical RAM) the outer scheduler's task count
+  is checked against when a stream is built. A configuration that cannot fit
+  is an error rather than being silently reduced.
+- `progress` — `(stage, done, total)` callback per completed scan of each
+  pass.
+- `outer_executor` — the across-scan scheduler, and thus how many scan
+  groups are resident at once: `SerialScheduler()` by default; any other
+  OhMyThreads `Scheduler` runs its task count of groups concurrently
+  (`GreedyScheduler(; ntasks)` balances uneven scan lengths best). Groups
+  are dispatched heaviest-first under every scheduler.
+- `inner_executor` — the within-scan fan-out scheduler
+  (`DynamicScheduler()` by default; `SerialScheduler()` for
+  single-threaded within-scan solves).
 """
 Base.@kwdef struct ExecutionConfig{P, O, I}
     mem_fraction::Float64 = 0.6
@@ -53,7 +47,7 @@ outer_executor(x::ExecutionConfig) = x.outer_executor
 """
     inner_executor(x) -> Scheduler
 
-The WITHIN-scan fan-out scheduler of an [`ExecutionConfig`](@ref) or of the
+The within-scan fan-out scheduler of an [`ExecutionConfig`](@ref) or of the
 [`ScanStream`](@ref) built from one: the default `executor` for the per-group
 kernels ([`materialize_cube`](@ref) and the solves that run on its output).
 """

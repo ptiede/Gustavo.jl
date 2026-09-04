@@ -8,14 +8,14 @@
 """
     FringeFit(; model = FringeModel(), estimator = MatchedFilter())
 
-The fringe-fitting stage. WHAT is solved is `model` ([`FringeModel`](@ref)):
+The fringe-fitting stage. What is solved is `model` ([`FringeModel`](@ref)):
 the ordered phase-term list — per-scan constant/delay/rate, the inter-feed offsets
 (the gauge pin, `gauge`, is run-wide — see [`CalibrationPipeline`](@ref)).
-HOW it is solved lives on `estimator`, a pluggable
+How it is solved lives on `estimator`, a pluggable
 [`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
 (per-baseline delay/rate search + closure-screened station WLS).
 
-Ionospheric dispersion (dTEC) and single-band delay (SBD) are NOT part of this
+Ionospheric dispersion (dTEC) and single-band delay (SBD) are not part of this
 step — add a [`DispersionSBDFit`](@ref) step after it to fit them on the
 fringe-corrected residual.
 """
@@ -36,7 +36,7 @@ fusable_grouping(s::FringeFit) =
 # Consulted only inside a fused run — exactly the scan-local configuration,
 # whose `estimate_scan!` return carries the scan's own unconstrained flags.
 scan_flags(s::FringeFit, r) = r.flags
-# NOTE: no `fit_selection` method — the fringe pass streams EVERY scan (the
+# NOTE: no `fit_selection` method — the fringe pass streams every scan (the
 # default `AllScans`).
 
 """
@@ -48,7 +48,7 @@ per-band-group delay fit ([`SingleBandDelay`](@ref)), on the fringe-corrected
 residual — place a [`FringeFit`](@ref) step earlier in the pipeline. Set
 either field to `nothing` to disable that term.
 
-The Δτ half of the joint fit lands in a PRIVATE per-scan delay column, not in
+The Δτ half of the joint fit lands in a private per-scan delay column, not in
 `FringeFit`'s own wideband delay: gains compose multiplicatively, so this
 step's delay column times `FringeFit`'s is the same total correction as
 incrementing one shared column would be, without either step writing into the
@@ -70,10 +70,10 @@ fusable_grouping(::DispersionSBDFit) = :scan
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan (fit-on-subset / apply-everywhere: pre-filter the
-`UVSet` before fitting if only a scan subset should contribute). WHAT is fit
+`UVSet` before fitting if only a scan subset should contribute). What is fit
 is `model`: a `(; phase, logamp)` tree of named `Calibration.GainComponent`s
 (or a `StationGainModel`) — see [`Fringe.default_bandpass_terms`](@ref) for the
-default and the component form the smoothers accept. HOW it is solved lives on
+default and the component form the smoothers accept. How it is solved lives on
 `smoother`, a pluggable [`Fringe.AbstractBandpassSmoother`](@ref) carrying one
 shape spec per observable; by default [`Fringe.JointSmoother`](@ref), which
 fits the complex visibilities against an explicit per-scan source coherence and
@@ -101,10 +101,10 @@ fusable_grouping(::Bandpass) = :global
     TemporalSmoother(smoother)
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
-globally-closing per-AP station phase on the fringe/bandpass residual. WHAT is
+globally-closing per-AP station phase on the fringe/bandpass residual. What is
 fit is `model`: a `(; phase, logamp)` tree holding the single adhoc component —
 see [`Fringe.default_adhoc_terms`](@ref) for the default (feed-common) form and
-its `feed` tying knob. HOW the solved tracks are smoothed lives on `smoother`,
+its `feed` tying knob. How the solved tracks are smoothed lives on `smoother`,
 a pluggable [`Fringe.AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
 `JointOUSmoother`, `OUSmoother`, `PenalizedSmoother`, …); `JointOUSmoother`
 requires the feed-common (`SharedFeeds`) model. The one-argument form takes the
@@ -128,13 +128,13 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
         "not step-by-step."
 )
 
-# ── Model components (compiled in step order into ONE StationGainModel) ───────
+# ── Model components (compiled in step order into one StationGainModel) ───────
 
 # The estimator vets the model here, at compile time, before any data is read.
 # Both directions: no term the estimator cannot fit (its θ block would stay at
 # zero and the solution would look fitted), and no missing term the estimator
 # assumes exists (its own estimate of that quantity would be discarded). The
-# check covers only THIS step's contributions — the adhoc and bandpass
+# check covers only this step's contributions — the adhoc and bandpass
 # components come from steps that solve them themselves.
 function model_components(s::FringeFit, spec)
     tree = Fringe.fringe_phase_components(s.model, spec)
@@ -154,8 +154,8 @@ function model_components(s::FringeFit, spec)
 end
 
 # The dispersion/SBD components: a private per-scan delay-refinement column
-# (shares the fringe stage's own wideband-delay SIGNATURE by design, but lives
-# in this step's own SEPARATE model/θ) plus the dTEC column, both compiled only
+# (shares the fringe stage's own wideband-delay signature by design, but lives
+# in this step's own separate model/θ) plus the dTEC column, both compiled only
 # when the DispersionModel/geometry combination
 # enables dTEC; and the SBD delay + companion constant, compiled only when the
 # frequency axis has ≥ 2 band groups. Either half is dropped entirely by
@@ -260,7 +260,7 @@ function start_pass!(s::FringeFit, ctx::SolveContext)
     # own private model/θ, never a merged one), so no restriction is needed: a
     # later step's component sharing a stage-B signature by design
     # (`DispersionSBDFit`'s private delay-refinement column vs. this model's own
-    # wideband delay) lives in a SEPARATE model and never appears here.
+    # wideband delay) lives in a separate model and never appears here.
     stageB = Fringe.fringe_stage_components(ctx.model, ctx.layout)
     # A model whose rate components disagree on any constant-phase epoch is
     # rejected here, before the pass reads any data (see `scan_phase_epoch`).
@@ -296,7 +296,7 @@ function _station_solve!(est::Fringe.MatchedFilter, ctx::SolveContext, dets)
     return ncomp, Fringe.unconstrained_flags(dets, covered, ctx.geom)
 end
 
-# The pass diagnostics both solve paths report. `scan_snr` is a LATER step's
+# The pass diagnostics both solve paths report. `scan_snr` is a later step's
 # non-data input (e.g. a `ScanWhere` selection reading it off this step's
 # `StepSolution.info` — see `_scan_snr`); `scan_ncells` and the detection table
 # are pure logging (`Fringe.diagnostics.jl`'s `fringe_snr_table` /
@@ -317,7 +317,7 @@ function Fringe.estimate_scan!(
     round = ctx.scratch[:fringe_round]::Int
     Vsearch = round > 1 ? Fringe.residual_vis(ctx.ev, ctx.θ, stack, win) : stack[:vis]
     # Reference the detection phases to the epoch this scan's constant phase
-    # columns are the phase AT (`scan_phase_epoch`), not to the track epoch
+    # columns are the phase at (`scan_phase_epoch`), not to the track epoch
     # `search_scan` defaults to for a standalone caller. The station solve reads
     # each phase as a constant, so any gap between the two epochs pours that
     # row's rate uncertainty into the constant — and the inter-feed offset,
@@ -346,7 +346,7 @@ function Fringe.estimate_scan!(
         time_rms = Fringe._rms_spread(timestamps(stack) .* 3600.0),
     )
 
-    # Per-scan search log for the solution diagnostics: every MEASURED cell, its
+    # Per-scan search log for the solution diagnostics: every measured cell, its
     # family-wise PFA, and whether that PFA accepts it as a real fringe. Recording
     # the rejected cells too is what makes the near-threshold population visible;
     # `detected` is the column that separates them. The search cube is transient
@@ -357,7 +357,7 @@ function Fringe.estimate_scan!(
     pfa_max = est.closure.pfa_max
     local_solve = Fringe.scan_local_solve(est, s.model)
     ncomp, flags = 0, Tuple{Int, Int}[]
-    # Steering needs θ for THIS scan, so it can only run where the station solve
+    # Steering needs θ for this scan, so it can only run where the station solve
     # closes here (`scan_local_solve`); a pooled solve has no station parameters
     # until every group has been read and the cube is long gone.
     steer = nothing
@@ -380,7 +380,7 @@ function Fringe.estimate_scan!(
                 sr[a, :] .= NaN
             end
             steer = Fringe.steer_scan(
-                # The SAME epoch the search above referenced: `sr` is a rate
+                # The same epoch the search above referenced: `sr` is a rate
                 # about it, as is the model's own Rate component.
                 stack, res, bl_pairs, pols, ctx.stream.geom.f0,
                 epoch * 3600.0, sd, sr;
@@ -399,7 +399,7 @@ function Fringe.estimate_scan!(
             snr_steer = _st(:snr, j, p), pfa_steer = _st(:pfa, j, p),
             delay_steer = _st(:delay, j, p), rate_steer = _st(:rate, j, p),
             # Measured at the station solution's delay and rate rather than found
-            # blind. There is NO threshold here: `pfa_max` decides fringe-group
+            # blind. There is no threshold here: `pfa_max` decides fringe-group
             # membership on the blind pass, and once a station is in that group
             # its baselines are measured at the known fringe location to
             # arbitrarily low SNR. `pfa_steer` records the significance of what
@@ -429,7 +429,7 @@ function Fringe.finish_estimate!(est::Fringe.MatchedFilter, ctx::SolveContext, s
         ncomp = sum(scan_values(res -> res.r.ncomp, results, ngroups; default = 0))
         return (; ncomp, _fringe_report(results, ngroups)...)
     end
-    # `dets` is SOLVE-ESSENTIAL (it feeds the closure-screened WLS immediately
+    # `dets` is solve-ESSENTIAL (it feeds the closure-screened WLS immediately
     # below) — the pass covers every group every round, so a fresh build each
     # round is exact.
     dets = Vector{Any}(undef, ngroups)
@@ -458,7 +458,7 @@ function start_pass!(s::DispersionSBDFit, ctx::SolveContext)
     disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
     # `ctx.model` holds only this step's own components: the
     # per-scan delay-refinement column — sharing FringeFit's wideband-delay
-    # SIGNATURE by design — is the only `_is_perscan_delay` match here, so
+    # Signature by design — is the only `_is_perscan_delay` match here, so
     # the plain `findfirst` router (`_perscan_delay_plan`) finds it directly;
     # `nothing` when dispersion is disabled (no such component was compiled).
     delay_plan = disp_plan === nothing ? nothing : Fringe._perscan_delay_plan(ctx.model, ctx.layout)
@@ -501,12 +501,12 @@ end
 function start_pass!(s::Bandpass, ctx::SolveContext)
     layout = ctx.layout
     nant = ctx.nant
-    # The GLOBAL baseline table of the accumulation: every cross pair.
+    # The global baseline table of the accumulation: every cross pair.
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
     blidx = Dict(bl_pairs[i] => i for i in eachindex(bl_pairs))
     # `ctx.layout` holds only this step's own components, in phase-then-logamp
     # order, and `validate_bandpass_groups` capped each group at one — so the
-    # plan list positions ARE the two observables, whatever the user named them.
+    # plan list positions are the two observables, whatever the user named them.
     plans = layout.plans
     ctx.scratch[:bp_setup] = (;
         bl_pairs, blidx, nant,

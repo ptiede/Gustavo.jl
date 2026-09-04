@@ -25,7 +25,7 @@ step's — and `θ` its own solved parameter vector, plus `info`, that step's ow
 solver diagnostics. A [`CalibrationSolution`](@ref) is the ordered
 `steps::Vector{StepSolution}` a pipeline run produced, one per solve step, in
 run order; gains compose multiplicatively across them ([`gains`](@ref),
-[`apply_calibration`](@ref)), and `name` (the step's `provides(step)`
+[`apply_calibration`](@ref Gustavo.UVData.apply_calibration)), and `name` (the step's `provides(step)`
 capability, e.g. `:fringe`/`:bandpass`/`:refine`/`:adhoc`) is how a later
 step's `fit_selection` or a user's [`stage_info`](@ref) or `sol[name]`
 looks a step up.
@@ -215,13 +215,13 @@ station-heterogeneous name descends into its signature groups
 descends further into its subtree (`sol[:fringe, :phase][:fringe, :mbd]`).
 The selection remembers the tree path — θ is never copied or zeroed.
 
-Gains compose multiplicatively across steps AND across components, so a
+Gains compose multiplicatively across steps and across components, so a
 selection's gain is exactly the product of the selected parts' own gains — a
 part left out contributes no gain at all. A leading run `sol[1:i]` is thus the
 solution AS OF step `i`, and a component selection's gain is that component's
 own contribution: apply it, plot it, or difference it against another.
 Geometry, `info` and both provenance chains carry over unchanged, so every
-selection is a valid solution for [`apply_calibration`](@ref) and `calibrate`,
+selection is a valid solution for [`apply_calibration`](@ref Gustavo.UVData.apply_calibration) and `calibrate`,
 and `sol[:]` reproduces `sol`.
 
 Selecting no step at all is an error: a solution has at least one.
@@ -422,7 +422,7 @@ for inspection: a `DimArray` over `(Frequency, Ti, Ant, Feed)` — channel
 frequencies (Hz), integration times (hours), antennas (named when `sol.info`
 carries `ant_names`, else `1:nant`), and feed. `gain = exp(Σ logamp) · cis(Σ
 phase)`, summed over the selection's components, is the same forward map
-[`apply_calibration`](@ref) divides by (and [`save_solution_hdf5`](@ref)
+[`apply_calibration`](@ref Gustavo.UVData.apply_calibration) divides by (and [`save_solution_hdf5`](@ref)
 writes); `abs.(gains(sol))` and `angle.(gains(sol))` recover amplitude and
 phase.
 
@@ -454,7 +454,7 @@ function gains(sol::CalibrationSolution; kw...)
     If, It, Ia, Ife = Dimensions.dims2indices(ref, Dimensions.kw2dims(kw))
     ci = _window_indices(If, nchan)
     ti = _window_indices(It, ntime)
-    # Slice the lookups BEFORE evaluating: the evaluator reads its segment
+    # Slice the lookups before evaluating: the evaluator reads its segment
     # tables under `@inbounds`, so an out-of-range selector must fail here
     # (a plain `BoundsError`), never inside the evaluation.
     fsel = sol.geom.channel_freqs[ci]
@@ -722,7 +722,7 @@ A window into a [`DataGeometry`](@ref): everything needed to locate one scan's
 channels and times in the solve's index space, with no data attached.
 
 - `geom` — the solve's geometry, the index space the window addresses.
-- `chan_idx`, `ti_idx` — GLOBAL indices into `geom.channel_freqs` / `geom.times`
+- `chan_idx`, `ti_idx` — global indices into `geom.channel_freqs` / `geom.times`
   of the channels and times the window covers.
 
 θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
@@ -773,11 +773,17 @@ end
 
 # ── Apply ────────────────────────────────────────────────────────────────────
 
+# Whole-set replay of a recorded transform chain. The transform types (and the
+# working method) live in the Streaming layer, which loads after this module;
+# the stub exists so `apply_calibration` can replay a chain without a layering
+# inversion.
+function _replay_transforms end
+
 """
     apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true,
                       transforms = sol.transforms) -> UVSet
 
-Apply the solution's RECORDED transform chain (`sol.transforms` — e.g. a
+Apply the solution's recorded transform chain (`sol.transforms` — e.g. a
 station weight scale and an earlier solution applied as a data transform), then
 divide every leaf's visibilities by the solution's per-antenna gains. For a
 baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
@@ -787,7 +793,7 @@ baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
 Samples where either gain magnitude underflows are flagged (weight 0, vis NaN).
 
 `transforms` defaults to the solution's own recorded chain, so the corrected
-set carries the SAME total correction `calibrate(sol, uvset)` produces (minus
+set carries the same total correction `calibrate(sol, uvset)` produces (minus
 its `postcal`/`reduce` tail) — weights included, which matters to anything
 that reads them as noise claims. Pass `transforms = ()` to apply the gains
 alone: the right call when the data has already been transform-corrected (the
@@ -804,15 +810,9 @@ span crosses a bin boundary — see `evaluate_gains`.
 identity gains, i.e. the data would pass through uncalibrated. This is the
 EHT-HOPS flag semantic: a station is flagged per scan only when, after the
 closure-screened global solve, no strong detection constrains it; a merely weak
-baseline between two constrained stations is NOT flagged (it is calibrated by
+baseline between two constrained stations is not flagged (it is calibrated by
 SNR transfer).
 """
-# Whole-set replay of a recorded transform chain. The transform types (and the
-# working method) live in the Streaming layer, which loads after this module;
-# the stub exists so `apply_calibration` can replay a chain without a layering
-# inversion.
-function _replay_transforms end
-
 function UVData.apply_calibration(
         uvset::UVSet, sol::CalibrationSolution;
         apply_flags::Bool = true, executor = DynamicScheduler(),
@@ -877,7 +877,7 @@ _geom_scan_id(geom::DataGeometry, scan_name) =
 
 # Zero-weight (and NaN) whole baseline rows touching a (station, scan) the solve
 # left unconstrained — identity gains, so the data would pass through
-# uncalibrated. A leaf spans ONE scan, hence one scan id.
+# uncalibrated. A leaf spans one scan, hence one scan id.
 function _flag_solution_rows!(Vc, Wc, bl_pairs, scanid::Integer, flagged)
     flagged === nothing && return nothing
     @inbounds for bi in eachindex(bl_pairs)
@@ -1026,21 +1026,26 @@ end
 """
     external_info(x) -> Union{NamedTuple, Nothing}
 
-The plain-data form (numbers, vectors, strings, nested NamedTuples) of a
-solution `info` entry for language-neutral export —
-[`save_solution_hdf5`](@ref)'s `info/*` groups. The fallback `nothing` means
-`x` has no external form: the exporter omits it, reports the omission, and the
-entry survives only in the Julia blob. A step or estimator whose diagnostics
-record a custom config type makes it externally readable by defining one
-method.
+The plain-data form of a solution `info` entry, for language-neutral export
+([`save_solution_hdf5`](@ref)'s `info/*` groups). A method returns a
+`NamedTuple` whose values are numbers, vectors, strings, or nested
+`NamedTuple`s/`DimStack`s; the exporter writes each as a dataset or
+subgroup, recursively. Any other value inside the returned tree is itself
+passed through `external_info`, so a nested custom type exports if it
+defines a method and is otherwise skipped and reported.
+
+The fallback returns `nothing`: the entry is omitted from the HDF5 `info/*`
+groups (with a report) and survives only in the file's Julia blob. A step or
+estimator whose diagnostics record a custom config type makes it externally
+readable by defining one method.
 """
 external_info(::Any) = nothing
 
 """
     save_solution_hdf5(path, sol::CalibrationSolution; gains = true, time_block = 1024)
 
-Write `sol` to an HDF5 caltable readable from any language (Python/h5py, CASA, …),
-NOT just Julia. Provided by `GustavoHDF5Ext` — load `HDF5` to enable it.
+Write `sol` to an HDF5 caltable readable from any language (Python/h5py,
+CASA, …), not just Julia. Provided by `GustavoHDF5Ext` — load `HDF5` to enable it.
 
 Layout:
 - `gain/real`, `gain/imag` — the evaluated complex antenna gains on the
@@ -1050,7 +1055,7 @@ Layout:
 - `axes/*` — `channel_freq_hz`, `time`, `scan_of_time`, `spw_of_chan`, `f0`, `t0`.
 - `info/*` — the solution-level (run-wide) diagnostics: antenna/scan counts,
   station names, flags, executor/timing summary counters.
-- `info/steps/<name>/*` — each pipeline step's OWN diagnostics
+- `info/steps/<name>/*` — each pipeline step's own diagnostics
   (`stage_info(sol, name)`), one subgroup per step, written generically —
   a third-party `SolveStep`'s custom diagnostics appear here automatically,
   with no changes needed to the writer. A `NamedTuple`- or `DimStack`-valued

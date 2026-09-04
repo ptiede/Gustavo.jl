@@ -41,7 +41,7 @@ Holds source identification (`source_name`/`source_key`/`field_name`/`ra`/
 
 `time_span` is the interval (hours) each `Ti` sample integrates over — the time
 counterpart of `freq_setup`'s `ch_width`. Empty when the samples are
-instantaneous; [`time_average`](@ref)-style reducers set it to the span they
+instantaneous; time-averaging reducers (`time_bin_average`, `scan_average`) set it to the span they
 collapsed, so a later consumer can tell an averaged sample from a snapshot.
 
 Scan model follows xradio's `ScanArray` (schema.py:779): the *primary*

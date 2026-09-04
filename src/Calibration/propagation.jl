@@ -9,22 +9,25 @@
     DispersionModel(; require_band_separation = true, colocated_sep = 1000.0)
 
 The differential-ionosphere (dTEC) term: a per-scan, feed-common phase ∝ 1/ν.
-A `FringeModel` term-list element — include it in the list to model the
-ionosphere, omit it for a fit that models no ionosphere at all.
+The `dispersion` field of a `DispersionSBDFit` pipeline step — pass it there to
+model the ionosphere, `nothing` for a fit that models no ionosphere at all. (It
+is not a `FringeModel` term-list element; the fringe search does not fit it.)
 
 - `require_band_separation` — solve the term only when the band layout can
   actually separate 1/ν from a linear delay: several sub-bands over a wide
   fractional bandwidth (VGOS 3–10.7 GHz qualifies; a single contiguous band
-  cannot constrain the curvature and the term would just soak up delay). Set
+  cannot constrain the curvature and the term would just soak up delay). The
+  gate — at least 4 sub-bands and `fmax/fmin > 1.3` — is this element's own
+  judgment of when the curvature is measurable, not framework policy. Set
   `false` to solve it regardless.
 - `colocated_sep` — the station separation (meters) below which two stations are
-  taken to see the same ionosphere and are tied to ONE dTEC, a differential TEC
+  taken to see the same ionosphere and are tied to one dTEC, a differential TEC
   between them being pure solve error. The default 1 km ties twins such as
   Onsala's OE/OW at ~75 m; `nothing` ties nothing. The grouping is computed from
   the antenna table's station positions, and errors if they are missing or
   degenerate — a threshold means nothing without real positions.
 
-Estimating dispersion is NOT separable from estimating delay: over a finite
+Estimating dispersion is not separable from estimating delay: over a finite
 band the two are near-degenerate, so the fringe estimator fits Δτ and dTEC
 jointly. The separation here is of the model, not of the solve.
 """
@@ -52,7 +55,7 @@ function _dispersion_enabled(dm::DispersionModel, geom::DataGeometry)
     return nb >= 4 && fmax / fmin > 1.3
 end
 
-# The dTEC component's routing signature: located by TERM TYPE rather than by
+# The dTEC component's routing signature: located by term type rather than by
 # index, so the model may carry it anywhere in its component order.
 _is_dispersion(tc) = tc.term isa Dispersion
 

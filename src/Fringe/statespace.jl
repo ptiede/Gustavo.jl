@@ -5,8 +5,8 @@
 # Gaussian process with a Matérn-1/2 kernel K(Δt) = σ²·exp(-|Δt|/τ) (τ = coherence
 # time). Matérn-1/2 is an Ornstein–Uhlenbeck process — a first-order (AR(1))
 # linear-Gaussian state-space model — so the GP posterior mean is computed exactly
-# and in O(n) by a scalar Kalman filter + RTS smoother, with NO dense covariance
-# and NO SparseArrays (Reactant-safe). Unlike the first-difference (random-walk)
+# and in O(n) by a scalar Kalman filter + RTS smoother, with no dense covariance
+# and no SparseArrays (Reactant-safe). Unlike the first-difference (random-walk)
 # penalty, OU is stationary and mean-reverting with a physical timescale, and its
 # Kalman marginal likelihood lets us fit (τ, σ²) per station from the data.
 #
@@ -336,10 +336,10 @@ function _ou_tau_bounds(times)
     return τ_lo, τ_hi
 end
 
-# The same bounds for a GROUP of tracks sharing one correlation scale: the
+# The same bounds for a group of tracks sharing one correlation scale: the
 # tightest `τ_lo` and the widest `τ_hi` any member would impose alone.
 #
-# Each member's bounds come from its OWN coordinates, never from the concatenation:
+# Each member's bounds come from its own coordinates, never from the concatenation:
 # the scale describes structure inside one track, so the gaps BETWEEN tracks — the
 # jump from one spectral window to the next — carry no shape information and must
 # not be mistaken for sample spacing or for span.
@@ -402,7 +402,7 @@ observes a station-phase DIFFERENCE,
 
     ys[k][j] = x[a] − x[b] + ε,   ε ~ N(0, rs[k][j])
 
-with `(a, b)` read from `rows[k][j]` — an [`_ObsRow`](@ref), whose `val`/`w`/feed
+with `(a, b)` read from `rows[k][j]` — an `_ObsRow`, whose `val`/`w`/feed
 fields are ignored here: the caller passes the processed observation and its
 variance in `ys`/`rs`.
 

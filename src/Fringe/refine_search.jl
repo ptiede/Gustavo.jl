@@ -15,7 +15,7 @@
 # The FFT search + stationization solve a per-scan LINEAR delay; the ionosphere
 # adds a dispersive phase K·dTEC·(1/f0 − 1/f) whose linear-in-ν part the delay
 # absorbs (biasing it by hundreds of ps on VGOS) and whose curvature survives as
-# cross-band structure that no GLOBAL per-channel bandpass can track scan-to-scan.
+# cross-band structure that no global per-channel bandpass can track scan-to-scan.
 # This measures both self-consistently from each scan's own residual — fourfit's
 # ionospheric search, done as a per-baseline (Δτ, dTEC) grid fit over the scan's
 # band phasors. Feed-common (ionosphere is non-birefringent to first order);
@@ -138,7 +138,7 @@ end
 # ── Per-scan band-group SBD fit (fourfit's single-band delay) ────────────────
 #
 # The wideband (MBD) delay and dTEC are constrained by CROSS-band structure;
-# the WITHIN-band phase slope is nearly orthogonal to both and instrumentally
+# the within-band phase slope is nearly orthogonal to both and instrumentally
 # real: a station's per-band signal path can move relative to its phase-cal
 # tones between scans (VR2505's YJ drifts by ~30 ns in the 3 GHz group), which
 # no time-invariant per-channel bandpass can represent. This measures the
@@ -170,7 +170,7 @@ function _accumulate_leaf_chunks!(z, w, V, W, bl_pairs, pols, chunk_of_chan)
     return nothing
 end
 
-# Exact matched filter for ONE delay over chunk phasors about centre `fc`:
+# Exact matched filter for one delay over chunk phasors about centre `fc`:
 # argmax_τ |Σ_k z_k·cis(−2πτ(f_k − fc))|, coarse→fine sweep + parabolic polish.
 function _fit_chunk_delay(
         fs::Vector{Float64}, zs::Vector{ComplexF64}, ws::Vector{Float64}, fc::Float64;

@@ -9,7 +9,7 @@ budgets, executors and `DimTree` leaves, not about fringes:
   schedulers and progress callback a stream is built from.
 - `transforms.jl` — [`AbstractDataTransform`](@ref), the per-materialization
   hook chain, and the scan `DimStack` + [`GeometryWindow`](@ref) it mutates.
-- `selections.jl` — [`AbstractScanSelection`](@ref), naming WHICH scan groups a
+- `selections.jl` — [`AbstractScanSelection`](@ref), naming which scan groups a
   pass reads.
 - `stream.jl` — [`ScanStream`](@ref) construction, group materialization, and
   the concurrent pass runner [`map_groups`](@ref).

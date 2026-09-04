@@ -265,7 +265,7 @@ end
 """
     apply_calibration(uvset, spw_cals::AbstractDict{<:Integer, AntabCalibration}; on_missing_station = :warn) -> UVSet
 
-A-priori flux calibration where each spectral window (spw) has its OWN
+A-priori flux calibration where each spectral window (spw) has its own
 `AntabCalibration`. Each leaf is calibrated with `spw_cals[info.ddi + 1]`
 (1-based spw index); otherwise identical to the single-`AntabCalibration`
 method. Used for FITS-IDI `GAIN_CURVE` + `SYSTEM_TEMPERATURE` calibration

@@ -42,7 +42,7 @@ end
     _sum_group(sub, θ, ant, feed, ti, c)
 
 # A station-heterogeneous name routes the station through its own signature
-# group's plan — with the group-LOCAL antenna index, since each group's leaf
+# group's plan — with the group-local antenna index, since each group's leaf
 # spans only its own stations. A station in no group carries the component
 # not at all: zero contribution, i.e. a unit gain factor.
 @inline function _node_value(g::GroupedComponentPlan, θ, ant, feed, ti, c)
@@ -190,7 +190,7 @@ length(ti_idx), nant, 2)` for the samples of `target` selected by
 `chan_idx`/`ti_idx`, evaluated from a θ laid out over `solve_geom` (the geometry
 `ev.layout` was planned on).
 
-Each target sample is placed in the solve segment it BELONGS to — matched by
+Each target sample is placed in the solve segment it belongs to — matched by
 scan and spw label, or by the segmentation's own bin formula evaluated with the
 solve's parameters — so a solution applies to data sampled differently from the
 grid it was fit on: a segmentation coarser than the data has a segment covering
@@ -231,7 +231,7 @@ end
 
 # Rebuild each plan's grid-indexed tables for the target samples asked for. The
 # result is a `ComponentPlan` like any other — tables sized to those samples
-# rather than to the solve grid, but still holding SOLVE-side segment ids, which
+# rather than to the solve grid, but still holding solve-side segment ids, which
 # is what makes the θ leaf and the coordinate state index correctly — so the
 # forward map above is the same walk. Nothing is cached: the tables are
 # recomputed per call, O(nchan + ntime) lookups.

@@ -1,6 +1,6 @@
 # ── The scan group: the streaming layer's unit of data flow ──────────────────
 #
-# A pass sees a lazy `UVSet` one SCAN GROUP at a time and never the set itself:
+# A pass sees a lazy `UVSet` one scan group at a time and never the set itself:
 #
 #   stream = scan_stream(uvset; transforms = [...])   # group + schedule, no read
 #   stack, win = materialize_cube(stream, spec)       # one group, transforms applied
@@ -282,11 +282,11 @@ contiguous channel block of the stacked cube (one sequential read, no per-band
 intermediates); falls back to materialize-then-copy when the group is not a
 single sibling-band IDI span.
 
-`stack` is a leaf-shaped `DimStack` built ONCE where the concatenated cube is
+`stack` is a leaf-shaped `DimStack` built once where the concatenated cube is
 born: native-precision `:vis`/`:weights` layers on `(Frequency, Ti, Baseline,
 Pol)` dims, with the first band leaf's `PartitionInfo` as metadata (source/scan
 identity, antennas and baselines are group-wide; the frequency truth for the
-concatenated axis lives on the `Frequency` lookup, NOT in
+concatenated axis lives on the `Frequency` lookup, not in
 `metadata.frequencies`, which still describes that one band). `win` is the
 group's [`GeometryWindow`](@ref) into the solve's index space.
 """
@@ -302,7 +302,7 @@ function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; executor = in
 end
 
 # Direct decode into the stacked cube: returns `nothing` (caller falls back) unless
-# every band leaf maps to ONE full contiguous ascending channel block of the
+# every band leaf maps to one full contiguous ascending channel block of the
 # stacked frequency axis. Metadata comes from the LAZY leaves, so nothing is
 # materialized until the decode, which runs under `executor`.
 function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry, executor)
@@ -553,7 +553,7 @@ foreach_group(work::F, stream::ScanStream; kwargs...) where {F} =
 # the heaviest item (by `charges`) first so the long poles start immediately.
 # Results in `items` order. A failed worker rethrows after the other workers
 # drain the queue. `executor` is used exactly as configured — how many items run
-# at once is ITS decision, checked against the memory budget upstream.
+# at once is its decision, checked against the memory budget upstream.
 #
 # Each backend fills an `Any` sink and returns `map(identity, sink)`: `work`'s
 # return type is not known before it runs, and tasks write their slots

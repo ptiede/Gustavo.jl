@@ -491,7 +491,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         )
         geom = CAL.build_geometry(uvd)
         @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
-        model = FP._fringe_model(
+        model = _full_fringe_model(
             dispersion = true, sbd_freq_groups = FP.fringe_freq_groups(geom.channel_freqs),
         )
         layout = CAL.plan_parameters(model, 4, geom)

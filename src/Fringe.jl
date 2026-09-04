@@ -93,7 +93,7 @@ function plot_fringe_snr end
     plot_fringe_search(m::BaselineFringeMap; zoom)
     plot_fringe_search(parent, m; zoom)
 
-HOPS-style fringe-search diagnostic for one baseline of one scan — THE plot for
+HOPS-style fringe-search diagnostic for one baseline of one scan — the plot for
 judging a suspected false fringe. Draws the delay–rate matched-filter SNR
 surface with delay/rate cross-sections through the peak, and annotates the
 refined detection (delay, rate, SNR) and its false-alarm probability. A real
@@ -117,7 +117,7 @@ function plot_fringe_search end
     plot_baseline_fringes(parent, data; ...)
 
 Per-baseline before/after fringe-fit check for one scan: a grid of panels (one per
-baseline) overlaying the coherent visibility BEFORE and AFTER applying `sol`.
+baseline) overlaying the coherent visibility before and after applying `sol`.
 `kind = :freq` plots phase (or amplitude) vs frequency — a group delay shows as a
 slope that flattens after a good fit; `kind = :time` plots vs time — a fringe rate
 shows as a slope that flattens. `show = :phase` (default) or `:amp`. `pol` selects

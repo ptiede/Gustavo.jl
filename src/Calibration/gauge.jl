@@ -33,7 +33,7 @@ ranked list matters when the leading choice is absent or unconstrained on some
 scans — the gauge then falls to the next entry instead of to an arbitrary node.
 
 Values reported under this gauge are differences against the pinned node, so
-they are comparable across scans only where the SAME node was pinned.
+they are comparable across scans only where the same node was pinned.
 """
 struct PinAntenna{R} <: AbstractGauge
     refs::R

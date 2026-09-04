@@ -2,16 +2,16 @@
 #
 # The composable pipeline's fringe stage in three parts:
 #
-# - `FringeModel` — WHAT is solved: an ordered list of phase-term elements
+# - `FringeModel` — what is solved: an ordered list of phase-term elements
 #   (the gauge pin, `gauge`, is run-wide — see `CalibrationPipeline` in
 #   pipeline/protocol.jl). Each element declares its own feed scope
 #   through its tying (`SharedFeeds`, `SingleFeed(2)`, …), so the model is
 #   specified feed by feed; adding a component is adding an element.
 #   `fringe_phase_components` compiles each element through
 #   `model_components(element, spec)` and concatenates in list order.
-# - `MatchedFilter <: AbstractFringeEstimator` — HOW it is estimated: today's
+# - `MatchedFilter <: AbstractFringeEstimator` — how it is estimated: today's
 #   stage A (per-baseline delay/rate matched-filter search + closure-screened
-#   station WLS). The search and `Stationization` live HERE, not on the model —
+#   station WLS). The search and `Stationization` live here, not on the model —
 #   an alternative estimator (e.g. a Schwab–Cotton-style global LS) plugs in
 #   with no vestigial search/stationization options.
 # - The stage machinery the runner drives through the streaming layer:
@@ -21,25 +21,21 @@
 """
     SingleBandDelay(; freq = BandGroups())
 
-Per-scan single-band delay (fourfit's SBD) — a [`FringeModel`](@ref) term-list
-element. A station's signal path can move relative to its phase-cal tones
-between scans (~30 ns has been observed), which neither the wideband delay (one
-slope across the whole band) nor the time-invariant per-channel bandpass can
-track. Instrumental, not propagation.
+Per-scan single-band delay (fourfit's SBD): the `sbd` field of a
+[`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit) step. A station's signal
+path can move relative to its phase-cal tones between scans (~30 ns has been
+observed), which neither the wideband delay nor the time-invariant bandpass
+can track. Instrumental, not propagation.
 
-`freq` is the frequency partition the delay is resolved on — any
-`AbstractFrequencySegmentation`, resolved through `Calibration.materialize` and
-`Calibration.segment_ranges`. `BandGroups()` (the default) gives one delay per
-gap-detected band group; `PerSpectralWindow()` gives every spectral window its
-own delay and offset, which is what a per-spw signal-path difference that MOVES
-between scans needs — a `GlobalTime` bandpass can only fit such a step's track
-average. A `FreqGroups` is taken as the partition itself.
+`freq` is the frequency partition the delay is resolved on, any
+`AbstractFrequencySegmentation`. `BandGroups()` (the default) gives one
+delay per gap-detected band group; `PerSpectralWindow()` gives every
+spectral window its own delay and offset.
 
-Compiles to a coupled per-group pair — a per-scan `Delay` plus its companion
-per-scan constant over that partition — or to nothing when the partition holds
-fewer than 2 groups (a single group is fully degenerate with the wideband
-delay). Fit from within-group chunk slopes by the refine stage, nearly
-orthogonal to the cross-band observables that set the wideband delay and dTEC.
+Compiles to a per-scan `Delay` plus its companion per-scan constant over
+that partition, or to nothing when the partition holds fewer than 2 groups
+(a single group is degenerate with the wideband delay). Fit from
+within-group chunk slopes by the refine stage.
 """
 Base.@kwdef struct SingleBandDelay{F}
     freq::F = BandGroups()
@@ -49,7 +45,7 @@ function model_components(s::SingleBandDelay, spec)
     geom = spec.geom
     freqgroups = segment_ranges(materialize(s.freq, geom), geom)
     length(freqgroups) >= 2 || return nothing
-    # The Delay coordinate is (f − f0) with the GLOBAL f0, so correcting a
+    # The Delay coordinate is (f − f0) with the global f0, so correcting a
     # group slope about the group's own centre νg needs the companion per-group
     # constant −2πτ(νg − f0): net phase 2πτ(f − νg), zero at the group centre —
     # the cross-band solution is untouched. The pair nests under the element's
@@ -63,64 +59,46 @@ end
 """
     default_fringe_terms(; rel_time = PerScan()) -> NamedTuple
 
-The default [`FringeModel`](@ref) term list — the standard VLBI fringe model,
-specified feed by feed as a named list (the key names the component; compiled
-component order = list order):
+The default [`FringeModel`](@ref) term list — the standard VLBI fringe
+model, as a named list (each key names its component; list order is compiled
+order):
 
-1. per-scan constant phase, feed-common (`SharedFeeds`): atmosphere/clock.
-2. per-scan wideband (multi-band) delay, feed-common.
-3. relative delay offset, `Ti = rel_time`, `Feed = SingleFeed(2)`: the instrumental
-   feed-2 − feed-1 group-delay offset.
-4. per-scan rate, feed-common: the fringe rate is common to both feeds. There
-   is deliberately NO feed-specific rate here — the inter-feed rate is
-   negligible (EHT-HOPS convention), so a column for it would buy little but
-   the noise of fitting one. A genuine offset is opted into by ADDING
-   `GainComponent(Rate(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SingleFeed(2))`,
-   which gives the inter-feed rate its own column. Every correlation product's
-   rate row enters the system either way; the tying alone decides whether it
-   reads as `ṙ_a − ṙ_b` (feed-common) or `ṙ_{a,p} − ṙ_{b,q}` (feed-specific).
-   An added rate component must carry the same time segmentation as the
-   constants beside it, so that one epoch zeroes every rate coordinate at once —
+1. `atmos` — per-scan constant phase, feed-common (atmosphere/clock).
+2. `mbd` — per-scan wideband delay, feed-common.
+3. `rel_delay` — inter-feed delay offset, `Ti = rel_time`,
+   `Feed = SingleFeed(2)`: the instrumental feed-2 − feed-1 group-delay
+   offset.
+4. `rate` — per-scan rate, feed-common. There is no feed-specific rate: the
+   inter-feed rate is negligible (EHT-HOPS convention). A genuine offset is
+   added as
+   `GainComponent(Rate(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SingleFeed(2))`;
+   an added rate component must carry the same time segmentation as the
+   constants beside it, so one epoch zeroes every rate coordinate at once —
    see [`scan_phase_epoch`](@ref).
 
-`rel_time` is the inter-feed delay offset's time segmentation, an
-`AbstractTimeSegmentation`:
+`rel_time` is the inter-feed delay's time segmentation: `PerScan()` (the
+default) fits an offset per scan, so its scan-to-scan scatter is an
+instrument-stability diagnostic and no column couples scans; `GlobalTime()`
+fits one offset per station for the whole track (the EHT-HOPS / rPICARD
+assumption) — bright scans pin it and weak scans inherit it, at the cost of
+coupling every scan into one system, which forgoes scan fusion.
 
-- `PerScan()` (default) fits an offset per scan, so its scan-to-scan scatter is
-  a direct instrument-stability diagnostic, and the model has no cross-scan
-  column — each scan's system is independent, which is what lets consecutive
-  scan-local steps share one pass over the data.
-- `GlobalTime()` fits ONE offset per station for the whole track (the EHT-HOPS
-  / rPICARD assumption that the instrumental offset is stable): bright scans pin
-  it and weak scans inherit it. The cost is that a track-global column couples
-  every scan into one system, which forgoes scan fusion.
+There is no inter-feed phase offset. A feed-2 constant is not separable from
+the source's cross-hand phase (the model has no source column), so fitting
+one would remove the source's polarization angle along with the instrument's
+offset. Omitting it costs nothing: the offset lands in the feed-common
+constant, which cancels in every feed difference, and the R–L phase stays in
+the data for a downstream polarization fit — `QQ − PP` on one baseline
+measures it directly at parallel-hand SNR (see `DetectionRow`'s `phase`).
+The inter-feed DELAY is kept because a delay decoheres across the band, so
+leaving it in costs signal.
 
-There is deliberately NO inter-feed PHASE offset. A feed-2 constant is not
-separable from the source's cross-hand phase — both are a rigid shift of the
-feed-2 block, and the model has no source column — so fitting one and dividing
-it out removes the source's polarization angle along with the instrument's
-offset. Omitting it removes nothing instead: the R–L phase is left in the data
-for a downstream polarization fit, which is where the source and the instrument
-can be separated with a source model. Nothing else in the model is disturbed by
-the omission, because the offset it would have carried lands in the feed-COMMON
-constant, and a feed-common term cancels identically in every feed difference —
-`QQ − PP` and the cross hands are untouched.
+Dispersion (dTEC) and single-band delay (SBD) are not modeled here — they
+are fit by a separate [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)
+step on the fringe-corrected residual.
 
-The R–L phase is still MEASURABLE without the column, and better: `QQ − PP` on
-one baseline is `ρ_a − ρ_b` with the source and atmospheric terms cancelling
-algebraically, at parallel-hand SNR and with no fit in between (see
-`DetectionRow`'s `phase`).
-
-The inter-feed DELAY is a different case and is kept: a delay decoheres across
-the band, so leaving it in costs signal, while a constant phase costs nothing to
-carry.
-
-Ionospheric dispersion (dTEC) and single-band delay (SBD) are NOT modeled
-here — they are fit by a separate [`DispersionSBDFit`](@ref) pipeline step,
-on the fringe-corrected residual.
-
-Omit an element to drop the component; add a `Calibration.GainComponent` (a term with its
-time segmentation, frequency segmentation, and feed tying) to model a new one.
+Omit an element to drop its component; add a `Calibration.GainComponent` to
+model a new one.
 """
 default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = (
     atmos = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
@@ -132,21 +110,17 @@ default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = (
 """
     FringeModel(; terms = default_fringe_terms())
 
-WHAT the fringe stage solves — the model specification of a `FringeFit` step:
-an ordered list of phase-term elements. The gauge pin (`gauge`) is run-wide,
-not part of any one step's model — see [`CalibrationPipeline`](@ref).
+What the fringe stage solves — the model specification of a `FringeFit`
+step. `terms` is a `NamedTuple`: each key names the component its value (a
+`Calibration.GainComponent`) compiles to, and list order is compiled
+component order. See [`default_fringe_terms`](@ref) for the default list.
+The gauge pin is run-wide, not part of any step's model — see
+[`CalibrationPipeline`](@ref Gustavo.CalibrationPipeline).
 
-- `terms` — the ordered, NAMED term list (a `NamedTuple`; each key names the
-  component it compiles to). Each value is a bare `Calibration.GainComponent`
-  (a gain term with its time segmentation, frequency segmentation, and feed tying).
-  Adding a component is adding a named element; the list order is the compiled
-  component order. See [`default_fringe_terms`](@ref) for the default list and
-  how to modify it.
-
-[`DispersionModel`](@ref) and [`SingleBandDelay`](@ref) are NOT valid `terms`
-elements: they are fit by a separate [`DispersionSBDFit`](@ref) pipeline step,
-not by the fringe search, so a `FringeModel` carrying one would compile a θ
-column no stage ever fits (a silent no-fit) — rejected at construction instead.
+[`DispersionModel`](@ref) and [`SingleBandDelay`](@ref) are rejected at
+construction: they are fit by a separate
+[`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit) step, not by the fringe
+search, so carrying one here would compile a θ column no stage fits.
 """
 struct FringeModel{T <: NamedTuple}
     terms::T
@@ -182,30 +156,30 @@ end
 """
     MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1)
 
-HOW the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)):
-today's stage A — a per-baseline delay/rate matched-filter `search` on every
-scan group, then the closure-screened station WLS (`closure`) that ties the
-feeds. With one round and an all-per-scan term list the station systems are
-block-diagonal, and each scan's system is solved as its scan is searched, so
-the pass is scan-local ([`scan_local_solve`](@ref)); a track-global column or
-`rounds > 1` instead pools every scan's detections into one solve at the end
-of the pass. `rounds` re-runs the search on the residual (each round divides
-out the current solution and accumulates the leftover) — an iteration knob of
-THIS estimator.
+How the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)): a
+per-baseline delay/rate matched-filter `search` on every scan group, then
+the closure-screened station WLS (`closure`) that ties the feeds. With one
+round and an all-per-scan term list each scan's station systems solve as the
+scan is searched, so the pass is scan-local ([`scan_local_solve`](@ref)); a
+track-global column or `rounds > 1` instead pools every scan's detections
+into one solve at the end of the pass.
 
-The `search` measures every baseline and gates nothing; `closure.pfa_max` is the
-one detection threshold, deciding which measurements are real fringes and so
-which stations are calibrated (see [`Stationization`](@ref)).
+`rounds` re-runs the search on the residual of the current solution. A
+re-search needs the whole pass finished first, so `rounds > 1` also flips
+the enclosing `FringeFit` step's `fusable_grouping` to `:global` and the
+step takes its own streaming pass.
 
-After the station solve closes, every cell is re-measured AT the delay and rate
-that solution predicts for it ([`steer_scan`](@ref)). That measurement is NOT
-gated: `pfa_max` decides fringe-group membership on the blind pass, and a
-station in that group has its baselines measured at the known fringe location to
+The `search` measures every baseline and gates nothing; `closure.pfa_max` is
+the one detection threshold, deciding which measurements are real fringes
+and so which stations are calibrated (see [`Stationization`](@ref)).
+
+After the station solve closes, every cell is re-measured at the delay and
+rate the solution predicts ([`steer_scan`](@ref)), ungated: a station in the
+fringe group has its baselines measured at the known fringe location to
 arbitrarily low SNR. `steer_cells` sizes the trial count of the recorded
-`pfa_steer` — a significance a caller may read, not a threshold the pass
-applies — and `steer_cells = 0` skips the pass entirely. It runs only where the
-solve is scan-local; a pooled solve has no station parameters while the data is
-still resident, and the steered columns come back `NaN`.
+`pfa_steer` (a significance a caller may read, not a threshold);
+`steer_cells = 0` skips steering. Steering runs only where the solve is
+scan-local; under a pooled solve the steered columns are `NaN`.
 """
 Base.@kwdef struct MatchedFilter <: AbstractFringeEstimator
     search::FringeSearch = FringeSearch()
@@ -221,7 +195,7 @@ end
 
 The fringe stage's gain-model phase components as a named tree: each element of
 `fm.terms` compiled through `model_components(element, spec)` under its list
-key, in list order — the list order IS the compiled component order
+key, in list order — the list order is the compiled component order
 (`spec = (; geom, antennas)`, the step compile spec). An element that
 compiles to nothing contributes no key; one that compiles to several components
 nests them under its key.
@@ -292,14 +266,14 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 #                             same name.
 #   nothing                 — the matched filter does not touch it.
 #
-# ONE estimator's vocabulary, hence private: a global least-squares fringe
+# One estimator's vocabulary, hence private: a global least-squares fringe
 # fitter has no use for it, fitting θ through `evaluate_gains` directly.
 #
 # The stage-B kinds cover exactly the single-parameter, band-wide terms whose
 # observable the search measures. Everything else is `nothing` and so unfittable
 # by this estimator rather than approximated: `_solve_kind_cols!` writes one θ
 # column per (station, feed, time) node — the block's first parameter at the
-# FIRST frequency segment — so a multi-parameter term (a polynomial) would have its
+# First frequency segment — so a multi-parameter term (a polynomial) would have its
 # trailing parameters left at zero, and a frequency-resolved term (the bandpass,
 # `ConstantTerm` over `ChannelBlocks`) would have every segment but the first left at
 # zero while the search wrote its band-wide phase into that one. A `Dispersion`
@@ -309,7 +283,7 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 # own term list (they belong to a separate `DispersionSBDFit` step instead).
 function matched_kind(tc)
     tc.Ti isa PerIntegration && return nothing
-    # The per-baseline search measures ONE delay/rate/phase across the whole
+    # The per-baseline search measures one delay/rate/phase across the whole
     # band, so only a component spanning it can receive that estimate.
     tc.Frequency isa GlobalFrequency || return nothing
     term = tc.term
@@ -320,7 +294,7 @@ function matched_kind(tc)
 end
 
 # Stage-B engine components `(plan, kind)` — the delay/rate/phase terms the
-# search + stationization solve, as declared by `matched_kind`, over EVERY
+# search + stationization solve, as declared by `matched_kind`, over every
 # phase component of `model`. Called on a single step's own private model
 # (the fringe step's), so every component here genuinely belongs to that step
 # — no later step's component can structurally collide with a stage-B
@@ -473,7 +447,7 @@ end
 
 Per-`(station, feed)` group delay (s) and fringe rate (Hz) at time index `ti`,
 summed over the stage-B components of `model`. This is the decode
-[`fringe_station_solutions`](@ref) reports, for ONE scan and without a finished
+[`fringe_station_solutions`](@ref) reports, for one scan and without a finished
 solution, so a solve step can read its own station parameters while the scan's
 data is still resident. Entries are `NaN` where no component constrains that node.
 """
@@ -550,10 +524,10 @@ end
     validate_scan_epochs(comps, ntimes)
 
 Reject a model whose rate components disagree on the constant-phase epoch at
-ANY time index — the [`scan_phase_epoch`](@ref) error, raised over the whole
+Any time index — the [`scan_phase_epoch`](@ref) error, raised over the whole
 time axis at once so a fringe pass fails before it reads any data rather than
 mid-stream at the first offending scan. `comps` is
-[`fringe_stage_components`](@ref)' output; a model with at most one rate
+`fringe_stage_components`' output; a model with at most one rate
 component cannot disagree and is skipped outright.
 """
 function validate_scan_epochs(comps, ntimes::Integer)
@@ -567,21 +541,19 @@ end
 """
     steer_scan(stack, res, bl_pairs, pols, f0, t0, sta_delay, sta_rate; cells)
 
-Re-measure every `(baseline, product)` of a materialized scan group AT the delay
-and rate the station solution predicts for it — `τ_{a,fa} − τ_{b,fb}` and the
-same difference in rate — rather than wherever a blind search found its peak.
+Re-measure every `(baseline, product)` of a materialized scan group at the
+delay and rate the station solution predicts for it (`τ_{a,fa} − τ_{b,fb}`,
+and the same difference in rate) rather than at a blind search peak.
 
-This is what recovers a fringe too weak to survive a blind search: the trial
-count collapses from the search plane's ~1e4 cells to the handful `cells`
-covering the prediction's uncertainty, so the SNR needed to clear a given
-false-alarm probability drops by roughly 1.5σ. Nothing about the measurement
-changes — only how many chances noise had to fake it.
+This recovers a fringe too weak to survive a blind search: the trial count
+collapses from the search plane's ~1e4 cells to the `cells` covering the
+prediction's uncertainty, so the SNR needed to clear a given false-alarm
+probability drops by roughly 1.5σ.
 
-The steered SNR is directly comparable to the blind one because it is formed
-against the SAME noise: the blind pass reports `snr = |D_blind|/σ`, so
-re-evaluating the exact matched filter at the blind peak recovers `σ = |D_blind|/snr`
-without needing the search plane. Cells with no usable data, or whose two
-stations are not both solved this scan, come back `NaN`.
+The steered SNR is comparable to the blind one because both are formed
+against the same noise (`σ = |D_blind|/snr` at the blind peak). Cells with
+no usable data, or whose two stations are not both solved this scan, come
+back `NaN`.
 """
 function steer_scan(
         stack, res, bl_pairs, pols, f0::Real, t0::Real,

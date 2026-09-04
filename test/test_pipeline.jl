@@ -159,15 +159,15 @@ end
     # revert to `PerFeed` lets a spurious inter-feed rate (rate₂ − rate₁) / adhoc phase
     # float on noise and — multiplied by the whole-track Rate lever arm
     # `2π·rate·(t − t0_global)`, hours long — inject large, arbitrary scan-to-scan
-    # cross-hand phase jumps (see the rationale comment on `_fringe_model` in
-    # model_plans.jl and the `fringe-rate-must-be-sharedfeeds` decision).
+    # cross-hand phase jumps (see the `default_fringe_terms` and
+    # `default_adhoc_terms` docstrings for the tying rationale).
     #
     # The end-to-end coherence test injects FEED-COMMON truth, so a `PerFeed` revert
     # would still recover it at high SNR and pass — it does NOT guard this decision.
     # Assert the tying structurally (the model) AND that the layout realises it (both
     # feeds share one θ column per (station, time-seg), so the solved inter-feed
     # rate is ≡ 0).
-    model = FP._fringe_model()
+    model = _full_fringe_model()
     phase = CAL.phase_components(model)
 
     rate_i = findfirst(tc -> tc.term isa CAL.Rate, phase)

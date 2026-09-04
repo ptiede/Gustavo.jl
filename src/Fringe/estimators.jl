@@ -3,7 +3,7 @@
 # The strategy that turns scan data into station fringe parameters (delays,
 # rates, phases) is pluggable. Today's implementation — a per-baseline
 # delay/rate matched-filter search followed by a closure-screened per-station
-# WLS ("stationization") — is ONE estimator; a Schwab–Cotton-style global least
+# WLS ("stationization") — is one estimator; a Schwab–Cotton-style global least
 # squares fit of station parameters directly to the visibilities is another,
 # and needs no stationization at all. The search/closure machinery therefore
 # belongs to the ESTIMATOR that uses it, not to the `FringeFit` step itself.
@@ -16,42 +16,36 @@
     AbstractFringeEstimator
 
 The strategy a `FringeFit` step uses to estimate station fringe parameters
-from scan data. Implementations own their machinery entirely — e.g. the
-matched-filter estimator carries a search configuration and a `Stationization`;
-a global least-squares estimator would carry neither.
+from scan data. Implementations own their machinery: the matched-filter
+estimator carries a search configuration and a `Stationization`; a global
+least-squares estimator would carry neither.
 
 # Implementing an estimator
 
-Subtype it and define two methods, which `FringeFit` calls once per scan group
-and once per pass:
+Subtype it and define two methods, called once per scan group and once per
+pass:
 
     Gustavo.Fringe.estimate_scan!(est::MyEstimator, ctx, step, stack, win) -> NamedTuple
     Gustavo.Fringe.finish_estimate!(est::MyEstimator, ctx, step) -> NamedTuple
 
-See [`estimate_scan!`](@ref) and [`finish_estimate!`](@ref) for what each
-receives and must return. Both have fallbacks that error, so an estimator that
-implements neither fails with a message naming what is missing rather than
-being silently skipped.
-
-Then declare what it can fit, which the step checks when it compiles the
-model — before any data is read:
+(see [`estimate_scan!`](@ref) and [`finish_estimate!`](@ref); both fallbacks
+error, naming what is missing). Then declare what it can fit, checked when
+the step compiles the model, before any data is read:
 
     Gustavo.Fringe.can_fit(est::MyEstimator, tc) -> Bool
     Gustavo.Fringe.validate_model(est::MyEstimator, comps)   # optional
 
 [`can_fit`](@ref) defaults to `false`, so an estimator that declares nothing
-is rejected rather than quietly leaving θ columns unwritten;
-[`validate_model`](@ref) defaults to a no-op, since requiring nothing is
-legitimate. See both for the two directions of the check.
+is rejected rather than leaving θ columns unwritten; [`validate_model`](@ref)
+defaults to a no-op.
 
 An estimator whose solve completes per scan under some configurations may
-additionally declare [`scan_local_solve`](@ref), which lets a `FringeFit`
-carrying it share one streaming pass with adjacent scan-local steps; the
-default (`false`) is always correct, just never fused.
+also declare [`scan_local_solve`](@ref), which lets a `FringeFit` carrying
+it share one streaming pass with adjacent scan-local steps; the default
+(`false`) is never fused.
 
-The step, not the estimator, owns the θ slots `FringeModel` declared and the
-dTEC/SBD refine service it publishes for later stages — an estimator only has
-to fill θ and report.
+The step, not the estimator, owns the θ slots `FringeModel` declared; an
+estimator only fills θ and reports.
 """
 abstract type AbstractFringeEstimator end
 
@@ -60,13 +54,13 @@ abstract type AbstractFringeEstimator end
 
 One scan group's contribution to the fringe estimate. `ctx` is the pipeline's
 solve context (`ctx.θ`, `ctx.ev`, `ctx.geom`, `ctx.stream`, `ctx.scratch`),
-`step` the [`FringeFit`](@ref) being run — read its `model` for WHAT is solved —
+`step` the [`FringeFit`](@ref Gustavo.FringeFit) being run — read its `model` for what is solved —
 `stack` the materialized scan group's `DimStack`, and `win` its
 [`GeometryWindow`](@ref) into the solve's index space.
 
 Runs concurrently across scan groups, so it may write only θ columns private to
 this scan; anything global belongs in [`finish_estimate!`](@ref). A scan-local
-configuration ([`scan_local_solve`](@ref)) writes ALL of this scan's columns
+configuration ([`scan_local_solve`](@ref)) writes all of this scan's columns
 here. The returned NamedTuple is collected in group order and handed back there.
 
 Include a `max_snr::Real` field: a scan selection may rank or filter groups by
@@ -93,7 +87,7 @@ This is where θ's cross-scan columns are solved.
 The returned NamedTuple becomes the stage's recorded diagnostics. Include
 `repeat_pass = true` to have the runner stream the whole pass again — how a
 residual-refinement round is requested. The step publishes its refine service
-once the pass is NOT repeated, so an estimator that iterates must report every
+once the pass is not repeated, so an estimator that iterates must report every
 intermediate round as `repeat_pass = true`.
 """
 function finish_estimate! end
@@ -125,7 +119,7 @@ scan_local_solve(::AbstractFringeEstimator, model) = false
     can_fit(est::AbstractFringeEstimator, tc::Calibration.GainComponent) -> Bool
 
 Whether `est` fits the θ block of the compiled component `tc`. `FringeFit`
-calls this once per component ITS OWN model contributed, at model-compile
+calls this once per component its own model contributed, at model-compile
 time, and throws an `ArgumentError` naming the estimator and the component on
 the first `false` — a term nothing writes is a silent no-fit, not a smaller
 solve.
@@ -135,7 +129,7 @@ author never considered capability fails loudly on the first model term rather
 than returning a solution with zeros in it. Declaring capability is therefore
 part of implementing the interface, not an optional refinement.
 
-Components contributed by OTHER steps — the per-integration adhoc phase, the
+Components contributed by other steps — the per-integration adhoc phase, the
 per-channel bandpass — are not asked about: the step that contributes a
 component vouches for it.
 """
@@ -166,7 +160,7 @@ validate_model(::AbstractFringeEstimator, comps) = nothing
     estimator_info(est::AbstractFringeEstimator) -> NamedTuple
 
 The estimator's own provenance, merged into the fitted solution's `info` so a
-solution records HOW it was estimated. `MatchedFilter` reports its
+solution records how it was estimated. `MatchedFilter` reports its
 [`FringeSearch`](@ref) configuration as `search`.
 
 Optional: the default is empty, and a solution from an estimator that defines no

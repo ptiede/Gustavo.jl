@@ -174,7 +174,7 @@ function _colocated_ties(antennas; max_sep::Real)
             "means anything. Supply real `station_xyz`, or do not ask for co-located tying."
     )
     # NOTE the explicit nesting: in a comma-nested `for j, i` a `break` exits
-    # BOTH levels, so only the FIRST co-located pair in the array would ever be
+    # Both levels, so only the first co-located pair in the array would ever be
     # found and every later twin would stay untied.
     for j in 2:n
         for i in 1:(j - 1)

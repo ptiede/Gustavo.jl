@@ -40,6 +40,38 @@ _dispersion_sbd_step(; dispersion = true, sbd = true) =
         sbd = sbd ? SingleBandDelay() : nothing,
     )
 
+# The union of the components the standard pipeline's steps solve (each on its
+# own private θ in a real run), assembled as ONE StationGainModel: the fringe
+# terms, optionally the dTEC and SBD columns, plus the phase/log-amplitude
+# bandpass and the adhoc phase. Structural tests use it to exercise the plan
+# routers and θ decoding on a realistic full component mix.
+function _full_fringe_model(;
+        dispersion::Bool = false, sbd_freq_groups = nothing,
+        rel_time = PerScan(),
+    )
+    disp = dispersion ?
+        (dtec = GainComponent(Dispersion(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),) : (;)
+    sbd = sbd_freq_groups === nothing ? (;) : (
+            sbd = (
+                delay = GainComponent(Delay(); Ti = PerScan(), Frequency = FreqGroups(sbd_freq_groups), Feed = SharedFeeds()),
+                constant = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = FreqGroups(sbd_freq_groups), Feed = SharedFeeds()),
+            ),
+        )
+    return StationGainModel(
+        phase = merge(
+            default_fringe_terms(; rel_time),
+            disp, sbd,
+            (
+                bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed()),
+                adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+            ),
+        ),
+        logamp = (
+            bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed()),
+        ),
+    )
+end
+
 # ── Synthetic UVSet with injected station fringe parameters ──────────────────
 #
 # For baseline (a, b) and product p with feeds (fa, fb):

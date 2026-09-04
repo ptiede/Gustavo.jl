@@ -143,7 +143,7 @@ end
 
 Ridge-regularized WLS: solve `min_x ‖diag(√inv_variances)(Ax - b)‖² + ‖Rx‖²`
 by stacking `R` onto the weighted design matrix (`Rx = 0` as extra
-zero-target rows) and delegating to [`weighted_least_squares`](@ref).
+zero-target rows) and delegating to `weighted_least_squares`.
 
 `penalties` is either a vector of per-column ridge weights `λᵢ ≥ 0` (the
 diagonal case, giving `R = Diagonal(√λ)`) or an arbitrary penalty matrix `R`
@@ -175,7 +175,7 @@ matrix, or a function of `A` computing one of those (for penalties whose
 shape depends on the system size, e.g. one ridge entry per column).
 
 Calling `est(args...)` runs `observation_model(args...)` then dispatches to
-[`weighted_least_squares`](@ref) or [`weighted_regularized_least_squares`](@ref)
+`weighted_least_squares` or [`weighted_regularized_least_squares`](@ref)
 according to `penalty`.
 """
 struct WLSEstimator{O, P}
@@ -237,31 +237,20 @@ end
     unwrap_phase_track(phases; weights=nothing) -> Vector
 
 Unwrap a phase track to remove ±2π discontinuities between adjacent finite
-samples. The walk seeds from a single reference index, picked internally as
-`argmax(weights[finite])` when `weights` is provided, or the first finite phase
-otherwise.
+samples, moving samples only by whole multiples of 2π: no trend is
+estimated, removed, or restored. The walk seeds from `argmax` of the finite
+weights when `weights` is given, else the first finite phase.
 
-Each step is resolved against zero: the branch chosen is the one putting the
-increment nearest the previous sample. This does ONE thing to the track — it moves
-samples by whole multiples of 2π. No trend is estimated, removed or restored, so a
-delay or rate the caller has not fitted out is still present in the result, exactly
-as it was in the input.
+A step is resolved only while the true increment plus its noise stays inside
+±π, so a track carrying a steep trend (a group delay along frequency, a
+fringe rate along time) is walked onto the wrong branch systematically —
+fit the trend out first. Noise puts individual steps over the boundary at
+random, accumulating 2π errors that a subsequent smooth fit reports as a
+large trend; [`phase_unwrap_ambiguity`](@ref) detects that, so consult it
+before trusting an unwrapped track.
 
-That is also the walk's limit. A step is resolved only while the true increment
-plus its noise stays inside ±π, so a track carrying a steep trend — a group delay
-along frequency, a fringe rate along time — is walked onto the wrong branch
-systematically once the per-sample increment approaches π. Fit the trend out before
-unwrapping if it is that steep; a bandpass solved after a fringe fit is orders of
-magnitude below it and unaffected.
-
-Noise puts individual steps over the boundary at random, and the walk then
-accumulates 2π errors that any subsequent smooth fit reports as a large trend.
-[`phase_unwrap_ambiguity`](@ref) detects that; consult it before trusting an
-unwrapped track or anything fit to one.
-
-This is an algorithmic anchor only — downstream gauge code should fix the
-phase gauge itself (by centering via a weighted mean, or by removing a
-per-feed reference factor), not rely on the unwrap reference.
+The seed is an algorithmic anchor only; downstream gauge code should fix the
+phase gauge itself rather than rely on the unwrap reference.
 """
 function unwrap_phase_track(phases; weights = nothing)
     Base.require_one_based_indexing(phases)
@@ -325,7 +314,7 @@ rather than as evidence of the trend that fit reports.
 The circular mean is a location parameter here, nothing more: it is what makes this
 a measure of scatter rather than of the trend the track happens to carry, so a
 steadily-trending track reads near 0 however steep its trend. Steepness is a
-SEPARATE failure of the walk (increments approaching ±π go onto the wrong branch
+separate failure of the walk (increments approaching ±π go onto the wrong branch
 systematically) and this statistic does not report it — fit the trend out first if
 a caller can carry one that large.
 

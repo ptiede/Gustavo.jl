@@ -130,13 +130,12 @@ Fields:
                     the ids are dense-ranked (`scan_names[s]` names segment `s`).
 - `spw_names`     : spw label of each distinct `spw_of_chan` id, likewise.
 
-The names are the IDENTITY a solution is applied on: placing a foreign sample in
-a `PerScan` or `PerSpectralWindow` segment matches the label, never the raw
-integer id (which means nothing across two geometries) and never the coordinate.
-They may be left empty, and then a solution carrying such a segmentation applies
-only to a grid with the same labelling. The `scan_names[s] ↔ id s`
-correspondence is checked here: a name vector must either be empty or have one
-entry per distinct id.
+The names are the identity a solution is applied on: a foreign sample is
+placed in a `PerScan` or `PerSpectralWindow` segment by matching the name,
+never the raw integer id or the coordinate. Name vectors may be left empty,
+in which case a solution carrying such a segmentation applies only to a grid
+with identical labelling. A non-empty name vector must have one entry per
+distinct id (checked here).
 """
 struct DataGeometry
     times::Vector{Float64}
@@ -232,7 +231,7 @@ time_segment_ids(seg::Union{TimeBlocks, InstrumentScans}, geom::DataGeometry) =
     _dense_rank(map(_time_binner(seg, geom), geom.times))
 
 # The raw-bin formula of a time segmentation that bins a coordinate, closed over
-# the geometry parameters it reads. Placing a foreign sample evaluates the SOLVE
+# the geometry parameters it reads. Placing a foreign sample evaluates the solve
 # geometry's binner at the target's epoch, so both grids are binned identically;
 # a `TimeBlocks` origin is the solve's first epoch, never the target's.
 function _time_binner(seg::TimeBlocks, geom::DataGeometry)
@@ -321,7 +320,7 @@ materialize(b::BandGroups, geom::DataGeometry) =
 """
     fringe_freq_groups(freqs; gap_factor = 4.0) -> Vector{UnitRange{Int}}
 
-Group the contiguous sub-band blocks of a channel-frequency axis into FREQUENCY
+Group the contiguous sub-band blocks of a channel-frequency axis into frequency
 GROUPS. The inter-block gaps are split into "within-group" vs "between-group"
 scales at the largest ratio jump in their sorted values (must exceed
 `gap_factor`); when the gaps carry no such two-scale structure the axis is one
@@ -423,7 +422,7 @@ end
 # ── Placement on a foreign grid ──────────────────────────────────────────────
 #
 # Applying a solution to data it was not fit on asks one question per target
-# sample: which segment of the SOLVE does this sample belong to? It is answered
+# sample: which segment of the solve does this sample belong to? It is answered
 # by the identity the segmentation is defined on — a scan is a scan name, a spw
 # is a spw name, a block is a bin of the solve's own formula — never by
 # comparing coordinates against segment intervals, which would replace an exact
@@ -442,7 +441,7 @@ const _FREQ_RTOL = 1.0e-9
     time_segment_ids(seg, solve::DataGeometry, target::DataGeometry;
                      ti_idx = eachindex(target.times), time_span = nothing) -> Vector{Int}
 
-The SOLVE-side time segment id of each `target` epoch selected by `ti_idx` — the
+The solve-side time segment id of each `target` epoch selected by `ti_idx` — the
 space `ComponentPlan.tseg_id` and a component's θ leaf are indexed by, so a
 solution evaluates on `target`'s grid by reading these ids. `ti_idx` selects the
 window to place; `time_span[k]` is the interval the `k`-th selected sample
@@ -458,7 +457,7 @@ function time_segment_ids end
     freq_segment_ids(seg, solve::DataGeometry, target::DataGeometry;
                      chan_idx = eachindex(target.channel_freqs)) -> Vector{Int}
 
-The SOLVE-side frequency segment id of each `target` channel selected by
+The solve-side frequency segment id of each `target` channel selected by
 `chan_idx`; the frequency counterpart of the foreign-grid
 [`time_segment_ids`](@ref).
 """
@@ -479,7 +478,7 @@ function time_segment_ids(
         ti_idx = eachindex(target.times), time_span = nothing,
     )
     ids, _ = _dense_rank(solve.scan_of_time)
-    # An identical labelling IS the identity — the two grids agree sample for
+    # An identical labelling is the identity — the two grids agree sample for
     # sample, so no name is needed to say which scan a sample belongs to.
     solve.scan_of_time == target.scan_of_time && return ids[ti_idx]
     _require_names(seg, "scan", solve.scan_names, target.scan_names)
@@ -587,7 +586,7 @@ function time_segment_ids(
                     "resampled onto a different time grid."
             )
         )
-        # Averaging epochs {1, 2, 3} h yields 2.0 h, which IS a solve epoch, so
+        # Averaging epochs {1, 2, 3} h yields 2.0 h, which is a solve epoch, so
         # the match above does not by itself catch time-averaged data; the span
         # does — it still covers the epochs that were averaged away.
         w = _span_at(time_span, k)
@@ -607,7 +606,7 @@ function time_segment_ids(
     return out
 end
 
-# `FreqGroups` and `ChannelBlocks` cut the CHANNEL INDEX axis, so they mean the
+# `FreqGroups` and `ChannelBlocks` cut the channel INDEX axis, so they mean the
 # same thing on another grid only when that grid indexes the same channels.
 function freq_segment_ids(
         seg::Union{FreqGroups, ChannelBlocks}, solve::DataGeometry, target::DataGeometry;

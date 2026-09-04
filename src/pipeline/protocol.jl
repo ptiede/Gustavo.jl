@@ -1,6 +1,6 @@
 # ── Step protocol: the composable-pipeline contract ──────────────────────────
 #
-# A pipeline is an ordered list of steps, each solving its OWN compiled gain
+# A pipeline is an ordered list of steps, each solving its own compiled gain
 # model: at fit time a `SolveStep` declares its model components and
 # `plan_parameters` lays out that step's own θ alone — no step's θ block is
 # ever shared with, or visible to, another step's. Gain correction between
@@ -34,8 +34,8 @@
 #   solve kernel, not from pipeline construction.
 #
 # Run-wide resources (task/memory budgets, progress) live on the pipeline's
-# `ExecutionConfig`, NOT on steps: they are properties of a run, shared by
-# every pass. Anything that changes WHAT a given step solves is model
+# `ExecutionConfig`, not on steps: they are properties of a run, shared by
+# every pass. Anything that changes what a given step solves is model
 # specification and lives on that step. The reference antenna is neither: it is
 # a run-wide choice shared by every step's pass rather than a resource, so it
 # lives on `CalibrationPipeline` itself (`gauge`), not on any one step or on
@@ -100,7 +100,7 @@ transforms(step::CalibrationStep) = ()
     fit_selection(step::CalibrationStep, prior_solutions) -> Fringe.AbstractScanSelection
 
 Which scans feed this step's accumulation. Time-global components solved by
-the step still apply to EVERY scan — fitting a bandpass or a track-global delay
+the step still apply to every scan — fitting a bandpass or a track-global delay
 from a few bright calibrator scans and applying it across the board. `prior_solutions`
 is the ordered `Vector{StepSolution}` of every earlier step's finished solution —
 a step wanting non-data info from an earlier step (e.g. per-scan SNR) reads it
@@ -132,13 +132,13 @@ required_grouping(step::CalibrationStep) = :any
     fusable_grouping(step::CalibrationStep) -> Symbol
 
 The accumulation scope this step's solve needs: `:scan` when the step is
-finalizable from ONE scan group alone — every θ slot it writes for a scan is
+finalizable from one scan group alone — every θ slot it writes for a scan is
 written from that scan's data, by the time its `process_scan!` returns — or
 `:global` when finishing needs the whole pass (one system closed over every
 scan, a statistic pooled across scans, a residual re-search round). Default
 `:global`, so a step that has not declared otherwise is never fused.
 
-Consecutive `:scan` steps share ONE streaming pass: the scan group is
+Consecutive `:scan` steps share one streaming pass: the scan group is
 materialized once, each step's [`process_scan!`](@ref) runs on it in declared
 order, and each step's just-solved gains are divided out of the resident scan
 before the next step sees it — the same correction the transform chain applies
@@ -196,37 +196,26 @@ process_scan!(step::SolveStep, ctx, stack, win) = nothing
 """
     finish_pass!(step::SolveStep, ctx::SolveContext) -> NamedTuple
 
-Called once when the pass's streaming completes: run the step's global solve
-(stationization, bandpass solve, smoother fit, …), fill its θ block, and return
-the stage's diagnostics NamedTuple — THIS is the step logging interface: any
-key returned here ends up on the step's own `StepSolution.info`
-(`stage_info(sol, name)`), readable uniformly regardless of which step
-published it, and (for `Number`/`AbstractVector`/nested `NamedTuple`/`DimStack`
-values) written to `save_solution_hdf5`'s `info/steps/<name>/*` automatically.
-No separate logging hook is needed — return what you want recorded.
+Called once when the pass's streaming completes: run the step's global
+solve, fill its θ block, and return the stage's diagnostics `NamedTuple`.
+This is the step logging interface: every key returned lands on the step's
+own `StepSolution.info` (`stage_info(sol, name)`) and — for
+`Number`/`AbstractVector`/`String`/nested `NamedTuple`/`DimStack` values —
+is written to `save_solution_hdf5`'s `info/steps/<name>/*` automatically.
 
-`ctx.scratch[:pass_results]` holds the pass's collected per-group results —
-`(; index, decode, work, reduce, r, out)` per selected group, in NO particular
-order (a group's `index` is its true position; use [`scan_values`](@ref) to
-scatter a per-`res` quantity back into GLOBAL scan-group order rather than
-assuming `results` is sorted or covers every group). `decode`/`work` are
-seconds spent materializing / in `process_scan!`; `r` is the step's own
-per-scan return. The runner adds `t_pass` (total pass wall time) and `timing`
-(a `scan_values`-built `DimStack` of `decode`/`work`/`reduce`) to whatever this
-returns, automatically, for every step — no extra code needed for that part.
+`ctx.scratch[:pass_results]` holds the collected per-group results:
+`(; index, decode, work, reduce, r, out)` per selected group, in no
+particular order — `index` is the group's true position, and
+[`scan_values`](@ref) scatters a per-result quantity back into global
+scan-group order. `decode`/`work` are seconds spent materializing / in
+`process_scan!`; `r` is the step's own per-scan return. The runner adds
+`t_pass` and a per-scan `timing` `DimStack` to whatever this returns.
 
-A step may request pass repetition (residual re-search rounds) by including
-`repeat_pass = true` in the returned NamedTuple — the runner streams the pass
-again (that key is stripped from the recorded diagnostics). A step declaring
-itself scan-local ([`fusable_grouping`](@ref)) may not: it is rejected, since a
-step needing the pass run again is not finalizable from one scan. Default:
-empty diagnostics.
-
-Together with [`start_pass!`](@ref) and [`process_scan!`](@ref) this is the
-step execution contract: the runner drives the steps in the pipeline's declared
-order through the streaming layer (`Fringe.map_groups`), each in its own pass —
-every built-in stage consumes the residual of all previously-solved θ — except
-where consecutive scan-local steps share one.
+A step may request pass repetition by including `repeat_pass = true` in the
+return (the key is stripped from the recorded diagnostics). A step declaring
+itself scan-local ([`fusable_grouping`](@ref)) may not — a step needing the
+pass run again is not finalizable from one scan. Default: empty
+diagnostics.
 """
 finish_pass!(step::SolveStep, ctx) = NamedTuple()
 
@@ -235,7 +224,7 @@ finish_pass!(step::SolveStep, ctx) = NamedTuple()
 
 The per-scan-group values `f(res)` extracts from `results`
 (`ctx.scratch[:pass_results]`, see [`finish_pass!`](@ref)), scattered into a
-dense length-`ngroups` array in GLOBAL scan-group index order. A group a
+dense length-`ngroups` array in global scan-group index order. A group a
 step's [`fit_selection`](@ref) did not select reads back as `default`, not
 garbage — `results` need not be sorted, and need not cover every group. The
 shared primitive behind the runner's own per-step `timing` (in
@@ -259,21 +248,21 @@ end
     SolveContext
 
 The shared state of one pipeline solve, threaded through every visitor hook:
-the step's OWN compiled model (`model`/`layout`/`ev`/`θ` — that step's private
+the step's own compiled model (`model`/`layout`/`ev`/`θ` — that step's private
 gain model, never merged with another step's, see [`StepSolution`](@ref)), the
 data geometry, the resolved gauge (`gauge`), the streaming layer
 (`stream` — REBUILT between steps as each finished solution is appended to its
 transform chain, see `_run_pipeline` — which also carries the run's
 [`ExecutionConfig`](@ref) resources), and
-`scratch` — a `Dict{Symbol, Any}` for state PRIVATE to this step's own pass
+`scratch` — a `Dict{Symbol, Any}` for state private to this step's own pass
 (e.g. per-group scratch accumulators across search rounds). Non-data info a
-LATER step wants from an earlier one (e.g. per-scan SNR) is never read through
+Later step wants from an earlier one (e.g. per-scan SNR) is never read through
 `scratch` — it's read off the ordered list of finished `StepSolution`s instead
 (see [`fit_selection`](@ref)); gain correction between steps is never read
 through `scratch` either — it flows through `stream`'s transform chain, so no
 step evaluates or mutates another step's θ.
 
-`θ` is a [`ComponentVector`](@ref) over `layout.template`'s axes — its named
+`θ` is a `ComponentVector` over `layout.template`'s axes — its named
 blocks (`θ.phase.<name>` / `θ.logamp.<name>`) are directly addressable. Once a
 step is finished and wrapped in a [`CalibrationSolution`](@ref),
 [`parameters`](@ref) wraps its components' blocks as labelled, dimensioned

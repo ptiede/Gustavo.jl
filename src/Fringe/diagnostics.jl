@@ -120,57 +120,50 @@ end
 """
     fringe_station_solutions(sol::CalibrationSolution) -> Vector{NamedTuple}
 
-Decode the stationized per-scan delay/rate/constant-phase parameters straight out
-of the fringe step's own θ into a per-`(scan, station, feed)` table — no data
-read, no re-search.
-One row per (scan-group index `scan`, 1-based `station`, `feed ∈ {1, 2}`):
+Decode the stationized per-scan delay/rate/constant-phase parameters from
+the fringe step's θ into a per-`(scan, station, feed)` table; no data is
+read. One row per (scan-group index `scan`, 1-based `station`,
+`feed ∈ {1, 2}`):
 
-- `delay_ns`  — station group delay (ns): the per-scan feed-common delay plus, on
-  feed 2, the inter-feed delay offset the model fit (per scan, or one offset for
-  the whole track — see `default_fringe_terms`' `rel_time`).
+- `delay_ns`  — station group delay (ns): the feed-common delay plus, on
+  feed 2, the fitted inter-feed offset.
 - `rate_mHz`  — station fringe rate (mHz).
-- `phase_deg` — station constant phase (deg): per-scan feed-common phase plus, on
-  feed 2, the inter-feed phase offset. It is the phase at the epoch that scan's
-  rate column is referenced to — the scan's own mean time, not a track-wide one
-  (see `Calibration.Rate`), so it is comparable across scans only through a
-  difference taken within one.
+- `phase_deg` — station constant phase (deg), at the epoch the scan's rate
+  column is referenced to (the scan's own mean time), so it is comparable
+  across scans only through a difference taken within one scan.
 
-Summed from every stage-B component the fringe stage itself owns
-(`fringe_stage_components` — the delay/rate/constant terms, EXCLUDING the
-per-AP adhoc, the per-channel bandpass, dTEC and SBD) PLUS, if a
-`DispersionSBDFit` step ran, its own private per-scan delay-refinement column
-from its own `(model, layout, θ)` (gains compose multiplicatively, so this is
-the same total delay as one incremented column would be), so it tracks the
-model automatically. Values are gauge-fixed to the solve's
-reference pin; a within-scan difference against the SAME feed of a reference station
-is gauge-invariant (the reported `delay_rel`/`rate_rel`).
+Summed from every stage-B component the fringe stage owns (delay/rate/
+constant terms — not adhoc, bandpass, dTEC, or SBD) plus, if a
+`DispersionSBDFit` step ran, its private per-scan delay-refinement column.
+Values are gauge-fixed to the solve's reference pin; a within-scan
+difference against the same feed of a reference station is gauge-invariant
+(the reported `delay_rel`/`rate_rel`).
 
-The table is DENSE: a row is emitted for every layout slot, so a (station, feed,
-scan) the solve never constrained reads back as the identity 0 (indistinguishable
-here from the reference's genuine gauge-zero). Mask it with the detection/flag info
-(`suspect_fringes` / `info.flagged_ant`/`flagged_scan`, and single-feed stations
-via which feeds ever appear in `info.det_pol`) — this accessor deliberately stays a
-pure θ-decode and does not consult the detections.
+The table is dense: a (station, feed, scan) the solve never constrained
+reads back as the identity 0, indistinguishable from a genuine gauge-zero.
+Mask it with the detection/flag info (`suspect_fringes`,
+`info.flagged_ant`/`flagged_scan`); this accessor is a pure θ-decode and
+does not consult the detections.
 
-Scan index matches the scan-group ordering used by [`fringe_snr_table`](@ref) and
-`info.det_scan` (the per-scan time segmentation is the scan-group partition).
+Scan index matches the scan-group ordering of [`fringe_snr_table`](@ref) and
+`info.det_scan`.
 """
 function fringe_station_solutions(sol::CalibrationSolution)
     fringe_step = sol[:fringe].steps[1]
     model, layout, θ = fringe_step.model, fringe_step.layout, fringe_step.θ
     nant = layout.nant
-    # The fringe step's OWN model carries only its own components — a LATER
+    # The fringe step's own model carries only its own components — a later
     # step (e.g. `DispersionSBDFit`) compiling a component sharing a stage-B
-    # signature by design (see `fringe_stage_components`) lives in a SEPARATE
+    # signature by design (see `fringe_stage_components`) lives in a separate
     # step's own model and never appears here, so no restriction is needed.
     comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate/:phase)
     refplan = _perscan_delay_plan(model, layout)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
     # `DispersionSBDFit`'s own delay-refinement column, if that step ran — a
-    # SEPARATE step's own `(model, layout, θ)`, not a positional trick against
+    # Separate step's own `(model, layout, θ)`, not a positional trick against
     # a merged model, so its own plain `_perscan_delay_plan` finds it directly
-    # (its own model has only ONE such component).
+    # (its own model has only one such component).
     refine_i = findfirst(s -> s.name === :refine, sol.steps)
     delay_refine_plan = refine_i === nothing ? nothing :
         _perscan_delay_plan(sol.steps[refine_i].model, sol.steps[refine_i].layout)
@@ -228,7 +221,7 @@ end
 """
     BaselineFringeData
 
-Per-baseline coherent visibility averages for ONE scan, before and after applying
+Per-baseline coherent visibility averages for one scan, before and after applying
 a fringe `CalibrationSolution`. Produced by [`baseline_fringe_data`](@ref) and
 consumed by `plot_baseline_fringes`.
 
@@ -244,13 +237,13 @@ means (vector averages, `NaN` where a cell has no unflagged data):
   `angle` vs time shows the fringe-rate slope (flat after a good fit).
 
 Wide-band multi-group data (e.g. the four VGOS 3/5/6/10 GHz frequency groups) also
-carries the per-FREQUENCY-GROUP split, so diagnostics can be viewed one frequency
+carries the per-frequency-group split, so diagnostics can be viewed one frequency
 group at a time (`plot_baseline_fringes(data; freqgroup = k)`):
 
 - `freq_groups` — channel ranges of each frequency group ([`fringe_freq_groups`](@ref)
   of `freqs`; a single full range on contiguous data).
 - `tser_freqgroup_before`/`tser_freqgroup_after` — `(ntime, nbl, npol, ngroups)`, the time
-  series averaged over ONLY that frequency group's channels.
+  series averaged over only that frequency group's channels.
 """
 struct BaselineFringeData
     source::String
@@ -288,7 +281,7 @@ function BaselineFringeData(
 end
 
 # The scan stream a diagnostic materializes through. The transform chain is the
-# one RECORDED on `sol` by default, so diagnostics see exactly the data the
+# one recorded on `sol` by default, so diagnostics see exactly the data the
 # solve saw (the "pass `weight_scale` again or this map's SNR won't match the
 # solve" trap is gone); the legacy explicit kwargs (`precal`/`flag_channels`/
 # `weight_scale`) override it when any is given, in the solver's application
@@ -387,7 +380,7 @@ end
     baseline_fringe_data(uvset, sol; scan_index = nothing) -> BaselineFringeData
 
 Materialize one scan of `uvset` and compute, per baseline and correlation product,
-the weighted coherent visibility average vs frequency and vs time, BEFORE and AFTER
+the weighted coherent visibility average vs frequency and vs time, before and after
 dividing out the fringe solution `sol`. This is the per-baseline before/after check:
 a good fit flattens the phase slopes (delay in frequency, rate in time) and lifts
 the coherent amplitude.
@@ -397,7 +390,7 @@ the solve used); the default is the highest-SNR scan. The "after"
 visibility is `V / (g_a · conj(g_b))` with gains evaluated from `sol` exactly as the
 solver applies them — no second disk read of the full set, just this one scan.
 When the solve used a `precal` (e.g. `phasecal_solution`), pass the same one here
-so both BEFORE and AFTER are pre-calibrated the way the solver saw the data; the
+so both before and after are pre-calibrated the way the solver saw the data; the
 same goes for `flag_channels` (e.g. `tone_channel_mask` — flagged channels are
 zero-weighted, dropping out of the plotted averages exactly as they dropped out
 of the solve) and `weight_scale` (the per-station weight correction — see
@@ -478,7 +471,7 @@ baseline_pol_index(data::BaselineFringeData, pol) = _pol_index(data.pol_products
 Per-frequency-group coherence summary of one scan's [`baseline_fringe_data`](@ref):
 for each contiguous frequency group, the within-group coherence `|Σ_c z_c| / Σ_c |z_c|`
 of the per-channel time-averaged visibilities, pooled over cross baselines —
-BEFORE and AFTER the fringe solution. A frequency group whose `eta_after` lags its
+before and after the fringe solution. A frequency group whose `eta_after` lags its
 neighbours localises residual frequency structure (RFI, station passband
 defect) to that group.
 """
@@ -604,7 +597,7 @@ end
 """
     BaselineFringeMap
 
-The delay–rate search map of ONE (baseline, correlation product) of one scan,
+The delay–rate search map of one (baseline, correlation product) of one scan,
 with its scan/baseline labels — [`fringe_search_map`](@ref) output, consumed by
 `plot_fringe_search`. `source`/`scan`/`scan_index` identify the scan; `bl_pair`
 (antenna indices into `ant_names`) and `pol` the searched block; `map` is the
@@ -650,7 +643,7 @@ end
                       pol = :parallel, search = nothing) -> BaselineFringeMap
 
 Recompute the delay–rate matched-filter surface (the HOPS-style fringe plot data,
-and THE false-fringe check) for one baseline of one scan of `uvset` — exactly the
+and the false-fringe check) for one baseline of one scan of `uvset` — exactly the
 search the fringe pass ran, but keeping the whole windowed `|D|` plane in
 SNR units instead of only the peak. A real fringe is a single sharp peak far
 above the sidelobe forest (`pfa ≪ 1`); a false fringe barely clears it.
@@ -745,7 +738,7 @@ detection (`pfa <= Stationization.pfa_max`) on any of the station's baselines,
 so nothing put it in a fringe group (the EHT-HOPS flag criterion). A measured
 but rejected baseline does not rescue it: such a row constrains the fit without
 fixing a fringe location. These stations carry
-identity gains for those scans, and [`apply_calibration`](@ref) zero-weights
+identity gains for those scans, and [`apply_calibration`](@ref Gustavo.UVData.apply_calibration) zero-weights
 their baselines there (`apply_flags = true`). Rows
 `(; scan, scan_name, ant, station)`; empty when every participating station
 was constrained (or the solution predates flag recording).
@@ -776,13 +769,13 @@ the threshold given here. The search pass records every measured cell, accepted
 or not, so this reads the `detected` ones only — a rejected cell is not a suspect
 fringe, it is a non-detection.
 
-At the default this returns the empty set by construction, since acceptance IS a
+At the default this returns the empty set by construction, since acceptance is a
 PFA test at the solve's own `Stationization.pfa_max`. It earns its keep when
 passed something STRICTER than the solve used: those are the accepted detections
 that would flip under a tighter threshold, i.e. the marginal ones worth eyeballing.
 
 Rows `(; scan, a, b, sta_a, sta_b, pol, snr, pfa)`, most-suspect (largest `pfa`)
-first. Needs NO data read — inspect a flagged row with
+first. Needs no data read — inspect a flagged row with
 
     m = fringe_search_map(uvset, sol; scan_index = r.scan, baseline = (r.a, r.b), pol = r.pol)
     plot_fringe_search(m)

@@ -33,7 +33,7 @@ place a cell in its segment, `xf`/`xt` for the term's coordinates, and
 `(node, fs, ts, ant)` with `node = _feed_node(tying, feed)`. A block holds the
 parameters `param_shapes(term, nchan_seg[fs])` declares, in declaration order.
 
-Those four tables are indexed by position on the SOLVE GRID. `tseg`/`fseg` are
+Those four tables are indexed by position on the solve GRID. `tseg`/`fseg` are
 the segmentations they resolve, so the identical tables can be rebuilt for data
 sampled anywhere by placing each foreign sample in its segment
 ([`time_segment_ids`](@ref) / [`freq_segment_ids`](@ref)) — the basis for
@@ -343,7 +343,7 @@ and a heterogeneous name becomes a [`GroupedComponentPlan`](@ref) with one
 ragged leaf per group (`θ.phase.<name>.g1`, `.g2`, …). Iterate the groups with
 [`station_blocks`](@ref).
 
-`require_nonempty` runs [`validate_station_gain_model`](@ref) first, rejecting
+`require_nonempty` runs `validate_station_gain_model` first, rejecting
 a `model` with neither phase nor log-amplitude components — the right default
 for a model meant to be solved. Pass `require_nonempty = false` when an empty
 model is a legitimate, expected state (e.g. one pipeline step's own model,
@@ -411,7 +411,7 @@ solver loops over. `path` descends the layout's plantree starting at `:phase`
 or `:logamp` (e.g. `station_blocks(layout, θ, :phase, :bandpass)`); each
 returned block is `(; stations, θ, plan)`:
 
-- `stations` — the GLOBAL station indices this block's `:Ant` axis spans, in
+- `stations` — the global station indices this block's `:Ant` axis spans, in
   axis order;
 - `θ` — the block's shaped leaf, a view into the given `θ` with axes
   `(param, node, Frequency, Ti, Ant)`;
@@ -422,7 +422,7 @@ returned block is `(; stations, θ, plan)`:
 A station-uniform component yields exactly one block spanning every station.
 
 Gauge note: the blocks of one name share a single physical degeneracy (one
-common offset across ALL stations carrying the component), not one per block.
+common offset across all stations carrying the component), not one per block.
 A solver must place its gauge constraint once across the union of the blocks'
 `stations` — constraining each block separately over-constrains the solve, and
 `stations` holds global indices precisely so a run-wide gauge

@@ -1,15 +1,15 @@
 # ── Bandpass stage: per-channel station phase/log-amp over scan windows ───────
 #
 # The carved-out bandpass stage of the composable pipeline: the per-scan
-# residual accumulation ([`accumulate_bandpass!`](@ref)) and the two per-channel
+# residual accumulation (`accumulate_bandpass!`) and the two per-channel
 # closure seed solves — descended from the monolithic solver (deleted at M5),
 # retargeted from its concat cube to a scan `DimStack` where they touch data. The
 # `Bandpass` step visits every scan (refine → accumulate → return the scan's
-# contribution) and its `finish_pass!` folds the contributions in GROUP-INDEX
-# order — deterministic at ANY concurrency (unlike the monolith's
+# contribution) and its `finish_pass!` folds the contributions in group-INDEX
+# order — deterministic at any concurrency (unlike the monolith's
 # ntasks-dependent chunk fold; the two agree to float-rounding, gated at
-# rtol ≤ 1e-12). WHAT is fit is the step's model tree (see
-# [`default_bandpass_terms`](@ref)); HOW it is solved is
+# rtol ≤ 1e-12). What is fit is the step's model tree (see
+# [`default_bandpass_terms`](@ref)); how it is solved is
 # pluggable through `AbstractBandpassSmoother`, in two tiers. `PerTrackSmoother`
 # sums every scan's residual into one accumulator, runs the per-channel closure
 # solves (which assume a baseline's source term cancels) and fits each resulting
@@ -17,7 +17,7 @@
 # [`solve_joint_bandpass!`](@ref) instead, fitting the actual complex
 # visibilities against an explicit per-scan source term — the right choice when
 # that assumption fails — with the specs entering as priors inside the gain
-# update. Both carry one [`AbstractShapeSpec`](@ref) per observable.
+# update. Both carry one [`AbstractShapeSpec`](@ref Gustavo.Fringe.AbstractShapeSpec) per observable.
 #
 # The graph/solve helpers (`_ObsRow`, `_solve_observable`, `_track_noise2`,
 # `_node`) live in stationize.jl/adhoc.jl; the shape specs live in shapes.jl.
@@ -41,7 +41,7 @@ end
 """
     default_bandpass_terms(; freq = ChannelBlocks(1)) -> NamedTuple
 
-The default [`Bandpass`](@ref) step model: a time-stable, per-feed constant per
+The default [`Bandpass`](@ref Gustavo.Bandpass) step model: a time-stable, per-feed constant per
 frequency segment for each observable — a `phase.bandpass` and a
 `logamp.bandpass` component, both resolved by `freq` (an
 `AbstractFrequencySegmentation`; the default is one free value per channel).
@@ -53,7 +53,7 @@ absent or empty. Fit one observable only by keeping just that group, e.g.
     Bandpass(model = (; phase = default_bandpass_terms().phase),
              smoother = PerTrackSmoother())
 
-fits the phase bandpass alone. Uniform across every antenna. HOW each
+fits the phase bandpass alone. Uniform across every antenna. How each
 observable is shaped lives on the step's smoother (see
 [`AbstractBandpassSmoother`](@ref)).
 """
@@ -68,13 +68,12 @@ _bandpass_component(freq) =
 """
     AbstractBandpassSmoother
 
-HOW the [`Bandpass`](@ref) step turns the accumulated per-channel residual into
-station bandpass tracks, given the shape assumption each observable is fit under
-(an [`AbstractShapeSpec`](@ref) per observable). Concretely
-[`PerTrackSmoother`](@ref), which solves the per-channel closures and fits each
-track, or [`JointSmoother`](@ref), which fits the complex visibilities against an
-explicit per-scan source term with the specs as priors. Mirrors
-[`AbstractFringeEstimator`](@ref)'s split between WHAT a step fits and HOW.
+How the [`Bandpass`](@ref Gustavo.Bandpass) step turns the accumulated
+per-channel residual into station bandpass tracks, given a shape assumption
+per observable (an [`AbstractShapeSpec`](@ref Gustavo.Fringe.AbstractShapeSpec)).
+Concretely [`PerTrackSmoother`](@ref), which solves the per-channel closures
+and fits each track, or [`JointSmoother`](@ref), which fits the complex
+visibilities against an explicit per-scan source term.
 
 # Implementing a smoother
 
@@ -84,38 +83,30 @@ Define:
     Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup; gauge) -> report
 
 [`can_fit`](@ref) declares which model components the smoother can solve; it
-defaults to `false`, so a smoother that declares nothing rejects every model at
-compile time rather than leaving θ blocks silently unsolved. Both shipped
-smoothers accept `GainComponent(ConstantTerm(); Ti = GlobalTime(),
-Frequency = <any segmentation>, Feed = PerFeed())` and nothing else — that is
-what the θ writes address: one constant per (feed, frequency segment),
-time-stable, one feed node per feed.
+defaults to `false`, so an undeclared model is rejected at compile time
+rather than leaving θ blocks unsolved. Both shipped smoothers accept
+`GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = <any segmentation>, Feed = PerFeed())`
+and nothing else.
 
-`solve_bandpass!` writes into `θ`'s bandpass blocks. `results` is the per-scan
-`(; rl, wl, pols, source)` accumulator list, in group-index order; `setup` is
-`(; bl_pairs, blidx, nant, bp_plan, amp_plan, channel_freqs, spw_of_chan)`,
-built once per pass. The fallback errors, naming what is missing.
-
-`report` is published on the [`Bandpass`](@ref) step's solution record and should
-say which tracks the solve actually measured — see
-[`bandpass_track_report`](@ref), which builds it from per-track outcome codes.
-Return `nothing` if a smoother has nothing to report; θ alone cannot express the
-difference between a measured flat response and an unfitted one, so a smoother
-that can tell them apart should.
+`solve_bandpass!` writes into `θ`'s bandpass blocks. `results` is the
+per-scan `(; rl, wl, pols, source)` accumulator list in group-index order;
+`setup` is `(; bl_pairs, blidx, nant, bp_plan, amp_plan, channel_freqs, spw_of_chan)`,
+built once per pass. `report` is published on the step's solution record and
+should say which tracks were measured (see [`bandpass_track_report`](@ref));
+θ alone cannot distinguish a measured flat response from an unfitted one.
+Return `nothing` to report nothing.
 
 Two optional hooks:
 
     Gustavo.Fringe.bandpass_derotate(sm::MySmoother) -> Bool   # default true
     Gustavo.Fringe.validate_model(sm::MySmoother, model)
 
-[`bandpass_derotate`](@ref) controls whether [`accumulate_bandpass!`](@ref)
-counter-rotates each AP before accumulating (see its docstring) — a smoother that
-sums scans together needs it, one that fits each scan's own coherent visibility
-does not. `validate_model` receives the whole `(; phase, logamp)` component tree
-at model-compile time, before any data is read, for requirements `can_fit`'s
-per-component view cannot express (see [`JointSmoother`](@ref), which requires
-both observables); a method for a new smoother REPLACES the default, so it must
-state at least as strong a requirement — the default's checks are available as
+`bandpass_derotate` controls whether `accumulate_bandpass!` counter-rotates
+each AP before accumulating: a smoother that sums scans together needs it;
+one that fits each scan's own coherent visibility does not. `validate_model`
+receives the whole `(; phase, logamp)` tree at compile time for requirements
+`can_fit` cannot express per component. A new method replaces the default,
+so it must re-establish the base checks, available as
 [`validate_bandpass_groups`](@ref).
 """
 abstract type AbstractBandpassSmoother end
@@ -139,15 +130,12 @@ _fits_bandpass_track(tc) =
 """
     validate_bandpass_groups(model)
 
-The structural requirement the [`Bandpass`](@ref) step's solve loop places on
-every smoother's model — the default `validate_model` for
-[`AbstractBandpassSmoother`](@ref), and the base a smoother's own method must
-re-establish. `model` is the `(; phase, logamp)` named component tree.
-
-The step hands `solve_bandpass!` one plan per observable (`setup.bp_plan` /
-`setup.amp_plan`), so each group may hold at most one component; and a model
-with no component at all would accumulate every scan and write nowhere, so at
-least one group must be non-empty.
+The structural requirement the [`Bandpass`](@ref Gustavo.Bandpass) step
+places on every smoother's model: at least one component overall, and at
+most one per group (the step hands `solve_bandpass!` one plan per
+observable). The default `validate_model` for
+[`AbstractBandpassSmoother`](@ref), and the base a smoother's own method
+must re-establish.
 """
 function validate_bandpass_groups(model)
     np = length(Calibration._flatten_components(model.phase))
@@ -179,29 +167,9 @@ solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
         "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup; gauge)."
 )
 
-"""
-    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow; derotate = true)
-
-Accumulate one scan window's contribution to the per-(global-baseline, product,
-GLOBAL channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for the
-bandpass solves, on data already gain-corrected through the pipeline's
-transform chain. `blidx` maps `(a, b) -> row` in the global baseline table;
-a pair absent from it never contributes.
-
-`derotate` (default `true`) counter-rotates each AP, BEFORE summing over time,
-by its OWN band-averaged residual phase — removing the per-AP time phase
-(residual rate/drift, and what the adhoc stage would later remove) so summing
-COHERENT SCANS TOGETHER ([`PerTrackSmoother`](@ref), which combines every
-selected scan's residual into one accumulator before solving) isolates the per-channel SHAPE
-despite each scan's uncontrolled source phase. [`solve_joint_bandpass!`](@ref)
-fits each scan's OWN coherent visibility against an explicit per-scan source
-term instead of summing scans together, so it passes `derotate = false` — the
-per-AP trick would otherwise erase the very source phase/amplitude that term
-is meant to absorb.
-"""
-# Fresh per-(baseline row, product, GLOBAL channel) bandpass accumulators. They
+# Fresh per-(baseline row, product, global channel) bandpass accumulators. They
 # carry (Baseline, Pol, Frequency) dims so the accumulate/solve kernels below
-# address axes BY NAME (the house style of the Bandpass module) instead of by
+# address axes by NAME (the house style of the Bandpass module) instead of by
 # position; indexing stays plain-positional and costs nothing.
 function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
     d = (Baseline(1:nbl), Pol(1:npol), Frequency(1:nchan))
@@ -211,6 +179,26 @@ function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
     )
 end
 
+"""
+    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow; derotate = true)
+
+Accumulate one scan window's contribution to the per-(global-baseline,
+product, global channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for the
+bandpass solves, on data already gain-corrected through the pipeline's
+transform chain. `blidx` maps `(a, b) -> row` in the global baseline table;
+a pair absent from it never contributes.
+
+`derotate` (default `true`) counter-rotates each AP, before summing over time,
+by its own band-averaged residual phase — removing the per-AP time phase
+(residual rate/drift, and what the adhoc stage would later remove) so summing
+COHERENT SCANS TOGETHER ([`PerTrackSmoother`](@ref), which combines every
+selected scan's residual into one accumulator before solving) isolates the per-channel shape
+despite each scan's uncontrolled source phase. [`solve_joint_bandpass!`](@ref)
+fits each scan's own coherent visibility against an explicit per-scan source
+term instead of summing scans together, so it passes `derotate = false` — the
+per-AP trick would otherwise erase the very source phase/amplitude that term
+is meant to absorb.
+"""
 function accumulate_bandpass!(
         rbar_bp, wbar_bp, blidx, stack::AbstractDimStack, win::GeometryWindow;
         derotate::Bool = true,
@@ -288,7 +276,7 @@ end
 
 # Gauge and write a solved phase bandpass: each (station, feed) track is
 # referenced to its circular-mean phase over segments, so the bandpass carries
-# SHAPE only and applies zero net phase.
+# Shape only and applies zero net phase.
 function _write_phase_bandpass!(θ, plan, phase)
     nant, _, nseg = size(phase)
     leaf = _component_leaf(plan, θ)
@@ -313,7 +301,7 @@ end
 
 # One frequency segment's coherent residual `(r, w, w2)`: the sums of the
 # accumulators over the channels it holds, plus `w2 = Σ wᶜ²`, which converts a
-# PER-CHANNEL noise variance into the variance of this segment's normalized
+# Per-channel noise variance into the variance of this segment's normalized
 # value `r/w` — `n2 · w2 / w²`, i.e. `n2/k` for `k` equally-weighted channels.
 # Scaling the noise the other way (or not at all) would make a wide block look
 # WORSE than its channels and the SNR gate would reject the very observations
@@ -392,7 +380,7 @@ function _spike_guard!(la, seg_spw, spike_sigma::Real)
 end
 
 # Gauge and write a solved log-amp bandpass: zero band-mean per (station, feed),
-# so the bandpass carries SHAPE only and applies unit net amplitude.
+# so the bandpass carries shape only and applies unit net amplitude.
 function _write_amp_bandpass!(θ, plan, la, max_logamp::Real)
     nant, _, nfseg = size(la)
     leaf = _component_leaf(plan, θ)
@@ -472,7 +460,7 @@ end
 const _BP_SPIKE_SIGMA = 5.0
 const _BP_MAX_LOGAMP = log(10.0)
 
-# Outcome of fitting ONE (station, feed, spw) bandpass track, reported per track by
+# Outcome of fitting one (station, feed, spw) bandpass track, reported per track by
 # `bandpass_track_report` so a caller can tell a measurement from a placeholder.
 # `θ` carries no such distinction: an unfitted track reads back as unit gain and a
 # starved one as a constant, both indistinguishable from a real flat response.
@@ -537,7 +525,7 @@ function _band_track_status(fitted)
 end
 
 # Fit one segment-indexed track under `spec`, split at the spw boundaries — a
-# shape describes the response WITHIN a band, so segments never pool across spws
+# shape describes the response within a band, so segments never pool across spws
 # and each band keeps its own free level. `fit_track_group` decides what, if
 # anything, the bands share: only a spec that ESTIMATES its shape parameters pools
 # them, and it pools the parameters alone, never the levels.
@@ -608,7 +596,7 @@ end
     bandpass_track_report(phase_status, amp_status, band_ids) -> NamedTuple
 
 Summarize a bandpass solve's per-(station, feed, spw) outcomes into the record the
-[`Bandpass`](@ref) step publishes. `phase_status`/`amp_status` are `(Ant, Feed,
+[`Bandpass`](@ref Gustavo.Bandpass) step publishes. `phase_status`/`amp_status` are `(Ant, Feed,
 band)` arrays of `_BP_TRACK_*` codes (either may be `nothing` when that half was
 not fit); `band_ids` names the spw each band slot came from.
 
@@ -707,25 +695,25 @@ end
 # instead of biasing the station bandpass. `g` is bilinear with `S`, so this
 # alternates a closed-form per-(scan, baseline, pol) solve of `S` (given the
 # current `g`, [`_update_source_coherence!`](@ref)) with a Gauss-Seidel
-# per-(station, feed) solve of `g` (given `S` and every OTHER station's
+# per-(station, feed) solve of `g` (given `S` and every other station's
 # current gain, [`_update_station_gains!`](@ref)) at `phase_plan`/`amp_plan`'s
 # shared frequency-segment resolution, to convergence.
 #
 # Every array below carries (Scan, Baseline, Pol, Frequency) or (Ant, Feed,
 # Frequency) dims — the house style of this module — so the loops read by
-# axis NAME; `Frequency` here is the SEGMENT index (as elsewhere once a
+# axis NAME; `Frequency` here is the segment index (as elsewhere once a
 # solve moves past the raw per-channel accumulator). Indexing itself stays
 # plain-positional.
 
-# One scan's per-(baseline, pol, SEGMENT) coherent residual, written directly
+# One scan's per-(baseline, pol, segment) coherent residual, written directly
 # into `rview`/`wview` (a (Baseline, Pol, Frequency) slice of the multi-scan
 # accumulator — no intermediate allocation).
 #
-# NOT SNR-gated, deliberately. The joint solve consumes these as COMPLEX
+# Not SNR-gated, deliberately. The joint solve consumes these as complex
 # residuals under inverse-variance weights, and that accumulation is unbiased
 # at any SNR — a weak cell contributes its information at its honest weight
 # and costs variance, never validity. An SNR gate here (the closure tier's,
-# which is justified THERE because that tier extracts a per-segment PHASE, a
+# which is justified THERE because that tier extracts a per-segment phase, a
 # meaningless quantity below the noise) would preferentially delete the
 # cross-hand cells — the only rows that tie the feed-2 gain block to feed-1
 # and so the only measurement of the relative (R–L) bandpass — leaving that
@@ -743,8 +731,8 @@ function _reduce_scan_segments!(rview, wview, sc, segs)
     return nothing
 end
 
-# Every scan's (Baseline, Pol, SEGMENT) residual, stacked over an added Scan
-# axis — NOT summed across scans (unlike the closure tier's fold), since the per-scan source coherence needs each
+# Every scan's (Baseline, Pol, segment) residual, stacked over an added Scan
+# axis — not summed across scans (unlike the closure tier's fold), since the per-scan source coherence needs each
 # scan's own coherent visibility. Element types follow the scan accumulators'
 # own (`bandpass_accumulators`'), not a hardcoded precision.
 function _reduce_all_scans(scans, segs)
@@ -779,19 +767,19 @@ end
 # One reference (station, feed) node per connected component of the
 # (station, feed) graph — mirrors `_solve_observable`'s pin selection in
 # stationize.jl. The
-# pinned node's PHASE is held at zero for every segment throughout the ALS
+# pinned node's phase is held at zero for every segment throughout the ALS
 # iteration; its amplitude is solved like any other node's.
 #
 # Only the phase is a gauge freedom. Multiplying every station's gain at one
 # segment by a shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)`: the
 # phase of `c` cancels between the two conjugated factors, so a common phase per
 # segment is unobservable and must be pinned there, one constraint per segment.
-# The magnitude does NOT cancel, and `S` is frequency-flat, so it can only absorb
-# `|c|²` when `|c|` is constant across the band — leaving exactly ONE free
+# The magnitude does not cancel, and `S` is frequency-flat, so it can only absorb
+# `|c|²` when `|c|` is constant across the band — leaving exactly one free
 # amplitude parameter overall, which the zero-band-mean gauge in
-# [`_write_joint_bandpass!`](@ref) removes. Pinning `|g|` per segment as well
+# `_write_joint_bandpass!` removes. Pinning `|g|` per segment as well
 # would assert the reference antenna has a flat amplitude bandpass, discarding
-# structure that IS identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
+# structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 # over the band eliminates `ls` and leaves the full-rank signless-Laplacian
 # system) and biasing every other station through the inconsistency.
 function _joint_bandpass_pins(bl_pairs, feeds, nant, gauge)
@@ -852,14 +840,14 @@ end
 
 # One Gauss-Seidel sweep over every non-pinned (station, feed): closed-form
 # per-segment solve of its complex gain given the current source coherence `S`
-# and every OTHER station's current gain (immediately visible to later antennas
+# and every other station's current gain (immediately visible to later antennas
 # in the same sweep — Gauss-Seidel, not Jacobi), with each observable's shape
 # spec acting as a PRIOR on the resulting track rather than a post-hoc smooth.
 #
 # Solving each segment independently would be the `FreeShape`/`FreeShape` case;
 # the prior enters exactly where that independence is dropped. Around the
 # unconstrained per-segment estimate `ĝ` the residual linearizes as
-# `Σ denom·|ĝ|²·(δlogamp² + δphase²)`, so `denom·|ĝ|²` is the Fisher weight BOTH
+# `Σ denom·|ĝ|²·(δlogamp² + δphase²)`, so `denom·|ĝ|²` is the Fisher weight both
 # real tracks are fit under, and the fit is a penalized WLS against the spec.
 # Iterated to convergence with the relinearization this is MAP estimation under
 # the two priors.
@@ -885,7 +873,7 @@ function _update_station_gains!(
     for feed in axes(g, Feed), ant in axes(g, Ant)
         entries = touching[ant, feed]
         isempty(entries) && continue
-        # The gauge pin fixes this node's PHASE at every segment; its amplitude
+        # The gauge pin fixes this node's phase at every segment; its amplitude
         # is solved like any other node's (see `_joint_bandpass_pins`).
         ispin = pinned[ant, feed]
         fill!(ĝ, zero(C))
@@ -1012,7 +1000,7 @@ function JointSmoother(;
     return JointSmoother(phase, amp, Int(max_iterations), Float64(tolerance))
 end
 
-# The joint tier fits each scan's OWN coherent visibility against an explicit
+# The joint tier fits each scan's own coherent visibility against an explicit
 # source term, so the per-AP derotation that lets scans be summed together would
 # erase the very source phase that term absorbs.
 bandpass_derotate(::JointSmoother) = false
@@ -1062,15 +1050,15 @@ end
                           gauge = PinAntenna(1), max_iterations = 8, tolerance = 1.0e-6,
                           max_logamp = log(10.0))
 
-Jointly solve the per-(station, feed) COMPLEX bandpass gain and a per-scan,
+Jointly solve the per-(station, feed) complex bandpass gain and a per-scan,
 per-baseline, per-polarization constant source coherence (see the module
-comment above [`_reduce_scan_segments!`](@ref) for the model and the
+comment above `_reduce_scan_segments!` for the model and the
 alternating scheme), then gauge-fix each (station, feed) track and write the
 result into `phase_plan`'s and `amp_plan`'s θ blocks
-([`_write_joint_bandpass!`](@ref)).
+(`_write_joint_bandpass!`).
 
 `scans` is the per-scan `(rl, wl)` accumulator pairs from
-[`accumulate_bandpass!`](@ref)`(...; derotate = false)` — NOT summed across
+`accumulate_bandpass!``(...; derotate = false)` — not summed across
 scans, since the source term needs each scan's own coherent visibility.
 `phase_plan` and `amp_plan` must share one frequency segmentation (which
 `validate_model(::JointSmoother, model)` already enforces at model-compile
@@ -1148,12 +1136,12 @@ end
 # ── Coverage top-up selection (stations the calibrator never observed) ────────
 
 # Wraps the bandpass step's user selection: stations absent from every selected
-# scan would get NO bandpass (g = 1), so for each such station the highest-SNR
+# scan would get no bandpass (g = 1), so for each such station the highest-SNR
 # scan (any source) containing it is added — mixing sources is safe for the
-# bandpass SHAPE (a source's structure phase is flat in frequency per baseline,
+# bandpass shape (a source's structure phase is flat in frequency per baseline,
 # so it biases every channel identically and cancels in the shape; per-scan
 # ionosphere differences land in the frozen curve's mean, which each scan's
-# dTEC is measured relative to). Applied to ANY selection, matching the frozen
+# dTEC is measured relative to). Applied to any selection, matching the frozen
 # monolith's `_bandpass_coverage_topup`; a selection that already covers every
 # station (e.g. `AllScans`) is returned unchanged. Requires the per-scan
 # `stations` record field `select_groups` provides.

@@ -2,7 +2,7 @@
 #
 # VGOS-style systems inject a phase-locked tone comb at each station front end;
 # the correlator extracts the tone phasors per (station, polarization, band,
-# epoch) and writes them to the FITS-IDI PHASE-CAL table. Those tones measure the
+# epoch) and writes them to the FITS-IDI phase-CAL table. Those tones measure the
 # station's INSTRUMENTAL phase response — per-band delays and phase offsets that
 # otherwise decohere the multi-band fringe — so dividing them out of the
 # visibilities before fringe fitting aligns the bands (EU-VGOS / fourfit
@@ -15,7 +15,7 @@
 # is packed as an ordinary `CalibrationSolution` — a phase-only
 # `StationGainModel` with per-scan, per-spectral-window `Delay` + `ConstantTerm`
 # per feed — so applying, saving, and composing it reuses the Calibration
-# machinery unchanged. What phase-cal does NOT fix: the ionospheric dispersive
+# machinery unchanged. What phase-cal does not fix: the ionospheric dispersive
 # delay (∝ 1/ν; it enters after the injection point) and anything sky-side —
 # those stay with the fringe fitter.
 
@@ -47,7 +47,7 @@ end
 """
     load_fitsidi_phasecal(path) -> PhaseCalTable
 
-Read a FITS-IDI PHASE-CAL table (AIPS Memo 114) into a [`PhaseCalTable`](@ref).
+Read a FITS-IDI phase-CAL table (AIPS Memo 114) into a [`PhaseCalTable`](@ref).
 Provided by `GustavoFITSFilesExt` (load FITSFiles).
 """
 function load_fitsidi_phasecal end
@@ -64,7 +64,7 @@ function _phasecal_model()
     )
 end
 
-# Robust multitone fit for the tones of ONE (station, feed, scan, spw) block:
+# Robust multitone fit for the tones of one (station, feed, scan, spw) block:
 # `ν` (Hz) ascending with phasors `z`. Returns `(τ, φ0, nused)` where the block's
 # instrumental phase is `φ(f) = φ0 + 2πτ(f − f0)` (φ0 referenced DIRECTLY to the
 # global f0 — the `Delay` term's coordinate — so no per-band reference juggling),
@@ -118,7 +118,7 @@ function _fit_tone_block(ν::Vector{Float64}, z::Vector{ComplexF64}, f0::Float64
     end
     den > 0 && (τ += num / (2π * den))
 
-    # Instrumental phase at the GLOBAL reference frequency.
+    # Instrumental phase at the global reference frequency.
     s = zero(ComplexF64)
     for i in 1:n
         keep[i] || continue
@@ -130,37 +130,33 @@ end
 
 """
     phasecal_solution(pcal::PhaseCalTable, uvset::UVSet;
-                      sign = -1, min_tones = 2, max_resid = 1.0) -> CalibrationSolution
+                      sign = 1, min_tones = 2, max_resid = 1.0) -> CalibrationSolution
 
 Fit the fourfit-style multitone instrumental correction from `pcal` on the
-geometry of `uvset`: per (station, feed, scan, spectral window), a robust tone
-delay + constant phase (see `_fit_tone_block`), packed as a phase-only
-`CalibrationSolution` (`Delay` + `ConstantTerm`, `PerScan` × `PerSpectralWindow`,
-`PerFeed`). Apply it with `calibrate(sol, uvset)` or put
-`ApplySolution(pcal)` in the pipeline's transform chain (applied in-stream, no
-materialization of the full set).
+geometry of `uvset`: per (station, feed, scan, spectral window), a robust
+tone delay + constant phase, packed as a phase-only `CalibrationSolution`
+(`Delay` + `ConstantTerm`, `PerScan` × `PerSpectralWindow`, `PerFeed`).
+Apply it with `calibrate(sol, uvset)` or put `ApplySolution(pcal)` in the
+pipeline's transform chain.
 
-- `sign` — orientation of the correction: the gain stored is
-  `cis(sign·(φ_pc + 2πτ_pc(f − f0)))` and `apply_calibration` DIVIDES it out.
-  The default `sign = +1` (divide by the measured tone phasor itself) is the
-  orientation validated on VGOS DiFX data (VR2505: it raises the multi-band
-  fringe amplitude ~30% on a real scan; `sign = -1` lowers it by the same
-  amount). Flip it if your correlator uses the opposite convention — the wrong
-  sign ADDS the instrumental decoherence instead of removing it, which the
-  fringe SNR makes obvious.
+`sign` orients the correction: the stored gain is
+`cis(sign·(φ_pc + 2πτ_pc(f − f0)))` and `apply_calibration` divides it out.
+Flip it if your correlator uses the opposite convention — the wrong sign
+adds the instrumental decoherence instead of removing it, which the fringe
+SNR makes obvious.
 
-Note the fourfit-shared limitation: the tone delay is ambiguous modulo
-1/(tone spacing) (±100 ns for the 5 MHz VGOS comb). A wrapped tone delay still
-reproduces every tone phase exactly (the wrap is absorbed into the constant),
-but the interpolation BETWEEN tones winds; that residual per-channel structure
-is exactly what the fringe solve's phase-bandpass stage absorbs — keep
-`phase_bandpass = true` when instrumental delays may exceed the ambiguity.
-- Tones are matched to spectral windows BY FREQUENCY (FITS band order need not
-  match the geometry's spw order). Blocks with no usable tones get identity
-  gains, and stations absent from the table are left uncorrected.
+The tone delay is ambiguous modulo 1/(tone spacing) (±100 ns for the 5 MHz
+VGOS comb), as in fourfit. A wrapped tone delay still reproduces every tone
+phase (the wrap is absorbed into the constant), but the interpolation
+between tones winds; the fringe solve's phase-bandpass stage absorbs that
+residual structure, so keep it enabled when instrumental delays may exceed
+the ambiguity.
 
-The `info` reports coverage: `nblocks` fitted / `nmissing` empty, per-station
-fit counts, and the tone-delay range.
+Tones are matched to spectral windows by frequency (FITS band order need not
+match the geometry's spw order). Blocks with no usable tones get identity
+gains; stations absent from the table are left uncorrected. The `info`
+reports coverage: `nblocks` fitted / `nmissing` empty, per-station fit
+counts, and the tone-delay range.
 """
 function phasecal_solution(
         pcal::PhaseCalTable, uvset::UVSet;
@@ -287,7 +283,7 @@ end
 """
     tone_channel_mask(pcal::PhaseCalTable, uvset::UVSet; pad::Integer = 0) -> BitVector
 
-`true` for every GLOBAL channel (geometry order) that contains an injected
+`true` for every global channel (geometry order) that contains an injected
 phase-cal tone (± `pad` neighbouring channels). Tone combs are phase-locked at
 every station, so they can cross-correlate and leave spurious spikes in those
 channels; put `FlagChannels(mask)` in the pipeline's transform chain to

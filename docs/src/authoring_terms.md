@@ -2,7 +2,7 @@
 CurrentModule = Gustavo.Calibration
 ```
 
-# Authoring a new gain term
+# [Authoring a new gain term](@id authoring-terms)
 
 A gain [`term`](@ref AbstractGainTerm) is one physical contribution to a
 station's phase or log-amplitude response — a delay, a rate, a polynomial

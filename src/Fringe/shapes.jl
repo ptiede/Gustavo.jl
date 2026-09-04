@@ -1,20 +1,20 @@
 # ── Frequency-shape specs for one real observable track ──────────────────────
-#
-# A shape spec is a small value type stating the frequency-shape assumption for
-# ONE real observable track of one (station, feed, spw) — log-amplitude or
-# unwrapped phase. Its per-track consumption is [`fit_track`](@ref): a
-# penalized/projected weighted least-squares (or, for `ARShape`, a Gaussian-
-# process posterior mean) of the track against that assumption.
-#
-# The specs are ordered by how much they assume: `FreeShape` constrains nothing
-# and estimates nothing it has no data for; `PolynomialShape` restricts the track
-# to a low-order basis; `WhittakerShape` penalizes roughness without assuming a
-# shape; `ARShape` puts a stationary Ornstein–Uhlenbeck (Matérn-1/2) process
-# prior on it, with a physical correlation bandwidth. The last three all estimate
-# the segments they have no data for, from the ones they do.
-#
-# Adding a model is one struct plus one `fit_track` method.
 
+"""
+    AbstractShapeSpec
+
+The frequency-shape assumption for one real observable track (log-amplitude
+or unwrapped phase) of one (station, feed, spw), fit per track by
+[`fit_track`](@ref).
+
+In order of increasing assumption: [`FreeShape`](@ref) constrains nothing;
+[`PolynomialShape`](@ref) restricts the track to a low-order basis;
+[`WhittakerShape`](@ref) penalizes roughness; [`ARShape`](@ref) applies an
+Ornstein–Uhlenbeck process prior with a physical correlation bandwidth. The
+last three estimate segments with no data from the ones with data.
+
+A new spec is one struct plus one `fit_track` method.
+"""
 abstract type AbstractShapeSpec end
 
 # A segment carries usable data iff its value is finite and its weight is a
@@ -31,24 +31,22 @@ const _SHAPE_RIDGE = 1.0e-6
 """
     fit_track(spec::AbstractShapeSpec, y, w, x) -> ŷ
 
-Fit one real observable track `y` — log-amplitude or unwrapped phase, one entry
-per frequency segment — under the shape assumption `spec`. `w` holds the
-per-segment inverse-variance weights (`w ≤ 0` or non-finite ⇒ that segment
-carries no data, as does a non-finite `y`) and `x` the segment coordinates
-(frequencies, in any unit as long as a spec's own scale parameters share it).
-Irregular spacing and gaps are allowed.
+Fit one track `y` (one entry per frequency segment) under `spec`. `w` holds
+per-segment inverse-variance weights; a segment with non-finite `y`, or `w`
+not positive and finite, carries no data. `x` holds the segment frequencies
+(any unit, as long as the spec's scale parameters share it). Irregular
+spacing and gaps are allowed.
 
-Returns the fitted track, `NaN` at segments the spec cannot estimate. A track
-with no usable segment at all is `NaN` throughout for every spec.
+Returns the fitted track, `NaN` at segments the spec cannot estimate; a
+track with no usable segment is all `NaN`.
 """
 function fit_track end
 
 """
     FreeShape()
 
-No shape constraint: each frequency segment keeps its own estimate. Follows the
-data wherever it has any, and estimates nothing where it has none — the
-`lambda → 0` / `degree → ∞` limit of the other specs.
+No shape constraint: each segment keeps its own estimate, and a segment
+without data stays `NaN`.
 """
 struct FreeShape <: AbstractShapeSpec end
 
@@ -61,12 +59,10 @@ end
 """
     PolynomialShape(degree = 4)
 
-Polynomial of `degree` in the track's frequency coordinate, fit by weighted least
-squares and evaluated at every segment — so gaps are estimated by the fit.
-Assumes the track is a smooth low-order curve across the band (passband
-roll-off, gentle instrumental phase); a high degree can ring (Runge) at the
-edges. The degree is lowered to one less than the number of usable segments
-where the data cannot support it.
+Weighted least-squares polynomial of `degree` in the frequency coordinate,
+evaluated at every segment, so gaps are filled by the fit. Suits a smooth
+low-order curve across the band; a high degree can ring at the edges. The
+degree is capped at one less than the number of usable segments.
 """
 struct PolynomialShape <: AbstractShapeSpec
     degree::Int
@@ -110,16 +106,14 @@ end
 """
     WhittakerShape(lambda = 1.0)
 
-Roughness-penalized track (a Whittaker smoother): minimizes
-`Σ w_k(ŷ_k − y_k)² + λ̄·Σ(ŷ_{k−1} − 2ŷ_k + ŷ_{k+1})²`, where `λ̄` is `lambda`
-scaled by the median positive weight so the strength is data-relative. Makes NO
-shape assumption — it follows real structure where the weights support it and
-interpolates gaps smoothly where they do not. `lambda → 0` ⇒ [`FreeShape`](@ref);
-large `lambda` ⇒ a straight line (the second-difference null space).
+Whittaker smoother: minimizes `Σ w_k(ŷ_k − y_k)² + λ̄·Σ(ŷ_{k−1} − 2ŷ_k + ŷ_{k+1})²`,
+with `λ̄` equal to `lambda` scaled by the median positive weight. Assumes no
+shape; interpolates gaps smoothly. `lambda → 0` gives [`FreeShape`](@ref);
+large `lambda` gives a straight line.
 
-The penalty is on segment-to-segment differences, so it measures roughness per
-SEGMENT, not per unit frequency: an irregular segmentation is penalized as if it
-were uniform.
+The penalty is on segment-to-segment differences, so roughness is measured
+per segment, not per unit frequency: an irregular segmentation is penalized
+as if it were uniform.
 """
 struct WhittakerShape <: AbstractShapeSpec
     lambda::Float64
@@ -180,23 +174,20 @@ end
 """
     ARShape(bandwidth; sigma = :auto, fit_hypers = true)
 
-Ornstein–Uhlenbeck (Matérn-1/2) process prior along frequency — an AR(1) track
-with correlation function `σ²·exp(-|Δν|/bandwidth)`. The fit is the exact GP
-posterior mean, computed in `O(nseg)` by the Kalman filter + RTS smoother of
-[`smooth_ou_track`](@ref) with the segment frequencies as the sample coordinate,
-so gaps are interpolated and irregular spacing costs nothing.
+Ornstein–Uhlenbeck (Matérn-1/2) process prior along frequency, with
+correlation `σ²·exp(-|Δν|/bandwidth)`. The fit is the exact GP posterior
+mean, computed in `O(nseg)` by a Kalman filter and smoother; gaps are
+interpolated and irregular spacing is allowed.
 
-`bandwidth` is the correlation bandwidth in the units of `fit_track`'s `x`
-(Hz for channel frequencies). `sigma` is the prior standard deviation of the
-track about its mean; `:auto` seeds it from the track's own scatter in excess of
-its noise. With `fit_hypers` (the default) both are then refit per track by
-maximizing the Kalman marginal likelihood ([`fit_ou_hypers`](@ref)), with
-`bandwidth` confined to between one segment spacing and ten times the fitted
-span.
+`bandwidth` is in the units of `fit_track`'s `x` (Hz for channel
+frequencies). `sigma` is the prior standard deviation of the track about its
+mean; `:auto` seeds it from the track's scatter in excess of its noise. With
+`fit_hypers` (the default) both are refit per track by maximizing the Kalman
+marginal likelihood, with `bandwidth` bounded between one segment spacing
+and ten times the fitted span.
 
-Unlike [`WhittakerShape`](@ref) this is stationary and mean-reverting with a
-physical scale, and it measures smoothness per unit FREQUENCY rather than per
-segment.
+Unlike [`WhittakerShape`](@ref), smoothness is measured per unit frequency
+and the prior has a physical scale.
 """
 struct ARShape <: AbstractShapeSpec
     bandwidth::Float64
@@ -238,22 +229,16 @@ end
 """
     fit_track_group(spec::AbstractShapeSpec, ys, ws, xs) -> Vector
 
-Fit a GROUP of tracks that share one shape assumption but not one level — the
-per-spw pieces of one (station, feed) response. `ys`, `ws` and `xs` hold one
-[`fit_track`](@ref) argument triple per member; the result holds one fitted track
-per member, in the order given, `NaN` wherever `fit_track` would put it.
+Fit a group of tracks that share one shape assumption but not one level (the
+per-spw pieces of one station/feed response). `ys`, `ws`, `xs` hold one
+[`fit_track`](@ref) argument triple per member; the result holds one fitted
+track per member, in order. Each member keeps its own free level, so a
+discontinuity between members is preserved.
 
-The members are independent in everything the shape does not tie together: each
-keeps its own free level, so a genuine discontinuity between them is represented
-exactly, never smoothed across.
-
-The default fits each member on its own, which is exact for every spec whose shape
-parameters are SUPPLIED rather than estimated ([`FreeShape`](@ref),
-[`PolynomialShape`](@ref), [`WhittakerShape`](@ref)). [`ARShape`](@ref) overrides
-it, because its correlation bandwidth and prior scatter are estimated from the
-data and one member frequently cannot determine them.
-
-A new spec needs no method here unless it estimates something from the data.
+The default fits each member on its own, which is exact when the spec's
+parameters are supplied rather than estimated. [`ARShape`](@ref) overrides it
+to estimate its bandwidth and scatter from all members jointly. A new spec
+needs a method only if it estimates parameters from the data.
 """
 function fit_track_group end
 
@@ -287,7 +272,7 @@ function fit_track_group(spec::ARShape, ys, ws, xs)
     ]
     isempty(usable) && return out
 
-    # The OU prior reverts to zero, so each member is centred on its OWN weighted
+    # The OU prior reverts to zero, so each member is centred on its own weighted
     # mean for the solve and that mean is restored afterwards — this is what leaves
     # the levels free while the shape is shared.
     ms = [_weighted_mean_finite(ys[i], ws[i]) for i in usable]

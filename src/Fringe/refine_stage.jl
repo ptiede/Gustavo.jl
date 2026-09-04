@@ -92,7 +92,7 @@ Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
 delay), on data already gain-corrected through the pipeline's transform chain:
 each spw block's sub-band chunk phasors → per-(baseline, group) exact
 matched-filter slope fits → guarded station solves accumulating into the
-per-scan `Delay × FreqGroups` column and its companion constant. Run AFTER
+per-scan `Delay × FreqGroups` column and its companion constant. Run after
 the dispersion refinement so the within-band slopes it fits are
 dispersion-corrected. A no-op (0) when `sbd === nothing`.
 """
@@ -248,7 +248,7 @@ end
 
 # Shared back half: per-(baseline, group) fits over the accumulated chunk
 # phasors — the within-group SLOPE (exact matched filter) plus the slope-
-# corrected group phasor's PHASE — then one feed-common station solve of each
+# corrected group phasor's phase — then one feed-common station solve of each
 # per group. Both are needed: the wideband delay's decomposition against the
 # per-group slopes is ambiguous (a common-mode slope shift leaves per-group
 # constants of 2πΔτ(f0 − νg) behind that no single per-scan constant can
@@ -276,7 +276,7 @@ function _sbd_fit_stationize!(
     # phasors it was fit from. The group CONSTANT is judged separately — it
     # cancels inside the within-group coherence (|Σ z·e^{-iφ}| = |Σ z|), so
     # this tier is structurally blind to it. A failing slope is ZEROED and the
-    # group phase refit at τ = 0 (NOT dropped with the group: φg carries the
+    # group phase refit at τ = 0 (not dropped with the group: φg carries the
     # cross-band alignment, and dropping it collapsed 1803+784's cross-band η
     # in the first, group-dropping version of this guard).
     gsols = NamedTuple[]
@@ -349,7 +349,7 @@ function _sbd_fit_stationize!(
     # ── Tier 2: scan-level JOINT guard on the CROSS-band statistic ──────────
     # The group constants' whole job is aligning the groups' band phasors, so
     # judge them (together with the surviving slopes) on the coherent sum over
-    # ALL groups per baseline — the ηx-flavoured statistic — and apply the
+    # All groups per baseline — the ηx-flavoured statistic — and apply the
     # scan's SBD solution all-or-nothing.
     num0 = 0.0
     num1 = 0.0

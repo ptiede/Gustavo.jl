@@ -1,10 +1,10 @@
 # ── Data transforms: the materialization hook chain ──────────────────────────
 #
 # An `AbstractDataTransform` is a caller-supplied operation applied to each scan
-# group's visibilities/weights AS IT IS MATERIALIZED, before any solver stage
+# group's visibilities/weights AS IT is MATERIALIZED, before any solver stage
 # sees it. Precal division, per-station weight scaling and channel flagging are
 # built-in transforms; `CalFunction` opens the same choke point to arbitrary
-# caller code (e.g. rescaling the weights of ONE baseline on ONE scan) with no
+# caller code (e.g. rescaling the weights of one baseline on one scan) with no
 # edits to Gustavo internals.
 #
 # The contract: implement `apply_transform!(t, stack, win; executor)` mutating the
@@ -24,6 +24,9 @@ Built-ins: [`ApplySolution`](@ref), [`StationWeightScale`](@ref),
 """
 abstract type AbstractDataTransform end
 
+# Only the transform type is annotated: a third-party method that leaves `stack`
+# and `win` unannotated — the natural spelling — must be strictly more specific
+# than this fallback, not ambiguous with it.
 """
     apply_transform!(t::AbstractDataTransform, stack::AbstractDimStack,
                      win::GeometryWindow; executor = SerialScheduler())
@@ -35,7 +38,7 @@ layers in place. The extension point for custom transforms.
 dims (frequencies in Hz, times in hours, correlation products on the `Pol`
 lookup) and the leaf's `PartitionInfo` metadata, so DimensionalData selectors
 and the `UVData` accessors both work on it directly — `stack[:vis][Pol =
-pol_at("PP")]`, [`frequencies`](@ref), [`baselines`](@ref), [`source_name`](@ref).
+pol_at("PP")]`, [`frequencies`](@ref), `baselines`, [`source_name`](@ref).
 `win` addresses the same channels and times in the solve's index space, which a
 coordinate axis cannot carry (`win.geom.channel_freqs[win.chan_idx] ==
 frequencies(stack)`).
@@ -43,9 +46,6 @@ frequencies(stack)`).
 `executor` is the OhMyThreads scheduler for transforms that fan out over
 baselines (the within-scan inner executor — see [`ExecutionConfig`](@ref)).
 """
-# Only the transform type is annotated: a third-party method that leaves `stack`
-# and `win` unannotated — the natural spelling — must be strictly MORE specific
-# than this fallback, not ambiguous with it.
 function apply_transform!(t::AbstractDataTransform, stack, win; executor = SerialScheduler())
     return error(
         "apply_transform! not implemented for $(typeof(t)) — implement " *
@@ -93,20 +93,20 @@ rather than eagerly against every sample the run might never visit.
 """
 validate_transform(t::AbstractDataTransform, geom::DataGeometry, ant_names) = nothing
 
+# `apply_calibration`'s recorded-chain replay (see the stub in
+# `Calibration/solutions.jl` for why it is wired through this layer).
+Calibration._replay_transforms(uvset::UVSet, transforms) = apply_transforms(uvset, transforms)
+
 """
     apply_transforms(uvset::UVSet, transforms; geom = build_geometry(uvset)) -> UVSet
 
 Eagerly apply a transform chain to a whole `UVSet`, leaf by leaf — each leaf is
-paired with its global [`GeometryWindow`](@ref), so EVERY transform works here,
+paired with its global [`GeometryWindow`](@ref), so every transform works here,
 including [`CalFunction`](@ref) and [`FlagChannels`](@ref) (which need global
 indices and have no standalone whole-set form). This is the replay of the chain
 a solution records (`sol.transforms`), used by the standalone `calibrate`. Leaf
 arrays are copied; the input set is never mutated.
 """
-# `apply_calibration`'s recorded-chain replay (see the stub in
-# `Calibration/solutions.jl` for why it is wired through this layer).
-Calibration._replay_transforms(uvset::UVSet, transforms) = apply_transforms(uvset, transforms)
-
 function apply_transforms(uvset::UVSet, transforms; geom::DataGeometry = build_geometry(uvset))
     ts = collect(Any, transforms)
     isempty(ts) && return uvset
@@ -135,7 +135,7 @@ untouched (matching the solver's precal semantics — no data is invented or
 destroyed by a bad precal cell).
 
 The solution need not have been fit on this set, nor on its sampling. Each
-target sample is placed in the segment of `sol` it BELONGS to, by the identity
+target sample is placed in the segment of `sol` it belongs to, by the identity
 the segmentation is defined on: a `PerScan` component by scan name, a
 `PerSpectralWindow` one by spw name, a `TimeBlocks` or `InstrumentScans` one by
 the solve's own bin formula, a `PerIntegration` one by exact epoch. So a
@@ -144,7 +144,7 @@ scan-averaged data corrects at full time resolution — while one segmented more
 finely has no answer and is refused. `ChannelBlocks` and `FreqGroups` cut the
 channel-index axis, so they require the target to index the same channels.
 
-Stations are matched BY NAME against the solution's recorded `ant_names` — a
+Stations are matched by NAME against the solution's recorded `ant_names` — a
 name is the whole of a station's identity here, never its position — and
 stations the solution never solved keep identity gains, with a warning. A
 solution that records no `ant_names`, or that shares no station with the set at
@@ -198,7 +198,7 @@ Check that the solution's stations can be matched to this set's at all: a
 station is identified by its NAME and nothing else, so the solution must record
 `ant_names`, and at least one of `ant_names` must appear in them. Stations the
 solution is missing are not an error — they keep identity gains, with a warning
-from the apply — but a solution sharing NO station with the set corrects
+from the apply — but a solution sharing no station with the set corrects
 nothing at all, and silently doing nothing is the outcome worth refusing.
 
 Whether an individual channel or time can be PLACED in the solution is not
@@ -221,10 +221,10 @@ end
 # Whether the solution's gains are the same at every time in the window: no
 # component reads a time coordinate, and every sample places in one time segment.
 # A precal is usually such a solution (PerScan × PerSpectralWindow with no time
-# term), and evaluating ONE time column instead of `nti` of them saves the
+# term), and evaluating one time column instead of `nti` of them saves the
 # `cis`/`exp` work that dominates applying the correction.
 #
-# Placement runs over the WHOLE window here, so a sample the solution cannot
+# Placement runs over the whole window here, so a sample the solution cannot
 # place — or whose span straddles a bin boundary — raises exactly as it would in
 # the full evaluation. This decides how many columns to evaluate, never whether
 # to check.
@@ -352,7 +352,7 @@ end
 """
     FlagChannels(mask::BitVector)
 
-Transform: zero-weight the flagged GLOBAL channels (mask indexed by the solve
+Transform: zero-weight the flagged global channels (mask indexed by the solve
 geometry's channel axis, `true` = flag), e.g. `tone_channel_mask`.
 """
 struct FlagChannels <: AbstractDataTransform
@@ -365,7 +365,7 @@ function apply_transform!(
     )
     length(t.mask) == length(win.geom.channel_freqs) ||
         error("FlagChannels: mask length $(length(t.mask)) ≠ nchan $(length(win.geom.channel_freqs))")
-    # `t.mask` is indexed by GLOBAL channel; gathering it through `win.chan_idx`
+    # `t.mask` is indexed by global channel; gathering it through `win.chan_idx`
     # gives the mask over this window's own frequency axis.
     stack[:weights][Frequency = t.mask[win.chan_idx]] .= 0
     return nothing
@@ -412,25 +412,22 @@ end
 """
     station_weight_scale(uvset_or_names, factors; default = 1.0) -> Vector{Float64}
 
-Per-station weight correction factors, indexed by the solver's station index, built
-from a station-code => factor map (e.g. `Dict("HS" => 2.0, "GL" => 2.0)`). A factor
-ABOVE 1 raises a station's weights, which is what a correlator claiming MORE noise
-than the data carries needs. Wrap the
-result in a [`StationWeightScale`](@ref) transform in the pipeline's step chain
-and every scan's weights are corrected as
-`w → w·s_a·s_b` at materialization — so a baseline with ONE affected station gets
-`s`, and a baseline between two affected stations gets `s²`, automatically.
+Per-station weight correction factors, indexed by the solver's station
+index, built from a station-code => factor map. A factor above 1 raises a
+station's weights (a correlator claiming more noise than the data carries).
+Wrap the result in a [`StationWeightScale`](@ref) transform in the
+pipeline's step chain and every scan's weights are corrected as
+`w → w·s_a·s_b` at materialization.
 
-This corrects the NOISE ESTIMATE only; visibilities are untouched. Use it when the
-correlator's weights are miscalibrated for particular stations (an upstream bug),
-which otherwise biases every weighted quantity downstream — fringe SNR (∝ √s), the
-PFA gate that consumes it, the bandpass and adhoc accumulations, and the exported
-weights. Codes absent from the data are ignored; stations absent from `factors`
-get `default`.
+This corrects the noise estimate only; visibilities are untouched.
+Miscalibrated station weights otherwise bias every weighted quantity
+downstream: fringe SNR (∝ √s), the PFA gate, the bandpass and adhoc
+accumulations, and the exported weights. Codes absent from the data are
+ignored; stations absent from `factors` get `default`.
 
     uvset = load_fitsidi(path; lazy = true)
     ws = station_weight_scale(uvset, Dict("HS" => 2.0, "GL" => 2.0))
-    FringeFit(weight_scale = ws, …)
+    fit(StationWeightScale(ws) |> FringeFit(), uvset)
 """
 station_weight_scale(uvset::UVSet, factors; default::Real = 1.0) = station_weight_scale(
     String.(UVData.metadata(first(values(UVData.branches(uvset)))).antennas.name),

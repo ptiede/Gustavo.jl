@@ -14,7 +14,7 @@
 # frequency (delay/bandpass removed), so averaging the data — the whole point of
 # fringe fitting — stays coherent out to long timescales and wide bandwidths.
 #
-# These helpers operate on ANY `UVSet` (raw, fringe-corrected, frequency- or
+# These helpers operate on any `UVSet` (raw, fringe-corrected, frequency- or
 # time-averaged), so the same metric can be read at every pipeline stage by
 # calling `coherence_report` on each stage's `UVSet`. `coherence_report` returns
 # two curves — η versus time-averaging interval Δt and η versus frequency-
@@ -24,7 +24,7 @@
 #
 # CAVEAT: η is computed against the data's own finest resolution (a single
 # integration / channel gives η ≡ 1), so it is self-normalized and needs no
-# external gain model. By default it is NOT thermal-noise-debiased: pure thermal
+# external gain model. By default it is not thermal-noise-debiased: pure thermal
 # noise alone pulls η below 1 at coarse averaging (the incoherent |V| is
 # noise-inflated while the coherent sum averages noise down), so at native per-cell
 # SNR the absolute η UNDERSTATES a good solution — read the *shape* and the
@@ -36,7 +36,7 @@
 #
 # The debiased estimator works in POWER, with a single square root at the end:
 # per averaging bin, `|Σ w·V|² − 2αΣw` is an unbiased estimate of the bin's
-# coherent signal power `|s̄|²(Σw)²` at ANY SNR (α the measured noise scale), so
+# coherent signal power `|s̄|²(Σw)²` at any SNR (α the measured noise scale), so
 # bins (and cells, and baselines) are pooled as `Σ (|Σ w·V|² − 2αΣw)/Σw` — no
 # per-bin clip, no per-bin square root — and η = √(pooled power at Δ / pooled
 # power at native binning). A per-bin amplitude `√(max(|Σ w·V|² − 2Σw, 0))`
@@ -169,32 +169,24 @@ materialized one at a time (memory-safe on a streamed set).
 parallel-hand only — cross hands are mostly noise and would bias η down), `:all`,
 an index, or product label(s).
 
-`debias` (default `false`) removes the thermal-noise bias from η. The weights
-set the RELATIVE cell weighting (`w ∝ 1/Var(Re V)`, one real component; e.g.
-`load_fitsidi(weight_mode = :radiometer)`); the absolute noise scale is
-estimated per (baseline, product) from adjacent-sample differences of the data,
-so a mis-calibrated WEIGHT column (a per-station factor, a uniform offset) does
-not corrupt η. Without `debias` the raw η is pulled below 1 at coarse averaging
-by noise alone (the incoherent Σ w·|V| is noise-inflated), so it understates a
-good solution at native per-cell SNR. The debiased estimator pools unbiased
-per-bin POWER estimates `(|Σ w·V|² − 2αΣw)/Σw` and takes one square root at the
-end, so η ≈ 1 for a flat-phase solution at any SNR — including bins and
-baselines with per-bin SNR ≲ 1, which a per-bin debiased amplitude would fold
-noise into. A baseline (or pooled aggregate) whose measured signal power does
-not clear 3σ of its null fluctuation has no coherence measurement and reads
-`NaN` — never a clamped noise-over-noise ratio. A NaN baseline still enters the
-pooled aggregate (its expected contribution to both sums is zero, so excluding
-it on the realized sign would bias the pool).
+`debias` (default `false`) removes the thermal-noise bias from η. The
+weights set the relative cell weighting; the absolute noise scale is
+estimated per (baseline, product) from adjacent-sample differences, so a
+mis-calibrated WEIGHT column does not corrupt η. Without `debias` the raw η
+is pulled below 1 at coarse averaging by noise alone. The debiased estimator
+pools unbiased per-bin power estimates `(|Σ w·V|² − 2αΣw)/Σw` and takes one
+square root at the end, so η ≈ 1 for a flat-phase solution at any SNR. A
+baseline (or pooled aggregate) whose signal power does not clear 3σ of its
+null fluctuation reads `NaN`; a NaN baseline still enters the pooled
+aggregate, since excluding it on the realized sign would bias the pool.
 
-`marginalize` (default `true`) measures each curve on the data coherently averaged
-over the OTHER axis first — the time curve on the per-AP band-average, the freq
-curve on the per-channel time-average (incoherent/segmented, EHT-HOPS style). This
-boosts the per-sample SNR (so `debias` is reliable) and answers the real "can I
-average this" question; at native per-cell SNR ≲ 1 (faint/resolved sources) the
-`marginalize = false` per-channel/per-AP curves understate coherence (they measure
-noise), while marginalizing does not. Combine with `debias = true`. See
-[`CoherenceReport`](@ref) /
-[`print_coherence_report`](@ref) / `plot_coherence`.
+`marginalize` (default `true`) measures each curve on the data coherently
+averaged over the other axis first: the time curve on the per-AP
+band-average, the frequency curve on the per-channel time-average. This
+boosts the per-sample SNR (so `debias` is reliable); at native per-cell
+SNR ≲ 1 the unmarginalized curves measure noise and understate coherence.
+See [`CoherenceReport`](@ref) / [`print_coherence_report`](@ref) /
+`plot_coherence`.
 """
 function coherence_report(
         uvset::UVSet;
@@ -289,7 +281,7 @@ function coherence_report(
         # exactly by the weighted averaging `_collapse_axis` performs.
         alpha = debias ? _noise_scale(V, W, plist) : ones(Float64, size(V, 3), size(V, 4))
         if marginalize
-            # Coherently average the OTHER axis first (incoherent/segmented style), so
+            # Coherently average the other axis first (incoherent/segmented style), so
             # each curve is measured on high-SNR samples and the debias is reliable.
             f0m = isempty(freqs) ? 0.0 : sum(freqs) / length(freqs)
             t0m = isempty(times_sec) ? 0.0 : sum(times_sec) / length(times_sec)
@@ -320,7 +312,7 @@ end
 # Power mode (`power = true`, the debiased estimator): num and den are pooled
 # unbiased signal powers, and η = √(num/den) — one square root, on the ratio.
 # The ratio is clamped to [0, 1] (its fluctuations are unbounded either way for
-# weak data; the estimand is). A baseline whose OWN measured power is not
+# weak data; the estimand is). A baseline whose own measured power is not
 # positive has no coherence measurement and reads NaN — but it still enters the
 # pooled sums: its expected contribution to both is zero, and excluding it on
 # the realized sign of a noise fluctuation would bias the aggregate.
@@ -375,7 +367,7 @@ end
 # TIME bins (per channel): walk ascending time, flush the coherent sum `|Σ w·V|`
 # when the bin id changes; FREQ bins (per AP): same over ascending freq. Bin ids
 # depend only on (sample, interval) — not on baseline/pol — so they are tabulated
-# ONCE (`tid`/`fid`) and each (c, ti) cell is read O(1) times w.r.t. the number of
+# Once (`tid`/`fid`) and each (c, ti) cell is read O(1) times w.r.t. the number of
 # intervals: a single walk fans every cell into all nT (or nF) running
 # accumulators. The denominator Σ w·|V| and `npts` are interval-independent, summed
 # once. Intervals are used as given (the auto sweep nudges its terminal just above
@@ -417,12 +409,12 @@ function _coherence_accumulate!(
     accF = Vector{ComplexF64}(undef, nF); swF = Vector{Float64}(undef, nF)
     curF = Vector{Int}(undef, nF); haveF = Vector{Bool}(undef, nF)
 
-    # Per-bin contribution. The weight is the inverse variance of ONE REAL
-    # COMPONENT (`w = 1/σ²` with `Var(Re n) = Var(Im n) = 1/w`), so a cell's COMPLEX
+    # Per-bin contribution. The weight is the inverse variance of one REAL
+    # COMPONENT (`w = 1/σ²` with `Var(Re n) = Var(Im n) = 1/w`), so a cell's complex
     # noise power is `E|n|² = 2/w` — the factor of 2 below is that, not a fudge.
     # Hence `|Σ w·V|²` is noise-inflated by `Σ w²·E|n|² = 2Σw`.
     #
-    # With `debias` the contribution is the unbiased PER-BIN SIGNAL POWER
+    # With `debias` the contribution is the unbiased per-BIN SIGNAL POWER
     # `(|Σ w·V|² − 2Σw)/Σw` — unclipped, no per-bin square root, so noise
     # fluctuations cancel across bins instead of folding at bin SNR ≲ 1; the
     # single square root is taken on the pooled ratio in `_curve_from_sums`.
@@ -710,7 +702,7 @@ function plot_coherence end
 
 Heatmap of the per-baseline coherence factor η: one row per baseline (labelled by
 station-pair code, sorted worst-first by default), one column per averaging
-interval, colour = η ∈ [0, 1] (red = decorrelated, green = coherent). The direct
+interval, colour = η ∈ `[0, 1]` (red = decorrelated, green = coherent). The direct
 "which baseline/station is bad" view — a problem station shows as a band of red
 rows. `axis = :time` (Δt columns) or `:freq` (Δν columns). Choose the columns by
 passing `timescales` / `bandwidths` to [`coherence_report`](@ref) (e.g.

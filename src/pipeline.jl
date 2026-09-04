@@ -120,13 +120,13 @@ end
 """
     AprioriAmplitude(spw_cals; min_elevation_deg = 0.0, on_missing_station = :warn)
 
-Output-chain pipeline step (NOT a reduction): a-priori amplitude calibration.
+Output-chain pipeline step (not a reduction): a-priori amplitude calibration.
 Applies a pre-built `spw_cals` (`load_fitsidi_apriori(path)` — the caller's
 job) to the fringe-corrected data, after the solution's gains and
 interleaved with any `ReduceStep`s in whatever relative order the
 `CalibrationPipeline` declares them — e.g. placed before a `ReduceStep` that
 merges spws, it sees the native per-spw channels; placed after, it sees the
-reduced ones. It is RECORDED on the fitted solution (`sol.postcal`), so the
+reduced ones. It is recorded on the fitted solution (`sol.postcal`), so the
 standalone `calibrate(sol, uvset)` reproduces it without re-passing
 `spw_cals`.
 """

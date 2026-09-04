@@ -56,7 +56,7 @@ end
 
 Materialize a group of lazy leaves. A reader extension can mark its backing array
 bulk-capable (`_bulk_backend`) and provide `_materialize_group_bulk` to read the
-group's shared on-disk bytes ONCE — e.g. the FITS-IDI reader reads a scan's whole
+group's shared on-disk bytes once — e.g. the FITS-IDI reader reads a scan's whole
 contiguous row span in a single sequential read and extracts every spw's
 visibilities from it, instead of per-leaf, per-row `seek`+`read`s. Falls back to
 per-leaf [`materialize_leaf`](@ref) when no bulk path applies (including for

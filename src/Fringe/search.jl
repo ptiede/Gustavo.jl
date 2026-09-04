@@ -13,7 +13,7 @@
 # is a 2-D DFT once the (weighted) visibilities are placed on a uniform
 # frequency × time grid: delay is conjugate to frequency, rate to time. We grid,
 # zero-pad (oversample), FFT, take the windowed peak of |D|, then polish that
-# coarse (delay, rate) cell on the EXACT matched filter (`_polish_peak_exact!`) and
+# coarse (delay, rate) cell on the exact matched filter (`_polish_peak_exact!`) and
 # read φ off it. The FFT only LOCATES the main lobe; the sub-cell peak comes from
 # the exact objective, so accuracy no longer needs a fine `oversample` grid.
 #
@@ -38,7 +38,7 @@
 # other complex type). This applies to the FFT grid/plan (`FringeWorkspace{C,T}`,
 # `_MBDWorkspace{C}`) and the small FFT-conjugate delay/rate axes (`_SearchAxes`'s
 # `delays`/`rates`, `_MBDAxes`'s `sbd_val`/`mbd`/`rate_val`/etc), which are the
-# compute-dominant pieces. The channel/time AXIS ORIGIN AND SPACING
+# compute-dominant pieces. The channel/time AXIS ORIGIN and SPACING
 # (`_uniform_axis`'s `origin`/`step`, `_MBDAxes`'s `f_lo`/`bc_step`) and the raw
 # `freqs`/`times` used directly in phase computation (`_exact_matched_filter`)
 # stay `Float64` regardless of `C`: these are absolute physical values (e.g.
@@ -91,19 +91,17 @@ struct HierarchicalMBD <: AbstractSearchAlgorithm end
 
 Options for [`baseline_fringe_search`](@ref).
 
-The search measures; it does not judge. Every cell holding usable data yields a
-peak with its signal-to-noise and false-alarm probability, and no detection
-threshold is applied here — admission to the station solve is
-[`Stationization`](@ref)'s decision, taken on the recorded `pfa`.
+Every cell holding usable data yields a peak with its signal-to-noise and
+false-alarm probability; no detection threshold is applied here — admission
+to the station solve is [`Stationization`](@ref)'s decision, taken on the
+recorded `pfa`.
 
 - `delay_window`  : `(lo, hi)` delay search window in seconds. Default ±1 µs.
 - `rate_window`   : `(lo, hi)` fringe-rate search window in Hz. Default ±0.8 Hz.
-  Narrowing it buys no speed — the FFT spans the whole plane either way — only a
-  smaller false-alarm trial count, while a window narrower than the true rate
-  spread hides a station outright. A station off the array's clock reaches
-  several hundred mHz at mm wavelengths, so the default is generous; keep any
-  choice well inside the ±1/(2Δt) Nyquist rate, past which a peak is an alias of
-  its own wrap.
+  Narrowing it buys no speed (the FFT spans the whole plane), only a smaller
+  false-alarm trial count, while a window narrower than the true rate spread
+  hides a station outright. Keep any choice well inside the ±1/(2Δt) Nyquist
+  rate, past which a peak is an alias of its own wrap.
 - `oversample`    : zero-padding factor per axis (finer delay/rate grid). Default 8.
   Widely-separated narrow bands may need a larger value (or a tight
   `delay_window`) to avoid locking onto a multi-band alias peak.
@@ -148,7 +146,7 @@ somewhere in the search family the measurement belongs to — the whole family o
 one search in isolation, so it is directly comparable to
 `Stationization.pfa_max` (see [`search_scan`](@ref)).
 
-`valid` says a peak was MEASURED here, not that it passed any threshold: it is
+`valid` says a peak was measured here, not that it passed any threshold: it is
 false only for a cell with no usable data (zero total weight, no peak), whose
 other fields are all zero and carry no information. `pfa` is the quantity that
 separates a real fringe from noise.
@@ -216,7 +214,7 @@ end
 # unlike MEASURE, whose algorithm choice depends on wall-clock trials and can
 # therefore pick a different transform (and different floating-point rounding)
 # on different runs of the same problem size. The plan depends only on the
-# padded grid size and `C`, so it is built ONCE per scan and shared read-only
+# padded grid size and `C`, so it is built once per scan and shared read-only
 # across every baseline/task: FFTW executes one plan concurrently across
 # threads through out-of-place `mul!(D, plan, G)`, which never mutates the plan.
 _plan_grid(::Type{C}, nf::Integer, nt::Integer) where {C} = plan_fft(zeros(C, nf, nt); flags = ESTIMATE)
@@ -249,9 +247,9 @@ const _Axis = @NamedTuple{origin::Float64, step::Float64, n::Int, degenerate::Bo
 
 # Per-(scan group) search-grid geometry: the frequency/time uniform-axis
 # descriptors, the padded FFT sizes, and the conjugate delay/rate coordinate
-# vectors (at compute precision `T`). These depend ONLY on (freqs, times,
+# vectors (at compute precision `T`). These depend only on (freqs, times,
 # oversample, C) — identical across every (baseline, product) of a group — so
-# the search builds them ONCE per group via `_search_axes` instead of re-sorting
+# the search builds them once per group via `_search_axes` instead of re-sorting
 # the freq/time axes (an O(nchan log nchan) sort of the same 1024 channels) and
 # re-`collect`ing the two fftfreq vectors on each of the group's nbl×npol calls.
 struct _SearchAxes{T, M}
@@ -471,7 +469,7 @@ function _baseline_fringe_search(
     # Noise estimate from the full |D|² plane (see `_plane_noise2!`).
     noise2 = _plane_noise2!(ws, Wsum)
 
-    # Refine the peak on the EXACT matched filter (scalloping-free), seeded at the
+    # Refine the peak on the exact matched filter (scalloping-free), seeded at the
     # FFT peak cell. This replaces the old on-grid 3-point parabola: the FFT only
     # LOCATES the main lobe, and `_polish_peak_exact!` finds the sub-cell peak of
     # the true objective — so accuracy no longer leans on a fine `oversample` grid.
@@ -571,7 +569,7 @@ end
 #     S[c] = Σ_t w·V[c,t]·cis(−2π·ṙ(t−t0))   ⇒  D(τ, ṙ) = Σ_c S[c]·cis(−2π·τ(f_c−f0))
 #     T[t] = Σ_c w·V[c,t]·cis(−2π·τ(f_c−f0)) ⇒  D(τ, ṙ) = Σ_t T[t]·cis(−2π·ṙ(t−t0))
 #
-# A coordinate-descent step therefore costs ONE sweep of the cube for the whole
+# A coordinate-descent step therefore costs one sweep of the cube for the whole
 # axis, not one per probe — which is what `_polish_peak_exact!` is built on.
 # `_collapse_freq!` sums in `_exact_matched_filter`'s own order, so the two agree
 # exactly; `_collapse_time!` sums time-major and agrees to float rounding.
@@ -617,7 +615,7 @@ function _phase_sum(z, coord, origin::Real, x::Real)
     return D
 end
 
-# Refine a coarse (delay, rate) peak by maximizing the EXACT matched filter
+# Refine a coarse (delay, rate) peak by maximizing the exact matched filter
 # |Σ w·V·exp(−2πi[τ(f−f0)+ṙ(t−t0)])| directly, rather than fitting a parabola to
 # the coarse FFT |D| (whose bias grows with the grid cell size, i.e. shrinks with
 # `oversample`). Four passes of a per-axis 3-point parabolic step evaluated on the
@@ -653,7 +651,7 @@ function _polish_peak_exact!(
     # step is CLAMPED to one probe width (a coarse-grid parabola can overshoot the
     # sinc peak) rather than rejected, so the point always walks toward the peak,
     # and only an uphill move is kept. Each axis' three probes and its centre are
-    # read off the SAME collapsed vector, so the parabola is built from mutually
+    # read off the same collapsed vector, so the parabola is built from mutually
     # consistent values.
     hd = refine_delay ? delay_bin / 2 : 0.0
     hr = refine_rate ? rate_bin / 2 : 0.0
@@ -735,7 +733,7 @@ _in_window(x::Real, window::Tuple{<:Real, <:Real}, degenerate::Bool) =
 #
 # The MBD is periodic with ambiguity A = 1/Δbc; the total delay is the MBD
 # unfolded near the SBD estimate. Because the SBD bin (1/BW_band) can be
-# comparable to A, the ambiguity k is ARBITRATED BY THE EXACT MATCHED FILTER:
+# comparable to A, the ambiguity k is ARBITRATED by the exact MATCHED FILTER:
 # every candidate mbd + k·A within ~1.5 SBD bins of the SBD estimate (and inside
 # the window) is evaluated exactly and the strongest wins — the exact filter sees
 # the true in-band slope, which is precisely what distinguishes the aliases. The
@@ -744,7 +742,7 @@ _in_window(x::Real, window::Tuple{<:Real, <:Real}, degenerate::Bool) =
 #
 # Cost: the giant nf_pad×nt_pad grid (mostly zeros for VGOS layouts) is replaced
 # by nfreqgroup small per-band FFTs plus nsbd tiny band-center FFTs — orders of
-# magnitude less compute AND memory traffic. Noise/SNR conventions are identical
+# magnitude less compute and memory traffic. Noise/SNR conventions are identical
 # to the full path: every cube cell is a matched-filter output with variance Σw
 # under noise, so the same strided-median estimate applies.
 
@@ -998,7 +996,7 @@ function _mbd_fringe_search(
     nfreqgroup = w.nfreqgroup
 
     # Stage 1: per band, grid + 2-D FFT (in-band delay × rate); keep the windowed
-    # (SBD row, rate col) block. The noise is estimated HERE, from a strided
+    # (SBD row, rate col) block. The noise is estimated here, from a strided
     # median of each band's FULL |D_b|² plane (the windowed stage-2 cube sits on
     # the fringe's sidelobe ridge and would bias it — same rationale as the full
     # path's whole-plane sample): the band contributions to D are independent, so
@@ -1085,7 +1083,7 @@ function _mbd_fringe_search(
     end
 
     # Ambiguity arbitration: candidate total delays mbd_ref + k·A near the SBD
-    # estimate (within ±1.5 SBD bins, inside the window), decided by the EXACT
+    # estimate (within ±1.5 SBD bins, inside the window), decided by the exact
     # matched filter — it sees the true in-band slope, which is what separates
     # the aliases. Usually one candidate (A ≫ sbd_bin); a handful otherwise.
     half = 1.5 * mx.sbd_bin
@@ -1105,7 +1103,7 @@ function _mbd_fringe_search(
         end
     end
 
-    # Final refinement on the EXACT matched filter (scalloping-free), shared with
+    # Final refinement on the exact matched filter (scalloping-free), shared with
     # the full path. The stage-2 FFT and the ambiguity arbitration above have
     # located the main lobe and its correct alias branch; `_polish_peak_exact!`
     # then finds the sub-cell (delay, rate) peak of the true objective. Its
@@ -1135,7 +1133,7 @@ end
 # The delay resolution is 1/(gridded bandwidth span) = 1/(fax.n·fax.step) and the
 # rate resolution 1/(time span), so cells-per-axis = window span / resolution,
 # clamped to [1, n gridded samples] (zero-pad `oversample` refines the peak but
-# adds NO independent cells). A degenerate axis contributes a factor 1.
+# adds no independent cells). A degenerate axis contributes a factor 1.
 _search_cells(ax::_SearchAxes, opts::FringeSearch) = _search_cells(ax.fax, ax.tax, opts)
 _search_cells(freqs::AbstractVector, times::AbstractVector, opts::FringeSearch) =
     _search_cells(_uniform_axis(freqs), _uniform_axis(times), opts)
@@ -1203,7 +1201,7 @@ by [`baseline_fringe_map`](@ref) — the classic false-fringe diagnostic. Always
 [`baseline_fringe_search`](@ref)). Fields:
 
 - `delays` (s) / `rates` (Hz) — the in-window grid coordinates, ascending.
-- `snr` — `(ndelay, nrate)` map of `|D| / noise` in the SAME units as
+- `snr` — `(ndelay, nrate)` map of `|D| / noise` in the same units as
   the detection's `snr`, so the map's peak sits at ≈ `detection.snr`.
 - `detection` — the refined peak, exactly as [`baseline_fringe_search`](@ref)
   returns it (narrowed to `Float64` regardless of the search's own precision).

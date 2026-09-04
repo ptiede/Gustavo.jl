@@ -28,42 +28,33 @@ const DetectionRow = @NamedTuple{
                 Vsearch = data[:vis], ngroups = 1,
                 executor = SerialScheduler(), t0 = geom.t0 * 3600.0) -> DimStack
 
-Fringe-search every cross-baseline (baseline, product) of a materialized scan
-group — the public stage-A search. `data` is the group's `DimStack` as
-[`materialize_cube`](@ref) returns it; the search reads data only and needs no
-geometry window. Autocorrelation baselines (antenna `a == a`, total power) are
-dropped up front, so the result covers only interferometric baselines. `geom`
-supplies the reference frequency `f0` and the default phase epoch `t0`.
-`Vsearch` lets a caller search a residual cube in place of the raw one
-(`rounds > 1`). `ngroups` sizes the false-alarm family each cell's `pfa` is
-computed over: the whole family of `ncross×npol×ngroups` searches shares one
-budget (Bonferroni), so a recorded `pfa` already accounts for every search it
-competes with and can be compared directly against `Stationization.pfa_max`. The
-default `ngroups = 1` scopes the family to this scan alone (the QA convention); a
-whole-track solve passes its scan count. `t0` (seconds) is the epoch the detection PHASES
-are referenced to — delay/rate/SNR are epoch-invariant. A phase is only as good
-as its epoch is close to the data: quoting it a lever arm away costs it
-`2π·σ_rate·Δt`, so anything comparing phases against a model must reference them
-where that model's constant lives ([`scan_phase_epoch`](@ref)), and a standalone
-QA caller wants the scan midpoint (`mean(timestamps(data)) * 3600`). The default
-is `geom`'s track epoch, which is the right answer only for a single-scan
-geometry. Results are bit-identical to the serial loop
-regardless of the fan-out `executor`.
+Fringe-search every cross-baseline (baseline, product) of a materialized
+scan group. `data` is the group's `DimStack` as [`materialize_cube`](@ref)
+returns it; autocorrelation baselines are dropped, so the result covers only
+interferometric baselines. `geom` supplies the reference frequency `f0` and
+the default phase epoch. `Vsearch` lets a caller search a residual cube in
+place of the raw one.
+
+`ngroups` sizes the false-alarm family each cell's `pfa` is computed over:
+the family of `ncross×npol×ngroups` searches shares one budget (Bonferroni),
+so a recorded `pfa` is directly comparable to `Stationization.pfa_max`. The
+default `ngroups = 1` scopes the family to this scan; a whole-track solve
+passes its scan count.
+
+`t0` (seconds) is the epoch the detection phases are referenced to
+(delay/rate/SNR are epoch-invariant). Quoting a phase a lever arm from the
+data costs it `2π·σ_rate·Δt`, so a caller comparing phases against a model
+must reference them where the model's constant lives
+([`scan_phase_epoch`](@ref)); a standalone caller wants the scan midpoint
+(`mean(timestamps(data)) * 3600`). The default is `geom`'s track epoch,
+which is right only for a single-scan geometry.
 
 Returns a `DimStack` over `Baseline × Pol` whose layers are the seven
 [`Detection`](@ref) fields (`:delay`/`:rate`/`:phase`/`:amp`/`:snr`/`:pfa`/`:valid`),
-so one cell `det[bi, p]` reads back as a `Detection` `NamedTuple`, and its
-`Baseline` lookup carries the surviving `(a, b)` antenna pairs. The layers'
-element type tracks `Vsearch`'s own precision (`real(eltype(Vsearch))`) — a
-`ComplexF32` cube produces `Float32` layers. The scan-level aggregates (max
-SNR, effective cell count, the detection table) are not stored here; a caller
-derives them from the cube's layers plus a cheap `_search_cells` recompute when
-it needs them.
-
-Grid geometry (and its shared FFT plan) is built ONCE per scan; the independent
-per-(baseline, product) searches fan out over `executor`, each task reusing one
-`FringeWorkspace` for scratch. Each search result is written straight into its
-cell of the DimStack — no intermediate detection matrix is built.
+so one cell `det[bi, p]` reads back as a `Detection` `NamedTuple`; the
+`Baseline` lookup carries the surviving `(a, b)` pairs. The layers' element
+type tracks `real(eltype(Vsearch))`. Results are bit-identical to the serial
+loop regardless of the fan-out `executor`.
 """
 function search_scan(
         data::AbstractDimStack, geom::DataGeometry, params::FringeSearch;
@@ -92,7 +83,7 @@ function search_scan(
     phase = similar(delay)
     amp = similar(delay)
     snr = similar(delay)
-    # `valid` is a dense `Matrix{Bool}`, NOT a `BitArray`: the fan-out writes
+    # `valid` is a dense `Matrix{Bool}`, not a `BitArray`: the fan-out writes
     # distinct cells concurrently, and adjacent bits of a BitArray share a word,
     # so `zeros(Bool, …)` is race-free where `falses(…)` is not.
     valid = zeros(Bool, dims...)

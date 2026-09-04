@@ -22,6 +22,14 @@
 
 # ── Feed tying ───────────────────────────────────────────────────────────────
 
+"""
+    AbstractFeedTying
+
+How a [`GainComponent`](@ref)'s parameter blocks are shared between the two
+polarization feeds: [`PerFeed`](@ref) (each feed its own block),
+[`SharedFeeds`](@ref) (one block read by both), [`SingleFeed`](@ref) (one
+feed only), or [`ReferenceRelative`](@ref) (partner = reference + relative).
+"""
 abstract type AbstractFeedTying end
 
 "Independent parameters per feed — feed 1 and feed 2 solved separately."
@@ -34,11 +42,10 @@ struct SharedFeeds <: AbstractFeedTying end
     ReferenceRelative(reference_feed)
 
 The `reference_feed` reads a reference block; the partner feed reads the
-reference block PLUS a relative-deviation block (partner = reference + relative).
-This reproduces the old absolute/relative bandpass feed pattern when both feeds
-share the *same* term and segmentation. For an asymmetric bandpass model (the
-two feeds use different terms/segmentations) use a `SharedFeeds` component for
-the common part plus a `SingleFeed` for the partner-only deviation.
+reference block plus a relative-deviation block (partner = reference +
+relative). Requires both feeds to share the same term and segmentation; for
+an asymmetric model use a `SharedFeeds` component for the common part plus a
+`SingleFeed` for the partner-only deviation.
 """
 struct ReferenceRelative <: AbstractFeedTying
     reference_feed::Int
@@ -55,11 +62,10 @@ end
 """
     SingleFeed(feed)
 
-The component applies to one `feed` (1 or 2) only — the other feed gets no
-contribution from it. Allocates a single parameter block, assigned to `feed`.
-This is the primitive that expresses a partner-feed-only deviation, so the old
-asymmetric reference/relative bandpass model decomposes as a `SharedFeeds`
-common part plus a `SingleFeed(partner)` deviation.
+The component applies to one `feed` (1 or 2) only; the other feed gets no
+contribution from it. Allocates a single parameter block. An asymmetric
+reference/relative bandpass model decomposes as a `SharedFeeds` common part
+plus a `SingleFeed(partner)` deviation.
 """
 struct SingleFeed <: AbstractFeedTying
     feed::Int
@@ -128,17 +134,16 @@ _feed_node2(t::ReferenceRelative, feed::Integer) = feed == 3 - t.reference_feed 
     AbstractGainModel
 
 A station gain model: the assignment of a `(; phase, logamp)` pair of named
-[`GainComponent`](@ref) trees to every station of an observation.
+[`GainComponent`](@ref) trees to every station of an observation, with
 `gain = exp(Σ logamp) · cis(Σ phase)` per station.
 
-The one required method is the station seam,
-[`station_components`](@ref)`(model, station) -> (; phase, logamp)` — the trees
-the named station solves. [`StationGainModel`](@ref) is the shipped
-implementation; a rule-based model (e.g. "every station whose code starts with
-a given prefix gets a smoother bandpass") is a subtype implementing that one
-method. Before a solve, a model is resolved against the observation's antenna
-table by [`materialize`](@ref)`(model, antennas, geom)`, which records the
-per-station trees the solve actually uses.
+The one required method is
+[`station_components`](@ref)`(model, station) -> (; phase, logamp)`, the
+trees the named station solves. [`StationGainModel`](@ref) is the shipped
+implementation; a rule-based model is a subtype implementing that one
+method. Before a solve, a model is resolved against the observation's
+antenna table by [`materialize`](@ref)`(model, antennas, geom)`, which
+records the per-station trees the solve uses.
 """
 abstract type AbstractGainModel end
 
@@ -152,12 +157,11 @@ within each group; a value may itself be a `NamedTuple` — a named subtree for
 one element that compiled to several components.
 
 `stations` maps a station code to a replacement entry used verbatim for that
-station: a `NamedTuple` whose `phase` and/or `logamp` tree REPLACES the
-corresponding base group wholesale — the model never merges within a group. A
-group the entry omits is inherited from the base. Replacement is whole-group
-because components within a group interact (they sum and share degeneracies)
-while the two groups do not. An entry key other than `phase`/`logamp` errors at
-construction — the likely mistake is writing a component name at the top level.
+station: a `NamedTuple` whose `phase` and/or `logamp` tree replaces the
+corresponding base group whole; a group the entry omits is inherited from
+the base. Replacement is whole-group because components within a group
+interact (they sum and share degeneracies) while the two groups do not. An
+entry key other than `phase`/`logamp` errors at construction.
 
 ```julia
 StationGainModel(
@@ -216,10 +220,10 @@ _station_entry(x) = throw(
     station_components(model::AbstractGainModel, station) -> (; phase, logamp)
 
 The named component trees `station` (a station code, `String` or `Symbol`)
-solves under `model`. This is the extension seam of [`AbstractGainModel`](@ref):
-a model subtype implements this one method and the layout machinery does the
-rest. Solves consult it only through [`materialize`](@ref), so what a solve
-records and what this returns coincide.
+solves under `model`. The extension seam of [`AbstractGainModel`](@ref): a
+model subtype implements this one method. Solves consult it only through
+[`materialize`](@ref), so what a solve records and what this returns
+coincide.
 
 For a [`StationGainModel`](@ref): the base `phase`/`logamp` trees, except where
 a `stations` entry replaces a whole group for this station.
@@ -283,11 +287,9 @@ logamp_components(m::StationGainModel) = _flatten_components(m.logamp)
     model_components(element, spec) -> GainComponent | NamedTuple | Nothing
 
 Compile one model-list element for an observation. `spec = (; geom, antennas)`
-carries the `DataGeometry` and the antenna table — the same spec a pipeline
-step's `model_components` receives, so steps and list elements compose through
-one mechanism (the same generic applied to a step returns the step's whole
-model). The result is named by the element's key in the term list, so an
-element returns only its own internal structure:
+carries the `DataGeometry` and the antenna table (the same spec a pipeline
+step's `model_components` receives). The result is named by the element's
+key in the term list, so an element returns only its own internal structure:
 
 - a single [`GainComponent`](@ref) — the element's list key names it (`θ.phase.<key>`);
 - a `NamedTuple` of `GainComponent`s — one element that compiles to several
@@ -392,6 +394,13 @@ function component_label(e::GainComponent)
     )
 end
 
+"""
+    station_model_summary(name, m::StationGainModel) -> String
+
+One-line summary of `m` under the label `name`: each phase and log-amplitude
+component as its [`component_label`](@ref) constructor call, plus the station
+overrides, if any.
+"""
 function station_model_summary(name, m::StationGainModel)
     p, a = phase_components(m), logamp_components(m)
     ph = isempty(p) ? "—" : join(component_label.(p), " + ")

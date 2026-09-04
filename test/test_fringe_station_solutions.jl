@@ -5,8 +5,8 @@
 @testset "rel_time model option + fringe_station_solutions" begin
 
     @testset "rel_time switches the inter-feed delay's time basis" begin
-        mg = FP._fringe_model(rel_time = CAL.GlobalTime())
-        mp = FP._fringe_model(rel_time = CAL.PerScan())
+        mg = _full_fringe_model(rel_time = CAL.GlobalTime())
+        mp = _full_fringe_model(rel_time = CAL.PerScan())
         @test length(mg.phase) == length(mp.phase)
         # Exactly the one `SingleFeed`-tied offset differs between the models,
         # and only in its time-segmentation type. (There is no inter-feed
@@ -25,7 +25,7 @@
         @test sort([nameof(typeof(mg.phase[i].term)) for i in diff]) == [:Delay]
 
         # Per-scan is the default: the inter-feed offsets carry no cross-scan column.
-        md = FP._fringe_model()
+        md = _full_fringe_model()
         @test all(
             tc -> tc.Ti isa CAL.PerScan,
             filter(tc -> tc.Feed isa CAL.SingleFeed, collect(md.phase)),
@@ -35,7 +35,7 @@
     @testset "θ decode: units + feed-2 = shared + inter-feed offset" begin
         uvset, _ = _build_fringe_uvset(nant = 4)
         geom = CAL.build_geometry(uvset)
-        model = FP._fringe_model()
+        model = _full_fringe_model()
         layout = CAL.plan_parameters(model, 4, geom)
 
         # The two GlobalFrequency delay plans: the feed-common per-scan one (has a

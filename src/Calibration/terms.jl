@@ -14,17 +14,18 @@
 """
     AbstractGainTerm
 
-One physical contribution to a station's phase or log-amplitude response — a
+One physical contribution to a station's phase or log-amplitude response: a
 delay, a rate, a polynomial bandpass shape. A concrete term implements
-[`term_axes`](@ref), [`param_shapes`](@ref), a coordinate builder
-([`freq_coordinate`](@ref) / [`time_coordinate`](@ref)) and its resolved state
-([`freq_coord_state`](@ref) / [`time_coord_state`](@ref)) for each axis
-declared, and [`term_eval`](@ref); [`term_label`](@ref) is optional. See the
-"Authoring a new gain term" documentation page for a worked example.
+[`term_axes`](@ref), [`param_shapes`](@ref), [`term_eval`](@ref), and — for
+each axis declared — a coordinate builder ([`freq_coordinate`](@ref) /
+[`time_coordinate`](@ref)) with its resolved state
+([`freq_coord_state`](@ref) / [`time_coord_state`](@ref));
+[`term_label`](@ref) is optional. See the "Authoring a new gain term" docs
+page for a worked example.
 
-A term lives inside an [`GainComponent`](@ref), which pins it to one
-(time-segment, frequency-segment) block of parameters, so a term itself never
-sees the global parameter vector.
+A term lives inside a [`GainComponent`](@ref), which pins it to one
+(time-segment, frequency-segment) parameter block; a term never sees the
+global parameter vector.
 """
 abstract type AbstractGainTerm end
 
@@ -38,18 +39,18 @@ struct Delay <: AbstractGainTerm end
 const DISPERSION_K = 8.4479e9
 
 """
-Ionospheric dispersion: phase = K·`dtec`·(1/f0 − 1/f) with K = $DISPERSION_K rad·Hz/TECU,
-so `dtec` is a differential TEC in TECU. Station-based and non-magnetic to first
-order, so it ties feeds (`SharedFeeds`). Referenced to f0 — the 1/f0 offset
-lands in the accompanying constant/phase term, keeping this term pure shape.
+Ionospheric dispersion: phase = K·`dtec`·(1/f0 − 1/f) with K = $DISPERSION_K
+rad·Hz/TECU, so `dtec` is a differential TEC in TECU. Non-magnetic to first
+order, so it ties feeds (`SharedFeeds`). The 1/f0 reference puts the offset
+at f0 into the accompanying constant term.
 """
 struct Dispersion <: AbstractGainTerm end
 
 """
-Fringe rate: phase = 2π·`rate`·(t − t0)·3600, `rate` in Hz (t in hours), with t0
-the mean epoch of the term's OWN time segment. A companion constant term is
-therefore the phase at the middle of each segment, not at a track-wide epoch —
-see `time_coord_state(::Rate, …)` for why the distinction is not cosmetic.
+Fringe rate: phase = 2π·`rate`·(t − t0)·3600, `rate` in Hz (t in hours), with
+t0 the mean epoch of the term's own time segment. A companion constant term
+is therefore the phase at the middle of each segment, not at a track-wide
+epoch (see the comment at `time_coord_state(::Rate, …)`).
 """
 struct Rate <: AbstractGainTerm end
 
@@ -114,20 +115,15 @@ term_axes(::Polynomial{C}) where {C} = (C,)
 
 The parameters of one (time-segment, frequency-segment) block of `term`,
 named and shaped: `()` for a scalar, `(n,)` for a vector of length `n`.
-`nchan_seg` is the number of channels in the term's frequency segment, for
-terms whose arity the data sets. How finely a term varies in frequency is
-said by its frequency SEGMENTATION, not by its parameter count: a free value
-per channel is `ConstantTerm` paired with `ChannelBlocks(1)`.
+`nchan_seg` is the channel count of the term's frequency segment, for terms
+whose arity the data sets. How finely a term varies is set by its
+segmentation, not its parameter count: a free value per channel is
+`ConstantTerm` with `ChannelBlocks(1)`.
 
-[`term_eval`](@ref) receives these as a `NamedTuple`, so a term author writes
-`p.delay` and never a position into a block whose length it would have to
-know. Shapes are part of the type, not runtime data, so the `NamedTuple` is
-built statically and costs nothing.
-
-The names are LOCAL to one term's own block and are never merged with
-another's: two terms may both name a parameter `:offset` without colliding.
-An aggregate view of θ must therefore namespace by component, never by
-parameter name.
+[`term_eval`](@ref) receives these as a `NamedTuple` (`p.delay`), never as
+positions into a block. Names are local to the term's own block: two terms
+may both name a parameter `:offset` without colliding, so aggregate views of
+θ must namespace by component.
 """
 function param_shapes end
 
@@ -141,8 +137,7 @@ param_shapes(t::Polynomial, nchan_seg) = (coeffs = (t.degree,),)
     nparams_per_block(term, nchan_seg) -> Int
 
 Number of parameters one (time-segment, frequency-segment) block of `term`
-occupies in θ. A term names its parameters rather than counting them, so a count
-can never disagree with the names it is derived from.
+occupies in θ; derived from [`param_shapes`](@ref).
 """
 nparams_per_block(t::AbstractGainTerm, nchan_seg) =
     sum(prod, values(param_shapes(t, nchan_seg)))
@@ -152,24 +147,21 @@ nparams_per_block(t::AbstractGainTerm, nchan_seg) =
 """
     freq_coordinate(term, f, state, seg::Integer) -> Real
 
-`term`'s `x.Frequency` at frequency `f` (Hz), lying in the SOLVE's frequency
-segment `seg`. `state` is whatever [`freq_coord_state`](@ref) resolved for this
-term — a reference frequency, a per-segment normalization, whatever the term's
-coordinate needs. Required for any term declaring `:Frequency` in
-[`term_axes`](@ref); there is deliberately no generic fallback —
-`plan_parameters` calls this for every term that declares the axis, so a term
-that forgets it errors loudly (a `MethodError`) instead of silently evaluating
-that axis at zero.
+`term`'s `x.Frequency` at frequency `f` (Hz), lying in the solve's frequency
+segment `seg`. `state` is what [`freq_coord_state`](@ref) resolved for this
+term. Required for any term declaring `:Frequency` in [`term_axes`](@ref);
+there is no fallback, so a missing method throws a `MethodError` at plan
+time rather than evaluating the axis at zero.
 
 Pointwise in `f`, so the same definition serves the solve grid and any
-coordinate off it (see `evaluate_gains`).
+coordinate off it.
 """
 function freq_coordinate end
 
 """
     time_coordinate(term, t, state, seg::Integer) -> Real
 
-`term`'s `x.Ti` at epoch `t` (hours), lying in the SOLVE's time segment `seg`,
+`term`'s `x.Ti` at epoch `t` (hours), lying in the solve's time segment `seg`,
 against the state [`time_coord_state`](@ref) resolved. Required for any term
 declaring `:Ti` in [`term_axes`](@ref); see [`freq_coordinate`](@ref) for why
 there is no generic fallback.
@@ -180,15 +172,13 @@ function time_coordinate end
     freq_coord_state(term, geom::DataGeometry, fseg_id, nfseg)
     time_coord_state(term, geom::DataGeometry, tseg_id, ntseg)
 
-The constants `term`'s coordinate reads, resolved against the solve geometry
-once at plan time and stored on the [`ComponentPlan`](@ref) as `fstate`/`tstate`.
-They are not θ parameters (nothing fits them) and not fields of the term (a term
-is a user declaration, written before any geometry exists), so each term defines
-its own state and a new term needing new constants widens nothing shared.
-
-Required for any term declaring the corresponding axis in [`term_axes`](@ref),
-with no generic fallback, for the same reason [`freq_coordinate`](@ref) has
-none. An undeclared axis stores `nothing` and needs no method.
+The constants `term`'s coordinate reads (a reference frequency, a per-segment
+normalization), resolved against the solve geometry once at plan time and
+stored on the [`ComponentPlan`](@ref) as `fstate`/`tstate`. They are not θ
+parameters and not fields of the term. Required for any term declaring the
+corresponding axis in [`term_axes`](@ref), with no fallback (a missing
+method throws at plan time); an undeclared axis stores `nothing` and needs
+no method.
 """
 function freq_coord_state end
 
@@ -207,7 +197,7 @@ freq_coord_state(::Dispersion, geom::DataGeometry, fseg_id, nfseg) = geom.f0
 freq_coordinate(::Dispersion, f, f0, seg::Integer) = DISPERSION_K * (1.0 / f0 - 1.0 / f)
 
 # Rate uses (t − t0) in seconds (t given in hours) so θ is a rate in Hz, with t0
-# the SEGMENT's own mean epoch rather than a track-wide one.
+# the segment's own mean epoch rather than a track-wide one.
 #
 # The origin is where the co-located constant phase lives: phase = φ + 2π·ṙ·(t −
 # t0), so φ is the phase at t0. A rate carries an uncertainty σ_ṙ, and quoting
@@ -283,16 +273,14 @@ end
 """
     term_eval(term, p, x)
 
-`term`'s contribution to phase / log-amplitude at one (channel, time) cell.
-`p` holds the term's own parameters, named and shaped as [`param_shapes`](@ref)
-declares — a scalar per `()` name, a vector view per `(n,)` name. `x` holds
-the coordinates [`term_axes`](@ref) declares, under those names: `x.Frequency`,
-`x.Ti`, or both. A term never sees the global parameter vector, nor the
-layout that addresses it, nor an index into either.
+`term`'s contribution to phase or log-amplitude at one (channel, time)
+cell. `p` holds the term's own parameters as [`param_shapes`](@ref) declares
+them: a scalar per `()` name, a vector view per `(n,)` name. `x` holds the
+coordinates [`term_axes`](@ref) declares (`x.Frequency`, `x.Ti`, or both).
 
-This is the hot path of `evaluate_gains` — kept allocation-free and
-type-stable so the whole forward map is inferrable (and Reactant-traceable).
-Read `p` and `x` by field name; iterating a `NamedTuple` is not type-stable.
+This is the hot path of `evaluate_gains` and must stay allocation-free and
+type-stable. Read `p` and `x` by field name; iterating a `NamedTuple` is not
+type-stable.
 """
 function term_eval end
 
@@ -312,9 +300,8 @@ end
 """
     term_label(term) -> String
 
-A short diagnostic label for `term`, used in `show` and summaries. Defaults
-to the type name; override only for a more evocative label than the type
-itself provides.
+A short diagnostic label for `term`, used in `show` and summaries.
+Defaults to the type name.
 """
 term_label(t::AbstractGainTerm) = string(nameof(typeof(t)))
 term_label(::ConstantTerm) = "const"
