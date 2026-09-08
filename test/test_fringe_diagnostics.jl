@@ -516,3 +516,89 @@ end
     @test data.tser_freqgroup_before[:, :, :, 1] == data.tser_before
     @test data.tser_freqgroup_after[:, :, :, 1] == data.tser_after
 end
+
+# ── Thermal error bars on the baseline-fringe panels ─────────────────────────
+#
+# `plot_baseline_fringes` draws DATA — coherent visibility averages — so every
+# point has a thermal width and no gain uncertainty is involved. The width is
+# `σ = 1/√Σw` on the weighted mean, and the panels derive an amplitude bar
+# (σ itself) and a phase bar (σ/|V|) from the same complex sample.
+
+@testset "baseline fringe error bars" begin
+    # Weights in the fixture are a flat 1e3, so injecting σ_vis = 1/√1e3 makes
+    # them truthful and the reported widths checkable against real scatter.
+    σ_vis = 1 / sqrt(1.0e3)
+    nti = 6
+    uvset, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 8, ntime = nti, noise = σ_vis)
+    sol = fit(FringeFit(model = FringeModel()) |> Bandpass(), uvset)
+    d = FP.baseline_fringe_data(uvset, sol; scan_index = 1)
+
+    @testset "σ is 1/√Σw on the coherent mean" begin
+        # Each spectral point averages this baseline over `nti` integrations of
+        # weight 1e3, so its width is a known constant.
+        @test size(d.spec_sigma_before) == size(d.spec_before)
+        @test size(d.tser_sigma_before) == size(d.tser_before)
+        finite = filter(isfinite, d.spec_sigma_before)
+        @test !isempty(finite)
+        @test all(≈(1 / sqrt(nti * 1.0e3)), finite)
+        # The time series averages over channels instead: 16 of them.
+        tfinite = filter(isfinite, d.tser_sigma_before)
+        @test all(≈(1 / sqrt(16 * 1.0e3)), tfinite)
+        # Correction rescales the weights, so the "after" widths move with |g|.
+        @test any(isfinite, d.spec_sigma_after)
+    end
+
+    @testset "σ matches the observed scatter" begin
+        # Corrected visibilities on a baseline should scatter about their mean
+        # by the reported width. Pooled over every baseline and channel this is
+        # a tight check even with few samples.
+        p = FP.baseline_pol_index(d, :parallel)
+        z = Float64[]
+        for bi in eachindex(d.bl_pairs)
+            a, b = d.bl_pairs[bi]
+            a == b && continue
+            col = @view d.spec_after[:, bi, p]
+            σ = @view d.spec_sigma_after[:, bi, p]
+            μ = sum(col) / length(col)
+            for c in eachindex(col, σ)
+                (isfinite(col[c]) && isfinite(σ[c])) || continue
+                # Real and imaginary parts each carry σ/√2 of the complex width.
+                push!(z, real(col[c] - μ) / (σ[c] / sqrt(2)))
+                push!(z, imag(col[c] - μ) / (σ[c] / sqrt(2)))
+            end
+        end
+        @test length(z) > 100
+        rms = sqrt(sum(abs2, z) / length(z))
+        @test 0.5 < rms < 2.0          # standardized residuals are O(1)
+    end
+
+    @testset "phase bar saturates rather than lying" begin
+        @test FP._plotted_sigma(abs, 2.0 + 0im, 0.5) == 0.5
+        @test FP._plotted_sigma(angle, 2.0 + 0im, 0.5) ≈ 0.25
+        # Once the width reaches the sample the phase is unconstrained.
+        @test FP._plotted_sigma(angle, 0.1 + 0im, 5.0) == Float64(π)
+        @test FP._plotted_sigma(angle, 0.0 + 0im, 1.0) == Float64(π)
+    end
+
+    @testset "unknown widths draw no bars" begin
+        # The weightless constructor cannot know a width; it reports NaN, and
+        # every panel still renders.
+        nchan = length(d.freqs)
+        bare = FP.BaselineFringeData(
+            "S", "1", 1, 100.0, d.bl_pairs, d.ant_names, d.pol_products, d.freqs, d.times,
+            d.spec_before, d.spec_after, d.tser_before, d.tser_after,
+        )
+        @test all(isnan, bare.spec_sigma_before)
+        for kind in (:freq, :time), show in (:phase, :amp)
+            @test FP.plot_baseline_fringes(bare; kind = kind, show = show) isa Figure
+        end
+    end
+
+    @testset "every panel variant renders with bars" begin
+        for kind in (:freq, :time), show in (:phase, :amp), layout in (:triangle, :grid)
+            @test FP.plot_baseline_fringes(d; kind = kind, show = show, layout = layout) isa Figure
+        end
+        @test FP.plot_baseline_fringes(d; kind = :freq, show = :amp, freqgroup = 1) isa Figure
+        @test FP.plot_baseline_fringes(d; kind = :time, show = :phase, freqgroup = 1) isa Figure
+    end
+end

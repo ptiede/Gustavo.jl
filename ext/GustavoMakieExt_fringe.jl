@@ -13,6 +13,7 @@ using DimensionalData: lookup, Ti
 using Gustavo.Fringe: fringe_snr_table
 using Gustavo.Fringe: BaselineFringeData, baseline_fringe_data, baseline_pol_index
 using Gustavo.Fringe: FringeSearchMap, BaselineFringeMap, fringe_search_map, _fmt_pfa
+using Gustavo.Fringe: _plotted_sigma
 
 # Resolve a `sites`/`feeds` selector into a vector of integer indices.
 _fringe_indices(sel::Colon, n::Integer) = collect(1:n)
@@ -175,26 +176,43 @@ function _triangle_positions(data::BaselineFringeData, bls)
 end
 
 # Coherently bin per-channel complex means in bins of `bin` channels within one
-# frequency-group range (NaN channels skipped); returns (x_fraction_within_group, values).
-function _bin_freqgroup(spec_col, r::UnitRange{Int}, bin::Int)
+# frequency-group range (NaN channels skipped); returns the fractional x within
+# the group, the binned values, and their widths.
+function _bin_freqgroup(spec_col, sigma_col, r::UnitRange{Int}, bin::Int)
     xs = Float64[]
     zs = ComplexF64[]
+    σs = Float64[]
     lo = first(r)
     for i in lo:bin:last(r)
         hi = min(i + bin - 1, last(r))
         acc = zero(ComplexF64)
+        var = 0.0
         n = 0
         for c in i:hi
             z = spec_col[c]
             (isfinite(real(z)) && isfinite(imag(z))) || continue
             acc += z
+            # The bin is an unweighted mean of n independent channel means, so
+            # its variance is `Σσ² / n²`. A NaN σ poisons the bin's, which is
+            # the honest outcome — the bin's width is then unknown.
+            var += sigma_col[c]^2
             n += 1
         end
         n == 0 && continue
         push!(xs, (0.5 * (i + hi) - lo) / max(length(r) - 1, 1))
         push!(zs, acc / n)
+        push!(σs, sqrt(var) / n)
     end
-    return xs, zs
+    return xs, zs, σs
+end
+
+# Draw error bars for the finite subset; Makie rejects a NaN in `errorbars!`,
+# and points with unknown width simply get no bar.
+function _errorbars_finite!(ax, x, y, σ; color)
+    keep = [i for i in eachindex(x, y, σ) if isfinite(x[i]) && isfinite(y[i]) && isfinite(σ[i])]
+    isempty(keep) && return nothing
+    errorbars!(ax, x[keep], y[keep], σ[keep]; color = color, linewidth = 1, whiskerwidth = 0)
+    return nothing
 end
 
 # Unit phasor of a complex sample's vector mean (the panel's mean phase direction),
@@ -235,12 +253,18 @@ function Fringe.plot_baseline_fringes(
         binw = bin > 0 ? Int(bin) : max(1, maximum(length, freqgroups) ÷ 12)
         x = data.freqs ./ 1.0e9
         before, after = data.spec_before, data.spec_after
+        sig_before, sig_after = data.spec_sigma_before, data.spec_sigma_after
         xlab = compressed ? "group (centre GHz)" : "frequency (GHz)"
     else
         binw = 1
         x = data.times
         before, after = fgsel == 0 ? (data.tser_before, data.tser_after) :
             (view(data.tser_freqgroup_before, :, :, :, fgsel), view(data.tser_freqgroup_after, :, :, :, fgsel))
+        sig_before, sig_after = fgsel == 0 ? (data.tser_sigma_before, data.tser_sigma_after) :
+            (
+            view(data.tser_freqgroup_sigma_before, :, :, :, fgsel),
+            view(data.tser_freqgroup_sigma_after, :, :, :, fgsel),
+        )
         xlab = "time (h)"
     end
     reduce_y = show === :phase ? angle : abs
@@ -304,27 +328,39 @@ function Fringe.plot_baseline_fringes(
         compressed && !isempty(tickpos) && (ax.xticks = (tickpos, ticklab))
         local sb, sa
         if kind === :freq
-            xb = Float64[]; zbv = ComplexF64[]
-            xa = Float64[]; zav = ComplexF64[]
+            xb = Float64[]; zbv = ComplexF64[]; σbv = Float64[]
+            xa = Float64[]; zav = ComplexF64[]; σav = Float64[]
             for (k, r) in enumerate(freqgroups)
                 x0 = compressed ? k - 1 + 0.05 : data.freqs[first(r)] / 1.0e9
                 xw = compressed ? 0.9 : (data.freqs[last(r)] - data.freqs[first(r)]) / 1.0e9
-                fx, fz = _bin_freqgroup(view(before, :, bi, p), r, binw)
-                append!(xb, x0 .+ xw .* fx); append!(zbv, fz)
-                fx, fz = _bin_freqgroup(view(after, :, bi, p), r, binw)
-                append!(xa, x0 .+ xw .* fx); append!(zav, fz)
+                fx, fz, fσ = _bin_freqgroup(view(before, :, bi, p), view(sig_before, :, bi, p), r, binw)
+                append!(xb, x0 .+ xw .* fx); append!(zbv, fz); append!(σbv, fσ)
+                fx, fz, fσ = _bin_freqgroup(view(after, :, bi, p), view(sig_after, :, bi, p), r, binw)
+                append!(xa, x0 .+ xw .* fx); append!(zav, fz); append!(σav, fσ)
             end
             # Phase only: rotate both traces so the "after" mean phase sits at 0, so a
             # flat corrected track near ±π reads as one group, not a split at the wrap.
+            # A rotation by a unit phasor moves the sample, never its width.
             rot = (show === :phase && recenter) ? conj(_unit_phasor(zav)) : one(ComplexF64)
-            sb = scatter!(ax, xb, reduce_y.(rot .* zbv); markersize = 5, color = (:steelblue, 0.6))
-            sa = scatter!(ax, xa, reduce_y.(rot .* zav); markersize = 5, color = (:firebrick, 0.8))
+            yb = reduce_y.(rot .* zbv); ya = reduce_y.(rot .* zav)
+            _errorbars_finite!(ax, xb, yb, _plotted_sigma.(reduce_y, zbv, σbv); color = (:steelblue, 0.5))
+            _errorbars_finite!(ax, xa, ya, _plotted_sigma.(reduce_y, zav, σav); color = (:firebrick, 0.6))
+            sb = scatter!(ax, xb, yb; markersize = 5, color = (:steelblue, 0.6))
+            sa = scatter!(ax, xa, ya; markersize = 5, color = (:firebrick, 0.8))
             compressed && length(freqgroups) > 1 &&
                 vlines!(ax, collect(1.0:(length(freqgroups) - 1)); color = (:gray, 0.3), linewidth = 0.5)
         else
             rot = (show === :phase && recenter) ? conj(_unit_phasor(@view after[:, bi, p])) : one(ComplexF64)
-            yb = reduce_y.(rot .* @view before[:, bi, p])
-            ya = reduce_y.(rot .* @view after[:, bi, p])
+            zb = collect(rot .* @view before[:, bi, p])
+            za = collect(rot .* @view after[:, bi, p])
+            yb = reduce_y.(zb)
+            ya = reduce_y.(za)
+            _errorbars_finite!(
+                ax, x, yb, _plotted_sigma.(reduce_y, zb, view(sig_before, :, bi, p)); color = (:steelblue, 0.5),
+            )
+            _errorbars_finite!(
+                ax, x, ya, _plotted_sigma.(reduce_y, za, view(sig_after, :, bi, p)); color = (:firebrick, 0.6),
+            )
             sb = scatter!(ax, x, yb; markersize = 4, color = (:steelblue, 0.6))
             sa = scatter!(ax, x, ya; markersize = 4, color = (:firebrick, 0.8))
         end

@@ -262,7 +262,30 @@ struct BaselineFringeData
     freq_groups::Vector{UnitRange{Int}}
     tser_freqgroup_before::Array{ComplexF64, 4}
     tser_freqgroup_after::Array{ComplexF64, 4}
+    # Thermal 1σ on each coherent mean above, in visibility units — the radial
+    # width of the complex sample, from which a phase error is σ/|V|. `NaN`
+    # where the mean has no contributing data, or where the caller did not
+    # supply weights.
+    spec_sigma_before::Array{Float64, 3}
+    spec_sigma_after::Array{Float64, 3}
+    tser_sigma_before::Array{Float64, 3}
+    tser_sigma_after::Array{Float64, 3}
+    tser_freqgroup_sigma_before::Array{Float64, 4}
+    tser_freqgroup_sigma_after::Array{Float64, 4}
 end
+
+# 1σ on a weighted coherent mean: with `w = 1/σ_vis²` per sample, the mean
+# `Σwv / Σw` has variance `1/Σw`. `_coherent_mean!` leaves its weight-sum
+# argument untouched, so this reads the same accumulator the mean divided by.
+_mean_sigma(wsum::AbstractArray) = map(x -> x > 0 ? 1 / sqrt(x) : NaN, wsum)
+
+# The 1σ error bar on a plotted view of a complex sample, given the sample `z`
+# and its radial width `σ`: `abs` sees σ itself, `angle` sees the angle σ
+# subtends at radius |z| (the same small-angle form `phase_series_with_noise`
+# uses). Once σ reaches |z| the phase is unconstrained, so the bar saturates at
+# π rather than reporting a misleadingly finite width.
+_plotted_sigma(::typeof(abs), z, σ) = σ
+_plotted_sigma(::typeof(angle), z, σ) = abs(z) > 0 ? min(σ / abs(z), Float64(π)) : Float64(π)
 
 # Backwards-compatible constructor (no frequency-group split): one group spanning
 # all channels, per-group time series = the full-span ones.
@@ -277,6 +300,11 @@ function BaselineFringeData(
         [1:length(freqs)],
         reshape(copy(tser_before), nti, nbl, npol, 1),
         reshape(copy(tser_after), nti, nbl, npol, 1),
+        # No weights were supplied, so the thermal widths are unknown; plots
+        # draw no error bars for a NaN σ.
+        fill(NaN, size(spec_before)), fill(NaN, size(spec_after)),
+        fill(NaN, size(tser_before)), fill(NaN, size(tser_after)),
+        fill(NaN, nti, nbl, npol, 1), fill(NaN, nti, nbl, npol, 1),
     )
 end
 
@@ -444,6 +472,11 @@ function baseline_fringe_data(
     fstep = _fringe_step(sol)
     fsnr = fstep === nothing ? Float64[] : get(fstep.info, :scan_snr, Float64[])
     msnr = gi <= length(fsnr) ? Float64(fsnr[gi]) : NaN
+    # Before the means overwrite their numerators: the weight sums are the
+    # accumulated inverse variances, so σ = 1/√Σw on every coherent mean.
+    σ_sb = _mean_sigma(swb); σ_sa = _mean_sigma(swa)
+    σ_tb = _mean_sigma(twb); σ_ta = _mean_sigma(twa)
+    σ_tbb = _mean_sigma(twbb); σ_tab = _mean_sigma(twab)
     return BaselineFringeData(
         info.source_name, info.scan_name, gi, msnr,
         copy(UVData.baselines(stack).pairs), String.(collect(info.antennas.name)), copy(pol_products(stack)),
@@ -452,6 +485,7 @@ function baseline_fringe_data(
         _coherent_mean!(tb, twb), _coherent_mean!(ta, twa),
         bgs,
         _coherent_mean!(tbb, twbb), _coherent_mean!(tab, twab),
+        σ_sb, σ_sa, σ_tb, σ_ta, σ_tbb, σ_tab,
     )
 end
 
