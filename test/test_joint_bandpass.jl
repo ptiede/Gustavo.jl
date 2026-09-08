@@ -313,18 +313,22 @@ end
 
         # …and the merged driver's θ is the per-segment loop's, exactly.
         θ_merged = zeros(l.nθ)
+        merged_blocks = FP.bandpass_blocks(setup(l), θ_merged, :phase)
         for idx in FP._joint_scan_groups(tseg)
             FP.solve_joint_bandpass!(
-                θ_merged, results[idx], bl_pairs, pol_products, nant, plan, plan;
+                θ_merged, results[idx], bl_pairs, pol_products, nant,
+                merged_blocks, merged_blocks;
                 gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
                 tseg = view(tseg, :, idx),
             )
         end
         θ_loop = zeros(l.nθ)
+        loop_blocks = FP.bandpass_blocks(setup(l), θ_loop, :phase)
         for (ts, idx) in pairs(FP.time_segment_scans(plan, results))
             isempty(idx) && continue
             FP.solve_joint_bandpass!(
-                θ_loop, results[idx], bl_pairs, pol_products, nant, plan, plan;
+                θ_loop, results[idx], bl_pairs, pol_products, nant,
+                loop_blocks, loop_blocks;
                 gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
                 tseg = fill(ts, nant, length(idx)),
             )
@@ -336,8 +340,10 @@ end
         l = layout(InstrumentScans([1.5]))
         s = setup(l)
         θ = zeros(l.nθ)
-        phase_plan = only(FP.bandpass_blocks(s, θ, :phase)).plan
-        amp_plan = only(FP.bandpass_blocks(s, θ, :logamp)).plan
+        phase_blocks = FP.bandpass_blocks(s, θ, :phase)
+        amp_blocks = FP.bandpass_blocks(s, θ, :logamp)
+        phase_plan = only(phase_blocks).plan
+        amp_plan = only(amp_blocks).plan
         # Station 1 alone is solved per half; the others carry one segment, so
         # their scans bridge the break and the whole track is one ALS.
         tseg = fill(1, nant, 4)
@@ -348,7 +354,7 @@ end
         phase_status = fill(FP._BP_TRACK_NODATA, nant, 2, 1, 2)
         amp_status = fill(FP._BP_TRACK_NODATA, nant, 2, 1, 2)
         FP.solve_joint_bandpass!(
-            θ, results, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
             gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13,
             tseg, phase_status, amp_status,
         )
@@ -384,6 +390,86 @@ end
             end
             @test phase_status[1, f, 1, 2] == FP._BP_TRACK_SOLVED
         end
+    end
+
+    @testset "a heterogeneous model writes through each station's own block" begin
+        # Station 1 alone carries the break; the rest hold one gain over the
+        # track, so the two signature groups become two blocks with different
+        # `:Ant` axes and different time segmentations, and the solve has to
+        # place each station in the block that holds it.
+        het_model = CAL.StationGainModel(;
+            phase = (; bandpass = bp(CAL.GlobalTime())),
+            logamp = (; bandpass = bp(CAL.GlobalTime())),
+            stations = (
+                A1 = (;
+                    phase = (; bandpass = bp(InstrumentScans([1.5]))),
+                    logamp = (; bandpass = bp(InstrumentScans([1.5]))),
+                ),
+            ),
+        )
+        lh = CAL.plan_parameters(het_model, anames, geom)
+        sh = setup(lh)
+        θ = zeros(lh.nθ)
+        phase_blocks = FP.bandpass_blocks(sh, θ, :phase)
+        amp_blocks = FP.bandpass_blocks(sh, θ, :logamp)
+        @test [b.stations for b in phase_blocks] == [[1], [2, 3, 4]]
+        # The parameter saving is real: the stations that hold one gain carry one
+        # time segment, not the union's two.
+        @test phase_blocks[1].plan.shape[4] == 2
+        @test phase_blocks[2].plan.shape[4] == 1
+
+        tsg = fill(1, nant, 4)
+        tsg[1, :] = [1, 1, 2, 2]
+        results = _joint_scan_accumulators(gtrue, Strue, tsg, bl_pairs, feeds, nchan)
+        @test FP._station_time_segments(phase_blocks, results, nant) == tsg
+        @test FP._joint_scan_groups(tsg) == [[1, 2, 3, 4]]
+
+        # The status grid spans the union of the two segmentations, and the cells
+        # the one-segment stations do not have are absent, not unmeasured.
+        phase_status = FP._joint_status_array(phase_blocks, nant, 1)
+        amp_status = FP._joint_status_array(amp_blocks, nant, 1)
+        @test size(phase_status) == (nant, 2, 1, 2)
+        @test all(==(FP._BP_TRACK_NODATA), view(phase_status, :, :, :, 1))
+        @test all(==(FP._BP_TRACK_NODATA), view(phase_status, 1, :, :, 2))
+        @test all(==(FP._BP_TRACK_NA), view(phase_status, 2:nant, :, :, 2))
+
+        FP.solve_joint_bandpass!(
+            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+            gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13,
+            tseg = tsg, phase_status, amp_status,
+        )
+
+        demean(v) = v .- sum(v) / length(v)
+        cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
+        want_phase(a, f, ts) = cdemean(
+            angle.(gtrue[a, f, ts, :]) .- angle.(gtrue[2, f, 1, :]),
+        )
+        want_amp(a, f, ts) = demean(log.(abs.(gtrue[a, f, ts, :])))
+
+        for f in 1:2
+            # The broken station is alone on its block's `:Ant` axis, and both of
+            # its segments land in that block.
+            for ts in 1:2
+                @test phase_blocks[1].θ[1, f, :, ts, 1] ≈ want_phase(1, f, ts) atol = 1.0e-8
+                @test amp_blocks[1].θ[1, f, :, ts, 1] ≈ want_amp(1, f, ts) atol = 1.0e-8
+            end
+            # …and each of the others lands at ITS block-local position, which is
+            # not its global station index.
+            for (ai, a) in pairs(phase_blocks[2].stations)
+                @test phase_blocks[2].θ[1, f, :, 1, ai] ≈ want_phase(a, f, 1) atol = 1.0e-8
+                @test amp_blocks[2].θ[1, f, :, 1, ai] ≈ want_amp(a, f, 1) atol = 1.0e-8
+            end
+            @test phase_status[1, f, 1, 2] == FP._BP_TRACK_SOLVED
+        end
+        # No solve writes an absent cell, so the code survives the whole run…
+        @test all(==(FP._BP_TRACK_NA), view(phase_status, 2:nant, :, :, 2))
+        @test all(==(FP._BP_TRACK_NA), view(amp_status, 2:nant, :, :, 2))
+        # …and it is reported apart from the four outcomes a real track can have,
+        # so it does not dilute the degenerate-track fraction.
+        rep = FP.bandpass_track_report(phase_status, amp_status, [1])
+        @test rep.track_labels[FP._BP_TRACK_NA + 1] == "na"
+        @test rep.n_na == 2 * 2 * (nant - 1)
+        @test rep.n_nodata + rep.n_solved + rep.n_flat + rep.n_declined == 2 * 2 * (nant + 1)
     end
 end
 
@@ -448,16 +534,16 @@ end
 
     @testset "the reference station's own break is measured, not gauged away" begin
         θ = zeros(l.nθ)
-        phase_plan = only(FP.bandpass_blocks(s, θ, :phase)).plan
-        amp_plan = only(FP.bandpass_blocks(s, θ, :logamp)).plan
+        phase_blocks = FP.bandpass_blocks(s, θ, :phase)
+        amp_blocks = FP.bandpass_blocks(s, θ, :logamp)
         results = _joint_scan_accumulators(gtrue, Strue, het, bl_pairs, feeds, nchan)
         FP.solve_joint_bandpass!(
-            θ, results, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
             gauge = PinAntenna(1), max_iterations = 200, tolerance = 1.0e-13,
             tseg = het,
         )
 
-        pleaf = CAL._component_leaf(phase_plan, θ)
+        pleaf = CAL._component_leaf(only(phase_blocks).plan, θ)
         cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
         # Everything is measured against the pinned node — station 1's FIRST
         # segment — including station 1's second segment.

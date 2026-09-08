@@ -513,8 +513,12 @@ const _BP_TRACK_NODATA = Int8(0)      # no usable segment; left at unit gain
 const _BP_TRACK_SOLVED = Int8(1)      # fit, with frequency structure
 const _BP_TRACK_FLAT = Int8(2)        # fit, but constant to within `_BP_FLAT_SPAN`
 const _BP_TRACK_DECLINED = Int8(3)    # phase branch undetermined; not fit
+# A (station, time segment) cell the report's rectangular shape has but this
+# station's own segmentation does not — the station carries no parameter there.
+# Distinct from `_BP_TRACK_NODATA`, which is a cell that exists and went unfit.
+const _BP_TRACK_NA = Int8(4)
 
-const _BP_TRACK_LABELS = ("nodata", "solved", "flat", "declined")
+const _BP_TRACK_LABELS = ("nodata", "solved", "flat", "declined", "na")
 
 # A fitted track this flat carries no shape: reported as `_BP_TRACK_FLAT` rather
 # than silently passed off as a measured response. In radians for a phase track and
@@ -647,16 +651,22 @@ the record the [`Bandpass`](@ref Gustavo.Bandpass) step publishes.
 `band_ids` names the spw each band slot came from. A time-stable bandpass has one
 time segment, so its arrays are `(Ant, Feed, band, 1)`.
 
+The time-segment axis spans the union of every station's segments, so where the
+model gives stations different time segmentations the arrays are rectangular over
+a grid some stations do not fill; a cell a station's own segmentation lacks
+carries the `na` code and is counted in `n_na`, apart from the four outcomes a
+track that exists can have.
+
 Returns the two arrays as `phase_status`/`amp_status` alongside `band_ids`,
 `track_labels` (the code → name mapping, so a reader needs no constant from this
-module) and the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata` summed over both
-observables. `flat` and `declined` are the two ways a track can occupy a slot
-without measuring anything, and they are what the counts exist to expose: θ itself
-records an unfitted track as unit gain and a starved one as a constant, neither
-distinguishable there from a genuinely flat response.
+module) and the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata`/`n_na` summed
+over both observables. `flat` and `declined` are the two ways a track can occupy a
+slot without measuring anything, and they are what the counts exist to expose: θ
+itself records an unfitted track as unit gain and a starved one as a constant,
+neither distinguishable there from a genuinely flat response.
 """
 function bandpass_track_report(phase_status, amp_status, band_ids)
-    counts = zeros(Int, 4)
+    counts = zeros(Int, length(_BP_TRACK_LABELS))
     for st in (phase_status, amp_status), c in something(st, Int8[])
         counts[Int(c) + 1] += 1
     end
@@ -669,14 +679,16 @@ function bandpass_track_report(phase_status, amp_status, band_ids)
         band_ids = collect(Int, band_ids),
         track_labels = collect(String, _BP_TRACK_LABELS),
         n_nodata = counts[1], n_solved = counts[2],
-        n_flat = counts[3], n_declined = counts[4],
+        n_flat = counts[3], n_declined = counts[4], n_na = counts[5],
     )
 end
 
 # Warn when a large share of the tracks measured nothing. Silence here would leave
 # a bandpass that is mostly placeholder looking exactly like one that is mostly
 # measured — the caller cannot tell from θ, which is why this is a warning and not
-# only a record.
+# only a record. The fraction is over the tracks that EXIST: a cell a station's
+# own segmentation does not have (`n_na`) is not a track that failed to measure
+# anything, and counting it would make the warning fire on raggedness alone.
 function _warn_degenerate_bandpass(report)
     total = report.n_nodata + report.n_solved + report.n_flat + report.n_declined
     total > 0 || return nothing
@@ -1131,28 +1143,47 @@ end
 
 # Gauge-fix each (station, feed, time segment) track — zero band-mean
 # log-amplitude, circular-mean reference phase, matching the closure tier's
-# convention — and write into phase_plan's/amp_plan's θ blocks. Both gauges are
-# over the FREQUENCY track of one time segment, so each of a station's segments
-# is normalized on its own. A (station, feed, segment) `touched` nowhere (no data
-# ever reached it) is left unwritten (still whatever θ already held, i.e. unit
-# gain).
-function _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp, present)
-    phase_leaf = _component_leaf(phase_plan, θ)
-    amp_leaf = _component_leaf(amp_plan, θ)
-    for a in axes(g, Ant), f in axes(g, Feed), ts in present[a]
-        valid = @view touched[a, f, ts, :]
-        any(valid) || continue
-        logs = log.(abs.(@view g[a, f, ts, :]))
-        m = sum(view(logs, valid)) / count(valid)
-        mphase = angle(sum(cis(angle(g[a, f, ts, fs])) for fs in axes(g, Frequency) if touched[a, f, ts, fs]))
-        pnode = _feed_node(phase_plan.tying, f)
-        anode = _feed_node(amp_plan.tying, f)
-        for fs in axes(g, Frequency)
-            touched[a, f, ts, fs] || continue
-            la = logs[fs] - m
-            ph = rem2pi(angle(g[a, f, ts, fs]) - mphase, RoundNearest)
-            anode == 0 || (amp_leaf[1, anode, fs, ts, a] = abs(la) > max_logamp ? 0.0 : la)
-            pnode == 0 || (phase_leaf[1, pnode, fs, ts, a] = ph)
+# convention — and write it into the station block that carries it. Both gauges
+# are over the FREQUENCY track of one time segment, so each of a station's
+# segments is normalized on its own. A (station, feed, segment) `touched` nowhere
+# (no data ever reached it) is left unwritten (still whatever θ already held,
+# i.e. unit gain), as is a station no block covers.
+#
+# A block's `:Ant` axis spans its own stations, so the leaf is indexed by the
+# station's position within `block.stations`, and `ts` is already in that block's
+# own segment numbering (`_station_time_segments` reads each station's segment
+# from its own block's `tseg_id`).
+function _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, max_logamp, present)
+    for block in phase_blocks
+        for (ai, a) in pairs(block.stations), f in axes(g, Feed)
+            node = _feed_node(block.plan.tying, f)
+            node == 0 && continue
+            for ts in present[a]
+                any(view(touched, a, f, ts, :)) || continue
+                mphase = angle(sum(cis(angle(g[a, f, ts, fs])) for fs in axes(g, Frequency) if touched[a, f, ts, fs]))
+                for fs in axes(g, Frequency)
+                    touched[a, f, ts, fs] || continue
+                    block.θ[1, node, fs, ts, ai] =
+                        rem2pi(angle(g[a, f, ts, fs]) - mphase, RoundNearest)
+                end
+            end
+        end
+    end
+    for block in amp_blocks
+        for (ai, a) in pairs(block.stations), f in axes(g, Feed)
+            node = _feed_node(block.plan.tying, f)
+            node == 0 && continue
+            for ts in present[a]
+                valid = @view touched[a, f, ts, :]
+                any(valid) || continue
+                logs = log.(abs.(@view g[a, f, ts, :]))
+                m = sum(view(logs, valid)) / count(valid)
+                for fs in axes(g, Frequency)
+                    valid[fs] || continue
+                    la = logs[fs] - m
+                    block.θ[1, node, fs, ts, ai] = abs(la) > max_logamp ? 0.0 : la
+                end
+            end
         end
     end
     return θ
@@ -1229,22 +1260,23 @@ end
 
 function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge)
     phase_blocks = bandpass_blocks(setup, θ, :phase)
-    phase_plan = only(phase_blocks).plan
-    amp_plan = only(bandpass_blocks(setup, θ, :logamp)).plan
-    _, seg_spw, seg_freq = _segment_bands(phase_plan, setup.channel_freqs, setup.spw_of_chan)
+    amp_blocks = bandpass_blocks(setup, θ, :logamp)
+    # Every block shares one frequency segmentation (`solve_joint_bandpass!`
+    # throws otherwise), so any block's plan resolves the band table.
+    _, seg_spw, seg_freq = _segment_bands(
+        first(phase_blocks).plan, setup.channel_freqs, setup.spw_of_chan,
+    )
     band_ids = sort(unique(seg_spw))
     # One complex gain per (station, feed, segment) means one time segmentation
     # for both observables — `validate_model` holds each station's two plans to
-    # it — so the phase side's table is the whole solve's. The status arrays are
-    # rectangular over the union of every station's segments.
+    # it — so the phase side's table is the whole solve's.
     tseg = _station_time_segments(phase_blocks, results, setup.nant)
-    ntseg = maximum(tseg; init = zero(eltype(tseg)))
-    phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), ntseg)
-    amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), ntseg)
+    phase_status = _joint_status_array(phase_blocks, setup.nant, length(band_ids))
+    amp_status = _joint_status_array(amp_blocks, setup.nant, length(band_ids))
     for idx in _joint_scan_groups(tseg)
         solve_joint_bandpass!(
             θ, results[idx], setup.bl_pairs, results[1].pols, setup.nant,
-            phase_plan, amp_plan;
+            phase_blocks, amp_blocks;
             gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
             phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq,
             tseg = view(tseg, :, idx), phase_status, amp_status,
@@ -1255,8 +1287,23 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
     return report
 end
 
+# One observable's `(Ant, Feed, band, time segment)` status array, rectangular
+# over the union of the blocks' time segmentations. A cell outside a station's
+# own segmentation — including every cell of a station no block covers — is
+# `_BP_TRACK_NA`: it holds no parameter, so no solve will ever write it and it is
+# not a track that measured nothing. The rest start at `_BP_TRACK_NODATA`, which
+# is what they stay if no scan reaches them.
+function _joint_status_array(blocks, nant, nband)
+    ntseg = maximum((b.plan.shape[4] for b in blocks); init = 0)
+    status = fill(_BP_TRACK_NA, nant, 2, nband, ntseg)
+    for b in blocks, a in b.stations
+        fill!(view(status, a, :, :, 1:b.plan.shape[4]), _BP_TRACK_NODATA)
+    end
+    return status
+end
+
 """
-    solve_joint_bandpass!(θ, scans, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+    solve_joint_bandpass!(θ, scans, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
                           gauge = PinAntenna(1), max_iterations = 8, tolerance = 1.0e-6,
                           max_logamp = log(10.0))
 
@@ -1264,15 +1311,22 @@ Jointly solve the per-(station, feed) complex bandpass gain and a per-scan,
 per-baseline, per-polarization constant source coherence (see the module
 comment above `_reduce_scan_segments!` for the model and the
 alternating scheme), then gauge-fix each (station, feed, time segment) track and
-write the result into `phase_plan`'s and `amp_plan`'s θ blocks
+write the result into the station blocks of the two observables
 (`_write_joint_bandpass!`).
+
+`phase_blocks` and `amp_blocks` are [`bandpass_blocks`](@ref)`(setup, θ, :phase)`
+and `(…, :logamp)` — station blocks over the SAME `θ` this call is handed, since
+each block's `θ` is a view into it. A station-uniform model gives one block per
+observable spanning every station; where the model differs across stations, each
+block carries its own stations, feed tying and segment numbering, and a station
+no block covers is left at unit gain. Every block of both observables must share
+one frequency segmentation (which `validate_model(::JointSmoother, model)`
+already enforces per station at model-compile time; the throw here guards direct
+callers and the across-station case).
 
 `scans` is the per-scan `(rl, wl)` accumulator pairs from
 `accumulate_bandpass!``(...; derotate = false)` — not summed across
 scans, since the source term needs each scan's own coherent visibility.
-`phase_plan` and `amp_plan` must share one frequency segmentation (which
-`validate_model(::JointSmoother, model)` already enforces at model-compile
-time; the throw here guards direct callers).
 
 `tseg`, when given, is the `(station, scan)` time-segment table
 ([`_station_time_segments`](@ref)): station `a`'s gain is solved separately for
@@ -1298,10 +1352,11 @@ separate calls rather than being averaged into a common tolerance.
 `phase_status`/`amp_status`, when given, are `(Ant, Feed, band, time segment)`
 arrays that receive each track's `_BP_TRACK_*` outcome code from the final sweep;
 they are indexed by the station's own segment number, so a call solving part of a
-track writes only its own slots.
+track writes only its own slots, and a slot outside a station's own segmentation
+is never written (the caller marks those `_BP_TRACK_NA`).
 """
 function solve_joint_bandpass!(
-        θ, scans, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+        θ, scans, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
         gauge::AbstractGauge = PinAntenna(1), max_iterations::Integer = 8, tolerance::Real = 1.0e-6,
         max_logamp::Real = _BP_MAX_LOGAMP,
         phase_spec::AbstractShapeSpec = FreeShape(),
@@ -1312,9 +1367,15 @@ function solve_joint_bandpass!(
         amp_status = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )
-    phase_plan.fseg_id == amp_plan.fseg_id || throw(
+    phase_plan = first(phase_blocks).plan
+    all(
+        b -> b.plan.fseg_id == phase_plan.fseg_id,
+        Iterators.flatten((phase_blocks, amp_blocks)),
+    ) || throw(
         ArgumentError(
-            "solve_joint_bandpass!: phase_plan and amp_plan must share one frequency segmentation",
+            "solve_joint_bandpass!: every station block of both observables must share one " *
+                "frequency segmentation — the solve carries one complex gain per " *
+                "(station, feed, time segment) on a single frequency grid.",
         ),
     )
     isempty(scans) && return θ
@@ -1368,7 +1429,7 @@ function solve_joint_bandpass!(
         maxrel < tolerance && break
     end
 
-    return _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp, present)
+    return _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, max_logamp, present)
 end
 
 # ── Coverage top-up selection (stations the calibrator never observed) ────────
