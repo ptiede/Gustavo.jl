@@ -44,6 +44,17 @@ const CAL = Gustavo.Calibration
 
     @test CAL.segment_groups([1, 1, 2, 3, 3, 4], 4) == [[1, 2], [3], [4, 5], [6]]
 
+    # The common refinement: two indices share a cell only where they share a
+    # segment under every member. Members that agree come back unchanged…
+    @test CAL.common_refinement([[1, 1, 2, 2], [1, 1, 2, 2]]) == ([1, 1, 2, 2], 2)
+    # …and segmentations that cut the axis at different places give a partition
+    # strictly finer than either, still numbered in axis order.
+    @test CAL.common_refinement([[1, 1, 1, 2, 2, 2], [1, 1, 2, 2, 3, 3]]) ==
+        ([1, 1, 2, 3, 4, 4], 4)
+    # A coarsening of another member changes nothing: refining is one-sided.
+    @test CAL.common_refinement([[1, 1, 2, 2], [1, 1, 1, 1]]) == ([1, 1, 2, 2], 2)
+    @test_throws DimensionMismatch CAL.common_refinement([[1, 1], [1, 1, 2]])
+
     # A name vector names every segment or none; a partial one would silently
     # label the wrong segment when a foreign grid is placed against it.
     @test_throws "must name every segment or be empty" CAL.DataGeometry(;

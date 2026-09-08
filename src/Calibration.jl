@@ -49,7 +49,7 @@ export gauge_station_order
 export AbstractTimeSegmentation, AbstractFrequencySegmentation
 export GlobalTime, PerScan, PerIntegration, TimeBlocks, InstrumentScans
 export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FreqGroups, BandGroups
-export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups
+export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups, common_refinement
 export materialize, segment_ranges, fringe_freq_groups
 
 # Terms

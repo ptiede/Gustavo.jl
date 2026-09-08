@@ -562,3 +562,148 @@ end
         end
     end
 end
+
+# ── Per-station frequency segmentation ───────────────────────────────────────
+#
+# Two stations with different `Frequency` segmentations share no segment grid, so
+# the accumulators are reduced onto the COMMON REFINEMENT of the blocks'
+# segmentations and each station's gain is solved on its own segments — one gain
+# pooled over however many refinement cells a segment spans.
+
+@testset "JointSmoother: each station's own frequency segments" begin
+    nant, nchan = 4, 6
+    anames = ["A$i" for i in 1:nant]
+    geom = _seg_geometry(nchan)
+    bpf(fs) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = fs, Feed = PerFeed())
+    hetmodel(a1, rest) = CAL.StationGainModel(;
+        phase = (; bandpass = bpf(rest)), logamp = (; bandpass = bpf(rest)),
+        stations = (
+            A1 = (; phase = (; bandpass = bpf(a1)), logamp = (; bandpass = bpf(a1))),
+        ),
+    )
+    setup(l) = (;
+        layout = l,
+        bp_path = FP._bandpass_path(l.plantree, :phase),
+        amp_path = FP._bandpass_path(l.plantree, :logamp),
+    )
+
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    pol_products = ["PP", "QQ"]
+    feeds = [FP.correlation_feed_pair(p) for p in pol_products]
+
+    @testset "segmentations that cut at different channels refine each other" begin
+        # Station 1 in blocks of two channels, the rest in blocks of three: no
+        # cut of one lands on every cut of the other, so the refinement is
+        # strictly finer than either.
+        l = CAL.plan_parameters(hetmodel(ChannelBlocks(2), ChannelBlocks(3)), anames, geom)
+        blocks = FP.bandpass_blocks(setup(l), zeros(l.nθ), :phase)
+        @test [b.stations for b in blocks] == [[1], [2, 3, 4]]
+        fseg, cells = FP._station_freq_segments(blocks, nant)
+        @test cells == [[1, 2], [3], [4], [5, 6]]
+        @test fseg[1, :] == [1, 2, 2, 3]
+        @test all(fseg[a, :] == [1, 1, 2, 2] for a in 2:nant)
+        @test length(cells) > maximum(fseg[1, :])
+        @test length(cells) > maximum(fseg[2, :])
+
+        # Segmentations that only refine each other leave ONE common-phase mode
+        # over the whole band, so no station carrying more than one bandpass
+        # segment can be pinned: zeroing its phase in every segment would fix
+        # three modes where one is free, biasing the stations it anchors.
+        @test FP._freq_gauge_groups(fseg, length(cells)) == 1
+        θ = zeros(l.nθ)
+        pb = FP.bandpass_blocks(setup(l), θ, :phase)
+        ab = FP.bandpass_blocks(setup(l), θ, :logamp)
+        gtrue = ones(ComplexF64, nant, 2, 1, nchan)
+        Strue = ones(ComplexF64, 4, length(bl_pairs), length(pol_products))
+        results = _joint_scan_accumulators(
+            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, nchan,
+        )
+        @test_throws "over-constrain the solve" FP.solve_joint_bandpass!(
+            θ, results, bl_pairs, pol_products, nant, pb, ab; gauge = PinAntenna(1),
+        )
+    end
+
+    @testset "one segmentation for every station is the identity refinement" begin
+        l = CAL.plan_parameters(
+            CAL.StationGainModel(;
+                phase = (; bandpass = bpf(ChannelBlocks(2))),
+                logamp = (; bandpass = bpf(ChannelBlocks(2))),
+            ), anames, geom,
+        )
+        blocks = FP.bandpass_blocks(setup(l), zeros(l.nθ), :phase)
+        plan = only(blocks).plan
+        fseg, cells = FP._station_freq_segments(blocks, nant)
+        # The cells ARE that segmentation's own channel groups and every station
+        # maps each cell to itself, so the solve is the pre-refinement one.
+        @test cells == CAL.segment_groups(plan.fseg_id, length(plan.nchan_seg))
+        @test all(fseg[a, :] == collect(eachindex(cells)) for a in 1:nant)
+        # Nothing ties one cell to another, so every cell carries its own free
+        # common-phase mode and any station may be pinned.
+        @test FP._freq_gauge_groups(fseg, length(cells)) == length(cells)
+    end
+
+    @testset "a station holding one gain over cells the others split" begin
+        # Station 1 carries ONE bandpass over the whole band while the rest
+        # carry two, so its single segment pools both refinement cells. Pinning
+        # it gauges the solve exactly: its gain is constant in frequency, so the
+        # phase the pin removes from every station is a single constant.
+        l = CAL.plan_parameters(hetmodel(CAL.GlobalFrequency(), ChannelBlocks(3)), anames, geom)
+        s = setup(l)
+        θ = zeros(l.nθ)
+        phase_blocks = FP.bandpass_blocks(s, θ, :phase)
+        amp_blocks = FP.bandpass_blocks(s, θ, :logamp)
+        fseg, cells = FP._station_freq_segments(phase_blocks, nant)
+        @test cells == [[1, 2, 3], [4, 5, 6]]
+        @test fseg[1, :] == [1, 1]
+        @test all(fseg[a, :] == [1, 2] for a in 2:nant)
+        # Station 1 ties the two cells into one mode, which is the one segment it
+        # carries — so it is the station the gauge may pin, and the others are not.
+        @test FP._freq_gauge_groups(fseg, length(cells)) == 1
+
+        rng = MersenneTwister(20260908)
+        # Each station's truth is constant over its OWN segments: station 1 over
+        # the whole band, the rest over each half.
+        gtrue = ones(ComplexF64, nant, 2, 1, nchan)
+        for a in 1:nant, f in 1:2
+            for chans in (a == 1 ? [1:6] : [1:3, 4:6])
+                gt = exp(complex(0.2 * randn(rng), 0.6 * randn(rng)))
+                gtrue[a, f, 1, chans] .= gt
+            end
+        end
+        Strue = [
+            (0.5 + rand(rng)) * cis(2pi * rand(rng))
+                for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(pol_products)
+        ]
+        results = _joint_scan_accumulators(
+            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, nchan,
+        )
+        FP.solve_joint_bandpass!(
+            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+            gauge = PinAntenna(1), max_iterations = 200, tolerance = 1.0e-13,
+        )
+
+        demean(v) = v .- sum(v) / length(v)
+        cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
+        # The first channel of each cell stands for the segment holding it.
+        rep = [1, 4]
+        for f in 1:2
+            # The station with one segment has nothing to vary against: its own
+            # band mean IS its single value, so both observables gauge to zero.
+            @test all(iszero, phase_blocks[1].θ[1, f, :, 1, 1])
+            @test all(iszero, amp_blocks[1].θ[1, f, :, 1, 1])
+            # The rest recover their two segments from data pooled over three
+            # channels each, measured against the pinned station.
+            for (ai, a) in pairs(phase_blocks[2].stations)
+                @test phase_blocks[2].θ[1, f, :, 1, ai] ≈
+                    cdemean([angle(gtrue[a, f, 1, c]) for c in rep]) atol = 1.0e-8
+                @test amp_blocks[2].θ[1, f, :, 1, ai] ≈
+                    demean([log(abs(gtrue[a, f, 1, c])) for c in rep]) atol = 1.0e-8
+            end
+        end
+        @test_throws "over-constrain the solve" FP.solve_joint_bandpass!(
+            zeros(l.nθ), results, bl_pairs, pol_products, nant,
+            FP.bandpass_blocks(s, zeros(l.nθ), :phase),
+            FP.bandpass_blocks(s, zeros(l.nθ), :logamp); gauge = PinAntenna(2),
+        )
+    end
+end

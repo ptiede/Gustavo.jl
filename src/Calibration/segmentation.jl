@@ -307,6 +307,28 @@ function segment_groups(ids::AbstractVector{<:Integer}, nseg::Integer)
     return groups
 end
 
+"""
+    common_refinement(idvecs) -> (ids::Vector{Int}, nseg::Int)
+
+The coarsest segmentation that every member of `idvecs` refines: two indices
+share a segment of the result exactly when they share one under every member.
+Ids are dense from 1 in first-appearance order, so a partition into contiguous
+runs stays contiguous and in axis order, and members that all agree come back
+unchanged.
+
+Pooling several stations' data onto ONE grid needs this wherever the stations do
+not share a segmentation: the refinement is the finest grid all of them can be
+read on at once, and each station's own segment is then a union of its cells.
+"""
+function common_refinement(idvecs)
+    ids, nseg = _dense_rank(first(idvecs))
+    for other in Iterators.drop(idvecs, 1)
+        k = maximum(other)
+        ids, nseg = _dense_rank([(ids[i] - 1) * k + other[i] for i in eachindex(ids, other)])
+    end
+    return ids, nseg
+end
+
 # ── Materialization and the range form ───────────────────────────────────────
 
 """
