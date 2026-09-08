@@ -225,3 +225,164 @@ end
     )
     @test amprms(s_joint) < amprms(s_closure)
 end
+
+# ── The per-station time-segment axis inside one ALS ─────────────────────────
+#
+# The gain arrays carry a time-segment axis and the scans that couple through a
+# shared (station, segment) node are solved in one alternating run, so a station
+# whose bandpass breaks mid-track can sit beside stations held over the whole of
+# it. These fixtures drive `solve_joint_bandpass!` directly on synthetic
+# accumulators — `rl = w·g_a·S·conj(g_b)`, exactly the model the ALS inverts —
+# because the segment table is what is under test, not the accumulation.
+
+# A four-scan, one-time-sample-per-scan geometry whose second half is a separate
+# instrument segment.
+function _seg_geometry(nchan)
+    return CAL.DataGeometry(;
+        times = collect(0.0:3.0), scan_of_time = collect(1:4),
+        channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
+        spw_of_chan = ones(Int, nchan),
+        scan_names = ["No00$i" for i in 1:4], spw_names = ["A"],
+    )
+end
+
+# Per-scan accumulators for `g[ant, feed, segment, channel]` observed through
+# `S[scan, baseline, pol]`, with `tseg[ant, scan]` naming each station's segment.
+function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, nchan)
+    nbl, npol = length(bl_pairs), length(feeds)
+    return map(axes(S, 1)) do si
+        rl, wl = FP.bandpass_accumulators(nbl, npol, nchan)
+        for (bi, (a, b)) in pairs(bl_pairs), p in eachindex(feeds)
+            fa, fb = feeds[p]
+            for c in axes(rl, Frequency)
+                v = g[a, fa, tseg[a, si], c] * S[si, bi, p] *
+                    conj(g[b, fb, tseg[b, si], c])
+                wl[bi, p, c] = 1.0
+                rl[bi, p, c] = v
+            end
+        end
+        return (; rl, wl, ti = si)
+    end
+end
+
+@testset "JointSmoother: each station's own time segments in one ALS" begin
+    nant, nchan = 4, 6
+    anames = ["A$i" for i in 1:nant]
+    geom = _seg_geometry(nchan)
+    bp(ti) = GainComponent(ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed())
+    breakmodel(ti) = CAL.StationGainModel(;
+        phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)),
+    )
+    layout(ti) = CAL.plan_parameters(breakmodel(ti), anames, geom)
+    setup(l) = (;
+        layout = l,
+        bp_path = FP._bandpass_path(l.plantree, :phase),
+        amp_path = FP._bandpass_path(l.plantree, :logamp),
+    )
+
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    pol_products = ["PP", "QQ"]
+    feeds = [FP.correlation_feed_pair(p) for p in pol_products]
+
+    rng = MersenneTwister(20260908)
+    # Station 1 breaks across the boundary; every other station holds one gain
+    # over the whole track.
+    gtrue = ones(ComplexF64, nant, 2, 2, nchan)
+    for a in 1:nant, f in 1:2, c in 1:nchan
+        gt = exp(complex(0.2 * randn(rng), 0.6 * randn(rng)))
+        gtrue[a, f, 1, c] = gt
+        gtrue[a, f, 2, c] = a == 1 ? exp(complex(0.2 * randn(rng), 0.6 * randn(rng))) : gt
+    end
+    Strue = [
+        (0.5 + rand(rng)) * cis(2pi * rand(rng))
+            for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(pol_products)
+    ]
+
+    @testset "a uniform table reproduces the per-segment partition" begin
+        l = layout(InstrumentScans([1.5]))
+        plan = only(FP.bandpass_blocks(setup(l), zeros(l.nθ), :phase)).plan
+        results = _joint_scan_accumulators(
+            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, nchan,
+        )
+        blocks = FP.bandpass_blocks(setup(l), zeros(l.nθ), :phase)
+        tseg = FP._station_time_segments(blocks, results, nant)
+        # One block spans every station, so every row is that block's own table.
+        @test all(tseg[a, :] == [1, 1, 2, 2] for a in 1:nant)
+        @test FP._joint_scan_groups(tseg) ==
+            filter(!isempty, FP.time_segment_scans(plan, results))
+
+        # …and the merged driver's θ is the per-segment loop's, exactly.
+        θ_merged = zeros(l.nθ)
+        for idx in FP._joint_scan_groups(tseg)
+            FP.solve_joint_bandpass!(
+                θ_merged, results[idx], bl_pairs, pol_products, nant, plan, plan;
+                gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
+                tseg = view(tseg, :, idx),
+            )
+        end
+        θ_loop = zeros(l.nθ)
+        for (ts, idx) in pairs(FP.time_segment_scans(plan, results))
+            isempty(idx) && continue
+            FP.solve_joint_bandpass!(
+                θ_loop, results[idx], bl_pairs, pol_products, nant, plan, plan;
+                gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
+                tseg = fill(ts, nant, length(idx)),
+            )
+        end
+        @test θ_merged == θ_loop
+    end
+
+    @testset "one station breaks and the rest span the track" begin
+        l = layout(InstrumentScans([1.5]))
+        s = setup(l)
+        θ = zeros(l.nθ)
+        phase_plan = only(FP.bandpass_blocks(s, θ, :phase)).plan
+        amp_plan = only(FP.bandpass_blocks(s, θ, :logamp)).plan
+        # Station 1 alone is solved per half; the others carry one segment, so
+        # their scans bridge the break and the whole track is one ALS.
+        tseg = fill(1, nant, 4)
+        tseg[1, :] = [1, 1, 2, 2]
+        results = _joint_scan_accumulators(gtrue, Strue, tseg, bl_pairs, feeds, nchan)
+        @test FP._joint_scan_groups(tseg) == [[1, 2, 3, 4]]
+
+        phase_status = fill(FP._BP_TRACK_NODATA, nant, 2, 1, 2)
+        amp_status = fill(FP._BP_TRACK_NODATA, nant, 2, 1, 2)
+        FP.solve_joint_bandpass!(
+            θ, results, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+            gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13,
+            tseg, phase_status, amp_status,
+        )
+
+        pleaf = CAL._component_leaf(phase_plan, θ)
+        aleaf = CAL._component_leaf(amp_plan, θ)
+        demean(v) = v .- sum(v) / length(v)
+        cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
+        # Phase is recovered relative to the pinned station's track, then to its
+        # own circular band mean; amplitude carries no reference, only the
+        # arithmetic band mean.
+        want_phase(a, f, ts) = cdemean(
+            angle.(gtrue[a, f, ts, :]) .- angle.(gtrue[2, f, 1, :]),
+        )
+        want_amp(a, f, ts) = demean(log.(abs.(gtrue[a, f, ts, :])))
+
+        for f in 1:2
+            # The broken station's two halves are each recovered, and they differ.
+            for ts in 1:2
+                @test pleaf[1, f, :, ts, 1] ≈ want_phase(1, f, ts) atol = 1.0e-8
+                @test aleaf[1, f, :, ts, 1] ≈ want_amp(1, f, ts) atol = 1.0e-8
+            end
+            @test !isapprox(pleaf[1, f, :, 1, 1], pleaf[1, f, :, 2, 1]; atol = 1.0e-3)
+            # Every other station holds ONE segment: its second slot is never
+            # solved, so θ still carries the zero it started at.
+            for a in 2:nant
+                @test pleaf[1, f, :, 1, a] ≈ want_phase(a, f, 1) atol = 1.0e-8
+                @test aleaf[1, f, :, 1, a] ≈ want_amp(a, f, 1) atol = 1.0e-8
+                @test all(iszero, pleaf[1, f, :, 2, a])
+                @test all(iszero, aleaf[1, f, :, 2, a])
+                # …and the status array leaves that slot at its initial code.
+                @test phase_status[a, f, 1, 2] == FP._BP_TRACK_NODATA
+            end
+            @test phase_status[1, f, 1, 2] == FP._BP_TRACK_SOLVED
+        end
+    end
+end
