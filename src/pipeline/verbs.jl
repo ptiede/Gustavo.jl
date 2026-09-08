@@ -364,7 +364,7 @@ function _run_pipeline(
             Calibration.as_gain_model(model_components(st, spec)), antennas, geom,
         )
         supports_station_heterogeneity(st) ||
-            Calibration.require_station_uniform(step_model, antennas, string(nameof(typeof(st))))
+            Calibration.require_station_uniform(step_model, antennas, heterogeneity_rejector(st))
         step_layout = plan_parameters(step_model, antennas, geom; require_nonempty = false)
         return SolveContext(
             step_model, step_layout, geom, GainEvaluator(step_model, step_layout),

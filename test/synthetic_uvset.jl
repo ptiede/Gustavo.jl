@@ -78,6 +78,12 @@ end
 #   V[c, ti] = A · exp(i·[ Δφ + 2π·Δτ·(f_c − f0) + 2π·Δṙ·(t_sec − t0_sec)
 #                          + Δscreen[ti] ])
 # with Δx = x[a, fa] − x[b, fb]. Times in seconds use t0_sec; freqs in Hz.
+# One station-feed-channel entry of a bandpass table, for scan `s`. A 3-D table
+# is constant across scans; a 4-D one carries its own value per scan, which is
+# what a model with a time segmentation finer than the track is fit against.
+_bp_at(bp::AbstractArray{<:Any, 3}, a, f, gc, s) = bp[a, f, gc]
+_bp_at(bp::AbstractArray{<:Any, 4}, a, f, gc, s) = bp[a, f, gc, s]
+
 function _build_fringe_uvset(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
         scan_gap = nothing,     # hours between scan starts (default: back-to-back)
@@ -87,8 +93,10 @@ function _build_fringe_uvset(;
         pol_labels = ["PP", "PQ", "QP", "QQ"],
         ref_freq = 230.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         seed = 1234,
-        bandpass = nothing,    # optional (nant, 2, nspw*nchan) per-channel phase (rad)
-        amp_bandpass = nothing, # optional (nant, 2, nspw*nchan) per-channel log-amp
+        bandpass = nothing,    # optional (nant, 2, nspw*nchan) per-channel phase (rad),
+        #   or (nant, 2, nspw*nchan, nscans) for a bandpass
+        #   that changes between scans
+        amp_bandpass = nothing, # optional per-channel log-amp, same two shapes
         dtec = nothing,         # optional (nant,) station TEC (TECU, feed-common)
         feed_common = false,    # tie delay/phi across feeds (zero true inter-feed offset)
         rel_rate = nothing,      # optional (nant,) feed-2 − feed-1 rate offset (Hz) —
@@ -98,6 +106,11 @@ function _build_fringe_uvset(;
         station_positions = nothing, # optional (nant,) xyz vectors (m) — for co-location tests
         omit_station = nothing, # optional station index present in the antenna table but
         #   observing no baseline — a station that dropped out
+        station_gains = true,   # when false, delay, rate, phase and the atmospheric
+        #   screen are all zero, leaving the bandpass as the only
+        #   station gain — what a bandpass solve can be compared
+        #   against channel by channel without a fringe stage
+        #   having first taken the delay-like part of it
     )
     UV = Gustavo.UVData
     rng = MersenneTwister(seed)
@@ -175,12 +188,14 @@ function _build_fringe_uvset(;
     delay = zeros(nant, 2)         # seconds (per feed)
     rate = zeros(nant, 2)          # Hz (feed-common)
     phi = zeros(nant, 2)           # rad (per feed)
-    for a in 2:nant
-        rc = (rand(rng) - 0.5) * 2.0e-3               # ±1 mHz, feed-common
-        for f in 1:2
-            delay[a, f] = (rand(rng) - 0.5) * 2.0e-9      # ±1 ns  (« 1/chan_bw)
-            rate[a, f] = rc
-            phi[a, f] = (rand(rng) - 0.5) * 2.0           # ±1 rad
+    if station_gains
+        for a in 2:nant
+            rc = (rand(rng) - 0.5) * 2.0e-3               # ±1 mHz, feed-common
+            for f in 1:2
+                delay[a, f] = (rand(rng) - 0.5) * 2.0e-9      # ±1 ns  (« 1/chan_bw)
+                rate[a, f] = rc
+                phi[a, f] = (rand(rng) - 0.5) * 2.0           # ±1 rad
+            end
         end
     end
 
@@ -199,7 +214,7 @@ function _build_fringe_uvset(;
     # draws its own screen (scan 1's rng sequence matches the historical
     # single-scan builder exactly).
     screen = zeros(nant, 2, ntime, nscans)
-    for s in 1:nscans, a in 2:nant
+    for s in 1:nscans, a in (station_gains ? (2:nant) : 1:0)
         base = (rand(rng) - 0.5) * 1.0
         for ti in 1:ntime
             v = base + 0.2 * sin(0.5 * ti + a)
@@ -229,8 +244,10 @@ function _build_fringe_uvset(;
             dφ = phi[a, fa] - phi[bb, fb]
             dscr = screen[a, fa, ti, s] - screen[bb, fb, ti, s]
             gc = (b - 1) * nchan + c          # global channel index (bands stacked by freq)
-            dbp = bandpass === nothing ? 0.0 : (bandpass[a, fa, gc] - bandpass[bb, fb, gc])
-            dla = amp_bandpass === nothing ? 0.0 : (amp_bandpass[a, fa, gc] + amp_bandpass[bb, fb, gc])  # log-amp SUMS
+            dbp = bandpass === nothing ? 0.0 :
+                (_bp_at(bandpass, a, fa, gc, s) - _bp_at(bandpass, bb, fb, gc, s))
+            dla = amp_bandpass === nothing ? 0.0 :
+                (_bp_at(amp_bandpass, a, fa, gc, s) + _bp_at(amp_bandpass, bb, fb, gc, s))  # log-amp SUMS
             ddt = dtec === nothing ? 0.0 :
                 CAL.DISPERSION_K * (dtec[a] - dtec[bb]) * (1.0 / f0 - 1.0 / f)
             ph = dφ + 2π * dτ * (f - f0) + 2π * dṙ * (tsec - t0_sec) + dscr + dbp + ddt

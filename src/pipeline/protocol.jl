@@ -82,10 +82,17 @@ receives θ blocks it would silently leave unsolved.
 A step that declares `true` must write its solve as a loop over the station
 blocks the layout supplies — [`Calibration.station_blocks`](@ref) — rather
 than assuming one rectangular `(…, nant)` leaf per component. A step whose
-solving is delegated to a pluggable solver object should forward this question
-to it.
+solving is delegated to a pluggable solver object forwards this question to it,
+so the generic also answers for solver objects — [`Bandpass`](@ref) asks its
+smoother.
 """
 supports_station_heterogeneity(step::CalibrationStep) = false
+
+# How the heterogeneity rejection names its subject. A step that delegates its
+# solve is not itself the thing that cannot take the model, so it names the
+# solver and the configuration that would accept it; the step type alone leaves
+# the user nothing to change.
+heterogeneity_rejector(step::CalibrationStep) = string(nameof(typeof(step)))
 
 """
     transforms(step::CalibrationStep) -> Tuple

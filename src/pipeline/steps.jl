@@ -239,6 +239,19 @@ model_components(s::Bandpass, spec) = _vet_step_model(
     spec,
 )
 
+# `Bandpass` delegates its solve to `smoother`, so the capability question and
+# the name in the rejection both belong to the smoother rather than the step.
+# `JointSmoother` writes its solve as a loop over station blocks; the closure
+# path does not, and its θ blocks for the differing stations would stay at zero.
+supports_station_heterogeneity(s::Bandpass) = supports_station_heterogeneity(s.smoother)
+supports_station_heterogeneity(::Fringe.AbstractBandpassSmoother) = false
+supports_station_heterogeneity(::Fringe.JointSmoother) = true
+
+heterogeneity_rejector(s::Bandpass) =
+    "Bandpass(smoother = $(nameof(typeof(s.smoother)))(...)), whose smoother solves " *
+    "one rectangular gain table for every station — `Bandpass(smoother = JointSmoother())` " *
+    "solves a per-station model"
+
 model_components(s::TemporalSmoother, spec) = _vet_step_model(
     s.smoother, s.model,
     "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *

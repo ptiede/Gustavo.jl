@@ -247,11 +247,14 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             Bandpass(model = bad_entry), nothing,
         )
 
-        # A heterogeneous model that vets cleanly still cannot reach a step
-        # that has not opted in (`supports_station_heterogeneity` defaults to
-        # false): the runner rejects it at compile time, naming the differing
-        # component and its per-station signatures.
-        @test !Gustavo.supports_station_heterogeneity(Bandpass())
+        # A heterogeneous model reaches the solver only where the smoother
+        # solves per station. `Bandpass` forwards the question to it: the joint
+        # path loops over the layout's station blocks and takes the model, the
+        # closure path solves one rectangular gain table and does not, and the
+        # runner rejects it there, naming the differing component and its
+        # per-station signatures.
+        @test supports_station_heterogeneity(Bandpass(smoother = FP.JointSmoother()))
+        @test !supports_station_heterogeneity(Bandpass(smoother = pertrack))
         het = CAL.StationGainModel(;
             default_bandpass_terms()...,
             stations = (
@@ -262,8 +265,9 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             ),
         )
         @test model_components(Bandpass(model = het), nothing) isa CAL.StationGainModel
-        @test_throws "station-uniform" fit(Bandpass(model = het), uvset)
-        @test_throws "phase.bandpass" fit(Bandpass(model = het), uvset)
+        @test fit(Bandpass(model = het), uvset) isa CAL.CalibrationSolution
+        @test_throws "station-uniform" fit(Bandpass(model = het, smoother = pertrack), uvset)
+        @test_throws "phase.bandpass" fit(Bandpass(model = het, smoother = pertrack), uvset)
     end
 
     @testset "observables are located by name, not plan-list position" begin
@@ -785,5 +789,125 @@ end
         @test fit(
             Bandpass(; model = mixed, smoother = FP.PerTrackSmoother()), broken,
         ) isa CAL.CalibrationSolution
+    end
+end
+
+# ── A per-station bandpass time segmentation, end to end ─────────────────────
+#
+# `JointSmoother` solves its gains as a loop over the layout's station blocks,
+# so `Bandpass` forwards `supports_station_heterogeneity` to it and a model that
+# gives one station its own time segmentation reaches the solver. The saving is
+# the point: the nine stations that hold one bandpass over the track carry one
+# time segment of θ, not two, and the gauge measures the tenth station's break
+# against them rather than gauging it away.
+
+@testset "Bandpass(smoother = JointSmoother()): a per-station time segmentation" begin
+    nant, nspw, nchan, ntime, nscans = 10, 1, 8, 6, 2
+    nglob = nspw * nchan
+    ap = 30.0 / 3600.0
+    scan_span = (ntime + 2) * ap
+    # Inside the gap: after the last AP of scan 1, before the first of scan 2.
+    t_break = ((ntime - 1) * ap + scan_span) / 2
+
+    rng = MersenneTwister(20260908)
+    bp_true = zeros(nant, 2, nglob, nscans)
+    for a in 1:nant, f in 1:2
+        base = 0.5 .* randn(rng, nglob)
+        bp_true[a, f, :, 1] .= base
+        bp_true[a, f, :, 2] .= base
+    end
+    # Only station 1 changes across the gap.
+    brk = [0.6 .* randn(rng, nglob) for _ in 1:2]
+    for f in 1:2
+        bp_true[1, f, :, 2] .+= brk[f]
+    end
+
+    # `station_gains = false` leaves the bandpass as the only station gain, so
+    # the solved θ is comparable to the injected track channel by channel. With
+    # a fringe stage in front, the delay-like part of each station's bandpass
+    # would already have been absorbed into its delay and the comparison would
+    # be against something the fixture does not state.
+    # Parallel hands only: a cross-hand correlation joins the two feeds' nodes in
+    # the gauge graph, which makes the feeds one component carrying one constant
+    # between them, and every feed-2 track is then referenced to feed 1. That is
+    # correct — with cross-hands the inter-feed phase is measured — but it is not
+    # what this test is about.
+    uvset, _ = _build_fringe_uvset(;
+        nant, nspw, nchan, ntime, nscans, bandpass = bp_true, station_gains = false,
+        pol_labels = ["PP", "QQ"],
+    )
+    bpc(ti) = GainComponent(
+        ConstantTerm(); Ti = ti, Frequency = CAL.ChannelBlocks(1), Feed = PerFeed(),
+    )
+    het = StationGainModel(;
+        phase = (; bandpass = bpc(GlobalTime())),
+        logamp = (; bandpass = bpc(GlobalTime())),
+        stations = (
+            A1 = (;
+                phase = (; bandpass = bpc(InstrumentScans([t_break]))),
+                logamp = (; bandpass = bpc(InstrumentScans([t_break]))),
+            ),
+        ),
+    )
+
+    @testset "the capability is declared by the smoother, not the step" begin
+        @test supports_station_heterogeneity(Bandpass(smoother = FP.JointSmoother()))
+        @test !supports_station_heterogeneity(Bandpass(smoother = FP.PerTrackSmoother()))
+        # The closure path solves one rectangular gain table for every station,
+        # so the rejection names it and the smoother that would take the model.
+        @test_throws "Bandpass(smoother = JointSmoother())" fit(
+            Bandpass(model = het, smoother = FP.PerTrackSmoother()), uvset,
+        )
+    end
+
+    # `JointSmoother`'s default of 8 sweeps leaves 0.4 rad on this model; the
+    # alternating solve reaches 1e-7 by 150 and holds there.
+    sol = fit(
+        Bandpass(
+            model = het,
+            smoother = FP.JointSmoother(max_iterations = 400, tolerance = 1.0e-12),
+        ),
+        uvset,
+    )
+    step = only(sol[:bandpass].steps)
+    pb = CAL.station_blocks(step.layout, step.θ, :phase, :bandpass)
+
+    @testset "the uniform stations carry one time segment, not two" begin
+        @test [b.stations for b in pb] == [[1], collect(2:nant)]
+        # `plan.shape` is (1, feed node, frequency segment, time segment, station).
+        @test pb[1].plan.shape[4] == 2
+        @test pb[2].plan.shape[4] == 1
+    end
+
+    @testset "the break is measured against the stations that span it" begin
+        cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
+        for f in 1:2
+            # Station 1 is the gauge reference and the broken station both, so
+            # the pin holds its FIRST segment and its second carries the break.
+            @test all(iszero, pb[1].θ[1, f, :, 1, 1])
+            @test pb[1].θ[1, f, :, 2, 1] ≈ cdemean(brk[f]) atol = 1.0e-6
+            # The other nine hold one bandpass across the gap, and it is the one
+            # they really have — station 1's break leaks into none of them.
+            for (ai, a) in pairs(pb[2].stations)
+                want = cdemean(bp_true[a, f, :, 1] .- bp_true[1, f, :, 1])
+                @test pb[2].θ[1, f, :, 1, ai] ≈ want atol = 1.0e-6
+            end
+        end
+    end
+
+    @testset "a heterogeneous solution round-trips through save/load" begin
+        mktempdir() do dir
+            path = joinpath(dir, "het.h5")
+            save_solution(path, sol)
+            back = load_solution(path)
+            rb = only(back[:bandpass].steps)
+            @test rb.θ == step.θ
+            qb = CAL.station_blocks(rb.layout, rb.θ, :phase, :bandpass)
+            @test [b.stations for b in qb] == [b.stations for b in pb]
+            @test [b.plan.shape for b in qb] == [b.plan.shape for b in pb]
+            for (x, y) in zip(qb, pb)
+                @test x.θ == y.θ
+            end
+        end
     end
 end
