@@ -520,16 +520,24 @@ end
     uniform = repeat([1 1 2 2], nant)
 
     @testset "one pin per connected component of the promoted graph" begin
-        nodes, pins = FP._joint_bandpass_pins(bl_pairs, feeds, nant, het, PinAntenna(1))
-        # The constant stations bridge the break, so each feed is one component
-        # and the reference is pinned in its first segment only — its second is
-        # free to carry the break it actually has.
-        @test pins == Set([nodes[1, 1, 1], nodes[1, 2, 1]])
+        # Every station shares `ChannelBlocks(1)` here, so each channel is its own
+        # frequency segment and the graph splits along them.
+        fseg = repeat(collect(1:nchan)', nant)
+        nodes, pins = FP._joint_bandpass_pins(
+            bl_pairs, feeds, nant, het, fseg, nchan, PinAntenna(1),
+        )
+        # The constant stations bridge the break, so each (feed, channel) is one
+        # component and the reference is pinned in its first time segment only —
+        # its second is free to carry the break it actually has.
+        @test pins == Set(nodes[1, f, 1, c] for f in 1:2 for c in 1:nchan)
 
         # A segmentation every station shares has nothing to bridge the epochs:
-        # each (feed, segment) is its own component and carries its own pin.
-        _, upins = FP._joint_bandpass_pins(bl_pairs, feeds, nant, uniform, PinAntenna(1))
-        @test length(upins) == 4
+        # each (feed, time segment, channel) is its own component and carries its
+        # own pin.
+        _, upins = FP._joint_bandpass_pins(
+            bl_pairs, feeds, nant, uniform, fseg, nchan, PinAntenna(1),
+        )
+        @test length(upins) == 2 * 2 * nchan
     end
 
     @testset "the reference station's own break is measured, not gauged away" begin
@@ -605,21 +613,65 @@ end
         @test length(cells) > maximum(fseg[1, :])
         @test length(cells) > maximum(fseg[2, :])
 
-        # Segmentations that only refine each other leave ONE common-phase mode
-        # over the whole band, so no station carrying more than one bandpass
-        # segment can be pinned: zeroing its phase in every segment would fix
-        # three modes where one is free, biasing the stations it anchors.
-        @test FP._freq_gauge_groups(fseg, length(cells)) == 1
-        θ = zeros(l.nθ)
-        pb = FP.bandpass_blocks(setup(l), θ, :phase)
-        ab = FP.bandpass_blocks(setup(l), θ, :logamp)
+        # Neither station's segments nest inside the other's, so the whole band
+        # is one connected component per feed: the gauge has ONE constant to fix
+        # and the pin holds one segment of station 1's three-segment track. The
+        # other two are free to carry the structure they really have.
+        nfsmax = maximum(fseg)
+        nodes, pins = FP._joint_bandpass_pins(
+            bl_pairs, feeds, nant, fill(1, nant, 4), fseg, nfsmax, PinAntenna(1),
+        )
+        @test pins == Set([nodes[1, 1, 1, 1], nodes[1, 2, 1, 1]])
+
+        rng = MersenneTwister(20260908)
+        # Each station's truth is constant over its OWN segments — two channels
+        # for station 1, three for the rest.
         gtrue = ones(ComplexF64, nant, 2, 1, nchan)
-        Strue = ones(ComplexF64, 4, length(bl_pairs), length(pol_products))
+        for a in 1:nant, f in 1:2
+            for chans in (a == 1 ? [1:2, 3:4, 5:6] : [1:3, 4:6])
+                gtrue[a, f, 1, chans] .= exp(complex(0.2 * randn(rng), 0.6 * randn(rng)))
+            end
+        end
+        Strue = [
+            (0.5 + rand(rng)) * cis(2pi * rand(rng))
+                for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(pol_products)
+        ]
         results = _joint_scan_accumulators(
             gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, nchan,
         )
-        @test_throws "over-constrain the solve" FP.solve_joint_bandpass!(
+
+        θ = zeros(l.nθ)
+        pb = FP.bandpass_blocks(setup(l), θ, :phase)
+        ab = FP.bandpass_blocks(setup(l), θ, :logamp)
+        # The misaligned refinement couples the two segmentations through cells
+        # neither owns alone, which the alternating sweep works through slowly:
+        # the recovery is exact, but 200 sweeps only reach 3e-8 of it.
+        FP.solve_joint_bandpass!(
             θ, results, bl_pairs, pol_products, nant, pb, ab; gauge = PinAntenna(1),
+            max_iterations = 1000, tolerance = 1.0e-13,
+        )
+
+        demean(v) = v .- sum(v) / length(v)
+        cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
+        # The first channel of each of a station's own segments stands for it.
+        reps(a) = a == 1 ? [1, 3, 5] : [1, 4]
+        for f in 1:2, (bi, block) in pairs(pb)
+            for (ai, a) in pairs(block.stations)
+                truth = [gtrue[a, f, 1, c] for c in reps(a)]
+                @test block.θ[1, f, :, 1, ai] ≈ cdemean(angle.(truth)) atol = 1.0e-10
+                @test ab[bi].θ[1, f, :, 1, ai] ≈ demean(log.(abs.(truth))) atol = 1.0e-10
+            end
+        end
+
+        # A spec that fits a band's segments jointly cannot express the partial
+        # pin: two of station 1's three segments would be fitted and the third
+        # overwritten with zero, which is not the fit the spec asks for.
+        θ2 = zeros(l.nθ)
+        @test_throws "Use `FreeShape` for the phase" FP.solve_joint_bandpass!(
+            θ2, results, bl_pairs, pol_products, nant,
+            FP.bandpass_blocks(setup(l), θ2, :phase),
+            FP.bandpass_blocks(setup(l), θ2, :logamp);
+            gauge = PinAntenna(1), phase_spec = FP.PolynomialShape(1),
         )
     end
 
@@ -637,9 +689,13 @@ end
         # maps each cell to itself, so the solve is the pre-refinement one.
         @test cells == CAL.segment_groups(plan.fseg_id, length(plan.nchan_seg))
         @test all(fseg[a, :] == collect(eachindex(cells)) for a in 1:nant)
-        # Nothing ties one cell to another, so every cell carries its own free
-        # common-phase mode and any station may be pinned.
-        @test FP._freq_gauge_groups(fseg, length(cells)) == length(cells)
+        # Nothing ties one cell to another, so every cell is its own component
+        # and the reference station is pinned in all of them — the whole-track
+        # zeroing a station-uniform model has always had.
+        nodes, pins = FP._joint_bandpass_pins(
+            bl_pairs, feeds, nant, fill(1, nant, 4), fseg, length(cells), PinAntenna(1),
+        )
+        @test pins == Set(nodes[1, f, 1, k] for f in 1:2 for k in eachindex(cells))
     end
 
     @testset "a station holding one gain over cells the others split" begin
@@ -656,9 +712,12 @@ end
         @test cells == [[1, 2, 3], [4, 5, 6]]
         @test fseg[1, :] == [1, 1]
         @test all(fseg[a, :] == [1, 2] for a in 2:nant)
-        # Station 1 ties the two cells into one mode, which is the one segment it
-        # carries — so it is the station the gauge may pin, and the others are not.
-        @test FP._freq_gauge_groups(fseg, length(cells)) == 1
+        # Station 1 ties the two cells into one component, so the gauge has one
+        # constant to fix per feed however it picks the node to fix it at.
+        nodes, pins = FP._joint_bandpass_pins(
+            bl_pairs, feeds, nant, fill(1, nant, 4), fseg, 2, PinAntenna(1),
+        )
+        @test pins == Set([nodes[1, 1, 1, 1], nodes[1, 2, 1, 1]])
 
         rng = MersenneTwister(20260908)
         # Each station's truth is constant over its OWN segments: station 1 over
@@ -700,10 +759,20 @@ end
                     demean([log(abs(gtrue[a, f, 1, c])) for c in rep]) atol = 1.0e-8
             end
         end
-        @test_throws "over-constrain the solve" FP.solve_joint_bandpass!(
-            zeros(l.nθ), results, bl_pairs, pol_products, nant,
-            FP.bandpass_blocks(s, zeros(l.nθ), :phase),
-            FP.bandpass_blocks(s, zeros(l.nθ), :logamp); gauge = PinAntenna(2),
+        # Pinning a station whose segmentation is FINER than the free modes is a
+        # partial pin, not an over-constraint: one of station 2's two segments is
+        # held and the other is fitted. The gauge constant it removes is common to
+        # the whole component and each track is written band-demeaned, so θ comes
+        # out the same as pinning station 1.
+        θ2 = zeros(l.nθ)
+        pb2 = FP.bandpass_blocks(s, θ2, :phase)
+        FP.solve_joint_bandpass!(
+            θ2, results, bl_pairs, pol_products, nant, pb2,
+            FP.bandpass_blocks(s, θ2, :logamp); gauge = PinAntenna(2),
+            max_iterations = 200, tolerance = 1.0e-13,
         )
+        for (bi, block) in pairs(pb2)
+            @test block.θ ≈ phase_blocks[bi].θ atol = 1.0e-8
+        end
     end
 end

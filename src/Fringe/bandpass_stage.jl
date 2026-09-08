@@ -772,33 +772,6 @@ function _station_freq_segments(blocks, nant)
     return fseg, cells
 end
 
-# How many independent common-phase modes the band carries, given a per-station
-# frequency-segment table over the refinement grid.
-#
-# Scaling every station's gain by the same phase leaves every visibility
-# unchanged, so that phase is unmeasurable and the gauge must fix it. It is free
-# to vary from cell to cell only where the parameterization lets it: a station
-# holding ONE gain over several cells forces the mode to be constant across them,
-# so the modes are the connected components of the graph that ties a station's
-# cells together. Stations that share one segmentation tie nothing, leaving one
-# mode per cell.
-function _freq_gauge_groups(fseg, ncell)
-    # A cell tied to nothing is still a mode of its own; the self-edge marks it
-    # visited so `connected_components` counts it.
-    edges = [(k, k) for k in 1:ncell]
-    first_cell = zeros(Int, ncell)
-    for a in axes(fseg, 1)
-        fill!(first_cell, 0)
-        for k in 1:ncell
-            sg = fseg[a, k]
-            iszero(sg) && continue
-            iszero(first_cell[sg]) ? (first_cell[sg] = k) : push!(edges, (first_cell[sg], k))
-        end
-    end
-    _, ncomp, _ = connected_components(ncell, edges)
-    return ncomp
-end
-
 # The two per-station tables `_fit_track_bands` fits a track against: the spw
 # each of that station's frequency segments belongs to, and the segment's
 # frequency coordinate. Both are the station's block's own, so stations sharing a
@@ -1004,17 +977,28 @@ function _joint_bandpass_touching(bl_pairs, feeds, nant)
 end
 
 # The phase-gauge graph of a joint bandpass solve: one node per (station, feed,
-# that station's own time segment), one edge per (scan, baseline, pol)
-# correlation, joining its two ends in the segments they are in for that scan.
-# Node degree stands in for the row weight the gauge scores elsewhere — the graph
-# is built from the correlations that EXIST, before any per-channel gating, so a
-# node's degree is the observation count available to anchor it.
+# that station's own time segment, that station's own frequency segment), one
+# edge per (scan, baseline, pol, refinement cell) correlation, joining its two
+# ends in the segments they are in for that scan and that cell. Node degree
+# stands in for the row weight the gauge scores elsewhere — the graph is built
+# from the correlations that EXIST, before any per-channel gating, so a node's
+# degree is the observation count available to anchor it.
 #
-# `nodes` is the dense `(station, feed, segment)` numbering `connected_components`
-# works in; `compid[n]` is `0` for a node no correlation touches.
-function _joint_bandpass_graph(bl_pairs, feeds, nant, tseg)
+# The node set IS the gauge condition. An edge names the two gain slots one
+# correlation reads, and a shared phase cancels out of `g_a·S·conj(g_b)` only
+# when both ends of every internal edge carry it, so the unobservable phases are
+# one constant per connected component — no coarser node set states that, and a
+# station whose frequency segments are finer than the modes the array leaves free
+# would be over-constrained by any pin that fixed its whole track.
+#
+# `nodes` is the dense `(station, feed, time segment, frequency segment)`
+# numbering `connected_components` works in; `compid[n]` is `0` for a node no
+# correlation touches.
+function _joint_bandpass_graph(bl_pairs, feeds, nant, tseg, fseg, nfsmax)
     ntseg = maximum(tseg; init = zero(eltype(tseg)))
-    nodes = LinearIndices((Base.OneTo(nant), Base.OneTo(2), Base.OneTo(ntseg)))
+    nodes = LinearIndices(
+        (Base.OneTo(nant), Base.OneTo(2), Base.OneTo(ntseg), Base.OneTo(nfsmax)),
+    )
     edges = Tuple{Int, Int}[]
     deg = zeros(Int, length(nodes))
     for si in axes(tseg, 2), p in eachindex(feeds), bi in eachindex(bl_pairs)
@@ -1025,10 +1009,13 @@ function _joint_bandpass_graph(bl_pairs, feeds, nant, tseg)
         ta, tb = tseg[a, si], tseg[b, si]
         (iszero(ta) || iszero(tb)) && continue
         fa, fb = feeds[p]
-        na, nb = nodes[a, fa, ta], nodes[b, fb, tb]
-        push!(edges, (na, nb))
-        deg[na] += 1
-        deg[nb] += 1
+        for cell in axes(fseg, 2)
+            na = nodes[a, fa, ta, fseg[a, cell]]
+            nb = nodes[b, fb, tb, fseg[b, cell]]
+            push!(edges, (na, nb))
+            deg[na] += 1
+            deg[nb] += 1
+        end
     end
     compid, ncomp, _ = connected_components(length(nodes), edges)
     return nodes, compid, ncomp, deg
@@ -1036,8 +1023,8 @@ end
 
 # One reference node per connected component of that graph — mirrors
 # `_solve_observable`'s pin selection in stationize.jl. The pinned node's phase is
-# held at zero across the whole band for the one segment it names; its amplitude
-# is solved like any other node's.
+# held at zero in the one (time segment, frequency segment) slot it names; its
+# amplitude is solved like any other node's.
 #
 # Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
 # shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
@@ -1045,11 +1032,17 @@ end
 # conjugated factors. The sets on which it cancels everywhere are exactly the
 # components above, so the phase carries one unobservable constant per component
 # and needs one constraint there — no more. A station-uniform segmentation splits
-# the graph along the array-wide segments and recovers one pin per segment; a
-# model in which one station breaks mid-track keeps the whole track in one
-# component, because the stations that hold one gain over it bridge the broken
-# station's two segments, and the relative phase across that break is then
+# the graph along the array-wide (time segment, frequency segment) cells and
+# recovers one pin per cell, which together zero the reference station's whole
+# track; a model in which one station breaks mid-track keeps the whole track in
+# one component, because the stations that hold one gain over it bridge the
+# broken station's two segments, and the relative phase across that break is then
 # measured rather than gauged away.
+#
+# The same bridging on the frequency axis makes a pin PARTIAL: where a station
+# holds one gain across cells the others split, those cells lie in one component,
+# and its single pin fixes ONE segment of the pinned station's track while the
+# rest of that track is fitted.
 #
 # The magnitude does not cancel, and `S` is frequency-flat, so it can only absorb
 # `|c|²` when `|c|` is constant across the band — leaving exactly one free
@@ -1059,8 +1052,9 @@ end
 # structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 # over the band eliminates `ls` and leaves the full-rank signless-Laplacian
 # system) and biasing every other station through the inconsistency.
-function _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, gauge)
-    nodes, compid, ncomp, deg = _joint_bandpass_graph(bl_pairs, feeds, nant, tseg)
+function _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, fseg, nfsmax, gauge)
+    nodes, compid, ncomp, deg =
+        _joint_bandpass_graph(bl_pairs, feeds, nant, tseg, fseg, nfsmax)
     ci = CartesianIndices(nodes)
     station_of(n) = ci[n][1]
     feed_of(n) = ci[n][2]
@@ -1145,11 +1139,13 @@ function _update_station_gains!(
     for feed in axes(g, Feed), ant in axes(g, Ant), ts in present[ant]
         entries = touching[ant, feed]
         isempty(entries) && continue
-        # The gauge pin fixes this node's phase; its amplitude is solved like any
-        # other node's (see `_joint_bandpass_pins`).
-        ispin = pinned[ant, feed, ts]
         seg_spw, seg_freq = bands[ant], coords[ant]
         nfs = length(seg_spw)
+        # The gauge fixes this node's phase in the frequency segments it pins —
+        # every one of them where the array leaves this track no free structure,
+        # a single one where a coarser station ties the band into one mode. The
+        # amplitude is solved like any other node's (see `_joint_bandpass_pins`).
+        pins = view(pinned, ant, feed, ts, 1:nfs)
         for buf in (num, den, ĝ, wf, la, φ̃)
             resize!(buf, nfs)
         end
@@ -1207,13 +1203,23 @@ function _update_station_gains!(
         ast = amp_status === nothing ? nothing : view(amp_status, ant, feed, :, ts)
         pst = phase_status === nothing ? nothing : view(phase_status, ant, feed, :, ts)
         la_new = _fit_track_bands(amp_spec, la, wf, seg_spw, seg_freq; status = ast)
-        φ_new = if ispin
-            # The pin's phase is fixed by the gauge, so it is known rather than
-            # fitted: report it as such instead of leaving it at NODATA.
+        φ_new = if all(pins)
+            # A wholly pinned track is known rather than fitted: report it as such
+            # instead of leaving it at NODATA.
             pst === nothing || fill!(pst, _BP_TRACK_SOLVED)
             zeros(T, nfs)
         else
-            _fit_track_bands(phase_spec, φ̃, wf, seg_spw, seg_freq; unwrap = seed, status = pst)
+            fitted = _fit_track_bands(
+                phase_spec, φ̃, wf, seg_spw, seg_freq; unwrap = seed, status = pst,
+            )
+            # A partial pin holds its own segments and leaves the rest fitted.
+            # With segments fit independently that is the constrained fit itself;
+            # `solve_joint_bandpass!` rejects a `phase_spec` that pools them
+            # rather than pass off a joint fit with one segment overwritten.
+            for fs in eachindex(fitted)
+                pins[fs] && (fitted[fs] = zero(T))
+            end
+            fitted
         end
         for fs in 1:nfs
             (isfinite(la_new[fs]) && isfinite(φ_new[fs])) || continue
@@ -1420,15 +1426,17 @@ that order: the spw each of the block's frequency segments belongs to and the
 segment's frequency coordinate, as [`_segment_bands`](@ref) returns them. Omitted,
 each station is fit as one band indexed by segment.
 
-Scaling every station by one phase leaves every visibility unchanged, so the
-gauge must fix that mode. It is free per frequency cell only where the
-parameterization allows: a station holding one gain across several cells ties the
-mode across them ([`_freq_gauge_groups`](@ref)). The pinned node's phase is held
-at zero in each of its own frequency segments, which fixes those modes and no
-more only when the pinned station carries one segment per mode; a `gauge` that
-picks any other station is rejected rather than solved biased. Stations that
-share one frequency segmentation always satisfy this, as does pinning the station
-with the coarsest segmentation when the segmentations nest.
+Scaling a set of stations by one phase leaves every visibility internal to that
+set unchanged, so the gauge fixes one constant per such set. The sets are the
+connected components of the (station, feed, time segment, frequency segment)
+graph the correlations span, and one node of each is pinned
+([`_joint_bandpass_pins`](@ref)). Stations sharing one frequency segmentation
+split that graph per cell, so the pinned station's whole track is held at zero;
+where one station holds a gain across cells the others split, those cells lie in
+one component and the pin holds ONE segment of its track while the rest is
+fitted. That partial pin is the constrained fit only where the segments are fit
+independently, so a `phase_spec` other than [`FreeShape`](@ref) is rejected in
+that case rather than solved as a joint fit with a segment overwritten.
 
 `scans` is the per-scan `(rl, wl)` accumulator pairs from
 `accumulate_bandpass!``(...; derotate = false)` — not summed across
@@ -1440,8 +1448,9 @@ each distinct `tseg[a, :]` value, in that station's own segment numbering, and a
 station whose entry is `0` is left out of the solve. Every station shares one
 segment when it is omitted. `scans` must hold the scans `tseg`'s columns
 describe, in the same order. The phase gauge acts on the
-(station, feed, segment) graph these scans span, pinning one node per connected
-component ([`_joint_bandpass_pins`](@ref)), so a break at one station is measured
+(station, feed, time segment, frequency segment) graph these scans span, pinning
+one node per connected component ([`_joint_bandpass_pins`](@ref)), so a break at
+one station is measured
 against the stations that hold one gain across it rather than gauged away.
 Solved phases are comparable only WITHIN a component: where that graph splits —
 disjoint sub-arrays, or every station segmented at the same epoch — each piece
@@ -1511,28 +1520,33 @@ function solve_joint_bandpass!(
 
     rseg, wseg = _reduce_all_scans(scans, segs)
     touching = _joint_bandpass_touching(bl_pairs, feeds, nant)
-    nodes, pins = _joint_bandpass_pins(bl_pairs, feeds, nant, tsg, gauge)
-    pinned = [nodes[ant, feed, ts] in pins for ant in 1:nant, feed in 1:2, ts in 1:ntseg]
+    nodes, pins = _joint_bandpass_pins(bl_pairs, feeds, nant, tsg, fseg, nfsmax, gauge)
+    pinned = [
+        nodes[ant, feed, ts, fs] in pins
+            for ant in 1:nant, feed in 1:2, ts in 1:ntseg, fs in 1:nfsmax
+    ]
 
-    # `_update_station_gains!` holds a pinned node's phase at zero over EVERY
-    # frequency segment that node has, so the pin fixes as many phases as it has
-    # segments. That is the free common-phase modes exactly when the pinned
-    # station carries one segment per mode.
-    nfmodes = _freq_gauge_groups(fseg, length(segs))
-    for n in pins
-        a = CartesianIndices(nodes)[n][1]
-        nfs_pin = maximum(view(fseg, a, :))
-        nfs_pin == nfmodes || throw(
-            ArgumentError(
-                "solve_joint_bandpass!: the phase gauge pins station $a, which carries " *
-                    "$nfs_pin frequency segments, but the stations' segmentations leave " *
-                    "$nfmodes independent common-phase mode(s) across the band. Holding the " *
-                    "pinned station's phase at zero in each of its segments would " *
-                    "over-constrain the solve and bias every station it anchors. Pin a " *
-                    "station carrying one bandpass segment per mode, or give the stations " *
-                    "frequency segmentations that nest.",
-            ),
-        )
+    # A pin covering part of a track leaves the rest of it fitted, and zeroing
+    # part of a track a spec fits jointly is not the constrained fit that spec
+    # asks for. Segments fit on their own admit the constraint exactly.
+    if !(phase_spec isa FreeShape)
+        for ant in 1:nant, feed in 1:2, ts in 1:ntseg
+            nfs = length(bands[ant])
+            np = count(view(pinned, ant, feed, ts, 1:nfs))
+            (iszero(np) || np == nfs) && continue
+            throw(
+                ArgumentError(
+                    "solve_joint_bandpass!: the phase gauge pins $np of the $nfs frequency " *
+                        "segments of station $ant (feed $feed, time segment $ts), because " *
+                        "the stations' frequency segmentations tie those channels into " *
+                        "fewer independent common-phase modes than this station has " *
+                        "segments. $(nameof(typeof(phase_spec))) fits a band's segments " *
+                        "jointly, so holding part of the fitted track at zero is not the " *
+                        "constrained fit it asks for. Use `FreeShape` for the phase, or " *
+                        "give the stations frequency segmentations that nest.",
+                ),
+            )
+        end
     end
 
     C = eltype(rseg)
