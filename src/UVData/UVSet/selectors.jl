@@ -102,7 +102,7 @@ function _filter_uvset(uvset::UVSet, kw::NamedTuple)
     return DimensionalData.rebuild(uvset; branches = new_branches)
 end
 
-# Apply Station/Baseline/Ti/Pol/IF selectors to a single leaf DimTree.
+# Apply Station/Baseline/Ti/Pol selectors to a single leaf DimTree.
 # Returns `nothing` if the filter would empty the leaf.
 function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     bls = baselines(leaf)
@@ -126,7 +126,6 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
 
     vis_l = leaf[:vis]
     weights_l = leaf[:weights]
-    flag_l = leaf[:flag]
     uvw_l = leaf[:uvw]
 
     nti_full = length(obs_time(leaf))
@@ -139,27 +138,24 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     end
     isempty(ti_inds) && return nothing
 
-    # Slice positionally. vis/weights/flag: (Frequency, Ti, Baseline, Pol).
+    # Slice positionally. vis/weights: (Frequency, Ti, Baseline, Pol).
     # uvw: (Ti, Baseline, UVW).
     vis_p = parent(vis_l)[:, ti_inds, bl_inds, :]
     w_p = parent(weights_l)[:, ti_inds, bl_inds, :]
-    flag_p = parent(flag_l)[:, ti_inds, bl_inds, :]
     uvw_p = parent(uvw_l)[ti_inds, bl_inds, :]
     obs_time_new = obs_time(leaf)[ti_inds]
 
     new_labels = bls.labels[bl_inds]
     pol_dim = dims(vis_l, Pol)
-    if_dim = dims(vis_l, Frequency)
-    vis_da = DimArray(vis_p, (if_dim, Ti(obs_time_new), Baseline(new_labels), pol_dim))
+    freq_dim = dims(vis_l, Frequency)
+    vis_da = DimArray(vis_p, (freq_dim, Ti(obs_time_new), Baseline(new_labels), pol_dim))
     weights_da = DimArray(w_p, dims(vis_da))
-    flag_da = DimArray(flag_p, dims(vis_da))
     uvw_da = DimArray(uvw_p, (Ti(obs_time_new), Baseline(new_labels), UVW(["U", "V", "W"])))
 
-    pol_if_kw = NamedTuple(kk => v for (kk, v) in pairs(kw) if kk in (:Pol, :IF))
-    if !isempty(pol_if_kw)
-        vis_da = getindex(vis_da; pol_if_kw...)
-        weights_da = getindex(weights_da; pol_if_kw...)
-        flag_da = getindex(flag_da; pol_if_kw...)
+    pol_kw = NamedTuple(kk => v for (kk, v) in pairs(kw) if kk === :Pol)
+    if !isempty(pol_kw)
+        vis_da = getindex(vis_da; pol_kw...)
+        weights_da = getindex(weights_da; pol_kw...)
     end
 
     new_pairs = bls.pairs[bl_inds]
@@ -192,7 +188,7 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     end
 
     return _build_leaf(
-        vis_da, weights_da, uvw_da, flag_da;
+        vis_da, weights_da, uvw_da;
         partition_info = update(
             DimensionalData.metadata(leaf);
             baselines = new_baselines,

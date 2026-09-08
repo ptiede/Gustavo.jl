@@ -1,9 +1,14 @@
+# The containers that carry a leaf's `PartitionInfo`: the leaf tree itself and
+# any layer selection off it (`leaf[(:vis, :weights)]`), which keeps the
+# metadata. Both answer the identity accessors defined throughout this file.
+const PartitionedData = Union{DimensionalData.AbstractDimTree, DimensionalData.AbstractDimStack}
+
 """
     UVSet <: DimensionalData.AbstractDimTree
 
 Top-level container mirroring xradio's MSv4 `ProcessingSet`: a flat
 `OrderedDict` of MSv4-shaped partition leaves under `branches`, keyed by
-sanitized `:<source>_scan_<n>` Symbols (e.g. `:M3C273_scan_1`). Multi-source
+sanitized `:<source>_scan_<n>` Symbols (e.g. `:src_3C273_scan_1`). Multi-source
 data shows up as sibling flat partitions, never as a nested Source dim.
 
 The struct subtypes `AbstractDimTree` so all DD machinery (selectors,
@@ -11,7 +16,8 @@ The struct subtypes `AbstractDimTree` so all DD machinery (selectors,
 works without bespoke overloads. Per-leaf data lives on each branch
 (a plain `DimTree`) carrying:
 
-- `data`     : `:vis`, `:weights`, `:uvw`, `:flag` `DimArray` layers.
+- `data`     : `:vis`, `:weights`, `:uvw` `DimArray` layers. A cell is
+  flagged iff its weight is `≤ 0`, so no separate flag layer is stored.
 - `metadata` : `PartitionInfo` struct (`source_name`, `source_key`,
   `field_name`, `scan_name`, `scan_intents`, `sub_scan_name`, `spw_name`,
   `intent`, `ra`, `dec`, `ddi`, `partition_name`, `baselines::BaselineIndex`,
@@ -319,7 +325,7 @@ function Base.show(io::IO, ::MIME"text/plain", uvset::UVSet)
     println(io, "  Array     : $(arr_name) ($ref_freq_ghz GHz)")
     println(io, "  Sources   : $(length(src_list)) ($(join(src_list, ", ")))")
     println(io, "  Partitions: $(n_part)")
-    println(io, "  Spectral  : $(length(setups)) setup(s), $(length(chan_freqs)) IFs total: $(flo)–$(fhi) GHz")
+    println(io, "  Spectral  : $(length(setups)) setup(s), $(length(chan_freqs)) channels total: $(flo)–$(fhi) GHz")
     print(io, "  Antennas ($(length(nms))): $(join(nms, ", "))")
     return io
 end
@@ -342,7 +348,7 @@ function scan_time_centers(uvset::UVSet)
     end
     return out
 end
-band_center_frequency(uvset::UVSet) = band_center_frequency(freq_setup(uvset))
+spw_center_frequency(uvset::UVSet) = spw_center_frequency(freq_setup(uvset))
 centered_channel_freqs(uvset::UVSet) = centered_channel_freqs(freq_setup(uvset))
 
 function baseline_sites(uvset::UVSet, bl::Tuple{String, String})
@@ -364,7 +370,7 @@ end
 
 Per-leaf antenna table.
 """
-antennas(leaf::DimensionalData.AbstractDimTree) =
+antennas(leaf::PartitionedData) =
     DimensionalData.metadata(leaf).antennas
 
 """
@@ -406,6 +412,47 @@ function union_antennas(uvset::UVSet)
     return AntennaTable(
         StructArray(rows), array_xyz(template), array_name(template), extras(template),
     )
+end
+
+"""
+    unify_antennas(uvset::UVSet) -> UVSet
+
+Put every leaf on one antenna table — [`union_antennas`](@ref)'s — re-indexing
+each leaf's `BaselineIndex` into it.
+
+A leaf's `(a, b)` pairs index that leaf's OWN table, so a sub-array leaf listing
+only the stations that observed it numbers them differently from a fuller leaf:
+where six antennas observed, index 3 may be `KT` while the full array's index 3
+is `GL`. Anything reading pairs against a single table — which is every solver,
+since a solve has one station axis — would then attribute one station's data to
+another. This makes the indices mean the same thing everywhere, so sets whose
+leaves saw different sub-arrays can be solved together.
+
+Antennas are matched by NAME (`union_antennas` refuses inconsistent metadata for
+a shared name). Leaves already on the union table are returned untouched, so a
+single-sub-array set costs nothing and stays lazy.
+"""
+function unify_antennas(uvset::UVSet)
+    table = union_antennas(uvset)
+    names = collect(String.(table.name))
+    all(
+        collect(String.(DimensionalData.metadata(l).antennas.name)) == names
+            for l in values(DimensionalData.branches(uvset))
+    ) && return uvset
+    slot = Dict(n => i for (i, n) in pairs(names))
+    return apply(uvset) do leaf, info, root
+        local_names = collect(String.(info.antennas.name))
+        local_names == names && return leaf
+        m = [slot[n] for n in local_names]
+        remap(ps) = [(m[a], m[b]) for (a, b) in ps]
+        b = info.baselines
+        # `record_order` holds (time, baseline-slot) pairs, and slot order is
+        # preserved here, so it needs no remapping.
+        newb = BaselineIndex(remap(b.pairs_per_record), remap(b.pairs); antenna_names = names)
+        return DimensionalData.rebuild(
+            leaf; metadata = update(info; antennas = table, baselines = newb),
+        )
+    end
 end
 
 """
@@ -455,22 +502,29 @@ nintegrations(uvset::UVSet) = sum(
 DimensionalData.metadata(dt::DimensionalData.DimTree) = getfield(dt, :metadata)
 
 
-freq_setup(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).freq_setup
-baselines(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).baselines
-record_order(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).record_order
-extra_columns(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).extra_columns
+freq_setup(part::PartitionedData) = DimensionalData.metadata(part).freq_setup
+baselines(part::PartitionedData) = DimensionalData.metadata(part).baselines
+record_order(part::PartitionedData) = DimensionalData.metadata(part).record_order
+extra_columns(part::PartitionedData) = DimensionalData.metadata(part).extra_columns
+
+"""
+    source_name(part) -> String
+
+Name of the source the leaf (or a layer selection off it) observes.
+"""
+source_name(part::PartitionedData) = DimensionalData.metadata(part).source_name
 
 # Each leaf maps to exactly one xradio MSv4 scan, so the scan label is a
 # scalar field on `PartitionInfo`. `scan_name` and `primary_scan_name`
 # return that String — twin accessors retained for callers that previously
 # read the per-Ti vector form.
-scan_name(part::DimensionalData.AbstractDimTree) =
+scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).scan_name
-primary_scan_name(part::DimensionalData.AbstractDimTree) =
+primary_scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).scan_name
-scan_intents(part::DimensionalData.AbstractDimTree) =
+scan_intents(part::PartitionedData) =
     DimensionalData.metadata(part).scan_intents
-sub_scan_name(part::DimensionalData.AbstractDimTree) =
+sub_scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).sub_scan_name
 
 """
@@ -482,7 +536,7 @@ sub_scan_name(part::DimensionalData.AbstractDimTree) =
 function scan_window(part::DimensionalData.AbstractDimTree)
     t = obs_time(part)
     isempty(t) && return (NaN, NaN)
-    return (Float64(minimum(t)), Float64(maximum(t)))
+    return extrema(t)
 end
 
 """
@@ -497,31 +551,26 @@ function participating_antennas(part::DimensionalData.AbstractDimTree)
     return sort!(collect(Set{String}(vcat(bls.ant1_names, bls.ant2_names))))
 end
 
-# Time axis lookup. Leaves use `Ti`. Values are Float64 fractional hours
-# since RDATE 00:00 UTC (the AIPS RDATE card on the AN HDU). For a
-# single-night track, magnitudes are bounded by ~24; multi-night tracks
-# accumulate as 24·days_offset + hour_within_day.
+# Time axis lookup. Values are Float64 fractional hours since RDATE 00:00 UTC
+# (the AIPS RDATE card on the AN HDU). For a single-night track, magnitudes
+# are bounded by ~24; multi-night tracks accumulate as
+# 24·days_offset + hour_within_day.
 function obs_time(part::DimensionalData.AbstractDimTree)
-    vis = part[:vis]
-    return hasdim(vis, Ti) ? lookup(vis, Ti) : lookup(vis, Integration)
+    return lookup(part[:vis], Ti)
 end
 
-# `weights ≤ 0` carries the FITS flag convention. We derive a Bool layer at
-# construction so `data.flag` is always available without recomputation.
-_derive_flag(w::AbstractDimArray) = DimArray(parent(w) .<= 0, dims(w))
-_derive_flag(w::AbstractArray) = w .<= 0
-
 """
-    with_visibilities(part::AbstractDimTree, vis, weights) -> DimTree
+    rebuild_visibilities(part::AbstractDimTree, vis, weights) -> DimTree
 
 Return a new leaf sharing `part`'s `uvw` layer and metadata, with
-`vis`/`weights`/`flag` swapped in. `flag` is re-derived from `weights`.
+`vis`/`weights` swapped in. A cell is flagged iff its weight is `≤ 0`.
 """
-function with_visibilities(part::DimensionalData.AbstractDimTree, vis, weights)
+function rebuild_visibilities(part::DimensionalData.AbstractDimTree, vis = part[:vis], weights = part[:weights], uvw = part[:uvw])
     vis_l = _rewrap_like(vis, part[:vis])
     w_l = _rewrap_like(weights, part[:weights])
+    uvw_l = _rewrap_like(uvw, part[:uvw])
     return _build_leaf(
-        vis_l, w_l, part[:uvw];
+        vis_l, w_l, uvw_l;
         partition_info = DimensionalData.metadata(part),
     )
 end

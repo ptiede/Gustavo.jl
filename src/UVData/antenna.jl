@@ -3,16 +3,22 @@ const PolTypes = Union{RPol, LPol, XPol, YPol}
 """
     Mount(parallactic, elevation, offset=0)
 
-Defines the telescope mount type. `parallactic` and `elevation` are the
-rotation-rate coefficients applied during parallactic-angle evolution;
-`offset` is the feed angular offset (radians for natural use, but any
-numeric type works).
+A telescope mount: the rotation-rate coefficients applied during
+parallactic-angle evolution, plus a feed angular offset. `parallactic` and
+`elevation` are those coefficients; `offset` is the feed offset (radians for
+natural use, but any numeric type works). A single value-based type covers
+arbitrary coefficients, so a mount the standard names below do not anticipate is
+still expressible as a direct `Mount(...)`. Dispatch on `::Mount`.
 
-Convenience constructors:
-- `MountAltAz(offset=0)`: alt-az mount (AIPS `MNTSTA = 0`)
-- `MountEquatorial(offset=0)`: equatorial mount (AIPS `MNTSTA = 1`)
-- `MountNaismithR(offset=0)`: right Naismith mount (AIPS `MNTSTA = 4`)
-- `MountNaismithL(offset=0)`: left Naismith mount (AIPS `MNTSTA = 5`)
+The four standard mounts are FUNCTIONS returning a `Mount` (not distinct types,
+so do not dispatch on their names):
+- `MountAltAz(offset=0)`      → alt-az mount        (AIPS `MNTSTA = 0`)
+- `MountEquatorial(offset=0)` → equatorial mount    (AIPS `MNTSTA = 1`)
+- `MountNaismithR(offset=0)`  → right Naismith mount (AIPS `MNTSTA = 4`)
+- `MountNaismithL(offset=0)`  → left Naismith mount  (AIPS `MNTSTA = 5`)
+
+Read the fields back with `parallactic_mount(m)`, `elevation_mount(m)`, and
+`offset_mount(m)`.
 """
 struct Mount{A, B, C}
     parallactic::A
@@ -143,3 +149,41 @@ Base.hash(a::AntennaTable, h::UInt) = hash(
     ),
     hash(:AntennaTable, h),
 )
+
+# ── Co-located stations ──────────────────────────────────────────────────────
+
+# ant → representative-station map for co-located groups (separation below
+# `max_sep` meters, e.g. the Onsala twins at ~75 m). Co-located stations share
+# an atmosphere and an ionosphere, so a solve can tie them to one parameter.
+# `max_sep` is the caller's to choose: what counts as co-located depends on
+# which effect is being tied, not on the array.
+function _colocated_ties(antennas; max_sep::Real)
+    n = length(antennas)
+    xyz = antennas.station_xyz
+    ties = collect(1:n)
+    # Grouping by separation is meaningless without VLBI-scale positions: a table
+    # of zeros or of toy coordinates would tie the whole array into one node.
+    maxd2 = 0.0
+    for j in 2:n, i in 1:(j - 1)
+        maxd2 = max(maxd2, sum(abs2, Float64.(xyz[j]) .- Float64.(xyz[i])))
+    end
+    maxd2 > (10.0e3)^2 || error(
+        "co-located grouping needs real station positions: the antenna table's widest " *
+            "separation is $(round(sqrt(maxd2) / 1.0e3; digits = 3)) km, too small for a VLBI " *
+            "array — the positions are missing or degenerate, so no separation threshold " *
+            "means anything. Supply real `station_xyz`, or do not ask for co-located tying."
+    )
+    # NOTE the explicit nesting: in a comma-nested `for j, i` a `break` exits
+    # Both levels, so only the first co-located pair in the array would ever be
+    # found and every later twin would stay untied.
+    for j in 2:n
+        for i in 1:(j - 1)
+            d2 = sum(abs2, Float64.(xyz[j]) .- Float64.(xyz[i]))
+            if d2 <= float(max_sep)^2
+                ties[j] = ties[i]
+                break
+            end
+        end
+    end
+    return ties
+end

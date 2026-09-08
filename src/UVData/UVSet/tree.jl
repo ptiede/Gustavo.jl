@@ -1,9 +1,8 @@
 function _build_leaf(
         vis::AbstractDimArray, weights::AbstractDimArray,
-        uvw::AbstractDimArray, flag::Union{Nothing, AbstractDimArray} = nothing;
+        uvw::AbstractDimArray;
         partition_info::PartitionInfo,
     )
-    flag_layer = flag === nothing ? _derive_flag(weights) : flag
     vis_dims = dims(vis)
     uvw_dims = dims(uvw)
     vis_names = map(DimensionalData.name, vis_dims)
@@ -13,16 +12,14 @@ function _build_leaf(
         :vis => parent(vis),
         :weights => parent(weights),
         :uvw => parent(uvw),
-        :flag => parent(flag_layer),
     )
     layerdims = DimensionalData.TupleDict(
         :vis => vis_names,
         :weights => vis_names,
         :uvw => uvw_names,
-        :flag => vis_names,
     )
     layermetadata = DimensionalData.DataDict(
-        :vis => nm, :weights => nm, :uvw => nm, :flag => nm,
+        :vis => nm, :weights => nm, :uvw => nm,
     )
     all_dims = (vis_dims..., DimensionalData.otherdims(uvw_dims, vis_dims)...)
     return DimensionalData.DimTree(;
@@ -83,7 +80,7 @@ function _extract_scan_leaf(
         ti = time_lookup[obs_times_per_int[rec_i]]
         bi = bl_lookup_scan[bl_pairs_per_record[rec_i]]
         record_order[rec_i] = (ti, bi)
-        # flat layout is (Integration, Pol, Frequency); permute into
+        # flat layout is (Ti, Pol, Frequency); permute into
         # (Frequency, Ti, Baseline, Pol).
         for p in 1:npol, c in 1:nchan
             vis_dense[c, ti, bi, p] = vis_flat[int_i, p, c]

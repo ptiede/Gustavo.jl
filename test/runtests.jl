@@ -10,24 +10,93 @@ using FITSFiles: Card
 using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
-using Gustavo.UVData: Integration, Pol, Frequency, UVW, Baseline, UVSet, pol_products
+using Gustavo.UVData: Pol, Frequency, UVW, Baseline, UVSet, pol_products
+using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using PolarizedTypes: RPol, LPol
 
-# α refactor: BandpassSegmentation is gone and SegmentedBandpassModel
-# requires explicit time + frequency segmentations. The helper below
-# rebuilds the previous "auto-default" station model — PerChannel ×
-# Global × Global on every feed/spec — so existing tests that assumed
-# a no-arg StationBandpassModel can opt into it explicitly.
-function default_station_model_for_tests()
-    BP = Gustavo.Bandpass
-    spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
-        BP.PerChannelBandpassModel(),
-        BP.GlobalTimeSegmentation(),
-        BP.GlobalFrequencySegmentation(),
-    ))
-    feed = BP.FeedBandpassModel(phase = spec, amplitude = spec)
-    return BP.StationBandpassModel(reference_feed = 1, reference = feed, relative = feed)
-end
+# Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
+include("plan_offsets.jl")
+
+include("test_calibration.jl")
+
+# Gauge conventions: which constraint fixes each component's additive freedom.
+include("test_gauge.jl")
+
+# FITS-IDI writer round-trip tests (Phase 2 of the fringe-fitter refactor).
+include("test_fitsidi.jl")
+
+# Per-baseline FFT fringe search (Phase 3 of the fringe-fitter refactor).
+include("test_fringe_search.jl")
+
+# Per-feed stationization with closure (Phase 4 of the fringe-fitter refactor).
+include("test_stationize.jl")
+
+# OU / Matérn-1/2 state-space phase smoother primitives (underpins adhoc :gp).
+include("test_statespace.jl")
+
+# Per-observable frequency-shape specs and their per-track fit (the bandpass
+# smoother's shape assumptions; ARShape rides the OU primitives above).
+include("test_shapes.jl")
+
+# Globally-closing adhoc phasing (Phase 5 of the fringe-fitter refactor).
+include("test_adhoc.jl")
+
+# End-to-end CalibrationSolution + fit pipeline (Phase 6).
+include("test_pipeline.jl")
+
+# Modular calibration pipeline (CalibrationPipeline / calibrate refactor).
+# Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
+include("test_pipeline_config.jl")
+
+# Composable-pipeline interface (step protocol, transforms, selections, stage
+# snapshots, fit/calibrate/fitcalibrate). Reuses the same aliases.
+include("test_interface.jl")
+
+# New streaming engine vs the frozen monolith oracle (M2 gates): grouping /
+# materialization / search parity, and the transform chain vs the precal path.
+include("test_stream.jl")
+include("test_transforms.jl")
+
+# The FringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
+# cross-feed rate opt-in, fit-on-subset masking, transforms on the new path.
+include("test_fringe_step.jl")
+
+# The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
+# vs the frozen monolith, refine-kernel bit parity, coverage top-up,
+# step-selection extraction + portable ApplySolution.
+include("test_bandpass_step.jl")
+
+# Bandpass(smoother = JointSmoother()): the alternating complex-visibility +
+# per-scan source-coherence solve, vs. the closure-based PerTrackSmoother
+# default, and the shape specs acting as priors inside its gain update.
+include("test_joint_bandpass.jl")
+
+# The TemporalSmoother step + output sink: multi-scan full-pipeline solves
+# (incl. the refine polish split), standalone calibrate ≡ fused output,
+# AprioriAmplitude as a recorded output-chain step.
+include("test_smoother_step.jl")
+
+# Fringe diagnostics + Makie plot stubs (Phase 8).
+include("test_fringe_diagnostics.jl")
+
+# fringe_station_solutions θ-decode + the `rel_time` model option.
+# Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
+include("test_fringe_station_solutions.jl")
+
+# Phase-cal (injected tone) calibration: multitone fit + precal hook.
+# Reuses _build_fringe_uvset + _coherence from test_pipeline.jl.
+include("test_phasecal.jl")
+
+# Per-station weight correction (station_weight_scale / the weight_scale option).
+# Reuses _build_fringe_uvset + the FP/CAL/UVP aliases from test_pipeline.jl.
+include("test_weight_scale.jl")
+
+# The executor seam: the group scheduler under each outer scheduler — dispatch
+# order, task cap, and bit-identical θ/outputs whichever one runs the pass.
+include("test_executors.jl")
+
+# The coherence QA estimator: the debiased η must stay unbiased at low SNR.
+include("test_coherence.jl")
 
 function synthetic_uvdata()
     vis = ComplexF64[
@@ -51,9 +120,9 @@ function synthetic_uvdata()
     # order — the round-trip test exercises the read/write permutation.
     pol_labels_synth = ["PP", "PQ", "QP", "QQ"]
     channel_freqs_synth = collect(1.0:4.0)
-    vis = DimArray(vis, (Integration(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
-    weights = DimArray(weights, (Integration(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
-    uvw = DimArray(zeros(Float32, 2, 3), (Integration(obs_time_synth), UVW(["U", "V", "W"])))
+    vis = DimArray(vis, (Ti(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
+    weights = DimArray(weights, (Ti(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
+    uvw = DimArray(zeros(Float32, 2, 3), (Ti(obs_time_synth), UVW(["U", "V", "W"])))
 
     UV = Gustavo.UVData
     nominal_basis_v = [(RPol(), LPol()), (RPol(), LPol())]
@@ -142,362 +211,68 @@ function synthetic_uvdata()
     return uvset
 end
 
-function synthetic_bandpass_avg_uvdata()
-    BP = Gustavo.Bandpass
-    nant = 3
-    bl_pairs = [(1, 2), (1, 3), (2, 3)]
-    ant_names = ["AA", "AX", "NN"]
-    pol_labels = ["PP", "PQ", "QP", "QQ"]   # MSv4-canonical order
-    nscan = 2
-    nchan = 6
-
-    # gains_true layout: (Frequency, Ant, Feed) = (nchan, nant, 2).
-    gains_true = Array{ComplexF64}(undef, nchan, nant, 2)
-    for c in 1:nchan
-        gains_true[c, 1, 1] = (0.95 + 0.02c) * cis(0.03 * (c - 1))
-        gains_true[c, 2, 1] = (1.05 + 0.01c) * cis(0.14 + 0.04 * (c - 1))
-        gains_true[c, 3, 1] = (0.88 - 0.015c) * cis(-0.09 - 0.05 * (c - 1))
-
-        gains_true[c, 1, 2] = gains_true[c, 1, 1] * (1.1 - 0.01c) * cis(0.2 + 0.02 * (c - 1))
-        gains_true[c, 2, 2] = gains_true[c, 2, 1] * (0.92 + 0.015c) * cis(-0.15 + 0.01 * (c - 1))
-        gains_true[c, 3, 2] = gains_true[c, 3, 1] * (1.04 - 0.005c) * cis(0.11 - 0.03 * (c - 1))
-    end
-
-    source_true = reshape(
-        ComplexF64[
-            1.5 * cis(0.2), 0.3 * cis(-0.4), 0.25 * cis(0.1), 0.9 * cis(0.3),
-            0.7 * cis(-0.1), 0.2 * cis(0.5), 0.15 * cis(-0.2), 1.2 * cis(-0.3),
-
-            1.1 * cis(0.4), 0.35 * cis(0.2), 0.18 * cis(-0.5), 0.8 * cis(0.15),
-            0.9 * cis(-0.2), 0.25 * cis(0.35), 0.12 * cis(-0.1), 1.0 * cis(-0.25),
-
-            0.8 * cis(0.1), 0.28 * cis(-0.15), 0.21 * cis(0.22), 1.1 * cis(0.18),
-            1.3 * cis(-0.05), 0.18 * cis(0.4), 0.14 * cis(-0.3), 0.95 * cis(0.27),
-        ],
-        nscan, length(bl_pairs), 2, 2
-    )
-
-    # vis_arr layout: (Frequency, Ti, Baseline, Pol).
-    vis_arr = zeros(ComplexF64, nchan, nscan, length(bl_pairs), length(pol_labels))
-    for s in 1:nscan, (bi, (a, b)) in enumerate(bl_pairs), pol in eachindex(pol_labels), c in 1:nchan
-        fa, fb = BP.correlation_feed_pair(pol_labels[pol])
-        vis_arr[c, s, bi, pol] = gains_true[c, a, fa] * source_true[s, bi, fa, fb] * conj(gains_true[c, b, fb])
-    end
-    weights_arr = ones(Float64, size(vis_arr))
-    bl_labels = [string(ant_names[a], "-", ant_names[b]) for (a, b) in bl_pairs]
-    scan_centers = (Float64.(0:(nscan - 1)) .+ Float64.(1:nscan)) ./ 2
-    channel_freqs_synth = collect(1.0:nchan)
-    vis = DimArray(vis_arr, (Frequency(channel_freqs_synth), Ti(scan_centers), Baseline(bl_labels), Pol(pol_labels)))
-    weights = DimArray(weights_arr, (Frequency(channel_freqs_synth), Ti(scan_centers), Baseline(bl_labels), Pol(pol_labels)))
-    uvw = DimArray(zeros(nscan, length(bl_pairs), 3), (Ti(scan_centers), Baseline(bl_labels), UVW(["U", "V", "W"])))
-
-    UV = Gustavo.UVData
-    antennas_v = [
-        UV.Antenna(;
-                name = ant_names[i],
-                station_xyz = zeros(3),
-                mount = UV.MountAltAz(),
-                nominal_basis = (RPol(), LPol()),
-                response = Diagonal(ones(ComplexF32, 2)),
-                pol_angles = (0.0f0, 0.0f0),
-            )
-            for i in 1:nant
-    ]
-    antennas = UV.AntennaTable(
-        StructArray(antennas_v), zeros(3), "TEST",
-        (POLCALA = [Float32[] for _ in 1:nant], POLCALB = [Float32[] for _ in 1:nant]),
-    )
-    freq_setup = UV.FrequencySetup(;
-        name = "FRQSEL_1",
-        ref_freq = 1.0e9,
-        channel_freqs = collect(1.0:nchan),
-        ch_widths = fill(1.0f0, nchan),
-        total_bandwidths = fill(1.0f0, nchan),
-        sidebands = Int32.(fill(1, nchan)),
-    )
-    array_obs = UV.ObsArrayMetadata(;
-        telescope = "TEST", instrume = "TEST",
-        date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
-        rdate = "2000-01-01", earth_rot_rate = 360.0f0, poltype = "APPROX",
-    )
-
-    baselines_idx = UV.BaselineIndex(
-        bl_pairs, bl_pairs;
-        antenna_names = ant_names,
-    )
-    scan_windows = [(Float64(s - 1), Float64(s)) for s in 1:nscan]
-    return BP.BandpassDataset(
-        vis, weights, uvw, baselines_idx,
-        antennas, array_obs, freq_setup, scan_windows,
-    )
-end
-
 @testset "Gustavo.jl" begin
-    @test isdefined(Gustavo, :Bandpass)
-    @test Gustavo.Bandpass isa Module
-    @test isdefined(Gustavo.Bandpass, :solve_bandpass)
-end
-
-@testset "Bandpass composite basis" begin
-    BP = Gustavo.Bandpass
-    freq = BP.BlockFrequencySegmentation(4)
-    time = BP.GlobalTimeSegmentation()
-    model = BP.CompositeBandpassModel(
-        BP.SegmentedBandpassModel(BP.FlatBandpassModel(), time, freq),
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(1), time, freq),
-    )
-    spec = BP.BandpassSpec(model)
-
-    x = collect(1.0:8.0)
-    valid = trues(length(x))
-    basis = Vector{Vector{Float64}}()
-    for component in BP.spec_components(spec)
-        append!(basis, BP.component_design_columns(component, x, valid))
+    for sub in (:UVData, :Calibration, :Fringe)
+        @test isdefined(Gustavo, sub)
+        @test getfield(Gustavo, sub) isa Module
     end
-    A = hcat(basis...)
+    @test isdefined(Gustavo, :fitcalibrate)
+end
 
-    @test A[1:4, 3] ≈ [-1.0, -1 / 3, 1 / 3, 1.0]
-    @test A[5:8, 4] ≈ [-1.0, -1 / 3, 1 / 3, 1.0]
+@testset "top-level export surface" begin
+    top = names(Gustavo)
 
-    valid = Bool[1, 0, 0, 0, 1, 1, 1, 1]
-    basis = Vector{Vector{Float64}}()
-    for component in BP.spec_components(spec)
-        append!(basis, BP.component_design_columns(component, x, valid))
+    # A bare `using Gustavo` spans the production path end to end: read a set,
+    # fit/calibrate it, extract the per-stage step `sol[:fringe]` returns, write it.
+    for n in (
+            :UVSet, :load_uvfits, :load_fitsidi, :write_uvfits, :write_fitsidi,
+            :fit, :calibrate, :fitcalibrate, :StepSolution,
+        )
+        @test n in top
     end
-    A = hcat(basis...)
 
-    @test size(A, 2) == 3
-    @test rank(A[valid, :]) == size(A, 2)
+    # Streaming-engine internals stay behind `Fringe`: reachable for users who
+    # drive the engine directly, absent from the pipeline-level namespace. They
+    # are `Streaming`'s, re-exported — the same binding under both names.
+    for n in (:ScanGroupSpec, :materialize_cube, :materialize_leaves)
+        @test !(n in top)
+        @test n in names(Gustavo.Fringe)
+        @test n in names(Gustavo.Streaming)
+        @test getproperty(Gustavo.Fringe, n) === getproperty(Gustavo.Streaming, n)
+    end
+
+    # The four submodules, named at the top level.
+    for n in (:UVData, :Calibration, :Streaming, :Fringe)
+        @test n in top
+    end
+
+    # Every axis name a stored or returned array can carry, so scripts index
+    # leaves with a bare `using Gustavo`. `Ti` is DimensionalData's dim under
+    # both names — the same binding, so no ambiguity when both are loaded.
+    for n in (:Pol, :Frequency, :Ant, :Baseline, :Ti, :UVW, :Feed, :Scan)
+        @test n in top
+        @test getproperty(Gustavo, n) <: DimensionalData.Dimension
+    end
+    @test Gustavo.Ti === DimensionalData.Ti
+
+    # Solver-internal parameter bookkeeping: still reachable, no longer exported.
+    @test !(:ComponentPlan in names(Gustavo.Calibration))
+    @test Gustavo.Calibration.ComponentPlan isa Type
+
+    # The term-authoring interface: the hooks a new `AbstractGainTerm`
+    # implements, exported as Gustavo's documented extension point.
+    for n in (:term_axes, :param_shapes, :term_eval, :term_label, :freq_coordinate, :time_coordinate)
+        @test n in names(Gustavo.Calibration)
+    end
+    @test !(:nparams_per_block in names(Gustavo.Calibration))
+    @test Gustavo.Calibration.nparams_per_block isa Function
 end
 
-@testset "Bandpass mixed-time spec (commit 2 of α refactor)" begin
-    BP = Gustavo.Bandpass
-
-    # Mixing GlobalTime and PerScanTime components within a single spec
-    # is allowed under commit 2 — the solver routes global components
-    # into the template fit and per-scan components into the per-scan
-    # deviation fit.
-    gt = BP.GlobalTimeSegmentation()
-    ps = BP.PerScanTimeSegmentation()
-    bf4 = BP.BlockFrequencySegmentation(4)
-    composite = BP.CompositeBandpassModel(
-        BP.SegmentedBandpassModel(BP.FlatBandpassModel(),        gt, bf4),
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), ps, bf4),
-    )
-    spec = BP.BandpassSpec(composite)
-
-    # Spec construction is no longer rejected by the validator.
-    spec_amp = BP.BandpassSpec(BP.SegmentedBandpassModel(
-        BP.PerChannelBandpassModel(), gt, BP.GlobalFrequencySegmentation(),
-    ))
-    feed = BP.FeedBandpassModel(phase = spec, amplitude = spec_amp)
-    @test feed isa BP.FeedBandpassModel
-
-    # Mixed time means the spec is "per-scan" overall (any component
-    # per-scan ⇒ phase_variable_mask is set), but spec_time_segmentation
-    # returns nothing, and spec_time_label lists both.
-    @test BP.phase_is_per_scan(feed)
-    @test BP.spec_time_segmentation(spec) === nothing
-    @test BP.spec_time_label(spec) == "global+per_scan"
-
-    # Internal helper: filtering by mode pulls only the global or the
-    # per-scan components.
-    comps_global  = Gustavo.Bandpass._components_for_mode(spec, :template)
-    comps_perscan = Gustavo.Bandpass._components_for_mode(spec, :per_scan)
-    comps_full    = Gustavo.Bandpass._components_for_mode(spec, :full)
-    @test length(comps_global) == 1 && comps_global[1].model isa BP.FlatBandpassModel
-    @test length(comps_perscan) == 1 && comps_perscan[1].model isa BP.PolynomialBandpassModel
-    @test length(comps_full) == 2
-end
-
-@testset "Per-scan projection: identity template when no global components" begin
-    # Regression for commit-2 bug 1: an all-per-scan spec was using the
-    # unrefined `template_gains` slot as `frozen`, fitting only the
-    # residual (track − unrefined_template) onto a demeaned per-scan
-    # basis. Because the unrefined `frozen` is generally not in the
-    # basis span, the fitted total deviated from the equivalent direct
-    # fit on `track`. The fix: `_phase_frozen` / `_amp_frozen` return
-    # `nothing` when the spec has no global components, routing the
-    # projection through the direct (full-track) fit.
-    BP = Gustavo.Bandpass
-    nchan = 16
-
-    spec_perscan_only = BP.BandpassSpec(BP.SegmentedBandpassModel(
-        BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation(),
-    ))
-    spec_with_global = BP.BandpassSpec(BP.CompositeBandpassModel(
-        BP.SegmentedBandpassModel(BP.FlatBandpassModel(),        BP.GlobalTimeSegmentation(),  BP.GlobalFrequencySegmentation()),
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation()),
-    ))
-
-    weights = ones(nchan)
-    # Concrete template_gains shape (chan, ant, feed) with non-trivial
-    # values that should be IGNORED when the spec has no global components.
-    template_gains = fill(2.0 * cis(1.7), nchan, 1, 2)
-
-    @test BP.Bandpass._phase_frozen(template_gains, 1, 1, :per_scan, weights, spec_perscan_only) === nothing
-    @test BP.Bandpass._phase_frozen(nothing, 1, 1, :per_scan, weights, spec_perscan_only) === nothing
-    @test BP.Bandpass._amp_frozen(template_gains, 1, 1, :per_scan, spec_perscan_only) === nothing
-    @test BP.Bandpass._amp_frozen(nothing, 1, 1, :per_scan, spec_perscan_only) === nothing
-
-    # When the spec carries global components, frozen tracks the template.
-    frozen_phase = BP.Bandpass._phase_frozen(template_gains, 1, 1, :per_scan, weights, spec_with_global)
-    @test frozen_phase isa AbstractVector{Float64}
-    @test all(isapprox.(frozen_phase, 1.7; atol = 1e-12))
-
-    frozen_amp = BP.Bandpass._amp_frozen(template_gains, 1, 1, :per_scan, spec_with_global)
-    @test frozen_amp isa AbstractVector{Float64}
-    @test all(isapprox.(frozen_amp, log(2.0); atol = 1e-12))
-
-    # Non-:per_scan modes never produce a frozen track.
-    @test BP.Bandpass._phase_frozen(template_gains, 1, 1, :template, weights, spec_with_global) === nothing
-    @test BP.Bandpass._phase_frozen(template_gains, 1, 1, :full,     weights, spec_with_global) === nothing
-end
-
-@testset "Per-scan projection is invariant under 2π unwrap branch shift" begin
-    # Regression for commit-2 bug 2: independent unwraps of `track` and
-    # `template_phase` could land 2π apart globally, leaking a constant
-    # offset that the demeaned per-scan basis cannot absorb. The fix:
-    # `_fit_phase_track_with_frozen` computes the deviation as
-    # `mod(track − frozen + π, 2π) − π`, the wrap-correct phase
-    # difference, so any 2π shift in `frozen` cancels.
-    BP = Gustavo.Bandpass
-    nchan = 16
-    freqs = collect(range(220.0, 230.0; length = nchan))
-    weights = ones(nchan)
-
-    components = (
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation()),
-    )
-
-    # A wrapped per-scan gain phase track and a corresponding "template"
-    # phase that, on its own unwrap branch, is a smooth slope — a stand-in
-    # for what the template solve produces.
-    true_template = collect(range(-0.4, 0.4; length = nchan))
-    deviation_true = 0.05 .* sin.(2π .* (freqs .- minimum(freqs)) ./ (maximum(freqs) - minimum(freqs)))
-    track = mod.(true_template .+ deviation_true .+ π, 2π) .- π   # wrapped
-
-    # Two equivalent unwrap branches for the template.
-    frozen_a = copy(true_template)
-    frozen_b = true_template .+ 2π          # offset by exactly 2π globally
-
-    fitted_a = BP.Bandpass._fit_phase_track_with_frozen(track, weights, freqs, components, frozen_a)
-    fitted_b = BP.Bandpass._fit_phase_track_with_frozen(track, weights, freqs, components, frozen_b)
-
-    # The fitted total should be the same modulo the 2π offset of the
-    # frozen branch — i.e., `cis(fitted_a) ≈ cis(fitted_b)`.
-    @test maximum(abs.(cis.(fitted_a) .- cis.(fitted_b))) < 1e-10
-
-    # And the fitted total should reproduce the underlying (template + dev)
-    # within thermal-noise-free precision when the deviation lives in the
-    # basis span.
-    poly2 = (
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), BP.GlobalFrequencySegmentation()),
-    )
-    expected_total = true_template .+ deviation_true
-    @test maximum(abs.(cis.(fitted_a) .- cis.(expected_total))) < 0.05
-end
-
-@testset "Bandpass per-scan demeaning enforces G3" begin
-    # Per-scan components must produce a basis whose every column has
-    # zero uniform whole-band mean — this is the model-side enforcement
-    # of the user's G3 invariant (per-(ant, feed) band-mean is
-    # time-invariant, so band-averaging visibilities is unchanged by
-    # bandpass application up to a baseline-level constant).
-    BP = Gustavo.Bandpass
-    freq = BP.BlockFrequencySegmentation(4)
-    nchan = 8
-    x = collect(1.0:nchan)
-    valid = trues(nchan)
-
-    # Global-time component: columns NOT demeaned — band-mean nonzero.
-    global_comp = BP.SegmentedBandpassModel(
-        BP.FlatBandpassModel(), BP.GlobalTimeSegmentation(), freq,
-    )
-    cols_g = BP.component_design_columns(global_comp, x, valid)
-    @test all(abs(sum(c) / nchan) > 1e-12 for c in cols_g)
-
-    # Per-scan time component: every column demeaned to zero band-mean.
-    per_scan_comp = BP.SegmentedBandpassModel(
-        BP.FlatBandpassModel(), BP.PerScanTimeSegmentation(), freq,
-    )
-    cols_p = BP.component_design_columns(per_scan_comp, x, valid)
-    @test all(abs(sum(c) / nchan) < 1e-12 for c in cols_p)
-
-    # Demeaned `Flat × Block(N)` columns sum to zero — the post-fit rank
-    # trim drops one. fit_phase_model handles that internally; here we
-    # verify the columns themselves carry the demean.
-    poly_per_scan = BP.SegmentedBandpassModel(
-        BP.PolynomialBandpassModel(3), BP.PerScanTimeSegmentation(), freq,
-    )
-    cols_poly = BP.component_design_columns(poly_per_scan, x, valid)
-    @test all(abs(sum(c) / nchan) < 1e-12 for c in cols_poly)
-end
-
-@testset "Bandpass time segmentation" begin
-    BP = Gustavo.Bandpass
-    poly1 = BP.PolynomialBandpassModel(1)
-    global_freq = BP.GlobalFrequencySegmentation()
-    per_scan_phase_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
-        poly1, BP.PerScanTimeSegmentation(), global_freq,
-    ))
-    global_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
-        poly1, BP.GlobalTimeSegmentation(), global_freq,
-    ))
-    model = BP.StationBandpassModel(
-        reference_feed = 1,
-        reference = BP.FeedBandpassModel(
-            phase = per_scan_phase_spec,
-            amplitude = global_spec,
-        ),
-        relative = BP.FeedBandpassModel(
-            phase = global_spec,
-            amplitude = global_spec,
-        ),
-    )
-
-    @test BP.phase_is_per_scan(model.reference)
-    @test !BP.amplitude_is_per_scan(model.reference)
-    @test !BP.phase_is_per_scan(model.relative)
-    @test occursin("abs(phase=poly1, phase_time=per_scan, amp=poly1, amp_time=global)", BP.station_model_summary("AA", model))
-
-    gain_slice = ComplexF64[
-        2.0 * cis(0.1) 3.0 * cis(0.2)
-        4.0 * cis(0.3) 5.0 * cis(0.4);
-
-        6.0 * cis(0.5) 7.0 * cis(0.6)
-        8.0 * cis(0.7) 9.0 * cis(0.8)
-    ]
-    gain_slice = reshape(gain_slice, 2, 2, 2)
-
-    scan_gains = ComplexF64[
-        20.0 * cis(1.1) 30.0 * cis(1.2)
-        40.0 * cis(1.3) 50.0 * cis(1.4);
-
-        60.0 * cis(1.5) 70.0 * cis(1.6)
-        80.0 * cis(1.7) 90.0 * cis(1.8)
-    ]
-    scan_gains = reshape(scan_gains, 2, 2, 2)
-    solved = trues(2, 2, 2)
-    phase_variable_mask = Bool[1 0; 0 0]
-    amplitude_variable_mask = Bool[0 0; 0 1]
-
-    BP.merge_scan_gains!(gain_slice, scan_gains, solved, phase_variable_mask, amplitude_variable_mask)
-
-    @test abs(gain_slice[1, 1, 1]) ≈ 2.0
-    @test angle(gain_slice[1, 1, 1]) ≈ 1.1
-    @test abs(gain_slice[2, 2, 2]) ≈ 90.0
-    @test angle(gain_slice[2, 2, 2]) ≈ 0.8
-end
-
-@testset "Bandpass stability plots" begin
-    BP = Gustavo.Bandpass
+@testset "Baseline stability plots" begin
     UV = Gustavo.UVData
     data = synthetic_uvdata()
-    corr = UV.apply((leaf, _info, _meta) -> UV.with_visibilities(leaf, parent(leaf[:vis]) .* (1.0 + 0.0im), parent(leaf[:weights])), data)
+    corr = UV.apply((leaf, _info, _meta) -> UV.rebuild_visibilities(leaf, parent(leaf[:vis]) .* (1.0 + 0.0im), parent(leaf[:weights])), data)
 
-    # Plot helpers operate on UVSet directly. The resolver tests below
-    # also accept a UVSet (via the _DataLike accessors).
     gains = reshape(
         ComplexF64[
             1.0 * cis(0.1), 2.0 * cis(0.2),
@@ -511,30 +286,30 @@ end
         ], 2, 2, 2, 2
     )
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = :parallel)
+    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = :parallel)
     @test pol_idx == [1, 4]
     @test pol_labels == ["PP", "QQ"]
 
-    pol_idx, pol_labels = BP.resolve_plot_polarizations(data; pol = ["QQ", "PQ"])
+    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = ["QQ", "PQ"])
     @test pol_idx == [4, 2]
     @test pol_labels == ["QQ", "PQ"]
 
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
-    @test !isnothing(BP.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
-    @test !isnothing(BP.plot_gain_solutions(gains, data))
-    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
-    @test !isnothing(BP.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
+    @test !isnothing(UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
+    @test !isnothing(UV.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
+    @test !isnothing(UV.plot_gain_solutions(gains, data))
+    @test !isnothing(UV.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
+    @test !isnothing(UV.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
     fig_embed = Figure(size = (1400, 500))
-    @test !isnothing(BP.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
-    @test !isnothing(BP.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
+    @test !isnothing(UV.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
+    @test !isnothing(UV.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 
-    fig = BP.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP")
+    fig = UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP")
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig)
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig_embed)
 end
 
 @testset "Amplitude stability summary" begin
-    BP = Gustavo.Bandpass
+    UV = Gustavo.UVData
     vis_block = ComplexF64[
         1.0 + 0.0im 2.0 + 0.0im;
         -1.0 + 0.0im -2.0 + 0.0im
@@ -542,752 +317,61 @@ end
     weight_block = ones(Float64, 2, 2)
     groups = [1, 2]
 
-    summary = BP.scan_averaged_amplitude_series(vis_block, weight_block; relative = false, groups = groups)
+    summary = UV.scan_averaged_amplitude_series(vis_block, weight_block; relative = false, groups = groups)
     @test summary ≈ [1.0, 2.0]
 
     noise_vis = reshape(ComplexF64[1.0 + 0.0im, 2.0 + 0.0im], 1, 2)
     noise_weights = fill(2.0, 1, 2)
 
-    _, amp_noise = BP.amplitude_series_with_noise(noise_vis, noise_weights; relative = false)
+    _, amp_noise = UV.amplitude_series_with_noise(noise_vis, noise_weights; relative = false)
     @test amp_noise ≈ fill(1 / sqrt(2), 2)
 
-    rel_amp, rel_amp_noise = BP.amplitude_series_with_noise(noise_vis, noise_weights; relative = true)
+    rel_amp, rel_amp_noise = UV.amplitude_series_with_noise(noise_vis, noise_weights; relative = true)
     @test rel_amp ≈ [1.0, 2.0]
     @test rel_amp_noise ≈ [0.0, 1 / sqrt(2)]
 
-    phase, phase_noise = BP.phase_series_with_noise(noise_vis, noise_weights; relative = false)
+    phase, phase_noise = UV.phase_series_with_noise(noise_vis, noise_weights; relative = false)
     @test phase ≈ [0.0, 0.0]
     @test phase_noise ≈ [1 / sqrt(2), 1 / (2sqrt(2))]
 
-    rel_phase, rel_phase_noise = BP.phase_series_with_noise(noise_vis, noise_weights; relative = true)
+    rel_phase, rel_phase_noise = UV.phase_series_with_noise(noise_vis, noise_weights; relative = true)
     @test rel_phase ≈ [0.0, 0.0]
     @test rel_phase_noise ≈ [0.0, 1 / (2sqrt(2))]
 end
 
 @testset "Diagnostics series y-limits" begin
-    BP = Gustavo.Bandpass
+    UV = Gustavo.UVData
 
-    ylims = BP.finite_series_ylims(([1.0, 2.0, NaN], [4.0]); pad_fraction = 0.1, min_pad = 0.0)
+    ylims = UV.finite_series_ylims(([1.0, 2.0, NaN], [4.0]); pad_fraction = 0.1, min_pad = 0.0)
     @test collect(ylims) ≈ [0.7, 4.3]
 
-    ylims_noise = BP.finite_series_ylims(([1.0, 1.0],), ([10.0, 0.2],); pad_fraction = 0.1, min_pad = 0.0, noise_cap_fraction = 0.5)
+    ylims_noise = UV.finite_series_ylims(([1.0, 1.0],), ([10.0, 0.2],); pad_fraction = 0.1, min_pad = 0.0, noise_cap_fraction = 0.5)
     @test collect(ylims_noise) ≈ [0.4, 1.6]
 
-    @test isnothing(BP.finite_series_ylims(([NaN], [Inf, -Inf])))
-    @test isequal(BP.shared_track(([1.0, 2.0, NaN], [1.0, 2.0, NaN])), [1.0, 2.0, NaN])
-    @test isnothing(BP.shared_track(([1.0, 2.0], [1.0, 3.0])))
+    @test isnothing(UV.finite_series_ylims(([NaN], [Inf, -Inf])))
+    @test isequal(UV.shared_track(([1.0, 2.0, NaN], [1.0, 2.0, NaN])), [1.0, 2.0, NaN])
+    @test isnothing(UV.shared_track(([1.0, 2.0], [1.0, 3.0])))
 end
 
-@testset "Parallel-hand log-ratio weights" begin
-    BP = Gustavo.Bandpass
-
-    vis = zeros(ComplexF64, 2, 1, 2)
-    vis[1, 1, 1] = 2.0 + 0.0im
-    vis[1, 1, 2] = 4.0 + 0.0im
-    vis[2, 1, 1] = 0.0 + 0.0im
-    vis[2, 1, 2] = 3.0 + 0.0im
-
-    weights = zeros(Float64, 2, 1, 2)
-    weights[1, 1, 1] = 9.0
-    weights[1, 1, 2] = 16.0
-    weights[2, 1, 1] = 25.0
-    weights[2, 1, 2] = 36.0
-
-    # Wrap as DimArrays (Baseline × Pol × IF) so collect_parallel_hand_rows'
-    # dim-agnostic loop sees named axes — exercising the same code path the
-    # solver hits on real data.
-    bl_dim = Baseline(["A", "B"])
-    pol_dim = Pol(["PP"])
-    if_dim = Frequency([1.0, 2.0])
-    vis_d = DimArray(vis, (bl_dim, pol_dim, if_dim))
-    weights_d = DimArray(weights, (bl_dim, pol_dim, if_dim))
-
-    ratios, row_weights, rows = BP.collect_parallel_hand_rows(vis_d, weights_d, 1, 1, 2)
-    weights_shifted_ref = copy(weights)
-    weights_shifted_ref[1, 1, 1] = 1.0e6
-    weights_shifted_d = DimArray(weights_shifted_ref, (bl_dim, pol_dim, if_dim))
-    _, shifted_ref_row_weights, _ = BP.collect_parallel_hand_rows(vis_d, weights_shifted_d, 1, 1, 2)
-
-    expected_variance = inv(16.0 * abs2(4.0 + 0.0im)) + inv(9.0 * abs2(2.0 + 0.0im))
-    expected_weight = inv(expected_variance)
-    shifted_ref_variance = inv(16.0 * abs2(4.0 + 0.0im)) + inv(1.0e6 * abs2(2.0 + 0.0im))
-    shifted_ref_weight = inv(shifted_ref_variance)
-
-    @test ratios == ComplexF64[2.0 + 0.0im]
-    @test row_weights ≈ [expected_weight]
-    @test shifted_ref_row_weights ≈ [shifted_ref_weight]
-    @test shifted_ref_row_weights[1] > row_weights[1]
-    @test rows == [1]
-
-    double_ratio_weight = BP.propagated_log_double_ratio_weight(
-        5.0 + 0.0im, 25.0,
-        4.0 + 0.0im, 16.0,
-        2.0 + 0.0im, 9.0,
-        3.0 + 0.0im, 36.0
-    )
-    expected_double_variance = (
-        inv(25.0 * abs2(5.0 + 0.0im)) +
-            inv(16.0 * abs2(4.0 + 0.0im)) +
-            inv(9.0 * abs2(2.0 + 0.0im)) +
-            inv(36.0 * abs2(3.0 + 0.0im))
-    )
-    @test double_ratio_weight ≈ inv(expected_double_variance)
-end
-
-@testset "Zero-mean bandpass gauge" begin
-    BP = Gustavo.Bandpass
-
-    # gains layout: (Frequency, Ant, Feed) = (3, 1, 2). Each pair of three
-    # consecutive complex values forms a feed track at the single antenna.
-    gains = permutedims(
-        reshape(
-            ComplexF64[
-                exp(1.0) * cis(0.7), exp(2.0) * cis(1.2), exp(3.0) * cis(1.7),
-                exp(-0.5) * cis(-0.2), exp(0.0) * cis(0.3), exp(0.5) * cis(0.8),
-            ],
-            1, 2, 3
-        ),
-        (3, 1, 2),
-    )
-    support = ones(Float64, 1, 2, 3)
-
-    BP.apply_zero_mean_bandpass_gauge!(gains, support)
-
-    for feed in 1:2
-        log_amp = log.(abs.(gains[:, 1, feed]))
-        phase = BP.unwrap_phase_track(vec(angle.(gains[:, 1, feed])))
-        @test abs(sum(log_amp) / length(log_amp)) < 1.0e-12
-        @test abs(sum(phase) / length(phase)) < 1.0e-12
-    end
-
-    # gains4 layout: (Frequency, Ti, Ant, Feed) = (3, 2, 1, 2).
-    gains4 = permutedims(
-        reshape(
-            ComplexF64[
-                exp(1.0) * cis(0.2), exp(2.0) * cis(0.4), exp(3.0) * cis(0.6),
-                exp(0.0) * cis(-0.1), exp(0.5) * cis(0.1), exp(1.0) * cis(0.3),
-
-                exp(1.5) * cis(0.7), exp(2.5) * cis(0.9), exp(3.5) * cis(1.1),
-                exp(-0.5) * cis(-0.4), exp(0.0) * cis(-0.2), exp(0.5) * cis(0.0),
-            ],
-            2, 1, 2, 3
-        ),
-        (4, 1, 2, 3),
-    )
-    BP.apply_zero_mean_bandpass_gauge!(gains4, support)
-
-    for scan in 1:2, feed in 1:2
-        log_amp = log.(abs.(gains4[:, scan, 1, feed]))
-        phase = BP.unwrap_phase_track(vec(angle.(gains4[:, scan, 1, feed])))
-        @test abs(sum(log_amp) / length(log_amp)) < 1.0e-12
-        @test abs(sum(phase) / length(phase)) < 1.0e-12
-    end
-end
-
-@testset "Reference-antenna bandpass gauge" begin
-    BP = Gustavo.Bandpass
-
-    # gains layout: (Frequency, Ant, Feed) = (3, 2, 2).
-    gains = permutedims(
-        reshape(
-            ComplexF64[
-                exp(1.0) * cis(0.7), exp(2.0) * cis(1.2), exp(3.0) * cis(1.7),
-                exp(-0.5) * cis(-0.2), exp(0.0) * cis(0.3), exp(0.5) * cis(0.8),
-
-                exp(0.1) * cis(-0.4), exp(0.2) * cis(-0.1), exp(0.3) * cis(0.2),
-                exp(-0.7) * cis(0.5), exp(-0.2) * cis(0.8), exp(0.1) * cis(1.1),
-            ],
-            2, 2, 3
-        ),
-        (3, 1, 2),
-    )
-    support = ones(Float64, 2, 2, 3)
-    gains_gauged = copy(gains)
-
-    BP.apply_bandpass_gauge!(gains_gauged, support, BP.ReferenceAntennaBandpassGauge(2))
-
-    for feed in 1:2
-        log_amp = log.(abs.(gains_gauged[:, 2, feed]))
-        phase = BP.unwrap_phase_track(vec(angle.(gains_gauged[:, 2, feed])))
-        @test abs(sum(log_amp) / length(log_amp)) < 1.0e-12
-        @test abs(sum(phase) / length(phase)) < 1.0e-12
-
-        for c in axes(gains, 1)
-            @test gains_gauged[c, 1, feed] / gains_gauged[c, 2, feed] ≈ gains[c, 1, feed] / gains[c, 2, feed]
-        end
-    end
-
-    validated = BP.validate_bandpass_gauge(BP.ReferenceAntennaBandpassGauge(2), 3)
-    @test validated isa BP.ReferenceAntennaBandpassGauge
-    @test validated.ref_ant == 2
-    @test_throws ErrorException BP.validate_bandpass_gauge(BP.ReferenceAntennaBandpassGauge(4), 3)
-end
-
-@testset "Solve parallel-hand channel ratios" begin
-    BP = Gustavo.Bandpass
-
-    nant = 3
-    bl_pairs = [(1, 2), (1, 3), (2, 3)]
-    npol = 2
-    nchan = 6
-    c0 = 1
-
-    gains_true = Array{ComplexF64}(undef, nant, nchan)
-    for c in 1:nchan
-        gains_true[1, c] = (0.95 + 0.03c) * cis(0.04 * (c - 1))
-        gains_true[2, c] = (1.1 + 0.02c) * cis(0.1 + 0.05 * (c - 1))
-        gains_true[3, c] = (0.85 - 0.02c) * cis(-0.08 - 0.04 * (c - 1))
-    end
-    A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
-    station_models = [default_station_model_for_tests() for _ in 1:nant]
-
-    # Vscan_arr layout: (Frequency, Baseline, Pol). gains_scan layout:
-    # (Frequency, Ant, Feed). 3-D single-Ti slice.
-    Vscan_arr = ones(ComplexF64, nchan, length(bl_pairs), npol)
-    source_scan = ComplexF64[1.5 * cis(0.3), 0.6 * cis(-0.4), 1.2 * cis(0.1)]
-    for (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
-        Vscan_arr[c, bi, pol] = source_scan[bi] * gains_true[a, c] * conj(gains_true[b, c])
-    end
-    Wscan_arr = ones(Float64, size(Vscan_arr))
-    Vscan = DimArray(Vscan_arr, (Frequency(Float64.(1:nchan)), Baseline(["AB", "AC", "BC"]), Pol(["PP", "QQ"])))
-    Wscan = DimArray(Wscan_arr, dims(Vscan))
-    gains_scan = ones(ComplexF64, nchan, nant, 2)
-    ref_gauge = BP.ReferenceAntennaBandpassGauge(1)
-
-    for c in 1:nchan
-        c == c0 && continue
-        BP.solve_parallel_channel!(
-            gains_scan, nothing, Vscan, Wscan, bl_pairs, nant, ref_gauge, c0, c, A_amp, A_phase,
-            station_models, (1, 2); min_baselines = 3
-        )
-    end
-
-    for feed in 1:2
-        @test gains_scan[c0, :, feed] ≈ ones(ComplexF64, nant) atol = 1.0e-10
-        for c in 1:nchan
-            c == c0 && continue
-            for (bi, (a, b)) in enumerate(bl_pairs)
-                solved_ratio = gains_scan[c, a, feed] * conj(gains_scan[c, b, feed])
-                expected_ratio = (
-                    gains_true[a, c] * conj(gains_true[b, c]) /
-                        (gains_true[a, c0] * conj(gains_true[b, c0]))
-                )
-                @test solved_ratio ≈ expected_ratio atol = 1.0e-10
-            end
-        end
-    end
-
-    # Vtemplate_arr layout: (Frequency, Ti, Baseline, Pol). 4-D path.
-    nscan = 2
-    Vtemplate_arr = ones(ComplexF64, nchan, nscan, length(bl_pairs), npol)
-    source_template = reshape(
-        ComplexF64[
-            1.5 * cis(0.3), 0.6 * cis(-0.4), 1.2 * cis(0.1),
-            0.7 * cis(-0.2), 1.1 * cis(0.5), 0.9 * cis(-0.3),
-        ],
-        nscan, length(bl_pairs)
-    )
-    for s in 1:nscan, (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
-        Vtemplate_arr[c, s, bi, pol] = source_template[s, bi] * gains_true[a, c] * conj(gains_true[b, c])
-    end
-    Wtemplate_arr = ones(Float64, size(Vtemplate_arr))
-    Vtemplate = DimArray(Vtemplate_arr, (Frequency(Float64.(1:nchan)), Ti(Float64.(1:nscan)), Baseline(["AB", "AC", "BC"]), Pol(["PP", "QQ"])))
-    Wtemplate = DimArray(Wtemplate_arr, dims(Vtemplate))
-    gains_template = ones(ComplexF64, nchan, nant, 2)
-
-    for c in 1:nchan
-        c == c0 && continue
-        BP.solve_parallel_channel!(
-            gains_template, nothing, Vtemplate, Wtemplate, bl_pairs, nant, ref_gauge, c0, c, A_amp, A_phase,
-            station_models, (1, 2); min_baselines = 3
-        )
-    end
-
-    for feed in 1:2
-        @test gains_template[c0, :, feed] ≈ ones(ComplexF64, nant) atol = 1.0e-10
-        for c in 1:nchan
-            c == c0 && continue
-            for (bi, (a, b)) in enumerate(bl_pairs)
-                solved_ratio = gains_template[c, a, feed] * conj(gains_template[c, b, feed])
-                expected_ratio = (
-                    gains_true[a, c] * conj(gains_true[b, c]) /
-                        (gains_true[a, c0] * conj(gains_true[b, c0]))
-                )
-                @test solved_ratio ≈ expected_ratio atol = 1.0e-10
-            end
-        end
-    end
-end
-
-@testset "Joint ALS bandpass refinement" begin
-    BP = Gustavo.Bandpass
-
-    nant = 3
-    bl_pairs = [(1, 2), (1, 3), (2, 3)]
-    nchan = 6
-    pol_products_v = ["PP", "PQ", "QP", "QQ"]
-    npol = length(pol_products_v)
-    c0 = 1
-
-    # gains_true layout: (Frequency, Ant, Feed) = (nchan, nant, 2).
-    gains_true = Array{ComplexF64}(undef, nchan, nant, 2)
-    for c in 1:nchan
-        gains_true[c, 1, 1] = (0.95 + 0.02c) * cis(0.03 * (c - 1))
-        gains_true[c, 2, 1] = (1.05 + 0.01c) * cis(0.14 + 0.04 * (c - 1))
-        gains_true[c, 3, 1] = (0.88 - 0.015c) * cis(-0.09 - 0.05 * (c - 1))
-
-        gains_true[c, 1, 2] = gains_true[c, 1, 1] * (1.1 - 0.01c) * cis(0.2 + 0.02 * (c - 1))
-        gains_true[c, 2, 2] = gains_true[c, 2, 1] * (0.92 + 0.015c) * cis(-0.15 + 0.01 * (c - 1))
-        gains_true[c, 3, 2] = gains_true[c, 3, 1] * (1.04 - 0.005c) * cis(0.11 - 0.03 * (c - 1))
-    end
-
-    source_true = zeros(ComplexF64, length(bl_pairs), 2, 2)
-    source_true[1, :, :] .= ComplexF64[1.5 * cis(0.2) 0.3 * cis(-0.4); 0.25 * cis(0.1) 0.9 * cis(0.3)]
-    source_true[2, :, :] .= ComplexF64[0.7 * cis(-0.1) 0.2 * cis(0.5); 0.15 * cis(-0.2) 1.2 * cis(-0.3)]
-    source_true[3, :, :] .= ComplexF64[1.1 * cis(0.4) 0.35 * cis(0.2); 0.18 * cis(-0.5) 0.8 * cis(0.15)]
-
-    # V_arr layout: (Frequency, Baseline, Pol). 3-D single-Ti slice.
-    V_arr = zeros(ComplexF64, nchan, length(bl_pairs), npol)
-    for (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
-        fa, fb = BP.correlation_feed_pair(pol_products_v[pol])
-        V_arr[c, bi, pol] = gains_true[c, a, fa] * source_true[bi, fa, fb] * conj(gains_true[c, b, fb])
-    end
-    W_arr = ones(Float64, size(V_arr))
-    V = DimArray(V_arr, (Frequency(Float64.(1:nchan)), Baseline(["AB", "AC", "BC"]), Pol(pol_products_v)))
-    W = DimArray(W_arr, dims(V))
-
-    gains_init = ones(ComplexF64, nchan, nant, 2)
-    A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
-    station_models = [default_station_model_for_tests() for _ in 1:nant]
-    parallel_pols = (1, 2)
-
-    for c in 1:nchan
-        c == c0 && continue
-        BP.solve_parallel_channel!(
-            gains_init, nothing, V, W, bl_pairs, nant, BP.ReferenceAntennaBandpassGauge(1), c0, c, A_amp, A_phase,
-            station_models, parallel_pols; min_baselines = 3
-        )
-    end
-
-    source_init = BP.allocate_source_coherencies(V)
-    BP.solve_source_coherencies!(source_init, gains_init, V, W, bl_pairs, pol_products_v)
-    objective_before = BP.joint_bandpass_objective(gains_init, source_init, V, W, bl_pairs, pol_products_v)
-
-    gains_before = copy(gains_init)
-    support = BP.antenna_feed_support_weights(W, bl_pairs, pol_products_v, nant)
-    gains_expected = copy(gains_true)
-    BP.apply_zero_mean_bandpass_gauge!(gains_expected, support)
-    gains_before_gauged = copy(gains_before)
-    BP.apply_zero_mean_bandpass_gauge!(gains_before_gauged, support)
-    error_before = norm(gains_before_gauged .- gains_expected)
-
-    BP.refine_joint_bandpass_als!(
-        gains_init, nothing, V, W, bl_pairs, pol_products_v,
-        station_models, Float64.(1:nchan), parallel_pols, nothing;
-        max_iterations = 12, tolerance = 1.0e-10,
-    )
-
-    source_final = BP.allocate_source_coherencies(V)
-    BP.solve_source_coherencies!(source_final, gains_init, V, W, bl_pairs, pol_products_v)
-    objective_after = BP.joint_bandpass_objective(gains_init, source_final, V, W, bl_pairs, pol_products_v)
-
-    gains_estimated = copy(gains_init)
-    BP.apply_zero_mean_bandpass_gauge!(gains_estimated, support)
-    error_after = norm(gains_estimated .- gains_expected)
-
-    @test objective_after <= objective_before + 1.0e-10
-    @test error_after < error_before
-end
-
-@testset "Model-aware ALS keeps gains in user-specified subspace" begin
-    BP = Gustavo.Bandpass
+@testset "Reference-relative series" begin
     UV = Gustavo.UVData
 
-    nant = 4
-    bl_pairs = [(a, b) for a in 1:nant, b in 1:nant if a < b]
-    nchan = 16
-    pol_products_v = ["PP", "PQ", "QP", "QQ"]
-    npol = length(pol_products_v)
-    c0 = 1
-    parallel_pols = (1, 4)
-    chan_freqs = collect(Float64, 1:nchan)
+    # `Calibration` re-exports the phase referencing helper from `UVData`.
+    @test Gustavo.Calibration.phase_relative_to_ref === UV.phase_relative_to_ref
 
-    # True bandpass: pure global Composite(Flat ⊕ Poly2) for amp and phase.
-    α_amp = randn(nant, 2) * 0.05
-    β_amp = randn(nant, 2) * 0.02
-    γ_amp = randn(nant, 2) * 0.01
-    α_phs = randn(nant, 2) * 0.1
-    β_phs = randn(nant, 2) * 0.05
-    γ_phs = randn(nant, 2) * 0.02
-    x = chan_freqs .- chan_freqs[c0]
-    x_scaled = x ./ maximum(abs.(x))
-    gains_true = Array{ComplexF64}(undef, nchan, nant, 2)
-    for ant in 1:nant, feed in 1:2, c in 1:nchan
-        log_amp = α_amp[ant, feed] + β_amp[ant, feed] * x_scaled[c] + γ_amp[ant, feed] * x_scaled[c]^2
-        phs = α_phs[ant, feed] + β_phs[ant, feed] * x_scaled[c] + γ_phs[ant, feed] * x_scaled[c]^2
-        gains_true[c, ant, feed] = exp(log_amp) * cis(phs)
-    end
+    @test UV.phase_relative_to_ref([0.5, 1.5, 2.5]) ≈ [0.0, 1.0, 2.0]
+    # Differences wrap into (-π, π].
+    @test UV.phase_relative_to_ref([0.0, 3π / 2]) ≈ [0.0, -π / 2]
+    # A non-finite reference falls through to the first finite entry.
+    @test UV.phase_relative_to_ref([NaN, 1.0, 2.0]) ≈ [NaN, 0.0, 1.0] nans = true
+    @test all(isnan, UV.phase_relative_to_ref([NaN, NaN]))
+    # ref_idx outside the axes yields all-NaN rather than throwing.
+    @test all(isnan, UV.phase_relative_to_ref([1.0, 2.0], 5))
 
-    # Diagonal source (parallel-hand only) so the test isolates the
-    # projection / per-channel-update interaction without the cross-hand
-    # coupling that slows convergence inside the constrained subspace.
-    source_true = zeros(ComplexF64, length(bl_pairs), 2, 2)
-    for (bi, _) in enumerate(bl_pairs)
-        source_true[bi, 1, 1] = 1.0 + 0im
-        source_true[bi, 2, 2] = 1.0 + 0im
-    end
-
-    V_arr = zeros(ComplexF64, nchan, length(bl_pairs), npol)
-    for (bi, (a, b)) in enumerate(bl_pairs), pol in 1:npol, c in 1:nchan
-        fa, fb = BP.correlation_feed_pair(pol_products_v[pol])
-        V_arr[c, bi, pol] = gains_true[c, a, fa] * source_true[bi, fa, fb] * conj(gains_true[c, b, fb])
-    end
-    W_arr = ones(Float64, size(V_arr))
-    V = DimArray(V_arr, (Frequency(chan_freqs), Baseline(string.("B", 1:length(bl_pairs))), Pol(pol_products_v)))
-    W = DimArray(W_arr, dims(V))
-
-    global_time = BP.GlobalTimeSegmentation()
-    global_freq = BP.GlobalFrequencySegmentation()
-    poly2 = BP.CompositeBandpassModel(
-        BP.SegmentedBandpassModel(BP.FlatBandpassModel(), global_time, global_freq),
-        BP.SegmentedBandpassModel(BP.PolynomialBandpassModel(2), global_time, global_freq),
-    )
-    feedmodel = BP.FeedBandpassModel(
-        phase = BP.BandpassSpec(poly2),
-        amplitude = BP.BandpassSpec(poly2),
-    )
-    station_models = [BP.StationBandpassModel(reference_feed = 1, reference = feedmodel, relative = feedmodel) for _ in 1:nant]
-
-    gains = ones(ComplexF64, nchan, nant, 2)
-    A_amp, A_phase = BP.design_matrices(bl_pairs, nant)
-    for c in 1:nchan
-        c == c0 && continue
-        BP.solve_parallel_channel!(
-            gains, nothing, V, W, bl_pairs, nant, BP.ZeroMeanBandpassGauge(), c0, c, A_amp, A_phase,
-            station_models, parallel_pols; min_baselines = 3,
-        )
-    end
-
-    BP.refine_joint_bandpass_als!(
-        gains, nothing, V, W, bl_pairs, pol_products_v,
-        station_models, chan_freqs, parallel_pols, nothing;
-        max_iterations = 30, tolerance = 1.0e-12,
-    )
-
-    # The 3-parameter Composite(Flat+Poly2) basis spans 3 columns; the projection
-    # onto that subspace must reproduce log|g| and arg g exactly (mod gauge) for
-    # data generated with a Poly2 truth, modulo a constant phase shift per (ant, feed).
-    function poly2_residual(track, x_scaled)
-        # Project out {1, x, x²} via WLS, return residual norm (should ≈ 0).
-        B = hcat(ones(length(x_scaled)), x_scaled, x_scaled .^ 2)
-        coeffs = B \ track
-        return norm(track .- B * coeffs) / max(norm(track), 1.0)
-    end
-    for ant in 1:nant, feed in 1:2
-        log_amp_track = log.(abs.(gains[:, ant, feed]))
-        phase_track = BP.unwrap_phase_track(angle.(gains[:, ant, feed]))
-        @test poly2_residual(log_amp_track, x_scaled) < 1.0e-6
-        @test poly2_residual(phase_track, x_scaled) < 1.0e-6
-    end
-
-    # Now exercise the 4D Vblock path (multi-scan template fit). Same truth
-    # gains across scans; ALS must collapse to the same Poly2 subspace.
-    nti = 3
-    V4_arr = zeros(ComplexF64, nchan, nti, length(bl_pairs), npol)
-    W4_arr = ones(Float64, size(V4_arr))
-    for s in 1:nti
-        V4_arr[:, s, :, :] .= V_arr
-    end
-    V4 = DimArray(
-        V4_arr,
-        (Frequency(chan_freqs), Ti(Float64.(1:nti)), Baseline(string.("B", 1:length(bl_pairs))), Pol(pol_products_v))
-    )
-    W4 = DimArray(W4_arr, dims(V4))
-
-    gains4 = ones(ComplexF64, nchan, nant, 2)
-    for c in 1:nchan
-        c == c0 && continue
-        BP.solve_parallel_channel!(
-            gains4, nothing, V4, W4, bl_pairs, nant, BP.ZeroMeanBandpassGauge(), c0, c, A_amp, A_phase,
-            station_models, parallel_pols; min_baselines = 3,
-        )
-    end
-    BP.refine_joint_bandpass_als!(
-        gains4, nothing, V4, W4, bl_pairs, pol_products_v,
-        station_models, chan_freqs, parallel_pols, nothing;
-        max_iterations = 30, tolerance = 1.0e-12,
-    )
-    for ant in 1:nant, feed in 1:2
-        log_amp_track = log.(abs.(gains4[:, ant, feed]))
-        phase_track = BP.unwrap_phase_track(angle.(gains4[:, ant, feed]))
-        @test poly2_residual(log_amp_track, x_scaled) < 1.0e-6
-        @test poly2_residual(phase_track, x_scaled) < 1.0e-6
-    end
-end
-
-@testset "Prepared bandpass solver lifecycle" begin
-    BP = Gustavo.Bandpass
-    data = synthetic_bandpass_avg_uvdata()
-    ref_ant = 1
-    station_models = [default_station_model_for_tests() for _ in data.antennas]
-
-    setup = BP.prepare_bandpass_solver(
-        data,
-        ref_ant;
-        min_baselines = 3,
-        station_models = station_models
-    )
-    state = BP.initialize_bandpass_state(setup)
-    objective_before = BP.bandpass_state_objective(state)
-
-    BP.refine_bandpass!(setup, state, BP.BandpassALS(iterations = 2, tolerance = 1.0e-10))
-    objective_after = BP.bandpass_state_objective(state)
-    gains = BP.finalize_bandpass_state(setup, state)
-
-    gains_direct = BP.solve_bandpass(
-        data,
-        ref_ant;
-        min_baselines = 3,
-        station_models = station_models,
-        joint_als_iterations = 2,
-        joint_als_tolerance = 1.0e-10
-    )
-
-    @test objective_after <= objective_before + 1.0e-10
-    @test Array(gains) ≈ Array(gains_direct)
-
-    stats = BP.bandpass_fit_stats(setup, state)
-    merged_source = BP.allocate_source_coherencies(data.vis)
-    BP.solve_source_coherencies!(merged_source, state.gains, data.vis, data.weights, data.baselines.pairs, pol_products(data))
-    expected_chi2 = BP.joint_bandpass_objective(state.gains, merged_source, data.vis, data.weights, data.baselines.pairs, pol_products(data))
-    @test stats.chi2 ≈ expected_chi2
-    @test stats.nvis > 0
-    @test stats.nreal == 2 * stats.nvis
-    @test stats.nparams > 0
-    @test stats.dof > 0
-    @test stats.chi2_per_visibility ≈ stats.chi2 / stats.nvis
-    @test stats.chi2_per_real_component ≈ stats.chi2 / stats.nreal
-    @test stats.reduced_chi2 ≈ stats.chi2 / stats.dof
-end
-
-@testset "Bandpass fit stats parameter counting" begin
-    BP = Gustavo.Bandpass
-
-    @test BP.constrained_real_track_parameter_count(Bool[]) == 0
-    @test BP.constrained_real_track_parameter_count(trues(1)) == 0
-    @test BP.constrained_real_track_parameter_count(trues(4)) == 3
-
-    # 4-D layout: (Frequency, Ti, Baseline, Pol). Use 3 channels, 1 Ti,
-    # 1 baseline, 2 pols.
-    V = ones(ComplexF64, 3, 1, 1, 2)
-    W = ones(Float64, 3, 1, 1, 2)
-    pol_products_v = ["PP", "QQ"]
-    @test BP.observed_source_parameter_count(V, W, pol_products_v) == 4
-
-    data = synthetic_bandpass_avg_uvdata()
-    per_scan_phase_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
-        BP.PerChannelBandpassModel(),
-        BP.PerScanTimeSegmentation(),
-        BP.GlobalFrequencySegmentation(),
-    ))
-    global_amp_spec = BP.BandpassSpec(BP.SegmentedBandpassModel(
-        BP.PerChannelBandpassModel(),
-        BP.GlobalTimeSegmentation(),
-        BP.GlobalFrequencySegmentation(),
-    ))
-    per_scan_feed = BP.FeedBandpassModel(
-        phase = per_scan_phase_spec,
-        amplitude = global_amp_spec,
-    )
-    global_feed = BP.FeedBandpassModel(
-        phase = global_amp_spec,
-        amplitude = global_amp_spec,
-    )
-    station_models = [
-        default_station_model_for_tests(),
-        BP.StationBandpassModel(
-            reference_feed = 1,
-            reference = per_scan_feed,
-            relative = global_feed,
-        ),
-        default_station_model_for_tests(),
-    ]
-    setup = BP.prepare_bandpass_solver(
-        data,
-        1;
-        min_baselines = 3,
-        station_models = station_models
-    )
-    state = BP.initialize_bandpass_state(setup)
-
-    # gains_template layout: (Frequency, Ant, Feed). scan_gains/scan_solved:
-    # (Frequency, Ti, Ant, Feed). Slice along Frequency.
-    expected_gain_params = 0
-    for ant in axes(state.gains_template, 2), feed in axes(state.gains_template, 3)
-        valid_template = isfinite.(view(state.gains_template, :, ant, feed))
-        if !setup.amplitude_variable_mask[ant, feed]
-            expected_gain_params += BP.constrained_real_track_parameter_count(valid_template)
-        end
-        if !setup.phase_variable_mask[ant, feed]
-            expected_gain_params += BP.constrained_real_track_parameter_count(valid_template)
-        end
-        for s in axes(state.scan_gains, 2)
-            valid_scan = isfinite.(view(state.scan_gains, :, s, ant, feed)) .& view(state.scan_solved, :, s, ant, feed)
-            if setup.amplitude_variable_mask[ant, feed]
-                expected_gain_params += BP.constrained_real_track_parameter_count(valid_scan)
-            end
-            if setup.phase_variable_mask[ant, feed]
-                expected_gain_params += BP.constrained_real_track_parameter_count(valid_scan)
-            end
-        end
-    end
-
-    @test BP.effective_gain_parameter_count(setup, state) == expected_gain_params
-end
-
-@testset "Bandpass residual stats and plot" begin
-    BP = Gustavo.Bandpass
-    data = synthetic_bandpass_avg_uvdata()
-    ref_ant = 1
-    station_models = [default_station_model_for_tests() for _ in data.antennas]
-
-    setup = BP.prepare_bandpass_solver(
-        data,
-        ref_ant;
-        min_baselines = 3,
-        station_models = station_models
-    )
-    state = BP.initialize_bandpass_state(setup)
-    BP.refine_bandpass!(setup, state, BP.BandpassALS(iterations = 2, tolerance = 1.0e-10))
-
-    fit_stats = BP.bandpass_fit_stats(setup, state)
-    residual_rows = BP.bandpass_residual_stats(setup, state; by = :baseline)
-    scan_rows = BP.bandpass_residual_stats(setup, state; by = :scan_baseline)
-    result_gains = BP.finalize_bandpass_state(setup, state)
-    final_fit_stats = BP.bandpass_fit_stats(setup, result_gains)
-    final_residual_rows = BP.bandpass_residual_stats(setup, result_gains; by = :baseline)
-
-    @test !isempty(residual_rows)
-    @test !isempty(scan_rows)
-    @test !isempty(final_residual_rows)
-    @test sum(getindex.(residual_rows, :nvis)) == fit_stats.nvis
-    @test sum(getindex.(scan_rows, :nvis)) == fit_stats.nvis
-    @test sum(getindex.(residual_rows, :chi2)) ≈ fit_stats.chi2
-    @test sum(getindex.(scan_rows, :chi2)) ≈ fit_stats.chi2
-    @test sum(getindex.(final_residual_rows, :chi2)) ≈ final_fit_stats.chi2
-    @test all(hasproperty.(residual_rows, :median_abs_normalized_residual))
-    @test all(row -> row.normalized_residual_rms ≈ sqrt(row.chi2_per_real_component), residual_rows)
-    @test final_fit_stats.nparams === missing
-    @test final_fit_stats.dof === missing
-    @test final_fit_stats.reduced_chi2 === missing
-
-    bi = findfirst(==((1, 2)), data.baselines.pairs)
-    observed, observed_weights, gain_model, normalized_residual, weights = BP.baseline_bandpass_diagnostics(setup, result_gains, bi, 1)
-    source = BP.fit_bandpass_source_coherencies(setup, result_gains)
-    # data.vis/weights layout: (Frequency, Ti, Baseline, Pol). gains:
-    # (Frequency, Ti, Ant, Feed). Output normalized_residual stays (Ti, Frequency).
-    for s in axes(data.vis, 2), c in axes(data.vis, 1)
-        w = data.weights[c, s, bi, 1]
-        v = data.vis[c, s, bi, 1]
-        if w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))
-            a, b = data.baselines.pairs[bi]
-            m = result_gains[c, s, a, 1] * source[s, bi, 1, 1] * conj(result_gains[c, s, b, 1])
-            @test normalized_residual[s, c] ≈ sqrt(w) * (v - m)
-        end
-    end
-    @test size(observed) == size(observed_weights) == size(gain_model) == size(normalized_residual) == size(weights)
-
-    fig_bandpass = BP.plot_baseline_bandpass(setup, result_gains, ("AA", "AX"); pol = :parallel)
-    @test !isempty(repr(MIME("image/png"), fig_bandpass))
-
-    fig_embed = Figure(size = (1800, 700))
-    @test !isnothing(BP.plot_baseline_bandpass(fig_embed[1, 1], setup, result_gains, ("AA", "AX"); pol = :parallel))
-    @test !isnothing(BP.plot_baseline_bandpass_residuals(fig_embed[1, 2], setup, result_gains, ("AA", "AX"); pol = :parallel))
-    @test !isempty(repr(MIME("image/png"), fig_embed))
-
-    fig = BP.plot_baseline_bandpass_residuals(setup, result_gains, ("AA", "AX"); pol = :parallel)
-    png = repr(MIME("image/png"), fig)
-    @test !isempty(png)
-end
-
-@testset "Bandpass initializer methods" begin
-    BP = Gustavo.Bandpass
-    UV = Gustavo.UVData
-    data = synthetic_bandpass_avg_uvdata()
-    ref_ant = 1
-    station_models = [default_station_model_for_tests() for _ in data.antennas]
-
-    setup = BP.prepare_bandpass_solver(
-        data,
-        ref_ant;
-        min_baselines = 3,
-        station_models = station_models
-    )
-
-    state_default = BP.initialize_bandpass_state(setup)
-    state_ratio = BP.initialize_bandpass_state(setup, BP.RatioBandpassInitializer())
-    @test state_default.gains_template ≈ state_ratio.gains_template
-    @test state_default.scan_gains ≈ state_ratio.scan_gains
-    @test state_default.scan_solved == state_ratio.scan_solved
-
-    rng = MersenneTwister(1234)
-    random_initializer = BP.RandomBandpassInitializer(
-        rng = rng,
-        amplitude_sigma = 0.03,
-        phase_sigma = 0.1,
-        scan_perturbation = 0.01
-    )
-    random_state = BP.initialize_bandpass_state(setup, random_initializer)
-
-    @test size(random_state.gains_template) == (length(UV.channel_freqs(data.freq_setup)), length(data.antennas), 2)
-    @test size(random_state.scan_gains) == (length(UV.channel_freqs(data.freq_setup)), length(data.scans), length(data.antennas), 2)
-    @test all(random_state.scan_solved)
-    @test isfinite(BP.bandpass_state_objective(random_state))
-    @test norm(random_state.gains_template .- state_ratio.gains_template) > 0
-end
-
-@testset "Gain amplitude sanitization" begin
-    BP = Gustavo.Bandpass
-
-    # c0 = 1. Channel 3 (ant 1, feed 1) is genuinely broken (zero magnitude);
-    # channel 5 has a legitimately tiny but finite amplitude (e.g. IF-edge
-    # rolloff). Only the zero-magnitude gain gets sanitized; the small-but-
-    # finite value is left alone but surfaced separately by
-    # `inspect_collapsed_gain_amplitudes`.
-    # gains layout: (Frequency, Ant, Feed) = (5, 1, 2). Two feeds (rows
-    # before reshape correspond to feeds; `permutedims` then puts Frequency
-    # first).
-    gains_old = reshape(
-        ComplexF64[
-            1.0 + 0.0im   0.9 * cis(0.1)  0.0 + 0.0im     1.1 * cis(0.3)  0.004 * cis(0.4);
-            1.0 + 0.0im   1.0 * cis(0.1)  1.0 * cis(0.2)  1.0 * cis(0.3)  1.0 * cis(0.4);
-        ],
-        1, 2, 5
-    )
-    gains = permutedims(gains_old, (3, 1, 2))
-    support = ones(Float64, 1, 2, 5)
-
-    repaired = BP.sanitize_gain_amplitudes!(gains, support; neighbor_window = 1)
-
-    @test length(repaired) == 1
-    @test repaired[1].channel == 3
-    @test abs(gains[3, 1, 1]) ≈ median([1.0, 0.9, 1.1])  # local neighbors at c±1 (channel 1 now included)
-    @test isfinite(gains[5, 1, 1]) && abs(gains[5, 1, 1]) ≈ 0.004  # finite-tiny untouched
-
-    @test_logs (:warn, r"repaired") BP.warn_sanitized_gain_amplitudes(
-        repaired, ["AA"]; context = "scan 1"
-    )
-
-    suspects = BP.inspect_collapsed_gain_amplitudes(
-        gains, support;
-        collapse_fraction = 0.05, min_gain_amplitude = 1.0e-2, neighbor_window = 1
-    )
-    @test length(suspects) == 1
-    @test suspects[1].channel == 5
-    @test suspects[1].amplitude ≈ 0.004
-    @test_logs (:warn, r"collapsed gain amplitudes detected") BP.warn_collapsed_gain_amplitudes(
-        suspects, ["AA"]; context = "scan 1"
-    )
+    @test UV.amplitude_relative_to_ref([2.0, 4.0, 1.0]) ≈ [1.0, 2.0, 0.5]
+    # Non-positive and non-finite amplitudes are not usable references.
+    @test UV.amplitude_relative_to_ref([0.0, 4.0, 2.0]) ≈ [NaN, 1.0, 0.5] nans = true
+    @test all(isnan, UV.amplitude_relative_to_ref([0.0, -1.0, NaN]))
 end
 
 @testset "write_uvfits HDU construction" begin
@@ -1302,6 +386,59 @@ end
         @test filesize(tmp) > 0
     finally
         isfile(tmp) && rm(tmp; force = true)
+    end
+end
+
+@testset "write_uvfits emits no record without a uv position" begin
+    UV = Gustavo.UVData
+    # An in-memory fixture: the lazy one is backed by a DiskArray that cannot be
+    # mutated in place, and this test has to blank a cell.
+    uvset, _ = _build_fringe_uvset()
+    leaf = first(values(UV.branches(uvset)))
+    uvw = parent(leaf[:uvw])            # (Ti, Baseline, UVW)
+    wts = parent(leaf[:weights])        # (Frequency, Ti, Baseline, Pol)
+
+    # Blank one (time, baseline) cell the way a reduction leaves an unsampled
+    # one: no uv position, no weight.
+    uvw[1, 1, :] .= NaN
+    wts[:, 1, 1, :] .= 0
+
+    tmp = tempname() * ".uvfits"
+    try
+        UV.write_uvfits(tmp, uvset)
+        # The record is judged in the FILE: `load_uvfits` densifies the (time,
+        # baseline) grid, marking a cell absent from the file with NaN uvw in
+        # memory, so a round-tripped cube cannot distinguish a dropped record
+        # from a written NaN one. The group count can.
+        ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+        expected = sum(
+            l -> size(parent(l[:uvw]), 1) * size(parent(l[:uvw]), 2),
+            values(UV.branches(uvset)),
+        ) - 1
+        @test Int(ext.card_value(FITSFiles.fits(tmp)[1].cards, "GCOUNT")) == expected
+        back = UV.load_uvfits(tmp)
+        for l in values(UV.branches(back))
+            u = parent(l[:uvw])
+            wb = parent(l[:weights])
+            # In-memory NaN uvw marks a record absent from the file; such a
+            # cell must be weightless.
+            @test all(
+                all(isfinite, @view u[t, b, :]) || all(iszero, @view wb[:, t, b, :])
+                    for t in axes(u, 1), b in axes(u, 2)
+            )
+        end
+    finally
+        isfile(tmp) && rm(tmp; force = true)
+    end
+
+    # A cell with weight but no position is a bug upstream; dropping it would
+    # silently lose data, so the write stops instead.
+    wts[1, 1, 1, 1] = 1.0
+    tmp2 = tempname() * ".uvfits"
+    try
+        @test_throws ErrorException UV.write_uvfits(tmp2, uvset)
+    finally
+        isfile(tmp2) && rm(tmp2; force = true)
     end
 end
 
@@ -1380,7 +517,7 @@ end
             push!(scan_indices, info.scan_name)
             push!(bl_pairs_per_record, bls.pairs[bi])
             # Slice (Frequency, Pol) for one (ti, bi); transpose to (Pol, Frequency)
-            # to match the flat fixture's (Integration, Pol, Frequency) layout.
+            # to match the flat fixture's (Ti, Pol, Frequency) layout.
             push!(vis_chunks, copy(transpose(vis_p[:, ti, bi, :])))
             push!(weights_chunks, copy(transpose(w_p[:, ti, bi, :])))
             push!(uvw_chunks, uvw_p[ti, bi, :])
@@ -1399,9 +536,9 @@ end
     end
     pol_labels = pol_products(base)
     chan_freqs = UV.channel_freqs(UV.freq_setup(base))
-    vis_da = DimArray(vis_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
-    weights_da = DimArray(weights_flat, (UV.Integration(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
-    uvw_da = DimArray(uvw_flat, (UV.Integration(obs_times), UV.UVW(["U", "V", "W"])))
+    vis_da = DimArray(vis_flat, (Ti(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
+    weights_da = DimArray(weights_flat, (Ti(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
+    uvw_da = DimArray(uvw_flat, (Ti(obs_times), UV.UVW(["U", "V", "W"])))
 
     unique_pairs = sort(unique(bl_pairs_per_record))
     bls = UV.BaselineIndex(bl_pairs_per_record, unique_pairs; antenna_names = UV.union_antennas(base).name)
@@ -1452,33 +589,6 @@ end
     end
 end
 
-@testset "antenna_phase_weights uses |v|² · w" begin
-    # Regression: under the new inverse-variance WLS convention, channel
-    # weights for the polynomial bandpass fits must be the inverse variance
-    # of the *phasetrack*, i.e. Σ_bl |v|² · w_raw (`log_visibility_precision`),
-    # not bare Σ w_raw. With bare-w, high-SNR channels (AA-AX-rich) get
-    # sqrt-compressed weight relative to the old code and the polynomial
-    # leaves a visible AA-AX phase residual.
-    BP = Gustavo.Bandpass
-    bl_pairs = [(1, 2)]
-    nchan = 2
-    npol = 1
-    # |v|² differs across channels: 4 at c=1, 1 at c=2. w_raw is uniform.
-    V = DimArray(
-        reshape(ComplexF64[2.0 + 0.0im, 1.0 + 0.0im], 1, 1, nchan),
-        (Baseline(["AB"]), Pol(["PP"]), Frequency(Float64.(1:nchan)))
-    )
-    W = DimArray(fill(1.0, 1, 1, nchan), dims(V))
-
-    cw = BP.antenna_phase_weights(V, W, bl_pairs, 2, 1)
-    # log_visibility_precision = w·|v|² → 4.0 at c=1, 1.0 at c=2 per baseline,
-    # accumulated to both antennas.
-    @test cw[1, 1] ≈ 4.0
-    @test cw[1, 2] ≈ 1.0
-    @test cw[2, 1] ≈ 4.0
-    @test cw[2, 2] ≈ 1.0
-end
-
 @testset "UVSet partition tree shape" begin
     UV = Gustavo.UVData
     uvset = synthetic_uvdata()
@@ -1486,7 +596,7 @@ end
     nleaves = length(UV.branches(uvset))
     @test nleaves == 2
     for s in 1:nleaves
-        key = UV.partition_key(; source_key = :TEST, scan_name = string(s))
+        key = UV.partition_key(; source_key = :src_TEST, scan_name = string(s))
         @test haskey(UV.branches(uvset), key)
         leaf = UV.branches(uvset)[key]
         @test UV.primary_scan_name(leaf) == string(s)
@@ -1511,7 +621,7 @@ end
     # Transformed leaves: scale weights by 2.
     scaled = UV.apply(uvset) do leaf, _info, _root
         new_w = parent(leaf[:weights]) .* 2
-        UV.with_visibilities(leaf, parent(leaf[:vis]), new_w)
+        UV.rebuild_visibilities(leaf, parent(leaf[:vis]), new_w)
     end
     for (key, leaf) in UV.branches(scaled)
         orig = UV.branches(uvset)[key]
@@ -1527,7 +637,7 @@ end
     # Single-scan selection returns a leaf DimTree.
     p1 = UV.select_scan(uvset, "TEST", 1)
     @test p1 isa UV.DimTree
-    @test p1 === UV.branches(uvset)[UV.partition_key(; source_key = :TEST, scan_name = "1")]
+    @test p1 === UV.branches(uvset)[UV.partition_key(; source_key = :src_TEST, scan_name = "1")]
 
     # Multi-scan selection via select_partition returns a sub-UVSet.
     sub_s1 = UV.select_partition(uvset; scan = 1)
@@ -1567,12 +677,7 @@ end
     win = UV.time_window(uvset, 0.5, 1.5)
     @test win isa UV.UVSet
     @test length(UV.branches(win)) == 1
-    @test haskey(UV.branches(win), UV.partition_key(; source_key = :TEST, scan_name = "2"))
-
-    # Flag layer is computed at construction (= weights ≤ 0).
-    leaf_1 = UV.branches(uvset)[UV.partition_key(; source_key = :TEST, scan_name = "1")]
-    @test eltype(leaf_1[:flag]) == Bool
-    @test parent(leaf_1[:flag]) == (parent(leaf_1[:weights]) .<= 0)
+    @test haskey(UV.branches(win), UV.partition_key(; source_key = :src_TEST, scan_name = "2"))
 end
 
 @testset "scan_average(uvset) collapses Ti to length 1" begin
@@ -1595,130 +700,58 @@ end
     end
 end
 
-@testset "apply_bandpass(uvset) preserves shape per partition" begin
-    UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
-    uvset = synthetic_uvdata()
-
-    ants = UV.union_antennas(uvset)
-    nant = length(ants)
-    nchan = UV.nchannels(uvset)
-    leaves_v = collect(values(UV.branches(uvset)))
-    nscan = length(leaves_v)
-    pol_labels = UV.pol_products(uvset)
-    npol = length(pol_labels)
-    chan_freqs = UV.channel_freqs(UV.freq_setup(uvset))
-    scan_centers = [(lo + hi) / 2 for (lo, hi) in [UV.scan_window(l) for l in leaves_v]]
-    # Layout: (Frequency, Ti, Ant, Pol).
-    gains_raw = ComplexF64[
-        cis(0.1 * a + 0.05 * c + 0.02 * f + 0.01 * s) * (0.95 + 0.01 * (a + c))
-            for c in 1:nchan, s in 1:nscan, a in 1:nant, f in 1:npol
-    ]
-    gains_da = Gustavo.UVData.DimensionalData.DimArray(
-        gains_raw,
-        (UV.Frequency(chan_freqs), UV.Ti(scan_centers), UV.Ant(ants.name), UV.Pol(pol_labels));
-        metadata = Dict{Symbol, Any}(:spw_name => "spw_0"),
-    )
-    sols = Dict("spw_0" => gains_da)
-
-    corr_set = BP.apply_bandpass(uvset, sols)
-    @test corr_set isa UV.UVSet
-    @test length(UV.branches(corr_set)) == length(UV.branches(uvset))
-    for (key, leaf) in UV.branches(corr_set)
-        orig = UV.branches(uvset)[key]
-        @test size(parent(leaf[:vis])) == size(parent(orig[:vis]))
-    end
-
-    # Single-SPW DimArray shorthand: `apply_bandpass(uvset, gains::DimArray)`
-    # should produce the same result as the Dict form, pulling spw_name
-    # from the gain DimArray's metadata.
-    corr_da = BP.apply_bandpass(uvset, gains_da)
-    @test corr_da isa UV.UVSet
-    for (key, leaf_dict) in UV.branches(corr_set)
-        leaf_da = UV.branches(corr_da)[key]
-        @test parent(leaf_da[:vis]) ≈ parent(leaf_dict[:vis])
-    end
-
-    # Default to "spw_0" when no metadata is present.
-    gains_no_meta = Gustavo.UVData.DimensionalData.DimArray(
-        gains_raw,
-        (UV.Frequency(chan_freqs), UV.Ti(scan_centers), UV.Ant(ants.name), UV.Pol(pol_labels)),
-    )
-    @test BP.apply_bandpass(uvset, gains_no_meta) isa UV.UVSet
-end
-
 @testset "Weighted LSQ accepts mixed-precision RHS" begin
     # Regression: Memo-117 cleanup made `weights` Float32 while `A` is built in
     # Float64 by `design_matrices`. LinearSolve's QR `ldiv!` errored on the
     # Float64 factorization against a Float32 RHS — promote to a shared eltype.
-    BP = Gustavo.Bandpass
+    CALIB = Gustavo.Calibration
     A = Float64[1.0 0.0; 1.0 1.0; 1.0 2.0; 1.0 3.0]
     b32 = Float32[1.0, 2.0, 3.1, 3.9]
     iv32 = Float32[1.0, 1.0, 1.0, 1.0]
-    x = BP.weighted_least_squares(A, b32, iv32)
+    x = CALIB.weighted_least_squares(A, b32, iv32)
     @test eltype(x) == Float64
     @test x ≈ A \ Float64.(b32) rtol = 1.0e-6
 
     # Same for the regularized and constrained variants.
-    xr = BP.weighted_regularized_least_squares(A, b32, iv32, [0.0, 0.0])
+    xr = CALIB.weighted_regularized_least_squares(A, b32, iv32, [0.0, 0.0])
     @test xr ≈ A \ Float64.(b32) rtol = 1.0e-6
     C = Float64[1.0 0.0]
     d = Float64[0.5]
-    xc = BP.weighted_constrained_least_squares(A, b32, iv32, C, d)
+    xc = CALIB.weighted_constrained_least_squares(A, b32, iv32, C, d)
     @test isfinite(xc[1]) && isfinite(xc[2])
 end
 
-@testset "Bandpass solver works with Float32 weights" begin
-    # Regression: `prepare_bandpass_solver` + `initialize_bandpass_state` was
-    # erroring inside `weighted_least_squares` because `data.weights` is now
-    # Float32 (Memo 117) and the design matrix is Float64. This testset drives
-    # the full template-solve path on the synthetic averaged dataset using a
-    # Float32 weights cube to lock the regression.
-    BP = Gustavo.Bandpass
-    UV = Gustavo.UVData
-    avg = synthetic_bandpass_avg_uvdata()
-    # Force Float32 weights (the production path now produces these on load).
-    w32 = Float32.(parent(avg.weights))
-    avg = BP.BandpassDataset(
-        avg.vis, DimArray(w32, dims(avg.weights)), avg.uvw,
-        avg.baselines, avg.antennas, avg.metadata, avg.freq_setup, avg.scans,
-    )
-    @test eltype(avg.weights) == Float32
+@testset "Regularized WLS: penalty matrix generalizes the diagonal vector" begin
+    CALIB = Gustavo.Calibration
+    A = Float64[1.0 0.0; 1.0 1.0; 1.0 2.0; 1.0 3.0]
+    b = Float64[1.0, 2.0, 3.1, 3.9]
+    iv = ones(4)
+    lambda = [0.2, 0.7]
 
-    setup = BP.prepare_bandpass_solver(
-        avg, 1;
-        station_models = BP.build_station_models(
-            avg.antennas.name, Dict{String, BP.StationBandpassModel}();
-            default = default_station_model_for_tests(),
-        ),
-        min_baselines = 1,
-    )
-    state = BP.initialize_bandpass_state(setup, BP.RatioBandpassInitializer())
-    @test all(isfinite, state.gains)
+    x_vec = CALIB.weighted_regularized_least_squares(A, b, iv, lambda)
+    x_mat = CALIB.weighted_regularized_least_squares(A, b, iv, Diagonal(sqrt.(lambda)))
+    @test x_vec ≈ x_mat rtol = 1.0e-10
+
+    # A non-diagonal R (a first-difference roughness penalty) must reduce to
+    # solving the row-stacked normal equations directly.
+    R = Float64[1.0 -1.0]
+    x_r = CALIB.weighted_regularized_least_squares(A, b, iv, R)
+    sw = sqrt.(iv)
+    Aw = A .* sw
+    bw = b .* sw
+    x_ref = vcat(Aw, R) \ vcat(bw, zeros(size(R, 1)))
+    @test x_r ≈ x_ref rtol = 1.0e-10
 end
 
 @testset "DimArray slicing" begin
     using DimensionalData
     UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
     raw = synthetic_uvdata()
-    avg = synthetic_bandpass_avg_uvdata()
 
     # Per-leaf Pol slice on a UVSet: pull leaf, then DimTree's selector.
     leaf1 = UV.select_scan(raw, "TEST", 1)
     sliced = leaf1[Pol = At("PP")]
     @test sliced isa DimensionalData.AbstractDimTree
-
-    # BandpassDataset Baseline slice returns a DimStack. The uvw cube is
-    # 3-D (Ti, Baseline, UVW); slicing the Baseline drops it to 2-D.
-    sel3 = avg[Baseline = At("AA-AX")]
-    @test ndims(sel3[:vis]) == 3
-    @test ndims(sel3[:uvw]) == 2
-    @test size(sel3[:uvw]) == (length(avg.scans), 3)
-
-    # Baseline-tuple positional indexing on a BandpassDataset.
-    bl_vis = BP.baseline_visibilities(avg, ("AA", "AX"))
-    @test ndims(bl_vis) == 3
 end
 
 # Build a second single-source UVSet so we can exercise multi-source
@@ -1741,7 +774,7 @@ function synthetic_uvdata_3c273()
             partition_name = "synthetic_0_3C273_$(info.scan_name)",
         )
         new_leaf = UV._build_leaf(
-            leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+            leaf[:vis], leaf[:weights], leaf[:uvw];
             partition_info = info_3c,
         )
         new_key = UV.partition_key(info_3c)
@@ -1759,7 +792,7 @@ function synthetic_uvdata_3c273_shifted()
     # Pick a shift large enough that the new Ti axes don't overlap the original.
     dt = 100.0
     new_branches = Gustavo.UVData.DimensionalData.TreeDict()
-    # Layout: (Frequency, Ti, Baseline, Pol) for vis/weights/flag and
+    # Layout: (Frequency, Ti, Baseline, Pol) for vis/weights and
     # (UVW, Ti, Baseline) for uvw — Ti is dim 2 in both. Replace it.
     _replace_ti(da, new_t) = begin
         old_dims = dims(da)
@@ -1773,8 +806,7 @@ function synthetic_uvdata_3c273_shifted()
         new_vis = _replace_ti(old_vis, new_t)
         new_w = _replace_ti(leaf[:weights], new_t)
         new_uvw = _replace_ti(leaf[:uvw], new_t)
-        new_flag = _replace_ti(leaf[:flag], new_t)
-        new_leaf = UV._build_leaf(new_vis, new_w, new_uvw, new_flag; partition_info = info)
+        new_leaf = UV._build_leaf(new_vis, new_w, new_uvw; partition_info = info)
         new_branches[k] = new_leaf
     end
     return Gustavo.UVData.DimensionalData.rebuild(src; branches = new_branches)
@@ -1809,9 +841,9 @@ end
 
     # Tab-completable Partitions accessor.
     ps = UV.partitions(multi)
-    @test :TEST_spw_0_scan_1 in propertynames(ps)
-    @test :M3C273_spw_0_scan_1 in propertynames(ps)
-    @test ps.M3C273_spw_0_scan_1 === UV.branches(multi)[:M3C273_spw_0_scan_1]
+    @test :src_TEST_spw_0_scan_1 in propertynames(ps)
+    @test :src_3C273_spw_0_scan_1 in propertynames(ps)
+    @test ps.src_3C273_spw_0_scan_1 === UV.branches(multi)[:src_3C273_spw_0_scan_1]
 
     # apply preserves tree shape; per-leaf metadata flows through.
     averaged = UV.apply(UV.TimeAverage(), multi)
@@ -1859,13 +891,13 @@ end
 
 @testset "Source name sanitization" begin
     UV = Gustavo.UVData
-    @test UV.sanitize_source("TEST") == :TEST
-    @test UV.sanitize_source("3C273") == :M3C273       # digit-leading
-    @test UV.sanitize_source("Sgr A*") == :Sgr_A_      # non-identifier chars
-    @test UV.sanitize_source("NGC 4486") == :NGC_4486
-    @test UV.sanitize_source("") == :unknown
-    @test UV.sanitize_source("  ") == :unknown
-    @test UV.partition_key(; source_key = :M3C273, scan_name = "5") == :M3C273_spw_0_scan_5
+    @test UV.sanitize_source("TEST") == :src_TEST
+    @test UV.sanitize_source("3C273") == :src_3C273    # digit-leading
+    @test UV.sanitize_source("Sgr A*") == :src_Sgr_A_  # non-identifier chars
+    @test UV.sanitize_source("NGC 4486") == :src_NGC_4486
+    @test UV.sanitize_source("") == :src_unknown
+    @test UV.sanitize_source("  ") == :src_unknown
+    @test UV.partition_key(; source_key = :src_3C273, scan_name = "5") == :src_3C273_spw_0_scan_5
 end
 
 @testset "Structural ==/hash for metadata types" begin
@@ -1926,9 +958,9 @@ end
     axis = UV.union_frequency_axis(data)
     @test length(axis) == 1
     @test axis[1] == fs_root
-    # nchannels / band_center_frequency dispatch through freq_setup(uvset).
+    # nchannels / spw_center_frequency dispatch through freq_setup(uvset).
     @test UV.nchannels(data) == length(UV.channel_freqs(fs_root))
-    @test UV.band_center_frequency(data) == UV.band_center_frequency(fs_root)
+    @test UV.spw_center_frequency(data) == UV.spw_center_frequency(fs_root)
 
     # Round-trip through write/read keeps the per-leaf setup.
     tmp = tempname() * ".uvfits"
@@ -1960,7 +992,7 @@ end
         if info.scan_name == "2"
             new_info = UV.update(info; freq_setup = fs_alt)
             new_leaf = UV._build_leaf(
-                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+                leaf[:vis], leaf[:weights], leaf[:uvw];
                 partition_info = new_info,
             )
             branches[k] = new_leaf
@@ -1980,7 +1012,7 @@ end
     UV = Gustavo.UVData
     leaf = first(values(UV.branches(synthetic_uvdata())))
     info = UV.metadata(leaf)
-    @test UV.partition_key(info) == :TEST_spw_0_scan_1
+    @test UV.partition_key(info) == :src_TEST_spw_0_scan_1
 
     # Append a synthetic axis without touching `partition_key` or any other
     # call site — only the axis tuple changes.
@@ -1988,9 +1020,9 @@ end
         UV.DEFAULT_PARTITION_AXES...,
         UV.PartitionAxis(:obs, info -> isempty(info.intent) ? "" : "obs_$(info.intent)"),
     )
-    @test UV.partition_key(info, extended) == :TEST_spw_0_scan_1
+    @test UV.partition_key(info, extended) == :src_TEST_spw_0_scan_1
     info_with_intent = UV.update(info; intent = "TARGET")
-    @test UV.partition_key(info_with_intent, extended) == :TEST_spw_0_scan_1_obs_TARGET
+    @test UV.partition_key(info_with_intent, extended) == :src_TEST_spw_0_scan_1_obs_TARGET
 end
 
 """
@@ -2008,9 +1040,9 @@ function synthetic_two_spw_flat()
     chan_freq = collect(1.0:4.0)
     vis = ComplexF32.(rand(ComplexF32, 2, 4, 4))
     weights = fill(1.0f0, 2, 4, 4)
-    vis_da = DimArray(vis, (Integration(obs_t), Pol(pol_lab), Frequency(chan_freq)))
-    weights_da = DimArray(weights, (Integration(obs_t), Pol(pol_lab), Frequency(chan_freq)))
-    uvw_da = DimArray(zeros(Float32, 2, 3), (Integration(obs_t), UVW(["U", "V", "W"])))
+    vis_da = DimArray(vis, (Ti(obs_t), Pol(pol_lab), Frequency(chan_freq)))
+    weights_da = DimArray(weights, (Ti(obs_t), Pol(pol_lab), Frequency(chan_freq)))
+    uvw_da = DimArray(zeros(Float32, 2, 3), (Ti(obs_t), UVW(["U", "V", "W"])))
 
     # Reuse antennas / array_config / array_obs / primary_cards from the
     # single-source fixture. Same structure, just two SPWs.
@@ -2054,10 +1086,10 @@ end
     uvset = UV.UVSet(flat)
 
     @test length(UV.branches(uvset)) == 2
-    @test haskey(UV.branches(uvset), :TEST_spw_0_scan_1)
-    @test haskey(UV.branches(uvset), :TEST_spw_1_scan_1)
-    @test UV.freq_setup(UV.branches(uvset)[:TEST_spw_0_scan_1]) == fs_a
-    @test UV.freq_setup(UV.branches(uvset)[:TEST_spw_1_scan_1]) == fs_b
+    @test haskey(UV.branches(uvset), :src_TEST_spw_0_scan_1)
+    @test haskey(UV.branches(uvset), :src_TEST_spw_1_scan_1)
+    @test UV.freq_setup(UV.branches(uvset)[:src_TEST_spw_0_scan_1]) == fs_a
+    @test UV.freq_setup(UV.branches(uvset)[:src_TEST_spw_1_scan_1]) == fs_b
     @test UV.union_frequency_axis(uvset) == [fs_a, fs_b]
     @test_throws ArgumentError UV.freq_setup(uvset)
 end
@@ -2131,10 +1163,10 @@ end
     )
     bad_info = UV.update(info; baselines = bad_bls)
     bad_leaf = UV._build_leaf(
-        leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+        leaf[:vis], leaf[:weights], leaf[:uvw];
         partition_info = bad_info,
     )
-    branches = Gustavo.UVData.DimensionalData.TreeDict(:TEST_spw_0_scan_1 => bad_leaf)
+    branches = Gustavo.UVData.DimensionalData.TreeDict(:src_TEST_spw_0_scan_1 => bad_leaf)
     bad_set = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
     tmp = tempname() * ".uvfits"
     try
@@ -2248,7 +1280,7 @@ end
         if info.scan_name == "1"
             sub_info = UV.update(info; sub_scan_name = "B")
             sub_leaf = UV._build_leaf(
-                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+                leaf[:vis], leaf[:weights], leaf[:uvw];
                 partition_info = sub_info,
             )
             sub_key = UV.partition_key(sub_info)
@@ -2256,8 +1288,8 @@ end
         end
     end
     multi_sa = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
-    @test haskey(UV.branches(multi_sa), :TEST_spw_0_scan_1)
-    @test haskey(UV.branches(multi_sa), :TEST_spw_0_scan_1_B)
+    @test haskey(UV.branches(multi_sa), :src_TEST_spw_0_scan_1)
+    @test haskey(UV.branches(multi_sa), :src_TEST_spw_0_scan_1_B)
     # Multi-subarray write (Phase 1.7+2.5) succeeds when leaves share antennas;
     # multiple AN HDUs are emitted when antennas differ.
     tmp = tempname() * ".uvfits"
@@ -2314,14 +1346,14 @@ end
     )
     bad_info = UV.update(info; antennas = bad_table)
     bad_leaf = UV._build_leaf(
-        leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flag];
+        leaf[:vis], leaf[:weights], leaf[:uvw];
         partition_info = bad_info,
     )
     branches = Gustavo.UVData.DimensionalData.TreeDict()
     for (k, v) in UV.branches(base)
         branches[k] = v
     end
-    branches[:TEST_spw_0_sub_1_scan_1] = bad_leaf
+    branches[:src_TEST_spw_0_sub_1_scan_1] = bad_leaf
     multi = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
     @test_throws ErrorException UV.union_antennas(multi)
 end
@@ -2341,11 +1373,11 @@ end
     orig = info.antennas
     perturbed_v = [
         UV.Antenna(;
-                name = orig.name[i],
-                station_xyz = i == 1 ? orig.station_xyz[i] .+ 1.0 : orig.station_xyz[i],
-                mount = orig.mount[i], nominal_basis = orig.nominal_basis[i],
-                response = orig.response[i], pol_angles = orig.pol_angles[i],
-            ) for i in 1:length(orig)
+            name = orig.name[i],
+            station_xyz = i == 1 ? orig.station_xyz[i] .+ 1.0 : orig.station_xyz[i],
+            mount = orig.mount[i], nominal_basis = orig.nominal_basis[i],
+            response = orig.response[i], pol_angles = orig.pol_angles[i],
+        ) for i in 1:length(orig)
     ]
     perturbed = UV.AntennaTable(
         StructArray(perturbed_v),
@@ -2359,7 +1391,7 @@ end
         if l_info.scan_name == "2"
             new_info = UV.update(l_info; antennas = perturbed, subarray_name = "sub_1")
             new_l = UV._build_leaf(
-                l[:vis], l[:weights], l[:uvw], l[:flag];
+                l[:vis], l[:weights], l[:uvw];
                 partition_info = new_info,
             )
             branches[UV.partition_key(new_info)] = new_l
@@ -2420,60 +1452,8 @@ end
     end
 end
 
-@testset "Phase 3: multi-SPW orchestrator + apply" begin
-    # Architectural test: confirms _group_leaves_by_spw splits leaves
-    # correctly and apply_bandpass dispatches per-leaf via spw_name.
-    # The synthetic_two_spw_flat fixture is too small for the inner
-    # solver (1 baseline) — we test the orchestrator boundary by
-    # constructing per-SPW bogus gain DimArrays and applying them.
-    UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
-    flat, fs_a, fs_b = synthetic_two_spw_flat()
-    uvset = UV.UVSet(flat)
-
-    # _group_leaves_by_spw splits the 2-leaf UVSet by spw.
-    groups = BP._group_leaves_by_spw(uvset)
-    @test Set(keys(groups)) == Set(["spw_0", "spw_1"])
-    @test length(groups["spw_0"]) == 1
-    @test length(groups["spw_1"]) == 1
-
-    # _uvset_with_branches narrows correctly; freq_setup(sub) succeeds.
-    sub = BP._uvset_with_branches(uvset, groups["spw_0"])
-    @test UV.freq_setup(sub) == fs_a
-
-    # Per-SPW apply: bogus-but-shape-correct gains per SPW.
-    function _bogus_gains(uvs, spw)
-        leaves = collect(values(UV.branches(uvs)))
-        leaf = first(leaves)
-        info = UV.metadata(leaf)
-        leaf_setup = info.freq_setup
-        ants = info.antennas
-        nchan = UV.nchannels(leaf_setup)
-        npol = length(UV.pol_products(leaf))
-        scan_centers = [(lo + hi) / 2 for (lo, hi) in [UV.scan_window(l) for l in leaves if UV.metadata(l).spw_name == spw]]
-        nscan = length(scan_centers)
-        return Gustavo.UVData.DimensionalData.DimArray(
-            ones(ComplexF64, nchan, nscan, length(ants), npol),
-            (
-                UV.Frequency(UV.channel_freqs(leaf_setup)), UV.Ti(scan_centers),
-                UV.Ant(ants.name), UV.Pol(UV.pol_products(leaf)),
-            );
-            metadata = Dict{Symbol, Any}(:spw_name => spw),
-        )
-    end
-    sols = Dict(
-        "spw_0" => _bogus_gains(uvset, "spw_0"),
-        "spw_1" => _bogus_gains(uvset, "spw_1")
-    )
-    corr = BP.apply_bandpass(uvset, sols)
-    @test length(UV.branches(corr)) == 2
-    for (k, leaf) in UV.branches(corr)
-        @test size(parent(leaf[:vis])) == size(parent(UV.branches(uvset)[k][:vis]))
-    end
-end
-
 @testset "ANTAB parser: GAIN + TSYS layouts" begin
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
     text = """
     GAIN AA ELEV DPFU = 0.031000 POLY = 1.0 /
     GAIN MG ELEV DPFU = 0.0179, 0.0168 POLY = 0.727119, 0.00947339, -0.00008222 /
@@ -2547,7 +1527,7 @@ end
 
 @testset "apply_calibration: synthetic UVSet" begin
     UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
 
     base = synthetic_uvdata()
     leaves_v = collect(values(UV.branches(base)))
@@ -2584,7 +1564,16 @@ end
         "synthetic", "synth", 2000, stations,
     )
 
-    corr = BP.apply_calibration(base, antab)
+    # min_elevation_deg = -Inf: this test fakes station_xyz = zeros(3) (elevation
+    # ill-defined) and uses a flat gain curve, so we disable the below-horizon
+    # cutoff to keep it purely a SEFD-scaling check.
+    corr = BP.apply_calibration(base, antab; min_elevation_deg = -Inf)
+
+    # The public verb `calibrate(antab, uvset)` applies the same correction.
+    corr_pub = calibrate(antab, base; min_elevation_deg = -Inf)
+    for (k, leaf) in UV.branches(corr_pub)
+        @test isequal(parent(leaf[:vis]), parent(UV.branches(corr)[k][:vis]))
+    end
 
     # The synthetic `synthetic_uvdata` fakes `station_xyz = zeros(3)` —
     # the elevation calculation will be ill-defined there, but the test
@@ -2600,25 +1589,26 @@ end
         w_out = parent(leaf_out[:weights])
         idx = findfirst(i -> isfinite(vis_in[i]) && w_out[i] > 0, eachindex(vis_in))
         @test idx !== nothing
-        @test abs(vis_out[idx]) ≈ abs(vis_in[idx]) * expected_factor rtol = 1e-6
+        @test abs(vis_out[idx]) ≈ abs(vis_in[idx]) * expected_factor rtol = 1.0e-6
     end
 end
 
 @testset "tsys_in_window rejects outliers outside the scan window" begin
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
     # Three rows: an "in-scan" row, a slew-time outlier outside the window,
     # and another "in-scan" row. The window-mean must average only the
     # in-window rows and never see the outlier.
     base_dt = DateTime(2022, 3, 27, 0, 0, 0)
     times = [base_dt, base_dt + Minute(2), base_dt + Minute(10), base_dt + Minute(20)]
-    cols  = [(0, :R), (0, :L)]
-    vals  = Float64[
+    cols = [(0, :R), (0, :L)]
+    vals = Float64[
         100.0   120.0;
         110.0   130.0;
         1.0e6   1.0e6;        # slew/outlier — outside the scan window below
         105.0   125.0;
     ]
-    st = BP.AntabStation("XX",
+    st = BP.AntabStation(
+        "XX",
         BP.AntabGainCurve((1.0, 1.0), [1.0]),
         BP.AntabTsysSeries(times, cols, vals),
         0,
@@ -2636,7 +1626,7 @@ end
 
 @testset "apply_calibration: missing station warns" begin
     UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
+    BP = Gustavo.UVData
     base = synthetic_uvdata()
 
     leaves_v = collect(values(UV.branches(base)))
@@ -2665,31 +1655,12 @@ end
     @test out isa Gustavo.UVData.UVSet
     flux = BP.apriori_flux_gains(base, antab; on_missing_station = :ignore)
     @test all(g -> "AX" in g.missing_stations, values(flux))
-    @test_throws ErrorException BP.apply_calibration(
+    @test_throws "has no record for stations" BP.apply_calibration(
         base, antab; on_missing_station = :error,
     )
-end
-
-@testset "Phase 3: apply_bandpass errors on missing SPW" begin
-    UV = Gustavo.UVData
-    BP = Gustavo.Bandpass
-    base = synthetic_uvdata()
-    # Construct a dummy gains DimArray with the wrong SPW key.
-    leaves_v = collect(values(UV.branches(base)))
-    ants = UV.union_antennas(base)
-    nchan = UV.nchannels(base)
-    npol = length(UV.pol_products(base))
-    nscan = length(leaves_v)
-    chan_freqs = UV.channel_freqs(UV.freq_setup(base))
-    scan_centers = [(lo + hi) / 2 for (lo, hi) in [UV.scan_window(l) for l in leaves_v]]
-    bogus_gains = ones(ComplexF64, nchan, nscan, length(ants), npol)
-    bogus_da = Gustavo.UVData.DimensionalData.DimArray(
-        bogus_gains,
-        (UV.Frequency(chan_freqs), UV.Ti(scan_centers), UV.Ant(ants.name), UV.Pol(UV.pol_products(base)));
-        metadata = Dict{Symbol, Any}(:spw_name => "spw_99"),
+    @test_throws "must be :warn, :error, or :ignore" BP.apply_calibration(
+        base, antab; on_missing_station = :bogus,
     )
-    sols = Dict("spw_99" => bogus_da)
-    @test_throws ErrorException BP.apply_bandpass(base, sols)
 end
 
 @testset "apply / mapleaves / flatmap arity overloads" begin
@@ -2713,8 +1684,10 @@ end
     nleaves_3 = UV.mapleaves(base) do leaf, info, root
         (; scan = info.scan_name, telescope = root.array_obs.telescope)
     end
-    @test all(getproperty(v, :telescope) == UV.metadata(base).array_obs.telescope
-              for v in values(nleaves_3))
+    @test all(
+        getproperty(v, :telescope) == UV.metadata(base).array_obs.telescope
+            for v in values(nleaves_3)
+    )
 
     # `flatmap` produces a vcat'd Vector
     rows = UV.flatmap(base) do leaf
@@ -2726,7 +1699,7 @@ end
 
     # `apply` still returns a UVSet when `f` returns a DimTree.
     out = UV.apply(base) do leaf
-        UV.with_visibilities(leaf, leaf[:vis], leaf[:weights])
+        UV.rebuild_visibilities(leaf, leaf[:vis], leaf[:weights])
     end
     @test out isa UV.UVSet
     @test length(UV.branches(out)) == length(UV.branches(base))
@@ -2778,7 +1751,7 @@ end
     bl = UV.baseline(leaf, bls.pairs[1])
 
     @test bl isa DimensionalData.DimStack
-    @test Set(keys(bl)) == Set((:vis, :weights, :flag, :uvw))
+    @test Set(keys(bl)) == Set((:vis, :weights, :uvw))
 
     # Shape & dims
     nch = UV.nchannels(base)
@@ -2786,7 +1759,6 @@ end
     npol = length(UV.pol_products(leaf))
     @test size(bl[:vis]) == (nch, nti, npol)
     @test size(bl[:weights]) == (nch, nti, npol)
-    @test size(bl[:flag]) == (nch, nti, npol)
     @test size(bl[:uvw]) == (nti, 3)
 
     # Pol selector path matches manual indexing.
@@ -2816,4 +1788,19 @@ end
     expected_ti = sum(length(UV.obs_time(l)) for l in values(UV.branches(base)))
     @test size(full[:vis], 2) == expected_ti
     @test size(full[:uvw], 1) == expected_ti
+end
+
+# Every extension must precompile and load. An extension method that shares a
+# signature with a stub in `src/` is overwritten on load, which precompilation
+# rejects outright — so a missing extension here means the package is broken for
+# everyone who loads that trigger, not merely missing a feature. Runs last: each
+# extension only activates once its trigger package is loaded, and the suite
+# loads HDF5 from `synthetic_uvset.jl` rather than at the top of this file.
+@testset "extensions load" begin
+    for name in (
+            :GustavoFITSFilesExt,
+            :GustavoHDF5Ext, :GustavoMakieExt,
+        )
+        @test Base.get_extension(Gustavo, name) !== nothing
+    end
 end

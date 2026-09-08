@@ -1,0 +1,620 @@
+# ── The FringeFit step (stage A on the composable engine) ─────────────────────
+#
+# A FringeFit-only pipeline solves the matched-filter stage standalone. The M3
+# bit-parity gates against the frozen monolith ran before its deletion; the
+# standing invariant kept here is that LATER STAGES NEVER MOVE THE FRINGE
+# BLOCKS: a fringe-only fit's θ blocks are bit-identical to the same blocks of
+# a fuller pipeline (dispersion/SBD off, so no later stage refines the compared
+# slots). Plus the step's capabilities: the opt-in cross-feed rate solve,
+# fit-on-subset cross-hand masking, and transforms on the streaming path.
+
+@isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
+
+@testset "FringeFit step (new engine)" begin
+    @testset "fringe blocks invariant under later stages" begin
+        uvset, _ = _build_fringe_uvset()
+        solm = fit(
+            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))) |>
+                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            uvset,
+        )
+        sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
+        fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
+        @test length(fr.model.phase) == 4
+        rn = CAL.component_ranges(fr.layout)
+        rm = CAL.component_ranges(frm.layout)
+        for i in 1:4
+            @test fr.θ[rn[i]] == frm.θ[rm[i]]        # bit-identical
+        end
+        @test keys(sol) == [:fringe]
+        @test sol.info.nscan == solm.info.nscan
+        @test fr.info.scan_snr == frm.info.scan_snr
+        @test fr.info.scan_ncells == frm.info.scan_ncells
+        @test fr.info.det_snr == frm.info.det_snr
+        @test fr.info.det_pfa == frm.info.det_pfa
+
+        # A gauge naming a station code resolves identically.
+        sol_code = fit(
+            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            uvset; gauge = PinAntenna("A1"),
+        )
+        @test sol_code[:fringe].steps[1].θ == fr.θ
+
+        # Step selection works on a single-step solution.
+        @test sol[1:1][:fringe].steps[1].θ == fr.θ
+
+        # A fringe-only solution applies cleanly.
+        corr = UVP.apply_calibration(uvset, sol)
+        @test corr isa UVP.UVSet
+    end
+
+    @testset "a scan the reference sits out still calibrates" begin
+        # The reference antenna is in the table but observes no baseline. The
+        # stations that DID observe are constrained by their own closure, so none
+        # of them is flagged and their data is calibrated rather than blanked.
+        uvset, _ = _build_fringe_uvset(nant = 4, omit_station = 4)
+        model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+
+        sol = fit(FringeFit(; model), uvset; gauge = PinAntenna("A4"))
+        @test isempty(sol.info.flagged_ant)
+        @test isempty(FP.fringe_station_flags(sol))
+        @test UVP.apply_calibration(uvset, sol) isa UVP.UVSet
+
+        # The flags do not depend on which station holds the gauge.
+        present = fit(FringeFit(; model), uvset; gauge = PinAntenna("A1"))
+        @test present.info.flagged_ant == sol.info.flagged_ant
+        @test present.info.flagged_scan == sol.info.flagged_scan
+    end
+
+    @testset "rounds > 1: fringe blocks invariant under later stages" begin
+        uvset, _ = _build_fringe_uvset()
+        solm = fit(
+            FringeFit(
+                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
+                estimator = MatchedFilter(rounds = 2),
+            ) |> TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            uvset,
+        )
+        sol = fit(
+            FringeFit(
+                model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false)),
+                estimator = MatchedFilter(rounds = 2),
+            ), uvset,
+        )
+        fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
+        rn = CAL.component_ranges(fr.layout)
+        rm = CAL.component_ranges(frm.layout)
+        for i in 1:4
+            @test fr.θ[rn[i]] == frm.θ[rm[i]]
+        end
+    end
+
+    @testset "opt-in cross-feed rate (a feed-2 Rate list element)" begin
+        inj = [0.0, 2.0e-4, -1.0e-4, 5.0e-5]
+        uvset, _ = _build_fringe_uvset(rel_rate = inj)
+        # A solvable inter-feed rate is ADDED to the term list — a feed-specific Rate
+        # component; the estimator detects it structurally and includes the
+        # cross-hand rows in the rate system.
+        rel_terms = (;
+            _fringe_terms(dispersion = false, sbd = false)...,
+            rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2)),
+        )
+
+        sol = fit(FringeFit(model = FringeModel(terms = rel_terms)), uvset)
+        fr = sol[:fringe].steps[1]
+        @test length(CAL.phase_components(fr.model)) == 5
+        plan = fr.layout.plans[5]
+        solved = [fr.θ[plan_off1(plan)[a, 2, 1, 1]] for a in 1:4]
+        @test solved ≈ inj .- inj[1] atol = 1.0e-7
+
+        # Null case: no injected feed-rate offset → solved offsets ≈ 0.
+        uv0, _ = _build_fringe_uvset()
+        sol0 = fit(FringeFit(model = FringeModel(terms = rel_terms)), uv0)
+        fr0 = sol0[:fringe].steps[1]
+        plan0 = fr0.layout.plans[5]
+        @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
+
+        # No feed-specific Rate element: the component does not exist — the
+        # The inter-feed rate is tied ≡ 0.
+        sold = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
+        @test length(sold[:fringe].steps[1].model.phase) == 4
+    end
+
+    @testset "a constant phase is referenced to its own scan" begin
+        # A rate is measured only to within its own uncertainty, so a constant
+        # phase quoted a lever arm Δt from the data carries 2π·σ_ṙ·Δt of it.
+        # A feed-COMMON constant hides that — the station rate solved from the
+        # same rows moves with it — so the probe is a feed-2 constant, which the
+        # model gives no rate of its own: it keeps the whole lever arm. Referred
+        # to a track-wide epoch instead of its own scan's, hours of lever arm
+        # randomize it outright. Noise is what makes this visible; with exact
+        # rates there is no uncertainty to lever.
+        #
+        # Not part of `default_fringe_terms` (see there for why the inter-feed
+        # phase offset is deliberately absent) — added here precisely because it
+        # is the column most sensitive to the epoch.
+        nscans = 4
+        terms = (;
+            _fringe_terms(dispersion = false, sbd = false)...,
+            rel_phase = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2)),
+        )
+        uvset, truth = _build_fringe_uvset(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
+        sol = fit(FringeFit(model = FringeModel(; terms)), uvset)
+        rel = CAL.parameters(sol[:fringe, :phase, :rel_phase])
+        want = truth.phi[:, 2] .- truth.phi[:, 1]
+        for a in eachindex(want), s in 1:nscans
+            got = only(rel[1, :, 1, s, a])
+            @test abs(rem2pi(got - want[a], RoundNearest)) < 0.2
+        end
+    end
+
+    @testset "transforms on the new path (incl. CalFunction)" begin
+        uvset, _ = _build_fringe_uvset()
+        ws = [1.0, 0.5, 1.0, 2.0]
+        # Weight scale: the search is invariant (snr from the |D|² plane), so
+        # the fringe θ matches the untransformed solve bit-for-bit.
+        sol_ws = fit(
+            StationWeightScale(ws) |>
+                FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            uvset,
+        )
+        sol = fit(FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))), uvset)
+        @test sol_ws[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
+        @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
+
+        # CalFunction runs on the new path (it errors only when bridging), and
+        # is recorded + replayed by calibrate: zeroing one baseline's weights
+        # zero-weights it in the calibrated output.
+        touched = Threads.Atomic{Int}(0)
+        kill12 = CalFunction() do stack, win
+            Threads.atomic_add!(touched, 1)
+            for (bi, (a, b)) in enumerate(baselines(stack).pairs)
+                minmax(a, b) == (1, 2) && (stack[:weights][Baseline = bi] .= 0)
+            end
+        end
+        sol_cf, out = fitcalibrate(
+            kill12 |> FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            uvset,
+        )
+        @test touched[] > 0
+        @test sol_cf.transforms[1] isa CalFunction
+        for (_, leaf) in DimensionalData.branches(out)
+            W = parent(leaf[:weights])
+            for (bi, (a, b)) in enumerate(UVP.baselines(leaf).pairs)
+                minmax(a, b) == (1, 2) && @test all(W[:, :, bi, :] .== 0)
+            end
+        end
+
+        # fit + calibrate ≡ fitcalibrate on the new path.
+        out2 = calibrate(sol_cf, uvset)
+        for (k, leaf) in DimensionalData.branches(out)
+            V = parent(leaf[:vis])
+            V2 = parent(DimensionalData.branches(out2)[k][:vis])
+            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(V, V2))
+        end
+    end
+
+    @testset "model validation + full-pipeline option coverage" begin
+        uvset, _ = _build_fringe_uvset()
+        # The model is the term list alone (the gauge pin is run-wide, on
+        # CalibrationPipeline) — no per-effect fields or keywords survive on
+        # FringeModel or FringeFit.
+        @test_throws MethodError FringeModel(dispersion = :maybe)
+        @test_throws MethodError FringeModel(sbd = false)
+        @test fieldnames(FringeModel) == (:terms,)
+        @test :dispersion ∉ fieldnames(typeof(FringeFit()))
+
+        # The options the legacy bridge used to reject (custom Stationization,
+        # the inter-feed rate opt-in, arbitrary CalFunction transforms) run in
+        # FULL pipelines now — every pipeline is new-engine.
+        sol_full = fit(
+            CalibrationPipeline(
+                CalFunction((stack, win) -> nothing),
+                FringeFit(
+                    model = FringeModel(
+                        terms = (;
+                            default_fringe_terms()...,
+                            rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2)),
+                        )
+                    ),
+                    estimator = MatchedFilter(closure = FP.Stationization(pfa_max = 1.0e-2)),
+                ),
+                Bandpass(), TemporalSmoother();
+                exec = ExecutionConfig(),
+            ),
+            uvset,
+        )
+        @test keys(sol_full) == [:fringe, :bandpass, :adhoc]
+        # Bandpass without TemporalSmoother still solves a :bandpass
+        # stage (F |> B — no final pass).
+        sol_fb = fit(CalibrationPipeline(FringeFit(), Bandpass()), uvset)
+        @test any(r -> r.name === :bandpass, sol_fb.steps)
+    end
+
+    @testset "term-list compilation: order, gating, duplicate rejection" begin
+        uvset, _ = _build_fringe_uvset()   # 2 band groups; narrow fractional bandwidth
+        geom = CAL.build_geometry(uvset)
+        sig(tc) = (
+            typeof(tc.term), typeof(tc.Ti),
+            typeof(tc.Frequency), typeof(tc.Feed),
+        )
+
+        # The default list compiles IN LIST ORDER to the standard sequence — 4
+        # elements → 4 components; dispersion/SBD are DispersionSBDFit's, not
+        # FringeModel's, so they never appear here regardless of geometry, and
+        # there is no inter-feed CONSTANT (see `default_fringe_terms`).
+        comps = FP.fringe_phase_components(FringeModel(), (; geom, antennas = nothing))
+        @test collect(map(sig, CAL._flatten_components(comps))) == [
+            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SingleFeed),
+            (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+        ]
+
+        # `rel_time` moves the inter-feed delay onto a track-global column.
+        gcomps = FP.fringe_phase_components(
+            FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime())),
+            (; geom, antennas = nothing),
+        )
+        @test collect(map(sig, CAL._flatten_components(gcomps))) == [
+            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+            (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.SingleFeed),
+            (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
+        ]
+
+        # DispersionSBDFit compiles its own private delay-refinement column +
+        # dTEC (gate closed on this narrow-fractional-bandwidth geometry) + SBD
+        # delay/constant pair (2 band groups here, so SBD's gate is open).
+        dscomps = Gustavo.model_components(DispersionSBDFit(), (; geom, antennas = nothing))
+        @test collect(map(sig, CAL._flatten_components(dscomps.phase))) == [
+            (CAL.Delay, CAL.PerScan, CAL.FreqGroups, CAL.SharedFeeds),
+            (CAL.ConstantTerm, CAL.PerScan, CAL.FreqGroups, CAL.SharedFeeds),
+        ]
+        @test isempty(dscomps.logamp)
+
+        # Geometry-gated elements emit nothing when unconstrainable.
+        @test CAL.model_components(DispersionModel(), (; geom, antennas = nothing)) === nothing
+        @test CAL.model_components(
+            DispersionModel(require_band_separation = false), (; geom, antennas = nothing)
+        ) isa CAL.GainComponent
+        narrow, _ = _build_fringe_uvset(nspw = 1)
+        @test CAL.model_components(SingleBandDelay(), (; geom = CAL.build_geometry(narrow), antennas = nothing)) === nothing
+
+        # `freq` chooses the partition the SBD pair is resolved on. On a
+        # geometry whose spws fall in two gap-separated groups, `BandGroups`
+        # emits one delay per GROUP and `PerSpectralWindow` one per SPW.
+        gsbd = CAL.DataGeometry(;
+            times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 1.2e9, 5.0e9],
+            scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 3], t0 = 0.0, f0 = 3.0e9,
+        )
+        bandranges(sbd, g) = CAL.model_components(sbd, (; geom = g, antennas = nothing)).delay.Frequency.ranges
+        @test bandranges(SingleBandDelay(), gsbd) == [1:3, 4:4]
+        @test bandranges(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd) ==
+            [1:2, 3:3, 4:4]
+        # An explicit partition is taken as given.
+        @test bandranges(SingleBandDelay(freq = CAL.FreqGroups([1:1, 2:4])), gsbd) ==
+            [1:1, 2:4]
+        # The < 2 group gate is on the resolved partition, so a one-spw axis
+        # emits nothing under PerSpectralWindow too.
+        @test CAL.model_components(
+            SingleBandDelay(freq = CAL.PerSpectralWindow()),
+            (; geom = CAL.build_geometry(narrow), antennas = nothing),
+        ) === nothing
+        # `GlobalFrequency` resolves to one group on any axis: fully degenerate
+        # with the wideband delay, so the element always compiles to nothing.
+        @test CAL.model_components(
+            SingleBandDelay(freq = CAL.GlobalFrequency()), (; geom = gsbd, antennas = nothing),
+        ) === nothing
+        # Both halves of the pair share the partition.
+        psbd = CAL.model_components(SingleBandDelay(freq = CAL.PerSpectralWindow()), (; geom = gsbd, antennas = nothing))
+        @test psbd.constant.Frequency.ranges == psbd.delay.Frequency.ranges
+
+        # A bare GainComponent compiles to itself.
+        tc = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2))
+        @test CAL.model_components(tc, (; geom, antennas = nothing)) === tc
+
+        # Exact duplicate components are rejected by message.
+        dup = (;
+            default_fringe_terms()...,
+            mbd2 = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
+        )
+        @test_throws "two identical components" FP.fringe_phase_components(
+            FringeModel(terms = dup), (; geom, antennas = nothing)
+        )
+
+        # A second component matching a findfirst router's signature — without
+        # being an exact duplicate — is rejected naming the signature.
+        collide = (;
+            default_fringe_terms()...,
+            mbd_tb = CAL.GainComponent(CAL.Delay(); Ti = CAL.TimeBlocks(1.0), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
+        )
+        @test_throws "per-scan feed-common delay signature" FP.fringe_phase_components(
+            FringeModel(terms = collide), (; geom, antennas = nothing)
+        )
+
+        # DispersionModel/SingleBandDelay elements are rejected outright —
+        # dispersion/SBD are DispersionSBDFit's, not FringeModel's.
+        @test_throws "DispersionSBDFit" FringeModel(
+            terms = (; default_fringe_terms()..., dtec2 = DispersionModel(colocated_sep = nothing))
+        )
+        @test_throws "DispersionSBDFit" FringeModel(
+            terms = (; default_fringe_terms()..., sbd2 = SingleBandDelay())
+        )
+    end
+end
+
+# ── The estimator seam, exercised from outside the package ───────────────────
+#
+# `AbstractFringeEstimator` is a supported extension point, so the proof is an
+# estimator defined HERE — not in `src/` — driven all the way through `fit`.
+
+# Delegates both hooks to a MatchedFilter it wraps, counting the calls. Anything
+# it gets wrong shows up as a θ difference against the same fit run directly.
+struct _ProbeEstimator{E <: FP.AbstractFringeEstimator} <: FP.AbstractFringeEstimator
+    inner::E
+    scans::Base.RefValue{Int}
+    passes::Base.RefValue{Int}
+end
+_ProbeEstimator(inner) = _ProbeEstimator(inner, Ref(0), Ref(0))
+
+function FP.estimate_scan!(e::_ProbeEstimator, ctx, step, stack, win)
+    e.scans[] += 1
+    return FP.estimate_scan!(e.inner, ctx, step, stack, win)
+end
+function FP.finish_estimate!(e::_ProbeEstimator, ctx, step)
+    e.passes[] += 1
+    return FP.finish_estimate!(e.inner, ctx, step)
+end
+# A wrapper fits exactly what it wraps, so both capability hooks forward too.
+FP.can_fit(e::_ProbeEstimator, tc) = FP.can_fit(e.inner, tc)
+FP.validate_model(e::_ProbeEstimator, comps) = FP.validate_model(e.inner, comps)
+
+# Implements neither solve hook: must fail loudly rather than solve nothing.
+# Claims the whole model so the failure is the missing hook, not the capability
+# check that runs before it.
+struct _SilentEstimator <: FP.AbstractFringeEstimator end
+FP.can_fit(::_SilentEstimator, tc) = true
+
+# The independence probe: implements the interface and NOTHING else. It writes no
+# θ and publishes none of the matched filter's diagnostic scratch tables, so it
+# fails if any of them is secretly required to assemble a solution.
+struct _NullEstimator <: FP.AbstractFringeEstimator
+    scans::Base.RefValue{Int}
+end
+_NullEstimator() = _NullEstimator(Ref(0))
+function FP.estimate_scan!(e::_NullEstimator, ctx, step, stack, win)
+    e.scans[] += 1
+    return (; max_snr = NaN)
+end
+FP.finish_estimate!(::_NullEstimator, ctx, step) = (; ncomp = 0)
+FP.can_fit(::_NullEstimator, tc) = true
+
+# Declares no capability at all — the default. Every model term is unclaimed.
+struct _UnclaimingEstimator <: FP.AbstractFringeEstimator end
+FP.estimate_scan!(::_UnclaimingEstimator, ctx, step, stack, win) = (; max_snr = NaN)
+FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
+
+@testset "fringe estimator seam" begin
+    uvset, _ = _build_fringe_uvset()
+    model = FringeModel()
+
+    @testset "an out-of-package estimator drives the whole pipeline" begin
+        probe = _ProbeEstimator(MatchedFilter())
+        sol = fit(
+            FringeFit(; model, estimator = probe) |> Bandpass() |>
+                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            uvset,
+        )
+        ref = fit(
+            FringeFit(; model) |> Bandpass() |>
+                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            uvset,
+        )
+        # Bit-identical, not approximate: the seam must not perturb the solve.
+        @test keys(sol) == keys(ref)
+        @test all(a.θ == b.θ for (a, b) in zip(sol.steps, ref.steps))
+        @test probe.scans[] == sol.info.nscan
+        @test probe.passes[] == 1
+    end
+
+    @testset "the step's refine service reaches an out-of-package estimator" begin
+        # Downstream stages depend on it, so a third-party estimator must get it
+        # without publishing it itself.
+        probe = _ProbeEstimator(MatchedFilter())
+        sol = fit(
+            FringeFit(; model = FringeModel(), estimator = probe) |>
+                Bandpass(),
+            uvset,
+        )
+        @test any(r -> r.name === :bandpass, sol.steps)
+    end
+
+    @testset "an estimator publishing no diagnostics still yields a solution" begin
+        null = _NullEstimator()
+        sol = fit(FringeFit(; model, estimator = null), uvset)
+        fringe = sol[:fringe].steps[1]
+        @test null.scans[] == sol.info.nscan
+        @test all(iszero, fringe.θ)     # it solved nothing, by construction
+        @test !haskey(fringe.info, :det_snr)     # no detections published at all
+        @test isempty(sol.info.flagged_ant)
+        @test !haskey(fringe.info, :scan_snr)
+        # `search` is MatchedFilter provenance, so this solution carries none.
+        @test !haskey(sol.info, :search)
+        @test haskey(fit(FringeFit(; model), uvset).info, :search)
+    end
+
+    @testset "an estimator implementing neither hook errors by name" begin
+        @test_throws "does not implement the fringe estimator interface" fit(
+            FringeFit(; model, estimator = _SilentEstimator()), uvset,
+        )
+        @test_throws "estimate_scan!" fit(
+            FringeFit(; model, estimator = _SilentEstimator()), uvset,
+        )
+    end
+
+    @testset "an estimator that declares no capability is rejected, not run" begin
+        # `can_fit`'s default is `false` and the STEP drives the loop, so the
+        # estimator that never thought about capability fails at model-compile
+        # time instead of returning a solution full of unwritten θ.
+        @test_throws "cannot fit the model term" fit(
+            FringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+        )
+        @test_throws "_UnclaimingEstimator" fit(
+            FringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+        )
+    end
+
+    @testset "a term the estimator cannot fit is rejected by name" begin
+        # A polynomial-in-frequency phase is a legitimate gain term that the
+        # matched filter has no observable for: its θ block would stay at zero
+        # while the solution looked fitted.
+        terms = (; _fringe_terms()..., poly = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()))
+        @test_throws "MatchedFilter cannot fit the model term" fit(
+            FringeFit(model = FringeModel(terms = terms)), uvset,
+        )
+    end
+
+    @testset "a model missing a term the estimator requires is rejected by name" begin
+        # The kind is missing outright: nothing to write the rate search into.
+        norate = filter(
+            t -> !(t isa CAL.GainComponent && t.term isa CAL.Rate),
+            _fringe_terms(),
+        )
+        @test_throws "requires a rate component" fit(
+            FringeFit(model = FringeModel(terms = norate)), uvset,
+        )
+
+        # The kind is PRESENT and the router signature is not: the inter-feed delay is
+        # still a `:delay`, so only a signature-level check catches a wideband
+        # delay tied across the whole track.
+        globaldelay = map(_fringe_terms()) do t
+            t isa CAL.GainComponent && FP._is_perscan_delay(t) ?
+                CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
+        end
+        @test_throws "requires a per-scan feed-common wideband delay" fit(
+            FringeFit(model = FringeModel(terms = globaldelay)), uvset,
+        )
+    end
+
+    @testset "the matched filter's kind vocabulary stays private" begin
+        # `matched_kind` answers "what does THIS estimator do with this
+        # component" — one estimator's vocabulary, so retiring the estimator
+        # must not be a public API removal.
+        @test !(:matched_kind in names(Gustavo.Fringe))
+        @test !(:matched_kind in names(Gustavo))
+        @test :can_fit in names(Gustavo.Fringe)
+        @test :validate_model in names(Gustavo.Fringe)
+    end
+
+    @testset "the estimator is carried as a type parameter, not an abstract field" begin
+        # Removing the old `::MatchedFilter` assertion would otherwise put a
+        # dynamic dispatch in the per-scan path.
+        @test isconcretetype(fieldtype(typeof(FringeFit()), :estimator))
+        @test fieldtype(typeof(FringeFit(estimator = _SilentEstimator())), :estimator) ===
+            _SilentEstimator
+    end
+end
+
+# ── Dispersion as a model of its own ─────────────────────────────────────────
+#
+# The ionosphere is specified separately from the instrument, but ESTIMATED
+# jointly with the delay it is degenerate with — these assert both halves.
+@testset "dispersion is a separate model" begin
+    # A VGOS-like layout: four sub-bands over a wide fractional bandwidth, which
+    # is what lets 1/ν be separated from a linear delay at all.
+    uvset, _ = _build_fringe_uvset(
+        nspw = 4, nchan = 8, dtec = [0.0, 3.0, -2.0, 1.5],
+        spw_origins = [3.0e9, 5.0e9, 8.0e9, 1.03e10], feed_common = true,
+    )
+    mf = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid()))
+
+    @testset "the ionosphere is DispersionSBDFit's own field, not FringeModel's" begin
+        @test :dispersion ∉ fieldnames(FringeModel)
+        @test :dtec_colocated_sep ∉ fieldnames(FringeModel)
+        # Instrumental terms stay in the instrument model's default list;
+        # dispersion/SBD are DispersionSBDFit's own fields, not term-list
+        # elements — putting either type IN the term list is rejected outright.
+        @test !any(t -> t isa SingleBandDelay, FringeModel().terms)
+        @test !any(t -> t isa DispersionModel, FringeModel().terms)
+        @test fieldnames(DispersionModel) == (:require_band_separation, :colocated_sep)
+        @test fieldnames(DispersionSBDFit) == (:dispersion, :sbd)
+    end
+
+    @testset "the propagation model is Calibration's, not Fringe's" begin
+        # An ionosphere is modelled without loading the fringe-fitting module:
+        # the spec sits beside the `Dispersion` term it configures, and only the
+        # joint (Δτ, dTEC) estimator stays in `Fringe`.
+        @test parentmodule(DispersionModel) === Gustavo.Calibration
+        @test which(CAL._dispersion_enabled, Tuple{Nothing, CAL.DataGeometry}).module ===
+            Gustavo.Calibration
+        # Re-exported, so `FP.DispersionModel` and a bare `using Gustavo` name
+        # the SAME type rather than a shadowing second one.
+        @test FP.DispersionModel === CAL.DispersionModel === Gustavo.DispersionModel
+        @test !isdefined(FP, :_dispersion_plan)
+        @test FP._dispersion_enabled === CAL._dispersion_enabled
+        # Co-location is array geometry, not a fringe concept, so the dTEC
+        # tie's grouping belongs to UVData.
+        @test parentmodule(UVP._colocated_ties) === Gustavo.UVData
+        @test !isdefined(FP, :_colocated_ties)
+    end
+
+    @testset "the step decides whether an ionosphere is modelled at all" begin
+        # Whether the term is SOLVED end to end is `stage_info(sol,
+        # :refine).dispersion_applied` (see the dispersion testset in
+        # test_pipeline.jl). What this asserts
+        # is the model structure DispersionSBDFit's presence/field builds.
+        ff = FringeFit(model = FringeModel(), estimator = mf)
+        on = fit(ff |> DispersionSBDFit(), uvset)
+        off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset)
+        on_ref, off_ref = on[:refine].steps[1], off[:refine].steps[1]
+        @test CAL._dispersion_plan(on_ref.model, on_ref.layout) !== nothing
+        @test CAL._dispersion_plan(off_ref.model, off_ref.layout) === nothing
+        @test any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(on_ref.model))
+        @test !any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(off_ref.model))
+        # No dTEC term means no dTEC column in θ at all — but `off` still has
+        # SBD's columns (untouched by the `dispersion` field), so `on` has
+        # exactly one more (the private delay-refinement column that only
+        # accompanies dTEC).
+        @test length(on_ref.θ) - length(off_ref.θ) == length(CAL._dispersion_plan(on_ref.model, on_ref.layout).range) +
+            length(FP._perscan_delay_plan(on_ref.model, on_ref.layout).range)
+    end
+
+    @testset "require_band_separation gates on the band layout" begin
+        # A single contiguous band cannot constrain the 1/ν curvature.
+        narrow, _ = _build_fringe_uvset(nspw = 1, nchan = 8)
+        geom_n = CAL.build_geometry(narrow)
+        geom_w = CAL.build_geometry(uvset)
+        @test !CAL._dispersion_enabled(DispersionModel(), geom_n)
+        @test CAL._dispersion_enabled(DispersionModel(), geom_w)
+        # Forcing it on solves the term regardless of what the layout supports.
+        @test CAL._dispersion_enabled(DispersionModel(require_band_separation = false), geom_n)
+        @test !CAL._dispersion_enabled(nothing, geom_n)
+    end
+
+    @testset "colocated_sep reaches DispersionSBDFit's own start_pass! through the step" begin
+        # The tie is the dispersion model's, but DispersionSBDFit is the step
+        # that reads it (`_dtec_ties(s.dispersion, ctx.antennas)`), so it must
+        # arrive without the estimator knowing about it.
+        ants = Gustavo.UVData.metadata(
+            first(values(Gustavo.UVData.branches(uvset)))
+        ).antennas
+        @test Gustavo._dtec_ties(DispersionModel(colocated_sep = 1000.0), ants) !== nothing
+        @test Gustavo._dtec_ties(DispersionModel(colocated_sep = nothing), ants) === nothing
+        @test Gustavo._dtec_ties(nothing, ants) === nothing
+    end
+
+    @testset "delay and dTEC are still estimated jointly" begin
+        # The separation is of the specification only: DispersionSBDFit's own
+        # process_scan! fits both plans in one joint (Δτ, dTEC) grid search,
+        # because over a finite band the two are near-degenerate — confirmed by
+        # both plans existing (and being solved, not left at zero) once the step
+        # runs.
+        ff = FringeFit(model = FringeModel(), estimator = mf)
+        sol = fit(ff |> DispersionSBDFit(), uvset)
+        refine = sol[:refine].steps[1]
+        @test CAL._dispersion_plan(refine.model, refine.layout) !== nothing
+        @test FP._perscan_delay_plan(refine.model, refine.layout) !== nothing
+        @test stage_info(sol, :refine).dispersion_applied
+    end
+end

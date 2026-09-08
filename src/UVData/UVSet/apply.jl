@@ -29,7 +29,7 @@ Walk the leaves of `uvset` and rebuild a tree with each leaf replaced by
 - `f(leaf, info, root_meta)` — `root_meta::UVMetadata` is `metadata(uvset)`.
 
 Whichever signature `f` defines, it must return a `DimTree` (e.g. via
-`with_visibilities`) so the resulting `UVSet` is well-formed. Tree shape
+`rebuild_visibilities`) so the resulting `UVSet` is well-formed. Tree shape
 is preserved. Built-in reducers (`TimeAverage`) and the bandpass /
 apriori applicators implement this signature.
 
@@ -46,6 +46,19 @@ function apply(f, uvset::UVSet)
         new_branches[k] = _call_leaf_fn(f, leaf, DimensionalData.metadata(leaf), root_meta)
     end
     return DimensionalData.rebuild(uvset; branches = new_branches)
+end
+
+"""
+    set_bunit(uvset::UVSet, bunit) -> UVSet
+
+Return `uvset` with its array-wide brightness unit set to `bunit` (e.g. `"JY"`
+once the visibilities have been flux-calibrated). Only the root
+`ObsArrayMetadata.bunit` is changed; leaves and data are untouched.
+"""
+function set_bunit(uvset::UVSet, bunit)
+    root = DimensionalData.metadata(uvset)
+    new_meta = UVMetadata(with_bunit(root.array_obs, bunit))
+    return DimensionalData.rebuild(uvset; metadata = new_meta)
 end
 
 """
@@ -125,12 +138,14 @@ function flatmap(f, uvset::UVSet)
     state === nothing && return Any[]
     leaf1, st = state
     first_piece = _call_leaf_fn(f, leaf1, DimensionalData.metadata(leaf1), root_meta)
-    first_piece isa AbstractVector || throw(ArgumentError(
-        "flatmap: callable must return an `AbstractVector` per leaf (got " *
-            "$(typeof(first_piece))). Use `mapleaves` if you want per-leaf " *
-            "results collected into an OrderedDict, or `apply` if you want " *
-            "to rebuild a `UVSet` with new leaf data.",
-    ))
+    first_piece isa AbstractVector || throw(
+        ArgumentError(
+            "flatmap: callable must return an `AbstractVector` per leaf (got " *
+                "$(typeof(first_piece))). Use `mapleaves` if you want per-leaf " *
+                "results collected into an OrderedDict, or `apply` if you want " *
+                "to rebuild a `UVSet` with new leaf data.",
+        )
+    )
     return _flatmap_collect(f, iter, st, root_meta, first_piece, length(src))
 end
 

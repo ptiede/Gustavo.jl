@@ -1,0 +1,66 @@
+# ── Propagation model: the dispersive ionosphere ─────────────────────────────
+#
+# The specification of the dTEC term and the structural lookup of its θ
+# columns. `Dispersion` (terms.jl) is the term this model configures; the
+# estimator that fits it — jointly with the delay it is degenerate with — lives
+# in `Gustavo.Fringe`.
+
+"""
+    DispersionModel(; require_band_separation = true, colocated_sep = 1000.0)
+
+The differential-ionosphere (dTEC) term: a per-scan, feed-common phase ∝ 1/ν.
+The `dispersion` field of a `DispersionSBDFit` pipeline step — pass it there to
+model the ionosphere, `nothing` for a fit that models no ionosphere at all. (It
+is not a `FringeModel` term-list element; the fringe search does not fit it.)
+
+- `require_band_separation` — solve the term only when the band layout can
+  actually separate 1/ν from a linear delay: several sub-bands over a wide
+  fractional bandwidth (VGOS 3–10.7 GHz qualifies; a single contiguous band
+  cannot constrain the curvature and the term would just soak up delay). The
+  gate — at least 4 sub-bands and `fmax/fmin > 1.3` — is this element's own
+  judgment of when the curvature is measurable, not framework policy. Set
+  `false` to solve it regardless.
+- `colocated_sep` — the station separation (meters) below which two stations are
+  taken to see the same ionosphere and are tied to one dTEC, a differential TEC
+  between them being pure solve error. The default 1 km ties twins such as
+  Onsala's OE/OW at ~75 m; `nothing` ties nothing. The grouping is computed from
+  the antenna table's station positions, and errors if they are missing or
+  degenerate — a threshold means nothing without real positions.
+
+Estimating dispersion is not separable from estimating delay: over a finite
+band the two are near-degenerate, so the fringe estimator fits Δτ and dTEC
+jointly. The separation here is of the model, not of the solve.
+"""
+Base.@kwdef struct DispersionModel
+    require_band_separation::Bool = true
+    colocated_sep::Union{Nothing, Float64} = 1000.0
+end
+
+# The element compiles to the dTEC component, or to nothing when the band
+# layout cannot constrain it (see `_dispersion_enabled`).
+model_components(dm::DispersionModel, spec) =
+    _dispersion_enabled(dm, spec.geom) ?
+    GainComponent(Dispersion(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()) : nothing
+
+# Whether this geometry gets a dTEC term. No model, no term. With one, the
+# `require_band_separation` gate asks whether the band layout can separate 1/ν
+# from a linear delay: several sub-bands over a wide fractional bandwidth (VGOS
+# 3–10.7 GHz qualifies; a single contiguous band cannot constrain the curvature
+# and the term would just soak up delay).
+_dispersion_enabled(::Nothing, ::DataGeometry) = false
+function _dispersion_enabled(dm::DispersionModel, geom::DataGeometry)
+    dm.require_band_separation || return true
+    nb = length(unique(geom.spw_of_chan))
+    fmin, fmax = extrema(geom.channel_freqs)
+    return nb >= 4 && fmax / fmin > 1.3
+end
+
+# The dTEC component's routing signature: located by term type rather than by
+# index, so the model may carry it anywhere in its component order.
+_is_dispersion(tc) = tc.term isa Dispersion
+
+# The dispersion component's plan, or `nothing` when the model carries no dTEC term.
+function _dispersion_plan(model, layout)
+    i = findfirst(_is_dispersion, phase_components(model))
+    return i === nothing ? nothing : layout.plans[i]
+end

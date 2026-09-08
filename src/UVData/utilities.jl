@@ -1,15 +1,17 @@
 """
     sanitize_source(name::AbstractString) -> Symbol
 
-Sanitize a source name into a valid Julia identifier `Symbol`. Non-identifier
-chars are replaced with `_`; names starting with a digit are prefixed with
-`M`. Examples: `"3C273"` → `:M3C273`, `"Sgr A*"` → `:Sgr_A_`,
-`"NGC 4486"` → `:NGC_4486`. Used as the source-segment of a partition key.
+Sanitize a source name into a valid Julia identifier `Symbol`, always prefixed
+with `src_` so the key is identifier-safe (digit-leading catalog names like
+`3C273` are otherwise illegal identifiers) and never masquerades as a real
+source name. Non-identifier chars are replaced with `_`. Examples:
+`"3C273"` → `:src_3C273`, `"Sgr A*"` → `:src_Sgr_A_`,
+`"NGC 4486"` → `:src_NGC_4486`. Used as the source-segment of a partition key.
 """
 function sanitize_source(name::AbstractString)
     s = replace(strip(String(name)), r"[^A-Za-z0-9_]" => "_")
-    isempty(s) && return :unknown
-    return isdigit(first(s)) ? Symbol("M", s) : Symbol(s)
+    isempty(s) && (s = "unknown")
+    return Symbol("src_", s)
 end
 
 """
@@ -72,6 +74,15 @@ _rewrap_like(A, ref::AbstractDimArray) =
     size(A) == size(ref) ? DimArray(A, dims(ref)) : A
 _rewrap_like(A, _) = A
 
+# Collect `xs` into a Vector whose element type is the tightest common supertype
+# of what it actually holds — concrete whenever the entries share a type, however
+# loosely the source container was typed. An empty `xs` has nothing to join and
+# becomes `Vector{Any}`; `Vector{Union{}}` could hold no entry at all.
+function _narrow_eltype(xs)
+    isempty(xs) && return Vector{Any}(undef, 0)
+    return collect(mapreduce(typeof, typejoin, xs), xs)
+end
+
 """
     pol_products(x) -> Vector{String}
 
@@ -81,12 +92,32 @@ on a `DimArray` (the lookup), a leaf `AbstractDimTree`, or a `UVSet`
 (uses the first leaf — all leaves share the same Pol axis on read).
 """
 pol_products(vis::AbstractDimArray) = collect(lookup(vis, Pol))
-pol_products(leaf::AbstractDimTree) = pol_products(leaf[:vis])
+pol_products(leaf::PartitionedData) = pol_products(leaf[:vis])
 function pol_products(uvset::UVSet)
     bs = DimensionalData.branches(uvset)
     isempty(bs) && error("pol_products: UVSet has no leaves")
     return pol_products(first(values(bs)))
 end
+
+"""
+    frequencies(x) -> Vector{Float64}
+
+Channel frequencies (Hz) off the `Frequency` lookup of `x`'s visibility array —
+a `DimArray`, a leaf `AbstractDimTree`, or a layer selection off one. The raw
+coordinate vector, not a lookup wrapper.
+"""
+frequencies(vis::AbstractDimArray) = parent(lookup(vis, Frequency))
+frequencies(leaf::PartitionedData) = frequencies(leaf[:vis])
+
+"""
+    timestamps(x) -> Vector{Float64}
+
+Integration times (hours) off the `Ti` lookup of `x`'s visibility array — a
+`DimArray`, a leaf `AbstractDimTree`, or a layer selection off one. The raw
+coordinate vector, not a lookup wrapper.
+"""
+timestamps(vis::AbstractDimArray) = parent(lookup(vis, Ti))
+timestamps(leaf::PartitionedData) = timestamps(leaf[:vis])
 
 # ── Polarization-by-name selectors ────────────────────────────────────
 #
@@ -100,9 +131,11 @@ _POL_FEED_LETTERS = ('P', 'Q', 'R', 'L', 'X', 'Y')
 
 function _canonical_pol_label(label::AbstractString)
     s = uppercase(strip(String(label)))
-    length(s) == 2 || throw(ArgumentError(
-        "pol_index: expected a 2-character label like \"PP\" / \"RR\" / \"XY\", got \"$label\""
-    ))
+    length(s) == 2 || throw(
+        ArgumentError(
+            "pol_index: expected a 2-character label like \"PP\" / \"RR\" / \"XY\", got \"$label\""
+        )
+    )
     return string(_canonical_feed(s[1]), _canonical_feed(s[2]))
 end
 _canonical_feed(c::Char) = c in ('P', 'R', 'X') ? 'P' :
@@ -135,9 +168,9 @@ pol_index(x, label::Tuple{<:PolTypes, <:PolTypes}) =
     _pol_index_lookup(x, _canonical_pol_label(label))
 
 _pol_index_lookup(products::AbstractVector{<:AbstractString}, canon::AbstractString) =
-    let i = findfirst(==(canon), products)
-        i === nothing ? throw(KeyError(canon)) : i
-    end
+let i = findfirst(==(canon), products)
+    i === nothing ? throw(KeyError(canon)) : i
+end
 _pol_index_lookup(x, canon) = _pol_index_lookup(pol_products(x), canon)
 
 """

@@ -14,6 +14,17 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
+        "Specifying gain models" => "models.md",
+        "Authoring a new gain term" => "authoring_terms.md",
+        "Authoring a pipeline step" => "authoring_steps.md",
+        "API reference" => [
+            "Gustavo" => "api/gustavo.md",
+            "UVData" => "api/uvdata.md",
+            "Calibration" => "api/calibration.md",
+            "Streaming" => "api/streaming.md",
+            "Fringe" => "api/fringe.md",
+        ],
+        "Internals" => "internals.md",
     ],
 )
 
