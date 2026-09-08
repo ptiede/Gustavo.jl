@@ -73,7 +73,7 @@ export supports_station_heterogeneity
 # Re-export the transform / selection vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
 export AbstractDataTransform, apply_transform!, apply_transform
-export CalFunction, ApplySolution, StationWeightScale, FlagChannels
+export CalFunction, ApplySolution, StationWeightScale, FlagChannels, AprioriPreCal
 export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
 export AbstractLeafGrouping, ByScan, BySpw, ByKey

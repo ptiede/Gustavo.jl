@@ -121,6 +121,13 @@ end
     AprioriAmplitude(spw_cals; min_elevation_deg = 0.0, on_missing_station = :warn)
 
 Output-chain pipeline step (not a reduction): a-priori amplitude calibration.
+
+Being an output step, this scales the data a solve *produces*, never the data it
+*reads*: a `Bandpass` in the same pipeline is fit on unscaled amplitudes, so a
+per-channel SEFD lands in the fitted gains instead of being divided out ahead of
+them. Use [`AprioriPreCal`](@ref) — a data transform, applied to each scan group
+as it is materialized — when the solvers should see calibrated amplitudes.
+
 Applies a pre-built `spw_cals` (`load_fitsidi_apriori(path)` — the caller's
 job) to the fringe-corrected data, after the solution's gains and
 interleaved with any `ReduceStep`s in whatever relative order the

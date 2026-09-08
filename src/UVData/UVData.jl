@@ -50,7 +50,7 @@ export correlation_feed_pair, is_parallel_hand
 export parallel_hand_indices, cross_hand_indices
 export AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
 export load_antab, load_fitsidi_apriori, tsys_at, elevation_gain, stations
-export AprioriFluxGains, apriori_flux_gains
+export AprioriFluxGains, apriori_flux_gains, apriori_gains
 export primary_cards, register_primary_cards!
 export CoherenceReport, CoherenceCurve, coherence_report, coherence_headline
 export print_coherence_report, plot_coherence, plot_coherence_matrix

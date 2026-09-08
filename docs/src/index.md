@@ -65,6 +65,17 @@ calibration ([`AprioriAmplitude`](@ref)) compose into the same pipeline.
 Every step is optional and reorderable; a single standalone step is a legal
 pipeline.
 
+**Transforms.** A step scales what it *produces*; an
+[`AbstractDataTransform`](@ref Gustavo.Fringe.AbstractDataTransform) scales what
+every step *reads* — it runs on each scan group as it is materialized, inside
+the streaming pass. Chain one into a pipeline like any step
+(`AprioriPreCal(uvset, antab) |> Bandpass()`). The built-ins are
+[`AprioriPreCal`](@ref) (ANTAB SEFD scaling before the solve, the pre-fit
+counterpart of [`AprioriAmplitude`](@ref)), [`ApplySolution`](@ref),
+[`StationWeightScale`](@ref), [`FlagChannels`](@ref), and
+[`CalFunction`](@ref) for arbitrary caller code. Writing your own means one
+method, `apply_transform!(t, stack, win; executor)`.
+
 **Models.** Each solve step separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —
 from HOW it is solved (a pluggable estimator or smoother object on the step).

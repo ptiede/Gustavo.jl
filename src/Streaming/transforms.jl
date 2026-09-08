@@ -371,6 +371,216 @@ function apply_transform!(
     return nothing
 end
 
+# ── Built-in: a-priori amplitude (SEFD) calibration ──────────────────────────
+
+"""
+    AprioriPreCal(uvset::UVSet, antab::AntabCalibration;
+                  min_elevation_deg = 0.0, on_missing_station = :warn)
+
+Transform: a-priori amplitude calibration from a parsed ANTAB, applied to each
+scan group as it is materialized — so every solve step reads visibilities
+already scaled to Jy. Same correction as
+[`apply_calibration`](@ref Gustavo.UVData.apply_calibration)`(uvset, antab)`:
+`V → V / (g_a·g_b)` and `w → w·(g_a·g_b)²` with `g_a = 1/√SEFD_a`,
+`SEFD = T_sys / (DPFU · g_E(elevation))`. Samples whose Tsys is missing or
+non-positive, and those below `min_elevation_deg`, are flagged (weight ← 0);
+autocorrelations are flagged, being total power rather than a visibility.
+
+This is the streaming counterpart of the
+[`AprioriAmplitude`](@ref) pipeline step. The two differ in *what they
+calibrate*, not merely in when: `AprioriAmplitude` runs in the output tail,
+after the solved gains, so a bandpass fit alongside it is fit on uncalibrated
+amplitudes; this transform runs before any solver reads the scan, so the SEFD
+scaling — per channel, where the ANTAB declares per-channel Tsys — is divided
+out first and does not land in the fitted gains. Use this one when the solve
+should see calibrated amplitudes.
+
+`uvset` supplies the array's `rdate` (the epoch the ANTAB's timestamps are
+resolved against) and the per-spw channel numbering the ANTAB indexes, both
+read from metadata only — the set stays lazy.
+
+The correction leaves the set's `BUNIT` untouched: it is data, not metadata, that
+this transform rewrites. Stamp the finished output with
+`set_bunit(out, "JY")` if the unit needs to be recorded.
+"""
+struct AprioriPreCal{A <: UVData.AntabCalibration} <: AbstractDataTransform
+    antab::A
+    rdate::String
+    spw_channel_freqs::Dict{String, Vector{Float64}}
+    min_elevation_deg::Float64
+    on_missing_station::Symbol
+end
+
+function AprioriPreCal(
+        uvset::UVSet, antab::UVData.AntabCalibration;
+        min_elevation_deg::Real = 0.0, on_missing_station::Symbol = :warn,
+    )
+    on_missing_station in (:warn, :error, :ignore) || throw(
+        ArgumentError(
+            "AprioriPreCal: on_missing_station must be :warn, :error, or :ignore " *
+                "(got :$(on_missing_station))"
+        )
+    )
+    rdate = String(DimensionalData.metadata(uvset).array_obs.rdate)
+    isempty(rdate) && throw(
+        ArgumentError(
+            "AprioriPreCal: the set's root metadata has an empty `rdate`, so the ANTAB's " *
+                "DOY+UT timestamps cannot be resolved to the data's time axis."
+        )
+    )
+    # An ANTAB numbers channels within a spw, so recovering that numbering for a
+    # multi-spw scan group needs each spw's own channel order — which is the
+    # leaf's, not the geometry's ascending-frequency one (a lower-sideband spw
+    # reverses between the two).
+    spw_freqs = Dict{String, Vector{Float64}}()
+    for leaf in values(DimensionalData.branches(uvset))
+        info = DimensionalData.metadata(leaf)
+        get!(spw_freqs, String(info.spw_name)) do
+            Float64.(collect(info.freq_setup.channel_freqs))
+        end
+    end
+    return AprioriPreCal(
+        antab, rdate, spw_freqs, Float64(min_elevation_deg), on_missing_station,
+    )
+end
+
+"""
+    validate_transform(t::AprioriPreCal, geom::DataGeometry, ant_names)
+
+Check that the ANTAB describes stations this set actually has, and that every
+spw of the solve geometry was seen when the transform was built. An ANTAB
+sharing no station with the set would scale nothing at all, and silently doing
+nothing is the outcome worth refusing; `on_missing_station` decides what a
+*partially* matching ANTAB does (`:error` refuses, `:warn` reports and leaves
+those baselines unscaled).
+"""
+function validate_transform(t::AprioriPreCal, geom::Calibration.DataGeometry, ant_names)
+    known = [n for n in ant_names if haskey(t.antab, n)]
+    isempty(known) && throw(
+        ArgumentError(
+            "AprioriPreCal: the ANTAB $(repr(t.antab.track_label)) shares no station with " *
+                "this set, so it would scale nothing. It knows " *
+                "$(join(map(repr, sort(collect(String, keys(t.antab)))), ", ")); " *
+                "the set has $(join(map(repr, ant_names), ", ")). Check the ANTAB matches " *
+                "this track and band."
+        )
+    )
+    absent = [String(n) for n in ant_names if !haskey(t.antab, n)]
+    if !isempty(absent)
+        if t.on_missing_station === :error
+            throw(
+                ArgumentError(
+                    "AprioriPreCal: the ANTAB $(repr(t.antab.track_label)) has no record for " *
+                        "stations $(absent); baselines involving them would go through " *
+                        "unscaled. Pass `on_missing_station = :warn` or `:ignore` to allow that."
+                )
+            )
+        elseif t.on_missing_station === :warn
+            @warn "AprioriPreCal: the ANTAB has no record for these stations; baselines involving them are left unscaled." stations =
+                absent track = t.antab.track_label
+        end
+    end
+    for s in unique(geom.spw_of_chan)
+        name = isempty(geom.spw_names) ? "" : geom.spw_names[s]
+        haskey(t.spw_channel_freqs, name) || throw(
+            ArgumentError(
+                "AprioriPreCal: spw $(repr(name)) is in the solve geometry but was not in the " *
+                    "`UVSet` the transform was built from, so its channel numbering is unknown. " *
+                    "Build the transform from the set being solved."
+            )
+        )
+    end
+    return nothing
+end
+
+function apply_transform!(
+        t::AprioriPreCal, stack::AbstractDimStack, win::GeometryWindow; executor = SerialScheduler(),
+    )
+    info = DimensionalData.metadata(stack)
+    times = Float64.(lookup(stack[:vis], Ti))
+    isempty(times) && return nothing
+    base_dt = DateTime(Date(t.rdate))
+    base_jd = datetime2julian(base_dt)
+    jds = [base_jd + h / 24.0 for h in times]
+    lo_h, hi_h = extrema(times)
+    t_lo = base_dt + Millisecond(round(Int, lo_h * 3_600_000))
+    t_hi = base_dt + Millisecond(round(Int, hi_h * 3_600_000))
+
+    pkg = UVData.apriori_gains(
+        t.antab, info.antennas, _antab_channel_index(t, win), jds, t_lo, t_hi,
+        info.ra, info.dec;
+        # Station coverage is settled once, at stream construction
+        # (`validate_transform`); repeating it here would warn once per scan group.
+        on_missing_station = :ignore, min_elevation_deg = t.min_elevation_deg,
+    )
+    _scale_apriori!(stack, pkg.gains, executor)
+    return nothing
+end
+
+apply_transform(uvset::UVSet, t::AprioriPreCal) = UVData.apply_calibration(
+    uvset, t.antab;
+    on_missing_station = :ignore, min_elevation_deg = t.min_elevation_deg,
+)
+
+# The ANTAB channel number of each channel of this window: the position the
+# channel holds in its own spw's leaf-order frequency list. Identity for a
+# single-spw window whose channels are in file order, and the reason a
+# multi-spw or lower-sideband window still reads the right per-channel Tsys.
+function _antab_channel_index(t::AprioriPreCal, win::GeometryWindow)
+    geom = win.geom
+    idx = Vector{Int}(undef, length(win.chan_idx))
+    for (c, gc) in pairs(win.chan_idx)
+        name = isempty(geom.spw_names) ? "" : geom.spw_names[geom.spw_of_chan[gc]]
+        freqs = t.spw_channel_freqs[name]
+        f = geom.channel_freqs[gc]
+        k = findfirst(g -> isapprox(g, f; rtol = 1.0e-9), freqs)
+        k === nothing && error(
+            "AprioriPreCal: channel $(f) Hz is not among spw $(repr(name))'s channels; the " *
+                "transform was built from a set with a different frequency setup."
+        )
+        idx[c] = k
+    end
+    return idx
+end
+
+# Divide out real, positive per-(channel, integration, antenna, feed) amplitude
+# gains in place. Mirrors `UVData._apply_apriori_kernel`, which does the same on
+# a whole leaf: NaN flags the sample, autocorrelations are flagged outright.
+function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, executor)
+    V = parent(stack[:vis])
+    W = parent(stack[:weights])
+    bl_pairs = UVData.baselines(stack).pairs
+    pols = UVData.pol_products(stack)
+    nchan, nti, nbl, npol = size(V)
+    cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
+    tforeach(cols; scheduler = executor) do col
+        bi, p = col
+        a, b = bl_pairs[bi]
+        if a == b
+            for t in 1:nti, c in 1:nchan
+                W[c, t, bi, p] = zero(eltype(W))
+            end
+            return
+        end
+        fa, fb = UVData.correlation_feed_pair(pols[p])
+        for t in 1:nti
+            for c in 1:nchan
+                w = W[c, t, bi, p]
+                (w > 0 && isfinite(w)) || continue
+                ga = gains[c, t, a, fa]
+                gb = gains[c, t, b, fb]
+                if !(isfinite(ga) && isfinite(gb))
+                    W[c, t, bi, p] = zero(eltype(W))
+                    continue
+                end
+                V[c, t, bi, p] /= ga * gb
+                W[c, t, bi, p] *= (ga * gb)^2
+            end
+        end
+    end
+    return nothing
+end
+
 # ── The open hook: arbitrary caller code ──────────────────────────────────────
 
 """

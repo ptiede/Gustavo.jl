@@ -81,19 +81,6 @@ function _build_apriori_gains(
         leaf, info, root_meta, antab::AntabCalibration;
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    on_missing_station in (:warn, :error, :ignore) || throw(
-        ArgumentError(
-            "on_missing_station must be :warn, :error, or :ignore (got :$(on_missing_station))"
-        )
-    )
-    ant_table = info.antennas
-    ant_names = ant_table.name
-    ant_xyz = ant_table.station_xyz
-    nant = length(ant_names)
-    chan_freqs = collect(info.freq_setup.channel_freqs)
-    nchan = length(chan_freqs)
-    nti = length(obs_time(leaf))
-
     jds = _leaf_obs_jds(leaf, root_meta)
 
     # Convert the leaf's scan window (hours since RDATE 0h UTC) to absolute
@@ -111,19 +98,68 @@ function _build_apriori_gains(
     t_lo = base_dt + Millisecond(round(Int, lo_h * 3_600_000))
     t_hi = base_dt + Millisecond(round(Int, hi_h * 3_600_000))
 
+    # A leaf spans one spw, so its channels ARE the ANTAB's channel numbering.
+    # `info.ra`/`info.dec` are already radians (the FITS-IDI loader converts the
+    # SOURCE table's degrees, and the UVFITS path round-trips OBSRA/OBSDEC).
+    nchan = length(info.freq_setup.channel_freqs)
+    return apriori_gains(
+        antab, info.antennas, Base.OneTo(nchan),
+        jds, t_lo, t_hi, info.ra, info.dec;
+        on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
+    )
+end
+
+"""
+    apriori_gains(antab, antennas, chan_index, jds, t_lo, t_hi, ra, dec;
+                  on_missing_station = :warn, min_elevation_deg = 0.0)
+        -> AprioriFluxGains
+
+SEFD-derived amplitude gains for one block of data, from explicit coordinates
+rather than a leaf: `antennas` is an [`AntennaTable`](@ref), `jds` the block's
+integration epochs as Julian Dates (UTC), `[t_lo, t_hi]` the scan window whose
+ANTAB rows are averaged for Tsys, and `ra`/`dec` the source position in radians.
+
+`chan_index[c]` is the ANTAB channel number of the block's `c`-th channel. An
+ANTAB numbers channels **within a spectral window** (ALMA's `'L1|R1' … 'L32|R32'`
+declares 32 per-channel SEFDs for one band), so a block spanning several spws
+must say which channel of which band each of its columns is; a single-spw block
+passes `Base.OneTo(nchan)`. Stations whose ANTAB declares aggregate Tsys ignore
+the index entirely.
+
+Both a-priori paths enter here: [`apply_calibration`](@ref) per leaf, and the
+streaming [`AprioriPreCal`](@ref) transform per scan group — so a scan corrected
+on the fly and the same scan corrected eagerly get bit-identical gains.
+"""
+function apriori_gains(
+        antab::AntabCalibration, ant_table::AntennaTable,
+        chan_index::AbstractVector{<:Integer}, jds::AbstractVector{<:Real},
+        t_lo::DateTime, t_hi::DateTime, ra::Real, dec::Real;
+        on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
+    )
+    on_missing_station in (:warn, :error, :ignore) || throw(
+        ArgumentError(
+            "on_missing_station must be :warn, :error, or :ignore (got :$(on_missing_station))"
+        )
+    )
+    # The gain/SEFD cubes below are freshly allocated 1-based arrays indexed in
+    # lockstep with these inputs.
+    Base.require_one_based_indexing(chan_index, jds)
+
+    ant_names = ant_table.name
+    ant_xyz = ant_table.station_xyz
+    nant = length(ant_names)
+    nchan = length(chan_index)
+    nti = length(jds)
+
+    ra_rad = Float64(ra)
+    dec_rad = Float64(dec)
+
     elevation_deg = Matrix{Float64}(undef, nti, nant)
     sefd = Array{Float64}(undef, nchan, nti, nant, 2)
     gains = Array{Float64}(undef, nchan, nti, nant, 2)
 
     pol_syms = (:R, :L)
     missing_stations = String[]
-
-    # PartitionInfo stores source ra/dec in RADIANS (the FITS-IDI loader
-    # converts the SOURCE table's RAEPO/DECEPO degrees → radians, and the
-    # UVFITS path round-trips radians through OBSRA/OBSDEC), so they feed
-    # `_source_elevation` (which expects radians) directly.
-    ra_rad = Float64(info.ra)
-    dec_rad = Float64(info.dec)
 
     for (a, name) in pairs(ant_names)
         if !haskey(antab, name)
@@ -149,7 +185,7 @@ function _build_apriori_gains(
         # leaf's scan window.
         scan_tsys = Matrix{Float64}(undef, nchan, 2)
         for p in 1:2, c in 1:nchan
-            scan_tsys[c, p] = tsys_in_window(st, t_lo, t_hi, c, pol_syms[p])
+            scan_tsys[c, p] = tsys_in_window(st, t_lo, t_hi, Int(chan_index[c]), pol_syms[p])
         end
 
         for ti in 1:nti

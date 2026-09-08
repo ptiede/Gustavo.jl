@@ -151,7 +151,7 @@ export fringe_freq_group_stats, fringe_freq_groups
 export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags
 export delay_closure, print_delay_closure
 export AbstractDataTransform, apply_transform!, apply_transform
-export ApplySolution, StationWeightScale, FlagChannels, CalFunction
+export ApplySolution, StationWeightScale, FlagChannels, CalFunction, AprioriPreCal
 export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
 export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info

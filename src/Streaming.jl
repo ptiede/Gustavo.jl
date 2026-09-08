@@ -25,6 +25,7 @@ using OhMyThreads: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialSch
 using OhMyThreads.Schedulers: chunking_enabled, has_nchunks, nchunks
 using ..UVData
 using ..UVData: Baseline, Frequency, Pol
+using Dates: DateTime, Date, Millisecond, datetime2julian
 using ..Calibration
 using ..Calibration: GeometryWindow
 import DimensionalData
@@ -37,7 +38,7 @@ include("Streaming/stream.jl")
 
 export ExecutionConfig, ProgressLogger, outer_executor, inner_executor
 export AbstractDataTransform, apply_transform!, apply_transform
-export ApplySolution, StationWeightScale, FlagChannels, CalFunction
+export ApplySolution, StationWeightScale, FlagChannels, CalFunction, AprioriPreCal
 export station_weight_scale
 export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans

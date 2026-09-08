@@ -195,3 +195,125 @@
         @test_throws ErrorException FP.materialize_cube(st_len, st_len.groups[1])
     end
 end
+
+# ── AprioriPreCal: a-priori SEFD scaling inside the streaming pass ────────────
+#
+# The transform's whole reason to exist is that the solvers see the SCALED data,
+# where the `AprioriAmplitude` pipeline step scales only the output. Its
+# correctness gate is therefore parity with the eager whole-set verb: streaming
+# a scan group through the transform must land on the same visibilities and
+# weights `apply_calibration(uvset, antab)` produces for those samples.
+
+@testset "AprioriPreCal" begin
+    uvset, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 8, ntime = 6)
+    ant_names = String.(UVP.union_antennas(uvset).name)
+    geom = CAL.build_geometry(uvset)
+
+    rdate = DimensionalData.metadata(uvset).array_obs.rdate
+    base_dt = DateTime(Date(rdate))
+    ts = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
+    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts]
+    times = [times[1] - Hour(1); times; times[end] + Hour(1)]      # pad the window
+
+    # Per-station Tsys, distinct per station so a mixed-up station mapping shows
+    # up as a wrong factor rather than cancelling.
+    tsys_of = Dict(nm => 100.0 * (i + 1) for (i, nm) in pairs(ant_names))
+    function _antab(names; tsys_of = tsys_of)
+        stns = Dict{String, UVP.AntabStation}()
+        for nm in names
+            vals = repeat([tsys_of[nm] tsys_of[nm]], length(times), 1)
+            stns[nm] = UVP.AntabStation(
+                nm, UVP.AntabGainCurve((1.0, 1.0), [1.0]),
+                UVP.AntabTsysSeries(times, [(0, :R), (0, :L)], vals), 0,
+            )
+        end
+        return UVP.AntabCalibration("synthetic", "synth", 2000, stns)
+    end
+    antab = _antab(ant_names)
+
+    # Synthetic station_xyz are not real ECEF coords, so elevation is ill-defined;
+    # the gain curve is flat, so disabling the horizon cut isolates SEFD scaling.
+    precal = ST.AprioriPreCal(uvset, antab; min_elevation_deg = -Inf)
+    eager = UVP.apply_calibration(uvset, antab; min_elevation_deg = -Inf)
+
+    @testset "streaming ≡ eager apply_calibration" begin
+        st_raw = FP.scan_stream(uvset; geom = geom)
+        st_pre = FP.scan_stream(uvset; geom = geom, transforms = [precal])
+        st_eag = FP.scan_stream(eager; geom = geom)
+        for (g_pre, g_eag) in zip(st_pre.groups, st_eag.groups)
+            s_pre, _ = FP.materialize_cube(st_pre, g_pre)
+            s_eag, _ = FP.materialize_cube(st_eag, g_eag)
+            @test isequal(parent(s_pre[:vis]), parent(s_eag[:vis]))
+            @test isequal(parent(s_pre[:weights]), parent(s_eag[:weights]))
+        end
+        # ... and it actually did something: the scaled amplitudes differ from raw.
+        s_raw, _ = FP.materialize_cube(st_raw, st_raw.groups[1])
+        s_pre, _ = FP.materialize_cube(st_pre, st_pre.groups[1])
+        @test !isequal(parent(s_raw[:vis]), parent(s_pre[:vis]))
+    end
+
+    @testset "eager form matches the verb" begin
+        direct = FP.apply_transform(uvset, precal)
+        for (k, leaf) in UVP.branches(direct)
+            @test isequal(parent(leaf[:vis]), parent(UVP.branches(eager)[k][:vis]))
+        end
+    end
+
+    # An ANTAB numbers channels WITHIN a spw (ALMA's `'L1|R1' … 'Ln|Rn'`), so a
+    # scan group spanning two spws must map each of its columns back to a
+    # per-spw channel number. Getting that wrong reads the neighbouring band's
+    # Tsys — a wrong answer with no symptom, which is what these two gate.
+    nchan_spw = 8
+    perchan = let stns = Dict{String, UVP.AntabStation}()
+        cols = [(c, :both) for c in 1:nchan_spw]
+        for (i, nm) in pairs(ant_names)
+            # Strongly channel-dependent, and distinct per station.
+            row = [100.0 * (i + 1) * (1 + 0.5 * c) for c in 1:nchan_spw]
+            stns[nm] = UVP.AntabStation(
+                nm, UVP.AntabGainCurve((1.0, 1.0), [1.0]),
+                UVP.AntabTsysSeries(times, cols, repeat(row', length(times), 1)), nchan_spw,
+            )
+        end
+        UVP.AntabCalibration("synthetic", "synth", 2000, stns)
+    end
+    pre_pc = ST.AprioriPreCal(uvset, perchan; min_elevation_deg = -Inf)
+
+    @testset "per-channel Tsys: streaming ≡ eager across spws" begin
+        eager_pc = UVP.apply_calibration(uvset, perchan; min_elevation_deg = -Inf)
+        st_pre = FP.scan_stream(uvset; geom = geom, transforms = [pre_pc])
+        st_eag = FP.scan_stream(eager_pc; geom = geom)
+        for (g_pre, g_eag) in zip(st_pre.groups, st_eag.groups)
+            s_pre, _ = FP.materialize_cube(st_pre, g_pre)
+            s_eag, _ = FP.materialize_cube(st_eag, g_eag)
+            @test isequal(parent(s_pre[:vis]), parent(s_eag[:vis]))
+        end
+    end
+
+    @testset "the solve sees scaled data" begin
+        # The point of the transform: a step fit through it is fit on calibrated
+        # amplitudes. A channel-dependent SEFD is what shows it — a station's
+        # flat scaling is degenerate with the bandpass gauge and absorbed by it.
+        b_raw = fit(Bandpass(), uvset)
+        b_pre = fit(pre_pc |> Bandpass(), uvset)
+        @test !isapprox(
+            abs.(CAL.gains(b_raw; Ti = 1)), abs.(CAL.gains(b_pre; Ti = 1)); rtol = 1.0e-3,
+        )
+        # The transform is recorded on the solution, so `calibrate` replays it.
+        @test any(t -> t isa ST.AprioriPreCal, b_pre.transforms)
+    end
+
+    @testset "station coverage is settled at stream construction" begin
+        partial = _antab(ant_names[1:(end - 1)])
+        @test_throws "has no record for stations" FP.scan_stream(
+            uvset; geom = geom,
+            transforms = [ST.AprioriPreCal(uvset, partial; on_missing_station = :error)],
+        )
+        strangers = _antab(["XX", "YY"]; tsys_of = Dict("XX" => 100.0, "YY" => 100.0))
+        @test_throws "shares no station with this set" FP.scan_stream(
+            uvset; geom = geom, transforms = [ST.AprioriPreCal(uvset, strangers)],
+        )
+        @test_throws "on_missing_station must be" ST.AprioriPreCal(
+            uvset, antab; on_missing_station = :shrug,
+        )
+    end
+end
