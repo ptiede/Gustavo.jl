@@ -10,8 +10,7 @@ test/Manifest.toml
 testdata
 run_output
 vgos/
-DESIGN_REVIEW_PLAN.md
-DESIGN_REVIEW_SESSION.md
+DESIGN_REVIEW_*.md
 NOTES_UPDATES.md
 APPLY_DESIGN_PLAN.md
 BANDPASS_DESIGN_PLAN.md
