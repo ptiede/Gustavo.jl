@@ -872,3 +872,52 @@ end
     # scale_value agrees on a scalar (the primitive _swap_into! calls).
     @test FITSFiles.scale_value(Int16(8), field, true) ≈ 104.0
 end
+
+# ── Source identity survives select-out-of-merge ─────────────────────────────
+#
+# The primary-HDU stash carries a set's FITS layout through `rebuild`/`select_*`/
+# `merge_uvsets`, and a merge inherits the FIRST input's cards. `OBJECT` is not
+# layout — it is what the reader takes `source_name` from — so a source selected
+# back out of a merge must be written under its OWN identity, not whichever
+# source the merge happened to inherit.
+@testset "write_uvfits: OBJECT follows the set, not the merge stash" begin
+    UV = Gustavo.UVData
+    one = build_synth_idi_uvset(; nant = 3, nspw = 1, nchan = 2, nscan = 1, ntime = 2)
+    # A second set under a different source name, otherwise identical. The leaf
+    # KEY encodes the source, so it has to be recomputed — merging keys by
+    # (source, scan), and a stale key would collide with the original's.
+    two_branches = DimensionalData.TreeDict()
+    for (_, leaf) in UV.branches(one)
+        info = UV.metadata(leaf)
+        ni = UV.update(
+            info; source_name = "OTHER", source_key = :src_OTHER,
+            ra = info.ra + 0.01, dec = info.dec - 0.01,
+        )
+        two_branches[UV.partition_key(ni)] = DimensionalData.rebuild(leaf; metadata = ni)
+    end
+    two = DimensionalData.rebuild(one; branches = two_branches)
+    merged = UV.merge_uvsets(one, two)
+    @test Set(UV.sources(merged)) == Set([UV.metadata(first(values(UV.leaves(one)))).source_name, "OTHER"])
+
+    for want in UV.sources(merged)
+        sub = UV.select_source(merged, want)
+        mktempdir() do dir
+            path = joinpath(dir, "sel.uvfits")
+            UV.write_uvfits(path, sub)
+            back = UV.load_uvfits(path)
+            @test unique([UV.metadata(l).source_name for l in values(UV.leaves(back))]) == [want]
+            # The phase centre travels with the identity, not with the stash —
+            # on EVERY card that carries it. OBSRA/OBSDEC and the RA/DEC axis
+            # CRVALs are written from one source position and must agree, or a
+            # reader taking the axis pair gets another source's coordinates.
+            @test UV.metadata(first(values(UV.leaves(back)))).ra ≈
+                UV.metadata(first(values(UV.leaves(sub)))).ra atol = 1.0e-9
+            @test UV.metadata(first(values(UV.leaves(back)))).dec ≈
+                UV.metadata(first(values(UV.leaves(sub)))).dec atol = 1.0e-9
+            cards = UV.primary_cards(back)
+            cv(k) = only([c.value for c in cards if rstrip(string(c.key)) == k])
+            @test cv("CRVAL6") ≈ cv("OBSRA") atol = 1.0e-9
+            @test cv("CRVAL7") ≈ cv("OBSDEC") atol = 1.0e-9
+        end
+    end
+end

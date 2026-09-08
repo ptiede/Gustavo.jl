@@ -518,6 +518,40 @@ function _synthesize_primary_cards(uvset::UVSet)
     ]
 end
 
+# The primary-HDU stash preserves the FITS layout a set was read with (axis
+# descriptors, scaling, PTYPE order) across `rebuild`/`select_*`/`merge_uvsets`.
+# Source identity is NOT layout: it describes the data, and the UVSet's own
+# leaves are its source of truth. `merge_uvsets` inherits the first input's
+# cards, so a set selected back out of a merge would otherwise be written under
+# whichever source happened to sort first. Refresh the three identity cards from
+# the set being written; everything else is left as stashed.
+function _refresh_source_cards(cards::AbstractVector, uvset::UVSet)
+    branches_dict = DimensionalData.branches(uvset)
+    isempty(branches_dict) && return cards
+    info = DimensionalData.metadata(first(values(branches_dict)))
+    out = Vector{Card}(cards)
+    # Every card carrying the phase centre, not just OBSRA/OBSDEC: the RA/DEC
+    # axes' CRVALs hold it too (`_synthesize_primary_cards` writes all four from
+    # the same `info.ra`/`info.dec`), and a reader is free to take the position
+    # from either. Leaving the axis pair stale puts one source's name and
+    # OBSRA/OBSDEC on another source's coordinates — which reads as a wrong
+    # parallactic angle at every station.
+    obsra = rad2deg(Float64(info.ra))
+    obsdec = rad2deg(Float64(info.dec))
+    replacements = (
+        "OBJECT" => Card("OBJECT", string(info.source_name)),
+        "OBSRA" => Card("OBSRA", obsra),
+        "OBSDEC" => Card("OBSDEC", obsdec),
+        "CRVAL6" => Card("CRVAL6", obsra),
+        "CRVAL7" => Card("CRVAL7", obsdec),
+    )
+    for (name, card) in replacements
+        i = findfirst(c -> rstrip(string(c.key)) == name, out)
+        i === nothing ? push!(out, card) : (out[i] = card)
+    end
+    return out
+end
+
 function UVData.primary_cards(uvset::UVSet)
     haskey(_PRIMARY_CARDS, uvset) && return _PRIMARY_CARDS[uvset]
     # No registered cards (FITS-IDI origin or freshly built): synthesize a
@@ -1432,7 +1466,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
     # Map MSv4 pol order (in-memory) back to whatever AIPS Stokes order the
     # primary_cards specify, so the on-disk layout matches the round-tripped
     # CRVAL/CDELT.
-    cards = UVData.primary_cards(uvset)
+    cards = _refresh_source_cards(UVData.primary_cards(uvset), uvset)
     aips_codes_disk, aips_labels_disk, _, _ = parse_stokes_axis(cards, npol)
     pol_perm = if isempty(aips_codes_disk) || aips_labels_disk == msv4_labels
         collect(1:npol)
