@@ -1,31 +1,90 @@
-# Scope: per-scan (time-varying) bandpass component
+# Scope: time-varying bandpass components
 
-Status: scoped, not started. Blocked on `DESIGN_REVIEW_PLAN.md` CHUNK-006
-(Bandpass model surface) and CHUNK-003/CHUNK-008 (station scoping) — the
-configuration entry point for this feature is decided there. Everything below
-concerns the solver side, which is independent of how the component is spelled.
+Status: two tiers. **Break segmentation** (below) is the first cut and needs no
+new identifiability machinery. **Per-scan** freedom is the generalization,
+scoped from "Reference implementation" onward and not started. CHUNK-003,
+CHUNK-006 and CHUNK-008 are all complete, so both are unblocked.
 
 ## Motivation
 
-ALMA's bandpass in the 2022 EHT data changes late in the track (seen in
-`plot_stability` per-scan series on AA baselines of `hops_3809_M87.uvfits`).
-Two facts pin this on a genuine instrumental effect the current model cannot
-express:
+ALMA's *phase* bandpass in the 2022 EHT data breaks near the end of the track.
+Measured on `hops_3809_M87.uvfits` (track F27, band 3) as the per-scan RMS
+deviation of the bandpass-corrected phase shape from the track median, on the
+high-SNR co-located AA–AX baseline:
 
-- The a priori (ANTAB) calibration does not explain it. AA's per-channel SEFD
-  table in `e22f27_b3_proc.AN` (32 channels, ~6 s sampling, 2701 rows over
-  ~8.3 h) has a large static spectral shape (±12% in sqrt-SEFD, i.e. in
-  visibility amplitude) but that shape is stable in time to 0.3–0.6% across
-  the whole track. Applying the ANTAB removes a *fixed* amplitude-bandpass
-  component, not a late-track change.
-- The pre-streaming implementation reached the same conclusion and handled it:
-  AA's production config gave the *phase* bandpass per-scan freedom
-  (`Flat ⊕ Poly × ChannelBlocks(4)`, both components per-scan). The current
-  pipeline's bandpass is hard-wired `GlobalTime()`, so scan-to-scan bandpass
-  evolution averages into the template and shows up as late-scan residuals.
+| scans | epoch | PP | QQ |
+|---|---|---|---|
+| 13–34 | 24.8 – 31.1 h | 0.3 – 3.2° | 0.3 – 3.2° |
+| 35 | 32.20 h | 33.2° | 22.7° |
+| 36 | 32.33 h | 32.7° | 22.6° |
+
+Three properties of that measurement shape the design:
+
+- **It is a step, not a drift.** One time-global template fits every scan up to
+  31.1 h to a few degrees. The last two scans are an order of magnitude worse.
+- **It belongs to ALMA.** The same two scans deviate on AA–GL PP (44.3°,
+  32.7°); ALMA is the only station common to both baselines. AA–GL QQ is
+  noise-dominated and says nothing either way.
+- **It is phase-only.** The same per-scan analysis on amplitude gives 0.4–3.6%
+  across every scan, with 35 and 36 among the *best*. The amplitude passband
+  carries a large static shape (span 0.28 in PP, 0.35 in QQ before correction)
+  that is stable in time.
+
+The a priori (ANTAB) calibration does not explain the phase break. AA's
+per-channel SEFD table in `e22f27_b3_proc.AN` (32 channels, ~6 s sampling, 2701
+rows over ~8.3 h) has a large static spectral shape (±12% in sqrt-SEFD) that is
+stable in time to 0.3–0.6% across the whole track, and it is an amplitude
+correction in any case.
 
 A plausible instrumental origin: phased-ALMA phasing efficiency is
 frequency-dependent and degrades toward low elevation (late in an M87 track).
+The pre-streaming implementation reached the same conclusion and gave AA's
+*phase* bandpass per-scan freedom (`Flat ⊕ Poly × ChannelBlocks(4)`), amplitude
+global — a split the measurement above supports.
+
+Two scans is not enough to separate a genuine step from the onset of a drift
+the track ends before revealing, and this is one file of one band of one track.
+
+## Break segmentation (first tier)
+
+A bandpass that is piecewise-constant in time, changing at caller-named epochs.
+`InstrumentScans([32.0])` already spells it — `boundaries_hr` gives the interior
+boundaries and `n` of them yield `n+1` segments — and the model, θ layout,
+`time_segment_ids`, evaluation and foreign-grid application already carry it.
+The gap is solver-side only: `_fits_bandpass_track` requires `Ti isa
+GlobalTime`, so the step rejects the component before any data is read.
+
+**The solve is the existing one, run once per time segment.** `solve_joint_bandpass!`
+takes the per-scan accumulator list and pools it; partitioning that list by
+time segment and calling it once per partition gives a break bandpass with no
+change to the ALS, the source-coherence estimate, the pins, or the shape fits.
+Each segment still spans many scans, so nothing about its conditioning differs
+from today's whole-track solve.
+
+**G3 comes for free here.** `_write_joint_bandpass!` already gauges every
+(station, feed) track to zero band-mean log-amplitude and zero circular
+band-mean phase before writing θ. Run per segment, that makes the per-(antenna,
+feed) band mean identically zero in *every* segment — so it is time-invariant by
+construction, and applying the bandpass cannot alter the temporal structure of
+band-averaged per-baseline quantities. The demeaning discipline the per-scan
+tier needs (three must-agree sites, below) exists because per-scan components
+are fit as deviations from a template on a shared basis; solving each segment
+independently under the existing gauge sidesteps it.
+
+Work: thread the scan's `first(win.ti_idx)` through `process_scan!`'s results
+(shared with the per-scan tier); widen `_fits_bandpass_track` past `GlobalTime`;
+partition by time segment in `solve_bandpass!` and write θ at `ts` instead of the
+hardcoded `1` in the three `_write_*_bandpass!` writers; give the status arrays
+and `bandpass_track_report` a time-segment axis. Tests: injected break recovered,
+band mean time-invariant across segments, a `GlobalTime` model bit-identical to
+today's.
+
+Not covered by this tier: a bandpass that varies smoothly scan to scan, and
+per-station time resolution (which needs
+`supports_station_heterogeneity(::Bandpass)`, still undeclared). Both are the
+per-scan tier's business.
+
+## Per-scan freedom (second tier)
 
 ## Reference implementation
 
@@ -52,9 +111,9 @@ the M87 2022 driver repository): phase = `Flat ⊕ Poly` per 4-channel (per-IF)
 block, degree 1 (tuned) or 2 (reports), **both components per-scan**;
 amplitude = global per-channel. The mixed-time form (`Flat` global,
 `Poly` per-scan) was tried and lost ~1.0 in χ² — the per-IF stair itself
-drifts in time. Note the current need is an *amplitude* change, so the new
-implementation should support per-scan amplitude with the same basis form
-from the start.
+drifts in time. The measurement in Motivation supports that config's split:
+the phase shape breaks, the amplitude shape does not. Per-scan amplitude is
+worth supporting for data that needs it, but no data here does.
 
 ## Architecture decision
 
@@ -72,9 +131,9 @@ required by any variant of this feature.
 
 The evaluate/apply side needs no changes: `PerScan` components index the θ
 leaf's time-segment axis via `plan.tseg_id[ti]`, and `component_dimarray`
-gives the solved component a scan-epoch `Ti` axis automatically. The current
-`ts = 1` hardcoding in the three `_write_*_bandpass!` writers only ever
-touches the `GlobalTime` template component and stays as is.
+gives the solved component a scan-epoch `Ti` axis automatically. The `ts` the
+three `_write_*_bandpass!` writers take (parameterized by the break tier) is
+this tier's template segment, whatever segmentation the template itself carries.
 
 Station scoping uses the allocate-for-all / write-only-scoped convention
 (θ = 0 reads back as unit gain; `_write_joint_bandpass!` already relies on
@@ -171,8 +230,8 @@ Rough total 600–900 lines including tests.
 
 ## Open questions
 
-- Per-scan on amplitude, phase, or both for AA? (Old config: phase only; the
-  current observation is amplitude — scope both, enable per observation.)
+- Per-scan on amplitude, phase, or both for AA? The measurement says phase
+  only, matching the old config; scope both and enable per observation.
 - Default basis: `Flat ⊕ Poly1 × ChannelBlocks(4)` both per-scan (the tuned
   config) vs the TOML's degree 2?
 - Is report-don't-project acceptable long-term for the delay slope, or should

@@ -608,8 +608,9 @@ end
         uvset,
     )
     info = stage_info(sol, :bandpass)
-    @test size(info.phase_status) == (nant, 2, nspw)
-    @test size(info.amp_status) == (nant, 2, nspw)
+    # (Ant, Feed, band, time segment) — a time-stable bandpass is one segment.
+    @test size(info.phase_status) == (nant, 2, nspw, 1)
+    @test size(info.amp_status) == (nant, 2, nspw, 1)
     @test info.band_ids == collect(1:nspw)
     total = info.n_solved + info.n_flat + info.n_declined + info.n_nodata
     @test total == 2 * nant * 2 * nspw
@@ -617,4 +618,117 @@ end
     # measured, not placeholders.
     @test info.n_solved > total ÷ 2
     @test info.n_declined == 0
+end
+
+# ── Break segmentation: a bandpass that changes at named epochs ───────────────
+#
+# Both smoothers pool the scans of a time segment and solve that stretch as a
+# unit, so a segmentation whose segments each span several scans (`InstrumentScans`,
+# `TimeBlocks`) is solved one segment at a time. The gauge already demeans every
+# written track over the band, so each segment's band mean is identically zero and
+# the G3 invariant holds across the break for free.
+
+@testset "bandpass break segmentation" begin
+    nant, nchan, nscans = 4, 8, 6
+    uvset, _ = _build_fringe_uvset(; nant, nspw = 1, nchan, nscans, ntime = 8, seed = 7)
+    geom = CAL.build_geometry(uvset)
+    t, sot = geom.times, geom.scan_of_time
+    # Three scans on each side of the break.
+    boundary = (maximum(t[sot .== 3]) + minimum(t[sot .== 4])) / 2
+    seg = InstrumentScans([boundary])
+
+    # A station phase bandpass present only in the second half.
+    Δ = [0.5 * sin(4π * (c - 1) / nchan + a) for a in 1:nant, c in 1:nchan]
+    function inject(set, scan)
+        UVP.apply(set) do leaf, info, root
+            info.scan_name == scan || return leaf
+            vis = copy(parent(leaf[:vis]))
+            for (bi, (a, b)) in enumerate(UVP.baselines(leaf).pairs),
+                    p in axes(vis, 4), ti in axes(vis, 2), c in axes(vis, 1)
+                vis[c, ti, bi, p] *= cis(Δ[a, c] - Δ[b, c])
+            end
+            return UVP.rebuild_visibilities(
+                leaf, DimArray(vis, dims(leaf[:vis])), leaf[:weights],
+            )
+        end
+    end
+    broken = foldl((u, sc) -> inject(u, sc), ["4", "5", "6"]; init = uvset)
+
+    bp(ti) = GainComponent(ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed())
+    model(ti) = (; phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)))
+
+    @testset "θ carries one block per time segment" begin
+        sol = fit(Bandpass(; model = model(seg)), broken)
+        leaf = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
+        @test size(leaf, 4) == 2                       # (param, feed, Frequency, Ti, Ant)
+        # Each segment is solved from its own scans, so the halves disagree —
+        # they would be one block under `GlobalTime`.
+        @test any(!iszero, leaf[1, 1, :, 1, :])
+        @test any(!iszero, leaf[1, 1, :, 2, :])
+        @test !isapprox(leaf[1, 1, :, 1, :], leaf[1, 1, :, 2, :]; atol = 1.0e-3)
+    end
+
+    @testset "a break tracks the data a time-global fit cannot" begin
+        # Per-scan spread of the corrected phase about the track median — the
+        # same diagnostic the M87 evolution check uses. A time-global template
+        # must average the two halves; a break follows both.
+        # The injected shape has two cycles across the band, so it is orthogonal
+        # to a constant and to a delay ramp. Removing both from each scan's track
+        # leaves only what a bandpass owns — otherwise the fixture's own per-scan
+        # delays, which no bandpass model here removes, dominate the comparison.
+        function detrend(v)
+            x = collect(1.0:length(v)); x .-= sum(x) / length(x)
+            y = v .- sum(v) / length(v)
+            return y .- (sum(x .* y) / sum(abs2, x)) .* x
+        end
+        function scan_spread(sol)
+            corr = calibrate(sol, broken)
+            tracks = [
+                detrend(angle.(vec(sum(parent(l[:vis])[:, :, 1, 1]; dims = 2))))
+                    for l in values(UVP.leaves(corr))
+            ]
+            med = [median([tr[c] for tr in tracks]) for c in 1:nchan]
+            return sqrt(mean(abs2, reduce(vcat, [tr .- med for tr in tracks])))
+        end
+        s_glob = scan_spread(fit(Bandpass(; model = model(GlobalTime())), broken))
+        s_brk = scan_spread(fit(Bandpass(; model = model(seg)), broken))
+        @test s_brk < 0.5 * s_glob
+    end
+
+    @testset "G3: the band mean is time-invariant across the break" begin
+        sol = fit(Bandpass(; model = model(seg)), broken)
+        leaf = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
+        aleaf = parent(CAL.parameters(sol[:bandpass, :logamp, :bandpass]))
+        for a in axes(leaf, 5), f in axes(leaf, 2), ts in axes(leaf, 4)
+            ph = leaf[1, f, :, ts, a]
+            any(!iszero, ph) || continue
+            @test abs(angle(sum(cis, ph))) < 1.0e-8    # zero circular band mean
+            @test abs(mean(aleaf[1, f, :, ts, a])) < 1.0e-8
+        end
+    end
+
+    @testset "a time-global model is untouched by the change" begin
+        # The break path must reduce exactly to the old one-segment solve.
+        a = fit(Bandpass(; model = model(GlobalTime())), broken)
+        b = fit(Bandpass(; model = default_bandpass_terms()), broken)
+        @test parent(CAL.parameters(a[:bandpass, :phase, :bandpass])) ==
+            parent(CAL.parameters(b[:bandpass, :phase, :bandpass]))
+    end
+
+    @testset "per-scan resolution is still refused" begin
+        @test_throws "cannot fit the component" fit(Bandpass(; model = model(PerScan())), broken)
+        @test_throws "cannot fit the component" fit(
+            Bandpass(; model = model(PerScan()), smoother = FP.PerTrackSmoother()), broken,
+        )
+    end
+
+    @testset "JointSmoother holds both observables to one time segmentation" begin
+        mixed = (; phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(GlobalTime())))
+        @test_throws "share one time segmentation" fit(Bandpass(; model = mixed), broken)
+        # PerTrackSmoother solves the two independently, so it allows the split —
+        # a phase bandpass that breaks beside an amplitude one held all track.
+        @test fit(
+            Bandpass(; model = mixed, smoother = FP.PerTrackSmoother()), broken,
+        ) isa CAL.CalibrationSolution
+    end
 end

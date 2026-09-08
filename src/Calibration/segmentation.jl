@@ -43,6 +43,13 @@ struct InstrumentScans <: AbstractTimeSegmentation
 end
 InstrumentScans(b::AbstractVector{<:Real}) = InstrumentScans(sort!(Float64.(collect(b))))
 
+# Value equality: the boundaries are the segmentation's whole identity, and a
+# `Vector` field would otherwise leave `==` at object identity — so two
+# separately-built segmentations describing the same partition would compare
+# unequal wherever a signature is matched.
+Base.:(==)(a::InstrumentScans, b::InstrumentScans) = a.boundaries_hr == b.boundaries_hr
+Base.hash(s::InstrumentScans, h::UInt) = hash(s.boundaries_hr, hash(:InstrumentScans, h))
+
 abstract type AbstractFrequencySegmentation end
 
 "One segment spanning all channels of all spectral windows."

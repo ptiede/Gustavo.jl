@@ -85,11 +85,14 @@ Define:
 [`can_fit`](@ref) declares which model components the smoother can solve; it
 defaults to `false`, so an undeclared model is rejected at compile time
 rather than leaving θ blocks unsolved. Both shipped smoothers accept
-`GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = <any segmentation>, Feed = PerFeed())`
-and nothing else.
+`GainComponent(ConstantTerm(); Ti = <GlobalTime, InstrumentScans or TimeBlocks>,
+Frequency = <any segmentation>, Feed = PerFeed())` and nothing else — a time
+segmentation whose segments each span several scans, solved one segment at a time.
 
 `solve_bandpass!` writes into `θ`'s bandpass blocks. `results` is the
-per-scan `(; rl, wl, pols, source)` accumulator list in group-index order;
+per-scan `(; rl, wl, pols, ti, source)` accumulator list in group-index order,
+`ti` being the scan's first sample on the solve's time axis (hence which time
+segment it falls in);
 `setup` is `(; bl_pairs, blidx, nant, bp_plan, amp_plan, channel_freqs, spw_of_chan)`,
 built once per pass. `report` is published on the step's solution record and
 should say which tracks were measured (see [`bandpass_track_report`](@ref));
@@ -118,14 +121,18 @@ bandpass_derotate(::AbstractBandpassSmoother) = true
 # undeclared smoother reject loudly instead of accepting silently.
 can_fit(::AbstractBandpassSmoother, tc) = false
 
-# The component both shipped smoothers solve: one constant per (feed, frequency
-# segment), any frequency segmentation, time-stable, per-feed. The θ writes
-# (`_write_phase_bandpass!`, `_write_amp_bandpass!`, `_write_joint_bandpass!`)
-# address leaf slot (param 1, feed node, segment, time segment 1, ant) with one
-# node per feed, so a different term, time segmentation, or feed tying would be
-# left unsolved or overwritten.
+# A bandpass track is one free constant per frequency segment, per feed, held
+# over a stretch of time. Both smoothers pool the scans of a time segment and
+# solve that stretch as a unit, so any segmentation whose segments span scans
+# fits: `GlobalTime` is the whole track, `InstrumentScans` breaks it at named
+# epochs, `TimeBlocks` at a fixed cadence. `PerScan` and `PerIntegration` do not
+# — a segment holding one scan leaves the band mean of the gain degenerate with
+# that scan's own source coherence, which needs the deviation-from-template
+# scheme neither smoother implements.
 _fits_bandpass_track(tc) =
-    tc.term isa ConstantTerm && tc.Ti isa GlobalTime && tc.Feed isa PerFeed
+    tc.term isa ConstantTerm &&
+    tc.Ti isa Union{GlobalTime, InstrumentScans, TimeBlocks} &&
+    tc.Feed isa PerFeed
 
 """
     validate_bandpass_groups(model)
@@ -277,7 +284,7 @@ end
 # Gauge and write a solved phase bandpass: each (station, feed) track is
 # referenced to its circular-mean phase over segments, so the bandpass carries
 # Shape only and applies zero net phase.
-function _write_phase_bandpass!(θ, plan, phase)
+function _write_phase_bandpass!(θ, plan, phase, ts::Integer = 1)
     nant, _, nseg = size(phase)
     leaf = _component_leaf(plan, θ)
     for a in 1:nant, f in 1:2
@@ -293,7 +300,7 @@ function _write_phase_bandpass!(θ, plan, phase)
             isfinite(v) || continue
             node = _feed_node(plan.tying, f)
             node == 0 && continue
-            leaf[1, node, fs, 1, a] = rem2pi(v - m, RoundNearest)
+            leaf[1, node, fs, ts, a] = rem2pi(v - m, RoundNearest)
         end
     end
     return θ
@@ -381,7 +388,7 @@ end
 
 # Gauge and write a solved log-amp bandpass: zero band-mean per (station, feed),
 # so the bandpass carries shape only and applies unit net amplitude.
-function _write_amp_bandpass!(θ, plan, la, max_logamp::Real)
+function _write_amp_bandpass!(θ, plan, la, max_logamp::Real, ts::Integer = 1)
     nant, _, nfseg = size(la)
     leaf = _component_leaf(plan, θ)
     for a in 1:nant, f in 1:2
@@ -405,7 +412,7 @@ function _write_amp_bandpass!(θ, plan, la, max_logamp::Real)
             # `apply_calibration` scales weights by |g|². The bound is generous
             # (|g| ≤ 10) so real passband roll-off/structure passes unchanged — only
             # pathological noise blow-ups are gated.
-            leaf[1, node, s, 1, a] = abs(val) > max_logamp ? 0.0 : val
+            leaf[1, node, s, ts, a] = abs(val) > max_logamp ? 0.0 : val
         end
     end
     return θ
@@ -595,10 +602,12 @@ end
 """
     bandpass_track_report(phase_status, amp_status, band_ids) -> NamedTuple
 
-Summarize a bandpass solve's per-(station, feed, spw) outcomes into the record the
-[`Bandpass`](@ref Gustavo.Bandpass) step publishes. `phase_status`/`amp_status` are `(Ant, Feed,
-band)` arrays of `_BP_TRACK_*` codes (either may be `nothing` when that half was
-not fit); `band_ids` names the spw each band slot came from.
+Summarize a bandpass solve's per-(station, feed, spw, time segment) outcomes into
+the record the [`Bandpass`](@ref Gustavo.Bandpass) step publishes.
+`phase_status`/`amp_status` are `(Ant, Feed, band, time segment)` arrays of
+`_BP_TRACK_*` codes (either may be `nothing` when that half was not fit);
+`band_ids` names the spw each band slot came from. A time-stable bandpass has one
+time segment, so its arrays are `(Ant, Feed, band, 1)`.
 
 Returns the two arrays as `phase_status`/`amp_status` alongside `band_ids`,
 `track_labels` (the code → name mapping, so a reader needs no constant from this
@@ -615,7 +624,7 @@ function bandpass_track_report(phase_status, amp_status, band_ids)
     end
     # Concrete arrays throughout — the record is serialized with the solution, and
     # an observable that was not fit is an EMPTY status rather than a missing field.
-    empty_status = Array{Int8, 3}(undef, 0, 0, 0)
+    empty_status = Array{Int8, 4}(undef, 0, 0, 0, 0)
     return (;
         phase_status = something(phase_status, empty_status),
         amp_status = something(amp_status, empty_status),
@@ -646,37 +655,79 @@ function _warn_degenerate_bandpass(report)
     return nothing
 end
 
+"""
+    time_segment_scans(plan, results) -> Vector{Vector{Int}}
+
+The `results` indices belonging to each of `plan`'s time segments, in segment
+order. A scan lies wholly inside one segment of any segmentation the smoothers
+accept, so its first sample (`res.ti`) names the segment. Segments the pass
+never visited come back empty.
+"""
+function time_segment_scans(plan, results)
+    nts = isempty(plan.tseg_id) ? 1 : maximum(plan.tseg_id)
+    groups = [Int[] for _ in 1:nts]
+    for (i, res) in pairs(results)
+        push!(groups[plan.tseg_id[res.ti]], i)
+    end
+    return groups
+end
+
+# Sum the per-scan residual accumulators of `idx` into one pooled pair.
+function _pool_scans(results, idx, nbl, npol, nchan)
+    rbar, wbar = bandpass_accumulators(nbl, npol, nchan)
+    for i in idx
+        rbar .+= results[i].rl
+        wbar .+= results[i].wl
+    end
+    return rbar, wbar
+end
+
 function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::AbstractGauge)
     pols = results[1].pols
     nchan = length(setup.channel_freqs)
-    rbar, wbar = bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
-    for res in results
-        rbar .+= res.rl
-        wbar .+= res.wl
-    end
+    nbl = length(setup.bl_pairs)
     phase_status = nothing
     amp_status = nothing
     band_ids = Int[]
+    # The two observables are solved independently here, so each partitions the
+    # scans by its OWN time segmentation — a phase bandpass that breaks mid-track
+    # can sit beside an amplitude one held over the whole of it.
     if setup.bp_plan !== nothing
         plan = setup.bp_plan
         fsegs, seg_spw, seg_freq = _segment_bands(plan, setup.channel_freqs, setup.spw_of_chan)
         band_ids = sort(unique(seg_spw))
-        phase, prec = _seed_phase_tracks(
-            rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs; gauge,
-        )
-        phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
-        _shape_tracks!(phase, prec, seg_spw, seg_freq, sm.phase; unwrap = true, status = phase_status)
-        _write_phase_bandpass!(θ, plan, phase)
+        groups = time_segment_scans(plan, results)
+        phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
+        for (ts, idx) in pairs(groups)
+            isempty(idx) && continue
+            rbar, wbar = _pool_scans(results, idx, nbl, length(pols), nchan)
+            phase, prec = _seed_phase_tracks(
+                rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs; gauge,
+            )
+            _shape_tracks!(
+                phase, prec, seg_spw, seg_freq, sm.phase;
+                unwrap = true, status = view(phase_status, :, :, :, ts),
+            )
+            _write_phase_bandpass!(θ, plan, phase, ts)
+        end
     end
     if setup.amp_plan !== nothing
         plan = setup.amp_plan
         fsegs, seg_spw, seg_freq = _segment_bands(plan, setup.channel_freqs, setup.spw_of_chan)
         band_ids = sort(unique(seg_spw))
-        la, prec = _seed_amp_tracks(rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs)
-        _spike_guard!(la, seg_spw, _BP_SPIKE_SIGMA)
-        amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
-        _shape_tracks!(la, prec, seg_spw, seg_freq, sm.amp; unwrap = false, status = amp_status)
-        _write_amp_bandpass!(θ, plan, la, _BP_MAX_LOGAMP)
+        groups = time_segment_scans(plan, results)
+        amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
+        for (ts, idx) in pairs(groups)
+            isempty(idx) && continue
+            rbar, wbar = _pool_scans(results, idx, nbl, length(pols), nchan)
+            la, prec = _seed_amp_tracks(rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs)
+            _spike_guard!(la, seg_spw, _BP_SPIKE_SIGMA)
+            _shape_tracks!(
+                la, prec, seg_spw, seg_freq, sm.amp;
+                unwrap = false, status = view(amp_status, :, :, :, ts),
+            )
+            _write_amp_bandpass!(θ, plan, la, _BP_MAX_LOGAMP, ts)
+        end
     end
     report = bandpass_track_report(phase_status, amp_status, band_ids)
     _warn_degenerate_bandpass(report)
@@ -947,7 +998,7 @@ end
 # circular-mean reference phase, matching the closure tier's convention — and write into phase_plan's/amp_plan's θ
 # blocks. A (station, feed) `touched` nowhere (no data ever reached it) is
 # left unwritten (still whatever θ already held, i.e. unit gain).
-function _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp)
+function _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp, ts::Integer = 1)
     phase_leaf = _component_leaf(phase_plan, θ)
     amp_leaf = _component_leaf(amp_plan, θ)
     for a in axes(g, Ant), f in axes(g, Feed)
@@ -962,8 +1013,8 @@ function _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp
             touched[a, f, fs] || continue
             la = logs[fs] - m
             ph = rem2pi(angle(g[a, f, fs]) - mphase, RoundNearest)
-            anode == 0 || (amp_leaf[1, anode, fs, 1, a] = abs(la) > max_logamp ? 0.0 : la)
-            pnode == 0 || (phase_leaf[1, pnode, fs, 1, a] = ph)
+            anode == 0 || (amp_leaf[1, anode, fs, ts, a] = abs(la) > max_logamp ? 0.0 : la)
+            pnode == 0 || (phase_leaf[1, pnode, fs, ts, a] = ph)
         end
     end
     return θ
@@ -1026,20 +1077,38 @@ function validate_model(::JointSmoother, model)
                 "$(repr(only(ph).Frequency)) (phase) vs $(repr(only(la).Frequency)) (logamp).",
         ),
     )
+    only(ph).Ti == only(la).Ti || throw(
+        ArgumentError(
+            "JointSmoother requires the phase and logamp components to share one time " *
+                "segmentation — one complex gain per (station, feed, segment) is solved over " *
+                "one stretch of time, not two. Got $(repr(only(ph).Ti)) (phase) vs " *
+                "$(repr(only(la).Ti)) (logamp). Use `smoother = PerTrackSmoother()` to give " *
+                "the two observables different time resolutions.",
+        ),
+    )
     return nothing
 end
 
 function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge)
     _, seg_spw, seg_freq = _segment_bands(setup.bp_plan, setup.channel_freqs, setup.spw_of_chan)
     band_ids = sort(unique(seg_spw))
-    phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
-    amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids))
-    solve_joint_bandpass!(
-        θ, results, setup.bl_pairs, results[1].pols, setup.nant, setup.bp_plan, setup.amp_plan;
-        gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
-        phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq,
-        phase_status, amp_status,
-    )
+    # One complex gain per (station, feed, segment) means one time segmentation
+    # for both observables — `validate_model` holds the two plans to it — so the
+    # scans partition once and each segment's ALS runs over its own scans alone.
+    groups = time_segment_scans(setup.bp_plan, results)
+    phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
+    amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
+    for (ts, idx) in pairs(groups)
+        isempty(idx) && continue
+        solve_joint_bandpass!(
+            θ, results[idx], setup.bl_pairs, results[1].pols, setup.nant,
+            setup.bp_plan, setup.amp_plan;
+            gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
+            phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq, ts,
+            phase_status = view(phase_status, :, :, :, ts),
+            amp_status = view(amp_status, :, :, :, ts),
+        )
+    end
     report = bandpass_track_report(phase_status, amp_status, band_ids)
     _warn_degenerate_bandpass(report)
     return report
@@ -1081,6 +1150,7 @@ function solve_joint_bandpass!(
         seg_freq::Union{Nothing, AbstractVector{<:Real}} = nothing,
         phase_status = nothing,
         amp_status = nothing,
+        ts::Integer = 1,
     )
     phase_plan.fseg_id == amp_plan.fseg_id || throw(
         ArgumentError(
@@ -1130,7 +1200,7 @@ function solve_joint_bandpass!(
         maxrel < tolerance && break
     end
 
-    return _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp)
+    return _write_joint_bandpass!(θ, phase_plan, amp_plan, g, touched, max_logamp, ts)
 end
 
 # ── Coverage top-up selection (stations the calibrator never observed) ────────

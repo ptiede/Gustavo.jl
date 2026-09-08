@@ -233,8 +233,9 @@ end
 model_components(s::Bandpass, spec) = _vet_step_model(
     s.smoother, s.model,
     "Both shipped bandpass smoothers fit `GainComponent(ConstantTerm(); " *
-        "Ti = GlobalTime(), Frequency = <any segmentation>, Feed = PerFeed())` — " *
-        "see `default_bandpass_terms`.",
+        "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
+        "segmentation>, Feed = PerFeed())` — a time segmentation whose segments " *
+        "each span several scans. See `default_bandpass_terms`.",
     spec,
 )
 
@@ -528,7 +529,11 @@ function process_scan!(s::Bandpass, ctx::SolveContext, stack, win::GeometryWindo
     Fringe.accumulate_bandpass!(
         rl, wl, setup.blidx, stack, win; derotate = Fringe.bandpass_derotate(s.smoother),
     )
-    return (; rl, wl, pols, source = source_name(stack))
+    # `ti` locates this scan on the solve's global time axis, which is how a
+    # time-segmented bandpass tells which segment the scan belongs to. A scan
+    # lies within one segment of any segmentation coarser than a scan, so its
+    # first sample names the segment.
+    return (; rl, wl, pols, ti = first(win.ti_idx), source = source_name(stack))
 end
 
 function finish_pass!(s::Bandpass, ctx::SolveContext)
