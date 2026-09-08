@@ -415,6 +415,47 @@ function union_antennas(uvset::UVSet)
 end
 
 """
+    unify_antennas(uvset::UVSet) -> UVSet
+
+Put every leaf on one antenna table — [`union_antennas`](@ref)'s — re-indexing
+each leaf's `BaselineIndex` into it.
+
+A leaf's `(a, b)` pairs index that leaf's OWN table, so a sub-array leaf listing
+only the stations that observed it numbers them differently from a fuller leaf:
+where six antennas observed, index 3 may be `KT` while the full array's index 3
+is `GL`. Anything reading pairs against a single table — which is every solver,
+since a solve has one station axis — would then attribute one station's data to
+another. This makes the indices mean the same thing everywhere, so sets whose
+leaves saw different sub-arrays can be solved together.
+
+Antennas are matched by NAME (`union_antennas` refuses inconsistent metadata for
+a shared name). Leaves already on the union table are returned untouched, so a
+single-sub-array set costs nothing and stays lazy.
+"""
+function unify_antennas(uvset::UVSet)
+    table = union_antennas(uvset)
+    names = collect(String.(table.name))
+    all(
+        collect(String.(DimensionalData.metadata(l).antennas.name)) == names
+            for l in values(DimensionalData.branches(uvset))
+    ) && return uvset
+    slot = Dict(n => i for (i, n) in pairs(names))
+    return apply(uvset) do leaf, info, root
+        local_names = collect(String.(info.antennas.name))
+        local_names == names && return leaf
+        m = [slot[n] for n in local_names]
+        remap(ps) = [(m[a], m[b]) for (a, b) in ps]
+        b = info.baselines
+        # `record_order` holds (time, baseline-slot) pairs, and slot order is
+        # preserved here, so it needs no remapping.
+        newb = BaselineIndex(remap(b.pairs_per_record), remap(b.pairs); antenna_names = names)
+        return DimensionalData.rebuild(
+            leaf; metadata = update(info; antennas = table, baselines = newb),
+        )
+    end
+end
+
+"""
     union_pol_products(uvset::UVSet) -> Vector{String}
 
 Pol product set shared across leaves. Errors if leaves disagree —

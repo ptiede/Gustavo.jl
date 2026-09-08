@@ -207,3 +207,79 @@ end
     @test res isa DimStack
     @test keys(res) == (:delay, :rate, :phase, :amp, :snr, :pfa, :valid)
 end
+
+# ── Sub-array leaves: one station axis across differing antenna tables ────────
+#
+# A leaf's `(a, b)` baseline pairs index that leaf's OWN antenna table, so a
+# leaf that saw a sub-array numbers stations differently from a full one. Every
+# solver has a single station axis, so the set must be put on one table first —
+# `unify_antennas` — or one station's data is attributed to another.
+
+@testset "unify_antennas: sub-array leaves share one station axis" begin
+    uvset, _ = _build_fringe_uvset(nant = 4, nspw = 1, nchan = 4, nscans = 2, ntime = 4)
+    names = String.(UVP.union_antennas(uvset).name)
+
+    # Rebuild the SECOND scan as a sub-array that dropped the second antenna:
+    # its own table lists 3 stations, so its index 2 is what the full table
+    # calls index 3.
+    keep = [names[1], names[3], names[4]]
+    sub = UVP.apply(uvset) do leaf, info, root
+        info.scan_name == "2" || return leaf
+        full = String.(info.antennas.name)
+        local_of = Dict(n => i for (i, n) in pairs(keep))
+        rows = [r for r in getfield(info.antennas, :antennas) if String(r.name) in keep]
+        tbl = UVP.AntennaTable(
+            StructArray(rows), UVP.array_xyz(info.antennas),
+            UVP.array_name(info.antennas), UVP.extras(info.antennas),
+        )
+        remap(ps) = [
+            (local_of[full[a]], local_of[full[b]]) for (a, b) in ps
+                if full[a] in keep && full[b] in keep
+        ]
+        b = info.baselines
+        idx = [i for (i, (a, c)) in enumerate(b.pairs) if full[a] in keep && full[c] in keep]
+        newb = UVP.BaselineIndex(remap(b.pairs_per_record), remap(b.pairs); antenna_names = keep)
+        v = leaf[:vis][Baseline = idx]
+        w = leaf[:weights][Baseline = idx]
+        u = leaf[:uvw][Baseline = idx]
+        return UVP._build_leaf(
+            v, w, u;
+            partition_info = UVP.update(
+                info; antennas = tbl, baselines = newb, record_order = Tuple{Int, Int}[],
+            ),
+        )
+    end
+
+    @testset "leaves really do disagree before unification" begin
+        tables = unique([String.(UVP.metadata(l).antennas.name) for l in values(UVP.leaves(sub))])
+        @test length(tables) == 2
+        @test keep in tables && names in tables
+    end
+
+    @testset "unification puts every leaf on the union table" begin
+        u = UVP.unify_antennas(sub)
+        @test all(String.(UVP.metadata(l).antennas.name) == names for l in values(UVP.leaves(u)))
+        # The sub-array leaf's pairs now name the same stations they did locally.
+        for (k, l) in UVP.branches(u)
+            info = UVP.metadata(l)
+            UVP.metadata(UVP.branches(sub)[k]).scan_name == "2" || continue
+            orig = UVP.metadata(UVP.branches(sub)[k]).baselines
+            for (p_new, p_old) in zip(info.baselines.pairs, orig.pairs)
+                @test names[p_new[1]] == keep[p_old[1]]
+                @test names[p_new[2]] == keep[p_old[2]]
+            end
+        end
+        # A set whose leaves already agree is handed back untouched.
+        @test UVP.unify_antennas(uvset) === uvset
+    end
+
+    @testset "the solve spans both, and stations keep their identity" begin
+        # Solving the mixed set must reach every station of the union table and
+        # name them as the full-array set does.
+        sol = fit(Bandpass(), sub)
+        @test sol.info.ant_names == names
+        # The sub-array scan contributes: its stations are solved, not skipped.
+        g = CAL.gains(sol[:bandpass]; Ti = 1)
+        @test size(g, 2) == length(names)
+    end
+end

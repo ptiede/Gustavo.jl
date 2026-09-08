@@ -108,6 +108,9 @@ function calibrate(
                 "serialization (saved as `missing`) — re-fit, or apply it manually."
         )
     )
+    # Same station-axis reason as `fit`: leaves that saw different sub-arrays
+    # number stations differently, and the gains are applied against one axis.
+    uvset = UVData.unify_antennas(uvset)
     stream = Fringe.scan_stream(uvset; transforms = sol.transforms, exec = exec)
     post = _compose_output_chain(sol.postcal, collect(reduce))
     group_pairs = Fringe.map_groups(stream; stage = :output) do spec
@@ -318,9 +321,13 @@ function _run_pipeline(
     )
     solve_steps = br.solve_steps
 
+    # A solve has ONE station axis, and a leaf's baseline pairs index that
+    # leaf's own antenna table — so leaves that saw different sub-arrays number
+    # the same station differently. Put them all on the union table first; a set
+    # whose leaves already share one is returned untouched and stays lazy.
+    uvset = UVData.unify_antennas(uvset)
     geom = build_geometry(uvset)
-    first_leaf = first(values(UVData.branches(uvset)))
-    antennas = UVData.metadata(first_leaf).antennas
+    antennas = UVData.union_antennas(uvset)
     nant = length(antennas)
     spec = (; geom, antennas)
     gauge = resolve_gauge(gauge_spec, _antenna_names(uvset))

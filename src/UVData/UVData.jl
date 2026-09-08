@@ -30,7 +30,7 @@ include("apriori.jl")
 include("utilities.jl")
 
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
-export antennas, union_antennas, union_pol_products
+export antennas, union_antennas, unify_antennas, union_pol_products
 export freq_setup, union_frequency_axis, channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
 export Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL
 export BaselineIndex, UVSet, rebuild_visibilities, scan_key
