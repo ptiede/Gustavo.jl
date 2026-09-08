@@ -386,3 +386,93 @@ end
         end
     end
 end
+
+# ── The phase gauge across per-station time segments ─────────────────────────
+#
+# The gauge graph's nodes are (station, feed, that station's own time segment)
+# and its edges are the correlations, so the stations that hold one gain over the
+# whole track bridge a broken station's segments and one pin covers both. The
+# relative phase across such a break is then measured, not gauged away — even
+# when the broken station is itself the reference.
+
+@testset "JointSmoother: the phase gauge spans per-station time segments" begin
+    nant, nchan = 4, 6
+    anames = ["A$i" for i in 1:nant]
+    geom = _seg_geometry(nchan)
+    bp = GainComponent(
+        ConstantTerm(); Ti = InstrumentScans([1.5]),
+        Frequency = ChannelBlocks(1), Feed = PerFeed(),
+    )
+    model = CAL.StationGainModel(; phase = (; bandpass = bp), logamp = (; bandpass = bp))
+    l = CAL.plan_parameters(model, anames, geom)
+    s = (;
+        layout = l,
+        bp_path = FP._bandpass_path(l.plantree, :phase),
+        amp_path = FP._bandpass_path(l.plantree, :logamp),
+    )
+
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    pol_products = ["PP", "QQ"]
+    feeds = [FP.correlation_feed_pair(p) for p in pol_products]
+
+    rng = MersenneTwister(20260908)
+    # Station 1 breaks across the boundary; every other station holds one gain
+    # over the whole track.
+    gtrue = ones(ComplexF64, nant, 2, 2, nchan)
+    for a in 1:nant, f in 1:2, c in 1:nchan
+        gt = exp(complex(0.2 * randn(rng), 0.6 * randn(rng)))
+        gtrue[a, f, 1, c] = gt
+        gtrue[a, f, 2, c] = a == 1 ? exp(complex(0.2 * randn(rng), 0.6 * randn(rng))) : gt
+    end
+    Strue = [
+        (0.5 + rand(rng)) * cis(2pi * rand(rng))
+            for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(pol_products)
+    ]
+
+    het = fill(1, nant, 4)
+    het[1, :] = [1, 1, 2, 2]
+    uniform = repeat([1 1 2 2], nant)
+
+    @testset "one pin per connected component of the promoted graph" begin
+        nodes, pins = FP._joint_bandpass_pins(bl_pairs, feeds, nant, het, PinAntenna(1))
+        # The constant stations bridge the break, so each feed is one component
+        # and the reference is pinned in its first segment only — its second is
+        # free to carry the break it actually has.
+        @test pins == Set([nodes[1, 1, 1], nodes[1, 2, 1]])
+
+        # A segmentation every station shares has nothing to bridge the epochs:
+        # each (feed, segment) is its own component and carries its own pin.
+        _, upins = FP._joint_bandpass_pins(bl_pairs, feeds, nant, uniform, PinAntenna(1))
+        @test length(upins) == 4
+    end
+
+    @testset "the reference station's own break is measured, not gauged away" begin
+        θ = zeros(l.nθ)
+        phase_plan = only(FP.bandpass_blocks(s, θ, :phase)).plan
+        amp_plan = only(FP.bandpass_blocks(s, θ, :logamp)).plan
+        results = _joint_scan_accumulators(gtrue, Strue, het, bl_pairs, feeds, nchan)
+        FP.solve_joint_bandpass!(
+            θ, results, bl_pairs, pol_products, nant, phase_plan, amp_plan;
+            gauge = PinAntenna(1), max_iterations = 200, tolerance = 1.0e-13,
+            tseg = het,
+        )
+
+        pleaf = CAL._component_leaf(phase_plan, θ)
+        cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
+        # Everything is measured against the pinned node — station 1's FIRST
+        # segment — including station 1's second segment.
+        want_phase(a, f, ts) = cdemean(
+            angle.(gtrue[a, f, ts, :]) .- angle.(gtrue[1, f, 1, :]),
+        )
+        for f in 1:2
+            @test pleaf[1, f, :, 2, 1] ≈ want_phase(1, f, 2) atol = 1.0e-8
+            @test !isapprox(pleaf[1, f, :, 2, 1], pleaf[1, f, :, 1, 1]; atol = 1.0e-3)
+            # The stations that span the break carry one parameter each, and it
+            # is the truth both halves share — the break at station 1 leaks into
+            # neither half.
+            for a in 2:nant
+                @test pleaf[1, f, :, 1, a] ≈ want_phase(a, f, 1) atol = 1.0e-8
+            end
+        end
+    end
+end

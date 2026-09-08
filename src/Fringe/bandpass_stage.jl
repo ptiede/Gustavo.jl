@@ -917,51 +917,73 @@ function _joint_bandpass_touching(bl_pairs, feeds, nant)
     return touching
 end
 
-# One reference (station, feed) node per connected component of the
-# (station, feed) graph — mirrors `_solve_observable`'s pin selection in
-# stationize.jl. The
-# pinned node's phase is held at zero for every segment throughout the ALS
-# iteration; its amplitude is solved like any other node's.
+# The phase-gauge graph of a joint bandpass solve: one node per (station, feed,
+# that station's own time segment), one edge per (scan, baseline, pol)
+# correlation, joining its two ends in the segments they are in for that scan.
+# Node degree stands in for the row weight the gauge scores elsewhere — the graph
+# is built from the correlations that EXIST, before any per-channel gating, so a
+# node's degree is the observation count available to anchor it.
 #
-# Only the phase is a gauge freedom. Multiplying every station's gain at one
-# segment by a shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)`: the
-# phase of `c` cancels between the two conjugated factors, so a common phase per
-# segment is unobservable and must be pinned there, one constraint per segment.
-# The magnitude does not cancel, and `S` is frequency-flat, so it can only absorb
-# `|c|²` when `|c|` is constant across the band — leaving exactly one free
-# amplitude parameter overall, which the zero-band-mean gauge in
-# `_write_joint_bandpass!` removes. Pinning `|g|` per segment as well
-# would assert the reference antenna has a flat amplitude bandpass, discarding
-# structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
-# over the band eliminates `ls` and leaves the full-rank signless-Laplacian
-# system) and biasing every other station through the inconsistency.
-function _joint_bandpass_pins(bl_pairs, feeds, nant, gauge)
-    nnodes = 2 * nant
+# `nodes` is the dense `(station, feed, segment)` numbering `connected_components`
+# works in; `compid[n]` is `0` for a node no correlation touches.
+function _joint_bandpass_graph(bl_pairs, feeds, nant, tseg)
+    ntseg = maximum(tseg; init = zero(eltype(tseg)))
+    nodes = LinearIndices((Base.OneTo(nant), Base.OneTo(2), Base.OneTo(ntseg)))
     edges = Tuple{Int, Int}[]
-    # Node degree stands in for the row weight the gauge scores elsewhere: this
-    # graph is built from the baselines that EXIST, before any per-channel gating,
-    # so the number of correlations touching a node is the observation count
-    # available to anchor it.
-    deg = zeros(Int, nnodes)
-    for p in eachindex(feeds), bi in eachindex(bl_pairs)
+    deg = zeros(Int, length(nodes))
+    for si in axes(tseg, 2), p in eachindex(feeds), bi in eachindex(bl_pairs)
         a, b = bl_pairs[bi]
         a == b && continue
+        # A station no block covers (segment 0) carries no bandpass parameter, so
+        # the correlations touching it constrain nothing.
+        ta, tb = tseg[a, si], tseg[b, si]
+        (iszero(ta) || iszero(tb)) && continue
         fa, fb = feeds[p]
-        na, nb = _node(a, fa, nant), _node(b, fb, nant)
+        na, nb = nodes[a, fa, ta], nodes[b, fb, tb]
         push!(edges, (na, nb))
         deg[na] += 1
         deg[nb] += 1
     end
-    compid, ncomp, _ = connected_components(nnodes, edges)
-    # Inverse of `_node`: feed-1 block 1:nant, feed-2 nant+1:2nant.
-    station_of(n) = (n - 1) % nant + 1
-    feed_of(n) = n > nant ? 2 : 1
+    compid, ncomp, _ = connected_components(length(nodes), edges)
+    return nodes, compid, ncomp, deg
+end
+
+# One reference node per connected component of that graph — mirrors
+# `_solve_observable`'s pin selection in stationize.jl. The pinned node's phase is
+# held at zero across the whole band for the one segment it names; its amplitude
+# is solved like any other node's.
+#
+# Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
+# shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
+# correlation internal to that set: the phase of `c` cancels between the two
+# conjugated factors. The sets on which it cancels everywhere are exactly the
+# components above, so the phase carries one unobservable constant per component
+# and needs one constraint there — no more. A station-uniform segmentation splits
+# the graph along the array-wide segments and recovers one pin per segment; a
+# model in which one station breaks mid-track keeps the whole track in one
+# component, because the stations that hold one gain over it bridge the broken
+# station's two segments, and the relative phase across that break is then
+# measured rather than gauged away.
+#
+# The magnitude does not cancel, and `S` is frequency-flat, so it can only absorb
+# `|c|²` when `|c|` is constant across the band — leaving exactly one free
+# amplitude parameter overall, which the zero-band-mean gauge in
+# `_write_joint_bandpass!` removes. Pinning `|g|` as well
+# would assert the reference antenna has a flat amplitude bandpass, discarding
+# structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
+# over the band eliminates `ls` and leaves the full-rank signless-Laplacian
+# system) and biasing every other station through the inconsistency.
+function _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, gauge)
+    nodes, compid, ncomp, deg = _joint_bandpass_graph(bl_pairs, feeds, nant, tseg)
+    ci = CartesianIndices(nodes)
+    station_of(n) = ci[n][1]
+    feed_of(n) = ci[n][2]
     pins = Set{Int}()
     for c in 1:ncomp
         comp_nodes = findall(==(c), compid)
         push!(pins, gauge_anchor(gauge, comp_nodes, deg, station_of, feed_of))
     end
-    return pins
+    return nodes, pins
 end
 
 # Closed-form per-(scan, baseline, pol) solve of the source coherence `S`
@@ -1031,9 +1053,9 @@ function _update_station_gains!(
     for feed in axes(g, Feed), ant in axes(g, Ant), ts in present[ant]
         entries = touching[ant, feed]
         isempty(entries) && continue
-        # The gauge pin fixes this node's phase at every segment; its amplitude
-        # is solved like any other node's (see `_joint_bandpass_pins`).
-        ispin = pinned[ant, feed]
+        # The gauge pin fixes this node's phase; its amplitude is solved like any
+        # other node's (see `_joint_bandpass_pins`).
+        ispin = pinned[ant, feed, ts]
         fill!(ĝ, zero(C))
         fill!(wf, zero(T))
         for fs in axes(g, Frequency)
@@ -1087,8 +1109,8 @@ function _update_station_gains!(
         pst = phase_status === nothing ? nothing : view(phase_status, ant, feed, :, ts)
         la_new = _fit_track_bands(amp_spec, la, wf, seg_spw, seg_freq; status = ast)
         φ_new = if ispin
-            # The pin's phase is fixed by the gauge at every segment, so it is known
-            # rather than fitted: report it as such instead of leaving it at NODATA.
+            # The pin's phase is fixed by the gauge, so it is known rather than
+            # fitted: report it as such instead of leaving it at NODATA.
             pst === nothing || fill!(pst, _BP_TRACK_SOLVED)
             zeros(T, nseg)
         else
@@ -1257,7 +1279,14 @@ time; the throw here guards direct callers).
 each distinct `tseg[a, :]` value, in that station's own segment numbering, and a
 station whose entry is `0` is left out of the solve. Every station shares one
 segment when it is omitted. `scans` must hold the scans `tseg`'s columns
-describe, in the same order.
+describe, in the same order. The phase gauge acts on the
+(station, feed, segment) graph these scans span, pinning one node per connected
+component ([`_joint_bandpass_pins`](@ref)), so a break at one station is measured
+against the stations that hold one gain across it rather than gauged away.
+Solved phases are comparable only WITHIN a component: where that graph splits —
+disjoint sub-arrays, or every station segmented at the same epoch — each piece
+carries its own arbitrary constant, and a per-station change read across the
+split is that constant plus the change.
 
 Convergence is judged on the largest relative per-iteration gain change over
 every (station, feed, segment) node solved here, not a tracked χ² (which would
@@ -1304,8 +1333,8 @@ function solve_joint_bandpass!(
 
     rseg, wseg = _reduce_all_scans(scans, segs)
     touching = _joint_bandpass_touching(bl_pairs, feeds, nant)
-    pins = _joint_bandpass_pins(bl_pairs, feeds, nant, gauge)
-    pinned = [_node(ant, feed, nant) in pins for ant in 1:nant, feed in 1:2]
+    nodes, pins = _joint_bandpass_pins(bl_pairs, feeds, nant, tsg, gauge)
+    pinned = [nodes[ant, feed, ts] in pins for ant in 1:nant, feed in 1:2, ts in 1:ntseg]
 
     # A shape describes the response within one band; with no segmentation given
     # the whole solve is one band indexed by segment.
