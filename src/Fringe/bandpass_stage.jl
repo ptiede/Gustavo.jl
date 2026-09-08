@@ -93,8 +93,10 @@ segmentation whose segments each span several scans, solved one segment at a tim
 per-scan `(; rl, wl, pols, ti, source)` accumulator list in group-index order,
 `ti` being the scan's first sample on the solve's time axis (hence which time
 segment it falls in);
-`setup` is `(; bl_pairs, blidx, nant, bp_plan, amp_plan, channel_freqs, spw_of_chan)`,
-built once per pass. `report` is published on the step's solution record and
+`setup` is `(; bl_pairs, blidx, nant, layout, bp_path, amp_path, channel_freqs, spw_of_chan)`,
+built once per pass. Reach each observable's parameters through
+[`bandpass_blocks`](@ref)`(setup, θ, :phase)` / `(…, :logamp)` rather than the
+paths directly. `report` is published on the step's solution record and
 should say which tracks were measured (see [`bandpass_track_report`](@ref));
 θ alone cannot distinguish a measured flat response from an unfitted one.
 Return `nothing` to report nothing.
@@ -166,6 +168,42 @@ function validate_bandpass_groups(model)
 end
 
 validate_model(sm::AbstractBandpassSmoother, model) = validate_bandpass_groups(model)
+
+# The path to a bandpass observable's component in a step layout's plantree,
+# `nothing` when that group compiles none. `validate_bandpass_groups` caps each
+# group at one component, so every level of the descent carries exactly one key
+# and the path is unambiguous however the user nested the names. The plantree's
+# type is a compile-time constant, so accumulating the path as a tuple keeps the
+# descent inferrable and the splat into `station_blocks` type-stable.
+_bandpass_path(plantree, group::Symbol) = _component_path(plantree[group], (group,))
+
+# Descend a plantree subtree to its single component; a node that is not a named
+# subtree is that component.
+_component_path(_, path::Tuple{Vararg{Symbol}}) = path
+function _component_path(nt::NamedTuple, path::Tuple{Vararg{Symbol}})
+    isempty(nt) && return nothing
+    k = only(keys(nt))
+    return _component_path(nt[k], (path..., k))
+end
+
+"""
+    bandpass_blocks(setup, θ, group::Symbol) -> Vector
+
+The station blocks of the bandpass's `:phase` or `:logamp` observable —
+[`Calibration.station_blocks`](@ref) resolved against `setup`'s recorded path —
+empty when the model compiles no component for that observable. Each block is
+`(; stations, θ, plan)`, and a station-uniform model yields exactly one block
+spanning every station.
+
+The path is resolved by NAME through the layout's component tree: the flat
+`layout.plans` list holds one entry per signature group, so its positions do not
+name the two observables once a model differs across stations.
+"""
+function bandpass_blocks(setup, θ, group::Symbol)
+    path = group === :phase ? setup.bp_path : setup.amp_path
+    path === nothing && return NamedTuple[]
+    return station_blocks(setup.layout, θ, path...)
+end
 
 function solve_bandpass! end
 solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
@@ -692,8 +730,10 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
     # The two observables are solved independently here, so each partitions the
     # scans by its OWN time segmentation — a phase bandpass that breaks mid-track
     # can sit beside an amplitude one held over the whole of it.
-    if setup.bp_plan !== nothing
-        plan = setup.bp_plan
+    bp_blocks = bandpass_blocks(setup, θ, :phase)
+    amp_blocks = bandpass_blocks(setup, θ, :logamp)
+    if !isempty(bp_blocks)
+        plan = only(bp_blocks).plan
         fsegs, seg_spw, seg_freq = _segment_bands(plan, setup.channel_freqs, setup.spw_of_chan)
         band_ids = sort(unique(seg_spw))
         groups = time_segment_scans(plan, results)
@@ -711,8 +751,8 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
             _write_phase_bandpass!(θ, plan, phase, ts)
         end
     end
-    if setup.amp_plan !== nothing
-        plan = setup.amp_plan
+    if !isempty(amp_blocks)
+        plan = only(amp_blocks).plan
         fsegs, seg_spw, seg_freq = _segment_bands(plan, setup.channel_freqs, setup.spw_of_chan)
         band_ids = sort(unique(seg_spw))
         groups = time_segment_scans(plan, results)
@@ -1090,19 +1130,21 @@ function validate_model(::JointSmoother, model)
 end
 
 function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge)
-    _, seg_spw, seg_freq = _segment_bands(setup.bp_plan, setup.channel_freqs, setup.spw_of_chan)
+    phase_plan = only(bandpass_blocks(setup, θ, :phase)).plan
+    amp_plan = only(bandpass_blocks(setup, θ, :logamp)).plan
+    _, seg_spw, seg_freq = _segment_bands(phase_plan, setup.channel_freqs, setup.spw_of_chan)
     band_ids = sort(unique(seg_spw))
     # One complex gain per (station, feed, segment) means one time segmentation
     # for both observables — `validate_model` holds the two plans to it — so the
     # scans partition once and each segment's ALS runs over its own scans alone.
-    groups = time_segment_scans(setup.bp_plan, results)
+    groups = time_segment_scans(phase_plan, results)
     phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
     amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
     for (ts, idx) in pairs(groups)
         isempty(idx) && continue
         solve_joint_bandpass!(
             θ, results[idx], setup.bl_pairs, results[1].pols, setup.nant,
-            setup.bp_plan, setup.amp_plan;
+            phase_plan, amp_plan;
             gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
             phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq, ts,
             phase_status = view(phase_status, :, :, :, ts),

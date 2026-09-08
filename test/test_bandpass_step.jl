@@ -266,6 +266,61 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test_throws "phase.bandpass" fit(Bandpass(model = het), uvset)
     end
 
+    @testset "observables are located by name, not plan-list position" begin
+        anames = ["A1", "A2", "A3"]
+        geom = CAL.DataGeometry(;
+            times = [0.0, 1.0], scan_of_time = [1, 1],
+            channel_freqs = collect(1.0e9 .+ (0:3) .* 1.0e6), spw_of_chan = ones(Int, 4),
+            scan_names = ["No001"], spw_names = ["A"],
+        )
+        _setup(layout) = (;
+            layout,
+            bp_path = FP._bandpass_path(layout.plantree, :phase),
+            amp_path = FP._bandpass_path(layout.plantree, :logamp),
+        )
+
+        lu = CAL.plan_parameters(CAL.StationGainModel(; default_bandpass_terms()...), anames, geom)
+        @test FP._bandpass_path(lu.plantree, :phase) == (:phase, :bandpass)
+        # The plantree's type is a compile-time constant, so the descent infers —
+        # the path is splatted into `station_blocks` on every solve.
+        @test @inferred(FP._bandpass_path(lu.plantree, :logamp)) == (:logamp, :bandpass)
+        @test only(FP.bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
+
+        # The path is a NAME descent, so it reaches a component the user nested
+        # under names of their own.
+        nested = CAL.StationGainModel(
+            phase = (; inst = (; bp = FP._bandpass_component(CAL.ChannelBlocks(1)))),
+        )
+        @test FP._bandpass_path(CAL.plan_parameters(nested, anames, geom).plantree, :phase) ==
+            (:phase, :inst, :bp)
+
+        # A model differing across stations puts one plan per signature group on
+        # the flat `plans` list, so its positions no longer name the two
+        # observables — the blocks still resolve, one per signature group.
+        mh = CAL.StationGainModel(;
+            default_bandpass_terms()...,
+            stations = (
+                A1 = (;
+                    phase = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
+                    logamp = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
+                ),
+            ),
+        )
+        lh = CAL.plan_parameters(mh, anames, geom)
+        @test lh.nphase == 2 && length(lh.plans) == 4
+        for group in (:phase, :logamp)
+            @test [b.stations for b in FP.bandpass_blocks(_setup(lh), zeros(lh.nθ), group)] ==
+                [[1], [2, 3]]
+        end
+
+        # An observable the model omits resolves to no path and no blocks.
+        lp = CAL.plan_parameters(
+            CAL.StationGainModel(; phase = default_bandpass_terms().phase), anames, geom,
+        )
+        @test FP._bandpass_path(lp.plantree, :logamp) === nothing
+        @test isempty(FP.bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
+    end
+
     @testset "PerTrackSmoother: a shape on both observables" begin
         # θ slot for one (station, feed, GLOBAL channel) of a bandpass component.
         bpθ(θ, plan, a, f, gc) =

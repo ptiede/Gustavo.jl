@@ -143,7 +143,7 @@ export AbstractShapeSpec, FreeShape, PolynomialShape, WhittakerShape, ARShape, f
 export fit_track_group
 export default_bandpass_terms
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
-export bandpass_derotate, validate_bandpass_groups, solve_bandpass!, bandpass_track_report
+export bandpass_derotate, validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_station_solutions
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups

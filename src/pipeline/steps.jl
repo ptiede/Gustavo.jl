@@ -505,14 +505,14 @@ function start_pass!(s::Bandpass, ctx::SolveContext)
     # The global baseline table of the accumulation: every cross pair.
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
     blidx = Dict(bl_pairs[i] => i for i in eachindex(bl_pairs))
-    # `ctx.layout` holds only this step's own components, in phase-then-logamp
-    # order, and `validate_bandpass_groups` capped each group at one — so the
-    # plan list positions are the two observables, whatever the user named them.
-    plans = layout.plans
+    # `ctx.layout` holds only this step's own components. The two observables are
+    # located by NAME through the layout's component tree: the flat `plans` list
+    # carries one entry per station-signature group, so its positions stop naming
+    # them as soon as a model differs across stations.
     ctx.scratch[:bp_setup] = (;
-        bl_pairs, blidx, nant,
-        bp_plan = layout.nphase == 1 ? plans[1] : nothing,
-        amp_plan = length(plans) == layout.nphase + 1 ? plans[end] : nothing,
+        bl_pairs, blidx, nant, layout,
+        bp_path = Fringe._bandpass_path(layout.plantree, :phase),
+        amp_path = Fringe._bandpass_path(layout.plantree, :logamp),
         channel_freqs = ctx.geom.channel_freqs, spw_of_chan = ctx.geom.spw_of_chan,
     )
     return nothing
