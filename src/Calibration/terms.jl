@@ -53,7 +53,7 @@ at f0 into the accompanying constant term.
 struct Dispersion <: AbstractGainTerm end
 
 """
-Fringe rate: phase = 2π·`rate`·(t − t0)·3600, `rate` in Hz (t in hours), with
+Fringe rate: phase = 2π·`rate`·(t − t0), `rate` in Hz (t in seconds), with
 t0 the mean epoch of the term's own time segment. A companion constant term
 is therefore the phase at the middle of each segment, not at a track-wide
 epoch (see the comment at `time_coord_state(::Rate, …)`).
@@ -167,7 +167,7 @@ function freq_coordinate end
 """
     time_coordinate(term, t, state, seg::Integer) -> Real
 
-`term`'s `x.Ti` at epoch `t` (hours), lying in the solve's time segment `seg`,
+`term`'s `x.Ti` at epoch `t` (seconds), lying in the solve's time segment `seg`,
 against the state [`time_coord_state`](@ref) resolved. Required for any term
 declaring `:Ti` in [`term_axes`](@ref); see [`freq_coordinate`](@ref) for why
 there is no generic fallback.
@@ -202,8 +202,8 @@ freq_coordinate(::Delay, f, f0, seg::Integer) = f - f0
 freq_coord_state(::Dispersion, geom::DataGeometry, fseg_id, nfseg) = geom.f0
 freq_coordinate(::Dispersion, f, f0, seg::Integer) = DISPERSION_K * (1.0 / f0 - 1.0 / f)
 
-# Rate uses (t − t0) in seconds (t given in hours) so θ is a rate in Hz, with t0
-# the segment's own mean epoch rather than a track-wide one.
+# Rate uses (t − t0), which the `Ti` axis already gives in seconds, so θ is a
+# rate in Hz, with t0 the segment's own mean epoch rather than a track-wide one.
 #
 # The origin is where the co-located constant phase lives: phase = φ + 2π·ṙ·(t −
 # t0), so φ is the phase at t0. A rate carries an uncertainty σ_ṙ, and quoting
@@ -214,7 +214,7 @@ freq_coordinate(::Dispersion, f, f0, seg::Integer) = DISPERSION_K * (1.0 / f0 - 
 # own extent, where σ_φ = 1/snr is the whole story.
 time_coord_state(::Rate, geom::DataGeometry, tseg_id, ntseg) =
     _segment_center(geom.times, tseg_id, ntseg, geom.t0)
-time_coordinate(::Rate, t, t0, seg::Integer) = @inbounds (t - t0[seg]) * 3600.0
+time_coordinate(::Rate, t, t0, seg::Integer) = @inbounds t - t0[seg]
 
 """
     PolyNorm(center, scale)
@@ -245,7 +245,7 @@ time_coordinate(::Polynomial{:Ti}, t, st, seg::Integer) =
 # excursion from it. A single-sample segment has zero spread; its scale is
 # REPLACED by 1 rather than floored — the coordinate is then identically zero
 # either way, and a floor in physical units would mean nothing shared between a
-# frequency axis (Hz) and a time axis (hours).
+# frequency axis (Hz) and a time axis (seconds).
 function _poly_norm(coords::AbstractVector{<:Real}, ids::AbstractVector{<:Integer}, nseg::Integer)
     center = _segment_center(coords, ids, nseg, 0.0)
     scale = zeros(Float64, nseg)

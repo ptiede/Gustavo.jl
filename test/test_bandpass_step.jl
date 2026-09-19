@@ -804,10 +804,6 @@ end
 @testset "Bandpass(smoother = JointSmoother()): a per-station time segmentation" begin
     nant, nspw, nchan, ntime, nscans = 10, 1, 8, 6, 2
     nglob = nspw * nchan
-    ap = 30.0 / 3600.0
-    scan_span = (ntime + 2) * ap
-    # Inside the gap: after the last AP of scan 1, before the first of scan 2.
-    t_break = ((ntime - 1) * ap + scan_span) / 2
 
     rng = MersenneTwister(20260908)
     bp_true = zeros(nant, 2, nglob, nscans)
@@ -836,6 +832,11 @@ end
         nant, nspw, nchan, ntime, nscans, bandpass = bp_true, station_gains = false,
         pol_labels = ["PP", "QQ"],
     )
+    # The segmentation boundary sits inside the inter-scan gap: after the last
+    # AP of scan 1 and before the first of scan 2.
+    ts = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
+    t_break = (ts[ntime] + ts[ntime + 1]) / 2
+
     bpc(ti) = GainComponent(
         ConstantTerm(); Ti = ti, Frequency = CAL.ChannelBlocks(1), Feed = PerFeed(),
     )

@@ -17,8 +17,8 @@
 #       STK_1 = -1, CDELT2 = -1). The MSv4-ordered leaf Pol axis is mapped back
 #       to disk order by inverting the reader's `perm`.
 #   * BASELINE = 256*NOSTA[a] + NOSTA[b] (1-based NOSTA values).
-#   * Time: DATE = jd0 (constant JD of RDATE midnight), TIME = t_hours/24
-#       (fraction of day), so the reader's `24*((DATE+TIME) - jd0)` recovers Ti.
+#   * Time: DATE = jd0 (constant JD of RDATE midnight), TIME = the record's
+#       offset from it in days, so DATE + TIME is the record's Julian Day.
 #   * UV_DATA rows are time-ordered (SORT='T*'): sorted by (time, baseline).
 
 # ── Inverse helpers ──────────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
     )
     disk_to_msv4 = Vector{Int}(disk_to_msv4)
 
-    # jd0 = JD of RDATE midnight. DATE col is jd0 (constant), TIME = t_hours/24.
+    # jd0 = JD of RDATE midnight. DATE col is jd0 (constant), TIME the offset.
     jd0 = _rdate_jd_or_zero(array_obs.rdate)
     if jd0 == 0.0
         @warn(
@@ -251,6 +251,7 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
                 "round-trips (jd0 cancels), but external tools will reject it.",
         )
     end
+    jd0_unix = UVData.jd_to_unix(jd0)
 
     # Group leaves by scan (the reader segments scans by time gap / SOURCE_ID;
     # one UV_DATA row per (time, baseline) carries every band's FLUX). Bands of
@@ -366,11 +367,11 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
                 end
             end
 
-            t_hours = ti_vals[ti]
+            t_day = (ti_vals[ti] - jd0_unix) / 86400.0
             push!(flux_rows, flux)
             push!(weight_rows, wts)
             push!(date_col, jd0)
-            push!(time_col, t_hours / 24.0)
+            push!(time_col, t_day)
             push!(bl_col, bl_codes[bi])
             push!(source_col, Int32(1))
             push!(freqid_col, Int32(1))
@@ -379,7 +380,7 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
             push!(uu_col, Float32(uvw_dense[ti, bi, 1]))
             push!(vv_col, Float32(uvw_dense[ti, bi, 2]))
             push!(ww_col, Float32(uvw_dense[ti, bi, 3]))
-            push!(sort_keys, (t_hours / 24.0, bl_codes[bi]))
+            push!(sort_keys, (t_day, bl_codes[bi]))
         end
     end
 
@@ -470,12 +471,12 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
     return output_path
 end
 
-# Representative integration time (seconds) from the leaf's Ti axis (hours):
-# the smallest positive spacing, falling back to 1 when a single integration.
+# Representative integration time (seconds) from the leaf's Ti axis: the
+# smallest positive spacing, falling back to 1 when a single integration.
 function _idi_inttim(ti_vals::AbstractVector)
     length(ti_vals) < 2 && return 1.0
     diffs = diff(sort(collect(ti_vals)))
     pos = filter(>(0), diffs)
     isempty(pos) && return 1.0
-    return minimum(pos) * 3600.0
+    return minimum(pos)
 end

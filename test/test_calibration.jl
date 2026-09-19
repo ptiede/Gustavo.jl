@@ -7,6 +7,7 @@ using Test
 using LinearAlgebra
 using DimensionalData: DimArray, Dim, lookup, Ti, name, dims
 using Statistics: mean, median
+using Dates: Minute, Second, Nanosecond, Month, DateTime, datetime2unix
 using Random
 import OffsetArrays
 
@@ -703,7 +704,7 @@ end
     @test pr.tstate ≈ [sum(times) / length(times)]
     for ant in 1:nant, ti in eachindex(times)
         off = plan_off1(pr)[ant, 1, 1, 1]
-        expected = cis(2π * ṙ[off] * (times[ti] - pr.tstate[1]) * 3600.0)
+        expected = cis(2π * ṙ[off] * (times[ti] - pr.tstate[1]))
         @test gr[1, ti, ant, 1] ≈ expected
         @test gr[1, ti, ant, 2] ≈ expected               # shared across feeds
     end
@@ -888,13 +889,31 @@ end
     end
 end
 
+# The `Ti` axis is in seconds, so a segmentation's width is too. A `Period`
+# says which unit the caller meant; the stored field stays a bare Float64, so
+# equality, hashing and the HDF5 round trip are untouched by the spelling.
+@testset "segmentations accept a Period" begin
+    @test CAL.TimeBlocks(Minute(10)) == CAL.TimeBlocks(600.0)
+    @test CAL.TimeBlocks(Second(30)).duration_s == 30.0
+    @test hash(CAL.TimeBlocks(Minute(10))) == hash(CAL.TimeBlocks(600.0))
+    # A Float64 duration has ~1e-23 s of resolution at this magnitude, so the
+    # finest `Dates` unit is exact.
+    @test CAL.TimeBlocks(Nanosecond(100)).duration_s == 1.0e-7
+    # Month has no fixed length, so it cannot name a width.
+    @test_throws MethodError CAL.TimeBlocks(Month(1))
+
+    # InstrumentScans boundaries are epochs on the axis, not widths.
+    t0 = DateTime(2021, 3, 4, 1, 0, 0)
+    @test CAL.InstrumentScans([t0]) == CAL.InstrumentScans([datetime2unix(t0)])
+end
+
 @testset "argument validation is typed" begin
     # Constructor and argument validation throws `ArgumentError` or
     # `DimensionMismatch`; bare `error` is reserved for algorithmic failure, so a
     # caller can tell "you passed me nonsense" from "the solve did not converge".
     @testset "segmentation constructors" begin
         @test_throws ArgumentError CAL.TimeBlocks(0.0)
-        @test_throws "duration_hr must be positive" CAL.TimeBlocks(-1.0)
+        @test_throws "duration_s must be positive" CAL.TimeBlocks(-1.0)
         @test_throws ArgumentError CAL.ChannelBlocks(0)
         @test_throws "block_size must be at least 1" CAL.ChannelBlocks(-2)
         @test_throws ArgumentError CAL.FreqGroups(UnitRange{Int}[])

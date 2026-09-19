@@ -26,7 +26,7 @@ const DetectionRow = @NamedTuple{
 """
     search_scan(data, geom::DataGeometry, params::FringeSearch;
                 Vsearch = data[:vis], ngroups = 1,
-                executor = SerialScheduler(), t0 = geom.t0 * 3600.0) -> DimStack
+                executor = SerialScheduler(), t0 = geom.t0) -> DimStack
 
 Fringe-search every cross-baseline (baseline, product) of a materialized
 scan group. `data` is the group's `DimStack` as [`materialize_cube`](@ref)
@@ -46,7 +46,7 @@ passes its scan count.
 data costs it `2π·σ_rate·Δt`, so a caller comparing phases against a model
 must reference them where the model's constant lives
 ([`scan_phase_epoch`](@ref)); a standalone caller wants the scan midpoint
-(`mean(timestamps(data)) * 3600`). The default is `geom`'s track epoch,
+(`mean(timestamps(data))`). The default is `geom`'s track epoch,
 which is right only for a single-scan geometry.
 
 Returns a `DimStack` over `Baseline × Pol` whose layers are the seven
@@ -59,7 +59,7 @@ loop regardless of the fan-out `executor`.
 function search_scan(
         data::AbstractDimStack, geom::DataGeometry, params::FringeSearch;
         Vsearch = data[:vis], ngroups::Integer = 1,
-        executor = SerialScheduler(), t0::Real = geom.t0 * 3600.0,
+        executor = SerialScheduler(), t0::Real = geom.t0,
     )
     # Search only interferometric baselines: drop autocorrelations once here
     # rather than guarding `a == b` per cell. `keep[j]` is the column of the
@@ -91,7 +91,7 @@ function search_scan(
     scube = DimensionalData.DimStack((; delay, rate, phase, amp, snr, pfa, valid))
 
     fg = frequencies(data)
-    times = timestamps(data) .* 3600.0
+    times = timestamps(data)
     ax = _search_axes(fg, times, params, C)
     # The false-alarm family: every ncross×npol×ngroups search sharing one budget.
     # Scaling one search's cell count by the family size is the Bonferroni

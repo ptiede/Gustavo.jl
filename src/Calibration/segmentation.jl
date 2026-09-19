@@ -24,31 +24,49 @@ struct PerScan <: AbstractTimeSegmentation end
 "One segment per integration / accumulation period (each `Ti` sample)."
 struct PerIntegration <: AbstractTimeSegmentation end
 
-"One segment per fixed wall-clock block of `duration_hr` hours."
+"""
+One segment per fixed wall-clock block of `duration_s` seconds. A `Dates.Period`
+is accepted and converted, so `TimeBlocks(Minute(10))` and `TimeBlocks(600.0)`
+are the same segmentation.
+"""
 struct TimeBlocks <: AbstractTimeSegmentation
-    duration_hr::Float64
-    function TimeBlocks(duration_hr::Real)
-        duration_hr > 0 ||
-            throw(ArgumentError("TimeBlocks duration_hr must be positive, got $duration_hr"))
-        return new(Float64(duration_hr))
+    duration_s::Float64
+    function TimeBlocks(duration_s::Real)
+        duration_s > 0 ||
+            throw(ArgumentError("TimeBlocks duration_s must be positive, got $duration_s"))
+        return new(Float64(duration_s))
     end
 end
+TimeBlocks(duration::Period) = TimeBlocks(_period_seconds(duration))
+
+# A fixed-length `Period` in seconds. Nanosecond is the finest `Dates` unit, and
+# Int64 nanoseconds span ±292 years, so every calendar-independent period is
+# representable; `Month` and `Year` have no fixed length and throw here.
+#
+# Dividing by 1e9 rather than multiplying by 1e-9 keeps the result correctly
+# rounded: 1e-9 is not exact in binary, so `3.0e10 * 1.0e-9` gives
+# 30.000000000000004 where the division gives 30.0.
+_period_seconds(p::Period) = Float64(Nanosecond(p).value) / 1.0e9
 
 """
-One segment per user-specified instrument-scan window. `boundaries_hr` lists
-the interior boundaries (hours); `n+1` segments result from `n` boundaries.
+One segment per user-specified instrument-scan window. `boundaries_s` lists
+the interior boundaries as epochs on the `Ti` axis (seconds since
+`UVData.JD_UNIX_EPOCH`); `n+1` segments result from `n` boundaries. A vector of
+`DateTime`s is accepted and converted.
 """
 struct InstrumentScans <: AbstractTimeSegmentation
-    boundaries_hr::Vector{Float64}
+    boundaries_s::Vector{Float64}
 end
 InstrumentScans(b::AbstractVector{<:Real}) = InstrumentScans(sort!(Float64.(collect(b))))
+InstrumentScans(b::AbstractVector{DateTime}) =
+    InstrumentScans(sort!([datetime2unix(t) for t in b]))
 
 # Value equality: the boundaries are the segmentation's whole identity, and a
 # `Vector` field would otherwise leave `==` at object identity — so two
 # separately-built segmentations describing the same partition would compare
 # unequal wherever a signature is matched.
-Base.:(==)(a::InstrumentScans, b::InstrumentScans) = a.boundaries_hr == b.boundaries_hr
-Base.hash(s::InstrumentScans, h::UInt) = hash(s.boundaries_hr, hash(:InstrumentScans, h))
+Base.:(==)(a::InstrumentScans, b::InstrumentScans) = a.boundaries_s == b.boundaries_s
+Base.hash(s::InstrumentScans, h::UInt) = hash(s.boundaries_s, hash(:InstrumentScans, h))
 
 abstract type AbstractFrequencySegmentation end
 
@@ -126,12 +144,12 @@ from the abstract segmentation vocabulary to integer sample indices. Built once
 per solve (from a `UVSet` scan-group, or directly in tests).
 
 Fields:
-- `times`         : `Ti` sample epochs (hours since the dataset reference time).
+- `times`         : `Ti` sample epochs (seconds since `UVData.JD_UNIX_EPOCH`).
 - `scan_of_time`  : scan id for each time sample (any integer labels; need not
                     be 1-based or contiguous — `PerScan` dense-ranks them).
 - `channel_freqs` : concatenated channel center frequencies (Hz) across spws.
 - `spw_of_chan`   : spw id for each global channel (same labelling freedom).
-- `t0`            : rate reference epoch (hours); rate phase ∝ (t − t0).
+- `t0`            : rate reference epoch (seconds); rate phase ∝ (t − t0).
 - `f0`            : delay reference frequency (Hz); delay phase ∝ (f − f0).
 - `scan_names`    : scan label of each distinct `scan_of_time` id, in the order
                     the ids are dense-ranked (`scan_names[s]` names segment `s`).
@@ -243,10 +261,10 @@ time_segment_ids(seg::Union{TimeBlocks, InstrumentScans}, geom::DataGeometry) =
 # a `TimeBlocks` origin is the solve's first epoch, never the target's.
 function _time_binner(seg::TimeBlocks, geom::DataGeometry)
     t_start = isempty(geom.times) ? 0.0 : minimum(geom.times)
-    return t -> floor(Int, (t - t_start) / seg.duration_hr)
+    return t -> floor(Int, (t - t_start) / seg.duration_s)
 end
 _time_binner(seg::InstrumentScans, ::DataGeometry) =
-    t -> searchsortedlast(seg.boundaries_hr, t) + 1
+    t -> searchsortedlast(seg.boundaries_s, t) + 1
 
 # ── Frequency segment ids ────────────────────────────────────────────────────
 
@@ -463,7 +481,12 @@ end
 
 # Epoch/frequency identity tolerances — the same ones `leaf_window` joins a leaf
 # to a geometry with, so a solution and the data it was solved on always agree.
-const _EPOCH_ATOL = 1.0e-9      # hours
+# The epoch tolerance scales with its operand: `Ti` holds absolute seconds
+# (~1.7e9 at present epochs), where a Float64 resolves ~0.24 µs, so a fixed
+# constant would be correct at exactly one magnitude. Sixteen ULP is ~3.8 µs
+# there, far below any integration midpoint. `_FREQ_RTOL` is relative for the
+# same reason.
+_epoch_atol(t::Real) = 16 * eps(max(abs(Float64(t)), 1.0))
 const _FREQ_RTOL = 1.0e-9
 
 """
@@ -607,11 +630,12 @@ function time_segment_ids(
     out = Vector{Int}(undef, length(ti_idx))
     for (k, i) in enumerate(ti_idx)
         t = target.times[i]
-        j = searchsortedfirst(st, t - _EPOCH_ATOL)
-        (j <= length(st) && abs(st[j] - t) <= _EPOCH_ATOL) || throw(
+        atol = _epoch_atol(t)
+        j = searchsortedfirst(st, t - atol)
+        (j <= length(st) && abs(st[j] - t) <= atol) || throw(
             ArgumentError(
-                "$(_seg_label(seg)): the target epoch $t h is not a solve epoch — the nearest " *
-                    "is $(_nearest(st, t)) h. One segment per solve integration cannot be " *
+                "$(_seg_label(seg)): the target epoch $t s is not a solve epoch — the nearest " *
+                    "is $(_nearest(st, t)) s. One segment per solve integration cannot be " *
                     "resampled onto a different time grid."
             )
         )
@@ -695,6 +719,6 @@ end
 
 _nearest(sorted, t) = argmin(x -> abs(x - t), sorted)
 
-_seg_label(seg::TimeBlocks) = "TimeBlocks($(seg.duration_hr))"
+_seg_label(seg::TimeBlocks) = "TimeBlocks($(seg.duration_s))"
 _seg_label(seg::ChannelBlocks) = "ChannelBlocks($(seg.block_size))"
 _seg_label(seg) = string(nameof(typeof(seg)))

@@ -25,7 +25,7 @@ using OhMyThreads: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialSch
 using OhMyThreads.Schedulers: chunking_enabled, has_nchunks, nchunks
 using ..UVData
 using ..UVData: Baseline, Frequency, Pol
-using Dates: DateTime, Date, Millisecond, datetime2julian
+using Dates: unix2datetime
 using ..Calibration
 using ..Calibration: GeometryWindow
 import DimensionalData

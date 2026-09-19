@@ -26,30 +26,11 @@ function _source_elevation(ecef::AbstractVector{<:Real}, ra::Real, dec::Real, jd
     return asin(clamp(sin_alt, -1.0, 1.0))
 end
 
-# Convert a leaf's `obs_time` axis (fractional hours since RDATE 0h UTC)
-# back to absolute UTC `DateTime`s using the array's `rdate` string.
-function _leaf_obs_datetimes(leaf, root_meta)
-    obs = obs_time(leaf)
-    rdate_str = root_meta.array_obs.rdate
-    isempty(rdate_str) && error(
-        "apply_calibration: root metadata has empty `rdate`; cannot resolve " *
-            "ANTAB DOY+UT timestamps to the leaf's time axis.",
-    )
-    base = DateTime(Date(rdate_str))           # 0h UTC on RDATE
-    return [base + Millisecond(round(Int, t * 3_600_000)) for t in obs]
-end
+# A leaf's `obs_time` axis as UTC `DateTime`s, rounded to the millisecond.
+_leaf_obs_datetimes(leaf) = [unix2datetime(t) for t in obs_time(leaf)]
 
-# Convert a leaf's obs_time axis to a vector of Julian Dates (UTC).
-function _leaf_obs_jds(leaf, root_meta)
-    obs = obs_time(leaf)
-    rdate_str = root_meta.array_obs.rdate
-    isempty(rdate_str) && error(
-        "apply_calibration: root metadata has empty `rdate`; cannot compute " *
-            "antenna elevations.",
-    )
-    base_jd = datetime2julian(DateTime(Date(rdate_str)))
-    return [base_jd + t / 24.0 for t in obs]
-end
+# A leaf's `obs_time` axis as Julian Dates (UTC).
+_leaf_obs_jds(leaf) = [unix_to_jd(t) for t in obs_time(leaf)]
 
 """
     AprioriFluxGains
@@ -78,25 +59,19 @@ end
 # its time series. Elevation, and therefore the gain curve `g_E`,
 # remains evaluated per integration.
 function _build_apriori_gains(
-        leaf, info, root_meta, antab::AntabCalibration;
+        leaf, info, antab::AntabCalibration;
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    jds = _leaf_obs_jds(leaf, root_meta)
+    jds = _leaf_obs_jds(leaf)
 
-    # Convert the leaf's scan window (hours since RDATE 0h UTC) to absolute
-    # UTC DateTimes for matching against antab timestamps.
-    rdate_str = root_meta.array_obs.rdate
-    isempty(rdate_str) && error(
-        "apply_calibration: root metadata has empty `rdate`; cannot align " *
-            "ANTAB scan windows to the leaf's time axis.",
-    )
-    base_dt = DateTime(Date(rdate_str))
-    lo_h, hi_h = scan_window(leaf)
-    (isfinite(lo_h) && isfinite(hi_h)) || error(
+    # The scan window as absolute UTC DateTimes, for matching against the
+    # ANTAB's timestamps.
+    lo_s, hi_s = scan_window(leaf)
+    (isfinite(lo_s) && isfinite(hi_s)) || error(
         "apply_calibration: leaf has no finite scan window",
     )
-    t_lo = base_dt + Millisecond(round(Int, lo_h * 3_600_000))
-    t_hi = base_dt + Millisecond(round(Int, hi_h * 3_600_000))
+    t_lo = unix2datetime(lo_s)
+    t_hi = unix2datetime(hi_s)
 
     # A leaf spans one spw, so its channels ARE the ANTAB's channel numbering.
     # `info.ra`/`info.dec` are already radians (the FITS-IDI loader converts the
@@ -249,11 +224,10 @@ function apriori_flux_gains(
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
     out = Dict{Symbol, AprioriFluxGains}()
-    root_meta = DimensionalData.metadata(uvset)
     for (k, leaf) in DimensionalData.branches(uvset)
         info = DimensionalData.metadata(leaf)
         out[k] = _build_apriori_gains(
-            leaf, info, root_meta, antab;
+            leaf, info, antab;
             on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
         )
     end
@@ -282,9 +256,9 @@ function apply_calibration(
         uvset::UVSet, antab::AntabCalibration;
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    out = apply(uvset) do leaf, info, root
+    out = apply(uvset) do leaf, info
         gains_pkg = _build_apriori_gains(
-            leaf, info, root, antab;
+            leaf, info, antab;
             on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
         )
         bl_pairs = baselines(leaf).pairs
@@ -311,14 +285,14 @@ function apply_calibration(
         uvset::UVSet, spw_cals::AbstractDict{<:Integer, AntabCalibration};
         on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
     )
-    out = apply(uvset) do leaf, info, root
+    out = apply(uvset) do leaf, info
         spw = Int(info.ddi) + 1
         haskey(spw_cals, spw) || error(
             "apply_calibration: no a-priori calibration for spw $(spw) " *
                 "(spw_name $(info.spw_name)); have spws $(sort(collect(keys(spw_cals))))",
         )
         gains_pkg = _build_apriori_gains(
-            leaf, info, root, spw_cals[spw];
+            leaf, info, spw_cals[spw];
             on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
         )
         bl_pairs = baselines(leaf).pairs

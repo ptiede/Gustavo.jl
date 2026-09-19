@@ -346,7 +346,7 @@ function Fringe.estimate_scan!(
     res = Fringe.search_scan(
         stack, ctx.stream.geom, est.search;
         Vsearch, ngroups = length(ctx.stream.groups), executor = inner_executor(ctx.stream),
-        t0 = epoch * 3600.0,
+        t0 = epoch,
     )
     pols = pol_products(stack)
     # `res` covers only the surviving (cross) baselines; take its own pair list.
@@ -357,7 +357,7 @@ function Fringe.estimate_scan!(
     det = Fringe._with_ti(
         res, first(win.ti_idx); epoch,
         freq_rms = Fringe._rms_spread(frequencies(stack)),
-        time_rms = Fringe._rms_spread(timestamps(stack) .* 3600.0),
+        time_rms = Fringe._rms_spread(timestamps(stack)),
     )
 
     # Per-scan search log for the solution diagnostics: every measured cell, its
@@ -366,7 +366,7 @@ function Fringe.estimate_scan!(
     # `detected` is the column that separates them. The search cube is transient
     # (consumed by the station solve), so these are read off it here; `cells1` is
     # the only piece not already in the cube.
-    cells1 = Fringe._search_cells(frequencies(stack), timestamps(stack) .* 3600.0, est.search)
+    cells1 = Fringe._search_cells(frequencies(stack), timestamps(stack), est.search)
     ncells = cells1 * max(length(bl_pairs) * length(pols), 1)
     pfa_max = est.closure.pfa_max
     local_solve = Fringe.scan_local_solve(est, s.model)
@@ -397,7 +397,7 @@ function Fringe.estimate_scan!(
                 # The same epoch the search above referenced: `sr` is a rate
                 # about it, as is the model's own Rate component.
                 stack, res, bl_pairs, pols, ctx.stream.geom.f0,
-                epoch * 3600.0, sd, sr;
+                epoch, sd, sr;
                 cells = est.steer_cells,
             )
         end

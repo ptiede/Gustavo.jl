@@ -228,7 +228,7 @@ frequency_average(uvset::UVSet; nout::Integer = 1) = apply(FrequencyAverage(nout
     TimeBinAverage(dt_seconds)
 
 Per-leaf reducer that inverse-variance-averages the `Ti` axis into consecutive
-bins spanning `dt_seconds` (the `Ti` lookup is in hours). Bins are formed by
+bins spanning `dt_seconds`, matching the `Ti` lookup's own unit. Bins are formed by
 `floor((t − t₀)/Δt)` over the leaf's sorted times; each output sample sits at its
 bin's weighted-mean epoch, with summed weights and weight-mean `uvw`. After
 fringe + adhoc phasing the per-AP residual phase is flat, so averaging to a
@@ -250,7 +250,7 @@ function _time_bins(ts::AbstractVector, dt_seconds::Real)
     n = length(ts)
     n == 0 && return (Int[], Float64[], 0)
     t0 = float(first(ts))
-    raw = [floor(Int, (float(t) - t0) * 3600.0 / dt_seconds) for t in ts]
+    raw = [floor(Int, (float(t) - t0) / dt_seconds) for t in ts]
     ids = Vector{Int}(undef, n)
     nbin = 0
     last = typemin(Int)

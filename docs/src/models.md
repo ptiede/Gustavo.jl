@@ -64,7 +64,7 @@ placed in. New terms are added with six small methods — see
 | [`GlobalTime`](@ref)`()` | whole track (time-invariant) |
 | [`PerScan`](@ref)`()` | scan |
 | [`PerIntegration`](@ref)`()` | accumulation period (`Ti` sample) |
-| [`TimeBlocks`](@ref)`(hours)` | fixed wall-clock block |
+| [`TimeBlocks`](@ref)`(seconds)` | fixed wall-clock block |
 | [`InstrumentScans`](@ref)`(boundaries_hr)` | user-specified window |
 
 ### Frequency segmentations

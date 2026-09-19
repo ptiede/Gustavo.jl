@@ -474,16 +474,16 @@ end
         @test fs_round.sidebands == fs_orig.sidebands
         @test pol_products(round_set) == pol_products(data)
 
-        # obs_time round-trip precision: AIPS DATE PTYPE columns are
-        # stored as Float32 (~3.6e-7 hour ULP at 24h magnitude, i.e.
-        # ~1.3 ms). The round-tripped Ti axis must agree to within that
-        # budget for every leaf.
+        # obs_time round-trip precision: the AIPS DATE PTYPE's integer JD
+        # column is exact (Float32 holds integers below 2^24), so the whole
+        # error is the sub-day fraction's Float32 rounding. Its widest binade,
+        # [0.5, 1), has a 5.15 ms ULP, bounding the round trip at 2.58 ms.
         for (k, leaf_orig) in pairs(UV.branches(data))
             leaf_round = UV.branches(round_set)[k]
             t_orig = collect(UV.obs_time(leaf_orig))
             t_round = collect(UV.obs_time(leaf_round))
             @test length(t_round) == length(t_orig)
-            @test maximum(abs.(t_round .- t_orig)) < 2.0e-3   # 2 ms slack
+            @test maximum(abs.(t_round .- t_orig)) < 5.0e-3   # 2x the 2.58 ms bound
         end
     finally
         isfile(tmp) && rm(tmp; force = true)
@@ -1539,11 +1539,9 @@ end
     # POLY=[1.0] and DPFU=1.0 so SEFD = Tsys exactly. Cover every leaf's
     # scan window so the per-scan Tsys lookup finds at least one antab
     # row in each.
-    rdate = UV.DimensionalData.metadata(base).array_obs.rdate
-    base_dt = DateTime(Date(rdate))
     ts_all = unique(sort!(reduce(vcat, [collect(UV.obs_time(l)) for l in leaves_v])))
     isempty(ts_all) && error("synthetic obs_time empty")
-    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+    times = [unix2datetime(t) for t in ts_all]
     extended_times = [times[1] - Hour(2); times; times[end] + Hour(2)]
 
     sefd_aa = 100.0
@@ -1630,10 +1628,8 @@ end
     base = synthetic_uvdata()
 
     leaves_v = collect(values(UV.branches(base)))
-    rdate = UV.DimensionalData.metadata(base).array_obs.rdate
-    base_dt = DateTime(Date(rdate))
     ts_all = unique(sort!(reduce(vcat, [collect(UV.obs_time(l)) for l in leaves_v])))
-    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+    times = [unix2datetime(t) for t in ts_all]
     extended_times = [times[1] - Hour(2); times; times[end] + Hour(2)]
     aa_only = Dict(
         "AA" => BP.AntabStation(

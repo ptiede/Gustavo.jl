@@ -477,7 +477,7 @@ end
 """
     scan_phase_epoch(model, layout, ti) -> Union{Float64, Nothing}
 
-The epoch (hours) at which `model`'s constant phase terms are the phase, for the
+The epoch (seconds) at which `model`'s constant phase terms are the phase, for the
 time segment holding time index `ti`: the origin of the rate columns covering
 that segment, since a rate contributes `2π·ṙ·(t − t0)` and vanishes only there.
 `nothing` when the model carries no rate component, which leaves the constant
@@ -563,7 +563,7 @@ function steer_scan(
     V = stack[:vis]
     W = stack[:weights]
     freqs = frequencies(stack)
-    times = timestamps(stack) .* 3600.0
+    times = timestamps(stack)
     # `res` covers only cross baselines; `keep` maps its column back to the cube's.
     keep = findall(pr -> pr[1] != pr[2], UVData.baselines(stack).pairs)
     dims = (length(bl_pairs), length(pols))

@@ -35,7 +35,7 @@ Apply `t` to one materialized scan window, mutating `stack`'s `:vis`/`:weights`
 layers in place. The extension point for custom transforms.
 
 `stack` carries layers `:vis`/`:weights` on `(Frequency, Ti, Baseline, Pol)`
-dims (frequencies in Hz, times in hours, correlation products on the `Pol`
+dims (frequencies in Hz, times in seconds, correlation products on the `Pol`
 lookup) and the leaf's `PartitionInfo` metadata, so DimensionalData selectors
 and the `UVData` accessors both work on it directly — `stack[:vis][Pol =
 pol_at("PP")]`, [`frequencies`](@ref), `baselines`, [`source_name`](@ref).
@@ -395,9 +395,8 @@ scaling — per channel, where the ANTAB declares per-channel Tsys — is divide
 out first and does not land in the fitted gains. Use this one when the solve
 should see calibrated amplitudes.
 
-`uvset` supplies the array's `rdate` (the epoch the ANTAB's timestamps are
-resolved against) and the per-spw channel numbering the ANTAB indexes, both
-read from metadata only — the set stays lazy.
+`uvset` supplies the per-spw channel numbering the ANTAB indexes, read from
+metadata only — the set stays lazy.
 
 The correction leaves the set's `BUNIT` untouched: it is data, not metadata, that
 this transform rewrites. Stamp the finished output with
@@ -405,7 +404,6 @@ this transform rewrites. Stamp the finished output with
 """
 struct AprioriPreCal{A <: UVData.AntabCalibration} <: AbstractDataTransform
     antab::A
-    rdate::String
     spw_channel_freqs::Dict{String, Vector{Float64}}
     min_elevation_deg::Float64
     on_missing_station::Symbol
@@ -421,13 +419,6 @@ function AprioriPreCal(
                 "(got :$(on_missing_station))"
         )
     )
-    rdate = String(DimensionalData.metadata(uvset).array_obs.rdate)
-    isempty(rdate) && throw(
-        ArgumentError(
-            "AprioriPreCal: the set's root metadata has an empty `rdate`, so the ANTAB's " *
-                "DOY+UT timestamps cannot be resolved to the data's time axis."
-        )
-    )
     # An ANTAB numbers channels within a spw, so recovering that numbering for a
     # multi-spw scan group needs each spw's own channel order — which is the
     # leaf's, not the geometry's ascending-frequency one (a lower-sideband spw
@@ -440,7 +431,7 @@ function AprioriPreCal(
         end
     end
     return AprioriPreCal(
-        antab, rdate, spw_freqs, Float64(min_elevation_deg), on_missing_station,
+        antab, spw_freqs, Float64(min_elevation_deg), on_missing_station,
     )
 end
 
@@ -499,12 +490,10 @@ function apply_transform!(
     info = DimensionalData.metadata(stack)
     times = Float64.(lookup(stack[:vis], Ti))
     isempty(times) && return nothing
-    base_dt = DateTime(Date(t.rdate))
-    base_jd = datetime2julian(base_dt)
-    jds = [base_jd + h / 24.0 for h in times]
-    lo_h, hi_h = extrema(times)
-    t_lo = base_dt + Millisecond(round(Int, lo_h * 3_600_000))
-    t_hi = base_dt + Millisecond(round(Int, hi_h * 3_600_000))
+    jds = [UVData.unix_to_jd(t) for t in times]
+    lo_s, hi_s = extrema(times)
+    t_lo = unix2datetime(lo_s)
+    t_hi = unix2datetime(hi_s)
 
     pkg = UVData.apriori_gains(
         t.antab, info.antennas, _antab_channel_index(t, win), jds, t_lo, t_hi,

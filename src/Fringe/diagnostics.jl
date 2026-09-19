@@ -723,9 +723,9 @@ function fringe_search_map(
     fg = frequencies(stack)
     opts = search === nothing ? get(sol.info, :search, FringeSearch()) : search
     p = _pol_index(pol_products(stack), pol)
-    times = timestamps(stack) .* 3600.0
+    times = timestamps(stack)
     f0 = sol.geom.f0
-    t0 = sol.geom.t0 * 3600.0
+    t0 = sol.geom.t0
 
     bi = if baseline === nothing
         # Default to the strongest detection at this product — the same search the

@@ -112,12 +112,37 @@ frequencies(leaf::PartitionedData) = frequencies(leaf[:vis])
 """
     timestamps(x) -> Vector{Float64}
 
-Integration times (hours) off the `Ti` lookup of `x`'s visibility array — a
+Integration times (seconds) off the `Ti` lookup of `x`'s visibility array — a
 `DimArray`, a leaf `AbstractDimTree`, or a layer selection off one. The raw
 coordinate vector, not a lookup wrapper.
 """
 timestamps(vis::AbstractDimArray) = parent(lookup(vis, Ti))
 timestamps(leaf::PartitionedData) = timestamps(leaf[:vis])
+
+# ── Time axis ────────────────────────────────────────────────────────────────
+
+"""
+    JD_UNIX_EPOCH
+
+Julian Day of 1970-01-01T00:00:00 UTC, the origin of the `Ti` axis.
+"""
+const JD_UNIX_EPOCH = 2440587.5
+
+"""
+    jd_to_unix(jd) -> Float64
+    unix_to_jd(t) -> Float64
+
+Convert between a Julian Day and the `Ti` axis' seconds since
+[`JD_UNIX_EPOCH`](@ref).
+
+A Julian Day near the present is ~2.46e6, where a `Float64` resolves only
+~40 µs, so a caller holding the day and its fraction separately — as FITS-IDI
+`DATE`/`TIME` and the AIPS `DATE` PTYPE pair both do — must subtract the epoch
+from the integer part *before* adding the fraction to keep sub-microsecond
+timestamps.
+"""
+jd_to_unix(jd::Real) = (Float64(jd) - JD_UNIX_EPOCH) * 86400.0
+unix_to_jd(t::Real) = JD_UNIX_EPOCH + Float64(t) / 86400.0
 
 # ── Polarization-by-name selectors ────────────────────────────────────
 #

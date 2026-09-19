@@ -1164,10 +1164,8 @@ function adhoc_scan!(
         rbar .+= view(rparts, :, :, :, li)
         wbar .+= view(wparts, :, :, :, li)
     end
-    # `tg` is in hours; pass SECONDS so the adhoc's `:auto` window (T_AP / T_coh) is
-    # in physical units. Detrend uses only the mean, so the scaling is otherwise inert.
     as = solve_adhoc_phasing(
-        rbar, wbar, bl_pairs, pols, nant, tg .* 3600.0;
+        rbar, wbar, bl_pairs, pols, nant, tg;
         gauge = gauge, smoother = adhoc, tying = adhoc_plan.tying,
     )
     adhoc_leaf = _component_leaf(adhoc_plan, θ)

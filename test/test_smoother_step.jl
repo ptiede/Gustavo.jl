@@ -256,10 +256,8 @@ end
     @testset "AprioriAmplitude is an output-chain step" begin
         BP = Gustavo.UVData
         ant_names = String.(collect(UVP.union_antennas(uvset).name))
-        rdate = DimensionalData.metadata(uvset).array_obs.rdate
-        base_dt = DateTime(Date(rdate))
         ts_all = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
-        times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+        times = [unix2datetime(t) for t in ts_all]
         times = [times[1] - Hour(1); times; times[end] + Hour(1)]
         tsys_band = Dict(1 => 100.0, 2 => 400.0)
         spw_cals = Dict{Int, BP.AntabCalibration}()
@@ -318,10 +316,8 @@ end
     @testset "AprioriAmplitude/ReduceStep compose in declared order" begin
         BP = Gustavo.UVData
         ant_names = String.(collect(UVP.union_antennas(uvset).name))
-        rdate = DimensionalData.metadata(uvset).array_obs.rdate
-        base_dt = DateTime(Date(rdate))
         ts_all = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
-        times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+        times = [unix2datetime(t) for t in ts_all]
         times = [times[1] - Hour(1); times; times[end] + Hour(1)]
         gain = BP.AntabGainCurve((1.0, 1.0), [1.0])
         vals = repeat([100.0 100.0], length(times), 1)

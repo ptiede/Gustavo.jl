@@ -6,7 +6,7 @@
 using Gustavo
 using Test
 using FITSFiles
-using Dates: DateTime, Date, Millisecond, Hour
+using Dates: DateTime, Date, Millisecond, Hour, unix2datetime, datetime2unix
 using LinearAlgebra: Diagonal
 using StructArrays
 using DimensionalData
@@ -90,9 +90,10 @@ function build_synth_idi_uvset(;
     branches = DimensionalData.TreeDict()
     for scan in 1:nscan
         # Distinct, well-separated time windows per scan so the reader's
-        # gap-based segmentation splits them back out. Times in hours.
-        t0 = (scan - 1) * 5.0
-        ti_vals = collect(t0 .+ (0:(ntime - 1)) .* 0.01)   # 36 s spacing
+        # gap-based segmentation splits them back out. Absolute seconds,
+        # anchored at 0h UTC on RDATE.
+        t0 = datetime2unix(DateTime(Date(rdate))) + (scan - 1) * 18000.0   # scans 5 h apart
+        ti_vals = collect(t0 .+ (0:(ntime - 1)) .* 36.0)
 
         # uvw shared across bands.
         uvw_dense = zeros(Float32, ntime, nbl, 3)
@@ -559,10 +560,8 @@ end
     uvset = build_synth_idi_uvset(; nant = 3, nspw = 2, nchan = 2, nscan = 1, ntime = 3)
     ant_names = UV.union_antennas(uvset).name
 
-    rdate = DimensionalData.metadata(uvset).array_obs.rdate
-    base_dt = DateTime(Date(rdate))
     ts_all = sort!(unique(reduce(vcat, [collect(UV.obs_time(l)) for l in values(UV.branches(uvset))])))
-    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts_all]
+    times = [unix2datetime(t) for t in ts_all]
     times = [times[1] - Hour(1); times; times[end] + Hour(1)]   # pad the window
 
     tsys_band = Dict(1 => 100.0, 2 => 400.0)
@@ -674,11 +673,12 @@ end
             nant = nant, nspw = nspw, nchan = nchan, nscan = 1, ntime = ntime,
             weight_fn = (band, ti, bl, p) -> 2.0f0,
         )
-        # The synthetic scan times are 0.0, 0.01, 0.02 hours (scan 1).
-        # Flag: antenna 2, band 1, channels 2..3, pol RR(disk idx1 → MSv4 PP),
-        # over time 0.005..0.025 hours → in days = /24.
-        thi = 0.025 / 24.0
-        tlo = 0.005 / 24.0
+        # The synthetic scan-1 times are 0, 36 and 72 s past RDATE 0h.
+        # Flag: antenna 2, band 1, channels 2..3, pol RR (disk idx1 → MSv4 PP),
+        # over 18..90 s, which covers the second and third samples. TIMERANG is
+        # in days relative to RDATE.
+        tlo = 18.0 / 86400.0
+        thi = 90.0 / 86400.0
         flag_rows = [
             (;
                 SOURCE_ID = 0, ANTS = [2, 0], FREQID = 0,
@@ -955,7 +955,7 @@ end
         V = parent(leaf[:vis])[:, :, 1, 1]
         W = ones(size(V))
         freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
-        times = collect(lookup(leaf[:vis], Ti)) .* 3600     # hours → seconds
+        times = collect(lookup(leaf[:vis], Ti))
         det = FR.baseline_fringe_search(V, W, freqs, times, freqs[1], times[1])
         @test det.valid
         @test isapprox(det.delay, τ; atol = 1.0e-9)
@@ -984,7 +984,7 @@ end
         for leaf in values(UV.leaves(rt))
             V = parent(leaf[:vis])[:, :, 1, 1]
             freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
-            times = collect(lookup(leaf[:vis], Ti)) .* 3600
+            times = collect(lookup(leaf[:vis], Ti))
             det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, freqs[1], times[1])
             @test det.valid
             @test isapprox(det.delay, τ; atol = 1.0e-9)
@@ -1015,10 +1015,76 @@ end
         for leaf in values(UV.leaves(back))
             V = parent(leaf[:vis])[:, :, 1, 1]
             freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
-            times = collect(lookup(leaf[:vis], Ti)) .* 3600
+            times = collect(lookup(leaf[:vis], Ti))
             det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, freqs[1], times[1])
             @test det.valid
             @test isapprox(det.delay, τ; atol = 1.0e-9)
+        end
+    end
+end
+
+# ── The Ti axis is absolute ──────────────────────────────────────────────────
+#
+# `Ti` holds seconds since `UVData.JD_UNIX_EPOCH`, so a loaded epoch names a
+# real instant. Nothing else in the suite pins this: a round trip through
+# either FITS flavour is self-consistent under any origin, and the ANTAB
+# matching compares the axis against timestamps derived from the same axis.
+# These check it against a date the file itself declares.
+
+@testset "the Ti axis carries absolute epochs" begin
+    UV = Gustavo.UVData
+    rdate = "2021-03-04"
+    uvset = build_synth_idi_uvset(; nant = 3, nspw = 1, nchan = 2, nscan = 1, ntime = 3, rdate)
+
+    leaf_times(set) = sort!(unique(reduce(
+        vcat, [collect(UV.obs_time(l)) for l in values(DimensionalData.branches(set))],
+    )))
+
+    @testset "in memory" begin
+        ts = leaf_times(uvset)
+        @test Date(unix2datetime(first(ts))) == Date(rdate)
+        # An hours-since-RDATE axis would put these three samples inside the
+        # first minute of 1970.
+        @test unix2datetime(first(ts)) > DateTime(2000)
+    end
+
+    @testset "through FITS-IDI" begin
+        path = tempname() * ".idifits"
+        try
+            UV.write_fitsidi(path, uvset)
+            round_ts = leaf_times(UV.load_fitsidi(path))
+            @test Date(unix2datetime(first(round_ts))) == Date(rdate)
+            @test maximum(abs.(round_ts .- leaf_times(uvset))) < 5.0e-3
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+    end
+
+    @testset "through UVFITS" begin
+        path = tempname() * ".uvfits"
+        try
+            UV.write_uvfits(path, uvset)
+            round_ts = leaf_times(UV.load_uvfits(path))
+            @test Date(unix2datetime(first(round_ts))) == Date(rdate)
+            @test maximum(abs.(round_ts .- leaf_times(uvset))) < 5.0e-3
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+    end
+
+    @testset "a real FITS-IDI file" begin
+        real_path = joinpath(
+            @__DIR__, "..", "testdata", "BT164", "BT164A",
+            "VLBA_BT164A_bt164aQband_BIN0_SRC0_0_260108T230453.idifits",
+        )
+        if !isfile(real_path)
+            @test_skip "real FITS-IDI file not present"
+        else
+            real_set = UV.load_fitsidi(real_path; lazy = true)
+            file_rdate = DimensionalData.metadata(real_set).array_obs.rdate
+            ts = leaf_times(real_set)
+            @test !isempty(file_rdate)
+            @test Date(unix2datetime(first(ts))) == Date(file_rdate)
         end
     end
 end

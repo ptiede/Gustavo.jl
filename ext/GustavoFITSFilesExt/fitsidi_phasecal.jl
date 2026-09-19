@@ -49,6 +49,12 @@ function Fringe.load_fitsidi_phasecal(path::AbstractString)
     ag = _idi_find_hdu(fid, "ARRAY_GEOMETRY")
     ag === nothing && error("load_fitsidi_phasecal: no ARRAY_GEOMETRY HDU in $(path)")
 
+    # PHASE-CAL TIME is days since RDATE; `PhaseCalTable` shares the `Ti` axis'
+    # absolute seconds, so RDATE's own epoch is added here.
+    rdate_unix = UVData.jd_to_unix(
+        _rdate_jd_or_zero(strip(string(something(card_value(ag.cards, "RDATE"), "")))),
+    )
+
     # NOSTA → cleaned station name (must match what `load_fitsidi` stores).
     nosta = round.(Int, collect(getproperty(ag.data, :NOSTA)))
     anames = _idi_clean.(collect(getproperty(ag.data, :ANNAME)))
@@ -62,8 +68,8 @@ function Fringe.load_fitsidi_phasecal(path::AbstractString)
     ant = round.(Int, collect(getproperty(d, :ANTENNA_NO)))
     nrow = length(ant)
     station = [get(name_of, a, string("ant", a)) for a in ant]
-    time = Float64.(collect(getproperty(d, :TIME))) .* 24.0          # days → hours since RDATE
-    interval = Float64.(collect(getproperty(d, :TIME_INTERVAL))) .* 24.0
+    time = rdate_unix .+ Float64.(collect(getproperty(d, :TIME))) .* 86400.0
+    interval = Float64.(collect(getproperty(d, :TIME_INTERVAL))) .* 86400.0
     cable = :CABLE_CAL in propertynames(d) ?
         Float64.(collect(getproperty(d, :CABLE_CAL))) : fill(NaN, nrow)
 

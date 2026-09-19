@@ -501,7 +501,7 @@ direct `solve_station_systems!` call) has the same shape as
 one that came from the search, and every consumer reads pairs/feeds/ti off the
 stack uniformly.
 
-`epoch` (hours) is where the phases were measured, which the station solve needs
+`epoch` (seconds) is where the phases were measured, which the station solve needs
 to read them as constants. Omitting it asserts they sit wherever the model's
 rate components are referenced, and is an error when those disagree among
 themselves — see `Fringe.scan_phase_epoch`.
@@ -528,7 +528,7 @@ function detection_stack(
 end
 
 # A detection stack's scan-level provenance: the representative global time
-# index, the epoch (hours) the phases are referenced to, and the RMS
+# index, the epoch (seconds) the phases are referenced to, and the RMS
 # frequency/time spreads the weights need.
 _scan_meta(ti, epoch, freq_rms, time_rms) = Dict{Symbol, Any}(
     :ti => Int(ti), :epoch => epoch, :freq_rms => freq_rms, :time_rms => time_rms,
@@ -802,7 +802,7 @@ function _phase_epoch_offset(rate_plans, solved, ti::Integer, epoch, a::Integer,
         Δt == 0.0 && continue
         col = _block_index(plan, node, 1, seg, a)
         col == 0 && continue
-        off += 2π * get(solved, col, 0.0) * Δt * 3600.0
+        off += 2π * get(solved, col, 0.0) * Δt
     end
     return off
 end

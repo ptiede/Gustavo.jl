@@ -419,7 +419,7 @@ end
 The solved complex antenna gains of `sol` — the whole solution, or any
 selection of it (`sol[:bandpass]`, `sol[:fringe, :phase, :mbd]`, …) — labelled
 for inspection: a `DimArray` over `(Frequency, Ti, Ant, Feed)` — channel
-frequencies (Hz), integration times (hours), antennas (named when `sol.info`
+frequencies (Hz), integration times (seconds), antennas (named when `sol.info`
 carries `ant_names`, else `1:nant`), and feed. `gain = exp(Σ logamp) · cis(Σ
 phase)`, summed over the selection's components, is the same forward map
 [`apply_calibration`](@ref Gustavo.UVData.apply_calibration) divides by (and [`save_solution_hdf5`](@ref)
@@ -488,7 +488,7 @@ the result is that component's θ leaf: a `DimArray` over the five axes
 `(param, feed, Frequency, Ti, Ant)` — the second is `Feed` when the component
 is fit per feed, else the tied `node` axis — with coordinates materialized
 from `sol`'s geometry: a `Frequency` segment's centre channel frequency (Hz),
-a `Ti` segment's mean epoch (hours), feed/node ids, and antenna names (from
+a `Ti` segment's mean epoch (seconds), feed/node ids, and antenna names (from
 `sol.info.ant_names` when present, else `1:nant`).
 
 A wider selection returns the NamedTuple tree of those leaves, mirroring the
@@ -618,7 +618,7 @@ end
 
 Build the union `DataGeometry` spanning every leaf of `uvset`: the sorted unique
 channel frequencies (Hz) of all bands, the sorted unique integration times
-(hours) of all scans, with `spw_of_chan` / `scan_of_time` dense-ranked from the
+(seconds) of all scans, with `spw_of_chan` / `scan_of_time` dense-ranked from the
 leaves' `spw_name` / `scan_name`. `f0` defaults to the mean channel frequency,
 `t0` to the first time. Assumes a single consistent antenna table across the
 set (used only to size the solve elsewhere).
@@ -727,7 +727,7 @@ channels and times in the solve's index space, with no data attached.
 
 θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
 tseg_id, ant)` over global-length segment-id tables — while a `DimStack`'s
-coordinates are PHYSICAL (Hz, hours), so this join cannot be recovered from the
+coordinates are PHYSICAL (Hz, seconds), so this join cannot be recovered from the
 data alone.
 Build one with [`leaf_window`](@ref); pass it alongside the scan's `DimStack`
 to anything that needs both.

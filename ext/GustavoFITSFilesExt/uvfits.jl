@@ -625,7 +625,10 @@ function UVData.load_uvfits(path)
     return uvset
 end
 
-const _NX_TIME_TOL_HOURS = 1.0e-6
+# Slack on the NX window match. The DATE PTYPE's sub-day fraction is Float32,
+# which resolves ~5 ms of a day, so a record's decoded epoch and the NX window
+# it belongs to can disagree by that much after a round trip.
+const _NX_TIME_TOL_SECONDS = 1.0e-2
 
 function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
     nrec = length(obs_time)
@@ -643,15 +646,15 @@ function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
 
         assigned = 0
         if 1 <= pos <= length(lower_s)
-            lo = lower_s[pos] - _NX_TIME_TOL_HOURS
-            hi = upper_s[pos] + _NX_TIME_TOL_HOURS
+            lo = lower_s[pos] - _NX_TIME_TOL_SECONDS
+            hi = upper_s[pos] + _NX_TIME_TOL_SECONDS
             if lo <= t <= hi
                 assigned = perm[pos]
             end
         end
         if assigned == 0 && pos + 1 <= length(lower_s)
-            lo = lower_s[pos + 1] - _NX_TIME_TOL_HOURS
-            hi = upper_s[pos + 1] + _NX_TIME_TOL_HOURS
+            lo = lower_s[pos + 1] - _NX_TIME_TOL_SECONDS
+            hi = upper_s[pos + 1] + _NX_TIME_TOL_SECONDS
             if lo <= t <= hi
                 assigned = perm[pos + 1]
             end
@@ -756,33 +759,38 @@ function _load_uvfits_flat(path)
     #     fractional day. Sum is full JD.
     #   * Gustavo / round-tripped: col1 = floor(days_since_RDATE) (~0..few),
     #     col2 = fractional remainder. Sum is days_since_RDATE.
-    # We lift each column to Float64 *before* summing (Float32 ULP at JD
+    # We lift each column to Float64 *before* combining (Float32 ULP at JD
     # magnitude is ~0.25 days, which would collapse sub-second timestamps),
-    # then detect whether the sum is full JD or already RDATE-relative and
-    # produce **fractional hours since RDATE 00:00 UTC** ("hours since the
-    # start of the track"). Magnitude is bounded by track length (typically
-    # 0..~24 h) so float-tolerance comparisons in scan-matching code (e.g.
-    # `_scan_index_for_leaf`'s `≈`) have plenty of headroom.
+    # then detect whether the pair is a full JD or already RDATE-relative and
+    # produce **seconds since `UVData.JD_UNIX_EPOCH`**, the `Ti` convention.
+    # The two columns stay separate through the epoch subtraction: a Float64
+    # resolves only ~40 µs at Julian-Day magnitude, so summing them first
+    # would discard the split's whole purpose.
     rdate_jd = _rdate_jd_or_zero(array_obs.rdate)
     date_raw = collect(dt.DATE)
-    raw_sum::Vector{Float64} = if ndims(date_raw) == 2
-        Float64.(@view date_raw[:, 1]) .+ Float64.(@view date_raw[:, 2])
+    date_hi, date_lo = if ndims(date_raw) == 2
+        Float64.(@view date_raw[:, 1]), Float64.(@view date_raw[:, 2])
     else
-        Float64.(date_raw)
+        Float64.(date_raw), zeros(Float64, length(date_raw))
     end
     # Detect AIPS-strict full-JD (large) vs already-RDATE-relative (small).
     # Full JD has been > 2.4e6 since ~1858 (the MJD reference); plausible
     # days-since-RDATE is < ~1e3 even for decade-long campaigns. A value
     # in [1e3, 2.4e6) cannot come from either convention and indicates a
     # corrupted file or unsupported writer — error rather than guess.
-    days_since_rdate::Vector{Float64} = if isempty(raw_sum)
-        raw_sum
+    obs_time::Vector{Float64} = if isempty(date_hi)
+        Float64[]
     else
-        raw_max = maximum(raw_sum)
+        raw_max = maximum(date_hi .+ date_lo)
         if raw_max >= 2.4e6
-            raw_sum .- rdate_jd          # AIPS-strict full JD
+            ((date_hi .- UVData.JD_UNIX_EPOCH) .+ date_lo) .* 86400.0
         elseif raw_max <= 1.0e3
-            raw_sum                       # Gustavo / RDATE-relative
+            rdate_jd == 0.0 && error(
+                "load_uvfits: DATE PTYPE values are days relative to RDATE " *
+                    "(max(col1+col2) = $raw_max), but the AN HDU carries no " *
+                    "usable RDATE, so the records have no absolute epoch."
+            )
+            UVData.jd_to_unix(rdate_jd) .+ (date_hi .+ date_lo) .* 86400.0
         else
             error(
                 "load_uvfits: ambiguous DATE PTYPE values — max(col1+col2) = $raw_max " *
@@ -792,7 +800,6 @@ function _load_uvfits_flat(path)
             )
         end
     end
-    obs_time::Vector{Float64} = days_since_rdate .* 24.0
     bl_codes::Vector{Int} = round.(Int, collect(dt.BASELINE))
 
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
@@ -816,10 +823,11 @@ function _load_uvfits_flat(path)
     # canonical scan label (string-cast for xradio `ScanArray` shape).
     nx_time::Vector{Float64} = Float64.(collect(nx.TIME))
     nx_dt::Vector{Float64} = Float64.(collect(nx.var"TIME INTERVAL"))
-    # NX TIME / TIME INTERVAL are days-since-RDATE; convert to hours
-    # since RDATE 00:00 UTC to share `obs_time`'s scale.
-    nx_lower::Vector{Float64} = (nx_time .- nx_dt ./ 2) .* 24.0
-    nx_upper::Vector{Float64} = (nx_time .+ nx_dt ./ 2) .* 24.0
+    # NX TIME / TIME INTERVAL are days-since-RDATE; shift onto `obs_time`'s
+    # absolute seconds.
+    nx_rdate_unix = UVData.jd_to_unix(rdate_jd)
+    nx_lower::Vector{Float64} = nx_rdate_unix .+ (nx_time .- nx_dt ./ 2) .* 86400.0
+    nx_upper::Vector{Float64} = nx_rdate_unix .+ (nx_time .+ nx_dt ./ 2) .* 86400.0
     nx_freqid::Vector{Int32} = hasproperty(nx, Symbol("FREQ ID")) ?
         round.(Int32, collect(nx.var"FREQ ID")) : ones(Int32, length(nx_time))
     nx_subarray::Vector{Int32} = hasproperty(nx, :SUBARRAY) ?
@@ -1025,10 +1033,8 @@ function _fast_random_read(lazy::FITSFiles.LazyArray)
 end
 
 # Parse `array_obs.rdate` (e.g. "2022-01-01") to a Julian Day at 0h UT.
-# Used to subtract from AIPS-strict full-JD `DATE` PTYPE values when
-# decoding to "days since RDATE". Returns 0.0 when the string is empty /
-# unparseable so the subtraction is a no-op (Gustavo-written files
-# already store days-since-RDATE in `DATE` and do not need the subtract).
+# Anchors the AIPS NX table, whose times are days relative to RDATE.
+# Returns 0.0 when the string is empty or unparseable.
 function _rdate_jd_or_zero(rdate_str::AbstractString)
     isempty(rdate_str) && return 0.0
     return try
@@ -1038,26 +1044,17 @@ function _rdate_jd_or_zero(rdate_str::AbstractString)
     end
 end
 
-# Reconstruct AIPS DATE PTYPE columns from a leaf's `obs_time` (fractional
-# hours since RDATE 00:00 UTC). Emits two columns shaped `(nrec_leaf, 2)`
-# whose sum is the **full Julian Day** of the record (AIPS-strict
-# convention) so external readers — astropy/ehtim, AIPS APCAL, CASA —
-# parse the timestamp correctly. Column 1 carries the integer JD (which
-# Float32 holds exactly up to ~16M) and column 2 carries the sub-day
-# fractional remainder (giving sub-second precision).
-#
-# `rdate_jd` is the Julian Day of RDATE 0h UTC, computed from the
-# `array_obs.rdate` string. When `rdate_jd == 0` (no RDATE set), the
-# writer emits days-since-epoch-zero — round-trippable through the
-# Gustavo loader but **not** readable by external tools. Callers should
-# ensure `array_obs.rdate` is populated before writing.
-function _build_date_param(
-        obs_time_hr::AbstractVector{<:Real}, record_order, rdate_jd::Real,
-    )
+# Reconstruct AIPS DATE PTYPE columns from a leaf's `obs_time` (seconds since
+# `UVData.JD_UNIX_EPOCH`). Emits two columns shaped `(nrec_leaf, 2)` whose sum
+# is the **full Julian Day** of the record (AIPS-strict convention) so external
+# readers — astropy/ehtim, AIPS APCAL, CASA — parse the timestamp correctly.
+# Column 1 carries the integer JD (which Float32 holds exactly up to ~16M) and
+# column 2 the sub-day fractional remainder, whose Float32 ULP is ~5 ms.
+function _build_date_param(obs_time_s::AbstractVector{<:Real}, record_order)
     n = length(record_order)
     out = Matrix{Float32}(undef, n, 2)
     @inbounds for (rec_i, (ti, _)) in enumerate(record_order)
-        jd = rdate_jd + obs_time_hr[ti] / 24.0
+        jd = UVData.unix_to_jd(obs_time_s[ti])
         intpart = floor(jd)
         out[rec_i, 1] = Float32(intpart)
         out[rec_i, 2] = Float32(jd - intpart)
@@ -1346,13 +1343,14 @@ function _build_nx_hdu(
         scan_windows::AbstractVector{Tuple{Float64, Float64}},
         record_starts::AbstractVector, record_ends::AbstractVector,
         freqid_per_scan::AbstractVector{<:Integer},
-        subarray_per_scan::AbstractVector{<:Integer} = fill(Int32(1), length(scan_windows)),
+        subarray_per_scan::AbstractVector{<:Integer} = fill(Int32(1), length(scan_windows));
+        rdate_jd::Real = 0.0,
     )
     nscan = length(scan_windows)
-    # scan_windows are fractional hours since RDATE 00:00 UTC; convert
-    # to AIPS NX's days-since-RDATE convention.
-    time_center = [(lo + hi) / 2 / 24.0 for (lo, hi) in scan_windows]
-    time_interval = [Float32((hi - lo) / 24.0) for (lo, hi) in scan_windows]
+    # scan_windows are absolute seconds; AIPS NX is days relative to RDATE.
+    rdate_unix = UVData.jd_to_unix(rdate_jd)
+    time_center = [((lo + hi) / 2 - rdate_unix) / 86400.0 for (lo, hi) in scan_windows]
+    time_interval = [Float32((hi - lo) / 86400.0) for (lo, hi) in scan_windows]
     nt_data = (
         TIME = time_center,
         var"TIME INTERVAL" = time_interval,
@@ -1479,15 +1477,16 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
     nrec_total = sum(length(_leaf_record_order(l)) for l in leaf_list)
     nrec_total > 0 || error("write_uvfits: UVSet has no records to write")
 
-    # AIPS-strict DATE PTYPE: emit full Julian Day (col1 = integer JD,
-    # col2 = sub-day fraction). Compute the JD offset once per write.
+    # The DATE PTYPE is a full Julian Day, which the absolute `Ti` axis gives
+    # directly. The AIPS NX table is days relative to RDATE, so it alone needs
+    # the RDATE epoch.
     rdate_jd = _rdate_jd_or_zero(root.array_obs.rdate)
     if rdate_jd == 0.0
         @warn(
-            "write_uvfits: `array_obs.rdate` is empty; DATE PTYPE will be " *
-                "emitted relative to JD 0 (year -4713). External readers " *
-                "(astropy / ehtim) will reject this. Populate the RDATE " *
-                "metadata before writing.",
+            "write_uvfits: `array_obs.rdate` is empty; the NX table's scan " *
+                "windows will be emitted relative to JD 0 (year -4713). " *
+                "External readers (astropy / ehtim) will reject this. " *
+                "Populate the RDATE metadata before writing.",
         )
     end
 
@@ -1545,9 +1544,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
         first_row_in_scan = rec_offset + 1
         # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
         bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
-        # Reconstruct DATE PTYPE columns per-record from obs_time
-        # (hours since RDATE 0h UTC) and the AN-HDU RDATE Julian Day.
-        date_param_leaf = _build_date_param(UVData.obs_time(leaf), ro, rdate_jd)
+        date_param_leaf = _build_date_param(UVData.obs_time(leaf), ro)
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
             parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:uvw]),
@@ -1605,7 +1602,8 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
     ]
     fq_hdu = _build_fq_hdu(setups, [freqid_lookup[fs] for fs in setups])
     nx_hdu = _build_nx_hdu(
-        scan_windows, record_starts, record_ends, freqid_per_scan, subarray_per_scan,
+        scan_windows, record_starts, record_ends, freqid_per_scan, subarray_per_scan;
+        rdate_jd,
     )
 
     out_hdus = HDU[primary_hdu]

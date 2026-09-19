@@ -219,7 +219,7 @@ function coherence_report(
             labels = String.(pol_products(leaf))
             pol_labels = labels[_select_coherence_pols(labels, pols)]
         end
-        ts = sort(Float64.(lookup(leaf[:vis], Ti))) .* 3600.0   # hours → seconds
+        ts = sort(Float64.(lookup(leaf[:vis], Ti)))
         if length(ts) > 1
             append!(tdiffs, filter(>(0), diff(ts)))
             push!(tspans, last(ts) - first(ts))
@@ -272,7 +272,7 @@ function coherence_report(
                 "cannot pool into one report",
         )
         blmap = [get(blidx, p, 0) for p in baselines(m).pairs]
-        times_sec = Float64.(lookup(m[:vis], Ti)) .* 3600.0
+        times_sec = Float64.(lookup(m[:vis], Ti))
         freqs = Float64.(lookup(m[:vis], Frequency))
         # Per-(baseline, product) noise scale α, from adjacent-sample differences
         # of the NATIVE cube (signal cancels in the difference; noise does not),

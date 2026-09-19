@@ -13,6 +13,7 @@ using DimensionalData: DimArray, Ti, dims, lookup
 using PolarizedTypes: RPol, LPol
 using Gustavo.UVData: Pol, Frequency, UVW, Baseline, UVSet, pol_products, channel_freqs
 using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
+using Dates: Date, DateTime, datetime2unix
 using HDF5   # triggers GustavoHDF5Ext (solution save/load round-trip)
 using FITSFiles   # triggers GustavoFITSFilesExt (write_uvfits/load_uvfits round-trip)
 
@@ -86,7 +87,7 @@ _bp_at(bp::AbstractArray{<:Any, 4}, a, f, gc, s) = bp[a, f, gc, s]
 
 function _build_fringe_uvset(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
-        scan_gap = nothing,     # hours between scan starts (default: back-to-back)
+        scan_gap = nothing,     # seconds between scan starts (default: back-to-back)
         noise = nothing,        # σ per visibility sample (same units as the A0 = 2.5 signal);
         #   without it every estimate is exact and no
         #   uncertainty-driven effect is observable
@@ -164,20 +165,22 @@ function _build_fringe_uvset(;
         extras = (; correlat = "DiFX", obscode = "SY001"),
     )
 
-    # Times (hours): `nscans` scans of `ntime` APs spaced 30 s, scans separated
-    # by a 2-AP gap. Scan 1 keeps the historical single-scan time axis.
-    ti_vals = collect((0:(ntime - 1)) .* (30.0 / 3600.0))
-    scan_span = scan_gap === nothing ? (ntime + 2) * (30.0 / 3600.0) : Float64(scan_gap)
+    # Times: `nscans` scans of `ntime` APs spaced 30 s, scans separated by a
+    # 2-AP gap, anchored at 0h UTC on the array's reference date so the axis is
+    # absolute seconds like a loader's.
+    t_epoch = datetime2unix(DateTime(Date("2021-03-04")))
+    ti_vals = collect(t_epoch .+ (0:(ntime - 1)) .* 30.0)
+    scan_span = scan_gap === nothing ? (ntime + 2) * 30.0 : Float64(scan_gap)
 
     # Reference geometry constants (must match what the solve derives):
-    # f0 = mean of all channel freqs across both bands; t0 = first time (hours).
+    # f0 = mean of all channel freqs across both bands; t0 = first time.
     allfreqs = Float64[]
     for fs in setups
         append!(allfreqs, collect(channel_freqs(fs)))
     end
     sort!(unique!(allfreqs))
     f0 = sum(allfreqs) / length(allfreqs)
-    t0_sec = ti_vals[1] * 3600.0
+    t0_sec = ti_vals[1]
 
     # Injected parameters. Reference antenna 1 = 0 (so the recovered solution matches
     # the gauge), others drawn small. `delay`/`phi` are PER-FEED (their constant inter-feed
@@ -238,7 +241,7 @@ function _build_fringe_uvset(;
             a, bb = bl_pairs[bl]
             fa, fb = feeds[p]
             f = fch[c]
-            tsec = ti_scan[ti] * 3600.0
+            tsec = ti_scan[ti]
             dτ = delay[a, fa] - delay[bb, fb]
             dṙ = rate[a, fa] - rate[bb, fb]
             dφ = phi[a, fa] - phi[bb, fb]

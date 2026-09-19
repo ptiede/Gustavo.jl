@@ -25,9 +25,9 @@
 Format-neutral phase-cal tone table (one row per station × epoch):
 
 - `station[row]`  — station code (matches `AntennaTable` names).
-- `time[row]`     — epoch centre, HOURS since the file reference date (the
+- `time[row]`     — epoch centre, seconds since `UVData.JD_UNIX_EPOCH` (the
   UVSet `Ti` convention).
-- `interval[row]` — accumulation interval (hours).
+- `interval[row]` — accumulation interval (seconds).
 - `cable[row]`    — cable-cal delay (s); `NaN` when absent.
 - `freq[tone, band, feed, row]` — tone sky frequency (Hz); `NaN` = absent.
 - `tone[tone, band, feed, row]` — measured tone phasor, in the same phase
@@ -183,7 +183,7 @@ function phasecal_solution(
     delay_leaf = _component_leaf(delay_plan, θ)
     const_leaf = _component_leaf(const_plan, θ)
 
-    # Scan time spans (hours) per time-segment id of the model.
+    # Scan time spans (seconds) per time-segment id of the model.
     ntseg = maximum(delay_plan.tseg_id; init = 0)
     tmin = fill(Inf, ntseg)
     tmax = fill(-Inf, ntseg)

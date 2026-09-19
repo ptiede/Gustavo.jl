@@ -551,10 +551,11 @@ function participating_antennas(part::DimensionalData.AbstractDimTree)
     return sort!(collect(Set{String}(vcat(bls.ant1_names, bls.ant2_names))))
 end
 
-# Time axis lookup. Values are Float64 fractional hours since RDATE 00:00 UTC
-# (the AIPS RDATE card on the AN HDU). For a single-night track, magnitudes
-# are bounded by ~24; multi-night tracks accumulate as
-# 24·days_offset + hour_within_day.
+# Time axis lookup. Values are Float64 seconds since `UVData.JD_UNIX_EPOCH`,
+# matching MSv4's `time` coordinate in its default `unix` format. Magnitudes
+# near the present are ~1.7e9, where a Float64 resolves ~0.24 µs; every rate
+# and delay term works on `t − t0` about a segment-local origin, where the
+# resolution is picoseconds.
 function obs_time(part::DimensionalData.AbstractDimTree)
     return lookup(part[:vis], Ti)
 end

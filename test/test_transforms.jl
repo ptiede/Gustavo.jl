@@ -209,10 +209,8 @@ end
     ant_names = String.(UVP.union_antennas(uvset).name)
     geom = CAL.build_geometry(uvset)
 
-    rdate = DimensionalData.metadata(uvset).array_obs.rdate
-    base_dt = DateTime(Date(rdate))
     ts = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
-    times = [base_dt + Millisecond(round(Int, t * 3_600_000)) for t in ts]
+    times = [unix2datetime(t) for t in ts]
     times = [times[1] - Hour(1); times; times[end] + Hour(1)]      # pad the window
 
     # Per-station Tsys, distinct per station so a mixed-up station mapping shows

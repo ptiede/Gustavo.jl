@@ -239,9 +239,8 @@ end
 #                  antenna flags every baseline touching it; two flag that
 #                  baseline only.
 #   FREQID(1J)     0 = all freq setups
-#   TIMERANG(2E)   (start, end) in DAYS relative to RDATE. Multiply by 24 to
-#                  get the reader's `t_hours` (hours since RDATE 00:00 UTC);
-#                  TIMERANG is already RDATE-relative, so no jd0 term is added.
+#   TIMERANG(2E)   (start, end) in DAYS relative to RDATE, so reaching the
+#                  reader's absolute `Ti` seconds adds RDATE's own epoch.
 #   BANDS(NO_BAND J)  per-band flag, 1 = flag that band
 #   CHANS(2J)      (lo, hi) 1-based channel range; (0,0) = all channels
 #   PFLAGS(NO_STKD J) per-stokes flag in on-disk (RR/LL/RL/LR) order, 1 = flag
@@ -255,7 +254,7 @@ struct FlagEntry
     ant1::Int                 # global antenna index, 0 = wildcard
     ant2::Int                 # global antenna index, 0 = wildcard
     freqid::Int               # 0 = all freq setups
-    t0::Float64               # hours since RDATE 00:00 UTC
+    t0::Float64               # seconds since UVData.JD_UNIX_EPOCH
     t1::Float64
     bands::Vector{Bool}       # per-band (length NO_BAND)
     chan_lo::Int              # 1-based channel lo (0 = all)
@@ -294,7 +293,7 @@ end
 # Parse the FLAG HDU into `FlagEntry`s. `nosta_to_idx` maps NOSTA → global
 # antenna index; `perm[p]` is the on-disk stokes index for MSv4 pol `p`, so
 # `pflags_msv4[p] = pflags_disk[perm[p]]` aligns PFLAGS with the leaf Pol axis.
-function _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stkd)
+function _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stkd, rdate_unix)
     flag_hdu === nothing && return FlagEntry[]
     d = flag_hdu.data
     # The FLAG table is small; read its columns eagerly. Missing columns fall
@@ -326,11 +325,18 @@ function _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stk
             t1 = Inf
         else
             tr = _idi_row(trang, r)
-            # TIMERANG is in DAYS relative to RDATE → hours.
-            t0 = Float64(tr[1]) * 24.0
-            t1 = Float64(length(tr) >= 2 ? tr[2] : tr[1]) * 24.0
-            # (0,0) means "all times" in AIPS convention.
-            (t0 == 0.0 && t1 == 0.0) && (t0 = -Inf; t1 = Inf)
+            d0 = Float64(tr[1])
+            d1 = Float64(length(tr) >= 2 ? tr[2] : tr[1])
+            if d0 == 0.0 && d1 == 0.0
+                # (0,0) means "all times" in AIPS convention. Tested on the raw
+                # days, which the RDATE offset would otherwise hide.
+                t0 = -Inf
+                t1 = Inf
+            else
+                # TIMERANG is in DAYS relative to RDATE; `Ti` is absolute seconds.
+                t0 = rdate_unix + d0 * 86400.0
+                t1 = rdate_unix + d1 * 86400.0
+            end
         end
 
         bvec = if bands === nothing
@@ -430,7 +436,7 @@ struct IDIChunkArray{T, K, TD, TFF, TW} <: DiskArrays.AbstractDiskArray{T, 4}
     row_of::Matrix{Int}     # (nti, nbl) UV_DATA row per cell (0 = missing)
     flags::Vector{FlagEntry}  # FLAG entries pre-filtered to this leaf
     bl_ants::Vector{Tuple{Int, Int}}  # global antenna pair per baseline column
-    times::Vector{Float64}  # per-ti time (hours since RDATE) for TIMERANG match
+    times::Vector{Float64}  # per-ti time (absolute seconds) for TIMERANG match
     wfactor::Float32        # radiometer weight factor 2·Δν·η² for this band (0 ⇒ no scaling)
     # Per-(global-row) INTTIM (s); empty when wfactor == 0. Indexed by GLOBAL row, so
     # every leaf of the file needs the same full-length vector and they SHARE one
@@ -1395,15 +1401,15 @@ _decode_field(::Type{Int16}, buf, o) = _be_scalar(Int16, buf, o)
 _decode_field(::Type{Int64}, buf, o) = _be_scalar(Int64, buf, o)
 
 # Segment time-ordered rows into scans: a new scan starts when SOURCE_ID
-# changes or the time gap exceeds `gap_hours`. Returns a Vector of (range,
+# changes or the time gap exceeds `gap_seconds`. Returns a Vector of (range,
 # source_id) tuples (ranges index into the time-ordered row arrays).
-function _idi_segment_scans(source_ids, t_hours, gap_hours)
-    n = length(t_hours)
+function _idi_segment_scans(source_ids, t_sec, gap_seconds)
+    n = length(t_sec)
     segs = Tuple{UnitRange{Int}, Int}[]
     n == 0 && return segs
     start = 1
     for i in 2:n
-        if source_ids[i] != source_ids[start] || (t_hours[i] - t_hours[i - 1]) > gap_hours
+        if source_ids[i] != source_ids[start] || (t_sec[i] - t_sec[i - 1]) > gap_seconds
             push!(segs, (start:(i - 1), source_ids[start]))
             start = i
         end
@@ -1592,8 +1598,10 @@ function UVData.load_fitsidi(
     # Parse the FLAG table eagerly (small; the FLUX matrix is never touched).
     # `apply_flags = false` leaves the entry list empty, so no cell is ever flagged
     # by the table and every other code path sees the same "no FLAG HDU" case.
+    rdate_unix = UVData.jd_to_unix(_idi_rdate_jd(array_obs.rdate))
     flag_entries = _build_idi_flags(
         apply_flags ? flag_hdu : nothing, nosta_to_idx, perm, no_band, no_chan, no_stkd,
+        rdate_unix,
     )
 
     # Index pass: small per-row columns only (no WEIGHT / FLUX). Read in ONE
@@ -1619,9 +1627,10 @@ function UVData.load_fitsidi(
     vv = small[Symbol("VV---SIN")]
     ww = small[Symbol("WW---SIN")]
 
-    # Time in fractional hours since RDATE 00:00 UTC.
-    jd0 = _idi_rdate_jd(array_obs.rdate)
-    t_hours = ((date .+ tim) .- jd0) .* 24.0
+    # Absolute seconds on the `Ti` axis. DATE holds the Julian Day at 0h and
+    # TIME the fraction of that day; the epoch comes off DATE *before* TIME is
+    # added, because a Float64 resolves only ~40 µs at Julian-Day magnitude.
+    t_sec = ((date .- UVData.JD_UNIX_EPOCH) .+ tim) .* 86400.0
 
     # FLUX field descriptor (read once; shared by all chunk arrays).
     flux_col = data[:FLUX]
@@ -1630,10 +1639,10 @@ function UVData.load_fitsidi(
     weight_col = data[:WEIGHT]
 
     # Scan segmentation. Data is SORT='T*' (time-ordered).
-    med_int_hours = isempty(inttim) ? 0.0 : Float64(median(inttim)) / 3600.0
-    gap_hours = 2 * med_int_hours
-    gap_hours <= 0 && (gap_hours = Inf)   # single integration → one scan
-    segments = _idi_segment_scans(source_ids, t_hours, gap_hours)
+    med_int_s = isempty(inttim) ? 0.0 : Float64(median(inttim))   # INTTIM is seconds
+    gap_s = 2 * med_int_s
+    gap_s <= 0 && (gap_s = Inf)           # single integration → one scan
+    segments = _idi_segment_scans(source_ids, t_sec, gap_s)
 
     # Optional scan / band restriction.
     band_sel = bands === Colon() ? (1:no_band) : collect(bands)
@@ -1650,7 +1659,7 @@ function UVData.load_fitsidi(
         source_key = UVData.sanitize_source(si.name)
 
         # Per-(ti, bl) row map shared across bands within the scan.
-        seg_t = @view t_hours[rng]
+        seg_t = @view t_sec[rng]
         seg_bl = @view bl_codes[rng]
         unique_times = sort(unique(seg_t))
         time_lookup = Dict(t => i for (i, t) in enumerate(unique_times))
@@ -1691,7 +1700,7 @@ function UVData.load_fitsidi(
         # grows only over the kept cross-correlation records (in on-disk order).
         record_order = Tuple{Int, Int}[]
         for gi in rng
-            ti = time_lookup[t_hours[gi]]
+            ti = time_lookup[t_sec[gi]]
             code = bl_codes[gi]
             pa = get(nosta_to_idx, code ÷ 256, code ÷ 256)
             pb = get(nosta_to_idx, code % 256, code % 256)
@@ -1719,7 +1728,7 @@ function UVData.load_fitsidi(
             (Ti(unique_times), Baseline(baselines.labels), UVW(["U", "V", "W"])),
         )
 
-        # Scan time span (hours), used to pre-filter FLAG entries per leaf.
+        # Scan time span (seconds), used to pre-filter FLAG entries per leaf.
         scan_t_lo = isempty(unique_times) ? -Inf : first(unique_times)
         scan_t_hi = isempty(unique_times) ? Inf : last(unique_times)
         no_flags = FlagEntry[]

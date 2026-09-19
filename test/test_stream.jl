@@ -58,7 +58,7 @@
         # plane is divided by the oversampling) — a Float64, never an Int
         # (regression: an Int once survived the whole synthetic suite because the
         # fixtures give integral counts, then threw InexactError on a real file).
-        @test FP._search_cells(frequencies(stack_n), timestamps(stack_n) .* 3600.0, search) isa Float64
+        @test FP._search_cells(frequencies(stack_n), timestamps(stack_n), search) isa Float64
 
         # inner fan-out is bit-identical to the serial loop, per detection layer.
         res_ser = FP.search_scan(stack_n, st.geom, search; executor = SerialScheduler(), ngroups = length(st.groups))

@@ -39,7 +39,7 @@ Holds source identification (`source_name`/`source_key`/`field_name`/`ra`/
 `record_order`/`date_param`/`extra_columns`, the human-readable
 `partition_name`, the leaf's own `freq_setup`, and the leaf's scan handles.
 
-`time_span` is the interval (hours) each `Ti` sample integrates over — the time
+`time_span` is the interval (seconds) each `Ti` sample integrates over — the time
 counterpart of `freq_setup`'s `ch_width`. Empty when the samples are
 instantaneous; time-averaging reducers (`time_bin_average`, `scan_average`) set it to the span they
 collapsed, so a later consumer can tell an averaged sample from a snapshot.
