@@ -728,15 +728,13 @@ function _load_uvfits_flat(path)
     dim1 = findall(==(1), size(dt.data))
     raw::Array{Float32, 4} = dropdims(dt.data, dims = Tuple(dim1))
 
-    # CONJUGATE the visibilities crossing the UVFITS boundary. AIPS random-groups
-    # UVFITS stores the complex conjugate of Gustavo's internal (FITS-IDI / TMS)
-    # phase convention: FITS-IDI defines V = ⟨E_a1 · conj(E_a2)⟩, and AIPS/CASA use
-    # the opposite phase — same (u,v,w) and same 256·a1+a2 baseline convention
-    # (AIPS Memo 114r §2.1; casacore FitsIDItoMS.cc: "FITS-IDI convention is
-    # conjugate of AIPS and CASA convention"). So we negate the imaginary part on
-    # read and leave (u,v,w) untouched. `write_uvfits(...; convention = :aips)`
-    # applies the same conjugation, so the write→read round-trip is identity.
-    vis_raw::Array{ComplexF32, 3} = complex.(raw[:, 1, :, :], -raw[:, 2, :, :])
+    # Read the visibilities verbatim. AIPS random-groups UVFITS shares Gustavo's
+    # internal phase convention — both are the AIPS/CASA/casacore sense, which is
+    # the conjugate of FITS-IDI's V = ⟨E_a1 · conj(E_a2)⟩ (AIPS Memo 114r §2.1;
+    # casacore FitsIDItoMS.cc: "FITS-IDI convention is conjugate of AIPS and CASA
+    # convention"). (u,v,w) and the 256·a1+a2 baseline codes agree too, so nothing
+    # on this boundary is transformed.
+    vis_raw::Array{ComplexF32, 3} = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
     weights_raw::Array{Float32, 3} = raw[:, 3, :, :]
 
     antenna_tables = AntennaTable[_build_antenna_table(h) for h in an_hdus]
@@ -798,10 +796,11 @@ function _load_uvfits_flat(path)
     bl_codes::Vector{Int} = round.(Int, collect(dt.BASELINE))
 
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
-    # (u,v,w) are NOT negated: FITS-IDI and AIPS UVFITS share an identical
+    # (u,v,w) are read verbatim: every FITS flavour Gustavo reads shares one
     # baseline-coordinate convention (u,v,w in light-seconds, coord = r_a1 − r_a2;
     # AIPS Memo 117r §4.1.2 = Memo 114r §4.1.2 word for word). The FITS-IDI↔AIPS
-    # difference is purely the visibility conjugation applied above.
+    # difference is purely the visibility conjugation, which FITS-IDI carries and
+    # UVFITS does not.
     uvw_raw::Matrix{Float32} = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
     cfq::Vector{Float64} = channel_freqs(first(freq_setups))
@@ -1417,18 +1416,20 @@ end
 
 function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :aips)
     # `convention` selects the on-disk visibility phase convention:
-    #   :aips    — conjugate visibilities to the AIPS/CASA/UVFITS convention (the
-    #              standard form that DIFMAP/AIPS/CASA/ehtim/pyuvdata/VLBIFiles
-    #              read correctly). This is the default.
-    #   :fitsidi — write Gustavo's internal FITS-IDI (TMS) phase convention
-    #              verbatim, i.e. no conjugation.
+    #   :aips    — the AIPS/CASA/UVFITS convention, the standard form that
+    #              DIFMAP/AIPS/CASA/ehtim/pyuvdata/VLBIFiles read correctly.
+    #              It is Gustavo's internal convention too, so the visibilities
+    #              are written verbatim. This is the default.
+    #   :fitsidi — conjugate to the FITS-IDI (TMS) phase convention, for tools
+    #              that expect that sense in a UVFITS file.
     # (u,v,w) are IDENTICAL in both formats and are never negated (see load_uvfits).
     # NOTE: load_uvfits always assumes a standard :aips file, so only :aips
     # round-trips through Gustavo as the identity.
     convention in (:aips, :fitsidi) || error(
-        "write_uvfits: `convention` must be :aips (conjugate to the standard " *
-            "AIPS/CASA/UVFITS phase convention, default) or :fitsidi (internal " *
-            "FITS-IDI phase verbatim); got $(repr(convention)).",
+        "write_uvfits: `convention` must be :aips (the standard AIPS/CASA/UVFITS " *
+            "phase convention, which is also Gustavo's internal one, default) or " *
+            ":fitsidi (conjugate to the FITS-IDI phase sense); got " *
+            "$(repr(convention)).",
     )
     _assert_not_writing_to_source(output_path, uvset)
     src_list = sources(uvset)
@@ -1533,8 +1534,8 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
     subarray_per_scan = ones(Int32, nscan)
     scan_windows = Vector{Tuple{Float64, Float64}}(undef, nscan)
 
-    # :aips conjugates (negate imag part); :fitsidi writes the imag part verbatim.
-    imag_sign::Float32 = convention === :aips ? -1.0f0 : 1.0f0
+    # :aips writes the imag part verbatim; :fitsidi conjugates (negates it).
+    imag_sign::Float32 = convention === :aips ? 1.0f0 : -1.0f0
 
     rec_offset = 0
     for (sid, leaf) in enumerate(leaf_list)
@@ -1647,8 +1648,8 @@ function _write_records_kernel!(
                 wc = w_dense[c, ti, bi, pmem]
                 if isfinite(real(v)) && isfinite(imag(v)) && isfinite(wc) && wc > 0
                     raw_data[row, 1, pdisk, 1, c, 1, 1] = real(v)
-                    # imag_sign = -1 (:aips) conjugates to the AIPS/UVFITS phase
-                    # convention; +1 (:fitsidi) writes the internal phase verbatim.
+                    # imag_sign = +1 (:aips) writes the internal phase verbatim;
+                    # -1 (:fitsidi) conjugates to the FITS-IDI phase convention.
                     raw_data[row, 2, pdisk, 1, c, 1, 1] = imag_sign * imag(v)
                     raw_data[row, 3, pdisk, 1, c, 1, 1] = wc
                 elseif isfinite(wc) && wc > 0

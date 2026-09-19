@@ -30,7 +30,8 @@ Format-neutral phase-cal tone table (one row per station × epoch):
 - `interval[row]` — accumulation interval (hours).
 - `cable[row]`    — cable-cal delay (s); `NaN` when absent.
 - `freq[tone, band, feed, row]` — tone sky frequency (Hz); `NaN` = absent.
-- `tone[tone, band, feed, row]` — measured tone phasor; `NaN` = absent.
+- `tone[tone, band, feed, row]` — measured tone phasor, in the same phase
+  convention as the visibilities; `NaN` = absent.
 
 Produced by [`load_fitsidi_phasecal`](@ref); consumed by
 [`phasecal_solution`](@ref) and [`tone_channel_mask`](@ref).
@@ -48,6 +49,8 @@ end
     load_fitsidi_phasecal(path) -> PhaseCalTable
 
 Read a FITS-IDI phase-CAL table (AIPS Memo 114) into a [`PhaseCalTable`](@ref).
+The tone phasors are conjugated on read, as the visibilities are, so the table
+is in the same phase convention as a `UVSet`.
 Provided by `GustavoFITSFilesExt` (load FITSFiles).
 """
 function load_fitsidi_phasecal end
@@ -141,9 +144,11 @@ pipeline's transform chain.
 
 `sign` orients the correction: the stored gain is
 `cis(sign·(φ_pc + 2πτ_pc(f − f0)))` and `apply_calibration` divides it out.
-Flip it if your correlator uses the opposite convention — the wrong sign
-adds the instrumental decoherence instead of removing it, which the fringe
-SNR makes obvious.
+The default assumes `pcal` holds its tones in the same phase convention as
+`uvset`'s visibilities, which is what every reader in the package produces.
+Flip it for a table whose tones are conjugated relative to the data — the
+wrong sign adds the instrumental decoherence instead of removing it, which
+the fringe SNR makes obvious.
 
 The tone delay is ambiguous modulo 1/(tone spacing) (±100 ns for the 5 MHz
 VGOS comb), as in fourfit. A wrapped tone delay still reproduces every tone

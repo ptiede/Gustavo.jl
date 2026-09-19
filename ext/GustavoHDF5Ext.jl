@@ -54,6 +54,10 @@ function save_solution_hdf5(
         attrs["version"] = 2
         attrs["gains_layout"] = "(channel, time, antenna, feed)"
         attrs["gain_convention"] = "V_corr = V / (g_a * conj(g_b)); weight *= abs2(g_a * g_b)"
+        # The apply relation above is form-invariant under conjugation, so it
+        # does not by itself tell a consumer which phase sense these gains
+        # assume. Applying them to FITS-IDI-sense visibilities is wrong.
+        attrs["phase_convention"] = "AIPS/CASA/MSv4: V = <E_a1 * conj(E_a2)>* (conjugate of FITS-IDI)"
         attrs["nant"] = nant
         attrs["nchan"] = nchan
         attrs["ntime"] = ntime

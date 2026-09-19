@@ -921,3 +921,104 @@ end
         end
     end
 end
+
+# ── Absolute visibility phase convention ─────────────────────────────────────
+#
+# Gustavo's internal convention is the AIPS/CASA/MSv4 one; FITS-IDI stores its
+# complex conjugate. A write→read round trip is blind to that — the two
+# conjugations cancel, and so would a uniformly wrong pair — so these tests read
+# the on-disk arrays directly. Each boundary's absolute sign is then pinned
+# against the file format rather than against Gustavo's other half.
+@testset "absolute visibility phase convention" begin
+    UV = Gustavo.UVData
+    FR = Gustavo.Fringe
+    ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+
+    τ = 10.0e-9                  # injected delay, in Gustavo's (CASA K-Jones) sense
+    nchan, npol, nspw = 32, 2, 2
+    ref_freq, chan_bw, spw_sep = 43.0e9, 4.0e6, 2.0e8
+    pol_labels = ["PP", "QQ"]
+    band_freqs(b) = ref_freq + (b - 1) * spw_sep .+ (0:(nchan - 1)) .* chan_bw
+    # V = cis(+2πτ(f − f0)) is what `term_eval(::Delay)` and the matched filter
+    # both call a delay of +τ. Constant over time, baseline and polarization, so
+    # every on-disk cell of a band carries the same value.
+    fringe(b, c) = cis(2π * τ * (band_freqs(b)[c] - band_freqs(b)[1]))
+
+    uvset = build_synth_idi_uvset(;
+        nant = 3, nspw, nchan, nscan = 1, ntime = 4, pol_labels,
+        ref_freq, chan_bw, spw_sep,
+        vis_fn = (b, ti, bl, p, c) -> ComplexF32(fringe(b, c)),
+    )
+
+    # The solver's own reading of that fringe: a positive delay.
+    for leaf in values(UV.leaves(uvset))
+        V = parent(leaf[:vis])[:, :, 1, 1]
+        W = ones(size(V))
+        freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
+        times = collect(lookup(leaf[:vis], Ti)) .* 3600     # hours → seconds
+        det = FR.baseline_fringe_search(V, W, freqs, times, freqs[1], times[1])
+        @test det.valid
+        @test isapprox(det.delay, τ; atol = 1.0e-9)
+    end
+
+    mktempdir() do dir
+        idipath = joinpath(dir, "conv.idifits")
+        UV.write_fitsidi(idipath, uvset)
+
+        # FITS-IDI on disk: V = ⟨E_a1 · conj(E_a2)⟩, the conjugate of the above.
+        # Read straight out of the FLUX column, bypassing `load_fitsidi`.
+        fid = FITSFiles.fits(idipath)
+        uv_hdu = ext._idi_find_hdu(fid, "UV_DATA")
+        @test uv_hdu !== nothing
+        flux = getproperty(uv_hdu.data, :FLUX)
+        nperband = 2 * npol * nchan
+        for b in 1:nspw, c in 1:nchan, s in 1:npol
+            off = (b - 1) * nperband + (c - 1) * 2 * npol + (s - 1) * 2
+            v_disk = complex(flux[1, off + 1], flux[1, off + 2])
+            @test isapprox(v_disk, conj(fringe(b, c)); atol = 1.0e-5)
+        end
+
+        # Reading that file back must undo the conjugation, so the fitted delay
+        # keeps the sign it had before the write.
+        rt = UV.load_fitsidi(idipath; lazy = false, weight_mode = :validity)
+        for leaf in values(UV.leaves(rt))
+            V = parent(leaf[:vis])[:, :, 1, 1]
+            freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
+            times = collect(lookup(leaf[:vis], Ti)) .* 3600
+            det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, freqs[1], times[1])
+            @test det.valid
+            @test isapprox(det.delay, τ; atol = 1.0e-9)
+        end
+    end
+
+    # UVFITS shares Gustavo's convention, so its on-disk imaginary part is the
+    # internal one — the opposite of what FITS-IDI holds for the same data.
+    # Single-band: `load_uvfits` reads the AIPS layout with one IF.
+    uvset1 = build_synth_idi_uvset(;
+        nant = 3, nspw = 1, nchan, nscan = 1, ntime = 4, pol_labels,
+        ref_freq, chan_bw,
+        vis_fn = (b, ti, bl, p, c) -> ComplexF32(fringe(1, c)),
+    )
+    mktempdir() do dir
+        uvpath = joinpath(dir, "conv.uvfits")
+        UV.write_uvfits(uvpath, uvset1)
+
+        fid = FITSFiles.fits(uvpath)
+        dt = fid[1].data
+        raw = dropdims(dt.data; dims = Tuple(findall(==(1), size(dt.data))))
+        for c in 1:nchan, p in 1:npol
+            v_disk = complex(raw[1, 1, p, c], raw[1, 2, p, c])
+            @test isapprox(v_disk, fringe(1, c); atol = 1.0e-5)
+        end
+
+        back = UV.load_uvfits(uvpath)
+        for leaf in values(UV.leaves(back))
+            V = parent(leaf[:vis])[:, :, 1, 1]
+            freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
+            times = collect(lookup(leaf[:vis], Ti)) .* 3600
+            det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, freqs[1], times[1])
+            @test det.valid
+            @test isapprox(det.delay, τ; atol = 1.0e-9)
+        end
+    end
+end

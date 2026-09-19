@@ -19,16 +19,16 @@ random-groups records in scan-insertion order, then assembling the AN, FQ,
 and NX bintables from the root metadata.
 
 `convention` selects the on-disk visibility phase convention:
-- `:aips` (default) — conjugate the visibilities to the AIPS/CASA/UVFITS
-  convention, the standard form read correctly by AIPS, DIFMAP, CASA, ehtim,
-  pyuvdata, and VLBIFiles. FITS-IDI (Gustavo's internal convention) stores the
-  complex conjugate of this (AIPS Memo 114r §2.1).
-- `:fitsidi` — write Gustavo's internal FITS-IDI phase convention verbatim (no
-  conjugation), e.g. for tools that expect the FITS-IDI phase sense.
+- `:aips` (default) — the AIPS/CASA/UVFITS convention, the standard form read
+  correctly by AIPS, DIFMAP, CASA, ehtim, pyuvdata, and VLBIFiles. This is also
+  Gustavo's internal convention, so the visibilities are written verbatim.
+- `:fitsidi` — conjugate to the FITS-IDI phase convention, which stores
+  `V = ⟨E_a1 · conj(E_a2)⟩` (AIPS Memo 114r §2.1), for tools that expect that
+  sense in a UVFITS file.
 
 `(u,v,w)` are written verbatim in both cases — FITS-IDI and AIPS UVFITS share
 the same baseline-coordinate convention. `load_uvfits` always assumes a standard
-`:aips` file (conjugating on read), so only `:aips` round-trips as the identity.
+`:aips` file, so only `:aips` round-trips as the identity.
 
 Single-source UVSets only — multi-source UVSets must first be narrowed via
 `select_source(uvset, name)`.
@@ -47,6 +47,11 @@ Load a FITS-IDI file (AIPS Memo 114) into a `UVSet`. Header tables
 (`materialize_leaf`). Pass `lazy = false` to materialize everything up front
 (only for small files), or restrict `scans`/`bands` to a subset.
 
+Visibilities are conjugated on read: FITS-IDI stores `V = ⟨E_a1 · conj(E_a2)⟩`
+(AIPS Memo 114r §2.1), the conjugate of Gustavo's internal AIPS/CASA/MSv4 phase
+convention. `(u,v,w)` and the baseline antenna ordering are shared by both and
+are read verbatim.
+
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
 function load_fitsidi end
@@ -58,6 +63,9 @@ Write a `UVSet` to a FITS-IDI file (AIPS Memo 114): a stub PRIMARY HDU plus
 ARRAY_GEOMETRY, SOURCE, ANTENNA, FREQUENCY, and a time-ordered `UV_DATA`
 binary table. Used primarily to build round-trip and fringe-injection test
 fixtures.
+
+Visibilities are conjugated on write, into the FITS-IDI phase convention
+`V = ⟨E_a1 · conj(E_a2)⟩`; `load_fitsidi` conjugates back.
 
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """

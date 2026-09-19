@@ -358,7 +358,10 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
                         v = vis_b[c, ti, bi, p]
                         off = base_off + (c - 1) * (2 * no_stkd) + (s_disk - 1) * 2
                         flux[off + 1] = Float32(real(v))
-                        flux[off + 2] = Float32(imag(v))
+                        # Conjugate on the way out: FITS-IDI stores
+                        # V = ⟨E_a1 · conj(E_a2)⟩, the conjugate of Gustavo's
+                        # internal MSv4/casacore sense (AIPS Memo 114r §2.1).
+                        flux[off + 2] = Float32(-imag(v))
                     end
                 end
             end

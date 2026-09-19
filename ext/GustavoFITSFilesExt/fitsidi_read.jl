@@ -29,6 +29,19 @@ using OhMyThreads: tforeach, SerialScheduler
 
 # ── Small helpers ────────────────────────────────────────────────────────────
 
+# Decode one on-disk (re, im) FLUX pair into Gustavo's internal visibility.
+#
+# FITS-IDI stores V = ⟨E_a1 · conj(E_a2)⟩ (AIPS Memo 114r §2.1). Gustavo's
+# internal convention is the MSv4/casacore one, which is the complex conjugate
+# of that (casacore `FitsIDItoMS.cc`: "FITS-IDI convention is conjugate of AIPS
+# and CASA convention"), so every FLUX decode negates the imaginary part. The
+# three decode loops in this file all route through here — a decode that misses
+# the conjugation is silent, since a write→read round trip cancels it.
+#
+# (u,v,w) and the 256·a1+a2 baseline ordering are shared by both conventions and
+# are never touched.
+@inline _idi_vis(::Type{T}, re, im) where {T} = T(complex(re, -im))
+
 # Strip FITS string padding (trailing spaces / NULs) from an `nA` column entry.
 _idi_clean(s) = filter(c -> isascii(c) && isprint(c) && !isspace(c), string(s))
 
@@ -741,7 +754,7 @@ end
             base = (s - 1) * 2
             for c in 1:nchan
                 o = (c - 1) * twostk + base
-                out[c, ti, bl, p] = T(complex(cube[o + 1], cube[o + 2]))
+                out[c, ti, bl, p] = _idi_vis(T, cube[o + 1], cube[o + 2])
             end
         end
     end
@@ -987,7 +1000,7 @@ function DiskArrays.readblock!(
                 base = (s - 1) * 2                        # +1 → re, +2 → im for chan 1
                 for (cj, c) in enumerate(rchan)
                     o = (c - 1) * twostk + base
-                    out[cj, tj, bj, pj] = T(complex(cube[o + 1], cube[o + 2]))
+                    out[cj, tj, bj, pj] = _idi_vis(T, cube[o + 1], cube[o + 2])
                 end
             end
         end
@@ -1168,7 +1181,7 @@ function _decode_vis_from_span!(
             base = (s - 1) * 2
             for (cj, c) in enumerate(rchan)
                 o = (c - 1) * twostk + base
-                out[coff + cj, tj, bj, pj] = T(complex(cube[o + 1], cube[o + 2]))
+                out[coff + cj, tj, bj, pj] = _idi_vis(T, cube[o + 1], cube[o + 2])
             end
         end
     end

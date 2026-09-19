@@ -10,6 +10,12 @@
 # for each axis declared — a coordinate builder plus the resolved state that
 # builder reads. `term_label` is optional; it defaults to the type name and only
 # needs an override for a more evocative diagnostic label.
+#
+# Every term's phase is summed and enters the data as `V = g_a · S · conj(g_b)`
+# with `g = cis(Σ phase)`, against visibilities in the AIPS/CASA/MSv4 phase
+# convention. That fixes the sign of every fitted parameter: a delay here is
+# CASA's K-Jones delay, and the negative of the delay fourfit reports for the
+# same observation, since FITS-IDI is the conjugate convention.
 
 """
     AbstractGainTerm
@@ -32,7 +38,7 @@ abstract type AbstractGainTerm end
 "Constant offset: phase/log-amp = `offset`. (Per-block constant — a fringe phase, or a flat gain.)"
 struct ConstantTerm <: AbstractGainTerm end
 
-"Group delay: phase = 2π·`delay`·(f − f0), `delay` in seconds."
+"Group delay: phase = 2π·`delay`·(f − f0), `delay` in seconds (CASA K-Jones sense)."
 struct Delay <: AbstractGainTerm end
 
 # rad·Hz per TECU (1 TECU = 1e16 el/m²): ionospheric phase = −K·TEC/f.

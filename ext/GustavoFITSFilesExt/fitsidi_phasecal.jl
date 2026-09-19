@@ -10,6 +10,12 @@ using Gustavo.Fringe: PhaseCalTable
 
 # One PC_* column group (`_1` or `_2`) reshaped to (ntone, nband, nrow); a
 # missing column (NO_POL = 1) yields all-NaN.
+#
+# The tone phasors are conjugated here for the same reason the FLUX decode
+# conjugates: the correlator records them in the FITS-IDI sense, and a
+# `PhaseCalTable` holds the station response in Gustavo's internal
+# MSv4/casacore sense. A correction fitted from unconjugated tones would add
+# the instrumental decoherence rather than remove it.
 function _idi_pc_pol!(freq, tone, d, suffix, ntone, nband, nrow)
     fcol = Symbol("PC_FREQ_", suffix)
     rcol = Symbol("PC_REAL_", suffix)
@@ -30,7 +36,7 @@ function _idi_pc_pol!(freq, tone, d, suffix, ntone, nband, nrow)
         for b in 1:nband, tn in 1:ntone
             k = (b - 1) * ntone + tn
             freq[tn, b, r] = Float64(fr[k])
-            tone[tn, b, r] = complex(Float64(rr[k]), Float64(ir[k]))
+            tone[tn, b, r] = complex(Float64(rr[k]), -Float64(ir[k]))
         end
     end
     return nothing
