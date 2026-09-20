@@ -37,9 +37,10 @@
             stack_l, _ = ST._stacked_scan_group([m for (_, m) in keyed], geom)
             @test isequal(stack[:vis], stack_l[:vis])
             @test isequal(stack[:weights], stack_l[:weights])
-            # The mask really zero-weighted the flagged global channels.
+            @test isequal(stack[:flags], stack_l[:flags])
+            # The mask really flagged the named global channels.
             for (c, gc) in enumerate(win.chan_idx)
-                mask[gc] && @test all(iszero, @view stack[:weights][c, :, :, :])
+                mask[gc] && @test all(@view stack[:flags][c, :, :, :])
             end
         end
     end
@@ -153,10 +154,10 @@
         # The transformed arrays flow through to the returned leaves unchanged.
         @test Set(objectid(parent(c.stack[:vis])) for c in captured) ==
             Set(objectid(parent(l[:vis])) for (_, l) in keyed)
-        # FlagChannels zeroed whole channels above, so the transformed weights
-        # carry the flag (a cell is flagged iff its weight is ≤ 0).
+        # FlagChannels flagged whole channels above, and the transformed
+        # `:flags` layer is what carries that through to the leaves.
         for (_, l) in keyed
-            @test any(parent(l[:weights]) .<= 0)
+            @test any(parent(l[:flags]))
         end
     end
 

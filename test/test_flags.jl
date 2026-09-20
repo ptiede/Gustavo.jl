@@ -133,10 +133,10 @@ using Gustavo.UVData: Pol, Frequency, Baseline
             @test all(f[1, :, :, :])
             @test all(f[end, :, :, :])
             @test !any(f[2:(end - 1), :, :, :])
-            # The flag alone does not exclude the channel yet, so the weights
-            # go with it.
-            @test all(parent(leaf[:weights])[1, :, :, :] .== 0)
-            @test all(parent(leaf[:weights])[end, :, :, :] .== 0)
+            # Flagging an edge channel does not cost it its weight: clearing
+            # the flag has to give the sample back.
+            @test all(parent(leaf[:weights])[1, :, :, :] .> 0)
+            @test all(parent(leaf[:weights])[end, :, :, :] .> 0)
         end
 
         # `:trim` carries each surviving channel's flag through unchanged.
@@ -220,6 +220,34 @@ using Gustavo.UVData: Pol, Frequency, Baseline
         avg = first(values(UV.leaves(UV.scan_average(one))))
         @test parent(avg[:weights])[1, 1, 1, 1] == 0
         @test !parent(avg[:flags])[1, 1, 1, 1]
+    end
+
+    @testset "the a-priori kernel flags without spending the weight" begin
+        # The two branches that flag: an autocorrelation, which is total power
+        # rather than a visibility, and a non-finite gain, which leaves the
+        # correction undefined. Neither is a statement about the datum's
+        # quality, so neither touches the weight.
+        leaf = first(values(UV.leaves(base)))
+        # The kernel spans its axes by dimension (`axes(vis, Ti)`), so it takes
+        # the leaf's `DimArray`s, not their parents.
+        vis = leaf[:vis]
+        w = leaf[:weights]
+        f = leaf[:flags]
+        bl_pairs = UV.baselines(leaf).pairs
+        pols = collect(UV.pol_products(leaf))
+        nchan, nti, _, _ = size(vis)
+        nant = maximum(maximum(p) for p in bl_pairs)
+
+        gains = ones(Float64, nchan, nti, nant, 2)
+        gains[1, 1, 1, :] .= NaN                 # station 1 unusable at (chan 1, ti 1)
+        auto = findfirst(p -> p[1] == p[2], bl_pairs)
+        cross1 = findfirst(p -> p[1] != p[2] && 1 in p, bl_pairs)
+        @test cross1 !== nothing
+
+        _, w_out, f_out = UV._apply_apriori_kernel(vis, w, f, gains, bl_pairs, pols)
+        @test parent(w_out) == parent(w)
+        @test f_out[1, 1, cross1, 1]
+        auto === nothing || @test all(f_out[:, :, auto, :])
     end
 
     @testset "the bridge takes FLAG from the layer, not the weight sign" begin

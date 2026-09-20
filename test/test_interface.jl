@@ -219,12 +219,14 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test_throws ErrorException StationWeightScale([1.0, -1.0, 1.0])
         @test_throws ErrorException apply_transform!(StationWeightScale([1.0]), mkwindow()...)
 
-        # FlagChannels: zero-weights flagged GLOBAL channels only.
+        # FlagChannels: sets the flag on the named GLOBAL channels only, and
+        # leaves every weight alone.
         stack, win = mkwindow()
         apply_transform!(FlagChannels(BitVector([true, false, false, true])), stack, win)
-        W = stack[:weights]
-        @test all(W[1, :, :, :] .== 0) && all(W[4, :, :, :] .== 0)
-        @test all(W[2:3, :, :, :] .== 1)
+        F = stack[:flags]
+        @test all(F[1, :, :, :]) && all(F[4, :, :, :])
+        @test !any(F[2:3, :, :, :])
+        @test all(stack[:weights] .== 1)
         @test_throws ErrorException apply_transform!(FlagChannels(trues(3)), mkwindow()...)
 
         # CalFunction: arbitrary per-(scan, baseline) mutation — the pain point.

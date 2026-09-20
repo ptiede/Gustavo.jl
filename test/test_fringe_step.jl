@@ -171,7 +171,6 @@
             for (bi, (a, b)) in enumerate(baselines(stack).pairs)
                 if minmax(a, b) == (1, 2)
                     stack[:flags][Baseline = bi] .= true
-                    stack[:weights][Baseline = bi] .= 0
                 end
             end
         end
@@ -182,9 +181,9 @@
         @test touched[] > 0
         @test sol_cf.transforms[1] isa CalFunction
         for (_, leaf) in DimensionalData.branches(out)
-            W = parent(leaf[:weights])
+            F = parent(leaf[:flags])
             for (bi, (a, b)) in enumerate(UVP.baselines(leaf).pairs)
-                minmax(a, b) == (1, 2) && @test all(W[:, :, bi, :] .== 0)
+                minmax(a, b) == (1, 2) && @test all(F[:, :, bi, :])
             end
         end
 

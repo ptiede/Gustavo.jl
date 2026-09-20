@@ -357,8 +357,8 @@ end
     FlagChannels(mask::BitVector)
 
 Transform: flag the given global channels (mask indexed by the solve
-geometry's channel axis, `true` = flag), e.g. `tone_channel_mask`. Their
-weights are zeroed as well.
+geometry's channel axis, `true` = flag), e.g. `tone_channel_mask`. The
+visibilities and weights are left as they are.
 """
 struct FlagChannels <: AbstractDataTransform
     mask::BitVector
@@ -374,9 +374,6 @@ function apply_transform!(
     # gives the mask over this window's own frequency axis.
     sel = t.mask[win.chan_idx]
     stack[:flags][Frequency = sel] .= true
-    # The weights go to zero as well: the solver stages decide usability from
-    # the weight, so the flag alone would not exclude these channels.
-    stack[:weights][Frequency = sel] .= 0
     return nothing
 end
 
@@ -392,7 +389,7 @@ already scaled to Jy. Same correction as
 [`apply_calibration`](@ref Gustavo.UVData.apply_calibration)`(uvset, antab)`:
 `V → V / (g_a·g_b)` and `w → w·(g_a·g_b)²` with `g_a = 1/√SEFD_a`,
 `SEFD = T_sys / (DPFU · g_E(elevation))`. Samples whose Tsys is missing or
-non-positive, and those below `min_elevation_deg`, are flagged (weight ← 0);
+non-positive, and those below `min_elevation_deg`, are flagged;
 autocorrelations are flagged, being total power rather than a visibility.
 
 This is the streaming counterpart of the
@@ -544,8 +541,8 @@ end
 # Divide out real, positive per-(channel, integration, antenna, feed) amplitude
 # gains in place. Mirrors `UVData._apply_apriori_kernel`, which does the same on
 # a whole leaf: a non-finite gain flags the sample, autocorrelations are flagged
-# outright. Every sample flagged here has its weight zeroed as well, because the
-# solver stages decide usability from the weight.
+# outright. A flagged sample keeps the visibility and weight it arrived with —
+# nothing scaled it, so there is nothing to record but the flag.
 function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, executor)
     V = parent(stack[:vis])
     W = parent(stack[:weights])
@@ -560,7 +557,6 @@ function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, exec
         if a == b
             for t in axes(V, 2), c in axes(V, 1)
                 Fl[c, t, bi, p] = true
-                W[c, t, bi, p] = zero(eltype(W))
             end
             return
         end
@@ -574,7 +570,6 @@ function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, exec
                 gb = gains[c, t, b, fb]
                 if !(isfinite(ga) && isfinite(gb))
                     Fl[c, t, bi, p] = true
-                    W[c, t, bi, p] = zero(eltype(W))
                     continue
                 end
                 V[c, t, bi, p] /= ga * gb

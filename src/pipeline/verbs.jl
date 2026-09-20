@@ -193,7 +193,7 @@ end
                        ntasks = 1, apply_flags = true) -> Vector{Pair}
 
 The per-scan-group output tail: rebuild the group's `(key, leaf)` pairs as a
-sub-`UVSet`, apply `sol`'s gains/flags (`apply_calibration` — zero-weighting
+sub-`UVSet`, apply `sol`'s gains/flags (`apply_calibration` — flagging
 unconstrained stations and excluded baselines exactly like a full-set apply
 would), run `postprocess` (a `UVSet -> UVSet` map), and return the reduced
 output branches. Every output path — the fused `fitcalibrate` tail and the

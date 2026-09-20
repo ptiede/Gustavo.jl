@@ -2,7 +2,7 @@
 #
 # Inverse of `fitsidi_read.jl`. Emits a stub PRIMARY HDU plus five binary
 # tables: ARRAY_GEOMETRY, ANTENNA, FREQUENCY, SOURCE, and a time-ordered
-# UV_DATA table. The on-disk conventions mirror the reader exactly so that
+# UV_DATA table, plus a FLAG table when any sample is flagged. The on-disk conventions mirror the reader exactly so that
 # `load_fitsidi(write_fitsidi(path, uvset))` reproduces `uvset` leaf-for-leaf.
 #
 # Layout facts emitted (read back by `fitsidi_read.jl`):
@@ -184,6 +184,152 @@ end
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
+# ── FLAG table (inverse of the reader's `_build_idi_flags`) ──────────────────
+#
+# The dense `:flags` layer is re-encoded as FLAG rows. For one (band, baseline,
+# on-disk stokes) the flagged channels of an integration form a set of runs, and
+# consecutive integrations carrying the identical set share a row — so a
+# whole-scan flag on one baseline costs one row rather than `nti·nchan`.
+
+# One FLAG row before serialization. `t0`/`t1` are DAYS relative to RDATE, the
+# units TIMERANG is written in; `ants` are NOSTA numbers and `stokes` is an
+# on-disk stokes slot.
+struct IDIFlagRow
+    ants::Tuple{Int, Int}
+    t0::Float64
+    t1::Float64
+    band::Int
+    chan_lo::Int
+    chan_hi::Int
+    stokes::Int
+end
+
+# Inclusive 1-based (lo, hi) channel runs where `col` is set.
+function _flag_runs(col::AbstractVector{Bool})
+    runs = Tuple{Int, Int}[]
+    lo = 0
+    for c in eachindex(col)
+        if col[c]
+            lo == 0 && (lo = c)
+        elseif lo != 0
+            push!(runs, (lo, c - 1))
+            lo = 0
+        end
+    end
+    lo != 0 && push!(runs, (lo, lastindex(col)))
+    return runs
+end
+
+# Append this scan's FLAG rows. `band_flags[b]` is band `b`'s dense
+# (Frequency, Ti, Baseline, Pol) flag layer; `disk_to_msv4[s]` is the MSv4 pol
+# stored at on-disk stokes slot `s`.
+#
+# TIMERANG is padded by half an integration each side: a flag covers the
+# integration rather than its centre, and the column is single precision, so a
+# range written to the sample times themselves could round inside them. The pad
+# stops half-way to the neighbouring integration, which `_flag_timerange` then
+# checks survives the narrowing to `Float32`.
+function _append_idi_flag_rows!(
+        rows::Vector{IDIFlagRow}, band_flags, bls, nosta, ti_vals, jd0_unix, disk_to_msv4,
+    )
+    nti = length(ti_vals)
+    nti == 0 && return rows
+    issorted(ti_vals) || error(
+        "write_fitsidi: the Ti axis must ascend to write a FLAG table; got $(ti_vals).",
+    )
+    pad = _idi_inttim(ti_vals) / 2
+    for (band, F) in pairs(band_flags)
+        any(F) || continue
+        nchan = size(F, 1)
+        col = Vector{Bool}(undef, nchan)
+        for bi in axes(F, 3), s_disk in eachindex(disk_to_msv4)
+            p = disk_to_msv4[s_disk]
+            prev = Tuple{Int, Int}[]
+            ti_start = 1
+            for ti in 1:nti
+                for c in 1:nchan
+                    col[c] = F[c, ti, bi, p]
+                end
+                runs = _flag_runs(col)
+                runs == prev && continue
+                _push_idi_flag_rows!(
+                    rows, prev, bls, nosta, bi, band, s_disk, ti_vals, ti_start, ti - 1, pad, jd0_unix,
+                )
+                prev = runs
+                ti_start = ti
+            end
+            _push_idi_flag_rows!(
+                rows, prev, bls, nosta, bi, band, s_disk, ti_vals, ti_start, nti, pad, jd0_unix,
+            )
+        end
+    end
+    return rows
+end
+
+# TIMERANG (days relative to RDATE) covering integrations `ti_lo:ti_hi`, checked
+# against the single precision it is stored in: the stored interval must still
+# contain every integration it covers and still exclude the neighbours.
+function _flag_timerange(ti_vals, ti_lo::Int, ti_hi::Int, pad::Float64, jd0_unix::Float64)
+    t0 = Float32((ti_vals[ti_lo] - pad - jd0_unix) / 86400.0)
+    t1 = Float32((ti_vals[ti_hi] + pad - jd0_unix) / 86400.0)
+    s0 = jd0_unix + Float64(t0) * 86400.0
+    s1 = jd0_unix + Float64(t1) * 86400.0
+    prev = ti_lo > 1 ? ti_vals[ti_lo - 1] : -Inf
+    next = ti_hi < length(ti_vals) ? ti_vals[ti_hi + 1] : Inf
+    (s0 <= ti_vals[ti_lo] && s1 >= ti_vals[ti_hi] && s0 > prev && s1 < next) || error(
+        "write_fitsidi: cannot express a flag over integrations $(ti_lo):$(ti_hi) in " *
+            "TIMERANG's single precision — the stored range $(s0) .. $(s1) s does not " *
+            "isolate $(ti_vals[ti_lo]) .. $(ti_vals[ti_hi]) s from its neighbours.",
+    )
+    return Float64(t0), Float64(t1)
+end
+
+function _push_idi_flag_rows!(
+        rows, runs, bls, nosta, bi::Int, band::Int, s_disk::Int,
+        ti_vals, ti_lo::Int, ti_hi::Int, pad::Float64, jd0_unix::Float64,
+    )
+    (isempty(runs) || ti_lo > ti_hi) && return rows
+    a, b = bls.pairs[bi]
+    t0, t1 = _flag_timerange(ti_vals, ti_lo, ti_hi, pad, jd0_unix)
+    for (lo, hi) in runs
+        push!(rows, IDIFlagRow((nosta[a], nosta[b]), t0, t1, band, lo, hi, s_disk))
+    end
+    return rows
+end
+
+# Serialize collected FLAG rows. BANDS and PFLAGS select one band / one stokes
+# each; with a single band or stokes they become scalar columns, since FITSFiles'
+# bintable writer cannot serialize length-1 vector columns.
+function _build_idi_flag_hdu(
+        rows::Vector{IDIFlagRow}, no_band::Integer, no_stkd::Integer, no_chan::Integer,
+    )
+    n = length(rows)
+    bands = no_band == 1 ? fill(Int32(1), n) :
+        [Int32[i == r.band ? 1 : 0 for i in 1:no_band] for r in rows]
+    pflags = no_stkd == 1 ? fill(Int32(1), n) :
+        [Int32[i == r.stokes ? 1 : 0 for i in 1:no_stkd] for r in rows]
+    data = (
+        SOURCE_ID = fill(Int32(0), n),
+        ARRAY = fill(Int32(1), n),
+        ANTS = [Int32[r.ants[1], r.ants[2]] for r in rows],
+        FREQID = fill(Int32(0), n),
+        TIMERANG = [Float32[r.t0, r.t1] for r in rows],
+        BANDS = bands,
+        CHANS = [Int32[r.chan_lo, r.chan_hi] for r in rows],
+        PFLAGS = pflags,
+        REASON = [rpad("GUSTAVO", 24) for _ in rows],
+        SEVERITY = fill(Int32(-1), n),
+    )
+    cards = Card[
+        Card("EXTNAME", "FLAG"),
+        Card("EXTVER", Int32(1)),
+        Card("NO_STKD", Int32(no_stkd)),
+        Card("NO_BAND", Int32(no_band)),
+        Card("NO_CHAN", Int32(no_chan)),
+    ]
+    return HDU(Bintable, data, cards)
+end
+
 function UVData.write_fitsidi(output_path, uvset::UVSet)
     _assert_not_writing_to_source(output_path, uvset)
     src_list = sources(uvset)
@@ -286,6 +432,7 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
     vv_col = Float32[]
     ww_col = Float32[]
     sort_keys = Tuple{Float64, Int32}[]   # (time_days, baseline) for SORT='T*'
+    flag_rows = IDIFlagRow[]
 
     for sn in scan_order
         leaves = scan_leaves[sn]
@@ -297,17 +444,20 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
         nti = length(ti_vals)
         nbl = length(bls.pairs)
 
-        # Per-band materialized layers, indexed by band number. Flagging is
-        # carried by the WEIGHT sign on disk, so only vis/weights are needed.
+        # Per-band materialized layers, indexed by band number. The flag layer
+        # is serialized separately, as FLAG rows.
         band_vis = Dict{Int, Any}()
         band_w = Dict{Int, Any}()
+        band_f = Dict{Int, Any}()
         for leaf in leaves
             fs = DimensionalData.metadata(leaf).freq_setup
             b = band_index[fs]
             ml = UVData.materialize_leaf(leaf)
             band_vis[b] = parent(ml[:vis])      # (Frequency, Ti, Baseline, Pol)
             band_w[b] = parent(ml[:weights])
+            band_f[b] = parent(ml[:flags])
         end
+        _append_idi_flag_rows!(flag_rows, band_f, bls, nosta, ti_vals, jd0_unix, disk_to_msv4)
         # uvw from the reference leaf (shared across bands).
         uvw_dense = parent(UVData.materialize_leaf(ref_leaf)[:uvw])  # (Ti, Baseline, UVW)
 
@@ -336,9 +486,9 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
                 for s_disk in 1:no_stkd
                     p = disk_to_msv4[s_disk]
                     # WEIGHT: collapse per-channel weights to a single value per
-                    # (stokes, band). Use the first finite weight; if the cell is
-                    # flagged across all channels emit a non-positive weight so
-                    # the reader flags it.
+                    # (stokes, band) — the column has no channel axis. Use the
+                    # first finite positive weight; a cell with none keeps its
+                    # non-positive value, which is what the reader reads back.
                     wval = 0.0f0
                     found_w = false
                     for c in 1:no_chan
@@ -350,7 +500,8 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
                         end
                     end
                     if !found_w
-                        # All channels flagged/zero — preserve flagged state.
+                        # No usable weight on any channel — preserve the
+                        # non-positive value the reader expects.
                         wval = Float32(w_b[1, ti, bi, p])
                         (isfinite(wval) && wval <= 0) || (wval = -1.0f0)
                     end
@@ -385,6 +536,13 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
     end
 
     isempty(flux_rows) && error("write_fitsidi: UVSet has no records to write")
+
+    # TIMERANG is expressed in days relative to RDATE, so a FLAG table cannot be
+    # written without one.
+    (!isempty(flag_rows) && jd0 == 0.0) && error(
+        "write_fitsidi: the set carries flags but `array_obs.rdate` is empty or " *
+            "unparseable — the FLAG table's TIMERANG is measured from RDATE.",
+    )
 
     # SORT='T*': order rows by (time, baseline).
     order = sortperm(sort_keys; by = identity)
@@ -467,6 +625,8 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
     )
 
     out_hdus = HDU[primary_hdu, ag_hdu, an_hdu, fq_hdu, src_hdu, uv_hdu]
+    isempty(flag_rows) ||
+        push!(out_hdus, _build_idi_flag_hdu(flag_rows, no_band, no_stkd, no_chan))
     write(output_path, out_hdus)
     return output_path
 end

@@ -790,7 +790,8 @@ baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
 
     V_corr = V / (g_a[fa] · conj(g_b[fb])),    W_corr = W · |g_a · g_b|²
 
-Samples where either gain magnitude underflows are flagged (weight 0, vis NaN).
+Samples where either gain magnitude underflows are flagged, with a NaN
+visibility: the corrected value is undefined. Their weights are untouched.
 
 `transforms` defaults to the solution's own recorded chain, so the corrected
 set carries the same total correction `calibrate(sol, uvset)` produces (minus
@@ -805,9 +806,10 @@ a bandpass fit on scan-averaged data corrects data at full time resolution. A
 sample the solution has no segment for is rejected, as is one whose recorded
 span crosses a bin boundary — see `evaluate_gains`.
 
-`apply_flags` (default `true`) additionally zero-weights baselines touching a
+`apply_flags` (default `true`) additionally flags baselines touching a
 (station, scan) the solve left UNCONSTRAINED, when `sol.info` records them —
-identity gains, i.e. the data would pass through uncalibrated. This is the
+identity gains, i.e. the data would pass through uncalibrated. The rows keep
+their visibilities and weights: clearing the flag is what makes them usable. This is the
 EHT-HOPS flag semantic: a station is flagged per scan only when, after the
 closure-screened global solve, no strong detection constrains it; a merely weak
 baseline between two constrained stations is not flagged (it is calibrated by
@@ -853,7 +855,7 @@ function UVData.apply_calibration(
         )
         _apply_gains!(leaf, g; executor)
         _flag_solution_rows!(
-            leaf[:vis], leaf[:weights], leaf[:flags], UVData.baselines(leaf).pairs,
+            leaf[:flags], UVData.baselines(leaf).pairs,
             _geom_scan_id(sol.geom, info.scan_name), flagged,
         )
         return leaf
@@ -876,20 +878,18 @@ end
 _geom_scan_id(geom::DataGeometry, scan_name) =
     something(findfirst(==(String(scan_name)), geom.scan_names), 0)
 
-# Zero-weight (and NaN) whole baseline rows touching a (station, scan) the solve
-# left unconstrained — identity gains, so the data would pass through
-# uncalibrated. A leaf spans one scan, hence one scan id.
-function _flag_solution_rows!(Vc, Wc, Fc, bl_pairs, scanid::Integer, flagged)
+# Flag whole baseline rows touching a (station, scan) the solve left
+# unconstrained: their gains were identity, so the data passed through
+# uncalibrated. The visibilities and weights are left intact — the row holds
+# real data and clearing the flag is what makes it usable again. A leaf spans
+# one scan, hence one scan id.
+function _flag_solution_rows!(Fc, bl_pairs, scanid::Integer, flagged)
     flagged === nothing && return nothing
     for bi in eachindex(bl_pairs)
         a, b = bl_pairs[bi]
         a == b && continue
         ((a, scanid) in flagged || (b, scanid) in flagged) || continue
         Fc[:, :, bi, :] .= true
-        # Zeroing the weight alongside the flag is what excludes the row: the
-        # solver stages decide usability from the weight.
-        Wc[:, :, bi, :] .= zero(eltype(Wc))
-        Vc[:, :, bi, :] .= convert(eltype(Vc), NaN)
     end
     return nothing
 end
@@ -901,10 +901,10 @@ const _GAIN_FLOOR = 1.0e-12
 # Correct one (baseline, product) column in place over its (Frequency, Ti)
 # plane: `V ← V / (g_a conj(g_b))` and `w ← w · |g_a g_b|²`, where `ga`/`gb` are
 # the two stations' gains on that same plane. A degenerate or non-finite gain
-# blanks the cell — NaN visibility, zero weight — and flags it. The weight goes
-# to zero alongside the flag because the solver stages decide usability from the
-# weight. Each cell reads then writes its own index, so the update is exact even
-# though the read and the write hit the same array.
+# leaves the correction undefined, so the cell gets a NaN visibility and a flag;
+# its weight is left as it arrived, since nothing scaled it. Each cell reads then
+# writes its own index, so the update is exact even though the read and the write
+# hit the same array.
 function _correct_column!(vis, w, f, ga, gb)
     for i in eachindex(vis, w, f, ga, gb)
         gai = ga[i]
@@ -912,7 +912,6 @@ function _correct_column!(vis, w, f, ga, gb)
         den = gai * conj(gbi)
         if abs(gai) < _GAIN_FLOOR || abs(gbi) < _GAIN_FLOOR || !isfinite(den)
             vis[i] = convert(eltype(vis), NaN)
-            w[i] = zero(eltype(w))
             f[i] = true
         else
             vis[i] = vis[i] / den

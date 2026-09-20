@@ -23,18 +23,6 @@
 # i.e. linear index = (band-1)*NO_STKD + stokes (verified empirically: each
 # group of NO_STKD entries shows the parallel/cross-hand signature).
 
-# A leaf's `:flags` layer over a FITS-IDI weights layer. The FLAG table is
-# folded into WEIGHT during decode — a non-positive weight is how a flagged
-# FITS-IDI sample is recorded — so the flag layer reads back from the weights
-# rather than from a column of its own.
-struct IDIDerivedFlags{A <: AbstractArray} <: AbstractArray{Bool, 4}
-    weights::A
-end
-
-Base.size(f::IDIDerivedFlags) = size(f.weights)
-Base.axes(f::IDIDerivedFlags) = axes(f.weights)
-Base.@propagate_inbounds Base.getindex(f::IDIDerivedFlags, I::Int...) = !(f.weights[I...] > 0)
-UVData._materialize_layer(f::IDIDerivedFlags) = .!(UVData._materialize_layer(f.weights) .> 0)
 using DiskArrays
 using Statistics: median
 using OhMyThreads: tforeach, SerialScheduler
@@ -405,8 +393,9 @@ end
     IDIChunkArray{T, K} <: DiskArrays.AbstractDiskArray{T, 4}
 
 Disk-backed `(Frequency, Ti, Baseline, Pol)` view of one band of one scan of
-a FITS-IDI `UV_DATA` table. `kind::Val{:vis}` / `Val{:weights}` selects the
-layer. No FLUX bytes are read until `readblock!` runs; each call
+a FITS-IDI `UV_DATA` table. `kind::Val{:vis}` / `Val{:weights}` / `Val{:flags}`
+selects the layer; the `:flags` layer is decoded from the FLAG table alone and
+reads no `UV_DATA` bytes at all. No FLUX bytes are read until `readblock!` runs; each call
 opens the file once (`open_lazy_source`), then per (time, baseline) cell seeks
 to the cell's band slice, bulk-reads it in one `readbytes!`, byte-swaps it into
 a reused scratch buffer, and closes in a `finally` — never per element.
@@ -538,8 +527,9 @@ function _normalize_vis!(out, a::IDIChunkArray{T}, Aspec, rchan, rti, rbl, rpol)
 end
 
 # Scale a dense weights block to track the correlation-coefficient normalization:
-# noise ÷ √(A_a·A_b) ⇒ weight × (A_a·A_b). Cells with a missing/≤0 autocorr are
-# flagged (weight ← 0), matching the NaN the vis pass writes there.
+# noise ÷ √(A_a·A_b) ⇒ weight × (A_a·A_b). A cell with a missing or non-positive
+# autocorr has no correlation coefficient to weight, so its weight goes to zero,
+# matching the NaN the vis pass writes there.
 function _scale_weights!(out, a::IDIChunkArray{T}, Aspec, rchan, rti, rbl, rpol) where {T}
     @inbounds for (bj, bl) in enumerate(rbl)
         ea, eb = a.bl_ants[bl]
@@ -780,7 +770,7 @@ end
 end
 
 # Fill a dense (no_chan, nti, nbl, no_stkd) weights array from the span — the
-# full-leaf equivalent of the weights `readblock!` loop (FLAG-table aware).
+# full-leaf equivalent of the weights `readblock!` loop.
 # Barrier: resolve the abstract on-disk WEIGHT dtype once (Float32 placeholder when
 # there is no WEIGHT column — `_weights_from_span!` fills 1.0 then), then run the
 # type-stable, baseline-threaded kernel.
@@ -801,33 +791,53 @@ end
     return out
 end
 
-# Decode one baseline column (all times) of a weights leaf from the span (FLAG-aware).
+# Decode one baseline column (all times) of a weights leaf from the span.
 @inline function _decode_weights_bl!(out, a::IDIChunkArray{T, Val{:weights}}, span, rmin::Int, ::Type{D}, bl::Int) where {T, D}
     nchan = a.no_chan
     nti = size(a.row_of, 1)
     npol = a.no_stkd
     wscale = _weight_scale(a)
-    have_flags = !isempty(a.flags)
     wbuf = Vector{Float32}(undef, a.no_stkd)
-    ea, eb = a.bl_ants[bl]
     @inbounds for ti in 1:nti
         r = a.row_of[ti, bl]
         r != 0 && _weights_from_span!(wbuf, span, a, r, rmin, wscale, D)
         sc = r == 0 ? 1.0f0 : _wscale_phys(a, r)   # radiometer scale (1 if disabled)
-        t = a.times[ti]
         for p in 1:npol
             wv = r == 0 ? 0.0f0 : wbuf[a.perm[p]]
-            # Scale only valid (positive) weights; <=0 stays a flag sentinel.
+            # Scale only valid (positive) weights; a non-positive on-disk WEIGHT
+            # is the correlator's own invalidity marker and passes through.
             w = wv > 0 ? T(wv * sc) : T(wv)
-            if have_flags && r != 0 && w > 0
-                for c in 1:nchan
-                    out[c, ti, bl, p] = _idi_cell_flagged(a, c, t, ea, eb, p) ? zero(T) : w
-                end
-            else
-                for c in 1:nchan
-                    out[c, ti, bl, p] = w
-                end
+            for c in 1:nchan
+                out[c, ti, bl, p] = w
             end
+        end
+    end
+    return nothing
+end
+
+# Fill a dense (no_chan, nti, nbl, no_stkd) flags array from this leaf's FLAG
+# entries. Unlike the vis and weights fills this touches no `UV_DATA` bytes, so
+# it takes neither a row span nor an on-disk dtype.
+function _fill_flags_dense!(out, a::IDIChunkArray{Bool, Val{:flags}}, executor)
+    if isempty(a.flags)
+        fill!(out, false)
+        return out
+    end
+    nbl = size(a.row_of, 2)
+    tforeach(bl -> _decode_flags_bl!(out, a, bl), 1:nbl; scheduler = executor)
+    return out
+end
+
+# Decode one baseline column (all times) of a flags leaf.
+@inline function _decode_flags_bl!(out, a::IDIChunkArray{Bool, Val{:flags}}, bl::Int)
+    nchan = a.no_chan
+    nti = size(a.row_of, 1)
+    npol = a.no_stkd
+    ea, eb = a.bl_ants[bl]
+    for ti in 1:nti
+        t = a.times[ti]
+        for p in 1:npol, c in 1:nchan
+            out[c, ti, bl, p] = _idi_cell_flagged(a, c, t, ea, eb, p)
         end
     end
     return nothing
@@ -880,9 +890,11 @@ function UVData._materialize_group_bulk(leaves, executor)
         _fill_vis_dense!(vis_dense, av, span, rmin, executor)
         w_dense = Array{Float32}(undef, aw.no_chan, nti, nbl, aw.no_stkd)
         _fill_weights_dense!(w_dense, aw, span, rmin, executor)
+        f_dense = Array{Bool}(undef, size(w_dense))
+        _fill_flags_dense!(f_dense, parent(l[:flags]), executor)
         vis_da = DimArray(vis_dense, dims(l[:vis]))
         w_da = DimArray(w_dense, dims(l[:weights]))
-        f_da = DimArray(.!(w_dense .> 0), dims(l[:flags]))
+        f_da = DimArray(f_dense, dims(l[:flags]))
         uvw_da = DimArray(UVData._materialize_layer(parent(l[:uvw])), dims(l[:uvw]))
         UVData._build_leaf(vis_da, w_da, uvw_da, f_da; partition_info = DimensionalData.metadata(l))
     end
@@ -934,7 +946,7 @@ function UVData._materialize_group_bulk_into!(dests, leaves, executor)
         vis_dest, w_dest, f_dest = dests[i]
         _fill_vis_dense!(vis_dest, av, span, rmin, executor)
         _fill_weights_dense!(w_dest, aw, span, rmin, executor)
-        f_dest .= .!(w_dest .> 0)
+        _fill_flags_dense!(f_dest, parent(l[:flags]), executor)
     end
     return true
 end
@@ -1042,29 +1054,18 @@ function DiskArrays.readblock!(
     wbuf = Vector{Float32}(undef, a.no_stkd)
     wraw = _weight_rawbuf(a)
     wscale = _weight_scale(a)
-    have_flags = !isempty(a.flags)
     try
         @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
             r = a.row_of[ti, bl]
             r != 0 && _read_weight_row!(wbuf, wraw, io, a, r, wscale)
             sc = r == 0 ? 1.0f0 : _wscale_phys(a, r)   # radiometer scale (1 if disabled)
-            ea, eb = a.bl_ants[bl]
-            t = a.times[ti]
             for (pj, p) in enumerate(rpol)
                 wv = r == 0 ? 0.0f0 : wbuf[a.perm[p]]
-                # Scale only valid (positive) weights; <=0 stays a flag sentinel.
+                # Scale only valid (positive) weights; a non-positive on-disk
+                # WEIGHT is the correlator's own invalidity marker.
                 w = wv > 0 ? T(wv * sc) : T(wv)
-                # FLAG-table entries zero the weight (channel-dependent when
-                # CHANS is set). OR'd with the existing weight<=0 path.
-                if have_flags && r != 0 && w > 0
-                    for (cj, c) in enumerate(rchan)
-                        out[cj, tj, bj, pj] =
-                            _idi_cell_flagged(a, c, t, ea, eb, p) ? zero(T) : w
-                    end
-                else
-                    for cj in eachindex(rchan)
-                        out[cj, tj, bj, pj] = w
-                    end
+                for cj in eachindex(rchan)
+                    out[cj, tj, bj, pj] = w
                 end
             end
         end
@@ -1073,6 +1074,27 @@ function DiskArrays.readblock!(
         end
     finally
         close(io)
+    end
+    return out
+end
+
+function DiskArrays.readblock!(
+        a::IDIChunkArray{Bool, Val{:flags}}, out,
+        rchan::AbstractUnitRange, rti::AbstractUnitRange,
+        rbl::AbstractUnitRange, rpol::AbstractUnitRange,
+    )
+    if isempty(a.flags)
+        fill!(out, false)
+        return out
+    end
+    for (bj, bl) in enumerate(rbl)
+        ea, eb = a.bl_ants[bl]
+        for (tj, ti) in enumerate(rti)
+            t = a.times[ti]
+            for (pj, p) in enumerate(rpol), (cj, c) in enumerate(rchan)
+                out[cj, tj, bj, pj] = _idi_cell_flagged(a, c, t, ea, eb, p)
+            end
+        end
     end
     return out
 end
@@ -1232,7 +1254,7 @@ function _decode_vis_band!(out, coff::Int, chunk::IDIChunkArray{T, Val{:vis}}, s
     return nothing
 end
 
-# Weights mirror of `_decode_vis_from_span!` (FLAG-aware, mirrors the io-based
+# Weights mirror of `_decode_vis_from_span!` (mirrors the io-based
 # `readblock!` for `IDIChunkArray{T,Val{:weights}}` above).
 function _decode_weights_from_span!(
         out, coff::Int, chunk::IDIChunkArray{T, Val{:weights}}, span, rmin::Int,
@@ -1240,24 +1262,15 @@ function _decode_weights_from_span!(
     ) where {T, D}
     wbuf = Vector{Float32}(undef, chunk.no_stkd)
     wscale = _weight_scale(chunk)
-    have_flags = !isempty(chunk.flags)
     @inbounds for (bj, bl) in enumerate(rbl), (tj, ti) in enumerate(rti)
         r = chunk.row_of[ti, bl]
         r != 0 && _weights_from_span!(wbuf, span, chunk, r, rmin, wscale, D)
         sc = r == 0 ? 1.0f0 : _wscale_phys(chunk, r)
-        ea, eb = chunk.bl_ants[bl]
-        t = chunk.times[ti]
         for (pj, p) in enumerate(rpol)
             wv = r == 0 ? 0.0f0 : wbuf[chunk.perm[p]]
             w = wv > 0 ? T(wv * sc) : T(wv)
-            if have_flags && r != 0 && w > 0
-                for (cj, c) in enumerate(rchan)
-                    out[coff + cj, tj, bj, pj] = _idi_cell_flagged(chunk, c, t, ea, eb, p) ? zero(T) : w
-                end
-            else
-                for cj in eachindex(rchan)
-                    out[coff + cj, tj, bj, pj] = w
-                end
+            for cj in eachindex(rchan)
+                out[coff + cj, tj, bj, pj] = w
             end
         end
     end
@@ -1283,9 +1296,10 @@ function _decode_weights_band!(out, coff::Int, chunk::IDIChunkArray{T, Val{:weig
     return nothing
 end
 
-# Span too large for `_read_row_span`'s cap: decode band-by-band via each
-# chunk's own seek-per-cell `readblock!` (the pre-merge behavior).
-function _readblock_merged_fallback!(a::IDIMergedChunkArray, out, rchan, rti, rbl, rpol)
+# Decode band-by-band via each chunk's own `readblock!` (the pre-merge
+# behavior). This is the fallback when the row span is over `_read_row_span`'s
+# cap, and the only path the `:flags` kind needs — that kind reads no UV_DATA.
+function _readblock_merged_perband!(a::IDIMergedChunkArray, out, rchan, rti, rbl, rpol)
     for (b, chunk) in enumerate(a.chunks)
         lo = a.chan_offsets[b] + 1
         hi = a.chan_offsets[b] + chunk.no_chan
@@ -1318,7 +1332,7 @@ function _merged_readblock!(decode_band!::F, a::IDIMergedChunkArray{T}, out, rch
     finally
         close(io)
     end
-    span === nothing && return _readblock_merged_fallback!(a, out, rchan, rti, rbl, rpol)
+    span === nothing && return _readblock_merged_perband!(a, out, rchan, rti, rbl, rpol)
     for (b, chunk) in enumerate(a.chunks)
         lo = a.chan_offsets[b] + 1
         hi = a.chan_offsets[b] + chunk.no_chan
@@ -1346,6 +1360,14 @@ function DiskArrays.readblock!(
         rbl::AbstractUnitRange, rpol::AbstractUnitRange,
     ) where {T}
     return _merged_readblock!(_decode_weights_band!, a, out, rchan, rti, rbl, rpol, zero(T))
+end
+
+function DiskArrays.readblock!(
+        a::IDIMergedChunkArray{Bool, Val{:flags}}, out,
+        rchan::AbstractUnitRange, rti::AbstractUnitRange,
+        rbl::AbstractUnitRange, rpol::AbstractUnitRange,
+    )
+    return _readblock_merged_perband!(a, out, rchan, rti, rbl, rpol)
 end
 
 # ── Index pass ───────────────────────────────────────────────────────────────
@@ -1462,12 +1484,12 @@ on data with no autocorrelations.
 interferometric). `normalize_autocorr=true` implies the autocorrelations are
 dropped from the output regardless. Pass both `false` to keep autocorrelations.
 
-`apply_flags` (default `true`) honors the FITS-IDI FLAG table, zeroing the weight of
-every cell its rows select. Pass `false` to ignore the table and keep those cells:
+`apply_flags` (default `true`) honors the FITS-IDI FLAG table: every cell its rows
+select is set in the leaf's `:flags` layer. Pass `false` for an all-unflagged layer:
 the flags a correlator writes are operator/monitor assertions rather than
 measurements, and an over-flagging monitor can blank a whole station on a scan whose
-data is in fact good. The visibilities are identical either way — only which cells
-carry weight changes.
+data is in fact good. Visibilities and weights are identical either way — the FLAG
+table never touches them, so clearing a flag recovers the sample.
 
 `weight_mode` controls how the on-disk `WEIGHT` column becomes the output weight.
 Its meaning is set by the `WEIGHTYP` header keyword (AIPS Memo 114, Table 14),
@@ -1772,9 +1794,9 @@ function UVData.load_fitsidi(
                 Float32(2 * dnu_b * weight_efficiency^2 / weight_norm) : 0.0f0
             inttim_b = wfactor_b == 0.0f0 ? Float32[] : inttim
 
-            # Flags touching this leaf (source, band, time-span). The vis layer
-            # is never flagged (its values stay as read); flagging is carried by
-            # the weights (a flagged cell reads weight 0).
+            # Flags touching this leaf (source, band, time-span). They back the
+            # `:flags` layer alone: the vis and weight layers carry what the
+            # FLUX and WEIGHT columns hold, unaltered.
             leaf_flags = _filter_flags_for_leaf(
                 flag_entries, sid, band, scan_t_lo, scan_t_hi,
             )
@@ -1788,10 +1810,18 @@ function UVData.load_fitsidi(
             w_chunk = _idi_chunk(
                 Float32, Val(:weights), data, flux_field, weight_col,
                 band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
-                leaf_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
+                no_flags, bl_pairs, unique_times, wfactor_b, inttim_b,
                 auto_row, scale_w_by_auto, feed_pairs, auto_stokes,
             )
-            (; band, fsetup, vis_chunk, w_chunk)
+            # The flag layer reads the FLAG table only, so the radiometer and
+            # autocorrelation-normalization inputs are left empty/off.
+            f_chunk = _idi_chunk(
+                Bool, Val(:flags), data, flux_field, weight_col,
+                band, no_stkd, no_chan, no_band, perm, flux_scale, row_of,
+                leaf_flags, bl_pairs, unique_times, 0.0f0, Float32[],
+                auto_row, false, feed_pairs, auto_stokes,
+            )
+            (; band, fsetup, vis_chunk, w_chunk, f_chunk)
         end
 
         if merge_spws && length(band_chunks) > 1
@@ -1813,9 +1843,8 @@ function UVData.load_fitsidi(
                 Baseline(baselines.labels), Pol(msv4_labels),
             )
             vis_part = DimArray(_idi_merged_chunk([bc.vis_chunk for bc in sorted]), vis_dims)
-            w_chunk = _idi_merged_chunk([bc.w_chunk for bc in sorted])
-            w_part = DimArray(w_chunk, vis_dims)
-            f_part = DimArray(IDIDerivedFlags(w_chunk), vis_dims)
+            w_part = DimArray(_idi_merged_chunk([bc.w_chunk for bc in sorted]), vis_dims)
+            f_part = DimArray(_idi_merged_chunk([bc.f_chunk for bc in sorted]), vis_dims)
 
             info = UVData.PartitionInfo(;
                 source_name = si.name,
@@ -1843,7 +1872,7 @@ function UVData.load_fitsidi(
                 )
                 vis_part = DimArray(bc.vis_chunk, vis_dims)
                 w_part = DimArray(bc.w_chunk, vis_dims)
-                f_part = DimArray(IDIDerivedFlags(bc.w_chunk), vis_dims)
+                f_part = DimArray(bc.f_chunk, vis_dims)
 
                 info = UVData.PartitionInfo(;
                     source_name = si.name,

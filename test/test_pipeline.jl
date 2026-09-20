@@ -145,7 +145,10 @@ end
     for i in eachindex(vis0)
         den = ga[i] * conj(gb[i])
         if abs(ga[i]) < CAL._GAIN_FLOOR || abs(gb[i]) < CAL._GAIN_FLOOR || !isfinite(den)
-            @test isnan(vis[i]) && iszero(w[i]) && f[i]
+            # The corrected value is undefined, so the visibility is NaN —
+            # but the weight the cell arrived with is left alone.
+            @test isnan(vis[i]) && f[i]
+            @test w[i] == w0[i]
         else
             @test !f[i]
             @test vis[i] ≈ vis0[i] / den
@@ -662,7 +665,6 @@ end
     dead_globals = [(b - 1) * nchan + dead_local for b in 1:nspw]
     for (_, leaf) in DimensionalData.branches(uvset)
         parent(leaf[:flags])[dead_local, :, :, :] .= true
-        parent(leaf[:weights])[dead_local, :, :, :] .= 0.0f0
     end
 
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
@@ -1129,7 +1131,7 @@ end
     )
 end
 
-@testset "EHT-HOPS station flags: unconstrained station zero-weighted" begin
+@testset "EHT-HOPS station flags: unconstrained station flagged" begin
     # Station 4 participates (baselines with valid weights) but carries NO
     # fringe — pure weak noise — so after the closure-screened global solve no
     # strong detection constrains it: the EHT-HOPS flag criterion. Its gains
@@ -1161,24 +1163,31 @@ end
     @test all(r -> r.ant == 4, flags)                 # only station 4 unconstrained
     @test any(r -> r.station == "A4", flags)
 
+    # An unconstrained row is flagged, not blanked: it holds real data that the
+    # solve left uncalibrated, so its visibilities and weights survive and
+    # clearing the flag gives it back.
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
     for (_, leaf) in Gustavo.UVData.leaves(corr)
+        F = parent(leaf[:flags])
         W = parent(leaf[:weights])
         prs = Gustavo.UVData.baselines(leaf).pairs
         for bi in eachindex(prs)
             prs[bi][1] == prs[bi][2] && continue
             if prs[bi][1] == 4 || prs[bi][2] == 4
-                @test all(iszero, @view W[:, :, bi, :])
+                @test all(@view F[:, :, bi, :])
+                @test all(>(0), @view W[:, :, bi, :])
             else
+                @test !any(@view F[:, :, bi, :])
                 @test any(>(0), @view W[:, :, bi, :])
             end
         end
     end
-    # Opting out keeps the (identity-gain) data.
+    # Opting out leaves the (identity-gain) row unflagged.
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol; apply_flags = false)
     l0f = last(first(Gustavo.UVData.leaves(corr0)))
     prs0 = Gustavo.UVData.baselines(l0f).pairs
     bi4 = findfirst(p -> p[1] != p[2] && (p[1] == 4 || p[2] == 4), prs0)
+    @test !any(@view parent(l0f[:flags])[:, :, bi4, :])
     @test any(>(0), @view parent(l0f[:weights])[:, :, bi4, :])
 
     # The fused fitcalibrate tail applies the same flags: it corrects each scan
@@ -1189,14 +1198,14 @@ end
     @test sol_fc.info.flagged_ant == sol.info.flagged_ant
     @test sol_fc.info.flagged_scan == sol.info.flagged_scan
     for (_, leaf) in Gustavo.UVData.leaves(out)
-        W = parent(leaf[:weights])
+        F = parent(leaf[:flags])
         prs = Gustavo.UVData.baselines(leaf).pairs
         for bi in eachindex(prs)
             prs[bi][1] == prs[bi][2] && continue
             if prs[bi][1] == 4 || prs[bi][2] == 4
-                @test all(iszero, @view W[:, :, bi, :])
+                @test all(@view F[:, :, bi, :])
             else
-                @test any(>(0), @view W[:, :, bi, :])
+                @test !any(@view F[:, :, bi, :])
             end
         end
     end

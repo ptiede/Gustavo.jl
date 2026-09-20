@@ -292,7 +292,7 @@ end
 phase-cal tone (± `pad` neighbouring channels). Tone combs are phase-locked at
 every station, so they can cross-correlate and leave spurious spikes in those
 channels; put `FlagChannels(mask)` in the pipeline's transform chain to
-zero-weight them during the solve (≈ ntones/nchan of the data, ~4% for the
+exclude them from the solve (≈ ntones/nchan of the data, ~4% for the
 VGOS 5 MHz comb at 0.2 MHz channels).
 """
 function tone_channel_mask(pcal::PhaseCalTable, uvset::UVSet; pad::Integer = 0)

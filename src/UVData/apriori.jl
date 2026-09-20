@@ -169,7 +169,7 @@ function apriori_gains(
             # Below the elevation cutoff (default: the horizon) the source is
             # not observable and the gain-curve polynomial extrapolates to tiny
             # / negative values, which makes SEFD = Tsys/(DPFU·gE) explode. Flag
-            # those samples (weight ← 0 on apply) rather than apply a blown-up gain.
+            # those samples on apply rather than apply a blown-up gain.
             el_ok = isfinite(el) && el >= min_elevation_deg
             for p in 1:2
                 dpfu = st.gain.dpfu[p]
@@ -244,7 +244,7 @@ by `sqrt(SEFD_a * SEFD_b)` so the output amplitudes are in Jy.
 
 Visibilities are divided by `g_a * conj(g_b)` with `g_a = 1/sqrt(SEFD_a)`
 (real, positive), and weights scale by `|g_a|^2 |g_b|^2`. Samples whose
-ANTAB Tsys is missing or non-positive are flagged (weight set to 0).
+ANTAB Tsys is missing or non-positive are flagged.
 
 The caller is responsible for matching the ANTAB to the right uvfits
 track and band; pass `on_missing_station=:error` to refuse to silently
@@ -313,8 +313,8 @@ end
 # non-finite gain flags the sample; non-NaN scaling matches the bandpass kernel
 # convention so the two corrections compose cleanly.
 #
-# Every sample this kernel flags also has its weight zeroed: the solver stages
-# decide usability from the weight, so the flag alone would not exclude it.
+# A flagged sample keeps the visibility and weight it arrived with: no gain was
+# applied to it, so there is nothing to record beyond the flag itself.
 function _apply_apriori_kernel(
         vis_p::AbstractArray, w_p::AbstractArray, flags_p::AbstractArray,
         gains::AbstractArray{Float64, 4},
@@ -332,7 +332,6 @@ function _apply_apriori_kernel(
         # downstream — the fringe solve already skips them.
         if a == b
             for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
-                weights_corr[c, ti, bi, p] = zero(eltype(weights_corr))
                 flags_corr[c, ti, bi, p] = true
             end
             continue
@@ -346,7 +345,6 @@ function _apply_apriori_kernel(
                 ga = gains[c, ti, a, fa]
                 gb = gains[c, ti, b, fb]
                 if !(isfinite(ga) && isfinite(gb))
-                    weights_corr[c, ti, bi, p] = zero(w)
                     flags_corr[c, ti, bi, p] = true
                     continue
                 end

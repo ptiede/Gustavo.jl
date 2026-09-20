@@ -1389,6 +1389,7 @@ function _leaf_record_order(leaf)
     # holds nothing. Emit only the cells with a real position.
     uvw = parent(leaf[:uvw])          # (Ti, Baseline, UVW)
     w = parent(leaf[:weights])        # (Frequency, Ti, Baseline, Pol)
+    f = parent(leaf[:flags])          # (Frequency, Ti, Baseline, Pol)
     nchan, npol = sz[1], sz[4]
     out = Tuple{Int, Int}[]
     sizehint!(out, nti * nbl)
@@ -1397,10 +1398,12 @@ function _leaf_record_order(leaf)
             push!(out, (ti, bl))
             continue
         end
-        # A cell with weight but no position is a bug upstream, not padding:
-        # dropping it would silently discard data, so it stops the write.
+        # An unflagged cell with weight but no position is a bug upstream, not
+        # padding: dropping it would silently discard data, so it stops the
+        # write. A flagged one is a cell the pipeline already ruled out.
         for p in 1:npol, c in 1:nchan
             wc = w[c, ti, bl, p]
+            f[c, ti, bl, p] && continue
             isfinite(wc) && wc > 0 && error(
                 "write_uvfits: (time $ti, baseline $bl) carries weight $wc at " *
                     "(channel $c, pol $p) but its (u,v,w) is $(uvw[ti, bl, 1]), " *
@@ -1547,7 +1550,8 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
         date_param_leaf = _build_date_param(UVData.obs_time(leaf), ro)
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
-            parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:uvw]),
+            parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:flags]),
+            parent(leaf[:uvw]),
             bl_aips_codes, ro, date_param_leaf, rec_offset, pol_perm, imag_sign,
         )
         for (rec_i, _) in enumerate(ro)
@@ -1623,6 +1627,7 @@ function _write_records_kernel!(
         date_param_cat::AbstractMatrix{Tdate},
         vis_dense::AbstractArray{Tvis, 4},
         w_dense::AbstractArray{Tw, 4},
+        f_dense::AbstractArray{Bool, 4},
         uvw_dense::AbstractArray{Tuvw, 3},
         bl_aips_codes_local::AbstractVector{Int32},
         record_order::AbstractVector{Tuple{Int, Int}},
@@ -1631,8 +1636,12 @@ function _write_records_kernel!(
         pol_perm::AbstractVector{Int},
         imag_sign::Float32,
     ) where {Tvis, Tw, Tuvw, Tdate}
-    # Leaf storage: (Frequency, Ti, Baseline, Pol) for vis/weights;
+    # Leaf storage: (Frequency, Ti, Baseline, Pol) for vis/weights/flags;
     # (Ti, Baseline, UVW) for uvw.
+    #
+    # UVFITS has no flag table: a negative weight is the only way the format
+    # records a flag, so a flagged sample is written with its weight negated.
+    # The magnitude survives, and `load_uvfits` reads the sign back as the flag.
     npol = length(pol_perm)
     nchan = size(vis_dense, 1)
     # In-memory `Frequency` dim entries are per-IF (1 channel each), so
@@ -1644,13 +1653,14 @@ function _write_records_kernel!(
             for c in 1:nchan
                 v = vis_dense[c, ti, bi, pmem]
                 wc = w_dense[c, ti, bi, pmem]
+                flagged = f_dense[c, ti, bi, pmem]
                 if isfinite(real(v)) && isfinite(imag(v)) && isfinite(wc) && wc > 0
                     raw_data[row, 1, pdisk, 1, c, 1, 1] = real(v)
                     # imag_sign = +1 (:aips) writes the internal phase verbatim;
                     # -1 (:fitsidi) conjugates to the FITS-IDI phase convention.
                     raw_data[row, 2, pdisk, 1, c, 1, 1] = imag_sign * imag(v)
-                    raw_data[row, 3, pdisk, 1, c, 1, 1] = wc
-                elseif isfinite(wc) && wc > 0
+                    raw_data[row, 3, pdisk, 1, c, 1, 1] = flagged ? -wc : wc
+                elseif !flagged && isfinite(wc) && wc > 0
                     # A weighted cell with a non-finite visibility is corrupted
                     # data, not padding: exporting it as zero would silently
                     # discard a measurement.

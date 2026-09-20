@@ -177,7 +177,7 @@
             @test mask[c]
         end
 
-        # Solve with flagging: runs, and the output zero-weights those channels.
+        # Solve with flagging: runs, and the output flags those channels.
         _, out2 = fitcalibrate(
             FP.FlagChannels(mask) |> FringeFit(model = FringeModel()) |>
                 Bandpass() |>
@@ -186,9 +186,9 @@
         )
         lo = first(values(UVP.branches(out2)))
         ci = CAL.leaf_window(geom, lo).chan_idx
-        W = parent(lo[:weights])
+        F = parent(lo[:flags])
         for (cc, c) in enumerate(ci)
-            mask[c] && @test all(w -> w <= 0 || !isfinite(w), @view(W[cc, :, :, :]))
+            mask[c] && @test all(@view F[cc, :, :, :])
         end
     end
 end

@@ -392,8 +392,8 @@ end
 # EHT-HOPS-style station flags: a station that PARTICIPATES in a scan (has
 # baselines there) but is left UNCONSTRAINED by the surviving stage-B rows
 # keeps identity gains — record it as (station, geometry scan id) so
-# `apply_calibration` zero-weights its baselines instead of passing raw phases
-# through at full weight.
+# `apply_calibration` flags its baselines instead of passing raw phases through
+# as if they had been corrected.
 function unconstrained_flags(dets, covered, geom::DataGeometry)
     flags = Tuple{Int, Int}[]
     for gi in eachindex(dets)

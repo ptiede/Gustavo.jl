@@ -126,11 +126,13 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
         flagged = UVP.flag_spw_edges(uvset; mode = :flag_fraction, fraction = 0.2)
         for (k, leaf) in DimensionalData.branches(flagged)
-            W = parent(leaf[:weights])
-            W0 = parent(DimensionalData.branches(uvset)[k][:weights])
-            @test all(W[1, :, :, :] .== 0)
-            @test all(W[end, :, :, :] .== 0)
-            @test W[2:(end - 1), :, :, :] == W0[2:(end - 1), :, :, :]
+            F = parent(leaf[:flags])
+            @test all(F[1, :, :, :])
+            @test all(F[end, :, :, :])
+            @test !any(F[2:(end - 1), :, :, :])
+            # Edge flagging records a decision; it does not rewrite the data.
+            @test parent(leaf[:weights]) ==
+                parent(DimensionalData.branches(uvset)[k][:weights])
         end
 
         trimmed = UVP.flag_spw_edges(uvset; mode = :trim, fraction = 0.2)
@@ -152,9 +154,9 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
             uvset,
         )
         for (_, leaf) in DimensionalData.branches(out)
-            W = parent(leaf[:weights])
-            @test all(W[1, :, :, :] .== 0)
-            @test all(W[end, :, :, :] .== 0)
+            F = parent(leaf[:flags])
+            @test all(F[1, :, :, :])
+            @test all(F[end, :, :, :])
         end
     end
 

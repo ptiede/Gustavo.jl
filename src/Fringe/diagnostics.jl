@@ -421,9 +421,8 @@ visibility is `V / (g_a · conj(g_b))` with gains evaluated from `sol` exactly a
 solver applies them — no second disk read of the full set, just this one scan.
 When the solve used a `precal` (e.g. `phasecal_solution`), pass the same one here
 so both before and after are pre-calibrated the way the solver saw the data; the
-same goes for `flag_channels` (e.g. `tone_channel_mask` — flagged channels are
-zero-weighted, dropping out of the plotted averages exactly as they dropped out
-of the solve) and `weight_scale` (the per-station weight correction — see
+same goes for `flag_channels` (e.g. `tone_channel_mask` — flagged channels drop
+out of the plotted averages exactly as they dropped out of the solve) and `weight_scale` (the per-station weight correction — see
 [`station_weight_scale`](@ref)).
 """
 function baseline_fringe_data(
@@ -771,7 +770,7 @@ detection (`pfa <= Stationization.pfa_max`) on any of the station's baselines,
 so nothing put it in a fringe group (the EHT-HOPS flag criterion). A measured
 but rejected baseline does not rescue it: such a row constrains the fit without
 fixing a fringe location. These stations carry
-identity gains for those scans, and [`apply_calibration`](@ref Gustavo.UVData.apply_calibration) zero-weights
+identity gains for those scans, and [`apply_calibration`](@ref Gustavo.UVData.apply_calibration) flags
 their baselines there (`apply_flags = true`). Rows
 `(; scan, scan_name, ant, station)`; empty when every participating station
 was constrained (or the solution predates flag recording).

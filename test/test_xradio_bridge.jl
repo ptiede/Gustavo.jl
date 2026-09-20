@@ -53,8 +53,8 @@ using XRadio: XRadio, ProcessingSet, MeasurementSet
             @test parent(ms[:visibility]) == permutedims(vis_g, (4, 1, 3, 2))
             @test parent(ms[:weight]) == permutedims(w_g, (4, 1, 3, 2))
             @test parent(ms[:uvw]) == permutedims(uvw_g, (3, 2, 1))
-            # `w <= 0` is the flagging the set carries, so that is the FLAG.
-            @test parent(ms[:flag]) == permutedims(w_g .<= 0, (4, 1, 3, 2))
+            # FLAG comes from the `:flags` layer, not from the weight sign.
+            @test parent(ms[:flag]) == permutedims(parent(leaf[:flags]), (4, 1, 3, 2))
         end
     end
 

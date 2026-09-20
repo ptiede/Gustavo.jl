@@ -29,6 +29,7 @@ function build_synth_idi_uvset(;
         ref_freq = 43.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         include_autocorr = false,
         weight_fn = (band, ti, bl, p) -> 1.0f0,
+        flag_fn = (band, ti, bl, p, c) -> false,
         vis_fn = (band, ti, bl, p, c) -> ComplexF32(band + 0.1 * ti + 0.01 * bl + 0.001 * p + 0.0001 * c, -0.5),
     )
     UV = Gustavo.UVData
@@ -111,9 +112,12 @@ function build_synth_idi_uvset(;
             fs = setups[b]
             vis_dense = Array{ComplexF32}(undef, nchan, ntime, nbl, npol)
             w_dense = Array{Float32}(undef, nchan, ntime, nbl, npol)
+            f_dense = Array{Bool}(undef, nchan, ntime, nbl, npol)
             for p in 1:npol, bl in 1:nbl, ti in 1:ntime, c in 1:nchan
                 vis_dense[c, ti, bl, p] = vis_fn(b, ti, bl, p, c)
                 w_dense[c, ti, bl, p] = weight_fn(b, ti, bl, p)
+                f_dense[c, ti, bl, p] =
+                    flag_fn(b, ti, bl, p, c) || !(w_dense[c, ti, bl, p] > 0)
             end
             vis_part = DimArray(
                 vis_dense,
@@ -123,7 +127,7 @@ function build_synth_idi_uvset(;
                 ),
             )
             w_part = DimArray(w_dense, dims(vis_part))
-            f_part = DimArray(.!(w_dense .> 0), dims(vis_part))
+            f_part = DimArray(f_dense, dims(vis_part))
 
             info = UV.PartitionInfo(;
                 source_name = src_name,
@@ -611,11 +615,13 @@ end
 
 # ── FLAG-table support ────────────────────────────────────────────────────────
 #
-# `write_fitsidi` does not emit a FLAG table, so these tests construct one by
-# hand: write a base file with `write_fitsidi`, reopen it to collect its HDUs,
-# append a FLAG bintable HDU (built directly with FITSFiles), and rewrite. Then
-# `load_fitsidi` reads the FLAG table and applies it to the lazy weight/flag
-# layers. We do NOT modify fitsidi_write.jl.
+# These tests construct a FLAG table by hand: write a base file with
+# `write_fitsidi`, reopen it to collect its HDUs, append a FLAG bintable HDU
+# (built directly with FITSFiles), and rewrite. `write_fitsidi` emits its own
+# FLAG table, but only in the narrow form it needs — one band, one stokes and an
+# explicit antenna pair, channel range and time range per row. Building rows by
+# hand is what reaches the wildcard encodings a producer may use and the reader
+# must honor: `ANTS = (0, 0)`, `CHANS = (0, 0)`, `TIMERANG = (0, 0)`.
 
 using FITSFiles: HDU, Bintable, Card, fits
 
@@ -705,11 +711,11 @@ end
             m1 = UV.materialize_leaf(leaf1)
             m2 = UV.materialize_leaf(leaf2)
 
-            # A cell is flagged iff its weight is ≤ 0: the reader bakes every
-            # FLAG-table flag into the weights.
+            # The FLAG table backs the `:flags` layer alone; the weights carry
+            # the WEIGHT column unaltered.
             w1 = parent(m1[:weights])
-            f1 = w1 .<= 0               # (Frequency, Ti, Baseline, Pol)
-            f2 = parent(m2[:weights]) .<= 0
+            f1 = parent(m1[:flags])     # (Frequency, Ti, Baseline, Pol)
+            f2 = parent(m2[:flags])
 
             pols = collect(lookup(leaf1[:vis], Pol))   # MSv4 order
             pp = findfirst(==("PP"), pols)             # RR → PP
@@ -726,7 +732,9 @@ end
             # 2..3, pol PP.
             for bi in touch2, ti in tin, c in 2:3
                 @test f1[c, ti, bi, pp]
-                @test w1[c, ti, bi, pp] == 0
+                # The flag does not touch the weight: the flagged pol's weight
+                # still matches the unflagged pol's at the same cell.
+                @test w1[c, ti, bi, pp] == w1[c, ti, bi, qq]
             end
             # NOT flagged: other pol (QQ).
             for bi in touch2, ti in tin, c in 2:3
@@ -784,21 +792,54 @@ end
             m2 = UV.materialize_leaf(idx[("1", 2)])
             m1 = UV.materialize_leaf(idx[("1", 1)])
             w2 = parent(m2[:weights])
-            f2 = w2 .<= 0
+            f2 = parent(m2[:flags])
             pols = collect(lookup(idx[("1", 2)][:vis], Pol))
             qq = findfirst(==("QQ"), pols)
             others = setdiff(1:length(pols), [qq])
 
             # Band 2, QQ pol: everything flagged (all ants, chans, times).
             @test all(f2[:, :, :, qq])
-            @test all(w2[:, :, :, qq] .== 0)
+            @test all(w2[:, :, :, qq] .> 0)
             # Other pols on band 2: untouched.
             for p in others
                 @test !any(f2[:, :, :, p])
                 @test all(w2[:, :, :, p] .> 0)
             end
             # Band 1: untouched entirely.
-            @test !any(parent(m1[:weights]) .<= 0)
+            @test !any(parent(m1[:flags]))
+            @test all(parent(m1[:weights]) .> 0)
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "write_fitsidi round-trips the flag layer" begin
+        nspw = 2
+        nchan = 4
+        ntime = 3
+        # A channel run on one baseline and pol of band 1, over the last two
+        # integrations, with every weight positive — so the flag survives only
+        # if the writer emits a FLAG table and the reader decodes it.
+        uvset = build_synth_idi_uvset(;
+            nant = 3, nspw = nspw, nchan = nchan, nscan = 1, ntime = ntime,
+            weight_fn = (band, ti, bl, p) -> 3.0f0,
+            flag_fn = (band, ti, bl, p, c) ->
+                band == 1 && bl == 2 && p == 3 && ti >= 2 && 2 <= c <= 3,
+        )
+        path = tempname() * ".idifits"
+        try
+            UV.write_fitsidi(path, uvset)
+            rt = UV.load_fitsidi(path; lazy = true, weight_mode = :validity)
+            orig = _index_leaves_by_scan_band(uvset)
+            read_idx = _index_leaves_by_scan_band(rt)
+            @test Set(keys(read_idx)) == Set(keys(orig))
+            for (k, oleaf) in orig
+                m = UV.materialize_leaf(read_idx[k])
+                @test parent(m[:flags]) == parent(UV.materialize_leaf(oleaf)[:flags])
+                # The flags cost no weight on either side of the round trip.
+                @test all(parent(m[:weights]) .> 0)
+            end
+            @test any(parent(UV.materialize_leaf(read_idx[("1", 1)])[:flags]))
         finally
             isfile(path) && rm(path)
         end
@@ -820,16 +861,14 @@ end
             # Find a leaf whose scan/band the FLAG table actually touches. The
             # real FLAG rows flag whole (antenna, band, time-range) selections,
             # so scan the leaves for one that picks up FLAG-table flags on cells
-            # whose visibility is present (finite) — i.e. flags the pre-fix
-            # reader (weight<=0 only) would have missed.
+            # whose visibility is present (finite).
             found = false
             for (_, leaf) in leaves
                 m = UV.materialize_leaf(leaf)
-                flag = parent(m[:weights]) .<= 0
+                flag = parent(m[:flags])
                 vis = parent(m[:vis])
                 # A flagged cell whose vis is finite cannot be a "missing row"
-                # (those are NaN); on this file all on-disk weights are
-                # positive, so such a flag can only come from the FLAG table.
+                # (those are NaN), so it can only come from the FLAG table.
                 flagged_with_data = flag .& isfinite.(real.(vis)) .& isfinite.(imag.(vis))
                 n = count(flagged_with_data)
                 if n > 0

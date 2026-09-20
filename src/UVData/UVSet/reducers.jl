@@ -429,13 +429,9 @@ function _spw_edge_partition(leaf::DimensionalData.AbstractDimTree, mode::Symbol
         f_new = copy(parent(leaf[:flags]))
         f_new[1:ne, :, :, :] .= true
         f_new[(nchan - ne + 1):nchan, :, :, :] .= true
-        # The edge weights are zeroed as well: the solver stages decide
-        # usability from the weight, so the flag alone would not exclude
-        # these channels.
-        w_new = copy(parent(leaf[:weights]))
-        w_new[1:ne, :, :, :] .= 0
-        w_new[(nchan - ne + 1):nchan, :, :, :] .= 0
-        return rebuild_visibilities(leaf, parent(vis_l), w_new, parent(leaf[:uvw]), f_new)
+        return rebuild_visibilities(
+            leaf, parent(vis_l), parent(leaf[:weights]), parent(leaf[:uvw]), f_new,
+        )
     else  # :trim
         keep = (ne + 1):(nchan - ne)
         isempty(keep) &&
