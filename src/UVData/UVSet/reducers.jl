@@ -99,20 +99,21 @@ function _time_average_kernel(
     UVW_num = zeros(Tuvw, 1, nbl, 3)
     UVW_w = zeros(Tw, 1, nbl)
 
-    @inbounds for ti in axes(vis_p, 2), bi in axes(vis_p, 3)
+    @inbounds for ti in axes(vis_p, Ti), bi in axes(vis_p, Baseline)
         tot_w = zero(Tw)
-        for p in axes(vis_p, 4), c in axes(vis_p, 1)
-            f_p[c, ti, bi, p] && continue
-            w = w_p[c, ti, bi, p]
-            v = vis_p[c, ti, bi, p]
+        for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
+            cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+            f_p[cell] && continue
+            w = w_p[cell]
+            v = vis_p[cell]
             (w > 0 && isfinite(w) && isfinite(real(v))) || continue
             V_num[c, 1, bi, p] += w * v
             W_sum[c, 1, bi, p] += w
             tot_w += w
         end
         (tot_w > 0 && isfinite(tot_w)) || continue
-        for k in axes(uvw_p, 3)
-            u = uvw_p[ti, bi, k]
+        for k in axes(uvw_p, UVW)
+            u = uvw_p[Ti(ti), Baseline(bi), UVW(k)]
             isfinite(u) || continue
             UVW_num[1, bi, k] += tot_w * u
         end
@@ -224,12 +225,13 @@ function _frequency_average_kernel(
     ng = length(groups)
     Vnum = zeros(Tvis, ng, nti, nbl, npol)
     Wsum = zeros(Tw, ng, nti, nbl, npol)
-    @inbounds for p in axes(vis_p, 4), bi in axes(vis_p, 3), ti in axes(vis_p, 2)
+    @inbounds for p in axes(vis_p, Pol), bi in axes(vis_p, Baseline), ti in axes(vis_p, Ti)
         for (g, grp) in enumerate(groups)
             for c in grp
-                f_p[c, ti, bi, p] && continue
-                w = w_p[c, ti, bi, p]
-                v = vis_p[c, ti, bi, p]
+                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+                f_p[cell] && continue
+                w = w_p[cell]
+                v = vis_p[cell]
                 (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
                 Vnum[g, ti, bi, p] += w * v
                 Wsum[g, ti, bi, p] += w
@@ -342,22 +344,23 @@ function _time_bin_average_kernel(
 
     # `ids` and `Vnum`'s bin axis are what the annotation still guards: `b` is a
     # value read out of `ids`, not a loop range the compiler can bound.
-    @inbounds for ti in axes(vis_p, 2)
+    @inbounds for ti in axes(vis_p, Ti)
         b = ids[ti]
-        for bi in axes(vis_p, 3)
+        for bi in axes(vis_p, Baseline)
             tot_w = zero(Tw)
-            for p in axes(vis_p, 4), c in axes(vis_p, 1)
-                f_p[c, ti, bi, p] && continue
-                w = w_p[c, ti, bi, p]
-                v = vis_p[c, ti, bi, p]
+            for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
+                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+                f_p[cell] && continue
+                w = w_p[cell]
+                v = vis_p[cell]
                 (w > 0 && isfinite(w) && isfinite(real(v)) && isfinite(imag(v))) || continue
                 Vnum[c, b, bi, p] += w * v
                 Wsum[c, b, bi, p] += w
                 tot_w += w
             end
             (tot_w > 0 && isfinite(tot_w)) || continue
-            for k in axes(uvw_p, 3)
-                u = uvw_p[ti, bi, k]
+            for k in axes(uvw_p, UVW)
+                u = uvw_p[Ti(ti), Baseline(bi), UVW(k)]
                 isfinite(u) || continue
                 UVWnum[b, bi, k] += tot_w * u
             end

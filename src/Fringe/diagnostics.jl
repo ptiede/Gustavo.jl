@@ -369,19 +369,19 @@ end
 # accumulator is indexed by `bi`, so the tasks write to disjoint slices and the
 # fan-out needs no reduction.
 function _accumulate_baseline_fringes!(
-        acc, Vg, Wg, Fg, g, gid, bl_pairs, feeds,
-        nchan::Int, nti::Int, nbl::Int, npol::Int, executor,
+        acc, Vg, Wg, Fg, g, gid, bl_pairs, feeds, executor,
     )
     UVData.check_layer_axes(Vg, Wg, Fg)
-    tforeach(1:nbl; scheduler = executor) do bi
+    tforeach(axes(Vg, Baseline); scheduler = executor) do bi
         a, b = bl_pairs[bi]
         a == b && return                                # skip autocorrelations
-        for p in axes(Vg, 4)
+        for p in axes(Vg, Pol)
             fa, fb = feeds[p]
-            @inbounds for ti in axes(Vg, 2), c in axes(Vg, 1)
-                Fg[c, ti, bi, p] && continue
-                w = Wg[c, ti, bi, p]
-                v = Vg[c, ti, bi, p]
+            @inbounds for ti in axes(Vg, Ti), c in axes(Vg, Frequency)
+                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+                Fg[cell] && continue
+                w = Wg[cell]
+                v = Vg[cell]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
                 k = gid[c]
                 acc.sb[c, bi, p] += w * v; acc.swb[c, bi, p] += w
@@ -468,7 +468,7 @@ function baseline_fringe_data(
         (; sb, swb, sa, swa, tb, twb, ta, twa, tbb, twbb, tab, twab),
         Vg, Wg, Fg, g, gid, UVData.baselines(stack).pairs,
         [correlation_feed_pair(pol_products(stack)[p]) for p in eachindex(pol_products(stack))],
-        nchan, nti, nbl, npol, executor,
+        executor,
     )
 
     fstep = _fringe_step(sol)

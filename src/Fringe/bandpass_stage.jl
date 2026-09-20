@@ -1092,14 +1092,14 @@ function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg
             numer = zero(eltype(S))
             denom = zero(T)
             for cell in axes(rseg, Frequency)
-                w = wseg[si, bi, p, cell]
+                w = wseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
                 w > 0 || continue
                 u = g[a, fa, ta, fseg[a, cell]] * conj(g[b, fb, tb, fseg[b, cell]])
                 abs2(u) > 0 || continue
-                numer += conj(u) * rseg[si, bi, p, cell]
+                numer += conj(u) * rseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
                 denom += w * abs2(u)
             end
-            S[si, bi, p] = denom > 0 ? numer / denom : zero(eltype(S))
+            S[Scan(si), Baseline(bi), Pol(p)] = denom > 0 ? numer / denom : zero(eltype(S))
         end
     end
     return nothing
@@ -1165,22 +1165,22 @@ function _update_station_gains!(
                 for si in axes(rseg, Scan)
                     # Only the scans this node's OWN segment covers constrain it.
                     tseg[ant, si] == ts || continue
-                    w = wseg[si, bi, p, cell]
+                    w = wseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
                     w > 0 || continue
-                    s = S[si, bi, p]
+                    s = S[Scan(si), Baseline(bi), Pol(p)]
                     if role === :a
                         tb = tseg[b, si]
                         iszero(tb) && continue
                         coeff = s * conj(g[b, fb, tb, fseg[b, cell]])
                         abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * rseg[si, bi, p, cell]
+                        num[sa] += conj(coeff) * rseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
                         den[sa] += w * abs2(coeff)
                     else
                         ta = tseg[a, si]
                         iszero(ta) && continue
                         coeff = conj(g[a, fa, ta, fseg[a, cell]] * s)
                         abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * conj(rseg[si, bi, p, cell])
+                        num[sa] += conj(coeff) * conj(rseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)])
                         den[sa] += w * abs2(coeff)
                     end
                 end

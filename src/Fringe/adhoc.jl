@@ -1099,14 +1099,14 @@ end
 # before this kernel ever sees it.
 function _accumulate_leaf_rbar!(rbar, wbar, V, W, F)
     UVData.check_layer_axes(V, W, F)
-    nchan, nti, nbl, npol = size(V)
-    @inbounds for p in axes(V, 4)
-        for bi in axes(V, 3)
-            for tt in axes(V, 2), c in axes(V, 1)
-                F[c, tt, bi, p] && continue
-                w = W[c, tt, bi, p]
+    @inbounds for p in axes(V, Pol)
+        for bi in axes(V, Baseline)
+            for tt in axes(V, Ti), c in axes(V, Frequency)
+                cell = (Frequency(c), Ti(tt), Baseline(bi), Pol(p))
+                F[cell] && continue
+                w = W[cell]
                 (w > 0 && isfinite(w)) || continue
-                v = V[c, tt, bi, p]
+                v = V[cell]
                 isfinite(v) || continue
                 rbar[bi, p, tt] += w * v
                 wbar[bi, p, tt] += w

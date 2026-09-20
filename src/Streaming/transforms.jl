@@ -544,36 +544,37 @@ end
 # outright. A flagged sample keeps the visibility and weight it arrived with —
 # nothing scaled it, so there is nothing to record but the flag.
 function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, executor)
-    V = parent(stack[:vis])
-    W = parent(stack[:weights])
-    Fl = parent(stack[:flags])
+    V = stack[:vis]
+    W = stack[:weights]
+    Fl = stack[:flags]
     UVData.check_layer_axes(V, W, Fl)
     bl_pairs = UVData.baselines(stack).pairs
     pols = UVData.pol_products(stack)
-    cols = [(bi, p) for p in axes(V, 4) for bi in axes(V, 3)]
+    cols = [(bi, p) for p in axes(V, Pol) for bi in axes(V, Baseline)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
         a, b = bl_pairs[bi]
         if a == b
-            for t in axes(V, 2), c in axes(V, 1)
-                Fl[c, t, bi, p] = true
+            for t in axes(V, Ti), c in axes(V, Frequency)
+                Fl[Frequency(c), Ti(t), Baseline(bi), Pol(p)] = true
             end
             return
         end
         fa, fb = UVData.correlation_feed_pair(pols[p])
-        for t in axes(V, 2)
-            for c in axes(V, 1)
-                Fl[c, t, bi, p] && continue
-                w = W[c, t, bi, p]
+        for t in axes(V, Ti)
+            for c in axes(V, Frequency)
+                cell = (Frequency(c), Ti(t), Baseline(bi), Pol(p))
+                Fl[cell] && continue
+                w = W[cell]
                 (w > 0 && isfinite(w)) || continue
                 ga = gains[c, t, a, fa]
                 gb = gains[c, t, b, fb]
                 if !(isfinite(ga) && isfinite(gb))
-                    Fl[c, t, bi, p] = true
+                    Fl[cell] = true
                     continue
                 end
-                V[c, t, bi, p] /= ga * gb
-                W[c, t, bi, p] *= (ga * gb)^2
+                V[cell] /= ga * gb
+                W[cell] *= (ga * gb)^2
             end
         end
     end

@@ -427,13 +427,17 @@ end
     # these kernels ALREADY-reweighted (V, W) must give back exactly that
     # inverse-variance mean, with no further correction applied.
     nchan, nti, nbl, npol = 2, 1, 1, 1
-    V = zeros(ComplexF32, nchan, nti, nbl, npol)
-    W = zeros(Float32, nchan, nti, nbl, npol)
+    # The kernels read their layers by dimension name, so the fixture carries the
+    # dimensions the pipeline hands them rather than a bare array in an order the
+    # test and the kernel would have to agree on out of band.
+    axs = (Frequency([2.2e10, 2.2e10 + 1.0e6]), Ti([0.0]), Baseline(1:nbl), Pol(["PP"]))
+    V = DimArray(zeros(ComplexF32, nchan, nti, nbl, npol), axs)
+    W = DimArray(zeros(Float32, nchan, nti, nbl, npol), axs)
     V[1, 1, 1, 1] = 1.0 + 0.0im          # channel 1: unit gain ⇒ unchanged, weight 1
     V[2, 1, 1, 1] = 10.0im               # channel 2: pre-corrected by |g|² = 0.01,
     W[1, 1, 1, 1] = 1.0                  # so its weight is reweighted to 0.0001
     W[2, 1, 1, 1] = 0.0001
-    F = falses(nchan, nti, nbl, npol)
+    F = DimArray(falses(nchan, nti, nbl, npol), axs)
     bl = [(1, 2)]
     rbar = zeros(ComplexF64, nbl, npol, nti)
     wbar = zeros(Float64, nbl, npol, nti)
@@ -445,6 +449,25 @@ end
     FP._accumulate_leaf_band_phasor!(z, wz, V, W, F, bl, ["PP"])
     @test wz[1, 1] ≈ 1.0001
     @test z[1, 1] / wz[1, 1] ≈ (1.0 + 0.001im) / 1.0001
+
+    # Same data in a different memory layout is the same measurement: the kernels
+    # locate every axis by name, so only the dimensions decide what is read.
+    perm = (Pol, Baseline, Ti, Frequency)
+    rbar_p = zeros(ComplexF64, nbl, npol, nti)
+    wbar_p = zeros(Float64, nbl, npol, nti)
+    FP._accumulate_leaf_rbar!(
+        rbar_p, wbar_p, permutedims(V, perm), permutedims(W, perm), permutedims(F, perm),
+    )
+    @test rbar_p == rbar
+    @test wbar_p == wbar
+    z_p = zeros(ComplexF64, nbl, npol)
+    wz_p = zeros(Float64, nbl, npol)
+    FP._accumulate_leaf_band_phasor!(
+        z_p, wz_p, permutedims(V, perm), permutedims(W, perm), permutedims(F, perm),
+        bl, ["PP"],
+    )
+    @test z_p == z
+    @test wz_p == wz
 
     # A flagged channel contributes nothing even though its weight is positive.
     F[2, 1, 1, 1] = true

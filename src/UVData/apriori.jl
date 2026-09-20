@@ -332,24 +332,25 @@ function _apply_apriori_kernel(
         # downstream — the fringe solve already skips them.
         if a == b
             for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
-                flags_corr[c, ti, bi, p] = true
+                flags_corr[Frequency(c), Ti(ti), Baseline(bi), Pol(p)] = true
             end
             continue
         end
         for p in axes(vis_p, Pol)
             fa, fb = correlation_feed_pair(pol_products[Int(p)])
             for c in axes(vis_p, Frequency)
-                flags_p[c, ti, bi, p] && continue
-                w = w_p[c, ti, bi, p]
+                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+                flags_p[cell] && continue
+                w = w_p[cell]
                 (w > 0 && isfinite(w)) || continue
                 ga = gains[c, ti, a, fa]
                 gb = gains[c, ti, b, fb]
                 if !(isfinite(ga) && isfinite(gb))
-                    flags_corr[c, ti, bi, p] = true
+                    flags_corr[cell] = true
                     continue
                 end
-                vis_corr[c, ti, bi, p] /= ga * gb
-                weights_corr[c, ti, bi, p] *= (ga * gb)^2
+                vis_corr[cell] /= ga * gb
+                weights_corr[cell] *= (ga * gb)^2
             end
         end
     end
