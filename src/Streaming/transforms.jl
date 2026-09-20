@@ -644,7 +644,7 @@ station_weight_scale(uvset::UVSet, factors; default::Real = 1.0) = station_weigh
 )
 
 function station_weight_scale(names::AbstractVector{<:AbstractString}, factors; default::Real = 1.0)
-    s = fill(Float64(default), length(names))
+    s = fill!(similar(names, Float64), Float64(default))
     for (code, f) in pairs(factors)
         i = findfirst(==(String(code)), names)
         i === nothing && continue

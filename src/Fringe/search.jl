@@ -344,6 +344,11 @@ A block taken from a solver cube needs no constructor — slice the scan stack
 instead, `view(stack, Baseline(bi), Pol(p))`.
 """
 function fringe_plane(V, W, freqs, times; flags = nothing)
+    # The returned stack's lookups are `freqs`/`times` themselves, so the block
+    # is read 1-based. Declared here, where the argument can be named: the
+    # vector path reshapes, which would otherwise drop an offset silently.
+    Base.require_one_based_indexing(V, W)
+    flags === nothing || Base.require_one_based_indexing(flags)
     size(V) == size(W) || throw(
         DimensionMismatch("V is $(size(V)) and W is $(size(W)); they must have the same shape")
     )

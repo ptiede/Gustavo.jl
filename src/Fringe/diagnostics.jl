@@ -561,15 +561,17 @@ end
 # the wrapped increment (no unwrap needed) and weights by |z|; skips flagged cells
 # and the sub-band-boundary jumps (Δf ≫ in-band spacing) where the increment wraps.
 function _baseline_delay(z::AbstractVector, freqs::AbstractVector)
+    # `z` and `freqs` are read at the same index, so they must share one axis.
+    eachindex(z, freqs)
     df = Float64[]
-    @inbounds for c in 1:(length(freqs) - 1)
+    for c in firstindex(freqs):(lastindex(freqs) - 1)
         d = freqs[c + 1] - freqs[c]
         d > 0 && push!(df, d)
     end
     isempty(df) && return NaN
     dfmed = median(df)
     num = 0.0; den = 0.0
-    @inbounds for c in 1:(length(z) - 1)
+    for c in firstindex(z):(lastindex(z) - 1)
         z1 = z[c]; z2 = z[c + 1]
         (isfinite(z1) && isfinite(z2) && abs(z1) > 0 && abs(z2) > 0) || continue
         d = freqs[c + 1] - freqs[c]

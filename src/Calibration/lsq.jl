@@ -35,6 +35,8 @@ local fit (so the smoother also interpolates gaps), and the polynomial order is
 reduced where a window has too few finite samples. Returns a new vector.
 """
 function savitzky_golay_smooth(y::AbstractVector, weights = nothing; window::Integer = 11, order::Integer = 2)
+    Base.require_one_based_indexing(y)
+    weights === nothing || Base.require_one_based_indexing(weights)
     n = length(y)
     out = collect(float.(y))
     h = window ÷ 2

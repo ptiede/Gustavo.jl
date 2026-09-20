@@ -22,6 +22,9 @@ include("test_xradio_bridge.jl")
 # FLAG and WEIGHT as independent layers.
 include("test_flags.jl")
 
+# The `AbstractArray` promise: generic where it is made, declared where it is not.
+include("test_generic_axes.jl")
+
 include("test_calibration.jl")
 
 # Gauge conventions: which constraint fixes each component's additive freedom.

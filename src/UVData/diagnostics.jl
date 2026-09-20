@@ -146,8 +146,8 @@ Non-finite entries stay `NaN`. If `phases[ref_idx]` is not finite the first
 finite entry is used instead; if none is, every entry is `NaN`.
 """
 function phase_relative_to_ref(phases, ref_idx = 1)
-    relative = fill(NaN, length(phases))
-    (1 <= ref_idx <= length(phases)) || return relative
+    relative = fill!(similar(phases, Float64), NaN)
+    (ref_idx in eachindex(phases)) || return relative
 
     ref = phases[ref_idx]
     if !isfinite(ref)
@@ -172,8 +172,8 @@ positive the first entry that is gets used instead; if none is, every entry is
 `NaN`.
 """
 function amplitude_relative_to_ref(amps, ref_idx = 1)
-    relative = fill(NaN, length(amps))
-    (1 <= ref_idx <= length(amps)) || return relative
+    relative = fill!(similar(amps, Float64), NaN)
+    (ref_idx in eachindex(amps)) || return relative
 
     ref = amps[ref_idx]
     if !(isfinite(ref) && ref > 0)
@@ -192,7 +192,7 @@ end
 # Index of the reference channel used to normalize amplitudes: `ref_idx` when
 # it names a positive finite amplitude, otherwise the first channel that does.
 function amplitude_reference_index(amps, ref_idx = 1)
-    if 1 <= ref_idx <= length(amps)
+    if ref_idx in eachindex(amps)
         ref = amps[ref_idx]
         isfinite(ref) && ref > 0 && return ref_idx
     end
