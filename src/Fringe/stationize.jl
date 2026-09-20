@@ -926,7 +926,9 @@ function _solve_tagged_system(
     A = zeros(Float64, nrow, nnodes)
     b = zeros(Float64, nrow)
     w = zeros(Float64, nrow)
-    @inbounds for i in 1:nrow
+    # `rowA`/`rowB` hold node numbers, so `A[i, n]` is indexed by value — that
+    # is what the annotation still carries.
+    @inbounds for i in axes(A, 1)
         for n in rowA[i]
             A[i, n] += 1.0
         end

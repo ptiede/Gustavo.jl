@@ -111,13 +111,13 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     keep_bl = trues(nbl)
     if haskey(kw, :Station)
         name = String(kw.Station)
-        @inbounds for bi in 1:nbl
+        for bi in eachindex(keep_bl, bls.ant1_names, bls.ant2_names)
             keep_bl[bi] &= (bls.ant1_names[bi] == name) || (bls.ant2_names[bi] == name)
         end
     end
     if haskey(kw, :Baseline)
         target = String(kw.Baseline isa AbstractString ? kw.Baseline : kw.Baseline.val)
-        @inbounds for bi in 1:nbl
+        for bi in eachindex(keep_bl, bls.labels)
             keep_bl[bi] &= bls.labels[bi] == target
         end
     end

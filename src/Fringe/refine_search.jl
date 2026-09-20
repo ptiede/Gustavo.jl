@@ -29,15 +29,15 @@
 function _accumulate_leaf_band_phasor!(z, w, V, W, F, bl_pairs, pols)
     UVData.check_layer_axes(V, W, F)
     nchan, nti, nbl, npol = size(V)
-    @inbounds for p in 1:npol
+    @inbounds for p in axes(V, 4)
         fa, fb = correlation_feed_pair(pols[p])
         fa == fb || continue                    # parallel hands only
-        for bi in 1:nbl
+        for bi in axes(V, 3)
             a, b = bl_pairs[bi]
             a == b && continue
             acc = zero(ComplexF64)
             wsum = 0.0
-            for tt in 1:nti, c in 1:nchan
+            for tt in axes(V, 2), c in axes(V, 1)
                 F[c, tt, bi, p] && continue
                 ww = W[c, tt, bi, p]
                 (ww > 0 && isfinite(ww)) || continue
@@ -71,12 +71,12 @@ function _fit_band_dispersion(
     y = Vector{ComplexF64}(undef, nb)
     function sweep(dts, τs)
         for dt in dts
-            @inbounds for b in 1:nb
+            for b in eachindex(y, zs, xdisp)
                 y[b] = zs[b] * cis(-dt * xdisp[b])
             end
             for τ in τs
                 acc = zero(ComplexF64)
-                @inbounds for b in 1:nb
+                for b in eachindex(y, xtau)
                     acc += y[b] * cis(-τ * xtau[b])
                 end
                 a = abs(acc)
@@ -153,13 +153,13 @@ end
 function _accumulate_leaf_chunks!(z, w, V, W, F, bl_pairs, pols, chunk_of_chan)
     UVData.check_layer_axes(V, W, F)
     nchan, nti, nbl, npol = size(V)
-    @inbounds for p in 1:npol
+    @inbounds for p in axes(V, 4)
         fa, fb = correlation_feed_pair(pols[p])
         fa == fb || continue
-        for bi in 1:nbl
+        for bi in axes(V, 3)
             a, b = bl_pairs[bi]
             a == b && continue
-            for tt in 1:nti, c in 1:nchan
+            for tt in axes(V, 2), c in axes(V, 1)
                 F[c, tt, bi, p] && continue
                 ww = W[c, tt, bi, p]
                 (ww > 0 && isfinite(ww)) || continue

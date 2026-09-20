@@ -395,16 +395,16 @@ function _coherence_accumulate!(
 
     # Bin-id tables (sample × interval), indexed by the ORIGINAL sample index.
     tid = Matrix{Int}(undef, nti, nT)
-    @inbounds for k in 1:nT
+    for k in eachindex(dts)
         dt = dts[k]
-        for ti in 1:nti
+        for ti in eachindex(times_sec)
             tid[ti, k] = dt > 0 ? floor(Int, (times_sec[ti] - t0) / dt) : 0
         end
     end
     fid = Matrix{Int}(undef, nchan, nF)
-    @inbounds for k in 1:nF
+    for k in eachindex(dnus)
         dnu = dnus[k]
-        for c in 1:nchan
+        for c in eachindex(freqs)
             fid[c, k] = dnu > 0 ? floor(Int, (freqs[c] - f0) / dnu) : 0
         end
     end
@@ -430,7 +430,10 @@ function _coherence_accumulate!(
     # so η ≡ 1 there — an identity both estimators preserve.
     binval(s::ComplexF64, sw::Float64, a::Float64) = debias ? (abs2(s) - 2 * a * sw) / sw : abs(s)
 
-    @inbounds for bli in 1:nbl
+    # Spanning the cube's own axes drops the checks on the `V`/`W`/`Fl` reads;
+    # the annotation stays for `blmap`, `alpha`, `den`/`npts` and the per-bin
+    # accumulators, which are indexed through values rather than loop ranges.
+    @inbounds for bli in axes(V, 3)
         bl = blmap[bli]
         bl == 0 && continue
         for pli in eachindex(plist)
@@ -445,7 +448,7 @@ function _coherence_accumulate!(
             # is unbiased at any SNR (a per-cell clipped amplitude would sit
             # noise-inflated above the true signal for weak cells, holding η
             # below 1 even after the numerator's bins reach high SNR).
-            for ti in 1:nti, c in 1:nchan
+            for ti in axes(V, 2), c in axes(V, 1)
                 _flagged(Fl, c, ti, bli, p) && continue
                 w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
@@ -541,13 +544,13 @@ function _noise_scale(
         Fl::AbstractArray{Bool, 4}, plist::Vector{Int},
     ) where {Tv, Tw}
     nchan, nti, nbl, npol = size(V)
-    alpha = ones(Float64, nbl, npol)
+    alpha = fill!(similar(V, Float64, (axes(V, 3), axes(V, 4))), 1.0)
     buf = Float64[]
-    @inbounds for bli in 1:nbl, p in plist
-        p in 1:npol || continue
+    @inbounds for bli in axes(V, 3), p in plist
+        p in axes(V, 4) || continue
         empty!(buf)
         if nchan > 1
-            for ti in 1:nti, c in 1:(nchan - 1)
+            for ti in axes(V, 2), c in firstindex(V, 1):(lastindex(V, 1) - 1)
                 (Fl[c, ti, bli, p] || Fl[c + 1, ti, bli, p]) && continue
                 w1 = W[c, ti, bli, p]; w2 = W[c + 1, ti, bli, p]
                 v1 = V[c, ti, bli, p]; v2 = V[c + 1, ti, bli, p]
@@ -588,12 +591,14 @@ function _collapse_axis(
         Fl::AbstractArray{Bool, 4}, axis::Int,
     )
     nchan, nti, nbl, npol = size(V)
-    on, no = axis == 1 ? (nchan, nti) : (nti, nchan)
+    # The collapsed axis keeps a length-1 slot; the surviving one keeps the
+    # cube's own axis, so a caller's axes flow into the result.
+    kept, gone = axis == 1 ? (axes(V, 2), axes(V, 1)) : (axes(V, 1), axes(V, 2))
     Vbar = fill(ComplexF64(NaN), axis == 1 ? 1 : nchan, axis == 1 ? nti : 1, nbl, npol)
     Wbar = zeros(Float64, axis == 1 ? 1 : nchan, axis == 1 ? nti : 1, nbl, npol)
-    @inbounds for p in 1:npol, bl in 1:nbl, j in 1:no
+    @inbounds for p in axes(V, 4), bl in axes(V, 3), j in kept
         s = zero(ComplexF64); w = 0.0
-        for i in 1:on
+        for i in gone
             c, ti = axis == 1 ? (i, j) : (j, i)
             Fl[c, ti, bl, p] && continue
             wc = W[c, ti, bl, p]; vc = V[c, ti, bl, p]

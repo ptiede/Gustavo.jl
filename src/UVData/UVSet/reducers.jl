@@ -125,9 +125,9 @@ function _time_average_kernel(
     end
 
     UVW_out = fill(Tuvw(NaN), 1, nbl, 3)
-    @inbounds for bi in 1:nbl
+    for bi in axes(UVW_out, 2)
         if UVW_w[1, bi] > 0
-            for k in 1:3
+            for k in axes(UVW_out, 3)
                 UVW_out[1, bi, k] = UVW_num[1, bi, k] / UVW_w[1, bi]
             end
         end
@@ -283,7 +283,7 @@ function _time_bins(ts::AbstractVector, dt_seconds::Real)
     ids = Vector{Int}(undef, n)
     nbin = 0
     last = typemin(Int)
-    @inbounds for i in 1:n
+    for i in eachindex(raw, ids)
         if raw[i] != last
             nbin += 1
             last = raw[i]
@@ -340,9 +340,11 @@ function _time_bin_average_kernel(
     tnum = zeros(Float64, nbin)
     tw = zeros(Float64, nbin)
 
-    @inbounds for ti in 1:nti
+    # `ids` and `Vnum`'s bin axis are what the annotation still guards: `b` is a
+    # value read out of `ids`, not a loop range the compiler can bound.
+    @inbounds for ti in axes(vis_p, 2)
         b = ids[ti]
-        for bi in 1:nbl
+        for bi in axes(vis_p, 3)
             tot_w = zero(Tw)
             for p in axes(vis_p, 4), c in axes(vis_p, 1)
                 f_p[c, ti, bi, p] && continue
@@ -370,14 +372,17 @@ function _time_bin_average_kernel(
         V[k] = Wsum[k] > 0 ? Vnum[k] / Wsum[k] : Tvis(NaN, NaN)
     end
     UVW_out = fill(Tuvw(NaN), nbin, nbl, 3)
-    @inbounds for bi in 1:nbl, b in 1:nbin
+    for bi in axes(UVW_out, 2), b in axes(UVW_out, 1)
         if UVWw[b, bi] > 0
-            for k in 1:3
+            for k in axes(UVW_out, 3)
                 UVW_out[b, bi, k] = UVWnum[b, bi, k] / UVWw[b, bi]
             end
         end
     end
-    tcenters = [tw[b] > 0 ? tnum[b] / tw[b] : (isempty(tvals) ? 0.0 : tvals[1]) for b in 1:nbin]
+    tcenters = [
+        tw[b] > 0 ? tnum[b] / tw[b] : (isempty(tvals) ? 0.0 : first(tvals))
+            for b in eachindex(tnum, tw)
+    ]
     return V, Wsum, UVW_out, tcenters
 end
 

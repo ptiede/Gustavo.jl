@@ -127,7 +127,11 @@ function evaluate_gains(ev::GainEvaluator, θ::AbstractVector)
     gains = Array{Complex{T}}(undef, lay.nchan, lay.ntime, lay.nant, 2)
     pp = lay.plantree.phase
     lp = lay.plantree.logamp
-    @inbounds for feed in 1:2, ant in 1:lay.nant, ti in 1:lay.ntime, c in 1:lay.nchan
+    # Spanning `gains`'s own axes is what lets the compiler drop the bounds
+    # check on the store; the `@inbounds` is still carrying the plans' grid
+    # tables, which `_check_window` and the layout invariants guarantee.
+    @inbounds for feed in axes(gains, 4), ant in axes(gains, 3),
+            ti in axes(gains, 2), c in axes(gains, 1)
         phase = _sum_group(pp, θ, ant, feed, ti, c)
         logamp = _sum_group(lp, θ, ant, feed, ti, c)
         gains[c, ti, ant, feed] = exp(logamp) * cis(phase)
@@ -171,8 +175,8 @@ function evaluate_gains(
     gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
     pp = lay.plantree.phase
     lp = lay.plantree.logamp
-    @inbounds for feed in 1:2, ant in 1:lay.nant
-        for (tii, ti) in enumerate(ti_idx), (ci, c) in enumerate(chan_idx)
+    @inbounds for feed in axes(gains, 4), ant in axes(gains, 3)
+        for (tii, ti) in zip(axes(gains, 2), ti_idx), (ci, c) in zip(axes(gains, 1), chan_idx)
             phase = _sum_group(pp, θ, ant, feed, ti, c)
             logamp = _sum_group(lp, θ, ant, feed, ti, c)
             gains[ci, tii, ant, feed] = exp(logamp) * cis(phase)
@@ -219,7 +223,7 @@ function evaluate_gains(
     lp = _resolve_tree(lay.plantree.logamp, solve_geom, target, chan_idx, ti_idx, time_span)
     T = float(eltype(θ))
     gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
-    @inbounds for feed in 1:2, ant in 1:lay.nant
+    @inbounds for feed in axes(gains, 4), ant in axes(gains, 3)
         for ti in axes(gains, 2), c in axes(gains, 1)
             phase = _sum_group(pp, θ, ant, feed, ti, c)
             logamp = _sum_group(lp, θ, ant, feed, ti, c)
@@ -279,20 +283,19 @@ function predict_visibilities(
         bl_a::AbstractVector{<:Integer}, bl_b::AbstractVector{<:Integer},
         feed_a::AbstractVector{<:Integer}, feed_b::AbstractVector{<:Integer}
     )
-    nchan, ntime, _, _ = size(gains)
-    nbl = length(bl_a)
-    length(bl_b) == nbl || error("bl_a and bl_b must have equal length")
-    npol = length(feed_a)
-    length(feed_b) == npol || error("feed_a and feed_b must have equal length")
-    V = Array{eltype(gains)}(undef, nchan, ntime, nbl, npol)
-    @inbounds for p in 1:npol
+    # `eachindex(x, y)` is both the pairing and the length check: the baseline
+    # and product axes of the result are the ones the caller's vectors carry.
+    bls = eachindex(bl_a, bl_b)
+    pols = eachindex(feed_a, feed_b)
+    V = similar(gains, (axes(gains, 1), axes(gains, 2), bls, pols))
+    for p in pols
         fa = feed_a[p]
         fb = feed_b[p]
-        for bi in 1:nbl
+        for bi in bls
             a = bl_a[bi]
             b = bl_b[bi]
             s = coh[bi, fa, fb]
-            for ti in 1:ntime, c in 1:nchan
+            for ti in axes(gains, 2), c in axes(gains, 1)
                 V[c, ti, bi, p] = gains[c, ti, a, fa] * s * conj(gains[c, ti, b, fb])
             end
         end

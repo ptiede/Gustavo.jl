@@ -370,7 +370,7 @@ function _parse_tsys_block(lines::Vector{String}, i::Int, year_int::Int)
         values = Matrix{Float64}(undef, 0, length(columns))
     else
         values = Matrix{Float64}(undef, length(rows), length(columns))
-        @inbounds for r in 1:length(rows), c in 1:length(columns)
+        for r in axes(values, 1), c in axes(values, 2)
             values[r, c] = rows[r][c]
         end
     end
@@ -470,7 +470,7 @@ function tsys_in_window(
     n == 0 && return NaN
     acc = 0.0
     cnt = 0
-    @inbounds for i in 1:n
+    for i in eachindex(times)
         if t_lo <= times[i] <= t_hi
             v = station.tsys.values[i, col]
             isfinite(v) || continue

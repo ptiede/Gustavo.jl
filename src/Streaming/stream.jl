@@ -382,8 +382,9 @@ function _cube_block!(
         Vg::Array{ComplexF32, 4}, Wg::Array{Float32, 4}, Fg::Array{Bool, 4}, V, W, F,
         dst0::Int, lc0::Int, nbc::Int,
     )
-    _, nti, nbl, npol = size(Vg)
-    @inbounds for p in 1:npol, bl in 1:nbl, ti in 1:nti
+    # The outer ranges are the destination's own axes; the annotation carries
+    # the channel axis, whose indices are formed by arithmetic on `dst0`/`lc0`.
+    @inbounds for p in axes(Vg, 4), bl in axes(Vg, 3), ti in axes(Vg, 2)
         @simd for c in 0:(nbc - 1)
             Vg[dst0 + c, ti, bl, p] = V[lc0 + c, ti, bl, p]
             Wg[dst0 + c, ti, bl, p] = W[lc0 + c, ti, bl, p]

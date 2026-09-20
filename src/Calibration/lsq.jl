@@ -271,7 +271,7 @@ function unwrap_phase_track(phases; weights = nothing)
         # Choose the highest-weight finite channel as the unwrap seed.
         best_w = -Inf
         best_i = findfirst(finite)
-        @inbounds for i in 1:n
+        for i in eachindex(finite, weights)
             (finite[i] && isfinite(weights[i])) || continue
             if weights[i] > best_w
                 best_w = weights[i]
@@ -283,14 +283,14 @@ function unwrap_phase_track(phases; weights = nothing)
     isnothing(ref_idx) && return unwrapped
 
     last = unwrapped[ref_idx]
-    for i in (ref_idx + 1):n
+    for i in (ref_idx + 1):lastindex(unwrapped)
         isfinite(unwrapped[i]) || continue
         unwrapped[i] += 2π * round((last - unwrapped[i]) / (2π))
         last = unwrapped[i]
     end
 
     last = unwrapped[ref_idx]
-    for i in (ref_idx - 1):-1:1
+    for i in (ref_idx - 1):-1:firstindex(unwrapped)
         isfinite(unwrapped[i]) || continue
         unwrapped[i] += 2π * round((last - unwrapped[i]) / (2π))
         last = unwrapped[i]

@@ -300,7 +300,7 @@ function freq_segment_ids(seg::ChannelBlocks, geom::DataGeometry)
     spw_counter = Dict{Int, Int}()
     nextlabel = Dict{Tuple{Int, Int}, Int}()
     nlab = 0
-    @inbounds for c in 1:n
+    for c in eachindex(labels, spw)
         k = get(spw_counter, spw[c], 0)
         block = k ÷ seg.block_size
         spw_counter[spw[c]] = k + 1

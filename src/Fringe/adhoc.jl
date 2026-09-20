@@ -387,7 +387,7 @@ end
 function _track_noise2(rbar, wbar, bi::Int, p::Int, nap::Int)
     d2 = Float64[]
     prev = ComplexF64(NaN, NaN)
-    @inbounds for ap in 1:nap
+    @inbounds for ap in axes(wbar, 3)
         w = wbar[bi, p, ap]
         v = w > 0 ? rbar[bi, p, ap] / w : ComplexF64(NaN, NaN)
         (isfinite(v) && isfinite(prev)) && push!(d2, abs2(v - prev))
@@ -482,7 +482,7 @@ end
 function _adhoc_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, snr_floor2::Real, tying)
     rows = _ObsRow[]
     nbl = length(bl_pairs)
-    @inbounds for bi in 1:nbl, p in eachindex(feeds)
+    @inbounds for bi in eachindex(bl_pairs), p in eachindex(feeds)
         a, b = bl_pairs[bi]
         a == b && continue
         fa, fb = feeds[p]
@@ -780,7 +780,7 @@ end
 function _linearized_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, tying, phase, sbar)
     rows = _ObsRow[]
     nbl = length(bl_pairs)
-    @inbounds for bi in 1:nbl, p in eachindex(feeds)
+    @inbounds for bi in eachindex(bl_pairs), p in eachindex(feeds)
         a, b = bl_pairs[bi]
         a == b && continue
         na = _feed_node(tying, feeds[p][1])
@@ -1100,8 +1100,8 @@ end
 function _accumulate_leaf_rbar!(rbar, wbar, V, W, F)
     UVData.check_layer_axes(V, W, F)
     nchan, nti, nbl, npol = size(V)
-    @inbounds for p in 1:npol
-        for bi in 1:nbl
+    @inbounds for p in axes(V, 4)
+        for bi in axes(V, 3)
             for tt in axes(V, 2), c in axes(V, 1)
                 F[c, tt, bi, p] && continue
                 w = W[c, tt, bi, p]

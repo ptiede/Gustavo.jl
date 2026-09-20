@@ -479,9 +479,8 @@ function _plane_noise2!(ws::FringeWorkspace, Wsum::Float64)
     dwin = ws.dwin
     empty!(dwin)
     D = ws.D
-    ntot = length(D)
-    stride = max(1, ntot ÷ 20000)
-    @inbounds for idx in 1:stride:ntot
+    stride = max(1, length(D) ÷ 20000)
+    for idx in firstindex(D):stride:lastindex(D)
         push!(dwin, abs2(D[idx]))
     end
     return length(dwin) > 2 ? max(median(dwin) / log(2), eps(Float64)) : Wsum
@@ -605,7 +604,7 @@ function _exact_matched_filter(
     _check_plane_axes(V, W, F)
     nchan, ntime = size(V)
     cf = Vector{C}(undef, nchan)
-    @inbounds for ci in 1:nchan
+    for ci in eachindex(cf, freqs)
         cf[ci] = cis(-2π * delay * (freqs[ci] - f0))
     end
     Dref = zero(C)
@@ -1020,7 +1019,9 @@ end
 function _stage2_plane!(w::_MBDWorkspace{C}, mx::_MBDAxes, sj::Int) where {C}
     Mc = w.Mc
     fill!(Mc, zero(C))
-    @inbounds for b in 1:w.nfreqgroup, rj in 1:w.nrw
+    # `bc_bin` scatters by value, which no loop range can bound — that is what
+    # the annotation still carries here.
+    @inbounds for b in axes(w.X, 3), rj in axes(w.X, 2)
         Mc[mx.bc_bin[b], rj] += w.X[sj, rj, b]
     end
     mul!(w.Dc, mx.planc, Mc)
@@ -1033,7 +1034,7 @@ end
 function _stage2_value(w::_MBDWorkspace{C}, mx::_MBDAxes, sj::Int, m::Int, rj::Int) where {C}
     acc = zero(C)
     ph = -2π * (m - 1) / mx.nbc_pad
-    @inbounds for b in 1:w.nfreqgroup
+    @inbounds for b in axes(w.X, 3)
         acc += w.X[sj, rj, b] * cis(ph * (mx.bc_bin[b] - 1))
     end
     return acc
@@ -1085,16 +1086,16 @@ function _mbd_fringe_search(
         end
         mul!(w.Db, mx.planb, Gb)
         empty!(dwin)
-        ntot = length(w.Db)
-        stride = max(1, ntot ÷ max(64, 20000 ÷ nfreqgroup))
-        @inbounds for idx in 1:stride:ntot
+        stride = max(1, length(w.Db) ÷ max(64, 20000 ÷ nfreqgroup))
+        for idx in firstindex(w.Db):stride:lastindex(w.Db)
             push!(dwin, abs2(w.Db[idx]))
         end
         if length(dwin) > 2
             noise2 += median(dwin) / log(2)
             nnoise += 1
         end
-        @inbounds for (rj, l) in enumerate(mx.rate_idx), (sj, k) in enumerate(mx.sbd_idx)
+        @inbounds for (rj, l) in zip(axes(w.X, 2), mx.rate_idx),
+                (sj, k) in zip(axes(w.X, 1), mx.sbd_idx)
             w.X[sj, rj, bi] = w.Db[k, l]
         end
     end
@@ -1111,7 +1112,7 @@ function _mbd_fringe_search(
     for sj in 1:nsbd
         Dc = _stage2_plane!(w, mx, sj)
         sv = mx.sbd_val[sj]
-        @inbounds for rj in mx.rate_scan, m in 1:nbc
+        @inbounds for rj in mx.rate_scan, m in axes(Dc, 1)
             a = abs(Dc[m, rj])
             a > peak || continue
             # Total-delay candidate: the MBD unfolded to the branch nearest this
