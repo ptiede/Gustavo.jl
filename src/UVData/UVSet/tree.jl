@@ -1,25 +1,32 @@
 function _build_leaf(
         vis::AbstractDimArray, weights::AbstractDimArray,
-        uvw::AbstractDimArray;
+        uvw::AbstractDimArray, flags::AbstractDimArray;
         partition_info::PartitionInfo,
     )
     vis_dims = dims(vis)
     uvw_dims = dims(uvw)
     vis_names = map(DimensionalData.name, vis_dims)
     uvw_names = map(DimensionalData.name, uvw_dims)
+    axes(flags) == axes(vis) || throw(
+        DimensionMismatch(
+            "flags must share the vis axes: $(axes(flags)) vs $(axes(vis))"
+        ),
+    )
     nm = DimensionalData.Lookups.NoMetadata()
     data_dict = DimensionalData.DataDict(
         :vis => parent(vis),
         :weights => parent(weights),
+        :flags => parent(flags),
         :uvw => parent(uvw),
     )
     layerdims = DimensionalData.TupleDict(
         :vis => vis_names,
         :weights => vis_names,
+        :flags => vis_names,
         :uvw => uvw_names,
     )
     layermetadata = DimensionalData.DataDict(
-        :vis => nm, :weights => nm, :uvw => nm,
+        :vis => nm, :weights => nm, :flags => nm, :uvw => nm,
     )
     all_dims = (vis_dims..., DimensionalData.otherdims(uvw_dims, vis_dims)...)
     return DimensionalData.DimTree(;
@@ -65,7 +72,7 @@ function _extract_scan_leaf(
     nchan = size(vis_flat, 3)
 
     # Memory layout: frequency varies fastest, pol slowest. Order is
-    # (Frequency, Ti, Baseline, Pol) for vis/weights/flag and
+    # (Frequency, Ti, Baseline, Pol) for vis/weights/flags and
     # (UVW, Ti, Baseline) for uvw — matches xradio MSv4 frequency-fastest
     # convention and gives stride-1 channel access in bandpass loops.
     vis_dense = fill(
@@ -101,6 +108,9 @@ function _extract_scan_leaf(
         ),
     )
     weights_part = DimArray(weights_dense, dims(vis_part))
+    # `weights_dense` starts at zero, so a (time, baseline) slot no record
+    # filled is flagged along with every sample the reader marked bad.
+    flags_part = DimArray(.!(weights_dense .> 0), dims(vis_part))
     uvw_part = DimArray(
         uvw_dense,
         (Ti(unique_times), Baseline(baselines_scan.labels), UVW(["U", "V", "W"])),
@@ -128,6 +138,6 @@ function _extract_scan_leaf(
         ddi = Int(spw_index) - 1,
         basename = basename,
     )
-    leaf = _build_leaf(vis_part, weights_part, uvw_part; partition_info = info)
+    leaf = _build_leaf(vis_part, weights_part, uvw_part, flags_part; partition_info = info)
     return leaf, info
 end

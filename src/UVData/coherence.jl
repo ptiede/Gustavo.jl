@@ -255,7 +255,7 @@ function coherence_report(
     # Pass 2 — materialize each leaf and accumulate.
     for leaf in values(src)
         m = materialize_leaf(leaf)
-        V = parent(m[:vis]); W = parent(m[:weights])
+        V = parent(m[:vis]); W = parent(m[:weights]); Fl = parent(m[:flags])
         labels = String.(pol_products(m))
         plist = _select_coherence_pols(labels, pols)
         # Pass 1 captured the first leaf's labels/antennas, but pass 2 pools all
@@ -279,18 +279,18 @@ function coherence_report(
         # so the debias trusts the weights only for RELATIVE cell weighting. α is
         # a property of the weights against the true noise and is preserved
         # exactly by the weighted averaging `_collapse_axis` performs.
-        alpha = debias ? _noise_scale(V, W, plist) : ones(Float64, size(V, 3), size(V, 4))
+        alpha = debias ? _noise_scale(V, W, Fl, plist) : ones(Float64, size(V, 3), size(V, 4))
         if marginalize
             # Coherently average the other axis first (incoherent/segmented style), so
             # each curve is measured on high-SNR samples and the debias is reliable.
             f0m = isempty(freqs) ? 0.0 : sum(freqs) / length(freqs)
             t0m = isempty(times_sec) ? 0.0 : sum(times_sec) / length(times_sec)
-            Vt, Wt = _collapse_axis(V, W, 1)        # band-average per AP → time curve
-            _coherence_accumulate!(numT, dumF, denT, dvarT, npts, Vt, Wt, blmap, plist, times_sec, [f0m], dts, [1.0], debias, alpha)
-            Vf, Wf = _collapse_axis(V, W, 2)        # time-average per channel → freq curve
-            _coherence_accumulate!(dumT, numF, denF, dvarF, dumN, Vf, Wf, blmap, plist, [t0m], freqs, [1.0], dnus, debias, alpha)
+            Vt, Wt = _collapse_axis(V, W, Fl, 1)        # band-average per AP → time curve
+            _coherence_accumulate!(numT, dumF, denT, dvarT, npts, Vt, Wt, nothing, blmap, plist, times_sec, [f0m], dts, [1.0], debias, alpha)
+            Vf, Wf = _collapse_axis(V, W, Fl, 2)        # time-average per channel → freq curve
+            _coherence_accumulate!(dumT, numF, denF, dvarF, dumN, Vf, Wf, nothing, blmap, plist, [t0m], freqs, [1.0], dnus, debias, alpha)
         else
-            _coherence_accumulate!(numT, numF, denT, dvarT, npts, V, W, blmap, plist, times_sec, freqs, dts, dnus, debias, alpha)
+            _coherence_accumulate!(numT, numF, denT, dvarT, npts, V, W, Fl, blmap, plist, times_sec, freqs, dts, dnus, debias, alpha)
         end
     end
 
@@ -372,13 +372,20 @@ end
 # accumulators. The denominator Σ w·|V| and `npts` are interval-independent, summed
 # once. Intervals are used as given (the auto sweep nudges its terminal just above
 # the span so the whole leaf lands in one bin).
+# `Fl` is the flag layer over `V`, or `nothing` for an already-collapsed cube:
+# `_collapse_axis` has excluded the flagged samples, so the reduced cells carry
+# no flag of their own.
+@inline _flagged(::Nothing, I...) = false
+Base.@propagate_inbounds _flagged(Fl, I...) = Fl[I...]
+
 function _coherence_accumulate!(
         numT::Matrix{Float64}, numF::Matrix{Float64}, den::Vector{Float64}, dvar::Vector{Float64},
         npts::Vector{Int},
-        V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, blmap::Vector{Int}, plist::Vector{Int},
+        V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, Fl, blmap::Vector{Int}, plist::Vector{Int},
         times_sec::Vector{Float64}, freqs::Vector{Float64}, dts::Vector{Float64}, dnus::Vector{Float64},
         debias::Bool, alpha::Matrix{Float64},
     ) where {Tv, Tw}
+    Fl === nothing || check_layer_axes(V, W, Fl)
     nchan, nti, nbl, npol = size(V)
     nT = length(dts); nF = length(dnus)
     tperm = sortperm(times_sec)
@@ -439,6 +446,7 @@ function _coherence_accumulate!(
             # noise-inflated above the true signal for weak cells, holding η
             # below 1 even after the numerator's bins reach high SNR).
             for ti in 1:nti, c in 1:nchan
+                _flagged(Fl, c, ti, bli, p) && continue
                 w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
                 a2 = abs2(ComplexF64(v))
@@ -458,6 +466,7 @@ function _coherence_accumulate!(
                     accT[k] = zero(ComplexF64); swT[k] = 0.0; haveT[k] = false
                 end
                 for ti in tperm
+                    _flagged(Fl, c, ti, bli, p) && continue
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                     (w > 0 && isfinite(w) && isfinite(v)) || continue
                     wv = w * ComplexF64(v)
@@ -484,6 +493,7 @@ function _coherence_accumulate!(
                     accF[k] = zero(ComplexF64); swF[k] = 0.0; haveF[k] = false
                 end
                 for c in cperm
+                    _flagged(Fl, c, ti, bli, p) && continue
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                     (w > 0 && isfinite(w) && isfinite(v)) || continue
                     wv = w * ComplexF64(v)
@@ -526,7 +536,10 @@ end
 # Residual signal leakage into the difference (a delay slope across adjacent
 # channels of RAW data) inflates α slightly at high SNR, where the debias is
 # negligible anyway; on corrected data the signal is flat and cancels exactly.
-function _noise_scale(V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, plist::Vector{Int}) where {Tv, Tw}
+function _noise_scale(
+        V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4},
+        Fl::AbstractArray{Bool, 4}, plist::Vector{Int},
+    ) where {Tv, Tw}
     nchan, nti, nbl, npol = size(V)
     alpha = ones(Float64, nbl, npol)
     buf = Float64[]
@@ -535,6 +548,7 @@ function _noise_scale(V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, plist::V
         empty!(buf)
         if nchan > 1
             for ti in 1:nti, c in 1:(nchan - 1)
+                (Fl[c, ti, bli, p] || Fl[c + 1, ti, bli, p]) && continue
                 w1 = W[c, ti, bli, p]; w2 = W[c + 1, ti, bli, p]
                 v1 = V[c, ti, bli, p]; v2 = V[c + 1, ti, bli, p]
                 (w1 > 0 && w2 > 0 && isfinite(w1) && isfinite(w2) && isfinite(v1) && isfinite(v2)) || continue
@@ -547,6 +561,7 @@ function _noise_scale(V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, plist::V
         if length(buf) < 32 && nti > 1
             empty!(buf)
             for c in 1:nchan, ti in 1:(nti - 1)
+                (Fl[c, ti, bli, p] || Fl[c, ti + 1, bli, p]) && continue
                 w1 = W[c, ti, bli, p]; w2 = W[c, ti + 1, bli, p]
                 v1 = V[c, ti, bli, p]; v2 = V[c, ti + 1, bli, p]
                 (w1 > 0 && w2 > 0 && isfinite(w1) && isfinite(w2) && isfinite(v1) && isfinite(v2)) || continue
@@ -568,7 +583,10 @@ end
 # preserving the inverse-variance convention the debias relies on). For corrected
 # data this is the high-SNR band-average (axis 1) or time-average (axis 2) used by
 # `coherence_report(marginalize = true)`; cells with no weight become `NaN`.
-function _collapse_axis(V::AbstractArray{<:Any, 4}, W::AbstractArray{<:Any, 4}, axis::Int)
+function _collapse_axis(
+        V::AbstractArray{<:Any, 4}, W::AbstractArray{<:Any, 4},
+        Fl::AbstractArray{Bool, 4}, axis::Int,
+    )
     nchan, nti, nbl, npol = size(V)
     on, no = axis == 1 ? (nchan, nti) : (nti, nchan)
     Vbar = fill(ComplexF64(NaN), axis == 1 ? 1 : nchan, axis == 1 ? nti : 1, nbl, npol)
@@ -577,6 +595,7 @@ function _collapse_axis(V::AbstractArray{<:Any, 4}, W::AbstractArray{<:Any, 4}, 
         s = zero(ComplexF64); w = 0.0
         for i in 1:on
             c, ti = axis == 1 ? (i, j) : (j, i)
+            Fl[c, ti, bl, p] && continue
             wc = W[c, ti, bl, p]; vc = V[c, ti, bl, p]
             (wc > 0 && isfinite(wc) && isfinite(vc)) || continue
             s += Float64(wc) * ComplexF64(vc); w += Float64(wc)

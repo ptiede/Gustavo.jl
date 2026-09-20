@@ -603,7 +603,7 @@ function time_segment_ids(
         w = _span_at(time_span, k)
         (w <= 0 || (bin(t - w / 2) == b && bin(t + w / 2) == b)) || throw(
             ArgumentError(
-                "$(_seg_label(seg)): the target epoch $t h integrates over $w h and crosses a " *
+                "$(_seg_label(seg)): the target epoch $t s integrates over $w s and crosses a " *
                     "segment boundary of the solution, which is segmented more finely than the " *
                     "data — no single segment applies."
             )
@@ -611,7 +611,7 @@ function time_segment_ids(
         s = get(of_bin, b, 0)
         s == 0 && throw(
             ArgumentError(
-                "$(_seg_label(seg)): the target epoch $t h falls in bin $b, which no solve " *
+                "$(_seg_label(seg)): the target epoch $t s falls in bin $b, which no solve " *
                     "epoch populated, so the solution has no segment covering it."
             )
         )
@@ -648,8 +648,8 @@ function time_segment_ids(
             hi = searchsortedlast(st, t + w / 2)
             hi > lo && throw(
                 ArgumentError(
-                    "$(_seg_label(seg)): the target epoch $t h integrates over $w h, covering " *
-                        "solve epochs $(join(st[lo:hi], ", ")) h — the solution is segmented " *
+                    "$(_seg_label(seg)): the target epoch $t s integrates over $w s, covering " *
+                        "solve epochs $(join(st[lo:hi], ", ")) s — the solution is segmented " *
                         "more finely than the data and no single segment applies."
                 )
             )

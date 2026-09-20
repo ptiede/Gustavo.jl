@@ -143,7 +143,7 @@
         stp = FP.scan_stream(uvset; geom = geom, transforms = (probe, FP.FlagChannels(mask)))
         keyed = FP.materialize_leaves(stp, stp.groups[1])
         @test length(captured) == length(keyed)
-        # The stack is `leaf[(:vis, :weights)]` — the leaf's own
+        # The stack is `leaf[(:vis, :weights, :flags)]` — the leaf's own
         # PartitionInfo comes along with the selection, nothing is rebuilt.
         for c in captured
             @test DimensionalData.metadata(c.stack) isa UVP.PartitionInfo

@@ -17,6 +17,11 @@ using PolarizedTypes: RPol, LPol
 # Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
 include("plan_offsets.jl")
 
+include("test_xradio_bridge.jl")
+
+# FLAG and WEIGHT as independent layers.
+include("test_flags.jl")
+
 include("test_calibration.jl")
 
 # Gauge conventions: which constraint fixes each component's additive freedom.
@@ -774,7 +779,7 @@ function synthetic_uvdata_3c273()
             partition_name = "synthetic_0_3C273_$(info.scan_name)",
         )
         new_leaf = UV._build_leaf(
-            leaf[:vis], leaf[:weights], leaf[:uvw];
+            leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flags];
             partition_info = info_3c,
         )
         new_key = UV.partition_key(info_3c)
@@ -806,7 +811,8 @@ function synthetic_uvdata_3c273_shifted()
         new_vis = _replace_ti(old_vis, new_t)
         new_w = _replace_ti(leaf[:weights], new_t)
         new_uvw = _replace_ti(leaf[:uvw], new_t)
-        new_leaf = UV._build_leaf(new_vis, new_w, new_uvw; partition_info = info)
+        new_flags = _replace_ti(leaf[:flags], new_t)
+        new_leaf = UV._build_leaf(new_vis, new_w, new_uvw, new_flags; partition_info = info)
         new_branches[k] = new_leaf
     end
     return Gustavo.UVData.DimensionalData.rebuild(src; branches = new_branches)
@@ -992,7 +998,7 @@ end
         if info.scan_name == "2"
             new_info = UV.update(info; freq_setup = fs_alt)
             new_leaf = UV._build_leaf(
-                leaf[:vis], leaf[:weights], leaf[:uvw];
+                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flags];
                 partition_info = new_info,
             )
             branches[k] = new_leaf
@@ -1163,7 +1169,7 @@ end
     )
     bad_info = UV.update(info; baselines = bad_bls)
     bad_leaf = UV._build_leaf(
-        leaf[:vis], leaf[:weights], leaf[:uvw];
+        leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flags];
         partition_info = bad_info,
     )
     branches = Gustavo.UVData.DimensionalData.TreeDict(:src_TEST_spw_0_scan_1 => bad_leaf)
@@ -1280,7 +1286,7 @@ end
         if info.scan_name == "1"
             sub_info = UV.update(info; sub_scan_name = "B")
             sub_leaf = UV._build_leaf(
-                leaf[:vis], leaf[:weights], leaf[:uvw];
+                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flags];
                 partition_info = sub_info,
             )
             sub_key = UV.partition_key(sub_info)
@@ -1346,7 +1352,7 @@ end
     )
     bad_info = UV.update(info; antennas = bad_table)
     bad_leaf = UV._build_leaf(
-        leaf[:vis], leaf[:weights], leaf[:uvw];
+        leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flags];
         partition_info = bad_info,
     )
     branches = Gustavo.UVData.DimensionalData.TreeDict()
@@ -1391,7 +1397,7 @@ end
         if l_info.scan_name == "2"
             new_info = UV.update(l_info; antennas = perturbed, subarray_name = "sub_1")
             new_l = UV._build_leaf(
-                l[:vis], l[:weights], l[:uvw];
+                l[:vis], l[:weights], l[:uvw], l[:flags];
                 partition_info = new_info,
             )
             branches[UV.partition_key(new_info)] = new_l
@@ -1432,8 +1438,9 @@ end
     reduced_vis = leaf[:vis][Pol = 1:2]
     reduced_w = leaf[:weights][Pol = 1:2]
     reduced_uvw = leaf[:uvw]
+    reduced_flags = leaf[:flags][Pol = 1:2]
     reduced_leaf = UV._build_leaf(
-        reduced_vis, reduced_w, reduced_uvw;
+        reduced_vis, reduced_w, reduced_uvw, reduced_flags;
         partition_info = info,
     )
     branches = Gustavo.UVData.DimensionalData.TreeDict()
@@ -1747,7 +1754,7 @@ end
     bl = UV.baseline(leaf, bls.pairs[1])
 
     @test bl isa DimensionalData.DimStack
-    @test Set(keys(bl)) == Set((:vis, :weights, :uvw))
+    @test Set(keys(bl)) == Set((:vis, :weights, :flags, :uvw))
 
     # Shape & dims
     nch = UV.nchannels(base)

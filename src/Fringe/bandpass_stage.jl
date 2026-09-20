@@ -250,6 +250,7 @@ function accumulate_bandpass!(
     )
     V = stack[:vis]                                      # the dims-carrying layers —
     W = stack[:weights]                                  # the loops below address axes BY NAME
+    F = stack[:flags]
     bl_pairs = UVData.baselines(stack).pairs
     g_ci = win.chan_idx
     for p in axes(V, Pol), bi in axes(V, Baseline)
@@ -265,7 +266,8 @@ function accumulate_bandpass!(
                 for c in axes(V, Frequency)
                     w = W[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
                     vv = V[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
-                    cond = (w > 0 && isfinite(w) && isfinite(vv))
+                    fl = F[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
+                    cond = (!fl && w > 0 && isfinite(w) && isfinite(vv))
                     acc += ifelse(cond, w * vv, zero(eltype(V)))
                 end
                 rot = ifelse(abs(acc) > 0, conj(acc) / abs(acc), one(eltype(V))) # cis(-angle(acc)): de-rotate this AP
@@ -273,7 +275,8 @@ function accumulate_bandpass!(
             for c in axes(V, Frequency)
                 w = W[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
                 vv = V[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
-                cond = (w > 0 && isfinite(w) && isfinite(vv))
+                fl = F[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
+                cond = (!fl && w > 0 && isfinite(w) && isfinite(vv))
                 gc = g_ci[c]
                 rbar_bp[idx, p, gc] += ifelse(cond, w * vv * rot, zero(eltype(V)))
                 wbar_bp[idx, p, gc] += ifelse(cond, w, zero(eltype(W)))

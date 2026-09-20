@@ -34,7 +34,7 @@ end
 
     V = inject_fringe(freqs, times, f0, t0; delay = τ_true, rate = ṙ_true, phase = φ_true)
     W = ones(size(V))
-    det = FR.baseline_fringe_search(V, W, freqs, times, f0, t0)
+    det = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0)
 
     @test det.valid
     # Bin spacing sets the tolerance; quadratic interp pushes well below it.
@@ -54,7 +54,7 @@ end
     f0, t0 = freqs[1], times[1]
     τ, ṙ, φ = -20.0e-9, -6.0e-3, -1.3
     V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = φ)
-    det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, f0, t0)
+    det = FR.baseline_fringe_search(FR.fringe_plane(V, ones(size(V)), freqs, times), f0, t0)
     @test isapprox(det.delay, τ; atol = 1.0e-9)
     @test isapprox(det.rate, ṙ; atol = 5.0e-4)
     @test isapprox(rem2pi(det.phase - φ, RoundNearest), 0.0; atol = 2.0e-2)
@@ -66,7 +66,7 @@ end
     freqs = 43.0e9 .+ (0:(nchan - 1)) .* 0.5e6
     f0 = mean(freqs)
     Vmat = inject_fringe(freqs, [0.0], f0, 0.0; delay = 15.0e-9, rate = 0.0, phase = 0.4)
-    det = FR.baseline_fringe_search(Vmat, ones(size(Vmat)), freqs, [0.0], f0, 0.0)
+    det = FR.baseline_fringe_search(FR.fringe_plane(Vmat, ones(size(Vmat)), freqs, [0.0]), f0, 0.0)
     @test det.rate == 0.0
     @test isapprox(det.delay, 15.0e-9; atol = 1.0e-9)
     @test isapprox(rem2pi(det.phase - 0.4, RoundNearest), 0.0; atol = 2.0e-2)
@@ -76,17 +76,13 @@ end
     times = (0:(nt - 1)) .* 0.5
     t0 = mean(times)
     Vmat2 = inject_fringe([43.0e9], times, 43.0e9, t0; delay = 0.0, rate = 10.0e-3, phase = -0.2)
-    det2 = FR.baseline_fringe_search(Vmat2, ones(size(Vmat2)), [43.0e9], times, 43.0e9, t0)
+    det2 = FR.baseline_fringe_search(FR.fringe_plane(Vmat2, ones(size(Vmat2)), [43.0e9], times), 43.0e9, t0)
     @test det2.delay == 0.0
     @test isapprox(det2.rate, 10.0e-3; atol = 5.0e-4)
 
     # A vector that matches neither axis is a shape error, not a search failure.
-    @test_throws DimensionMismatch FR.baseline_fringe_search(
-        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0
-    )
-    @test_throws "matches neither" FR.baseline_fringe_search(
-        vec(Vmat2)[1:3], ones(3), [43.0e9], times, 43.0e9, t0
-    )
+    @test_throws DimensionMismatch FR.fringe_plane(vec(Vmat2)[1:3], ones(3), [43.0e9], times)
+    @test_throws "matches neither" FR.fringe_plane(vec(Vmat2)[1:3], ones(3), [43.0e9], times)
 end
 
 @testset "Fringe search: shape validation" begin
@@ -95,18 +91,13 @@ end
     times = collect(0:(nt - 1)) .* 0.5
     V = ones(ComplexF64, nchan, nt)
 
-    @test_throws DimensionMismatch FR.baseline_fringe_search(
-        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0
-    )
-    @test_throws "same shape" FR.baseline_fringe_search(
-        V, ones(nchan, nt - 1), freqs, times, mean(freqs), 0.0
-    )
-    @test_throws DimensionMismatch FR.baseline_fringe_search(
-        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0
-    )
-    @test_throws "expected (length(freqs), length(times))" FR.baseline_fringe_map(
-        V, ones(nchan, nt), freqs[1:(end - 1)], times, mean(freqs), 0.0
-    )
+    @test_throws DimensionMismatch FR.fringe_plane(V, ones(nchan, nt - 1), freqs, times)
+    @test_throws "same shape" FR.fringe_plane(V, ones(nchan, nt - 1), freqs, times)
+    @test_throws DimensionMismatch FR.fringe_plane(V, ones(nchan, nt), freqs[1:(end - 1)], times)
+    @test_throws "expected (length(freqs), length(times))" FR.fringe_plane(V, ones(nchan, nt), freqs[1:(end - 1)], times)
+
+    # A flag layer off the vis axes is caught too.
+    @test_throws "same shape" FR.fringe_plane(V, ones(nchan, nt), freqs, times; flags = falses(nchan, nt - 1))
 end
 
 @testset "Fringe search: multi-band gapped frequency axis" begin
@@ -122,7 +113,7 @@ end
     t0 = mean(times)
     τ, ṙ, φ = 5.0e-9, 4.0e-3, 0.9
     V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = φ)
-    det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, f0, t0)
+    det = FR.baseline_fringe_search(FR.fringe_plane(V, ones(size(V)), freqs, times), f0, t0)
     @test det.valid
     @test isapprox(det.delay, τ; atol = 1.0e-9)
     @test isapprox(det.rate, ṙ; atol = 5.0e-4)
@@ -139,12 +130,12 @@ end
     # Flag half the channels (and inject garbage there) — result must be unchanged.
     W[1:2:end, :] .= 0.0
     V[1:2:end, :] .= 1.0e6 .* cis(2.3)
-    det = FR.baseline_fringe_search(V, W, freqs, times, f0, t0)
+    det = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0)
     @test det.valid
     @test isapprox(det.delay, 9.0e-9; atol = 1.5e-9)
 
     # All flagged → invalid, zeroed detection.
-    det0 = FR.baseline_fringe_search(V, zeros(size(V)), freqs, times, f0, t0)
+    det0 = FR.baseline_fringe_search(FR.fringe_plane(V, zeros(size(V)), freqs, times), f0, t0)
     @test !det0.valid
     @test det0.snr == 0.0
 end
@@ -169,7 +160,7 @@ end
         V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = 0.0, amp = A)
         V .+= σ .* (randn(rng, size(V)) .+ im .* randn(rng, size(V))) ./ sqrt(2)
         W = fill(1 / σ^2, size(V))
-        det = FR.baseline_fringe_search(V, W, freqs, times, f0, t0)
+        det = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0)
         push!(snrs, det.snr)
         @test det.valid
         @test det.pfa < 1.0e-4
@@ -181,7 +172,7 @@ end
     # Pure noise (no fringe): still MEASURED — the search reports the best peak it
     # found and leaves the verdict to `pfa`, which here is nowhere near a detection.
     Vn = σ .* (randn(rng, nchan, nt) .+ im .* randn(rng, nchan, nt)) ./ sqrt(2)
-    detn = FR.baseline_fringe_search(Vn, fill(1 / σ^2, nchan, nt), freqs, times, f0, t0)
+    detn = FR.baseline_fringe_search(FR.fringe_plane(Vn, fill(1 / σ^2, nchan, nt), freqs, times), f0, t0)
     @test detn.valid
     @test detn.pfa > 1.0e-4
 end
@@ -196,7 +187,7 @@ end
     V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = φ)
     W = ones(size(V))
 
-    m = FR.baseline_fringe_map(V, W, freqs, times, f0, t0)
+    m = FR.baseline_fringe_map(FR.fringe_plane(V, W, freqs, times), f0, t0)
     @test m isa FR.FringeSearchMap
     @test size(m.snr) == (length(m.delays), length(m.rates))
     @test issorted(m.delays) && issorted(m.rates)
@@ -206,7 +197,7 @@ end
 
     # The embedded detection is what the standalone search returns (≈ only
     # because the two calls plan separate FFTW MEASURE transforms).
-    det = FR.baseline_fringe_search(V, W, freqs, times, f0, t0)
+    det = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0)
     @test isapprox(m.detection.delay, det.delay; rtol = 1.0e-10, atol = 1.0e-20)
     @test isapprox(m.detection.rate, det.rate; rtol = 1.0e-10, atol = 1.0e-15)
     @test isapprox(m.detection.snr, det.snr; rtol = 1.0e-10)
@@ -231,13 +222,13 @@ end
     # Pure noise: the peak is consistent with the sidelobe forest (PFA not small).
     rng = MersenneTwister(0x000FA15E)
     Vn = (randn(rng, nchan, nt) .+ im .* randn(rng, nchan, nt)) ./ sqrt(2)
-    mn = FR.baseline_fringe_map(Vn, W, freqs, times, f0, t0)
+    mn = FR.baseline_fringe_map(FR.fringe_plane(Vn, W, freqs, times), f0, t0)
     @test mn.detection.valid                 # measured, not accepted
     @test mn.detection.pfa > 1.0e-3
     @test mn.pfa > 1.0e-3
 
     # All-flagged block → empty map, invalid detection.
-    m0 = FR.baseline_fringe_map(V, zeros(size(V)), freqs, times, f0, t0)
+    m0 = FR.baseline_fringe_map(FR.fringe_plane(V, zeros(size(V)), freqs, times), f0, t0)
     @test isempty(m0.delays) && isempty(m0.rates)
     @test !m0.detection.valid
     @test isnan(m0.pfa)
@@ -279,9 +270,9 @@ end
     V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = φ, amp = 0.7)
     W = ones(size(V))
 
-    dm = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = mbd)
-    df = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = full)
-    da = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = auto)
+    dm = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = mbd)
+    df = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = full)
+    da = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = auto)
     @test da.delay == dm.delay                                    # auto took the mbd path
     for d in (dm, df)
         @test d.valid
@@ -302,8 +293,8 @@ end
     σ = 0.5
     Vn = V .+ σ .* (randn(rng, size(V)) .+ im .* randn(rng, size(V))) ./ sqrt(2)
     Wn = fill(1 / σ^2, size(V))
-    dn = FR.baseline_fringe_search(Vn, Wn, freqs, times, f0, t0; opts = mbd)
-    dnf = FR.baseline_fringe_search(Vn, Wn, freqs, times, f0, t0; opts = full)
+    dn = FR.baseline_fringe_search(FR.fringe_plane(Vn, Wn, freqs, times), f0, t0; opts = mbd)
+    dnf = FR.baseline_fringe_search(FR.fringe_plane(Vn, Wn, freqs, times), f0, t0; opts = full)
     @test dn.valid
     @test isapprox(dn.delay, τ; atol = 1.0e-9)
     @test isapprox(dn.rate, ṙ; atol = 5.0e-4)
@@ -313,12 +304,12 @@ end
     Vf = copy(V); Wf = copy(W)
     Wf[1:(2 * nchan_b), :] .= 0.0
     Vf[1:(2 * nchan_b), :] .= 1.0e6 .* cis(1.1)
-    dflag = FR.baseline_fringe_search(Vf, Wf, freqs, times, f0, t0; opts = mbd)
+    dflag = FR.baseline_fringe_search(FR.fringe_plane(Vf, Wf, freqs, times), f0, t0; opts = mbd)
     @test dflag.valid
     @test isapprox(dflag.delay, τ; atol = 0.5e-9)
 
     # All flagged → invalid.
-    d0 = FR.baseline_fringe_search(V, zeros(size(V)), freqs, times, f0, t0; opts = mbd)
+    d0 = FR.baseline_fringe_search(FR.fringe_plane(V, zeros(size(V)), freqs, times), f0, t0; opts = mbd)
     @test !d0.valid
 
     # Explicit :mbd on a CONTIGUOUS band falls back to the full path (single
@@ -326,13 +317,13 @@ end
     fc = 43.0e9 .+ (0:63) .* 0.5e6
     @test FR._search_axes(fc, times, mbd, ComplexF64).mbd === nothing
     Vc = inject_fringe(fc, times, mean(fc), t0; delay = 9.0e-9, rate = 3.0e-3, phase = 0.2)
-    d1 = FR.baseline_fringe_search(Vc, ones(size(Vc)), fc, times, mean(fc), t0; opts = mbd)
-    d2 = FR.baseline_fringe_search(Vc, ones(size(Vc)), fc, times, mean(fc), t0; opts = full)
+    d1 = FR.baseline_fringe_search(FR.fringe_plane(Vc, ones(size(Vc)), fc, times), mean(fc), t0; opts = mbd)
+    d2 = FR.baseline_fringe_search(FR.fringe_plane(Vc, ones(size(Vc)), fc, times), mean(fc), t0; opts = full)
     @test d1.delay == d2.delay && d1.snr == d2.snr
 
     # Degenerate time axis (one AP): delay-only search through the mbd path.
     V1 = inject_fringe(freqs, [0.0], f0, 0.0; delay = 40.0e-9, rate = 0.0, phase = 0.3)
-    dd = FR.baseline_fringe_search(V1, ones(size(V1)), freqs, [0.0], f0, 0.0; opts = mbd)
+    dd = FR.baseline_fringe_search(FR.fringe_plane(V1, ones(size(V1)), freqs, [0.0]), f0, 0.0; opts = mbd)
     @test dd.rate == 0.0
     @test isapprox(dd.delay, 40.0e-9; atol = 0.5e-9)
 
@@ -350,8 +341,8 @@ end
     f0v = mean(fv)
     τv = 55.0e-9                                            # ≫ A = 31.25 ns
     Vv = inject_fringe(fv, times, f0v, t0; delay = τv, rate = 2.0e-3, phase = 0.5)
-    dv = FR.baseline_fringe_search(Vv, ones(size(Vv)), fv, times, f0v, t0; opts = mbd)
-    dvf = FR.baseline_fringe_search(Vv, ones(size(Vv)), fv, times, f0v, t0; opts = full)
+    dv = FR.baseline_fringe_search(FR.fringe_plane(Vv, ones(size(Vv)), fv, times), f0v, t0; opts = mbd)
+    dvf = FR.baseline_fringe_search(FR.fringe_plane(Vv, ones(size(Vv)), fv, times), f0v, t0; opts = full)
     @test dv.valid
     @test isapprox(dv.delay, τv; atol = 0.5e-9)
     @test isapprox(dv.delay, dvf.delay; atol = 0.5e-9)
@@ -361,9 +352,9 @@ end
     # estimate is defined) the map peak tracks the detection SNR; the noiseless
     # limit is degenerate (both "noise" estimates measure different sidelobe
     # floors), so compare there.
-    m = FR.baseline_fringe_map(V, W, freqs, times, f0, t0; opts = auto)
+    m = FR.baseline_fringe_map(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = auto)
     @test m.detection.delay == da.delay                            # detection = solver's search
-    mn2 = FR.baseline_fringe_map(Vn, Wn, freqs, times, f0, t0; opts = auto)
+    mn2 = FR.baseline_fringe_map(FR.fringe_plane(Vn, Wn, freqs, times), f0, t0; opts = auto)
     @test isapprox(mn2.detection.delay, dn.delay; atol = 1.0e-12)
     @test isapprox(maximum(mn2.snr), mn2.detection.snr; rtol = 0.15)
 end
@@ -388,7 +379,7 @@ end
     @test eltype(ax.rates) === Float32
 
     ws = FR.FringeWorkspace(ComplexF32)
-    det = FR.baseline_fringe_search(V32, W32, freqs, times, f0, t0; workspace = ws)
+    det = FR.baseline_fringe_search(FR.fringe_plane(V32, W32, freqs, times), f0, t0; workspace = ws)
     @test eltype(ws.G) === ComplexF32
     @test eltype(ws.D) === ComplexF32
     @test eltype(ws.dwin) === Float32
@@ -413,7 +404,7 @@ end
     Wm32 = ones(Float32, size(Vm32))
     mbd = FR.FringeSearch(algorithm = FR.HierarchicalMBD())
     wsm = FR.FringeWorkspace(ComplexF32)
-    detm = FR.baseline_fringe_search(Vm32, Wm32, freqs_m, times, f0m, t0; opts = mbd, workspace = wsm)
+    detm = FR.baseline_fringe_search(FR.fringe_plane(Vm32, Wm32, freqs_m, times), f0m, t0; opts = mbd, workspace = wsm)
     @test detm isa FR.Detection{Float32}
     @test wsm.mbd isa FR._MBDWorkspace{ComplexF32}
     @test eltype(wsm.mbd.Gb) === ComplexF32
@@ -455,9 +446,8 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
     f0, t0 = mean(freqs), mean(times)
     V = inject_fringe(freqs, times, f0, t0; delay = 13.7e-9, rate = 6.0e-3, phase = -0.9)
     W = ones(Float64, size(V))
-    d_probe = FR.baseline_fringe_search(V, W, freqs, times, f0, t0; opts = probe)
-    d_full = FR.baseline_fringe_search(
-        V, W, freqs, times, f0, t0; opts = FR.FringeSearch(algorithm = FR.FullGrid())
+    d_probe = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = probe)
+    d_full = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = FR.FringeSearch(algorithm = FR.FullGrid())
     )
     @test d_probe.delay == d_full.delay
     @test d_probe.snr == d_full.snr

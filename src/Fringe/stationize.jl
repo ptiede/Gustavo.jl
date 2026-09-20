@@ -815,9 +815,9 @@ function _require_common_epoch(rate_plans, ti::Integer)
     o1 = Float64(first(rate_plans).tstate[first(rate_plans).tseg_id[ti]])
     for plan in rate_plans
         o = Float64(plan.tstate[plan.tseg_id[ti]])
-        isapprox(o, o1; atol = 1.0e-9) || error(
+        isapprox(o, o1; atol = _epoch_atol(o1)) || error(
             "solve_station_systems!: the rate components are referenced to different " *
-                "epochs at time index $ti ($o1 h vs $o h), so no single epoch makes a " *
+                "epochs at time index $ti ($o1 s vs $o s), so no single epoch makes a " *
                 "detection's phase a sum of constants. Record the epoch the phases were " *
                 "measured at (`detection_stack(...; epoch)`) so the rates referenced " *
                 "elsewhere can be subtracted from the phase rows.",

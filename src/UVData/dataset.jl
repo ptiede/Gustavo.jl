@@ -45,10 +45,12 @@ function materialize_leaf(leaf::DimensionalData.AbstractDimTree)
     vis = leaf[:vis]
     w = leaf[:weights]
     uvw = leaf[:uvw]
+    f = leaf[:flags]
     vis_m = DimArray(_materialize_layer(parent(vis)), dims(vis))
     w_m = DimArray(_materialize_layer(parent(w)), dims(w))
     uvw_m = DimArray(_materialize_layer(parent(uvw)), dims(uvw))
-    return _build_leaf(vis_m, w_m, uvw_m; partition_info = metadata(leaf))
+    f_m = DimArray(_materialize_layer(parent(f)), dims(f))
+    return _build_leaf(vis_m, w_m, uvw_m, f_m; partition_info = metadata(leaf))
 end
 
 """
@@ -88,8 +90,8 @@ function _materialize_group_bulk end
 
 Decode a group of sibling-spw lazy `leaves` DIRECTLY into caller-provided
 destination arrays — no per-spw intermediate dense copy. `dests[i]` is a
-`(vis_dest, weights_dest)` pair the i-th leaf decodes into; each destination's
-axis-1 length must equal that leaf's channel count and axes 2-4 its
+`(vis_dest, weights_dest, flags_dest)` triple the i-th leaf decodes into; each
+destination's axis-1 length must equal that leaf's channel count and axes 2-4 its
 `(ti, baseline, pol)`. Views into a larger concatenated cube are the intended use
 (the fringe search builds its stacked-frequency cube this way, avoiding the
 materialize-then-copy round trip and one full in-RAM data copy).

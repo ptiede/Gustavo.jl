@@ -504,11 +504,11 @@ function _scan_epoch(comps, ti::Integer)
         o = Float64(plan.tstate[plan.tseg_id[ti]])
         if epoch === nothing
             epoch = o
-        elseif !isapprox(o, epoch; atol = 1.0e-9)
+        elseif !isapprox(o, epoch; atol = _epoch_atol(epoch))
             throw(
                 ArgumentError(
                     "scan_phase_epoch: the model's rate components disagree on the epoch of " *
-                        "time index $ti ($epoch h vs $o h). A constant phase is the phase at " *
+                        "time index $ti ($epoch s vs $o s). A constant phase is the phase at " *
                         "the epoch where every rate coordinate vanishes, and rate components " *
                         "with different time segmentations have no such epoch in common. Give " *
                         "every Rate term the same time segmentation as the constant it " *
@@ -560,8 +560,6 @@ function steer_scan(
         sta_delay::AbstractMatrix, sta_rate::AbstractMatrix;
         cells::Real = 9.0,
     )
-    V = stack[:vis]
-    W = stack[:weights]
     freqs = frequencies(stack)
     times = timestamps(stack)
     # `res` covers only cross baselines; `keep` maps its column back to the cube's.
@@ -579,21 +577,22 @@ function steer_scan(
         rpred = sta_rate[a, fa] - sta_rate[b, fb]
         (isfinite(dpred) && isfinite(rpred)) || continue
         bi = keep[j]
-        Vb = view(V, :, :, bi, p)
-        Wb = view(W, :, :, bi, p)
+        plane = view(stack, Baseline(bi), Pol(p))
+        Wb = plane[:weights]
+        Fb = plane[:flags]
         # σ of the blind pass, recovered from its own reported SNR.
         σ = abs(
             _exact_matched_filter(
-                Vb, Wb, freqs, times, f0, t0,
+                plane, freqs, times, f0, t0,
                 res[:delay][j, p], res[:rate][j, p]
             )
         ) / snr0
         σ > 0 || continue
-        D = _exact_matched_filter(Vb, Wb, freqs, times, f0, t0, dpred, rpred)
+        D = _exact_matched_filter(plane, freqs, times, f0, t0, dpred, rpred)
         Wsum = 0.0
-        for i in eachindex(Wb)
+        for i in eachindex(Wb, Fb)
             w = Wb[i]
-            (isfinite(w) && w > 0) && (Wsum += w)
+            (!Fb[i] && isfinite(w) && w > 0) && (Wsum += w)
         end
         sdelay[j, p] = dpred
         srate[j, p] = rpred

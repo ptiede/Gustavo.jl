@@ -139,13 +139,15 @@ end
     ga = rand(rng, ComplexF64, nchan, nti) .+ 1   # magnitudes well above _GAIN_FLOOR
     gb = rand(rng, ComplexF64, nchan, nti) .+ 1
     ga[1] = 0                                       # force the degenerate branch
+    f = falses(nchan, nti)
     vis0, w0 = copy(vis), copy(w)
-    CAL._correct_column!(vis, w, ga, gb)
+    CAL._correct_column!(vis, w, f, ga, gb)
     for i in eachindex(vis0)
         den = ga[i] * conj(gb[i])
         if abs(ga[i]) < CAL._GAIN_FLOOR || abs(gb[i]) < CAL._GAIN_FLOOR || !isfinite(den)
-            @test isnan(vis[i]) && iszero(w[i])
+            @test isnan(vis[i]) && iszero(w[i]) && f[i]
         else
+            @test !f[i]
             @test vis[i] ≈ vis0[i] / den
             @test w[i] ≈ w0[i] * abs2(ga[i] * gb[i])
         end
@@ -428,17 +430,28 @@ end
     V[2, 1, 1, 1] = 10.0im               # channel 2: pre-corrected by |g|² = 0.01,
     W[1, 1, 1, 1] = 1.0                  # so its weight is reweighted to 0.0001
     W[2, 1, 1, 1] = 0.0001
+    F = falses(nchan, nti, nbl, npol)
     bl = [(1, 2)]
     rbar = zeros(ComplexF64, nbl, npol, nti)
     wbar = zeros(Float64, nbl, npol, nti)
-    FP._accumulate_leaf_rbar!(rbar, wbar, V, W)
+    FP._accumulate_leaf_rbar!(rbar, wbar, V, W, F)
     @test wbar[1, 1, 1] ≈ 1.0001
     @test rbar[1, 1, 1] / wbar[1, 1, 1] ≈ (1.0 + 0.001im) / 1.0001
     z = zeros(ComplexF64, nbl, npol)
     wz = zeros(Float64, nbl, npol)
-    FP._accumulate_leaf_band_phasor!(z, wz, V, W, bl, ["PP"])
+    FP._accumulate_leaf_band_phasor!(z, wz, V, W, F, bl, ["PP"])
     @test wz[1, 1] ≈ 1.0001
     @test z[1, 1] / wz[1, 1] ≈ (1.0 + 0.001im) / 1.0001
+
+    # A flagged channel contributes nothing even though its weight is positive.
+    F[2, 1, 1, 1] = true
+    rbar .= 0; wbar .= 0; z .= 0; wz .= 0
+    FP._accumulate_leaf_rbar!(rbar, wbar, V, W, F)
+    @test wbar[1, 1, 1] ≈ 1.0
+    @test rbar[1, 1, 1] ≈ 1.0 + 0.0im
+    FP._accumulate_leaf_band_phasor!(z, wz, V, W, F, bl, ["PP"])
+    @test wz[1, 1] ≈ 1.0
+    @test z[1, 1] ≈ 1.0 + 0.0im
 end
 
 @testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
@@ -643,11 +656,12 @@ end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, amp_bandpass = abp)
 
-    # Kill local channel 7 in every band (globals 7 and 15): zero its weight on all
+    # Kill local channel 7 in every band (globals 7 and 15): flag it on all
     # baselines so the per-channel solve has NO data there.
     dead_local = 7
     dead_globals = [(b - 1) * nchan + dead_local for b in 1:nspw]
     for (_, leaf) in DimensionalData.branches(uvset)
+        parent(leaf[:flags])[dead_local, :, :, :] .= true
         parent(leaf[:weights])[dead_local, :, :, :] .= 0.0f0
     end
 

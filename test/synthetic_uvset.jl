@@ -267,6 +267,7 @@ function _build_fringe_uvset(;
             ),
         )
         w_part = DimArray(w_dense, dims(vis_part))
+        f_part = DimArray(falses(size(w_dense)), dims(vis_part))
 
         uvw_dense = zeros(Float32, ntime, nbl, 3)
         for ti in 1:ntime, bl in 1:nbl
@@ -292,7 +293,7 @@ function _build_fringe_uvset(;
             ddi = b - 1,
             basename = "synth_fringe",
         )
-        leaf = UV._build_leaf(vis_part, w_part, uvw_part; partition_info = info)
+        leaf = UV._build_leaf(vis_part, w_part, uvw_part, f_part; partition_info = info)
         branches[UV.partition_key(info)] = leaf
     end
 

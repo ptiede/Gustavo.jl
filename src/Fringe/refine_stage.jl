@@ -59,6 +59,7 @@ function refine_scan_dispersion!(
     length(blocks) >= 4 || return 0              # < 4 bands can't constrain 1/ν
     V = stack[:vis]
     W = stack[:weights]
+    F = stack[:flags]
     fg = frequencies(stack)
     bl_pairs = UVData.baselines(stack).pairs
     pols = pol_products(stack)
@@ -73,7 +74,7 @@ function refine_scan_dispersion!(
         r = blocks[li]
         _accumulate_leaf_band_phasor!(
             view(z, :, :, li), view(w, :, :, li),
-            view(V, r, :, :, :), view(W, r, :, :, :),
+            view(V, r, :, :, :), view(W, r, :, :, :), view(F, r, :, :, :),
             bl_pairs, pols,
         )
     end
@@ -107,6 +108,7 @@ function refine_scan_sbd!(
     blocks = _spw_blocks(geom, ci)
     V = stack[:vis]
     W = stack[:weights]
+    F = stack[:flags]
     fg = frequencies(stack)
     bl_pairs = UVData.baselines(stack).pairs
     pols = pol_products(stack)
@@ -138,7 +140,7 @@ function refine_scan_sbd!(
         _accumulate_leaf_chunks!(
             view(z, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
             view(w, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
-            view(V, r, :, :, :), view(W, r, :, :, :),
+            view(V, r, :, :, :), view(W, r, :, :, :), view(F, r, :, :, :),
             bl_pairs, pols,
             coc .- (li - 1) * Int(nchunk),
         )

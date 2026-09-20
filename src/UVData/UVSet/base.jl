@@ -1,5 +1,5 @@
 # The containers that carry a leaf's `PartitionInfo`: the leaf tree itself and
-# any layer selection off it (`leaf[(:vis, :weights)]`), which keeps the
+# any layer selection off it (`leaf[(:vis, :weights, :flags)]`), which keeps the
 # metadata. Both answer the identity accessors defined throughout this file.
 const PartitionedData = Union{DimensionalData.AbstractDimTree, DimensionalData.AbstractDimStack}
 
@@ -16,8 +16,11 @@ The struct subtypes `AbstractDimTree` so all DD machinery (selectors,
 works without bespoke overloads. Per-leaf data lives on each branch
 (a plain `DimTree`) carrying:
 
-- `data`     : `:vis`, `:weights`, `:uvw` `DimArray` layers. A cell is
-  flagged iff its weight is `≤ 0`, so no separate flag layer is stored.
+- `data`     : `:vis`, `:weights`, `:flags`, `:uvw` `DimArray` layers.
+  `:flags` is `Bool` on the `:vis` axes and is `true` where the datum must
+  not be used; `:weights` says how good it would have been. The two are
+  independent, matching MSv4's `FLAG`/`WEIGHT` pair: a flagged cell may
+  carry a positive weight, and a zero weight does not by itself flag.
 - `metadata` : `PartitionInfo` struct (`source_name`, `source_key`,
   `field_name`, `scan_name`, `scan_intents`, `sub_scan_name`, `spw_name`,
   `intent`, `ra`, `dec`, `ddi`, `partition_name`, `baselines::BaselineIndex`,
@@ -561,17 +564,22 @@ function obs_time(part::DimensionalData.AbstractDimTree)
 end
 
 """
-    rebuild_visibilities(part::AbstractDimTree, vis, weights) -> DimTree
+    rebuild_visibilities(part::AbstractDimTree, vis, weights, uvw, flags) -> DimTree
 
-Return a new leaf sharing `part`'s `uvw` layer and metadata, with
-`vis`/`weights` swapped in. A cell is flagged iff its weight is `≤ 0`.
+Return a new leaf sharing `part`'s metadata, with any of the data layers
+swapped in; each defaults to `part`'s own. Layers not passed are shared with
+`part` rather than copied.
 """
-function rebuild_visibilities(part::DimensionalData.AbstractDimTree, vis = part[:vis], weights = part[:weights], uvw = part[:uvw])
+function rebuild_visibilities(
+        part::DimensionalData.AbstractDimTree, vis = part[:vis],
+        weights = part[:weights], uvw = part[:uvw], flags = part[:flags],
+    )
     vis_l = _rewrap_like(vis, part[:vis])
     w_l = _rewrap_like(weights, part[:weights])
     uvw_l = _rewrap_like(uvw, part[:uvw])
+    flags_l = _rewrap_like(flags, part[:flags])
     return _build_leaf(
-        vis_l, w_l, uvw_l;
+        vis_l, w_l, uvw_l, flags_l;
         partition_info = DimensionalData.metadata(part),
     )
 end

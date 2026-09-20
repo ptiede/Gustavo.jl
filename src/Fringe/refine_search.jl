@@ -26,7 +26,8 @@
 # inverse-variance mean of the data, already gain-corrected (and reweighted by
 # |gain|², matching `apply_calibration`) through the pipeline's transform
 # chain before this kernel ever sees it.
-function _accumulate_leaf_band_phasor!(z, w, V, W, bl_pairs, pols)
+function _accumulate_leaf_band_phasor!(z, w, V, W, F, bl_pairs, pols)
+    UVData.check_layer_axes(V, W, F)
     nchan, nti, nbl, npol = size(V)
     @inbounds for p in 1:npol
         fa, fb = correlation_feed_pair(pols[p])
@@ -37,6 +38,7 @@ function _accumulate_leaf_band_phasor!(z, w, V, W, bl_pairs, pols)
             acc = zero(ComplexF64)
             wsum = 0.0
             for tt in 1:nti, c in 1:nchan
+                F[c, tt, bi, p] && continue
                 ww = W[c, tt, bi, p]
                 (ww > 0 && isfinite(ww)) || continue
                 v = V[c, tt, bi, p]
@@ -148,7 +150,8 @@ end
 # Accumulate one channel-block's inverse-variance chunk phasors:
 # `z[bi, p, chunk_of_chan[c]] += w·V` (parallel hands only), off data already
 # gain-corrected through the pipeline's transform chain.
-function _accumulate_leaf_chunks!(z, w, V, W, bl_pairs, pols, chunk_of_chan)
+function _accumulate_leaf_chunks!(z, w, V, W, F, bl_pairs, pols, chunk_of_chan)
+    UVData.check_layer_axes(V, W, F)
     nchan, nti, nbl, npol = size(V)
     @inbounds for p in 1:npol
         fa, fb = correlation_feed_pair(pols[p])
@@ -157,6 +160,7 @@ function _accumulate_leaf_chunks!(z, w, V, W, bl_pairs, pols, chunk_of_chan)
             a, b = bl_pairs[bi]
             a == b && continue
             for tt in 1:nti, c in 1:nchan
+                F[c, tt, bi, p] && continue
                 ww = W[c, tt, bi, p]
                 (ww > 0 && isfinite(ww)) || continue
                 v = V[c, tt, bi, p]

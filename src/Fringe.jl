@@ -17,6 +17,7 @@ using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
 using ..UVData: Frequency, Baseline, Feed, Pol, Scan
 using ..Calibration
+using ..Calibration: _epoch_atol
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,
     _flatten_components, _component_leaf, _feed_node, _block_index, _composed_gains,
     _freq_group_ranges

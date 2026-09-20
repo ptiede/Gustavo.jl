@@ -583,7 +583,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
                 if keyed !== nothing
                     for (_, m) in keyed
                         apply_transform!(
-                            as, m[(:vis, :weights)], leaf_window(stream.geom, m);
+                            as, m[(:vis, :weights, :flags)], leaf_window(stream.geom, m);
                             executor = SerialScheduler(),
                         )
                     end

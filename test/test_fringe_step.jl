@@ -163,13 +163,16 @@
         @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
 
         # CalFunction runs on the new path (it errors only when bridging), and
-        # is recorded + replayed by calibrate: zeroing one baseline's weights
-        # zero-weights it in the calibrated output.
+        # is recorded + replayed by calibrate: flagging one baseline flags it in
+        # the calibrated output.
         touched = Threads.Atomic{Int}(0)
         kill12 = CalFunction() do stack, win
             Threads.atomic_add!(touched, 1)
             for (bi, (a, b)) in enumerate(baselines(stack).pairs)
-                minmax(a, b) == (1, 2) && (stack[:weights][Baseline = bi] .= 0)
+                if minmax(a, b) == (1, 2)
+                    stack[:flags][Baseline = bi] .= true
+                    stack[:weights][Baseline = bi] .= 0
+                end
             end
         end
         sol_cf, out = fitcalibrate(

@@ -123,6 +123,7 @@ function build_synth_idi_uvset(;
                 ),
             )
             w_part = DimArray(w_dense, dims(vis_part))
+            f_part = DimArray(.!(w_dense .> 0), dims(vis_part))
 
             info = UV.PartitionInfo(;
                 source_name = src_name,
@@ -137,7 +138,7 @@ function build_synth_idi_uvset(;
                 ddi = b - 1,
                 basename = "synth_idi",
             )
-            leaf = UV._build_leaf(vis_part, w_part, uvw_part; partition_info = info)
+            leaf = UV._build_leaf(vis_part, w_part, uvw_part, f_part; partition_info = info)
             key = UV.partition_key(info)
             branches[key] = leaf
         end
@@ -956,7 +957,7 @@ end
         W = ones(size(V))
         freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
         times = collect(lookup(leaf[:vis], Ti))
-        det = FR.baseline_fringe_search(V, W, freqs, times, freqs[1], times[1])
+        det = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), freqs[1], times[1])
         @test det.valid
         @test isapprox(det.delay, τ; atol = 1.0e-9)
     end
@@ -985,7 +986,7 @@ end
             V = parent(leaf[:vis])[:, :, 1, 1]
             freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
             times = collect(lookup(leaf[:vis], Ti))
-            det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, freqs[1], times[1])
+            det = FR.baseline_fringe_search(FR.fringe_plane(V, ones(size(V)), freqs, times), freqs[1], times[1])
             @test det.valid
             @test isapprox(det.delay, τ; atol = 1.0e-9)
         end
@@ -1016,7 +1017,7 @@ end
             V = parent(leaf[:vis])[:, :, 1, 1]
             freqs = collect(channel_freqs(DimensionalData.metadata(leaf).freq_setup))
             times = collect(lookup(leaf[:vis], Ti))
-            det = FR.baseline_fringe_search(V, ones(size(V)), freqs, times, freqs[1], times[1])
+            det = FR.baseline_fringe_search(FR.fringe_plane(V, ones(size(V)), freqs, times), freqs[1], times[1])
             @test det.valid
             @test isapprox(det.delay, τ; atol = 1.0e-9)
         end

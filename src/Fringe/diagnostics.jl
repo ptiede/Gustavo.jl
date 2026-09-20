@@ -369,15 +369,17 @@ end
 # accumulator is indexed by `bi`, so the tasks write to disjoint slices and the
 # fan-out needs no reduction.
 function _accumulate_baseline_fringes!(
-        acc, Vg, Wg, g, gid, bl_pairs, feeds,
+        acc, Vg, Wg, Fg, g, gid, bl_pairs, feeds,
         nchan::Int, nti::Int, nbl::Int, npol::Int, executor,
     )
+    UVData.check_layer_axes(Vg, Wg, Fg)
     tforeach(1:nbl; scheduler = executor) do bi
         a, b = bl_pairs[bi]
         a == b && return                                # skip autocorrelations
         for p in 1:npol
             fa, fb = feeds[p]
-            @inbounds for ti in 1:nti, c in 1:nchan
+            @inbounds for ti in axes(Vg, 2), c in axes(Vg, 1)
+                Fg[c, ti, bi, p] && continue
                 w = Wg[c, ti, bi, p]
                 v = Vg[c, ti, bi, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
@@ -445,6 +447,7 @@ function baseline_fringe_data(
     fg = frequencies(stack)
     Vg = stack[:vis]
     Wg = stack[:weights]
+    Fg = stack[:flags]
     nchan, nti, nbl, npol = size(Vg)
 
     # Frequency-group split of the stacked frequency axis (per-channel group id).
@@ -464,7 +467,7 @@ function baseline_fringe_data(
 
     _accumulate_baseline_fringes!(
         (; sb, swb, sa, swa, tb, twb, ta, twa, tbb, twbb, tab, twab),
-        Vg, Wg, g, gid, UVData.baselines(stack).pairs,
+        Vg, Wg, Fg, g, gid, UVData.baselines(stack).pairs,
         [correlation_feed_pair(pol_products(stack)[p]) for p in 1:npol],
         nchan, nti, nbl, npol, executor,
     )
@@ -719,7 +722,6 @@ function fringe_search_map(
     ant_names = String.(collect(info.antennas.name))
     stack, win = materialize_cube(stream, groups[gi])
     Vg = stack[:vis]
-    Wg = stack[:weights]
     fg = frequencies(stack)
     opts = search === nothing ? get(sol.info, :search, FringeSearch()) : search
     p = _pol_index(pol_products(stack), pol)
@@ -740,7 +742,7 @@ function fringe_search_map(
             a, b = UVData.baselines(stack).pairs[k]
             a == b && continue
             d = _baseline_fringe_search(
-                view(Vg, :, :, k, p), view(Wg, :, :, k, p),
+                view(stack, Baseline(k), Pol(p)),
                 fg, times, f0, t0, ax, ws, opts, family_cells,
             )
             d.snr > bestsnr && (bestsnr = d.snr; best = k)
@@ -754,10 +756,7 @@ function fringe_search_map(
         k
     end
 
-    m = baseline_fringe_map(
-        view(Vg, :, :, bi, p), view(Wg, :, :, bi, p),
-        fg, times, f0, t0; opts = opts,
-    )
+    m = baseline_fringe_map(view(stack, Baseline(bi), Pol(p)), f0, t0; opts = opts)
     return BaselineFringeMap(
         info.source_name, info.scan_name, gi, UVData.baselines(stack).pairs[bi], ant_names,
         pol_products(stack)[p], m,

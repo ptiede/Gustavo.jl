@@ -23,6 +23,18 @@
 # i.e. linear index = (band-1)*NO_STKD + stokes (verified empirically: each
 # group of NO_STKD entries shows the parallel/cross-hand signature).
 
+# A leaf's `:flags` layer over a FITS-IDI weights layer. The FLAG table is
+# folded into WEIGHT during decode — a non-positive weight is how a flagged
+# FITS-IDI sample is recorded — so the flag layer reads back from the weights
+# rather than from a column of its own.
+struct IDIDerivedFlags{A <: AbstractArray} <: AbstractArray{Bool, 4}
+    weights::A
+end
+
+Base.size(f::IDIDerivedFlags) = size(f.weights)
+Base.axes(f::IDIDerivedFlags) = axes(f.weights)
+Base.@propagate_inbounds Base.getindex(f::IDIDerivedFlags, I::Int...) = !(f.weights[I...] > 0)
+UVData._materialize_layer(f::IDIDerivedFlags) = .!(UVData._materialize_layer(f.weights) .> 0)
 using DiskArrays
 using Statistics: median
 using OhMyThreads: tforeach, SerialScheduler
@@ -870,14 +882,15 @@ function UVData._materialize_group_bulk(leaves, executor)
         _fill_weights_dense!(w_dense, aw, span, rmin, executor)
         vis_da = DimArray(vis_dense, dims(l[:vis]))
         w_da = DimArray(w_dense, dims(l[:weights]))
+        f_da = DimArray(.!(w_dense .> 0), dims(l[:flags]))
         uvw_da = DimArray(UVData._materialize_layer(parent(l[:uvw])), dims(l[:uvw]))
-        UVData._build_leaf(vis_da, w_da, uvw_da; partition_info = DimensionalData.metadata(l))
+        UVData._build_leaf(vis_da, w_da, uvw_da, f_da; partition_info = DimensionalData.metadata(l))
     end
 end
 
 # Direct-into-destination variant of `_materialize_group_bulk`: read the scan's
 # shared row span ONCE, then decode each band's vis/weights straight into the
-# caller's `dests[i] = (vis_dest, weights_dest)` (typically contiguous channel-block
+# caller's `dests[i] = (vis_dest, weights_dest, flags_dest)` (typically contiguous channel-block
 # views of one stacked cube) — skipping the per-band intermediate dense arrays and
 # the uvw layer the fringe search never uses. The decode kernels write
 # `out[c, ti, bl, p]` generically, so a SubArray destination works (axis-1 = the
@@ -918,9 +931,10 @@ function UVData._materialize_group_bulk_into!(dests, leaves, executor)
     for (i, l) in enumerate(leaves)
         av = parent(l[:vis])
         aw = parent(l[:weights])
-        vis_dest, w_dest = dests[i]
+        vis_dest, w_dest, f_dest = dests[i]
         _fill_vis_dense!(vis_dest, av, span, rmin, executor)
         _fill_weights_dense!(w_dest, aw, span, rmin, executor)
+        f_dest .= .!(w_dest .> 0)
     end
     return true
 end
@@ -1799,7 +1813,9 @@ function UVData.load_fitsidi(
                 Baseline(baselines.labels), Pol(msv4_labels),
             )
             vis_part = DimArray(_idi_merged_chunk([bc.vis_chunk for bc in sorted]), vis_dims)
-            w_part = DimArray(_idi_merged_chunk([bc.w_chunk for bc in sorted]), vis_dims)
+            w_chunk = _idi_merged_chunk([bc.w_chunk for bc in sorted])
+            w_part = DimArray(w_chunk, vis_dims)
+            f_part = DimArray(IDIDerivedFlags(w_chunk), vis_dims)
 
             info = UVData.PartitionInfo(;
                 source_name = si.name,
@@ -1814,7 +1830,7 @@ function UVData.load_fitsidi(
                 ddi = 0,
                 basename = base_name,
             )
-            leaf = UVData._build_leaf(vis_part, w_part, uvw_part; partition_info = info)
+            leaf = UVData._build_leaf(vis_part, w_part, uvw_part, f_part; partition_info = info)
             key = UVData.partition_key(info)
             haskey(branches, key) && error("load_fitsidi: duplicate partition key $(key)")
             branches[key] = leaf
@@ -1827,6 +1843,7 @@ function UVData.load_fitsidi(
                 )
                 vis_part = DimArray(bc.vis_chunk, vis_dims)
                 w_part = DimArray(bc.w_chunk, vis_dims)
+                f_part = DimArray(IDIDerivedFlags(bc.w_chunk), vis_dims)
 
                 info = UVData.PartitionInfo(;
                     source_name = si.name,
@@ -1841,7 +1858,7 @@ function UVData.load_fitsidi(
                     ddi = bc.band - 1,
                     basename = base_name,
                 )
-                leaf = UVData._build_leaf(vis_part, w_part, uvw_part; partition_info = info)
+                leaf = UVData._build_leaf(vis_part, w_part, uvw_part, f_part; partition_info = info)
                 key = UVData.partition_key(info)
                 haskey(branches, key) && error("load_fitsidi: duplicate partition key $(key)")
                 branches[key] = leaf

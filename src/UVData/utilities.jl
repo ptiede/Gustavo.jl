@@ -1,4 +1,25 @@
 """
+    check_layer_axes(reference, layers...)
+
+Throw a `DimensionMismatch` unless every array in `layers` shares `reference`'s
+axes.
+
+The solver kernels walk parallel `:vis`, `:weights` and `:flags` planes with one
+set of loop variables, so a layer whose axes differ would be read at the wrong
+cells instead of being reported. Call this where the layers arrive as separate
+arrays; a leaf built through `_build_leaf` is already checked.
+"""
+function check_layer_axes(reference, layers...)
+    ref = axes(reference)
+    for l in layers
+        axes(l) == ref || throw(
+            DimensionMismatch("layer has axes $(axes(l)); expected $(ref)"),
+        )
+    end
+    return nothing
+end
+
+"""
     sanitize_source(name::AbstractString) -> Symbol
 
 Sanitize a source name into a valid Julia identifier `Symbol`, always prefixed

@@ -330,49 +330,120 @@ function _search_axes(freqs::AbstractVector, times::AbstractVector, opts::Fringe
 end
 
 """
-    baseline_fringe_search(V, W, freqs, times, f0, t0; opts = FringeSearch()) -> Detection
+    fringe_plane(V, W, freqs, times; flags = nothing) -> DimStack
 
-Search one block of visibilities `V[chan, time]` (with inverse-variance weights
-`W[chan, time]`) for the group delay, fringe rate, and phase that align the
-visibility phasor. `freqs` (Hz) and `times` (s) label the channel and time axes;
-`f0`, `t0` are the delay/rate reference frequency and epoch (the returned phase
-is referenced to them). Flagged samples (`W ≤ 0` or non-finite `V`) are dropped.
+Wrap one (baseline, correlation product) block into the `(Frequency, Ti)` stack
+[`baseline_fringe_search`](@ref) takes: layers `:vis`, `:weights` and `:flags`,
+with `freqs` (Hz) and `times` (s) as the two lookups. `flags` defaults to
+nothing flagged.
 
-The search runs natively at `V`'s own compute type `C = eltype(V)` (`ComplexF32`
-or `ComplexF64`; FFTW supports no other complex type) — a `ComplexF32` block
-returns a `Detection{Float32}`.
+`V`/`W`/`flags` may be vectors instead, for a single-time (`(nchan,)`, delay
+only) or single-channel (`times`-length, rate only) block.
 
-`V`/`W` may also be passed as vectors for a single-time (`(nchan,)`, delay only)
-or single-channel block (`times`-length, rate only).
+A block taken from a solver cube needs no constructor — slice the scan stack
+instead, `view(stack, Baseline(bi), Pol(p))`.
 """
-function baseline_fringe_search(
-        V::AbstractMatrix{C}, W::AbstractMatrix,
-        freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real;
-        opts::FringeSearch = FringeSearch(),
-        workspace::Union{Nothing, FringeWorkspace} = nothing,
-    ) where {C}
+function fringe_plane(V, W, freqs, times; flags = nothing)
     size(V) == size(W) || throw(
         DimensionMismatch("V is $(size(V)) and W is $(size(W)); they must have the same shape")
     )
-    nchan, ntime = size(V)
-    (nchan == length(freqs) && ntime == length(times)) || throw(
+    flags === nothing || size(flags) == size(V) || throw(
+        DimensionMismatch("flags is $(size(flags)) and V is $(size(V)); they must have the same shape")
+    )
+    Vm, Wm, Fm = _as_plane_arrays(V, W, flags, freqs, times)
+    d = (Frequency(collect(freqs)), Ti(collect(times)))
+    return DimStack((
+        vis = DimArray(Vm, d), weights = DimArray(Wm, d), flags = DimArray(Fm, d),
+    ))
+end
+
+# Reshape a block to `(nchan, ntime)`. A vector is read as one time when its
+# length matches `freqs` and as one channel when it matches `times`.
+function _as_plane_arrays(V::AbstractMatrix, W, flags, freqs, times)
+    (size(V, 1) == length(freqs) && size(V, 2) == length(times)) || throw(
         DimensionMismatch(
             "V is $(size(V)); expected (length(freqs), length(times)) = " *
                 "($(length(freqs)), $(length(times)))"
         )
     )
+    return V, W, flags === nothing ? falses(size(V)) : flags
+end
+
+function _as_plane_arrays(V::AbstractVector, W, flags, freqs, times)
+    rs(x, d) = reshape(x, d)
+    if length(V) == length(freqs) && length(times) == 1
+        sz = (length(V), 1)
+    elseif length(V) == length(times) && length(freqs) == 1
+        sz = (1, length(V))
+    else
+        throw(
+            DimensionMismatch(
+                "vector fringe_plane: length(V)=$(length(V)) matches neither " *
+                    "freqs ($(length(freqs))) nor times ($(length(times)))"
+            )
+        )
+    end
+    return rs(V, sz), rs(W, sz), flags === nothing ? falses(sz) : rs(flags, sz)
+end
+
+"""
+    baseline_fringe_search(plane, f0, t0; opts = FringeSearch()) -> Detection
+
+Search one (baseline, correlation product) block for the group delay, fringe
+rate, and phase that align the visibility phasor. `plane` is a `DimStack` on
+`(Frequency, Ti)` carrying `:vis`, `:weights` (inverse-variance) and `:flags` —
+a slice of a scan stack, `view(stack, Baseline(bi), Pol(p))`, or one built from
+plain arrays by [`fringe_plane`](@ref). `f0`, `t0` are the delay/rate reference
+frequency and epoch, and the returned phase is referenced to them.
+
+A sample is used when its flag is unset and it carries usable statistics — a
+finite visibility and a finite, positive weight. The two are independent: a
+flag that a caller clears makes the sample available again at the weight it
+already had.
+
+The search runs natively at the visibility layer's own compute type
+`C = eltype(plane[:vis])` (`ComplexF32` or `ComplexF64`; FFTW supports no other
+complex type), so a `ComplexF32` block returns a `Detection{Float32}`.
+"""
+function baseline_fringe_search(
+        plane::AbstractDimStack, f0::Real, t0::Real;
+        opts::FringeSearch = FringeSearch(),
+        workspace::Union{Nothing, FringeWorkspace} = nothing,
+    )
+    freqs, times = _plane_axes(plane)
+    C = eltype(plane[:vis])
     ax = _search_axes(freqs, times, opts, C)
     # A standalone search is a family of one, so its own cell count is the family's.
-    return _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, _search_cells(ax, opts))
+    return _baseline_fringe_search(
+        plane, freqs, times, f0, t0, ax, workspace, opts, _search_cells(ax, opts),
+    )
 end
+
+# The plane's own frequency and time lookups, which label its two axes.
+_plane_axes(plane) = (lookup(plane[:vis], Frequency), lookup(plane[:vis], Ti))
+
+# The three layers every search kernel reads, in the order they are passed on.
+_plane_layers(plane) = (plane[:vis], plane[:weights], plane[:flags])
 
 # Grid the weighted visibilities onto the workspace's zero-padded uniform grid
 # `ws.G` (zeroed here); returns Σw. Shared by the search hot path and the map
 # extractor (`baseline_fringe_map`) so the gridding convention has one home.
+# The flag layer for the (baseline, product) plane under search, or `nothing`
+# from a caller that has none. Which method applies follows from the argument
+# type, so the test below costs nothing where there are no flags.
+@inline _flagged(::Nothing, I...) = false
+Base.@propagate_inbounds _flagged(F, I...) = F[I...]
+
+# The kernels index the three planes with one set of loop variables, so their
+# axes must agree. A caller with no flag layer passes `nothing`.
+_check_plane_axes(V, W, ::Nothing) = UVData.check_layer_axes(V, W)
+_check_plane_axes(V, W, F) = UVData.check_layer_axes(V, W, F)
+
 function _grid_visibilities!(
-        ws::FringeWorkspace{C}, V::AbstractMatrix, W::AbstractMatrix,
+        ws::FringeWorkspace{C}, V::AbstractMatrix, W::AbstractMatrix, F,
         freqs::AbstractVector, times::AbstractVector, ax::_SearchAxes,
     ) where {C}
+    _check_plane_axes(V, W, F)
     nchan, ntime = size(V)
     fax = ax.fax
     tax = ax.tax
@@ -381,10 +452,10 @@ function _grid_visibilities!(
     G = ws.G
     fill!(G, zero(C))
     Wsum = 0.0
-    @inbounds for ti in 1:ntime, ci in 1:nchan
+    @inbounds for ti in axes(V, 2), ci in axes(V, 1)
         w = W[ci, ti]
         v = V[ci, ti]
-        (isfinite(w) && w > 0 && isfinite(v)) || continue
+        (!_flagged(F, ci, ti) && isfinite(w) && w > 0 && isfinite(v)) || continue
         bf = fax.degenerate ? 1 : round(Int, (freqs[ci] - fax.origin) / fax.step) + 1
         bt = tax.degenerate ? 1 : round(Int, (times[ti] - tax.origin) / tax.step) + 1
         (1 <= bf <= nf_pad && 1 <= bt <= nt_pad) || continue
@@ -416,15 +487,20 @@ end
 # one-off wrapper that builds the axes then calls this; the group search builds the
 # axes once and calls this directly for every baseline. Numerically identical to the
 # previously-inlined body.
+# The numeric kernels below work on the plane's three layers as plain arrays:
+# they are swept thousands of times per solve and index by position, so the
+# stack is destructured once here rather than at every call.
 function _baseline_fringe_search(
-        V::AbstractMatrix{C}, W::AbstractMatrix,
+        plane::AbstractDimStack,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
         ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
         family_cells::Real,
-    ) where {C}
+    )
+    V, W, F = _plane_layers(plane)
+    C = eltype(V)
     # Hierarchical multi-band path (never allocates the big common-Δf grid).
     ax.mbd === nothing ||
-        return _mbd_fringe_search(V, W, freqs, times, f0, t0, ax, workspace, opts, family_cells)
+        return _mbd_fringe_search(V, W, F, freqs, times, f0, t0, ax, workspace, opts, family_cells)
 
     T = real(C)
     nchan, ntime = size(V)
@@ -437,7 +513,7 @@ function _baseline_fringe_search(
     # shared FFT plan instead of allocating an `nf_pad × nt_pad` `C` grid and
     # replanning on every call.
     ws = _ensure_workspace!(workspace, C, nf_pad, nt_pad)
-    Wsum = _grid_visibilities!(ws, V, W, freqs, times, ax)
+    Wsum = _grid_visibilities!(ws, V, W, F, freqs, times, ax)
     Wsum > 0 || return _invalid_detection(T)
 
     D = ws.D
@@ -481,14 +557,14 @@ function _baseline_fringe_search(
     rate = rates[lbest]
     if opts.quad_interp
         pk = _polish_peak_exact!(
-            V, W, freqs, times, f0, t0, delay, rate;
+            V, W, F, freqs, times, f0, t0, delay, rate;
             delay_bin = fax.degenerate ? 0.0 : 1.0 / (nf_pad * fax.step),
             rate_bin = tax.degenerate ? 0.0 : 1.0 / (nt_pad * tax.step),
             refine_delay = !fax.degenerate, refine_rate = !tax.degenerate,
         )
         delay, rate, Dref = pk.delay, pk.rate, pk.Dref
     else
-        Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate)
+        Dref = _exact_matched_filter(V, W, F, freqs, times, f0, t0, delay, rate)
     end
     absref = abs(Dref)
     amp = absref / Wsum
@@ -507,53 +583,33 @@ function _baseline_fringe_search(
     return Detection{T}((delay, rate, phase, amp, snr, T(fringe_pfa(snr, family_cells)), true))
 end
 
-# Vector overloads: single-time (delay only) and the general fallback.
-function baseline_fringe_search(
-        V::AbstractVector, W::AbstractVector,
-        freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real;
-        opts::FringeSearch = FringeSearch(),
+function _exact_matched_filter(
+        plane::AbstractDimStack,
+        freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
+        delay::Real, rate::Real,
     )
-    # Interpret a vector as (nchan, 1) when it matches freqs, else (1, ntime).
-    if length(V) == length(freqs) && length(times) == 1
-        return baseline_fringe_search(reshape(V, :, 1), reshape(W, :, 1), freqs, times, f0, t0; opts)
-    elseif length(V) == length(times) && length(freqs) == 1
-        return baseline_fringe_search(reshape(V, 1, :), reshape(W, 1, :), freqs, times, f0, t0; opts)
-    else
-        throw(
-            DimensionMismatch(
-                "vector baseline_fringe_search: length(V)=$(length(V)) matches neither " *
-                    "freqs ($(length(freqs))) nor times ($(length(times)))"
-            )
-        )
-    end
+    V, W, F = _plane_layers(plane)
+    return _exact_matched_filter(V, W, F, freqs, times, f0, t0, delay, rate)
 end
 
-# Exact (grid-free) matched filter Σ w·V·exp(−2πi[τ(f−f0) + ṙ(t−t0)]) at one
-# (delay, rate) point — the scalloping-free evaluation shared by both search
-# paths (final phase/amp readout, and the MBD ambiguity arbitration, which
-# evaluates several candidates per search). The phase is separable, so the
-# phasors are precomputed per axis: O(nchan + ntime) `cis` calls instead of
-# O(nchan·ntime) — `cis` dominates the naive loop. The phase ANGLES
-# (`freqs[ci] - f0`, an absolute-Hz difference) are computed in `Float64`
-# regardless of `V`'s compute type `C` — see the header note on precision scope
-# — but the phasors themselves, and the accumulator, are natively `C`.
 function _exact_matched_filter(
-        V::AbstractMatrix{C}, W::AbstractMatrix,
+        V::AbstractMatrix{C}, W::AbstractMatrix, F,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
         delay::Real, rate::Real,
     ) where {C}
+    _check_plane_axes(V, W, F)
     nchan, ntime = size(V)
     cf = Vector{C}(undef, nchan)
     @inbounds for ci in 1:nchan
         cf[ci] = cis(-2π * delay * (freqs[ci] - f0))
     end
     Dref = zero(C)
-    @inbounds for ti in 1:ntime
+    @inbounds for ti in axes(V, 2)
         acc = zero(C)
-        for ci in 1:nchan
+        for ci in axes(V, 1)
             w = W[ci, ti]
             v = V[ci, ti]
-            (isfinite(w) && w > 0 && isfinite(v)) || continue
+            (!_flagged(F, ci, ti) && isfinite(w) && w > 0 && isfinite(v)) || continue
             acc += w * v * cf[ci]
         end
         Dref += acc * cis(-2π * rate * (times[ti] - t0))
@@ -574,21 +630,23 @@ end
 # `_collapse_freq!` sums in `_exact_matched_filter`'s own order, so the two agree
 # exactly; `_collapse_time!` sums time-major and agrees to float rounding.
 
-function _collapse_time!(S, V::AbstractMatrix{C}, W, times, t0::Real, rate::Real) where {C}
+function _collapse_time!(S, V::AbstractMatrix{C}, W, F, times, t0::Real, rate::Real) where {C}
+    _check_plane_axes(V, W, F)
     fill!(S, zero(C))
     @inbounds for ti in axes(V, 2)
         ph = cis(-2π * rate * (times[ti] - t0))
         for ci in axes(V, 1)
             w = W[ci, ti]
             v = V[ci, ti]
-            (isfinite(w) && w > 0 && isfinite(v)) || continue
+            (!_flagged(F, ci, ti) && isfinite(w) && w > 0 && isfinite(v)) || continue
             S[ci] += w * v * ph
         end
     end
     return S
 end
 
-function _collapse_freq!(Tt, cf, V::AbstractMatrix{C}, W, freqs, f0::Real, delay::Real) where {C}
+function _collapse_freq!(Tt, cf, V::AbstractMatrix{C}, W, F, freqs, f0::Real, delay::Real) where {C}
+    _check_plane_axes(V, W, F)
     @inbounds for ci in axes(V, 1)
         cf[ci] = cis(-2π * delay * (freqs[ci] - f0))
     end
@@ -597,7 +655,7 @@ function _collapse_freq!(Tt, cf, V::AbstractMatrix{C}, W, freqs, f0::Real, delay
         for ci in axes(V, 1)
             w = W[ci, ti]
             v = V[ci, ti]
-            (isfinite(w) && w > 0 && isfinite(v)) || continue
+            (!_flagged(F, ci, ti) && isfinite(w) && w > 0 && isfinite(v)) || continue
             acc += w * v * cf[ci]
         end
         Tt[ti] = acc
@@ -638,11 +696,11 @@ end
 # axis spacing, so the refined values end up `Float64` — narrowed back to `T`
 # only when the caller builds the final `Detection{T}`.
 function _polish_peak_exact!(
-        V, W, freqs, times, f0, t0, delay::Real, rate::Real;
+        V, W, F, freqs, times, f0, t0, delay::Real, rate::Real;
         delay_bin::Real, rate_bin::Real,
         refine_delay::Bool, refine_rate::Bool,
     )
-    Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate)
+    Dref = _exact_matched_filter(V, W, F, freqs, times, f0, t0, delay, rate)
     # Per-axis probe half-width, shrunk geometrically each pass so the search hones
     # from the coarse seed cell down to well below the fringe resolution regardless
     # of `oversample`. The seed is the FFT argmax, so the true peak lies within
@@ -664,7 +722,7 @@ function _polish_peak_exact!(
     cf = similar(V, C, (axes(V, 1),))
     for _ in 1:4
         if hd > 0
-            _collapse_time!(S, V, W, times, t0, rate)
+            _collapse_time!(S, V, W, F, times, t0, rate)
             b0 = abs(_phase_sum(S, freqs, f0, delay))
             am = abs(_phase_sum(S, freqs, f0, delay - hd))
             ap = abs(_phase_sum(S, freqs, f0, delay + hd))
@@ -679,7 +737,7 @@ function _polish_peak_exact!(
             hd *= 0.5
         end
         if hr > 0
-            _collapse_freq!(Tt, cf, V, W, freqs, f0, delay)
+            _collapse_freq!(Tt, cf, V, W, F, freqs, f0, delay)
             b0 = abs(_phase_sum(Tt, times, t0, rate))
             am = abs(_phase_sum(Tt, times, t0, rate - hr))
             ap = abs(_phase_sum(Tt, times, t0, rate + hr))
@@ -980,11 +1038,12 @@ end
 # `_baseline_fringe_search`: identical Detection semantics and SNR/noise
 # conventions).
 function _mbd_fringe_search(
-        V::AbstractMatrix{C}, W::AbstractMatrix,
+        V::AbstractMatrix{C}, W::AbstractMatrix, F,
         freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
         ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
         family_cells::Real,
     ) where {C}
+    _check_plane_axes(V, W, F)
     T = real(C)
     mx = ax.mbd
     tax = ax.tax
@@ -1009,10 +1068,10 @@ function _mbd_fringe_search(
         Gb = w.Gb
         fill!(Gb, zero(C))
         flo = mx.f_lo[bi]
-        @inbounds for ti in 1:ntime, ci in mx.freqgroups[bi]
+        @inbounds for ti in axes(V, 2), ci in mx.freqgroups[bi]
             wgt = W[ci, ti]
             v = V[ci, ti]
-            (isfinite(wgt) && wgt > 0 && isfinite(v)) || continue
+            (!_flagged(F, ci, ti) && isfinite(wgt) && wgt > 0 && isfinite(v)) || continue
             bf = round(Int, (freqs[ci] - flo) / Δf) + 1
             bt = tax.degenerate ? 1 : round(Int, (times[ti] - tax.origin) / tax.step) + 1
             (1 <= bf <= w.nfb && 1 <= bt <= nt_pad) || continue
@@ -1093,10 +1152,10 @@ function _mbd_fringe_search(
         kmin = kmax = round(Int, (clamp(sbd_ref, lo, hi) - mbd_ref) / A)
     end
     delay = mbd_ref + kmin * A
-    Dref = _exact_matched_filter(V, W, freqs, times, f0, t0, delay, rate_ref)
+    Dref = _exact_matched_filter(V, W, F, freqs, times, f0, t0, delay, rate_ref)
     for k in (kmin + 1):kmax
         d = mbd_ref + k * A
-        Dk = _exact_matched_filter(V, W, freqs, times, f0, t0, d, rate_ref)
+        Dk = _exact_matched_filter(V, W, F, freqs, times, f0, t0, d, rate_ref)
         if abs(Dk) > abs(Dref)
             Dref = Dk
             delay = d
@@ -1112,7 +1171,7 @@ function _mbd_fringe_search(
     # rate on the exact objective instead of on the (biased) stage-2 grid.
     if opts.quad_interp
         pk = _polish_peak_exact!(
-            V, W, freqs, times, f0, t0, delay, rate_ref;
+            V, W, F, freqs, times, f0, t0, delay, rate_ref;
             delay_bin = mx.mbd_bin,
             rate_bin = tax.degenerate ? 0.0 : 1.0 / (nt_pad * tax.step),
             refine_delay = true, refine_rate = !tax.degenerate,
@@ -1223,7 +1282,7 @@ _detection64(d::Detection) =
     Detection{Float64}((Float64(d.delay), Float64(d.rate), Float64(d.phase), Float64(d.amp), Float64(d.snr), d.valid))
 
 """
-    baseline_fringe_map(V, W, freqs, times, f0, t0; opts = FringeSearch(), workspace = nothing)
+    baseline_fringe_map(plane, f0, t0; opts = FringeSearch(), workspace = nothing)
         -> FringeSearchMap
 
 Compute the full delay–rate SNR surface for one visibility block — the
@@ -1237,26 +1296,19 @@ much more expensive than the hierarchical search that produced the solution),
 not a hot path.
 """
 function baseline_fringe_map(
-        V::AbstractMatrix{C}, W::AbstractMatrix,
-        freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real;
+        plane::AbstractDimStack, f0::Real, t0::Real;
         opts::FringeSearch = FringeSearch(),
         workspace::Union{Nothing, FringeWorkspace} = nothing,
-    ) where {C}
-    size(V) == size(W) || throw(
-        DimensionMismatch("V is $(size(V)) and W is $(size(W)); they must have the same shape")
     )
-    (size(V, 1) == length(freqs) && size(V, 2) == length(times)) || throw(
-        DimensionMismatch(
-            "V is $(size(V)); expected (length(freqs), length(times)) = " *
-                "($(length(freqs)), $(length(times)))"
-        )
-    )
+    freqs, times = _plane_axes(plane)
+    V, W, flags = _plane_layers(plane)
+    C = eltype(V)
     ax = _search_axes(freqs, times, opts, C)              # detection axes (honour opts.algorithm)
     axf = ax.mbd === nothing ? ax :                       # plane axes: always the full grid
         _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.quad_interp, FullGrid()), C)
     ncells = _search_cells(axf, opts)
     ws = _ensure_workspace!(workspace, C, axf.nf_pad, axf.nt_pad)
-    Wsum = _grid_visibilities!(ws, V, W, freqs, times, axf)
+    Wsum = _grid_visibilities!(ws, V, W, flags, freqs, times, axf)
     Wsum > 0 || return FringeSearchMap(Float64[], Float64[], zeros(0, 0), _invalid_detection(Float64), ncells, NaN)
     D = ws.D
     mul!(D, axf.plan, ws.G)
@@ -1274,6 +1326,6 @@ function baseline_fringe_map(
     # The refined peak, via the standard search (re-grids + re-FFTs the same data
     # in `ws` — the map above is already copied out, and reusing the search keeps
     # the peak/refinement logic in one place).
-    det = _baseline_fringe_search(V, W, freqs, times, f0, t0, ax, ws, opts, ncells)
+    det = _baseline_fringe_search(plane, freqs, times, f0, t0, ax, ws, opts, ncells)
     return FringeSearchMap(axf.delays[kidx], axf.rates[lidx], snrmap, det, ncells, fringe_pfa(det.snr, ncells))
 end

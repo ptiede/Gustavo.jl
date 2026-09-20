@@ -242,8 +242,9 @@ end
         v = leaf[:vis][Baseline = idx]
         w = leaf[:weights][Baseline = idx]
         u = leaf[:uvw][Baseline = idx]
+        f = leaf[:flags][Baseline = idx]
         return UVP._build_leaf(
-            v, w, u;
+            v, w, u, f;
             partition_info = UVP.update(
                 info; antennas = tbl, baselines = newb, record_order = Tuple{Int, Int}[],
             ),

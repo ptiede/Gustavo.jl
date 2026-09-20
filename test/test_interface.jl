@@ -204,7 +204,8 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         function mkwindow()
             parent(leaf[:vis]) .= 1
             parent(leaf[:weights]) .= 1
-            return leaf[(:vis, :weights)], CAL.leaf_window(geom, leaf)
+            parent(leaf[:flags]) .= false
+            return leaf[(:vis, :weights, :flags)], CAL.leaf_window(geom, leaf)
         end
 
         # StationWeightScale: w → w·s_a·s_b per baseline; vis untouched.

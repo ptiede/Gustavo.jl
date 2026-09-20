@@ -264,10 +264,12 @@ function apply_calibration(
         bl_pairs = baselines(leaf).pairs
         vis_l = leaf[:vis]
         w_l = leaf[:weights]
-        vis_corr, weights_corr = _apply_apriori_kernel(
-            vis_l, w_l, gains_pkg.gains, bl_pairs, pol_products(leaf),
+        vis_corr, weights_corr, flags_corr = _apply_apriori_kernel(
+            vis_l, w_l, leaf[:flags], gains_pkg.gains, bl_pairs, pol_products(leaf),
         )
-        return rebuild_visibilities(leaf, vis_corr, weights_corr)
+        return rebuild_visibilities(
+            leaf, vis_corr, weights_corr, leaf[:uvw], flags_corr,
+        )
     end
     return set_bunit(out, "JY")
 end
@@ -296,45 +298,56 @@ function apply_calibration(
             on_missing_station = on_missing_station, min_elevation_deg = min_elevation_deg,
         )
         bl_pairs = baselines(leaf).pairs
-        vis_corr, weights_corr = _apply_apriori_kernel(
-            leaf[:vis], leaf[:weights], gains_pkg.gains, bl_pairs, pol_products(leaf),
+        vis_corr, weights_corr, flags_corr = _apply_apriori_kernel(
+            leaf[:vis], leaf[:weights], leaf[:flags], gains_pkg.gains, bl_pairs,
+            pol_products(leaf),
         )
-        return rebuild_visibilities(leaf, vis_corr, weights_corr)
+        return rebuild_visibilities(
+            leaf, vis_corr, weights_corr, leaf[:uvw], flags_corr,
+        )
     end
     return set_bunit(out, "JY")
 end
 
-# Apply per-(channel, integration, antenna, feed) real-valued gains. NaN
-# gains flag the sample (weight ← 0); non-NaN scaling matches the
-# bandpass kernel convention so the two corrections compose cleanly.
+# Apply per-(channel, integration, antenna, feed) real-valued gains. A
+# non-finite gain flags the sample; non-NaN scaling matches the bandpass kernel
+# convention so the two corrections compose cleanly.
+#
+# Every sample this kernel flags also has its weight zeroed: the solver stages
+# decide usability from the weight, so the flag alone would not exclude it.
 function _apply_apriori_kernel(
-        vis_p::AbstractArray, w_p::AbstractArray,
+        vis_p::AbstractArray, w_p::AbstractArray, flags_p::AbstractArray,
         gains::AbstractArray{Float64, 4},
         bl_pairs, pol_products,
     )
+    check_layer_axes(vis_p, w_p, flags_p)
     vis_corr = copy(vis_p)
     weights_corr = copy(w_p)
+    flags_corr = copy(flags_p)
     for ti in axes(vis_p, Ti), bi in axes(vis_p, Baseline)
         a, b = bl_pairs[bi]
         # Autocorrelations (a == b) are total power, not interferometric
         # visibilities: `√(SEFD_a·SEFD_b)` flux-scaling is meaningless and blows
-        # their amplitude up by the SEFD. Flag them (weight ← 0) so they are not
-        # used downstream — the fringe solve already skips them.
+        # their amplitude up by the SEFD. Flag them so they are not used
+        # downstream — the fringe solve already skips them.
         if a == b
             for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
                 weights_corr[c, ti, bi, p] = zero(eltype(weights_corr))
+                flags_corr[c, ti, bi, p] = true
             end
             continue
         end
         for p in axes(vis_p, Pol)
             fa, fb = correlation_feed_pair(pol_products[Int(p)])
             for c in axes(vis_p, Frequency)
+                flags_p[c, ti, bi, p] && continue
                 w = w_p[c, ti, bi, p]
                 (w > 0 && isfinite(w)) || continue
                 ga = gains[c, ti, a, fa]
                 gb = gains[c, ti, b, fb]
                 if !(isfinite(ga) && isfinite(gb))
                     weights_corr[c, ti, bi, p] = zero(w)
+                    flags_corr[c, ti, bi, p] = true
                     continue
                 end
                 vis_corr[c, ti, bi, p] /= ga * gb
@@ -342,5 +355,5 @@ function _apply_apriori_kernel(
             end
         end
     end
-    return vis_corr, weights_corr
+    return vis_corr, weights_corr, flags_corr
 end

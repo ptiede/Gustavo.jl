@@ -13,6 +13,7 @@ using Statistics: mean, median
 using Printf: @sprintf
 using Dates
 using AstroLib: ct2lst
+import XRadio
 
 include("dimensions.jl")
 include("antenna.jl")
@@ -28,6 +29,7 @@ include("diagnostics.jl")
 include("antab.jl")
 include("apriori.jl")
 include("utilities.jl")
+include("xradio_bridge.jl")
 
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
 export antennas, union_antennas, unify_antennas, union_pol_products
@@ -40,6 +42,7 @@ export set_bunit, with_bunit
 export baseline, baselines_per_scan, baselines
 export pol_index, pol_at, baseline_index
 export obs_time
+export uvset_to_processingset
 export source_name, scan_name, primary_scan_name, scan_intents, sub_scan_name, scan_window, participating_antennas
 export select_source, select_scan, select_station, select_baseline, select_partition
 export merge_uvsets, time_window

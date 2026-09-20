@@ -649,7 +649,7 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
             prev = get(time_scan, tk, nothing)
             (prev === nothing || prev == info.scan_name) || throw(
                 ArgumentError(
-                    "build_geometry: time $tk h appears in conflicting scans '$prev' and " *
+                    "build_geometry: time $tk s appears in conflicting scans '$prev' and " *
                         "'$(info.scan_name)' — a single concatenated time axis cannot dense-rank " *
                         "it to one scan. Check for overlapping scan windows or inconsistent " *
                         "scan names."
@@ -764,7 +764,7 @@ function _time_indices(geom::DataGeometry, leaf)
     ts = lookup(leaf[:vis], Ti)
     idx = Vector{Int}(undef, length(ts))
     for (i, t) in enumerate(ts)
-        j = findfirst(g -> isapprox(g, Float64(t); atol = 1.0e-9), geom.times)
+        j = findfirst(g -> isapprox(g, Float64(t); atol = _epoch_atol(t)), geom.times)
         isnothing(j) && throw(ArgumentError("leaf_window: time $t not found in geometry"))
         idx[i] = j
     end
@@ -843,6 +843,7 @@ function UVData.apply_calibration(
         private || (
             leaf = rebuild_visibilities(
                 leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights])),
+                parent(leaf[:uvw]), copy(parent(leaf[:flags])),
             )
         )
         win = leaf_window(target, leaf)
@@ -852,7 +853,7 @@ function UVData.apply_calibration(
         )
         _apply_gains!(leaf, g; executor)
         _flag_solution_rows!(
-            leaf[:vis], leaf[:weights], UVData.baselines(leaf).pairs,
+            leaf[:vis], leaf[:weights], leaf[:flags], UVData.baselines(leaf).pairs,
             _geom_scan_id(sol.geom, info.scan_name), flagged,
         )
         return leaf
@@ -878,12 +879,15 @@ _geom_scan_id(geom::DataGeometry, scan_name) =
 # Zero-weight (and NaN) whole baseline rows touching a (station, scan) the solve
 # left unconstrained — identity gains, so the data would pass through
 # uncalibrated. A leaf spans one scan, hence one scan id.
-function _flag_solution_rows!(Vc, Wc, bl_pairs, scanid::Integer, flagged)
+function _flag_solution_rows!(Vc, Wc, Fc, bl_pairs, scanid::Integer, flagged)
     flagged === nothing && return nothing
-    @inbounds for bi in eachindex(bl_pairs)
+    for bi in eachindex(bl_pairs)
         a, b = bl_pairs[bi]
         a == b && continue
         ((a, scanid) in flagged || (b, scanid) in flagged) || continue
+        Fc[:, :, bi, :] .= true
+        # Zeroing the weight alongside the flag is what excludes the row: the
+        # solver stages decide usability from the weight.
         Wc[:, :, bi, :] .= zero(eltype(Wc))
         Vc[:, :, bi, :] .= convert(eltype(Vc), NaN)
     end
@@ -897,17 +901,19 @@ const _GAIN_FLOOR = 1.0e-12
 # Correct one (baseline, product) column in place over its (Frequency, Ti)
 # plane: `V ← V / (g_a conj(g_b))` and `w ← w · |g_a g_b|²`, where `ga`/`gb` are
 # the two stations' gains on that same plane. A degenerate or non-finite gain
-# blanks the cell — NaN visibility, zero weight — which is what marks it flagged
-# downstream. Each cell reads then writes its own index, so the update is exact
-# even though the read and the write hit the same array.
-function _correct_column!(vis, w, ga, gb)
-    for i in eachindex(vis, w, ga, gb)
+# blanks the cell — NaN visibility, zero weight — and flags it. The weight goes
+# to zero alongside the flag because the solver stages decide usability from the
+# weight. Each cell reads then writes its own index, so the update is exact even
+# though the read and the write hit the same array.
+function _correct_column!(vis, w, f, ga, gb)
+    for i in eachindex(vis, w, f, ga, gb)
         gai = ga[i]
         gbi = gb[i]
         den = gai * conj(gbi)
         if abs(gai) < _GAIN_FLOOR || abs(gbi) < _GAIN_FLOOR || !isfinite(den)
             vis[i] = convert(eltype(vis), NaN)
             w[i] = zero(eltype(w))
+            f[i] = true
         else
             vis[i] = vis[i] / den
             w[i] = w[i] * abs2(gai * gbi)
@@ -930,6 +936,7 @@ end
 function _apply_gains!(leaf, g::AbstractArray{<:Complex, 4}; executor = SerialScheduler())
     vis = leaf[:vis]
     w = leaf[:weights]
+    f = leaf[:flags]
     ants = UVData.baselines(leaf).pairs
     feeds = map(correlation_feed_pair, pol_products(leaf))
     columns = vec(CartesianIndices((axes(vis, 3), axes(vis, 4))))
@@ -938,7 +945,7 @@ function _apply_gains!(leaf, g::AbstractArray{<:Complex, 4}; executor = SerialSc
         a, b = ants[bi]
         fa, fb = feeds[p]
         _correct_column!(
-            view(vis, :, :, bi, p), view(w, :, :, bi, p),
+            view(vis, :, :, bi, p), view(w, :, :, bi, p), view(f, :, :, bi, p),
             view(g, :, :, a, fa), view(g, :, :, b, fb),
         )
     end

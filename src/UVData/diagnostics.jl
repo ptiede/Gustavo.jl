@@ -61,17 +61,31 @@ function _baseline_scan_blocks(data::UVSet, corr::UVSet, bl_plot, pol_index::Int
         # Layout: (Frequency, Ti, Baseline, Pol). Slice to (Frequency, Ti)
         # for fixed (baseline, pol), then transpose to (Ti, Frequency) so
         # downstream concat yields (nrec, nchan).
+        # A flagged sample carries no weight in the extracted block: every
+        # consumer below decides usability from the weight, and the block is a
+        # copy built for display, so the leaf's own layers stay independent.
         push!(
             blocks, (
                 sid = sid,
                 vis_b = copy(transpose(parent(leaf_d[:vis])[:, :, bi_d, pol_index])),
                 vis_a = copy(transpose(parent(leaf_c[:vis])[:, :, bi_c, pol_index])),
-                w_b = copy(transpose(parent(leaf_d[:weights])[:, :, bi_d, pol_index])),
-                w_a = copy(transpose(parent(leaf_c[:weights])[:, :, bi_c, pol_index])),
+                w_b = _unflagged_weights(leaf_d, bi_d, pol_index),
+                w_a = _unflagged_weights(leaf_c, bi_c, pol_index),
             )
         )
     end
     return blocks
+end
+
+# One (baseline, product) weight plane as `(Ti, Frequency)`, zeroed where the
+# leaf's flag is set.
+function _unflagged_weights(leaf, bi::Integer, pol_index::Integer)
+    w = copy(transpose(parent(leaf[:weights])[:, :, bi, pol_index]))
+    f = transpose(view(parent(leaf[:flags]), :, :, bi, pol_index))
+    for i in eachindex(w, f)
+        f[i] && (w[i] = zero(eltype(w)))
+    end
+    return w
 end
 
 # vcat per-scan blocks into a single (nrec, nchan) matrix and a parallel

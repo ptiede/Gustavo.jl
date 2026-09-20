@@ -102,7 +102,9 @@ function search_scan(
 
     f0 = geom.f0
     t0_sec = Float64(t0)
-    Wg = data[:weights]
+    # One stack over the cube the search reads, so each cell is a plane slice
+    # rather than three separately-gathered views.
+    cube = DimStack((vis = Vsearch, weights = data[:weights], flags = data[:flags]))
     # One reusable workspace per task (not per cell): the grids are tens of MB, so
     # a task processing many baselines allocates its scratch once. Each (j, p)
     # writes a distinct cell of every layer, so the concurrent writes never overlap.
@@ -111,7 +113,7 @@ function search_scan(
     tforeach(cells; scheduler = executor) do (j, p)
         bi = keep[j]
         scube[j, p] = _baseline_fringe_search(
-            view(Vsearch, :, :, bi, p), view(Wg, :, :, bi, p),
+            view(cube, Baseline(bi), Pol(p)),
             fg, times, f0, t0_sec, ax, workspace[], params, family_cells,
         )
     end

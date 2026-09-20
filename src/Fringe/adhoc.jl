@@ -1097,11 +1097,13 @@ end
 # inverse-variance mean of the data, already gain-corrected (and reweighted by
 # |gain|², matching `apply_calibration`) through the pipeline's transform chain
 # before this kernel ever sees it.
-function _accumulate_leaf_rbar!(rbar, wbar, V, W)
+function _accumulate_leaf_rbar!(rbar, wbar, V, W, F)
+    UVData.check_layer_axes(V, W, F)
     nchan, nti, nbl, npol = size(V)
     @inbounds for p in 1:npol
         for bi in 1:nbl
-            for tt in 1:nti, c in 1:nchan
+            for tt in axes(V, 2), c in axes(V, 1)
+                F[c, tt, bi, p] && continue
                 w = W[c, tt, bi, p]
                 (w > 0 && isfinite(w)) || continue
                 v = V[c, tt, bi, p]
@@ -1156,6 +1158,7 @@ function adhoc_scan!(
         _accumulate_leaf_rbar!(
             view(rparts, :, :, :, li), view(wparts, :, :, :, li),
             view(stack[:vis], r, :, :, :), view(stack[:weights], r, :, :, :),
+            view(stack[:flags], r, :, :, :),
         )
     end
     rbar = zeros(ComplexF64, nbl, npol, nap)

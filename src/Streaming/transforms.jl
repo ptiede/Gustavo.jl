@@ -8,7 +8,7 @@
 # edits to Gustavo internals.
 #
 # The contract: implement `apply_transform!(t, stack, win; executor)` mutating the
-# stack's `:vis`/`:weights` layers in place. Transforms run in chain order at
+# stack's `:vis`/`:weights`/`:flags` layers in place. Transforms run in chain order at
 # every materialization, so a solve, a re-run, and a diagnostic that share the
 # chain see identical data. Solutions record the chain they were solved with
 # (`sol.transforms`), so diagnostics can replay it automatically.
@@ -31,10 +31,11 @@ abstract type AbstractDataTransform end
     apply_transform!(t::AbstractDataTransform, stack::AbstractDimStack,
                      win::GeometryWindow; executor = SerialScheduler())
 
-Apply `t` to one materialized scan window, mutating `stack`'s `:vis`/`:weights`
-layers in place. The extension point for custom transforms.
+Apply `t` to one materialized scan window, mutating `stack`'s
+`:vis`/`:weights`/`:flags` layers in place. The extension point for custom
+transforms.
 
-`stack` carries layers `:vis`/`:weights` on `(Frequency, Ti, Baseline, Pol)`
+`stack` carries layers `:vis`/`:weights`/`:flags` on `(Frequency, Ti, Baseline, Pol)`
 dims (frequencies in Hz, times in seconds, correlation products on the `Pol`
 lookup) and the leaf's `PartitionInfo` metadata, so DimensionalData selectors
 and the `UVData` accessors both work on it directly — `stack[:vis][Pol =
@@ -50,7 +51,7 @@ function apply_transform!(t::AbstractDataTransform, stack, win; executor = Seria
     return error(
         "apply_transform! not implemented for $(typeof(t)) — implement " *
             "`apply_transform!(t, stack, win::GeometryWindow; executor)` mutating the " *
-            "stack's :vis/:weights layers in place."
+            "stack's :vis/:weights/:flags layers in place."
     )
 end
 
@@ -116,8 +117,11 @@ function apply_transforms(uvset::UVSet, transforms; geom::DataGeometry = build_g
         # transform's stack is then just the layer selection off that leaf —
         # metadata included. The selection shares `mlc`'s arrays, so the chain
         # mutates `mlc` in place and it is the transformed leaf.
-        mlc = rebuild_visibilities(ml, copy(parent(ml[:vis])), copy(parent(ml[:weights])))
-        apply_transforms!(ts, mlc[(:vis, :weights)], leaf_window(geom, mlc))
+        mlc = rebuild_visibilities(
+            ml, copy(parent(ml[:vis])), copy(parent(ml[:weights])),
+            parent(ml[:uvw]), copy(parent(ml[:flags])),
+        )
+        apply_transforms!(ts, mlc[(:vis, :weights, :flags)], leaf_window(geom, mlc))
         return mlc
     end
 end
@@ -352,8 +356,9 @@ end
 """
     FlagChannels(mask::BitVector)
 
-Transform: zero-weight the flagged global channels (mask indexed by the solve
-geometry's channel axis, `true` = flag), e.g. `tone_channel_mask`.
+Transform: flag the given global channels (mask indexed by the solve
+geometry's channel axis, `true` = flag), e.g. `tone_channel_mask`. Their
+weights are zeroed as well.
 """
 struct FlagChannels <: AbstractDataTransform
     mask::BitVector
@@ -367,7 +372,11 @@ function apply_transform!(
         error("FlagChannels: mask length $(length(t.mask)) ≠ nchan $(length(win.geom.channel_freqs))")
     # `t.mask` is indexed by global channel; gathering it through `win.chan_idx`
     # gives the mask over this window's own frequency axis.
-    stack[:weights][Frequency = t.mask[win.chan_idx]] .= 0
+    sel = t.mask[win.chan_idx]
+    stack[:flags][Frequency = sel] .= true
+    # The weights go to zero as well: the solver stages decide usability from
+    # the weight, so the flag alone would not exclude these channels.
+    stack[:weights][Frequency = sel] .= 0
     return nothing
 end
 
@@ -534,31 +543,37 @@ end
 
 # Divide out real, positive per-(channel, integration, antenna, feed) amplitude
 # gains in place. Mirrors `UVData._apply_apriori_kernel`, which does the same on
-# a whole leaf: NaN flags the sample, autocorrelations are flagged outright.
+# a whole leaf: a non-finite gain flags the sample, autocorrelations are flagged
+# outright. Every sample flagged here has its weight zeroed as well, because the
+# solver stages decide usability from the weight.
 function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, executor)
     V = parent(stack[:vis])
     W = parent(stack[:weights])
+    Fl = parent(stack[:flags])
+    UVData.check_layer_axes(V, W, Fl)
     bl_pairs = UVData.baselines(stack).pairs
     pols = UVData.pol_products(stack)
-    nchan, nti, nbl, npol = size(V)
-    cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
+    cols = [(bi, p) for p in axes(V, 4) for bi in axes(V, 3)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
         a, b = bl_pairs[bi]
         if a == b
-            for t in 1:nti, c in 1:nchan
+            for t in axes(V, 2), c in axes(V, 1)
+                Fl[c, t, bi, p] = true
                 W[c, t, bi, p] = zero(eltype(W))
             end
             return
         end
         fa, fb = UVData.correlation_feed_pair(pols[p])
-        for t in 1:nti
-            for c in 1:nchan
+        for t in axes(V, 2)
+            for c in axes(V, 1)
+                Fl[c, t, bi, p] && continue
                 w = W[c, t, bi, p]
                 (w > 0 && isfinite(w)) || continue
                 ga = gains[c, t, a, fa]
                 gb = gains[c, t, b, fb]
                 if !(isfinite(ga) && isfinite(gb))
+                    Fl[c, t, bi, p] = true
                     W[c, t, bi, p] = zero(eltype(W))
                     continue
                 end
