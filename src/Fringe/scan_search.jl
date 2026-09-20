@@ -109,7 +109,7 @@ function search_scan(
     # a task processing many baselines allocates its scratch once. Each (j, p)
     # writes a distinct cell of every layer, so the concurrent writes never overlap.
     workspace = TaskLocalValue{FringeWorkspace{C}}(() -> FringeWorkspace(C))
-    cells = [(j, p) for p in 1:npol for j in 1:ncross]
+    cells = [(j, p) for p in axes(scube, 2) for j in axes(scube, 1)]
     tforeach(cells; scheduler = executor) do (j, p)
         bi = keep[j]
         scube[j, p] = _baseline_fringe_search(

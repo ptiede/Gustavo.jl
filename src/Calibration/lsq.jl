@@ -40,7 +40,7 @@ function savitzky_golay_smooth(y::AbstractVector, weights = nothing; window::Int
     n = length(y)
     out = collect(float.(y))
     h = window ÷ 2
-    for i in 1:n
+    for i in eachindex(out)
         lo, hi = max(1, i - h), min(n, i + h)
         idx = [j for j in lo:hi if isfinite(y[j])]
         isempty(idx) && continue
@@ -93,7 +93,7 @@ function connected_components(nnodes::Integer, edges)
     compid = zeros(Int, nnodes)
     label = Dict{Int, Int}()
     ncomp = 0
-    for n in 1:nnodes
+    for n in eachindex(touched)
         touched[n] || continue
         r = findroot(n)
         id = get(label, r, 0)

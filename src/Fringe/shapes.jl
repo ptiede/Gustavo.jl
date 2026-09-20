@@ -142,6 +142,8 @@ end
 # interpolation. `λ` is scaled by the median positive weight to stay
 # data-relative.
 function _whittaker_track(y, w, lambda::Real, ridge::Real)
+    # The penalized solve builds a dense 1-based operator over the track.
+    Base.require_one_based_indexing(y, w)
     T = float(promote_type(eltype(y), eltype(w)))
     n = length(y)
     pos = T[T(w[k]) for k in eachindex(y, w) if _shape_usable(y[k], w[k])]

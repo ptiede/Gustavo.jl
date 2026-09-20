@@ -101,9 +101,8 @@ end
 # ── Weighted channel statistics ─────────────────────────────────────────────
 
 function weighted_channel_average(vis_block, weight_block)
-    nchan = size(vis_block, 2)
-    avg = Vector{ComplexF64}(undef, nchan)
-    for c in 1:nchan
+    avg = similar(vis_block, ComplexF64, (axes(vis_block, 2),))
+    for c in axes(vis_block, 2)
         weights_c = vec(weight_block[:, c])
         vis_c = vec(vis_block[:, c])
         valid = (weights_c .> 0) .& isfinite.(weights_c) .& isfinite.(real.(vis_c)) .& isfinite.(imag.(vis_c))
@@ -117,9 +116,8 @@ function weighted_channel_average(vis_block, weight_block)
 end
 
 function summed_channel_weights(weight_block)
-    nchan = size(weight_block, 2)
-    sums = zeros(Float64, nchan)
-    for c in 1:nchan
+    sums = fill!(similar(weight_block, Float64, (axes(weight_block, 2),)), 0.0)
+    for c in axes(weight_block, 2)
         weights_c = vec(weight_block[:, c])
         valid = (weights_c .> 0) .& isfinite.(weights_c)
         any(valid) || continue
@@ -278,7 +276,7 @@ function scan_averaged_amplitude_series(vis_block, weight_block; relative = fals
 
         spectrum = amplitude_series(view(vis_block, ii, :), view(weight_block, ii, :); relative = relative)
         spectrum_weights = summed_channel_weights(view(weight_block, ii, :))
-        for c in 1:nchan
+        for c in eachindex(spectrum, spectrum_weights)
             v = spectrum[c]
             w = spectrum_weights[c]
             (isfinite(v) && isfinite(w) && w > 0) || continue

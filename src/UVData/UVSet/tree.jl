@@ -89,12 +89,12 @@ function _extract_scan_leaf(
         record_order[rec_i] = (ti, bi)
         # flat layout is (Ti, Pol, Frequency); permute into
         # (Frequency, Ti, Baseline, Pol).
-        for p in 1:npol, c in 1:nchan
+        for p in axes(vis_dense, 4), c in axes(vis_dense, 1)
             vis_dense[c, ti, bi, p] = vis_flat[int_i, p, c]
             weights_dense[c, ti, bi, p] = weights_flat[int_i, p, c]
         end
         # uvw layout: (Ti, Baseline, UVW) — easy slicing on Ti/Baseline.
-        for k in 1:3
+        for k in axes(uvw_dense, 3)
             uvw_dense[ti, bi, k] = uvw_flat[int_i, k]
         end
     end

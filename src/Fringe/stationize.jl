@@ -317,7 +317,7 @@ function _solve_observable(
     # solve for the stations that DO have data. Fixing it at 0 (its value is
     # discarded; only `touched` cells are returned) keeps the system well-posed.
     # Components hold only touched nodes, so these never collide with a gauge row.
-    idle = [n for n in 1:nnodes if !touched[n]]
+    idle = [n for n in eachindex(touched) if !touched[n]]
 
     A = zeros(Float64, nrow, nnodes)
     b = zeros(Float64, nrow)
@@ -357,7 +357,7 @@ function _solve_observable(
         # smoother both leave intact). Stations the seed does not cover fall back to
         # the spanning-tree estimate.
         if seed_phase !== nothing
-            for ant in 1:nant, feed in 1:2
+            for ant in axes(seed_phase, 1), feed in axes(seed_phase, 2)
                 v = seed_phase[ant, feed]
                 isfinite(v) && (xseed[_node(ant, feed, nant)] = float(v))
             end
@@ -377,7 +377,7 @@ function _solve_observable(
         resid = b .- A * x
     end
 
-    for ant in 1:nant, feed in 1:2
+    for ant in axes(vals, 1), feed in axes(vals, 2)
         n = _node(ant, feed, nant)
         if touched[n]
             vals[ant, feed] = x[n]
@@ -410,7 +410,7 @@ function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, anchors::Abst
         push!(adj[nb], (na, r.val, r.w))
     end
     # Visit strongest edges first so the tree follows high-SNR connections.
-    for n in 1:nnodes
+    for n in eachindex(adj)
         sort!(adj[n]; by = e -> e[3], rev = true)
     end
     # Grow a MAX-WEIGHT spanning tree per component (Prim): repeatedly attach the
@@ -428,7 +428,7 @@ function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, anchors::Abst
             best_u = 0
             best_v = 0
             best_add = 0.0
-            for u in 1:nnodes
+            for u in eachindex(visited)
                 visited[u] || continue
                 for (v, add, w) in adj[u]
                     (!visited[v] && w > best_w) || continue
@@ -683,7 +683,7 @@ function _solve_kind_cols!(
         # at the reference rather than leaving it to the min-norm completion.
         f1 = Set{Int}()
         if feedblind
-            for bi in 1:nbl, p in 1:npol
+            for bi in axes(sc, 1), p in axes(sc, 2)
                 sc[bi, p].valid || continue
                 fa, fb = feeds[p]
                 (fa == 1 && fb == 1) || continue
@@ -692,7 +692,7 @@ function _solve_kind_cols!(
                 push!(f1, a); push!(f1, b)
             end
         end
-        for bi in 1:nbl, p in 1:npol
+        for bi in axes(sc, 1), p in axes(sc, 2)
             det = sc[bi, p]
             det.valid || continue                   # no data in this cell, no measurement
             a, b = bl_pairs[bi]
@@ -917,7 +917,7 @@ function _solve_tagged_system(
     # per component for the phase-unwrap seed.
     comps = Vector{Int}[]
     for c in 1:ncomp
-        comp = [n for n in 1:nnodes if compid[n] == c]
+        comp = [n for n in eachindex(compid) if compid[n] == c]
         isempty(comp) && continue
         push!(comps, comp)
     end
@@ -953,7 +953,7 @@ function _solve_tagged_system(
     # station's feed-2 frame, deterministically.
     if nuisance !== nothing && any(nuisance)
         groups = Dict{Tuple{Int, Int}, Vector{Int}}()
-        for n in 1:nnodes
+        for n in eachindex(nuisance)
             nuisance[n] || continue
             # A nuisance node outside every accepted component carries no
             # common-mode freedom worth pinning; its weak rows (or the
@@ -1012,7 +1012,7 @@ function _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes::Integer)
         push!(adj[na], (nb, -rval[i], rw[i]))
         push!(adj[nb], (na, rval[i], rw[i]))
     end
-    for n in 1:nnodes
+    for n in eachindex(adj)
         sort!(adj[n]; by = e -> e[3], rev = true)
     end
     visited = falses(nnodes)
@@ -1022,7 +1022,7 @@ function _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes::Integer)
         while true
             best_w = -Inf
             best_u = 0; best_v = 0; best_add = 0.0
-            for u in 1:nnodes
+            for u in eachindex(visited)
                 visited[u] || continue
                 for (v, add, ww) in adj[u]
                     (!visited[v] && ww > best_w) || continue

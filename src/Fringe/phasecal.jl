@@ -86,7 +86,7 @@ function _fit_tone_block(ν::Vector{Float64}, z::Vector{ComplexF64}, f0::Float64
     τ = 0.0
     if n >= 2
         incr = Float64[]
-        for j in 1:(n - 1)
+        for j in firstindex(ν):(lastindex(ν) - 1)
             dν = ν[j + 1] - ν[j]
             dν > 0 || continue
             push!(incr, angle(z[j + 1] * conj(z[j])) / (2π * dν))
@@ -98,10 +98,10 @@ function _fit_tone_block(ν::Vector{Float64}, z::Vector{ComplexF64}, f0::Float64
     # Residual phasors at the median delay; reject tones whose residual phase is
     # far from the pack (a corrupted tone leaves ~uniform phase).
     keep = trues(n)
-    r = [z[i] * cis(-2π * τ * (ν[i] - νb)) for i in 1:n]
+    r = [z[i] * cis(-2π * τ * (ν[i] - νb)) for i in eachindex(ν, z)]
     rbar = sum(r)
     if abs(rbar) > 0
-        for i in 1:n
+        for i in eachindex(r, keep)
             keep[i] = abs(angle(r[i] * conj(rbar))) <= max_resid
         end
     end
@@ -109,10 +109,10 @@ function _fit_tone_block(ν::Vector{Float64}, z::Vector{ComplexF64}, f0::Float64
 
     # Weighted LSQ refinement of τ on the kept residual phases (small after the
     # median fit, so no unwrap needed), weights = |z| (tone detection strength).
-    rbar = sum(r[i] for i in 1:n if keep[i])
+    rbar = sum(r[i] for i in eachindex(r, keep) if keep[i])
     num = 0.0
     den = 0.0
-    for i in 1:n
+    for i in eachindex(r, keep)
         keep[i] || continue
         w = abs(z[i])
         x = ν[i] - νb
@@ -123,7 +123,7 @@ function _fit_tone_block(ν::Vector{Float64}, z::Vector{ComplexF64}, f0::Float64
 
     # Instrumental phase at the global reference frequency.
     s = zero(ComplexF64)
-    for i in 1:n
+    for i in eachindex(z, keep)
         keep[i] || continue
         s += z[i] * cis(-2π * τ * (ν[i] - f0))
     end
@@ -228,7 +228,7 @@ function phasecal_solution(
     for (st, rows) in rows_of
         ant = get(ant_of, st, 0)
         ant == 0 && continue
-        for ts in 1:ntseg
+        for ts in eachindex(tmin, tmax)
             # Rows overlapping this scan (± one accumulation interval); fall back
             # to the nearest row — the instrument drifts slowly between scans.
             tc = (tmin[ts] + tmax[ts]) / 2
@@ -237,12 +237,12 @@ function phasecal_solution(
                     pcal.time[r] <= tmax[ts] + pcal.interval[r] + 1.0e-9
             ]
             isempty(sel) && (sel = [rows[argmin([abs(pcal.time[r] - tc) for r in rows])]])
-            for feed in 1:min(nfeed, 2), fs in 1:nfseg
+            for feed in 1:min(nfeed, 2), fs in eachindex(flo, fhi)
                 # Coherent tone average over the selected rows, keeping tones in
                 # this spw's frequency span.
                 empty!(νbuf)
                 empty!(zbuf)
-                for b in 1:nspw, tn in 1:ntone
+                for b in axes(pcal.freq, 2), tn in axes(pcal.freq, 1)
                     ν = pcal.freq[tn, b, feed, sel[1]]
                     (isfinite(ν) && flo[fs] <= ν <= fhi[fs]) || continue
                     acc = zero(ComplexF64)

@@ -456,7 +456,7 @@ function scan_station_terms(model, layout, θ, ti::Integer)
     comps = fringe_stage_components(model, layout)
     delay = fill(NaN, nant, 2)
     rate = fill(NaN, nant, 2)
-    for a in 1:nant, f in 1:2
+    for a in axes(delay, 1), f in axes(delay, 2)
         d = 0.0; r = 0.0; hd = false; hr = false
         for (plan, kind) in comps
             node = _feed_node(plan.tying, f)        # fseg 1: stage-B terms are GlobalFrequency

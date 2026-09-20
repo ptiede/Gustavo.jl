@@ -190,7 +190,7 @@ function _antenna_dataset(tab::AntennaTable)
     ds[:mount] = DimArray([_mount_name(m) for m in tab.mount], (ant,))
     ds[:telescope_name] = DimArray(fill(String(array_name(tab)), n), (ant,))
     ds[:polarization_type] = DimArray(
-        [_receptor_label(basis[a][r]) for r in 1:2, a in 1:n], (receptor, ant),
+        [_receptor_label(basis[a][r]) for r in 1:2, a in eachindex(basis)], (receptor, ant),
     )
     return ds
 end

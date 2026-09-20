@@ -271,7 +271,7 @@ function _segment_center(
         sums[ids[i]] += coords[i]
         cnt[ids[i]] += 1
     end
-    return [cnt[s] > 0 ? sums[s] / cnt[s] : Float64(empty) for s in 1:nseg]
+    return [cnt[s] > 0 ? sums[s] / cnt[s] : Float64(empty) for s in eachindex(sums, cnt)]
 end
 
 # ── Pure scalar evaluation ───────────────────────────────────────────────────

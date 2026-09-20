@@ -414,6 +414,8 @@ end
 # Contiguous frequency-group ranges of a channel-frequency axis: split where the
 # step jumps by more than 3× the median spacing (the VGOS sub-band gaps).
 function _freq_group_ranges(freqs::AbstractVector{<:Real})
+    # The returned ranges index the stacked channel axis, which is 1-based.
+    Base.require_one_based_indexing(freqs)
     n = length(freqs)
     n == 0 && return UnitRange{Int}[]
     n == 1 && return [1:1]
@@ -451,7 +453,7 @@ function segment_ranges(seg::AbstractFrequencySegmentation, geom::DataGeometry)
         hi[s] = max(hi[s], c)
         count[s] += 1
     end
-    for s in 1:nseg
+    for s in eachindex(lo, hi, count)
         count[s] > 0 || throw(
             ArgumentError("$(_seg_label(seg)): segment $s of $nseg covers no channel")
         )
@@ -463,7 +465,7 @@ function segment_ranges(seg::AbstractFrequencySegmentation, geom::DataGeometry)
             )
         )
     end
-    return [lo[s]:hi[s] for s in 1:nseg]
+    return [lo[s]:hi[s] for s in eachindex(lo, hi)]
 end
 
 # ── Placement on a foreign grid ──────────────────────────────────────────────
@@ -679,7 +681,7 @@ function _require_same_channels(seg, solve::DataGeometry, target::DataGeometry)
                 "identical channel layout; the target has $nt channels and the solution $ns."
         )
     )
-    for c in 1:ns
+    for c in eachindex(target.channel_freqs, solve.channel_freqs)
         isapprox(target.channel_freqs[c], solve.channel_freqs[c]; rtol = _FREQ_RTOL) || throw(
             ArgumentError(
                 "$(_seg_label(seg)) segments the channel axis by index, so it applies only to " *

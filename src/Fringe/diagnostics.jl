@@ -178,7 +178,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
         (1 <= k <= nscan && t0[k] == 0) && (t0[k] = ti)
     end
     out = NamedTuple[]
-    for k in 1:nscan
+    for k in eachindex(t0)
         ti = t0[k]
         ti == 0 && continue
         for a in 1:nant, f in 1:2
@@ -376,7 +376,7 @@ function _accumulate_baseline_fringes!(
     tforeach(1:nbl; scheduler = executor) do bi
         a, b = bl_pairs[bi]
         a == b && return                                # skip autocorrelations
-        for p in 1:npol
+        for p in axes(Vg, 4)
             fa, fb = feeds[p]
             @inbounds for ti in axes(Vg, 2), c in axes(Vg, 1)
                 Fg[c, ti, bi, p] && continue
@@ -467,7 +467,7 @@ function baseline_fringe_data(
     _accumulate_baseline_fringes!(
         (; sb, swb, sa, swa, tb, twb, ta, twa, tbb, twbb, tab, twab),
         Vg, Wg, Fg, g, gid, UVData.baselines(stack).pairs,
-        [correlation_feed_pair(pol_products(stack)[p]) for p in 1:npol],
+        [correlation_feed_pair(pol_products(stack)[p]) for p in eachindex(pol_products(stack))],
         nchan, nti, nbl, npol, executor,
     )
 
@@ -606,13 +606,13 @@ function delay_closure(data::BaselineFringeData; pol = :parallel)
     p = baseline_pol_index(data, pol)
     nbl = length(data.bl_pairs)
     τb = fill(NaN, nbl); τa = fill(NaN, nbl)
-    for bi in 1:nbl
+    for bi in eachindex(τb, τa)
         a, b = data.bl_pairs[bi]
         a == b && continue
         τb[bi] = _baseline_delay(view(data.spec_before, :, bi, p), data.freqs)
         τa[bi] = _baseline_delay(view(data.spec_after, :, bi, p), data.freqs)
     end
-    blindex = Dict(data.bl_pairs[bi] => bi for bi in 1:nbl)
+    blindex = Dict(data.bl_pairs[bi] => bi for bi in eachindex(data.bl_pairs))
     ants = sort(unique(Iterators.flatten(data.bl_pairs)))
     tris = NTuple{3, Int}[]; cb = Float64[]; ca = Float64[]
     for a in ants, b in ants, c in ants

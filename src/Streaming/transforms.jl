@@ -273,7 +273,7 @@ function _divide_gains!(
         ti_idx = tconst ? win.ti_idx[1:1] : win.ti_idx,
         time_span = tconst ? _head_span(tspan) : tspan,
     )
-    cols = [(bi, p) for p in 1:npol for bi in 1:nbl]
+    cols = [(bi, p) for p in axes(V, 4) for bi in axes(V, 3)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
         @inbounds begin
@@ -284,9 +284,9 @@ function _divide_gains!(
                 b = amap[b]
                 (a == 0 || b == 0) && return
             end
-            for t in 1:nti
+            for t in axes(V, 2)
                 gt = tconst ? 1 : t
-                for c in 1:nchan
+                for c in axes(V, 1)
                     den = g[c, gt, a, fa] * conj(g[c, gt, b, fb])
                     (isfinite(den) && abs2(den) > 0) || continue
                     V[c, t, bi, p] /= den

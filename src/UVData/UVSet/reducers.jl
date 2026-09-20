@@ -111,7 +111,7 @@ function _time_average_kernel(
             tot_w += w
         end
         (tot_w > 0 && isfinite(tot_w)) || continue
-        for k in 1:3
+        for k in axes(uvw_p, 3)
             u = uvw_p[ti, bi, k]
             isfinite(u) || continue
             UVW_num[1, bi, k] += tot_w * u
@@ -356,7 +356,7 @@ function _time_bin_average_kernel(
                 tot_w += w
             end
             (tot_w > 0 && isfinite(tot_w)) || continue
-            for k in 1:3
+            for k in axes(uvw_p, 3)
                 u = uvw_p[ti, bi, k]
                 isfinite(u) || continue
                 UVWnum[b, bi, k] += tot_w * u

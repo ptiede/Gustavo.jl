@@ -327,9 +327,9 @@ function _curve_from_sums(
     nrow, nbl = size(num)
     eta_bl = fill(NaN, nrow, nbl)
     agg = fill(NaN, nrow)
-    for k in 1:nrow
+    for k in axes(num, 1)
         sn = 0.0; sd = 0.0; sv = 0.0
-        for bl in 1:nbl
+        for bl in axes(num, 2)
             d = den[bl]
             if power
                 d == 0.0 && num[k, bl] == 0.0 && continue      # no data at all
@@ -464,8 +464,8 @@ function _coherence_accumulate!(
 
             # Time-binned coherent amplitude, per channel. One ascending-time walk
             # fans each cell into all nT intervals.
-            for c in 1:nchan
-                for k in 1:nT
+            for c in axes(V, 1)
+                for k in eachindex(accT)
                     accT[k] = zero(ComplexF64); swT[k] = 0.0; haveT[k] = false
                 end
                 for ti in tperm
@@ -473,7 +473,7 @@ function _coherence_accumulate!(
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                     (w > 0 && isfinite(w) && isfinite(v)) || continue
                     wv = w * ComplexF64(v)
-                    for k in 1:nT
+                    for k in eachindex(accT)
                         id = tid[ti, k]
                         if !haveT[k]
                             curT[k] = id; haveT[k] = true
@@ -484,15 +484,15 @@ function _coherence_accumulate!(
                         accT[k] += wv; swT[k] += w
                     end
                 end
-                for k in 1:nT
+                for k in eachindex(accT)
                     haveT[k] && (numT[k, bl] += binval(accT[k], swT[k], a))
                 end
             end
 
             # Frequency-binned coherent amplitude, per AP. One ascending-freq walk
             # fans each cell into all nF intervals.
-            for ti in 1:nti
-                for k in 1:nF
+            for ti in axes(V, 2)
+                for k in eachindex(accF)
                     accF[k] = zero(ComplexF64); swF[k] = 0.0; haveF[k] = false
                 end
                 for c in cperm
@@ -500,7 +500,7 @@ function _coherence_accumulate!(
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                     (w > 0 && isfinite(w) && isfinite(v)) || continue
                     wv = w * ComplexF64(v)
-                    for k in 1:nF
+                    for k in eachindex(accF)
                         id = fid[c, k]
                         if !haveF[k]
                             curF[k] = id; haveF[k] = true
@@ -511,7 +511,7 @@ function _coherence_accumulate!(
                         accF[k] += wv; swF[k] += w
                     end
                 end
-                for k in 1:nF
+                for k in eachindex(accF)
                     haveF[k] && (numF[k, bl] += binval(accF[k], swF[k], a))
                 end
             end
@@ -563,7 +563,7 @@ function _noise_scale(
         end
         if length(buf) < 32 && nti > 1
             empty!(buf)
-            for c in 1:nchan, ti in 1:(nti - 1)
+            for c in axes(V, 1), ti in firstindex(V, 2):(lastindex(V, 2) - 1)
                 (Fl[c, ti, bli, p] || Fl[c, ti + 1, bli, p]) && continue
                 w1 = W[c, ti, bli, p]; w2 = W[c, ti + 1, bli, p]
                 v1 = V[c, ti, bli, p]; v2 = V[c, ti + 1, bli, p]

@@ -514,7 +514,7 @@ function require_station_uniform(model::StationGainModel, antennas, who::Abstrac
                     for i in eachindex(g.comps)
             ), "; ",
         )
-        absent = setdiff(1:length(names), covered)
+        absent = setdiff(eachindex(names), covered)
         isempty(absent) || (sigs *= "; absent at [" * join(names[absent], ", ") * "]")
         push!(
             lines,

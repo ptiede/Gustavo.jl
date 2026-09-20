@@ -163,15 +163,15 @@ function _dispersion_fit_stationize!(
     nbl, npol, nlf = size(z)
     Dτ = fill(_invalid_detection(Float64), nbl, npol)
     Dd = fill(_invalid_detection(Float64), nbl, npol)
-    for p in 1:npol
+    for p in axes(z, 2)
         feeds[p][1] == feeds[p][2] || continue
-        for bi in 1:nbl
+        for bi in axes(z, 1)
             a, b = bl_pairs[bi]
             a == b && continue
             rows_f = Float64[]
             rows_z = ComplexF64[]
             rows_w = Float64[]
-            for li in 1:nlf
+            for li in axes(z, 3)
                 w[bi, p, li] > 0 || continue
                 push!(rows_f, fb[li])
                 push!(rows_z, z[bi, p, li])
@@ -191,7 +191,7 @@ function _dispersion_fit_stationize!(
     end
 
     if haskey(ENV, "GUSTAVO_DTEC_DEBUG")
-        for p in 1:npol, bi in 1:nbl
+        for p in axes(Dτ, 2), bi in axes(Dτ, 1)
             Dτ[bi, p].valid || continue
             println(
                 "  dtec-fit bl=", bl_pairs[bi], " p=", p,
@@ -289,9 +289,9 @@ function _sbd_fit_stationize!(
         rows_τ = _ObsRow[]
         # per accepted baseline row: (a, b, φ at fitted slope, φ at τ = 0, weight)
         φrows = Tuple{Int, Int, Float64, Float64, Float64}[]
-        for p in 1:npol
+        for p in axes(z, 2)
             feeds[p][1] == feeds[p][2] || continue
-            for bi in 1:nbl
+            for bi in axes(z, 1)
                 a, b = bl_pairs[bi]
                 a == b && continue
                 fs = Float64[]
@@ -320,9 +320,9 @@ function _sbd_fit_stationize!(
         τv, covτ, _ = _solve_observable_robust(rows_τ, nant, gauge, opts; rewrap = 0)
         num0 = 0.0
         num1 = 0.0
-        for p in 1:npol
+        for p in axes(z, 2)
             feeds[p][1] == feeds[p][2] || continue
-            for bi in 1:nbl
+            for bi in axes(z, 1)
                 a, b = bl_pairs[bi]
                 a == b && continue
                 τab = (covτ[a, 1] ? τv[a, 1] : 0.0) - (covτ[b, 1] ? τv[b, 1] : 0.0)
@@ -355,9 +355,9 @@ function _sbd_fit_stationize!(
     # scan's SBD solution all-or-nothing.
     num0 = 0.0
     num1 = 0.0
-    for p in 1:npol
+    for p in axes(z, 2)
         feeds[p][1] == feeds[p][2] || continue
-        for bi in 1:nbl
+        for bi in axes(z, 1)
             a, b = bl_pairs[bi]
             a == b && continue
             acc0 = zero(ComplexF64)
@@ -381,7 +381,7 @@ function _sbd_fit_stationize!(
     dleaf = _component_leaf(sbd.dplan, θ)
     cleaf = _component_leaf(sbd.cplan, θ)
     for gs in gsols
-        for a in 1:nant
+        for a in axes(gs.covτ, 1)
             τa = (gs.covτ[a, 1] && isfinite(gs.τv[a, 1])) ? gs.τv[a, 1] : 0.0
             φa = (gs.covφ[a, 1] && isfinite(gs.φv[a, 1])) ? gs.φv[a, 1] : 0.0
             (τa == 0.0 && φa == 0.0) && continue

@@ -360,7 +360,7 @@ function _parse_tsys_block(lines::Vector{String}, i::Int, year_int::Int)
         )
         doy = parse(Int, toks[1])
         t = _parse_antab_time(year_int, doy, toks[2])
-        vals = Float64[parse(Float64, toks[2 + k]) for k in 1:length(columns)]
+        vals = Float64[parse(Float64, toks[2 + k]) for k in eachindex(columns)]
         push!(times, t)
         push!(rows, vals)
         j += 1

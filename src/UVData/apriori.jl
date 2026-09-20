@@ -139,9 +139,9 @@ function apriori_gains(
     for (a, name) in pairs(ant_names)
         if !haskey(antab, name)
             push!(missing_stations, String(name))
-            for ti in 1:nti
+            for ti in axes(elevation_deg, 1)
                 elevation_deg[ti, a] = NaN
-                for c in 1:nchan, p in 1:2
+                for c in axes(sefd, 1), p in axes(sefd, 4)
                     sefd[c, ti, a, p] = NaN
                     gains[c, ti, a, p] = 1.0
                 end
@@ -150,7 +150,7 @@ function apriori_gains(
         end
         st = antab[name]
         # Per-time elevation only depends on the antenna position, not channel/pol.
-        for ti in 1:nti
+        for ti in axes(elevation_deg, 1)
             el_rad = _source_elevation(ant_xyz[a], ra_rad, dec_rad, jds[ti])
             elevation_deg[ti, a] = rad2deg(el_rad)
         end
@@ -159,11 +159,11 @@ function apriori_gains(
         # (channel, pol) for this antenna by averaging antab rows in the
         # leaf's scan window.
         scan_tsys = Matrix{Float64}(undef, nchan, 2)
-        for p in 1:2, c in 1:nchan
+        for p in axes(scan_tsys, 2), c in axes(scan_tsys, 1)
             scan_tsys[c, p] = tsys_in_window(st, t_lo, t_hi, Int(chan_index[c]), pol_syms[p])
         end
 
-        for ti in 1:nti
+        for ti in axes(elevation_deg, 1)
             el = elevation_deg[ti, a]
             gE = elevation_gain(st.gain, el)
             # Below the elevation cutoff (default: the horizon) the source is
@@ -171,9 +171,9 @@ function apriori_gains(
             # / negative values, which makes SEFD = Tsys/(DPFU·gE) explode. Flag
             # those samples on apply rather than apply a blown-up gain.
             el_ok = isfinite(el) && el >= min_elevation_deg
-            for p in 1:2
+            for p in axes(sefd, 4)
                 dpfu = st.gain.dpfu[p]
-                for c in 1:nchan
+                for c in axes(sefd, 1)
                     tsys = scan_tsys[c, p]
                     if !(el_ok && isfinite(tsys) && isfinite(gE) && isfinite(dpfu) && dpfu > 0 && gE > 0 && tsys > 0)
                         sefd[c, ti, a, p] = NaN

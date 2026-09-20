@@ -833,6 +833,8 @@ end
 # Split a SORTED frequency axis into contiguous band blocks: a new block starts
 # wherever the spacing exceeds 1.5× the in-band spacing Δf.
 function _detect_freq_groups(freqs::AbstractVector, Δf::Real)
+    # The returned ranges index the stacked channel axis, which is 1-based.
+    Base.require_one_based_indexing(freqs)
     freqgroups = UnitRange{Int}[]
     lo = 1
     for i in 1:(length(freqs) - 1)
@@ -1070,7 +1072,7 @@ function _mbd_fringe_search(
     noise2 = 0.0
     nnoise = 0
     dwin = ws.dwin
-    for bi in 1:nfreqgroup
+    for bi in eachindex(mx.freqgroups)
         Gb = w.Gb
         fill!(Gb, zero(C))
         flo = mx.f_lo[bi]
@@ -1109,7 +1111,7 @@ function _mbd_fringe_search(
     lo, hi = opts.delay_window
     peak = -one(T)
     ps = pm = pr = 0
-    for sj in 1:nsbd
+    for sj in eachindex(mx.sbd_val)
         Dc = _stage2_plane!(w, mx, sj)
         sv = mx.sbd_val[sj]
         @inbounds for rj in mx.rate_scan, m in axes(Dc, 1)

@@ -63,8 +63,8 @@ function _fit_band_dispersion(
         tau_max::Float64 = 2.0e-8, dtec_max::Float64 = 45.0,
     )
     nb = length(fbs)
-    xdisp = [Calibration.DISPERSION_K * (1.0 / f0 - 1.0 / fbs[b]) for b in 1:nb]
-    xtau = [2π * (fbs[b] - f0) for b in 1:nb]
+    xdisp = [Calibration.DISPERSION_K * (1.0 / f0 - 1.0 / fbs[b]) for b in eachindex(fbs)]
+    xtau = [2π * (fbs[b] - f0) for b in eachindex(fbs)]
     best_a = -1.0
     best_d = 0.0
     best_t = 0.0
@@ -94,7 +94,7 @@ function _fit_band_dispersion(
     # Parabolic sub-grid polish (one axis at a time): at high SNR the CRB is far
     # below the fine-grid step, and leftover quantization would read as a
     # significant residual to the downstream station solve.
-    value(dt, τ) = abs(sum(zs[b] * cis(-dt * xdisp[b] - τ * xtau[b]) for b in 1:nb))
+    value(dt, τ) = abs(sum(zs[b] * cis(-dt * xdisp[b] - τ * xtau[b]) for b in eachindex(zs, xdisp, xtau)))
     for _ in 1:2
         for (step, isdt) in ((0.01, true), (1.0e-12, false))
             d0 = best_d

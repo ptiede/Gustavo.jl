@@ -571,7 +571,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
         tb = time_ns()
         work = zeros(Float64, n)
         rs = Vector{Any}(undef, n)
-        for k in 1:n
+        for k in eachindex(steps, contexts)
             tk = time_ns()
             rs[k] = process_scan!(steps[k], contexts[k], stack, win)
             if k < n
@@ -599,7 +599,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
             # have, so the tail's group-local solution carries only the LAST
             # step's own (model, layout, θ).
             flags = copy(base_flags)
-            for k in 1:n
+            for k in eachindex(steps, rs)
                 append!(flags, scan_flags(steps[k], rs[k]))
             end
             sol_local = CalibrationSolution(
@@ -618,7 +618,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
     end
     sink === nothing || (ctx_n.scratch[:sink_pairs] = [res.out for res in results])
     infos = NamedTuple[]
-    for k in 1:n
+    for k in eachindex(steps, contexts)
         ctx = contexts[k]
         # Each step sees the pass results in the shape a step of its own always
         # gets: its own per-scan return under `r`, and the share of the group's

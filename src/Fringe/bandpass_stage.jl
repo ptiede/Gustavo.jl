@@ -298,7 +298,7 @@ function _seed_phase_tracks(
     )
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
-    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in 1:nbl, p in 1:npol]
+    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
     nseg = length(segs)
     phase = fill(NaN, nant, 2, nseg)
     prec = zeros(nant, 2, nseg)
@@ -328,15 +328,15 @@ end
 function _write_phase_bandpass!(θ, plan, phase, ts::Integer = 1)
     nant, _, nseg = size(phase)
     leaf = _component_leaf(plan, θ)
-    for a in 1:nant, f in 1:2
+    for a in axes(phase, 1), f in axes(phase, 2)
         acc = zero(ComplexF64)
-        for fs in 1:nseg
+        for fs in axes(phase, 3)
             v = phase[a, f, fs]
             isfinite(v) && (acc += cis(v))
         end
         abs(acc) > 0 || continue
         m = angle(acc)
-        for fs in 1:nseg
+        for fs in axes(phase, 3)
             v = phase[a, f, fs]
             isfinite(v) || continue
             node = _feed_node(plan.tying, f)
@@ -412,8 +412,8 @@ end
 function _spike_guard!(la, seg_spw, spike_sigma::Real)
     spike_sigma > 0 || return la
     nant, _, nfseg = size(la)
-    for a in 1:nant, f in 1:2, bnd in sort(unique(seg_spw))
-        sidx = [s for s in 1:nfseg if seg_spw[s] == bnd]
+    for a in axes(la, 1), f in axes(la, 2), bnd in sort(unique(seg_spw))
+        sidx = [s for s in eachindex(seg_spw) if seg_spw[s] == bnd]
         v = [la[a, f, s] for s in sidx if isfinite(la[a, f, s])]
         length(v) >= 8 || continue
         med = median(v)
@@ -432,15 +432,15 @@ end
 function _write_amp_bandpass!(θ, plan, la, max_logamp::Real, ts::Integer = 1)
     nant, _, nfseg = size(la)
     leaf = _component_leaf(plan, θ)
-    for a in 1:nant, f in 1:2
+    for a in axes(la, 1), f in axes(la, 2)
         acc = 0.0; n = 0
-        for s in 1:nfseg
+        for s in axes(la, 3)
             v = la[a, f, s]
             isfinite(v) && (acc += v; n += 1)
         end
         n == 0 && continue
         m = acc / n
-        for s in 1:nfseg
+        for s in axes(la, 3)
             v = la[a, f, s]
             isfinite(v) || continue
             node = _feed_node(plan.tying, f)
@@ -470,14 +470,14 @@ function _seed_amp_tracks(
     )
     nbl, npol, nchan = size(rbar_bp)
     feeds = [correlation_feed_pair(p) for p in pol_products]
-    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in 1:nbl, p in 1:npol]
+    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
     nnodes = 2 * nant
     nfseg = length(fsegs)
     la = fill(NaN, nant, 2, nfseg)
     prec = zeros(nant, 2, nfseg)
     for (fs, chans) in enumerate(fsegs)
         na = Int[]; nbn = Int[]; vals = Float64[]; wts = Float64[]
-        for bi in 1:nbl, p in 1:npol
+        for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)
             a, b = bl_pairs[bi]
             a == b && continue
             r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
@@ -632,13 +632,13 @@ function _shape_tracks!(
         tracks, prec, seg_spw, seg_freq, spec::AbstractShapeSpec; unwrap::Bool, status = nothing,
     )
     nant, _, nfseg = size(tracks)
-    for a in 1:nant, f in 1:2
-        y = [tracks[a, f, s] for s in 1:nfseg]
-        w = [prec[a, f, s] for s in 1:nfseg]
+    for a in axes(tracks, 1), f in axes(tracks, 2)
+        y = [tracks[a, f, s] for s in axes(tracks, 3)]
+        w = [prec[a, f, s] for s in axes(prec, 3)]
         st = status === nothing ? nothing : view(status, a, f, :)
         fitted = _fit_track_bands(spec, y, w, seg_spw, seg_freq; unwrap, status = st)
-        for s in 1:nfseg
-            tracks[a, f, s] = fitted[s]
+        for (s, v) in zip(axes(tracks, 3), fitted)
+            tracks[a, f, s] = v
         end
     end
     return tracks
@@ -785,11 +785,11 @@ function _station_band_tables(blocks, block_of, seg_spw, seg_freq, nant)
     nfs(a) = iszero(block_of[a]) ? 0 : blocks[block_of[a]].plan.shape[3]
     bands = [
         (seg_spw === nothing || iszero(block_of[a])) ? ones(Int, nfs(a)) : seg_spw[block_of[a]]
-            for a in 1:nant
+            for a in eachindex(block_of)
     ]
     coords = [
         (seg_freq === nothing || iszero(block_of[a])) ? collect(1.0:nfs(a)) : seg_freq[block_of[a]]
-            for a in 1:nant
+            for a in eachindex(block_of)
     ]
     return bands, coords
 end
@@ -1526,14 +1526,14 @@ function solve_joint_bandpass!(
     nodes, pins = _joint_bandpass_pins(bl_pairs, feeds, nant, tsg, fseg, nfsmax, gauge)
     pinned = [
         nodes[ant, feed, ts, fs] in pins
-            for ant in 1:nant, feed in 1:2, ts in 1:ntseg, fs in 1:nfsmax
+            for ant in axes(nodes, 1), feed in axes(nodes, 2), ts in axes(nodes, 3), fs in axes(nodes, 4)
     ]
 
     # A pin covering part of a track leaves the rest of it fitted, and zeroing
     # part of a track a spec fits jointly is not the constrained fit that spec
     # asks for. Segments fit on their own admit the constraint exactly.
     if !(phase_spec isa FreeShape)
-        for ant in 1:nant, feed in 1:2, ts in 1:ntseg
+        for ant in axes(pinned, 1), feed in axes(pinned, 2), ts in axes(pinned, 3)
             nfs = length(bands[ant])
             np = count(view(pinned, ant, feed, ts, 1:nfs))
             (iszero(np) || np == nfs) && continue
