@@ -109,6 +109,32 @@ end
         @test_throws "partial overlap is not" CALsub.build_geometry(uvset)
     end
 
+    @testset "timestamps within _epoch_atol are one instant" begin
+        # Two sub-arrays whose axes differ by one ULP per sample, as separately
+        # loaded correlator files can.
+        nudged = [nextfloat(t) for t in tspan]
+        @test nudged != tspan
+        uvset = _subarray_uvset(
+            [
+                ("sA", "3C279", [1, 2, 3], tspan),
+                ("sB", "J0423-0120", [4, 5, 6], nudged),
+            ],
+        )
+        geom = CALsub.build_geometry(uvset)
+        # One axis entry per integration, not two.
+        @test length(geom.times) == length(tspan)
+        @test all(t -> any(g -> isapprox(g, t; atol = CALsub._epoch_atol(t)), geom.times), nudged)
+
+        # And the shared-station check still fires across the nudged axes.
+        clash = _subarray_uvset(
+            [
+                ("sA", "3C279", [1, 2, 3], tspan),
+                ("sB", "J0423-0120", [3, 4, 5], nudged),
+            ],
+        )
+        @test_throws "cannot be in two scans at one instant" CALsub.build_geometry(clash)
+    end
+
     @testset "a single sub-array is unaffected" begin
         uvset = _subarray_uvset([("sA", "3C279", [1, 2, 3], tspan)])
         geom = CALsub.build_geometry(uvset)

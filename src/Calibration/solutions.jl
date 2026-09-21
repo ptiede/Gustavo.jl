@@ -613,6 +613,35 @@ end
 
 # ── Geometry from a UVSet ────────────────────────────────────────────────────
 
+# Two timestamps within `_epoch_atol` of each other are the same instant. The
+# axis is built by matching each new value against the canonical ones already
+# seen, not by rounding to a grid: a grid still splits two values that straddle
+# a bucket edge, which is the case this exists to remove. The canonical value is
+# a real observed timestamp, so the axis keeps feeding physical `t - t0`
+# arithmetic. `_time_indices` matches `geom.times` with the same tolerance, so
+# the constructor and its readers agree.
+function _find_canonical_time(canon::AbstractVector{Float64}, t::Float64)
+    atol = _epoch_atol(t)
+    i = searchsortedfirst(canon, t - atol)
+    return (i <= length(canon) && abs(canon[i] - t) <= atol) ? i : nothing
+end
+
+function _canonical_time!(canon::Vector{Float64}, t::Float64)
+    i = _find_canonical_time(canon, t)
+    i === nothing || return canon[i]
+    insert!(canon, searchsortedfirst(canon, t), t)
+    return t
+end
+
+# Read-only counterpart for a second pass over times already canonicalized.
+function _canonical_time(canon::AbstractVector{Float64}, t::Float64)
+    i = _find_canonical_time(canon, t)
+    i === nothing && throw(
+        ArgumentError("build_geometry: time $t s was not canonicalized on the first pass")
+    )
+    return canon[i]
+end
+
 """
     build_geometry(uvset; f0 = nothing, t0 = nothing) -> DataGeometry
 
@@ -630,12 +659,18 @@ timestamp carries whichever scan name is seen first; the per-(station, scan)
 parameters remain correct because the station sets do not meet. Throws when two
 scans share both a timestamp and a station, and when a scan overlaps another
 over only part of its span, which would split it across segments.
+
+Timestamps within `_epoch_atol` of each other are one instant on the axis, so
+leaves whose times reach Gustavo by different float paths — sub-arrays
+delivered as separate correlator files, say — still meet. The axis reports an
+observed value, not a rounded one.
 """
 function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
     # Collect (freq, spw_name) and (time, scan_name) observations from all leaves.
     freq_spw = Dict{Float64, String}()
     time_scan = Dict{Float64, String}()
     time_stations = Dict{Float64, Set{String}}()
+    time_canon = Float64[]
     for (_, leaf) in UVData.branches(uvset)
         info = UVData.metadata(leaf)
         fs = channel_freqs(info.freq_setup)
@@ -655,7 +690,7 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
         ts = lookup(leaf[:vis], Ti)
         ants = Set{String}(UVData.participating_antennas(leaf))
         for t in ts
-            tk = Float64(t)
+            tk = _canonical_time!(time_canon, Float64(t))
             prev = get(time_scan, tk, nothing)
             if prev === nothing
                 time_scan[tk] = info.scan_name
@@ -685,7 +720,7 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
     # parameter segments partway through. Reject that rather than solve it.
     for (_, leaf) in UVData.branches(uvset)
         name = UVData.metadata(leaf).scan_name
-        labels = unique(time_scan[Float64(t)] for t in lookup(leaf[:vis], Ti))
+        labels = unique(time_scan[_canonical_time(time_canon, Float64(t))] for t in lookup(leaf[:vis], Ti))
         length(labels) == 1 || throw(
             ArgumentError(
                 "build_geometry: scan '$name' spans timestamps that dense-rank to " *
