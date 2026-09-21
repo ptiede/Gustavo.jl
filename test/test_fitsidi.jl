@@ -168,6 +168,28 @@ end
 
 const _F32EPS = 1.0f-4
 
+# The `TFORM` of the named UV_DATA column, as the header spells it.
+function _tform_of(uv_hdu, name::AbstractString)
+    i = 1
+    while haskey(uv_hdu.cards, "TTYPE$i")
+        strip(uv_hdu.cards["TTYPE$i"]) == name && return strip(uv_hdu.cards["TFORM$i"])
+        i += 1
+    end
+    error("UV_DATA has no $name column")
+end
+
+# A copy of `uvset` whose visibility layers are `ComplexF64`.
+function _widen_vis(uvset)
+    branches = DimensionalData.TreeDict()
+    for (k, leaf) in DimensionalData.branches(uvset)
+        vis = leaf[:vis]
+        branches[k] = Gustavo.UVData.rebuild_visibilities(
+            leaf, DimArray(ComplexF64.(parent(vis)), dims(vis))
+        )
+    end
+    return UVSet(; metadata = DimensionalData.metadata(uvset), branches)
+end
+
 @testset "FITS-IDI I/O" begin
     UV = Gustavo.UVData
 
@@ -546,6 +568,42 @@ const _F32EPS = 1.0f-4
             @test all(isapprox.(we[:, :, :, pp], Float32(2 * factor * 0.25); rtol = 1.0f-4))
             # Flag sentinels (≤0) are preserved, not scaled into valid weights.
             @test all(wr[:, :, :, pq] .<= 0)
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "the file is written at the precision the set holds" begin
+        ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+        narrow = build_synth_idi_uvset(; nspw = 1)
+        wide = _widen_vis(narrow)
+        @test eltype(first(values(UV.branches(wide)))[:vis]) == ComplexF64
+
+        # UVFITS random groups carry one type for the data and every group
+        # parameter, so the set's precision is the file's BITPIX.
+        for (uvset, bitpix, vis_eltype) in (
+                (narrow, -32, ComplexF32), (wide, -64, ComplexF64),
+            )
+            path = tempname() * ".uvfits"
+            try
+                @test UV.write_uvfits(path, uvset) == path
+                hdus = FITSFiles.fits(path)
+                @test hdus[1].cards["BITPIX"] == bitpix
+                rt = UV.load_uvfits(path)
+                @test eltype(first(values(UV.branches(rt)))[:vis]) == vis_eltype
+            finally
+                isfile(path) && rm(path)
+            end
+        end
+
+        # A FITS-IDI column carries its own TFORM, so FLUX widens to `D` on its
+        # own — the weights beside it stay `E`, as their layer is Float32.
+        path = tempname() * ".idifits"
+        try
+            @test UV.write_fitsidi(path, wide) == path
+            uv = ext._idi_find_hdu(FITSFiles.fits(path), "UV_DATA")
+            @test _tform_of(uv, "FLUX")[end] == 'D'
+            @test _tform_of(uv, "WEIGHT")[end] == 'E'
         finally
             isfile(path) && rm(path)
         end

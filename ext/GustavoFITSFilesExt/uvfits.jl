@@ -603,6 +603,28 @@ function _assert_not_writing_to_source(output_path, uvset::UVSet)
     )
 end
 
+# FITS stores floating-point data at one of two widths, so a layer is written
+# at the narrower one that holds it. A type wider than `Float64` has no FITS
+# form at all and stops the write rather than losing digits on the way out.
+function _fits_float_type(what::AbstractString, T::Type{<:AbstractFloat})
+    promote_type(T, Float32) === Float32 && return Float32
+    promote_type(T, Float64) === Float64 && return Float64
+    throw(
+        ArgumentError(
+            "$what: the UVSet holds $T values, which FITS cannot store — its " *
+                "floating-point forms are Float32 and Float64",
+        ),
+    )
+end
+
+# Random groups carry one type for the data array and every group parameter
+# alike, so the file's width is the widest of the layers that go into it.
+_uvfits_float_type(leaf) = promote_type(
+    real(eltype(parent(leaf[:vis]))),
+    eltype(parent(leaf[:weights])),
+    eltype(parent(leaf[:uvw])),
+)
+
 # Hook so primary-HDU cards and the source path follow a UVSet through
 # `rebuild` / `select_*` / `merge_uvsets`. Source-of-truth lives only here;
 # format-neutral code in `src/` calls `_propagate_extension_state!` and gets a
@@ -1062,14 +1084,16 @@ end
 # readers — astropy/ehtim, AIPS APCAL, CASA — parse the timestamp correctly.
 # Column 1 carries the integer JD (which Float32 holds exactly up to ~16M) and
 # column 2 the sub-day fractional remainder, whose Float32 ULP is ~5 ms.
-function _build_date_param(obs_time_s::AbstractVector{<:Real}, record_order)
+function _build_date_param(
+        ::Type{T}, obs_time_s::AbstractVector{<:Real}, record_order
+    ) where {T}
     n = length(record_order)
-    out = Matrix{Float32}(undef, n, 2)
+    out = Matrix{T}(undef, n, 2)
     @inbounds for (rec_i, (ti, _)) in enumerate(record_order)
         jd = UVData.unix_to_jd(obs_time_s[ti])
         intpart = floor(jd)
-        out[rec_i, 1] = Float32(intpart)
-        out[rec_i, 2] = Float32(jd - intpart)
+        out[rec_i, 1] = T(intpart)
+        out[rec_i, 2] = T(jd - intpart)
     end
     return out
 end
@@ -1122,15 +1146,15 @@ end
 """
     _strip_stale_shape_cards!(cards)
 
-Remove all PTYPE/PSCAL/PZERO/PUNIT/NAXIS\$j cards plus NAXIS, PCOUNT,
-GCOUNT from the copied primary header so `create_cards!` rebuilds them
-cleanly from the freshly-derived format/fields. Preserving the originals
+Remove all PTYPE/PSCAL/PZERO/PUNIT/NAXIS\$j cards plus BITPIX, NAXIS,
+PCOUNT, GCOUNT from the copied primary header so `create_cards!` rebuilds
+them cleanly from the freshly-derived format/fields. Preserving the originals
 is unsafe because `create_cards!` reuses any existing `PTYPE\$j` card via
 `popat!`, which carries forward stale duplicate `DATE` entries from the
 input header.
 """
 function _strip_stale_shape_cards!(cards)
-    pat = r"^(PTYPE|PSCAL|PZERO|PUNIT|NAXIS)\d+$|^(NAXIS|PCOUNT|GCOUNT)$"
+    pat = r"^(PTYPE|PSCAL|PZERO|PUNIT|NAXIS)\d+$|^(BITPIX|NAXIS|PCOUNT|GCOUNT)$"
     filter!(c -> match(pat, strip(string(c.key))) === nothing, cards)
     return cards
 end
@@ -1189,7 +1213,7 @@ function _build_primary_data(uvset::UVSet, uu, vv, ww, bl_codes, date_param, ext
         "UU" => uu,
         "VV" => vv,
         "WW" => ww,
-        "BASELINE" => Float32.(bl_codes),
+        "BASELINE" => convert.(eltype(raw_data), bl_codes),
         "DATE" => date_param,
     )
     # Emit one NamedTuple entry per unique PTYPE name. Duplicate AIPS
@@ -1507,23 +1531,25 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
 
     fp = first(leaf_list)
     fp_info = DimensionalData.metadata(fp)
-    uvw_eltype = eltype(parent(fp[:uvw]))
+    T = _fits_float_type(
+        "write_uvfits", mapreduce(_uvfits_float_type, promote_type, leaf_list)
+    )
     # Per AIPS Memo 117 §3.1.1 + the FQ-table semantics, each entry of
     # `FrequencySetup.channel_freqs` is an IF center frequency (one
     # channel per IF — the loader enforces `nif == nvis_chan`). On the
     # data array that means NAXIS5=nIF (the IF axis), NAXIS4=1 (one
     # channel per IF). Putting all spectral entries on NAXIS4 would
     # produce a file whose DATA shape contradicts the FQ table's NIF.
-    raw_data = zeros(Float32, nrec_total, 3, npol, 1, nchan, 1, 1)
-    uu = Vector{uvw_eltype}(undef, nrec_total)
-    vv = Vector{uvw_eltype}(undef, nrec_total)
-    ww_ = Vector{uvw_eltype}(undef, nrec_total)
+    raw_data = zeros(T, nrec_total, 3, npol, 1, nchan, 1, 1)
+    uu = Vector{T}(undef, nrec_total)
+    vv = Vector{T}(undef, nrec_total)
+    ww_ = Vector{T}(undef, nrec_total)
     bl_codes = Vector{Int}(undef, nrec_total)
-    # AIPS-strict DATE PTYPE: two columns whose sum is the full Julian
-    # Day. Splitting into floor + fractional parts keeps Float32 sub-day
-    # precision intact (Float32 represents the integer JD exactly up to
-    # ~16M, and the fractional remainder gives ~10 ms resolution).
-    date_param_cat = Matrix{Float32}(undef, nrec_total, 2)
+    # AIPS-strict DATE PTYPE: two columns whose sum is the full Julian Day.
+    # Splitting into floor + fractional parts keeps the sub-day precision a
+    # single-precision file would otherwise lose: Float32 represents the
+    # integer JD exactly up to ~16M, and the fractional remainder gives ~10 ms.
+    date_param_cat = Matrix{T}(undef, nrec_total, 2)
     extras_keys = keys(fp_info.extra_columns)
     extras_eltypes = ntuple(i -> eltype(fp_info.extra_columns[i]), length(extras_keys))
     extras_bufs = ntuple(i -> Vector{extras_eltypes[i]}(undef, nrec_total), length(extras_keys))
@@ -1549,7 +1575,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
     scan_windows = Vector{Tuple{Float64, Float64}}(undef, nscan)
 
     # :aips writes the imag part verbatim; :fitsidi conjugates (negates it).
-    imag_sign::Float32 = convention === :aips ? 1.0f0 : -1.0f0
+    imag_sign = convention === :aips ? one(T) : -one(T)
 
     rec_offset = 0
     for (sid, leaf) in enumerate(leaf_list)
@@ -1559,7 +1585,7 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
         first_row_in_scan = rec_offset + 1
         # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
         bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
-        date_param_leaf = _build_date_param(UVData.obs_time(leaf), ro)
+        date_param_leaf = _build_date_param(T, UVData.obs_time(leaf), ro)
         _write_records_kernel!(
             raw_data, uu, vv, ww_, bl_codes, date_param_cat,
             parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:flags]),
@@ -1631,23 +1657,23 @@ function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :ai
 end
 
 function _write_records_kernel!(
-        raw_data::AbstractArray{Float32, 7},
-        uu::AbstractVector{Tuvw},
-        vv::AbstractVector{Tuvw},
-        ww_::AbstractVector{Tuvw},
+        raw_data::AbstractArray{T, 7},
+        uu::AbstractVector{T},
+        vv::AbstractVector{T},
+        ww_::AbstractVector{T},
         bl_codes::AbstractVector{Int},
-        date_param_cat::AbstractMatrix{Tdate},
+        date_param_cat::AbstractMatrix{T},
         vis_dense::AbstractArray{Tvis, 4},
         w_dense::AbstractArray{Tw, 4},
         f_dense::AbstractArray{Bool, 4},
         uvw_dense::AbstractArray{Tuvw, 3},
         bl_aips_codes_local::AbstractVector{Int32},
         record_order::AbstractVector{Tuple{Int, Int}},
-        date_param::AbstractMatrix{Tdate},
+        date_param::AbstractMatrix{T},
         rec_offset::Integer,
         pol_perm::AbstractVector{Int},
-        imag_sign::Float32,
-    ) where {Tvis, Tw, Tuvw, Tdate}
+        imag_sign::T,
+    ) where {T, Tvis, Tw, Tuvw}
     # Leaf storage: (Frequency, Ti, Baseline, Pol) for vis/weights/flags;
     # (Ti, Baseline, UVW) for uvw.
     #

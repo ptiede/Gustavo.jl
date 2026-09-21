@@ -420,17 +420,33 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
     flux_len = nperband * no_band
     weight_len = no_stkd * no_band
 
-    flux_rows = Vector{Vector{Float32}}()
-    weight_rows = Vector{Vector{Float32}}()
+    # A FITS-IDI column carries its own TFORM, so each one is written at the
+    # width of the layer it holds.
+    leaf_vals = values(branches_dict)
+    Tflux = _fits_float_type(
+        "write_fitsidi",
+        mapreduce(l -> real(eltype(parent(l[:vis]))), promote_type, leaf_vals),
+    )
+    Tweight = _fits_float_type(
+        "write_fitsidi",
+        mapreduce(l -> eltype(parent(l[:weights])), promote_type, leaf_vals),
+    )
+    Tuvw = _fits_float_type(
+        "write_fitsidi",
+        mapreduce(l -> eltype(parent(l[:uvw])), promote_type, leaf_vals),
+    )
+
+    flux_rows = Vector{Vector{Tflux}}()
+    weight_rows = Vector{Vector{Tweight}}()
     date_col = Float64[]
     time_col = Float64[]
     bl_col = Int32[]
     source_col = Int32[]
     freqid_col = Int32[]
     inttim_col = Float32[]
-    uu_col = Float32[]
-    vv_col = Float32[]
-    ww_col = Float32[]
+    uu_col = Tuvw[]
+    vv_col = Tuvw[]
+    ww_col = Tuvw[]
     sort_keys = Tuple{Float64, Int32}[]   # (time_days, baseline) for SORT='T*'
     flag_rows = IDIFlagRow[]
 
@@ -477,8 +493,8 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
             end
             present || continue
 
-            flux = Vector{Float32}(undef, flux_len)
-            wts = Vector{Float32}(undef, weight_len)
+            flux = Vector{Tflux}(undef, flux_len)
+            wts = Vector{Tweight}(undef, weight_len)
             for b in 1:no_band
                 vis_b = band_vis[b]
                 w_b = band_w[b]
@@ -489,10 +505,10 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
                     # (stokes, band) — the column has no channel axis. Use the
                     # first finite positive weight; a cell with none keeps its
                     # non-positive value, which is what the reader reads back.
-                    wval = 0.0f0
+                    wval = zero(Tweight)
                     found_w = false
                     for c in 1:no_chan
-                        wc = Float32(w_b[c, ti, bi, p])
+                        wc = Tweight(w_b[c, ti, bi, p])
                         if isfinite(wc) && wc > 0
                             wval = wc
                             found_w = true
@@ -502,18 +518,18 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
                     if !found_w
                         # No usable weight on any channel — preserve the
                         # non-positive value the reader expects.
-                        wval = Float32(w_b[1, ti, bi, p])
-                        (isfinite(wval) && wval <= 0) || (wval = -1.0f0)
+                        wval = Tweight(w_b[1, ti, bi, p])
+                        (isfinite(wval) && wval <= 0) || (wval = -one(Tweight))
                     end
                     wts[_idi_weight_index(s_disk, b, no_stkd)] = wval
                     for c in 1:no_chan
                         v = vis_b[c, ti, bi, p]
                         off = base_off + (c - 1) * (2 * no_stkd) + (s_disk - 1) * 2
-                        flux[off + 1] = Float32(real(v))
+                        flux[off + 1] = Tflux(real(v))
                         # Conjugate on the way out: FITS-IDI stores
                         # V = ⟨E_a1 · conj(E_a2)⟩, the conjugate of Gustavo's
                         # internal MSv4/casacore sense (AIPS Memo 114r §2.1).
-                        flux[off + 2] = Float32(-imag(v))
+                        flux[off + 2] = Tflux(-imag(v))
                     end
                 end
             end
@@ -528,9 +544,9 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
             push!(freqid_col, Int32(1))
             # INTTIM: use the median spacing of the time axis if available.
             push!(inttim_col, Float32(_idi_inttim(ti_vals)))
-            push!(uu_col, Float32(uvw_dense[ti, bi, 1]))
-            push!(vv_col, Float32(uvw_dense[ti, bi, 2]))
-            push!(ww_col, Float32(uvw_dense[ti, bi, 3]))
+            push!(uu_col, Tuvw(uvw_dense[ti, bi, 1]))
+            push!(vv_col, Tuvw(uvw_dense[ti, bi, 2]))
+            push!(ww_col, Tuvw(uvw_dense[ti, bi, 3]))
             push!(sort_keys, (t_day, bl_codes[bi]))
         end
     end

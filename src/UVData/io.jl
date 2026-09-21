@@ -35,6 +35,11 @@ and NX bintables from the root metadata.
 the same baseline-coordinate convention. `load_uvfits` always assumes a standard
 `:aips` file, so only `:aips` round-trips as the identity.
 
+The file is written at the precision `uvset` holds. Random groups carry one
+floating type for the data array and every group parameter alike, so that is
+the widest of the `vis`, `weights` and `uvw` layers: a single-precision set
+gives `BITPIX = -32` and a double-precision one `-64`.
+
 Single-source UVSets only — multi-source UVSets must first be narrowed via
 `select_source(uvset, name)`.
 
@@ -71,6 +76,10 @@ fixtures.
 
 Visibilities are conjugated on write, into the FITS-IDI phase convention
 `V = ⟨E_a1 · conj(E_a2)⟩`; `load_fitsidi` conjugates back.
+
+Each column is written at the precision its layer holds — a double-precision
+`vis` gives a `D`-format `FLUX` column — since a FITS-IDI column carries its
+own `TFORM`.
 
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
