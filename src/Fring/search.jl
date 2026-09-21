@@ -1,55 +1,18 @@
 # ── Per-baseline FFT delay/rate fringe search ────────────────────────────────
 #
-# For one (baseline, correlation product, scan) block of visibilities the fringe
-# model is
+# The algorithm — the matched filter, its evaluation as a 2-D FFT over a
+# uniform frequency × time grid, oversampling, multi-band aliasing and the
+# hierarchical SBD → MBD decomposition — is derived in
+# `docs/src/fringe_fitting.md`.
 #
-#     V(f, t) ≈ A · exp(i[φ + 2π·τ·(f − f0) + 2π·ṙ·(t − t0)])
-#
-# with a station-pair delay τ (s), fringe rate ṙ (Hz), constant phase φ (rad).
-# The matched filter
-#
-#     D(τ, ṙ) = Σ_{f,t} w(f,t)·V(f,t)·exp(−2πi[τ·(f − f0) + ṙ·(t − t0)])
-#
-# is a 2-D DFT once the (weighted) visibilities are placed on a uniform
-# frequency × time grid: delay is conjugate to frequency, rate to time. We grid,
-# zero-pad (oversample), FFT, take the windowed peak of |D|, then polish that
-# coarse (delay, rate) cell on the exact matched filter (`_polish_peak_exact!`) and
-# read φ off it. The FFT only LOCATES the main lobe; the sub-cell peak comes from
-# the exact objective, so the grid sets WHICH lobe is found, not how accurately
-# it is measured. `oversample` is therefore sized for lobe identification alone
-# (`_resolve_oversample`), which is why it can follow the frequency axis.
-#
-# Conventions: weights are inverse variances (1/σ²); at the matched point
-# |D| ≈ A·Σw and the noise on D has variance Σw, so SNR = |D_peak| / √(Σw) and
-# amplitude A = |D_peak| / Σw. Multi-band (gapped) frequency axes are gridded
-# onto a common Δf grid with empty bins zero-filled. NOTE: for narrow bands that
-# are widely separated, the multi-band matched filter has near-equal-height alias
-# peaks at the inverse band-spacing, and the FFT can lock onto an alias unless the
-# delay window is narrower than the alias spacing or `oversample` is large — so
-# multi-band delay is only as unambiguous as the a-priori `delay_window` allows.
-# `:auto` oversampling raises the grid as the bands sparsify for exactly this
-# reason; it does not remove the ambiguity, only the scalloping that feeds it.
-#
-# For VGOS-style layouts (narrow bands spread over a huge span) the common-Δf
-# grid is almost entirely zeros and the single big FFT is prohibitively slow; a
-# hierarchical single-band → multi-band delay (SBD/MBD) search — HOPS/fourfit's
-# decomposition — replaces it, selected by `FringeSearch.algorithm` (see the
-# "Hierarchical SBD → MBD search" section below).
-#
-# Precision: the compute type `C` (complex; `T = real(C)`) flows from the
-# visibility block's own eltype rather than being fixed at `ComplexF64` — a
-# `ComplexF32` caller's FFT runs natively in `Float32` (FFTW itself supports no
-# other complex type). This applies to the FFT grid/plan (`FringeWorkspace{C,T}`,
-# `_MBDWorkspace{C}`) and the small FFT-conjugate delay/rate axes (`_SearchAxes`'s
-# `delays`/`rates`, `_MBDAxes`'s `sbd_val`/`mbd`/`rate_val`/etc), which are the
-# compute-dominant pieces. The channel/time AXIS ORIGIN and SPACING
-# (`_uniform_axis`'s `origin`/`step`, `_MBDAxes`'s `f_lo`/`bc_step`) and the raw
-# `freqs`/`times` used directly in phase computation (`_exact_matched_filter`)
-# stay `Float64` regardless of `C`: these are absolute physical values (e.g.
-# ~10¹¹ Hz), and `Float32`'s ~7 significant digits would quantize a GHz-scale
-# origin to within a few kHz — enough to misround channel bins on fine spacing.
-# Narrowing to `T` happens only for small, already-relative quantities (grid
-# reciprocals, FFT outputs).
+# Precision: the compute type `C` follows the visibility block's own eltype, so
+# a `ComplexF32` caller's FFT runs natively in `Float32`. Axis origins and
+# spacings (`_uniform_axis`'s `origin`/`step`, `_MBDAxes`'s `f_lo`/`bc_step`)
+# and the `freqs`/`times` that `_exact_matched_filter` uses must stay `Float64`
+# whatever `C` is: they are absolute physical values near 10¹¹ Hz, and
+# `Float32`'s ~7 significant digits would quantize a GHz-scale origin to within
+# a few kHz, enough to misround channel bins on fine spacing. Only relative
+# quantities — grid reciprocals, FFT outputs — narrow to `T`.
 
 """
     AbstractSearchAlgorithm
@@ -223,9 +186,9 @@ function _ensure_workspace!(ws::FringeWorkspace{C}, ::Type{C}, nf::Integer, nt::
     return ws
 end
 
-# The scan's shared FFT plan at compute type `C`. FFTW.ESTIMATE selects a plan
+# The scan's shared FFT plan at compute type `C`. `FFTW.ESTIMATE` selects a plan
 # by a fixed heuristic, with no timing-based benchmarking of the machine —
-# unlike MEASURE, whose algorithm choice depends on wall-clock trials and can
+# unlike `FFTW.MEASURE`, whose algorithm choice depends on wall-clock trials and can
 # therefore pick a different transform (and different floating-point rounding)
 # on different runs of the same problem size. The plan depends only on the
 # padded grid size and `C`, so it is built once per scan and shared read-only
@@ -488,7 +451,7 @@ function _grid_visibilities!(
 end
 
 # Data-driven noise variance of the D plane: median of a strided sample of |D|²
-# over the FULL plane (not the narrow search window, whose fringe/sidelobe ridge
+# over the full plane (not the narrow search window, whose fringe/sidelobe ridge
 # would bias it), converted Rayleigh-median → mean (`median(|D|²) = ln2·mean`).
 # Falls back to Σw when the plane is too small to sample. See the SNR note in
 # `_baseline_fringe_search`.
@@ -503,11 +466,10 @@ function _plane_noise2!(ws::FringeWorkspace, Wsum::Float64)
     return length(dwin) > 2 ? max(median(dwin) / log(2), eps(Float64)) : Wsum
 end
 
-# Core matched-filter search on a PRECOMPUTED `_SearchAxes` — the hot path called
+# Core matched-filter search on a precomputed `_SearchAxes` — the hot path called
 # once per (baseline, product). `baseline_fringe_search` above is the public,
 # one-off wrapper that builds the axes then calls this; the group search builds the
-# axes once and calls this directly for every baseline. Numerically identical to the
-# previously-inlined body.
+# axes once and calls this directly for every baseline.
 # The numeric kernels below work on the plane's three layers as plain arrays:
 # they are swept thousands of times per solve and index by position, so the
 # stack is destructured once here rather than at every call.
@@ -568,7 +530,7 @@ function _baseline_fringe_search(
 
     # Refine the peak on the exact matched filter (scalloping-free), seeded at the
     # FFT peak cell. This replaces the old on-grid 3-point parabola: the FFT only
-    # LOCATES the main lobe, and `_polish_peak_exact!` finds the sub-cell peak of
+    # locates the main lobe, and `_polish_peak_exact!` finds the sub-cell peak of
     # the true objective — so accuracy no longer leans on a fine `oversample` grid.
     # It also reads φ and amplitude off the exact complex peak, referenced directly
     # to (f0, t0) with no FFT scalloping / grid-origin rotation:
@@ -594,7 +556,7 @@ function _baseline_fringe_search(
     # sidelobes don't bias it. For Rayleigh-distributed noise bins
     # `median(|D|²) = ln2 · mean(|D|²)`, and `mean(|D|²) = Σw` when the weights are
     # true inverse-variances — so this reduces to the matched-filter |Dref|/√Σw
-    # for calibrated data, but stays correct when the WEIGHT column is
+    # for calibrated data, but stays correct when the weight column is
     # uncalibrated / uniform (common in raw correlator output), where √Σw badly
     # mis-scales the SNR and so its false-alarm probability. Falls back to √Σw if
     # the window is too small to estimate noise.
@@ -638,18 +600,18 @@ function _exact_matched_filter(
     return Dref
 end
 
-# ── Separable evaluation: collapse one axis, then sweep the other ─────────────
+# ── Separable evaluation: collapse one axis, then sweep the other ───────────
 #
 # The matched-filter phase is separable, so collapsing the cube along one axis
-# leaves a vector the CONJUGATE coordinate can be swept over in O(length):
+# leaves a vector the conjugate coordinate can be swept over in O(length):
 #
 #     S[c] = Σ_t w·V[c,t]·cis(−2π·ṙ(t−t0))   ⇒  D(τ, ṙ) = Σ_c S[c]·cis(−2π·τ(f_c−f0))
 #     T[t] = Σ_c w·V[c,t]·cis(−2π·τ(f_c−f0)) ⇒  D(τ, ṙ) = Σ_t T[t]·cis(−2π·ṙ(t−t0))
 #
 # A coordinate-descent step therefore costs one sweep of the cube for the whole
-# axis, not one per probe — which is what `_polish_peak_exact!` is built on.
-# `_collapse_freq!` sums in `_exact_matched_filter`'s own order, so the two agree
-# exactly; `_collapse_time!` sums time-major and agrees to float rounding.
+# axis rather than one per probe, which is what `_polish_peak_exact!` is built
+# on. `_collapse_freq!` sums in `_exact_matched_filter`'s own order, so the two
+# agree exactly; `_collapse_time!` sums time-major and agrees to float rounding.
 
 function _collapse_time!(S, V::AbstractMatrix{C}, W, F, times, t0::Real, rate::Real) where {C}
     _check_plane_axes(V, W, F)
@@ -696,42 +658,40 @@ end
 
 # Refine a coarse (delay, rate) peak by maximizing the exact matched filter
 # |Σ w·V·exp(−2πi[τ(f−f0)+ṙ(t−t0)])| directly, rather than fitting a parabola to
-# the coarse FFT |D| (whose bias grows with the grid cell size, i.e. shrinks with
-# `oversample`). Four passes of a per-axis 3-point parabolic step evaluated on the
-# exact objective, seeded at the FFT peak cell with a half-bin probe — the same
-# coordinate-descent polish `_fit_band_dispersion` uses over its band phasors.
-# Each axis is swept on its collapsed vector (`_collapse_time!`/`_collapse_freq!`),
-# so a pass costs two sweeps of the cube rather than one per probe.
+# the coarse FFT |D|, whose bias grows with the grid cell size. Four passes of a
+# per-axis 3-point parabolic step on the exact objective, seeded at the FFT peak
+# cell with a half-bin probe. Each axis is swept on its collapsed vector
+# (`_collapse_time!`/`_collapse_freq!`), so a pass costs two sweeps of the cube
+# rather than one per probe.
 #
-# Four passes shrink the probe bracket to `bin/32`, over which the main lobe
-# (first null at ~1/B, i.e. `oversample` bins away) is quadratic to well within
-# the noise; the accepted step is the parabola VERTEX, a continuous estimate, so
-# the achieved resolution is not the bracket width.
-# Optimizing the true objective can only raise |D|, so the refined SNR is ≥ the
-# on-grid SNR; steps that leave the seed cell or head downhill are rejected, so a
-# coarse (low-`oversample`) grid still seeds it safely. Returns the refined
-# `(delay, rate, Dref)`. A degenerate axis passes `refine_* = false` (its conjugate
-# coordinate is fixed at 0), so the polish reduces to a single exact evaluation.
-# `delay`/`rate`/the bin widths are plain `Real`: they arrive at the search's
-# compute precision `T` but the bin widths derive from the (always-`Float64`)
-# axis spacing, so the refined values end up `Float64` — narrowed back to `T`
-# only when the caller builds the final `Detection{T}`.
+# Four passes shrink the probe bracket to `bin/32`, over which the main lobe is
+# quadratic to well within the noise; the accepted step is the parabola vertex,
+# a continuous estimate, so the achieved resolution is not the bracket width.
+# Optimizing the true objective can only raise |D|, so the refined SNR is at
+# least the on-grid SNR; steps that leave the seed cell or head downhill are
+# rejected, so a coarse grid still seeds it safely. A degenerate axis passes
+# `refine_* = false`, its conjugate coordinate fixed at 0, and the polish
+# reduces to a single exact evaluation. Returns `(delay, rate, Dref)`.
+#
+# `delay`/`rate` and the bin widths are plain `Real`: the bin widths derive from
+# the always-`Float64` axis spacing, so the refined values are `Float64`,
+# narrowed back to `T` only when the caller builds the final `Detection{T}`.
 function _polish_peak_exact!(
         V, W, F, freqs, times, f0, t0, delay::Real, rate::Real;
         delay_bin::Real, rate_bin::Real,
         refine_delay::Bool, refine_rate::Bool,
     )
     Dref = _exact_matched_filter(V, W, F, freqs, times, f0, t0, delay, rate)
-    # Per-axis probe half-width, shrunk geometrically each pass so the search hones
-    # from the coarse seed cell down to well below the fringe resolution regardless
-    # of `oversample`. The seed is the FFT argmax, so the true peak lies within
-    # ±half a grid bin; probing ±bin/2 brackets it. Where the three probes are
-    # concave we take the parabolic vertex, else step toward the taller side; the
-    # step is CLAMPED to one probe width (a coarse-grid parabola can overshoot the
-    # sinc peak) rather than rejected, so the point always walks toward the peak,
-    # and only an uphill move is kept. Each axis' three probes and its centre are
-    # read off the same collapsed vector, so the parabola is built from mutually
-    # consistent values.
+    # Per-axis probe half-width, shrunk geometrically each pass so the search
+    # hones from the coarse seed cell to well below the fringe resolution
+    # whatever `oversample` is. The seed is the FFT argmax, so the true peak lies
+    # within ±half a grid bin and probing ±bin/2 brackets it. Where the three
+    # probes are concave the parabolic vertex is taken, else a step toward the
+    # taller side; the step is clamped to one probe width rather than rejected,
+    # since a coarse-grid parabola can overshoot the sinc peak, so the point
+    # always walks toward the peak and only an uphill move is kept. Each axis'
+    # three probes and its centre are read off the same collapsed vector, so the
+    # parabola is built from mutually consistent values.
     hd = refine_delay ? delay_bin / 2 : 0.0
     hr = refine_rate ? rate_bin / 2 : 0.0
     (hd > 0 || hr > 0) || return (delay = delay, rate = rate, Dref = Dref)
@@ -792,37 +752,12 @@ _wrap(i::Int, n::Int) = mod(i - 1, n) + 1
 _in_window(x::Real, window::Tuple{<:Real, <:Real}, degenerate::Bool) =
     degenerate || (window[1] <= x <= window[2])
 
-# ── Hierarchical SBD → MBD search (HOPS/fourfit-style) ─────────────────────────
+# ── Hierarchical SBD → MBD search (HOPS/fourfit-style) ───────────────────────
 #
-# For narrow bands spread over a wide span, factor the matched filter over the
-# band blocks b (with per-band grid origin f_b):
-#
-#     D(τ, ṙ) = Σ_b exp(−2πi·τ·(f_b − f_1)) · D_b(τ, ṙ)
-#     D_b(τ, ṙ) = Σ_{f∈b, t} w·V·exp(−2πi[τ·(f − f_b) + ṙ·(t − t0)])
-#
-# |D_b| varies with τ on the SLOW in-band scale 1/BW_band (the single-band delay,
-# SBD), while the band phase factor varies on the FAST scale 1/span (the multi-
-# band delay, MBD). So:
-#
-#   stage 1: per band, one SMALL 2-D FFT (in-band delay × rate) — D_b on a coarse
-#            SBD grid; keep only the windowed (SBD, rate) block.
-#   stage 2: per SBD bin, a SMALL 1-D FFT across the band ORIGINS (gridded on a
-#            coarse common spacing Δbc) → the (MBD, rate) plane; scan the 3-D
-#            (SBD, MBD, rate) cube for the windowed peak.
-#
-# The MBD is periodic with ambiguity A = 1/Δbc; the total delay is the MBD
-# unfolded near the SBD estimate. Because the SBD bin (1/BW_band) can be
-# comparable to A, the ambiguity k is ARBITRATED by the exact MATCHED FILTER:
-# every candidate mbd + k·A within ~1.5 SBD bins of the SBD estimate (and inside
-# the window) is evaluated exactly and the strongest wins — the exact filter sees
-# the true in-band slope, which is precisely what distinguishes the aliases. The
-# final fine delay is then polished by a parabolic step on the exact filter, so
-# the result carries no grid scalloping.
-#
-# Cost: the giant nf_pad×nt_pad grid (mostly zeros for VGOS layouts) is replaced
-# by nfreqgroup small per-band FFTs plus nsbd tiny band-center FFTs — orders of
-# magnitude less compute and memory traffic. Noise/SNR conventions are identical
-# to the full path: every cube cell is a matched-filter output with variance Σw
+# The band factorization, the two FFT stages, the MBD ambiguity and how the
+# exact matched filter arbitrates it are derived in
+# `docs/src/fringe_fitting.md`. Noise and SNR conventions are identical to the
+# full-grid path: every cube cell is a matched-filter output with variance Σw
 # under noise, so the same strided-median estimate applies.
 
 # Approximate GCD of nonnegative reals within absolute tolerance `tol` (folded
@@ -847,7 +782,7 @@ function _approx_gcd(vals::AbstractVector{<:Real}, tol::Real)
     return g
 end
 
-# Split a SORTED frequency axis into contiguous band blocks: a new block starts
+# Split a sorted frequency axis into contiguous band blocks: a new block starts
 # wherever the spacing exceeds 1.5× the in-band spacing Δf.
 function _detect_freq_groups(freqs::AbstractVector, Δf::Real)
     # The returned ranges index the stacked channel axis, which is 1-based.
@@ -1139,7 +1074,7 @@ function _mbd_fringe_search(
 
     # Stage 1: per band, grid + 2-D FFT (in-band delay × rate); keep the windowed
     # (SBD row, rate col) block. The noise is estimated here, from a strided
-    # median of each band's FULL |D_b|² plane (the windowed stage-2 cube sits on
+    # median of each band's full |D_b|² plane (the windowed stage-2 cube sits on
     # the fringe's sidelobe ridge and would bias it — same rationale as the full
     # path's whole-plane sample): the band contributions to D are independent, so
     # Var(D) = Σ_b Var(D_b), each `median|D_b|²/ln2` (Rayleigh median → mean).
@@ -1271,7 +1206,7 @@ end
 
 # ── False-fringe statistics + the delay–rate map extractor ─────────────────────
 
-# Effective number of INDEPENDENT search cells inside the (delay, rate) window.
+# Effective number of independent search cells inside the (delay, rate) window.
 # The delay resolution is 1/(gridded bandwidth span) = 1/(fax.n·fax.step) and the
 # rate resolution 1/(time span), so cells-per-axis = window span / resolution,
 # clamped to [1, n gridded samples] (zero-pad `oversample` refines the peak but

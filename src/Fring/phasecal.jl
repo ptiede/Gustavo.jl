@@ -1,23 +1,20 @@
-# ── Phase-cal (injected tone) instrumental calibration ─────────────────────────
+# ── Phase-cal (injected tone) instrumental calibration ───────────────────────
 #
 # VGOS-style systems inject a phase-locked tone comb at each station front end;
 # the correlator extracts the tone phasors per (station, polarization, band,
-# epoch) and writes them to the FITS-IDI phase-CAL table. Those tones measure the
-# station's INSTRUMENTAL phase response — per-band delays and phase offsets that
-# otherwise decohere the multi-band fringe — so dividing them out of the
-# visibilities before fringe fitting aligns the bands (EU-VGOS / fourfit
-# "multitone" scheme, Alef et al. 2024, A&A: per band fit a tone delay τ_pc from
-# the tone-phase slope, then the instrumental phase φ_pc as the mean tone
-# residual phase).
+# epoch) into the FITS-IDI phase-CAL table. The tones measure the station's
+# instrumental phase response — per-band delays and phase offsets that
+# otherwise decohere the multi-band fringe — so dividing them out before fringe
+# fitting aligns the bands. Per band, a tone delay τ_pc is fit from the
+# tone-phase slope and the instrumental phase φ_pc is the mean tone residual
+# phase (EU-VGOS / fourfit "multitone", Alef et al. 2024, A&A).
 #
-# Everything here is format-neutral: `load_fitsidi_phasecal` (the FITS-IDI
-# reader) is a stub implemented in `GustavoFITSFilesExt`. The fitted correction
-# is packed as an ordinary `CalibrationSolution` — a phase-only
-# `StationGainModel` with per-scan, per-spectral-window `Delay` + `ConstantTerm`
-# per feed — so applying, saving, and composing it reuses the Calibration
-# machinery unchanged. What phase-cal does not fix: the ionospheric dispersive
-# delay (∝ 1/ν; it enters after the injection point) and anything sky-side —
-# those stay with the fringe fitter.
+# Everything here is format-neutral: `load_fitsidi_phasecal` is a stub
+# implemented in `GustavoFITSFilesExt`. The fitted correction is packed as an
+# ordinary `CalibrationSolution`, so applying, saving and composing it reuse the
+# Calibration machinery unchanged. Phase-cal does not correct the ionospheric
+# dispersive delay, which enters after the injection point, or anything
+# sky-side; those stay with the fringe fitter.
 
 """
     PhaseCalTable
@@ -68,16 +65,17 @@ function _phasecal_model()
 end
 
 # Robust multitone fit for the tones of one (station, feed, scan, spw) block:
-# `ν` (Hz) ascending with phasors `z`. Returns `(τ, φ0, nused)` where the block's
-# instrumental phase is `φ(f) = φ0 + 2πτ(f − f0)` (φ0 referenced DIRECTLY to the
-# global f0 — the `Delay` term's coordinate — so no per-band reference juggling),
-# or `nothing` when fewer than `min_tones` usable tones survive.
+# `ν` (Hz) ascending with phasors `z`. Returns `(τ, φ0, nused)`, where the
+# block's instrumental phase is `φ(f) = φ0 + 2πτ(f − f0)` with φ0 referenced
+# directly to the global f0, the `Delay` term's coordinate, so no per-band
+# reference juggling is needed; or `nothing` when fewer than `min_tones` usable
+# tones survive.
 #
-# τ from the median of the wrapped adjacent-increment estimates (immune to a
-# single bad tone; unambiguous for |τ| < 1/(2·tone spacing), ±100 ns for the
-# 5 MHz VGOS comb — the same inherent ambiguity as fourfit's tone fringe), then
-# outlier tones rejected by their residual phase and τ refined by a weighted LSQ
-# on the residuals.
+# τ comes from the median of the wrapped adjacent-increment estimates, which is
+# immune to a single bad tone and unambiguous for |τ| < 1/(2·tone spacing),
+# ±100 ns for the 5 MHz VGOS comb — the same inherent ambiguity as fourfit's
+# tone fringe. Outlier tones are then rejected by their residual phase and τ
+# refined by a weighted LSQ on the residuals.
 function _fit_tone_block(ν::Vector{Float64}, z::Vector{ComplexF64}, f0::Float64; min_tones::Int = 2, max_resid::Float64 = 1.0)
     n = length(ν)
     n >= min_tones || return nothing

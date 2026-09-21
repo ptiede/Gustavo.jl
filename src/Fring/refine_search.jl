@@ -1,25 +1,21 @@
 # ── Per-baseline matched filters for dispersion (dTEC) and SBD refinement ────
 #
 # The per-baseline measurement half of `DispersionSBDFit`: a joint (Δτ, dTEC)
-# grid fit over a baseline's per-spw band phasors, and a single-delay fit over
-# a band group's sub-band chunk phasors (fourfit's SBD). Both mirror the
-# wideband search's matched-filter principle — maximize coherent sum magnitude
-# over a delay-like parameter — at coarser (per-band/per-chunk, not
-# per-channel) resolution, since only a handful of bands/chunks are available
-# per baseline. `refine_stage.jl`'s `refine_scan_dispersion!`/`refine_scan_sbd!`
-# assemble the band/chunk phasors these kernels fit from and station-solve the
-# resulting per-baseline measurements.
+# grid fit over a baseline's per-spw band phasors, and a single-delay fit over a
+# band group's sub-band chunk phasors (fourfit's SBD). Both maximize coherent
+# sum magnitude over a delay-like parameter, as the wideband search does, but at
+# per-band/per-chunk resolution, only a handful being available per baseline.
 
-# ── Per-scan (Δτ, dTEC) band-phasor fit ───────────────────────────────────────
+# ── Per-scan (Δτ, dTEC) band-phasor fit ─────────────────────────────────────
 #
-# The FFT search + stationization solve a per-scan LINEAR delay; the ionosphere
-# adds a dispersive phase K·dTEC·(1/f0 − 1/f) whose linear-in-ν part the delay
-# absorbs (biasing it by hundreds of ps on VGOS) and whose curvature survives as
-# cross-band structure that no global per-channel bandpass can track scan-to-scan.
-# This measures both self-consistently from each scan's own residual — fourfit's
-# ionospheric search, done as a per-baseline (Δτ, dTEC) grid fit over the scan's
-# band phasors. Feed-common (ionosphere is non-birefringent to first order);
-# cross hands are skipped like the rate solve.
+# The FFT search and stationization solve a per-scan linear delay. The
+# ionosphere adds a dispersive phase K·dTEC·(1/f0 − 1/f) whose linear-in-ν part
+# the delay absorbs, biasing it by hundreds of ps on VGOS, and whose curvature
+# survives as cross-band structure no global per-channel bandpass can track
+# scan to scan. This measures both self-consistently from each scan's own
+# residual, as a per-baseline (Δτ, dTEC) grid fit over the scan's band phasors —
+# fourfit's ionospheric search. Feed-common, the ionosphere being
+# non-birefringent to first order; cross hands are skipped as in the rate solve.
 
 # Collapse one band leaf to one residual phasor per (baseline, product):
 # `z[bi, p] = Σ w·V`, `w[bi, p] = Σ w` over the leaf's channels × APs — the
@@ -123,7 +119,7 @@ end
 
 # Half the band-comb delay ambiguity: band/chunk phasors sampled on centers with
 # an (approximate) common spacing grid `g` cannot distinguish τ from τ + k/g, so
-# a delay fit must search a window with a UNIQUE branch — otherwise baselines
+# a delay fit must search a window with a unique branch — otherwise baselines
 # tie-break the exact degeneracy to different branches, the measurements break
 # closure, and the robust station solve excises them instead of fixing the
 # delay. Uses the same folded-Euclid grid the MBD search uses. Shared by the
@@ -139,13 +135,13 @@ end
 
 # ── Per-scan band-group SBD fit (fourfit's single-band delay) ────────────────
 #
-# The wideband (MBD) delay and dTEC are constrained by CROSS-band structure;
+# The wideband (MBD) delay and dTEC are constrained by cross-band structure;
 # the within-band phase slope is nearly orthogonal to both and instrumentally
-# real: a station's per-band signal path can move relative to its phase-cal
-# tones between scans (VR2505's YJ drifts by ~30 ns in the 3 GHz group), which
-# no time-invariant per-channel bandpass can represent. This measures the
-# residual within-band slope per (baseline, band group) from sub-band CHUNK
-# phasors (exact matched filter over one delay about the group's centre).
+# real: a station's per-band signal path can move by tens of nanoseconds
+# relative to its phase-cal tones between scans, which no time-invariant
+# per-channel bandpass can represent. This measures the residual within-band
+# slope per (baseline, band group) from sub-band chunk phasors, an exact
+# matched filter over one delay about the group's centre.
 
 # Accumulate one channel-block's inverse-variance chunk phasors:
 # `z[bi, p, chunk_of_chan[c]] += w·V` (parallel hands only), off data already

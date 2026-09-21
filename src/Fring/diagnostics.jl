@@ -314,7 +314,7 @@ end
 # solve" trap is gone); the legacy explicit kwargs (`precal`/`flag_channels`/
 # `weight_scale`) override it when any is given, in the solver's application
 # order (precal division, weight scale, channel mask); `transforms` overrides
-# everything with an explicit chain — `transforms = ()` inspects the RAW data.
+# everything with an explicit chain — `transforms = ()` inspects the raw data.
 function _diag_stream(
         uvset::UVSet, sol::CalibrationSolution;
         precal = nothing, flag_channels = nothing, weight_scale = nothing,
@@ -335,7 +335,7 @@ function _diag_stream(
         "diagnostics: the solution records a transform that did not survive " *
             "serialization — pass the chain explicitly (precal/flag_channels/weight_scale)."
     )
-    # Diagnostics inspect one group at a time, so the OUTER level stays serial; the
+    # Diagnostics inspect one group at a time, so the outer level stays serial; the
     # inner level still fans out across the group's leaves and baselines.
     return scan_stream(
         uvset; geom = sol.geom, transforms = tfs,
@@ -394,7 +394,7 @@ function _accumulate_baseline_fringes!(
                 (abs2(ga) > 1.0e-24 && abs2(gb) > 1.0e-24 && isfinite(denom)) || continue
                 vc = v / denom
                 isfinite(vc) || continue
-                # inverse-variance weight of the CORRECTED datum (Var(V/g) =
+                # inverse-variance weight of the corrected datum (Var(V/g) =
                 # 1/(w·|g|²)) — matches apply_calibration's reweighting.
                 wd = w * abs2(denom)
                 acc.sa[c, bi, p] += wd * vc; acc.swa[c, bi, p] += wd

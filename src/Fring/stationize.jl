@@ -1,47 +1,28 @@
 # ── Per-feed stationization with closure ─────────────────────────────────────
 #
-# Turn per-baseline fringe detections into per-(station, feed) delays, rates and
-# phases by weighted least squares on the (station, feed) graph (2·nant nodes).
-# Every observable differences station quantities with the same incidence:
+# Weighted least squares turning per-baseline fringe detections into
+# per-(station, feed) delays, rates and phases on a graph of 2·nant nodes. The
+# incidence, the use of all four correlation products, the row weights and the
+# gauge are derived in `docs/src/fringe_fitting.md`.
 #
-#     baseline (a,b), product p with feeds (fa, fb) = correlation_feed_pair(p):
-#         delay_ab^p = τ_{a,fa} − τ_{b,fb}
-#         rate_ab^p  = ṙ_{a,fa} − ṙ_{b,fb}
-#         phase_ab^p = φ_{a,fa} − φ_{b,fb}
-#
-# Using all FOUR products (not just parallel hands) is deliberate: cross-hand
-# rows connect feed-1 and feed-2 nodes, so the inter-feed (feed-2 − feed-1)
-# delay/phase offset is pinned by the data and falls out of the solution — no
-# separate alignment stage. Closure holds by construction within each product
-# and across mixed-hand triangles.
-#
-# What the model omits. The per-antenna response is taken as diagonal, so
-# leakage goes to the residuals. There is no parallactic-angle term: with
-# circular feeds field rotation is a per-feed phase the solve's own nodes
-# absorb; with linear feeds it perturbs the parallel-hand amplitude through Q, U
-# and reaches the phase only through the stations' differential rotation, at
-# O(V/I). Neither is checked here — modeling either means adding a component.
-#
-# Gauge: each connected component of the (station, feed) graph has one additive
-# freedom per observable, fixed by one constraint row per component supplied by an
-# `AbstractGauge`. Cross hands merge the two feeds into a single component, so the
-# inter-feed offset is fixed by the data and needs no constraint of its own.
+# The per-antenna response is taken as diagonal, so leakage goes to the
+# residuals, and there is no parallactic-angle term. Modeling either means
+# adding a component; neither is checked for here.
 
-# ── Robust losses ────────────────────────────────────────────────────────────
+# ── Robust losses ───────────────────────────────────────────────────────────
 #
-# The station solves downweight inconsistent rows through a robust loss ρ
-# applied to the NORMALIZED squared residual u = (z/f)², where z = resid·√w and
-# f is the loss scale. Because `w` is the noise model's inverse variance
-# (`_row_weight`: the CRB σ of that observable, floored by a systematic term),
-# z is already in units of predicted σ and u is dimensionless — the scale is
-# never re-estimated from the residuals themselves. That is what makes
-# the effective threshold independent of how many rows are in the system: a
-# scale fitted from residuals shrinks with the degrees of freedom, so a nominal
-# cut tightens on exactly the weak scans that can least afford it.
+# The station solves downweight inconsistent rows through a robust loss ρ on
+# the normalized squared residual u = (z/f)², where z = resid·√w and f is the
+# loss scale. Because `w` is the noise model's inverse variance (`_row_weight`),
+# z is already in units of predicted σ and u is dimensionless. The scale must
+# not be re-estimated from the residuals themselves: that makes the effective
+# threshold independent of how many rows are in the system, whereas a fitted
+# scale shrinks with the degrees of freedom, tightening a nominal cut on
+# exactly the weak scans that can least afford it.
 #
 # Each loss supplies `robust_weight(loss, u) = ρ′(u)`, the IRLS multiplier on a
-# row's weight. Conventions follow SciPy's `least_squares` loss family, which
-# is where EHT-HOPS's `soft_l1` choice comes from.
+# row's weight. Conventions follow SciPy's `least_squares` loss family, which is
+# where EHT-HOPS's `soft_l1` choice comes from.
 
 """
     AbstractRobustLoss
@@ -165,25 +146,21 @@ function _irls_weights!(w, w0, loss::AbstractRobustLoss, scale::Real, resid)
     return changed
 end
 
-# ── Row weights: the noise model, in each observable's own units ─────────────
+# ── Row weights: the noise model, in each observable's own units ────────────
 #
-# Every row's weight is `1/σ²` with σ the CRB uncertainty of that measurement:
-#
-#     σ_delay = 1 / (2π · σ_ν · snr)     seconds   (σ_ν = RMS frequency spread)
-#     σ_rate  = 1 / (2π · σ_t · snr)     Hz        (σ_t = RMS time spread)
-#     σ_phase = 1 / snr                  radians
-#
-# plus a systematic floor in quadrature. Only the delay and rate σ carry the
-# array's frequency/time extent; phase is already dimensionless in σ units,
-# which is why it alone needs no scan geometry.
+# Every row's weight is `1/σ²` with σ the CRB uncertainty of that measurement,
+# derived in `docs/src/fringe_fitting.md`, plus a systematic floor in
+# quadrature. Only the delay and rate σ carry the array's frequency and time
+# extent; phase is already dimensionless in σ units, which is why it alone needs
+# no scan geometry.
 #
 # The spreads matter only for the robust loss. A weighted least-squares solution
 # is invariant under scaling every weight in a system by a common constant, and
-# σ_ν/σ_t are common to all rows of one scan — so getting them wrong (or right)
-# cannot move the fit. What they fix is the meaning of `z = resid·√w`: with a
-# true inverse variance, z is in units of σ and `loss_scale` is the same
-# dimensionless number for all three observables, matching EHT-HOPS's
-# `f_scale = 8` on `(data − model)/err`.
+# σ_ν/σ_t are common to all rows of one scan, so getting them wrong cannot move
+# the fit. What they fix is the meaning of `z = resid·√w`: with a true inverse
+# variance, z is in units of σ and `loss_scale` is the same dimensionless number
+# for all three observables, matching EHT-HOPS's `f_scale = 8` on
+# `(data − model)/err`.
 
 # RMS spread of a coordinate about its mean — the CRB lever arm. For channels
 # uniformly filling a band of width B this is B/√12, HOPS's `√12` factor; taking
@@ -232,8 +209,8 @@ end
 # Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 
-# One observation row contributing to a node system. `na`/`nb` are the PARAMETER
-# NODES the row's two stations contribute to — `_feed_node(tying, feed)` of the
+# One observation row contributing to a node system. `na`/`nb` are the parameter
+# nodes the row's two stations contribute to — `_feed_node(tying, feed)` of the
 # correlation product's feeds, so they coincide with the feed indices only under
 # `PerFeed`. A row with `na != nb` is cross-hand: it is the only kind that ties
 # the two feed blocks together. `src` indexes the row's free source term in a
@@ -255,7 +232,7 @@ _ObsRow(a, b, na, nb, val, w) = _ObsRow(a, b, na, nb, val, w, 0)
 # rescales every row's noise-model weight by the loss's derivative at that row's
 # normalized residual and re-solves; no scale is estimated from the residuals.
 #
-# The phase system's own re-wrap iteration lives INSIDE `_solve_observable`, so
+# The phase system's own re-wrap iteration lives inside `_solve_observable`, so
 # the nesting is IRLS-outer / re-wrap-inner: every IRLS pass sees a fully
 # converged 2π branch assignment. The other order would let the loss downweight
 # rows whose residual is still one wrap away from its final value, which reads
@@ -311,7 +288,7 @@ function _solve_observable(
     feed_of(n) = n > nant ? 2 : 1
     comps = [findall(==(c), compid) for c in 1:ncomp]
     anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
-    # Constrain every UNTOUCHED node — an (antenna, feed) with no observation in
+    # Constrain every untouched node — an (antenna, feed) with no observation in
     # this solve, e.g. a station that dropped out. Its design column is all-zero,
     # which would make the constrained QR system rank-deficient and corrupt the
     # solve for the stations that DO have data. Fixing it at 0 (its value is
@@ -339,8 +316,8 @@ function _solve_observable(
 
     # Phase re-wrap: unwrap observations toward a model and re-solve, so
     # station-difference phases exceeding ±π are handled. The first model comes
-    # from a maximum-weight spanning-tree traversal of the (station, feed) graph
-    # (K1): propagating wrapped edge phases from each pin gives a globally
+    # from a maximum-weight spanning-tree traversal of the (station, feed) graph:
+    # propagating wrapped edge phases from each pin gives a globally
     # consistent unwrap that is correct even when a true station-difference
     # exceeds ±π — far more robust than starting the iteration from a WLS fit on
     # the raw wrapped observations, which can lock onto the wrong 2π branch. For
@@ -348,7 +325,7 @@ function _solve_observable(
     if rewrap > 0
         xseed = _spanning_tree_seed(rows, nant, anchors)
         # Temporal warm-start: where a `seed_phase` (e.g. the previous AP's solved
-        # node phases) is available, OVERRIDE the per-solve spanning-tree seed with
+        # node phases) is available, override the per-solve spanning-tree seed with
         # it. The model is used only to pick each observation's 2π branch, and edge
         # predictions `φ_na − φ_nb` are gauge-invariant, so a warm-start from a
         # differently-anchored neighbouring AP is safe. This gives the per-AP adhoc
@@ -387,7 +364,7 @@ function _solve_observable(
     return vals, cov, ncomp, resid
 end
 
-# Maximum-weight spanning-tree phase seed (K1). Propagate wrapped edge phases
+# Maximum-weight spanning-tree phase seed. Propagate wrapped edge phases
 # from each pin over the parallel-hand (same-node-index, `na == nb`) edges of the
 # (station, feed) graph, preferring high-weight edges, to build a globally
 # consistent node-phase estimate. Cross-hand rows are excluded from the tree:
@@ -413,7 +390,7 @@ function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, anchors::Abst
     for n in eachindex(adj)
         sort!(adj[n]; by = e -> e[3], rev = true)
     end
-    # Grow a MAX-WEIGHT spanning tree per component (Prim): repeatedly attach the
+    # Grow a maximum-weight spanning tree per component (Prim): repeatedly attach the
     # highest-weight edge from the visited set to an unvisited node. Following the
     # strongest edges (not just any incident edge, as a plain BFS would) keeps the
     # unwrapping on the most reliable, smallest-|Δφ| connections — a hub node
@@ -446,49 +423,34 @@ function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, anchors::Abst
     return x
 end
 
-# ── Generic, model-driven station solve ──────────────────────────────────────
+# ── Generic, model-driven station solve ─────────────────────────────────────
 #
 # `solve_station_systems!` has no node space of its own: the unknowns are the θ
-# COLUMNS the model declares. For each stage-B phase component (a
-# `ConstantTerm`/`Delay`/`Rate` × time-seg × tying), `_block_index(plan,
-# _feed_node(tying, feed), 1, tseg_id[ti], ant)` is the θ slot a (station, feed,
-# time) observation maps to. The plan's segmentation encodes the time basis
-# (PerScan → a distinct column per scan; GlobalTime → one column shared across the
-# whole track) and its tying the feed fold (PerFeed → distinct feed columns;
-# SharedFeeds → one shared column). So the same engine solves a per-scan model
-# (columns disjoint per scan ⇒ block-diagonal ⇒ scans solve independently) and a
-# model with a track-global inter-feed offset (a column shared across scans
-# couples them) — the model is the extension point, this solver just reads the θ
-# columns each component declares.
+# columns the model declares. For each stage-B phase component,
+# `_block_index(plan, _feed_node(tying, feed), 1, tseg_id[ti], ant)` is the θ
+# slot a (station, feed, time) observation maps to. The plan's segmentation
+# encodes the time basis — `PerScan` gives a distinct column per scan,
+# `GlobalTime` one column shared across the track — and its tying the feed fold.
+# So the same engine solves a per-scan model, whose columns are disjoint per
+# scan and therefore block-diagonal, and a model with a track-global inter-feed
+# offset, whose shared column couples scans. The model is the extension point;
+# this solver only reads the θ columns each component declares.
 #
 # Every correlation product's detection becomes a row of the delay and rate
-# systems. A cross-hand row is not special-cased there: the tying alone decides
-# what it touches, so `SharedFeeds` reads it as `x_a − x_b` and `PerFeed` as
-# `x_{a,p} − x_{b,q}` — and under the default term list the cross-hand delay
-# rows are exactly what constrains `rel_delay`'s common mode.
+# systems, with no special case for cross hands: the tying alone decides what a
+# row touches. Under the default term list the cross-hand delay rows are what
+# constrains `rel_delay`'s common mode. The phase system under a feed-blind
+# model is the exception, described in `docs/src/fringe_fitting.md`;
+# `_solve_kind_cols!` implements it by augmenting that system with
+# per-(scan, station) nuisance feed-2 offset columns and withholding cross-hand
+# rows from it.
 #
-# The phase system under a feed-blind model is the exception, because its rows
-# are not mutually consistent: the model deliberately carries no feed-relative
-# phase (the R–L offset — instrumental constant plus field rotation — is left
-# in the data for a downstream polarization fit), so a QQ row sits a
-# station-based offset away from its PP sibling, and a cross-hand row adds the
-# source's cross-hand phase on top. Fitting all four families to one shared
-# column would return a weighted compromise biased toward whichever feed
-# carries more weight. `_solve_kind_cols!` therefore augments the feed-blind
-# phase system with per-(scan, station) NUISANCE feed-2 offset columns —
-# solved so the shared column is the feed-1 phase, then discarded so the
-# offset survives in the data — and withholds cross-hand rows from that system
-# alone: everything they constrain beyond the parallel hands (the offsets'
-# common mode, i.e. the EVPA zero) is discarded anyway. A model whose phase
-# component resolves feeds itself describes every row, so the nuisance
-# machinery stays off there.
-#
-# `scans` is a vector of `Baseline × Pol` Detection `DimStack`s (the shape
-# `search_scan` returns — see `detection_stack`/`_with_ti`), each carrying its
-# `Baseline` lookup's `(a, b)` pairs, per-product feeds derived from its `Pol`
-# lookup, and a representative global time index `:ti` in metadata for the
-# `tseg_id` lookup. θ slots are ACCUMULATED into (`+=`), matching
-# `_pack_station!`, so `rounds > 1` (search on the residual) stays correct.
+# `scans` is a vector of `Baseline × Pol` Detection `DimStack`s, the shape
+# `search_scan` returns, each carrying its `Baseline` lookup's `(a, b)` pairs,
+# per-product feeds from its `Pol` lookup, and a representative global time
+# index `:ti` in metadata for the `tseg_id` lookup. θ slots are accumulated into
+# with `+=`, matching `_pack_station!`, so `rounds > 1` — search on the residual
+# — stays correct.
 
 """
     detection_stack(D::AbstractMatrix{<:Detection}, bl_pairs, pol_products;
@@ -571,9 +533,9 @@ function solve_station_systems!(
         gauge::AbstractGauge = PinAntenna(1), opts::Stationization = Stationization(),
     )
     ncomp = 0
-    # (station, scan-index) pairs the solve CONSTRAINS. A station with no
+    # (station, scan-index) pairs the solve constrains. A station with no
     # accepted detection in a scan keeps θ = 0 there ⇒ identity gain, and must
-    # be FLAGGED downstream rather than silently passed through uncalibrated.
+    # be flagged downstream rather than silently passed through uncalibrated.
     # Intersected over the solved kinds: a station must be constrained in delay
     # And rate and phase to count as calibrated.
     covered = Set{Tuple{Int, Int}}()
@@ -743,14 +705,12 @@ function _solve_kind_cols!(
 
     # Robust solve: IRLS over `opts.loss`, rescaling each row's noise-model
     # weight by the loss's derivative at that row's normalized residual (see
-    # `Stationization`). No row leaves the system, so the graph's connectivity —
-    # and hence which stations are solvable — is fixed before the first solve
-    # and cannot be changed by the fit.
+    # `Stationization`). No row leaves the system, so the graph's connectivity,
+    # and hence which stations are solvable, is fixed before the first solve.
     #
-    # Nesting: IRLS outer, the phase system's 2π re-wrap inner (it lives inside
-    # `_solve_tagged_system`), so every IRLS pass sees a converged branch
-    # assignment. Reversing them would downweight rows whose residual is still a
-    # wrap away from its final value.
+    # IRLS is the outer loop and the phase system's 2π re-wrap the inner one, so
+    # every IRLS pass sees a converged branch assignment. Reversing them would
+    # downweight rows whose residual is still a wrap away from its final value.
     w = copy(rw)
     nuisance = node_col .== 0
     local x, ncomp
@@ -776,21 +736,21 @@ function _solve_kind_cols!(
     return ncomp, _covered_stations(rsta_a, rsta_b, rscan, raccept), solved
 end
 
-# The phase a rate component contributes at `epoch` to one (station, feed) —
+# The phase a rate component contributes at `epoch` to one (station, feed):
 # `2π·ṙ·(epoch − t0_k)` over the rate columns, in radians.
 #
 # A detection's phase is the phase at the epoch its search referenced, and the
-# station solve reads it as a sum of CONSTANTS. That holds only where every rate
-# coordinate is zero, i.e. at each rate component's own origin. A component
-# segmented like the constants beside it (the default: everything `PerScan`) has
-# its origin exactly there and contributes nothing here — the subtraction is
-# identically zero and the rows are the measured phases unchanged. A component
-# segmented more coarsely (a track-global inter-feed rate against per-scan
-# constants) is referenced elsewhere, and its share of the measured phase is
-# removed here rather than being left for a per-scan constant to absorb.
+# station solve reads it as a sum of constants. That holds only where every rate
+# coordinate is zero, at each rate component's own origin. A component segmented
+# like the constants beside it — the default, everything `PerScan` — has its
+# origin exactly there and contributes nothing here, so the rows are the
+# measured phases unchanged. A component segmented more coarsely, such as a
+# track-global inter-feed rate against per-scan constants, is referenced
+# elsewhere, and its share of the measured phase is removed here rather than
+# left for a per-scan constant to absorb.
 #
 # `solved` is this round's rate increment per θ column, which is what the phases
-# of this round — measured on the residual of the previous one — contain.
+# of this round, measured on the previous round's residual, contain.
 function _phase_epoch_offset(rate_plans, solved, ti::Integer, epoch, a::Integer, feed::Integer)
     isempty(rate_plans) && return 0.0
     off = 0.0
@@ -826,29 +786,27 @@ function _require_common_epoch(rate_plans, ti::Integer)
     return nothing
 end
 
-# The (station, scan) pairs this system actually calibrates: those carrying at
-# least one ACCEPTED detection, and so constrained by the solve rather than left
-# at θ = 0 (identity gain). Everything else is flagged downstream.
+# The (station, scan) pairs this system calibrates: those carrying at least one
+# accepted detection, and so constrained by the solve rather than left at θ = 0
+# (identity gain). Everything else is flagged downstream.
 #
-# `raccept` is what keeps this honest. Every measured cell contributes a row, so
-# reading coverage off the rows alone would call a station calibrated on the
-# strength of a noise peak — which sits at an arbitrary delay and fixes nothing.
-# Only a detection at or below `pfa_max` joins stations into a fringe group.
+# Acceptance must be read from `raccept`, not from the rows: every measured cell
+# contributes a row, so reading coverage off the rows alone would call a station
+# calibrated on the strength of a noise peak, which sits at an arbitrary delay
+# and fixes nothing. Only a detection at or below `pfa_max` joins stations into
+# a fringe group.
 #
 # Coverage does not depend on the reference antenna, and so is invariant to the
-# gauge pin. Each connected component of the (station, feed) graph carries its own
-# arbitrary additive zero, but a correction enters the data only as the difference
-# `g_a − g_b` along a baseline, and a baseline exists only within a component — so
-# a component's gauge cancels wherever it is applied, whether or not the reference
-# is one of its stations. Requiring reference connectivity instead would discard
-# every station of a scan the reference happens to sit out, including scans whose
-# own closure is perfectly well determined.
+# gauge pin: a correction enters the data only as the difference `g_a − g_b`
+# along a baseline, and a baseline exists only within a connected component, so
+# a component's gauge cancels wherever it is applied. Requiring reference
+# connectivity instead would discard every station of a scan the reference sits
+# out, including scans whose own closure is well determined.
 #
-# Connectivity and weighting are separate questions: `pfa_max` decides which rows
-# are real detections and therefore what the graph looks like, and the robust loss
-# then arbitrates inconsistency AMONG those rows without removing any. A station
-# with no accepted detection is uncalibrated no matter how the surviving rows are
-# weighted.
+# `pfa_max` decides which rows are real detections and therefore what the graph
+# looks like; the robust loss then arbitrates inconsistency among those rows
+# without removing any. A station with no accepted detection is uncalibrated
+# however the surviving rows are weighted.
 function _covered_stations(rsta_a, rsta_b, rscan, raccept)
     cov = Set{Tuple{Int, Int}}()
     for i in eachindex(rsta_a, rsta_b, rscan, raccept)
@@ -859,33 +817,31 @@ function _covered_stations(rsta_a, rsta_b, rscan, raccept)
     return cov
 end
 
-# Constrained WLS over a tagged node graph (the column-space generalization of
-# `_solve_observable`). `node_feed`/`node_station`/`node_scan` tag each local node
+# Constrained WLS over a tagged node graph, the column-space generalization of
+# `_solve_observable`. `node_feed`/`node_station`/`node_scan` tag each local node
 # (feed 0 = shared by both feeds; scan 0 = global column) so the gauge reproduces
 # `_solve_observable`'s tie-breaks in the per-scan case. Rows may touch more than
-# one column per side (a feed-common column plus a global feed-offset column).
-# After the per-component gauge rows, any residual gauge freedom (e.g. the per-scan
-# absolute level once scans are globally coupled) is removed by a minimum-norm
-# null-space pin — so the engine is well-posed for any model `plan_parameters` can
-# flatten, with no model-specific gauge code. `rcross` marks cross-hand rows,
-# which are excluded from the unwrap seed's spanning tree.
+# one column per side, such as a feed-common column plus a global feed-offset
+# column. After the per-component gauge rows, any residual gauge freedom — the
+# per-scan absolute level once scans are globally coupled — is removed by a
+# minimum-norm null-space pin, so the engine is well-posed for any model
+# `plan_parameters` can flatten, with no model-specific gauge code. `rcross`
+# marks cross-hand rows, which are excluded from the unwrap seed's spanning tree.
 function _solve_tagged_system(
         rowA, rowB, rval, rw, rcross, nnodes,
         node_feed, node_station, node_scan, gauge::AbstractGauge; rewrap::Integer,
         nuisance::Union{Nothing, AbstractVector{Bool}} = nothing,
         raccept::Union{Nothing, AbstractVector{Bool}} = nothing,
     )
-    # Union the columns of each (possibly multi-term) row into one component —
-    # ACCEPTED rows only. A detection above `pfa_max` sits at an arbitrary
-    # noise peak, so letting it define graph structure would hand the component
-    # count, the gauge pins and the unwrap anchors to noise; the two-tier
-    # contract is a hard connectivity cut, with weak rows constraining the fit
-    # (σ-inflated) and no more. A node reached only by weak rows joins no
-    # component and gets no gauge row: its value is determined RELATIVE to the
-    # accepted structure by those weak rows — the "constrains a parameter
-    # nothing else constrains" case — or, for a genuinely isolated island,
-    # falls to the min-norm completion; `_covered_stations` already excludes it
-    # from coverage either way.
+    # Union the columns of each row into one component, from accepted rows only.
+    # A detection above `pfa_max` sits at an arbitrary noise peak, so letting it
+    # define graph structure would hand the component count, the gauge pins and
+    # the unwrap anchors to noise. Acceptance is a hard connectivity cut; weak
+    # rows constrain the fit, σ-inflated, and no more. A node reached only by
+    # weak rows joins no component and gets no gauge row: its value is determined
+    # relative to the accepted structure by those weak rows, or for a genuinely
+    # isolated island falls to the min-norm completion. `_covered_stations`
+    # excludes it from coverage either way.
     edges = Tuple{Int, Int}[]
     for i in eachindex(rowA)
         (raccept === nothing || raccept[i]) || continue
@@ -946,7 +902,7 @@ function _solve_tagged_system(
     # common-mode freedom the data cannot fix — shifting them together, along
     # with the shared column of every station observed only on feed 2, changes
     # no row. Left to the min-norm completion it would land partly on those
-    # stations' shared columns, i.e. in the APPLIED correction, so it is pinned
+    # stations' shared columns, i.e. in the applied correction, so it is pinned
     # like any other gauge freedom: one row per (component, scan) group of
     # nuisance nodes, through `gauge`, which prefers the ranked reference — a
     # feed-2-only station's phase is thereby referenced to the reference

@@ -7,13 +7,13 @@
 
 # One recorded search row: baseline antennas, correlation product, SNR, the
 # family-wise false-alarm probability, and whether that PFA accepted it as a real
-# fringe. Every measured cell gets a row, so `detected` — not the row's presence
-# — is what marks a detection.
+# fringe. Every measured cell gets a row, so `detected`, not the row's presence,
+# is what marks a detection.
 #
 # `phase` (rad) is the measured constant phase at the epoch the search referenced
 # (`scan_phase_epoch`). It is the only stage-A observable a station solve cannot
 # be inverted for: the parallel-hand pair of one baseline gives the inter-feed
-# offset DIFFERENCE `ρ_a − ρ_b` directly as `QQ − PP`, with the source and
+# offset difference `ρ_a − ρ_b` directly as `QQ − PP`, with the source and
 # atmospheric terms cancelling, at parallel-hand SNR and without cross-hand data
 # or any station fit in between.
 const DetectionRow = @NamedTuple{

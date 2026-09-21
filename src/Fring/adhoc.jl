@@ -1,60 +1,53 @@
 # ── Globally-closing adhoc phasing ───────────────────────────────────────────
 #
-# After the per-scan fringe solution (delay/rate/constant phase per station,
-# feed) there remains a fast, time-variable phase per station — atmospheric
-# turbulence — that a per-scan constant cannot track. EHT-HOPS estimates it
-# relative to a reference antenna; here we solve it GLOBALLY: per accumulation
-# period (AP) we fit station phases from all baselines via the same feed-aware
-# incidence WLS used by the station solve, so the solution closes by construction
-# and stays well-determined at low SNR even without a dominant anchor (no ALMA).
+# After the per-scan fringe solution there remains a fast, time-variable phase
+# per station — atmospheric turbulence — that a per-scan constant cannot track.
+# It is solved globally rather than against a reference antenna: per
+# accumulation period (AP), station phases are fit from all baselines with the
+# same feed-aware incidence WLS as the station solve, so the solution closes by
+# construction and stays well-determined at low SNR with no dominant anchor.
 #
-# The observation model for baseline (a, b), correlation product p with feeds
-# (fa, fb), at accumulation period t is
+# For baseline (a, b), correlation product p with feeds (fa, fb), at AP t:
 #
 #     y_{ab,p}(t) = φ_{na}(t) − φ_{nb}(t) + x_{ab,p} + ε,
 #
-# where `n· = _feed_node(tying, f·)` maps a feed onto its parameter node (so the
-# component's feed tying sets whether a station carries one phase track or two),
-# and `x_{ab,p}` is the observed source visibility phase — held constant over the
-# scan. Making the source term free per (baseline, product) is what keeps the
-# model independent of the polarization basis: the source EVPA, the D-terms, and
-# the source's own CLOSURE phase all land in `x` rather than biasing the station
-# tracks. One cross-hand phase shared by every baseline would be the rank-one
+# where `n· = _feed_node(tying, f·)` maps a feed onto its parameter node and
+# `x_{ab,p}` is the source visibility phase, held constant over the scan.
+#
+# `x` must stay free per (baseline, product): that is what keeps the model
+# independent of the polarization basis, since the source EVPA, the D-terms and
+# the source's own closure phase then land in `x` rather than biasing the
+# station tracks. One cross-hand phase shared by every baseline is the rank-one
 # restriction `x_{ab,p} = ±c`, which cannot represent closure phase at all.
 #
 # `x` is degenerate with a per-station constant (`φ_a → φ_a + c_a`, `x_{ab,p} →
-# x_{ab,p} − (c_a − c_b)`); the per-scan demean in step (5) fixes that gauge. A
-# per-station SLOPE is not degenerate with a constant `x`, so the residual-rate
-# information the demean deliberately keeps survives untouched.
+# x_{ab,p} − (c_a − c_b)`), a gauge the per-scan demean in step (5) fixes. A
+# per-station slope is not degenerate with a constant `x`, so the residual-rate
+# information survives the demean.
 #
-# Per scan: (1) the caller supplies residual baseline visibilities already
-# divided by the fringe solution and coherently frequency-averaged to one complex
-# number per (baseline, product, AP); (2) alternate — solve the per-AP node
-# phases over the graph's connected components with the current `x` removed, then
-# re-estimate each `x_{ab,p}` as the weighted circular mean of its residual over
-# APs; (3) unwrap each track across APs; (4) smooth (Savitzky–Golay), penalize
-# (dense first-difference — no SparseArrays), or GP-smooth (Ornstein–Uhlenbeck /
-# Matérn-1/2 Kalman + RTS — see statespace.jl); (5) demean per track: remove the
-# per-scan weighted mean so the adhoc track does not alias the Stage-B constant
-# phase (the slope/residual rate is kept so adhoc can flatten it).
-#
-# Steps (1)–(3) are identical for every smoother, so each smoother sees the same
-# source-corrected rows and the same seed track; a smoother only ever decides
-# step (4).
+# Per scan: (1) the caller supplies residual baseline visibilities, already
+# divided by the fringe solution and coherently frequency-averaged to one
+# complex number per (baseline, product, AP); (2) alternate between solving the
+# per-AP node phases over the graph's connected components and re-estimating
+# each `x_{ab,p}` as the weighted circular mean of its residual; (3) unwrap each
+# track across APs; (4) smooth — Savitzky–Golay, dense first-difference penalty,
+# or GP (statespace.jl); (5) demean per track, so the adhoc track does not alias
+# the Stage-B constant phase. Steps (1)–(3) are identical for every smoother,
+# which only ever decides step (4).
 
-# ── Adhoc smoothers: a pluggable type-based interface ─────────────────────────
+# ── Adhoc smoothers: a pluggable type-based interface ────────────────────────
 #
-# After the per-AP global solve (below) each (station, feed) phase track is
-# smoothed. WHICH smoother — and how it is parameterized — is a strategy type, one
-# per method (unlike the amp-bandpass smoothers in `bandpass_stage.jl`, which are
-# `WLSEstimator`-based callables: most adhoc smoothers are not WLS problems —
-# `OUSmoother`/`JointOUSmoother` are Kalman/RTS filters, `NoSmoothing` is a no-op —
-# so a shared struct-dispatch interface is the right fit here instead).
-# Internal traits (defaults in the traits section below): `_adhoc_coherence_time(sm)`
-# — the assumed atmospheric `T_coh` (seconds), used by the per-AP warm-start
-# staleness; `_requires_single_node(sm)` — whether the smoother needs one phase
-# node per station (only the joint solve, whose Kalman state is one dimension per
-# station).
+# After the per-AP global solve each (station, feed) phase track is smoothed.
+# The smoother is a strategy type, one per method, rather than the
+# `WLSEstimator`-based callables the amp-bandpass smoothers use: most adhoc
+# smoothers are not WLS problems (`OUSmoother`/`JointOUSmoother` are Kalman/RTS
+# filters, `NoSmoothing` is a no-op).
+#
+# Internal traits, with defaults in the traits section below:
+# `_adhoc_coherence_time(sm)` is the assumed atmospheric `T_coh` in seconds,
+# used by the per-AP warm-start staleness check; `_requires_single_node(sm)` is
+# whether the smoother needs one phase node per station, which only the joint
+# solve does.
 
 """
     AbstractAdhocSmoother
@@ -430,16 +423,15 @@ function _savgol_window_dof(rho2::Real, m_coh::Real, alpha::Real, order::Integer
     return iseven(n) ? n + 1 : n
 end
 
-# Circular (complex-phasor) solve of one AP's rows — the classic adhoc-phasing
-# iteration z_a ← Σ_b w·e^{iφ_ab}·z_b, gauged at the anchor. The linear
-# phases-as-values WLS has 2π-branch local minima when rows sit near ±π: a
-# cold-started AP can converge ~150° off a strong row, and the warm-start chain
-# then LOCKS that branch and relaxes toward truth across the whole scan — a
-# fake smooth ±π-scale arc in the station track (VR2505 WN band 2: +230° over
-# a 59-s scan whose rows close to ±20°). The phasor iteration is circular, so
-# it has no branch structure; it is used only to seed the linear solve at APs
-# with no usable warm-start snapshot. Every row is a pure node difference (its
-# source term is already removed), so all of them drive the iteration.
+# Circular (complex-phasor) solve of one AP's rows, z_a ← Σ_b w·e^{iφ_ab}·z_b,
+# gauged at the anchor. It seeds the linear solve at APs with no usable
+# warm-start snapshot and must not be replaced by a cold linear solve: the
+# phases-as-values WLS has 2π-branch local minima when rows sit near ±π, and a
+# cold-started AP can converge ~150° off a strong row, after which the
+# warm-start chain locks that branch and relaxes toward truth across the scan,
+# leaving a smooth ±π-scale arc in the station track. The phasor iteration is
+# circular and so has no branch structure. Every row is a pure node difference,
+# its source term already removed, so all of them drive the iteration.
 function _circular_ap_seed(rows::Vector{_ObsRow}, nant::Integer, anchor::Integer)
     isempty(rows) && return nothing
     z = ones(ComplexF64, nant, 2)
@@ -462,10 +454,9 @@ function _circular_ap_seed(rows::Vector{_ObsRow}, nant::Integer, anchor::Integer
             a > 0 && (z[i] = acc[i] / a)
         end
     end
-    # One common gauge for the whole seed (anchor when present). A fully
+    # One common gauge for the whole seed, the anchor when present. A fully
     # consistent seed is safe on anchor-dropout APs too: the rewrap uses
-    # prediction DIFFERENCES, so a common gauge offset cancels (unlike the
-    # mixed-gauge partial snapshots the K3 restitch logic guards against).
+    # prediction differences, so a common gauge offset cancels.
     g = present[anchor, 1] ? conj(z[anchor, 1]) / abs(z[anchor, 1]) : one(ComplexF64)
     ph = fill(NaN, nant, 2)
     for f in axes(ph, 2), a in axes(ph, 1)
@@ -504,7 +495,7 @@ end
 
 # Weighted circular mean of each (baseline, product) source term from its
 # residual `y − (φ_na − φ_nb)` over the APs where the row survived the gate and
-# both nodes solved. `raw_rows` must carry the UNCORRECTED `val`, since `x` is
+# both nodes solved. `raw_rows` must carry the uncorrected `val`, since `x` is
 # defined relative to the observation itself.
 function _update_source_terms!(x, raw_rows, phase)
     acc = zeros(ComplexF64, length(x))
@@ -529,7 +520,7 @@ end
 
 # The rows of one AP with their source term removed, ready for the node solve.
 # Rows whose source term is unidentifiable (`keep[src]` false) are dropped: a
-# (baseline, product) seen at a single AP is absorbed EXACTLY by its own source
+# (baseline, product) seen at a single AP is absorbed exactly by its own source
 # term, so it constrains no node phase and only inflates the apparent coverage.
 function _source_corrected_rows(rows::Vector{_ObsRow}, x, keep)
     out = _ObsRow[]
@@ -542,18 +533,18 @@ function _source_corrected_rows(rows::Vector{_ObsRow}, x, keep)
     return out
 end
 
-# Joint (paper-faithful) adhoc solve: one MULTIVARIATE OU Kalman filter + RTS
-# smoother over the whole station-phase vector, observing the baseline phase
-# DIFFERENCES directly with a per-station temporal OU prior — closing and denoising
-# in a single recursive estimator (better at low SNR than per-AP-solve-then-smooth,
-# where a single AP is poorly conditioned). Mutates `phase[:, 1, :]` in place; the
-# caller's detrend and node→feed expansion run afterwards.
+# Joint adhoc solve: one multivariate OU Kalman filter + RTS smoother over the
+# whole station-phase vector, observing the baseline phase differences directly
+# under a per-station temporal OU prior, so closure and denoising happen in one
+# recursive estimator. This conditions better at low SNR than solving each AP
+# and smoothing afterwards. Mutates `phase[:, 1, :]` in place; the caller's
+# detrend and node→feed expansion run afterwards.
 #
 # State = `nant` station phases. `ap_rows` arrive with each row's source term
 # already removed, so a row is a pure node difference and the filter needs no
-# augmented source dimension. The unobservable common mode is pinned near 0 by the
-# OU prior (the paper needs no reference station); we re-gauge to the anchor
-# afterwards for pipeline consistency. Requires one node per station.
+# augmented source dimension. The OU prior pins the unobservable common mode
+# near 0; it is re-gauged to the anchor afterwards for pipeline consistency.
+# Requires one node per station.
 function _solve_gp_joint!(
         phase, track_w, ap_rows, nant::Integer, times, anchor::Integer, sm::JointOUSmoother,
     )
@@ -578,7 +569,7 @@ function _solve_gp_joint!(
 
     # Per-station OU hypers from the (centered) seed track. The reference track is
     # structurally 0 (per-AP gauge) so it carries no variance info — give it and any
-    # degenerate/uncovered station the ensemble-median dynamics, so the JOINT solve
+    # degenerate/uncovered station the ensemble-median dynamics, so the joint solve
     # treats every station as a real OU process (none pinned during the solve).
     τ_lo, τ_hi = _ou_tau_bounds(times)
     τv = fill(T(sm.coherence_time), nant)
@@ -603,7 +594,7 @@ function _solve_gp_joint!(
     τall = τv
     σ2all = σ2v
 
-    # Per-row measurement variance (1/snr²). The observation GEOMETRY needs no
+    # Per-row measurement variance (1/snr²). The observation geometry needs no
     # buffer: `ap_rows` goes to the filter as-is, which reads `a`/`b` from each row.
     # `T[...]`, not `[...]`: `T` is a runtime value, so an AP with no rows would
     # otherwise collect to `Vector{Any}` while a populated one gives `Vector{T}`,
@@ -718,12 +709,11 @@ function _solve_ap_sweep!(
         end
     end
 
-    # Restitch the per-AP gauge when the anchor drops out (K3). Each per-AP solve
-    # pins the anchor; in APs where it has no data the solve falls back to a
-    # different pin node, so that AP's whole solution is offset by an arbitrary
-    # (non-2π) constant — which would otherwise inject a spurious common-mode jump
-    # into every station's track. Re-reference those APs to the trusted frame from
-    # neighbouring anchor-present APs via the overlapping stations.
+    # Restitch the per-AP gauge when the anchor drops out. Each per-AP solve pins
+    # the anchor; in APs where it has no data the solve falls back to a different
+    # pin node, so that AP's whole solution is offset by an arbitrary, non-2π
+    # constant, which would otherwise inject a spurious common-mode jump into
+    # every station's track.
     _restitch_refant_gauge!(phase, covered, track_w, anchor)
 
     # Unwrap each (station, node) track across APs (per-AP solves share the ref
@@ -772,10 +762,9 @@ end
 #     val  = Δφ̂ + Im(V̄·conj(s̄)e^{-iΔφ̂}) / |s̄|²
 #     info = 2|s̄|² / σ²        (σ² the complex noise power of V̄, data-driven)
 #
-# is a LINEAR measurement of Δφ with exactly Gaussian noise — valid at any
-# per-AP SNR, so every AP with data and a track enters, ungated: unlike a
-# per-AP extracted phase, whose information collapses nonlinearly below
-# SNR ≈ 1, the low-SNR APs here simply carry their honest (small) weight.
+# is a linear measurement of Δφ with Gaussian noise at any per-AP SNR. Every AP
+# with data and a track therefore enters ungated, carrying its honest weight;
+# a per-AP extracted phase would instead collapse nonlinearly below SNR ≈ 1.
 # `src = 0`: the source term is already divided out through `conj(s̄)`.
 function _linearized_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, tying, phase, sbar)
     rows = _ObsRow[]
@@ -797,7 +786,7 @@ function _linearized_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, t
         z = imag((r / w) * conj(s) * cis(-dphi)) / s2
         isfinite(z) || continue
         n2 = noise2[bi, p]
-        # Fall back to the WEIGHT column's noise claim when the track is too
+        # Fall back to the weight column's noise claim when the track is too
         # short to estimate its own (mirrors `_adhoc_ap_rows`'s fallback).
         wrow = isfinite(n2) && n2 > 0 ? 2 * s2 / n2 : s2 * Float64(w)
         push!(rows, _ObsRow(a, b, na, nb, dphi + z, wrow, 0))
@@ -872,7 +861,7 @@ function solve_adhoc_phasing(
     )
     feeds = [correlation_feed_pair(p) for p in pol_products]
 
-    # Solved on the (station, NODE) graph; expanded back onto the feed axis at the end.
+    # Solved on the (station, node) graph; expanded back onto the feed axis at the end.
     phase = fill(convert(eltype(wbar), NaN), nant, 2, nap)
     covered = falses(nant, 2, nap)
     # Track per-(station,node) coherent weight for smoothing / detrend.
@@ -880,26 +869,14 @@ function solve_adhoc_phasing(
 
     # Per-(baseline, product) noise of the coherent track, estimated data-driven
     # from its AP-to-AP scatter — see `_track_noise2`. The per-AP coherent SNR² is
-    # then |V̄_ap|² / noise², which is SCALE-INVARIANT in the WEIGHT column: the
-    # naive `|rbar|²/wbar` is only a true SNR when WEIGHT is calibrated inverse-
+    # then |V̄_ap|² / noise², which is scale-invariant in the weight column: the
+    # naive `|rbar|²/wbar` is only a true SNR when weight is calibrated inverse-
     # variance, and on raw correlator output (uncalibrated/uniform weights, common
     # in FITS-IDI) it is mis-scaled by an arbitrary factor, silently dropping every
     # row at any fixed `snr_floor` and killing the whole adhoc stage. For calibrated
     # weights `noise² → 1/wbar`, so this reduces to the old `|rbar|²/wbar` exactly.
     noise2 = [_track_noise2(rbar, wbar, bi, p, nap) for bi in axes(rbar, 1), p in axes(rbar, 2)]
 
-    # Effective per-scan ANCHOR station: the gauge's preferred station when it observes in this scan,
-    # else the best-covered station (largest total gated row weight). Everything
-    # gauge-related below — the per-AP pin, the warm-start seed condition, the
-    # gauge restitch, and the joint solve's re-gauge — keys on the anchor being
-    # PRESENT. Keying on the literal reference disabled all of it on scans that
-    # never see the reference (common in multi-subarray tracks: VR2505's
-    # 0607-157 scan has no GS): the warm start never armed, so the K3 per-AP 2π
-    # branch flips returned on weakly-constrained stations, and the per-AP pin
-    # (lowest covered node) could hop with coverage flicker with the restitcher
-    # never engaging. The anchor choice is inert to the applied correction (a
-    # per-AP common mode cancels on every baseline); it exists so the
-    # per-station tracks are temporally consistent — i.e. smoothable.
     # The SNR gate does not depend on the source terms, so every AP's gated rows are
     # built once and reused by every alternation pass (and by the joint smoother).
     raw_rows = [
@@ -918,7 +895,7 @@ function solve_adhoc_phasing(
         for ap in eachindex(raw_rows), row in raw_rows[ap]
             row.src == 0 || (naps_src[row.src] += 1)
         end
-        # A (baseline, product) seen at a single AP is absorbed EXACTLY by its own
+        # A (baseline, product) seen at a single AP is absorbed exactly by its own
         # source term: it constrains no node phase, and admitting it would only
         # inflate the apparent coverage. Two APs is the identifiability threshold,
         # not a tuning choice.
@@ -933,18 +910,15 @@ function solve_adhoc_phasing(
     end
     ap_rows = [_source_corrected_rows(raw_rows[ap], x, keep) for ap in eachindex(raw_rows)]
 
-    # Effective per-scan ANCHOR station: the gauge's preferred station when it observes in this scan,
-    # else the best-covered station (largest total gated row weight). Everything
-    # gauge-related below — the per-AP pin, the warm-start seed condition, the
-    # gauge restitch, and the joint solve's re-gauge — keys on the anchor being
-    # PRESENT. Keying on the literal reference disabled all of it on scans that
-    # never see the reference (common in multi-subarray tracks: VR2505's
-    # 0607-157 scan has no GS): the warm start never armed, so the K3 per-AP 2π
-    # branch flips returned on weakly-constrained stations, and the per-AP pin
-    # (lowest covered node) could hop with coverage flicker with the restitcher
-    # never engaging. The anchor choice is inert to the applied correction (a
-    # per-AP common mode cancels on every baseline); it exists so the
-    # per-station tracks are temporally consistent — i.e. smoothable.
+    # Effective per-scan anchor station: the gauge's preferred station when it
+    # observes in this scan, else the best-covered station by total gated row
+    # weight. Everything gauge-related below — the per-AP pin, the warm-start
+    # seed condition, the gauge restitch, the joint solve's re-gauge — keys on
+    # the anchor being present, so it must not key on the literal reference:
+    # a scan that never sees the reference would disable all of it, which is
+    # common in multi-subarray tracks. The anchor choice is inert to the applied
+    # correction, a per-AP common mode cancelling on every baseline; it exists so
+    # the per-station tracks are temporally consistent, and so smoothable.
     anchor = let wtot = zeros(nant)
         for ap in eachindex(ap_rows), row in ap_rows[ap]
             wtot[row.a] += row.w
@@ -959,20 +933,19 @@ function solve_adhoc_phasing(
     end
 
     # Carry solved node phases forward as a temporal warm-start for the next AP's
-    # 2π-branch selection (continuity ⇒ no per-AP branch flips on weakly-constrained
-    # stations). The seed is an ANCHOR-GAUGED snapshot: it is refreshed only from
-    # APs where the anchor has data (so every stored cell is in the anchor=0 gauge
-    # and the snapshot is mutually consistent) and applied only when the CURRENT AP
-    # also has the anchor (so the per-AP spanning-tree seed it partially overrides
-    # is anchor=0 too). Skipping the seed on anchor-dropout APs avoids mixing an
-    # anchor=0 seed with a differently-anchored tree seed, which would mis-pick the
-    # 2π branch on a seeded↔tree boundary edge — the arbitrary non-2π offset such
-    # APs carry (K3). The snapshot is rebuilt from scratch by each alternation pass,
-    # so a pass never inherits a branch chosen against a stale set of source terms.
+    # 2π-branch selection, so weakly-constrained stations do not flip branch per
+    # AP. The seed is an anchor-gauged snapshot: refreshed only from APs where
+    # the anchor has data, so every stored cell is in the anchor = 0 gauge, and
+    # applied only when the current AP also has the anchor, so the per-AP
+    # spanning-tree seed it partially overrides is anchor = 0 too. Mixing an
+    # anchor = 0 seed with a differently-anchored tree seed would mis-pick the 2π
+    # branch on a seeded↔tree boundary edge. The snapshot is rebuilt from scratch
+    # by each alternation pass, so a pass never inherits a branch chosen against
+    # a stale set of source terms.
     #
-    # Trust a seed only while the atmosphere cannot yet have drifted past ±π (beyond
-    # which the old branch is no longer a safe guide): ~π of drift takes a few
-    # coherence times. `times` is in seconds; `T_AP` is its median spacing.
+    # A seed is trusted only while the atmosphere cannot yet have drifted past
+    # ±π, beyond which the old branch is no longer a safe guide; that takes a few
+    # coherence times. `times` is in seconds and `T_AP` is its median spacing.
     dts0 = filter(>(0), diff(sort(times)))
     t_ap0 = isempty(dts0) ? 1.0 : float(median(dts0))
     max_stale = max(10, ceil(Int, 3 * _adhoc_coherence_time(smoother) / t_ap0))
@@ -1003,17 +976,17 @@ function solve_adhoc_phasing(
     apply_adhoc!(smoother, phase, track_w, times; anchor = anchor, nant = nant, ap_rows = ap_rows)
 
     # Gauss–Newton refinement in the complex domain. Everything above is the
-    # Seed: the phase-extraction solve's spanning-tree unwrap and warm starts
-    # settle the global 2π branch, which no local linearization can, and the
-    # SNR gate is confined to that seeding role. Each pass here re-derives the
+    # seed: the phase-extraction solve's spanning-tree unwrap and warm starts
+    # settle the global 2π branch, which no local linearization can, and the SNR
+    # gate is confined to that seeding role. Each pass here re-derives the
     # per-(baseline, product) complex source terms from the whole scan,
     # linearizes every AP's residual around the current tracks
-    # (`_linearized_ap_rows`), and re-solves and re-smooths on those rows —
-    # every AP entering at its exact first-order information, ungated. With
-    # the smoothing pass inside, each iteration is an extended-Kalman/RTS
-    # step and the loop is Gauss–Newton on the MAP objective of the complex
-    # data; the innovations start on the seed's branch, so the linearization
-    # stays inside ±π by construction.
+    # (`_linearized_ap_rows`), and re-solves and re-smooths on those rows, every
+    # AP entering at its exact first-order information, ungated. With the
+    # smoothing pass inside, each iteration is an extended-Kalman/RTS step and
+    # the loop is Gauss–Newton on the MAP objective of the complex data; the
+    # innovations start on the seed's branch, so the linearization stays inside
+    # ±π by construction.
     sbar_ref = nothing
     nap_ref = nothing
     for _ in 1:max(smoother.complex_iters, 0)
@@ -1040,7 +1013,7 @@ function solve_adhoc_phasing(
         end
     end
 
-    # Impose the gauge LAST. Detrending removes each track's temporal mean, which
+    # Impose the gauge last. Detrending removes each track's temporal mean, which
     # offsets every AP by the same constant, so applying the gauge after it leaves
     # the per-AP convention exact and the detrended tracks zero-mean up to one
     # global constant — and that constant is a per-AP common mode, which cancels on
@@ -1048,7 +1021,7 @@ function solve_adhoc_phasing(
     # this order is what makes the gauge the exact one.
     _apply_ap_gauge!(phase, covered, gauge, 2)
 
-    # Expand the (station, NODE) solution onto the feed axis the caller indexes:
+    # Expand the (station, node) solution onto the feed axis the caller indexes:
     # feeds sharing a node get identical tracks (so a `SharedFeeds` adhoc contributes
     # exactly zero inter-feed phase), and a feed the component does not parameterize
     # (node 0) stays NaN/uncovered.
@@ -1146,7 +1119,7 @@ function adhoc_scan!(
     # Per-band accumulation (the window's per-spw channel blocks stand in for the
     # band leaves) fanned out over the inner `executor` — this loop (the residual
     # sum over every visibility) dominates the adhoc pass on many-band data. Each
-    # BLOCK owns the trailing slice `li` of the partial buffers and the slices
+    # block owns the trailing slice `li` of the partial buffers and the slices
     # fold in block order, so the float association is fixed by the data layout
     # alone — the result is bit-deterministic at any chunking.
     blocks = _spw_blocks(geom, ci)
@@ -1185,32 +1158,17 @@ function adhoc_scan!(
     return θ
 end
 
-# Restitch per-AP gauges so the reference frame is consistent across APs even
-# when the anchor drops out (K3). When the anchor is solved in an AP, that AP's
-# per-AP solve already pins it (frame = anchor phase 0) and we trust it,
-# refreshing the running anchor from this AP's solved cells (so real drift
-# propagates). When the anchor is ABSENT, the AP's solve anchored on a different
-# node, so it carries an arbitrary global offset δ; we estimate δ as the
-# weighted circular mean over the cells common to this AP and the anchor, and
-# subtract it from every solved cell of the AP. This is a no-op when the anchor is
-# present in every AP (so it never perturbs the well-anchored case), and it only
-# removes a single global per-AP constant — per-(station, feed) means and slopes
-# are still handled later by `_detrend_track!`. Leading APs with no trusted
-# anchor yet are left untouched (best effort). A multi-component AP keeps one
-# global δ dominated by the largest overlap; per-island offsets remain a
-# fundamental gauge freedom (one additive freedom per connected component).
-# Put each AP on the gauge's own convention, over a station set that does not move
-# between APs.
+# Put each AP on the gauge's own convention, over a station set that does not
+# move between APs. The per-AP common mode is unobservable — it cancels on every
+# baseline — so this changes how the tracks read, never the applied correction.
+# That is why the set must be fixed: a sum taken over whatever stations happen
+# to be covered shifts frame whenever coverage flickers, putting steps into
+# every track for a quantity that carries no information. Summing over the
+# stations covered in every AP keeps one frame for the whole scan.
 #
-# The per-AP common mode is unobservable — it cancels on every baseline — so this
-# changes how the tracks read, never the applied correction. That is exactly why
-# the set must be fixed: a sum taken over whatever stations happen to be covered
-# shifts frame whenever coverage flickers, putting steps into every track for a
-# quantity that carries no information. Summing over the stations covered in every
-# AP keeps one frame for the whole scan.
-#
-# A pinned gauge needs nothing here: the per-AP solves already pin the anchor and
-# `_restitch_refant_gauge!` has carried that frame across the APs where it drops out.
+# A pinned gauge needs nothing here: the per-AP solves already pin the anchor,
+# and `_restitch_refant_gauge!` carries that frame across the APs where it
+# drops out.
 _apply_ap_gauge!(phase, covered, ::AbstractGauge, nnode::Integer) = phase
 
 function _apply_ap_gauge!(phase, covered, gauge::ZeroSumPhase, nnode::Integer)
@@ -1218,14 +1176,14 @@ function _apply_ap_gauge!(phase, covered, gauge::ZeroSumPhase, nnode::Integer)
     # One constant per AP, across both feed nodes. Cross-hand rows join the two
     # feeds into a single connected component carrying a single additive freedom,
     # so a separate constant per feed would invent a second one and shift every
-    # cross-hand difference `φ_{a,1} − φ_{b,2}` by the gap between them — breaking
+    # cross-hand difference `φ_{a,1} − φ_{b,2}` by the gap between them, breaking
     # the reconstruction the gauge must leave untouched. Subtracting the same
     # constant from every cell cancels in every baseline difference, parallel and
     # cross alike.
     #
     # The summed cells are those covered in every AP: a sum over whatever happens
-    # to be covered moves frame with coverage, putting steps into every track for a
-    # quantity that carries no information.
+    # to be covered moves frame with coverage, putting steps into every track for
+    # a quantity that carries no information.
     #
     # `weights` describes the station-solve constraint row, whose nodes are not
     # these cells, so the per-AP frame is unweighted.
@@ -1253,6 +1211,16 @@ function _apply_ap_gauge!(phase, covered, gauge::ZeroSumPhase, nnode::Integer)
     return phase
 end
 
+# Re-reference anchor-absent APs to the trusted frame. Where the anchor is
+# solved, that AP's own solve already pins it and the running anchor is
+# refreshed from it, so real drift propagates. Where it is absent, the AP
+# carries an arbitrary global offset δ, estimated as the weighted circular mean
+# over the cells common to this AP and the anchor and subtracted from every
+# solved cell. This is a no-op when the anchor is present in every AP, and it
+# removes only a single global per-AP constant: per-(station, feed) means and
+# slopes are left to `_detrend_track!`. Leading APs with no trusted anchor yet
+# are left untouched, and a multi-component AP keeps one global δ dominated by
+# the largest overlap, per-island offsets being a gauge freedom.
 function _restitch_refant_gauge!(phase, covered, track_w, ref_station::Integer)
     nant, _, nap = size(phase)
     anchor = fill(NaN, nant, 2)
@@ -1323,10 +1291,10 @@ function _detrend_track!(track::AbstractVector, w::AbstractVector)
     idx = [i for i in eachindex(track) if isfinite(track[i])]
     length(idx) >= 1 || return track
     ws = [(isfinite(w[i]) && w[i] > 0) ? float(w[i]) : 1.0 for i in idx]
-    # Remove the weighted MEAN only — not the slope. The constant-phase degeneracy
+    # Remove the weighted mean only — not the slope. The constant-phase degeneracy
     # between the per-AP adhoc term and the Stage-B `ConstantTerm` is real and worth
     # breaking (zero-mean adhoc ⇒ the constant is owned by Stage-B). The *slope*,
-    # however, is the residual fringe RATE left when Stage-B's per-scan `Rate` is
+    # however, is the residual fringe rate left when Stage-B's per-scan `Rate` is
     # imperfect (e.g. within-scan atmospheric drift); removing it would force that
     # error to survive uncorrected. Letting adhoc keep the slope lets it flatten
     # residual rates — the whole point of a per-AP phase track. (`times` is unused

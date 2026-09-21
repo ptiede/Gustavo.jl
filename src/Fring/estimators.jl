@@ -1,16 +1,8 @@
 # ── Fringe estimator seam ────────────────────────────────────────────────────
 #
-# The strategy that turns scan data into station fringe parameters (delays,
-# rates, phases) is pluggable. Today's implementation — a per-baseline
-# delay/rate matched-filter search followed by a closure-screened per-station
-# WLS ("stationization") — is one estimator; a Schwab–Cotton-style global least
-# squares fit of station parameters directly to the visibilities is another,
-# and needs no stationization at all. The search/closure machinery therefore
-# belongs to the ESTIMATOR that uses it, not to the `FringeFit` step itself.
-#
-# This file declares the seam: the supertype and the two hooks a `FringeFit`
-# step calls. `MatchedFilter`'s methods are defined with the step itself, which
-# is where the pipeline's solve context is in scope.
+# The supertype and the two hooks a `FringeFit` step calls to turn scan data
+# into station fringe parameters. `MatchedFilter`'s methods are defined with the
+# step itself, which is where the pipeline's solve context is in scope.
 
 """
     AbstractFringeEstimator

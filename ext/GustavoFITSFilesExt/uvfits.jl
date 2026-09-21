@@ -722,13 +722,15 @@ function _assign_records_to_nx_rows(
     return _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
 end
 
+_is_lazy_random(data) = data isa FITSFiles.LazyStructuredData && data.hdu_type === FITSFiles.Random
+
 function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
     fid = FITSFiles.fits(path)
     primary_hdu = fid[1]
     # Bypass FITSFiles' per-record Vector{Float32} allocation when the
-    # primary HDU is a random-group LazyArray.
+    # primary HDU is lazy random-group data.
     primary_lazy = getfield(primary_hdu, :data)
-    dt = primary_lazy isa FITSFiles.LazyArray ?
+    dt = _is_lazy_random(primary_lazy) ?
         _fast_random_read(primary_lazy) : primary_hdu.data
     # Collect every AN HDU (filtered by EXTNAME=AIPS AN) — multi-AN-extver
     # files carry one AN table per subarray.
@@ -973,14 +975,14 @@ _basename_of_path(path) = isempty(path) ? "uvfits" : Base.basename(String(path))
 # is a single `read!` into a `Vector{T}` of length
 # `N * (P + prod(shape))`, plus an in-place `bswap` pass.
 # The two-method split is a function barrier: the body runs with `T` concrete.
-function _fast_random_read(lazy::FITSFiles.LazyArray)
+function _fast_random_read(lazy::FITSFiles.LazyStructuredData)
     T = lazy.format.type
     T === Float32 || T === Float64 ||
         error("_fast_random_read: only Float32/Float64 random groups supported (got $T)")
     return _fast_random_read(T, lazy)
 end
 
-function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyArray) where {T <: AbstractFloat}
+function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyStructuredData) where {T <: AbstractFloat}
     fmt = lazy.format
     fields = lazy.fields::AbstractVector{<:FITSFiles.AbstractField}
     P = fmt.param::Int
@@ -1039,11 +1041,11 @@ function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyArray) where {T <: Abs
             end
             if !ismissing(fld.zero) && !ismissing(fld.scale) &&
                     (fld.zero != 0 || fld.scale != 1)
-                @inbounds @simd for j in 1:N
-                    v[j] = fld.zero + fld.scale * v[j]
-                end
+                # Scale in the promoted type, as FITSFiles does.
+                fld.zero .+ fld.scale .* v
+            else
+                v
             end
-            v
         else
             m = Matrix{T}(undef, N, length(ndx))
             @inbounds for (k, fi) in enumerate(ndx)

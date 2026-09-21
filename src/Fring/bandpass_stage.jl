@@ -1,34 +1,29 @@
-# ── Bandpass stage: per-channel station phase/log-amp over scan windows ───────
+# ── Bandpass stage: per-channel station phase/log-amp over scan windows ──────
 #
-# The carved-out bandpass stage of the composable pipeline: the per-scan
-# residual accumulation (`accumulate_bandpass!`) and the two per-channel
-# closure seed solves — descended from the monolithic solver (deleted at M5),
-# retargeted from its concat cube to a scan `DimStack` where they touch data. The
-# `Bandpass` step visits every scan (refine → accumulate → return the scan's
-# contribution) and its `finish_pass!` folds the contributions in group-INDEX
-# order — deterministic at any concurrency (unlike the monolith's
-# ntasks-dependent chunk fold; the two agree to float-rounding, gated at
-# rtol ≤ 1e-12). What is fit is the step's model tree (see
-# [`default_bandpass_terms`](@ref)); how it is solved is
-# pluggable through `AbstractBandpassSmoother`, in two tiers. `PerTrackSmoother`
-# sums every scan's residual into one accumulator, runs the per-channel closure
-# solves (which assume a baseline's source term cancels) and fits each resulting
-# (station, feed, spw) track under its shape spec. `JointSmoother` runs
-# [`solve_joint_bandpass!`](@ref) instead, fitting the actual complex
-# visibilities against an explicit per-scan source term — the right choice when
-# that assumption fails — with the specs entering as priors inside the gain
-# update. Both carry one [`AbstractShapeSpec`](@ref Gustavo.Fring.AbstractShapeSpec) per observable.
+# The `Bandpass` step visits every scan (refine → accumulate → return the
+# scan's contribution) and its `finish_pass!` folds the contributions in
+# group-index order, which keeps the result deterministic at any concurrency.
+# What is fit is the step's model tree (see [`default_bandpass_terms`](@ref));
+# how it is solved is pluggable through `AbstractBandpassSmoother`, in two
+# tiers. `PerTrackSmoother` sums every scan's residual into one accumulator,
+# runs the per-channel closure solves — which assume a baseline's source term
+# cancels — and fits each resulting (station, feed, spw) track under its shape
+# spec. `JointSmoother` runs [`solve_joint_bandpass!`](@ref) instead, fitting
+# the complex visibilities against an explicit per-scan source term, for when
+# that assumption fails, with the specs entering as priors inside the gain
+# update. Both carry one
+# [`AbstractShapeSpec`](@ref Gustavo.Fring.AbstractShapeSpec) per observable.
 #
 # The graph/solve helpers (`_ObsRow`, `_solve_observable`, `_track_noise2`,
 # `_node`) live in stationize.jl/adhoc.jl; the shape specs live in shapes.jl.
 
 # ── Amplitude closure incidence ───────────────────────────────────────────────
 #
-# The per-(station, feed) log-amp bandpass is solved from the SUM closure
+# The per-(station, feed) log-amp bandpass is solved from the sum closure
 # `log|V̄_ab(ν)| = la_a(ν) + lb_b(ν)` over each spw (a +1/+1, signless-Laplacian
-# incidence — FULL RANK, so no reference state).
+# incidence — full rank, so no reference state).
 
-# Signless-Laplacian (SUM) incidence for one frequency segment's gated closure
+# Signless-Laplacian (sum) incidence for one frequency segment's gated closure
 # observations, restricted to the rows `idx`.
 function _signless_incidence(na, nb, idx, nnodes, val, w)
     A = zeros(length(idx), nnodes)
@@ -214,7 +209,7 @@ solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
 
 # Fresh per-(baseline row, product, global channel) bandpass accumulators. They
 # carry (Baseline, Pol, Frequency) dims so the accumulate/solve kernels below
-# address axes by NAME (the house style of the Bandpass module) instead of by
+# address axes by name (the house style of the Bandpass module) instead of by
 # position; indexing stays plain-positional and costs nothing.
 function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
     d = (Baseline(1:nbl), Pol(1:npol), Frequency(1:nchan))
@@ -349,11 +344,11 @@ end
 
 # One frequency segment's coherent residual `(r, w, w2)`: the sums of the
 # accumulators over the channels it holds, plus `w2 = Σ wᶜ²`, which converts a
-# Per-channel noise variance into the variance of this segment's normalized
-# value `r/w` — `n2 · w2 / w²`, i.e. `n2/k` for `k` equally-weighted channels.
-# Scaling the noise the other way (or not at all) would make a wide block look
-# WORSE than its channels and the SNR gate would reject the very observations
-# grouping exists to strengthen.
+# per-channel noise variance into the variance of this segment's normalized
+# value `r/w` — `n2 · w2 / w²`, or `n2/k` for `k` equally-weighted channels.
+# Scaling the noise any other way would make a wide block look worse than its
+# channels, and the SNR gate would reject the very observations grouping exists
+# to strengthen.
 #
 # A one-channel segment leaves all three quantities at that channel's own, so
 # `ChannelBlocks(1)` reproduces a free per-channel bandpass exactly; a wider
@@ -408,11 +403,11 @@ function _segment_bands(plan, channel_freqs, spw_of_chan)
 end
 
 # Narrow-spike guard: additive contamination (pcal tones, RFI) violates the
-# multiplicative gain model — a contaminated channel shows EXCESS amplitude,
+# multiplicative gain model — a contaminated channel shows excess amplitude,
 # the fit hands it |g| > 1, and `apply_calibration` would then UP-weight it
 # (w → w·|g|²), amplifying exactly the channels that should be distrusted.
 # Genuine passband structure is smooth or negative (roll-off), so narrow
-# POSITIVE log-amp outliers vs the per-(station, feed, spw) robust scale are
+# positive log-amp outliers vs the per-(station, feed, spw) robust scale are
 # excised (left unapplied, |g| = 1) instead of trusted. `spike_sigma = 0`
 # disables the guard.
 function _spike_guard!(la, seg_spw, spike_sigma::Real)
@@ -452,7 +447,7 @@ function _write_amp_bandpass!(θ, plan, la, max_logamp::Real, ts::Integer = 1)
             node = _feed_node(plan.tying, f)
             node == 0 && continue
             val = v - m
-            # Leave implausibly-large corrections UNAPPLIED (|g| = 1). A shape that
+            # Leave implausibly-large corrections unapplied (|g| = 1). A shape that
             # interpolates gaps self-regularizes, but an unconstrained fit can hand a
             # low-SNR band-edge segment that barely clears the gate a huge log-amp;
             # applying it would up-weight that segment's noise, since
@@ -465,7 +460,7 @@ function _write_amp_bandpass!(θ, plan, la, max_logamp::Real, ts::Integer = 1)
     return θ
 end
 
-# Free per-segment closure seed for the log-amp bandpass: the SUM closure
+# Free per-segment closure seed for the log-amp bandpass: the sum closure
 # `log|V̄_ab| = la_a + la_b` solved independently in each frequency segment on the
 # signless-Laplacian incidence (full rank, so no reference state), plus each
 # (station, feed, segment)'s summed gate weight as its precision. Segments with no
@@ -582,17 +577,17 @@ function _band_track_status(fitted)
     return (maximum(obs) - minimum(obs)) < _BP_FLAT_SPAN ? _BP_TRACK_FLAT : _BP_TRACK_SOLVED
 end
 
-# Fit one segment-indexed track under `spec`, split at the spw boundaries — a
+# Fit one segment-indexed track under `spec`, split at the spw boundaries: a
 # shape describes the response within a band, so segments never pool across spws
-# and each band keeps its own free level. `fit_track_group` decides what, if
-# anything, the bands share: only a spec that ESTIMATES its shape parameters pools
-# them, and it pools the parameters alone, never the levels.
+# and each band keeps its own free level. `fit_track_group` decides what the
+# bands share; only a spec that estimates its shape parameters pools them, and it
+# pools the parameters alone, never the levels.
 #
 # `unwrap` re-references a phase track to a continuous branch along frequency
-# first: the specs fit a real track, and the ±π branch cuts of a raw phase solve
-# would otherwise read as genuine structure. A band whose branch the data does not
-# determine (`phase_unwrap_ambiguity` past `_BP_MAX_UNWRAP_AMBIGUITY`) is dropped
-# instead — see that constant.
+# first, because the specs fit a real track and the ±π branch cuts of a raw phase
+# solve would otherwise read as genuine structure. A band whose branch the data
+# does not determine (`phase_unwrap_ambiguity` past
+# `_BP_MAX_UNWRAP_AMBIGUITY`) is dropped instead; see that constant.
 #
 # `status` receives one `_BP_TRACK_*` code per band, in ascending band order.
 function _fit_track_bands(
@@ -680,7 +675,7 @@ function bandpass_track_report(phase_status, amp_status, band_ids)
         counts[Int(c) + 1] += 1
     end
     # Concrete arrays throughout — the record is serialized with the solution, and
-    # an observable that was not fit is an EMPTY status rather than a missing field.
+    # an observable that was not fit is an empty status rather than a missing field.
     empty_status = Array{Int8, 4}(undef, 0, 0, 0, 0)
     return (;
         phase_status = something(phase_status, empty_status),
@@ -695,7 +690,7 @@ end
 # Warn when a large share of the tracks measured nothing. Silence here would leave
 # a bandpass that is mostly placeholder looking exactly like one that is mostly
 # measured — the caller cannot tell from θ, which is why this is a warning and not
-# only a record. The fraction is over the tracks that EXIST: a cell a station's
+# only a record. The fraction is over the tracks that exist: a cell a station's
 # own segmentation does not have (`n_na`) is not a track that failed to measure
 # anything, and counting it would make the warning fire on raggedness alone.
 function _warn_degenerate_bandpass(report)
@@ -804,11 +799,11 @@ end
 # per-station time-segment table.
 #
 # Two scans share a parameter only through a station that is in the same one of
-# ITS OWN time segments in both, so the coupling graph has one node per
-# (station, segment) and one edge per pair of stations a scan holds together; the
-# ALS then runs once per connected component. With one segmentation for the whole
+# its own time segments in both, so the coupling graph has one node per
+# (station, segment) and one edge per pair of stations a scan holds together, and
+# the ALS runs once per connected component. With one segmentation for the whole
 # array the components are exactly the array-wide time segments. With one station
-# broken mid-track and the rest constant the constant stations bridge the break
+# broken mid-track and the rest constant, the constant stations bridge the break
 # and the whole track is one component.
 function _joint_scan_groups(tseg)
     # `connected_components` numbers its nodes densely from 1, which is what
@@ -856,7 +851,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
     amp_status = nothing
     band_ids = Int[]
     # The two observables are solved independently here, so each partitions the
-    # scans by its OWN time segmentation — a phase bandpass that breaks mid-track
+    # scans by its own time segmentation — a phase bandpass that breaks mid-track
     # can sit beside an amplitude one held over the whole of it.
     bp_blocks = bandpass_blocks(setup, θ, :phase)
     amp_blocks = bandpass_blocks(setup, θ, :logamp)
@@ -902,44 +897,43 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
     return report
 end
 
-# ── Joint complex bandpass + per-scan source coherence (ALS) ──────────────────
+# ── Joint complex bandpass + per-scan source coherence (ALS) ─────────────────
 #
-# The per-channel closure solves assume a baseline's source term
-# cancels out of the per-channel phase-difference/log-amp-sum closure — true
-# only for an unresolved, unpolarized source. solve_joint_bandpass! instead
-# fits the actual complex visibilities against
-#   V_ab(ν) | scan  ≈  g_a(ν) · S_{scan,ab,pol} · conj(g_b(ν)),
-# one frequency-flat complex `S` per (scan, baseline, polarization product),
-# so a resolved/polarized source's per-baseline structure is absorbed into `S`
-# instead of biasing the station bandpass. `g` is bilinear with `S`, so this
-# alternates a closed-form per-(scan, baseline, pol) solve of `S` (given the
-# current `g`, [`_update_source_coherence!`](@ref)) with a Gauss-Seidel
-# per-(station, feed) solve of `g` (given `S` and every other station's
-# current gain, [`_update_station_gains!`](@ref)) at `phase_plan`/`amp_plan`'s
-# shared frequency-segment resolution, to convergence.
+# The per-channel closure solves assume a baseline's source term cancels out of
+# the per-channel phase-difference/log-amp-sum closure, which holds only for an
+# unresolved, unpolarized source. `solve_joint_bandpass!` instead fits the
+# complex visibilities against
 #
-# Every array below carries (Scan, Baseline, Pol, Frequency) or (Ant, Feed, Ti,
-# Frequency) dims — the house style of this module — so the loops read by
-# axis NAME; `Frequency` here is the frequency-segment index and `Ti` the
-# time-segment one (as elsewhere once a solve moves past the raw per-channel
-# accumulator). Because each station carries its own time segmentation, `Ti`
-# spans the union of them and a station reaches only its own slots. Indexing
-# itself stays plain-positional.
+#     V_ab(ν) | scan  ≈  g_a(ν) · S_{scan,ab,pol} · conj(g_b(ν)),
+#
+# one frequency-flat complex `S` per (scan, baseline, polarization product), so
+# a resolved or polarized source's per-baseline structure is absorbed into `S`
+# rather than biasing the station bandpass. `g` is bilinear with `S`, so this
+# alternates a closed-form per-(scan, baseline, pol) solve of `S` given the
+# current `g` ([`_update_source_coherence!`](@ref)) with a Gauss-Seidel
+# per-(station, feed) solve of `g` given `S` and every other station's current
+# gain ([`_update_station_gains!`](@ref)), at `phase_plan`/`amp_plan`'s shared
+# frequency-segment resolution, to convergence.
+#
+# Every array below carries (Scan, Baseline, Pol, Frequency) or
+# (Ant, Feed, Ti, Frequency) dims, so the loops read by axis name. `Frequency`
+# is the frequency-segment index and `Ti` the time-segment one. Each station
+# carries its own time segmentation, so `Ti` spans the union of them and a
+# station reaches only its own slots. Indexing itself stays plain-positional.
 
 # One scan's per-(baseline, pol, segment) coherent residual, written directly
-# into `rview`/`wview` (a (Baseline, Pol, Frequency) slice of the multi-scan
-# accumulator — no intermediate allocation).
+# into `rview`/`wview`, a (Baseline, Pol, Frequency) slice of the multi-scan
+# accumulator, with no intermediate allocation.
 #
-# Not SNR-gated, deliberately. The joint solve consumes these as complex
-# residuals under inverse-variance weights, and that accumulation is unbiased
-# at any SNR — a weak cell contributes its information at its honest weight
-# and costs variance, never validity. An SNR gate here (the closure tier's,
-# which is justified THERE because that tier extracts a per-segment phase, a
-# meaningless quantity below the noise) would preferentially delete the
-# cross-hand cells — the only rows that tie the feed-2 gain block to feed-1
-# and so the only measurement of the relative (R–L) bandpass — leaving that
-# block at its initialization. Outlier handling is a pipeline concern (a
-# dedicated flagging step upstream of the solve), not a cell gate's.
+# These must not be SNR-gated. The joint solve consumes them as complex
+# residuals under inverse-variance weights, and that accumulation is unbiased at
+# any SNR: a weak cell contributes its information at its honest weight and
+# costs variance, never validity. The closure tier's gate is justified there
+# because that tier extracts a per-segment phase, which is meaningless below the
+# noise. Applied here it would preferentially delete the cross-hand cells, the
+# only rows tying the feed-2 gain block to feed-1 and so the only measurement of
+# the relative R–L bandpass, leaving that block at its initialization. Outliers
+# belong to a flagging step upstream of the solve, not to a cell gate.
 function _reduce_scan_segments!(rview, wview, sc, segs)
     for p in axes(rview, Pol), bi in axes(rview, Baseline)
         for (fs, chans) in enumerate(segs)
@@ -989,14 +983,14 @@ end
 # that station's own time segment, that station's own frequency segment), one
 # edge per (scan, baseline, pol, refinement cell) correlation, joining its two
 # ends in the segments they are in for that scan and that cell. Node degree
-# stands in for the row weight the gauge scores elsewhere — the graph is built
-# from the correlations that EXIST, before any per-channel gating, so a node's
+# stands in for the row weight the gauge scores elsewhere; the graph is built
+# from the correlations that exist, before any per-channel gating, so a node's
 # degree is the observation count available to anchor it.
 #
-# The node set IS the gauge condition. An edge names the two gain slots one
+# The node set is the gauge condition. An edge names the two gain slots one
 # correlation reads, and a shared phase cancels out of `g_a·S·conj(g_b)` only
 # when both ends of every internal edge carry it, so the unobservable phases are
-# one constant per connected component — no coarser node set states that, and a
+# one constant per connected component. No coarser node set states that, and a
 # station whose frequency segments are finer than the modes the array leaves free
 # would be over-constrained by any pin that fixed its whole track.
 #
@@ -1085,7 +1079,7 @@ end
 # unknown `S`.
 #
 # `rseg`/`wseg` are reduced onto the refinement grid the two stations have in
-# common, while `g` is held in each station's OWN frequency segments, so each end
+# common, while `g` is held in each station's own frequency segments, so each end
 # is read through its own `fseg` row.
 function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg)
     T = real(eltype(S))
@@ -1117,23 +1111,25 @@ end
 
 # One Gauss-Seidel sweep over every (station, feed, time segment): closed-form
 # per-frequency-segment solve of its complex gain given the current source
-# coherence `S` and every other station's current gain (immediately visible to later antennas
-# in the same sweep — Gauss-Seidel, not Jacobi), with each observable's shape
-# spec acting as a PRIOR on the resulting track rather than a post-hoc smooth.
+# coherence `S` and every other station's current gain, which is immediately
+# visible to later antennas in the same sweep — Gauss-Seidel, not Jacobi — with
+# each observable's shape spec acting as a prior on the resulting track rather
+# than a post-hoc smooth.
 #
-# Solving each segment independently would be the `FreeShape`/`FreeShape` case;
-# the prior enters exactly where that independence is dropped. Around the
-# unconstrained per-segment estimate `ĝ` the residual linearizes as
+# Solving each segment independently is the `FreeShape`/`FreeShape` case; the
+# prior enters where that independence is dropped. Around the unconstrained
+# per-segment estimate `ĝ` the residual linearizes as
 # `Σ denom·|ĝ|²·(δlogamp² + δphase²)`, so `denom·|ĝ|²` is the Fisher weight both
-# real tracks are fit under, and the fit is a penalized WLS against the spec.
-# Iterated to convergence with the relinearization this is MAP estimation under
+# real tracks are fit under and the fit is a penalized WLS against the spec.
+# Iterated to convergence with the relinearization, this is MAP estimation under
 # the two priors.
 #
-# `φ` carries each (station, feed)'s UNWRAPPED phase track across sweeps: it is
+# `φ` carries each (station, feed)'s unwrapped phase track across sweeps. It is
 # unwrapped once, when `seed` (the first sweep) initializes it, and thereafter
-# advanced by wrapped increments about its own current value, so no global unwrap
-# is needed inside the loop and the 2π branch cannot flip between iterations.
-# Returns the largest relative gain change, for the caller's convergence check.
+# advanced by wrapped increments about its own current value, so no global
+# unwrap is needed inside the loop and the 2π branch cannot flip between
+# iterations. Returns the largest relative gain change, for the caller's
+# convergence check.
 function _update_station_gains!(
         g, φ, touched, S, rseg, wseg, touching, bl_pairs, feeds, pinned, tseg, fseg, present,
         phase_spec, amp_spec, bands, coords; seed::Bool,
@@ -1165,7 +1161,7 @@ function _update_station_gains!(
         fill!(num, zero(C))
         fill!(den, zero(T))
         # The data live on the refinement grid every station shares; this station's
-        # gain is constant over its OWN segment, so a segment's estimate pools the
+        # gain is constant over its own segment, so a segment's estimate pools the
         # numerator and denominator of every cell inside it.
         for cell in axes(rseg, Frequency)
             sa = fseg[ant, cell]
@@ -1173,7 +1169,7 @@ function _update_station_gains!(
                 a, b = bl_pairs[bi]
                 fa, fb = feeds[p]
                 for si in axes(rseg, Scan)
-                    # Only the scans this node's OWN segment covers constrain it.
+                    # Only the scans this node's own segment covers constrain it.
                     tseg[ant, si] == ts || continue
                     w = wseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
                     w > 0 || continue
@@ -1211,7 +1207,7 @@ function _update_station_gains!(
                 φ̃[fs] = T(NaN)
             end
         end
-        # The status of the LAST sweep is the status of the solve: each sweep
+        # The status of the last sweep is the status of the solve: each sweep
         # overwrites the previous one's codes for this node.
         ast = amp_status === nothing ? nothing : view(amp_status, ant, feed, :, ts)
         pst = phase_status === nothing ? nothing : view(phase_status, ant, feed, :, ts)
@@ -1250,10 +1246,10 @@ end
 # Gauge-fix each (station, feed, time segment) track — zero band-mean
 # log-amplitude, circular-mean reference phase, matching the closure tier's
 # convention — and write it into the station block that carries it. Both gauges
-# are over the FREQUENCY track of one time segment, so each of a station's
-# segments is normalized on its own. A (station, feed, segment) `touched` nowhere
-# (no data ever reached it) is left unwritten (still whatever θ already held,
-# i.e. unit gain), as is a station no block covers.
+# are over the frequency track of one time segment, so each of a station's
+# segments is normalized on its own. A (station, feed, segment) that `touched`
+# nowhere is left unwritten, holding whatever θ already had, which is unit gain;
+# so is a station no block covers.
 #
 # A block's `:Ant` axis spans its own stations, so the leaf is indexed by the
 # station's position within `block.stations`, and `ts` is already in that block's
@@ -1499,14 +1495,14 @@ function solve_joint_bandpass!(
 
     feeds = [correlation_feed_pair(p) for p in pol_products]
     # The data are reduced onto the refinement of every block's frequency
-    # segmentation, and each station's gain is held in its OWN segments — one
+    # segmentation, and each station's gain is held in its own segments — one
     # gain over however many refinement cells that segment spans.
     fseg, segs = _station_freq_segments(phase_blocks, nant)
     block_of = zeros(Int, nant)
     for (bi, b) in pairs(phase_blocks), a in b.stations
         block_of[a] = bi
     end
-    # Both observables carry ONE complex gain per (station, feed, segment), so a
+    # Both observables carry one complex gain per (station, feed, segment), so a
     # station's two components must resolve the same frequency segmentation
     # (`validate_model(::JointSmoother, model)` holds each station's tree to it;
     # the throw guards direct callers).
@@ -1563,7 +1559,7 @@ function solve_joint_bandpass!(
     end
 
     C = eltype(rseg)
-    # The gain arrays are indexed by each station's OWN frequency segment, which
+    # The gain arrays are indexed by each station's own frequency segment, which
     # is θ's own axis; a station with fewer segments than the widest one leaves
     # the tail slots untouched (and at unit gain).
     gd = (Ant(1:nant), Feed(1:2), Ti(1:ntseg), Frequency(1:nfsmax))
@@ -1603,9 +1599,8 @@ end
 # bandpass shape (a source's structure phase is flat in frequency per baseline,
 # so it biases every channel identically and cancels in the shape; per-scan
 # ionosphere differences land in the frozen curve's mean, which each scan's
-# dTEC is measured relative to). Applied to any selection, matching the frozen
-# monolith's `_bandpass_coverage_topup`; a selection that already covers every
-# station (e.g. `AllScans`) is returned unchanged. Requires the per-scan
+# dTEC is measured relative to). Applied to any selection; one that already
+# covers every station, such as `AllScans`, is returned unchanged. Requires the per-scan
 # `stations` record field `select_groups` provides.
 struct CoverageTopup{S <: AbstractScanSelection} <: AbstractScanSelection
     inner::S

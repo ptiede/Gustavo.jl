@@ -1,17 +1,16 @@
-# ── Ornstein–Uhlenbeck (Matérn-1/2) state-space phase smoother ────────────────
+# ── Ornstein–Uhlenbeck (Matérn-1/2) state-space phase smoother ───────────────
 #
-# A physically-motivated alternative to the Savitzky–Golay / first-difference
-# adhoc smoothers: model each station's residual atmospheric phase track as a
-# Gaussian process with a Matérn-1/2 kernel K(Δt) = σ²·exp(-|Δt|/τ) (τ = coherence
-# time). Matérn-1/2 is an Ornstein–Uhlenbeck process — a first-order (AR(1))
-# linear-Gaussian state-space model — so the GP posterior mean is computed exactly
-# and in O(n) by a scalar Kalman filter + RTS smoother, with no dense covariance
-# and no SparseArrays (Reactant-safe). Unlike the first-difference (random-walk)
-# penalty, OU is stationary and mean-reverting with a physical timescale, and its
-# Kalman marginal likelihood lets us fit (τ, σ²) per station from the data.
+# Models a station's residual atmospheric phase track as a Gaussian process
+# with a Matérn-1/2 kernel K(Δt) = σ²·exp(-|Δt|/τ), τ the coherence time.
+# Matérn-1/2 is an Ornstein–Uhlenbeck process, a first-order linear-Gaussian
+# state-space model, so the GP posterior mean is exact in O(n) from a scalar
+# Kalman filter plus RTS smoother — no dense covariance and no SparseArrays.
+# Unlike the first-difference penalty, OU is stationary and mean-reverting with
+# a physical timescale, and its Kalman marginal likelihood fits (τ, σ²) per
+# station from the data.
 #
-# Reference: Blackburn/Bouman et al., AJ (doi:10.3847/1538-3881/ae160f); the OU
-# state-space form of a Matérn-1/2 GP is standard (Särkkä & Solin, Applied SDEs).
+# Blackburn/Bouman et al., AJ (doi:10.3847/1538-3881/ae160f); for the OU
+# state-space form of a Matérn-1/2 GP see Särkkä & Solin, Applied SDEs.
 
 # Exact discrete OU transition over a time gap Δt for K(Δt)=σ²·exp(-|Δt|/τ): the
 # state contracts by a=exp(-|Δt|/τ) toward the (zero) mean, with process variance
@@ -340,7 +339,7 @@ end
 # tightest `τ_lo` and the widest `τ_hi` any member would impose alone.
 #
 # Each member's bounds come from its own coordinates, never from the concatenation:
-# the scale describes structure inside one track, so the gaps BETWEEN tracks — the
+# the scale describes structure inside one track, so the gaps between tracks — the
 # jump from one spectral window to the next — carry no shape information and must
 # not be mistaken for sample spacing or for span.
 function _group_ou_tau_bounds(xs)
@@ -373,18 +372,17 @@ function _track_ou_hypers(
     return m, yc, τ, σ2
 end
 
-# ── Multivariate OU state-space (joint station-phase solve) ───────────────────
+# ── Multivariate OU state-space (joint station-phase solve) ─────────────────
 #
-# The joint (paper-faithful) solve: instead of solving each AP's station phases
-# independently and then smoothing each station track, one MULTIVARIATE OU Kalman
-# filter over the whole station-phase vector observes the baseline phase
-# DIFFERENCES directly (`ϕ_ij = θ_i − θ_j`) with the per-station OU temporal prior,
-# closing and denoising in a single recursive estimator (better at low SNR, where
-# a single AP is poorly conditioned and temporal structure resolves it). Each state
+# One multivariate OU Kalman filter over the whole station-phase vector observes
+# the baseline phase differences `ϕ_ij = θ_i − θ_j` directly under the
+# per-station OU temporal prior, closing and denoising in a single recursive
+# estimator, rather than solving each AP's station phases independently and
+# smoothing each track afterwards. This conditions better at low SNR, where a
+# single AP is poorly determined and temporal structure resolves it. Each state
 # dimension has its own OU `(τ_i, σ_i²)`; the transition is diagonal, so `A P Aᵀ`
-# is just `(a_i a_j)·P_ij`. A dimension with `τ_i ≤ 0` is treated as independent
-# per step (`a = 0`) with a diffuse prior — a state with no temporal correlation
-# to carry.
+# is `(a_i a_j)·P_ij`. A dimension with `τ_i ≤ 0` is treated as independent per
+# step (`a = 0`) under a diffuse prior, having no temporal correlation to carry.
 
 # Per-dimension exact OU transition, guarding the diffuse (`τ ≤ 0`) dimension.
 @inline function _ou_ab(τ::Real, σ2::Real, Δt::Real)
@@ -482,7 +480,7 @@ function kalman_ou_mv_filter(rows, ys, rs, times; τ::AbstractVector, σ2::Abstr
                     "observation row references states $ia/$ib outside the state 1:$n",
                 ),
             )
-            # h has nonzeros only at ia and ib, so P·h is a difference of two COLUMNS
+            # h has nonzeros only at ia and ib, so P·h is a difference of two columns
             # of P and hᵀv is two of its entries.
             for i in 1:n
                 Ph[i] = P[i, ia] - P[i, ib]
@@ -533,7 +531,7 @@ function rts_smooth_mv(xf, Pf, xp, Pp, avecs)
         # skip the smoothing update there (leaving step `k` at its filtered value).
         F = cholesky(Symmetric(Pp[:, :, k + 1]), check = false)
         issuccess(F) || continue
-        # G = Pf[k]·Aᵀ·inv(Pp[k+1]); Aᵀ diagonal scales COLUMNS of Pf[k] by a.
+        # G = Pf[k]·Aᵀ·inv(Pp[k+1]); Aᵀ diagonal scales columns of Pf[k] by a.
         G = (view(Pf, :, :, k) .* reshape(a, 1, :)) / F
         dx = view(xs, :, k + 1) .- view(xp, :, k + 1)
         dP = view(Ps, :, :, k + 1) .- view(Pp, :, :, k + 1)

@@ -1,16 +1,10 @@
-# ── Per-scan dTEC/SBD refinement over scan windows ────────────────────────────
+# ── Per-scan dTEC/SBD refinement over scan windows ───────────────────────────
 #
-# The per-scan (Δτ, dTEC) and per-band-group SBD refinement, operating on a
-# scan's `DimStack` and its `GeometryWindow` (descended verbatim from the
-# monolithic solver's concat-cube variants, deleted at M5). Both are driven by
-# `DispersionSBDFit`'s visitor hooks (`src/pipeline/steps.jl`), on data already
-# fringe-corrected through the pipeline's transform chain — neither kernel
-# evaluates a gain itself. The per-baseline matched-filter measurements
-# (`_fit_band_dispersion`, `_fit_chunk_delay`, and their band/chunk-phasor
-# accumulators) live in `refine_search.jl`; this file assembles those
-# measurements per scan and station-solves them (closure screen + robust
-# rejection, via `solve_station_systems!`) into the private per-scan θ columns
-# `DispersionSBDFit` owns.
+# Assembles the per-baseline measurements from `refine_search.jl` per scan and
+# station-solves them, through `solve_station_systems!`, into the private
+# per-scan θ columns `DispersionSBDFit` owns. Driven by `DispersionSBDFit`'s
+# visitor hooks (`src/pipeline/steps.jl`) on data already fringe-corrected
+# through the pipeline's transform chain, so neither kernel evaluates a gain.
 
 # The view's grp-local channel ranges per spectral window (the concat cube's
 # per-band blocks, recovered from the global channel indices).
@@ -249,15 +243,15 @@ function _dispersion_fit_stationize!(
 end
 
 # Shared back half: per-(baseline, group) fits over the accumulated chunk
-# phasors — the within-group SLOPE (exact matched filter) plus the slope-
-# corrected group phasor's phase — then one feed-common station solve of each
-# per group. Both are needed: the wideband delay's decomposition against the
-# per-group slopes is ambiguous (a common-mode slope shift leaves per-group
-# constants of 2πΔτ(f0 − νg) behind that no single per-scan constant can
-# absorb), and real instruments carry genuine per-band phase offsets. θ gets
-# the per-scan per-group delay and its constant: net correction
-# 2πτ(f − νg) + φg, referenced to the group centre. `chunkf`/`chunkgrp` label
-# each accumulated chunk with its centre frequency and band-group id.
+# phasors — the within-group slope from an exact matched filter, plus the
+# slope-corrected group phasor's phase — then one feed-common station solve of
+# each per group. Both are needed: the wideband delay's decomposition against
+# the per-group slopes is ambiguous, a common-mode slope shift leaving per-group
+# constants of 2πΔτ(f0 − νg) that no single per-scan constant can absorb, and
+# real instruments carry per-band phase offsets. θ gets the per-scan per-group
+# delay and its constant, a net correction of 2πτ(f − νg) + φg referenced to the
+# group centre. `chunkf`/`chunkgrp` label each accumulated chunk with its centre
+# frequency and band-group id.
 function _sbd_fit_stationize!(
         θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds, ti0, geom, sbd, gauge, nant;
         opts::Stationization = Stationization(loss = LeastSquares()),
@@ -266,21 +260,18 @@ function _sbd_fit_stationize!(
     nbl, npol, _ = size(z)
     ngrp = length(sbd.freqgroups)
     nrej = 0
-    # ── Tier 1: per-group fits + within-group SLOPE guard ───────────────────
-    # The per-baseline SNR gate cannot catch a BIASED fit: on a group whose
-    # chunk phasors are internally decoherent (real per-channel bandpass
-    # structure, not a delay — VGOS band 2 is the worst), the matched filter
-    # happily returns a confident wrong slope, and applying it bends every
-    # baseline of a previously-better group (the VR2505 full run: +SBD
-    # degraded g1/g2 η_f on 1803+784 and 4C39.25 and band-2 on 3C454.3 while
-    # genuinely fixing 0607-157 and YJ). So: keep a group's stationized slope
-    # only when it RAISES the group's within-band coherence on the very chunk
-    # phasors it was fit from. The group CONSTANT is judged separately — it
-    # cancels inside the within-group coherence (|Σ z·e^{-iφ}| = |Σ z|), so
-    # this tier is structurally blind to it. A failing slope is ZEROED and the
-    # group phase refit at τ = 0 (not dropped with the group: φg carries the
-    # cross-band alignment, and dropping it collapsed 1803+784's cross-band η
-    # in the first, group-dropping version of this guard).
+    # ── Tier 1: per-group fits + within-group slope guard ───────────────────
+    # The per-baseline SNR gate cannot catch a biased fit: where a group's chunk
+    # phasors are internally decoherent — per-channel bandpass structure rather
+    # than a delay — the matched filter returns a confident wrong slope, and
+    # applying it bends every baseline of the group. A group's stationized slope
+    # is therefore kept only when it raises the group's within-band coherence on
+    # the chunk phasors it was fit from. The group constant is judged
+    # separately: it cancels inside the within-group coherence
+    # (|Σ z·e^{-iφ}| = |Σ z|), so this tier is blind to it. A failing slope is
+    # zeroed and the group phase refit at τ = 0. The group must not be dropped
+    # instead — φg carries the cross-band alignment, and dropping it collapses
+    # cross-band coherence.
     gsols = NamedTuple[]
     for gidx in 1:ngrp
         ks = findall(==(gidx), chunkgrp)
@@ -348,7 +339,7 @@ function _sbd_fit_stationize!(
         push!(gsols, (; gidx, ks, fc, τv, covτ, φv, covφ))
     end
     isempty(gsols) && return nrej
-    # ── Tier 2: scan-level JOINT guard on the CROSS-band statistic ──────────
+    # ── Tier 2: scan-level joint guard on the cross-band statistic ──────────
     # The group constants' whole job is aligning the groups' band phasors, so
     # judge them (together with the surviving slopes) on the coherent sum over
     # All groups per baseline — the ηx-flavoured statistic — and apply the

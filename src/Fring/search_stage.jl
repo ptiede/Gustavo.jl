@@ -2,20 +2,16 @@
 #
 # The composable pipeline's fringe stage in three parts:
 #
-# - `FringeModel` — what is solved: an ordered list of phase-term elements
-#   (the gauge pin, `gauge`, is run-wide — see `CalibrationPipeline` in
-#   pipeline/protocol.jl). Each element declares its own feed scope
-#   through its tying (`SharedFeeds`, `SingleFeed(2)`, …), so the model is
-#   specified feed by feed; adding a component is adding an element.
-#   `fringe_phase_components` compiles each element through
-#   `model_components(element, spec)` and concatenates in list order.
-# - `MatchedFilter <: AbstractFringeEstimator` — how it is estimated: today's
-#   stage A (per-baseline delay/rate matched-filter search + closure-screened
-#   station WLS). The search and `Stationization` live here, not on the model —
-#   an alternative estimator (e.g. a Schwab–Cotton-style global LS) plugs in
-#   with no vestigial search/stationization options.
-# - The stage machinery the runner drives through the streaming layer:
-#   residual cubes for `rounds > 1`, the stage-B component filter, and the
+# - `FringeModel` — what is solved: an ordered list of phase-term elements. The
+#   gauge pin is run-wide, on `CalibrationPipeline` in pipeline/protocol.jl.
+#   Each element declares its own feed scope through its tying, so the model is
+#   specified feed by feed. `fringe_phase_components` compiles each element
+#   through `model_components(element, spec)` and concatenates in list order.
+# - `MatchedFilter <: AbstractFringeEstimator` — how it is estimated. The search
+#   and `Stationization` options live on the estimator rather than the model, so
+#   that another estimator plugs in without inheriting them.
+# - The stage machinery the runner drives through the streaming layer: residual
+#   cubes for `rounds > 1`, the stage-B component filter, and the
 #   detection/flag tables recorded on the solution.
 
 """
@@ -266,21 +262,21 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 #                             same name.
 #   nothing                 — the matched filter does not touch it.
 #
-# One estimator's vocabulary, hence private: a global least-squares fringe
-# fitter has no use for it, fitting θ through `evaluate_gains` directly.
+# This is one estimator's vocabulary, hence private: a global least-squares
+# fringe fitter fits θ through `evaluate_gains` directly.
 #
-# The stage-B kinds cover exactly the single-parameter, band-wide terms whose
-# observable the search measures. Everything else is `nothing` and so unfittable
-# by this estimator rather than approximated: `_solve_kind_cols!` writes one θ
-# column per (station, feed, time) node — the block's first parameter at the
-# First frequency segment — so a multi-parameter term (a polynomial) would have its
-# trailing parameters left at zero, and a frequency-resolved term (the bandpass,
-# `ConstantTerm` over `ChannelBlocks`) would have every segment but the first left at
-# zero while the search wrote its band-wide phase into that one. A `Dispersion`
-# term or a `FreqGroups`-segmented one (SBD) already falls through to
-# `nothing` here — the term/freq-type checks below exclude them without special
-# casing — so `can_fit` correctly rejects either if found in a `FringeModel`'s
-# own term list (they belong to a separate `DispersionSBDFit` step instead).
+# The stage-B kinds cover the single-parameter, band-wide terms whose observable
+# the search measures. Everything else must map to `nothing`, so that it is
+# unfittable by this estimator rather than approximated: `_solve_kind_cols!`
+# writes one θ column per (station, feed, time) node — the block's first
+# parameter at the first frequency segment — so a multi-parameter term such as a
+# polynomial would have its trailing parameters left at zero, and a
+# frequency-resolved term such as `ConstantTerm` over `ChannelBlocks` would have
+# every segment but the first left at zero while the search wrote its band-wide
+# phase into that one. A `Dispersion` or `FreqGroups`-segmented term falls
+# through to `nothing` on the term/freq-type checks below, so `can_fit` rejects
+# either if it appears in a `FringeModel`'s own term list; both belong to a
+# `DispersionSBDFit` step.
 function matched_kind(tc)
     tc.Ti isa PerIntegration && return nothing
     # The per-baseline search measures one delay/rate/phase across the whole
@@ -323,7 +319,7 @@ scan_local_solve(est::MatchedFilter, fm::FringeModel) =
     est.rounds <= 1 &&
     all(t -> t isa GainComponent && component_is_per_scan(t), values(fm.terms))
 
-# What the matched filter REQUIRES to exist. Each absent item costs the
+# What the matched filter requires to exist. Each absent item costs the
 # estimator its own output silently rather than crashing: `solve_station_systems!`
 # skips a kind with no components, dropping every scan's search estimate for
 # that observable, and `refine_scan_dispersion!` skips the Δτ half of the joint
@@ -389,8 +385,8 @@ function residual_vis(
     return _residual_cell.(stack[:vis], ga, gb)
 end
 
-# EHT-HOPS-style station flags: a station that PARTICIPATES in a scan (has
-# baselines there) but is left UNCONSTRAINED by the surviving stage-B rows
+# EHT-HOPS-style station flags: a station that participates in a scan (has
+# baselines there) but is left unconstrained by the surviving stage-B rows
 # keeps identity gains — record it as (station, geometry scan id) so
 # `apply_calibration` flags its baselines instead of passing raw phases through
 # as if they had been corrected.
