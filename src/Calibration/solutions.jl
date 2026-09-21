@@ -622,11 +622,20 @@ channel frequencies (Hz) of all bands, the sorted unique integration times
 leaves' `spw_name` / `scan_name`. `f0` defaults to the mean channel frequency,
 `t0` to the first time. Assumes a single consistent antenna table across the
 set (used only to size the solve elsewhere).
+
+Sub-arrays observing different sources over the same timestamps are supported,
+provided their station sets are disjoint and they share the whole scan window.
+The time axis still dense-ranks each timestamp to one scan, so such a
+timestamp carries whichever scan name is seen first; the per-(station, scan)
+parameters remain correct because the station sets do not meet. Throws when two
+scans share both a timestamp and a station, and when a scan overlaps another
+over only part of its span, which would split it across segments.
 """
 function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
     # Collect (freq, spw_name) and (time, scan_name) observations from all leaves.
     freq_spw = Dict{Float64, String}()
     time_scan = Dict{Float64, String}()
+    time_stations = Dict{Float64, Set{String}}()
     for (_, leaf) in UVData.branches(uvset)
         info = UVData.metadata(leaf)
         fs = channel_freqs(info.freq_setup)
@@ -644,19 +653,48 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
             freq_spw[fk] = info.spw_name
         end
         ts = lookup(leaf[:vis], Ti)
+        ants = Set{String}(UVData.participating_antennas(leaf))
         for t in ts
             tk = Float64(t)
             prev = get(time_scan, tk, nothing)
-            (prev === nothing || prev == info.scan_name) || throw(
-                ArgumentError(
-                    "build_geometry: time $tk s appears in conflicting scans '$prev' and " *
-                        "'$(info.scan_name)' — a single concatenated time axis cannot dense-rank " *
-                        "it to one scan. Check for overlapping scan windows or inconsistent " *
-                        "scan names."
+            if prev === nothing
+                time_scan[tk] = info.scan_name
+                time_stations[tk] = copy(ants)
+            elseif prev == info.scan_name
+                union!(time_stations[tk], ants)
+            else
+                shared = intersect(time_stations[tk], ants)
+                isempty(shared) || throw(
+                    ArgumentError(
+                        "build_geometry: station(s) $(join(sort!(collect(shared)), ", ")) are in " *
+                            "both scan '$prev' and scan '$(info.scan_name)' at time $tk s. A " *
+                            "station cannot be in two scans at one instant, and a single " *
+                            "concatenated time axis cannot dense-rank the timestamp to one scan. " *
+                            "Check for overlapping scan windows or inconsistent scan names."
+                    )
                 )
-            )
-            time_scan[tk] = info.scan_name
+                union!(time_stations[tk], ants)
+            end
         end
+    end
+
+    # Sub-arrays observing different sources at the same timestamps are
+    # admitted above, since disjoint station sets carry no contradiction. The
+    # timestamp still dense-ranks to one scan, so a leaf whose times land under
+    # more than one label would have its scan split into separate per-scan
+    # parameter segments partway through. Reject that rather than solve it.
+    for (_, leaf) in UVData.branches(uvset)
+        name = UVData.metadata(leaf).scan_name
+        labels = unique(time_scan[Float64(t)] for t in lookup(leaf[:vis], Ti))
+        length(labels) == 1 || throw(
+            ArgumentError(
+                "build_geometry: scan '$name' spans timestamps that dense-rank to " *
+                    "$(join(("'" * l * "'" for l in labels), ", ")) — it overlaps another " *
+                    "scan over part of its span but not all of it, so a single concatenated " *
+                    "time axis would segment it into more than one scan. Sub-arrays sharing " *
+                    "an entire scan window are supported; partial overlap is not."
+            )
+        )
     end
 
     freqs = sort!(collect(keys(freq_spw)))

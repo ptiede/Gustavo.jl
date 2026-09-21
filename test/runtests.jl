@@ -27,6 +27,9 @@ include("test_generic_axes.jl")
 
 include("test_calibration.jl")
 
+# Concurrent sub-arrays on one time axis.
+include("test_subarray_geometry.jl")
+
 # Gauge conventions: which constraint fixes each component's additive freedom.
 include("test_gauge.jl")
 
