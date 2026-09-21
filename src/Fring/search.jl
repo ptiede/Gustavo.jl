@@ -59,7 +59,7 @@ How the delay search lays out its FFT grid. Built-ins: [`FullGrid`](@ref) and
 
 A custom algorithm subtypes this and defines
 
-    Gustavo.Fringe._mbd_axes(alg, freqs, fax, tax, rates, opts, ::Type{C}) -> mbd_axes or nothing
+    Gustavo.Fring._mbd_axes(alg, freqs, fax, tax, rates, opts, ::Type{C}) -> mbd_axes or nothing
 
 returning `nothing` to run the single full-grid FFT, or the hierarchical band
 geometry to run the two-stage search. `C` is the search's compute type (the
@@ -971,7 +971,7 @@ _with_oversample(s::FringeSearch, oversample::Int) = FringeSearch(;
 _mbd_axes(alg::AbstractSearchAlgorithm, freqs, fax, tax, rates, opts, ::Type{C}) where {C} =
     throw(
     ArgumentError(
-        "FringeSearch: $(typeof(alg)) defines no `Gustavo.Fringe._mbd_axes` method"
+        "FringeSearch: $(typeof(alg)) defines no `Gustavo.Fring._mbd_axes` method"
     )
 )
 

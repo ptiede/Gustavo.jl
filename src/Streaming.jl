@@ -16,7 +16,7 @@ budgets, executors and `DimTree` leaves, not about fringes:
 
 This layer owns the group/budget/transform machinery and never names a
 consumer's kernels: it hands a materialized scan `DimStack` to whatever reads it
-(`Gustavo.Fringe`'s search allocates its own per-task FFT scratch).
+(`Gustavo.Fring`'s search allocates its own per-task FFT scratch).
 """
 module Streaming
 

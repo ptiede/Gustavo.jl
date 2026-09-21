@@ -503,10 +503,10 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         # `matched_kind` answers "what does THIS estimator do with this
         # component" — one estimator's vocabulary, so retiring the estimator
         # must not be a public API removal.
-        @test !(:matched_kind in names(Gustavo.Fringe))
+        @test !(:matched_kind in names(Gustavo.Fring))
         @test !(:matched_kind in names(Gustavo))
-        @test :can_fit in names(Gustavo.Fringe)
-        @test :validate_model in names(Gustavo.Fringe)
+        @test :can_fit in names(Gustavo.Fring)
+        @test :validate_model in names(Gustavo.Fring)
     end
 
     @testset "the estimator is carried as a type parameter, not an abstract field" begin
@@ -543,10 +543,10 @@ end
         @test fieldnames(DispersionSBDFit) == (:dispersion, :sbd)
     end
 
-    @testset "the propagation model is Calibration's, not Fringe's" begin
+    @testset "the propagation model is Calibration's, not Fring's" begin
         # An ionosphere is modelled without loading the fringe-fitting module:
         # the spec sits beside the `Dispersion` term it configures, and only the
-        # joint (Δτ, dTEC) estimator stays in `Fringe`.
+        # joint (Δτ, dTEC) estimator stays in `Fring`.
         @test parentmodule(DispersionModel) === Gustavo.Calibration
         @test which(CAL._dispersion_enabled, Tuple{Nothing, CAL.DataGeometry}).module ===
             Gustavo.Calibration

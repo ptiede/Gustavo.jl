@@ -66,10 +66,10 @@ answer. The shipped `FringeFit` is the example:
 
 ```julia
 fusable_grouping(s::FringeFit) =
-    Fringe.scan_local_solve(s.estimator, s.model) ? :scan : :global
+    Fring.scan_local_solve(s.estimator, s.model) ? :scan : :global
 ```
 
-With the default [`MatchedFilter`](@ref Gustavo.Fringe.MatchedFilter) (one
+With the default [`MatchedFilter`](@ref Gustavo.Fring.MatchedFilter) (one
 round) and an all-per-scan term list, each scan's station systems close
 inside `process_scan!` and the step fuses. Setting `MatchedFilter(rounds = 2)`
 — a residual re-search — needs the whole pass finished before the next round
@@ -144,8 +144,8 @@ The step owns the solve. Its declaration surface:
 
 ```julia
 Base.@kwdef struct DispersionSBDFit{D, S} <: SolveStep
-    dispersion::D = Fringe.DispersionModel()
-    sbd::S = Fringe.SingleBandDelay()
+    dispersion::D = Fring.DispersionModel()
+    sbd::S = Fring.SingleBandDelay()
 end
 provides(::DispersionSBDFit) = :refine
 required_grouping(::DispersionSBDFit) = :scan_complete
@@ -187,10 +187,10 @@ streams:
 function start_pass!(s::DispersionSBDFit, ctx::SolveContext)
     disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
     delay_plan = disp_plan === nothing ? nothing :
-        Fringe._perscan_delay_plan(ctx.model, ctx.layout)
+        Fring._perscan_delay_plan(ctx.model, ctx.layout)
     ctx.scratch[:disp_sbd_setup] = (;
         delay_plan, disp_plan,
-        sbd_plans = Fringe._sbd_plans(ctx.model, ctx.layout),
+        sbd_plans = Fring._sbd_plans(ctx.model, ctx.layout),
         ties = _dtec_ties(s.dispersion, ctx.antennas),
     )
     return nothing
@@ -291,6 +291,6 @@ the accumulation (fit-on-subset / apply-everywhere — a bandpass fit from a
 few bright calibrator scans still applies to every scan). `prior_solutions`
 is the ordered list of earlier steps' finished `StepSolution`s: the supported
 way to read non-data info from an earlier step, e.g. a
-[`ScanWhere`](@ref Gustavo.Fringe.ScanWhere) selection keeping scans whose
+[`ScanWhere`](@ref Gustavo.Fring.ScanWhere) selection keeping scans whose
 fringe SNR cleared a floor. Gain corrections are *never* read this way — they
 flow through the stream's transform chain automatically.

@@ -3,7 +3,7 @@
 # The specification of the dTEC term and the structural lookup of its θ
 # columns. `Dispersion` (terms.jl) is the term this model configures; the
 # estimator that fits it — jointly with the delay it is degenerate with — lives
-# in `Gustavo.Fringe`.
+# in `Gustavo.Fring`.
 
 """
     DispersionModel(; require_band_separation = true, colocated_sep = 1000.0)

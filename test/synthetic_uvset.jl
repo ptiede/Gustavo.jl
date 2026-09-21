@@ -18,7 +18,7 @@ using HDF5   # triggers GustavoHDF5Ext (solution save/load round-trip)
 using FITSFiles   # triggers GustavoFITSFilesExt (write_uvfits/load_uvfits round-trip)
 
 const CAL = Gustavo.Calibration
-const FP = Gustavo.Fringe
+const FP = Gustavo.Fring
 const ST = Gustavo.Streaming
 const UVP = Gustavo.UVData
 

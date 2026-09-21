@@ -25,17 +25,17 @@ import .Calibration: model_components
 
 # Scan-group streaming: the substrate the solver stages run on. Between
 # `Calibration` (whose `DataGeometry`/`CalibrationSolution` it consumes) and
-# `Fringe` (which consumes it).
+# `Fring` (which consumes it).
 include("Streaming.jl")
 using .Streaming
 
-include("Fringe.jl")
-using .Fringe
+include("Fring.jl")
+using .Fring
 
 # Top-level modular calibration pipeline (orchestrates all three submodules).
 include("pipeline.jl")
 
-export UVData, Calibration, Streaming, Fringe
+export UVData, Calibration, Streaming, Fring
 # Axis names for every array Gustavo stores or returns, so scripts can index
 # and slice leaves without reaching into `UVData` or `DimensionalData`.
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.

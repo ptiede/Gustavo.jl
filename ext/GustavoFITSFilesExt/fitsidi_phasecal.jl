@@ -3,10 +3,10 @@
 # cable-cal delay. AIPS specifics (NOSTA→name mapping, TIME in days since RDATE,
 # PC_* column layout `ntone × nband` flattened per row, _1/_2 polarization
 # suffixes matching POLTYA/POLTYB feed order) live here; the multitone fit in
-# `src/Fringe/phasecal.jl` is format-neutral.
+# `src/Fring/phasecal.jl` is format-neutral.
 
-import Gustavo.Fringe
-using Gustavo.Fringe: PhaseCalTable
+import Gustavo.Fring
+using Gustavo.Fring: PhaseCalTable
 
 # One PC_* column group (`_1` or `_2`) reshaped to (ntone, nband, nrow); a
 # missing column (NO_POL = 1) yields all-NaN.
@@ -42,7 +42,7 @@ function _idi_pc_pol!(freq, tone, d, suffix, ntone, nband, nrow)
     return nothing
 end
 
-function Fringe.load_fitsidi_phasecal(path::AbstractString)
+function Fring.load_fitsidi_phasecal(path::AbstractString)
     fid = FITSFiles.fits(path)
     pc = _idi_find_hdu(fid, "PHASE-CAL")
     pc === nothing && error("load_fitsidi_phasecal: no PHASE-CAL HDU in $(path)")

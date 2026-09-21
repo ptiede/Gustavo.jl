@@ -66,7 +66,7 @@ Every step is optional and reorderable; a single standalone step is a legal
 pipeline.
 
 **Transforms.** A step scales what it *produces*; an
-[`AbstractDataTransform`](@ref Gustavo.Fringe.AbstractDataTransform) scales what
+[`AbstractDataTransform`](@ref Gustavo.Fring.AbstractDataTransform) scales what
 every step *reads* — it runs on each scan group as it is materialized, inside
 the streaming pass. Chain one into a pipeline like any step
 (`AprioriPreCal(uvset, antab) |> Bandpass()`). The built-ins are
@@ -103,7 +103,7 @@ Three seams, in increasing scope:
   [Authoring a new gain term](@ref authoring-terms);
 - a new **estimator or smoother** behind an existing step — a different way
   to solve the same model: see
-  [`AbstractFringeEstimator`](@ref Gustavo.Fringe.AbstractFringeEstimator) and
-  [`AbstractBandpassSmoother`](@ref Gustavo.Fringe.AbstractBandpassSmoother);
+  [`AbstractFringeEstimator`](@ref Gustavo.Fring.AbstractFringeEstimator) and
+  [`AbstractBandpassSmoother`](@ref Gustavo.Fring.AbstractBandpassSmoother);
 - a new **pipeline step** — a solver with its own streaming pass:
   [Authoring a pipeline step](@ref authoring-steps).

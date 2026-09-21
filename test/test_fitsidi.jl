@@ -1029,7 +1029,7 @@ end
 # against the file format rather than against Gustavo's other half.
 @testset "absolute visibility phase convention" begin
     UV = Gustavo.UVData
-    FR = Gustavo.Fringe
+    FR = Gustavo.Fring
     ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
 
     τ = 10.0e-9                  # injected delay, in Gustavo's (CASA K-Jones) sense

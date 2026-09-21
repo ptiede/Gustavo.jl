@@ -54,7 +54,7 @@ Any composition of `SolveStep`s is legal, including one standalone step
 (e.g. a `Bandpass` fit over data an earlier run corrected) — the pipeline
 needs no [`FringeFit`](@ref). Solving `A |> B` in one call is equivalent to
 `sa = fit(A, uvset)` followed by
-`fit(Fringe.ApplySolution(sa[provides(A)]) |> B, uvset)`: the same
+`fit(Fring.ApplySolution(sa[provides(A)]) |> B, uvset)`: the same
 mechanism, run within one call instead of across two.
 """
 function fit(pipe::CalibrationPipeline, uvset::UVSet)
@@ -66,7 +66,7 @@ function fit(pipe::CalibrationPipeline, uvset::UVSet)
 end
 
 fit(
-    x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
+    x::Union{CalibrationStep, Fring.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
     gauge::AbstractGauge = PinAntenna(1),
 ) = fit(CalibrationPipeline(x; exec, gauge), uvset)
@@ -111,10 +111,10 @@ function calibrate(
     # Same station-axis reason as `fit`: leaves that saw different sub-arrays
     # number stations differently, and the gains are applied against one axis.
     uvset = UVData.unify_antennas(uvset)
-    stream = Fringe.scan_stream(uvset; transforms = sol.transforms, exec = exec)
+    stream = Fring.scan_stream(uvset; transforms = sol.transforms, exec = exec)
     post = _compose_output_chain(sol.postcal, collect(reduce))
-    group_pairs = Fringe.map_groups(stream; stage = :output) do spec
-        keyed = Fringe.materialize_leaves(stream, spec)
+    group_pairs = Fring.map_groups(stream; stage = :output) do spec
+        keyed = Fring.materialize_leaves(stream, spec)
         reduce_scan_output(
             stream.uvset, keyed, sol, post;
             executor = inner_executor(stream), apply_flags = apply_flags,
@@ -160,7 +160,7 @@ function fitcalibrate(pipe::CalibrationPipeline, uvset::UVSet; reduce = ReduceSt
 end
 
 fitcalibrate(
-    x::Union{CalibrationStep, Fringe.AbstractDataTransform}, uvset::UVSet;
+    x::Union{CalibrationStep, Fring.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
     gauge::AbstractGauge = PinAntenna(1),
     kwargs...,
@@ -336,7 +336,7 @@ function _run_pipeline(
     # transform chain between steps (below): `ScanStream`/`SolveContext` fix the
     # transform-vector element type as a type parameter, so appending a
     # transform means building a new stream, not mutating one in place.
-    _build_stream(tfs) = Fringe.scan_stream(uvset; geom = geom, transforms = tfs, exec = exec)
+    _build_stream(tfs) = Fring.scan_stream(uvset; geom = geom, transforms = tfs, exec = exec)
     stream = _build_stream(br.tfs)
     # Run-wide state shared, unmodified in identity, across every step's own
     # SolveContext below (only `model`/`layout`/`ev`/`θ` and `stream` change
@@ -398,7 +398,7 @@ function _run_pipeline(
         # step's θ block. Within a fused run the same corrections were applied
         # to the resident scan instead, in the same order.
         for (st, c) in zip(run_steps, contexts)
-            push!(tfs_solve, Fringe.ApplySolution(_step_precal(st, c, geom)))
+            push!(tfs_solve, Fring.ApplySolution(_step_precal(st, c, geom)))
         end
         stream = _build_stream(tfs_solve)
     end
@@ -414,8 +414,8 @@ function _run_pipeline(
         # correction, so this output pass must divide it out exactly once,
         # the same as the standalone `calibrate(sol, uvset)` path does.
         out_stream = _build_stream(br.tfs)
-        group_pairs = Fringe.map_groups(out_stream; stage = :output) do gspec
-            keyed = Fringe.materialize_leaves(out_stream, gspec)
+        group_pairs = Fring.map_groups(out_stream; stage = :output) do gspec
+            keyed = Fring.materialize_leaves(out_stream, gspec)
             reduce_scan_output(
                 out_stream.uvset, keyed, sol, sink.postprocess;
                 executor = inner_executor(out_stream), apply_flags = sink.apply_flags,
@@ -454,7 +454,7 @@ end
 # run of its own and gets a pass to itself.
 function _fusable_run(solve_steps, first_i::Integer, prior_solutions)
     _fusable(st) = fusable_grouping(st) === :scan &&
-        fit_selection(st, prior_solutions) isa Fringe.AllScans
+        fit_selection(st, prior_solutions) isa Fring.AllScans
     _fusable(solve_steps[first_i]) || return first_i:first_i
     last_i = first_i
     while last_i < length(solve_steps) && _fusable(solve_steps[last_i + 1])
@@ -481,17 +481,17 @@ function _run_pass!(step::SolveStep, ctx::SolveContext, prior_solutions; sink = 
     while true
         start_pass!(step, ctx)
         flag_nt = sink === nothing ? nothing :
-            Fringe.flag_table(_fringe_flags(ctx))
-        results = Fringe.map_groups(
+            Fring.flag_table(_fringe_flags(ctx))
+        results = Fring.map_groups(
             ctx.stream; selection = fit_selection(step, prior_solutions),
             snr = _scan_snr(prior_solutions), stage = stage,
         ) do gspec
             ta = time_ns()
             if sink === nothing
-                stack, win = Fringe.materialize_cube(ctx.stream, gspec)
+                stack, win = Fring.materialize_cube(ctx.stream, gspec)
                 keyed = nothing
             else
-                keyed = Fringe.materialize_leaves(ctx.stream, gspec)
+                keyed = Fring.materialize_leaves(ctx.stream, gspec)
                 stack, win = Streaming._stacked_scan_group(
                     [m for (_, m) in keyed], ctx.stream.geom,
                 )
@@ -559,10 +559,10 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
     # in this run finishes each scan's flags inside `process_scan!`
     # (`scan_flags`), never pass-wide — the tail collects them per group below.
     base_flags = sink === nothing ? nothing : _fringe_flags(ctx_n)
-    results = Fringe.map_groups(stream; stage = provides(last(steps))) do gspec
+    results = Fring.map_groups(stream; stage = provides(last(steps))) do gspec
         ta = time_ns()
         if sink === nothing
-            stack, win = Fringe.materialize_cube(stream, gspec)
+            stack, win = Fring.materialize_cube(stream, gspec)
             keyed = nothing
         else
             keyed = _private_leaves(stream, gspec)
@@ -578,7 +578,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
                 # `_stacked_scan_group` copied the leaves' data into the cube, so
                 # the solve stack and the output leaves are separate arrays and
                 # each needs the correction applied to it.
-                as = Fringe.ApplySolution(_step_precal(steps[k], contexts[k], contexts[k].geom))
+                as = Fring.ApplySolution(_step_precal(steps[k], contexts[k], contexts[k].geom))
                 apply_transform!(as, stack, win; executor = inner_executor(stream))
                 if keyed !== nothing
                     for (_, m) in keyed
@@ -603,7 +603,7 @@ function _run_fused_pass!(steps, contexts; sink = nothing)
                 append!(flags, scan_flags(steps[k], rs[k]))
             end
             sol_local = CalibrationSolution(
-                ctx_n.model, ctx_n.layout, ctx_n.geom, ctx_n.θ, Fringe.flag_table(flags);
+                ctx_n.model, ctx_n.layout, ctx_n.geom, ctx_n.θ, Fring.flag_table(flags);
                 name = provides(last(steps)),
             )
             out = reduce_scan_output(
@@ -649,7 +649,7 @@ end
 # array identity rather than by re-deriving when the copy already happened, so
 # no assumption about the materialization path is carried here.
 function _private_leaves(stream, gspec)
-    keyed = Fringe.materialize_leaves(stream, gspec)
+    keyed = Fring.materialize_leaves(stream, gspec)
     return [
         parent(m[:vis]) === parent(src[:vis]) ?
             (k, UVData.rebuild_visibilities(m, copy(parent(m[:vis])), copy(parent(m[:weights])))) :
@@ -703,10 +703,10 @@ function _new_engine_info(ctx::SolveContext, br, step_solutions::Vector{StepSolu
     return (;
         nant = ctx.nant,
         nscan = length(ctx.stream.groups),
-        Fringe.flag_table(_fringe_flags(ctx))...,
+        Fring.flag_table(_fringe_flags(ctx))...,
         ant_names = String.(collect(ctx.antennas.name)),
-        (br.ff === nothing ? NamedTuple() : Fringe.estimator_info(br.ff.estimator))...,
-        precal_applied = any(t -> t isa Fringe.ApplySolution, br.tfs),
+        (br.ff === nothing ? NamedTuple() : Fring.estimator_info(br.ff.estimator))...,
+        precal_applied = any(t -> t isa Fring.ApplySolution, br.tfs),
         ntasks_used = Streaming.max_tasks(outer_executor(ctx.stream)),
         inner_tasks = Streaming.max_tasks(inner_executor(ctx.stream)),
     )
@@ -749,7 +749,7 @@ end
 # FringeFit's correction and does not have one fails from its own solve
 # kernel, not from pipeline construction.
 function _parse_pipeline(pipe::CalibrationPipeline)
-    tfs = Fringe.AbstractDataTransform[]
+    tfs = Fring.AbstractDataTransform[]
     solve_steps = SolveStep[]
     post_steps = Union{AprioriAmplitude, ReduceStep}[]
     for s in pipe.steps

@@ -97,23 +97,23 @@ heterogeneity_rejector(step::CalibrationStep) = string(nameof(typeof(step)))
 """
     transforms(step::CalibrationStep) -> Tuple
 
-Data transforms ([`Fringe.AbstractDataTransform`](@ref)) this step contributes
+Data transforms ([`Fring.AbstractDataTransform`](@ref)) this step contributes
 to the materialization chain, applied in pipeline order to every scan group as
 it is materialized. Default: none.
 """
 transforms(step::CalibrationStep) = ()
 
 """
-    fit_selection(step::CalibrationStep, prior_solutions) -> Fringe.AbstractScanSelection
+    fit_selection(step::CalibrationStep, prior_solutions) -> Fring.AbstractScanSelection
 
 Which scans feed this step's accumulation. Time-global components solved by
 the step still apply to every scan — fitting a bandpass or a track-global delay
 from a few bright calibrator scans and applying it across the board. `prior_solutions`
 is the ordered `Vector{StepSolution}` of every earlier step's finished solution —
 a step wanting non-data info from an earlier step (e.g. per-scan SNR) reads it
-off there. Default: [`Fringe.AllScans`](@ref)`()`.
+off there. Default: [`Fring.AllScans`](@ref)`()`.
 """
-fit_selection(step::CalibrationStep, prior_solutions) = Fringe.AllScans()
+fit_selection(step::CalibrationStep, prior_solutions) = Fring.AllScans()
 
 """
     provides(step::CalibrationStep) -> Symbol
@@ -154,7 +154,7 @@ decodes the dataset once per pass, so this is the difference between N reads of
 the data and one; it changes no step's result.
 
 Fusion additionally requires every step in the run to accumulate from every
-scan ([`fit_selection`](@ref) returning [`Fringe.AllScans`](@ref)`()`), since
+scan ([`fit_selection`](@ref) returning [`Fring.AllScans`](@ref)`()`), since
 one pass materializes one set of groups, and forbids pass repetition
 (`repeat_pass`), which is by definition not scan-local.
 
@@ -295,14 +295,14 @@ end
 # ── Transforms as pipeline steps ─────────────────────────────────────────────
 
 """
-    DataTransformStep(t::Fringe.AbstractDataTransform)
+    DataTransformStep(t::Fring.AbstractDataTransform)
 
 Lifts a data transform into a pipeline step so transforms compose in the step
 chain: `CalFunction(f) |> FringeFit(...)`. Raw transforms are lifted
 automatically by `|>` and the `CalibrationPipeline` constructors, so you rarely
 construct this directly.
 """
-struct DataTransformStep{T <: Fringe.AbstractDataTransform} <: CalibrationStep
+struct DataTransformStep{T <: Fring.AbstractDataTransform} <: CalibrationStep
     t::T
 end
 transforms(s::DataTransformStep) = (s.t,)
@@ -316,7 +316,7 @@ end
 
 # Lift pipeline elements to steps: transforms wrap, steps pass through.
 _lift_step(s::CalibrationStep) = s
-_lift_step(t::Fringe.AbstractDataTransform) = DataTransformStep(t)
+_lift_step(t::Fring.AbstractDataTransform) = DataTransformStep(t)
 _lift_step(x) = error(
     "not a pipeline element: $(typeof(x)) — expected a CalibrationStep or an AbstractDataTransform."
 )
@@ -334,7 +334,7 @@ struct StepChain
     steps::Vector{CalibrationStep}
 end
 
-const _Chainable = Union{CalibrationStep, Fringe.AbstractDataTransform}
+const _Chainable = Union{CalibrationStep, Fring.AbstractDataTransform}
 Base.:|>(a::_Chainable, b::_Chainable) = StepChain([_lift_step(a), _lift_step(b)])
 Base.:|>(c::StepChain, b::_Chainable) = StepChain(vcat(c.steps, _lift_step(b)))
 Base.:|>(a::_Chainable, c::StepChain) = StepChain(vcat(_lift_step(a), c.steps))
@@ -348,7 +348,7 @@ Base.:|>(a::StepChain, b::StepChain) = StepChain(vcat(a.steps, b.steps))
     CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), gauge = PinAntenna(1))
 
 An ordered list of [`CalibrationStep`](@ref)s (raw
-`Fringe.AbstractDataTransform`s are lifted automatically) plus the run-wide
+`Fring.AbstractDataTransform`s are lifted automatically) plus the run-wide
 [`ExecutionConfig`](@ref), `gauge` — the gauge convention every solve step reads
 (`ctx.gauge`): an [`AbstractGauge`](@ref), e.g. `PinAntenna("PT")`,
 `PinAntenna(["PT", "LA"])` for a ranked fallback, or `ZeroSumPhase()`. A

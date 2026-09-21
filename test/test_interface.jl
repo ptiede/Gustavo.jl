@@ -25,7 +25,7 @@ Gustavo.fusable_grouping(::_RepeatingScanStep) = :scan
 Gustavo.finish_pass!(::_RepeatingScanStep, ctx) = (; repeat_pass = true)
 
 # A transform with no apply_transform! implementation (error-path probe).
-struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
+struct _NoImpl <: Gustavo.Fring.AbstractDataTransform end
 
 # A FringeModel term that is not an GainComponent: its compiled segmentation is
 # unknowable without the geometry, so the scan-locality answer must be the
@@ -33,7 +33,7 @@ struct _NoImpl <: Gustavo.Fringe.AbstractDataTransform end
 struct _OpaqueTerm end
 
 # An estimator that declares nothing — `scan_local_solve`'s safe default.
-struct _OpaqueEstimator <: Gustavo.Fringe.AbstractFringeEstimator end
+struct _OpaqueEstimator <: Gustavo.Fring.AbstractFringeEstimator end
 
 # The full three-stage production pipeline at defaults.
 _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
@@ -67,7 +67,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         @test Gustavo.fusable_grouping(DispersionSBDFit()) == :scan
         @test Gustavo.fusable_grouping(TemporalSmoother()) == :scan
         @test Gustavo.fusable_grouping(Bandpass()) == :global
-        # FringeFit answers per instance (`Fringe.scan_local_solve`): the
+        # FringeFit answers per instance (`Fring.scan_local_solve`): the
         # default — one round, every term per-scan — solves each scan's
         # station systems as the scan is searched, so the pass is scan-local.
         @test Gustavo.fusable_grouping(FringeFit()) == :scan

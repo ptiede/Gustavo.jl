@@ -6,7 +6,7 @@
 # (per-scan max SNR / component count), so it is Makie-free and unit-testable
 # without loading a plotting backend. The plot entry points themselves
 # (`plot_fringe_spectrum`, `plot_fringe_phases`, `plot_fringe_snr`) are stubs in
-# `Fringe.jl`, implemented by `GustavoMakieExt`.
+# `Fring.jl`, implemented by `GustavoMakieExt`.
 
 # The `:fringe` step's own `StepSolution`, or `nothing` — every diagnostic
 # below degrades gracefully (empty/NaN) rather than erroring when the

@@ -6,7 +6,7 @@ using Test
 using Random
 using Statistics: mean, std
 
-const FRa = Gustavo.Fringe
+const FRa = Gustavo.Fring
 const CALa = Gustavo.Calibration
 
 all_bl_a(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]

@@ -220,7 +220,7 @@ function synthetic_uvdata()
 end
 
 @testset "Gustavo.jl" begin
-    for sub in (:UVData, :Calibration, :Fringe)
+    for sub in (:UVData, :Calibration, :Fring)
         @test isdefined(Gustavo, sub)
         @test getfield(Gustavo, sub) isa Module
     end
@@ -239,18 +239,18 @@ end
         @test n in top
     end
 
-    # Streaming-engine internals stay behind `Fringe`: reachable for users who
+    # Streaming-engine internals stay behind `Fring`: reachable for users who
     # drive the engine directly, absent from the pipeline-level namespace. They
     # are `Streaming`'s, re-exported — the same binding under both names.
     for n in (:ScanGroupSpec, :materialize_cube, :materialize_leaves)
         @test !(n in top)
-        @test n in names(Gustavo.Fringe)
+        @test n in names(Gustavo.Fring)
         @test n in names(Gustavo.Streaming)
-        @test getproperty(Gustavo.Fringe, n) === getproperty(Gustavo.Streaming, n)
+        @test getproperty(Gustavo.Fring, n) === getproperty(Gustavo.Streaming, n)
     end
 
     # The four submodules, named at the top level.
-    for n in (:UVData, :Calibration, :Streaming, :Fringe)
+    for n in (:UVData, :Calibration, :Streaming, :Fring)
         @test n in top
     end
 

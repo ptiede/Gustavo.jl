@@ -1,5 +1,5 @@
 ```@meta
-CurrentModule = Gustavo.Fringe
+CurrentModule = Gustavo.Fring
 ```
 
 # [Fringe fitting](@id fringe-fitting)

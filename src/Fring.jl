@@ -1,5 +1,5 @@
 """
-    Fringe
+    Fring
 
 VLBI fringe fitting on top of the unified `Gustavo.Calibration` model framework,
 the `Gustavo.UVData` visibility model, and the `Gustavo.Streaming` scan-group
@@ -11,7 +11,7 @@ The streaming vocabulary (`ScanStream`, the transform and
 selection types) is re-exported from `Gustavo.Streaming`, so a caller driving
 the fringe engine reaches it without a second `using`.
 """
-module Fringe
+module Fring
 
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
@@ -40,25 +40,25 @@ using Statistics: median, mean
 using LinearAlgebra
 using Printf: @sprintf
 
-include("Fringe/search.jl")
-include("Fringe/stationize.jl")
-include("Fringe/statespace.jl")
+include("Fring/search.jl")
+include("Fring/stationize.jl")
+include("Fring/statespace.jl")
 # Per-observable frequency-shape specs and their per-track fit — pure functions
 # over one (station, feed, spw) track, independent of any solver stage.
-include("Fringe/shapes.jl")
-include("Fringe/adhoc.jl")
-include("Fringe/phasecal.jl")
+include("Fring/shapes.jl")
+include("Fring/adhoc.jl")
+include("Fring/phasecal.jl")
 # The composable-pipeline engine: the pluggable fringe-estimator strategy, the
 # search over one streamed scan group, the model/plan routers, and the three
 # carved-out stage implementations the step visitors call into.
-include("Fringe/estimators.jl")
-include("Fringe/scan_search.jl")
-include("Fringe/search_stage.jl")
-include("Fringe/model_plans.jl")
-include("Fringe/bandpass_stage.jl")
-include("Fringe/refine_search.jl")
-include("Fringe/refine_stage.jl")
-include("Fringe/diagnostics.jl")
+include("Fring/estimators.jl")
+include("Fring/scan_search.jl")
+include("Fring/search_stage.jl")
+include("Fring/model_plans.jl")
+include("Fring/bandpass_stage.jl")
+include("Fring/refine_search.jl")
+include("Fring/refine_stage.jl")
+include("Fring/diagnostics.jl")
 
 # ── Plot stubs — implemented by `GustavoMakieExt`. Load Makie or CairoMakie
 # to enable plotting.

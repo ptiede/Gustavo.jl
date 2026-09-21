@@ -7,7 +7,7 @@ using Random
 using LinearAlgebra
 using Statistics: mean, var
 
-const FRs = Gustavo.Fringe
+const FRs = Gustavo.Fring
 
 # Dense Matérn-1/2 GP covariance K[i,j] = σ²·exp(-|tᵢ-tⱼ|/τ).
 _matern12(times, τ, σ2) = [σ2 * exp(-abs(times[i] - times[j]) / τ) for i in eachindex(times), j in eachindex(times)]

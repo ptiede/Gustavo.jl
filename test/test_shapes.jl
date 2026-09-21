@@ -8,7 +8,7 @@ using Random
 using LinearAlgebra
 using Statistics: mean, median, std
 
-const FRsh = Gustavo.Fringe
+const FRsh = Gustavo.Fring
 
 # A 32-segment spw at ~228 GHz with 2 MHz segments — the frequency coordinate
 # `fit_track` is written against.

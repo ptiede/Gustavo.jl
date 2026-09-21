@@ -6,7 +6,7 @@ using Test
 using Random
 using Statistics: mean
 
-const FR = Gustavo.Fringe
+const FR = Gustavo.Fring
 
 # Build a noiseless fringe block V[chan,time] = A·exp(i[φ + 2πτ(f−f0) + 2πṙ(t−t0)]).
 function inject_fringe(freqs, times, f0, t0; delay, rate, phase, amp = 1.0)
@@ -522,7 +522,7 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
 
     # No silent fallback: an algorithm with no `_mbd_axes` method is an error,
     # not a quiet switch to a different search.
-    @test_throws "defines no `Gustavo.Fringe._mbd_axes` method" FR._search_axes(
+    @test_throws "defines no `Gustavo.Fring._mbd_axes` method" FR._search_axes(
         freqs, times, FR.FringeSearch(algorithm = _ProbeUnimplemented()), ComplexF64
     )
 

@@ -17,7 +17,7 @@
 # [`solve_joint_bandpass!`](@ref) instead, fitting the actual complex
 # visibilities against an explicit per-scan source term — the right choice when
 # that assumption fails — with the specs entering as priors inside the gain
-# update. Both carry one [`AbstractShapeSpec`](@ref Gustavo.Fringe.AbstractShapeSpec) per observable.
+# update. Both carry one [`AbstractShapeSpec`](@ref Gustavo.Fring.AbstractShapeSpec) per observable.
 #
 # The graph/solve helpers (`_ObsRow`, `_solve_observable`, `_track_noise2`,
 # `_node`) live in stationize.jl/adhoc.jl; the shape specs live in shapes.jl.
@@ -70,7 +70,7 @@ _bandpass_component(freq) =
 
 How the [`Bandpass`](@ref Gustavo.Bandpass) step turns the accumulated
 per-channel residual into station bandpass tracks, given a shape assumption
-per observable (an [`AbstractShapeSpec`](@ref Gustavo.Fringe.AbstractShapeSpec)).
+per observable (an [`AbstractShapeSpec`](@ref Gustavo.Fring.AbstractShapeSpec)).
 Concretely [`PerTrackSmoother`](@ref), which solves the per-channel closures
 and fits each track, or [`JointSmoother`](@ref), which fits the complex
 visibilities against an explicit per-scan source term.
@@ -79,8 +79,8 @@ visibilities against an explicit per-scan source term.
 
 Define:
 
-    Gustavo.Fringe.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
-    Gustavo.Fringe.solve_bandpass!(sm::MySmoother, θ, results, setup; gauge) -> report
+    Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
+    Gustavo.Fring.solve_bandpass!(sm::MySmoother, θ, results, setup; gauge) -> report
 
 [`can_fit`](@ref) declares which model components the smoother can solve; it
 defaults to `false`, so an undeclared model is rejected at compile time
@@ -103,8 +103,8 @@ Return `nothing` to report nothing.
 
 Two optional hooks:
 
-    Gustavo.Fringe.bandpass_derotate(sm::MySmoother) -> Bool   # default true
-    Gustavo.Fringe.validate_model(sm::MySmoother, model)
+    Gustavo.Fring.bandpass_derotate(sm::MySmoother) -> Bool   # default true
+    Gustavo.Fring.validate_model(sm::MySmoother, model)
 
 `bandpass_derotate` controls whether `accumulate_bandpass!` counter-rotates
 each AP before accumulating: a smoother that sums scans together needs it;
@@ -209,7 +209,7 @@ function solve_bandpass! end
 solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
     error(
     "$(typeof(sm)) does not implement the bandpass smoother interface: define " *
-        "Gustavo.Fringe.solve_bandpass!(::$(typeof(sm)), θ, results, setup; gauge)."
+        "Gustavo.Fring.solve_bandpass!(::$(typeof(sm)), θ, results, setup; gauge)."
 )
 
 # Fresh per-(baseline row, product, global channel) bandpass accumulators. They

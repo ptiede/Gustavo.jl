@@ -3,7 +3,7 @@
 
 Shared calibration infrastructure for Gustavo: feed/correlation-product
 conventions, weighted least-squares solvers, phase-track utilities, and the
-unified station gain-model framework used by `Gustavo.Fringe` and the
+unified station gain-model framework used by `Gustavo.Fring` and the
 calibration pipeline.
 """
 module Calibration

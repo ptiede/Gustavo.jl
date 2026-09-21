@@ -6,7 +6,7 @@ using Test
 using Random
 using Statistics: mean
 
-const FR = Gustavo.Fringe
+const FR = Gustavo.Fring
 const CALs = Gustavo.Calibration
 
 # Sign with which an unresolved source's cross-hand phase enters a product with

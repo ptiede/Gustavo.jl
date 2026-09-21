@@ -68,7 +68,7 @@ the per-AP station phase tracks the adhoc solve produces
 
 Define a struct and:
 
-    Gustavo.Fringe.apply_adhoc!(sm::MySmoother, phase, track_w, times; anchor, nant, ap_rows)
+    Gustavo.Fring.apply_adhoc!(sm::MySmoother, phase, track_w, times; anchor, nant, ap_rows)
 
 the single dispatch point; mutates `phase` in place. `ap_rows` holds the
 SNR-gated, source-corrected observation rows per AP. A smoother that acts
@@ -76,7 +76,7 @@ independently on each (station, node) track subtypes
 [`PerTrackAdhocSmoother`](@ref) and implements the per-track hook
 `smooth_track(sm, track, w, times)` instead.
 
-    Gustavo.Fringe.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
+    Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
 
 declares which adhoc components the smoother can solve, checked at
 model-compile time (default `false`, so an undeclared smoother rejects every

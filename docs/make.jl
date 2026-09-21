@@ -24,7 +24,7 @@ makedocs(;
             "UVData" => "api/uvdata.md",
             "Calibration" => "api/calibration.md",
             "Streaming" => "api/streaming.md",
-            "Fringe" => "api/fringe.md",
+            "Fring" => "api/fring.md",
         ],
         "Internals" => "internals.md",
     ],

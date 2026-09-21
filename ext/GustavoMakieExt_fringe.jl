@@ -1,19 +1,19 @@
 # ── Fringe-solution plots (GustavoMakieExt) ──────────────────────────────────
 #
-# Implements the plot stubs declared in `Gustavo.Fringe`. Each entry point has a
+# Implements the plot stubs declared in `Gustavo.Fring`. Each entry point has a
 # `(parent, sol; …)` form that draws into a `Figure`/`GridPosition` and a
 # `(sol; …)` convenience form that creates and returns a `Figure`. Gains are
 # pulled through `gains` on a solution selection, so all the data wrangling
 # stays Makie-free and tested without a backend.
 
-import Gustavo.Fringe
+import Gustavo.Fring
 using Gustavo.UVData: UVSet, Frequency
 using Gustavo.Calibration: CalibrationSolution, gains, _freq_group_ranges
 using DimensionalData: lookup, Ti
-using Gustavo.Fringe: fringe_snr_table
-using Gustavo.Fringe: BaselineFringeData, baseline_fringe_data, baseline_pol_index
-using Gustavo.Fringe: FringeSearchMap, BaselineFringeMap, fringe_search_map, _fmt_pfa
-using Gustavo.Fringe: _plotted_sigma
+using Gustavo.Fring: fringe_snr_table
+using Gustavo.Fring: BaselineFringeData, baseline_fringe_data, baseline_pol_index
+using Gustavo.Fring: FringeSearchMap, BaselineFringeMap, fringe_search_map, _fmt_pfa
+using Gustavo.Fring: _plotted_sigma
 
 # Resolve a `sites`/`feeds` selector into a vector of integer indices.
 _fringe_indices(sel::Colon, n::Integer) = collect(1:n)
@@ -29,7 +29,7 @@ _site_label(names, i::Integer) =
 _feed_label(f::Integer) = string("feed", f)
 
 # ── plot_fringe_spectrum: phase vs frequency, rows = sites, cols = feeds ───────
-function Fringe.plot_fringe_spectrum(
+function Fring.plot_fringe_spectrum(
         parent, sol::CalibrationSolution;
         sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false,
     )
@@ -45,7 +45,7 @@ function Fringe.plot_fringe_spectrum(
     # Optional restriction to one frequency group of the (possibly gappy) channel axis.
     fglab = ""
     if freqgroup !== nothing
-        fgs = Fringe.fringe_freq_groups(freqs)
+        fgs = Fring.fringe_freq_groups(freqs)
         (1 <= Int(freqgroup) <= length(fgs)) || error("freqgroup must be in 1:$(length(fgs)) (got $freqgroup)")
         r = fgs[Int(freqgroup)]
         fglab = @sprintf(" — freqgroup %d/%d", Int(freqgroup), length(fgs))
@@ -76,11 +76,11 @@ function Fringe.plot_fringe_spectrum(
     return parent
 end
 
-function Fringe.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false)
+function Fring.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false)
     nrow = length(_fringe_indices(sites, sol.steps[1].layout.nant))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
-    Fringe.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, freqgroup = freqgroup, residual = residual)
+    Fring.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, freqgroup = freqgroup, residual = residual)
     return fig
 end
 
@@ -89,7 +89,7 @@ end
 # where the per-scan delay term contributes ~nothing. Any other channel adds
 # 2π·τ·(f_ci − f0) — thousands of radians on real data — so the scan-to-scan
 # phase track is wrap-scrambled by the delay and unreadable there.
-function Fringe.plot_fringe_phases(
+function Fring.plot_fringe_phases(
         parent, sol::CalibrationSolution;
         sites = :all, feeds = :all, ci::Integer = 0,
     )
@@ -120,16 +120,16 @@ function Fringe.plot_fringe_phases(
     return parent
 end
 
-function Fringe.plot_fringe_phases(sol::CalibrationSolution; sites = :all, feeds = :all, ci::Integer = 0)
+function Fring.plot_fringe_phases(sol::CalibrationSolution; sites = :all, feeds = :all, ci::Integer = 0)
     nrow = length(_fringe_indices(sites, sol.steps[1].layout.nant))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
-    Fringe.plot_fringe_phases(fig, sol; sites = sites, feeds = feeds, ci = ci)
+    Fring.plot_fringe_phases(fig, sol; sites = sites, feeds = feeds, ci = ci)
     return fig
 end
 
 # ── plot_fringe_snr: per-scan max SNR ─────────────────────────────────────────
-function Fringe.plot_fringe_snr(parent, sol::CalibrationSolution)
+function Fring.plot_fringe_snr(parent, sol::CalibrationSolution)
     rows = fringe_snr_table(sol)
     scans = [Float64(r.scan) for r in rows]
     snr = [r.max_snr for r in rows]
@@ -141,9 +141,9 @@ function Fringe.plot_fringe_snr(parent, sol::CalibrationSolution)
     return parent
 end
 
-function Fringe.plot_fringe_snr(sol::CalibrationSolution)
+function Fring.plot_fringe_snr(sol::CalibrationSolution)
     fig = Figure(size = (640, 280))
-    Fringe.plot_fringe_snr(fig, sol)
+    Fring.plot_fringe_snr(fig, sol)
     return fig
 end
 
@@ -220,7 +220,7 @@ end
 # track sitting near ±π is drawn as one group instead of split across the wrap.
 _unit_phasor(zs) = (s = sum(z -> isfinite(z) ? z : zero(z), zs); abs(s) > 0 ? s / abs(s) : one(ComplexF64))
 
-function Fringe.plot_baseline_fringes(
+function Fring.plot_baseline_fringes(
         parent, data::BaselineFringeData;
         kind::Symbol = :freq, show::Symbol = :phase, pol = :parallel, baselines = :all,
         layout::Symbol = :triangle, bin::Integer = 0, freqgroup = nothing,
@@ -391,7 +391,7 @@ function Fringe.plot_baseline_fringes(
     return parent
 end
 
-function Fringe.plot_baseline_fringes(data::BaselineFringeData; kind::Symbol = :freq, kwargs...)
+function Fring.plot_baseline_fringes(data::BaselineFringeData; kind::Symbol = :freq, kwargs...)
     bls = _baseline_indices(data, get(kwargs, :baselines, :all))
     layout = get(kwargs, :layout, :triangle)
     if layout === :triangle
@@ -403,16 +403,16 @@ function Fringe.plot_baseline_fringes(data::BaselineFringeData; kind::Symbol = :
         nrows = ceil(Int, n / ncols)
     end
     fig = Figure(size = (360 * ncols + 40, 240 * nrows + 60))
-    Fringe.plot_baseline_fringes(fig, data; kind = kind, kwargs...)
+    Fring.plot_baseline_fringes(fig, data; kind = kind, kwargs...)
     return fig
 end
 
-function Fringe.plot_baseline_fringes(
+function Fring.plot_baseline_fringes(
         uvset::UVSet, sol::CalibrationSolution;
         scan_index = nothing, kind::Symbol = :freq, kwargs...,
     )
     data = baseline_fringe_data(uvset, sol; scan_index = scan_index)
-    return Fringe.plot_baseline_fringes(data; kind = kind, kwargs...)
+    return Fring.plot_baseline_fringes(data; kind = kind, kwargs...)
 end
 
 # ── plot_fringe_search: delay–rate SNR surface + peak cross-sections ───────────
@@ -460,7 +460,7 @@ end
 _zoom_span(zoom::Bool) = zoom ? _FRINGE_ZOOM_SPAN : nothing
 _zoom_span(zoom::Real) = (zoom > 0 || error("plot_fringe_search: zoom must be positive"); Float64(zoom))
 
-function Fringe.plot_fringe_search(
+function Fring.plot_fringe_search(
         parent, fsm::FringeSearchMap;
         title::AbstractString = "", zoom::Union{Bool, Real} = true,
     )
@@ -517,7 +517,7 @@ function Fringe.plot_fringe_search(
     return parent
 end
 
-function Fringe.plot_fringe_search(parent, m::BaselineFringeMap; kwargs...)
+function Fring.plot_fringe_search(parent, m::BaselineFringeMap; kwargs...)
     det = m.map.detection
     title = string(
         m.source, "  scan ", m.scan, "  ",
@@ -528,18 +528,18 @@ function Fringe.plot_fringe_search(parent, m::BaselineFringeMap; kwargs...)
         @sprintf("   ṙ = %.3f mHz", det.rate * 1.0e3),
         "   PFA ", _fmt_pfa(m.map.pfa),
     )
-    return Fringe.plot_fringe_search(parent, m.map; title = title, kwargs...)
+    return Fring.plot_fringe_search(parent, m.map; title = title, kwargs...)
 end
 
-function Fringe.plot_fringe_search(m::Union{BaselineFringeMap, FringeSearchMap}; kwargs...)
+function Fring.plot_fringe_search(m::Union{BaselineFringeMap, FringeSearchMap}; kwargs...)
     fig = Figure(size = (900, 640))
-    Fringe.plot_fringe_search(fig, m; kwargs...)
+    Fring.plot_fringe_search(fig, m; kwargs...)
     return fig
 end
 
-function Fringe.plot_fringe_search(
+function Fring.plot_fringe_search(
         uvset::UVSet, sol::CalibrationSolution;
         zoom::Union{Bool, Real} = true, kwargs...,
     )
-    return Fringe.plot_fringe_search(fringe_search_map(uvset, sol; kwargs...); zoom = zoom)
+    return Fring.plot_fringe_search(fringe_search_map(uvset, sol; kwargs...); zoom = zoom)
 end

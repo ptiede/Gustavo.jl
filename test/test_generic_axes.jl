@@ -12,7 +12,7 @@ using Gustavo.UVData: Frequency, Ti, Baseline, Pol
 # plausible delay built partly from memory past the end of its input.
 @testset "generic axes" begin
     UV = Gustavo.UVData
-    FR = Gustavo.Fringe
+    FR = Gustavo.Fring
     CAL = Gustavo.Calibration
     ST = Gustavo.Streaming
 

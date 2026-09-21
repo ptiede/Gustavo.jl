@@ -504,7 +504,7 @@ stack uniformly.
 `epoch` (seconds) is where the phases were measured, which the station solve needs
 to read them as constants. Omitting it asserts they sit wherever the model's
 rate components are referenced, and is an error when those disagree among
-themselves — see `Fringe.scan_phase_epoch`.
+themselves — see `Fring.scan_phase_epoch`.
 """
 function detection_stack(
         D::AbstractMatrix{<:Detection}, bl_pairs, pol_products;

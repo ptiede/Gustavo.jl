@@ -150,7 +150,7 @@
     end
 end
 
-# The streaming layer drives a pass with nothing from `Gustavo.Fringe` in
+# The streaming layer drives a pass with nothing from `Gustavo.Fring` in
 # scope: `using Gustavo.Streaming` alone must supply the stream, the grouping,
 # the transform contract and the pass runner.
 module StreamingWithoutFringe
@@ -187,12 +187,12 @@ end
     @test all(isapprox(h, 0.5 * p; rtol = 1.0e-6) for (h, p) in zip(halved, plain))
 
     # `Streaming` never names the fringe kernels — the module is the assertion,
-    # since it is loaded before `Fringe` and cannot reach back into it.
+    # since it is loaded before `Fring` and cannot reach back into it.
     for n in (:FringeWorkspace, :FringeSearch, :search_scan)
         @test !isdefined(Gustavo.Streaming, n)
     end
 
-    # `Fringe`'s own selection extends the streaming generic rather than
+    # `Fring`'s own selection extends the streaming generic rather than
     # shadowing it: one function, reachable unambiguously at the top level.
     @test FP.select_scans === ST.select_scans === Gustavo.select_scans
     @test isdefined(Gustavo, :select_scans)

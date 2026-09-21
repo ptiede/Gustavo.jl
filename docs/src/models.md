@@ -110,18 +110,18 @@ components nests them under its key (the SBD element's `sbd.delay` /
 
 Each built-in solve step takes its model as a constructor argument, vetted at
 compile time — before any data is read — against the step's solver: the
-solver declares [`can_fit`](@ref Gustavo.Fringe.can_fit) per component
+solver declares [`can_fit`](@ref Gustavo.Fring.can_fit) per component
 (default `false`, so an undeclared combination fails loudly with the
 component's constructor spelling, never solves to silent zeros), plus
 whole-tree requirements via
-[`validate_model`](@ref Gustavo.Fringe.validate_model).
+[`validate_model`](@ref Gustavo.Fring.validate_model).
 
 - [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_terms(), smoother = ...)`
   and [`TemporalSmoother`](@ref Gustavo.TemporalSmoother)`(model = default_adhoc_terms(), smoother = ...)`
   take a full `(; phase, logamp)` tree (or a `StationGainModel`).
 - [`FringeFit`](@ref Gustavo.FringeFit)`(model = FringeModel(), estimator = ...)`
-  takes a [`FringeModel`](@ref Gustavo.Fringe.FringeModel): an ordered, named
-  phase-term list ([`default_fringe_terms`](@ref Gustavo.Fringe.default_fringe_terms)).
+  takes a [`FringeModel`](@ref Gustavo.Fring.FringeModel): an ordered, named
+  phase-term list ([`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms)).
 - [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)`(dispersion = DispersionModel(), sbd = SingleBandDelay())`
   deliberately has no free-form tree: its solver is a rigid specialized fit,
   so its whole surface is the two element fields (either may be `nothing`).
@@ -154,7 +154,7 @@ weak scans inherit it through the shared column. There is deliberately no
 inter-feed *phase* offset: a feed-2 constant is not separable from the
 source's cross-hand phase, so fitting one would remove the source's
 polarization angle along with the instrument's offset — see
-[`default_fringe_terms`](@ref Gustavo.Fringe.default_fringe_terms) for the
+[`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms) for the
 full argument.
 
 **`rate` — per-scan fringe rate, feed-common.** The fringe rate is common to

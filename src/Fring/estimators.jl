@@ -25,15 +25,15 @@ least-squares estimator would carry neither.
 Subtype it and define two methods, called once per scan group and once per
 pass:
 
-    Gustavo.Fringe.estimate_scan!(est::MyEstimator, ctx, step, stack, win) -> NamedTuple
-    Gustavo.Fringe.finish_estimate!(est::MyEstimator, ctx, step) -> NamedTuple
+    Gustavo.Fring.estimate_scan!(est::MyEstimator, ctx, step, stack, win) -> NamedTuple
+    Gustavo.Fring.finish_estimate!(est::MyEstimator, ctx, step) -> NamedTuple
 
 (see [`estimate_scan!`](@ref) and [`finish_estimate!`](@ref); both fallbacks
 error, naming what is missing). Then declare what it can fit, checked when
 the step compiles the model, before any data is read:
 
-    Gustavo.Fringe.can_fit(est::MyEstimator, tc) -> Bool
-    Gustavo.Fringe.validate_model(est::MyEstimator, comps)   # optional
+    Gustavo.Fring.can_fit(est::MyEstimator, tc) -> Bool
+    Gustavo.Fring.validate_model(est::MyEstimator, comps)   # optional
 
 [`can_fit`](@ref) defaults to `false`, so an estimator that declares nothing
 is rejected rather than leaving θ columns unwritten; [`validate_model`](@ref)
@@ -71,7 +71,7 @@ function estimate_scan! end
 
 estimate_scan!(est::AbstractFringeEstimator, ctx, step, stack, win) = error(
     "$(typeof(est)) does not implement the fringe estimator interface: define " *
-        "Gustavo.Fringe.estimate_scan!(::$(typeof(est)), ctx, step, stack, win) " *
+        "Gustavo.Fring.estimate_scan!(::$(typeof(est)), ctx, step, stack, win) " *
         "returning this scan group's contribution (see `AbstractFringeEstimator`)."
 )
 
@@ -94,7 +94,7 @@ function finish_estimate! end
 
 finish_estimate!(est::AbstractFringeEstimator, ctx, step) = error(
     "$(typeof(est)) does not implement the fringe estimator interface: define " *
-        "Gustavo.Fringe.finish_estimate!(::$(typeof(est)), ctx, step) " *
+        "Gustavo.Fring.finish_estimate!(::$(typeof(est)), ctx, step) " *
         "solving the cross-scan parameters (see `AbstractFringeEstimator`)."
 )
 
