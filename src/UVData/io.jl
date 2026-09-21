@@ -12,6 +12,9 @@ Load a UVData file, returning a `UVSet` whose `branches` is a flat
 random-groups file is read as `ComplexF64`/`Float64`. Name it explicitly to
 store at a different precision — including to narrow a double file deliberately.
 
+Visibilities are read verbatim: AIPS UVFITS shares Gustavo's internal phase
+sense. See [Conventions](@ref conventions).
+
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
 function load_uvfits end
@@ -23,17 +26,15 @@ Write a UVData file by walking the leaves of `uvset` directly and emitting
 random-groups records in scan-insertion order, then assembling the AN, FQ,
 and NX bintables from the root metadata.
 
-`convention` selects the on-disk visibility phase convention:
-- `:aips` (default) — the AIPS/CASA/UVFITS convention, the standard form read
-  correctly by AIPS, DIFMAP, CASA, ehtim, pyuvdata, and VLBIFiles. This is also
-  Gustavo's internal convention, so the visibilities are written verbatim.
-- `:fitsidi` — conjugate to the FITS-IDI phase convention, which stores
-  `V = ⟨E_a1 · conj(E_a2)⟩` (AIPS Memo 114r §2.1), for tools that expect that
-  sense in a UVFITS file.
+`convention` selects the on-disk visibility phase sense:
+- `:aips` (default) — Gustavo's internal sense, written verbatim, and the form
+  read correctly by AIPS, DIFMAP, CASA, ehtim, pyuvdata, and VLBIFiles.
+- `:fitsidi` — conjugated, for tools that expect the FITS-IDI sense in a
+  UVFITS file.
 
-`(u,v,w)` are written verbatim in both cases — FITS-IDI and AIPS UVFITS share
-the same baseline-coordinate convention. `load_uvfits` always assumes a standard
-`:aips` file, so only `:aips` round-trips as the identity.
+`(u,v,w)` is written verbatim in both cases. `load_uvfits` always assumes an
+`:aips` file, so only `:aips` round-trips as the identity. See
+[Conventions](@ref conventions).
 
 The file is written at the precision `uvset` holds. Random groups carry one
 floating type for the data array and every group parameter alike, so that is
@@ -57,10 +58,9 @@ Load a FITS-IDI file (AIPS Memo 114) into a `UVSet`. Header tables
 (`materialize_leaf`). Pass `lazy = false` to materialize everything up front
 (only for small files), or restrict `scans`/`bands` to a subset.
 
-Visibilities are conjugated on read: FITS-IDI stores `V = ⟨E_a1 · conj(E_a2)⟩`
-(AIPS Memo 114r §2.1), the conjugate of Gustavo's internal AIPS/CASA/MSv4 phase
-convention. `(u,v,w)` and the baseline antenna ordering are shared by both and
-are read verbatim.
+Visibilities are conjugated on read, from the FITS-IDI sense into Gustavo's
+internal one; `(u,v,w)` and the baseline antenna ordering are shared by both
+and are read verbatim. See [Conventions](@ref conventions).
 
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
@@ -74,8 +74,8 @@ ARRAY_GEOMETRY, SOURCE, ANTENNA, FREQUENCY, and a time-ordered `UV_DATA`
 binary table. Used primarily to build round-trip and fringe-injection test
 fixtures.
 
-Visibilities are conjugated on write, into the FITS-IDI phase convention
-`V = ⟨E_a1 · conj(E_a2)⟩`; `load_fitsidi` conjugates back.
+Visibilities are conjugated on write, into the FITS-IDI sense; `load_fitsidi`
+conjugates back. See [Conventions](@ref conventions).
 
 Each column is written at the precision its layer holds — a double-precision
 `vis` gives a `D`-format `FLUX` column — since a FITS-IDI column carries its

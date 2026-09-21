@@ -14,7 +14,9 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
+        "Conventions" => "conventions.md",
         "Specifying gain models" => "models.md",
+        "Fringe fitting" => "fringe_fitting.md",
         "Authoring a new gain term" => "authoring_terms.md",
         "Authoring a pipeline step" => "authoring_steps.md",
         "API reference" => [
