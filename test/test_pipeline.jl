@@ -33,7 +33,8 @@ include("synthetic_uvset.jl")
             bl_pairs = UVP.baselines(leaf).pairs
             lp = pol_products(leaf)
             for p in eachindex(lp)
-                Gustavo.Calibration.is_parallel_hand(lp[p]) || continue
+                fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+                fp[1] == fp[2] || continue
                 for bi in eachindex(bl_pairs)
                     a, b = bl_pairs[bi]
                     a == b && continue
@@ -54,7 +55,8 @@ include("synthetic_uvset.jl")
             bl_pairs = UVP.baselines(leaf).pairs
             lp = pol_products(leaf)
             for p in eachindex(lp)
-                Gustavo.Calibration.is_parallel_hand(lp[p]) && continue
+                fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+                fp[1] == fp[2] && continue
                 for bi in eachindex(bl_pairs)
                     a, b = bl_pairs[bi]
                     a == b && continue
@@ -255,7 +257,8 @@ end
         bl_pairs = UVP.baselines(leaf2).pairs
         lp = pol_products(leaf2)
         for p in eachindex(lp)
-            Gustavo.Calibration.is_parallel_hand(lp[p]) || continue
+            fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+            fp[1] == fp[2] || continue
             for bi in eachindex(bl_pairs)
                 bl_pairs[bi][1] == bl_pairs[bi][2] && continue
                 @test _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])) > 0.99
@@ -499,7 +502,8 @@ end
             bl_pairs = UVP.baselines(leaf).pairs
             lp = pol_products(leaf)
             for p in eachindex(lp)
-                Gustavo.Calibration.is_parallel_hand(lp[p]) || continue
+                fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+                fp[1] == fp[2] || continue
                 for bi in eachindex(bl_pairs)
                     a, b = bl_pairs[bi]
                     a == b && continue
@@ -762,7 +766,8 @@ end
         bl_pairs = UVP.baselines(leaf).pairs
         lp = pol_products(leaf)
         for p in eachindex(lp)
-            Gustavo.Calibration.is_parallel_hand(lp[p]) || continue
+            fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+            fp[1] == fp[2] || continue
             for bi in eachindex(bl_pairs)
                 a, b = bl_pairs[bi]
                 a == b && continue

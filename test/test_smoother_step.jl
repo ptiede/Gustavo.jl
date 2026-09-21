@@ -44,7 +44,8 @@ function _worst_parallel_coherence(corr)
         bl_pairs = UVP.baselines(leaf).pairs
         lp = pol_products(leaf)
         for p in eachindex(lp)
-            CAL.is_parallel_hand(lp[p]) || continue
+            fp = CAL.correlation_feed_pair(lp[p])
+            fp[1] == fp[2] || continue
             for bi in eachindex(bl_pairs)
                 a, b = bl_pairs[bi]
                 a == b && continue

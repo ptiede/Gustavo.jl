@@ -21,15 +21,6 @@ end
 _feed_index(c::Char) = c == 'P' ? 1 : c == 'Q' ? 2 : error("Unsupported feed letter '$c' (expected 'P' or 'Q')")
 
 """
-    is_parallel_hand(label::AbstractString) -> Bool
-
-True for the parallel-hand correlations `"PP"` and `"QQ"`; false for
-`"PQ"` and `"QP"`.
-"""
-is_parallel_hand(label::AbstractString) =
-    length(label) == 2 && label[1] == label[2]
-
-"""
     parallel_hand_indices(pol_products) -> Tuple{Int, Int}
 
 Indices of `"PP"` and `"QQ"` in `pol_products`. Errors if either is

@@ -50,7 +50,7 @@ export load_uvfits, write_uvfits, default_output_path
 export load_fitsidi, write_fitsidi
 export is_lazy, materialize_leaf, materialize, materialize_group
 export check_layer_axes
-export correlation_feed_pair, is_parallel_hand
+export correlation_feed_pair
 export parallel_hand_indices, cross_hand_indices
 export AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
 export load_antab, load_fitsidi_apriori, tsys_at, elevation_gain, stations

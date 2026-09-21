@@ -10,7 +10,7 @@ module Calibration
 
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 using ..UVData
-using ..UVData: correlation_feed_pair, is_parallel_hand,
+using ..UVData: correlation_feed_pair,
     parallel_hand_indices, cross_hand_indices, phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,
     is_lazy, pol_products, baselines
@@ -37,7 +37,7 @@ include("Calibration/evaluate.jl")
 include("Calibration/solutions.jl")
 
 # Feed / correlation-product conventions
-export correlation_feed_pair, is_parallel_hand
+export correlation_feed_pair
 export parallel_hand_indices, cross_hand_indices
 
 # Gauge conventions for station-based solves
