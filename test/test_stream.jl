@@ -284,3 +284,70 @@ end
         @test size(g, 2) == length(names)
     end
 end
+
+@testset "the cube's precision follows the leaves" begin
+    base, _ = _build_fringe_uvset(; nspw = 2, nchan = 4, ntime = 4)
+
+    # `bands === nothing` retypes every leaf.
+    function retype(uvset, C, R; bands = nothing)
+        branches = DimensionalData.TreeDict()
+        for (i, (k, leaf)) in enumerate(UVP.branches(uvset))
+            v, w = leaf[:vis], leaf[:weights]
+            hit = bands === nothing || i in bands
+            vis = hit ? DimArray(convert(Array{C}, parent(v)), dims(v)) : v
+            wts = hit ? DimArray(convert(Array{R}, parent(w)), dims(w)) : w
+            branches[k] = UVP._build_leaf(
+                vis, wts, leaf[:uvw], leaf[:flags]; partition_info = UVP.metadata(leaf),
+            )
+        end
+        return DimensionalData.rebuild(uvset; branches = branches)
+    end
+
+    function cube(uvset)
+        st = FP.scan_stream(uvset; geom = CAL.build_geometry(uvset))
+        return first(FP.materialize_cube(st, st.groups[1]))
+    end
+
+    @testset "single precision in, single precision out" begin
+        stack = cube(base)
+        @test eltype(stack[:vis]) === ComplexF32
+        @test eltype(stack[:weights]) === Float32
+    end
+
+    @testset "double precision survives the concatenation" begin
+        wide = retype(base, ComplexF64, Float64)
+        # No exact Float32 representation, so narrowing shows up as an
+        # inequality rather than passing a type check.
+        parent(first(values(UVP.branches(wide)))[:vis])[1] = ComplexF64(1 / 3, 1 / 7)
+        parent(first(values(UVP.branches(wide)))[:weights])[1] = 1 / 3
+        stack = cube(wide)
+        @test eltype(stack[:vis]) === ComplexF64
+        @test eltype(stack[:weights]) === Float64
+        @test stack[:vis][1, 1, 1, 1] == ComplexF64(1 / 3, 1 / 7)
+        @test stack[:weights][1, 1, 1, 1] == 1 / 3
+    end
+
+    @testset "bands of unlike precision promote" begin
+        mixed = retype(base, ComplexF64, Float64; bands = (2,))
+        stack = cube(mixed)
+        @test eltype(stack[:vis]) === ComplexF64
+        @test eltype(stack[:weights]) === Float64
+    end
+
+    @testset "the search runs at the cube's precision" begin
+        wide = retype(base, ComplexF64, Float64)
+        geom = CAL.build_geometry(wide)
+        st = FP.scan_stream(wide; geom = geom)
+        stack, _ = FP.materialize_cube(st, st.groups[1])
+        res = FP.search_scan(stack, st.geom, FP.FringeSearch(); ngroups = length(st.groups))
+        @test eltype(res.delay) === Float64
+        @test any(res.valid)
+
+        geom32 = CAL.build_geometry(base)
+        st32 = FP.scan_stream(base; geom = geom32)
+        stack32, _ = FP.materialize_cube(st32, st32.groups[1])
+        res32 = FP.search_scan(stack32, st32.geom, FP.FringeSearch(); ngroups = length(st32.groups))
+        @test eltype(res32.delay) === Float32
+        @test maximum(abs, res.delay .- res32.delay) < 1.0e-12
+    end
+end

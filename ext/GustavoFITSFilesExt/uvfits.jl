@@ -617,8 +617,8 @@ end
 
 # ── Read path ───────────────────────────────────────────────────────────────
 
-function UVData.load_uvfits(path)
-    flat = _load_uvfits_flat(path)
+function UVData.load_uvfits(path; element_type::Union{Nothing, Type} = nothing)
+    flat = _load_uvfits_flat(path; element_type)
     uvset = UVSet(flat)
     UVData.register_primary_cards!(uvset, flat.primary_cards)
     register_source_path!(uvset, path)
@@ -700,7 +700,7 @@ function _assign_records_to_nx_rows(
     return _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
 end
 
-function _load_uvfits_flat(path)
+function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
     fid = FITSFiles.fits(path)
     primary_hdu = fid[1]
     # Bypass FITSFiles' per-record Vector{Float32} allocation when the
@@ -729,7 +729,13 @@ function _load_uvfits_flat(path)
     an_hdu = first(an_hdus)
 
     dim1 = findall(==(1), size(dt.data))
-    raw::Array{Float32, 4} = dropdims(dt.data, dims = Tuple(dim1))
+    raw = dropdims(dt.data, dims = Tuple(dim1))
+    element_type === nothing || element_type <: AbstractFloat || throw(
+        ArgumentError(
+            "load_uvfits: element_type must be a real float type, got $(element_type)",
+        ),
+    )
+    T = element_type === nothing ? eltype(raw) : element_type
 
     # Read the visibilities verbatim. AIPS random-groups UVFITS shares Gustavo's
     # internal phase convention — both are the AIPS/CASA/casacore sense, which is
@@ -737,8 +743,8 @@ function _load_uvfits_flat(path)
     # casacore FitsIDItoMS.cc: "FITS-IDI convention is conjugate of AIPS and CASA
     # convention"). (u,v,w) and the 256·a1+a2 baseline codes agree too, so nothing
     # on this boundary is transformed.
-    vis_raw::Array{ComplexF32, 3} = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
-    weights_raw::Array{Float32, 3} = raw[:, 3, :, :]
+    vis_raw::Array{Complex{T}, 3} = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
+    weights_raw::Array{T, 3} = raw[:, 3, :, :]
 
     antenna_tables = AntennaTable[_build_antenna_table(h) for h in an_hdus]
     antennas = first(antenna_tables)
@@ -808,7 +814,7 @@ function _load_uvfits_flat(path)
     # AIPS Memo 117r §4.1.2 = Memo 114r §4.1.2 word for word). The FITS-IDI↔AIPS
     # difference is purely the visibility conjugation, which FITS-IDI carries and
     # UVFITS does not.
-    uvw_raw::Matrix{Float32} = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
+    uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
     cfq::Vector{Float64} = channel_freqs(first(freq_setups))
     dims = (Ti(obs_time), Pol(msv4_labels), Frequency(cfq))
@@ -942,19 +948,25 @@ _basename_of_path(path) = isempty(path) ? "uvfits" : Base.basename(String(path))
 #
 # The original FITSFiles path allocates one `Vector{Float32}` per record
 # (~50 M allocs / 2 GiB on a 100k-record EHT file). The bulk read here
-# is a single `read!` into a `Vector{Float32}` of length
+# is a single `read!` into a `Vector{T}` of length
 # `N * (P + prod(shape))`, plus an in-place `bswap` pass.
+# The two-method split is a function barrier: the body runs with `T` concrete.
 function _fast_random_read(lazy::FITSFiles.LazyArray)
+    T = lazy.format.type
+    T === Float32 || T === Float64 ||
+        error("_fast_random_read: only Float32/Float64 random groups supported (got $T)")
+    return _fast_random_read(T, lazy)
+end
+
+function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyArray) where {T <: AbstractFloat}
     fmt = lazy.format
-    fmt.type === Float32 ||
-        error("_fast_random_read: only Float32 random groups supported (got $(fmt.type))")
     fields = lazy.fields::AbstractVector{<:FITSFiles.AbstractField}
     P = fmt.param::Int
     N = fmt.group::Int
     leng_data = prod(fmt.shape)::Int
     L = P + leng_data
     total = N * L
-    buf = Vector{Float32}(undef, total)
+    buf = Vector{T}(undef, total)
     open(lazy.filnam) do io
         seek(io, lazy.begpos)
         read!(io, buf)
@@ -999,7 +1011,7 @@ function _fast_random_read(lazy::FITSFiles.LazyArray)
         ndx = name_indices[name]
         col = if length(ndx) == 1
             fld = fields[ndx[1]]
-            v = Vector{Float32}(undef, N)
+            v = Vector{T}(undef, N)
             @inbounds for j in 1:N
                 v[j] = rec[ndx[1], j]
             end
@@ -1011,7 +1023,7 @@ function _fast_random_read(lazy::FITSFiles.LazyArray)
             end
             v
         else
-            m = Matrix{Float32}(undef, N, length(ndx))
+            m = Matrix{T}(undef, N, length(ndx))
             @inbounds for (k, fi) in enumerate(ndx)
                 fld = fields[fi]
                 for j in 1:N

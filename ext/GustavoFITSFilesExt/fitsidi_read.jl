@@ -1671,6 +1671,11 @@ function UVData.load_fitsidi(
     # FLUX field descriptor (read once; shared by all chunk arrays).
     flux_col = data[:FLUX]
     flux_field = flux_col.fields[1]
+    flux_field.type === Float64 && error(
+        "load_fitsidi: $(path) has a double-precision ('D') FLUX column, which " *
+            "this reader can only store as ComplexF32. Convert it with " *
+            "XRadio.fitsidi2msv4 to read it at its own precision."
+    )
     flux_scale = FITSFiles._has_active_scaling(flux_field, true)
     weight_col = data[:WEIGHT]
 

@@ -1128,3 +1128,46 @@ end
         end
     end
 end
+
+@testset "storage precision follows the file" begin
+    UV = Gustavo.UVData
+    uvset = build_synth_idi_uvset(; nant = 3, nspw = 2, nchan = 4, nscan = 1, ntime = 3)
+
+    @testset "load_uvfits takes the file's own precision" begin
+        mktempdir() do dir
+            path = joinpath(dir, "prec.uvfits")
+            UV.write_uvfits(path, uvset)
+            leaf = first(values(UV.leaves(UV.load_uvfits(path))))
+            @test eltype(leaf[:vis]) === ComplexF32
+            @test eltype(leaf[:weights]) === Float32
+
+            wide = first(values(UV.leaves(UV.load_uvfits(path; element_type = Float64))))
+            @test eltype(wide[:vis]) === ComplexF64
+            @test eltype(wide[:weights]) === Float64
+            @test parent(wide[:vis]) == ComplexF64.(parent(leaf[:vis]))
+            @test parent(wide[:weights]) == Float64.(parent(leaf[:weights]))
+
+            @test_throws "element_type must be a real float type" UV.load_uvfits(
+                path; element_type = ComplexF64,
+            )
+        end
+    end
+
+    @testset "load_fitsidi refuses a double-precision FLUX column" begin
+        mktempdir() do dir
+            path = joinpath(dir, "prec.idi")
+            UV.write_fitsidi(path, uvset)
+            # The guard runs before any row is read, so retyping the FLUX
+            # column's TFORM is enough to reach it.
+            bytes = read(path)
+            text = String(copy(bytes))
+            n = only(m.captures[1] for m in eachmatch(r"TTYPE(\d+) = 'FLUX *'", text))
+            tform = only(eachmatch(Regex("TFORM$(n) *= *'\\d+(E)'"), text))
+            bytes[tform.offsets[1]] = UInt8('D')
+            wide_path = joinpath(dir, "prec_d.idi")
+            write(wide_path, bytes)
+
+            @test_throws "double-precision ('D') FLUX column" UV.load_fitsidi(wide_path)
+        end
+    end
+end

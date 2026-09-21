@@ -283,12 +283,14 @@ intermediates); falls back to materialize-then-copy when the group is not a
 single sibling-band IDI span.
 
 `stack` is a leaf-shaped `DimStack` built once where the concatenated cube is
-born: native-precision `:vis`/`:weights`/`:flags` layers on `(Frequency, Ti,
-Baseline, Pol)` dims, with the first band leaf's `PartitionInfo` as metadata (source/scan
-identity, antennas and baselines are group-wide; the frequency truth for the
-concatenated axis lives on the `Frequency` lookup, not in
-`metadata.frequencies`, which still describes that one band). `win` is the
-group's [`GeometryWindow`](@ref) into the solve's index space.
+born: `:vis`/`:weights`/`:flags` layers on `(Frequency, Ti, Baseline, Pol)`
+dims, `:vis` and `:weights` each carrying the element type promoted over the
+group's leaves so no band's precision is narrowed. Metadata is the first band
+leaf's `PartitionInfo` (source/scan identity, antennas and baselines are
+group-wide; the frequency truth for the concatenated axis lives on the
+`Frequency` lookup, not in `metadata.frequencies`, which still describes that
+one band). `win` is the group's [`GeometryWindow`](@ref) into the solve's index
+space.
 """
 function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; executor = inner_executor(stream))
     grp = _direct_scan_group(spec, stream.geom, executor)
@@ -299,6 +301,13 @@ function materialize_cube(stream::ScanStream, spec::ScanGroupSpec; executor = in
     stack, win = grp
     apply_transforms!(stream.transforms, stack, win; executor)
     return stack, win
+end
+
+# Promoted over the group's leaves so that no band's precision is narrowed.
+function _cube_eltypes(leaves)
+    C = mapreduce(l -> eltype(l[:vis]), promote_type, leaves)
+    R = mapreduce(l -> eltype(l[:weights]), promote_type, leaves)
+    return C, R
 end
 
 # Direct decode into the stacked cube: returns `nothing` (caller falls back) unless
@@ -346,8 +355,9 @@ function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry, executor)
     end
     any(isempty, blocks) && return nothing
 
-    Vg = Array{ComplexF32}(undef, nchan, nti, nbl, npol)
-    Wg = Array{Float32}(undef, nchan, nti, nbl, npol)
+    C, R = _cube_eltypes(lazy)
+    Vg = Array{C}(undef, nchan, nti, nbl, npol)
+    Wg = Array{R}(undef, nchan, nti, nbl, npol)
     Fg = Array{Bool}(undef, nchan, nti, nbl, npol)
     fg = Vector{Float64}(undef, nchan)
     g_ci = Vector{Int}(undef, nchan)
@@ -379,9 +389,9 @@ end
 # `V`/`W`/`F` from `parent(leaf[:vis])` and friends are type-unstable at the call
 # site; the `@simd` loop over the stride-1 channel axis needs the specialization).
 function _cube_block!(
-        Vg::Array{ComplexF32, 4}, Wg::Array{Float32, 4}, Fg::Array{Bool, 4}, V, W, F,
+        Vg::Array{C, 4}, Wg::Array{R, 4}, Fg::Array{Bool, 4}, V, W, F,
         dst0::Int, lc0::Int, nbc::Int,
-    )
+    ) where {C, R}
     # The outer ranges are the destination's own axes; the annotation carries
     # the channel axis, whose indices are formed by arithmetic on `dst0`/`lc0`.
     @inbounds for p in axes(Vg, 4), bl in axes(Vg, 3), ti in axes(Vg, 2)
@@ -417,8 +427,9 @@ function _stacked_scan_group(leaves, geom::DataGeometry)
     sort!(chan_entries; by = e -> e[1])
     nchan = length(chan_entries)
 
-    Vg = Array{ComplexF32}(undef, nchan, nti, nbl, npol)
-    Wg = Array{Float32}(undef, nchan, nti, nbl, npol)
+    C, R = _cube_eltypes(leaves)
+    Vg = Array{C}(undef, nchan, nti, nbl, npol)
+    Wg = Array{R}(undef, nchan, nti, nbl, npol)
     Fg = Array{Bool}(undef, nchan, nti, nbl, npol)
     fg = Vector{Float64}(undef, nchan)
     g_ci = Vector{Int}(undef, nchan)

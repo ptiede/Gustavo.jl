@@ -1,11 +1,16 @@
 """
-    load_uvfits(path) -> UVSet
+    load_uvfits(path; element_type = nothing) -> UVSet
 
 Load a UVData file, returning a `UVSet` whose `branches` is a flat
 `OrderedDict` of MSv4-shaped per-scan leaf `DimTree`s keyed by sanitized
 `:<source>_scan_<n>` Symbols. Each leaf carries dense
 `(Ti, Baseline, Pol, Frequency)` cubes for `vis`/`weights` and
 `(Ti, Baseline, UVW)` for `uvw`, mirroring xradio's MSv4 visibility schema.
+
+`element_type` is the real float type the `vis`/`weights` cubes are stored at;
+`nothing` takes the precision the file itself holds, so a double-precision
+random-groups file is read as `ComplexF64`/`Float64`. Name it explicitly to
+store at a different precision — including to narrow a double file deliberately.
 
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
