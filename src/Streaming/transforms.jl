@@ -392,8 +392,8 @@ already scaled to Jy. Same correction as
 non-positive, and those below `min_elevation_deg`, are flagged;
 autocorrelations are flagged, being total power rather than a visibility.
 
-This is the streaming counterpart of the
-[`AprioriAmplitude`](@ref) pipeline step. The two differ in *what they
+This is the streaming counterpart of the `AprioriAmplitude`
+pipeline step. The two differ in *what they
 calibrate*, not merely in when: `AprioriAmplitude` runs in the output tail,
 after the solved gains, so a bandpass fit alongside it is fit on uncalibrated
 amplitudes; this transform runs before any solver reads the scan, so the SEFD

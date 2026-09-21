@@ -210,9 +210,13 @@ end
     rbin = m.rates[2] - m.rates[1]
     @test isapprox(m.delays[pk[1]], τ; atol = dbin)
     @test isapprox(m.rates[pk[2]], ṙ; atol = rbin)
-    # ...and its height matches the refined detection SNR (the exact re-evaluated
-    # peak is ≥ the discrete grid peak, but only marginally at oversample = 8).
-    @test isapprox(maximum(m.snr), det.snr; rtol = 0.05)
+    # ...and its height matches the refined detection SNR to within the grid's
+    # scalloping loss. A peak falling between cells is read low by up to
+    # sinc(1/2oversample) on each axis, so the bound follows `oversample` rather
+    # than being a fixed tolerance; the exact re-evaluated peak is never below
+    # the discrete one.
+    osr = FR._resolve_oversample(opts.oversample, FR._uniform_axis(freqs), nchan)
+    @test maximum(m.snr) >= det.snr * sinc(1 / 2osr)^2
     @test maximum(m.snr) <= det.snr * (1 + 1.0e-9)
 
     # A strong fringe is a secure detection.
@@ -242,6 +246,70 @@ end
     @test FR.fringe_pfa(100.0, 1.0e12) == 0.0                        # underflow → secure
     @test isnan(FR.fringe_pfa(NaN, 10.0))
     @test 0.0 <= FR.fringe_pfa(2.0, 1.0e4) <= 1.0
+end
+
+@testset "Oversample resolved from band sparsity" begin
+    # `oversample` is the number of grid cells across the delay main lobe, and
+    # `:auto` raises it as the channels sparsify into separated bands, where a
+    # scalloped main lobe can be reported below an alias peak. The thresholds
+    # sit at sparsity (common grid bins / real channels) 2 and 3.
+    nchan_b, nt = 16, 24
+    Δt = 1.0
+    times = (0:(nt - 1)) .* Δt
+    t0 = mean(times)
+    bands(sep, nb = 4) = reduce(
+        vcat, [8.0e9 + b * sep .+ (0:(nchan_b - 1)) .* 1.0e6 for b in 0:(nb - 1)],
+    )
+    osof(freqs) = FR._resolve_oversample(:auto, FR._uniform_axis(freqs), length(freqs))
+
+    @test osof(bands(16.0e6)) == 2          # contiguous: sparsity 1
+    @test osof(bands(48.0e6)) == 4          # sparsity 2.5
+    @test osof(bands(80.0e6)) == 8          # sparsity 4, the HierarchicalMBD crossover
+    # A single channel has no delay axis to resolve.
+    @test FR._resolve_oversample(:auto, FR._uniform_axis([8.0e9]), 1) == 2
+
+    # An explicit factor overrides, and both spellings are checked rather than
+    # silently accepted.
+    @test FR._resolve_oversample(4, FR._uniform_axis(bands(80.0e6)), 64) == 4
+    @test_throws "oversample must be :auto or a positive Int" FR._resolve_oversample(
+        :fine, FR._uniform_axis(bands(16.0e6)), 64,
+    )
+    @test_throws "oversample must be ≥ 1" FR._resolve_oversample(
+        0, FR._uniform_axis(bands(16.0e6)), 64,
+    )
+
+    # The resolved factor is what the grid is built at.
+    freqs = bands(48.0e6)
+    fax = FR._uniform_axis(freqs)
+    ax = FR._search_axes(freqs, times, FR.FringeSearch(), ComplexF64)
+    @test ax.nf_pad == FR._fast_fft_size(4 * fax.n)
+    @test ax.nt_pad == FR._fast_fft_size(4 * nt)
+
+    # Identifying the right lobe is what the grid buys: on separated bands a
+    # one-cell grid reports an alias, while `:auto` (4 here) recovers the delay.
+    # The alias spacing is 1/48 MHz = 20.8 ns.
+    f0 = mean(freqs)
+    τ, ṙ, φ = 4.0e-9, 6.0e-3, 0.3
+    V = inject_fringe(freqs, times, f0, t0; delay = τ, rate = ṙ, phase = φ)
+    W = ones(size(V))
+    plane = FR.fringe_plane(V, W, freqs, times)
+    d_auto = FR.baseline_fringe_search(plane, f0, t0)
+    d_one = FR.baseline_fringe_search(plane, f0, t0; opts = FR.FringeSearch(oversample = 1))
+    @test isapprox(d_auto.delay, τ; atol = 0.5e-9)
+    @test abs(d_one.delay - τ) > 10.0e-9                  # landed on another lobe
+
+    # The hierarchical path floors its band grids at 4 and takes only its rate
+    # axis from `oversample`, so a coarse request does not degrade its delay.
+    vgos = bands(100.0e6, 8)
+    fv0 = mean(vgos)
+    Vv = inject_fringe(vgos, times, fv0, t0; delay = τ, rate = ṙ, phase = φ)
+    Wv = ones(size(Vv))
+    planev = FR.fringe_plane(Vv, Wv, vgos, times)
+    @test FR._search_axes(vgos, times, FR.FringeSearch(), ComplexF64).mbd !== nothing
+    for os in (1, 2, :auto)
+        d = FR.baseline_fringe_search(planev, fv0, t0; opts = FR.FringeSearch(oversample = os))
+        @test isapprox(d.delay, τ; atol = 0.5e-9)
+    end
 end
 
 @testset "Hierarchical MBD search (VGOS-style)" begin

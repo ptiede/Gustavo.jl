@@ -102,7 +102,7 @@ passes `Base.OneTo(nchan)`. Stations whose ANTAB declares aggregate Tsys ignore
 the index entirely.
 
 Both a-priori paths enter here: [`apply_calibration`](@ref) per leaf, and the
-streaming [`AprioriPreCal`](@ref) transform per scan group — so a scan corrected
+streaming `AprioriPreCal` transform per scan group — so a scan corrected
 on the fly and the same scan corrected eagerly get bit-identical gains.
 """
 function apriori_gains(

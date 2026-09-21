@@ -447,7 +447,7 @@ using HDF5
                 # The search configuration is exported flat, so external
                 # readers get the full search provenance.
                 @test read(f["info"]["search"]["algorithm"]) == "auto"
-                @test read(f["info"]["search"]["oversample"]) == 8
+                @test read(f["info"]["search"]["oversample"]) == "auto"
                 @test read(f["info"]["search"]["delay_window_s"]) == [-1.0e-6, 1.0e-6]
                 @test haskey(f["info"]["steps"], "fringe")
                 @test haskey(f["info"]["steps"]["fringe"], "scan_snr")

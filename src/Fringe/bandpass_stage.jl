@@ -379,10 +379,16 @@ _segment_snr2(r, w, w2, n2) =
     isfinite(n2) && n2 > 0 ? abs2(r / w) * w^2 / (n2 * w2) : abs2(r) / w
 
 
-# Per-segment spw label and mean frequency for a bandpass plan's segmentation,
-# with `spw_of_chan` empty meaning a single band. A frequency segment is the unit
-# solved for, so it must lie within one spw: a shape is fit per spw and could not
-# place a straddling segment.
+"""
+    _segment_bands(plan, channel_freqs, spw_of_chan) -> (fsegs, seg_spw, seg_freq)
+
+The channel groups of a bandpass plan's frequency segmentation, with each
+segment's spw label and mean frequency. `spw_of_chan` empty means a single band.
+
+A frequency segment is the unit solved for, so it must lie within one spw: a
+shape is fit per spw and could not place a straddling segment. One that does is
+an error rather than a segment assigned to an arbitrary side.
+"""
 function _segment_bands(plan, channel_freqs, spw_of_chan)
     nchan = length(channel_freqs)
     soc = isempty(spw_of_chan) ? ones(Int, nchan) : collect(spw_of_chan)
@@ -1024,37 +1030,41 @@ function _joint_bandpass_graph(bl_pairs, feeds, nant, tseg, fseg, nfsmax)
     return nodes, compid, ncomp, deg
 end
 
-# One reference node per connected component of that graph — mirrors
-# `_solve_observable`'s pin selection in stationize.jl. The pinned node's phase is
-# held at zero in the one (time segment, frequency segment) slot it names; its
-# amplitude is solved like any other node's.
-#
-# Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
-# shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
-# correlation internal to that set: the phase of `c` cancels between the two
-# conjugated factors. The sets on which it cancels everywhere are exactly the
-# components above, so the phase carries one unobservable constant per component
-# and needs one constraint there — no more. A station-uniform segmentation splits
-# the graph along the array-wide (time segment, frequency segment) cells and
-# recovers one pin per cell, which together zero the reference station's whole
-# track; a model in which one station breaks mid-track keeps the whole track in
-# one component, because the stations that hold one gain over it bridge the
-# broken station's two segments, and the relative phase across that break is then
-# measured rather than gauged away.
-#
-# The same bridging on the frequency axis makes a pin PARTIAL: where a station
-# holds one gain across cells the others split, those cells lie in one component,
-# and its single pin fixes ONE segment of the pinned station's track while the
-# rest of that track is fitted.
-#
-# The magnitude does not cancel, and `S` is frequency-flat, so it can only absorb
-# `|c|²` when `|c|` is constant across the band — leaving exactly one free
-# amplitude parameter overall, which the zero-band-mean gauge in
-# `_write_joint_bandpass!` removes. Pinning `|g|` as well
-# would assert the reference antenna has a flat amplitude bandpass, discarding
-# structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
-# over the band eliminates `ls` and leaves the full-rank signless-Laplacian
-# system) and biasing every other station through the inconsistency.
+"""
+    _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, fseg, nfsmax, gauge) -> (nodes, pins)
+
+One reference node per connected component of the joint-bandpass graph — mirrors
+`_solve_observable`'s pin selection in `stationize.jl`. The pinned node's phase is
+held at zero in the one (time segment, frequency segment) slot it names; its
+amplitude is solved like any other node's.
+
+Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
+shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
+correlation internal to that set: the phase of `c` cancels between the two
+conjugated factors. The sets on which it cancels everywhere are exactly the
+components above, so the phase carries one unobservable constant per component
+and needs one constraint there — no more. A station-uniform segmentation splits
+the graph along the array-wide (time segment, frequency segment) cells and
+recovers one pin per cell, which together zero the reference station's whole
+track; a model in which one station breaks mid-track keeps the whole track in
+one component, because the stations that hold one gain over it bridge the
+broken station's two segments, and the relative phase across that break is then
+measured rather than gauged away.
+
+The same bridging on the frequency axis makes a pin PARTIAL: where a station
+holds one gain across cells the others split, those cells lie in one component,
+and its single pin fixes ONE segment of the pinned station's track while the
+rest of that track is fitted.
+
+The magnitude does not cancel, and `S` is frequency-flat, so it can only absorb
+`|c|²` when `|c|` is constant across the band — leaving exactly one free
+amplitude parameter overall, which the zero-band-mean gauge in
+`_write_joint_bandpass!` removes. Pinning `|g|` as well
+would assert the reference antenna has a flat amplitude bandpass, discarding
+structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
+over the band eliminates `ls` and leaves the full-rank signless-Laplacian
+system) and biasing every other station through the inconsistency.
+"""
 function _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, fseg, nfsmax, gauge)
     nodes, compid, ncomp, deg =
         _joint_bandpass_graph(bl_pairs, feeds, nant, tseg, fseg, nfsmax)

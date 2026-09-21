@@ -15,7 +15,9 @@
 # zero-pad (oversample), FFT, take the windowed peak of |D|, then polish that
 # coarse (delay, rate) cell on the exact matched filter (`_polish_peak_exact!`) and
 # read φ off it. The FFT only LOCATES the main lobe; the sub-cell peak comes from
-# the exact objective, so accuracy no longer needs a fine `oversample` grid.
+# the exact objective, so the grid sets WHICH lobe is found, not how accurately
+# it is measured. `oversample` is therefore sized for lobe identification alone
+# (`_resolve_oversample`), which is why it can follow the frequency axis.
 #
 # Conventions: weights are inverse variances (1/σ²); at the matched point
 # |D| ≈ A·Σw and the noise on D has variance Σw, so SNR = |D_peak| / √(Σw) and
@@ -25,6 +27,8 @@
 # peaks at the inverse band-spacing, and the FFT can lock onto an alias unless the
 # delay window is narrower than the alias spacing or `oversample` is large — so
 # multi-band delay is only as unambiguous as the a-priori `delay_window` allows.
+# `:auto` oversampling raises the grid as the bands sparsify for exactly this
+# reason; it does not remove the ambiguity, only the scalloping that feeds it.
 #
 # For VGOS-style layouts (narrow bands spread over a huge span) the common-Δf
 # grid is almost entirely zeros and the single big FFT is prohibitively slow; a
@@ -102,9 +106,18 @@ recorded `pfa`.
   false-alarm trial count, while a window narrower than the true rate spread
   hides a station outright. Keep any choice well inside the ±1/(2Δt) Nyquist
   rate, past which a peak is an alias of its own wrap.
-- `oversample`    : zero-padding factor per axis (finer delay/rate grid). Default 8.
-  Widely-separated narrow bands may need a larger value (or a tight
-  `delay_window`) to avoid locking onto a multi-band alias peak.
+- `oversample`    : zero-padding factor per axis, equivalently the number of grid
+  cells laid across the main lobe of the delay response. It sets which lobe the
+  search finds, not how accurately the delay is then measured — `quad_interp`
+  polishes the peak off-grid — so it only has to be fine enough to tell the main
+  lobe from the alias lobes a gapped frequency axis puts beside it. `:auto`
+  (default) therefore reads it off that axis: 2 for contiguous channels, rising
+  to 8 as the bands sparsify toward the [`HierarchicalMBD`](@ref) crossover.
+  An explicit positive `Int` overrides it; raise it if detections are landing on
+  a multi-band alias, or lower it if the axis is contiguous and the search is the
+  bottleneck. Cost is quadratic — the grid is `oversample·nchan ×
+  oversample·ntime`, so 8 is ~16× the work of 2. [`_resolve_oversample`](@ref)
+  gives the rule and the measurements behind its thresholds.
 - `quad_interp`   : polish the peak on the exact matched filter (sub-cell, per-axis
   parabolic steps on the true objective — `_polish_peak_exact!`). Default true.
 - `algorithm`     : an [`AbstractSearchAlgorithm`](@ref) — [`FullGrid`](@ref) or
@@ -117,7 +130,7 @@ recorded `pfa`.
 Base.@kwdef struct FringeSearch
     delay_window::Tuple{Float64, Float64} = (-1.0e-6, 1.0e-6)
     rate_window::Tuple{Float64, Float64} = (-0.8, 0.8)
-    oversample::Int = 8
+    oversample::Union{Symbol, Int} = :auto
     quad_interp::Bool = true
     algorithm::Union{Symbol, AbstractSearchAlgorithm} = :auto
 end
@@ -127,7 +140,8 @@ end
 Calibration.external_info(s::FringeSearch) = (;
     delay_window_s = collect(s.delay_window),
     rate_window_hz = collect(s.rate_window),
-    s.oversample, s.quad_interp,
+    oversample = s.oversample isa Symbol ? String(s.oversample) : s.oversample,
+    s.quad_interp,
     algorithm = s.algorithm isa Symbol ? String(s.algorithm) :
         string(nameof(typeof(s.algorithm))),
 )
@@ -175,7 +189,7 @@ Reusable scratch for [`baseline_fringe_search`](@ref) at compute type `C`
 (`ComplexF32` or `ComplexF64`, matching a visibility block's own eltype): the
 zero-padded gridding buffer `G` and the FFT output `D`, lazily (re)allocated
 when the padded grid size changes. Pass one per task to avoid allocating the
-grid (tens of MB at `oversample = 8`) on every call — the search runs thousands
+grid (tens of MB where `oversample` resolves high) on every call — the search runs thousands
 of times per solve, so reuse removes essentially all of its allocation/GC churn.
 The FFT plan is not here: it is a pure function of the grid size (and `C`), so
 the search-grid geometry carries it (built once per scan, shared read-only
@@ -318,11 +332,14 @@ function _search_axes(freqs::AbstractVector, times::AbstractVector, opts::Fringe
     fax = _uniform_axis(freqs)
     tax = _uniform_axis(times)
     _check_rate_window(tax, opts)
-    nf_pad = fax.degenerate ? 1 : _fast_fft_size(opts.oversample * fax.n)
-    nt_pad = tax.degenerate ? 1 : _fast_fft_size(opts.oversample * tax.n)
+    # Resolve the padding factor once per group, here at the boundary, so every
+    # grid below reads a concrete Int (`_resolve_algorithm` resolves the same way).
+    ropts = _with_oversample(opts, _resolve_oversample(opts.oversample, fax, length(freqs)))
+    nf_pad = fax.degenerate ? 1 : _fast_fft_size(ropts.oversample * fax.n)
+    nt_pad = tax.degenerate ? 1 : _fast_fft_size(ropts.oversample * tax.n)
     delays = fax.degenerate ? [zero(T)] : collect(fftfreq(nf_pad, T(1.0 / fax.step)))
     rates = tax.degenerate ? [zero(T)] : collect(fftfreq(nt_pad, T(1.0 / tax.step)))
-    mbd = _maybe_mbd_axes(freqs, fax, tax, rates, opts, C)
+    mbd = _maybe_mbd_axes(freqs, fax, tax, rates, ropts, C)
     # The full-grid path executes `plan`; the hierarchical path carries its own
     # plans on `mbd` and never touches this one, so only build it when needed.
     plan = mbd === nothing ? _plan_grid(C, nf_pad, nt_pad) : nothing
@@ -888,6 +905,64 @@ function _resolve_algorithm(alg::Symbol, freqs, fax::_Axis)
     hierarchical = !fax.degenerate && issorted(freqs) && fax.n > 4 * length(freqs)
     return hierarchical ? HierarchicalMBD() : FullGrid()
 end
+
+"""
+    _resolve_oversample(oversample, fax, nchan) -> Int
+
+The zero-padding factor to build the search grid at: an explicit positive `Int`
+passes through, `:auto` reads it off the frequency axis.
+
+The padded grid's delay cell is `1/(oversample·n·Δf)` and the main lobe of the
+synthesized delay response is about `1/(n·Δf)` wide, so `oversample` is the
+number of cells laid across the main lobe. One cell never suffices: the search
+reports whichever cell is highest, and the sampled peak is scalloped away from
+the true one by up to half a cell.
+
+How finely the lobe must be sampled depends on what it is competing against.
+Contiguous channels put a single lobe in the delay window, and scalloping costs
+only accuracy — which `_polish_peak_exact!` then recovers off-grid. Channels
+gathered into separated bands put a comb of alias lobes beside it, spaced by the
+reciprocal of the band-origin spacing, and a scalloped main lobe can be reported
+below one of them; the polish cannot undo that, because it refines whichever
+lobe it was seeded in. The comb's density tracks `sparsity` — the common grid's
+size over the real channel count, the same quantity `_resolve_algorithm` reads
+to hand a very gapped axis to [`HierarchicalMBD`](@ref) — so the sampling
+requirement tracks it too.
+
+The thresholds come from injected fringes scored on how often the recovered
+delay lands on the true lobe, swept over band sparsity and signal-to-noise: 2
+cells hold to sparsity ≈ 1.5; 4 is indistinguishable from 8 up to sparsity ≈ 3;
+only at the `HierarchicalMBD` crossover (sparsity 4) does 8 measurably beat 4,
+and by 1–3 points. Below 2 cells the identification collapses — to 20–50% — at
+every signal-to-noise, because it is a grid failure rather than a noise one.
+
+`:auto` is a pure function of the frequency axis, so a recorded `FringeSearch`
+still determines the grid: replaying it on the same data resolves identically.
+[`HierarchicalMBD`](@ref) floors its own band and band-centre grids at 4
+regardless, and takes only its rate axis from this.
+"""
+function _resolve_oversample(oversample::Symbol, fax::_Axis, nchan::Integer)
+    oversample === :auto || throw(
+        ArgumentError(
+            "FringeSearch: oversample must be :auto or a positive Int; got :$(oversample)"
+        )
+    )
+    (fax.degenerate || nchan <= 0) && return 2
+    sparsity = fax.n / nchan
+    return sparsity < 2 ? 2 : sparsity < 3 ? 4 : 8
+end
+function _resolve_oversample(oversample::Integer, ::_Axis, ::Integer)
+    oversample >= 1 || throw(
+        ArgumentError("FringeSearch: oversample must be ≥ 1; got $(oversample)")
+    )
+    return Int(oversample)
+end
+
+# `s` with `oversample` resolved to the Int the grid is actually built at, so
+# everything below `_search_axes` reads a concrete factor.
+_with_oversample(s::FringeSearch, oversample::Int) = FringeSearch(;
+    s.delay_window, s.rate_window, oversample, s.quad_interp, s.algorithm,
+)
 
 # The hierarchical band geometry for `alg`, or `nothing` to run the single
 # full-grid FFT. The extension point for a custom `AbstractSearchAlgorithm`:
