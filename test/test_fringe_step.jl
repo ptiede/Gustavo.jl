@@ -369,14 +369,14 @@ function FP.finish_estimate!(e::_ProbeEstimator, ctx, step)
     return FP.finish_estimate!(e.inner, ctx, step)
 end
 # A wrapper fits exactly what it wraps, so both capability hooks forward too.
-FP.can_fit(e::_ProbeEstimator, tc) = FP.can_fit(e.inner, tc)
+FP.can_fit(e::_ProbeEstimator, tc, geom) = FP.can_fit(e.inner, tc, geom)
 FP.validate_model(e::_ProbeEstimator, comps) = FP.validate_model(e.inner, comps)
 
 # Implements neither solve hook: must fail loudly rather than solve nothing.
 # Claims the whole model so the failure is the missing hook, not the capability
 # check that runs before it.
 struct _SilentEstimator <: FP.AbstractFringeEstimator end
-FP.can_fit(::_SilentEstimator, tc) = true
+FP.can_fit(::_SilentEstimator, tc, geom) = true
 
 # The independence probe: implements the interface and NOTHING else. It writes no
 # θ and publishes none of the matched filter's diagnostic scratch tables, so it
@@ -390,7 +390,7 @@ function FP.estimate_scan!(e::_NullEstimator, ctx, step, stack, win)
     return (; max_snr = NaN)
 end
 FP.finish_estimate!(::_NullEstimator, ctx, step) = (; ncomp = 0)
-FP.can_fit(::_NullEstimator, tc) = true
+FP.can_fit(::_NullEstimator, tc, geom) = true
 
 # Declares no capability at all — the default. Every model term is unclaimed.
 struct _UnclaimingEstimator <: FP.AbstractFringeEstimator end
@@ -497,6 +497,40 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         @test_throws "requires a per-scan feed-common wideband delay" fit(
             FringeFit(model = FringeModel(terms = globaldelay)), uvset,
         )
+    end
+
+    @testset "a time segmentation finer than a scan is rejected, not half-solved" begin
+        # One search per scan group measures one delay, rate and phase per scan.
+        # A segmentation splitting a scan asks for columns nothing writes: the
+        # scan's first segment would be solved and the rest left at identity
+        # gain while `calibrate` places each sample in its own segment's column.
+        # `_build_fringe_uvset` gives one 330 s scan, so 150 s blocks split it.
+        subscan = map(
+            t -> CAL.GainComponent(t.term; Ti = CAL.TimeBlocks(150.0), Frequency = t.Frequency, Feed = t.Feed),
+            _fringe_terms(dispersion = false, sbd = false),
+        )
+        @test_throws "MatchedFilter cannot fit the model term" fit(
+            FringeFit(model = FringeModel(terms = subscan)), uvset,
+        )
+        @test_throws "on this data" fit(
+            FringeFit(model = FringeModel(terms = subscan)), uvset,
+        )
+
+        geom = CAL.build_geometry(uvset)
+        mbd(Ti) = CAL.GainComponent(CAL.Delay(); Ti, Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds())
+
+        # The same boundary expressed as an instrument scan edge, and the
+        # per-integration limit the classifier used to special-case.
+        @test !FP.can_fit(FP.MatchedFilter(), mbd(CAL.InstrumentScans([geom.times[1] + 150.0])), geom)
+        @test !FP.can_fit(FP.MatchedFilter(), mbd(CAL.PerIntegration()), geom)
+
+        # Coarser than a scan is fitted: one column several scans share is
+        # written by all of them. The rule is the segmentation against the
+        # geometry, not the segmentation alone — 3600 s blocks do not split a
+        # 330 s scan.
+        @test FP.can_fit(FP.MatchedFilter(), mbd(CAL.PerScan()), geom)
+        @test FP.can_fit(FP.MatchedFilter(), mbd(CAL.GlobalTime()), geom)
+        @test FP.can_fit(FP.MatchedFilter(), mbd(CAL.TimeBlocks(3600.0)), geom)
     end
 
     @testset "the matched filter's kind vocabulary stays private" begin

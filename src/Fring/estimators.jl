@@ -24,7 +24,7 @@ pass:
 error, naming what is missing). Then declare what it can fit, checked when
 the step compiles the model, before any data is read:
 
-    Gustavo.Fring.can_fit(est::MyEstimator, tc) -> Bool
+    Gustavo.Fring.can_fit(est::MyEstimator, tc, geom) -> Bool
     Gustavo.Fring.validate_model(est::MyEstimator, comps)   # optional
 
 [`can_fit`](@ref) defaults to `false`, so an estimator that declares nothing
@@ -108,24 +108,30 @@ only on the estimator's and model's declared options, never on the geometry.
 scan_local_solve(::AbstractFringeEstimator, model) = false
 
 """
-    can_fit(est::AbstractFringeEstimator, tc::Calibration.GainComponent) -> Bool
+    can_fit(est, tc::Calibration.GainComponent, geom::Calibration.DataGeometry) -> Bool
 
-Whether `est` fits the θ block of the compiled component `tc`. `FringeFit`
-calls this once per component its own model contributed, at model-compile
-time, and throws an `ArgumentError` naming the estimator and the component on
-the first `false` — a term nothing writes is a silent no-fit, not a smaller
-solve.
+Whether `est` fits the θ block of the compiled component `tc` on the geometry
+`geom`. The step calls this once per component its own model contributed, at
+model-compile time, and throws an `ArgumentError` naming the estimator and the
+component on the first `false` — a term nothing writes is a silent no-fit, not
+a smaller solve. The rejection is generic by design; state which models the
+family fits in the estimator's own docstring and point the message there.
+
+`geom` is what makes a capability that depends on the data's own sampling
+answerable: whether a time segmentation splits a scan, for instance, is a
+property of the segmentation and the scan lengths together, not of the term
+alone. Answer from the term wherever that suffices.
 
 **The default is `false`**, and the step drives the loop, so an estimator whose
 author never considered capability fails loudly on the first model term rather
 than returning a solution with zeros in it. Declaring capability is therefore
 part of implementing the interface, not an optional refinement.
 
-Components contributed by other steps — the per-integration adhoc phase, the
-per-channel bandpass — are not asked about: the step that contributes a
-component vouches for it.
+Shared with the bandpass and adhoc smoothers, which answer for their own steps'
+models. Components contributed by other steps are not asked about: the step
+that contributes a component vouches for it.
 """
-can_fit(::AbstractFringeEstimator, tc) = false
+can_fit(::AbstractFringeEstimator, tc, geom) = false
 
 """
     validate_model(est::AbstractFringeEstimator, comps) -> nothing

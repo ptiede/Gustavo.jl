@@ -815,8 +815,9 @@ end
     leaf_window(geom::DataGeometry, leaf) -> GeometryWindow
 
 The [`GeometryWindow`](@ref) addressing the channels and times `leaf` carries,
-matched by value against `geom` (frequency by `isapprox` rtol 1e-9, time by atol
-1e-9 h). Errors if any leaf sample has no match in the geometry.
+matched by value against `geom` (frequency by `isapprox` rtol 1e-9, time by
+`_epoch_atol` on absolute seconds). Errors if any leaf sample has no match in
+the geometry.
 """
 leaf_window(geom::DataGeometry, leaf) =
     GeometryWindow(geom, _channel_indices(geom, leaf), _time_indices(geom, leaf))

@@ -165,6 +165,17 @@ re-search needs the whole pass finished first, so `rounds > 1` also flips
 the enclosing `FringeFit` step's `fusable_grouping` to `:global` and the
 step takes its own streaming pass.
 
+The models it fits: a `Delay`, `Rate` or `ConstantTerm` spanning the whole band
+(`Frequency = GlobalFrequency()`), under any feed scope, with a time
+segmentation no finer than a scan. One search per scan group measures one
+delay, rate and phase per scan, so a segmentation that splits a scan — a
+`TimeBlocks` shorter than the scans, `PerIntegration` — asks for θ columns the
+search has no measurement to fill and is rejected when the step compiles the
+model. A segmentation *coarser* than a scan is fitted: one column shared by
+several scans is written by all of them. `default_fringe_terms` is the standard
+model; the per-band and dispersive terms belong to
+[`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit).
+
 The `search` measures every baseline and gates nothing; `closure.pfa_max` is
 the one detection threshold, deciding which measurements are real fringes
 and so which stations are calibrated (see [`Stationization`](@ref)).
@@ -277,8 +288,11 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 # through to `nothing` on the term/freq-type checks below, so `can_fit` rejects
 # either if it appears in a `FringeModel`'s own term list; both belong to a
 # `DispersionSBDFit` step.
+#
+# The time axis is not decided here: whether a segmentation leaves a scan with
+# more than one θ column depends on the scan lengths, so `can_fit` answers it
+# against the geometry.
 function matched_kind(tc)
-    tc.Ti isa PerIntegration && return nothing
     # The per-baseline search measures one delay/rate/phase across the whole
     # band, so only a component spanning it can receive that estimate.
     tc.Frequency isa GlobalFrequency || return nothing
@@ -307,7 +321,25 @@ end
 
 # ── MatchedFilter's capability ───────────────────────────────────────────────
 
-can_fit(::MatchedFilter, tc) = matched_kind(tc) !== nothing
+# One search per scan group yields one (delay, rate, phase) per scan, written to
+# the θ column holding the scan's first epoch. A term whose time segmentation
+# splits a scan therefore has every other column of that scan left at identity
+# while `calibrate` places each sample in the column its own epoch falls in, so
+# the geometry decides this as much as the term does: `TimeBlocks` coarser than
+# the scans is fitted, finer is not.
+can_fit(::MatchedFilter, tc, geom) =
+    matched_kind(tc) !== nothing && !splits_a_scan(tc.Ti, geom)
+
+# Whether `seg` resolves more than one time segment inside any one scan.
+function splits_a_scan(seg, geom)
+    scans, _ = time_segment_ids(PerScan(), geom)
+    ids, _ = time_segment_ids(seg, geom)
+    first_of = Dict{Int, Int}()
+    for i in eachindex(ids, scans)
+        get!(first_of, scans[i], ids[i]) == ids[i] || return true
+    end
+    return false
+end
 
 # One round and an all-per-scan term list make the station systems
 # block-diagonal per scan, so each scan's WLS closes inside `estimate_scan!`

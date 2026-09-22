@@ -69,7 +69,7 @@ independently on each (station, node) track subtypes
 [`PerTrackAdhocSmoother`](@ref) and implements the per-track hook
 `smooth_track(sm, track, w, times)` instead.
 
-    Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
+    Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent, geom) -> Bool
 
 declares which adhoc components the smoother can solve, checked at
 model-compile time (default `false`, so an undeclared smoother rejects every
@@ -277,11 +277,11 @@ _fits_adhoc_track(tc) =
     tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
     tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds)
 
-can_fit(::AbstractAdhocSmoother, tc) = false
-can_fit(::PerTrackAdhocSmoother, tc) = _fits_adhoc_track(tc)
-can_fit(::NoSmoothing, tc) = _fits_adhoc_track(tc)
+can_fit(::AbstractAdhocSmoother, tc, geom) = false
+can_fit(::PerTrackAdhocSmoother, tc, geom) = _fits_adhoc_track(tc)
+can_fit(::NoSmoothing, tc, geom) = _fits_adhoc_track(tc)
 # The joint solve needs one phase node per station (`_requires_single_node`).
-can_fit(::JointOUSmoother, tc) = _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds
+can_fit(::JointOUSmoother, tc, geom) = _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds
 
 # The structural contract of the adhoc pass: exactly one per-integration phase
 # component (the stage runs one globally-closing phase solve and writes one θ

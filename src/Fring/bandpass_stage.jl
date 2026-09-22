@@ -74,7 +74,7 @@ visibilities against an explicit per-scan source term.
 
 Define:
 
-    Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent) -> Bool
+    Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent, geom) -> Bool
     Gustavo.Fring.solve_bandpass!(sm::MySmoother, θ, results, setup; gauge) -> report
 
 [`can_fit`](@ref) declares which model components the smoother can solve; it
@@ -116,7 +116,7 @@ bandpass_derotate(::AbstractBandpassSmoother) = true
 # `can_fit`/`validate_model` are the same compile-time capability seam the
 # fringe estimators use (see estimators.jl); the `false` default makes an
 # undeclared smoother reject loudly instead of accepting silently.
-can_fit(::AbstractBandpassSmoother, tc) = false
+can_fit(::AbstractBandpassSmoother, tc, geom) = false
 
 # A bandpass track is one free constant per frequency segment, per feed, held
 # over a stretch of time. Both smoothers pool the scans of a time segment and
@@ -567,7 +567,7 @@ end
 PerTrackSmoother(; phase::AbstractShapeSpec = FreeShape(), amp::AbstractShapeSpec = WhittakerShape(1.0)) =
     PerTrackSmoother(phase, amp)
 
-can_fit(::PerTrackSmoother, tc) = _fits_bandpass_track(tc)
+can_fit(::PerTrackSmoother, tc, geom) = _fits_bandpass_track(tc)
 
 # The outcome code for one fitted spw track: nothing estimated, a constant, or a
 # real shape.
@@ -1327,7 +1327,7 @@ end
 # erase the very source phase that term absorbs.
 bandpass_derotate(::JointSmoother) = false
 
-can_fit(::JointSmoother, tc) = _fits_bandpass_track(tc)
+can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
 function validate_model(::JointSmoother, model)
     validate_bandpass_groups(model)

@@ -130,6 +130,12 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 
 # ── Model components (compiled in step order into one StationGainModel) ───────
 
+# A step's model compiles without a geometry when a caller only wants the
+# components (`model_components(step, nothing)`). `can_fit` is handed the
+# `nothing` rather than a substitute, so a capability that genuinely needs the
+# geometry fails there instead of being answered from a default.
+_spec_geom(spec) = spec === nothing ? nothing : spec.geom
+
 # The estimator vets the model here, at compile time, before any data is read.
 # Both directions: no term the estimator cannot fit (its θ block would stay at
 # zero and the solution would look fitted), and no missing term the estimator
@@ -140,12 +146,14 @@ function model_components(s::FringeFit, spec)
     tree = Fring.fringe_phase_components(s.model, spec)
     comps = Calibration._flatten_components(tree)
     for tc in comps
-        Fring.can_fit(s.estimator, tc) || throw(
+        Fring.can_fit(s.estimator, tc, _spec_geom(spec)) || throw(
             ArgumentError(
                 "$(nameof(typeof(s.estimator))) cannot fit the model term compiling to " *
-                    "$(Calibration.component_label(tc)); its parameters would never be " *
-                    "solved. Remove the term, or use an estimator that declares " *
-                    "`Gustavo.Fring.can_fit` for it.",
+                    "$(Calibration.component_label(tc)) on this data; its parameters would " *
+                    "never be solved. See `$(nameof(typeof(s.estimator)))` for the models it " *
+                    "fits — a capability can depend on the data's own sampling, so a term " *
+                    "this estimator fits elsewhere may still be unfittable here. Remove the " *
+                    "term, or use an estimator that declares `Gustavo.Fring.can_fit` for it.",
             ),
         )
     end
@@ -189,7 +197,7 @@ function _vet_step_model(solver, model, accepted, spec = nothing)
     for (station, tree) in _station_variants(m, spec)
         at = station === nothing ? "" : " (station $(repr(station)) entry)"
         for tc in Calibration._flatten_components(tree)
-            Fring.can_fit(solver, tc) || throw(
+            Fring.can_fit(solver, tc, _spec_geom(spec)) || throw(
                 ArgumentError(
                     "$(nameof(typeof(solver))) cannot fit the component " *
                         "$(Calibration.component_label(tc))$at; its parameters would " *
