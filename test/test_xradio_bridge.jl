@@ -323,3 +323,90 @@ end
         @test_throws "holds 2 scan names" UV.primary_scan_name(ms)
     end
 end
+
+# ── Set-level functions on a ProcessingSet ────────────────────────────────────
+
+@testset "set-level functions on a ProcessingSet" begin
+    UV = Gustavo.UVData
+    uvset, _ = _build_fringe_uvset(; nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 2)
+    ps = UV.uvset_to_processingset(uvset)
+
+    @testset "leaves are the Measurement Sets, by name" begin
+        @test collect(UV.leaves(ps)) == collect(pairs(ps))
+    end
+
+    @testset "frequency and polarization unions agree with the UVSet's" begin
+        mine, theirs = UV.union_frequency_axis(ps), UV.union_frequency_axis(uvset)
+        @test length(mine) == length(theirs) == 2
+        @test UV.channel_freqs.(mine) == UV.channel_freqs.(theirs)
+        @test UV.setup_name.(mine) == UV.setup_name.(theirs)
+        @test UV.union_pol_products(ps) == UV.union_pol_products(uvset)
+        @test_throws "2 distinct frequency setups" UV.freq_setup(ps)
+
+        one_spw, _ = _build_fringe_uvset(; nant = 4, nspw = 1, nchan = 8, ntime = 6, nscans = 2)
+        one_ps = UV.uvset_to_processingset(one_spw)
+        @test UV.channel_freqs(UV.freq_setup(one_ps)) ==
+            UV.channel_freqs(UV.freq_setup(one_spw))
+        @test UV.nchannels(one_ps) == UV.nchannels(one_spw) == 8
+    end
+
+    @testset "the antenna union agrees with the UVSet's" begin
+        mine, theirs = UV.union_antennas(ps), UV.union_antennas(uvset)
+        @test mine.name == theirs.name
+        @test mine.station_xyz == theirs.station_xyz
+        @test mine.mount == theirs.mount
+        @test UV.extras(mine).DIAMETER == UV.extras(theirs).DIAMETER
+    end
+
+    @testset "members that saw different sub-arrays" begin
+        # The second scan drops the second antenna, so its antenna dataset
+        # lists three stations and the union must restore the full order.
+        names = String.(UV.union_antennas(uvset).name)
+        keep = names[[1, 3, 4]]
+        sub = UV.apply(uvset) do leaf, info, root
+            info.scan_name == "2" || return leaf
+            full = String.(info.antennas.name)
+            rows = findall(in(keep), full)
+            ext = map(c -> c[rows], UV.extras(info.antennas))
+            tbl = UV.AntennaTable(
+                StructArray(getfield(info.antennas, :antennas)[rows]),
+                UV.array_name(info.antennas), ext,
+            )
+            local_of = Dict(n => i for (i, n) in pairs(keep))
+            b = info.baselines
+            idx = [i for (i, (a, c)) in pairs(b.pairs) if full[a] in keep && full[c] in keep]
+            local_pairs = [(local_of[full[a]], local_of[full[c]]) for (a, c) in b.pairs[idx]]
+            newb = UV.BaselineIndex(local_pairs, local_pairs; antenna_names = keep)
+            return UV._build_leaf(
+                leaf[:vis][Baseline = idx], leaf[:weights][Baseline = idx],
+                leaf[:uvw][Baseline = idx], leaf[:flags][Baseline = idx];
+                partition_info = UV.update(
+                    info; antennas = tbl, baselines = newb, record_order = Tuple{Int, Int}[],
+                ),
+            )
+        end
+        sub_ps = UV.uvset_to_processingset(sub)
+        @test length(unique(XRadio.antennas.(values(sub_ps)))) == 2
+
+        tab = UV.union_antennas(sub_ps)
+        @test tab.name == names
+        @test UV.extras(tab).DIAMETER == UV.extras(UV.union_antennas(uvset)).DIAMETER
+    end
+
+    @testset "unstated receptor angles still union" begin
+        bare = UV.uvset_to_processingset(uvset)
+        for ms in values(bare)
+            delete!(DimensionalData.branches(ms)[:antenna], :antenna_receptor_angle)
+        end
+        tab = UV.union_antennas(bare)
+        @test tab.name == UV.union_antennas(uvset).name
+        @test all(a -> all(isnan, a), tab.pol_angles)
+    end
+
+    @testset "one antenna stated two ways is refused" begin
+        clash = UV.uvset_to_processingset(uvset)
+        moved = DimensionalData.branches(last(collect(values(clash))))[:antenna]
+        parent(moved[:antenna_position])[1, 1] += 1.0
+        @test_throws "inconsistent metadata across partitions" UV.union_antennas(clash)
+    end
+end

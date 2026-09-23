@@ -75,6 +75,10 @@ Base.:(==)(a::Antenna, b::Antenna) =
     a.name == b.name && a.station_xyz == b.station_xyz &&
     a.mount == b.mount && a.nominal_basis == b.nominal_basis &&
     a.pol_angles == b.pol_angles
+Base.isequal(a::Antenna, b::Antenna) =
+    isequal(a.name, b.name) && isequal(a.station_xyz, b.station_xyz) &&
+    isequal(a.mount, b.mount) && isequal(a.nominal_basis, b.nominal_basis) &&
+    isequal(a.pol_angles, b.pol_angles)
 Base.hash(a::Antenna, h::UInt) = hash(
     (a.name, a.station_xyz, a.mount, a.nominal_basis, a.pol_angles),
     hash(:Antenna, h),

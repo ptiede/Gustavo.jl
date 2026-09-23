@@ -190,12 +190,22 @@ function nscans(uvset::UVSet)
 end
 
 """
-    leaves(uvset::UVSet)
+    VisibilitySet
 
-Iterator over `(partition_key::Symbol, leaf::DimTree)` pairs for every leaf
-in the tree, in branch insertion order.
+A `UVSet` or an `XRadio.ProcessingSet`: the whole-set functions that only walk
+[`leaves`](@ref) and read each partition through its accessors take either.
+"""
+const VisibilitySet = Union{UVSet, XRadio.ProcessingSet}
+
+"""
+    leaves(uvset::UVSet)
+    leaves(ps::XRadio.ProcessingSet)
+
+Iterator over `key => partition` pairs, in insertion order: each leaf of a
+`UVSet`, or each `MeasurementSet` of a processing set.
 """
 leaves(uvset::UVSet) = pairs(DimensionalData.branches(uvset))
+leaves(ps::XRadio.ProcessingSet) = pairs(ps)
 
 """
     sources(uvset::UVSet) -> Vector{String}
@@ -261,18 +271,18 @@ function Base.summary(uvset::UVSet)
 end
 
 """
-    union_frequency_axis(uvset::UVSet) -> Vector{FrequencySetup}
+    union_frequency_axis(data::VisibilitySet) -> Vector{FrequencySetup}
 
-Vector of `FrequencySetup`s spanning every leaf, deduplicated by `==`/`hash`,
+Vector of `FrequencySetup`s spanning every partition, deduplicated by `==`/`hash`,
 in first-seen order. Mirrors xradio's `ProcessingSet.get_freq_axis()`.
 Used by the FITS writer to assemble the union FQ table and by the future
 per-SPW solver dispatch.
 """
-function union_frequency_axis(uvset::UVSet)
+function union_frequency_axis(data::VisibilitySet)
     out = FrequencySetup[]
     seen = Set{FrequencySetup}()
-    for (_, leaf) in DimensionalData.branches(uvset)
-        fs = DimensionalData.metadata(leaf).freq_setup
+    for (_, leaf) in leaves(data)
+        fs = freq_setup(leaf)
         if !(fs in seen)
             push!(out, fs)
             push!(seen, fs)
@@ -282,22 +292,22 @@ function union_frequency_axis(uvset::UVSet)
 end
 
 """
-    freq_setup(uvset::UVSet) -> FrequencySetup
+    freq_setup(data::VisibilitySet) -> FrequencySetup
 
-Single-SPW shorthand: returns the unique `FrequencySetup` if every leaf
+Single-SPW shorthand: returns the unique `FrequencySetup` if every partition
 shares one, otherwise throws `ArgumentError`. Multi-SPW callers should
-use `union_frequency_axis(uvset)` or read each leaf's `freq_setup`
+use `union_frequency_axis(data)` or read each partition's `freq_setup`
 individually.
 """
-function freq_setup(uvset::UVSet)
-    setups = union_frequency_axis(uvset)
+function freq_setup(data::VisibilitySet)
+    setups = union_frequency_axis(data)
     n = length(setups)
     n == 1 && return setups[1]
-    n == 0 && throw(ArgumentError("UVSet has no leaves; no frequency setup"))
+    n == 0 && throw(ArgumentError("the set has no partitions; no frequency setup"))
     throw(
         ArgumentError(
-            "UVSet has $(n) distinct frequency setups; " *
-                "use union_frequency_axis(uvset) or freq_setup(leaf)",
+            "the set has $(n) distinct frequency setups; " *
+                "use union_frequency_axis(data) or freq_setup(partition)",
         )
     )
 end
@@ -377,44 +387,42 @@ antennas(leaf::PartitionedData) =
     DimensionalData.metadata(leaf).antennas
 
 """
-    union_antennas(uvset::UVSet) -> AntennaTable
+    union_antennas(data::VisibilitySet) -> AntennaTable
 
-Walk leaves and union participating antennas by name. Errors if the
-same antenna name has different metadata (mount, station_xyz,
-nominal_basis, pol_angles) across leaves — a multi-track
-observation that should be split via `select_*` and processed per-SPW.
+Walk partitions and union their antennas by name, in first-seen order. Errors
+if the same antenna name has different metadata (mount, station_xyz,
+nominal_basis, pol_angles) across partitions — a multi-track observation that
+should be split and processed per-SPW. An `extras` column is kept when every
+partition's table has it, taking each antenna's value from the table it was
+first seen in.
 """
-function union_antennas(uvset::UVSet)
-    bs = DimensionalData.branches(uvset)
-    isempty(bs) && error("union_antennas: UVSet has no leaves")
-    leaves_v = collect(values(bs))
-    template = DimensionalData.metadata(first(leaves_v)).antennas
-    # Fast path: every leaf points to the same AntennaTable instance (the
-    # common case for single-subarray observations).
-    same_ref = all(DimensionalData.metadata(l).antennas === template for l in leaves_v)
-    same_ref && return template
-    seen = Set{String}()
+function union_antennas(data::VisibilitySet)
+    tables = [antennas(leaf) for (_, leaf) in leaves(data)]
+    isempty(tables) && error("union_antennas: the set has no partitions")
+    template = first(tables)
+    all(t -> t === template, tables) && return template
     rows = eltype(getfield(template, :antennas))[]
-    for leaf in leaves_v
-        sa = getfield(DimensionalData.metadata(leaf).antennas, :antennas)
-        for ant in sa
-            if !(ant.name in seen)
-                push!(rows, ant)
-                push!(seen, ant.name)
-            else
-                # Re-find the existing row by name and verify equality.
-                idx = findfirst(r -> r.name == ant.name, rows)
-                rows[idx] == ant || error(
-                    "union_antennas: antenna '$(ant.name)' has " *
-                        "inconsistent metadata across leaves; split via " *
-                        "select_* and process per-SPW.",
-                )
-            end
+    origin = Tuple{Int, Int}[]
+    slot = Dict{String, Int}()
+    for (ti, tab) in pairs(tables), (ai, ant) in pairs(getfield(tab, :antennas))
+        idx = get(slot, ant.name, 0)
+        if idx == 0
+            push!(rows, ant)
+            push!(origin, (ti, ai))
+            slot[ant.name] = length(rows)
+        else
+            isequal(rows[idx], ant) || error(
+                "union_antennas: antenna '$(ant.name)' has " *
+                    "inconsistent metadata across partitions; split the set " *
+                    "and process per-SPW.",
+            )
         end
     end
-    return AntennaTable(
-        StructArray(rows), array_name(template), extras(template),
+    common = filter(k -> all(t -> haskey(extras(t), k), tables), keys(extras(template)))
+    ext = NamedTuple{common}(
+        Tuple([extras(tables[ti])[k][ai] for (ti, ai) in origin] for k in common)
     )
+    return AntennaTable(StructArray(rows), array_name(template), ext)
 end
 
 """
@@ -459,17 +467,15 @@ function unify_antennas(uvset::UVSet)
 end
 
 """
-    union_pol_products(uvset::UVSet) -> Vector{String}
+    union_pol_products(data::VisibilitySet) -> Vector{String}
 
-Pol product set shared across leaves. Errors if leaves disagree —
+Pol product set shared across partitions. Errors if they disagree —
 mirrors `union_antennas` for the polarization axis.
 """
-function union_pol_products(uvset::UVSet)
-    bs = DimensionalData.branches(uvset)
-    isempty(bs) && error("union_pol_products: UVSet has no leaves")
-    leaves_v = collect(values(bs))
-    first_pp = pol_products(first(leaves_v))
-    for leaf in leaves_v
+function union_pol_products(data::VisibilitySet)
+    isempty(leaves(data)) && error("union_pol_products: the set has no partitions")
+    first_pp = pol_products(last(first(leaves(data))))
+    for (_, leaf) in leaves(data)
         Set(pol_products(leaf)) == Set(first_pp) ||
             error(
             "union_pol_products: leaves have different pol product sets; " *
@@ -480,7 +486,7 @@ function union_pol_products(uvset::UVSet)
 end
 
 antenna_names(uvset::UVSet) = union_antennas(uvset).name
-nchannels(uvset::UVSet) = nchannels(freq_setup(uvset))
+nchannels(data::VisibilitySet) = nchannels(freq_setup(data))
 npols(uvset::UVSet) = length(pol_products(uvset))
 nbaselines(uvset::UVSet) = length(
     unique(
