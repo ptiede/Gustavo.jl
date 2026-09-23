@@ -11,7 +11,7 @@ using Gustavo.UVData:
     UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup,
     Antenna, AntennaTable, BaselineIndex,
     AbstractMount, Mount, MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
-    MountXY, MountOrbiting, MountOther,
+    MountBWGR, MountBWGL, MountXY, MountOrbiting,
     Pol, Frequency, UVW, Baseline,
     sources, array_name, extras, XRadio,
     channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name,
@@ -86,16 +86,18 @@ function _msv4_order(labels::AbstractVector{<:AbstractString})
 end
 
 
-# AIPS MNTSTA codes 0–6, shared by the UVFITS AN and FITS-IDI ARRAY_GEOMETRY
-# tables. `offset` is the mount's axis offset in meters.
+# AIPS MNTSTA codes 0–7, shared by the UVFITS AN and FITS-IDI ARRAY_GEOMETRY
+# tables; 6 and 7 are the beam-waveguide mounts (Dodson & Rioja,
+# arXiv:2210.13381), which pyuvdata codes differently. `offset` is the mount's
+# axis offset in meters.
 const _MNTSTA_MOUNTS = (
     MountAltAz, MountEquatorial, MountOrbiting, MountXY, MountNasmythR, MountNasmythL,
-    MountOther,
+    MountBWGR, MountBWGL,
 )
 
 function mnt_codes_to_type(code, offset)
     0 <= code < length(_MNTSTA_MOUNTS) ||
-        throw(ArgumentError("MNTSTA $code names no mount; AIPS defines codes 0–6"))
+        throw(ArgumentError("MNTSTA $code names no mount; AIPS defines codes 0–7"))
     return _MNTSTA_MOUNTS[code + 1](offset)
 end
 

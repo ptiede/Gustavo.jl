@@ -63,10 +63,13 @@ using FITSFiles: Card
     end
 
     @testset "every AIPS mount code round-trips" begin
-        for code in 0:6
+        for code in 0:7
             @test ext.mount_to_mntsta(ext.mnt_codes_to_type(code, (0.0, 0.0, 0.0))) == code
         end
-        @test_throws "MNTSTA 7 names no mount" ext.mnt_codes_to_type(7, (0.0, 0.0, 0.0))
+        @test ext.mnt_codes_to_type(6, (0.0, 0.0, 0.0)) == UV.MountBWGR()
+        @test ext.mnt_codes_to_type(7, (0.0, 0.0, 0.0)) == UV.MountBWGL()
+        @test_throws "MNTSTA 8 names no mount" ext.mnt_codes_to_type(8, (0.0, 0.0, 0.0))
         @test_throws "has no AIPS MNTSTA code" ext.mount_to_mntsta(UV.Mount(0.5, 0.0))
+        @test_throws "has no AIPS MNTSTA code" ext.mount_to_mntsta(UV.MountOther())
     end
 end
