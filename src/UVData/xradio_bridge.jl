@@ -15,12 +15,19 @@ arrays are transposed into the standard's `(time, baseline_id, frequency,
 polarization)` order, the antenna table becomes an `antenna` sub-dataset, and
 the source position becomes a `field_and_source` one.
 
-Two of the set's fields have no MSv4 field and are dropped rather than
-approximated: the per-channel `sidebands` and `total_bandwidths` of the
-[`FrequencySetup`](@ref), and the Earth-orientation block of
-[`ObsArrayMetadata`](@ref). `FLAG` and `WEIGHT` come from the leaf's own
-`:flags` and `:weights` layers, which carry the same independent meanings
-MSv4 gives them.
+What MSv4 has no field for is carried under
+[`GUSTAVO_VISIBILITY_SCHEMA`](@ref): the Earth-orientation block of
+[`ObsArrayMetadata`](@ref), the `sidebands` and `total_bandwidths` of the
+[`FrequencySetup`](@ref), and `sub_scan_name`. Pass that schema to
+`XRadio.check` and `XRadio.write` for them to be examined and named correctly
+on disk.
+
+A [`FrequencySetup`](@ref) states its widths, bandwidths and sidebands per
+channel where MSv4 states one `channel_width` for the window; the first of each
+is written, as `channel_width` itself already was.
+
+`FLAG` and `WEIGHT` come from the leaf's own `:flags` and `:weights` layers,
+which carry the same independent meanings MSv4 gives them.
 """
 function uvset_to_processingset(uvset::UVSet)
     sets = OrderedDict{Symbol, XRadio.MeasurementSet}()
@@ -80,6 +87,12 @@ function _leaf_to_measurementset(leaf, root)
                 # MSv4's channel_width is one scalar for the window; a setup
                 # with varying widths keeps only the first here.
                 :channel_width => _measure(Float64(first(ch_widths(fs))), "Hz"),
+                # Neither has an MSv4 field; `GUSTAVO_VISIBILITY_SCHEMA` is what
+                # describes them. Both are one scalar for the window, as
+                # `channel_width` is.
+                :sideband => Int(first(sidebands(fs))),
+                :total_bandwidth =>
+                    _measure(Float64(first(total_bandwidths(fs))), "Hz"),
             ),
         ),
     )
@@ -110,6 +123,14 @@ function _leaf_to_measurementset(leaf, root)
             :scan_intents => String.(collect(info.scan_intents)),
         ),
     )
+    # A set with no sub-scan names it "", and a coordinate of empty strings
+    # says no more than no coordinate at all — which is also the only form Zarr
+    # can store, since a zero-length string has no `MaxLengthString`.
+    if !isempty(info.sub_scan_name)
+        ms[:sub_scan_name] = DimArray(
+            fill(String(info.sub_scan_name), length(times)), (time,)
+        )
+    end
     ms[:baseline_antenna1_name] = DimArray(String.(info.baselines.ant1_names), (base,))
     ms[:baseline_antenna2_name] = DimArray(String.(info.baselines.ant2_names), (base,))
 
@@ -134,6 +155,17 @@ function _ms_metadata(root)
         ),
         :processor_info => Dict{Symbol, Any}(
             :type => "CORRELATOR", :sub_type => String(obs.instrume),
+        ),
+        # No MSv4 field; `GUSTAVO_VISIBILITY_SCHEMA` describes the block.
+        :earth_orientation => Dict{Symbol, Any}(
+            :gst_iat0 => Float64(obs.gst_iat0),
+            :earth_rot_rate => Float64(obs.earth_rot_rate),
+            :ut1utc => Float64(obs.ut1utc),
+            :polarx => Float64(obs.polarx),
+            :polary => Float64(obs.polary),
+            :datutc => Float64(obs.datutc),
+            :xyzhand => String(obs.xyzhand),
+            :poltype => String(obs.poltype),
         ),
         :data_groups => Dict{Symbol, Any}(
             :base => Dict{Symbol, Any}(

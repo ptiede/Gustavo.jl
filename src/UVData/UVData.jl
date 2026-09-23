@@ -29,6 +29,7 @@ include("diagnostics.jl")
 include("antab.jl")
 include("apriori.jl")
 include("utilities.jl")
+include("msv4_schema.jl")
 include("xradio_bridge.jl")
 
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
@@ -42,7 +43,7 @@ export set_bunit, with_bunit
 export baseline, baselines_per_scan, baselines
 export pol_index, pol_at, baseline_index
 export obs_time
-export uvset_to_processingset
+export uvset_to_processingset, GUSTAVO_VISIBILITY_SCHEMA
 export source_name, scan_name, primary_scan_name, scan_intents, sub_scan_name, scan_window, participating_antennas
 export select_source, select_scan, select_station, select_baseline, select_partition
 export merge_uvsets, time_window
