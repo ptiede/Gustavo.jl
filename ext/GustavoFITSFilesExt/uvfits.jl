@@ -1,7 +1,6 @@
 using FITSFiles
 using FITSFiles: HDU, Random, Bintable, Card
 using StructArrays
-using LinearAlgebra: Diagonal
 using Dates: Date, DateTime, datetime2julian
 using DimensionalData
 using DimensionalData: DimArray
@@ -11,10 +10,10 @@ import Gustavo.UVData
 using Gustavo.UVData:
     UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup,
     Antenna, AntennaTable, BaselineIndex,
-    Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL,
+    AbstractMount, Mount, MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
+    MountXY, MountOrbiting, MountOther,
     Pol, Frequency, UVW, Baseline,
-    sources, parallactic_mount, elevation_mount, offset_mount,
-    array_xyz, array_name, extras,
+    sources, array_name, extras, XRadio,
     channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name,
     nchannels
 
@@ -87,26 +86,36 @@ function _msv4_order(labels::AbstractVector{<:AbstractString})
 end
 
 
-# AIPS MNTSTA ↔ Mount round-trip.
+# AIPS MNTSTA codes 0–6, shared by the UVFITS AN and FITS-IDI ARRAY_GEOMETRY
+# tables. `offset` is the mount's axis offset in meters.
+const _MNTSTA_MOUNTS = (
+    MountAltAz, MountEquatorial, MountOrbiting, MountXY, MountNasmythR, MountNasmythL,
+    MountOther,
+)
+
 function mnt_codes_to_type(code, offset)
-    code == 0 && return MountAltAz(offset)
-    code == 1 && return MountEquatorial(offset)
-    code == 2 && throw(ArgumentError("Orbital antennas are not supported yet"))
-    code == 3 && throw(ArgumentError("X-Y mounts are not supported yet"))
-    code == 4 && return MountNaismithR(offset)
-    code == 5 && return MountNaismithL(offset)
-    code == 6 && throw(ArgumentError("Aperture/phased array mounts are not supported yet"))
-    error("Unsupported MNTSTA code: $code")
+    0 <= code < length(_MNTSTA_MOUNTS) ||
+        throw(ArgumentError("MNTSTA $code names no mount; AIPS defines codes 0–6"))
+    return _MNTSTA_MOUNTS[code + 1](offset)
 end
 
-function mount_to_mntsta(m::Mount)::Int32
-    par = parallactic_mount(m)
-    el = elevation_mount(m)
-    par == 1 && el == 0 && return Int32(0)   # alt-az
-    par == 0 && el == 0 && return Int32(1)   # equatorial
-    par == 1 && el == 1 && return Int32(4)   # Naismith R
-    par == 1 && el == -1 && return Int32(5)  # Naismith L
-    error("Mount $(m) has no AIPS MNTSTA mapping")
+function mount_to_mntsta(m::AbstractMount)::Int32
+    for (code, make) in pairs(_MNTSTA_MOUNTS)
+        m == make(XRadio.axis_offset(m)) && return Int32(code - 1)
+    end
+    throw(ArgumentError("$m has no AIPS MNTSTA code"))
+end
+
+# The UVFITS AN table states one axis offset per antenna, along the station's x.
+_uvfits_axis_offset(staxof) = (Float64(staxof), 0.0, 0.0)
+
+function _uvfits_staxof(m::AbstractMount)
+    x, y, z = XRadio.axis_offset(m)
+    iszero(y) && iszero(z) || throw(ArgumentError(
+        "$m has an axis offset off the station's x axis, which the UVFITS AN " *
+            "table's scalar STAXOF cannot state; FITS-IDI can"
+    ))
+    return Float32(x)
 end
 
 
@@ -233,17 +242,18 @@ function _build_antenna_table(an_hdu)
     xyz_raw = collect(an.STABXYZ)
     mount_raw = collect(an.MNTSTA)
     staxof_raw::Vector{Float32} = hasproperty(an, :STAXOF) ? collect(an.STAXOF) : fill(0.0f0, nant)
-    mnts = mnt_codes_to_type.(mount_raw, staxof_raw)
+    mnts = mnt_codes_to_type.(mount_raw, _uvfits_axis_offset.(staxof_raw))
     poltya_raw = hasproperty(an, :POLTYA) ? collect(an.POLTYA) : fill("R", nant)
     poltya::Vector{POLBASIS} = poltype.(poltya_raw)
     poltyb_raw = hasproperty(an, :POLTYB) ? collect(an.POLTYB) : fill("L", nant)
     poltyb::Vector{POLBASIS} = poltype.(poltyb_raw)
     polaa_raw::Vector{Float32} = hasproperty(an, :POLAA) ? collect(an.POLAA) : fill(0.0f0, nant)
     polab_raw::Vector{Float32} = hasproperty(an, :POLAB) ? collect(an.POLAB) : fill(0.0f0, nant)
-    pol_angles::Vector{Tuple{Float32, Float32}} = tuple.(Float32.(polaa_raw), Float32.(polab_raw))
+    pol_angles::Vector{Tuple{Float32, Float32}} = tuple.(deg2rad.(polaa_raw), deg2rad.(polab_raw))
 
-    response::Vector{Diagonal{ComplexF32, Vector{ComplexF32}}} = [Diagonal(ones(ComplexF32, 2)) for _ in 1:nant]
-    station_xyz::Vector{Vector{Float64}} = [Float64.(xyz_raw[i, :]) for i in eachindex(names)]
+    # `STABXYZ` is measured from the ARRAYX/Y/Z array center.
+    center = [Float64(something(card_value(cards, k), 0.0)) for k in ("ARRAYX", "ARRAYY", "ARRAYZ")]
+    station_xyz::Vector{Vector{Float64}} = [center .+ Float64.(xyz_raw[i, :]) for i in eachindex(names)]
     nominal_basis::Vector{Tuple{POLBASIS, POLBASIS}} = tuple.(poltya, poltyb)
 
     antennas = [
@@ -252,15 +262,11 @@ function _build_antenna_table(an_hdu)
             station_xyz = station_xyz[i],
             mount = mnts[i],
             nominal_basis = nominal_basis[i],
-            response = response[i],
             pol_angles = pol_angles[i],
         )
             for i in 1:nant
     ]
 
-    arrayx::Float64 = Float64(something(card_value(cards, "ARRAYX"), 0.0))
-    arrayy::Float64 = Float64(something(card_value(cards, "ARRAYY"), 0.0))
-    arrayz::Float64 = Float64(something(card_value(cards, "ARRAYZ"), 0.0))
     arrnam::String = string(something(card_value(cards, "ARRNAM"), ""))
 
     ant_extras = (;
@@ -269,7 +275,7 @@ function _build_antenna_table(an_hdu)
         _collect_an_extras(an)...,
     )
 
-    ant_table = AntennaTable(StructArray(antennas), (arrayx, arrayy, arrayz), arrnam, ant_extras)
+    ant_table = AntennaTable(StructArray(antennas), arrnam, ant_extras)
     return ant_table
 end
 
@@ -1275,16 +1281,15 @@ function _build_an_hdu(
         ORBPARM = [Float64[] for _ in 1:nant],
         NOSTA = Int32.(1:nant),
         MNTSTA = [mount_to_mntsta(m) for m in mounts],
-        STAXOF = Float32[Float32(offset_mount(m)) for m in mounts],
+        STAXOF = Float32[_uvfits_staxof(m) for m in mounts],
         POLTYA = [poltype_letter(p[1]) for p in nb],
-        POLAA = Float32[a[1] for a in pa],
+        POLAA = Float32[rad2deg(a[1]) for a in pa],
         POLTYB = [poltype_letter(p[2]) for p in nb],
-        POLAB = Float32[a[2] for a in pa],
+        POLAB = Float32[rad2deg(a[2]) for a in pa],
         POLCALA = polcala,
         POLCALB = polcalb,
     )
     data = merge(base, extras_rest)
-    arr_xyz = array_xyz(antennas)
     # AIPS AN HDU header: time-system / Earth-orientation / coord-frame
     # fields source from ObsArrayMetadata. Pure-AIPS bookkeeping fields
     # (NUMORB, NO_IF, NOPCAL, FREQID, EXTVER) are reconstructed from the
@@ -1293,9 +1298,10 @@ function _build_an_hdu(
     cards = [
         Card("EXTNAME", "AIPS AN"),
         Card("EXTVER", Int32(extver)),
-        Card("ARRAYX", Float64(arr_xyz[1])),
-        Card("ARRAYY", Float64(arr_xyz[2])),
-        Card("ARRAYZ", Float64(arr_xyz[3])),
+        # `STABXYZ` is geocentric, so the array center is the geocenter.
+        Card("ARRAYX", 0.0),
+        Card("ARRAYY", 0.0),
+        Card("ARRAYZ", 0.0),
         Card("ARRNAM", array_name(antennas)),
         Card("FREQ", ref_freq),
         Card("RDATE", array_obs.rdate),

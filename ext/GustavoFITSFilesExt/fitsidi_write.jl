@@ -55,16 +55,16 @@ function _build_idi_array_geometry_hdu(
         STABXYZ = [Float64.(collect(xyz[i])) for i in 1:nant],
         NOSTA = nosta,
         MNTSTA = [mount_to_mntsta(m) for m in mounts],
-        STAXOF = Float32[Float32(offset_mount(m)) for m in mounts],
+        STAXOF = [Float32.(collect(XRadio.axis_offset(m))) for m in mounts],
         DIAMETER = diameter,
     )
-    arr_xyz = array_xyz(antennas)
     cards = Card[
         Card("EXTNAME", "ARRAY_GEOMETRY"),
         Card("EXTVER", Int32(1)),
-        Card("ARRAYX", Float64(arr_xyz[1])),
-        Card("ARRAYY", Float64(arr_xyz[2])),
-        Card("ARRAYZ", Float64(arr_xyz[3])),
+        # `STABXYZ` is geocentric, so the array center is the geocenter.
+        Card("ARRAYX", 0.0),
+        Card("ARRAYY", 0.0),
+        Card("ARRAYZ", 0.0),
         Card("ARRNAM", array_name(antennas)),
         Card("FRAME", array_obs.frame),
         Card("NUMORB", Int32(0)),

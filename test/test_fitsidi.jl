@@ -40,15 +40,14 @@ function build_synth_idi_uvset(;
         UV.Antenna(;
             name = "A$(i)",
             station_xyz = Float64[100.0 * i, 200.0 * i, 300.0 * i],
-            mount = UV.MountAltAz(),
+            mount = (UV.MountAltAz(), UV.MountNasmythR((0.5, 0.0, 0.0)), UV.MountEquatorial())[mod1(i, 3)],
             nominal_basis = (RPol(), LPol()),
-            response = Diagonal(ones(ComplexF32, 2)),
-            pol_angles = (0.0f0, 0.0f0),
+            pol_angles = (0.1f0 * i, 0.2f0 * i),
         )
             for i in 1:nant
     ]
     antennas = UV.AntennaTable(
-        StructArray(ants_v), Float64[1.0, 2.0, 3.0], "SYNTH",
+        StructArray(ants_v), "SYNTH",
         (; NOSTA = Int32.(1:nant), DIAMETER = fill(25.0f0, nant)),
     )
 
@@ -239,6 +238,8 @@ end
             rants = UV.union_antennas(rt)
             @test collect(oants.name) == collect(rants.name)
             @test collect(oants.station_xyz) ≈ collect(rants.station_xyz)
+            @test collect(oants.mount) == collect(rants.mount)
+            @test [collect(p) for p in rants.pol_angles] ≈ [collect(p) for p in oants.pol_angles]
 
             # Source ra/dec.
             ometa = DimensionalData.metadata(first(values(DimensionalData.branches(uvset))))

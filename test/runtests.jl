@@ -35,6 +35,7 @@ include("test_gauge.jl")
 
 # FITS-IDI writer round-trip tests (Phase 2 of the fringe-fitter refactor).
 include("test_fitsidi.jl")
+include("test_antenna_tables.jl")
 
 # Per-baseline FFT fringe search (Phase 3 of the fringe-fitter refactor).
 include("test_fringe_search.jl")
@@ -137,28 +138,25 @@ function synthetic_uvdata()
 
     UV = Gustavo.UVData
     nominal_basis_v = [(RPol(), LPol()), (RPol(), LPol())]
-    response_v = [Diagonal(ones(ComplexF32, 2)) for _ in 1:2]
-    pol_angles_v = [(0.0f0, 0.0f0), (0.0f0, 0.0f0)]
+    pol_angles_v = [(0.0f0, 0.0f0), (0.3f0, 1.2f0)]
     antennas_v = [
         UV.Antenna(;
             name = "AA",
             station_xyz = zeros(3),
             mount = UV.MountAltAz(),
             nominal_basis = nominal_basis_v[1],
-            response = response_v[1],
             pol_angles = pol_angles_v[1],
         ),
         UV.Antenna(;
             name = "AX",
             station_xyz = zeros(3),
-            mount = UV.MountAltAz(),
+            mount = UV.MountNasmythR((1.5, 0.0, 0.0)),
             nominal_basis = nominal_basis_v[2],
-            response = response_v[2],
             pol_angles = pol_angles_v[2],
         ),
     ]
     antennas = UV.AntennaTable(
-        StructArray(antennas_v), zeros(3), "TEST",
+        StructArray(antennas_v), "TEST",
         (POLCALA = [Float32[], Float32[]], POLCALB = [Float32[], Float32[]]),
     )
     freq_setup = UV.FrequencySetup(;
@@ -484,6 +482,11 @@ end
         @test fs_round.total_bandwidths == fs_orig.total_bandwidths
         @test fs_round.sidebands == fs_orig.sidebands
         @test pol_products(round_set) == pol_products(data)
+
+        ants_orig, ants_round = UV.union_antennas(data), UV.union_antennas(round_set)
+        @test collect(ants_round.station_xyz) == collect(ants_orig.station_xyz)
+        @test collect(ants_round.mount) == collect(ants_orig.mount)
+        @test [collect(p) for p in ants_round.pol_angles] ≈ [collect(p) for p in ants_orig.pol_angles]
 
         # obs_time round-trip precision: the AIPS DATE PTYPE's integer JD
         # column is exact (Float32 holds integers below 2^24), so the whole
@@ -951,7 +954,6 @@ end
     ant() = UV.Antenna(;
         name = "AA", station_xyz = zeros(3), mount = UV.MountAltAz(),
         nominal_basis = (RPol(), LPol()),
-        response = Diagonal(ones(ComplexF32, 2)),
         pol_angles = (0.0f0, 0.0f0),
     )
     @test ant() == ant()
@@ -1347,13 +1349,12 @@ end
         name = "AA", station_xyz = [1.0, 0.0, 0.0],
         mount = UV.MountAltAz(),
         nominal_basis = (RPol(), LPol()),
-        response = Diagonal(ones(ComplexF32, 2)),
         pol_angles = (0.0f0, 0.0f0),
     )
     other_ant = info.antennas[2]
     bad_table = UV.AntennaTable(
         StructArray([bad_ant, other_ant]),
-        UV.array_xyz(info.antennas), UV.array_name(info.antennas),
+        UV.array_name(info.antennas),
         UV.extras(info.antennas),
     )
     bad_info = UV.update(info; antennas = bad_table)
@@ -1388,12 +1389,12 @@ end
             name = orig.name[i],
             station_xyz = i == 1 ? orig.station_xyz[i] .+ 1.0 : orig.station_xyz[i],
             mount = orig.mount[i], nominal_basis = orig.nominal_basis[i],
-            response = orig.response[i], pol_angles = orig.pol_angles[i],
+            pol_angles = orig.pol_angles[i],
         ) for i in 1:length(orig)
     ]
     perturbed = UV.AntennaTable(
         StructArray(perturbed_v),
-        UV.array_xyz(orig), UV.array_name(orig), UV.extras(orig),
+        UV.array_name(orig), UV.extras(orig),
     )
     # Hand the second leaf the perturbed table; tag with sub_name so the
     # partition key separates the two subarrays.

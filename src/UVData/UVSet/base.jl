@@ -381,7 +381,7 @@ antennas(leaf::PartitionedData) =
 
 Walk leaves and union participating antennas by name. Errors if the
 same antenna name has different metadata (mount, station_xyz,
-nominal_basis, response, pol_angles) across leaves — a multi-track
+nominal_basis, pol_angles) across leaves — a multi-track
 observation that should be split via `select_*` and processed per-SPW.
 """
 function union_antennas(uvset::UVSet)
@@ -413,7 +413,7 @@ function union_antennas(uvset::UVSet)
         end
     end
     return AntennaTable(
-        StructArray(rows), array_xyz(template), array_name(template), extras(template),
+        StructArray(rows), array_name(template), extras(template),
     )
 end
 

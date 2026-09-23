@@ -229,8 +229,7 @@ end
         local_of = Dict(n => i for (i, n) in pairs(keep))
         rows = [r for r in getfield(info.antennas, :antennas) if String(r.name) in keep]
         tbl = UVP.AntennaTable(
-            StructArray(rows), UVP.array_xyz(info.antennas),
-            UVP.array_name(info.antennas), UVP.extras(info.antennas),
+            StructArray(rows), UVP.array_name(info.antennas), UVP.extras(info.antennas),
         )
         remap(ps) = [
             (local_of[full[a]], local_of[full[b]]) for (a, b) in ps

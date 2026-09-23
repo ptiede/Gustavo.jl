@@ -16,12 +16,11 @@ function _subarray_uvset(specs; nchan = 4, nant = 6)
             station_xyz = Float64[1.0e4 * i, 2.0e4 * i, 3.0e4 * i],
             mount = UVsub.MountAltAz(),
             nominal_basis = (RPol(), LPol()),
-            response = Diagonal(ones(ComplexF32, 2)),
             pol_angles = (0.0f0, 0.0f0),
         ) for i in 1:nant
     ]
     antennas = UVsub.AntennaTable(
-        StructArray(ants), Float64[1.0:nant;], "SYNTH",
+        StructArray(ants), "SYNTH",
         (; NOSTA = Int32.(1:nant), DIAMETER = fill(25.0f0, nant)),
     )
     chf = 230.0e9 .+ (0:(nchan - 1)) .* 2.0e6

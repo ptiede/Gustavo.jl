@@ -91,15 +91,20 @@ function _build_idi_antenna_table(ag_hdu, an_hdu)
     names = _idi_clean.(collect(ag.ANNAME))
     nant = length(names)
 
+    # `STABXYZ` is measured from the ARRAYX/Y/Z array center.
+    center = [Float64(something(card_value(ag_cards, k), 0.0)) for k in ("ARRAYX", "ARRAYY", "ARRAYZ")]
     xyz_raw = collect(ag.STABXYZ)               # (nant, 3)
-    station_xyz = [Float64.(xyz_raw[i, :]) for i in 1:nant]
+    station_xyz = [center .+ Float64.(xyz_raw[i, :]) for i in 1:nant]
 
     mount_raw = collect(ag.MNTSTA)
-    staxof_raw = hasproperty(ag, :STAXOF) ? collect(ag.STAXOF) : fill(0.0f0, nant)
-    # STAXOF is `(nant, 3)`; the scalar feed offset is the first component.
-    staxof_scalar = staxof_raw isa AbstractMatrix ?
-        Float32.(staxof_raw[:, 1]) : Float32.(staxof_raw)
-    mounts = mnt_codes_to_type.(mount_raw, staxof_scalar)
+    staxof = hasproperty(ag, :STAXOF) ? collect(ag.STAXOF) : zeros(Float32, nant, 3)
+    size(staxof) == (nant, 3) || throw(ArgumentError(
+        "FITS-IDI ARRAY_GEOMETRY STAXOF is $(size(staxof)); the standard defines " *
+            "three values per antenna, one per station axis"
+    ))
+    mounts = [
+        mnt_codes_to_type(mount_raw[i], NTuple{3, Float64}(staxof[i, :])) for i in 1:nant
+    ]
 
     poltya = poltype.(_idi_clean.(collect(an.POLTYA)))::Vector{<:POLBASIS}
     poltyb = poltype.(_idi_clean.(collect(an.POLTYB)))::Vector{<:POLBASIS}
@@ -115,31 +120,23 @@ function _build_idi_antenna_table(ag_hdu, an_hdu)
             for i in 1:nant
     ]
 
-    response = [Diagonal(ones(ComplexF32, 2)) for _ in 1:nant]
-
     antennas = [
         Antenna(;
             name = names[i],
             station_xyz = station_xyz[i],
             mount = mounts[i],
             nominal_basis = nominal_basis[i],
-            response = response[i],
             pol_angles = pol_angles[i],
         )
             for i in 1:nant
     ]
 
-    arrayx = Float64(something(card_value(ag_cards, "ARRAYX"), 0.0))
-    arrayy = Float64(something(card_value(ag_cards, "ARRAYY"), 0.0))
-    arrayz = Float64(something(card_value(ag_cards, "ARRAYZ"), 0.0))
     arrnam = string(something(card_value(ag_cards, "ARRNAM"), ""))
 
-    extras = (;
-        DIAMETER = hasproperty(ag, :DIAMETER) ?
-            Float32.(collect(ag.DIAMETER)) : fill(0.0f0, nant),
-        NOSTA = round.(Int32, collect(ag.NOSTA)),
-    )
-    return AntennaTable(StructArray(antennas), (arrayx, arrayy, arrayz), arrnam, extras)
+    nosta = round.(Int32, collect(ag.NOSTA))
+    extras = hasproperty(ag, :DIAMETER) ?
+        (; DIAMETER = Float32.(collect(ag.DIAMETER)), NOSTA = nosta) : (; NOSTA = nosta)
+    return AntennaTable(StructArray(antennas), arrnam, extras)
 end
 
 # One `FrequencySetup` per BAND. `channel_freqs = REF_FREQ + BANDFREQ[b] +

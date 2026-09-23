@@ -14,6 +14,8 @@ using Printf: @sprintf
 using Dates
 using AstroLib: ct2lst
 import XRadio
+using XRadio: AbstractMount, Mount, MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
+    MountXY, MountOrbiting, MountOther
 
 include("dimensions.jl")
 include("antenna.jl")
@@ -35,7 +37,8 @@ include("xradio_bridge.jl")
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
 export antennas, union_antennas, unify_antennas, union_pol_products
 export freq_setup, union_frequency_axis, channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
-export Mount, MountAltAz, MountEquatorial, MountNaismithR, MountNaismithL
+export AbstractMount, Mount, MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
+    MountXY, MountOrbiting, MountOther
 export BaselineIndex, UVSet, rebuild_visibilities, scan_key
 export apply, mapleaves, flatmap, leaves, sources, scan_ids, partitions, pol_products
 export frequencies, timestamps

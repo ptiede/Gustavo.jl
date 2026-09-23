@@ -179,15 +179,6 @@ function _ms_metadata(root)
     )
 end
 
-# AIPS mount codes, from the rotation-rate coefficients `Mount` carries.
-function _mount_name(m::Mount)
-    par, elev = parallactic_mount(m), elevation_mount(m)
-    par == 0 && return "EQUATORIAL"
-    elev == 1 && return "NASMYTH-R"
-    elev == -1 && return "NASMYTH-L"
-    return "ALT-AZ"
-end
-
 _receptor_label(p::PolTypes) =
     p isa RPol ? "R" : p isa LPol ? "L" : p isa XPol ? "X" : "Y"
 
@@ -219,12 +210,23 @@ function _antenna_dataset(tab::AntennaTable)
         ),
     )
     ds[:station_name] = DimArray(names, (ant,))
-    ds[:mount] = DimArray([_mount_name(m) for m in tab.mount], (ant,))
     ds[:telescope_name] = DimArray(fill(String(array_name(tab)), n), (ant,))
     ds[:polarization_type] = DimArray(
         [_receptor_label(basis[a][r]) for r in 1:2, a in eachindex(basis)], (receptor, ant),
     )
-    return ds
+    angles = collect(tab.pol_angles)
+    ds[:antenna_receptor_angle] = DimArray(
+        [Float64(angles[a][r]) for r in 1:2, a in eachindex(angles)], (receptor, ant);
+        metadata = Dict{Symbol, Any}(:type => "quantity", :units => "rad"),
+    )
+    ext = extras(tab)
+    if haskey(ext, :DIAMETER)
+        ds[:antenna_dish_diameter] = DimArray(
+            Float64.(collect(ext.DIAMETER)), (ant,);
+            metadata = Dict{Symbol, Any}(:type => "quantity", :units => "m"),
+        )
+    end
+    return XRadio.set_mounts!(ds, collect(tab.mount))
 end
 
 function _field_and_source_dataset(info)

@@ -82,6 +82,10 @@ using XRadio: XRadio, ProcessingSet, MeasurementSet
         for (i, xyz) in enumerate(info.antennas.station_xyz)
             @test parent(ant[:antenna_position])[:, i] ≈ Float64.(xyz)
         end
+        @test collect(XRadio.mounts(ant)) == collect(info.antennas.mount)
+        @test [Tuple(c) for c in eachcol(parent(ant[:antenna_receptor_angle]))] ==
+            [Float64.(p) for p in info.antennas.pol_angles]
+        @test collect(ant[:antenna_dish_diameter]) == Float64.(UV.extras(info.antennas).DIAMETER)
     end
 
     @testset "a lazy set converts through materialization" begin

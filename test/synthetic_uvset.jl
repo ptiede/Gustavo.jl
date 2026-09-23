@@ -126,13 +126,12 @@ function _build_fringe_uvset(;
                 Float64[1.0e4 * i, 2.0e4 * i, 3.0e4 * i] : Float64.(station_positions[i]),
             mount = UV.MountAltAz(),
             nominal_basis = (RPol(), LPol()),
-            response = Diagonal(ones(ComplexF32, 2)),
             pol_angles = (0.0f0, 0.0f0),
         )
             for i in 1:nant
     ]
     antennas = UV.AntennaTable(
-        StructArray(ants_v), Float64[1.0:nant;], "SYNTH",
+        StructArray(ants_v), "SYNTH",
         (; NOSTA = Int32.(1:nant), DIAMETER = fill(25.0f0, nant)),
     )
 
