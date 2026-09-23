@@ -215,3 +215,111 @@ end
             )[:sideband]
     end
 end
+
+# ── Partition accessors on a MeasurementSet ───────────────────────────────────
+#
+# Each accessor answers from the store what it answers from the leaf the store
+# was built from.
+
+@testset "partition accessors on a MeasurementSet" begin
+    UV = Gustavo.UVData
+    uvset, _ = _build_fringe_uvset(; nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 2)
+    root = DimensionalData.metadata(uvset)
+    ps = UV.uvset_to_processingset(uvset)
+
+    function agrees(ms, leaf)
+        @test UV.scan_name(ms) == UV.scan_name(leaf)
+        @test UV.primary_scan_name(ms) == UV.primary_scan_name(leaf)
+        @test UV.source_name(ms) == UV.source_name(leaf)
+        @test UV.sub_scan_name(ms) == UV.sub_scan_name(leaf)
+        @test UV.scan_intents(ms) == UV.scan_intents(leaf)
+        @test collect(UV.obs_time(ms)) == collect(UV.obs_time(leaf))
+        @test UV.scan_window(ms) == UV.scan_window(leaf)
+        @test UV.pol_products(ms) == UV.pol_products(leaf)
+        @test UV.participating_antennas(ms) == UV.participating_antennas(leaf)
+
+        bm, bl = UV.baselines(ms), UV.baselines(leaf)
+        @test bm.pairs == bl.pairs
+        @test bm.labels == bl.labels
+        @test bm.ant1_names == bl.ant1_names
+        @test bm.ant2_names == bl.ant2_names
+        @test [UV.baseline_number(ms, p) for p in zip(bl.ant1_names, bl.ant2_names)] ==
+            collect(eachindex(bl.pairs))
+
+        fm, fl = UV.freq_setup(ms), UV.freq_setup(leaf)
+        @test UV.setup_name(fm) == UV.setup_name(fl)
+        @test UV.ref_freq(fm) == UV.ref_freq(fl)
+        @test UV.channel_freqs(fm) == UV.channel_freqs(fl)
+        @test UV.ch_widths(fm) == UV.ch_widths(fl)
+        @test UV.total_bandwidths(fm) == UV.total_bandwidths(fl)
+        @test UV.sidebands(fm) == UV.sidebands(fl)
+
+        am, al = UV.antennas(ms), UV.antennas(leaf)
+        @test am.name == al.name
+        @test am.station_xyz == al.station_xyz
+        @test am.mount == al.mount
+        @test am.nominal_basis == al.nominal_basis
+        @test am.pol_angles == al.pol_angles
+        @test UV.array_name(am) == UV.array_name(al)
+        return @test UV.extras(am).DIAMETER == UV.extras(al).DIAMETER
+    end
+
+    @testset "in memory" begin
+        for (key, leaf) in UV.branches(uvset)
+            agrees(ps[key], leaf)
+        end
+    end
+
+    @testset "read back from disk" begin
+        path = joinpath(mktempdir(), "accessors.ps.zarr")
+        write(path, ps; schemas = [UV.GUSTAVO_VISIBILITY_SCHEMA])
+        back = read(XRadio.ProcessingSet, path)
+        for (key, leaf) in UV.branches(uvset)
+            agrees(back[key], leaf)
+        end
+    end
+
+    key, leaf = first(UV.branches(uvset))
+    info = DimensionalData.metadata(leaf)
+    rebuilt(; kw...) = UV._leaf_to_measurementset(
+        DimensionalData.rebuild(leaf; metadata = UV.update(info; kw...)), root,
+    )
+
+    @testset "a named sub-scan and stated intents" begin
+        intents = ["OBSERVE_TARGET#ON_SOURCE", "CALIBRATE_DELAY#ON_SOURCE"]
+        ms = rebuilt(; sub_scan_name = "sub_1", scan_intents = intents)
+        @test UV.sub_scan_name(ms) == "sub_1"
+        @test UV.scan_intents(ms) == intents
+    end
+
+    @testset "sideband and bandwidth derived where the store states none" begin
+        # A stated bandwidth wider than the channels span, so reading the stored
+        # value and deriving one give different answers.
+        fs = info.freq_setup
+        setup(freqs, sideband) = UV.FrequencySetup(;
+            name = fs.name, ref_freq = fs.ref_freq, channel_freqs = freqs,
+            ch_widths = fs.ch_widths, total_bandwidths = fill(5.0e7, length(fs)),
+            sidebands = fill(sideband, length(fs)),
+        )
+        for sideband in (1.0, -1.0)
+            freqs = sideband > 0 ? fs.channel_freqs : reverse(fs.channel_freqs)
+            ms = rebuilt(; freq_setup = setup(freqs, sideband))
+            @test all(==(5.0e7), UV.total_bandwidths(UV.freq_setup(ms)))
+            meta = DimensionalData.metadata(lookup(dims(ms, XRadio.Frequency)))
+            delete!(meta, :sideband)
+            delete!(meta, :total_bandwidth)
+            derived = UV.freq_setup(ms)
+            @test all(==(sideband), UV.sidebands(derived))
+            @test all(==(length(fs) * first(fs.ch_widths)), UV.total_bandwidths(derived))
+        end
+        @test_throws "no direction to derive one from" UV._channel_direction([2.3e11])
+    end
+
+    @testset "a Measurement Set holding two scans has no scan name" begin
+        ms = UV.uvset_to_processingset(uvset)[key]
+        t = dims(ms, Ti)
+        ms[:scan_name] = DimArray([i <= length(t) ÷ 2 ? "1" : "2" for i in eachindex(t)], (t,))
+        @test_throws "holds 2 scan names (1, 2)" UV.scan_name(ms)
+        @test_throws "holds 2 scan names" UV.primary_scan_name(ms)
+    end
+end

@@ -33,6 +33,7 @@ include("apriori.jl")
 include("utilities.jl")
 include("msv4_schema.jl")
 include("xradio_bridge.jl")
+include("measurementset.jl")
 
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
 export antennas, union_antennas, unify_antennas, union_pol_products
