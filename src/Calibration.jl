@@ -10,8 +10,7 @@ module Calibration
 
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 using ..UVData
-using ..UVData: correlation_feed_pair,
-    parallel_hand_indices, cross_hand_indices, phase_relative_to_ref
+using ..UVData: feed_pairs, phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,
     is_lazy, pol_products, baselines
 # Segmentation materialization is a METHOD of the data layer's `materialize`
@@ -37,8 +36,7 @@ include("Calibration/evaluate.jl")
 include("Calibration/solutions.jl")
 
 # Feed / correlation-product conventions
-export correlation_feed_pair
-export parallel_hand_indices, cross_hand_indices
+export feed_pairs
 
 # Gauge conventions for station-based solves
 export AbstractGauge, PinAntenna, ZeroSumPhase
