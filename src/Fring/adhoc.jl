@@ -1066,11 +1066,15 @@ end
 
 # ── Per-scan pipeline entry ───────────────────────────────────────────────────
 
-# Accumulate one band leaf's per-AP residual into `rbar`/`wbar` as the
-# inverse-variance mean of the data, already gain-corrected (and reweighted by
-# |gain|², matching `apply_calibration`) through the pipeline's transform chain
-# before this kernel ever sees it.
-function _accumulate_leaf_rbar!(rbar, wbar, V, W, F)
+# Accumulate one band leaf's per-AP residual sums, `phasor_sum[bi, p, t] += w·V`
+# and `weight_sum[bi, p, t] += w`, whose ratio is the inverse-variance mean of
+# the data, already gain-corrected (and reweighted by |gain|², matching
+# `apply_calibration`) through the pipeline's transform chain before this
+# kernel ever sees it.
+_accumulate_leaf_rbar!(phasor_sum, weight_sum, s::AbstractDimStack) =
+    _accumulate_leaf_rbar!(phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags])
+
+function _accumulate_leaf_rbar!(phasor_sum, weight_sum, V, W, F)
     UVData.check_layer_axes(V, W, F)
     @inbounds for p in axes(V, Polarization)
         for bi in axes(V, BaselineID)
@@ -1081,12 +1085,12 @@ function _accumulate_leaf_rbar!(rbar, wbar, V, W, F)
                 (w > 0 && isfinite(w)) || continue
                 v = V[cell]
                 isfinite(v) || continue
-                rbar[bi, p, tt] += w * v
-                wbar[bi, p, tt] += w
+                phasor_sum[bi, p, tt] += w * v
+                weight_sum[bi, p, tt] += w
             end
         end
     end
-    return rbar, wbar
+    return phasor_sum, weight_sum
 end
 
 """
@@ -1130,8 +1134,7 @@ function adhoc_scan!(
         r = blocks[li]
         _accumulate_leaf_rbar!(
             view(rparts, :, :, :, li), view(wparts, :, :, :, li),
-            view(stack[:vis], r, :, :, :), view(stack[:weights], r, :, :, :),
-            view(stack[:flags], r, :, :, :),
+            view(stack, Frequency(r)),
         )
     end
     rbar = zeros(ComplexF64, nbl, npol, nap)

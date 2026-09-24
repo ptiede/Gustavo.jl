@@ -260,11 +260,10 @@ function _divide_gains!(
         stack::AbstractDimStack, win::GeometryWindow, sol::CalibrationSolution,
         executor; amap = nothing,
     )
-    V = parent(stack[:vis])
-    W = parent(stack[:weights])
+    Vd = stack[:vis]
+    Wd = stack[:weights]
     bl_pairs = UVData.baselines(stack).pairs
     pols = pol_products(stack)
-    nchan, nti, nbl, npol = size(V)
     tspan = UVData.metadata(stack).time_span
     tconst = _time_constant_over(sol, win, tspan)
     g = Calibration._composed_gains(
@@ -273,26 +272,36 @@ function _divide_gains!(
         ti_idx = tconst ? win.ti_idx[1:1] : win.ti_idx,
         time_span = tconst ? _head_span(tspan) : tspan,
     )
-    cols = [(bi, p) for p in axes(V, 4) for bi in axes(V, 3)]
+    cols = [(bi, p) for p in axes(Vd, Polarization) for bi in axes(Vd, BaselineID)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
-        @inbounds begin
-            fa, fb = correlation_feed_pair(pols[p])
-            a, b = bl_pairs[bi]
-            if amap !== nothing
-                a = amap[a]
-                b = amap[b]
-                (a == 0 || b == 0) && return
-            end
-            for t in axes(V, 2)
-                gt = tconst ? 1 : t
-                for c in axes(V, 1)
-                    den = g[c, gt, a, fa] * conj(g[c, gt, b, fb])
-                    (isfinite(den) && abs2(den) > 0) || continue
-                    V[c, t, bi, p] /= den
-                    W[c, t, bi, p] *= abs2(den)
-                end
-            end
+        fa, fb = correlation_feed_pair(pols[p])
+        a, b = bl_pairs[bi]
+        if amap !== nothing
+            a = amap[a]
+            b = amap[b]
+            (a == 0 || b == 0) && return
+        end
+        _divide_column!(
+            UVData._cell_plane(Vd, bi, p), UVData._cell_plane(Wd, bi, p), g, a, b, fa, fb, tconst,
+        )
+    end
+    return nothing
+end
+
+# One `(Frequency, Ti)` plane of `_divide_gains!`. The gains share its axes (one
+# time when `tconst`), which is what keeps the `@inbounds` reads of `g` in range.
+function _divide_column!(V, W, g, a, b, fa, fb, tconst::Bool)
+    axes(V, 1) == axes(g, 1) && (tconst || axes(V, 2) == axes(g, 2)) || throw(
+        DimensionMismatch("gains $(axes(g)) do not cover the plane $(axes(V))"),
+    )
+    @inbounds for t in axes(V, 2)
+        gt = tconst ? 1 : t
+        for c in axes(V, 1)
+            den = g[c, gt, a, fa] * conj(g[c, gt, b, fb])
+            (isfinite(den) && abs2(den) > 0) || continue
+            V[c, t] /= den
+            W[c, t] *= abs2(den)
         end
     end
     return nothing
@@ -332,7 +341,7 @@ function apply_transform!(
     for p in axes(W, Polarization), (bi, (a, b)) in enumerate(bl_pairs)
         f = s[a] * s[b]
         f == 1 && continue
-        @views W[:, :, bi, p] .*= f
+        W[BaselineID(bi), Polarization(p)] .*= f
     end
     return nothing
 end
@@ -341,13 +350,13 @@ function apply_transform(uvset::UVSet, t::StationWeightScale)
     s = t.s
     return UVData.apply(uvset) do leaf, info, root
         leaf = UVData.materialize_leaf(leaf)
-        W = copy(parent(leaf[:weights]))
+        W = copy(leaf[:weights])
         for (bi, (a, b)) in enumerate(UVData.baselines(leaf).pairs)
             f = s[a] * s[b]
             f == 1 && continue
-            @views W[:, :, bi, :] .*= f
+            W[BaselineID(bi)] .*= f
         end
-        return rebuild_visibilities(leaf, copy(parent(leaf[:vis])), W)
+        return rebuild_visibilities(leaf, copy(parent(leaf[:vis])), parent(W))
     end
 end
 

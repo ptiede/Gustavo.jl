@@ -165,9 +165,10 @@ mutable struct FringeWorkspace{C, T}
     D::Matrix{C}
     dwin::Vector{T}            # scratch for the windowed |D|² noise estimate
     mbd::Any                   # lazily-built `_MBDWorkspace{C}` for the hierarchical path
+    planes::Any                # the cell's gathered `(vis, weights, flags)` planes
 end
 FringeWorkspace{C}() where {C} = FringeWorkspace{C, real(C)}(
-    0, 0, Matrix{C}(undef, 0, 0), Matrix{C}(undef, 0, 0), real(C)[], nothing,
+    0, 0, Matrix{C}(undef, 0, 0), Matrix{C}(undef, 0, 0), real(C)[], nothing, nothing,
 )
 FringeWorkspace(::Type{C}) where {C} = FringeWorkspace{C}()
 
@@ -407,8 +408,45 @@ end
 # The plane's own frequency and time lookups, which label its two axes.
 _plane_axes(plane) = (lookup(plane[:vis], Frequency), lookup(plane[:vis], Ti))
 
-# The three layers every search kernel reads, in the order they are passed on.
-_plane_layers(plane) = (plane[:vis], plane[:weights], plane[:flags])
+# The three layers every search kernel reads, in the order they are passed on,
+# each as a plain `(Frequency, Ti)` matrix whatever order the plane is stored in:
+# the kernels index them by position.
+_plane_layers(plane) = map(
+    L -> PermutedDimsArray(parent(L), dimnum(L, (Frequency, Ti))),
+    (plane[:vis], plane[:weights], plane[:flags]),
+)
+
+# A cell's layers copied into `ws` frequency-fastest, and concatenated along
+# frequency across the `planes` of a scan group's members, which must share one
+# time axis. The kernels sweep a plane many times, so one copy costs less than
+# strided reads.
+function _gather_planes!(ws::FringeWorkspace, planes)
+    tg = lookup(first(planes)[:vis], Ti)
+    for plane in planes
+        lookup(plane[:vis], Ti) == tg || throw(
+            DimensionMismatch("the members of a scan group must share one time axis"),
+        )
+    end
+    shape = (sum(plane -> size(plane[:vis], Frequency), planes), length(tg))
+    bufs = _plane_buffers!(ws, _plane_layers(first(planes)), shape)
+    offset = 0
+    for plane in planes
+        rows = offset .+ (1:size(plane[:vis], Frequency))
+        foreach(bufs, _plane_layers(plane)) do buf, L
+            buf[rows, :] .= L
+        end
+        offset = last(rows)
+    end
+    return bufs
+end
+
+function _plane_buffers!(ws::FringeWorkspace, layers, shape)
+    fits(buf, L) = buf isa Matrix{eltype(L)} && size(buf) == shape
+    bufs = ws.planes
+    bufs isa NTuple{3, Matrix} && all(map(fits, bufs, layers)) && return bufs
+    ws.planes = map(L -> Matrix{eltype(L)}(undef, shape), layers)
+    return ws.planes
+end
 
 # Grid the weighted visibilities onto the workspace's zero-padded uniform grid
 # `ws.G` (zeroed here); returns Σw. Shared by the search hot path and the map
@@ -479,7 +517,17 @@ function _baseline_fringe_search(
         ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
         family_cells::Real,
     )
-    V, W, F = _plane_layers(plane)
+    ws = something(workspace, FringeWorkspace(eltype(plane[:vis])))
+    V, W, F = _gather_planes!(ws, (plane,))
+    return _baseline_fringe_search(V, W, F, freqs, times, f0, t0, ax, ws, opts, family_cells)
+end
+
+function _baseline_fringe_search(
+        V::AbstractMatrix, W::AbstractMatrix, F,
+        freqs::AbstractVector, times::AbstractVector, f0::Real, t0::Real,
+        ax::_SearchAxes, workspace::Union{Nothing, FringeWorkspace}, opts::FringeSearch,
+        family_cells::Real,
+    )
     C = eltype(V)
     # Hierarchical multi-band path (never allocates the big common-Δf grid).
     ax.mbd === nothing ||

@@ -70,6 +70,7 @@ include("test_interface.jl")
 # materialization / search parity, and the transform chain vs the precal path.
 include("test_stream.jl")
 include("test_transforms.jl")
+include("test_axis_order.jl")
 
 # The FringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
 # cross-feed rate opt-in, fit-on-subset masking, transforms on the new path.

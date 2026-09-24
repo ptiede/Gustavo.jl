@@ -51,9 +51,6 @@ function refine_scan_dispersion!(
     ti = win.ti_idx
     blocks = _spw_blocks(geom, ci)
     length(blocks) >= 4 || return 0              # < 4 bands can't constrain 1/ν
-    V = stack[:vis]
-    W = stack[:weights]
-    F = stack[:flags]
     fg = frequencies(stack)
     bl_pairs = UVData.baselines(stack).pairs
     pols = pol_products(stack)
@@ -61,19 +58,19 @@ function refine_scan_dispersion!(
     nbl = length(bl_pairs)
     npol = length(pols)
     nlf = length(blocks)
-    z = zeros(ComplexF64, nbl, npol, nlf)
-    w = zeros(Float64, nbl, npol, nlf)
+    phasor_sum = zeros(ComplexF64, nbl, npol, nlf)
+    weight_sum = zeros(Float64, nbl, npol, nlf)
     fb = [sum(@view fg[r]) / length(r) for r in blocks]
     tforeach(1:nlf; scheduler = executor) do li
         r = blocks[li]
         _accumulate_leaf_band_phasor!(
-            view(z, :, :, li), view(w, :, :, li),
-            view(V, r, :, :, :), view(W, r, :, :, :), view(F, r, :, :, :),
+            view(phasor_sum, :, :, li), view(weight_sum, :, :, li),
+            view(stack, Frequency(r)),
             bl_pairs, pols,
         )
     end
     return _dispersion_fit_stationize!(
-        θ, z, w, fb, bl_pairs, pols, feeds, first(ti), geom,
+        θ, phasor_sum, weight_sum, fb, bl_pairs, pols, feeds, first(ti), geom,
         delay_plan, disp_plan, gauge, opts,
         Float64(tau_max), Float64(dtec_max), ties,
     )
@@ -100,9 +97,6 @@ function refine_scan_sbd!(
     ci = win.chan_idx
     ti = win.ti_idx
     blocks = _spw_blocks(geom, ci)
-    V = stack[:vis]
-    W = stack[:weights]
-    F = stack[:flags]
     fg = frequencies(stack)
     bl_pairs = UVData.baselines(stack).pairs
     pols = pol_products(stack)
@@ -111,8 +105,8 @@ function refine_scan_sbd!(
     npol = length(pols)
     nlf = length(blocks)
     ntot = nlf * Int(nchunk)
-    z = zeros(ComplexF64, nbl, npol, ntot)
-    w = zeros(Float64, nbl, npol, ntot)
+    phasor_sum = zeros(ComplexF64, nbl, npol, ntot)
+    weight_sum = zeros(Float64, nbl, npol, ntot)
     chunkf = zeros(Float64, ntot)
     chunkgrp = zeros(Int, ntot)
     tforeach(1:nlf; scheduler = executor) do li
@@ -132,15 +126,15 @@ function refine_scan_sbd!(
             chunkgrp[kk] = bgrp
         end
         _accumulate_leaf_chunks!(
-            view(z, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
-            view(w, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
-            view(V, r, :, :, :), view(W, r, :, :, :), view(F, r, :, :, :),
+            view(phasor_sum, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
+            view(weight_sum, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
+            view(stack, Frequency(r)),
             bl_pairs, pols,
             coc .- (li - 1) * Int(nchunk),
         )
     end
     return _sbd_fit_stationize!(
-        θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds,
+        θ, phasor_sum, weight_sum, chunkf, chunkgrp, bl_pairs, pols, feeds,
         first(ti), geom, sbd, gauge, nant;
         tau_max = Float64(tau_max),
     )
@@ -151,25 +145,25 @@ end
 # (disjoint per scan, so pass-2 groups can refine concurrently). Returns the
 # number of detections the robust station solves excised.
 function _dispersion_fit_stationize!(
-        θ, z, w, fb, bl_pairs, pols, feeds, ti0, geom,
+        θ, phasor_sum, weight_sum, fb, bl_pairs, pols, feeds, ti0, geom,
         delay_plan, disp_plan, gauge, opts, tau_max, dtec_max, ties = nothing,
     )
-    nbl, npol, nlf = size(z)
+    nbl, npol, nlf = size(phasor_sum)
     Dτ = fill(_invalid_detection(Float64), nbl, npol)
     Dd = fill(_invalid_detection(Float64), nbl, npol)
-    for p in axes(z, 2)
+    for p in axes(phasor_sum, 2)
         feeds[p][1] == feeds[p][2] || continue
-        for bi in axes(z, 1)
+        for bi in axes(phasor_sum, 1)
             a, b = bl_pairs[bi]
             a == b && continue
             rows_f = Float64[]
             rows_z = ComplexF64[]
             rows_w = Float64[]
-            for li in axes(z, 3)
-                w[bi, p, li] > 0 || continue
+            for li in axes(phasor_sum, 3)
+                weight_sum[bi, p, li] > 0 || continue
                 push!(rows_f, fb[li])
-                push!(rows_z, z[bi, p, li])
-                push!(rows_w, w[bi, p, li])
+                push!(rows_z, phasor_sum[bi, p, li])
+                push!(rows_w, weight_sum[bi, p, li])
             end
             length(rows_f) >= 4 || continue
             fit = _fit_band_dispersion(
@@ -253,11 +247,12 @@ end
 # group centre. `chunkf`/`chunkgrp` label each accumulated chunk with its centre
 # frequency and band-group id.
 function _sbd_fit_stationize!(
-        θ, z, w, chunkf, chunkgrp, bl_pairs, pols, feeds, ti0, geom, sbd, gauge, nant;
+        θ, phasor_sum, weight_sum, chunkf, chunkgrp, bl_pairs, pols, feeds, ti0, geom,
+        sbd, gauge, nant;
         opts::Stationization = Stationization(loss = LeastSquares()),
         tau_max::Float64 = 6.0e-8,
     )
-    nbl, npol, _ = size(z)
+    nbl, npol, _ = size(phasor_sum)
     ngrp = length(sbd.freqgroups)
     nrej = 0
     # ── Tier 1: per-group fits + within-group slope guard ───────────────────
@@ -280,19 +275,19 @@ function _sbd_fit_stationize!(
         rows_τ = _ObsRow[]
         # per accepted baseline row: (a, b, φ at fitted slope, φ at τ = 0, weight)
         φrows = Tuple{Int, Int, Float64, Float64, Float64}[]
-        for p in axes(z, 2)
+        for p in axes(phasor_sum, 2)
             feeds[p][1] == feeds[p][2] || continue
-            for bi in axes(z, 1)
+            for bi in axes(phasor_sum, 1)
                 a, b = bl_pairs[bi]
                 a == b && continue
                 fs = Float64[]
                 zs = ComplexF64[]
                 ws = Float64[]
                 for k in ks
-                    w[bi, p, k] > 0 || continue
+                    weight_sum[bi, p, k] > 0 || continue
                     push!(fs, chunkf[k])
-                    push!(zs, z[bi, p, k])
-                    push!(ws, w[bi, p, k])
+                    push!(zs, phasor_sum[bi, p, k])
+                    push!(ws, weight_sum[bi, p, k])
                 end
                 length(fs) >= 3 || continue
                 fit = _fit_chunk_delay(fs, zs, ws, fc; tau_max = _band_delay_halfwindow(fs, tau_max))
@@ -311,17 +306,17 @@ function _sbd_fit_stationize!(
         τv, covτ, _ = _solve_observable_robust(rows_τ, nant, gauge, opts; rewrap = 0)
         num0 = 0.0
         num1 = 0.0
-        for p in axes(z, 2)
+        for p in axes(phasor_sum, 2)
             feeds[p][1] == feeds[p][2] || continue
-            for bi in axes(z, 1)
+            for bi in axes(phasor_sum, 1)
                 a, b = bl_pairs[bi]
                 a == b && continue
                 τab = (covτ[a, 1] ? τv[a, 1] : 0.0) - (covτ[b, 1] ? τv[b, 1] : 0.0)
                 acc0 = zero(ComplexF64)
                 acc1 = zero(ComplexF64)
                 for k in ks
-                    w[bi, p, k] > 0 || continue
-                    zk = z[bi, p, k]
+                    weight_sum[bi, p, k] > 0 || continue
+                    zk = phasor_sum[bi, p, k]
                     acc0 += zk
                     acc1 += zk * cis(-2π * τab * (chunkf[k] - fc))
                 end
@@ -346,9 +341,9 @@ function _sbd_fit_stationize!(
     # scan's SBD solution all-or-nothing.
     num0 = 0.0
     num1 = 0.0
-    for p in axes(z, 2)
+    for p in axes(phasor_sum, 2)
         feeds[p][1] == feeds[p][2] || continue
-        for bi in axes(z, 1)
+        for bi in axes(phasor_sum, 1)
             a, b = bl_pairs[bi]
             a == b && continue
             acc0 = zero(ComplexF64)
@@ -357,8 +352,8 @@ function _sbd_fit_stationize!(
                 τab = (gs.covτ[a, 1] ? gs.τv[a, 1] : 0.0) - (gs.covτ[b, 1] ? gs.τv[b, 1] : 0.0)
                 φab = (gs.covφ[a, 1] ? gs.φv[a, 1] : 0.0) - (gs.covφ[b, 1] ? gs.φv[b, 1] : 0.0)
                 for k in gs.ks
-                    w[bi, p, k] > 0 || continue
-                    zk = z[bi, p, k]
+                    weight_sum[bi, p, k] > 0 || continue
+                    zk = phasor_sum[bi, p, k]
                     acc0 += zk
                     acc1 += zk * cis(-(2π * τab * (chunkf[k] - gs.fc) + φab))
                 end

@@ -18,11 +18,17 @@
 # non-birefringent to first order; cross hands are skipped as in the rate solve.
 
 # Collapse one band leaf to one residual phasor per (baseline, product):
-# `z[bi, p] = Σ w·V`, `w[bi, p] = Σ w` over the leaf's channels × APs — the
-# inverse-variance mean of the data, already gain-corrected (and reweighted by
-# |gain|², matching `apply_calibration`) through the pipeline's transform
-# chain before this kernel ever sees it.
-function _accumulate_leaf_band_phasor!(z, w, V, W, F, bl_pairs, pols)
+# `phasor_sum[bi, p] = Σ w·V`, `weight_sum[bi, p] = Σ w` over the leaf's
+# channels × APs, whose ratio is the inverse-variance mean of the data, already
+# gain-corrected (and reweighted by |gain|², matching `apply_calibration`)
+# through the pipeline's transform chain before this kernel ever sees it.
+function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, pols)
+    return _accumulate_leaf_band_phasor!(
+        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, pols,
+    )
+end
+
+function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, V, W, F, bl_pairs, pols)
     UVData.check_layer_axes(V, W, F)
     @inbounds for p in axes(V, Polarization)
         fa, fb = correlation_feed_pair(pols[p])
@@ -42,8 +48,8 @@ function _accumulate_leaf_band_phasor!(z, w, V, W, F, bl_pairs, pols)
                 acc += ww * v
                 wsum += ww
             end
-            z[bi, p] = acc
-            w[bi, p] = wsum
+            phasor_sum[bi, p] = acc
+            weight_sum[bi, p] = wsum
         end
     end
     return nothing
@@ -144,9 +150,18 @@ end
 # matched filter over one delay about the group's centre.
 
 # Accumulate one channel-block's inverse-variance chunk phasors:
-# `z[bi, p, chunk_of_chan[c]] += w·V` (parallel hands only), off data already
+# `phasor_sum[bi, p, chunk_of_chan[c]] += w·V` and `weight_sum[…] += w` (parallel
+# hands only), off data already
 # gain-corrected through the pipeline's transform chain.
-function _accumulate_leaf_chunks!(z, w, V, W, F, bl_pairs, pols, chunk_of_chan)
+function _accumulate_leaf_chunks!(
+        phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, pols, chunk_of_chan,
+    )
+    return _accumulate_leaf_chunks!(
+        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, pols, chunk_of_chan,
+    )
+end
+
+function _accumulate_leaf_chunks!(phasor_sum, weight_sum, V, W, F, bl_pairs, pols, chunk_of_chan)
     UVData.check_layer_axes(V, W, F)
     @inbounds for p in axes(V, Polarization)
         fa, fb = correlation_feed_pair(pols[p])
@@ -162,8 +177,8 @@ function _accumulate_leaf_chunks!(z, w, V, W, F, bl_pairs, pols, chunk_of_chan)
                 v = V[cell]
                 isfinite(v) || continue
                 k = chunk_of_chan[c]
-                z[bi, p, k] += ww * v
-                w[bi, p, k] += ww
+                phasor_sum[bi, p, k] += ww * v
+                weight_sum[bi, p, k] += ww
             end
         end
     end

@@ -963,7 +963,7 @@ function _flag_solution_rows!(Fc, bl_pairs, scanid::Integer, flagged)
         a, b = bl_pairs[bi]
         a == b && continue
         ((a, scanid) in flagged || (b, scanid) in flagged) || continue
-        Fc[:, :, bi, :] .= true
+        Fc[BaselineID(bi)] .= true
     end
     return nothing
 end
@@ -1012,13 +1012,13 @@ function _apply_gains!(leaf, g::AbstractArray{<:Complex, 4}; executor = SerialSc
     f = leaf[:flags]
     ants = UVData.baselines(leaf).pairs
     feeds = map(correlation_feed_pair, pol_products(leaf))
-    columns = vec(CartesianIndices((axes(vis, 3), axes(vis, 4))))
+    columns = vec(CartesianIndices((axes(vis, BaselineID), axes(vis, Polarization))))
     tforeach(columns; scheduler = executor) do col
         bi, p = Tuple(col)
         a, b = ants[bi]
         fa, fb = feeds[p]
         _correct_column!(
-            view(vis, :, :, bi, p), view(w, :, :, bi, p), view(f, :, :, bi, p),
+            UVData._cell_plane(vis, bi, p), UVData._cell_plane(w, bi, p), UVData._cell_plane(f, bi, p),
             view(g, :, :, a, fa), view(g, :, :, b, fb),
         )
     end

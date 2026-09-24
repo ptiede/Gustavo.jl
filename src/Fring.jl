@@ -35,7 +35,7 @@ using ..Streaming
 import ..Streaming: select_scans
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
-using DimensionalData: lookup, dims, Ti, DimArray, DimStack, AbstractDimStack
+using DimensionalData: lookup, dims, dimnum, Ti, DimArray, DimStack, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
 using Printf: @sprintf

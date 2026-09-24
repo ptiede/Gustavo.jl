@@ -447,7 +447,7 @@ function baseline_fringe_data(
     Vg = stack[:vis]
     Wg = stack[:weights]
     Fg = stack[:flags]
-    nchan, nti, nbl, npol = size(Vg)
+    nchan, nti, nbl, npol = size(Vg, Frequency), size(Vg, Ti), size(Vg, BaselineID), size(Vg, Polarization)
 
     # Frequency-group split of the stacked frequency axis (per-channel group id).
     bgs = fringe_freq_groups(fg)

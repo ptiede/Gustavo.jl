@@ -10,3 +10,16 @@ using XRadio: BaselineID, Frequency, Polarization
 @dim UVW "UVW "
 @dim Feed "Feed (receptor index)"
 @dim Scan "Scan index"
+
+# The `(Frequency, Ti)` plane of layer `L` at baseline `bi` and product `p`, in
+# that axis order whatever order `L` is stored in.
+function _cell_plane(L, bi, p)
+    v = view(L, BaselineID(bi), Polarization(p))
+    return PermutedDimsArray(parent(v), DimensionalData.dimnum(v, (Frequency, Ti)))
+end
+
+# `A`, a plain array laid out `(Frequency, Ti, BaselineID, Polarization)`,
+# viewed lazily in the axis order of the visibility array `ref`.
+_in_axis_order(ref, A::AbstractArray{<:Any, 4}) = PermutedDimsArray(
+    A, invperm(DimensionalData.dimnum(ref, (Frequency, Ti, BaselineID, Polarization))),
+)

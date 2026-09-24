@@ -410,11 +410,12 @@ function residual_vis(
     ants = UVData.baselines(stack).pairs
     feeds = map(correlation_feed_pair, pol_products(stack))
     # Indexing the gains by the baselines' antenna vector and the products' feed
-    # vector is an outer product over (BaselineID, Polarization) — the cube's last two axes
-    # — so the whole residual is one fused broadcast with no intermediate.
-    ga = view(g, :, :, first.(ants), first.(feeds))
-    gb = view(g, :, :, last.(ants), last.(feeds))
-    return _residual_cell.(stack[:vis], ga, gb)
+    # vector is an outer product over (BaselineID, Polarization), so the whole
+    # residual is one fused broadcast with no intermediate.
+    V = stack[:vis]
+    ga = UVData._in_axis_order(V, view(g, :, :, first.(ants), first.(feeds)))
+    gb = UVData._in_axis_order(V, view(g, :, :, last.(ants), last.(feeds)))
+    return _residual_cell.(V, ga, gb)
 end
 
 # EHT-HOPS-style station flags: a station that participates in a scan (has
