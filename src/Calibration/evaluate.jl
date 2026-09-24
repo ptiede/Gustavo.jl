@@ -1,7 +1,6 @@
 # ── Pure forward evaluation ──────────────────────────────────────────────────
 #
-# `GainEvaluator` pairs a `GainModel` with its `ParameterLayout`. The map
-# θ → gains is pure: no mutation of θ, no global state, allocation only of the
+# `evaluate_gains(layout, θ)` maps a parameter vector to gains. The map is pure: no mutation of θ, no global state, allocation only of the
 # output array, and fully type-stable (verified by `@inferred` in the tests).
 # This is the surface a future Comrade/Reactant global solver will trace; the
 # WLS solvers may mutate their own scratch, but they go through this same map to
@@ -11,19 +10,7 @@
 # so names are compile-time constants) and, at each component, slices its shaped
 # leaf straight out of θ by the plan's `range`/`shape`, then reads the parameter
 # block its `(feed, ti, c)` selects — no offset tables, no Dicts, no closures on
-# the hot path. `θ` is a plain vector; `component_vector` wraps it for named
-# inspection, but the map does not need that view.
-
-struct GainEvaluator{M <: GainModel, L <: ParameterLayout}
-    model::M
-    layout::L
-end
-
-GainEvaluator(model::GainModel, geom::DataGeometry; nant::Integer) =
-    GainEvaluator(model, plan_parameters(model, nant, geom))
-
-
-nparameters(ev::GainEvaluator) = ev.layout.nθ
+# the hot path. `θ` is a plain vector of any real element type.
 
 # Sum a group's (phase or log-amp) component contributions for one
 # (ant, feed, ti, c) cell. Recursion over the group's nodes — the concretely
@@ -105,14 +92,13 @@ end
     @inbounds view(block, off:(off + shape[1] - 1))
 
 """
-    evaluate_gains(ev::GainEvaluator, θ) -> Array{Complex,4}
+    evaluate_gains(layout::ParameterLayout, θ) -> Array{Complex,4}
 
 Pure forward map θ → complex antenna gains of shape `(nchan, ntime, nant, 2)`,
 where the last axis is the feed (1, 2). `gain = exp(Σ logamp) · cis(Σ phase)`.
 Element type follows `eltype(θ)` (so AD / Reactant tracing flows through).
 """
-function evaluate_gains(ev::GainEvaluator, θ::AbstractVector)
-    lay = ev.layout
+function evaluate_gains(lay::ParameterLayout, θ::AbstractVector)
     length(θ) == lay.nθ ||
         error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
     T = float(eltype(θ))
@@ -147,18 +133,17 @@ function _check_window(idx, n::Int, argname::AbstractString, axis::AbstractStrin
 end
 
 """
-    evaluate_gains(ev::GainEvaluator, θ, chan_idx, ti_idx) -> Array{Complex,4}
+    evaluate_gains(layout::ParameterLayout, θ, chan_idx, ti_idx) -> Array{Complex,4}
 
 Windowed pure forward map: gains of shape `(length(chan_idx), length(ti_idx),
-nant, 2)` at the given GLOBAL channel and time indices (into `ev`'s geometry).
+nant, 2)` at the given GLOBAL channel and time indices (into `layout`'s geometry).
 Use this to evaluate the gains a single UVSet leaf needs without materializing
 the full `(nchan_total, ntime_total, …)` array.
 """
 function evaluate_gains(
-        ev::GainEvaluator, θ::AbstractVector,
+        lay::ParameterLayout, θ::AbstractVector,
         chan_idx::AbstractVector{<:Integer}, ti_idx::AbstractVector{<:Integer},
     )
-    lay = ev.layout
     length(θ) == lay.nθ ||
         error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
     _check_window(chan_idx, lay.nchan, "chan_idx", "channel")
@@ -178,13 +163,13 @@ function evaluate_gains(
 end
 
 """
-    evaluate_gains(ev::GainEvaluator, θ, solve_geom::DataGeometry, target::DataGeometry;
+    evaluate_gains(layout::ParameterLayout, θ, solve_geom::DataGeometry, target::DataGeometry;
                    chan_idx = …, ti_idx = …, time_span = nothing)
 
 Forward map onto a FOREIGN grid: gains of shape `(length(chan_idx),
 length(ti_idx), nant, 2)` for the samples of `target` selected by
 `chan_idx`/`ti_idx`, evaluated from a θ laid out over `solve_geom` (the geometry
-`ev.layout` was planned on).
+`layout` was planned on).
 
 Each target sample is placed in the solve segment it belongs to — matched by
 scan and spw label, or by the segmentation's own bin formula evaluated with the
@@ -203,12 +188,11 @@ pointwise from the solution's own resolved state, so they stay in the basis θ
 was fit in.
 """
 function evaluate_gains(
-        ev::GainEvaluator, θ::AbstractVector, solve_geom::DataGeometry, target::DataGeometry;
+        lay::ParameterLayout, θ::AbstractVector, solve_geom::DataGeometry, target::DataGeometry;
         chan_idx::AbstractVector{<:Integer} = Base.OneTo(nchannels(target)),
         ti_idx::AbstractVector{<:Integer} = Base.OneTo(ntimes(target)),
         time_span = nothing,
     )
-    lay = ev.layout
     length(θ) == lay.nθ ||
         error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
     pp = _resolve_tree(lay.plantree.phase, solve_geom, target, chan_idx, ti_idx, time_span)
@@ -256,41 +240,4 @@ function _resolve_node(plan::ComponentPlan, solve, target, chan_idx, ti_idx, tsp
         t, plan.tseg, plan.fseg, tseg, fseg, xf, xt, plan.nchan_seg, plan.tying,
         plan.range, plan.shape, plan.fstate, plan.tstate,
     )
-end
-
-"""
-    predict_visibilities(gains, coh, bl_a, bl_b, feed_a, feed_b) -> Array{Complex,4}
-
-Pure visibility prediction `V̂[c,ti,bi,p] = g_a · coh · conj(g_b)` from antenna
-gains and source coherencies.
-
-- `gains`  : `(nchan, ntime, nant, 2)` from `evaluate_gains`.
-- `coh`    : `(nbl, 2, 2)` source coherency per baseline (feed_a, feed_b indexed).
-- `bl_a`, `bl_b` : antenna indices of each baseline (length `nbl`).
-- `feed_a`, `feed_b` : feed index (1/2) of antenna A and B for each of the
-  `npol` correlation products (from [`feed_pairs`](@ref)).
-"""
-function predict_visibilities(
-        gains::AbstractArray{<:Complex, 4}, coh::AbstractArray{<:Complex, 3},
-        bl_a::AbstractVector{<:Integer}, bl_b::AbstractVector{<:Integer},
-        feed_a::AbstractVector{<:Integer}, feed_b::AbstractVector{<:Integer}
-    )
-    # `eachindex(x, y)` is both the pairing and the length check: the baseline
-    # and product axes of the result are the ones the caller's vectors carry.
-    bls = eachindex(bl_a, bl_b)
-    pols = eachindex(feed_a, feed_b)
-    V = similar(gains, (axes(gains, 1), axes(gains, 2), bls, pols))
-    for p in pols
-        fa = feed_a[p]
-        fb = feed_b[p]
-        for bi in bls
-            a = bl_a[bi]
-            b = bl_b[bi]
-            s = coh[bi, fa, fb]
-            for ti in axes(gains, 2), c in axes(gains, 1)
-                V[c, ti, bi, p] = gains[c, ti, a, fa] * s * conj(gains[c, ti, b, fb])
-            end
-        end
-    end
-    return V
 end

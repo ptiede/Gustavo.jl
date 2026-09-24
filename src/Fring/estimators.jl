@@ -45,7 +45,7 @@ abstract type AbstractFringeEstimator end
     estimate_scan!(est::AbstractFringeEstimator, ctx, step, stack, win) -> NamedTuple
 
 One scan group's contribution to the fringe estimate. `ctx` is the pipeline's
-solve context (`ctx.θ`, `ctx.ev`, `ctx.geom`, `ctx.stream`, `ctx.scratch`),
+solve context (`ctx.θ`, `ctx.layout`, `ctx.geom`, `ctx.stream`, `ctx.scratch`),
 `step` the [`FringeFit`](@ref Gustavo.FringeFit) being run — read its `model` for what is solved —
 `stack` the materialized scan group's `DimStack`, and `win` its
 [`GeometryWindow`](@ref) into the solve's index space.

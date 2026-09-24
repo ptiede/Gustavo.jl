@@ -23,7 +23,6 @@ using LinearAlgebra
 using LinearSolve
 using Statistics: median
 using Dates: Period, Nanosecond, DateTime, datetime2unix
-using ComponentArrays: ComponentVector, ComponentArray, getaxes
 
 include("Calibration/gauge.jl")
 include("Calibration/lsq.jl")
@@ -40,7 +39,7 @@ export feed_pairs
 
 # Gauge conventions for station-based solves
 export AbstractGauge, PinAntenna, ZeroSumPhase
-export gauge_anchor, gauge_row!, regauge!, resolve_gauge, gauge_primary, remap_gauge
+export gauge_anchor, gauge_row!, resolve_gauge, remap_gauge
 export gauge_station_order
 
 # ── Unified gain-model framework ─────────────────────────────────────────────
@@ -63,28 +62,21 @@ export GainComponent, GainModel, with_station
 export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed
 export phase_components, logamp_components, model_components
 export station_components
-export phase_is_per_scan, amplitude_is_per_scan, component_is_per_scan
-export validate_gain_model, station_model_summary, component_label
+export validate_gain_model, component_label
 
 # Propagation
 export DispersionModel
 
 # Parameter layout and pure evaluation
 export ParameterLayout, plan_parameters, station_blocks
-export GainEvaluator, evaluate_gains, predict_visibilities, nparameters
+export evaluate_gains
 
 # Calibration solution container, apply, serialization
 export CalibrationSolution, StepSolution, build_geometry, GeometryWindow, leaf_window
 export save_solution, load_solution
-export save_solution_hdf5, load_solution_hdf5
 
 # Per-stage provenance and snapshots (composable pipeline)
 export stage_info
-export component_ranges, component_names, gains, parameters
-
-# Documented interface without an exported name; callers qualify it.
-@static if VERSION >= v"1.11"
-    eval(Meta.parse("public component_vector"))
-end
+export component_names, gains, parameters
 
 end

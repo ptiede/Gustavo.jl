@@ -1845,13 +1845,9 @@ end
 # signature with a stub in `src/` is overwritten on load, which precompilation
 # rejects outright — so a missing extension here means the package is broken for
 # everyone who loads that trigger, not merely missing a feature. Runs last: each
-# extension only activates once its trigger package is loaded, and the suite
-# loads HDF5 from `synthetic_uvset.jl` rather than at the top of this file.
+# extension only activates once its trigger package is loaded.
 @testset "extensions load" begin
-    for name in (
-            :GustavoFITSFilesExt,
-            :GustavoHDF5Ext, :GustavoMakieExt,
-        )
+    for name in (:GustavoFITSFilesExt, :GustavoMakieExt)
         @test Base.get_extension(Gustavo, name) !== nothing
     end
 end

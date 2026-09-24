@@ -18,7 +18,7 @@ _bpc(freq) = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Freque
 
 # One component's θ block from a step's own layout. `i` indexes
 # `step.layout.plans` (phase components first, then log-amplitude).
-_blk(step, i) = step.θ[CAL.component_ranges(step.layout)[i]]
+_blk(step, i) = step.θ[[p.range for p in step.layout.plans][i]]
 
 # The bandpass step's own components, reached by the names its model gives them.
 _bp_phase_plan(step) = step.layout.plantree.phase.bandpass
@@ -436,7 +436,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
     @testset "portable ApplySolution: same-set + cross-set by station name" begin
         bps = sol_n[:bandpass]
         bp = only(bps.steps)
-        ev = CAL.GainEvaluator(bp.model, bp.layout)
+        ev = bp.layout
 
         # Same-set (identical geometry): index-aligned division.
         st0 = FP.scan_stream(uvset)

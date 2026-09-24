@@ -8,13 +8,9 @@
 # (`plot_fringe_spectrum`, `plot_fringe_phases`, `plot_fringe_snr`) are stubs in
 # `Fring.jl`, implemented by `GustavoMakieExt`.
 
-# The `:fringe` step's own `StepSolution`, or `nothing` — every diagnostic
-# below degrades gracefully (empty/NaN) rather than erroring when the
-# solution carries no fringe stage (hand-built, or predates this design).
-_fringe_step(sol::CalibrationSolution) = begin
-    i = findfirst(s -> s.name === :fringe, sol.steps)
-    i === nothing ? nothing : sol.steps[i]
-end
+# The `:fringe` step's diagnostics, or an empty NamedTuple when the solution
+# has no fringe stage — every diagnostic below then returns an empty result.
+_fringe_info(sol::CalibrationSolution) = haskey(sol, :fringe) ? stage_info(sol, :fringe) : (;)
 
 """
     fringe_snr_table(sol::CalibrationSolution) -> Vector{NamedTuple}
@@ -29,9 +25,7 @@ when the solution predates `scan_ncells`). Returns an empty vector if the
 solution carries no `:fringe` stage, or that stage no per-scan diagnostics.
 """
 function fringe_snr_table(sol::CalibrationSolution)
-    step = _fringe_step(sol)
-    step === nothing && return NamedTuple[]
-    info = step.info
+    info = _fringe_info(sol)
     (haskey(info, :scan_snr) && haskey(info, :ncomp)) || return NamedTuple[]
     snr = info.scan_snr
     ncomp = Int(info.ncomp)
@@ -106,8 +100,7 @@ Lazy — reads only leaf metadata (no visibilities), so it is cheap on a streame
 """
 function fringe_scan_groups(uvset::UVSet, sol::CalibrationSolution)
     specs = scan_stream(uvset; geom = sol.geom).groups
-    step = _fringe_step(sol)
-    snr = step === nothing ? Float64[] : get(step.info, :scan_snr, Float64[])
+    snr = get(_fringe_info(sol), :scan_snr, Float64[])
     return [
         (;
             scan_index = gi, source = g.source, scan = g.scan,
@@ -349,9 +342,7 @@ end
 # Scan group with the largest detection SNR (the most informative to inspect),
 # falling back to the first group when no per-scan SNR is recorded.
 function _max_snr_scan(sol::CalibrationSolution, ngroups::Integer)
-    step = _fringe_step(sol)
-    step === nothing && return 1
-    snr = get(step.info, :scan_snr, Float64[])
+    snr = get(_fringe_info(sol), :scan_snr, Float64[])
     (isempty(snr) || all(!isfinite, snr)) && return 1
     return argmax(i -> (isfinite(snr[i]) ? snr[i] : -Inf), 1:min(length(snr), ngroups))
 end
@@ -443,7 +434,7 @@ function baseline_fringe_data(
     info = UVData.metadata(last(first(groups[gi].leaves)))   # source/scan from the lazy leaf
     executor = inner_executor(stream)                   # within-group fan-out
     stack, win = materialize_cube(stream, groups[gi])
-    g = _composed_gains(sol, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
+    g = parent(gains(sol, win))   # (nchan, nti, nant, 2)
     fg = frequencies(stack)
     Vg = stack[:vis]
     Wg = stack[:weights]
@@ -472,8 +463,7 @@ function baseline_fringe_data(
         executor,
     )
 
-    fstep = _fringe_step(sol)
-    fsnr = fstep === nothing ? Float64[] : get(fstep.info, :scan_snr, Float64[])
+    fsnr = get(_fringe_info(sol), :scan_snr, Float64[])
     msnr = gi <= length(fsnr) ? Float64(fsnr[gi]) : NaN
     # Before the means overwrite their numerators: the weight sums are the
     # accumulated inverse variances, so σ = 1/√Σw on every coherent mean.
@@ -808,9 +798,7 @@ first. Needs no data read — inspect a flagged row with
     plot_fringe_search(m)
 """
 function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
-    step = _fringe_step(sol)
-    step === nothing && return NamedTuple[]
-    info = step.info
+    info = _fringe_info(sol)
     haskey(info, :det_pfa) || return NamedTuple[]
     names = get(sol.info, :ant_names, String[])
     sta(i) = i <= length(names) ? String(names[i]) : string("ant", i)

@@ -266,12 +266,8 @@ function _divide_gains!(
     feeds = feed_pairs(stack)
     tspan = UVData.metadata(stack).time_span
     tconst = _time_constant_over(sol, win, tspan)
-    g = Calibration._composed_gains(
-        sol, win.geom;
-        chan_idx = win.chan_idx,
-        ti_idx = tconst ? win.ti_idx[1:1] : win.ti_idx,
-        time_span = tconst ? _head_span(tspan) : tspan,
-    )
+    gwin = tconst ? GeometryWindow(win.geom, win.chan_idx, win.ti_idx[1:1]) : win
+    g = parent(gains(sol, gwin; time_span = tconst ? _head_span(tspan) : tspan))
     cols = [(bi, p) for p in axes(Vd, Polarization) for bi in axes(Vd, BaselineID)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col

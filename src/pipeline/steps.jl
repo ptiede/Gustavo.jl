@@ -266,8 +266,7 @@ finish_pass!(s::FringeFit, ctx::SolveContext) = Fring.finish_estimate!(s.estimat
 # which would mint a second function here and leave the seam's fallback in place.
 
 # The struct itself, not a flattened copy: `fringe_search_map` replays it to
-# reproduce the solve's search for diagnostics. Its external (caltable) form
-# comes from `Calibration.external_info(::FringeSearch)`.
+# reproduce the solve's search for diagnostics.
 Fring.estimator_info(est::Fring.MatchedFilter) = (; search = est.search)
 
 # Solve into `ctx.θ` the station systems `dets` closes, reporting the components
@@ -301,7 +300,7 @@ function Fring.estimate_scan!(
         stack, win::GeometryWindow,
     )
     round = ctx.scratch[:fringe_round]::Int
-    Vsearch = round > 1 ? Fring.residual_vis(ctx.ev, ctx.θ, stack, win) : stack[:vis]
+    Vsearch = round > 1 ? Fring.residual_vis(ctx.layout, ctx.θ, stack, win) : stack[:vis]
     # Reference the detection phases to the epoch this scan's constant phase
     # columns are the phase at (`scan_phase_epoch`), not to the track epoch
     # `search_scan` defaults to for a standalone caller. The station solve reads

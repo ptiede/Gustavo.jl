@@ -21,8 +21,8 @@
         sol = fit(FringeFit(), uvset)
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
         @test length(fr.model.phase) == 4
-        rn = CAL.component_ranges(fr.layout)
-        rm = CAL.component_ranges(frm.layout)
+        rn = [p.range for p in fr.layout.plans]
+        rm = [p.range for p in frm.layout.plans]
         for i in 1:4
             @test fr.θ[rn[i]] == frm.θ[rm[i]]        # bit-identical
         end
@@ -82,8 +82,8 @@
             ), uvset,
         )
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
-        rn = CAL.component_ranges(fr.layout)
-        rm = CAL.component_ranges(frm.layout)
+        rn = [p.range for p in fr.layout.plans]
+        rm = [p.range for p in frm.layout.plans]
         for i in 1:4
             @test fr.θ[rn[i]] == frm.θ[rm[i]]
         end

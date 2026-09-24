@@ -38,8 +38,7 @@
         layout = Gustavo.plan_parameters(model, antennas, geom; require_nonempty = false)
         gauge = CAL.resolve_gauge(CAL.ZeroSumPhase(), String.(antennas.name))
         return Gustavo.SolveContext(
-            model, layout, geom, CAL.GainEvaluator(model, layout),
-            CAL.component_vector(layout, zeros(layout.nθ)), gauge, length(antennas),
+            model, layout, geom, zeros(layout.nθ), gauge, length(antennas),
             antennas, stream, Dict{Symbol, Any}(),
         )
     end
@@ -94,8 +93,8 @@
         end
 
         @testset "residual_vis" begin
-            a = FP.residual_vis(fringe_ctx.ev, fringe_ctx.θ, stack, win)
-            b = FP.residual_vis(fringe_ctx.ev, fringe_ctx.θ, permuted, win)
+            a = FP.residual_vis(fringe_ctx.layout, fringe_ctx.θ, stack, win)
+            b = FP.residual_vis(fringe_ctx.layout, fringe_ctx.θ, permuted, win)
             @test dims(b) == dims(permuted[:vis])
             @test isequal(parent(permutedims(b, dims(a))), parent(a))
         end
@@ -113,9 +112,7 @@
 
         @testset "gain application and solution row flags" begin
             info = UV.metadata(stack)
-            g = CAL._composed_gains(
-                sol, geom; chan_idx = win.chan_idx, ti_idx = win.ti_idx, time_span = info.time_span,
-            )
+            g = parent(CAL.gains(sol, win; time_span = info.time_span))
             scanid = CAL._geom_scan_id(geom, info.scan_name)
             a = deepcopy_stack(stack)
             b = deepcopy_stack(permuted)

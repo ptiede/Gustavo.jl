@@ -54,7 +54,7 @@ export FringeFit, DispersionModel, SingleBandDelay, default_fringe_terms,
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.
 export GainComponent, GainModel, with_station
-export station_components, station_model_summary, component_label
+export station_components, component_label
 export AbstractGainTerm, ConstantTerm, Delay, Dispersion, Rate, Polynomial,
     PolynomialFreq, PolynomialTime
 export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed

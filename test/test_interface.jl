@@ -271,7 +271,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         # Component θ ranges: contiguous, disjoint, and tile 1:nθ — a per-step
         # property now (each step owns its own layout, not a merged one).
         for step in sol.steps
-            rng = CAL.component_ranges(step.layout)
+            rng = [p.range for p in step.layout.plans]
             @test length(rng) == length(step.layout.plans)
             nonempty = [r for r in rng if !isempty(r)]
             isempty(nonempty) && continue

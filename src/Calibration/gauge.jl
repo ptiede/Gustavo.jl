@@ -167,49 +167,6 @@ function gauge_row!(row, g::ZeroSumPhase, comp_nodes, nodew, station_of, feed_of
 end
 
 """
-    regauge!(x, g::AbstractGauge) -> x
-
-Shift a per-station vector to `g`'s convention in place, skipping non-finite
-entries. Used where a solve leaves its own arbitrary common mode — the adhoc
-phase filter, whose prior pins the common mode near 0 rather than at a station —
-and the result must land on the same convention as the rest of the pipeline.
-
-Leaves `x` untouched when the gauge has nothing finite to reference, so an AP
-with no usable station keeps whatever the solve produced instead of acquiring a
-fabricated zero.
-"""
-function regauge!(x, g::PinAntenna)
-    for a in _gauge_refs(g.refs)
-        checkbounds(Bool, x, a) || continue
-        isfinite(x[a]) || continue
-        ref = x[a]
-        for i in eachindex(x)
-            isfinite(x[i]) && (x[i] -= ref)
-        end
-        return x
-    end
-    return x
-end
-
-function regauge!(x, g::ZeroSumPhase)
-    idx = g.antennas === nothing ? eachindex(x) :
-        [i for i in g.antennas if checkbounds(Bool, x, i)]
-    tot = zero(eltype(x))
-    n = 0
-    for i in idx
-        isfinite(x[i]) || continue
-        tot += x[i]
-        n += 1
-    end
-    n == 0 && return x
-    ref = tot / n
-    for i in eachindex(x)
-        isfinite(x[i]) && (x[i] -= ref)
-    end
-    return x
-end
-
-"""
     resolve_gauge(g::AbstractGauge, ant_names) -> AbstractGauge
 
 Return `g` with any station codes replaced by 1-based station indices, matched
@@ -251,15 +208,6 @@ function resolve_gauge(g::ZeroSumPhase, ant_names)
     end
     return ZeroSumPhase(out, g.weights)
 end
-
-"""
-    gauge_primary(g::AbstractGauge) -> Union{Int, Nothing}
-
-The station index a caller may substitute when stations are merged into
-representatives, or `nothing` when the gauge names no single station.
-"""
-gauge_primary(g::PinAntenna) = first(_gauge_refs(g.refs))
-gauge_primary(::AbstractGauge) = nothing
 
 """
     remap_gauge(g::AbstractGauge, map) -> AbstractGauge

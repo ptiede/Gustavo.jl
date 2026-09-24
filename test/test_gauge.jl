@@ -68,30 +68,6 @@ end
     end
 end
 
-@testset "regauge! shifts a per-station vector" begin
-    # PinAntenna subtracts its reference; non-finite entries are left alone rather
-    # than fabricated into a value.
-    x = [1.0, 2.0, 4.0, NaN]
-    CALg.regauge!(x, PinAntenna(2))
-    @test x[1:3] == [-1.0, 0.0, 2.0]
-    @test isnan(x[4])
-
-    # Ranked: the first reference with a finite value wins.
-    y = [1.0, NaN, 4.0, 8.0]
-    CALg.regauge!(y, PinAntenna([2, 3]))
-    @test y[[1, 3, 4]] == [-3.0, 0.0, 4.0]
-
-    # ZeroSumPhase centers on the mean of the finite entries.
-    z = [1.0, 2.0, 4.0, NaN]
-    CALg.regauge!(z, ZeroSumPhase())
-    @test sum(z[1:3]) ≈ 0 atol = 1.0e-12
-
-    # Nothing finite to reference leaves the vector untouched.
-    w = [NaN, NaN]
-    CALg.regauge!(w, PinAntenna(1))
-    @test all(isnan, w)
-end
-
 @testset "resolve_gauge maps station codes to indices" begin
     names = ["A1", "A2", "A3", "A4"]
     @test resolve_gauge(PinAntenna("A2"), names).refs == [2]
@@ -115,7 +91,4 @@ end
     map = [1, 1, 3, 3]
     @test CALg.remap_gauge(PinAntenna([2, 4]), map).refs == [1, 3]
     @test CALg.remap_gauge(ZeroSumPhase(antennas = [2, 4]), map).antennas == [1, 3]
-
-    @test CALg.gauge_primary(PinAntenna([3, 1])) == 3
-    @test CALg.gauge_primary(ZeroSumPhase()) === nothing
 end

@@ -108,7 +108,7 @@ freq_coordinate(::Dispersion, f, f0, seg) = DISPERSION_K * (1.0 / f0 - 1.0 / f)
 ```
 
 Once the θ column is filled — by *any* solver — `evaluate_gains` and every
-downstream consumer (correction, diagnostics, HDF5 export) handle the effect
+downstream consumer (correction, diagnostics) handle the effect
 with no further code.
 
 ### 2. The wrapper element, with geometry gating
@@ -234,34 +234,14 @@ end
 
 `finish_pass!`'s returned `NamedTuple` **is** the step logging interface:
 every key lands on the step's own `StepSolution.info`, readable via
-[`stage_info`](@ref Gustavo.Calibration.stage_info)`(sol, :refine)` and
-written automatically to [`save_solution_hdf5`](@ref
-Gustavo.Calibration.save_solution_hdf5)'s `info/steps/<name>/*` groups
-(`Number`, `AbstractVector`, `String`, and nested `NamedTuple`/`DimStack`
-values). The runner adds `t_pass` and a per-scan `timing` `DimStack` for
+[`stage_info`](@ref Gustavo.Calibration.stage_info)`(sol, :refine)`. The
+runner adds `t_pass` and a per-scan `timing` `DimStack` for
 free. Publish per-scan quantities in global scan order with
 [`scan_values`](@ref):
 
 ```julia
 scan_values(res -> res.r.residual_rms, ctx.scratch[:pass_results], ngroups; default = NaN)
 ```
-
-### Exporting an opaque config: `external_info`
-
-A step (or estimator) may record a custom struct in its diagnostics — the
-fringe estimator records its whole `FringeSearch` config, which its
-diagnostics replay. The HDF5 exporter cannot write an arbitrary struct; the
-seam is [`external_info`](@ref Gustavo.Calibration.external_info): define one
-method returning the plain-data form, and the exporter writes it instead of
-reporting the entry as omitted:
-
-```julia
-Calibration.external_info(s::MyEstimatorConfig) =
-    (; window_ns = collect(s.window), algorithm = string(s.algorithm))
-```
-
-Without a method, the entry is omitted from the HDF5 `info/*` groups (with a
-report) and survives only in the file's Julia blob.
 
 ## Station heterogeneity
 

@@ -255,11 +255,11 @@ end
         model = CAL.GainModel(phase = mc.phase, logamp = mc.logamp)
         layout = CAL.plan_parameters(model, nant, geom)
         ctx = Gustavo.SolveContext(
-            model, layout, geom, CAL.GainEvaluator(model, layout), zeros(layout.nθ),
+            model, layout, geom, zeros(layout.nθ),
             PinAntenna(1), nant, antennas, ST.scan_stream(uvset; geom), Dict{Symbol, Any}(),
         )
         @test isconcretetype(typeof(ctx))
-        for f in (:model, :layout, :geom, :ev, :antennas, :stream)
+        for f in (:model, :layout, :geom, :antennas, :stream)
             @test isconcretetype(fieldtype(typeof(ctx), f))
         end
         # `scratch` stays a `Dict{Symbol, Any}` by design — it is the untyped

@@ -35,7 +35,7 @@ sol, out = fitcalibrate(
 )
 
 write_uvfits("track_cal.uvfits", out)
-save_solution("track.jls", sol)                  # or save_solution_hdf5 (needs HDF5)
+save_solution("track.jls", sol)
 ```
 
 Every step is optional and reorderable — a pipeline can equally be a single

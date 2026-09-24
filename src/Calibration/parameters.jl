@@ -3,21 +3,18 @@
 # `plan_parameters` resolves one shared `GainModel`, replicated across
 # `nant` antennas over a `DataGeometry`, into the structures a solve addresses:
 #
-#   * a `ComponentVector` `template` — θ named and shaped by component. Each
-#     component's block space (parameters × feed-node × freq-segment ×
-#     time-segment × antenna) is a shaped leaf under the component's name,
-#     `θ.phase.<name>` / `θ.logamp.<name>`, so `component_vector` can wrap a solved
-#     θ for named, shaped inspection.
 #   * `plans` — the flat, depth-first list of `ComponentPlan`s (phase components
 #     first, then log-amplitude); and `plantree`, the same plans nested under the
 #     model's names. Each plan carries its term, segmentation metadata, and the
 #     contiguous θ `range`/`shape` of its leaf, so the forward map and the solve
 #     writers slice the block for a `(feed, ti, c)` cell directly out of θ.
 #
+#   * `axes` — each component's leaf dimensions and the physical axis each
+#     carries, which `parameters(sol)` uses to label a solved θ.
+#
 # A component's leaf occupies exactly its `range` (column-major over parameters,
 # feed-node, freq-segment, time-segment, antenna), so `reshape(view(θ, range),
-# shape)` is the same array `component_vector` exposes under the component's name.
-# The map recurses the `plantree` (names are compile-time constants) and slices θ
+# shape)` is the component's block space. The map recurses the `plantree` (names are compile-time constants) and slices θ
 # by `range`, so it needs no offset tables, Dicts, or closures and stays
 # type-stable and AD/Reactant-traceable.
 
@@ -67,12 +64,15 @@ end
 
 The resolved plan for a solve: total length `nθ`, the grid dims, the number of
 phase components `nphase`, the flat `plans` list and its `plantree` (the same
-plans nested under the model's names), the named/shaped `template`
-`ComponentVector`, and `axes` — a tree mirroring the model that records each
-leaf's dimension sizes and the physical axis each dimension carries (`:Ant`,
-`:Feed`, `:node`, `:Ti`, `:Frequency`, `:param`), for labelling a wrapped θ.
+plans nested under the model's names), and `axes` — a tree mirroring the
+model that records each leaf's dimension sizes and the physical axis each
+dimension carries (`:Ant`, `:Feed`, `:node`, `:Ti`, `:Frequency`, `:param`),
+for labelling a solved θ.
+
+[`evaluate_gains`](@ref)`(layout, θ)` maps a parameter vector over this layout
+to gains.
 """
-struct ParameterLayout{PT, CV, AX}
+struct ParameterLayout{PT, AX}
     nθ::Int
     nant::Int
     ntime::Int
@@ -80,7 +80,6 @@ struct ParameterLayout{PT, CV, AX}
     nphase::Int
     plans::Vector{ComponentPlan}
     plantree::PT
-    template::CV
     axes::AX
 end
 
@@ -100,7 +99,7 @@ end
 #
 # One resolution of an `GainComponent` over a geometry: the segment ids and
 # coordinates the `ComponentPlan` needs, plus the shaped-leaf description the
-# template and range build from. The leaf `shape`/`roles` describe the block run
+# range and axes build from. The leaf `shape`/`roles` describe the block run
 # as a fixed-rank column-major array: fastest to slowest over parameters,
 # feed-node, frequency segment, time segment, then antenna, size-1 axes kept so
 # every component reshapes to the same five axes and any consumer addresses it
@@ -255,24 +254,12 @@ _group_keys(n::Int) = ntuple(i -> Symbol(:g, i), n)
 
 # ── Named trees ──────────────────────────────────────────────────────────────
 #
-# Walk the model's named component tree so the template, plans, and axes nest
-# exactly where the model does. The plans are built into both a flat depth-first
-# list (`flat`) and the mirrored tree (returned), sharing a θ cursor (`next`) so a
-# component's `range` matches the position of its leaf in the `ComponentVector`.
-# Leaves are `GainComponent`s, or `_ComponentGroups` where the canonicalizer
-# found station heterogeneity.
-_template_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
-    map(v -> _template_node(v, nant, geom), nt)
-_template_node(e::GainComponent, nant::Int, geom::DataGeometry) =
-    zeros(_component_layout(e, nant, geom).shape...)
-_template_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _template_tree(nt, nant, geom)
-_template_node(g::_ComponentGroups, nant::Int, geom::DataGeometry) =
-    NamedTuple{_group_keys(length(g.comps))}(
-    Tuple(
-        _template_node(g.comps[i], length(g.stations[i]), geom)
-            for i in eachindex(g.comps)
-    )
-)
+# Walk the model's named component tree so the plans and axes nest exactly
+# where the model does. The plans are built into both a flat depth-first list
+# (`flat`) and the mirrored tree (returned), sharing a θ cursor (`next`) so
+# components occupy consecutive ranges in tree order. Leaves are
+# `GainComponent`s, or `_ComponentGroups` where the canonicalizer found station
+# heterogeneity.
 
 function _plans_tree(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
     return NamedTuple{keys(nt)}(map(v -> _plans_node(v, nant, geom, flat, next), values(nt)))
@@ -383,21 +370,13 @@ function _plan_layout(ptree_spec::NamedTuple, ltree_spec::NamedTuple, nant::Int,
     ltree = _plans_tree(ltree_spec, nant, geom, flat, next)
     nθ = next[] - 1
 
-    template = ComponentVector(
-        phase = _template_tree(ptree_spec, nant, geom),
-        logamp = _template_tree(ltree_spec, nant, geom),
-    )
     axes = (
         phase = _axes_tree(ptree_spec, nant, geom),
         logamp = _axes_tree(ltree_spec, nant, geom),
     )
-    length(template) == nθ || error(
-        "plan_parameters: template length $(length(template)) disagrees with nθ = $nθ; " *
-            "the named leaves and the component ranges must span the same θ."
-    )
     return ParameterLayout(
         nθ, nant, ntimes(geom), nchannels(geom), nphase,
-        flat, (; phase = ptree, logamp = ltree), template, axes,
+        flat, (; phase = ptree, logamp = ltree), axes,
     )
 end
 
@@ -528,21 +507,4 @@ function require_station_uniform(model::GainModel, antennas, who::AbstractString
                 "across stations:\n" * join(lines, "\n"),
         ),
     )
-end
-
-"""
-    component_vector(layout::ParameterLayout, θ::AbstractVector) -> ComponentVector
-
-Wrap a flat θ (length `layout.nθ`) as the layout's named, shaped
-`ComponentVector`, so `cv.phase.<name>` / `cv.logamp.<name>` view each
-component's block as a labelled array. The wrap shares data with `θ` (no copy);
-use it for inspection.
-"""
-function component_vector(layout::ParameterLayout, θ::AbstractVector)
-    length(θ) == layout.nθ || throw(
-        DimensionMismatch(
-            "component_vector: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)"
-        )
-    )
-    return ComponentArray(θ, getaxes(layout.template))
 end

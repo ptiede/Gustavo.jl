@@ -322,16 +322,16 @@ function _residual_cell(v, ga, gb)
 end
 
 """
-    residual_vis(ev::GainEvaluator, θ, stack, win::GeometryWindow) -> DimArray
+    residual_vis(layout::ParameterLayout, θ, stack, win::GeometryWindow) -> DimArray
 
 The scan's residual visibilities: `stack`'s `:vis` layer divided by the current
 θ gains evaluated on `win`'s (global chan, global ti) window — the search input
 for residual re-search rounds. Carries the visibilities' dims and element type.
 """
 function residual_vis(
-        ev::GainEvaluator, θ::AbstractVector, stack::AbstractDimStack, win::GeometryWindow,
+        layout::ParameterLayout, θ::AbstractVector, stack::AbstractDimStack, win::GeometryWindow,
     )
-    g = evaluate_gains(ev, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
+    g = evaluate_gains(layout, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
     ants = UVData.baselines(stack).pairs
     feeds = feed_pairs(stack)
     # Indexing the gains by the baselines' antenna vector and the products' feed
@@ -365,7 +365,7 @@ function unconstrained_flags(dets, covered, geom::DataGeometry)
 end
 
 # Flatten per-scan search rows into parallel plain vectors for the solution
-# `info` — HDF5-representable and cheap to filter (`suspect_fringes`). Every
+# `info`, cheap to filter (`suspect_fringes`). Every
 # measured cell is here, so `det_detected` is what selects the real fringes.
 function detection_table(scan_dets)
     n = sum(length, scan_dets; init = 0)
@@ -558,8 +558,8 @@ function steer_scan(
     return (delay = sdelay, rate = srate, amp = samp, snr = ssnr, pfa = spfa)
 end
 
-# The flag block for the solution `info` (plain parallel vectors,
-# HDF5-representable): the stage-B-unconstrained (station, scan) pairs.
+# The flag block for the solution `info` (plain parallel vectors): the
+# stage-B-unconstrained (station, scan) pairs.
 function flag_table(station_flags)
     return (;
         flagged_ant = Int[f[1] for f in station_flags],

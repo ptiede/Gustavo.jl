@@ -203,9 +203,7 @@ process_scan!(step::SolveStep, ctx, stack, win) = nothing
 Called once when the pass's streaming completes: run the step's global
 solve, fill its θ block, and return the stage's diagnostics `NamedTuple`.
 This is the step logging interface: every key returned lands on the step's
-own `StepSolution.info` (`stage_info(sol, name)`) and — for
-`Number`/`AbstractVector`/`String`/nested `NamedTuple`/`DimStack` values —
-is written to `save_solution_hdf5`'s `info/steps/<name>/*` automatically.
+own `StepSolution.info` (`stage_info(sol, name)`).
 
 `ctx.scratch[:pass_results]` holds the collected per-group results:
 `(; index, decode, work, reduce, r, out)` per selected group, in no
@@ -266,21 +264,19 @@ Later step wants from an earlier one (e.g. per-scan SNR) is never read through
 through `scratch` either — it flows through `stream`'s transform chain, so no
 step evaluates or mutates another step's θ.
 
-`θ` is a `ComponentVector` over `layout.template`'s axes — its named
-blocks (`θ.phase.<name>` / `θ.logamp.<name>`) are directly addressable. Once a
-step is finished and wrapped in a [`CalibrationSolution`](@ref),
+`θ` is the flat parameter vector over `layout`; a component's block is
+`reshape(view(θ, plan.range), plan.shape)`. Once a step is finished and wrapped in a [`CalibrationSolution`](@ref),
 [`parameters`](@ref) wraps its components' blocks as labelled, dimensioned
 `DimArray`s on demand.
 """
 mutable struct SolveContext{
-        M <: GainModel, L <: ParameterLayout, E <: GainEvaluator,
+        M <: GainModel, L <: ParameterLayout,
         A <: UVData.AntennaTable, S <: Streaming.ScanStream,
         V <: AbstractVector{Float64},
     }
     model::M
     layout::L
     geom::DataGeometry
-    ev::E
     θ::V
     gauge::AbstractGauge
     nant::Int

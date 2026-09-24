@@ -21,7 +21,7 @@ using Dates
 
 # One component's θ block of a single STEP. `i` indexes that step's own
 # `layout.plans` (phase components first, then log-amplitude).
-_blk(step, i) = step.θ[CAL.component_ranges(step.layout)[i]]
+_blk(step, i) = step.θ[[p.range for p in step.layout.plans][i]]
 
 # Leaf-by-leaf equality of two UVSets' vis/weights.
 function _sets_equal(a, b; exact = true)

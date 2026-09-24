@@ -270,15 +270,6 @@ is_per_scan(::PerScan) = true
 is_per_scan(::PerIntegration) = true
 component_is_per_scan(e::GainComponent) = is_per_scan(e.Ti)
 
-# The per-scan queries answer for the whole model: the base groups plus every
-# station entry's replacement groups.
-phase_is_per_scan(m::GainModel) =
-    any(component_is_per_scan, phase_components(m)) ||
-    any(e -> haskey(e, :phase) && any(component_is_per_scan, _flatten_components(e.phase)), values(m.stations))
-amplitude_is_per_scan(m::GainModel) =
-    any(component_is_per_scan, logamp_components(m)) ||
-    any(e -> haskey(e, :logamp) && any(component_is_per_scan, _flatten_components(e.logamp)), values(m.stations))
-
 # ── Validation ───────────────────────────────────────────────────────────────
 # A frequency-only / time-only term must not be paired with a segmentation that
 # makes it degenerate-free; the linear-algebra layer tolerates redundancy, so
@@ -351,20 +342,6 @@ function component_label(e::GainComponent)
         ", Frequency = ", _call_string(e.Frequency),
         ", Feed = ", _call_string(e.Feed), ")",
     )
-end
-
-"""
-    station_model_summary(name, m::GainModel) -> String
-
-One-line summary of `m` under the label `name`: each phase and log-amplitude
-component as its [`component_label`](@ref) constructor call, plus the station
-overrides, if any.
-"""
-function station_model_summary(name, m::GainModel)
-    p, a = phase_components(m), logamp_components(m)
-    ph = isempty(p) ? "—" : join(component_label.(p), " + ")
-    am = isempty(a) ? "—" : join(component_label.(a), " + ")
-    return string(name, "  phase(", ph, ")  logamp(", am, ")", _stations_suffix(m))
 end
 
 _stations_suffix(m::GainModel) =

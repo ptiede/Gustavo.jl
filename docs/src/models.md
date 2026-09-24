@@ -257,7 +257,7 @@ the seam exists for solvers written against the station-block iterator (see
 
 [`component_label`](@ref) prints a component as its constructor call — a form
 you can paste back — and error messages use the same spelling.
-[`station_model_summary`](@ref Gustavo.Calibration.station_model_summary)
-summarizes a whole model, station overrides included. After a fit,
+Showing a `GainModel` lists its components the same way, and the stations
+with their own groups. After a fit,
 [`parameters`](@ref) shows each component's solved θ as a labelled
 `DimArray`.

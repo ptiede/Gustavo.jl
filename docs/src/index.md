@@ -21,9 +21,8 @@ Pkg.add(url = "https://github.com/ptiede/Gustavo.jl")
 ```
 
 The FITS-IDI/UVFITS reader and writer live in a package extension: also load
-`FITSFiles` to enable them. Loading `HDF5` enables the language-neutral
-caltable writer ([`save_solution_hdf5`](@ref Gustavo.Calibration.save_solution_hdf5)),
-and loading `CairoMakie` (or another Makie backend) enables the diagnostic plots.
+`FITSFiles` to enable them. Loading `CairoMakie` (or another Makie backend)
+enables the diagnostic plots.
 
 ## A calibration run
 

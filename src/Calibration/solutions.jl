@@ -185,15 +185,6 @@ Base.show(io::IO, sol::CalibrationSolution) = print(
 # ── Per-stage views: snapshots of the solution as of each pipeline stage ─────
 
 """
-    component_ranges(layout::ParameterLayout) -> Vector{UnitRange{Int}}
-
-The contiguous θ range owned by each component plan (phase components first,
-then log-amplitude, matching `layout.plans`) — each plan's own `range`, the span
-`plan_parameters` reserved for its leaf.
-"""
-component_ranges(layout::ParameterLayout) = [p.range for p in layout.plans]
-
-"""
     getindex(sol::CalibrationSolution, index) -> CalibrationSolution
     getindex(sol::CalibrationSolution, step, path::Symbol...) -> CalibrationSolution
 
@@ -324,18 +315,15 @@ function _prune_node(g::GroupedComponentPlan, path::Tuple{Symbol, Vararg{Symbol}
     )
 end
 
-# The evaluator for one step, honoring its selection: the step's layout with
-# the plantree pruned to the selected subtree. `nθ`, the grid dims, and the
-# flat `plans` stay those of the full solve — pruning never re-lays-out θ.
-function _evaluator(s::StepSolution)
-    isempty(s.selection) && return GainEvaluator(s.model, s.layout)
+# One step's layout, honoring its selection: the plantree pruned to the
+# selected subtree. `nθ`, the grid dims, and the flat `plans` stay those of the
+# full solve — pruning never re-lays-out θ.
+function _selected_layout(s::StepSolution)
+    isempty(s.selection) && return s.layout
     lay = s.layout
-    return GainEvaluator(
-        s.model,
-        ParameterLayout(
-            lay.nθ, lay.nant, lay.ntime, lay.nchan, lay.nphase, lay.plans,
-            _selected_plantree(lay, s.selection), lay.template, lay.axes,
-        ),
+    return ParameterLayout(
+        lay.nθ, lay.nant, lay.ntime, lay.nchan, lay.nphase, lay.plans,
+        _selected_plantree(lay, s.selection), lay.axes,
     )
 end
 
@@ -365,50 +353,15 @@ function component_names(sol::CalibrationSolution)
     return names
 end
 
-# The elementwise product of every step's own gains over the full grid —
-# each step's own `evaluate_gains` already reads as identity gain wherever
-# that step has no component, so the product across steps is the exact same
-# total gain a single merged evaluator would have produced, without ever
-# building one.
-function _composed_gains(sol::CalibrationSolution)
+# The elementwise product of every step's own gains, each evaluated by
+# `evaluate_gains(layout, θ, args...; kw...)`. A step reads as identity gain
+# wherever it has no component, so the product across steps is the same total
+# gain a single merged model would give, without ever building one.
+function _product_gains(sol::CalibrationSolution, args...; kw...)
     s1 = sol.steps[1]
-    g = evaluate_gains(_evaluator(s1), s1.θ)
+    g = evaluate_gains(_selected_layout(s1), s1.θ, args...; kw...)
     for s in view(sol.steps, 2:length(sol.steps))
-        g .*= evaluate_gains(_evaluator(s), s.θ)
-    end
-    return g
-end
-
-# Windowed counterpart of `_composed_gains(sol)` — see `evaluate_gains`'s
-# windowed method.
-function _composed_gains(
-        sol::CalibrationSolution,
-        chan_idx::AbstractVector{<:Integer}, ti_idx::AbstractVector{<:Integer},
-    )
-    s1 = sol.steps[1]
-    g = evaluate_gains(_evaluator(s1), s1.θ, chan_idx, ti_idx)
-    for s in view(sol.steps, 2:length(sol.steps))
-        g .*= evaluate_gains(_evaluator(s), s.θ, chan_idx, ti_idx)
-    end
-    return g
-end
-
-# Foreign-grid counterpart: each target sample placed in the solve segment it
-# belongs to, so the data need not be sampled on the solve grid.
-function _composed_gains(
-        sol::CalibrationSolution, target::DataGeometry;
-        chan_idx::AbstractVector{<:Integer} = Base.OneTo(nchannels(target)),
-        ti_idx::AbstractVector{<:Integer} = Base.OneTo(ntimes(target)),
-        time_span = nothing,
-    )
-    s1 = sol.steps[1]
-    g = evaluate_gains(
-        _evaluator(s1), s1.θ, sol.geom, target; chan_idx, ti_idx, time_span,
-    )
-    for s in view(sol.steps, 2:length(sol.steps))
-        g .*= evaluate_gains(
-            _evaluator(s), s.θ, sol.geom, target; chan_idx, ti_idx, time_span,
-        )
+        g .*= evaluate_gains(_selected_layout(s), s.θ, args...; kw...)
     end
     return g
 end
@@ -422,9 +375,8 @@ for inspection: a `DimArray` over `(Frequency, Ti, Ant, Feed)` — channel
 frequencies (Hz), integration times (seconds), antennas (named when `sol.info`
 carries `ant_names`, else `1:nant`), and feed. `gain = exp(Σ logamp) · cis(Σ
 phase)`, summed over the selection's components, is the same forward map
-[`apply_calibration`](@ref Gustavo.UVData.apply_calibration) divides by (and [`save_solution_hdf5`](@ref)
-writes); `abs.(gains(sol))` and `angle.(gains(sol))` recover amplitude and
-phase.
+[`apply_calibration`](@ref Gustavo.UVData.apply_calibration) divides by;
+`abs.(gains(sol))` and `angle.(gains(sol))` recover amplitude and phase.
 
 The keywords are the dimension names and accept anything `DimArray` indexing
 accepts — integers, ranges, `At`, `Near`, `Where`, intervals — under the
@@ -439,7 +391,7 @@ function gains(sol::CalibrationSolution; kw...)
     nchan = nchannels(sol.geom)
     ntime = ntimes(sol.geom)
     d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), Ant(_ant_labels(sol, nant)), Feed(1:nfeed))
-    isempty(kw) && return DimArray(_composed_gains(sol), d)
+    isempty(kw) && return DimArray(_product_gains(sol), d)
     for k in keys(kw)
         k in (:Frequency, :Ti, :Ant, :Feed) || throw(
             ArgumentError(
@@ -459,7 +411,7 @@ function gains(sol::CalibrationSolution; kw...)
     # (a plain `BoundsError`), never inside the evaluation.
     fsel = sol.geom.channel_freqs[ci]
     tsel = sol.geom.times[ti]
-    g = _composed_gains(sol, ci, ti)
+    g = _product_gains(sol, ci, ti)
     A = DimArray(g, (Frequency(fsel), Ti(tsel), d[3], d[4]))
     # Indexing the windowed wrap reproduces `gains(sol)[kw...]` exactly —
     # including an integer selector dropping its dimension.
@@ -845,6 +797,30 @@ function _time_indices(geom::DataGeometry, leaf)
     return idx
 end
 
+"""
+    gains(sol::CalibrationSolution, win::GeometryWindow; time_span = nothing) -> DimArray
+
+The gains of `sol` at the samples `win` addresses: `win.chan_idx` and
+`win.ti_idx` index `win.geom`, which may be `sol.geom` itself or the geometry of
+other data. On a foreign geometry each sample is placed in the solve segment it
+belongs to (see [`evaluate_gains`](@ref)); `time_span[k]` is the interval the
+`k`-th selected time integrates over, so a sample straddling a segment boundary
+is rejected. Labelled like [`gains`](@ref)`(sol)`.
+"""
+function gains(sol::CalibrationSolution, win::GeometryWindow; time_span = nothing)
+    g = win.geom === sol.geom ? _product_gains(sol, win.chan_idx, win.ti_idx) :
+        _product_gains(
+            sol, sol.geom, win.geom; chan_idx = win.chan_idx, ti_idx = win.ti_idx, time_span,
+        )
+    nant = _nant(sol)
+    return DimArray(
+        g, (
+            Frequency(win.geom.channel_freqs[win.chan_idx]), Ti(win.geom.times[win.ti_idx]),
+            Ant(_ant_labels(sol, nant)), Feed(1:2),
+        ),
+    )
+end
+
 # ── Apply ────────────────────────────────────────────────────────────────────
 
 # Whole-set replay of a recorded transform chain. The transform types (and the
@@ -923,10 +899,7 @@ function UVData.apply_calibration(
             )
         )
         win = leaf_window(target, leaf)
-        g = _composed_gains(                                 # (nchan_leaf, nti_leaf, nant, 2)
-            sol, target;
-            chan_idx = win.chan_idx, ti_idx = win.ti_idx, time_span = info.time_span,
-        )
+        g = parent(gains(sol, win; time_span = info.time_span))   # (nchan_leaf, nti_leaf, nant, 2)
         _apply_gains!(leaf, g; executor)
         _flag_solution_rows!(
             leaf[:flags], UVData.baselines(leaf).pairs,
@@ -1102,57 +1075,3 @@ function load_solution(path::AbstractString)
         transforms = w.transforms, postcal = w.postcal, pipeline = w.pipeline,
     )
 end
-
-"""
-    external_info(x) -> Union{NamedTuple, Nothing}
-
-The plain-data form of a solution `info` entry, for language-neutral export
-([`save_solution_hdf5`](@ref)'s `info/*` groups). A method returns a
-`NamedTuple` whose values are numbers, vectors, strings, or nested
-`NamedTuple`s/`DimStack`s; the exporter writes each as a dataset or
-subgroup, recursively. Any other value inside the returned tree is itself
-passed through `external_info`, so a nested custom type exports if it
-defines a method and is otherwise skipped and reported.
-
-The fallback returns `nothing`: the entry is omitted from the HDF5 `info/*`
-groups (with a report) and survives only in the file's Julia blob. A step or
-estimator whose diagnostics record a custom config type makes it externally
-readable by defining one method.
-"""
-external_info(::Any) = nothing
-
-"""
-    save_solution_hdf5(path, sol::CalibrationSolution; gains = true, time_block = 1024)
-
-Write `sol` to an HDF5 caltable readable from any language (Python/h5py,
-CASA, …), not just Julia. Provided by `GustavoHDF5Ext` — load `HDF5` to enable it.
-
-Layout:
-- `gain/real`, `gain/imag` — the evaluated complex antenna gains on the
-  `(channel, time, antenna, feed)` grid (`Float32`, chunked + gzip). Written in
-  blocks of `time_block` integrations so the full ~GB cube is never resident. Omit
-  with `gains = false` to write only the compact parametric form.
-- `axes/*` — `channel_freq_hz`, `time`, `scan_of_time`, `spw_of_chan`, `f0`, `t0`.
-- `info/*` — the solution-level (run-wide) diagnostics: antenna/scan counts,
-  station names, flags, executor/timing summary counters.
-- `info/steps/<name>/*` — each pipeline step's own diagnostics
-  (`stage_info(sol, name)`), one subgroup per step, written generically —
-  a third-party `SolveStep`'s custom diagnostics appear here automatically,
-  with no changes needed to the writer. A `NamedTuple`- or `DimStack`-valued
-  entry (e.g. the fringe step's per-scan `scan_snr`/detection table, any
-  step's `timing`) recurses into its own further subgroup.
-- root attributes — format/version, units, and the gain convention
-  `V_corr = V / (g_a · conj(g_b))`, `weight ×= |g_a g_b|²`.
-- `julia/blob` — the `Serialization` bytes of the full solution (steps, geom,
-  info, transforms, postcal, pipeline) so Julia can round-trip it losslessly
-  (external readers ignore it).
-"""
-function save_solution_hdf5 end
-
-"""
-    load_solution_hdf5(path) -> CalibrationSolution
-
-Reconstruct a `CalibrationSolution` from an HDF5 file written by
-[`save_solution_hdf5`](@ref) (via its `julia/blob`). Provided by `GustavoHDF5Ext`.
-"""
-function load_solution_hdf5 end

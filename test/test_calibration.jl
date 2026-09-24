@@ -281,8 +281,8 @@ end
             ),
         )
         nant = 2
-        ev = CAL.GainEvaluator(model, solve; nant)
-        θ = collect(range(0.1; step = 0.05, length = ev.layout.nθ))
+        ev = CAL.plan_parameters(model, nant, solve)
+        θ = collect(range(0.1; step = 0.05, length = ev.nθ))
         θ[(end ÷ 2 + 1):end] .*= 1.0e-9         # the delay block, in seconds
 
         # Placing the solve grid against itself reproduces the index form
@@ -451,7 +451,7 @@ end
     @test plan_off1(r)[1, 2, 1, 1] != 0
 end
 
-@testset "Calibration ComponentVector template" begin
+@testset "Calibration parameter layout" begin
     freqs = [1.0e9, 2.0e9, 3.0e9]                    # 3 channels
     geom = CAL.DataGeometry(; times = [0.0, 1.0], channel_freqs = freqs)
     nant = 2
@@ -467,41 +467,36 @@ end
     )
     layout = CAL.plan_parameters(model, nant, geom)
     θ = Float64.(1:layout.nθ)
-    cv = CAL.component_vector(layout, θ)
 
-    # The named/shaped view spans exactly the flat θ (one source of truth) and
-    # nests where the model does.
-    @test length(layout.template) == layout.nθ
-    @test propertynames(cv) == (:phase, :logamp)
-    @test propertynames(cv.phase) == (:a, :bp, :grp)
-    @test propertynames(cv.phase.grp) == (:d, :c)
+    # The axes tree nests where the model does.
+    @test keys(layout.axes) == (:phase, :logamp)
+    @test keys(layout.axes.phase) == (:a, :bp, :grp)
+    @test keys(layout.axes.phase.grp) == (:d, :c)
 
     # Each leaf is the full-rank shape its tying × segmentation imply
     # (param, feed-node, freq-seg, time-seg, ant), size-1 axes kept.
-    @test size(cv.phase.a) == (1, 2, 1, 1, nant)                 # PerFeed: two feed nodes
-    @test size(cv.phase.bp) == (1, 1, length(freqs), 1, nant)    # ChannelBlocks(1): one freq-seg per channel
-    @test size(cv.phase.grp.d) == (1, 1, 1, 1, nant)             # a nested part is a plain leaf
-    @test size(cv.phase.grp.c) == (1, 1, 1, 1, nant)
+    @test layout.axes.phase.a.dims == (1, 2, 1, 1, nant)                 # PerFeed: two feed nodes
+    @test layout.axes.phase.bp.dims == (1, 1, length(freqs), 1, nant)    # ChannelBlocks(1): one freq-seg per channel
+    @test layout.axes.phase.grp.d.dims == (1, 1, 1, 1, nant)             # a nested part is a plain leaf
+    @test layout.axes.phase.grp.c.dims == (1, 1, 1, 1, nant)
 
     # The stored axis roles name each dimension.
     @test layout.axes.phase.a.roles == (:param, :Feed, :Frequency, :Ti, :Ant)
     @test layout.axes.phase.bp.roles == (:param, :node, :Frequency, :Ti, :Ant)
     @test layout.axes.phase.grp.d.roles == (:param, :node, :Frequency, :Ti, :Ant)
 
-    # A named leaf is exactly the component's θ block (matches component_ranges:
-    # phase components depth-first — a, bp, grp.d, grp.c).
-    rng = CAL.component_ranges(layout)
-    @test vec(cv.phase.a) == θ[rng[1]]
-    @test vec(cv.phase.bp) == θ[rng[2]]
-    @test vec(cv.phase.grp.d) == θ[rng[3]]
-    @test vec(cv.phase.grp.c) == θ[rng[4]]
+    # The plans tile θ depth-first — a, bp, grp.d, grp.c — each over its leaf.
+    rng = [p.range for p in layout.plans]
+    @test reduce(vcat, collect.(rng)) == 1:layout.nθ
+    @test [p.shape for p in layout.plans] ==
+        [layout.axes.phase.a.dims, layout.axes.phase.bp.dims, layout.axes.phase.grp.d.dims, layout.axes.phase.grp.c.dims]
 
-    # The wrap shares data (no copy), and the forward map reads it identically to
-    # the flat vector.
-    ev = CAL.GainEvaluator(model, layout)
-    @test CAL.evaluate_gains(ev, cv) == CAL.evaluate_gains(ev, θ)
-    cv[1] = -99.0
-    @test θ[1] == -99.0
+    # The forward map follows θ's element type, so a caller can differentiate
+    # through it or evaluate it in higher precision.
+    θs = 1.0e-10 .* θ                  # delays of order 0.1 ns keep the phases O(1)
+    gb = CAL.evaluate_gains(layout, BigFloat.(θs))
+    @test eltype(gb) == Complex{BigFloat}
+    @test gb ≈ CAL.evaluate_gains(layout, θs)
 end
 
 @testset "parameters: component θ leaves as labelled DimArrays" begin
@@ -571,7 +566,7 @@ end
     # The leaf is a view onto θ (no copy): its data is the component's block,
     # and writing through it mirrors into θ — a component selection shares θ
     # with the step it narrows.
-    rng = CAL.component_ranges(layout)
+    rng = [p.range for p in layout.plans]
     @test vec(parent(a)) == θ[rng[1]]
     a[1, 1, 1, 1, 1] = -7.0
     @test sol.steps[1].θ[first(rng[1])] == -7.0
@@ -648,15 +643,15 @@ end
     model = CAL.GainModel(
         phase = (delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
-    ev = CAL.GainEvaluator(model, geom; nant)
-    @test CAL.nparameters(ev) == nant * 2
+    ev = CAL.plan_parameters(model, nant, geom)
+    @test ev.nθ == nant * 2
 
     τ = 1.0e-9 .* collect(1:(nant * 2))                    # distinct delays in ns
     g = CAL.evaluate_gains(ev, τ)
     @test size(g) == (length(freqs), length(times), nant, 2)
 
     # Hand-check a couple of cells: |g| == 1 (no amplitude), phase = 2π τ (f−f0).
-    p = ev.layout.plans[1]
+    p = ev.plans[1]
     for ant in 1:nant, feed in 1:2, ci in eachindex(freqs)
         off = plan_off1(p)[ant, feed, 1, 1]
         expected = cis(2π * τ[off] * (freqs[ci] - f0))
@@ -686,52 +681,16 @@ end
     rate_model = CAL.GainModel(
         phase = (rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),),
     )
-    evr = CAL.GainEvaluator(rate_model, geom; nant)
+    evr = CAL.plan_parameters(rate_model, nant, geom)
     ṙ = 1.0e-3 .* collect(1:nant)                          # mHz-scale rates
     gr = CAL.evaluate_gains(evr, ṙ)
-    pr = evr.layout.plans[1]
+    pr = evr.plans[1]
     @test pr.tstate ≈ [sum(times) / length(times)]
     for ant in 1:nant, ti in eachindex(times)
         off = plan_off1(pr)[ant, 1, 1, 1]
         expected = cis(2π * ṙ[off] * (times[ti] - pr.tstate[1]))
         @test gr[1, ti, ant, 1] ≈ expected
         @test gr[1, ti, ant, 2] ≈ expected               # shared across feeds
-    end
-end
-
-@testset "Calibration predict_visibilities closes" begin
-    nant = 3
-    geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [2.28e11, 2.281e11], t0 = 0.0)
-    model = CAL.GainModel(
-        phase = (offset = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
-        logamp = (offset = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
-    )
-    ev = CAL.GainEvaluator(model, geom; nant)
-    θ = randn(CAL.nparameters(ev))
-    g = CAL.evaluate_gains(ev, θ)
-
-    bl_pairs = [(1, 2), (1, 3), (2, 3)]
-    bl_a = first.(bl_pairs)
-    bl_b = last.(bl_pairs)
-    pol_products = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    feed_a = first.(pol_products)
-    feed_b = last.(pol_products)
-
-    coh = zeros(ComplexF64, length(bl_pairs), 2, 2)
-    for bi in eachindex(bl_pairs)
-        coh[bi, :, :] .= ComplexF64[1.0 0.1; 0.1 0.9]
-    end
-    V = CAL.predict_visibilities(g, coh, bl_a, bl_b, feed_a, feed_b)
-    @test size(V) == (2, 1, 3, 4)
-
-    # Phase closure of the gain factors on triangle (1,2,3) for the PP product:
-    # arg(V12) + arg(V23) − arg(V13), with a point source the source phase is 0,
-    # so the closure phase is exactly 0.
-    pp = 1
-    for c in 1:2
-        cphase = angle(V[c, 1, 1, pp]) + angle(V[c, 1, 3, pp]) - angle(V[c, 1, 2, pp])
-        # source coherency PP is real positive → contributes 0 to closure.
-        @test isapprox(rem2pi(cphase, RoundNearest), 0.0; atol = 1.0e-10)
     end
 end
 
@@ -811,7 +770,7 @@ end
         @test sold2.steps[1].θ isa DimArray
         @test sold2.steps[1].θ == θd_fr
         # Same numbers as the Vector-backed solution, not merely close.
-        ev = CAL.GainEvaluator(model_fr, layout_fr)
+        ev = layout_fr
         @test CAL.evaluate_gains(ev, sold2.steps[1].θ) == CAL.evaluate_gains(ev, solv2.steps[1].θ)
         @test parent(gains(sold2[:fringe, :phase, :delay])) == parent(gains(solv2[:fringe, :phase, :delay]))
         # A step selection is index-matched to θ, so it propagates the array type.
@@ -823,7 +782,7 @@ end
     end
 
     @testset "gains(sol) labels the forward map for inspection" begin
-        ev = CAL.GainEvaluator(model, layout)
+        ev = layout
         g = gains(solv)
         @test g isa DimArray
         @test size(g) == (length(freqs), length(times), nant, 2)
@@ -840,6 +799,18 @@ end
         # Indifferent to θ's array type.
         θd = DimArray(copy(θv), Dim{:param}(1:(layout.nθ)))
         @test gains(CAL.CalibrationSolution(model, layout, geom, θd, (; nant))) == g
+    end
+
+    @testset "gains(sol, win) at a window of the solve grid or of other data" begin
+        ci, ti = [2, 5], [1, 3]
+        gw = gains(solv, CAL.GeometryWindow(geom, ci, ti))
+        @test parent(gw) == parent(gains(solv))[ci, ti, :, :]
+        @test lookup(gw, UVD.Frequency) == freqs[ci]
+        @test lookup(gw, Ti) == times[ti]
+        # Another geometry holding the same samples places each in the same
+        # solve segment.
+        other = CAL.DataGeometry(; times, channel_freqs = freqs, t0 = 0.0, f0 = geom.f0)
+        @test parent(gains(solv, CAL.GeometryWindow(other, ci, ti))) ≈ parent(gw)
     end
 
     @testset "the 1-based contract is enforced, not assumed" begin
@@ -870,7 +841,7 @@ end
 
 # The `Ti` axis is in seconds, so a segmentation's width is too. A `Period`
 # says which unit the caller meant; the stored field stays a bare Float64, so
-# equality, hashing and the HDF5 round trip are untouched by the spelling.
+# equality and hashing are untouched by the spelling.
 @testset "segmentations accept a Period" begin
     @test CAL.TimeBlocks(Minute(10)) == CAL.TimeBlocks(600.0)
     @test CAL.TimeBlocks(Second(30)).duration_s == 30.0
@@ -1132,7 +1103,7 @@ end
         @test node.groups.g1.shape == (1, 2, 1, 1, 1)
         @test node.groups.g2.shape == (1, 2, 6, 1, 2)
         # θ leaves nest under the group keys and spans stay contiguous.
-        @test length(lh.template.phase.bandpass.g1) == 2
+        @test length(node.groups.g1.range) == 2
         @test node.groups.g2.range == last(node.groups.g1.range) .+ (1:24)
         # A component every station shares (here at a different resolution per
         # the entry, but with an identical signature) stays a plain plan with
@@ -1151,10 +1122,10 @@ end
 
     @testset "evaluator routes stations through their groups" begin
         θ = zeros(lh.nθ)
-        cv = CAL.component_vector(lh, θ)
-        cv.phase.bandpass.g1 .= 0.5                    # AA: one phase, all channels
-        cv.phase.bandpass.g2[1, 1, 3, 1, 2] = 0.25     # CC (local index 2), feed 1, chan 3
-        ev = CAL.GainEvaluator(mh, lh)
+        g1, g2 = lh.plantree.phase.bandpass.groups
+        CAL._component_leaf(g1, θ) .= 0.5                    # AA: one phase, all channels
+        CAL._component_leaf(g2, θ)[1, 1, 3, 1, 2] = 0.25     # CC (local index 2), feed 1, chan 3
+        ev = lh
         g = @inferred CAL.evaluate_gains(ev, θ)
         @test size(g) == (6, 4, 3, 2)
         @test all(angle.(g[:, :, 1, :]) .≈ 0.5)

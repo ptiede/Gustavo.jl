@@ -57,7 +57,7 @@
         @test sol.info.nblocks == nant * 2 * sol.info.nscan * nspw
         @test sol.info.nmissing == 0
         step = sol.steps[1]
-        ev = CAL.GainEvaluator(step.model, step.layout)
+        ev = step.layout
         g = CAL.evaluate_gains(ev, step.θ, 1:nchan, 1:1)
         for a in 1:nant, f in 1:2, c in 1:nchan
             @test isapprox(g[c, 1, a, f], inst_gain(a, f, c); atol = 1.0e-8)
@@ -69,7 +69,7 @@
         pbad.tone[2, 1, 1, 2] *= cis(2.7)                    # both epochs of ant 1
         solb = FP.phasecal_solution(pbad, uvset; sign = 1)
         stepb = solb.steps[1]
-        gb = CAL.evaluate_gains(CAL.GainEvaluator(stepb.model, stepb.layout), stepb.θ, 1:nchan, 1:1)
+        gb = CAL.evaluate_gains(stepb.layout, stepb.θ, 1:nchan, 1:1)
         for c in findall(==(1), spw_of_chan)
             @test isapprox(gb[c, 1, 1, 1], inst_gain(1, 1, c); atol = 1.0e-6)
         end
@@ -82,7 +82,7 @@
         )
         sols = FP.phasecal_solution(psub, uvset; sign = 1)
         step = sols.steps[1]
-        gs = CAL.evaluate_gains(CAL.GainEvaluator(step.model, step.layout), step.θ, 1:nchan, 1:1)
+        gs = CAL.evaluate_gains(step.layout, step.θ, 1:nchan, 1:1)
         @test all(gs[c, 1, 2, f] ≈ 1.0 for c in 1:nchan, f in 1:2)
     end
 

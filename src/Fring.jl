@@ -19,7 +19,7 @@ using ..UVData: Frequency, BaselineID, Feed, Polarization, Scan
 using ..Calibration
 using ..Calibration: _epoch_atol
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,
-    _flatten_components, _component_leaf, _feed_node, _block_index, _composed_gains,
+    _flatten_components, _component_leaf, _feed_node, _block_index, component_is_per_scan,
     _freq_group_ranges
 # Numeric kernels the model layer keeps off its public surface.
 using ..Calibration: weighted_regularized_least_squares, weighted_constrained_least_squares,

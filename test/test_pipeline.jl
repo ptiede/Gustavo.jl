@@ -970,11 +970,11 @@ end
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
     @test _crossband_eta(corr0) < 0.9
 
-    # HDF5 round-trip carries the Dispersion term (generic serialization).
+    # A saved solution carries the Dispersion term.
     mktempdir() do dir
-        path = joinpath(dir, "disp.h5")
-        CAL.save_solution_hdf5(path, sol)
-        sol2 = CAL.load_solution_hdf5(path)
+        path = joinpath(dir, "disp.jls")
+        CAL.save_solution(path, sol)
+        sol2 = CAL.load_solution(path)
         refine2 = sol2[:refine].steps[1]
         @test refine2.θ == refine.θ
         @test any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(refine2.model))
