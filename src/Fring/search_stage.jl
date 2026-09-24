@@ -1,12 +1,10 @@
-# ── FringeFit stage: the term-list fringe model + the matched-filter estimator ─
+# ── FringeFit stage: the default fringe model + the matched-filter estimator ──
 #
 # The composable pipeline's fringe stage in three parts:
 #
-# - `FringeModel` — what is solved: an ordered list of phase-term elements. The
+# - `default_fringe_terms` — what is solved by default: a `(; phase)` tree of
+#   named components, each declaring its own feed scope through its tying. The
 #   gauge pin is run-wide, on `CalibrationPipeline` in pipeline/protocol.jl.
-#   Each element declares its own feed scope through its tying, so the model is
-#   specified feed by feed. `fringe_phase_components` compiles each element
-#   through `model_components(element, spec)` and concatenates in list order.
 # - `MatchedFilter <: AbstractFringeEstimator` — how it is estimated. The search
 #   and `Stationization` options live on the estimator rather than the model, so
 #   that another estimator plugs in without inheriting them.
@@ -53,11 +51,11 @@ function model_components(s::SingleBandDelay, spec)
 end
 
 """
-    default_fringe_terms(; rel_time = PerScan()) -> NamedTuple
+    default_fringe_terms(; rel_time = PerScan()) -> GainModel
 
-The default [`FringeModel`](@ref) term list — the standard VLBI fringe
-model, as a named list (each key names its component; list order is compiled
-order):
+The default model of a [`FringeFit`](@ref Gustavo.FringeFit) step — the
+standard VLBI fringe model, phase components only (each key names its
+component; the order is the parameter order):
 
 1. `atmos` — per-scan constant phase, feed-common (atmosphere/clock).
 2. `mbd` — per-scan wideband delay, feed-common.
@@ -66,8 +64,8 @@ order):
    offset.
 4. `rate` — per-scan rate, feed-common. There is no feed-specific rate: the
    inter-feed rate is negligible (EHT-HOPS convention). A genuine offset is
-   added as
-   `GainComponent(Rate(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SingleFeed(2))`;
+   added with
+   `merge(default_fringe_terms(); phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = SingleFeed(2))))`;
    an added rate component must carry the same time segmentation as the
    constants beside it, so one epoch zeroes every rate coordinate at once —
    see [`scan_phase_epoch`](@ref).
@@ -93,61 +91,16 @@ Dispersion (dTEC) and single-band delay (SBD) are not modeled here — they
 are fit by a separate [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)
 step on the fringe-corrected residual.
 
-Omit an element to drop its component; add a `Calibration.GainComponent` to
-model a new one.
+Add or replace a component with [`merge`](@ref Base.merge(::GainModel)).
 """
-default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = (
-    atmos = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
-    mbd = GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
-    rel_delay = GainComponent(Delay(); Ti = rel_time, Frequency = GlobalFrequency(), Feed = SingleFeed(2)),
-    rate = GainComponent(Rate(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = GainModel(
+    phase = (
+        atmos = GainComponent(ConstantTerm(); Ti = PerScan(), Feed = SharedFeeds()),
+        mbd = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds()),
+        rel_delay = GainComponent(Delay(); Ti = rel_time, Feed = SingleFeed(2)),
+        rate = GainComponent(Rate(); Ti = PerScan(), Feed = SharedFeeds()),
+    ),
 )
-
-"""
-    FringeModel(; terms = default_fringe_terms())
-
-What the fringe stage solves — the model specification of a `FringeFit`
-step. `terms` is a `NamedTuple`: each key names the component its value (a
-`Calibration.GainComponent`) compiles to, and list order is compiled
-component order. See [`default_fringe_terms`](@ref) for the default list.
-The gauge pin is run-wide, not part of any step's model — see
-[`CalibrationPipeline`](@ref Gustavo.CalibrationPipeline).
-
-[`DispersionModel`](@ref) and [`SingleBandDelay`](@ref) are rejected at
-construction: they are fit by a separate
-[`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit) step, not by the fringe
-search, so carrying one here would compile a θ column no stage fits.
-"""
-struct FringeModel{T <: NamedTuple}
-    terms::T
-    function FringeModel{T}(terms) where {T}
-        for (k, t) in pairs(terms)
-            t isa DispersionModel && throw(
-                ArgumentError(
-                    "FringeModel: `terms.$k` is a DispersionModel — dispersion is fit by a " *
-                        "separate DispersionSBDFit pipeline step, not by FringeModel's term " *
-                        "list. Remove it from `terms` and add `DispersionSBDFit(; dispersion = " *
-                        "$(t))` to the pipeline instead.",
-                ),
-            )
-            t isa SingleBandDelay && throw(
-                ArgumentError(
-                    "FringeModel: `terms.$k` is a SingleBandDelay — SBD is fit by a separate " *
-                        "DispersionSBDFit pipeline step, not by FringeModel's term list. Remove " *
-                        "it from `terms` and add `DispersionSBDFit(; sbd = $(t))` to the " *
-                        "pipeline instead.",
-                ),
-            )
-        end
-        return new{T}(terms)
-    end
-end
-function FringeModel(; terms = default_fringe_terms())
-    terms isa NamedTuple || throw(
-        ArgumentError("FringeModel: `terms` must be a NamedTuple naming each element."),
-    )
-    return FringeModel{typeof(terms)}(terms)
-end
 
 """
     MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1)
@@ -155,7 +108,7 @@ end
 How the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)): a
 per-baseline delay/rate matched-filter `search` on every scan group, then
 the closure-screened station WLS (`closure`) that ties the feeds. With one
-round and an all-per-scan term list each scan's station systems solve as the
+round and an all-per-scan model each scan's station systems solve as the
 scan is searched, so the pass is scan-local ([`scan_local_solve`](@ref)); a
 track-global column or `rounds > 1` instead pools every scan's detections
 into one solve at the end of the pass.
@@ -172,9 +125,9 @@ delay, rate and phase per scan, so a segmentation that splits a scan — a
 `TimeBlocks` shorter than the scans, `PerIntegration` — asks for θ columns the
 search has no measurement to fill and is rejected when the step compiles the
 model. A segmentation *coarser* than a scan is fitted: one column shared by
-several scans is written by all of them. `default_fringe_terms` is the standard
-model; the per-band and dispersive terms belong to
-[`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit).
+several scans is written by all of them. The model has phase components only.
+`default_fringe_terms` is the standard model; the per-band and dispersive terms
+belong to [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit).
 
 The `search` measures every baseline and gates nothing; `closure.pfa_max` is
 the one detection threshold, deciding which measurements are real fringes
@@ -195,44 +148,7 @@ Base.@kwdef struct MatchedFilter <: AbstractFringeEstimator
     steer_cells::Float64 = 9.0
 end
 
-# ── Model compilation ─────────────────────────────────────────────────────────
-
-"""
-    fringe_phase_components(fm::FringeModel, spec) -> NamedTuple
-
-The fringe stage's gain-model phase components as a named tree: each element of
-`fm.terms` compiled through `model_components(element, spec)` under its list
-key, in list order — the list order is the compiled component order
-(`spec = (; geom, antennas)`, the step compile spec). An element that
-compiles to nothing contributes no key; one that compiles to several components
-nests them under its key.
-
-Throws `ArgumentError` when two compiled components share a routing signature:
-the structural plan routers (`_perscan_delay_plan`, `_sbd_plans`,
-`Calibration._dispersion_plan`) locate θ blocks by `findfirst` over (term,
-segmentation, tying) types, so a second matching component would compile θ
-columns no stage ever writes — a silent no-fit.
-"""
-function fringe_phase_components(fm::FringeModel, spec)
-    comps = _compile_named(fm.terms, spec)
-    _validate_fringe_components(_flatten_components(comps))
-    return comps
-end
-
-# Compile a named term list into a named component tree: each element keyed by
-# its list name, dropped when it emits nothing, nested when it emits several.
-# The names come from the type parameter so the keys stay compile-time constants
-# and the tree's type is inferred.
-_compile_named(terms::NamedTuple{names}, spec) where {names} =
-    _compile_named(names, terms, spec)
-_compile_named(::Tuple{}, terms, spec) = (;)
-function _compile_named(names::Tuple, terms, spec)
-    k = first(names)
-    v = model_components(terms[k], spec)
-    return _prepend_named(Val(k), v, _compile_named(Base.tail(names), terms, spec))
-end
-_prepend_named(::Val, ::Nothing, rest) = rest
-_prepend_named(::Val{k}, v, rest) where {k} = merge(NamedTuple{(k,)}((v,)), rest)
+# ── Model validation ─────────────────────────────────────────────────────────
 
 # Reject compiled component sets a findfirst router cannot address uniquely,
 # and exact duplicates (indistinguishable θ blocks are degenerate columns).
@@ -240,9 +156,9 @@ function _validate_fringe_components(comps::Tuple)
     for i in eachindex(comps), j in (i + 1):length(comps)
         _same_component_signature(comps[i], comps[j]) && throw(
             ArgumentError(
-                "FringeModel: terms compile two identical components " *
+                "the fringe model has two identical components " *
                     "($(component_label(comps[i]))) — the routers and solvers cannot " *
-                    "distinguish their θ blocks. Remove the duplicate element.",
+                    "distinguish their θ blocks. Remove the duplicate.",
             ),
         )
     end
@@ -254,9 +170,9 @@ function _at_most_one(pred, comps::Tuple, what::String)
     n = count(pred, comps)
     n <= 1 || throw(
         ArgumentError(
-            "FringeModel: $n compiled components match $what — the plan router " *
+            "the fringe model has $n components matching $what — the plan router " *
                 "routes to the first and the rest would never be fit. Remove the " *
-                "duplicate element(s).",
+                "duplicate(s).",
         ),
     )
     return nothing
@@ -286,8 +202,7 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 # every segment but the first left at zero while the search wrote its band-wide
 # phase into that one. A `Dispersion` or `FreqGroups`-segmented term falls
 # through to `nothing` on the term/freq-type checks below, so `can_fit` rejects
-# either if it appears in a `FringeModel`'s own term list; both belong to a
-# `DispersionSBDFit` step.
+# either in the fringe step's model; both belong to a `DispersionSBDFit` step.
 #
 # The time axis is not decided here: whether a segmentation leaves a scan with
 # more than one θ column depends on the scan lengths, so `can_fit` answers it
@@ -341,23 +256,33 @@ function splits_a_scan(seg, geom)
     return false
 end
 
-# One round and an all-per-scan term list make the station systems
+# One round and an all-per-scan model make the station systems
 # block-diagonal per scan, so each scan's WLS closes inside `estimate_scan!`
 # and the pass is scan-local. A cross-scan time segmentation (a `GlobalTime`
-# inter-feed offset shares a column across scans), an opaque term (its
-# compiled segmentation is unknowable without the geometry), or `rounds > 1`
-# (the re-search reads the whole pass's residual) each force the pooled path.
-scan_local_solve(est::MatchedFilter, fm::FringeModel) =
-    est.rounds <= 1 &&
-    all(t -> t isa GainComponent && component_is_per_scan(t), values(fm.terms))
+# inter-feed offset shares a column across scans) or `rounds > 1` (the
+# re-search reads the whole pass's residual) each force the pooled path.
+function scan_local_solve(est::MatchedFilter, m::GainModel)
+    est.rounds <= 1 || return false
+    trees = (m.phase, (e.phase for e in values(m.stations) if haskey(e, :phase))...)
+    return all(t -> all(component_is_per_scan, _flatten_components(t)), trees)
+end
 
-# What the matched filter requires to exist. Each absent item costs the
-# estimator its own output silently rather than crashing: `solve_station_systems!`
-# skips a kind with no components, dropping every scan's search estimate for
-# that observable, and `refine_scan_dispersion!` skips the Δτ half of the joint
-# (Δτ, dTEC) fit when the per-scan delay plan is missing, biasing the dTEC it
-# does report by exactly the degeneracy the joint fit exists to break.
-function validate_model(est::MatchedFilter, comps)
+# What the matched filter requires of a `(; phase, logamp)` model tree. Each
+# absent item costs the estimator its own output silently rather than crashing:
+# `solve_station_systems!` skips a kind with no components, dropping every
+# scan's search estimate for that observable, and `refine_scan_dispersion!`
+# skips the Δτ half of the joint (Δτ, dTEC) fit when the per-scan delay plan is
+# missing, biasing the dTEC it does report by exactly the degeneracy the joint
+# fit exists to break.
+function validate_model(est::MatchedFilter, model)
+    name = nameof(typeof(est))
+    isempty(_flatten_components(model.logamp)) || throw(
+        ArgumentError(
+            "$name fits phase components only; the fringe model's `logamp` group " *
+                "must be empty.",
+        ),
+    )
+    comps = _validate_fringe_components(_flatten_components(model.phase))
     kinds = map(matched_kind, comps)
     for (kind, what) in (
             (:delay, "a delay component (the per-baseline delay search has nowhere to go)"),
@@ -366,18 +291,18 @@ function validate_model(est::MatchedFilter, comps)
         )
         kind in kinds || throw(
             ArgumentError(
-                "$(nameof(typeof(est))) requires $what. Add one to the FringeModel's " *
-                    "`terms` — see `default_fringe_terms`.",
+                "$name requires $what. Add one to the fringe model's `phase` " *
+                    "tree — see `default_fringe_terms`.",
             ),
         )
     end
     any(_is_perscan_delay, comps) || throw(
         ArgumentError(
-            "$(nameof(typeof(est))) requires a per-scan feed-common wideband delay " *
+            "$name requires a per-scan feed-common wideband delay " *
                 "component (a `Delay` with a non-`GlobalTime` time segmentation, " *
                 "`Frequency = GlobalFrequency()`, `Feed = SharedFeeds()`): the refine stage fits it jointly " *
                 "with dTEC, and a delay tied any other way leaves that fit with only " *
-                "its degenerate half. Add one to the FringeModel's `terms` — see " *
+                "its degenerate half. Add one to the fringe model's `phase` tree — see " *
                 "`default_fringe_terms`.",
         ),
     )
@@ -542,7 +467,7 @@ function _scan_epoch(comps, ti::Integer)
                         "the epoch where every rate coordinate vanishes, and rate components " *
                         "with different time segmentations have no such epoch in common. Give " *
                         "every Rate term the same time segmentation as the constant it " *
-                        "accompanies (`PerScan()` for the default fringe term list).",
+                        "accompanies (`PerScan()` for `default_fringe_terms`).",
                 )
             )
         end

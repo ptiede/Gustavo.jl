@@ -103,7 +103,7 @@ end
     # Layouts materialize: a plan built from a `BandGroups` component records the
     # concrete `FreqGroups`, so solutions and foreign-grid placement never see
     # the data-dependent form.
-    model = CAL.StationGainModel(
+    model = CAL.GainModel(
         phase = (
             sbd = CAL.GainComponent(
                 CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.BandGroups(),
@@ -274,7 +274,7 @@ end
     end
 
     @testset "gains evaluate on the foreign grid in the solve's own basis" begin
-        model = CAL.StationGainModel(
+        model = CAL.GainModel(
             phase = (
                 atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
                 mbd = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
@@ -324,13 +324,6 @@ end
     @test CAL.PolynomialTime(3) isa CAL.Polynomial{:Ti}
     @test CAL.term_axes(CAL.PolynomialFreq(3)) == (:Frequency,)
     @test CAL.term_axes(CAL.PolynomialTime(3)) == (:Ti,)
-    @test CAL.term_label(CAL.PolynomialFreq(3)) == "polyf3"
-    @test CAL.term_label(CAL.PolynomialTime(2)) == "polyt2"
-
-    # `term_label` defaults to the type name, so a term author only needs to
-    # override it for a more evocative label.
-    @eval CAL struct _UnlabeledTerm <: AbstractGainTerm end
-    @test CAL.term_label(CAL._UnlabeledTerm()) == "_UnlabeledTerm"
 
     @test_throws ArgumentError CAL.PolynomialFreq(0)
     @test_throws "axis must be one of" CAL.Polynomial{:nope}(2)
@@ -410,7 +403,6 @@ end
             (CAL.PolynomialTime(3), "PolynomialTime(3)"),
             (CAL.TimeBlocks(1.5), "TimeBlocks(1.5)"),
             (CAL.ChannelBlocks(4), "ChannelBlocks(4)"),
-            (CAL.ReferenceRelative(1), "ReferenceRelative(1)"),
             (CAL.SingleFeed(2), "SingleFeed(2)"),
         )
         @test CAL._call_string(x) == want
@@ -426,19 +418,19 @@ end
     @test mk(fg1) == mk(fg2) && hash(mk(fg1)) == hash(mk(fg2))
     @test mk(fg1) != CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = fg1)  # Feed differs
     @test mk(fg1) != CAL.GainComponent(CAL.Rate(); Ti = CAL.PerScan(), Frequency = fg1, Feed = CAL.SharedFeeds())
-    m1 = CAL.StationGainModel(phase = (sbd = mk(fg1),))
-    m2 = CAL.StationGainModel(phase = (sbd = mk(fg2),))
+    m1 = CAL.GainModel(phase = (sbd = mk(fg1),))
+    m2 = CAL.GainModel(phase = (sbd = mk(fg2),))
     @test m1 == m2 && hash(m1) == hash(m2)
-    @test m1 != CAL.StationGainModel(logamp = (sbd = mk(fg1),))
+    @test m1 != CAL.GainModel(logamp = (sbd = mk(fg1),))
 
     # Unnamed components are rejected with the constructor the message shows.
-    @test_throws "pass a NamedTuple" CAL.StationGainModel(phase = (mk(fg1),))
+    @test_throws "pass a NamedTuple" CAL.GainModel(phase = (mk(fg1),))
 end
 
 @testset "Calibration feed tying offset algebra" begin
     geom = CAL.DataGeometry(; times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
     # One ConstantTerm, GlobalTime × GlobalFrequency, 2 antennas.
-    mk(tying) = CAL.StationGainModel(
+    mk(tying) = CAL.GainModel(
         phase = (c = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = tying),),
     )
 
@@ -446,27 +438,24 @@ end
     @test lay_pf.nθ == 4                                    # 2 ant × 2 feeds
     p = lay_pf.plans[1]
     @test plan_off1(p)[1, 1, 1, 1] != plan_off1(p)[1, 2, 1, 1]          # feeds independent
-    @test all(plan_off2(p) .== 0)
 
     lay_sf = CAL.plan_parameters(mk(CAL.SharedFeeds()), 2, geom)
     @test lay_sf.nθ == 2                                    # 2 ant, shared across feeds
     q = lay_sf.plans[1]
     @test plan_off1(q)[1, 1, 1, 1] == plan_off1(q)[1, 2, 1, 1]          # feeds share a block
-    @test all(plan_off2(q) .== 0)
 
-    lay_rr = CAL.plan_parameters(mk(CAL.ReferenceRelative(1)), 2, geom)
-    @test lay_rr.nθ == 4                                    # ref + relative per ant
-    r = lay_rr.plans[1]
-    @test plan_off1(r)[1, 1, 1, 1] == plan_off1(r)[1, 2, 1, 1]          # both feeds reference the ref block
-    @test plan_off2(r)[1, 1, 1, 1] == 0                           # reference feed has no relative
-    @test plan_off2(r)[1, 2, 1, 1] != 0                           # partner feed adds a relative block
+    lay_1f = CAL.plan_parameters(mk(CAL.SingleFeed(2)), 2, geom)
+    @test lay_1f.nθ == 2                                    # one block per ant
+    r = lay_1f.plans[1]
+    @test plan_off1(r)[1, 1, 1, 1] == 0                           # feed 1 has no block
+    @test plan_off1(r)[1, 2, 1, 1] != 0
 end
 
 @testset "Calibration ComponentVector template" begin
     freqs = [1.0e9, 2.0e9, 3.0e9]                    # 3 channels
     geom = CAL.DataGeometry(; times = [0.0, 1.0], channel_freqs = freqs)
     nant = 2
-    model = CAL.StationGainModel(
+    model = CAL.GainModel(
         phase = (
             a = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
             bp = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.SharedFeeds()),
@@ -524,11 +513,11 @@ end
     )
     nant = 3
     ants = ["PT", "LM", "AA"]
-    model = CAL.StationGainModel(
+    model = CAL.GainModel(
         phase = (
             atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
             bp = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(2), Feed = CAL.SharedFeeds()),
-            rl = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.ReferenceRelative(1)),
+            rl = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2)),
         ),
         logamp = (
             amp = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),
@@ -549,10 +538,10 @@ end
     @test name(a) == :atmos
 
     # PerFeed carries a physical Feed axis; the tied tyings carry a positional
-    # node axis (ReferenceRelative: reference + relative, two nodes).
+    # node axis.
     @test name(dims(a, 2)) == :Feed
     @test name(dims(CAL.parameters(sol[:solution, :phase, :bp]), 2)) == :node
-    @test size(CAL.parameters(sol[:solution, :phase, :rl]), 2) == 2
+    @test size(CAL.parameters(sol[:solution, :phase, :rl]), 2) == 1
 
     # The same lookup by step POSITION (not name) reaches the same leaf.
     @test CAL.parameters(sol[1, :phase, :atmos]) == a
@@ -598,7 +587,7 @@ end
         scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 2], t0 = 0.0, f0 = 3.0e9,
     )
     sbd = CAL.model_components(SingleBandDelay(), (; geom = gb, antennas = nothing))
-    msbd = CAL.StationGainModel(phase = (sbd = sbd,))
+    msbd = CAL.GainModel(phase = (sbd = sbd,))
     lsbd = CAL.plan_parameters(msbd, 2, gb)
     ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, Float64.(1:lsbd.nθ), (;))
     dl = CAL.parameters(ssbd[:solution, :phase, :sbd, :delay])
@@ -627,7 +616,7 @@ end
     # component selection resolves by step, never by searching for a name
     # across steps.
     atmos2 = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds())
-    model2 = CAL.StationGainModel(phase = (atmos = atmos2,))
+    model2 = CAL.GainModel(phase = (atmos = atmos2,))
     layout2 = CAL.plan_parameters(model2, nant, geom)
     θ2 = fill(-1.0, layout2.nθ)
     twostep = CAL.CalibrationSolution(
@@ -656,7 +645,7 @@ end
     geom = CAL.DataGeometry(; times, channel_freqs = freqs, t0 = 0.0, f0)
 
     # Pure per-feed delay model: phase = 2π τ (f − f0), one τ per (ant, feed).
-    model = CAL.StationGainModel(
+    model = CAL.GainModel(
         phase = (delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
     ev = CAL.GainEvaluator(model, geom; nant)
@@ -694,7 +683,7 @@ end
 
     # Rate term: phase grows linearly in time, flat in frequency, about the
     # segment's OWN mean epoch (one segment here, so the whole track's).
-    rate_model = CAL.StationGainModel(
+    rate_model = CAL.GainModel(
         phase = (rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds()),),
     )
     evr = CAL.GainEvaluator(rate_model, geom; nant)
@@ -713,7 +702,7 @@ end
 @testset "Calibration predict_visibilities closes" begin
     nant = 3
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [2.28e11, 2.281e11], t0 = 0.0)
-    model = CAL.StationGainModel(
+    model = CAL.GainModel(
         phase = (offset = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
         logamp = (offset = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
@@ -770,7 +759,7 @@ end
         # NOTE: deliberately no freq_coordinate method.
     end
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = [1.0e9, 2.0e9])
-    model = CAL.StationGainModel(
+    model = CAL.GainModel(
         phase = (bad = CAL.GainComponent(CAL._AuditBadFreqTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
     @test_throws MethodError CAL.plan_parameters(model, 1, geom)
@@ -785,7 +774,7 @@ end
     )
     # A delay term plus a per-channel bandpass, so step selection has
     # something to extract.
-    model = CAL.StationGainModel(
+    model = CAL.GainModel(
         phase = (
             delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
             bandpass = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.SharedFeeds()),
@@ -801,8 +790,8 @@ end
         # Split into the delay-only :fringe step and the bandpass-only
         # :bandpass step so the step-scoped accessors (`sol[i]`, component
         # selections) have real steps to address.
-        model_fr = CAL.StationGainModel(phase = (delay = model.phase.delay,))
-        model_bp = CAL.StationGainModel(phase = (bandpass = model.phase.bandpass,))
+        model_fr = CAL.GainModel(phase = (delay = model.phase.delay,))
+        model_bp = CAL.GainModel(phase = (bandpass = model.phase.bandpass,))
         layout_fr = CAL.plan_parameters(model_fr, nant, geom)
         layout_bp = CAL.plan_parameters(model_bp, nant, geom)
         θv_fr = θv[1:(layout_fr.nθ)]
@@ -933,13 +922,11 @@ end
     end
 
     @testset "feed tying and empty models" begin
-        @test_throws ArgumentError CAL.ReferenceRelative(3)
-        @test_throws "reference_feed must be 1 or 2" CAL.ReferenceRelative(0)
         @test_throws ArgumentError CAL.SingleFeed(3)
         @test_throws "feed must be 1 or 2" CAL.SingleFeed(0)
-        @test_throws ArgumentError CAL.validate_station_gain_model(CAL.StationGainModel())
-        @test_throws "neither phase nor log-amplitude" CAL.validate_station_gain_model(
-            CAL.StationGainModel()
+        @test_throws ArgumentError CAL.validate_gain_model(CAL.GainModel())
+        @test_throws "neither phase nor log-amplitude" CAL.validate_gain_model(
+            CAL.GainModel()
         )
     end
 end
@@ -1009,16 +996,6 @@ end
     @test CAL.phase_unwrap_ambiguity(Float64[]) == 0
 end
 
-# A rule-based gain model: stations named in `special` get `tree`, the rest
-# `base`. Exercises the `station_components` seam a user subtype implements.
-struct _RuleModel{B, T} <: CAL.AbstractGainModel
-    special::Vector{String}
-    base::B
-    tree::T
-end
-CAL.station_components(m::_RuleModel, station) =
-    String(station) in m.special ? m.tree : m.base
-
 @testset "Per-station heterogeneity" begin
     geom = CAL.DataGeometry(;
         times = [0.0, 0.1, 1.0, 1.1],
@@ -1038,7 +1015,7 @@ CAL.station_components(m::_RuleModel, station) =
     base = (; phase = (bandpass = bp(CAL.ChannelBlocks(1)), atmos))
 
     @testset "stations constructor and seam" begin
-        m = CAL.StationGainModel(;
+        m = CAL.GainModel(;
             base..., stations = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()),)),),
         )
         # Replacement is verbatim and whole-group: AA's phase tree is the
@@ -1054,38 +1031,58 @@ CAL.station_components(m::_RuleModel, station) =
 
         # Entry keys other than phase/logamp error — the likely mistake is a
         # component name at the top level.
-        @test_throws "unexpected key" CAL.StationGainModel(;
+        @test_throws "unexpected key" CAL.GainModel(;
             base..., stations = (AA = (; bandpass = bp(CAL.GlobalFrequency())),),
         )
-        @test_throws "must be a `(; phase, logamp)` NamedTuple" CAL.StationGainModel(;
+        @test_throws "must be a `(; phase, logamp)` NamedTuple" CAL.GainModel(;
             base..., stations = (AA = bp(CAL.GlobalFrequency()),),
         )
 
         # Equality and hashing are order-insensitive in `stations`.
-        ma = CAL.StationGainModel(;
+        ma = CAL.GainModel(;
             base..., stations = (AA = (; phase = (;)), BB = (; logamp = (;))),
         )
-        mb = CAL.StationGainModel(;
+        mb = CAL.GainModel(;
             base..., stations = (BB = (; logamp = (;)), AA = (; phase = (;))),
         )
         @test ma == mb
         @test hash(ma) == hash(mb)
-        @test ma != CAL.StationGainModel(; base...)
+        @test ma != CAL.GainModel(; base...)
     end
 
-    @testset "as_gain_model lift" begin
-        m = CAL.StationGainModel(; base...)
-        @test CAL.as_gain_model(m) === m
-        @test CAL.as_gain_model(base) == m
-        @test CAL.as_gain_model((; phase = base.phase)) == m
-        @test_throws "unexpected key" CAL.as_gain_model((; bandpass = bp(CAL.GlobalFrequency())))
-        @test_throws "must be a `StationGainModel`" CAL.as_gain_model(CAL.ChannelBlocks(1))
+    @testset "with_station" begin
+        m = CAL.GainModel(; base...)
+        cc = (bandpass = bp(CAL.GlobalFrequency()),)
+        mc = CAL.with_station(m, "CC"; phase = cc)
+        @test mc == CAL.GainModel(; base..., stations = (CC = (; phase = cc),))
+        @test m == CAL.GainModel(; base...)          # the input is unchanged
+        # A later call keeps the groups it does not name; Symbol/String agree.
+        la = (amp = atmos,)
+        mcl = CAL.with_station(mc, :CC; logamp = la)
+        @test CAL.station_components(mcl, "CC") == (; phase = cc, logamp = la)
+        @test CAL.with_station(mcl, "CC"; phase = base.phase).stations.CC ==
+            (; phase = base.phase, logamp = la)
+        @test_throws "unexpected key" CAL.with_station(m, "CC"; bandpass = bp(CAL.GlobalFrequency()))
+    end
+
+    @testset "merge" begin
+        m = CAL.with_station(CAL.GainModel(; base...), "CC"; phase = (; bandpass = bp(CAL.GlobalFrequency())))
+        amp = (; amp = atmos)
+        mm = merge(m; phase = (; atmos = bp(CAL.GlobalFrequency())), logamp = amp)
+        # A name the model has is replaced in place; a new name is appended.
+        @test keys(mm.phase) == (:bandpass, :atmos)
+        @test mm.phase.atmos == bp(CAL.GlobalFrequency())
+        @test mm.logamp == amp
+        @test mm.stations == m.stations                       # entries are kept
+        @test merge(m) == m
+        @test_throws "must be named" merge(m; phase = (atmos,))
+        @test_throws "must be a `GainComponent`" merge(m; phase = (; x = 1.0))
     end
 
     @testset "materialize" begin
         # Segmentations materialize inside per-station trees, and an entry
         # equal to the base (after materialization) collapses away.
-        m = CAL.StationGainModel(
+        m = CAL.GainModel(
             phase = (bandpass = bp(CAL.BandGroups()), atmos),
             stations = (
                 BB = (; phase = (bandpass = bp(CAL.BandGroups()), atmos)),
@@ -1098,23 +1095,13 @@ CAL.station_components(m::_RuleModel, station) =
         @test CAL.materialize(mat, names, geom) == mat        # idempotent
 
         # Unknown station codes error, naming the known stations.
-        bad = CAL.StationGainModel(; base..., stations = (XX = (; phase = base.phase),))
+        bad = CAL.GainModel(; base..., stations = (XX = (; phase = base.phase),))
         @test_throws "unknown station :XX" CAL.materialize(bad, names, geom)
         @test_throws "AA, BB, CC" CAL.materialize(bad, names, geom)
-
-        # A rule-based model materializes through its seam: the majority tree
-        # becomes the base, the outlier an entry — provenance holds exactly
-        # the per-station trees the model assigned.
-        rm = _RuleModel(["CC"], base, (; phase = (bandpass = bp(CAL.GlobalFrequency()),)))
-        rmat = CAL.materialize(rm, names, geom)
-        @test rmat isa CAL.StationGainModel
-        @test rmat.phase == base.phase
-        @test keys(rmat.stations) == (:CC,)
-        @test CAL.station_components(rmat, "CC").phase.bandpass.Frequency isa CAL.GlobalFrequency
     end
 
-    mu = CAL.StationGainModel(; base...)
-    mh = CAL.StationGainModel(;
+    mu = CAL.GainModel(; base...)
+    mh = CAL.GainModel(;
         base...,
         stations = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()), atmos)),),
     )
@@ -1155,7 +1142,7 @@ CAL.station_components(m::_RuleModel, station) =
 
         # A name that is a leaf at one station and a subtree at another has no
         # honest layout.
-        conflict = CAL.StationGainModel(;
+        conflict = CAL.GainModel(;
             base...,
             stations = (AA = (; phase = (bandpass = (; a = bp(CAL.GlobalFrequency())),)),),
         )
@@ -1221,7 +1208,7 @@ CAL.station_components(m::_RuleModel, station) =
         # A uniform model passes through, entries collapsed or not.
         @test CAL.require_station_uniform(
             CAL.materialize(mu, names, geom), names, "Bandpass",
-        ) isa CAL.StationGainModel
+        ) isa CAL.GainModel
     end
 
     @testset "parameters and gains on a grouped leaf" begin

@@ -1,6 +1,6 @@
 # ── Pure forward evaluation ──────────────────────────────────────────────────
 #
-# `GainEvaluator` pairs a `StationGainModel` with its `ParameterLayout`. The map
+# `GainEvaluator` pairs a `GainModel` with its `ParameterLayout`. The map
 # θ → gains is pure: no mutation of θ, no global state, allocation only of the
 # output array, and fully type-stable (verified by `@inferred` in the tests).
 # This is the surface a future Comrade/Reactant global solver will trace; the
@@ -14,12 +14,12 @@
 # the hot path. `θ` is a plain vector; `component_vector` wraps it for named
 # inspection, but the map does not need that view.
 
-struct GainEvaluator{M <: AbstractGainModel, L <: ParameterLayout}
+struct GainEvaluator{M <: GainModel, L <: ParameterLayout}
     model::M
     layout::L
 end
 
-GainEvaluator(model::StationGainModel, geom::DataGeometry; nant::Integer) =
+GainEvaluator(model::GainModel, geom::DataGeometry; nant::Integer) =
     GainEvaluator(model, plan_parameters(model, nant, geom))
 
 
@@ -66,17 +66,9 @@ end
     x = _cell_coordinates(t, plan, ti, c)
     @inbounds shapes = param_shapes(t, plan.nchan_seg[fs])
     leaf = _component_leaf(plan, θ)
-    val = zero(eltype(θ))
     node = _feed_node(plan.tying, feed)
-    if node != 0
-        val += term_eval(t, _block_params(shapes, _leaf_block(leaf, node, fs, ts, ant)), x)
-    end
-    # `ReferenceRelative`'s partner also reads its relative block (node 2).
-    node2 = _feed_node2(plan.tying, feed)
-    if node2 != 0
-        val += term_eval(t, _block_params(shapes, _leaf_block(leaf, node2, fs, ts, ant)), x)
-    end
-    return val
+    node == 0 && return zero(eltype(θ))
+    return term_eval(t, _block_params(shapes, _leaf_block(leaf, node, fs, ts, ant)), x)
 end
 
 # The parameter run of one block: the 1-D view over the leaf's `:param` axis at

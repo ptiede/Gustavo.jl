@@ -34,31 +34,27 @@ function _signless_incidence(na, nb, idx, nnodes, val, w)
 end
 
 """
-    default_bandpass_terms(; freq = ChannelBlocks(1)) -> NamedTuple
+    default_bandpass_terms(; freq = ChannelBlocks(1)) -> GainModel
 
 The default [`Bandpass`](@ref Gustavo.Bandpass) step model: a time-stable, per-feed constant per
 frequency segment for each observable — a `phase.bandpass` and a
 `logamp.bandpass` component, both resolved by `freq` (an
 `AbstractFrequencySegmentation`; the default is one free value per channel).
 
-A `Bandpass` model is a `(; phase, logamp)` tree of named
-`Calibration.GainComponent`s (or a `StationGainModel`); either group may be
-absent or empty. Fit one observable only by keeping just that group, e.g.
+Either group of a `Bandpass` model may be empty. Fit one observable only by
+keeping just that group, e.g.
 
-    Bandpass(model = (; phase = default_bandpass_terms().phase),
+    Bandpass(model = GainModel(; phase = default_bandpass_terms().phase),
              smoother = PerTrackSmoother())
 
 fits the phase bandpass alone. Uniform across every antenna. How each
 observable is shaped lives on the step's smoother (see
 [`AbstractBandpassSmoother`](@ref)).
 """
-default_bandpass_terms(; freq::AbstractFrequencySegmentation = ChannelBlocks(1)) = (;
-    phase = (; bandpass = _bandpass_component(freq)),
-    logamp = (; bandpass = _bandpass_component(freq)),
-)
-
-_bandpass_component(freq) =
-    GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = freq, Feed = PerFeed())
+function default_bandpass_terms(; freq::AbstractFrequencySegmentation = ChannelBlocks(1))
+    bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = freq, Feed = PerFeed())
+    return GainModel(phase = (; bandpass), logamp = (; bandpass))
+end
 
 """
     AbstractBandpassSmoother

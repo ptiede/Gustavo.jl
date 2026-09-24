@@ -56,7 +56,7 @@ function load_fitsidi_phasecal end
 # and constant phase — exactly what the multitone fit measures. Phase-only
 # (tone amplitudes track injection power, not the signal-path gain).
 function _phasecal_model()
-    return StationGainModel(
+    return GainModel(
         phase = (
             delay = GainComponent(Delay(); Ti = PerScan(), Frequency = PerSpectralWindow(), Feed = PerFeed()),
             constant = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = PerSpectralWindow(), Feed = PerFeed()),

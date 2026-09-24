@@ -80,7 +80,7 @@ end
         nant, nspw = 2, nchan = 8, nscans = 3,
         bandpass = bp_true, amp_bandpass = abp_true,
     )
-    fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+    fm = default_fringe_terms()
     pipe = CalibrationPipeline(
         FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
         exec = ExecutionConfig(),

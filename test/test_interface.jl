@@ -27,9 +27,7 @@ Gustavo.finish_pass!(::_RepeatingScanStep, ctx) = (; repeat_pass = true)
 # A transform with no apply_transform! implementation (error-path probe).
 struct _NoImpl <: Gustavo.Fring.AbstractDataTransform end
 
-# A FringeModel term that is not an GainComponent: its compiled segmentation is
-# unknowable without the geometry, so the scan-locality answer must be the
-# conservative :global.
+# A model value that is not a `GainComponent`.
 struct _OpaqueTerm end
 
 # An estimator that declares nothing — `scan_local_solve`'s safe default.
@@ -41,7 +39,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
 @testset "Composable pipeline interface" begin
     @testset "step protocol defaults + visitor hooks" begin
         s = _ProtoProbe()
-        @test Gustavo.model_components(s, nothing) == (; phase = (;), logamp = (;))
+        @test Gustavo.model_components(s, nothing) == GainModel()
         @test Gustavo.transforms(s) == ()
         @test Gustavo.fit_selection(s, Gustavo.StepSolution[]) isa AllScans
         @test Gustavo.provides(s) == :nothing
@@ -72,16 +70,24 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         # station systems as the scan is searched, so the pass is scan-local.
         @test Gustavo.fusable_grouping(FringeFit()) == :scan
         # Any cross-scan coupling forces the pooled pass: a residual re-search
-        # round, a track-global inter-feed column, an opaque term (compiled
-        # segmentation unknowable without the geometry), or an estimator that
-        # declares nothing (the seam's safe default).
+        # round, a track-global inter-feed column (in the base model or in one
+        # station's entry), or an estimator that declares nothing (the seam's
+        # safe default).
         @test Gustavo.fusable_grouping(FringeFit(estimator = MatchedFilter(rounds = 2))) == :global
         @test Gustavo.fusable_grouping(
-            FringeFit(model = FringeModel(terms = default_fringe_terms(rel_time = CAL.GlobalTime()))),
+            FringeFit(model = default_fringe_terms(rel_time = CAL.GlobalTime())),
         ) == :global
         @test Gustavo.fusable_grouping(
-            FringeFit(model = FringeModel(terms = merge(default_fringe_terms(), (; x = _OpaqueTerm())))),
+            FringeFit(
+                model = with_station(
+                    default_fringe_terms(), "AA";
+                    phase = default_fringe_terms(rel_time = CAL.GlobalTime()).phase,
+                ),
+            ),
         ) == :global
+        @test_throws "must be a `GainComponent`" merge(default_fringe_terms(); phase = (; x = _OpaqueTerm()))
+        # A step's model is a GainModel, never a bare NamedTuple.
+        @test_throws MethodError FringeFit(model = (; phase = default_fringe_terms().phase))
         @test Gustavo.fusable_grouping(FringeFit(estimator = _OpaqueEstimator())) == :global
         # A scan-local FringeFit finishes each scan's unconstrained-station
         # flags inside `process_scan!`, so the fused output tail reads them off
@@ -415,16 +421,9 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         # A second rate on a different time segmentation puts its origin in a
         # different place, so no single epoch zeroes both rate coordinates;
         # the fit rejects the model before its fringe pass reads any data.
-        bad = FringeModel(
-            terms = merge(
-                default_fringe_terms(),
-                (;
-                    rate2 = GainComponent(
-                        Rate(); Ti = GlobalTime(), Frequency = GlobalFrequency(),
-                        Feed = SingleFeed(2),
-                    ),
-                ),
-            ),
+        bad = merge(
+            default_fringe_terms();
+            phase = (; rate2 = GainComponent(Rate(); Ti = GlobalTime(), Feed = SingleFeed(2))),
         )
         @test_throws "disagree on the epoch" fit(FringeFit(model = bad), uvset)
     end

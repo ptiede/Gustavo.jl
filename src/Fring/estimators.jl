@@ -25,7 +25,7 @@ error, naming what is missing). Then declare what it can fit, checked when
 the step compiles the model, before any data is read:
 
     Gustavo.Fring.can_fit(est::MyEstimator, tc, geom) -> Bool
-    Gustavo.Fring.validate_model(est::MyEstimator, comps)   # optional
+    Gustavo.Fring.validate_model(est::MyEstimator, model)   # optional
 
 [`can_fit`](@ref) defaults to `false`, so an estimator that declares nothing
 is rejected rather than leaving θ columns unwritten; [`validate_model`](@ref)
@@ -36,7 +36,7 @@ also declare [`scan_local_solve`](@ref), which lets a `FringeFit` carrying
 it share one streaming pass with adjacent scan-local steps; the default
 (`false`) is never fused.
 
-The step, not the estimator, owns the θ slots `FringeModel` declared; an
+The step, not the estimator, owns the θ slots its model declared; an
 estimator only fills θ and reports.
 """
 abstract type AbstractFringeEstimator end
@@ -93,7 +93,7 @@ finish_estimate!(est::AbstractFringeEstimator, ctx, step) = error(
 """
     scan_local_solve(est::AbstractFringeEstimator, model) -> Bool
 
-Whether `est`, fitting `model` (the `FringeFit`'s own `FringeModel`), finalizes
+Whether `est`, fitting `model` (the `FringeFit`'s own model), finalizes
 each scan from that scan's data alone: every θ column of a scan is written by
 the time its [`estimate_scan!`](@ref) returns, and [`finish_estimate!`](@ref)
 neither writes θ nor requests `repeat_pass`. `FringeFit` declares itself
@@ -134,11 +134,12 @@ that contributes a component vouches for it.
 can_fit(::AbstractFringeEstimator, tc, geom) = false
 
 """
-    validate_model(est::AbstractFringeEstimator, comps) -> nothing
+    validate_model(est::AbstractFringeEstimator, model) -> nothing
 
-Check that the compiled components `comps` (again, only the `FringeFit`'s own
-contributions) contain everything `est` REQUIRES, throwing an `ArgumentError`
-naming the estimator and the missing signature. The mirror of
+Check that the `(; phase, logamp)` component tree `model` (again, only the
+`FringeFit`'s own; once per distinct station tree) contains everything `est`
+REQUIRES, throwing an `ArgumentError` naming the estimator and the missing
+signature. The mirror of
 [`can_fit`](@ref): that one rejects terms the estimator cannot fit, this one
 rejects a model missing terms the estimator assumes exist.
 
@@ -152,7 +153,7 @@ actually looks up, not as a term type. `MatchedFilter` requires a per-scan
 feed-common delay; a `Delay` segmented by `GlobalTime` satisfies a term-level
 check and still leaves the router with nothing to return.
 """
-validate_model(::AbstractFringeEstimator, comps) = nothing
+validate_model(::AbstractFringeEstimator, model) = nothing
 
 """
     estimator_info(est::AbstractFringeEstimator) -> NamedTuple

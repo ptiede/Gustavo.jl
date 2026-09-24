@@ -360,9 +360,7 @@ function _run_pipeline(
     # into station heterogeneity (`supports_station_heterogeneity`) is handed
     # uniform models only — anything else is rejected before any data is read.
     function _step_context(st, stream)
-        step_model = Calibration.materialize(
-            Calibration.as_gain_model(model_components(st, spec)), antennas, geom,
-        )
+        step_model = Calibration.materialize(model_components(st, spec), antennas, geom)
         supports_station_heterogeneity(st) ||
             Calibration.require_station_uniform(step_model, antennas, heterogeneity_rejector(st))
         step_layout = plan_parameters(step_model, antennas, geom; require_nonempty = false)

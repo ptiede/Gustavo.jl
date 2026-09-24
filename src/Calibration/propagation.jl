@@ -11,7 +11,7 @@
 The differential-ionosphere (dTEC) term: a per-scan, feed-common phase ∝ 1/ν.
 The `dispersion` field of a `DispersionSBDFit` pipeline step — pass it there to
 model the ionosphere, `nothing` for a fit that models no ionosphere at all. (It
-is not a `FringeModel` term-list element; the fringe search does not fit it.)
+is not part of the fringe step's model; the fringe search does not fit it.)
 
 - `require_band_separation` — solve the term only when the band layout can
   actually separate 1/ν from a linear delay: several sub-bands over a wide

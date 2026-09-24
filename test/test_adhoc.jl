@@ -210,22 +210,6 @@ end
     @test worst < 1.0e-5
 end
 
-@testset "Adhoc rejects a ReferenceRelative component" begin
-    # Its partner feed reads the reference block PLUS a relative block, so a row
-    # would touch two parameter columns per station — outside what the node solve
-    # can express. Refuse rather than silently treat it as SharedFeeds.
-    rng = MersenneTwister(0x00FEED01)
-    nant, nap = 3, 8
-    bl = all_bl_a(nant)
-    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    times = collect(0:(nap - 1)) .* 1.0
-    screen = 0.2 .* randn(rng, nant, 2, nap)
-    rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0)
-    @test_throws "ReferenceRelative" FRa.solve_adhoc_phasing(
-        rbar, wbar, bl, pols, nant, times; tying = CALa.ReferenceRelative(1),
-    )
-end
-
 @testset "Adhoc: a one-AP (baseline, product) is dropped, not fitted" begin
     # Its source term absorbs its single row exactly, so the row constrains no
     # station phase; admitting it would only inflate `covered`.

@@ -438,7 +438,7 @@ end
 #
 # Every correlation product's detection becomes a row of the delay and rate
 # systems, with no special case for cross hands: the tying alone decides what a
-# row touches. Under the default term list the cross-hand delay rows are what
+# row touches. Under `default_fringe_terms` the cross-hand delay rows are what
 # constrains `rel_delay`'s common mode. The phase system under a feed-blind
 # model is the exception, described in `docs/src/fringe_fitting.md`;
 # `_solve_kind_cols!` implements it by augmenting that system with

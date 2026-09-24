@@ -21,7 +21,7 @@ evaluation loop.
 ## The interface
 
 A new term is a `struct` subtyping [`AbstractGainTerm`](@ref) plus five
-methods (a sixth, [`term_label`](@ref), is optional):
+methods:
 
   - [`term_axes`](@ref) — which coordinate axes the term reads.
   - [`param_shapes`](@ref) — the term's own parameter names and shapes.
@@ -29,7 +29,6 @@ methods (a sixth, [`term_label`](@ref), is optional):
     and its resolved state ([`freq_coord_state`](@ref) /
     [`time_coord_state`](@ref)) for each axis declared.
   - [`term_eval`](@ref) — the scalar evaluation itself.
-  - [`term_label`](@ref) — optional; defaults to the type name.
 
 ### `term_axes`
 
@@ -106,19 +105,6 @@ and `x` by field name, never by iterating the `NamedTuple`.
 @inline term_eval(::Quadratic, p, x) = p.quad * x.Frequency^2
 ```
 
-### `term_label`
-
-A short diagnostic label, used in `show` and summaries. Optional — the
-default is the type name:
-
-```julia
-term_label(t::AbstractGainTerm) = string(nameof(typeof(t)))
-```
-
-Override it only when the type name is not evocative enough on its own (the
-built-in terms do, e.g. `term_label(::Delay) = "delay"`,
-`term_label(t::Polynomial{:Frequency}) = "polyf$(t.degree)"`).
-
 ## Worked example: a quadratic frequency term
 
 A term whose phase grows as the square of the offset from `f0` — not
@@ -128,7 +114,7 @@ physical, but a compact illustration of every hook. The hooks are functions of
 ```julia
 using Gustavo
 import Gustavo.Calibration: term_axes, param_shapes, freq_coord_state,
-    freq_coordinate, term_eval, term_label
+    freq_coordinate, term_eval
 
 "Quadratic phase in frequency: phase = `quad`·(f − f0)², `quad` in rad/Hz²."
 struct Quadratic <: AbstractGainTerm end
@@ -138,22 +124,21 @@ param_shapes(::Quadratic, nchan_seg) = (quad = (),)
 freq_coord_state(::Quadratic, geom, fseg_id, nfseg) = geom.f0
 freq_coordinate(::Quadratic, f, f0, seg) = f - f0
 @inline term_eval(::Quadratic, p, x) = p.quad * x.Frequency^2
-term_label(::Quadratic) = "quad"
 ```
 
 A term is not fit on its own — it is wrapped in an [`GainComponent`](@ref)
 (which pins its time/frequency segmentation and how it ties across feeds),
-then placed in a [`StationGainModel`](@ref) alongside the other components:
+then placed in a [`GainModel`](@ref) alongside the other components:
 
 ```julia
-model = StationGainModel(
+model = GainModel(
     phase = (
-        d = GainComponent(Delay(); Ti = GlobalTime(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
-        q = GainComponent(Quadratic(); Ti = GlobalTime(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+        d = GainComponent(Delay(); Ti = GlobalTime(), Feed = SharedFeeds()),
+        q = GainComponent(Quadratic(); Ti = GlobalTime(), Feed = SharedFeeds()),
     ),
 )
 ```
 
 From here `Quadratic` participates in `plan_parameters` and `evaluate_gains`
-exactly as the built-in terms do — nothing downstream of the six hooks above
+exactly as the built-in terms do — nothing downstream of the five hooks above
 is aware that it is a third-party addition.

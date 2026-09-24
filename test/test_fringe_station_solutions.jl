@@ -76,7 +76,7 @@
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
         uvset, truth = _build_fringe_uvset(nant = 4)
         sol = fit(
-            FringeFit(model = FringeModel(terms = default_fringe_terms())) |>
+            FringeFit() |>
                 Bandpass() |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
             uvset,

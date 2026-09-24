@@ -34,9 +34,7 @@
 
     antennas = UV.union_antennas(uvset)
     function step_context(step)
-        model = CAL.materialize(
-            CAL.as_gain_model(Gustavo.model_components(step, (; geom, antennas))), antennas, geom,
-        )
+        model = CAL.materialize(Gustavo.model_components(step, (; geom, antennas)), antennas, geom)
         layout = Gustavo.plan_parameters(model, antennas, geom; require_nonempty = false)
         gauge = CAL.resolve_gauge(CAL.ZeroSumPhase(), String.(antennas.name))
         return Gustavo.SolveContext(

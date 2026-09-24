@@ -8,8 +8,7 @@
 #
 # Writing a term means: a `term_axes`, a `param_shapes`, a `term_eval`, and —
 # for each axis declared — a coordinate builder plus the resolved state that
-# builder reads. `term_label` is optional; it defaults to the type name and only
-# needs an override for a more evocative diagnostic label.
+# builder reads.
 #
 # Every term's phase is summed and enters the data as `V = g_a · S · conj(g_b)`
 # with `g = cis(Σ phase)`, against visibilities in the AIPS/CASA/MSv4 phase
@@ -25,9 +24,8 @@ delay, a rate, a polynomial bandpass shape. A concrete term implements
 [`term_axes`](@ref), [`param_shapes`](@ref), [`term_eval`](@ref), and — for
 each axis declared — a coordinate builder ([`freq_coordinate`](@ref) /
 [`time_coordinate`](@ref)) with its resolved state
-([`freq_coord_state`](@ref) / [`time_coord_state`](@ref));
-[`term_label`](@ref) is optional. See the "Authoring a new gain term" docs
-page for a worked example.
+([`freq_coord_state`](@ref) / [`time_coord_state`](@ref)). See the "Authoring
+a new gain term" docs page for a worked example.
 
 A term lives inside a [`GainComponent`](@ref), which pins it to one
 (time-segment, frequency-segment) parameter block; a term never sees the
@@ -303,16 +301,3 @@ function term_eval end
     return xa * evalpoly(xa, p.coeffs)
 end
 
-"""
-    term_label(term) -> String
-
-A short diagnostic label for `term`, used in `show` and summaries.
-Defaults to the type name.
-"""
-term_label(t::AbstractGainTerm) = string(nameof(typeof(t)))
-term_label(::ConstantTerm) = "const"
-term_label(::Delay) = "delay"
-term_label(::Dispersion) = "dtec"
-term_label(::Rate) = "rate"
-term_label(t::Polynomial{:Frequency}) = "polyf$(t.degree)"
-term_label(t::Polynomial{:Ti}) = "polyt$(t.degree)"

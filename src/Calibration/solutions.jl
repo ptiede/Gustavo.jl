@@ -41,7 +41,7 @@ whole model) unless the step came out of a component selection
 (`sol[step, path...]`, see `getindex`). A selected step evaluates only the
 selected subtree; every other component contributes unit gain.
 """
-struct StepSolution{M <: StationGainModel, L <: ParameterLayout, V <: AbstractVector{<:Real}}
+struct StepSolution{M <: GainModel, L <: ParameterLayout, V <: AbstractVector{<:Real}}
     name::Symbol
     model::M
     layout::L
@@ -68,7 +68,7 @@ end
 # their own slots, and each group must correct against its own snapshot. A
 # selection (`_select_component`) calls the inner constructor directly and
 # deliberately shares θ with the step it narrows.
-StepSolution(name::Symbol, model::StationGainModel, layout::ParameterLayout, θ::AbstractVector, info::NamedTuple = NamedTuple()) =
+StepSolution(name::Symbol, model::GainModel, layout::ParameterLayout, θ::AbstractVector, info::NamedTuple = NamedTuple()) =
     StepSolution{typeof(model), typeof(layout), typeof(θ)}(name, model, layout, copy(θ), info)
 
 # Fieldwise equality, so a selection of a solution compares as the same
@@ -136,7 +136,7 @@ function CalibrationSolution(
 end
 
 function CalibrationSolution(
-        model::StationGainModel, layout::ParameterLayout, geom::DataGeometry,
+        model::GainModel, layout::ParameterLayout, geom::DataGeometry,
         θ::AbstractVector, info::NamedTuple = NamedTuple();
         name::Symbol = :solution, transforms = (), postcal = (), pipeline = nothing,
     )

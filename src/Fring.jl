@@ -24,8 +24,7 @@ using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dis
 # Numeric kernels the model layer keeps off its public surface.
 using ..Calibration: weighted_regularized_least_squares, weighted_constrained_least_squares,
     unwrap_phase_track, phase_unwrap_ambiguity, connected_components, savitzky_golay_smooth
-# `SingleBandDelay` and the `FringeModel` term-list compilation are methods of
-# the model layer's element-compilation generic.
+# `SingleBandDelay` compiles through the model layer's element-compilation generic.
 import ..Calibration: model_components
 using ..Streaming
 # `CoverageTopup` (bandpass_stage.jl) is another `AbstractScanSelection`, so its
@@ -157,7 +156,7 @@ export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
 export select_scans
 export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info
 export can_fit, validate_model
-export MatchedFilter, FringeModel, SingleBandDelay, BandGroups, default_fringe_terms
+export MatchedFilter, SingleBandDelay, BandGroups, default_fringe_terms
 # `DispersionModel` is `Calibration`'s (the propagation model beside the
 # `Dispersion` term it configures); re-exported so a caller driving the fringe
 # engine names it without a second `using`.

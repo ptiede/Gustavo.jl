@@ -14,6 +14,8 @@
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 
+_bpc(freq) = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = freq, Feed = CAL.PerFeed())
+
 # One component's θ block from a step's own layout. `i` indexes
 # `step.layout.plans` (phase components first, then log-amplitude).
 _blk(step, i) = step.θ[CAL.component_ranges(step.layout)[i]]
@@ -34,7 +36,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         nant, nspw, nchan, bandpass = bp_true, amp_bandpass = abp_true,
     )
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+    fm = default_fringe_terms()
 
     # The fuller-pipeline reference (adhoc is solved AFTER the bandpass, so its
     # presence must not move the fringe/bandpass blocks; dispersion/sbd are OFF
@@ -170,12 +172,12 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
     @testset "compile-time model vetting (can_fit / validate_model)" begin
         pertrack = FP.PerTrackSmoother()
-        phase_only = (; phase = default_bandpass_terms().phase)
+        phase_only = GainModel(; phase = default_bandpass_terms().phase)
         # An empty tree compiles no component at all, so the step would
         # accumulate every scan and write nowhere — rejected at compile time,
         # before any data is read.
-        @test_throws ArgumentError fit(Bandpass(model = (;), smoother = pertrack), uvset)
-        @test_throws "fits nothing" fit(Bandpass(model = (;), smoother = pertrack), uvset)
+        @test_throws ArgumentError fit(Bandpass(model = GainModel(), smoother = pertrack), uvset)
+        @test_throws "fits nothing" fit(Bandpass(model = GainModel(), smoother = pertrack), uvset)
         # JointSmoother is stricter: one complex gain per (station, feed, segment)
         # needs both observables, not just one — so it rejects a model
         # PerTrackSmoother would happily solve.
@@ -183,16 +185,16 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test fit(Bandpass(model = phase_only, smoother = pertrack), uvset) isa
             CAL.CalibrationSolution
         # ...and its two components must share one frequency segmentation.
-        mixed = (;
-            phase = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(1))),
-            logamp = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(2))),
+        mixed = GainModel(;
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(1))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
         )
         @test_throws "share one frequency segmentation" model_components(
             Bandpass(model = mixed), nothing,
         )
         # A component the smoothers' θ writes cannot address (here: a Delay
         # term) is rejected by `can_fit`, naming the component.
-        delay_model = (;
+        delay_model = GainModel(;
             phase = (;
                 bandpass = CAL.GainComponent(
                     CAL.Delay(); Ti = CAL.GlobalTime(),
@@ -205,41 +207,21 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         )
         # One track set per observable: a second component in a group is
         # structurally unsolvable, whatever its form.
-        doubled = (;
+        doubled = GainModel(;
             phase = (;
-                bandpass = FP._bandpass_component(CAL.ChannelBlocks(1)),
-                ripple = FP._bandpass_component(CAL.ChannelBlocks(4)),
+                bandpass = _bpc(CAL.ChannelBlocks(1)),
+                ripple = _bpc(CAL.ChannelBlocks(4)),
             ),
         )
         @test_throws "at most one" model_components(Bandpass(model = doubled), nothing)
-        # The tree's only legal top-level keys are the two groups — a component
-        # name written at the top level is the likely mistake.
-        @test_throws "unexpected key" model_components(
-            Bandpass(model = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(1)))),
-            nothing,
-        )
-        # Anything that is neither a tree nor a StationGainModel is rejected
-        # with the expected forms named.
-        @test_throws "must be a `StationGainModel`" model_components(
-            Bandpass(model = CAL.ChannelBlocks(1)), nothing,
-        )
-        # A StationGainModel is accepted verbatim as the model argument.
-        sgm = CAL.StationGainModel(; default_bandpass_terms()...)
-        @test model_components(Bandpass(model = sgm), nothing) ==
-            model_components(Bandpass(), nothing)
-
         # A `stations` entry is vetted like the base, with the can_fit error
         # naming the station whose entry carries the unfittable component.
-        bad_entry = CAL.StationGainModel(;
-            default_bandpass_terms()...,
-            stations = (
-                A1 = (;
-                    phase = (;
-                        bandpass = CAL.GainComponent(
-                            CAL.Delay(); Ti = CAL.GlobalTime(),
-                            Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
-                        ),
-                    ),
+        bad_entry = with_station(
+            default_bandpass_terms(), "A1";
+            phase = (;
+                bandpass = CAL.GainComponent(
+                    CAL.Delay(); Ti = CAL.GlobalTime(),
+                    Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
                 ),
             ),
         )
@@ -255,16 +237,12 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # per-station signatures.
         @test supports_station_heterogeneity(Bandpass(smoother = FP.JointSmoother()))
         @test !supports_station_heterogeneity(Bandpass(smoother = pertrack))
-        het = CAL.StationGainModel(;
-            default_bandpass_terms()...,
-            stations = (
-                A1 = (;
-                    phase = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
-                    logamp = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
-                ),
-            ),
+        het = with_station(
+            default_bandpass_terms(), "A1";
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
         )
-        @test model_components(Bandpass(model = het), nothing) isa CAL.StationGainModel
+        @test model_components(Bandpass(model = het), nothing) isa CAL.GainModel
         @test fit(Bandpass(model = het), uvset) isa CAL.CalibrationSolution
         @test_throws "station-uniform" fit(Bandpass(model = het, smoother = pertrack), uvset)
         @test_throws "phase.bandpass" fit(Bandpass(model = het, smoother = pertrack), uvset)
@@ -283,7 +261,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             amp_path = FP._bandpass_path(layout.plantree, :logamp),
         )
 
-        lu = CAL.plan_parameters(CAL.StationGainModel(; default_bandpass_terms()...), anames, geom)
+        lu = CAL.plan_parameters(default_bandpass_terms(), anames, geom)
         @test FP._bandpass_path(lu.plantree, :phase) == (:phase, :bandpass)
         # The plantree's type is a compile-time constant, so the descent infers —
         # the path is splatted into `station_blocks` on every solve.
@@ -292,8 +270,8 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
         # The path is a NAME descent, so it reaches a component the user nested
         # under names of their own.
-        nested = CAL.StationGainModel(
-            phase = (; inst = (; bp = FP._bandpass_component(CAL.ChannelBlocks(1)))),
+        nested = CAL.GainModel(
+            phase = (; inst = (; bp = _bpc(CAL.ChannelBlocks(1)))),
         )
         @test FP._bandpass_path(CAL.plan_parameters(nested, anames, geom).plantree, :phase) ==
             (:phase, :inst, :bp)
@@ -301,14 +279,10 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # A model differing across stations puts one plan per signature group on
         # the flat `plans` list, so its positions no longer name the two
         # observables — the blocks still resolve, one per signature group.
-        mh = CAL.StationGainModel(;
-            default_bandpass_terms()...,
-            stations = (
-                A1 = (;
-                    phase = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
-                    logamp = (; bandpass = FP._bandpass_component(CAL.ChannelBlocks(4))),
-                ),
-            ),
+        mh = with_station(
+            default_bandpass_terms(), "A1";
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
         )
         lh = CAL.plan_parameters(mh, anames, geom)
         @test lh.nphase == 2 && length(lh.plans) == 4
@@ -319,7 +293,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
         # An observable the model omits resolves to no path and no blocks.
         lp = CAL.plan_parameters(
-            CAL.StationGainModel(; phase = default_bandpass_terms().phase), anames, geom,
+            CAL.GainModel(; phase = default_bandpass_terms().phase), anames, geom,
         )
         @test FP._bandpass_path(lp.plantree, :logamp) === nothing
         @test isempty(FP.bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
@@ -415,7 +389,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             end
         end
 
-        fmc = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+        fmc = default_fringe_terms()
         runc(sm) = fit(
             CalibrationPipeline(
                 FringeFit(model = fmc), Bandpass(smoother = sm); exec = ExecutionConfig(),
@@ -660,7 +634,7 @@ end
     )
     sol = fit(
         CalibrationPipeline(
-            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            FringeFit(),
             Bandpass();
             exec = ExecutionConfig(),
         ),
@@ -714,7 +688,7 @@ end
     broken = foldl((u, sc) -> inject(u, sc), ["4", "5", "6"]; init = uvset)
 
     bp(ti) = GainComponent(ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed())
-    model(ti) = (; phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)))
+    model(ti) = GainModel(phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)))
 
     @testset "θ carries one block per time segment" begin
         sol = fit(Bandpass(; model = model(seg)), broken)
@@ -782,7 +756,7 @@ end
     end
 
     @testset "JointSmoother holds both observables to one time segmentation" begin
-        mixed = (; phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(GlobalTime())))
+        mixed = GainModel(phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(GlobalTime())))
         @test_throws "share one time segmentation" fit(Bandpass(; model = mixed), broken)
         # PerTrackSmoother solves the two independently, so it allows the split —
         # a phase bandpass that breaks beside an amplitude one held all track.
@@ -840,7 +814,7 @@ end
     bpc(ti) = GainComponent(
         ConstantTerm(); Ti = ti, Frequency = CAL.ChannelBlocks(1), Feed = PerFeed(),
     )
-    het = StationGainModel(;
+    het = GainModel(;
         phase = (; bandpass = bpc(GlobalTime())),
         logamp = (; bandpass = bpc(GlobalTime())),
         stations = (

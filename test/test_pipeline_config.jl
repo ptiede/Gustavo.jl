@@ -191,17 +191,18 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
     @testset "defaults" begin
         f = FringeFit()
-        @test f.model.terms == default_fringe_terms()
-        # The default list: 4 feed-by-feed instrument components. Dispersion
+        @test f.model == default_fringe_terms()
+        # The default model: 4 feed-by-feed instrument components. Dispersion
         # (dTEC) and SBD are a separate DispersionSBDFit step, and there is no
         # inter-feed PHASE offset — see `default_fringe_terms`.
-        @test length(f.model.terms) == 4
-        @test !haskey(f.model.terms, :rel_phase)
+        @test isempty(f.model.logamp)
+        @test length(f.model.phase) == 4
+        @test !haskey(f.model.phase, :rel_phase)
         # No feed-specific Rate element: the inter-feed rate is tied ≡ 0 by default.
         @test !any(
             t -> t isa CAL.GainComponent && t.term isa CAL.Rate &&
                 t.Feed isa CAL.SingleFeed,
-            f.model.terms,
+            f.model.phase,
         )
         @test f.estimator isa MatchedFilter
         @test f.estimator.search == FP.FringeSearch()
@@ -225,7 +226,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         e = ExecutionConfig()
         @test e.mem_fraction == 0.6 && e.mem_budget === nothing
 
-        # gauge is run-wide, on CalibrationPipeline, not on FringeModel or
+        # gauge is run-wide, on CalibrationPipeline, not on a step's model or
         # ExecutionConfig.
         @test CalibrationPipeline([FringeFit()]).gauge.refs == 1
 
@@ -246,12 +247,12 @@ end
     uvset, _ = _build_fringe_uvset()
 
     @testset "SolveContext" begin
-        ff = FringeFit(model = FringeModel())
+        ff = FringeFit()
         geom = CAL.build_geometry(uvset)
         antennas = UVP.metadata(first(values(UVP.branches(uvset)))).antennas
         nant = length(antennas)
         mc = Gustavo.model_components(ff, (; geom, antennas))
-        model = CAL.StationGainModel(phase = mc.phase, logamp = mc.logamp)
+        model = CAL.GainModel(phase = mc.phase, logamp = mc.logamp)
         layout = CAL.plan_parameters(model, nant, geom)
         ctx = Gustavo.SolveContext(
             model, layout, geom, CAL.GainEvaluator(model, layout), zeros(layout.nθ),
@@ -320,7 +321,7 @@ end
         # Wired through a real fit: the pipeline's stages are named in the log.
         buf4 = IOBuffer()
         sol = fit(
-            FringeFit(model = FringeModel()) |> Bandpass(),
+            FringeFit() |> Bandpass(),
             uvset;
             exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
         )
@@ -369,7 +370,7 @@ end
 # labelled `DimArray` — and the whole apply path must be indifferent to that.
 @testset "a rewrapped θ corrects data identically" begin
     uvset, _ = _build_fringe_uvset()
-    sol = fit(FringeFit(model = FringeModel()) |> Bandpass(), uvset)
+    sol = fit(FringeFit() |> Bandpass(), uvset)
     sold_steps = [
         CAL.StepSolution(
             s.name, s.model, s.layout, DimArray(copy(s.θ), Dim{:param}(1:(s.layout.nθ))), s.info,

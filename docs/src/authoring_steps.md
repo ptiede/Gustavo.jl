@@ -105,7 +105,6 @@ param_shapes(::Dispersion, nchan_seg) = (dtec = (),)
 freq_coord_state(::Dispersion, geom, fseg_id, nfseg) = geom.f0
 freq_coordinate(::Dispersion, f, f0, seg) = DISPERSION_K * (1.0 / f0 - 1.0 / f)
 @inline term_eval(::Dispersion, p, x) = p.dtec * x.Frequency
-term_label(::Dispersion) = "dtec"
 ```
 
 Once the θ column is filled — by *any* solver — `evaluate_gains` and every
@@ -126,7 +125,7 @@ end
 
 model_components(dm::DispersionModel, spec) =
     _dispersion_enabled(dm, spec.geom) ?
-    GainComponent(Dispersion(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()) : nothing
+    GainComponent(Dispersion(); Ti = PerScan(), Feed = SharedFeeds()) : nothing
 ```
 
 `spec = (; geom, antennas)` carries the data geometry, so the element can
@@ -153,9 +152,9 @@ fusable_grouping(::DispersionSBDFit) = :scan     # both fits are per-scan
 ```
 
 Note the step's model surface is its two element fields — deliberately not a
-free-form component tree, because the solver is a rigid specialized fit. A
-step whose solver genuinely generalizes takes a tree instead (as `Bandpass`
-does) and vets it with `can_fit`/`validate_model`.
+free-form `GainModel`, because the solver is a rigid specialized fit. A
+step whose solver genuinely generalizes takes a `GainModel` instead (as
+`Bandpass` does) and vets it with `can_fit`/`validate_model`.
 
 Its `model_components` compiles the step's private model:
 
@@ -165,12 +164,12 @@ function model_components(s::DispersionSBDFit, spec)
     sbdc = s.sbd === nothing ? nothing : model_components(s.sbd, spec)
     phase = merge(
         dispc === nothing ? (;) : (;
-                delay_refine = GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+                delay_refine = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds()),
                 dtec = dispc,
             ),
         sbdc === nothing ? (;) : (; sbd = sbdc),
     )
-    return (; phase, logamp = (;))
+    return GainModel(; phase)
 end
 ```
 

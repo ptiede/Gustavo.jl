@@ -75,7 +75,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         uvset, _ = _build_fringe_uvset(; nscans = 2)
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
         mk(ex) = CalibrationPipeline(
-            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            FringeFit(),
             Bandpass(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(outer_executor = ex),
         )
@@ -101,7 +101,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         uvset, _ = _build_fringe_uvset(; nscans = 2)
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
         mk(inner) = CalibrationPipeline(
-            FringeFit(model = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))),
+            FringeFit(),
             Bandpass(), TemporalSmoother(adhoc);
             exec = ExecutionConfig(inner_executor = inner),
         )

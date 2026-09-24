@@ -242,7 +242,7 @@ _requires_single_node(::AbstractAdhocSmoother) = false
 _requires_single_node(::JointOUSmoother) = true
 
 """
-    default_adhoc_terms(; feed = SharedFeeds()) -> NamedTuple
+    default_adhoc_terms(; feed = SharedFeeds()) -> GainModel
 
 The default [`TemporalSmoother`](@ref Gustavo.TemporalSmoother) step model: one per-AP constant phase
 over the global band — a `phase.adhoc` component with `Ti = PerIntegration()`.
@@ -252,17 +252,10 @@ track contributes ZERO inter-feed phase, where a `PerFeed()` solve lets per-AP
 noise differ between feeds and so injects spurious cross-hand scatter.
 `PerFeed()` fits each feed's own track when the per-feed structure is real.
 
-A `TemporalSmoother` model is a `(; phase, logamp)` tree of named
-`Calibration.GainComponent`s (or a `StationGainModel`), like every solve
-step's; the adhoc stage solves exactly one phase component and no logamp.
+The adhoc stage solves exactly one phase component and no logamp.
 """
-default_adhoc_terms(; feed::AbstractFeedTying = SharedFeeds()) = (;
-    phase = (;
-        adhoc = GainComponent(
-            ConstantTerm(); Ti = PerIntegration(), Frequency = GlobalFrequency(), Feed = feed,
-        ),
-    ),
-)
+default_adhoc_terms(; feed::AbstractFeedTying = SharedFeeds()) =
+    GainModel(phase = (; adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Feed = feed)))
 
 # Capability declarations for the compile-time `can_fit`/`validate_model` seam
 # (shared with the fringe estimators and bandpass smoothers; the step drives the
@@ -272,7 +265,7 @@ default_adhoc_terms(; feed::AbstractFeedTying = SharedFeeds()) = (;
 # `adhoc_scan!` writes leaf slot (param 1, node, freq segment 1, time segment,
 # ant), and `solve_adhoc_phasing`'s single-node-per-row systems can tie feeds
 # (`SharedFeeds`) or solve them independently (`PerFeed`) but cannot represent
-# `ReferenceRelative`'s two-block partner feed or a `SingleFeed` scope.
+# a `SingleFeed` scope.
 _fits_adhoc_track(tc) =
     tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
     tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds)
@@ -823,9 +816,7 @@ per-AP convention: `PinAntenna` holds its reference's phase at 0,
 `tying` is the adhoc component's [`AbstractFeedTying`](@ref). `PerFeed()`
 (the default) solves an independent track per feed; `SharedFeeds()` solves
 one feed-common phase, constrained by all four correlation products and
-contributing zero inter-feed phase. `ReferenceRelative` is rejected: its
-partner feed reads two parameter blocks, which a single-node-per-row solve
-cannot represent. Under `PerFeed`, cross-hand rows join the two feed blocks
+contributing zero inter-feed phase. Under `PerFeed`, cross-hand rows join the two feed blocks
 into one connected component with a single gauge freedom, pinned at the
 reference's feed-1 node, so the reference's inter-feed phase stays in the
 solution.
@@ -850,11 +841,6 @@ function solve_adhoc_phasing(
     nbl == length(bl_pairs) || error("rbar has $nbl baselines; bl_pairs has $(length(bl_pairs))")
     npol == length(feeds) || error("rbar has $npol products; feeds has $(length(feeds))")
     nap == length(times) || error("rbar has $nap APs; times has $(length(times))")
-    tying isa ReferenceRelative && error(
-        "solve_adhoc_phasing cannot use a ReferenceRelative adhoc component: the " *
-            "partner feed reads TWO parameter blocks, which the single-node-per-row " *
-            "solve cannot represent. Use SharedFeeds or PerFeed.",
-    )
     _requires_single_node(smoother) && _feed_node(tying, 1) != _feed_node(tying, 2) && error(
         "$(typeof(smoother)) requires one phase node per station (its Kalman state " *
             "is one dimension per station), but the adhoc component ties feeds as " *

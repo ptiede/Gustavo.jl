@@ -25,18 +25,8 @@ const UVP = Gustavo.UVData
 
 include("synthetic_ps.jl")
 
-# The default fringe term list. Dispersion (dTEC) and SBD are NOT part of
-# `default_fringe_terms()` — they are fit by a separate `DispersionSBDFit`
-# step, not by `FringeModel` — so `dispersion`/`sbd` are now no-op kwargs kept
-# only so existing call sites (almost all `dispersion = false, sbd = false`,
-# i.e. the now-default behavior) don't need touching. A test that wants
-# dispersion/SBD actually fit should compose a `_dispersion_sbd_step(...)`
-# into its pipeline instead.
-_fringe_terms(; dispersion = true, sbd = true) = default_fringe_terms()
-
-# `DispersionSBDFit`, or `nothing` when both halves are disabled — the
-# DispersionSBDFit-step equivalent of the old `_fringe_terms(dispersion, sbd)`
-# kwargs, for tests that want dTEC/SBD actually fit.
+# `DispersionSBDFit`, or `nothing` when both halves are disabled, for tests
+# that want dTEC/SBD actually fit.
 _dispersion_sbd_step(; dispersion = true, sbd = true) =
     !dispersion && !sbd ? nothing :
     DispersionSBDFit(;
@@ -45,7 +35,7 @@ _dispersion_sbd_step(; dispersion = true, sbd = true) =
     )
 
 # The union of the components the standard pipeline's steps solve (each on its
-# own private θ in a real run), assembled as ONE StationGainModel: the fringe
+# own private θ in a real run), assembled as ONE GainModel: the fringe
 # terms, optionally the dTEC and SBD columns, plus the phase/log-amplitude
 # bandpass and the adhoc phase. Structural tests use it to exercise the plan
 # routers and θ decoding on a realistic full component mix.
@@ -61,9 +51,9 @@ function _full_fringe_model(;
                 constant = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = FreqGroups(sbd_freq_groups), Feed = SharedFeeds()),
             ),
         )
-    return StationGainModel(
+    return GainModel(
         phase = merge(
-            default_fringe_terms(; rel_time),
+            default_fringe_terms(; rel_time).phase,
             disp, sbd,
             (
                 bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed()),

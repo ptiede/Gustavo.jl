@@ -6,11 +6,12 @@
 # the runner in verbs.jl drives them). Every pipeline runs on this engine.
 
 """
-    FringeFit(; model = FringeModel(), estimator = MatchedFilter())
+    FringeFit(; model = default_fringe_terms(), estimator = MatchedFilter())
 
-The fringe-fitting stage. What is solved is `model` ([`FringeModel`](@ref)):
-the ordered phase-term list — per-scan constant/delay/rate, the inter-feed offsets
-(the gauge pin, `gauge`, is run-wide — see [`CalibrationPipeline`](@ref)).
+The fringe-fitting stage. What is solved is `model`, a phase-only
+[`GainModel`](@ref): per-scan constant/delay/rate and the inter-feed offsets;
+see [`Fring.default_fringe_terms`](@ref) for the default. The gauge pin, `gauge`,
+is run-wide — see [`CalibrationPipeline`](@ref).
 How it is solved lives on `estimator`, a pluggable
 [`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
 (per-baseline delay/rate search + closure-screened station WLS).
@@ -19,15 +20,15 @@ Ionospheric dispersion (dTEC) and single-band delay (SBD) are not part of this
 step — add a [`DispersionSBDFit`](@ref) step after it to fit them on the
 fringe-corrected residual.
 """
-Base.@kwdef struct FringeFit{M <: Fring.FringeModel, E <: Fring.AbstractFringeEstimator} <: SolveStep
-    model::M = Fring.FringeModel()
+Base.@kwdef struct FringeFit{M <: GainModel, E <: Fring.AbstractFringeEstimator} <: SolveStep
+    model::M = Fring.default_fringe_terms()
     estimator::E = Fring.MatchedFilter()
 end
 provides(::FringeFit) = :fringe
 required_grouping(::FringeFit) = :scan_complete
 # WHERE θ is written decides the scope, and the estimator answers for its own
 # configuration (`Fring.scan_local_solve`): the default `MatchedFilter` with
-# one round and an all-per-scan term list solves each scan's station systems
+# one round and an all-per-scan model solves each scan's station systems
 # inside `process_scan!`, so the pass is scan-local; any cross-scan coupling —
 # a residual re-search round, a `GlobalTime`-tied inter-feed column, an
 # estimator that pools every scan's detections — forces `:global`.
@@ -71,8 +72,7 @@ The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan (fit-on-subset / apply-everywhere: pre-filter the
 `UVSet` before fitting if only a scan subset should contribute). What is fit
-is `model`: a `(; phase, logamp)` tree of named `Calibration.GainComponent`s
-(or a `StationGainModel`) — see [`Fring.default_bandpass_terms`](@ref) for the
+is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_terms`](@ref) for the
 default and the component form the smoothers accept. How it is solved lives on
 `smoother`, a pluggable [`Fring.AbstractBandpassSmoother`](@ref) carrying one
 shape spec per observable; by default [`Fring.JointSmoother`](@ref), which
@@ -84,7 +84,7 @@ model — a phase-only or amplitude-only model must name
 solves and then fits each track. The model is self-contained, so placing
 `Bandpass` before or after `FringeFit` is equally legal.
 """
-Base.@kwdef struct Bandpass{M, S <: Fring.AbstractBandpassSmoother} <: SolveStep
+Base.@kwdef struct Bandpass{M <: GainModel, S <: Fring.AbstractBandpassSmoother} <: SolveStep
     model::M = Fring.default_bandpass_terms()
     smoother::S = Fring.JointSmoother()
 end
@@ -102,7 +102,7 @@ fusable_grouping(::Bandpass) = :global
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
 globally-closing per-AP station phase on the fringe/bandpass residual. What is
-fit is `model`: a `(; phase, logamp)` tree holding the single adhoc component —
+fit is `model`, a [`GainModel`](@ref) holding the single adhoc component —
 see [`Fring.default_adhoc_terms`](@ref) for the default (feed-common) form and
 its `feed` tying knob. How the solved tracks are smoothed lives on `smoother`,
 a pluggable [`Fring.AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
@@ -110,7 +110,7 @@ a pluggable [`Fring.AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
 requires the feed-common (`SharedFeeds`) model. The one-argument form takes the
 smoother and keeps the default model.
 """
-Base.@kwdef struct TemporalSmoother{M, S <: Fring.AbstractAdhocSmoother} <: SolveStep
+Base.@kwdef struct TemporalSmoother{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: SolveStep
     model::M = Fring.default_adhoc_terms()
     smoother::S = Fring.SavitzkyGolaySmoother()
 end
@@ -128,7 +128,7 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
         "not step-by-step."
 )
 
-# ── Model components (compiled in step order into one StationGainModel) ───────
+# ── Model components (compiled in step order into one GainModel) ───────
 
 # A step's model compiles without a geometry when a caller only wants the
 # components (`model_components(step, nothing)`). `can_fit` is handed the
@@ -136,30 +136,15 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 # geometry fails there instead of being answered from a default.
 _spec_geom(spec) = spec === nothing ? nothing : spec.geom
 
-# The estimator vets the model here, at compile time, before any data is read.
-# Both directions: no term the estimator cannot fit (its θ block would stay at
-# zero and the solution would look fitted), and no missing term the estimator
-# assumes exists (its own estimate of that quantity would be discarded). The
-# check covers only this step's contributions — the adhoc and bandpass
-# components come from steps that solve them themselves.
-function model_components(s::FringeFit, spec)
-    tree = Fring.fringe_phase_components(s.model, spec)
-    comps = Calibration._flatten_components(tree)
-    for tc in comps
-        Fring.can_fit(s.estimator, tc, _spec_geom(spec)) || throw(
-            ArgumentError(
-                "$(nameof(typeof(s.estimator))) cannot fit the model term compiling to " *
-                    "$(Calibration.component_label(tc)) on this data; its parameters would " *
-                    "never be solved. See `$(nameof(typeof(s.estimator)))` for the models it " *
-                    "fits — a capability can depend on the data's own sampling, so a term " *
-                    "this estimator fits elsewhere may still be unfittable here. Remove the " *
-                    "term, or use an estimator that declares `Gustavo.Fring.can_fit` for it.",
-            ),
-        )
-    end
-    Fring.validate_model(s.estimator, comps)
-    return (; phase = tree, logamp = (;))
-end
+model_components(s::FringeFit, spec) = _vet_step_model(
+    s.estimator, s.model,
+    "See `$(nameof(typeof(s.estimator)))` for the models it fits — a capability " *
+        "can depend on the data's own sampling, so a term this estimator fits " *
+        "elsewhere may still be unfittable here. Dispersion (`Dispersion`) and " *
+        "single-band delay (a `FreqGroups`-segmented `Delay`) are fit by a " *
+        "`DispersionSBDFit` step, not by the fringe step.",
+    spec,
+)
 
 # The dispersion/SBD components: a private per-scan delay-refinement column
 # (shares the fringe stage's own wideband-delay signature by design, but lives
@@ -173,28 +158,25 @@ function model_components(s::DispersionSBDFit, spec)
     sbdc = s.sbd === nothing ? nothing : model_components(s.sbd, spec)
     phase = merge(
         dispc === nothing ? (;) : (;
-                delay_refine = GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),
+                delay_refine = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds()),
                 dtec = dispc,
             ),
         sbdc === nothing ? (;) : (; sbd = sbdc),
     )
-    return (; phase, logamp = (;))
+    return GainModel(; phase)
 end
 
 # Vet a step's model argument against its solver's declared capability, at
-# compile time, before any data is read — the same two-sided check as
-# `FringeFit`'s: no component the solver cannot fit (`can_fit`; its θ block
-# would stay at zero and the solution would look fitted), then the solver's own
-# whole-tree requirements (`validate_model`). Both checks run once per distinct
-# station tree — the base and each `stations` entry's effective pair — with
-# the can_fit error naming the station whose entry carries the component.
-# `accepted` finishes that error with the component form the solver family
-# does fit. Returns the model lifted to an `AbstractGainModel`
-# (`Calibration.as_gain_model`); the runner materializes it against the
-# antenna table.
-function _vet_step_model(solver, model, accepted, spec = nothing)
-    m = Calibration.as_gain_model(model)
-    for (station, tree) in _station_variants(m, spec)
+# compile time, before any data is read: no component the solver cannot fit
+# (`can_fit`; its θ block would stay at zero and the solution would look
+# fitted), then the solver's own whole-tree requirements (`validate_model`).
+# Both checks run once per distinct station tree — the base and each
+# `stations` entry's effective pair — with the can_fit error naming the station
+# whose entry carries the component. `accepted` finishes that error with the
+# component form the solver family does fit. Returns `m`; the runner
+# materializes it against the antenna table.
+function _vet_step_model(solver, m::GainModel, accepted, spec = nothing)
+    for (station, tree) in _station_variants(m)
         at = station === nothing ? "" : " (station $(repr(station)) entry)"
         for tc in Calibration._flatten_components(tree)
             Fring.can_fit(solver, tc, _spec_geom(spec)) || throw(
@@ -211,29 +193,11 @@ function _vet_step_model(solver, model, accepted, spec = nothing)
 end
 
 # The distinct station trees a model assigns, as `station => (; phase, logamp)`
-# pairs (`nothing` for the base). A `StationGainModel` enumerates structurally;
-# any other `AbstractGainModel` can only be enumerated against a concrete
-# antenna table, so it needs `spec.antennas`.
-function _station_variants(m::Calibration.StationGainModel, spec)
+# pairs (`nothing` for the base).
+function _station_variants(m::Calibration.GainModel)
     vars = Pair{Any, Any}[nothing => (; phase = m.phase, logamp = m.logamp)]
     for k in keys(m.stations)
         push!(vars, k => Calibration.station_components(m, k))
-    end
-    return vars
-end
-function _station_variants(m::Calibration.AbstractGainModel, spec)
-    (spec === nothing || spec.antennas === nothing) && throw(
-        ArgumentError(
-            "cannot vet a $(nameof(typeof(m))) without the antenna table: its " *
-                "station trees come from `station_components(model, station)`, so " *
-                "compile it with a `spec = (; geom, antennas)` carrying the antennas.",
-        ),
-    )
-    names = Calibration._station_names(spec.antennas)
-    vars = Pair{Any, Any}[]
-    for n in names
-        t = Calibration._full_tree(Calibration.station_components(m, n))
-        any(p -> p.second == t, vars) || push!(vars, n => t)
     end
     return vars
 end

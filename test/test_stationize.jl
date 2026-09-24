@@ -78,7 +78,7 @@ function perfeed_scan_layout(nant)
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
-    model = CALs.StationGainModel(
+    model = CALs.GainModel(
         phase = (
             offset = mk(CALs.ConstantTerm()), delay = mk(CALs.Delay()), rate = mk(CALs.Rate()),
         ),
@@ -522,7 +522,7 @@ end
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mkc(term, tseg, tying) = CALs.GainComponent(term; Ti = tseg, Frequency = CALs.GlobalFrequency(), Feed = tying)
-    model = CALs.StationGainModel(
+    model = CALs.GainModel(
         phase = (
             atmos = mkc(CALs.ConstantTerm(), CALs.PerScan(), CALs.SharedFeeds()),
             rel_phase = mkc(CALs.ConstantTerm(), CALs.GlobalTime(), CALs.SingleFeed(2)),
@@ -751,7 +751,7 @@ end
             times = [0.0, 1.0, 100.0, 101.0], scan_of_time = [1, 1, 2, 2],
             channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
         )
-        model = CALs.StationGainModel(
+        model = CALs.GainModel(
             phase = (
                 offset = CALs.GainComponent(CALs.ConstantTerm(); Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed()),
             ),
@@ -804,7 +804,7 @@ end
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
-    model = CALs.StationGainModel(
+    model = CALs.GainModel(
         phase = (phi = mk(CALs.ConstantTerm()), mbd = mk(CALs.Delay()), rate = mk(CALs.Rate())),
     )
     layout = CALs.plan_parameters(model, nant, geom)
@@ -959,7 +959,7 @@ function sharedfeeds_scan_layout(nant)
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.SharedFeeds())
-    model = CALs.StationGainModel(
+    model = CALs.GainModel(
         phase = (
             offset = mk(CALs.ConstantTerm()), delay = mk(CALs.Delay()), rate = mk(CALs.Rate()),
         ),

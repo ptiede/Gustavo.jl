@@ -19,11 +19,14 @@ standard pipeline's model solves and why.
 
 ## The atom: `GainComponent`
 
-A model is a `(; phase, logamp)` pair of named trees of
-[`GainComponent`](@ref)s:
+A model is a [`GainModel`](@ref): a `phase` group and a `logamp` group, each
+a `NamedTuple` of named [`GainComponent`](@ref)s:
 
 ```julia
-GainComponent(term; Ti, Frequency, Feed = PerFeed())
+GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed())
+
+bp = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1))
+GainModel(phase = (; bp), logamp = (; bp))
 ```
 
 A component is **a term at a resolution with a feed tying**: one physical
@@ -31,8 +34,9 @@ A component is **a term at a resolution with a feed tying**: one physical
 and a `Frequency` segmentation — one parameter block per (time segment,
 frequency segment, feed block). The keywords are the same dimension names used
 everywhere else in Gustavo (`term_eval` coordinates, θ leaf axes,
-`gains(sol; ...)` selectors). `Ti` and `Frequency` have no defaults: a
-resolution is a modeling choice, stated explicitly.
+`gains(sol; ...)` selectors). `Ti` has no default: the time resolution
+decides what is solved, so it is stated explicitly. `Frequency` defaults to
+the whole band.
 
 Two rules of thumb anchor the vocabulary:
 
@@ -54,7 +58,7 @@ Two rules of thumb anchor the vocabulary:
 | [`PolynomialFreq`](@ref)`(n)` / [`PolynomialTime`](@ref)`(n)` | `Σ cᵈ·xᵈ`, `d = 1…n`, over the segment-normalized axis coordinate | `n` coefficients per segment (the constant belongs to a `ConstantTerm`) |
 
 A term contributes to whichever group (`phase` or `logamp`) its component is
-placed in. New terms are added with six small methods — see
+placed in. New terms are added with five small methods — see
 [Authoring a new gain term](@ref authoring-terms).
 
 ### Time segmentations
@@ -90,7 +94,9 @@ meets.
 | [`PerFeed`](@ref)`()` | 2 | each feed solves its own value |
 | [`SharedFeeds`](@ref)`()` | 1 | one value, read by both feeds |
 | [`SingleFeed`](@ref)`(k)` | 1 | feed `k` only; the other feed gets no contribution |
-| [`ReferenceRelative`](@ref)`(k)` | 2 | partner feed = reference block + relative block |
+
+A reference/relative model is a `SharedFeeds` component for the common part
+plus a `SingleFeed(k)` component for the partner's deviation.
 
 The tying is physics: a feed-common quantity solved `PerFeed` lets the two
 feeds' solve noise diverge, injecting spurious cross-hand structure (see the
@@ -116,15 +122,22 @@ component's constructor spelling, never solves to silent zeros), plus
 whole-tree requirements via
 [`validate_model`](@ref Gustavo.Fring.validate_model).
 
-- [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_terms(), smoother = ...)`
-  and [`TemporalSmoother`](@ref Gustavo.TemporalSmoother)`(model = default_adhoc_terms(), smoother = ...)`
-  take a full `(; phase, logamp)` tree (or a `StationGainModel`).
-- [`FringeFit`](@ref Gustavo.FringeFit)`(model = FringeModel(), estimator = ...)`
-  takes a [`FringeModel`](@ref Gustavo.Fring.FringeModel): an ordered, named
-  phase-term list ([`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms)).
+- [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_terms(), smoother = ...)`,
+  [`TemporalSmoother`](@ref Gustavo.TemporalSmoother)`(model = default_adhoc_terms(), smoother = ...)`
+  and [`FringeFit`](@ref Gustavo.FringeFit)`(model = default_fringe_terms(), estimator = ...)`
+  take a `GainModel`; the fringe step's model has phase components only
+  ([`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms)).
 - [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)`(dispersion = DispersionModel(), sbd = SingleBandDelay())`
-  deliberately has no free-form tree: its solver is a rigid specialized fit,
+  deliberately has no free-form model: its solver is a rigid specialized fit,
   so its whole surface is the two element fields (either may be `nothing`).
+
+[`merge`](@ref Base.merge(::GainModel)) builds a variant of a model by adding
+or replacing named components:
+
+```julia
+FringeFit(model = merge(default_fringe_terms();
+    phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = SingleFeed(2)))))
+```
 
 Each step compiles and solves its own model on its own private θ — no step's
 parameter block is shared with or visible to another's. Gains compose
@@ -211,16 +224,12 @@ amplitude calibration ([`AprioriAmplitude`](@ref Gustavo.AprioriAmplitude)).
 
 Stations may differ in segmentation and in terms. The rule the design
 follows: *the model shouldn't change shape because one station behaves a
-little differently.* A [`StationGainModel`](@ref)'s `stations` keyword maps a
-station code to a replacement entry used verbatim:
+little differently.* [`with_station`](@ref) gives one station its own
+groups, used verbatim:
 
 ```julia
-StationGainModel(
-    phase = (bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1)),),
-    stations = (
-        AA = (; phase = (bandpass = GainComponent(PolynomialFreq(3); Ti = GlobalTime(), Frequency = GlobalFrequency()),)),
-    ),
-)
+m = GainModel(phase = (; bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1))))
+with_station(m, "AA"; phase = (; bandpass = GainComponent(PolynomialFreq(3); Ti = GlobalTime())))
 ```
 
 Here every station solves a free per-channel phase bandpass except AA, which
@@ -233,9 +242,8 @@ within a group.
 
 Station codes resolve against the observation's antenna table when the model
 is materialized for a solve; an unknown code errors there, naming the known
-stations. A rule-based model ("every station matching a prefix gets a
-smoother bandpass") is an [`AbstractGainModel`](@ref) subtype implementing
-the one seam method, [`station_components`](@ref).
+stations. A rule ("every station matching a prefix gets a smoother
+bandpass") is a loop of `with_station` calls over the station codes.
 
 Heterogeneity is opt-in per solver
 ([`supports_station_heterogeneity`](@ref Gustavo.supports_station_heterogeneity)):

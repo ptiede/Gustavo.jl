@@ -1,6 +1,6 @@
 # ── Parameter layout ─────────────────────────────────────────────────────────
 #
-# `plan_parameters` resolves one shared `StationGainModel`, replicated across
+# `plan_parameters` resolves one shared `GainModel`, replicated across
 # `nant` antennas over a `DataGeometry`, into the structures a solve addresses:
 #
 #   * a `ComponentVector` `template` — θ named and shaped by component. Each
@@ -326,16 +326,16 @@ _axes_node(g::_ComponentGroups, nant::Int, geom::DataGeometry) =
 )
 
 """
-    plan_parameters(model::StationGainModel, nant, geom::DataGeometry; require_nonempty = true) -> ParameterLayout
-    plan_parameters(model::AbstractGainModel, antennas, geom::DataGeometry; require_nonempty = true) -> ParameterLayout
+    plan_parameters(model::GainModel, nant, geom::DataGeometry; require_nonempty = true) -> ParameterLayout
+    plan_parameters(model::GainModel, antennas, geom::DataGeometry; require_nonempty = true) -> ParameterLayout
 
 Resolve `model` over `geom` into a `ParameterLayout`. The returned `nθ` is the
 length of the parameter vector that `evaluate_gains` consumes.
 
-The `nant::Integer` form lays out a station-uniform `StationGainModel` (empty
+The `nant::Integer` form lays out a station-uniform `GainModel` (empty
 `stations` — the codes could not be resolved otherwise) replicated across
 `nant` antennas. The `antennas` form (an `AntennaTable` or an iterable of
-station codes) [`materialize`](@ref)s any `AbstractGainModel` against the
+station codes) [`materialize`](@ref)s the model against the
 station set first and handles heterogeneity: per component name, stations
 group by identical `(term, Ti, Frequency, Feed)` signature, a name with one
 signature covering every station lays out exactly as the uniform form does,
@@ -343,15 +343,15 @@ and a heterogeneous name becomes a [`GroupedComponentPlan`](@ref) with one
 ragged leaf per group (`θ.phase.<name>.g1`, `.g2`, …). Iterate the groups with
 [`station_blocks`](@ref).
 
-`require_nonempty` runs `validate_station_gain_model` first, rejecting
+`require_nonempty` runs `validate_gain_model` first, rejecting
 a `model` with neither phase nor log-amplitude components — the right default
 for a model meant to be solved. Pass `require_nonempty = false` when an empty
 model is a legitimate, expected state (e.g. one pipeline step's own model,
 which may legitimately compile no components while a sibling step's does);
 the returned layout then simply has `nθ == 0`.
 """
-function plan_parameters(model::StationGainModel, nant::Integer, geom::DataGeometry; require_nonempty::Bool = true)
-    require_nonempty && validate_station_gain_model(model)
+function plan_parameters(model::GainModel, nant::Integer, geom::DataGeometry; require_nonempty::Bool = true)
+    require_nonempty && validate_gain_model(model)
     isempty(model.stations) || throw(
         ArgumentError(
             "plan_parameters with an antenna COUNT cannot resolve the model's " *
@@ -361,10 +361,10 @@ function plan_parameters(model::StationGainModel, nant::Integer, geom::DataGeome
     return _plan_layout(model.phase, model.logamp, Int(nant), geom)
 end
 
-function plan_parameters(model::AbstractGainModel, antennas, geom::DataGeometry; require_nonempty::Bool = true)
+function plan_parameters(model::GainModel, antennas, geom::DataGeometry; require_nonempty::Bool = true)
     names = _station_names(antennas)
     mat = materialize(model, names, geom)
-    require_nonempty && validate_station_gain_model(mat)
+    require_nonempty && validate_gain_model(mat)
     nant = length(names)
     isempty(mat.stations) &&
         return plan_parameters(mat, nant, geom; require_nonempty = false)
@@ -472,7 +472,7 @@ end
 # `(path, groups)` pairs for every component name with more than one signature
 # or with stations that lack it. Empty exactly when every consumer may treat
 # the model as uniform.
-function _station_heterogeneity(mat::StationGainModel, names)
+function _station_heterogeneity(mat::GainModel, names)
     nant = length(names)
     isempty(mat.stations) && return Tuple{Tuple, _ComponentGroups}[]
     trees = [station_components(mat, n) for n in names]
@@ -493,7 +493,7 @@ _hetero_leaves!(out, ::GainComponent, path) = out
 _hetero_leaves!(out, g::_ComponentGroups, path) = push!(out, (path, g))
 
 """
-    require_station_uniform(model::StationGainModel, antennas, who) -> model
+    require_station_uniform(model::GainModel, antennas, who) -> model
 
 Assert that the materialized `model` assigns every station the same component
 signatures, throwing otherwise with the differing components, their
@@ -501,7 +501,7 @@ signatures, and the stations carrying each. `who` names the consumer in the
 error — the framework calls this for a solve step that has not opted into
 heterogeneity (`supports_station_heterogeneity`).
 """
-function require_station_uniform(model::StationGainModel, antennas, who::AbstractString)
+function require_station_uniform(model::GainModel, antennas, who::AbstractString)
     names = _station_names(antennas)
     het = _station_heterogeneity(model, names)
     isempty(het) && return model

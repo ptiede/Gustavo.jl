@@ -47,7 +47,7 @@
         end
     end
 
-    fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+    fm = default_fringe_terms()
     # `ref_ant` indexes the truth arrays below; `gauge` is what the solve takes.
     ref_ant = 1
     gauge = PinAntenna(ref_ant)     # Bandpass's/CalibrationPipeline's default
@@ -135,7 +135,7 @@ end
         nant, nspw, nchan, ntime, nscans,
         bandpass = bp_true, amp_bandpass = abp_true, seed = 21,
     )
-    fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+    fm = default_fringe_terms()
     runbp(sm) = fit(
         CalibrationPipeline(FringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig()),
         uvset,
@@ -197,7 +197,7 @@ end
         end
     end
 
-    fm = FringeModel(terms = _fringe_terms(dispersion = false, sbd = false))
+    fm = default_fringe_terms()
     runbp(sm) = fit(
         CalibrationPipeline(FringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig()),
         uvset,
@@ -270,7 +270,7 @@ end
     anames = ["A$i" for i in 1:nant]
     geom = _seg_geometry(nchan)
     bp(ti) = GainComponent(ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed())
-    breakmodel(ti) = CAL.StationGainModel(;
+    breakmodel(ti) = CAL.GainModel(;
         phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)),
     )
     layout(ti) = CAL.plan_parameters(breakmodel(ti), anames, geom)
@@ -397,7 +397,7 @@ end
         # track, so the two signature groups become two blocks with different
         # `:Ant` axes and different time segmentations, and the solve has to
         # place each station in the block that holds it.
-        het_model = CAL.StationGainModel(;
+        het_model = CAL.GainModel(;
             phase = (; bandpass = bp(CAL.GlobalTime())),
             logamp = (; bandpass = bp(CAL.GlobalTime())),
             stations = (
@@ -489,7 +489,7 @@ end
         ConstantTerm(); Ti = InstrumentScans([1.5]),
         Frequency = ChannelBlocks(1), Feed = PerFeed(),
     )
-    model = CAL.StationGainModel(; phase = (; bandpass = bp), logamp = (; bandpass = bp))
+    model = CAL.GainModel(; phase = (; bandpass = bp), logamp = (; bandpass = bp))
     l = CAL.plan_parameters(model, anames, geom)
     s = (;
         layout = l,
@@ -583,7 +583,7 @@ end
     anames = ["A$i" for i in 1:nant]
     geom = _seg_geometry(nchan)
     bpf(fs) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = fs, Feed = PerFeed())
-    hetmodel(a1, rest) = CAL.StationGainModel(;
+    hetmodel(a1, rest) = CAL.GainModel(;
         phase = (; bandpass = bpf(rest)), logamp = (; bandpass = bpf(rest)),
         stations = (
             A1 = (; phase = (; bandpass = bpf(a1)), logamp = (; bandpass = bpf(a1))),
@@ -677,7 +677,7 @@ end
 
     @testset "one segmentation for every station is the identity refinement" begin
         l = CAL.plan_parameters(
-            CAL.StationGainModel(;
+            CAL.GainModel(;
                 phase = (; bandpass = bpf(ChannelBlocks(2))),
                 logamp = (; bandpass = bpf(ChannelBlocks(2))),
             ), anames, geom,

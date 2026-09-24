@@ -116,7 +116,7 @@
         lc = first(values(UVP.branches(corrupt)))
         snapshot = copy(parent(lc[:vis]))
         solf, output = fitcalibrate(
-            FP.ApplySolution(sol) |> FringeFit(model = FringeModel()) |>
+            FP.ApplySolution(sol) |> FringeFit() |>
                 Bandpass() |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
             corrupt,
@@ -179,7 +179,7 @@
 
         # Solve with flagging: runs, and the output flags those channels.
         _, out2 = fitcalibrate(
-            FP.FlagChannels(mask) |> FringeFit(model = FringeModel()) |>
+            FP.FlagChannels(mask) |> FringeFit() |>
                 Bandpass() |>
                 TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
             uvset,

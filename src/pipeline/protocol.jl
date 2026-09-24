@@ -54,20 +54,17 @@ instead.
 abstract type SolveStep <: CalibrationStep end
 
 """
-    model_components(step::SolveStep, spec) -> AbstractGainModel | (; phase, logamp)
+    model_components(step::SolveStep, spec) -> GainModel
 
-The gain model `step` solves: an [`Calibration.AbstractGainModel`](@ref), or a
-bare `(; phase, logamp)` tree of named `GainComponent`s that the runner lifts
-to a station-uniform [`StationGainModel`](@ref)
-([`Calibration.as_gain_model`](@ref)). `spec = (; geom, antennas)` carries the
+The [`GainModel`](@ref) `step` solves. `spec = (; geom, antennas)` carries the
 data geometry and antenna table the step may consult (e.g. to resolve an
 `:auto` option). Default: no components.
 
-A method of the same generic that compiles a `FringeModel` term-list element —
-`model_components(element, spec)` — so steps and model-list elements compose
-through one mechanism.
+A method of the same generic compiles a data-dependent model element —
+`model_components(element, spec)`, e.g. a [`DispersionModel`](@ref) — so steps
+and model elements compose through one mechanism.
 """
-model_components(step::SolveStep, spec) = (; phase = (;), logamp = (;))
+model_components(step::SolveStep, spec) = GainModel()
 
 """
     supports_station_heterogeneity(step::SolveStep) -> Bool
@@ -276,7 +273,7 @@ step is finished and wrapped in a [`CalibrationSolution`](@ref),
 `DimArray`s on demand.
 """
 mutable struct SolveContext{
-        M <: StationGainModel, L <: ParameterLayout, E <: GainEvaluator,
+        M <: GainModel, L <: ParameterLayout, E <: GainEvaluator,
         A <: UVData.AntennaTable, S <: Streaming.ScanStream,
         V <: AbstractVector{Float64},
     }
