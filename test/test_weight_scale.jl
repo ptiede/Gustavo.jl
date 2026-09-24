@@ -96,8 +96,8 @@
         # `sol.transforms` — the recorded StationWeightScale — so the explicit
         # kwarg and the default now see IDENTICAL data.
         @test length(sol.transforms) == 1 && sol.transforms[1] isa FP.StationWeightScale
-        m = FP.fringe_search_map(uvset, sol; weight_scale = ws)
-        m0 = FP.fringe_search_map(uvset, sol)
+        m = FP.fringe_search_map(uvset, sol; pol = (1, 1), weight_scale = ws)
+        m0 = FP.fringe_search_map(uvset, sol; pol = (1, 1))
         @test m.map.detection.snr ≈ m0.map.detection.snr
         d = FP.baseline_fringe_data(uvset, sol; weight_scale = ws)
         d0 = FP.baseline_fringe_data(uvset, sol)

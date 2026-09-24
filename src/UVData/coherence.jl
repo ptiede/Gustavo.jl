@@ -78,8 +78,8 @@ end
     CoherenceReport
 
 Stage-agnostic coherence summary of a `UVSet`, from [`coherence_report`](@ref).
-`bl_pairs`/`ant_names` label the baseline axis of the curves; `pol_products` are
-the correlation products that were included (parallel-hand by default); `npts` is
+`bl_pairs`/`ant_names` label the baseline axis of the curves; `feeds` are the
+feed pairs of the correlation products that were included; `npts` is
 the valid-cell count per baseline. `time` and `freq` are the [`CoherenceCurve`](@ref)s
 versus Δt and Δν. The headline stage numbers are `time.eta[end]` (coherence
 retained averaging the whole scan to one sample) and `freq.eta[end]` (averaging
@@ -88,34 +88,24 @@ the whole band to one channel) — see [`coherence_headline`](@ref).
 struct CoherenceReport
     bl_pairs::Vector{Tuple{Int, Int}}
     ant_names::Vector{String}
-    pol_products::Vector{String}
+    feeds::Vector{Tuple{Int, Int}}
     npts::Vector{Int}
     time::CoherenceCurve
     freq::CoherenceCurve
 end
 
-# Parallel-hand correlation product ("PP"/"QQ", or "RR"/"LL"): both feed letters
-# equal. A pure-label test, kept local so this file needs no Calibration import.
-_is_parallel_product(s::AbstractString) = length(s) == 2 && s[1] == s[2]
-
-# Resolve a `pols` selector against this leaf's product labels → local indices.
-function _select_coherence_pols(labels::Vector{String}, pols)
-    if pols === :parallel
-        idx = findall(_is_parallel_product, labels)
-        return isempty(idx) ? collect(eachindex(labels)) : idx
-    elseif pols === :all
-        return collect(eachindex(labels))
+# Resolve a `pols` selector against this leaf's feed pairs → local indices.
+function _select_coherence_pols(feeds::Vector{Tuple{Int, Int}}, pols)
+    if pols === :all
+        return collect(eachindex(feeds))
     elseif pols isa Integer
         return [Int(pols)]
-    elseif pols isa AbstractVector{<:Integer}
-        return collect(Int.(pols))
-    elseif pols isa Union{AbstractString, Symbol}
-        i = findfirst(==(String(pols)), labels)
-        return i === nothing ? error("coherence: product $(pols) not in $labels") : [i]
-    elseif pols isa AbstractVector
-        return [(j = findfirst(==(String(p)), labels); j === nothing ? error("coherence: product $p not in $labels") : j) for p in pols]
+    elseif pols isa Tuple{Integer, Integer}
+        return [_pol_index_lookup(feeds, pols)]
+    elseif pols isa AbstractVector && all(p -> p isa Union{Integer, Tuple{Integer, Integer}}, pols)
+        return [p isa Integer ? Int(p) : _pol_index_lookup(feeds, p) for p in pols]
     else
-        error("coherence: `pols` must be :parallel, :all, an index, or product label(s)")
+        throw(ArgumentError("coherence: `pols` must be :all, an index, a feed pair such as (1, 1), or a vector of these; got $(repr(pols))"))
     end
 end
 
@@ -149,7 +139,7 @@ end
 
 """
     coherence_report(uvset::UVSet; timescales = nothing, bandwidths = nothing,
-                     pols = :parallel) -> CoherenceReport
+                     pols) -> CoherenceReport
 
 Measure the per-baseline coherence factor η = |Σ w·V| / Σ(w·|V|) of `uvset` as a
 function of time-averaging interval Δt and frequency-averaging width Δν, pooling
@@ -165,9 +155,8 @@ one-sample-per-bin resolution) and needs no gain model. Lazy leaves are
 materialized one at a time (memory-safe on a streamed set).
 
 `timescales` (seconds) / `bandwidths` (Hz) override the default geometric sweeps
-(native spacing → full extent). `pols` selects products: `:parallel` (default,
-parallel-hand only — cross hands are mostly noise and would bias η down), `:all`,
-an index, or product label(s).
+(native spacing → full extent). `pols` selects the products to pool: `:all`, an index, a feed pair such as
+`(1, 1)` (see [`feed_pairs`](@ref)), or a vector of these. Products that are mostly noise bias η down.
 
 `debias` (default `false`) removes the thermal-noise bias from η. The
 weights set the relative cell weighting; the absolute noise scale is
@@ -190,7 +179,7 @@ See [`CoherenceReport`](@ref) / [`print_coherence_report`](@ref) /
 """
 function coherence_report(
         uvset::UVSet;
-        timescales = nothing, bandwidths = nothing, pols = :parallel,
+        pols, timescales = nothing, bandwidths = nothing,
         debias = false, marginalize = true,
     )
     src = DimensionalData.branches(uvset)
@@ -202,7 +191,7 @@ function coherence_report(
     blidx = OrderedDict{Tuple{Int, Int}, Int}()
     bl_pairs = Tuple{Int, Int}[]
     ant_names = String[]
-    pol_labels = String[]
+    pol_feeds = Tuple{Int, Int}[]
     tdiffs = Float64[]; tspans = Float64[]
     fdiffs = Float64[]; fspans = Float64[]
     for leaf in values(src)
@@ -215,9 +204,9 @@ function coherence_report(
             end
         end
         isempty(ant_names) && (ant_names = String.(collect(metadata(leaf).antennas.name)))
-        if isempty(pol_labels)
-            labels = String.(pol_products(leaf))
-            pol_labels = labels[_select_coherence_pols(labels, pols)]
+        if isempty(pol_feeds)
+            feeds = feed_pairs(leaf)
+            pol_feeds = feeds[_select_coherence_pols(feeds, pols)]
         end
         ts = sort(Float64.(lookup(leaf[:vis], Ti)))
         if length(ts) > 1
@@ -256,15 +245,15 @@ function coherence_report(
     for leaf in values(src)
         m = materialize_leaf(leaf)
         V = parent(m[:vis]); W = parent(m[:weights]); Fl = parent(m[:flags])
-        labels = String.(pol_products(m))
-        plist = _select_coherence_pols(labels, pols)
+        feeds = feed_pairs(m)
+        plist = _select_coherence_pols(feeds, pols)
         # Pass 1 captured the first leaf's labels/antennas, but pass 2 pools all
         # leaves into one global baseline index — heterogeneous leaves would be
         # silently mislabelled, so guard instead of trusting the first leaf.
-        leaf_labels = labels[plist]
-        leaf_labels == pol_labels || error(
+        leaf_feeds = feeds[plist]
+        leaf_feeds == pol_feeds || error(
             "coherence_report: heterogeneous correlation products across leaves " *
-                "($(leaf_labels) vs $(pol_labels)); cannot pool into one report",
+                "($(leaf_feeds) vs $(pol_feeds)); cannot pool into one report",
         )
         leaf_ants = String.(collect(metadata(m).antennas.name))
         leaf_ants == ant_names || error(
@@ -297,7 +286,7 @@ function coherence_report(
     etaT, aggT = _curve_from_sums(numT, denT, dvarT, debias)
     etaF, aggF = _curve_from_sums(numF, marginalize ? denF : denT, marginalize ? dvarF : dvarT, debias)
     return CoherenceReport(
-        bl_pairs, ant_names, pol_labels, npts,
+        bl_pairs, ant_names, pol_feeds, npts,
         CoherenceCurve(:time, dts, aggT, etaT),
         CoherenceCurve(:freq, dnus, aggF, etaF),
     )
@@ -639,7 +628,7 @@ coherent baselines at full averaging.
 """
 function print_coherence_report(report::CoherenceReport; io = stdout, nworst::Integer = 5)
     println(io)
-    println(io, "Coherence report [", join(report.pol_products, ","), "], ", length(report.bl_pairs), " baselines")
+    println(io, "Coherence report [", join(report.feeds, ","), "], ", length(report.bl_pairs), " baselines")
 
     _print_curve(io, "time-averaging", report.time, "Δt", 1.0, "s")
     _print_curve(io, "frequency-averaging", report.freq, "Δν", 1.0e-6, "MHz")

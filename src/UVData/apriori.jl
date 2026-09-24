@@ -265,7 +265,7 @@ function apply_calibration(
         vis_l = leaf[:vis]
         w_l = leaf[:weights]
         vis_corr, weights_corr, flags_corr = _apply_apriori_kernel(
-            vis_l, w_l, leaf[:flags], gains_pkg.gains, bl_pairs, pol_products(leaf),
+            vis_l, w_l, leaf[:flags], gains_pkg.gains, bl_pairs, feed_pairs(leaf),
         )
         return rebuild_visibilities(
             leaf, vis_corr, weights_corr, leaf[:uvw], flags_corr,
@@ -300,7 +300,7 @@ function apply_calibration(
         bl_pairs = baselines(leaf).pairs
         vis_corr, weights_corr, flags_corr = _apply_apriori_kernel(
             leaf[:vis], leaf[:weights], leaf[:flags], gains_pkg.gains, bl_pairs,
-            pol_products(leaf),
+            feed_pairs(leaf),
         )
         return rebuild_visibilities(
             leaf, vis_corr, weights_corr, leaf[:uvw], flags_corr,
@@ -318,7 +318,7 @@ end
 function _apply_apriori_kernel(
         vis_p::AbstractArray, w_p::AbstractArray, flags_p::AbstractArray,
         gains::AbstractArray{Float64, 4},
-        bl_pairs, pol_products,
+        bl_pairs, feeds,
     )
     check_layer_axes(vis_p, w_p, flags_p)
     vis_corr = copy(vis_p)
@@ -337,7 +337,7 @@ function _apply_apriori_kernel(
             continue
         end
         for p in axes(vis_p, Polarization)
-            fa, fb = correlation_feed_pair(pol_products[Int(p)])
+            fa, fb = feeds[p]
             for c in axes(vis_p, Frequency)
                 cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
                 flags_p[cell] && continue

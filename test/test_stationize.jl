@@ -23,7 +23,7 @@ _cross_sign(fa, fb) = fa == fb ? 0 : (fa < fb ? 1 : -1)
 # phase the solve can actually recover from data built this way.
 function inject_detections(bl_pairs, pol_products, τ, ṙ, φ, χ; snr = 100.0, pfa = 0.0)
     nbl, npol = length(bl_pairs), length(pol_products)
-    feeds = [CALs.correlation_feed_pair(p) for p in pol_products]
+    feeds = collect(pol_products)
     D = Matrix{FR.Detection{Float64}}(undef, nbl, npol)
     for bi in 1:nbl, p in 1:npol
         a, b = bl_pairs[bi]
@@ -43,7 +43,7 @@ absorbed_phase(φ, χ) = hcat(φ[:, 1], φ[:, 2] .- χ)
 
 # Max |measured − model-from-solution| over all valid, non-auto baselines.
 function recon_residuals(D, sol, bl_pairs, pol_products)
-    feeds = [CALs.correlation_feed_pair(p) for p in pol_products]
+    feeds = collect(pol_products)
     rd = rr = rp = 0.0
     for bi in eachindex(bl_pairs), p in eachindex(pol_products)
         det = D[bi, p]
@@ -89,7 +89,7 @@ end
 # The (station, feed) cells at least one usable detection touches — the cells a
 # solve can say anything about.
 function touched_cells(D, bl, pols, nant, opts)
-    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+    feeds = collect(pols)
     t = falses(nant, 2)
     for bi in eachindex(bl), p in eachindex(pols)
         det = D[bi, p]
@@ -136,7 +136,7 @@ end
     nant = 5
     ref = 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)         # small enough to avoid wraps
@@ -181,7 +181,7 @@ end
     nant = 5
     ref = 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)
@@ -211,7 +211,7 @@ end
     nant = 4
     ref = 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     # Feed-2 = feed-1 + a per-station inter-feed offset (delay and phase).
     τ1 = 2.0e-9 .* randn(rng, nant)
     rel_delay = 5.0e-9 .* randn(rng, nant)
@@ -238,7 +238,7 @@ end
     rng = MersenneTwister(0x04)
     nant = 5
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), zeros(nant, 2), 0.25 .* randn(rng, nant, 2), 0.5)
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     # Parallel-hand products (PP=1, QQ=4) close exactly on noiseless data.
@@ -254,7 +254,7 @@ end
     nant = 5
     ref = 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     # Per-feed phases large enough that a fraction of station differences exceed
     # ±π and wrap (realistic residual-phase scale after delay/rate removal).
     φ = 1.2 .* randn(rng, nant, 2)
@@ -269,7 +269,7 @@ end
     # Antennas 1-3 and 4-6 with NO inter-island baselines.
     nant = 6
     bl = vcat(all_baselines(3), [(a, b) for a in 4:6 for b in (a + 1):6])
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)
@@ -287,12 +287,12 @@ end
     nant = 5
     ref = 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.5)
     # Knock out every cross-hand detection (low SNR).
-    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+    feeds = collect(pols)
     for bi in eachindex(bl), p in eachindex(pols)
         if feeds[p][1] != feeds[p][2]
             d = D[bi, p]
@@ -316,7 +316,7 @@ end
     nant = 5
     absent_ref = 5                                  # observes no baseline below
     bl = all_baselines(4)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     rng = MersenneTwister(0x9c31)
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
@@ -345,7 +345,7 @@ end
     # solved and both are covered — including the island holding no reference.
     nant = 5
     bl = [(1, 2), (1, 3), (2, 3), (4, 5)]
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     rng = MersenneTwister(0x4a17)
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
@@ -366,7 +366,7 @@ end
     nant = 5
     absent_ref = 5
     bl = all_baselines(4)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     rng = MersenneTwister(0x1d05)
     τ = 1.0e-9 .* randn(rng, nant, 2)
     D0 = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 100.0)
@@ -397,7 +397,7 @@ end
 @testset "Stationize: pfa_max decides which detections are real" begin
     nant = 4
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(MersenneTwister(0x33), nant, 2)
     D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 5.0, pfa = 1.0e-3)
     # Every detection at PFA 1e-3: a looser threshold accepts them and the solve
@@ -413,7 +413,7 @@ end
 @testset "Stationize: rejected rows constrain but never connect" begin
     nant = 4
     bl = all_baselines(nant)
-    pols = ["PP", "QQ"]
+    pols = [(1, 1), (2, 2)]
     τ = 1.0e-9 .* randn(MersenneTwister(0x51), nant, 2)
     # One weak baseline among strong ones: it must not extend coverage, and the
     # accepted detections must still solve exactly.
@@ -443,8 +443,8 @@ end
     nant = 5
     ref = 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
-    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    feeds = collect(pols)
 
     # Cumulative phase: φ[a] − φ[ref] grows past π along the chain.
     φ = zeros(nant, 2)
@@ -490,8 +490,8 @@ end
     nant = 4
     ref = 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
-    feeds = [CALs.correlation_feed_pair(p) for p in pols]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    feeds = collect(pols)
 
     δ = 1.0e-9 .* randn(rng, nant)          # track-global inter-feed delay offset (feed2 − feed1)
     ε = 0.5 .* randn(rng, nant)             # track-global inter-feed phase offset
@@ -585,7 +585,7 @@ end
     function poisoned_scan(nant; offset = 2.0, snr = 100.0, seed = 0x33)
         rng = MersenneTwister(seed)
         bl = all_baselines(nant)
-        pols = ["PP", "PQ", "QP", "QQ"]
+        pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
         τ = 1.0e-9 .* randn(rng, nant, 2)
         φ = 0.3 .* randn(rng, nant, 2)
         D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0; snr = snr)
@@ -684,7 +684,7 @@ end
         rng = MersenneTwister(0x51)
         nant, ref = 5, 1
         bl = all_baselines(nant)
-        pols = ["PP", "PQ", "QP", "QQ"]
+        pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
         τ = 1.0e-9 .* randn(rng, nant, 2)
         φ = 0.3 .* randn(rng, nant, 2)
         D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0)
@@ -810,7 +810,7 @@ end
     layout = CALs.plan_parameters(model, nant, geom)
     comps = ((layout.plans[1], :phase), (layout.plans[2], :delay), (layout.plans[3], :rate))
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     # Scan 2 carries a closure-breaking delay+phase outlier, so the robust loss
     # genuinely iterates and the pooled stopping-rule coupling is exercised.
     function scan_D(seed; poison)
@@ -856,7 +856,7 @@ end
     rng = MersenneTwister(0x77)
     nant, ref = 5, 1
     bl = all_baselines(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     φ = 0.3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0)
@@ -881,7 +881,7 @@ end
     end
 
     @testset "with no cross-hand rows the cross floors are inert" begin
-        pols_par = ["PP", "QQ"]
+        pols_par = [(1, 1), (2, 2)]
         Dp = inject_detections(bl, pols_par, τ, zeros(nant, 2), φ, 0.0)
         dp = Dp[2, 1]
         Dp[2, 1] = FR.Detection{Float64}((10.0e-9, dp.rate, dp.phase, dp.amp, dp.snr, 0.0, true))
@@ -972,8 +972,8 @@ end
     nant = 5
     single = 4                                    # single-feed station: feed 2 only
     bl = all_baselines(nant)
-    pols = ["PP", "QQ", "PQ", "QP"]
-    pfeeds = [CALs.correlation_feed_pair(p) for p in pols]
+    pols = [(1, 1), (2, 2), (1, 2), (2, 1)]
+    pfeeds = collect(pols)
 
     τ = repeat(randn(rng, nant) .* 1.0e-9, 1, 2)  # feed-independent delay/rate, so
     ṙ = repeat(randn(rng, nant) .* 1.0e-3, 1, 2)  # those systems stay consistent

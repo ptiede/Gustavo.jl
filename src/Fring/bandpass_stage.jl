@@ -85,7 +85,7 @@ Frequency = <any segmentation>, Feed = PerFeed())` and nothing else — a time
 segmentation whose segments each span several scans, solved one segment at a time.
 
 `solve_bandpass!` writes into `θ`'s bandpass blocks. `results` is the
-per-scan `(; rl, wl, pols, ti, source)` accumulator list in group-index order,
+per-scan `(; rl, wl, feeds, ti, source)` accumulator list in group-index order,
 `ti` being the scan's first sample on the solve's time axis (hence which time
 segment it falls in);
 `setup` is `(; bl_pairs, blidx, nant, layout, bp_path, amp_path, channel_freqs, spw_of_chan)`,
@@ -288,11 +288,10 @@ end
 # touching it, which is the diagonal of the segment's normal matrix and so the
 # per-segment precision a shape fit weights the track by.
 function _seed_phase_tracks(
-        rbar_bp, wbar_bp, bl_pairs, pol_products, nant, segs;
+        rbar_bp, wbar_bp, bl_pairs, feeds, nant, segs;
         gauge::AbstractGauge = PinAntenna(1), snr_floor::Real = 1.0,
     )
     nbl, npol, nchan = size(rbar_bp)
-    feeds = [correlation_feed_pair(p) for p in pol_products]
     noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
     nseg = length(segs)
     phase = fill(NaN, nant, 2, nseg)
@@ -466,11 +465,10 @@ end
 # (station, feed, segment)'s summed gate weight as its precision. Segments with no
 # gated observation are left `NaN` for a shape fit to estimate — or not.
 function _seed_amp_tracks(
-        rbar_bp, wbar_bp, bl_pairs, pol_products, nant, fsegs;
+        rbar_bp, wbar_bp, bl_pairs, feeds, nant, fsegs;
         snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
     )
     nbl, npol, nchan = size(rbar_bp)
-    feeds = [correlation_feed_pair(p) for p in pol_products]
     noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
     nnodes = 2 * nant
     nfseg = length(fsegs)
@@ -844,7 +842,7 @@ function _pool_scans(results, idx, nbl, npol, nchan)
 end
 
 function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::AbstractGauge)
-    pols = results[1].pols
+    feeds = results[1].feeds
     nchan = length(setup.channel_freqs)
     nbl = length(setup.bl_pairs)
     phase_status = nothing
@@ -863,9 +861,9 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
         phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
         for (ts, idx) in pairs(groups)
             isempty(idx) && continue
-            rbar, wbar = _pool_scans(results, idx, nbl, length(pols), nchan)
+            rbar, wbar = _pool_scans(results, idx, nbl, length(feeds), nchan)
             phase, prec = _seed_phase_tracks(
-                rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs; gauge,
+                rbar, wbar, setup.bl_pairs, feeds, setup.nant, fsegs; gauge,
             )
             _shape_tracks!(
                 phase, prec, seg_spw, seg_freq, sm.phase;
@@ -882,8 +880,8 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
         amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
         for (ts, idx) in pairs(groups)
             isempty(idx) && continue
-            rbar, wbar = _pool_scans(results, idx, nbl, length(pols), nchan)
-            la, prec = _seed_amp_tracks(rbar, wbar, setup.bl_pairs, pols, setup.nant, fsegs)
+            rbar, wbar = _pool_scans(results, idx, nbl, length(feeds), nchan)
+            la, prec = _seed_amp_tracks(rbar, wbar, setup.bl_pairs, feeds, setup.nant, fsegs)
             _spike_guard!(la, seg_spw, _BP_SPIKE_SIGMA)
             _shape_tracks!(
                 la, prec, seg_spw, seg_freq, sm.amp;
@@ -1378,7 +1376,7 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
     amp_status = _joint_status_array(amp_blocks, setup.nant, length(band_ids))
     for idx in _joint_scan_groups(tseg)
         solve_joint_bandpass!(
-            θ, results[idx], setup.bl_pairs, results[1].pols, setup.nant,
+            θ, results[idx], setup.bl_pairs, results[1].feeds, setup.nant,
             phase_blocks, amp_blocks;
             gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
             phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq,
@@ -1406,7 +1404,7 @@ function _joint_status_array(blocks, nant, nband)
 end
 
 """
-    solve_joint_bandpass!(θ, scans, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+    solve_joint_bandpass!(θ, scans, bl_pairs, feeds, nant, phase_blocks, amp_blocks;
                           gauge = PinAntenna(1), max_iterations = 8, tolerance = 1.0e-6,
                           max_logamp = log(10.0))
 
@@ -1480,7 +1478,7 @@ track writes only its own slots, and a slot outside a station's own segmentation
 is never written (the caller marks those `_BP_TRACK_NA`).
 """
 function solve_joint_bandpass!(
-        θ, scans, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+        θ, scans, bl_pairs, feeds, nant, phase_blocks, amp_blocks;
         gauge::AbstractGauge = PinAntenna(1), max_iterations::Integer = 8, tolerance::Real = 1.0e-6,
         max_logamp::Real = _BP_MAX_LOGAMP,
         phase_spec::AbstractShapeSpec = FreeShape(),
@@ -1493,7 +1491,6 @@ function solve_joint_bandpass!(
     )
     isempty(scans) && return θ
 
-    feeds = [correlation_feed_pair(p) for p in pol_products]
     # The data are reduced onto the refinement of every block's frequency
     # segmentation, and each station's gain is held in its own segments — one
     # gain over however many refinement cells that segment spans.
@@ -1573,8 +1570,8 @@ function solve_joint_bandpass!(
     # the same way the rest do.
     touched = DimensionalData.DimArray(falses(nant, 2, ntseg, nfsmax), gd)
     S = DimensionalData.DimArray(
-        zeros(C, length(scans), length(bl_pairs), length(pol_products)),
-        (Scan(1:length(scans)), BaselineID(1:length(bl_pairs)), Polarization(1:length(pol_products))),
+        zeros(C, length(scans), length(bl_pairs), length(feeds)),
+        (Scan(1:length(scans)), BaselineID(1:length(bl_pairs)), Polarization(1:length(feeds))),
     )
 
     _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tsg, fseg)

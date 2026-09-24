@@ -90,7 +90,7 @@ function UVData.plot_coherence(parent, report::CoherenceReport; baselines = :all
     end
     Label(
         parent[0, :],
-        string("Coherence loss  [", join(report.pol_products, ","), "]  ", length(report.bl_pairs), " baselines");
+        string("Coherence loss  [", join(report.feeds, ","), "]  ", length(report.bl_pairs), " baselines");
         fontsize = 14, font = :bold,
     )
     return parent
@@ -122,7 +122,7 @@ function UVData.plot_coherence_matrix(parent, report::CoherenceReport; axis::Sym
     ax = Axis(
         parent[1, 1];
         xlabel = xunit, ylabel = "baseline (worst → best)",
-        title = string("per-baseline coherence η  [", join(report.pol_products, ","), "]"),
+        title = string("per-baseline coherence η  [", join(report.feeds, ","), "]"),
         xticks = (1:nint, xt), yticks = (1:nbl, labels),
         yticklabelsize = 8, yreversed = true,
     )

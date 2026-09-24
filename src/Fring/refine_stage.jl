@@ -53,10 +53,9 @@ function refine_scan_dispersion!(
     length(blocks) >= 4 || return 0              # < 4 bands can't constrain 1/ν
     fg = frequencies(stack)
     bl_pairs = UVData.baselines(stack).pairs
-    pols = pol_products(stack)
-    feeds = [correlation_feed_pair(p) for p in pols]
+    feeds = feed_pairs(stack)
     nbl = length(bl_pairs)
-    npol = length(pols)
+    npol = length(feeds)
     nlf = length(blocks)
     phasor_sum = zeros(ComplexF64, nbl, npol, nlf)
     weight_sum = zeros(Float64, nbl, npol, nlf)
@@ -66,11 +65,11 @@ function refine_scan_dispersion!(
         _accumulate_leaf_band_phasor!(
             view(phasor_sum, :, :, li), view(weight_sum, :, :, li),
             view(stack, Frequency(r)),
-            bl_pairs, pols,
+            bl_pairs, feeds,
         )
     end
     return _dispersion_fit_stationize!(
-        θ, phasor_sum, weight_sum, fb, bl_pairs, pols, feeds, first(ti), geom,
+        θ, phasor_sum, weight_sum, fb, bl_pairs, feeds, first(ti), geom,
         delay_plan, disp_plan, gauge, opts,
         Float64(tau_max), Float64(dtec_max), ties,
     )
@@ -99,10 +98,9 @@ function refine_scan_sbd!(
     blocks = _spw_blocks(geom, ci)
     fg = frequencies(stack)
     bl_pairs = UVData.baselines(stack).pairs
-    pols = pol_products(stack)
-    feeds = [correlation_feed_pair(p) for p in pols]
+    feeds = feed_pairs(stack)
     nbl = length(bl_pairs)
-    npol = length(pols)
+    npol = length(feeds)
     nlf = length(blocks)
     ntot = nlf * Int(nchunk)
     phasor_sum = zeros(ComplexF64, nbl, npol, ntot)
@@ -129,12 +127,12 @@ function refine_scan_sbd!(
             view(phasor_sum, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
             view(weight_sum, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
             view(stack, Frequency(r)),
-            bl_pairs, pols,
+            bl_pairs, feeds,
             coc .- (li - 1) * Int(nchunk),
         )
     end
     return _sbd_fit_stationize!(
-        θ, phasor_sum, weight_sum, chunkf, chunkgrp, bl_pairs, pols, feeds,
+        θ, phasor_sum, weight_sum, chunkf, chunkgrp, bl_pairs, feeds,
         first(ti), geom, sbd, gauge, nant;
         tau_max = Float64(tau_max),
     )
@@ -145,7 +143,7 @@ end
 # (disjoint per scan, so pass-2 groups can refine concurrently). Returns the
 # number of detections the robust station solves excised.
 function _dispersion_fit_stationize!(
-        θ, phasor_sum, weight_sum, fb, bl_pairs, pols, feeds, ti0, geom,
+        θ, phasor_sum, weight_sum, fb, bl_pairs, feeds, ti0, geom,
         delay_plan, disp_plan, gauge, opts, tau_max, dtec_max, ties = nothing,
     )
     nbl, npol, nlf = size(phasor_sum)
@@ -215,7 +213,7 @@ function _dispersion_fit_stationize!(
             any(d -> d.valid, Ds) || continue
         end
         solve_station_systems!(
-            θ, (detection_stack(Ds, pairs_s, pols; ti = ti0, freq_rms, time_rms),), ((plan, :delay),);
+            θ, (detection_stack(Ds, pairs_s, feeds; ti = ti0, freq_rms, time_rms),), ((plan, :delay),);
             gauge = tie ? remap_gauge(gauge, ties) : gauge, opts = opts,
         )
         if tie
@@ -247,7 +245,7 @@ end
 # group centre. `chunkf`/`chunkgrp` label each accumulated chunk with its centre
 # frequency and band-group id.
 function _sbd_fit_stationize!(
-        θ, phasor_sum, weight_sum, chunkf, chunkgrp, bl_pairs, pols, feeds, ti0, geom,
+        θ, phasor_sum, weight_sum, chunkf, chunkgrp, bl_pairs, feeds, ti0, geom,
         sbd, gauge, nant;
         opts::Stationization = Stationization(loss = LeastSquares()),
         tau_max::Float64 = 6.0e-8,

@@ -795,7 +795,7 @@ function _linearized_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, t
 end
 
 """
-    solve_adhoc_phasing(rbar, wbar, bl_pairs, pol_products, nant, times;
+    solve_adhoc_phasing(rbar, wbar, bl_pairs, feeds, nant, times;
                         gauge, smoother, tying) -> DimStack
 
 Solve globally-closing adhoc phases from coherently frequency-averaged
@@ -804,7 +804,8 @@ residual baseline visibilities under the model
     y[baseline, product, ap] = φ_na(ap) − φ_nb(ap) + x[baseline, product],
 
 with the station phases `φ` on parameter nodes and one free source term `x`
-per (baseline, product), constant over the scan. The free source term
+per (baseline, product), constant over the scan. `feeds[p]` is product `p`'s
+feed pair (see [`feed_pairs`](@ref)). The free source term
 carries the source's EVPA, D-terms, and closure phase, so the station tracks
 are unbiased by source structure.
 
@@ -838,7 +839,7 @@ fixes `x = 0`.
 function solve_adhoc_phasing(
         rbar::AbstractArray{<:Complex, 3}, wbar::AbstractArray{<:Real, 3},
         bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
-        pol_products::AbstractVector{<:AbstractString},
+        feeds::AbstractVector{<:Tuple{Integer, Integer}},
         nant::Integer, times::AbstractVector;
         gauge::AbstractGauge = PinAntenna(1),
         smoother::AbstractAdhocSmoother = SavitzkyGolaySmoother(),
@@ -847,7 +848,7 @@ function solve_adhoc_phasing(
     nbl, npol, nap = size(rbar)
     size(wbar) == size(rbar) || error("rbar and wbar must have the same shape")
     nbl == length(bl_pairs) || error("rbar has $nbl baselines; bl_pairs has $(length(bl_pairs))")
-    npol == length(pol_products) || error("rbar has $npol products; pol_products has $(length(pol_products))")
+    npol == length(feeds) || error("rbar has $npol products; feeds has $(length(feeds))")
     nap == length(times) || error("rbar has $nap APs; times has $(length(times))")
     tying isa ReferenceRelative && error(
         "solve_adhoc_phasing cannot use a ReferenceRelative adhoc component: the " *
@@ -859,7 +860,6 @@ function solve_adhoc_phasing(
             "is one dimension per station), but the adhoc component ties feeds as " *
             "$(typeof(tying)). Use OUSmoother for an independent per-feed track.",
     )
-    feeds = [correlation_feed_pair(p) for p in pol_products]
 
     # Solved on the (station, node) graph; expanded back onto the feed axis at the end.
     phase = fill(convert(eltype(wbar), NaN), nant, 2, nap)
@@ -1113,12 +1113,12 @@ function adhoc_scan!(
     )
     geom = win.geom
     bl_pairs = collect(UVData.baselines(stack).pairs)
-    pols = String.(pol_products(stack))
+    feeds = feed_pairs(stack)
     tg = Float64.(timestamps(stack))
     ci = win.chan_idx
     g_ti = win.ti_idx
     nbl = length(bl_pairs)
-    npol = length(pols)
+    npol = length(feeds)
     nap = length(tg)
     # Per-band accumulation (the window's per-spw channel blocks stand in for the
     # band leaves) fanned out over the inner `executor` — this loop (the residual
@@ -1144,7 +1144,7 @@ function adhoc_scan!(
         wbar .+= view(wparts, :, :, :, li)
     end
     as = solve_adhoc_phasing(
-        rbar, wbar, bl_pairs, pols, nant, tg;
+        rbar, wbar, bl_pairs, feeds, nant, tg;
         gauge = gauge, smoother = adhoc, tying = adhoc_plan.tying,
     )
     adhoc_leaf = _component_leaf(adhoc_plan, θ)

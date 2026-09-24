@@ -472,7 +472,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         g = CAL.evaluate_gains(ev, bp.θ, win0.chan_idx, win0.ti_idx)
         Vm = copy(parent(stack0[:vis])); Wm = copy(parent(stack0[:weights]))
         for p in axes(Vm, 4), (bi, (a, b)) in enumerate(baselines(stack0).pairs)
-            fa, fb = CAL.correlation_feed_pair(pol_products(stack0)[p])
+            fa, fb = feed_pairs(stack0)[p]
             for t in axes(Vm, 2), c in axes(Vm, 1)
                 den = g[c, t, a, fa] * conj(g[c, t, b, fb])
                 (isfinite(den) && abs2(den) > 0) || continue
@@ -493,7 +493,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         gx = CAL.evaluate_gains(ev, bp.θ, win0s.chan_idx, 1:1)   # A1..A3 ≡ solution rows 1..3
         Vx = copy(parent(stack0s[:vis])); Wx = copy(parent(stack0s[:weights]))
         for p in axes(Vx, 4), (bi, (a, b)) in enumerate(baselines(stack0s).pairs)
-            fa, fb = CAL.correlation_feed_pair(pol_products(stack0s)[p])
+            fa, fb = feed_pairs(stack0s)[p]
             for t in axes(Vx, 2), c in axes(Vx, 1)
                 den = gx[c, 1, a, fa] * conj(gx[c, 1, b, fb])
                 (isfinite(den) && abs2(den) > 0) || continue

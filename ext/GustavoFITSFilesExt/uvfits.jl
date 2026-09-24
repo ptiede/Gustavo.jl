@@ -72,8 +72,7 @@ function generic_to_aips_code(label::AbstractString, basis::Symbol)
     error("Unsupported correlation label: $label")
 end
 
-# MSv4 canonical ordering: parallel-hands first, then cross-hands in PQ/QP
-# order. For sub-sets we keep the canonical relative order.
+# Product order written to a leaf; a subset keeps this relative order.
 const _MSV4_CANONICAL = ("PP", "PQ", "QP", "QQ")
 function _msv4_order(labels::AbstractVector{<:AbstractString})
     out = String[]

@@ -94,9 +94,9 @@
             ci, ti = win.chan_idx, win.ti_idx
             V = parent(leaf[:vis])
             bl_pairs = UVP.baselines(leaf).pairs
-            lp = pol_products(leaf)
+            lp = feed_pairs(leaf)
             for p in eachindex(lp)
-                fa, fb = CAL.correlation_feed_pair(lp[p])
+                fa, fb = lp[p]
                 for (bi, (a, b)) in enumerate(bl_pairs), (tt, _) in enumerate(ti), (cc, c) in enumerate(ci)
                     V[cc, tt, bi, p] *= inst_gain(a, fa, c) * conj(inst_gain(b, fb, c))
                 end
@@ -162,7 +162,7 @@
                 for i in eachindex(x, y)
         )
         @test finite_close(d_clean.spec_before, d_pcal.spec_before)
-        m = FP.fringe_search_map(corrupt, solf; precal = sol)
+        m = FP.fringe_search_map(corrupt, solf; pol = (1, 1), precal = sol)
         @test m isa FP.BaselineFringeMap
     end
 

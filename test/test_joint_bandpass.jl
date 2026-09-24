@@ -281,8 +281,8 @@ end
     )
 
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
-    pol_products = ["PP", "QQ"]
-    feeds = [FP.correlation_feed_pair(p) for p in pol_products]
+    pol_products = [(1, 1), (2, 2)]
+    feeds = collect(pol_products)
 
     rng = MersenneTwister(20260908)
     # Station 1 breaks across the boundary; every other station holds one gain
@@ -498,8 +498,8 @@ end
     )
 
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
-    pol_products = ["PP", "QQ"]
-    feeds = [FP.correlation_feed_pair(p) for p in pol_products]
+    pol_products = [(1, 1), (2, 2)]
+    feeds = collect(pol_products)
 
     rng = MersenneTwister(20260908)
     # Station 1 breaks across the boundary; every other station holds one gain
@@ -596,8 +596,8 @@ end
     )
 
     bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
-    pol_products = ["PP", "QQ"]
-    feeds = [FP.correlation_feed_pair(p) for p in pol_products]
+    pol_products = [(1, 1), (2, 2)]
+    feeds = collect(pol_products)
 
     @testset "segmentations that cut at different channels refine each other" begin
         # Station 1 in blocks of two channels, the rest in blocks of three: no

@@ -724,10 +724,9 @@ end
     bl_pairs = [(1, 2), (1, 3), (2, 3)]
     bl_a = first.(bl_pairs)
     bl_b = last.(bl_pairs)
-    # Parallel + cross hands: PP, PQ, QP, QQ → feed pairs.
-    pol_products = ["PP", "PQ", "QP", "QQ"]
-    feed_a = [CAL.correlation_feed_pair(p)[1] for p in pol_products]
-    feed_b = [CAL.correlation_feed_pair(p)[2] for p in pol_products]
+    pol_products = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    feed_a = first.(pol_products)
+    feed_b = last.(pol_products)
 
     coh = zeros(ComplexF64, length(bl_pairs), 2, 2)
     for bi in eachindex(bl_pairs)
@@ -748,15 +747,6 @@ end
 end
 
 # ── Audit-driven regression tests ────────────────────────────────────────────
-
-@testset "Calibration parallel_hand_indices errors when PP/QQ missing" begin
-    @test CAL.parallel_hand_indices(["PP", "PQ", "QP", "QQ"]) == (1, 4)
-    # Regression for the operator-precedence bug: a missing PP must error, not
-    # silently return (nothing, idx).
-    @test_throws ErrorException CAL.parallel_hand_indices(["RL", "QQ"])
-    @test_throws ErrorException CAL.parallel_hand_indices(["PP", "RL"])
-    @test_throws ErrorException CAL.parallel_hand_indices(["RR", "LL"])
-end
 
 @testset "Calibration savitzky_golay_smooth: isolated finite sample" begin
     # Regression: a window containing one finite sample (ord = 0) must not crash.

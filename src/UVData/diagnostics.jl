@@ -319,43 +319,24 @@ end
 
 # ── Polarization selection ──────────────────────────────────────────────────
 
-function resolve_plot_polarizations(data::UVSet; pol = :parallel)
-    pp = pol_products(data)
-    if pol == :parallel
-        pol_idx = collect(parallel_hand_indices(pp))
-    elseif pol == :all
-        pol_idx = collect(eachindex(pp))
-    elseif pol isa Integer
-        pol_idx = [Int(pol)]
-    elseif pol isa AbstractString
-        pol_idx = [resolve_single_polarization(data, pol)]
-    elseif pol isa AbstractVector || pol isa Tuple
-        pol_idx = Int[resolve_single_polarization(data, item) for item in pol]
+function resolve_plot_polarizations(data::UVSet; pol)
+    feeds = feed_pairs(data)
+    pol_idx = if pol == :all
+        collect(eachindex(feeds))
+    elseif pol isa Union{Integer, Tuple{Integer, Integer}}
+        [resolve_single_polarization(data, pol)]
+    elseif pol isa AbstractVector
+        Int[resolve_single_polarization(data, item) for item in pol]
     else
-        error("Unsupported polarization selector: $pol")
+        throw(ArgumentError("select products by :all, an index, a feed pair such as (1, 1), or a vector of these; got $(repr(pol))"))
     end
 
-    all(1 .<= pol_idx .<= length(pp)) || error("Polarization index out of bounds: $pol_idx")
-    return pol_idx, collect(pp[pol_idx])
+    all(in(eachindex(feeds)), pol_idx) || error("Polarization index out of bounds: $pol_idx")
+    return pol_idx, string.(feeds[pol_idx])
 end
 
 resolve_single_polarization(data::UVSet, pol::Integer) = Int(pol)
-function resolve_single_polarization(data::UVSet, pol::AbstractString)
-    pp = pol_products(data)
-    idx = findfirst(==(pol), pp)
-    isnothing(idx) || return idx
-
-    if pol in ("11", "22")
-        p_idx, q_idx = parallel_hand_indices(pp)
-        return pol == "11" ? p_idx : q_idx
-    end
-    if pol in ("12", "21")
-        cross = cross_hand_indices(pp)
-        isnothing(cross) && error("Cross-hand pol $pol not found in $(collect(pp))")
-        return pol == "12" ? cross.pq : cross.qp
-    end
-    error("Polarization $pol not found in $(collect(pp))")
-end
+resolve_single_polarization(data::UVSet, pol::Tuple{Integer, Integer}) = pol_index(data, pol)
 
 # ── Axis and track helpers ──────────────────────────────────────────────────
 
@@ -493,8 +474,6 @@ end
 
 function resolve_gain_polarizations(data::UVSet; pol = :all)
     if pol == :all
-        pol_idx = [1, 2]
-    elseif pol == :parallel
         pol_idx = [1, 2]
     elseif pol isa Integer
         pol_idx = [Int(pol)]

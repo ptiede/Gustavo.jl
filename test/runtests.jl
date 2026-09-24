@@ -11,7 +11,7 @@ import XRadio
 using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
-using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, UVSet, pol_products
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, UVSet, pol_products, feed_pairs
 using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using PolarizedTypes: RPol, LPol
 
@@ -303,24 +303,25 @@ end
         ], 2, 2, 2, 2
     )
 
-    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = :parallel)
+    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = [(1, 1), (2, 2)])
     @test pol_idx == [1, 4]
-    @test pol_labels == ["PP", "QQ"]
+    @test pol_labels == ["(1, 1)", "(2, 2)"]
+    @test_throws UndefKeywordError UV.resolve_plot_polarizations(data)
 
-    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = ["QQ", "PQ"])
+    pol_idx, pol_labels = UV.resolve_plot_polarizations(data; pol = [(2, 2), 2])
     @test pol_idx == [4, 2]
-    @test pol_labels == ["QQ", "PQ"]
+    @test_throws "a feed pair such as (1, 1)" UV.resolve_plot_polarizations(data; pol = "PP")
 
-    @test !isnothing(UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
+    @test !isnothing(UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = (1, 1)))
     @test !isnothing(UV.plot_stability(data, corr, ("AA", "AX"); quantity = :amplitude, pol = :all, relative = true))
     @test !isnothing(UV.plot_gain_solutions(gains, data))
     @test !isnothing(UV.plot_gain_solutions(gains, data; quantity = :amplitude, pol = 1, sites = "AA", relative = false))
     @test !isnothing(UV.plot_gain_solutions(gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
     fig_embed = Figure(size = (1400, 500))
-    @test !isnothing(UV.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = "PP"))
+    @test !isnothing(UV.plot_stability(fig_embed[1, 1], data, corr, ("AA", "AX"); quantity = :phase, pol = (1, 1)))
     @test !isnothing(UV.plot_gain_solutions(fig_embed[1, 2], gains, data; quantity = :phase, pol = [2], sites = ["AX"]))
 
-    fig = UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = "PP")
+    fig = UV.plot_stability(data, corr, ("AA", "AX"); quantity = :phase, pol = (1, 1))
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig)
     @test_nowarn show(IOBuffer(), MIME("image/png"), fig_embed)
 end
@@ -1743,22 +1744,52 @@ end
     @test UV.baseline_index(bls, (-1, -2)) == 0
 end
 
-@testset "pol_index / pol_at canonicalization" begin
+@testset "pol_index / pol_at select by feed pair" begin
     UV = Gustavo.UVData
     base = synthetic_uvdata()
     leaf = first(values(UV.branches(base)))
-    pp = UV.pol_index(leaf, "PP")
-    @test pp isa Integer && pp > 0
-    # EHT shorthands fold onto the canonical PP/PQ/QP/QQ.
-    @test UV.pol_index(leaf, "RR") == pp
-    @test UV.pol_index(leaf, "XX") == pp
-    @test UV.pol_index(leaf, (RPol(), RPol())) == pp
+    @test UV.feed_pairs(leaf) == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    @test [UV.pol_index(leaf, fp) for fp in UV.feed_pairs(leaf)] == 1:4
+    @test_throws KeyError UV.pol_index(leaf, (1, 3))
+    @test_throws MethodError UV.pol_index(leaf, "RR")
 
-    @test UV.pol_index(leaf, "QQ") == UV.pol_index(leaf, "LL")
-    # Selector roundtrip.
-    sel = UV.pol_at("RR")
+    sel = UV.pol_at(leaf, (2, 1))
     @test sel isa DimensionalData.At
-    @test getfield(sel, :val) == "PP"  # canonical label
+    @test getfield(sel, :val) == UV.pol_products(leaf)[3]
+
+    @test_throws "P (feed 1) and Q (feed 2)" UV._feed_pairs(["RR"])
+end
+
+@testset "a Measurement Set's products resolve through each antenna's receptors" begin
+    UV = Gustavo.UVData
+    Testing = XRadio.Testing
+    names = ["SMA", "LMT", "ALMA"]
+    ant = Testing.antenna(names)
+    types = parent(ant[:polarization_type])
+    types[:, 2] .= ["L", "R"]
+    types[:, 3] .= ["X", "Y"]
+    ms = Testing.measurement_set(; antennas = names, antenna_xds = ant)
+    @test UV.pol_products(ms) == ["RR", "RL", "LR", "LL"]
+    @test UV.baselines(ms).pairs == [(1, 2), (1, 3), (2, 3)]
+
+    pairs = UV.feed_pairs(ms)
+    # SMA–LMT: LMT's R is its second receptor.
+    @test pairs[:, 1] == [(1, 2), (1, 1), (2, 2), (2, 1)]
+    # SMA–ALMA: ALMA has no R/L receptor, so R is its first and L its second.
+    @test pairs[:, 2] == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    # LMT–ALMA
+    @test pairs[:, 3] == [(2, 1), (2, 2), (1, 1), (1, 2)]
+
+    order, perm = UV._feed_permutation(pairs)
+    @test order == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    @test perm[:, 1] == [2, 1, 4, 3]
+    @test all(bi -> pairs[perm[:, bi], bi] == order, axes(pairs, 2))
+
+    types[:, 3] .= ["R", "X"]
+    @test_throws "product letter `L` names no receptor of antenna `ALMA`, whose receptors are R, X" UV.feed_pairs(
+        Testing.measurement_set(; antennas = names, antenna_xds = ant)
+    )
+    @test_throws "every baseline must relate each of" UV._feed_permutation([(1, 1) (1, 1); (2, 2) (1, 2)])
 end
 
 @testset "baseline DimStack views" begin
@@ -1780,8 +1811,8 @@ end
     @test size(bl[:uvw]) == (nti, 3)
 
     # Polarization selector path matches manual indexing.
-    pp_idx = UV.pol_index(leaf, "PP")
-    via_selector = parent(bl[:vis][Polarization = UV.pol_at("PP")])
+    pp_idx = UV.pol_index(leaf, (1, 1))
+    via_selector = parent(bl[:vis][Polarization = UV.pol_at(leaf, (1, 1))])
     via_manual = parent(view(leaf[:vis], UV.BaselineID(bls.pairs[1] |> p -> bls[p])))[:, :, pp_idx]
     @test via_selector == via_manual
 

@@ -222,7 +222,7 @@ _unit_phasor(zs) = (s = sum(z -> isfinite(z) ? z : zero(z), zs); abs(s) > 0 ? s 
 
 function Fring.plot_baseline_fringes(
         parent, data::BaselineFringeData;
-        kind::Symbol = :freq, show::Symbol = :phase, pol = :parallel, baselines = :all,
+        pol, kind::Symbol = :freq, show::Symbol = :phase, baselines = :all,
         layout::Symbol = :triangle, bin::Integer = 0, freqgroup = nothing,
         recenter::Bool = true, drop_empty::Bool = true,
     )
@@ -378,7 +378,7 @@ function Fring.plot_baseline_fringes(
     Label(
         parent[0, :],
         string(
-            data.source, "  scan ", data.scan, "  [", data.pol_products[p], "]  ",
+            data.source, "  scan ", data.scan, "  [", data.feeds[p], "]  ",
             show, " vs ", kind === :freq ? "freq" : "time",
             isfinite(data.max_snr) ? string("  (max SNR ", round(data.max_snr; digits = 1), ")") : "",
             fgsel == 0 ? "" : @sprintf(

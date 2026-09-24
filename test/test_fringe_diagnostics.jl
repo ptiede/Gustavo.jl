@@ -55,7 +55,7 @@ using HDF5
         n = length(inf.det_pfa)
         @test n > 0
         @test length(inf.det_scan) == length(inf.det_ant_a) == length(inf.det_ant_b) ==
-            length(inf.det_pol) == length(inf.det_snr) == n
+            length(inf.det_feed_a) == length(inf.det_feed_b) == length(inf.det_snr) == n
         @test all(s -> 1 <= s <= info.nscan, inf.det_scan)
         @test length(inf.det_detected) == n
         @test all(p -> 0.0 <= p <= 1.0, inf.det_pfa)
@@ -137,15 +137,18 @@ using HDF5
         @test data isa FP.BaselineFringeData
         nchan = length(sol.geom.channel_freqs)
         nbl = length(data.bl_pairs)
-        npol = length(data.pol_products)
+        npol = length(data.feeds)
         @test size(data.spec_before) == (nchan, nbl, npol)
         @test size(data.spec_after) == (nchan, nbl, npol)
         @test size(data.tser_before, 1) == length(data.times)
         @test data.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset).groups))
 
-        p = FP.baseline_pol_index(data, :parallel)
-        @test 1 <= p <= npol
-        @test FP.baseline_pol_index(data, data.pol_products[1]) == 1
+        @test data.feeds == [(1, 1), (1, 2), (2, 1), (2, 2)]
+        p = FP.baseline_pol_index(data, (1, 1))
+        @test p == 1
+        @test FP.baseline_pol_index(data, (2, 1)) == 3
+        @test FP.baseline_pol_index(data, 2) == 2
+        @test_throws "by index or by feed pair" FP.baseline_pol_index(data, "RR")
 
         # Quality: dividing out the solution should ALIGN the per-channel phases
         # (flatten the delay slope), so the coherent concentration R = |Σe^{iφ}|/N
@@ -185,7 +188,7 @@ using HDF5
 
     @testset "delay closure" begin
         data = FP.baseline_fringe_data(uvset, sol)
-        c = FP.delay_closure(data)
+        c = FP.delay_closure(data; pol = (1, 1))
         @test !isempty(c.triangles)
         @test length(c.closure_before) == length(c.triangles)
 
@@ -209,13 +212,12 @@ using HDF5
     end
 
     @testset "fringe_search_map (delay–rate surface)" begin
-        m = FP.fringe_search_map(uvset, sol)
+        m = FP.fringe_search_map(uvset, sol; pol = (1, 1))
         @test m isa FP.BaselineFringeMap
-        # Defaults: the highest-SNR scan, the strongest baseline, a parallel hand.
+        # Defaults: the highest-SNR scan, the strongest baseline.
         @test m.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset).groups))
         @test m.ant_names == ["A1", "A2", "A3", "A4"]
-        fa, fb = CAL.correlation_feed_pair(m.pol)
-        @test fa == fb
+        @test m.pol == (1, 1)
         fsm = m.map
         @test size(fsm.snr) == (length(fsm.delays), length(fsm.rates))
         @test fsm.detection.valid
@@ -236,20 +238,20 @@ using HDF5
         )
         @test m2.bl_pair == m.bl_pair
         @test m2.map.detection.snr ≈ fsm.detection.snr rtol = 1.0e-10
-        @test FP.fringe_search_map(uvset, sol; baseline = (b, a)).bl_pair == m.bl_pair  # order-insensitive
+        @test FP.fringe_search_map(uvset, sol; baseline = (b, a), pol = m.pol).bl_pair == m.bl_pair  # order-insensitive
         m3 = FP.fringe_search_map(uvset, sol; baseline = 2, pol = 1)
-        @test m3.pol == "PP"
+        @test m3.pol == (1, 1)
 
-        @test_throws ErrorException FP.fringe_search_map(uvset, sol; scan_index = 10_000)
-        @test_throws ErrorException FP.fringe_search_map(uvset, sol; baseline = ("A1", "nope"))
-        @test_throws ErrorException FP.fringe_search_map(uvset, sol; pol = "XX")
+        @test_throws ErrorException FP.fringe_search_map(uvset, sol; scan_index = 10_000, pol = 1)
+        @test_throws ErrorException FP.fringe_search_map(uvset, sol; baseline = ("A1", "nope"), pol = 1)
+        @test_throws KeyError FP.fringe_search_map(uvset, sol; pol = (1, 3))
     end
 
     @testset "plot_fringe_search smoke" begin
-        m = FP.fringe_search_map(uvset, sol)
+        m = FP.fringe_search_map(uvset, sol; pol = (1, 1))
         @test !isnothing(FP.plot_fringe_search(m))
         @test !isnothing(FP.plot_fringe_search(m.map))                    # unlabeled low-level map
-        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair))
+        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair, pol = m.pol))
         fig = Figure(size = (900, 700))
         @test !isnothing(FP.plot_fringe_search(fig[1, 1], m))
         figm = FP.plot_fringe_search(m)
@@ -258,7 +260,7 @@ using HDF5
         # Zoom: the default view is a window around the peak, `false` the whole
         # searched plane, a number that span in main-lobe widths.
         @test !isnothing(FP.plot_fringe_search(m; zoom = 30))
-        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair, zoom = false))
+        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair, pol = m.pol, zoom = false))
         @test_throws ErrorException FP.plot_fringe_search(m; zoom = 0)
 
         figfull = FP.plot_fringe_search(m; zoom = false)
@@ -274,32 +276,32 @@ using HDF5
 
     @testset "plot_baseline_fringes smoke" begin
         data = FP.baseline_fringe_data(uvset, sol)
-        @test !isnothing(FP.plot_baseline_fringes(data))                                   # freq/phase
-        @test !isnothing(FP.plot_baseline_fringes(data; kind = :time))
-        @test !isnothing(FP.plot_baseline_fringes(data; kind = :freq, show = :amp))
+        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1))                                   # freq/phase
+        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :time))
+        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :freq, show = :amp))
         @test !isnothing(FP.plot_baseline_fringes(data; baselines = 2, pol = 1))
-        @test !isnothing(FP.plot_baseline_fringes(uvset, sol; kind = :time))               # full path
+        @test !isnothing(FP.plot_baseline_fringes(uvset, sol; pol = 1, kind = :time))               # full path
         fig = Figure(size = (900, 700))
-        @test !isnothing(FP.plot_baseline_fringes(fig[1, 1], data; kind = :freq))
-        figbl = FP.plot_baseline_fringes(data)
+        @test !isnothing(FP.plot_baseline_fringes(fig[1, 1], data; pol = 1, kind = :freq))
+        figbl = FP.plot_baseline_fringes(data; pol = 1)
         @test (show(IOBuffer(), MIME("image/png"), figbl); true)
         # per-frequency-group view (freq restricts channels; time uses the freqgroup tser)
         nbg = length(data.freq_groups)
-        @test !isnothing(FP.plot_baseline_fringes(data; kind = :freq, freqgroup = nbg))
-        @test !isnothing(FP.plot_baseline_fringes(data; kind = :time, freqgroup = 1))
-        @test_throws Exception FP.plot_baseline_fringes(data; freqgroup = nbg + 1)
+        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :freq, freqgroup = nbg))
+        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :time, freqgroup = 1))
+        @test_throws Exception FP.plot_baseline_fringes(data; pol = 1, freqgroup = nbg + 1)
         @test !isnothing(FP.plot_fringe_spectrum(sol; freqgroup = 1))
     end
 
     @testset "coherence report (stage-agnostic)" begin
         corr = Gustavo.UVData.apply_calibration(uvset, sol)
-        raw = UVP.coherence_report(uvset)
-        rep = UVP.coherence_report(corr)
+        raw = UVP.coherence_report(uvset; pols = [(1, 1), (2, 2)])
+        rep = UVP.coherence_report(corr; pols = [(1, 1), (2, 2)])
 
         @test rep isa UVP.CoherenceReport
         nbl = length(rep.bl_pairs)
         @test nbl > 0
-        @test all(p -> length(p) == 2 && p[1] == p[2], rep.pol_products)   # parallel-hand default
+        @test rep.feeds == [(1, 1), (2, 2)]
         @test size(rep.time.eta_baseline) == (length(rep.time.intervals), nbl)
         @test size(rep.freq.eta_baseline) == (length(rep.freq.intervals), nbl)
         @test length(rep.time.eta) == length(rep.time.intervals)
@@ -322,12 +324,12 @@ using HDF5
 
         # Selectors / overrides.
         @test UVP.coherence_report(corr; pols = :all) isa UVP.CoherenceReport
-        rep2 = UVP.coherence_report(corr; timescales = [30.0, 120.0, 360.0], bandwidths = [4.0e6, 1.6e7])
+        rep2 = UVP.coherence_report(corr; pols = 1, timescales = [30.0, 120.0, 360.0], bandwidths = [4.0e6, 1.6e7])
         @test rep2.time.intervals == [30.0, 120.0, 360.0]
         @test rep2.freq.intervals == [4.0e6, 1.6e7]
 
         # Re-exported at the package top level.
-        @test Gustavo.coherence_report(corr) isa UVP.CoherenceReport
+        @test Gustavo.coherence_report(corr; pols = :all) isa UVP.CoherenceReport
 
         buf = IOBuffer()
         @test_nowarn UVP.print_coherence_report(rep; io = buf)
@@ -492,11 +494,11 @@ end
     spec_b = reshape(ComplexF64[cis(2π * c / 6) for c in 1:nchan], nchan, 1, 1)
     spec_a = reshape(fill(1.0 + 0.0im, nchan), nchan, 1, 1)
     data = FP.BaselineFringeData(
-        "S", "1", 1, 100.0, bl, ["A", "B"], ["PP"], freqs, [0.0],
+        "S", "1", 1, 100.0, bl, ["A", "B"], [(1, 1)], freqs, [0.0],
         spec_b, spec_a,
         zeros(ComplexF64, 1, 1, 1), zeros(ComplexF64, 1, 1, 1),
     )
-    stats = FP.fringe_freq_group_stats(data)
+    stats = FP.fringe_freq_group_stats(data; pol = 1)
     @test length(stats) == 3
     @test all(r -> r.nchan == 4, stats)
     @test all(r -> r.eta_after ≈ 1.0, stats)
@@ -552,7 +554,7 @@ end
         # Corrected visibilities on a baseline should scatter about their mean
         # by the reported width. Pooled over every baseline and channel this is
         # a tight check even with few samples.
-        p = FP.baseline_pol_index(d, :parallel)
+        p = FP.baseline_pol_index(d, (1, 1))
         z = Float64[]
         for bi in eachindex(d.bl_pairs)
             a, b = d.bl_pairs[bi]
@@ -585,20 +587,20 @@ end
         # every panel still renders.
         nchan = length(d.freqs)
         bare = FP.BaselineFringeData(
-            "S", "1", 1, 100.0, d.bl_pairs, d.ant_names, d.pol_products, d.freqs, d.times,
+            "S", "1", 1, 100.0, d.bl_pairs, d.ant_names, d.feeds, d.freqs, d.times,
             d.spec_before, d.spec_after, d.tser_before, d.tser_after,
         )
         @test all(isnan, bare.spec_sigma_before)
         for kind in (:freq, :time), show in (:phase, :amp)
-            @test FP.plot_baseline_fringes(bare; kind = kind, show = show) isa Figure
+            @test FP.plot_baseline_fringes(bare; pol = 1, kind = kind, show = show) isa Figure
         end
     end
 
     @testset "every panel variant renders with bars" begin
         for kind in (:freq, :time), show in (:phase, :amp), layout in (:triangle, :grid)
-            @test FP.plot_baseline_fringes(d; kind = kind, show = show, layout = layout) isa Figure
+            @test FP.plot_baseline_fringes(d; pol = 1, kind = kind, show = show, layout = layout) isa Figure
         end
-        @test FP.plot_baseline_fringes(d; kind = :freq, show = :amp, freqgroup = 1) isa Figure
-        @test FP.plot_baseline_fringes(d; kind = :time, show = :phase, freqgroup = 1) isa Figure
+        @test FP.plot_baseline_fringes(d; pol = 1, kind = :freq, show = :amp, freqgroup = 1) isa Figure
+        @test FP.plot_baseline_fringes(d; pol = 1, kind = :time, show = :phase, freqgroup = 1) isa Figure
     end
 end

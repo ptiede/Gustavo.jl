@@ -17,7 +17,7 @@
 # atmospheric terms cancelling, at parallel-hand SNR and without cross-hand data
 # or any station fit in between.
 const DetectionRow = @NamedTuple{
-    a::Int, b::Int, pol::String, snr::Float64, pfa::Float64,
+    a::Int, b::Int, pol::Tuple{Int, Int}, snr::Float64, pfa::Float64,
     delay::Float64, rate::Float64, phase::Float64, detected::Bool,
     snr_steer::Float64, pfa_steer::Float64,
     delay_steer::Float64, rate_steer::Float64, steered::Bool,
@@ -68,16 +68,16 @@ function search_scan(
     bls = UVData.baselines(data)
     keep = findall(pr -> pr[1] != pr[2], bls.pairs)
     bl_pairs = bls.pairs[keep]
-    pols = pol_products(data)
+    feeds = feed_pairs(data)
     ncross = length(keep)
-    npol = length(pols)
+    npol = length(feeds)
 
     # The search's compute type: a ComplexF32 streaming caller runs its FFT
     # natively in Float32 (see search.jl's precision-scope note); the detection
     # layers below track the same precision.
     C = eltype(Vsearch)
     T = real(C)
-    dims = (BaselineID(bl_pairs), Polarization(pols))
+    dims = (BaselineID(bl_pairs), Polarization(feeds))
     delay = zeros(T, dims...)
     rate = similar(delay)
     phase = similar(delay)

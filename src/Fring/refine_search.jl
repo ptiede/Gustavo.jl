@@ -22,16 +22,16 @@
 # channels × APs, whose ratio is the inverse-variance mean of the data, already
 # gain-corrected (and reweighted by |gain|², matching `apply_calibration`)
 # through the pipeline's transform chain before this kernel ever sees it.
-function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, pols)
+function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, feeds)
     return _accumulate_leaf_band_phasor!(
-        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, pols,
+        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, feeds,
     )
 end
 
-function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, V, W, F, bl_pairs, pols)
+function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, V, W, F, bl_pairs, feeds)
     UVData.check_layer_axes(V, W, F)
     @inbounds for p in axes(V, Polarization)
-        fa, fb = correlation_feed_pair(pols[p])
+        fa, fb = feeds[p]
         fa == fb || continue                    # parallel hands only
         for bi in axes(V, BaselineID)
             a, b = bl_pairs[bi]
@@ -154,17 +154,17 @@ end
 # hands only), off data already
 # gain-corrected through the pipeline's transform chain.
 function _accumulate_leaf_chunks!(
-        phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, pols, chunk_of_chan,
+        phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, feeds, chunk_of_chan,
     )
     return _accumulate_leaf_chunks!(
-        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, pols, chunk_of_chan,
+        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, feeds, chunk_of_chan,
     )
 end
 
-function _accumulate_leaf_chunks!(phasor_sum, weight_sum, V, W, F, bl_pairs, pols, chunk_of_chan)
+function _accumulate_leaf_chunks!(phasor_sum, weight_sum, V, W, F, bl_pairs, feeds, chunk_of_chan)
     UVData.check_layer_axes(V, W, F)
     @inbounds for p in axes(V, Polarization)
-        fa, fb = correlation_feed_pair(pols[p])
+        fa, fb = feeds[p]
         fa == fb || continue
         for bi in axes(V, BaselineID)
             a, b = bl_pairs[bi]

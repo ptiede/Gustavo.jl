@@ -276,7 +276,7 @@ gains and source coherencies.
 - `coh`    : `(nbl, 2, 2)` source coherency per baseline (feed_a, feed_b indexed).
 - `bl_a`, `bl_b` : antenna indices of each baseline (length `nbl`).
 - `feed_a`, `feed_b` : feed index (1/2) of antenna A and B for each of the
-  `npol` correlation products (from `correlation_feed_pair.(pol_products)`).
+  `npol` correlation products (from [`feed_pairs`](@ref)).
 """
 function predict_visibilities(
         gains::AbstractArray{<:Complex, 4}, coh::AbstractArray{<:Complex, 3},

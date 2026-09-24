@@ -105,12 +105,12 @@ function _narrow_eltype(xs)
 end
 
 """
-    pol_products(x) -> Vector{String}
+    pol_products(x) -> Vector
 
-Return the polarization-product labels (e.g. `["PP", "PQ", "QP", "QQ"]`)
-read off the `Polarization` dimension of `x`'s underlying visibility array. Works
-on a `DimArray` (the lookup), a leaf `AbstractDimTree`, or a `UVSet`
-(uses the first leaf — all leaves share the same Polarization axis on read).
+The values of the `Polarization` lookup of `x`'s visibilities: the stored
+product labels of a leaf or `UVSet` (`"PP"`, `"PQ"`, …), or the feed pairs of a
+solver cube (see [`feed_pairs`](@ref)). A `UVSet` answers for its first leaf;
+all leaves share one axis.
 """
 pol_products(vis::AbstractDimArray) = collect(lookup(vis, Polarization))
 pol_products(leaf::PartitionedData) = pol_products(leaf[:vis])
@@ -118,6 +118,30 @@ function pol_products(uvset::UVSet)
     bs = DimensionalData.branches(uvset)
     isempty(bs) && error("pol_products: UVSet has no leaves")
     return pol_products(first(values(bs)))
+end
+
+"""
+    feed_pairs(x) -> Vector{Tuple{Int, Int}}
+
+The `(feed_a, feed_b)` pair each product along the `Polarization` axis of `x`
+relates, so that `V[a, b, p] = g_a[feed_a] · S · conj(g_b[feed_b])`. A solver
+cube's lookup holds these pairs directly. A leaf or `UVSet` labels its products
+`P` (feed 1) and `Q` (feed 2). A Measurement Set's labels are resolved through
+each antenna's receptors by
+[`feed_pairs(::XRadio.MeasurementSet)`](@ref feed_pairs(::XRadio.MeasurementSet)).
+"""
+feed_pairs(vis::AbstractDimArray) = _feed_pairs(lookup(vis, Polarization))
+feed_pairs(x::Union{PartitionedData, UVSet}) = _feed_pairs(pol_products(x))
+
+_feed_pairs(products::AbstractVector{<:Tuple{Integer, Integer}}) = collect(Tuple{Int, Int}, products)
+_feed_pairs(products::AbstractVector{<:AbstractString}) = map(_stored_feed_pair, products)
+
+function _stored_feed_pair(label::AbstractString)
+    feed(c) = c == 'P' ? 1 : c == 'Q' ? 2 : throw(
+        ArgumentError("a leaf labels its products P (feed 1) and Q (feed 2), got \"$label\"")
+    )
+    length(label) == 2 || throw(ArgumentError("a product label has two feeds, got \"$label\""))
+    return (feed(label[1]), feed(label[2]))
 end
 
 """
@@ -165,72 +189,31 @@ timestamps.
 jd_to_unix(jd::Real) = (Float64(jd) - JD_UNIX_EPOCH) * 86400.0
 unix_to_jd(t::Real) = JD_UNIX_EPOCH + Float64(t) / 86400.0
 
-# ── Polarization-by-name selectors ────────────────────────────────────
-#
-# Internal MSv4 canonical labels are "PP" / "PQ" / "QP" / "QQ" (feed-1
-# vs feed-2 cross-product). EHT users habitually write "RR" / "RL" /
-# "LR" / "LL" (or X/Y for ALMA pre-PolConvert); these are aliases for the
-# same canonical pair on a circular- or linear-feed antenna. The map is
-# unambiguous: feed letter 1 → P, feed letter 2 → Q.
+# ── Selecting a product ───────────────────────────────────────────────
 
-_POL_FEED_LETTERS = ('P', 'Q', 'R', 'L', 'X', 'Y')
+"""
+    pol_index(x, pair::Tuple{Integer, Integer}) -> Int
 
-function _canonical_pol_label(label::AbstractString)
-    s = uppercase(strip(String(label)))
-    length(s) == 2 || throw(
-        ArgumentError(
-            "pol_index: expected a 2-character label like \"PP\" / \"RR\" / \"XY\", got \"$label\""
-        )
-    )
-    return string(_canonical_feed(s[1]), _canonical_feed(s[2]))
+The index along the `Polarization` axis of `x` of the product relating feed
+`pair[1]` of the first antenna to feed `pair[2]` of the second (see
+[`feed_pairs`](@ref)). Throws `KeyError` when `x` has no such product.
+"""
+pol_index(x, pair::Tuple{Integer, Integer}) = _pol_index_lookup(feed_pairs(x), pair)
+
+function _pol_index_lookup(pairs::AbstractVector{<:Tuple{Integer, Integer}}, pair)
+    i = findfirst(==(pair), pairs)
+    i === nothing && throw(KeyError(pair))
+    return i
 end
-_canonical_feed(c::Char) = c in ('P', 'R', 'X') ? 'P' :
-    c in ('Q', 'L', 'Y') ? 'Q' :
-    throw(ArgumentError("pol_index: unsupported feed letter '$c' (expected one of P/Q/R/L/X/Y)"))
-
-# Convert a `(PolType, PolType)` pair to a canonical "PP"/"PQ"/"QP"/"QQ" label.
-_canonical_pol_label(p::Tuple{<:PolTypes, <:PolTypes}) =
-    string(_feed_char(p[1]), _feed_char(p[2]))
-_feed_char(::Union{RPol, XPol}) = 'P'
-_feed_char(::Union{LPol, YPol}) = 'Q'
 
 """
-    pol_index(x, label) -> Int
+    pol_at(x, pair::Tuple{Integer, Integer}) -> DimensionalData.At
 
-Resolve a polarization-product `label` to its integer index along the
-`Polarization` axis of `x` (`x` may be a `DimArray`, a leaf `AbstractDimTree`, a
-`UVSet`, or any concrete `Vector{String}` of pol products). Accepts:
-
-- a string like `"PP"` / `"RR"` / `"LL"` / `"XY"` — the EHT shorthands
-  (`R/L`, `X/Y`) are folded onto the canonical MSv4 `P/Q` pair before
-  lookup, so e.g. `pol_index(leaf, "RR") == pol_index(leaf, "PP")`;
-- a tuple `(RPol(), RPol())` of `PolarizedTypes` — same canonicalization
-  via `nominal_basis` semantics.
-
-Throws `KeyError` when the canonicalized label is absent from `x`.
-"""
-pol_index(x, label::AbstractString) = _pol_index_lookup(x, _canonical_pol_label(label))
-pol_index(x, label::Tuple{<:PolTypes, <:PolTypes}) =
-    _pol_index_lookup(x, _canonical_pol_label(label))
-
-_pol_index_lookup(products::AbstractVector{<:AbstractString}, canon::AbstractString) =
-let i = findfirst(==(canon), products)
-    i === nothing ? throw(KeyError(canon)) : i
-end
-_pol_index_lookup(x, canon) = _pol_index_lookup(pol_products(x), canon)
-
-"""
-    pol_at(label) -> DimensionalData.At
-
-DimensionalData selector for the canonical pol label, suitable for
-indexing `Polarization`-dimensioned arrays:
+A selector for the product of `x` relating feed pair `pair`, for indexing
+`Polarization`-dimensioned arrays:
 
 ```julia
-amp = abs.(stack[:vis][Polarization = pol_at("RR")])
+amp = abs.(stack[:vis][Polarization = pol_at(stack, (1, 1))])
 ```
-
-Equivalent to `At(canonical_label(label))` after folding the EHT
-shorthands (`R/L`, `X/Y`) onto the MSv4 `P/Q` convention.
 """
-pol_at(label::AbstractString) = At(_canonical_pol_label(label))
-pol_at(label::Tuple{<:PolTypes, <:PolTypes}) = At(_canonical_pol_label(label))
+pol_at(x, pair::Tuple{Integer, Integer}) = At(pol_products(x)[pol_index(x, pair)])

@@ -42,9 +42,9 @@ function _worst_parallel_coherence(corr)
     for (_, leaf) in UVP.branches(corr)
         V = parent(leaf[:vis]); W = parent(leaf[:weights])
         bl_pairs = UVP.baselines(leaf).pairs
-        lp = pol_products(leaf)
+        lp = feed_pairs(leaf)
         for p in eachindex(lp)
-            fp = CAL.correlation_feed_pair(lp[p])
+            fp = lp[p]
             fp[1] == fp[2] || continue
             for bi in eachindex(bl_pairs)
                 a, b = bl_pairs[bi]

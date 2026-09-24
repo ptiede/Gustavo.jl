@@ -1,10 +1,12 @@
-# The solver reads a scan cube by dimension name, so the same data stored in
-# MSv4's axis order `(Polarization, Frequency, BaselineID, Ti)` gives the same
-# answer as Gustavo's `(Frequency, Ti, BaselineID, Polarization)`.
+# The solver reads a scan cube by dimension name and each product's feeds from
+# `feed_pairs`, so the same data stored in MSv4's axis order
+# `(Polarization, Frequency, BaselineID, Ti)`, or labeled with a leaf's `P`/`Q`
+# strings instead of feed pairs, gives the same answer as Gustavo's
+# `(Frequency, Ti, BaselineID, Polarization)` cube.
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 
-@testset "scan kernels are independent of the cube's axis order" begin
+@testset "scan kernels are independent of the cube's axis order and product labels" begin
     CAL = Gustavo.Calibration
     FP = Gustavo.Fring
     ST = Gustavo.Streaming
@@ -22,6 +24,12 @@
         metadata = DimensionalData.metadata(s),
     )
     deepcopy_stack(s) = relaid(s, dims(s))
+    function stored_labels(s)
+        pol = Polarization([join(("PQ"[fa], "PQ"[fb])) for (fa, fb) in UV.feed_pairs(s)])
+        swap(A) = DimArray(parent(A), map(d -> d isa Polarization ? pol : d, dims(A)))
+        return DimStack(map(swap, DimensionalData.layers(s)); metadata = DimensionalData.metadata(s))
+    end
+    @test UV.pol_products(stack) == [(1, 1), (1, 2), (2, 1), (2, 2)]
     same_cells(a, b) = all(k -> isequal(parent(permutedims(b[k], dims(a[k]))), parent(a[k])), keys(a))
 
     antennas = UV.union_antennas(uvset)
@@ -50,13 +58,14 @@
         (; ant_names = String.(antennas.name)); name = :fringe,
     )
 
-    # MSv4's order, and one that puts time before frequency.
-    @testset "$order" for order in (
-            (Polarization, Frequency, BaselineID, Ti),
-            (Ti, Polarization, BaselineID, Frequency),
+    # MSv4's order, one that puts time before frequency, and a leaf's labels.
+    @testset "$variant" for (variant, permuted) in (
+            "MSv4 order" => relaid(stack, (Polarization, Frequency, BaselineID, Ti)),
+            "time first" => relaid(stack, (Ti, Polarization, BaselineID, Frequency)),
+            "P/Q labels" => stored_labels(stack),
         )
-        permuted = relaid(stack, order)
-        @test size(permuted[:vis]) != size(stack[:vis])
+        @test size(permuted[:vis]) != size(stack[:vis]) ||
+            UV.pol_products(permuted) != UV.pol_products(stack)
 
         @testset "search_scan" begin
             a = FP.search_scan(stack, geom, FP.FringeSearch())

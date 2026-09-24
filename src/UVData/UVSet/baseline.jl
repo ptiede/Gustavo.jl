@@ -4,7 +4,7 @@
 # `:flags`, `:uvw`) with the `BaselineID` axis dropped. `vis`/`weights`/`flags`
 # have dims `(Frequency, Ti, Polarization)`; `:uvw` has dims `(Ti, UVW)`.
 # DimStacks support per-layer slicing and DimensionalData selectors out of
-# the box (e.g. `bl[:vis][Polarization = pol_at("RR")]`), so most downstream tasks
+# the box (e.g. `bl[:vis][Polarization = pol_at(bl, (1, 1))]`), so most downstream tasks
 # (radplots, per-channel diagnostics, time-averaging) become one-liners.
 
 """
@@ -22,7 +22,7 @@ the baseline is absent from this leaf.
 
 ```julia
 bl   = baseline(leaf, ("AA", "AX"))
-amp  = abs.(bl[:vis][Polarization = pol_at("RR")])     # (Frequency, Ti)
+amp  = abs.(bl[:vis][Polarization = pol_at(bl, (1, 1))])     # (Frequency, Ti)
 uvw  = bl[:uvw]                                # (Ti, UVW)
 ```
 """
@@ -83,7 +83,7 @@ mixed-setup stack).
 
 ```julia
 bl  = baseline(uvset, ("AA", "AX"))
-amp = abs.(bl[:vis][Polarization = pol_at("RR")])      # (Frequency, all-Ti)
+amp = abs.(bl[:vis][Polarization = pol_at(bl, (1, 1))])      # (Frequency, all-Ti)
 uv  = bl[:uvw]                                # (all-Ti, UVW)
 ```
 """

@@ -453,11 +453,12 @@ end
 # — stays correct.
 
 """
-    detection_stack(D::AbstractMatrix{<:Detection}, bl_pairs, pol_products;
+    detection_stack(D::AbstractMatrix{<:Detection}, bl_pairs, feeds;
                     ti, freq_rms, time_rms) -> DimStack
 
 Package a plain `[baseline, product]` detection matrix as the `BaselineID × Polarization`
-DimStack shape `search_scan` returns, carrying `ti` (the representative global
+DimStack shape `search_scan` returns, its products labeled by their feed pairs
+`feeds` (see [`feed_pairs`](@ref)), carrying `ti` (the representative global
 time index) in metadata — so a scan built directly (the refine stage, or a
 direct `solve_station_systems!` call) has the same shape as
 one that came from the search, and every consumer reads pairs/feeds/ti off the
@@ -469,12 +470,12 @@ rate components are referenced, and is an error when those disagree among
 themselves — see `Fring.scan_phase_epoch`.
 """
 function detection_stack(
-        D::AbstractMatrix{<:Detection}, bl_pairs, pol_products;
+        D::AbstractMatrix{<:Detection}, bl_pairs, feeds;
         ti::Integer, epoch::Union{Nothing, Real} = nothing,
         freq_rms::Union{Nothing, Real} = nothing,
         time_rms::Union{Nothing, Real} = nothing,
     )
-    gdims = (BaselineID(collect(Tuple{Int, Int}, bl_pairs)), Polarization(collect(pol_products)))
+    gdims = (BaselineID(collect(Tuple{Int, Int}, bl_pairs)), Polarization(collect(feeds)))
     layers = (;
         delay = DimArray(getfield.(D, :delay), gdims),
         rate = DimArray(getfield.(D, :rate), gdims),
@@ -506,7 +507,7 @@ _with_ti(
 
 _scan_bl_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, BaselineID))
 _scan_pols(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Polarization))
-_scan_feeds(sc::AbstractDimStack) = [correlation_feed_pair(p) for p in _scan_pols(sc)]
+_scan_feeds(sc::AbstractDimStack) = UVData._feed_pairs(_scan_pols(sc))
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc)[:ti]::Int
 _scan_epoch(sc::AbstractDimStack) = get(DimensionalData.metadata(sc), :epoch, nothing)
 _scan_spread(sc::AbstractDimStack, key::Symbol) = get(DimensionalData.metadata(sc), key, nothing)
@@ -994,14 +995,14 @@ function _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes::Integer)
 end
 
 """
-    station_closure_residuals(detections, bl_pairs, pol_products;
+    station_closure_residuals(detections, bl_pairs, feeds;
                               observable = :phase, product = 1, pfa_max) -> Vector
 
 For every closed triangle of baselines present in `bl_pairs`, the residual
 closure quantity of the chosen `observable` (`:delay`/`:rate`/`:phase`) using the
 *measured* detections — i.e. the signed sum around the triangle that station-based
 quantities must cancel. For noiseless station-differenced data these are ≈ 0
-(including mixed-hand triangles); large values flag non-closing data. This is a
+(including triangles that mix feeds); large values flag non-closing data. This is a
 property of the data alone, so no solution is needed to evaluate it.
 
 A triangle counts only when all three legs are accepted detections
@@ -1011,7 +1012,7 @@ would enter the sum as noise rather than as evidence of non-closure.
 function station_closure_residuals(
         detections::AbstractMatrix{<:Detection},
         bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
-        pol_products::AbstractVector{<:AbstractString};
+        feeds::AbstractVector;
         observable::Symbol = :phase,
         product::Integer = 1,
         pfa_max::Real = Stationization().pfa_max,

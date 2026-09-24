@@ -234,7 +234,7 @@ using Gustavo.UVData: Polarization, Frequency, BaselineID
         w = leaf[:weights]
         f = leaf[:flags]
         bl_pairs = UV.baselines(leaf).pairs
-        pols = collect(UV.pol_products(leaf))
+        feeds = UV.feed_pairs(leaf)
         nchan, nti, _, _ = size(vis)
         nant = maximum(maximum(p) for p in bl_pairs)
 
@@ -244,7 +244,7 @@ using Gustavo.UVData: Polarization, Frequency, BaselineID
         cross1 = findfirst(p -> p[1] != p[2] && 1 in p, bl_pairs)
         @test cross1 !== nothing
 
-        _, w_out, f_out = UV._apply_apriori_kernel(vis, w, f, gains, bl_pairs, pols)
+        _, w_out, f_out = UV._apply_apriori_kernel(vis, w, f, gains, bl_pairs, feeds)
         @test parent(w_out) == parent(w)
         @test f_out[1, 1, cross1, 1]
         auto === nothing || @test all(f_out[:, :, auto, :])

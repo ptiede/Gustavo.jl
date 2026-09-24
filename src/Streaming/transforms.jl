@@ -39,7 +39,7 @@ transforms.
 dims (frequencies in Hz, times in seconds, correlation products on the `Polarization`
 lookup) and the leaf's `PartitionInfo` metadata, so DimensionalData selectors
 and the `UVData` accessors both work on it directly — `stack[:vis][Polarization =
-pol_at("PP")]`, [`frequencies`](@ref), `baselines`, [`source_name`](@ref).
+pol_at(stack, (1, 1))]`, [`frequencies`](@ref), `baselines`, [`source_name`](@ref).
 `win` addresses the same channels and times in the solve's index space, which a
 coordinate axis cannot carry (`win.geom.channel_freqs[win.chan_idx] ==
 frequencies(stack)`).
@@ -263,7 +263,7 @@ function _divide_gains!(
     Vd = stack[:vis]
     Wd = stack[:weights]
     bl_pairs = UVData.baselines(stack).pairs
-    pols = pol_products(stack)
+    feeds = feed_pairs(stack)
     tspan = UVData.metadata(stack).time_span
     tconst = _time_constant_over(sol, win, tspan)
     g = Calibration._composed_gains(
@@ -275,7 +275,7 @@ function _divide_gains!(
     cols = [(bi, p) for p in axes(Vd, Polarization) for bi in axes(Vd, BaselineID)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
-        fa, fb = correlation_feed_pair(pols[p])
+        fa, fb = feeds[p]
         a, b = bl_pairs[bi]
         if amap !== nothing
             a = amap[a]
@@ -558,7 +558,7 @@ function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, exec
     Fl = stack[:flags]
     UVData.check_layer_axes(V, W, Fl)
     bl_pairs = UVData.baselines(stack).pairs
-    pols = UVData.pol_products(stack)
+    feeds = UVData.feed_pairs(stack)
     cols = [(bi, p) for p in axes(V, Polarization) for bi in axes(V, BaselineID)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
@@ -569,7 +569,7 @@ function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, exec
             end
             return
         end
-        fa, fb = UVData.correlation_feed_pair(pols[p])
+        fa, fb = feeds[p]
         for t in axes(V, Ti)
             for c in axes(V, Frequency)
                 cell = (Frequency(c), Ti(t), BaselineID(bi), Polarization(p))

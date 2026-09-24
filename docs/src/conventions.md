@@ -86,15 +86,21 @@ as the flag.
 
 ## Feeds and correlation products
 
-Correlation products are labelled by two generic feed letters, `"P"` for feed 1
-and `"Q"` for feed 2, so that one vocabulary covers circular and linear feeds.
-`"PQ"` relates ``V[a, b, p]`` to antenna ``a``'s feed 1 and antenna ``b``'s
-feed 2; [`correlation_feed_pair`](@ref Gustavo.UVData.correlation_feed_pair)
-maps a label to that index pair. `"PP"` and `"QQ"` are the parallel hands and
-`"PQ"`, `"QP"` the cross hands.
+Inside the solver a correlation product is the pair of feed indices it
+relates: product ``(f_a, f_b)`` relates ``V[a, b, p]`` to antenna ``a``'s feed
+``f_a`` and antenna ``b``'s feed ``f_b``. A solver cube's `Polarization` axis
+holds these pairs, [`feed_pairs`](@ref Gustavo.UVData.feed_pairs) returns them,
+and products are selected by index or by pair (`pol = (1, 1)`). No label is
+read: a feed's nominal polarization is recorded per antenna
+(`polarization_type` in a Measurement Set) and matters only where a feed is
+mapped back to a physical receptor.
 
-The nominal basis each station's feeds are in is a property of the antenna
-table, not of the label, and the array need not share one basis.
+A Measurement Set stores products as receptor labels (`"RR"`, `"XY"`, …).
+[`feed_pairs`](@ref feed_pairs(::XRadio.MeasurementSet)) resolves each letter
+through its antenna's `polarization_type`, so one stored product can relate
+different feed pairs on different baselines; each baseline's products are
+reordered into one shared order when data becomes solver input. A `UVSet`
+leaf labels its products `P` (feed 1) and `Q` (feed 2).
 
 ## Baseline coordinates
 

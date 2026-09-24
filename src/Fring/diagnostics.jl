@@ -226,7 +226,8 @@ a fringe `CalibrationSolution`. Produced by [`baseline_fringe_data`](@ref) and
 consumed by `plot_baseline_fringes`.
 
 Fields: `source`/`scan`/`scan_index`/`max_snr` identify the scan; `bl_pairs` and
-`pol_products` label the baseline and correlation axes; `freqs` (Hz, all spws
+`feeds` (each product's feed pair, see [`feed_pairs`](@ref)) label the baseline
+and correlation axes; `freqs` (Hz, all spws
 stacked) and `times` (h) the data axes. The four data arrays are weighted coherent
 means (vector averages, `NaN` where a cell has no unflagged data):
 
@@ -252,7 +253,7 @@ struct BaselineFringeData
     max_snr::Float64
     bl_pairs::Vector{Tuple{Int, Int}}
     ant_names::Vector{String}        # station codes, indexed by antenna number
-    pol_products::Vector{String}
+    feeds::Vector{Tuple{Int, Int}}
     freqs::Vector{Float64}
     times::Vector{Float64}
     spec_before::Array{ComplexF64, 3}
@@ -290,12 +291,12 @@ _plotted_sigma(::typeof(angle), z, σ) = abs(z) > 0 ? min(σ / abs(z), Float64(�
 # Backwards-compatible constructor (no frequency-group split): one group spanning
 # all channels, per-group time series = the full-span ones.
 function BaselineFringeData(
-        source, scan, scan_index, max_snr, bl_pairs, ant_names, pol_products,
+        source, scan, scan_index, max_snr, bl_pairs, ant_names, feeds,
         freqs, times, spec_before, spec_after, tser_before, tser_after,
     )
     nti, nbl, npol = size(tser_before)
     return BaselineFringeData(
-        source, scan, scan_index, max_snr, bl_pairs, ant_names, pol_products,
+        source, scan, scan_index, max_snr, bl_pairs, ant_names, feeds,
         freqs, times, spec_before, spec_after, tser_before, tser_after,
         [1:length(freqs)],
         reshape(copy(tser_before), nti, nbl, npol, 1),
@@ -467,7 +468,7 @@ function baseline_fringe_data(
     _accumulate_baseline_fringes!(
         (; sb, swb, sa, swa, tb, twb, ta, twa, tbb, twbb, tab, twab),
         Vg, Wg, Fg, g, gid, UVData.baselines(stack).pairs,
-        [correlation_feed_pair(pol_products(stack)[p]) for p in eachindex(pol_products(stack))],
+        feed_pairs(stack),
         executor,
     )
 
@@ -481,7 +482,7 @@ function baseline_fringe_data(
     σ_tbb = _mean_sigma(twbb); σ_tab = _mean_sigma(twab)
     return BaselineFringeData(
         info.source_name, info.scan_name, gi, msnr,
-        copy(UVData.baselines(stack).pairs), String.(collect(info.antennas.name)), copy(pol_products(stack)),
+        copy(UVData.baselines(stack).pairs), String.(collect(info.antennas.name)), feed_pairs(stack),
         copy(fg), copy(timestamps(stack)),
         _coherent_mean!(sb, swb), _coherent_mean!(sa, swa),
         _coherent_mean!(tb, twb), _coherent_mean!(ta, twa),
@@ -494,14 +495,13 @@ end
 """
     baseline_pol_index(data, pol) -> Int
 
-Resolve a correlation-product selector (`Integer` index, or `String`/`Symbol`
-label like `"PP"`) against `data.pol_products`. With `pol = :parallel` (the
-default used by the plots) returns the first parallel-hand product.
+Resolve a correlation-product selector, an `Integer` index or a feed pair such as
+`(1, 1)`, against `data.feeds`.
 """
-baseline_pol_index(data::BaselineFringeData, pol) = _pol_index(data.pol_products, pol)
+baseline_pol_index(data::BaselineFringeData, pol) = _pol_index(data.feeds, pol)
 
 """
-    fringe_freq_group_stats(data::BaselineFringeData; pol = :parallel)
+    fringe_freq_group_stats(data::BaselineFringeData; pol)
         -> Vector{@NamedTuple{f_lo, f_hi, nchan, eta_before, eta_after}}
 
 Per-frequency-group coherence summary of one scan's [`baseline_fringe_data`](@ref):
@@ -511,8 +511,8 @@ before and after the fringe solution. A frequency group whose `eta_after` lags i
 neighbours localises residual frequency structure (RFI, station passband
 defect) to that group.
 """
-function fringe_freq_group_stats(data::BaselineFringeData; pol = :parallel)
-    p = _pol_index(data.pol_products, pol)
+function fringe_freq_group_stats(data::BaselineFringeData; pol)
+    p = _pol_index(data.feeds, pol)
     out = @NamedTuple{f_lo::Float64, f_hi::Float64, nchan::Int, eta_before::Float64, eta_after::Float64}[]
     for r in _freq_group_ranges(data.freqs)
         stats = map((data.spec_before, data.spec_after)) do spec
@@ -544,17 +544,11 @@ function fringe_freq_group_stats(data::BaselineFringeData; pol = :parallel)
 end
 
 # Selector resolution shared by `baseline_pol_index` and `fringe_search_map`.
-function _pol_index(pol_products::AbstractVector{<:AbstractString}, pol)
-    return if pol === :parallel
-        idx = findfirst(p -> (fp = correlation_feed_pair(p); fp[1] == fp[2]), pol_products)
-        idx === nothing ? 1 : idx
-    elseif pol isa Integer
-        Int(pol)
-    else
-        idx = findfirst(==(String(pol)), pol_products)
-        idx === nothing ? error("pol $(pol) not in $(pol_products)") : idx
-    end
-end
+_pol_index(feeds, pol::Integer) = Int(pol)
+_pol_index(feeds, pol::Tuple{Integer, Integer}) = UVData._pol_index_lookup(feeds, pol)
+_pol_index(feeds, pol) = throw(
+    ArgumentError("select a correlation product by index or by feed pair such as (1, 1), got $(repr(pol))")
+)
 
 # Coherence-weighted group delay (s) of one baseline's spectrum `z` over `freqs`
 # from the per-channel phase increment: τ = ⟨angle(z[c+1] z[c]*)⟩ / (2π Δf). Uses
@@ -584,7 +578,7 @@ function _baseline_delay(z::AbstractVector, freqs::AbstractVector)
 end
 
 """
-    delay_closure(data::BaselineFringeData; pol = :parallel) -> NamedTuple
+    delay_closure(data::BaselineFringeData; pol) -> NamedTuple
 
 Triangle delay-closure check, the consistency test a station-based delay solution
 must pass. For every closed triangle `(a,b,c)` it forms `τ_ab + τ_bc − τ_ac` from
@@ -602,7 +596,7 @@ Returns `(; pol, triangles, closure_before, closure_after, resid_delay, bl_pairs
 A station-structure or sign mistake shows up as nonzero `resid_delay` (and, if it
 breaks closure, nonzero `closure_after`).
 """
-function delay_closure(data::BaselineFringeData; pol = :parallel)
+function delay_closure(data::BaselineFringeData; pol)
     p = baseline_pol_index(data, pol)
     nbl = length(data.bl_pairs)
     τb = fill(NaN, nbl); τa = fill(NaN, nbl)
@@ -625,7 +619,7 @@ function delay_closure(data::BaselineFringeData; pol = :parallel)
         push!(ca, τa[ab] + τa[bc] - τa[ac])
     end
     return (;
-        pol = data.pol_products[p], triangles = tris, closure_before = cb,
+        pol = data.feeds[p], triangles = tris, closure_before = cb,
         closure_after = ca, data_delay = τb, resid_delay = τa, bl_pairs = copy(data.bl_pairs),
     )
 end
@@ -638,7 +632,7 @@ end
 The delay–rate search map of one (baseline, correlation product) of one scan,
 with its scan/baseline labels — [`fringe_search_map`](@ref) output, consumed by
 `plot_fringe_search`. `source`/`scan`/`scan_index` identify the scan; `bl_pair`
-(antenna indices into `ant_names`) and `pol` the searched block; `map` is the
+(antenna indices into `ant_names`) and `pol` (the product's feed pair) the searched block; `map` is the
 [`FringeSearchMap`](@ref) (axes, SNR surface, refined detection, `ncells`,
 `pfa`).
 """
@@ -648,7 +642,7 @@ struct BaselineFringeMap
     scan_index::Int
     bl_pair::Tuple{Int, Int}
     ant_names::Vector{String}
-    pol::String
+    pol::Tuple{Int, Int}
     map::FringeSearchMap
 end
 
@@ -678,7 +672,7 @@ end
 
 """
     fringe_search_map(uvset, sol; scan_index = nothing, baseline = nothing,
-                      pol = :parallel, search = nothing) -> BaselineFringeMap
+                      pol, search = nothing) -> BaselineFringeMap
 
 Recompute the delay–rate matched-filter surface (the HOPS-style fringe plot data,
 and the false-fringe check) for one baseline of one scan of `uvset` — exactly the
@@ -691,8 +685,7 @@ above the sidelobe forest (`pfa ≪ 1`); a false fringe barely clears it.
 - `baseline` — an Integer index into the scan's baseline table, an antenna-index
   pair `(1, 3)`, or a station-code pair `("AA", "LM")` (order-insensitive).
   Default: the baseline with the strongest detection on this scan.
-- `pol` — correlation-product selector as [`baseline_pol_index`](@ref)
-  (default `:parallel`).
+- `pol` — correlation-product selector as [`baseline_pol_index`](@ref).
 - `search` — `FringeSearch` options; defaults to the ones the solve used
   (recorded in `sol.info`).
 - `precal` — when the solve used one (e.g. `phasecal_solution`), pass the same
@@ -706,7 +699,7 @@ Materializes only the one scan. Returns a [`BaselineFringeMap`](@ref).
 function fringe_search_map(
         uvset::UVSet, sol::CalibrationSolution;
         scan_index::Union{Integer, Nothing} = nothing,
-        baseline = nothing, pol = :parallel,
+        baseline = nothing, pol,
         search::Union{FringeSearch, Nothing} = nothing,
         precal::Union{Nothing, CalibrationSolution} = nothing,
         flag_channels = nothing,
@@ -725,7 +718,7 @@ function fringe_search_map(
     Vg = stack[:vis]
     fg = frequencies(stack)
     opts = search === nothing ? get(sol.info, :search, FringeSearch()) : search
-    p = _pol_index(pol_products(stack), pol)
+    p = _pol_index(feed_pairs(stack), pol)
     times = timestamps(stack)
     f0 = sol.geom.f0
     t0 = sol.geom.t0
@@ -760,7 +753,7 @@ function fringe_search_map(
     m = baseline_fringe_map(view(stack, BaselineID(bi), Polarization(p)), f0, t0; opts = opts)
     return BaselineFringeMap(
         info.source_name, info.scan_name, gi, UVData.baselines(stack).pairs[bi], ant_names,
-        pol_products(stack)[p], m,
+        feed_pairs(stack)[p], m,
     )
 end
 
@@ -829,7 +822,7 @@ function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
         (;
             scan = Int(info.det_scan[i]), a = Int(info.det_ant_a[i]), b = Int(info.det_ant_b[i]),
             sta_a = sta(Int(info.det_ant_a[i])), sta_b = sta(Int(info.det_ant_b[i])),
-            pol = String(info.det_pol[i]), snr = Float64(info.det_snr[i]), pfa = Float64(info.det_pfa[i]),
+            pol = (Int(info.det_feed_a[i]), Int(info.det_feed_b[i])), snr = Float64(info.det_snr[i]), pfa = Float64(info.det_pfa[i]),
         )
             for i in eachindex(info.det_pfa) if accepted(i) && info.det_pfa[i] > pfa_max
     ]

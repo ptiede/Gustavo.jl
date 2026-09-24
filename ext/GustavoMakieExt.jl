@@ -14,7 +14,7 @@ using Printf: @sprintf
 
 import Gustavo.UVData
 using Gustavo.UVData:
-    UVSet, pol_products,
+    UVSet, feed_pairs,
     _scans, _baseline_scan_blocks, _concat_scan_blocks,
     resolve_plot_polarizations,
     resolve_gain_polarizations, resolve_gain_sites,
@@ -124,7 +124,7 @@ const stability_plotting_config = UVData.stability_plotting_config
 function UVData.plot_stability(
         parent,
         data::UVSet, corr::UVSet, bl_plot;
-        quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input,
+        pol, quantity = :phase, relative = false, comparison_weights = :input,
     )
     nscan = length(_scans(data))
     scan_wheel = diagnostic_scan_colormap(nscan)
@@ -193,7 +193,7 @@ end
 
 function UVData.plot_stability(
         data::UVSet, corr::UVSet, bl_plot;
-        quantity = :phase, pol = :parallel, relative = false, comparison_weights = :input,
+        pol, quantity = :phase, relative = false, comparison_weights = :input,
     )
     fig = Figure(size = (900, 280 * length(resolve_plot_polarizations(data; pol = pol)[1]) + 40))
     UVData.plot_stability(fig, data, corr, bl_plot; quantity = quantity, pol = pol, relative = relative, comparison_weights = comparison_weights)
@@ -209,7 +209,7 @@ function UVData.plot_baseline_phases(
     )
     nscan = length(_scans(data))
     scan_wheel = diagnostic_scan_colormap(nscan)
-    pol_labels = collect(pol_products(data))
+    pol_labels = string.(feed_pairs(data))
     ylabel = relative ? "phase relative to ref (rad)" : "absolute phase (rad)"
     use_input_weights = comparison_weights === :input
     if !(comparison_weights in (:input, :native))

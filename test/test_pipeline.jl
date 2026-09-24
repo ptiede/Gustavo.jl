@@ -31,9 +31,9 @@ include("synthetic_uvset.jl")
             V = parent(leaf[:vis])
             W = parent(leaf[:weights])
             bl_pairs = UVP.baselines(leaf).pairs
-            lp = pol_products(leaf)
+            lp = feed_pairs(leaf)
             for p in eachindex(lp)
-                fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+                fp = lp[p]
                 fp[1] == fp[2] || continue
                 for bi in eachindex(bl_pairs)
                     a, b = bl_pairs[bi]
@@ -53,9 +53,9 @@ include("synthetic_uvset.jl")
             V = parent(leaf[:vis])
             W = parent(leaf[:weights])
             bl_pairs = UVP.baselines(leaf).pairs
-            lp = pol_products(leaf)
+            lp = feed_pairs(leaf)
             for p in eachindex(lp)
-                fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+                fp = lp[p]
                 fp[1] == fp[2] && continue
                 for bi in eachindex(bl_pairs)
                     a, b = bl_pairs[bi]
@@ -255,9 +255,9 @@ end
         V = parent(leaf2[:vis])
         W = parent(leaf2[:weights])
         bl_pairs = UVP.baselines(leaf2).pairs
-        lp = pol_products(leaf2)
+        lp = feed_pairs(leaf2)
         for p in eachindex(lp)
-            fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+            fp = lp[p]
             fp[1] == fp[2] || continue
             for bi in eachindex(bl_pairs)
                 bl_pairs[bi][1] == bl_pairs[bi][2] && continue
@@ -500,9 +500,9 @@ end
             V = parent(leaf[:vis])
             W = parent(leaf[:weights])
             bl_pairs = UVP.baselines(leaf).pairs
-            lp = pol_products(leaf)
+            lp = feed_pairs(leaf)
             for p in eachindex(lp)
-                fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+                fp = lp[p]
                 fp[1] == fp[2] || continue
                 for bi in eachindex(bl_pairs)
                     a, b = bl_pairs[bi]
@@ -554,7 +554,7 @@ end
 
     don = FP.baseline_fringe_data(uvset, sol_on)
     doff = FP.baseline_fringe_data(uvset, sol_off)
-    p = FP.baseline_pol_index(don, :parallel)
+    p = FP.baseline_pol_index(don, (1, 1))
     # Per-channel phase coherence per cross baseline: R = |Σ_c V̄_c| / Σ_c |V̄_c|
     # (1 ⇒ flat per-channel phase). Mean over baselines.
     function freq_coh(spec)
@@ -575,8 +575,8 @@ end
     @test R_off < 0.95                  # bandpass survives without the stage
 
     # Bandpass is station-based ⇒ triangle delay closure is unchanged by it.
-    c_on = FP.delay_closure(don)
-    c_off = FP.delay_closure(doff)
+    c_on = FP.delay_closure(don; pol = (1, 1))
+    c_off = FP.delay_closure(doff; pol = (1, 1))
     mx(v) = (u = abs.(filter(isfinite, v)); isempty(u) ? 0.0 : maximum(u))
     @test isapprox(mx(c_on.closure_before), mx(c_off.closure_before); rtol = 0.2)
 end
@@ -636,7 +636,7 @@ end
         end
         return sum(rs) / length(rs)
     end
-    cross_ps = findall(p -> (fp = CAL.correlation_feed_pair(p); fp[1] != fp[2]), don.pol_products)
+    cross_ps = findall(fp -> fp[1] != fp[2], don.feeds)
     R_on = freq_coh(don.spec_after, cross_ps)
     R_off = freq_coh(doff.spec_after, cross_ps)
     @test R_on > R_off
@@ -660,8 +660,8 @@ end
     end
     @test worst < 0.15
 
-    # Parallel hands are invariant under the feed-2 common-mode re-gauge.
-    @test freq_coh(don.spec_after, (FP.baseline_pol_index(don, :parallel),)) > 0.97
+    # Feed-1 products are invariant under the feed-2 common-mode re-gauge.
+    @test freq_coh(don.spec_after, (FP.baseline_pol_index(don, (1, 1)),)) > 0.97
 end
 
 @testset "Amplitude bandpass: pluggable shape specs (poly / Whittaker / free)" begin
@@ -714,7 +714,7 @@ end
             TemporalSmoother(adhoc), uvset,
     )
     doff = FP.baseline_fringe_data(uvset, sol_off)
-    poff = FP.baseline_pol_index(doff, :parallel)
+    poff = FP.baseline_pol_index(doff, (1, 1))
     @test amp_ripple(doff.spec_after, doff, poff) > 1.3    # roll-off ripple without the stage
 
     # The gap-estimating specs flatten the band AND fill the killed channels onto the
@@ -725,7 +725,7 @@ end
                 TemporalSmoother(adhoc), uvset,
         )
         don = FP.baseline_fringe_data(uvset, sol)
-        p = FP.baseline_pol_index(don, :parallel)
+        p = FP.baseline_pol_index(don, (1, 1))
         @test amp_ripple(don.spec_after, don, p) < 1.08
         bp = sol[:bandpass].steps[1]
         plan = bp.layout.plantree.logamp.bandpass
@@ -764,9 +764,9 @@ end
     for (_, leaf) in DimensionalData.branches(corr)
         V = parent(leaf[:vis]); W = parent(leaf[:weights])
         bl_pairs = UVP.baselines(leaf).pairs
-        lp = pol_products(leaf)
+        lp = feed_pairs(leaf)
         for p in eachindex(lp)
-            fp = Gustavo.Calibration.correlation_feed_pair(lp[p])
+            fp = lp[p]
             fp[1] == fp[2] || continue
             for bi in eachindex(bl_pairs)
                 a, b = bl_pairs[bi]
@@ -802,7 +802,7 @@ end
         V = parent(leaf[:vis])
         W = parent(leaf[:weights])
         bl_pairs = UVP.baselines(leaf).pairs
-        lp = pol_products(leaf)
+        lp = feed_pairs(leaf)
         for p in eachindex(lp), bi in eachindex(bl_pairs)
             a, b = bl_pairs[bi]
             a == b && continue

@@ -225,7 +225,7 @@ function _build_fringe_uvset(;
         end
     end
 
-    feeds = [CAL.correlation_feed_pair(p) for p in pol_labels]
+    feeds = Gustavo.UVData._feed_pairs(pol_labels)
     A0 = 2.5
 
     src_name = "SRC1"

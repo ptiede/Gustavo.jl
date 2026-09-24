@@ -408,7 +408,7 @@ function residual_vis(
     )
     g = evaluate_gains(ev, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
     ants = UVData.baselines(stack).pairs
-    feeds = map(correlation_feed_pair, pol_products(stack))
+    feeds = feed_pairs(stack)
     # Indexing the gains by the baselines' antenna vector and the products' feed
     # vector is an outer product over (BaselineID, Polarization), so the whole
     # residual is one fused broadcast with no intermediate.
@@ -445,7 +445,8 @@ end
 function detection_table(scan_dets)
     n = sum(length, scan_dets; init = 0)
     det_scan = Vector{Int}(undef, n); det_ant_a = Vector{Int}(undef, n)
-    det_ant_b = Vector{Int}(undef, n); det_pol = Vector{String}(undef, n)
+    det_ant_b = Vector{Int}(undef, n)
+    det_feed_a = Vector{Int}(undef, n); det_feed_b = Vector{Int}(undef, n)
     det_snr = Vector{Float64}(undef, n); det_pfa = Vector{Float64}(undef, n)
     det_delay = Vector{Float64}(undef, n); det_rate = Vector{Float64}(undef, n)
     det_phase = Vector{Float64}(undef, n)
@@ -457,7 +458,7 @@ function detection_table(scan_dets)
     for (gi, rows) in enumerate(scan_dets), r in rows
         i += 1
         det_scan[i] = gi; det_ant_a[i] = r.a; det_ant_b[i] = r.b
-        det_pol[i] = r.pol; det_snr[i] = r.snr; det_pfa[i] = r.pfa
+        det_feed_a[i], det_feed_b[i] = r.pol; det_snr[i] = r.snr; det_pfa[i] = r.pfa
         det_delay[i] = r.delay; det_rate[i] = r.rate; det_phase[i] = r.phase
         det_detected[i] = r.detected
         det_snr_steer[i] = r.snr_steer; det_pfa_steer[i] = r.pfa_steer
@@ -465,7 +466,7 @@ function detection_table(scan_dets)
         det_steered[i] = r.steered
     end
     return (;
-        det_scan, det_ant_a, det_ant_b, det_pol, det_snr, det_pfa,
+        det_scan, det_ant_a, det_ant_b, det_feed_a, det_feed_b, det_snr, det_pfa,
         det_delay, det_rate, det_phase, det_detected,
         det_snr_steer, det_pfa_steer, det_delay_steer, det_rate_steer, det_steered,
     )
@@ -568,7 +569,7 @@ function validate_scan_epochs(comps, ntimes::Integer)
 end
 
 """
-    steer_scan(stack, res, bl_pairs, pols, f0, t0, sta_delay, sta_rate; cells)
+    steer_scan(stack, res, bl_pairs, feeds, f0, t0, sta_delay, sta_rate; cells)
 
 Re-measure every `(baseline, product)` of a materialized scan group at the
 delay and rate the station solution predicts for it (`τ_{a,fa} − τ_{b,fb}`,
@@ -585,7 +586,7 @@ no usable data, or whose two stations are not both solved this scan, come
 back `NaN`.
 """
 function steer_scan(
-        stack, res, bl_pairs, pols, f0::Real, t0::Real,
+        stack, res, bl_pairs, feeds, f0::Real, t0::Real,
         sta_delay::AbstractMatrix, sta_rate::AbstractMatrix;
         cells::Real = 9.0,
     )
@@ -593,15 +594,15 @@ function steer_scan(
     times = timestamps(stack)
     # `res` covers only cross baselines; `keep` maps its column back to the cube's.
     keep = findall(pr -> pr[1] != pr[2], UVData.baselines(stack).pairs)
-    dims = (length(bl_pairs), length(pols))
+    dims = (length(bl_pairs), length(feeds))
     sdelay = fill(NaN, dims); srate = fill(NaN, dims)
     samp = fill(NaN, dims); ssnr = fill(NaN, dims); spfa = fill(NaN, dims)
-    for p in eachindex(pols), j in eachindex(bl_pairs)
+    for p in eachindex(feeds), j in eachindex(bl_pairs)
         res[:valid][j, p] || continue
         snr0 = res[:snr][j, p]
         snr0 > 0 || continue
         a, b = bl_pairs[j]
-        fa, fb = correlation_feed_pair(pols[p])
+        fa, fb = feeds[p]
         dpred = sta_delay[a, fa] - sta_delay[b, fb]
         rpred = sta_rate[a, fa] - sta_rate[b, fb]
         (isfinite(dpred) && isfinite(rpred)) || continue

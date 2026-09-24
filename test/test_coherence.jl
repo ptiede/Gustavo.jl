@@ -33,7 +33,7 @@ function _coherence_fixture_report(;
         V[c, ti, bl, p] = amp * cis(ph) + sigma * (randn(rng) + im * randn(rng))
         W[c, ti, bl, p] = w * weight_scale
     end
-    return UV.coherence_report(uvset; debias = true, marginalize = false)
+    return UV.coherence_report(uvset; pols = [(1, 1), (2, 2)], debias = true, marginalize = false)
 end
 
 @testset "coherence_report: debiased η is unbiased at low SNR" begin
@@ -71,6 +71,6 @@ end
     # The raw (debias = false) estimator is untouched: bounded by 1 and
     # noise-suppressed below it at coarse averaging on weak data.
     uvset, _ = _build_fringe_uvset(nant = 3, nspw = 1, nchan = 16, ntime = 32)
-    raw = Gustavo.UVData.coherence_report(uvset; debias = false, marginalize = false)
+    raw = Gustavo.UVData.coherence_report(uvset; pols = [(1, 1), (2, 2)], debias = false, marginalize = false)
     @test all(η -> 0.0 <= η <= 1.0, filter(isfinite, raw.time.eta))
 end

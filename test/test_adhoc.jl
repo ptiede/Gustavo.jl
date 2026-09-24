@@ -18,7 +18,7 @@ all_bl_a(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
 function inject_screen(bl_pairs, pol_products, screen, x = nothing; amp = 10.0, noise = 0.0, rng = nothing)
     nbl, npol = length(bl_pairs), length(pol_products)
     nap = size(screen, 3)
-    feeds = [CALa.correlation_feed_pair(p) for p in pol_products]
+    feeds = collect(pol_products)
     xs = x === nothing ? zeros(nbl, npol) : x
     rbar = Array{ComplexF64}(undef, nbl, npol, nap)
     wbar = ones(nbl, npol, nap)
@@ -37,7 +37,7 @@ end
 
 # Max |measured − model-from-solution| (mod 2π) over valid baselines/APs.
 function adhoc_recon(rbar, sol, bl_pairs, pol_products)
-    feeds = [CALa.correlation_feed_pair(p) for p in pol_products]
+    feeds = collect(pol_products)
     m = 0.0
     for ap in axes(rbar, 3), bi in eachindex(bl_pairs), p in eachindex(pol_products)
         a, b = bl_pairs[bi]
@@ -58,7 +58,7 @@ end
     nant, nap = 5, 20
     ref = 2
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     screen = 0.3 .* randn(rng, nant, 2, nap)
     times = collect(0:(nap - 1)) .* 1.0
     rbar, wbar = inject_screen(bl, pols, screen)
@@ -109,7 +109,7 @@ end
     nant, nap = 5, 20
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     screen = 0.3 .* randn(rng, nant, 2, nap)
     times = collect(0:(nap - 1)) .* 1.0
 
@@ -153,7 +153,7 @@ end
     nant, nap = 6, 30
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = repeat(0.4 .* randn(rng, nant, 1, nap), 1, 2, 1)   # feed-common truth
     xtrue = 0.8 .* randn(rng, length(bl), length(pols))
@@ -217,7 +217,7 @@ end
     rng = MersenneTwister(0x00FEED01)
     nant, nap = 3, 8
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = 0.2 .* randn(rng, nant, 2, nap)
     rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0)
@@ -232,7 +232,7 @@ end
     rng = MersenneTwister(0x01AF)
     nant, nap = 4, 12
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = repeat(0.3 .* randn(rng, nant, 1, nap), 1, 2, 1)
     rbar, wbar = inject_screen(bl, pols, screen; amp = 20.0)
@@ -252,7 +252,7 @@ end
     nant, nap = 4, 30
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     tc = times .- mean(times)
     # Screen = per-station constant + slope + a common wiggle (cancels in the
@@ -289,7 +289,7 @@ end
     nant, nap = 4, 40
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = Array{Float64}(undef, nant, 2, nap)
     for a in 1:nant, f in 1:2, ap in 1:nap
@@ -314,7 +314,7 @@ end
     nant, nap = 5, 60
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     # Smooth (band-limited) screen per station/feed.
     screen = Array{Float64}(undef, nant, 2, nap)
@@ -360,7 +360,7 @@ end
     nant, nap = 4, 40
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     tc = times .- mean(times)
     c0 = 0.5 .* randn(rng, nant, 2)
@@ -386,7 +386,7 @@ end
     nant, nap = 4, 30
     ref = 2
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = Array{Float64}(undef, nant, 2, nap)
     for a in 1:nant, f in 1:2, ap in 1:nap
@@ -426,13 +426,13 @@ end
     nant, nap = 5, 50
     ref = 2
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = shared_screen(rng, nant, nap)
     rbar, wbar = inject_screen(bl, pols, screen; amp = 6.0, noise = 1.0, rng = rng)
     # Cross hands carrying a strong, baseline-dependent phase near the wrap cut —
     # the linear-feed case. Constant over the scan, so the source term takes it.
-    feeds = [CALa.correlation_feed_pair(p) for p in pols]
+    feeds = collect(pols)
     for p in eachindex(pols)
         fa, fb = feeds[p]
         fa == fb && continue
@@ -463,7 +463,7 @@ end
     nant, nap = 5, 60
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = shared_screen(rng, nant, nap; k = 1.5, amp = 0.5)
     rbar, wbar = inject_screen(bl, pols, screen; amp = 3.0, noise = 2.0, rng = rng)
@@ -493,7 +493,7 @@ end
     rng = MersenneTwister(0x5A17)
     nant, nap = 3, 10
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = shared_screen(rng, nant, nap)
     rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0)
@@ -510,7 +510,7 @@ end
     nant, nap = 5, 4
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     rng = MersenneTwister(0xB1A5)
     screen = 0.4 .* randn(rng, nant, 2, nap)
@@ -549,7 +549,7 @@ end
     nant, nap = 5, 12
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     rng = MersenneTwister(0xC3C3)
 
@@ -650,7 +650,7 @@ end
     rng = MersenneTwister(0xBADC0FFE)
     nant2, nap = 5, 60
     bl = all_bl_a(nant2)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = 0.2 .* randn(rng, nant2, 2, nap)
     for ap in 1:nap                                  # station 5 hovers near +π
@@ -708,7 +708,7 @@ end
     nant, nap = 4, 30
     ref = 1
     bl = all_bl_a(nant)
-    pols = ["PP", "PQ", "QP", "QQ"]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     screen = shared_screen(rng, nant, nap)         # feed-common (works for the joint solve too)
     rbar, wbar = inject_screen(bl, pols, screen; amp = 6.0, noise = 0.5, rng = rng)
@@ -745,7 +745,7 @@ end
     function screen_scenario(snrs; seed = 0x0ADC, nap = 240, nant = 6)
         rng = MersenneTwister(seed)
         bl = all_bl_a(nant)
-        pols = ["PP", "QQ"]
+        pols = [(1, 1), (2, 2)]
         times = collect(0:(nap - 1)) .* 1.0
         screen = zeros(nant, nap)
         for a in 2:nant, t in 2:nap

@@ -122,7 +122,7 @@ baseline) overlaying the coherent visibility before and after applying `sol`.
 `kind = :freq` plots phase (or amplitude) vs frequency — a group delay shows as a
 slope that flattens after a good fit; `kind = :time` plots vs time — a fringe rate
 shows as a slope that flattens. `show = :phase` (default) or `:amp`. `pol` selects
-the correlation product (default `:parallel`); `baselines` selects which to draw.
+the correlation product (required); `baselines` selects which to draw.
 `freqgroup = k` restricts the view to the k-th frequency group ([`fringe_freq_groups`](@ref)):
 `:freq` panels show only that group's channels on the real frequency axis, `:time`
 panels average over only that group — the readable view on wide multi-group data

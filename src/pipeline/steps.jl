@@ -356,7 +356,7 @@ function Fring.estimate_scan!(
         Vsearch, ngroups = length(ctx.stream.groups), executor = inner_executor(ctx.stream),
         t0 = epoch,
     )
-    pols = pol_products(stack)
+    feeds = feed_pairs(stack)
     # `res` covers only the surviving (cross) baselines; take its own pair list.
     bl_pairs = collect(UVData.DimensionalData.lookup(res, UVData.BaselineID))
     # The scan's frequency/time lever arms travel with its detections: they set
@@ -375,7 +375,7 @@ function Fring.estimate_scan!(
     # (consumed by the station solve), so these are read off it here; `cells1` is
     # the only piece not already in the cube.
     cells1 = Fring._search_cells(frequencies(stack), timestamps(stack), est.search)
-    ncells = cells1 * max(length(bl_pairs) * length(pols), 1)
+    ncells = cells1 * max(length(bl_pairs) * length(feeds), 1)
     pfa_max = est.closure.pfa_max
     local_solve = Fring.scan_local_solve(est, s.model)
     ncomp, flags = 0, Tuple{Int, Int}[]
@@ -404,7 +404,7 @@ function Fring.estimate_scan!(
             steer = Fring.steer_scan(
                 # The same epoch the search above referenced: `sr` is a rate
                 # about it, as is the model's own Rate component.
-                stack, res, bl_pairs, pols, ctx.stream.geom.f0,
+                stack, res, bl_pairs, feeds, ctx.stream.geom.f0,
                 epoch, sd, sr;
                 cells = est.steer_cells,
             )
@@ -413,7 +413,7 @@ function Fring.estimate_scan!(
     _st(field, j, p) = steer === nothing ? NaN : steer[field][j, p]
     rows = [
         (;
-            a = bl_pairs[j][1], b = bl_pairs[j][2], pol = pols[p],
+            a = bl_pairs[j][1], b = bl_pairs[j][2], pol = feeds[p],
             snr = res.snr[j, p], pfa = res.pfa[j, p],
             delay = res.delay[j, p], rate = res.rate[j, p],
             phase = res.phase[j, p],
@@ -428,7 +428,7 @@ function Fring.estimate_scan!(
             # was measured; it does not gate it.
             steered = res.pfa[j, p] > pfa_max && isfinite(_st(:snr, j, p)),
         )
-            for p in eachindex(pols) for j in eachindex(bl_pairs) if res.valid[j, p]
+            for p in eachindex(feeds) for j in eachindex(bl_pairs) if res.valid[j, p]
     ]
     max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
     local_solve && return (; ncomp, flags, max_snr, ncells, rows)
@@ -544,9 +544,9 @@ function process_scan!(s::Bandpass, ctx::SolveContext, stack, win::GeometryWindo
     # `stack` arrives already fringe/dispersion/SBD-corrected through the
     # pipeline's transform chain (every earlier step's finished solution) —
     # this step just accumulates the residual, no correction of its own.
-    pols = String.(pol_products(stack))
+    feeds = feed_pairs(stack)
     nchan = length(setup.channel_freqs)
-    rl, wl = Fring.bandpass_accumulators(length(setup.bl_pairs), length(pols), nchan)
+    rl, wl = Fring.bandpass_accumulators(length(setup.bl_pairs), length(feeds), nchan)
     Fring.accumulate_bandpass!(
         rl, wl, setup.blidx, stack, win; derotate = Fring.bandpass_derotate(s.smoother),
     )
@@ -554,7 +554,7 @@ function process_scan!(s::Bandpass, ctx::SolveContext, stack, win::GeometryWindo
     # time-segmented bandpass tells which segment the scan belongs to. A scan
     # lies within one segment of any segmentation coarser than a scan, so its
     # first sample names the segment.
-    return (; rl, wl, pols, ti = first(win.ti_idx), source = source_name(stack))
+    return (; rl, wl, feeds, ti = first(win.ti_idx), source = source_name(stack))
 end
 
 function finish_pass!(s::Bandpass, ctx::SolveContext)
