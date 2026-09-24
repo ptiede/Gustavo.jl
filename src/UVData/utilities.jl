@@ -108,11 +108,11 @@ end
     pol_products(x) -> Vector{String}
 
 Return the polarization-product labels (e.g. `["PP", "PQ", "QP", "QQ"]`)
-read off the `Pol` dimension of `x`'s underlying visibility array. Works
+read off the `Polarization` dimension of `x`'s underlying visibility array. Works
 on a `DimArray` (the lookup), a leaf `AbstractDimTree`, or a `UVSet`
-(uses the first leaf — all leaves share the same Pol axis on read).
+(uses the first leaf — all leaves share the same Polarization axis on read).
 """
-pol_products(vis::AbstractDimArray) = collect(lookup(vis, Pol))
+pol_products(vis::AbstractDimArray) = collect(lookup(vis, Polarization))
 pol_products(leaf::PartitionedData) = pol_products(leaf[:vis])
 function pol_products(uvset::UVSet)
     bs = DimensionalData.branches(uvset)
@@ -198,7 +198,7 @@ _feed_char(::Union{LPol, YPol}) = 'Q'
     pol_index(x, label) -> Int
 
 Resolve a polarization-product `label` to its integer index along the
-`Pol` axis of `x` (`x` may be a `DimArray`, a leaf `AbstractDimTree`, a
+`Polarization` axis of `x` (`x` may be a `DimArray`, a leaf `AbstractDimTree`, a
 `UVSet`, or any concrete `Vector{String}` of pol products). Accepts:
 
 - a string like `"PP"` / `"RR"` / `"LL"` / `"XY"` — the EHT shorthands
@@ -223,10 +223,10 @@ _pol_index_lookup(x, canon) = _pol_index_lookup(pol_products(x), canon)
     pol_at(label) -> DimensionalData.At
 
 DimensionalData selector for the canonical pol label, suitable for
-indexing `Pol`-dimensioned arrays:
+indexing `Polarization`-dimensioned arrays:
 
 ```julia
-amp = abs.(stack[:vis][Pol = pol_at("RR")])
+amp = abs.(stack[:vis][Polarization = pol_at("RR")])
 ```
 
 Equivalent to `At(canonical_label(label))` after folding the EHT

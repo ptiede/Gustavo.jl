@@ -35,10 +35,10 @@ Apply `t` to one materialized scan window, mutating `stack`'s
 `:vis`/`:weights`/`:flags` layers in place. The extension point for custom
 transforms.
 
-`stack` carries layers `:vis`/`:weights`/`:flags` on `(Frequency, Ti, Baseline, Pol)`
-dims (frequencies in Hz, times in seconds, correlation products on the `Pol`
+`stack` carries layers `:vis`/`:weights`/`:flags` on `(Frequency, Ti, BaselineID, Polarization)`
+dims (frequencies in Hz, times in seconds, correlation products on the `Polarization`
 lookup) and the leaf's `PartitionInfo` metadata, so DimensionalData selectors
-and the `UVData` accessors both work on it directly — `stack[:vis][Pol =
+and the `UVData` accessors both work on it directly — `stack[:vis][Polarization =
 pol_at("PP")]`, [`frequencies`](@ref), `baselines`, [`source_name`](@ref).
 `win` addresses the same channels and times in the solve's index space, which a
 coordinate axis cannot carry (`win.geom.channel_freqs[win.chan_idx] ==
@@ -329,7 +329,7 @@ function apply_transform!(
     n <= length(s) ||
         error("StationWeightScale: factor vector has $(length(s)) entries but the data references station index $n.")
     W = stack[:weights]
-    for p in axes(W, Pol), (bi, (a, b)) in enumerate(bl_pairs)
+    for p in axes(W, Polarization), (bi, (a, b)) in enumerate(bl_pairs)
         f = s[a] * s[b]
         f == 1 && continue
         @views W[:, :, bi, p] .*= f
@@ -550,20 +550,20 @@ function _scale_apriori!(stack::AbstractDimStack, gains::Array{Float64, 4}, exec
     UVData.check_layer_axes(V, W, Fl)
     bl_pairs = UVData.baselines(stack).pairs
     pols = UVData.pol_products(stack)
-    cols = [(bi, p) for p in axes(V, Pol) for bi in axes(V, Baseline)]
+    cols = [(bi, p) for p in axes(V, Polarization) for bi in axes(V, BaselineID)]
     tforeach(cols; scheduler = executor) do col
         bi, p = col
         a, b = bl_pairs[bi]
         if a == b
             for t in axes(V, Ti), c in axes(V, Frequency)
-                Fl[Frequency(c), Ti(t), Baseline(bi), Pol(p)] = true
+                Fl[Frequency(c), Ti(t), BaselineID(bi), Polarization(p)] = true
             end
             return
         end
         fa, fb = UVData.correlation_feed_pair(pols[p])
         for t in axes(V, Ti)
             for c in axes(V, Frequency)
-                cell = (Frequency(c), Ti(t), Baseline(bi), Pol(p))
+                cell = (Frequency(c), Ti(t), BaselineID(bi), Polarization(p))
                 Fl[cell] && continue
                 w = W[cell]
                 (w > 0 && isfinite(w)) || continue
@@ -598,7 +598,7 @@ dedicated option:
         names = antennas(stack).name
         pt = findfirst(==("PT"), names); la = findfirst(==("LA"), names)
         for (bi, (a, b)) in enumerate(baselines(stack).pairs)
-            (minmax(a, b) == minmax(pt, la)) && (stack[:weights][Baseline = bi] .*= 0.5)
+            (minmax(a, b) == minmax(pt, la)) && (stack[:weights][BaselineID = bi] .*= 0.5)
         end
     end
 

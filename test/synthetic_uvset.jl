@@ -11,7 +11,7 @@ using StructArrays
 using DimensionalData
 using DimensionalData: DimArray, Ti, dims, lookup
 using PolarizedTypes: RPol, LPol
-using Gustavo.UVData: Pol, Frequency, UVW, Baseline, UVSet, pol_products, channel_freqs
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, UVSet, pol_products, channel_freqs
 using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using Dates: Date, DateTime, datetime2unix
 using HDF5   # triggers GustavoHDF5Ext (solution save/load round-trip)
@@ -262,7 +262,7 @@ function _build_fringe_uvset(;
             vis_dense,
             (
                 Frequency(fch), Ti(ti_scan),
-                Baseline(baselines.labels), Pol(pol_labels),
+                BaselineID(baselines.labels), Polarization(pol_labels),
             ),
         )
         w_part = DimArray(w_dense, dims(vis_part))
@@ -276,7 +276,7 @@ function _build_fringe_uvset(;
         end
         uvw_part = DimArray(
             uvw_dense,
-            (Ti(ti_scan), Baseline(baselines.labels), UVP.UVW(["U", "V", "W"])),
+            (Ti(ti_scan), BaselineID(baselines.labels), UVP.UVW(["U", "V", "W"])),
         )
 
         info = UV.PartitionInfo(;

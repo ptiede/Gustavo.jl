@@ -324,22 +324,22 @@ function _apply_apriori_kernel(
     vis_corr = copy(vis_p)
     weights_corr = copy(w_p)
     flags_corr = copy(flags_p)
-    for ti in axes(vis_p, Ti), bi in axes(vis_p, Baseline)
+    for ti in axes(vis_p, Ti), bi in axes(vis_p, BaselineID)
         a, b = bl_pairs[bi]
         # Autocorrelations (a == b) are total power, not interferometric
         # visibilities: `√(SEFD_a·SEFD_b)` flux-scaling is meaningless and blows
         # their amplitude up by the SEFD. Flag them so they are not used
         # downstream — the fringe solve already skips them.
         if a == b
-            for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
-                flags_corr[Frequency(c), Ti(ti), Baseline(bi), Pol(p)] = true
+            for p in axes(vis_p, Polarization), c in axes(vis_p, Frequency)
+                flags_corr[Frequency(c), Ti(ti), BaselineID(bi), Polarization(p)] = true
             end
             continue
         end
-        for p in axes(vis_p, Pol)
+        for p in axes(vis_p, Polarization)
             fa, fb = correlation_feed_pair(pol_products[Int(p)])
             for c in axes(vis_p, Frequency)
-                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+                cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
                 flags_p[cell] && continue
                 w = w_p[cell]
                 (w > 0 && isfinite(w)) || continue

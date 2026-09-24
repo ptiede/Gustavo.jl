@@ -410,7 +410,7 @@ function residual_vis(
     ants = UVData.baselines(stack).pairs
     feeds = map(correlation_feed_pair, pol_products(stack))
     # Indexing the gains by the baselines' antenna vector and the products' feed
-    # vector is an outer product over (Baseline, Pol) — the cube's last two axes
+    # vector is an outer product over (BaselineID, Polarization) — the cube's last two axes
     # — so the whole residual is one fused broadcast with no intermediate.
     ga = view(g, :, :, first.(ants), first.(feeds))
     gb = view(g, :, :, last.(ants), last.(feeds))
@@ -605,7 +605,7 @@ function steer_scan(
         rpred = sta_rate[a, fa] - sta_rate[b, fb]
         (isfinite(dpred) && isfinite(rpred)) || continue
         bi = keep[j]
-        plane = view(stack, Baseline(bi), Pol(p))
+        plane = view(stack, BaselineID(bi), Polarization(p))
         Wb = plane[:weights]
         Fb = plane[:flags]
         # σ of the blind pass, recovered from its own reported SNR.

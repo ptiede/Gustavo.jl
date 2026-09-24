@@ -54,12 +54,12 @@ _idi_row(M::AbstractVector, r::Integer) = [M[r]]
 # JD of RDATE 00:00 UTC, reusing the UVFITS convention. 0.0 when unparseable.
 _idi_rdate_jd(rdate::AbstractString) = _rdate_jd_or_zero(rdate)
 
-# ── STOKES axis → MSv4 Pol permutation ───────────────────────────────────────
+# ── STOKES axis → MSv4 Polarization permutation ───────────────────────────────────────
 #
 # The FITS-IDI STOKES axis is defined by STK_1/NO_STKD (or CRVAL2/CDELT2 on
 # the UV_DATA matrix), not by a CTYPE card. AIPS codes are
 # `STK_1 + (k-1)*CDELT2` for k = 1..NO_STKD (e.g. -1,-2,-3,-4 → RR,LL,RL,LR →
-# generic PP,QQ,PQ,QP). We map each to its MSv4 canonical Pol index so that
+# generic PP,QQ,PQ,QP). We map each to its MSv4 canonical Polarization index so that
 # `aips_labels[perm] == msv4_labels` (PP,PQ,QP,QQ).
 function _idi_stokes_perm(cards)
     no_stkd = Int(something(card_value(cards, "NO_STKD"), 4))
@@ -244,7 +244,7 @@ end
 #   REASON(A), SEVERITY(1J)  (ignored)
 
 # One parsed FLAG row. Antenna numbers are mapped NOSTA → global 1-based antenna
-# index; `pflags` is permuted into MSv4 Pol order so it aligns with the leaf Pol
+# index; `pflags` is permuted into MSv4 Polarization order so it aligns with the leaf Polarization
 # axis. `bands` has length NO_BAND, `pflags` length NO_STKD.
 struct FlagEntry
     source_id::Int            # 0 = all sources
@@ -289,7 +289,7 @@ end
 
 # Parse the FLAG HDU into `FlagEntry`s. `nosta_to_idx` maps NOSTA → global
 # antenna index; `perm[p]` is the on-disk stokes index for MSv4 pol `p`, so
-# `pflags_msv4[p] = pflags_disk[perm[p]]` aligns PFLAGS with the leaf Pol axis.
+# `pflags_msv4[p] = pflags_disk[perm[p]]` aligns PFLAGS with the leaf Polarization axis.
 function _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stkd, rdate_unix)
     flag_hdu === nothing && return FlagEntry[]
     d = flag_hdu.data
@@ -358,7 +358,7 @@ function _build_idi_flags(flag_hdu, nosta_to_idx, perm, no_band, no_chan, no_stk
             pr = _idi_row(pflags, r)
             Bool[(s <= length(pr) ? pr[s] != 0 : true) for s in 1:no_stkd]
         end
-        # Permute on-disk stokes order → MSv4 Pol order.
+        # Permute on-disk stokes order → MSv4 Polarization order.
         pvec = Bool[pvec_disk[perm[p]] for p in 1:no_stkd]
 
         out[r] = FlagEntry(sid, a1, a2, fq, t0, t1, bvec, clo, chi, pvec)
@@ -389,7 +389,7 @@ end
 """
     IDIChunkArray{T, K} <: DiskArrays.AbstractDiskArray{T, 4}
 
-Disk-backed `(Frequency, Ti, Baseline, Pol)` view of one band of one scan of
+Disk-backed `(Frequency, Ti, BaselineID, Polarization)` view of one band of one scan of
 a FITS-IDI `UV_DATA` table. `kind::Val{:vis}` / `Val{:weights}` / `Val{:flags}`
 selects the layer; the `:flags` layer is decoded from the FLAG table alone and
 reads no `UV_DATA` bytes at all. No FLUX bytes are read until `readblock!` runs; each call
@@ -429,7 +429,7 @@ struct IDIChunkArray{T, K, TD, TFF, TW} <: DiskArrays.AbstractDiskArray{T, 4}
     no_chan::Int            # NO_CHAN
     no_band::Int            # NO_BAND
     nperband::Int           # 2 * no_stkd * no_chan
-    perm::Vector{Int}       # on-disk stokes idx → MSv4 Pol idx
+    perm::Vector{Int}       # on-disk stokes idx → MSv4 Polarization idx
     flux_scale::Bool        # whether FLUX has active TSCAL/TZERO
     row_of::Matrix{Int}     # (nti, nbl) UV_DATA row per cell (0 = missing)
     flags::Vector{FlagEntry}  # FLAG entries pre-filtered to this leaf
@@ -1123,7 +1123,7 @@ end
 """
     IDIMergedChunkArray{T, K} <: DiskArrays.AbstractDiskArray{T, 4}
 
-Disk-backed `(Frequency, Ti, Baseline, Pol)` view spanning every band of one
+Disk-backed `(Frequency, Ti, BaselineID, Polarization)` view spanning every band of one
 FITS-IDI scan, concatenated along `Frequency` in `chunks` order. `chunks[b]` is
 the `IDIChunkArray` that would back band `b`'s leaf alone; all must share one
 scan's UV_DATA rows (`data`/`row_of`/`begpos`/`L`), enforced by `_idi_merged_chunk`.
@@ -1763,7 +1763,7 @@ function UVData.load_fitsidi(
 
         uvw_part = DimArray(
             uvw_dense,
-            (Ti(unique_times), Baseline(baselines.labels), UVW(["U", "V", "W"])),
+            (Ti(unique_times), BaselineID(baselines.labels), UVW(["U", "V", "W"])),
         )
 
         # Scan time span (seconds), used to pre-filter FLAG entries per leaf.
@@ -1842,7 +1842,7 @@ function UVData.load_fitsidi(
             )
             vis_dims = (
                 Frequency(new_freqs), Ti(unique_times),
-                Baseline(baselines.labels), Pol(msv4_labels),
+                BaselineID(baselines.labels), Polarization(msv4_labels),
             )
             vis_part = DimArray(_idi_merged_chunk([bc.vis_chunk for bc in sorted]), vis_dims)
             w_part = DimArray(_idi_merged_chunk([bc.w_chunk for bc in sorted]), vis_dims)
@@ -1870,7 +1870,7 @@ function UVData.load_fitsidi(
                 chf = channel_freqs(bc.fsetup)
                 vis_dims = (
                     Frequency(chf), Ti(unique_times),
-                    Baseline(baselines.labels), Pol(msv4_labels),
+                    BaselineID(baselines.labels), Polarization(msv4_labels),
                 )
                 vis_part = DimArray(bc.vis_chunk, vis_dims)
                 w_part = DimArray(bc.w_chunk, vis_dims)

@@ -43,7 +43,7 @@ using XRadio: XRadio, ProcessingSet, MeasurementSet
     end
 
     @testset "science values survive the transpose" begin
-        # Gustavo holds (Frequency, Ti, Baseline, Pol); MSv4's Julia order is
+        # Gustavo holds (Frequency, Ti, BaselineID, Polarization); MSv4's Julia order is
         # (polarization, frequency, baseline_id, time).
         for (key, leaf) in UV.branches(uvset)
             ms = ps[key]
@@ -378,8 +378,8 @@ end
             local_pairs = [(local_of[full[a]], local_of[full[c]]) for (a, c) in b.pairs[idx]]
             newb = UV.BaselineIndex(local_pairs, local_pairs; antenna_names = keep)
             return UV._build_leaf(
-                leaf[:vis][Baseline = idx], leaf[:weights][Baseline = idx],
-                leaf[:uvw][Baseline = idx], leaf[:flags][Baseline = idx];
+                leaf[:vis][BaselineID = idx], leaf[:weights][BaselineID = idx],
+                leaf[:uvw][BaselineID = idx], leaf[:flags][BaselineID = idx];
                 partition_info = UV.update(
                     info; antennas = tbl, baselines = newb, record_order = Tuple{Int, Int}[],
                 ),

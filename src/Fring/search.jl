@@ -321,7 +321,7 @@ nothing flagged.
 only) or single-channel (`times`-length, rate only) block.
 
 A block taken from a solver cube needs no constructor — slice the scan stack
-instead, `view(stack, Baseline(bi), Pol(p))`.
+instead, `view(stack, BaselineID(bi), Polarization(p))`.
 """
 function fringe_plane(V, W, freqs, times; flags = nothing)
     # The returned stack's lookups are `freqs`/`times` themselves, so the block
@@ -377,7 +377,7 @@ end
 Search one (baseline, correlation product) block for the group delay, fringe
 rate, and phase that align the visibility phasor. `plane` is a `DimStack` on
 `(Frequency, Ti)` carrying `:vis`, `:weights` (inverse-variance) and `:flags` —
-a slice of a scan stack, `view(stack, Baseline(bi), Pol(p))`, or one built from
+a slice of a scan stack, `view(stack, BaselineID(bi), Polarization(p))`, or one built from
 plain arrays by [`fringe_plane`](@ref). `f0`, `t0` are the delay/rate reference
 frequency and epoch, and the returned phase is referenced to them.
 

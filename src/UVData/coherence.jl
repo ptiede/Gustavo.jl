@@ -351,7 +351,7 @@ function _curve_from_sums(
     return eta_bl, agg
 end
 
-# Accumulate one leaf's contribution. `V`/`W` are `(Frequency, Ti, Baseline, Pol)`;
+# Accumulate one leaf's contribution. `V`/`W` are `(Frequency, Ti, BaselineID, Polarization)`;
 # `blmap[bli]` maps a local baseline to its global index (0 = skip: autocorr or
 # unmapped). A function barrier so the hot loops specialize on the concrete eltypes
 # of `parent(leaf[...])` (type-unstable at the call site, as in the reducers).

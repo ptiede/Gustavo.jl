@@ -4,8 +4,8 @@
 Load a UVData file, returning a `UVSet` whose `branches` is a flat
 `OrderedDict` of MSv4-shaped per-scan leaf `DimTree`s keyed by sanitized
 `:<source>_scan_<n>` Symbols. Each leaf carries dense
-`(Ti, Baseline, Pol, Frequency)` cubes for `vis`/`weights` and
-`(Ti, Baseline, UVW)` for `uvw`, mirroring xradio's MSv4 visibility schema.
+`(Ti, BaselineID, Polarization, Frequency)` cubes for `vis`/`weights` and
+`(Ti, BaselineID, UVW)` for `uvw`, mirroring xradio's MSv4 visibility schema.
 
 `element_type` is the real float type the `vis`/`weights` cubes are stored at;
 `nothing` takes the precision the file itself holds, so a double-precision

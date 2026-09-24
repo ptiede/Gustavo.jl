@@ -12,7 +12,7 @@ using Gustavo.UVData:
     Antenna, AntennaTable, BaselineIndex,
     AbstractMount, Mount, MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
     MountBWGR, MountBWGL, MountXY, MountOrbiting,
-    Pol, Frequency, UVW, Baseline,
+    Polarization, Frequency, UVW, BaselineID,
     sources, array_name, extras, XRadio,
     channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name,
     nchannels
@@ -849,7 +849,7 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
     uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
     cfq::Vector{Float64} = channel_freqs(first(freq_setups))
-    dims = (Ti(obs_time), Pol(msv4_labels), Frequency(cfq))
+    dims = (Ti(obs_time), Polarization(msv4_labels), Frequency(cfq))
 
     vis, weights, uvw = _build_arrays(vis_raw, weights_raw, uvw_raw, dims)
 
@@ -1110,7 +1110,7 @@ end
 
 _wrap_int_pol_if(arr, obs_time, pol_labels, channel_freqs) = DimArray(
     arr,
-    (Ti(obs_time), Pol(pol_labels), Frequency(channel_freqs)),
+    (Ti(obs_time), Polarization(pol_labels), Frequency(channel_freqs)),
 )
 
 # Warn if the AIPS Stokes axis (circular vs linear block) doesn't match the
@@ -1422,7 +1422,7 @@ end
 # time-ordered records and warn or mis-sort otherwise.
 function _leaf_record_order(leaf)
     ro = DimensionalData.metadata(leaf).record_order
-    sz = size(parent(leaf[:vis]))     # (Frequency, Ti, Baseline, Pol)
+    sz = size(parent(leaf[:vis]))     # (Frequency, Ti, BaselineID, Polarization)
     nti, nbl = sz[2], sz[3]
     # A recorded order is filtered on the same rule as a densified one: where a
     # record comes from does not change whether it can be placed on the uv plane.
@@ -1433,9 +1433,9 @@ function _leaf_record_order(leaf)
     # be placed on the uv plane: a reader that grids it, takes a uv range over it,
     # or forms `Σ V·w` (where `NaN * 0` is NaN, not 0) is corrupted by a row that
     # holds nothing. Emit only the cells with a real position.
-    uvw = parent(leaf[:uvw])          # (Ti, Baseline, UVW)
-    w = parent(leaf[:weights])        # (Frequency, Ti, Baseline, Pol)
-    f = parent(leaf[:flags])          # (Frequency, Ti, Baseline, Pol)
+    uvw = parent(leaf[:uvw])          # (Ti, BaselineID, UVW)
+    w = parent(leaf[:weights])        # (Frequency, Ti, BaselineID, Polarization)
+    f = parent(leaf[:flags])          # (Frequency, Ti, BaselineID, Polarization)
     nchan, npol = sz[1], sz[4]
     out = Tuple{Int, Int}[]
     sizehint!(out, nti * nbl)
@@ -1684,8 +1684,8 @@ function _write_records_kernel!(
         pol_perm::AbstractVector{Int},
         imag_sign::T,
     ) where {T, Tvis, Tw, Tuvw}
-    # Leaf storage: (Frequency, Ti, Baseline, Pol) for vis/weights/flags;
-    # (Ti, Baseline, UVW) for uvw.
+    # Leaf storage: (Frequency, Ti, BaselineID, Polarization) for vis/weights/flags;
+    # (Ti, BaselineID, UVW) for uvw.
     #
     # UVFITS has no flag table: a negative weight is the only way the format
     # records a flag, so a flagged sample is written with its weight negated.

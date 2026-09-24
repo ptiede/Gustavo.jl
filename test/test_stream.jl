@@ -238,10 +238,10 @@ end
         b = info.baselines
         idx = [i for (i, (a, c)) in enumerate(b.pairs) if full[a] in keep && full[c] in keep]
         newb = UVP.BaselineIndex(remap(b.pairs_per_record), remap(b.pairs); antenna_names = keep)
-        v = leaf[:vis][Baseline = idx]
-        w = leaf[:weights][Baseline = idx]
-        u = leaf[:uvw][Baseline = idx]
-        f = leaf[:flags][Baseline = idx]
+        v = leaf[:vis][BaselineID = idx]
+        w = leaf[:weights][BaselineID = idx]
+        u = leaf[:uvw][BaselineID = idx]
+        f = leaf[:flags][BaselineID = idx]
         return UVP._build_leaf(
             v, w, u, f;
             partition_info = UVP.update(

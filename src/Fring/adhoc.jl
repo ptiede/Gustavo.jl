@@ -810,7 +810,7 @@ are unbiased by source structure.
 
 Returns a `DimStack`: `:phase` (`Ant × Feed × Ti`, `Ti` carrying the AP
 epochs) is the per-(station, feed) adhoc phase in radians, `NaN` where
-unsolved; `:covered` marks the solved cells; `:source` (`Baseline × Pol`) is
+unsolved; `:covered` marks the solved cells; `:source` (`BaselineID × Polarization`) is
 the fitted source phase, `NaN` where unidentifiable.
 
 `rbar[baseline, product, ap]` is `Σ_chan w·V_residual` and
@@ -1059,7 +1059,7 @@ function solve_adhoc_phasing(
         (
             phase = DimArray(phase_out, axs),
             covered = DimArray(covered_out, axs),
-            source = DimArray(source, (Baseline(1:nbl), Pol(1:npol))),
+            source = DimArray(source, (BaselineID(1:nbl), Polarization(1:npol))),
         )
     )
 end
@@ -1072,10 +1072,10 @@ end
 # before this kernel ever sees it.
 function _accumulate_leaf_rbar!(rbar, wbar, V, W, F)
     UVData.check_layer_axes(V, W, F)
-    @inbounds for p in axes(V, Pol)
-        for bi in axes(V, Baseline)
+    @inbounds for p in axes(V, Polarization)
+        for bi in axes(V, BaselineID)
             for tt in axes(V, Ti), c in axes(V, Frequency)
-                cell = (Frequency(c), Ti(tt), Baseline(bi), Pol(p))
+                cell = (Frequency(c), Ti(tt), BaselineID(bi), Polarization(p))
                 F[cell] && continue
                 w = W[cell]
                 (w > 0 && isfinite(w)) || continue

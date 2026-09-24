@@ -283,7 +283,7 @@ intermediates); falls back to materialize-then-copy when the group is not a
 single sibling-band IDI span.
 
 `stack` is a leaf-shaped `DimStack` built once where the concatenated cube is
-born: `:vis`/`:weights`/`:flags` layers on `(Frequency, Ti, Baseline, Pol)`
+born: `:vis`/`:weights`/`:flags` layers on `(Frequency, Ti, BaselineID, Polarization)`
 dims, `:vis` and `:weights` each carrying the element type promoted over the
 group's leaves so no band's precision is narrowed. Metadata is the first band
 leaf's `PartitionInfo` (source/scan identity, antennas and baselines are
@@ -375,7 +375,7 @@ function _direct_scan_group(spec::ScanGroupSpec, geom::DataGeometry, executor)
     UVData.materialize_group_into!(dests, lazy; executor) || return nothing
 
     info = UVData.metadata(l0)
-    d = (Frequency(fg), Ti(tg), Baseline(copy(info.baselines.labels)), Pol(pols))
+    d = (Frequency(fg), Ti(tg), BaselineID(copy(info.baselines.labels)), Polarization(pols))
     return (
         DimStack(
             (vis = DimArray(Vg, d), weights = DimArray(Wg, d), flags = DimArray(Fg, d));
@@ -456,7 +456,7 @@ function _stacked_scan_group(leaves, geom::DataGeometry)
     end
 
     info = UVData.metadata(l0)
-    d = (Frequency(fg), Ti(tg), Baseline(copy(info.baselines.labels)), Pol(pols))
+    d = (Frequency(fg), Ti(tg), BaselineID(copy(info.baselines.labels)), Polarization(pols))
     return (
         DimStack(
             (vis = DimArray(Vg, d), weights = DimArray(Wg, d), flags = DimArray(Fg, d));

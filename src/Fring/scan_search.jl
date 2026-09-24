@@ -49,10 +49,10 @@ must reference them where the model's constant lives
 (`mean(timestamps(data))`). The default is `geom`'s track epoch,
 which is right only for a single-scan geometry.
 
-Returns a `DimStack` over `Baseline × Pol` whose layers are the seven
+Returns a `DimStack` over `BaselineID × Polarization` whose layers are the seven
 [`Detection`](@ref) fields (`:delay`/`:rate`/`:phase`/`:amp`/`:snr`/`:pfa`/`:valid`),
 so one cell `det[bi, p]` reads back as a `Detection` `NamedTuple`; the
-`Baseline` lookup carries the surviving `(a, b)` pairs. The layers' element
+`BaselineID` lookup carries the surviving `(a, b)` pairs. The layers' element
 type tracks `real(eltype(Vsearch))`. Results are bit-identical to the serial
 loop regardless of the fan-out `executor`.
 """
@@ -77,7 +77,7 @@ function search_scan(
     # layers below track the same precision.
     C = eltype(Vsearch)
     T = real(C)
-    dims = (Baseline(bl_pairs), Pol(pols))
+    dims = (BaselineID(bl_pairs), Polarization(pols))
     delay = zeros(T, dims...)
     rate = similar(delay)
     phase = similar(delay)
@@ -113,7 +113,7 @@ function search_scan(
     tforeach(cells; scheduler = executor) do (j, p)
         bi = keep[j]
         scube[j, p] = _baseline_fringe_search(
-            view(cube, Baseline(bi), Pol(p)),
+            view(cube, BaselineID(bi), Polarization(p)),
             fg, times, f0, t0_sec, ax, workspace[], params, family_cells,
         )
     end

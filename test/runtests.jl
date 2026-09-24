@@ -7,10 +7,11 @@ using StructArrays
 using Dates
 using OrderedCollections
 using FITSFiles: Card
+import XRadio
 using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
-using Gustavo.UVData: Pol, Frequency, UVW, Baseline, UVSet, pol_products
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, UVSet, pol_products
 using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using PolarizedTypes: RPol, LPol
 
@@ -133,8 +134,8 @@ function synthetic_uvdata()
     # order — the round-trip test exercises the read/write permutation.
     pol_labels_synth = ["PP", "PQ", "QP", "QQ"]
     channel_freqs_synth = collect(1.0:4.0)
-    vis = DimArray(vis, (Ti(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
-    weights = DimArray(weights, (Ti(obs_time_synth), Pol(pol_labels_synth), Frequency(channel_freqs_synth)))
+    vis = DimArray(vis, (Ti(obs_time_synth), Polarization(pol_labels_synth), Frequency(channel_freqs_synth)))
+    weights = DimArray(weights, (Ti(obs_time_synth), Polarization(pol_labels_synth), Frequency(channel_freqs_synth)))
     uvw = DimArray(zeros(Float32, 2, 3), (Ti(obs_time_synth), UVW(["U", "V", "W"])))
 
     UV = Gustavo.UVData
@@ -259,11 +260,16 @@ end
     # Every axis name a stored or returned array can carry, so scripts index
     # leaves with a bare `using Gustavo`. `Ti` is DimensionalData's dim under
     # both names — the same binding, so no ambiguity when both are loaded.
-    for n in (:Pol, :Frequency, :Ant, :Baseline, :Ti, :UVW, :Feed, :Scan)
+    for n in (:Polarization, :Frequency, :Ant, :BaselineID, :Ti, :UVW, :Feed, :Scan)
         @test n in top
         @test getproperty(Gustavo, n) <: DimensionalData.Dimension
     end
     @test Gustavo.Ti === DimensionalData.Ti
+    # A leaf and a Measurement Set subset share their axis types, so a kernel
+    # indexing by name reads either.
+    for n in (:Frequency, :BaselineID, :Polarization)
+        @test getproperty(Gustavo, n) === getproperty(XRadio, n)
+    end
 
     # Solver-internal parameter bookkeeping: still reachable, no longer exported.
     @test !(:ComponentPlan in names(Gustavo.Calibration))
@@ -405,8 +411,8 @@ end
     # mutated in place, and this test has to blank a cell.
     uvset, _ = _build_fringe_uvset()
     leaf = first(values(UV.branches(uvset)))
-    uvw = parent(leaf[:uvw])            # (Ti, Baseline, UVW)
-    wts = parent(leaf[:weights])        # (Frequency, Ti, Baseline, Pol)
+    uvw = parent(leaf[:uvw])            # (Ti, BaselineID, UVW)
+    wts = parent(leaf[:weights])        # (Frequency, Ti, BaselineID, Polarization)
 
     # Blank one (time, baseline) cell the way a reduction leaves an unsampled
     # one: no uv position, no weight.
@@ -524,15 +530,15 @@ end
         info = UV.metadata(leaf)
         ti_lookup = collect(UV.obs_time(leaf))
         bls = info.baselines
-        vis_p = parent(leaf[:vis])     # (Frequency, Ti, Baseline, Pol)
+        vis_p = parent(leaf[:vis])     # (Frequency, Ti, BaselineID, Polarization)
         w_p = parent(leaf[:weights])
-        uvw_p = parent(leaf[:uvw])     # (Ti, Baseline, UVW)
+        uvw_p = parent(leaf[:uvw])     # (Ti, BaselineID, UVW)
         for (ti, bi) in info.record_order
             push!(obs_times, ti_lookup[ti])
             push!(scan_indices, info.scan_name)
             push!(bl_pairs_per_record, bls.pairs[bi])
-            # Slice (Frequency, Pol) for one (ti, bi); transpose to (Pol, Frequency)
-            # to match the flat fixture's (Ti, Pol, Frequency) layout.
+            # Slice (Frequency, Polarization) for one (ti, bi); transpose to (Polarization, Frequency)
+            # to match the flat fixture's (Ti, Polarization, Frequency) layout.
             push!(vis_chunks, copy(transpose(vis_p[:, ti, bi, :])))
             push!(weights_chunks, copy(transpose(w_p[:, ti, bi, :])))
             push!(uvw_chunks, uvw_p[ti, bi, :])
@@ -551,8 +557,8 @@ end
     end
     pol_labels = pol_products(base)
     chan_freqs = UV.channel_freqs(UV.freq_setup(base))
-    vis_da = DimArray(vis_flat, (Ti(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
-    weights_da = DimArray(weights_flat, (Ti(obs_times), UV.Pol(pol_labels), UV.Frequency(chan_freqs)))
+    vis_da = DimArray(vis_flat, (Ti(obs_times), UV.Polarization(pol_labels), UV.Frequency(chan_freqs)))
+    weights_da = DimArray(weights_flat, (Ti(obs_times), UV.Polarization(pol_labels), UV.Frequency(chan_freqs)))
     uvw_da = DimArray(uvw_flat, (Ti(obs_times), UV.UVW(["U", "V", "W"])))
 
     unique_pairs = sort(unique(bl_pairs_per_record))
@@ -685,7 +691,7 @@ end
     @test length(UV.branches(sub_bl)) == length(UV.branches(uvset))
     for (_, leaf) in UV.branches(sub_bl)
         @test UV.baselines(leaf).labels == ["AA-AX"]
-        @test size(parent(leaf[:vis]), 2) == 1   # Baseline axis collapsed to 1
+        @test size(parent(leaf[:vis]), 2) == 1   # BaselineID axis collapsed to 1
     end
 
     # Time window — synthetic fixture has obs_time = [0.0, 1.0], one per scan.
@@ -703,7 +709,7 @@ end
     @test avg_set isa UV.UVSet
     @test length(UV.branches(avg_set)) == length(UV.branches(uvset))
     for (key, leaf) in UV.branches(avg_set)
-        # Layout: (Frequency, Ti, Baseline, Pol). Ti axis is dim 2.
+        # Layout: (Frequency, Ti, BaselineID, Polarization). Ti axis is dim 2.
         @test size(parent(leaf[:vis]), 2) == 1
         @test length(UV.obs_time(leaf)) == 1
     end
@@ -763,9 +769,9 @@ end
     UV = Gustavo.UVData
     raw = synthetic_uvdata()
 
-    # Per-leaf Pol slice on a UVSet: pull leaf, then DimTree's selector.
+    # Per-leaf Polarization slice on a UVSet: pull leaf, then DimTree's selector.
     leaf1 = UV.select_scan(raw, "TEST", 1)
-    sliced = leaf1[Pol = At("PP")]
+    sliced = leaf1[Polarization = At("PP")]
     @test sliced isa DimensionalData.AbstractDimTree
 end
 
@@ -807,8 +813,8 @@ function synthetic_uvdata_3c273_shifted()
     # Pick a shift large enough that the new Ti axes don't overlap the original.
     dt = 100.0
     new_branches = Gustavo.UVData.DimensionalData.TreeDict()
-    # Layout: (Frequency, Ti, Baseline, Pol) for vis/weights and
-    # (UVW, Ti, Baseline) for uvw — Ti is dim 2 in both. Replace it.
+    # Layout: (Frequency, Ti, BaselineID, Polarization) for vis/weights and
+    # (UVW, Ti, BaselineID) for uvw — Ti is dim 2 in both. Replace it.
     _replace_ti(da, new_t) = begin
         old_dims = dims(da)
         new_dims = (old_dims[1], Ti(new_t), old_dims[3:end]...)
@@ -1055,8 +1061,8 @@ function synthetic_two_spw_flat()
     chan_freq = collect(1.0:4.0)
     vis = ComplexF32.(rand(ComplexF32, 2, 4, 4))
     weights = fill(1.0f0, 2, 4, 4)
-    vis_da = DimArray(vis, (Ti(obs_t), Pol(pol_lab), Frequency(chan_freq)))
-    weights_da = DimArray(weights, (Ti(obs_t), Pol(pol_lab), Frequency(chan_freq)))
+    vis_da = DimArray(vis, (Ti(obs_t), Polarization(pol_lab), Frequency(chan_freq)))
+    weights_da = DimArray(weights, (Ti(obs_t), Polarization(pol_lab), Frequency(chan_freq)))
     uvw_da = DimArray(zeros(Float32, 2, 3), (Ti(obs_t), UVW(["U", "V", "W"])))
 
     # Reuse antennas / array_config / array_obs / primary_cards from the
@@ -1443,10 +1449,10 @@ end
     info = UV.metadata(leaf)
     # Reshape vis to a different pol set (drop the cross-hands so leaves
     # disagree across the 2 scans).
-    reduced_vis = leaf[:vis][Pol = 1:2]
-    reduced_w = leaf[:weights][Pol = 1:2]
+    reduced_vis = leaf[:vis][Polarization = 1:2]
+    reduced_w = leaf[:weights][Polarization = 1:2]
     reduced_uvw = leaf[:uvw]
-    reduced_flags = leaf[:flags][Pol = 1:2]
+    reduced_flags = leaf[:flags][Polarization = 1:2]
     reduced_leaf = UV._build_leaf(
         reduced_vis, reduced_w, reduced_uvw, reduced_flags;
         partition_info = info,
@@ -1772,10 +1778,10 @@ end
     @test size(bl[:weights]) == (nch, nti, npol)
     @test size(bl[:uvw]) == (nti, 3)
 
-    # Pol selector path matches manual indexing.
+    # Polarization selector path matches manual indexing.
     pp_idx = UV.pol_index(leaf, "PP")
-    via_selector = parent(bl[:vis][Pol = UV.pol_at("PP")])
-    via_manual = parent(view(leaf[:vis], UV.Baseline(bls.pairs[1] |> p -> bls[p])))[:, :, pp_idx]
+    via_selector = parent(bl[:vis][Polarization = UV.pol_at("PP")])
+    via_manual = parent(view(leaf[:vis], UV.BaselineID(bls.pairs[1] |> p -> bls[p])))[:, :, pp_idx]
     @test via_selector == via_manual
 
     # Metadata carries the antenna identification + scan name.

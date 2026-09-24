@@ -2,7 +2,7 @@ using Test
 using Random
 using OffsetArrays: OffsetArray
 using DimensionalData: DimArray
-using Gustavo.UVData: Frequency, Ti, Baseline, Pol
+using Gustavo.UVData: Frequency, Ti, BaselineID, Polarization
 
 # An `AbstractArray` annotation promises the function works for any array — any
 # axes, and lazy wrappers as well as `Array`. These tests hold the package to
@@ -26,7 +26,7 @@ using Gustavo.UVData: Frequency, Ti, Baseline, Pol
         V = randn(ComplexF64, 4, 3, 2, 2)
         d = (
             Frequency(collect(1.0:4.0)), Ti(collect(1.0:3.0)),
-            Baseline(["a", "b"]), Pol(["PP", "QQ"]),
+            BaselineID(["a", "b"]), Polarization(["PP", "QQ"]),
         )
         @test_throws DimensionMismatch DimArray(OffsetArray(V, -1, -1, 0, 0), d)
         # A lazy wrapper is not an offset and must still be accepted.

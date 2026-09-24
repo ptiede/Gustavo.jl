@@ -445,9 +445,9 @@ end
 # per-(scan, station) nuisance feed-2 offset columns and withholding cross-hand
 # rows from it.
 #
-# `scans` is a vector of `Baseline × Pol` Detection `DimStack`s, the shape
-# `search_scan` returns, each carrying its `Baseline` lookup's `(a, b)` pairs,
-# per-product feeds from its `Pol` lookup, and a representative global time
+# `scans` is a vector of `BaselineID × Polarization` Detection `DimStack`s, the shape
+# `search_scan` returns, each carrying its `BaselineID` lookup's `(a, b)` pairs,
+# per-product feeds from its `Polarization` lookup, and a representative global time
 # index `:ti` in metadata for the `tseg_id` lookup. θ slots are accumulated into
 # with `+=`, matching `_pack_station!`, so `rounds > 1` — search on the residual
 # — stays correct.
@@ -456,7 +456,7 @@ end
     detection_stack(D::AbstractMatrix{<:Detection}, bl_pairs, pol_products;
                     ti, freq_rms, time_rms) -> DimStack
 
-Package a plain `[baseline, product]` detection matrix as the `Baseline × Pol`
+Package a plain `[baseline, product]` detection matrix as the `BaselineID × Polarization`
 DimStack shape `search_scan` returns, carrying `ti` (the representative global
 time index) in metadata — so a scan built directly (the refine stage, or a
 direct `solve_station_systems!` call) has the same shape as
@@ -474,7 +474,7 @@ function detection_stack(
         freq_rms::Union{Nothing, Real} = nothing,
         time_rms::Union{Nothing, Real} = nothing,
     )
-    gdims = (Baseline(collect(Tuple{Int, Int}, bl_pairs)), Pol(collect(pol_products)))
+    gdims = (BaselineID(collect(Tuple{Int, Int}, bl_pairs)), Polarization(collect(pol_products)))
     layers = (;
         delay = DimArray(getfield.(D, :delay), gdims),
         rate = DimArray(getfield.(D, :rate), gdims),
@@ -504,8 +504,8 @@ _with_ti(
     freq_rms::Union{Nothing, Real} = nothing, time_rms::Union{Nothing, Real} = nothing,
 ) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, epoch, freq_rms, time_rms))
 
-_scan_bl_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Baseline))
-_scan_pols(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Pol))
+_scan_bl_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, BaselineID))
+_scan_pols(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Polarization))
 _scan_feeds(sc::AbstractDimStack) = [correlation_feed_pair(p) for p in _scan_pols(sc)]
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc)[:ti]::Int
 _scan_epoch(sc::AbstractDimStack) = get(DimensionalData.metadata(sc), :epoch, nothing)

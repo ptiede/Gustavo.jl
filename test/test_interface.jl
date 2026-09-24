@@ -234,7 +234,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         hook = CalFunction() do st, w
             scan_name(st) == scanname || return
             for (bi, (a, b)) in enumerate(baselines(st).pairs)
-                minmax(a, b) == (1, 3) && (st[:weights][Baseline = bi] .*= 0.5)
+                minmax(a, b) == (1, 3) && (st[:weights][BaselineID = bi] .*= 0.5)
             end
         end
         apply_transform!(hook, stack, win)
@@ -362,8 +362,8 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         f2 = sol.geom.channel_freqs[2]
         @test gains(sol; Frequency = At(f2), Ant = 2) == G[Frequency = At(f2), Ant = 2]
         @test gains(sol; Ti = Near(sol.geom.times[end])) == G[Ti = Near(sol.geom.times[end])]
-        @test_throws ArgumentError gains(sol; Pol = 1)
-        @test_throws "unknown dimension keyword" gains(sol; Pol = 1)
+        @test_throws ArgumentError gains(sol; Polarization = 1)
+        @test_throws "unknown dimension keyword" gains(sol; Polarization = 1)
     end
 
     @testset "fit + calibrate ≡ fitcalibrate (weight-scale transform)" begin

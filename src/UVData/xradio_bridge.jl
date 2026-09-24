@@ -100,7 +100,7 @@ function _leaf_to_measurementset(leaf, root)
     base = XRadio.BaselineID(DimensionalData.Lookups.Sampled(collect(1:nbl)))
     uvwlab = XRadio.UVWLabel(DimensionalData.Lookups.Categorical(["u", "v", "w"]))
 
-    # Gustavo holds `(Frequency, Ti, Baseline, Pol)` and the standard's Julia
+    # Gustavo holds `(Frequency, Ti, BaselineID, Polarization)` and the standard's Julia
     # order is `(polarization, frequency, baseline_id, time)`.
     vis = permutedims(parent(part[:vis]), (4, 1, 3, 2))
     wgt = permutedims(parent(part[:weights]), (4, 1, 3, 2))

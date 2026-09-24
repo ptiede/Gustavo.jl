@@ -72,8 +72,8 @@ function _extract_scan_leaf(
     nchan = size(vis_flat, 3)
 
     # Memory layout: frequency varies fastest, pol slowest. Order is
-    # (Frequency, Ti, Baseline, Pol) for vis/weights/flags and
-    # (UVW, Ti, Baseline) for uvw — matches xradio MSv4 frequency-fastest
+    # (Frequency, Ti, BaselineID, Polarization) for vis/weights/flags and
+    # (UVW, Ti, BaselineID) for uvw — matches xradio MSv4 frequency-fastest
     # convention and gives stride-1 channel access in bandpass loops.
     vis_dense = fill(
         complex(eltype(real(eltype(vis_flat)))(NaN), eltype(real(eltype(vis_flat)))(NaN)),
@@ -87,24 +87,24 @@ function _extract_scan_leaf(
         ti = time_lookup[obs_times_per_int[rec_i]]
         bi = bl_lookup_scan[bl_pairs_per_record[rec_i]]
         record_order[rec_i] = (ti, bi)
-        # flat layout is (Ti, Pol, Frequency); permute into
-        # (Frequency, Ti, Baseline, Pol).
+        # flat layout is (Ti, Polarization, Frequency); permute into
+        # (Frequency, Ti, BaselineID, Polarization).
         for p in axes(vis_dense, 4), c in axes(vis_dense, 1)
             vis_dense[c, ti, bi, p] = vis_flat[int_i, p, c]
             weights_dense[c, ti, bi, p] = weights_flat[int_i, p, c]
         end
-        # uvw layout: (Ti, Baseline, UVW) — easy slicing on Ti/Baseline.
+        # uvw layout: (Ti, BaselineID, UVW) — easy slicing on Ti/BaselineID.
         for k in axes(uvw_dense, 3)
             uvw_dense[ti, bi, k] = uvw_flat[int_i, k]
         end
     end
 
-    pol_labels = collect(lookup(flat.vis, Pol))
+    pol_labels = collect(lookup(flat.vis, Polarization))
     vis_part = DimArray(
         vis_dense,
         (
             Frequency(channel_freqs(leaf_freq_setup)), Ti(unique_times),
-            Baseline(baselines_scan.labels), Pol(pol_labels),
+            BaselineID(baselines_scan.labels), Polarization(pol_labels),
         ),
     )
     weights_part = DimArray(weights_dense, dims(vis_part))
@@ -113,7 +113,7 @@ function _extract_scan_leaf(
     flags_part = DimArray(.!(weights_dense .> 0), dims(vis_part))
     uvw_part = DimArray(
         uvw_dense,
-        (Ti(unique_times), Baseline(baselines_scan.labels), UVW(["U", "V", "W"])),
+        (Ti(unique_times), BaselineID(baselines_scan.labels), UVW(["U", "V", "W"])),
     )
 
     extras_part = NamedTuple{keys(flat.extra_columns)}(

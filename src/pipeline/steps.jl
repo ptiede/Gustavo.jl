@@ -358,7 +358,7 @@ function Fring.estimate_scan!(
     )
     pols = pol_products(stack)
     # `res` covers only the surviving (cross) baselines; take its own pair list.
-    bl_pairs = collect(UVData.DimensionalData.lookup(res, UVData.Baseline))
+    bl_pairs = collect(UVData.DimensionalData.lookup(res, UVData.BaselineID))
     # The scan's frequency/time lever arms travel with its detections: they set
     # the CRB uncertainty of a delay and a rate, which is what puts the station
     # solve's residuals in units of σ (see `Stationization`).

@@ -14,7 +14,7 @@
 using Serialization: serialize, deserialize
 using Statistics: mean
 using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions
-using ..UVData: Frequency, Pol, Baseline, Ant, Feed
+using ..UVData: Frequency, Polarization, BaselineID, Ant, Feed
 
 """
     StepSolution(name, model, layout, θ, info)

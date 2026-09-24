@@ -170,7 +170,7 @@
             Threads.atomic_add!(touched, 1)
             for (bi, (a, b)) in enumerate(baselines(stack).pairs)
                 if minmax(a, b) == (1, 2)
-                    stack[:flags][Baseline = bi] .= true
+                    stack[:flags][BaselineID = bi] .= true
                 end
             end
         end

@@ -24,16 +24,16 @@
 # chain before this kernel ever sees it.
 function _accumulate_leaf_band_phasor!(z, w, V, W, F, bl_pairs, pols)
     UVData.check_layer_axes(V, W, F)
-    @inbounds for p in axes(V, Pol)
+    @inbounds for p in axes(V, Polarization)
         fa, fb = correlation_feed_pair(pols[p])
         fa == fb || continue                    # parallel hands only
-        for bi in axes(V, Baseline)
+        for bi in axes(V, BaselineID)
             a, b = bl_pairs[bi]
             a == b && continue
             acc = zero(ComplexF64)
             wsum = 0.0
             for tt in axes(V, Ti), c in axes(V, Frequency)
-                cell = (Frequency(c), Ti(tt), Baseline(bi), Pol(p))
+                cell = (Frequency(c), Ti(tt), BaselineID(bi), Polarization(p))
                 F[cell] && continue
                 ww = W[cell]
                 (ww > 0 && isfinite(ww)) || continue
@@ -148,14 +148,14 @@ end
 # gain-corrected through the pipeline's transform chain.
 function _accumulate_leaf_chunks!(z, w, V, W, F, bl_pairs, pols, chunk_of_chan)
     UVData.check_layer_axes(V, W, F)
-    @inbounds for p in axes(V, Pol)
+    @inbounds for p in axes(V, Polarization)
         fa, fb = correlation_feed_pair(pols[p])
         fa == fb || continue
-        for bi in axes(V, Baseline)
+        for bi in axes(V, BaselineID)
             a, b = bl_pairs[bi]
             a == b && continue
             for tt in axes(V, Ti), c in axes(V, Frequency)
-                cell = (Frequency(c), Ti(tt), Baseline(bi), Pol(p))
+                cell = (Frequency(c), Ti(tt), BaselineID(bi), Polarization(p))
                 F[cell] && continue
                 ww = W[cell]
                 (ww > 0 && isfinite(ww)) || continue

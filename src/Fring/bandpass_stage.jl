@@ -208,11 +208,11 @@ solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
 )
 
 # Fresh per-(baseline row, product, global channel) bandpass accumulators. They
-# carry (Baseline, Pol, Frequency) dims so the accumulate/solve kernels below
+# carry (BaselineID, Polarization, Frequency) dims so the accumulate/solve kernels below
 # address axes by name (the house style of the Bandpass module) instead of by
 # position; indexing stays plain-positional and costs nothing.
 function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
-    d = (Baseline(1:nbl), Pol(1:npol), Frequency(1:nchan))
+    d = (BaselineID(1:nbl), Polarization(1:npol), Frequency(1:nchan))
     return (
         DimensionalData.DimArray(zeros(ComplexF64, nbl, npol, nchan), d),
         DimensionalData.DimArray(zeros(Float64, nbl, npol, nchan), d),
@@ -248,7 +248,7 @@ function accumulate_bandpass!(
     F = stack[:flags]
     bl_pairs = UVData.baselines(stack).pairs
     g_ci = win.chan_idx
-    for p in axes(V, Pol), bi in axes(V, Baseline)
+    for p in axes(V, Polarization), bi in axes(V, BaselineID)
         a, b = bl_pairs[bi]
         a == b && continue # autocorrelation skip
         idx = get(blidx, (a, b), 0)
@@ -259,18 +259,18 @@ function accumulate_bandpass!(
                 # Band-averaged residual phase for this AP (the per-AP time phase).
                 acc = zero(eltype(V))
                 for c in axes(V, Frequency)
-                    w = W[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
-                    vv = V[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
-                    fl = F[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
+                    w = W[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
+                    vv = V[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
+                    fl = F[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
                     cond = (!fl && w > 0 && isfinite(w) && isfinite(vv))
                     acc += ifelse(cond, w * vv, zero(eltype(V)))
                 end
                 rot = ifelse(abs(acc) > 0, conj(acc) / abs(acc), one(eltype(V))) # cis(-angle(acc)): de-rotate this AP
             end
             for c in axes(V, Frequency)
-                w = W[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
-                vv = V[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
-                fl = F[Frequency = c, Ti = tt, Baseline = bi, Pol = p]
+                w = W[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
+                vv = V[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
+                fl = F[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
                 cond = (!fl && w > 0 && isfinite(w) && isfinite(vv))
                 gc = g_ci[c]
                 rbar_bp[idx, p, gc] += ifelse(cond, w * vv * rot, zero(eltype(V)))
@@ -299,7 +299,7 @@ function _seed_phase_tracks(
     prec = zeros(nant, 2, nseg)
     for (fs, chans) in enumerate(segs)
         rows = _ObsRow[]
-        for bi in axes(rbar_bp, Baseline), p in axes(rbar_bp, Pol)
+        for bi in axes(rbar_bp, BaselineID), p in axes(rbar_bp, Polarization)
             a, b = bl_pairs[bi]
             a == b && continue
             r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
@@ -915,14 +915,14 @@ end
 # gain ([`_update_station_gains!`](@ref)), at `phase_plan`/`amp_plan`'s shared
 # frequency-segment resolution, to convergence.
 #
-# Every array below carries (Scan, Baseline, Pol, Frequency) or
+# Every array below carries (Scan, BaselineID, Polarization, Frequency) or
 # (Ant, Feed, Ti, Frequency) dims, so the loops read by axis name. `Frequency`
 # is the frequency-segment index and `Ti` the time-segment one. Each station
 # carries its own time segmentation, so `Ti` spans the union of them and a
 # station reaches only its own slots. Indexing itself stays plain-positional.
 
 # One scan's per-(baseline, pol, segment) coherent residual, written directly
-# into `rview`/`wview`, a (Baseline, Pol, Frequency) slice of the multi-scan
+# into `rview`/`wview`, a (BaselineID, Polarization, Frequency) slice of the multi-scan
 # accumulator, with no intermediate allocation.
 #
 # These must not be SNR-gated. The joint solve consumes them as complex
@@ -935,7 +935,7 @@ end
 # the relative R–L bandpass, leaving that block at its initialization. Outliers
 # belong to a flagging step upstream of the solve, not to a cell gate.
 function _reduce_scan_segments!(rview, wview, sc, segs)
-    for p in axes(rview, Pol), bi in axes(rview, Baseline)
+    for p in axes(rview, Polarization), bi in axes(rview, BaselineID)
         for (fs, chans) in enumerate(segs)
             rc, wc, _ = _segment_residual(sc.rl, sc.wl, bi, p, chans)
             keep = isfinite(rc) && isfinite(wc) && wc > 0
@@ -946,17 +946,17 @@ function _reduce_scan_segments!(rview, wview, sc, segs)
     return nothing
 end
 
-# Every scan's (Baseline, Pol, segment) residual, stacked over an added Scan
+# Every scan's (BaselineID, Polarization, segment) residual, stacked over an added Scan
 # axis — not summed across scans (unlike the closure tier's fold), since the per-scan source coherence needs each
 # scan's own coherent visibility. Element types follow the scan accumulators'
 # own (`bandpass_accumulators`'), not a hardcoded precision.
 function _reduce_all_scans(scans, segs)
     nscan = length(scans)
-    nbl, npol = size(first(scans).rl, Baseline), size(first(scans).rl, Pol)
+    nbl, npol = size(first(scans).rl, BaselineID), size(first(scans).rl, Polarization)
     nseg = length(segs)
     C = eltype(first(scans).rl)
     T = real(eltype(first(scans).wl))
-    d = (Scan(1:nscan), Baseline(1:nbl), Pol(1:npol), Frequency(1:nseg))
+    d = (Scan(1:nscan), BaselineID(1:nbl), Polarization(1:npol), Frequency(1:nseg))
     rseg = DimensionalData.DimArray(zeros(C, nscan, nbl, npol, nseg), d)
     wseg = DimensionalData.DimArray(zeros(T, nscan, nbl, npol, nseg), d)
     for (si, sc) in enumerate(scans)
@@ -1083,7 +1083,7 @@ end
 # is read through its own `fseg` row.
 function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg)
     T = real(eltype(S))
-    for p in axes(rseg, Pol), bi in axes(rseg, Baseline)
+    for p in axes(rseg, Polarization), bi in axes(rseg, BaselineID)
         a, b = bl_pairs[bi]
         a == b && continue
         fa, fb = feeds[p]
@@ -1096,14 +1096,14 @@ function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg
             numer = zero(eltype(S))
             denom = zero(T)
             for cell in axes(rseg, Frequency)
-                w = wseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
+                w = wseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
                 w > 0 || continue
                 u = g[a, fa, ta, fseg[a, cell]] * conj(g[b, fb, tb, fseg[b, cell]])
                 abs2(u) > 0 || continue
-                numer += conj(u) * rseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
+                numer += conj(u) * rseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
                 denom += w * abs2(u)
             end
-            S[Scan(si), Baseline(bi), Pol(p)] = denom > 0 ? numer / denom : zero(eltype(S))
+            S[Scan(si), BaselineID(bi), Polarization(p)] = denom > 0 ? numer / denom : zero(eltype(S))
         end
     end
     return nothing
@@ -1171,22 +1171,22 @@ function _update_station_gains!(
                 for si in axes(rseg, Scan)
                     # Only the scans this node's own segment covers constrain it.
                     tseg[ant, si] == ts || continue
-                    w = wseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
+                    w = wseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
                     w > 0 || continue
-                    s = S[Scan(si), Baseline(bi), Pol(p)]
+                    s = S[Scan(si), BaselineID(bi), Polarization(p)]
                     if role === :a
                         tb = tseg[b, si]
                         iszero(tb) && continue
                         coeff = s * conj(g[b, fb, tb, fseg[b, cell]])
                         abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * rseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)]
+                        num[sa] += conj(coeff) * rseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
                         den[sa] += w * abs2(coeff)
                     else
                         ta = tseg[a, si]
                         iszero(ta) && continue
                         coeff = conj(g[a, fa, ta, fseg[a, cell]] * s)
                         abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * conj(rseg[Scan(si), Baseline(bi), Pol(p), Frequency(cell)])
+                        num[sa] += conj(coeff) * conj(rseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)])
                         den[sa] += w * abs2(coeff)
                     end
                 end
@@ -1574,7 +1574,7 @@ function solve_joint_bandpass!(
     touched = DimensionalData.DimArray(falses(nant, 2, ntseg, nfsmax), gd)
     S = DimensionalData.DimArray(
         zeros(C, length(scans), length(bl_pairs), length(pol_products)),
-        (Scan(1:length(scans)), Baseline(1:length(bl_pairs)), Pol(1:length(pol_products))),
+        (Scan(1:length(scans)), BaselineID(1:length(bl_pairs)), Polarization(1:length(pol_products))),
     )
 
     _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tsg, fseg)

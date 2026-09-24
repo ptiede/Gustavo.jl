@@ -1,7 +1,7 @@
 using Test
 using DimensionalData
 using DimensionalData: DimArray, dims, lookup, Ti
-using Gustavo.UVData: Pol, Frequency, Baseline
+using Gustavo.UVData: Polarization, Frequency, BaselineID
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 
@@ -253,7 +253,7 @@ using Gustavo.UVData: Pol, Frequency, Baseline
     @testset "the bridge takes FLAG from the layer, not the weight sign" begin
         crossed = _maptree(_crossed_leaf, base)
         ms = first(values(UV.uvset_to_processingset(crossed)))
-        # Gustavo's (Frequency, Ti, Baseline, Pol) cell [c, 1, 1, 1] is MSv4's
+        # Gustavo's (Frequency, Ti, BaselineID, Polarization) cell [c, 1, 1, 1] is MSv4's
         # (polarization, frequency, baseline_id, time) cell [1, c, 1, 1].
         @test parent(ms[:flag])[1, 1, 1, 1]
         @test parent(ms[:weight])[1, 1, 1, 1] > 0

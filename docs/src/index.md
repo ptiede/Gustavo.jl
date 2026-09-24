@@ -51,7 +51,7 @@ save_solution("track.jls", sol)
 
 **Data.** [`load_fitsidi`](@ref) / [`load_uvfits`](@ref) return a `UVSet`: a
 tree of per-scan leaves, each carrying dimension-named
-`(Ti, Baseline, Pol, Frequency)` visibility cubes. The `UV_DATA` payload
+`(Ti, BaselineID, Polarization, Frequency)` visibility cubes. The `UV_DATA` payload
 stays on disk until a scan group is materialized, so the solvers stream it.
 
 **Pipeline.** A [`CalibrationPipeline`](@ref) is an ordered list of steps

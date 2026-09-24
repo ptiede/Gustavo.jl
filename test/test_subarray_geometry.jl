@@ -44,13 +44,13 @@ function _subarray_uvset(specs; nchan = 4, nant = 6)
         vis = DimArray(
             fill(ComplexF32(1), nchan, nt, nbl, length(pol_labels)),
             (Frequency(collect(chf)), Ti(collect(times)),
-                Baseline(bls.labels), Pol(pol_labels)),
+                BaselineID(bls.labels), Polarization(pol_labels)),
         )
         w = DimArray(ones(Float32, size(vis)), dims(vis))
         fl = DimArray(falses(size(vis)), dims(vis))
         uvw = DimArray(
             zeros(Float32, nt, nbl, 3),
-            (Ti(collect(times)), Baseline(bls.labels), UVW(["U", "V", "W"])),
+            (Ti(collect(times)), BaselineID(bls.labels), UVW(["U", "V", "W"])),
         )
         info = UVsub.PartitionInfo(;
             source_name = src, source_key = UVsub.sanitize_source(src),

@@ -24,7 +24,7 @@ using OhMyThreads: tforeach, tmap, Scheduler
 using OhMyThreads: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 using OhMyThreads.Schedulers: chunking_enabled, has_nchunks, nchunks
 using ..UVData
-using ..UVData: Baseline, Frequency, Pol
+using ..UVData: BaselineID, Frequency, Polarization
 using Dates: unix2datetime
 using ..Calibration
 using ..Calibration: GeometryWindow

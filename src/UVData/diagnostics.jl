@@ -58,7 +58,7 @@ function _baseline_scan_blocks(data::UVSet, corr::UVSet, bl_plot, pol_index::Int
         isnothing(bi_d) && continue
         bi_c = _local_baseline_idx(leaf_c, bl_plot)
         isnothing(bi_c) && continue
-        # Layout: (Frequency, Ti, Baseline, Pol). Slice to (Frequency, Ti)
+        # Layout: (Frequency, Ti, BaselineID, Polarization). Slice to (Frequency, Ti)
         # for fixed (baseline, pol), then transpose to (Ti, Frequency) so
         # downstream concat yields (nrec, nchan).
         # A flagged sample carries no weight in the extracted block: every

@@ -11,12 +11,12 @@ using LinearAlgebra: Diagonal
 using StructArrays
 using DimensionalData
 using DimensionalData: DimArray, Ti, dims, lookup
-using Gustavo.UVData: Pol, Frequency, UVW, Baseline, UVSet, pol_products, channel_freqs
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, UVSet, pol_products, channel_freqs
 using PolarizedTypes: RPol, LPol
 
 # ── Synthetic multi-band UVSet builder ───────────────────────────────────────
 #
-# Layout per leaf is (Frequency, Ti, Baseline, Pol). We build the leaves
+# Layout per leaf is (Frequency, Ti, BaselineID, Polarization). We build the leaves
 # directly via `_build_leaf` + `PartitionInfo`, one leaf per (band, scan), so
 # they exactly mirror what `load_fitsidi` produces.
 #
@@ -104,7 +104,7 @@ function build_synth_idi_uvset(;
         end
         uvw_part = DimArray(
             uvw_dense,
-            (Ti(ti_vals), Baseline(baselines.labels), UVW(["U", "V", "W"])),
+            (Ti(ti_vals), BaselineID(baselines.labels), UVW(["U", "V", "W"])),
         )
 
         for b in 1:nspw
@@ -122,7 +122,7 @@ function build_synth_idi_uvset(;
                 vis_dense,
                 (
                     Frequency(collect(channel_freqs(fs))), Ti(ti_vals),
-                    Baseline(baselines.labels), Pol(pol_labels),
+                    BaselineID(baselines.labels), Polarization(pol_labels),
                 ),
             )
             w_part = DimArray(w_dense, dims(vis_part))
@@ -227,9 +227,9 @@ end
                 @test (ow .<= 0) == (rw .<= 0)
 
                 # Axis labels.
-                @test collect(lookup(oleaf[:vis], Pol)) == collect(lookup(rleaf[:vis], Pol))
+                @test collect(lookup(oleaf[:vis], Polarization)) == collect(lookup(rleaf[:vis], Polarization))
                 @test collect(lookup(oleaf[:vis], Ti)) ≈ collect(lookup(rleaf[:vis], Ti)) atol = 1.0e-6
-                @test collect(lookup(oleaf[:vis], Baseline)) == collect(lookup(rleaf[:vis], Baseline))
+                @test collect(lookup(oleaf[:vis], BaselineID)) == collect(lookup(rleaf[:vis], BaselineID))
                 @test collect(lookup(oleaf[:vis], Frequency)) ≈ collect(lookup(rleaf[:vis], Frequency)) rtol = 1.0e-9
             end
 
@@ -478,9 +478,9 @@ end
             UV.write_fitsidi(path, uvset)
             rt = UV.load_fitsidi(path; lazy = false)
             leaf = first(values(DimensionalData.branches(rt)))
-            pols = collect(lookup(leaf[:vis], Pol))
+            pols = collect(lookup(leaf[:vis], Polarization))
             @test pols == ["PP", "PQ", "QP", "QQ"]
-            vis = parent(leaf[:vis])  # (Frequency, Ti, Baseline, Pol)
+            vis = parent(leaf[:vis])  # (Frequency, Ti, BaselineID, Polarization)
             for (p, lab) in enumerate(pols)
                 expected = Dict("PP" => 1.0, "PQ" => 2.0, "QP" => 3.0, "QQ" => 4.0)[lab]
                 @test real(vis[1, 1, 1, p]) ≈ expected atol = _F32EPS
@@ -526,8 +526,8 @@ end
             UV.write_fitsidi(path, uvset)
             rt = UV.load_fitsidi(path; lazy = false)
             leaf = first(values(DimensionalData.branches(rt)))
-            pols = collect(lookup(leaf[:vis], Pol))
-            w = parent(leaf[:weights])    # (Frequency, Ti, Baseline, Pol)
+            pols = collect(lookup(leaf[:vis], Polarization))
+            w = parent(leaf[:weights])    # (Frequency, Ti, BaselineID, Polarization)
             pq = findfirst(==("PQ"), pols)
             pp = findfirst(==("PP"), pols)
             @test all(w[:, :, :, pq] .<= 0)        # PQ flagged everywhere
@@ -558,7 +558,7 @@ end
             lv = first(values(DimensionalData.branches(valid)))
             lr = first(values(DimensionalData.branches(radio)))
             le = first(values(DimensionalData.branches(radio_eta)))
-            pols = collect(lookup(lv[:vis], Pol))
+            pols = collect(lookup(lv[:vis], Polarization))
             pp = findfirst(==("PP"), pols)
             pq = findfirst(==("PQ"), pols)
             wv = parent(lv[:weights]); wr = parent(lr[:weights]); we = parent(le[:weights])
@@ -773,13 +773,13 @@ end
             # The FLAG table backs the `:flags` layer alone; the weights carry
             # the WEIGHT column unaltered.
             w1 = parent(m1[:weights])
-            f1 = parent(m1[:flags])     # (Frequency, Ti, Baseline, Pol)
+            f1 = parent(m1[:flags])     # (Frequency, Ti, BaselineID, Polarization)
             f2 = parent(m2[:flags])
 
-            pols = collect(lookup(leaf1[:vis], Pol))   # MSv4 order
+            pols = collect(lookup(leaf1[:vis], Polarization))   # MSv4 order
             pp = findfirst(==("PP"), pols)             # RR → PP
             qq = findfirst(==("QQ"), pols)
-            bls = collect(lookup(leaf1[:vis], Baseline))
+            bls = collect(lookup(leaf1[:vis], BaselineID))
             # Baseline columns touching antenna 2: (1,2) and (2,3).
             touch2 = findall(b -> occursin("A2", string(b)), bls)
             notouch = setdiff(1:length(bls), touch2)
@@ -852,7 +852,7 @@ end
             m1 = UV.materialize_leaf(idx[("1", 1)])
             w2 = parent(m2[:weights])
             f2 = parent(m2[:flags])
-            pols = collect(lookup(idx[("1", 2)][:vis], Pol))
+            pols = collect(lookup(idx[("1", 2)][:vis], Polarization))
             qq = findfirst(==("QQ"), pols)
             others = setdiff(1:length(pols), [qq])
 
@@ -1257,12 +1257,12 @@ end
     for ms in values(ps)
         ddi = parse(Int, last(split(XRadio.spectralwindow(ms), "_")))
         leaf = by_scan_band[(UV.scan_name(ms), ddi)]
-        labels = collect(lookup(leaf[:vis], UV.Baseline))
+        labels = collect(lookup(leaf[:vis], UV.BaselineID))
         stored = [string(a, "-", b) for (a, b) in XRadio.baselines(ms)]
         @test stored == labels
-        pols = [feed_names[p] for p in lookup(leaf[:vis], UV.Pol)]
+        pols = [feed_names[p] for p in lookup(leaf[:vis], UV.Polarization)]
         @test collect(XRadio.polarizations(ms)) == pols
-        # Leaves hold (Frequency, Ti, Baseline, Pol); MSv4 (polarization,
+        # Leaves hold (Frequency, Ti, BaselineID, Polarization); MSv4 (polarization,
         # frequency, baseline_id, time).
         for (layer, stored_layer) in (
                 (:vis, XRadio.correlated(ms)), (:weights, XRadio.weights(ms)), (:flags, XRadio.flags(ms)),

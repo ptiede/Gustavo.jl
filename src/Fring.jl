@@ -15,7 +15,7 @@ module Fring
 
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
-using ..UVData: Frequency, Baseline, Feed, Pol, Scan
+using ..UVData: Frequency, BaselineID, Feed, Polarization, Scan
 using ..Calibration
 using ..Calibration: _epoch_atol
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,

@@ -433,7 +433,7 @@ end
     # The kernels read their layers by dimension name, so the fixture carries the
     # dimensions the pipeline hands them rather than a bare array in an order the
     # test and the kernel would have to agree on out of band.
-    axs = (Frequency([2.2e10, 2.2e10 + 1.0e6]), Ti([0.0]), Baseline(1:nbl), Pol(["PP"]))
+    axs = (Frequency([2.2e10, 2.2e10 + 1.0e6]), Ti([0.0]), BaselineID(1:nbl), Polarization(["PP"]))
     V = DimArray(zeros(ComplexF32, nchan, nti, nbl, npol), axs)
     W = DimArray(zeros(Float32, nchan, nti, nbl, npol), axs)
     V[1, 1, 1, 1] = 1.0 + 0.0im          # channel 1: unit gain ⇒ unchanged, weight 1
@@ -455,7 +455,7 @@ end
 
     # Same data in a different memory layout is the same measurement: the kernels
     # locate every axis by name, so only the dimensions decide what is read.
-    perm = (Pol, Baseline, Ti, Frequency)
+    perm = (Polarization, BaselineID, Ti, Frequency)
     rbar_p = zeros(ComplexF64, nbl, npol, nti)
     wbar_p = zeros(Float64, nbl, npol, nti)
     FP._accumulate_leaf_rbar!(

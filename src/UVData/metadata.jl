@@ -11,7 +11,7 @@ partition** in a UVSet: telescope identity, observation epoch, time
 system, Earth-orientation parameters, coord frame, polcal scheme.
 Source-specific fields (`object`, `ra`, `dec`) and the per-partition
 `freq_setup` live on each per-leaf `PartitionInfo`. Polarization products
-are not stored here — they live on the `Pol` dimension of the data cube
+are not stored here — they live on the `Polarization` dimension of the data cube
 and can be read with `pol_products(uvset)` / `pol_products(leaf)` /
 `pol_products(data)`.
 

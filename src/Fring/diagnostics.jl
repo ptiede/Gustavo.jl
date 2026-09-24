@@ -372,13 +372,13 @@ function _accumulate_baseline_fringes!(
         acc, Vg, Wg, Fg, g, gid, bl_pairs, feeds, executor,
     )
     UVData.check_layer_axes(Vg, Wg, Fg)
-    tforeach(axes(Vg, Baseline); scheduler = executor) do bi
+    tforeach(axes(Vg, BaselineID); scheduler = executor) do bi
         a, b = bl_pairs[bi]
         a == b && return                                # skip autocorrelations
-        for p in axes(Vg, Pol)
+        for p in axes(Vg, Polarization)
             fa, fb = feeds[p]
             @inbounds for ti in axes(Vg, Ti), c in axes(Vg, Frequency)
-                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+                cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
                 Fg[cell] && continue
                 w = Wg[cell]
                 v = Vg[cell]
@@ -743,7 +743,7 @@ function fringe_search_map(
             a, b = UVData.baselines(stack).pairs[k]
             a == b && continue
             d = _baseline_fringe_search(
-                view(stack, Baseline(k), Pol(p)),
+                view(stack, BaselineID(k), Polarization(p)),
                 fg, times, f0, t0, ax, ws, opts, family_cells,
             )
             d.snr > bestsnr && (bestsnr = d.snr; best = k)
@@ -757,7 +757,7 @@ function fringe_search_map(
         k
     end
 
-    m = baseline_fringe_map(view(stack, Baseline(bi), Pol(p)), f0, t0; opts = opts)
+    m = baseline_fringe_map(view(stack, BaselineID(bi), Polarization(p)), f0, t0; opts = opts)
     return BaselineFringeMap(
         info.source_name, info.scan_name, gi, UVData.baselines(stack).pairs[bi], ant_names,
         pol_products(stack)[p], m,

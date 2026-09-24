@@ -54,10 +54,10 @@ function _time_average_partition(leaf::DimensionalData.AbstractDimTree)
 
     new_obs_time = [t_center]
 
-    pol_dim = dims(vis_l, Pol)
+    pol_dim = dims(vis_l, Polarization)
     freq_dim = dims(vis_l, Frequency)
-    bl_dim = dims(vis_l, Baseline)
-    # Storage layout: (Frequency, Ti, Baseline, Pol). uvw: (Ti, Baseline, UVW).
+    bl_dim = dims(vis_l, BaselineID)
+    # Storage layout: (Frequency, Ti, BaselineID, Polarization). uvw: (Ti, BaselineID, UVW).
     vis_da = DimArray(V, (freq_dim, Ti(new_obs_time), bl_dim, pol_dim))
     weights_da = DimArray(W_sum, dims(vis_da))
     flags_da = DimArray(
@@ -84,7 +84,7 @@ end
 
 # Type-stable kernel for inverse-variance time-averaging. Hot loop sees
 # concrete `vis_p::Array{Tvis,4}`, `w_p::Array{Tw,4}`, `uvw_p::Array{Tuvw,3}`.
-# Layout: vis/weights are (Frequency, Ti, Baseline, Pol); uvw is (Ti, Baseline, UVW).
+# Layout: vis/weights are (Frequency, Ti, BaselineID, Polarization); uvw is (Ti, BaselineID, UVW).
 function _time_average_kernel(
         vis_p::AbstractArray{Tvis, 4},
         w_p::AbstractArray{Tw, 4},
@@ -99,10 +99,10 @@ function _time_average_kernel(
     UVW_num = zeros(Tuvw, 1, nbl, 3)
     UVW_w = zeros(Tw, 1, nbl)
 
-    @inbounds for ti in axes(vis_p, Ti), bi in axes(vis_p, Baseline)
+    @inbounds for ti in axes(vis_p, Ti), bi in axes(vis_p, BaselineID)
         tot_w = zero(Tw)
-        for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
-            cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+        for p in axes(vis_p, Polarization), c in axes(vis_p, Frequency)
+            cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
             f_p[cell] && continue
             w = w_p[cell]
             v = vis_p[cell]
@@ -113,7 +113,7 @@ function _time_average_kernel(
         end
         (tot_w > 0 && isfinite(tot_w)) || continue
         for k in axes(uvw_p, UVW)
-            u = uvw_p[Ti(ti), Baseline(bi), UVW(k)]
+            u = uvw_p[Ti(ti), BaselineID(bi), UVW(k)]
             isfinite(u) || continue
             UVW_num[1, bi, k] += tot_w * u
         end
@@ -203,8 +203,8 @@ function _frequency_average_partition(leaf::DimensionalData.AbstractDimTree, nou
         extras = fs.extras,
     )
 
-    pol_dim = dims(vis_l, Pol)
-    bl_dim = dims(vis_l, Baseline)
+    pol_dim = dims(vis_l, Polarization)
+    bl_dim = dims(vis_l, BaselineID)
     ti_dim = dims(vis_l, Ti)
     vis_da = DimArray(V, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
     weights_da = DimArray(W, dims(vis_da))
@@ -215,7 +215,7 @@ function _frequency_average_partition(leaf::DimensionalData.AbstractDimTree, nou
 end
 
 # Type-stable kernel: average `vis`/`weights` over each channel group.
-# Layout (Frequency, Ti, Baseline, Pol).
+# Layout (Frequency, Ti, BaselineID, Polarization).
 function _frequency_average_kernel(
         vis_p::AbstractArray{Tvis, 4}, w_p::AbstractArray{Tw, 4},
         f_p::AbstractArray{Bool, 4}, groups,
@@ -225,10 +225,10 @@ function _frequency_average_kernel(
     ng = length(groups)
     Vnum = zeros(Tvis, ng, nti, nbl, npol)
     Wsum = zeros(Tw, ng, nti, nbl, npol)
-    @inbounds for p in axes(vis_p, Pol), bi in axes(vis_p, Baseline), ti in axes(vis_p, Ti)
+    @inbounds for p in axes(vis_p, Polarization), bi in axes(vis_p, BaselineID), ti in axes(vis_p, Ti)
         for (g, grp) in enumerate(groups)
             for c in grp
-                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+                cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
                 f_p[cell] && continue
                 w = w_p[cell]
                 v = vis_p[cell]
@@ -307,9 +307,9 @@ function _time_bin_average_partition(leaf::DimensionalData.AbstractDimTree, dt_s
         vis_l, weights_l, flags_l, uvw_l, ids, tvals, nbin,
     )
 
-    pol_dim = dims(vis_l, Pol)
+    pol_dim = dims(vis_l, Polarization)
     freq_dim = dims(vis_l, Frequency)
-    bl_dim = dims(vis_l, Baseline)
+    bl_dim = dims(vis_l, BaselineID)
     vis_da = DimArray(V, (freq_dim, Ti(tcenters), bl_dim, pol_dim))
     weights_da = DimArray(W, dims(vis_da))
     flags_da = DimArray(
@@ -326,7 +326,7 @@ function _time_bin_average_partition(leaf::DimensionalData.AbstractDimTree, dt_s
 end
 
 # Type-stable kernel: inverse-variance average into `nbin` time bins.
-# Layout: vis/weights (Frequency, Ti, Baseline, Pol); uvw (Ti, Baseline, UVW).
+# Layout: vis/weights (Frequency, Ti, BaselineID, Polarization); uvw (Ti, BaselineID, UVW).
 function _time_bin_average_kernel(
         vis_p::AbstractArray{Tvis, 4}, w_p::AbstractArray{Tw, 4},
         f_p::AbstractArray{Bool, 4},
@@ -346,10 +346,10 @@ function _time_bin_average_kernel(
     # value read out of `ids`, not a loop range the compiler can bound.
     @inbounds for ti in axes(vis_p, Ti)
         b = ids[ti]
-        for bi in axes(vis_p, Baseline)
+        for bi in axes(vis_p, BaselineID)
             tot_w = zero(Tw)
-            for p in axes(vis_p, Pol), c in axes(vis_p, Frequency)
-                cell = (Frequency(c), Ti(ti), Baseline(bi), Pol(p))
+            for p in axes(vis_p, Polarization), c in axes(vis_p, Frequency)
+                cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
                 f_p[cell] && continue
                 w = w_p[cell]
                 v = vis_p[cell]
@@ -360,7 +360,7 @@ function _time_bin_average_kernel(
             end
             (tot_w > 0 && isfinite(tot_w)) || continue
             for k in axes(uvw_p, UVW)
-                u = uvw_p[Ti(ti), Baseline(bi), UVW(k)]
+                u = uvw_p[Ti(ti), BaselineID(bi), UVW(k)]
                 isfinite(u) || continue
                 UVWnum[b, bi, k] += tot_w * u
             end
@@ -470,8 +470,8 @@ function _trim_channels(leaf::DimensionalData.AbstractDimTree, keep::AbstractVec
     W = parent(w_l)[keep, :, :, :]
     F = parent(f_l)[keep, :, :, :]
     ti_dim = dims(vis_l, Ti)
-    bl_dim = dims(vis_l, Baseline)
-    pol_dim = dims(vis_l, Pol)
+    bl_dim = dims(vis_l, BaselineID)
+    pol_dim = dims(vis_l, Polarization)
     vis_da = DimArray(V, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
     weights_da = DimArray(W, dims(vis_da))
     flags_da = DimArray(F, dims(vis_da))
@@ -505,7 +505,7 @@ IFs of a single FREQID — the standard continuum layout — rather than one FRE
 per spw (which a reader also cannot serialize when a spw carries a single
 channel). Apply after [`frequency_average`](@ref) so each spw is one channel.
 
-All sibling leaves of a group must share their `Ti`, `Baseline`, and `Pol` axes
+All sibling leaves of a group must share their `Ti`, `BaselineID`, and `Polarization` axes
 (true for spws read from one FITS-IDI `UV_DATA` table); a mismatch errors.
 Groups with a single spw are returned unchanged.
 """
@@ -532,7 +532,7 @@ function combine_spw(uvset::UVSet)
 end
 
 # Concatenate sibling spw leaves along Frequency into one leaf (one merged
-# FrequencySetup). Leaves must agree on Ti/Baseline/Pol; uvw is freq-independent
+# FrequencySetup). Leaves must agree on Ti/BaselineID/Polarization; uvw is freq-independent
 # so the first leaf's is carried through.
 function _combine_spw_leaves(leaves)
     spw_min(l) = minimum(channel_freqs(DimensionalData.metadata(l).freq_setup))
@@ -541,12 +541,12 @@ function _combine_spw_leaves(leaves)
     info0 = DimensionalData.metadata(l0)
 
     ti0 = lookup(l0[:vis], Ti)
-    bl0 = lookup(l0[:vis], Baseline)
-    pol0 = lookup(l0[:vis], Pol)
+    bl0 = lookup(l0[:vis], BaselineID)
+    pol0 = lookup(l0[:vis], Polarization)
     for l in leaves
-        (lookup(l[:vis], Ti) == ti0 && lookup(l[:vis], Baseline) == bl0 && lookup(l[:vis], Pol) == pol0) ||
+        (lookup(l[:vis], Ti) == ti0 && lookup(l[:vis], BaselineID) == bl0 && lookup(l[:vis], Polarization) == pol0) ||
             error(
-            "combine_spw: sibling spw leaves must share Ti/Baseline/Pol axes. " *
+            "combine_spw: sibling spw leaves must share Ti/BaselineID/Polarization axes. " *
                 "If you time-averaged first, each spw got its own weighted bin-center " *
                 "epochs — apply combine_spw BEFORE time_bin_average (after frequency_average, " *
                 "which preserves the integration axis).",
@@ -570,8 +570,8 @@ function _combine_spw_leaves(leaves)
     )
 
     ti_dim = dims(l0[:vis], Ti)
-    bl_dim = dims(l0[:vis], Baseline)
-    pol_dim = dims(l0[:vis], Pol)
+    bl_dim = dims(l0[:vis], BaselineID)
+    pol_dim = dims(l0[:vis], Polarization)
     vis_da = DimArray(vis_cat, (Frequency(new_freqs), ti_dim, bl_dim, pol_dim))
     w_da = DimArray(w_cat, dims(vis_da))
     f_da = DimArray(f_cat, dims(vis_da))

@@ -14,7 +14,7 @@
 #       linear index (band-1)*NO_STKD + stokes. One weight per (stokes, band),
 #       shared across channels. Negative/zero = flagged.
 #   * STOKES axis on disk is AIPS order RR,LL,RL,LR (STK_1 + (k-1)*CDELT2 with
-#       STK_1 = -1, CDELT2 = -1). The MSv4-ordered leaf Pol axis is mapped back
+#       STK_1 = -1, CDELT2 = -1). The MSv4-ordered leaf Polarization axis is mapped back
 #       to disk order by inverting the reader's `perm`.
 #   * BASELINE = 256*NOSTA[a] + NOSTA[b] (1-based NOSTA values).
 #   * Time: DATE = jd0 (constant JD of RDATE midnight), TIME = the record's
@@ -221,7 +221,7 @@ function _flag_runs(col::AbstractVector{Bool})
 end
 
 # Append this scan's FLAG rows. `band_flags[b]` is band `b`'s dense
-# (Frequency, Ti, Baseline, Pol) flag layer; `disk_to_msv4[s]` is the MSv4 pol
+# (Frequency, Ti, BaselineID, Polarization) flag layer; `disk_to_msv4[s]` is the MSv4 pol
 # stored at on-disk stokes slot `s`.
 #
 # TIMERANG is padded by half an integration each side: a flag covers the
@@ -371,7 +371,7 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
     end
     ref_freq_v = Float64(ref_freq(first(setups)))
 
-    # Pol axis (MSv4) shared across leaves → on-disk STOKES order (AIPS
+    # Polarization axis (MSv4) shared across leaves → on-disk STOKES order (AIPS
     # RR,LL,RL,LR). The reader computes `perm` s.t. aips_labels[perm] ==
     # msv4_labels; serializing means writing MSv4 pol `msv4_to_disk[s_disk]`
     # into on-disk stokes slot `s_disk`. `disk_to_msv4[s] = perm[s]`.
@@ -401,7 +401,7 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
 
     # Group leaves by scan (the reader segments scans by time gap / SOURCE_ID;
     # one UV_DATA row per (time, baseline) carries every band's FLUX). Bands of
-    # the same scan share Ti/Baseline. Key on scan_name.
+    # the same scan share Ti/BaselineID. Key on scan_name.
     scan_leaves = Dict{String, Vector{Any}}()
     scan_order = String[]
     for (_, leaf) in branches_dict
@@ -452,7 +452,7 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
 
     for sn in scan_order
         leaves = scan_leaves[sn]
-        # Map each leaf to its band index; all leaves in a scan share Ti/Baseline.
+        # Map each leaf to its band index; all leaves in a scan share Ti/BaselineID.
         ref_leaf = first(leaves)
         ref_meta = DimensionalData.metadata(ref_leaf)
         bls = ref_meta.baselines
@@ -469,13 +469,13 @@ function UVData.write_fitsidi(output_path, uvset::UVSet)
             fs = DimensionalData.metadata(leaf).freq_setup
             b = band_index[fs]
             ml = UVData.materialize_leaf(leaf)
-            band_vis[b] = parent(ml[:vis])      # (Frequency, Ti, Baseline, Pol)
+            band_vis[b] = parent(ml[:vis])      # (Frequency, Ti, BaselineID, Polarization)
             band_w[b] = parent(ml[:weights])
             band_f[b] = parent(ml[:flags])
         end
         _append_idi_flag_rows!(flag_rows, band_f, bls, nosta, ti_vals, jd0_unix, disk_to_msv4)
         # uvw from the reference leaf (shared across bands).
-        uvw_dense = parent(UVData.materialize_leaf(ref_leaf)[:uvw])  # (Ti, Baseline, UVW)
+        uvw_dense = parent(UVData.materialize_leaf(ref_leaf)[:uvw])  # (Ti, BaselineID, UVW)
 
         # Baseline AIPS codes via NOSTA.
         bl_codes = Int32[Int32(256 * nosta[a] + nosta[b]) for (a, b) in bls.pairs]

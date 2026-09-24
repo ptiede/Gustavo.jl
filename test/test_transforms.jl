@@ -81,7 +81,7 @@
         # Targeted per-datum correction: halve the weights of baseline (1, 2).
         fix = FP.CalFunction() do stack, win
             for (bi, (a, b)) in enumerate(baselines(stack).pairs)
-                minmax(a, b) == (1, 2) && (stack[:weights][Baseline = bi] .*= 0.5)
+                minmax(a, b) == (1, 2) && (stack[:weights][BaselineID = bi] .*= 0.5)
             end
         end
         stf = FP.scan_stream(uvset; geom = geom, transforms = (fix,))
@@ -113,7 +113,7 @@
         @test collect(lookup(stack[:vis], Ti)) == timestamps(stack)
         @test pol_products(stack[:vis]) == pol_products(stack)
         p1 = pol_products(stack)[1]
-        @test parent(stack[:vis][Pol = At(p1)]) == parent(stack[:vis])[:, :, :, 1]
+        @test parent(stack[:vis][Polarization = At(p1)]) == parent(stack[:vis])[:, :, :, 1]
         # The window addresses the same channels in the solve's index space.
         @test geom.channel_freqs[win.chan_idx] ≈ frequencies(stack)
         # The metadata is the first band leaf's own PartitionInfo — moved, not
