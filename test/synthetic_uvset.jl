@@ -23,6 +23,8 @@ const FP = Gustavo.Fring
 const ST = Gustavo.Streaming
 const UVP = Gustavo.UVData
 
+include("synthetic_ps.jl")
+
 # The default fringe term list. Dispersion (dTEC) and SBD are NOT part of
 # `default_fringe_terms()` — they are fit by a separate `DispersionSBDFit`
 # step, not by `FringeModel` — so `dispersion`/`sbd` are now no-op kwargs kept
@@ -80,12 +82,6 @@ end
 #   V[c, ti] = A · exp(i·[ Δφ + 2π·Δτ·(f_c − f0) + 2π·Δṙ·(t_sec − t0_sec)
 #                          + Δscreen[ti] ])
 # with Δx = x[a, fa] − x[b, fb]. Times in seconds use t0_sec; freqs in Hz.
-# One station-feed-channel entry of a bandpass table, for scan `s`. A 3-D table
-# is constant across scans; a 4-D one carries its own value per scan, which is
-# what a model with a time segmentation finer than the track is fit against.
-_bp_at(bp::AbstractArray{<:Any, 3}, a, f, gc, s) = bp[a, f, gc]
-_bp_at(bp::AbstractArray{<:Any, 4}, a, f, gc, s) = bp[a, f, gc, s]
-
 function _build_fringe_uvset(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
         scan_gap = nothing,     # seconds between scan starts (default: back-to-back)

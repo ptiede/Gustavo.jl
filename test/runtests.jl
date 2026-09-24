@@ -18,6 +18,7 @@ using PolarizedTypes: RPol, LPol
 # Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
 include("plan_offsets.jl")
 
+include("test_synthetic_ps.jl")
 include("test_xradio_bridge.jl")
 include("test_ms_baselines.jl")
 include("test_autocorrelations.jl")
