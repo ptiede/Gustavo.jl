@@ -67,14 +67,27 @@ pol_products(ms::XRadio.MeasurementSet) = XRadio.polarizations(ms)
 The baselines of `ms` in `baseline_id` order, their antenna indices counting
 into [`antennas(ms)`](@ref antennas(::XRadio.MeasurementSet)).
 """
-function baselines(ms::XRadio.MeasurementSet)
-    names = XRadio.antennas(ms)
+baselines(ms::XRadio.MeasurementSet) =
+    _baselines_into(ms, XRadio.antennas(ms), "the antenna dataset")
+
+"""
+    baselines(ms::XRadio.MeasurementSet, stations::AntennaTable) -> BaselineIndex
+
+The baselines of `ms` in `baseline_id` order, their antenna indices counting
+into `stations`, matched by name. This is how Measurement Sets that saw
+different sub-arrays share one station axis: MSv4 names each baseline's
+antennas, and `stations` — usually [`union_antennas`](@ref) of the set — fixes
+the numbering.
+"""
+baselines(ms::XRadio.MeasurementSet, stations::AntennaTable) =
+    _baselines_into(ms, collect(String.(stations.name)), "the station table")
+
+function _baselines_into(ms, names, what)
     slot = Dict(n => i for (i, n) in pairs(names))
     index(n) = get(slot, n) do
         throw(
             ArgumentError(
-                "baseline antenna `$n` is not in the antenna dataset, which names " *
-                    join(names, ", ")
+                "baseline antenna `$n` is not in $what, which names " * join(names, ", ")
             )
         )
     end

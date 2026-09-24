@@ -1230,3 +1230,50 @@ end
         end
     end
 end
+
+# The same file read as a UVSet and as MSv4 through XRadio's converter holds the
+# same data. Both are read raw: the UVSet reader otherwise divides by the
+# autocorrelations, which MSv4 keeps. Its UVW is FITS-IDI's seconds; MSv4 states
+# metres. This checks the switch between readers, and goes with the UVSet reader.
+@testset "the MSv4 converter reads what the UVSet reader reads" begin
+    UV = Gustavo.UVData
+    uvset = build_synth_idi_uvset(; nspw = 3, nchan = 4, nscan = 2, ntime = 3)
+    dir = mktempdir()
+    path = joinpath(dir, "same.idifits")
+    UV.write_fitsidi(path, uvset)
+    raw = UV.load_fitsidi(path; lazy = false, normalize_autocorr = false, drop_autocorr = false)
+    # Gustavo's writer states no unit for FLUX, which the converter reports.
+    store = @test_logs (:warn, r"carries no TUNIT") XRadio.fitsidi2msv4(
+        path, joinpath(dir, "same.ps.zarr"); release_date = "2030-01-01T00:00:00.000"
+    )
+    ps = open(XRadio.ProcessingSet, store)
+    by_scan_band = Dict(
+        (UV.metadata(l).scan_name, UV.metadata(l).ddi) => l
+            for l in values(DimensionalData.branches(raw))
+    )
+    @test length(ps) == length(by_scan_band) == 6
+    # The UVSet reader names products by feed; the circular feeds here are R, L.
+    feed_names = Dict("PP" => "RR", "PQ" => "RL", "QP" => "LR", "QQ" => "LL")
+    for ms in values(ps)
+        ddi = parse(Int, last(split(XRadio.spectralwindow(ms), "_")))
+        leaf = by_scan_band[(UV.scan_name(ms), ddi)]
+        labels = collect(lookup(leaf[:vis], UV.Baseline))
+        stored = [string(a, "-", b) for (a, b) in XRadio.baselines(ms)]
+        @test stored == labels
+        pols = [feed_names[p] for p in lookup(leaf[:vis], UV.Pol)]
+        @test collect(XRadio.polarizations(ms)) == pols
+        # Leaves hold (Frequency, Ti, Baseline, Pol); MSv4 (polarization,
+        # frequency, baseline_id, time).
+        for (layer, stored_layer) in (
+                (:vis, XRadio.correlated(ms)), (:weights, XRadio.weights(ms)), (:flags, XRadio.flags(ms)),
+            )
+            @test parent(leaf[layer]) == permutedims(Array(parent(stored_layer)), (2, 4, 3, 1))
+        end
+        @test collect(lookup(leaf[:vis], UV.Frequency)) == collect(lookup(ms, XRadio.Frequency))
+        # Each reader forms Unix seconds from the file's Julian dates by its own
+        # arithmetic, which agrees to well under a microsecond.
+        @test collect(lookup(leaf[:vis], Ti)) ≈ collect(lookup(ms, Ti)) atol = 1.0e-6
+        @test parent(leaf[:uvw]) .* 299_792_458.0 ≈ permutedims(Array(parent(XRadio.uvw(ms))), (3, 2, 1))
+        @test UV.metadata(leaf).source_name == UV.source_name(ms)
+    end
+end

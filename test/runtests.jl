@@ -18,6 +18,7 @@ using PolarizedTypes: RPol, LPol
 include("plan_offsets.jl")
 
 include("test_xradio_bridge.jl")
+include("test_ms_baselines.jl")
 
 # FLAG and WEIGHT as independent layers.
 include("test_flags.jl")
