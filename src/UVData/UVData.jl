@@ -33,6 +33,7 @@ include("utilities.jl")
 include("msv4_schema.jl")
 include("xradio_bridge.jl")
 include("measurementset.jl")
+include("autocorrelations.jl")
 
 export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
 export antennas, union_antennas, unify_antennas, union_pol_products
@@ -54,7 +55,7 @@ export load_uvfits, write_uvfits, default_output_path
 export load_fitsidi, write_fitsidi
 export is_lazy, materialize_leaf, materialize, materialize_group
 export check_layer_axes
-export feed_pairs
+export feed_pairs, normalize_by_autocorrelations
 export AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
 export load_antab, load_fitsidi_apriori, tsys_at, elevation_gain, stations
 export AprioriFluxGains, apriori_flux_gains, apriori_gains
