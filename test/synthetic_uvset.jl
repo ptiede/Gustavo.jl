@@ -6,6 +6,7 @@
 using Gustavo
 using Test
 using Random
+using StableRNGs: StableRNG
 using LinearAlgebra: Diagonal
 using StructArrays
 using DimensionalData
@@ -100,6 +101,7 @@ function _build_fringe_uvset(;
         amp_bandpass = nothing, # optional per-channel log-amp, same two shapes
         dtec = nothing,         # optional (nant,) station TEC (TECU, feed-common)
         feed_common = false,    # tie delay/phi across feeds (zero true inter-feed offset)
+        station_rate = nothing, # optional (nant,) feed-common rate (Hz) replacing the draw
         rel_rate = nothing,      # optional (nant,) feed-2 − feed-1 rate offset (Hz) —
         #   exercises the opt-in RL(rate = ...) solve
 
@@ -114,7 +116,7 @@ function _build_fringe_uvset(;
         #   having first taken the delay-like part of it
     )
     UV = Gustavo.UVData
-    rng = MersenneTwister(seed)
+    rng = StableRNG(seed)
     npol = length(pol_labels)
 
     ants_v = [
@@ -201,6 +203,7 @@ function _build_fringe_uvset(;
         end
     end
 
+    station_rate === nothing || (rate .= station_rate)
     rel_rate === nothing || (rate[:, 2] .= rate[:, 1] .+ rel_rate)
 
     if feed_common
@@ -213,8 +216,7 @@ function _build_fringe_uvset(;
     # model's adhoc term is `SharedFeeds`. A smooth (slowly-varying) phase track — the
     # regime the Savitzky–Golay adhoc smoother is designed for — plus a per-station
     # constant offset that Stage-B's per-scan constant phase absorbs. Each scan
-    # draws its own screen (scan 1's rng sequence matches the historical
-    # single-scan builder exactly).
+    # draws its own screen.
     screen = zeros(nant, 2, ntime, nscans)
     for s in 1:nscans, a in (station_gains ? (2:nant) : 1:0)
         base = (rand(rng) - 0.5) * 1.0

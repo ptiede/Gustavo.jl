@@ -5,7 +5,8 @@
 using HDF5
 
 @testset "Fringe diagnostics" begin
-    uvset, _truth = _build_fringe_uvset()
+    # Rates large enough that the uncorrected scan average decorrelates.
+    uvset, _truth = _build_fringe_uvset(; station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3])
     sol = fit(
         FringeFit(model = FringeModel()) |> Bandpass() |>
             TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),

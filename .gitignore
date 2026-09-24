@@ -17,3 +17,4 @@ BANDPASS_DESIGN_PLAN.md
 scratch.jl
 
 .claude/
+test/references/Manifest*.toml
