@@ -589,7 +589,7 @@ end
 function _canonical_time(canon::AbstractVector{Float64}, t::Float64)
     i = _find_canonical_time(canon, t)
     i === nothing && throw(
-        ArgumentError("build_geometry: time $t s was not canonicalized on the first pass")
+        ArgumentError("time $t s was not canonicalized on the first pass")
     )
     return canon[i]
 end
@@ -618,64 +618,120 @@ delivered as separate correlator files, say — still meet. The axis reports an
 observed value, not a rounded one.
 """
 function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
-    # Collect (freq, spw_name) and (time, scan_name) observations from all leaves.
+    pieces = map(collect(UVData.branches(uvset))) do (_, leaf)
+        info = UVData.metadata(leaf)
+        ts = Float64.(lookup(leaf[:vis], Ti))
+        (;
+            freqs = Float64.(channel_freqs(info.freq_setup)), spw = info.spw_name,
+            times = ts, scans = fill(info.scan_name, length(ts)),
+            active = Set{String}(UVData.participating_antennas(leaf)),
+        )
+    end
+    return _span_geometry(pieces, String[]; f0, t0)
+end
+
+"""
+    DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing) -> DataGeometry
+
+The geometry a solve over `ps` runs on: the sorted distinct channel
+frequencies (Hz) and time samples (seconds) of every Measurement Set, each
+channel's spectral window from [`XRadio.spectralwindow`](@ref), each time's
+scan from the `scan_name` coordinate, and the stations, every antenna named
+in an antenna dataset, in the order first seen. `f0` defaults to the mean
+channel frequency, `t0` to the first time.
+
+A Measurement Set may hold several scans. Sub-arrays observing different
+scans at the same timestamps are supported when their station sets are
+disjoint and they share the whole scan window, as for
+[`build_geometry`](@ref). Throws when a Measurement Set states no `scan_name`,
+when a frequency falls in two spectral windows, when two scans share a
+timestamp and a station, and when a scan overlaps another over part of its
+span.
+"""
+function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
+    isempty(ps) && throw(ArgumentError("the processing set holds no Measurement Sets"))
+    pieces = [
+        (;
+                freqs = Float64.(XRadio.frequencies(ms)), spw = XRadio.spectralwindow(ms),
+                times = Float64.(XRadio.times(ms)), scans = _scan_labels(ms),
+                active = Set{String}(Iterators.flatten(XRadio.baselines(ms))),
+            ) for ms in ps
+    ]
+    stations = String[]
+    for ms in ps, name in XRadio.antennas(ms)
+        String(name) in stations || push!(stations, String(name))
+    end
+    return _span_geometry(pieces, stations; f0, t0)
+end
+
+function _scan_labels(ms::XRadio.MeasurementSet)
+    haskey(ms, :scan_name) || throw(
+        ArgumentError(
+            "a Measurement Set states no `scan_name`; the geometry labels every time " *
+                "sample with its scan"
+        )
+    )
+    return String.(collect(ms[:scan_name]))
+end
+
+# The union geometry of `pieces`, each holding channels `freqs` of one spectral
+# window `spw` and time samples `times` labelled per sample by `scans`, observed
+# by the stations in `active`.
+function _span_geometry(pieces, stations; f0, t0)
     freq_spw = Dict{Float64, String}()
     time_scan = Dict{Float64, String}()
     time_stations = Dict{Float64, Set{String}}()
     time_canon = Float64[]
-    for (_, leaf) in UVData.branches(uvset)
-        info = UVData.metadata(leaf)
-        fs = channel_freqs(info.freq_setup)
-        for f in fs
-            fk = Float64(f)
-            prev = get(freq_spw, fk, nothing)
-            (prev === nothing || prev == info.spw_name) || throw(
+    for piece in pieces
+        for f in piece.freqs
+            prev = get(freq_spw, f, nothing)
+            (prev === nothing || prev == piece.spw) || throw(
                 ArgumentError(
-                    "build_geometry: channel frequency $fk Hz appears in conflicting spectral " *
-                        "windows '$prev' and '$(info.spw_name)' — a single concatenated channel " *
+                    "channel frequency $f Hz appears in conflicting spectral " *
+                        "windows '$prev' and '$(piece.spw)' — a single concatenated channel " *
                         "axis cannot dense-rank it to one spw. Partition the set so each " *
                         "frequency belongs to one spw, or rename the spws consistently."
                 )
             )
-            freq_spw[fk] = info.spw_name
+            freq_spw[f] = piece.spw
         end
-        ts = lookup(leaf[:vis], Ti)
-        ants = Set{String}(UVData.participating_antennas(leaf))
-        for t in ts
-            tk = _canonical_time!(time_canon, Float64(t))
+        for (t, scan) in zip(piece.times, piece.scans)
+            tk = _canonical_time!(time_canon, t)
             prev = get(time_scan, tk, nothing)
             if prev === nothing
-                time_scan[tk] = info.scan_name
-                time_stations[tk] = copy(ants)
-            elseif prev == info.scan_name
-                union!(time_stations[tk], ants)
+                time_scan[tk] = scan
+                time_stations[tk] = copy(piece.active)
+            elseif prev == scan
+                union!(time_stations[tk], piece.active)
             else
-                shared = intersect(time_stations[tk], ants)
+                shared = intersect(time_stations[tk], piece.active)
                 isempty(shared) || throw(
                     ArgumentError(
-                        "build_geometry: station(s) $(join(sort!(collect(shared)), ", ")) are in " *
-                            "both scan '$prev' and scan '$(info.scan_name)' at time $tk s. A " *
+                        "station(s) $(join(sort!(collect(shared)), ", ")) are in " *
+                            "both scan '$prev' and scan '$scan' at time $tk s. A " *
                             "station cannot be in two scans at one instant, and a single " *
                             "concatenated time axis cannot dense-rank the timestamp to one scan. " *
                             "Check for overlapping scan windows or inconsistent scan names."
                     )
                 )
-                union!(time_stations[tk], ants)
+                union!(time_stations[tk], piece.active)
             end
         end
     end
 
     # Sub-arrays observing different sources at the same timestamps are
     # admitted above, since disjoint station sets carry no contradiction. The
-    # timestamp still dense-ranks to one scan, so a leaf whose times land under
+    # timestamp still dense-ranks to one scan, so a scan whose times land under
     # more than one label would have its scan split into separate per-scan
     # parameter segments partway through. Reject that rather than solve it.
-    for (_, leaf) in UVData.branches(uvset)
-        name = UVData.metadata(leaf).scan_name
-        labels = unique(time_scan[_canonical_time(time_canon, Float64(t))] for t in lookup(leaf[:vis], Ti))
+    for piece in pieces, name in unique(piece.scans)
+        labels = unique(
+            time_scan[_canonical_time(time_canon, t)]
+                for (t, scan) in zip(piece.times, piece.scans) if scan == name
+        )
         length(labels) == 1 || throw(
             ArgumentError(
-                "build_geometry: scan '$name' spans timestamps that dense-rank to " *
+                "scan '$name' spans timestamps that dense-rank to " *
                     "$(join(("'" * l * "'" for l in labels), ", ")) — it overlaps another " *
                     "scan over part of its span but not all of it, so a single concatenated " *
                     "time axis would segment it into more than one scan. Sub-arrays sharing " *
@@ -693,21 +749,13 @@ function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
     spw_of_chan, _ = _dense_rank_labels(spw_labels)
     scan_of_time, _ = _dense_rank_labels(scan_labels)
 
-    spw_names = _unique_in_order(spw_labels)
-    scan_names = _unique_in_order(scan_labels)
-
     f0v = isnothing(f0) ? (isempty(freqs) ? 0.0 : mean(freqs)) : Float64(f0)
     t0v = isnothing(t0) ? (isempty(times) ? 0.0 : first(times)) : Float64(t0)
 
     return DataGeometry(;
-        times = times,
-        channel_freqs = freqs,
-        scan_of_time = scan_of_time,
-        spw_of_chan = spw_of_chan,
-        t0 = t0v,
-        f0 = f0v,
-        scan_names = scan_names,
-        spw_names = spw_names,
+        times, channel_freqs = freqs, scan_of_time, spw_of_chan, t0 = t0v, f0 = f0v,
+        scan_names = _unique_in_order(scan_labels), spw_names = _unique_in_order(spw_labels),
+        stations,
     )
 end
 
@@ -741,26 +789,63 @@ function _unique_in_order(labels::AbstractVector{<:AbstractString})
 end
 
 """
-    GeometryWindow
+    GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
+    GeometryWindow(geom::DataGeometry, chan_idx, ti_idx)
 
-A window into a [`DataGeometry`](@ref): everything needed to locate one scan's
-channels and times in the solve's index space, with no data attached.
+A window into a [`DataGeometry`](@ref): the solve's index space projected onto
+one Measurement Set, with no data attached.
 
 - `geom` — the solve's geometry, the index space the window addresses.
 - `chan_idx`, `ti_idx` — global indices into `geom.channel_freqs` / `geom.times`
-  of the channels and times the window covers.
+  of each channel and time of the Measurement Set, in its own order.
+- `stations` — for each baseline, in `baseline_id` order, the pair of indices
+  into `geom.stations` of its two antennas.
+- `feed_order` — the feed pairs `(feed_a, feed_b)` the baselines relate, sorted.
+- `feeds` — `feeds[k, b]` is the stored product of baseline `b` that relates
+  `feed_order[k]`.
 
 θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
-tseg_id, ant)` over global-length segment-id tables — while a `DimStack`'s
-coordinates are PHYSICAL (Hz, seconds), so this join cannot be recovered from the
-data alone.
-Build one with [`leaf_window`](@ref); pass it alongside the scan's `DimStack`
-to anything that needs both.
+tseg_id, ant)` over global-length segment-id tables — while a Measurement Set's
+coordinates are PHYSICAL (Hz, seconds, antenna names, correlation labels), so
+this join cannot be recovered from the data alone.
+
+`GeometryWindow(geom, ms)` matches channels by frequency (`isapprox`, rtol
+1e-9), times by `_epoch_atol` on absolute seconds, and antennas by name, and
+throws on any that `geom` does not hold. The three-argument form addresses
+channels and times only, which is all evaluating gains needs; its station and
+feed maps are empty.
 """
 struct GeometryWindow
     geom::DataGeometry
     chan_idx::Vector{Int}
     ti_idx::Vector{Int}
+    stations::Vector{Tuple{Int, Int}}
+    feed_order::Vector{Tuple{Int, Int}}
+    feeds::Matrix{Int}
+end
+
+GeometryWindow(geom::DataGeometry, chan_idx, ti_idx) =
+    GeometryWindow(geom, chan_idx, ti_idx, Tuple{Int, Int}[], Tuple{Int, Int}[], zeros(Int, 0, 0))
+
+function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
+    isempty(geom.stations) && throw(
+        ArgumentError("the geometry names no stations; build it with `DataGeometry(ps)`")
+    )
+    slot = Dict(n => i for (i, n) in pairs(geom.stations))
+    station(n) = get(slot, String(n)) do
+        throw(
+            ArgumentError(
+                "baseline antenna `$n` is not among the geometry's stations, " *
+                    join(geom.stations, ", ")
+            )
+        )
+    end
+    stations = [(station(a), station(b)) for (a, b) in XRadio.baselines(ms)]
+    order, perm = UVData._feed_permutation(feed_pairs(ms))
+    return GeometryWindow(
+        geom, _channel_indices(geom, XRadio.frequencies(ms)),
+        _time_indices(geom, XRadio.times(ms)), stations, order, perm,
+    )
 end
 
 """
@@ -771,30 +856,25 @@ matched by value against `geom` (frequency by `isapprox` rtol 1e-9, time by
 `_epoch_atol` on absolute seconds). Errors if any leaf sample has no match in
 the geometry.
 """
-leaf_window(geom::DataGeometry, leaf) =
-    GeometryWindow(geom, _channel_indices(geom, leaf), _time_indices(geom, leaf))
+leaf_window(geom::DataGeometry, leaf) = GeometryWindow(
+    geom, _channel_indices(geom, lookup(leaf[:vis], Frequency)),
+    _time_indices(geom, lookup(leaf[:vis], Ti)),
+)
 
-function _channel_indices(geom::DataGeometry, leaf)
-    fs = lookup(leaf[:vis], Frequency)
-    idx = Vector{Int}(undef, length(fs))
-    for (i, f) in enumerate(fs)
-        j = findfirst(g -> isapprox(g, Float64(f); rtol = 1.0e-9), geom.channel_freqs)
-        isnothing(j) &&
-            throw(ArgumentError("leaf_window: channel frequency $f not found in geometry"))
-        idx[i] = j
-    end
-    return idx
+_channel_indices(geom::DataGeometry, fs) = [_channel_index(geom, Float64(f)) for f in fs]
+
+function _channel_index(geom::DataGeometry, f)
+    j = findfirst(g -> isapprox(g, f; rtol = 1.0e-9), geom.channel_freqs)
+    isnothing(j) && throw(ArgumentError("channel frequency $f Hz is not in the geometry"))
+    return j
 end
 
-function _time_indices(geom::DataGeometry, leaf)
-    ts = lookup(leaf[:vis], Ti)
-    idx = Vector{Int}(undef, length(ts))
-    for (i, t) in enumerate(ts)
-        j = findfirst(g -> isapprox(g, Float64(t); atol = _epoch_atol(t)), geom.times)
-        isnothing(j) && throw(ArgumentError("leaf_window: time $t not found in geometry"))
-        idx[i] = j
-    end
-    return idx
+_time_indices(geom::DataGeometry, ts) = [_time_index(geom, Float64(t)) for t in ts]
+
+function _time_index(geom::DataGeometry, t)
+    j = findfirst(g -> isapprox(g, t; atol = _epoch_atol(t)), geom.times)
+    isnothing(j) && throw(ArgumentError("time $t s is not in the geometry"))
+    return j
 end
 
 """

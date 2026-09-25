@@ -153,6 +153,8 @@ Fields:
 - `scan_names`    : scan label of each distinct `scan_of_time` id, in the order
                     the ids are dense-ranked (`scan_names[s]` names segment `s`).
 - `spw_names`     : spw label of each distinct `spw_of_chan` id, likewise.
+- `stations`      : the run's station names; a baseline's antennas are
+                    indices into it. Empty for a geometry built without one.
 
 The names are the identity a solution is applied on: a foreign sample is
 placed in a `PerScan` or `PerSpectralWindow` segment by matching the name,
@@ -170,6 +172,7 @@ struct DataGeometry
     f0::Float64
     scan_names::Vector{String}
     spw_names::Vector{String}
+    stations::Vector{String}
 end
 
 function DataGeometry(;
@@ -181,6 +184,7 @@ function DataGeometry(;
         f0::Real = isempty(channel_freqs) ? 0.0 : sum(channel_freqs) / length(channel_freqs),
         scan_names::AbstractVector{<:AbstractString} = String[],
         spw_names::AbstractVector{<:AbstractString} = String[],
+        stations::AbstractVector{<:AbstractString} = String[],
     )
     length(scan_of_time) == length(times) || throw(
         DimensionMismatch(
@@ -195,11 +199,12 @@ function DataGeometry(;
     )
     _check_names("scan_names", scan_names, scan_of_time)
     _check_names("spw_names", spw_names, spw_of_chan)
+    allunique(stations) || throw(ArgumentError("DataGeometry: station names repeat: $(join(stations, ", "))"))
     return DataGeometry(
         Float64.(collect(times)), Int.(collect(scan_of_time)),
         Float64.(collect(channel_freqs)), Int.(collect(spw_of_chan)),
         Float64(t0), Float64(f0),
-        String.(collect(scan_names)), String.(collect(spw_names)),
+        String.(collect(scan_names)), String.(collect(spw_names)), String.(collect(stations)),
     )
 end
 
