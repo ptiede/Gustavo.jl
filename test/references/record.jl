@@ -40,7 +40,7 @@ const EXPECTED_CHANGES = [
 ]
 
 # The standard four-step chain, used for BT164A and the default synthetic case.
-default_chain() = FringeFit() |> DispersionSBDFit() |> Bandpass() |> TemporalSmoother()
+default_chain() = BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()
 
 function provenance()
     git(args...) = readchomp(Cmd(`git $args`; dir = REPO))
@@ -179,7 +179,7 @@ const SYNTHETIC_CASES = [
         name = "chain_two_scans",
         fixture = (; seed = 1234, nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 2, noise = 0.05),
         pipeline = default_chain,
-        pipeline_text = "FringeFit() |> DispersionSBDFit() |> Bandpass() |> TemporalSmoother()",
+        pipeline_text = "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
     ),
     (
         name = "phase_bandpass",
@@ -196,22 +196,22 @@ const SYNTHETIC_CASES = [
                 bp
             end,
         ),
-        pipeline = () -> FringeFit() |> Bandpass() |>
-            TemporalSmoother(Fring.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
-        pipeline_text = "FringeFit() |> Bandpass() |> " *
-            "TemporalSmoother(SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0))",
+        pipeline = () -> BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(Fring.SavitzkyGolaySmoother(; window = 7, order = 2, options = Fring.AdhocOptions(; snr_floor = 0.0))),
+        pipeline_text = "BaselineFringeFit() |> Bandpass() |> " *
+            "AdhocPhase(SavitzkyGolaySmoother(; window = 7, order = 2, options = AdhocOptions(; snr_floor = 0.0)))",
     ),
     (
         name = "dispersion",
         fixture = (; seed = 1234, nant = 4, nspw = 4, nchan = 8, ntime = 12, noise = 0.02, dtec = [0.0, 0.3, -0.2, 0.5]),
         pipeline = default_chain,
-        pipeline_text = "FringeFit() |> DispersionSBDFit() |> Bandpass() |> TemporalSmoother()",
+        pipeline_text = "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
     ),
     (
         name = "four_scans_gapped",
         fixture = (; seed = 1234, nant = 5, nspw = 2, nchan = 8, ntime = 10, nscans = 4, scan_gap = 600.0, noise = 0.05),
         pipeline = default_chain,
-        pipeline_text = "FringeFit() |> DispersionSBDFit() |> Bandpass() |> TemporalSmoother()",
+        pipeline_text = "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
     ),
 ]
 
@@ -222,7 +222,7 @@ function record_synthetic(dir = SYNTHETIC_DIR)
         uvset, truth = _build_fringe_uvset(; case.fixture...)
         input = joinpath(dir, "$(case.name).idifits")
         write_fitsidi(input, uvset)
-        sol = fit(case.pipeline(), load_fitsidi(input; lazy = false))
+        sol = fit(case.pipeline(), load_fitsidi(input; lazy = false); gauge = PinAntenna(1))
         path = write_solution(
             joinpath(dir, "$(case.name).zarr"), sol; attrs = Dict{String, Any}(
                 "input" => basename(input),
@@ -249,14 +249,14 @@ function record_bt164a(
     isfile(path) || error("record_bt164a: $path does not exist")
     uvset = load_fitsidi(path; lazy = true, scans)
     exec = ExecutionConfig(inner_executor = DynamicScheduler(; ntasks))
-    sol = fit(default_chain(), uvset; exec)
+    sol = fit(default_chain(), uvset; exec, gauge = PinAntenna(1))
     out = joinpath(dirname(path), "reference_Qband_scans_$(first(scans))-$(last(scans)).zarr")
     return write_solution(
         out, sol; attrs = Dict{String, Any}(
             "input" => basename(path),
             "reader" => "load_fitsidi(input; lazy = true, scans = $(scans))",
             "inner_ntasks" => ntasks,
-            "pipeline" => "FringeFit() |> DispersionSBDFit() |> Bandpass() |> TemporalSmoother()",
+            "pipeline" => "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
         ),
     )
 end

@@ -276,7 +276,7 @@ end
     @testset "the solve spans both, and stations keep their identity" begin
         # Solving the mixed set must reach every station of the union table and
         # name them as the full-array set does.
-        sol = fit(Bandpass(), sub)
+        sol = fit(Bandpass(), sub; gauge = PinAntenna(1))
         @test sol.info.ant_names == names
         # The sub-array scan contributes: its stations are solved, not skipped.
         g = CAL.gains(sol[:bandpass]; Ti = 1)

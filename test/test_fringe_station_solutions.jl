@@ -76,10 +76,11 @@
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
         uvset, truth = _build_fringe_uvset(nant = 4)
         sol = fit(
-            FringeFit() |>
+            BaselineFringeFit() |>
                 Bandpass() |>
-                TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+                AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
+            gauge = PinAntenna(1),
         )
         rows = FP.fringe_station_solutions(sol)
         @test length(rows) == sol.info.nscan * sol.steps[1].layout.nant * 2

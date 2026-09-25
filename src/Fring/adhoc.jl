@@ -52,7 +52,7 @@
 """
     AbstractAdhocSmoother
 
-How the [`TemporalSmoother`](@ref Gustavo.TemporalSmoother) step smooths
+How the [`AdhocPhase`](@ref Gustavo.AdhocPhase) step smooths
 the per-AP station phase tracks the adhoc solve produces
 (`solve_adhoc_phasing`). Concretely `SavitzkyGolaySmoother` (the default),
 `PenalizedSmoother`, `OUSmoother`, `JointOUSmoother`, or `NoSmoothing`.
@@ -64,50 +64,59 @@ Define a struct and:
     Gustavo.Fring.apply_adhoc!(sm::MySmoother, phase, track_w, times; anchor, nant, ap_rows)
 
 the single dispatch point; mutates `phase` in place. `ap_rows` holds the
-SNR-gated, source-corrected observation rows per AP. A smoother that acts
-independently on each (station, node) track subtypes
-[`PerTrackAdhocSmoother`](@ref) and implements the per-track hook
-`smooth_track(sm, track, w, times)` instead.
+SNR-gated, source-corrected observation rows per AP. The default
+`apply_adhoc!` smooths each (station, node) track independently through the
+per-track hook, so a smoother that acts track by track implements only
+
+    Gustavo.Fring.smooth_track(sm::MySmoother, track, w, times) -> ŷ
+
+A smoother declares which adhoc components it can solve with
 
     Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent, geom) -> Bool
 
-declares which adhoc components the smoother can solve, checked at
-model-compile time (default `false`, so an undeclared smoother rejects every
-model). A `PerTrackAdhocSmoother` inherits the shared capability — per-AP
-constant phase over the global band, `SharedFeeds` or `PerFeed`;
-`JointOUSmoother` restricts to `SharedFeeds` (its Kalman state is one
-dimension per station).
+checked at model-compile time. The default is the capability of the solve
+machinery — per-AP constant phase over the global band, `SharedFeeds` or
+`PerFeed`; `JointOUSmoother` restricts to `SharedFeeds` (its Kalman state is
+one dimension per station).
 
-# Shared solve options
-
-`snr_floor`, `phase_rewrap_iters`, `source_iters`, `source_tol`, `detrend`,
-and `complex_iters` are fields on every smoother. `snr_floor` gates the seed
-pass only (the phase-extraction solve that fixes the global 2π branch);
-`complex_iters` Gauss–Newton passes then re-fit the tracks against the
-complex residuals with every AP entering ungated (`complex_iters = 0` keeps
-the seed).
-
-`detrend` (default `true`) removes each track's per-scan weighted mean, so
-the adhoc component carries per-AP phase structure only and the per-scan
-constant stays with the fringe stage's own constant term. The residual-rate
-slope is kept. Disable only when the model has no other per-scan constant to
-alias against.
+Every smoother carries its solve options in an `options::AdhocOptions` field;
+see [`AdhocOptions`](@ref).
 """
 abstract type AbstractAdhocSmoother end
 
 """
-    PerTrackAdhocSmoother <: AbstractAdhocSmoother
+    AdhocOptions(; snr_floor = 1.0, phase_rewrap_iters = 3, source_iters = 10,
+                 source_tol = 1.0e-6, detrend = true, complex_iters = 2)
 
-A smoother that acts INDEPENDENTLY on each (station, node) phase track: it
-implements `smooth_track(sm, track, w, times) -> ŷ` and inherits the shared
-`apply_adhoc!` loop and the shared component capability (`can_fit`).
+The solve options every [`AbstractAdhocSmoother`](@ref) carries in its
+`options` field, e.g. `SavitzkyGolaySmoother(; window = 7, options =
+AdhocOptions(; snr_floor = 0.0))`.
+
+`snr_floor` gates the seed pass only (the phase-extraction solve that fixes
+the global 2π branch); `complex_iters` Gauss–Newton passes then re-fit the
+tracks against the complex residuals with every AP entering ungated
+(`complex_iters = 0` keeps the seed). `phase_rewrap_iters` bounds the
+rewrap passes of each solve. `source_iters` alternations between the station
+tracks and the per-(baseline, product) source phases run until the source
+phases move less than `source_tol`; `source_iters = 1` fits no source term.
+
+`detrend` removes each track's per-scan weighted mean, so the adhoc component
+carries per-AP phase structure only and the per-scan constant stays with the
+fringe stage's own constant term. The residual-rate slope is kept. Disable
+only when the model has no other per-scan constant to alias against.
 """
-abstract type PerTrackAdhocSmoother <: AbstractAdhocSmoother end
+Base.@kwdef struct AdhocOptions
+    snr_floor::Float64 = 1.0
+    phase_rewrap_iters::Int = 3
+    source_iters::Int = 10
+    source_tol::Float64 = 1.0e-6
+    detrend::Bool = true
+    complex_iters::Int = 2
+end
 
 """
     SavitzkyGolaySmoother(; window, order, coherence_time, structure_exponent,
-                          snr_floor, phase_rewrap_iters, source_iters,
-                          source_tol, detrend)
+                          options)
 
 Savitzky–Golay per-track smoother (the default). `window`/`order` are the SG window
 (APs) and polynomial order; `window` may be `:auto` (default) — the EHT-HOPS
@@ -122,46 +131,32 @@ Pass an integer to fix it.
 - `structure_exponent` : phase structure-function exponent `α` (5/3 = 3D Kolmogorov,
   2/3 = 2D). Only used when `window = :auto`.
 
-See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`/`complex_iters`.
+`options` is an [`AdhocOptions`](@ref).
 """
-Base.@kwdef struct SavitzkyGolaySmoother <: PerTrackAdhocSmoother
+Base.@kwdef struct SavitzkyGolaySmoother <: AbstractAdhocSmoother
     window::Union{Int, Symbol} = :auto
     order::Int = 2
     coherence_time::Float64 = 10.0
     structure_exponent::Float64 = 5 / 3
-    snr_floor::Float64 = 1.0
-    phase_rewrap_iters::Int = 3
-    source_iters::Int = 10
-    source_tol::Float64 = 1.0e-6
-    detrend::Bool = true
-    complex_iters::Int = 2
+    options::AdhocOptions = AdhocOptions()
 end
 
 """
-    PenalizedSmoother(; smoothness, snr_floor, phase_rewrap_iters, source_iters,
-                      source_tol, detrend)
+    PenalizedSmoother(; smoothness, options)
 
 Dense first-difference (random-walk) penalized per-track smoother: minimizes
 `Σ w_k(φ_k − y_k)² + smoothness·Σ(φ_{k+1}−φ_k)²`. No SparseArrays (the system is
 tridiagonal, solved densely). Larger `smoothness` ⇒ stiffer track.
 
-See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`/`complex_iters`.
+`options` is an [`AdhocOptions`](@ref).
 """
-Base.@kwdef struct PenalizedSmoother <: PerTrackAdhocSmoother
+Base.@kwdef struct PenalizedSmoother <: AbstractAdhocSmoother
     smoothness::Float64 = 1.0
-    snr_floor::Float64 = 1.0
-    phase_rewrap_iters::Int = 3
-    source_iters::Int = 10
-    source_tol::Float64 = 1.0e-6
-    detrend::Bool = true
-    complex_iters::Int = 2
+    options::AdhocOptions = AdhocOptions()
 end
 
 """
-    OUSmoother(; coherence_time, fit_hypers, snr_floor, phase_rewrap_iters,
-               source_iters, source_tol, detrend)
+    OUSmoother(; coherence_time, fit_hypers, options)
 
 Per-station Ornstein–Uhlenbeck / Matérn-1/2 Gaussian-process per-track smoother via
 an exact Kalman filter + RTS smoother (see [`smooth_ou_track`](@ref)), with
@@ -169,23 +164,16 @@ an exact Kalman filter + RTS smoother (see [`smooth_ou_track`](@ref)), with
 OU `(τ, σ²)` are fit by maximum Kalman marginal likelihood; when `false`,
 `τ = coherence_time` and `σ²` is seeded from the track scatter (no optimization).
 
-See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`/`complex_iters`.
+`options` is an [`AdhocOptions`](@ref).
 """
-Base.@kwdef struct OUSmoother <: PerTrackAdhocSmoother
+Base.@kwdef struct OUSmoother <: AbstractAdhocSmoother
     coherence_time::Float64 = 10.0
     fit_hypers::Bool = true
-    snr_floor::Float64 = 1.0
-    phase_rewrap_iters::Int = 3
-    source_iters::Int = 10
-    source_tol::Float64 = 1.0e-6
-    detrend::Bool = true
-    complex_iters::Int = 2
+    options::AdhocOptions = AdhocOptions()
 end
 
 """
-    JointOUSmoother(; coherence_time, fit_hypers, snr_floor, phase_rewrap_iters,
-                    source_iters, source_tol, detrend)
+    JointOUSmoother(; coherence_time, fit_hypers, options)
 
 The paper-faithful JOINT solve — one multivariate OU Kalman over all station phases
 observing baseline phase differences directly, closing and denoising together (better
@@ -195,35 +183,23 @@ solve; see `_solve_gp_joint!`. Requires one phase node per station (e.g. a
 `coherence_time`/`fit_hypers` seed the per-station OU dynamics as in
 [`OUSmoother`](@ref).
 
-See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`/`complex_iters`.
+`options` is an [`AdhocOptions`](@ref).
 """
 Base.@kwdef struct JointOUSmoother <: AbstractAdhocSmoother
     coherence_time::Float64 = 10.0
     fit_hypers::Bool = true
-    snr_floor::Float64 = 1.0
-    phase_rewrap_iters::Int = 3
-    source_iters::Int = 10
-    source_tol::Float64 = 1.0e-6
-    detrend::Bool = true
-    complex_iters::Int = 2
+    options::AdhocOptions = AdhocOptions()
 end
 
 """
-    NoSmoothing(; snr_floor, phase_rewrap_iters, source_iters, source_tol, detrend)
+    NoSmoothing(; options)
 
 No smoothing: the raw per-AP global solve only (unwrap + optional detrend still run).
 
-See `AbstractAdhocSmoother` for the shared `snr_floor`/`phase_rewrap_iters`/
-`source_iters`/`source_tol`/`detrend`/`complex_iters`.
+`options` is an [`AdhocOptions`](@ref).
 """
 Base.@kwdef struct NoSmoothing <: AbstractAdhocSmoother
-    snr_floor::Float64 = 1.0
-    phase_rewrap_iters::Int = 3
-    source_iters::Int = 10
-    source_tol::Float64 = 1.0e-6
-    detrend::Bool = true
-    complex_iters::Int = 2
+    options::AdhocOptions = AdhocOptions()
 end
 
 # ── Smoother interface traits ─────────────────────────────────────────────────
@@ -244,7 +220,7 @@ _requires_single_node(::JointOUSmoother) = true
 """
     default_adhoc_terms(; feed = SharedFeeds()) -> GainModel
 
-The default [`TemporalSmoother`](@ref Gustavo.TemporalSmoother) step model: one per-AP constant phase
+The default [`AdhocPhase`](@ref Gustavo.AdhocPhase) step model: one per-AP constant phase
 over the global band — a `phase.adhoc` component with `Ti = PerIntegration()`.
 `feed` is its feed tying: `SharedFeeds()` (the default) solves one track per
 station — residual atmospheric phase is non-birefringent, and a feed-common
@@ -259,7 +235,7 @@ default_adhoc_terms(; feed::AbstractFeedTying = SharedFeeds()) =
 
 # Capability declarations for the compile-time `can_fit`/`validate_model` seam
 # (shared with the fringe estimators and bandpass smoothers; the step drives the
-# checks in `model_components(::TemporalSmoother, spec)`).
+# checks in `model_components(::AdhocPhase, spec)`).
 #
 # What the solve machinery addresses: one constant per (feed node, AP) —
 # `adhoc_scan!` writes leaf slot (param 1, node, freq segment 1, time segment,
@@ -270,9 +246,7 @@ _fits_adhoc_track(tc) =
     tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
     tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds)
 
-can_fit(::AbstractAdhocSmoother, tc, geom) = false
-can_fit(::PerTrackAdhocSmoother, tc, geom) = _fits_adhoc_track(tc)
-can_fit(::NoSmoothing, tc, geom) = _fits_adhoc_track(tc)
+can_fit(::AbstractAdhocSmoother, tc, geom) = _fits_adhoc_track(tc)
 # The joint solve needs one phase node per station (`_requires_single_node`).
 can_fit(::JointOUSmoother, tc, geom) = _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds
 
@@ -303,8 +277,8 @@ end
 # the per-AP SNR-gated observation rows with the source term already removed, so
 # every smoother sees the same observations; per-track smoothers ignore it.
 
-# Per-track smoothers: loop the (station, node) tracks and apply the per-track hook.
-function apply_adhoc!(sm::PerTrackAdhocSmoother, phase, track_w, times; anchor, nant, ap_rows)
+# Default: loop the (station, node) tracks and apply the per-track hook.
+function apply_adhoc!(sm::AbstractAdhocSmoother, phase, track_w, times; anchor, nant, ap_rows)
     for a in axes(phase, 1), f in axes(phase, 2)
         any(isfinite, @view phase[a, f, :]) || continue
         phase[a, f, :] .= smooth_track(sm, phase[a, f, :], @view(track_w[a, f, :]), times)
@@ -602,7 +576,7 @@ function _solve_gp_joint!(
 
     # Iterated Kalman: rewrap each raw observation toward the current joint model,
     # then re-run the forward/backward smoother (relinearizing the ±2π branch).
-    for _ in 1:max(sm.phase_rewrap_iters, 1)
+    for _ in 1:max(sm.options.phase_rewrap_iters, 1)
         for ap in eachindex(ap_rows, ys)
             rows = ap_rows[ap]
             y = ys[ap]
@@ -822,10 +796,10 @@ reference's feed-1 node, so the reference's inter-feed phase stays in the
 solution.
 
 `smoother` is an [`AbstractAdhocSmoother`](@ref) selecting how each track is
-smoothed after the solve, and carries the shared solve options. The `(φ, x)`
-blocks are fit by alternating minimization until no source term moves by
-more than `source_tol` radians or `source_iters` passes; `source_iters = 1`
-fixes `x = 0`.
+smoothed after the solve; its [`AdhocOptions`](@ref) set the solve. The
+`(φ, x)` blocks are fit by alternating minimization until no source term moves
+by more than `options.source_tol` radians or `options.source_iters` passes;
+`source_iters = 1` fixes `x = 0`.
 """
 function solve_adhoc_phasing(
         rbar::AbstractArray{<:Complex, 3}, wbar::AbstractArray{<:Real, 3},
@@ -866,7 +840,7 @@ function solve_adhoc_phasing(
     # The SNR gate does not depend on the source terms, so every AP's gated rows are
     # built once and reused by every alternation pass (and by the joint smoother).
     raw_rows = [
-        _adhoc_ap_rows(rbar, wbar, ap, bl_pairs, feeds, noise2, smoother.snr_floor^2, tying)
+        _adhoc_ap_rows(rbar, wbar, ap, bl_pairs, feeds, noise2, smoother.options.snr_floor^2, tying)
             for ap in axes(rbar, 3)
     ]
 
@@ -874,7 +848,7 @@ function solve_adhoc_phasing(
     # `source_iters == 1` never updates them, so the model reduces exactly to a pure
     # station-difference solve with no source term.
     x = zeros(Float64, nbl * npol)
-    fit_source = smoother.source_iters >= 2
+    fit_source = smoother.options.source_iters >= 2
     keep = trues(nbl * npol)
     if fit_source
         naps_src = zeros(Int, nbl * npol)
@@ -941,17 +915,17 @@ function solve_adhoc_phasing(
     # are conditionally linear, so the alternation descends a convex quadratic.
     # With `source_iters == 1` the source terms are never fitted and stay at 0, so
     # the model reduces to a pure station-difference solve.
-    for iter in 1:max(smoother.source_iters, 1)
+    for iter in 1:max(smoother.options.source_iters, 1)
         _solve_ap_sweep!(
             phase, covered, track_w, ap_rows, nant, anchor,
-            smoother.phase_rewrap_iters, max_stale,
+            smoother.options.phase_rewrap_iters, max_stale,
         )
-        (fit_source && iter < smoother.source_iters) || break
+        (fit_source && iter < smoother.options.source_iters) || break
         moved = _update_source_terms!(x, raw_rows, phase)
         for ap in eachindex(ap_rows, raw_rows)
             ap_rows[ap] = _source_corrected_rows(raw_rows[ap], x, keep)
         end
-        moved <= smoother.source_tol && break
+        moved <= smoother.options.source_tol && break
     end
 
     # Smooth: dispatch on the smoother type. Per-track smoothers loop the (station,
@@ -975,7 +949,7 @@ function solve_adhoc_phasing(
     # ±π by construction.
     sbar_ref = nothing
     nap_ref = nothing
-    for _ in 1:max(smoother.complex_iters, 0)
+    for _ in 1:max(smoother.options.complex_iters, 0)
         sbar, napu = _complex_source_means(rbar, wbar, phase, bl_pairs, feeds, tying)
         sbar_ref = sbar
         nap_ref = napu
@@ -985,7 +959,7 @@ function solve_adhoc_phasing(
         ]
         _solve_ap_sweep!(
             phase, covered, track_w, ref_rows, nant, anchor,
-            smoother.phase_rewrap_iters, max_stale,
+            smoother.options.phase_rewrap_iters, max_stale,
         )
         apply_adhoc!(smoother, phase, track_w, times; anchor = anchor, nant = nant, ap_rows = ref_rows)
     end
@@ -993,7 +967,7 @@ function solve_adhoc_phasing(
     # Demean per track: remove the per-scan mean so adhoc does not alias the Stage-B
     # constant phase — this also fixes the (per-station constant ↔ source term)
     # gauge. The slope (residual rate) is intentionally kept — see `_detrend_track!`.
-    if smoother.detrend
+    if smoother.options.detrend
         for a in axes(phase, 1), n in axes(phase, 2)
             _detrend_track!(@view(phase[a, n, :]), @view(track_w[a, n, :]))
         end

@@ -14,9 +14,10 @@ include("synthetic_uvset.jl")
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
     # keeps every well-determined AP in this high-SNR synthetic.
     sol = fit(
-        FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset,
+        gauge = PinAntenna(1),
     )
     @test sol isa CAL.CalibrationSolution
     for step in sol.steps
@@ -111,7 +112,7 @@ include("synthetic_uvset.jl")
         @test occursin("GainModel", sprint(show, sol[:fringe].steps[1].model))
 
         # CalibrationPipeline is an ordered container over its steps.
-        pipe = CalibrationPipeline(FringeFit() |> Bandpass())
+        pipe = CalibrationPipeline(BaselineFringeFit() |> Bandpass(); gauge = PinAntenna(1))
         @test length(pipe) == length(pipe.steps)
         @test eltype(typeof(pipe)) == CalibrationStep
         @test collect(pipe) == pipe.steps
@@ -202,38 +203,38 @@ end
         @test any(!=(0), off1[:, 1, :, :])           # ...and the plan is non-trivial
     end
 
-    # The pipeline's own default carries the same tie: the TemporalSmoother
+    # The pipeline's own default carries the same tie: the AdhocPhase
     # step's compiled component is the feed-common adhoc form.
-    t = Gustavo.model_components(TemporalSmoother(), nothing)
+    t = Gustavo.model_components(AdhocPhase(), nothing)
     @test t.phase.adhoc.Feed isa CAL.SharedFeeds
     @test isempty(t.logamp)
 end
 
-@testset "TemporalSmoother model surface: vetting + per-feed adhoc" begin
-    sm = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+@testset "AdhocPhase model surface: vetting + per-feed adhoc" begin
+    sm = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
     # One-argument form: the smoother, with the default model.
-    @test TemporalSmoother(sm).model == default_adhoc_terms()
-    @test TemporalSmoother(sm).smoother === sm
+    @test AdhocPhase(sm).model == default_adhoc_terms()
+    @test AdhocPhase(sm).smoother === sm
 
     # Compile-time vetting. The joint smoother cannot solve a per-feed model
     # (its Kalman state is one node per station)...
     pf = default_adhoc_terms(feed = CAL.PerFeed())
     @test_throws "JointOUSmoother cannot fit" Gustavo.model_components(
-        TemporalSmoother(model = pf, smoother = FP.JointOUSmoother()), nothing,
+        AdhocPhase(model = pf, smoother = FP.JointOUSmoother()), nothing,
     )
     # ...no adhoc smoother can address a single-feed tying...
     @test_throws "cannot fit the component" Gustavo.model_components(
-        TemporalSmoother(model = default_adhoc_terms(feed = CAL.SingleFeed(2))),
+        AdhocPhase(model = default_adhoc_terms(feed = CAL.SingleFeed(2))),
         nothing,
     )
     # ...and the stage solves exactly one phase component, nothing in logamp.
     two = GainModel(; phase = (; a = pf.phase.adhoc, b = pf.phase.adhoc))
     @test_throws "exactly one" Gustavo.model_components(
-        TemporalSmoother(model = two), nothing,
+        AdhocPhase(model = two), nothing,
     )
     la = GainModel(; phase = pf.phase, logamp = pf.phase)
     @test_throws "phase only" Gustavo.model_components(
-        TemporalSmoother(model = la), nothing,
+        AdhocPhase(model = la), nothing,
     )
 
     # End-to-end per-feed adhoc: the layout realizes two nodes per station, both
@@ -241,8 +242,9 @@ end
     # parallel hands still flatten.
     uvset, _ = _build_fringe_uvset()
     sol = fit(
-        FringeFit() |> TemporalSmoother(model = pf, smoother = sm),
+        BaselineFringeFit() |> AdhocPhase(model = pf, smoother = sm),
         uvset,
+        gauge = PinAntenna(1),
     )
     st = sol[:adhoc].steps[1]
     plan = FP._adhoc_plan(st.model, st.layout)
@@ -272,15 +274,15 @@ end
     # two-pass `apply_calibration(uvset, fit(pipe, uvset))`, because each
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    chain = FringeFit() |> Bandpass() |>
-        TemporalSmoother(adhoc)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    chain = BaselineFringeFit() |> Bandpass() |>
+        AdhocPhase(adhoc)
 
-    sol_ref = fit(chain, uvset)
+    sol_ref = fit(chain, uvset; gauge = PinAntenna(1))
     corr_ref = Gustavo.UVData.apply_calibration(uvset, sol_ref)
 
     # No reduce steps → fused correction only (no reduction).
-    sol_fused, out_fused = fitcalibrate(chain, uvset)
+    sol_fused, out_fused = fitcalibrate(chain, uvset; gauge = PinAntenna(1))
 
     @test parent(gains(sol_fused)) ≈ parent(gains(sol_ref))
     # Same tree keys.
@@ -304,7 +306,7 @@ end
     # With a reducer the fused output must equal applying the same reducer to the
     # two-pass corrected set.
     red_ref = UVP.frequency_average(corr_ref; nout = 1)
-    _, out_red = fitcalibrate(chain, uvset; reduce = [AverageFrequency(nout = 1)])
+    _, out_red = fitcalibrate(chain, uvset; reduce = [AverageFrequency(nout = 1)], gauge = PinAntenna(1))
     for (k, leaf) in DimensionalData.branches(red_ref)
         Vr = parent(leaf[:vis])
         Vf = parent(DimensionalData.branches(out_red)[k][:vis])
@@ -322,13 +324,13 @@ end
     # fitting `ApplySolution(sol_a[:fringe]) |> B` in a later,
     # unrelated call.
     uvset, _ = _build_fringe_uvset()
-    ff = FringeFit()
+    ff = BaselineFringeFit()
     bp = Bandpass()
 
-    sol_within = fit(ff |> bp, uvset)
+    sol_within = fit(ff |> bp, uvset; gauge = PinAntenna(1))
 
-    sol_a = fit(ff, uvset)
-    sol_cross = fit(FP.ApplySolution(sol_a[:fringe]) |> bp, uvset)
+    sol_a = fit(ff, uvset; gauge = PinAntenna(1))
+    sol_cross = fit(FP.ApplySolution(sol_a[:fringe]) |> bp, uvset; gauge = PinAntenna(1))
 
     θ_within = sol_within[:bandpass].steps[1].θ
     θ_cross = sol_cross[:bandpass].steps[1].θ
@@ -359,10 +361,11 @@ end
     # synthesize them. Reduce + combine spws to channels, then round-trip via UVFITS.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     sol, reduced = fitcalibrate(
-        FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
+        gauge = PinAntenna(1),
     )
     @test length(DimensionalData.branches(reduced)) == 1
     @test length(UVP.union_frequency_axis(reduced)) == 1
@@ -394,10 +397,11 @@ end
     # exactly and differ ONLY by that conjugation. This isolates the convention.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     _, reduced = fitcalibrate(
-        FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
+        gauge = PinAntenna(1),
     )
     pa = tempname() * ".uvfits"
     pf = tempname() * ".uvfits"
@@ -487,12 +491,13 @@ end
     # Regression for the θ-overwrite bug: even rounds previously wiped the
     # round-1 solution (coherence collapsed). Accumulation keeps all rounds good.
     uvset, _ = _build_fringe_uvset()
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
         sol = fit(
-            FringeFit(estimator = FP.MatchedFilter(rounds = r)) |>
-                Bandpass() |> TemporalSmoother(adhoc),
+            BaselineFringeFit(estimator = FP.MatchedFilter(rounds = r)) |>
+                Bandpass() |> AdhocPhase(adhoc),
             uvset,
+            gauge = PinAntenna(1),
         )
         corr = Gustavo.UVData.apply_calibration(uvset, sol)
         worst = 1.0
@@ -544,12 +549,13 @@ end
         end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    ff = FringeFit()
-    sol_on = fit(ff |> Bandpass() |> TemporalSmoother(adhoc), uvset)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    ff = BaselineFringeFit()
+    sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
     sol_off = fit(
         ff |> Bandpass(model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
-            TemporalSmoother(adhoc), uvset,
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
     )
 
     don = FP.baseline_fringe_data(uvset, sol_on)
@@ -611,12 +617,13 @@ end
         end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
-    ff = FringeFit()
-    sol_on = fit(ff |> Bandpass() |> TemporalSmoother(adhoc), uvset)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    ff = BaselineFringeFit()
+    sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
     sol_off = fit(
         ff |> Bandpass(model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
-            TemporalSmoother(adhoc), uvset,
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
     )
 
     don = FP.baseline_fringe_data(uvset, sol_on)
@@ -694,7 +701,7 @@ end
         parent(leaf[:flags])[dead_local, :, :, :] .= true
     end
 
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
     larec(θ, plan, a, f, gc) = (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : θ[off])
     function amp_ripple(spec, don, p)
         rs = Float64[]
@@ -708,10 +715,11 @@ end
         isempty(rs) ? NaN : sum(rs) / length(rs)
     end
 
-    ff = FringeFit()
+    ff = BaselineFringeFit()
     sol_off = fit(
         ff |> Bandpass(model = GainModel(; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother()) |>
-            TemporalSmoother(adhoc), uvset,
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
     )
     doff = FP.baseline_fringe_data(uvset, sol_off)
     poff = FP.baseline_pol_index(doff, (1, 1))
@@ -722,7 +730,8 @@ end
     for sm in (FP.PolynomialShape(4), FP.WhittakerShape(0.1))
         sol = fit(
             ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = sm)) |>
-                TemporalSmoother(adhoc), uvset,
+                AdhocPhase(adhoc), uvset,
+                gauge = PinAntenna(1),
         )
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, (1, 1))
@@ -741,7 +750,8 @@ end
     # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothing specs.
     solf = fit(
         ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = FP.FreeShape())) |>
-            TemporalSmoother(adhoc), uvset,
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
     )
     bpf = solf[:bandpass].steps[1]
     planf = bpf.layout.plantree.logamp.bandpass
@@ -755,9 +765,10 @@ end
     # selection). Verify the default path still flattens the per-baseline phase.
     uvset, _ = _build_fringe_uvset()
     sol = fit(
-        FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother()),   # window = :auto
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother()),   # window = :auto
         uvset,
+        gauge = PinAntenna(1),
     )
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
     worst = 1.0
@@ -789,9 +800,10 @@ end
     @test ax.mbd !== nothing
 
     sol = fit(
-        FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset,
+        gauge = PinAntenna(1),
     )
     @test all(>(10), filter(isfinite, sol[:fringe].steps[1].info.scan_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
@@ -834,10 +846,11 @@ end
     # fires per completed scan of each pass (plus a done=0 pass announcement).
     events = Tuple{Symbol, Int, Int}[]
     sol = fit(
-        FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
+        gauge = PinAntenna(1),
     )
     ngroups = length(FP.scan_stream(uvset).groups)
     # Stages report under the pass names of the composable pipeline
@@ -872,11 +885,12 @@ end
     # single-scan uvset (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
     solc = fit(
-        FringeFit() |>
+        BaselineFringeFit() |>
             Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
+        gauge = PinAntenna(1),
     )
     @test solc isa CAL.CalibrationSolution
     bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
@@ -913,11 +927,12 @@ end
     @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
 
     sol = fit(
-        FringeFit(
+        BaselineFringeFit(
             model = default_fringe_terms(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> DispersionSBDFit() |> TemporalSmoother(),        # no bandpass stage (see comment above)
+        ) |> DispersionSBDFit() |> AdhocPhase(),        # no bandpass stage (see comment above)
         uvset,
+        gauge = PinAntenna(1),
     )
     refine = sol[:refine].steps[1]
     @test stage_info(sol, :refine).dispersion_applied
@@ -960,11 +975,12 @@ end
     # Without the term (no DispersionSBDFit step) the dispersion survives as
     # cross-band decoherence.
     sol0 = fit(
-        FringeFit(
+        BaselineFringeFit(
             model = default_fringe_terms(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> TemporalSmoother(),
+        ) |> AdhocPhase(),
         uvset,
+        gauge = PinAntenna(1),
     )
     @test :refine ∉ keys(sol0)     # no DispersionSBDFit step in this pipeline at all
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
@@ -1032,11 +1048,12 @@ end
     # dispersion OFF: this geometry's spw count/fractional bandwidth would also
     # enable the dTEC term, and this test isolates the SBD machinery.
     sol = fit(
-        FringeFit(
+        BaselineFringeFit(
             model = default_fringe_terms(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> DispersionSBDFit(dispersion = nothing) |> TemporalSmoother(),
+        ) |> DispersionSBDFit(dispersion = nothing) |> AdhocPhase(),
         uvset,
+        gauge = PinAntenna(1),
     )
     refine = sol[:refine].steps[1]
     @test stage_info(sol, :refine).sbd_applied
@@ -1056,11 +1073,12 @@ end
     # Without the term (no DispersionSBDFit step) the per-group slope survives
     # as within-group decoherence.
     sol0 = fit(
-        FringeFit(
+        BaselineFringeFit(
             model = default_fringe_terms(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
-        ) |> TemporalSmoother(),
+        ) |> AdhocPhase(),
         uvset,
+        gauge = PinAntenna(1),
     )
     @test :refine ∉ keys(sol0)     # no DispersionSBDFit step in this pipeline at all
     corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
@@ -1106,13 +1124,14 @@ end
     @test UVP._colocated_ties(ant2; max_sep = 1000.0) == [1, 2, 2, 4, 4]
 
     sol = fit(
-        FringeFit(
+        BaselineFringeFit(
             model = default_fringe_terms(),
             estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
         ) |> DispersionSBDFit(
             dispersion = DispersionModel(colocated_sep = 1000.0), sbd = nothing,
-        ) |> TemporalSmoother(),
+        ) |> AdhocPhase(),
         uvset,
+        gauge = PinAntenna(1),
     )
     refine = sol[:refine].steps[1]
     dplan = CAL._dispersion_plan(refine.model, refine.layout)
@@ -1177,7 +1196,7 @@ end
             end
         end
     end
-    ff = FringeFit(
+    ff = BaselineFringeFit(
         model = default_fringe_terms(),
         estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
     )
@@ -1185,7 +1204,7 @@ end
     # configuration whose flags exist only per scan (`scan_flags`), never in
     # scratch while the pass runs.
     @test fusable_grouping(ff) === :scan
-    sol = fit(ff |> TemporalSmoother(), uvset)
+    sol = fit(ff |> AdhocPhase(), uvset; gauge = PinAntenna(1))
     flags = FP.fringe_station_flags(sol)
     @test !isempty(flags)
     @test all(r -> r.ant == 4, flags)                 # only station 4 unconstrained
@@ -1222,7 +1241,7 @@ end
     # group while resident, before any `finish_pass!` has run, so it must read
     # the scan's flags off the fringe step's own `process_scan!` return
     # (`scan_flags`) — scratch holds nothing yet.
-    sol_fc, out = fitcalibrate(ff |> TemporalSmoother(), uvset)
+    sol_fc, out = fitcalibrate(ff |> AdhocPhase(), uvset; gauge = PinAntenna(1))
     @test sol_fc.info.flagged_ant == sol.info.flagged_ant
     @test sol_fc.info.flagged_scan == sol.info.flagged_scan
     for (_, leaf) in Gustavo.UVData.leaves(out)

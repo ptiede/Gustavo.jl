@@ -16,9 +16,10 @@
     # A real solution to divide out (per-scan delays/rates + per-AP adhoc — the
     # time-VARYING precal branch; `_precal_time_constant` guards the fast path).
     precal = fit(
-        FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset,
+        gauge = PinAntenna(1),
     )
     nant = length(UVP.union_antennas(uvset).name)
     ws = [1.0 + 0.25 * i for i in 1:nant]
@@ -292,8 +293,8 @@ end
         # The point of the transform: a step fit through it is fit on calibrated
         # amplitudes. A channel-dependent SEFD is what shows it — a station's
         # flat scaling is degenerate with the bandpass gauge and absorbed by it.
-        b_raw = fit(Bandpass(), uvset)
-        b_pre = fit(pre_pc |> Bandpass(), uvset)
+        b_raw = fit(Bandpass(), uvset; gauge = PinAntenna(1))
+        b_pre = fit(pre_pc |> Bandpass(), uvset; gauge = PinAntenna(1))
         @test !isapprox(
             abs.(CAL.gains(b_raw; Ti = 1)), abs.(CAL.gains(b_pre; Ti = 1)); rtol = 1.0e-3,
         )

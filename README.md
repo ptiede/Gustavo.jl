@@ -25,7 +25,7 @@ using FITSFiles   # enables the FITS-IDI/UVFITS reader and writer extension
 uvset = load_fitsidi("track.idifits")            # lazy: header tables only
 
 pipe = CalibrationPipeline(
-    FringeFit() |> DispersionSBDFit() |> Bandpass() |> TemporalSmoother();
+    BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase();
     gauge = PinAntenna("AA"),                    # run-wide reference antenna
 )
 

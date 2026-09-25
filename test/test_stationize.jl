@@ -790,7 +790,7 @@ end
     end
 end
 
-# The engine contract behind `FringeFit`'s scan-local mode: on a model whose
+# The engine contract behind `BaselineFringeFit`'s scan-local mode: on a model whose
 # every column is per-scan, solving each scan's system alone accumulates the
 # same solution as one pooled call over all scans. The graph aggregation is
 # EXACT — connectivity is weight-independent, so component counts sum and the

@@ -116,10 +116,11 @@
         lc = first(values(UVP.branches(corrupt)))
         snapshot = copy(parent(lc[:vis]))
         solf, output = fitcalibrate(
-            FP.ApplySolution(sol) |> FringeFit() |>
+            FP.ApplySolution(sol) |> BaselineFringeFit() |>
                 Bandpass() |>
-                TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+                AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             corrupt,
+            gauge = PinAntenna(1),
         )
         @test solf.info.precal_applied
         @test parent(lc[:vis]) == snapshot                 # caller's data unmutated
@@ -144,10 +145,10 @@
         # The solution is per scan × per spw, so it ports to a set that samples
         # the same scan and spws differently — 6 channels per band instead of 8.
         other, _ = _build_fringe_uvset(nchan = 6)
-        @test fit(FP.ApplySolution(sol) |> FringeFit(), other) isa CAL.CalibrationSolution
+        @test fit(FP.ApplySolution(sol) |> BaselineFringeFit(), other; gauge = PinAntenna(1)) isa CAL.CalibrationSolution
         # A scan it never saw is refused, fail-fast at stream construction.
         twoscan, _ = _build_fringe_uvset(nscans = 2)
-        @test_throws "is not in the solution" fit(FP.ApplySolution(sol) |> FringeFit(), twoscan)
+        @test_throws "is not in the solution" fit(FP.ApplySolution(sol) |> BaselineFringeFit(), twoscan; gauge = PinAntenna(1))
 
         # Diagnostics see the pre-calibrated data when the same precal is passed:
         # the "before" spectra of the corrupted set + precal equal the clean
@@ -179,10 +180,11 @@
 
         # Solve with flagging: runs, and the output flags those channels.
         _, out2 = fitcalibrate(
-            FP.FlagChannels(mask) |> FringeFit() |>
+            FP.FlagChannels(mask) |> BaselineFringeFit() |>
                 Bandpass() |>
-                TemporalSmoother(FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)),
+                AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
+            gauge = PinAntenna(1),
         )
         lo = first(values(UVP.branches(out2)))
         ci = CAL.leaf_window(geom, lo).chan_idx

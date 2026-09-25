@@ -73,11 +73,12 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
 
     @testset "full pipeline: θ and output bit-identical across OUTER executors" begin
         uvset, _ = _build_fringe_uvset(; nscans = 2)
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
         mk(ex) = CalibrationPipeline(
-            FringeFit(),
-            Bandpass(), TemporalSmoother(adhoc);
+            BaselineFringeFit(),
+            Bandpass(), AdhocPhase(adhoc);
             exec = ExecutionConfig(outer_executor = ex),
+            gauge = PinAntenna(1),
         )
         sol_t, out_t = fitcalibrate(mk(DynamicScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
         sol_d, out_d = fitcalibrate(mk(GreedyScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
@@ -99,11 +100,12 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
 
     @testset "full pipeline: θ bit-identical across INNER executors" begin
         uvset, _ = _build_fringe_uvset(; nscans = 2)
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
         mk(inner) = CalibrationPipeline(
-            FringeFit(),
-            Bandpass(), TemporalSmoother(adhoc);
+            BaselineFringeFit(),
+            Bandpass(), AdhocPhase(adhoc);
             exec = ExecutionConfig(inner_executor = inner),
+            gauge = PinAntenna(1),
         )
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are
         # order-fixed by the data layout, so θ is bit-identical.

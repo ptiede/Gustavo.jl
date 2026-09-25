@@ -34,7 +34,7 @@ struct _OpaqueTerm end
 struct _OpaqueEstimator <: Gustavo.Fring.AbstractFringeEstimator end
 
 # The full three-stage production pipeline at defaults.
-_full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
+_full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
 
 @testset "Composable pipeline interface" begin
     @testset "step protocol defaults + visitor hooks" begin
@@ -56,29 +56,29 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
     end
 
     @testset "built-in step declarations" begin
-        @test Gustavo.provides(FringeFit()) == :fringe
+        @test Gustavo.provides(BaselineFringeFit()) == :fringe
         @test Gustavo.provides(Bandpass()) == :bandpass
-        @test Gustavo.provides(TemporalSmoother()) == :adhoc
-        @test Gustavo.required_grouping(FringeFit()) == :scan_complete
+        @test Gustavo.provides(AdhocPhase()) == :adhoc
+        @test Gustavo.required_grouping(BaselineFringeFit()) == :scan_complete
         # Steps that finalize a scan inside `process_scan!` declare themselves
         # scan-local; a pass that closes one system over every scan does not.
         @test Gustavo.fusable_grouping(DispersionSBDFit()) == :scan
-        @test Gustavo.fusable_grouping(TemporalSmoother()) == :scan
+        @test Gustavo.fusable_grouping(AdhocPhase()) == :scan
         @test Gustavo.fusable_grouping(Bandpass()) == :global
-        # FringeFit answers per instance (`Fring.scan_local_solve`): the
+        # BaselineFringeFit answers per instance (`Fring.scan_local_solve`): the
         # default — one round, every term per-scan — solves each scan's
         # station systems as the scan is searched, so the pass is scan-local.
-        @test Gustavo.fusable_grouping(FringeFit()) == :scan
+        @test Gustavo.fusable_grouping(BaselineFringeFit()) == :scan
         # Any cross-scan coupling forces the pooled pass: a residual re-search
         # round, a track-global inter-feed column (in the base model or in one
         # station's entry), or an estimator that declares nothing (the seam's
         # safe default).
-        @test Gustavo.fusable_grouping(FringeFit(estimator = MatchedFilter(rounds = 2))) == :global
+        @test Gustavo.fusable_grouping(BaselineFringeFit(estimator = MatchedFilter(rounds = 2))) == :global
         @test Gustavo.fusable_grouping(
-            FringeFit(model = default_fringe_terms(rel_time = CAL.GlobalTime())),
+            BaselineFringeFit(model = default_fringe_terms(rel_time = CAL.GlobalTime())),
         ) == :global
         @test Gustavo.fusable_grouping(
-            FringeFit(
+            BaselineFringeFit(
                 model = with_station(
                     default_fringe_terms(), "AA";
                     phase = default_fringe_terms(rel_time = CAL.GlobalTime()).phase,
@@ -87,32 +87,32 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         ) == :global
         @test_throws "must be a `GainComponent`" merge(default_fringe_terms(); phase = (; x = _OpaqueTerm()))
         # A step's model is a GainModel, never a bare NamedTuple.
-        @test_throws MethodError FringeFit(model = (; phase = default_fringe_terms().phase))
-        @test Gustavo.fusable_grouping(FringeFit(estimator = _OpaqueEstimator())) == :global
-        # A scan-local FringeFit finishes each scan's unconstrained-station
+        @test_throws MethodError BaselineFringeFit(model = (; phase = default_fringe_terms().phase))
+        @test Gustavo.fusable_grouping(BaselineFringeFit(estimator = _OpaqueEstimator())) == :global
+        # A scan-local BaselineFringeFit finishes each scan's unconstrained-station
         # flags inside `process_scan!`, so the fused output tail reads them off
         # that scan's return rather than waiting for the pass to end.
-        @test Gustavo.scan_flags(FringeFit(), (; flags = [(4, 2)])) == [(4, 2)]
-        # Neither Bandpass nor FringeFit overrides fit_selection — both passes
+        @test Gustavo.scan_flags(BaselineFringeFit(), (; flags = [(4, 2)])) == [(4, 2)]
+        # Neither Bandpass nor BaselineFringeFit overrides fit_selection — both passes
         # stream every scan.
         @test Gustavo.fit_selection(Bandpass(), Gustavo.StepSolution[]) isa AllScans
-        @test Gustavo.fit_selection(FringeFit(), Gustavo.StepSolution[]) isa AllScans
+        @test Gustavo.fit_selection(BaselineFringeFit(), Gustavo.StepSolution[]) isa AllScans
         # Solve steps refuse the sequential run_step chain.
-        @test_throws ErrorException Gustavo.run_step(FringeFit(), Gustavo.CalibrationContext())
+        @test_throws ErrorException Gustavo.run_step(BaselineFringeFit(), Gustavo.CalibrationContext())
     end
 
     @testset "pass partitioning: which steps share one read" begin
         prior = Gustavo.StepSolution[]
         steps = Gustavo.SolveStep[
-            FringeFit(), DispersionSBDFit(), TemporalSmoother(), Bandpass(),
+            BaselineFringeFit(), DispersionSBDFit(), AdhocPhase(), Bandpass(),
         ]
         @test Gustavo._fusable_run(steps, 1, prior) == 1:3   # the scan-local run shares a pass
         @test Gustavo._fusable_run(steps, 4, prior) == 4:4
-        # A pooled FringeFit instance (rounds > 1) runs alone, and the
+        # A pooled BaselineFringeFit instance (rounds > 1) runs alone, and the
         # scan-local pair after it still shares its own pass.
         steps2 = Gustavo.SolveStep[
-            FringeFit(estimator = MatchedFilter(rounds = 2)),
-            DispersionSBDFit(), TemporalSmoother(), Bandpass(),
+            BaselineFringeFit(estimator = MatchedFilter(rounds = 2)),
+            DispersionSBDFit(), AdhocPhase(), Bandpass(),
         ]
         @test Gustavo._fusable_run(steps2, 1, prior) == 1:1
         @test Gustavo._fusable_run(steps2, 2, prior) == 2:3
@@ -130,8 +130,15 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
     @testset "a fused step may not ask for its pass again" begin
         uvset, _ = _build_fringe_uvset()
         @test_throws "is not scan-local" fit(
-            TemporalSmoother() |> _RepeatingScanStep(), uvset,
+            AdhocPhase() |> _RepeatingScanStep(), uvset,
+            gauge = PinAntenna(1),
         )
+    end
+
+    @testset "a fit without a gauge throws, naming the stations" begin
+        uvset, _ = _build_fringe_uvset()
+        @test_throws "no gauge given" fit(BaselineFringeFit(), uvset)
+        @test_throws join(Gustavo._antenna_names(uvset), ", ") fit(BaselineFringeFit(), uvset)
     end
 
     @testset "steps compose in any declared order" begin
@@ -139,16 +146,16 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         # isa-case anywhere in _parse_pipeline for it, and no construction-time
         # veto on where it sits.
         @test Gustavo._check_unique_provides(
-            Gustavo.SolveStep[FringeFit(), _ThirdPartyStep()]
+            Gustavo.SolveStep[BaselineFringeFit(), _ThirdPartyStep()]
         ) === nothing
         @test Gustavo._check_unique_provides(
-            Gustavo.SolveStep[_ThirdPartyStep(), FringeFit()]
+            Gustavo.SolveStep[_ThirdPartyStep(), BaselineFringeFit()]
         ) === nothing
         # Two steps providing the same capability are rejected, regardless of
         # their concrete types or position — a naming conflict, not an
         # ordering rule.
         @test_throws "more than one step provides :fringe" Gustavo._check_unique_provides(
-            Gustavo.SolveStep[FringeFit(), FringeFit()]
+            Gustavo.SolveStep[BaselineFringeFit(), BaselineFringeFit()]
         )
         # provides(step) === :nothing never collides with itself.
         @test Gustavo._check_unique_provides(
@@ -158,29 +165,29 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         # solve_steps by abstract type alone, in declared order — it does not
         # reorder or reject based on that order.
         br = Gustavo._parse_pipeline(
-            CalibrationPipeline(FringeFit(), _ThirdPartyStep())
+            CalibrationPipeline(BaselineFringeFit(), _ThirdPartyStep(); gauge = PinAntenna(1))
         )
-        @test br.solve_steps == [FringeFit(), _ThirdPartyStep()]
-        @test br.ff == FringeFit()
+        @test br.solve_steps == [BaselineFringeFit(), _ThirdPartyStep()]
+        @test br.ff == BaselineFringeFit()
     end
 
     @testset "chaining and lifting" begin
         cf = CalFunction((stack, win) -> nothing)
-        chain = cf |> FringeFit() |> AverageFrequency(nout = 1)
+        chain = cf |> BaselineFringeFit() |> AverageFrequency(nout = 1)
         @test chain isa StepChain
         @test length(chain.steps) == 3
         @test chain.steps[1] isa DataTransformStep
         @test Gustavo.transforms(chain.steps[1]) == (cf,)
-        @test chain.steps[2] isa FringeFit
+        @test chain.steps[2] isa BaselineFringeFit
 
-        p = CalibrationPipeline(chain; exec = ExecutionConfig(mem_fraction = 0.4))
+        p = CalibrationPipeline(chain; exec = ExecutionConfig(mem_fraction = 0.4), gauge = PinAntenna(1))
         @test p.steps == chain.steps
         @test p.exec.mem_fraction == 0.4
 
         # Vector and vararg constructors lift raw transforms too.
-        p2 = CalibrationPipeline([cf, FringeFit()])
+        p2 = CalibrationPipeline([cf, BaselineFringeFit()]; gauge = PinAntenna(1))
         @test p2.steps[1] isa DataTransformStep
-        p3 = CalibrationPipeline(cf, FringeFit())
+        p3 = CalibrationPipeline(cf, BaselineFringeFit(); gauge = PinAntenna(1))
         @test p3.steps[1] isa DataTransformStep && p3.exec == ExecutionConfig()
     end
 
@@ -261,7 +268,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
 
     @testset "full pipeline: stage provenance and snapshots" begin
         uvset, _ = _build_fringe_uvset()
-        sol = fit(CalibrationPipeline(_full_chain()), uvset)
+        sol = fit(CalibrationPipeline(_full_chain(); gauge = PinAntenna(1)), uvset)
 
         @test sol isa CAL.CalibrationSolution
         @test keys(sol) == [:fringe, :bandpass, :adhoc]
@@ -330,7 +337,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
 
     @testset "solution container and selection algebra" begin
         uvset, _ = _build_fringe_uvset()
-        sol = fit(CalibrationPipeline(_full_chain()), uvset)
+        sol = fit(CalibrationPipeline(_full_chain(); gauge = PinAntenna(1)), uvset)
 
         # Container contract: length/eachindex/keys/haskey, and iteration
         # yields each step as a single-step solution.
@@ -375,7 +382,7 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
     @testset "fit + calibrate ≡ fitcalibrate (weight-scale transform)" begin
         uvset, _ = _build_fringe_uvset()
         ws = [1.0, 0.5, 1.0, 2.0]
-        pipe = CalibrationPipeline(StationWeightScale(ws) |> _full_chain())
+        pipe = CalibrationPipeline(StationWeightScale(ws) |> _full_chain(); gauge = PinAntenna(1))
         red = [AverageFrequency(nout = 1)]
 
         sol_f, out_f = fitcalibrate(pipe, uvset; reduce = red)
@@ -403,15 +410,15 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
         # order, w·(s_a s_b)²) — the old bridge's "specified twice" error died
         # with it. Both are recorded on the solution.
         both = CalibrationPipeline(
-            StationWeightScale(ws) |> StationWeightScale(ws) |> _full_chain()
+            StationWeightScale(ws) |> StationWeightScale(ws) |> _full_chain(); gauge = PinAntenna(1)
         )
         sol_b = fit(both, uvset)
         @test length(sol_b.transforms) == 2
-        @test parent(gains(fit(CalibrationPipeline(StationWeightScale(ws .* ws) |> _full_chain()), uvset))) ≈
+        @test parent(gains(fit(CalibrationPipeline(StationWeightScale(ws .* ws) |> _full_chain(); gauge = PinAntenna(1)), uvset))) ≈
             parent(gains(sol_b))
 
         # Chain convenience form ≡ the pipeline form.
-        @test parent(gains(fit(StationWeightScale(ws) |> _full_chain(), uvset))) ≈ parent(gains(sol_f))
+        @test parent(gains(fit(StationWeightScale(ws) |> _full_chain(), uvset; gauge = PinAntenna(1)))) ≈ parent(gains(sol_f))
     end
 
     @testset "rate components must share the constant-phase epoch" begin
@@ -425,12 +432,12 @@ _full_chain() = FringeFit() |> Bandpass() |> TemporalSmoother()
             default_fringe_terms();
             phase = (; rate2 = GainComponent(Rate(); Ti = GlobalTime(), Feed = SingleFeed(2))),
         )
-        @test_throws "disagree on the epoch" fit(FringeFit(model = bad), uvset)
+        @test_throws "disagree on the epoch" fit(BaselineFringeFit(model = bad), uvset; gauge = PinAntenna(1))
     end
 
     @testset "solution serialization round-trip; older files refused" begin
         uvset, _ = _build_fringe_uvset()
-        sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain()), uvset)
+        sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain(); gauge = PinAntenna(1)), uvset)
         path = joinpath(mktempdir(), "sol.jls")
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)

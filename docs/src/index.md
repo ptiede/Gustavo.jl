@@ -33,7 +33,7 @@ using FITSFiles
 uvset = load_fitsidi("track.idifits")            # lazy: header tables only
 
 pipe = CalibrationPipeline(
-    FringeFit() |> DispersionSBDFit() |> Bandpass() |> TemporalSmoother();
+    BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase();
     gauge = PinAntenna("AA"),                    # run-wide reference antenna
 )
 
@@ -54,10 +54,10 @@ tree of per-scan leaves, each carrying dimension-named
 stays on disk until a scan group is materialized, so the solvers stream it.
 
 **Pipeline.** A [`CalibrationPipeline`](@ref) is an ordered list of steps
-chained with `|>`. The built-in solve steps are [`FringeFit`](@ref) (delay /
+chained with `|>`. The built-in solve steps are [`BaselineFringeFit`](@ref) (delay /
 rate / phase search), [`DispersionSBDFit`](@ref) (ionospheric dTEC and
 per-band-group delay refinement), [`Bandpass`](@ref) (time-stable station
-bandpass), and [`TemporalSmoother`](@ref) (per-integration atmospheric
+bandpass), and [`AdhocPhase`](@ref) (per-integration atmospheric
 phase). Data reductions ([`AverageFrequency`](@ref), [`AverageTime`](@ref),
 [`CombineSpw`](@ref), [`FlagSpwEdges`](@ref)) and a-priori amplitude
 calibration ([`AprioriAmplitude`](@ref)) compose into the same pipeline.

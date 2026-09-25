@@ -1,13 +1,13 @@
 # ── Fringe estimator seam ────────────────────────────────────────────────────
 #
-# The supertype and the two hooks a `FringeFit` step calls to turn scan data
+# The supertype and the two hooks a `BaselineFringeFit` step calls to turn scan data
 # into station fringe parameters. `MatchedFilter`'s methods are defined with the
 # step itself, which is where the pipeline's solve context is in scope.
 
 """
     AbstractFringeEstimator
 
-The strategy a `FringeFit` step uses to estimate station fringe parameters
+The strategy a `BaselineFringeFit` step uses to estimate station fringe parameters
 from scan data. Implementations own their machinery: the matched-filter
 estimator carries a search configuration and a `Stationization`; a global
 least-squares estimator would carry neither.
@@ -32,7 +32,7 @@ is rejected rather than leaving θ columns unwritten; [`validate_model`](@ref)
 defaults to a no-op.
 
 An estimator whose solve completes per scan under some configurations may
-also declare [`scan_local_solve`](@ref), which lets a `FringeFit` carrying
+also declare [`scan_local_solve`](@ref), which lets a `BaselineFringeFit` carrying
 it share one streaming pass with adjacent scan-local steps; the default
 (`false`) is never fused.
 
@@ -46,7 +46,7 @@ abstract type AbstractFringeEstimator end
 
 One scan group's contribution to the fringe estimate. `ctx` is the pipeline's
 solve context (`ctx.θ`, `ctx.layout`, `ctx.geom`, `ctx.stream`, `ctx.scratch`),
-`step` the [`FringeFit`](@ref Gustavo.FringeFit) being run — read its `model` for what is solved —
+`step` the [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit) being run — read its `model` for what is solved —
 `stack` the materialized scan group's `DimStack`, and `win` its
 [`GeometryWindow`](@ref) into the solve's index space.
 
@@ -93,10 +93,10 @@ finish_estimate!(est::AbstractFringeEstimator, ctx, step) = error(
 """
     scan_local_solve(est::AbstractFringeEstimator, model) -> Bool
 
-Whether `est`, fitting `model` (the `FringeFit`'s own model), finalizes
+Whether `est`, fitting `model` (the `BaselineFringeFit`'s own model), finalizes
 each scan from that scan's data alone: every θ column of a scan is written by
 the time its [`estimate_scan!`](@ref) returns, and [`finish_estimate!`](@ref)
-neither writes θ nor requests `repeat_pass`. `FringeFit` declares itself
+neither writes θ nor requests `repeat_pass`. `BaselineFringeFit` declares itself
 scan-local (`fusable_grouping` = `:scan`) exactly when this is `true`, letting
 it share one streaming pass with adjacent scan-local steps.
 
@@ -137,7 +137,7 @@ can_fit(::AbstractFringeEstimator, tc, geom) = false
     validate_model(est::AbstractFringeEstimator, model) -> nothing
 
 Check that the `(; phase, logamp)` component tree `model` (again, only the
-`FringeFit`'s own; once per distinct station tree) contains everything `est`
+`BaselineFringeFit`'s own; once per distinct station tree) contains everything `est`
 REQUIRES, throwing an `ArgumentError` naming the estimator and the missing
 signature. The mirror of
 [`can_fit`](@ref): that one rejects terms the estimator cannot fit, this one

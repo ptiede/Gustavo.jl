@@ -56,10 +56,9 @@ the interior boundaries as epochs on the `Ti` axis (seconds since
 """
 struct InstrumentScans <: AbstractTimeSegmentation
     boundaries_s::Vector{Float64}
+    InstrumentScans(b::AbstractVector{<:Real}) = new(sort!(Float64.(b)))
 end
-InstrumentScans(b::AbstractVector{<:Real}) = InstrumentScans(sort!(Float64.(collect(b))))
-InstrumentScans(b::AbstractVector{DateTime}) =
-    InstrumentScans(sort!([datetime2unix(t) for t in b]))
+InstrumentScans(b::AbstractVector{DateTime}) = InstrumentScans(datetime2unix.(b))
 
 # Value equality: the boundaries are the segmentation's whole identity, and a
 # `Vector` field would otherwise leave `==` at object identity — so two

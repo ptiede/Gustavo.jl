@@ -49,7 +49,7 @@
         return ctx, r
     end
 
-    fringe_ctx, _ = process(FringeFit(), stack)
+    fringe_ctx, _ = process(BaselineFringeFit(), stack)
     sol = CAL.CalibrationSolution(
         fringe_ctx.model, fringe_ctx.layout, geom, fringe_ctx.θ,
         (; ant_names = String.(antennas.name)); name = :fringe,
@@ -72,12 +72,12 @@
         end
 
         @testset "$(nameof(typeof(step)))" for step in (
-                FringeFit(),
+                BaselineFringeFit(),
                 DispersionSBDFit(;
                     dispersion = DispersionModel(),
                     sbd = SingleBandDelay(; freq = CAL.FreqGroups([1:16, 17:32])),
                 ),
-                TemporalSmoother(),
+                AdhocPhase(),
             )
             a, _ = process(step, stack)
             b, _ = process(step, permuted)

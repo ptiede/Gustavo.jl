@@ -53,8 +53,9 @@
     gauge = PinAntenna(ref_ant)     # Bandpass's/CalibrationPipeline's default
     sol_closure = fit(
         CalibrationPipeline(
-            FringeFit(model = fm), Bandpass(smoother = FP.PerTrackSmoother());
+            BaselineFringeFit(model = fm), Bandpass(smoother = FP.PerTrackSmoother());
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         ),
         uvset,
     )
@@ -64,9 +65,10 @@
     # count/tolerance.
     sol_joint = fit(
         CalibrationPipeline(
-            FringeFit(model = fm),
+            BaselineFringeFit(model = fm),
             Bandpass(smoother = FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-10));
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         ),
         uvset,
     )
@@ -137,7 +139,7 @@ end
     )
     fm = default_fringe_terms()
     runbp(sm) = fit(
-        CalibrationPipeline(FringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig()),
+        CalibrationPipeline(BaselineFringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig(), gauge = PinAntenna(1)),
         uvset,
     )[:bandpass].steps[1]
 
@@ -199,7 +201,7 @@ end
 
     fm = default_fringe_terms()
     runbp(sm) = fit(
-        CalibrationPipeline(FringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig()),
+        CalibrationPipeline(BaselineFringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig(), gauge = PinAntenna(1)),
         uvset,
     )[:bandpass].steps[1]
     s_joint = runbp(FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-12))

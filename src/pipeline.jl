@@ -6,7 +6,7 @@
 # UVSet transform) and defining one method — `run_step` or `prepare_reducer`.
 #
 # Memory model ("solver owns its reductions"): fringe solve+correct+reduce is one
-# streaming pass over the (lazy) data. Reduce steps placed in `FringeFit(reduce =
+# streaming pass over the (lazy) data. Reduce steps placed in `BaselineFringeFit(reduce =
 # [...])` are folded into that pass's `postprocess`, so they never materialize the
 # full file. The same `ReduceStep`s also run standalone at the top level (eagerly,
 # on the already-reduced `output`).
@@ -28,7 +28,7 @@ abstract type CalibrationStep end
     ReduceStep <: CalibrationStep
 
 A `UVSet -> UVSet` transform that can be *fused* into a solver's streaming pass
-(via `FringeFit(reduce = [...])`) or run standalone. Implement
+(via `BaselineFringeFit(reduce = [...])`) or run standalone. Implement
 `prepare_reducer(step, ctx) -> (transform, ctx)`.
 """
 abstract type ReduceStep <: CalibrationStep end
@@ -71,7 +71,7 @@ function run_step end
     prepare_reducer(step::ReduceStep, ctx) -> (transform::Any, ctx::CalibrationContext)
 
 Return a `UVSet -> UVSet` `transform` and a (possibly updated) context. Called by
-[`FringeFit`](@ref) to fold the step into its streaming pass, and by the default
+[`BaselineFringeFit`](@ref) to fold the step into its streaming pass, and by the default
 [`run_step`](@ref) for standalone use.
 """
 function prepare_reducer end
@@ -83,7 +83,7 @@ function run_step(step::ReduceStep, ctx::CalibrationContext)
     target === nothing && error("$(nameof(typeof(step))): no `output`/`uvset` in context to reduce.")
     if is_lazy(target)
         @warn "Applying $(nameof(typeof(step))) eagerly to a lazy UVSet forces a full " *
-            "materialization; put it in `FringeFit(reduce = [...])` to fuse it into the streaming pass."
+            "materialization; put it in `BaselineFringeFit(reduce = [...])` to fuse it into the streaming pass."
     end
     return _with(ctx; output = f(target))
 end
@@ -105,8 +105,8 @@ end
 # chaining (`|>`), and the CalibrationPipeline itself.
 include("pipeline/protocol.jl")
 
-# The built-in solve steps: FringeFit (model + estimator), Bandpass,
-# TemporalSmoother.
+# The built-in solve steps: BaselineFringeFit (model + estimator), Bandpass,
+# AdhocPhase.
 include("pipeline/steps.jl")
 
 

@@ -6,7 +6,7 @@
 # the runner in verbs.jl drives them). Every pipeline runs on this engine.
 
 """
-    FringeFit(; model = default_fringe_terms(), estimator = MatchedFilter())
+    BaselineFringeFit(; model = default_fringe_terms(), estimator = MatchedFilter())
 
 The fringe-fitting stage. What is solved is `model`, a phase-only
 [`GainModel`](@ref): per-scan constant/delay/rate and the inter-feed offsets;
@@ -20,23 +20,23 @@ Ionospheric dispersion (dTEC) and single-band delay (SBD) are not part of this
 step — add a [`DispersionSBDFit`](@ref) step after it to fit them on the
 fringe-corrected residual.
 """
-Base.@kwdef struct FringeFit{M <: GainModel, E <: Fring.AbstractFringeEstimator} <: SolveStep
+Base.@kwdef struct BaselineFringeFit{M <: GainModel, E <: Fring.AbstractFringeEstimator} <: SolveStep
     model::M = Fring.default_fringe_terms()
     estimator::E = Fring.MatchedFilter()
 end
-provides(::FringeFit) = :fringe
-required_grouping(::FringeFit) = :scan_complete
+provides(::BaselineFringeFit) = :fringe
+required_grouping(::BaselineFringeFit) = :scan_complete
 # WHERE θ is written decides the scope, and the estimator answers for its own
 # configuration (`Fring.scan_local_solve`): the default `MatchedFilter` with
 # one round and an all-per-scan model solves each scan's station systems
 # inside `process_scan!`, so the pass is scan-local; any cross-scan coupling —
 # a residual re-search round, a `GlobalTime`-tied inter-feed column, an
 # estimator that pools every scan's detections — forces `:global`.
-fusable_grouping(s::FringeFit) =
+fusable_grouping(s::BaselineFringeFit) =
     Fring.scan_local_solve(s.estimator, s.model) ? :scan : :global
 # Consulted only inside a fused run — exactly the scan-local configuration,
 # whose `estimate_scan!` return carries the scan's own unconstrained flags.
-scan_flags(s::FringeFit, r) = r.flags
+scan_flags(s::BaselineFringeFit, r) = r.flags
 # NOTE: no `fit_selection` method — the fringe pass streams every scan (the
 # default `AllScans`).
 
@@ -46,12 +46,12 @@ scan_flags(s::FringeFit, r) = r.flags
 The ionospheric-dispersion (dTEC) and single-band-delay (SBD) refinement
 stage: a per-scan joint (Δτ, dTEC) fit ([`DispersionModel`](@ref)) and a
 per-band-group delay fit ([`SingleBandDelay`](@ref)), on the fringe-corrected
-residual — place a [`FringeFit`](@ref) step earlier in the pipeline. Set
+residual — place a [`BaselineFringeFit`](@ref) step earlier in the pipeline. Set
 either field to `nothing` to disable that term.
 
 The Δτ half of the joint fit lands in a private per-scan delay column, not in
-`FringeFit`'s own wideband delay: gains compose multiplicatively, so this
-step's delay column times `FringeFit`'s is the same total correction as
+`BaselineFringeFit`'s own wideband delay: gains compose multiplicatively, so this
+step's delay column times `BaselineFringeFit`'s is the same total correction as
 incrementing one shared column would be, without either step writing into the
 other's θ block.
 """
@@ -82,7 +82,7 @@ complex gain per (station, feed, segment), so it needs both halves of the
 model — a phase-only or amplitude-only model must name
 [`Fring.PerTrackSmoother`](@ref) instead, which runs the per-channel closure
 solves and then fits each track. The model is self-contained, so placing
-`Bandpass` before or after `FringeFit` is equally legal.
+`Bandpass` before or after `BaselineFringeFit` is equally legal.
 """
 Base.@kwdef struct Bandpass{M <: GainModel, S <: Fring.AbstractBandpassSmoother} <: SolveStep
     model::M = Fring.default_bandpass_terms()
@@ -97,8 +97,8 @@ fusable_grouping(::Bandpass) = :global
 # No fit_selection override — every scan feeds the pass (protocol.jl's default AllScans).
 
 """
-    TemporalSmoother(; model = default_adhoc_terms(), smoother = SavitzkyGolaySmoother())
-    TemporalSmoother(smoother)
+    AdhocPhase(; model = default_adhoc_terms(), smoother = SavitzkyGolaySmoother())
+    AdhocPhase(smoother)
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
 globally-closing per-AP station phase on the fringe/bandpass residual. What is
@@ -110,16 +110,16 @@ a pluggable [`Fring.AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
 requires the feed-common (`SharedFeeds`) model. The one-argument form takes the
 smoother and keeps the default model.
 """
-Base.@kwdef struct TemporalSmoother{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: SolveStep
+Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: SolveStep
     model::M = Fring.default_adhoc_terms()
     smoother::S = Fring.SavitzkyGolaySmoother()
 end
-TemporalSmoother(smoother::Fring.AbstractAdhocSmoother) = TemporalSmoother(; smoother)
-provides(::TemporalSmoother) = :adhoc
-required_grouping(::TemporalSmoother) = :scan_complete
+AdhocPhase(smoother::Fring.AbstractAdhocSmoother) = AdhocPhase(; smoother)
+provides(::AdhocPhase) = :adhoc
+required_grouping(::AdhocPhase) = :scan_complete
 # `adhoc_scan!` fits the scan's per-AP track from that scan's stack alone and
 # writes its θ before returning; the slots are disjoint per scan.
-fusable_grouping(::TemporalSmoother) = :scan
+fusable_grouping(::AdhocPhase) = :scan
 
 # Solve steps run through the pipeline verbs, never the sequential
 # `run_step` chain (they need the shared compiled model + streaming passes).
@@ -136,7 +136,7 @@ run_step(s::SolveStep, ctx::CalibrationContext) = error(
 # geometry fails there instead of being answered from a default.
 _spec_geom(spec) = spec === nothing ? nothing : spec.geom
 
-model_components(s::FringeFit, spec) = _vet_step_model(
+model_components(s::BaselineFringeFit, spec) = _vet_step_model(
     s.estimator, s.model,
     "See `$(nameof(typeof(s.estimator)))` for the models it fits — a capability " *
         "can depend on the data's own sampling, so a term this estimator fits " *
@@ -224,7 +224,7 @@ heterogeneity_rejector(s::Bandpass) =
     "one rectangular gain table for every station — `Bandpass(smoother = JointSmoother())` " *
     "solves a per-station model"
 
-model_components(s::TemporalSmoother, spec) = _vet_step_model(
+model_components(s::AdhocPhase, spec) = _vet_step_model(
     s.smoother, s.model,
     "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
         "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed())` " *
@@ -232,7 +232,7 @@ model_components(s::TemporalSmoother, spec) = _vet_step_model(
     spec,
 )
 
-# ── FringeFit visitor (stage A: per-scan search + station solve) ─────────────
+# ── BaselineFringeFit visitor (stage A: per-scan search + station solve) ─────
 #
 # The station solve runs where `scan_local_solve` says it can: per scan inside
 # `estimate_scan!` when the systems are block-diagonal (each scan's θ is
@@ -240,9 +240,9 @@ model_components(s::TemporalSmoother, spec) = _vet_step_model(
 # promises), or once over every scan's detections in `finish_estimate!` when a
 # cross-scan column or a re-search round couples them.
 
-function start_pass!(s::FringeFit, ctx::SolveContext)
+function start_pass!(s::BaselineFringeFit, ctx::SolveContext)
     ctx.scratch[:fringe_round] = get(ctx.scratch, :fringe_round, 0) + 1
-    # `ctx.model` holds only FringeFit's own components (each step solves on its
+    # `ctx.model` holds only BaselineFringeFit's own components (each step solves on its
     # own private model/θ, never a merged one), so no restriction is needed: a
     # later step's component sharing a stage-B signature by design
     # (`DispersionSBDFit`'s private delay-refinement column vs. this model's own
@@ -255,10 +255,10 @@ function start_pass!(s::FringeFit, ctx::SolveContext)
     return nothing
 end
 
-process_scan!(s::FringeFit, ctx::SolveContext, stack, win::GeometryWindow) =
+process_scan!(s::BaselineFringeFit, ctx::SolveContext, stack, win::GeometryWindow) =
     Fring.estimate_scan!(s.estimator, ctx, s, stack, win)
 
-finish_pass!(s::FringeFit, ctx::SolveContext) = Fring.finish_estimate!(s.estimator, ctx, s)
+finish_pass!(s::BaselineFringeFit, ctx::SolveContext) = Fring.finish_estimate!(s.estimator, ctx, s)
 
 # ── MatchedFilter: the per-baseline search + closure-screened station WLS ─────
 #
@@ -296,7 +296,7 @@ _fringe_report(results, ngroups) = (;
 )
 
 function Fring.estimate_scan!(
-        est::Fring.MatchedFilter, ctx::SolveContext, s::FringeFit,
+        est::Fring.MatchedFilter, ctx::SolveContext, s::BaselineFringeFit,
         stack, win::GeometryWindow,
     )
     round = ctx.scratch[:fringe_round]::Int
@@ -398,7 +398,7 @@ function Fring.estimate_scan!(
     return (; det, max_snr, ncells, rows)
 end
 
-function Fring.finish_estimate!(est::Fring.MatchedFilter, ctx::SolveContext, s::FringeFit)
+function Fring.finish_estimate!(est::Fring.MatchedFilter, ctx::SolveContext, s::BaselineFringeFit)
     results = ctx.scratch[:pass_results]
     ngroups = length(ctx.stream.groups)
     if Fring.scan_local_solve(est, s.model)
@@ -442,7 +442,7 @@ _dtec_ties(dm::DispersionModel, antennas) =
 function start_pass!(s::DispersionSBDFit, ctx::SolveContext)
     disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
     # `ctx.model` holds only this step's own components: the
-    # per-scan delay-refinement column — sharing FringeFit's wideband-delay
+    # per-scan delay-refinement column — sharing BaselineFringeFit's wideband-delay
     # Signature by design — is the only `_is_perscan_delay` match here, so
     # the plain `findfirst` router (`_perscan_delay_plan`) finds it directly;
     # `nothing` when dispersion is disabled (no such component was compiled).
@@ -538,16 +538,16 @@ function finish_pass!(s::Bandpass, ctx::SolveContext)
     )
 end
 
-# ── TemporalSmoother visitor (refine + per-scan adhoc solve; final pass) ──────
+# ── AdhocPhase visitor (refine + per-scan adhoc solve; final pass) ────────────
 
-function start_pass!(s::TemporalSmoother, ctx::SolveContext)
+function start_pass!(s::AdhocPhase, ctx::SolveContext)
     ctx.scratch[:adhoc_setup] = (;
         adhoc_plan = Fring._adhoc_plan(ctx.model, ctx.layout),
     )
     return nothing
 end
 
-function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::GeometryWindow)
+function process_scan!(s::AdhocPhase, ctx::SolveContext, stack, win::GeometryWindow)
     setup = ctx.scratch[:adhoc_setup]
     # `stack` arrives already fringe/dispersion/SBD/bandpass-corrected through
     # the pipeline's transform chain — the per-AP phases fit that residual
@@ -559,7 +559,7 @@ function process_scan!(s::TemporalSmoother, ctx::SolveContext, stack, win::Geome
     return nothing
 end
 
-function finish_pass!(s::TemporalSmoother, ctx::SolveContext)
+function finish_pass!(s::AdhocPhase, ctx::SolveContext)
     results = ctx.scratch[:pass_results]
     return (; nscans = length(results))
 end

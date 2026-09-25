@@ -63,10 +63,10 @@
         # detections — SNR, delay, rate — are bit-identical. What the fix moves
         # is the RELATIVE inter-baseline weighting of the stages that accumulate
         # ACROSS baselines (stage B / bandpass / adhoc) and the exported weights.
-        chain0 = FringeFit() |> Bandpass() |>
-            TemporalSmoother(FP.NoSmoothing())
-        base = fitcalibrate(chain0, uvset)
-        fixd = fitcalibrate(FP.StationWeightScale(ws) |> chain0, uvset)
+        chain0 = BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.NoSmoothing())
+        base = fitcalibrate(chain0, uvset; gauge = PinAntenna(1))
+        fixd = fitcalibrate(FP.StationWeightScale(ws) |> chain0, uvset; gauge = PinAntenna(1))
         bfr, ffr = base[1][:fringe].steps[1], fixd[1][:fringe].steps[1]
         @test ffr.info.scan_snr == bfr.info.scan_snr
         @test ffr.info.det_snr == bfr.info.det_snr
@@ -87,9 +87,10 @@
 
     @testset "diagnostics replay the solve's recorded transforms" begin
         sol = fit(
-            FP.StationWeightScale(ws) |> FringeFit() |>
-                Bandpass() |> TemporalSmoother(FP.NoSmoothing()),
+            FP.StationWeightScale(ws) |> BaselineFringeFit() |>
+                Bandpass() |> AdhocPhase(FP.NoSmoothing()),
             uvset,
+            gauge = PinAntenna(1),
         )
         # The old footgun (forgetting to re-pass weight_scale to a diagnostic)
         # is dead: with NO kwargs the diagnostics materialize through

@@ -1,6 +1,6 @@
-# ── The FringeFit step (stage A on the composable engine) ─────────────────────
+# ── The BaselineFringeFit step (stage A on the composable engine) ─────────────
 #
-# A FringeFit-only pipeline solves the matched-filter stage standalone. The M3
+# A BaselineFringeFit-only pipeline solves the matched-filter stage standalone. The M3
 # bit-parity gates against the frozen monolith ran before its deletion; the
 # standing invariant kept here is that LATER STAGES NEVER MOVE THE FRINGE
 # BLOCKS: a fringe-only fit's θ blocks are bit-identical to the same blocks of
@@ -10,15 +10,16 @@
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 
-@testset "FringeFit step (new engine)" begin
+@testset "BaselineFringeFit step (new engine)" begin
     @testset "fringe blocks invariant under later stages" begin
         uvset, _ = _build_fringe_uvset()
         solm = fit(
-            FringeFit() |>
-                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            BaselineFringeFit() |>
+                AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
+            gauge = PinAntenna(1),
         )
-        sol = fit(FringeFit(), uvset)
+        sol = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
         @test length(fr.model.phase) == 4
         rn = [p.range for p in fr.layout.plans]
@@ -35,7 +36,7 @@
 
         # A gauge naming a station code resolves identically.
         sol_code = fit(
-            FringeFit(),
+            BaselineFringeFit(),
             uvset; gauge = PinAntenna("A1"),
         )
         @test sol_code[:fringe].steps[1].θ == fr.θ
@@ -55,13 +56,13 @@
         uvset, _ = _build_fringe_uvset(nant = 4, omit_station = 4)
         model = default_fringe_terms()
 
-        sol = fit(FringeFit(; model), uvset; gauge = PinAntenna("A4"))
+        sol = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna("A4"))
         @test isempty(sol.info.flagged_ant)
         @test isempty(FP.fringe_station_flags(sol))
         @test UVP.apply_calibration(uvset, sol) isa UVP.UVSet
 
         # The flags do not depend on which station holds the gauge.
-        present = fit(FringeFit(; model), uvset; gauge = PinAntenna("A1"))
+        present = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna("A1"))
         @test present.info.flagged_ant == sol.info.flagged_ant
         @test present.info.flagged_scan == sol.info.flagged_scan
     end
@@ -69,17 +70,19 @@
     @testset "rounds > 1: fringe blocks invariant under later stages" begin
         uvset, _ = _build_fringe_uvset()
         solm = fit(
-            FringeFit(
+            BaselineFringeFit(
                 model = default_fringe_terms(),
                 estimator = MatchedFilter(rounds = 2),
-            ) |> TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            ) |> AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
+            gauge = PinAntenna(1),
         )
         sol = fit(
-            FringeFit(
+            BaselineFringeFit(
                 model = default_fringe_terms(),
                 estimator = MatchedFilter(rounds = 2),
             ), uvset,
+            gauge = PinAntenna(1),
         )
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
         rn = [p.range for p in fr.layout.plans]
@@ -100,7 +103,7 @@
             phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
         )
 
-        sol = fit(FringeFit(model = rel_terms), uvset)
+        sol = fit(BaselineFringeFit(model = rel_terms), uvset; gauge = PinAntenna(1))
         fr = sol[:fringe].steps[1]
         @test length(CAL.phase_components(fr.model)) == 5
         plan = fr.layout.plans[5]
@@ -109,14 +112,14 @@
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         uv0, _ = _build_fringe_uvset()
-        sol0 = fit(FringeFit(model = rel_terms), uv0)
+        sol0 = fit(BaselineFringeFit(model = rel_terms), uv0; gauge = PinAntenna(1))
         fr0 = sol0[:fringe].steps[1]
         plan0 = fr0.layout.plans[5]
         @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
-        sold = fit(FringeFit(), uvset)
+        sold = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
         @test length(sold[:fringe].steps[1].model.phase) == 4
     end
 
@@ -139,7 +142,7 @@
             phase = (; rel_phase = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Feed = CAL.SingleFeed(2))),
         )
         uvset, truth = _build_fringe_uvset(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
-        sol = fit(FringeFit(; model), uvset)
+        sol = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna(1))
         rel = CAL.parameters(sol[:fringe, :phase, :rel_phase])
         want = truth.phi[:, 2] .- truth.phi[:, 1]
         for a in eachindex(want), s in 1:nscans
@@ -155,10 +158,11 @@
         # the fringe θ matches the untransformed solve bit-for-bit.
         sol_ws = fit(
             StationWeightScale(ws) |>
-                FringeFit(),
+                BaselineFringeFit(),
             uvset,
+            gauge = PinAntenna(1),
         )
-        sol = fit(FringeFit(), uvset)
+        sol = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
         @test sol_ws[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
         @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
 
@@ -175,8 +179,9 @@
             end
         end
         sol_cf, out = fitcalibrate(
-            kill12 |> FringeFit(),
+            kill12 |> BaselineFringeFit(),
             uvset,
+            gauge = PinAntenna(1),
         )
         @test touched[] > 0
         @test sol_cf.transforms[1] isa CalFunction
@@ -199,8 +204,8 @@
     @testset "model validation + full-pipeline option coverage" begin
         uvset, _ = _build_fringe_uvset()
         # The model is the component tree alone (the gauge pin is run-wide, on
-        # CalibrationPipeline) — no per-effect fields or keywords on FringeFit.
-        @test fieldnames(typeof(FringeFit())) == (:model, :estimator)
+        # CalibrationPipeline) — no per-effect fields or keywords on BaselineFringeFit.
+        @test fieldnames(typeof(BaselineFringeFit())) == (:model, :estimator)
 
         # The options the legacy bridge used to reject (custom Stationization,
         # the inter-feed rate opt-in, arbitrary CalFunction transforms) run in
@@ -208,22 +213,23 @@
         sol_full = fit(
             CalibrationPipeline(
                 CalFunction((stack, win) -> nothing),
-                FringeFit(
+                BaselineFringeFit(
                     model = merge(
                         default_fringe_terms();
                         phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
                     ),
                     estimator = MatchedFilter(closure = FP.Stationization(pfa_max = 1.0e-2)),
                 ),
-                Bandpass(), TemporalSmoother();
+                Bandpass(), AdhocPhase();
                 exec = ExecutionConfig(),
+                gauge = PinAntenna(1),
             ),
             uvset,
         )
         @test keys(sol_full) == [:fringe, :bandpass, :adhoc]
-        # Bandpass without TemporalSmoother still solves a :bandpass
+        # Bandpass without AdhocPhase still solves a :bandpass
         # stage (F |> B — no final pass).
-        sol_fb = fit(CalibrationPipeline(FringeFit(), Bandpass()), uvset)
+        sol_fb = fit(CalibrationPipeline(BaselineFringeFit(), Bandpass(); gauge = PinAntenna(1)), uvset)
         @test any(r -> r.name === :bandpass, sol_fb.steps)
     end
 
@@ -231,7 +237,7 @@
         uvset, _ = _build_fringe_uvset()   # 2 band groups; narrow fractional bandwidth
         geom = CAL.build_geometry(uvset)
         fringe_phase(model) =
-            Gustavo.model_components(FringeFit(; model), (; geom, antennas = nothing)).phase
+            Gustavo.model_components(BaselineFringeFit(; model), (; geom, antennas = nothing)).phase
         sig(tc) = (
             typeof(tc.term), typeof(tc.Ti),
             typeof(tc.Frequency), typeof(tc.Feed),
@@ -399,14 +405,16 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
     @testset "an out-of-package estimator drives the whole pipeline" begin
         probe = _ProbeEstimator(MatchedFilter())
         sol = fit(
-            FringeFit(; model, estimator = probe) |> Bandpass() |>
-                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            BaselineFringeFit(; model, estimator = probe) |> Bandpass() |>
+                AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
+            gauge = PinAntenna(1),
         )
         ref = fit(
-            FringeFit(; model) |> Bandpass() |>
-                TemporalSmoother(FP.SavitzkyGolaySmoother(window = 7, order = 2, snr_floor = 0.0)),
+            BaselineFringeFit(; model) |> Bandpass() |>
+                AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
+            gauge = PinAntenna(1),
         )
         # Bit-identical, not approximate: the seam must not perturb the solve.
         @test keys(sol) == keys(ref)
@@ -420,16 +428,17 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         # without publishing it itself.
         probe = _ProbeEstimator(MatchedFilter())
         sol = fit(
-            FringeFit(; estimator = probe) |>
+            BaselineFringeFit(; estimator = probe) |>
                 Bandpass(),
             uvset,
+            gauge = PinAntenna(1),
         )
         @test any(r -> r.name === :bandpass, sol.steps)
     end
 
     @testset "an estimator publishing no diagnostics still yields a solution" begin
         null = _NullEstimator()
-        sol = fit(FringeFit(; model, estimator = null), uvset)
+        sol = fit(BaselineFringeFit(; model, estimator = null), uvset; gauge = PinAntenna(1))
         fringe = sol[:fringe].steps[1]
         @test null.scans[] == sol.info.nscan
         @test all(iszero, fringe.θ)     # it solved nothing, by construction
@@ -438,15 +447,17 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         @test !haskey(fringe.info, :scan_snr)
         # `search` is MatchedFilter provenance, so this solution carries none.
         @test !haskey(sol.info, :search)
-        @test haskey(fit(FringeFit(; model), uvset).info, :search)
+        @test haskey(fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna(1)).info, :search)
     end
 
     @testset "an estimator implementing neither hook errors by name" begin
         @test_throws "does not implement the fringe estimator interface" fit(
-            FringeFit(; model, estimator = _SilentEstimator()), uvset,
+            BaselineFringeFit(; model, estimator = _SilentEstimator()), uvset,
+            gauge = PinAntenna(1),
         )
         @test_throws "estimate_scan!" fit(
-            FringeFit(; model, estimator = _SilentEstimator()), uvset,
+            BaselineFringeFit(; model, estimator = _SilentEstimator()), uvset,
+            gauge = PinAntenna(1),
         )
     end
 
@@ -455,10 +466,12 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         # estimator that never thought about capability fails at model-compile
         # time instead of returning a solution full of unwritten θ.
         @test_throws "cannot fit the component" fit(
-            FringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+            BaselineFringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+            gauge = PinAntenna(1),
         )
         @test_throws "_UnclaimingEstimator" fit(
-            FringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+            BaselineFringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
+            gauge = PinAntenna(1),
         )
     end
 
@@ -468,14 +481,15 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
         # while the solution looked fitted.
         poly = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())
         @test_throws "MatchedFilter cannot fit the component" fit(
-            FringeFit(model = merge(default_fringe_terms(); phase = (; poly))), uvset,
+            BaselineFringeFit(model = merge(default_fringe_terms(); phase = (; poly))), uvset,
+            gauge = PinAntenna(1),
         )
     end
 
     @testset "a model missing a term the estimator requires is rejected by name" begin
         # The kind is missing outright: nothing to write the rate search into.
         norate = GainModel(; phase = Base.structdiff(default_fringe_terms().phase, (; rate = nothing)))
-        @test_throws "requires a rate component" fit(FringeFit(model = norate), uvset)
+        @test_throws "requires a rate component" fit(BaselineFringeFit(model = norate), uvset; gauge = PinAntenna(1))
 
         # The kind is PRESENT and the router signature is not: the inter-feed delay is
         # still a `:delay`, so only a signature-level check catches a wideband
@@ -485,7 +499,8 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
                 CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
         end
         @test_throws "requires a per-scan feed-common wideband delay" fit(
-            FringeFit(model = GainModel(; phase = globaldelay)), uvset,
+            BaselineFringeFit(model = GainModel(; phase = globaldelay)), uvset,
+            gauge = PinAntenna(1),
         )
     end
 
@@ -500,10 +515,12 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
             default_fringe_terms().phase,
         )
         @test_throws "MatchedFilter cannot fit the component" fit(
-            FringeFit(model = GainModel(; phase = subscan)), uvset,
+            BaselineFringeFit(model = GainModel(; phase = subscan)), uvset,
+            gauge = PinAntenna(1),
         )
         @test_throws "the data's own sampling" fit(
-            FringeFit(model = GainModel(; phase = subscan)), uvset,
+            BaselineFringeFit(model = GainModel(; phase = subscan)), uvset,
+            gauge = PinAntenna(1),
         )
 
         geom = CAL.build_geometry(uvset)
@@ -536,8 +553,8 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
     @testset "the estimator is carried as a type parameter, not an abstract field" begin
         # Removing the old `::MatchedFilter` assertion would otherwise put a
         # dynamic dispatch in the per-scan path.
-        @test isconcretetype(fieldtype(typeof(FringeFit()), :estimator))
-        @test fieldtype(typeof(FringeFit(estimator = _SilentEstimator())), :estimator) ===
+        @test isconcretetype(fieldtype(typeof(BaselineFringeFit()), :estimator))
+        @test fieldtype(typeof(BaselineFringeFit(estimator = _SilentEstimator())), :estimator) ===
             _SilentEstimator
     end
 end
@@ -584,9 +601,9 @@ end
         # :refine).dispersion_applied` (see the dispersion testset in
         # test_pipeline.jl). What this asserts
         # is the model structure DispersionSBDFit's presence/field builds.
-        ff = FringeFit(estimator = mf)
-        on = fit(ff |> DispersionSBDFit(), uvset)
-        off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset)
+        ff = BaselineFringeFit(estimator = mf)
+        on = fit(ff |> DispersionSBDFit(), uvset; gauge = PinAntenna(1))
+        off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset; gauge = PinAntenna(1))
         on_ref, off_ref = on[:refine].steps[1], off[:refine].steps[1]
         @test CAL._dispersion_plan(on_ref.model, on_ref.layout) !== nothing
         @test CAL._dispersion_plan(off_ref.model, off_ref.layout) === nothing
@@ -630,8 +647,8 @@ end
         # because over a finite band the two are near-degenerate — confirmed by
         # both plans existing (and being solved, not left at zero) once the step
         # runs.
-        ff = FringeFit(estimator = mf)
-        sol = fit(ff |> DispersionSBDFit(), uvset)
+        ff = BaselineFringeFit(estimator = mf)
+        sol = fit(ff |> DispersionSBDFit(), uvset; gauge = PinAntenna(1))
         refine = sol[:refine].steps[1]
         @test CAL._dispersion_plan(refine.model, refine.layout) !== nothing
         @test FP._perscan_delay_plan(refine.model, refine.layout) !== nothing

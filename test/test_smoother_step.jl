@@ -1,7 +1,7 @@
-# ── TemporalSmoother step + output sink ───────────────────────────────────────
+# ── AdhocPhase step + output sink ─────────────────────────────────────────────
 #
-# The full three-stage pipeline (FringeFit |> Bandpass |>
-# TemporalSmoother) on the composable engine. The M5 parity gates against the
+# The full three-stage pipeline (BaselineFringeFit |> Bandpass |>
+# AdhocPhase) on the composable engine. The M5 parity gates against the
 # frozen monolith (fringe blocks bit-identical, bandpass/adhoc to rtol 1e-12,
 # polish-split full-θ bit-identical) ran BEFORE its deletion; what this file
 # keeps are the engine's standing guarantees:
@@ -56,8 +56,8 @@ function _worst_parallel_coherence(corr)
     return worst
 end
 
-@testset "TemporalSmoother step + output sink (new engine)" begin
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, snr_floor = 0.0)
+@testset "AdhocPhase step + output sink (new engine)" begin
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
     nant = 4
     nglob = 16
     # SMOOTH injected per-(station, feed) bandpass shapes (as in test_pipeline's
@@ -82,8 +82,9 @@ end
     )
     fm = default_fringe_terms()
     pipe = CalibrationPipeline(
-        FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
+        BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc);
         exec = ExecutionConfig(),
+        gauge = PinAntenna(1),
     )
     sol_n = fit(pipe, uvset)
 
@@ -100,8 +101,9 @@ end
         # θ bit-deterministic across group concurrency (per-block partials fold
         # in a fixed order regardless of ntasks/inner).
         pipe4 = CalibrationPipeline(
-            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc);
+            BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc);
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         @test parent(gains(fit(pipe4, uvset))) == parent(gains(sol_n))
 
@@ -139,10 +141,11 @@ end
         # term to be emitted at all.
         ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
         pd = CalibrationPipeline(
-            FringeFit(model = fm), ds,
+            BaselineFringeFit(model = fm), ds,
             Bandpass(),
-            TemporalSmoother(adhoc);
+            AdhocPhase(adhoc);
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         sol_nd = fit(pd, uvd)
         @test stage_info(sol_nd, :refine).dispersion_applied
@@ -165,19 +168,21 @@ end
         # Bit-deterministic across group concurrency through the whole
         # refine + bandpass + adhoc chain.
         pd4 = CalibrationPipeline(
-            FringeFit(model = fm), ds,
+            BaselineFringeFit(model = fm), ds,
             Bandpass(),
-            TemporalSmoother(adhoc);
+            AdhocPhase(adhoc);
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         @test parent(gains(fit(pd4, uvd))) == parent(gains(sol_nd))
     end
 
-    @testset "FringeFit |> TemporalSmoother (no bandpass)" begin
+    @testset "BaselineFringeFit |> AdhocPhase (no bandpass)" begin
         sol_fs = fit(
             CalibrationPipeline(
-                FringeFit(model = fm), TemporalSmoother(adhoc);
+                BaselineFringeFit(model = fm), AdhocPhase(adhoc);
                 exec = ExecutionConfig(),
+                gauge = PinAntenna(1),
             ),
             uvset,
         )
@@ -195,42 +200,42 @@ end
     end
 
     @testset "scan-local fusion ≡ a pass per step" begin
-        # `DispersionSBDFit |> TemporalSmoother` is the one adjacent pair of
+        # `DispersionSBDFit |> AdhocPhase` is the one adjacent pair of
         # scan-local steps among the built-ins, so the runner solves both in ONE
         # read of the data. The oracle is the composition a caller can write by
         # hand — separate `fit` calls of one step each, which never fuse.
         ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
         pre = FP.ApplySolution(sol_n[:fringe])
 
-        sol_fused = fit(pre |> ds |> TemporalSmoother(adhoc), uvset)
+        sol_fused = fit(pre |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test keys(sol_fused) == [:refine, :adhoc]
         # Neither half of the fused run is vacuous.
         @test sol_fused[:refine].steps[1].layout.nθ > 0
         @test any(!=(0), sol_fused[:refine].steps[1].θ)
         @test any(!=(0), sol_fused[:adhoc].steps[1].θ)
 
-        sol_a = fit(pre |> ds, uvset)
+        sol_a = fit(pre |> ds, uvset; gauge = PinAntenna(1))
         refine_tf = FP.ApplySolution(sol_a[:refine])
-        sol_b = fit(pre |> refine_tf |> TemporalSmoother(adhoc), uvset)
+        sol_b = fit(pre |> refine_tf |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test sol_fused[:refine].steps[1].θ == sol_a[:refine].steps[1].θ
         @test sol_fused[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
 
         # The same holds with the output tail fused into that one pass.
-        _, out_fused = fitcalibrate(pre |> ds |> TemporalSmoother(adhoc), uvset)
-        _, out_ref = fitcalibrate(pre |> refine_tf |> TemporalSmoother(adhoc), uvset)
+        _, out_fused = fitcalibrate(pre |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        _, out_ref = fitcalibrate(pre |> refine_tf |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test _sets_equal(out_fused, out_ref)
 
-        # A default FringeFit (one round, all-per-scan terms) solves each
+        # A default BaselineFringeFit (one round, all-per-scan terms) solves each
         # scan's station systems inside its own `process_scan!`, so the whole
         # default chain is one run of THREE scan-local steps — one read of the
         # data — and still ≡ the same steps fit separately.
-        sol_3 = fit(FringeFit() |> ds |> TemporalSmoother(adhoc), uvset)
+        sol_3 = fit(BaselineFringeFit() |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test keys(sol_3) == [:fringe, :refine, :adhoc]
-        sol_f1 = fit(FringeFit(), uvset)
+        sol_f1 = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
         pre_f = FP.ApplySolution(sol_f1[:fringe])
-        sol_r1 = fit(pre_f |> ds, uvset)
+        sol_r1 = fit(pre_f |> ds, uvset; gauge = PinAntenna(1))
         pre_r = FP.ApplySolution(sol_r1[:refine])
-        sol_a1 = fit(pre_f |> pre_r |> TemporalSmoother(adhoc), uvset)
+        sol_a1 = fit(pre_f |> pre_r |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test sol_3[:fringe].steps[1].θ == sol_f1[:fringe].steps[1].θ
         @test sol_3[:refine].steps[1].θ == sol_r1[:refine].steps[1].θ
         @test sol_3[:adhoc].steps[1].θ == sol_a1[:adhoc].steps[1].θ
@@ -247,7 +252,7 @@ end
             k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
                 for (k, l) in pairs(UVP.branches(uvset))
         )
-        fitcalibrate(ds |> TemporalSmoother(adhoc), uvset)
+        fitcalibrate(ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test all(
             isequal(snap[k][1], parent(l[:vis])) && isequal(snap[k][2], parent(l[:weights]))
                 for (k, l) in pairs(UVP.branches(uvset))
@@ -275,8 +280,9 @@ end
         ap = AprioriAmplitude(spw_cals; min_elevation_deg = -Inf)
 
         pipe_ap = CalibrationPipeline(
-            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc), ap;
+            BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc), ap;
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         sol_ap, out_ap = fitcalibrate(pipe_ap, uvset)
         # Recorded on the solution; the solve's θ is untouched by it.
@@ -336,8 +342,9 @@ end
         # `apply_calibration` would raise called directly, with no
         # pipeline-level ordering check in front of it.
         pipe_ap_first = CalibrationPipeline(
-            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc), ap;
+            BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc), ap;
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         @test_throws "no a-priori calibration for spw 2" fitcalibrate(pipe_ap_first, uvset)
 
@@ -347,9 +354,10 @@ end
         # the output chain composes AprioriAmplitude/ReduceStep in their
         # DECLARED relative order, not a hardcoded "apriori always first".
         pipe_reduce_first = CalibrationPipeline(
-            FringeFit(model = fm), Bandpass(), TemporalSmoother(adhoc),
+            BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc),
             CombineSpw(), ap;
             exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         _, out = fitcalibrate(pipe_reduce_first, uvset)
         @test all(UVP.metadata(leaf).ddi == 0 for (_, leaf) in pairs(UVP.branches(out)))

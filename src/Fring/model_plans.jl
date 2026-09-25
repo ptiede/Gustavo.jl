@@ -21,7 +21,7 @@
 
 # The feed-common wideband delay: not the per-band-group SBD delay
 # (`FreqGroups`), not a feed-specific inter-feed delay (`SingleFeed`). Shared by
-# `FringeFit`'s own wideband delay (`mbd`) and `DispersionSBDFit`'s private
+# `BaselineFringeFit`'s own wideband delay (`mbd`) and `DispersionSBDFit`'s private
 # per-scan delay-refinement column — but each lives in its own step's private
 # model, so `findfirst` over either step's own component list finds the right
 # one without ambiguity; no positional trick is needed to tell them apart.
@@ -35,7 +35,7 @@ _is_sbd_delay(tc) = tc.term isa Delay && tc.Frequency isa FreqGroups
 _is_sbd_constant(tc) =
     tc.term isa ConstantTerm && tc.Frequency isa FreqGroups
 
-# The step's own feed-common wideband delay — `FringeFit`'s `mbd` when called
+# The step's own feed-common wideband delay — `BaselineFringeFit`'s `mbd` when called
 # on the fringe step's own `(model, layout)`, or `DispersionSBDFit`'s private
 # delay-refinement column when called on the refine step's own — either way
 # the only `_is_perscan_delay`-signatured component in that step's private

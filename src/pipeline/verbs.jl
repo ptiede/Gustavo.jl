@@ -12,7 +12,7 @@
 # (see `fusable_grouping`), and — for the
 # output verbs — a per-scan-group output tail (`reduce_scan_output`)
 # that applies the solution and the reduce chain while the group is resident.
-# When the final solve step is a `TemporalSmoother` the tail FUSES into its
+# When the final solve step is an `AdhocPhase` the tail FUSES into its
 # pass (the group is corrected and reduced right after its per-AP solve, the
 # production single-read path); otherwise a dedicated output pass streams the
 # same tail. `calibrate(sol, uvset)` is that output pass standalone, so fused
@@ -34,7 +34,7 @@ end
 
 """
     fit(pipe::CalibrationPipeline, uvset::UVSet) -> CalibrationSolution
-    fit(step_or_chain, uvset; exec = ExecutionConfig(), gauge = PinAntenna(1)) -> CalibrationSolution
+    fit(step_or_chain, uvset; exec = ExecutionConfig(), gauge) -> CalibrationSolution
 
 Solve the pipeline's calibration on `uvset` without producing corrected
 data — the estimation half of [`fitcalibrate`](@ref). The returned solution
@@ -52,7 +52,7 @@ output tail.
 
 Any composition of `SolveStep`s is legal, including one standalone step
 (e.g. a `Bandpass` fit over data an earlier run corrected) — the pipeline
-needs no [`FringeFit`](@ref). Solving `A |> B` in one call is equivalent to
+needs no [`BaselineFringeFit`](@ref). Solving `A |> B` in one call is equivalent to
 `sa = fit(A, uvset)` followed by
 `fit(Fring.ApplySolution(sa[provides(A)]) |> B, uvset)`: the same
 mechanism, run within one call instead of across two.
@@ -68,12 +68,12 @@ end
 fit(
     x::Union{CalibrationStep, Fring.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    gauge::AbstractGauge = PinAntenna(1),
+    gauge::Union{Nothing, AbstractGauge} = nothing,
 ) = fit(CalibrationPipeline(x; exec, gauge), uvset)
 fit(
     chain::StepChain, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    gauge::AbstractGauge = PinAntenna(1),
+    gauge::Union{Nothing, AbstractGauge} = nothing,
 ) = fit(CalibrationPipeline(chain; exec, gauge), uvset)
 
 """
@@ -149,7 +149,7 @@ Solve and produce the corrected, reduced output — the production path. The
 output chain is: the solution's gains/flags, then any [`AprioriAmplitude`](@ref)
 and `ReduceStep`s the pipeline declares, run in THEIR declared relative order,
 then the `reduce` kwarg's (always last) — run per scan group while it is
-resident. When the pipeline ends in a [`TemporalSmoother`](@ref) the whole
+resident. When the pipeline ends in an [`AdhocPhase`](@ref) the whole
 tail fuses into that final streaming pass (one read solves, corrects, and
 reduces each group).
 """
@@ -162,13 +162,13 @@ end
 fitcalibrate(
     x::Union{CalibrationStep, Fring.AbstractDataTransform}, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    gauge::AbstractGauge = PinAntenna(1),
+    gauge::Union{Nothing, AbstractGauge} = nothing,
     kwargs...,
 ) = fitcalibrate(CalibrationPipeline(x; exec, gauge), uvset; kwargs...)
 fitcalibrate(
     chain::StepChain, uvset::UVSet;
     exec::ExecutionConfig = ExecutionConfig(),
-    gauge::AbstractGauge = PinAntenna(1),
+    gauge::Union{Nothing, AbstractGauge} = nothing,
     kwargs...,
 ) = fitcalibrate(CalibrationPipeline(chain; exec, gauge), uvset; kwargs...)
 
@@ -291,6 +291,14 @@ end
 
 # ── The new-engine path: the compiled model + visitor pass runner ────────────
 
+_resolve_run_gauge(g::AbstractGauge, ant_names) = resolve_gauge(g, ant_names)
+_resolve_run_gauge(::Nothing, ant_names) = throw(
+    ArgumentError(
+        "no gauge given; pass `gauge = PinAntenna(station)` or `gauge = ZeroSumPhase()`. " *
+            "Stations: $(join(ant_names, ", ")).",
+    ),
+)
+
 # Solve a pipeline on the new engine: each solve step compiles and solves its
 # own private (model, layout, θ) — never a merged one — under the visitor
 # contract (start_pass!/process_scan!/finish_pass!). The steps are partitioned
@@ -310,13 +318,13 @@ end
 # per-scan SNR) reaches a later step through the plain, ordered list of
 # finished `StepSolution`s (`fit_selection`), not a shared scratch dict. With a
 # `sink`, the output tail runs per group — fused into the final pass when that
-# pass is a TemporalSmoother's (it never repeats and its θ writes precede the
+# pass is an AdhocPhase's (it never repeats and its θ writes precede the
 # tail), else as a dedicated output pass after the solves. Once every step has
 # solved, the runner hands the finished `StepSolution`s straight to
 # `CalibrationSolution` — there is no merged model/layout/θ to assemble.
 # Returns `(sol, output)` (`output === nothing` without a sink).
 function _run_pipeline(
-        br, exec::ExecutionConfig, gauge_spec::AbstractGauge,
+        br, exec::ExecutionConfig, gauge_spec::Union{Nothing, AbstractGauge},
         uvset::UVSet; sink = nothing, pipeline = nothing,
     )
     solve_steps = br.solve_steps
@@ -326,11 +334,11 @@ function _run_pipeline(
     # the same station differently. Put them all on the union table first; a set
     # whose leaves already share one is returned untouched and stays lazy.
     uvset = UVData.unify_antennas(uvset)
+    gauge = _resolve_run_gauge(gauge_spec, _antenna_names(uvset))
     geom = build_geometry(uvset)
     antennas = UVData.union_antennas(uvset)
     nant = length(antennas)
     spec = (; geom, antennas)
-    gauge = resolve_gauge(gauge_spec, _antenna_names(uvset))
     # A fresh `ScanStream` over the given transform list — cheap (geometry-only,
     # no data read). Used both for the initial stream and to grow the solve-time
     # transform chain between steps (below): `ScanStream`/`SolveContext` fix the
@@ -342,10 +350,10 @@ function _run_pipeline(
     # SolveContext below (only `model`/`layout`/`ev`/`θ` and `stream` change
     # per step — the rest is run-wide).
     scratch = Dict{Symbol, Any}()
-    # The final pass fuses the output tail only when it is a TemporalSmoother's:
+    # The final pass fuses the output tail only when it is an AdhocPhase's:
     # that pass never repeats and finishes each group's θ before the tail runs
     # (the monolith's pass-2 structure). Anything else gets a dedicated pass.
-    fused = sink !== nothing && last(solve_steps) isa TemporalSmoother
+    fused = sink !== nothing && last(solve_steps) isa AdhocPhase
     tfs_solve = copy(br.tfs)
     step_solutions = StepSolution[]
     ctx = nothing
@@ -694,7 +702,7 @@ _step_precal(st, c::SolveContext, geom::DataGeometry) = CalibrationSolution(
 # step) or by the step itself (e.g. the fringe estimator's `scan_snr`,
 # detection table). This function no longer needs to know any step's name to
 # expose its diagnostics; a third-party `SolveStep` needs no changes here.
-# `br.ff` is `nothing` for a FringeFit-less pipeline, so the estimator info is
+# `br.ff` is `nothing` for a BaselineFringeFit-less pipeline, so the estimator info is
 # omitted rather than assumed present.
 function _new_engine_info(ctx::SolveContext, br, step_solutions::Vector{StepSolution})
     return (;
@@ -738,12 +746,12 @@ function _check_unique_provides(solve_steps::Vector{SolveStep})
     return nothing
 end
 
-# Parse a pipeline into (transforms, the FringeFit if present, every SolveStep
+# Parse a pipeline into (transforms, the BaselineFringeFit if present, every SolveStep
 # in declared order, and the output-tail steps — AprioriAmplitude and
 # ReduceStep — in their own declared relative order) — no per-step-type branch
-# to maintain as new `SolveStep`s appear. A pipeline needs no FringeFit step —
+# to maintain as new `SolveStep`s appear. A pipeline needs no BaselineFringeFit step —
 # `ff` is `nothing` when none is declared; a step that needs an earlier
-# FringeFit's correction and does not have one fails from its own solve
+# BaselineFringeFit's correction and does not have one fails from its own solve
 # kernel, not from pipeline construction.
 function _parse_pipeline(pipe::CalibrationPipeline)
     tfs = Fring.AbstractDataTransform[]
@@ -760,15 +768,15 @@ function _parse_pipeline(pipe::CalibrationPipeline)
             throw(
                 ArgumentError(
                     "fit/fitcalibrate: step $(typeof(s)) is not runnable — supported: data " *
-                        "transforms, SolveSteps (FringeFit, DispersionSBDFit, " *
-                        "Bandpass, TemporalSmoother, or a third-party SolveStep), " *
+                        "transforms, SolveSteps (BaselineFringeFit, DispersionSBDFit, " *
+                        "Bandpass, AdhocPhase, or a third-party SolveStep), " *
                         "AprioriAmplitude, and ReduceSteps."
                 )
             )
         end
     end
     _check_unique_provides(solve_steps)
-    ffi = findfirst(s -> s isa FringeFit, solve_steps)
+    ffi = findfirst(s -> s isa BaselineFringeFit, solve_steps)
     apriori = filter(s -> s isa AprioriAmplitude, post_steps)
     return (; tfs, ff = ffi === nothing ? nothing : solve_steps[ffi], solve_steps, apriori, post_steps)
 end

@@ -47,8 +47,8 @@ export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, resolve_gauge
 export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
 export run_step, prepare_reducer, calibrate
-export FringeFit, DispersionModel, SingleBandDelay, default_fringe_terms,
-    MatchedFilter, DispersionSBDFit, Bandpass, default_bandpass_terms, TemporalSmoother,
+export BaselineFringeFit, DispersionModel, SingleBandDelay, default_fringe_terms,
+    MatchedFilter, DispersionSBDFit, Bandpass, default_bandpass_terms, AdhocPhase,
     default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 # The gain-model vocabulary: everything a step's `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare

@@ -855,6 +855,10 @@ end
     # InstrumentScans boundaries are epochs on the axis, not widths.
     t0 = DateTime(2021, 3, 4, 1, 0, 0)
     @test CAL.InstrumentScans([t0]) == CAL.InstrumentScans([datetime2unix(t0)])
+    @test CAL.InstrumentScans([3.0, 1.0]).boundaries_s == [1.0, 3.0]
+    @test CAL.InstrumentScans([3, 1]).boundaries_s == [1.0, 3.0]
+    @test CAL.InstrumentScans([t0 + Hour(1), t0]).boundaries_s ==
+        datetime2unix.([t0, t0 + Hour(1)])
 end
 
 @testset "argument validation is typed" begin

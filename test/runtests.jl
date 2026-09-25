@@ -74,7 +74,7 @@ include("test_stream.jl")
 include("test_transforms.jl")
 include("test_axis_order.jl")
 
-# The FringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
+# The BaselineFringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
 # cross-feed rate opt-in, fit-on-subset masking, transforms on the new path.
 include("test_fringe_step.jl")
 
@@ -88,7 +88,7 @@ include("test_bandpass_step.jl")
 # default, and the shape specs acting as priors inside its gain update.
 include("test_joint_bandpass.jl")
 
-# The TemporalSmoother step + output sink: multi-scan full-pipeline solves
+# The AdhocPhase step + output sink: multi-scan full-pipeline solves
 # (incl. the refine polish split), standalone calibrate ≡ fused output,
 # AprioriAmplitude as a recorded output-chain step.
 include("test_smoother_step.jl")

@@ -1,4 +1,4 @@
-# ── FringeFit stage: the default fringe model + the matched-filter estimator ──
+# ── BaselineFringeFit stage: the default fringe model + the matched-filter estimator ──
 #
 # The composable pipeline's fringe stage in three parts:
 #
@@ -53,7 +53,7 @@ end
 """
     default_fringe_terms(; rel_time = PerScan()) -> GainModel
 
-The default model of a [`FringeFit`](@ref Gustavo.FringeFit) step — the
+The default model of a [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit) step — the
 standard VLBI fringe model, phase components only (each key names its
 component; the order is the parameter order):
 
@@ -115,7 +115,7 @@ into one solve at the end of the pass.
 
 `rounds` re-runs the search on the residual of the current solution. A
 re-search needs the whole pass finished first, so `rounds > 1` also flips
-the enclosing `FringeFit` step's `fusable_grouping` to `:global` and the
+the enclosing `BaselineFringeFit` step's `fusable_grouping` to `:global` and the
 step takes its own streaming pass.
 
 The models it fits: a `Delay`, `Rate` or `ConstantTerm` spanning the whole band

@@ -65,11 +65,11 @@ end
 
     zs = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        gauge = ZeroSumPhase(), smoother = FRa.NoSmoothing(detrend = false),
+        gauge = ZeroSumPhase(), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)),
     )
     pin = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = false),
+        gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)),
     )
 
     # The gauge is a per-AP common mode, which cancels on every baseline: both
@@ -114,7 +114,7 @@ end
     times = collect(0:(nap - 1)) .* 1.0
 
     rbar, wbar = inject_screen(bl, pols, screen)
-    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = false))
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)))
 
     @test adhoc_recon(rbar, sol, bl, pols) < 1.0e-9
     # Cross-hand rows join the two feed blocks into ONE connected component, whose
@@ -135,7 +135,7 @@ end
 
     # With the demean on, the gauge is fixed and each track matches truth exactly,
     # to within the per-scan mean the demean removes by design.
-    sd = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = true))
+    sd = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = true)))
     for a in 1:nant, f in 1:2
         t = truth(a, f)
         @test maximum(abs.(sd.phase[a, f, :] .- (t .- mean(t)))) < 1.0e-8
@@ -179,19 +179,17 @@ end
     # same per-(baseline, product) constant.
     off = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        smoother = FRa.NoSmoothing(
-            detrend = false, snr_floor = 0.0, source_iters = 1, complex_iters = 0,
-        ), opts...,
+        smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false, snr_floor = 0.0, source_iters = 1, complex_iters = 0)), opts...,
     )
     on = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        smoother = FRa.NoSmoothing(detrend = false, snr_floor = 0.0), opts...,
+        smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false, snr_floor = 0.0)), opts...,
     )
     # The refinement alone (seed alternation still disabled) also absorbs the
     # source phase: its complex source means play the same role.
     refined = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        smoother = FRa.NoSmoothing(detrend = false, snr_floor = 0.0, source_iters = 1), opts...,
+        smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false, snr_floor = 0.0, source_iters = 1)), opts...,
     )
     @test wobble(off) > 0.3                       # unmodelled source phase corrupts the tracks
     @test wobble(on) < 1.0e-3                     # modelling it removes the corruption
@@ -224,7 +222,7 @@ end
     rbar[1, 1, 2:end] .= 0.0 + 0.0im
     sol = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        gauge = PinAntenna(1), smoother = FRa.NoSmoothing(detrend = false, snr_floor = 0.0),
+        gauge = PinAntenna(1), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false, snr_floor = 0.0)),
         tying = CALa.SharedFeeds(),
     )
     @test isnan(sol.source[1, 1])              # unidentifiable, so never fitted
@@ -248,7 +246,7 @@ end
         screen[a, f, ap] = c0[a, f] + c1[a, f] * tc[ap] + 0.05 * sin(2π * ap / nap)
     end
     rbar, wbar = inject_screen(bl, pols, screen)
-    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = true))
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = true)))
 
     # Detrend removes the per-station MEAN (breaks the constant-phase gauge vs the
     # Stage-B ConstantTerm) but KEEPS the slope — so adhoc can flatten a residual
@@ -280,7 +278,7 @@ end
         screen[a, f, ap] = 0.3 * randn(rng) + 0.04 * sin(2π * ap / nap + a)
     end
     rbar, wbar = inject_screen(bl, pols, screen; amp = 5.0, noise = 0.4, rng = rng)
-    sm = FRa.NoSmoothing(detrend = false, snr_floor = 1.0)
+    sm = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false, snr_floor = 1.0))
     s1 = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = sm)
     k = 1.0e-6
     s2 = FRa.solve_adhoc_phasing(k .* rbar, k .* wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = sm)
@@ -323,10 +321,10 @@ end
         sqrt(mean(abs2, e))
     end
 
-    raw = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = false))
-    sm = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.SavitzkyGolaySmoother(window = 11, order = 2, detrend = false))
-    pen = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.PenalizedSmoother(smoothness = 20.0, detrend = false))
-    gp = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(coherence_time = 15.0, detrend = false))
+    raw = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)))
+    sm = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.SavitzkyGolaySmoother(window = 11, order = 2, options = FRa.AdhocOptions(; detrend = false)))
+    pen = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.PenalizedSmoother(smoothness = 20.0, options = FRa.AdhocOptions(; detrend = false)))
+    gp = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(coherence_time = 15.0, options = FRa.AdhocOptions(; detrend = false)))
 
     @test rms_to_truth(sm) < rms_to_truth(raw)
     @test rms_to_truth(pen) < rms_to_truth(raw)
@@ -354,7 +352,7 @@ end
         screen[a, f, ap] = c0[a, f] + c1[a, f] * tc[ap]
     end
     rbar, wbar = inject_screen(bl, pols, screen; amp = 20.0)
-    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(coherence_time = 30.0, detrend = true))
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; detrend = true)))
 
     for a in 1:nant, f in 1:2
         a == ref && continue
@@ -377,7 +375,7 @@ end
         screen[a, f, ap] = 0.3 * sin(2π * ap / nap + a) + 0.2 * randn(rng)
     end
     rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0, noise = 0.5, rng = rng)
-    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(detrend = false))
+    sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(options = FRa.AdhocOptions(; detrend = false)))
     # The gauge pins the reference's feed-1 node; its feed 2 holds the reference's
     # own inter-feed phase, measured against that pin.
     @test all(abs.(sol.phase[ref, 1, :]) .< 1.0e-8)
@@ -427,7 +425,7 @@ end
     end
     sol = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref),
-        smoother = FRa.JointOUSmoother(coherence_time = 15.0, detrend = false), tying = CALa.SharedFeeds(),
+        smoother = FRa.JointOUSmoother(coherence_time = 15.0, options = FRa.AdhocOptions(; detrend = false)), tying = CALa.SharedFeeds(),
     )
     @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)     # ref pinned
     @test all(sol.phase[:, 1, :] .=== sol.phase[:, 2, :])                 # both feeds share the node
@@ -465,9 +463,9 @@ end
         sqrt(mean(abs2, e))
     end
 
-    none = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = false), tying = CALa.SharedFeeds())
-    gp = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(coherence_time = 20.0, detrend = false), tying = CALa.SharedFeeds())
-    gpj = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.JointOUSmoother(coherence_time = 20.0, detrend = false), tying = CALa.SharedFeeds())
+    none = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)), tying = CALa.SharedFeeds())
+    gp = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.OUSmoother(coherence_time = 20.0, options = FRa.AdhocOptions(; detrend = false)), tying = CALa.SharedFeeds())
+    gpj = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.JointOUSmoother(coherence_time = 20.0, options = FRa.AdhocOptions(; detrend = false)), tying = CALa.SharedFeeds())
 
     @test rms_to_truth(gpj) < rms_to_truth(none)          # joint solve denoises
     @test rms_to_truth(gpj) < 1.5 * rms_to_truth(gp)      # competitive with per-track
@@ -504,7 +502,7 @@ end
     cnt = zeros(nant, 2, nap)
     for _ in 1:ntrial
         rbar, wbar = inject_screen(bl, pols, screen; amp = 2.0, noise = 1.0, rng = rng)
-        sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = false, snr_floor = 0.0))
+        sol = FRa.solve_adhoc_phasing(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false, snr_floor = 0.0)))
         for a in 1:nant, f in 1:2, ap in 1:nap
             isfinite(sol.phase[a, f, ap]) || continue
             acc[a, f, ap] += rem2pi(sol.phase[a, f, ap], RoundNearest)
@@ -551,7 +549,7 @@ end
 
     sol = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant, times;
-        gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(detrend = false),
+        gauge = PinAntenna(ref), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)),
     )
 
     # The reference is unsolved in the dropout APs but solved elsewhere.
@@ -582,7 +580,7 @@ end
     end
     sol2 = FRa.solve_adhoc_phasing(
         rbar2, wbar2, bl, pols, nant6, times;
-        gauge = PinAntenna(nant6), smoother = FRa.NoSmoothing(detrend = false),
+        gauge = PinAntenna(nant6), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)),
     )
     @test !any(sol2.covered[nant6, :, :])            # absent ref never fabricated
     for a in 2:nant, f in 1:2
@@ -643,7 +641,7 @@ end
     rbar, wbar = inject_screen(bl, pols, screen; amp = 6.0, noise = 1.0, rng = rng)
     sol = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant2, times;
-        gauge = PinAntenna(1), smoother = FRa.NoSmoothing(detrend = false),
+        gauge = PinAntenna(1), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)),
     )
     tr = sol.phase[5, 1, :]
     jumps = [abs(rem2pi(tr[ap + 1] - tr[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(tr[ap]) && isfinite(tr[ap + 1])]
@@ -657,7 +655,7 @@ end
     nant3 = nant2 + 1                                # station 6 = the absent reference
     sol_noref = FRa.solve_adhoc_phasing(
         rbar, wbar, bl, pols, nant3, times;
-        gauge = PinAntenna(nant3), smoother = FRa.NoSmoothing(detrend = false),
+        gauge = PinAntenna(nant3), smoother = FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)),
     )
     @test !any(sol_noref.covered[nant3, :, :])       # absent ref is never fabricated
     trn = sol_noref.phase[5, 1, :]
@@ -699,11 +697,11 @@ end
 
     # (smoother, tying) — the joint solve needs one phase node per station.
     cases = [
-        (FRa.SavitzkyGolaySmoother(window = 9, detrend = false), CALa.PerFeed()),
-        (FRa.PenalizedSmoother(smoothness = 10.0, detrend = false), CALa.PerFeed()),
-        (FRa.OUSmoother(coherence_time = 15.0, detrend = false), CALa.PerFeed()),
-        (FRa.NoSmoothing(detrend = false), CALa.PerFeed()),
-        (FRa.JointOUSmoother(coherence_time = 15.0, detrend = false), CALa.SharedFeeds()),
+        (FRa.SavitzkyGolaySmoother(window = 9, options = FRa.AdhocOptions(; detrend = false)), CALa.PerFeed()),
+        (FRa.PenalizedSmoother(smoothness = 10.0, options = FRa.AdhocOptions(; detrend = false)), CALa.PerFeed()),
+        (FRa.OUSmoother(coherence_time = 15.0, options = FRa.AdhocOptions(; detrend = false)), CALa.PerFeed()),
+        (FRa.NoSmoothing(options = FRa.AdhocOptions(; detrend = false)), CALa.PerFeed()),
+        (FRa.JointOUSmoother(coherence_time = 15.0, options = FRa.AdhocOptions(; detrend = false)), CALa.SharedFeeds()),
     ]
     for (sm, ty) in cases
         @test sm isa FRa.AbstractAdhocSmoother
@@ -765,7 +763,7 @@ end
         sol = FRa.solve_adhoc_phasing(
             rbar, wbar, bl, pols, nant, times;
             gauge = PinAntenna(1),
-            smoother = FRa.JointOUSmoother(coherence_time = 30.0, complex_iters = ci),
+            smoother = FRa.JointOUSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
             tying = CALa.SharedFeeds(),
         )
         track_rmse(sol, screen, nant, nap)
@@ -780,7 +778,7 @@ end
         sol = FRa.solve_adhoc_phasing(
             rbar, wbar, bl, pols, nant, times;
             gauge = PinAntenna(1),
-            smoother = FRa.JointOUSmoother(coherence_time = 30.0, complex_iters = ci),
+            smoother = FRa.JointOUSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
             tying = CALa.SharedFeeds(),
         )
         track_rmse(sol, screen, nant, nap)

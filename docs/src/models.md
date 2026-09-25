@@ -123,8 +123,8 @@ whole-tree requirements via
 [`validate_model`](@ref Gustavo.Fring.validate_model).
 
 - [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_terms(), smoother = ...)`,
-  [`TemporalSmoother`](@ref Gustavo.TemporalSmoother)`(model = default_adhoc_terms(), smoother = ...)`
-  and [`FringeFit`](@ref Gustavo.FringeFit)`(model = default_fringe_terms(), estimator = ...)`
+  [`AdhocPhase`](@ref Gustavo.AdhocPhase)`(model = default_adhoc_terms(), smoother = ...)`
+  and [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit)`(model = default_fringe_terms(), estimator = ...)`
   take a `GainModel`; the fringe step's model has phase components only
   ([`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms)).
 - [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)`(dispersion = DispersionModel(), sbd = SingleBandDelay())`
@@ -135,20 +135,20 @@ whole-tree requirements via
 or replacing named components:
 
 ```julia
-FringeFit(model = merge(default_fringe_terms();
+BaselineFringeFit(model = merge(default_fringe_terms();
     phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = SingleFeed(2)))))
 ```
 
 Each step compiles and solves its own model on its own private θ — no step's
 parameter block is shared with or visible to another's. Gains compose
 multiplicatively across steps, so e.g. `DispersionSBDFit`'s private per-scan
-delay-refinement column times `FringeFit`'s wideband delay is the same total
+delay-refinement column times `BaselineFringeFit`'s wideband delay is the same total
 correction as incrementing one shared column would be.
 
 ## The standard pipeline's model, component by component
 
-The four-step pipeline `FringeFit() |> DispersionSBDFit() |> Bandpass() |>
-TemporalSmoother()` solves, across its steps, the following phase components
+The four-step pipeline `BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |>
+AdhocPhase()` solves, across its steps, the following phase components
 — this is the standard VLBI calibration model, and each tying below is a
 physics decision:
 
@@ -206,7 +206,7 @@ instrumental phase that a per-scan linear delay cannot represent, stable
 across the observation (HOPS-style).
 
 **`adhoc` — per-integration constant phase, feed-common** (the
-`TemporalSmoother` step). Residual atmospheric phase is non-birefringent
+`AdhocPhase` step). Residual atmospheric phase is non-birefringent
 (common to both feeds), so it is solved feed-common — which both denoises it
 and contributes exactly zero inter-feed phase. A `PerFeed` adhoc lets per-AP
 solve noise differ between feeds and injects spurious cross-hand scatter on

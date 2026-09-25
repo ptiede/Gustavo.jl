@@ -642,7 +642,7 @@ ignored; stations absent from `factors` get `default`.
 
     uvset = load_fitsidi(path; lazy = true)
     ws = station_weight_scale(uvset, Dict("HS" => 2.0, "GL" => 2.0))
-    fit(StationWeightScale(ws) |> FringeFit(), uvset)
+    fit(StationWeightScale(ws) |> BaselineFringeFit(), uvset)
 """
 station_weight_scale(uvset::UVSet, factors; default::Real = 1.0) = station_weight_scale(
     String.(UVData.metadata(first(values(UVData.branches(uvset)))).antennas.name),

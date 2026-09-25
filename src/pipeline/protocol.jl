@@ -291,7 +291,7 @@ end
     DataTransformStep(t::Fring.AbstractDataTransform)
 
 Lifts a data transform into a pipeline step so transforms compose in the step
-chain: `CalFunction(f) |> FringeFit(...)`. Raw transforms are lifted
+chain: `CalFunction(f) |> BaselineFringeFit(...)`. Raw transforms are lifted
 automatically by `|>` and the `CalibrationPipeline` constructors, so you rarely
 construct this directly.
 """
@@ -320,7 +320,7 @@ _lift_step(x) = error(
     StepChain
 
 An ordered chain of pipeline steps built with `|>`:
-`CalFunction(f) |> FringeFit(...) |> Bandpass(...)`. Pass it to
+`CalFunction(f) |> BaselineFringeFit(...) |> Bandpass(...)`. Pass it to
 [`CalibrationPipeline`](@ref) (or directly to [`fit`](@ref)).
 """
 struct StepChain
@@ -336,16 +336,17 @@ Base.:|>(a::StepChain, b::StepChain) = StepChain(vcat(a.steps, b.steps))
 # ── The pipeline ─────────────────────────────────────────────────────────────
 
 """
-    CalibrationPipeline(steps...; exec = ExecutionConfig(), gauge = PinAntenna(1))
-    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), gauge = PinAntenna(1))
-    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), gauge = PinAntenna(1))
+    CalibrationPipeline(steps...; exec = ExecutionConfig(), gauge)
+    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), gauge)
+    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), gauge)
 
 An ordered list of [`CalibrationStep`](@ref)s (raw
 `Fring.AbstractDataTransform`s are lifted automatically) plus the run-wide
 [`ExecutionConfig`](@ref), `gauge` — the gauge convention every solve step reads
 (`ctx.gauge`): an [`AbstractGauge`](@ref), e.g. `PinAntenna("PT")`,
-`PinAntenna(["PT", "LA"])` for a ranked fallback, or `ZeroSumPhase()`. A
-pipeline needs no [`FringeFit`](@ref) step; any `SolveStep`
+`PinAntenna(["PT", "LA"])` for a ranked fallback, or `ZeroSumPhase()`. There is
+no default gauge; [`fit`](@ref) throws, naming the stations, when none is given. A
+pipeline needs no [`BaselineFringeFit`](@ref) step; any `SolveStep`
 composition is legal, including a single standalone step (e.g. a `Bandpass`
 fit over data already corrected by an earlier run) — the single-step solve is
 the primitive a multi-step pipeline is built from (see [`fit`](@ref)'s
@@ -354,19 +355,19 @@ docstring). Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
 struct CalibrationPipeline{X <: ExecutionConfig}
     steps::Vector{CalibrationStep}
     exec::X
-    gauge::AbstractGauge
+    gauge::Union{Nothing, AbstractGauge}
 end
 CalibrationPipeline(
     steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig(),
-    gauge::AbstractGauge = PinAntenna(1),
+    gauge::Union{Nothing, AbstractGauge} = nothing,
 ) = CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec, gauge)
 CalibrationPipeline(
     steps::_Chainable...; exec::ExecutionConfig = ExecutionConfig(),
-    gauge::AbstractGauge = PinAntenna(1),
+    gauge::Union{Nothing, AbstractGauge} = nothing,
 ) = CalibrationPipeline(collect(steps); exec, gauge)
 CalibrationPipeline(
     chain::StepChain; exec::ExecutionConfig = ExecutionConfig(),
-    gauge::AbstractGauge = PinAntenna(1),
+    gauge::Union{Nothing, AbstractGauge} = nothing,
 ) = CalibrationPipeline(chain.steps, exec, gauge)
 
 # Label a step by kind; a lifted transform is named for the transform it wraps.

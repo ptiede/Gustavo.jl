@@ -62,10 +62,10 @@ steps then share **one** streaming pass — on a lazy dataset, the difference
 between N reads of the data and one.
 
 The hook dispatches on the step *instance*, so configuration can change the
-answer. The shipped `FringeFit` is the example:
+answer. The shipped `BaselineFringeFit` is the example:
 
 ```julia
-fusable_grouping(s::FringeFit) =
+fusable_grouping(s::BaselineFringeFit) =
     Fring.scan_local_solve(s.estimator, s.model) ? :scan : :global
 ```
 
@@ -175,8 +175,8 @@ end
 
 `delay_refine` is the private-θ principle in action: the joint (Δτ, dTEC)
 fit must update a per-scan delay alongside the dTEC (the two covary), but
-that column belongs to *this* step's model, not to `FringeFit`'s — gains
-compose multiplicatively, so this step's delay column times `FringeFit`'s is
+that column belongs to *this* step's model, not to `BaselineFringeFit`'s — gains
+compose multiplicatively, so this step's delay column times `BaselineFringeFit`'s is
 the same total correction, and neither step touches the other's θ.
 
 `start_pass!` resolves where the step's θ columns live, once, before any data
