@@ -81,11 +81,13 @@ Frequency = <any segmentation>, Feed = PerFeed())` and nothing else — a time
 segmentation whose segments each span several scans, solved one segment at a time.
 
 `solve_bandpass!` writes into `θ`'s bandpass blocks. `results` is the
-per-scan `(; rl, wl, feeds, ti, source)` accumulator list in group-index order,
-`ti` being the scan's first sample on the solve's time axis (hence which time
-segment it falls in);
-`setup` is `(; bl_pairs, blidx, nant, layout, bp_path, amp_path, channel_freqs, spw_of_chan)`,
-built once per solve. Reach each observable's parameters through
+per-scan `(; rl, wl, ti, source)` list in group-index order: `rl` and `wl` are
+`accumulate_bandpass`'s sums, `ti` the scan's first sample on the
+solve's time axis (hence which time segment it falls in). `setup` is
+`(; stations, feeds, bl_pairs, nant, layout, bp_path, amp_path, channel_freqs,
+spw_of_chan)`, built once per solve: `stations` and `feeds` label the sums'
+`StationPair` and `FeedPair` axes, and `bl_pairs` gives `stations` as station
+indices. Reach each observable's parameters through
 [`bandpass_blocks`](@ref)`(setup, θ, :phase)` / `(…, :logamp)` rather than the
 paths directly. `report` is published on the step's solution record and
 should say which tracks were measured (see [`bandpass_track_report`](@ref));
@@ -196,63 +198,40 @@ solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
         "Gustavo.Fring.solve_bandpass!(::$(typeof(sm)), θ, results, setup; gauge)."
 )
 
-# Fresh per-(baseline row, product, global channel) bandpass accumulators. They
-# carry (BaselineID, Polarization, Frequency) dims so the accumulate/solve kernels below
-# address axes by name (the house style of the Bandpass module) instead of by
-# position; indexing stays plain-positional and costs nothing.
-function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
-    d = (BaselineID(1:nbl), Polarization(1:npol), Frequency(1:nchan))
-    return (
-        DimensionalData.DimArray(zeros(ComplexF64, nbl, npol, nchan), d),
-        DimensionalData.DimArray(zeros(Float64, nbl, npol, nchan), d),
+"""
+    accumulate_bandpass(group::XRadio.ProcessingSet, geom::DataGeometry, stations, feeds;
+                        executor = SerialScheduler()) -> (rl, wl)
+
+One scan group's inverse-variance sums over time per (station pair, feed pair,
+channel), `rl = Σ w·v` and `wl = Σ w`, on data already gain-corrected by the
+pipeline's corrections. Both are `DimArray`s over `StationPair(stations)`,
+`FeedPair(feeds)` and `Frequency(geom.channel_freqs)` — labels shared by every
+group of a solve, so the sums of different scans line up — in the element types
+of the data. Autocorrelations never contribute; a cross pair or feed pair of the
+group that the labels do not hold is an error. Every smoother receives these
+sums as they are.
+"""
+function accumulate_bandpass(
+        group::XRadio.ProcessingSet, geom::DataGeometry, stations, feeds;
+        executor = SerialScheduler(),
     )
-end
-
-"""
-    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, group, geom::DataGeometry)
-
-Accumulate one scan group's contribution to the per-(global-baseline, feed
-pair, global channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for
-the bandpass solves, on data already gain-corrected by the pipeline's
-corrections. `group` is a `ProcessingSet` or its [`GroupTables`](@ref) on
-`geom`; the feed-pair axis follows the group's `feeds`. `blidx` maps `(a, b) ->
-row` in the global baseline table; a pair absent from it never contributes.
-Every smoother receives these sums as they are.
-"""
-accumulate_bandpass!(rbar_bp, wbar_bp, blidx, group::XRadio.ProcessingSet, geom::DataGeometry; kw...) =
-    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, GroupTables(group, geom); kw...)
-
-function accumulate_bandpass!(rbar_bp, wbar_bp, blidx, tabs::GroupTables)
-    for m in eachindex(tabs.members)
-        _accumulate_bandpass_member!(
-            rbar_bp, wbar_bp, blidx, _member_layers(tabs.members[m])..., tabs.wins[m], tabs.feedrow[m],
-        )
+    isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
+    parts = tmap(ms -> _member_bandpass_sums(ms, geom), _members_by_frequency(group); scheduler = executor)
+    ax = (_station_pair_dim(stations), FeedPair(feeds), Frequency(geom.channel_freqs))
+    rl = zeros(promote_type((eltype(p.wv) for p in parts)...), ax)
+    wl = zeros(promote_type((eltype(p.ws) for p in parts)...), ax)
+    for p in parts
+        chans = Frequency(At(geom.channel_freqs[p.chan]))
+        _add_by_label!(rl, wl, p.wv, p.ws, p.stations, p.feeds, chans; autos = false)
     end
-    return rbar_bp, wbar_bp
+    return rl, wl
 end
 
-function _accumulate_bandpass_member!(rbar_bp, wbar_bp, blidx, V, W, F, win::GeometryWindow, feedrow)
-    UVData.check_layer_axes(V, W, F)
-    for k in eachindex(win.feed_order), bi in eachindex(win.stations)
-        a, b = win.stations[bi]
-        a == b && continue
-        idx = get(blidx, (a, b), 0)
-        idx == 0 && continue
-        Vp, Wp, Fp = _member_planes(V, W, F, bi, win.feeds[k, bi])
-        f = feedrow[k]
-        for t in axes(Vp, 2)
-            for c in axes(Vp, 1)
-                w, vv = Wp[c, t], Vp[c, t]
-                ok = _usable(Fp[c, t], w, vv)
-                gc = win.chan_idx[c]
-                rbar_bp[idx, f, gc] += ifelse(ok, w * vv, zero(eltype(rbar_bp)))
-                wbar_bp[idx, f, gc] += ifelse(ok, w, zero(eltype(wbar_bp)))
-            end
-        end
-    end
-    return rbar_bp, wbar_bp
+function _member_bandpass_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
+    wv, ws = weighted_sums(_member_layers(ms)...; dims = Ti)
+    chan = Calibration._channel_indices(geom, XRadio.frequencies(ms))
+    return (; wv, ws, stations = _member_station_pairs(ms), feeds = feed_pairs(ms), chan)
 end
-
 
 # Free per-segment closure seed for the phase bandpass: the globally-closing
 # per-feed phase solved independently in each frequency segment, plus each
@@ -270,7 +249,7 @@ function _seed_phase_tracks(
     prec = zeros(nant, 2, nseg)
     for (fs, chans) in enumerate(segs)
         rows = _ObsRow[]
-        for bi in axes(rbar_bp, BaselineID), p in axes(rbar_bp, Polarization)
+        for bi in axes(rbar_bp, StationPair), p in axes(rbar_bp, FeedPair)
             a, b = bl_pairs[bi]
             a == b && continue
             r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
@@ -512,7 +491,7 @@ const _BP_MAX_UNWRAP_AMBIGUITY = 0.25
 const _BP_DEGENERATE_WARN_FRACTION = 0.25
 
 """
-    PerTrackSmoother(; phase = FreeShape(), amp = WhittakerShape(1.0))
+    PerTrackSmoother(; phase = FreeShape(), amp = WhittakerShape(1.0), eltype = nothing)
 
 Solve the bandpass one (station, feed, spw) track at a time: the per-segment
 closure graph solve seeds real phase and log-amp tracks, then each track is fit
@@ -526,16 +505,28 @@ continuous branch rather than a sawtooth. A spec that estimates gaps
 segments the closure solve had no data for; [`FreeShape`](@ref) leaves them
 unapplied.
 
+The scans of a time segment are pooled before the solve, each first rotated by
+its own band-averaged phase per (baseline, feed pair). The pooled sums are held
+in `eltype`, a real floating-point type; `nothing` keeps the data's.
+
 The closure assumes a baseline's source term cancels out of the per-channel
 phase-difference / log-amp-sum, so it is not appropriate for a resolved or
 polarized calibrator (see [`JointSmoother`](@ref)).
 """
-struct PerTrackSmoother{P <: AbstractShapeSpec, A <: AbstractShapeSpec} <: AbstractBandpassSmoother
+struct PerTrackSmoother{P <: AbstractShapeSpec, A <: AbstractShapeSpec, E} <: AbstractBandpassSmoother
     phase::P
     amp::A
+    eltype::E
+    function PerTrackSmoother(phase::AbstractShapeSpec, amp::AbstractShapeSpec, eltype)
+        isnothing(eltype) || eltype isa Type{<:AbstractFloat} || throw(
+            ArgumentError("`eltype` must be a real floating-point type or `nothing`, got $eltype"),
+        )
+        return new{typeof(phase), typeof(amp), typeof(eltype)}(phase, amp, eltype)
+    end
 end
-PerTrackSmoother(; phase::AbstractShapeSpec = FreeShape(), amp::AbstractShapeSpec = WhittakerShape(1.0)) =
-    PerTrackSmoother(phase, amp)
+PerTrackSmoother(;
+    phase::AbstractShapeSpec = FreeShape(), amp::AbstractShapeSpec = WhittakerShape(1.0), eltype = nothing,
+) = PerTrackSmoother(phase, amp, eltype)
 
 can_fit(::PerTrackSmoother, tc, geom) = _fits_bandpass_track(tc)
 
@@ -808,8 +799,9 @@ end
 # conjugate of its band-averaged phase per (baseline, feed pair); unaligned scans
 # would partly cancel. The rotation is flat in frequency, so the bandpass shape
 # and the phase steps between spectral windows are kept.
-function _pool_scans(results, idx, nbl, npol, nchan)
-    rbar, wbar = bandpass_accumulators(nbl, npol, nchan)
+function _pool_scans(results, idx, T)
+    rbar = zeros(complex(T), dims(results[first(idx)].rl))
+    wbar = zeros(T, dims(results[first(idx)].wl))
     for i in idx
         rl = results[i].rl
         rbar .+= DimensionalData.broadcast_dims(*, rl, _scan_alignment(rl))
@@ -824,9 +816,8 @@ _scan_alignment(rl) = map(
 )
 
 function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::AbstractGauge)
-    feeds = results[1].feeds
-    nchan = length(setup.channel_freqs)
-    nbl = length(setup.bl_pairs)
+    feeds = setup.feeds
+    T = something(sm.eltype, mapreduce(r -> eltype(r.wl), promote_type, results))
     phase_status = nothing
     amp_status = nothing
     band_ids = Int[]
@@ -843,7 +834,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
         phase_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
         for (ts, idx) in pairs(groups)
             isempty(idx) && continue
-            rbar, wbar = _pool_scans(results, idx, nbl, length(feeds), nchan)
+            rbar, wbar = _pool_scans(results, idx, T)
             phase, prec = _seed_phase_tracks(
                 rbar, wbar, setup.bl_pairs, feeds, setup.nant, fsegs; gauge,
             )
@@ -862,7 +853,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
         amp_status = fill(_BP_TRACK_NODATA, setup.nant, 2, length(band_ids), length(groups))
         for (ts, idx) in pairs(groups)
             isempty(idx) && continue
-            rbar, wbar = _pool_scans(results, idx, nbl, length(feeds), nchan)
+            rbar, wbar = _pool_scans(results, idx, T)
             la, prec = _seed_amp_tracks(rbar, wbar, setup.bl_pairs, feeds, setup.nant, fsegs)
             _spike_guard!(la, seg_spw, _BP_SPIKE_SIGMA)
             _shape_tracks!(
@@ -895,14 +886,14 @@ end
 # gain ([`_update_station_gains!`](@ref)), at `phase_plan`/`amp_plan`'s shared
 # frequency-segment resolution, to convergence.
 #
-# Every array below carries (Scan, BaselineID, Polarization, Frequency) or
+# Every array below carries (Scan, StationPair, FeedPair, Frequency) or
 # (Ant, Feed, Ti, Frequency) dims, so the loops read by axis name. `Frequency`
 # is the frequency-segment index and `Ti` the time-segment one. Each station
 # carries its own time segmentation, so `Ti` spans the union of them and a
 # station reaches only its own slots. Indexing itself stays plain-positional.
 
 # One scan's per-(baseline, pol, segment) coherent residual, written directly
-# into `rview`/`wview`, a (BaselineID, Polarization, Frequency) slice of the multi-scan
+# into `rview`/`wview`, a (StationPair, FeedPair, Frequency) slice of the multi-scan
 # accumulator, with no intermediate allocation.
 #
 # These must not be SNR-gated. The joint solve consumes them as complex
@@ -915,7 +906,7 @@ end
 # the relative R–L bandpass, leaving that block at its initialization. Outliers
 # belong to a flagging step upstream of the solve, not to a cell gate.
 function _reduce_scan_segments!(rview, wview, sc, segs)
-    for p in axes(rview, Polarization), bi in axes(rview, BaselineID)
+    for p in axes(rview, FeedPair), bi in axes(rview, StationPair)
         for (fs, chans) in enumerate(segs)
             rc, wc, _ = _segment_residual(sc.rl, sc.wl, bi, p, chans)
             keep = isfinite(rc) && isfinite(wc) && wc > 0
@@ -926,17 +917,18 @@ function _reduce_scan_segments!(rview, wview, sc, segs)
     return nothing
 end
 
-# Every scan's (BaselineID, Polarization, segment) residual, stacked over an added Scan
+# Every scan's (StationPair, FeedPair, segment) residual, stacked over an added Scan
 # axis — not summed across scans (unlike the closure tier's fold), since the per-scan source coherence needs each
 # scan's own coherent visibility. Element types follow the scan accumulators'
-# own (`bandpass_accumulators`'), not a hardcoded precision.
+# own, not a hardcoded precision.
 function _reduce_all_scans(scans, segs)
     nscan = length(scans)
-    nbl, npol = size(first(scans).rl, BaselineID), size(first(scans).rl, Polarization)
+    rl = first(scans).rl
+    nbl, npol = size(rl, StationPair), size(rl, FeedPair)
     nseg = length(segs)
-    C = eltype(first(scans).rl)
+    C = eltype(rl)
     T = real(eltype(first(scans).wl))
-    d = (Scan(1:nscan), BaselineID(1:nbl), Polarization(1:npol), Frequency(1:nseg))
+    d = (Scan(1:nscan), dims(rl, StationPair), dims(rl, FeedPair), Frequency(1:nseg))
     rseg = DimensionalData.DimArray(zeros(C, nscan, nbl, npol, nseg), d)
     wseg = DimensionalData.DimArray(zeros(T, nscan, nbl, npol, nseg), d)
     for (si, sc) in enumerate(scans)
@@ -1063,7 +1055,7 @@ end
 # is read through its own `fseg` row.
 function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg)
     T = real(eltype(S))
-    for p in axes(rseg, Polarization), bi in axes(rseg, BaselineID)
+    for p in axes(rseg, FeedPair), bi in axes(rseg, StationPair)
         a, b = bl_pairs[bi]
         a == b && continue
         fa, fb = feeds[p]
@@ -1076,14 +1068,14 @@ function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg
             numer = zero(eltype(S))
             denom = zero(T)
             for cell in axes(rseg, Frequency)
-                w = wseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
+                w = wseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
                 w > 0 || continue
                 u = g[a, fa, ta, fseg[a, cell]] * conj(g[b, fb, tb, fseg[b, cell]])
                 abs2(u) > 0 || continue
-                numer += conj(u) * rseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
+                numer += conj(u) * rseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
                 denom += w * abs2(u)
             end
-            S[Scan(si), BaselineID(bi), Polarization(p)] = denom > 0 ? numer / denom : zero(eltype(S))
+            S[Scan(si), StationPair(bi), FeedPair(p)] = denom > 0 ? numer / denom : zero(eltype(S))
         end
     end
     return nothing
@@ -1151,22 +1143,22 @@ function _update_station_gains!(
                 for si in axes(rseg, Scan)
                     # Only the scans this node's own segment covers constrain it.
                     tseg[ant, si] == ts || continue
-                    w = wseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
+                    w = wseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
                     w > 0 || continue
-                    s = S[Scan(si), BaselineID(bi), Polarization(p)]
+                    s = S[Scan(si), StationPair(bi), FeedPair(p)]
                     if role === :a
                         tb = tseg[b, si]
                         iszero(tb) && continue
                         coeff = s * conj(g[b, fb, tb, fseg[b, cell]])
                         abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * rseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)]
+                        num[sa] += conj(coeff) * rseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
                         den[sa] += w * abs2(coeff)
                     else
                         ta = tseg[a, si]
                         iszero(ta) && continue
                         coeff = conj(g[a, fa, ta, fseg[a, cell]] * s)
                         abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * conj(rseg[Scan(si), BaselineID(bi), Polarization(p), Frequency(cell)])
+                        num[sa] += conj(coeff) * conj(rseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)])
                         den[sa] += w * abs2(coeff)
                     end
                 end
@@ -1235,18 +1227,22 @@ end
 # station's position within `block.stations`, and `ts` is already in that block's
 # own segment numbering (`_station_time_segments` reads each station's segment
 # from its own block's `tseg_id`).
+#
+# The band means are removed at θ's precision, which may exceed `g`'s: the
+# gauge is a property of θ.
 function _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, max_logamp, present)
+    T = eltype(θ)
     for block in phase_blocks
         for (ai, a) in pairs(block.stations), f in axes(g, Feed)
             node = _feed_node(block.plan.tying, f)
             node == 0 && continue
             for ts in present[a]
                 any(view(touched, a, f, ts, :)) || continue
-                mphase = angle(sum(cis(angle(g[a, f, ts, fs])) for fs in axes(g, Frequency) if touched[a, f, ts, fs]))
+                phase(fs) = T(angle(g[a, f, ts, fs]))
+                mphase = angle(sum(cis(phase(fs)) for fs in axes(g, Frequency) if touched[a, f, ts, fs]))
                 for fs in axes(g, Frequency)
                     touched[a, f, ts, fs] || continue
-                    block.θ[1, node, fs, ts, ai] =
-                        rem2pi(angle(g[a, f, ts, fs]) - mphase, RoundNearest)
+                    block.θ[1, node, fs, ts, ai] = rem2pi(phase(fs) - mphase, RoundNearest)
                 end
             end
         end
@@ -1258,7 +1254,7 @@ function _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, max_lo
             for ts in present[a]
                 valid = @view touched[a, f, ts, :]
                 any(valid) || continue
-                logs = log.(abs.(@view g[a, f, ts, :]))
+                logs = log.(T.(abs.(@view g[a, f, ts, :])))
                 m = sum(view(logs, valid)) / count(valid)
                 for fs in axes(g, Frequency)
                     valid[fs] || continue
@@ -1353,7 +1349,7 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
     amp_status = _joint_status_array(amp_blocks, setup.nant, length(band_ids))
     for idx in _joint_scan_groups(tseg)
         solve_joint_bandpass!(
-            θ, results[idx], setup.bl_pairs, results[1].feeds, setup.nant,
+            θ, results[idx], setup.bl_pairs, setup.feeds, setup.nant,
             phase_blocks, amp_blocks;
             gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
             phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq,
@@ -1423,7 +1419,7 @@ independently, so a `phase_spec` other than [`FreeShape`](@ref) is rejected in
 that case rather than solved as a joint fit with a segment overwritten.
 
 `scans` is the per-scan `(rl, wl)` accumulator pairs from
-`accumulate_bandpass!` — not summed across scans, since the source term
+`accumulate_bandpass` — not summed across scans, since the source term
 needs each scan's own coherent visibility.
 
 `tseg`, when given, is the `(station, scan)` time-segment table
@@ -1548,7 +1544,7 @@ function solve_joint_bandpass!(
     touched = DimensionalData.DimArray(falses(nant, 2, ntseg, nfsmax), gd)
     S = DimensionalData.DimArray(
         zeros(C, length(scans), length(bl_pairs), length(feeds)),
-        (Scan(1:length(scans)), BaselineID(1:length(bl_pairs)), Polarization(1:length(feeds))),
+        (Scan(1:length(scans)), StationPair(1:length(bl_pairs)), FeedPair(1:length(feeds))),
     )
 
     _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tsg, fseg)

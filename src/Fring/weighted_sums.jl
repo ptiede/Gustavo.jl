@@ -36,3 +36,77 @@ function _weighted_sums!(wv, ws, V, W, F, dims::D) where {D}
     end
     return wv, ws
 end
+
+# ── A scan group's sums, by label ────────────────────────────────────────────
+
+# The group's inverse-variance sums per (station pair, feed pair, AP) over every
+# channel of every member. Members are added in frequency order, so the float
+# association is fixed by the data alone. Station pairs follow `geom`'s station
+# numbering; `bl_pairs` gives them as station indices, `ti` the APs as indices
+# into `geom.times`.
+function _ap_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
+    isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
+    parts = tmap(ms -> _member_ap_sums(ms, geom), _members_by_frequency(group); scheduler = executor)
+
+    stations, bl_pairs = _station_pairs(reduce(vcat, (p.stations for p in parts)), geom)
+    feeds = sort!(unique!(reduce(vcat, (vec(p.feeds) for p in parts))))
+    ti = sort!(unique!(reduce(vcat, (p.ti for p in parts))))
+
+    ax = (_station_pair_dim(stations), FeedPair(feeds), Ti(geom.times[ti]))
+    rbar = zeros(promote_type((eltype(p.wv) for p in parts)...), ax)
+    wbar = zeros(promote_type((eltype(p.ws) for p in parts)...), ax)
+    for p in parts
+        _add_by_label!(rbar, wbar, p.wv, p.ws, p.stations, p.feeds, Ti(At(geom.times[p.ti])))
+    end
+    return (; rbar, wbar, bl_pairs, ti)
+end
+
+_members_by_frequency(group) = sort!(collect(values(group)); by = ms -> minimum(XRadio.frequencies(ms)))
+
+function _member_ap_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
+    wv, ws = weighted_sums(_member_layers(ms)...; dims = Frequency)
+    ti = Calibration._time_indices(geom, XRadio.times(ms))
+    return (; wv, ws, stations = _member_station_pairs(ms), feeds = feed_pairs(ms), ti)
+end
+
+"""
+    _station_pairs(pairs, geom::DataGeometry) -> (stations, bl_pairs)
+
+The distinct station pairs among `pairs` (antenna-name tuples), ordered by
+`geom`'s station numbering, and the same pairs as station indices. Refuses a
+pair stored in both orders, since the two would conjugate each other.
+"""
+function _station_pairs(pairs, geom::DataGeometry)
+    slot = Dict(n => i for (i, n) in Base.pairs(geom.stations))
+    station(n) = get(slot, n) do
+        throw(ArgumentError("baseline antenna `$n` is not among the geometry's stations, " * join(geom.stations, ", ")))
+    end
+    stations = sort!(unique(pairs); by = ((a, b),) -> (station(a), station(b)))
+    stored = Set(stations)
+    for (a, b) in stations
+        a != b && (b, a) in stored && throw(
+            ArgumentError("stations $a and $b are stored in both orders"),
+        )
+    end
+    return stations, [(station(a), station(b)) for (a, b) in stations]
+end
+
+_station_pair_dim(stations) = StationPair(
+    DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered()),
+)
+
+_member_station_pairs(ms::XRadio.MeasurementSet) = [(String(a), String(b)) for (a, b) in XRadio.baselines(ms)]
+
+# A stored product's feed pair varies by baseline, so each (baseline, product)
+# of a member finds its row by label. `along` selects the third axis.
+function _add_by_label!(rbar, wbar, wv, ws, stations, feeds, along; autos::Bool = true)
+    for bi in axes(feeds, 2), p in axes(feeds, 1)
+        a, b = stations[bi]
+        autos || a != b || continue
+        sel = (StationPair(At(stations[bi])), FeedPair(At(feeds[p, bi])), along)
+        cell = (BaselineID(bi), Polarization(p))
+        view(rbar, sel...) .+= view(wv, cell...)
+        view(wbar, sel...) .+= view(ws, cell...)
+    end
+    return rbar, wbar
+end

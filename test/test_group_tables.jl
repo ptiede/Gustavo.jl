@@ -81,12 +81,12 @@ end
     end
 end
 
-@testset "adhoc sums by label" begin
+@testset "per-AP sums by label" begin
     ps, _ = _build_fringe_ps(; nant = 4, nspw = 3, nchan = 4, ntime = 5, nscans = 2)
     geom = CAL.DataGeometry(ps)
     group = first(values(DimensionalData.groupby(ps, XRadio.ByScan())))
     exec = SerialScheduler()
-    s = FP._adhoc_sums(group, geom; executor = exec)
+    s = FP._ap_sums(group, geom; executor = exec)
     @test lookup(s.rbar, FP.StationPair) == [(geom.stations[a], geom.stations[b]) for (a, b) in s.bl_pairs]
     @test issorted(s.bl_pairs)
     @test lookup(s.rbar, FP.FeedPair) == [(1, 1), (1, 2), (2, 1), (2, 2)]
@@ -100,14 +100,14 @@ end
 
     # The order members are stored in does not change the sums.
     rev = XRadio.ProcessingSet(OrderedDict(reverse(collect(pairs(group)))), DimensionalData.metadata(group))
-    @test FP._adhoc_sums(rev, geom; executor = exec).rbar == s.rbar
+    @test FP._ap_sums(rev, geom; executor = exec).rbar == s.rbar
 
     members = OrderedDict(pairs(group))
     k = first(keys(members))
     members[k] = _swap_baselines(read(members[k]))
     swapped = XRadio.ProcessingSet(members, DimensionalData.metadata(group))
-    @test_throws "stored in both orders" FP._adhoc_sums(swapped, geom; executor = exec)
-    @test_throws "holds no Measurement Sets" FP._adhoc_sums(
+    @test_throws "stored in both orders" FP._ap_sums(swapped, geom; executor = exec)
+    @test_throws "holds no Measurement Sets" FP._ap_sums(
         XRadio.ProcessingSet(OrderedDict{Symbol, XRadio.MeasurementSet}()), geom; executor = exec,
     )
 end
@@ -182,4 +182,53 @@ end
     θ = fit(st, ps; gauge = PinAntenna(1)).steps[1].θ
     θoff = fit(st, _offset_scans(ps, 4); gauge = PinAntenna(1)).steps[1].θ
     @test θoff ≈ θ atol = 1.0e-6
+
+    # Pooling follows the data's type unless the smoother names one.
+    θ64 = fit(Bandpass(smoother = FP.PerTrackSmoother(eltype = Float64)), ps; gauge = PinAntenna(1)).steps[1].θ
+    @test θ64 ≈ θ atol = 1.0e-5
+    @test_throws "must be a real floating-point type" FP.PerTrackSmoother(eltype = ComplexF64)
+end
+
+@testset "bandpass sums by label" begin
+    rng = MersenneTwister(5)
+    ps, _ = _build_fringe_ps(;
+        nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 3,
+        bandpass = 0.3 .* randn(rng, 4, 2, 16), seed = 3,
+    )
+    geom = CAL.DataGeometry(ps)
+    groups = collect(values(DimensionalData.groupby(ps, XRadio.ByScan())))
+    members = [ms for g in groups for ms in values(g)]
+    cross = [p for ms in members for p in FP._member_station_pairs(ms) if p[1] != p[2]]
+    stations, _ = FP._station_pairs(cross, geom)
+    feeds = sort!(unique!([f for ms in members for f in feed_pairs(ms)]))
+    exec = SerialScheduler()
+
+    rl, wl = FP.accumulate_bandpass(first(groups), geom, stations, feeds; executor = exec)
+    @test lookup(rl, FP.StationPair) == stations
+    @test lookup(rl, FP.FeedPair) == feeds
+    @test lookup(rl, Frequency) == geom.channel_freqs
+    @test eltype(rl) == ComplexF32 && eltype(wl) == Float32
+    tot = sum(first(groups)) do ms
+        wv, _ = FP.weighted_sums(FP._member_layers(ms)...; dims = Ti)
+        autos = [a == b for (a, b) in FP._member_station_pairs(ms)]
+        sum(wv[BaselineID = .!autos])
+    end
+    @test sum(rl) ≈ tot
+    results = [(; rl, wl)]
+    @test eltype(FP._pool_scans(results, [1], Float32)[1]) == ComplexF32
+    @test eltype(FP._pool_scans(results, [1], Float64)[2]) == Float64
+
+    # A scan holding only the parallel hands lines up with the full set's labels:
+    # its cross-hand rows stay empty and the rest are unchanged.
+    parallel = XRadio.ProcessingSet(
+        OrderedDict(k => read(ms)[Polarization = At(["RR", "LL"])] for (k, ms) in pairs(first(groups))),
+        DimensionalData.metadata(first(groups)),
+    )
+    rp, wp = FP.accumulate_bandpass(parallel, geom, stations, feeds; executor = exec)
+    @test dims(rp) == dims(rl)
+    @test all(iszero, wp[FeedPair = At([(1, 2), (2, 1)])])
+    @test rp[FeedPair = At([(1, 1), (2, 2)])] == rl[FeedPair = At([(1, 1), (2, 2)])]
+
+    @test_throws "stored in both orders" FP._station_pairs([("A1", "A2"), ("A2", "A1")], geom)
+    @test_throws "not among the geometry's stations" FP._station_pairs([("A1", "Z9")], geom)
 end

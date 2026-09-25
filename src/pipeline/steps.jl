@@ -485,41 +485,43 @@ end
 
 function _group_setup(::Bandpass, ctx::SolveContext)
     layout = ctx.layout
-    nant = ctx.nant
-    # The global baseline table of the accumulation: every cross pair.
-    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
-    blidx = Dict(bl_pairs[i] => i for i in eachindex(bl_pairs))
+    # The accumulators' labels, shared by every scan group: each stored cross
+    # pair and feed pair of the set.
+    members = [ms for group in values(ctx.groups) for ms in values(group)]
+    cross = [p for ms in members for p in Fring._member_station_pairs(ms) if p[1] != p[2]]
+    stations, bl_pairs = Fring._station_pairs(cross, ctx.geom)
+    feeds = sort!(unique!([f for ms in members for f in feed_pairs(ms)]))
     # `ctx.layout` holds only this step's own components. The two observables are
     # located by NAME through the layout's component tree: the flat `plans` list
     # carries one entry per station-signature group, so its positions stop naming
     # them as soon as a model differs across stations.
     return (;
-        bl_pairs, blidx, nant, layout,
+        stations, feeds, bl_pairs, nant = ctx.nant, layout,
         bp_path = Fring._bandpass_path(layout.plantree, :phase),
         amp_path = Fring._bandpass_path(layout.plantree, :logamp),
         channel_freqs = ctx.geom.channel_freqs, spw_of_chan = ctx.geom.spw_of_chan,
     )
 end
 
-function _solve_group(s::Bandpass, ctx::SolveContext, setup, tabs::Fring.GroupTables)
-    rl, wl = Fring.bandpass_accumulators(
-        length(setup.bl_pairs), length(tabs.feeds), length(setup.channel_freqs),
+function _solve_group(s::Bandpass, ctx::SolveContext, setup, group)
+    rl, wl = Fring.accumulate_bandpass(
+        group, ctx.geom, setup.stations, setup.feeds; executor = inner_executor(ctx.exec),
     )
-    Fring.accumulate_bandpass!(rl, wl, setup.blidx, tabs)
     # `ti` locates this scan on the solve's global time axis, which is how a
     # time-segmented bandpass tells which segment the scan belongs to. A scan
     # lies within one segment of any segmentation coarser than a scan, so its
     # first sample names the segment.
-    sources = unique(source_name.(tabs.members))
+    t0 = minimum(minimum(XRadio.times(ms)) for ms in values(group))
+    sources = unique(source_name(ms) for ms in values(group))
     length(sources) == 1 || throw(
         ArgumentError("a scan group observes several sources: $(join(sources, ", "))")
     )
-    return (; rl, wl, feeds = tabs.feeds, ti = first(tabs.ti), source = only(sources))
+    return (; rl, wl, ti = Calibration._time_index(ctx.geom, t0), source = only(sources))
 end
 
 function solve(s::Bandpass, ctx::SolveContext)
     setup = _group_setup(s, ctx)
-    results = each_group(group -> _solve_group(s, ctx, setup, Fring.GroupTables(group, ctx.geom)), ctx)
+    results = each_group(group -> _solve_group(s, ctx, setup, group), ctx)
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
     report = Fring.solve_bandpass!(s.smoother, ctx.θ, results, setup; gauge = ctx.gauge)
     # The smoother's own per-track record travels with the step's info, so a

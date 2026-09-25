@@ -1026,64 +1026,6 @@ end
 
 # ── Per-scan pipeline entry ───────────────────────────────────────────────────
 
-# The group's inverse-variance sums per (station pair, feed pair, AP) over every
-# channel of every member, on data the pipeline's corrections have already
-# gain-corrected and reweighted by |gain|². Members are added in frequency
-# order, so the float association is fixed by the data alone. Station pairs
-# follow `geom`'s station numbering; `bl_pairs` gives them as station indices,
-# `ti` the APs as indices into `geom.times`.
-function _adhoc_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
-    isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
-    members = sort!(collect(values(group)); by = ms -> minimum(XRadio.frequencies(ms)))
-    parts = tmap(ms -> _adhoc_member_sums(ms, geom), members; scheduler = executor)
-
-    slot = Dict(n => i for (i, n) in pairs(geom.stations))
-    station(n) = get(slot, n) do
-        throw(ArgumentError("baseline antenna `$n` is not among the geometry's stations, " * join(geom.stations, ", ")))
-    end
-    stations = unique!(reduce(vcat, (p.stations for p in parts)))
-    sort!(stations; by = ((a, b),) -> (station(a), station(b)))
-    stored = Set(stations)
-    for (a, b) in stations
-        a != b && (b, a) in stored && throw(
-            ArgumentError("stations $a and $b are stored in both orders within one scan group"),
-        )
-    end
-    feeds = sort!(unique!(reduce(vcat, (vec(p.feeds) for p in parts))))
-    ti = sort!(unique!(reduce(vcat, (p.ti for p in parts))))
-
-    ax = (
-        StationPair(DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered())),
-        FeedPair(feeds), Ti(geom.times[ti]),
-    )
-    rbar = zeros(promote_type((eltype(p.wv) for p in parts)...), ax)
-    wbar = zeros(promote_type((eltype(p.ws) for p in parts)...), ax)
-    for p in parts
-        _add_by_label!(rbar, wbar, p.wv, p.ws, p.stations, p.feeds, Ti(At(geom.times[p.ti])))
-    end
-    bl_pairs = [(station(a), station(b)) for (a, b) in stations]
-    return (; rbar, wbar, bl_pairs, ti)
-end
-
-function _adhoc_member_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
-    wv, ws = weighted_sums(_member_layers(ms)...; dims = Frequency)
-    stations = [(String(a), String(b)) for (a, b) in XRadio.baselines(ms)]
-    ti = Calibration._time_indices(geom, XRadio.times(ms))
-    return (; wv, ws, stations, feeds = feed_pairs(ms), ti)
-end
-
-# A stored product's feed pair varies by baseline, so each (baseline, product)
-# of a member finds its group row by label.
-function _add_by_label!(rbar, wbar, wv, ws, stations, feeds, tsel)
-    for bi in axes(feeds, 2), p in axes(feeds, 1)
-        sel = (StationPair(At(stations[bi])), FeedPair(At(feeds[p, bi])), tsel)
-        cell = (BaselineID(bi), Polarization(p))
-        view(rbar, sel...) .+= view(wv, cell...)
-        view(wbar, sel...) .+= view(ws, cell...)
-    end
-    return rbar, wbar
-end
-
 """
     adhoc_scan!(θ, group::XRadio.ProcessingSet, geom::DataGeometry, adhoc_plan,
                 adhoc, gauge, nant; executor = DynamicScheduler()) -> θ
@@ -1102,7 +1044,7 @@ function adhoc_scan!(
         θ, group::XRadio.ProcessingSet, geom::DataGeometry, adhoc_plan, adhoc, gauge, nant;
         executor = DynamicScheduler(),
     )
-    (; rbar, wbar, bl_pairs, ti) = _adhoc_sums(group, geom; executor)
+    (; rbar, wbar, bl_pairs, ti) = _ap_sums(group, geom; executor)
     as = solve_adhoc_phasing(
         rbar, wbar, bl_pairs, collect(lookup(rbar, FeedPair)), nant, geom.times[ti];
         gauge, smoother = adhoc, tying = adhoc_plan.tying,

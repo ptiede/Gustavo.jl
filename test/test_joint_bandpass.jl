@@ -251,7 +251,8 @@ end
 function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, nchan)
     nbl, npol = length(bl_pairs), length(feeds)
     return map(axes(S, 1)) do si
-        rl, wl = FP.bandpass_accumulators(nbl, npol, nchan)
+        ax = (FP.StationPair(1:nbl), FP.FeedPair(1:npol), Frequency(1:nchan))
+        rl, wl = zeros(ComplexF64, ax), zeros(ax)
         for (bi, (a, b)) in pairs(bl_pairs), p in eachindex(feeds)
             fa, fb = feeds[p]
             for c in axes(rl, Frequency)
