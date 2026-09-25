@@ -4,9 +4,9 @@ CurrentModule = Gustavo
 
 # [Authoring a pipeline step](@id authoring-steps)
 
-A pipeline step is a solver with its own streaming pass: it declares the gain
-model it solves, accumulates from each materialized scan group, and closes its
-solve when the pass completes. This page is the step contract, followed by a
+A pipeline step is a solver that reads the data itself: it declares the gain
+model it solves and fits it, reading each scan group through
+[`each_group`](@ref) as many times as its solve needs. This page is the step contract, followed by a
 worked end-to-end example — adding a new physical effect with a specialized
 solver — using the shipped ionospheric-dispersion step as the model.
 
@@ -16,63 +16,34 @@ change what later steps read, are covered by the transform contract
 
 ## The contract at a glance
 
-A `SolveStep` subtype implements some of these hooks — every one has a
-working default:
+A `SolveStep` subtype implements [`solve`](@ref) and some of these hooks:
 
 | Hook | Answers | Default |
 |:-----|:--------|:--------|
 | [`model_components`](@ref) | what gain model does this step solve? | no components |
 | [`provides`](@ref) | the step's solution slot name (`sol[:name]`) | `:nothing` |
-| [`start_pass!`](@ref) | allocate accumulators before the pass | no-op |
-| [`process_scan!`](@ref) | accumulate one scan group | no-op |
-| [`finish_pass!`](@ref) | close the solve; return diagnostics | empty |
-| [`fusable_grouping`](@ref) | can the step share a pass with its neighbors? | `:global` |
-| [`required_grouping`](@ref) | leaf-grouping constraint | `:any` |
+| [`solve`](@ref) | fill θ; return diagnostics | required |
 | [`supports_station_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
 
 The execution model behind them:
 
-- **The executor owns all streaming.** A step never sees the `UVSet`; the
-  runner materializes each scan group through the pipeline's transform chain
-  (so the step reads data already corrected by every earlier step's finished
-  solution) and hands the step a `DimStack` plus the `GeometryWindow`
-  addressing it in the solve's index space.
+- **A step reads scan groups, never the whole set.** `each_group(f, ctx)`
+  materializes each scan group through the pipeline's transform chain (so the
+  step reads data already corrected by every earlier step's finished solution)
+  and calls `f(stack, win)` with the group's `DimStack` and the
+  `GeometryWindow` addressing it in the solve's index space. It returns `f`'s
+  results in group order. A solve that iterates, such as a residual
+  re-search, calls `each_group` once per round.
 - **Each step solves its own private θ.** `model_components(step, spec)`
   compiles to a per-step parameter layout; no step's θ block is shared with
   or visible to another step's. Gains compose multiplicatively across steps,
   so a step needing "the same" column as an earlier step compiles its own
   private copy instead of writing into the other's (the worked example's
   `delay_refine` column below).
-- **`process_scan!` may run concurrently across groups.** Its return value is
-  collected by the runner — one entry per selected group — and delivered to
-  `finish_pass!` via `ctx.scratch[:pass_results]`, so a step needs no
-  locking: return each scan's contribution and fold at the end. Per-scan θ
-  slots are disjoint, so a scan-local step may also write θ directly.
-
-## Pass fusion: `fusable_grouping`
-
-Declaring `fusable_grouping(step) = :scan` promises the step is finalizable
-from one scan group alone: every θ slot it writes for a scan is written from
-that scan's data by the time `process_scan!` returns. Consecutive `:scan`
-steps then share **one** streaming pass — on a lazy dataset, the difference
-between N reads of the data and one.
-
-The hook dispatches on the step *instance*, so configuration can change the
-answer. The shipped `BaselineFringeFit` is the example:
-
-```julia
-fusable_grouping(s::BaselineFringeFit) =
-    Fring.scan_local_solve(s.estimator, s.model) ? :scan : :global
-```
-
-With the default [`MatchedFilter`](@ref Gustavo.Fring.MatchedFilter) (one
-round) and an all-per-scan term list, each scan's station systems close
-inside `process_scan!` and the step fuses. Setting `MatchedFilter(rounds = 2)`
-— a residual re-search — needs the whole pass finished before the next round
-can start, so it flips the step to `:global` and it takes its own pass. Any
-track-global model column (`GlobalTime`-tied inter-feed delay) does the same.
-When your step's answer depends on its model or solver options, follow this
-pattern rather than hardcoding one value.
+- **`f` may run concurrently across groups.** It returns each scan's
+  contribution and `solve` combines the returned vector, so a step needs no
+  locking. Per-scan θ slots are disjoint, so `f` may also write the θ slots
+  of its own scan directly.
 
 ## Worked example: the dispersion step
 
@@ -143,8 +114,6 @@ Base.@kwdef struct DispersionSBDFit{D, S} <: SolveStep
     sbd::S = Fring.SingleBandDelay()
 end
 provides(::DispersionSBDFit) = :refine
-required_grouping(::DispersionSBDFit) = :scan_complete
-fusable_grouping(::DispersionSBDFit) = :scan     # both fits are per-scan
 ```
 
 Note the step's model surface is its two element fields — deliberately not a
@@ -175,20 +144,31 @@ that column belongs to *this* step's model, not to `BaselineFringeFit`'s — gai
 compose multiplicatively, so this step's delay column times `BaselineFringeFit`'s is
 the same total correction, and neither step touches the other's θ.
 
-`start_pass!` resolves where the step's θ columns live, once, before any data
-streams:
+`solve` resolves where the step's θ columns live, once, before any data is
+read, then runs the specialized fits per scan. Both fits write per-scan θ
+slots, which are disjoint across groups, so the per-group function writes θ
+directly and returns nothing. The returned `NamedTuple` publishes what was
+actually solved:
 
 ```julia
-function start_pass!(s::DispersionSBDFit, ctx::SolveContext)
+function solve(s::DispersionSBDFit, ctx::SolveContext)
     disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
     delay_plan = disp_plan === nothing ? nothing :
         Fring._perscan_delay_plan(ctx.model, ctx.layout)
-    ctx.scratch[:disp_sbd_setup] = (;
-        delay_plan, disp_plan,
-        sbd_plans = Fring._sbd_plans(ctx.model, ctx.layout),
-        ties = _dtec_ties(s.dispersion, ctx.antennas),
+    sbd_plans = Fring._sbd_plans(ctx.model, ctx.layout)
+    ties = _dtec_ties(s.dispersion, ctx.antennas)
+    results = each_group(ctx) do stack, win
+        Fring.refine_scan_dispersion!(
+            ctx.θ, stack, win, delay_plan, disp_plan, ctx.gauge, ctx.nant; ties,
+        )
+        Fring.refine_scan_sbd!(ctx.θ, stack, win, sbd_plans, ctx.gauge, ctx.nant)
+        nothing
+    end
+    return (;
+        nscans = length(results),
+        dispersion_applied = disp_plan !== nothing,
+        sbd_applied = sbd_plans !== nothing,
     )
-    return nothing
 end
 ```
 
@@ -211,32 +191,18 @@ within the step's *own* private model, which the step itself compiled — that
 is what keeps `findfirst` honest. A step whose model names the component it
 needs can skip routers entirely and reach it through `ctx.layout.plantree`.
 
-`process_scan!` runs the specialized fits per scan (both write per-scan θ
-slots, which are disjoint across groups — hence `fusable_grouping = :scan`),
-and `finish_pass!` publishes what was actually solved:
-
-```julia
-function finish_pass!(s::DispersionSBDFit, ctx::SolveContext)
-    setup = ctx.scratch[:disp_sbd_setup]
-    return (;
-        nscans = length(ctx.scratch[:pass_results]),
-        dispersion_applied = setup.disp_plan !== nothing,
-        sbd_applied = setup.sbd_plans !== nothing,
-    )
-end
-```
-
 ## Diagnostics and logging
 
-`finish_pass!`'s returned `NamedTuple` **is** the step logging interface:
-every key lands on the step's own `StepSolution.info`, readable via
+The `NamedTuple` `solve` returns **is** the step logging interface: every key
+lands on the step's own `StepSolution.info`, readable via
 [`stage_info`](@ref Gustavo.Calibration.stage_info)`(sol, :refine)`. The
-runner adds `t_pass` and a per-scan `timing` `DimStack` for
-free. Publish per-scan quantities in global scan order with
-[`scan_values`](@ref):
+runner adds `t_pass` and a per-scan `timing` `DimStack`. A per-scan quantity
+is a vector built from `each_group`'s results, which are already in scan-group
+order:
 
 ```julia
-scan_values(res -> res.r.residual_rms, ctx.scratch[:pass_results], ngroups; default = NaN)
+results = each_group((stack, win) -> residual_rms(stack, win), ctx)
+return (; residual_rms = results)
 ```
 
 ## Station heterogeneity

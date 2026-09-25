@@ -1,14 +1,13 @@
-# ── BaselineFringeFit stage: the default fringe model + the matched-filter estimator ──
+# ── BaselineFringeFit stage: the default fringe model + the matched filter ────
 #
 # The composable pipeline's fringe stage in three parts:
 #
 # - `default_fringe_terms` — what is solved by default: a `(; phase)` tree of
 #   named components, each declaring its own feed scope through its tying. The
 #   gauge pin is run-wide, an argument of `fit`.
-# - `MatchedFilter <: AbstractFringeEstimator` — how it is estimated. The search
-#   and `Stationization` options live on the estimator rather than the model, so
-#   that another estimator plugs in without inheriting them.
-# - The stage machinery the runner drives through the streaming layer: residual
+# - What the matched filter (the per-baseline search and the station solve)
+#   can fit and requires of a model.
+# - The stage machinery the step drives through the streaming layer: residual
 #   cubes for `rounds > 1`, the stage-B component filter, and the
 #   detection/flag tables recorded on the solution.
 
@@ -75,7 +74,7 @@ default) fits an offset per scan, so its scan-to-scan scatter is an
 instrument-stability diagnostic and no column couples scans; `GlobalTime()`
 fits one offset per station for the whole track (the EHT-HOPS / rPICARD
 assumption) — bright scans pin it and weak scans inherit it, at the cost of
-coupling every scan into one system, which forgoes scan fusion.
+coupling every scan into one system, solved after every scan is searched.
 
 There is no inter-feed phase offset. A feed-2 constant is not separable from
 the source's cross-hand phase (the model has no source column), so fitting
@@ -101,52 +100,6 @@ default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = GainMod
         rate = GainComponent(Rate(); Ti = PerScan(), Feed = SharedFeeds()),
     ),
 )
-
-"""
-    MatchedFilter(; search = FringeSearch(), closure = Stationization(), rounds = 1)
-
-How the fringe stage is estimated (an [`AbstractFringeEstimator`](@ref)): a
-per-baseline delay/rate matched-filter `search` on every scan group, then
-the closure-screened station WLS (`closure`) that ties the feeds. With one
-round and an all-per-scan model each scan's station systems solve as the
-scan is searched, so the pass is scan-local ([`scan_local_solve`](@ref)); a
-track-global column or `rounds > 1` instead pools every scan's detections
-into one solve at the end of the pass.
-
-`rounds` re-runs the search on the residual of the current solution. A
-re-search needs the whole pass finished first, so `rounds > 1` also flips
-the enclosing `BaselineFringeFit` step's `fusable_grouping` to `:global` and the
-step takes its own streaming pass.
-
-The models it fits: a `Delay`, `Rate` or `ConstantTerm` spanning the whole band
-(`Frequency = GlobalFrequency()`), under any feed scope, with a time
-segmentation no finer than a scan. One search per scan group measures one
-delay, rate and phase per scan, so a segmentation that splits a scan — a
-`TimeBlocks` shorter than the scans, `PerIntegration` — asks for θ columns the
-search has no measurement to fill and is rejected when the step compiles the
-model. A segmentation *coarser* than a scan is fitted: one column shared by
-several scans is written by all of them. The model has phase components only.
-`default_fringe_terms` is the standard model; the per-band and dispersive terms
-belong to [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit).
-
-The `search` measures every baseline and gates nothing; `closure.pfa_max` is
-the one detection threshold, deciding which measurements are real fringes
-and so which stations are calibrated (see [`Stationization`](@ref)).
-
-After the station solve closes, every cell is re-measured at the delay and
-rate the solution predicts ([`steer_scan`](@ref)), ungated: a station in the
-fringe group has its baselines measured at the known fringe location to
-arbitrarily low SNR. `steer_cells` sizes the trial count of the recorded
-`pfa_steer` (a significance a caller may read, not a threshold);
-`steer_cells = 0` skips steering. Steering runs only where the solve is
-scan-local; under a pooled solve the steered columns are `NaN`.
-"""
-Base.@kwdef struct MatchedFilter <: AbstractFringeEstimator
-    search::FringeSearch = FringeSearch()
-    closure::Stationization = Stationization()
-    rounds::Int = 1
-    steer_cells::Float64 = 9.0
-end
 
 # ── Model validation ─────────────────────────────────────────────────────────
 
@@ -182,19 +135,19 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
     typeof(a.term) === typeof(b.term) &&
     a.Ti == b.Ti && a.Frequency == b.Frequency && a.Feed == b.Feed
 
-# What `MatchedFilter` does with a compiled component's θ block:
+# What the matched filter does with a compiled component's θ block:
 #
 #   :delay / :rate / :phase — stage B's station system of that kind writes it,
 #                             from the per-baseline search observable of the
 #                             same name.
 #   nothing                 — the matched filter does not touch it.
 #
-# This is one estimator's vocabulary, hence private: a global least-squares
-# fringe fitter fits θ through `evaluate_gains` directly.
+# This is the matched filter's vocabulary, hence private: a global
+# least-squares fringe fitter fits θ through `evaluate_gains` directly.
 #
 # The stage-B kinds cover the single-parameter, band-wide terms whose observable
 # the search measures. Everything else must map to `nothing`, so that it is
-# unfittable by this estimator rather than approximated: `_solve_kind_cols!`
+# unfittable by the matched filter rather than approximated: `_solve_kind_cols!`
 # writes one θ column per (station, feed, time) node — the block's first
 # parameter at the first frequency segment — so a multi-parameter term such as a
 # polynomial would have its trailing parameters left at zero, and a
@@ -234,7 +187,7 @@ function fringe_stage_components(model, layout)
     return comps
 end
 
-# ── MatchedFilter's capability ───────────────────────────────────────────────
+# ── The matched filter's capability ──────────────────────────────────────────
 
 # One search per scan group yields one (delay, rate, phase) per scan, written to
 # the θ column holding the scan's first epoch. A term whose time segmentation
@@ -242,8 +195,7 @@ end
 # while `calibrate` places each sample in the column its own epoch falls in, so
 # the geometry decides this as much as the term does: `TimeBlocks` coarser than
 # the scans is fitted, finer is not.
-can_fit(::MatchedFilter, tc, geom) =
-    matched_kind(tc) !== nothing && !splits_a_scan(tc.Ti, geom)
+fringe_can_fit(tc, geom) = matched_kind(tc) !== nothing && !splits_a_scan(tc.Ti, geom)
 
 # Whether `seg` resolves more than one time segment inside any one scan.
 function splits_a_scan(seg, geom)
@@ -256,26 +208,15 @@ function splits_a_scan(seg, geom)
     return false
 end
 
-# One round and an all-per-scan model make the station systems
-# block-diagonal per scan, so each scan's WLS closes inside `estimate_scan!`
-# and the pass is scan-local. A cross-scan time segmentation (a `GlobalTime`
-# inter-feed offset shares a column across scans) or `rounds > 1` (the
-# re-search reads the whole pass's residual) each force the pooled path.
-function scan_local_solve(est::MatchedFilter, m::GainModel)
-    est.rounds <= 1 || return false
-    trees = (m.phase, (e.phase for e in values(m.stations) if haskey(e, :phase))...)
-    return all(t -> all(component_is_per_scan, _flatten_components(t)), trees)
-end
-
 # What the matched filter requires of a `(; phase, logamp)` model tree. Each
-# absent item costs the estimator its own output silently rather than crashing:
+# absent item costs the step its own output silently rather than crashing:
 # `solve_station_systems!` skips a kind with no components, dropping every
 # scan's search estimate for that observable, and `refine_scan_dispersion!`
 # skips the Δτ half of the joint (Δτ, dTEC) fit when the per-scan delay plan is
 # missing, biasing the dTEC it does report by exactly the degeneracy the joint
 # fit exists to break.
-function validate_model(est::MatchedFilter, model)
-    name = nameof(typeof(est))
+function validate_fringe_model(model)
+    name = "BaselineFringeFit"
     isempty(_flatten_components(model.logamp)) || throw(
         ArgumentError(
             "$name fits phase components only; the fringe model's `logamp` group " *

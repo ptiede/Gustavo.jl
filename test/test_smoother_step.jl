@@ -166,31 +166,25 @@ end
         @test all(>(10), filter(isfinite, sol_fs[:fringe].steps[1].info.scan_snr))
     end
 
-    @testset "scan-local fusion ≡ a pass per step" begin
-        # `DispersionSBDFit |> AdhocPhase` is the one adjacent pair of
-        # scan-local steps among the built-ins, so the runner solves both in ONE
-        # read of the data. The oracle is the composition a caller can write by
-        # hand — separate `fit` calls of one step each, which never fuse.
+    @testset "a pipeline ≡ its steps fit separately" begin
+        # The oracle is the composition a caller can write by hand: separate
+        # `fit` calls of one step each, chained through `ApplySolution`.
         ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
         pre = FP.ApplySolution(sol_n[:fringe])
 
-        sol_fused = fit(pre |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
-        @test keys(sol_fused) == [:refine, :adhoc]
-        # Neither half of the fused run is vacuous.
-        @test sol_fused[:refine].steps[1].layout.nθ > 0
-        @test any(!=(0), sol_fused[:refine].steps[1].θ)
-        @test any(!=(0), sol_fused[:adhoc].steps[1].θ)
+        sol_pipe = fit(pre |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test keys(sol_pipe) == [:refine, :adhoc]
+        # Neither step is vacuous.
+        @test sol_pipe[:refine].steps[1].layout.nθ > 0
+        @test any(!=(0), sol_pipe[:refine].steps[1].θ)
+        @test any(!=(0), sol_pipe[:adhoc].steps[1].θ)
 
         sol_a = fit(pre |> ds, uvset; gauge = PinAntenna(1))
         refine_tf = FP.ApplySolution(sol_a[:refine])
         sol_b = fit(pre |> refine_tf |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
-        @test sol_fused[:refine].steps[1].θ == sol_a[:refine].steps[1].θ
-        @test sol_fused[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
+        @test sol_pipe[:refine].steps[1].θ == sol_a[:refine].steps[1].θ
+        @test sol_pipe[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
 
-        # A default BaselineFringeFit (one round, all-per-scan terms) solves each
-        # scan's station systems inside its own `process_scan!`, so the whole
-        # default chain is one run of THREE scan-local steps — one read of the
-        # data — and still ≡ the same steps fit separately.
         sol_3 = fit(BaselineFringeFit() |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test keys(sol_3) == [:fringe, :refine, :adhoc]
         sol_f1 = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
@@ -201,15 +195,13 @@ end
         @test sol_3[:fringe].steps[1].θ == sol_f1[:fringe].steps[1].θ
         @test sol_3[:refine].steps[1].θ == sol_r1[:refine].steps[1].θ
         @test sol_3[:adhoc].steps[1].θ == sol_a1[:adhoc].steps[1].θ
-        # The scan-local fringe pass reports the same flags/diagnostics shape.
+        # The fringe step reports the same flags and diagnostics either way.
         @test sol_3.info.flagged_ant == sol_f1.info.flagged_ant
         @test sol_3.info.flagged_scan == sol_f1.info.flagged_scan
         @test sol_3[:fringe].steps[1].info.scan_snr == sol_f1[:fringe].steps[1].info.scan_snr
 
-        # A fused run divides each step's gains out of the resident scan in
-        # place, so with no transform chain in front of it — the one case where
-        # materialization hands back an eager set's own arrays — it must work on
-        # copies. The caller's data is never written.
+        # With no transform chain in front of a step, materialization may hand
+        # back an eager set's own arrays; the caller's data is never written.
         snap = Dict(
             k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
                 for (k, l) in pairs(UVP.branches(uvset))

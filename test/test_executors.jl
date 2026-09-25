@@ -22,20 +22,20 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
 @testset "Executor seam" begin
     @testset "group dispatch across outer schedulers" begin
         for ex in (DynamicScheduler(), StaticScheduler(), GreedyScheduler())
-            res = ST._scheduled_map(
+            res = Gustavo._scheduled_map(
                 x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2]; executor = _cap(ex, 4),
             )
             @test res == [10, 20, 30, 40, 50, 60, 70, 80]   # items order
             # Heaviest item first: with a single task, dispatch order IS run order.
             seen = Int[]
-            ST._scheduled_map(
+            Gustavo._scheduled_map(
                 x -> push!(seen, x), 1:4, [1, 9, 3, 5]; executor = _cap(ex, 1),
             )
             @test seen == [2, 4, 3, 1]
             # The task cap holds — it is what bounds resident scan groups.
             live = Threads.Atomic{Int}(0)
             peak = Threads.Atomic{Int}(0)
-            ST._scheduled_map(1:16, collect(16:-1:1); executor = _cap(ex, 3)) do x
+            Gustavo._scheduled_map(1:16, collect(16:-1:1); executor = _cap(ex, 3)) do x
                 Threads.atomic_max!(peak, Threads.atomic_add!(live, 1) + 1)
                 sleep(0.02)
                 Threads.atomic_sub!(live, 1)
@@ -44,11 +44,11 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
             @test peak[] <= 3
             # Empty input.
             @test isempty(
-                ST._scheduled_map(identity, Int[], Float64[]; executor = _cap(ex, 2)),
+                Gustavo._scheduled_map(identity, Int[], Float64[]; executor = _cap(ex, 2)),
             )
             # A failed group task rethrows its own exception.
             err = try
-                ST._scheduled_map(
+                Gustavo._scheduled_map(
                     x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1]; executor = _cap(ex, 1),
                 )
                 nothing
@@ -63,7 +63,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
     @testset "an unbacked outer executor fails fast" begin
         # No `_scheduled_map(::UnbackedExecutor, …)` method — a custom backend
         # must add one (the seam is open by dispatch, not by subtyping).
-        @test_throws MethodError ST._scheduled_map(
+        @test_throws MethodError Gustavo._scheduled_map(
             identity, 1:3, [1, 1, 1]; executor = UnbackedExecutor(),
         )
         # Likewise for the memory gate: a scheduler whose task count cannot be

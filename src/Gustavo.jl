@@ -11,6 +11,7 @@ import DimensionalData
 # bare `using Gustavo` can name them in
 # `ExecutionConfig(outer_executor = …, inner_executor = …)`.
 using OhMyThreads: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
+using OhMyThreads: Scheduler, tforeach
 
 using LinearAlgebra: BLAS
 import StatsAPI
@@ -49,7 +50,7 @@ export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, resolve_gauge
 export calibrate
 export BaselineFringeFit, DispersionModel, SingleBandDelay, default_fringe_terms,
-    MatchedFilter, DispersionSBDFit, Bandpass, default_bandpass_terms, AdhocPhase,
+    DispersionSBDFit, Bandpass, default_bandpass_terms, AdhocPhase,
     default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 # The gain-model vocabulary: everything a step's `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
@@ -68,8 +69,7 @@ export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 export fit
 export SolveStep, ExecutionConfig, ProgressLogger
 export outer_executor, inner_executor
-export start_pass!, process_scan!, finish_pass!, scan_values
-export model_components, provides, required_grouping, fusable_grouping
+export each_group, model_components, provides
 export supports_station_heterogeneity
 # Re-export the transform vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
@@ -78,10 +78,14 @@ export CalFunction, ApplySolution, StationWeightScale, FlagChannels, AprioriPreC
 export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ScanStream, scan_stream
 export search_scan
-export map_groups, foreach_group
 # The solution surface: the container, selection (`sol[...]`), the two verbs,
 # and serialization.
 export CalibrationSolution, StepSolution, stage_info
 export component_names, gains, parameters
 export save_solution, load_solution, recorded_transforms
+
+# A step author extends `solve`; unexported because the name is common.
+@static if VERSION >= v"1.11"
+    eval(Meta.parse("public solve, SolveContext"))
+end
 end

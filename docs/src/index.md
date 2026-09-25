@@ -73,7 +73,7 @@ method, `apply_transform!(t, stack, win; executor)`.
 
 **Models.** Each solve step separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —
-from HOW it is solved (a pluggable estimator or smoother object on the step).
+from HOW it is solved (the step's options, or a pluggable smoother object).
 
 **Verbs.** [`fit`](@ref) solves and returns a
 [`CalibrationSolution`](@ref Gustavo.Calibration.CalibrationSolution) without
@@ -99,9 +99,9 @@ Three seams, in increasing scope:
 
 - a new **gain term** — a physical effect in the forward model:
   [Authoring a new gain term](@ref authoring-terms);
-- a new **estimator or smoother** behind an existing step — a different way
-  to solve the same model: see
-  [`AbstractFringeEstimator`](@ref Gustavo.Fring.AbstractFringeEstimator) and
+- a new **smoother** behind an existing step — a different way to solve the
+  same model: see
   [`AbstractBandpassSmoother`](@ref Gustavo.Fring.AbstractBandpassSmoother);
-- a new **pipeline step** — a solver with its own streaming pass:
+- a new **pipeline step** — a solver that reads the data through
+  [`each_group`](@ref Gustavo.each_group):
   [Authoring a pipeline step](@ref authoring-steps).

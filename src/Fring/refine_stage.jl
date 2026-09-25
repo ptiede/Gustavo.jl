@@ -3,7 +3,7 @@
 # Assembles the per-baseline measurements from `refine_search.jl` per scan and
 # station-solves them, through `solve_station_systems!`, into the private
 # per-scan θ columns `DispersionSBDFit` owns. Driven by `DispersionSBDFit`'s
-# visitor hooks (`src/pipeline/steps.jl`) on data already fringe-corrected
+# `solve` (`src/pipeline/steps.jl`) on data already fringe-corrected
 # through the pipeline's transform chain, so neither kernel evaluates a gain.
 
 # The view's grp-local channel ranges per spectral window (the concat cube's

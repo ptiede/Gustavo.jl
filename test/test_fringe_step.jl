@@ -72,7 +72,7 @@
         solm = fit(
             BaselineFringeFit(
                 model = default_fringe_terms(),
-                estimator = MatchedFilter(rounds = 2),
+                rounds = 2,
             ) |> AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
             gauge = PinAntenna(1),
@@ -80,7 +80,7 @@
         sol = fit(
             BaselineFringeFit(
                 model = default_fringe_terms(),
-                estimator = MatchedFilter(rounds = 2),
+                rounds = 2,
             ), uvset,
             gauge = PinAntenna(1),
         )
@@ -194,7 +194,8 @@
         uvset, _ = _build_fringe_uvset()
         # The model is the component tree alone (the gauge pin is run-wide, an
         # argument of `fit`) — no per-effect fields or keywords on BaselineFringeFit.
-        @test fieldnames(typeof(BaselineFringeFit())) == (:model, :estimator)
+        @test fieldnames(typeof(BaselineFringeFit())) ==
+            (:model, :search, :closure, :rounds, :steer_cells)
 
         # The options the legacy bridge used to reject (custom Stationization,
         # the inter-feed rate opt-in, arbitrary CalFunction transforms) run in
@@ -206,7 +207,7 @@
                         default_fringe_terms();
                         phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
                     ),
-                    estimator = MatchedFilter(closure = FP.Stationization(pfa_max = 1.0e-2)),
+                    closure = FP.Stationization(pfa_max = 1.0e-2),
                 ),
                 Bandpass(), AdhocPhase()],
             uvset,
@@ -334,146 +335,30 @@
     end
 end
 
-# ── The estimator seam, exercised from outside the package ───────────────────
-#
-# `AbstractFringeEstimator` is a supported extension point, so the proof is an
-# estimator defined HERE — not in `src/` — driven all the way through `fit`.
+# ── What the fringe step can fit ─────────────────────────────────────────────
 
-# Delegates both hooks to a MatchedFilter it wraps, counting the calls. Anything
-# it gets wrong shows up as a θ difference against the same fit run directly.
-struct _ProbeEstimator{E <: FP.AbstractFringeEstimator} <: FP.AbstractFringeEstimator
-    inner::E
-    scans::Base.RefValue{Int}
-    passes::Base.RefValue{Int}
-end
-_ProbeEstimator(inner) = _ProbeEstimator(inner, Ref(0), Ref(0))
-
-function FP.estimate_scan!(e::_ProbeEstimator, ctx, step, stack, win)
-    e.scans[] += 1
-    return FP.estimate_scan!(e.inner, ctx, step, stack, win)
-end
-function FP.finish_estimate!(e::_ProbeEstimator, ctx, step)
-    e.passes[] += 1
-    return FP.finish_estimate!(e.inner, ctx, step)
-end
-# A wrapper fits exactly what it wraps, so both capability hooks forward too.
-FP.can_fit(e::_ProbeEstimator, tc, geom) = FP.can_fit(e.inner, tc, geom)
-FP.validate_model(e::_ProbeEstimator, comps) = FP.validate_model(e.inner, comps)
-
-# Implements neither solve hook: must fail loudly rather than solve nothing.
-# Claims the whole model so the failure is the missing hook, not the capability
-# check that runs before it.
-struct _SilentEstimator <: FP.AbstractFringeEstimator end
-FP.can_fit(::_SilentEstimator, tc, geom) = true
-
-# The independence probe: implements the interface and NOTHING else. It writes no
-# θ and publishes none of the matched filter's diagnostic scratch tables, so it
-# fails if any of them is secretly required to assemble a solution.
-struct _NullEstimator <: FP.AbstractFringeEstimator
-    scans::Base.RefValue{Int}
-end
-_NullEstimator() = _NullEstimator(Ref(0))
-function FP.estimate_scan!(e::_NullEstimator, ctx, step, stack, win)
-    e.scans[] += 1
-    return (; max_snr = NaN)
-end
-FP.finish_estimate!(::_NullEstimator, ctx, step) = (; ncomp = 0)
-FP.can_fit(::_NullEstimator, tc, geom) = true
-
-# Declares no capability at all — the default. Every model term is unclaimed.
-struct _UnclaimingEstimator <: FP.AbstractFringeEstimator end
-FP.estimate_scan!(::_UnclaimingEstimator, ctx, step, stack, win) = (; max_snr = NaN)
-FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
-
-@testset "fringe estimator seam" begin
+@testset "fringe step capability" begin
     uvset, _ = _build_fringe_uvset()
     model = default_fringe_terms()
 
-    @testset "an out-of-package estimator drives the whole pipeline" begin
-        probe = _ProbeEstimator(MatchedFilter())
-        sol = fit(
-            BaselineFringeFit(; model, estimator = probe) |> Bandpass() |>
-                AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
-            uvset,
-            gauge = PinAntenna(1),
-        )
-        ref = fit(
-            BaselineFringeFit(; model) |> Bandpass() |>
-                AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
-            uvset,
-            gauge = PinAntenna(1),
-        )
-        # Bit-identical, not approximate: the seam must not perturb the solve.
-        @test keys(sol) == keys(ref)
-        @test all(a.θ == b.θ for (a, b) in zip(sol.steps, ref.steps))
-        @test probe.scans[] == sol.info.nscan
-        @test probe.passes[] == 1
+    @testset "the solution records the search configuration" begin
+        sol = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna(1))
+        @test sol.info.search == FP.FringeSearch()
+        @test stage_info(sol, :fringe).flagged_ant == sol.info.flagged_ant
     end
 
-    @testset "the step's refine service reaches an out-of-package estimator" begin
-        # Downstream stages depend on it, so a third-party estimator must get it
-        # without publishing it itself.
-        probe = _ProbeEstimator(MatchedFilter())
-        sol = fit(
-            BaselineFringeFit(; estimator = probe) |>
-                Bandpass(),
-            uvset,
-            gauge = PinAntenna(1),
-        )
-        @test any(r -> r.name === :bandpass, sol.steps)
-    end
-
-    @testset "an estimator publishing no diagnostics still yields a solution" begin
-        null = _NullEstimator()
-        sol = fit(BaselineFringeFit(; model, estimator = null), uvset; gauge = PinAntenna(1))
-        fringe = sol[:fringe].steps[1]
-        @test null.scans[] == sol.info.nscan
-        @test all(iszero, fringe.θ)     # it solved nothing, by construction
-        @test !haskey(fringe.info, :det_snr)     # no detections published at all
-        @test isempty(sol.info.flagged_ant)
-        @test !haskey(fringe.info, :scan_snr)
-        # `search` is MatchedFilter provenance, so this solution carries none.
-        @test !haskey(sol.info, :search)
-        @test haskey(fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna(1)).info, :search)
-    end
-
-    @testset "an estimator implementing neither hook errors by name" begin
-        @test_throws "does not implement the fringe estimator interface" fit(
-            BaselineFringeFit(; model, estimator = _SilentEstimator()), uvset,
-            gauge = PinAntenna(1),
-        )
-        @test_throws "estimate_scan!" fit(
-            BaselineFringeFit(; model, estimator = _SilentEstimator()), uvset,
-            gauge = PinAntenna(1),
-        )
-    end
-
-    @testset "an estimator that declares no capability is rejected, not run" begin
-        # `can_fit`'s default is `false` and the STEP drives the loop, so the
-        # estimator that never thought about capability fails at model-compile
-        # time instead of returning a solution full of unwritten θ.
-        @test_throws "cannot fit the component" fit(
-            BaselineFringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
-            gauge = PinAntenna(1),
-        )
-        @test_throws "_UnclaimingEstimator" fit(
-            BaselineFringeFit(; model, estimator = _UnclaimingEstimator()), uvset,
-            gauge = PinAntenna(1),
-        )
-    end
-
-    @testset "a term the estimator cannot fit is rejected by name" begin
+    @testset "a term the step cannot fit is rejected by name" begin
         # A polynomial-in-frequency phase is a legitimate gain term that the
         # matched filter has no observable for: its θ block would stay at zero
         # while the solution looked fitted.
         poly = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())
-        @test_throws "MatchedFilter cannot fit the component" fit(
+        @test_throws "BaselineFringeFit cannot fit the component" fit(
             BaselineFringeFit(model = merge(default_fringe_terms(); phase = (; poly))), uvset,
             gauge = PinAntenna(1),
         )
     end
 
-    @testset "a model missing a term the estimator requires is rejected by name" begin
+    @testset "a model missing a term the step requires is rejected by name" begin
         # The kind is missing outright: nothing to write the rate search into.
         norate = GainModel(; phase = Base.structdiff(default_fringe_terms().phase, (; rate = nothing)))
         @test_throws "requires a rate component" fit(BaselineFringeFit(model = norate), uvset; gauge = PinAntenna(1))
@@ -501,7 +386,7 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
             t -> CAL.GainComponent(t.term; Ti = CAL.TimeBlocks(150.0), Frequency = t.Frequency, Feed = t.Feed),
             default_fringe_terms().phase,
         )
-        @test_throws "MatchedFilter cannot fit the component" fit(
+        @test_throws "BaselineFringeFit cannot fit the component" fit(
             BaselineFringeFit(model = GainModel(; phase = subscan)), uvset,
             gauge = PinAntenna(1),
         )
@@ -515,35 +400,27 @@ FP.finish_estimate!(::_UnclaimingEstimator, ctx, step) = (; ncomp = 0)
 
         # The same boundary expressed as an instrument scan edge, and the
         # per-integration limit the classifier used to special-case.
-        @test !FP.can_fit(FP.MatchedFilter(), mbd(CAL.InstrumentScans([geom.times[1] + 150.0])), geom)
-        @test !FP.can_fit(FP.MatchedFilter(), mbd(CAL.PerIntegration()), geom)
+        @test !FP.can_fit(BaselineFringeFit(), mbd(CAL.InstrumentScans([geom.times[1] + 150.0])), geom)
+        @test !FP.can_fit(BaselineFringeFit(), mbd(CAL.PerIntegration()), geom)
 
         # Coarser than a scan is fitted: one column several scans share is
         # written by all of them. The rule is the segmentation against the
         # geometry, not the segmentation alone — 3600 s blocks do not split a
         # 330 s scan.
-        @test FP.can_fit(FP.MatchedFilter(), mbd(CAL.PerScan()), geom)
-        @test FP.can_fit(FP.MatchedFilter(), mbd(CAL.GlobalTime()), geom)
-        @test FP.can_fit(FP.MatchedFilter(), mbd(CAL.TimeBlocks(3600.0)), geom)
+        @test FP.can_fit(BaselineFringeFit(), mbd(CAL.PerScan()), geom)
+        @test FP.can_fit(BaselineFringeFit(), mbd(CAL.GlobalTime()), geom)
+        @test FP.can_fit(BaselineFringeFit(), mbd(CAL.TimeBlocks(3600.0)), geom)
     end
 
     @testset "the matched filter's kind vocabulary stays private" begin
-        # `matched_kind` answers "what does THIS estimator do with this
-        # component" — one estimator's vocabulary, so retiring the estimator
-        # must not be a public API removal.
+        # `matched_kind` answers "what does the matched filter do with this
+        # component", an implementation detail of the fringe step.
         @test !(:matched_kind in names(Gustavo.Fring))
         @test !(:matched_kind in names(Gustavo))
         @test :can_fit in names(Gustavo.Fring)
         @test :validate_model in names(Gustavo.Fring)
     end
 
-    @testset "the estimator is carried as a type parameter, not an abstract field" begin
-        # Removing the old `::MatchedFilter` assertion would otherwise put a
-        # dynamic dispatch in the per-scan path.
-        @test isconcretetype(fieldtype(typeof(BaselineFringeFit()), :estimator))
-        @test fieldtype(typeof(BaselineFringeFit(estimator = _SilentEstimator())), :estimator) ===
-            _SilentEstimator
-    end
 end
 
 # ── Dispersion as a model of its own ─────────────────────────────────────────
@@ -557,7 +434,7 @@ end
         nspw = 4, nchan = 8, dtec = [0.0, 3.0, -2.0, 1.5],
         spw_origins = [3.0e9, 5.0e9, 8.0e9, 1.03e10], feed_common = true,
     )
-    mf = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid()))
+    search = FP.FringeSearch(algorithm = FP.FullGrid())
 
     @testset "the ionosphere is DispersionSBDFit's own field, not the fringe model's" begin
         @test !any(t -> t.term isa CAL.Dispersion, default_fringe_terms().phase)
@@ -588,7 +465,7 @@ end
         # :refine).dispersion_applied` (see the dispersion testset in
         # test_pipeline.jl). What this asserts
         # is the model structure DispersionSBDFit's presence/field builds.
-        ff = BaselineFringeFit(estimator = mf)
+        ff = BaselineFringeFit(; search)
         on = fit(ff |> DispersionSBDFit(), uvset; gauge = PinAntenna(1))
         off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset; gauge = PinAntenna(1))
         on_ref, off_ref = on[:refine].steps[1], off[:refine].steps[1]
@@ -616,10 +493,9 @@ end
         @test !CAL._dispersion_enabled(nothing, geom_n)
     end
 
-    @testset "colocated_sep reaches DispersionSBDFit's own start_pass! through the step" begin
+    @testset "colocated_sep reaches DispersionSBDFit through the step" begin
         # The tie is the dispersion model's, but DispersionSBDFit is the step
-        # that reads it (`_dtec_ties(s.dispersion, ctx.antennas)`), so it must
-        # arrive without the estimator knowing about it.
+        # that reads it (`_dtec_ties(s.dispersion, ctx.antennas)`).
         ants = Gustavo.UVData.metadata(
             first(values(Gustavo.UVData.branches(uvset)))
         ).antennas
@@ -629,12 +505,12 @@ end
     end
 
     @testset "delay and dTEC are still estimated jointly" begin
-        # The separation is of the specification only: DispersionSBDFit's own
-        # process_scan! fits both plans in one joint (Δτ, dTEC) grid search,
+        # The separation is of the specification only: DispersionSBDFit's
+        # per-scan kernel fits both plans in one joint (Δτ, dTEC) grid search,
         # because over a finite band the two are near-degenerate — confirmed by
         # both plans existing (and being solved, not left at zero) once the step
         # runs.
-        ff = BaselineFringeFit(estimator = mf)
+        ff = BaselineFringeFit(; search)
         sol = fit(ff |> DispersionSBDFit(), uvset; gauge = PinAntenna(1))
         refine = sol[:refine].steps[1]
         @test CAL._dispersion_plan(refine.model, refine.layout) !== nothing

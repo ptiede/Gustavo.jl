@@ -9,8 +9,7 @@ budgets, executors and `DimTree` leaves, not about fringes:
   schedulers and progress callback a stream is built from.
 - `transforms.jl` — [`AbstractDataTransform`](@ref), the per-materialization
   hook chain, and the scan `DimStack` + [`GeometryWindow`](@ref) it mutates.
-- `stream.jl` — [`ScanStream`](@ref) construction, group materialization, and
-  the concurrent pass runner [`map_groups`](@ref).
+- `stream.jl` — [`ScanStream`](@ref) construction and group materialization.
 
 This layer owns the group/budget/transform machinery and never names a
 consumer's kernels: it hands a materialized scan `DimStack` to whatever reads it
@@ -40,6 +39,5 @@ export station_weight_scale
 export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ScanStream, scan_stream, ScanGroupSpec
 export materialize_cube, materialize_leaves
-export map_groups, foreach_group
 
 end

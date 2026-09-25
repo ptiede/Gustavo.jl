@@ -39,13 +39,12 @@
         gauge = CAL.resolve_gauge(CAL.ZeroSumPhase(), String.(antennas.name))
         return Gustavo.SolveContext(
             model, layout, geom, zeros(layout.nθ), gauge, length(antennas),
-            antennas, stream, Dict{Symbol, Any}(),
+            antennas, stream, Gustavo.provides(step), Gustavo._PassTiming[],
         )
     end
     function process(step, s)
         ctx = step_context(step)
-        Gustavo.start_pass!(step, ctx)
-        r = Gustavo.process_scan!(step, ctx, s, win)
+        r = Gustavo._solve_group(step, ctx, Gustavo._group_setup(step, ctx), s, win)
         return ctx, r
     end
 

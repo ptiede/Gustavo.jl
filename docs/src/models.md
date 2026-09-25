@@ -124,7 +124,7 @@ whole-tree requirements via
 
 - [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_terms(), smoother = ...)`,
   [`AdhocPhase`](@ref Gustavo.AdhocPhase)`(model = default_adhoc_terms(), smoother = ...)`
-  and [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit)`(model = default_fringe_terms(), estimator = ...)`
+  and [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit)`(model = default_fringe_terms(), search = ...)`
   take a `GainModel`; the fringe step's model has phase components only
   ([`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms)).
 - [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)`(dispersion = DispersionModel(), sbd = SingleBandDelay())`

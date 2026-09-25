@@ -4,7 +4,6 @@
 #
 #   stream = scan_stream(uvset; transforms = [...])   # group + schedule, no read
 #   stack, win = materialize_cube(stream, spec)       # one group, transforms applied
-#   map_groups(stream) do spec ... end                # concurrent pass runner
 #
 # The data hook is the stream's TRANSFORM CHAIN (`AbstractDataTransform`, see
 # transforms.jl), applied at every materialization, so a solve, a re-run, and a
@@ -32,8 +31,8 @@ struct ByScan <: AbstractLeafGrouping end
     BySpw()
 
 One group per spw leaf (`(source, scan, spw)` granularity) — no frequency
-concatenation. For per-spw streaming work; steps that declare
-`required_grouping(step) == :scan_complete` cannot run under it.
+concatenation. For per-spw streaming work; the solve steps cannot run under
+it.
 """
 struct BySpw <: AbstractLeafGrouping end
 
@@ -83,8 +82,7 @@ A `UVSet` prepared for scan-group streaming: the ordered [`ScanGroupSpec`](@ref)
 the data-transform chain applied at every materialization, and the
 [`ExecutionConfig`](@ref) the run's parallelism, memory budget and progress
 reporting come from. Build with [`scan_stream`](@ref); consume with
-[`materialize_cube`](@ref) / [`materialize_leaves`](@ref) /
-[`map_groups`](@ref).
+[`materialize_cube`](@ref) / [`materialize_leaves`](@ref).
 
 `S` and `T` carry the group-spec and transform types the stream was built from.
 Reach the schedulers with [`outer_executor`](@ref) / [`inner_executor`](@ref).
@@ -476,103 +474,4 @@ function _transform_leaf(stream::ScanStream, spec::ScanGroupSpec, leaf; copy_arr
         executor = SerialScheduler(),
     )
     return base
-end
-
-# ── The pass runner: concurrent group execution (the executor seam) ──────────
-
-const _STREAM_PROGRESS_LOCK = ReentrantLock()
-
-_stream_progress(::Nothing, stage, done, total) = nothing
-function _stream_progress(cb, stage, done, total)
-    lock(_STREAM_PROGRESS_LOCK) do
-        try
-            cb(stage, Int(done), Int(total))
-        catch err
-            @warn "progress callback failed" stage err maxlog = 1
-        end
-    end
-    return nothing
-end
-
-"""
-    map_groups(work, stream::ScanStream;
-               progress = progress_callback(stream), stage = :pass) -> Vector
-
-Run `work(spec::ScanGroupSpec)` over the stream's groups on the stream's outer
-scheduler, heaviest group first so the long poles start
-immediately. Results return in group order. `work` must be independent across
-groups (all fringe passes qualify: disjoint per-scan θ slots / per-scan outputs).
-
-The outer scheduler alone decides how many groups run at once; [`scan_stream`](@ref)
-has already checked that many against the run's memory budget.
-
-This is the EXECUTOR SEAM: every full-data pass of the pipeline runs through
-here. `progress` defaults to the callback on the stream's
-[`ExecutionConfig`](@ref) and, when not `nothing`, is called
-`(stage, done, total)` per completed group.
-"""
-function map_groups(
-        work::F, stream::ScanStream;
-        progress = progress_callback(stream), stage::Symbol = :pass,
-    ) where {F}
-    groups = stream.groups
-    total = length(groups)
-    _stream_progress(progress, stage, 0, total)
-    done = Threads.Atomic{Int}(0)
-    function wrapped(spec)
-        r = work(spec)
-        _stream_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
-        return r
-    end
-    return _scheduled_map(
-        wrapped, groups, [s.charge for s in groups];
-        executor = outer_executor(stream),
-    )
-end
-
-"""
-    foreach_group(work, stream; kwargs...) -> nothing
-
-[`map_groups`](@ref) discarding results.
-"""
-foreach_group(work::F, stream::ScanStream; kwargs...) where {F} =
-    (map_groups(work, stream; kwargs...); nothing)
-
-# Largest-first parallel map: run `work` over `items` on `executor`, dispatching
-# the heaviest item (by `charges`) first so the long poles start immediately.
-# Results in `items` order. A failed worker rethrows after the other workers
-# drain the queue. `executor` is used exactly as configured — how many items run
-# at once is its decision, checked against the memory budget upstream.
-#
-# Each backend fills an `Any` sink and returns `map(identity, sink)`: `work`'s
-# return type is not known before it runs, and tasks write their slots
-# concurrently, so the sink has to admit any value; `map` then recovers the
-# concrete element type for whatever consumes the pass.
-function _scheduled_map(work::F, items, charges; executor = SerialScheduler()) where {F}
-    length(items) == length(charges) || throw(
-        DimensionMismatch("items and charges must match: $(length(items)) vs $(length(charges))"),
-    )
-    Base.require_one_based_indexing(items, charges)
-    return _scheduled_map(executor, work, items, charges)
-end
-
-# The SERIAL outer backend: each group runs to completion on the calling task in
-# `items` order — with one worker the dispatch order cannot matter. Within-scan
-# fan-out still goes through the inner executor.
-function _scheduled_map(::SerialScheduler, work::F, items, charges) where {F}
-    return map(work, items)
-end
-
-# The THREADED outer backend: `sched` runs the groups over the charge-sorted
-# index order. `GreedyScheduler` is the one that keeps largest-first meaningful
-# under uneven charges — it hands each task the next group off the queue — where
-# a chunking scheduler assigns groups to tasks up front. A backend with
-# different task-lifetime needs adds its own method on its executor type; the
-# seam is open by dispatch.
-function _scheduled_map(sched::Scheduler, work::F, items, charges) where {F}
-    out = Vector{Any}(undef, length(items))
-    tforeach(sortperm(charges; rev = true); scheduler = sched) do k
-        out[k] = work(items[k])
-    end
-    return map(identity, out)
 end

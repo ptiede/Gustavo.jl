@@ -42,10 +42,10 @@ include("Fring/statespace.jl")
 include("Fring/shapes.jl")
 include("Fring/adhoc.jl")
 include("Fring/phasecal.jl")
-# The composable-pipeline engine: the pluggable fringe-estimator strategy, the
+# The composable-pipeline engine: the solver capability checks, the
 # search over one streamed scan group, the model/plan routers, and the three
-# carved-out stage implementations the step visitors call into.
-include("Fring/estimators.jl")
+# carved-out stage implementations the steps call into.
+include("Fring/capability.jl")
 include("Fring/scan_search.jl")
 include("Fring/search_stage.jl")
 include("Fring/model_plans.jl")
@@ -147,9 +147,8 @@ export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_fla
 export delay_closure, print_delay_closure
 export AbstractDataTransform, apply_transform!, apply_transform
 export ApplySolution, StationWeightScale, FlagChannels, CalFunction, AprioriPreCal
-export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info
 export can_fit, validate_model
-export MatchedFilter, SingleBandDelay, BandGroups, default_fringe_terms
+export SingleBandDelay, BandGroups, default_fringe_terms
 # `DispersionModel` is `Calibration`'s (the propagation model beside the
 # `Dispersion` term it configures); re-exported so a caller driving the fringe
 # engine names it without a second `using`.
@@ -159,13 +158,7 @@ export ExecutionConfig, ProgressLogger, outer_executor, inner_executor
 export ScanStream, scan_stream, ScanGroupSpec
 export materialize_cube, materialize_leaves
 export search_scan
-export map_groups, foreach_group
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
 export plot_fringe_search
-
-# Documented estimator hook without an exported name; callers qualify it.
-@static if VERSION >= v"1.11"
-    eval(Meta.parse("public scan_local_solve"))
-end
 
 end

@@ -39,8 +39,8 @@ end
     outer_executor(x) -> Scheduler
 
 The ACROSS-scan scheduler of an [`ExecutionConfig`](@ref) or of the
-[`ScanStream`](@ref) built from one: how many scan groups [`map_groups`](@ref)
-keeps resident at once.
+[`ScanStream`](@ref) built from one: how many scan groups a pass keeps
+resident at once.
 """
 outer_executor(x::ExecutionConfig) = x.outer_executor
 
@@ -53,8 +53,7 @@ kernels ([`materialize_cube`](@ref) and the solves that run on its output).
 """
 inner_executor(x::ExecutionConfig) = x.inner_executor
 
-# The `(stage, done, total)` callback, or `nothing`. Unexported: pass reporting
-# is plumbed by `map_groups`, not assembled by callers.
+# The `(stage, done, total)` callback, or `nothing`.
 progress_callback(x::ExecutionConfig) = x.progress
 
 """

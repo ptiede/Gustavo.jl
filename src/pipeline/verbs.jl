@@ -3,9 +3,8 @@
 #     sol = fit(pipeline, uvset; gauge)               # solve
 #     out = calibrate(sol, uvset; post)               # apply, one scan group at a time
 #
-# `fit` runs each solve step in its own streaming pass, except where
-# consecutive scan-local steps share one (see `fusable_grouping`).
-# `calibrate` streams the recorded corrections, the gains and flags, and the
+# `fit` runs each solve step's `solve` on the data as the corrections and steps
+# before it leave it. `calibrate` streams the recorded corrections, the gains and flags, and the
 # output steps over each scan group, then `post`.
 
 # A solve's parallelism is across scan groups and, within a group, across
@@ -85,7 +84,7 @@ function calibrate(
     stream = Fring.scan_stream(uvset; transforms = recorded_transforms(sol), exec = exec)
     apriori = filter(x -> x isa AprioriAmplitude, sol.sequence)
     output = uv -> post(foldl((acc, a) -> _apply_apriori(a, acc), apriori; init = uv))
-    group_pairs = Fring.map_groups(stream; stage = :output) do spec
+    group_pairs = _map_groups(stream; stage = :output) do spec
         keyed = Fring.materialize_leaves(stream, spec)
         reduce_scan_output(
             stream.uvset, keyed, sol, output;
@@ -141,7 +140,7 @@ function assemble_output(uvset::UVSet, group_pairs)
     return DimensionalData.rebuild(uvset; branches = out_branches)
 end
 
-# ── The new-engine path: the compiled model + visitor pass runner ────────────
+# ── The runner ───────────────────────────────────────────────────────────────
 
 _resolve_run_gauge(g::AbstractGauge, ant_names) = resolve_gauge(g, ant_names)
 _resolve_run_gauge(::Nothing, ant_names) = throw(
@@ -152,21 +151,13 @@ _resolve_run_gauge(::Nothing, ant_names) = throw(
 )
 
 # Solve a pipeline: each solve step compiles and solves its own private
-# (model, layout, θ) — never a merged one — under the visitor contract
-# (start_pass!/process_scan!/finish_pass!). The steps are partitioned into
-# RUNS (`_fusable_run`), one streaming pass each: a run of consecutive
-# scan-local steps with no transform between them shares its pass, and
-# everything else runs alone. A step reads the data through the transform
-# chain as it stands at the step's position: the transforms listed before it,
-# in order, with each earlier step's own solution (`ApplySolution`) appended
-# where the step finished. Non-data info an earlier step published (e.g. the
-# fringe stage's per-scan SNR) reaches a later step through the ordered list
-# of finished `StepSolution`s, not a shared scratch dict.
+# (model, layout, θ), never a merged one. A step reads the data through the
+# transform chain as it stands at the step's position: the transforms listed
+# before it, in order, with each earlier step's own solution (`ApplySolution`)
+# appended where the step finished.
 function _run_pipeline(
         br, exec::ExecutionConfig, gauge_spec::Union{Nothing, AbstractGauge}, uvset::UVSet,
     )
-    solve_steps = br.solve_steps
-
     # A solve has ONE station axis, and a leaf's baseline pairs index that
     # leaf's own antenna table — so leaves that saw different sub-arrays number
     # the same station differently. Put them all on the union table first; a set
@@ -175,200 +166,73 @@ function _run_pipeline(
     gauge = _resolve_run_gauge(gauge_spec, _antenna_names(uvset))
     geom = build_geometry(uvset)
     antennas = UVData.union_antennas(uvset)
-    nant = length(antennas)
     spec = (; geom, antennas)
-    # `ScanStream`/`SolveContext` fix the transform-vector element type as a
-    # type parameter, so growing the chain means building a new stream (cheap:
-    # geometry only, no data read).
-    _build_stream(tfs) = Fring.scan_stream(uvset; geom = geom, transforms = tfs, exec = exec)
-    # Run-wide state shared across every step's own SolveContext.
-    scratch = Dict{Symbol, Any}()
     chain = Fring.AbstractDataTransform[]
     step_solutions = StepSolution[]
-    ctx = nothing
-    # A step compiles its own model against the run's geometry, and may
-    # legitimately compile no components at all (e.g. `DispersionSBDFit` with
-    # dispersion disabled and a band layout that can't support SBD either); it
-    # still runs under the visitor contract, with nothing to solve. The model is
-    # materialized against the run's antenna table here, so the context (and
-    # the solution's provenance) holds the concrete per-station trees the solve
-    # uses; a step that has not opted into station heterogeneity
-    # (`supports_station_heterogeneity`) is handed uniform models only —
-    # anything else is rejected before any data is read.
-    function _step_context(st, stream)
-        step_model = Calibration.materialize(model_components(st, spec), antennas, geom)
-        supports_station_heterogeneity(st) ||
-            Calibration.require_station_uniform(step_model, antennas, heterogeneity_rejector(st))
-        step_layout = plan_parameters(step_model, antennas, geom; require_nonempty = false)
-        return SolveContext(
-            step_model, step_layout, geom, zeros(step_layout.nθ),
-            gauge, nant, antennas, stream, scratch,
+    stream = nothing
+    for (st, before) in zip(br.solve_steps, br.before)
+        append!(chain, before)
+        # The stream fixes its transform types as a type parameter, so a longer
+        # chain means a new stream (geometry only, no data read).
+        stream = Fring.scan_stream(uvset; geom, transforms = copy(chain), exec)
+        ctx = _step_context(st, spec, gauge, stream)
+        t0 = time_ns()
+        info = solve(st, ctx)
+        info isa NamedTuple || throw(
+            ArgumentError(
+                "`solve(::$(nameof(typeof(st))), ctx)` must return a NamedTuple of " *
+                    "diagnostics, got a $(typeof(info))",
+            ),
         )
-    end
-    si = 1
-    while si <= length(solve_steps)
-        append!(chain, br.before[si])
-        # A transform between two steps ends the run: the later step must read
-        # its output.
-        run = _fusable_run(solve_steps, si)
-        stop = findfirst(k -> !isempty(br.before[k]), (si + 1):last(run))
-        run = stop === nothing ? run : si:(si + stop - 1)
-        si = last(run) + 1
-        stream = _build_stream(copy(chain))
-        run_steps = solve_steps[run]
-        contexts = [_step_context(st, stream) for st in run_steps]
-        ctx = last(contexts)
-        infos = length(run) == 1 ?
-            [_run_pass!(run_steps[1], contexts[1])] :
-            _run_fused_pass!(run_steps, contexts)
-        for (st, c, info) in zip(run_steps, contexts, infos)
-            push!(step_solutions, StepSolution(provides(st), c.model, c.layout, c.θ, info))
-        end
-        # Each step's own θ is undivided (it solves its own private model), so
-        # it joins the chain as-is and every later pass reads corrected data.
-        # Within a fused run the same corrections were applied to the
-        # resident scan instead, in the same order.
-        for (st, c) in zip(run_steps, contexts)
-            push!(chain, Fring.ApplySolution(_step_precal(st, c, geom)))
-        end
+        push!(
+            step_solutions,
+            StepSolution(provides(st), ctx.model, ctx.layout, ctx.θ, _with_timing(info, ctx, t0)),
+        )
+        # Each step's θ is undivided (it solves its own private model), so it
+        # joins the chain as-is and every later step reads corrected data.
+        push!(chain, Fring.ApplySolution(_step_precal(st, ctx, geom)))
     end
     return CalibrationSolution(
-        step_solutions, geom, _new_engine_info(ctx, br);
+        step_solutions, geom, _run_info(step_solutions, br, antennas, stream);
         sequence = Tuple(br.sequence), gauge = gauge_spec,
     )
 end
 
-# ── Pass partitioning: which steps share one read of the data ────────────────
-
-# The maximal run of steps starting at `first_i` that can share one streaming
-# pass: consecutive steps that each declare themselves scan-local
-# (`fusable_grouping === :scan`). The run's first step need not be, so every
-# pipeline partitions into runs: a `:global` step simply lands in a run of its
-# own and gets a pass to itself.
-function _fusable_run(solve_steps, first_i::Integer)
-    _fusable(st) = fusable_grouping(st) === :scan
-    _fusable(solve_steps[first_i]) || return first_i:first_i
-    last_i = first_i
-    while last_i < length(solve_steps) && _fusable(solve_steps[last_i + 1])
-        last_i += 1
-    end
-    return first_i:last_i
+# A step compiles its own model against the run's geometry, and may
+# legitimately compile no components at all (e.g. `DispersionSBDFit` with
+# dispersion disabled and a band layout that can't support SBD either); it
+# still runs, with nothing to solve. The model is materialized against the
+# run's antenna table here, so the context (and the solution's provenance)
+# holds the concrete per-station trees the solve uses; a step that has not
+# opted into station heterogeneity (`supports_station_heterogeneity`) is handed
+# uniform models only — anything else is rejected before any data is read.
+function _step_context(st::SolveStep, spec, gauge, stream)
+    (; geom, antennas) = spec
+    model = Calibration.materialize(model_components(st, spec), antennas, geom)
+    supports_station_heterogeneity(st) ||
+        Calibration.require_station_uniform(model, antennas, heterogeneity_rejector(st))
+    layout = plan_parameters(model, antennas, geom; require_nonempty = false)
+    return SolveContext(
+        model, layout, geom, zeros(layout.nθ), gauge, length(antennas), antennas,
+        stream, provides(st), _PassTiming[],
+    )
 end
 
-# One streaming pass per solve step: materialize each selected group, hand its
-# stack and geometry window to `process_scan!`, collect the per-group returns IN
-# group-INDEX ORDER into `ctx.scratch[:pass_results]`, then `finish_pass!`
-# (repeating the pass while it returns `repeat_pass = true` — residual
-# re-search rounds). Returns the step's diagnostics NamedTuple (`repeat_pass`
-# stripped, `t_pass`/`timing` added — see below) — the caller wraps it into a
-# `StepSolution` alongside this step's own `ctx.model`/`layout`/`θ`.
-function _run_pass!(step::SolveStep, ctx::SolveContext)
-    stage = provides(step)
+# A step's diagnostics plus `t_pass`, the wall time of its `solve`, and
+# `timing`, a `DimStack` over `Scan` of each group's `decode`/`work` seconds
+# summed over the step's passes.
+function _with_timing(info::NamedTuple, ctx::SolveContext, t0::UInt64)
     ngroups = length(ctx.stream.groups)
-    t0 = time_ns()
-    while true
-        start_pass!(step, ctx)
-        results = Fring.map_groups(ctx.stream; stage) do gspec
-            ta = time_ns()
-            stack, win = Fring.materialize_cube(ctx.stream, gspec)
-            tb = time_ns()
-            r = process_scan!(step, ctx, stack, win)
-            (; index = gspec.index, decode = (tb - ta) / 1.0e9, work = (time_ns() - tb) / 1.0e9, r)
-        end
-        ctx.scratch[:pass_results] = results
-        info = finish_pass!(step, ctx)
-        get(info, :repeat_pass, false) || return _pass_diagnostics(info, results, ngroups, t0)
+    decode, work = zeros(ngroups), zeros(ngroups)
+    for pass in ctx.passes
+        decode .+= pass.decode
+        work .+= pass.work
     end
-    return
+    timing = DimensionalData.DimStack((; decode, work), (UVData.Scan(1:ngroups),))
+    return (; info..., t_pass = (time_ns() - t0) / 1.0e9, timing)
 end
 
-# One streaming pass shared by a run of scan-local steps (see
-# `fusable_grouping` / `_fusable_run`): the group is materialized once, then
-# each step's `process_scan!` runs on it in declared order, and every step but
-# the last has its just-solved gains divided out of the resident scan before
-# the next one reads it. That division is the same `ApplySolution` the
-# transform chain applies between un-fused passes, on the same values in the
-# same order — so the run's θ is what separate passes would have produced,
-# reading and decoding the data once instead of once per step. Returns one
-# diagnostics NamedTuple per step, in step order.
-#
-# `t_pass` runs from the start of the shared pass, so each step reports the
-# run's elapsed time through its own `finish_pass!`; the per-scan `timing`
-# splits the group's cost the way it was actually incurred — the single decode
-# charged to the first step and each step's own `process_scan!` to itself.
-#
-function _run_fused_pass!(steps, contexts)
-    n = length(steps)
-    stream = first(contexts).stream
-    ngroups = length(stream.groups)
-    t0 = time_ns()
-    for (st, ctx) in zip(steps, contexts)
-        start_pass!(st, ctx)
-    end
-    results = Fring.map_groups(stream; stage = provides(last(steps))) do gspec
-        ta = time_ns()
-        stack, win = Fring.materialize_cube(stream, gspec)
-        tb = time_ns()
-        work = zeros(Float64, n)
-        rs = Vector{Any}(undef, n)
-        for k in eachindex(steps, contexts)
-            tk = time_ns()
-            rs[k] = process_scan!(steps[k], contexts[k], stack, win)
-            if k < n
-                as = Fring.ApplySolution(_step_precal(steps[k], contexts[k], contexts[k].geom))
-                apply_transform!(as, stack, win; executor = inner_executor(stream))
-            end
-            work[k] = (time_ns() - tk) / 1.0e9
-        end
-        (; index = gspec.index, decode = (tb - ta) / 1.0e9, work, rs)
-    end
-    infos = NamedTuple[]
-    for k in eachindex(steps, contexts)
-        ctx = contexts[k]
-        # Each step sees the pass results in the shape a step of its own always
-        # gets: its own per-scan return under `r`, and the share of the group's
-        # cost it caused.
-        ctx.scratch[:pass_results] = [
-            (;
-                res.index, decode = k == 1 ? res.decode : 0.0, work = res.work[k], r = res.rs[k],
-            ) for res in results
-        ]
-        info = finish_pass!(steps[k], ctx)
-        get(info, :repeat_pass, false) && throw(
-            ArgumentError(
-                "$(nameof(typeof(steps[k]))) declares `fusable_grouping` = :scan but its " *
-                    "`finish_pass!` requested `repeat_pass` — a step that needs the pass run " *
-                    "again is not scan-local. Declare :global."
-            )
-        )
-        push!(infos, _pass_diagnostics(info, ctx.scratch[:pass_results], ngroups, t0))
-    end
-    return infos
-end
-
-# Every step's diagnostics, whatever `finish_pass!` chose to return
-# (`repeat_pass` stripped), plus TWO fields the runner computes generically for
-# Any step from data `map_groups` already collected — no per-step code, no
-# per-step-name knowledge: `t_pass` (total pass wall time) and `timing` (a
-# `DimStack` over `Scan`, one row per selected group, `decode`/`work`
-# task-seconds, built with `scan_values` — the same primitive a custom step
-# uses for its own per-scan diagnostics). A third-party `SolveStep` gets both
-# automatically.
-function _pass_diagnostics(out, results, ngroups::Integer, t0::UInt64)
-    timing = DimensionalData.DimStack(
-        (;
-            decode = scan_values(res -> res.decode, results, ngroups; default = 0.0),
-            work = scan_values(res -> res.work, results, ngroups; default = 0.0),
-        ),
-        (UVData.Scan(1:ngroups),),
-    )
-    return (;
-        (k => v for (k, v) in pairs(out) if k !== :repeat_pass)...,
-        t_pass = (time_ns() - t0) / 1.0e9, timing = timing,
-    )
-end
-
-# One finished step's own solution, as the precal a later pass divides out.
+# One finished step's own solution, as the precal a later step divides out.
 # `ApplySolution` matches stations by NAME and refuses a solution that names
 # none, so the station table is recorded here as it is on the run's own
 # solution — a solve-time transform is no exception to the apply contract.
@@ -377,36 +241,31 @@ _step_precal(st, c::SolveContext, geom::DataGeometry) = CalibrationSolution(
     name = provides(st),
 )
 
-# The solution-level `info` NamedTuple of a new-engine fit: RUN-WIDE fields
-# only. Every per-step diagnostic (per-scan SNR/detections, pass timing, …) now
-# lives on that step's own `StepSolution.info` instead (`stage_info(sol,
-# name)`) — published generically by `_run_pass!` (`t_pass`/`timing`, any
-# step) or by the step itself (e.g. the fringe estimator's `scan_snr`,
-# detection table). This function no longer needs to know any step's name to
-# expose its diagnostics; a third-party `SolveStep` needs no changes here.
-# `br.ff` is `nothing` for a BaselineFringeFit-less pipeline, so the estimator info is
-# omitted rather than assumed present.
-function _new_engine_info(ctx::SolveContext, br)
+# The solution-level `info`: run-wide fields, plus the fringe step's
+# unconstrained (station, scan) flags, which `calibrate` applies, and its
+# search configuration, which `fringe_search_map` replays. Every other per-step
+# diagnostic lives on that step's `StepSolution.info` (`stage_info(sol, name)`).
+function _run_info(step_solutions, br, antennas, stream)
+    ffi = findfirst(st -> st isa BaselineFringeFit, br.solve_steps)
+    ff_info = ffi === nothing ? nothing : step_solutions[ffi].info
     return (;
-        nant = ctx.nant,
-        nscan = length(ctx.stream.groups),
-        Fring.flag_table(_fringe_flags(ctx))...,
-        ant_names = String.(collect(ctx.antennas.name)),
-        (br.ff === nothing ? NamedTuple() : Fring.estimator_info(br.ff.estimator))...,
+        nant = length(antennas),
+        nscan = length(stream.groups),
+        flagged_ant = ff_info === nothing ? Int[] : ff_info.flagged_ant,
+        flagged_scan = ff_info === nothing ? Int[] : ff_info.flagged_scan,
+        ant_names = String.(collect(antennas.name)),
+        (ffi === nothing ? (;) : (; search = br.solve_steps[ffi].search))...,
         precal_applied = any(t -> t isa Fring.ApplySolution, Iterators.flatten(br.before)),
-        ntasks_used = Streaming.max_tasks(outer_executor(ctx.stream)),
-        inner_tasks = Streaming.max_tasks(inner_executor(ctx.stream)),
+        ntasks_used = Streaming.max_tasks(outer_executor(stream)),
+        inner_tasks = Streaming.max_tasks(inner_executor(stream)),
     )
 end
-
-# The stage-B-unconstrained (station, scan) pairs an estimator reported, or none.
-_fringe_flags(ctx::SolveContext) = get(() -> Tuple{Int, Int}[], ctx.scratch, :fringe_flags)
 
 # ── Pipeline parsing ─────────────────────────────────────────────────────────
 
 # Step order is never validated here — a step that cannot do its job with the
-# data it is handed fails at the point of use (its own estimator/solve
-# kernel), the same pattern `apply_calibration`'s data-level guards use. Only
+# data it is handed fails at the point of use (its own solve kernel), the same
+# pattern `apply_calibration`'s data-level guards use. Only
 # `provides`'s NAMING role is checked: two steps sharing a non-`:nothing`
 # capability would silently collide in the by-name lookup behind `sol[name]`
 # (a `findfirst`, so the second step's solution would be unreachable) — that is a naming conflict, not an ordering rule, so it stays
@@ -446,6 +305,5 @@ function _parse_pipeline(pipeline)
     end
     isempty(solve_steps) && throw(ArgumentError("fit: the pipeline holds no solve step"))
     _check_unique_provides(solve_steps)
-    ffi = findfirst(s -> s isa BaselineFringeFit, solve_steps)
-    return (; sequence, solve_steps, before, ff = ffi === nothing ? nothing : solve_steps[ffi])
+    return (; sequence, solve_steps, before)
 end

@@ -33,7 +33,7 @@ _apply_apriori(s::AprioriAmplitude, uv) = UVData.apply_calibration(
 # The step protocol: SolveStep, its hooks, and `|>` building a pipeline.
 include("pipeline/protocol.jl")
 
-# The built-in solve steps: BaselineFringeFit (model + estimator), Bandpass,
+# The built-in solve steps: BaselineFringeFit, DispersionSBDFit, Bandpass,
 # AdhocPhase.
 include("pipeline/steps.jl")
 

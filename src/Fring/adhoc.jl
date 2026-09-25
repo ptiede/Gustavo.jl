@@ -234,8 +234,8 @@ default_adhoc_terms(; feed::AbstractFeedTying = SharedFeeds()) =
     GainModel(phase = (; adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Feed = feed)))
 
 # Capability declarations for the compile-time `can_fit`/`validate_model` seam
-# (shared with the fringe estimators and bandpass smoothers; the step drives the
-# checks in `model_components(::AdhocPhase, spec)`).
+# (capability.jl; the step drives the checks in
+# `model_components(::AdhocPhase, spec)`).
 #
 # What the solve machinery addresses: one constant per (feed node, AP) —
 # `adhoc_scan!` writes leaf slot (param 1, node, freq segment 1, time segment,

@@ -51,13 +51,13 @@ returns the step's diagnostics.
 
 Each step separates WHAT it solves (a gain model: named components, each a
 term at a time/frequency resolution with a feed tying) from HOW it is solved
-(an estimator or smoother object). Third-party code can add
+(the step's options, or a smoother object). Third-party code can add
 
 - a new **gain term** (a physical effect in the forward model) — six small
   methods;
-- a new **pipeline step** (a solver with its own streaming pass) — the
-  `start_pass!`/`process_scan!`/`finish_pass!` visitor contract;
-- a new **fringe estimator** or **bandpass smoother** behind an existing step.
+- a new **pipeline step** — a `solve` method that reads the data through
+  `each_group`;
+- a new **bandpass** or **adhoc smoother** behind an existing step.
 
 The [documentation](https://ptiede.github.io/Gustavo.jl/dev/) has a worked
 example for each, plus the model-specification vocabulary

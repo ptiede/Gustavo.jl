@@ -15,7 +15,8 @@ Both stages are derived below. The choice of which parameters are solved, at
 what time and frequency resolution, and with what tying across feeds belongs to
 the gain model, described in
 [Specifying gain models](@ref specifying-models); the fringe stage's model is a
-phase-only [`GainModel`](@ref Gustavo.Calibration.GainModel) and its estimator a [`MatchedFilter`](@ref). Phase sense,
+phase-only [`GainModel`](@ref Gustavo.Calibration.GainModel), and the search
+and station-solve options are fields of [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit). Phase sense,
 parameter signs and units are fixed in [Conventions](@ref conventions).
 
 ## Matched filter

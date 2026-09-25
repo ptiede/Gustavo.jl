@@ -478,7 +478,7 @@ end
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
         sol = fit(
-            BaselineFringeFit(estimator = FP.MatchedFilter(rounds = r)) |>
+            BaselineFringeFit(rounds = r) |>
                 Bandpass() |> AdhocPhase(adhoc),
             uvset,
             gauge = PinAntenna(1),
@@ -913,7 +913,7 @@ end
     sol = fit(
         BaselineFringeFit(
             model = default_fringe_terms(),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
+            search = FP.FringeSearch(algorithm = FP.FullGrid()),
         ) |> DispersionSBDFit() |> AdhocPhase(),        # no bandpass stage (see comment above)
         uvset,
         gauge = PinAntenna(1),
@@ -961,7 +961,7 @@ end
     sol0 = fit(
         BaselineFringeFit(
             model = default_fringe_terms(),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
+            search = FP.FringeSearch(algorithm = FP.FullGrid()),
         ) |> AdhocPhase(),
         uvset,
         gauge = PinAntenna(1),
@@ -1034,7 +1034,7 @@ end
     sol = fit(
         BaselineFringeFit(
             model = default_fringe_terms(),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
+            search = FP.FringeSearch(algorithm = FP.FullGrid()),
         ) |> DispersionSBDFit(dispersion = nothing) |> AdhocPhase(),
         uvset,
         gauge = PinAntenna(1),
@@ -1059,7 +1059,7 @@ end
     sol0 = fit(
         BaselineFringeFit(
             model = default_fringe_terms(),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
+            search = FP.FringeSearch(algorithm = FP.FullGrid()),
         ) |> AdhocPhase(),
         uvset,
         gauge = PinAntenna(1),
@@ -1110,7 +1110,7 @@ end
     sol = fit(
         BaselineFringeFit(
             model = default_fringe_terms(),
-            estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
+            search = FP.FringeSearch(algorithm = FP.FullGrid()),
         ) |> DispersionSBDFit(
             dispersion = DispersionModel(colocated_sep = 1000.0), sbd = nothing,
         ) |> AdhocPhase(),
@@ -1129,18 +1129,18 @@ end
 
 @testset "Largest-first group map" begin
     # Results come back in index order regardless of completion order.
-    res = ST._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2])
+    res = Gustavo._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2])
     @test res == [10, 20, 30, 40, 50, 60, 70, 80]
     @test res isa Vector{Int}   # `work`'s return type, not `Any`
 
     # Empty input and worker-error propagation.
-    @test isempty(ST._scheduled_map(identity, Int[], Float64[]))
-    @test_throws Exception ST._scheduled_map(
+    @test isempty(Gustavo._scheduled_map(identity, Int[], Float64[]))
+    @test_throws Exception Gustavo._scheduled_map(
         x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1],
     )
 
     # A charge per item is required.
-    @test_throws "items and charges must match" ST._scheduled_map(
+    @test_throws "items and charges must match" Gustavo._scheduled_map(
         identity, 1:3, [1, 1],
     )
 end
@@ -1165,10 +1165,10 @@ end
     end
     ff = BaselineFringeFit(
         model = default_fringe_terms(),
-        estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
+        search = FP.FringeSearch(algorithm = FP.FullGrid()),
     )
-    # Scan-local, so the whole chain below fuses into one pass.
-    @test fusable_grouping(ff) === :scan
+    # Each scan's station systems solve as it is searched.
+    @test Gustavo._scan_local_solve(ff)
     sol = fit(ff |> AdhocPhase(), uvset; gauge = PinAntenna(1))
     flags = FP.fringe_station_flags(sol)
     @test !isempty(flags)

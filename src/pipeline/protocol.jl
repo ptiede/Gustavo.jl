@@ -9,19 +9,12 @@
 # chain), and every stage remains individually inspectable through the
 # solution's per-stage records.
 #
-# Hooks a step may implement (all have working defaults):
+# Hooks a step may implement:
 # - `model_components(step, spec)` — the gain-model components this step solves.
 # - `provides(step)`               — names the step's solution slot.
-# - `required_grouping(step)`      — leaf-grouping constraint.
-# - `fusable_grouping(step)`       — accumulation scope; `:scan` lets the step
-#                                    share one streaming pass with its
-#                                    neighbors.
-# - `start_pass!` / `process_scan!` / `finish_pass!` — the VISITOR CONTRACT:
-#   the executor owns all streaming (the scan group is the only unit of data
-#   flow — steps never see the uvset); a step accumulates from each
-#   materialized, transform-corrected scan view and runs its global solve when
-#   the pass completes. Consecutive scan-local steps (`fusable_grouping`) with
-#   no correction between them share one pass.
+# - `solve(step, ctx)`             — fills the step's θ, reading the data through
+#                                    `each_group(f, ctx)`, and returns the step's
+#                                    diagnostics.
 #
 # Run-wide resources (task/memory budgets, progress) live on the
 # `ExecutionConfig` passed to `fit`; the gauge is a run-wide choice passed to
@@ -32,10 +25,9 @@
     SolveStep
 
 A pipeline stage that solves its own gain model (fringe fit, bandpass
-estimation, adhoc phasing, …). Solve steps declare their model components
-via [`model_components`](@ref) and run under the executor-driven visitor
-contract — [`start_pass!`](@ref) / [`process_scan!`](@ref) /
-[`finish_pass!`](@ref).
+estimation, adhoc phasing, …). A solve step declares its model components
+with [`model_components`](@ref) and fits them in [`solve`](@ref), reading the
+data with [`each_group`](@ref).
 """
 abstract type SolveStep end
 
@@ -89,137 +81,43 @@ same name. Default: `:nothing`.
 provides(step::SolveStep) = :nothing
 
 """
-    required_grouping(step::SolveStep) -> Symbol
+    solve(step::SolveStep, ctx::SolveContext) -> NamedTuple
 
-The leaf-grouping this step can run under: `:any`, or `:scan_complete` (the
-step needs every spw of a scan materialized together — true of the fringe
-search's multi-band concat and of per-scan θ-slot disjointness). Default `:any`.
+Fit `step`'s own model: fill `ctx.θ` and return the step's diagnostics, which
+become its `StepSolution.info` (`stage_info(sol, name)`). The data are read
+with [`each_group`](@ref), once per pass the solve needs; a solve that
+iterates (a residual re-search, say) calls it once per round. The runner adds
+`t_pass`, the solve's wall time, and `timing`, each scan group's decode and
+work seconds summed over the step's passes.
+
+Every `SolveStep` must define a method.
 """
-required_grouping(step::SolveStep) = :any
+function solve end
 
-"""
-    fusable_grouping(step::SolveStep) -> Symbol
+solve(step::SolveStep, ctx) = throw(
+    ArgumentError(
+        "$(nameof(typeof(step))) does not define `Gustavo.solve(::$(nameof(typeof(step))), ctx)`, " *
+            "which fits the step's θ and returns its diagnostics NamedTuple.",
+    ),
+)
 
-The accumulation scope this step's solve needs: `:scan` when the step is
-finalizable from one scan group alone — every θ slot it writes for a scan is
-written from that scan's data, by the time its `process_scan!` returns — or
-`:global` when finishing needs the whole pass (one system closed over every
-scan, a statistic pooled across scans, a residual re-search round). Default
-`:global`, so a step that has not declared otherwise is never fused.
-
-Consecutive `:scan` steps share one streaming pass: the scan group is
-materialized once, each step's [`process_scan!`](@ref) runs on it in declared
-order, and each step's just-solved gains are divided out of the resident scan
-before the next step sees it — the same correction the transform chain applies
-between un-fused passes, on data already in memory. A lazy `UVSet` re-reads and
-decodes the dataset once per pass, so this is the difference between N reads of
-the data and one; it changes no step's result.
-
-Fusion forbids pass repetition (`repeat_pass`), which is by definition not
-scan-local.
-
-Dispatches on the step INSTANCE, not just its type, so a step whose
-configuration decides the answer can answer for itself.
-"""
-fusable_grouping(step::SolveStep) = :global
-
-"""
-    start_pass!(step::SolveStep, ctx) -> nothing
-
-Called once when the streaming pass containing `step` begins, before any scan
-is materialized — allocate the step's accumulators here. Default: no-op.
-"""
-start_pass!(step::SolveStep, ctx) = nothing
-
-"""
-    process_scan!(step::SolveStep, ctx::SolveContext, stack, win::GeometryWindow) -> Any
-
-Accumulate one scan group into the step's state. The EXECUTOR has already
-materialized the group and applied the pipeline's transform chain — the step
-only consumes the scan's `DimStack` and the
-[`GeometryWindow`](@ref) addressing it in the solve's index space (and may
-read/write its own per-scan θ slots through `ctx`). Called once per scan group,
-possibly concurrently across groups; per-scan θ
-slots are disjoint. The RETURN VALUE is collected by the runner — one entry per
-selected group, in group-index order, delivered to [`finish_pass!`](@ref) via
-`ctx.scratch[:pass_results]` — so a step needs no locking: return the scan's
-contribution and fold in `finish_pass!` (the fold is then deterministic at any
-concurrency). Default: no-op returning `nothing`.
-"""
-process_scan!(step::SolveStep, ctx, stack, win) = nothing
-
-"""
-    finish_pass!(step::SolveStep, ctx::SolveContext) -> NamedTuple
-
-Called once when the pass's streaming completes: run the step's global
-solve, fill its θ block, and return the stage's diagnostics `NamedTuple`.
-This is the step logging interface: every key returned lands on the step's
-own `StepSolution.info` (`stage_info(sol, name)`).
-
-`ctx.scratch[:pass_results]` holds the collected per-group results:
-`(; index, decode, work, r)` per selected group, in no particular order — `index` is the group's true position, and
-[`scan_values`](@ref) scatters a per-result quantity back into global
-scan-group order. `decode`/`work` are seconds spent materializing / in
-`process_scan!`; `r` is the step's own per-scan return. The runner adds
-`t_pass` and a per-scan `timing` `DimStack` to whatever this returns.
-
-A step may request pass repetition by including `repeat_pass = true` in the
-return (the key is stripped from the recorded diagnostics). A step declaring
-itself scan-local ([`fusable_grouping`](@ref)) may not — a step needing the
-pass run again is not finalizable from one scan. Default: empty
-diagnostics.
-"""
-finish_pass!(step::SolveStep, ctx) = NamedTuple()
-
-"""
-    scan_values(f, results, ngroups::Integer; default) -> Vector
-
-The per-scan-group values `f(res)` extracts from `results`
-(`ctx.scratch[:pass_results]`, see [`finish_pass!`](@ref)), scattered into a
-dense length-`ngroups` array in global scan-group index order. A group
-missing from `results` reads back as `default`, not
-garbage — `results` need not be sorted, and need not cover every group. The
-shared primitive behind the runner's own per-step `timing` (in
-[`finish_pass!`](@ref)'s docs) and the built-in fringe estimator's per-scan
-`scan_snr`/`scan_ncells`/detection log — reach for it in a CUSTOM step's
-`finish_pass!` to publish a per-scan diagnostic the same way, e.g.
-
-    scan_values(res -> res.r.residual_rms, results, ngroups; default = NaN)
-"""
-function scan_values(f, results, ngroups::Integer; default)
-    out = fill(default, ngroups)
-    for res in results
-        out[res.index] = f(res)
-    end
-    return out
-end
-
-# ── The solve context (shared state of a pipeline run) ───────────────────────
+# ── The solve context ────────────────────────────────────────────────────────
 
 """
     SolveContext
 
-The shared state of one pipeline solve, threaded through every visitor hook:
-the step's own compiled model (`model`/`layout`/`ev`/`θ` — that step's private
-gain model, never merged with another step's, see [`StepSolution`](@ref)), the
-data geometry, the resolved gauge (`gauge`), the streaming layer
-(`stream` — REBUILT between steps as each finished solution is appended to its
-transform chain, see `_run_pipeline` — which also carries the run's
-[`ExecutionConfig`](@ref) resources), and
-`scratch` — a `Dict{Symbol, Any}` for state private to this step's own pass
-(e.g. per-group scratch accumulators across search rounds). Non-data info a
-later step wants from an earlier one (e.g. per-scan SNR) is never read through
-`scratch` — it's read off the ordered list of finished `StepSolution`s
-instead; gain correction between steps is never read
-through `scratch` either — it flows through `stream`'s transform chain, so no
-step evaluates or mutates another step's θ.
-
-`θ` is the flat parameter vector over `layout`; a component's block is
-`reshape(view(θ, plan.range), plan.shape)`. Once a step is finished and wrapped in a [`CalibrationSolution`](@ref),
-[`parameters`](@ref) wraps its components' blocks as labelled, dimensioned
-`DimArray`s on demand.
+What a step's [`solve`](@ref) works with: the step's own compiled model
+(`model`, `layout`, and `θ`, the flat parameter vector over `layout`, which
+`solve` fills; a component's block is `reshape(view(θ, plan.range),
+plan.shape)`), the data geometry `geom`, the resolved `gauge`, the station
+table (`nant`, `antennas`), and `stream`, the scan groups as the step reads
+them: through the pipeline's corrections before the step and every earlier
+step's gains. Another step's θ is never visible here; it reaches the step only
+as a correction of the data.
 """
-mutable struct SolveContext{
+const _PassTiming = @NamedTuple{decode::Vector{Float64}, work::Vector{Float64}}
+
+struct SolveContext{
         M <: GainModel, L <: ParameterLayout,
         A <: UVData.AntennaTable, S <: Streaming.ScanStream,
         V <: AbstractVector{Float64},
@@ -232,7 +130,103 @@ mutable struct SolveContext{
     nant::Int
     antennas::A
     stream::S
-    scratch::Dict{Symbol, Any}
+    stage::Symbol
+    passes::Vector{_PassTiming}
+end
+
+"""
+    each_group(f, ctx::SolveContext) -> Vector
+
+Read each scan group of the step's data and return `f(stack, win)` for every
+group, in group order. `stack` is the group's `DimStack` with the pipeline's
+corrections applied; `win` is its [`GeometryWindow`](@ref) into the solve's
+index space. Groups run on the run's outer scheduler, heaviest first, and the
+progress callback is told of each.
+
+`f` may run concurrently across groups, so it must not write shared state
+other than θ slots belonging to its own scan; it returns its scan's
+contribution instead, and the caller combines the returned values.
+"""
+function each_group(f::F, ctx::SolveContext) where {F}
+    stream = ctx.stream
+    out = _map_groups(stream; stage = ctx.stage) do spec
+        ta = time_ns()
+        stack, win = Fring.materialize_cube(stream, spec)
+        tb = time_ns()
+        r = f(stack, win)
+        (; decode = (tb - ta) / 1.0e9, work = (time_ns() - tb) / 1.0e9, r)
+    end
+    push!(ctx.passes, (; decode = Float64[o.decode for o in out], work = Float64[o.work for o in out]))
+    return map(o -> o.r, out)
+end
+
+# ── Group scheduling ─────────────────────────────────────────────────────────
+
+const _PROGRESS_LOCK = ReentrantLock()
+
+_report_progress(::Nothing, stage, done, total) = nothing
+function _report_progress(cb, stage, done, total)
+    lock(_PROGRESS_LOCK) do
+        try
+            cb(stage, Int(done), Int(total))
+        catch err
+            @warn "progress callback failed" stage err maxlog = 1
+        end
+    end
+    return nothing
+end
+
+# `work(spec)` over the stream's groups on its outer scheduler, heaviest first,
+# with the results in group order and `(stage, done, total)` reported to the
+# run's progress callback.
+function _map_groups(work::F, stream::Streaming.ScanStream; stage::Symbol) where {F}
+    groups = stream.groups
+    total = length(groups)
+    progress = Streaming.progress_callback(stream)
+    _report_progress(progress, stage, 0, total)
+    done = Threads.Atomic{Int}(0)
+    function wrapped(spec)
+        r = work(spec)
+        _report_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
+        return r
+    end
+    return _scheduled_map(
+        wrapped, groups, [s.charge for s in groups];
+        executor = outer_executor(stream),
+    )
+end
+
+# Largest-first parallel map: run `work` over `items` on `executor`, dispatching
+# the heaviest item (by `charges`) first so the long poles start immediately.
+# Results in `items` order. A failed worker rethrows after the other workers
+# drain the queue. `executor` is used exactly as configured — how many items run
+# at once is its decision, checked against the memory budget upstream.
+#
+# Each backend fills an `Any` sink and returns `map(identity, sink)`: `work`'s
+# return type is not known before it runs, and tasks write their slots
+# concurrently, so the sink has to admit any value; `map` then recovers the
+# concrete element type for whatever consumes the pass.
+function _scheduled_map(work::F, items, charges; executor = SerialScheduler()) where {F}
+    length(items) == length(charges) || throw(
+        DimensionMismatch("items and charges must match: $(length(items)) vs $(length(charges))"),
+    )
+    Base.require_one_based_indexing(items, charges)
+    return _scheduled_map(executor, work, items, charges)
+end
+
+# With one worker the dispatch order cannot matter.
+_scheduled_map(::SerialScheduler, work::F, items, charges) where {F} = map(work, items)
+
+# `GreedyScheduler` is the one that keeps largest-first meaningful under uneven
+# charges — it hands each task the next group off the queue — where a chunking
+# scheduler assigns groups to tasks up front. A backend with different
+# task-lifetime needs adds its own method on its executor type.
+function _scheduled_map(sched::Scheduler, work::F, items, charges) where {F}
+    out = Vector{Any}(undef, length(items))
+    tforeach(sortperm(charges; rev = true); scheduler = sched) do k
+        out[k] = work(items[k])
+    end
+    return map(identity, out)
 end
 
 # ── Pipelines ────────────────────────────────────────────────────────────────

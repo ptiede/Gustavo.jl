@@ -81,24 +81,24 @@
         @test length(stk.groups[1].leaves) == nleaves
     end
 
-    @testset "map_groups: order, selection, progress" begin
-        stb = FP.scan_stream(uvset; grouping = FP.BySpw(), geom = geom)
-        n = length(stb.groups)
-        # Results in group order regardless of scheduling.
-        @test map_groups(spec -> spec.index, stb) == collect(1:n)
-
+    @testset "group map: order, progress" begin
         events = Tuple{Symbol, Int, Int}[]
         cb = (stage, done, total) -> push!(events, (stage, done, total))
-        map_groups(spec -> nothing, stb; progress = cb, stage = :probe)
+        stb = FP.scan_stream(
+            uvset; grouping = FP.BySpw(), geom = geom, exec = ExecutionConfig(progress = cb),
+        )
+        n = length(stb.groups)
+        Gustavo._map_groups(spec -> nothing, stb; stage = :probe)
         @test events[1] == (:probe, 0, n)
         @test sort(last.(events[2:end])) == fill(n, n) && sort([e[2] for e in events[2:end]]) == collect(1:n)
-
+        # Results in group order regardless of scheduling.
+        @test Gustavo._map_groups(spec -> spec.index, stb; stage = :probe) == collect(1:n)
 
         # A failing group rethrows after the pass drains. A concurrent
         # scheduler task-wraps it — the contract is that the ROOT CAUSE
         # surfaces.
         err = try
-            map_groups(stb) do spec
+            Gustavo._map_groups(stb; stage = :probe) do spec
                 spec.index == 1 ? error("boom") : nothing
             end
             nothing
@@ -127,7 +127,8 @@
             uvset; geom = geom, grouping = FP.BySpw(),
             exec = ExecutionConfig(mem_budget = 1.0),
         )
-        @test map_groups(spec -> spec.index, st_tight) == collect(1:length(st_tight.groups))
+        @test Gustavo._map_groups(spec -> spec.index, st_tight; stage = :probe) ==
+            collect(1:length(st_tight.groups))
 
         @test ST.max_tasks(SerialScheduler()) == 1
         @test ST.max_tasks(GreedyScheduler(; ntasks = 3)) == 3
@@ -140,7 +141,7 @@ end
 
 # The streaming layer drives a pass with nothing from `Gustavo.Fring` in
 # scope: `using Gustavo.Streaming` alone must supply the stream, the grouping,
-# the transform contract and the pass runner.
+# and the transform contract.
 module StreamingWithoutFringe
 
     using Gustavo.Streaming
@@ -154,7 +155,7 @@ module StreamingWithoutFringe
     # report each group's total weight.
     function pass(uvset, geom)
         stream = scan_stream(uvset; geom = geom, transforms = (HalveWeights(),))
-        sums = map_groups(stream) do spec
+        sums = map(stream.groups) do spec
             sum(first(materialize_cube(stream, spec))[:weights])
         end
         return stream, sums
@@ -167,10 +168,8 @@ end
     geom = CAL.build_geometry(uvset)
 
     stream, halved = StreamingWithoutFringe.pass(uvset, geom)
-    plain = map_groups(
-        s -> sum(first(FP.materialize_cube(FP.scan_stream(uvset; geom = geom), s))[:weights]),
-        FP.scan_stream(uvset; geom = geom),
-    )
+    plain_stream = FP.scan_stream(uvset; geom = geom)
+    plain = map(s -> sum(first(FP.materialize_cube(plain_stream, s))[:weights]), plain_stream.groups)
     @test length(halved) == length(stream.groups) == length(plain)
     @test all(isapprox(h, 0.5 * p; rtol = 1.0e-6) for (h, p) in zip(halved, plain))
 

@@ -158,10 +158,10 @@
                 t.Feed isa CAL.SingleFeed,
             f.model.phase,
         )
-        @test f.estimator isa MatchedFilter
-        @test f.estimator.search == FP.FringeSearch()
-        @test f.estimator.closure == FP.Stationization()
-        @test f.estimator.rounds == 1
+        @test f.search == FP.FringeSearch()
+        @test f.closure == FP.Stationization()
+        @test f.rounds == 1
+        @test f.steer_cells == 9.0
 
         d = DispersionSBDFit()
         @test d.dispersion == DispersionModel()
@@ -206,15 +206,13 @@ end
         layout = CAL.plan_parameters(model, nant, geom)
         ctx = Gustavo.SolveContext(
             model, layout, geom, zeros(layout.nθ),
-            PinAntenna(1), nant, antennas, ST.scan_stream(uvset; geom), Dict{Symbol, Any}(),
+            PinAntenna(1), nant, antennas, ST.scan_stream(uvset; geom), :fringe,
+            Gustavo._PassTiming[],
         )
         @test isconcretetype(typeof(ctx))
-        for f in (:model, :layout, :geom, :antennas, :stream)
+        for f in (:model, :layout, :geom, :antennas, :stream, :passes)
             @test isconcretetype(fieldtype(typeof(ctx), f))
         end
-        # `scratch` stays a `Dict{Symbol, Any}` by design — it is the untyped
-        # cross-step channel, and its readers assert on retrieval.
-        @test fieldtype(typeof(ctx), :scratch) == Dict{Symbol, Any}
     end
 
     @testset "ExecutionConfig carries the progress callback's type" begin

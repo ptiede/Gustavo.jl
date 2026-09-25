@@ -1,4 +1,4 @@
-# Composable-pipeline interface tests (protocol, transforms, selections, stage
+# Composable-pipeline interface tests (protocol, transforms, stage
 # provenance/snapshots, and the fit/calibrate verbs). Every
 # pipeline runs on the new engine. Reuses `_build_fringe_uvset` and the
 # CAL/FP/UVP aliases from test_pipeline.jl (included earlier in runtests.jl).
@@ -12,11 +12,19 @@ struct _ProtoProbe <: Gustavo.SolveStep end
 struct _ThirdPartyStep <: Gustavo.SolveStep end
 Gustavo.provides(::_ThirdPartyStep) = :thirdparty
 
-# A step whose declaration contradicts itself: scan-local, yet asking for the
-# pass to be run again.
-struct _RepeatingScanStep <: Gustavo.SolveStep end
-Gustavo.fusable_grouping(::_RepeatingScanStep) = :scan
-Gustavo.finish_pass!(::_RepeatingScanStep, ctx) = (; repeat_pass = true)
+# A third-party step that reads the data twice and reports each group's first
+# time index.
+struct _TwoPassStep <: Gustavo.SolveStep end
+Gustavo.provides(::_TwoPassStep) = :twopass
+function Gustavo.solve(::_TwoPassStep, ctx)
+    first_ti = Gustavo.each_group((stack, win) -> first(win.ti_idx), ctx)
+    again = Gustavo.each_group((stack, win) -> first(win.ti_idx), ctx)
+    return (; first_ti, again)
+end
+
+# A step whose `solve` returns something other than its diagnostics.
+struct _BadInfoStep <: Gustavo.SolveStep end
+Gustavo.solve(::_BadInfoStep, ctx) = 1.0
 
 # A transform with no apply_transform! implementation (error-path probe).
 struct _NoImpl <: Gustavo.Fring.AbstractDataTransform end
@@ -24,77 +32,59 @@ struct _NoImpl <: Gustavo.Fring.AbstractDataTransform end
 # A model value that is not a `GainComponent`.
 struct _OpaqueTerm end
 
-# An estimator that declares nothing — `scan_local_solve`'s safe default.
-struct _OpaqueEstimator <: Gustavo.Fring.AbstractFringeEstimator end
-
 # The full three-stage production pipeline at defaults.
 _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
 
 @testset "Composable pipeline interface" begin
-    @testset "step protocol defaults + visitor hooks" begin
+    @testset "step protocol defaults" begin
         s = _ProtoProbe()
         @test Gustavo.model_components(s, nothing) == GainModel()
         @test Gustavo.provides(s) == :nothing
-        @test Gustavo.required_grouping(s) == :any
-        # A step that has not declared itself scan-local is never fused.
-        @test Gustavo.fusable_grouping(s) == :global
-        # The executor-driven visitor contract has working defaults.
-        @test Gustavo.start_pass!(s, nothing) === nothing
-        @test Gustavo.process_scan!(s, nothing, nothing, nothing) === nothing
-        @test Gustavo.finish_pass!(s, nothing) == NamedTuple()
+        uvset, _ = _build_fringe_uvset()
+        @test_throws "does not define `Gustavo.solve(::_ProtoProbe, ctx)`" fit(
+            _ProtoProbe(), uvset; gauge = PinAntenna(1),
+        )
+        @test_throws "must return a NamedTuple" fit(_BadInfoStep(), uvset; gauge = PinAntenna(1))
+    end
+
+    @testset "a step drives its own passes with each_group" begin
+        uvset, _ = _build_fringe_uvset(; nscans = 3)
+        sol = fit(_TwoPassStep(), uvset; gauge = PinAntenna(1))
+        info = stage_info(sol, :twopass)
+        # One result per scan group, in the same group order on every pass.
+        @test length(info.first_ti) == sol.info.nscan == 3
+        @test allunique(info.first_ti)
+        @test info.again == info.first_ti
+        # The runner's timing covers both passes of every group.
+        @test info.t_pass > 0
+        @test length(info.timing.work) == 3 && all(>(0), info.timing.decode)
     end
 
     @testset "built-in step declarations" begin
         @test Gustavo.provides(BaselineFringeFit()) == :fringe
         @test Gustavo.provides(Bandpass()) == :bandpass
         @test Gustavo.provides(AdhocPhase()) == :adhoc
-        @test Gustavo.required_grouping(BaselineFringeFit()) == :scan_complete
-        # Steps that finalize a scan inside `process_scan!` declare themselves
-        # scan-local; a pass that closes one system over every scan does not.
-        @test Gustavo.fusable_grouping(DispersionSBDFit()) == :scan
-        @test Gustavo.fusable_grouping(AdhocPhase()) == :scan
-        @test Gustavo.fusable_grouping(Bandpass()) == :global
-        # BaselineFringeFit answers per instance (`Fring.scan_local_solve`): the
-        # default — one round, every term per-scan — solves each scan's
-        # station systems as the scan is searched, so the pass is scan-local.
-        @test Gustavo.fusable_grouping(BaselineFringeFit()) == :scan
-        # Any cross-scan coupling forces the pooled pass: a residual re-search
-        # round, a track-global inter-feed column (in the base model or in one
-        # station's entry), or an estimator that declares nothing (the seam's
-        # safe default).
-        @test Gustavo.fusable_grouping(BaselineFringeFit(estimator = MatchedFilter(rounds = 2))) == :global
-        @test Gustavo.fusable_grouping(
+        # The default fringe fit (one round, every term per-scan) solves each
+        # scan's station systems as the scan is searched.
+        @test Gustavo._scan_local_solve(BaselineFringeFit())
+        # Any cross-scan coupling pools every scan's detections into one solve:
+        # a residual re-search round, or a track-global inter-feed column (in
+        # the base model or in one station's entry).
+        @test !Gustavo._scan_local_solve(BaselineFringeFit(rounds = 2))
+        @test !Gustavo._scan_local_solve(
             BaselineFringeFit(model = default_fringe_terms(rel_time = CAL.GlobalTime())),
-        ) == :global
-        @test Gustavo.fusable_grouping(
+        )
+        @test !Gustavo._scan_local_solve(
             BaselineFringeFit(
                 model = with_station(
                     default_fringe_terms(), "AA";
                     phase = default_fringe_terms(rel_time = CAL.GlobalTime()).phase,
                 ),
             ),
-        ) == :global
+        )
         @test_throws "must be a `GainComponent`" merge(default_fringe_terms(); phase = (; x = _OpaqueTerm()))
         # A step's model is a GainModel, never a bare NamedTuple.
         @test_throws MethodError BaselineFringeFit(model = (; phase = default_fringe_terms().phase))
-        @test Gustavo.fusable_grouping(BaselineFringeFit(estimator = _OpaqueEstimator())) == :global
-    end
-
-    @testset "pass partitioning: which steps share one read" begin
-        steps = Gustavo.SolveStep[
-            BaselineFringeFit(), DispersionSBDFit(), AdhocPhase(), Bandpass(),
-        ]
-        @test Gustavo._fusable_run(steps, 1) == 1:3   # the scan-local run shares a pass
-        @test Gustavo._fusable_run(steps, 4) == 4:4
-        # A pooled BaselineFringeFit instance (rounds > 1) runs alone, and the
-        # scan-local pair after it still shares its own pass.
-        steps2 = Gustavo.SolveStep[
-            BaselineFringeFit(estimator = MatchedFilter(rounds = 2)),
-            DispersionSBDFit(), AdhocPhase(), Bandpass(),
-        ]
-        @test Gustavo._fusable_run(steps2, 1) == 1:1
-        @test Gustavo._fusable_run(steps2, 2) == 2:3
-        @test Gustavo._fusable_run(steps2, 4) == 4:4
     end
 
     @testset "a step fit on a scan subset, carried into the full fit" begin
@@ -116,14 +106,6 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         sol = fit(ApplySolution(fr) |> ApplySolution(bp_sub) |> AdhocPhase(), uvset; gauge)
         @test sol.sequence[1] isa ApplySolution && sol.sequence[2] isa ApplySolution
         @test calibrate(sol, uvset) isa UVP.UVSet
-    end
-
-    @testset "a fused step may not ask for its pass again" begin
-        uvset, _ = _build_fringe_uvset()
-        @test_throws "is not scan-local" fit(
-            AdhocPhase() |> _RepeatingScanStep(), uvset,
-            gauge = PinAntenna(1),
-        )
     end
 
     @testset "a fit without a gauge throws, naming the stations" begin
@@ -157,7 +139,6 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         # reorder or reject based on that order.
         br = Gustavo._parse_pipeline([BaselineFringeFit(), _ThirdPartyStep()])
         @test br.solve_steps == [BaselineFringeFit(), _ThirdPartyStep()]
-        @test br.ff == BaselineFringeFit()
     end
 
     @testset "chaining builds a vector" begin

@@ -1,8 +1,8 @@
 # ── Bandpass stage: per-channel station phase/log-amp over scan windows ──────
 #
-# The `Bandpass` step visits every scan (refine → accumulate → return the
-# scan's contribution) and its `finish_pass!` folds the contributions in
-# group-index order, which keeps the result deterministic at any concurrency.
+# The `Bandpass` step reads every scan (accumulate → return the scan's
+# contribution) and folds the contributions in group order, which keeps the
+# result deterministic at any concurrency.
 # What is fit is the step's model tree (see [`default_bandpass_terms`](@ref));
 # how it is solved is pluggable through `AbstractBandpassSmoother`, in two
 # tiers. `PerTrackSmoother` sums every scan's residual into one accumulator,
@@ -85,7 +85,7 @@ per-scan `(; rl, wl, feeds, ti, source)` accumulator list in group-index order,
 `ti` being the scan's first sample on the solve's time axis (hence which time
 segment it falls in);
 `setup` is `(; bl_pairs, blidx, nant, layout, bp_path, amp_path, channel_freqs, spw_of_chan)`,
-built once per pass. Reach each observable's parameters through
+built once per solve. Reach each observable's parameters through
 [`bandpass_blocks`](@ref)`(setup, θ, :phase)` / `(…, :logamp)` rather than the
 paths directly. `report` is published on the step's solution record and
 should say which tracks were measured (see [`bandpass_track_report`](@ref));
@@ -109,9 +109,8 @@ abstract type AbstractBandpassSmoother end
 
 bandpass_derotate(::AbstractBandpassSmoother) = true
 
-# `can_fit`/`validate_model` are the same compile-time capability seam the
-# fringe estimators use (see estimators.jl); the `false` default makes an
-# undeclared smoother reject loudly instead of accepting silently.
+# The `false` default of `can_fit` (capability.jl) makes an undeclared smoother
+# reject loudly instead of accepting silently.
 can_fit(::AbstractBandpassSmoother, tc, geom) = false
 
 # A bandpass track is one free constant per frequency segment, per feed, held

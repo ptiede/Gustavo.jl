@@ -1,7 +1,7 @@
 # Streaming
 
-The scan-group streaming substrate: streams, group mapping, transforms, scan
-selections, and execution configuration.
+The scan-group streaming substrate: streams, transforms, and execution
+configuration.
 
 ```@autodocs
 Modules = [Gustavo.Streaming]

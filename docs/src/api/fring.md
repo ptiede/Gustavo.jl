@@ -1,6 +1,6 @@
 # Fring
 
-The solver stages and their pluggable estimators/smoothers: the fringe
+The solver stages and their pluggable smoothers: the fringe
 search, stationization, dispersion/SBD refinement, bandpass smoothers, and
 adhoc phasing.
 
