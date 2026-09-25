@@ -1583,39 +1583,3 @@ function solve_joint_bandpass!(
 
     return _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, max_logamp, present)
 end
-
-# ── Coverage top-up selection (stations the calibrator never observed) ────────
-
-# Wraps the bandpass step's user selection: stations absent from every selected
-# scan would get no bandpass (g = 1), so for each such station the highest-SNR
-# scan (any source) containing it is added — mixing sources is safe for the
-# bandpass shape (a source's structure phase is flat in frequency per baseline,
-# so it biases every channel identically and cancels in the shape; per-scan
-# ionosphere differences land in the frozen curve's mean, which each scan's
-# dTEC is measured relative to). Applied to any selection; one that already
-# covers every station, such as `AllScans`, is returned unchanged. Requires the per-scan
-# `stations` record field `select_groups` provides.
-struct CoverageTopup{S <: AbstractScanSelection} <: AbstractScanSelection
-    inner::S
-end
-
-function select_scans(sel::CoverageTopup, scans)
-    picked = select_scans(sel.inner, scans)
-    (isempty(scans) || !hasproperty(first(scans), :stations)) && return picked
-    by = Dict(s.index => s for s in scans)
-    covered = Set{Int}()
-    for gi in picked
-        union!(covered, by[gi].stations)
-    end
-    pickset = Set(picked)
-    extra = Int[]
-    order = sortperm([isfinite(s.snr) ? s.snr : -Inf for s in scans]; rev = true)
-    for oi in order
-        s = scans[oi]
-        s.index in pickset && continue
-        isempty(setdiff(s.stations, covered)) && continue
-        push!(extra, s.index)
-        union!(covered, s.stations)
-    end
-    return sort!(vcat(picked, extra))
-end

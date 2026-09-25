@@ -9,8 +9,6 @@ budgets, executors and `DimTree` leaves, not about fringes:
   schedulers and progress callback a stream is built from.
 - `transforms.jl` — [`AbstractDataTransform`](@ref), the per-materialization
   hook chain, and the scan `DimStack` + [`GeometryWindow`](@ref) it mutates.
-- `selections.jl` — [`AbstractScanSelection`](@ref), naming which scan groups a
-  pass reads.
 - `stream.jl` — [`ScanStream`](@ref) construction, group materialization, and
   the concurrent pass runner [`map_groups`](@ref).
 
@@ -33,17 +31,14 @@ using DimensionalData: DimArray, DimStack, AbstractDimStack, lookup, Ti
 
 include("Streaming/execution.jl")
 include("Streaming/transforms.jl")
-include("Streaming/selections.jl")
 include("Streaming/stream.jl")
 
 export ExecutionConfig, ProgressLogger, outer_executor, inner_executor
 export AbstractDataTransform, apply_transform!, apply_transform
 export ApplySolution, StationWeightScale, FlagChannels, CalFunction, AprioriPreCal
 export station_weight_scale
-export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
-export select_scans
 export AbstractLeafGrouping, ByScan, BySpw, ByKey
-export ScanStream, scan_stream, ScanGroupSpec, select_groups
+export ScanStream, scan_stream, ScanGroupSpec
 export materialize_cube, materialize_leaves
 export map_groups, foreach_group
 

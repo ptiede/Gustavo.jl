@@ -34,8 +34,6 @@ required_grouping(::BaselineFringeFit) = :scan_complete
 # estimator that pools every scan's detections — forces `:global`.
 fusable_grouping(s::BaselineFringeFit) =
     Fring.scan_local_solve(s.estimator, s.model) ? :scan : :global
-# NOTE: no `fit_selection` method — the fringe pass streams every scan (the
-# default `AllScans`).
 
 """
     DispersionSBDFit(; dispersion = DispersionModel(), sbd = SingleBandDelay())
@@ -67,8 +65,7 @@ fusable_grouping(::DispersionSBDFit) = :scan
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
-their gains, over every scan (fit-on-subset / apply-everywhere: pre-filter the
-`UVSet` before fitting if only a scan subset should contribute). What is fit
+their gains, over every scan it is given. What is fit
 is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_terms`](@ref) for the
 default and the component form the smoothers accept. How it is solved lives on
 `smoother`, a pluggable [`Fring.AbstractBandpassSmoother`](@ref) carrying one
@@ -80,6 +77,13 @@ model — a phase-only or amplitude-only model must name
 [`Fring.PerTrackSmoother`](@ref) instead, which runs the per-channel closure
 solves and then fits each track. The model is self-contained, so placing
 `Bandpass` before or after `BaselineFringeFit` is equally legal.
+
+To fit the bandpass on calibrator scans only, fit it on those scans and carry
+the solution into the full-data fit as a correction:
+
+    fr = fit(BaselineFringeFit(), data; gauge)
+    bp = fit(ApplySolution(fr) |> Bandpass(), calibrator_scans; gauge)
+    sol = fit(ApplySolution(fr) |> ApplySolution(bp) |> AdhocPhase(), data; gauge)
 """
 Base.@kwdef struct Bandpass{M <: GainModel, S <: Fring.AbstractBandpassSmoother} <: SolveStep
     model::M = Fring.default_bandpass_terms()
@@ -91,7 +95,6 @@ required_grouping(::Bandpass) = :scan_complete
 # `solve_bandpass!` closes into one system over every scan. A time-global
 # bandpass is not scan-local under any configuration.
 fusable_grouping(::Bandpass) = :global
-# No fit_selection override — every scan feeds the pass (protocol.jl's default AllScans).
 
 """
     AdhocPhase(; model = default_adhoc_terms(), smoother = SavitzkyGolaySmoother())
@@ -271,10 +274,8 @@ function _station_solve!(est::Fring.MatchedFilter, ctx::SolveContext, dets)
     return ncomp, Fring.unconstrained_flags(dets, covered, ctx.geom)
 end
 
-# The pass diagnostics both solve paths report. `scan_snr` is a later step's
-# non-data input (e.g. a `ScanWhere` selection reading it off this step's
-# `StepSolution.info` — see `_scan_snr`); `scan_ncells` and the detection table
-# are pure logging (`Fring.diagnostics.jl`'s `fringe_snr_table` /
+# The pass diagnostics both solve paths report. `scan_snr`, `scan_ncells` and
+# the detection table are pure logging (`Fring.diagnostics.jl`'s `fringe_snr_table` /
 # `suspect_fringes` read them off that same `info`), built on the final round
 # only, via the `scan_values` primitive every step's per-scan diagnostics use.
 _fringe_report(results, ngroups) = (;

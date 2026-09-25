@@ -12,12 +12,6 @@ struct _ProtoProbe <: Gustavo.SolveStep end
 struct _ThirdPartyStep <: Gustavo.SolveStep end
 Gustavo.provides(::_ThirdPartyStep) = :thirdparty
 
-# A scan-local step that accumulates from a SUBSET of the scans — the one
-# property that keeps a `:scan` step out of a shared pass.
-struct _SubsetScanStep <: Gustavo.SolveStep end
-Gustavo.fusable_grouping(::_SubsetScanStep) = :scan
-Gustavo.fit_selection(::_SubsetScanStep, _) = ScanIndices(1)
-
 # A step whose declaration contradicts itself: scan-local, yet asking for the
 # pass to be run again.
 struct _RepeatingScanStep <: Gustavo.SolveStep end
@@ -40,7 +34,6 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
     @testset "step protocol defaults + visitor hooks" begin
         s = _ProtoProbe()
         @test Gustavo.model_components(s, nothing) == GainModel()
-        @test Gustavo.fit_selection(s, Gustavo.StepSolution[]) isa AllScans
         @test Gustavo.provides(s) == :nothing
         @test Gustavo.required_grouping(s) == :any
         # A step that has not declared itself scan-local is never fused.
@@ -85,36 +78,44 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         # A step's model is a GainModel, never a bare NamedTuple.
         @test_throws MethodError BaselineFringeFit(model = (; phase = default_fringe_terms().phase))
         @test Gustavo.fusable_grouping(BaselineFringeFit(estimator = _OpaqueEstimator())) == :global
-        # Neither Bandpass nor BaselineFringeFit overrides fit_selection — both passes
-        # stream every scan.
-        @test Gustavo.fit_selection(Bandpass(), Gustavo.StepSolution[]) isa AllScans
-        @test Gustavo.fit_selection(BaselineFringeFit(), Gustavo.StepSolution[]) isa AllScans
     end
 
     @testset "pass partitioning: which steps share one read" begin
-        prior = Gustavo.StepSolution[]
         steps = Gustavo.SolveStep[
             BaselineFringeFit(), DispersionSBDFit(), AdhocPhase(), Bandpass(),
         ]
-        @test Gustavo._fusable_run(steps, 1, prior) == 1:3   # the scan-local run shares a pass
-        @test Gustavo._fusable_run(steps, 4, prior) == 4:4
+        @test Gustavo._fusable_run(steps, 1) == 1:3   # the scan-local run shares a pass
+        @test Gustavo._fusable_run(steps, 4) == 4:4
         # A pooled BaselineFringeFit instance (rounds > 1) runs alone, and the
         # scan-local pair after it still shares its own pass.
         steps2 = Gustavo.SolveStep[
             BaselineFringeFit(estimator = MatchedFilter(rounds = 2)),
             DispersionSBDFit(), AdhocPhase(), Bandpass(),
         ]
-        @test Gustavo._fusable_run(steps2, 1, prior) == 1:1
-        @test Gustavo._fusable_run(steps2, 2, prior) == 2:3
-        @test Gustavo._fusable_run(steps2, 4, prior) == 4:4
-        # A scan-local step accumulating from a SUBSET of the scans still runs
-        # alone: one pass materializes one set of groups.
-        @test Gustavo._fusable_run(
-            Gustavo.SolveStep[DispersionSBDFit(), _SubsetScanStep()], 1, prior
-        ) == 1:1
-        @test Gustavo._fusable_run(
-            Gustavo.SolveStep[_SubsetScanStep(), DispersionSBDFit()], 1, prior
-        ) == 1:1
+        @test Gustavo._fusable_run(steps2, 1) == 1:1
+        @test Gustavo._fusable_run(steps2, 2) == 2:3
+        @test Gustavo._fusable_run(steps2, 4) == 4:4
+    end
+
+    @testset "a step fit on a scan subset, carried into the full fit" begin
+        nant, nspw, nchan = 4, 2, 8
+        bp = [a == 1 ? 0.0 : 0.3 * sin(0.4 * c + a + f) for a in 1:nant, f in 1:2, c in 1:(nspw * nchan)]
+        uvset, _ = _build_fringe_uvset(; nant, nspw, nchan, nscans = 3, bandpass = bp)
+        sub = UVP.select_partition(uvset; scan = "3")
+        gauge = PinAntenna(1)
+        fr = fit(BaselineFringeFit(), uvset; gauge)
+        # The scans' fringe phases differ, so the full-set solution corrects the
+        # subset exactly as a fit on the subset alone does only if each of its
+        # scans' gains lands on that scan.
+        fr3 = fit(BaselineFringeFit(), sub; gauge)
+        bp_sub = fit(ApplySolution(fr) |> Bandpass(), sub; gauge)
+        @test bp_sub.steps[1].θ ≈ fit(ApplySolution(fr3) |> Bandpass(), sub; gauge).steps[1].θ atol = 1.0e-10
+        # Noise-free and time-constant: one scan determines the bandpass all three do.
+        @test bp_sub.steps[1].θ ≈ fit(ApplySolution(fr) |> Bandpass(), uvset; gauge).steps[1].θ atol = 1.0e-6
+
+        sol = fit(ApplySolution(fr) |> ApplySolution(bp_sub) |> AdhocPhase(), uvset; gauge)
+        @test sol.sequence[1] isa ApplySolution && sol.sequence[2] isa ApplySolution
+        @test calibrate(sol, uvset) isa UVP.UVSet
     end
 
     @testset "a fused step may not ask for its pass again" begin
@@ -169,20 +170,6 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test Gustavo._parse_pipeline(chain).before == [[cf], []]
         # Only pipeline elements chain; anything else is function application.
         @test_throws MethodError BaselineFringeFit() |> AverageFrequency(nout = 1)
-    end
-
-    @testset "scan selections" begin
-        scans = [
-            (index = 1, source = "A", scan = "No1", snr = 10.0),
-            (index = 2, source = "B", scan = "No2", snr = 50.0),
-            (index = 3, source = "A", scan = "No3", snr = 20.0),
-            (index = 4, source = "B", scan = "No4", snr = 5.0),
-        ]
-        @test select_scans(AllScans(), scans) == [1, 2, 3, 4]
-        @test select_scans(SourceScans("A"), scans) == [1, 3]
-        @test select_scans(SourceScans("A", "B"), scans) == [1, 2, 3, 4]
-        @test select_scans(ScanIndices(3, 1), scans) == [1, 3]
-        @test select_scans(ScanWhere(s -> s.snr > 15), scans) == [2, 3]
     end
 
     @testset "transforms on a scan stack + geometry window" begin

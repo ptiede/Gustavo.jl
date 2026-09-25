@@ -11,10 +11,6 @@
 #
 # Hooks a step may implement (all have working defaults):
 # - `model_components(step, spec)` — the gain-model components this step solves.
-# - `fit_selection(step, prior_solutions)` — which scans feed its accumulation
-#                                    (fit-on-subset / apply-everywhere); reads
-#                                    non-data info from earlier steps (e.g.
-#                                    per-scan SNR) off their `StepSolution`s.
 # - `provides(step)`               — names the step's solution slot.
 # - `required_grouping(step)`      — leaf-grouping constraint.
 # - `fusable_grouping(step)`       — accumulation scope; `:scan` lets the step
@@ -82,18 +78,6 @@ supports_station_heterogeneity(step::SolveStep) = false
 heterogeneity_rejector(step::SolveStep) = string(nameof(typeof(step)))
 
 """
-    fit_selection(step::SolveStep, prior_solutions) -> Fring.AbstractScanSelection
-
-Which scans feed this step's accumulation. Time-global components solved by
-the step still apply to every scan — fitting a bandpass or a track-global delay
-from a few bright calibrator scans and applying it across the board. `prior_solutions`
-is the ordered `Vector{StepSolution}` of every earlier step's finished solution —
-a step wanting non-data info from an earlier step (e.g. per-scan SNR) reads it
-off there. Default: [`Fring.AllScans`](@ref)`()`.
-"""
-fit_selection(step::SolveStep, prior_solutions) = Fring.AllScans()
-
-"""
     provides(step::SolveStep) -> Symbol
 
 The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
@@ -131,10 +115,8 @@ between un-fused passes, on data already in memory. A lazy `UVSet` re-reads and
 decodes the dataset once per pass, so this is the difference between N reads of
 the data and one; it changes no step's result.
 
-Fusion additionally requires every step in the run to accumulate from every
-scan ([`fit_selection`](@ref) returning [`Fring.AllScans`](@ref)`()`), since
-one pass materializes one set of groups, and forbids pass repetition
-(`repeat_pass`), which is by definition not scan-local.
+Fusion forbids pass repetition (`repeat_pass`), which is by definition not
+scan-local.
 
 Dispatches on the step INSTANCE, not just its type, so a step whose
 configuration decides the answer can answer for itself.
@@ -156,8 +138,8 @@ Accumulate one scan group into the step's state. The EXECUTOR has already
 materialized the group and applied the pipeline's transform chain — the step
 only consumes the scan's `DimStack` and the
 [`GeometryWindow`](@ref) addressing it in the solve's index space (and may
-read/write its own per-scan θ slots through `ctx`). Called once per selected scan group
-(see [`fit_selection`](@ref)), possibly concurrently across groups; per-scan θ
+read/write its own per-scan θ slots through `ctx`). Called once per scan group,
+possibly concurrently across groups; per-scan θ
 slots are disjoint. The RETURN VALUE is collected by the runner — one entry per
 selected group, in group-index order, delivered to [`finish_pass!`](@ref) via
 `ctx.scratch[:pass_results]` — so a step needs no locking: return the scan's
@@ -194,8 +176,8 @@ finish_pass!(step::SolveStep, ctx) = NamedTuple()
 
 The per-scan-group values `f(res)` extracts from `results`
 (`ctx.scratch[:pass_results]`, see [`finish_pass!`](@ref)), scattered into a
-dense length-`ngroups` array in global scan-group index order. A group a
-step's [`fit_selection`](@ref) did not select reads back as `default`, not
+dense length-`ngroups` array in global scan-group index order. A group
+missing from `results` reads back as `default`, not
 garbage — `results` need not be sorted, and need not cover every group. The
 shared primitive behind the runner's own per-step `timing` (in
 [`finish_pass!`](@ref)'s docs) and the built-in fringe estimator's per-scan
@@ -226,9 +208,9 @@ transform chain, see `_run_pipeline` — which also carries the run's
 [`ExecutionConfig`](@ref) resources), and
 `scratch` — a `Dict{Symbol, Any}` for state private to this step's own pass
 (e.g. per-group scratch accumulators across search rounds). Non-data info a
-Later step wants from an earlier one (e.g. per-scan SNR) is never read through
-`scratch` — it's read off the ordered list of finished `StepSolution`s instead
-(see [`fit_selection`](@ref)); gain correction between steps is never read
+later step wants from an earlier one (e.g. per-scan SNR) is never read through
+`scratch` — it's read off the ordered list of finished `StepSolution`s
+instead; gain correction between steps is never read
 through `scratch` either — it flows through `stream`'s transform chain, so no
 step evaluates or mutates another step's θ.
 

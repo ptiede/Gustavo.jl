@@ -233,43 +233,6 @@ function _check_memory_budget(specs, outer, budget)
     )
 end
 
-"""
-    select_groups(stream::ScanStream, sel::AbstractScanSelection; snr = nothing)
-        -> Vector{ScanGroupSpec}
-
-The stream's groups filtered by a scan selection (fit-on-subset: a selective
-pass materializes — and reads — only these). `snr` optionally supplies per-group
-stage-A SNRs (by stream group index) for selections that need them (e.g. a
-[`ScanWhere`](@ref) predicate reading `s.snr`); without it they see `NaN`.
-Each selection record also carries the group's `stations` set (from lazy-leaf
-metadata — no reads), consumed by coverage-aware selections and available to
-`ScanWhere` predicates.
-"""
-function select_groups(stream::ScanStream, sel::AbstractScanSelection; snr = nothing)
-    recs = [
-        (;
-            index = s.index, source = s.source, scan = s.scan,
-            snr = snr === nothing ? NaN : Float64(snr[s.index]),
-            stations = _spec_stations(s),
-        )
-            for s in stream.groups
-    ]
-    return stream.groups[select_scans(sel, recs)]
-end
-
-# Station set of one scan group, from lazy-leaf metadata (no reads).
-function _spec_stations(spec::ScanGroupSpec)
-    sts = Set{Int}()
-    for (_, leaf) in spec.leaves
-        for (a, b) in UVData.baselines(leaf).pairs
-            a == b && continue
-            push!(sts, a)
-            push!(sts, b)
-        end
-    end
-    return sts
-end
-
 # ── Materialization (the transform-chain choke points) ────────────────────────
 
 """
@@ -532,11 +495,11 @@ function _stream_progress(cb, stage, done, total)
 end
 
 """
-    map_groups(work, stream::ScanStream; selection = AllScans(), snr = nothing,
+    map_groups(work, stream::ScanStream;
                progress = progress_callback(stream), stage = :pass) -> Vector
 
-Run `work(spec::ScanGroupSpec)` over the stream's (selected) groups on the
-stream's outer scheduler, heaviest group first so the long poles start
+Run `work(spec::ScanGroupSpec)` over the stream's groups on the stream's outer
+scheduler, heaviest group first so the long poles start
 immediately. Results return in group order. `work` must be independent across
 groups (all fringe passes qualify: disjoint per-scan θ slots / per-scan outputs).
 
@@ -550,11 +513,10 @@ here. `progress` defaults to the callback on the stream's
 """
 function map_groups(
         work::F, stream::ScanStream;
-        selection::AbstractScanSelection = AllScans(), snr = nothing,
         progress = progress_callback(stream), stage::Symbol = :pass,
     ) where {F}
-    specs = selection isa AllScans ? stream.groups : select_groups(stream, selection; snr)
-    total = length(specs)
+    groups = stream.groups
+    total = length(groups)
     _stream_progress(progress, stage, 0, total)
     done = Threads.Atomic{Int}(0)
     function wrapped(spec)
@@ -563,7 +525,7 @@ function map_groups(
         return r
     end
     return _scheduled_map(
-        wrapped, specs, [s.charge for s in specs];
+        wrapped, groups, [s.charge for s in groups];
         executor = outer_executor(stream),
     )
 end

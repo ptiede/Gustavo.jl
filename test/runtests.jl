@@ -80,7 +80,7 @@ include("test_axis_order.jl")
 include("test_fringe_step.jl")
 
 # The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
-# vs the frozen monolith, refine-kernel bit parity, coverage top-up,
+# vs the frozen monolith, refine-kernel bit parity,
 # step-selection extraction + portable ApplySolution.
 include("test_bandpass_step.jl")
 

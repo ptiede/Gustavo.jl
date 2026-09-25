@@ -1127,23 +1127,6 @@ end
     @test isapprox(refine.θ[o3], dtec_true[3] - dtec_true[1]; atol = 0.05)
 end
 
-@testset "Bandpass calibrator: SourceScans override + coverage top-up" begin
-    srcs = ["A", "A", "A", "B"]
-    snr = [500.0, 600.0, 550.0, 900.0]
-    recs = [
-        (index = i, source = srcs[i], scan = "No$i", snr = snr[i], stations = Set([1, 2]))
-            for i in eachindex(srcs)
-    ]
-    @test select_scans(Gustavo.SourceScans("B"), recs) == [4]   # explicit override
-
-    # Top-up is a no-op when the selected scans already cover every station.
-    full = [
-        (index = i, source = "A", scan = "No$i", snr = 1.0, stations = Set(1:4))
-            for i in 1:3
-    ]
-    @test select_scans(FP.CoverageTopup(Gustavo.AllScans()), full) == [1, 2, 3]
-end
-
 @testset "Largest-first group map" begin
     # Results come back in index order regardless of completion order.
     res = ST._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2])

@@ -28,7 +28,6 @@ working default:
 | [`finish_pass!`](@ref) | close the solve; return diagnostics | empty |
 | [`fusable_grouping`](@ref) | can the step share a pass with its neighbors? | `:global` |
 | [`required_grouping`](@ref) | leaf-grouping constraint | `:any` |
-| [`fit_selection`](@ref) | which scans feed the accumulation | all scans |
 | [`supports_station_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
 
 The execution model behind them:
@@ -262,11 +261,10 @@ blocks' stations, not per block.
 
 ## Selecting scans
 
-[`fit_selection`](@ref)`(step, prior_solutions)` restricts which scans feed
-the accumulation (fit-on-subset / apply-everywhere — a bandpass fit from a
-few bright calibrator scans still applies to every scan). `prior_solutions`
-is the ordered list of earlier steps' finished `StepSolution`s: the supported
-way to read non-data info from an earlier step, e.g. a
-[`ScanWhere`](@ref Gustavo.Fring.ScanWhere) selection keeping scans whose
-fringe SNR cleared a floor. Gain corrections are *never* read this way — they
-flow through the stream's transform chain automatically.
+A step reads every scan of the data `fit` is given; there is no per-step
+selection. To fit a step on a subset of the scans, fit it on that subset and
+carry its solution into the full-data fit as a correction:
+
+    fr = fit(BaselineFringeFit(), data; gauge)
+    bp = fit(ApplySolution(fr) |> Bandpass(), calibrator_scans; gauge)
+    sol = fit(ApplySolution(fr) |> ApplySolution(bp) |> AdhocPhase(), data; gauge)

@@ -27,8 +27,7 @@ solver diagnostics. A [`CalibrationSolution`](@ref) is the ordered
 run order; gains compose multiplicatively across them ([`gains`](@ref),
 [`apply_calibration`](@ref Gustavo.UVData.apply_calibration)), and `name` (the step's `provides(step)`
 capability, e.g. `:fringe`/`:bandpass`/`:refine`/`:adhoc`) is how a later
-step's `fit_selection` or a user's [`stage_info`](@ref) or `sol[name]`
-looks a step up.
+a user's [`stage_info`](@ref) or `sol[name]` looks a step up.
 
 `θ` keeps whatever array type it is given — a labelled `DimArray` as readily as
 a `Vector` — subject to two requirements `layout` imposes: `length(θ) ==

@@ -55,9 +55,8 @@ this scan; anything global belongs in [`finish_estimate!`](@ref). A scan-local
 configuration ([`scan_local_solve`](@ref)) writes all of this scan's columns
 here. The returned NamedTuple is collected in group order and handed back there.
 
-Include a `max_snr::Real` field: a scan selection may rank or filter groups by
-strength (e.g. a [`ScanWhere`](@ref) predicate reading `s.snr`), and an
-estimator with no notion of SNR should return `NaN` rather than omit it.
+Include a `max_snr::Real` field: it becomes the step's per-scan `scan_snr`
+diagnostic, and an estimator with no notion of SNR should return `NaN` rather than omit it.
 """
 function estimate_scan! end
 

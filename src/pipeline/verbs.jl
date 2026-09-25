@@ -161,7 +161,7 @@ _resolve_run_gauge(::Nothing, ant_names) = throw(
 # in order, with each earlier step's own solution (`ApplySolution`) appended
 # where the step finished. Non-data info an earlier step published (e.g. the
 # fringe stage's per-scan SNR) reaches a later step through the ordered list
-# of finished `StepSolution`s (`fit_selection`), not a shared scratch dict.
+# of finished `StepSolution`s, not a shared scratch dict.
 function _run_pipeline(
         br, exec::ExecutionConfig, gauge_spec::Union{Nothing, AbstractGauge}, uvset::UVSet,
     )
@@ -208,10 +208,9 @@ function _run_pipeline(
     si = 1
     while si <= length(solve_steps)
         append!(chain, br.before[si])
-        # The partition is recomputed here rather than up front because
-        # `fit_selection` reads the solutions finished so far. A transform
-        # between two steps ends the run: the later step must read its output.
-        run = _fusable_run(solve_steps, si, step_solutions)
+        # A transform between two steps ends the run: the later step must read
+        # its output.
+        run = _fusable_run(solve_steps, si)
         stop = findfirst(k -> !isempty(br.before[k]), (si + 1):last(run))
         run = stop === nothing ? run : si:(si + stop - 1)
         si = last(run) + 1
@@ -220,7 +219,7 @@ function _run_pipeline(
         contexts = [_step_context(st, stream) for st in run_steps]
         ctx = last(contexts)
         infos = length(run) == 1 ?
-            [_run_pass!(run_steps[1], contexts[1], step_solutions)] :
+            [_run_pass!(run_steps[1], contexts[1])] :
             _run_fused_pass!(run_steps, contexts)
         for (st, c, info) in zip(run_steps, contexts, infos)
             push!(step_solutions, StepSolution(provides(st), c.model, c.layout, c.θ, info))
@@ -239,35 +238,15 @@ function _run_pipeline(
     )
 end
 
-# The per-scan SNR a later step's selection may want (e.g. a `ScanWhere`
-# predicate filtering on `s.snr`), read off the most recent finished
-# `StepSolution` that published one — never a shared scratch dict.
-# `nothing` when no prior step published SNR (an estimator with
-# no notion of it, or none yet).
-function _scan_snr(prior_solutions)
-    for s in Iterators.reverse(prior_solutions)
-        haskey(s.info, :scan_snr) && return s.info.scan_snr
-    end
-    return nothing
-end
-
 # ── Pass partitioning: which steps share one read of the data ────────────────
 
 # The maximal run of steps starting at `first_i` that can share one streaming
-# pass. A run extends while each further step declares itself scan-local
-# (`fusable_grouping === :scan`) and accumulates from every scan: one pass
-# materializes one set of groups, so steps disagreeing on their `fit_selection`
-# need passes of their own. `AllScans` is required rather than mere agreement
-# because a fused step also cannot read its run siblings' `StepSolution`s —
-# they do not exist until the run ends — and a narrower selection is exactly
-# where a step would want them.
-#
-# The run's first step needs neither property, so every pipeline partitions
-# into runs: a `:global` step, or one fitting on a subset, simply lands in a
-# run of its own and gets a pass to itself.
-function _fusable_run(solve_steps, first_i::Integer, prior_solutions)
-    _fusable(st) = fusable_grouping(st) === :scan &&
-        fit_selection(st, prior_solutions) isa Fring.AllScans
+# pass: consecutive steps that each declare themselves scan-local
+# (`fusable_grouping === :scan`). The run's first step need not be, so every
+# pipeline partitions into runs: a `:global` step simply lands in a run of its
+# own and gets a pass to itself.
+function _fusable_run(solve_steps, first_i::Integer)
+    _fusable(st) = fusable_grouping(st) === :scan
     _fusable(solve_steps[first_i]) || return first_i:first_i
     last_i = first_i
     while last_i < length(solve_steps) && _fusable(solve_steps[last_i + 1])
@@ -283,16 +262,13 @@ end
 # re-search rounds). Returns the step's diagnostics NamedTuple (`repeat_pass`
 # stripped, `t_pass`/`timing` added — see below) — the caller wraps it into a
 # `StepSolution` alongside this step's own `ctx.model`/`layout`/`θ`.
-function _run_pass!(step::SolveStep, ctx::SolveContext, prior_solutions)
+function _run_pass!(step::SolveStep, ctx::SolveContext)
     stage = provides(step)
     ngroups = length(ctx.stream.groups)
     t0 = time_ns()
     while true
         start_pass!(step, ctx)
-        results = Fring.map_groups(
-            ctx.stream; selection = fit_selection(step, prior_solutions),
-            snr = _scan_snr(prior_solutions), stage = stage,
-        ) do gspec
+        results = Fring.map_groups(ctx.stream; stage) do gspec
             ta = time_ns()
             stack, win = Fring.materialize_cube(ctx.stream, gspec)
             tb = time_ns()
@@ -321,9 +297,6 @@ end
 # splits the group's cost the way it was actually incurred — the single decode
 # charged to the first step and each step's own `process_scan!` to itself.
 #
-# Every step in the run selects every scan (`_fusable_run`), which is why the
-# pass takes the default selection and needs no per-scan SNR from the steps
-# solved before it.
 function _run_fused_pass!(steps, contexts)
     n = length(steps)
     stream = first(contexts).stream

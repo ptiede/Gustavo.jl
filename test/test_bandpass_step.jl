@@ -105,23 +105,6 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test solbf isa CAL.CalibrationSolution
     end
 
-    @testset "CoverageTopup selection" begin
-        recs = [
-            (; index = 1, source = "C", scan = "1", snr = 50.0, stations = Set([1, 2, 3])),
-            (; index = 2, source = "X", scan = "2", snr = 10.0, stations = Set([3, 4])),
-            (; index = 3, source = "X", scan = "3", snr = 20.0, stations = Set([2, 4])),
-            (; index = 4, source = "Y", scan = "4", snr = 5.0, stations = Set([5])),
-        ]
-        # Station 4 is missing from scan 1 → its best scan (index 3, snr 20)
-        # tops up; station 5 needs scan 4 too.
-        @test FP.select_scans(FP.CoverageTopup(FP.ScanIndices(1)), recs) == [1, 3, 4]
-        # A selection that already covers everything is unchanged.
-        @test FP.select_scans(FP.CoverageTopup(FP.AllScans()), recs) == [1, 2, 3, 4]
-        # Records without a stations field pass through untouched.
-        recs2 = [(; index = 1, source = "C", scan = "1", snr = 1.0)]
-        @test FP.select_scans(FP.CoverageTopup(FP.AllScans()), recs2) == [1]
-    end
-
     @testset "grouped bandpass: ChannelBlocks(k) ties channels within a block" begin
         # How finely the bandpass varies in frequency is said by the SEGMENTATION,
         # so `ChannelBlocks(4)` gives one solved value per 4 consecutive channels

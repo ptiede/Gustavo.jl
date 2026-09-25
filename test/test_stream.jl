@@ -93,18 +93,6 @@
         @test events[1] == (:probe, 0, n)
         @test sort(last.(events[2:end])) == fill(n, n) && sort([e[2] for e in events[2:end]]) == collect(1:n)
 
-        sel = Gustavo.ScanIndices(2)
-        picked = FP.select_groups(stb, sel)
-        @test length(picked) == 1 && picked[1].index == 2
-        @test map_groups(spec -> spec.index, stb; selection = sel) == [2]
-
-        # snr-aware selection resolves through select_groups' snr keyword —
-        # any ScanWhere predicate can read it generically.
-        snrs = fill(NaN, n); snrs[1] = 10.0
-        finite = FP.select_groups(stb, Gustavo.ScanWhere(s -> isfinite(s.snr)); snr = snrs)
-        @test [s.index for s in finite] == [1]
-        every = FP.select_groups(stb, Gustavo.ScanWhere(s -> true); snr = snrs)
-        @test [s.index for s in every] == collect(1:n)
 
         # A failing group rethrows after the pass drains. A concurrent
         # scheduler task-wraps it — the contract is that the ROOT CAUSE
@@ -191,13 +179,6 @@ end
     for n in (:FringeWorkspace, :FringeSearch, :search_scan)
         @test !isdefined(Gustavo.Streaming, n)
     end
-
-    # `Fring`'s own selection extends the streaming generic rather than
-    # shadowing it: one function, reachable unambiguously at the top level.
-    @test FP.select_scans === ST.select_scans === Gustavo.select_scans
-    @test isdefined(Gustavo, :select_scans)
-    recs = [(; index = i, source = "S", scan = "s$i", snr = 1.0, stations = Set(1:3)) for i in 1:3]
-    @test select_scans(FP.CoverageTopup(AllScans()), recs) == [1, 2, 3]
 
     # The stream carries no kernel scratch: the search allocates its own per-task
     # FFT workspace, so any stream searches without prior setup.

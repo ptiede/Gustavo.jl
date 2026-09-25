@@ -69,16 +69,14 @@ export fit
 export SolveStep, ExecutionConfig, ProgressLogger
 export outer_executor, inner_executor
 export start_pass!, process_scan!, finish_pass!, scan_values
-export model_components, fit_selection, provides, required_grouping, fusable_grouping
+export model_components, provides, required_grouping, fusable_grouping
 export supports_station_heterogeneity
-# Re-export the transform / selection vocabulary and stage accessors so
+# Re-export the transform vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
 export AbstractDataTransform, apply_transform!, apply_transform
 export CalFunction, ApplySolution, StationWeightScale, FlagChannels, AprioriPreCal
-export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
-export select_scans
 export AbstractLeafGrouping, ByScan, BySpw, ByKey
-export ScanStream, scan_stream, select_groups
+export ScanStream, scan_stream
 export search_scan
 export map_groups, foreach_group
 # The solution surface: the container, selection (`sol[...]`), the two verbs,

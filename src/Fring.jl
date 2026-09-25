@@ -7,9 +7,9 @@ layer it runs its passes over (EHT-HOPS-inspired, Blackburn et al. 2019, but
 with globally-closing per-feed solutions): per-baseline FFT delay/rate search,
 stationization, bandpass and adhoc-phase stages, and the diagnostics over them.
 
-The streaming vocabulary (`ScanStream`, the transform and
-selection types) is re-exported from `Gustavo.Streaming`, so a caller driving
-the fringe engine reaches it without a second `using`.
+The streaming vocabulary (`ScanStream`, the transform types) is re-exported
+from `Gustavo.Streaming`, so a caller driving the fringe engine reaches it
+without a second `using`.
 """
 module Fring
 
@@ -27,11 +27,6 @@ using ..Calibration: weighted_regularized_least_squares, weighted_constrained_le
 # `SingleBandDelay` compiles through the model layer's element-compilation generic.
 import ..Calibration: model_components
 using ..Streaming
-# `CoverageTopup` (bandpass_stage.jl) is another `AbstractScanSelection`, so its
-# resolver must be a METHOD of the streaming layer's generic — defining
-# `select_scans` under a bare `using` would mint a second function of the same
-# name and leave the two ambiguous wherever both modules are in scope.
-import ..Streaming: select_scans
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, DimArray, DimStack, AbstractDimStack
@@ -152,8 +147,6 @@ export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_fla
 export delay_closure, print_delay_closure
 export AbstractDataTransform, apply_transform!, apply_transform
 export ApplySolution, StationWeightScale, FlagChannels, CalFunction, AprioriPreCal
-export AbstractScanSelection, AllScans, SourceScans, ScanIndices, ScanWhere
-export select_scans
 export AbstractFringeEstimator, estimate_scan!, finish_estimate!, estimator_info
 export can_fit, validate_model
 export MatchedFilter, SingleBandDelay, BandGroups, default_fringe_terms
@@ -163,7 +156,7 @@ export MatchedFilter, SingleBandDelay, BandGroups, default_fringe_terms
 export DispersionModel
 export AbstractLeafGrouping, ByScan, BySpw, ByKey
 export ExecutionConfig, ProgressLogger, outer_executor, inner_executor
-export ScanStream, scan_stream, ScanGroupSpec, select_groups
+export ScanStream, scan_stream, ScanGroupSpec
 export materialize_cube, materialize_leaves
 export search_scan
 export map_groups, foreach_group
