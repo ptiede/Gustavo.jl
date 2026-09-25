@@ -96,7 +96,7 @@ model_components(dm::DispersionModel, spec) =
     GainComponent(Dispersion(); Ti = PerScan(), Feed = SharedFeeds()) : nothing
 ```
 
-`spec = (; geom, antennas)` carries the data geometry, so the element can
+`spec = (; geom)` carries the data geometry, so the element can
 decline to compile at all when the data cannot constrain the effect — here,
 when the band layout cannot separate 1/ν from a linear delay
 (`_dispersion_enabled` requires several sub-bands over a wide fractional
@@ -146,7 +146,9 @@ compose multiplicatively, so this step's delay column times `BaselineFringeFit`'
 the same total correction, and neither step touches the other's θ.
 
 `solve` resolves where the step's θ columns live, once, before any data is
-read, then runs the specialized fits per scan. Both fits write per-scan θ
+read, then runs the specialized fits per scan. Both fits need every band of
+the scan at once, so each takes the whole group, placed on the run's geometry
+by `Fring.GroupTables`, rather than one Measurement Set. Both write per-scan θ
 slots, which are disjoint across groups, so the per-group function writes θ
 directly and returns nothing. The returned `NamedTuple` publishes what was
 actually solved:
@@ -157,15 +159,13 @@ function solve(s::DispersionSBDFit, ctx::SolveContext)
     delay_plan = disp_plan === nothing ? nothing :
         Fring._perscan_delay_plan(ctx.model, ctx.layout)
     sbd_plans = Fring._sbd_plans(ctx.model, ctx.layout)
-    ties = _dtec_ties(s.dispersion, ctx.geom.stations)
+    ties = _dtec_ties(s.dispersion, ctx)
     results = each_group(ctx) do group
-        for ms in values(group)
-            win = GeometryWindow(ctx.geom, ms)
-            Fring.refine_scan_dispersion!(
-                ctx.θ, ms, win, delay_plan, disp_plan, ctx.gauge, ctx.nant; ties,
-            )
-            Fring.refine_scan_sbd!(ctx.θ, ms, win, sbd_plans, ctx.gauge, ctx.nant)
-        end
+        tabs = Fring.GroupTables(group, ctx.geom)
+        Fring.refine_scan_dispersion!(
+            ctx.θ, tabs, delay_plan, disp_plan, ctx.gauge, ctx.nant; ties,
+        )
+        Fring.refine_scan_sbd!(ctx.θ, tabs, sbd_plans, ctx.gauge, ctx.nant)
         nothing
     end
     return (;
