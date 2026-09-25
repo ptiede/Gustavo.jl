@@ -243,12 +243,12 @@ function _seed_phase_tracks(
         gauge::AbstractGauge = PinAntenna(1), snr_floor::Real = 1.0,
     )
     nbl, npol, nchan = size(rbar_bp)
-    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
+    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
     nseg = length(segs)
     phase = fill(NaN, nant, 2, nseg)
     prec = zeros(nant, 2, nseg)
     for (fs, chans) in enumerate(segs)
-        rows = _ObsRow[]
+        rows = _ObsRow{real(eltype(rbar_bp))}[]
         for bi in axes(rbar_bp, StationPair), p in axes(rbar_bp, FeedPair)
             a, b = bl_pairs[bi]
             a == b && continue
@@ -257,7 +257,7 @@ function _seed_phase_tracks(
             snr2 = _segment_snr2(r, w, w2, noise2[bi, p])
             snr2 >= snr_floor^2 || continue
             fa, fb = feeds[p]
-            push!(rows, _ObsRow(a, b, fa, fb, angle(r), snr2))
+            push!(rows, eltype(rows)(a, b, fa, fb, angle(r), snr2))
             prec[a, fa, fs] += snr2
             prec[b, fb, fs] += snr2
         end
@@ -420,7 +420,7 @@ function _seed_amp_tracks(
         snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
     )
     nbl, npol, nchan = size(rbar_bp)
-    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p, nchan) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
+    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
     nnodes = 2 * nant
     nfseg = length(fsegs)
     la = fill(NaN, nant, 2, nfseg)

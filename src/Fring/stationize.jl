@@ -217,16 +217,23 @@ _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 # system that carries one per (baseline, product) — the adhoc solve, where the
 # observed source visibility phase is a per-scan constant absorbed alongside the
 # station phases (see `solve_adhoc_phasing`). It is 0 in systems with no such term.
-struct _ObsRow
+# `T` is the solve's working type: a system is solved in its rows' value type.
+struct _ObsRow{T <: AbstractFloat}
     a::Int
     b::Int
     na::Int
     nb::Int
-    val::Float64
-    w::Float64
+    val::T
+    w::T
     src::Int
 end
-_ObsRow(a, b, na, nb, val, w) = _ObsRow(a, b, na, nb, val, w, 0)
+function _ObsRow(a, b, na, nb, val::Real, w::Real, src = 0)
+    v, wv = promote(float(val), float(w))
+    return _ObsRow{typeof(v)}(a, b, na, nb, v, wv, src)
+end
+_ObsRow{T}(a, b, na, nb, val, w) where {T} = _ObsRow{T}(a, b, na, nb, val, w, 0)
+
+_rowtype(::AbstractVector{_ObsRow{T}}) where {T} = T
 
 # Robust wrapper around `_solve_observable`: IRLS over `opts.loss`. Each pass
 # rescales every row's noise-model weight by the loss's derivative at that row's
@@ -238,7 +245,7 @@ _ObsRow(a, b, na, nb, val, w) = _ObsRow(a, b, na, nb, val, w, 0)
 # rows whose residual is still one wrap away from its final value, which reads
 # as a gross outlier and suppresses a perfectly good row.
 function _solve_observable_robust(
-        rows::Vector{_ObsRow}, nant::Integer, gauge::AbstractGauge, opts::Stationization;
+        rows::AbstractVector{<:_ObsRow}, nant::Integer, gauge::AbstractGauge, opts::Stationization;
         rewrap::Integer,
     )
     vals, cov, ncomp, resid = _solve_observable(rows, nant, gauge; rewrap = rewrap)
@@ -259,15 +266,16 @@ end
 # `resid` comes back aligned with `rows`, already 2π-branch-corrected for a
 # re-wrapped system, so the driver can normalize it without redoing the unwrap.
 function _solve_observable(
-        rows::Vector{_ObsRow}, nant::Integer, gauge::AbstractGauge;
+        rows::AbstractVector{<:_ObsRow}, nant::Integer, gauge::AbstractGauge;
         rewrap::Integer,
         seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
         weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
     )
-    vals = fill(NaN, nant, 2)
+    T = _rowtype(rows)
+    vals = fill(T(NaN), nant, 2)
     cov = falses(nant, 2)
     nnodes = 2 * nant
-    isempty(rows) && return vals, cov, 0, Float64[]
+    isempty(rows) && return vals, cov, 0, T[]
 
     edges = [(_node(r.a, r.na, nant), _node(r.b, r.nb, nant)) for r in rows]
     compid, ncomp, touched = connected_components(nnodes, edges)
@@ -277,7 +285,7 @@ function _solve_observable(
     # Gauge: `gauge` supplies one constraint row per component. `anchors` names a
     # real node per component as well — phase unwrapping propagates outward from
     # an actual node, which a summed constraint does not provide.
-    nodew = zeros(Float64, nnodes)
+    nodew = zeros(T, nnodes)
     for (i, r) in enumerate(rows)
         wi = weights === nothing ? r.w : weights[i]
         nodew[_node(r.a, r.na, nant)] += wi
@@ -296,12 +304,12 @@ function _solve_observable(
     # Components hold only touched nodes, so these never collide with a gauge row.
     idle = [n for n in eachindex(touched) if !touched[n]]
 
-    A = zeros(Float64, nrow, nnodes)
-    b = zeros(Float64, nrow)
-    w = zeros(Float64, nrow)
+    A = zeros(T, nrow, nnodes)
+    b = zeros(T, nrow)
+    w = zeros(T, nrow)
     for (i, r) in enumerate(rows)
-        A[i, _node(r.a, r.na, nant)] += 1.0
-        A[i, _node(r.b, r.nb, nant)] -= 1.0
+        A[i, _node(r.a, r.na, nant)] += one(T)
+        A[i, _node(r.b, r.nb, nant)] -= one(T)
         b[i] = r.val
         w[i] = weights === nothing ? r.w : weights[i]
     end
@@ -336,7 +344,7 @@ function _solve_observable(
         if seed_phase !== nothing
             for ant in axes(seed_phase, 1), feed in axes(seed_phase, 2)
                 v = seed_phase[ant, feed]
-                isfinite(v) && (xseed[_node(ant, feed, nant)] = float(v))
+                isfinite(v) && (xseed[_node(ant, feed, nant)] = v)
             end
         end
         model = A * xseed
@@ -373,11 +381,12 @@ end
 # by the WLS). The estimate is used only to unwrap the observations for the first
 # constrained solve, so any edge it cannot place stays 0 — the re-wrap iterations
 # refine from there.
-function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, anchors::AbstractVector{<:Integer})
+function _spanning_tree_seed(rows::AbstractVector{<:_ObsRow}, nant::Integer, anchors::AbstractVector{<:Integer})
+    T = _rowtype(rows)
     nnodes = 2 * nant
-    x = zeros(Float64, nnodes)
+    x = zeros(T, nnodes)
     # Adjacency over parallel-hand edges: neighbor, phase to ADD (φ_v = φ_u + add), weight.
-    adj = [Vector{Tuple{Int, Float64, Float64}}() for _ in 1:nnodes]
+    adj = [Vector{Tuple{Int, T, T}}() for _ in 1:nnodes]
     for r in rows
         r.na == r.nb || continue
         na = _node(r.a, r.na, nant)
@@ -401,10 +410,10 @@ function _spanning_tree_seed(rows::Vector{_ObsRow}, nant::Integer, anchors::Abst
         (1 <= p <= nnodes && !visited[p]) || continue
         visited[p] = true                       # pinned node phase stays 0
         while true
-            best_w = -Inf
+            best_w = T(-Inf)
             best_u = 0
             best_v = 0
-            best_add = 0.0
+            best_add = zero(T)
             for u in eachindex(visited)
                 visited[u] || continue
                 for (v, add, w) in adj[u]

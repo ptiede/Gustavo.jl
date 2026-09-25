@@ -741,6 +741,19 @@ end
     d = Float64[0.5]
     xc = CALIB.weighted_constrained_least_squares(A, b32, iv32, C, d)
     @test isfinite(xc[1]) && isfinite(xc[2])
+
+    # A Float32 system stays Float32: the penalty and the constraint weight are
+    # tuning quantities and do not set the precision; the constraint rows do.
+    A32 = Float32.(A)
+    @test eltype(CALIB.weighted_least_squares(A32, b32, iv32)) == Float32
+    xr32 = CALIB.weighted_regularized_least_squares(A32, b32, iv32, [0.2, 0.7])
+    @test eltype(xr32) == Float32
+    @test xr32 ≈ CALIB.weighted_regularized_least_squares(A, b32, iv32, [0.2, 0.7]) rtol = 1.0e-5
+    @test eltype(CALIB.weighted_regularized_least_squares(A32, b32, iv32, Float64[1.0 -1.0])) == Float32
+    xc32 = CALIB.weighted_constrained_least_squares(A32, b32, iv32, Float32.(C), Float32.(d))
+    @test eltype(xc32) == Float32
+    @test xc32 ≈ CALIB.weighted_constrained_least_squares(A, b32, iv32, C, d) rtol = 1.0e-5
+    @test eltype(CALIB.weighted_constrained_least_squares(A32, b32, iv32, C, d)) == Float64
 end
 
 @testset "Regularized WLS: penalty matrix generalizes the diagonal vector" begin

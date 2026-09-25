@@ -86,7 +86,8 @@ abstract type AbstractAdhocSmoother end
 
 """
     AdhocOptions(; snr_floor = 1.0, phase_rewrap_iters = 3, source_iters = 10,
-                 source_tol = 1.0e-6, detrend = true, complex_iters = 2)
+                 source_tol = 1.0e-6, detrend = true, complex_iters = 2,
+                 eltype = nothing)
 
 The solve options every [`AbstractAdhocSmoother`](@ref) carries in its
 `options` field, e.g. `SavitzkyGolaySmoother(; window = 7, options =
@@ -104,6 +105,9 @@ phases move less than `source_tol`; `source_iters = 1` fits no source term.
 carries per-AP phase structure only and the per-scan constant stays with the
 fringe stage's own constant term. The residual-rate slope is kept. Disable
 only when the model has no other per-scan constant to alias against.
+
+The solve works in the real type of the summed visibilities (`Float32` for an
+MSv4 store); `eltype`, a real floating-point type, names another.
 """
 Base.@kwdef struct AdhocOptions
     snr_floor::Float64 = 1.0
@@ -112,6 +116,13 @@ Base.@kwdef struct AdhocOptions
     source_tol::Float64 = 1.0e-6
     detrend::Bool = true
     complex_iters::Int = 2
+    eltype::Union{Nothing, DataType} = nothing
+    function AdhocOptions(snr_floor, phase_rewrap_iters, source_iters, source_tol, detrend, complex_iters, eltype)
+        isnothing(eltype) || eltype <: AbstractFloat || throw(
+            ArgumentError("`eltype` must be a real floating-point type or `nothing`, got $eltype"),
+        )
+        return new(snr_floor, phase_rewrap_iters, source_iters, source_tol, detrend, complex_iters, eltype)
+    end
 end
 
 """
@@ -204,8 +215,8 @@ end
 
 # ── Smoother interface traits ─────────────────────────────────────────────────
 # The assumed atmospheric coherence time (seconds) — used by the per-AP warm-start
-# staleness. Default for smoothers that carry no coherence time (matches the old
-# `coherence_time` field default).
+# staleness. Smoothers that carry no coherence time use the same default as those
+# that do.
 _adhoc_coherence_time(::AbstractAdhocSmoother) = 10.0
 _adhoc_coherence_time(sm::SavitzkyGolaySmoother) = sm.coherence_time
 _adhoc_coherence_time(sm::OUSmoother) = sm.coherence_time
@@ -344,17 +355,19 @@ end
 # 2 ln2 · σ²` (Δ of two APs has twice the variance, and the median of an
 # exponential is `ln2 ×` its mean), so `σ² = median(|ΔV̄|²) / (2 ln2)`. Returns
 # `NaN` when fewer than 4 differences are available (caller falls back).
-function _track_noise2(rbar, wbar, bi::Int, p::Int, nap::Int)
-    d2 = Float64[]
-    prev = ComplexF64(NaN, NaN)
-    @inbounds for ap in axes(wbar, 3)
+function _track_noise2(rbar, wbar, bi::Int, p::Int)
+    C = eltype(rbar)
+    T = real(C)
+    d2 = T[]
+    prev = C(NaN, NaN)
+    for ap in axes(wbar, 3)
         w = wbar[bi, p, ap]
-        v = w > 0 ? rbar[bi, p, ap] / w : ComplexF64(NaN, NaN)
+        v = w > 0 ? rbar[bi, p, ap] / w : C(NaN, NaN)
         (isfinite(v) && isfinite(prev)) && push!(d2, abs2(v - prev))
         prev = v
     end
-    length(d2) >= 4 || return NaN
-    return median(d2) / (2 * log(2))
+    length(d2) >= 4 || return T(NaN)
+    return median(d2) / (2 * log(T(2)))
 end
 
 """
@@ -379,8 +392,8 @@ function _savgol_window_dof(rho2::Real, m_coh::Real, alpha::Real, order::Integer
     a = float(alpha)
     # T_dof is real only for a physical structure exponent 0 < α < 2 (the denominator
     # `2 + a − 2^a` vanishes at α = 2 and goes negative above). Fall back to the
-    # minimal window rather than producing Inf/NaN — `solve_adhoc_phasing` validates
-    # α up front, so this only guards direct callers.
+    # minimal window rather than producing Inf/NaN — `smooth_track` validates α
+    # first, so this only guards direct callers.
     denom = 2 + a - 2.0^a
     (0 < a < 2 && denom > 0) || return order + 1
     coef = (1 + a) * (2 + a) / (2.0^(-a) * a * denom)
@@ -399,9 +412,10 @@ end
 # leaving a smooth ±π-scale arc in the station track. The phasor iteration is
 # circular and so has no branch structure. Every row is a pure node difference,
 # its source term already removed, so all of them drive the iteration.
-function _circular_ap_seed(rows::Vector{_ObsRow}, nant::Integer, anchor::Integer)
+function _circular_ap_seed(rows::AbstractVector{<:_ObsRow}, nant::Integer, anchor::Integer)
     isempty(rows) && return nothing
-    z = ones(ComplexF64, nant, 2)
+    T = _rowtype(rows)
+    z = ones(Complex{T}, nant, 2)
     present = falses(nant, 2)
     for r in rows
         present[r.a, r.na] = true
@@ -409,7 +423,7 @@ function _circular_ap_seed(rows::Vector{_ObsRow}, nant::Integer, anchor::Integer
     end
     any(present) || return nothing
     for _ in 1:50
-        acc = zeros(ComplexF64, nant, 2)
+        acc = zeros(Complex{T}, nant, 2)
         for r in rows
             R = cis(r.val)
             acc[r.a, r.na] += r.w * R * z[r.b, r.nb]
@@ -424,8 +438,8 @@ function _circular_ap_seed(rows::Vector{_ObsRow}, nant::Integer, anchor::Integer
     # One common gauge for the whole seed, the anchor when present. A fully
     # consistent seed is safe on anchor-dropout APs too: the rewrap uses
     # prediction differences, so a common gauge offset cancels.
-    g = present[anchor, 1] ? conj(z[anchor, 1]) / abs(z[anchor, 1]) : one(ComplexF64)
-    ph = fill(NaN, nant, 2)
+    g = present[anchor, 1] ? conj(z[anchor, 1]) / abs(z[anchor, 1]) : one(Complex{T})
+    ph = fill(T(NaN), nant, 2)
     for f in axes(ph, 2), a in axes(ph, 1)
         present[a, f] && (ph[a, f] = angle(z[a, f] * g))
     end
@@ -438,9 +452,9 @@ end
 # (baseline, product)'s own free source term `src`, so no product needs the
 # polarization basis to be known.
 function _adhoc_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, snr_floor2::Real, tying)
-    rows = _ObsRow[]
+    rows = _ObsRow{real(eltype(rbar))}[]
     nbl = length(bl_pairs)
-    @inbounds for bi in eachindex(bl_pairs), p in eachindex(feeds)
+    for bi in eachindex(bl_pairs), p in eachindex(feeds)
         a, b = bl_pairs[bi]
         a == b && continue
         fa, fb = feeds[p]
@@ -455,7 +469,7 @@ function _adhoc_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, snr_fl
         n2 = noise2[bi, p]
         snr2 = isfinite(n2) && n2 > 0 ? abs2(r / w) / n2 : abs2(r) / w   # fall back if unestimable
         snr2 >= snr_floor2 || continue
-        push!(rows, _ObsRow(a, b, na, nb, angle(r), snr2, (p - 1) * nbl + bi))
+        push!(rows, eltype(rows)(a, b, na, nb, angle(r), snr2, (p - 1) * nbl + bi))
     end
     return rows
 end
@@ -465,7 +479,7 @@ end
 # both nodes solved. `raw_rows` must carry the uncorrected `val`, since `x` is
 # defined relative to the observation itself.
 function _update_source_terms!(x, raw_rows, phase)
-    acc = zeros(ComplexF64, length(x))
+    acc = zeros(Complex{eltype(x)}, length(x))
     for ap in eachindex(raw_rows)
         for row in raw_rows[ap]
             row.src == 0 && continue
@@ -489,13 +503,13 @@ end
 # Rows whose source term is unidentifiable (`keep[src]` false) are dropped: a
 # (baseline, product) seen at a single AP is absorbed exactly by its own source
 # term, so it constrains no node phase and only inflates the apparent coverage.
-function _source_corrected_rows(rows::Vector{_ObsRow}, x, keep)
-    out = _ObsRow[]
+function _source_corrected_rows(rows::AbstractVector{R}, x, keep) where {R <: _ObsRow}
+    out = R[]
     sizehint!(out, length(rows))
     for r in rows
         (r.src == 0 || keep[r.src]) || continue
         v = r.src == 0 ? r.val : r.val - x[r.src]
-        push!(out, _ObsRow(r.a, r.b, r.na, r.nb, v, r.w, r.src))
+        push!(out, R(r.a, r.b, r.na, r.nb, v, r.w, r.src))
     end
     return out
 end
@@ -515,7 +529,6 @@ end
 function _solve_gp_joint!(
         phase, track_w, ap_rows, nant::Integer, times, anchor::Integer, sm::JointOUSmoother,
     )
-    nap = length(times)
     # Compute type flows from the data, not from the smoother's field types.
     T = float(promote_type(eltype(phase), eltype(track_w), eltype(times)))
 
@@ -558,8 +571,6 @@ function _solve_gp_joint!(
     for i in eachindex(τv, σ2v, welldet)
         welldet[i] || (τv[i] = τ_med; σ2v[i] = σ2_med)
     end
-    τall = τv
-    σ2all = σ2v
 
     # Per-row measurement variance (1/snr²). The observation geometry needs no
     # buffer: `ap_rows` goes to the filter as-is, which reads `a`/`b` from each row.
@@ -588,7 +599,7 @@ function _solve_gp_joint!(
                 y[j] = raw + twoπ * round((model - raw) / twoπ) - centre
             end
         end
-        xf, Pf, xp, Pp, avecs, _ = kalman_ou_mv_filter(ap_rows, ys, rs, times; τ = τall, σ2 = σ2all)
+        xf, Pf, xp, Pp, avecs, _ = kalman_ou_mv_filter(ap_rows, ys, rs, times; τ = τv, σ2 = σ2v)
         xs, _ = rts_smooth_mv(xf, Pf, xp, Pp, avecs)
         for ap in axes(θf, 2)
             for i in axes(θf, 1)
@@ -643,7 +654,7 @@ function _solve_ap_sweep!(
         ref_here = any(r -> r.a == anchor || r.b == anchor, rows)
         seed = nothing
         if ref_here
-            seed = fill(NaN, nant, 2)
+            seed = fill(convert(eltype(phase), NaN), nant, 2)
             for a in axes(seed, 1), n in axes(seed, 2)
                 (isfinite(prev_phase[a, n]) && prev_age[a, n] <= max_stale) &&
                     (seed[a, n] = prev_phase[a, n])
@@ -699,8 +710,8 @@ end
 # APs informed each term (its identifiability count).
 function _complex_source_means(rbar, wbar, phase, bl_pairs, feeds, tying)
     nbl, npol, nap = size(rbar)
-    sbar = zeros(ComplexF64, nbl, npol)
-    nrm = zeros(Float64, nbl, npol)
+    sbar = zeros(eltype(rbar), nbl, npol)
+    nrm = zeros(real(eltype(rbar)), nbl, npol)
     napu = zeros(Int, nbl, npol)
     for bi in axes(rbar, 1), p in axes(rbar, 2)
         a, b = bl_pairs[bi]
@@ -715,7 +726,7 @@ function _complex_source_means(rbar, wbar, phase, bl_pairs, feeds, tying)
             dphi = phase[a, na, ap] - phase[b, nb, ap]
             isfinite(dphi) || continue
             sbar[bi, p] += r * cis(-dphi)     # r = Σ w·V ⇒ this is Σ w·V·e^{-iΔφ̂}
-            nrm[bi, p] += Float64(w)
+            nrm[bi, p] += w
             napu[bi, p] += 1
         end
         nrm[bi, p] > 0 && (sbar[bi, p] /= nrm[bi, p])
@@ -734,9 +745,9 @@ end
 # a per-AP extracted phase would instead collapse nonlinearly below SNR ≈ 1.
 # `src = 0`: the source term is already divided out through `conj(s̄)`.
 function _linearized_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, tying, phase, sbar)
-    rows = _ObsRow[]
+    rows = _ObsRow{real(eltype(rbar))}[]
     nbl = length(bl_pairs)
-    @inbounds for bi in eachindex(bl_pairs), p in eachindex(feeds)
+    for bi in eachindex(bl_pairs), p in eachindex(feeds)
         a, b = bl_pairs[bi]
         a == b && continue
         na = _feed_node(tying, feeds[p][1])
@@ -755,8 +766,8 @@ function _linearized_ap_rows(rbar, wbar, ap::Integer, bl_pairs, feeds, noise2, t
         n2 = noise2[bi, p]
         # Fall back to the weight column's noise claim when the track is too
         # short to estimate its own (mirrors `_adhoc_ap_rows`'s fallback).
-        wrow = isfinite(n2) && n2 > 0 ? 2 * s2 / n2 : s2 * Float64(w)
-        push!(rows, _ObsRow(a, b, na, nb, dphi + z, wrow, 0))
+        wrow = isfinite(n2) && n2 > 0 ? 2 * s2 / n2 : s2 * w
+        push!(rows, eltype(rows)(a, b, na, nb, dphi + z, wrow, 0))
     end
     return rows
 end
@@ -820,12 +831,25 @@ function solve_adhoc_phasing(
             "is one dimension per station), but the adhoc component ties feeds as " *
             "$(typeof(tying)). Use OUSmoother for an independent per-feed track.",
     )
+    T = something(smoother.options.eltype, float(real(eltype(rbar))))
+    return _solve_adhoc_phasing(
+        _with_eltype(Complex{T}, rbar), _with_eltype(T, wbar), bl_pairs, feeds, nant, times,
+        gauge, smoother, tying,
+    )
+end
+
+_with_eltype(::Type{T}, A) where {T} = eltype(A) === T ? A : T.(A)
+
+# Behind a function barrier: the working type comes from a runtime option.
+function _solve_adhoc_phasing(rbar, wbar, bl_pairs, feeds, nant, times, gauge, smoother, tying)
+    T = real(eltype(rbar))
+    nbl, npol, nap = size(rbar)
 
     # Solved on the (station, node) graph; expanded back onto the feed axis at the end.
-    phase = fill(convert(eltype(wbar), NaN), nant, 2, nap)
+    phase = fill(T(NaN), nant, 2, nap)
     covered = falses(nant, 2, nap)
     # Track per-(station,node) coherent weight for smoothing / detrend.
-    track_w = zeros(eltype(wbar), nant, 2, nap)
+    track_w = zeros(T, nant, 2, nap)
 
     # Per-(baseline, product) noise of the coherent track, estimated data-driven
     # from its AP-to-AP scatter — see `_track_noise2`. The per-AP coherent SNR² is
@@ -835,7 +859,7 @@ function solve_adhoc_phasing(
     # in FITS-IDI) it is mis-scaled by an arbitrary factor, silently dropping every
     # row at any fixed `snr_floor` and killing the whole adhoc stage. For calibrated
     # weights `noise² → 1/wbar`, so this reduces to the old `|rbar|²/wbar` exactly.
-    noise2 = [_track_noise2(rbar, wbar, bi, p, nap) for bi in axes(rbar, 1), p in axes(rbar, 2)]
+    noise2 = [_track_noise2(rbar, wbar, bi, p) for bi in axes(rbar, 1), p in axes(rbar, 2)]
 
     # The SNR gate does not depend on the source terms, so every AP's gated rows are
     # built once and reused by every alternation pass (and by the joint smoother).
@@ -847,7 +871,7 @@ function solve_adhoc_phasing(
     # Source terms, one per (baseline, product), indexed by each row's `src`.
     # `source_iters == 1` never updates them, so the model reduces exactly to a pure
     # station-difference solve with no source term.
-    x = zeros(Float64, nbl * npol)
+    x = zeros(T, nbl * npol)
     fit_source = smoother.options.source_iters >= 2
     keep = trues(nbl * npol)
     if fit_source
@@ -879,7 +903,7 @@ function solve_adhoc_phasing(
     # common in multi-subarray tracks. The anchor choice is inert to the applied
     # correction, a per-AP common mode cancelling on every baseline; it exists so
     # the per-station tracks are temporally consistent, and so smoothable.
-    anchor = let wtot = zeros(nant)
+    anchor = let wtot = zeros(T, nant)
         for ap in eachindex(ap_rows), row in ap_rows[ap]
             wtot[row.a] += row.w
             wtot[row.b] += row.w
@@ -985,7 +1009,7 @@ function solve_adhoc_phasing(
     # feeds sharing a node get identical tracks (so a `SharedFeeds` adhoc contributes
     # exactly zero inter-feed phase), and a feed the component does not parameterize
     # (node 0) stays NaN/uncovered.
-    phase_out = fill(convert(eltype(wbar), NaN), nant, 2, nap)
+    phase_out = fill(T(NaN), nant, 2, nap)
     covered_out = falses(nant, 2, nap)
     for f in axes(phase_out, 2)
         n = _feed_node(tying, f)
@@ -1011,7 +1035,7 @@ function solve_adhoc_phasing(
     end
 
     # Source terms as measured, `NaN` where too poorly sampled to identify.
-    source = [keep[(p - 1) * nbl + bi] ? x[(p - 1) * nbl + bi] : NaN for bi in 1:nbl, p in 1:npol]
+    source = [keep[(p - 1) * nbl + bi] ? x[(p - 1) * nbl + bi] : T(NaN) for bi in 1:nbl, p in 1:npol]
 
     tdim = Ti(float.(times))
     axs = (Ant(1:nant), Feed(1:2), tdim)
@@ -1127,8 +1151,8 @@ end
 # are left untouched, and a multi-component AP keeps one global δ dominated by
 # the largest overlap, per-island offsets being a gauge freedom.
 function _restitch_refant_gauge!(phase, covered, track_w, ref_station::Integer)
-    nant, _, nap = size(phase)
-    anchor = fill(NaN, nant, 2)
+    T = eltype(phase)
+    anchor = fill(T(NaN), size(phase, 1), size(phase, 2))
     have_anchor = false
     for ap in axes(phase, 3)
         ref_present = covered[ref_station, 1, ap] || covered[ref_station, 2, ap]
@@ -1140,13 +1164,13 @@ function _restitch_refant_gauge!(phase, covered, track_w, ref_station::Integer)
             # convention (each feed gauged relative to the anchor's feed) matches the
             # rest of the adhoc solve, so a separate δ per feed restores it.
             for f in axes(phase, 2)
-                num_s = 0.0
-                num_c = 0.0
-                wsum = 0.0
+                num_s = zero(T)
+                num_c = zero(T)
+                wsum = zero(T)
                 for a in axes(phase, 1)
                     (covered[a, f, ap] && isfinite(anchor[a, f]) && isfinite(phase[a, f, ap])) || continue
                     d = phase[a, f, ap] - anchor[a, f]
-                    wk = (isfinite(track_w[a, f, ap]) && track_w[a, f, ap] > 0) ? track_w[a, f, ap] : 1.0
+                    wk = (isfinite(track_w[a, f, ap]) && track_w[a, f, ap] > 0) ? T(track_w[a, f, ap]) : one(T)
                     num_s += wk * sin(d)
                     num_c += wk * cos(d)
                     wsum += wk
@@ -1177,34 +1201,31 @@ end
 function _penalized_smooth(y::AbstractVector, w::AbstractVector, λ::Real)
     # The solve is a dense 1-based matrix problem, so the track is read 1-based.
     Base.require_one_based_indexing(y, w)
+    T = float(eltype(y))
     n = length(y)
-    n == 0 && return collect(float.(y))
-    wk = [(isfinite(y[k]) && isfinite(w[k]) && w[k] > 0) ? float(w[k]) : 0.0 for k in 1:n]
-    yk = [wk[k] > 0 ? float(y[k]) : 0.0 for k in 1:n]
+    n == 0 && return collect(T, y)
+    wk = [(isfinite(y[k]) && isfinite(w[k]) && w[k] > 0) ? T(w[k]) : zero(T) for k in 1:n]
+    yk = [wk[k] > 0 ? T(y[k]) : zero(T) for k in 1:n]
     # Guard against an all-unconstrained component (no data, λ = 0).
-    all(iszero, wk) && iszero(λ) && return collect(float.(y))
-    D = zeros(n - 1, n)
+    all(iszero, wk) && iszero(λ) && return collect(T, y)
+    D = zeros(T, n - 1, n)
     for k in axes(D, 1)
-        D[k, k] = 1.0; D[k, k + 1] = -1.0
+        D[k, k] = one(T); D[k, k + 1] = -one(T)
     end
-    R = sqrt(λ) .* D
-    return weighted_regularized_least_squares(Matrix(1.0I, n, n), yk, wk, R)
+    R = sqrt(T(λ)) .* D
+    return weighted_regularized_least_squares(Matrix{T}(I, n, n), yk, wk, R)
 end
 
-# Remove the weighted mean and linear slope of a track over `times`.
+# Remove the weighted mean of a track. Only the mean: the constant is degenerate
+# with the fringe step's per-scan `ConstantTerm`, which owns it, while the slope
+# is the residual fringe rate the fringe step's `Rate` left, which the adhoc
+# track exists to correct.
 function _detrend_track!(track::AbstractVector, w::AbstractVector)
+    T = eltype(track)
     idx = [i for i in eachindex(track) if isfinite(track[i])]
     length(idx) >= 1 || return track
-    ws = [(isfinite(w[i]) && w[i] > 0) ? float(w[i]) : 1.0 for i in idx]
-    # Remove the weighted mean only — not the slope. The constant-phase degeneracy
-    # between the per-AP adhoc term and the Stage-B `ConstantTerm` is real and worth
-    # breaking (zero-mean adhoc ⇒ the constant is owned by Stage-B). The *slope*,
-    # however, is the residual fringe rate left when Stage-B's per-scan `Rate` is
-    # imperfect (e.g. within-scan atmospheric drift); removing it would force that
-    # error to survive uncorrected. Letting adhoc keep the slope lets it flatten
-    # residual rates — the whole point of a per-AP phase track. (`times` is unused
-    # the whole point of a per-AP phase track.)
-    m = sum(ws .* Float64.(track[idx])) / sum(ws)
+    ws = [(isfinite(w[i]) && w[i] > 0) ? T(w[i]) : one(T) for i in idx]
+    m = sum(ws .* track[idx]) / sum(ws)
     for i in idx
         track[i] -= m
     end

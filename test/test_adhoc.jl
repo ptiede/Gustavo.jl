@@ -602,7 +602,7 @@ end
     # Construct a genuinely bistable solve: station 4 sees two weak edges (to 2 and
     # 3, both pinned ≈0 by strong edges to ref=1) whose WRAPPED phases disagree by
     # ~2π, so φ4 ≈ 0 and φ4 ≈ ±π are BOTH self-consistent rewrap fixed points.
-    OR = FRa._ObsRow
+    OR = FRa._ObsRow{Float64}
     rows = OR[
         OR(1, 2, 1, 1, 0.0, 100.0, 0),
         OR(1, 3, 1, 1, 0.0, 100.0, 0),
@@ -785,4 +785,36 @@ end
     end
     @test rms[2] < 1.3 * rms[1]
     @test rms[2] < 0.15
+end
+
+@testset "Adhoc: the solve works in the data's element type" begin
+    rng = MersenneTwister(0x0AD7)
+    nant, nap = 5, 20
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    screen = 0.3 .* randn(rng, nant, 2, nap)
+    times = collect(0:(nap - 1)) .* 1.0
+    rbar, wbar = inject_screen(bl, pols, screen; noise = 0.5, rng)
+    r32, w32 = ComplexF32.(rbar), Float32.(wbar)
+    solve(r, w, sm) = FRa.solve_adhoc_phasing(r, w, bl, pols, nant, times; gauge = PinAntenna(1), smoother = sm)
+
+    s32 = solve(r32, w32, FRa.SavitzkyGolaySmoother())
+    @test eltype(s32.phase) == Float32
+    @test eltype(s32.source) == Float32
+    s64 = solve(r32, w32, FRa.SavitzkyGolaySmoother(; options = FRa.AdhocOptions(; eltype = Float64)))
+    @test eltype(s64.phase) == Float64
+    @test maximum(abs, filter(isfinite, s64.phase .- s32.phase)) < 1.0e-5
+    @test eltype(solve(rbar, wbar, FRa.NoSmoothing()).phase) == Float64
+    @test_throws "`eltype` must be a real floating-point type" FRa.AdhocOptions(; eltype = Int)
+
+    noise2 = [FRa._track_noise2(r32, w32, bi, p) for bi in axes(r32, 1), p in axes(r32, 2)]
+    @test eltype(noise2) == Float32
+    rows = @inferred FRa._adhoc_ap_rows(r32, w32, 1, bl, pols, noise2, 1.0, CALa.PerFeed())
+    @test eltype(rows) == FRa._ObsRow{Float32}
+    phase = zeros(Float32, nant, 2, nap)
+    sbar = ones(ComplexF32, length(bl), length(pols))
+    @test eltype(@inferred FRa._linearized_ap_rows(r32, w32, 1, bl, pols, noise2, CALa.PerFeed(), phase, sbar)) ==
+        FRa._ObsRow{Float32}
+    ph, _, _, _ = FRa._solve_observable(rows, nant, PinAntenna(1); rewrap = 2)
+    @test eltype(ph) == Float32
 end

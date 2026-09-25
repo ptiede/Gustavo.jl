@@ -96,7 +96,7 @@ function rts_smooth(μf, Pf, μp, Pp, avec)
     n = length(μf)
     μs = copy(μf)
     Ps = copy(Pf)
-    @inbounds for k in (n - 1):-1:1
+    for k in (n - 1):-1:1
         Ppk = Pp[k + 1]
         Ppk > 0 || continue
         C = Pf[k] * avec[k + 1] / Ppk

@@ -120,24 +120,28 @@ end
 # themselves.**
 _row_scale(inv_variances) = sqrt.(inv_variances)
 
-# Promote the WLS triple `(A, b, inv_variances)` to a single common element
-# type. The design matrix `A` is built in Float64 by `design_matrices`, but
-# `b` (log-amplitudes / phases) and `inv_variances` (UVData weights) come in
-# at Float32 since AIPS Memo 117 stores weights as `1E`. LinearSolve's QR
-# `ldiv!` rejects a Float64 factorization against a Float32 RHS, so we have
-# to align eltypes up front.
-function _promote_lsq(A, b, inv_variances)
-    T = promote_type(eltype(A), eltype(b), real(eltype(inv_variances)))
-    return convert(AbstractMatrix{T}, A), convert(AbstractVector{T}, b),
-        convert(AbstractVector{T}, inv_variances)
+# A solve works in the common type of its data (`A`, `b`, the weights), so a
+# Float32 system stays Float32. The system is allocated in that type and filled,
+# so a tuning quantity (a penalty, a constraint weight) is converted on
+# assignment and never sets the precision.
+_lsq_eltype(A, b, inv_variances) = promote_type(eltype(A), eltype(b), real(eltype(inv_variances)))
+
+# The row-weighted system `(diag(√w)·A, diag(√w)·b)` in `T`, followed by
+# `nextra` rows the caller fills.
+function _weighted_system(::Type{T}, A, b, inv_variances, nextra) where {T}
+    Base.require_one_based_indexing(A, b, inv_variances)
+    nr = size(A, 1)
+    M = similar(A, T, nr + nextra, size(A, 2))
+    y = similar(b, T, nr + nextra)
+    sw = _row_scale(inv_variances)
+    M[1:nr, :] .= A .* sw
+    y[1:nr] .= b .* sw
+    return M, y
 end
 
 function weighted_least_squares(A, b, inv_variances)
-    A, b, inv_variances = _promote_lsq(A, b, inv_variances)
-    sw = _row_scale(inv_variances)
-    Aw = A .* reshape(sw, :, 1)
-    bw = b .* sw
-    return solve(LinearProblem(Aw, bw), QRFactorization()).u
+    M, y = _weighted_system(_lsq_eltype(A, b, inv_variances), A, b, inv_variances, 0)
+    return solve(LinearProblem(M, y), QRFactorization()).u
 end
 
 """
@@ -157,13 +161,12 @@ function weighted_regularized_least_squares(A, b, inv_variances, penalties)
     isempty(penalties) && return weighted_least_squares(A, b, inv_variances)
     penalties isa AbstractVector && all(≤(0), penalties) && return weighted_least_squares(A, b, inv_variances)
 
-    A, b, inv_variances = _promote_lsq(A, b, inv_variances)
-    sw = _row_scale(inv_variances)
-    Aw = A .* reshape(sw, :, 1)
-    bw = b .* sw
-    Areg = penalties isa AbstractVector ? Diagonal(sqrt.(penalties)) : penalties
-    breg = zeros(eltype(Aw), size(Areg, 1))
-    return solve(LinearProblem(vcat(Aw, Areg), vcat(bw, breg)), QRFactorization()).u
+    R = penalties isa AbstractVector ? Diagonal(sqrt.(penalties)) : penalties
+    M, y = _weighted_system(_lsq_eltype(A, b, inv_variances), A, b, inv_variances, size(R, 1))
+    rows = (size(A, 1) + 1):size(M, 1)
+    M[rows, :] .= R
+    y[rows] .= zero(eltype(y))
+    return solve(LinearProblem(M, y), QRFactorization()).u
 end
 
 """
@@ -196,13 +199,12 @@ end
 function weighted_constrained_least_squares(A, b, inv_variances, C, d; constraint_weight = 1.0e6)
     isempty(C) && return weighted_least_squares(A, b, inv_variances)
 
-    A, b, inv_variances = _promote_lsq(A, b, inv_variances)
-    sw = _row_scale(inv_variances)
-    Aw = A .* reshape(sw, :, 1)
-    bw = b .* sw
-    Acon = constraint_weight .* C
-    bcon = constraint_weight .* d
-    return solve(LinearProblem(vcat(Aw, Acon), vcat(bw, bcon)), QRFactorization()).u
+    T = promote_type(_lsq_eltype(A, b, inv_variances), eltype(C), eltype(d))
+    M, y = _weighted_system(T, A, b, inv_variances, size(C, 1))
+    rows = (size(A, 1) + 1):size(M, 1)
+    M[rows, :] .= constraint_weight .* C
+    y[rows] .= constraint_weight .* d
+    return solve(LinearProblem(M, y), QRFactorization()).u
 end
 
 # Inverse-variance weight of the increment between samples `k` and `k+1`: the

@@ -127,7 +127,7 @@ end
     st = Bandpass(smoother = FP.PerTrackSmoother())
     θ = fit(st, ps; gauge = PinAntenna(1)).steps[1].θ
     θoff = fit(st, _offset_scans(ps, 4); gauge = PinAntenna(1)).steps[1].θ
-    @test θoff ≈ θ atol = 1.0e-6
+    @test maximum(abs, θoff .- θ) < 1.0e-6
 
     # Pooling follows the data's type unless the smoother names one.
     θ64 = fit(Bandpass(smoother = FP.PerTrackSmoother(eltype = Float64)), ps; gauge = PinAntenna(1)).steps[1].θ
