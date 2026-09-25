@@ -46,8 +46,7 @@ export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, resolve_gauge
 export calibrate
-export BaselineFringeFit, DispersionModel, SingleBandDelay, default_fringe_terms,
-    DispersionSBDFit, Bandpass, default_bandpass_terms, AdhocPhase,
+export BaselineFringeFit, default_fringe_terms, Bandpass, default_bandpass_terms, AdhocPhase,
     default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 # The gain-model vocabulary: everything a step's `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare

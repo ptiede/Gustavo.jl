@@ -1,5 +1,11 @@
 # ── Inverse-variance sums over named dimensions ──────────────────────────────
 
+# The visibility, weight and flag layers of one member, for a kernel behind a
+# function barrier (a Measurement Set's layers do not infer).
+_member_layers(ms::XRadio.MeasurementSet) = (ms[:visibility], ms[:weight], ms[:flag])
+
+@inline _usable(f, w, v) = !f && w > 0 && isfinite(w) && isfinite(v)
+
 """
     weighted_sums(V, W, F; dims) -> (wv, ws)
 

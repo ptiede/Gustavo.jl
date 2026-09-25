@@ -72,10 +72,6 @@
 
         @testset "$(nameof(typeof(step)))" for step in (
                 BaselineFringeFit(),
-                DispersionSBDFit(;
-                    dispersion = DispersionModel(),
-                    sbd = SingleBandDelay(; freq = CAL.FreqGroups([1:16, 17:32])),
-                ),
                 AdhocPhase(),
             )
             a, _ = process(step, stack)

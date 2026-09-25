@@ -25,7 +25,7 @@ using XRadio
 ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
 pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
-    DispersionSBDFit() |> Bandpass() |> AdhocPhase()
+    Bandpass() |> AdhocPhase()
 sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
 out = calibrate(sol, ps)                         # corrected, in memory

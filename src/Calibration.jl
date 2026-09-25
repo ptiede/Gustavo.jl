@@ -31,7 +31,6 @@ include("Calibration/segmentation.jl")
 include("Calibration/terms.jl")
 include("Calibration/models.jl")
 include("Calibration/parameters.jl")
-include("Calibration/propagation.jl")
 include("Calibration/evaluate.jl")
 include("Calibration/solutions.jl")
 
@@ -65,8 +64,6 @@ export phase_components, logamp_components, model_components
 export station_components
 export validate_gain_model, component_label
 
-# Propagation
-export DispersionModel
 
 # Parameter layout and pure evaluation
 export ParameterLayout, plan_parameters, station_blocks

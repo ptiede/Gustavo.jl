@@ -75,7 +75,6 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test _bp_phase(bn) == _blk(bn, 1) && _bp_amp(bn) == _blk(bn, bn.layout.nphase + 1)
         @test stage_info(sol_n, :bandpass).nscans == length(FP.scan_stream(uvset).groups)
         @test stage_info(sol_n, :bandpass).t_pass > 0
-        @test :refine ∉ keys(sol_n)     # no DispersionSBDFit step in this pipeline at all
     end
 
     @testset "new-engine fold is deterministic across ntasks" begin
@@ -90,14 +89,12 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
     @testset "steps compose in any declared order" begin
         # No step vetoes its position at construction time — every SolveStep
-        # runs in whatever order the pipeline declares. DispersionSBDFit and
-        # AdhocPhase still solve for a fringe-corrected residual, but
-        # that is now an assumption of their own solve kernel, not a checked
-        # precondition: placed ahead of BaselineFringeFit, they fit the UNCORRECTED
-        # residual instead and complete without error — a quietly worse fit,
-        # not a construction-time rejection.
-        solds = fit([DispersionSBDFit(), BaselineFringeFit(model = fm)], uvset; gauge = PinAntenna(1))
-        @test solds isa CAL.CalibrationSolution
+        # runs in whatever order the pipeline declares. AdhocPhase still solves
+        # for a fringe-corrected residual, but that is an assumption of its own
+        # solve kernel, not a checked precondition: placed ahead of
+        # BaselineFringeFit, it fits the UNCORRECTED residual instead and
+        # completes without error — a quietly worse fit, not a
+        # construction-time rejection.
         solts = fit([AdhocPhase(), BaselineFringeFit(model = fm)], uvset; gauge = PinAntenna(1))
         @test solts isa CAL.CalibrationSolution
         # Bandpass's model is self-contained regardless of position,
@@ -506,52 +503,6 @@ end
         @test isempty(FP.bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
     end
 
-end
-
-@testset "refine kernels: standalone on a scan group (determinism + recovery)" begin
-    # VGOS-like dispersive layout (8 sub-bands, wide fractional bandwidth).
-    dtec_true = [0.0, 3.0, -5.0, 1.5]
-    psd, _ = _build_fringe_ps(;
-        nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
-        dtec = dtec_true, seed = 77, feed_common = true,
-    )
-    geom = CAL.DataGeometry(psd)
-    @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
-    model = _full_fringe_model(
-        dispersion = true, sbd_freq_groups = FP.fringe_freq_groups(geom.channel_freqs),
-    )
-    layout = CAL.plan_parameters(model, geom.stations, geom)
-    disp_plan = CAL._dispersion_plan(model, layout)
-    ps_delay = FP._perscan_delay_plan(model, layout)
-    sbd = FP._sbd_plans(model, layout)
-    @test disp_plan !== nothing && ps_delay !== nothing && sbd !== nothing
-
-    # The data carry no station gains beyond the injected dTEC's companions, so
-    # the raw visibilities stand in for data the pipeline has corrected.
-    group = first(values(groupby(psd, XRadio.ByScan())))
-    θn = zeros(layout.nθ)
-    θ4 = zeros(layout.nθ)
-    nn = FP.refine_scan_dispersion!(θn, group, geom, ps_delay, disp_plan, PinAntenna(1), 4; executor = SerialScheduler())
-    n4 = FP.refine_scan_dispersion!(θ4, group, geom, ps_delay, disp_plan, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
-    # Per-band accumulation ⇒ bit-identical at any inner fan-out.
-    @test nn == n4
-    @test θn == θ4
-    @test any(!=(0), θn)
-    # The dispersion column recovers the injected differential dTEC.
-    for a in 2:4
-        off = plan_off1(disp_plan)[a, 1, 1, 1]
-        @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
-    end
-    FP.refine_scan_sbd!(θn, group, geom, sbd, PinAntenna(1), 4; executor = SerialScheduler())
-    FP.refine_scan_sbd!(θ4, group, geom, sbd, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
-    @test θn == θ4
-
-    # The member order of a group does not matter: members are placed by channel.
-    rev = XRadio.ProcessingSet(OrderedDict(reverse(collect(pairs(group)))), DimensionalData.metadata(group))
-    θr = zeros(layout.nθ)
-    FP.refine_scan_dispersion!(θr, rev, geom, ps_delay, disp_plan, PinAntenna(1), 4)
-    FP.refine_scan_sbd!(θr, rev, geom, sbd, PinAntenna(1), 4)
-    @test θr == θn
 end
 
 # ── Per-track outcome reporting and the undetermined-branch gate ──────────────

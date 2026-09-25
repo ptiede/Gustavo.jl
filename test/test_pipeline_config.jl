@@ -146,8 +146,7 @@
     @testset "defaults" begin
         f = BaselineFringeFit()
         @test f.model == default_fringe_terms()
-        # The default model: 4 feed-by-feed instrument components. Dispersion
-        # (dTEC) and SBD are a separate DispersionSBDFit step, and there is no
+        # The default model: 4 feed-by-feed instrument components, and no
         # inter-feed PHASE offset — see `default_fringe_terms`.
         @test isempty(f.model.logamp)
         @test length(f.model.phase) == 4
@@ -162,10 +161,6 @@
         @test f.closure == FP.Stationization()
         @test f.rounds == 1
         @test f.steer_cells == 9.0
-
-        d = DispersionSBDFit()
-        @test d.dispersion == DispersionModel()
-        @test d.sbd isa SingleBandDelay
 
         b = Bandpass()
         @test b.model == default_bandpass_terms()

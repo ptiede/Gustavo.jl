@@ -12,44 +12,6 @@
 #   detection/flag tables recorded on the solution.
 
 """
-    SingleBandDelay(; freq = BandGroups())
-
-Per-scan single-band delay (fourfit's SBD): the `sbd` field of a
-[`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit) step. A station's signal
-path can move relative to its phase-cal tones between scans (~30 ns has been
-observed), which neither the wideband delay nor the time-invariant bandpass
-can track. Instrumental, not propagation.
-
-`freq` is the frequency partition the delay is resolved on, any
-`AbstractFrequencySegmentation`. `BandGroups()` (the default) gives one
-delay per gap-detected band group; `PerSpectralWindow()` gives every
-spectral window its own delay and offset.
-
-Compiles to a per-scan `Delay` plus its companion per-scan constant over
-that partition, or to nothing when the partition holds fewer than 2 groups
-(a single group is degenerate with the wideband delay). Fit from
-within-group chunk slopes by the refine stage.
-"""
-Base.@kwdef struct SingleBandDelay{F}
-    freq::F = BandGroups()
-end
-
-function model_components(s::SingleBandDelay, spec)
-    geom = spec.geom
-    freqgroups = segment_ranges(materialize(s.freq, geom), geom)
-    length(freqgroups) >= 2 || return nothing
-    # The Delay coordinate is (f − f0) with the global f0, so correcting a
-    # group slope about the group's own centre νg needs the companion per-group
-    # constant −2πτ(νg − f0): net phase 2πτ(f − νg), zero at the group centre —
-    # the cross-band solution is untouched. The pair nests under the element's
-    # key (`θ.phase.<key>.delay` / `.constant`).
-    return (
-        delay = GainComponent(Delay(); Ti = PerScan(), Frequency = FreqGroups(freqgroups), Feed = SharedFeeds()),
-        constant = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = FreqGroups(freqgroups), Feed = SharedFeeds()),
-    )
-end
-
-"""
     default_fringe_terms(; rel_time = PerScan()) -> GainModel
 
 The default model of a [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit) step — the
@@ -85,10 +47,6 @@ the data for a downstream polarization fit — `QQ − PP` on one baseline
 measures it directly at parallel-hand SNR (see `DetectionRow`'s `phase`).
 The inter-feed DELAY is kept because a delay decoheres across the band, so
 leaving it in costs signal.
-
-Dispersion (dTEC) and single-band delay (SBD) are not modeled here — they
-are fit by a separate [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)
-step on the fringe-corrected residual.
 
 Add or replace a component with [`merge`](@ref Base.merge(::GainModel)).
 """
@@ -155,7 +113,7 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 # every segment but the first left at zero while the search wrote its band-wide
 # phase into that one. A `Dispersion` or `FreqGroups`-segmented term falls
 # through to `nothing` on the term/freq-type checks below, so `can_fit` rejects
-# either in the fringe step's model; both belong to a `DispersionSBDFit` step.
+# either.
 #
 # The time axis is not decided here: whether a segmentation leaves a scan with
 # more than one θ column depends on the scan lengths, so `can_fit` answers it
@@ -211,10 +169,8 @@ end
 # What the matched filter requires of a `(; phase, logamp)` model tree. Each
 # absent item costs the step its own output silently rather than crashing:
 # `solve_station_systems!` skips a kind with no components, dropping every
-# scan's search estimate for that observable, and `refine_scan_dispersion!`
-# skips the Δτ half of the joint (Δτ, dTEC) fit when the per-scan delay plan is
-# missing, biasing the dTEC it does report by exactly the degeneracy the joint
-# fit exists to break.
+# scan's search estimate for that observable, and `fringe_station_solutions`
+# decodes each scan through the per-scan delay plan.
 function validate_fringe_model(model)
     name = "BaselineFringeFit"
     isempty(_flatten_components(model.logamp)) || throw(
@@ -241,9 +197,8 @@ function validate_fringe_model(model)
         ArgumentError(
             "$name requires a per-scan feed-common wideband delay " *
                 "component (a `Delay` with a non-`GlobalTime` time segmentation, " *
-                "`Frequency = GlobalFrequency()`, `Feed = SharedFeeds()`): the refine stage fits it jointly " *
-                "with dTEC, and a delay tied any other way leaves that fit with only " *
-                "its degenerate half. Add one to the fringe model's `phase` tree — see " *
+                "`Frequency = GlobalFrequency()`, `Feed = SharedFeeds()`). Add one to " *
+                "the fringe model's `phase` tree — see " *
                 "`default_fringe_terms`.",
         ),
     )

@@ -410,10 +410,9 @@ end
 
 @testset "Residual accumulation is a plain weighted mean of pre-corrected data" begin
     # The pipeline's corrections divide out the gains, including the |g|² weight
-    # reweighting (Var(V/g) = 1/(w·|g|²)), before `weighted_sums` and
-    # `_accumulate_band_phasor!` see the data. Feeding them already-reweighted
-    # (V, W) must give back exactly that inverse-variance mean, with no further
-    # correction applied.
+    # reweighting (Var(V/g) = 1/(w·|g|²)), before `weighted_sums` sees the
+    # data. Feeding it already-reweighted (V, W) must give back exactly that
+    # inverse-variance mean, with no further correction applied.
     nchan, nti, nbl, npol = 2, 1, 1, 1
     axs = (Frequency([2.2e10, 2.2e10 + 1.0e6]), Ti([0.0]), BaselineID(1:nbl), Polarization(["PP"]))
     V = DimArray(zeros(ComplexF32, nchan, nti, nbl, npol), axs)
@@ -423,46 +422,32 @@ end
     W[1, 1, 1, 1] = 1.0                  # so its weight is reweighted to 0.0001
     W[2, 1, 1, 1] = 0.0001
     F = DimArray(falses(nchan, nti, nbl, npol), axs)
-    geom = CAL.DataGeometry(; times = [0.0], channel_freqs = collect(lookup(axs[1])))
-    win = CAL.GeometryWindow(geom, [1, 2], [1], [(1, 2)], [(1, 1)], fill(1, 1, 1))
     rbar(V, W, F) = map(only, FP.weighted_sums(V, W, F; dims = Frequency))
-    band(V, W, F) = (z = zeros(ComplexF64, 1, 1); wz = zeros(1, 1);
-        FP._accumulate_band_phasor!(z, wz, V, W, F, win, [1], [1]); (z, wz))
 
     r, w = rbar(V, W, F)
     @test w ≈ 1.0001
     @test r / w ≈ (1.0 + 0.001im) / 1.0001
-    z, wz = band(V, W, F)
-    @test wz[1] ≈ 1.0001
-    @test z[1] / wz[1] ≈ (1.0 + 0.001im) / 1.0001
 
-    # Same data in a different memory layout is the same measurement: the kernels
-    # locate every axis by name, so only the dimensions decide what is read.
+    # Same data in a different memory layout is the same measurement: the kernel
+    # locates every axis by name, so only the dimensions decide what is read.
     perm = (Polarization, BaselineID, Ti, Frequency)
     Vp, Wp, Fp = permutedims(V, perm), permutedims(W, perm), permutedims(F, perm)
     @test rbar(Vp, Wp, Fp) == (r, w)
     @test rbar(V, Wp, F) == (r, w)
-    @test band(Vp, Wp, Fp) == (z, wz)
     # ...and so is a view into larger layers.
     big(A) = cat(A, A; dims = 3)
     sub(A) = view(DimArray(big(parent(A)), (dims(A)[1:2]..., BaselineID(1:2), dims(A, Polarization))), BaselineID(1:1))
     @test rbar(sub(V), sub(W), sub(F)) == (r, w)
-    @test band(sub(V), sub(W), sub(F)) == (z, wz)
 
     # A flagged channel contributes nothing even though its weight is positive.
     F[2, 1, 1, 1] = true
     r, w = rbar(V, W, F)
     @test w ≈ 1.0
     @test r ≈ 1.0 + 0.0im
-    z, wz = band(V, W, F)
-    @test wz[1] ≈ 1.0
-    @test z[1] ≈ 1.0 + 0.0im
 
-    # The per-member kernels sit behind a function barrier and infer.
+    # The per-member kernel sits behind a function barrier and infers.
     out = DimensionalData.otherdims(V, Frequency)
     @inferred FP._weighted_sums!(zeros(ComplexF32, out), zeros(Float32, out), V, W, F, Frequency)
-    @inferred FP._accumulate_band_phasor!(zeros(ComplexF64, 1, 1), zeros(1, 1), V, W, F, win, [1], [1])
-    @inferred FP._accumulate_chunks!(zeros(ComplexF64, 1, 1, 2), zeros(1, 1, 2), V, W, F, win, [1], [1], [1, 2])
 end
 
 @testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
@@ -882,233 +867,6 @@ end
     fringe = sol[:fringe].steps[1]
     old = CAL.CalibrationSolution(fringe.model, fringe.layout, sol.geom, fringe.θ, (;))
     @test_nowarn FP.print_solve_timing(old; io = IOBuffer())
-end
-
-@testset "Dispersion (dTEC) refinement recovers injected station TEC" begin
-    # VGOS-like layout: 8 sub-bands over 3.0-6.5 GHz — wide enough fractional
-    # bandwidth that 1/ν separates from a linear delay (`dispersion = :auto`
-    # turns the term on). Phase bandpass OFF: on a single-scan synthetic a
-    # global per-channel bandpass is degenerate with the dispersion curvature
-    # (on real multi-scan data the bandpass absorbs only the CALIBRATOR scan's
-    # ionosphere and per-scan dTEC is measured relative to it).
-    # `feed_common = true` (zero true inter-feed offset): dispersion smears the
-    # stage-B delay peak, so each correlation product's argmax scatters within the
-    # smeared peak and that scatter lands in the inter-feed delay offset — which
-    # the (correctly feed-common) refinement cannot repair. The test removes the
-    # coupling to isolate the dispersion machinery itself.
-    dtec_true = [0.0, 3.0, -5.0, 1.5]
-    uvset, _ = _build_fringe_uvset(
-        nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
-        dtec = dtec_true, seed = 77, feed_common = true,
-    )
-    geom = CAL.build_geometry(uvset)
-    @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
-
-    sol = fit(
-        BaselineFringeFit(
-            model = default_fringe_terms(),
-            search = FP.FringeSearch(algorithm = FP.FullGrid()),
-        ) |> DispersionSBDFit() |> AdhocPhase(),        # no bandpass stage (see comment above)
-        uvset,
-        gauge = PinAntenna(1),
-    )
-    refine = sol[:refine].steps[1]
-    @test stage_info(sol, :refine).dispersion_applied
-    dplan = CAL._dispersion_plan(refine.model, refine.layout)
-    @test dplan !== nothing
-    for a in 1:4
-        off = plan_off1(dplan)[a, 1, 1, 1]
-        off == 0 && continue
-        @test isapprox(refine.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
-    end
-
-    # CROSS-BAND coherence: collapse each band leaf to one phasor per
-    # (baseline, parallel product), then |Σ_bands| / Σ|·| pooled. This is the
-    # metric dispersion decoheres — `coherence_report`'s frequency sweep bins
-    # WITHIN each leaf (one band), so it cannot see cross-band structure.
-    function _crossband_eta(uv)
-        zsum = Dict{Tuple{Int, Int}, ComplexF64}()
-        zabs = Dict{Tuple{Int, Int}, Float64}()
-        for (_, l) in Gustavo.UVData.leaves(uv)
-            V = parent(l[:vis])
-            W = parent(l[:weights])
-            for p in (1, 4), bi in axes(V, 3)
-                acc = zero(ComplexF64)
-                for t in axes(V, 2), c in axes(V, 1)
-                    w = W[c, t, bi, p]
-                    w > 0 || continue
-                    acc += w * V[c, t, bi, p]
-                end
-                zsum[(bi, p)] = get(zsum, (bi, p), zero(ComplexF64)) + acc
-                zabs[(bi, p)] = get(zabs, (bi, p), 0.0) + abs(acc)
-            end
-        end
-        return sum(abs, values(zsum)) / sum(values(zabs))
-    end
-
-    # The full correction aligns the bands: cross-band coherence ≈ 1.
-    corr = Gustavo.UVData.apply_calibration(uvset, sol)
-    @test _crossband_eta(corr) > 0.99
-
-    # Without the term (no DispersionSBDFit step) the dispersion survives as
-    # cross-band decoherence.
-    sol0 = fit(
-        BaselineFringeFit(
-            model = default_fringe_terms(),
-            search = FP.FringeSearch(algorithm = FP.FullGrid()),
-        ) |> AdhocPhase(),
-        uvset,
-        gauge = PinAntenna(1),
-    )
-    @test :refine ∉ keys(sol0)     # no DispersionSBDFit step in this pipeline at all
-    corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
-    @test _crossband_eta(corr0) < 0.9
-
-    # A saved solution carries the Dispersion term.
-    mktempdir() do dir
-        path = joinpath(dir, "disp.jls")
-        CAL.save_solution(path, sol)
-        sol2 = CAL.load_solution(path)
-        refine2 = sol2[:refine].steps[1]
-        @test refine2.θ == refine.θ
-        @test any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(refine2.model))
-    end
-end
-
-@testset "SBD: per-scan band-group delay recovered" begin
-    # Two band GROUPS (4 sub-bands at 3.0–3.3 GHz, 4 at 5.0–5.3 GHz — the gap
-    # ratio splits them) with an injected per-GROUP delay of ±2 ns on station 2,
-    # zero-mean across groups so the wideband stage-B delay cannot absorb it.
-    # This is the fourfit-SBD situation: a per-band instrumental slope that
-    # neither the wideband delay nor a time-invariant bandpass owns (VR2505's
-    # YJ drifts by ~30 ns between scans).
-    origins = [3.0e9, 3.1e9, 3.2e9, 3.3e9, 5.0e9, 5.1e9, 5.2e9, 5.3e9]
-    nb, nch = length(origins), 16
-    chf = vcat([o .+ (0:(nch - 1)) .* 2.0e6 for o in origins]...)
-    groups = FP.fringe_freq_groups(chf)
-    @test length(groups) == 2
-    τ2 = [2.0e-9, -2.0e-9]
-    ph = zeros(4, 2, nb * nch)
-    for (g, r) in enumerate(groups)
-        νc = sum(chf[r]) / length(r)
-        for c in r
-            ph[2, :, c] .= 2π * τ2[g] * (chf[c] - νc)
-        end
-    end
-    uvset, _ = _build_fringe_uvset(
-        nant = 4, nspw = nb, nchan = nch, ref_freq = 3.0e9, chan_bw = 2.0e6,
-        spw_origins = origins, bandpass = ph, seed = 99, feed_common = true,
-    )
-    geom = CAL.build_geometry(uvset)
-    # The SingleBandDelay element emits its per-band pair on this geometry.
-    @test length(CAL.model_components(SingleBandDelay(), (; geom, antennas = nothing))) == 2
-
-    # Per-channel pooled coherence of one baseline after correction (time-avg
-    # per channel, |Σ_c z| / Σ_c |z| across all channels).
-    function _perchan_eta(uv, bi)
-        acc = ComplexF64[]
-        for (_, l) in Gustavo.UVData.leaves(uv)
-            V = parent(l[:vis])
-            W = parent(l[:weights])
-            for c in axes(V, 1)
-                z = zero(ComplexF64)
-                for t in axes(V, 2)
-                    w = W[c, t, bi, 1]
-                    w > 0 || continue
-                    z += w * V[c, t, bi, 1]
-                end
-                abs(z) > 0 && push!(acc, z)
-            end
-        end
-        return abs(sum(acc)) / sum(abs, acc)
-    end
-
-    # dispersion OFF: this geometry's spw count/fractional bandwidth would also
-    # enable the dTEC term, and this test isolates the SBD machinery.
-    sol = fit(
-        BaselineFringeFit(
-            model = default_fringe_terms(),
-            search = FP.FringeSearch(algorithm = FP.FullGrid()),
-        ) |> DispersionSBDFit(dispersion = nothing) |> AdhocPhase(),
-        uvset,
-        gauge = PinAntenna(1),
-    )
-    refine = sol[:refine].steps[1]
-    @test stage_info(sol, :refine).sbd_applied
-    @test !stage_info(sol, :refine).dispersion_applied
-    sbd = FP._sbd_plans(refine.model, refine.layout)
-    @test sbd !== nothing
-    # A common-mode slope across groups is gauge-shared with the wideband
-    # stage-B delay (and its constants land in the SBD phase columns), so the
-    # gauge-invariant recovery check is the ACROSS-GROUP DIFFERENCE.
-    Δ(a) = refine.θ[plan_off1(sbd.dplan)[a, 1, 1, 1]] - refine.θ[plan_off1(sbd.dplan)[a, 1, 1, 2]]
-    @test plan_off1(sbd.dplan)[2, 1, 1, 1] != 0
-    @test isapprox(Δ(2), τ2[1] - τ2[2]; atol = 0.1e-9)          # injected 4 ns split
-    @test abs(Δ(3)) < 0.1e-9                                    # clean station ≈ 0
-    corr = Gustavo.UVData.apply_calibration(uvset, sol)
-    @test _perchan_eta(corr, 1) > 0.98                          # baseline (1,2) flat
-
-    # Without the term (no DispersionSBDFit step) the per-group slope survives
-    # as within-group decoherence.
-    sol0 = fit(
-        BaselineFringeFit(
-            model = default_fringe_terms(),
-            search = FP.FringeSearch(algorithm = FP.FullGrid()),
-        ) |> AdhocPhase(),
-        uvset,
-        gauge = PinAntenna(1),
-    )
-    @test :refine ∉ keys(sol0)     # no DispersionSBDFit step in this pipeline at all
-    corr0 = Gustavo.UVData.apply_calibration(uvset, sol0)
-    @test _perchan_eta(corr0, 1) < 0.9
-end
-
-@testset "dTEC co-located tie (the Onsala-twin constraint)" begin
-    # Station 4 sits 60 m from station 3 (same ionosphere); stations are
-    # otherwise 100 km apart. At `colocated_sep = 1 km` the pair groups, and the
-    # dispersion solve fits ONE dTEC for it that both θ columns carry.
-    positions = [[0.0, 0.0, 0.0], [1.0e5, 0.0, 0.0], [2.0e5, 0.0, 0.0], [2.0e5 + 60.0, 0.0, 0.0]]
-    dtec_true = [0.0, 3.0, -5.0, -5.0]
-    uvset, _ = _build_fringe_uvset(
-        nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
-        dtec = dtec_true, seed = 77, feed_common = true,
-        station_positions = positions,
-    )
-    @test UVP._colocated_ties(positions; max_sep = 1000.0) == [1, 2, 3, 3]
-
-    # Missing or degenerate positions are rejected: without a real array, no
-    # separation threshold distinguishes a twin from the whole array.
-    @test_throws "co-located grouping needs real station positions" UVP._colocated_ties(
-        [[100.0 * i, 200.0 * i, 300.0 * i] for i in 1:4]; max_sep = 1000.0,
-    )
-
-    # TWO co-located pairs must BOTH tie (regression: a `break` in the old
-    # comma-nested loop exited both levels after the first pair — on VR2505
-    # it tied Onsala and silently skipped the Wettzell twins).
-    pos2 = [
-        [0.0, 0.0, 0.0], [1.0e5, 0.0, 0.0], [1.0e5 + 70.0, 0.0, 0.0],
-        [2.0e5, 0.0, 0.0], [2.0e5 + 60.0, 0.0, 0.0],
-    ]
-    @test UVP._colocated_ties(pos2; max_sep = 1000.0) == [1, 2, 2, 4, 4]
-
-    sol = fit(
-        BaselineFringeFit(
-            model = default_fringe_terms(),
-            search = FP.FringeSearch(algorithm = FP.FullGrid()),
-        ) |> DispersionSBDFit(
-            dispersion = DispersionModel(colocated_sep = 1000.0), sbd = nothing,
-        ) |> AdhocPhase(),
-        uvset,
-        gauge = PinAntenna(1),
-    )
-    refine = sol[:refine].steps[1]
-    dplan = CAL._dispersion_plan(refine.model, refine.layout)
-    @test dplan !== nothing
-    o3 = plan_off1(dplan)[3, 1, 1, 1]
-    o4 = plan_off1(dplan)[4, 1, 1, 1]
-    @test o3 != 0 && o4 != 0
-    @test refine.θ[o3] == refine.θ[o4]                                # tied EXACTLY
-    @test isapprox(refine.θ[o3], dtec_true[3] - dtec_true[1]; atol = 0.05)
 end
 
 @testset "Largest-first group map" begin

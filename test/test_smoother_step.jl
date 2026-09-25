@@ -90,7 +90,6 @@ end
         ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
         @test any(!=(0), _blk(adhoc_step, ipi))
         @test adhoc_step.info.t_pass > 0
-        @test :refine ∉ keys(sol_n)     # no DispersionSBDFit step in this pipeline at all
 
         # θ bit-deterministic across group concurrency (per-block partials fold
         # in a fixed order regardless of ntasks/inner).
@@ -105,45 +104,6 @@ end
         out_s = calibrate(sol_n, uvset; post = AverageFrequency(nout = 1))
         red_ref = UVP.frequency_average(Gustavo.UVData.apply_calibration(uvset, sol_n); nout = 1)
         @test _sets_equal(out_s, red_ref; exact = false)
-    end
-
-    @testset "DispersionSBDFit: dTEC recovery + determinism" begin
-        dtec_true = [0.0, 6.0, -4.0, 2.5]
-        uvd, _ = _build_fringe_uvset(;
-            nant, nspw = 8, nchan = 8, nscans = 3,
-            ref_freq = 3.0e9, spw_sep = 0.5e9, dtec = dtec_true,
-            seed = 77, feed_common = true,
-        )
-        # This band layout needs `require_band_separation` off for the dTEC
-        # term to be emitted at all.
-        ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
-        pd = [BaselineFringeFit(model = fm), ds,
-            Bandpass(),
-            AdhocPhase(adhoc)]
-        sol_nd = fit(pd, uvd; exec = ExecutionConfig(), gauge = PinAntenna(1))
-        @test stage_info(sol_nd, :refine).dispersion_applied
-        @test keys(sol_nd) == [:fringe, :refine, :bandpass, :adhoc]
-
-        # Injected per-station dTEC recovered on EVERY scan — DispersionSBDFit's
-        # own pass covers the whole track unconditionally, same as the bandpass
-        # stage, which now also fits every scan.
-        refine_step = sol_nd[:refine].steps[1]
-        dplan = CAL._dispersion_plan(refine_step.model, refine_step.layout)
-        @test dplan !== nothing
-        nseg = size(plan_off1(dplan), 3)
-        @test nseg >= 3                        # per-scan dTEC columns
-        for a in 1:nant, s in 1:nseg
-            off = plan_off1(dplan)[a, 1, s, 1]
-            off == 0 && continue
-            @test isapprox(refine_step.θ[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
-        end
-
-        # Bit-deterministic across group concurrency through the whole
-        # refine + bandpass + adhoc chain.
-        pd4 = [BaselineFringeFit(model = fm), ds,
-            Bandpass(),
-            AdhocPhase(adhoc)]
-        @test parent(gains(fit(pd4, uvd; exec = ExecutionConfig(), gauge = PinAntenna(1)))) == parent(gains(sol_nd))
     end
 
     @testset "BaselineFringeFit |> AdhocPhase (no bandpass)" begin
@@ -169,31 +129,31 @@ end
     @testset "a pipeline ≡ its steps fit separately" begin
         # The oracle is the composition a caller can write by hand: separate
         # `fit` calls of one step each, chained through `ApplySolution`.
-        ds = DispersionSBDFit(dispersion = CAL.DispersionModel(require_band_separation = false))
+        bp = Bandpass()
         pre = FP.ApplySolution(sol_n[:fringe])
 
-        sol_pipe = fit(pre |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
-        @test keys(sol_pipe) == [:refine, :adhoc]
+        sol_pipe = fit(pre |> bp |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test keys(sol_pipe) == [:bandpass, :adhoc]
         # Neither step is vacuous.
-        @test sol_pipe[:refine].steps[1].layout.nθ > 0
-        @test any(!=(0), sol_pipe[:refine].steps[1].θ)
+        @test sol_pipe[:bandpass].steps[1].layout.nθ > 0
+        @test any(!=(0), sol_pipe[:bandpass].steps[1].θ)
         @test any(!=(0), sol_pipe[:adhoc].steps[1].θ)
 
-        sol_a = fit(pre |> ds, uvset; gauge = PinAntenna(1))
-        refine_tf = FP.ApplySolution(sol_a[:refine])
-        sol_b = fit(pre |> refine_tf |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
-        @test sol_pipe[:refine].steps[1].θ == sol_a[:refine].steps[1].θ
+        sol_a = fit(pre |> bp, uvset; gauge = PinAntenna(1))
+        bandpass_tf = FP.ApplySolution(sol_a[:bandpass])
+        sol_b = fit(pre |> bandpass_tf |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test sol_pipe[:bandpass].steps[1].θ == sol_a[:bandpass].steps[1].θ
         @test sol_pipe[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
 
-        sol_3 = fit(BaselineFringeFit() |> ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
-        @test keys(sol_3) == [:fringe, :refine, :adhoc]
+        sol_3 = fit(BaselineFringeFit() |> bp |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test keys(sol_3) == [:fringe, :bandpass, :adhoc]
         sol_f1 = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
         pre_f = FP.ApplySolution(sol_f1[:fringe])
-        sol_r1 = fit(pre_f |> ds, uvset; gauge = PinAntenna(1))
-        pre_r = FP.ApplySolution(sol_r1[:refine])
-        sol_a1 = fit(pre_f |> pre_r |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        sol_b1 = fit(pre_f |> bp, uvset; gauge = PinAntenna(1))
+        pre_b = FP.ApplySolution(sol_b1[:bandpass])
+        sol_a1 = fit(pre_f |> pre_b |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test sol_3[:fringe].steps[1].θ == sol_f1[:fringe].steps[1].θ
-        @test sol_3[:refine].steps[1].θ == sol_r1[:refine].steps[1].θ
+        @test sol_3[:bandpass].steps[1].θ == sol_b1[:bandpass].steps[1].θ
         @test sol_3[:adhoc].steps[1].θ == sol_a1[:adhoc].steps[1].θ
         # The fringe step reports the same flags and diagnostics either way.
         @test sol_3.info.flagged_ant == sol_f1.info.flagged_ant
@@ -206,7 +166,7 @@ end
             k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
                 for (k, l) in pairs(UVP.branches(uvset))
         )
-        fit(ds |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        fit(bp |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
         @test all(
             isequal(snap[k][1], parent(l[:vis])) && isequal(snap[k][2], parent(l[:weights]))
                 for (k, l) in pairs(UVP.branches(uvset))

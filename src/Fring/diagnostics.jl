@@ -126,8 +126,7 @@ read. One row per (scan-group index `scan`, 1-based `station`,
   across scans only through a difference taken within one scan.
 
 Summed from every stage-B component the fringe stage owns (delay/rate/
-constant terms — not adhoc, bandpass, dTEC, or SBD) plus, if a
-`DispersionSBDFit` step ran, its private per-scan delay-refinement column.
+constant terms — not adhoc or bandpass).
 Values are gauge-fixed to the solve's reference pin; a within-scan
 difference against the same feed of a reference station is gauge-invariant
 (the reported `delay_rel`/`rate_rel`).
@@ -145,22 +144,10 @@ function fringe_station_solutions(sol::CalibrationSolution)
     fringe_step = sol[:fringe].steps[1]
     model, layout, θ = fringe_step.model, fringe_step.layout, fringe_step.θ
     nant = layout.nant
-    # The fringe step's own model carries only its own components — a later
-    # step (e.g. `DispersionSBDFit`) compiling a component sharing a stage-B
-    # signature by design (see `fringe_stage_components`) lives in a separate
-    # step's own model and never appears here, so no restriction is needed.
     comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate/:phase)
     refplan = _perscan_delay_plan(model, layout)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
-    # `DispersionSBDFit`'s own delay-refinement column, if that step ran — a
-    # Separate step's own `(model, layout, θ)`, not a positional trick against
-    # a merged model, so its own plain `_perscan_delay_plan` finds it directly
-    # (its own model has only one such component).
-    refine_i = findfirst(s -> s.name === :refine, sol.steps)
-    delay_refine_plan = refine_i === nothing ? nothing :
-        _perscan_delay_plan(sol.steps[refine_i].model, sol.steps[refine_i].layout)
-    delay_refine_θ = refine_i === nothing ? nothing : sol.steps[refine_i].θ
     nscan = refplan.shape[4]                                # PerScan ⇒ ntseg == #scan groups
     # First time index landing in each scan segment — used to look up every plan's
     # own segment id for this scan (a `GlobalTime` inter-feed plan maps them all to 1, a
@@ -187,13 +174,6 @@ function fringe_station_solutions(sol::CalibrationSolution)
                     r += v; hr = true
                 else
                     p += v; hp = true
-                end
-            end
-            if delay_refine_plan !== nothing
-                node = _feed_node(delay_refine_plan.tying, f)
-                if node != 0
-                    d += _component_leaf(delay_refine_plan, delay_refine_θ)[1, node, 1, delay_refine_plan.tseg_id[ti], a]
-                    hd = true
                 end
             end
             push!(

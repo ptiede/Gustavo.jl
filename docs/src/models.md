@@ -108,9 +108,8 @@ quantity solved `SharedFeeds` averages away a real signal.
 Components compose by *named* `NamedTuple` entries, never positionally: θ is
 addressed as `θ.phase.<name>`, diagnostics label by name, and
 `parameters(sol[:fringe, :phase, :mbd])` selects by the same name. A value may
-itself be a named subtree — one model element that compiles to several
-components nests them under its key (the SBD element's `sbd.delay` /
-`sbd.constant` pair, below).
+itself be a named subtree of components, addressed through its key
+(`θ.phase.<name>.<part>`).
 
 ## Where a model plugs in
 
@@ -127,9 +126,6 @@ whole-tree requirements via
   and [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit)`(model = default_fringe_terms(), search = ...)`
   take a `GainModel`; the fringe step's model has phase components only
   ([`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms)).
-- [`DispersionSBDFit`](@ref Gustavo.DispersionSBDFit)`(dispersion = DispersionModel(), sbd = SingleBandDelay())`
-  deliberately has no free-form model: its solver is a rigid specialized fit,
-  so its whole surface is the two element fields (either may be `nothing`).
 
 [`merge`](@ref Base.merge(::GainModel)) builds a variant of a model by adding
 or replacing named components:
@@ -141,14 +137,12 @@ BaselineFringeFit(model = merge(default_fringe_terms();
 
 Each step compiles and solves its own model on its own private θ — no step's
 parameter block is shared with or visible to another's. Gains compose
-multiplicatively across steps, so e.g. `DispersionSBDFit`'s private per-scan
-delay-refinement column times `BaselineFringeFit`'s wideband delay is the same total
-correction as incrementing one shared column would be.
+multiplicatively across steps.
 
 ## The standard pipeline's model, component by component
 
-The four-step pipeline `BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |>
-AdhocPhase()` solves, across its steps, the following phase components
+The three-step pipeline `BaselineFringeFit() |> Bandpass() |> AdhocPhase()`
+solves, across its steps, the following phase components
 — this is the standard VLBI calibration model, and each tying below is a
 physics decision:
 
@@ -178,27 +172,6 @@ arm, inject arbitrary scan-to-scan cross-hand phase jumps. The inter-feed
 rate is negligible (EHT-HOPS), so it is tied; a genuine offset would be
 opted into as a separate `PerScan × SingleFeed(2)` rate component, not by
 untying this one.
-
-**`dtec` — per-scan differential TEC, feed-common** (`DispersionSBDFit`'s
-`dispersion` half). Ionospheric dispersion, phase `K·θ·(1/f0 − 1/f)` with θ
-in TECU. It is *not* solved by the FFT fringe search: over any finite band
-the 1/ν curvature is nearly degenerate with a linear delay, so the refinement
-stage fits (Δτ, dTEC) jointly per scan, updating its own private delay column
-alongside. It is only compiled when the band layout can constrain the
-curvature (several sub-bands over a wide fractional bandwidth — see
-[`DispersionModel`](@ref)).
-
-**`sbd.delay` + `sbd.constant` — per-scan per-band-group single-band delay**
-(`DispersionSBDFit`'s `sbd` half, fourfit's SBD). A station's per-band signal
-path can move relative to its phase-cal tones between scans (tens of ns),
-which neither the wideband delay (one slope across all groups) nor the
-time-invariant per-channel bandpass can track. It is measured from
-within-band chunk slopes — nearly orthogonal to the cross-band observables
-that set `mbd` and `dtec`. The pair exists because the `Delay` coordinate is
-`(f − f0)` with the *global* `f0`: correcting a group's slope about its own
-centre `νg` needs the companion per-group constant `−2πτ(νg − f0)`, making
-the net phase `2πτ(f − νg)` — zero at the group centre, so the cross-band
-solution is untouched.
 
 **`bandpass` — per-channel constant phase, time-global, per-feed** (the
 `Bandpass` step's phase half). The residual nonlinear-in-frequency

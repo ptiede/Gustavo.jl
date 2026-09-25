@@ -80,8 +80,7 @@ include("test_axis_order.jl")
 include("test_fringe_step.jl")
 
 # The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
-# vs the frozen monolith, refine-kernel bit parity,
-# step-selection extraction + portable ApplySolution.
+# vs the frozen monolith, step-selection extraction + portable ApplySolution.
 include("test_bandpass_step.jl")
 
 # Bandpass(smoother = JointSmoother()): the alternating complex-visibility +
@@ -90,7 +89,7 @@ include("test_bandpass_step.jl")
 include("test_joint_bandpass.jl")
 
 # The AdhocPhase step + output sink: multi-scan full-pipeline solves
-# (incl. the refine polish split), standalone calibrate ≡ fused output,
+# standalone calibrate ≡ fused output,
 # AprioriAmplitude as a recorded output-chain step.
 include("test_smoother_step.jl")
 

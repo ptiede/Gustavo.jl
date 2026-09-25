@@ -15,14 +15,12 @@ using ..UVData: Frequency, BaselineID, Feed, Polarization, Scan, StationPair, Fe
 using ..Calibration
 using ..Calibration: _epoch_atol
 import XRadio
-using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,
+using ..Calibration: ComponentPlan, GeometryWindow,
     _flatten_components, _component_leaf, _feed_node, _block_index, component_is_per_scan,
     _freq_group_ranges
 # Numeric kernels the model layer keeps off its public surface.
 using ..Calibration: weighted_regularized_least_squares, weighted_constrained_least_squares,
     unwrap_phase_track, phase_unwrap_ambiguity, connected_components, savitzky_golay_smooth
-# `SingleBandDelay` compiles through the model layer's element-compilation generic.
-import ..Calibration: model_components
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimStack
@@ -36,7 +34,6 @@ include("Fring/statespace.jl")
 # Per-observable frequency-shape specs and their per-track fit — pure functions
 # over one (station, feed, spw) track, independent of any solver stage.
 include("Fring/shapes.jl")
-include("Fring/group_tables.jl")
 include("Fring/weighted_sums.jl")
 include("Fring/adhoc.jl")
 include("Fring/phasecal.jl")
@@ -48,8 +45,6 @@ include("Fring/scan_search.jl")
 include("Fring/search_stage.jl")
 include("Fring/model_plans.jl")
 include("Fring/bandpass_stage.jl")
-include("Fring/refine_search.jl")
-include("Fring/refine_stage.jl")
 include("Fring/diagnostics.jl")
 
 # ── Plot stubs — implemented by `GustavoMakieExt`. Load Makie or CairoMakie
@@ -143,11 +138,7 @@ export fringe_freq_group_stats, fringe_freq_groups
 export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags
 export delay_closure, print_delay_closure
 export can_fit, validate_model
-export SingleBandDelay, BandGroups, default_fringe_terms
-# `DispersionModel` is `Calibration`'s (the propagation model beside the
-# `Dispersion` term it configures); re-exported so a caller driving the fringe
-# engine names it without a second `using`.
-export DispersionModel
+export BandGroups, default_fringe_terms
 export search_scan
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
 export plot_fringe_search

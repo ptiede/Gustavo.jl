@@ -23,36 +23,15 @@ const UVP = Gustavo.UVData
 
 include("synthetic_ps.jl")
 
-# `DispersionSBDFit`, or `nothing` when both halves are disabled, for tests
-# that want dTEC/SBD actually fit.
-_dispersion_sbd_step(; dispersion = true, sbd = true) =
-    !dispersion && !sbd ? nothing :
-    DispersionSBDFit(;
-        dispersion = dispersion ? DispersionModel() : nothing,
-        sbd = sbd ? SingleBandDelay() : nothing,
-    )
-
 # The union of the components the standard pipeline's steps solve (each on its
 # own private θ in a real run), assembled as ONE GainModel: the fringe
-# terms, optionally the dTEC and SBD columns, plus the phase/log-amplitude
-# bandpass and the adhoc phase. Structural tests use it to exercise the plan
-# routers and θ decoding on a realistic full component mix.
-function _full_fringe_model(;
-        dispersion::Bool = false, sbd_freq_groups = nothing,
-        rel_time = PerScan(),
-    )
-    disp = dispersion ?
-        (dtec = GainComponent(Dispersion(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),) : (;)
-    sbd = sbd_freq_groups === nothing ? (;) : (
-            sbd = (
-                delay = GainComponent(Delay(); Ti = PerScan(), Frequency = FreqGroups(sbd_freq_groups), Feed = SharedFeeds()),
-                constant = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = FreqGroups(sbd_freq_groups), Feed = SharedFeeds()),
-            ),
-        )
+# terms plus the phase/log-amplitude bandpass and the adhoc phase. Structural
+# tests use it to exercise the plan routers and θ decoding on a realistic full
+# component mix.
+function _full_fringe_model(; rel_time = PerScan())
     return GainModel(
         phase = merge(
             default_fringe_terms(; rel_time).phase,
-            disp, sbd,
             (
                 bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed()),
                 adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),

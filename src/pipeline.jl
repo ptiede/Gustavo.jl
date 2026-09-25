@@ -38,8 +38,7 @@ include("pipeline/corrections.jl")
 # The step protocol: SolveStep, its hooks, and `|>` building a pipeline.
 include("pipeline/protocol.jl")
 
-# The built-in solve steps: BaselineFringeFit, DispersionSBDFit, Bandpass,
-# AdhocPhase.
+# The built-in solve steps: BaselineFringeFit, Bandpass, AdhocPhase.
 include("pipeline/steps.jl")
 
 

@@ -231,10 +231,8 @@
             typeof(tc.Frequency), typeof(tc.Feed),
         )
 
-        # The default model compiles in order to the standard sequence;
-        # dispersion/SBD are DispersionSBDFit's, so they never appear here
-        # regardless of geometry, and there is no inter-feed CONSTANT (see
-        # `default_fringe_terms`).
+        # The default model compiles in order to the standard sequence, with no
+        # inter-feed CONSTANT (see `default_fringe_terms`).
         comps = fringe_phase(default_fringe_terms())
         @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -251,53 +249,6 @@
             (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.SingleFeed),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
         ]
-
-        # DispersionSBDFit compiles its own private delay-refinement column +
-        # dTEC (gate closed on this narrow-fractional-bandwidth geometry) + SBD
-        # delay/constant pair (2 band groups here, so SBD's gate is open).
-        dscomps = Gustavo.model_components(DispersionSBDFit(), (; geom, antennas = nothing))
-        @test collect(map(sig, CAL._flatten_components(dscomps.phase))) == [
-            (CAL.Delay, CAL.PerScan, CAL.FreqGroups, CAL.SharedFeeds),
-            (CAL.ConstantTerm, CAL.PerScan, CAL.FreqGroups, CAL.SharedFeeds),
-        ]
-        @test isempty(dscomps.logamp)
-
-        # Geometry-gated elements emit nothing when unconstrainable.
-        @test CAL.model_components(DispersionModel(), (; geom, antennas = nothing)) === nothing
-        @test CAL.model_components(
-            DispersionModel(require_band_separation = false), (; geom, antennas = nothing)
-        ) isa CAL.GainComponent
-        narrow, _ = _build_fringe_uvset(nspw = 1)
-        @test CAL.model_components(SingleBandDelay(), (; geom = CAL.build_geometry(narrow), antennas = nothing)) === nothing
-
-        # `freq` chooses the partition the SBD pair is resolved on. On a
-        # geometry whose spws fall in two gap-separated groups, `BandGroups`
-        # emits one delay per GROUP and `PerSpectralWindow` one per SPW.
-        gsbd = CAL.DataGeometry(;
-            times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 1.2e9, 5.0e9],
-            scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 3], t0 = 0.0, f0 = 3.0e9,
-        )
-        bandranges(sbd, g) = CAL.model_components(sbd, (; geom = g, antennas = nothing)).delay.Frequency.ranges
-        @test bandranges(SingleBandDelay(), gsbd) == [1:3, 4:4]
-        @test bandranges(SingleBandDelay(freq = CAL.PerSpectralWindow()), gsbd) ==
-            [1:2, 3:3, 4:4]
-        # An explicit partition is taken as given.
-        @test bandranges(SingleBandDelay(freq = CAL.FreqGroups([1:1, 2:4])), gsbd) ==
-            [1:1, 2:4]
-        # The < 2 group gate is on the resolved partition, so a one-spw axis
-        # emits nothing under PerSpectralWindow too.
-        @test CAL.model_components(
-            SingleBandDelay(freq = CAL.PerSpectralWindow()),
-            (; geom = CAL.build_geometry(narrow), antennas = nothing),
-        ) === nothing
-        # `GlobalFrequency` resolves to one group on any axis: fully degenerate
-        # with the wideband delay, so the element always compiles to nothing.
-        @test CAL.model_components(
-            SingleBandDelay(freq = CAL.GlobalFrequency()), (; geom = gsbd, antennas = nothing),
-        ) === nothing
-        # Both halves of the pair share the partition.
-        psbd = CAL.model_components(SingleBandDelay(freq = CAL.PerSpectralWindow()), (; geom = gsbd, antennas = nothing))
-        @test psbd.constant.Frequency.ranges == psbd.delay.Frequency.ranges
 
         # A bare GainComponent compiles to itself.
         tc = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2))
@@ -318,14 +269,14 @@
         )
         @test_throws "per-scan feed-common delay signature" fringe_phase(collide)
 
-        # DispersionModel/SingleBandDelay elements are rejected outright, and
-        # so are the components they compile to — dispersion/SBD are
-        # DispersionSBDFit's.
+        # Dispersion and a per-band-group delay are rejected: no shipped step
+        # fits either.
         withphase(; kw...) = merge(default_fringe_terms(); phase = NamedTuple(kw))
-        @test_throws "DispersionSBDFit" withphase(dtec2 = DispersionModel(colocated_sep = nothing))
-        @test_throws "DispersionSBDFit" withphase(sbd2 = SingleBandDelay())
-        @test_throws "DispersionSBDFit" fringe_phase(
+        @test_throws "No shipped step fits dispersion" fringe_phase(
             withphase(dtec2 = CAL.GainComponent(CAL.Dispersion(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())),
+        )
+        @test_throws "No shipped step fits dispersion" fringe_phase(
+            withphase(sbd2 = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.FreqGroups([1:1, 2:length(geom.channel_freqs)]), Feed = CAL.SharedFeeds())),
         )
 
         # The fringe step fits phase only.
@@ -421,100 +372,4 @@ end
         @test :validate_model in names(Gustavo.Fring)
     end
 
-end
-
-# ── Dispersion as a model of its own ─────────────────────────────────────────
-#
-# The ionosphere is specified separately from the instrument, but ESTIMATED
-# jointly with the delay it is degenerate with — these assert both halves.
-@testset "dispersion is a separate model" begin
-    # A VGOS-like layout: four sub-bands over a wide fractional bandwidth, which
-    # is what lets 1/ν be separated from a linear delay at all.
-    uvset, _ = _build_fringe_uvset(
-        nspw = 4, nchan = 8, dtec = [0.0, 3.0, -2.0, 1.5],
-        spw_origins = [3.0e9, 5.0e9, 8.0e9, 1.03e10], feed_common = true,
-    )
-    search = FP.FringeSearch(algorithm = FP.FullGrid())
-
-    @testset "the ionosphere is DispersionSBDFit's own field, not the fringe model's" begin
-        @test !any(t -> t.term isa CAL.Dispersion, default_fringe_terms().phase)
-        @test fieldnames(DispersionModel) == (:require_band_separation, :colocated_sep)
-        @test fieldnames(DispersionSBDFit) == (:dispersion, :sbd)
-    end
-
-    @testset "the propagation model is Calibration's, not Fring's" begin
-        # An ionosphere is modelled without loading the fringe-fitting module:
-        # the spec sits beside the `Dispersion` term it configures, and only the
-        # joint (Δτ, dTEC) estimator stays in `Fring`.
-        @test parentmodule(DispersionModel) === Gustavo.Calibration
-        @test which(CAL._dispersion_enabled, Tuple{Nothing, CAL.DataGeometry}).module ===
-            Gustavo.Calibration
-        # Re-exported, so `FP.DispersionModel` and a bare `using Gustavo` name
-        # the SAME type rather than a shadowing second one.
-        @test FP.DispersionModel === CAL.DispersionModel === Gustavo.DispersionModel
-        @test !isdefined(FP, :_dispersion_plan)
-        @test FP._dispersion_enabled === CAL._dispersion_enabled
-        # Co-location is array geometry, not a fringe concept, so the dTEC
-        # tie's grouping belongs to UVData.
-        @test parentmodule(UVP._colocated_ties) === Gustavo.UVData
-        @test !isdefined(FP, :_colocated_ties)
-    end
-
-    @testset "the step decides whether an ionosphere is modelled at all" begin
-        # Whether the term is SOLVED end to end is `stage_info(sol,
-        # :refine).dispersion_applied` (see the dispersion testset in
-        # test_pipeline.jl). What this asserts
-        # is the model structure DispersionSBDFit's presence/field builds.
-        ff = BaselineFringeFit(; search)
-        on = fit(ff |> DispersionSBDFit(), uvset; gauge = PinAntenna(1))
-        off = fit(ff |> DispersionSBDFit(dispersion = nothing), uvset; gauge = PinAntenna(1))
-        on_ref, off_ref = on[:refine].steps[1], off[:refine].steps[1]
-        @test CAL._dispersion_plan(on_ref.model, on_ref.layout) !== nothing
-        @test CAL._dispersion_plan(off_ref.model, off_ref.layout) === nothing
-        @test any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(on_ref.model))
-        @test !any(tc -> tc.term isa CAL.Dispersion, CAL.phase_components(off_ref.model))
-        # No dTEC term means no dTEC column in θ at all — but `off` still has
-        # SBD's columns (untouched by the `dispersion` field), so `on` has
-        # exactly one more (the private delay-refinement column that only
-        # accompanies dTEC).
-        @test length(on_ref.θ) - length(off_ref.θ) == length(CAL._dispersion_plan(on_ref.model, on_ref.layout).range) +
-            length(FP._perscan_delay_plan(on_ref.model, on_ref.layout).range)
-    end
-
-    @testset "require_band_separation gates on the band layout" begin
-        # A single contiguous band cannot constrain the 1/ν curvature.
-        narrow, _ = _build_fringe_uvset(nspw = 1, nchan = 8)
-        geom_n = CAL.build_geometry(narrow)
-        geom_w = CAL.build_geometry(uvset)
-        @test !CAL._dispersion_enabled(DispersionModel(), geom_n)
-        @test CAL._dispersion_enabled(DispersionModel(), geom_w)
-        # Forcing it on solves the term regardless of what the layout supports.
-        @test CAL._dispersion_enabled(DispersionModel(require_band_separation = false), geom_n)
-        @test !CAL._dispersion_enabled(nothing, geom_n)
-    end
-
-    @testset "colocated_sep reaches DispersionSBDFit through the step" begin
-        # The tie is the dispersion model's, but DispersionSBDFit is the step
-        # that reads it (`_dtec_ties(s.dispersion, ctx.antennas)`).
-        ants = Gustavo.UVData.metadata(
-            first(values(Gustavo.UVData.branches(uvset)))
-        ).antennas
-        @test Gustavo._dtec_ties(DispersionModel(colocated_sep = 1000.0), ants) !== nothing
-        @test Gustavo._dtec_ties(DispersionModel(colocated_sep = nothing), ants) === nothing
-        @test Gustavo._dtec_ties(nothing, ants) === nothing
-    end
-
-    @testset "delay and dTEC are still estimated jointly" begin
-        # The separation is of the specification only: DispersionSBDFit's
-        # per-scan kernel fits both plans in one joint (Δτ, dTEC) grid search,
-        # because over a finite band the two are near-degenerate — confirmed by
-        # both plans existing (and being solved, not left at zero) once the step
-        # runs.
-        ff = BaselineFringeFit(; search)
-        sol = fit(ff |> DispersionSBDFit(), uvset; gauge = PinAntenna(1))
-        refine = sol[:refine].steps[1]
-        @test CAL._dispersion_plan(refine.model, refine.layout) !== nothing
-        @test FP._perscan_delay_plan(refine.model, refine.layout) !== nothing
-        @test stage_info(sol, :refine).dispersion_applied
-    end
 end

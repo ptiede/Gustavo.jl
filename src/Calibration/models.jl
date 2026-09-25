@@ -149,9 +149,7 @@ _as_component(nt::NamedTuple) = map(_as_component, nt)   # a named subtree
 _as_component(x) = throw(
     ArgumentError(
         "a model component must be a `GainComponent` or a NamedTuple of them, got " *
-            "$(typeof(x)); a data-dependent element such as `DispersionModel` or " *
-            "`SingleBandDelay` belongs to the step that compiles it " *
-            "(`DispersionSBDFit`).",
+            "$(typeof(x)).",
     ),
 )
 
@@ -244,8 +242,8 @@ logamp_components(m::GainModel) = _flatten_components(m.logamp)
 """
     model_components(element, spec) -> GainComponent | NamedTuple | Nothing
 
-Compile one model element — a component whose form depends on the data, such
-as [`DispersionModel`](@ref) — for an observation. `spec = (; geom, antennas)`
+Compile one model element — a component whose form depends on the data — for
+an observation. `spec = (; geom, antennas)`
 carries the `DataGeometry` and the antenna table (the same spec a pipeline
 step's `model_components` receives). The caller names the result, so an
 element returns only its own internal structure:
@@ -256,8 +254,8 @@ element returns only its own internal structure:
 - `nothing` — the geometry cannot constrain the element, so it contributes no
   component (and no key).
 
-A bare `GainComponent` compiles to itself; wrapper elements (e.g.
-[`DispersionModel`](@ref)) consult `spec.geom`.
+A bare `GainComponent` compiles to itself; wrapper elements consult
+`spec.geom`.
 """
 function model_components end
 

@@ -32,7 +32,7 @@ using XRadio
 ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
 pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
-    DispersionSBDFit() |> Bandpass() |> AdhocPhase()
+    Bandpass() |> AdhocPhase()
 sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
 out = calibrate(sol, ps)                         # corrected, in memory
@@ -49,8 +49,7 @@ store stays on disk until a step reads it. Narrow the data by subsetting the
 
 **Pipeline.** A pipeline is a tuple of solve steps and corrections, usually
 built with `|>`, run in order. The built-in solve steps are [`BaselineFringeFit`](@ref) (delay /
-rate / phase search), [`DispersionSBDFit`](@ref) (ionospheric dTEC and
-per-band-group delay refinement), [`Bandpass`](@ref) (time-stable station
+rate / phase search), [`Bandpass`](@ref) (time-stable station
 bandpass), and [`AdhocPhase`](@ref) (per-integration atmospheric
 phase). Every step is optional and reorderable; a single standalone step is
 a legal pipeline.

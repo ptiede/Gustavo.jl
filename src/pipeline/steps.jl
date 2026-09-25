@@ -40,9 +40,9 @@ arbitrarily low SNR. `steer_cells` sizes the trial count of the recorded
 `steer_cells = 0` skips steering. Steering runs only where each scan solves on
 its own; under a pooled solve the steered columns are `NaN`.
 
-Ionospheric dispersion (dTEC) and single-band delay (SBD) are not part of this
-step: add a [`DispersionSBDFit`](@ref) step after it to fit them on the
-fringe-corrected residual.
+The search measures one delay across the whole band, so this step fits neither
+ionospheric dispersion (`Dispersion`) nor a per-band-group delay (a
+`FreqGroups`-segmented `Delay`), and no shipped step does.
 """
 Base.@kwdef struct BaselineFringeFit{M <: GainModel} <: SolveStep
     model::M = Fring.default_fringe_terms()
@@ -52,27 +52,6 @@ Base.@kwdef struct BaselineFringeFit{M <: GainModel} <: SolveStep
     steer_cells::Float64 = 9.0
 end
 provides(::BaselineFringeFit) = :fringe
-
-"""
-    DispersionSBDFit(; dispersion = DispersionModel(), sbd = SingleBandDelay())
-
-The ionospheric-dispersion (dTEC) and single-band-delay (SBD) refinement
-stage: a per-scan joint (Δτ, dTEC) fit ([`DispersionModel`](@ref)) and a
-per-band-group delay fit ([`SingleBandDelay`](@ref)), on the fringe-corrected
-residual — place a [`BaselineFringeFit`](@ref) step earlier in the pipeline. Set
-either field to `nothing` to disable that term.
-
-The Δτ half of the joint fit lands in a private per-scan delay column, not in
-`BaselineFringeFit`'s own wideband delay: gains compose multiplicatively, so this
-step's delay column times `BaselineFringeFit`'s is the same total correction as
-incrementing one shared column would be, without either step writing into the
-other's θ block.
-"""
-Base.@kwdef struct DispersionSBDFit{D, S} <: SolveStep
-    dispersion::D = Fring.DispersionModel()
-    sbd::S = Fring.SingleBandDelay()
-end
-provides(::DispersionSBDFit) = :refine
 
 """
     Bandpass(; model = default_bandpass_terms(), smoother = JointSmoother())
@@ -138,31 +117,10 @@ model_components(s::BaselineFringeFit, spec) = _vet_step_model(
     s, s.model,
     "See `BaselineFringeFit` for the models it fits — a capability " *
         "can depend on the data's own sampling, so a term this step fits " *
-        "elsewhere may still be unfittable here. Dispersion (`Dispersion`) and " *
-        "single-band delay (a `FreqGroups`-segmented `Delay`) are fit by a " *
-        "`DispersionSBDFit` step, not by the fringe step.",
+        "elsewhere may still be unfittable here. No shipped step fits dispersion " *
+        "(`Dispersion`) or a per-band-group delay (a `FreqGroups`-segmented `Delay`).",
     spec,
 )
-
-# The dispersion/SBD components: a private per-scan delay-refinement column
-# (shares the fringe stage's own wideband-delay signature by design, but lives
-# in this step's own separate model/θ) plus the dTEC column, both compiled only
-# when the DispersionModel/geometry combination
-# enables dTEC; and the SBD delay + companion constant, compiled only when the
-# frequency axis has ≥ 2 band groups. Either half is dropped entirely by
-# setting the matching field to `nothing`.
-function model_components(s::DispersionSBDFit, spec)
-    dispc = s.dispersion === nothing ? nothing : model_components(s.dispersion, spec)
-    sbdc = s.sbd === nothing ? nothing : model_components(s.sbd, spec)
-    phase = merge(
-        dispc === nothing ? (;) : (;
-                delay_refine = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds()),
-                dtec = dispc,
-            ),
-        sbdc === nothing ? (;) : (; sbd = sbdc),
-    )
-    return GainModel(; phase)
-end
 
 # Vet a step's model argument against its solver's declared capability, at
 # compile time, before any data is read: no component the solver cannot fit
@@ -403,82 +361,6 @@ function _solve_group(
     max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
     local_solve && return (; ncomp, flags, max_snr, ncells, rows)
     return (; det, max_snr, ncells, rows)
-end
-
-# ── DispersionSBDFit: per-scan joint (Δτ, dTEC) fit + SBD fit ────────────────
-
-# Co-located stations see the same ionosphere, so a differential TEC between
-# them is pure solve error — but only a model that solves dTEC has any to tie,
-# and only the caller knows the separation that counts as co-located here.
-_dtec_ties(::Nothing, ctx) = nothing
-_dtec_ties(dm::DispersionModel, ctx) =
-    dm.colocated_sep === nothing ? nothing :
-    UVData._colocated_ties(_station_positions(ctx.groups, ctx.geom.stations); max_sep = dm.colocated_sep)
-
-# Each station's geocentric position, in `stations` order, from the antenna
-# datasets of the groups' Measurement Sets. Stops reading once every station is
-# placed; a station stated at two positions more than a millimetre apart, or at
-# none, is refused.
-function _station_positions(groups, stations)
-    slot = Dict(n => i for (i, n) in pairs(stations))
-    xyz = Vector{Union{Nothing, Vector{Float64}}}(nothing, length(stations))
-    for group in values(groups), ms in values(group)
-        pos = XRadio.antenna_positions(ms)
-        for (j, name) in pairs(lookup(pos, 2))
-            i = get(slot, String(name), 0)
-            i == 0 && continue
-            p = Float64.(collect(view(parent(pos), :, j)))
-            if xyz[i] === nothing
-                xyz[i] = p
-            elseif !isapprox(xyz[i], p; atol = 1.0e-3)
-                throw(ArgumentError("station $name is stated at $(xyz[i]) and $p m"))
-            end
-        end
-        all(!isnothing, xyz) && break
-    end
-    missing_ = [stations[i] for i in eachindex(xyz) if xyz[i] === nothing]
-    isempty(missing_) || throw(
-        ArgumentError("no Measurement Set states a position for $(join(missing_, ", "))")
-    )
-    return Vector{Vector{Float64}}(xyz)
-end
-
-function _group_setup(s::DispersionSBDFit, ctx::SolveContext)
-    disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
-    # `ctx.model` holds only this step's own components: the per-scan
-    # delay-refinement column — sharing BaselineFringeFit's wideband-delay
-    # signature by design — is the only `_is_perscan_delay` match here, so the
-    # plain `findfirst` router (`_perscan_delay_plan`) finds it directly;
-    # `nothing` when dispersion is disabled (no such component was compiled).
-    delay_plan = disp_plan === nothing ? nothing : Fring._perscan_delay_plan(ctx.model, ctx.layout)
-    sbd_plans = Fring._sbd_plans(ctx.model, ctx.layout)
-    ties = disp_plan === nothing ? nothing : _dtec_ties(s.dispersion, ctx)
-    return (; delay_plan, disp_plan, sbd_plans, ties)
-end
-
-function _solve_group(::DispersionSBDFit, ctx::SolveContext, setup, tabs::Fring.GroupTables)
-    executor = inner_executor(ctx.exec)
-    Fring.refine_scan_dispersion!(
-        ctx.θ, tabs, setup.delay_plan, setup.disp_plan, ctx.gauge, ctx.nant;
-        executor, setup.ties,
-    )
-    Fring.refine_scan_sbd!(ctx.θ, tabs, setup.sbd_plans, ctx.gauge, ctx.nant; executor)
-    return nothing
-end
-
-function solve(s::DispersionSBDFit, ctx::SolveContext)
-    setup = _group_setup(s, ctx)
-    results = each_group(ctx) do group
-        _solve_group(s, ctx, setup, Fring.GroupTables(group, ctx.geom))
-    end
-    # This step's own compiled model alone says whether dTEC/SBD were fit —
-    # published here so a solution-level consumer needs no knowledge of this
-    # step's name to ask "was dispersion/SBD applied?".
-    return (;
-        nscans = length(results),
-        dispersion_applied = setup.disp_plan !== nothing,
-        sbd_applied = setup.sbd_plans !== nothing,
-    )
 end
 
 # ── Bandpass: accumulate per scan → per-channel/joint solves ─────────────────

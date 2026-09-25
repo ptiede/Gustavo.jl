@@ -575,13 +575,16 @@ end
     soln = CAL.CalibrationSolution(model, layout, geom, θ, (; nant))
     @test lookup(CAL.parameters(soln[:solution, :phase, :atmos]), UVD.Ant) == 1:nant
 
-    # A multi-emit wrapper's nested subtree is reached leaf by leaf, the shape
-    # SingleBandDelay compiles to (`sbd.delay` / `sbd.constant`).
+    # A nested subtree (`sbd.delay` / `sbd.constant`) is reached leaf by leaf.
     gb = CAL.DataGeometry(;
         times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9],
         scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 2], t0 = 0.0, f0 = 3.0e9,
     )
-    sbd = CAL.model_components(SingleBandDelay(), (; geom = gb, antennas = nothing))
+    groups = CAL.FreqGroups([1:2, 3:4])
+    sbd = (
+        delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = groups, Feed = CAL.SharedFeeds()),
+        constant = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = groups, Feed = CAL.SharedFeeds()),
+    )
     msbd = CAL.GainModel(phase = (sbd = sbd,))
     lsbd = CAL.plan_parameters(msbd, 2, gb)
     ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, Float64.(1:lsbd.nθ), (;))

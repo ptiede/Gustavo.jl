@@ -27,12 +27,12 @@ end
 
 Solve the pipeline's solve steps on `ps`, in order, one scan group
 (`groupby(ps, ByScan())`) at a time. `pipeline` is a tuple (or vector) of
-solve steps ([`BaselineFringeFit`](@ref), [`DispersionSBDFit`](@ref),
-[`Bandpass`](@ref), [`AdhocPhase`](@ref) or a third-party `SolveStep`) and
-corrections (an [`AbstractDataTransform`](@ref) such as
-[`AutocorrelationNormalization`](@ref), or any function from a Measurement Set
-to a Measurement Set), usually built with `|>`, or a single one of them. Each
-solve step reads the data every earlier correction and step has corrected.
+solve steps ([`BaselineFringeFit`](@ref), [`Bandpass`](@ref),
+[`AdhocPhase`](@ref) or a third-party `SolveStep`) and corrections (an
+[`AbstractDataTransform`](@ref) such as [`AutocorrelationNormalization`](@ref),
+or any function from a Measurement Set to a Measurement Set), usually built
+with `|>`, or a single one of them. Each solve step reads the data every
+earlier correction and step has corrected.
 Narrow the data by subsetting `ps` first. A Measurement Set is fit as a
 processing set of one.
 
@@ -242,13 +242,11 @@ function _run_pipeline(
 end
 
 # A step compiles its own model against the run's geometry, and may
-# legitimately compile no components at all (e.g. `DispersionSBDFit` with
-# dispersion disabled and a band layout that can't support SBD either); it
-# still runs, with nothing to solve. The model is materialized against the
-# run's stations here, so the context (and the solution's provenance) holds the
-# concrete per-station trees the solve uses; a step that has not opted into
-# station heterogeneity (`supports_station_heterogeneity`) is handed uniform
-# models only — anything else is rejected before any data is read.
+# legitimately compile no components at all; it still runs, with nothing to
+# solve. The model is materialized against the run's stations here, so the
+# context (and the solution's provenance) holds the concrete per-station trees
+# the solve uses; a step that has not opted into station heterogeneity
+# (`supports_station_heterogeneity`) is handed uniform models only — anything else is rejected before any data is read.
 function _step_context(st::SolveStep, spec, gauge, groups, charges, corrections, exec)
     stations = spec.geom.stations
     model = Calibration.materialize(model_components(st, spec), stations, spec.geom)

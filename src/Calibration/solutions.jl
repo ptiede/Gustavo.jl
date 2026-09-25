@@ -26,7 +26,7 @@ solver diagnostics. A [`CalibrationSolution`](@ref) is the ordered
 `steps::Vector{StepSolution}` a pipeline run produced, one per solve step, in
 run order; gains compose multiplicatively across them ([`gains`](@ref),
 `calibrate`), and `name` (the step's `provides(step)`
-capability, e.g. `:fringe`/`:bandpass`/`:refine`/`:adhoc`) is how a later
+capability, e.g. `:fringe`/`:bandpass`/`:adhoc`) is how a later
 a user's [`stage_info`](@ref) or `sol[name]` looks a step up.
 
 `θ` keeps whatever array type it is given — a labelled `DimArray` as readily as
