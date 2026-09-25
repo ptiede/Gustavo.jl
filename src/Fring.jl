@@ -14,6 +14,7 @@ using ..UVData
 using ..UVData: Frequency, BaselineID, Feed, Polarization, Scan
 using ..Calibration
 using ..Calibration: _epoch_atol
+import XRadio
 using ..Calibration: ComponentPlan, GeometryWindow, _dispersion_enabled, _is_dispersion,
     _flatten_components, _component_leaf, _feed_node, _block_index, component_is_per_scan,
     _freq_group_ranges
@@ -35,6 +36,7 @@ include("Fring/statespace.jl")
 # Per-observable frequency-shape specs and their per-track fit — pure functions
 # over one (station, feed, spw) track, independent of any solver stage.
 include("Fring/shapes.jl")
+include("Fring/group_tables.jl")
 include("Fring/adhoc.jl")
 include("Fring/phasecal.jl")
 # The composable-pipeline engine: the solver capability checks, the

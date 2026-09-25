@@ -409,18 +409,12 @@ end
 end
 
 @testset "Residual accumulation is a plain weighted mean of pre-corrected data" begin
-    # `_accumulate_leaf_rbar!`/`_accumulate_leaf_band_phasor!` no longer divide
-    # out a gain themselves — the pipeline's transform chain (`_divide_gains!`,
-    # transforms.jl) corrects `V`/`W` BEFORE these kernels ever see them,
-    # including the |g|² weight reweighting (Var(V/g) = 1/(w·|g|²); this is
-    # what once tripled K2's adhoc track noise on VR2505 when a low-|g| amp
-    # channel's noise was up-weighted by a RAW, un-reweighted `w`). So feeding
-    # these kernels ALREADY-reweighted (V, W) must give back exactly that
-    # inverse-variance mean, with no further correction applied.
+    # The pipeline's corrections divide out the gains, including the |g|² weight
+    # reweighting (Var(V/g) = 1/(w·|g|²)), before `_accumulate_rbar!` and
+    # `_accumulate_band_phasor!` see the data. Feeding them already-reweighted
+    # (V, W) must give back exactly that inverse-variance mean, with no further
+    # correction applied.
     nchan, nti, nbl, npol = 2, 1, 1, 1
-    # The kernels read their layers by dimension name, so the fixture carries the
-    # dimensions the pipeline hands them rather than a bare array in an order the
-    # test and the kernel would have to agree on out of band.
     axs = (Frequency([2.2e10, 2.2e10 + 1.0e6]), Ti([0.0]), BaselineID(1:nbl), Polarization(["PP"]))
     V = DimArray(zeros(ComplexF32, nchan, nti, nbl, npol), axs)
     W = DimArray(zeros(Float32, nchan, nti, nbl, npol), axs)
@@ -429,46 +423,49 @@ end
     W[1, 1, 1, 1] = 1.0                  # so its weight is reweighted to 0.0001
     W[2, 1, 1, 1] = 0.0001
     F = DimArray(falses(nchan, nti, nbl, npol), axs)
-    bl = [(1, 2)]
-    rbar = zeros(ComplexF64, nbl, npol, nti)
-    wbar = zeros(Float64, nbl, npol, nti)
-    FP._accumulate_leaf_rbar!(rbar, wbar, V, W, F)
-    @test wbar[1, 1, 1] ≈ 1.0001
-    @test rbar[1, 1, 1] / wbar[1, 1, 1] ≈ (1.0 + 0.001im) / 1.0001
-    z = zeros(ComplexF64, nbl, npol)
-    wz = zeros(Float64, nbl, npol)
-    FP._accumulate_leaf_band_phasor!(z, wz, V, W, F, bl, ["PP"])
-    @test wz[1, 1] ≈ 1.0001
-    @test z[1, 1] / wz[1, 1] ≈ (1.0 + 0.001im) / 1.0001
+    geom = CAL.DataGeometry(; times = [0.0], channel_freqs = collect(lookup(axs[1])))
+    win = CAL.GeometryWindow(geom, [1, 2], [1], [(1, 2)], [(1, 1)], fill(1, 1, 1))
+    rbar(V, W, F) = FP._accumulate_rbar!(zeros(ComplexF64, 1, 1, 1), zeros(1, 1, 1), V, W, F, win, [1], [1], [1])
+    band(V, W, F) = (z = zeros(ComplexF64, 1, 1); wz = zeros(1, 1);
+        FP._accumulate_band_phasor!(z, wz, V, W, F, win, [1], [1]); (z, wz))
+
+    r, w = rbar(V, W, F)
+    @test w[1] ≈ 1.0001
+    @test r[1] / w[1] ≈ (1.0 + 0.001im) / 1.0001
+    z, wz = band(V, W, F)
+    @test wz[1] ≈ 1.0001
+    @test z[1] / wz[1] ≈ (1.0 + 0.001im) / 1.0001
 
     # Same data in a different memory layout is the same measurement: the kernels
     # locate every axis by name, so only the dimensions decide what is read.
     perm = (Polarization, BaselineID, Ti, Frequency)
-    rbar_p = zeros(ComplexF64, nbl, npol, nti)
-    wbar_p = zeros(Float64, nbl, npol, nti)
-    FP._accumulate_leaf_rbar!(
-        rbar_p, wbar_p, permutedims(V, perm), permutedims(W, perm), permutedims(F, perm),
-    )
-    @test rbar_p == rbar
-    @test wbar_p == wbar
-    z_p = zeros(ComplexF64, nbl, npol)
-    wz_p = zeros(Float64, nbl, npol)
-    FP._accumulate_leaf_band_phasor!(
-        z_p, wz_p, permutedims(V, perm), permutedims(W, perm), permutedims(F, perm),
-        bl, ["PP"],
-    )
-    @test z_p == z
-    @test wz_p == wz
+    Vp, Wp, Fp = permutedims(V, perm), permutedims(W, perm), permutedims(F, perm)
+    @test rbar(Vp, Wp, Fp) == (r, w)
+    @test band(Vp, Wp, Fp) == (z, wz)
+    # ...and so is a view into larger layers.
+    big(A) = cat(A, A; dims = 3)
+    sub(A) = view(DimArray(big(parent(A)), (dims(A)[1:2]..., BaselineID(1:2), dims(A, Polarization))), BaselineID(1:1))
+    @test rbar(sub(V), sub(W), sub(F)) == (r, w)
+    @test band(sub(V), sub(W), sub(F)) == (z, wz)
 
     # A flagged channel contributes nothing even though its weight is positive.
     F[2, 1, 1, 1] = true
-    rbar .= 0; wbar .= 0; z .= 0; wz .= 0
-    FP._accumulate_leaf_rbar!(rbar, wbar, V, W, F)
-    @test wbar[1, 1, 1] ≈ 1.0
-    @test rbar[1, 1, 1] ≈ 1.0 + 0.0im
-    FP._accumulate_leaf_band_phasor!(z, wz, V, W, F, bl, ["PP"])
-    @test wz[1, 1] ≈ 1.0
-    @test z[1, 1] ≈ 1.0 + 0.0im
+    r, w = rbar(V, W, F)
+    @test w[1] ≈ 1.0
+    @test r[1] ≈ 1.0 + 0.0im
+    z, wz = band(V, W, F)
+    @test wz[1] ≈ 1.0
+    @test z[1] ≈ 1.0 + 0.0im
+
+    # The per-member kernels sit behind a function barrier and infer.
+    @inferred FP._accumulate_rbar!(zeros(ComplexF64, 1, 1, 1), zeros(1, 1, 1), V, W, F, win, [1], [1], [1])
+    @inferred FP._accumulate_band_phasor!(zeros(ComplexF64, 1, 1), zeros(1, 1), V, W, F, win, [1], [1])
+    @inferred FP._accumulate_chunks!(zeros(ComplexF64, 1, 1, 2), zeros(1, 1, 2), V, W, F, win, [1], [1], [1, 2])
+    @inferred FP._accumulate_ap_phasor!(zeros(ComplexF32, 1, 1, 1), V, W, F, win, [1], [1], [1])
+    @inferred FP._accumulate_bandpass_member!(
+        zeros(ComplexF64, 1, 1, 2), zeros(1, 1, 2), Dict((1, 2) => 1), ones(ComplexF32, 1, 1, 1),
+        V, W, F, win, [1], [1], [1],
+    )
 end
 
 @testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
@@ -1080,18 +1077,12 @@ end
         dtec = dtec_true, seed = 77, feed_common = true,
         station_positions = positions,
     )
-    ants = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uvset)))).antennas
-    @test UVP._colocated_ties(ants; max_sep = 1000.0) == [1, 2, 3, 3]
+    @test UVP._colocated_ties(positions; max_sep = 1000.0) == [1, 2, 3, 3]
 
     # Missing or degenerate positions are rejected: without a real array, no
     # separation threshold distinguishes a twin from the whole array.
-    uvd, _ = _build_fringe_uvset(
-        nant = 4, nspw = 2, nchan = 4,
-        station_positions = [[100.0 * i, 200.0 * i, 300.0 * i] for i in 1:4],
-    )
-    antd = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uvd)))).antennas
     @test_throws "co-located grouping needs real station positions" UVP._colocated_ties(
-        antd; max_sep = 1000.0,
+        [[100.0 * i, 200.0 * i, 300.0 * i] for i in 1:4]; max_sep = 1000.0,
     )
 
     # TWO co-located pairs must BOTH tie (regression: a `break` in the old
@@ -1101,11 +1092,7 @@ end
         [0.0, 0.0, 0.0], [1.0e5, 0.0, 0.0], [1.0e5 + 70.0, 0.0, 0.0],
         [2.0e5, 0.0, 0.0], [2.0e5 + 60.0, 0.0, 0.0],
     ]
-    uv2, _ = _build_fringe_uvset(
-        nant = 5, nspw = 2, nchan = 4, station_positions = pos2,
-    )
-    ant2 = Gustavo.UVData.metadata(first(values(Gustavo.UVData.branches(uv2)))).antennas
-    @test UVP._colocated_ties(ant2; max_sep = 1000.0) == [1, 2, 2, 4, 4]
+    @test UVP._colocated_ties(pos2; max_sep = 1000.0) == [1, 2, 2, 4, 4]
 
     sol = fit(
         BaselineFringeFit(

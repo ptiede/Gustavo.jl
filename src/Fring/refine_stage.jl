@@ -1,139 +1,112 @@
-# ── Per-scan dTEC/SBD refinement over scan windows ───────────────────────────
+# ── Per-scan dTEC/SBD refinement over a scan group ──────────────────────────
 #
 # Assembles the per-baseline measurements from `refine_search.jl` per scan and
 # station-solves them, through `solve_station_systems!`, into the private
 # per-scan θ columns `DispersionSBDFit` owns. Driven by `DispersionSBDFit`'s
-# `solve` (`src/pipeline/steps.jl`) on data already fringe-corrected
-# through the pipeline's transform chain, so neither kernel evaluates a gain.
-
-# The view's grp-local channel ranges per spectral window (the concat cube's
-# per-band blocks, recovered from the global channel indices).
-function _spw_blocks(geom::DataGeometry, chan_idx)
-    soc = geom.spw_of_chan
-    blocks = UnitRange{Int}[]
-    lo = 1
-    for c in 2:length(chan_idx)
-        if soc[chan_idx[c]] != soc[chan_idx[c - 1]]
-            push!(blocks, lo:(c - 1))
-            lo = c
-        end
-    end
-    push!(blocks, lo:length(chan_idx))
-    return blocks
-end
+# `solve` (`src/pipeline/steps.jl`) on data already fringe-corrected by the
+# pipeline's corrections, so neither kernel evaluates a gain. Each Measurement
+# Set of the group is one band.
 
 """
-    refine_scan_dispersion!(θ, stack, win::GeometryWindow, delay_plan, disp_plan,
+    refine_scan_dispersion!(θ, group, geom::DataGeometry, delay_plan, disp_plan,
                             gauge, nant; opts, tau_max, dtec_max,
                             executor, ties) -> nothing
 
-Joint per-scan (Δτ, dTEC) refinement of one scan window, on data already
-gain-corrected through the pipeline's transform chain: per-spw band phasors →
-per-baseline joint fits → two station solves accumulating into `delay_plan`
-(a private per-scan delay REFINEMENT column, distinct from and additional to
-the wideband delay the fringe search already solved — gains compose
-multiplicatively, so this is the same total delay as incrementing one shared
-column) and `disp_plan` (the dispersion θ block). The window's per-spw channel
-blocks stand in for the band leaves (the concat-cube path). Returns the number
-of detections the robust station solves excised; a no-op (0) when
-`disp_plan === nothing` or fewer than 4 bands are present (1/ν is
+Joint per-scan (Δτ, dTEC) refinement of one scan group, on data already
+gain-corrected by the pipeline's corrections: one band phasor per Measurement
+Set → per-baseline joint fits → two station solves accumulating into
+`delay_plan` (a private per-scan delay REFINEMENT column, distinct from and
+additional to the wideband delay the fringe search already solved — gains
+compose multiplicatively, so this is the same total delay as incrementing one
+shared column) and `disp_plan` (the dispersion θ block). `group` is a
+`ProcessingSet` or its [`GroupTables`](@ref) on `geom`. A no-op when
+`disp_plan === nothing` or the group holds fewer than 4 bands (1/ν is
 unconstrainable).
 """
+refine_scan_dispersion!(θ, group::XRadio.ProcessingSet, geom::DataGeometry, args...; kw...) =
+    refine_scan_dispersion!(θ, GroupTables(group, geom), args...; kw...)
+
 function refine_scan_dispersion!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, delay_plan, disp_plan, gauge, nant;
+        θ, tabs::GroupTables, delay_plan, disp_plan, gauge, nant;
         opts::Stationization = Stationization(loss = LeastSquares()),
         tau_max::Real = 2.0e-8, dtec_max::Real = 45.0, executor = DynamicScheduler(),
         ties = nothing,
     )
     disp_plan === nothing && return 0
-    geom = win.geom
-    ci = win.chan_idx
-    ti = win.ti_idx
-    blocks = _spw_blocks(geom, ci)
-    length(blocks) >= 4 || return 0              # < 4 bands can't constrain 1/ν
-    fg = frequencies(stack)
-    bl_pairs = UVData.baselines(stack).pairs
-    feeds = feed_pairs(stack)
-    nbl = length(bl_pairs)
-    npol = length(feeds)
-    nlf = length(blocks)
-    phasor_sum = zeros(ComplexF64, nbl, npol, nlf)
-    weight_sum = zeros(Float64, nbl, npol, nlf)
-    fb = [sum(@view fg[r]) / length(r) for r in blocks]
+    nlf = length(tabs.members)
+    nlf >= 4 || return 0                          # < 4 bands can't constrain 1/ν
+    geom = first(tabs.wins).geom
+    phasor_sum = zeros(ComplexF64, length(tabs.bl_pairs), length(tabs.feeds), nlf)
+    weight_sum = zeros(Float64, size(phasor_sum))
+    fb = [sum(view(geom.channel_freqs, w.chan_idx)) / length(w.chan_idx) for w in tabs.wins]
     tforeach(1:nlf; scheduler = executor) do li
-        r = blocks[li]
-        _accumulate_leaf_band_phasor!(
+        _accumulate_band_phasor!(
             view(phasor_sum, :, :, li), view(weight_sum, :, :, li),
-            view(stack, Frequency(r)),
-            bl_pairs, feeds,
+            _member_layers(tabs.members[li])..., tabs.wins[li],
+            tabs.blrow[li], tabs.feedrow[li],
         )
     end
     return _dispersion_fit_stationize!(
-        θ, phasor_sum, weight_sum, fb, bl_pairs, feeds, first(ti), geom,
+        θ, phasor_sum, weight_sum, fb, tabs.bl_pairs, tabs.feeds, first(tabs.ti), geom,
         delay_plan, disp_plan, gauge, opts,
         Float64(tau_max), Float64(dtec_max), ties,
     )
 end
 
 """
-    refine_scan_sbd!(θ, stack, win::GeometryWindow, sbd, gauge, nant;
+    refine_scan_sbd!(θ, group, geom::DataGeometry, sbd, gauge, nant;
                      nchunk = 4, tau_max = 6.0e-8, executor = DynamicScheduler()) -> nrej
 
-Per-scan per-band-group SBD refinement of one scan window (fourfit's single-band
-delay), on data already gain-corrected through the pipeline's transform chain:
-each spw block's sub-band chunk phasors → per-(baseline, group) exact
-matched-filter slope fits → guarded station solves accumulating into the
-per-scan `Delay × FreqGroups` column and its companion constant. Run after
-the dispersion refinement so the within-band slopes it fits are
-dispersion-corrected. A no-op (0) when `sbd === nothing`.
+Per-scan per-band-group SBD refinement of one scan group (fourfit's single-band
+delay), on data already gain-corrected by the pipeline's corrections: each
+band's sub-band chunk phasors → per-(baseline, group) exact matched-filter slope
+fits → guarded station solves accumulating into the per-scan `Delay ×
+FreqGroups` column and its companion constant. Run after the dispersion
+refinement so the within-band slopes it fits are dispersion-corrected. `group`
+is a `ProcessingSet` or its [`GroupTables`](@ref) on `geom`. A no-op (0) when
+`sbd === nothing`.
 """
+refine_scan_sbd!(θ, group::XRadio.ProcessingSet, geom::DataGeometry, args...; kw...) =
+    refine_scan_sbd!(θ, GroupTables(group, geom), args...; kw...)
+
 function refine_scan_sbd!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, sbd, gauge, nant;
+        θ, tabs::GroupTables, sbd, gauge, nant;
         nchunk::Integer = 4, tau_max::Real = 6.0e-8, executor = DynamicScheduler(),
     )
     sbd === nothing && return 0
-    geom = win.geom
-    ci = win.chan_idx
-    ti = win.ti_idx
-    blocks = _spw_blocks(geom, ci)
-    fg = frequencies(stack)
-    bl_pairs = UVData.baselines(stack).pairs
-    feeds = feed_pairs(stack)
-    nbl = length(bl_pairs)
-    npol = length(feeds)
-    nlf = length(blocks)
-    ntot = nlf * Int(nchunk)
-    phasor_sum = zeros(ComplexF64, nbl, npol, ntot)
-    weight_sum = zeros(Float64, nbl, npol, ntot)
+    geom = first(tabs.wins).geom
+    nk = Int(nchunk)
+    nlf = length(tabs.members)
+    ntot = nlf * nk
+    phasor_sum = zeros(ComplexF64, length(tabs.bl_pairs), length(tabs.feeds), ntot)
+    weight_sum = zeros(Float64, size(phasor_sum))
     chunkf = zeros(Float64, ntot)
     chunkgrp = zeros(Int, ntot)
     tforeach(1:nlf; scheduler = executor) do li
-        r = blocks[li]
-        fs = fg[r]
+        win = tabs.wins[li]
+        fs = geom.channel_freqs[win.chan_idx]
         nc = length(fs)
-        bgrp = findfirst(rr -> ci[first(r)] in rr, sbd.freqgroups)
+        bgrp = findfirst(rr -> first(win.chan_idx) in rr, sbd.freqgroups)
         bgrp === nothing && return
-        edges = round.(Int, range(0, nc; length = Int(nchunk) + 1))
+        edges = round.(Int, range(0, nc; length = nk + 1))
         coc = Vector{Int}(undef, nc)
-        for k in 1:Int(nchunk)
+        for k in 1:nk
             klo, khi = edges[k] + 1, edges[k + 1]
             khi >= klo || continue
-            kk = (li - 1) * Int(nchunk) + k
-            coc[klo:khi] .= kk
+            kk = (li - 1) * nk + k
+            coc[klo:khi] .= k
             chunkf[kk] = sum(@view fs[klo:khi]) / (khi - klo + 1)
             chunkgrp[kk] = bgrp
         end
-        _accumulate_leaf_chunks!(
-            view(phasor_sum, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
-            view(weight_sum, :, :, ((li - 1) * Int(nchunk) + 1):(li * Int(nchunk))),
-            view(stack, Frequency(r)),
-            bl_pairs, feeds,
-            coc .- (li - 1) * Int(nchunk),
+        slots = ((li - 1) * nk + 1):(li * nk)
+        _accumulate_chunks!(
+            view(phasor_sum, :, :, slots), view(weight_sum, :, :, slots),
+            _member_layers(tabs.members[li])..., win, tabs.blrow[li], tabs.feedrow[li], coc,
         )
     end
     return _sbd_fit_stationize!(
-        θ, phasor_sum, weight_sum, chunkf, chunkgrp, bl_pairs, feeds,
-        first(ti), geom, sbd, gauge, nant;
+        θ, phasor_sum, weight_sum, chunkf, chunkgrp, tabs.bl_pairs, tabs.feeds,
+        first(tabs.ti), geom, sbd, gauge, nant;
         tau_max = Float64(tau_max),
     )
 end

@@ -96,13 +96,14 @@ Base.hash(a::AntennaTable, h::UInt) = hash(
 # ── Co-located stations ──────────────────────────────────────────────────────
 
 # ant → representative-station map for co-located groups (separation below
-# `max_sep` meters, e.g. the Onsala twins at ~75 m). Co-located stations share
+# `max_sep` meters, e.g. the Onsala twins at ~75 m), from each station's
+# geocentric position `xyz[a]` in meters. Co-located stations share
 # an atmosphere and an ionosphere, so a solve can tie them to one parameter.
 # `max_sep` is the caller's to choose: what counts as co-located depends on
 # which effect is being tied, not on the array.
-function _colocated_ties(antennas; max_sep::Real)
-    n = length(antennas)
-    xyz = antennas.station_xyz
+function _colocated_ties(xyz::AbstractVector; max_sep::Real)
+    Base.require_one_based_indexing(xyz)
+    n = length(xyz)
     ties = collect(1:n)
     # Grouping by separation is meaningless without VLBI-scale positions: a table
     # of zeros or of toy coordinates would tie the whole array into one node.
@@ -111,10 +112,10 @@ function _colocated_ties(antennas; max_sep::Real)
         maxd2 = max(maxd2, sum(abs2, Float64.(xyz[j]) .- Float64.(xyz[i])))
     end
     maxd2 > (10.0e3)^2 || error(
-        "co-located grouping needs real station positions: the antenna table's widest " *
+        "co-located grouping needs real station positions: the stations' widest " *
             "separation is $(round(sqrt(maxd2) / 1.0e3; digits = 3)) km, too small for a VLBI " *
             "array — the positions are missing or degenerate, so no separation threshold " *
-            "means anything. Supply real `station_xyz`, or do not ask for co-located tying."
+            "means anything. Supply real antenna positions, or do not ask for co-located tying."
     )
     # NOTE the explicit nesting: in a comma-nested `for j, i` a `break` exits
     # Both levels, so only the first co-located pair in the array would ever be

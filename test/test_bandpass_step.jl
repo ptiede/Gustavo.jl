@@ -13,6 +13,7 @@
 #   (station-name-mapped, channel-layout-validated, time-constant only).
 
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 _bpc(freq) = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = freq, Feed = CAL.PerFeed())
 
@@ -147,135 +148,6 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         sol_f = fit(BaselineFringeFit(model = fm), uvset; gauge = PinAntenna(1))
         @test_throws ArgumentError sol_f[:bandpass]
         @test_throws "no stage :bandpass" sol_f[:bandpass]
-    end
-
-    @testset "compile-time model vetting (can_fit / validate_model)" begin
-        pertrack = FP.PerTrackSmoother()
-        phase_only = GainModel(; phase = default_bandpass_terms().phase)
-        # An empty tree compiles no component at all, so the step would
-        # accumulate every scan and write nowhere — rejected at compile time,
-        # before any data is read.
-        @test_throws ArgumentError fit(Bandpass(model = GainModel(), smoother = pertrack), uvset; gauge = PinAntenna(1))
-        @test_throws "fits nothing" fit(Bandpass(model = GainModel(), smoother = pertrack), uvset; gauge = PinAntenna(1))
-        # JointSmoother is stricter: one complex gain per (station, feed, segment)
-        # needs both observables, not just one — so it rejects a model
-        # PerTrackSmoother would happily solve.
-        @test_throws "JointSmoother requires" fit(Bandpass(model = phase_only), uvset; gauge = PinAntenna(1))
-        @test fit(Bandpass(model = phase_only, smoother = pertrack), uvset; gauge = PinAntenna(1)) isa
-            CAL.CalibrationSolution
-        # ...and its two components must share one frequency segmentation.
-        mixed = GainModel(;
-            phase = (; bandpass = _bpc(CAL.ChannelBlocks(1))),
-            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
-        )
-        @test_throws "share one frequency segmentation" model_components(
-            Bandpass(model = mixed), nothing,
-        )
-        # A component the smoothers' θ writes cannot address (here: a Delay
-        # term) is rejected by `can_fit`, naming the component.
-        delay_model = GainModel(;
-            phase = (;
-                bandpass = CAL.GainComponent(
-                    CAL.Delay(); Ti = CAL.GlobalTime(),
-                    Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
-                ),
-            ),
-        )
-        @test_throws "cannot fit the component" model_components(
-            Bandpass(model = delay_model), nothing,
-        )
-        # One track set per observable: a second component in a group is
-        # structurally unsolvable, whatever its form.
-        doubled = GainModel(;
-            phase = (;
-                bandpass = _bpc(CAL.ChannelBlocks(1)),
-                ripple = _bpc(CAL.ChannelBlocks(4)),
-            ),
-        )
-        @test_throws "at most one" model_components(Bandpass(model = doubled), nothing)
-        # A `stations` entry is vetted like the base, with the can_fit error
-        # naming the station whose entry carries the unfittable component.
-        bad_entry = with_station(
-            default_bandpass_terms(), "A1";
-            phase = (;
-                bandpass = CAL.GainComponent(
-                    CAL.Delay(); Ti = CAL.GlobalTime(),
-                    Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
-                ),
-            ),
-        )
-        @test_throws "station :A1 entry" model_components(
-            Bandpass(model = bad_entry), nothing,
-        )
-
-        # A heterogeneous model reaches the solver only where the smoother
-        # solves per station. `Bandpass` forwards the question to it: the joint
-        # path loops over the layout's station blocks and takes the model, the
-        # closure path solves one rectangular gain table and does not, and the
-        # runner rejects it there, naming the differing component and its
-        # per-station signatures.
-        @test supports_station_heterogeneity(Bandpass(smoother = FP.JointSmoother()))
-        @test !supports_station_heterogeneity(Bandpass(smoother = pertrack))
-        het = with_station(
-            default_bandpass_terms(), "A1";
-            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
-            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
-        )
-        @test model_components(Bandpass(model = het), nothing) isa CAL.GainModel
-        @test fit(Bandpass(model = het), uvset; gauge = PinAntenna(1)) isa CAL.CalibrationSolution
-        @test_throws "station-uniform" fit(Bandpass(model = het, smoother = pertrack), uvset; gauge = PinAntenna(1))
-        @test_throws "phase.bandpass" fit(Bandpass(model = het, smoother = pertrack), uvset; gauge = PinAntenna(1))
-    end
-
-    @testset "observables are located by name, not plan-list position" begin
-        anames = ["A1", "A2", "A3"]
-        geom = CAL.DataGeometry(;
-            times = [0.0, 1.0], scan_of_time = [1, 1],
-            channel_freqs = collect(1.0e9 .+ (0:3) .* 1.0e6), spw_of_chan = ones(Int, 4),
-            scan_names = ["No001"], spw_names = ["A"],
-        )
-        _setup(layout) = (;
-            layout,
-            bp_path = FP._bandpass_path(layout.plantree, :phase),
-            amp_path = FP._bandpass_path(layout.plantree, :logamp),
-        )
-
-        lu = CAL.plan_parameters(default_bandpass_terms(), anames, geom)
-        @test FP._bandpass_path(lu.plantree, :phase) == (:phase, :bandpass)
-        # The plantree's type is a compile-time constant, so the descent infers —
-        # the path is splatted into `station_blocks` on every solve.
-        @test @inferred(FP._bandpass_path(lu.plantree, :logamp)) == (:logamp, :bandpass)
-        @test only(FP.bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
-
-        # The path is a NAME descent, so it reaches a component the user nested
-        # under names of their own.
-        nested = CAL.GainModel(
-            phase = (; inst = (; bp = _bpc(CAL.ChannelBlocks(1)))),
-        )
-        @test FP._bandpass_path(CAL.plan_parameters(nested, anames, geom).plantree, :phase) ==
-            (:phase, :inst, :bp)
-
-        # A model differing across stations puts one plan per signature group on
-        # the flat `plans` list, so its positions no longer name the two
-        # observables — the blocks still resolve, one per signature group.
-        mh = with_station(
-            default_bandpass_terms(), "A1";
-            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
-            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
-        )
-        lh = CAL.plan_parameters(mh, anames, geom)
-        @test lh.nphase == 2 && length(lh.plans) == 4
-        for group in (:phase, :logamp)
-            @test [b.stations for b in FP.bandpass_blocks(_setup(lh), zeros(lh.nθ), group)] ==
-                [[1], [2, 3]]
-        end
-
-        # An observable the model omits resolves to no path and no blocks.
-        lp = CAL.plan_parameters(
-            CAL.GainModel(; phase = default_bandpass_terms().phase), anames, geom,
-        )
-        @test FP._bandpass_path(lp.plantree, :logamp) === nothing
-        @test isempty(FP.bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
     end
 
     @testset "PerTrackSmoother: a shape on both observables" begin
@@ -493,50 +365,193 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         )
     end
 
-    @testset "refine kernels: standalone on a scan view (determinism + recovery)" begin
-        # VGOS-like dispersive layout (8 sub-bands, wide fractional bandwidth).
-        # (Originally gated bit-for-bit against the monolith's concat-cube
-        # variants; those died with the monolith at M5 — these ARE the kernels
-        # now, so the gates are inner-invariance and truth recovery.)
-        dtec_true = [0.0, 3.0, -5.0, 1.5]
-        uvd, _ = _build_fringe_uvset(
-            nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
-            dtec = dtec_true, seed = 77, feed_common = true,
-        )
-        geom = CAL.build_geometry(uvd)
-        @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
-        model = _full_fringe_model(
-            dispersion = true, sbd_freq_groups = FP.fringe_freq_groups(geom.channel_freqs),
-        )
-        layout = CAL.plan_parameters(model, 4, geom)
-        disp_plan = CAL._dispersion_plan(model, layout)
-        ps_delay = FP._perscan_delay_plan(model, layout)
-        sbd = FP._sbd_plans(model, layout)
-        @test disp_plan !== nothing && ps_delay !== nothing && sbd !== nothing
+end
 
-        st = FP.scan_stream(uvd; geom = geom)
-        stack, win = FP.materialize_cube(st, st.groups[1]; executor = SerialScheduler())
+@testset "Bandpass step: model vetting" begin
+    nant, nspw, nchan = 4, 2, 8
+    rng = MersenneTwister(11)
+    nglob = nspw * nchan
+    bp_true = 0.5 .* randn(rng, nant, 2, nglob)
+    abp_true = 0.2 .* randn(rng, nant, 2, nglob)
+    ps, _ = _build_fringe_ps(;
+        nant, nspw, nchan, bandpass = bp_true, amp_bandpass = abp_true,
+    )
 
-        θn = zeros(layout.nθ)
-        θ4 = zeros(layout.nθ)
-        # `stack` is raw (no transform chain) — the kernel now assumes
-        # already-corrected data, and with no prior gains to divide out here
-        # that's exactly the raw visibilities.
-        nn = FP.refine_scan_dispersion!(θn, stack, win, ps_delay, disp_plan, PinAntenna(1), 4; executor = SerialScheduler())
-        n4 = FP.refine_scan_dispersion!(θ4, stack, win, ps_delay, disp_plan, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
-        # Per-block accumulation ⇒ bit-identical at any inner fan-out.
-        @test nn == n4
-        @test θn == θ4
-        @test any(!=(0), θn)
-        # The dispersion column recovers the injected differential dTEC.
-        for a in 2:4
-            off = plan_off1(disp_plan)[a, 1, 1, 1]
-            @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
-        end
-        FP.refine_scan_sbd!(θn, stack, win, sbd, PinAntenna(1), 4; executor = SerialScheduler())
-        FP.refine_scan_sbd!(θ4, stack, win, sbd, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
-        @test θn == θ4
+    @testset "compile-time model vetting (can_fit / validate_model)" begin
+        pertrack = FP.PerTrackSmoother()
+        phase_only = GainModel(; phase = default_bandpass_terms().phase)
+        # An empty tree compiles no component at all, so the step would
+        # accumulate every scan and write nowhere — rejected at compile time,
+        # before any data is read.
+        @test_throws ArgumentError fit(Bandpass(model = GainModel(), smoother = pertrack), ps; gauge = PinAntenna(1))
+        @test_throws "fits nothing" fit(Bandpass(model = GainModel(), smoother = pertrack), ps; gauge = PinAntenna(1))
+        # JointSmoother is stricter: one complex gain per (station, feed, segment)
+        # needs both observables, not just one — so it rejects a model
+        # PerTrackSmoother would happily solve.
+        @test_throws "JointSmoother requires" fit(Bandpass(model = phase_only), ps; gauge = PinAntenna(1))
+        @test fit(Bandpass(model = phase_only, smoother = pertrack), ps; gauge = PinAntenna(1)) isa
+            CAL.CalibrationSolution
+        # ...and its two components must share one frequency segmentation.
+        mixed = GainModel(;
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(1))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
+        )
+        @test_throws "share one frequency segmentation" model_components(
+            Bandpass(model = mixed), nothing,
+        )
+        # A component the smoothers' θ writes cannot address (here: a Delay
+        # term) is rejected by `can_fit`, naming the component.
+        delay_model = GainModel(;
+            phase = (;
+                bandpass = CAL.GainComponent(
+                    CAL.Delay(); Ti = CAL.GlobalTime(),
+                    Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
+                ),
+            ),
+        )
+        @test_throws "cannot fit the component" model_components(
+            Bandpass(model = delay_model), nothing,
+        )
+        # One track set per observable: a second component in a group is
+        # structurally unsolvable, whatever its form.
+        doubled = GainModel(;
+            phase = (;
+                bandpass = _bpc(CAL.ChannelBlocks(1)),
+                ripple = _bpc(CAL.ChannelBlocks(4)),
+            ),
+        )
+        @test_throws "at most one" model_components(Bandpass(model = doubled), nothing)
+        # A `stations` entry is vetted like the base, with the can_fit error
+        # naming the station whose entry carries the unfittable component.
+        bad_entry = with_station(
+            default_bandpass_terms(), "A1";
+            phase = (;
+                bandpass = CAL.GainComponent(
+                    CAL.Delay(); Ti = CAL.GlobalTime(),
+                    Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
+                ),
+            ),
+        )
+        @test_throws "station :A1 entry" model_components(
+            Bandpass(model = bad_entry), nothing,
+        )
+
+        # A heterogeneous model reaches the solver only where the smoother
+        # solves per station. `Bandpass` forwards the question to it: the joint
+        # path loops over the layout's station blocks and takes the model, the
+        # closure path solves one rectangular gain table and does not, and the
+        # runner rejects it there, naming the differing component and its
+        # per-station signatures.
+        @test supports_station_heterogeneity(Bandpass(smoother = FP.JointSmoother()))
+        @test !supports_station_heterogeneity(Bandpass(smoother = pertrack))
+        het = with_station(
+            default_bandpass_terms(), "A1";
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+        )
+        @test model_components(Bandpass(model = het), nothing) isa CAL.GainModel
+        @test fit(Bandpass(model = het), ps; gauge = PinAntenna(1)) isa CAL.CalibrationSolution
+        @test_throws "station-uniform" fit(Bandpass(model = het, smoother = pertrack), ps; gauge = PinAntenna(1))
+        @test_throws "phase.bandpass" fit(Bandpass(model = het, smoother = pertrack), ps; gauge = PinAntenna(1))
     end
+
+    @testset "observables are located by name, not plan-list position" begin
+        anames = ["A1", "A2", "A3"]
+        geom = CAL.DataGeometry(;
+            times = [0.0, 1.0], scan_of_time = [1, 1],
+            channel_freqs = collect(1.0e9 .+ (0:3) .* 1.0e6), spw_of_chan = ones(Int, 4),
+            scan_names = ["No001"], spw_names = ["A"],
+        )
+        _setup(layout) = (;
+            layout,
+            bp_path = FP._bandpass_path(layout.plantree, :phase),
+            amp_path = FP._bandpass_path(layout.plantree, :logamp),
+        )
+
+        lu = CAL.plan_parameters(default_bandpass_terms(), anames, geom)
+        @test FP._bandpass_path(lu.plantree, :phase) == (:phase, :bandpass)
+        # The plantree's type is a compile-time constant, so the descent infers —
+        # the path is splatted into `station_blocks` on every solve.
+        @test @inferred(FP._bandpass_path(lu.plantree, :logamp)) == (:logamp, :bandpass)
+        @test only(FP.bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
+
+        # The path is a NAME descent, so it reaches a component the user nested
+        # under names of their own.
+        nested = CAL.GainModel(
+            phase = (; inst = (; bp = _bpc(CAL.ChannelBlocks(1)))),
+        )
+        @test FP._bandpass_path(CAL.plan_parameters(nested, anames, geom).plantree, :phase) ==
+            (:phase, :inst, :bp)
+
+        # A model differing across stations puts one plan per signature group on
+        # the flat `plans` list, so its positions no longer name the two
+        # observables — the blocks still resolve, one per signature group.
+        mh = with_station(
+            default_bandpass_terms(), "A1";
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+        )
+        lh = CAL.plan_parameters(mh, anames, geom)
+        @test lh.nphase == 2 && length(lh.plans) == 4
+        for group in (:phase, :logamp)
+            @test [b.stations for b in FP.bandpass_blocks(_setup(lh), zeros(lh.nθ), group)] ==
+                [[1], [2, 3]]
+        end
+
+        # An observable the model omits resolves to no path and no blocks.
+        lp = CAL.plan_parameters(
+            CAL.GainModel(; phase = default_bandpass_terms().phase), anames, geom,
+        )
+        @test FP._bandpass_path(lp.plantree, :logamp) === nothing
+        @test isempty(FP.bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
+    end
+
+end
+
+@testset "refine kernels: standalone on a scan group (determinism + recovery)" begin
+    # VGOS-like dispersive layout (8 sub-bands, wide fractional bandwidth).
+    dtec_true = [0.0, 3.0, -5.0, 1.5]
+    psd, _ = _build_fringe_ps(;
+        nant = 4, nspw = 8, nchan = 8, ref_freq = 3.0e9, spw_sep = 0.5e9,
+        dtec = dtec_true, seed = 77, feed_common = true,
+    )
+    geom = CAL.DataGeometry(psd)
+    @test CAL._dispersion_enabled(CAL.DispersionModel(), geom)
+    model = _full_fringe_model(
+        dispersion = true, sbd_freq_groups = FP.fringe_freq_groups(geom.channel_freqs),
+    )
+    layout = CAL.plan_parameters(model, geom.stations, geom)
+    disp_plan = CAL._dispersion_plan(model, layout)
+    ps_delay = FP._perscan_delay_plan(model, layout)
+    sbd = FP._sbd_plans(model, layout)
+    @test disp_plan !== nothing && ps_delay !== nothing && sbd !== nothing
+
+    # The data carry no station gains beyond the injected dTEC's companions, so
+    # the raw visibilities stand in for data the pipeline has corrected.
+    group = first(values(groupby(psd, XRadio.ByScan())))
+    θn = zeros(layout.nθ)
+    θ4 = zeros(layout.nθ)
+    nn = FP.refine_scan_dispersion!(θn, group, geom, ps_delay, disp_plan, PinAntenna(1), 4; executor = SerialScheduler())
+    n4 = FP.refine_scan_dispersion!(θ4, group, geom, ps_delay, disp_plan, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
+    # Per-band accumulation ⇒ bit-identical at any inner fan-out.
+    @test nn == n4
+    @test θn == θ4
+    @test any(!=(0), θn)
+    # The dispersion column recovers the injected differential dTEC.
+    for a in 2:4
+        off = plan_off1(disp_plan)[a, 1, 1, 1]
+        @test isapprox(θn[off], dtec_true[a] - dtec_true[1]; atol = 0.05)
+    end
+    FP.refine_scan_sbd!(θn, group, geom, sbd, PinAntenna(1), 4; executor = SerialScheduler())
+    FP.refine_scan_sbd!(θ4, group, geom, sbd, PinAntenna(1), 4; executor = DynamicScheduler(; nchunks = 4))
+    @test θn == θ4
+
+    # The member order of a group does not matter: members are placed by channel.
+    rev = XRadio.ProcessingSet(OrderedDict(reverse(collect(pairs(group)))), DimensionalData.metadata(group))
+    θr = zeros(layout.nθ)
+    FP.refine_scan_dispersion!(θr, rev, geom, ps_delay, disp_plan, PinAntenna(1), 4)
+    FP.refine_scan_sbd!(θr, rev, geom, sbd, PinAntenna(1), 4)
+    @test θr == θn
 end
 
 # ── Per-track outcome reporting and the undetermined-branch gate ──────────────
@@ -643,8 +658,8 @@ end
 
 @testset "bandpass break segmentation" begin
     nant, nchan, nscans = 4, 8, 6
-    uvset, _ = _build_fringe_uvset(; nant, nspw = 1, nchan, nscans, ntime = 8, seed = 7)
-    geom = CAL.build_geometry(uvset)
+    ps, _ = _build_fringe_ps(; nant, nspw = 1, nchan, nscans, ntime = 8, seed = 7)
+    geom = CAL.DataGeometry(ps)
     t, sot = geom.times, geom.scan_of_time
     # Three scans on each side of the break.
     boundary = (maximum(t[sot .== 3]) + minimum(t[sot .== 4])) / 2
@@ -652,20 +667,21 @@ end
 
     # A station phase bandpass present only in the second half.
     Δ = [0.5 * sin(4π * (c - 1) / nchan + a) for a in 1:nant, c in 1:nchan]
-    function inject(set, scan)
-        UVP.apply(set) do leaf, info, root
-            info.scan_name == scan || return leaf
-            vis = copy(parent(leaf[:vis]))
-            for (bi, (a, b)) in enumerate(UVP.baselines(leaf).pairs),
-                    p in axes(vis, 4), ti in axes(vis, 2), c in axes(vis, 1)
-                vis[c, ti, bi, p] *= cis(Δ[a, c] - Δ[b, c])
+    broken = deepcopy(ps)
+    for ms in values(broken)
+        UVP.scan_name(ms) in ("4", "5", "6") || continue
+        slot = Dict(n => i for (i, n) in pairs(geom.stations))
+        pairs_ = [(slot[String(a)], slot[String(b)]) for (a, b) in XRadio.baselines(ms)]
+        vis = copy(parent(ms[:visibility]))
+        V = DimArray(vis, dims(ms[:visibility]))
+        for (bi, (a, b)) in enumerate(pairs_), p in axes(V, XRadio.Polarization)
+            plane = UVP._cell_plane(V, bi, p)
+            for c in axes(plane, 1)
+                plane[c, :] .*= cis(Δ[a, c] - Δ[b, c])
             end
-            return UVP.rebuild_visibilities(
-                leaf, DimArray(vis, dims(leaf[:vis])), leaf[:weights],
-            )
         end
+        ms[:visibility] = rebuild(ms[:visibility], vis)
     end
-    broken = foldl((u, sc) -> inject(u, sc), ["4", "5", "6"]; init = uvset)
 
     bp(ti) = GainComponent(ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed())
     model(ti) = GainModel(phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)))
@@ -697,8 +713,8 @@ end
         function scan_spread(sol)
             corr = calibrate(sol, broken)
             tracks = [
-                detrend(angle.(vec(sum(parent(l[:vis])[:, :, 1, 1]; dims = 2))))
-                    for l in values(UVP.leaves(corr))
+                detrend(angle.(vec(sum(UVP._cell_plane(ms[:visibility], 1, 1); dims = 2))))
+                    for ms in values(corr)
             ]
             med = [median([tr[c] for tr in tracks]) for c in 1:nchan]
             return sqrt(mean(abs2, reduce(vcat, [tr .- med for tr in tracks])))
@@ -784,13 +800,13 @@ end
     # between them, and every feed-2 track is then referenced to feed 1. That is
     # correct — with cross-hands the inter-feed phase is measured — but it is not
     # what this test is about.
-    uvset, _ = _build_fringe_uvset(;
+    uvset, _ = _build_fringe_ps(;
         nant, nspw, nchan, ntime, nscans, bandpass = bp_true, station_gains = false,
-        pol_labels = ["PP", "QQ"],
+        polarizations = ["XX", "YY"],
     )
     # The segmentation boundary sits inside the inter-scan gap: after the last
     # AP of scan 1 and before the first of scan 2.
-    ts = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
+    ts = CAL.DataGeometry(uvset).times
     t_break = (ts[ntime] + ts[ntime + 1]) / 2
 
     bpc(ti) = GainComponent(

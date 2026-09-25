@@ -72,6 +72,7 @@ include("test_interface.jl")
 # Reading scan groups through the corrections, and the corrections themselves.
 include("test_each_group.jl")
 include("test_corrections.jl")
+include("test_group_tables.jl")
 include("test_axis_order.jl")
 
 # The BaselineFringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,

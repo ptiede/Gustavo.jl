@@ -17,39 +17,30 @@
 # fourfit's ionospheric search. Feed-common, the ionosphere being
 # non-birefringent to first order; cross hands are skipped as in the rate solve.
 
-# Collapse one band leaf to one residual phasor per (baseline, product):
-# `phasor_sum[bi, p] = Σ w·V`, `weight_sum[bi, p] = Σ w` over the leaf's
-# channels × APs, whose ratio is the inverse-variance mean of the data, already
-# gain-corrected (and reweighted by |gain|², matching `apply_calibration`)
-# through the pipeline's transform chain before this kernel ever sees it.
-function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, feeds)
-    return _accumulate_leaf_band_phasor!(
-        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, feeds,
-    )
-end
-
-function _accumulate_leaf_band_phasor!(phasor_sum, weight_sum, V, W, F, bl_pairs, feeds)
+# Collapse one band (a Measurement Set) to one residual phasor per (group
+# baseline, feed pair): `phasor_sum[row, f] = Σ w·V`, `weight_sum[row, f] = Σ w`
+# over the band's channels × APs, parallel hands only. Their ratio is the
+# inverse-variance mean of the data, which the pipeline's corrections have
+# already gain-corrected and reweighted by |gain|².
+function _accumulate_band_phasor!(phasor_sum, weight_sum, V, W, F, win::GeometryWindow, blrow, feedrow)
     UVData.check_layer_axes(V, W, F)
-    @inbounds for p in axes(V, Polarization)
-        fa, fb = feeds[p]
-        fa == fb || continue                    # parallel hands only
-        for bi in axes(V, BaselineID)
-            a, b = bl_pairs[bi]
+    for k in eachindex(win.feed_order)
+        fa, fb = win.feed_order[k]
+        fa == fb || continue
+        for bi in eachindex(win.stations)
+            a, b = win.stations[bi]
             a == b && continue
+            Vp, Wp, Fp = _member_planes(V, W, F, bi, win.feeds[k, bi])
             acc = zero(ComplexF64)
             wsum = 0.0
-            for tt in axes(V, Ti), c in axes(V, Frequency)
-                cell = (Frequency(c), Ti(tt), BaselineID(bi), Polarization(p))
-                F[cell] && continue
-                ww = W[cell]
-                (ww > 0 && isfinite(ww)) || continue
-                v = V[cell]
-                isfinite(v) || continue
-                acc += ww * v
-                wsum += ww
+            for t in axes(Vp, 2), c in axes(Vp, 1)
+                w, v = Wp[c, t], Vp[c, t]
+                _usable(Fp[c, t], w, v) || continue
+                acc += w * v
+                wsum += w
             end
-            phasor_sum[bi, p] = acc
-            weight_sum[bi, p] = wsum
+            phasor_sum[blrow[bi], feedrow[k]] = acc
+            weight_sum[blrow[bi], feedrow[k]] = wsum
         end
     end
     return nothing
@@ -149,36 +140,26 @@ end
 # slope per (baseline, band group) from sub-band chunk phasors, an exact
 # matched filter over one delay about the group's centre.
 
-# Accumulate one channel-block's inverse-variance chunk phasors:
-# `phasor_sum[bi, p, chunk_of_chan[c]] += w·V` and `weight_sum[…] += w` (parallel
-# hands only), off data already
-# gain-corrected through the pipeline's transform chain.
-function _accumulate_leaf_chunks!(
-        phasor_sum, weight_sum, s::AbstractDimStack, bl_pairs, feeds, chunk_of_chan,
-    )
-    return _accumulate_leaf_chunks!(
-        phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags], bl_pairs, feeds, chunk_of_chan,
-    )
-end
-
-function _accumulate_leaf_chunks!(phasor_sum, weight_sum, V, W, F, bl_pairs, feeds, chunk_of_chan)
+# Accumulate one band's inverse-variance chunk phasors:
+# `phasor_sum[row, f, chunk_of_chan[c]] += w·V` and `weight_sum[…] += w`
+# (parallel hands only), off data the pipeline's corrections have already
+# gain-corrected.
+function _accumulate_chunks!(phasor_sum, weight_sum, V, W, F, win::GeometryWindow, blrow, feedrow, chunk_of_chan)
     UVData.check_layer_axes(V, W, F)
-    @inbounds for p in axes(V, Polarization)
-        fa, fb = feeds[p]
+    for k in eachindex(win.feed_order)
+        fa, fb = win.feed_order[k]
         fa == fb || continue
-        for bi in axes(V, BaselineID)
-            a, b = bl_pairs[bi]
+        for bi in eachindex(win.stations)
+            a, b = win.stations[bi]
             a == b && continue
-            for tt in axes(V, Ti), c in axes(V, Frequency)
-                cell = (Frequency(c), Ti(tt), BaselineID(bi), Polarization(p))
-                F[cell] && continue
-                ww = W[cell]
-                (ww > 0 && isfinite(ww)) || continue
-                v = V[cell]
-                isfinite(v) || continue
-                k = chunk_of_chan[c]
-                phasor_sum[bi, p, k] += ww * v
-                weight_sum[bi, p, k] += ww
+            Vp, Wp, Fp = _member_planes(V, W, F, bi, win.feeds[k, bi])
+            row, f = blrow[bi], feedrow[k]
+            for t in axes(Vp, 2), c in axes(Vp, 1)
+                w, v = Wp[c, t], Vp[c, t]
+                _usable(Fp[c, t], w, v) || continue
+                j = chunk_of_chan[c]
+                phasor_sum[row, f, j] += w * v
+                weight_sum[row, f, j] += w
             end
         end
     end

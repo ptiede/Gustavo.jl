@@ -215,61 +215,91 @@ function bandpass_accumulators(nbl::Integer, npol::Integer, nchan::Integer)
 end
 
 """
-    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, stack, win::GeometryWindow; derotate = true)
+    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, group, geom::DataGeometry; derotate = true)
 
-Accumulate one scan window's contribution to the per-(global-baseline,
-product, global channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for the
-bandpass solves, on data already gain-corrected through the pipeline's
-transform chain. `blidx` maps `(a, b) -> row` in the global baseline table;
-a pair absent from it never contributes.
+Accumulate one scan group's contribution to the per-(global-baseline, feed
+pair, global channel) coherent residual `rbar_bp` (and weight `wbar_bp`) for
+the bandpass solves, on data already gain-corrected by the pipeline's
+corrections. `group` is a `ProcessingSet` or its [`GroupTables`](@ref) on
+`geom`; the feed-pair axis follows the group's `feeds`. `blidx` maps `(a, b) ->
+row` in the global baseline table; a pair absent from it never contributes.
 
 `derotate` (default `true`) counter-rotates each AP, before summing over time,
-by its own band-averaged residual phase — removing the per-AP time phase
-(residual rate/drift, and what the adhoc stage would later remove) so summing
-COHERENT SCANS TOGETHER ([`PerTrackSmoother`](@ref), which combines every
-selected scan's residual into one accumulator before solving) isolates the per-channel shape
-despite each scan's uncontrolled source phase. [`solve_joint_bandpass!`](@ref)
-fits each scan's own coherent visibility against an explicit per-scan source
-term instead of summing scans together, so it passes `derotate = false` — the
-per-AP trick would otherwise erase the very source phase/amplitude that term
-is meant to absorb.
+by its own residual phase averaged over every band of the scan — removing the
+per-AP time phase (residual rate/drift, and what the adhoc stage would later
+remove) so summing COHERENT SCANS TOGETHER ([`PerTrackSmoother`](@ref), which
+combines every selected scan's residual into one accumulator before solving)
+isolates the per-channel shape despite each scan's uncontrolled source phase.
+The average spans the whole scan so the phase steps between spectral windows
+stay in the bandpass. [`solve_joint_bandpass!`](@ref) fits each scan's own
+coherent visibility against an explicit per-scan source term instead of
+summing scans together, so it passes `derotate = false` — the per-AP trick
+would otherwise erase the very source phase/amplitude that term is meant to
+absorb.
 """
-function accumulate_bandpass!(
-        rbar_bp, wbar_bp, blidx, stack::AbstractDimStack, win::GeometryWindow;
-        derotate::Bool = true,
-    )
-    V = stack[:vis]                                      # the dims-carrying layers —
-    W = stack[:weights]                                  # the loops below address axes BY NAME
-    F = stack[:flags]
-    bl_pairs = UVData.baselines(stack).pairs
-    g_ci = win.chan_idx
-    for p in axes(V, Polarization), bi in axes(V, BaselineID)
-        a, b = bl_pairs[bi]
-        a == b && continue # autocorrelation skip
-        idx = get(blidx, (a, b), 0)
-        idx == 0 && continue # baseline doesn't exist so skip
-        for tt in axes(V, Ti)
-            rot = one(eltype(V))
-            if derotate
-                # Band-averaged residual phase for this AP (the per-AP time phase).
-                acc = zero(eltype(V))
-                for c in axes(V, Frequency)
-                    w = W[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
-                    vv = V[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
-                    fl = F[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
-                    cond = (!fl && w > 0 && isfinite(w) && isfinite(vv))
-                    acc += ifelse(cond, w * vv, zero(eltype(V)))
-                end
-                rot = ifelse(abs(acc) > 0, conj(acc) / abs(acc), one(eltype(V))) # cis(-angle(acc)): de-rotate this AP
+accumulate_bandpass!(rbar_bp, wbar_bp, blidx, group::XRadio.ProcessingSet, geom::DataGeometry; kw...) =
+    accumulate_bandpass!(rbar_bp, wbar_bp, blidx, GroupTables(group, geom); kw...)
+
+function accumulate_bandpass!(rbar_bp, wbar_bp, blidx, tabs::GroupTables; derotate::Bool = true)
+    layers = map(_member_layers, tabs.members)
+    T = mapreduce(l -> eltype(l[1]), promote_type, layers)
+    rot = ones(T, length(tabs.bl_pairs), length(tabs.feeds), length(tabs.ti))
+    if derotate
+        acc = zeros(T, size(rot))
+        for m in eachindex(layers)
+            _accumulate_ap_phasor!(acc, layers[m]..., tabs.wins[m], tabs.blrow[m], tabs.feedrow[m], tabs.tpos[m])
+        end
+        # cis(-angle(acc)): de-rotate this AP
+        rot .= ifelse.(abs.(acc) .> 0, conj.(acc) ./ abs.(acc), one(T))
+    end
+    for m in eachindex(layers)
+        _accumulate_bandpass_member!(
+            rbar_bp, wbar_bp, blidx, rot, layers[m]..., tabs.wins[m],
+            tabs.blrow[m], tabs.feedrow[m], tabs.tpos[m],
+        )
+    end
+    return rbar_bp, wbar_bp
+end
+
+# Σ w·V per (group baseline, feed pair, AP) over one band's channels: the band
+# part of each AP's residual phase that `derotate` removes.
+function _accumulate_ap_phasor!(acc, V, W, F, win::GeometryWindow, blrow, feedrow, tpos)
+    UVData.check_layer_axes(V, W, F)
+    for k in eachindex(win.feed_order), bi in eachindex(win.stations)
+        a, b = win.stations[bi]
+        a == b && continue
+        Vp, Wp, Fp = _member_planes(V, W, F, bi, win.feeds[k, bi])
+        row, f = blrow[bi], feedrow[k]
+        for t in axes(Vp, 2)
+            ap = tpos[t]
+            for c in axes(Vp, 1)
+                w, vv = Wp[c, t], Vp[c, t]
+                acc[row, f, ap] += ifelse(_usable(Fp[c, t], w, vv), w * vv, zero(eltype(acc)))
             end
-            for c in axes(V, Frequency)
-                w = W[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
-                vv = V[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
-                fl = F[Frequency = c, Ti = tt, BaselineID = bi, Polarization = p]
-                cond = (!fl && w > 0 && isfinite(w) && isfinite(vv))
-                gc = g_ci[c]
-                rbar_bp[idx, p, gc] += ifelse(cond, w * vv * rot, zero(eltype(V)))
-                wbar_bp[idx, p, gc] += ifelse(cond, w, zero(eltype(W)))
+        end
+    end
+    return acc
+end
+
+function _accumulate_bandpass_member!(
+        rbar_bp, wbar_bp, blidx, rot, V, W, F, win::GeometryWindow, blrow, feedrow, tpos,
+    )
+    UVData.check_layer_axes(V, W, F)
+    for k in eachindex(win.feed_order), bi in eachindex(win.stations)
+        a, b = win.stations[bi]
+        a == b && continue
+        idx = get(blidx, (a, b), 0)
+        idx == 0 && continue
+        Vp, Wp, Fp = _member_planes(V, W, F, bi, win.feeds[k, bi])
+        row, f = blrow[bi], feedrow[k]
+        for t in axes(Vp, 2)
+            r = rot[row, f, tpos[t]]
+            for c in axes(Vp, 1)
+                w, vv = Wp[c, t], Vp[c, t]
+                ok = _usable(Fp[c, t], w, vv)
+                gc = win.chan_idx[c]
+                rbar_bp[idx, f, gc] += ifelse(ok, w * vv * r, zero(eltype(rbar_bp)))
+                wbar_bp[idx, f, gc] += ifelse(ok, w, zero(eltype(wbar_bp)))
             end
         end
     end

@@ -1026,89 +1026,75 @@ end
 
 # ── Per-scan pipeline entry ───────────────────────────────────────────────────
 
-# Accumulate one band leaf's per-AP residual sums, `phasor_sum[bi, p, t] += w·V`
-# and `weight_sum[bi, p, t] += w`, whose ratio is the inverse-variance mean of
-# the data, already gain-corrected (and reweighted by |gain|², matching
-# `apply_calibration`) through the pipeline's transform chain before this
-# kernel ever sees it.
-_accumulate_leaf_rbar!(phasor_sum, weight_sum, s::AbstractDimStack) =
-    _accumulate_leaf_rbar!(phasor_sum, weight_sum, s[:vis], s[:weights], s[:flags])
-
-function _accumulate_leaf_rbar!(phasor_sum, weight_sum, V, W, F)
+# Accumulate one band's (a Measurement Set's) per-AP residual sums,
+# `phasor_sum[row, f, ap] += w·V` and `weight_sum[row, f, ap] += w`, whose ratio
+# is the inverse-variance mean of the data, which the pipeline's corrections
+# have already gain-corrected and reweighted by |gain|².
+function _accumulate_rbar!(phasor_sum, weight_sum, V, W, F, win::GeometryWindow, blrow, feedrow, tpos)
     UVData.check_layer_axes(V, W, F)
-    @inbounds for p in axes(V, Polarization)
-        for bi in axes(V, BaselineID)
-            for tt in axes(V, Ti), c in axes(V, Frequency)
-                cell = (Frequency(c), Ti(tt), BaselineID(bi), Polarization(p))
-                F[cell] && continue
-                w = W[cell]
-                (w > 0 && isfinite(w)) || continue
-                v = V[cell]
-                isfinite(v) || continue
-                phasor_sum[bi, p, tt] += w * v
-                weight_sum[bi, p, tt] += w
-            end
+    for k in eachindex(win.feed_order), bi in eachindex(win.stations)
+        Vp, Wp, Fp = _member_planes(V, W, F, bi, win.feeds[k, bi])
+        row, f = blrow[bi], feedrow[k]
+        for t in axes(Vp, 2), c in axes(Vp, 1)
+            w, v = Wp[c, t], Vp[c, t]
+            _usable(Fp[c, t], w, v) || continue
+            phasor_sum[row, f, tpos[t]] += w * v
+            weight_sum[row, f, tpos[t]] += w
         end
     end
     return phasor_sum, weight_sum
 end
 
 """
-    adhoc_scan!(θ, stack, win::GeometryWindow, adhoc_plan, adhoc, gauge, nant;
+    adhoc_scan!(θ, group, geom::DataGeometry, adhoc_plan, adhoc, gauge, nant;
                 executor = DynamicScheduler()) -> θ
 
-The per-integration atmospheric-phase (adhoc) solve of one scan window — the
+The per-integration atmospheric-phase (adhoc) solve of one scan group — the
 "caller" the module docstring above refers to. On data already gain-corrected
-through the pipeline's transform chain: accumulate the per-(baseline, product,
-AP) inverse-variance residual, solve the globally-closing per-AP station phase
-through the pluggable `adhoc` smoother (`solve_adhoc_phasing`), and
-write this scan's `PerIntegration` θ slots
-(disjoint per scan — concurrent groups may solve in parallel). The feed tying
-comes from `adhoc_plan`, so the number of phase nodes per station is the
-model's choice and needs no separate argument.
+by the pipeline's corrections: accumulate the per-(baseline, feed pair, AP)
+inverse-variance residual over every band, solve the globally-closing per-AP
+station phase through the pluggable `adhoc` smoother (`solve_adhoc_phasing`),
+and write this scan's `PerIntegration` θ slots (disjoint per scan — concurrent
+groups may solve in parallel). `group` is a `ProcessingSet` or its
+[`GroupTables`](@ref) on `geom`. The feed tying comes from `adhoc_plan`, so the
+number of phase nodes per station is the model's choice and needs no separate
+argument.
 """
+adhoc_scan!(θ, group::XRadio.ProcessingSet, geom::DataGeometry, args...; kw...) =
+    adhoc_scan!(θ, GroupTables(group, geom), args...; kw...)
+
 function adhoc_scan!(
-        θ, stack::AbstractDimStack, win::GeometryWindow, adhoc_plan, adhoc, gauge, nant;
+        θ, tabs::GroupTables, adhoc_plan, adhoc, gauge, nant;
         executor = DynamicScheduler(),
     )
-    geom = win.geom
-    bl_pairs = collect(UVData.baselines(stack).pairs)
-    feeds = feed_pairs(stack)
-    tg = Float64.(timestamps(stack))
-    ci = win.chan_idx
-    g_ti = win.ti_idx
-    nbl = length(bl_pairs)
-    npol = length(feeds)
-    nap = length(tg)
-    # Per-band accumulation (the window's per-spw channel blocks stand in for the
-    # band leaves) fanned out over the inner `executor` — this loop (the residual
-    # sum over every visibility) dominates the adhoc pass on many-band data. Each
-    # block owns the trailing slice `li` of the partial buffers and the slices
-    # fold in block order, so the float association is fixed by the data layout
-    # alone — the result is bit-deterministic at any chunking.
-    blocks = _spw_blocks(geom, ci)
-    nblk = length(blocks)
-    rparts = zeros(ComplexF64, nbl, npol, nap, nblk)
-    wparts = zeros(Float64, nbl, npol, nap, nblk)
+    geom = first(tabs.wins).geom
+    tg = geom.times[tabs.ti]
+    dims3 = (length(tabs.bl_pairs), length(tabs.feeds), length(tg))
+    # One partial buffer per band, folded in band order, so the float
+    # association is fixed by the data layout alone and the result is
+    # bit-deterministic at any chunking.
+    nblk = length(tabs.members)
+    rparts = zeros(ComplexF64, dims3..., nblk)
+    wparts = zeros(Float64, dims3..., nblk)
     tforeach(1:nblk; scheduler = executor) do li
-        r = blocks[li]
-        _accumulate_leaf_rbar!(
+        _accumulate_rbar!(
             view(rparts, :, :, :, li), view(wparts, :, :, :, li),
-            view(stack, Frequency(r)),
+            _member_layers(tabs.members[li])..., tabs.wins[li],
+            tabs.blrow[li], tabs.feedrow[li], tabs.tpos[li],
         )
     end
-    rbar = zeros(ComplexF64, nbl, npol, nap)
-    wbar = zeros(Float64, nbl, npol, nap)
+    rbar = zeros(ComplexF64, dims3)
+    wbar = zeros(Float64, dims3)
     for li in axes(rparts, 4)
         rbar .+= view(rparts, :, :, :, li)
         wbar .+= view(wparts, :, :, :, li)
     end
     as = solve_adhoc_phasing(
-        rbar, wbar, bl_pairs, feeds, nant, tg;
+        rbar, wbar, tabs.bl_pairs, tabs.feeds, nant, tg;
         gauge = gauge, smoother = adhoc, tying = adhoc_plan.tying,
     )
     adhoc_leaf = _component_leaf(adhoc_plan, θ)
-    for (ap, gti) in enumerate(g_ti)
+    for (ap, gti) in enumerate(tabs.ti)
         tseg = adhoc_plan.tseg_id[gti]
         for ant in axes(as.phase, 1), feed in axes(as.phase, 2)
             val = as.phase[ant, feed, ap]

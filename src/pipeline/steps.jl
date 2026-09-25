@@ -270,7 +270,7 @@ _fringe_report(results) = (;
     Fring.detection_table(Vector{Fring.DetectionRow}[r.rows for r in results])...,
 )
 
-# Each step's per-group kernel is `_solve_group(step, ctx, setup, stack, win)`,
+# Each step's per-group kernel is `_solve_group(step, ctx, setup, …)`,
 # with `setup = _group_setup(step, ctx)` computed once before the data are read.
 
 # The stage-B components. A model whose rate components disagree on any
@@ -410,10 +410,38 @@ end
 # Co-located stations see the same ionosphere, so a differential TEC between
 # them is pure solve error — but only a model that solves dTEC has any to tie,
 # and only the caller knows the separation that counts as co-located here.
-_dtec_ties(::Nothing, antennas) = nothing
-_dtec_ties(dm::DispersionModel, antennas) =
+_dtec_ties(::Nothing, ctx) = nothing
+_dtec_ties(dm::DispersionModel, ctx) =
     dm.colocated_sep === nothing ? nothing :
-    UVData._colocated_ties(antennas; max_sep = dm.colocated_sep)
+    UVData._colocated_ties(_station_positions(ctx.groups, ctx.geom.stations); max_sep = dm.colocated_sep)
+
+# Each station's geocentric position, in `stations` order, from the antenna
+# datasets of the groups' Measurement Sets. Stops reading once every station is
+# placed; a station stated at two positions more than a millimetre apart, or at
+# none, is refused.
+function _station_positions(groups, stations)
+    slot = Dict(n => i for (i, n) in pairs(stations))
+    xyz = Vector{Union{Nothing, Vector{Float64}}}(nothing, length(stations))
+    for group in values(groups), ms in values(group)
+        pos = XRadio.antenna_positions(ms)
+        for (j, name) in pairs(lookup(pos, 2))
+            i = get(slot, String(name), 0)
+            i == 0 && continue
+            p = Float64.(collect(view(parent(pos), :, j)))
+            if xyz[i] === nothing
+                xyz[i] = p
+            elseif !isapprox(xyz[i], p; atol = 1.0e-3)
+                throw(ArgumentError("station $name is stated at $(xyz[i]) and $p m"))
+            end
+        end
+        all(!isnothing, xyz) && break
+    end
+    missing_ = [stations[i] for i in eachindex(xyz) if xyz[i] === nothing]
+    isempty(missing_) || throw(
+        ArgumentError("no Measurement Set states a position for $(join(missing_, ", "))")
+    )
+    return Vector{Vector{Float64}}(xyz)
+end
 
 function _group_setup(s::DispersionSBDFit, ctx::SolveContext)
     disp_plan = Calibration._dispersion_plan(ctx.model, ctx.layout)
@@ -424,22 +452,25 @@ function _group_setup(s::DispersionSBDFit, ctx::SolveContext)
     # `nothing` when dispersion is disabled (no such component was compiled).
     delay_plan = disp_plan === nothing ? nothing : Fring._perscan_delay_plan(ctx.model, ctx.layout)
     sbd_plans = Fring._sbd_plans(ctx.model, ctx.layout)
-    return (; delay_plan, disp_plan, sbd_plans, ties = _dtec_ties(s.dispersion, ctx.antennas))
+    ties = disp_plan === nothing ? nothing : _dtec_ties(s.dispersion, ctx)
+    return (; delay_plan, disp_plan, sbd_plans, ties)
 end
 
-function _solve_group(::DispersionSBDFit, ctx::SolveContext, setup, stack, win::GeometryWindow)
+function _solve_group(::DispersionSBDFit, ctx::SolveContext, setup, tabs::Fring.GroupTables)
     executor = inner_executor(ctx.exec)
     Fring.refine_scan_dispersion!(
-        ctx.θ, stack, win, setup.delay_plan, setup.disp_plan, ctx.gauge, ctx.nant;
+        ctx.θ, tabs, setup.delay_plan, setup.disp_plan, ctx.gauge, ctx.nant;
         executor, setup.ties,
     )
-    Fring.refine_scan_sbd!(ctx.θ, stack, win, setup.sbd_plans, ctx.gauge, ctx.nant; executor)
+    Fring.refine_scan_sbd!(ctx.θ, tabs, setup.sbd_plans, ctx.gauge, ctx.nant; executor)
     return nothing
 end
 
 function solve(s::DispersionSBDFit, ctx::SolveContext)
     setup = _group_setup(s, ctx)
-    results = each_group((stack, win) -> _solve_group(s, ctx, setup, stack, win), ctx)
+    results = each_group(ctx) do group
+        _solve_group(s, ctx, setup, Fring.GroupTables(group, ctx.geom))
+    end
     # This step's own compiled model alone says whether dTEC/SBD were fit —
     # published here so a solution-level consumer needs no knowledge of this
     # step's name to ask "was dispersion/SBD applied?".
@@ -470,24 +501,27 @@ function _group_setup(::Bandpass, ctx::SolveContext)
     )
 end
 
-function _solve_group(s::Bandpass, ctx::SolveContext, setup, stack, win::GeometryWindow)
-    feeds = feed_pairs(stack)
+function _solve_group(s::Bandpass, ctx::SolveContext, setup, tabs::Fring.GroupTables)
     rl, wl = Fring.bandpass_accumulators(
-        length(setup.bl_pairs), length(feeds), length(setup.channel_freqs),
+        length(setup.bl_pairs), length(tabs.feeds), length(setup.channel_freqs),
     )
     Fring.accumulate_bandpass!(
-        rl, wl, setup.blidx, stack, win; derotate = Fring.bandpass_derotate(s.smoother),
+        rl, wl, setup.blidx, tabs; derotate = Fring.bandpass_derotate(s.smoother),
     )
     # `ti` locates this scan on the solve's global time axis, which is how a
     # time-segmented bandpass tells which segment the scan belongs to. A scan
     # lies within one segment of any segmentation coarser than a scan, so its
     # first sample names the segment.
-    return (; rl, wl, feeds, ti = first(win.ti_idx), source = source_name(stack))
+    sources = unique(source_name.(tabs.members))
+    length(sources) == 1 || throw(
+        ArgumentError("a scan group observes several sources: $(join(sources, ", "))")
+    )
+    return (; rl, wl, feeds = tabs.feeds, ti = first(tabs.ti), source = only(sources))
 end
 
 function solve(s::Bandpass, ctx::SolveContext)
     setup = _group_setup(s, ctx)
-    results = each_group((stack, win) -> _solve_group(s, ctx, setup, stack, win), ctx)
+    results = each_group(group -> _solve_group(s, ctx, setup, Fring.GroupTables(group, ctx.geom)), ctx)
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
     report = Fring.solve_bandpass!(s.smoother, ctx.θ, results, setup; gauge = ctx.gauge)
     # The smoother's own per-track record travels with the step's info, so a
@@ -504,9 +538,9 @@ end
 
 _group_setup(::AdhocPhase, ctx::SolveContext) = Fring._adhoc_plan(ctx.model, ctx.layout)
 
-function _solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, stack, win::GeometryWindow)
+function _solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, tabs::Fring.GroupTables)
     Fring.adhoc_scan!(
-        ctx.θ, stack, win, adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
+        ctx.θ, tabs, adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
         executor = inner_executor(ctx.exec),
     )
     return nothing
@@ -514,6 +548,6 @@ end
 
 function solve(s::AdhocPhase, ctx::SolveContext)
     adhoc_plan = _group_setup(s, ctx)
-    results = each_group((stack, win) -> _solve_group(s, ctx, adhoc_plan, stack, win), ctx)
+    results = each_group(group -> _solve_group(s, ctx, adhoc_plan, Fring.GroupTables(group, ctx.geom)), ctx)
     return (; nscans = length(results))
 end
