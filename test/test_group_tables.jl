@@ -1,8 +1,9 @@
 # ── A scan group on the run's geometry, and the steps that read it ───────────
 #
 # `GroupTables` places each Measurement Set of a scan group on the run's
-# geometry; the bandpass, adhoc and refine kernels accumulate one member at a
-# time into the group's tables and fit once per group.
+# geometry; the bandpass and refine kernels accumulate one member at a time into
+# the group's tables, and the adhoc kernel sums each member by label. Each step
+# fits once per group.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 @isdefined(CAL) || const CAL = Gustavo.Calibration
@@ -38,6 +39,63 @@ _swap_baselines(ms) = Gustavo._with_layers(
     swapped = XRadio.ProcessingSet(members, DimensionalData.metadata(group))
     @test_throws "stored in both orders" FP.GroupTables(swapped, geom)
     @test_throws "holds no Measurement Sets" FP.GroupTables(XRadio.ProcessingSet(OrderedDict{Symbol, XRadio.MeasurementSet}()), geom)
+end
+
+@testset "weighted_sums reduces named dimensions" begin
+    rng = MersenneTwister(21)
+    axs = (
+        Polarization(["RR", "RL", "LR", "LL"]), Frequency([1.0e9, 1.1e9, 1.2e9]),
+        BaselineID(0:4), Ti([0.0, 10.0]),
+    )
+    V = DimArray(randn(rng, ComplexF32, 4, 3, 5, 2), axs)
+    W = DimArray(rand(rng, Float32, 4, 3, 5, 2), axs)
+    F = DimArray(rand(rng, 4, 3, 5, 2) .< 0.2, axs)
+    W[1, 1, 1, 1] = 0
+    V[2, 2, 2, 2] = NaN
+    ok = @. !F & (W > 0) & isfinite(V)
+    for d in (Frequency, Ti, (Frequency, Ti))
+        wv, ws = FP.weighted_sums(V, W, F; dims = d)
+        @test dims(wv) == DimensionalData.otherdims(V, d)
+        @test eltype(wv) == ComplexF32 && eltype(ws) == Float32
+        @test parent(wv) ≈ dropdims(sum(ifelse.(parent(ok), parent(W) .* parent(V), 0); dims = DimensionalData.dimnum(V, d)); dims = DimensionalData.dimnum(V, d))
+        @test parent(ws) ≈ dropdims(sum(ifelse.(parent(ok), parent(W), 0); dims = DimensionalData.dimnum(V, d)); dims = DimensionalData.dimnum(V, d))
+    end
+    # Layers are read by name, so their storage order is free.
+    Wp = permutedims(W, (Ti, BaselineID, Frequency, Polarization))
+    @test FP.weighted_sums(V, Wp, F; dims = Frequency) == FP.weighted_sums(V, W, F; dims = Frequency)
+    @test_throws DimensionMismatch FP.weighted_sums(V, set(W, Ti => [0.0, 20.0]), F; dims = Frequency)
+    @test_throws "a layer has 3 dimensions" FP.weighted_sums(V, W[Ti = 1], F; dims = Frequency)
+end
+
+@testset "adhoc sums by label" begin
+    ps, _ = _build_fringe_ps(; nant = 4, nspw = 3, nchan = 4, ntime = 5, nscans = 2)
+    geom = CAL.DataGeometry(ps)
+    group = first(values(DimensionalData.groupby(ps, XRadio.ByScan())))
+    exec = SerialScheduler()
+    s = FP._adhoc_sums(group, geom; executor = exec)
+    @test lookup(s.rbar, FP.StationPair) == [(geom.stations[a], geom.stations[b]) for (a, b) in s.bl_pairs]
+    @test issorted(s.bl_pairs)
+    @test lookup(s.rbar, FP.FeedPair) == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    @test lookup(s.rbar, Ti) == geom.times[s.ti]
+    @test eltype(s.rbar) == ComplexF32 && eltype(s.wbar) == Float32
+
+    # Each member's sums land on its own labels: the group total over members
+    # equals the per-member totals.
+    tot = sum(FP.weighted_sums(FP._member_layers(ms)...; dims = Frequency)[1] |> sum for ms in values(group))
+    @test sum(s.rbar) ≈ tot
+
+    # The order members are stored in does not change the sums.
+    rev = XRadio.ProcessingSet(OrderedDict(reverse(collect(pairs(group)))), DimensionalData.metadata(group))
+    @test FP._adhoc_sums(rev, geom; executor = exec).rbar == s.rbar
+
+    members = OrderedDict(pairs(group))
+    k = first(keys(members))
+    members[k] = _swap_baselines(read(members[k]))
+    swapped = XRadio.ProcessingSet(members, DimensionalData.metadata(group))
+    @test_throws "stored in both orders" FP._adhoc_sums(swapped, geom; executor = exec)
+    @test_throws "holds no Measurement Sets" FP._adhoc_sums(
+        XRadio.ProcessingSet(OrderedDict{Symbol, XRadio.MeasurementSet}()), geom; executor = exec,
+    )
 end
 
 @testset "station positions for co-located ties" begin

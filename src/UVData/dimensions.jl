@@ -1,4 +1,4 @@
-export Polarization, Frequency, Ant, BaselineID, Ti, UVW, Feed, Scan
+export Polarization, Frequency, Ant, BaselineID, Ti, UVW, Feed, Scan, StationPair, FeedPair
 
 using DimensionalData: @dim, TimeDim, Ti
 # The frequency, baseline and polarization axes are MSv4's, not Gustavo's own:
@@ -10,6 +10,8 @@ using XRadio: BaselineID, Frequency, Polarization
 @dim UVW "UVW "
 @dim Feed "Feed (receptor index)"
 @dim Scan "Scan index"
+@dim StationPair "Station pair (antenna names)"
+@dim FeedPair "Feed pair (receptor indices)"
 
 # The `(Frequency, Ti)` plane of layer `L` at baseline `bi` and product `p`, in
 # that axis order whatever order `L` is stored in.

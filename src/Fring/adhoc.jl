@@ -1026,75 +1026,89 @@ end
 
 # ── Per-scan pipeline entry ───────────────────────────────────────────────────
 
-# Accumulate one band's (a Measurement Set's) per-AP residual sums,
-# `phasor_sum[row, f, ap] += w·V` and `weight_sum[row, f, ap] += w`, whose ratio
-# is the inverse-variance mean of the data, which the pipeline's corrections
-# have already gain-corrected and reweighted by |gain|².
-function _accumulate_rbar!(phasor_sum, weight_sum, V, W, F, win::GeometryWindow, blrow, feedrow, tpos)
-    UVData.check_layer_axes(V, W, F)
-    for k in eachindex(win.feed_order), bi in eachindex(win.stations)
-        Vp, Wp, Fp = _member_planes(V, W, F, bi, win.feeds[k, bi])
-        row, f = blrow[bi], feedrow[k]
-        for t in axes(Vp, 2), c in axes(Vp, 1)
-            w, v = Wp[c, t], Vp[c, t]
-            _usable(Fp[c, t], w, v) || continue
-            phasor_sum[row, f, tpos[t]] += w * v
-            weight_sum[row, f, tpos[t]] += w
-        end
+# The group's inverse-variance sums per (station pair, feed pair, AP) over every
+# channel of every member, on data the pipeline's corrections have already
+# gain-corrected and reweighted by |gain|². Members are added in frequency
+# order, so the float association is fixed by the data alone. Station pairs
+# follow `geom`'s station numbering; `bl_pairs` gives them as station indices,
+# `ti` the APs as indices into `geom.times`.
+function _adhoc_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
+    isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
+    members = sort!(collect(values(group)); by = ms -> minimum(XRadio.frequencies(ms)))
+    parts = tmap(ms -> _adhoc_member_sums(ms, geom), members; scheduler = executor)
+
+    slot = Dict(n => i for (i, n) in pairs(geom.stations))
+    station(n) = get(slot, n) do
+        throw(ArgumentError("baseline antenna `$n` is not among the geometry's stations, " * join(geom.stations, ", ")))
     end
-    return phasor_sum, weight_sum
+    stations = unique!(reduce(vcat, (p.stations for p in parts)))
+    sort!(stations; by = ((a, b),) -> (station(a), station(b)))
+    stored = Set(stations)
+    for (a, b) in stations
+        a != b && (b, a) in stored && throw(
+            ArgumentError("stations $a and $b are stored in both orders within one scan group"),
+        )
+    end
+    feeds = sort!(unique!(reduce(vcat, (vec(p.feeds) for p in parts))))
+    ti = sort!(unique!(reduce(vcat, (p.ti for p in parts))))
+
+    ax = (
+        StationPair(DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered())),
+        FeedPair(feeds), Ti(geom.times[ti]),
+    )
+    rbar = zeros(promote_type((eltype(p.wv) for p in parts)...), ax)
+    wbar = zeros(promote_type((eltype(p.ws) for p in parts)...), ax)
+    for p in parts
+        _add_by_label!(rbar, wbar, p.wv, p.ws, p.stations, p.feeds, Ti(At(geom.times[p.ti])))
+    end
+    bl_pairs = [(station(a), station(b)) for (a, b) in stations]
+    return (; rbar, wbar, bl_pairs, ti)
+end
+
+function _adhoc_member_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
+    wv, ws = weighted_sums(_member_layers(ms)...; dims = Frequency)
+    stations = [(String(a), String(b)) for (a, b) in XRadio.baselines(ms)]
+    ti = Calibration._time_indices(geom, XRadio.times(ms))
+    return (; wv, ws, stations, feeds = feed_pairs(ms), ti)
+end
+
+# A stored product's feed pair varies by baseline, so each (baseline, product)
+# of a member finds its group row by label.
+function _add_by_label!(rbar, wbar, wv, ws, stations, feeds, tsel)
+    for bi in axes(feeds, 2), p in axes(feeds, 1)
+        sel = (StationPair(At(stations[bi])), FeedPair(At(feeds[p, bi])), tsel)
+        cell = (BaselineID(bi), Polarization(p))
+        view(rbar, sel...) .+= view(wv, cell...)
+        view(wbar, sel...) .+= view(ws, cell...)
+    end
+    return rbar, wbar
 end
 
 """
-    adhoc_scan!(θ, group, geom::DataGeometry, adhoc_plan, adhoc, gauge, nant;
-                executor = DynamicScheduler()) -> θ
+    adhoc_scan!(θ, group::XRadio.ProcessingSet, geom::DataGeometry, adhoc_plan,
+                adhoc, gauge, nant; executor = DynamicScheduler()) -> θ
 
 The per-integration atmospheric-phase (adhoc) solve of one scan group — the
 "caller" the module docstring above refers to. On data already gain-corrected
-by the pipeline's corrections: accumulate the per-(baseline, feed pair, AP)
-inverse-variance residual over every band, solve the globally-closing per-AP
-station phase through the pluggable `adhoc` smoother (`solve_adhoc_phasing`),
-and write this scan's `PerIntegration` θ slots (disjoint per scan — concurrent
-groups may solve in parallel). `group` is a `ProcessingSet` or its
-[`GroupTables`](@ref) on `geom`. The feed tying comes from `adhoc_plan`, so the
-number of phase nodes per station is the model's choice and needs no separate
-argument.
+by the pipeline's corrections: sum the per-(station pair, feed pair, AP)
+inverse-variance residual over every band (`weighted_sums`), solve the
+globally-closing per-AP station phase through the pluggable `adhoc` smoother
+(`solve_adhoc_phasing`), and write this scan's `PerIntegration` θ slots
+(disjoint per scan — concurrent groups may solve in parallel). The feed tying
+comes from `adhoc_plan`, so the number of phase nodes per station is the
+model's choice and needs no separate argument.
 """
-adhoc_scan!(θ, group::XRadio.ProcessingSet, geom::DataGeometry, args...; kw...) =
-    adhoc_scan!(θ, GroupTables(group, geom), args...; kw...)
-
 function adhoc_scan!(
-        θ, tabs::GroupTables, adhoc_plan, adhoc, gauge, nant;
+        θ, group::XRadio.ProcessingSet, geom::DataGeometry, adhoc_plan, adhoc, gauge, nant;
         executor = DynamicScheduler(),
     )
-    geom = first(tabs.wins).geom
-    tg = geom.times[tabs.ti]
-    dims3 = (length(tabs.bl_pairs), length(tabs.feeds), length(tg))
-    # One partial buffer per band, folded in band order, so the float
-    # association is fixed by the data layout alone and the result is
-    # bit-deterministic at any chunking.
-    nblk = length(tabs.members)
-    rparts = zeros(ComplexF64, dims3..., nblk)
-    wparts = zeros(Float64, dims3..., nblk)
-    tforeach(1:nblk; scheduler = executor) do li
-        _accumulate_rbar!(
-            view(rparts, :, :, :, li), view(wparts, :, :, :, li),
-            _member_layers(tabs.members[li])..., tabs.wins[li],
-            tabs.blrow[li], tabs.feedrow[li], tabs.tpos[li],
-        )
-    end
-    rbar = zeros(ComplexF64, dims3)
-    wbar = zeros(Float64, dims3)
-    for li in axes(rparts, 4)
-        rbar .+= view(rparts, :, :, :, li)
-        wbar .+= view(wparts, :, :, :, li)
-    end
+    (; rbar, wbar, bl_pairs, ti) = _adhoc_sums(group, geom; executor)
     as = solve_adhoc_phasing(
-        rbar, wbar, tabs.bl_pairs, tabs.feeds, nant, tg;
-        gauge = gauge, smoother = adhoc, tying = adhoc_plan.tying,
+        rbar, wbar, bl_pairs, collect(lookup(rbar, FeedPair)), nant, geom.times[ti];
+        gauge, smoother = adhoc, tying = adhoc_plan.tying,
     )
     adhoc_leaf = _component_leaf(adhoc_plan, θ)
-    for (ap, gti) in enumerate(tabs.ti)
+    for (ap, gti) in enumerate(ti)
         tseg = adhoc_plan.tseg_id[gti]
         for ant in axes(as.phase, 1), feed in axes(as.phase, 2)
             val = as.phase[ant, feed, ap]

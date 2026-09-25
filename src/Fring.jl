@@ -9,9 +9,9 @@ diagnostics over them.
 """
 module Fring
 
-using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler, TaskLocalValue
+using OhMyThreads: tforeach, tmap, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
-using ..UVData: Frequency, BaselineID, Feed, Polarization, Scan
+using ..UVData: Frequency, BaselineID, Feed, Polarization, Scan, StationPair, FeedPair
 using ..Calibration
 using ..Calibration: _epoch_atol
 import XRadio
@@ -25,7 +25,7 @@ using ..Calibration: weighted_regularized_least_squares, weighted_constrained_le
 import ..Calibration: model_components
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
-using DimensionalData: lookup, dims, dimnum, Ti, DimArray, DimStack, AbstractDimStack
+using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
 using Printf: @sprintf
@@ -37,6 +37,7 @@ include("Fring/statespace.jl")
 # over one (station, feed, spw) track, independent of any solver stage.
 include("Fring/shapes.jl")
 include("Fring/group_tables.jl")
+include("Fring/weighted_sums.jl")
 include("Fring/adhoc.jl")
 include("Fring/phasecal.jl")
 # The composable-pipeline engine: the solver capability checks, the

@@ -538,9 +538,9 @@ end
 
 _group_setup(::AdhocPhase, ctx::SolveContext) = Fring._adhoc_plan(ctx.model, ctx.layout)
 
-function _solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, tabs::Fring.GroupTables)
+function _solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, group)
     Fring.adhoc_scan!(
-        ctx.θ, tabs, adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
+        ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
         executor = inner_executor(ctx.exec),
     )
     return nothing
@@ -548,6 +548,6 @@ end
 
 function solve(s::AdhocPhase, ctx::SolveContext)
     adhoc_plan = _group_setup(s, ctx)
-    results = each_group(group -> _solve_group(s, ctx, adhoc_plan, Fring.GroupTables(group, ctx.geom)), ctx)
+    results = each_group(group -> _solve_group(s, ctx, adhoc_plan, group), ctx)
     return (; nscans = length(results))
 end

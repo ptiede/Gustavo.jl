@@ -410,7 +410,7 @@ end
 
 @testset "Residual accumulation is a plain weighted mean of pre-corrected data" begin
     # The pipeline's corrections divide out the gains, including the |g|² weight
-    # reweighting (Var(V/g) = 1/(w·|g|²)), before `_accumulate_rbar!` and
+    # reweighting (Var(V/g) = 1/(w·|g|²)), before `weighted_sums` and
     # `_accumulate_band_phasor!` see the data. Feeding them already-reweighted
     # (V, W) must give back exactly that inverse-variance mean, with no further
     # correction applied.
@@ -425,13 +425,13 @@ end
     F = DimArray(falses(nchan, nti, nbl, npol), axs)
     geom = CAL.DataGeometry(; times = [0.0], channel_freqs = collect(lookup(axs[1])))
     win = CAL.GeometryWindow(geom, [1, 2], [1], [(1, 2)], [(1, 1)], fill(1, 1, 1))
-    rbar(V, W, F) = FP._accumulate_rbar!(zeros(ComplexF64, 1, 1, 1), zeros(1, 1, 1), V, W, F, win, [1], [1], [1])
+    rbar(V, W, F) = map(only, FP.weighted_sums(V, W, F; dims = Frequency))
     band(V, W, F) = (z = zeros(ComplexF64, 1, 1); wz = zeros(1, 1);
         FP._accumulate_band_phasor!(z, wz, V, W, F, win, [1], [1]); (z, wz))
 
     r, w = rbar(V, W, F)
-    @test w[1] ≈ 1.0001
-    @test r[1] / w[1] ≈ (1.0 + 0.001im) / 1.0001
+    @test w ≈ 1.0001
+    @test r / w ≈ (1.0 + 0.001im) / 1.0001
     z, wz = band(V, W, F)
     @test wz[1] ≈ 1.0001
     @test z[1] / wz[1] ≈ (1.0 + 0.001im) / 1.0001
@@ -441,6 +441,7 @@ end
     perm = (Polarization, BaselineID, Ti, Frequency)
     Vp, Wp, Fp = permutedims(V, perm), permutedims(W, perm), permutedims(F, perm)
     @test rbar(Vp, Wp, Fp) == (r, w)
+    @test rbar(V, Wp, F) == (r, w)
     @test band(Vp, Wp, Fp) == (z, wz)
     # ...and so is a view into larger layers.
     big(A) = cat(A, A; dims = 3)
@@ -451,14 +452,15 @@ end
     # A flagged channel contributes nothing even though its weight is positive.
     F[2, 1, 1, 1] = true
     r, w = rbar(V, W, F)
-    @test w[1] ≈ 1.0
-    @test r[1] ≈ 1.0 + 0.0im
+    @test w ≈ 1.0
+    @test r ≈ 1.0 + 0.0im
     z, wz = band(V, W, F)
     @test wz[1] ≈ 1.0
     @test z[1] ≈ 1.0 + 0.0im
 
     # The per-member kernels sit behind a function barrier and infer.
-    @inferred FP._accumulate_rbar!(zeros(ComplexF64, 1, 1, 1), zeros(1, 1, 1), V, W, F, win, [1], [1], [1])
+    out = DimensionalData.otherdims(V, Frequency)
+    @inferred FP._weighted_sums!(zeros(ComplexF32, out), zeros(Float32, out), V, W, F, Frequency)
     @inferred FP._accumulate_band_phasor!(zeros(ComplexF64, 1, 1), zeros(1, 1), V, W, F, win, [1], [1])
     @inferred FP._accumulate_chunks!(zeros(ComplexF64, 1, 1, 2), zeros(1, 1, 2), V, W, F, win, [1], [1], [1, 2])
     @inferred FP._accumulate_ap_phasor!(zeros(ComplexF32, 1, 1, 1), V, W, F, win, [1], [1], [1])
