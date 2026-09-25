@@ -505,9 +505,7 @@ function _solve_group(s::Bandpass, ctx::SolveContext, setup, tabs::Fring.GroupTa
     rl, wl = Fring.bandpass_accumulators(
         length(setup.bl_pairs), length(tabs.feeds), length(setup.channel_freqs),
     )
-    Fring.accumulate_bandpass!(
-        rl, wl, setup.blidx, tabs; derotate = Fring.bandpass_derotate(s.smoother),
-    )
+    Fring.accumulate_bandpass!(rl, wl, setup.blidx, tabs)
     # `ti` locates this scan on the solve's global time axis, which is how a
     # time-segmented bandpass tells which segment the scan belongs to. A scan
     # lies within one segment of any segmentation coarser than a scan, so its

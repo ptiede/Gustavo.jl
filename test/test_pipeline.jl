@@ -463,10 +463,8 @@ end
     @inferred FP._weighted_sums!(zeros(ComplexF32, out), zeros(Float32, out), V, W, F, Frequency)
     @inferred FP._accumulate_band_phasor!(zeros(ComplexF64, 1, 1), zeros(1, 1), V, W, F, win, [1], [1])
     @inferred FP._accumulate_chunks!(zeros(ComplexF64, 1, 1, 2), zeros(1, 1, 2), V, W, F, win, [1], [1], [1, 2])
-    @inferred FP._accumulate_ap_phasor!(zeros(ComplexF32, 1, 1, 1), V, W, F, win, [1], [1], [1])
     @inferred FP._accumulate_bandpass_member!(
-        zeros(ComplexF64, 1, 1, 2), zeros(1, 1, 2), Dict((1, 2) => 1), ones(ComplexF32, 1, 1, 1),
-        V, W, F, win, [1], [1], [1],
+        zeros(ComplexF64, 1, 1, 2), zeros(1, 1, 2), Dict((1, 2) => 1), V, W, F, win, [1],
     )
 end
 

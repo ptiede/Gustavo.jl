@@ -65,6 +65,20 @@ end
     @test FP.weighted_sums(V, Wp, F; dims = Frequency) == FP.weighted_sums(V, W, F; dims = Frequency)
     @test_throws DimensionMismatch FP.weighted_sums(V, set(W, Ti => [0.0, 20.0]), F; dims = Frequency)
     @test_throws "a layer has 3 dimensions" FP.weighted_sums(V, W[Ti = 1], F; dims = Frequency)
+
+    # The per-cell loop is compiled for the reduced dimensions: a call allocates
+    # its outputs, not a dispatch per cell.
+    big = (
+        Polarization(["RR", "RL", "LR", "LL"]), Frequency(1.0e9 .+ (0:31) .* 1.0e6),
+        BaselineID(0:9), Ti(0.0:10.0:190.0),
+    )
+    Vb = DimArray(randn(rng, ComplexF32, 4, 32, 10, 20), big)
+    Wb = DimArray(rand(rng, Float32, 4, 32, 10, 20), big)
+    Fb = DimArray(falses(4, 32, 10, 20), big)
+    for d in (Frequency, Ti)
+        FP.weighted_sums(Vb, Wb, Fb; dims = d)
+        @test @allocated(FP.weighted_sums(Vb, Wb, Fb; dims = d)) < sizeof(parent(Vb))
+    end
 end
 
 @testset "adhoc sums by label" begin
@@ -137,4 +151,35 @@ end
         @test stage_info(a, only(keys(a))).nscans == 3
     end
     @test stage_info(fit(Bandpass(), ps; gauge = PinAntenna(1)), :bandpass).sources == ["SRC1"]
+end
+
+# Each scan's visibilities rotated by its own phase per baseline, as a source
+# phase that changes from scan to scan.
+function _offset_scans(ps, seed)
+    rng = MersenneTwister(seed)
+    members = OrderedDict{Symbol, XRadio.MeasurementSet}()
+    for group in values(DimensionalData.groupby(ps, XRadio.ByScan()))
+        φ = 2π .* rand(rng, length(XRadio.baselines(first(values(group)))))
+        for (k, ms) in pairs(group)
+            m = read(ms)
+            V = copy(m[:visibility])
+            for bi in axes(V, BaselineID)
+                view(V, BaselineID(bi)) .*= cis(Float32(φ[bi]))
+            end
+            members[k] = Gustavo._with_layers(m; visibility = V)
+        end
+    end
+    return XRadio.ProcessingSet(members, DimensionalData.metadata(ps))
+end
+
+@testset "PerTrackSmoother aligns each scan's phase before pooling" begin
+    rng = MersenneTwister(5)
+    ps, _ = _build_fringe_ps(;
+        nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 3,
+        bandpass = 0.3 .* randn(rng, 4, 2, 16), seed = 3,
+    )
+    st = Bandpass(smoother = FP.PerTrackSmoother())
+    θ = fit(st, ps; gauge = PinAntenna(1)).steps[1].θ
+    θoff = fit(st, _offset_scans(ps, 4); gauge = PinAntenna(1)).steps[1].θ
+    @test θoff ≈ θ atol = 1.0e-6
 end

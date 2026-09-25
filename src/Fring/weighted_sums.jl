@@ -24,8 +24,9 @@ function weighted_sums(V, W, F; dims)
     return _weighted_sums!(wv, ws, V, W, F, dims)
 end
 
-# Behind a function barrier: a Measurement Set's layers do not infer.
-function _weighted_sums!(wv, ws, V, W, F, dims)
+# Behind a function barrier: a Measurement Set's layers do not infer. `dims` is
+# usually a type, which Julia does not specialize on unless it is a parameter.
+function _weighted_sums!(wv, ws, V, W, F, dims::D) where {D}
     for I in DimensionalData.DimIndices(V)
         w, v = W[I], V[I]
         _usable(F[I], w, v) || continue
