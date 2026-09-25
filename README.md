@@ -24,14 +24,12 @@ using FITSFiles   # enables the FITS-IDI/UVFITS reader and writer extension
 
 uvset = load_fitsidi("track.idifits")            # lazy: header tables only
 
-pipe = CalibrationPipeline(
-    BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase();
-    gauge = PinAntenna("AA"),                    # run-wide reference antenna
-)
+pipeline = BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()
+sol = fit(pipeline, uvset; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
-sol, out = fitcalibrate(
-    pipe, uvset;
-    reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 10.0)],
+out = calibrate(
+    sol, uvset;
+    post = AverageTime(seconds = 10.0) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
 )
 
 write_uvfits("track_cal.uvfits", out)
@@ -41,7 +39,7 @@ save_solution("track.jls", sol)
 Every step is optional and reorderable — a pipeline can equally be a single
 `Bandpass()` fit over data an earlier run already corrected. `fit` solves
 without producing output; `calibrate(sol, uvset)` applies a finished solution
-to this or another dataset with the same geometry.
+to this or another dataset with the same geometry, one scan group at a time.
 
 The solution is inspectable per stage: `sol[:fringe]` selects one step (any
 selection is itself a solution), `gains(sol[:bandpass])` evaluates its complex

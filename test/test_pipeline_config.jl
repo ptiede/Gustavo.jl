@@ -1,40 +1,30 @@
-# Modular calibration-pipeline tests: the pipeline-level surface
-# (`CalibrationPipeline`, `fitcalibrate`, reduce steps, defaults).
+# Modular calibration-pipeline tests: the pipeline-level surface (a pipeline
+# as a vector, `fit`, `calibrate` and its `post`, the output reducers, defaults).
 # Reuses `_build_fringe_uvset` and the CAL/FP/UVP aliases from test_pipeline.jl
 # (included earlier in runtests.jl).
 
-# A throwaway reduce step proving the ReduceStep extension point: subtype + one
-# `prepare_reducer` method (identity transform that records it ran).
-struct _ProbeReduce <: Gustavo.ReduceStep
-    seen::Base.RefValue{Bool}
-end
-Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
-    ((uv -> (s.seen[] = true; uv)), ctx)
-
 @testset "Calibration pipeline" begin
-    @testset "fitcalibrate defaults (solve + corrected output)" begin
+    @testset "fit, then calibrate" begin
         uvset, _ = _build_fringe_uvset()
-        pipe = CalibrationPipeline([BaselineFringeFit(), Bandpass(), AdhocPhase()]; gauge = PinAntenna(1))
-        sol, out = fitcalibrate(pipe, uvset)
+        pipe = (BaselineFringeFit(), Bandpass(), AdhocPhase())
+        sol = fit(pipe, uvset; gauge = PinAntenna(1))
         @test sol isa CAL.CalibrationSolution
-        @test out !== nothing                   # the full pipeline sets corrected output
-        # The fused output tail does not perturb the solve: gains ≡ the fit-only gains.
-        @test parent(gains(sol)) == parent(gains(fit(pipe, uvset)))
         @test sol.info.nant == 4
-        @test isempty(sol.postcal)              # no a-priori step
+        @test sol.sequence == pipe
+        out = calibrate(sol, uvset)
+        @test out isa UVP.UVSet
+        ref = Gustavo.UVData.apply_calibration(uvset, sol)
+        for (k, leaf) in DimensionalData.branches(ref)
+            @test isequal(parent(DimensionalData.branches(out)[k][:vis]), parent(leaf[:vis]))
+        end
     end
 
-    @testset "pipeline ReduceSteps fuse into the streaming pass" begin
+    @testset "calibrate's post runs on each corrected group" begin
         uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
-        chain = [BaselineFringeFit(), Bandpass(), AdhocPhase()]
-        pipe = CalibrationPipeline(
-            vcat(
-                chain, [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 1.0e6)],
-            ); gauge = PinAntenna(1)
+        sol = fit(BaselineFringeFit() |> Bandpass() |> AdhocPhase(), uvset; gauge = PinAntenna(1))
+        out = calibrate(
+            sol, uvset; post = AverageTime(seconds = 1.0e6) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
         )
-        sol, out = fitcalibrate(pipe, uvset)
-        # Equivalent hand-written reducer chain (same order) on the two-pass
-        # corrected set.
         reducer = uv -> UVP.time_bin_average(UVP.combine_spw(UVP.frequency_average(uv; nout = 1)), 1.0e6)
         out_ref = reducer(Gustavo.UVData.apply_calibration(uvset, sol))
         @test Set(keys(DimensionalData.branches(out))) ==
@@ -45,52 +35,24 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
             @test size(Vf) == size(Vr)
             @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(Vr, Vf))
         end
+
+        seen = Ref(0)
+        calibrate(sol, uvset; post = uv -> (seen[] += 1; uv))
+        @test seen[] == length(ST.scan_stream(uvset).groups)
     end
 
-    @testset "fitcalibrate reduce kwarg ≡ pipeline ReduceStep" begin
+    @testset "a pipeline holds solve steps, transforms and a-priori steps" begin
         uvset, _ = _build_fringe_uvset()
-        chain = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
-        _, out_kw = fitcalibrate(chain, uvset; reduce = [AverageFrequency(nout = 1)], gauge = PinAntenna(1))
-        _, out_pl = fitcalibrate(
-            CalibrationPipeline(
-                [
-                    BaselineFringeFit(), Bandpass(), AdhocPhase(), AverageFrequency(nout = 1),
-                ]; gauge = PinAntenna(1)
-            ),
-            uvset,
+        @test_throws "not AverageFrequency" fit(
+            [BaselineFringeFit(), AverageFrequency(nout = 1)], uvset; gauge = PinAntenna(1),
         )
-        for (k, leaf) in DimensionalData.branches(out_kw)
-            Vr = parent(leaf[:vis])
-            Vf = parent(DimensionalData.branches(out_pl)[k][:vis])
-            @test size(Vf) == size(Vr)
-            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(Vr, Vf))
-        end
-    end
-
-    @testset "extensibility: custom ReduceStep runs in the pipeline" begin
-        uvset, _ = _build_fringe_uvset()
-        seen = Ref(false)
-        sol, _ = fitcalibrate(
-            CalibrationPipeline(
-                [
-                    BaselineFringeFit(), Bandpass(), AdhocPhase(), _ProbeReduce(seen),
-                ]; gauge = PinAntenna(1)
-            ),
-            uvset,
-        )
-        @test seen[]
-        @test sol isa CAL.CalibrationSolution
-
-        # Arbitrary run_step-based action steps no longer thread through a
-        # pipeline (solve steps share one compiled model + streaming passes).
-        struct_probe = Gustavo.DataTransformStep(CalFunction((stack, win) -> nothing))
-        @test_throws ErrorException Gustavo.run_step(struct_probe, Gustavo.CalibrationContext())
+        @test_throws "holds no solve step" fit([StationWeightScale(ones(4))], uvset; gauge = PinAntenna(1))
     end
 
     @testset "reduce steps apply eagerly as functors" begin
         uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 8)
 
-        # The ReduceStep types are the one public spelling of each reduction;
+        # The reducer types are the one public spelling of each reduction;
         # calling one on a `UVSet` (or piping into it) applies it eagerly and
         # matches the internal kernels.
         red = uvset |> AverageFrequency(nout = 1) |> CombineSpw()
@@ -143,16 +105,9 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
         @test_throws ErrorException UVP.flag_spw_edges(uvset; mode = :bogus, fraction = 0.1)
 
-        # As a fused reduce step on the corrected output.
-        _, out = fitcalibrate(
-            CalibrationPipeline(
-                [
-                    BaselineFringeFit(), Bandpass(), AdhocPhase(),
-                    FlagSpwEdges(mode = :flag_fraction, fraction = 0.2),
-                ]; gauge = PinAntenna(1)
-            ),
-            uvset,
-        )
+        # As `calibrate`'s `post` on the corrected output.
+        sol = fit([BaselineFringeFit(), Bandpass(), AdhocPhase()], uvset; gauge = PinAntenna(1))
+        out = calibrate(sol, uvset; post = FlagSpwEdges(mode = :flag_fraction, fraction = 0.2))
         for (_, leaf) in DimensionalData.branches(out)
             F = parent(leaf[:flags])
             @test all(F[1, :, :, :])
@@ -185,8 +140,7 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
         @test keys(sol) == [:bandpass]
         @test !haskey(sol.info, :search)
         @test sol.info.nant == 4
-        _, out = fitcalibrate(Bandpass(), uvset; gauge = PinAntenna(2))
-        @test out !== nothing
+        @test calibrate(sol, uvset) isa UVP.UVSet
     end
 
     @testset "defaults" begin
@@ -225,10 +179,6 @@ Gustavo.prepare_reducer(s::_ProbeReduce, ctx::Gustavo.CalibrationContext) =
 
         e = ExecutionConfig()
         @test e.mem_fraction == 0.6 && e.mem_budget === nothing
-
-        # gauge is run-wide, on CalibrationPipeline, not on a step's model or
-        # ExecutionConfig.
-        @test CalibrationPipeline([BaselineFringeFit()]; gauge = PinAntenna(1)).gauge.refs == 1
 
         # AprioriAmplitude carries a pre-built spw_cals (loading is the caller's job).
         bc = Dict(1 => :dummy)
@@ -275,8 +225,6 @@ end
         @test fieldtype(typeof(ExecutionConfig()), :progress) === Nothing
         @test isconcretetype(fieldtype(typeof(e), :outer_executor))
         @test isconcretetype(fieldtype(typeof(e), :inner_executor))
-        # The pipeline propagates the config at its own concrete type.
-        @test fieldtype(typeof(CalibrationPipeline([BaselineFringeFit()]; exec = e, gauge = PinAntenna(1))), :exec) === typeof(e)
     end
 
     @testset "ProgressLogger" begin
@@ -342,28 +290,25 @@ end
         @test eltype(ST.scan_stream(uvset).transforms) === Any
     end
 
-    @testset "solution records its chains at their own type" begin
+    @testset "the solution records its pipeline and gauge" begin
         t = StationWeightScale(ones(4))
-        sol = fit(t |> BaselineFringeFit(), uvset; gauge = PinAntenna(1))
-        @test eltype(sol.transforms) === typeof(t)
-        @test eltype(sol.postcal) === Any        # empty
-        # A step selection rebuilds the solution without widening the chain.
-        @test eltype(sol[1:1].transforms) === eltype(sol.transforms)
-    end
+        ff = BaselineFringeFit()
+        sol = fit(t |> ff, uvset; gauge = PinAntenna("A1"))
+        @test sol.sequence == (t, ff)
+        # Recorded as a tuple whatever the pipeline was given as.
+        @test fit([t, ff], uvset; gauge = PinAntenna("A1")).sequence == (t, ff)
+        @test recorded_transforms(sol) == Any[t]
+        # The gauge as given, not as resolved against the stations.
+        @test sol.gauge.refs == "A1"
+        # A step selection carries both along.
+        @test sol[1:1].sequence == sol.sequence
+        @test sol[1:1].gauge === sol.gauge
 
-
-    @testset "AprioriAmplitude and CalibrationPipeline.gauge" begin
         bc = Dict(1 => :dummy)
         @test fieldtype(typeof(AprioriAmplitude(bc)), :spw_cals) === typeof(bc)
-        # The gauge is an AbstractGauge; a station code or index is what the
-        # gauge itself accepts, not what the pipeline field takes.
-        @test CalibrationPipeline([BaselineFringeFit()]; gauge = PinAntenna(2)).gauge.refs == 2
-        @test CalibrationPipeline([BaselineFringeFit()]; gauge = PinAntenna("A1")).gauge.refs == "A1"
-        @test CalibrationPipeline([BaselineFringeFit()]; gauge = PinAntenna(1)).gauge isa PinAntenna
-        @test CalibrationPipeline([BaselineFringeFit()]; gauge = ZeroSumPhase()).gauge isa ZeroSumPhase
-        # The field is typed, so a bare index is rejected at construction rather
-        # than silently treated as a gauge.
-        @test_throws TypeError CalibrationPipeline([BaselineFringeFit()]; gauge = 2)
+        # The gauge keyword is typed, so a bare index is rejected rather than
+        # silently treated as a gauge.
+        @test_throws TypeError fit(ff, uvset; gauge = 2)
     end
 end
 
@@ -378,9 +323,7 @@ end
         )
             for s in sol.steps
     ]
-    sold = CAL.CalibrationSolution(
-        sold_steps, sol.geom, sol.info; transforms = sol.transforms, postcal = sol.postcal,
-    )
+    sold = CAL.CalibrationSolution(sold_steps, sol.geom, sol.info; sol.sequence, sol.gauge)
     @test all(s.θ isa DimArray for s in sold.steps)
 
     a = Gustavo.UVData.apply_calibration(uvset, sol)

@@ -74,14 +74,13 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
     @testset "full pipeline: θ and output bit-identical across OUTER executors" begin
         uvset, _ = _build_fringe_uvset(; nscans = 2)
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
-        mk(ex) = CalibrationPipeline(
-            BaselineFringeFit(),
-            Bandpass(), AdhocPhase(adhoc);
-            exec = ExecutionConfig(outer_executor = ex),
-            gauge = PinAntenna(1),
+        run(ex) = fit(
+            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), uvset;
+            exec = ExecutionConfig(outer_executor = ex), gauge = PinAntenna(1),
         )
-        sol_t, out_t = fitcalibrate(mk(DynamicScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
-        sol_d, out_d = fitcalibrate(mk(GreedyScheduler()), uvset; reduce = [AverageFrequency(nout = 1)])
+        sol_t, sol_d = run(DynamicScheduler()), run(GreedyScheduler())
+        out_t = calibrate(sol_t, uvset; post = AverageFrequency(nout = 1), exec = ExecutionConfig(outer_executor = DynamicScheduler()))
+        out_d = calibrate(sol_d, uvset; post = AverageFrequency(nout = 1), exec = ExecutionConfig(outer_executor = GreedyScheduler()))
         @test parent(gains(sol_d)) == parent(gains(sol_t))
         @test keys(sol_d) == keys(sol_t)
         for (k, leaf) in UVP.branches(out_t)
@@ -101,16 +100,14 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
     @testset "full pipeline: θ bit-identical across INNER executors" begin
         uvset, _ = _build_fringe_uvset(; nscans = 2)
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
-        mk(inner) = CalibrationPipeline(
-            BaselineFringeFit(),
-            Bandpass(), AdhocPhase(adhoc);
-            exec = ExecutionConfig(inner_executor = inner),
-            gauge = PinAntenna(1),
+        run(inner) = fit(
+            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), uvset;
+            exec = ExecutionConfig(inner_executor = inner), gauge = PinAntenna(1),
         )
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are
         # order-fixed by the data layout, so θ is bit-identical.
-        sol_ser, _ = fitcalibrate(mk(SerialScheduler()), uvset)
-        sol_dyn, _ = fitcalibrate(mk(DynamicScheduler(; nchunks = 4)), uvset)
+        sol_ser = run(SerialScheduler())
+        sol_dyn = run(DynamicScheduler(; nchunks = 4))
         @test parent(gains(sol_ser)) == parent(gains(sol_dyn))
     end
 

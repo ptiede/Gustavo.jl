@@ -164,7 +164,7 @@
         )
         sol = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
         @test sol_ws[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
-        @test length(sol_ws.transforms) == 1 && sol_ws.transforms[1] isa StationWeightScale
+        @test only(recorded_transforms(sol_ws)) isa StationWeightScale
 
         # CalFunction runs on the new path (it errors only when bridging), and
         # is recorded + replayed by calibrate: flagging one baseline flags it in
@@ -178,41 +178,29 @@
                 end
             end
         end
-        sol_cf, out = fitcalibrate(
-            kill12 |> BaselineFringeFit(),
-            uvset,
-            gauge = PinAntenna(1),
-        )
+        sol_cf = fit(kill12 |> BaselineFringeFit(), uvset; gauge = PinAntenna(1))
         @test touched[] > 0
-        @test sol_cf.transforms[1] isa CalFunction
+        @test only(recorded_transforms(sol_cf)) isa CalFunction
+        out = calibrate(sol_cf, uvset)
         for (_, leaf) in DimensionalData.branches(out)
             F = parent(leaf[:flags])
             for (bi, (a, b)) in enumerate(UVP.baselines(leaf).pairs)
                 minmax(a, b) == (1, 2) && @test all(F[:, :, bi, :])
             end
         end
-
-        # fit + calibrate ≡ fitcalibrate on the new path.
-        out2 = calibrate(sol_cf, uvset)
-        for (k, leaf) in DimensionalData.branches(out)
-            V = parent(leaf[:vis])
-            V2 = parent(DimensionalData.branches(out2)[k][:vis])
-            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(V, V2))
-        end
     end
 
     @testset "model validation + full-pipeline option coverage" begin
         uvset, _ = _build_fringe_uvset()
-        # The model is the component tree alone (the gauge pin is run-wide, on
-        # CalibrationPipeline) — no per-effect fields or keywords on BaselineFringeFit.
+        # The model is the component tree alone (the gauge pin is run-wide, an
+        # argument of `fit`) — no per-effect fields or keywords on BaselineFringeFit.
         @test fieldnames(typeof(BaselineFringeFit())) == (:model, :estimator)
 
         # The options the legacy bridge used to reject (custom Stationization,
         # the inter-feed rate opt-in, arbitrary CalFunction transforms) run in
         # FULL pipelines now — every pipeline is new-engine.
         sol_full = fit(
-            CalibrationPipeline(
-                CalFunction((stack, win) -> nothing),
+            [CalFunction((stack, win) -> nothing),
                 BaselineFringeFit(
                     model = merge(
                         default_fringe_terms();
@@ -220,16 +208,15 @@
                     ),
                     estimator = MatchedFilter(closure = FP.Stationization(pfa_max = 1.0e-2)),
                 ),
-                Bandpass(), AdhocPhase();
-                exec = ExecutionConfig(),
-                gauge = PinAntenna(1),
-            ),
+                Bandpass(), AdhocPhase()],
             uvset,
+            exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         @test keys(sol_full) == [:fringe, :bandpass, :adhoc]
         # Bandpass without AdhocPhase still solves a :bandpass
         # stage (F |> B — no final pass).
-        sol_fb = fit(CalibrationPipeline(BaselineFringeFit(), Bandpass(); gauge = PinAntenna(1)), uvset)
+        sol_fb = fit([BaselineFringeFit(), Bandpass()], uvset; gauge = PinAntenna(1))
         @test any(r -> r.name === :bandpass, sol_fb.steps)
     end
 

@@ -61,12 +61,12 @@ include("test_adhoc.jl")
 # End-to-end CalibrationSolution + fit pipeline (Phase 6).
 include("test_pipeline.jl")
 
-# Modular calibration pipeline (CalibrationPipeline / calibrate refactor).
+# The calibration pipeline surface: pipelines as vectors, fit and calibrate.
 # Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
 include("test_pipeline_config.jl")
 
 # Composable-pipeline interface (step protocol, transforms, selections, stage
-# snapshots, fit/calibrate/fitcalibrate). Reuses the same aliases.
+# snapshots, fit/calibrate). Reuses the same aliases.
 include("test_interface.jl")
 
 # New streaming engine vs the frozen monolith oracle (M2 gates): grouping /
@@ -231,7 +231,6 @@ end
         @test isdefined(Gustavo, sub)
         @test getfield(Gustavo, sub) isa Module
     end
-    @test isdefined(Gustavo, :fitcalibrate)
 end
 
 @testset "top-level export surface" begin
@@ -241,7 +240,7 @@ end
     # fit/calibrate it, extract the per-stage step `sol[:fringe]` returns, write it.
     for n in (
             :UVSet, :load_uvfits, :load_fitsidi, :write_uvfits, :write_fitsidi,
-            :fit, :calibrate, :fitcalibrate, :StepSolution,
+            :fit, :calibrate, :StepSolution,
         )
         @test n in top
     end

@@ -299,7 +299,7 @@ end
             abs.(CAL.gains(b_raw; Ti = 1)), abs.(CAL.gains(b_pre; Ti = 1)); rtol = 1.0e-3,
         )
         # The transform is recorded on the solution, so `calibrate` replays it.
-        @test any(t -> t isa ST.AprioriPreCal, b_pre.transforms)
+        @test any(t -> t isa ST.AprioriPreCal, recorded_transforms(b_pre))
     end
 
     @testset "station coverage is settled at stream construction" begin

@@ -65,8 +65,12 @@
         # ACROSS baselines (stage B / bandpass / adhoc) and the exported weights.
         chain0 = BaselineFringeFit() |> Bandpass() |>
             AdhocPhase(FP.NoSmoothing())
-        base = fitcalibrate(chain0, uvset; gauge = PinAntenna(1))
-        fixd = fitcalibrate(FP.StationWeightScale(ws) |> chain0, uvset; gauge = PinAntenna(1))
+        base = let sol = fit(chain0, uvset; gauge = PinAntenna(1))
+            (sol, calibrate(sol, uvset))
+        end
+        fixd = let sol = fit(FP.StationWeightScale(ws) |> chain0, uvset; gauge = PinAntenna(1))
+            (sol, calibrate(sol, uvset))
+        end
         bfr, ffr = base[1][:fringe].steps[1], fixd[1][:fringe].steps[1]
         @test ffr.info.scan_snr == bfr.info.scan_snr
         @test ffr.info.det_snr == bfr.info.det_snr
@@ -94,9 +98,9 @@
         )
         # The old footgun (forgetting to re-pass weight_scale to a diagnostic)
         # is dead: with NO kwargs the diagnostics materialize through
-        # `sol.transforms` — the recorded StationWeightScale — so the explicit
+        # `recorded_transforms(sol)` — the StationWeightScale — so the explicit
         # kwarg and the default now see IDENTICAL data.
-        @test length(sol.transforms) == 1 && sol.transforms[1] isa FP.StationWeightScale
+        @test only(recorded_transforms(sol)) isa FP.StationWeightScale
         m = FP.fringe_search_map(uvset, sol; pol = (1, 1), weight_scale = ws)
         m0 = FP.fringe_search_map(uvset, sol; pol = (1, 1))
         @test m.map.detection.snr ≈ m0.map.detection.snr

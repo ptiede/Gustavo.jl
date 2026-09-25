@@ -1,19 +1,16 @@
-# ── Step protocol: the composable-pipeline contract ──────────────────────────
+# ── Step protocol ────────────────────────────────────────────────────────────
 #
-# A pipeline is an ordered list of steps, each solving its own compiled gain
-# model: at fit time a `SolveStep` declares its model components and
-# `plan_parameters` lays out that step's own θ alone — no step's θ block is
-# ever shared with, or visible to, another step's. Gain correction between
-# steps flows through the scan stream's transform chain (each finished step's
-# solution is appended, so later steps read already-corrected data), and every
-# stage remains individually inspectable through the solution's per-stage
-# records (composed from the run's finished `StepSolution`s once every step
-# has solved).
+# A pipeline is an ordered tuple of solve steps and corrections, each step
+# solving its own compiled gain model: at fit time a `SolveStep` declares its
+# model components and `plan_parameters` lays out that step's own θ alone — no
+# step's θ block is ever shared with, or visible to, another step's. A step
+# reads the data the corrections before it and the earlier steps' gains
+# produced (each finished step's solution joins the scan stream's transform
+# chain), and every stage remains individually inspectable through the
+# solution's per-stage records.
 #
 # Hooks a step may implement (all have working defaults):
 # - `model_components(step, spec)` — the gain-model components this step solves.
-# - `transforms(step)`             — data transforms it contributes to the
-#                                    materialization chain (see `CalFunction`).
 # - `fit_selection(step, prior_solutions)` — which scans feed its accumulation
 #                                    (fit-on-subset / apply-everywhere); reads
 #                                    non-data info from earlier steps (e.g.
@@ -27,31 +24,24 @@
 #   the executor owns all streaming (the scan group is the only unit of data
 #   flow — steps never see the uvset); a step accumulates from each
 #   materialized, transform-corrected scan view and runs its global solve when
-#   the pass completes. Steps are run in the order the pipeline declares them,
-#   each in its own streaming pass unless consecutive steps declare themselves
-#   scan-local (`fusable_grouping`), in which case they share one — a step that
-#   needs an earlier step's correction and does not have it fails from its own
-#   solve kernel, not from pipeline construction.
+#   the pass completes. Consecutive scan-local steps (`fusable_grouping`) with
+#   no correction between them share one pass.
 #
-# Run-wide resources (task/memory budgets, progress) live on the pipeline's
-# `ExecutionConfig`, not on steps: they are properties of a run, shared by
-# every pass. Anything that changes what a given step solves is model
-# specification and lives on that step. The reference antenna is neither: it is
-# a run-wide choice shared by every step's pass rather than a resource, so it
-# lives on `CalibrationPipeline` itself (`gauge`), not on any one step or on
-# `ExecutionConfig`.
+# Run-wide resources (task/memory budgets, progress) live on the
+# `ExecutionConfig` passed to `fit`; the gauge is a run-wide choice passed to
+# `fit` and recorded on the solution. Anything that changes what a given step
+# solves is model specification and lives on that step.
 
 """
-    SolveStep <: CalibrationStep
+    SolveStep
 
 A pipeline stage that solves its own gain model (fringe fit, bandpass
-estimation, temporal smoothing, …). Solve steps declare their model components
+estimation, adhoc phasing, …). Solve steps declare their model components
 via [`model_components`](@ref) and run under the executor-driven visitor
 contract — [`start_pass!`](@ref) / [`process_scan!`](@ref) /
-[`finish_pass!`](@ref); reduce steps ([`ReduceStep`](@ref)) transform data
-instead.
+[`finish_pass!`](@ref).
 """
-abstract type SolveStep <: CalibrationStep end
+abstract type SolveStep end
 
 """
     model_components(step::SolveStep, spec) -> GainModel
@@ -83,25 +73,16 @@ solving is delegated to a pluggable solver object forwards this question to it,
 so the generic also answers for solver objects — [`Bandpass`](@ref) asks its
 smoother.
 """
-supports_station_heterogeneity(step::CalibrationStep) = false
+supports_station_heterogeneity(step::SolveStep) = false
 
 # How the heterogeneity rejection names its subject. A step that delegates its
 # solve is not itself the thing that cannot take the model, so it names the
 # solver and the configuration that would accept it; the step type alone leaves
 # the user nothing to change.
-heterogeneity_rejector(step::CalibrationStep) = string(nameof(typeof(step)))
+heterogeneity_rejector(step::SolveStep) = string(nameof(typeof(step)))
 
 """
-    transforms(step::CalibrationStep) -> Tuple
-
-Data transforms ([`Fring.AbstractDataTransform`](@ref)) this step contributes
-to the materialization chain, applied in pipeline order to every scan group as
-it is materialized. Default: none.
-"""
-transforms(step::CalibrationStep) = ()
-
-"""
-    fit_selection(step::CalibrationStep, prior_solutions) -> Fring.AbstractScanSelection
+    fit_selection(step::SolveStep, prior_solutions) -> Fring.AbstractScanSelection
 
 Which scans feed this step's accumulation. Time-global components solved by
 the step still apply to every scan — fitting a bandpass or a track-global delay
@@ -110,10 +91,10 @@ is the ordered `Vector{StepSolution}` of every earlier step's finished solution 
 a step wanting non-data info from an earlier step (e.g. per-scan SNR) reads it
 off there. Default: [`Fring.AllScans`](@ref)`()`.
 """
-fit_selection(step::CalibrationStep, prior_solutions) = Fring.AllScans()
+fit_selection(step::SolveStep, prior_solutions) = Fring.AllScans()
 
 """
-    provides(step::CalibrationStep) -> Symbol
+    provides(step::SolveStep) -> Symbol
 
 The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
 names its `StepSolution` slot (`sol[:name]`)
@@ -121,19 +102,19 @@ and labels its progress-callback stage. Two steps in the same pipeline must
 not share a non-`:nothing` value — their solutions would collide under the
 same name. Default: `:nothing`.
 """
-provides(step::CalibrationStep) = :nothing
+provides(step::SolveStep) = :nothing
 
 """
-    required_grouping(step::CalibrationStep) -> Symbol
+    required_grouping(step::SolveStep) -> Symbol
 
 The leaf-grouping this step can run under: `:any`, or `:scan_complete` (the
 step needs every spw of a scan materialized together — true of the fringe
 search's multi-band concat and of per-scan θ-slot disjointness). Default `:any`.
 """
-required_grouping(step::CalibrationStep) = :any
+required_grouping(step::SolveStep) = :any
 
 """
-    fusable_grouping(step::CalibrationStep) -> Symbol
+    fusable_grouping(step::SolveStep) -> Symbol
 
 The accumulation scope this step's solve needs: `:scan` when the step is
 finalizable from one scan group alone — every θ slot it writes for a scan is
@@ -158,19 +139,7 @@ one pass materializes one set of groups, and forbids pass repetition
 Dispatches on the step INSTANCE, not just its type, so a step whose
 configuration decides the answer can answer for itself.
 """
-fusable_grouping(step::CalibrationStep) = :global
-
-"""
-    scan_flags(step::CalibrationStep, r) -> Vector{Tuple{Int, Int}}
-
-The `(station, geometry scan id)` pairs `step`'s solve left unconstrained in
-one scan, read off that scan's [`process_scan!`](@ref) return `r`. A fused
-output tail corrects each scan group while it is resident — before any step's
-`finish_pass!` runs — so flags a `:scan` step finishes inside `process_scan!`
-reach the tail through this accessor: like θ, they must be complete for the
-scan when `process_scan!` returns. Default: none.
-"""
-scan_flags(step::CalibrationStep, r) = Tuple{Int, Int}[]
+fusable_grouping(step::SolveStep) = :global
 
 """
     start_pass!(step::SolveStep, ctx) -> nothing
@@ -206,8 +175,7 @@ This is the step logging interface: every key returned lands on the step's
 own `StepSolution.info` (`stage_info(sol, name)`).
 
 `ctx.scratch[:pass_results]` holds the collected per-group results:
-`(; index, decode, work, reduce, r, out)` per selected group, in no
-particular order — `index` is the group's true position, and
+`(; index, decode, work, r)` per selected group, in no particular order — `index` is the group's true position, and
 [`scan_values`](@ref) scatters a per-result quantity back into global
 scan-group order. `decode`/`work` are seconds spent materializing / in
 `process_scan!`; `r` is the step's own per-scan return. The runner adds
@@ -285,112 +253,32 @@ mutable struct SolveContext{
     scratch::Dict{Symbol, Any}
 end
 
-# ── Transforms as pipeline steps ─────────────────────────────────────────────
+# ── Pipelines ────────────────────────────────────────────────────────────────
+
+# What a pipeline may hold: solve steps, corrections applied to the data every
+# later step reads, and output-only a-priori calibration.
+const PipelineElement = Union{SolveStep, Fring.AbstractDataTransform, AprioriAmplitude}
 
 """
-    DataTransformStep(t::Fring.AbstractDataTransform)
+    a |> b
 
-Lifts a data transform into a pipeline step so transforms compose in the step
-chain: `CalFunction(f) |> BaselineFringeFit(...)`. Raw transforms are lifted
-automatically by `|>` and the `CalibrationPipeline` constructors, so you rarely
-construct this directly.
+Build a pipeline, the tuple `(a, b)`, from solve steps and corrections;
+`pipeline |> c` appends and `c |> pipeline` prepends:
+`StationWeightScale(ws) |> BaselineFringeFit() |> Bandpass()`. Two pipelines
+join by splatting, `(p..., q...)`.
 """
-struct DataTransformStep{T <: Fring.AbstractDataTransform} <: CalibrationStep
-    t::T
-end
-transforms(s::DataTransformStep) = (s.t,)
+Base.:|>(a::PipelineElement, b::PipelineElement) = (a, b)
+Base.:|>(a::Tuple, b::PipelineElement) = (a..., b)
+Base.:|>(a::PipelineElement, b::Tuple) = (a, b...)
 
-function run_step(s::DataTransformStep, ctx::CalibrationContext)
-    return error(
-        "DataTransformStep($(typeof(s.t))) cannot run through the sequential `run_step` " *
-            "chain — use `fit`/`fitcalibrate`, which thread transforms into the streaming solve."
-    )
-end
-
-# Lift pipeline elements to steps: transforms wrap, steps pass through.
-_lift_step(s::CalibrationStep) = s
-_lift_step(t::Fring.AbstractDataTransform) = DataTransformStep(t)
-_lift_step(x) = error(
-    "not a pipeline element: $(typeof(x)) — expected a CalibrationStep or an AbstractDataTransform."
-)
-
-# ── Step chaining ────────────────────────────────────────────────────────────
-
-"""
-    StepChain
-
-An ordered chain of pipeline steps built with `|>`:
-`CalFunction(f) |> BaselineFringeFit(...) |> Bandpass(...)`. Pass it to
-[`CalibrationPipeline`](@ref) (or directly to [`fit`](@ref)).
-"""
-struct StepChain
-    steps::Vector{CalibrationStep}
-end
-
-const _Chainable = Union{CalibrationStep, Fring.AbstractDataTransform}
-Base.:|>(a::_Chainable, b::_Chainable) = StepChain([_lift_step(a), _lift_step(b)])
-Base.:|>(c::StepChain, b::_Chainable) = StepChain(vcat(c.steps, _lift_step(b)))
-Base.:|>(a::_Chainable, c::StepChain) = StepChain(vcat(_lift_step(a), c.steps))
-Base.:|>(a::StepChain, b::StepChain) = StepChain(vcat(a.steps, b.steps))
-
-# ── The pipeline ─────────────────────────────────────────────────────────────
-
-"""
-    CalibrationPipeline(steps...; exec = ExecutionConfig(), gauge)
-    CalibrationPipeline(chain::StepChain; exec = ExecutionConfig(), gauge)
-    CalibrationPipeline(steps::AbstractVector; exec = ExecutionConfig(), gauge)
-
-An ordered list of [`CalibrationStep`](@ref)s (raw
-`Fring.AbstractDataTransform`s are lifted automatically) plus the run-wide
-[`ExecutionConfig`](@ref), `gauge` — the gauge convention every solve step reads
-(`ctx.gauge`): an [`AbstractGauge`](@ref), e.g. `PinAntenna("PT")`,
-`PinAntenna(["PT", "LA"])` for a ranked fallback, or `ZeroSumPhase()`. There is
-no default gauge; [`fit`](@ref) throws, naming the stations, when none is given. A
-pipeline needs no [`BaselineFringeFit`](@ref) step; any `SolveStep`
-composition is legal, including a single standalone step (e.g. a `Bandpass`
-fit over data already corrected by an earlier run) — the single-step solve is
-the primitive a multi-step pipeline is built from (see [`fit`](@ref)'s
-docstring). Solve with [`fit`](@ref) / [`fitcalibrate`](@ref).
-"""
-struct CalibrationPipeline{X <: ExecutionConfig}
-    steps::Vector{CalibrationStep}
-    exec::X
-    gauge::Union{Nothing, AbstractGauge}
-end
-CalibrationPipeline(
-    steps::AbstractVector; exec::ExecutionConfig = ExecutionConfig(),
-    gauge::Union{Nothing, AbstractGauge} = nothing,
-) = CalibrationPipeline(CalibrationStep[_lift_step(s) for s in steps], exec, gauge)
-CalibrationPipeline(
-    steps::_Chainable...; exec::ExecutionConfig = ExecutionConfig(),
-    gauge::Union{Nothing, AbstractGauge} = nothing,
-) = CalibrationPipeline(collect(steps); exec, gauge)
-CalibrationPipeline(
-    chain::StepChain; exec::ExecutionConfig = ExecutionConfig(),
-    gauge::Union{Nothing, AbstractGauge} = nothing,
-) = CalibrationPipeline(chain.steps, exec, gauge)
-
-# Label a step by kind; a lifted transform is named for the transform it wraps.
-_step_label(s::CalibrationStep) = string(nameof(typeof(s)))
-_step_label(s::DataTransformStep) = string(nameof(typeof(s.t)))
-
-function Base.show(io::IO, ::MIME"text/plain", p::CalibrationPipeline)
-    println(io, "CalibrationPipeline (", length(p.steps), " step(s))")
-    for (i, s) in enumerate(p.steps)
-        println(io, "  ", i, ". ", _step_label(s))
+function _check_pipeline(seq)
+    for x in seq
+        x isa PipelineElement || throw(
+            ArgumentError(
+                "a pipeline holds solve steps, data transforms and AprioriAmplitude, " *
+                    "not $(nameof(typeof(x)))"
+            )
+        )
     end
-    print(
-        io, "  exec: outer=", nameof(typeof(outer_executor(p.exec))),
-        ", inner=", nameof(typeof(inner_executor(p.exec))),
-    )
-    return io
+    return seq
 end
-
-Base.show(io::IO, p::CalibrationPipeline) =
-    print(io, "CalibrationPipeline(", length(p.steps), " steps)")
-
-# Ordered container over its steps.
-Base.length(p::CalibrationPipeline) = length(p.steps)
-Base.getindex(p::CalibrationPipeline, i) = p.steps[i]
-Base.iterate(p::CalibrationPipeline, args...) = iterate(p.steps, args...)
-Base.eltype(::Type{<:CalibrationPipeline}) = CalibrationStep

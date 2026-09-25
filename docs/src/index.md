@@ -32,14 +32,12 @@ using FITSFiles
 
 uvset = load_fitsidi("track.idifits")            # lazy: header tables only
 
-pipe = CalibrationPipeline(
-    BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase();
-    gauge = PinAntenna("AA"),                    # run-wide reference antenna
-)
+pipeline = BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()
+sol = fit(pipeline, uvset; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
-sol, out = fitcalibrate(
-    pipe, uvset;
-    reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 10.0)],
+out = calibrate(
+    sol, uvset;
+    post = AverageTime(seconds = 10.0) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
 )
 
 write_uvfits("track_cal.uvfits", out)
@@ -53,21 +51,19 @@ tree of per-scan leaves, each carrying dimension-named
 `(Ti, BaselineID, Polarization, Frequency)` visibility cubes. The `UV_DATA` payload
 stays on disk until a scan group is materialized, so the solvers stream it.
 
-**Pipeline.** A [`CalibrationPipeline`](@ref) is an ordered list of steps
-chained with `|>`. The built-in solve steps are [`BaselineFringeFit`](@ref) (delay /
+**Pipeline.** A pipeline is a tuple of steps, usually built with `|>`,
+solved in order. The built-in solve steps are [`BaselineFringeFit`](@ref) (delay /
 rate / phase search), [`DispersionSBDFit`](@ref) (ionospheric dTEC and
 per-band-group delay refinement), [`Bandpass`](@ref) (time-stable station
 bandpass), and [`AdhocPhase`](@ref) (per-integration atmospheric
-phase). Data reductions ([`AverageFrequency`](@ref), [`AverageTime`](@ref),
-[`CombineSpw`](@ref), [`FlagSpwEdges`](@ref)) and a-priori amplitude
-calibration ([`AprioriAmplitude`](@ref)) compose into the same pipeline.
-Every step is optional and reorderable; a single standalone step is a legal
-pipeline.
+phase). A-priori amplitude calibration ([`AprioriAmplitude`](@ref)) joins
+the same pipeline and scales the output. Every step is optional and
+reorderable; a single standalone step is a legal pipeline.
 
 **Transforms.** A step scales what it *produces*; an
 [`AbstractDataTransform`](@ref Gustavo.Fring.AbstractDataTransform) scales what
-every step *reads* — it runs on each scan group as it is materialized, inside
-the streaming pass. Chain one into a pipeline like any step
+every step after it *reads* — it runs on each scan group as it is
+materialized, inside the streaming pass. Chain one into a pipeline like any step
 (`AprioriPreCal(uvset, antab) |> Bandpass()`). The built-ins are
 [`AprioriPreCal`](@ref) (ANTAB SEFD scaling before the solve, the pre-fit
 counterpart of [`AprioriAmplitude`](@ref)), [`ApplySolution`](@ref),
@@ -82,8 +78,11 @@ from HOW it is solved (a pluggable estimator or smoother object on the step).
 **Verbs.** [`fit`](@ref) solves and returns a
 [`CalibrationSolution`](@ref Gustavo.Calibration.CalibrationSolution) without
 producing corrected data; [`calibrate`](@ref) applies a finished solution to
-this or another dataset with the same geometry; [`fitcalibrate`](@ref) does
-both in one streaming run and is the production path.
+this or another dataset with the same geometry, replaying the recorded
+transforms and a-priori steps, and runs its `post` function — averaging
+([`AverageFrequency`](@ref), [`AverageTime`](@ref)), spw merging
+([`CombineSpw`](@ref)), edge flagging ([`FlagSpwEdges`](@ref)) — on each
+corrected scan group.
 
 **Solutions.** A solution is inspectable per stage: `sol[:fringe]` selects
 one step (any selection is itself a solution that applies, plots, and

@@ -50,27 +50,23 @@
     fm = default_fringe_terms()
     # `ref_ant` indexes the truth arrays below; `gauge` is what the solve takes.
     ref_ant = 1
-    gauge = PinAntenna(ref_ant)     # Bandpass's/CalibrationPipeline's default
+    gauge = PinAntenna(ref_ant)     # the gauge every test here passes to `fit`
     sol_closure = fit(
-        CalibrationPipeline(
-            BaselineFringeFit(model = fm), Bandpass(smoother = FP.PerTrackSmoother());
-            exec = ExecutionConfig(),
-            gauge = PinAntenna(1),
-        ),
+        [BaselineFringeFit(model = fm), Bandpass(smoother = FP.PerTrackSmoother())],
         uvset,
+        exec = ExecutionConfig(),
+        gauge = PinAntenna(1),
     )
     # This synthetic truth is i.i.d. RANDOM per channel (a deliberately hard,
     # uncorrelated-neighbor case for the ALS to track) — noticeably slower to
     # converge than JointSmoother's own defaults, hence the raised iteration
     # count/tolerance.
     sol_joint = fit(
-        CalibrationPipeline(
-            BaselineFringeFit(model = fm),
-            Bandpass(smoother = FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-10));
-            exec = ExecutionConfig(),
-            gauge = PinAntenna(1),
-        ),
+        [BaselineFringeFit(model = fm),
+            Bandpass(smoother = FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-10))],
         uvset,
+        exec = ExecutionConfig(),
+        gauge = PinAntenna(1),
     )
 
     function bp_leaves(sol)
@@ -139,8 +135,9 @@ end
     )
     fm = default_fringe_terms()
     runbp(sm) = fit(
-        CalibrationPipeline(BaselineFringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig(), gauge = PinAntenna(1)),
+        [BaselineFringeFit(model = fm), Bandpass(smoother = sm)],
         uvset,
+        exec = ExecutionConfig(), gauge = PinAntenna(1),
     )[:bandpass].steps[1]
 
     s_free = runbp(FP.JointSmoother(max_iterations = 40, tolerance = 1.0e-10))
@@ -201,8 +198,9 @@ end
 
     fm = default_fringe_terms()
     runbp(sm) = fit(
-        CalibrationPipeline(BaselineFringeFit(model = fm), Bandpass(smoother = sm); exec = ExecutionConfig(), gauge = PinAntenna(1)),
+        [BaselineFringeFit(model = fm), Bandpass(smoother = sm)],
         uvset,
+        exec = ExecutionConfig(), gauge = PinAntenna(1),
     )[:bandpass].steps[1]
     s_joint = runbp(FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-12))
     s_closure = runbp(FP.PerTrackSmoother(amp = FP.FreeShape()))
@@ -212,8 +210,8 @@ end
         Float64[L[1, f, c, 1, a] for c in 1:nglob]
     )
     gauge(x) = x .- sum(x) / length(x)
-    # gauge = PinAntenna(1), feed 1 is the pinned node (Bandpass's/CalibrationPipeline's
-    # default reference). Its amplitude bandpass must come back, not flat.
+    # Under the `PinAntenna(1)` gauge the fits above use, feed 1 is the pinned
+    # node. Its amplitude bandpass must come back, not flat.
     ref_true = gauge(abp_true[1, 1, :])
     ref_got = gauge(la(s_joint, 1, 1))
     @test std(ref_got) > 0.5 * std(ref_true)

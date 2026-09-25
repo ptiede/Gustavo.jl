@@ -111,16 +111,6 @@ include("synthetic_uvset.jl")
         @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
         @test occursin("GainModel", sprint(show, sol[:fringe].steps[1].model))
 
-        # CalibrationPipeline is an ordered container over its steps.
-        pipe = CalibrationPipeline(BaselineFringeFit() |> Bandpass(); gauge = PinAntenna(1))
-        @test length(pipe) == length(pipe.steps)
-        @test eltype(typeof(pipe)) == CalibrationStep
-        @test collect(pipe) == pipe.steps
-        @test pipe[1] === pipe.steps[1]
-        @test [s for s in pipe] == pipe.steps
-        @test occursin("CalibrationPipeline", sprint(show, pipe))
-        @test occursin("CalibrationPipeline", sprint(show, MIME"text/plain"(), pipe))
-
         # ScanStream is an ordered container over its scan-group specs.
         stream = ST.scan_stream(uvset)
         @test length(stream) == length(stream.groups)
@@ -269,9 +259,9 @@ end
     end
 end
 
-@testset "Fused fitcalibrate ≡ two-pass fit + apply" begin
-    # The fused single-pass driver must produce the SAME result as the explicit
-    # two-pass `apply_calibration(uvset, fit(pipe, uvset))`, because each
+@testset "calibrate ≡ fit + whole-set apply" begin
+    # Streaming the correction one scan group at a time must produce the same
+    # result as `apply_calibration(uvset, fit(pipe, uvset))`, because each
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
@@ -281,19 +271,9 @@ end
     sol_ref = fit(chain, uvset; gauge = PinAntenna(1))
     corr_ref = Gustavo.UVData.apply_calibration(uvset, sol_ref)
 
-    # No reduce steps → fused correction only (no reduction).
-    sol_fused, out_fused = fitcalibrate(chain, uvset; gauge = PinAntenna(1))
-
-    @test parent(gains(sol_fused)) ≈ parent(gains(sol_ref))
-    # Same tree keys.
+    out_fused = calibrate(sol_ref, uvset)
     @test Set(keys(DimensionalData.branches(out_fused))) ==
         Set(keys(DimensionalData.branches(corr_ref)))
-    # Corrected visibilities/weights per leaf agree to Float32 precision
-    # (NaN-aware) — NOT bit-identical: the two-pass reference divides by ONE
-    # combined gain (`apply_calibration`), while the fused path composes
-    # earlier steps' corrections through the transform chain as SEPARATE
-    # sequential divisions (mathematically the same total gain, different
-    # floating-point rounding).
     for (k, leaf) in DimensionalData.branches(corr_ref)
         Vr = parent(leaf[:vis]); Wr = parent(leaf[:weights])
         lf = DimensionalData.branches(out_fused)[k]
@@ -303,10 +283,10 @@ end
         @test all(((x, y),) -> (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5), zip(Wr, Wf))
     end
 
-    # With a reducer the fused output must equal applying the same reducer to the
-    # two-pass corrected set.
+    # `post` runs on each corrected group: the same as reducing the whole
+    # corrected set.
     red_ref = UVP.frequency_average(corr_ref; nout = 1)
-    _, out_red = fitcalibrate(chain, uvset; reduce = [AverageFrequency(nout = 1)], gauge = PinAntenna(1))
+    out_red = calibrate(sol_ref, uvset; post = AverageFrequency(nout = 1))
     for (k, leaf) in DimensionalData.branches(red_ref)
         Vr = parent(leaf[:vis])
         Vf = parent(DimensionalData.branches(out_red)[k][:vis])
@@ -360,12 +340,14 @@ end
     # `_build_fringe_uvset` registers NO primary cards, so write_uvfits must
     # synthesize them. Reduce + combine spws to channels, then round-trip via UVFITS.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
-    sol, reduced = fitcalibrate(
+    sol = fit(
         BaselineFringeFit() |> Bandpass() |>
             AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
-        reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
         gauge = PinAntenna(1),
+    )
+    reduced = calibrate(
+        sol, uvset; post = AverageTime(seconds = 0.02) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
     )
     @test length(DimensionalData.branches(reduced)) == 1
     @test length(UVP.union_frequency_axis(reduced)) == 1
@@ -396,12 +378,14 @@ end
     # since both files traverse the identical write/load path, their records align
     # exactly and differ ONLY by that conjugation. This isolates the convention.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
-    _, reduced = fitcalibrate(
+    sol = fit(
         BaselineFringeFit() |> Bandpass() |>
             AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
-        reduce = [AverageFrequency(nout = 1), CombineSpw(), AverageTime(seconds = 0.02)],
         gauge = PinAntenna(1),
+    )
+    reduced = calibrate(
+        sol, uvset; post = AverageTime(seconds = 0.02) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
     )
     pa = tempname() * ".uvfits"
     pf = tempname() * ".uvfits"
@@ -873,7 +857,7 @@ end
     for step in (fringe_step, bandpass_step, adhoc_step)
         t = step.info.timing
         @test length(t.decode) == inf.nscan
-        @test all(>=(0), t.decode) && all(>=(0), t.work) && all(>=(0), t.reduce)
+        @test all(>=(0), t.decode) && all(>=(0), t.work)
     end
     @test sum(fringe_step.info.timing.work) > 0
     buf = IOBuffer()
@@ -1200,9 +1184,7 @@ end
         model = default_fringe_terms(),
         estimator = FP.MatchedFilter(search = FP.FringeSearch(algorithm = FP.FullGrid())),
     )
-    # Scan-local, so the whole chain below fuses into one pass — the
-    # configuration whose flags exist only per scan (`scan_flags`), never in
-    # scratch while the pass runs.
+    # Scan-local, so the whole chain below fuses into one pass.
     @test fusable_grouping(ff) === :scan
     sol = fit(ff |> AdhocPhase(), uvset; gauge = PinAntenna(1))
     flags = FP.fringe_station_flags(sol)
@@ -1237,13 +1219,8 @@ end
     @test !any(@view parent(l0f[:flags])[:, :, bi4, :])
     @test any(>(0), @view parent(l0f[:weights])[:, :, bi4, :])
 
-    # The fused fitcalibrate tail applies the same flags: it corrects each scan
-    # group while resident, before any `finish_pass!` has run, so it must read
-    # the scan's flags off the fringe step's own `process_scan!` return
-    # (`scan_flags`) — scratch holds nothing yet.
-    sol_fc, out = fitcalibrate(ff |> AdhocPhase(), uvset; gauge = PinAntenna(1))
-    @test sol_fc.info.flagged_ant == sol.info.flagged_ant
-    @test sol_fc.info.flagged_scan == sol.info.flagged_scan
+    # `calibrate` applies the same flags, one scan group at a time.
+    out = calibrate(sol, uvset)
     for (_, leaf) in Gustavo.UVData.leaves(out)
         F = parent(leaf[:flags])
         prs = Gustavo.UVData.baselines(leaf).pairs

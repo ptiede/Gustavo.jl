@@ -323,7 +323,7 @@ function _diag_stream(
         flag_channels === nothing || push!(t, FlagChannels(BitVector(flag_channels)))
         t
     else
-        sol.transforms
+        recorded_transforms(sol)
     end
     any(t -> t === missing, tfs) && error(
         "diagnostics: the solution records a transform that did not survive " *
@@ -842,8 +842,7 @@ function print_solve_timing(sol::CalibrationSolution; io = stdout, top::Integer 
         if haskey(s.info, :timing)
             t = s.info.timing
             line *= @sprintf(
-                "   (Σ decode %8.1f s, Σ work %8.1f s, Σ reduce %8.1f s)",
-                sum(t.decode), sum(t.work), sum(t.reduce),
+                "   (Σ decode %8.1f s, Σ work %8.1f s)", sum(t.decode), sum(t.work),
             )
         end
         println(io, line)
@@ -851,11 +850,11 @@ function print_solve_timing(sol::CalibrationSolution; io = stdout, top::Integer 
     heaviest = argmax(s -> haskey(s.info, :timing) ? sum(s.info.timing.work) : -Inf, timed)
     haskey(heaviest.info, :timing) || return nothing
     t = heaviest.info.timing
-    tot = t.decode .+ t.work .+ t.reduce
+    tot = t.decode .+ t.work
     ord = sortperm(tot; rev = true)
-    println(io, "  slowest scans (", heaviest.name, ", decode/work/reduce s):")
+    println(io, "  slowest scans (", heaviest.name, ", decode/work s):")
     for i in ord[1:min(Int(top), length(ord))]
-        println(io, @sprintf("    scan %3d  %6.1f = %.1f/%.1f/%.1f", i, tot[i], t.decode[i], t.work[i], t.reduce[i]))
+        println(io, @sprintf("    scan %3d  %6.1f = %.1f/%.1f", i, tot[i], t.decode[i], t.work[i]))
     end
     return nothing
 end

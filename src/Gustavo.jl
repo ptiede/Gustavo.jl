@@ -13,6 +13,8 @@ import DimensionalData
 using OhMyThreads: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 
 using LinearAlgebra: BLAS
+import StatsAPI
+using StatsAPI: fit
 
 include("UVData/UVData.jl")
 using .UVData
@@ -41,12 +43,11 @@ export UVData, Calibration, Streaming, Fring
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.
 export Polarization, Frequency, Ant, BaselineID, Ti, UVW, Feed, Scan
 # Data entry and exit: the set type plus the reader/writer pair for each
-# supported format, so a bare `using Gustavo` spans load → fitcalibrate → write.
+# supported format, so a bare `using Gustavo` spans load → fit → calibrate → write.
 export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, resolve_gauge
-export CalibrationPipeline, CalibrationStep, ReduceStep, CalibrationContext
-export run_step, prepare_reducer, calibrate
+export calibrate
 export BaselineFringeFit, DispersionModel, SingleBandDelay, default_fringe_terms,
     MatchedFilter, DispersionSBDFit, Bandpass, default_bandpass_terms, AdhocPhase,
     default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
@@ -64,11 +65,11 @@ export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
     ChannelBlocks, FreqGroups, BandGroups
 export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
-export fit, fitcalibrate
-export SolveStep, StepChain, DataTransformStep, ExecutionConfig, ProgressLogger
+export fit
+export SolveStep, ExecutionConfig, ProgressLogger
 export outer_executor, inner_executor
 export start_pass!, process_scan!, finish_pass!, scan_values
-export model_components, fit_selection, provides, required_grouping, fusable_grouping, scan_flags
+export model_components, fit_selection, provides, required_grouping, fusable_grouping
 export supports_station_heterogeneity
 # Re-export the transform / selection vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
@@ -84,5 +85,5 @@ export map_groups, foreach_group
 # and serialization.
 export CalibrationSolution, StepSolution, stage_info
 export component_names, gains, parameters
-export save_solution, load_solution
+export save_solution, load_solution, recorded_transforms
 end

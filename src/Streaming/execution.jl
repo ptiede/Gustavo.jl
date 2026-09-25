@@ -5,8 +5,8 @@
                     outer_executor = SerialScheduler(), inner_executor = DynamicScheduler())
 
 Run-wide resources for a streaming run, shared by every pass over the data;
-per-step options live on the steps, and the gauge convention on
-`CalibrationPipeline`. Two runs differing only in their `ExecutionConfig`
+per-step options live on the steps, and the gauge is an argument of
+`fit`. Two runs differing only in their `ExecutionConfig`
 solve the same problem. A [`ScanStream`](@ref) carries the config it was
 built from; read the schedulers back with [`outer_executor`](@ref) /
 [`inner_executor`](@ref). Each scheduler is used exactly as configured, so
@@ -65,7 +65,7 @@ A ready-made [`ExecutionConfig`](@ref) `progress` callback: prints each pass's
 `min_interval` seconds, with an ETA extrapolated from the pass's mean
 completion rate so far. A pass's start (`done == 0`) and finish
 (`done == total`) always print, regardless of the throttle. Stateful — build
-one `ProgressLogger` per `fit`/`fitcalibrate` call; sharing an instance across
+one `ProgressLogger` per `fit` or `calibrate` call; sharing an instance across
 concurrent runs mixes their timers.
 
     fit(pipe, uvset; exec = ExecutionConfig(progress = ProgressLogger()))

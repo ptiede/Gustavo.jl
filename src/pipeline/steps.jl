@@ -11,7 +11,7 @@
 The fringe-fitting stage. What is solved is `model`, a phase-only
 [`GainModel`](@ref): per-scan constant/delay/rate and the inter-feed offsets;
 see [`Fring.default_fringe_terms`](@ref) for the default. The gauge pin, `gauge`,
-is run-wide — see [`CalibrationPipeline`](@ref).
+is run-wide — an argument of [`fit`](@ref).
 How it is solved lives on `estimator`, a pluggable
 [`AbstractFringeEstimator`](@ref); by default [`MatchedFilter`](@ref)
 (per-baseline delay/rate search + closure-screened station WLS).
@@ -34,9 +34,6 @@ required_grouping(::BaselineFringeFit) = :scan_complete
 # estimator that pools every scan's detections — forces `:global`.
 fusable_grouping(s::BaselineFringeFit) =
     Fring.scan_local_solve(s.estimator, s.model) ? :scan : :global
-# Consulted only inside a fused run — exactly the scan-local configuration,
-# whose `estimate_scan!` return carries the scan's own unconstrained flags.
-scan_flags(s::BaselineFringeFit, r) = r.flags
 # NOTE: no `fit_selection` method — the fringe pass streams every scan (the
 # default `AllScans`).
 
@@ -120,13 +117,6 @@ required_grouping(::AdhocPhase) = :scan_complete
 # `adhoc_scan!` fits the scan's per-AP track from that scan's stack alone and
 # writes its θ before returning; the slots are disjoint per scan.
 fusable_grouping(::AdhocPhase) = :scan
-
-# Solve steps run through the pipeline verbs, never the sequential
-# `run_step` chain (they need the shared compiled model + streaming passes).
-run_step(s::SolveStep, ctx::CalibrationContext) = error(
-    "$(nameof(typeof(s))) is a SolveStep — run it through `fit`/`fitcalibrate`, " *
-        "not step-by-step."
-)
 
 # ── Model components (compiled in step order into one GainModel) ───────
 

@@ -80,10 +80,9 @@ Base.:(==)(a::StepSolution, b::StepSolution) =
     a.θ == b.θ && a.info == b.info && a.selection == b.selection
 
 """
-    CalibrationSolution(steps, geom, info = NamedTuple();
-                        transforms = (), postcal = (), pipeline = nothing)
+    CalibrationSolution(steps, geom, info = NamedTuple(); sequence = (), gauge = nothing)
     CalibrationSolution(model, layout, geom, θ, info = NamedTuple(); name = :solution,
-                        transforms = (), postcal = (), pipeline = nothing)
+                        sequence = (), gauge = nothing)
 
 A solved calibration: the composition of every pipeline step's own finished
 [`StepSolution`](@ref). The second form is the common single-model
@@ -98,57 +97,50 @@ component) — a component selection (`sol[step, path...]`, see `getindex`)
 always takes the step explicitly rather than searching for a name across
 `steps`.
 
-`transforms` records the data-transform chain the solve materialized its scans
-through (precal, weight scaling, caller hooks), so diagnostics can replay it and
-the standalone apply path can reproduce `transforms ∘ solution`. `postcal`
-records the OUTPUT-chain calibration steps (a-priori amplitude) applied after
-the gains and before any reductions, so the standalone apply reproduces them
-without re-passing their inputs. Both default empty.
-
-`pipeline` records the `CalibrationPipeline` the solve ran — step order, model
-specs, execution config, and gauge — so a run is reproducible from its output
-(`fit(sol.pipeline, uvset)`). It is provenance only: applying the solution
-never reads it, and it does not participate in `==`. `nothing` for a
-hand-built solution; `missing` when a recorded pipeline did not survive
-serialization.
+`sequence` records the pipeline the solve ran, as a tuple, in order: its solve steps,
+data transforms and a-priori amplitude steps. Applying the solution replays
+its transforms ([`recorded_transforms`](@ref)) and a-priori steps, and
+`fit(sol.sequence, uvset; sol.gauge)` repeats the run. `gauge` is the gauge
+the solve was given. Both are empty for a hand-built solution; an element that
+did not survive serialization is `missing`.
 """
-struct CalibrationSolution{G <: DataGeometry, T, P}
+struct CalibrationSolution{G <: DataGeometry}
     steps::Vector{StepSolution}
     geom::G
     info::NamedTuple
-    transforms::Vector{T}
-    postcal::Vector{P}
-    # The pipeline the solve ran (`nothing` for a hand-built solution;
-    # `missing` when a recorded pipeline did not survive serialization).
-    # Provenance only — it does not participate in applying the solution.
-    pipeline::Any
+    sequence::Tuple
+    gauge::Any
 end
 
 function CalibrationSolution(
         steps::AbstractVector{<:StepSolution}, geom::DataGeometry, info::NamedTuple = NamedTuple();
-        transforms = (), postcal = (), pipeline = nothing,
+        sequence = (), gauge = nothing,
     )
     isempty(steps) && throw(ArgumentError("CalibrationSolution: at least one step is required."))
-    return CalibrationSolution(
-        collect(StepSolution, steps), geom, info,
-        UVData._narrow_eltype(transforms), UVData._narrow_eltype(postcal), pipeline,
-    )
+    return CalibrationSolution(collect(StepSolution, steps), geom, info, Tuple(sequence), gauge)
 end
 
 function CalibrationSolution(
         model::GainModel, layout::ParameterLayout, geom::DataGeometry,
         θ::AbstractVector, info::NamedTuple = NamedTuple();
-        name::Symbol = :solution, transforms = (), postcal = (), pipeline = nothing,
+        name::Symbol = :solution, sequence = (), gauge = nothing,
     )
     return CalibrationSolution(
-        [StepSolution(name, model, layout, θ, info)], geom, info;
-        transforms, postcal, pipeline,
+        [StepSolution(name, model, layout, θ, info)], geom, info; sequence, gauge,
     )
 end
 
+"""
+    recorded_transforms(sol::CalibrationSolution) -> Vector
+
+The data transforms in `sol.sequence`, in order, with any `missing` element
+kept so that a caller replaying them can refuse.
+"""
+function recorded_transforms end
+
 Base.:(==)(a::CalibrationSolution, b::CalibrationSolution) =
     a.steps == b.steps && a.geom == b.geom && a.info == b.info &&
-    a.transforms == b.transforms && a.postcal == b.postcal
+    a.sequence == b.sequence && a.gauge == b.gauge
 
 # `nant` is a run-wide constant every step's own layout was planned with
 # (`plan_parameters(step_model, nant, geom)`), so any step's own layout reports
@@ -169,10 +161,8 @@ function Base.show(io::IO, ::MIME"text/plain", sol::CalibrationSolution)
     println(io, "  Parameters: ", sum(s.layout.nθ for s in sol.steps))
     println(io, "  Components: ", join(component_names(sol), ", "))
     print(
-        io, "  Provenance: ", length(sol.transforms), " transform(s), ",
-        length(sol.postcal), " postcal step(s), pipeline ",
-        sol.pipeline === nothing ? "not recorded" :
-            sol.pipeline === missing ? "missing" : "recorded",
+        io, "  Pipeline  : ", length(sol.sequence), " element(s), gauge ",
+        sol.gauge === nothing ? "not recorded" : sol.gauge,
     )
     return io
 end
@@ -226,7 +216,7 @@ function Base.getindex(sol::CalibrationSolution, step::Union{Symbol, Integer}, p
     s = _select_component(ssel.steps[1], (path1, path...))
     return CalibrationSolution(
         [s], sol.geom, sol.info;
-        transforms = sol.transforms, postcal = sol.postcal, pipeline = sol.pipeline,
+        sequence = sol.sequence, gauge = sol.gauge,
     )
 end
 
@@ -544,7 +534,7 @@ function step_solution(sol::CalibrationSolution, index)
     stpout = stp isa AbstractVector ? stp : [stp]
     return CalibrationSolution(
         stpout, sol.geom, sol.info;
-        transforms = sol.transforms, postcal = sol.postcal, pipeline = sol.pipeline,
+        sequence = sol.sequence, gauge = sol.gauge,
     )
 end
 
@@ -911,9 +901,9 @@ function _replay_transforms end
 
 """
     apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true,
-                      transforms = sol.transforms) -> UVSet
+                      transforms = recorded_transforms(sol)) -> UVSet
 
-Apply the solution's recorded transform chain (`sol.transforms` — e.g. a
+Apply the solution's recorded transforms ([`recorded_transforms`](@ref) — e.g. a
 station weight scale and an earlier solution applied as a data transform), then
 divide every leaf's visibilities by the solution's per-antenna gains. For a
 baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
@@ -925,7 +915,7 @@ visibility: the corrected value is undefined. Their weights are untouched.
 
 `transforms` defaults to the solution's own recorded chain, so the corrected
 set carries the same total correction `calibrate(sol, uvset)` produces (minus
-its `postcal`/`reduce` tail) — weights included, which matters to anything
+its a-priori and `post` steps) — weights included, which matters to anything
 that reads them as noise claims. Pass `transforms = ()` to apply the gains
 alone: the right call when the data has already been transform-corrected (the
 streaming passes do this), and the semantics every internal replay site uses.
@@ -948,7 +938,7 @@ SNR transfer).
 function UVData.apply_calibration(
         uvset::UVSet, sol::CalibrationSolution;
         apply_flags::Bool = true, executor = DynamicScheduler(),
-        transforms = sol.transforms,
+        transforms = recorded_transforms(sol),
     )
     for t in transforms
         t === missing && throw(
@@ -1084,74 +1074,52 @@ end
     save_solution(path, sol::CalibrationSolution)
 
 Serialize `sol` to `path` via the `Serialization` stdlib inside a versioned
-wrapper NamedTuple. The current version is 7 (the solve's
-`CalibrationPipeline` is recorded on the solution); earlier versions are
-refused on load. Transforms that close over caller code (e.g. a
-`CalFunction`) serialize only within the same code state; a transform, a
-postcal step, or the recorded pipeline that fails to serialize is recorded as
-`missing` with a warning rather than failing the save.
+wrapper NamedTuple. The current version is 8 (the solution records its
+pipeline as `sequence` and its `gauge`); earlier versions are refused on load.
+Elements that close over caller code (e.g. a `CalFunction`) serialize only
+within the same code state; a pipeline element that fails to serialize is
+recorded as `missing` with a warning rather than failing the save.
 """
 function save_solution(path::AbstractString, sol::CalibrationSolution)
     wrapper = (;
-        version = 7, sol.steps, sol.geom, sol.info,
-        transforms = _serializable_transforms(sol.transforms),
-        postcal = _serializable_transforms(sol.postcal),
-        pipeline = _serializable_pipeline(sol.pipeline),
+        version = 8, sol.steps, sol.geom, sol.info,
+        sequence = Tuple(_serializable_elements(sol.sequence)), sol.gauge,
     )
     serialize(path, wrapper)
     return path
 end
 
-function _serializable_transforms(ts)
+function _serializable_elements(xs)
     out = Any[]
-    for t in ts
+    for x in xs
         ok = try
-            serialize(IOBuffer(), t)
+            serialize(IOBuffer(), x)
             true
         catch
             false
         end
         if ok
-            push!(out, t)
+            push!(out, x)
         else
-            @warn "save_solution: transform $(typeof(t)) is not serializable — recorded as `missing`."
+            @warn "save_solution: pipeline element $(typeof(x)) is not serializable — recorded as `missing`."
             push!(out, missing)
         end
     end
     return out
 end
 
-# Same fallback policy as `_serializable_transforms`, for the one recorded
-# pipeline: an unserializable pipeline (e.g. a step configured with caller
-# code) degrades to `missing` instead of failing the save.
-function _serializable_pipeline(p)
-    p === nothing && return nothing
-    ok = try
-        serialize(IOBuffer(), p)
-        true
-    catch
-        false
-    end
-    ok && return p
-    @warn "save_solution: the recorded pipeline is not serializable — recorded as `missing`."
-    return missing
-end
-
 """
     load_solution(path) -> CalibrationSolution
 
-Inverse of [`save_solution`](@ref). Only current-format (version 7) files are
+Inverse of [`save_solution`](@ref). Only current-format (version 8) files are
 supported; files from an earlier Gustavo used a different solution shape and
 are refused — re-solve to produce a current-format solution.
 """
 function load_solution(path::AbstractString)
     w = deserialize(path)
-    w.version == 7 || error(
+    w.version == 8 || error(
         "load_solution: unsupported version $(w.version) — saved by an incompatible " *
             "Gustavo (the solution shape changed); re-solve to produce a current file.",
     )
-    return CalibrationSolution(
-        w.steps, w.geom, w.info;
-        transforms = w.transforms, postcal = w.postcal, pipeline = w.pipeline,
-    )
+    return CalibrationSolution(w.steps, w.geom, w.info; w.sequence, w.gauge)
 end

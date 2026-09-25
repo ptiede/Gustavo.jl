@@ -1,5 +1,5 @@
 # Composable-pipeline interface tests (protocol, transforms, selections, stage
-# provenance/snapshots, and the fit/calibrate/fitcalibrate verbs). Every
+# provenance/snapshots, and the fit/calibrate verbs). Every
 # pipeline runs on the new engine. Reuses `_build_fringe_uvset` and the
 # CAL/FP/UVP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
@@ -40,7 +40,6 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
     @testset "step protocol defaults + visitor hooks" begin
         s = _ProtoProbe()
         @test Gustavo.model_components(s, nothing) == GainModel()
-        @test Gustavo.transforms(s) == ()
         @test Gustavo.fit_selection(s, Gustavo.StepSolution[]) isa AllScans
         @test Gustavo.provides(s) == :nothing
         @test Gustavo.required_grouping(s) == :any
@@ -50,9 +49,6 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test Gustavo.start_pass!(s, nothing) === nothing
         @test Gustavo.process_scan!(s, nothing, nothing, nothing) === nothing
         @test Gustavo.finish_pass!(s, nothing) == NamedTuple()
-        # A step that flags nothing per scan contributes nothing to a fused
-        # output tail, whatever its `process_scan!` returned.
-        @test Gustavo.scan_flags(s, nothing) == Tuple{Int, Int}[]
     end
 
     @testset "built-in step declarations" begin
@@ -89,16 +85,10 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         # A step's model is a GainModel, never a bare NamedTuple.
         @test_throws MethodError BaselineFringeFit(model = (; phase = default_fringe_terms().phase))
         @test Gustavo.fusable_grouping(BaselineFringeFit(estimator = _OpaqueEstimator())) == :global
-        # A scan-local BaselineFringeFit finishes each scan's unconstrained-station
-        # flags inside `process_scan!`, so the fused output tail reads them off
-        # that scan's return rather than waiting for the pass to end.
-        @test Gustavo.scan_flags(BaselineFringeFit(), (; flags = [(4, 2)])) == [(4, 2)]
         # Neither Bandpass nor BaselineFringeFit overrides fit_selection — both passes
         # stream every scan.
         @test Gustavo.fit_selection(Bandpass(), Gustavo.StepSolution[]) isa AllScans
         @test Gustavo.fit_selection(BaselineFringeFit(), Gustavo.StepSolution[]) isa AllScans
-        # Solve steps refuse the sequential run_step chain.
-        @test_throws ErrorException Gustavo.run_step(BaselineFringeFit(), Gustavo.CalibrationContext())
     end
 
     @testset "pass partitioning: which steps share one read" begin
@@ -164,31 +154,21 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         # _parse_pipeline routes any SolveStep (built-in or third-party) into
         # solve_steps by abstract type alone, in declared order — it does not
         # reorder or reject based on that order.
-        br = Gustavo._parse_pipeline(
-            CalibrationPipeline(BaselineFringeFit(), _ThirdPartyStep(); gauge = PinAntenna(1))
-        )
+        br = Gustavo._parse_pipeline([BaselineFringeFit(), _ThirdPartyStep()])
         @test br.solve_steps == [BaselineFringeFit(), _ThirdPartyStep()]
         @test br.ff == BaselineFringeFit()
     end
 
-    @testset "chaining and lifting" begin
+    @testset "chaining builds a vector" begin
         cf = CalFunction((stack, win) -> nothing)
-        chain = cf |> BaselineFringeFit() |> AverageFrequency(nout = 1)
-        @test chain isa StepChain
-        @test length(chain.steps) == 3
-        @test chain.steps[1] isa DataTransformStep
-        @test Gustavo.transforms(chain.steps[1]) == (cf,)
-        @test chain.steps[2] isa BaselineFringeFit
-
-        p = CalibrationPipeline(chain; exec = ExecutionConfig(mem_fraction = 0.4), gauge = PinAntenna(1))
-        @test p.steps == chain.steps
-        @test p.exec.mem_fraction == 0.4
-
-        # Vector and vararg constructors lift raw transforms too.
-        p2 = CalibrationPipeline([cf, BaselineFringeFit()]; gauge = PinAntenna(1))
-        @test p2.steps[1] isa DataTransformStep
-        p3 = CalibrationPipeline(cf, BaselineFringeFit(); gauge = PinAntenna(1))
-        @test p3.steps[1] isa DataTransformStep && p3.exec == ExecutionConfig()
+        chain = cf |> BaselineFringeFit() |> Bandpass()
+        @test chain isa Tuple
+        @test chain[1] === cf && chain[2] isa BaselineFringeFit && chain[3] isa Bandpass
+        @test (cf |> (BaselineFringeFit(),))[1] === cf
+        # A transform belongs to the steps after it.
+        @test Gustavo._parse_pipeline(chain).before == [[cf], []]
+        # Only pipeline elements chain; anything else is function application.
+        @test_throws MethodError BaselineFringeFit() |> AverageFrequency(nout = 1)
     end
 
     @testset "scan selections" begin
@@ -268,7 +248,7 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
 
     @testset "full pipeline: stage provenance and snapshots" begin
         uvset, _ = _build_fringe_uvset()
-        sol = fit(CalibrationPipeline(_full_chain(); gauge = PinAntenna(1)), uvset)
+        sol = fit(_full_chain(), uvset; gauge = PinAntenna(1))
 
         @test sol isa CAL.CalibrationSolution
         @test keys(sol) == [:fringe, :bandpass, :adhoc]
@@ -312,8 +292,8 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         # `end` addresses the last step, and a selection keeps the provenance
         # chains, so it stays replayable by `calibrate`.
         @test keys(sol[end]) == [last(keys(sol))]
-        @test sol[:].transforms == sol.transforms
-        @test sol[:].postcal == sol.postcal
+        @test sol[:].sequence == sol.sequence
+        @test sol[:].gauge === sol.gauge
         # A solution has at least one step, so an empty selection is refused.
         @test_throws ArgumentError sol[2:1]
         @test_throws "at least one step" sol[2:1]
@@ -337,7 +317,7 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
 
     @testset "solution container and selection algebra" begin
         uvset, _ = _build_fringe_uvset()
-        sol = fit(CalibrationPipeline(_full_chain(); gauge = PinAntenna(1)), uvset)
+        sol = fit(_full_chain(), uvset; gauge = PinAntenna(1))
 
         # Container contract: length/eachindex/keys/haskey, and iteration
         # yields each step as a single-step solution.
@@ -379,46 +359,35 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test_throws "unknown dimension keyword" gains(sol; Polarization = 1)
     end
 
-    @testset "fit + calibrate ≡ fitcalibrate (weight-scale transform)" begin
+    @testset "calibrate replays the recorded transforms (weight scale)" begin
         uvset, _ = _build_fringe_uvset()
         ws = [1.0, 0.5, 1.0, 2.0]
-        pipe = CalibrationPipeline(StationWeightScale(ws) |> _full_chain(); gauge = PinAntenna(1))
-        red = [AverageFrequency(nout = 1)]
+        sol = fit(StationWeightScale(ws) |> _full_chain(), uvset; gauge = PinAntenna(1))
+        @test length(recorded_transforms(sol)) == 1
+        @test recorded_transforms(sol)[1] isa StationWeightScale
+        @test recorded_transforms(sol)[1].s == ws
 
-        sol_f, out_f = fitcalibrate(pipe, uvset; reduce = red)
-        sol = fit(pipe, uvset)
-        @test parent(gains(sol)) ≈ parent(gains(sol_f))
-        # The solve's transform chain is recorded on the solution.
-        @test length(sol.transforms) == 1
-        @test sol.transforms[1] isa StationWeightScale
-        @test sol.transforms[1].s == ws
-
-        out = calibrate(sol, uvset; reduce = red)
-        @test Set(keys(DimensionalData.branches(out))) ==
-            Set(keys(DimensionalData.branches(out_f)))
-        for (k, leaf) in DimensionalData.branches(out_f)
-            Vf = parent(leaf[:vis])
-            Wf = parent(leaf[:weights])
+        out = calibrate(sol, uvset; post = AverageFrequency(nout = 1))
+        ref = AverageFrequency(nout = 1)(Gustavo.UVData.apply_calibration(uvset, sol))
+        @test Set(keys(DimensionalData.branches(out))) == Set(keys(DimensionalData.branches(ref)))
+        for (k, leaf) in DimensionalData.branches(ref)
             V = parent(DimensionalData.branches(out)[k][:vis])
-            W = parent(DimensionalData.branches(out)[k][:weights])
-            @test size(V) == size(Vf)
-            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(Vf, V))
-            @test W ≈ Wf
+            @test size(V) == size(parent(leaf[:vis]))
+            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(parent(leaf[:vis]), V))
+            @test parent(DimensionalData.branches(out)[k][:weights]) ≈ parent(leaf[:weights])
         end
 
-        # Two weight-scale transforms COMPOSE (the chain applies both in
-        # order, w·(s_a s_b)²) — the old bridge's "specified twice" error died
-        # with it. Both are recorded on the solution.
-        both = CalibrationPipeline(
-            StationWeightScale(ws) |> StationWeightScale(ws) |> _full_chain(); gauge = PinAntenna(1)
-        )
-        sol_b = fit(both, uvset)
-        @test length(sol_b.transforms) == 2
-        @test parent(gains(fit(CalibrationPipeline(StationWeightScale(ws .* ws) |> _full_chain(); gauge = PinAntenna(1)), uvset))) ≈
+        # Two weight-scale transforms compose (w·(s_a s_b)²), and both are
+        # recorded. Two pipelines join by splatting.
+        sol_b = fit(((StationWeightScale(ws) |> StationWeightScale(ws))..., _full_chain()...), uvset; gauge = PinAntenna(1))
+        @test length(recorded_transforms(sol_b)) == 2
+        @test parent(gains(fit(StationWeightScale(ws .* ws) |> _full_chain(), uvset; gauge = PinAntenna(1)))) ≈
             parent(gains(sol_b))
 
-        # Chain convenience form ≡ the pipeline form.
-        @test parent(gains(fit(StationWeightScale(ws) |> _full_chain(), uvset; gauge = PinAntenna(1)))) ≈ parent(gains(sol_f))
+        # A transform listed after a step does not reach that step.
+        early = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
+        late = fit(BaselineFringeFit() |> StationWeightScale(ws), uvset; gauge = PinAntenna(1))
+        @test parent(gains(late)) == parent(gains(early))
     end
 
     @testset "rate components must share the constant-phase epoch" begin
@@ -437,32 +406,30 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
 
     @testset "solution serialization round-trip; older files refused" begin
         uvset, _ = _build_fringe_uvset()
-        sol = fit(CalibrationPipeline(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain(); gauge = PinAntenna(1)), uvset)
+        sol = fit(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain(), uvset; gauge = PinAntenna(1))
         path = joinpath(mktempdir(), "sol.jls")
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)
         @test all(s1.θ == s2.θ for (s1, s2) in zip(back.steps, sol.steps))
         @test keys(back) == keys(sol)
-        @test back.transforms[1] isa StationWeightScale
+        @test recorded_transforms(back)[1] isa StationWeightScale
         @test back[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
 
-        # The solve's pipeline is recorded on the solution, survives the
-        # round-trip, and rides along through selections.
-        @test sol.pipeline isa CalibrationPipeline
-        @test back.pipeline isa CalibrationPipeline
-        @test length(back.pipeline.steps) == length(sol.pipeline.steps)
-        @test sol[:fringe].pipeline === sol.pipeline
+        # The pipeline and gauge are recorded, survive the round-trip, and ride
+        # along through selections.
+        @test length(back.sequence) == length(sol.sequence) == 4
+        @test back.gauge.refs == 1
+        @test sol[:fringe].sequence == sol.sequence
 
-        # A `missing` pipeline (one that did not survive an earlier save)
-        # round-trips as `missing` and never blocks applying the solution.
+        # An element that did not survive an earlier save round-trips as
+        # `missing`, and `calibrate` refuses rather than skip it.
         solm = CAL.CalibrationSolution(
-            sol.steps, sol.geom, sol.info;
-            transforms = sol.transforms, postcal = sol.postcal, pipeline = missing,
+            sol.steps, sol.geom, sol.info; sequence = (missing, sol.sequence[2:end]...), sol.gauge,
         )
         pathm = joinpath(mktempdir(), "solm.jls")
         CAL.save_solution(pathm, solm)
-        @test CAL.load_solution(pathm).pipeline === missing
-        @test calibrate(solm, uvset) isa UVP.UVSet
+        @test ismissing(first(CAL.load_solution(pathm).sequence))
+        @test_throws "did not survive" calibrate(solm, uvset)
 
         # Pre-v6 wrappers used a different solution shape; they are refused
         # rather than misread, so a caller re-solves instead of loading a stale

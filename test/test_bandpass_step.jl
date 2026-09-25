@@ -42,20 +42,16 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
     # presence must not move the fringe/bandpass blocks; dispersion/sbd are OFF
     # so no later stage refines the compared slots).
     sol_o = fit(
-        CalibrationPipeline(
-            BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc);
-            exec = ExecutionConfig(),
-            gauge = PinAntenna(1),
-        ),
+        [BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc)],
         uvset,
+        exec = ExecutionConfig(),
+        gauge = PinAntenna(1),
     )
     sol_n = fit(
-        CalibrationPipeline(
-            BaselineFringeFit(model = fm), Bandpass();
-            exec = ExecutionConfig(),
-            gauge = PinAntenna(1),
-        ),
+        [BaselineFringeFit(model = fm), Bandpass()],
         uvset,
+        exec = ExecutionConfig(),
+        gauge = PinAntenna(1),
     )
 
     @testset "θ blocks invariant under the appended smoother stage" begin
@@ -83,12 +79,10 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
     @testset "new-engine fold is deterministic across ntasks" begin
         sol_n4 = fit(
-            CalibrationPipeline(
-                BaselineFringeFit(model = fm), Bandpass();
-                exec = ExecutionConfig(),
-                gauge = PinAntenna(1),
-            ),
+            [BaselineFringeFit(model = fm), Bandpass()],
             uvset,
+            exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         @test all(a.θ == b.θ for (a, b) in zip(sol_n4.steps, sol_n.steps))
     end
@@ -101,13 +95,13 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # precondition: placed ahead of BaselineFringeFit, they fit the UNCORRECTED
         # residual instead and complete without error — a quietly worse fit,
         # not a construction-time rejection.
-        solds = fit(CalibrationPipeline(DispersionSBDFit(), BaselineFringeFit(model = fm); gauge = PinAntenna(1)), uvset)
+        solds = fit([DispersionSBDFit(), BaselineFringeFit(model = fm)], uvset; gauge = PinAntenna(1))
         @test solds isa CAL.CalibrationSolution
-        solts = fit(CalibrationPipeline(AdhocPhase(), BaselineFringeFit(model = fm); gauge = PinAntenna(1)), uvset)
+        solts = fit([AdhocPhase(), BaselineFringeFit(model = fm)], uvset; gauge = PinAntenna(1))
         @test solts isa CAL.CalibrationSolution
         # Bandpass's model is self-contained regardless of position,
         # so bandpass-before-fringe was always legal and stays so.
-        solbf = fit(CalibrationPipeline(Bandpass(), BaselineFringeFit(model = fm); gauge = PinAntenna(1)), uvset)
+        solbf = fit([Bandpass(), BaselineFringeFit(model = fm)], uvset; gauge = PinAntenna(1))
         @test solbf isa CAL.CalibrationSolution
     end
 
@@ -135,12 +129,10 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # component is that many times smaller.
         k = 4
         sol_g = fit(
-            CalibrationPipeline(
-                BaselineFringeFit(model = fm), Bandpass(model = default_bandpass_terms(freq = CAL.ChannelBlocks(k)));
-                exec = ExecutionConfig(),
-                gauge = PinAntenna(1),
-            ),
+            [BaselineFringeFit(model = fm), Bandpass(model = default_bandpass_terms(freq = CAL.ChannelBlocks(k)))],
             uvset,
+            exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )
         bg = sol_g[:bandpass].steps[1]; bn = sol_n[:bandpass].steps[1]
         @test length(_bp_phase(bg)) * k == length(_bp_phase(bn))
@@ -397,10 +389,9 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
         fmc = default_fringe_terms()
         runc(sm) = fit(
-            CalibrationPipeline(
-                BaselineFringeFit(model = fmc), Bandpass(smoother = sm); exec = ExecutionConfig(),
-                gauge = PinAntenna(1),
-            ), uvc,
+            [BaselineFringeFit(model = fmc), Bandpass(smoother = sm)], uvc,
+            exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
         )[:bandpass].steps[1]
         track(s, a, f) = (
             L = CAL._component_leaf(s.layout.plantree.logamp.bandpass, s.θ);
@@ -640,13 +631,11 @@ end
         seed = 5,
     )
     sol = fit(
-        CalibrationPipeline(
-            BaselineFringeFit(),
-            Bandpass();
-            exec = ExecutionConfig(),
-            gauge = PinAntenna(1),
-        ),
+        [BaselineFringeFit(),
+            Bandpass()],
         uvset,
+        exec = ExecutionConfig(),
+        gauge = PinAntenna(1),
     )
     info = stage_info(sol, :bandpass)
     # (Ant, Feed, band, time segment) — a time-stable bandpass is one segment.

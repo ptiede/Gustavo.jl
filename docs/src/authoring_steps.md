@@ -10,10 +10,9 @@ solve when the pass completes. This page is the step contract, followed by a
 worked end-to-end example — adding a new physical effect with a specialized
 solver — using the shipped ionospheric-dispersion step as the model.
 
-Two kinds of step exist. A [`ReduceStep`](@ref) is a `UVSet -> UVSet` data
-transform (averaging, spw merging); it implements one method,
-[`prepare_reducer`](@ref), and is not covered further here. A
-[`SolveStep`](@ref) solves gains; the rest of this page is about those.
+A step is a [`SolveStep`](@ref), which solves gains. Data transforms, which
+change what later steps read, are covered by the transform contract
+(`apply_transform!`) instead.
 
 ## The contract at a glance
 
@@ -30,9 +29,7 @@ working default:
 | [`fusable_grouping`](@ref) | can the step share a pass with its neighbors? | `:global` |
 | [`required_grouping`](@ref) | leaf-grouping constraint | `:any` |
 | [`fit_selection`](@ref) | which scans feed the accumulation | all scans |
-| [`scan_flags`](@ref) | per-scan unconstrained (station, scan) pairs | none |
 | [`supports_station_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
-| [`transforms`](@ref Gustavo.transforms) | data transforms the step contributes | none |
 
 The execution model behind them:
 

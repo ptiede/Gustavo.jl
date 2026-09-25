@@ -11,7 +11,7 @@
 # stack's `:vis`/`:weights`/`:flags` layers in place. Transforms run in chain order at
 # every materialization, so a solve, a re-run, and a diagnostic that share the
 # chain see identical data. Solutions record the chain they were solved with
-# (`sol.transforms`), so diagnostics can replay it automatically.
+# (`recorded_transforms(sol)`), so diagnostics can replay it automatically.
 
 """
     AbstractDataTransform
@@ -97,6 +97,8 @@ validate_transform(t::AbstractDataTransform, geom::DataGeometry, ant_names) = no
 # `apply_calibration`'s recorded-chain replay (see the stub in
 # `Calibration/solutions.jl` for why it is wired through this layer).
 Calibration._replay_transforms(uvset::UVSet, transforms) = apply_transforms(uvset, transforms)
+Calibration.recorded_transforms(sol::CalibrationSolution) =
+    Any[x for x in sol.sequence if x isa AbstractDataTransform || x === missing]
 
 """
     apply_transforms(uvset::UVSet, transforms; geom = build_geometry(uvset)) -> UVSet
@@ -105,7 +107,7 @@ Eagerly apply a transform chain to a whole `UVSet`, leaf by leaf — each leaf i
 paired with its global [`GeometryWindow`](@ref), so every transform works here,
 including [`CalFunction`](@ref) and [`FlagChannels`](@ref) (which need global
 indices and have no standalone whole-set form). This is the replay of the chain
-a solution records (`sol.transforms`), used by the standalone `calibrate`. Leaf
+a solution records (`recorded_transforms(sol)`), used by the standalone `calibrate`. Leaf
 arrays are copied; the input set is never mutated.
 """
 function apply_transforms(uvset::UVSet, transforms; geom::DataGeometry = build_geometry(uvset))

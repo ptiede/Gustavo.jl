@@ -4,7 +4,7 @@
 #
 # - `default_fringe_terms` — what is solved by default: a `(; phase)` tree of
 #   named components, each declaring its own feed scope through its tying. The
-#   gauge pin is run-wide, on `CalibrationPipeline` in pipeline/protocol.jl.
+#   gauge pin is run-wide, an argument of `fit`.
 # - `MatchedFilter <: AbstractFringeEstimator` — how it is estimated. The search
 #   and `Stationization` options live on the estimator rather than the model, so
 #   that another estimator plugs in without inheriting them.

@@ -115,13 +115,14 @@
         # untouched (regression: pass 2 once divided eager leaves in place).
         lc = first(values(UVP.branches(corrupt)))
         snapshot = copy(parent(lc[:vis]))
-        solf, output = fitcalibrate(
+        solf = fit(
             FP.ApplySolution(sol) |> BaselineFringeFit() |>
                 Bandpass() |>
                 AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             corrupt,
             gauge = PinAntenna(1),
         )
+        output = calibrate(solf, corrupt)
         @test solf.info.precal_applied
         @test parent(lc[:vis]) == snapshot                 # caller's data unmutated
         worst = 1.0
@@ -156,7 +157,7 @@
         # replay — solf records the precal, and the no-kwarg default replays it).
         d_clean = FP.baseline_fringe_data(uvset, solf; transforms = ())
         d_pcal = FP.baseline_fringe_data(corrupt, solf; precal = sol)
-        d_replay = FP.baseline_fringe_data(corrupt, solf)   # replays sol.transforms
+        d_replay = FP.baseline_fringe_data(corrupt, solf)   # replays recorded_transforms(solf)
         @test isequal(d_replay.spec_before, d_pcal.spec_before)
         finite_close(x, y) = all(
             !isfinite(x[i]) || !isfinite(y[i]) || isapprox(x[i], y[i]; rtol = 1.0e-4, atol = 1.0e-10)
@@ -179,13 +180,14 @@
         end
 
         # Solve with flagging: runs, and the output flags those channels.
-        _, out2 = fitcalibrate(
+        sol2 = fit(
             FP.FlagChannels(mask) |> BaselineFringeFit() |>
                 Bandpass() |>
                 AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
             gauge = PinAntenna(1),
         )
+        out2 = calibrate(sol2, uvset)
         lo = first(values(UVP.branches(out2)))
         ci = CAL.leaf_window(geom, lo).chan_idx
         F = parent(lo[:flags])
