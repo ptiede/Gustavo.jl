@@ -1,9 +1,8 @@
 # ── Fringe search over one materialized scan group ───────────────────────────
 #
-# The domain half of the streaming pass: given a materialized scan `DimStack`
-# and its `DataGeometry`, run the per-baseline kernels in `search.jl` over every
-# (baseline, product) cell. The caller (`Streaming`/the pipeline) owns the
-# group/budget/transform machinery and supplies the cube and geometry here.
+# Given a materialized scan `DimStack` and its `DataGeometry`, run the
+# per-baseline kernels in `search.jl` over every (baseline, product) cell. The
+# pipeline reads and corrects the scan group and supplies it here.
 
 # One recorded search row: baseline antennas, correlation product, SNR, the
 # family-wise false-alarm probability, and whether that PFA accepted it as a real
@@ -29,8 +28,8 @@ const DetectionRow = @NamedTuple{
                 executor = SerialScheduler(), t0 = geom.t0) -> DimStack
 
 Fringe-search every cross-baseline (baseline, product) of a materialized
-scan group. `data` is the group's `DimStack` as [`materialize_cube`](@ref)
-returns it; autocorrelation baselines are dropped, so the result covers only
+scan group. `data` is the group's `DimStack`, `(Frequency, Ti, BaselineID,
+Polarization)` layers `:vis`, `:weights` and `:flags`; autocorrelation baselines are dropped, so the result covers only
 interferometric baselines. `geom` supplies the reference frequency `f0` and
 the default phase epoch. `Vsearch` lets a caller search a residual cube in
 place of the raw one.

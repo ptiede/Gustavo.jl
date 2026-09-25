@@ -101,9 +101,7 @@ must say which channel of which band each of its columns is; a single-spw block
 passes `Base.OneTo(nchan)`. Stations whose ANTAB declares aggregate Tsys ignore
 the index entirely.
 
-Both a-priori paths enter here: [`apply_calibration`](@ref) per leaf, and the
-streaming `AprioriPreCal` transform per scan group — so a scan corrected
-on the fly and the same scan corrected eagerly get bit-identical gains.
+[`apply_calibration`](@ref) computes its gains here, per leaf.
 """
 function apriori_gains(
         antab::AntabCalibration, ant_table::AntennaTable,

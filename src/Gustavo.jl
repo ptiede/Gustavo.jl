@@ -4,14 +4,17 @@ Only the best chicken in the world. We sell nothing else and live on pure vibes
 """
 module Gustavo
 
-# The output tail rebuilds a `UVSet`'s branch tree per scan group.
 import DimensionalData
+using DimensionalData: lookup, modify, groupby, dims, Ti, AbstractDimVector
+using OrderedCollections: OrderedDict
+import XRadio
 
 # The scheduler types users select for either fan-out level; re-exported so a
 # bare `using Gustavo` can name them in
 # `ExecutionConfig(outer_executor = …, inner_executor = …)`.
 using OhMyThreads: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
-using OhMyThreads: Scheduler, tforeach
+using OhMyThreads: Scheduler, tforeach, tmap
+using OhMyThreads.Schedulers: chunking_enabled, has_nchunks, nchunks
 
 using LinearAlgebra: BLAS
 import StatsAPI
@@ -26,19 +29,13 @@ using .Calibration
 # element-compilation generic (see pipeline/protocol.jl).
 import .Calibration: model_components
 
-# Scan-group streaming: the substrate the solver stages run on. Between
-# `Calibration` (whose `DataGeometry`/`CalibrationSolution` it consumes) and
-# `Fring` (which consumes it).
-include("Streaming.jl")
-using .Streaming
-
 include("Fring.jl")
 using .Fring
 
 # Top-level modular calibration pipeline (orchestrates all three submodules).
 include("pipeline.jl")
 
-export UVData, Calibration, Streaming, Fring
+export UVData, Calibration, Fring
 # Axis names for every array Gustavo stores or returns, so scripts can index
 # and slice leaves without reaching into `UVData` or `DimensionalData`.
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.
@@ -73,10 +70,8 @@ export each_group, model_components, provides
 export supports_station_heterogeneity
 # Re-export the transform vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
-export AbstractDataTransform, apply_transform!, apply_transform
-export CalFunction, ApplySolution, StationWeightScale, FlagChannels, AprioriPreCal
-export AbstractLeafGrouping, ByScan, BySpw, ByKey
-export ScanStream, scan_stream
+export AbstractDataTransform, AutocorrelationNormalization, ApplySolution,
+    StationWeightScale, FlagChannels
 export search_scan
 # The solution surface: the container, selection (`sol[...]`), the two verbs,
 # and serialization.

@@ -7,8 +7,8 @@
 # (equivalently a log-space sum, since `evaluate_gains` already returns
 # `exp(Σ logamp)·cis(Σ phase)` and a product of `cis`/`exp` factors is a sum of
 # their arguments). It is the hand-off object between a solver (e.g.
-# `Gustavo.fit`) and the data: `apply_calibration(uvset, sol)` divides every
-# leaf's visibilities by the composed gains, and `save_solution`/`load_solution`
+# `Gustavo.fit`) and the data: `Gustavo.calibrate(sol, ps)` divides the data by
+# each step's gains, and `save_solution`/`load_solution`
 # round-trip it through the `Serialization` stdlib.
 
 using Serialization: serialize, deserialize
@@ -25,7 +25,7 @@ step's — and `θ` its own solved parameter vector, plus `info`, that step's ow
 solver diagnostics. A [`CalibrationSolution`](@ref) is the ordered
 `steps::Vector{StepSolution}` a pipeline run produced, one per solve step, in
 run order; gains compose multiplicatively across them ([`gains`](@ref),
-[`apply_calibration`](@ref Gustavo.UVData.apply_calibration)), and `name` (the step's `provides(step)`
+`calibrate`), and `name` (the step's `provides(step)`
 capability, e.g. `:fringe`/`:bandpass`/`:refine`/`:adhoc`) is how a later
 a user's [`stage_info`](@ref) or `sol[name]` looks a step up.
 
@@ -96,10 +96,10 @@ component) — a component selection (`sol[step, path...]`, see `getindex`)
 always takes the step explicitly rather than searching for a name across
 `steps`.
 
-`sequence` records the pipeline the solve ran, as a tuple, in order: its solve steps,
-data transforms and a-priori amplitude steps. Applying the solution replays
-its transforms ([`recorded_transforms`](@ref)) and a-priori steps, and
-`fit(sol.sequence, uvset; sol.gauge)` repeats the run. `gauge` is the gauge
+`sequence` records the pipeline the solve ran, as a tuple, in order: its solve
+steps and corrections. `calibrate(sol, ps)` replays it in that order, each
+solve step as its own gains, and `fit(sol.sequence, ps; sol.gauge)` repeats
+the run. `gauge` is the gauge
 the solve was given. Both are empty for a hand-built solution; an element that
 did not survive serialization is `missing`.
 """
@@ -132,8 +132,8 @@ end
 """
     recorded_transforms(sol::CalibrationSolution) -> Vector
 
-The data transforms in `sol.sequence`, in order, with any `missing` element
-kept so that a caller replaying them can refuse.
+The corrections in `sol.sequence`, in order, with any `missing` element kept
+so that a caller replaying them can refuse.
 """
 function recorded_transforms end
 
@@ -201,7 +201,7 @@ part left out contributes no gain at all. A leading run `sol[1:i]` is thus the
 solution AS OF step `i`, and a component selection's gain is that component's
 own contribution: apply it, plot it, or difference it against another.
 Geometry, `info` and both provenance chains carry over unchanged, so every
-selection is a valid solution for [`apply_calibration`](@ref Gustavo.UVData.apply_calibration) and `calibrate`,
+selection is a valid solution for `calibrate` and `ApplySolution`,
 and `sol[:]` reproduces `sol`.
 
 Selecting no step at all is an error: a solution has at least one.
@@ -364,7 +364,7 @@ for inspection: a `DimArray` over `(Frequency, Ti, Ant, Feed)` — channel
 frequencies (Hz), integration times (seconds), antennas (named when `sol.info`
 carries `ant_names`, else `1:nant`), and feed. `gain = exp(Σ logamp) · cis(Σ
 phase)`, summed over the selection's components, is the same forward map
-[`apply_calibration`](@ref Gustavo.UVData.apply_calibration) divides by;
+`calibrate` divides by;
 `abs.(gains(sol))` and `angle.(gains(sol))` recover amplitude and phase.
 
 The keywords are the dimension names and accept anything `DimArray` indexing
@@ -552,7 +552,7 @@ function step_solution(sol::CalibrationSolution, name::Symbol)
 end
 
 
-# ── Geometry from a UVSet ────────────────────────────────────────────────────
+# ── Geometry from a ProcessingSet ────────────────────────────────────────────────────
 
 # Two timestamps within `_epoch_atol` of each other are the same instant. The
 # axis is built by matching each new value against the canonical ones already
@@ -584,42 +584,6 @@ function _canonical_time(canon::AbstractVector{Float64}, t::Float64)
 end
 
 """
-    build_geometry(uvset; f0 = nothing, t0 = nothing) -> DataGeometry
-
-Build the union `DataGeometry` spanning every leaf of `uvset`: the sorted unique
-channel frequencies (Hz) of all bands, the sorted unique integration times
-(seconds) of all scans, with `spw_of_chan` / `scan_of_time` dense-ranked from the
-leaves' `spw_name` / `scan_name`. `f0` defaults to the mean channel frequency,
-`t0` to the first time. Assumes a single consistent antenna table across the
-set (used only to size the solve elsewhere).
-
-Sub-arrays observing different sources over the same timestamps are supported,
-provided their station sets are disjoint and they share the whole scan window.
-The time axis still dense-ranks each timestamp to one scan, so such a
-timestamp carries whichever scan name is seen first; the per-(station, scan)
-parameters remain correct because the station sets do not meet. Throws when two
-scans share both a timestamp and a station, and when a scan overlaps another
-over only part of its span, which would split it across segments.
-
-Timestamps within `_epoch_atol` of each other are one instant on the axis, so
-leaves whose times reach Gustavo by different float paths — sub-arrays
-delivered as separate correlator files, say — still meet. The axis reports an
-observed value, not a rounded one.
-"""
-function build_geometry(uvset::UVSet; f0 = nothing, t0 = nothing)
-    pieces = map(collect(UVData.branches(uvset))) do (_, leaf)
-        info = UVData.metadata(leaf)
-        ts = Float64.(lookup(leaf[:vis], Ti))
-        (;
-            freqs = Float64.(channel_freqs(info.freq_setup)), spw = info.spw_name,
-            times = ts, scans = fill(info.scan_name, length(ts)),
-            active = Set{String}(UVData.participating_antennas(leaf)),
-        )
-    end
-    return _span_geometry(pieces, String[]; f0, t0)
-end
-
-"""
     DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing) -> DataGeometry
 
 The geometry a solve over `ps` runs on: the sorted distinct channel
@@ -632,7 +596,7 @@ channel frequency, `t0` to the first time.
 A Measurement Set may hold several scans. Sub-arrays observing different
 scans at the same timestamps are supported when their station sets are
 disjoint and they share the whole scan window, as for
-[`build_geometry`](@ref). Throws when a Measurement Set states no `scan_name`,
+`DataGeometry`. Throws when a Measurement Set states no `scan_name`,
 when a frequency falls in two spectral windows, when two scans share a
 timestamp and a station, and when a scan overlaps another over part of its
 span.
@@ -837,19 +801,6 @@ function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
     )
 end
 
-"""
-    leaf_window(geom::DataGeometry, leaf) -> GeometryWindow
-
-The [`GeometryWindow`](@ref) addressing the channels and times `leaf` carries,
-matched by value against `geom` (frequency by `isapprox` rtol 1e-9, time by
-`_epoch_atol` on absolute seconds). Errors if any leaf sample has no match in
-the geometry.
-"""
-leaf_window(geom::DataGeometry, leaf) = GeometryWindow(
-    geom, _channel_indices(geom, lookup(leaf[:vis], Frequency)),
-    _time_indices(geom, lookup(leaf[:vis], Ti)),
-)
-
 _channel_indices(geom::DataGeometry, fs) = [_channel_index(geom, Float64(f)) for f in fs]
 
 function _channel_index(geom::DataGeometry, f)
@@ -890,183 +841,6 @@ function gains(sol::CalibrationSolution, win::GeometryWindow; time_span = nothin
     )
 end
 
-# ── Apply ────────────────────────────────────────────────────────────────────
-
-# Whole-set replay of a recorded transform chain. The transform types (and the
-# working method) live in the Streaming layer, which loads after this module;
-# the stub exists so `apply_calibration` can replay a chain without a layering
-# inversion.
-function _replay_transforms end
-
-"""
-    apply_calibration(uvset::UVSet, sol::CalibrationSolution; apply_flags = true,
-                      transforms = recorded_transforms(sol)) -> UVSet
-
-Apply the solution's recorded transforms ([`recorded_transforms`](@ref) — e.g. a
-station weight scale and an earlier solution applied as a data transform), then
-divide every leaf's visibilities by the solution's per-antenna gains. For a
-baseline `(a, b)` and correlation product `p` with feeds `(fa, fb)`:
-
-    V_corr = V / (g_a[fa] · conj(g_b[fb])),    W_corr = W · |g_a · g_b|²
-
-Samples where either gain magnitude underflows are flagged, with a NaN
-visibility: the corrected value is undefined. Their weights are untouched.
-
-`transforms` defaults to the solution's own recorded chain, so the corrected
-set carries the same total correction `calibrate(sol, uvset)` produces (minus
-its a-priori and `post` steps) — weights included, which matters to anything
-that reads them as noise claims. Pass `transforms = ()` to apply the gains
-alone: the right call when the data has already been transform-corrected (the
-streaming passes do this), and the semantics every internal replay site uses.
-
-Each channel and time is placed in the segment of `sol` it belongs to — matched
-by spw and scan identity — so `uvset` may be sampled differently from the solve:
-a bandpass fit on scan-averaged data corrects data at full time resolution. A
-sample the solution has no segment for is rejected, as is one whose recorded
-span crosses a bin boundary — see `evaluate_gains`.
-
-`apply_flags` (default `true`) additionally flags baselines touching a
-(station, scan) the solve left UNCONSTRAINED, when `sol.info` records them —
-identity gains, i.e. the data would pass through uncalibrated. The rows keep
-their visibilities and weights: clearing the flag is what makes them usable. This is the
-EHT-HOPS flag semantic: a station is flagged per scan only when, after the
-closure-screened global solve, no strong detection constrains it; a merely weak
-baseline between two constrained stations is not flagged (it is calibrated by
-SNR transfer).
-"""
-function UVData.apply_calibration(
-        uvset::UVSet, sol::CalibrationSolution;
-        apply_flags::Bool = true, executor = DynamicScheduler(),
-        transforms = recorded_transforms(sol),
-    )
-    for t in transforms
-        t === missing && throw(
-            ArgumentError(
-                "apply_calibration: this solution records a transform that did not survive " *
-                    "serialization (saved as `missing`) — re-fit, or apply the original " *
-                    "transform chain manually (pass `transforms = ()` to apply gains alone).",
-            )
-        )
-    end
-    isempty(transforms) || (uvset = _replay_transforms(uvset, transforms))
-    flagged = apply_flags ? _solution_flag_sets(sol.info) : nothing
-    # Placement is against the TARGET SET's own geometry, not a leaf's: a
-    # channel-index segmentation (`ChannelBlocks`, `FreqGroups`) is defined on
-    # the set's whole concatenated channel axis, which one band's leaf does not
-    # carry. `leaf_window` then says which of its samples each leaf holds.
-    target = build_geometry(uvset)
-    return UVData.apply(uvset) do leaf, info, root
-        # A lazy leaf materializes to freshly-decoded private arrays we correct
-        # in place; an eager leaf is caller-owned, so copy it first. Capture
-        # laziness before `materialize_leaf` collapses it.
-        private = is_lazy(leaf)
-        leaf = materialize_leaf(leaf)
-        private || (
-            leaf = rebuild_visibilities(
-                leaf, copy(parent(leaf[:vis])), copy(parent(leaf[:weights])),
-                parent(leaf[:uvw]), copy(parent(leaf[:flags])),
-            )
-        )
-        win = leaf_window(target, leaf)
-        g = parent(gains(sol, win; time_span = info.time_span))   # (nchan_leaf, nti_leaf, nant, 2)
-        _apply_gains!(leaf, g; executor)
-        _flag_solution_rows!(
-            leaf[:flags], UVData.baselines(leaf).pairs,
-            _geom_scan_id(sol.geom, info.scan_name), flagged,
-        )
-        return leaf
-    end
-end
-
-# The solution's unconstrained (station, geometry scan id) pairs as a lookup set,
-# `nothing` when the solution records none.
-function _solution_flag_sets(info::NamedTuple)
-    (haskey(info, :flagged_ant) && !isempty(info.flagged_ant)) || return nothing
-    return Set{Tuple{Int, Int}}(
-        (Int(info.flagged_ant[i]), Int(info.flagged_scan[i]))
-            for i in eachindex(info.flagged_ant)
-    )
-end
-
-# The solution's own scan id for a scan label, 0 when the solve never saw it.
-# Flags are recorded against these ids, so a label join is what locates them —
-# the leaf's epochs need not appear in the solve grid.
-_geom_scan_id(geom::DataGeometry, scan_name) =
-    something(findfirst(==(String(scan_name)), geom.scan_names), 0)
-
-# Flag whole baseline rows touching a (station, scan) the solve left
-# unconstrained: their gains were identity, so the data passed through
-# uncalibrated. The visibilities and weights are left intact — the row holds
-# real data and clearing the flag is what makes it usable again. A leaf spans
-# one scan, hence one scan id.
-function _flag_solution_rows!(Fc, bl_pairs, scanid::Integer, flagged)
-    flagged === nothing && return nothing
-    for bi in eachindex(bl_pairs)
-        a, b = bl_pairs[bi]
-        a == b && continue
-        ((a, scanid) in flagged || (b, scanid) in flagged) || continue
-        Fc[BaselineID(bi)] .= true
-    end
-    return nothing
-end
-
-# Gain magnitude below which a cell is treated as unconstrained rather than
-# divided through: the correction would amplify noise without bound.
-const _GAIN_FLOOR = 1.0e-12
-
-# Correct one (baseline, product) column in place over its (Frequency, Ti)
-# plane: `V ← V / (g_a conj(g_b))` and `w ← w · |g_a g_b|²`, where `ga`/`gb` are
-# the two stations' gains on that same plane. A degenerate or non-finite gain
-# leaves the correction undefined, so the cell gets a NaN visibility and a flag;
-# its weight is left as it arrived, since nothing scaled it. Each cell reads then
-# writes its own index, so the update is exact even though the read and the write
-# hit the same array.
-function _correct_column!(vis, w, f, ga, gb)
-    for i in eachindex(vis, w, f, ga, gb)
-        gai = ga[i]
-        gbi = gb[i]
-        den = gai * conj(gbi)
-        if abs(gai) < _GAIN_FLOOR || abs(gbi) < _GAIN_FLOOR || !isfinite(den)
-            vis[i] = convert(eltype(vis), NaN)
-            f[i] = true
-        else
-            vis[i] = vis[i] / den
-            w[i] = w[i] * abs2(gai * gbi)
-        end
-    end
-    return nothing
-end
-
-# Correct a leaf's visibilities in place by its complex antenna gains
-# `g[c, ti, ant, feed]`. Baselines and correlation products are read off the
-# leaf, so they cannot disagree with the arrays they index. The caller owns the
-# copy-or-mutate decision: pass a private leaf to overwrite it, or a copy to
-# leave the source untouched.
-#
-# Each (baseline, product) column is independent — disjoint writes over
-# read-only gains — so the columns fan out over the inner `executor`. That
-# fan-out is load-bearing: this kernel is ≈80% of `apply_calibration` and the
-# split is worth ~5× on 8 threads. It is also bit-identical to the serial loop,
-# because every cell is the same scalar expression whatever the partition.
-function _apply_gains!(leaf, g::AbstractArray{<:Complex, 4}; executor = SerialScheduler())
-    vis = leaf[:vis]
-    w = leaf[:weights]
-    f = leaf[:flags]
-    ants = UVData.baselines(leaf).pairs
-    feeds = feed_pairs(leaf)
-    columns = vec(CartesianIndices((axes(vis, BaselineID), axes(vis, Polarization))))
-    tforeach(columns; scheduler = executor) do col
-        bi, p = Tuple(col)
-        a, b = ants[bi]
-        fa, fb = feeds[p]
-        _correct_column!(
-            UVData._cell_plane(vis, bi, p), UVData._cell_plane(w, bi, p), UVData._cell_plane(f, bi, p),
-            view(g, :, :, a, fa), view(g, :, :, b, fb),
-        )
-    end
-    return leaf
-end
-
 # ── Serialization ────────────────────────────────────────────────────────────
 
 """
@@ -1075,9 +849,8 @@ end
 Serialize `sol` to `path` via the `Serialization` stdlib inside a versioned
 wrapper NamedTuple. The current version is 8 (the solution records its
 pipeline as `sequence` and its `gauge`); earlier versions are refused on load.
-Elements that close over caller code (e.g. a `CalFunction`) serialize only
-within the same code state; a pipeline element that fails to serialize is
-recorded as `missing` with a warning rather than failing the save.
+A pipeline element that fails to serialize, such as a closure, is recorded as
+`missing` with a warning rather than failing the save.
 """
 function save_solution(path::AbstractString, sol::CalibrationSolution)
     wrapper = (;

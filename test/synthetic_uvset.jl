@@ -19,7 +19,6 @@ using FITSFiles   # triggers GustavoFITSFilesExt (write_uvfits/load_uvfits round
 
 const CAL = Gustavo.Calibration
 const FP = Gustavo.Fring
-const ST = Gustavo.Streaming
 const UVP = Gustavo.UVData
 
 include("synthetic_ps.jl")

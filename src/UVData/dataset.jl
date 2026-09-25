@@ -1,4 +1,4 @@
-# ── Streaming dataset API (format-neutral) ───────────────────────────────────
+# ── Lazy dataset API (format-neutral) ───────────────────────────────────
 #
 # Large visibility files (FITS-IDI from DiFX can be tens of GB) do not fit in
 # memory. The reader builds an ordinary `UVSet` whose per-(scan, spw) leaves

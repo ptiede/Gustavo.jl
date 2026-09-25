@@ -6,12 +6,12 @@
 [![Coverage](https://codecov.io/gh/ptiede/Gustavo.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/ptiede/Gustavo.jl)
 
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package
-for radio interferometry. It reads FITS-IDI or UVFITS data into a lazy,
-scan-partitioned `UVSet`, solves an ordered pipeline of calibration steps —
-fringe search (delay/rate/phase), ionospheric dispersion and single-band
-delay refinement, station bandpass, per-integration atmospheric phase — and
-streams corrected, reduced visibilities back out, one scan group at a time,
-so a full-track dataset is never resident in memory.
+for radio interferometry. It solves an ordered pipeline of calibration steps
+on MSv4 data (an XRadio `ProcessingSet`) — fringe search (delay/rate/phase),
+ionospheric dispersion and single-band delay refinement, station bandpass,
+per-integration atmospheric phase — reading one scan group at a time, so a
+full-track dataset is never resident in memory, and applies the solution to
+the data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
 deprecation. (It also operates entirely on vibes and fried chicken.)
@@ -20,26 +20,23 @@ deprecation. (It also operates entirely on vibes and fried chicken.)
 
 ```julia
 using Gustavo
-using FITSFiles   # enables the FITS-IDI/UVFITS reader and writer extension
+using XRadio
 
-uvset = load_fitsidi("track.idifits")            # lazy: header tables only
+ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
-pipeline = BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()
-sol = fit(pipeline, uvset; gauge = PinAntenna("AA"))   # run-wide reference antenna
+pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
+    DispersionSBDFit() |> Bandpass() |> AdhocPhase()
+sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
-out = calibrate(
-    sol, uvset;
-    post = AverageTime(seconds = 10.0) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
-)
-
-write_uvfits("track_cal.uvfits", out)
+out = calibrate(sol, ps)                         # corrected, in memory
 save_solution("track.jls", sol)
 ```
 
 Every step is optional and reorderable — a pipeline can equally be a single
 `Bandpass()` fit over data an earlier run already corrected. `fit` solves
-without producing output; `calibrate(sol, uvset)` applies a finished solution
-to this or another dataset with the same geometry, one scan group at a time.
+without producing output; `calibrate(sol, ps)` applies a finished solution to
+this or other data, replaying the pipeline's corrections and each step's gains
+in order.
 
 The solution is inspectable per stage: `sol[:fringe]` selects one step (any
 selection is itself a solution), `gains(sol[:bandpass])` evaluates its complex

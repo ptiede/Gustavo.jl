@@ -485,8 +485,8 @@ end
 # "coarser is fine, finer is not" contract: a segmentation coarser than the data
 # has a segment covering every sample by construction, and a finer one does not.
 
-# Epoch/frequency identity tolerances — the same ones `leaf_window` joins a leaf
-# to a geometry with, so a solution and the data it was solved on always agree.
+# Epoch/frequency identity tolerances — the same ones `GeometryWindow` joins a
+# Measurement Set to a geometry with, so a solution and the data it was solved on always agree.
 # The epoch tolerance scales with its operand: `Ti` holds absolute seconds
 # (~1.7e9 at present epochs), where a Float64 resolves ~0.24 µs, so a fixed
 # constant would be correct at exactly one magnitude. Sixteen ULP is ~3.8 µs
@@ -568,7 +568,7 @@ function _require_names(seg, what::String, solve_names, target_names)
         ArgumentError(
             "$(_seg_label(seg)): the SOLUTION's geometry carries no $what names, so a foreign " *
                 "grid cannot be placed — matching raw $what ids across two geometries is " *
-                "positional matching, not identity. Build it with `build_geometry`, which names them."
+                "positional matching, not identity. Build it with `DataGeometry(ps)`, which names them."
         )
     )
     isempty(target_names) && throw(

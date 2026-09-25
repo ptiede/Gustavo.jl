@@ -415,7 +415,7 @@ When the solve used a `precal` (e.g. `phasecal_solution`), pass the same one her
 so both before and after are pre-calibrated the way the solver saw the data; the
 same goes for `flag_channels` (e.g. `tone_channel_mask` — flagged channels drop
 out of the plotted averages exactly as they dropped out of the solve) and `weight_scale` (the per-station weight correction — see
-[`station_weight_scale`](@ref)).
+`StationWeightScale`).
 """
 function baseline_fringe_data(
         uvset::UVSet, sol::CalibrationSolution;
@@ -681,7 +681,7 @@ above the sidelobe forest (`pfa ≪ 1`); a false fringe barely clears it.
 - `precal` — when the solve used one (e.g. `phasecal_solution`), pass the same
   solution so the map is computed on the data the solver actually searched; the
   same goes for `flag_channels` (e.g. `tone_channel_mask`) and `weight_scale`
-  (the per-station weight correction — see [`station_weight_scale`](@ref)),
+  (the per-station weight correction — see `StationWeightScale`),
   without which this map's SNR/PFA would not match the solve's.
 
 Materializes only the one scan. Returns a [`BaselineFringeMap`](@ref).

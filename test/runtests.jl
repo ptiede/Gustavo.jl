@@ -69,10 +69,9 @@ include("test_pipeline_config.jl")
 # snapshots, fit/calibrate). Reuses the same aliases.
 include("test_interface.jl")
 
-# New streaming engine vs the frozen monolith oracle (M2 gates): grouping /
-# materialization / search parity, and the transform chain vs the precal path.
-include("test_stream.jl")
-include("test_transforms.jl")
+# Reading scan groups through the corrections, and the corrections themselves.
+include("test_each_group.jl")
+include("test_corrections.jl")
 include("test_axis_order.jl")
 
 # The BaselineFringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
@@ -245,18 +244,16 @@ end
         @test n in top
     end
 
-    # Streaming-engine internals stay behind `Fring`: reachable for users who
-    # drive the engine directly, absent from the pipeline-level namespace. They
-    # are `Streaming`'s, re-exported — the same binding under both names.
-    for n in (:ScanGroupSpec, :materialize_cube, :materialize_leaves)
-        @test !(n in top)
-        @test n in names(Gustavo.Fring)
-        @test n in names(Gustavo.Streaming)
-        @test getproperty(Gustavo.Fring, n) === getproperty(Gustavo.Streaming, n)
+    # The corrections a pipeline records, and reading scan groups in a step.
+    for n in (
+            :AbstractDataTransform, :AutocorrelationNormalization, :ApplySolution,
+            :StationWeightScale, :FlagChannels, :each_group, :ExecutionConfig,
+        )
+        @test n in top
     end
 
-    # The four submodules, named at the top level.
-    for n in (:UVData, :Calibration, :Streaming, :Fring)
+    # The three submodules, named at the top level.
+    for n in (:UVData, :Calibration, :Fring)
         @test n in top
     end
 

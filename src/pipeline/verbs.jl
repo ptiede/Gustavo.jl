@@ -1,11 +1,11 @@
 # ── Pipeline verbs: fit / calibrate ──────────────────────────────────────────
 #
-#     sol = fit(pipeline, uvset; gauge)               # solve
-#     out = calibrate(sol, uvset; post)               # apply, one scan group at a time
+#     sol = fit(pipeline, ps; gauge)               # solve
+#     out = calibrate(sol, ps; post)               # apply
 #
 # `fit` runs each solve step's `solve` on the data as the corrections and steps
-# before it leave it. `calibrate` streams the recorded corrections, the gains and flags, and the
-# output steps over each scan group, then `post`.
+# before it leave it. `calibrate` replays the recorded sequence over each
+# Measurement Set, then the flags and `post`.
 
 # A solve's parallelism is across scan groups and, within a group, across
 # baselines; each task's WLS/QR solve is small. Multithreaded BLAS underneath
@@ -22,14 +22,19 @@ function _check_blas_threads()
 end
 
 """
-    fit(pipeline, uvset; gauge, exec = ExecutionConfig()) -> CalibrationSolution
+    fit(pipeline, ps::ProcessingSet; gauge, exec = ExecutionConfig()) -> CalibrationSolution
+    fit(pipeline, ms::MeasurementSet; gauge, exec = ExecutionConfig()) -> CalibrationSolution
 
-Solve the pipeline's solve steps on `uvset`, in order. `pipeline` is a tuple
-(or vector) of solve steps ([`BaselineFringeFit`](@ref), [`DispersionSBDFit`](@ref),
-[`Bandpass`](@ref), [`AdhocPhase`](@ref) or a third-party `SolveStep`), data
-transforms and [`AprioriAmplitude`](@ref), usually built with `|>`, or a
-single one of them. Each solve step reads the data every earlier transform
-and step has corrected; an `AprioriAmplitude` scales only the output.
+Solve the pipeline's solve steps on `ps`, in order, one scan group
+(`groupby(ps, ByScan())`) at a time. `pipeline` is a tuple (or vector) of
+solve steps ([`BaselineFringeFit`](@ref), [`DispersionSBDFit`](@ref),
+[`Bandpass`](@ref), [`AdhocPhase`](@ref) or a third-party `SolveStep`) and
+corrections (an [`AbstractDataTransform`](@ref) such as
+[`AutocorrelationNormalization`](@ref), or any function from a Measurement Set
+to a Measurement Set), usually built with `|>`, or a single one of them. Each
+solve step reads the data every earlier correction and step has corrected.
+Narrow the data by subsetting `ps` first. A Measurement Set is fit as a
+processing set of one.
 
 `gauge` is required: an [`AbstractGauge`](@ref) such as `PinAntenna("PT")`,
 `PinAntenna(["PT", "LA"])` for a ranked fallback, or `ZeroSumPhase()`; without
@@ -37,38 +42,47 @@ one `fit` throws, naming the stations. `exec` (an [`ExecutionConfig`](@ref))
 supplies the run's schedulers, memory budget and progress callback.
 
 The solution records the pipeline as a tuple (`sol.sequence`) and the gauge
-(`sol.gauge`), so `fit(sol.sequence, uvset; sol.gauge)` repeats the run and
-[`calibrate`](@ref)`(sol, uvset)` replays it. `sol[:fringe]` selects one step,
+(`sol.gauge`), so `fit(sol.sequence, ps; sol.gauge)` repeats the run and
+[`calibrate`](@ref)`(sol, ps)` replays it. `sol[:fringe]` selects one step,
 `sol[1:i]` the cumulative view through step `i`, and [`stage_info`](@ref) a
-step's diagnostics. A pipeline needs no `BaselineFringeFit`: solving `A |> B`
-is equivalent to `sa = fit(A, uvset)` followed by
-`fit(Fring.ApplySolution(sa[provides(A)]) |> B, uvset)`.
+step's diagnostics. Solving `A |> B` is equivalent to `sa = fit(A, ps)`
+followed by `fit(ApplySolution(sa[provides(A)]) |> B, ps)`.
 """
 function StatsAPI.fit(
-        pipeline::Union{Tuple, AbstractVector}, uvset::UVSet;
+        pipeline::Union{Tuple, AbstractVector}, ps::XRadio.ProcessingSet;
         gauge::Union{Nothing, AbstractGauge} = nothing,
         exec::ExecutionConfig = ExecutionConfig(),
     )
     _check_blas_threads()
-    return _run_pipeline(_parse_pipeline(pipeline), exec, gauge, uvset)
+    return _run_pipeline(_parse_pipeline(pipeline), exec, gauge, ps)
 end
 
-StatsAPI.fit(x::PipelineElement, uvset::UVSet; kwargs...) = fit((x,), uvset; kwargs...)
+StatsAPI.fit(pipeline::Union{Tuple, AbstractVector}, ms::XRadio.MeasurementSet; kwargs...) =
+    fit(pipeline, _one_member(ms); kwargs...)
+StatsAPI.fit(x::PipelineElement, data::Union{XRadio.ProcessingSet, XRadio.MeasurementSet}; kwargs...) =
+    fit((x,), data; kwargs...)
 
 """
-    calibrate(sol::CalibrationSolution, uvset::UVSet;
-              post = identity, apply_flags = true, exec = ExecutionConfig()) -> UVSet
+    calibrate(sol::CalibrationSolution, ps::ProcessingSet;
+              post = identity, apply_flags = true, exec = ExecutionConfig()) -> ProcessingSet
 
-Apply a fitted solution to data, one scan group at a time (a lazy set is
-never fully materialized). Each group passes through the transforms recorded
-in `sol.sequence`, in order, then the solution's gains and flags, then any
-recorded [`AprioriAmplitude`](@ref), then `post`, a `UVSet -> UVSet`
-function such as `CombineSpw() ∘ AverageFrequency(nout = 1)`. Use it on the
-data the solution was fit on, or another set with the same geometry. `exec`
-supplies this pass's schedulers, memory budget and progress callback.
+Apply a fitted solution to data: each Measurement Set of `ps` is read, passed
+through `sol.sequence` in order (each correction as recorded, each solve step
+as that step's gains), then the solution's flags, then `post`, a function from
+a Measurement Set to a Measurement Set. A gain cell that is zero or non-finite
+gives a NaN visibility and a flag.
+
+`apply_flags` (default `true`) flags the baselines of each (station, scan)
+the fringe solve left unconstrained: their gains are identity, so the data
+would pass through uncalibrated. The flagged samples keep their visibilities
+and weights.
+
+Each sample is placed in the solution by scan, spectral window and time as
+[`ApplySolution`](@ref) places it, so `ps` may be other data than the solution
+was fit on. `exec` supplies the schedulers and progress callback.
 """
 function calibrate(
-        sol::CalibrationSolution, uvset::UVSet;
+        sol::CalibrationSolution, ps::XRadio.ProcessingSet;
         post = identity, apply_flags::Bool = true,
         exec::ExecutionConfig = ExecutionConfig(),
     )
@@ -78,20 +92,19 @@ function calibrate(
                 "serialization (saved as `missing`) — re-fit, or apply it manually."
         )
     )
-    # Same station-axis reason as `fit`: leaves that saw different sub-arrays
-    # number stations differently, and the gains are applied against one axis.
-    uvset = UVData.unify_antennas(uvset)
-    stream = Fring.scan_stream(uvset; transforms = recorded_transforms(sol), exec = exec)
-    apriori = filter(x -> x isa AprioriAmplitude, sol.sequence)
-    output = uv -> post(foldl((acc, a) -> _apply_apriori(a, acc), apriori; init = uv))
-    group_pairs = _map_groups(stream; stage = :output) do spec
-        keyed = Fring.materialize_leaves(stream, spec)
-        reduce_scan_output(
-            stream.uvset, keyed, sol, output;
-            executor = inner_executor(stream), apply_flags = apply_flags,
-        )
+    geom = DataGeometry(ps)
+    replay = _replay_sequence(sol)
+    flagged = apply_flags ? _solution_flag_sets(sol.info) : nothing
+    names = collect(keys(ps))
+    members = collect(values(ps))
+    out = _map_groups(members, zeros(Int, length(members)), exec; stage = :output) do ms
+        corrected = _apply_corrections(replay, read(ms), geom)
+        post(_flag_unconstrained(corrected, sol, geom, flagged))
     end
-    return assemble_output(uvset, group_pairs)
+    return XRadio.ProcessingSet(
+        OrderedDict{Symbol, XRadio.MeasurementSet}(names .=> out),
+        copy(DimensionalData.metadata(ps)),
+    )
 end
 
 """
@@ -112,32 +125,69 @@ calibrate(
     kwargs...,
 ) = UVData.apply_calibration(uvset, spw_cals; kwargs...)
 
-# One scan group's output: the materialized leaves `keyed` (already through the
-# recorded transforms) as a sub-`UVSet`, with `sol`'s gains and flags applied
-# and then `postprocess`, returned as output branches.
-function reduce_scan_output(
-        uvset::UVSet, keyed, sol::CalibrationSolution, postprocess;
-        executor = SerialScheduler(), apply_flags::Bool = true,
-    )
-    sub_branches = DimensionalData.TreeDict()
-    for (k, leaf) in keyed
-        sub_branches[k] = leaf
-    end
-    sub = DimensionalData.rebuild(uvset; branches = sub_branches)
-    reduced = postprocess(UVData.apply_calibration(sub, sol; executor, apply_flags, transforms = ()))
-    return collect(pairs(UVData.branches(reduced)))
+# The gains of one solved step, as `calibrate` applies them: a degenerate gain
+# cell flags the sample.
+struct _StepGains{S <: CalibrationSolution}
+    sol::S
 end
 
-# The output `UVSet` rebuilt from the per-group branch pairs, in group order.
-function assemble_output(uvset::UVSet, group_pairs)
-    out_branches = DimensionalData.TreeDict()
-    for r in group_pairs
-        r === nothing && continue
-        for (k, leaf) in r
-            out_branches[k] = leaf
+_correct(g::_StepGains, ms::XRadio.MeasurementSet, geom::DataGeometry) =
+    _divide_gains(ms, GeometryWindow(geom, ms), g.sol; flag_bad = true)
+
+# `sol.sequence` as corrections, each solve step replaced by its own gains.
+function _replay_sequence(sol::CalibrationSolution)
+    replay = Any[]
+    k = 0
+    for x in sol.sequence
+        if x isa SolveStep
+            k += 1
+            push!(replay, _StepGains(sol[k]))
+        else
+            push!(replay, x)
         end
     end
-    return DimensionalData.rebuild(uvset; branches = out_branches)
+    k == length(sol.steps) || throw(
+        ArgumentError(
+            "calibrate: the solution records $(length(sol.steps)) solved step(s) but its " *
+                "sequence lists $k"
+        )
+    )
+    return replay
+end
+
+Calibration.recorded_transforms(sol::CalibrationSolution) =
+    Any[x for x in sol.sequence if !(x isa SolveStep)]
+
+# The solution's unconstrained (station, scan id) pairs as a lookup set,
+# `nothing` when the solution records none.
+function _solution_flag_sets(info::NamedTuple)
+    (haskey(info, :flagged_ant) && !isempty(info.flagged_ant)) || return nothing
+    return Set{Tuple{Int, Int}}(
+        (Int(info.flagged_ant[i]), Int(info.flagged_scan[i]))
+            for i in eachindex(info.flagged_ant)
+    )
+end
+
+# Flag the samples of each baseline touching a (station, scan) in `flagged`,
+# stations and scans being the solution's own, matched by name.
+function _flag_unconstrained(ms::XRadio.MeasurementSet, sol::CalibrationSolution, geom::DataGeometry, flagged)
+    flagged === nothing && return ms
+    solnames = _solution_ant_names(sol)
+    station = [something(findfirst(==(n), solnames), 0) for n in geom.stations]
+    scan = [something(findfirst(==(String(c)), sol.geom.scan_names), 0) for c in ms[:scan_name]]
+    flag = modify(Array, ms[:flag])
+    hit = false
+    for (bi, (a, b)) in pairs(GeometryWindow(geom, ms).stations)
+        a == b && continue
+        sa, sb = station[a], station[b]
+        for ti in eachindex(scan)
+            ((sa, scan[ti]) in flagged || (sb, scan[ti]) in flagged) || continue
+            view(flag, BaselineID(bi), Ti(ti)) .= true
+            hit = true
+        end
+    end
+    hit || return ms
+    return _with_layers(ms; flag)
 end
 
 # ── The runner ───────────────────────────────────────────────────────────────
@@ -152,30 +202,23 @@ _resolve_run_gauge(::Nothing, ant_names) = throw(
 
 # Solve a pipeline: each solve step compiles and solves its own private
 # (model, layout, θ), never a merged one. A step reads the data through the
-# transform chain as it stands at the step's position: the transforms listed
-# before it, in order, with each earlier step's own solution (`ApplySolution`)
-# appended where the step finished.
+# corrections as they stand at the step's position: those listed before it, in
+# order, with each earlier step's own solution (`ApplySolution`) where that
+# step sat.
 function _run_pipeline(
-        br, exec::ExecutionConfig, gauge_spec::Union{Nothing, AbstractGauge}, uvset::UVSet,
+        br, exec::ExecutionConfig, gauge_spec::Union{Nothing, AbstractGauge}, ps::XRadio.ProcessingSet,
     )
-    # A solve has ONE station axis, and a leaf's baseline pairs index that
-    # leaf's own antenna table — so leaves that saw different sub-arrays number
-    # the same station differently. Put them all on the union table first; a set
-    # whose leaves already share one is returned untouched and stays lazy.
-    uvset = UVData.unify_antennas(uvset)
-    gauge = _resolve_run_gauge(gauge_spec, _antenna_names(uvset))
-    geom = build_geometry(uvset)
-    antennas = UVData.union_antennas(uvset)
-    spec = (; geom, antennas)
-    chain = Fring.AbstractDataTransform[]
+    geom = DataGeometry(ps)
+    gauge = _resolve_run_gauge(gauge_spec, geom.stations)
+    groups = groupby(ps, XRadio.ByScan())
+    charges = [_group_charge(g) for g in values(groups)]
+    _check_memory_budget(charges, exec)
+    spec = (; geom)
+    corrections = Any[]
     step_solutions = StepSolution[]
-    stream = nothing
     for (st, before) in zip(br.solve_steps, br.before)
-        append!(chain, before)
-        # The stream fixes its transform types as a type parameter, so a longer
-        # chain means a new stream (geometry only, no data read).
-        stream = Fring.scan_stream(uvset; geom, transforms = copy(chain), exec)
-        ctx = _step_context(st, spec, gauge, stream)
+        append!(corrections, before)
+        ctx = _step_context(st, spec, gauge, groups, charges, copy(corrections), exec)
         t0 = time_ns()
         info = solve(st, ctx)
         info isa NamedTuple || throw(
@@ -189,11 +232,11 @@ function _run_pipeline(
             StepSolution(provides(st), ctx.model, ctx.layout, ctx.θ, _with_timing(info, ctx, t0)),
         )
         # Each step's θ is undivided (it solves its own private model), so it
-        # joins the chain as-is and every later step reads corrected data.
-        push!(chain, Fring.ApplySolution(_step_precal(st, ctx, geom)))
+        # joins the corrections as-is and every later step reads corrected data.
+        push!(corrections, ApplySolution(_step_precal(st, ctx, geom)))
     end
     return CalibrationSolution(
-        step_solutions, geom, _run_info(step_solutions, br, antennas, stream);
+        step_solutions, geom, _run_info(step_solutions, br, geom, groups, exec);
         sequence = Tuple(br.sequence), gauge = gauge_spec,
     )
 end
@@ -202,19 +245,19 @@ end
 # legitimately compile no components at all (e.g. `DispersionSBDFit` with
 # dispersion disabled and a band layout that can't support SBD either); it
 # still runs, with nothing to solve. The model is materialized against the
-# run's antenna table here, so the context (and the solution's provenance)
-# holds the concrete per-station trees the solve uses; a step that has not
-# opted into station heterogeneity (`supports_station_heterogeneity`) is handed
-# uniform models only — anything else is rejected before any data is read.
-function _step_context(st::SolveStep, spec, gauge, stream)
-    (; geom, antennas) = spec
-    model = Calibration.materialize(model_components(st, spec), antennas, geom)
+# run's stations here, so the context (and the solution's provenance) holds the
+# concrete per-station trees the solve uses; a step that has not opted into
+# station heterogeneity (`supports_station_heterogeneity`) is handed uniform
+# models only — anything else is rejected before any data is read.
+function _step_context(st::SolveStep, spec, gauge, groups, charges, corrections, exec)
+    stations = spec.geom.stations
+    model = Calibration.materialize(model_components(st, spec), stations, spec.geom)
     supports_station_heterogeneity(st) ||
-        Calibration.require_station_uniform(model, antennas, heterogeneity_rejector(st))
-    layout = plan_parameters(model, antennas, geom; require_nonempty = false)
+        Calibration.require_station_uniform(model, stations, heterogeneity_rejector(st))
+    layout = plan_parameters(model, stations, spec.geom; require_nonempty = false)
     return SolveContext(
-        model, layout, geom, zeros(layout.nθ), gauge, length(antennas), antennas,
-        stream, provides(st), _PassTiming[],
+        model, layout, spec.geom, zeros(layout.nθ), gauge, length(stations),
+        groups, charges, corrections, exec, provides(st), _PassTiming[],
     )
 end
 
@@ -222,7 +265,7 @@ end
 # `timing`, a `DimStack` over `Scan` of each group's `decode`/`work` seconds
 # summed over the step's passes.
 function _with_timing(info::NamedTuple, ctx::SolveContext, t0::UInt64)
-    ngroups = length(ctx.stream.groups)
+    ngroups = length(ctx.groups)
     decode, work = zeros(ngroups), zeros(ngroups)
     for pass in ctx.passes
         decode .+= pass.decode
@@ -232,32 +275,32 @@ function _with_timing(info::NamedTuple, ctx::SolveContext, t0::UInt64)
     return (; info..., t_pass = (time_ns() - t0) / 1.0e9, timing)
 end
 
-# One finished step's own solution, as the precal a later step divides out.
+# One finished step's own solution, as the correction a later step divides out.
 # `ApplySolution` matches stations by NAME and refuses a solution that names
 # none, so the station table is recorded here as it is on the run's own
-# solution — a solve-time transform is no exception to the apply contract.
+# solution.
 _step_precal(st, c::SolveContext, geom::DataGeometry) = CalibrationSolution(
-    c.model, c.layout, geom, c.θ, (; ant_names = String.(collect(c.antennas.name)));
+    c.model, c.layout, geom, c.θ, (; ant_names = copy(geom.stations));
     name = provides(st),
 )
 
 # The solution-level `info`: run-wide fields, plus the fringe step's
 # unconstrained (station, scan) flags, which `calibrate` applies, and its
-# search configuration, which `fringe_search_map` replays. Every other per-step
-# diagnostic lives on that step's `StepSolution.info` (`stage_info(sol, name)`).
-function _run_info(step_solutions, br, antennas, stream)
+# search configuration. Every other per-step diagnostic lives on that step's
+# `StepSolution.info` (`stage_info(sol, name)`).
+function _run_info(step_solutions, br, geom, groups, exec)
     ffi = findfirst(st -> st isa BaselineFringeFit, br.solve_steps)
     ff_info = ffi === nothing ? nothing : step_solutions[ffi].info
     return (;
-        nant = length(antennas),
-        nscan = length(stream.groups),
+        nant = length(geom.stations),
+        nscan = length(groups),
         flagged_ant = ff_info === nothing ? Int[] : ff_info.flagged_ant,
         flagged_scan = ff_info === nothing ? Int[] : ff_info.flagged_scan,
-        ant_names = String.(collect(antennas.name)),
+        ant_names = copy(geom.stations),
         (ffi === nothing ? (;) : (; search = br.solve_steps[ffi].search))...,
-        precal_applied = any(t -> t isa Fring.ApplySolution, Iterators.flatten(br.before)),
-        ntasks_used = Streaming.max_tasks(outer_executor(stream)),
-        inner_tasks = Streaming.max_tasks(inner_executor(stream)),
+        precal_applied = any(t -> t isa ApplySolution, Iterators.flatten(br.before)),
+        ntasks_used = max_tasks(outer_executor(exec)),
+        inner_tasks = max_tasks(inner_executor(exec)),
     )
 end
 
@@ -287,19 +330,19 @@ function _check_unique_provides(solve_steps::Vector{SolveStep})
     return nothing
 end
 
-# Split a pipeline into its solve steps and, for each, the transforms listed
+# Split a pipeline into its solve steps and, for each, the corrections listed
 # between it and the step before it (`before[k]`).
 function _parse_pipeline(pipeline)
     sequence = collect(Any, _check_pipeline(pipeline))
     solve_steps = SolveStep[]
-    before = Vector{Fring.AbstractDataTransform}[]
-    pending = Fring.AbstractDataTransform[]
+    before = Vector{Any}[]
+    pending = Any[]
     for x in sequence
         if x isa SolveStep
             push!(solve_steps, x)
             push!(before, pending)
-            pending = Fring.AbstractDataTransform[]
-        elseif x isa Fring.AbstractDataTransform
+            pending = Any[]
+        else
             push!(pending, x)
         end
     end

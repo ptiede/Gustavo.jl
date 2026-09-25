@@ -53,16 +53,6 @@ using Gustavo.UVData: Frequency, Ti, BaselineID, Polarization
         @test all(isnan, UV.phase_relative_to_ref(shift(ph), firstindex(shift(ph)) - 1))
     end
 
-    @testset "station_weight_scale tracks its name vector's axes" begin
-        names = ["AA", "BB", "CC"]
-        factors = Dict("BB" => 2.0)
-        ref = ST.station_weight_scale(names, factors)
-        out = ST.station_weight_scale(shift(names), factors)
-        @test collect(out) == collect(ref)
-        @test axes(out) == axes(shift(names))
-        @test ST.station_weight_scale(whole(names), factors) == ref
-    end
-
     @testset "the per-baseline delay reads its own indices" begin
         freqs = collect(range(2.2e10, step = 2.0e6, length = 8))
         z = cis.(range(0.0, 2.1, length = 8))

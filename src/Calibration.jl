@@ -73,7 +73,7 @@ export ParameterLayout, plan_parameters, station_blocks
 export evaluate_gains
 
 # Calibration solution container, apply, serialization
-export CalibrationSolution, StepSolution, build_geometry, GeometryWindow, leaf_window
+export CalibrationSolution, StepSolution, GeometryWindow
 export save_solution, load_solution, recorded_transforms
 
 # Per-stage provenance and snapshots (composable pipeline)

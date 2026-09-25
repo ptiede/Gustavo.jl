@@ -23,7 +23,6 @@ makedocs(;
             "Gustavo" => "api/gustavo.md",
             "UVData" => "api/uvdata.md",
             "Calibration" => "api/calibration.md",
-            "Streaming" => "api/streaming.md",
             "Fring" => "api/fring.md",
         ],
         "Internals" => "internals.md",

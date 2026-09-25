@@ -5,8 +5,8 @@
 # model components and `plan_parameters` lays out that step's own θ alone — no
 # step's θ block is ever shared with, or visible to, another step's. A step
 # reads the data the corrections before it and the earlier steps' gains
-# produced (each finished step's solution joins the scan stream's transform
-# chain), and every stage remains individually inspectable through the
+# produced (each finished step's solution joins the corrections of every later
+# step), and every stage remains individually inspectable through the
 # solution's per-stage records.
 #
 # Hooks a step may implement:
@@ -34,8 +34,8 @@ abstract type SolveStep end
 """
     model_components(step::SolveStep, spec) -> GainModel
 
-The [`GainModel`](@ref) `step` solves. `spec = (; geom, antennas)` carries the
-data geometry and antenna table the step may consult (e.g. to resolve an
+The [`GainModel`](@ref) `step` solves. `spec = (; geom)` carries the data
+geometry (with the run's `stations`) the step may consult (e.g. to resolve an
 `:auto` option). Default: no components.
 
 A method of the same generic compiles a data-dependent model element —
@@ -109,18 +109,18 @@ solve(step::SolveStep, ctx) = throw(
 What a step's [`solve`](@ref) works with: the step's own compiled model
 (`model`, `layout`, and `θ`, the flat parameter vector over `layout`, which
 `solve` fills; a component's block is `reshape(view(θ, plan.range),
-plan.shape)`), the data geometry `geom`, the resolved `gauge`, the station
-table (`nant`, `antennas`), and `stream`, the scan groups as the step reads
-them: through the pipeline's corrections before the step and every earlier
-step's gains. Another step's θ is never visible here; it reaches the step only
-as a correction of the data.
+plan.shape)`), the data geometry `geom` (its `stations` are the run's station
+table), the resolved `gauge`, `nant`, the scan groups of the data
+(`groupby(ps, ByScan())`), and the corrections the step's data pass through:
+the pipeline's corrections before the step and every earlier step's gains.
+Another step's θ is never visible here; it reaches the step only as a
+correction of the data.
 """
 const _PassTiming = @NamedTuple{decode::Vector{Float64}, work::Vector{Float64}}
 
 struct SolveContext{
-        M <: GainModel, L <: ParameterLayout,
-        A <: UVData.AntennaTable, S <: Streaming.ScanStream,
-        V <: AbstractVector{Float64},
+        M <: GainModel, L <: ParameterLayout, V <: AbstractVector{Float64},
+        G <: AbstractDict, X <: ExecutionConfig,
     }
     model::M
     layout::L
@@ -128,8 +128,10 @@ struct SolveContext{
     θ::V
     gauge::AbstractGauge
     nant::Int
-    antennas::A
-    stream::S
+    groups::G
+    charges::Vector{Int}
+    corrections::Vector{Any}
+    exec::X
     stage::Symbol
     passes::Vector{_PassTiming}
 end
@@ -137,10 +139,10 @@ end
 """
     each_group(f, ctx::SolveContext) -> Vector
 
-Read each scan group of the step's data and return `f(stack, win)` for every
-group, in group order. `stack` is the group's `DimStack` with the pipeline's
-corrections applied; `win` is its [`GeometryWindow`](@ref) into the solve's
-index space. Groups run on the run's outer scheduler, heaviest first, and the
+Read each scan group of the step's data and return `f(group)` for every
+group, in group order. `group` is a `ProcessingSet` of in-memory Measurement
+Sets, one per spectral window of the scan, with the corrections before the
+step applied. Groups run on the run's outer scheduler, heaviest first, and the
 progress callback is told of each.
 
 `f` may run concurrently across groups, so it must not write shared state
@@ -148,16 +150,29 @@ other than θ slots belonging to its own scan; it returns its scan's
 contribution instead, and the caller combines the returned values.
 """
 function each_group(f::F, ctx::SolveContext) where {F}
-    stream = ctx.stream
-    out = _map_groups(stream; stage = ctx.stage) do spec
+    out = _map_groups(ctx.groups, ctx.charges, ctx.exec; stage = ctx.stage) do group
         ta = time_ns()
-        stack, win = Fring.materialize_cube(stream, spec)
+        corrected = _read_group(group, ctx.corrections, ctx.geom, inner_executor(ctx.exec))
         tb = time_ns()
-        r = f(stack, win)
+        r = f(corrected)
         (; decode = (tb - ta) / 1.0e9, work = (time_ns() - tb) / 1.0e9, r)
     end
     push!(ctx.passes, (; decode = Float64[o.decode for o in out], work = Float64[o.work for o in out]))
     return map(o -> o.r, out)
+end
+
+# One scan group read into memory, each Measurement Set passed through
+# `corrections`.
+function _read_group(group::XRadio.ProcessingSet, corrections, geom::DataGeometry, executor)
+    named = collect(pairs(group))
+    # Typed `tmap`: the untyped form rejects `GreedyScheduler`.
+    members = tmap(XRadio.MeasurementSet, named; scheduler = executor) do (_, ms)
+        _apply_corrections(corrections, read(ms), geom)
+    end
+    return XRadio.ProcessingSet(
+        OrderedDict{Symbol, XRadio.MeasurementSet}(first.(named) .=> members),
+        copy(DimensionalData.metadata(group)),
+    )
 end
 
 # ── Group scheduling ─────────────────────────────────────────────────────────
@@ -176,24 +191,21 @@ function _report_progress(cb, stage, done, total)
     return nothing
 end
 
-# `work(spec)` over the stream's groups on its outer scheduler, heaviest first,
-# with the results in group order and `(stage, done, total)` reported to the
-# run's progress callback.
-function _map_groups(work::F, stream::Streaming.ScanStream; stage::Symbol) where {F}
-    groups = stream.groups
-    total = length(groups)
-    progress = Streaming.progress_callback(stream)
+# `work(group)` over `groups` (their values) on the outer scheduler, heaviest
+# first by `charges`, with the results in group order and
+# `(stage, done, total)` reported to the run's progress callback.
+function _map_groups(work::F, groups, charges, exec::ExecutionConfig; stage::Symbol) where {F}
+    items = collect(values(groups))
+    total = length(items)
+    progress = progress_callback(exec)
     _report_progress(progress, stage, 0, total)
     done = Threads.Atomic{Int}(0)
-    function wrapped(spec)
-        r = work(spec)
+    function wrapped(group)
+        r = work(group)
         _report_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
         return r
     end
-    return _scheduled_map(
-        wrapped, groups, [s.charge for s in groups];
-        executor = outer_executor(stream),
-    )
+    return _scheduled_map(wrapped, items, charges; executor = outer_executor(exec))
 end
 
 # Largest-first parallel map: run `work` over `items` on `executor`, dispatching
@@ -231,16 +243,17 @@ end
 
 # ── Pipelines ────────────────────────────────────────────────────────────────
 
-# What a pipeline may hold: solve steps, corrections applied to the data every
-# later step reads, and output-only a-priori calibration.
-const PipelineElement = Union{SolveStep, Fring.AbstractDataTransform, AprioriAmplitude}
+# The pipeline elements `|>` joins: solve steps and recorded corrections. A plain
+# function may also sit in a pipeline, written as a tuple or vector, since
+# `f |> x` is Base's function application.
+const PipelineElement = Union{SolveStep, AbstractDataTransform, AprioriAmplitude}
 
 """
     a |> b
 
 Build a pipeline, the tuple `(a, b)`, from solve steps and corrections;
 `pipeline |> c` appends and `c |> pipeline` prepends:
-`StationWeightScale(ws) |> BaselineFringeFit() |> Bandpass()`. Two pipelines
+`AutocorrelationNormalization() |> BaselineFringeFit() |> Bandpass()`. Two pipelines
 join by splatting, `(p..., q...)`.
 """
 Base.:|>(a::PipelineElement, b::PipelineElement) = (a, b)
@@ -249,10 +262,10 @@ Base.:|>(a::PipelineElement, b::Tuple) = (a, b...)
 
 function _check_pipeline(seq)
     for x in seq
-        x isa PipelineElement || throw(
+        x isa Union{PipelineElement, Function} || throw(
             ArgumentError(
-                "a pipeline holds solve steps, data transforms and AprioriAmplitude, " *
-                    "not $(nameof(typeof(x)))"
+                "a pipeline holds solve steps and corrections (an AbstractDataTransform, " *
+                    "AprioriAmplitude, or a function of a Measurement Set), not $(nameof(typeof(x)))"
             )
         )
     end

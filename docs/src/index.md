@@ -5,10 +5,9 @@ CurrentModule = Gustavo
 # Gustavo
 
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package.
-It reads FITS-IDI or UVFITS data into a lazy, scan-partitioned [`UVSet`](@ref),
-solves an ordered pipeline of calibration steps, and streams corrected,
-reduced visibilities back out one scan group at a time — a full-track dataset
-is never resident in memory.
+It solves an ordered pipeline of calibration steps on MSv4 data, an XRadio
+`ProcessingSet`, reading one scan group at a time, so a full-track dataset is
+never resident in memory, and applies the solution to the data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
 deprecation.
@@ -28,48 +27,44 @@ enables the diagnostic plots.
 
 ```julia
 using Gustavo
-using FITSFiles
+using XRadio
 
-uvset = load_fitsidi("track.idifits")            # lazy: header tables only
+ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
-pipeline = BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()
-sol = fit(pipeline, uvset; gauge = PinAntenna("AA"))   # run-wide reference antenna
+pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
+    DispersionSBDFit() |> Bandpass() |> AdhocPhase()
+sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
-out = calibrate(
-    sol, uvset;
-    post = AverageTime(seconds = 10.0) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
-)
-
-write_uvfits("track_cal.uvfits", out)
+out = calibrate(sol, ps)                         # corrected, in memory
 save_solution("track.jls", sol)
 ```
 
 ## The pieces
 
-**Data.** [`load_fitsidi`](@ref) / [`load_uvfits`](@ref) return a `UVSet`: a
-tree of per-scan leaves, each carrying dimension-named
-`(Ti, BaselineID, Polarization, Frequency)` visibility cubes. The `UV_DATA` payload
-stays on disk until a scan group is materialized, so the solvers stream it.
+**Data.** A `ProcessingSet` holds Measurement Sets, each one spectral window
+with dimension-named visibility, weight and flag layers. `fit` groups it by
+scan (`groupby(ps, ByScan())`) and reads one group at a time, so an opened
+store stays on disk until a step reads it. Narrow the data by subsetting the
+`ProcessingSet` before fitting.
 
-**Pipeline.** A pipeline is a tuple of steps, usually built with `|>`,
-solved in order. The built-in solve steps are [`BaselineFringeFit`](@ref) (delay /
+**Pipeline.** A pipeline is a tuple of solve steps and corrections, usually
+built with `|>`, run in order. The built-in solve steps are [`BaselineFringeFit`](@ref) (delay /
 rate / phase search), [`DispersionSBDFit`](@ref) (ionospheric dTEC and
 per-band-group delay refinement), [`Bandpass`](@ref) (time-stable station
 bandpass), and [`AdhocPhase`](@ref) (per-integration atmospheric
-phase). A-priori amplitude calibration ([`AprioriAmplitude`](@ref)) joins
-the same pipeline and scales the output. Every step is optional and
-reorderable; a single standalone step is a legal pipeline.
+phase). Every step is optional and reorderable; a single standalone step is
+a legal pipeline.
 
-**Transforms.** A step scales what it *produces*; an
-[`AbstractDataTransform`](@ref Gustavo.Fring.AbstractDataTransform) scales what
-every step after it *reads* — it runs on each scan group as it is
-materialized, inside the streaming pass. Chain one into a pipeline like any step
-(`AprioriPreCal(uvset, antab) |> Bandpass()`). The built-ins are
-[`AprioriPreCal`](@ref) (ANTAB SEFD scaling before the solve, the pre-fit
-counterpart of [`AprioriAmplitude`](@ref)), [`ApplySolution`](@ref),
-[`StationWeightScale`](@ref), [`FlagChannels`](@ref), and
-[`CalFunction`](@ref) for arbitrary caller code. Writing your own means one
-method, `apply_transform!(t, stack, win; executor)`.
+**Corrections.** A step solves gains; a correction changes what every step
+after it *reads*. A correction is a function from a Measurement Set to a
+corrected Measurement Set, applied to each Measurement Set of a scan group as
+the group is read. The ones a solution records and [`calibrate`](@ref)
+replays are [`AbstractDataTransform`](@ref) structs:
+[`AutocorrelationNormalization`](@ref), [`ApplySolution`](@ref),
+[`StationWeightScale`](@ref) and [`FlagChannels`](@ref). A plain function
+can sit in a pipeline too, written as a tuple or vector
+(`(my_flagging, BaselineFringeFit())`), since `f |> step` is Base's function
+application.
 
 **Models.** Each solve step separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —
@@ -78,11 +73,8 @@ from HOW it is solved (the step's options, or a pluggable smoother object).
 **Verbs.** [`fit`](@ref) solves and returns a
 [`CalibrationSolution`](@ref Gustavo.Calibration.CalibrationSolution) without
 producing corrected data; [`calibrate`](@ref) applies a finished solution to
-this or another dataset with the same geometry, replaying the recorded
-transforms and a-priori steps, and runs its `post` function — averaging
-([`AverageFrequency`](@ref), [`AverageTime`](@ref)), spw merging
-([`CombineSpw`](@ref)), edge flagging ([`FlagSpwEdges`](@ref)) — on each
-corrected scan group.
+this or other data, replaying the recorded corrections and each step's gains
+in order, and runs its `post` function on each corrected Measurement Set.
 
 **Solutions.** A solution is inspectable per stage: `sol[:fringe]` selects
 one step (any selection is itself a solution that applies, plots, and

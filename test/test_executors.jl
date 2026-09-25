@@ -1,13 +1,13 @@
 # ── The executor seam ─────────────────────────────────────────────────────────
 #
 # A run parallelizes at two independently-selected levels (see `ExecutionConfig`):
-# the OUTER across-scan group scheduler driving the pass runner, and the INNER
+# the OUTER across-scan group scheduler behind `each_group`, and the INNER
 # within-scan fan-out — each an OhMyThreads `Scheduler`. The contract under
 # test: groups are dispatched heaviest-first and run at the outer scheduler's
 # own task count, θ and outputs are bit-identical across BOTH choices, and a
 # failed group task surfaces its exception.
 
-@isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 using Gustavo: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 
 # An outer executor with no `_scheduled_map` method, for the fallback.
@@ -68,40 +68,32 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         )
         # Likewise for the memory gate: a scheduler whose task count cannot be
         # read cannot be checked against the budget.
-        @test_throws MethodError ST.max_tasks(UnbackedExecutor())
+        @test_throws MethodError Gustavo.max_tasks(UnbackedExecutor())
     end
 
     @testset "full pipeline: θ and output bit-identical across OUTER executors" begin
-        uvset, _ = _build_fringe_uvset(; nscans = 2)
+        ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
         run(ex) = fit(
-            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), uvset;
+            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), ps;
             exec = ExecutionConfig(outer_executor = ex), gauge = PinAntenna(1),
         )
         sol_t, sol_d = run(DynamicScheduler()), run(GreedyScheduler())
-        out_t = calibrate(sol_t, uvset; post = AverageFrequency(nout = 1), exec = ExecutionConfig(outer_executor = DynamicScheduler()))
-        out_d = calibrate(sol_d, uvset; post = AverageFrequency(nout = 1), exec = ExecutionConfig(outer_executor = GreedyScheduler()))
         @test parent(gains(sol_d)) == parent(gains(sol_t))
         @test keys(sol_d) == keys(sol_t)
-        for (k, leaf) in UVP.branches(out_t)
-            ld = UVP.branches(out_d)[k]
-            @test isequal(parent(leaf[:vis]), parent(ld[:vis]))
-            @test isequal(parent(leaf[:weights]), parent(ld[:weights]))
-        end
-
-        # Standalone calibrate matches across outer executors too.
-        c_t = calibrate(sol_t, uvset; exec = ExecutionConfig(outer_executor = DynamicScheduler()))
-        c_d = calibrate(sol_t, uvset; exec = ExecutionConfig(outer_executor = GreedyScheduler()))
-        for (k, leaf) in UVP.branches(c_t)
-            @test isequal(parent(leaf[:vis]), parent(UVP.branches(c_d)[k][:vis]))
+        out_t = calibrate(sol_t, ps; exec = ExecutionConfig(outer_executor = DynamicScheduler()))
+        out_d = calibrate(sol_d, ps; exec = ExecutionConfig(outer_executor = GreedyScheduler()))
+        for k in keys(ps)
+            @test isequal(parent(out_t[k][:visibility]), parent(out_d[k][:visibility]))
+            @test isequal(parent(out_t[k][:weight]), parent(out_d[k][:weight]))
         end
     end
 
     @testset "full pipeline: θ bit-identical across INNER executors" begin
-        uvset, _ = _build_fringe_uvset(; nscans = 2)
+        ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
         run(inner) = fit(
-            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), uvset;
+            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), ps;
             exec = ExecutionConfig(inner_executor = inner), gauge = PinAntenna(1),
         )
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are
@@ -109,29 +101,5 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         sol_ser = run(SerialScheduler())
         sol_dyn = run(DynamicScheduler(; nchunks = 4))
         @test parent(gains(sol_ser)) == parent(gains(sol_dyn))
-    end
-
-    @testset "the driver-facing stream carries both executors" begin
-        uvset, _ = _build_fringe_uvset()
-        st = FP.scan_stream(
-            uvset;
-            exec = ExecutionConfig(
-                outer_executor = GreedyScheduler(), inner_executor = SerialScheduler(),
-            ),
-        )
-        @test FP.outer_executor(st) isa GreedyScheduler
-        @test FP.inner_executor(st) isa SerialScheduler
-        # The bare default runs scan groups serially.
-        st0 = FP.scan_stream(uvset)
-        @test FP.outer_executor(st0) isa SerialScheduler
-        # Same search results whichever inner executor runs the fan-out.
-        stack, _ = FP.materialize_cube(st, st.groups[1])
-        stack0, _ = FP.materialize_cube(st0, st0.groups[1])
-        @test isequal(stack[:vis], stack0[:vis]) && isequal(stack[:weights], stack0[:weights])
-        r = FP.search_scan(stack, st.geom, FP.FringeSearch(); ngroups = 1)
-        r0 = FP.search_scan(stack0, st0.geom, FP.FringeSearch(); ngroups = 1)
-        # Same detections whichever inner executor runs the fan-out, per layer
-        # (subsumes any derived aggregate like max SNR).
-        @test all(all(r[k] .=== r0[k]) for k in keys(r))
     end
 end

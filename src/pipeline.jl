@@ -16,7 +16,6 @@ A-priori amplitude calibration, applied to the output: `spw_cals` (from
 gains and before `post`, wherever the element sits in the pipeline, so a
 solve step never sees the scaled amplitudes. It is recorded in the solution's
 sequence, so `calibrate(sol, uvset)` applies it without re-passing `spw_cals`.
-Use [`AprioriPreCal`](@ref) when the solvers should see calibrated amplitudes.
 """
 struct AprioriAmplitude{C}
     spw_cals::C
@@ -30,20 +29,18 @@ _apply_apriori(s::AprioriAmplitude, uv) = UVData.apply_calibration(
     uv, s.spw_cals; min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
 )
 
+# Run-wide resources: schedulers, the memory budget, progress.
+include("pipeline/execution.jl")
+
+# Corrections: Measurement Set → Measurement Set, the recorded ones as structs.
+include("pipeline/corrections.jl")
+
 # The step protocol: SolveStep, its hooks, and `|>` building a pipeline.
 include("pipeline/protocol.jl")
 
 # The built-in solve steps: BaselineFringeFit, DispersionSBDFit, Bandpass,
 # AdhocPhase.
 include("pipeline/steps.jl")
-
-
-# ── Antenna-name lookup (shared by the bridge and the runner) ───────────────
-
-function _antenna_names(uvset)
-    leaf = first(values(UVData.branches(uvset)))
-    return collect(UVData.metadata(leaf).antennas.name)
-end
 
 
 """

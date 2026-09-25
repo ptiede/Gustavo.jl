@@ -1,15 +1,11 @@
 """
     Fring
 
-VLBI fringe fitting on top of the unified `Gustavo.Calibration` model framework,
-the `Gustavo.UVData` visibility model, and the `Gustavo.Streaming` scan-group
-layer it runs its passes over (EHT-HOPS-inspired, Blackburn et al. 2019, but
-with globally-closing per-feed solutions): per-baseline FFT delay/rate search,
-stationization, bandpass and adhoc-phase stages, and the diagnostics over them.
-
-The streaming vocabulary (`ScanStream`, the transform types) is re-exported
-from `Gustavo.Streaming`, so a caller driving the fringe engine reaches it
-without a second `using`.
+VLBI fringe fitting on top of the unified `Gustavo.Calibration` model framework
+and the `Gustavo.UVData` visibility model (EHT-HOPS-inspired, Blackburn et al.
+2019, but with globally-closing per-feed solutions): per-baseline FFT
+delay/rate search, stationization, bandpass and adhoc-phase stages, and the
+diagnostics over them.
 """
 module Fring
 
@@ -26,7 +22,6 @@ using ..Calibration: weighted_regularized_least_squares, weighted_constrained_le
     unwrap_phase_track, phase_unwrap_ambiguity, connected_components, savitzky_golay_smooth
 # `SingleBandDelay` compiles through the model layer's element-compilation generic.
 import ..Calibration: model_components
-using ..Streaming
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, DimArray, DimStack, AbstractDimStack
@@ -133,7 +128,6 @@ export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, AdhocOptions, SavitzkyGolaySmoother, PenalizedSmoother
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing, default_adhoc_terms
-export station_weight_scale
 export AbstractShapeSpec, FreeShape, PolynomialShape, WhittakerShape, ARShape, fit_track
 export fit_track_group
 export default_bandpass_terms
@@ -145,18 +139,12 @@ export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan
 export fringe_freq_group_stats, fringe_freq_groups
 export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags
 export delay_closure, print_delay_closure
-export AbstractDataTransform, apply_transform!, apply_transform
-export ApplySolution, StationWeightScale, FlagChannels, CalFunction, AprioriPreCal
 export can_fit, validate_model
 export SingleBandDelay, BandGroups, default_fringe_terms
 # `DispersionModel` is `Calibration`'s (the propagation model beside the
 # `Dispersion` term it configures); re-exported so a caller driving the fringe
 # engine names it without a second `using`.
 export DispersionModel
-export AbstractLeafGrouping, ByScan, BySpw, ByKey
-export ExecutionConfig, ProgressLogger, outer_executor, inner_executor
-export ScanStream, scan_stream, ScanGroupSpec
-export materialize_cube, materialize_leaves
 export search_scan
 export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
 export plot_fringe_search

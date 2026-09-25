@@ -10,9 +10,9 @@ model it solves and fits it, reading each scan group through
 worked end-to-end example — adding a new physical effect with a specialized
 solver — using the shipped ionospheric-dispersion step as the model.
 
-A step is a [`SolveStep`](@ref), which solves gains. Data transforms, which
-change what later steps read, are covered by the transform contract
-(`apply_transform!`) instead.
+A step is a [`SolveStep`](@ref), which solves gains. Corrections, which
+change what later steps read, are functions from a Measurement Set to a
+Measurement Set ([`AbstractDataTransform`](@ref)) instead.
 
 ## The contract at a glance
 
@@ -28,11 +28,12 @@ A `SolveStep` subtype implements [`solve`](@ref) and some of these hooks:
 The execution model behind them:
 
 - **A step reads scan groups, never the whole set.** `each_group(f, ctx)`
-  materializes each scan group through the pipeline's transform chain (so the
-  step reads data already corrected by every earlier step's finished solution)
-  and calls `f(stack, win)` with the group's `DimStack` and the
-  `GeometryWindow` addressing it in the solve's index space. It returns `f`'s
-  results in group order. A solve that iterates, such as a residual
+  reads each scan group into memory through the corrections before the step
+  (so the step reads data already corrected by every earlier step's finished
+  solution) and calls `f(group)`, where `group` is a `ProcessingSet` holding
+  one Measurement Set per spectral window of the scan.
+  `GeometryWindow(ctx.geom, ms)` addresses a Measurement Set in the solve's
+  index space. `each_group` returns `f`'s results in group order. A solve that iterates, such as a residual
   re-search, calls `each_group` once per round.
 - **Each step solves its own private θ.** `model_components(step, spec)`
   compiles to a per-step parameter layout; no step's θ block is shared with
@@ -156,12 +157,15 @@ function solve(s::DispersionSBDFit, ctx::SolveContext)
     delay_plan = disp_plan === nothing ? nothing :
         Fring._perscan_delay_plan(ctx.model, ctx.layout)
     sbd_plans = Fring._sbd_plans(ctx.model, ctx.layout)
-    ties = _dtec_ties(s.dispersion, ctx.antennas)
-    results = each_group(ctx) do stack, win
-        Fring.refine_scan_dispersion!(
-            ctx.θ, stack, win, delay_plan, disp_plan, ctx.gauge, ctx.nant; ties,
-        )
-        Fring.refine_scan_sbd!(ctx.θ, stack, win, sbd_plans, ctx.gauge, ctx.nant)
+    ties = _dtec_ties(s.dispersion, ctx.geom.stations)
+    results = each_group(ctx) do group
+        for ms in values(group)
+            win = GeometryWindow(ctx.geom, ms)
+            Fring.refine_scan_dispersion!(
+                ctx.θ, ms, win, delay_plan, disp_plan, ctx.gauge, ctx.nant; ties,
+            )
+            Fring.refine_scan_sbd!(ctx.θ, ms, win, sbd_plans, ctx.gauge, ctx.nant)
+        end
         nothing
     end
     return (;
@@ -201,7 +205,7 @@ is a vector built from `each_group`'s results, which are already in scan-group
 order:
 
 ```julia
-results = each_group((stack, win) -> residual_rms(stack, win), ctx)
+results = each_group(group -> residual_rms(group, ctx.geom), ctx)
 return (; residual_rms = results)
 ```
 

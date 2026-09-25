@@ -324,7 +324,7 @@ function _solve_group(
     end
     res = Fring.search_scan(
         stack, ctx.geom, s.search;
-        Vsearch, ngroups = length(ctx.stream.groups), executor = inner_executor(ctx.stream),
+        Vsearch, ngroups = length(ctx.groups), executor = inner_executor(ctx.exec),
         t0 = epoch,
     )
     feeds = feed_pairs(stack)
@@ -428,7 +428,7 @@ function _group_setup(s::DispersionSBDFit, ctx::SolveContext)
 end
 
 function _solve_group(::DispersionSBDFit, ctx::SolveContext, setup, stack, win::GeometryWindow)
-    executor = inner_executor(ctx.stream)
+    executor = inner_executor(ctx.exec)
     Fring.refine_scan_dispersion!(
         ctx.θ, stack, win, setup.delay_plan, setup.disp_plan, ctx.gauge, ctx.nant;
         executor, setup.ties,
@@ -507,7 +507,7 @@ _group_setup(::AdhocPhase, ctx::SolveContext) = Fring._adhoc_plan(ctx.model, ctx
 function _solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, stack, win::GeometryWindow)
     Fring.adhoc_scan!(
         ctx.θ, stack, win, adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
-        executor = inner_executor(ctx.stream),
+        executor = inner_executor(ctx.exec),
     )
     return nothing
 end
