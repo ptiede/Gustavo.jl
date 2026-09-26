@@ -122,8 +122,8 @@ _row_scale(inv_variances) = sqrt.(inv_variances)
 
 # A solve works in the common type of its data (`A`, `b`, the weights), so a
 # Float32 system stays Float32. The system is allocated in that type and filled,
-# so a tuning quantity (a penalty, a constraint weight) is converted on
-# assignment and never sets the precision.
+# so a tuning quantity such as a penalty is converted on assignment and never
+# sets the precision.
 _lsq_eltype(A, b, inv_variances) = promote_type(eltype(A), eltype(b), real(eltype(inv_variances)))
 
 # The row-weighted system `(diag(√w)·A, diag(√w)·b)` in `T`, followed by
@@ -196,16 +196,80 @@ function (est::WLSEstimator)(args...)
     return weighted_regularized_least_squares(A, b, inv_variances, penalty)
 end
 
-function weighted_constrained_least_squares(A, b, inv_variances, C, d; constraint_weight = 1.0e6)
-    isempty(C) && return weighted_least_squares(A, b, inv_variances)
+"""
+    FactoredWLS(A, inv_variances)
+    FactoredWLS{T}(A, inv_variances)
 
-    T = promote_type(_lsq_eltype(A, b, inv_variances), eltype(C), eltype(d))
-    M, y = _weighted_system(T, A, b, inv_variances, size(C, 1))
-    rows = (size(A, 1) + 1):size(M, 1)
-    M[rows, :] .= constraint_weight .* C
-    y[rows] .= constraint_weight .* d
-    return solve(LinearProblem(M, y), QRFactorization()).u
+The weighted least-squares problem `min_x ‖diag(√inv_variances)(Ax − b)‖²`,
+factored once for any number of right-hand sides: `F(b)` returns `x`, a
+vector the next call overwrites. Throws if `A` does not determine every
+unknown. `T` defaults to the common type of `A` and the weights.
+"""
+struct FactoredWLS{T, V <: AbstractVector{T}, C}
+    sw::V
+    cache::C
 end
+
+FactoredWLS(A, inv_variances) =
+    FactoredWLS{promote_type(eltype(A), real(eltype(inv_variances)))}(A, inv_variances)
+
+function FactoredWLS{T}(A, inv_variances) where {T}
+    Base.require_one_based_indexing(A, inv_variances)
+    length(inv_variances) == size(A, 1) ||
+        throw(DimensionMismatch("$(length(inv_variances)) weights for $(size(A, 1)) rows"))
+    sw = convert(AbstractVector{T}, _row_scale(inv_variances))
+    cache = init(LinearProblem(A .* sw, zeros(T, size(A, 1))), QRFactorization())
+    solve!(cache)  # factors
+    _full_rank(cache.cacheval.R) || throw(ArgumentError("the system does not determine every unknown"))
+    return FactoredWLS{T, typeof(sw), typeof(cache)}(sw, cache)
+end
+
+function (F::FactoredWLS)(b)
+    F.cache.b = F.sw .* b
+    return solve!(F.cache).u
+end
+
+function _full_rank(R)
+    d = abs.(diag(R))
+    return isempty(d) || minimum(d) > length(d) * eps(eltype(d)) * maximum(d)
+end
+
+"""
+    ConstrainedWLS(A, inv_variances, C)
+    ConstrainedWLS{T}(A, inv_variances, C)
+
+The weighted least-squares problem `min_x ‖diag(√inv_variances)(Ax − b)‖²`
+subject to `Cx = 0`, factored once for any number of right-hand sides: `F(b)`
+returns `x`.
+
+The constraints hold exactly: with `Cᵀ = [Q₁ Q₂]R`, every feasible `x` is
+`Q₂z`, and `z` solves the unconstrained problem in `A·Q₂` (a
+[`FactoredWLS`](@ref)). Throws if `C` has dependent rows or `A` does not
+determine `x` on the constraints' null space. `T` defaults to the common type
+of `A`, the weights and `C`.
+"""
+struct ConstrainedWLS{T, F <: FactoredWLS{T}}
+    Z::Matrix{T}
+    reduced::F
+end
+
+ConstrainedWLS(A, inv_variances, C) =
+    ConstrainedWLS{promote_type(eltype(A), real(eltype(inv_variances)), eltype(C))}(A, inv_variances, C)
+
+function ConstrainedWLS{T}(A, inv_variances, C) where {T}
+    Base.require_one_based_indexing(A, C)
+    n = size(A, 2)
+    size(C, 2) == n || throw(DimensionMismatch("C has $(size(C, 2)) columns; A has $n"))
+    p = size(C, 1)
+    p <= n || throw(ArgumentError("$p constraints on $n unknowns"))
+    Fc = qr(Matrix{T}(transpose(C)))
+    _full_rank(Fc.R) || throw(ArgumentError("the constraint rows are linearly dependent"))
+    Z = Matrix{T}(Fc.Q * Matrix{T}(I, n, n))[:, (p + 1):n]
+    reduced = FactoredWLS{T}(A * Z, inv_variances)
+    return ConstrainedWLS{T, typeof(reduced)}(Z, reduced)
+end
+
+(F::ConstrainedWLS)(b) = F.Z * F.reduced(b)
 
 # Inverse-variance weight of the increment between samples `k` and `k+1`: the
 # precision of a difference of two independent estimates, `1/(1/w_k + 1/w_{k+1})`.

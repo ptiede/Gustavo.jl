@@ -243,9 +243,9 @@ function _solve_observable!(
     wt = T[w[I] for I in cells]
     compid, ncomp, touched = connected_components(nnodes, edges)
 
-    # Gauge: `gauge` supplies one constraint row per component. `anchors` names a
-    # real node per component as well — phase unwrapping propagates outward from
-    # an actual node, which a summed constraint does not provide.
+    # `gauge` sets each component's offset (`_regauge!`). `anchors` names a real
+    # node per component as well — phase unwrapping propagates outward from an
+    # actual node, which a summed gauge row does not provide.
     nodew = zeros(T, nnodes)
     for ((u, v), wi) in zip(edges, wt)
         nodew[u] += wi
@@ -256,27 +256,20 @@ function _solve_observable!(
     feed_of(n) = n > nant ? 2 : 1
     comps = [findall(==(c), compid) for c in 1:ncomp]
     anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
-    # Constrain every untouched node — an (antenna, feed) with no observation in
-    # this solve, e.g. a station that dropped out. Its design column is all-zero,
-    # which would make the constrained QR system rank-deficient and corrupt the
-    # solve for the stations that DO have data. Fixing it at 0 (its value is
-    # discarded; only `touched` cells are returned) keeps the system well-posed.
-    # Components hold only touched nodes, so these never collide with a gauge row.
-    idle = [n for n in eachindex(touched) if !touched[n]]
-
     A = zeros(T, length(edges), nnodes)
     for (i, (u, v)) in enumerate(edges)
         A[i, u] += one(T)
         A[i, v] -= one(T)
     end
-    C = zeros(T, ncomp + length(idle), nnodes)
-    for (j, cn) in enumerate(comps)
-        gauge_row!(view(C, j, :), gauge, cn, nodew, station_of, feed_of)
+    # Only differences are observed, so each component is solved with its anchor
+    # held at 0 (untouched nodes also stay 0) and `_regauge!` then applies `gauge`.
+    free = [n for n in eachindex(touched) if touched[n] && n ∉ anchors]
+    solve_free = FactoredWLS(A[:, free], wt)
+    function solve_system(y)
+        full = zeros(T, nnodes)
+        full[free] .= solve_free(y)
+        return full
     end
-    for (k, n) in enumerate(idle)
-        C[ncomp + k, n] = one(T)
-    end
-    dgauge = zeros(T, size(C, 1))
 
     # Phase re-wrap: unwrap observations toward a model and re-solve, so
     # station-difference phases exceeding ±π are handled. The first model comes
@@ -306,15 +299,16 @@ function _solve_observable!(
         model = A * xseed
         bw = similar(b)
         @. bw = b + 2π * round((model - b) / (2π))
-        x = weighted_constrained_least_squares(A, bw, wt, C, dgauge)
+        x = solve_system(bw)
         for _ in 1:rewrap
             model = A * x
             @. bw = b + 2π * round((model - b) / (2π))
-            x = weighted_constrained_least_squares(A, bw, wt, C, dgauge)
+            x = solve_system(bw)
         end
     else
-        x = weighted_constrained_least_squares(A, b, wt, C, dgauge)
+        x = solve_system(b)
     end
+    _regauge!(x, comps, gauge, nodew, station_of, feed_of)
 
     for ant in axes(vals, 1), feed in axes(vals, 2)
         n = _node(ant, feed, nant)
@@ -324,6 +318,21 @@ function _solve_observable!(
         end
     end
     return ncomp
+end
+
+# Shift each component of `x` by a constant so that its `gauge` row sums to
+# zero. A constant per component changes no edge difference.
+function _regauge!(x, comps, gauge::AbstractGauge, nodew, station_of, feed_of)
+    row = zeros(eltype(x), length(x))
+    for cn in comps
+        fill!(row, zero(eltype(row)))
+        gauge_row!(row, gauge, cn, nodew, station_of, feed_of)
+        c = sum(n -> row[n] * x[n], cn) / sum(n -> row[n], cn)
+        for n in cn
+            x[n] -= c
+        end
+    end
+    return x
 end
 
 # Maximum-weight spanning-tree phase seed. Propagate wrapped edge phases
@@ -889,22 +898,22 @@ function _solve_tagged_system(
     # byte-identical), non-trivial once a global column couples scans.
     nb = nullspace(vcat(A, Cp))
     C = size(nb, 2) > 0 ? vcat(Cp, permutedims(nb)) : Cp
-    dgauge = zeros(eltype(C), size(C, 1))
+    solve_system = ConstrainedWLS(A, w, C)
 
     if rewrap > 0
         xseed = _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes)
         model = A * xseed
         bw = similar(b)
         @. bw = b + 2π * round((model - b) / (2π))
-        x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
+        x = solve_system(bw)
         for _ in 1:rewrap
             model = A * x
             @. bw = b + 2π * round((model - b) / (2π))
-            x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
+            x = solve_system(bw)
         end
         resid = bw .- A * x
     else
-        x = weighted_constrained_least_squares(A, b, w, C, dgauge)
+        x = solve_system(b)
         resid = b .- A * x
     end
 

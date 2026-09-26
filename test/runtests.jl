@@ -738,22 +738,71 @@ end
     xr = CALIB.weighted_regularized_least_squares(A, b32, iv32, [0.0, 0.0])
     @test xr ≈ A \ Float64.(b32) rtol = 1.0e-6
     C = Float64[1.0 0.0]
-    d = Float64[0.5]
-    xc = CALIB.weighted_constrained_least_squares(A, b32, iv32, C, d)
+    xc = CALIB.ConstrainedWLS(A, iv32, C)(b32)
     @test isfinite(xc[1]) && isfinite(xc[2])
 
-    # A Float32 system stays Float32: the penalty and the constraint weight are
-    # tuning quantities and do not set the precision; the constraint rows do.
+    # A Float32 system stays Float32: the penalty is a tuning quantity and does
+    # not set the precision; the constraint rows do.
     A32 = Float32.(A)
     @test eltype(CALIB.weighted_least_squares(A32, b32, iv32)) == Float32
     xr32 = CALIB.weighted_regularized_least_squares(A32, b32, iv32, [0.2, 0.7])
     @test eltype(xr32) == Float32
     @test xr32 ≈ CALIB.weighted_regularized_least_squares(A, b32, iv32, [0.2, 0.7]) rtol = 1.0e-5
     @test eltype(CALIB.weighted_regularized_least_squares(A32, b32, iv32, Float64[1.0 -1.0])) == Float32
-    xc32 = CALIB.weighted_constrained_least_squares(A32, b32, iv32, Float32.(C), Float32.(d))
+    xc32 = CALIB.ConstrainedWLS(A32, iv32, Float32.(C))(b32)
     @test eltype(xc32) == Float32
-    @test xc32 ≈ CALIB.weighted_constrained_least_squares(A, b32, iv32, C, d) rtol = 1.0e-5
-    @test eltype(CALIB.weighted_constrained_least_squares(A32, b32, iv32, C, d)) == Float64
+    @test xc32 ≈ xc rtol = 1.0e-5
+    @test eltype(CALIB.ConstrainedWLS(A32, iv32, C)(b32)) == Float64
+end
+
+@testset "Constrained WLS imposes the constraints exactly" begin
+    CALIB = Gustavo.Calibration
+    rng = MersenneTwister(176)
+    # A phase-difference system on 8 nodes gauged by a dense zero-sum row.
+    edges = [(u, v) for u in 1:8 for v in (u + 1):8]
+    A = zeros(length(edges), 8)
+    for (i, (u, v)) in enumerate(edges)
+        A[i, u], A[i, v] = 1.0, -1.0
+    end
+    xtrue = randn(rng, 8)
+    xtrue .-= sum(xtrue) / 8
+    w = rand(rng, length(edges)) .+ 0.5
+    b = A * xtrue .+ 0.01 .* randn(rng, length(edges))
+    C = ones(1, 8)
+    F = CALIB.ConstrainedWLS(A, w, C)
+    x64 = F(b)
+    @test abs(sum(x64)) < 1.0e-12
+    @test x64 ≈ xtrue atol = 0.05
+    x32 = CALIB.ConstrainedWLS(Float32.(A), Float32.(w), Float32.(C))(Float32.(b))
+    @test eltype(x32) == Float32
+    @test maximum(abs, x32 .- x64) < 1.0e-5
+    # One factorization serves any right-hand side.
+    @test F(2 .* b) ≈ 2 .* x64
+    # With no constraints it is the unconstrained solve.
+    @test CALIB.ConstrainedWLS(A[:, 1:7], w, zeros(0, 7))(b) ≈ CALIB.weighted_least_squares(A[:, 1:7], b, w)
+
+    @test_throws "linearly dependent" CALIB.ConstrainedWLS(A, w, [C; 2 .* C])
+    unobserved = copy(A)
+    unobserved[:, 8] .= 0
+    @test_throws "does not determine" CALIB.ConstrainedWLS(unobserved, w, [1.0 zeros(1, 7)])
+end
+
+@testset "A factored WLS solver serves any right-hand side" begin
+    CALIB = Gustavo.Calibration
+    rng = MersenneTwister(1761)
+    A = randn(rng, 12, 4)
+    w = rand(rng, 12) .+ 0.5
+    b = randn(rng, 12)
+    for T in (Float64, Float32)
+        solve_ls = CALIB.FactoredWLS(T.(A), T.(w))
+        x = copy(solve_ls(T.(b)))
+        @test eltype(x) == T
+        @test x ≈ CALIB.weighted_least_squares(A, b, w) rtol = 10 * eps(T)
+        @test solve_ls(2 .* T.(b)) ≈ 2 .* x
+    end
+    @test eltype(CALIB.FactoredWLS{Float64}(Float32.(A), Float32.(w))(b)) == Float64
+    @test_throws DimensionMismatch CALIB.FactoredWLS(A, w[1:11])
+    @test_throws "does not determine" CALIB.FactoredWLS([A zeros(12)], w)
 end
 
 @testset "Regularized WLS: penalty matrix generalizes the diagonal vector" begin

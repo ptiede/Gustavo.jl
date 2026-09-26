@@ -106,8 +106,9 @@ the global 2π branch); `complex_iters` Gauss–Newton passes then re-fit the
 tracks against the complex residuals with every AP entering ungated
 (`complex_iters = 0` keeps the seed). `phase_rewrap_iters` bounds the
 rewrap passes of each solve. `source_iters` alternations between the station
-tracks and the per-(baseline, product) source phases run until the source
-phases move less than `source_tol`; `source_iters = 1` fits no source term.
+tracks and the per-(baseline, product) source phases run until no source
+phase moves by more than `source_tol` radians, not counting a move that
+per-station constants absorb; `source_iters = 1` fits no source term.
 
 `detrend` removes each track's per-scan weighted mean, so the adhoc component
 carries per-AP phase structure only and the per-scan constant stays with the
@@ -517,7 +518,7 @@ end
 # Weighted circular mean of each cell's source term from its residual
 # `y − (φ_na − φ_nb)` over the APs where the cell passed the gate and both nodes
 # solved. `obs` must carry the uncorrected phases, since `x` is defined relative
-# to the observation itself. Returns the largest move.
+# to the observation itself.
 function _update_source_terms!(x, obs, phase)
     (; val, w, mask, nodes) = obs
     acc = zeros(Complex{eltype(x)}, DimensionalData.dims(x))
@@ -530,12 +531,26 @@ function _update_source_terms!(x, obs, phase)
         (isfinite(pa) && isfinite(pb)) || continue
         acc[I...] += w[c...] * cis(val[c...] - (pa - pb))
     end
-    moved = zero(eltype(x))
     for i in eachindex(x, acc)
-        abs(acc[i]) > 0 || continue
-        xi = angle(acc[i])
-        moved = max(moved, abs(rem2pi(xi - x[i], RoundNearest)))
-        x[i] = xi
+        abs(acc[i]) > 0 && (x[i] = angle(acc[i]))
+    end
+    return x
+end
+
+# The source terms and the node tracks share a degeneracy: adding `c[a, na] −
+# c[b, nb]` to every term and subtracting `c` from the tracks leaves the model
+# unchanged. Returns the largest change from `x_prev` to `x` that no such `c`
+# absorbs, fitting `c` by weighted least squares over the cells in `mask`.
+function _source_move(x, x_prev, cell_w, mask, nodes, nant::Integer, anchor::Integer)
+    T = eltype(x)
+    dx = map((a, b) -> rem2pi(a - b, RoundNearest), x, x_prev)
+    c = fill(T(NaN), nant, 2)
+    _solve_observable!(c, falses(nant, 2), dx, cell_w, mask, nodes, PinAntenna(anchor); rewrap = 0)
+    moved = zero(T)
+    for I in eachindex(dx, mask, nodes)
+        mask[I] || continue
+        (a, na), (b, nb) = nodes[I]
+        moved = max(moved, abs(dx[I] - (c[a, na] - c[b, nb])))
     end
     return moved
 end
@@ -846,9 +861,11 @@ solution.
 
 `smoother` is an [`AbstractAdhocSmoother`](@ref) selecting how each track is
 smoothed after the solve; its [`AdhocOptions`](@ref) set the solve. The
-`(φ, x)` blocks are fit by alternating minimization until no source term moves
-by more than `options.source_tol` radians or `options.source_iters` passes;
-`source_iters = 1` fixes `x = 0`.
+`(φ, x)` blocks are fit by alternating minimization for at most
+`options.source_iters` passes, stopping once no source term moves by more than
+`options.source_tol` radians beyond what per-station constants absorb (a
+constant moved between the tracks and the source terms leaves the model
+unchanged); `source_iters = 1` fixes `x = 0`.
 """
 function solve_adhoc_phasing(
         rbar::DimensionalData.AbstractDimArray{<:Complex, 3},
@@ -965,6 +982,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
         j !== nothing ? Int(cand[j]) : (all(iszero, wtot) ? 1 : argmax(wtot))
     end
 
+    cell_w = dropdims(sum(map((w, m) -> m ? w : zero(w), raw.w, raw.mask); dims = Ti); dims = Ti)
     # Carry solved node phases forward as a temporal warm-start for the next AP's
     # 2π-branch selection, so weakly-constrained stations do not flip branch per
     # AP. The seed is an anchor-gauged snapshot: refreshed only from APs where
@@ -994,8 +1012,10 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
             smoother.options.phase_rewrap_iters, max_stale,
         )
         (fit_source && iter < smoother.options.source_iters) || break
-        moved = _update_source_terms!(x, raw, phase)
+        x_prev = copy(x)
+        _update_source_terms!(x, raw, phase)
         obs = _source_corrected(raw, x, keep)
+        moved = _source_move(x, x_prev, cell_w, keep, nodes, nant, anchor)
         moved <= smoother.options.source_tol && break
     end
 

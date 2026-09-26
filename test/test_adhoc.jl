@@ -908,3 +908,21 @@ end
         DimArray(rbar, (FRa.BaselineID(1:length(bl)), FRa.Polarization(1:4), Ti(times))), W, names,
     )
 end
+
+@testset "Adhoc: the source alternation ignores per-station constants" begin
+    rng = MersenneTwister(0x0176)
+    nant = 5
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    R, _, names = label_sums(zeros(ComplexF64, length(bl), 4, 2), ones(length(bl), 4, 2), bl, pols, nant, [0.0, 1.0])
+    nodes = FRa._cell_nodes(R, names, CALa.PerFeed())
+    x_prev = DimArray(randn(rng, length(bl), 4), dims(nodes))
+    cell_w = map(_ -> 1.0 + rand(rng), x_prev)
+    mask = map(_ -> true, x_prev)
+    c = 0.1 .* randn(rng, nant, 2)
+    shifted = map((x, ((a, na), (b, nb))) -> x + c[a, na] - c[b, nb], x_prev, nodes)
+    @test FRa._source_move(shifted, x_prev, cell_w, mask, nodes, nant, 1) < 1.0e-12
+    moved = copy(shifted)
+    moved[3, 2] += 0.01
+    @test 1.0e-3 < FRa._source_move(moved, x_prev, cell_w, mask, nodes, nant, 1) <= 0.01
+end
