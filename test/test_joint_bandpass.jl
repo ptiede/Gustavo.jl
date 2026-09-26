@@ -276,11 +276,11 @@ end
 function _joint_pins(geom, blocks, results, tseg, gauge)
     nant = length(geom.stations)
     fseg, _ = FP._station_freq_segments(blocks, nant)
-    cells = FP._cell_nodes(first(results).rl, geom.stations, PerFeed())
-    g = [ones(ComplexF64, FP._block_gain_axes(b, geom)) for b in blocks]
-    pinned = FP._joint_bandpass_pins(cells, blocks, g, FP._block_locations(blocks, nant), tseg, fseg, gauge)
-    @test all(dims(p) == dims(gk) for (p, gk) in zip(pinned, g))
-    return Set((k, Tuple(I)) for (k, p) in pairs(pinned) for I in findall(parent(p)))
+    data = (; ends = FP._cell_nodes(first(results).rl, geom.stations, PerFeed()))
+    layout = (; loc = FP._block_locations(blocks, nant), tseg, fseg)
+    gains = [FP._block_gains(b, geom, ComplexF64) for b in blocks]
+    FP._joint_bandpass_pins!(gains, data, layout, blocks, gauge)
+    return Set((k, Tuple(I)) for (k, st) in pairs(gains) for I in findall(parent(st.pinned)))
 end
 
 @testset "JointSmoother: each station's own time segments in one ALS" begin
@@ -675,6 +675,13 @@ end
                 @test ab[bi].θ[1, f, :, 1, ai] ≈ demean(log.(abs.(truth))) atol = 1.0e-10
             end
         end
+
+        # The two observables must give each station the same segments.
+        lu = CAL.plan_parameters(hetmodel(ChannelBlocks(3), ChannelBlocks(3)), anames, geom)
+        θu = zeros(lu.nθ)
+        @test_throws "different segmentations" FP.solve_joint_bandpass!(
+            θ, results, geom, pb, FP.bandpass_blocks(setup(lu), θu, :logamp),
+        )
 
         # A spec that fits a band's segments jointly cannot express the partial
         # pin: two of station 1's three segments would be fitted and the third
