@@ -79,7 +79,7 @@ Per-leaf filter to a single baseline. Leaves missing the baseline are
 dropped.
 """
 select_baseline(uvset::UVSet, label::AbstractString) =
-    _filter_uvset(uvset, (Baseline = label,))
+    _filter_uvset(uvset, (BaselineID = label,))
 select_baseline(uvset::UVSet, bl::Tuple{AbstractString, AbstractString}) =
     select_baseline(uvset, string(bl[1], "-", bl[2]))
 
@@ -102,7 +102,7 @@ function _filter_uvset(uvset::UVSet, kw::NamedTuple)
     return DimensionalData.rebuild(uvset; branches = new_branches)
 end
 
-# Apply Station/Baseline/Ti/Pol/IF selectors to a single leaf DimTree.
+# Apply Station/BaselineID/Ti/Polarization selectors to a single leaf DimTree.
 # Returns `nothing` if the filter would empty the leaf.
 function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     bls = baselines(leaf)
@@ -111,13 +111,13 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     keep_bl = trues(nbl)
     if haskey(kw, :Station)
         name = String(kw.Station)
-        @inbounds for bi in 1:nbl
+        for bi in eachindex(keep_bl, bls.ant1_names, bls.ant2_names)
             keep_bl[bi] &= (bls.ant1_names[bi] == name) || (bls.ant2_names[bi] == name)
         end
     end
-    if haskey(kw, :Baseline)
-        target = String(kw.Baseline isa AbstractString ? kw.Baseline : kw.Baseline.val)
-        @inbounds for bi in 1:nbl
+    if haskey(kw, :BaselineID)
+        target = String(kw.BaselineID isa AbstractString ? kw.BaselineID : kw.BaselineID.val)
+        for bi in eachindex(keep_bl, bls.labels)
             keep_bl[bi] &= bls.labels[bi] == target
         end
     end
@@ -126,7 +126,7 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
 
     vis_l = leaf[:vis]
     weights_l = leaf[:weights]
-    flag_l = leaf[:flag]
+    flags_l = leaf[:flags]
     uvw_l = leaf[:uvw]
 
     nti_full = length(obs_time(leaf))
@@ -139,27 +139,27 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     end
     isempty(ti_inds) && return nothing
 
-    # Slice positionally. vis/weights/flag: (Frequency, Ti, Baseline, Pol).
-    # uvw: (Ti, Baseline, UVW).
+    # Slice positionally. vis/weights/flags: (Frequency, Ti, BaselineID, Polarization).
+    # uvw: (Ti, BaselineID, UVW).
     vis_p = parent(vis_l)[:, ti_inds, bl_inds, :]
     w_p = parent(weights_l)[:, ti_inds, bl_inds, :]
-    flag_p = parent(flag_l)[:, ti_inds, bl_inds, :]
+    f_p = parent(flags_l)[:, ti_inds, bl_inds, :]
     uvw_p = parent(uvw_l)[ti_inds, bl_inds, :]
     obs_time_new = obs_time(leaf)[ti_inds]
 
     new_labels = bls.labels[bl_inds]
-    pol_dim = dims(vis_l, Pol)
-    if_dim = dims(vis_l, Frequency)
-    vis_da = DimArray(vis_p, (if_dim, Ti(obs_time_new), Baseline(new_labels), pol_dim))
+    pol_dim = dims(vis_l, Polarization)
+    freq_dim = dims(vis_l, Frequency)
+    vis_da = DimArray(vis_p, (freq_dim, Ti(obs_time_new), BaselineID(new_labels), pol_dim))
     weights_da = DimArray(w_p, dims(vis_da))
-    flag_da = DimArray(flag_p, dims(vis_da))
-    uvw_da = DimArray(uvw_p, (Ti(obs_time_new), Baseline(new_labels), UVW(["U", "V", "W"])))
+    flags_da = DimArray(f_p, dims(vis_da))
+    uvw_da = DimArray(uvw_p, (Ti(obs_time_new), BaselineID(new_labels), UVW(["U", "V", "W"])))
 
-    pol_if_kw = NamedTuple(kk => v for (kk, v) in pairs(kw) if kk in (:Pol, :IF))
-    if !isempty(pol_if_kw)
-        vis_da = getindex(vis_da; pol_if_kw...)
-        weights_da = getindex(weights_da; pol_if_kw...)
-        flag_da = getindex(flag_da; pol_if_kw...)
+    pol_kw = NamedTuple(kk => v for (kk, v) in pairs(kw) if kk === :Polarization)
+    if !isempty(pol_kw)
+        vis_da = getindex(vis_da; pol_kw...)
+        weights_da = getindex(weights_da; pol_kw...)
+        flags_da = getindex(flags_da; pol_kw...)
     end
 
     new_pairs = bls.pairs[bl_inds]
@@ -192,7 +192,7 @@ function _filter_partition(leaf::DimensionalData.DimTree, kw::NamedTuple)
     end
 
     return _build_leaf(
-        vis_da, weights_da, uvw_da, flag_da;
+        vis_da, weights_da, uvw_da, flags_da;
         partition_info = update(
             DimensionalData.metadata(leaf);
             baselines = new_baselines,
@@ -208,7 +208,7 @@ end
 
 Strictly combine multiple UVSets into one multi-source UVSet. All inputs
 must share identical array-wide metadata: `antennas`, `array_config`,
-`array_obs`, and the same polarization products on the `Pol` axis.
+`array_obs`, and the same polarization products on the `Polarization` axis.
 Primary-HDU cards (write-back state, FITS-extension-owned) are inherited
 from the first input via the extension's stash — write-back round-trips
 after `select_source(merged, name)`.

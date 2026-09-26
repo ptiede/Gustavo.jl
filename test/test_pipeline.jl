@@ -1,0 +1,961 @@
+# End-to-end fringe-fitter pipeline test. Builds a small synthetic multi-band
+# in-memory UVSet with KNOWN injected per-(station, feed) delay/rate/constant
+# phase plus a per-(station, feed, AP) atmospheric phase screen, then verifies
+# that `fit` → `apply_calibration` flattens the residual baseline
+# phases (the coherence test) and that save/load round-trips.
+
+# Shared synthetic-UVSet generator + usings/aliases (CAL/FP/UVP).
+include("synthetic_uvset.jl")
+
+
+@testset "Fringe pipeline end-to-end" begin
+    uvset, _truth = _build_fringe_uvset()
+
+    # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
+    # keeps every well-determined AP in this high-SNR synthetic.
+    sol = fit(
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+        uvset,
+        gauge = PinAntenna(1),
+    )
+    @test sol isa CAL.CalibrationSolution
+    for step in sol.steps
+        @test length(step.θ) == step.layout.nθ
+    end
+
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
+
+    @testset "parallel-hand coherence ≈ 1" begin
+        worst = 1.0
+        for (_, leaf) in DimensionalData.branches(corr)
+            V = parent(leaf[:vis])
+            W = parent(leaf[:weights])
+            bl_pairs = UVP.baselines(leaf).pairs
+            lp = feed_pairs(leaf)
+            for p in eachindex(lp)
+                fp = lp[p]
+                fp[1] == fp[2] || continue
+                for bi in eachindex(bl_pairs)
+                    a, b = bl_pairs[bi]
+                    a == b && continue
+                    coh = _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p]))
+                    worst = min(worst, coh)
+                    @test coh > 0.99
+                end
+            end
+        end
+        @info "worst parallel-hand coherence" worst
+    end
+
+    @testset "cross-hand coherence ≈ 1" begin
+        # Source is unpolarized here, so cross hands should also flatten.
+        for (_, leaf) in DimensionalData.branches(corr)
+            V = parent(leaf[:vis])
+            W = parent(leaf[:weights])
+            bl_pairs = UVP.baselines(leaf).pairs
+            lp = feed_pairs(leaf)
+            for p in eachindex(lp)
+                fp = lp[p]
+                fp[1] == fp[2] && continue
+                for bi in eachindex(bl_pairs)
+                    a, b = bl_pairs[bi]
+                    a == b && continue
+                    coh = _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p]))
+                    @test coh > 0.99
+                end
+            end
+        end
+    end
+
+    @testset "save / load round-trip" begin
+        path = tempname()
+        CAL.save_solution(path, sol)
+        sol2 = CAL.load_solution(path)
+        @test sol2.geom.times == sol.geom.times
+        @test sol2.geom.channel_freqs == sol.geom.channel_freqs
+        @test length(sol2.steps) == length(sol.steps)
+        for step in sol.steps
+            step2 = sol2[step.name].steps[1]
+            @test step2.θ == step.θ
+            @test step2.layout.nθ == step.layout.nθ
+            @test length(CAL.phase_components(step2.model)) == length(CAL.phase_components(step.model))
+        end
+
+        corr2 = Gustavo.UVData.apply_calibration(uvset, sol2)
+        for (k, leaf) in DimensionalData.branches(corr)
+            V = parent(leaf[:vis])
+            V2 = parent(DimensionalData.branches(corr2)[k][:vis])
+            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x == y, zip(V, V2))
+        end
+        rm(path; force = true)
+    end
+
+    @testset "eager input is left unmodified" begin
+        # An eager leaf is the caller's own data, so `apply_calibration` corrects
+        # a copy. The synthetic input carries no NaNs, so `==` is exact.
+        snap = Dict(
+            k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
+                for (k, l) in DimensionalData.branches(uvset)
+        )
+        Gustavo.UVData.apply_calibration(uvset, sol)
+        for (k, l) in DimensionalData.branches(uvset)
+            @test parent(l[:vis]) == snap[k][1]
+            @test parent(l[:weights]) == snap[k][2]
+        end
+    end
+
+    @testset "standard interfaces: show and iteration" begin
+        # `show` gives each type its own summary line instead of a raw dump.
+        @test occursin("CalibrationSolution", sprint(show, sol))
+        @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
+        @test occursin("GainModel", sprint(show, sol[:fringe].steps[1].model))
+
+        # ScanStream is an ordered container over its scan-group specs.
+        stream = ST.scan_stream(uvset)
+        @test length(stream) == length(stream.groups)
+        @test eltype(typeof(stream)) == eltype(stream.groups)
+        @test collect(stream) == stream.groups
+        @test first(stream) === stream.groups[1]
+        @test occursin("ScanStream", sprint(show, stream))
+    end
+end
+
+# `_correct_column!` overwrites its `vis`/`w` in place while reading them, so a
+# private (lazy-materialized) leaf can be corrected without an output copy. The
+# aliased read-then-write must land the same values as an out-of-place fold.
+@testset "gain correction folds in place exactly" begin
+    rng = MersenneTwister(0xC011)
+    nchan, nti = 4, 3
+    vis = rand(rng, ComplexF64, nchan, nti)
+    w = rand(rng, nchan, nti)
+    ga = rand(rng, ComplexF64, nchan, nti) .+ 1   # magnitudes well above _GAIN_FLOOR
+    gb = rand(rng, ComplexF64, nchan, nti) .+ 1
+    ga[1] = 0                                       # force the degenerate branch
+    f = falses(nchan, nti)
+    vis0, w0 = copy(vis), copy(w)
+    CAL._correct_column!(vis, w, f, ga, gb)
+    for i in eachindex(vis0)
+        den = ga[i] * conj(gb[i])
+        if abs(ga[i]) < CAL._GAIN_FLOOR || abs(gb[i]) < CAL._GAIN_FLOOR || !isfinite(den)
+            # The corrected value is undefined, so the visibility is NaN —
+            # but the weight the cell arrived with is left alone.
+            @test isnan(vis[i]) && f[i]
+            @test w[i] == w0[i]
+        else
+            @test !f[i]
+            @test vis[i] ≈ vis0[i] / den
+            @test w[i] ≈ w0[i] * abs2(ga[i] * gb[i])
+        end
+    end
+end
+
+@testset "Rate & adhoc are feed-tied (SharedFeeds regression)" begin
+    # The fringe model MUST tie the per-scan RATE and the per-AP ADHOC phase across
+    # feeds (`SharedFeeds`). Both are feed-common physics: the fringe rate is shared
+    # by the two feeds and the residual atmospheric screen is non-birefringent. A
+    # revert to `PerFeed` lets a spurious inter-feed rate (rate₂ − rate₁) / adhoc phase
+    # float on noise and — multiplied by the whole-track Rate lever arm
+    # `2π·rate·(t − t0_global)`, hours long — inject large, arbitrary scan-to-scan
+    # cross-hand phase jumps (see the `default_fringe_terms` and
+    # `default_adhoc_terms` docstrings for the tying rationale).
+    #
+    # The end-to-end coherence test injects FEED-COMMON truth, so a `PerFeed` revert
+    # would still recover it at high SNR and pass — it does NOT guard this decision.
+    # Assert the tying structurally (the model) AND that the layout realises it (both
+    # feeds share one θ column per (station, time-seg), so the solved inter-feed
+    # rate is ≡ 0).
+    model = _full_fringe_model()
+    phase = CAL.phase_components(model)
+
+    rate_i = findfirst(tc -> tc.term isa CAL.Rate, phase)
+    @test rate_i !== nothing
+    @test phase[rate_i].Feed isa CAL.SharedFeeds
+    @test !(phase[rate_i].Feed isa CAL.PerFeed)
+
+    adhoc_i = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phase)
+    @test adhoc_i !== nothing
+    @test phase[adhoc_i].Feed isa CAL.SharedFeeds
+    @test !(phase[adhoc_i].Feed isa CAL.PerFeed)
+
+    # Layout: `SharedFeeds` folds both feeds to ONE node (θ column), `PerFeed` keeps
+    # two distinct ones. So feed-1 and feed-2 share every column iff the tie holds —
+    # a `PerFeed` revert breaks this on any solved (station, seg).
+    uvset, _ = _build_fringe_uvset()
+    geom = CAL.build_geometry(uvset)
+    first_leaf = first(values(DimensionalData.branches(uvset)))
+    nant = length(UVP.metadata(first_leaf).antennas)
+    layout = CAL.plan_parameters(model, nant, geom)
+
+    for (ci, label) in ((rate_i, "rate"), (adhoc_i, "adhoc"))
+        off1 = plan_off1(layout.plans[ci])                 # (ant, feed, ntseg, nfseg)
+        @test off1[:, 1, :, :] == off1[:, 2, :, :]   # both feeds → same θ columns
+        @test any(!=(0), off1[:, 1, :, :])           # ...and the plan is non-trivial
+    end
+
+    # The pipeline's own default carries the same tie: the AdhocPhase
+    # step's compiled component is the feed-common adhoc form.
+    t = Gustavo.model_components(AdhocPhase(), nothing)
+    @test t.phase.adhoc.Feed isa CAL.SharedFeeds
+    @test isempty(t.logamp)
+end
+
+@testset "AdhocPhase model surface: vetting + per-feed adhoc" begin
+    sm = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    # One-argument form: the smoother, with the default model.
+    @test AdhocPhase(sm).model == default_adhoc_terms()
+    @test AdhocPhase(sm).smoother === sm
+
+    # Compile-time vetting. The joint smoother cannot solve a per-feed model
+    # (its Kalman state is one node per station)...
+    pf = default_adhoc_terms(feed = CAL.PerFeed())
+    @test_throws "JointOUSmoother cannot fit" Gustavo.model_components(
+        AdhocPhase(model = pf, smoother = FP.JointOUSmoother()), nothing,
+    )
+    # ...no adhoc smoother can address a single-feed tying...
+    @test_throws "cannot fit the component" Gustavo.model_components(
+        AdhocPhase(model = default_adhoc_terms(feed = CAL.SingleFeed(2))),
+        nothing,
+    )
+    # ...and the stage solves exactly one phase component, nothing in logamp.
+    two = GainModel(; phase = (; a = pf.phase.adhoc, b = pf.phase.adhoc))
+    @test_throws "exactly one" Gustavo.model_components(
+        AdhocPhase(model = two), nothing,
+    )
+    la = GainModel(; phase = pf.phase, logamp = pf.phase)
+    @test_throws "phase only" Gustavo.model_components(
+        AdhocPhase(model = la), nothing,
+    )
+
+    # End-to-end per-feed adhoc: the layout realizes two nodes per station, both
+    # feed tracks are solved, and (the screen being feed-common) the corrected
+    # parallel hands still flatten.
+    uvset, _ = _build_fringe_uvset()
+    sol = fit(
+        BaselineFringeFit() |> AdhocPhase(model = pf, smoother = sm),
+        uvset,
+        gauge = PinAntenna(1),
+    )
+    st = sol[:adhoc].steps[1]
+    plan = FP._adhoc_plan(st.model, st.layout)
+    @test plan.tying isa CAL.PerFeed
+    leaf = CAL._component_leaf(plan, st.θ)     # (param, node, fseg, tseg, ant)
+    @test any(!=(0), @view leaf[1, 1, 1, :, :])
+    @test any(!=(0), @view leaf[1, 2, 1, :, :])
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
+    for (_, leaf2) in DimensionalData.branches(corr)
+        V = parent(leaf2[:vis])
+        W = parent(leaf2[:weights])
+        bl_pairs = UVP.baselines(leaf2).pairs
+        lp = feed_pairs(leaf2)
+        for p in eachindex(lp)
+            fp = lp[p]
+            fp[1] == fp[2] || continue
+            for bi in eachindex(bl_pairs)
+                bl_pairs[bi][1] == bl_pairs[bi][2] && continue
+                @test _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])) > 0.99
+            end
+        end
+    end
+end
+
+@testset "calibrate ≡ fit + whole-set apply" begin
+    # Streaming the correction one scan group at a time must produce the same
+    # result as `apply_calibration(uvset, fit(pipe, uvset))`, because each
+    # leaf's gains depend only on its own (disjoint) θ slots.
+    uvset, _ = _build_fringe_uvset()
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    chain = BaselineFringeFit() |> Bandpass() |>
+        AdhocPhase(adhoc)
+
+    sol_ref = fit(chain, uvset; gauge = PinAntenna(1))
+    corr_ref = Gustavo.UVData.apply_calibration(uvset, sol_ref)
+
+    out_fused = calibrate(sol_ref, uvset)
+    @test Set(keys(DimensionalData.branches(out_fused))) ==
+        Set(keys(DimensionalData.branches(corr_ref)))
+    for (k, leaf) in DimensionalData.branches(corr_ref)
+        Vr = parent(leaf[:vis]); Wr = parent(leaf[:weights])
+        lf = DimensionalData.branches(out_fused)[k]
+        Vf = parent(lf[:vis]); Wf = parent(lf[:weights])
+        @test size(Vf) == size(Vr)
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5), zip(Vr, Vf))
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5), zip(Wr, Wf))
+    end
+
+    # `post` runs on each corrected group: the same as reducing the whole
+    # corrected set.
+    red_ref = UVP.frequency_average(corr_ref; nout = 1)
+    out_red = calibrate(sol_ref, uvset; post = AverageFrequency(nout = 1))
+    for (k, leaf) in DimensionalData.branches(red_ref)
+        Vr = parent(leaf[:vis])
+        Vf = parent(DimensionalData.branches(out_red)[k][:vis])
+        @test size(Vf) == size(Vr)
+        @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(Vr, Vf))
+    end
+end
+
+@testset "Cross-run step composition ≡ within-run pipeline" begin
+    # A multi-step pipeline's within-run composition (`_run_pipeline` appends
+    # each finished step's solution as an `ApplySolution` before the next
+    # step's pass) is the SAME mechanism a caller invokes by hand across
+    # separate `fit` calls via selection/`ApplySolution`. Fitting `A |>
+    # B` in one call must solve the SAME B-step θ as fitting `A` alone, then
+    # fitting `ApplySolution(sol_a[:fringe]) |> B` in a later,
+    # unrelated call.
+    uvset, _ = _build_fringe_uvset()
+    ff = BaselineFringeFit()
+    bp = Bandpass()
+
+    sol_within = fit(ff |> bp, uvset; gauge = PinAntenna(1))
+
+    sol_a = fit(ff, uvset; gauge = PinAntenna(1))
+    sol_cross = fit(FP.ApplySolution(sol_a[:fringe]) |> bp, uvset; gauge = PinAntenna(1))
+
+    θ_within = sol_within[:bandpass].steps[1].θ
+    θ_cross = sol_cross[:bandpass].steps[1].θ
+    @test θ_within == θ_cross
+end
+
+@testset "combine_spw: spws → Frequency axis" begin
+    uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
+    avg = UVP.frequency_average(uvset; nout = 1)          # each spw → 1 channel
+    @test length(UVP.union_frequency_axis(avg)) == 3      # 3 distinct spw setups
+
+    combined = UVP.combine_spw(avg)
+    @test length(DimensionalData.branches(combined)) == 1 # one leaf per (src,scan)
+    setups = UVP.union_frequency_axis(combined)
+    @test length(setups) == 1                             # single FREQID
+    cf = collect(channel_freqs(first(setups)))
+    @test length(cf) == 3                                 # 3 channels
+    @test issorted(cf)                                    # ascending channel freqs
+    # The combined channel frequencies are exactly the per-spw averaged centers.
+    spw_centers = sort([only(channel_freqs(fs)) for fs in UVP.union_frequency_axis(avg)])
+    @test cf ≈ spw_centers
+    leaf = first(values(DimensionalData.branches(combined)))
+    @test size(parent(leaf[:vis]), 1) == 3                # Frequency axis = 3 channels
+end
+
+@testset "write_uvfits on FITS-IDI-style UVSet (synthesized primary cards)" begin
+    # `_build_fringe_uvset` registers NO primary cards, so write_uvfits must
+    # synthesize them. Reduce + combine spws to channels, then round-trip via UVFITS.
+    uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
+    sol = fit(
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+        uvset;
+        gauge = PinAntenna(1),
+    )
+    reduced = calibrate(
+        sol, uvset; post = AverageTime(seconds = 0.02) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
+    )
+    @test length(DimensionalData.branches(reduced)) == 1
+    @test length(UVP.union_frequency_axis(reduced)) == 1
+    @test length(channel_freqs(first(UVP.union_frequency_axis(reduced)))) == 2
+
+    path = tempname() * ".uvfits"
+    try
+        @test Gustavo.UVData.write_uvfits(path, reduced) == path
+        @test isfile(path) && filesize(path) > 0
+        rt = Gustavo.UVData.load_uvfits(path)
+        @test length(DimensionalData.branches(rt)) == 1
+        rt_setups = UVP.union_frequency_axis(rt)
+        @test length(rt_setups) == 1
+        @test length(channel_freqs(first(rt_setups))) == 2          # 2 channels survive
+        @test channel_freqs(first(rt_setups)) ≈ channel_freqs(first(UVP.union_frequency_axis(reduced)))
+        rt_leaf = first(values(DimensionalData.branches(rt)))
+        @test Set(String.(pol_products(rt_leaf))) == Set(["PP", "PQ", "QP", "QQ"])
+        @test all(isfinite, filter(isfinite, parent(rt_leaf[:vis])))  # no NaN explosion
+    finally
+        isfile(path) && rm(path; force = true)
+    end
+end
+
+@testset "write_uvfits convention toggle (:aips conjugates, :fitsidi verbatim)" begin
+    # :aips writes conj(vis); :fitsidi writes vis verbatim; (u,v,w) never negated.
+    # load_uvfits always conjugates on read (assumes a standard :aips file), so the
+    # :fitsidi round-trip comes back as the conjugate of the :aips round-trip — and
+    # since both files traverse the identical write/load path, their records align
+    # exactly and differ ONLY by that conjugation. This isolates the convention.
+    uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
+    sol = fit(
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+        uvset;
+        gauge = PinAntenna(1),
+    )
+    reduced = calibrate(
+        sol, uvset; post = AverageTime(seconds = 0.02) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
+    )
+    pa = tempname() * ".uvfits"
+    pf = tempname() * ".uvfits"
+    try
+        @test UVP.write_uvfits(pa, reduced; convention = :aips) == pa
+        @test UVP.write_uvfits(pf, reduced; convention = :fitsidi) == pf
+        la = first(values(DimensionalData.branches(UVP.load_uvfits(pa))))
+        lf = first(values(DimensionalData.branches(UVP.load_uvfits(pf))))
+        Va = parent(la[:vis])
+        Vf = parent(lf[:vis])
+        finite = findall(v -> isfinite(real(v)) && isfinite(imag(v)), Va)
+        @test !isempty(finite)
+        @test Vf[finite] ≈ conj.(Va[finite])                      # convention flip
+        @test any(i -> abs(imag(Va[i])) > 1.0f-6, finite)         # non-trivial imag
+        @test parent(lf[:uvw]) ≈ parent(la[:uvw])                 # (u,v,w) not negated
+        @test_throws ErrorException UVP.write_uvfits(pa, reduced; convention = :bogus)
+    finally
+        isfile(pa) && rm(pa; force = true)
+        isfile(pf) && rm(pf; force = true)
+    end
+end
+
+@testset "Residual accumulation is a plain weighted mean of pre-corrected data" begin
+    # The pipeline's corrections divide out the gains, including the |g|² weight
+    # reweighting (Var(V/g) = 1/(w·|g|²)), before `weighted_sums` sees the
+    # data. Feeding it already-reweighted (V, W) must give back exactly that
+    # inverse-variance mean, with no further correction applied.
+    nchan, nti, nbl, npol = 2, 1, 1, 1
+    axs = (Frequency([2.2e10, 2.2e10 + 1.0e6]), Ti([0.0]), BaselineID(1:nbl), Polarization(["PP"]))
+    V = DimArray(zeros(ComplexF32, nchan, nti, nbl, npol), axs)
+    W = DimArray(zeros(Float32, nchan, nti, nbl, npol), axs)
+    V[1, 1, 1, 1] = 1.0 + 0.0im          # channel 1: unit gain ⇒ unchanged, weight 1
+    V[2, 1, 1, 1] = 10.0im               # channel 2: pre-corrected by |g|² = 0.01,
+    W[1, 1, 1, 1] = 1.0                  # so its weight is reweighted to 0.0001
+    W[2, 1, 1, 1] = 0.0001
+    F = DimArray(falses(nchan, nti, nbl, npol), axs)
+    rbar(V, W, F) = map(only, FP.weighted_sums(V, W, F; dims = Frequency))
+
+    r, w = rbar(V, W, F)
+    @test w ≈ 1.0001
+    @test r / w ≈ (1.0 + 0.001im) / 1.0001
+
+    # Same data in a different memory layout is the same measurement: the kernel
+    # locates every axis by name, so only the dimensions decide what is read.
+    perm = (Polarization, BaselineID, Ti, Frequency)
+    Vp, Wp, Fp = permutedims(V, perm), permutedims(W, perm), permutedims(F, perm)
+    @test rbar(Vp, Wp, Fp) == (r, w)
+    @test rbar(V, Wp, F) == (r, w)
+    # ...and so is a view into larger layers.
+    big(A) = cat(A, A; dims = 3)
+    sub(A) = view(DimArray(big(parent(A)), (dims(A)[1:2]..., BaselineID(1:2), dims(A, Polarization))), BaselineID(1:1))
+    @test rbar(sub(V), sub(W), sub(F)) == (r, w)
+
+    # A flagged channel contributes nothing even though its weight is positive.
+    F[2, 1, 1, 1] = true
+    r, w = rbar(V, W, F)
+    @test w ≈ 1.0
+    @test r ≈ 1.0 + 0.0im
+
+    # The per-member kernel sits behind a function barrier and infers.
+    out = DimensionalData.otherdims(V, Frequency)
+    @inferred FP._weighted_sums!(zeros(ComplexF32, out), zeros(Float32, out), V, W, F, Frequency)
+end
+
+@testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
+    # Regression for the θ-overwrite bug: even rounds previously wiped the
+    # round-1 solution (coherence collapsed). Accumulation keeps all rounds good.
+    uvset, _ = _build_fringe_uvset()
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    for r in (1, 2, 3)
+        sol = fit(
+            BaselineFringeFit(rounds = r) |>
+                Bandpass() |> AdhocPhase(adhoc),
+            uvset,
+            gauge = PinAntenna(1),
+        )
+        corr = Gustavo.UVData.apply_calibration(uvset, sol)
+        worst = 1.0
+        for (_, leaf) in DimensionalData.branches(corr)
+            V = parent(leaf[:vis])
+            W = parent(leaf[:weights])
+            bl_pairs = UVP.baselines(leaf).pairs
+            lp = feed_pairs(leaf)
+            for p in eachindex(lp)
+                fp = lp[p]
+                fp[1] == fp[2] || continue
+                for bi in eachindex(bl_pairs)
+                    a, b = bl_pairs[bi]
+                    a == b && continue
+                    worst = min(worst, _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])))
+                end
+            end
+        end
+        @test worst > 0.99
+    end
+end
+
+@testset "build_geometry conflict detection (N1)" begin
+    # Normal multi-band set: each channel frequency belongs to exactly one spw.
+    uvset_ok, _ = _build_fringe_uvset()
+    @test CAL.build_geometry(uvset_ok) isa CAL.DataGeometry
+
+    # spw_sep = 0 ⇒ the two bands share identical channel frequencies but carry
+    # distinct spw_names ("band_1"/"band_2"), so a single concatenated channel
+    # axis cannot dense-rank a frequency to one spw — build_geometry must error
+    # instead of silently last-write-wins.
+    uvset_conflict, _ = _build_fringe_uvset(spw_sep = 0.0)
+    @test_throws ArgumentError CAL.build_geometry(uvset_conflict)
+    @test_throws "conflicting spectral windows" CAL.build_geometry(uvset_conflict)
+end
+
+@testset "Phase bandpass: per-channel phase recovered" begin
+    # Inject a smooth per-(station, feed, channel) phase bandpass (ref ant 1 = 0)
+    # on top of the usual delay/rate/phase/screen. The bandpass stage should
+    # flatten the per-channel phase; with it OFF the bandpass survives uncorrected.
+    nant, nspw, nchan = 4, 2, 8
+    nchg = nspw * nchan
+    rng = MersenneTwister(0xBA9D)
+    bp = zeros(nant, 2, nchg)
+    for a in 2:nant, f in 1:2
+        off = (rand(rng) - 0.5)
+        for gc in 1:nchg
+            bp[a, f, gc] = off + 1.0 * sin(2π * gc / nchg + a + f)   # smooth shape + offset
+        end
+    end
+    uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    ff = BaselineFringeFit()
+    sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+    sol_off = fit(
+        ff |> Bandpass(model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
+    )
+
+    don = FP.baseline_fringe_data(uvset, sol_on)
+    doff = FP.baseline_fringe_data(uvset, sol_off)
+    p = FP.baseline_pol_index(don, (1, 1))
+    # Per-channel phase coherence per cross baseline: R = |Σ_c V̄_c| / Σ_c |V̄_c|
+    # (1 ⇒ flat per-channel phase). Mean over baselines.
+    function freq_coh(spec)
+        rs = Float64[]
+        for bi in eachindex(don.bl_pairs)
+            a, b = don.bl_pairs[bi]
+            a == b && continue
+            z = filter(isfinite, spec[:, bi, p])
+            isempty(z) && continue
+            push!(rs, abs(sum(z)) / sum(abs.(z)))
+        end
+        return sum(rs) / length(rs)
+    end
+    R_on = freq_coh(don.spec_after)
+    R_off = freq_coh(doff.spec_after)
+    @test R_on > R_off                  # the bandpass stage flattens per-channel phase
+    @test R_on > 0.97                   # nearly flat after the bandpass
+    @test R_off < 0.95                  # bandpass survives without the stage
+
+    # Bandpass is station-based ⇒ triangle delay closure is unchanged by it.
+    c_on = FP.delay_closure(don; pol = (1, 1))
+    c_off = FP.delay_closure(doff; pol = (1, 1))
+    mx(v) = (u = abs.(filter(isfinite, v)); isempty(u) ? 0.0 : maximum(u))
+    @test isapprox(mx(c_on.closure_before), mx(c_off.closure_before); rtol = 0.2)
+end
+
+@testset "Phase bandpass: reference inter-feed shape solved" begin
+    # Cross-hand rows tie the two feed blocks at every frequency segment, so the
+    # reference's relative inter-feed phase bandpass is SOLVED across the band
+    # rather than zeroed — otherwise it survives uncorrected in every cross-hand
+    # visibility. Only the one band-constant inter-feed offset is conventional,
+    # and the circular-mean referencing removes it.
+    nant, nspw, nchan = 4, 2, 8
+    nchg = nspw * nchan
+    rng = MersenneTwister(0xEC9A)
+    bp = zeros(nant, 2, nchg)
+    # Reference (ant 1): feed 1 flat (the true per-channel gauge), feed 2 a smooth
+    # NONZERO shape — the relative inter-feed phase bandpass under test. The shape is
+    # orthogonalized against per-band constant + slope: those components are
+    # legitimately (and feed-COMMONLY) absorbed by the per-band SBD delay/const
+    # and inter-feed delay stages, so leaving them in would make the earlier solves fight
+    # an unmodelled feed-2-only per-band ramp instead of exercising the band shape
+    # this test is about.
+    for b in 1:nspw
+        cs = ((b - 1) * nchan + 1):(b * nchan)
+        s = [0.6 * sin(2π * k / nchan + 0.9 * b) for k in 1:nchan]   # full period per band
+        X = hcat(ones(nchan), collect(Float64, 1:nchan))
+        bp[1, 2, cs] .= s .- X * (X \ s)                             # ⊥ {const, slope} per band
+    end
+    for a in 2:nant, f in 1:2
+        off = (rand(rng) - 0.5)
+        for gc in 1:nchg
+            bp[a, f, gc] = off + 1.0 * sin(2π * gc / nchg + a + f)
+        end
+    end
+    uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    ff = BaselineFringeFit()
+    sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+    sol_off = fit(
+        ff |> Bandpass(model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
+    )
+
+    don = FP.baseline_fringe_data(uvset, sol_on)
+    doff = FP.baseline_fringe_data(uvset, sol_off)
+    # Per-channel phase coherence R = |Σ_c V̄_c| / Σ_c |V̄_c| over a product set.
+    # The source is unpolarized, so a correct solve leaves the corrected CROSS
+    # spectra flat; a SIGN error in the feed-2 block doubles the ref inter-feed
+    # ripple instead of removing it, so the cross coherence is also a sign check.
+    function freq_coh(spec, ps)
+        rs = Float64[]
+        for bi in eachindex(don.bl_pairs), p in ps
+            a, b = don.bl_pairs[bi]
+            a == b && continue
+            z = filter(isfinite, spec[:, bi, p])
+            isempty(z) && continue
+            push!(rs, abs(sum(z)) / sum(abs.(z)))
+        end
+        return sum(rs) / length(rs)
+    end
+    cross_ps = findall(fp -> fp[1] != fp[2], don.feeds)
+    R_on = freq_coh(don.spec_after, cross_ps)
+    R_off = freq_coh(doff.spec_after, cross_ps)
+    @test R_on > R_off
+    @test R_on > 0.97                   # ref inter-feed shape corrected in the cross hands
+    @test R_off < 0.95                  # ...and survives with the stage off
+
+    # θ recovery: the (ref, feed 2) bandpass slots carry the injected shape up
+    # to per-band constant + slope components (the parts the per-band SBD and inter-feed
+    # delay terms legitimately absorb). Remove the per-band best-fit constant +
+    # slope from the difference; the residual shape must match.
+    bp_on = sol_on[:bandpass].steps[1]
+    plan = bp_on.layout.plantree.phase.bandpass
+    @test plan_off1(plan)[1, 2, 1, 1] != 0
+    rec = [bp_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
+    worst = 0.0
+    for b in 1:nspw
+        cs = ((b - 1) * nchan + 1):(b * nchan)
+        d = [rem2pi(rec[gc] - bp[1, 2, gc], RoundNearest) for gc in cs]
+        X = hcat(ones(nchan), collect(Float64, 1:nchan))
+        worst = max(worst, maximum(abs.(d .- X * (X \ d))))
+    end
+    @test worst < 0.15
+
+    # Feed-1 products are invariant under the feed-2 common-mode re-gauge.
+    @test freq_coh(don.spec_after, (FP.baseline_pol_index(don, (1, 1)),)) > 0.97
+end
+
+@testset "Amplitude bandpass: pluggable shape specs (poly / Whittaker / free)" begin
+    # Inject a per-BAND log-amp roll-off (the filterbank passband, deep toward each
+    # band's high-channel edge) shared by all stations, plus a small per-station
+    # ripple. THEN kill one interior channel per band (zero its weight on every
+    # baseline). The two GAP-ESTIMATING specs (polynomial, Whittaker) must flatten
+    # the band AND estimate the killed channels from the in-spw shape; FreeShape must
+    # leave the killed channels untouched (|g| = 1).
+    nant, nspw, nchan = 4, 2, 8
+    nchg = nspw * nchan
+    rng = MersenneTwister(0x5A11)
+    locof(gc) = (gc - 1) % nchan + 1                                # local channel within its band
+    rolloff(gc) = -0.5 * ((locof(gc) - 1) / (nchan - 1))^2          # per-band: 0 → −0.5 toward high edge
+    abp = zeros(nant, 2, nchg)
+    for a in 1:nant, f in 1:2
+        dev = a == 1 ? 0.0 : (rand(rng) - 0.5) * 0.3               # per-station offset (gauge removes it)
+        for gc in 1:nchg
+            wig = a == 1 ? 0.0 : 0.05 * sin(2π * gc / nchg + a + f) # small per-station ripple
+            abp[a, f, gc] = rolloff(gc) + dev + wig
+        end
+    end
+    uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, amp_bandpass = abp)
+
+    # Kill local channel 7 in every band (globals 7 and 15): flag it on all
+    # baselines so the per-channel solve has NO data there.
+    dead_local = 7
+    dead_globals = [(b - 1) * nchan + dead_local for b in 1:nspw]
+    for (_, leaf) in DimensionalData.branches(uvset)
+        parent(leaf[:flags])[dead_local, :, :, :] .= true
+    end
+
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    larec(θ, plan, a, f, gc) = (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : θ[off])
+    function amp_ripple(spec, don, p)
+        rs = Float64[]
+        for bi in eachindex(don.bl_pairs)
+            a, b = don.bl_pairs[bi]
+            a == b && continue
+            m = abs.(filter(isfinite, spec[:, bi, p]))
+            (isempty(m) || minimum(m) <= 0) && continue
+            push!(rs, maximum(m) / minimum(m))
+        end
+        isempty(rs) ? NaN : sum(rs) / length(rs)
+    end
+
+    ff = BaselineFringeFit()
+    sol_off = fit(
+        ff |> Bandpass(model = GainModel(; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother()) |>
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
+    )
+    doff = FP.baseline_fringe_data(uvset, sol_off)
+    poff = FP.baseline_pol_index(doff, (1, 1))
+    @test amp_ripple(doff.spec_after, doff, poff) > 1.3    # roll-off ripple without the stage
+
+    # The gap-estimating specs flatten the band AND fill the killed channels onto the
+    # in-spw curve (≈ the mean of the live neighbours, well away from log-amp 0).
+    for sm in (FP.PolynomialShape(4), FP.WhittakerShape(0.1))
+        sol = fit(
+            ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = sm)) |>
+                AdhocPhase(adhoc), uvset,
+                gauge = PinAntenna(1),
+        )
+        don = FP.baseline_fringe_data(uvset, sol)
+        p = FP.baseline_pol_index(don, (1, 1))
+        @test amp_ripple(don.spec_after, don, p) < 1.08
+        bp = sol[:bandpass].steps[1]
+        plan = bp.layout.plantree.logamp.bandpass
+        for dg in dead_globals, a in 2:nant, f in 1:2
+            nbr = 0.5 * (larec(bp.θ, plan, a, f, dg - 1) + larec(bp.θ, plan, a, f, dg + 1))
+            @test isfinite(larec(bp.θ, plan, a, f, dg))
+            @test abs(larec(bp.θ, plan, a, f, dg) - nbr) < 0.1    # estimated, on the smooth curve
+            @test abs(nbr) > 0.12                                 # ...curve far from |g|=1 (meaningful)
+        end
+    end
+
+    # FreeShape does NOT estimate the killed channels — their θ slot is untouched
+    # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothing specs.
+    solf = fit(
+        ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = FP.FreeShape())) |>
+            AdhocPhase(adhoc), uvset,
+            gauge = PinAntenna(1),
+    )
+    bpf = solf[:bandpass].steps[1]
+    planf = bpf.layout.plantree.logamp.bandpass
+    for dg in dead_globals, a in 2:nant, f in 1:2
+        @test larec(bpf.θ, planf, a, f, dg) == 0.0
+    end
+end
+
+@testset "Adhoc auto window (:auto) flattens end-to-end" begin
+    # The default `SavitzkyGolaySmoother()` now uses `window = :auto` (EHT-HOPS coherence-time
+    # selection). Verify the default path still flattens the per-baseline phase.
+    uvset, _ = _build_fringe_uvset()
+    sol = fit(
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother()),   # window = :auto
+        uvset,
+        gauge = PinAntenna(1),
+    )
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
+    worst = 1.0
+    for (_, leaf) in DimensionalData.branches(corr)
+        V = parent(leaf[:vis]); W = parent(leaf[:weights])
+        bl_pairs = UVP.baselines(leaf).pairs
+        lp = feed_pairs(leaf)
+        for p in eachindex(lp)
+            fp = lp[p]
+            fp[1] == fp[2] || continue
+            for bi in eachindex(bl_pairs)
+                a, b = bl_pairs[bi]
+                a == b && continue
+                worst = min(worst, _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])))
+            end
+        end
+    end
+    @test worst > 0.99
+end
+
+@testset "Fringe pipeline via hierarchical MBD search" begin
+    # Narrow bands widely separated (4 × 8 ch, origins every 150 MHz): the
+    # common-Δf grid is ≈ 7× the real channel count, so the group search
+    # auto-selects the hierarchical SBD→MBD path — verify, then check the
+    # end-to-end solve flattens the data exactly like the full path does.
+    uvset, _ = _build_fringe_uvset(nspw = 4, nchan = 8, spw_sep = 1.5e8)
+    geom = CAL.build_geometry(uvset)
+    ax = FP._search_axes(geom.channel_freqs, geom.times, FP.FringeSearch(), ComplexF64)
+    @test ax.mbd !== nothing
+
+    sol = fit(
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+        uvset,
+        gauge = PinAntenna(1),
+    )
+    @test all(>(10), filter(isfinite, sol[:fringe].steps[1].info.scan_snr))
+    @test isempty(FP.suspect_fringes(sol))                 # all detections secure
+
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
+    worst = 1.0
+    for (_, leaf) in DimensionalData.branches(corr)
+        V = parent(leaf[:vis])
+        W = parent(leaf[:weights])
+        bl_pairs = UVP.baselines(leaf).pairs
+        lp = feed_pairs(leaf)
+        for p in eachindex(lp), bi in eachindex(bl_pairs)
+            a, b = bl_pairs[bi]
+            a == b && continue
+            worst = min(worst, _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])))
+        end
+    end
+    @test worst > 0.99
+end
+
+@testset "Threaded per-baseline search ≡ serial, and stage timers" begin
+    uvset, _ = _build_fringe_uvset()
+    geom = CAL.build_geometry(uvset)
+    stq = FP.scan_stream(uvset; geom = geom)
+    stack, _ = FP.materialize_cube(stq, stq.groups[1])
+    det1 = FP.search_scan(stack, stq.geom, FP.FringeSearch(); executor = SerialScheduler(), ngroups = 1)
+    det4 = FP.search_scan(stack, stq.geom, FP.FringeSearch(); executor = DynamicScheduler(; nchunks = 4), ngroups = 1)
+    # Same detections regardless of the inner task count (≈ only because the two
+    # runs plan separate FFTW MEASURE transforms).
+    @test size(det1) == size(det4)
+    @test all(
+        isapprox(det1[i].delay, det4[i].delay; atol = 1.0e-15) &&
+            isapprox(det1[i].rate, det4[i].rate; atol = 1.0e-12) &&
+            isapprox(det1[i].snr, det4[i].snr; rtol = 1.0e-9) &&
+            det1[i].valid == det4[i].valid
+            for i in eachindex(det1)
+    )
+
+    # Stage timers land in the solution info and print; the progress callback
+    # fires per completed scan of each pass (plus a done=0 pass announcement).
+    events = Tuple{Symbol, Int, Int}[]
+    sol = fit(
+        BaselineFringeFit() |> Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+        uvset;
+        exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
+        gauge = PinAntenna(1),
+    )
+    ngroups = length(FP.scan_stream(uvset).groups)
+    # Stages report under the pass names of the composable pipeline
+    # (:fringe/:bandpass/:adhoc — the monolith's :search stage died with it).
+    for st in (:fringe, :adhoc)
+        ev = [(d, t) for (s2, d, t) in events if s2 == st]
+        @test !isempty(ev)
+        total = ev[1][2]
+        st === :fringe && @test total == ngroups
+        @test sort([d for (d, _) in ev]) == collect(0:total)   # announcement + every scan
+        @test all(t == total for (_, t) in ev)
+    end
+    @test any(e -> e[1] === :bandpass, events)                 # bandpass enabled by default
+    inf = sol.info
+    fringe_step, bandpass_step, adhoc_step = sol[:fringe].steps[1], sol[:bandpass].steps[1], sol[:adhoc].steps[1]
+    @test fringe_step.info.t_pass > 0 && adhoc_step.info.t_pass > 0 && bandpass_step.info.t_pass >= 0
+    @test inf.ntasks_used >= 1 && inf.inner_tasks >= 1
+    # Every step publishes the SAME generic per-scan timing shape — no
+    # per-step-name code in the runner, so a third-party step gets this too.
+    for step in (fringe_step, bandpass_step, adhoc_step)
+        t = step.info.timing
+        @test length(t.decode) == inf.nscan
+        @test all(>=(0), t.decode) && all(>=(0), t.work)
+    end
+    @test sum(fringe_step.info.timing.work) > 0
+    buf = IOBuffer()
+    FP.print_solve_timing(sol; io = buf)
+    out = String(take!(buf))
+    @test occursin("Solve timing", out) && occursin("fringe", out)
+
+    # The bandpass/adhoc chain still produces a working solve on a
+    # single-scan uvset (the stage-B/bandpass/adhoc chain is intact).
+    ev2 = Tuple{Symbol, Int, Int}[]
+    solc = fit(
+        BaselineFringeFit() |>
+            Bandpass() |>
+            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+        uvset;
+        exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
+        gauge = PinAntenna(1),
+    )
+    @test solc isa CAL.CalibrationSolution
+    bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
+    @test !isempty(bp2) && bp2[1][2] == 1                     # one scan in this uvset
+    corr2 = Gustavo.UVData.apply_calibration(uvset, solc)
+    l2 = first(values(UVP.branches(corr2)))
+    bl2 = UVP.baselines(l2).pairs
+    p2 = findfirst(pr -> pr[1] != pr[2], collect(bl2))
+    @test _coherence(@view(parent(l2[:vis])[:, :, p2, 1]), @view(parent(l2[:weights])[:, :, p2, 1])) > 0.99
+    # Solutions without timers degrade cleanly.
+    fringe = sol[:fringe].steps[1]
+    old = CAL.CalibrationSolution(fringe.model, fringe.layout, sol.geom, fringe.θ, (;))
+    @test_nowarn FP.print_solve_timing(old; io = IOBuffer())
+end
+
+@testset "Largest-first group map" begin
+    # Results come back in index order regardless of completion order.
+    res = Gustavo._scheduled_map(x -> x * 10, 1:8, [10, 3, 3, 3, 1, 2, 2, 2])
+    @test res == [10, 20, 30, 40, 50, 60, 70, 80]
+    @test res isa Vector{Int}   # `work`'s return type, not `Any`
+
+    # Empty input and worker-error propagation.
+    @test isempty(Gustavo._scheduled_map(identity, Int[], Float64[]))
+    @test_throws Exception Gustavo._scheduled_map(
+        x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1],
+    )
+
+    # A charge per item is required.
+    @test_throws "items and charges must match" Gustavo._scheduled_map(
+        identity, 1:3, [1, 1],
+    )
+end
+
+@testset "EHT-HOPS station flags: unconstrained station flagged" begin
+    # Station 4 participates (baselines with valid weights) but carries NO
+    # fringe — pure weak noise — so after the closure-screened global solve no
+    # strong detection constrains it: the EHT-HOPS flag criterion. Its gains
+    # stay identity, and apply_calibration must zero-weight its baselines
+    # instead of passing the uncalibrated data through at full weight.
+    uvset, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 8, ntime = 12, feed_common = true)
+    rng = MersenneTwister(0xF1A6)
+    for (_, leaf) in Gustavo.UVData.leaves(uvset)
+        V = parent(leaf[:vis])
+        prs = Gustavo.UVData.baselines(leaf).pairs
+        for bi in eachindex(prs)
+            (prs[bi][1] == 4 || prs[bi][2] == 4) || continue
+            for idx in CartesianIndices((axes(V, 1), axes(V, 2), axes(V, 4)))
+                V[idx[1], idx[2], bi, idx[3]] = 0.01 * (randn(rng) + im * randn(rng))
+            end
+        end
+    end
+    ff = BaselineFringeFit(
+        model = default_fringe_terms(),
+        search = FP.FringeSearch(algorithm = FP.FullGrid()),
+    )
+    # Each scan's station systems solve as it is searched.
+    @test Gustavo._scan_local_solve(ff)
+    sol = fit(ff |> AdhocPhase(), uvset; gauge = PinAntenna(1))
+    flags = FP.fringe_station_flags(sol)
+    @test !isempty(flags)
+    @test all(r -> r.ant == 4, flags)                 # only station 4 unconstrained
+    @test any(r -> r.station == "A4", flags)
+
+    # An unconstrained row is flagged, not blanked: it holds real data that the
+    # solve left uncalibrated, so its visibilities and weights survive and
+    # clearing the flag gives it back.
+    corr = Gustavo.UVData.apply_calibration(uvset, sol)
+    for (_, leaf) in Gustavo.UVData.leaves(corr)
+        F = parent(leaf[:flags])
+        W = parent(leaf[:weights])
+        prs = Gustavo.UVData.baselines(leaf).pairs
+        for bi in eachindex(prs)
+            prs[bi][1] == prs[bi][2] && continue
+            if prs[bi][1] == 4 || prs[bi][2] == 4
+                @test all(@view F[:, :, bi, :])
+                @test all(>(0), @view W[:, :, bi, :])
+            else
+                @test !any(@view F[:, :, bi, :])
+                @test any(>(0), @view W[:, :, bi, :])
+            end
+        end
+    end
+    # Opting out leaves the (identity-gain) row unflagged.
+    corr0 = Gustavo.UVData.apply_calibration(uvset, sol; apply_flags = false)
+    l0f = last(first(Gustavo.UVData.leaves(corr0)))
+    prs0 = Gustavo.UVData.baselines(l0f).pairs
+    bi4 = findfirst(p -> p[1] != p[2] && (p[1] == 4 || p[2] == 4), prs0)
+    @test !any(@view parent(l0f[:flags])[:, :, bi4, :])
+    @test any(>(0), @view parent(l0f[:weights])[:, :, bi4, :])
+
+    # `calibrate` applies the same flags, one scan group at a time.
+    out = calibrate(sol, uvset)
+    for (_, leaf) in Gustavo.UVData.leaves(out)
+        F = parent(leaf[:flags])
+        prs = Gustavo.UVData.baselines(leaf).pairs
+        for bi in eachindex(prs)
+            prs[bi][1] == prs[bi][2] && continue
+            if prs[bi][1] == 4 || prs[bi][2] == 4
+                @test all(@view F[:, :, bi, :])
+            else
+                @test !any(@view F[:, :, bi, :])
+            end
+        end
+    end
+end

@@ -1,9 +1,14 @@
+# The containers that carry a leaf's `PartitionInfo`: the leaf tree itself and
+# any layer selection off it (`leaf[(:vis, :weights, :flags)]`), which keeps the
+# metadata. Both answer the identity accessors defined throughout this file.
+const PartitionedData = Union{DimensionalData.AbstractDimTree, DimensionalData.AbstractDimStack}
+
 """
     UVSet <: DimensionalData.AbstractDimTree
 
 Top-level container mirroring xradio's MSv4 `ProcessingSet`: a flat
 `OrderedDict` of MSv4-shaped partition leaves under `branches`, keyed by
-sanitized `:<source>_scan_<n>` Symbols (e.g. `:M3C273_scan_1`). Multi-source
+sanitized `:<source>_scan_<n>` Symbols (e.g. `:src_3C273_scan_1`). Multi-source
 data shows up as sibling flat partitions, never as a nested Source dim.
 
 The struct subtypes `AbstractDimTree` so all DD machinery (selectors,
@@ -11,7 +16,11 @@ The struct subtypes `AbstractDimTree` so all DD machinery (selectors,
 works without bespoke overloads. Per-leaf data lives on each branch
 (a plain `DimTree`) carrying:
 
-- `data`     : `:vis`, `:weights`, `:uvw`, `:flag` `DimArray` layers.
+- `data`     : `:vis`, `:weights`, `:flags`, `:uvw` `DimArray` layers.
+  `:flags` is `Bool` on the `:vis` axes and is `true` where the datum must
+  not be used; `:weights` says how good it would have been. The two are
+  independent, matching MSv4's `FLAG`/`WEIGHT` pair: a flagged cell may
+  carry a positive weight, and a zero weight does not by itself flag.
 - `metadata` : `PartitionInfo` struct (`source_name`, `source_key`,
   `field_name`, `scan_name`, `scan_intents`, `sub_scan_name`, `spw_name`,
   `intent`, `ra`, `dec`, `ddi`, `partition_name`, `baselines::BaselineIndex`,
@@ -181,12 +190,22 @@ function nscans(uvset::UVSet)
 end
 
 """
-    leaves(uvset::UVSet)
+    VisibilitySet
 
-Iterator over `(partition_key::Symbol, leaf::DimTree)` pairs for every leaf
-in the tree, in branch insertion order.
+A `UVSet` or an `XRadio.ProcessingSet`: the whole-set functions that only walk
+[`leaves`](@ref) and read each partition through its accessors take either.
+"""
+const VisibilitySet = Union{UVSet, XRadio.ProcessingSet}
+
+"""
+    leaves(uvset::UVSet)
+    leaves(ps::XRadio.ProcessingSet)
+
+Iterator over `key => partition` pairs, in insertion order: each leaf of a
+`UVSet`, or each `MeasurementSet` of a processing set.
 """
 leaves(uvset::UVSet) = pairs(DimensionalData.branches(uvset))
+leaves(ps::XRadio.ProcessingSet) = pairs(ps)
 
 """
     sources(uvset::UVSet) -> Vector{String}
@@ -252,18 +271,18 @@ function Base.summary(uvset::UVSet)
 end
 
 """
-    union_frequency_axis(uvset::UVSet) -> Vector{FrequencySetup}
+    union_frequency_axis(data::VisibilitySet) -> Vector{FrequencySetup}
 
-Vector of `FrequencySetup`s spanning every leaf, deduplicated by `==`/`hash`,
+Vector of `FrequencySetup`s spanning every partition, deduplicated by `==`/`hash`,
 in first-seen order. Mirrors xradio's `ProcessingSet.get_freq_axis()`.
 Used by the FITS writer to assemble the union FQ table and by the future
 per-SPW solver dispatch.
 """
-function union_frequency_axis(uvset::UVSet)
+function union_frequency_axis(data::VisibilitySet)
     out = FrequencySetup[]
     seen = Set{FrequencySetup}()
-    for (_, leaf) in DimensionalData.branches(uvset)
-        fs = DimensionalData.metadata(leaf).freq_setup
+    for (_, leaf) in leaves(data)
+        fs = freq_setup(leaf)
         if !(fs in seen)
             push!(out, fs)
             push!(seen, fs)
@@ -273,22 +292,22 @@ function union_frequency_axis(uvset::UVSet)
 end
 
 """
-    freq_setup(uvset::UVSet) -> FrequencySetup
+    freq_setup(data::VisibilitySet) -> FrequencySetup
 
-Single-SPW shorthand: returns the unique `FrequencySetup` if every leaf
+Single-SPW shorthand: returns the unique `FrequencySetup` if every partition
 shares one, otherwise throws `ArgumentError`. Multi-SPW callers should
-use `union_frequency_axis(uvset)` or read each leaf's `freq_setup`
+use `union_frequency_axis(data)` or read each partition's `freq_setup`
 individually.
 """
-function freq_setup(uvset::UVSet)
-    setups = union_frequency_axis(uvset)
+function freq_setup(data::VisibilitySet)
+    setups = union_frequency_axis(data)
     n = length(setups)
     n == 1 && return setups[1]
-    n == 0 && throw(ArgumentError("UVSet has no leaves; no frequency setup"))
+    n == 0 && throw(ArgumentError("the set has no partitions; no frequency setup"))
     throw(
         ArgumentError(
-            "UVSet has $(n) distinct frequency setups; " *
-                "use union_frequency_axis(uvset) or freq_setup(leaf)",
+            "the set has $(n) distinct frequency setups; " *
+                "use union_frequency_axis(data) or freq_setup(partition)",
         )
     )
 end
@@ -319,7 +338,7 @@ function Base.show(io::IO, ::MIME"text/plain", uvset::UVSet)
     println(io, "  Array     : $(arr_name) ($ref_freq_ghz GHz)")
     println(io, "  Sources   : $(length(src_list)) ($(join(src_list, ", ")))")
     println(io, "  Partitions: $(n_part)")
-    println(io, "  Spectral  : $(length(setups)) setup(s), $(length(chan_freqs)) IFs total: $(flo)–$(fhi) GHz")
+    println(io, "  Spectral  : $(length(setups)) setup(s), $(length(chan_freqs)) channels total: $(flo)–$(fhi) GHz")
     print(io, "  Antennas ($(length(nms))): $(join(nms, ", "))")
     return io
 end
@@ -342,7 +361,7 @@ function scan_time_centers(uvset::UVSet)
     end
     return out
 end
-band_center_frequency(uvset::UVSet) = band_center_frequency(freq_setup(uvset))
+spw_center_frequency(uvset::UVSet) = spw_center_frequency(freq_setup(uvset))
 centered_channel_freqs(uvset::UVSet) = centered_channel_freqs(freq_setup(uvset))
 
 function baseline_sites(uvset::UVSet, bl::Tuple{String, String})
@@ -364,62 +383,99 @@ end
 
 Per-leaf antenna table.
 """
-antennas(leaf::DimensionalData.AbstractDimTree) =
+antennas(leaf::PartitionedData) =
     DimensionalData.metadata(leaf).antennas
 
 """
-    union_antennas(uvset::UVSet) -> AntennaTable
+    union_antennas(data::VisibilitySet) -> AntennaTable
 
-Walk leaves and union participating antennas by name. Errors if the
-same antenna name has different metadata (mount, station_xyz,
-nominal_basis, response, pol_angles) across leaves — a multi-track
-observation that should be split via `select_*` and processed per-SPW.
+Walk partitions and union their antennas by name, in first-seen order. Errors
+if the same antenna name has different metadata (mount, station_xyz,
+nominal_basis, pol_angles) across partitions — a multi-track observation that
+should be split and processed per-SPW. An `extras` column is kept when every
+partition's table has it, taking each antenna's value from the table it was
+first seen in.
 """
-function union_antennas(uvset::UVSet)
-    bs = DimensionalData.branches(uvset)
-    isempty(bs) && error("union_antennas: UVSet has no leaves")
-    leaves_v = collect(values(bs))
-    template = DimensionalData.metadata(first(leaves_v)).antennas
-    # Fast path: every leaf points to the same AntennaTable instance (the
-    # common case for single-subarray observations).
-    same_ref = all(DimensionalData.metadata(l).antennas === template for l in leaves_v)
-    same_ref && return template
-    seen = Set{String}()
+function union_antennas(data::VisibilitySet)
+    tables = [antennas(leaf) for (_, leaf) in leaves(data)]
+    isempty(tables) && error("union_antennas: the set has no partitions")
+    template = first(tables)
+    all(t -> t === template, tables) && return template
     rows = eltype(getfield(template, :antennas))[]
-    for leaf in leaves_v
-        sa = getfield(DimensionalData.metadata(leaf).antennas, :antennas)
-        for ant in sa
-            if !(ant.name in seen)
-                push!(rows, ant)
-                push!(seen, ant.name)
-            else
-                # Re-find the existing row by name and verify equality.
-                idx = findfirst(r -> r.name == ant.name, rows)
-                rows[idx] == ant || error(
-                    "union_antennas: antenna '$(ant.name)' has " *
-                        "inconsistent metadata across leaves; split via " *
-                        "select_* and process per-SPW.",
-                )
-            end
+    origin = Tuple{Int, Int}[]
+    slot = Dict{String, Int}()
+    for (ti, tab) in pairs(tables), (ai, ant) in pairs(getfield(tab, :antennas))
+        idx = get(slot, ant.name, 0)
+        if idx == 0
+            push!(rows, ant)
+            push!(origin, (ti, ai))
+            slot[ant.name] = length(rows)
+        else
+            isequal(rows[idx], ant) || error(
+                "union_antennas: antenna '$(ant.name)' has " *
+                    "inconsistent metadata across partitions; split the set " *
+                    "and process per-SPW.",
+            )
         end
     end
-    return AntennaTable(
-        StructArray(rows), array_xyz(template), array_name(template), extras(template),
+    common = filter(k -> all(t -> haskey(extras(t), k), tables), keys(extras(template)))
+    ext = NamedTuple{common}(
+        Tuple([extras(tables[ti])[k][ai] for (ti, ai) in origin] for k in common)
     )
+    return AntennaTable(StructArray(rows), array_name(template), ext)
 end
 
 """
-    union_pol_products(uvset::UVSet) -> Vector{String}
+    unify_antennas(uvset::UVSet) -> UVSet
 
-Pol product set shared across leaves. Errors if leaves disagree —
+Put every leaf on one antenna table — [`union_antennas`](@ref)'s — re-indexing
+each leaf's `BaselineIndex` into it.
+
+A leaf's `(a, b)` pairs index that leaf's OWN table, so a sub-array leaf listing
+only the stations that observed it numbers them differently from a fuller leaf:
+where six antennas observed, index 3 may be `KT` while the full array's index 3
+is `GL`. Anything reading pairs against a single table — which is every solver,
+since a solve has one station axis — would then attribute one station's data to
+another. This makes the indices mean the same thing everywhere, so sets whose
+leaves saw different sub-arrays can be solved together.
+
+Antennas are matched by NAME (`union_antennas` refuses inconsistent metadata for
+a shared name). Leaves already on the union table are returned untouched, so a
+single-sub-array set costs nothing and stays lazy.
+"""
+function unify_antennas(uvset::UVSet)
+    table = union_antennas(uvset)
+    names = collect(String.(table.name))
+    all(
+        collect(String.(DimensionalData.metadata(l).antennas.name)) == names
+            for l in values(DimensionalData.branches(uvset))
+    ) && return uvset
+    slot = Dict(n => i for (i, n) in pairs(names))
+    return apply(uvset) do leaf, info, root
+        local_names = collect(String.(info.antennas.name))
+        local_names == names && return leaf
+        m = [slot[n] for n in local_names]
+        remap(ps) = [(m[a], m[b]) for (a, b) in ps]
+        b = info.baselines
+        # `record_order` holds (time, baseline-slot) pairs, and slot order is
+        # preserved here, so it needs no remapping.
+        newb = BaselineIndex(remap(b.pairs_per_record), remap(b.pairs); antenna_names = names)
+        return DimensionalData.rebuild(
+            leaf; metadata = update(info; antennas = table, baselines = newb),
+        )
+    end
+end
+
+"""
+    union_pol_products(data::VisibilitySet) -> Vector{String}
+
+Pol product set shared across partitions. Errors if they disagree —
 mirrors `union_antennas` for the polarization axis.
 """
-function union_pol_products(uvset::UVSet)
-    bs = DimensionalData.branches(uvset)
-    isempty(bs) && error("union_pol_products: UVSet has no leaves")
-    leaves_v = collect(values(bs))
-    first_pp = pol_products(first(leaves_v))
-    for leaf in leaves_v
+function union_pol_products(data::VisibilitySet)
+    isempty(leaves(data)) && error("union_pol_products: the set has no partitions")
+    first_pp = pol_products(last(first(leaves(data))))
+    for (_, leaf) in leaves(data)
         Set(pol_products(leaf)) == Set(first_pp) ||
             error(
             "union_pol_products: leaves have different pol product sets; " *
@@ -430,7 +486,7 @@ function union_pol_products(uvset::UVSet)
 end
 
 antenna_names(uvset::UVSet) = union_antennas(uvset).name
-nchannels(uvset::UVSet) = nchannels(freq_setup(uvset))
+nchannels(data::VisibilitySet) = nchannels(freq_setup(data))
 npols(uvset::UVSet) = length(pol_products(uvset))
 nbaselines(uvset::UVSet) = length(
     unique(
@@ -455,22 +511,29 @@ nintegrations(uvset::UVSet) = sum(
 DimensionalData.metadata(dt::DimensionalData.DimTree) = getfield(dt, :metadata)
 
 
-freq_setup(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).freq_setup
-baselines(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).baselines
-record_order(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).record_order
-extra_columns(part::DimensionalData.AbstractDimTree) = DimensionalData.metadata(part).extra_columns
+freq_setup(part::PartitionedData) = DimensionalData.metadata(part).freq_setup
+baselines(part::PartitionedData) = DimensionalData.metadata(part).baselines
+record_order(part::PartitionedData) = DimensionalData.metadata(part).record_order
+extra_columns(part::PartitionedData) = DimensionalData.metadata(part).extra_columns
+
+"""
+    source_name(part) -> String
+
+Name of the source the leaf (or a layer selection off it) observes.
+"""
+source_name(part::PartitionedData) = DimensionalData.metadata(part).source_name
 
 # Each leaf maps to exactly one xradio MSv4 scan, so the scan label is a
 # scalar field on `PartitionInfo`. `scan_name` and `primary_scan_name`
 # return that String — twin accessors retained for callers that previously
 # read the per-Ti vector form.
-scan_name(part::DimensionalData.AbstractDimTree) =
+scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).scan_name
-primary_scan_name(part::DimensionalData.AbstractDimTree) =
+primary_scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).scan_name
-scan_intents(part::DimensionalData.AbstractDimTree) =
+scan_intents(part::PartitionedData) =
     DimensionalData.metadata(part).scan_intents
-sub_scan_name(part::DimensionalData.AbstractDimTree) =
+sub_scan_name(part::PartitionedData) =
     DimensionalData.metadata(part).sub_scan_name
 
 """
@@ -482,7 +545,7 @@ sub_scan_name(part::DimensionalData.AbstractDimTree) =
 function scan_window(part::DimensionalData.AbstractDimTree)
     t = obs_time(part)
     isempty(t) && return (NaN, NaN)
-    return (Float64(minimum(t)), Float64(maximum(t)))
+    return extrema(t)
 end
 
 """
@@ -497,31 +560,32 @@ function participating_antennas(part::DimensionalData.AbstractDimTree)
     return sort!(collect(Set{String}(vcat(bls.ant1_names, bls.ant2_names))))
 end
 
-# Time axis lookup. Leaves use `Ti`. Values are Float64 fractional hours
-# since RDATE 00:00 UTC (the AIPS RDATE card on the AN HDU). For a
-# single-night track, magnitudes are bounded by ~24; multi-night tracks
-# accumulate as 24·days_offset + hour_within_day.
+# Time axis lookup. Values are Float64 seconds since `UVData.JD_UNIX_EPOCH`,
+# matching MSv4's `time` coordinate in its default `unix` format. Magnitudes
+# near the present are ~1.7e9, where a Float64 resolves ~0.24 µs; every rate
+# and delay term works on `t − t0` about a segment-local origin, where the
+# resolution is picoseconds.
 function obs_time(part::DimensionalData.AbstractDimTree)
-    vis = part[:vis]
-    return hasdim(vis, Ti) ? lookup(vis, Ti) : lookup(vis, Integration)
+    return lookup(part[:vis], Ti)
 end
 
-# `weights ≤ 0` carries the FITS flag convention. We derive a Bool layer at
-# construction so `data.flag` is always available without recomputation.
-_derive_flag(w::AbstractDimArray) = DimArray(parent(w) .<= 0, dims(w))
-_derive_flag(w::AbstractArray) = w .<= 0
-
 """
-    with_visibilities(part::AbstractDimTree, vis, weights) -> DimTree
+    rebuild_visibilities(part::AbstractDimTree, vis, weights, uvw, flags) -> DimTree
 
-Return a new leaf sharing `part`'s `uvw` layer and metadata, with
-`vis`/`weights`/`flag` swapped in. `flag` is re-derived from `weights`.
+Return a new leaf sharing `part`'s metadata, with any of the data layers
+swapped in; each defaults to `part`'s own. Layers not passed are shared with
+`part` rather than copied.
 """
-function with_visibilities(part::DimensionalData.AbstractDimTree, vis, weights)
+function rebuild_visibilities(
+        part::DimensionalData.AbstractDimTree, vis = part[:vis],
+        weights = part[:weights], uvw = part[:uvw], flags = part[:flags],
+    )
     vis_l = _rewrap_like(vis, part[:vis])
     w_l = _rewrap_like(weights, part[:weights])
+    uvw_l = _rewrap_like(uvw, part[:uvw])
+    flags_l = _rewrap_like(flags, part[:flags])
     return _build_leaf(
-        vis_l, w_l, part[:uvw];
+        vis_l, w_l, uvw_l, flags_l;
         partition_info = DimensionalData.metadata(part),
     )
 end

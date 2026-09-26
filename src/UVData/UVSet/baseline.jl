@@ -1,10 +1,10 @@
 # Per-baseline `DimStack` views over leaves and `UVSet`s.
 #
 # The DimStack carries the same layer names as a leaf (`:vis`, `:weights`,
-# `:uvw`, `:flag`) with the `Baseline` axis dropped. `vis`/`weights`/`flag`
-# have dims `(Frequency, Ti, Pol)`; `:uvw` has dims `(Ti, UVW)`.
+# `:flags`, `:uvw`) with the `BaselineID` axis dropped. `vis`/`weights`/`flags`
+# have dims `(Frequency, Ti, Polarization)`; `:uvw` has dims `(Ti, UVW)`.
 # DimStacks support per-layer slicing and DimensionalData selectors out of
-# the box (e.g. `bl[:vis][Pol = pol_at("RR")]`), so most downstream tasks
+# the box (e.g. `bl[:vis][Polarization = pol_at(bl, (1, 1))]`), so most downstream tasks
 # (radplots, per-channel diagnostics, time-averaging) become one-liners.
 
 """
@@ -16,13 +16,13 @@ Build a `DimStack` view of one baseline of a single leaf. `bl` may be:
 - a name pair `("AA", "AX")`, or
 - the dash-joined label `"AA-AX"`.
 
-The returned stack carries layers `:vis`, `:weights`, `:flag` (each
-`(Frequency, Ti, Pol)`) and `:uvw` (`(Ti, UVW)`). Throws `KeyError` if
+The returned stack carries layers `:vis`, `:weights`, `:flags` (each
+`(Frequency, Ti, Polarization)`) and `:uvw` (`(Ti, UVW)`). Throws `KeyError` if
 the baseline is absent from this leaf.
 
 ```julia
 bl   = baseline(leaf, ("AA", "AX"))
-amp  = abs.(bl[:vis][Pol = pol_at("RR")])     # (Frequency, Ti)
+amp  = abs.(bl[:vis][Polarization = pol_at(bl, (1, 1))])     # (Frequency, Ti)
 uvw  = bl[:uvw]                                # (Ti, UVW)
 ```
 """
@@ -37,16 +37,16 @@ end
 function _baseline_stack(leaf::DimensionalData.AbstractDimTree, bi::Integer)
     vis_l = leaf[:vis]
     w_l = leaf[:weights]
+    f_l = leaf[:flags]
     uvw_l = leaf[:uvw]
-    flag_l = leaf[:flag]
 
-    # vis/weights/flag layout is (Frequency, Ti, Baseline, Pol) — slice
-    # the Baseline slot using DimensionalData selector so the resulting
-    # arrays keep their (Frequency, Ti, Pol) lookups.
-    vis_bl = view(vis_l, Baseline(bi))
-    w_bl = view(w_l, Baseline(bi))
-    flag_bl = view(flag_l, Baseline(bi))
-    uvw_bl = view(uvw_l, Baseline(bi))   # (Ti, UVW)
+    # vis/weights/flags layout is (Frequency, Ti, BaselineID, Polarization) — slice
+    # the BaselineID slot using DimensionalData selector so the resulting
+    # arrays keep their (Frequency, Ti, Polarization) lookups.
+    vis_bl = view(vis_l, BaselineID(bi))
+    w_bl = view(w_l, BaselineID(bi))
+    f_bl = view(f_l, BaselineID(bi))
+    uvw_bl = view(uvw_l, BaselineID(bi))   # (Ti, UVW)
 
     bls = baselines(leaf)
     a, b = bls.pairs[bi]
@@ -64,7 +64,7 @@ function _baseline_stack(leaf::DimensionalData.AbstractDimTree, bi::Integer)
         ra = info.ra,
         dec = info.dec,
     )
-    return DimStack((; vis = vis_bl, weights = w_bl, flag = flag_bl, uvw = uvw_bl); metadata = md)
+    return DimStack((; vis = vis_bl, weights = w_bl, flags = f_bl, uvw = uvw_bl); metadata = md)
 end
 
 """
@@ -72,8 +72,8 @@ end
 
 Cross-leaf view of one baseline: walk every leaf containing `bl` and
 concatenate along the `Ti` axis. The returned `DimStack` matches the
-single-leaf shape (layers `:vis`, `:weights`, `:flag` with dims
-`(Frequency, Ti, Pol)`; `:uvw` with `(Ti, UVW)`) but its `Ti` axis spans
+single-leaf shape (layers `:vis`, `:weights`, `:flags` with dims
+`(Frequency, Ti, Polarization)`; `:uvw` with `(Ti, UVW)`) but its `Ti` axis spans
 the entire observation for that baseline.
 
 By default the function errors when the participating leaves do not all
@@ -83,7 +83,7 @@ mixed-setup stack).
 
 ```julia
 bl  = baseline(uvset, ("AA", "AX"))
-amp = abs.(bl[:vis][Pol = pol_at("RR")])      # (Frequency, all-Ti)
+amp = abs.(bl[:vis][Polarization = pol_at(bl, (1, 1))])      # (Frequency, all-Ti)
 uv  = bl[:uvw]                                # (all-Ti, UVW)
 ```
 """
@@ -130,12 +130,12 @@ function baselines_per_scan(uvset::UVSet, bl)
 end
 
 # Concatenate per-leaf DimStacks along the Ti axis. We assume Frequency
-# and Pol axes are identical across leaves (verified by the SPW check
+# and Polarization axes are identical across leaves (verified by the SPW check
 # upstream); UVW just gets stacked along Ti like the others.
 function _concat_baseline_stacks(stacks::AbstractVector{<:DimStack})
     vis_cat = cat((s[:vis] for s in stacks)...; dims = Ti)
     w_cat = cat((s[:weights] for s in stacks)...; dims = Ti)
-    flag_cat = cat((s[:flag] for s in stacks)...; dims = Ti)
+    f_cat = cat((s[:flags] for s in stacks)...; dims = Ti)
     uvw_cat = cat((s[:uvw] for s in stacks)...; dims = Ti)
     md_first = DimensionalData.metadata(stacks[1])
     md = (;
@@ -144,5 +144,5 @@ function _concat_baseline_stacks(stacks::AbstractVector{<:DimStack})
         # Drop scan-specific bookkeeping when concatenating across scans;
         # ant1/ant2/label/freq_setup/ra/dec stay since they're invariant.
     )
-    return DimStack((; vis = vis_cat, weights = w_cat, flag = flag_cat, uvw = uvw_cat); metadata = md)
+    return DimStack((; vis = vis_cat, weights = w_cat, flags = f_cat, uvw = uvw_cat); metadata = md)
 end

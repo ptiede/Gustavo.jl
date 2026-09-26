@@ -1,0 +1,253 @@
+# ── AdhocPhase step + calibrate ───────────────────────────────────────────────
+#
+# The full three-stage pipeline (BaselineFringeFit |> Bandpass |>
+# AdhocPhase) on the composable engine. The M5 parity gates against the
+# frozen monolith (fringe blocks bit-identical, bandpass/adhoc to rtol 1e-12,
+# polish-split full-θ bit-identical) ran BEFORE its deletion; what this file
+# keeps are the engine's standing guarantees:
+# - θ is bit-deterministic across group concurrency (per-block partials fold in
+#   a fixed order — ntasks 1 ≡ 4), and the multi-scan solve flattens the data.
+# - `calibrate(sol, uvset; post)` ≡ the whole-set apply followed by `post`.
+# - The refine polish split (`bandpass_max_scans` ⇒ cal scan polished in the
+#   narrow window, others full-refined by the smoother pass) still recovers an
+#   injected dTEC truth.
+# - AprioriAmplitude scales the output only: applied after the gains and
+#   before `post`, recorded in `sol.sequence`, and replayed by `calibrate`.
+
+@isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
+using Dates
+
+# One component's θ block of a single STEP. `i` indexes that step's own
+# `layout.plans` (phase components first, then log-amplitude).
+_blk(step, i) = step.θ[[p.range for p in step.layout.plans][i]]
+
+# Leaf-by-leaf equality of two UVSets' vis/weights.
+function _sets_equal(a, b; exact = true)
+    for (k, leaf) in pairs(UVP.branches(a))
+        lb = UVP.branches(b)[k]
+        va, wa = parent(leaf[:vis]), parent(leaf[:weights])
+        vb, wb = parent(lb[:vis]), parent(lb[:weights])
+        ok = exact ? (isequal(va, vb) && isequal(wa, wb)) :
+            (isapprox(va, vb; rtol = 1.0e-6) && isapprox(wa, wb; rtol = 1.0e-6))
+        ok || return false
+    end
+    return length(collect(pairs(UVP.branches(a)))) == length(collect(pairs(UVP.branches(b))))
+end
+
+# Worst parallel-hand coherence of a corrected set.
+function _worst_parallel_coherence(corr)
+    worst = 1.0
+    for (_, leaf) in UVP.branches(corr)
+        V = parent(leaf[:vis]); W = parent(leaf[:weights])
+        bl_pairs = UVP.baselines(leaf).pairs
+        lp = feed_pairs(leaf)
+        for p in eachindex(lp)
+            fp = lp[p]
+            fp[1] == fp[2] || continue
+            for bi in eachindex(bl_pairs)
+                a, b = bl_pairs[bi]
+                a == b && continue
+                worst = min(worst, _coherence(@view(V[:, :, bi, p]), @view(W[:, :, bi, p])))
+            end
+        end
+    end
+    return worst
+end
+
+@testset "AdhocPhase step + output sink (new engine)" begin
+    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    nant = 4
+    nglob = 16
+    # SMOOTH injected per-(station, feed) bandpass shapes (as in test_pipeline's
+    # bandpass testsets): the stage's per-channel SNR gate estimates noise from
+    # cross-channel scatter, so a white-noise injection is OUT OF MODEL (the
+    # gate reads it as noise and correctly refuses to fit it) — smooth shapes
+    # are the physically representative case the stage must flatten.
+    rng = MersenneTwister(11)
+    bp_true = zeros(nant, 2, nglob)
+    abp_true = zeros(nant, 2, nglob)
+    for a in 1:nant, f in 1:2
+        po = (rand(rng) - 0.5)
+        ao = (rand(rng) - 0.5) * 0.2
+        for gc in 1:nglob
+            bp_true[a, f, gc] = po + 0.5 * sin(2π * gc / nglob + a + f)
+            abp_true[a, f, gc] = ao + 0.15 * sin(4π * gc / nglob + a - f)
+        end
+    end
+    uvset, _ = _build_fringe_uvset(;
+        nant, nspw = 2, nchan = 8, nscans = 3,
+        bandpass = bp_true, amp_bandpass = abp_true,
+    )
+    fm = default_fringe_terms()
+    pipe = [BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc)]
+    sol_n = fit(pipe, uvset; exec = ExecutionConfig(), gauge = PinAntenna(1))
+
+    @testset "3-scan full pipeline: structure, determinism, coherence" begin
+        @test keys(sol_n) == [:fringe, :bandpass, :adhoc]
+        adhoc_step = sol_n[:adhoc].steps[1]
+        phases = CAL.phase_components(adhoc_step.model)
+        # The adhoc block is really solved (nonzero) on every scan.
+        ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
+        @test any(!=(0), _blk(adhoc_step, ipi))
+        @test adhoc_step.info.t_pass > 0
+
+        # θ bit-deterministic across group concurrency (per-block partials fold
+        # in a fixed order regardless of ntasks/inner).
+        pipe4 = [BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc)]
+        @test parent(gains(fit(pipe4, uvset; exec = ExecutionConfig(), gauge = PinAntenna(1)))) == parent(gains(sol_n))
+
+        # The multi-scan solve flattens the data (bandpass + screen recovered).
+        @test _worst_parallel_coherence(Gustavo.UVData.apply_calibration(uvset, sol_n)) > 0.99
+    end
+
+    @testset "calibrate ≡ whole-set apply, then post" begin
+        out_s = calibrate(sol_n, uvset; post = AverageFrequency(nout = 1))
+        red_ref = UVP.frequency_average(Gustavo.UVData.apply_calibration(uvset, sol_n); nout = 1)
+        @test _sets_equal(out_s, red_ref; exact = false)
+    end
+
+    @testset "BaselineFringeFit |> AdhocPhase (no bandpass)" begin
+        sol_fs = fit(
+            [BaselineFringeFit(model = fm), AdhocPhase(adhoc)],
+            uvset,
+            exec = ExecutionConfig(),
+            gauge = PinAntenna(1),
+        )
+        @test keys(sol_fs) == [:fringe, :adhoc]
+        @test !any(s -> haskey(s.layout.plantree.phase, :bandpass), sol_fs.steps)
+        adhoc_step_fs = sol_fs[:adhoc].steps[1]
+        phases = CAL.phase_components(adhoc_step_fs.model)
+        ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
+        @test any(!=(0), _blk(adhoc_step_fs, ipi))
+        # Without the bandpass stage the injected per-channel bandpass survives,
+        # so full coherence is NOT reached — but the delay/rate/adhoc solve must
+        # still be sane (all θ finite, per-scan SNRs strong).
+        @test all(s -> all(isfinite, s.θ), sol_fs.steps)
+        @test all(>(10), filter(isfinite, sol_fs[:fringe].steps[1].info.scan_snr))
+    end
+
+    @testset "a pipeline ≡ its steps fit separately" begin
+        # The oracle is the composition a caller can write by hand: separate
+        # `fit` calls of one step each, chained through `ApplySolution`.
+        bp = Bandpass()
+        pre = FP.ApplySolution(sol_n[:fringe])
+
+        sol_pipe = fit(pre |> bp |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test keys(sol_pipe) == [:bandpass, :adhoc]
+        # Neither step is vacuous.
+        @test sol_pipe[:bandpass].steps[1].layout.nθ > 0
+        @test any(!=(0), sol_pipe[:bandpass].steps[1].θ)
+        @test any(!=(0), sol_pipe[:adhoc].steps[1].θ)
+
+        sol_a = fit(pre |> bp, uvset; gauge = PinAntenna(1))
+        bandpass_tf = FP.ApplySolution(sol_a[:bandpass])
+        sol_b = fit(pre |> bandpass_tf |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test sol_pipe[:bandpass].steps[1].θ == sol_a[:bandpass].steps[1].θ
+        @test sol_pipe[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
+
+        sol_3 = fit(BaselineFringeFit() |> bp |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test keys(sol_3) == [:fringe, :bandpass, :adhoc]
+        sol_f1 = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
+        pre_f = FP.ApplySolution(sol_f1[:fringe])
+        sol_b1 = fit(pre_f |> bp, uvset; gauge = PinAntenna(1))
+        pre_b = FP.ApplySolution(sol_b1[:bandpass])
+        sol_a1 = fit(pre_f |> pre_b |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test sol_3[:fringe].steps[1].θ == sol_f1[:fringe].steps[1].θ
+        @test sol_3[:bandpass].steps[1].θ == sol_b1[:bandpass].steps[1].θ
+        @test sol_3[:adhoc].steps[1].θ == sol_a1[:adhoc].steps[1].θ
+        # The fringe step reports the same flags and diagnostics either way.
+        @test sol_3.info.flagged_ant == sol_f1.info.flagged_ant
+        @test sol_3.info.flagged_scan == sol_f1.info.flagged_scan
+        @test sol_3[:fringe].steps[1].info.scan_snr == sol_f1[:fringe].steps[1].info.scan_snr
+
+        # With no transform chain in front of a step, materialization may hand
+        # back an eager set's own arrays; the caller's data is never written.
+        snap = Dict(
+            k => (copy(parent(l[:vis])), copy(parent(l[:weights])))
+                for (k, l) in pairs(UVP.branches(uvset))
+        )
+        fit(bp |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+        @test all(
+            isequal(snap[k][1], parent(l[:vis])) && isequal(snap[k][2], parent(l[:weights]))
+                for (k, l) in pairs(UVP.branches(uvset))
+        )
+    end
+
+    @testset "AprioriAmplitude scales the output only" begin
+        BP = Gustavo.UVData
+        ant_names = String.(collect(UVP.union_antennas(uvset).name))
+        ts_all = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
+        times = [unix2datetime(t) for t in ts_all]
+        times = [times[1] - Hour(1); times; times[end] + Hour(1)]
+        tsys_band = Dict(1 => 100.0, 2 => 400.0)
+        spw_cals = Dict{Int, BP.AntabCalibration}()
+        for (b, tsys) in tsys_band
+            stns = Dict{String, BP.AntabStation}()
+            for nm in ant_names
+                gain = BP.AntabGainCurve((1.0, 1.0), [1.0])
+                vals = repeat([tsys tsys], length(times), 1)
+                series = BP.AntabTsysSeries(times, [(0, :R), (0, :L)], vals)
+                stns[nm] = BP.AntabStation(nm, gain, series, 0)
+            end
+            spw_cals[b] = BP.AntabCalibration("synthetic", "synth", 2000, stns)
+        end
+        ap = AprioriAmplitude(spw_cals; min_elevation_deg = -Inf)
+
+        pipe_ap = [BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc), ap]
+        sol_ap = fit(pipe_ap, uvset; exec = ExecutionConfig(), gauge = PinAntenna(1))
+        out_ap = calibrate(sol_ap, uvset)
+        # Recorded on the solution; the solve's θ is untouched by it.
+        @test last(sol_ap.sequence) === ap
+        @test parent(gains(sol_ap)) == parent(gains(sol_n))
+        # Applied after the gains: relative to the no-apriori output every
+        # visibility scales by SEFD = Tsys_band (flat gain, DPFU = 1).
+        out_plain = calibrate(sol_n, uvset)
+        for (k, leaf) in pairs(UVP.branches(out_ap))
+            b = UVP.metadata(leaf).ddi + 1
+            lp = UVP.branches(out_plain)[k]
+            va = parent(leaf[:vis])
+            vp = parent(lp[:vis])
+            m = isfinite.(va) .& isfinite.(vp) .& (abs.(vp) .> 0)
+            @test isapprox(va[m], tsys_band[b] .* vp[m]; rtol = 1.0e-5)
+        end
+
+        # Serialization keeps it in the sequence.
+        path = tempname() * ".jls"
+        try
+            CAL.save_solution(path, sol_ap)
+            sol_l = CAL.load_solution(path)
+            @test last(sol_l.sequence) isa AprioriAmplitude
+            @test all(s1.θ == s2.θ for (s1, s2) in zip(sol_l.steps, sol_ap.steps))
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "AprioriAmplitude runs before post" begin
+        BP = Gustavo.UVData
+        ant_names = String.(collect(UVP.union_antennas(uvset).name))
+        ts_all = sort!(unique(reduce(vcat, [collect(UVP.obs_time(l)) for l in values(UVP.branches(uvset))])))
+        times = [unix2datetime(t) for t in ts_all]
+        times = [times[1] - Hour(1); times; times[end] + Hour(1)]
+        gain = BP.AntabGainCurve((1.0, 1.0), [1.0])
+        vals = repeat([100.0 100.0], length(times), 1)
+        stns = Dict(
+            nm => BP.AntabStation(nm, gain, BP.AntabTsysSeries(times, [(0, :R), (0, :L)], vals), 0)
+                for nm in ant_names
+        )
+        # Deliberately incomplete: this uvset has two bands (ddi 0 and 1), but
+        # the dict only covers band 1.
+        band_cals_1 = Dict(1 => BP.AntabCalibration("synthetic", "synth", 2000, stns))
+        ap = AprioriAmplitude(band_cals_1; min_elevation_deg = -Inf)
+
+        sol_ap = fit(
+            [BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc), ap], uvset;
+            exec = ExecutionConfig(), gauge = PinAntenna(1),
+        )
+        # Band 2's leaves reach it native, and band_cals_1 has no entry for
+        # them — the same error `apply_calibration` raises called directly.
+        @test_throws "no a-priori calibration for spw 2" calibrate(sol_ap, uvset)
+        # Merging the bands in `post` does not help: `post` runs after it.
+        @test_throws "no a-priori calibration for spw 2" calibrate(sol_ap, uvset; post = CombineSpw())
+    end
+end

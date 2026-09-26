@@ -1,0 +1,20 @@
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
+FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"
+Gustavo = "b6f820fd-87a9-4cf8-8bd4-0e8dc9bb4263"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+PolarizedTypes = "d3c5d4cd-a8ee-40d6-aac7-e34df5a20044"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+StableRNGs = "860ef19b-820b-49d6-a774-d7a799459cd3"
+StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Zarr = "0a941bbe-ad1d-11e8-39d9-ab76183a1d99"
+
+[sources]
+FITSFiles = {rev = "ptiede-uvfixes", url = "https://github.com/ptiede/FITSFiles.jl"}
+Gustavo = {path = "../.."}
+
+[compat]
+StableRNGs = "1"
+Zarr = "0.10"
