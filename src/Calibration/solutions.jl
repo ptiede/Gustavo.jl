@@ -14,6 +14,7 @@
 using Serialization: serialize, deserialize
 using Statistics: mean
 using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions
+using DimensionalData.Lookups: Sampled, Explicit, Intervals, Center
 using ..UVData: Frequency, Polarization, BaselineID, Ant, Feed
 
 """
@@ -428,9 +429,11 @@ For a single-component selection (`parameters(sol[:fringe, :phase, :mbd])`)
 the result is that component's θ leaf: a `DimArray` over the five axes
 `(param, feed, Frequency, Ti, Ant)` — the second is `Feed` when the component
 is fit per feed, else the tied `node` axis — with coordinates materialized
-from `sol`'s geometry: a `Frequency` segment's centre channel frequency (Hz),
-a `Ti` segment's mean epoch (seconds), feed/node ids, and antenna names (from
-`sol.info.ant_names` when present, else `1:nant`).
+from `sol`'s geometry: each `Frequency` and `Ti` segment is an interval from
+its lowest to its highest channel frequency (Hz) or sample epoch (seconds),
+labeled by its midpoint, so `Frequency(Contains(ν))` or `Ti(Contains(t))`
+selects the segment covering `ν` or `t`; then feed/node ids, and antenna names
+(from `sol.info.ant_names` when present, else `1:nant`).
 
 A wider selection returns the NamedTuple tree of those leaves, mirroring the
 model: `parameters(sol[:fringe, :phase])` the fringe step's phase components,
@@ -496,8 +499,8 @@ function _try_descend(tree, path::Tuple{Vararg{Symbol}})
 end
 
 # The DimensionalData dimension for one leaf axis, from its role and the
-# solution's geometry. A segment axis takes a representative coordinate per
-# segment (a frequency segment's centre, a time segment's mean epoch); the
+# solution's geometry. A segment axis spans each segment's extent, from its
+# lowest to its highest channel or sample, labeled by the midpoint; the
 # antenna axis takes station names when the solution carries them — for a
 # signature group's leaf, the names of just the group's `stations`; `:param`
 # and `:node` are positional id spaces with no physical coordinate.
@@ -508,13 +511,31 @@ function _ant_labels(sol::CalibrationSolution, n::Int)
     return an !== nothing && length(an) == n ? collect(an) : (1:n)
 end
 
+# A lookup over segments of the samples at `coords`, `groups` giving each
+# segment's sample indices: each segment is the interval from its lowest to its
+# highest sample, labeled by that interval's midpoint, so `Contains(x)` finds
+# the segment covering `x` and throws in a gap between segments.
+function _segment_lookup(coords, groups)
+    lo = [minimum(view(coords, g)) for g in groups]
+    hi = [maximum(view(coords, g)) for g in groups]
+    return Sampled(
+        (lo .+ hi) ./ 2;
+        span = Explicit(permutedims(hcat(lo, hi))), sampling = Intervals(Center()),
+    )
+end
+
+# The lookups of a plan's `n` frequency segments (over its channels) and time
+# segments (over its samples).
+_frequency_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape[3]) =
+    _segment_lookup(geom.channel_freqs, segment_groups(plan.fseg_id, n))
+_time_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape[4]) =
+    _segment_lookup(geom.times, segment_groups(plan.tseg_id, n))
+
 function _role_dim(role::Symbol, n::Int, sol::CalibrationSolution, plan::ComponentPlan; stations = nothing)
     if role === :Frequency
-        groups = segment_groups(plan.fseg_id, n)
-        return Frequency([mean(view(sol.geom.channel_freqs, g)) for g in groups])
+        return Frequency(_frequency_segment_lookup(plan, sol.geom, n))
     elseif role === :Ti
-        groups = segment_groups(plan.tseg_id, n)
-        return Ti([mean(view(sol.geom.times, g)) for g in groups])
+        return Ti(_time_segment_lookup(plan, sol.geom, n))
     elseif role === :Ant
         stations === nothing && return Ant(_ant_labels(sol, n))
         an = hasproperty(sol.info, :ant_names) ? sol.info.ant_names : nothing

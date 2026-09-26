@@ -99,6 +99,9 @@ end
 _station_pair_dim(stations) = StationPair(
     DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered()),
 )
+_station_dim(stations) = Ant(
+    DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered()),
+)
 
 _member_station_pairs(ms::XRadio.MeasurementSet) = [(String(a), String(b)) for (a, b) in XRadio.baselines(ms)]
 

@@ -559,14 +559,51 @@ end
 @testset "bandpass_track_report: counts and the unfitted observable" begin
     ph = Int8[FP._BP_TRACK_SOLVED FP._BP_TRACK_FLAT; FP._BP_TRACK_NODATA FP._BP_TRACK_DECLINED]
     phase_status = reshape(ph, 2, 2, 1)
-    rep = FP.bandpass_track_report(phase_status, nothing, [3])
+    rep = FP.bandpass_track_report(phase_status, nothing)
     @test (rep.n_solved, rep.n_flat, rep.n_nodata, rep.n_declined) == (1, 1, 1, 1)
-    @test rep.band_ids == [3]
+    @test !haskey(rep, :band_ids)
     @test rep.track_labels[FP._BP_TRACK_SOLVED + 1] == "solved"
     # An observable that was not fit is an EMPTY status, not a missing one: the
     # record is serialized with the solution and every field must carry a value.
     @test rep.amp_status isa AbstractArray && isempty(rep.amp_status)
     @test rep.phase_status === phase_status
+    # Plain arrays name their band slots alongside.
+    @test FP.bandpass_track_report(phase_status, nothing, [3]).band_ids == [3]
+end
+
+@testset "PerTrackSmoother seeds are labeled and read the sums by name" begin
+    rng = MersenneTwister(179)
+    stations = ["A1", "A2", "A3", "A4"]
+    pairs_ = [(stations[a], stations[b]) for a in 1:4 for b in (a + 1):4]
+    feeds = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    freqs = collect(2.3e11 .+ (0:11) .* 1.0e6)
+    ax = (FP._station_pair_dim(pairs_), FP.FeedPair(feeds), Frequency(freqs))
+    φ = 0.4 .* randn(rng, 4, 2, 12)
+    la = 0.1 .* randn(rng, 4, 2, 12)
+    rl = zeros(ComplexF32, ax)
+    wl = zeros(Float32, ax)
+    for (bi, (a, b)) in enumerate([(a, b) for a in 1:4 for b in (a + 1):4]), (p, (fa, fb)) in enumerate(feeds), c in 1:12
+        w = 1.0f0 + rand(rng, Float32)
+        wl[bi, p, c] = w
+        rl[bi, p, c] = w * exp(la[a, fa, c] + la[b, fb, c] + im * (φ[a, fa, c] - φ[b, fb, c]))
+    end
+    fsegs = [[c] for c in 1:12]
+    segs = dims(DimArray(freqs, Frequency(freqs)), Frequency)
+
+    phase, pprec = @inferred FP._seed_phase_tracks(rl, wl, stations, fsegs, segs; gauge = PinAntenna(1))
+    amp, aprec = @inferred FP._seed_amp_tracks(rl, wl, stations, fsegs, segs)
+    for A in (phase, pprec, amp, aprec)
+        @test eltype(A) == Float32
+        @test lookup(A, FP.Ant) == stations
+        @test lookup(A, Frequency) == freqs
+    end
+    @test maximum(abs, (phase .- (φ .- φ[1:1, :, :]))[FP.Feed(1)]) < 1.0e-4
+    @test maximum(abs, amp .- la) < 1.0e-4
+
+    # Storage order is not an input: the same sums stored permuted seed the same tracks.
+    rp, wp = permutedims(rl, (Frequency, FP.FeedPair, FP.StationPair)), permutedims(wl, (Frequency, FP.FeedPair, FP.StationPair))
+    @test isequal(FP._seed_phase_tracks(rp, wp, stations, fsegs, segs; gauge = PinAntenna(1)), (phase, pprec))
+    @test isequal(FP._seed_amp_tracks(rp, wp, stations, fsegs, segs), (amp, aprec))
 end
 
 @testset "Bandpass: the solve publishes its per-track record" begin
@@ -587,10 +624,10 @@ end
         gauge = PinAntenna(1),
     )
     info = stage_info(sol, :bandpass)
-    # (Ant, Feed, band, time segment) — a time-stable bandpass is one segment.
+    # (Ant, Feed, spw, time segment) — a time-stable bandpass is one segment.
     @test size(info.phase_status) == (nant, 2, nspw, 1)
     @test size(info.amp_status) == (nant, 2, nspw, 1)
-    @test info.band_ids == collect(1:nspw)
+    @test dims(info.phase_status) == dims(info.amp_status)
     total = info.n_solved + info.n_flat + info.n_declined + info.n_nodata
     @test total == 2 * nant * 2 * nspw
     # High-SNR synthetic data with real injected structure: the tracks are
@@ -673,6 +710,20 @@ end
         s_glob = scan_spread(fit(Bandpass(; model = model(GlobalTime())), broken; gauge = PinAntenna(1)))
         s_brk = scan_spread(fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1)))
         @test s_brk < 0.5 * s_glob
+    end
+
+    @testset "the per-track record is labeled like θ" begin
+        sol = fit(Bandpass(; model = model(seg), smoother = FP.PerTrackSmoother()), broken; gauge = PinAntenna(1))
+        st = stage_info(sol, :bandpass).phase_status
+        leaf = CAL.parameters(sol[:bandpass, :phase, :bandpass])
+        @test lookup(st, Ti) == lookup(leaf, Ti)
+        @test DimensionalData.intervalbounds(st, Ti) == DimensionalData.intervalbounds(leaf, Ti)
+        @test length(lookup(st, Ti)) == 2
+        @test lookup(st, Ant) == geom.stations
+        @test only(DimensionalData.intervalbounds(st, Frequency)) == extrema(geom.channel_freqs)
+        (_, first_end), (second_start, _) = DimensionalData.intervalbounds(st, Ti)
+        @test st[Ti(Contains(second_start))] == st[Ti(2)]
+        @test_throws "No interval contains" st[Ti(Contains((first_end + second_start) / 2))]
     end
 
     @testset "G3: the band mean is time-invariant across the break" begin

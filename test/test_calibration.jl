@@ -541,12 +541,16 @@ end
     # The same lookup by step POSITION (not name) reaches the same leaf.
     @test CAL.parameters(sol[1, :phase, :atmos]) == a
 
-    # Segment axes carry a representative physical coordinate per segment: a
-    # frequency segment's centre, a time segment's mean epoch.
-    @test lookup(a, UVD.Frequency) == [mean(freqs)]              # GlobalFrequency: one centre
-    @test lookup(a, Ti) == [mean(times[1:2]), mean(times[3:4])]  # PerScan: per-scan mean epoch
+    # Segment axes span each segment's channels or samples, labeled by the
+    # midpoint, so `Contains` finds the segment covering a coordinate.
+    @test lookup(a, UVD.Frequency) == [mean(freqs)]              # GlobalFrequency: one segment
+    @test DimensionalData.intervalbounds(a, UVD.Frequency) == [(1.0e9, 4.0e9)]
+    @test lookup(a, Ti) == [0.5, 2.5]                            # PerScan: one per scan
+    @test DimensionalData.intervalbounds(a, Ti) == [(0.0, 1.0), (2.0, 3.0)]
+    @test a[Ti(Contains(2.2)), UVD.Ant(At("PT")), UVD.Feed(1)] == a[Ti(2), UVD.Ant(1), UVD.Feed(1)]
+    @test_throws "No interval contains" a[Ti(Contains(1.5))]     # between scans
     @test lookup(CAL.parameters(sol[:solution, :phase, :bp]), UVD.Frequency) ==
-        [mean(freqs[1:2]), mean(freqs[3:4])]                     # ChannelBlocks(2): block centres
+        [mean(freqs[1:2]), mean(freqs[3:4])]                     # ChannelBlocks(2): block midpoints
 
     # Antennas take the solution's station names; feed is 1:2.
     @test lookup(a, UVD.Ant) == ants
