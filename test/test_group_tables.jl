@@ -58,8 +58,8 @@ end
     group = first(values(DimensionalData.groupby(ps, XRadio.ByScan())))
     exec = SerialScheduler()
     s = FP._ap_sums(group, geom; executor = exec)
-    @test lookup(s.rbar, FP.StationPair) == [(geom.stations[a], geom.stations[b]) for (a, b) in s.bl_pairs]
-    @test issorted(s.bl_pairs)
+    slot = Dict(n => i for (i, n) in pairs(geom.stations))
+    @test issorted(lookup(s.rbar, FP.StationPair); by = ((a, b),) -> (slot[a], slot[b]))
     @test lookup(s.rbar, FP.FeedPair) == [(1, 1), (1, 2), (2, 1), (2, 2)]
     @test lookup(s.rbar, Ti) == geom.times[s.ti]
     @test eltype(s.rbar) == ComplexF32 && eltype(s.wbar) == Float32

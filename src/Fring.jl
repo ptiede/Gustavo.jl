@@ -11,7 +11,7 @@ module Fring
 
 using OhMyThreads: tforeach, tmap, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..UVData
-using ..UVData: Frequency, BaselineID, Feed, Polarization, Scan, StationPair, FeedPair
+using ..UVData: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, StationPair, FeedPair
 using ..Calibration
 using ..Calibration: _epoch_atol
 import XRadio

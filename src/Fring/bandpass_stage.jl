@@ -14,8 +14,8 @@
 # update. Both carry one
 # [`AbstractShapeSpec`](@ref Gustavo.Fring.AbstractShapeSpec) per observable.
 #
-# The graph/solve helpers (`_ObsRow`, `_solve_observable`, `_track_noise2`,
-# `_node`) live in stationize.jl/adhoc.jl; the shape specs live in shapes.jl.
+# The graph/solve helpers (`_solve_observable!`, `_cell_noise2`, `_node`) live
+# in stationize.jl/adhoc.jl; the shape specs live in shapes.jl.
 
 # ── Amplitude closure incidence ───────────────────────────────────────────────
 #
@@ -242,27 +242,34 @@ function _seed_phase_tracks(
         rbar_bp, wbar_bp, bl_pairs, feeds, nant, segs;
         gauge::AbstractGauge = PinAntenna(1), snr_floor::Real = 1.0,
     )
-    nbl, npol, nchan = size(rbar_bp)
-    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
+    noise2 = _cell_noise2(rbar_bp, wbar_bp, Frequency)
+    T = real(eltype(rbar_bp))
+    cells = (DimensionalData.dims(rbar_bp, StationPair), DimensionalData.dims(rbar_bp, FeedPair))
+    nodes = DimArray([((a, fa), (b, fb)) for (a, b) in bl_pairs, (fa, fb) in feeds], cells)
+    val = zeros(T, cells)
+    wt = zeros(T, cells)
+    mask = fill!(similar(nodes, Bool), false)
     nseg = length(segs)
     phase = fill(NaN, nant, 2, nseg)
     prec = zeros(nant, 2, nseg)
+    solved = falses(nant, 2)
     for (fs, chans) in enumerate(segs)
-        rows = _ObsRow{real(eltype(rbar_bp))}[]
+        fill!(mask, false)
         for bi in axes(rbar_bp, StationPair), p in axes(rbar_bp, FeedPair)
-            a, b = bl_pairs[bi]
+            c = (StationPair(bi), FeedPair(p))
+            (a, fa), (b, fb) = nodes[c...]
             a == b && continue
             r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
             (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            snr2 = _segment_snr2(r, w, w2, noise2[bi, p])
+            snr2 = _segment_snr2(r, w, w2, noise2[c...])
             snr2 >= snr_floor^2 || continue
-            fa, fb = feeds[p]
-            push!(rows, eltype(rows)(a, b, fa, fb, angle(r), snr2))
+            val[c...] = angle(r)
+            wt[c...] = snr2
+            mask[c...] = true
             prec[a, fa, fs] += snr2
             prec[b, fb, fs] += snr2
         end
-        ph, _, _, _ = _solve_observable(rows, nant, gauge; rewrap = 0)
-        phase[:, :, fs] .= ph
+        _solve_observable!(view(phase, :, :, fs), solved, val, wt, mask, nodes, gauge; rewrap = 0)
     end
     return phase, prec
 end
@@ -419,8 +426,7 @@ function _seed_amp_tracks(
         rbar_bp, wbar_bp, bl_pairs, feeds, nant, fsegs;
         snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
     )
-    nbl, npol, nchan = size(rbar_bp)
-    noise2 = [_track_noise2(rbar_bp, wbar_bp, bi, p) for bi in axes(rbar_bp, 1), p in axes(rbar_bp, 2)]
+    noise2 = _cell_noise2(rbar_bp, wbar_bp, Frequency)
     nnodes = 2 * nant
     nfseg = length(fsegs)
     la = fill(NaN, nant, 2, nfseg)
@@ -432,7 +438,7 @@ function _seed_amp_tracks(
             a == b && continue
             r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
             (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            snr2 = _segment_snr2(r, w, w2, noise2[bi, p])
+            snr2 = _segment_snr2(r, w, w2, noise2[StationPair(bi), FeedPair(p)])
             snr2 >= snr_floor^2 || continue
             amp = abs(r / w); amp > 0 || continue
             fa, fb = feeds[p]
@@ -1000,7 +1006,7 @@ end
     _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, fseg, nfsmax, gauge) -> (nodes, pins)
 
 One reference node per connected component of the joint-bandpass graph — mirrors
-`_solve_observable`'s pin selection in `stationize.jl`. The pinned node's phase is
+`_solve_observable!`'s pin selection in `stationize.jl`. The pinned node's phase is
 held at zero in the one (time segment, frequency segment) slot it names; its
 amplitude is solved like any other node's.
 

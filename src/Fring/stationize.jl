@@ -209,87 +209,47 @@ end
 # Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 
-# One observation row contributing to a node system. `na`/`nb` are the parameter
-# nodes the row's two stations contribute to — `_feed_node(tying, feed)` of the
-# correlation product's feeds, so they coincide with the feed indices only under
-# `PerFeed`. A row with `na != nb` is cross-hand: it is the only kind that ties
-# the two feed blocks together. `src` indexes the row's free source term in a
-# system that carries one per (baseline, product) — the adhoc solve, where the
-# observed source visibility phase is a per-scan constant absorbed alongside the
-# station phases (see `solve_adhoc_phasing`). It is 0 in systems with no such term.
-# `T` is the solve's working type: a system is solved in its rows' value type.
-struct _ObsRow{T <: AbstractFloat}
-    a::Int
-    b::Int
-    na::Int
-    nb::Int
-    val::T
-    w::T
-    src::Int
-end
-function _ObsRow(a, b, na, nb, val::Real, w::Real, src = 0)
-    v, wv = promote(float(val), float(w))
-    return _ObsRow{typeof(v)}(a, b, na, nb, v, wv, src)
-end
-_ObsRow{T}(a, b, na, nb, val, w) where {T} = _ObsRow{T}(a, b, na, nb, val, w, 0)
+# The two ends of a node-system edge on the (station, feed) graph. A cell of a
+# `(StationPair, FeedPair)` system observes `φ(a, na) − φ(b, nb)`, where
+# `nodes[cell] = ((a, na), (b, nb))` gives each end's station index and phase
+# node — `_feed_node(tying, feed)` of the product's feeds, so the node equals the
+# feed only under `PerFeed`. An edge with `na != nb` is cross-hand: the only kind
+# that ties the two feed blocks together.
+_edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nant))
 
-_rowtype(::AbstractVector{_ObsRow{T}}) where {T} = T
-
-# Robust wrapper around `_solve_observable`: IRLS over `opts.loss`. Each pass
-# rescales every row's noise-model weight by the loss's derivative at that row's
-# normalized residual and re-solves; no scale is estimated from the residuals.
-#
-# The phase system's own re-wrap iteration lives inside `_solve_observable`, so
-# the nesting is IRLS-outer / re-wrap-inner: every IRLS pass sees a fully
-# converged 2π branch assignment. The other order would let the loss downweight
-# rows whose residual is still one wrap away from its final value, which reads
-# as a gross outlier and suppresses a perfectly good row.
-function _solve_observable_robust(
-        rows::AbstractVector{<:_ObsRow}, nant::Integer, gauge::AbstractGauge, opts::Stationization;
-        rewrap::Integer,
-    )
-    vals, cov, ncomp, resid = _solve_observable(rows, nant, gauge; rewrap = rewrap)
-    (opts.loss isa LeastSquares || isempty(rows)) && return vals, cov, ncomp
-    w0 = [r.w for r in rows]
-    w = copy(w0)
-    for _ in 1:max(opts.irls_iters, 0)
-        _irls_weights!(w, w0, opts.loss, opts.loss_scale, resid) || break
-        vals, cov, ncomp, resid =
-            _solve_observable(rows, nant, gauge; rewrap = rewrap, weights = w)
-    end
-    return vals, cov, ncomp
-end
-
-# Solve one observable's WLS system on the (station, feed) graph. Returns
-# (values::(nant,2), covered::(nant,2), ncomp, resid). `weights` overrides
-# the rows' own noise-model weights (the IRLS driver's reweighted vector);
-# `resid` comes back aligned with `rows`, already 2π-branch-corrected for a
-# re-wrapped system, so the driver can normalize it without redoing the unwrap.
-function _solve_observable(
-        rows::AbstractVector{<:_ObsRow}, nant::Integer, gauge::AbstractGauge;
+# Solve one observable's WLS system on the (station, feed) graph into `vals`
+# and `cov`, each `(nant, 2)`: the node values, `NaN` where unsolved, and which
+# nodes were solved. `val`, `w`, `mask` and `nodes` share their `(StationPair,
+# FeedPair)` axes; each cell with `mask` set is one observation `val` of its edge
+# (see `_edge`) with weight `w`. The system is solved in `val`'s element type.
+# Returns the number of connected components.
+function _solve_observable!(
+        vals, cov, val, w, mask, nodes, gauge::AbstractGauge;
         rewrap::Integer,
         seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
-        weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
     )
-    T = _rowtype(rows)
-    vals = fill(T(NaN), nant, 2)
-    cov = falses(nant, 2)
+    T = eltype(val)
+    nant = size(vals, 1)
+    size(vals) == size(cov) == (nant, 2) ||
+        throw(DimensionMismatch("vals and cov must be (nant, 2); got $(size(vals)) and $(size(cov))"))
+    fill!(vals, NaN)
+    fill!(cov, false)
     nnodes = 2 * nant
-    isempty(rows) && return vals, cov, 0, T[]
+    cells = [I for I in eachindex(val, w, mask, nodes) if mask[I]]
+    isempty(cells) && return 0
 
-    edges = [(_node(r.a, r.na, nant), _node(r.b, r.nb, nant)) for r in rows]
+    edges = [_edge(nodes[I], nant) for I in cells]
+    b = T[val[I] for I in cells]
+    wt = T[w[I] for I in cells]
     compid, ncomp, touched = connected_components(nnodes, edges)
-
-    nrow = length(rows)
 
     # Gauge: `gauge` supplies one constraint row per component. `anchors` names a
     # real node per component as well — phase unwrapping propagates outward from
     # an actual node, which a summed constraint does not provide.
     nodew = zeros(T, nnodes)
-    for (i, r) in enumerate(rows)
-        wi = weights === nothing ? r.w : weights[i]
-        nodew[_node(r.a, r.na, nant)] += wi
-        nodew[_node(r.b, r.nb, nant)] += wi
+    for ((u, v), wi) in zip(edges, wt)
+        nodew[u] += wi
+        nodew[v] += wi
     end
     # Inverse of `_node`: the feed-1 block is 1:nant, feed-2 is nant+1:2nant.
     station_of(n) = (n - 1) % nant + 1
@@ -304,23 +264,19 @@ function _solve_observable(
     # Components hold only touched nodes, so these never collide with a gauge row.
     idle = [n for n in eachindex(touched) if !touched[n]]
 
-    A = zeros(T, nrow, nnodes)
-    b = zeros(T, nrow)
-    w = zeros(T, nrow)
-    for (i, r) in enumerate(rows)
-        A[i, _node(r.a, r.na, nant)] += one(T)
-        A[i, _node(r.b, r.nb, nant)] -= one(T)
-        b[i] = r.val
-        w[i] = weights === nothing ? r.w : weights[i]
+    A = zeros(T, length(edges), nnodes)
+    for (i, (u, v)) in enumerate(edges)
+        A[i, u] += one(T)
+        A[i, v] -= one(T)
     end
-    C = zeros(eltype(A), ncomp + length(idle), nnodes)
+    C = zeros(T, ncomp + length(idle), nnodes)
     for (j, cn) in enumerate(comps)
         gauge_row!(view(C, j, :), gauge, cn, nodew, station_of, feed_of)
     end
     for (k, n) in enumerate(idle)
-        C[ncomp + k, n] = one(eltype(C))
+        C[ncomp + k, n] = one(T)
     end
-    dgauge = zeros(eltype(C), size(C, 1))
+    dgauge = zeros(T, size(C, 1))
 
     # Phase re-wrap: unwrap observations toward a model and re-solve, so
     # station-difference phases exceeding ±π are handled. The first model comes
@@ -331,7 +287,7 @@ function _solve_observable(
     # the raw wrapped observations, which can lock onto the wrong 2π branch. For
     # delay/rate (`rewrap == 0`, no wrapping) we solve the raw system directly.
     if rewrap > 0
-        xseed = _spanning_tree_seed(rows, nant, anchors)
+        xseed = _spanning_tree_seed(edges, b, wt, nant, anchors)
         # Temporal warm-start: where a `seed_phase` (e.g. the previous AP's solved
         # node phases) is available, override the per-solve spanning-tree seed with
         # it. The model is used only to pick each observation's 2π branch, and edge
@@ -350,16 +306,14 @@ function _solve_observable(
         model = A * xseed
         bw = similar(b)
         @. bw = b + 2π * round((model - b) / (2π))
-        x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
+        x = weighted_constrained_least_squares(A, bw, wt, C, dgauge)
         for _ in 1:rewrap
             model = A * x
             @. bw = b + 2π * round((model - b) / (2π))
-            x = weighted_constrained_least_squares(A, bw, w, C, dgauge)
+            x = weighted_constrained_least_squares(A, bw, wt, C, dgauge)
         end
-        resid = bw .- A * x
     else
-        x = weighted_constrained_least_squares(A, b, w, C, dgauge)
-        resid = b .- A * x
+        x = weighted_constrained_least_squares(A, b, wt, C, dgauge)
     end
 
     for ant in axes(vals, 1), feed in axes(vals, 2)
@@ -369,31 +323,27 @@ function _solve_observable(
             cov[ant, feed] = true
         end
     end
-    return vals, cov, ncomp, resid
+    return ncomp
 end
 
 # Maximum-weight spanning-tree phase seed. Propagate wrapped edge phases
-# from each pin over the parallel-hand (same-node-index, `na == nb`) edges of the
+# from each pin over the parallel-hand (same-feed-node) edges of the
 # (station, feed) graph, preferring high-weight edges, to build a globally
-# consistent node-phase estimate. Cross-hand rows are excluded from the tree:
+# consistent node-phase estimate. Cross-hand edges are excluded from the tree:
 # they carry the inter-feed offset, which the tree has no way to place, so their
 # nodes are reached through the parallel-hand subgraph (or seeded 0 and resolved
 # by the WLS). The estimate is used only to unwrap the observations for the first
 # constrained solve, so any edge it cannot place stays 0 — the re-wrap iterations
-# refine from there.
-function _spanning_tree_seed(rows::AbstractVector{<:_ObsRow}, nant::Integer, anchors::AbstractVector{<:Integer})
-    T = _rowtype(rows)
+# refine from there. Edge `i` observes `φ[edges[i][1]] − φ[edges[i][2]] = val[i]`.
+function _spanning_tree_seed(edges, val::AbstractVector{T}, w, nant::Integer, anchors) where {T}
     nnodes = 2 * nant
     x = zeros(T, nnodes)
     # Adjacency over parallel-hand edges: neighbor, phase to ADD (φ_v = φ_u + add), weight.
     adj = [Vector{Tuple{Int, T, T}}() for _ in 1:nnodes]
-    for r in rows
-        r.na == r.nb || continue
-        na = _node(r.a, r.na, nant)
-        nb = _node(r.b, r.nb, nant)
-        # row: φ_na − φ_nb = r.val ⇒ from na, φ_nb = φ_na − r.val; from nb, φ_na = φ_nb + r.val.
-        push!(adj[na], (nb, -r.val, r.w))
-        push!(adj[nb], (na, r.val, r.w))
+    for ((u, v), y, wi) in zip(edges, val, w)
+        (u - 1) ÷ nant == (v - 1) ÷ nant || continue
+        push!(adj[u], (v, -y, wi))
+        push!(adj[v], (u, y, wi))
     end
     # Visit strongest edges first so the tree follows high-SNR connections.
     for n in eachindex(adj)
@@ -828,9 +778,9 @@ function _covered_stations(rsta_a, rsta_b, rscan, raccept)
 end
 
 # Constrained WLS over a tagged node graph, the column-space generalization of
-# `_solve_observable`. `node_feed`/`node_station`/`node_scan` tag each local node
+# `_solve_observable!`. `node_feed`/`node_station`/`node_scan` tag each local node
 # (feed 0 = shared by both feeds; scan 0 = global column) so the gauge reproduces
-# `_solve_observable`'s tie-breaks in the per-scan case. Rows may touch more than
+# `_solve_observable!`'s tie-breaks in the per-scan case. Rows may touch more than
 # one column per side, such as a feed-common column plus a global feed-offset
 # column. After the per-component gauge rows, any residual gauge freedom — the
 # per-scan absolute level once scans are globally coupled — is removed by a

@@ -422,7 +422,7 @@ _group_setup(::AdhocPhase, ctx::SolveContext) = Fring._adhoc_plan(ctx.model, ctx
 
 function _solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, group)
     Fring.adhoc_scan!(
-        ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
+        ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge;
         executor = inner_executor(ctx.exec),
     )
     return nothing

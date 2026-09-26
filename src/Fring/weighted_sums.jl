@@ -48,13 +48,12 @@ end
 # The group's inverse-variance sums per (station pair, feed pair, AP) over every
 # channel of every member. Members are added in frequency order, so the float
 # association is fixed by the data alone. Station pairs follow `geom`'s station
-# numbering; `bl_pairs` gives them as station indices, `ti` the APs as indices
-# into `geom.times`.
+# numbering; `ti` gives the APs as indices into `geom.times`.
 function _ap_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
     isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
     parts = tmap(ms -> _member_ap_sums(ms, geom), _members_by_frequency(group); scheduler = executor)
 
-    stations, bl_pairs = _station_pairs(reduce(vcat, (p.stations for p in parts)), geom)
+    stations, _ = _station_pairs(reduce(vcat, (p.stations for p in parts)), geom)
     feeds = sort!(unique!(reduce(vcat, (vec(p.feeds) for p in parts))))
     ti = sort!(unique!(reduce(vcat, (p.ti for p in parts))))
 
@@ -64,7 +63,7 @@ function _ap_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
     for p in parts
         _add_by_label!(rbar, wbar, p.wv, p.ws, p.stations, p.feeds, Ti(At(geom.times[p.ti])))
     end
-    return (; rbar, wbar, bl_pairs, ti)
+    return (; rbar, wbar, ti)
 end
 
 _members_by_frequency(group) = sort!(collect(values(group)); by = ms -> minimum(XRadio.frequencies(ms)))

@@ -393,16 +393,16 @@ end
 end
 
 """
-    kalman_ou_mv_filter(rows, ys, rs, times; τ, σ2) -> (xf, Pf, xp, Pp, avecs, loglik)
+    kalman_ou_mv_filter(pairs, ys, rs, times; τ, σ2) -> (xf, Pf, xp, Pp, avecs, loglik)
 
-Forward multivariate OU Kalman filter over closure rows. At step `k`, row `j`
-observes a station-phase DIFFERENCE,
+Forward multivariate OU Kalman filter over closure observations. At step `k`,
+observation `j` is a station-phase DIFFERENCE,
 
     ys[k][j] = x[a] − x[b] + ε,   ε ~ N(0, rs[k][j])
 
-with `(a, b)` read from `rows[k][j]` — an `_ObsRow`, whose `val`/`w`/feed
-fields are ignored here: the caller passes the processed observation and its
-variance in `ys`/`rs`.
+with `(a, b) = pairs[j]`, the same state pair at every step; `ys[k]` and
+`rs[k]` share `pairs`' indices. An observation whose value is not finite or
+whose variance is not positive is skipped, so a step observes any subset.
 
 Rows are applied as sequential scalar updates (diagonal `R`, so this is exact and
 avoids an `m×m` inverse). A row has two nonzero design entries whatever `n` is, so
@@ -418,9 +418,9 @@ and the joint log marginal likelihood — so step `k` is `view(xf, :, k)` /
 `view(Pf, :, :, k)`. The element type is promoted from `ys`, `rs`, `τ`, `σ2` and
 `times`.
 """
-function kalman_ou_mv_filter(rows, ys, rs, times; τ::AbstractVector, σ2::AbstractVector)
+function kalman_ou_mv_filter(pairs, ys, rs, times; τ::AbstractVector, σ2::AbstractVector)
     # Steps and state dimensions are addressed as 1:nsteps / 1:n throughout.
-    Base.require_one_based_indexing(τ, σ2, times, rows, ys, rs)
+    Base.require_one_based_indexing(τ, σ2, times, ys, rs)
     T = float(
         promote_type(
             eltype(eltype(ys)), eltype(eltype(rs)), eltype(τ), eltype(σ2), eltype(times),
@@ -466,15 +466,13 @@ function kalman_ou_mv_filter(rows, ys, rs, times; τ::AbstractVector, σ2::Abstr
         copyto!(view(xp, :, k), x)
         copyto!(view(Pp, :, :, k), P)
 
-        rowsk = rows[k]
         yk = ys[k]
         rk = rs[k]
-        for j in eachindex(rowsk, yk, rk)
+        for j in eachindex(pairs, yk, rk)
             yj = yk[j]
             rj = rk[j]
             (isfinite(yj) && isfinite(rj) && rj > 0) || continue
-            row = rowsk[j]
-            ia, ib = row.a, row.b
+            ia, ib = pairs[j]
             (1 <= ia <= n && 1 <= ib <= n) || throw(
                 ArgumentError(
                     "observation row references states $ia/$ib outside the state 1:$n",
