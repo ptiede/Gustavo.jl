@@ -371,14 +371,14 @@ function _group_setup(::Bandpass, ctx::SolveContext)
     # pair and feed pair of the set.
     members = [ms for group in values(ctx.groups) for ms in values(group)]
     cross = [p for ms in members for p in Fring._member_station_pairs(ms) if p[1] != p[2]]
-    station_pairs, bl_pairs = Fring._station_pairs(cross, ctx.geom)
+    station_pairs = Fring._station_pairs(cross, ctx.geom)
     feeds = sort!(unique!([f for ms in members for f in feed_pairs(ms)]))
     # `ctx.layout` holds only this step's own components. The two observables are
     # located by NAME through the layout's component tree: the flat `plans` list
     # carries one entry per station-signature group, so its positions stop naming
     # them as soon as a model differs across stations.
     return (;
-        station_pairs, feeds, bl_pairs, nant = ctx.nant, layout, geom = ctx.geom,
+        station_pairs, feeds, layout, geom = ctx.geom,
         bp_path = Fring._bandpass_path(layout.plantree, :phase),
         amp_path = Fring._bandpass_path(layout.plantree, :logamp),
     )

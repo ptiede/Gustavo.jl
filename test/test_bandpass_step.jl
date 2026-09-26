@@ -567,8 +567,9 @@ end
     # record is serialized with the solution and every field must carry a value.
     @test rep.amp_status isa AbstractArray && isempty(rep.amp_status)
     @test rep.phase_status === phase_status
-    # Plain arrays name their band slots alongside.
-    @test FP.bandpass_track_report(phase_status, nothing, [3]).band_ids == [3]
+    # Per-block arrays are counted together.
+    blocks = FP.bandpass_track_report((g1 = phase_status, g2 = phase_status), nothing)
+    @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata, blocks.n_declined) == (2, 2, 2, 2)
 end
 
 @testset "PerTrackSmoother seeds are labeled and read the sums by name" begin
@@ -724,6 +725,31 @@ end
         (_, first_end), (second_start, _) = DimensionalData.intervalbounds(st, Ti)
         @test st[Ti(Contains(second_start))] == st[Ti(2)]
         @test_throws "No interval contains" st[Ti(Contains((first_end + second_start) / 2))]
+    end
+
+    @testset "the joint record is labeled like θ, one array per block" begin
+        # The first station breaks at the boundary and the rest hold one gain
+        # over the track, so the model compiles two station blocks.
+        st1 = Symbol(first(geom.stations))
+        het = GainModel(;
+            phase = (; bandpass = bp(GlobalTime())), logamp = (; bandpass = bp(GlobalTime())),
+            stations = NamedTuple{(st1,)}(((; phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(seg))),)),
+        )
+        sol = fit(Bandpass(; model = het, smoother = FP.JointSmoother()), broken; gauge = PinAntenna(1))
+        info = stage_info(sol, :bandpass)
+        for obs in (:phase, :logamp)
+            leaves = CAL.parameters(sol[:bandpass, obs, :bandpass])
+            st = getproperty(info, obs === :phase ? :phase_status : :amp_status)
+            @test keys(st) == keys(leaves) == (:g1, :g2)
+            for k in keys(st)
+                @test collect(lookup(st[k], Ant)) == collect(lookup(leaves[k], Ant))
+                @test lookup(st[k], Ti) == lookup(leaves[k], Ti)
+                @test DimensionalData.intervalbounds(st[k], Ti) == DimensionalData.intervalbounds(leaves[k], Ti)
+            end
+            @test [size(st[k], Ti) for k in keys(st)] == [2, 1]
+        end
+        @test info.n_nodata + info.n_solved + info.n_flat + info.n_declined == 2 * 2 * (2 + nant - 1)
+        @test !haskey(info, :n_na)
     end
 
     @testset "G3: the band mean is time-invariant across the break" begin

@@ -53,7 +53,7 @@ function _ap_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
     isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
     parts = tmap(ms -> _member_ap_sums(ms, geom), _members_by_frequency(group); scheduler = executor)
 
-    stations, _ = _station_pairs(reduce(vcat, (p.stations for p in parts)), geom)
+    stations = _station_pairs(reduce(vcat, (p.stations for p in parts)), geom)
     feeds = sort!(unique!(reduce(vcat, (vec(p.feeds) for p in parts))))
     ti = sort!(unique!(reduce(vcat, (p.ti for p in parts))))
 
@@ -75,25 +75,26 @@ function _member_ap_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
 end
 
 """
-    _station_pairs(pairs, geom::DataGeometry) -> (stations, bl_pairs)
+    _station_pairs(pairs, geom::DataGeometry) -> Vector
 
 The distinct station pairs among `pairs` (antenna-name tuples), ordered by
-`geom`'s station numbering, and the same pairs as station indices. Refuses a
-pair stored in both orders, since the two would conjugate each other.
+`geom`'s station numbering. Refuses a pair stored in both orders, since the two
+would conjugate each other.
 """
 function _station_pairs(pairs, geom::DataGeometry)
     slot = Dict(n => i for (i, n) in Base.pairs(geom.stations))
     station(n) = get(slot, n) do
         throw(ArgumentError("baseline antenna `$n` is not among the geometry's stations, " * join(geom.stations, ", ")))
     end
-    stations = sort!(unique(pairs); by = ((a, b),) -> (station(a), station(b)))
+    order = Dict((a, b) => (station(a), station(b)) for (a, b) in pairs)
+    stations = sort!(collect(keys(order)); by = p -> order[p])
     stored = Set(stations)
     for (a, b) in stations
         a != b && (b, a) in stored && throw(
             ArgumentError("stations $a and $b are stored in both orders"),
         )
     end
-    return stations, [(station(a), station(b)) for (a, b) in stations]
+    return stations
 end
 
 _station_pair_dim(stations) = StationPair(

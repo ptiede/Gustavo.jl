@@ -145,7 +145,7 @@ end
     groups = collect(values(DimensionalData.groupby(ps, XRadio.ByScan())))
     members = [ms for g in groups for ms in values(g)]
     cross = [p for ms in members for p in FP._member_station_pairs(ms) if p[1] != p[2]]
-    stations, _ = FP._station_pairs(cross, geom)
+    stations = FP._station_pairs(cross, geom)
     feeds = sort!(unique!([f for ms in members for f in feed_pairs(ms)]))
     exec = SerialScheduler()
 

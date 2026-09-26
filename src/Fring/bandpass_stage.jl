@@ -84,11 +84,10 @@ segmentation whose segments each span several scans, solved one segment at a tim
 per-scan `(; rl, wl, ti, source)` list in group-index order: `rl` and `wl` are
 `accumulate_bandpass`'s sums, `ti` the scan's first sample on the
 solve's time axis (hence which time segment it falls in). `setup` is
-`(; station_pairs, feeds, bl_pairs, nant, layout, geom, bp_path, amp_path)`,
-built once per solve: `station_pairs` and `feeds` label the sums' `StationPair`
-and `FeedPair` axes, `geom` is the solve's `DataGeometry`, whose `stations` are
-θ's stations, and `bl_pairs` gives each station pair as positions in
-`geom.stations`. Reach each observable's parameters through
+`(; station_pairs, feeds, layout, geom, bp_path, amp_path)`, built once per
+solve: `station_pairs` and `feeds` label the sums' `StationPair` and `FeedPair`
+axes, and `geom` is the solve's `DataGeometry`, whose `stations` are θ's
+stations. Reach each observable's parameters through
 [`bandpass_blocks`](@ref)`(setup, θ, :phase)` / `(…, :logamp)` rather than the
 paths directly. `report` is published on the step's solution record and
 should say which tracks were measured (see [`bandpass_track_report`](@ref));
@@ -473,12 +472,8 @@ const _BP_TRACK_NODATA = Int8(0)      # no usable segment; left at unit gain
 const _BP_TRACK_SOLVED = Int8(1)      # fit, with frequency structure
 const _BP_TRACK_FLAT = Int8(2)        # fit, but constant to within `_BP_FLAT_SPAN`
 const _BP_TRACK_DECLINED = Int8(3)    # phase branch undetermined; not fit
-# A (station, time segment) cell the report's rectangular shape has but this
-# station's own segmentation does not — the station carries no parameter there.
-# Distinct from `_BP_TRACK_NODATA`, which is a cell that exists and went unfit.
-const _BP_TRACK_NA = Int8(4)
 
-const _BP_TRACK_LABELS = ("nodata", "solved", "flat", "declined", "na")
+const _BP_TRACK_LABELS = ("nodata", "solved", "flat", "declined")
 
 # A fitted track this flat carries no shape: reported as `_BP_TRACK_FLAT` rather
 # than silently passed off as a measured response. In radians for a phase track and
@@ -619,38 +614,48 @@ function _track_segments(plan, geom::DataGeometry)
 end
 
 # One observable's per-track outcome array over `(Ant, Feed, Frequency, Ti)`:
-# θ's stations, the two feeds, each spectral window of `spw` over the extent of
+# `stations`, the two feeds, each spectral window of `spw` over the extent of
 # its channels, and each of `plan`'s `nts` time segments over the extent of its
 # samples.
-function _track_status_array(geom::DataGeometry, plan, spw, nts::Integer)
+function _track_status_array(stations, geom::DataGeometry, plan, spw, nts::Integer)
     bands = _segment_lookup(geom.channel_freqs, [findall(==(s), geom.spw_of_chan) for s in sort(unique(spw))])
-    ax = (_station_dim(geom.stations), Feed(1:2), Frequency(bands), Ti(_time_segment_lookup(plan, geom, nts)))
+    ax = (_station_dim(stations), Feed(1:2), Frequency(bands), Ti(_time_segment_lookup(plan, geom, nts)))
     return fill!(zeros(Int8, ax), _BP_TRACK_NODATA)
 end
 
+# A station block's outcome array: its own stations and time segments.
+function _block_status_array(block, geom::DataGeometry)
+    _, spw, _ = _track_segments(block.plan, geom)
+    return _track_status_array(geom.stations[block.stations], geom, block.plan, spw, block.plan.shape[4])
+end
+
+# One entry per station block, keyed `g1, g2, …` as `parameters(sol)` keys a
+# station-heterogeneous component's leaves; a single block is its own array.
+_block_leaves(arrays) = isempty(arrays) ? nothing :
+    length(arrays) == 1 ? only(arrays) :
+    NamedTuple{Calibration._group_keys(length(arrays))}(Tuple(arrays))
+
+_status_arrays(::Nothing) = ()
+_status_arrays(st::NamedTuple) = values(st)
+_status_arrays(st) = (st,)
+
 """
     bandpass_track_report(phase_status, amp_status) -> NamedTuple
-    bandpass_track_report(phase_status, amp_status, band_ids) -> NamedTuple
 
 Summarize a bandpass solve's per-(station, feed, spw, time segment) outcomes into
 the record the [`Bandpass`](@ref Gustavo.Bandpass) step publishes.
 `phase_status`/`amp_status` hold one `_BP_TRACK_*` code per track (either may be
-`nothing` when that half was not fit). [`PerTrackSmoother`](@ref) passes them
-as `DimArray`s over `(Ant, Feed, Frequency, Ti)`: the stations, the two feeds,
-each spectral window at its mean channel frequency and each time segment at its
-mean epoch. [`JointSmoother`](@ref) passes plain `(station, feed, band, time
-segment)` arrays with `band_ids`, the spw each band slot came from, which the
-record then carries.
+`nothing` when that half was not fit), as `DimArray`s over
+`(Ant, Feed, Frequency, Ti)`: the stations, the two feeds, each spectral window
+over the extent of its channels and each time segment over the extent of its
+samples. Where the model gives stations different segmentations,
+[`JointSmoother`](@ref) passes one array per station block, keyed `g1, g2, …`
+as [`parameters`](@ref Gustavo.Calibration.parameters) keys the blocks' leaves,
+each over its own stations and time segments.
 
-The joint arrays' time-segment axis spans the union of every station's segments,
-so where the model gives stations different time segmentations the arrays are
-rectangular over a grid some stations do not fill; a cell a station's own
-segmentation lacks carries the `na` code and is counted in `n_na`, apart from the
-four outcomes a track that exists can have.
-
-Returns the two arrays as `phase_status`/`amp_status` alongside `track_labels`
+Returns the arrays as `phase_status`/`amp_status` alongside `track_labels`
 (the code → name mapping, so a reader needs no constant from this module) and
-the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata`/`n_na` summed over both
+the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata` summed over both
 observables. `flat` and `declined` are the two ways a track can occupy a slot
 without measuring anything, and they are what the counts exist to expose: θ
 itself records an unfitted track as unit gain and a starved one as a constant,
@@ -658,7 +663,7 @@ neither distinguishable there from a genuinely flat response.
 """
 function bandpass_track_report(phase_status, amp_status)
     counts = zeros(Int, length(_BP_TRACK_LABELS))
-    for st in (phase_status, amp_status), c in something(st, Int8[])
+    for st in (phase_status, amp_status), a in _status_arrays(st), c in a
         counts[Int(c) + 1] += 1
     end
     # Concrete arrays throughout — the record is serialized with the solution, and
@@ -669,19 +674,14 @@ function bandpass_track_report(phase_status, amp_status)
         amp_status = something(amp_status, empty_status),
         track_labels = collect(String, _BP_TRACK_LABELS),
         n_nodata = counts[1], n_solved = counts[2],
-        n_flat = counts[3], n_declined = counts[4], n_na = counts[5],
+        n_flat = counts[3], n_declined = counts[4],
     )
 end
-
-bandpass_track_report(phase_status, amp_status, band_ids) =
-    (; bandpass_track_report(phase_status, amp_status)..., band_ids = collect(Int, band_ids))
 
 # Warn when a large share of the tracks measured nothing. Silence here would leave
 # a bandpass that is mostly placeholder looking exactly like one that is mostly
 # measured — the caller cannot tell from θ, which is why this is a warning and not
-# only a record. The fraction is over the tracks that exist: a cell a station's
-# own segmentation does not have (`n_na`) is not a track that failed to measure
-# anything, and counting it would make the warning fire on raggedness alone.
+# only a record.
 function _warn_degenerate_bandpass(report)
     total = report.n_nodata + report.n_solved + report.n_flat + report.n_declined
     total > 0 || return nothing
@@ -765,25 +765,6 @@ function _station_freq_segments(blocks, nant)
     return fseg, cells
 end
 
-# The two per-station tables `_fit_track_bands` fits a track against: the spw
-# each of that station's frequency segments belongs to, and the segment's
-# frequency coordinate. Both are the station's block's own, so stations sharing a
-# block share the vectors. `seg_spw`/`seg_freq` hold one entry per block, in
-# `blocks` order; `nothing` falls back to a single band indexed by segment, which
-# is what a caller that named no channel table gets.
-function _station_band_tables(blocks, block_of, seg_spw, seg_freq, nant)
-    nfs(a) = iszero(block_of[a]) ? 0 : blocks[block_of[a]].plan.shape[3]
-    bands = [
-        (seg_spw === nothing || iszero(block_of[a])) ? ones(Int, nfs(a)) : seg_spw[block_of[a]]
-            for a in eachindex(block_of)
-    ]
-    coords = [
-        (seg_freq === nothing || iszero(block_of[a])) ? collect(1.0:nfs(a)) : seg_freq[block_of[a]]
-            for a in eachindex(block_of)
-    ]
-    return bands, coords
-end
-
 # The `results` indices of each independently solvable scan group, given a
 # per-station time-segment table.
 #
@@ -857,7 +838,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
         plan = only(bp_blocks).plan
         fsegs, spw, seg_freq = _track_segments(plan, geom)
         groups = time_segment_scans(plan, results)
-        phase_status = _track_status_array(geom, plan, spw, length(groups))
+        phase_status = _track_status_array(geom.stations, geom, plan, spw, length(groups))
         for (ts, idx) in pairs(groups)
             isempty(idx) && continue
             rbar, wbar = _pool_scans(results, idx, T)
@@ -870,7 +851,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
         plan = only(amp_blocks).plan
         fsegs, spw, seg_freq = _track_segments(plan, geom)
         groups = time_segment_scans(plan, results)
-        amp_status = _track_status_array(geom, plan, spw, length(groups))
+        amp_status = _track_status_array(geom.stations, geom, plan, spw, length(groups))
         for (ts, idx) in pairs(groups)
             isempty(idx) && continue
             rbar, wbar = _pool_scans(results, idx, T)
@@ -903,11 +884,12 @@ end
 # gain ([`_update_station_gains!`](@ref)), at `phase_plan`/`amp_plan`'s shared
 # frequency-segment resolution, to convergence.
 #
-# Every array below carries (Scan, StationPair, FeedPair, Frequency) or
-# (Ant, Feed, Ti, Frequency) dims, so the loops read by axis name. `Frequency`
-# is the frequency-segment index and `Ti` the time-segment one. Each station
-# carries its own time segmentation, so `Ti` spans the union of them and a
-# station reaches only its own slots. Indexing itself stays plain-positional.
+# The data are `(Scan, StationPair, FeedPair, Frequency)` arrays over the
+# refinement cells every station shares. The gains are one
+# `(Ant, Feed, Frequency, Ti)` array per phase station block, over the block's
+# own stations and segments and labeled as θ's leaves are; a station's block
+# and position come from `_block_locations`. Station and feed indices come from
+# the `StationPair`/`FeedPair` labels (`_cell_nodes`).
 
 # One scan's per-(baseline, pol, segment) coherent residual, written directly
 # into `rview`/`wview`, a (StationPair, FeedPair, Frequency) slice of the multi-scan
@@ -938,14 +920,14 @@ end
 # axis — not summed across scans (unlike the closure tier's fold), since the per-scan source coherence needs each
 # scan's own coherent visibility. Element types follow the scan accumulators'
 # own, not a hardcoded precision.
-function _reduce_all_scans(scans, segs)
+function _reduce_all_scans(scans, segs, cells::Frequency)
     nscan = length(scans)
     rl = first(scans).rl
     nbl, npol = size(rl, StationPair), size(rl, FeedPair)
     nseg = length(segs)
     C = eltype(rl)
     T = real(eltype(first(scans).wl))
-    d = (Scan(1:nscan), dims(rl, StationPair), dims(rl, FeedPair), Frequency(1:nseg))
+    d = (Scan(1:nscan), dims(rl, StationPair), dims(rl, FeedPair), cells)
     rseg = DimensionalData.DimArray(zeros(C, nscan, nbl, npol, nseg), d)
     wseg = DimensionalData.DimArray(zeros(T, nscan, nbl, npol, nseg), d)
     for (si, sc) in enumerate(scans)
@@ -954,27 +936,56 @@ function _reduce_all_scans(scans, segs)
     return rseg, wseg
 end
 
-# Every (baseline, pol) touching (ant, feed), tagged by which side of the
-# baseline it is — built once, reused by every ALS iteration's gain update.
-function _joint_bandpass_touching(bl_pairs, feeds, nant)
+# Each station's block and its position on that block's `Ant` axis; `(0, 0)`
+# for a station no block covers.
+function _block_locations(blocks, nant)
+    loc = fill((0, 0), nant)
+    for (k, b) in pairs(blocks), (ai, a) in pairs(b.stations)
+        loc[a] = (k, ai)
+    end
+    return loc
+end
+
+# A phase block's gain axes: its stations, the two feeds, and its frequency and
+# time segments, labeled as θ's leaves are.
+_block_gain_axes(block, geom::DataGeometry) = (
+    _station_dim(geom.stations[block.stations]), Feed(1:2),
+    Frequency(_frequency_segment_lookup(block.plan, geom)),
+    Ti(_time_segment_lookup(block.plan, geom)),
+)
+
+# Every (station pair, feed pair) cell touching (station, feed), tagged by which
+# end of the cell it is — built once, reused by every ALS iteration's gain update.
+function _joint_bandpass_touching(cells, nant)
     touching = [Tuple{Int, Int, Symbol}[] for _ in 1:nant, _ in 1:2]
-    for p in eachindex(feeds), bi in eachindex(bl_pairs)
-        a, b = bl_pairs[bi]
-        a == b && continue
-        fa, fb = feeds[p]
+    for p in axes(cells, FeedPair), bi in axes(cells, StationPair)
+        _solvable(cells[bi, p]) || continue
+        (a, fa), (b, fb) = cells[bi, p]
         push!(touching[a, fa], (bi, p, :a))
         push!(touching[b, fb], (bi, p, :b))
     end
     return touching
 end
 
-# The phase-gauge graph of a joint bandpass solve: one node per (station, feed,
-# that station's own time segment, that station's own frequency segment), one
-# edge per (scan, baseline, pol, refinement cell) correlation, joining its two
-# ends in the segments they are in for that scan and that cell. Node degree
-# stands in for the row weight the gauge scores elsewhere; the graph is built
-# from the correlations that exist, before any per-channel gating, so a node's
-# degree is the observation count available to anchor it.
+# Dense ids of the gain slots, one array per block in its gain array's shape,
+# numbered consecutively across the blocks.
+function _gain_slot_ids(g)
+    next = 0
+    ids = map(g) do gk
+        idk = reshape((next + 1):(next + length(gk)), size(gk))
+        next += length(gk)
+        idk
+    end
+    return ids, next
+end
+
+# The phase-gauge graph of a joint bandpass solve: one node per gain slot —
+# (station, feed, that station's own frequency segment, its own time segment) —
+# one edge per (scan, station pair, feed pair, refinement cell) correlation,
+# joining its two ends in the segments they are in for that scan and that cell.
+# Node degree stands in for the row weight the gauge scores elsewhere; the graph
+# is built from the correlations that exist, before any per-channel gating, so a
+# node's degree is the observation count available to anchor it.
 #
 # The node set is the gauge condition. An edge names the two gain slots one
 # correlation reads, and a shared phase cancels out of `g_a·S·conj(g_b)` only
@@ -983,43 +994,38 @@ end
 # station whose frequency segments are finer than the modes the array leaves free
 # would be over-constrained by any pin that fixed its whole track.
 #
-# `nodes` is the dense `(station, feed, time segment, frequency segment)`
-# numbering `connected_components` works in; `compid[n]` is `0` for a node no
+# `ids` numbers the slots (`_gain_slot_ids`); `compid[n]` is `0` for a slot no
 # correlation touches.
-function _joint_bandpass_graph(bl_pairs, feeds, nant, tseg, fseg, nfsmax)
-    ntseg = maximum(tseg; init = zero(eltype(tseg)))
-    nodes = LinearIndices(
-        (Base.OneTo(nant), Base.OneTo(2), Base.OneTo(ntseg), Base.OneTo(nfsmax)),
-    )
+function _joint_bandpass_graph(cells, loc, ids, nslots, tseg, fseg)
     edges = Tuple{Int, Int}[]
-    deg = zeros(Int, length(nodes))
-    for si in axes(tseg, 2), p in eachindex(feeds), bi in eachindex(bl_pairs)
-        a, b = bl_pairs[bi]
-        a == b && continue
+    deg = zeros(Int, nslots)
+    for si in axes(tseg, 2), p in axes(cells, FeedPair), bi in axes(cells, StationPair)
+        _solvable(cells[bi, p]) || continue
+        (a, fa), (b, fb) = cells[bi, p]
         # A station no block covers (segment 0) carries no bandpass parameter, so
         # the correlations touching it constrain nothing.
         ta, tb = tseg[a, si], tseg[b, si]
         (iszero(ta) || iszero(tb)) && continue
-        fa, fb = feeds[p]
+        (ka, ia), (kb, ib) = loc[a], loc[b]
         for cell in axes(fseg, 2)
-            na = nodes[a, fa, ta, fseg[a, cell]]
-            nb = nodes[b, fb, tb, fseg[b, cell]]
+            na = ids[ka][ia, fa, fseg[a, cell], ta]
+            nb = ids[kb][ib, fb, fseg[b, cell], tb]
             push!(edges, (na, nb))
             deg[na] += 1
             deg[nb] += 1
         end
     end
-    compid, ncomp, _ = connected_components(length(nodes), edges)
-    return nodes, compid, ncomp, deg
+    compid, ncomp, _ = connected_components(nslots, edges)
+    return compid, ncomp, deg
 end
 
 """
-    _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, fseg, nfsmax, gauge) -> (nodes, pins)
+    _joint_bandpass_pins(cells, blocks, g, loc, tseg, fseg, gauge) -> pinned
 
-One reference node per connected component of the joint-bandpass graph — mirrors
-`_solve_observable!`'s pin selection in `stationize.jl`. The pinned node's phase is
-held at zero in the one (time segment, frequency segment) slot it names; its
-amplitude is solved like any other node's.
+One reference slot per connected component of the joint-bandpass graph — mirrors
+`_solve_observable!`'s pin selection in `stationize.jl`. `pinned` holds one Bool
+array per block of `g`, in its shape, true at each pinned slot. The pinned
+slot's phase is held at zero; its amplitude is solved like any other slot's.
 
 Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
 shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
@@ -1027,7 +1033,7 @@ correlation internal to that set: the phase of `c` cancels between the two
 conjugated factors. The sets on which it cancels everywhere are exactly the
 components above, so the phase carries one unobservable constant per component
 and needs one constraint there — no more. A station-uniform segmentation splits
-the graph along the array-wide (time segment, frequency segment) cells and
+the graph along the array-wide (frequency segment, time segment) cells and
 recovers one pin per cell, which together zero the reference station's whole
 track; a model in which one station breaks mid-track keeps the whole track in
 one component, because the stations that hold one gain over it bridge the
@@ -1048,37 +1054,37 @@ structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 over the band eliminates `ls` and leaves the full-rank signless-Laplacian
 system) and biasing every other station through the inconsistency.
 """
-function _joint_bandpass_pins(bl_pairs, feeds, nant, tseg, fseg, nfsmax, gauge)
-    nodes, compid, ncomp, deg =
-        _joint_bandpass_graph(bl_pairs, feeds, nant, tseg, fseg, nfsmax)
-    ci = CartesianIndices(nodes)
-    station_of(n) = ci[n][1]
-    feed_of(n) = ci[n][2]
-    pins = Set{Int}()
+function _joint_bandpass_pins(cells, blocks, g, loc, tseg, fseg, gauge)
+    ids, nslots = _gain_slot_ids(g)
+    compid, ncomp, deg = _joint_bandpass_graph(cells, loc, ids, nslots, tseg, fseg)
+    slot = [(k, I) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
+    station_of(n) = blocks[slot[n][1]].stations[slot[n][2][1]]
+    feed_of(n) = slot[n][2][2]
+    pinned = [fill!(similar(gk, Bool), false) for gk in g]
     for c in 1:ncomp
-        comp_nodes = findall(==(c), compid)
-        push!(pins, gauge_anchor(gauge, comp_nodes, deg, station_of, feed_of))
+        k, I = slot[gauge_anchor(gauge, findall(==(c), compid), deg, station_of, feed_of)]
+        pinned[k][I] = true
     end
-    return nodes, pins
+    return pinned
 end
 
-# Closed-form per-(scan, baseline, pol) solve of the source coherence `S`
-# given the current station gains `g`: the weighted-least-squares minimizer of
-# `Σ_cell wseg·|rseg/wseg − g_a·S·conj(g_b)|²` over the single complex
+# Closed-form per-(scan, station pair, feed pair) solve of the source coherence
+# `S` given the current station gains `g`: the weighted-least-squares minimizer
+# of `Σ_cell wseg·|rseg/wseg − g_a·S·conj(g_b)|²` over the single complex
 # unknown `S`.
 #
 # `rseg`/`wseg` are reduced onto the refinement grid the two stations have in
 # common, while `g` is held in each station's own frequency segments, so each end
 # is read through its own `fseg` row.
-function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg)
+function _update_source_coherence!(S, g, loc, rseg, wseg, cells, tseg, fseg)
     T = real(eltype(S))
     for p in axes(rseg, FeedPair), bi in axes(rseg, StationPair)
-        a, b = bl_pairs[bi]
-        a == b && continue
-        fa, fb = feeds[p]
+        _solvable(cells[bi, p]) || continue
+        (a, fa), (b, fb) = cells[bi, p]
+        (ka, ia), (kb, ib) = loc[a], loc[b]
         for si in axes(rseg, Scan)
             # Each station is in its own time segment for this scan; a station no
-            # block covers (segment 0) has no gain to fit, so the baselines that
+            # block covers (segment 0) has no gain to fit, so the pairs that
             # touch it carry no source term either.
             ta, tb = tseg[a, si], tseg[b, si]
             (iszero(ta) || iszero(tb)) && continue
@@ -1087,7 +1093,7 @@ function _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tseg, fseg
             for cell in axes(rseg, Frequency)
                 w = wseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
                 w > 0 || continue
-                u = g[a, fa, ta, fseg[a, cell]] * conj(g[b, fb, tb, fseg[b, cell]])
+                u = g[ka][ia, fa, fseg[a, cell], ta] * conj(g[kb][ib, fb, fseg[b, cell], tb])
                 abs2(u) > 0 || continue
                 numer += conj(u) * rseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
                 denom += w * abs2(u)
@@ -1117,116 +1123,122 @@ end
 # unwrapped once, when `seed` (the first sweep) initializes it, and thereafter
 # advanced by wrapped increments about its own current value, so no global
 # unwrap is needed inside the loop and the 2π branch cannot flip between
-# iterations. Returns the largest relative gain change, for the caller's
-# convergence check.
+# iterations. `spws[k]` is phase block `k`'s spectral window per frequency
+# segment and `seg_freqs[k]` each segment's shape-fit coordinate. The status
+# arrays, when given, hold one array per phase block and per amplitude block,
+# the latter located by `aloc`. Returns the largest relative gain change, for
+# the caller's convergence check.
 function _update_station_gains!(
-        g, φ, touched, S, rseg, wseg, touching, bl_pairs, feeds, pinned, tseg, fseg, present,
-        phase_spec, amp_spec, bands, coords; seed::Bool,
-        phase_status = nothing, amp_status = nothing,
+        g, φ, touched, loc, S, rseg, wseg, touching, cells, pinned, tseg, fseg, present,
+        phase_spec, amp_spec, spws, seg_freqs; seed::Bool,
+        phase_status = nothing, amp_status = nothing, aloc = loc,
     )
-    T = real(eltype(g))
-    C = eltype(g)
+    C = eltype(first(g))
+    T = real(C)
     maxrel = zero(T)
-    nfsmax = size(g, Frequency)
+    nfsmax = maximum(gk -> size(gk, Frequency), g)
     num = Vector{C}(undef, nfsmax)
     den = Vector{T}(undef, nfsmax)
     ĝ = Vector{C}(undef, nfsmax)
     wf = Vector{T}(undef, nfsmax)
     la = Vector{T}(undef, nfsmax)
     φ̃ = Vector{T}(undef, nfsmax)
-    for feed in axes(g, Feed), ant in axes(g, Ant), ts in present[ant]
+    for feed in 1:2, ant in eachindex(loc)
+        k, ai = loc[ant]
+        iszero(k) && continue
         entries = touching[ant, feed]
         isempty(entries) && continue
-        seg_spw, seg_freq = bands[ant], coords[ant]
-        nfs = length(seg_spw)
-        # The gauge fixes this node's phase in the frequency segments it pins —
-        # every one of them where the array leaves this track no free structure,
-        # a single one where a coarser station ties the band into one mode. The
-        # amplitude is solved like any other node's (see `_joint_bandpass_pins`).
-        pins = view(pinned, ant, feed, ts, 1:nfs)
-        for buf in (num, den, ĝ, wf, la, φ̃)
-            resize!(buf, nfs)
-        end
-        fill!(num, zero(C))
-        fill!(den, zero(T))
-        # The data live on the refinement grid every station shares; this station's
-        # gain is constant over its own segment, so a segment's estimate pools the
-        # numerator and denominator of every cell inside it.
-        for cell in axes(rseg, Frequency)
-            sa = fseg[ant, cell]
-            for (bi, p, role) in entries
-                a, b = bl_pairs[bi]
-                fa, fb = feeds[p]
-                for si in axes(rseg, Scan)
-                    # Only the scans this node's own segment covers constrain it.
-                    tseg[ant, si] == ts || continue
-                    w = wseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
-                    w > 0 || continue
-                    s = S[Scan(si), StationPair(bi), FeedPair(p)]
-                    if role === :a
-                        tb = tseg[b, si]
-                        iszero(tb) && continue
-                        coeff = s * conj(g[b, fb, tb, fseg[b, cell]])
+        gk, φk = g[k], φ[k]
+        nfs = size(gk, Frequency)
+        for ts in present[ant]
+            # The gauge fixes this node's phase in the frequency segments it pins —
+            # every one of them where the array leaves this track no free structure,
+            # a single one where a coarser station ties the band into one mode. The
+            # amplitude is solved like any other node's (see `_joint_bandpass_pins`).
+            pins = view(pinned[k], ai, feed, :, ts)
+            for buf in (num, den, ĝ, wf, la, φ̃)
+                resize!(buf, nfs)
+            end
+            fill!(num, zero(C))
+            fill!(den, zero(T))
+            # The data live on the refinement grid every station shares; this station's
+            # gain is constant over its own segment, so a segment's estimate pools the
+            # numerator and denominator of every cell inside it.
+            for cell in axes(rseg, Frequency)
+                sa = fseg[ant, cell]
+                for (bi, p, role) in entries
+                    # The cell's other end: its station, feed and gains.
+                    (a, fa), (b, fb) = cells[bi, p]
+                    o, fo = role === :a ? (b, fb) : (a, fa)
+                    ko, io = loc[o]
+                    # A station no block covers has no gain, so its cells constrain nothing.
+                    iszero(ko) && continue
+                    go = g[ko]
+                    so = fseg[o, cell]
+                    for si in axes(rseg, Scan)
+                        # Only the scans this node's own segment covers constrain it.
+                        tseg[ant, si] == ts || continue
+                        w = wseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
+                        w > 0 || continue
+                        to = tseg[o, si]
+                        iszero(to) && continue
+                        s = S[Scan(si), StationPair(bi), FeedPair(p)]
+                        coeff = role === :a ? s * conj(go[io, fo, so, to]) : conj(go[io, fo, so, to] * s)
                         abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * rseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
-                        den[sa] += w * abs2(coeff)
-                    else
-                        ta = tseg[a, si]
-                        iszero(ta) && continue
-                        coeff = conj(g[a, fa, ta, fseg[a, cell]] * s)
-                        abs2(coeff) > 0 || continue
-                        num[sa] += conj(coeff) * conj(rseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)])
+                        r = rseg[Scan(si), StationPair(bi), FeedPair(p), Frequency(cell)]
+                        num[sa] += conj(coeff) * (role === :a ? r : conj(r))
                         den[sa] += w * abs2(coeff)
                     end
                 end
             end
-        end
-        for fs in 1:nfs
-            gh = den[fs] > 0 ? num[fs] / den[fs] : zero(C)
-            ĝ[fs] = gh
-            wf[fs] = (den[fs] > 0 && abs(gh) > 0) ? den[fs] * abs2(gh) : zero(T)
-            if wf[fs] > 0
-                la[fs] = log(abs(gh))
-                # The wrapped increment about this track's current value keeps the
-                # candidate on the same 2π branch as the iterate it refines.
-                φ̃[fs] = φ[ant, feed, ts, fs] +
-                    rem2pi(angle(gh) - φ[ant, feed, ts, fs], RoundNearest)
+            for fs in 1:nfs
+                gh = den[fs] > 0 ? num[fs] / den[fs] : zero(C)
+                ĝ[fs] = gh
+                wf[fs] = (den[fs] > 0 && abs(gh) > 0) ? den[fs] * abs2(gh) : zero(T)
+                if wf[fs] > 0
+                    la[fs] = log(abs(gh))
+                    # The wrapped increment about this track's current value keeps the
+                    # candidate on the same 2π branch as the iterate it refines.
+                    φ̃[fs] = φk[ai, feed, fs, ts] +
+                        rem2pi(angle(gh) - φk[ai, feed, fs, ts], RoundNearest)
+                else
+                    la[fs] = T(NaN)
+                    φ̃[fs] = T(NaN)
+                end
+            end
+            # The status of the last sweep is the status of the solve: each sweep
+            # overwrites the previous one's codes for this node.
+            ka, ia = aloc[ant]
+            ast = (isnothing(amp_status) || iszero(ka)) ? nothing : view(amp_status[ka], ia, feed, :, ts)
+            pst = isnothing(phase_status) ? nothing : view(phase_status[k], ai, feed, :, ts)
+            la_new = _fit_track_bands(amp_spec, la, wf, spws[k], seg_freqs[k]; status = ast)
+            φ_new = if all(pins)
+                # A wholly pinned track is known rather than fitted: report it as such
+                # instead of leaving it at NODATA.
+                isnothing(pst) || fill!(pst, _BP_TRACK_SOLVED)
+                zeros(T, nfs)
             else
-                la[fs] = T(NaN)
-                φ̃[fs] = T(NaN)
+                fitted = _fit_track_bands(
+                    phase_spec, φ̃, wf, spws[k], seg_freqs[k]; unwrap = seed, status = pst,
+                )
+                # A partial pin holds its own segments and leaves the rest fitted.
+                # With segments fit independently that is the constrained fit itself;
+                # `solve_joint_bandpass!` rejects a `phase_spec` that pools them
+                # rather than pass off a joint fit with one segment overwritten.
+                for fs in eachindex(fitted)
+                    pins[fs] && (fitted[fs] = zero(T))
+                end
+                fitted
             end
-        end
-        # The status of the last sweep is the status of the solve: each sweep
-        # overwrites the previous one's codes for this node.
-        ast = amp_status === nothing ? nothing : view(amp_status, ant, feed, :, ts)
-        pst = phase_status === nothing ? nothing : view(phase_status, ant, feed, :, ts)
-        la_new = _fit_track_bands(amp_spec, la, wf, seg_spw, seg_freq; status = ast)
-        φ_new = if all(pins)
-            # A wholly pinned track is known rather than fitted: report it as such
-            # instead of leaving it at NODATA.
-            pst === nothing || fill!(pst, _BP_TRACK_SOLVED)
-            zeros(T, nfs)
-        else
-            fitted = _fit_track_bands(
-                phase_spec, φ̃, wf, seg_spw, seg_freq; unwrap = seed, status = pst,
-            )
-            # A partial pin holds its own segments and leaves the rest fitted.
-            # With segments fit independently that is the constrained fit itself;
-            # `solve_joint_bandpass!` rejects a `phase_spec` that pools them
-            # rather than pass off a joint fit with one segment overwritten.
-            for fs in eachindex(fitted)
-                pins[fs] && (fitted[fs] = zero(T))
+            for fs in 1:nfs
+                (isfinite(la_new[fs]) && isfinite(φ_new[fs])) || continue
+                gold = gk[ai, feed, fs, ts]
+                gnew = exp(C(la_new[fs], φ_new[fs]))
+                gk[ai, feed, fs, ts] = gnew
+                φk[ai, feed, fs, ts] = φ_new[fs]
+                touched[k][ai, feed, fs, ts] = true
+                maxrel = max(maxrel, abs(gnew - gold) / max(abs(gold), abs(gnew), eps(T)))
             end
-            fitted
-        end
-        for fs in 1:nfs
-            (isfinite(la_new[fs]) && isfinite(φ_new[fs])) || continue
-            gold = g[ant, feed, ts, fs]
-            gnew = exp(C(la_new[fs], φ_new[fs]))
-            g[ant, feed, ts, fs] = gnew
-            φ[ant, feed, ts, fs] = φ_new[fs]
-            touched[ant, feed, ts, fs] = true
-            maxrel = max(maxrel, abs(gnew - gold) / max(abs(gold), abs(gnew), eps(T)))
         end
     end
     return maxrel
@@ -1240,42 +1252,44 @@ end
 # nowhere is left unwritten, holding whatever θ already had, which is unit gain;
 # so is a station no block covers.
 #
-# A block's `:Ant` axis spans its own stations, so the leaf is indexed by the
-# station's position within `block.stations`, and `ts` is already in that block's
-# own segment numbering (`_station_time_segments` reads each station's segment
-# from its own block's `tseg_id`).
+# `g[k]` holds phase block `k`'s stations in the block's own order; an amplitude
+# block finds each of its stations' gains through `loc`.
 #
 # The band means are removed at θ's precision, which may exceed `g`'s: the
 # gauge is a property of θ.
-function _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, max_logamp, present)
+function _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, loc, max_logamp, present)
     T = eltype(θ)
-    for block in phase_blocks
-        for (ai, a) in pairs(block.stations), f in axes(g, Feed)
+    for (k, block) in pairs(phase_blocks)
+        gk, tk = g[k], touched[k]
+        for (ai, a) in pairs(block.stations), f in axes(gk, Feed)
             node = _feed_node(block.plan.tying, f)
             node == 0 && continue
             for ts in present[a]
-                any(view(touched, a, f, ts, :)) || continue
-                phase(fs) = T(angle(g[a, f, ts, fs]))
-                mphase = angle(sum(cis(phase(fs)) for fs in axes(g, Frequency) if touched[a, f, ts, fs]))
-                for fs in axes(g, Frequency)
-                    touched[a, f, ts, fs] || continue
+                any(view(tk, ai, f, :, ts)) || continue
+                phase(fs) = T(angle(gk[ai, f, fs, ts]))
+                mphase = angle(sum(cis(phase(fs)) for fs in axes(gk, Frequency) if tk[ai, f, fs, ts]))
+                for fs in axes(gk, Frequency)
+                    tk[ai, f, fs, ts] || continue
                     block.θ[1, node, fs, ts, ai] = rem2pi(phase(fs) - mphase, RoundNearest)
                 end
             end
         end
     end
     for block in amp_blocks
-        for (ai, a) in pairs(block.stations), f in axes(g, Feed)
+        for (ai, a) in pairs(block.stations), f in 1:2
             node = _feed_node(block.plan.tying, f)
             node == 0 && continue
+            k, i = loc[a]
+            iszero(k) && continue
+            gk, tk = g[k], touched[k]
             for ts in present[a]
-                valid = @view touched[a, f, ts, :]
-                any(valid) || continue
-                logs = log.(T.(abs.(@view g[a, f, ts, :])))
-                m = sum(view(logs, valid)) / count(valid)
-                for fs in axes(g, Frequency)
-                    valid[fs] || continue
-                    la = logs[fs] - m
+                n = count(view(tk, i, f, :, ts))
+                iszero(n) && continue
+                logamp(fs) = log(T(abs(gk[i, f, fs, ts])))
+                m = sum(logamp(fs) for fs in axes(gk, Frequency) if tk[i, f, fs, ts]) / n
+                for fs in axes(gk, Frequency)
+                    tk[i, f, fs, ts] || continue
+                    la = logamp(fs) - m
                     block.θ[1, node, fs, ts, ai] = abs(la) > max_logamp ? 0.0 : la
                 end
             end
@@ -1349,57 +1363,37 @@ function validate_model(::JointSmoother, model)
 end
 
 function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge)
+    geom = setup.geom
     phase_blocks = bandpass_blocks(setup, θ, :phase)
     amp_blocks = bandpass_blocks(setup, θ, :logamp)
-    # One band table per block, since the blocks need not share a frequency
-    # segmentation. Every segmentation refines the spw partition, so the bands
-    # they name are the same set however finely each block cuts them.
-    tables = [_segment_bands(b.plan, setup.geom.channel_freqs, setup.geom.spw_of_chan) for b in phase_blocks]
-    seg_spw = [t[2] for t in tables]
-    seg_freq = [t[3] for t in tables]
-    band_ids = sort(unique(Iterators.flatten(seg_spw)))
     # One complex gain per (station, feed, segment) means one time segmentation
     # for both observables — `validate_model` holds each station's two plans to
     # it — so the phase side's table is the whole solve's.
-    tseg = _station_time_segments(phase_blocks, results, setup.nant)
-    phase_status = _joint_status_array(phase_blocks, setup.nant, length(band_ids))
-    amp_status = _joint_status_array(amp_blocks, setup.nant, length(band_ids))
+    tseg = _station_time_segments(phase_blocks, results, length(geom.stations))
+    phase_status = [_block_status_array(b, geom) for b in phase_blocks]
+    amp_status = [_block_status_array(b, geom) for b in amp_blocks]
     for idx in _joint_scan_groups(tseg)
         solve_joint_bandpass!(
-            θ, results[idx], setup.bl_pairs, setup.feeds, setup.nant,
-            phase_blocks, amp_blocks;
+            θ, results[idx], geom, phase_blocks, amp_blocks;
             gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
-            phase_spec = sm.phase, amp_spec = sm.amp, seg_spw, seg_freq,
+            phase_spec = sm.phase, amp_spec = sm.amp,
             tseg = view(tseg, :, idx), phase_status, amp_status,
         )
     end
-    report = bandpass_track_report(phase_status, amp_status, band_ids)
+    report = bandpass_track_report(_block_leaves(phase_status), _block_leaves(amp_status))
     _warn_degenerate_bandpass(report)
     return report
 end
 
-# One observable's `(Ant, Feed, band, time segment)` status array, rectangular
-# over the union of the blocks' time segmentations. A cell outside a station's
-# own segmentation — including every cell of a station no block covers — is
-# `_BP_TRACK_NA`: it holds no parameter, so no solve will ever write it and it is
-# not a track that measured nothing. The rest start at `_BP_TRACK_NODATA`, which
-# is what they stay if no scan reaches them.
-function _joint_status_array(blocks, nant, nband)
-    ntseg = maximum((b.plan.shape[4] for b in blocks); init = 0)
-    status = fill(_BP_TRACK_NA, nant, 2, nband, ntseg)
-    for b in blocks, a in b.stations
-        fill!(view(status, a, :, :, 1:b.plan.shape[4]), _BP_TRACK_NODATA)
-    end
-    return status
-end
-
 """
-    solve_joint_bandpass!(θ, scans, bl_pairs, feeds, nant, phase_blocks, amp_blocks;
+    solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           gauge = PinAntenna(1), max_iterations = 8, tolerance = 1.0e-6,
-                          max_logamp = log(10.0))
+                          max_logamp = log(10.0), phase_spec = FreeShape(),
+                          amp_spec = FreeShape(), phase_status = nothing,
+                          amp_status = nothing, tseg = nothing)
 
 Jointly solve the per-(station, feed) complex bandpass gain and a per-scan,
-per-baseline, per-polarization constant source coherence (see the module
+per-station-pair, per-feed-pair constant source coherence (see the module
 comment above `_reduce_scan_segments!` for the model and the
 alternating scheme), then gauge-fix each (station, feed, time segment) track and
 write the result into the station blocks of the two observables
@@ -1410,7 +1404,8 @@ and `(…, :logamp)` — station blocks over the SAME `θ` this call is handed, 
 each block's `θ` is a view into it. A station-uniform model gives one block per
 observable spanning every station; where the model differs across stations, each
 block carries its own stations, feed tying and segment numbering, and a station
-no block covers is left at unit gain. Blocks need not share a frequency
+no block covers is left at unit gain. The gains are held per phase block, over
+the block's stations and segments. Blocks need not share a frequency
 segmentation: the accumulators are reduced onto the common refinement of the
 blocks' segmentations ([`_station_freq_segments`](@ref)) and each station's gain
 is solved on its own segments, one gain over however many refinement cells a
@@ -1418,14 +1413,13 @@ segment spans. A station's two components must still resolve the SAME
 segmentation as each other, which `validate_model(::JointSmoother, model)`
 enforces per station at model-compile time; the throw here guards direct callers.
 
-`seg_spw`/`seg_freq`, when given, hold one entry per block of `phase_blocks`, in
-that order: the spw each of the block's frequency segments belongs to and the
-segment's frequency coordinate, as [`_segment_bands`](@ref) returns them. Omitted,
-each station is fit as one band indexed by segment.
+`geom` supplies the stations the `StationPair` labels name (θ's stations, in
+θ's order) and the channel frequencies and spectral windows each block's shape
+fit places its segments at.
 
 Scaling a set of stations by one phase leaves every visibility internal to that
 set unchanged, so the gauge fixes one constant per such set. The sets are the
-connected components of the (station, feed, time segment, frequency segment)
+connected components of the (station, feed, frequency segment, time segment)
 graph the correlations span, and one node of each is pinned
 ([`_joint_bandpass_pins`](@ref)). Stations sharing one frequency segmentation
 split that graph per cell, so the pinned station's whole track is held at zero;
@@ -1444,15 +1438,13 @@ needs each scan's own coherent visibility.
 each distinct `tseg[a, :]` value, in that station's own segment numbering, and a
 station whose entry is `0` is left out of the solve. Every station shares one
 segment when it is omitted. `scans` must hold the scans `tseg`'s columns
-describe, in the same order. The phase gauge acts on the
-(station, feed, time segment, frequency segment) graph these scans span, pinning
-one node per connected component ([`_joint_bandpass_pins`](@ref)), so a break at
-one station is measured
-against the stations that hold one gain across it rather than gauged away.
-Solved phases are comparable only WITHIN a component: where that graph splits —
-disjoint sub-arrays, or every station segmented at the same epoch — each piece
-carries its own arbitrary constant, and a per-station change read across the
-split is that constant plus the change.
+describe, in the same order. The phase gauge acts on the graph these scans
+span, pinning one node per connected component, so a break at one station is
+measured against the stations that hold one gain across it rather than gauged
+away. Solved phases are comparable only WITHIN a component: where that graph
+splits — disjoint sub-arrays, or every station segmented at the same epoch —
+each piece carries its own arbitrary constant, and a per-station change read
+across the split is that constant plus the change.
 
 Convergence is judged on the largest relative per-iteration gain change over
 every (station, feed, segment) node solved here, not a tracked χ² (which would
@@ -1461,79 +1453,84 @@ to one call are a connected piece of the coupling graph, so this is one
 criterion over one coupled problem: nodes that share no data are solved by
 separate calls rather than being averaged into a common tolerance.
 
-`phase_status`/`amp_status`, when given, are `(Ant, Feed, band, time segment)`
-arrays that receive each track's `_BP_TRACK_*` outcome code from the final sweep;
-they are indexed by the station's own segment number, so a call solving part of a
-track writes only its own slots, and a slot outside a station's own segmentation
-is never written (the caller marks those `_BP_TRACK_NA`).
+`phase_status`/`amp_status`, when given, hold one `(Ant, Feed, Frequency, Ti)`
+array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref)),
+receiving each track's `_BP_TRACK_*` outcome code from the final sweep; a call
+solving part of a track writes only its own time segments.
 """
 function solve_joint_bandpass!(
-        θ, scans, bl_pairs, feeds, nant, phase_blocks, amp_blocks;
+        θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         gauge::AbstractGauge = PinAntenna(1), max_iterations::Integer = 8, tolerance::Real = 1.0e-6,
         max_logamp::Real = _BP_MAX_LOGAMP,
         phase_spec::AbstractShapeSpec = FreeShape(),
         amp_spec::AbstractShapeSpec = FreeShape(),
-        seg_spw::Union{Nothing, AbstractVector} = nothing,
-        seg_freq::Union{Nothing, AbstractVector} = nothing,
         phase_status = nothing,
         amp_status = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )
     isempty(scans) && return θ
+    nant = length(geom.stations)
 
     # The data are reduced onto the refinement of every block's frequency
     # segmentation, and each station's gain is held in its own segments — one
     # gain over however many refinement cells that segment spans.
     fseg, segs = _station_freq_segments(phase_blocks, nant)
-    block_of = zeros(Int, nant)
-    for (bi, b) in pairs(phase_blocks), a in b.stations
-        block_of[a] = bi
-    end
+    loc = _block_locations(phase_blocks, nant)
+    aloc = _block_locations(amp_blocks, nant)
     # Both observables carry one complex gain per (station, feed, segment), so a
     # station's two components must resolve the same frequency segmentation
     # (`validate_model(::JointSmoother, model)` holds each station's tree to it;
     # the throw guards direct callers).
-    for b in amp_blocks, a in b.stations
-        iszero(block_of[a]) && continue
-        b.plan.fseg_id == phase_blocks[block_of[a]].plan.fseg_id || throw(
+    for a in eachindex(loc, aloc)
+        k, j = first(loc[a]), first(aloc[a])
+        (iszero(k) || iszero(j)) && continue
+        amp_blocks[j].plan.fseg_id == phase_blocks[k].plan.fseg_id || throw(
             ArgumentError(
-                "solve_joint_bandpass!: station $a's phase and logamp components resolve " *
-                    "different frequency segmentations — the solve carries one COMPLEX gain " *
-                    "per (station, feed, segment), not independent phase/log-amp tracks.",
+                "solve_joint_bandpass!: station $(geom.stations[a])'s phase and logamp " *
+                    "components resolve different frequency segmentations — the solve " *
+                    "carries one COMPLEX gain per (station, feed, segment), not independent " *
+                    "phase/log-amp tracks.",
             ),
         )
     end
-    bands, coords = _station_band_tables(phase_blocks, block_of, seg_spw, seg_freq, nant)
-    nfsmax = maximum(length, bands; init = 0)
+    tables = [_track_segments(b.plan, geom) for b in phase_blocks]
+    spws = [t[2] for t in tables]
+    seg_freqs = [t[3] for t in tables]
 
     # The time segments each station is actually solved for here, in its own
-    # segmentation's numbering — the numbering θ is written in, so the arrays
-    # below are rectangular over `1:ntseg` and a station simply skips the slots
-    # its segmentation does not reach.
-    tsg = tseg === nothing ? ones(Int, nant, length(scans)) : tseg
+    # segmentation's numbering — the numbering of its block's `Ti` axis.
+    tsg = isnothing(tseg) ? ones(Int, nant, length(scans)) : tseg
     present = [sort!(filter!(!iszero, unique(view(tsg, a, :)))) for a in axes(tsg, 1)]
-    ntseg = maximum(tsg; init = zero(eltype(tsg)))
 
-    rseg, wseg = _reduce_all_scans(scans, segs)
-    touching = _joint_bandpass_touching(bl_pairs, feeds, nant)
-    nodes, pins = _joint_bandpass_pins(bl_pairs, feeds, nant, tsg, fseg, nfsmax, gauge)
-    pinned = [
-        nodes[ant, feed, ts, fs] in pins
-            for ant in axes(nodes, 1), feed in axes(nodes, 2), ts in axes(nodes, 3), fs in axes(nodes, 4)
-    ]
+    rseg, wseg = _reduce_all_scans(scans, segs, Frequency(_segment_lookup(geom.channel_freqs, segs)))
+    cells = _cell_nodes(rseg, geom.stations, PerFeed())
+    C = eltype(rseg)
+    axs = [_block_gain_axes(b, geom) for b in phase_blocks]
+    g = [ones(C, ax) for ax in axs]
+    # The unwrapped phase track behind `g`, carried across sweeps so the shape fit
+    # never sees a 2π branch cut.
+    φ = [zeros(real(C), ax) for ax in axs]
+    # Every node — pinned or not — is marked solved by the gain update, at the
+    # segments it actually has data for. A pinned node's phase is known
+    # everywhere by the gauge, but its amplitude is not, so it earns its slots
+    # the same way the rest do.
+    touched = [zeros(Bool, ax) for ax in axs]
+    touching = _joint_bandpass_touching(cells, nant)
+    pinned = _joint_bandpass_pins(cells, phase_blocks, g, loc, tsg, fseg, gauge)
 
     # A pin covering part of a track leaves the rest of it fitted, and zeroing
     # part of a track a spec fits jointly is not the constrained fit that spec
     # asks for. Segments fit on their own admit the constraint exactly.
     if !(phase_spec isa FreeShape)
-        for ant in axes(pinned, 1), feed in axes(pinned, 2), ts in axes(pinned, 3)
-            nfs = length(bands[ant])
-            np = count(view(pinned, ant, feed, ts, 1:nfs))
+        for (k, pk) in pairs(pinned), ts in axes(pk, Ti), feed in axes(pk, Feed), ai in axes(pk, Ant)
+            track = view(pk, ai, feed, :, ts)
+            np, nfs = count(track), length(track)
             (iszero(np) || np == nfs) && continue
             throw(
                 ArgumentError(
                     "solve_joint_bandpass!: the phase gauge pins $np of the $nfs frequency " *
-                        "segments of station $ant (feed $feed, time segment $ts), because " *
+                        "segments of station $(geom.stations[phase_blocks[k].stations[ai]]) " *
+                        "(feed $feed, time segment $ts), because " *
                         "the stations' frequency segmentations tie those channels into " *
                         "fewer independent common-phase modes than this station has " *
                         "segments. $(nameof(typeof(phase_spec))) fits a band's segments " *
@@ -1545,35 +1542,18 @@ function solve_joint_bandpass!(
         end
     end
 
-    C = eltype(rseg)
-    # The gain arrays are indexed by each station's own frequency segment, which
-    # is θ's own axis; a station with fewer segments than the widest one leaves
-    # the tail slots untouched (and at unit gain).
-    gd = (Ant(1:nant), Feed(1:2), Ti(1:ntseg), Frequency(1:nfsmax))
-    g = DimensionalData.DimArray(ones(C, nant, 2, ntseg, nfsmax), gd)
-    # The unwrapped phase track behind `g`, carried across sweeps so the shape fit
-    # never sees a 2π branch cut.
-    φ = DimensionalData.DimArray(zeros(real(C), nant, 2, ntseg, nfsmax), gd)
-    # Every node — pinned or not — is marked solved by the gain update, at the
-    # segments it actually has data for. A pinned node's phase is known
-    # everywhere by the gauge, but its amplitude is not, so it earns its slots
-    # the same way the rest do.
-    touched = DimensionalData.DimArray(falses(nant, 2, ntseg, nfsmax), gd)
-    S = DimensionalData.DimArray(
-        zeros(C, length(scans), length(bl_pairs), length(feeds)),
-        (Scan(1:length(scans)), StationPair(1:length(bl_pairs)), FeedPair(1:length(feeds))),
-    )
+    S = zeros(C, (Scan(1:length(scans)), dims(rseg, StationPair), dims(rseg, FeedPair)))
 
-    _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tsg, fseg)
+    _update_source_coherence!(S, g, loc, rseg, wseg, cells, tsg, fseg)
     for iter in 1:max_iterations
         maxrel = _update_station_gains!(
-            g, φ, touched, S, rseg, wseg, touching, bl_pairs, feeds, pinned, tsg, fseg, present,
-            phase_spec, amp_spec, bands, coords; seed = iter == 1,
-            phase_status, amp_status,
+            g, φ, touched, loc, S, rseg, wseg, touching, cells, pinned, tsg, fseg, present,
+            phase_spec, amp_spec, spws, seg_freqs; seed = iter == 1,
+            phase_status, amp_status, aloc,
         )
-        _update_source_coherence!(S, g, rseg, wseg, bl_pairs, feeds, tsg, fseg)
+        _update_source_coherence!(S, g, loc, rseg, wseg, cells, tsg, fseg)
         maxrel < tolerance && break
     end
 
-    return _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, max_logamp, present)
+    return _write_joint_bandpass!(θ, phase_blocks, amp_blocks, g, touched, loc, max_logamp, present)
 end

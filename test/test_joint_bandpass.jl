@@ -235,23 +235,28 @@ end
 # accumulators — `rl = w·g_a·S·conj(g_b)`, exactly the model the ALS inverts —
 # because the segment table is what is under test, not the accumulation.
 
-# A four-scan, one-time-sample-per-scan geometry whose second half is a separate
-# instrument segment.
-function _seg_geometry(nchan)
+# A four-scan, one-time-sample-per-scan geometry of `nant` stations `A1, A2, …`
+# whose second half is a separate instrument segment.
+function _seg_geometry(nchan; nant = 4)
     return CAL.DataGeometry(;
         times = collect(0.0:3.0), scan_of_time = collect(1:4),
         channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
         spw_of_chan = ones(Int, nchan),
         scan_names = ["No00$i" for i in 1:4], spw_names = ["A"],
+        stations = ["A$i" for i in 1:nant],
     )
 end
 
 # Per-scan accumulators for `g[ant, feed, segment, channel]` observed through
-# `S[scan, baseline, pol]`, with `tseg[ant, scan]` naming each station's segment.
-function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, nchan)
-    nbl, npol = length(bl_pairs), length(feeds)
+# `S[scan, baseline, pol]`, with `tseg[ant, scan]` naming each station's segment,
+# labeled by `geom`'s station names and channel frequencies.
+function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, geom)
+    names = geom.stations
     return map(axes(S, 1)) do si
-        ax = (FP.StationPair(1:nbl), FP.FeedPair(1:npol), Frequency(1:nchan))
+        ax = (
+            FP._station_pair_dim([(names[a], names[b]) for (a, b) in bl_pairs]),
+            FP.FeedPair(feeds), Frequency(geom.channel_freqs),
+        )
         rl, wl = zeros(ComplexF64, ax), zeros(ax)
         for (bi, (a, b)) in pairs(bl_pairs), p in eachindex(feeds)
             fa, fb = feeds[p]
@@ -264,6 +269,18 @@ function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, nchan)
         end
         return (; rl, wl, ti = si)
     end
+end
+
+# The pinned gain slots of a joint solve's phase gauge, as `(block, (ant, feed,
+# frequency segment, time segment))` positions.
+function _joint_pins(geom, blocks, results, tseg, gauge)
+    nant = length(geom.stations)
+    fseg, _ = FP._station_freq_segments(blocks, nant)
+    cells = FP._cell_nodes(first(results).rl, geom.stations, PerFeed())
+    g = [ones(ComplexF64, FP._block_gain_axes(b, geom)) for b in blocks]
+    pinned = FP._joint_bandpass_pins(cells, blocks, g, FP._block_locations(blocks, nant), tseg, fseg, gauge)
+    @test all(dims(p) == dims(gk) for (p, gk) in zip(pinned, g))
+    return Set((k, Tuple(I)) for (k, p) in pairs(pinned) for I in findall(parent(p)))
 end
 
 @testset "JointSmoother: each station's own time segments in one ALS" begin
@@ -303,7 +320,7 @@ end
         l = layout(InstrumentScans([1.5]))
         plan = only(FP.bandpass_blocks(setup(l), zeros(l.nθ), :phase)).plan
         results = _joint_scan_accumulators(
-            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, nchan,
+            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom,
         )
         blocks = FP.bandpass_blocks(setup(l), zeros(l.nθ), :phase)
         tseg = FP._station_time_segments(blocks, results, nant)
@@ -317,7 +334,7 @@ end
         merged_blocks = FP.bandpass_blocks(setup(l), θ_merged, :phase)
         for idx in FP._joint_scan_groups(tseg)
             FP.solve_joint_bandpass!(
-                θ_merged, results[idx], bl_pairs, pol_products, nant,
+                θ_merged, results[idx], geom,
                 merged_blocks, merged_blocks;
                 gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
                 tseg = view(tseg, :, idx),
@@ -328,7 +345,7 @@ end
         for (ts, idx) in pairs(FP.time_segment_scans(plan, results))
             isempty(idx) && continue
             FP.solve_joint_bandpass!(
-                θ_loop, results[idx], bl_pairs, pol_products, nant,
+                θ_loop, results[idx], geom,
                 loop_blocks, loop_blocks;
                 gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
                 tseg = fill(ts, nant, length(idx)),
@@ -349,13 +366,13 @@ end
         # their scans bridge the break and the whole track is one ALS.
         tseg = fill(1, nant, 4)
         tseg[1, :] = [1, 1, 2, 2]
-        results = _joint_scan_accumulators(gtrue, Strue, tseg, bl_pairs, feeds, nchan)
+        results = _joint_scan_accumulators(gtrue, Strue, tseg, bl_pairs, feeds, geom)
         @test FP._joint_scan_groups(tseg) == [[1, 2, 3, 4]]
 
-        phase_status = fill(FP._BP_TRACK_NODATA, nant, 2, 1, 2)
-        amp_status = fill(FP._BP_TRACK_NODATA, nant, 2, 1, 2)
+        phase_status = [FP._block_status_array(b, geom) for b in phase_blocks]
+        amp_status = [FP._block_status_array(b, geom) for b in amp_blocks]
         FP.solve_joint_bandpass!(
-            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+            θ, results, geom, phase_blocks, amp_blocks;
             gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13,
             tseg, phase_status, amp_status,
         )
@@ -387,9 +404,9 @@ end
                 @test all(iszero, pleaf[1, f, :, 2, a])
                 @test all(iszero, aleaf[1, f, :, 2, a])
                 # …and the status array leaves that slot at its initial code.
-                @test phase_status[a, f, 1, 2] == FP._BP_TRACK_NODATA
+                @test only(phase_status)[a, f, 1, 2] == FP._BP_TRACK_NODATA
             end
-            @test phase_status[1, f, 1, 2] == FP._BP_TRACK_SOLVED
+            @test only(phase_status)[1, f, 1, 2] == FP._BP_TRACK_SOLVED
         end
     end
 
@@ -421,21 +438,25 @@ end
 
         tsg = fill(1, nant, 4)
         tsg[1, :] = [1, 1, 2, 2]
-        results = _joint_scan_accumulators(gtrue, Strue, tsg, bl_pairs, feeds, nchan)
+        results = _joint_scan_accumulators(gtrue, Strue, tsg, bl_pairs, feeds, geom)
         @test FP._station_time_segments(phase_blocks, results, nant) == tsg
         @test FP._joint_scan_groups(tsg) == [[1, 2, 3, 4]]
 
-        # The status grid spans the union of the two segmentations, and the cells
-        # the one-segment stations do not have are absent, not unmeasured.
-        phase_status = FP._joint_status_array(phase_blocks, nant, 1)
-        amp_status = FP._joint_status_array(amp_blocks, nant, 1)
-        @test size(phase_status) == (nant, 2, 1, 2)
-        @test all(==(FP._BP_TRACK_NODATA), view(phase_status, :, :, :, 1))
-        @test all(==(FP._BP_TRACK_NODATA), view(phase_status, 1, :, :, 2))
-        @test all(==(FP._BP_TRACK_NA), view(phase_status, 2:nant, :, :, 2))
+        # Each block's status array spans its own stations and time segments,
+        # labeled as its θ leaf is.
+        phase_status = [FP._block_status_array(b, geom) for b in phase_blocks]
+        amp_status = [FP._block_status_array(b, geom) for b in amp_blocks]
+        for (st, b) in zip(phase_status, phase_blocks)
+            @test lookup(st, FP.Ant) == geom.stations[b.stations]
+            @test size(st, Ti) == b.plan.shape[4]
+            ref = CAL._time_segment_lookup(b.plan, geom)
+            @test collect(lookup(st, Ti)) == collect(ref)
+            @test val(DimensionalData.Lookups.span(lookup(st, Ti))) == val(DimensionalData.Lookups.span(ref))
+            @test all(==(FP._BP_TRACK_NODATA), st)
+        end
 
         FP.solve_joint_bandpass!(
-            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+            θ, results, geom, phase_blocks, amp_blocks;
             gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13,
             tseg = tsg, phase_status, amp_status,
         )
@@ -460,17 +481,15 @@ end
                 @test phase_blocks[2].θ[1, f, :, 1, ai] ≈ want_phase(a, f, 1) atol = 1.0e-8
                 @test amp_blocks[2].θ[1, f, :, 1, ai] ≈ want_amp(a, f, 1) atol = 1.0e-8
             end
-            @test phase_status[1, f, 1, 2] == FP._BP_TRACK_SOLVED
+            @test phase_status[1][FP.Ant(At("A1")), Feed(f), Ti(2)] == [FP._BP_TRACK_SOLVED]
         end
-        # No solve writes an absent cell, so the code survives the whole run…
-        @test all(==(FP._BP_TRACK_NA), view(phase_status, 2:nant, :, :, 2))
-        @test all(==(FP._BP_TRACK_NA), view(amp_status, 2:nant, :, :, 2))
-        # …and it is reported apart from the four outcomes a real track can have,
-        # so it does not dilute the degenerate-track fraction.
-        rep = FP.bandpass_track_report(phase_status, amp_status, [1])
-        @test rep.track_labels[FP._BP_TRACK_NA + 1] == "na"
-        @test rep.n_na == 2 * 2 * (nant - 1)
-        @test rep.n_nodata + rep.n_solved + rep.n_flat + rep.n_declined == 2 * 2 * (nant + 1)
+        # The report keys the blocks as `parameters` keys their leaves, and counts
+        # only the tracks the blocks have: station A1's two segments and one
+        # segment of each of the others.
+        rep = FP.bandpass_track_report(FP._block_leaves(phase_status), FP._block_leaves(amp_status))
+        @test keys(rep.phase_status) == keys(rep.amp_status) == (:g1, :g2)
+        @test rep.phase_status.g2 === phase_status[2]
+        @test rep.n_nodata + rep.n_solved + rep.n_flat + rep.n_declined == 2 * 2 * (2 + (nant - 1))
     end
 end
 
@@ -523,21 +542,18 @@ end
     @testset "one pin per connected component of the promoted graph" begin
         # Every station shares `ChannelBlocks(1)` here, so each channel is its own
         # frequency segment and the graph splits along them.
-        fseg = repeat(collect(1:nchan)', nant)
-        nodes, pins = FP._joint_bandpass_pins(
-            bl_pairs, feeds, nant, het, fseg, nchan, PinAntenna(1),
-        )
+        blocks = FP.bandpass_blocks(s, zeros(l.nθ), :phase)
+        results = _joint_scan_accumulators(gtrue, Strue, het, bl_pairs, feeds, geom)
+        pins = _joint_pins(geom, blocks, results, het, PinAntenna(1))
         # The constant stations bridge the break, so each (feed, channel) is one
         # component and the reference is pinned in its first time segment only —
         # its second is free to carry the break it actually has.
-        @test pins == Set(nodes[1, f, 1, c] for f in 1:2 for c in 1:nchan)
+        @test pins == Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:nchan)
 
         # A segmentation every station shares has nothing to bridge the epochs:
         # each (feed, time segment, channel) is its own component and carries its
         # own pin.
-        _, upins = FP._joint_bandpass_pins(
-            bl_pairs, feeds, nant, uniform, fseg, nchan, PinAntenna(1),
-        )
+        upins = _joint_pins(geom, blocks, results, uniform, PinAntenna(1))
         @test length(upins) == 2 * 2 * nchan
     end
 
@@ -545,9 +561,9 @@ end
         θ = zeros(l.nθ)
         phase_blocks = FP.bandpass_blocks(s, θ, :phase)
         amp_blocks = FP.bandpass_blocks(s, θ, :logamp)
-        results = _joint_scan_accumulators(gtrue, Strue, het, bl_pairs, feeds, nchan)
+        results = _joint_scan_accumulators(gtrue, Strue, het, bl_pairs, feeds, geom)
         FP.solve_joint_bandpass!(
-            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+            θ, results, geom, phase_blocks, amp_blocks;
             gauge = PinAntenna(1), max_iterations = 200, tolerance = 1.0e-13,
             tseg = het,
         )
@@ -618,12 +634,6 @@ end
         # is one connected component per feed: the gauge has ONE constant to fix
         # and the pin holds one segment of station 1's three-segment track. The
         # other two are free to carry the structure they really have.
-        nfsmax = maximum(fseg)
-        nodes, pins = FP._joint_bandpass_pins(
-            bl_pairs, feeds, nant, fill(1, nant, 4), fseg, nfsmax, PinAntenna(1),
-        )
-        @test pins == Set([nodes[1, 1, 1, 1], nodes[1, 2, 1, 1]])
-
         rng = MersenneTwister(20260908)
         # Each station's truth is constant over its OWN segments — two channels
         # for station 1, three for the rest.
@@ -638,8 +648,10 @@ end
                 for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(pol_products)
         ]
         results = _joint_scan_accumulators(
-            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, nchan,
+            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom,
         )
+        @test _joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1)) ==
+            Set([(1, (1, 1, 1, 1)), (1, (1, 2, 1, 1))])
 
         θ = zeros(l.nθ)
         pb = FP.bandpass_blocks(setup(l), θ, :phase)
@@ -648,7 +660,7 @@ end
         # neither owns alone, which the alternating sweep works through slowly:
         # the recovery is exact, but 200 sweeps only reach 3e-8 of it.
         FP.solve_joint_bandpass!(
-            θ, results, bl_pairs, pol_products, nant, pb, ab; gauge = PinAntenna(1),
+            θ, results, geom, pb, ab; gauge = PinAntenna(1),
             max_iterations = 1000, tolerance = 1.0e-13,
         )
 
@@ -669,7 +681,7 @@ end
         # overwritten with zero, which is not the fit the spec asks for.
         θ2 = zeros(l.nθ)
         @test_throws "Use `FreeShape` for the phase" FP.solve_joint_bandpass!(
-            θ2, results, bl_pairs, pol_products, nant,
+            θ2, results, geom,
             FP.bandpass_blocks(setup(l), θ2, :phase),
             FP.bandpass_blocks(setup(l), θ2, :logamp);
             gauge = PinAntenna(1), phase_spec = FP.PolynomialShape(1),
@@ -693,10 +705,12 @@ end
         # Nothing ties one cell to another, so every cell is its own component
         # and the reference station is pinned in all of them — the whole-track
         # zeroing a station-uniform model has always had.
-        nodes, pins = FP._joint_bandpass_pins(
-            bl_pairs, feeds, nant, fill(1, nant, 4), fseg, length(cells), PinAntenna(1),
+        results = _joint_scan_accumulators(
+            ones(ComplexF64, nant, 2, 1, nchan), ones(ComplexF64, 4, length(bl_pairs), length(feeds)),
+            fill(1, nant, 4), bl_pairs, feeds, geom,
         )
-        @test pins == Set(nodes[1, f, 1, k] for f in 1:2 for k in eachindex(cells))
+        @test _joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1)) ==
+            Set((1, (1, f, k, 1)) for f in 1:2 for k in eachindex(cells))
     end
 
     @testset "a station holding one gain over cells the others split" begin
@@ -715,11 +729,6 @@ end
         @test all(fseg[a, :] == [1, 2] for a in 2:nant)
         # Station 1 ties the two cells into one component, so the gauge has one
         # constant to fix per feed however it picks the node to fix it at.
-        nodes, pins = FP._joint_bandpass_pins(
-            bl_pairs, feeds, nant, fill(1, nant, 4), fseg, 2, PinAntenna(1),
-        )
-        @test pins == Set([nodes[1, 1, 1, 1], nodes[1, 2, 1, 1]])
-
         rng = MersenneTwister(20260908)
         # Each station's truth is constant over its OWN segments: station 1 over
         # the whole band, the rest over each half.
@@ -735,10 +744,12 @@ end
                 for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(pol_products)
         ]
         results = _joint_scan_accumulators(
-            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, nchan,
+            gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom,
         )
+        @test _joint_pins(geom, phase_blocks, results, fill(1, nant, 4), PinAntenna(1)) ==
+            Set([(1, (1, 1, 1, 1)), (1, (1, 2, 1, 1))])
         FP.solve_joint_bandpass!(
-            θ, results, bl_pairs, pol_products, nant, phase_blocks, amp_blocks;
+            θ, results, geom, phase_blocks, amp_blocks;
             gauge = PinAntenna(1), max_iterations = 200, tolerance = 1.0e-13,
         )
 
@@ -768,7 +779,7 @@ end
         θ2 = zeros(l.nθ)
         pb2 = FP.bandpass_blocks(s, θ2, :phase)
         FP.solve_joint_bandpass!(
-            θ2, results, bl_pairs, pol_products, nant, pb2,
+            θ2, results, geom, pb2,
             FP.bandpass_blocks(s, θ2, :logamp); gauge = PinAntenna(2),
             max_iterations = 200, tolerance = 1.0e-13,
         )
