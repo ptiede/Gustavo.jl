@@ -5,7 +5,8 @@ using Gustavo
 using Test
 using Random
 using Statistics: mean, std
-using Gustavo.DimensionalData: At, DimArray, Ti, dims, lookup
+using Gustavo.DimensionalData: At, Dim, DimArray, Ti, dims, lookup
+using LinearAlgebra: Diagonal
 using OffsetArrays: OffsetArray
 
 const FRa = Gustavo.Fring
@@ -680,6 +681,35 @@ end
     @test count(isfinite, trn) == nap
     jumpsn = [abs(rem2pi(trn[ap + 1] - trn[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(trn[ap]) && isfinite(trn[ap + 1])]
     @test maximum(jumpsn) < 1.0                      # warm start armed via the anchor
+end
+
+@testset "Adhoc: the penalized smoother solves its normal equations" begin
+    function penalized_reference(y, w, λ)
+        n = length(y)
+        wk = [isfinite(y[k]) && w[k] > 0 ? w[k] : 0.0 for k in 1:n]
+        D = [Float64((j == k) - (j == k + 1)) for k in 1:(n - 1), j in 1:n]
+        return (Diagonal(wk) + λ * D' * D) \ (wk .* replace(y, NaN => 0.0))
+    end
+    rng = MersenneTwister(31)
+    y = cumsum(0.2 .* randn(rng, 120)) .+ 4
+    y[40:55] .= NaN                                # gap interpolated by the penalty
+    w = rand(rng, 120) .+ 0.5
+    w[[3, 90]] .= 0
+    for λ in (0.1, 5.0, 1.0e3)
+        ref = penalized_reference(y, w, λ)
+        @test maximum(abs, FRa._penalized_smooth(y, w, λ) .- ref) < 1.0e-10
+        out32 = FRa._penalized_smooth(Float32.(y), Float32.(w), λ)
+        @test eltype(out32) == Float32
+        @test maximum(abs, out32 .- ref) < 1.0e-4
+    end
+    # No data and no penalty: nothing to solve, so the track is returned as is.
+    @test isequal(FRa._penalized_smooth([NaN, 1.0], [0.0, 0.0], 0.0), [NaN, 1.0])
+
+    Y = DimArray(reshape(Float32.(y), 1, :), (Dim{:feed}(1:1), Ti(2.0 .* (0:119))))
+    W = DimArray(reshape(Float32.(w), 1, :), dims(Y))
+    yv, wv = view(Y, 1, :), view(W, 1, :)
+    @test dims(FRa._penalized_smooth(yv, wv, 5.0)) == dims(yv)
+    @test @allocated(FRa._penalized_smooth(yv, wv, 5.0)) < 4 * sizeof(Float32) * 120 + 1024
 end
 
 @testset "EHT-HOPS adhoc window (T_dof, Eqs 21-22)" begin

@@ -347,7 +347,7 @@ function smooth_track!(sm::SavitzkyGolaySmoother, track, w)
     return track .= savitzky_golay_smooth(track, w; window = win, order = sm.order)
 end
 
-# Dense first-difference penalized smoother.
+# First-difference penalized smoother.
 smooth_track!(sm::PenalizedSmoother, track, w) = track .= _penalized_smooth(track, w, sm.smoothness)
 
 # Ornstein–Uhlenbeck (Matérn-1/2) Gaussian-process smoother: an exact Kalman filter
@@ -1244,26 +1244,27 @@ function _restitch_refant_gauge!(phase, covered, track_w, ref_station::Integer)
     return phase
 end
 
-# First-difference penalized smoother, via the generic penalized WLS solve
-# with `A = I`, the penalty stacked as `√λ · D` (`D` the 1st-difference
-# operator): minimize Σ w_k(φ_k − y_k)² + λ Σ(φ_{k+1}−φ_k)². Non-finite samples
+# First-difference penalized smoother: minimize Σ w_k(φ_k − y_k)² + λ Σ(φ_{k+1}−φ_k)²
+# through its tridiagonal normal equations (W + λDᵀD)φ = Wy. Non-finite samples
 # get zero data weight (interpolated by the penalty).
 function _penalized_smooth(y::AbstractVector, w::AbstractVector, λ::Real)
-    # The solve is a dense 1-based matrix problem, so the track is read 1-based.
     Base.require_one_based_indexing(y, w)
     T = float(eltype(y))
     n = length(y)
-    n == 0 && return collect(T, y)
-    wk = [(isfinite(y[k]) && isfinite(w[k]) && w[k] > 0) ? T(w[k]) : zero(T) for k in 1:n]
-    yk = [wk[k] > 0 ? T(y[k]) : zero(T) for k in 1:n]
+    n == 0 && return T.(y)
+    wk(k) = (isfinite(y[k]) && isfinite(w[k]) && w[k] > 0) ? T(w[k]) : zero(T)
     # Guard against an all-unconstrained component (no data, λ = 0).
-    all(iszero, wk) && iszero(λ) && return collect(T, y)
-    D = zeros(T, n - 1, n)
-    for k in axes(D, 1)
-        D[k, k] = one(T); D[k, k + 1] = -one(T)
+    all(k -> iszero(wk(k)), 1:n) && iszero(λ) && return T.(y)
+    λT = T(λ)
+    diagonal = Vector{T}(undef, n)
+    φ = similar(y, T)
+    for k in 1:n
+        neighbors = (k > 1) + (k < n)
+        diagonal[k] = wk(k) + neighbors * λT
+        φ[k] = iszero(wk(k)) ? zero(T) : wk(k) * T(y[k])
     end
-    R = sqrt(T(λ)) .* D
-    return weighted_regularized_least_squares(Matrix{T}(I, n, n), yk, wk, R)
+    offdiagonal = fill(-λT, n - 1)
+    return ldiv!(ldlt!(SymTridiagonal(diagonal, offdiagonal)), φ)
 end
 
 # Remove the weighted mean of a track. Only the mean: the constant is degenerate

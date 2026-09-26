@@ -711,6 +711,46 @@ end
     @test maximum(abs.(sm .- t)) < 0.1
 end
 
+@testset "Calibration savitzky_golay_smooth: local weighted polynomial fits" begin
+    # Dense reference: the weighted Vandermonde least-squares fit at each index.
+    function sg_reference(y, w; window, order)
+        h = window ÷ 2
+        return map(eachindex(y)) do i
+            idx = [j for j in max(1, i - h):min(length(y), i + h) if isfinite(y[j]) && w[j] > 0]
+            isempty(idx) && return y[i]
+            A = [Float64(j - i)^d for j in idx, d in 0:min(order, length(idx) - 1)]
+            sw = sqrt.(w[idx])
+            return ((sw .* A) \ (sw .* y[idx]))[1]
+        end
+    end
+    rng = MersenneTwister(21)
+    y = cumsum(0.2 .* randn(rng, 200)) .+ 20
+    y[rand(rng, 1:200, 20)] .= NaN
+    y[50:70] .= NaN
+    w = rand(rng, 200) .+ 0.5
+    w[[10, 12, 13]] .= 0                           # zero-weight samples are skipped
+    for window in (5, 11, 41, 151), order in 0:3
+        ref = sg_reference(y, w; window, order)
+        @test isequal(isnan.(CAL.savitzky_golay_smooth(y, w; window, order)), isnan.(ref))
+        @test maximum(abs, filter(isfinite, CAL.savitzky_golay_smooth(y, w; window, order) .- ref)) < 1.0e-9
+        out32 = CAL.savitzky_golay_smooth(Float32.(y), Float32.(w); window, order)
+        @test eltype(out32) == Float32
+        @test maximum(abs, filter(isfinite, out32 .- ref)) < 1.0e-4
+    end
+
+    # A window whose only positive weight is one sample returns that sample.
+    @test CAL.savitzky_golay_smooth([1.0, 5.0, 2.0], [0.0, 3.0, 0.0]; window = 3)[2] == 5.0
+
+    # A labeled track stays labeled, and a view of it allocates only the output.
+    Y = DimArray(reshape(Float32.(y), 1, :), (Dim{:feed}(1:1), Ti(2.0 .* (0:199))))
+    W = DimArray(reshape(Float32.(w), 1, :), dims(Y))
+    yv, wv = view(Y, 1, :), view(W, 1, :)
+    out = CAL.savitzky_golay_smooth(yv, wv; window = 11)
+    @test dims(out) == dims(yv)
+    @test isequal(parent(out), CAL.savitzky_golay_smooth(parent(yv), parent(wv); window = 11))
+    @test @allocated(CAL.savitzky_golay_smooth(yv, wv; window = 11)) < sizeof(Float32) * 200 + 1024
+end
+
 @testset "Calibration: misdeclared coordinate term errors loudly (N3)" begin
     # A new term that declares the :Frequency axis but defines no
     # freq_coordinate must error at plan time, not silently evaluate at x = 0.
