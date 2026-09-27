@@ -59,27 +59,56 @@ RandomWalkPrior(dim; order::Integer = 1, σ::Real) = RandomWalkPrior{dim, typeof
     OUPrior(dim; scale, σ)
 
 A stationary Ornstein–Uhlenbeck process along dimension `dim` (`Frequency` or
-`Ti`): the values are jointly Gaussian with zero mean and covariance
-`σ² exp(-|x - x′| / scale)` between coordinates `x` and `x′`. `σ` is in the
-parameter's own units and `scale` in the coordinate's (Hz or s).
+`Ti`) about a free level per block: the deviations from the level are jointly
+Gaussian with covariance `σ² exp(-|x - x′| / scale)` between coordinates `x`
+and `x′`. `σ` is in the parameter's own units and `scale` in the coordinate's
+(Hz or s).
+
+Each of `scale` and `σ` is either a positive number, held fixed, or a
+hyperprior — any density implementing DensityInterface's `logdensityof`, such
+as a Distributions.jl distribution. A solver estimates the hyperparameters by
+type-II MAP: it maximizes the marginal likelihood of the data, with the
+parameter values integrated out, times the hyperprior density over
+`(log scale, log σ)`.
 
 The component's term must carry a value per coordinate along `dim`
 (`Bandpass` along `Frequency`).
 """
-struct OUPrior{D, T <: Real} <: AbstractPrior
-    scale::T
-    σ::T
-    function OUPrior{D, T}(scale, σ) where {D, T}
+struct OUPrior{D, S, G} <: AbstractPrior
+    scale::S
+    σ::G
+    function OUPrior{D, S, G}(scale, σ) where {D, S, G}
         _check_prior_axis(OUPrior, D)
-        _check_positive("OUPrior scale", scale)
-        _check_positive("OUPrior σ", σ)
-        return new{D, T}(scale, σ)
+        _check_hyper("OUPrior scale", scale)
+        _check_hyper("OUPrior σ", σ)
+        return new{D, S, G}(scale, σ)
     end
 end
-function OUPrior(dim; scale::Real, σ::Real)
-    T = promote_type(typeof(scale), typeof(σ))
-    return OUPrior{dim, T}(scale, σ)
+function OUPrior(dim; scale, σ)
+    s, g = _promote_fixed(scale, σ)
+    return OUPrior{dim, typeof(s), typeof(g)}(s, g)
 end
+
+_promote_fixed(a::Real, b::Real) = promote(a, b)
+_promote_fixed(a, b) = (a, b)
+
+_check_hyper(what, x::Real) = _check_positive(what, x)
+_check_hyper(what, x) =
+    DensityInterface.DensityKind(x) === DensityInterface.HasDensity() || throw(
+    ArgumentError(
+        "$what must be a positive number or a density implementing " *
+            "DensityInterface.logdensityof, got $(typeof(x))",
+    )
+)
+
+"""
+    is_fixed_hyper(x) -> Bool
+
+Whether a prior hyperparameter is a fixed value (a number) rather than a
+hyperprior to be estimated.
+"""
+is_fixed_hyper(::Real) = true
+is_fixed_hyper(_) = false
 
 _check_positive(what, x) =
     (isfinite(x) && x > 0) || throw(ArgumentError("$what must be positive and finite, got $x"))

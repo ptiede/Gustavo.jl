@@ -11,6 +11,7 @@ module Calibration
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 import XRadio
 import DimensionalData
+import DensityInterface
 using ..UVData
 using ..UVData: feed_pairs, phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,
@@ -61,7 +62,7 @@ export freq_coordinate, time_coordinate, freq_coord_state, time_coord_state
 
 # Models and tying
 export GainComponent, GainModel, with_station
-export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior, prior_axis
+export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior, prior_axis, is_fixed_hyper
 export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed
 export phase_components, logamp_components, model_components
 export station_components

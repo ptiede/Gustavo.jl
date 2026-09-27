@@ -320,6 +320,49 @@ function fit_ou_hypers_pooled(ys, ws, xs; τ0::Real, σ2_0::Real, τ_lo::Real, �
     return τ, σ2
 end
 
+# Type-II MAP of an `OUPrior`'s hyperparameters shared by a group of centered
+# tracks: the pooled Kalman marginal likelihood plus the hyperprior density over
+# `(log τ, log σ)`, whose Jacobian adds `log τ + log σ`. `scale` and `σ` are each
+# a fixed value or a density (`is_fixed_hyper`); only the densities are searched.
+# `[τ_lo, τ_hi]` bounds the `τ` search and seeds it at its geometric mean.
+function _map_ou_hypers(ycs, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real)
+    T = float(
+        promote_type(
+            typeof(τ_lo), typeof(τ_hi), typeof(σ2_seed),
+            (eltype(y) for y in ycs)..., (eltype(w) for w in ws)..., (eltype(x) for x in xs)...,
+        ),
+    )
+    fixτ, fixσ = is_fixed_hyper(scale), is_fixed_hyper(σ)
+    fixτ && fixσ && return T(scale), T(σ)^2
+    rs = [[(isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf) for wk in w] for w in ws]
+    σ2_lo = T(1.0e-8)
+    lτ_lo, lτ_hi = log(T(τ_lo)), log(T(τ_hi))
+    lτ0 = fixτ ? log(T(scale)) : (lτ_lo + lτ_hi) / 2
+    lσ20 = fixσ ? 2 * log(T(σ)) : log(max(T(σ2_seed), σ2_lo))
+    unpack(p) = fixτ ? (lτ0, p[1]) : fixσ ? (p[1], lσ20) : (p[1], p[2])
+    function neglp(p)
+        lτ, lσ2 = unpack(p)
+        τ = fixτ ? exp(lτ) : exp(clamp(lτ, lτ_lo, lτ_hi))
+        σ2 = max(exp(lσ2), σ2_lo)
+        lp = zero(T)
+        for i in eachindex(ycs, rs, xs)
+            lp += kalman_ou_filter(ycs[i], rs[i], xs[i]; τ, σ2)[6]
+        end
+        fixτ || (lp += logdensityof(scale, τ) + log(τ))
+        fixσ || (lp += logdensityof(σ, sqrt(σ2)) + log(σ2) / 2)
+        val = isfinite(lp) ? -lp : T(Inf)
+        # Outside the box τ saturates and the objective goes flat; the excursion
+        # penalty drives the simplex back in.
+        excursion = fixτ ? zero(T) : max(lτ_lo - lτ, zero(T)) + max(lτ - lτ_hi, zero(T))
+        return val + 100 * excursion
+    end
+    x0 = fixτ ? T[lσ20] : fixσ ? T[clamp(lτ0, lτ_lo, lτ_hi)] : T[clamp(lτ0, lτ_lo, lτ_hi), lσ20]
+    xbest, _ = _nelder_mead(neglp, x0)
+    lτ, lσ2 = unpack(xbest)
+    τ = fixτ ? exp(lτ) : exp(clamp(lτ, lτ_lo, lτ_hi))
+    return τ, max(exp(lσ2), σ2_lo)
+end
+
 # OU correlation-scale search bounds read off the sample coordinate itself, so every
 # caller fits hypers under the same prior: `τ_lo` is one median sample spacing
 # (floored), `τ_hi` is 10× the observed span. The coordinate is time for the adhoc

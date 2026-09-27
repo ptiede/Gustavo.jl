@@ -10,6 +10,7 @@ using Statistics: mean, median
 using Dates: Minute, Second, Nanosecond, Month, DateTime, datetime2unix
 using Random
 import OffsetArrays
+using Distributions: LogNormal
 
 const UVD = Gustavo.UVData
 
@@ -795,6 +796,14 @@ end
         @test_throws "RandomWalkPrior order must be ≥ 1, got 0" CAL.RandomWalkPrior(Ti; order = 0, σ = 1.0)
         @test_throws "OUPrior scale must be positive" CAL.OUPrior(Ti; scale = -1.0, σ = 1.0)
         @test_throws "RandomWalkPrior axis must be one of (:Frequency, :Ti), got Ant" CAL.RandomWalkPrior(UVD.Ant; σ = 1.0)
+
+        # OU hyperparameters are fixed numbers or hyperpriors.
+        hp = CAL.OUPrior(Frequency; scale = LogNormal(log(1.0e7), 1.0), σ = 0.1)
+        @test hp.scale isa LogNormal && hp.σ === 0.1
+        @test !CAL.is_fixed_hyper(hp.scale) && CAL.is_fixed_hyper(hp.σ)
+        @test hp == CAL.OUPrior(Frequency; scale = LogNormal(log(1.0e7), 1.0), σ = 0.1)
+        @test_throws "OUPrior σ must be a positive number or a density implementing " *
+            "DensityInterface.logdensityof, got String" CAL.OUPrior(Frequency; scale = 1.0, σ = "wide")
     end
 
     @testset "attached to a component" begin
@@ -844,7 +853,7 @@ end
         rw = CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01)
         m = CAL.GainModel(
             phase = (bp = bp(rw),),
-            stations = (BB = (; phase = (bp = bp(CAL.OUPrior(Frequency; scale = 1.0e8, σ = 0.1)),)),),
+            stations = (BB = (; phase = (bp = bp(CAL.OUPrior(Frequency; scale = LogNormal(18.0, 1.0), σ = 0.1)),)),),
         )
         layout = CAL.plan_parameters(m, names, geom)
         node = layout.plantree.phase.bp
@@ -858,7 +867,8 @@ end
         CAL.save_solution(path, soln)
         back = CAL.load_solution(path)
         @test back.steps[1].model == mat
-        @test back.steps[1].model.stations.BB.phase.bp.prior == CAL.OUPrior(Frequency; scale = 1.0e8, σ = 0.1)
+        @test back.steps[1].model.stations.BB.phase.bp.prior ==
+            CAL.OUPrior(Frequency; scale = LogNormal(18.0, 1.0), σ = 0.1)
     end
 end
 

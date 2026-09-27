@@ -6,6 +6,7 @@ using Test
 using Random
 using LinearAlgebra
 using Statistics: mean, var
+using Distributions: LogNormal
 
 const FRs = Gustavo.Fring
 
@@ -258,4 +259,29 @@ end
     all3 = FRs.kalman_ou_mv_filter([(1, 2), (1, 3), (2, 3)], ys, [[0.02, 0.0, 0.02] for _ in times], times; τ, σ2)
     two = FRs.kalman_ou_mv_filter([(1, 2), (2, 3)], [y[[1, 3]] for y in ys], [[0.02, 0.02] for _ in times], times; τ, σ2)
     @test all3[1] ≈ two[1] && all3[6] ≈ two[6]
+end
+
+@testset "OU hyperparameters by type-II MAP" begin
+    rng = Random.Xoshiro(1)
+    xs = [collect(range(1.0e9, 1.064e9; length = 64)) for _ in 1:4]
+    ws = [fill(100.0, 64) for _ in 1:4]
+    # Pure noise, centered: no ripple for the process to explain.
+    ycs = map(1:4) do _
+        n = randn(rng, 64) ./ 10
+        n .- mean(n)
+    end
+    lo, hi = FRs._group_ou_tau_bounds(xs)
+    map_hypers(scale, σ) = FRs._map_ou_hypers(ycs, ws, xs, scale, σ; τ_lo = lo, τ_hi = hi, σ2_seed = 1.0e-2)
+
+    # Fixed values are returned as given, whatever the data say.
+    @test map_hypers(2.0e6, 0.3) == (2.0e6, 0.09)
+    # A concentrated hyperprior pins its hyperparameter.
+    τ, _ = map_hypers(LogNormal(log(3.0e6), 0.01), 0.1)
+    @test τ ≈ 3.0e6 rtol = 0.01
+    # With no ripple, type-II ML sends σ² to its floor; a hyperprior bounded away
+    # from zero keeps it there.
+    _, σ2_ml = FRs.fit_ou_hypers_pooled(ycs, ws, xs; τ0 = 1.0e7, σ2_0 = 1.0e-2, τ_lo = lo, τ_hi = hi)
+    @test σ2_ml ≤ 1.0e-6
+    _, σ2 = map_hypers(1.0e7, LogNormal(log(0.1), 0.3))
+    @test 0.01 < sqrt(σ2) < 0.1
 end

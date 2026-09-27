@@ -2,6 +2,7 @@
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 FITSFiles = "358a0a88-3548-4ad6-b652-8bdbf64af8e5"
 Gustavo = "b6f820fd-87a9-4cf8-8bd4-0e8dc9bb4263"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -19,4 +20,5 @@ XRadio = "8f21e5d1-474f-4c64-bef4-ed78edb0e816"
 FITSFiles = {url = "https://github.com/ptiede/FITSFiles.jl", rev = "ptiede-uvfixes"}
 
 [compat]
+Distributions = "0.25"
 StableRNGs = "1"
