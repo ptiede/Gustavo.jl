@@ -17,22 +17,6 @@
 # The graph/solve helpers (`_solve_observable!`, `_cell_noise2`, `_node`) live
 # in stationize.jl/adhoc.jl; the shape specs live in shapes.jl.
 
-# ── Amplitude closure incidence ───────────────────────────────────────────────
-#
-# The per-(station, feed) log-amp bandpass is solved from the sum closure
-# `log|V̄_ab(ν)| = la_a(ν) + lb_b(ν)` over each spw (a +1/+1, signless-Laplacian
-# incidence — full rank, so no reference state).
-
-# Signless-Laplacian (sum) incidence for one frequency segment's gated closure
-# observations, restricted to the rows `idx`.
-function _signless_incidence(na, nb, idx, nnodes, val, w)
-    A = zeros(eltype(val), length(idx), nnodes)
-    for (r, i) in enumerate(idx)
-        A[r, na[i]] += 1; A[r, nb[i]] += 1
-    end
-    return A, val[idx], w[idx]
-end
-
 """
     default_bandpass_terms(; freq = ChannelBlocks(1)) -> GainModel
 
@@ -414,9 +398,8 @@ function _write_amp_bandpass!(θ, plan, la, max_logamp::Real, ts::Integer = 1)
 end
 
 # Free per-segment closure seed for the log-amp bandpass: the sum closure
-# `log|V̄_ab| = la_a + la_b` solved independently in each frequency segment on the
-# signless-Laplacian incidence (full rank, so no reference state), plus each
-# (station, feed, segment)'s summed gate weight as its precision, both over
+# `log|V̄_ab| = la_a + la_b` solved independently in each frequency segment, plus
+# each (station, feed, segment)'s summed gate weight as its precision, both over
 # `(Ant(stations), Feed, segments)` in the sums' real type. Segments with no
 # gated observation are left `NaN` for a shape fit to estimate — or not.
 function _seed_amp_tracks(
@@ -426,13 +409,14 @@ function _seed_amp_tracks(
     noise2 = _cell_noise2(rbar_bp, wbar_bp, Frequency)
     T = real(eltype(rbar_bp))
     nodes = _cell_nodes(rbar_bp, stations, PerFeed())
-    nant = length(stations)
-    nnodes = 2 * nant
+    val = zeros(T, dims(nodes))
+    wt = zeros(T, dims(nodes))
+    mask = fill!(similar(nodes, Bool), false)
     tracks = (_station_dim(stations), Feed(1:2), segments)
     la = fill!(zeros(T, tracks), T(NaN))
     prec = zeros(T, tracks)
     for (fs, chans) in enumerate(fsegs)
-        na = Int[]; nbn = Int[]; vals = T[]; wts = T[]
+        fill!(mask, false)
         for bi in axes(nodes, StationPair), p in axes(nodes, FeedPair)
             c = (StationPair(bi), FeedPair(p))
             _solvable(nodes[c...]) || continue
@@ -442,21 +426,46 @@ function _seed_amp_tracks(
             snr2 = _segment_snr2(r, w, w2, noise2[c...])
             snr2 >= snr_floor^2 || continue
             amp = abs(r / w); amp > 0 || continue
-            push!(na, _node(a, fa, nant)); push!(nbn, _node(b, fb, nant))
-            push!(vals, log(amp)); push!(wts, snr2)
+            val[c...] = log(amp)
+            wt[c...] = snr2
+            mask[c...] = true
             prec[a, fa, fs] += snr2
             prec[b, fb, fs] += snr2
         end
-        isempty(vals) && continue
-        A, bvec, wvec = _signless_incidence(na, nbn, eachindex(vals), nnodes, vals, wts)
-        sol = weighted_regularized_least_squares(A, bvec, wvec, fill(T(ridge), nnodes))
-        for i in eachindex(vals), node in (na[i], nbn[i])
-            ant = (node - 1) % nant + 1
-            feed = (node - 1) ÷ nant + 1
-            la[ant, feed, fs] = sol[node]
-        end
+        _solve_log_amp!(view(la, Frequency(fs)), val, wt, mask, nodes, ridge)
     end
     return la, prec
+end
+
+# Solve the sum closure over the masked cells of `val` into `la` `(nant, 2)`,
+# leaving nodes no cell touches untouched. A component whose graph is bipartite
+# determines its nodes only up to an alternating offset; `ridge` picks the
+# smallest solution.
+function _solve_log_amp!(la, val, w, mask, nodes, ridge::Real)
+    T = eltype(val)
+    nant = size(la, 1)
+    cells = [I for I in eachindex(val, w, mask, nodes) if mask[I]]
+    isempty(cells) && return la
+    edges = [_edge(nodes[I], nant) for I in cells]
+    touched = sort!(unique!([n for e in edges for n in e]))
+    column = zeros(Int, 2nant)
+    column[touched] .= eachindex(touched)
+    ncell = length(cells)
+    A = zeros(T, ncell + length(touched), length(touched))
+    for (i, (u, v)) in enumerate(edges)
+        A[i, column[u]] += one(T)
+        A[i, column[v]] += one(T)
+    end
+    for j in eachindex(touched)
+        A[ncell + j, j] = one(T)
+    end
+    b = [T[val[I] for I in cells]; zeros(T, length(touched))]
+    wts = [T[w[I] for I in cells]; fill(T(ridge), length(touched))]
+    x = FactoredWLS(A, wts)(b)
+    for (j, n) in pairs(touched)
+        la[(n - 1) % nant + 1, n > nant ? 2 : 1] = x[j]
+    end
+    return la
 end
 
 # ── Per-track bandpass smoothing (seed closure solve → per-track shape fit) ────

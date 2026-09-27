@@ -136,41 +136,37 @@ function fit_track(spec::WhittakerShape, y, w, x)
     return _whittaker_track(y, w, spec.lambda, _SHAPE_RIDGE)
 end
 
-# The Whittaker system: identity design, the roughness term stacked as `√λ̄·D`
-# (`D` the 2nd-difference operator) and the ridge as `√ridge·I`. A segment with
-# no data carries weight 0, so the penalty alone sets it — that is the
+# The Whittaker normal equations `(W + λ̄DᵀD + ridge·I)ŷ = Wy`, `D` the
+# 2nd-difference operator: pentadiagonal, so a banded Cholesky. A segment with no
+# data carries weight 0, so the penalty alone sets it — that is the
 # interpolation. `λ` is scaled by the median positive weight to stay
-# data-relative.
+# data-relative. Solved in at least `Float64`: a wide gap or a large `λ` puts the
+# condition number past what `Float32` resolves.
 function _whittaker_track(y, w, lambda::Real, ridge::Real)
-    # The penalized solve builds a dense 1-based operator over the track.
     Base.require_one_based_indexing(y, w)
     T = float(promote_type(eltype(y), eltype(w)))
+    S = promote_type(T, Float64)
     n = length(y)
-    pos = T[T(w[k]) for k in eachindex(y, w) if _shape_usable(y[k], w[k])]
-    λ = T(lambda) * (isempty(pos) ? one(T) : T(median(pos)))
-    # Allocated off `y`, so the fit stays in the caller's array type.
-    wi = similar(y, T, n)
-    yi = similar(y, T, n)
+    pos = S[S(w[k]) for k in eachindex(y, w) if _shape_usable(y[k], w[k])]
+    λ = S(lambda) * (isempty(pos) ? one(S) : median(pos))
+    d0 = fill(S(ridge), n)
+    d1 = zeros(S, n - 1)
+    d2 = zeros(S, n - 2)
+    rhs = zeros(S, n)
     for k in eachindex(y, w)
-        ok = _shape_usable(y[k], w[k])
-        wi[k] = ok ? T(w[k]) : zero(T)
-        yi[k] = ok ? T(y[k]) : zero(T)
+        if _shape_usable(y[k], w[k])
+            d0[k] += w[k]
+            rhs[k] = S(w[k]) * S(y[k])
+        end
     end
-    A = similar(y, T, (n, n))
-    fill!(A, zero(T))
-    # The penalty rows stacked in one operator: √ridge·I over √λ̄·D.
-    R = similar(y, T, (2n - 2, n))
-    fill!(R, zero(T))
-    sr = sqrt(T(ridge))
-    sλ = sqrt(λ)
-    for k in 1:n
-        A[k, k] = one(T)
-        R[k, k] = sr
+    for i in 1:(n - 2)                                  # DᵀD from the rows [1, −2, 1]
+        d0[i] += λ; d0[i + 1] += 4λ; d0[i + 2] += λ
+        d1[i] -= 2λ; d1[i + 1] -= 2λ
+        d2[i] += λ
     end
-    for i in 1:(n - 2)                                  # 2nd-difference rows [1, −2, 1]
-        R[n + i, i] = sλ; R[n + i, i + 1] = -2 * sλ; R[n + i, i + 2] = sλ
-    end
-    return weighted_regularized_least_squares(A, yi, wi, R)
+    N = Symmetric(BandedMatrix(0 => d0, 1 => d1, 2 => d2))
+    # Allocated off `y`, so the fit stays in the caller's array type.
+    return copyto!(similar(y, T, n), cholesky(N) \ rhs)
 end
 
 """

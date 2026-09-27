@@ -107,6 +107,26 @@ end
     @test_throws "lambda must be ≥ 0" FRsh.WhittakerShape(-1.0)
 end
 
+@testset "WhittakerShape solves its normal equations in the data's type" begin
+    rng = MersenneTwister(0x0005A1AE)
+    n = 300
+    x = _spw_freqs(n)
+    y = sinpi.(range(0, 3; length = n)) .+ 0.1 .* randn(rng, n)
+    w = 0.5 .+ rand(rng, n)
+    w[100:139] .= 0.0
+    y[100:139] .= NaN
+    ok = w .> 0
+    D = diff(diff(Matrix{Float64}(I, n, n); dims = 1); dims = 1)
+    for lambda in (1.0, 1.0e3)
+        λ̄ = lambda * median(w[ok])
+        reference = (Diagonal(w) + λ̄ * D'D + 1.0e-6I) \ (w .* ifelse.(ok, y, 0.0))
+        @test FRsh.fit_track(FRsh.WhittakerShape(lambda), y, w, x) ≈ reference rtol = 1.0e-10
+        fit32 = FRsh.fit_track(FRsh.WhittakerShape(lambda), Float32.(y), Float32.(w), Float32.(x))
+        @test eltype(fit32) == Float32
+        @test fit32 ≈ reference rtol = 1.0e-5
+    end
+end
+
 @testset "ARShape is the OU posterior mean over the frequency coordinate" begin
     rng = MersenneTwister(0x0A5E)
     n = 24

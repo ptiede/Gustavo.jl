@@ -5,6 +5,7 @@ authors = ["Paul Tiede <ptiede91@gmail.com> and contributors"]
 
 [deps]
 AstroLib = "c7932e45-9af1-51e7-9da9-f004cd3a462b"
+BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 DiskArrays = "3c3547ce-8d99-4f5e-a174-61eb10b00ae3"
@@ -34,6 +35,7 @@ GustavoMakieExt = "Makie"
 
 [compat]
 AstroLib = "0.4"
+BandedMatrices = "1"
 Dates = "1"
 DimensionalData = "0.30"
 DiskArrays = "0.4"
