@@ -121,16 +121,17 @@ function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     axes = term_axes(t)
     all(in(TERM_AXES), axes) || throw(
         ArgumentError(
-            "$(typeof(t)) declares unknown coordinate axes $(setdiff(axes, TERM_AXES)); " *
-                "term_axes must be drawn from $TERM_AXES"
+            "$(typeof(t)) declares unknown coordinate axes " *
+                "$(map(DimensionalData.name, Tuple(setdiff(axes, TERM_AXES)))); term_axes must " *
+                "be drawn from $(map(DimensionalData.name, TERM_AXES))"
         )
     )
-    fstate = :Frequency in axes ? freq_coord_state(t, geom, fseg_id, nfseg) : nothing
-    tstate = :Ti in axes ? time_coord_state(t, geom, tseg_id, ntseg) : nothing
-    xf = :Frequency in axes ?
+    fstate = Frequency in axes ? freq_coord_state(t, geom, fseg_id, nfseg) : nothing
+    tstate = Ti in axes ? time_coord_state(t, geom, tseg_id, ntseg) : nothing
+    xf = Frequency in axes ?
         [freq_coordinate(t, geom.channel_freqs[c], fstate, fseg_id[c]) for c in eachindex(fseg_id)] :
         zeros(float(eltype(geom.channel_freqs)), nchannels(geom))
-    xt = :Ti in axes ?
+    xt = Ti in axes ?
         [time_coordinate(t, geom.times[i], tstate, tseg_id[i]) for i in eachindex(tseg_id)] :
         zeros(float(eltype(geom.times)), ntimes(geom))
 

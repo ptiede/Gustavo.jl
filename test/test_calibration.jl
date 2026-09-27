@@ -320,18 +320,18 @@ end
 
     # One `Polynomial` term; the axis it reads is a type parameter, and the
     # convenience constructors are functions returning it.
-    @test CAL.PolynomialFreq(3) isa CAL.Polynomial{:Frequency}
-    @test CAL.PolynomialTime(3) isa CAL.Polynomial{:Ti}
-    @test CAL.term_axes(CAL.PolynomialFreq(3)) == (:Frequency,)
-    @test CAL.term_axes(CAL.PolynomialTime(3)) == (:Ti,)
+    @test CAL.PolynomialFreq(3) isa CAL.Polynomial{Frequency}
+    @test CAL.PolynomialTime(3) isa CAL.Polynomial{Ti}
+    @test CAL.term_axes(CAL.PolynomialFreq(3)) == (Frequency,)
+    @test CAL.term_axes(CAL.PolynomialTime(3)) == (Ti,)
 
     @test_throws ArgumentError CAL.PolynomialFreq(0)
-    @test_throws "axis must be one of" CAL.Polynomial{:nope}(2)
+    @test_throws "axis must be one of" CAL.Polynomial{UVD.Ant}(2)
 
     # A term is handed the axes it declares, under the dimension names, and a
     # channel index is never one of them.
-    @test CAL.term_axes(CAL.Delay()) == (:Frequency,)
-    @test CAL.term_axes(CAL.Rate()) == (:Ti,)
+    @test CAL.term_axes(CAL.Delay()) == (Frequency,)
+    @test CAL.term_axes(CAL.Rate()) == (Ti,)
     @test CAL.term_axes(CAL.ConstantTerm()) == ()
 
     # A block's size never depends on how many channels its segment holds: how
@@ -717,7 +717,7 @@ end
     # The channel each solve channel is within its segment, and that segment.
     pos, seg = [1, 2, 3, 1, 2], [1, 1, 1, 2, 2]
 
-    @test CAL.term_axes(CAL.Bandpass()) == (:Frequency,)
+    @test CAL.term_axes(CAL.Bandpass()) == (Frequency,)
     @test CAL.param_shapes(CAL.Bandpass(), 7) == (values = (7,),)
 
     model = CAL.GainModel(phase = (bp = bp(CAL.PerSpectralWindow()),))
@@ -832,11 +832,11 @@ end
 end
 
 @testset "Calibration: misdeclared coordinate term errors loudly (N3)" begin
-    # A new term that declares the :Frequency axis but defines no
+    # A new term that declares the Frequency axis but defines no
     # freq_coordinate must error at plan time, not silently evaluate at x = 0.
     @eval CAL begin
         struct _AuditBadFreqTerm <: AbstractGainTerm end
-        term_axes(::_AuditBadFreqTerm) = (:Frequency,)
+        term_axes(::_AuditBadFreqTerm) = (Frequency,)
         param_shapes(::_AuditBadFreqTerm, n) = (scale = (),)
         # NOTE: deliberately no freq_coordinate method.
     end
@@ -845,6 +845,17 @@ end
         phase = (bad = CAL.GainComponent(CAL._AuditBadFreqTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
     @test_throws MethodError CAL.plan_parameters(model, 1, geom)
+
+    # A dimension no term coordinate is built along fails at plan time, named.
+    @eval CAL begin
+        struct _AuditAntTerm <: AbstractGainTerm end
+        term_axes(::_AuditAntTerm) = ($(UVD.Ant),)
+        param_shapes(::_AuditAntTerm, n) = (scale = (),)
+    end
+    antmodel = CAL.GainModel(
+        phase = (bad = CAL.GainComponent(CAL._AuditAntTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
+    )
+    @test_throws "declares unknown coordinate axes (:Ant,)" CAL.plan_parameters(antmodel, 1, geom)
 end
 
 @testset "CalibrationSolution θ keeps its array type" begin

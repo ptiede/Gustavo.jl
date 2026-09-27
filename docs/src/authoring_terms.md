@@ -32,17 +32,17 @@ methods:
 
 ### `term_axes`
 
-Names the coordinate axes a term reads, drawn from `(:Frequency, :Ti)`, both,
-or neither:
+Names the dimensions a term reads its coordinates along, drawn from
+`(Frequency, Ti)`, both, or neither:
 
 ```julia
-term_axes(::Quadratic) = (:Frequency,)
+term_axes(::Quadratic) = (Frequency,)
 ```
 
-`term_eval` is handed exactly these axes, under these names, as a
-`NamedTuple` — a term reading both writes `x.Frequency` and `x.Ti`. The names
-are checked at plan time, so a typo in `term_axes` fails there rather than
-silently evaluating against the wrong axis.
+`term_eval` is handed exactly these coordinates as a `NamedTuple` keyed by
+dimension name — a term reading both writes `x.Frequency` and `x.Ti`. Any
+other dimension is rejected at plan time, so a term cannot silently evaluate
+against an axis the layout does not build.
 
 ### `param_shapes`
 
@@ -119,7 +119,7 @@ import Gustavo.Calibration: term_axes, param_shapes, freq_coord_state,
 "Quadratic phase in frequency: phase = `quad`·(f − f0)², `quad` in rad/Hz²."
 struct Quadratic <: AbstractGainTerm end
 
-term_axes(::Quadratic) = (:Frequency,)
+term_axes(::Quadratic) = (Frequency,)
 param_shapes(::Quadratic, nchan_seg) = (quad = (),)
 freq_coord_state(::Quadratic, geom, fseg_id, nfseg) = geom.f0
 freq_coordinate(::Quadratic, f, f0, seg) = f - f0

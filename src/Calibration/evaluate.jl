@@ -63,15 +63,15 @@ end
 # there, so the block is in bounds by construction.
 @inline _leaf_block(leaf, node, fs, ts, ant) = @inbounds view(leaf, :, node, fs, ts, ant)
 
-# The coordinates a term declares through `term_axes`, under those names. The
+# The coordinates a term declares through `term_axes`, under their names. The
 # declaration is a compile-time constant for a concrete term, so the selection
 # folds away and each `term_eval` sees concretely-typed scalars.
 @inline _cell_coordinates(t::AbstractGainTerm, plan::ComponentPlan, ti, c) =
-    NamedTuple{term_axes(t)}(_axis_values(term_axes(t), plan, ti, c))
+    NamedTuple{map(DimensionalData.name, term_axes(t))}(_axis_values(term_axes(t), plan, ti, c))
 
 @inline _axis_values(::Tuple{}, plan, ti, c) = ()
 @inline function _axis_values(names::Tuple, plan, ti, c)
-    v = first(names) === :Frequency ? (@inbounds plan.xf[c]) : (@inbounds plan.xt[ti])
+    v = first(names) === Frequency ? (@inbounds plan.xf[c]) : (@inbounds plan.xt[ti])
     return (v, _axis_values(Base.tail(names), plan, ti, c)...)
 end
 
@@ -230,10 +230,10 @@ function _resolve_node(plan::ComponentPlan, solve, target, chan_idx, ti_idx, tsp
     ax = term_axes(t)
     fseg = freq_segment_ids(plan.fseg, solve, target; chan_idx)
     tseg = time_segment_ids(plan.tseg, solve, target; ti_idx, time_span = tspan)
-    xf = :Frequency in ax ?
+    xf = Frequency in ax ?
         [freq_coordinate(t, target.channel_freqs[c], plan.fstate, fseg[k]) for (k, c) in enumerate(chan_idx)] :
         zeros(Float64, length(chan_idx))
-    xt = :Ti in ax ?
+    xt = Ti in ax ?
         [time_coordinate(t, target.times[i], plan.tstate, tseg[k]) for (k, i) in enumerate(ti_idx)] :
         zeros(Float64, length(ti_idx))
     return ComponentPlan(

@@ -62,7 +62,7 @@ struct Rate <: AbstractGainTerm end
     Polynomial{axis}(degree)
 
 Polynomial in a segment-scaled coordinate: Σ_{d=1}^{degree} `coeffs`[d] · x^d, where
-`axis` is the coordinate axis it reads — `:Frequency` or `:Ti`. The axis is a type
+`axis` is the dimension it reads — `Frequency` or `Ti`. The axis is a type
 parameter because it must be known statically. Use the constructor functions
 [`PolynomialFreq`](@ref) / [`PolynomialTime`](@ref).
 """
@@ -70,27 +70,27 @@ struct Polynomial{A} <: AbstractGainTerm
     degree::Int
     function Polynomial{A}(degree) where {A}
         A in TERM_AXES ||
-            throw(ArgumentError("Polynomial axis must be one of $TERM_AXES, got $(repr(A))"))
+            throw(ArgumentError("Polynomial axis must be one of $TERM_AXES, got $A"))
         degree >= 1 || throw(ArgumentError("Polynomial degree must be ≥ 1, got $degree"))
         return new{A}(Int(degree))
     end
 end
 
 """
-    PolynomialFreq(degree) -> Polynomial{:Frequency}
+    PolynomialFreq(degree) -> Polynomial{Frequency}
 
 Polynomial in a segment-scaled frequency coordinate. Dispatch on `Polynomial`
-(or `Polynomial{:Frequency}`); this is a function, not a type.
+(or `Polynomial{Frequency}`); this is a function, not a type.
 """
-PolynomialFreq(degree::Integer) = Polynomial{:Frequency}(degree)
+PolynomialFreq(degree::Integer) = Polynomial{Frequency}(degree)
 
 """
-    PolynomialTime(degree) -> Polynomial{:Ti}
+    PolynomialTime(degree) -> Polynomial{Ti}
 
 Polynomial in a segment-scaled time coordinate. Dispatch on `Polynomial` (or
-`Polynomial{:Ti}`); this is a function, not a type.
+`Polynomial{Ti}`); this is a function, not a type.
 """
-PolynomialTime(degree::Integer) = Polynomial{:Ti}(degree)
+PolynomialTime(degree::Integer) = Polynomial{Ti}(degree)
 
 """
     Bandpass()
@@ -106,25 +106,25 @@ GainComponent(Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow())
 struct Bandpass <: AbstractGainTerm end
 
 # ── Coordinate axes ──────────────────────────────────────────────────────────
-const TERM_AXES = (:Frequency, :Ti)
+const TERM_AXES = (Frequency, Ti)
 
 """
     term_axes(term) -> Tuple
 
-The coordinate axes `term` reads, drawn from `(:Frequency, :Ti)`, both, or
-neither. [`term_eval`](@ref) receives exactly these as a `NamedTuple` — a term
-reading both writes `x.Frequency` and `x.Ti` — and the layout builds only the
-axes that are declared. The names are checked at plan time, so a typo fails
+The dimensions `term` reads its coordinates along, drawn from `(Frequency, Ti)`,
+both, or neither. [`term_eval`](@ref) receives exactly these as a `NamedTuple`
+keyed by dimension name — a term reading both writes `x.Frequency` and `x.Ti` —
+and the layout builds only the axes that are declared. The names are checked at plan time, so a typo fails
 there rather than evaluating against the wrong axis.
 """
 function term_axes end
 
 term_axes(::ConstantTerm) = ()
-term_axes(::Delay) = (:Frequency,)
-term_axes(::Dispersion) = (:Frequency,)
-term_axes(::Rate) = (:Ti,)
+term_axes(::Delay) = (Frequency,)
+term_axes(::Dispersion) = (Frequency,)
+term_axes(::Rate) = (Ti,)
 term_axes(::Polynomial{C}) where {C} = (C,)
-term_axes(::Bandpass) = (:Frequency,)
+term_axes(::Bandpass) = (Frequency,)
 
 # ── Parameter names and shapes ───────────────────────────────────────────────
 
@@ -168,7 +168,7 @@ nparams_per_block(t::AbstractGainTerm, nchan_seg) =
 
 `term`'s `x.Frequency` at frequency `f` (Hz), lying in the solve's frequency
 segment `seg`. `state` is what [`freq_coord_state`](@ref) resolved for this
-term. Required for any term declaring `:Frequency` in [`term_axes`](@ref);
+term. Required for any term declaring `Frequency` in [`term_axes`](@ref);
 there is no fallback, so a missing method throws a `MethodError` at plan
 time rather than evaluating the axis at zero.
 
@@ -182,7 +182,7 @@ function freq_coordinate end
 
 `term`'s `x.Ti` at epoch `t` (seconds), lying in the solve's time segment `seg`,
 against the state [`time_coord_state`](@ref) resolved. Required for any term
-declaring `:Ti` in [`term_axes`](@ref); see [`freq_coordinate`](@ref) for why
+declaring `Ti` in [`term_axes`](@ref); see [`freq_coordinate`](@ref) for why
 there is no generic fallback.
 """
 function time_coordinate end
@@ -241,17 +241,17 @@ struct PolyNorm
     scale::Vector{Float64}
 end
 
-freq_coord_state(::Polynomial{:Frequency}, geom::DataGeometry, fseg_id, nfseg) =
+freq_coord_state(::Polynomial{Frequency}, geom::DataGeometry, fseg_id, nfseg) =
     _poly_norm(geom.channel_freqs, fseg_id, nfseg)
-time_coord_state(::Polynomial{:Ti}, geom::DataGeometry, tseg_id, ntseg) =
+time_coord_state(::Polynomial{Ti}, geom::DataGeometry, tseg_id, ntseg) =
     _poly_norm(geom.times, tseg_id, ntseg)
 
 # A polynomial uses its segment's centered/scaled coordinate in ~[-1, 1] so the
 # basis is well conditioned; the same construction serves either axis, which is
 # why one `Polynomial` term covers both.
-freq_coordinate(::Polynomial{:Frequency}, f, st, seg::Integer) =
+freq_coordinate(::Polynomial{Frequency}, f, st, seg::Integer) =
     @inbounds (f - st.center[seg]) / st.scale[seg]
-time_coordinate(::Polynomial{:Ti}, t, st, seg::Integer) =
+time_coordinate(::Polynomial{Ti}, t, st, seg::Integer) =
     @inbounds (t - st.center[seg]) / st.scale[seg]
 
 # A `Bandpass` coordinate is the channel's position within its segment; the
@@ -330,7 +330,7 @@ function term_eval end
 # starts at x¹: a constant belongs to an accompanying `ConstantTerm`, and
 # including one here would be degenerate with it.
 @inline function term_eval(::Polynomial{A}, p, x) where {A}
-    xa = getproperty(x, A)
+    xa = getproperty(x, DimensionalData.name(A))
     return xa * evalpoly(xa, p.coeffs)
 end
 

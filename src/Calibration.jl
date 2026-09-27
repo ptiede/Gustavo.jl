@@ -10,6 +10,7 @@ module Calibration
 
 using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 import XRadio
+import DimensionalData
 using ..UVData
 using ..UVData: feed_pairs, phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,

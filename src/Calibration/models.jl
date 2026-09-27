@@ -323,8 +323,8 @@ _call_string(x) = string(
     nameof(typeof(x)), "(",
     join((repr(getfield(x, i)) for i in 1:nfields(x)), ", "), ")",
 )
-_call_string(t::Polynomial{:Frequency}) = "PolynomialFreq($(t.degree))"
-_call_string(t::Polynomial{:Ti}) = "PolynomialTime($(t.degree))"
+_call_string(t::Polynomial{Frequency}) = "PolynomialFreq($(t.degree))"
+_call_string(t::Polynomial{Ti}) = "PolynomialTime($(t.degree))"
 
 """
     component_label(e::GainComponent) -> String

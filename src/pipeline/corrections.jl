@@ -154,7 +154,7 @@ end
 function _time_constant_over(sol::CalibrationSolution, win::GeometryWindow, tspan)
     length(win.ti_idx) <= 1 && return true
     for s in sol.steps, plan in s.layout.plans
-        :Ti in Calibration.term_axes(plan.term) && return false
+        Ti in Calibration.term_axes(plan.term) && return false
         ids = Calibration.time_segment_ids(
             plan.tseg, sol.geom, win.geom; ti_idx = win.ti_idx, time_span = tspan,
         )
