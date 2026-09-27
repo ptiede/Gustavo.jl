@@ -52,6 +52,7 @@ export BaselineFringeFit, default_fringe_terms, Bandpass, default_bandpass_terms
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.
 export GainComponent, GainModel, with_station
+export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior
 export station_components, component_label
 export AbstractGainTerm, ConstantTerm, Delay, Dispersion, Rate, Polynomial,
     PolynomialFreq, PolynomialTime

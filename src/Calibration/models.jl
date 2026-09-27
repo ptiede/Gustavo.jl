@@ -57,13 +57,15 @@ end
 # ── GainComponent ────────────────────────────────────────────────────────────
 
 """
-    GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed())
+    GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed(), prior = nothing)
 
 One contribution to a station's gain: a gain `term` replicated over a `Ti`
 (time) segmentation and a `Frequency` segmentation, with `Feed` saying how the
 two feeds share it. The keywords are the dimension names the block's axes
 carry. One parameter block is allocated per (time segment, frequency
-segment, feed block).
+segment, feed block). `prior` is an [`AbstractPrior`](@ref) on the
+parameters, relating values within each block only; `nothing` leaves them
+free. A correlated prior's axis must be the term's [`value_axis`](@ref).
 
 ```julia
 GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds())
@@ -75,14 +77,25 @@ error messages print it back verbatim.
 struct GainComponent{
         T <: AbstractGainTerm, TS <: AbstractTimeSegmentation,
         FS <: AbstractFrequencySegmentation, F <: AbstractFeedTying,
+        P <: Union{Nothing, AbstractPrior},
     }
     term::T
     Ti::TS
     Frequency::FS
     Feed::F
+    prior::P
+    function GainComponent{T, TS, FS, F, P}(term, Ti, Frequency, Feed, prior) where {T, TS, FS, F, P}
+        e = new{T, TS, FS, F, P}(term, Ti, Frequency, Feed, prior)
+        _check_component_prior(e)
+        return e
+    end
 end
-GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed()) =
-    GainComponent(term, Ti, Frequency, Feed)
+GainComponent(term, Ti, Frequency, Feed, prior) =
+    GainComponent{typeof(term), typeof(Ti), typeof(Frequency), typeof(Feed), typeof(prior)}(
+    term, Ti, Frequency, Feed, prior,
+)
+GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed(), prior = nothing) =
+    GainComponent(term, Ti, Frequency, Feed, prior)
 
 # Number of distinct feed-blocks this tying allocates per (ant, tseg, fseg).
 nfeed_blocks(::PerFeed) = 2
@@ -288,9 +301,11 @@ end
 # order-insensitive: it is a station → entry map, and no consumer reads its
 # entry order.
 Base.:(==)(a::GainComponent, b::GainComponent) =
-    a.term == b.term && a.Ti == b.Ti && a.Frequency == b.Frequency && a.Feed == b.Feed
-Base.hash(e::GainComponent, h::UInt) =
-    hash(e.Feed, hash(e.Frequency, hash(e.Ti, hash(e.term, hash(:GainComponent, h)))))
+    a.term == b.term && a.Ti == b.Ti && a.Frequency == b.Frequency && a.Feed == b.Feed &&
+    a.prior == b.prior
+Base.hash(e::GainComponent, h::UInt) = hash(
+    e.prior, hash(e.Feed, hash(e.Frequency, hash(e.Ti, hash(e.term, hash(:GainComponent, h)))))
+)
 
 Base.:(==)(a::GainModel, b::GainModel) =
     a.phase == b.phase && a.logamp == b.logamp && _stations_equal(a.stations, b.stations)
@@ -330,15 +345,17 @@ _call_string(t::Polynomial{Ti}) = "PolynomialTime($(t.degree))"
     component_label(e::GainComponent) -> String
 
 The [`GainComponent`](@ref) constructor call as a string, e.g.
-`GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds())`.
-Used in errors and summaries so the printed form is one the user can paste back.
+`GainComponent(Delay(); Ti = PerScan(), Frequency = GlobalFrequency(), Feed = SharedFeeds())`,
+with `prior = …` appended when the component has one. Used in errors and
+summaries so the printed form is one the user can paste back.
 """
 function component_label(e::GainComponent)
     return string(
         "GainComponent(", _call_string(e.term),
         "; Ti = ", _call_string(e.Ti),
         ", Frequency = ", _call_string(e.Frequency),
-        ", Feed = ", _call_string(e.Feed), ")",
+        ", Feed = ", _call_string(e.Feed),
+        isnothing(e.prior) ? "" : ", prior = " * _call_string(e.prior), ")",
     )
 end
 
@@ -363,7 +380,7 @@ end
 # re-materialization, and is what provenance stores.
 
 materialize(e::GainComponent, geom::DataGeometry) =
-    GainComponent(e.term, e.Ti, materialize(e.Frequency, geom), e.Feed)
+    GainComponent(e.term, e.Ti, materialize(e.Frequency, geom), e.Feed, e.prior)
 materialize(nt::NamedTuple, geom::DataGeometry) = map(v -> materialize(v, geom), nt)
 
 # Station codes of an antenna table or an iterable of codes, as `String`s.

@@ -30,6 +30,7 @@ include("Calibration/gauge.jl")
 include("Calibration/lsq.jl")
 include("Calibration/segmentation.jl")
 include("Calibration/terms.jl")
+include("Calibration/priors.jl")
 include("Calibration/models.jl")
 include("Calibration/parameters.jl")
 include("Calibration/evaluate.jl")
@@ -55,11 +56,12 @@ export materialize, segment_ranges, fringe_freq_groups
 export AbstractGainTerm
 export ConstantTerm, Delay, Dispersion, Rate, Polynomial, PolynomialFreq, PolynomialTime
 # The term-authoring interface: the hooks a new `AbstractGainTerm` implements.
-export term_axes, param_shapes, term_eval
+export term_axes, param_shapes, term_eval, value_axis
 export freq_coordinate, time_coordinate, freq_coord_state, time_coord_state
 
 # Models and tying
 export GainComponent, GainModel, with_station
+export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior, prior_axis
 export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed
 export phase_components, logamp_components, model_components
 export station_components

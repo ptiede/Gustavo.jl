@@ -161,6 +161,17 @@ occupies in θ; derived from [`param_shapes`](@ref).
 nparams_per_block(t::AbstractGainTerm, nchan_seg) =
     sum(prod, values(param_shapes(t, nchan_seg)))
 
+"""
+    value_axis(term) -> Union{Type, Nothing}
+
+The dimension along which `term` carries one value per coordinate within a
+block (`Frequency` for [`Bandpass`](@ref)), or `nothing` when its parameters
+are not indexed by a coordinate. A correlated prior on a component must share
+this axis. Defaults to `nothing`.
+"""
+value_axis(::AbstractGainTerm) = nothing
+value_axis(::Bandpass) = Frequency
+
 # ── Coordinate builders ──────────────────────────────────────────────────────
 
 """
