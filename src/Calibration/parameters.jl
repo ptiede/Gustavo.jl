@@ -43,14 +43,15 @@ declare.
 struct ComponentPlan{
         T <: AbstractGainTerm, Ty <: AbstractFeedTying,
         TS <: AbstractTimeSegmentation, FS <: AbstractFrequencySegmentation, TC, FC,
+        XF <: AbstractVector{<:Real}, XT <: AbstractVector{<:Real},
     }
     term::T
     tseg::TS                    # the time segmentation `tseg_id` resolves
     fseg::FS                    # the frequency segmentation `fseg_id` resolves
     tseg_id::Vector{Int}        # length ntime  → time-segment id
     fseg_id::Vector{Int}        # length nchan  → freq-segment id
-    xf::Vector{Float64}         # length nchan  → frequency coordinate
-    xt::Vector{Float64}         # length ntime  → time coordinate
+    xf::XF                      # length nchan  → frequency coordinate
+    xt::XT                      # length ntime  → time coordinate
     nchan_seg::Vector{Int}      # length nfseg  → channels in the frequency segment
     tying::Ty
     range::UnitRange{Int}       # the component's contiguous θ span
@@ -103,8 +104,7 @@ end
 # as a fixed-rank column-major array: fastest to slowest over parameters,
 # feed-node, frequency segment, time segment, then antenna, size-1 axes kept so
 # every component reshapes to the same five axes and any consumer addresses it
-# the same way. A term whose block length varies across frequency segments has no
-# rectangular leaf and is rejected here.
+# the same way.
 function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     t = e.term
     tseg_id, ntseg = time_segment_ids(e.Ti, geom)
@@ -135,18 +135,12 @@ function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
         zeros(float(eltype(geom.times)), ntimes(geom))
 
     # Channels per freq segment, and the block length each implies (only terms
-    # whose arity comes from the data vary with it).
+    # whose arity comes from the data vary with it). The leaf is padded to the
+    # longest block; `param_shapes` names only a segment's own entries, so the
+    # padding is never read.
     nchan_seg = [length(grp) for grp in fseg_groups]
-    blocklen = [nparams_per_block(t, n) for n in nchan_seg]
-
+    bl = maximum(n -> nparams_per_block(t, n), nchan_seg)
     nfeed = nfeed_blocks(e.Feed)
-    bl = first(blocklen)                         # nchan_seg has one entry per segment (nfseg ≥ 1)
-    all(==(bl), blocklen) || throw(
-        ArgumentError(
-            "$(typeof(t)): block length varies across frequency segments (blocklen = " *
-                "$blocklen); the named-leaf layout requires one rectangular leaf per component."
-        )
-    )
     shape, roles = _leaf_shape(bl, nfeed, nfseg, ntseg, nant, e.Feed)
 
     return (;

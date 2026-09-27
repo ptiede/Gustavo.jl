@@ -484,6 +484,28 @@ function _leaf_dimarray(plan::ComponentPlan, axnode, sol::CalibrationSolution, s
     return DimArray(raw, dims; name)
 end
 
+# A `Bandpass` leaf holds each segment's channels on its padded `:param` axis;
+# the view lays them out over the solve's channels instead, still sharing θ.
+function _leaf_dimarray(plan::ComponentPlan{<:Bandpass}, axnode, sol::CalibrationSolution, s::StepSolution, name::Symbol)
+    stations = hasproperty(axnode, :stations) ? axnode.stations : nothing
+    raw = _component_leaf(plan, s.θ)
+    npad, nnode, nfseg, ntseg, nant = size(raw)
+    bychannel = reshape(PermutedDimsArray(raw, (1, 3, 2, 4, 5)), npad * nfseg, nnode, ntseg, nant)
+    slot = LinearIndices((npad, nfseg))
+    filled = zeros(Int, nfseg)
+    rows = map(plan.fseg_id) do fs
+        filled[fs] += 1
+        slot[filled[fs], fs]
+    end
+    dims = (
+        Frequency(sol.geom.channel_freqs),
+        _role_dim(axnode.roles[2], nnode, sol, plan; stations),
+        _role_dim(:Ti, ntseg, sol, plan; stations),
+        _role_dim(:Ant, nant, sol, plan; stations),
+    )
+    return DimArray(view(bychannel, rows, :, :, :), dims; name)
+end
+
 # Attempt to descend `tree` (a step's own `layout.plantree` or `layout.axes`)
 # by `path`; `(false, nothing)` without throwing when a name is absent along
 # the way. A `GroupedComponentPlan` descends into its signature groups, so a
