@@ -37,6 +37,7 @@ include("Fring/statespace.jl")
 # Per-observable frequency-shape specs and their per-track fit — pure functions
 # over one (station, feed, spw) track, independent of any solver stage.
 include("Fring/shapes.jl")
+include("Fring/prior_fits.jl")
 include("Fring/weighted_sums.jl")
 include("Fring/adhoc.jl")
 include("Fring/phasecal.jl")
