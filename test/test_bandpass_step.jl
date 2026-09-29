@@ -415,11 +415,14 @@ end
             shape, level = _bpc(CAL.PerSpectralWindow(); prior = ou),
         )
         @test_throws "share one time segmentation" pair(; shape, level = _bpc(CAL.PerSpectralWindow(); Ti = CAL.TimeBlocks(10.0)))
-        # Without a zero-mean prior the shape absorbs the level.
+        # Without a proper zero-mean prior the shape absorbs the level.
         @test_throws "needs a zero-mean OUPrior" pair(; level, shape = _bpc(CAL.ChannelBlocks(1)))
         @test_throws "needs a zero-mean OUPrior" pair(;
             level, shape = _bpc(CAL.ChannelBlocks(1); prior = CAL.RandomWalkPrior(; σ = 0.1)),
         )
+        @test pair(;
+            level, shape = _bpc(CAL.ChannelBlocks(1); prior = CAL.RandomWalkPrior(; σ = 0.1, init = Normal(0.0, 0.3))),
+        ) isa CAL.GainModel
         # A `stations` entry is vetted like the base, with the can_fit error
         # naming the station whose entry carries the unfittable component.
         bad_entry = with_station(

@@ -6,7 +6,7 @@ using Test
 using Random
 using LinearAlgebra
 using Statistics: mean, median, std
-using Distributions: LogNormal
+using Distributions: LogNormal, Normal, MvNormal
 
 const FRpf = Gustavo.Fring
 const CALpf = Gustavo.Calibration
@@ -131,6 +131,51 @@ end
     @test_throws "takes no level groups" FRpf._estimate_hypers(hyper, [y], [ws[1]], [x[1]]; level = [1])
     @test_throws "no block has 2 usable segments" FRpf._estimate_hypers(hyper, [fill(NaN, 150)], [ws[1]], [x[1]])
     @test_throws "RandomWalkPrior σ must be fixed" FRpf._estimate_map(hyper, y, ws[1], x[1])
+end
+
+# A walk of order `m` from a Gaussian start `N(μ, Σ)` on `(f, f′, …)` at `x[1]`, as a
+# Gaussian process: its mean and covariance at `x`.
+function _walk_gp(x, m, σ, μ, Σ)
+    t = x .- x[1]
+    k0(s, u) = m == 1 ? σ^2 * min(s, u) : (v = min(s, u); σ^2 * (v^3 / 3 + abs(u - s) * v^2 / 2))
+    X = [tj^j / factorial(j) for tj in t, j in 0:(m - 1)]
+    return X * μ, X * Σ * X' + [k0(a, b) for a in t, b in t]
+end
+
+@testset "random-walk prior with an init" begin
+    rng = Random.Xoshiro(21)
+    n = 30
+    x = cumsum(1.0e6 .* (0.5 .+ rand(rng, n)))
+    y = 0.3 .+ sin.((x .- x[1]) ./ 1.0e7) .+ 0.05 .* randn(rng, n)
+    y[6:8] .= NaN
+    w = 300.0 .+ 200.0 .* rand(rng, n)
+    o = findall(isfinite, y)
+    cases = (
+        (1, 1.0e-4, Normal(0.2, 0.5), [0.2], fill(0.25, 1, 1)),
+        (2, 1.0e-11, MvNormal([0.2, 1.0e-8], Diagonal([0.25, 1.0e-14])), [0.2, 1.0e-8], Diagonal([0.25, 1.0e-14])),
+    )
+    for (m, σ, init, μ, Σ) in cases
+        prior = CALpf.RandomWalkPrior(; order = m, σ, init)
+        mvec, K = _walk_gp(x, m, σ, μ, Σ)
+        C = K[o, o] + Diagonal(inv.(w[o]))
+        d = y[o] - mvec[o]
+        @test FRpf._estimate_map(prior, y, w, x) ≈ mvec + K[:, o] * (C \ d) rtol = 1.0e-6
+        @test FRpf._random_walk_loglik(y, w, x, m, σ; init) ≈ -(logdet(C) + d' * (C \ d) + length(o) * log(2π)) / 2 rtol = 1.0e-8
+        # The level beside the walk is its GLS estimate under the walk's covariance.
+        L = only(FRpf._estimate_levels(prior, [y], [w], [x], [1], 1))
+        @test L ≈ sum(C \ d) / sum(C \ ones(length(o))) rtol = 1.0e-6
+        @test all(isnan, FRpf._estimate_map(prior, fill(NaN, n), w, x))
+        # A σ hyperprior resolves with the level integrated out and keeps the init.
+        est = FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = m, σ = LogNormal(log(σ), 1.0), init), [y], [w], [x]; level = [1])
+        @test CALpf.is_fixed_hyper(est.σ) && est.init == init
+    end
+
+    flat = CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-11)
+    @test !FRpf._proper_prior(flat) && FRpf._proper_prior(CALpf.RandomWalkPrior(; σ = 0.1, init = Normal(0, 1)))
+    @test_throws "a level is not identifiable" FRpf._estimate_levels(flat, [y], [w], [x], [1], 1)
+    @test_throws "needs an init of length 2" CALpf.RandomWalkPrior(; order = 2, σ = 1.0, init = MvNormal(zeros(3), Diagonal(ones(3))))
+    @test_throws "got a Normal" CALpf.RandomWalkPrior(; order = 2, σ = 1.0, init = Normal(0, 1))
+    @test_throws "must be `nothing`, a Normal or an MvNormal" CALpf.RandomWalkPrior(; σ = 1.0, init = 0.3)
 end
 
 @testset "MAP of one block" begin

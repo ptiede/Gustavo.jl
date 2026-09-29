@@ -7,6 +7,7 @@ using Random
 using Statistics: mean, median, std
 using Gustavo.DimensionalData: At, Dim, DimArray, Ti, dims, lookup
 using LinearAlgebra: Diagonal
+using Distributions: LogNormal, Normal
 using OffsetArrays: OffsetArray
 
 const FRa = Gustavo.Fring
@@ -485,6 +486,13 @@ end
 
     @test rms_to_truth(gpj) < rms_to_truth(none)          # joint solve denoises
     @test rms_to_truth(gpj) < 1.1 * rms_to_truth(gp)      # competitive with per-track
+
+    # A random walk with an `init` runs in the joint state as well.
+    walk = RandomWalkPrior(; order = 1, σ = LogNormal(log(0.1), 1.0), init = Normal(0.0, 1.0))
+    rwj = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.JointKalmanSmoother(coherence_time = 20.0), tying = CALa.SharedFeeds(), prior = walk)
+    rwp = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.PerTrackAdhocSmoother(), tying = CALa.SharedFeeds(), prior = walk)
+    @test rms_to_truth(rwj) < rms_to_truth(none)
+    @test rms_to_truth(rwj) < 1.1 * rms_to_truth(rwp)
 end
 
 @testset "Adhoc :gp_joint resolves each station's prior" begin
@@ -517,9 +525,18 @@ end
     mixed = [a == ref ? fixed : FRa.default_adhoc_prior() for a in 1:nant]
     @test solve(mixed).prior[ref, 1] == fixed
 
-    # The joint state runs as an OU process, so any other prior is an error.
-    @test_throws "JointKalmanSmoother needs an OUPrior at every station" solve(RandomWalkPrior(; σ = 0.1))
-    @test_throws "JointKalmanSmoother needs an OUPrior at every station" solve(nothing)
+    # A walk's σ resolves the same way, and the reference station takes the
+    # median of the other walks'; the init is kept as given.
+    walk = RandomWalkPrior(; order = 1, σ = LogNormal(log(0.1), 1.0), init = Normal(0.0, 1.0))
+    pw = solve(walk).prior
+    @test all(p -> p isa RandomWalkPrior && CALa.is_fixed_hyper(p.σ) && p.init == walk.init, pw)
+    @test pw[ref, 1].σ ≈ median(pw[a, 1].σ for a in 1:nant if a != ref)
+    # The reference takes its median from stations of the same form only.
+    @test_throws "no other station has a prior of the same form" solve([a == ref ? walk : fixed for a in 1:nant])
+
+    # The joint state needs a proper prior: a flat walk or no prior is an error.
+    @test_throws "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init`" solve(RandomWalkPrior(; σ = 0.1))
+    @test_throws "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init`" solve(nothing)
 end
 
 @testset "Adhoc :gp_joint requires one node per station" begin

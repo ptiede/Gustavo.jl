@@ -205,6 +205,62 @@ end
     @test maximum(abs(xs[i, k] - Xgp[i, k]) for k in 1:T for i in 1:n) < 1.0e-8
 end
 
+@testset "Joint filter over mixed OU and random-walk stations ≡ dense GP" begin
+    rng = MersenneTwister(0x5A1D)
+    T = 9
+    times = sort(cumsum(0.5 .+ rand(rng, T)) .* 2.0)
+    t = times .- times[1]
+    μ1, P1 = [0.1], fill(0.3, 1, 1)
+    μ2, P2 = [0.0, 0.05], [0.4 0.01; 0.01 0.02]
+    models = [FRs.OUModel(3.0, 0.6), FRs.RandomWalkModel{1}(0.05, μ1, P1), FRs.RandomWalkModel{2}(0.01, μ2, P2)]
+    # Each station's value process: mean and covariance at `times`.
+    X1 = ones(T, 1)
+    X2 = [ones(T) t]
+    iwp(s, u) = (v = min(s, u); v^3 / 3 + abs(u - s) * v^2 / 2)
+    means = [zeros(T), X1 * μ1, X2 * μ2]
+    covs = [
+        [0.6 * exp(-abs(a - b) / 3.0) for a in times, b in times],
+        X1 * P1 * X1' + [0.05 * min(a, b) for a in t, b in t],
+        X2 * P2 * X2' + [0.01 * iwp(a, b) for a in t, b in t],
+    ]
+    rows = [(1, 2), (1, 3), (2, 3)]
+    ys = [randn(rng, 3) .* 0.4 for _ in 1:T]
+    rs = [fill(0.02, 3) for _ in 1:T]
+    ys[4][2] = NaN
+
+    n = 3
+    Σ = zeros(n * T, n * T)
+    m = zeros(n * T)
+    for i in 1:n
+        idx = ((i - 1) * T + 1):(i * T)
+        Σ[idx, idx] .= covs[i]
+        m[idx] .= means[i]
+    end
+    D = zeros(0, n * T)
+    yv = Float64[]
+    rv = Float64[]
+    for k in 1:T, (j, (a, b)) in enumerate(rows)
+        isfinite(ys[k][j]) || continue
+        row = zeros(1, n * T)
+        row[(a - 1) * T + k] = 1.0
+        row[(b - 1) * T + k] = -1.0
+        D = [D; row]
+        push!(yv, ys[k][j])
+        push!(rv, rs[k][j])
+    end
+    C = D * Σ * D' + Diagonal(rv)
+    dv = yv - D * m
+    dense_ll = -(logdet(C) + dv' * (C \ dv) + length(yv) * log(2π)) / 2
+    post = permutedims(reshape(m + Σ * D' * (C \ dv), T, n))
+
+    xf, Pf, xp, Pp, As, ll = FRs.kalman_mv_filter(rows, ys, rs, times, models)
+    xs, _ = FRs.rts_smooth_mv(xf, Pf, xp, Pp, As)
+    @test size(xs, 1) == 4                                   # states 1, 1 and 2
+    @test ll ≈ dense_ll atol = 1.0e-8
+    @test xs[[1, 2, 3], :] ≈ post atol = 1.0e-8               # each station's value state
+    @test_throws "needs a proper start" FRs.kalman_mv_filter(rows, ys, rs, times, [models[1], FRs.RandomWalkModel{1}(0.05)])
+end
+
 @testset "Multivariate OU: a τ = 0 station is temporally independent" begin
     # A τ = 0 station has a fresh N(0, σ²) value at every step and no temporal coupling,
     # so the RTS pass has nothing to propagate back: the smoothed track equals the

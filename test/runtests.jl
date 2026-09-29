@@ -6,7 +6,7 @@ using Random
 using StructArrays
 using Dates
 using OrderedCollections
-using Distributions: LogNormal
+using Distributions: LogNormal, Normal, MvNormal
 using FITSFiles: Card
 import XRadio
 using CairoMakie
