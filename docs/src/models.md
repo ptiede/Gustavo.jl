@@ -25,7 +25,7 @@ a `NamedTuple` of named [`GainComponent`](@ref)s:
 ```julia
 GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed(), prior = nothing)
 
-bp = GainComponent(Calibration.Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow())
+bp = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1))
 GainModel(phase = (; bp), logamp = (; bp))
 ```
 
@@ -45,9 +45,9 @@ Two rules of thumb anchor the vocabulary:
   `Ti` segmentations.
 - *How finely a value varies is said by its segmentation, never by the term.*
   A value free per channel is `ConstantTerm()` paired with `ChannelBlocks(1)`,
-  not a vector-valued term. The one exception is `Calibration.Bandpass()`, a
-  value per channel within each frequency segment, so that a prior can relate
-  neighboring channels; its segments are the breaks the prior never crosses.
+  not a vector-valued term. A value with structure at several resolutions is a
+  sum of components, one per resolution: a bandpass may be a `level` per
+  spectral window plus a per-channel `shape` under a zero-mean prior.
 
 ### Terms
 
@@ -58,7 +58,6 @@ Two rules of thumb anchor the vocabulary:
 | [`Rate`](@ref)`()` | `2π·ṙ·(t − t0)` | fringe rate `ṙ` (Hz), `t0` the segment's own mean epoch |
 | [`Dispersion`](@ref)`()` | `K·θ·(1/f0 − 1/f)` | differential TEC `θ` (TECU) |
 | [`PolynomialFreq`](@ref)`(n)` / [`PolynomialTime`](@ref)`(n)` | `Σ cᵈ·xᵈ`, `d = 1…n`, over the segment-normalized axis coordinate | `n` coefficients per segment (the constant belongs to a `ConstantTerm`) |
-| `Calibration.Bandpass()` | the value at the channel | one value per channel of each frequency segment |
 
 A term contributes to whichever group (`phase` or `logamp`) its component is
 placed in. New terms are added with five small methods — see
@@ -74,15 +73,31 @@ data:
 | `nothing` | none: every value is free |
 | [`IIDPrior`](@ref)`(σ)` | each parameter `N(0, σ²)` |
 | [`RandomWalkPrior`](@ref)`(; order, σ)` | the `order`-th difference between neighbors along the axis is `N(0, σ²)` |
-| [`OUPrior`](@ref)`(; scale, σ)` | an Ornstein–Uhlenbeck process along the axis about a free level; `scale` and `σ` each a number or a hyperprior |
+| [`OUPrior`](@ref)`(; scale, σ)` | a zero-mean Ornstein–Uhlenbeck process along the axis; `scale` and `σ` each a number or a hyperprior |
 
 `σ` is in the parameter's own units. A correlated prior runs along the one axis
 the component segments (the one whose segmentation is not `GlobalTime` or
 `GlobalFrequency`). A component segmenting both keys the prior by axis,
 `prior = (Ti = OUPrior(; …), Frequency = RandomWalkPrior(; …))`, and may leave
-either key out; see [`resolve_prior`](@ref). Stations that differ only in their
-priors share one parameter layout. Which priors a solver fits is part of its
-`can_fit`.
+either key out; see [`resolve_prior`](@ref). Along frequency, a prior relates
+values within one spectral window and never across windows. Stations that
+differ only in their priors share one parameter layout. Which priors a solver
+fits is part of its `can_fit`.
+
+A level is its own component, with no prior. The zero mean of the shape's prior
+is what separates the two:
+
+```julia
+shape = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1),
+                      prior = OUPrior(; scale = 50e6, σ = 0.1))
+level = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow())
+GainModel(phase = (; level, shape), logamp = (; level, shape))
+```
+
+The bandpass smoothers estimate the level by generalized least squares under the
+shape's prior, and an `OUPrior` hyperprior with the level integrated out. A
+random walk beside a level is rejected, since the walk leaves its own level
+free, as is a shape with no prior.
 
 ### Time segmentations
 
@@ -212,8 +227,8 @@ And one log-amplitude component:
 
 **`bandpass` — per-channel constant log-amplitude, time-global, per-feed**
 (the `Bandpass` step's logamp half). The instrumental amplitude passband
-(filterbank shape), flattened from the calibrator under a pluggable shape
-spec. The absolute flux scale is *not* its job — that stays with the a-priori
+(filterbank shape), measured on the calibrator under the component's prior,
+if any. The absolute flux scale is *not* its job — that stays with the a-priori
 amplitude calibration ([`AprioriAmplitude`](@ref Gustavo.AprioriAmplitude)).
 
 ## Per-station heterogeneity
@@ -224,7 +239,7 @@ little differently.* [`with_station`](@ref) gives one station its own
 groups, used verbatim:
 
 ```julia
-bp(prior) = GainComponent(Calibration.Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), prior)
+bp(prior) = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), prior)
 m = GainModel(phase = (; bandpass = bp(nothing)))
 with_station(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(; order = 2, σ = 0.01))))
 ```

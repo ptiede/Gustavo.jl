@@ -704,82 +704,6 @@ end
 
 # ── Audit-driven regression tests ────────────────────────────────────────────
 
-@testset "Bandpass term: a value per channel, segments as breaks" begin
-    freqs = [1.0, 1.1, 1.2, 2.0, 2.1] .* 1.0e9
-    geom = CAL.DataGeometry(;
-        times = [0.0, 1.0], scan_of_time = [1, 2], scan_names = ["No001", "No002"],
-        channel_freqs = freqs, spw_of_chan = [1, 1, 1, 2, 2], spw_names = ["A", "B"],
-        t0 = 0.0, f0 = 1.5e9,
-    )
-    names = ["AA", "BB", "CC"]
-    bp(seg) = CAL.GainComponent(
-        CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = seg, Feed = CAL.PerFeed(),
-    )
-    # The channel each solve channel is within its segment, and that segment.
-    pos, seg = [1, 2, 3, 1, 2], [1, 1, 1, 2, 2]
-
-    @test CAL.term_axes(CAL.Bandpass()) == (Frequency,)
-    @test CAL.param_shapes(CAL.Bandpass(), 7) == (values = (7,),)
-
-    model = CAL.GainModel(phase = (bp = bp(CAL.PerSpectralWindow()),))
-    layout = CAL.plan_parameters(model, length(names), geom)
-    plan = layout.plantree.phase.bp
-    # Padded to the wider spw; the narrower one's third slot is never read.
-    @test plan.shape == (3, 2, 2, 1, 3)
-    θ = 0.1 .* sin.(1:layout.nθ)
-    leaf = CAL._component_leaf(plan, θ)
-    g = CAL.evaluate_gains(layout, θ)
-    @test all(angle(g[c, t, a, f]) ≈ leaf[pos[c], f, seg[c], 1, a] for c in 1:5, t in 1:2, a in 1:3, f in 1:2)
-    padded = copy(θ)
-    CAL._component_leaf(plan, padded)[3, :, 2, :, :] .= 100.0
-    @test CAL.evaluate_gains(layout, padded) == g
-
-    @testset "labeled over the solve's channels, sharing θ" begin
-        sol = CAL.CalibrationSolution(model, layout, geom, θ, (; ant_names = names))
-        p = CAL.parameters(sol[:solution, :phase, :bp])
-        @test size(p) == (5, 2, 1, 3)
-        @test lookup(p, Frequency) == freqs
-        @test lookup(p, UVD.Ant) == names
-        @test all(p[c, f, 1, a] == leaf[pos[c], f, seg[c], 1, a] for c in 1:5, f in 1:2, a in 1:3)
-        solleaf = CAL._component_leaf(plan, sol.steps[1].θ)
-        solleaf[2, 1, 2, 1, 3] = 7.0
-        @test p[Frequency = At(2.1e9), Feed = At(1), Ant = At("CC")][1] == 7.0
-    end
-
-    @testset "applies only at the channels it was solved on" begin
-        same = CAL.DataGeometry(;
-            times = geom.times, scan_of_time = [1, 2], scan_names = geom.scan_names,
-            channel_freqs = freqs .* (1 + 1.0e-12), spw_of_chan = geom.spw_of_chan,
-            spw_names = geom.spw_names,
-        )
-        @test CAL.evaluate_gains(layout, θ, geom, same) ≈ g
-        shifted = CAL.DataGeometry(;
-            times = geom.times, scan_of_time = [1, 2], scan_names = geom.scan_names,
-            channel_freqs = [1.0, 1.1, 1.15, 2.0, 2.1] .* 1.0e9, spw_of_chan = geom.spw_of_chan,
-            spw_names = geom.spw_names,
-        )
-        @test_throws "no channel at 1.15e9 Hz" CAL.evaluate_gains(layout, θ, geom, shifted)
-    end
-
-    @testset "breaks per station" begin
-        m = CAL.GainModel(;
-            phase = (bp = bp(CAL.FreqGroups([1:2, 3:5])),),
-            stations = (AA = (; phase = (bp = bp(CAL.GlobalFrequency()),)),),
-        )
-        lh = CAL.plan_parameters(m, names, geom)
-        groups = lh.plantree.phase.bp.groups
-        @test groups.g1.shape == (5, 2, 1, 1, 1)
-        @test groups.g2.shape == (3, 2, 2, 1, 2)
-        θh = 0.1 .* cos.(1:lh.nθ)
-        gh = CAL.evaluate_gains(lh, θh)
-        whole = CAL._component_leaf(groups.g1, θh)
-        pieces = CAL._component_leaf(groups.g2, θh)
-        @test all(angle(gh[c, 1, 1, f]) ≈ whole[c, f, 1, 1, 1] for c in 1:5, f in 1:2)
-        hpos, hseg = [1, 2, 1, 2, 3], [1, 1, 2, 2, 2]
-        @test all(angle(gh[c, 1, a + 1, f]) ≈ pieces[hpos[c], f, hseg[c], 1, a] for c in 1:5, f in 1:2, a in 1:2)
-    end
-end
-
 @testset "Priors on a component" begin
     @testset "construction and validation" begin
         @test CAL.IIDPrior(0.1).σ == 0.1
@@ -833,7 +757,7 @@ end
 
     @testset "attached to a component" begin
         bp(prior) = CAL.GainComponent(
-            CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), prior,
+            CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), prior,
         )
         rw = CAL.RandomWalkPrior(; order = 2, σ = 0.01)
         @test bp(rw).prior === rw
@@ -854,7 +778,7 @@ end
             @test Core.eval(CAL, Meta.parse(lbl)) == c
         end
         @test CAL.component_label(bp(rw)) ==
-            "GainComponent(Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), " *
+            "GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), " *
             "Feed = PerFeed(), prior = RandomWalkPrior(; order = 2, σ = 0.01))"
     end
 
@@ -866,7 +790,7 @@ end
         )
         names = ["AA", "BB", "CC"]
         bp(prior; Ti = CAL.GlobalTime()) = CAL.GainComponent(
-            CAL.Bandpass(); Ti, Frequency = CAL.PerSpectralWindow(), prior,
+            CAL.ConstantTerm(); Ti, Frequency = CAL.PerSpectralWindow(), prior,
         )
         rw = CAL.RandomWalkPrior(; order = 2, σ = 0.01)
         ou = CAL.OUPrior(; scale = LogNormal(18.0, 1.0), σ = 0.1)

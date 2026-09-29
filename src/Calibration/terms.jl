@@ -92,19 +92,6 @@ Polynomial in a segment-scaled time coordinate. Dispatch on `Polynomial` (or
 """
 PolynomialTime(degree::Integer) = Polynomial{Ti}(degree)
 
-"""
-    Bandpass()
-
-A free value per channel within each frequency segment of its component. The
-segments are independent of each other: each has its own level, and a prior on
-the component relates values only within a segment.
-
-```julia
-GainComponent(Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow())
-```
-"""
-struct Bandpass <: AbstractGainTerm end
-
 # ── Coordinate axes ──────────────────────────────────────────────────────────
 const TERM_AXES = (Frequency, Ti)
 
@@ -124,7 +111,6 @@ term_axes(::Delay) = (Frequency,)
 term_axes(::Dispersion) = (Frequency,)
 term_axes(::Rate) = (Ti,)
 term_axes(::Polynomial{C}) where {C} = (C,)
-term_axes(::Bandpass) = (Frequency,)
 
 # ── Parameter names and shapes ───────────────────────────────────────────────
 
@@ -150,7 +136,6 @@ param_shapes(::Delay, nchan_seg) = (delay = (),)
 param_shapes(::Dispersion, nchan_seg) = (dtec = (),)
 param_shapes(::Rate, nchan_seg) = (rate = (),)
 param_shapes(t::Polynomial, nchan_seg) = (coeffs = (t.degree,),)
-param_shapes(::Bandpass, nchan_seg) = (values = (nchan_seg,),)
 
 """
     nparams_per_block(term, nchan_seg) -> Int
@@ -254,23 +239,6 @@ freq_coordinate(::Polynomial{Frequency}, f, st, seg::Integer) =
 time_coordinate(::Polynomial{Ti}, t, st, seg::Integer) =
     @inbounds (t - st.center[seg]) / st.scale[seg]
 
-# A `Bandpass` coordinate is the channel's position within its segment; the
-# state holds each segment's channel frequencies. A frequency matches a channel
-# only within `_FREQ_RTOL`, so a solution applies to foreign data only at the
-# channels it was solved on.
-freq_coord_state(::Bandpass, geom::DataGeometry, fseg_id, nfseg) =
-    [geom.channel_freqs[g] for g in segment_groups(fseg_id, nfseg)]
-function freq_coordinate(::Bandpass, f, chans, seg::Integer)
-    i = findfirst(c -> isapprox(c, f; rtol = _FREQ_RTOL), chans[seg])
-    isnothing(i) && throw(
-        ArgumentError(
-            "Bandpass: frequency segment $seg has no channel at $f Hz; a bandpass is " *
-                "defined only at the channels it was solved on."
-        )
-    )
-    return i
-end
-
 # Center each segment on the mean of its coordinates and scale by the widest
 # excursion from it. A single-sample segment has zero spread; its scale is
 # REPLACED by 1 rather than floored — the coordinate is then identically zero
@@ -324,7 +292,6 @@ function term_eval end
 @inline term_eval(::Delay, p, x) = 2π * p.delay * x.Frequency
 @inline term_eval(::Dispersion, p, x) = p.dtec * x.Frequency
 @inline term_eval(::Rate, p, x) = 2π * p.rate * x.Ti
-@inline term_eval(::Bandpass, p, x) = p.values[x.Frequency]
 
 # Σ_{d=1}^{degree} c_d · x^d, in the axis this polynomial declared. The basis
 # starts at x¹: a constant belongs to an accompanying `ConstantTerm`, and

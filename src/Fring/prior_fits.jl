@@ -1,43 +1,70 @@
 # ── Estimating one parameter block under a component prior ──────────────────
 #
-# A block is one frequency segment of one (station, feed, time segment) track: a
-# real observable (unwrapped phase or log-amplitude) per channel `y`, its
-# inverse-variance weights `w`, and the channel frequencies `x`. A channel with
-# non-finite `y`, or `w` not positive and finite, carries no data. A prior
+# A block is one spectral window of one (station, feed, time segment) track: a
+# real observable (unwrapped phase or log-amplitude) per frequency segment `y`,
+# its inverse-variance weights `w`, and the segments' frequencies `x`. A segment
+# with non-finite `y`, or `w` not positive and finite, carries no data. A prior
 # relates values within a block, never across blocks.
 #
-# Fitting is two steps: `_estimate_hypers` fixes a prior's hyperparameters from
-# whichever blocks the caller pools, and `_estimate_map` fits one block under the
-# resolved prior.
+# A block may share a level with other blocks: a separate component, flat and
+# unknown, that the prior's zero mean makes identifiable. `level` then gives each
+# block's level group, and `_estimate_levels` its GLS estimate.
+#
+# Fitting is in steps: `_estimate_hypers` fixes a prior's hyperparameters from
+# whichever blocks the caller pools, `_estimate_levels` the levels under them, and
+# `_estimate_map` fits one block, its level removed, under the resolved prior.
 
 _shape_usable(yk, wk) = isfinite(yk) && isfinite(wk) && wk > 0
 
 """
-    _estimate_hypers(prior, ys, ws, xs) -> prior
+    _estimate_hypers(prior, ys, ws, xs; level = nothing) -> prior
 
 `prior` with every hyperparameter fixed, estimated from the blocks
 `(ys[i], ws[i], xs[i])`. An `OUPrior` hyperparameter given as a hyperprior is
-estimated by type-II MAP, with each block centered on its own weighted mean; one
-given as a number is kept. Blocks without data are ignored; with none left the
+estimated by type-II MAP: zero-mean, or with the level of each group of
+`level` (one group id per block) integrated out under a flat prior. One given
+as a number is kept. Blocks without data are ignored; with none left the
 hyperpriors cannot be resolved and this throws.
 """
-_estimate_hypers(prior::Union{Nothing, RandomWalkPrior}, ys, ws, xs) = prior
+_estimate_hypers(prior::Union{Nothing, RandomWalkPrior}, ys, ws, xs; level = nothing) = prior
 
-function _estimate_hypers(prior::OUPrior, ys, ws, xs)
+function _estimate_hypers(prior::OUPrior, ys, ws, xs; level = nothing)
     is_fixed_hyper(prior.scale) && is_fixed_hyper(prior.σ) && return prior
     usable = [i for i in eachindex(ys, ws, xs) if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i]))]
     isempty(usable) && throw(
         ArgumentError("cannot estimate the OUPrior hyperparameters: no block carries data"),
     )
-    ycs = [_centered(ys[i], ws[i]) for i in usable]
+    yus = [_masked(ys[i], ws[i]) for i in usable]
     wus = [ws[i] for i in usable]
     xus = [xs[i] for i in usable]
     τ_lo, τ_hi = _group_ou_tau_bounds(xus)
     τ, σ2 = _map_ou_hypers(
-        ycs, wus, xus, prior.scale, prior.σ;
-        τ_lo, τ_hi, σ2_seed = _init_track_var(reduce(vcat, ycs), reduce(vcat, wus)),
+        yus, wus, xus, prior.scale, prior.σ;
+        τ_lo, τ_hi, σ2_seed = _init_track_var(reduce(vcat, yus), reduce(vcat, wus)),
+        levels = isnothing(level) ? nothing : level[usable],
     )
     return OUPrior(; scale = τ, σ = sqrt(σ2))
+end
+
+"""
+    _estimate_levels(prior::OUPrior, ys, ws, xs, level, nlevel) -> Vector
+
+The GLS estimate of each of `nlevel` levels, where block `i` is its level
+`level[i]` plus a zero-mean process under `prior` (hyperparameters fixed): the
+level maximizing the marginal likelihood of its blocks. `NaN` for a level no
+block with data holds.
+"""
+function _estimate_levels(prior::OUPrior, ys, ws, xs, level, nlevel::Integer)
+    T = promote_type((_block_eltype(y, w) for (y, w) in zip(ys, ws))...)
+    b = zeros(T, nlevel)
+    c = zeros(T, nlevel)
+    for i in eachindex(ys, ws, xs, level)
+        r = [_shape_usable(ys[i][k], ws[i][k]) ? inv(T(ws[i][k])) : T(Inf) for k in eachindex(ys[i], ws[i])]
+        _, bi, ci = _ou_level_sums(_masked(ys[i], ws[i]), r, xs[i]; τ = prior.scale, σ2 = prior.σ^2)
+        b[level[i]] += bi
+        c[level[i]] += ci
+    end
+    return T[c[g] > 0 ? b[g] / c[g] : T(NaN) for g in eachindex(b, c)]
 end
 
 """
@@ -51,9 +78,9 @@ value; a block without data is all `NaN`.
 
 - `nothing`: the measured values.
 - `RandomWalkPrior` of order `k`: the `k`-th difference between
-  neighboring channels is `N(0, σ²)`. A block with fewer than `k` usable
-  channels does not determine the walk and returns its measured values.
-- `OUPrior`: an OU process about the block's weighted mean.
+  neighboring segments is `N(0, σ²)`. A block with fewer than `k` usable
+  segments does not determine the walk and returns its measured values.
+- `OUPrior`: a zero-mean OU process.
 """
 function _estimate_map(::Nothing, y, w, x)
     T = _block_eltype(y, w)
@@ -72,23 +99,21 @@ function _estimate_map(prior::OUPrior, y, w, x)
     )
     T = _block_eltype(y, w)
     any(k -> _shape_usable(y[k], w[k]), eachindex(y, w)) || return fill(T(NaN), length(y))
-    m = _weighted_mean_finite(y, w)
-    return smooth_ou_track(_centered(y, w), w, x; τ = prior.scale, σ2 = prior.σ^2) .+ m
+    return smooth_ou_track(_masked(y, w), w, x; τ = prior.scale, σ2 = prior.σ^2)
 end
 
 _block_eltype(y, w) = float(promote_type(eltype(y), eltype(w)))
 
-# The block about its weighted mean, `NaN` where it carries no data.
-function _centered(y, w)
+# The block, `NaN` where it carries no data.
+function _masked(y, w)
     T = _block_eltype(y, w)
-    m = _weighted_mean_finite(y, w)
-    return T[_shape_usable(y[k], w[k]) ? y[k] - m : T(NaN) for k in eachindex(y, w)]
+    return T[_shape_usable(y[k], w[k]) ? y[k] : T(NaN) for k in eachindex(y, w)]
 end
 
 # The random-walk MAP `(W + DₖᵀDₖ/σ²)ŷ = Wy`, `Dₖ` the `k`-th
-# difference between neighboring channels: banded with bandwidth `k`, so a banded
-# Cholesky. A channel without data has weight 0 and the prior alone sets it. The
-# system is positive definite once `k` channels carry data, which the caller
+# difference between neighboring segments: banded with bandwidth `k`, so a banded
+# Cholesky. A segment without data has weight 0 and the prior alone sets it. The
+# system is positive definite once `k` segments carry data, which the caller
 # guarantees. Solved in at least `Float64`: a wide gap or a small `σ` puts the
 # condition number past what `Float32` resolves.
 function _random_walk_track(y, w, order::Integer, σ::Real)

@@ -268,16 +268,73 @@ function fit_ou_hypers(y, w, times; τ0::Real, σ2_0::Real, τ_lo::Real, τ_hi::
     return τ, σ2
 end
 
-# Type-II MAP of an `OUPrior`'s hyperparameters shared by a group of centered
-# tracks: the pooled Kalman marginal likelihood plus the hyperprior density over
+# The OU Kalman filter run over `y` and, with the same gains, over a vector of
+# ones. The filter is linear in its observations, so the innovations of
+# `y - L` are `vʸ - L·v¹`. Returns `(ll, b, c)` over the observed samples: the
+# zero-mean log likelihood of `y`, `b = Σ vʸ·v¹/S` and `c = Σ (v¹)²/S`. The GLS
+# level of `y` is `b/c`.
+function _ou_level_sums(y, r, times; τ::Real, σ2::Real)
+    Base.require_one_based_indexing(y, r, times)
+    T = float(promote_type(eltype(y), eltype(r), eltype(times), typeof(τ), typeof(σ2)))
+    ll = b = c = zero(T)
+    μy = μ1 = zero(T)
+    P = T(σ2)
+    for k in eachindex(y, r, times)
+        if k == 1
+            μyp, μ1p, Pp = zero(T), zero(T), T(σ2)
+        else
+            a, q = ou_step(τ, σ2, times[k] - times[k - 1])
+            μyp, μ1p, Pp = a * μy, a * μ1, a * a * P + q
+        end
+        if isfinite(y[k]) && isfinite(r[k]) && r[k] > 0
+            S = Pp + r[k]
+            K = Pp / S
+            vy, v1 = y[k] - μyp, one(T) - μ1p
+            ll -= (log(2 * T(π) * S) + vy * vy / S) / 2
+            b += vy * v1 / S
+            c += v1 * v1 / S
+            μy, μ1, P = μyp + K * vy, μ1p + K * v1, (1 - K) * Pp
+        else
+            μy, μ1, P = μyp, μ1p, Pp
+        end
+    end
+    return ll, b, c
+end
+
+# The log marginal likelihood of zero-mean OU tracks `ys`, or, with `levels`
+# giving each track's level group, of tracks offset by one unknown level per
+# group, integrated out under a flat prior (REML): per group
+# `Σ ll + b²/2c − log(c)/2`, up to a constant.
+function _ou_loglik(ys, rs, xs, levels; τ, σ2)
+    isnothing(levels) && return sum(i -> kalman_ou_filter(ys[i], rs[i], xs[i]; τ, σ2)[6], eachindex(ys, rs, xs))
+    ngroup = maximum(levels)
+    T = float(typeof(σ2))
+    b = zeros(T, ngroup)
+    c = zeros(T, ngroup)
+    lp = zero(T)
+    for i in eachindex(ys, rs, xs, levels)
+        ll, bi, ci = _ou_level_sums(ys[i], rs[i], xs[i]; τ, σ2)
+        lp += ll
+        b[levels[i]] += bi
+        c[levels[i]] += ci
+    end
+    for g in eachindex(b, c)
+        c[g] > 0 && (lp += b[g]^2 / (2 * c[g]) - log(c[g]) / 2)
+    end
+    return lp
+end
+
+# Type-II MAP of an `OUPrior`'s hyperparameters shared by a group of tracks:
+# the pooled Kalman marginal likelihood (`_ou_loglik`, zero-mean or with each
+# `levels` group's level integrated out) plus the hyperprior density over
 # `(log τ, log σ)`, whose Jacobian adds `log τ + log σ`. `scale` and `σ` are each
 # a fixed value or a density (`is_fixed_hyper`); only the densities are searched.
 # `[τ_lo, τ_hi]` bounds the `τ` search and seeds it at its geometric mean.
-function _map_ou_hypers(ycs, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real)
+function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, levels = nothing)
     T = float(
         promote_type(
             typeof(τ_lo), typeof(τ_hi), typeof(σ2_seed),
-            (eltype(y) for y in ycs)..., (eltype(w) for w in ws)..., (eltype(x) for x in xs)...,
+            (eltype(y) for y in ys)..., (eltype(w) for w in ws)..., (eltype(x) for x in xs)...,
         ),
     )
     fixτ, fixσ = is_fixed_hyper(scale), is_fixed_hyper(σ)
@@ -292,10 +349,7 @@ function _map_ou_hypers(ycs, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_se
         lτ, lσ2 = unpack(p)
         τ = fixτ ? exp(lτ) : exp(clamp(lτ, lτ_lo, lτ_hi))
         σ2 = max(exp(lσ2), σ2_lo)
-        lp = zero(T)
-        for i in eachindex(ycs, rs, xs)
-            lp += kalman_ou_filter(ycs[i], rs[i], xs[i]; τ, σ2)[6]
-        end
+        lp = _ou_loglik(ys, rs, xs, levels; τ, σ2)
         fixτ || (lp += logdensityof(scale, τ) + log(τ))
         fixσ || (lp += logdensityof(σ, sqrt(σ2)) + log(σ2) / 2)
         val = isfinite(lp) ? -lp : T(Inf)

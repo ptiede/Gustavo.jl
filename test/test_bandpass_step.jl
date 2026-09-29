@@ -15,9 +15,9 @@
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
-_bpc(freq; prior = nothing) =
-    CAL.GainComponent(CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = freq, Feed = CAL.PerFeed(), prior)
-_bpmodel(; phase = nothing, amp = nothing, freq = CAL.PerSpectralWindow()) = GainModel(;
+_bpc(freq; prior = nothing, Ti = CAL.GlobalTime()) =
+    CAL.GainComponent(CAL.ConstantTerm(); Ti, Frequency = freq, Feed = CAL.PerFeed(), prior)
+_bpmodel(; phase = nothing, amp = nothing, freq = CAL.ChannelBlocks(1)) = GainModel(;
     phase = (; bandpass = _bpc(freq; prior = phase)), logamp = (; bandpass = _bpc(freq; prior = amp)),
 )
 
@@ -30,6 +30,10 @@ _bp_phase_plan(step) = step.layout.plantree.phase.bandpass
 _bp_amp_plan(step) = step.layout.plantree.logamp.bandpass
 _bp_phase(step) = step.θ[_bp_phase_plan(step).range]
 _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
+
+# A bandpass leaf's values over `(Frequency, Feed, Ti, Ant)`, its unit `:param`
+# axis dropped.
+_by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
 @testset "Bandpass step (new engine)" begin
     nant, nspw, nchan = 4, 2, 8
@@ -175,7 +179,7 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         )[:bandpass].steps[1]
         track(s, a, f) = (
             L = CAL._component_leaf(s.layout.plantree.logamp.bandpass, s.θ);
-            Float64[L[c, f, 1, 1, a] for c in 1:nglobc]
+            Float64[L[1, f, c, 1, a] for c in 1:nglobc]
         )
         gauge(x) = x .- sum(x) / length(x)
         cleanc = [c for c in 1:nglobc if abs(c - bad_chan) > 2]
@@ -301,7 +305,7 @@ end
         bandpass = 0.5 .* randn(rng, nant, 2, nglob), amp_bandpass = 0.2 .* randn(rng, nant, 2, nglob),
     )
     # One (feed, station) phase track over the solve's channels.
-    phase_track(sol, a, f) = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))[:, f, 1, a]
+    phase_track(sol, a, f) = _by_channel(CAL.parameters(sol[:bandpass, :phase, :bandpass]))[:, f, 1, a]
     curvature(trk) = maximum(abs, diff(diff(CAL.unwrap_phase_track(trk))))
     run(model) = fit(Bandpass(; model, smoother = FP.PerTrackSmoother()), ps; gauge = PinAntenna(1))
 
@@ -319,15 +323,13 @@ end
     # acting rather than a featureless track...
     @test maximum(curvature(phase_track(sol_free, a, f)[cs]) for a in 2:nant, f in 1:2, cs in spws) > 0.1
     # ...and the spectral windows are separate pieces: across the boundary the
-    # track is not one line. With one segment over the band it is.
+    # track is not one line.
     @test maximum(curvature(phase_track(sol_stiff, a, f)) for a in 2:nant, f in 1:2) > 0.1
-    sol_one = run(_bpmodel(; phase = stiff, freq = CAL.GlobalFrequency()))
-    for a in 1:nant, f in 1:2
-        @test curvature(phase_track(sol_one, a, f)) < 1.0e-3
-    end
+    # A shape segment is the unit solved for, so one straddling two windows is refused.
+    @test_throws "straddles a spectral-window boundary" run(_bpmodel(; freq = CAL.GlobalFrequency()))
 
     # Stations differing only in prior share the layout; each fits under its own.
-    mixed = with_station(_bpmodel(), "A3"; phase = (; bandpass = _bpc(CAL.PerSpectralWindow(); prior = stiff)))
+    mixed = with_station(_bpmodel(), "A3"; phase = (; bandpass = _bpc(CAL.ChannelBlocks(1); prior = stiff)))
     sol_mixed = run(mixed)
     @test length(CAL.parameters(sol_mixed[:bandpass, :phase, :bandpass])) ==
         length(CAL.parameters(sol_free[:bandpass, :phase, :bandpass]))
@@ -340,7 +342,7 @@ end
 
     # The zero band-mean log-amp gauge is applied AFTER the prior fit, so a prior
     # that rewrites every channel still leaves the bandpass SHAPE only.
-    amp = parent(CAL.parameters(sol_stiff[:bandpass, :logamp, :bandpass]))
+    amp = _by_channel(CAL.parameters(sol_stiff[:bandpass, :logamp, :bandpass]))
     for a in 1:nant, f in 1:2
         @test abs(mean(amp[:, f, 1, a])) < 4 * eps(eltype(amp))
     end
@@ -364,37 +366,22 @@ end
         # before any data is read.
         @test_throws ArgumentError fit(Bandpass(model = GainModel(), smoother = pertrack), ps; gauge = PinAntenna(1))
         @test_throws "fits nothing" fit(Bandpass(model = GainModel(), smoother = pertrack), ps; gauge = PinAntenna(1))
-        # JointSmoother is stricter: one complex gain per (station, feed, channel)
+        # JointSmoother is stricter: one complex gain per (station, feed, segment)
         # needs both observables, not just one — so it rejects a model
         # PerTrackSmoother would happily solve.
         @test_throws "JointSmoother requires" fit(Bandpass(model = phase_only), ps; gauge = PinAntenna(1))
         @test fit(Bandpass(model = phase_only, smoother = pertrack), ps; gauge = PinAntenna(1)) isa
             CAL.CalibrationSolution
-        # Its two components may break at different frequency segments: the gains
-        # are per channel, and the segments only say where each prior breaks.
+        # Its two shapes share one frequency segmentation: one complex gain per segment.
         mixed = GainModel(;
-            phase = (; bandpass = _bpc(CAL.PerSpectralWindow())),
-            logamp = (; bandpass = _bpc(CAL.GlobalFrequency())),
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(1))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
         )
-        @test model_components(Bandpass(model = mixed), nothing) isa CAL.GainModel
-        # A prior the smoothers do not fit, and the per-segment constant the
-        # bandpass used to be, are both rejected by `can_fit`.
+        @test_throws "share one frequency segmentation" model_components(Bandpass(model = mixed), nothing)
+        @test model_components(Bandpass(model = mixed, smoother = pertrack), nothing) isa CAL.GainModel
+        # A prior the smoothers do not fit is rejected by `can_fit`.
         @test_throws "cannot fit the component" model_components(
-            Bandpass(model = GainModel(; phase = (; bandpass = _bpc(CAL.PerSpectralWindow(); prior = CAL.IIDPrior(0.1))))),
-            nothing,
-        )
-        @test_throws "cannot fit the component" model_components(
-            Bandpass(
-                model = GainModel(;
-                    phase = (;
-                        bandpass = CAL.GainComponent(
-                            CAL.ConstantTerm(); Ti = CAL.GlobalTime(),
-                            Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
-                        ),
-                    ),
-                ),
-                smoother = pertrack,
-            ),
+            Bandpass(model = GainModel(; phase = (; bandpass = _bpc(CAL.ChannelBlocks(1); prior = CAL.IIDPrior(0.1))))),
             nothing,
         )
         # A component the smoothers' θ writes cannot address (here: a Delay
@@ -410,15 +397,25 @@ end
         @test_throws "cannot fit the component" model_components(
             Bandpass(model = delay_model), nothing,
         )
-        # One track set per observable: a second component in a group is
-        # structurally unsolvable, whatever its form.
-        doubled = GainModel(;
-            phase = (;
-                bandpass = _bpc(CAL.PerSpectralWindow()),
-                ripple = _bpc(CAL.GlobalFrequency()),
-            ),
+        # One track set per observable: a shape, and at most one level beside it.
+        ou = CAL.OUPrior(; scale = 1.0e7, σ = 0.1)
+        shape = _bpc(CAL.ChannelBlocks(1); prior = ou)
+        level = _bpc(CAL.PerSpectralWindow())
+        pair(; kw...) = model_components(Bandpass(model = GainModel(; phase = (; kw...)), smoother = pertrack), nothing)
+        @test pair(; level, shape) isa CAL.GainModel
+        @test_throws "a shape and at most one level" pair(; shape, level, whole = _bpc(CAL.GlobalFrequency()))
+        @test_throws "one is the shape" pair(; a = shape, b = _bpc(CAL.ChannelBlocks(2)))
+        @test_throws "one is the shape" pair(; a = level, b = _bpc(CAL.GlobalFrequency()))
+        @test_throws "the level GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow()" *
+            ", Feed = PerFeed(), prior = OUPrior(; scale = 1.0e7, σ = 0.1)) carries a prior" pair(;
+            shape, level = _bpc(CAL.PerSpectralWindow(); prior = ou),
         )
-        @test_throws "at most one" model_components(Bandpass(model = doubled), nothing)
+        @test_throws "share one time segmentation" pair(; shape, level = _bpc(CAL.PerSpectralWindow(); Ti = CAL.TimeBlocks(10.0)))
+        # Without a zero-mean prior the shape absorbs the level.
+        @test_throws "needs a zero-mean OUPrior" pair(; level, shape = _bpc(CAL.ChannelBlocks(1)))
+        @test_throws "needs a zero-mean OUPrior" pair(;
+            level, shape = _bpc(CAL.ChannelBlocks(1); prior = CAL.RandomWalkPrior(; σ = 0.1)),
+        )
         # A `stations` entry is vetted like the base, with the can_fit error
         # naming the station whose entry carries the unfittable component.
         bad_entry = with_station(
@@ -444,8 +441,8 @@ end
         @test !supports_station_heterogeneity(Bandpass(smoother = pertrack))
         het = with_station(
             default_bandpass_terms(), "A1";
-            phase = (; bandpass = _bpc(CAL.GlobalFrequency())),
-            logamp = (; bandpass = _bpc(CAL.GlobalFrequency())),
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
         )
         @test model_components(Bandpass(model = het), nothing) isa CAL.GainModel
         @test fit(Bandpass(model = het), ps; gauge = PinAntenna(1)) isa CAL.CalibrationSolution
@@ -462,32 +459,42 @@ end
         )
         _setup(layout) = (;
             layout,
-            bp_path = FP._bandpass_path(layout.plantree, :phase),
-            amp_path = FP._bandpass_path(layout.plantree, :logamp),
+            paths = (;
+                phase = FP._bandpass_paths(layout.plantree, :phase),
+                logamp = FP._bandpass_paths(layout.plantree, :logamp),
+            ),
         )
 
         lu = CAL.plan_parameters(default_bandpass_terms(), anames, geom)
-        @test FP._bandpass_path(lu.plantree, :phase) == (:phase, :bandpass)
-        # The plantree's type is a compile-time constant, so the descent infers —
-        # the path is splatted into `station_blocks` on every solve.
-        @test @inferred(FP._bandpass_path(lu.plantree, :logamp)) == (:logamp, :bandpass)
+        @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing)
         @test only(FP.bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
+        @test isempty(FP.bandpass_level_blocks(_setup(lu), zeros(lu.nθ), :phase))
 
         # The path is a NAME descent, so it reaches a component the user nested
         # under names of their own.
         nested = CAL.GainModel(
-            phase = (; inst = (; bp = _bpc(CAL.PerSpectralWindow()))),
+            phase = (; inst = (; bp = _bpc(CAL.ChannelBlocks(1)))),
         )
-        @test FP._bandpass_path(CAL.plan_parameters(nested, anames, geom).plantree, :phase) ==
+        @test FP._bandpass_paths(CAL.plan_parameters(nested, anames, geom).plantree, :phase).shape ==
             (:phase, :inst, :bp)
+
+        # The shape is the component on `ChannelBlocks`, whatever the names and
+        # their order.
+        ou = CAL.OUPrior(; scale = 1.0e7, σ = 0.1)
+        leveled = CAL.GainModel(
+            phase = (; spw = _bpc(CAL.PerSpectralWindow()), chan = (; c = _bpc(CAL.ChannelBlocks(1); prior = ou))),
+        )
+        ll = CAL.plan_parameters(leveled, anames, geom)
+        @test FP._bandpass_paths(ll.plantree, :phase) == (; shape = (:phase, :chan, :c), level = (:phase, :spw))
+        @test only(FP.bandpass_level_blocks(_setup(ll), zeros(ll.nθ), :phase)).plan.fseg isa CAL.PerSpectralWindow
 
         # A model differing across stations puts one plan per signature group on
         # the flat `plans` list, so its positions no longer name the two
         # observables — the blocks still resolve, one per signature group.
         mh = with_station(
             default_bandpass_terms(), "A1";
-            phase = (; bandpass = _bpc(CAL.GlobalFrequency())),
-            logamp = (; bandpass = _bpc(CAL.GlobalFrequency())),
+            phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
+            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
         )
         lh = CAL.plan_parameters(mh, anames, geom)
         @test lh.nphase == 2 && length(lh.plans) == 4
@@ -500,7 +507,7 @@ end
         lp = CAL.plan_parameters(
             CAL.GainModel(; phase = default_bandpass_terms().phase), anames, geom,
         )
-        @test FP._bandpass_path(lp.plantree, :logamp) === nothing
+        @test FP._bandpass_paths(lp.plantree, :logamp) == (; shape = nothing, level = nothing)
         @test isempty(FP.bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
     end
 
@@ -549,10 +556,39 @@ end
     @test !any(==(FP._BP_TRACK_DECLINED), fit!(copy(noisy), w; unwrap = false))
 
     # The resolved prior is returned: hyperpriors become the fitted values.
-    resolved = FP._fit_track!(copy(smooth), w, x, pieces, prior)
+    resolved, levels = FP._fit_track!(copy(smooth), w, x, pieces, prior)
     @test CAL.is_fixed_hyper(resolved.scale) && CAL.is_fixed_hyper(resolved.σ)
+    @test isnothing(levels)
     # A track with no data keeps the prior it was given.
-    @test FP._fit_track!(fill(NaN, nband * nchan), w, x, pieces, prior) === prior
+    @test FP._fit_track!(fill(NaN, nband * nchan), w, x, pieces, prior) === (prior, nothing)
+end
+
+@testset "Bandpass: a track as levels plus a zero-mean shape" begin
+    rng = MersenneTwister(31)
+    nband, nchan = 4, 32
+    pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]
+    x = collect(range(8.6e10, 8.6e10 + 1.28e8; length = nband * nchan))
+    prior = CAL.OUPrior(; scale = 2.0e6, σ = 0.1)
+    # Pieces 1–2 share one level, 3–4 another.
+    level = [1, 1, 2, 2]
+    truth = [0.8, -0.5]
+    shape = 0.1 .* sin.(x ./ 1.5e6)
+    w = fill(1.0e4, nband * nchan)
+    y = [truth[level[b]] for b in 1:nband for _ in 1:nchan] .+ shape .+ randn(rng, nband * nchan) ./ 100
+
+    track = copy(y)
+    _, L = FP._fit_track!(track, w, x, pieces, prior; level, nlevel = 2)
+    @test L ≈ truth atol = 0.05
+    # The track receives their sum.
+    @test sqrt(mean(abs2, track .- ([truth[level[b]] for b in 1:nband for _ in 1:nchan] .+ shape))) < 0.03
+
+    # Phase pieces sharing a level are put on one 2π branch before the level is fit.
+    wrapped = copy(y)
+    wrapped[pieces[2]] .+= 2π
+    tp = copy(wrapped)
+    _, Lp = FP._fit_track!(tp, w, x, pieces, prior; level, nlevel = 2, unwrap = true)
+    @test Lp ≈ truth atol = 0.05
+    @test sqrt(mean(abs2, tp .- track)) < 1.0e-6
 end
 
 @testset "bandpass_track_report: counts and the unfitted observable" begin
@@ -676,12 +712,12 @@ end
         ms[:visibility] = rebuild(ms[:visibility], vis)
     end
 
-    bp(ti) = GainComponent(CAL.Bandpass(); Ti = ti, Frequency = PerSpectralWindow(), Feed = PerFeed())
+    bp(ti) = GainComponent(ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed())
     model(ti) = GainModel(phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)))
 
     @testset "θ carries one block per time segment" begin
         sol = fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1))
-        leaf = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
+        leaf = _by_channel(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
         @test size(leaf, 3) == 2                       # (Frequency, Feed, Ti, Ant)
         # Each segment is solved from its own scans, so the halves disagree —
         # they would be one block under `GlobalTime`.
@@ -758,8 +794,8 @@ end
 
     @testset "G3: the band mean is time-invariant across the break" begin
         sol = fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1))
-        leaf = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
-        aleaf = parent(CAL.parameters(sol[:bandpass, :logamp, :bandpass]))
+        leaf = _by_channel(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
+        aleaf = _by_channel(CAL.parameters(sol[:bandpass, :logamp, :bandpass]))
         for a in axes(leaf, 4), f in axes(leaf, 2), ts in axes(leaf, 3)
             ph = leaf[:, f, ts, a]
             any(!iszero, ph) || continue
@@ -772,8 +808,8 @@ end
         # The break path must reduce exactly to the old one-segment solve.
         a = fit(Bandpass(; model = model(GlobalTime())), broken; gauge = PinAntenna(1))
         b = fit(Bandpass(; model = default_bandpass_terms()), broken; gauge = PinAntenna(1))
-        @test parent(CAL.parameters(a[:bandpass, :phase, :bandpass])) ==
-            parent(CAL.parameters(b[:bandpass, :phase, :bandpass]))
+        @test _by_channel(CAL.parameters(a[:bandpass, :phase, :bandpass])) ==
+            _by_channel(CAL.parameters(b[:bandpass, :phase, :bandpass]))
     end
 
     @testset "per-scan resolution is still refused" begin
@@ -842,7 +878,7 @@ end
     t_break = (ts[ntime] + ts[ntime + 1]) / 2
 
     bpc(ti) = GainComponent(
-        CAL.Bandpass(); Ti = ti, Frequency = PerSpectralWindow(), Feed = PerFeed(),
+        ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed(),
     )
     het = GainModel(;
         phase = (; bandpass = bpc(GlobalTime())),
@@ -891,13 +927,13 @@ end
         for f in 1:2
             # Station 1 is the gauge reference and the broken station both, so
             # the pin holds its FIRST segment and its second carries the break.
-            @test all(iszero, pb[1].θ[:, f, 1, 1, 1])
-            @test pb[1].θ[:, f, 1, 2, 1] ≈ cdemean(brk[f]) atol = 1.0e-6
+            @test all(iszero, pb[1].θ[1, f, :, 1, 1])
+            @test pb[1].θ[1, f, :, 2, 1] ≈ cdemean(brk[f]) atol = 1.0e-6
             # The other nine hold one bandpass across the gap, and it is the one
             # they really have — station 1's break leaks into none of them.
             for (ai, a) in pairs(pb[2].stations)
                 want = cdemean(bp_true[a, f, :, 1] .- bp_true[1, f, :, 1])
-                @test pb[2].θ[:, f, 1, 1, ai] ≈ want atol = 1.0e-6
+                @test pb[2].θ[1, f, :, 1, ai] ≈ want atol = 1.0e-6
             end
         end
     end

@@ -12,6 +12,10 @@ const FRpf = Gustavo.Fring
 const CALpf = Gustavo.Calibration
 const Freq = Gustavo.UVData.Frequency
 
+# The zero-mean OU posterior covariance pieces by dense linear algebra.
+_ou_cov(x, τ, σ2) = [σ2 * exp(-abs(a - b) / τ) for a in x, b in x]
+_dense_ou_map(y, w, x, τ, σ2) = (K = _ou_cov(x, τ, σ2); K * ((K + Diagonal(inv.(w))) \ y))
+
 # The random-walk MAP by dense linear algebra.
 function _dense_random_walk(y, w, order, σ)
     n = length(y)
@@ -57,11 +61,11 @@ end
     @test isequal(FRpf._estimate_map(rw, y3, w, x), y3)
     @test all(isnan, FRpf._estimate_map(rw, fill(NaN, n), w, x))
 
-    # OU is centered on the block's weighted mean.
+    # OU is zero-mean: an offset is shrunk toward zero, not removed.
     ou = CALpf.OUPrior(; scale = 1.0e7, σ = 0.2)
     yl = y .+ 3.0
-    m = sum(yl .* w) / sum(w)
-    @test FRpf._estimate_map(ou, yl, w, x) ≈ FRpf.smooth_ou_track(yl .- m, w, x; τ = 1.0e7, σ2 = 0.04) .+ m
+    @test FRpf._estimate_map(ou, yl, w, x) ≈ FRpf.smooth_ou_track(yl, w, x; τ = 1.0e7, σ2 = 0.04)
+    @test FRpf._estimate_map(ou, yl, w, x) ≈ _dense_ou_map(yl, w, x, 1.0e7, 0.04)
     # Hyperparameters must be resolved first.
     @test_throws "OUPrior hyperparameters must be fixed" FRpf._estimate_map(
         CALpf.OUPrior(; scale = LogNormal(16.0, 1.0), σ = 0.2), y, w, x,
@@ -82,22 +86,61 @@ end
     @test FRpf._estimate_hypers(fixed, ys, ws, xs) === fixed
 
     # Hyperpriors resolve to one fixed (scale, σ) for all the blocks: the
-    # type-II MAP over the blocks, each centered on its own mean.
+    # type-II MAP over the blocks, each block's level integrated out.
     ou = CALpf.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = LogNormal(log(0.2), 1.0))
-    est = FRpf._estimate_hypers(ou, ys, ws, xs)
+    level = [1, 2, 3]
+    est = FRpf._estimate_hypers(ou, ys, ws, xs; level)
     @test CALpf.is_fixed_hyper(est.scale) && CALpf.is_fixed_hyper(est.σ)
-    ycs = [y .- sum(y .* w) / sum(w) for (y, w) in zip(ys, ws)]
     τ_lo, τ_hi = FRpf._group_ou_tau_bounds(xs)
     τ, σ2 = FRpf._map_ou_hypers(
-        ycs, ws, xs, ou.scale, ou.σ; τ_lo, τ_hi, σ2_seed = FRpf._init_track_var(reduce(vcat, ycs), reduce(vcat, ws)),
+        ys, ws, xs, ou.scale, ou.σ;
+        τ_lo, τ_hi, σ2_seed = FRpf._init_track_var(reduce(vcat, ys), reduce(vcat, ws)), levels = level,
     )
     @test est.scale ≈ τ && est.σ ≈ sqrt(σ2)
+    # Zero-mean, the offsets 1, 2, 3 read as signal and inflate σ.
+    @test FRpf._estimate_hypers(ou, ys, ws, xs).σ > 2 * est.σ
     # The resolved prior follows the ripple rather than flattening it.
-    @test std(FRpf._estimate_map(est, ys[1], ws[1], xs[1])) > 0.1
+    L = FRpf._estimate_levels(est, ys, ws, xs, level, 3)
+    @test L ≈ [1, 2, 3] atol = 0.15
+    @test std(FRpf._estimate_map(est, ys[1] .- L[1], ws[1], xs[1])) > 0.1
 
     # A block without data does not enter the estimate; with no data at all
     # there is nothing to estimate from.
     empty = fill(NaN, 64)
-    @test FRpf._estimate_hypers(ou, [ys; [empty]], [ws; [ws[1]]], [xs; [xs[1]]]) == est
+    @test FRpf._estimate_hypers(ou, [ys; [empty]], [ws; [ws[1]]], [xs; [xs[1]]]; level = [level; 1]) == est
     @test_throws "no block carries data" FRpf._estimate_hypers(ou, [empty], ws[1:1], xs[1:1])
+end
+
+@testset "a level shared by blocks under a zero-mean OU" begin
+    rng = Random.Xoshiro(8)
+    τ, σ2 = 2.0e7, 0.03
+    xs = [collect(range(1.0e9, 1.06e9; length = 12)), collect(range(1.2e9, 1.26e9; length = 9))]
+    ws = [100.0 .+ 50.0 .* rand(rng, length(x)) for x in xs]
+    ys = [0.7 .+ 0.2 .* sin.(x ./ 1.0e7) .+ randn(rng, length(x)) ./ sqrt.(w) for (x, w) in zip(xs, ws)]
+    ys[2][4] = NaN
+
+    # Dense GLS: the two blocks are independent, each covariance K + W⁻¹.
+    usable(i) = isfinite.(ys[i])
+    Σinv(i) = inv(_ou_cov(xs[i][usable(i)], τ, σ2) + Diagonal(inv.(ws[i][usable(i)])))
+    b = sum(sum(Σinv(i) * ys[i][usable(i)]) for i in 1:2)
+    c = sum(sum(Σinv(i)) for i in 1:2)
+    prior = CALpf.OUPrior(; scale = τ, σ = sqrt(σ2))
+    L = FRpf._estimate_levels(prior, ys, ws, xs, [1, 1], 1)
+    @test only(L) ≈ b / c rtol = 1.0e-10
+    # A level no block holds has no estimate.
+    @test isnan(FRpf._estimate_levels(prior, ys, ws, xs, [1, 1], 2)[2])
+
+    # REML: the likelihood with the level integrated out under a flat prior.
+    rs = [inv.(w) for w in ws]
+    reml = sum(1:2) do i
+        u = usable(i)
+        r = ys[i][u] .- only(L)
+        S = _ou_cov(xs[i][u], τ, σ2) + Diagonal(inv.(ws[i][u]))
+        -(logdet(S) + r' * (S \ r) + count(u) * log(2π)) / 2
+    end - log(c) / 2
+    @test FRpf._ou_loglik(ys, rs, xs, [1, 1]; τ, σ2) ≈ reml rtol = 1.0e-10
+
+    # The shape given the level is the zero-mean MAP of the remainder.
+    y1 = ys[1] .- only(L)
+    @test FRpf._estimate_map(prior, y1, ws[1], xs[1]) ≈ _dense_ou_map(y1, ws[1], xs[1], τ, σ2) rtol = 1.0e-8
 end

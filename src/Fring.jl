@@ -34,8 +34,8 @@ using Printf: @sprintf
 include("Fring/search.jl")
 include("Fring/stationize.jl")
 include("Fring/statespace.jl")
-# Per-observable frequency-shape specs and their per-track fit — pure functions
-# over one (station, feed, spw) track, independent of any solver stage.
+# Fitting one track's parameter blocks under a component prior, independent of
+# any solver stage.
 include("Fring/prior_fits.jl")
 include("Fring/weighted_sums.jl")
 include("Fring/adhoc.jl")
@@ -131,7 +131,8 @@ export AbstractAdhocSmoother, AdhocOptions, SavitzkyGolaySmoother, PenalizedSmoo
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing, default_adhoc_terms
 export default_bandpass_terms
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
-export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks
+export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks,
+    bandpass_level_blocks
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_station_solutions
 export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups

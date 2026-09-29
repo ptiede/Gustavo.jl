@@ -59,7 +59,7 @@ end
 end
 
 # The parameter run of one block: the 1-D view over the leaf's `:param` axis at
-# `(node, fs, ts, ant)`. The layout reserved at least `nparams_per_block` entries
+# `(node, fs, ts, ant)`. The layout reserved exactly `nparams_per_block` entries
 # there, so the block is in bounds by construction.
 @inline _leaf_block(leaf, node, fs, ts, ant) = @inbounds view(leaf, :, node, fs, ts, ant)
 

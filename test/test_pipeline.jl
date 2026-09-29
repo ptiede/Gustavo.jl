@@ -665,12 +665,12 @@ end
     end
 
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
-    larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[plan.xf[gc], f, plan.fseg_id[gc], 1, a]
+    larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[1, f, plan.fseg_id[gc], 1, a]
     amp_model(prior) = GainModel(;
         phase = default_bandpass_terms().phase,
         logamp = (;
             bandpass = CAL.GainComponent(
-                CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), Feed = CAL.PerFeed(), prior,
+                CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(), prior,
             ),
         ),
     )

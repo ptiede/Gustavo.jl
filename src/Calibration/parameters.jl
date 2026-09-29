@@ -107,7 +107,8 @@ end
 # as a fixed-rank column-major array: fastest to slowest over parameters,
 # feed-node, frequency segment, time segment, then antenna, size-1 axes kept so
 # every component reshapes to the same five axes and any consumer addresses it
-# the same way.
+# the same way. A term whose block length varies across frequency segments has no
+# rectangular leaf and is rejected here.
 function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     t = e.term
     tseg_id, ntseg = time_segment_ids(e.Ti, geom)
@@ -139,12 +140,17 @@ function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
         zeros(float(eltype(geom.times)), ntimes(geom))
 
     # Channels per freq segment, and the block length each implies (only terms
-    # whose arity comes from the data vary with it). The leaf is padded to the
-    # longest block; `param_shapes` names only a segment's own entries, so the
-    # padding is never read.
+    # whose arity comes from the data vary with it).
     nchan_seg = [length(grp) for grp in fseg_groups]
-    bl = maximum(n -> nparams_per_block(t, n), nchan_seg)
+    blocklen = [nparams_per_block(t, n) for n in nchan_seg]
     nfeed = nfeed_blocks(e.Feed)
+    bl = first(blocklen)                         # nchan_seg has one entry per segment (nfseg ≥ 1)
+    all(==(bl), blocklen) || throw(
+        ArgumentError(
+            "$(typeof(t)): block length varies across frequency segments (blocklen = " *
+                "$blocklen); the named-leaf layout requires one rectangular leaf per component."
+        )
+    )
     shape, roles = _leaf_shape(bl, nfeed, nfseg, ntseg, nant, e.Feed)
 
     return (;

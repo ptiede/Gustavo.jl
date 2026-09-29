@@ -108,11 +108,10 @@ is_fixed_hyper(_) = false
 _check_positive(what, x) =
     (isfinite(x) && x > 0) || throw(ArgumentError("$what must be positive and finite, got $x"))
 
-# The axes a component segments: those whose segmentation is not `Global*`. A
-# `Bandpass` term carries a value per channel, so it segments Frequency itself.
+# The axes a component segments: those whose segmentation is not `Global*`.
 _segmented_axes(e) = (
     (e.Ti isa GlobalTime ? () : (:Ti,))...,
-    (e.Frequency isa GlobalFrequency && !(e.term isa Bandpass) ? () : (:Frequency,))...,
+    (e.Frequency isa GlobalFrequency ? () : (:Frequency,))...,
 )
 
 """
