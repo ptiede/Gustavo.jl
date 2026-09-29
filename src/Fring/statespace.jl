@@ -391,7 +391,13 @@ end
 # `Σ ll + b²/2c − log(c)/2`, up to a constant.
 function _ou_loglik(ys, rs, xs, levels; τ, σ2)
     model = OUModel(τ, σ2)
-    isnothing(levels) && return sum(i -> _kalman_loglik(model, ys[i], rs[i], xs[i]), eachindex(ys, rs, xs))
+    if isnothing(levels)
+        lp = zero(float(typeof(σ2)))
+        for i in eachindex(ys, rs, xs)
+            lp += _kalman_loglik(model, ys[i], rs[i], xs[i])
+        end
+        return lp
+    end
     ngroup = maximum(levels)
     T = float(typeof(σ2))
     b = zeros(T, ngroup)
@@ -418,8 +424,7 @@ end
 function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, levels = nothing)
     T = float(
         promote_type(
-            typeof(τ_lo), typeof(τ_hi), typeof(σ2_seed),
-            (eltype(y) for y in ys)..., (eltype(w) for w in ws)..., (eltype(x) for x in xs)...,
+            typeof(τ_lo), typeof(τ_hi), typeof(σ2_seed), _blocks_eltype(ys, ws), mapreduce(eltype, promote_type, xs),
         ),
     )
     fixτ, fixσ = is_fixed_hyper(scale), is_fixed_hyper(σ)
@@ -429,25 +434,50 @@ function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_see
     lτ_lo, lτ_hi = log(T(τ_lo)), log(T(τ_hi))
     lτ0 = fixτ ? log(T(scale)) : (lτ_lo + lτ_hi) / 2
     lσ20 = fixσ ? 2 * log(T(σ)) : log(max(T(σ2_seed), σ2_lo))
-    unpack(p) = fixτ ? (lτ0, p[1]) : fixσ ? (p[1], lσ20) : (p[1], p[2])
-    function neglp(p)
-        lτ, lσ2 = unpack(p)
-        τ = fixτ ? exp(lτ) : exp(clamp(lτ, lτ_lo, lτ_hi))
-        σ2 = max(exp(lσ2), σ2_lo)
-        lp = _ou_loglik(ys, rs, xs, levels; τ, σ2)
-        fixτ || (lp += logdensityof(scale, τ) + log(τ))
-        fixσ || (lp += logdensityof(σ, sqrt(σ2)) + log(σ2) / 2)
-        val = isfinite(lp) ? -lp : T(Inf)
-        # Outside the box τ saturates and the objective goes flat; the excursion
-        # penalty drives the simplex back in.
-        excursion = fixτ ? zero(T) : max(lτ_lo - lτ, zero(T)) + max(lτ - lτ_hi, zero(T))
-        return val + 100 * excursion
-    end
+    neglp = _OUNegLogPost(ys, rs, xs, levels, scale, σ, lτ_lo, lτ_hi, lτ0, lσ20, σ2_lo)
     x0 = fixτ ? T[lσ20] : fixσ ? T[clamp(lτ0, lτ_lo, lτ_hi)] : T[clamp(lτ0, lτ_lo, lτ_hi), lσ20]
     xbest, _ = _nelder_mead(neglp, x0)
-    lτ, lσ2 = unpack(xbest)
-    τ = fixτ ? exp(lτ) : exp(clamp(lτ, lτ_lo, lτ_hi))
-    return τ, max(exp(lσ2), σ2_lo)
+    lτ̂, lσ̂2 = _unpack(neglp, xbest)
+    return _tau(neglp, lτ̂), max(exp(lσ̂2), σ2_lo)
+end
+
+# The negative log posterior of an `OUPrior`'s hyperparameters over the searched
+# coordinates `p`: `(log τ, log σ²)`, or whichever of the two is not fixed. `τ`
+# is confined to `[exp(lτ_lo), exp(lτ_hi)]` and `σ²` floored at `σ2_lo`.
+struct _OUNegLogPost{Y, R, X, L, S, G, T}
+    ys::Y
+    rs::R
+    xs::X
+    levels::L
+    scale::S
+    σ::G
+    lτ_lo::T
+    lτ_hi::T
+    lτ0::T
+    lσ20::T
+    σ2_lo::T
+end
+
+function _unpack(f::_OUNegLogPost, p)
+    is_fixed_hyper(f.scale) && return f.lτ0, p[1]
+    is_fixed_hyper(f.σ) && return p[1], f.lσ20
+    return p[1], p[2]
+end
+
+_tau(f::_OUNegLogPost, lτ) = is_fixed_hyper(f.scale) ? exp(lτ) : exp(clamp(lτ, f.lτ_lo, f.lτ_hi))
+
+function (f::_OUNegLogPost)(p)
+    lτ, lσ2 = _unpack(f, p)
+    τ = _tau(f, lτ)
+    σ2 = max(exp(lσ2), f.σ2_lo)
+    lp = _ou_loglik(f.ys, f.rs, f.xs, f.levels; τ, σ2)
+    is_fixed_hyper(f.scale) || (lp += logdensityof(f.scale, τ) + log(τ))
+    is_fixed_hyper(f.σ) || (lp += logdensityof(f.σ, sqrt(σ2)) + log(σ2) / 2)
+    val = isfinite(lp) ? -lp : oftype(lp, Inf)
+    is_fixed_hyper(f.scale) && return val
+    # Outside the box τ saturates and the objective goes flat; the excursion
+    # penalty drives the simplex back in.
+    return val + 100 * (max(f.lτ_lo - lτ, zero(val)) + max(lτ - f.lτ_hi, zero(val)))
 end
 
 # OU correlation-scale search bounds read off the sample coordinate itself, so every
@@ -473,7 +503,7 @@ end
 # jump from one spectral window to the next — carry no shape information and must
 # not be mistaken for sample spacing or for span.
 function _group_ou_tau_bounds(xs)
-    T = float(promote_type((eltype(x) for x in xs)...))
+    T = float(mapreduce(eltype, promote_type, xs))
     τ_lo = T(Inf)
     τ_hi = zero(T)
     for x in xs
@@ -521,7 +551,7 @@ function kalman_mv_filter(pairs, ys, rs, times, models)
     Base.require_one_based_indexing(times, ys, rs, models)
     T = float(
         promote_type(
-            eltype(eltype(ys)), eltype(eltype(rs)), eltype(times), map(_model_eltype, models)...,
+            eltype(eltype(ys)), eltype(eltype(rs)), eltype(times), mapreduce(_model_eltype, promote_type, models),
         ),
     )
     nsteps = length(times)

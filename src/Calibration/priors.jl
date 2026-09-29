@@ -42,17 +42,23 @@ holds for any spacing of the values and means the same at any segment
 resolution. The walk's starting value (and, for `m > 1`, its first `m − 1`
 derivatives) is left free, so the prior is improper in those directions.
 Order 2 gives a cubic smoothing spline.
+
+`σ` is either a positive number, held fixed, or a hyperprior (any density
+implementing DensityInterface's `logdensityof`), estimated by type-II MAP as
+for [`OUPrior`](@ref): the restricted likelihood of the data, with the values
+and the free starting state integrated out, times the hyperprior density over
+`log σ`. The hyperprior must be proper.
 """
-struct RandomWalkPrior{T <: Real} <: AbstractPrior
+struct RandomWalkPrior{G} <: AbstractPrior
     order::Int
-    σ::T
-    function RandomWalkPrior{T}(order, σ) where {T}
+    σ::G
+    function RandomWalkPrior{G}(order, σ) where {G}
         order >= 1 || throw(ArgumentError("RandomWalkPrior order must be ≥ 1, got $order"))
-        _check_positive("RandomWalkPrior σ", σ)
-        return new{T}(order, σ)
+        _check_hyper("RandomWalkPrior σ", σ)
+        return new{G}(order, σ)
     end
 end
-RandomWalkPrior(; order::Integer = 1, σ::Real) = RandomWalkPrior{typeof(σ)}(order, σ)
+RandomWalkPrior(; order::Integer = 1, σ) = RandomWalkPrior{typeof(σ)}(order, σ)
 
 """
     OUPrior(; scale, σ)

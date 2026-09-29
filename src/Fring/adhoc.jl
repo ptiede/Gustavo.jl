@@ -136,7 +136,9 @@ Fit each (station, feed node) phase track of a scan on its own, under the adhoc
 component's prior along `Ti` (the default): its maximum a posteriori values.
 
 - no prior: the per-AP solve stands as is.
-- [`RandomWalkPrior`](@ref): the random-walk MAP of the track.
+- [`RandomWalkPrior`](@ref): a `σ` given as a hyperprior is resolved per
+  (station, feed node, scan) by type-II MAP on the restricted likelihood; the
+  track is then the random-walk MAP.
 - [`OUPrior`](@ref): hyperparameters given as hyperpriors are resolved per
   (station, feed node, scan) by type-II MAP, with the track's level integrated
   out under a flat prior; the track is then the level plus the zero-mean OU
@@ -319,18 +321,22 @@ _track_times(track) = parent(lookup(track, Ti))
 smooth_track!(::PerTrackAdhocSmoother, track, w, ::Nothing) = nothing
 
 function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::RandomWalkPrior)
-    track .= _estimate_map(prior, parent(track), parent(w), _track_times(track))
-    return prior
+    x = _track_times(track)
+    resolved = _estimate_hypers(prior, [track], [w], [x])
+    _estimate_map!(track, resolved, track, w, x)
+    return resolved
 end
 
 # The track's level is the per-scan constant the demean removes afterwards, so
 # it is flat and unknown here: integrated out of the hyperparameter fit, then
 # estimated by GLS and restored around the zero-mean MAP.
 function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::OUPrior)
-    y, wv, x = parent(track), parent(w), _track_times(track)
-    resolved = _estimate_hypers(prior, [y], [wv], [x]; level = [1])
-    level = only(_estimate_levels(resolved, [y], [wv], [x], [1], 1))
-    track .= _estimate_map(resolved, y .- level, wv, x) .+ level
+    x = _track_times(track)
+    resolved = _estimate_hypers(prior, [track], [w], [x]; level = [1])
+    level = only(_estimate_levels(resolved, [track], [w], [x], [1], 1))
+    track .-= level
+    _estimate_map!(track, resolved, track, w, x)
+    track .+= level
     return resolved
 end
 

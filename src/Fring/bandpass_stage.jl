@@ -705,10 +705,10 @@ function _fit_track!(
     isnothing(level) || (levels .= _estimate_levels(resolved, ys, ws, xs, level, nlevel))
     for (j, p) in pairs(pieces)
         L = isnothing(level) ? zero(T) : levels[level[j]]
-        fitted = _estimate_map(resolved, ys[j] .- L, ws[j], xs[j]) .+ L
-        for (i, c) in pairs(p)
-            track[c] = fitted[i]
-        end
+        fitted = view(track, p)
+        ys[j] .-= L
+        _estimate_map!(fitted, resolved, ys[j], ws[j], xs[j])
+        fitted .+= L
         isnothing(status) || (status[j] = declined[j] ? _BP_TRACK_DECLINED : _band_track_status(fitted))
     end
     return resolved, levels

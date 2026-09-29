@@ -249,7 +249,25 @@ so the states have comparable magnitudes, and the fit is in at least `Float64`.
 A track with fewer than ``m`` samples with data does not determine the walk and
 keeps its measured values. Since the walk leaves its own level free, it cannot
 be separated from a level component, and a random walk beside a level is
-rejected. `σ` is fixed; a random walk has no hyperparameter search.
+rejected.
+
+`σ` may be a hyperprior, resolved by the same type-II MAP as an OU prior's,
+maximizing
+
+```math
+\sum_{\text{tracks}} \log p_R(y \mid \sigma) + \log \pi_\sigma(\sigma) + \log\sigma
+```
+
+over ``\log\sigma``, where ``p_R`` is the restricted likelihood above. The
+search starts from the variance of the ``m``-th differences of the samples with
+data, less their noise contribution, set equal to the variance a walk gives an
+``m``-th difference at the median spacing ``h``, ``c_m \sigma^2 h^{2m-1}``
+(``c_1 = 1``, ``c_2 = 2/3``). There are no search bounds, and the hyperprior
+must be proper: as ``\sigma \to 0`` the restricted likelihood tends to that
+of a polynomial of degree ``m - 1`` fit to the samples, which stays finite, so
+with a flat hyperprior a track whose structure is below the noise would be fit
+as a polynomial. The solvers pool tracks as they do for an OU prior; since a
+walk has no separate level, no levels are integrated out (`_estimate_hypers`).
 
 ## Where the solvers use this
 

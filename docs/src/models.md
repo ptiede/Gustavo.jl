@@ -72,7 +72,7 @@ data:
 |:------|:--------|
 | `nothing` | none: every value is free |
 | [`IIDPrior`](@ref)`(σ)` | each parameter `N(0, σ²)` |
-| [`RandomWalkPrior`](@ref)`(; order, σ)` | the `(order − 1)`-times integrated Brownian motion along the axis; `σ²` per unit of `x^(2·order − 1)` |
+| [`RandomWalkPrior`](@ref)`(; order, σ)` | the `(order − 1)`-times integrated Brownian motion along the axis; `σ²` per unit of `x^(2·order − 1)`; `σ` a number or a hyperprior |
 | [`OUPrior`](@ref)`(; scale, σ)` | a zero-mean Ornstein–Uhlenbeck process along the axis; `scale` and `σ` each a number or a hyperprior |
 
 `σ` is in the parameter's own units, per the power of the axis coordinate (s or Hz) the random walk states. A correlated prior runs along the one axis

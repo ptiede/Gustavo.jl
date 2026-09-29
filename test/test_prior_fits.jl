@@ -91,6 +91,48 @@ end
     )
 end
 
+# A walk of order `m` sampled at `x`, simulated from its exact transition, plus noise.
+function _simulate_walk(rng, x, m, σ, noise)
+    s = zeros(m)
+    f = zeros(length(x))
+    for k in eachindex(x)
+        if k > 1
+            A, Q = FRpf.transition(FRpf.RandomWalkModel{m}(σ^2), x[k] - x[k - 1], Float64)
+            s = A * s + cholesky(Symmetric(Matrix(Q))).L * randn(rng, m)
+        end
+        f[k] = s[1]
+    end
+    return f .+ noise .* randn(rng, length(x))
+end
+
+@testset "random-walk σ by type-II MAP" begin
+    rng = Random.Xoshiro(11)
+    x = [cumsum(0.5 .+ rand(rng, 150)) for _ in 1:4]
+    ws = [fill(1.0e4, 150) for _ in 1:4]
+    for (m, σ) in ((1, 0.05), (2, 0.002))
+        ys = [_simulate_walk(rng, xi, m, σ, 0.01) for xi in x]
+        est = FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = m, σ = LogNormal(log(0.1), 3.0)), ys, ws, x)
+        @test est isa CALpf.RandomWalkPrior && est.order == m && CALpf.is_fixed_hyper(est.σ)
+        @test 0.7 < est.σ / σ < 1.4
+        # A concentrated hyperprior pins σ whatever the data say.
+        @test FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = m, σ = LogNormal(log(0.3), 0.001)), ys, ws, x).σ ≈ 0.3 rtol = 0.01
+        # A block too short to inform the walk does not enter the estimate.
+        short = fill(NaN, 150)
+        short[5] = 0.1
+        pooled = FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.1), 3.0)), [ys; [short]], [ws; ws[1:1]], [x; x[1:1]])
+        @test pooled.σ ≈ FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.1), 3.0)), ys, ws, x).σ
+    end
+
+    y = _simulate_walk(rng, x[1], 2, 0.002, 0.01)
+    hyper = CALpf.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.1), 3.0))
+    fixed = CALpf.RandomWalkPrior(; order = 2, σ = 0.01)
+    @test FRpf._estimate_hypers(fixed, [y], [ws[1]], [x[1]]) === fixed
+    @test FRpf._estimate_hypers(hyper, [Float32.(y)], [Float32.(ws[1])], [x[1]]).σ isa Float32
+    @test_throws "takes no level groups" FRpf._estimate_hypers(hyper, [y], [ws[1]], [x[1]]; level = [1])
+    @test_throws "no block has 2 usable segments" FRpf._estimate_hypers(hyper, [fill(NaN, 150)], [ws[1]], [x[1]])
+    @test_throws "RandomWalkPrior σ must be fixed" FRpf._estimate_map(hyper, y, ws[1], x[1])
+end
+
 @testset "MAP of one block" begin
     rng = Random.Xoshiro(4)
     n = 16
@@ -120,6 +162,29 @@ end
     @test_throws "OUPrior hyperparameters must be fixed" FRpf._estimate_map(
         CALpf.OUPrior(; scale = LogNormal(16.0, 1.0), σ = 0.2), y, w, x,
     )
+end
+
+@testset "fitting a block in place" begin
+    rng = Random.Xoshiro(12)
+    n = 30
+    x = collect(range(1.0e9, 1.06e9; length = n))
+    y = 0.2 .* sin.(range(0, 3; length = n)) .+ 0.02 .* randn(rng, n)
+    y[4] = NaN
+    w = fill(2500.0, n)
+    for prior in (nothing, CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-11), CALpf.OUPrior(; scale = 1.0e7, σ = 0.2))
+        expected = FRpf._estimate_map(prior, y, w, x)
+        # `out` may be the block itself, or a view into a larger array.
+        yy = copy(y)
+        @test isequal(FRpf._estimate_map!(yy, prior, yy, w, x), expected)
+        big = fill(-1.0, 2n)
+        FRpf._estimate_map!(view(big, 2:2:(2n)), prior, y, w, x)
+        @test isequal(big[2:2:end], expected) && all(==(-1.0), big[1:2:end])
+        @inferred FRpf._estimate_map(prior, y, w, x)
+    end
+    @inferred FRpf._random_walk_loglik(y, w, x, 2, 1.0e-11)
+    @inferred FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = 2, σ = LogNormal(-25.0, 1.0)), [y], [w], [x])
+    @inferred FRpf._estimate_hypers(CALpf.OUPrior(; scale = LogNormal(16.0, 1.0), σ = LogNormal(-1.0, 1.0)), [y], [w], [x])
+    @inferred FRpf._estimate_levels(CALpf.OUPrior(; scale = 1.0e7, σ = 0.2), [y], [w], [x], [1], 1)
 end
 
 @testset "hyperparameters estimated over the blocks the caller pools" begin
