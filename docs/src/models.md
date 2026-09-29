@@ -82,7 +82,8 @@ the component segments (the one whose segmentation is not `GlobalTime` or
 either key out; see [`resolve_prior`](@ref). Along frequency, a prior relates
 values within one spectral window and never across windows. Stations that
 differ only in their priors share one parameter layout. Which priors a solver
-fits is part of its `can_fit`.
+fits is part of its `can_fit`. How a solver fits a track under a prior, and estimates a
+hyperprior, is derived in [Fitting under priors](@ref fitting-under-priors).
 
 A level is its own component, with no prior. The zero mean of the shape's prior
 is what separates the two:
