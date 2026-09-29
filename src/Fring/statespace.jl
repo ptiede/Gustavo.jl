@@ -10,7 +10,7 @@
 # - `OUModel`: Ornstein–Uhlenbeck (Matérn-1/2), K(Δ) = σ²·exp(-|Δ|/τ); one state,
 #   started from its stationary distribution.
 # - `RandomWalkModel{M}`: the (M−1)-times integrated Brownian motion; states
-#   `(f, f′, …, f^(M−1))`, started flat.
+#   `(f, f′, …, f^(M−1))`, started flat or from a stated Gaussian.
 #
 # Särkkä & Solin, Applied Stochastic Differential Equations (2019).
 
@@ -36,15 +36,22 @@ OUModel(τ, σ2) = OUModel{float(promote_type(typeof(τ), typeof(σ2)))}(τ, σ2
 
 """
     RandomWalkModel{M}(σ2)
+    RandomWalkModel{M}(σ2, μ0, P0)
 
 The `(M−1)`-times integrated Brownian motion whose `(M−1)`-th derivative has
-increments `N(0, σ2·|Δ|)`, with state `(f, f′, …, f^(M−1))`. The start is
-flat: the first sample's state is unconstrained by the prior.
+increments `N(0, σ2·|Δ|)`, with state `(f, f′, …, f^(M−1))`. The first sample's
+state is `N(μ0, P0)`, or unconstrained by the prior (a flat start) without them.
 """
-struct RandomWalkModel{M, T}
+struct RandomWalkModel{M, T, S}
     σ2::T
+    init::S
 end
-RandomWalkModel{M}(σ2) where {M} = RandomWalkModel{M, float(typeof(σ2))}(σ2)
+RandomWalkModel{M}(σ2) where {M} = RandomWalkModel{M, float(typeof(σ2)), Nothing}(σ2, nothing)
+function RandomWalkModel{M}(σ2, μ0, P0) where {M}
+    T = float(promote_type(typeof(σ2), eltype(μ0), eltype(P0)))
+    init = (SVector{M, T}(μ0), SMatrix{M, M, T}(P0))
+    return RandomWalkModel{M, T, typeof(init)}(σ2, init)
+end
 
 statedim(::OUModel) = 1
 statedim(::RandomWalkModel{M}) where {M} = M
@@ -75,7 +82,9 @@ end
 
 # The starting mean and covariance, or `nothing` for a flat start.
 initial(m::OUModel, ::Type{T}) where {T} = SVector{1, T}(0), SMatrix{1, 1, T}(m.σ2)
-initial(::RandomWalkModel, ::Type) = nothing
+initial(m::RandomWalkModel, ::Type{T}) where {T} = _initial(m.init, T)
+_initial(::Nothing, ::Type) = nothing
+_initial((μ0, P0)::Tuple, ::Type{T}) where {T} = T.(μ0), T.(P0)
 
 _symmetric(P) = (P + P') / 2
 
@@ -385,26 +394,23 @@ function _level_sums(model, y, r, x)
     return ll, b, c
 end
 
-# The log marginal likelihood of zero-mean OU tracks `ys`, or, with `levels`
-# giving each track's level group, of tracks offset by one unknown level per
-# group, integrated out under a flat prior (REML): per group
-# `Σ ll + b²/2c − log(c)/2`, up to a constant.
-function _ou_loglik(ys, rs, xs, levels; τ, σ2)
-    model = OUModel(τ, σ2)
+# The log marginal likelihood of zero-mean tracks `ys` under `models` (one per
+# track, or one for all), or, with `levels` giving each track's level group, of
+# tracks offset by one unknown level per group, integrated out under a flat
+# prior (REML): per group `Σ ll + b²/2c − log(c)/2`, up to a constant.
+function _pooled_loglik(models, ys, rs, xs, levels)
+    T = float(promote_type(_model_eltype(_track_model(models, firstindex(ys))), eltype(eltype(ys))))
+    lp = zero(T)
     if isnothing(levels)
-        lp = zero(float(typeof(σ2)))
         for i in eachindex(ys, rs, xs)
-            lp += _kalman_loglik(model, ys[i], rs[i], xs[i])
+            lp += _kalman_loglik(_track_model(models, i), ys[i], rs[i], xs[i])
         end
         return lp
     end
-    ngroup = maximum(levels)
-    T = float(typeof(σ2))
-    b = zeros(T, ngroup)
-    c = zeros(T, ngroup)
-    lp = zero(T)
+    b = zeros(T, maximum(levels))
+    c = zeros(T, maximum(levels))
     for i in eachindex(ys, rs, xs, levels)
-        ll, bi, ci = _level_sums(model, ys[i], rs[i], xs[i])
+        ll, bi, ci = _level_sums(_track_model(models, i), ys[i], rs[i], xs[i])
         lp += ll
         b[levels[i]] += bi
         c[levels[i]] += ci
@@ -414,6 +420,11 @@ function _ou_loglik(ys, rs, xs, levels; τ, σ2)
     end
     return lp
 end
+
+_track_model(models::AbstractVector, i) = models[i]
+_track_model(model, i) = model
+
+_ou_loglik(ys, rs, xs, levels; τ, σ2) = _pooled_loglik(OUModel(τ, σ2), ys, rs, xs, levels)
 
 # Type-II MAP of an `OUPrior`'s hyperparameters shared by a group of tracks:
 # the pooled Kalman marginal likelihood (`_ou_loglik`, zero-mean or with each

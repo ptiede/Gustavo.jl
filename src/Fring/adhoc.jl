@@ -86,8 +86,9 @@ A smoother declares which adhoc components it can solve with
 checked at model-compile time. The default is the capability of the solve
 machinery — per-AP constant phase over the global band, `SharedFeeds` or
 `PerFeed`, with no prior or a `RandomWalkPrior` or `OUPrior` along `Ti`;
-`JointKalmanSmoother` restricts to `SharedFeeds` (its Kalman state is one
-dimension per station) and to an `OUPrior`.
+`JointKalmanSmoother` restricts to `SharedFeeds` (its Kalman state holds one
+phase per station) and to a proper prior: an `OUPrior`, or a `RandomWalkPrior`
+with an `init`.
 
 Every smoother carries its solve options in an `options::AdhocOptions` field;
 see [`AdhocOptions`](@ref).
@@ -162,7 +163,9 @@ end
 
 Fit every station's phase track of a scan at once: one multivariate Kalman
 filter and RTS smoother over the station phases, observing the baseline phase
-differences directly under each station's [`OUPrior`](@ref) along `Ti`. Closure
+differences directly under each station's prior along `Ti`: an
+[`OUPrior`](@ref), or a [`RandomWalkPrior`](@ref) with an `init`, which holds
+the common phase of all stations that the differences leave free. Closure
 and denoising happen in one estimator, which conditions better at low SNR than
 fitting each track after the per-AP solve. Seeded and rewrapped from the per-AP
 solve; see `_solve_gp_joint!`.
@@ -171,7 +174,8 @@ A station's hyperparameters given as hyperpriors are resolved per scan by
 type-II MAP on its per-AP track, with the track's level integrated out under a
 flat prior. The reference station's track is zero by construction and an
 unobserved station has none, so both take the median of the resolved values of
-the others (a station whose hyperparameters are fixed keeps them).
+the stations whose prior has the same form (an `OUPrior`, or a walk of the same
+order); a station whose hyperparameters are fixed keeps them.
 
 Requires one phase node per station (a `SharedFeeds` adhoc component), since
 its state carries one dimension per station.
@@ -254,9 +258,9 @@ _time_prior(p::NamedTuple) = p.Ti
 
 can_fit(::AbstractAdhocSmoother, tc, geom) = _fits_adhoc_track(tc)
 # The joint solve needs one phase node per station (`_requires_single_node`) and
-# an OU process for its state dynamics.
+# a proper prior, which holds the common mode the baseline differences leave free.
 can_fit(::JointKalmanSmoother, tc, geom) =
-    _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds && _time_prior(resolve_prior(tc)) isa OUPrior
+    _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds && _proper_prior(_time_prior(resolve_prior(tc)))
 
 # The structural contract of the adhoc pass: exactly one per-integration phase
 # component (the stage runs one globally-closing phase solve and writes one θ
@@ -298,13 +302,14 @@ function apply_adhoc!(sm::AbstractAdhocSmoother, phase, track_w; obs, anchor, pr
     return phase
 end
 
-# Joint state-space solve: one multivariate OU Kalman over all station phases
-# observing baseline differences directly, seeded/rewrapped from the per-AP solve.
+# Joint state-space solve: one Kalman filter over all station phases observing
+# baseline differences directly, seeded/rewrapped from the per-AP solve.
 function apply_adhoc!(sm::JointKalmanSmoother, phase, track_w; obs, anchor, priors, resolved)
-    all(p -> p isa OUPrior, priors) || throw(
+    all(_proper_prior, priors) || throw(
         ArgumentError(
-            "JointKalmanSmoother needs an OUPrior at every station, got " *
-                join(unique(string.(typeof.(priors))), ", "),
+            "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init` at " *
+                "every station, got " *
+                join(unique(map(p -> isnothing(p) ? "nothing" : _call_string(p), priors)), ", "),
         ),
     )
     _solve_gp_joint!(phase, track_w, obs, anchor, sm, priors, resolved)
@@ -320,18 +325,17 @@ _track_times(track) = parent(lookup(track, Ti))
 
 smooth_track!(::PerTrackAdhocSmoother, track, w, ::Nothing) = nothing
 
-function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::RandomWalkPrior)
+# Under a proper prior the track's level is the per-scan constant the demean
+# removes afterwards, so it is flat and unknown here: integrated out of the
+# hyperparameter fit, then estimated by GLS and restored around the zero-mean
+# MAP. A walk without an init leaves its level free already.
+function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::Union{OUPrior, RandomWalkPrior})
     x = _track_times(track)
-    resolved = _estimate_hypers(prior, [track], [w], [x])
-    _estimate_map!(track, resolved, track, w, x)
-    return resolved
-end
-
-# The track's level is the per-scan constant the demean removes afterwards, so
-# it is flat and unknown here: integrated out of the hyperparameter fit, then
-# estimated by GLS and restored around the zero-mean MAP.
-function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::OUPrior)
-    x = _track_times(track)
+    if !_proper_prior(prior)
+        resolved = _estimate_hypers(prior, [track], [w], [x])
+        _estimate_map!(track, resolved, track, w, x)
+        return resolved
+    end
     resolved = _estimate_hypers(prior, [track], [w], [x]; level = [1])
     level = only(_estimate_levels(resolved, [track], [w], [x], [1], 1))
     track .-= level
@@ -511,18 +515,19 @@ _source_corrected(obs, x, keep) = (;
     obs.nodes,
 )
 
-# Joint adhoc solve: one multivariate OU Kalman filter + RTS smoother over the
-# whole station-phase vector, observing the baseline phase differences directly
-# under a per-station temporal OU prior, so closure and denoising happen in one
+# Joint adhoc solve: one Kalman filter + RTS smoother over every station's
+# state, observing the baseline phase differences directly under each station's
+# proper temporal prior, so closure and denoising happen in one
 # recursive estimator. This conditions better at low SNR than solving each AP
 # and smoothing afterwards. Mutates `phase[:, 1, :]` in place and records each
 # written station's resolved prior in `resolved[:, 1]`; the caller's demean and
 # node→feed expansion run afterwards.
 #
-# State = `nant` station phases. `obs` arrives with each cell's source term
-# already removed, so a cell is a pure node difference and the filter needs no
-# augmented source dimension. The OU prior pins the unobservable common mode
-# near 0; it is re-gauged to the anchor afterwards for pipeline consistency.
+# State = each station's model state, its phase first. `obs` arrives with each
+# cell's source term already removed, so a cell is a pure node difference and
+# the filter needs no augmented source dimension. The proper priors pin the
+# unobservable common mode near 0; it is re-gauged to the anchor afterwards for
+# pipeline consistency.
 # Requires one node per station.
 function _solve_gp_joint!(
         phase, track_w, obs, anchor::Integer, sm::JointKalmanSmoother, priors, resolved,
@@ -536,7 +541,7 @@ function _solve_gp_joint!(
     θseed = [T(phase[i, 1, ap]) for i in axes(phase, 1), ap in axes(phase, 3)]
 
     # A station with no gated row anywhere in the scan has an all-zero column in every
-    # H below, so the filter never updates it: it holds the OU prior mean for the whole
+    # H below, so the filter never updates it: it holds its prior mean for the whole
     # solve and the re-gauge turns that into minus the anchor's common mode — the same
     # information-free track for every such station. They are excluded from the hyper
     # fit and from the write-back.
@@ -545,29 +550,25 @@ function _solve_gp_joint!(
     any(welldet) || return phase
     track(i) = (view(θseed, i, :), collect(T, parent(view(track_w, i, 1, :))))
 
-    # Per-station OU hyperparameters from the seed track, the level integrated
-    # out. The anchor's track is structurally 0 (per-AP gauge) and carries no
-    # variance information, so it and every unseen station take the median of
-    # the well-determined stations' values, and every station stays a real OU
-    # process during the solve.
+    # Per-station hyperparameters from the seed track, the level integrated out.
+    # The anchor's track is structurally 0 (per-AP gauge) and carries no variance
+    # information, so it and every unseen station take the median of the
+    # well-determined stations' values, and every station keeps a proper prior
+    # during the solve.
     fitted = Vector{Any}(nothing, nant)
     for i in eachindex(welldet, priors)
         welldet[i] || continue
         y, w = track(i)
         fitted[i] = _estimate_hypers(priors[i], [y], [w], [times]; level = [1])
     end
-    τ_med = median(T(fitted[i].scale) for i in eachindex(welldet) if welldet[i])
-    σ_med = median(T(fitted[i].σ) for i in eachindex(welldet) if welldet[i])
+    peers = [fitted[i] for i in eachindex(welldet) if welldet[i]]
     for i in eachindex(welldet, priors)
-        welldet[i] && continue
-        p = priors[i]
-        fitted[i] = OUPrior(;
-            scale = is_fixed_hyper(p.scale) ? p.scale : τ_med, σ = is_fixed_hyper(p.σ) ? p.σ : σ_med,
-        )
+        welldet[i] || (fitted[i] = _peer_resolved(priors[i], peers, i))
     end
-    models = [OUModel{T}(fitted[i].scale, fitted[i].σ^2) for i in 1:nant]
+    models = [_state_model(fitted[i], T) for i in 1:nant]
+    value_state = cumsum(map(statedim, models)) .- map(statedim, models) .+ 1
 
-    # Per-station level: the OU prior reverts to 0, so each track is centered on
+    # Per-station level: each prior is zero-mean, so each track is centered on
     # its GLS level under its own prior before the solve. The downstream demean
     # removes the level again.
     mθ = zeros(T, nant)
@@ -609,7 +610,7 @@ function _solve_gp_joint!(
         xs, _ = rts_smooth_mv(xf, Pf, xp, Pp, As)
         for ap in axes(θf, 2)
             for i in axes(θf, 1)
-                θf[i, ap] = xs[i, ap] + mθ[i]
+                θf[i, ap] = xs[value_state[i], ap] + mθ[i]
             end
         end
     end
@@ -632,6 +633,35 @@ function _solve_gp_joint!(
         resolved[i, 1] = fitted[i]
     end
     return phase
+end
+
+# A station's prior as a state-space model along the scan's time coordinate.
+_state_model(p::OUPrior, ::Type{T}) where {T} = OUModel{T}(p.scale, p.σ^2)
+_state_model(p::RandomWalkPrior, ::Type{T}) where {T} = _random_walk_model(p.order, p.σ, p.init, one(T), T)
+
+# The prior of a station without a track of its own (the anchor, an unseen
+# station): its fixed hyperparameters, and for each hyperprior the median of the
+# resolved values of the `peers` whose prior has the same form.
+_peer_resolved(p::OUPrior, peers, station) =
+    OUPrior(; scale = _peer_median(p, :scale, peers, station), σ = _peer_median(p, :σ, peers, station))
+_peer_resolved(p::RandomWalkPrior, peers, station) =
+    RandomWalkPrior(; order = p.order, σ = _peer_median(p, :σ, peers, station), p.init)
+
+_same_form(::OUPrior, q) = q isa OUPrior
+_same_form(p::RandomWalkPrior, q) = q isa RandomWalkPrior && q.order == p.order
+
+function _peer_median(p, name::Symbol, peers, station)
+    v = getproperty(p, name)
+    is_fixed_hyper(v) && return v
+    vals = [getproperty(q, name) for q in peers if _same_form(p, q)]
+    isempty(vals) && throw(
+        ArgumentError(
+            "JointKalmanSmoother: station $station has no track of its own to resolve the " *
+                "`$name` hyperprior of $(_call_string(p)), and no other station has a prior " *
+                "of the same form to take it from; give it a fixed value",
+        ),
+    )
+    return median(vals)
 end
 
 # One full per-AP sweep: solve every AP's station phases from `obs` (with the

@@ -247,9 +247,17 @@ Lebesgue measure on the first sample's state, derivatives in units of the
 coordinate. The coordinate is first shifted and rescaled by its median spacing
 so the states have comparable magnitudes, and the fit is in at least `Float64`.
 A track with fewer than ``m`` samples with data does not determine the walk and
-keeps its measured values. Since the walk leaves its own level free, it cannot
-be separated from a level component, and a random walk beside a level is
-rejected.
+keeps its measured values. Since a walk with a flat start leaves its own level
+free, it cannot be separated from a level component, and such a walk beside a
+level is rejected.
+
+An `init` gives the first sample's state a Gaussian prior
+``s_1 \sim \mathcal N(\mu_0, P_0)`` instead, in units of the coordinate and
+relative to the track's level, and the walk is then proper. The filter starts
+in covariance form from it, exactly as for OU, and the likelihood is the
+ordinary one. A level beside it is estimated, and integrated out for the
+hyperparameters, as for OU above, so the init's spread describes how far the
+track's initial state may lie from its level.
 
 `σ` may be a hyperprior, resolved by the same type-II MAP as an OU prior's,
 maximizing
@@ -266,8 +274,9 @@ data, less their noise contribution, set equal to the variance a walk gives an
 must be proper: as ``\sigma \to 0`` the restricted likelihood tends to that
 of a polynomial of degree ``m - 1`` fit to the samples, which stays finite, so
 with a flat hyperprior a track whose structure is below the noise would be fit
-as a polynomial. The solvers pool tracks as they do for an OU prior; since a
-walk has no separate level, no levels are integrated out (`_estimate_hypers`).
+as a polynomial. The solvers pool tracks as they do for an OU prior. A walk
+with a flat start has no separate level, so no levels are integrated out; with
+an `init` they are, as for OU (`_estimate_hypers`).
 
 ## Where the solvers use this
 
@@ -288,11 +297,12 @@ hyperparameters.
 MAP of the zero-mean part. The per-scan mean is then removed from every track,
 since a per-station constant trades against the baseline source terms.
 
-**Adhoc phase, [`JointKalmanSmoother`](@ref).** The state is the vector of
-station phases ``\theta_1, \dots, \theta_N``, each an independent OU process
-with its own ``(\tau_i, \sigma_i)``, so the transition is diagonal with entries
-``a_{i,k} = e^{-\Delta_k/\tau_i}``. Each gated (baseline, correlation product)
-cell at an AP is an observation
+**Adhoc phase, [`JointKalmanSmoother`](@ref).** The state stacks every
+station's state under its own prior: its phase ``\theta_i`` for an OU prior,
+or ``(\theta_i, \theta_i', \dots)`` for a random walk with an `init`. The
+stations are independent, so the transition is block diagonal, one block per
+station. Each gated (baseline, correlation product) cell at an AP is an
+observation
 
 ```math
 y_{ab} = \theta_a - \theta_b + \varepsilon_{ab}, \qquad
@@ -303,7 +313,8 @@ with its source term already removed. The same filter and smoother, in matrix
 form ([`kalman_mv_filter`](@ref), [`rts_smooth_mv`](@ref)), give the
 posterior mean of every station's track from the baseline data directly,
 without first solving each AP. Differences leave the sum of all station
-phases unconstrained; only the OU prior holds it near zero, and the result is
+phases unconstrained; only the priors hold it near zero, which is why every
+station needs a proper prior (an OU prior or a walk with an `init`), and the result is
 re-referenced to the anchor station at every AP afterwards. Each observed phase
 is moved by a multiple of 2π toward the current model before the filter runs,
 and this is repeated a few times as the model improves.
@@ -311,8 +322,9 @@ and this is repeated a few times as the model improves.
 Each station's hyperparameters are resolved by type-II MAP on its track from
 the per-AP solve, with the level integrated out, and the track is centered on
 its level for the filter. The anchor's per-AP track is zero by construction,
-and an unobserved station has none, so both take the median of the other
-stations' resolved values, unless their own are fixed.
+and an unobserved station has none, so both take the median of the resolved
+values of the stations whose prior has the same form (OU, or a walk of the same
+order), unless their own are fixed.
 
 In both adhoc solvers, the complex-domain refinement (see
 [`AdhocOptions`](@ref)) repeats the fit on observations linearized around the

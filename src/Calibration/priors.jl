@@ -31,7 +31,7 @@ end
 IIDPrior(σ::Real) = IIDPrior{typeof(σ)}(σ)
 
 """
-    RandomWalkPrior(; order = 1, σ)
+    RandomWalkPrior(; order = 1, σ, init = nothing)
 
 A random walk of the given `order` `m` along the component's axis (see
 [`resolve_prior`](@ref)): the `(m − 1)`-times integrated Brownian motion in the
@@ -39,26 +39,49 @@ axis coordinate. Its `(m − 1)`-th derivative changes by `N(0, σ²·Δx)` over
 step `Δx`, so `σ²` is in the parameter's units squared per `x^(2m − 1)`: per
 second or per Hz for order 1, per Hz³ along frequency for order 2. The prior
 holds for any spacing of the values and means the same at any segment
-resolution. The walk's starting value (and, for `m > 1`, its first `m − 1`
-derivatives) is left free, so the prior is improper in those directions.
-Order 2 gives a cubic smoothing spline.
+resolution. Order 2 gives a cubic smoothing spline.
+
+`init` is the prior on the initial value and its first `m − 1` derivatives,
+`(f, f′, …, f^(m−1))` in units of the axis coordinate, relative to the track's
+level: a `Distributions.MvNormal` of length `m`, or a `Normal` for `m = 1`.
+With `init = nothing` these are left free (a flat start), so the prior is
+improper in those directions and leaves the track's level free; with an `init`
+the walk is proper, and a level beside it is estimated as for an
+[`OUPrior`](@ref). A solver that needs a proper prior requires an `init`.
 
 `σ` is either a positive number, held fixed, or a hyperprior (any density
 implementing DensityInterface's `logdensityof`), estimated by type-II MAP as
-for [`OUPrior`](@ref): the restricted likelihood of the data, with the values
-and the free starting state integrated out, times the hyperprior density over
-`log σ`. The hyperprior must be proper.
+for [`OUPrior`](@ref): the marginal likelihood of the data (restricted, with
+a flat start or a level), with the values integrated out, times the hyperprior
+density over `log σ`. The hyperprior must be proper.
 """
-struct RandomWalkPrior{G} <: AbstractPrior
+struct RandomWalkPrior{G, S} <: AbstractPrior
     order::Int
     σ::G
-    function RandomWalkPrior{G}(order, σ) where {G}
+    init::S
+    function RandomWalkPrior{G, S}(order, σ, init) where {G, S}
         order >= 1 || throw(ArgumentError("RandomWalkPrior order must be ≥ 1, got $order"))
         _check_hyper("RandomWalkPrior σ", σ)
-        return new{G}(order, σ)
+        _check_init(order, init)
+        return new{G, S}(order, σ, init)
     end
 end
-RandomWalkPrior(; order::Integer = 1, σ) = RandomWalkPrior{typeof(σ)}(order, σ)
+RandomWalkPrior(; order::Integer = 1, σ, init = nothing) = RandomWalkPrior{typeof(σ), typeof(init)}(order, σ, init)
+
+_check_init(order, ::Nothing) = nothing
+_check_init(order, ::Normal) = order == 1 || throw(
+    ArgumentError("a RandomWalkPrior of order $order needs an MvNormal init of length $order, got a Normal"),
+)
+_check_init(order, init::AbstractMvNormal) = length(init) == order || throw(
+    ArgumentError("a RandomWalkPrior of order $order needs an init of length $order, got length $(length(init))"),
+)
+_check_init(order, init) = throw(
+    ArgumentError("a RandomWalkPrior init must be `nothing`, a Normal or an MvNormal, got $(typeof(init))"),
+)
+
+# The mean vector and covariance matrix of a `RandomWalkPrior`'s proper init.
+_init_moments(init::Normal) = [mean(init)], fill(var(init), 1, 1)
+_init_moments(init::AbstractMvNormal) = collect(mean(init)), Matrix(cov(init))
 
 """
     OUPrior(; scale, σ)
@@ -174,7 +197,8 @@ _relates_nothing(e, why) = ArgumentError(
         "Segment the axis the prior should run along (e.g. `Frequency = ChannelBlocks(1)`).",
 )
 
-_call_string(p::RandomWalkPrior) = "RandomWalkPrior(; order = $(p.order), σ = $(repr(p.σ)))"
+_call_string(p::RandomWalkPrior) =
+    "RandomWalkPrior(; order = $(p.order), σ = $(repr(p.σ))" * (isnothing(p.init) ? "" : ", init = $(repr(p.init))") * ")"
 _call_string(p::OUPrior) = "OUPrior(; scale = $(repr(p.scale)), σ = $(repr(p.σ)))"
 _call_string(nt::NamedTuple) =
     "(" * join(("$k = $(_call_string(p))" for (k, p) in pairs(nt)), ", ") * (length(nt) == 1 ? ",)" : ")")

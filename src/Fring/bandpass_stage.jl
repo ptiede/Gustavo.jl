@@ -133,7 +133,8 @@ _frequency_prior(p::NamedTuple) = p.Frequency
 The structural requirement the [`Bandpass`](@ref Gustavo.Bandpass) step
 places on every smoother's model: at least one component overall, and per
 observable group either one component or a shape and its level. In a pair, the
-shape is the component on `ChannelBlocks` and carries a zero-mean `OUPrior`;
+shape is the component on `ChannelBlocks` and carries a proper zero-mean prior
+(an `OUPrior`, or a `RandomWalkPrior` with an `init`);
 the level is the other, on the same time segmentation, with no prior. The
 default `validate_model` for [`AbstractBandpassSmoother`](@ref), and the base a
 smoother's own method must re-establish.
@@ -184,11 +185,12 @@ function _validate_level_pair(name, a, b)
                 "segmentation. Got $(repr(level.Ti)) (level) vs $(repr(shape.Ti)) (shape).",
         ),
     )
-    _frequency_prior(resolve_prior(shape)) isa OUPrior || throw(
+    _proper_prior(_frequency_prior(resolve_prior(shape))) || throw(
         ArgumentError(
             "Bandpass model group `$name`: the shape $(component_label(shape)) beside a " *
-                "level needs a zero-mean OUPrior to separate the two. Without a prior the " *
-                "shape absorbs the level, and a random walk leaves its own level free.",
+                "level needs a zero-mean OUPrior or a RandomWalkPrior with an `init` to " *
+                "separate the two. Without a prior the shape absorbs the level, and a " *
+                "random walk without an init leaves its own level free.",
         ),
     )
     return nothing
