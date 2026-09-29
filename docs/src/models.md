@@ -72,10 +72,10 @@ data:
 |:------|:--------|
 | `nothing` | none: every value is free |
 | [`IIDPrior`](@ref)`(σ)` | each parameter `N(0, σ²)` |
-| [`RandomWalkPrior`](@ref)`(; order, σ)` | the `order`-th difference between neighbors along the axis is `N(0, σ²)` |
+| [`RandomWalkPrior`](@ref)`(; order, σ)` | the `(order − 1)`-times integrated Brownian motion along the axis; `σ²` per unit of `x^(2·order − 1)` |
 | [`OUPrior`](@ref)`(; scale, σ)` | a zero-mean Ornstein–Uhlenbeck process along the axis; `scale` and `σ` each a number or a hyperprior |
 
-`σ` is in the parameter's own units. A correlated prior runs along the one axis
+`σ` is in the parameter's own units, per the power of the axis coordinate (s or Hz) the random walk states. A correlated prior runs along the one axis
 the component segments (the one whose segmentation is not `GlobalTime` or
 `GlobalFrequency`). A component segmenting both keys the prior by axis,
 `prior = (Ti = OUPrior(; …), Frequency = RandomWalkPrior(; …))`, and may leave
@@ -246,12 +246,13 @@ groups, used verbatim:
 ```julia
 bp(prior) = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), prior)
 m = GainModel(phase = (; bandpass = bp(nothing)))
-with_station(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(; order = 2, σ = 0.01))))
+with_station(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(; order = 2, σ = 1.0e-11))))
 ```
 
 Here every station solves a free per-channel phase bandpass except AA, whose
-channels are tied by a second-order random walk — the right model for a
-station too weak to constrain per-channel values. Replacement is **whole-group**: a station entry supplies
+channels are tied by a second-order random walk (`σ` in rad/Hz^(3/2): over
+2 MHz channels the second difference has a standard deviation of about 0.02
+rad) — the right model for a station too weak to constrain per-channel values. Replacement is **whole-group**: a station entry supplies
 complete `phase` and/or `logamp` trees (a group the entry omits is inherited
 from the base), because components within a group interact — they sum and
 share degeneracies — while the two groups do not. The model never merges

@@ -16,29 +16,50 @@ const Freq = Gustavo.UVData.Frequency
 _ou_cov(x, τ, σ2) = [σ2 * exp(-abs(a - b) / τ) for a in x, b in x]
 _dense_ou_map(y, w, x, τ, σ2) = (K = _ou_cov(x, τ, σ2); K * ((K + Diagonal(inv.(w))) \ y))
 
-# The random-walk MAP by dense linear algebra.
-function _dense_random_walk(y, w, order, σ)
-    n = length(y)
-    D = Matrix(1.0I, n, n)
-    for _ in 1:order
-        D = diff(D; dims = 1)
-    end
-    usable = [isfinite(y[k]) && w[k] > 0 for k in eachindex(y)]
-    W = Diagonal(ifelse.(usable, w, 0.0))
-    return (W + D'D / σ^2) \ (W * ifelse.(usable, y, 0.0))
+# The random-walk MAP by dense linear algebra, as the posterior mean of a
+# Gaussian process: an integrated Brownian motion from the first coordinate plus
+# a polynomial of degree `order − 1` whose coefficients have variance `κ`, which
+# tends to the flat start as `κ` grows. Orders 1 and 2.
+function _dense_random_walk(y, w, x, order, σ; κ = 1.0e8)
+    u = (x .- x[1]) ./ (x[end] - x[1])
+    L = x[end] - x[1]
+    brownian(s, t) = σ^2 * L * min(s, t)
+    integrated(s, t) = (m = min(s, t); σ^2 * L^3 * (m^3 / 3 + abs(t - s) * m^2 / 2))
+    k = order == 1 ? brownian : integrated
+    K = [κ * sum((a * b)^d for d in 0:(order - 1)) + k(a, b) for a in u, b in u]
+    o = [i for i in eachindex(y) if isfinite(y[i]) && w[i] > 0]
+    return K[:, o] * ((K[o, o] + Diagonal(inv.(w[o]))) \ y[o])
 end
 
-@testset "random-walk prior: banded MAP" begin
+@testset "random-walk prior: integrated Brownian motion in the coordinate" begin
     rng = Random.Xoshiro(3)
     n = 40
-    y = sin.(range(0, 3; length = n)) .+ 0.05 .* randn(rng, n)
+    x = cumsum(1.0e6 .* (0.5 .+ rand(rng, n)))      # uneven spacing, Hz
+    y = sin.((x .- x[1]) ./ 1.0e7) .+ 0.05 .* randn(rng, n)
     w = fill(400.0, n)
     y[10:14] .= NaN
-    for order in 1:3
-        @test FRpf._random_walk_track(y, w, order, 0.02) ≈ _dense_random_walk(y, w, order, 0.02) atol = 1.0e-12
+    σ = Dict(1 => 1.0e-4, 2 => 1.0e-11)
+    for order in 1:2
+        @test FRpf._random_walk_track(y, w, x, order, σ[order]) ≈
+            _dense_random_walk(y, w, x, order, σ[order]) rtol = 1.0e-5
     end
-    @test eltype(FRpf._random_walk_track(Float32.(y), Float32.(w), 2, 0.02)) === Float32
-    @test FRpf._random_walk_track(Float32.(y), Float32.(w), 2, 0.02) ≈ _dense_random_walk(y, w, 2, 0.02) rtol = 1.0e-5
+
+    # Order 1 exactly: independent steps `N(0, σ²Δx)`.
+    D = diff(Matrix(1.0I, n, n); dims = 1)
+    wk = ifelse.(isfinite.(y), w, 0.0)
+    exact = (Diagonal(wk) + D' * Diagonal(inv.(σ[1]^2 .* diff(x))) * D) \ (wk .* ifelse.(isfinite.(y), y, 0.0))
+    @test FRpf._random_walk_track(y, w, x, 1, σ[1]) ≈ exact rtol = 1.0e-10
+
+    # The prior is defined along the coordinate, not by sample order: reversed
+    # coordinates and a shifted origin give the same fit.
+    @test FRpf._random_walk_track(reverse(y), reverse(w), reverse(x), 2, σ[2]) ≈
+        reverse(FRpf._random_walk_track(y, w, x, 2, σ[2])) rtol = 1.0e-8
+    @test FRpf._random_walk_track(y, w, x .+ 5.0e9, 2, σ[2]) ≈ FRpf._random_walk_track(y, w, x, 2, σ[2]) rtol = 1.0e-8
+    @test_throws "strictly monotone coordinates" FRpf._random_walk_track(y, w, [x[2]; x[1]; x[3:end]], 1, σ[1])
+
+    @test eltype(FRpf._random_walk_track(Float32.(y), Float32.(w), x, 2, σ[2])) === Float32
+    @test FRpf._random_walk_track(Float32.(y), Float32.(w), x, 2, σ[2]) ≈
+        FRpf._random_walk_track(y, w, x, 2, σ[2]) rtol = 1.0e-5
 end
 
 @testset "MAP of one block" begin
@@ -47,8 +68,8 @@ end
     x = collect(range(1.0e9, 1.03e9; length = n))
     y = 0.3 .* sin.(range(0, 2; length = n)) .+ 0.02 .* randn(rng, n)
     w = fill(2500.0, n)
-    rw = CALpf.RandomWalkPrior(; order = 2, σ = 0.01)
-    @test FRpf._estimate_map(rw, y, w, x) ≈ _dense_random_walk(y, w, 2, 0.01)
+    rw = CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-11)
+    @test FRpf._estimate_map(rw, y, w, x) ≈ FRpf._random_walk_track(y, w, x, 2, 1.0e-11)
 
     # No prior returns the measured values, `NaN` where there are none.
     y2 = copy(y)

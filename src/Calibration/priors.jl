@@ -33,13 +33,15 @@ IIDPrior(σ::Real) = IIDPrior{typeof(σ)}(σ)
 """
     RandomWalkPrior(; order = 1, σ)
 
-A random walk of the given `order` along the component's axis (see
-[`resolve_prior`](@ref)): the `order`-th difference between neighboring values
-is independently `N(0, σ²)`, with `σ` in the parameter's own units. The walk's
-starting level (and, for `order > 1`, its first `order - 1` differences) is
-left free, so the prior is improper in those directions. Order 2 makes the
-posterior mean a Whittaker smoother with `λ = 1/σ²` against inverse-variance
-weights.
+A random walk of the given `order` `m` along the component's axis (see
+[`resolve_prior`](@ref)): the `(m − 1)`-times integrated Brownian motion in the
+axis coordinate. Its `(m − 1)`-th derivative changes by `N(0, σ²·Δx)` over a
+step `Δx`, so `σ²` is in the parameter's units squared per `x^(2m − 1)`: per
+second or per Hz for order 1, per Hz³ along frequency for order 2. The prior
+holds for any spacing of the values and means the same at any segment
+resolution. The walk's starting value (and, for `m > 1`, its first `m − 1`
+derivatives) is left free, so the prior is improper in those directions.
+Order 2 gives a cubic smoothing spline.
 """
 struct RandomWalkPrior{T <: Real} <: AbstractPrior
     order::Int

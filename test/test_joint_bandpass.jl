@@ -143,7 +143,8 @@ end
 
     s_free = runbp(FP.JointSmoother(max_iterations = 40, tolerance = 1.0e-10))
 
-    stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6)
+    # σ = 1e-6 rad per channel (2 MHz) as rad/Hz^(3/2).
+    stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6 * sqrt(3 / (2 * 2.0e6^3)))
     s_stiff = runbp(FP.JointSmoother(max_iterations = 40); prior = stiff)
     pleaf = CAL._component_leaf(s_stiff.layout.plantree.phase.bandpass, s_stiff.θ)
     aleaf = CAL._component_leaf(s_stiff.layout.plantree.logamp.bandpass, s_stiff.θ)

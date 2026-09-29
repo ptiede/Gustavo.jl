@@ -185,21 +185,38 @@ hyperprior on ``\sigma`` keeps it at a plausible value. The adhoc default,
 
 ## The random-walk prior
 
-Under a [`RandomWalkPrior`](@ref Gustavo.Calibration.RandomWalkPrior)`(; order = m, σ)`,
-the ``m``-th difference between neighboring samples, ``(D_m f)_k``, is
-``\mathcal N(0, \sigma^2)``. The MAP values solve the normal equations
+A [`RandomWalkPrior`](@ref Gustavo.Calibration.RandomWalkPrior)`(; order = m, σ)`
+is the ``(m-1)``-times integrated Brownian motion along the coordinate. Its
+state at each sample is ``s_k = (f_k, f'_k, \dots, f^{(m-1)}_k)``, and over a
+step ``\Delta_k = |x_k - x_{k-1}|`` it evolves as
 
 ```math
-\big(W + \sigma^{-2} D_m^\top D_m\big)\, \hat f = W y, \qquad W = \mathrm{diag}(w_k),
+s_k = A_k s_{k-1} + \eta_k, \qquad
+(A_k)_{ij} = \frac{\Delta_k^{\,j-i}}{(j-i)!}\ (j \ge i), \qquad
+(Q_k)_{ij} = \frac{\sigma^2\, \Delta_k^{\,2m-1-i-j}}{(2m-1-i-j)\,(m-1-i)!\,(m-1-j)!},
 ```
 
-with ``w_k = 0`` at samples without data. The matrix is banded with bandwidth
-``m`` and is solved by a banded Cholesky factorization. The walk's starting
-level (and its first ``m - 1`` differences) is left free, so the prior is
-improper in those directions: it cannot separate a level component from the
-shape, and a random walk beside a level is rejected. The differences count
-samples, not coordinate spacing. `σ` is fixed; a random walk has no
-hyperparameter search.
+with ``\eta_k \sim \mathcal N(0, Q_k)`` and indices ``i, j`` from 0. For
+``m = 1`` this is ``f_k - f_{k-1} \sim \mathcal N(0, \sigma^2 \Delta_k)``;
+for ``m = 2`` the posterior mean is a cubic smoothing spline. ``\sigma^2`` is
+per unit of ``x^{2m-1}``. Because the prior is defined in the coordinate, not
+by counting samples, it holds for uneven spacing and gaps and keeps its meaning
+when the segments are made coarser or finer.
+
+The starting value and its first ``m - 1`` derivatives are left free, so the
+prior is improper in those directions. The MAP values minimize
+
+```math
+\sum_k w_k (y_k - f_k)^2 + \sum_{k \ge 2} (s_k - A_k s_{k-1})^\top Q_k^{-1} (s_k - A_k s_{k-1})
+```
+
+over every state, with ``w_k = 0`` at samples without data. The normal
+equations are banded, with bandwidth ``2m - 1``, and are solved by a banded
+Cholesky factorization once ``m`` samples carry data; the coordinate is first
+rescaled by its median spacing so the states have comparable magnitudes. Since
+the walk leaves its own level free, it cannot be separated from a level
+component, and a random walk beside a level is rejected. `σ` is fixed; a random
+walk has no hyperparameter search.
 
 ## Where the solvers use this
 

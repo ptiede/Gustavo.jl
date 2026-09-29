@@ -188,7 +188,8 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
         s_free = runc(nothing)
         s_ar = runc(CAL.OUPrior(; scale = LogNormal(log(nu), 1.0), σ = LogNormal(log(sigma_bp), 1.0)))
-        s_wh = runc(CAL.RandomWalkPrior(; order = 2, σ = 0.02))
+        # σ = 0.02 rad per channel (2 MHz) as rad/Hz^(3/2).
+        s_wh = runc(CAL.RandomWalkPrior(; order = 2, σ = 0.02 * sqrt(3 / (2 * 2.0e6^3))))
 
         # The guard excises the contaminated channel; no prior estimates
         # nothing it has no datum for, so that slot stays UNAPPLIED (log-amp 0)
@@ -312,8 +313,11 @@ end
     # A stiff second-order walk on the PHASE leaves only its null space — a
     # straight line in frequency within each spectral window, each with its own
     # level and slope.
-    stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6)
-    sol_stiff = run(_bpmodel(; phase = stiff, amp = CAL.RandomWalkPrior(; order = 2, σ = 0.01)))
+    # σ per channel converted to rad/Hz^(3/2): an order-2 walk's second difference
+    # over an even step h has variance (2/3)σ²h³.
+    per_channel(σ) = CAL.RandomWalkPrior(; order = 2, σ = σ * sqrt(3 / (2 * 2.0e6^3)))
+    stiff = per_channel(1.0e-6)
+    sol_stiff = run(_bpmodel(; phase = stiff, amp = per_channel(0.01)))
     sol_free = run(_bpmodel())
     spws = [((s - 1) * nchan + 1):(s * nchan) for s in 1:nspw]
     for a in 1:nant, f in 1:2, cs in spws

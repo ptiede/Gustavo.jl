@@ -727,12 +727,12 @@ end
     wk = [isfinite(y[k]) && w[k] > 0 ? w[k] : 0.0 for k in 1:n]
     sm = FRa.PerTrackAdhocSmoother()
 
-    # A first-order random walk: `(W + DᵀD/σ²)ŷ = Wy`.
+    # A first-order random walk, steps `N(0, σ²Δx)` with Δx = 2 s: `(W + DᵀD/(2σ²))ŷ = Wy`.
     D = [Float64((j == k) - (j == k + 1)) for k in 1:(n - 1), j in 1:n]
     for σ in (0.03, 0.5, 3.0)
         t = track(y)
         @test FRa.smooth_track!(sm, t, w, RandomWalkPrior(; σ)) == RandomWalkPrior(; σ)
-        ref = (Diagonal(wk) + D' * D / σ^2) \ (wk .* replace(y, NaN => 0.0))
+        ref = (Diagonal(wk) + D' * D / (2σ^2)) \ (wk .* replace(y, NaN => 0.0))
         @test maximum(abs, parent(t) .- ref) < 1.0e-8
     end
 

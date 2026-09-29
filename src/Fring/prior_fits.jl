@@ -77,9 +77,10 @@ proper along every direction. `NaN` where the data and prior do not determine a
 value; a block without data is all `NaN`.
 
 - `nothing`: the measured values.
-- `RandomWalkPrior` of order `k`: the `k`-th difference between
-  neighboring segments is `N(0, σ²)`. A block with fewer than `k` usable
-  segments does not determine the walk and returns its measured values.
+- `RandomWalkPrior` of order `m`: the `(m−1)`-times integrated Brownian
+  motion along `x`, with `σ²` per unit of `x^(2m−1)` (see
+  [`_random_walk_track`](@ref)). A block with fewer than `m` usable segments
+  does not determine the walk and returns its measured values.
 - `OUPrior`: a zero-mean OU process.
 """
 function _estimate_map(::Nothing, y, w, x)
@@ -90,7 +91,7 @@ end
 function _estimate_map(prior::RandomWalkPrior, y, w, x)
     count(k -> _shape_usable(y[k], w[k]), eachindex(y, w)) >= prior.order ||
         return _estimate_map(nothing, y, w, x)
-    return _random_walk_track(y, w, prior.order, prior.σ)
+    return _random_walk_track(y, w, x, prior.order, prior.σ)
 end
 
 function _estimate_map(prior::OUPrior, y, w, x)
@@ -110,29 +111,60 @@ function _masked(y, w)
     return T[_shape_usable(y[k], w[k]) ? y[k] : T(NaN) for k in eachindex(y, w)]
 end
 
-# The random-walk MAP `(W + DₖᵀDₖ/σ²)ŷ = Wy`, `Dₖ` the `k`-th
-# difference between neighboring segments: banded with bandwidth `k`, so a banded
-# Cholesky. A segment without data has weight 0 and the prior alone sets it. The
-# system is positive definite once `k` segments carry data, which the caller
-# guarantees. Solved in at least `Float64`: a wide gap or a small `σ` puts the
-# condition number past what `Float32` resolves.
-function _random_walk_track(y, w, order::Integer, σ::Real)
-    Base.require_one_based_indexing(y, w)
+"""
+    _random_walk_track(y, w, x, order, σ) -> ŷ
+
+The MAP values of `y` under a random walk of order `m = order` along the
+strictly monotone coordinates `x`: the `(m−1)`-times integrated Brownian motion
+whose `(m−1)`-th derivative has increments `N(0, σ²·|Δx|)`. The walk's value
+and first `m−1` derivatives at the start are free (a flat prior).
+
+The state at each sample is `s = (f, f′, …, f^(m−1))`; over a step `Δ` it
+evolves as `s′ = A s + η` with `A[i, j] = Δ^(j−i)/(j−i)!` and `η ~ N(0, Q)`,
+`Q[i, j] = σ² Δ^(2m−1−i−j) / ((2m−1−i−j)(m−1−i)!(m−1−j)!)` (0-based). The MAP
+minimizes `Σ w (y − f)² + Σ (s′ − A s)ᵀ Q⁻¹ (s′ − A s)` over every state, a
+banded system solved by a banded Cholesky factorization. A segment without
+data has weight 0 and the prior alone sets it. The system is positive definite
+once `m` segments carry data, which the caller guarantees.
+
+`x` is rescaled by its median spacing before the solve, so the states have
+comparable magnitudes; the solve is in at least `Float64`.
+"""
+function _random_walk_track(y, w, x, order::Integer, σ::Real)
+    Base.require_one_based_indexing(y, w, x)
     T = _block_eltype(y, w)
     S = promote_type(T, Float64)
     n = length(y)
-    λ = inv(S(σ)^2)
-    c = S[(-1)^(order - j) * binomial(order, j) for j in 0:order]
-    N = fill!(BandedMatrix{S}(undef, (n, n), (order, order)), zero(S))
-    rhs = zeros(S, n)
+    m = Int(order)
+    Δx = S[abs(x[k] - x[k - 1]) for k in 2:n]
+    (all(>(0), diff(x)) || all(<(0), diff(x))) || throw(
+        ArgumentError("a random walk needs strictly monotone coordinates"),
+    )
+    h = isempty(Δx) ? one(S) : median(Δx)
+    σ2 = S(σ)^2 * h^(2m - 1)
+    N = fill!(BandedMatrix{S}(undef, (n * m, n * m), (2m - 1, 2m - 1)), zero(S))
+    rhs = zeros(S, n * m)
+    at(k, i) = (k - 1) * m + i + 1
     for k in eachindex(y, w)
         if _shape_usable(y[k], w[k])
-            N[k, k] += w[k]
-            rhs[k] = S(w[k]) * S(y[k])
+            N[at(k, 0), at(k, 0)] += w[k]
+            rhs[at(k, 0)] = S(w[k]) * S(y[k])
         end
     end
-    for r in 1:(n - order), a in 0:order, b in 0:order
-        N[r + a, r + b] += λ * c[a + 1] * c[b + 1]
+    for k in 2:n
+        Δ = Δx[k - 1] / h
+        A = S[j >= i ? Δ^(j - i) / factorial(j - i) : zero(S) for i in 0:(m - 1), j in 0:(m - 1)]
+        Q = S[
+            σ2 * Δ^(2m - 1 - i - j) / ((2m - 1 - i - j) * factorial(m - 1 - i) * factorial(m - 1 - j))
+                for i in 0:(m - 1), j in 0:(m - 1)
+        ]
+        B = [-A Matrix{S}(I, m, m)]
+        C = B' * (cholesky(Symmetric(Q)) \ B)
+        idx = at(k - 1, 0):at(k, m - 1)
+        for (b, jj) in pairs(idx), (a, ii) in pairs(idx)
+            N[ii, jj] += C[a, b]
+        end
     end
-    return copyto!(similar(y, T, n), cholesky(Symmetric(N)) \ rhs)
+    s = cholesky(Symmetric(N)) \ rhs
+    return copyto!(similar(y, T, n), s[at.(1:n, 0)])
 end
