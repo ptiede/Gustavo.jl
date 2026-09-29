@@ -1,4 +1,4 @@
-# Ornstein–Uhlenbeck (Matérn-1/2) state-space phase smoother primitives.
+# State-space prior primitives: the Kalman filter and RTS smoothers.
 # Standalone-runnable and included from runtests.jl.
 
 using Gustavo
@@ -34,7 +34,7 @@ end
     K = _matern12(times, τ, σ2)
     C = K + Diagonal(r)
     dense_ll = -0.5 * (logdet(C) + dot(y, C \ y) + n * log(2π))
-    kal_ll = FRs.kalman_ou_filter(y, r, times; τ = τ, σ2 = σ2)[6]
+    kal_ll = FRs.kalman_filter(FRs.OUModel(τ, σ2), y, r, times).loglik
     @test isapprox(kal_ll, dense_ll; atol = 1.0e-9)
 end
 
@@ -49,10 +49,10 @@ end
     C = K + Diagonal(r)
     gp_mean = K * (C \ y)                            # full-track GP posterior mean
 
-    μf, Pf, μp, Pp, avec, _ = FRs.kalman_ou_filter(y, r, times; τ = τ, σ2 = σ2)
-    μs, Ps = FRs.rts_smooth(μf, Pf, μp, Pp, avec)
-    @test maximum(abs, μs .- gp_mean) < 1.0e-10
-    @test all(Ps .<= Pf .+ 1.0e-12)                 # smoothing never increases variance
+    kf = FRs.kalman_filter(FRs.OUModel(τ, σ2), y, r, times)
+    μs, Ps = FRs.rts_smooth(kf)
+    @test maximum(abs, first.(μs) .- gp_mean) < 1.0e-10
+    @test all(first.(Ps) .<= first.(kf.Pf) .+ 1.0e-12)   # smoothing never increases variance
 end
 
 @testset "Missing observations are predicted through" begin
@@ -64,8 +64,8 @@ end
     r = fill(0.02, n)
     r[8:12] .= Inf                                  # a gap of missing samples
     yg = copy(y); yg[8:12] .= NaN
-    kal = FRs.kalman_ou_filter(yg, r, times; τ = τ, σ2 = σ2)
-    @test isfinite(kal[6])                          # loglik sums only observed samples
+    kal = FRs.kalman_filter(FRs.OUModel(τ, σ2), yg, r, times)
+    @test isfinite(kal.loglik)                          # loglik sums only observed samples
     μs = FRs.smooth_ou_track(yg, 1.0 ./ r, times; τ = τ, σ2 = σ2)
     @test all(isfinite, μs)                         # gap interpolated to finite values
     # Interpolated gap stays within the range of its finite neighbours.
@@ -121,11 +121,11 @@ end
     y = θ .+ 0.1f0 .* Float32[sin(11k) for k in 1:N]
     w = fill(100.0f0, N)
 
-    μf, Pf, μp, Pp, avec, ll = FRs.kalman_ou_filter(y, 1 ./ w, times; τ = 20.0f0, σ2 = 1.0f0)
-    @test eltype(μf) === Float32
-    @test eltype(avec) === Float32
-    @test ll isa Float32
-    @test eltype(FRs.rts_smooth(μf, Pf, μp, Pp, avec)[1]) === Float32
+    kf = FRs.kalman_filter(FRs.OUModel(20.0f0, 1.0f0), y, 1 ./ w, times)
+    @test eltype(eltype(kf.μf)) === Float32
+    @test eltype(eltype(kf.A)) === Float32
+    @test kf.loglik isa Float32
+    @test eltype(eltype(FRs.rts_smooth(kf)[1])) === Float32
     @test eltype(FRs.smooth_ou_track(y, w, times; τ = 20.0f0, σ2 = 1.0f0)) === Float32
     @test FRs._init_track_var(y, w) isa Float32
 
@@ -197,18 +197,18 @@ end
     ys = [randn(rng, m) .* 0.4 for _ in 1:T]
     rs = [fill(0.02, m) for _ in 1:T]
 
-    xf, Pf, xp, Pp, avecs, kal_ll = FRs.kalman_ou_mv_filter(rows, ys, rs, times; τ = τ, σ2 = σ2)
-    xs, Ps = FRs.rts_smooth_mv(xf, Pf, xp, Pp, avecs)
+    xf, Pf, xp, Pp, As, kal_ll = FRs.kalman_mv_filter(rows, ys, rs, times, FRs.OUModel.(τ, σ2))
+    xs, Ps = FRs.rts_smooth_mv(xf, Pf, xp, Pp, As)
     dense_ll, Xgp = _dense_joint_gp(Hs, ys, rs, times, τ, σ2)
 
     @test isapprox(kal_ll, dense_ll; atol = 1.0e-8)
     @test maximum(abs(xs[i, k] - Xgp[i, k]) for k in 1:T for i in 1:n) < 1.0e-8
 end
 
-@testset "Multivariate OU: diffuse (τ=0) dim is temporally independent" begin
-    # A τ ≤ 0 dimension carries a diffuse per-step prior and no temporal coupling,
+@testset "Multivariate OU: a τ = 0 station is temporally independent" begin
+    # A τ = 0 station has a fresh N(0, σ²) value at every step and no temporal coupling,
     # so the RTS pass has nothing to propagate back: the smoothed track equals the
-    # filtered one exactly. Every dimension here is diffuse AND observed, so the
+    # filtered one exactly. Every station here is independent AND observed, so the
     # equality is a statement about the transition, not about an idle state.
     n, T = 3, 6
     τ = zeros(3)
@@ -217,9 +217,9 @@ end
     rows = [(1, 2), (1, 3), (2, 3)]
     ys = [[0.1 * k, sin(k), cos(k)] for k in 1:T]
     rs = [fill(0.05, 3) for _ in 1:T]
-    xf, Pf, xp, Pp, avecs, _ = FRs.kalman_ou_mv_filter(rows, ys, rs, times; τ = τ, σ2 = σ2)
-    xs, _ = FRs.rts_smooth_mv(xf, Pf, xp, Pp, avecs)
-    @test all(avecs[i, k] == 0.0 for i in 1:n, k in 2:T)             # diffuse transition
+    xf, Pf, xp, Pp, As, _ = FRs.kalman_mv_filter(rows, ys, rs, times, FRs.OUModel.(τ, σ2))
+    xs, _ = FRs.rts_smooth_mv(xf, Pf, xp, Pp, As)
+    @test all(As[i, i, k] == 0.0 for i in 1:n, k in 2:T)             # no carried state
     @test maximum(abs(xs[i, k] - xf[i, k]) for i in 1:n, k in 1:T) < 1.0e-12
     @test any(!iszero, xf)                                           # the states ARE observed
 end
@@ -230,19 +230,19 @@ end
     ys = [Float32[0.1, -0.2, 0.3] for _ in 1:T]
     rs = [fill(0.02f0, 3) for _ in 1:T]
     times = collect(0.0f0:(T - 1))
-    xf, Pf, xp, Pp, avecs, ll = FRs.kalman_ou_mv_filter(
-        rows, ys, rs, times; τ = Float32[3, 5, 8], σ2 = Float32[0.6, 0.9, 0.4],
+    xf, Pf, xp, Pp, As, ll = FRs.kalman_mv_filter(
+        rows, ys, rs, times, FRs.OUModel.(Float32[3, 5, 8], Float32[0.6, 0.9, 0.4]),
     )
     @test eltype(xf) === Float32
     @test eltype(Pf) === Float32
     @test ll isa Float32
-    xs, _ = FRs.rts_smooth_mv(xf, Pf, xp, Pp, avecs)
+    xs, _ = FRs.rts_smooth_mv(xf, Pf, xp, Pp, As)
     @test eltype(xs) === Float32
 end
 
 @testset "Multivariate OU: a row outside the state is an error" begin
-    @test_throws "outside the state 1:3" FRs.kalman_ou_mv_filter(
-        [(1, 4)], [[0.1]], [[0.02]], [0.0]; τ = [3.0, 5.0, 8.0], σ2 = [0.6, 0.9, 0.4],
+    @test_throws "outside 1:3" FRs.kalman_mv_filter(
+        [(1, 4)], [[0.1]], [[0.02]], [0.0], FRs.OUModel.([3.0, 5.0, 8.0], [0.6, 0.9, 0.4]),
     )
 end
 
@@ -250,8 +250,9 @@ end
     τ, σ2 = [3.0, 5.0, 8.0], [0.6, 0.9, 0.4]
     times = [0.0, 1.0, 2.5]
     ys = [[0.1, -0.2, 0.3], [0.2, 0.1, -0.1], [0.0, 0.3, 0.2]]
-    all3 = FRs.kalman_ou_mv_filter([(1, 2), (1, 3), (2, 3)], ys, [[0.02, 0.0, 0.02] for _ in times], times; τ, σ2)
-    two = FRs.kalman_ou_mv_filter([(1, 2), (2, 3)], [y[[1, 3]] for y in ys], [[0.02, 0.02] for _ in times], times; τ, σ2)
+    models = FRs.OUModel.(τ, σ2)
+    all3 = FRs.kalman_mv_filter([(1, 2), (1, 3), (2, 3)], ys, [[0.02, 0.0, 0.02] for _ in times], times, models)
+    two = FRs.kalman_mv_filter([(1, 2), (2, 3)], [y[[1, 3]] for y in ys], [[0.02, 0.02] for _ in times], times, models)
     @test all3[1] ≈ two[1] && all3[6] ≈ two[6]
 end
 

@@ -1,128 +1,275 @@
-# ── Ornstein–Uhlenbeck (Matérn-1/2) state-space phase smoother ───────────────
+# ── Linear-Gaussian state-space priors along a coordinate ───────────────────
 #
-# Models a station's residual atmospheric phase track as a Gaussian process
-# with a Matérn-1/2 kernel K(Δt) = σ²·exp(-|Δt|/τ), τ the coherence time.
-# Matérn-1/2 is an Ornstein–Uhlenbeck process, a first-order linear-Gaussian
-# state-space model, so the GP posterior mean is exact in O(n) from a scalar
-# Kalman filter plus RTS smoother — no dense covariance and no SparseArrays.
-# The same filter's marginal likelihood is what the prior's hyperparameters
-# are estimated from (prior_fits.jl); docs/src/priors.md derives both.
+# Every correlated prior on a track is a linear-Gaussian state-space model: a
+# small state `s` per sample, of which the track value is the first entry,
+# evolving over a step `Δ` in the coordinate as `s′ = A s + η`, `η ~ N(0, Q)`.
+# One Kalman filter and RTS smoother fit any such model exactly in O(n), and the
+# filter gives its marginal likelihood (restricted, for a flat start), from
+# which hyperparameters are estimated. docs/src/priors.md derives both.
 #
-# Blackburn/Bouman et al., AJ (doi:10.3847/1538-3881/ae160f); for the OU
-# state-space form of a Matérn-1/2 GP see Särkkä & Solin, Applied SDEs.
+# - `OUModel`: Ornstein–Uhlenbeck (Matérn-1/2), K(Δ) = σ²·exp(-|Δ|/τ); one state,
+#   started from its stationary distribution.
+# - `RandomWalkModel{M}`: the (M−1)-times integrated Brownian motion; states
+#   `(f, f′, …, f^(M−1))`, started flat.
+#
+# Särkkä & Solin, Applied Stochastic Differential Equations (2019).
 
-# Exact discrete OU transition over a time gap Δt for K(Δt)=σ²·exp(-|Δt|/τ): the
-# state contracts by a=exp(-|Δt|/τ) toward the (zero) mean, with process variance
-# q=σ²(1-a²) injected so the stationary variance stays σ². Irregular Δt (gaps) are
-# handled naturally — a is just larger for wider gaps.
+# Exact discrete OU transition over a gap Δt for K(Δt)=σ²·exp(-|Δt|/τ): the
+# state contracts by a=exp(-|Δt|/τ) toward the (zero) mean, with process
+# variance q=σ²(1-a²) injected so the stationary variance stays σ².
 @inline function ou_step(τ::Real, σ2::Real, Δt::Real)
     a = exp(-abs(Δt) / τ)
     return a, σ2 * (1 - a * a)
 end
 
 """
-    kalman_ou_filter(y, r, times; τ, σ2) -> (μf, Pf, μp, Pp, avec, loglik)
+    OUModel(τ, σ2)
 
-Forward Kalman filter for a scalar Ornstein–Uhlenbeck (Matérn-1/2) state observed
-as `y_k = θ_k + ε_k`, `ε_k ~ N(0, r_k)`. A sample with non-finite `y_k` or
-non-finite/non-positive `r_k` is treated as MISSING (predict-only, no update).
-The prior is the OU stationary distribution `θ_0 ~ N(0, σ2)`.
-
-`times` holds the sample coordinates and `τ` the correlation scale in the same
-unit — seconds along a time track, Hz along a frequency track; only their
-differences enter. Irregular spacing and gaps are allowed.
-
-Returns the filtered mean/variance `μf`/`Pf`, the one-step predicted mean/variance
-`μp`/`Pp`, the per-step transition `avec` (`avec[k]` links k-1→k, `avec[1]=0`),
-and the log marginal likelihood `Σ_k log N(v_k | 0, S_k)` over observed samples
-(the quantity maximized to fit (τ, σ2)).
+The Ornstein–Uhlenbeck process with covariance `σ2·exp(-|Δ|/τ)` as a
+one-state model, started from its stationary distribution `N(0, σ2)`.
 """
-function kalman_ou_filter(y, r, times; τ::Real, σ2::Real)
-    Base.require_one_based_indexing(y, r, times)
-    T = float(
-        promote_type(eltype(y), eltype(r), eltype(times), typeof(τ), typeof(σ2)),
-    )
+struct OUModel{T}
+    τ::T
+    σ2::T
+end
+OUModel(τ, σ2) = OUModel{float(promote_type(typeof(τ), typeof(σ2)))}(τ, σ2)
+
+"""
+    RandomWalkModel{M}(σ2)
+
+The `(M−1)`-times integrated Brownian motion whose `(M−1)`-th derivative has
+increments `N(0, σ2·|Δ|)`, with state `(f, f′, …, f^(M−1))`. The start is
+flat: the first sample's state is unconstrained by the prior.
+"""
+struct RandomWalkModel{M, T}
+    σ2::T
+end
+RandomWalkModel{M}(σ2) where {M} = RandomWalkModel{M, float(typeof(σ2))}(σ2)
+
+statedim(::OUModel) = 1
+statedim(::RandomWalkModel{M}) where {M} = M
+
+_model_eltype(::OUModel{T}) where {T} = T
+_model_eltype(::RandomWalkModel{M, T}) where {M, T} = T
+
+# `(A, Q)` over a step `Δ` in the coordinate, in element type `T`.
+function transition(m::OUModel, Δ, ::Type{T}) where {T}
+    a, q = ou_step(T(m.τ), T(m.σ2), T(Δ))
+    return SMatrix{1, 1, T}(a), SMatrix{1, 1, T}(q)
+end
+
+function transition(m::RandomWalkModel{M}, Δ, ::Type{T}) where {M, T}
+    d = abs(T(Δ))
+    σ2 = T(m.σ2)
+    A = SMatrix{M, M, T}(ntuple(Val(M * M)) do l
+        i, j = (l - 1) % M, (l - 1) ÷ M
+        j >= i ? d^(j - i) / factorial(j - i) : zero(T)
+    end)
+    Q = SMatrix{M, M, T}(ntuple(Val(M * M)) do l
+        i, j = (l - 1) % M, (l - 1) ÷ M
+        p = 2M - 1 - i - j
+        σ2 * d^p / (p * factorial(M - 1 - i) * factorial(M - 1 - j))
+    end)
+    return A, Q
+end
+
+# The starting mean and covariance, or `nothing` for a flat start.
+initial(m::OUModel, ::Type{T}) where {T} = SVector{1, T}(0), SMatrix{1, 1, T}(m.σ2)
+initial(::RandomWalkModel, ::Type) = nothing
+
+_symmetric(P) = (P + P') / 2
+
+"""
+    kalman_filter(model, y, r, x) -> NamedTuple
+
+Forward Kalman filter of the state-space `model` observed as `y_k = s_k[1] + ε_k`,
+`ε_k ~ N(0, r_k)`, at the coordinates `x` (any spacing, either direction; only
+the steps `x_k − x_{k−1}` enter). A sample with non-finite `y_k` or `r_k` not
+positive and finite is missing: predicted through, not updated.
+
+A flat start (`RandomWalkModel`) is filtered in information form until the
+observed samples determine the state, then in covariance form; this is exact.
+It throws if the samples never determine the state.
+
+Fields of the result, per sample `k`:
+
+- `μf`, `Pf`: filtered mean and covariance, for `k > ndiffuse`;
+- `ηf`, `Λf`: filtered information vector and matrix, for `k ≤ ndiffuse`;
+- `μp`, `Pp`: predicted mean and covariance, for `k > ndiffuse + 1`, and for
+  `k = 1` with a proper start;
+- `A`, `Q`: the transition into sample `k` (`k ≥ 2`);
+- `v`, `S`: innovation and its variance (`NaN` and `0` where not observed or
+  `k ≤ ndiffuse`);
+- `loglik`: the log marginal likelihood of the observed samples, restricted
+  (the flat start integrated out under the Lebesgue measure on the first
+  state) for a flat start.
+"""
+function kalman_filter(model, y, r, x)
+    Base.require_one_based_indexing(y, r, x)
+    T = _filter_eltype(model, y, r, x)
+    D = statedim(model)
     n = length(y)
-    μf = zeros(T, n)
-    Pf = zeros(T, n)
-    μp = zeros(T, n)
-    Pp = zeros(T, n)
-    avec = zeros(T, n)
-    loglik = zero(T)
-    μprev = zero(T)
-    Pprev = T(σ2)
-    for k in eachindex(y, r, times)
-        if k == 1
-            a = zero(T)
-            μpr = zero(T)
-            Ppr = T(σ2)
-        else
-            a, q = ou_step(τ, σ2, times[k] - times[k - 1])
-            μpr = a * μprev
-            Ppr = a * a * Pprev + q
+    nanvec = SVector{D, T}(ntuple(_ -> T(NaN), D))
+    nanmat = SMatrix{D, D, T}(ntuple(_ -> T(NaN), D * D))
+    rec = (;
+        μf = fill(nanvec, n), Pf = fill(nanmat, n), ηf = fill(nanvec, n), Λf = fill(nanmat, n),
+        μp = fill(nanvec, n), Pp = fill(nanmat, n), A = fill(nanmat, n), Q = fill(nanmat, n),
+        v = fill(T(NaN), n), S = zeros(T, n),
+    )
+    loglik, ndiffuse, _, _ = _kalman_forward(model, y, r, x, Val(D), T, Val(false), rec)
+    return (; rec..., ndiffuse, loglik)
+end
+
+_filter_eltype(model, y, r, x) = float(promote_type(eltype(y), eltype(r), eltype(x), _model_eltype(model)))
+
+# The forward recursion of `kalman_filter`, storing each step into `rec` unless
+# it is `nothing`. With `Val(true)` it also filters a track of ones, missing
+# where `y` is, under the same gains (proper start only), and accumulates
+# `b = Σ vʸ·v¹/S` and `c = Σ (v¹)²/S`. Returns `(loglik, ndiffuse, b, c)`.
+function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) where {D, T, L}
+    Vec = SVector{D, T}
+    Mat = SMatrix{D, D, T, D * D}
+    e1 = Vec(ntuple(i -> i == 1 ? one(T) : zero(T), Val(D)))
+    start = initial(model, T)
+    diffuse = isnothing(start)
+    L && diffuse &&
+        throw(ArgumentError("a level cannot be separated from a flat-start $(nameof(typeof(model)))"))
+    ndiffuse = 0
+    nobs = 0
+    loglik = b = c1 = zero(T)
+    μ, P = diffuse ? (zero(Vec), zero(Mat)) : start
+    μ1 = zero(Vec)
+    # Flat start: the running density of (y_1:k, s_k) is exp(c + ηᵀs − sᵀΛs/2).
+    η, Λ, c = zero(Vec), zero(Mat), zero(T)
+    for k in eachindex(y, r, x)
+        if k > 1
+            A, Q = transition(model, x[k] - x[k - 1], T)
+            isnothing(rec) || (rec.A[k] = A; rec.Q[k] = Q)
+            if diffuse
+                # Predict in information form without Q⁻¹, so Q may be singular.
+                Ai = inv(A)
+                M = Ai' * Λ * Ai
+                η̃ = Ai' * η
+                F = I + Q * M
+                c += dot(η̃, Q * (F' \ η̃)) / 2 - log(abs(det(A))) - log(det(F)) / 2
+                Λ = _symmetric(F' \ M)
+                η = F' \ η̃
+            else
+                μ = A * μ
+                L && (μ1 = A * μ1)
+                P = _symmetric(A * P * A' + Q)
+            end
         end
-        avec[k] = a
-        μp[k] = μpr
-        Pp[k] = Ppr
-        yk = y[k]
-        rk = r[k]
+        diffuse || isnothing(rec) || (rec.μp[k] = μ; rec.Pp[k] = P)
+        yk, rk = y[k], r[k]
         if isfinite(yk) && isfinite(rk) && rk > 0
-            S = Ppr + rk
-            v = yk - μpr
-            K = Ppr / S
-            μc = μpr + K * v
-            Pc = (1 - K) * Ppr
-            loglik -= (log(2 * T(π) * S) + v * v / S) / 2
-        else
-            μc = μpr
-            Pc = Ppr
+            if diffuse
+                Λ += e1 * e1' / rk
+                η += e1 * (yk / rk)
+                c -= (log(2 * T(π) * rk) + yk * yk / rk) / 2
+                nobs += 1
+            else
+                Sk = P[1, 1] + rk
+                vk = yk - μ[1]
+                K = P[:, 1] / Sk
+                μ += K * vk
+                if L
+                    v1 = one(T) - μ1[1]
+                    μ1 += K * v1
+                    b += vk * v1 / Sk
+                    c1 += v1 * v1 / Sk
+                end
+                IK = I - K * e1'
+                P = _symmetric(IK * P * IK' + K * rk * K')
+                isnothing(rec) || (rec.v[k] = vk; rec.S[k] = Sk)
+                loglik -= (log(2 * T(π) * Sk) + vk * vk / Sk) / 2
+            end
         end
-        μf[k] = μc
-        Pf[k] = Pc
-        μprev = μc
-        Pprev = Pc
+        if diffuse && nobs >= D
+            C = cholesky(Symmetric(Matrix(Λ)); check = false)
+            if issuccess(C)
+                P = _symmetric(inv(Λ))
+                μ = P * η
+                loglik = c + dot(η, μ) / 2 - logdet(C) / 2 + D * log(2 * T(π)) / 2
+                diffuse = false
+            end
+        end
+        if diffuse
+            isnothing(rec) || (rec.ηf[k] = η; rec.Λf[k] = Λ)
+            ndiffuse = k
+        else
+            isnothing(rec) || (rec.μf[k] = μ; rec.Pf[k] = P)
+        end
     end
-    return μf, Pf, μp, Pp, avec, loglik
+    diffuse && throw(
+        ArgumentError(
+            "the observed samples do not determine the flat-start state of $(nameof(typeof(model))) " *
+                "($nobs usable samples, state dimension $D)",
+        ),
+    )
+    return loglik, ndiffuse, b, c1
+end
+
+# The log marginal likelihood of `y` under `model` (restricted, for a flat
+# start), without storing the per-sample record.
+function _kalman_loglik(model, y, r, x)
+    Base.require_one_based_indexing(y, r, x)
+    T = _filter_eltype(model, y, r, x)
+    return first(_kalman_forward(model, y, r, x, Val(statedim(model)), T, Val(false), nothing))
 end
 
 """
-    rts_smooth(μf, Pf, μp, Pp, avec) -> (μs, Ps)
+    rts_smooth(kf) -> (μs, Ps)
 
-Rauch–Tung–Striebel backward smoother paired with [`kalman_ou_filter`](@ref):
-returns the smoothed mean/variance conditioned on the whole track. `Ps ≤ Pf`.
+Rauch–Tung–Striebel backward smoother paired with [`kalman_filter`](@ref): the
+mean and covariance of every sample's state given the whole track. Samples
+filtered in information form are smoothed through the backward conditional
+`p(s_k | s_{k+1}, y_{1:k})`, written without `Q⁻¹`.
 """
-function rts_smooth(μf, Pf, μp, Pp, avec)
+function rts_smooth(kf)
+    (; μf, Pf, ηf, Λf, μp, Pp, A, Q, ndiffuse) = kf
     n = length(μf)
     μs = copy(μf)
     Ps = copy(Pf)
     for k in (n - 1):-1:1
-        Ppk = Pp[k + 1]
-        Ppk > 0 || continue
-        C = Pf[k] * avec[k + 1] / Ppk
-        μs[k] = μf[k] + C * (μs[k + 1] - μp[k + 1])
-        Ps[k] = Pf[k] + C * C * (Ps[k + 1] - Ppk)
+        Ak, Qk = A[k + 1], Q[k + 1]
+        if k > ndiffuse
+            G = (Pf[k] * Ak') / Pp[k + 1]
+            μs[k] = μf[k] + G * (μs[k + 1] - μp[k + 1])
+            Ps[k] = _symmetric(Pf[k] + G * (Ps[k + 1] - Pp[k + 1]) * G')
+        else
+            Ai = inv(Ak)
+            G = Ai / (I + Qk * (Ai' * Λf[k] * Ai))
+            μs[k] = G * (Qk * (Ai' * ηf[k]) + μs[k + 1])
+            Ps[k] = _symmetric(G * Qk * Ai' + G * Ps[k + 1] * G')
+        end
     end
     return μs, Ps
 end
 
 """
+    smooth_track(model, y, r, x) -> ŷ
+
+The posterior mean of the track value `s_k[1]` at every sample under `model`,
+from [`kalman_filter`](@ref) and [`rts_smooth`](@ref); samples without data are
+interpolated.
+"""
+function smooth_track(model, y, r, x)
+    μs, _ = rts_smooth(kalman_filter(model, y, r, x))
+    return map(first, μs)
+end
+
+"""
     smooth_ou_track(y, w, times; τ, σ2) -> ŷ
 
-OU Kalman filter + RTS smoother of a real track `y`, mean-subtracted (the process
-reverts to zero) and, for a phase track, already unwrapped. `w` holds per-sample
-precision weights (measurement variance `r = 1/w`; `w ≤ 0` or non-finite ⇒
-missing) and `times` the sample coordinates, in `τ`'s unit — a phase track over
-APs or a bandpass track over channel frequencies. Returns the smoothed track with
-gaps interpolated (matching `_penalized_smooth`).
+[`smooth_track`](@ref) under `OUModel(τ, σ2)` of a zero-mean track `y` with
+precision weights `w` (`w ≤ 0` or non-finite ⇒ missing), at the coordinates
+`times` in `τ`'s unit.
 """
 function smooth_ou_track(y, w, times; τ::Real, σ2::Real)
-    T = float(
-        promote_type(eltype(y), eltype(w), eltype(times), typeof(τ), typeof(σ2)),
-    )
+    T = float(promote_type(eltype(y), eltype(w), eltype(times), typeof(τ), typeof(σ2)))
     r = [(isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf) for wk in w]
-    μf, Pf, μp, Pp, avec, _ = kalman_ou_filter(y, r, times; τ = τ, σ2 = σ2)
-    μs, _ = rts_smooth(μf, Pf, μp, Pp, avec)
-    return μs
+    return smooth_track(OUModel{T}(τ, σ2), y, r, times)
 end
 
 # Compact fixed-budget Nelder–Mead for low-dimensional unconstrained minimization
@@ -226,36 +373,15 @@ function _init_track_var(y, w)
     return max(var_y - r_bar, T(1.0e-4))
 end
 
-# The OU Kalman filter run over `y` and, with the same gains, over a vector of
-# ones. The filter is linear in its observations, so the innovations of
-# `y - L` are `vʸ - L·v¹`. Returns `(ll, b, c)` over the observed samples: the
-# zero-mean log likelihood of `y`, `b = Σ vʸ·v¹/S` and `c = Σ (v¹)²/S`. The GLS
-# level of `y` is `b/c`.
-function _ou_level_sums(y, r, times; τ::Real, σ2::Real)
-    Base.require_one_based_indexing(y, r, times)
-    T = float(promote_type(eltype(y), eltype(r), eltype(times), typeof(τ), typeof(σ2)))
-    ll = b = c = zero(T)
-    μy = μ1 = zero(T)
-    P = T(σ2)
-    for k in eachindex(y, r, times)
-        if k == 1
-            μyp, μ1p, Pp = zero(T), zero(T), T(σ2)
-        else
-            a, q = ou_step(τ, σ2, times[k] - times[k - 1])
-            μyp, μ1p, Pp = a * μy, a * μ1, a * a * P + q
-        end
-        if isfinite(y[k]) && isfinite(r[k]) && r[k] > 0
-            S = Pp + r[k]
-            K = Pp / S
-            vy, v1 = y[k] - μyp, one(T) - μ1p
-            ll -= (log(2 * T(π) * S) + vy * vy / S) / 2
-            b += vy * v1 / S
-            c += v1 * v1 / S
-            μy, μ1, P = μyp + K * vy, μ1p + K * v1, (1 - K) * Pp
-        else
-            μy, μ1, P = μyp, μ1p, Pp
-        end
-    end
+# The Kalman filter of a proper-start `model` run over `y` and, with the same
+# gains, over a track of ones. The filter is linear in its observations, so the
+# innovations of `y - L` are `vʸ - L·v¹`. Returns `(ll, b, c)` over the observed
+# samples: the zero-mean log likelihood of `y`, `b = Σ vʸ·v¹/S` and
+# `c = Σ (v¹)²/S`. The GLS level of `y` is `b/c`.
+function _level_sums(model, y, r, x)
+    Base.require_one_based_indexing(y, r, x)
+    T = _filter_eltype(model, y, r, x)
+    ll, _, b, c = _kalman_forward(model, y, r, x, Val(statedim(model)), T, Val(true), nothing)
     return ll, b, c
 end
 
@@ -264,14 +390,15 @@ end
 # group, integrated out under a flat prior (REML): per group
 # `Σ ll + b²/2c − log(c)/2`, up to a constant.
 function _ou_loglik(ys, rs, xs, levels; τ, σ2)
-    isnothing(levels) && return sum(i -> kalman_ou_filter(ys[i], rs[i], xs[i]; τ, σ2)[6], eachindex(ys, rs, xs))
+    model = OUModel(τ, σ2)
+    isnothing(levels) && return sum(i -> _kalman_loglik(model, ys[i], rs[i], xs[i]), eachindex(ys, rs, xs))
     ngroup = maximum(levels)
     T = float(typeof(σ2))
     b = zeros(T, ngroup)
     c = zeros(T, ngroup)
     lp = zero(T)
     for i in eachindex(ys, rs, xs, levels)
-        ll, bi, ci = _ou_level_sums(ys[i], rs[i], xs[i]; τ, σ2)
+        ll, bi, ci = _level_sums(model, ys[i], rs[i], xs[i])
         lp += ll
         b[levels[i]] += bi
         c[levels[i]] += ci
@@ -358,96 +485,86 @@ function _group_ou_tau_bounds(xs)
     return τ_lo, max(τ_hi, 10 * τ_lo)
 end
 
-# ── Multivariate OU state-space (joint station-phase solve) ─────────────────
+# ── Joint state-space filter over station phases ────────────────────────────
 #
-# One multivariate OU Kalman filter over the whole station-phase vector observes
-# the baseline phase differences `ϕ_ij = θ_i − θ_j` directly under the
-# per-station OU temporal prior, closing and denoising in a single recursive
-# estimator, rather than solving each AP's station phases independently and
-# smoothing each track afterwards. This conditions better at low SNR, where a
-# single AP is poorly determined and temporal structure resolves it. Each state
-# dimension has its own OU `(τ_i, σ_i²)`; the transition is diagonal, so `A P Aᵀ`
-# is `(a_i a_j)·P_ij`. A dimension with `τ_i ≤ 0` is treated as independent per
-# step (`a = 0`) under a diffuse prior, having no temporal correlation to carry.
-
-# Per-dimension exact OU transition, guarding the diffuse (`τ ≤ 0`) dimension.
-@inline function _ou_ab(τ::Real, σ2::Real, Δt::Real)
-    T = float(promote_type(typeof(τ), typeof(σ2), typeof(Δt)))
-    (τ > 0 && Δt != 0) || return (τ > 0 ? one(T) : zero(T)), (τ > 0 ? zero(T) : T(σ2))
-    a = exp(-abs(Δt) / τ)
-    return T(a), T(σ2 * (1 - a * a))
-end
+# One Kalman filter over the stacked states of every station observes the
+# baseline phase differences `ϕ_ab = θ_a − θ_b` directly, each station under its
+# own state-space model, closing and denoising in a single recursive estimator
+# rather than solving each AP's station phases independently and smoothing each
+# track afterwards. This conditions better at low SNR, where a single AP is
+# poorly determined and temporal structure resolves it. The joint transition is
+# block diagonal, one block per station.
 
 """
-    kalman_ou_mv_filter(pairs, ys, rs, times; τ, σ2) -> (xf, Pf, xp, Pp, avecs, loglik)
+    kalman_mv_filter(pairs, ys, rs, times, models) -> (xf, Pf, xp, Pp, As, loglik)
 
-Forward multivariate OU Kalman filter over closure observations. At step `k`,
-observation `j` is a station-phase DIFFERENCE,
+Forward Kalman filter over the stacked states of `models`, one state-space model
+per station, each with a proper start. At step `k`, observation `j` is a
+difference of two stations' values (the first entry of each station's state),
 
-    ys[k][j] = x[a] − x[b] + ε,   ε ~ N(0, rs[k][j])
+    ys[k][j] = θ[a] − θ[b] + ε,   ε ~ N(0, rs[k][j])
 
-with `(a, b) = pairs[j]`, the same state pair at every step; `ys[k]` and
+with `(a, b) = pairs[j]`, the same station pair at every step; `ys[k]` and
 `rs[k]` share `pairs`' indices. An observation whose value is not finite or
 whose variance is not positive is skipped, so a step observes any subset.
 
-Rows are applied as sequential scalar updates (diagonal `R`, so this is exact and
-avoids an `m×m` inverse). A row has two nonzero design entries whatever `n` is, so
-an update costs `O(n²)` — the covariance rank-2 update — where a dense design row
-would cost `O(n³)`.
+Rows are applied as sequential scalar updates (diagonal `R`, so this is exact
+and avoids an `m×m` inverse); a row has two nonzero design entries, so an update
+costs `O(n²)` for `n` stacked states.
 
-`τ`/`σ2` are per-dimension OU parameters (`τ[i] ≤ 0` ⇒ diffuse, temporally
-independent dimension). The prior is `x_0 ~ N(0, Diagonal(σ2))`.
-
-Returns the filtered and predicted means as `n × nsteps` matrices, their covariances
-as `n × n × nsteps` arrays, the per-step diagonal transition `avecs` (`n × nsteps`),
-and the joint log marginal likelihood — so step `k` is `view(xf, :, k)` /
-`view(Pf, :, :, k)`. The element type is promoted from `ys`, `rs`, `τ`, `σ2` and
-`times`.
+Returns the filtered and predicted means as `n × nsteps` matrices, their
+covariances and the transitions into each step as `n × n × nsteps` arrays, and
+the joint log marginal likelihood — so step `k` is `view(xf, :, k)` /
+`view(Pf, :, :, k)`. Station `i`'s value is state `1 + sum(statedim, models[1:i-1])`.
 """
-function kalman_ou_mv_filter(pairs, ys, rs, times; τ::AbstractVector, σ2::AbstractVector)
-    # Steps and state dimensions are addressed as 1:nsteps / 1:n throughout.
-    Base.require_one_based_indexing(τ, σ2, times, ys, rs)
+function kalman_mv_filter(pairs, ys, rs, times, models)
+    Base.require_one_based_indexing(times, ys, rs, models)
     T = float(
         promote_type(
-            eltype(eltype(ys)), eltype(eltype(rs)), eltype(τ), eltype(σ2), eltype(times),
+            eltype(eltype(ys)), eltype(eltype(rs)), eltype(times), map(_model_eltype, models)...,
         ),
     )
     nsteps = length(times)
-    n = length(τ)
-    length(σ2) == n ||
-        throw(DimensionMismatch("τ and σ2 must have equal length: $n vs $(length(σ2))"))
+    nstation = length(models)
+    dims = map(statedim, models)
+    offsets = cumsum(dims) .- dims
+    n = sum(dims)
+    starts = [initial(m, T) for m in models]
+    any(isnothing, starts) &&
+        throw(ArgumentError("the joint filter needs a proper start for every station's model"))
     xf = zeros(T, n, nsteps)
     Pf = zeros(T, n, n, nsteps)
     xp = zeros(T, n, nsteps)
     Pp = zeros(T, n, n, nsteps)
-    avecs = ones(T, n, nsteps)
+    As = zeros(T, n, n, nsteps)
     loglik = zero(T)
     # Reused across every row of every step: the update touches no other temporary.
     Ph = Vector{T}(undef, n)
     K = Vector{T}(undef, n)
-    q = Vector{T}(undef, n)
+    Q = zeros(T, n, n)
+    AP = zeros(T, n, n)
+    block(i) = offsets[i] .+ (1:dims[i])
     for k in 1:nsteps
-        a = view(avecs, :, k)
         x = view(xf, :, k)
         P = view(Pf, :, :, k)
         if k == 1
-            for i in 1:n
-                P[i, i] = σ2[i]
+            for i in 1:nstation
+                μ0, P0 = starts[i]
+                x[block(i)] .= μ0
+                P[block(i), block(i)] .= P0
             end
         else
             Δt = times[k] - times[k - 1]
-            xprev = view(xf, :, k - 1)
-            Pprev = view(Pf, :, :, k - 1)
-            for i in 1:n
-                a[i], q[i] = _ou_ab(τ[i], σ2[i], Δt)
+            A = view(As, :, :, k)
+            for i in 1:nstation
+                Ai, Qi = transition(models[i], Δt, T)
+                A[block(i), block(i)] .= Ai
+                Q[block(i), block(i)] .= Qi
             end
-            for j in 1:n, i in 1:n
-                P[i, j] = a[i] * a[j] * Pprev[i, j]
-            end
-            for i in 1:n
-                P[i, i] += q[i]
-                x[i] = a[i] * xprev[i]
-            end
+            mul!(x, A, view(xf, :, k - 1))
+            mul!(AP, A, view(Pf, :, :, k - 1))
+            mul!(P, AP, A')
+            P .+= Q
         end
         copyto!(view(xp, :, k), x)
         copyto!(view(Pp, :, :, k), P)
@@ -458,12 +575,13 @@ function kalman_ou_mv_filter(pairs, ys, rs, times; τ::AbstractVector, σ2::Abst
             yj = yk[j]
             rj = rk[j]
             (isfinite(yj) && isfinite(rj) && rj > 0) || continue
-            ia, ib = pairs[j]
-            (1 <= ia <= n && 1 <= ib <= n) || throw(
+            sa, sb = pairs[j]
+            (1 <= sa <= nstation && 1 <= sb <= nstation) || throw(
                 ArgumentError(
-                    "observation row references states $ia/$ib outside the state 1:$n",
+                    "observation row references stations $sa/$sb outside 1:$nstation",
                 ),
             )
+            ia, ib = offsets[sa] + 1, offsets[sb] + 1
             # h has nonzeros only at ia and ib, so P·h is a difference of two columns
             # of P and hᵀv is two of its entries.
             for i in 1:n
@@ -492,31 +610,26 @@ function kalman_ou_mv_filter(pairs, ys, rs, times; τ::AbstractVector, σ2::Abst
             loglik -= (log(2 * T(π) * s) + innov * innov * invs) / 2
         end
     end
-    return xf, Pf, xp, Pp, avecs, loglik
+    return xf, Pf, xp, Pp, As, loglik
 end
 
 """
-    rts_smooth_mv(xf, Pf, xp, Pp, avecs) -> (xs, Ps)
+    rts_smooth_mv(xf, Pf, xp, Pp, As) -> (xs, Ps)
 
-Rauch–Tung–Striebel backward smoother paired with [`kalman_ou_mv_filter`](@ref)
-(diagonal transition `Diagonal(view(avecs, :, k))`), in the same step-sliced layout:
-`xs` is `n × nsteps` and `Ps` is `n × n × nsteps`.
+Rauch–Tung–Striebel backward smoother paired with [`kalman_mv_filter`](@ref),
+in the same step-sliced layout: `xs` is `n × nsteps` and `Ps` is
+`n × n × nsteps`.
 """
-function rts_smooth_mv(xf, Pf, xp, Pp, avecs)
+function rts_smooth_mv(xf, Pf, xp, Pp, As)
     nsteps = size(xf, 2)
-    n = size(xf, 1)
     xs = copy(xf)
     Ps = copy(Pf)
     for k in (nsteps - 1):-1:1
-        a = view(avecs, :, k + 1)
-        # Guard the predicted covariance before inverting — mirror the scalar
-        # `rts_smooth`'s `Ppk > 0 || continue`. A zero-gap step (Δt = 0 ⇒ q = 0) or
-        # an ill-conditioned common-mode direction can make Pp[:, :, k+1] singular;
-        # skip the smoothing update there (leaving step `k` at its filtered value).
+        # A zero-gap step or an ill-conditioned common-mode direction can make the
+        # predicted covariance singular; step `k` then keeps its filtered value.
         F = cholesky(Symmetric(Pp[:, :, k + 1]), check = false)
         issuccess(F) || continue
-        # G = Pf[k]·Aᵀ·inv(Pp[k+1]); Aᵀ diagonal scales columns of Pf[k] by a.
-        G = (view(Pf, :, :, k) .* reshape(a, 1, :)) / F
+        G = (view(Pf, :, :, k) * view(As, :, :, k + 1)') / F
         dx = view(xs, :, k + 1) .- view(xp, :, k + 1)
         dP = view(Ps, :, :, k + 1) .- view(Pp, :, :, k + 1)
         mul!(view(xs, :, k), G, dx, true, true)

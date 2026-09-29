@@ -559,8 +559,7 @@ function _solve_gp_joint!(
             scale = is_fixed_hyper(p.scale) ? p.scale : τ_med, σ = is_fixed_hyper(p.σ) ? p.σ : σ_med,
         )
     end
-    τv = T[fitted[i].scale for i in 1:nant]
-    σ2v = T[fitted[i].σ^2 for i in 1:nant]
+    models = [OUModel{T}(fitted[i].scale, fitted[i].σ^2) for i in 1:nant]
 
     # Per-station level: the OU prior reverts to 0, so each track is centered on
     # its GLS level under its own prior before the solve. The downstream demean
@@ -600,8 +599,8 @@ function _solve_gp_joint!(
                 y[j] = raw + twoπ * round((model - raw) / twoπ) - centre
             end
         end
-        xf, Pf, xp, Pp, avecs, _ = kalman_ou_mv_filter(ends, ys, rs, times; τ = τv, σ2 = σ2v)
-        xs, _ = rts_smooth_mv(xf, Pf, xp, Pp, avecs)
+        xf, Pf, xp, Pp, As, _ = kalman_mv_filter(ends, ys, rs, times, models)
+        xs, _ = rts_smooth_mv(xf, Pf, xp, Pp, As)
         for ap in axes(θf, 2)
             for i in axes(θf, 1)
                 θf[i, ap] = xs[i, ap] + mθ[i]

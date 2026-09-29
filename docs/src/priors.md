@@ -8,8 +8,8 @@ A component's prior (see [Specifying gain models](@ref specifying-models))
 relates its parameter values along one axis: time for the adhoc phase,
 frequency for the bandpass. This page derives how a solver fits a track of
 values under such a prior: the maximum a posteriori (MAP) values, the Kalman
-filter and Rauch–Tung–Striebel (RTS) smoother that compute them for an
-Ornstein–Uhlenbeck (OU) prior, and the type-II MAP estimate of the prior's own
+filter and Rauch–Tung–Striebel (RTS) smoother that compute them for the
+Ornstein–Uhlenbeck (OU) and random-walk priors, and the type-II MAP estimate of the prior's own
 hyperparameters. The last section says where each solver uses them.
 
 ## One track
@@ -75,38 +75,51 @@ exponential (Matérn-1/2) covariance is standard; see Särkkä and Solin,
 
 ### Kalman filter
 
-The forward pass ([`kalman_ou_filter`](@ref)) carries the mean ``\mu_k`` and
-variance ``P_k`` of ``f_k`` given samples ``1, \dots, k``. Each step predicts
+Both priors on this page are linear-Gaussian state-space models: a small state
+``s_k`` per sample, whose first entry is ``f_k``, evolving over each step as
 
 ```math
-\mu_k^- = a_k \mu_{k-1}, \qquad P_k^- = a_k^2 P_{k-1} + q_k,
+s_k = A_k s_{k-1} + \eta_k, \qquad \eta_k \sim \mathcal N(0, Q_k).
 ```
 
-starting from ``\mu_1^- = 0``, ``P_1^- = \sigma^2``, and, if sample ``k``
-carries data, updates with the innovation ``v_k`` and its variance ``S_k``:
+For the OU prior the state is ``f_k`` alone, with ``A_k = a_k`` and
+``Q_k = q_k`` ([`OUModel`](@ref)); the random-walk prior below has ``m``
+states. One filter and smoother fit either.
+
+The forward pass ([`kalman_filter`](@ref)) carries the mean ``\mu_k`` and
+covariance ``P_k`` of ``s_k`` given samples ``1, \dots, k``. Each step predicts
 
 ```math
-v_k = y_k - L - \mu_k^-, \quad S_k = P_k^- + r_k, \quad
-K_k = P_k^- / S_k, \quad
-\mu_k = \mu_k^- + K_k v_k, \quad P_k = (1 - K_k) P_k^-.
+\mu_k^- = A_k \mu_{k-1}, \qquad P_k^- = A_k P_{k-1} A_k^\top + Q_k,
 ```
 
-A sample without data is predicted through: ``\mu_k = \mu_k^-``,
-``P_k = P_k^-``.
+starting from the prior's start (for OU, ``\mu_1^- = 0``,
+``P_1^- = \sigma^2``), and, if sample ``k`` carries data, updates with the
+innovation ``v_k`` and its variance ``S_k``:
+
+```math
+v_k = y_k - L - (\mu_k^-)_1, \quad S_k = (P_k^-)_{11} + r_k, \quad
+K_k = P_k^- e_1 / S_k, \quad
+\mu_k = \mu_k^- + K_k v_k, \quad P_k = P_k^- - K_k S_k K_k^\top,
+```
+
+with ``e_1`` the first unit vector; ``P_k`` is computed in Joseph form so it
+stays symmetric and positive definite. A sample without data is predicted
+through: ``\mu_k = \mu_k^-``, ``P_k = P_k^-``.
 
 ### RTS smoother
 
-The backward pass ([`rts_smooth`](@ref)) conditions each value on the samples
+The backward pass ([`rts_smooth`](@ref)) conditions each state on the samples
 after it as well:
 
 ```math
-G_k = \frac{P_k\, a_{k+1}}{P_{k+1}^-}, \qquad
-\hat f_k = \mu_k + G_k \big(\hat f_{k+1} - \mu_{k+1}^-\big),
+G_k = P_k A_{k+1}^\top (P_{k+1}^-)^{-1}, \qquad
+\hat s_k = \mu_k + G_k \big(\hat s_{k+1} - \mu_{k+1}^-\big),
 ```
 
-starting from ``\hat f_n = \mu_n``. The result equals the dense posterior mean
-above exactly, in ``O(n)`` time and memory, for any spacing
-([`smooth_ou_track`](@ref)).
+starting from ``\hat s_n = \mu_n``. The first entry of ``\hat s_k`` equals the
+dense posterior mean above exactly, in ``O(n)`` time and memory, for any
+spacing ([`smooth_track`](@ref), [`smooth_ou_track`](@ref)).
 
 ## The marginal likelihood
 
@@ -124,7 +137,7 @@ This is what the hyperparameters are estimated from.
 
 The filter is linear in its observations, so the innovations of ``y - L`` are
 ``v^y_k - L\, v^1_k``, where ``v^y`` are the innovations of ``y`` and ``v^1``
-those of a track of ones, both run with the same gains (`_ou_level_sums`).
+those of a track of ones, both run with the same gains (`_level_sums`).
 With
 
 ```math
@@ -203,20 +216,40 @@ per unit of ``x^{2m-1}``. Because the prior is defined in the coordinate, not
 by counting samples, it holds for uneven spacing and gaps and keeps its meaning
 when the segments are made coarser or finer.
 
-The starting value and its first ``m - 1`` derivatives are left free, so the
-prior is improper in those directions. The MAP values minimize
+The starting value and its first ``m - 1`` derivatives are left free (a flat
+start), so the prior is improper in those directions ([`RandomWalkModel`](@ref)).
+The same Kalman filter and RTS smoother fit it. Until the samples determine the
+state, the filter carries it in information form, the density
+``\exp(c + \eta^\top s - \tfrac12 s^\top \Lambda s)`` of the samples so far and
+the state, starting from ``\Lambda = 0``, ``\eta = 0``, ``c = 0``. A sample
+with data adds ``e_1 e_1^\top / r_k`` to ``\Lambda``, ``e_1 y_k / r_k`` to
+``\eta`` and ``-\tfrac12[\log(2\pi r_k) + y_k^2/r_k]`` to ``c``; a step, with
+``M = A_k^{-\top} \Lambda A_k^{-1}``, ``\tilde\eta = A_k^{-\top}\eta`` and
+``F = I + Q_k M``, sets
 
 ```math
-\sum_k w_k (y_k - f_k)^2 + \sum_{k \ge 2} (s_k - A_k s_{k-1})^\top Q_k^{-1} (s_k - A_k s_{k-1})
+\Lambda \leftarrow F^{-\top} M, \qquad \eta \leftarrow F^{-\top} \tilde\eta, \qquad
+c \leftarrow c + \tfrac12 \tilde\eta^\top Q_k F^{-\top} \tilde\eta
+- \log\lvert\det A_k\rvert - \tfrac12 \log\det F,
 ```
 
-over every state, with ``w_k = 0`` at samples without data. The normal
-equations are banded, with bandwidth ``2m - 1``, and are solved by a banded
-Cholesky factorization once ``m`` samples carry data; the coordinate is first
-rescaled by its median spacing so the states have comparable magnitudes. Since
-the walk leaves its own level free, it cannot be separated from a level
-component, and a random walk beside a level is rejected. `σ` is fixed; a random
-walk has no hyperparameter search.
+which needs no ``Q_k^{-1}``. Once ``\Lambda`` is positive definite, after ``m``
+samples with data, the filter continues in covariance form from
+``P = \Lambda^{-1}``, ``\mu = P\eta``. This is exact, not a large finite
+starting variance. The smoother runs back through those first samples with the
+conditional of ``s_k`` given ``s_{k+1}`` in the same form.
+
+The likelihood with the flat start integrated out (the restricted likelihood,
+as for the level above) is ``c + \tfrac12 \eta^\top \Lambda^{-1} \eta -
+\tfrac12 \log\det\Lambda + \tfrac m2 \log 2\pi`` at the switch, plus the usual
+innovation terms after it (`_random_walk_loglik`). It is taken under the
+Lebesgue measure on the first sample's state, derivatives in units of the
+coordinate. The coordinate is first shifted and rescaled by its median spacing
+so the states have comparable magnitudes, and the fit is in at least `Float64`.
+A track with fewer than ``m`` samples with data does not determine the walk and
+keeps its measured values. Since the walk leaves its own level free, it cannot
+be separated from a level component, and a random walk beside a level is
+rejected. `σ` is fixed; a random walk has no hyperparameter search.
 
 ## Where the solvers use this
 
@@ -249,7 +282,7 @@ y_{ab} = \theta_a - \theta_b + \varepsilon_{ab}, \qquad
 ```
 
 with its source term already removed. The same filter and smoother, in matrix
-form ([`kalman_ou_mv_filter`](@ref), [`rts_smooth_mv`](@ref)), give the
+form ([`kalman_mv_filter`](@ref), [`rts_smooth_mv`](@ref)), give the
 posterior mean of every station's track from the baseline data directly,
 without first solving each AP. Differences leave the sum of all station
 phases unconstrained; only the OU prior holds it near zero, and the result is

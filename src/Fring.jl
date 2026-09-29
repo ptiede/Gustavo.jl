@@ -29,7 +29,7 @@ import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
-using BandedMatrices: BandedMatrix
+using StaticArrays: SMatrix, SVector
 using Printf: @sprintf
 
 include("Fring/search.jl")

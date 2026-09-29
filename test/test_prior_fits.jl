@@ -62,6 +62,35 @@ end
         FRpf._random_walk_track(y, w, x, 2, σ[2]) rtol = 1.0e-5
 end
 
+@testset "random-walk prior: restricted likelihood" begin
+    rng = Random.Xoshiro(5)
+    n = 30
+    x = cumsum(1.0e6 .* (0.5 .+ rand(rng, n)))
+    y = sin.((x .- x[1]) ./ 1.0e7) .+ 0.05 .* randn(rng, n)
+    w = 300.0 .+ 200.0 .* rand(rng, n)
+    y[7:9] .= NaN
+    σ = Dict(1 => 1.0e-4, 2 => 1.0e-11)
+    o = findall(isfinite, y)
+    # Dense REML: the walk from a zero state at x[1], plus the flat starting state
+    # as regression on `(x − x₁)ʲ/j!`, integrated out under a flat prior.
+    for m in 1:2
+        t = x[o] .- x[1]
+        k(s, u) = m == 1 ? σ[m]^2 * min(s, u) : (v = min(s, u); σ[m]^2 * (v^3 / 3 + abs(u - s) * v^2 / 2))
+        Σ = [k(a, b) for a in t, b in t] + Diagonal(inv.(w[o]))
+        X = [tj^j / factorial(j) for tj in t, j in 0:(m - 1)]
+        Σi = inv(Σ)
+        XΣX = X' * Σi * X
+        Π = Σi - Σi * X * (XΣX \ (X' * Σi))
+        reml = -((length(o) - m) * log(2π) + logdet(Σ) + logdet(XΣX) + y[o]' * Π * y[o]) / 2
+        @test FRpf._random_walk_loglik(y, w, x, m, σ[m]) ≈ reml rtol = 1.0e-8
+    end
+
+    # The filter needs `m` usable samples to determine the flat start.
+    @test_throws "do not determine the flat-start state" FRpf.kalman_filter(
+        FRpf.RandomWalkModel{2}(1.0), [NaN, 0.3, NaN], fill(0.01, 3), [0.0, 1.0, 2.0],
+    )
+end
+
 @testset "MAP of one block" begin
     rng = Random.Xoshiro(4)
     n = 16

@@ -58,9 +58,10 @@ function _estimate_levels(prior::OUPrior, ys, ws, xs, level, nlevel::Integer)
     T = promote_type((_block_eltype(y, w) for (y, w) in zip(ys, ws))...)
     b = zeros(T, nlevel)
     c = zeros(T, nlevel)
+    model = OUModel(prior.scale, prior.σ^2)
     for i in eachindex(ys, ws, xs, level)
         r = [_shape_usable(ys[i][k], ws[i][k]) ? inv(T(ws[i][k])) : T(Inf) for k in eachindex(ys[i], ws[i])]
-        _, bi, ci = _ou_level_sums(_masked(ys[i], ws[i]), r, xs[i]; τ = prior.scale, σ2 = prior.σ^2)
+        _, bi, ci = _level_sums(model, _masked(ys[i], ws[i]), r, xs[i])
         b[level[i]] += bi
         c[level[i]] += ci
     end
@@ -115,56 +116,45 @@ end
     _random_walk_track(y, w, x, order, σ) -> ŷ
 
 The MAP values of `y` under a random walk of order `m = order` along the
-strictly monotone coordinates `x`: the `(m−1)`-times integrated Brownian motion
-whose `(m−1)`-th derivative has increments `N(0, σ²·|Δx|)`. The walk's value
-and first `m−1` derivatives at the start are free (a flat prior).
+strictly monotone coordinates `x`: [`RandomWalkModel`](@ref)`{m}(σ²)`, the
+`(m−1)`-times integrated Brownian motion whose `(m−1)`-th derivative has
+increments `N(0, σ²·|Δx|)`, with a flat start. A segment without data is
+interpolated by the prior. At least `m` segments must carry data.
 
-The state at each sample is `s = (f, f′, …, f^(m−1))`; over a step `Δ` it
-evolves as `s′ = A s + η` with `A[i, j] = Δ^(j−i)/(j−i)!` and `η ~ N(0, Q)`,
-`Q[i, j] = σ² Δ^(2m−1−i−j) / ((2m−1−i−j)(m−1−i)!(m−1−j)!)` (0-based). The MAP
-minimizes `Σ w (y − f)² + Σ (s′ − A s)ᵀ Q⁻¹ (s′ − A s)` over every state, a
-banded system solved by a banded Cholesky factorization. A segment without
-data has weight 0 and the prior alone sets it. The system is positive definite
-once `m` segments carry data, which the caller guarantees.
-
-`x` is rescaled by its median spacing before the solve, so the states have
-comparable magnitudes; the solve is in at least `Float64`.
+`x` is rescaled by its median spacing first, so the states have comparable
+magnitudes; the fit is in at least `Float64`.
 """
 function _random_walk_track(y, w, x, order::Integer, σ::Real)
-    Base.require_one_based_indexing(y, w, x)
     T = _block_eltype(y, w)
-    S = promote_type(T, Float64)
-    n = length(y)
-    m = Int(order)
-    Δx = S[abs(x[k] - x[k - 1]) for k in 2:n]
-    (all(>(0), diff(x)) || all(<(0), diff(x))) || throw(
-        ArgumentError("a random walk needs strictly monotone coordinates"),
-    )
-    h = isempty(Δx) ? one(S) : median(Δx)
-    σ2 = S(σ)^2 * h^(2m - 1)
-    N = fill!(BandedMatrix{S}(undef, (n * m, n * m), (2m - 1, 2m - 1)), zero(S))
-    rhs = zeros(S, n * m)
-    at(k, i) = (k - 1) * m + i + 1
-    for k in eachindex(y, w)
-        if _shape_usable(y[k], w[k])
-            N[at(k, 0), at(k, 0)] += w[k]
-            rhs[at(k, 0)] = S(w[k]) * S(y[k])
-        end
-    end
-    for k in 2:n
-        Δ = Δx[k - 1] / h
-        A = S[j >= i ? Δ^(j - i) / factorial(j - i) : zero(S) for i in 0:(m - 1), j in 0:(m - 1)]
-        Q = S[
-            σ2 * Δ^(2m - 1 - i - j) / ((2m - 1 - i - j) * factorial(m - 1 - i) * factorial(m - 1 - j))
-                for i in 0:(m - 1), j in 0:(m - 1)
-        ]
-        B = [-A Matrix{S}(I, m, m)]
-        C = B' * (cholesky(Symmetric(Q)) \ B)
-        idx = at(k - 1, 0):at(k, m - 1)
-        for (b, jj) in pairs(idx), (a, ii) in pairs(idx)
-            N[ii, jj] += C[a, b]
-        end
-    end
-    s = cholesky(Symmetric(N)) \ rhs
-    return copyto!(similar(y, T, n), s[at.(1:n, 0)])
+    model, r, u, _ = _random_walk_problem(y, w, x, order, σ)
+    return copyto!(similar(y, T, length(y)), smooth_track(model, _masked(y, w), r, u))
+end
+
+"""
+    _random_walk_loglik(y, w, x, order, σ) -> ll
+
+The restricted log likelihood of `y` under the random walk of
+[`_random_walk_track`](@ref): the flat start integrated out under the Lebesgue
+measure on the first segment's state `(f, f′, …, f^(m−1))`, derivatives in
+units of `x`.
+"""
+function _random_walk_loglik(y, w, x, order::Integer, σ::Real)
+    model, r, u, h = _random_walk_problem(y, w, x, order, σ)
+    m = statedim(model)
+    # The filter's derivatives are per unit of `u = x/h`; `f^(j)` in `u` is `hʲ` times `f^(j)` in `x`.
+    return _kalman_loglik(model, _masked(y, w), r, u) - m * (m - 1) * log(h) / 2
+end
+
+# The model, measurement variances and coordinates `u = (x − x₁)/h` the random
+# walk is filtered on, and `h`, the median spacing; `σ²` is scaled to match.
+function _random_walk_problem(y, w, x, order::Integer, σ::Real)
+    Base.require_one_based_indexing(y, w, x)
+    S = promote_type(_block_eltype(y, w), Float64)
+    dx = diff(x)
+    (all(>(0), dx) || all(<(0), dx)) ||
+        throw(ArgumentError("a random walk needs strictly monotone coordinates"))
+    h = isempty(dx) ? one(S) : S(median(abs.(dx)))
+    u = (S.(x) .- S(x[1])) ./ h
+    r = S[_shape_usable(y[k], w[k]) ? inv(S(w[k])) : S(Inf) for k in eachindex(y, w)]
+    return RandomWalkModel{Int(order)}(S(σ)^2 * h^(2order - 1)), r, u, h
 end
