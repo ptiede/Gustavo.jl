@@ -77,8 +77,9 @@ carried.
 
 [`baseline_fringe_search`](@ref) performs this search for one block, given a
 `DimStack` over `(Frequency, Ti)` with `:vis`, `:weights` and `:flags` layers.
-[`search_scan`](@ref) applies it to every cross baseline and product of a scan;
-autocorrelations are excluded. Each search returns a [`Detection`](@ref),
+[`search_scan`](@ref) applies it to every cross baseline and feed pair of a
+scan group, joining each baseline's spectral windows into one plane so the
+delay search spans them all; autocorrelations are excluded. Each search returns a [`Detection`](@ref),
 holding ``\hat\tau``, ``\hat{\dot r}``, ``\hat\varphi``, ``\hat A``, a
 signal-to-noise ratio and a false-alarm probability.
 

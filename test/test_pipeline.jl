@@ -6,6 +6,7 @@
 
 # Shared synthetic-UVSet generator + usings/aliases (CAL/FP/UVP).
 include("synthetic_uvset.jl")
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 
 @testset "Fringe pipeline end-to-end" begin
@@ -807,22 +808,11 @@ end
 end
 
 @testset "Threaded per-baseline search ≡ serial, and stage timers" begin
-    uvset, _ = _build_fringe_uvset()
-    geom = CAL.build_geometry(uvset)
-    stq = FP.scan_stream(uvset; geom = geom)
-    stack, _ = FP.materialize_cube(stq, stq.groups[1])
-    det1 = FP.search_scan(stack, stq.geom, FP.FringeSearch(); executor = SerialScheduler(), ngroups = 1)
-    det4 = FP.search_scan(stack, stq.geom, FP.FringeSearch(); executor = DynamicScheduler(; nchunks = 4), ngroups = 1)
-    # Same detections regardless of the inner task count (≈ only because the two
-    # runs plan separate FFTW MEASURE transforms).
-    @test size(det1) == size(det4)
-    @test all(
-        isapprox(det1[i].delay, det4[i].delay; atol = 1.0e-15) &&
-            isapprox(det1[i].rate, det4[i].rate; atol = 1.0e-12) &&
-            isapprox(det1[i].snr, det4[i].snr; rtol = 1.0e-9) &&
-            det1[i].valid == det4[i].valid
-            for i in eachindex(det1)
-    )
+    ps, _ = _build_fringe_ps()
+    geom = CAL.DataGeometry(ps)
+    det1 = FP.search_scan(ps, geom, FP.FringeSearch(); executor = SerialScheduler())
+    det4 = FP.search_scan(ps, geom, FP.FringeSearch(); executor = DynamicScheduler(; nchunks = 4))
+    @test all(k -> isequal(parent(det1[k]), parent(det4[k])), keys(det1))
 
     # Stage timers land in the solution info and print; the progress callback
     # fires per completed scan of each pass (plus a done=0 pass announcement).
@@ -830,11 +820,11 @@ end
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
-        uvset;
+        ps;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
         gauge = PinAntenna(1),
     )
-    ngroups = length(FP.scan_stream(uvset).groups)
+    ngroups = length(XRadio.groupby(ps, XRadio.ByScan()))
     # Stages report under the pass names of the composable pipeline
     # (:fringe/:bandpass/:adhoc — the monolith's :search stage died with it).
     for st in (:fringe, :adhoc)

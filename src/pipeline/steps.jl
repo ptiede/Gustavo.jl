@@ -250,8 +250,8 @@ end
 function solve(s::BaselineFringeFit, ctx::SolveContext)
     stageB = _group_setup(s, ctx)
     if _scan_local_solve(s)
-        results = each_group(ctx) do stack, win
-            _solve_group(s, ctx, stageB, stack, win; round = 1, local_solve = true)
+        results = each_group(ctx) do group
+            _solve_group(s, ctx, stageB, group; round = 1, local_solve = true)
         end
         flags = reduce(append!, (r.flags for r in results); init = Tuple{Int, Int}[])
         ncomp = sum((r.ncomp for r in results); init = 0)
@@ -259,8 +259,8 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
     end
     local results, ncomp, flags
     for round in 1:max(s.rounds, 1)
-        results = each_group(ctx) do stack, win
-            _solve_group(s, ctx, stageB, stack, win; round, local_solve = false)
+        results = each_group(ctx) do group
+            _solve_group(s, ctx, stageB, group; round, local_solve = false)
         end
         ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])
     end
@@ -270,10 +270,12 @@ end
 # One scan group's search. Round 1 searches the data; later rounds search the
 # residual of the current θ.
 function _solve_group(
-        s::BaselineFringeFit, ctx::SolveContext, stageB, stack, win::GeometryWindow;
+        s::BaselineFringeFit, ctx::SolveContext, stageB, group;
         round::Int = 1, local_solve::Bool = _scan_local_solve(s),
     )
-    Vsearch = round > 1 ? Fring.residual_vis(ctx.layout, ctx.θ, stack, win) : stack[:vis]
+    round > 1 && (group = Fring.residual_group(ctx.layout, ctx.θ, group, ctx.geom))
+    gc = Fring._GroupCells(group, ctx.geom)
+    ti = Calibration._time_index(ctx.geom, first(gc.times))
     # Reference the detection phases to the epoch this scan's constant phase
     # columns are the phase at (`scan_phase_epoch`), not to the track epoch
     # `search_scan` defaults to for a standalone caller. The station solve reads
@@ -282,26 +284,20 @@ function _solve_group(
     # which the model gives no rate of its own, has nothing to absorb it with.
     # A model with no rate column pins no epoch; the scan's own mean time is
     # then the natural place to measure a constant.
-    epoch = Fring.scan_phase_epoch(ctx.model, ctx.layout, first(win.ti_idx))
-    if epoch === nothing
-        ts = @view ctx.geom.times[win.ti_idx]
-        epoch = sum(ts) / length(ts)
-    end
+    epoch = Fring.scan_phase_epoch(ctx.model, ctx.layout, ti)
+    isnothing(epoch) && (epoch = sum(gc.times) / length(gc.times))
     res = Fring.search_scan(
-        stack, ctx.geom, s.search;
-        Vsearch, ngroups = length(ctx.groups), executor = inner_executor(ctx.exec),
-        t0 = epoch,
+        gc, ctx.geom, s.search;
+        ngroups = length(ctx.groups), executor = inner_executor(ctx.exec), t0 = epoch,
     )
-    feeds = feed_pairs(stack)
-    # `res` covers only the surviving (cross) baselines; take its own pair list.
-    bl_pairs = collect(UVData.DimensionalData.lookup(res, UVData.BaselineID))
+    feeds = gc.feeds
+    bl_pairs = gc.bl_pairs
     # The scan's frequency/time lever arms travel with its detections: they set
     # the CRB uncertainty of a delay and a rate, which is what puts the station
     # solve's residuals in units of σ (see `Stationization`).
     det = Fring._with_ti(
-        res, first(win.ti_idx); epoch,
-        freq_rms = Fring._rms_spread(frequencies(stack)),
-        time_rms = Fring._rms_spread(timestamps(stack)),
+        res, ti; epoch,
+        freq_rms = Fring._rms_spread(gc.freqs), time_rms = Fring._rms_spread(gc.times),
     )
 
     # Per-scan search log for the solution diagnostics: every measured cell, its
@@ -310,7 +306,7 @@ function _solve_group(
     # `detected` is the column that separates them. The search cube is transient
     # (consumed by the station solve), so these are read off it here; `cells1` is
     # the only piece not already in the cube.
-    cells1 = Fring._search_cells(frequencies(stack), timestamps(stack), s.search)
+    cells1 = Fring._search_cells(gc.freqs, gc.times, s.search)
     ncells = cells1 * max(length(bl_pairs) * length(feeds), 1)
     pfa_max = s.closure.pfa_max
     ncomp, flags = 0, Tuple{Int, Int}[]
@@ -325,7 +321,6 @@ function _solve_group(
         # contention.
         ncomp, flags = _station_solve!(s, ctx, stageB, (det,))
         if s.steer_cells > 0
-            ti = first(win.ti_idx)
             sd, sr = Fring.scan_station_terms(ctx.model, ctx.layout, ctx.θ, ti)
             # θ is dense: a station this scan never constrained reads back as an
             # identity 0, indistinguishable from a solved zero delay. Steering to
@@ -339,8 +334,7 @@ function _solve_group(
             steer = Fring.steer_scan(
                 # The same epoch the search above referenced: `sr` is a rate
                 # about it, as is the model's own Rate component.
-                stack, res, bl_pairs, feeds, ctx.geom.f0,
-                epoch, sd, sr;
+                gc, res, ctx.geom.f0, epoch, sd, sr;
                 cells = s.steer_cells,
             )
         end

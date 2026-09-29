@@ -536,3 +536,50 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
         )
     end
 end
+
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
+
+@testset "search_scan over a scan group's spectral windows" begin
+    # Two windows of one scan built separately, the second without station A4,
+    # so each cell is joined across members by label and A4's cells take no
+    # rows from the second window.
+    full, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.0e9])
+    partial, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.1e9], omit_station = 4)
+    group = XRadio.ProcessingSet(
+        OrderedDict{Symbol, XRadio.MeasurementSet}(
+            :hi => only(values(partial)), :lo => only(values(full)),
+        ),
+    )
+    geom = Gustavo.Calibration.DataGeometry(group)
+    gc = FR._GroupCells(group, geom)
+    lo, hi = only(values(full)), only(values(partial))
+    nlo = length(XRadio.frequencies(lo))
+
+    @test gc.freqs == vcat(XRadio.frequencies(lo), XRadio.frequencies(hi))
+    @test gc.bl_pairs == [(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]
+    @test gc.feeds == [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+    ws = FR.FringeWorkspace(ComplexF32)
+    member_plane(ms, pair, q) = let bi = findfirst(==(pair), collect(XRadio.baselines(ms)))
+        p = findfirst(==(gc.feeds[q]), Gustavo.UVData.feed_pairs(ms)[:, bi])
+        Gustavo.UVData._cell_plane(ms[:visibility], bi, p)
+    end
+    j14 = findfirst(==((1, 4)), gc.bl_pairs)
+    V, W, F = FR._gather_cell!(ws, gc, j14, 2)
+    @test V[1:nlo, :] == member_plane(lo, ("A1", "A4"), 2)
+    @test all(F[(nlo + 1):end, :]) && all(iszero, W[(nlo + 1):end, :])
+    j12 = findfirst(==((1, 2)), gc.bl_pairs)
+    V, W, F = FR._gather_cell!(ws, gc, j12, 3)
+    @test V[(nlo + 1):end, :] == member_plane(hi, ("A1", "A2"), 3)
+
+    @inferred FR._copy_cell_rows!(ws.planes, FR._member_layers(lo), (1, 1), 1:nlo)
+    ax = FR._search_axes(gc.freqs, gc.times, FR.FringeSearch(), ComplexF32)
+    @inferred FR._baseline_fringe_search(
+        V, W, F, gc.freqs, gc.times, geom.f0, geom.t0, ax, ws, FR.FringeSearch(), 1.0,
+    )
+
+    det = FR.search_scan(group, geom, FR.FringeSearch())
+    @test lookup(det, Gustavo.UVData.BaselineID) == gc.bl_pairs
+    @test all(det[:valid])
+    @test eltype(det[:delay]) == Float32
+end

@@ -218,25 +218,45 @@ function _residual_cell(v, ga, gb)
 end
 
 """
-    residual_vis(layout::ParameterLayout, θ, stack, win::GeometryWindow) -> DimArray
+    residual_group(layout::ParameterLayout, θ, group::XRadio.ProcessingSet, geom::DataGeometry)
+        -> XRadio.ProcessingSet
 
-The scan's residual visibilities: `stack`'s `:vis` layer divided by the current
-θ gains evaluated on `win`'s (global chan, global ti) window — the search input
-for residual re-search rounds. Carries the visibilities' dims and element type.
+The scan group with each member's visibilities divided by the gains of θ,
+placed through `geom`: the search input for residual re-search rounds. Weights
+and flags are unchanged, and the visibilities keep their element type.
 """
-function residual_vis(
-        layout::ParameterLayout, θ::AbstractVector, stack::AbstractDimStack, win::GeometryWindow,
+function residual_group(
+        layout::ParameterLayout, θ::AbstractVector, group::XRadio.ProcessingSet, geom::DataGeometry,
     )
+    members = map(collect(pairs(group))) do (key, ms)
+        key => _residual_member(layout, θ, ms, geom)
+    end
+    return XRadio.ProcessingSet(
+        OrderedDict{Symbol, XRadio.MeasurementSet}(members), copy(DimensionalData.metadata(group)),
+    )
+end
+
+function _residual_member(layout::ParameterLayout, θ, ms::XRadio.MeasurementSet, geom::DataGeometry)
+    win = GeometryWindow(geom, ms)
     g = evaluate_gains(layout, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
-    ants = UVData.baselines(stack).pairs
-    feeds = feed_pairs(stack)
-    # Indexing the gains by the baselines' antenna vector and the products' feed
-    # vector is an outer product over (BaselineID, Polarization), so the whole
-    # residual is one fused broadcast with no intermediate.
-    V = stack[:vis]
-    ga = UVData._in_axis_order(V, view(g, :, :, first.(ants), first.(feeds)))
-    gb = UVData._in_axis_order(V, view(g, :, :, last.(ants), last.(feeds)))
-    return _residual_cell.(V, ga, gb)
+    V = DimensionalData.modify(Array, ms[:visibility])
+    _divide_residual!(V, g, win.stations, feed_pairs(ms))
+    out = copy(ms)
+    out[:visibility] = V
+    return out
+end
+
+function _divide_residual!(V, g, stations, feeds)
+    for I in CartesianIndices(feeds)
+        p, bi = Tuple(I)
+        a, b = stations[bi]
+        fa, fb = feeds[p, bi]
+        plane = UVData._cell_plane(V, bi, p)
+        for t in axes(plane, 2), c in axes(plane, 1)
+            plane[c, t] = _residual_cell(plane[c, t], g[c, t, a, fa], g[c, t, b, fb])
+        end
+    end
+    return V
 end
 
 # EHT-HOPS-style station flags: a station that participates in a scan (has
@@ -390,11 +410,13 @@ function validate_scan_epochs(comps, ntimes::Integer)
 end
 
 """
-    steer_scan(stack, res, bl_pairs, feeds, f0, t0, sta_delay, sta_rate; cells)
+    steer_scan(group, geom, res, f0, t0, sta_delay, sta_rate; cells)
 
-Re-measure every `(baseline, product)` of a materialized scan group at the
-delay and rate the station solution predicts for it (`τ_{a,fa} − τ_{b,fb}`,
-and the same difference in rate) rather than at a blind search peak.
+Re-measure every cell of `res`, the [`search_scan`](@ref) result for scan group
+`group`, at the delay and rate the station solution predicts for it
+(`τ_{a,fa} − τ_{b,fb}`, and the same difference in rate) rather than at a
+blind search peak. `sta_delay[a, f]` and `sta_rate[a, f]` are indexed by
+`geom`'s station number and feed.
 
 This recovers a fringe too weak to survive a blind search: the trial count
 collapses from the search plane's ~1e4 cells to the `cells` covering the
@@ -406,50 +428,49 @@ against the same noise (`σ = |D_blind|/snr` at the blind peak). Cells with
 no usable data, or whose two stations are not both solved this scan, come
 back `NaN`.
 """
+steer_scan(group::XRadio.ProcessingSet, geom::DataGeometry, res, f0::Real, t0::Real, sta_delay, sta_rate; kw...) =
+    steer_scan(_GroupCells(group, geom), res, f0, t0, sta_delay, sta_rate; kw...)
+
 function steer_scan(
-        stack, res, bl_pairs, feeds, f0::Real, t0::Real,
+        gc::_GroupCells, res, f0::Real, t0::Real,
         sta_delay::AbstractMatrix, sta_rate::AbstractMatrix;
         cells::Real = 9.0,
     )
-    freqs = frequencies(stack)
-    times = timestamps(stack)
-    # `res` covers only cross baselines; `keep` maps its column back to the cube's.
-    keep = findall(pr -> pr[1] != pr[2], UVData.baselines(stack).pairs)
-    dims = (length(bl_pairs), length(feeds))
+    lookup(res, BaselineID) == gc.bl_pairs && lookup(res, Polarization) == gc.feeds || throw(
+        DimensionMismatch("the detections do not label the scan group's cells"),
+    )
+    dims = size(res)
     sdelay = fill(NaN, dims); srate = fill(NaN, dims)
     samp = fill(NaN, dims); ssnr = fill(NaN, dims); spfa = fill(NaN, dims)
-    for p in eachindex(feeds), j in eachindex(bl_pairs)
-        res[:valid][j, p] || continue
-        snr0 = res[:snr][j, p]
+    ws = FringeWorkspace(eltype(first(first(gc.layers))))
+    for q in eachindex(gc.feeds), j in eachindex(gc.bl_pairs)
+        res[:valid][j, q] || continue
+        snr0 = res[:snr][j, q]
         snr0 > 0 || continue
-        a, b = bl_pairs[j]
-        fa, fb = feeds[p]
+        a, b = gc.bl_pairs[j]
+        fa, fb = gc.feeds[q]
         dpred = sta_delay[a, fa] - sta_delay[b, fb]
         rpred = sta_rate[a, fa] - sta_rate[b, fb]
         (isfinite(dpred) && isfinite(rpred)) || continue
-        bi = keep[j]
-        plane = view(stack, BaselineID(bi), Polarization(p))
-        Wb = plane[:weights]
-        Fb = plane[:flags]
+        V, W, F = _gather_cell!(ws, gc, j, q)
         # σ of the blind pass, recovered from its own reported SNR.
         σ = abs(
             _exact_matched_filter(
-                plane, freqs, times, f0, t0,
-                res[:delay][j, p], res[:rate][j, p]
+                V, W, F, gc.freqs, gc.times, f0, t0, res[:delay][j, q], res[:rate][j, q],
             )
         ) / snr0
         σ > 0 || continue
-        D = _exact_matched_filter(plane, freqs, times, f0, t0, dpred, rpred)
+        D = _exact_matched_filter(V, W, F, gc.freqs, gc.times, f0, t0, dpred, rpred)
         Wsum = 0.0
-        for i in eachindex(Wb, Fb)
-            w = Wb[i]
-            (!Fb[i] && isfinite(w) && w > 0) && (Wsum += w)
+        for i in eachindex(W, F)
+            w = W[i]
+            (!F[i] && isfinite(w) && w > 0) && (Wsum += w)
         end
-        sdelay[j, p] = dpred
-        srate[j, p] = rpred
-        samp[j, p] = Wsum > 0 ? abs(D) / Wsum : NaN
-        ssnr[j, p] = abs(D) / σ
-        spfa[j, p] = fringe_pfa(ssnr[j, p], cells)
+        sdelay[j, q] = dpred
+        srate[j, q] = rpred
+        samp[j, q] = Wsum > 0 ? abs(D) / Wsum : NaN
+        ssnr[j, q] = abs(D) / σ
+        spfa[j, q] = fringe_pfa(ssnr[j, q], cells)
     end
     return (delay = sdelay, rate = srate, amp = samp, snr = ssnr, pfa = spfa)
 end

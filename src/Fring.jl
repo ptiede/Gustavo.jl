@@ -15,6 +15,7 @@ using ..UVData: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, Stati
 using ..Calibration
 using ..Calibration: _epoch_atol
 import XRadio
+using OrderedCollections: OrderedDict
 using DensityInterface: logdensityof
 using Distributions: LogNormal
 using ..Calibration: ComponentPlan, GeometryWindow,

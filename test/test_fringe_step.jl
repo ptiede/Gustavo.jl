@@ -8,18 +8,18 @@
 # slots). Plus the step's capabilities: the opt-in cross-feed rate solve,
 # fit-on-subset cross-hand masking, and transforms on the streaming path.
 
-@isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 @testset "BaselineFringeFit step (new engine)" begin
     @testset "fringe blocks invariant under later stages" begin
-        uvset, _ = _build_fringe_uvset()
+        ps, _ = _build_fringe_ps()
         solm = fit(
             BaselineFringeFit() |>
                 AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
-            uvset,
+            ps,
             gauge = PinAntenna(1),
         )
-        sol = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
         @test length(fr.model.phase) == 4
         rn = [p.range for p in fr.layout.plans]
@@ -37,7 +37,7 @@
         # A gauge naming a station code resolves identically.
         sol_code = fit(
             BaselineFringeFit(),
-            uvset; gauge = PinAntenna("A1"),
+            ps; gauge = PinAntenna("A1"),
         )
         @test sol_code[:fringe].steps[1].θ == fr.θ
 
@@ -45,43 +45,42 @@
         @test sol[1:1][:fringe].steps[1].θ == fr.θ
 
         # A fringe-only solution applies cleanly.
-        corr = UVP.apply_calibration(uvset, sol)
-        @test corr isa UVP.UVSet
+        @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
     @testset "a scan the reference sits out still calibrates" begin
         # The reference antenna is in the table but observes no baseline. The
         # stations that DID observe are constrained by their own closure, so none
         # of them is flagged and their data is calibrated rather than blanked.
-        uvset, _ = _build_fringe_uvset(nant = 4, omit_station = 4)
+        ps, _ = _build_fringe_ps(nant = 4, omit_station = 4)
         model = default_fringe_terms()
 
-        sol = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna("A4"))
+        sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna("A4"))
         @test isempty(sol.info.flagged_ant)
         @test isempty(FP.fringe_station_flags(sol))
-        @test UVP.apply_calibration(uvset, sol) isa UVP.UVSet
+        @test calibrate(sol, ps) isa XRadio.ProcessingSet
 
         # The flags do not depend on which station holds the gauge.
-        present = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna("A1"))
+        present = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna("A1"))
         @test present.info.flagged_ant == sol.info.flagged_ant
         @test present.info.flagged_scan == sol.info.flagged_scan
     end
 
     @testset "rounds > 1: fringe blocks invariant under later stages" begin
-        uvset, _ = _build_fringe_uvset()
+        ps, _ = _build_fringe_ps()
         solm = fit(
             BaselineFringeFit(
                 model = default_fringe_terms(),
                 rounds = 2,
             ) |> AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
-            uvset,
+            ps,
             gauge = PinAntenna(1),
         )
         sol = fit(
             BaselineFringeFit(
                 model = default_fringe_terms(),
                 rounds = 2,
-            ), uvset,
+            ), ps,
             gauge = PinAntenna(1),
         )
         fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
@@ -94,7 +93,7 @@
 
     @testset "opt-in cross-feed rate (a feed-2 Rate list element)" begin
         inj = [0.0, 2.0e-4, -1.0e-4, 5.0e-5]
-        uvset, _ = _build_fringe_uvset(rel_rate = inj)
+        ps, _ = _build_fringe_ps(rel_rate = inj)
         # A solvable inter-feed rate is ADDED to the term list — a feed-specific Rate
         # component; the estimator detects it structurally and includes the
         # cross-hand rows in the rate system.
@@ -103,7 +102,7 @@
             phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
         )
 
-        sol = fit(BaselineFringeFit(model = rel_terms), uvset; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(model = rel_terms), ps; gauge = PinAntenna(1))
         fr = sol[:fringe].steps[1]
         @test length(CAL.phase_components(fr.model)) == 5
         plan = fr.layout.plans[5]
@@ -111,15 +110,15 @@
         @test solved ≈ inj .- inj[1] atol = 1.0e-7
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
-        uv0, _ = _build_fringe_uvset()
-        sol0 = fit(BaselineFringeFit(model = rel_terms), uv0; gauge = PinAntenna(1))
+        ps0, _ = _build_fringe_ps()
+        sol0 = fit(BaselineFringeFit(model = rel_terms), ps0; gauge = PinAntenna(1))
         fr0 = sol0[:fringe].steps[1]
         plan0 = fr0.layout.plans[5]
         @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
-        sold = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
+        sold = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
         @test length(sold[:fringe].steps[1].model.phase) == 4
     end
 
@@ -141,8 +140,8 @@
             default_fringe_terms();
             phase = (; rel_phase = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Feed = CAL.SingleFeed(2))),
         )
-        uvset, truth = _build_fringe_uvset(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
-        sol = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna(1))
+        ps, truth = _build_fringe_ps(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
+        sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna(1))
         rel = CAL.parameters(sol[:fringe, :phase, :rel_phase])
         want = truth.phi[:, 2] .- truth.phi[:, 1]
         for a in eachindex(want), s in 1:nscans
@@ -151,57 +150,56 @@
         end
     end
 
-    @testset "transforms on the new path (incl. CalFunction)" begin
-        uvset, _ = _build_fringe_uvset()
-        ws = [1.0, 0.5, 1.0, 2.0]
+    @testset "corrections before the step, including a function" begin
+        ps, _ = _build_fringe_ps()
+        ws = DimArray([1.0, 0.5, 1.0, 2.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
         # Weight scale: the search is invariant (snr from the |D|² plane), so
         # the fringe θ matches the untransformed solve bit-for-bit.
         sol_ws = fit(
             StationWeightScale(ws) |>
                 BaselineFringeFit(),
-            uvset,
+            ps,
             gauge = PinAntenna(1),
         )
-        sol = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
         @test sol_ws[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
         @test only(recorded_transforms(sol_ws)) isa StationWeightScale
 
-        # CalFunction runs on the new path (it errors only when bridging), and
-        # is recorded + replayed by calibrate: flagging one baseline flags it in
-        # the calibrated output.
+        # A plain function is a correction: it runs before the step, and is
+        # recorded and replayed by calibrate, so flagging one baseline flags it
+        # in the calibrated output.
+        is12(a, b) = Set((a, b)) == Set(("A1", "A2"))
         touched = Threads.Atomic{Int}(0)
-        kill12 = CalFunction() do stack, win
+        function kill12(ms)
             Threads.atomic_add!(touched, 1)
-            for (bi, (a, b)) in enumerate(baselines(stack).pairs)
-                if minmax(a, b) == (1, 2)
-                    stack[:flags][BaselineID = bi] .= true
-                end
+            out = copy(ms)
+            flag = DimensionalData.modify(Array, ms[:flag])
+            for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
+                is12(a, b) && (view(flag, BaselineID(bi)) .= true)
             end
+            out[:flag] = flag
+            return out
         end
-        sol_cf = fit(kill12 |> BaselineFringeFit(), uvset; gauge = PinAntenna(1))
+        sol_cf = fit((kill12, BaselineFringeFit()), ps; gauge = PinAntenna(1))
         @test touched[] > 0
-        @test only(recorded_transforms(sol_cf)) isa CalFunction
-        out = calibrate(sol_cf, uvset)
-        for (_, leaf) in DimensionalData.branches(out)
-            F = parent(leaf[:flags])
-            for (bi, (a, b)) in enumerate(UVP.baselines(leaf).pairs)
-                minmax(a, b) == (1, 2) && @test all(F[:, :, bi, :])
-            end
+        @test only(recorded_transforms(sol_cf)) === kill12
+        calibrated = calibrate(sol_cf, ps)
+        for ms in values(calibrated), (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
+            is12(a, b) && @test all(view(ms[:flag], BaselineID(bi)))
         end
     end
 
     @testset "model validation + full-pipeline option coverage" begin
-        uvset, _ = _build_fringe_uvset()
+        ps, _ = _build_fringe_ps()
         # The model is the component tree alone (the gauge pin is run-wide, an
         # argument of `fit`) — no per-effect fields or keywords on BaselineFringeFit.
         @test fieldnames(typeof(BaselineFringeFit())) ==
             (:model, :search, :closure, :rounds, :steer_cells)
 
-        # The options the legacy bridge used to reject (custom Stationization,
-        # the inter-feed rate opt-in, arbitrary CalFunction transforms) run in
-        # FULL pipelines now — every pipeline is new-engine.
+        # A custom Stationization, the inter-feed rate opt-in and a function
+        # correction run in a full pipeline.
         sol_full = fit(
-            [CalFunction((stack, win) -> nothing),
+            [identity,
                 BaselineFringeFit(
                     model = merge(
                         default_fringe_terms();
@@ -210,22 +208,22 @@
                     closure = FP.Stationization(pfa_max = 1.0e-2),
                 ),
                 Bandpass(), AdhocPhase()],
-            uvset,
+            ps,
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
         )
         @test keys(sol_full) == [:fringe, :bandpass, :adhoc]
         # Bandpass without AdhocPhase still solves a :bandpass
         # stage (F |> B — no final pass).
-        sol_fb = fit([BaselineFringeFit(), Bandpass()], uvset; gauge = PinAntenna(1))
+        sol_fb = fit([BaselineFringeFit(), Bandpass()], ps; gauge = PinAntenna(1))
         @test any(r -> r.name === :bandpass, sol_fb.steps)
     end
 
     @testset "model compilation: order, gating, duplicate rejection" begin
-        uvset, _ = _build_fringe_uvset()   # 2 band groups; narrow fractional bandwidth
-        geom = CAL.build_geometry(uvset)
+        ps, _ = _build_fringe_ps()   # 2 band groups; narrow fractional bandwidth
+        geom = CAL.DataGeometry(ps)
         fringe_phase(model) =
-            Gustavo.model_components(BaselineFringeFit(; model), (; geom, antennas = nothing)).phase
+            Gustavo.model_components(BaselineFringeFit(; model), (; geom)).phase
         sig(tc) = (
             typeof(tc.term), typeof(tc.Ti),
             typeof(tc.Frequency), typeof(tc.Feed),
@@ -252,7 +250,7 @@
 
         # A bare GainComponent compiles to itself.
         tc = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2))
-        @test CAL.model_components(tc, (; geom, antennas = nothing)) === tc
+        @test CAL.model_components(tc, (; geom)) === tc
 
         # Exact duplicate components are rejected by message.
         dup = merge(
@@ -289,11 +287,11 @@ end
 # ── What the fringe step can fit ─────────────────────────────────────────────
 
 @testset "fringe step capability" begin
-    uvset, _ = _build_fringe_uvset()
+    ps, _ = _build_fringe_ps()
     model = default_fringe_terms()
 
     @testset "the solution records the search configuration" begin
-        sol = fit(BaselineFringeFit(; model), uvset; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna(1))
         @test sol.info.search == FP.FringeSearch()
         @test stage_info(sol, :fringe).flagged_ant == sol.info.flagged_ant
     end
@@ -304,7 +302,7 @@ end
         # while the solution looked fitted.
         poly = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())
         @test_throws "BaselineFringeFit cannot fit the component" fit(
-            BaselineFringeFit(model = merge(default_fringe_terms(); phase = (; poly))), uvset,
+            BaselineFringeFit(model = merge(default_fringe_terms(); phase = (; poly))), ps,
             gauge = PinAntenna(1),
         )
     end
@@ -312,7 +310,7 @@ end
     @testset "a model missing a term the step requires is rejected by name" begin
         # The kind is missing outright: nothing to write the rate search into.
         norate = GainModel(; phase = Base.structdiff(default_fringe_terms().phase, (; rate = nothing)))
-        @test_throws "requires a rate component" fit(BaselineFringeFit(model = norate), uvset; gauge = PinAntenna(1))
+        @test_throws "requires a rate component" fit(BaselineFringeFit(model = norate), ps; gauge = PinAntenna(1))
 
         # The kind is PRESENT and the router signature is not: the inter-feed delay is
         # still a `:delay`, so only a signature-level check catches a wideband
@@ -322,7 +320,7 @@ end
                 CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
         end
         @test_throws "requires a per-scan feed-common wideband delay" fit(
-            BaselineFringeFit(model = GainModel(; phase = globaldelay)), uvset,
+            BaselineFringeFit(model = GainModel(; phase = globaldelay)), ps,
             gauge = PinAntenna(1),
         )
     end
@@ -332,21 +330,21 @@ end
         # A segmentation splitting a scan asks for columns nothing writes: the
         # scan's first segment would be solved and the rest left at identity
         # gain while `calibrate` places each sample in its own segment's column.
-        # `_build_fringe_uvset` gives one 330 s scan, so 150 s blocks split it.
+        # `_build_fringe_ps` gives one 330 s scan, so 150 s blocks split it.
         subscan = map(
             t -> CAL.GainComponent(t.term; Ti = CAL.TimeBlocks(150.0), Frequency = t.Frequency, Feed = t.Feed),
             default_fringe_terms().phase,
         )
         @test_throws "BaselineFringeFit cannot fit the component" fit(
-            BaselineFringeFit(model = GainModel(; phase = subscan)), uvset,
+            BaselineFringeFit(model = GainModel(; phase = subscan)), ps,
             gauge = PinAntenna(1),
         )
         @test_throws "the data's own sampling" fit(
-            BaselineFringeFit(model = GainModel(; phase = subscan)), uvset,
+            BaselineFringeFit(model = GainModel(; phase = subscan)), ps,
             gauge = PinAntenna(1),
         )
 
-        geom = CAL.build_geometry(uvset)
+        geom = CAL.DataGeometry(ps)
         mbd(Ti) = CAL.GainComponent(CAL.Delay(); Ti, Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds())
 
         # The same boundary expressed as an instrument scan edge, and the
