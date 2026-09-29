@@ -264,8 +264,9 @@ end
 
 # Components of one step over one station set, planned together: `stations`
 # indexes `geom.stations`.
-struct _EvalGroup{L <: ParameterLayout, V <: AbstractVector}
+struct _EvalGroup{M <: GainModel, L <: ParameterLayout, V <: AbstractVector}
     step::Symbol
+    model::M
     layout::L
     θ::V
     stations::Vector{Int}
@@ -320,7 +321,7 @@ function _eval_group(step::Symbol, stations::Vector{String}, cs::Vector{SolvedCo
         _check_params_dims(DimensionalData.dims(c.params), _params_dims(plan, axnode, geom, stations), _label(c))
         copyto!(view(θ, plan.range), parent(c.params))
     end
-    return _EvalGroup(step, layout, θ, idx)
+    return _EvalGroup(step, model, layout, θ, idx)
 end
 
 function _check_params_dims(got::Tuple, expected::Tuple, label)

@@ -24,6 +24,10 @@
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
+# The bandpass step's `obs` (`:phase` or `:logamp`) bandpass parameters over
+# `(param, Feed, Frequency, Ti, Ant)`.
+_jb_leaf(sol, obs) = parent(only(sol[:bandpass, obs, :bandpass].components).params)
+
 # Multiply each (scan, baseline, product) of `ps` by `amp·cis(phase)`, indexed
 # `[scan, baseline, product]` in each Measurement Set's own baseline and product
 # order: per-scan source structure the station gains cannot absorb.
@@ -78,12 +82,7 @@ end
         gauge = PinAntenna(1),
     )
 
-    function bp_leaves(sol)
-        bstep = sol[:bandpass].steps[1]
-        pplan = bstep.layout.plantree.phase.bandpass
-        aplan = bstep.layout.plantree.logamp.bandpass
-        return CAL._component_leaf(pplan, bstep.θ), CAL._component_leaf(aplan, bstep.θ)
-    end
+    bp_leaves(sol) = (_jb_leaf(sol, :phase), _jb_leaf(sol, :logamp))
     pleaf_c, aleaf_c = bp_leaves(sol_closure)
     pleaf_j, aleaf_j = bp_leaves(sol_joint)
 
@@ -148,15 +147,14 @@ end
             Bandpass(model = CAL.GainModel(; phase = (; bandpass = bpc(prior)), logamp = (; bandpass = bpc(prior))), smoother = sm)],
         ps,
         exec = ExecutionConfig(), gauge = PinAntenna(1),
-    )[:bandpass].steps[1]
+    )
 
     s_free = runbp(FP.JointSmoother(max_iterations = 40, tolerance = 1.0e-10))
 
     # σ = 1e-6 rad per channel (2 MHz) as rad/Hz^(3/2).
     stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6 * sqrt(3 / (2 * 2.0e6^3)))
     s_stiff = runbp(FP.JointSmoother(max_iterations = 40); prior = stiff)
-    pleaf = CAL._component_leaf(s_stiff.layout.plantree.phase.bandpass, s_stiff.θ)
-    aleaf = CAL._component_leaf(s_stiff.layout.plantree.logamp.bandpass, s_stiff.θ)
+    pleaf, aleaf = _jb_leaf(s_stiff, :phase), _jb_leaf(s_stiff, :logamp)
     nflat = 0
     for a in 1:nant, f in 1:2
         ph = Float64[pleaf[1, f, c, 1, a] for c in 1:nglob]
@@ -169,7 +167,7 @@ end
     @test nflat == 2 * nant
     # ...and the unconstrained solve is genuinely rougher, so the flatness above
     # is the prior acting rather than a featureless track.
-    apleaf = CAL._component_leaf(s_free.layout.plantree.logamp.bandpass, s_free.θ)
+    apleaf = _jb_leaf(s_free, :logamp)
     rough = maximum(
         maximum(abs, diff(diff(Float64[apleaf[1, f, c, 1, a] for c in 1:nglob])))
             for a in 1:nant, f in 1:2
@@ -206,12 +204,12 @@ end
         [BaselineFringeFit(model = fm), Bandpass(smoother = sm)],
         ps,
         exec = ExecutionConfig(), gauge = PinAntenna(1),
-    )[:bandpass].steps[1]
+    )
     s_joint = runbp(FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-12))
     s_closure = runbp(FP.PerTrackSmoother())
 
     la(s, a, f) = (
-        L = CAL._component_leaf(s.layout.plantree.logamp.bandpass, s.θ);
+        L = _jb_leaf(s, :logamp);
         Float64[L[1, f, c, 1, a] for c in 1:nglob]
     )
     gauge(x) = x .- sum(x) / length(x)

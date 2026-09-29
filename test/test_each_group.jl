@@ -14,7 +14,7 @@ Gustavo.provides(::GroupProbe) = :probe
 Gustavo.solve(s::GroupProbe, ctx) = (; seen = each_group(s.f, ctx))
 
 _probe(pipeline, data; kw...) =
-    stage_info(fit(pipeline, data; gauge = PinAntenna(1), kw...), :probe).seen
+    fit(pipeline, data; gauge = PinAntenna(1), kw...).steps[:probe].seen
 
 _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w -> w ./ 2, ms[:weight]))
 
@@ -41,11 +41,12 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
         plain = _probe(GroupProbe(w), ps)
         halved = _probe(Any[_halve_weights, GroupProbe(w)], ps)
         @test halved ≈ plain ./ 2
-        # A correction after the step does not reach it; the solution records it.
+        # A correction after the step does not reach it; the solution's
+        # provenance records it.
         sol = fit(Any[GroupProbe(w), _halve_weights], ps; gauge = PinAntenna(1))
-        @test stage_info(sol, :probe).seen == plain
-        @test sol.sequence[2] === _halve_weights
-        @test recorded_transforms(sol) == Any[_halve_weights]
+        @test sol.steps[:probe].seen == plain
+        @test occursin("_halve_weights", sol.provenance.pipeline)
+        @test first(findfirst("GroupProbe", sol.provenance.pipeline)) < first(findfirst("_halve_weights", sol.provenance.pipeline))
     end
 
     @testset "a correction must return a Measurement Set" begin
@@ -77,7 +78,7 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
         sol = fit(GroupProbe(), ps; gauge = PinAntenna(1), exec = ExecutionConfig(progress = cb))
         @test events[1] == (:probe, 0, 3)
         @test sort([e[2] for e in events[2:end]]) == 1:3
-        timing = stage_info(sol, :probe).timing
+        timing = sol.steps[:probe].timing
         @test length(timing[:decode]) == 3 && all(>=(0), timing[:decode])
         @test sol.info.nscan == 3
     end

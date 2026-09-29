@@ -66,8 +66,8 @@ end
 
 Correction: [`normalize_by_autocorrelations`](@ref), so cross-correlations
 become correlation coefficients and the autocorrelation baselines are flagged.
-The default pipelines start with it; apply it to data before `calibrate` so
-the gains divide data on the scale they were solved on.
+The default pipelines start with it; `calibrate(pipeline, sol, ps)` repeats it,
+so the gains divide data on the scale they were solved on.
 """
 struct AutocorrelationNormalization <: AbstractDataTransform end
 

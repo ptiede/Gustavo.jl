@@ -20,29 +20,28 @@
             gauge = PinAntenna(1),
         )
         sol = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
-        fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
-        @test length(fr.model.phase) == 4
-        rn = [p.range for p in fr.layout.plans]
-        rm = [p.range for p in frm.layout.plans]
-        for i in 1:4
-            @test fr.θ[rn[i]] == frm.θ[rm[i]]        # bit-identical
+        fr, frm = sol[:fringe].components, solm[:fringe].components
+        @test length(fr) == 4
+        for (c, cm) in zip(fr, frm)
+            @test c == cm        # bit-identical
         end
-        @test keys(sol) == [:fringe]
+        @test collect(keys(sol.steps)) == [:fringe]
         @test sol.info.nscan == solm.info.nscan
-        @test fr.info.scan_snr == frm.info.scan_snr
-        @test fr.info.scan_ncells == frm.info.scan_ncells
-        @test fr.info.det_snr == frm.info.det_snr
-        @test fr.info.det_pfa == frm.info.det_pfa
+        fi, fim = sol.steps[:fringe], solm.steps[:fringe]
+        @test fi.scan_snr == fim.scan_snr
+        @test fi.scan_ncells == fim.scan_ncells
+        @test fi.det_snr == fim.det_snr
+        @test fi.det_pfa == fim.det_pfa
 
         # A gauge naming a station code resolves identically.
         sol_code = fit(
             BaselineFringeFit(),
             ps; gauge = PinAntenna("A1"),
         )
-        @test sol_code[:fringe].steps[1].θ == fr.θ
+        @test sol_code[:fringe].components == fr
 
         # Step selection works on a single-step solution.
-        @test sol[1:1][:fringe].steps[1].θ == fr.θ
+        @test filter(c -> c.step === :fringe, sol)[:fringe].components == fr
 
         # A fringe-only solution applies cleanly.
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
@@ -56,14 +55,14 @@
         model = default_fringe_terms()
 
         sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna("A4"))
-        @test isempty(sol.info.flagged_ant)
+        @test isempty(sol.steps[:fringe].flagged_ant)
         @test isempty(FP.fringe_station_flags(sol))
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
 
         # The flags do not depend on which station holds the gauge.
         present = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna("A1"))
-        @test present.info.flagged_ant == sol.info.flagged_ant
-        @test present.info.flagged_scan == sol.info.flagged_scan
+        @test present.steps[:fringe].flagged_ant == sol.steps[:fringe].flagged_ant
+        @test present.steps[:fringe].flagged_scan == sol.steps[:fringe].flagged_scan
     end
 
     @testset "rounds > 1: fringe blocks invariant under later stages" begin
@@ -83,11 +82,8 @@
             ), ps,
             gauge = PinAntenna(1),
         )
-        fr, frm = sol[:fringe].steps[1], solm[:fringe].steps[1]
-        rn = [p.range for p in fr.layout.plans]
-        rm = [p.range for p in frm.layout.plans]
-        for i in 1:4
-            @test fr.θ[rn[i]] == frm.θ[rm[i]]
+        for (c, cm) in zip(sol[:fringe].components, solm[:fringe].components)
+            @test c == cm
         end
     end
 
@@ -103,23 +99,19 @@
         )
 
         sol = fit(BaselineFringeFit(model = rel_terms), ps; gauge = PinAntenna(1))
-        fr = sol[:fringe].steps[1]
-        @test length(CAL.phase_components(fr.model)) == 5
-        plan = fr.layout.plans[5]
-        solved = [fr.θ[plan_off1(plan)[a, 2, 1, 1]] for a in 1:4]
-        @test solved ≈ inj .- inj[1] atol = 1.0e-7
+        @test count(c -> first(c.path) === :phase, sol[:fringe].components) == 5
+        solved = only(sol[:fringe, :phase, :rel_rate].components).params
+        @test vec(parent(solved)) ≈ inj .- inj[1] atol = 1.0e-7
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         ps0, _ = _build_fringe_ps()
         sol0 = fit(BaselineFringeFit(model = rel_terms), ps0; gauge = PinAntenna(1))
-        fr0 = sol0[:fringe].steps[1]
-        plan0 = fr0.layout.plans[5]
-        @test maximum(abs, [fr0.θ[plan_off1(plan0)[a, 2, 1, 1]] for a in 1:4]) < 1.0e-7
+        @test maximum(abs, only(sol0[:fringe, :phase, :rel_rate].components).params) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
         sold = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
-        @test length(sold[:fringe].steps[1].model.phase) == 4
+        @test length(sold[:fringe].components) == 4
     end
 
     @testset "a constant phase is referenced to its own scan" begin
@@ -142,7 +134,7 @@
         )
         ps, truth = _build_fringe_ps(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
         sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna(1))
-        rel = CAL.parameters(sol[:fringe, :phase, :rel_phase])
+        rel = only(sol[:fringe, :phase, :rel_phase].components).params
         want = truth.phi[:, 2] .- truth.phi[:, 1]
         for a in eachindex(want), s in 1:nscans
             got = only(rel[1, :, 1, s, a])
@@ -162,12 +154,12 @@
             gauge = PinAntenna(1),
         )
         sol = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
-        @test sol_ws[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
-        @test only(recorded_transforms(sol_ws)) isa StationWeightScale
+        @test sol_ws[:fringe].components == sol[:fringe].components
+        @test startswith(sol_ws.provenance.pipeline, "StationWeightScale")
 
-        # A plain function is a correction: it runs before the step, and is
-        # recorded and replayed by calibrate, so flagging one baseline flags it
-        # in the calibrated output.
+        # A plain function is a correction: it runs before the step, and
+        # calibrating through the same pipeline replays it, so flagging one
+        # baseline flags it in the calibrated output.
         is12(a, b) = Set((a, b)) == Set(("A1", "A2"))
         touched = Threads.Atomic{Int}(0)
         function kill12(ms)
@@ -180,10 +172,11 @@
             out[:flag] = flag
             return out
         end
-        sol_cf = fit((kill12, BaselineFringeFit()), ps; gauge = PinAntenna(1))
+        pipeline_cf = (kill12, BaselineFringeFit())
+        sol_cf = fit(pipeline_cf, ps; gauge = PinAntenna(1))
         @test touched[] > 0
-        @test only(recorded_transforms(sol_cf)) === kill12
-        calibrated = calibrate(sol_cf, ps)
+        @test occursin("kill12", sol_cf.provenance.pipeline)
+        calibrated = calibrate(pipeline_cf, sol_cf, ps)
         for ms in values(calibrated), (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
             is12(a, b) && @test all(view(ms[:flag], BaselineID(bi)))
         end
@@ -212,11 +205,11 @@
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
         )
-        @test keys(sol_full) == [:fringe, :bandpass, :adhoc]
+        @test collect(keys(sol_full.steps)) == [:fringe, :bandpass, :adhoc]
         # Bandpass without AdhocPhase still solves a :bandpass
         # stage (F |> B — no final pass).
         sol_fb = fit([BaselineFringeFit(), Bandpass()], ps; gauge = PinAntenna(1))
-        @test any(r -> r.name === :bandpass, sol_fb.steps)
+        @test haskey(sol_fb, :bandpass)
     end
 
     @testset "model compilation: order, gating, duplicate rejection" begin
@@ -292,8 +285,8 @@ end
 
     @testset "the solution records the search configuration" begin
         sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna(1))
-        @test sol.info.search == FP.FringeSearch()
-        @test stage_info(sol, :fringe).flagged_ant == sol.info.flagged_ant
+        @test sol.steps[:fringe].search == FP.FringeSearch()
+        @test haskey(sol.steps[:fringe], :flagged_ant) && haskey(sol.steps[:fringe], :flagged_scan)
     end
 
     @testset "a term the step cannot fit is rejected by name" begin

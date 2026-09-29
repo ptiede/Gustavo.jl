@@ -242,7 +242,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test !flagged(calibrate(sol[:bandpass], ps))
     end
 
-    @testset "calibrate applies gains only; corrections are the caller's" begin
+    @testset "calibrate: gains alone, or the fit's data path" begin
         ps, _ = _build_fringe_ps()
         ws = DimArray([1.0, 0.5, 1.0, 2.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
         sol = fit(StationWeightScale(ws) |> _full_chain(), ps; gauge = PinAntenna(1))
@@ -264,6 +264,17 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             @test parent(before[k][:weight]) ≈ parent(ms[:weight])
         end
 
+        # Given the pipeline, `calibrate` repeats the fit's data path, dividing
+        # step by step rather than by the gains' product.
+        replayed = calibrate(StationWeightScale(ws) |> _full_chain(), sol, ps)
+        for (k, ms) in pairs(before)
+            @test isapprox(parent(replayed[k][:visibility]), parent(ms[:visibility]); nans = true)
+            @test parent(replayed[k][:weight]) ≈ parent(ms[:weight])
+        end
+        # Its solve steps must be the solution's.
+        @test_throws "not the solution's steps" calibrate(StationWeightScale(ws) |> _full_chain(), sol[:fringe], ps)
+        @test_throws "not the solution's steps" calibrate(BaselineFringeFit(), sol, ps)
+
         # Two weight-scale transforms compose (w·(s_a s_b)²). Two pipelines
         # join by splatting.
         sol_b = fit(((StationWeightScale(ws) |> StationWeightScale(ws))..., _full_chain()...), ps; gauge = PinAntenna(1))
@@ -274,6 +285,15 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         early = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
         late = fit(BaselineFringeFit() |> StationWeightScale(ws), ps; gauge = PinAntenna(1))
         @test parent(gains(late)) == parent(gains(early))
+
+        # A correction between two steps is repeated in its place.
+        between = BaselineFringeFit() |> StationWeightScale(ws) |> Bandpass()
+        solb = fit(between, ps; gauge = PinAntenna(1))
+        by_hand = calibrate(solb[:bandpass], scale(calibrate(solb[:fringe], ps; apply_flags = false)); apply_flags = false)
+        for (k, ms) in pairs(calibrate(between, solb, ps; apply_flags = false))
+            @test isapprox(parent(ms[:visibility]), parent(by_hand[k][:visibility]); nans = true)
+            @test parent(ms[:weight]) ≈ parent(by_hand[k][:weight])
+        end
     end
 
     @testset "rate components must share the constant-phase epoch" begin

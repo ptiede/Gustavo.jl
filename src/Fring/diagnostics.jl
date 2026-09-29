@@ -10,13 +10,13 @@
 
 # The `:fringe` step's diagnostics, or an empty NamedTuple when the solution
 # has no fringe stage — every diagnostic below then returns an empty result.
-_fringe_info(sol::CalibrationSolution) = haskey(sol, :fringe) ? stage_info(sol, :fringe) : (;)
+_fringe_info(sol::CalibrationSolution) = get(sol.steps, :fringe, (;))
 
 """
     fringe_snr_table(sol::CalibrationSolution) -> Vector{NamedTuple}
 
 Per-scan fringe-fit summary rows `(scan, max_snr, ncomp, pfa)`, all pulled
-from the fringe step's own diagnostics (`stage_info(sol, :fringe)`). `ncomp` is a
+from the fringe step's own diagnostics (`sol.steps[:fringe]`). `ncomp` is a
 solve-wide scalar (the same value on every row, not literally per-scan). `pfa` is the scan's false-alarm probability [`fringe_pfa`](@ref):
 the chance that pure noise, searched over the scan's full
 delay×rate×baseline×product space, would produce a peak of at least `max_snr`
@@ -76,11 +76,11 @@ median per-scan max SNR.
 """
 function fringe_solution_summary(sol::CalibrationSolution)
     rows = fringe_snr_table(sol)
-    nant = get(sol.info, :nant, sol.steps[1].layout.nant)
+    nant = length(sol.geom.stations)
     nscan = get(sol.info, :nscan, length(rows))
     snrs = [r.max_snr for r in rows if isfinite(r.max_snr)]
     medsnr = isempty(snrs) ? NaN : median(snrs)
-    nθ = sum(s.layout.nθ for s in sol.steps)
+    nθ = sum(c -> length(c.params), sol.components; init = 0)
     return string(
         "FringeSolution: ", nant, " antennas, ", nscan, " scans, ",
         nθ, " parameters; median scan max-SNR = ", _fmt(medsnr),
@@ -141,8 +141,12 @@ Scan index matches the scan-group ordering of [`fringe_snr_table`](@ref) and
 `info.det_scan`.
 """
 function fringe_station_solutions(sol::CalibrationSolution)
-    fringe_step = sol[:fringe].steps[1]
-    model, layout, θ = fringe_step.model, fringe_step.layout, fringe_step.θ
+    groups = Calibration._applied(sol[:fringe]).groups
+    length(groups) == 1 || error(
+        "fringe_station_solutions: the fringe components differ across stations; decode each " *
+            "station set's components from their `params` instead"
+    )
+    (; model, layout, θ) = only(groups)
     nant = layout.nant
     comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate/:phase)
     refplan = _perscan_delay_plan(model, layout)
@@ -282,13 +286,11 @@ function BaselineFringeData(
     )
 end
 
-# The scan stream a diagnostic materializes through. The transform chain is the
-# one recorded on `sol` by default, so diagnostics see exactly the data the
-# solve saw (the "pass `weight_scale` again or this map's SNR won't match the
-# solve" trap is gone); the legacy explicit kwargs (`precal`/`flag_channels`/
-# `weight_scale`) override it when any is given, in the solver's application
-# order (precal division, weight scale, channel mask); `transforms` overrides
-# everything with an explicit chain — `transforms = ()` inspects the raw data.
+# The scan stream a diagnostic materializes through: the data as given, or
+# corrected by `transforms`, or by the explicit `precal`/`flag_channels`/
+# `weight_scale` in the solver's application order (precal division, weight
+# scale, channel mask). A solution records no executable corrections, so the
+# caller passes the ones the fit applied.
 function _diag_stream(
         uvset::UVSet, sol::CalibrationSolution;
         precal = nothing, flag_channels = nothing, weight_scale = nothing,
@@ -303,12 +305,8 @@ function _diag_stream(
         flag_channels === nothing || push!(t, FlagChannels(BitVector(flag_channels)))
         t
     else
-        recorded_transforms(sol)
+        Any[]
     end
-    any(t -> t === missing, tfs) && error(
-        "diagnostics: the solution records a transform that did not survive " *
-            "serialization — pass the chain explicitly (precal/flag_channels/weight_scale)."
-    )
     # Diagnostics inspect one group at a time, so the outer level stays serial; the
     # inner level still fans out across the group's leaves and baselines.
     return scan_stream(
@@ -657,7 +655,7 @@ above the sidelobe forest (`pfa ≪ 1`); a false fringe barely clears it.
   Default: the baseline with the strongest detection on this scan.
 - `pol` — correlation-product selector as [`baseline_pol_index`](@ref).
 - `search` — `FringeSearch` options; defaults to the ones the solve used
-  (recorded in `sol.info`).
+  (recorded in `sol.steps[:fringe]`).
 - `precal` — when the solve used one (e.g. `phasecal_solution`), pass the same
   solution so the map is computed on the data the solver actually searched; the
   same goes for `flag_channels` (e.g. `tone_channel_mask`) and `weight_scale`
@@ -687,7 +685,7 @@ function fringe_search_map(
     stack, win = materialize_cube(stream, groups[gi])
     Vg = stack[:vis]
     fg = frequencies(stack)
-    opts = search === nothing ? get(sol.info, :search, FringeSearch()) : search
+    opts = search === nothing ? get(_fringe_info(sol), :search, FringeSearch()) : search
     p = _pol_index(feed_pairs(stack), pol)
     times = timestamps(stack)
     f0 = sol.geom.f0
@@ -741,9 +739,9 @@ their baselines there (`apply_flags = true`). Rows
 was constrained (or the solution predates flag recording).
 """
 function fringe_station_flags(sol::CalibrationSolution)
-    info = sol.info
+    info = _fringe_info(sol)
     haskey(info, :flagged_ant) || return NamedTuple[]
-    names = get(info, :ant_names, String[])
+    names = sol.geom.stations
     sta(i) = i <= length(names) ? String(names[i]) : string("ant", i)
     scname(s) = s <= length(sol.geom.scan_names) ? String(sol.geom.scan_names[s]) : string(s)
     rows = [
@@ -780,7 +778,7 @@ first. Needs no data read — inspect a flagged row with
 function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
     info = _fringe_info(sol)
     haskey(info, :det_pfa) || return NamedTuple[]
-    names = get(sol.info, :ant_names, String[])
+    names = sol.geom.stations
     sta(i) = i <= length(names) ? String(names[i]) : string("ant", i)
     # A solution written before the table recorded rejected cells holds detections
     # only, so every row of one counts as accepted.
@@ -802,15 +800,14 @@ end
     print_solve_timing(sol::CalibrationSolution; io = stdout, top = 5)
 
 Profiling summary of a solve, GENERIC over every step (built-in or
-third-party): one line per step that published timing (`stage_info(sol,
-name).t_pass`, the pass's total wall time, and `.timing`, a `Scan`-indexed
+third-party): one line per step that published timing (`sol.steps[name].t_pass`, the pass's total wall time, and `.timing`, a `Scan`-indexed
 `DimStack` of `decode`/`work`/`reduce` task-seconds — with N concurrent group
 tasks the wall share is up to N× smaller), then the `top` slowest scans of
 whichever step spent the most per-scan time. Prints a notice when the
 solution carries no step timing at all.
 """
 function print_solve_timing(sol::CalibrationSolution; io = stdout, top::Integer = 5)
-    timed = [s for s in sol.steps if haskey(s.info, :t_pass)]
+    timed = [(; name, info) for (name, info) in sol.steps if haskey(info, :t_pass)]
     isempty(timed) && return println(io, "No solve timing recorded in this solution")
     println(io)
     println(

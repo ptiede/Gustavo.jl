@@ -83,7 +83,7 @@
             gauge = PinAntenna(1),
         )
         rows = FP.fringe_station_solutions(sol)
-        @test length(rows) == sol.info.nscan * sol.steps[1].layout.nant * 2
+        @test length(rows) == sol.info.nscan * length(sol.geom.stations) * 2
         val(st, fd) = only(filter(r -> r.scan == 1 && r.station == st && r.feed == fd, rows)).delay_ns
 
         # Gauge: reference station (1) is pinned to 0 on both feeds.

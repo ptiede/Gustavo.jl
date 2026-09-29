@@ -146,7 +146,7 @@ quantity solved `SharedFeeds` averages away a real signal.
 
 Components compose by *named* `NamedTuple` entries, never positionally: θ is
 addressed as `θ.phase.<name>`, diagnostics label by name, and
-`parameters(sol[:fringe, :phase, :mbd])` selects by the same name. A value may
+`sol[:fringe, :phase, :mbd]` selects by the same name. A value may
 itself be a named subtree of components, addressed through its key
 (`θ.phase.<name>.<part>`).
 

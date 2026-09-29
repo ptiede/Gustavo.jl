@@ -71,12 +71,13 @@
         fixd = let sol = fit(FP.StationWeightScale(ws) |> chain0, uvset; gauge = PinAntenna(1))
             (sol, calibrate(sol, uvset))
         end
-        bfr, ffr = base[1][:fringe].steps[1], fixd[1][:fringe].steps[1]
-        @test ffr.info.scan_snr == bfr.info.scan_snr
-        @test ffr.info.det_snr == bfr.info.det_snr
+        bfr, ffr = base[1].steps[:fringe], fixd[1].steps[:fringe]
+        @test ffr.scan_snr == bfr.scan_snr
+        @test ffr.det_snr == bfr.det_snr
         # …so the solution only shifts at the level of the re-weighted stages.
         @test all(
-            isapprox(s1.θ, s2.θ; atol = 1.0e-3) for (s1, s2) in zip(fixd[1].steps, base[1].steps)
+            isapprox(parent(c1.params), parent(c2.params); atol = 1.0e-3)
+                for (c1, c2) in zip(fixd[1].components, base[1].components)
         )
 
         for (k, leaf) in UVP.branches(fixd[2])
@@ -89,23 +90,22 @@
         end
     end
 
-    @testset "diagnostics replay the solve's recorded transforms" begin
+    @testset "diagnostics see the weight scale they are given" begin
         sol = fit(
             FP.StationWeightScale(ws) |> BaselineFringeFit() |>
                 Bandpass() |> AdhocPhase(model = default_adhoc_terms(; prior = nothing)),
             uvset,
             gauge = PinAntenna(1),
         )
-        # The old footgun (forgetting to re-pass weight_scale to a diagnostic)
-        # is dead: with NO kwargs the diagnostics materialize through
-        # `recorded_transforms(sol)` — the StationWeightScale — so the explicit
-        # kwarg and the default now see IDENTICAL data.
-        @test only(recorded_transforms(sol)) isa FP.StationWeightScale
+        # A solution records no executable corrections: the `weight_scale`
+        # keyword and the equivalent explicit transform chain see identical data.
+        @test startswith(sol.provenance.pipeline, "StationWeightScale")
+        chain = (FP.StationWeightScale(ws),)
         m = FP.fringe_search_map(uvset, sol; pol = (1, 1), weight_scale = ws)
-        m0 = FP.fringe_search_map(uvset, sol; pol = (1, 1))
+        m0 = FP.fringe_search_map(uvset, sol; pol = (1, 1), transforms = chain)
         @test m.map.detection.snr ≈ m0.map.detection.snr
         d = FP.baseline_fringe_data(uvset, sol; weight_scale = ws)
-        d0 = FP.baseline_fringe_data(uvset, sol)
+        d0 = FP.baseline_fringe_data(uvset, sol; transforms = chain)
         @test isequal(d.spec_after, d0.spec_after)
         @test isequal(d.spec_before, d0.spec_before)
     end

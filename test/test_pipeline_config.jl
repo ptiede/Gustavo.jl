@@ -9,8 +9,9 @@
         pipe = (BaselineFringeFit(), Bandpass(), AdhocPhase())
         sol = fit(pipe, uvset; gauge = PinAntenna(1))
         @test sol isa CAL.CalibrationSolution
-        @test sol.info.nant == 4
-        @test sol.sequence == pipe
+        @test length(sol.geom.stations) == 4
+        @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
+        @test startswith(sol.provenance.pipeline, "BaselineFringeFit")
         out = calibrate(sol, uvset)
         @test out isa UVP.UVSet
         ref = Gustavo.UVData.apply_calibration(uvset, sol)
@@ -137,9 +138,9 @@
         # A standalone Bandpass fit needs no BaselineFringeFit step, no
         # pipeline-level anchor check, and no fringe-estimator diagnostics.
         sol = fit(Bandpass(), uvset; gauge = PinAntenna(2))
-        @test keys(sol) == [:bandpass]
-        @test !haskey(sol.info, :search)
-        @test sol.info.nant == 4
+        @test collect(keys(sol.steps)) == [:bandpass]
+        @test !haskey(sol.steps[:bandpass], :search)
+        @test length(sol.geom.stations) == 4
         @test calibrate(sol, uvset) isa UVP.UVSet
     end
 
@@ -287,15 +288,13 @@ end
         t = StationWeightScale(ones(4))
         ff = BaselineFringeFit()
         sol = fit(t |> ff, uvset; gauge = PinAntenna("A1"))
-        @test sol.sequence == (t, ff)
-        # Recorded as a tuple whatever the pipeline was given as.
-        @test fit([t, ff], uvset; gauge = PinAntenna("A1")).sequence == (t, ff)
-        @test recorded_transforms(sol) == Any[t]
+        @test sol.provenance.pipeline == join((sprint(show, x; context = :limit => true) for x in (t, ff)), " |> ")
+        # Recorded the same whatever the pipeline was given as.
+        @test fit([t, ff], uvset; gauge = PinAntenna("A1")).provenance == sol.provenance
         # The gauge as given, not as resolved against the stations.
-        @test sol.gauge.refs == "A1"
+        @test sol.provenance.gauge == sprint(show, PinAntenna("A1"))
         # A step selection carries both along.
-        @test sol[1:1].sequence == sol.sequence
-        @test sol[1:1].gauge === sol.gauge
+        @test sol[:fringe].provenance == sol.provenance
 
         bc = Dict(1 => :dummy)
         @test fieldtype(typeof(AprioriAmplitude(bc)), :spw_cals) === typeof(bc)
@@ -305,19 +304,20 @@ end
     end
 end
 
-# The solve produces a `Vector`-backed θ, but a caller may rewrap it — e.g. as a
-# labelled `DimArray` — and the whole apply path must be indifferent to that.
-@testset "a rewrapped θ corrects data identically" begin
+# The solve stores each component's parameters over an `Array`, but a caller may
+# rewrap them — e.g. over a view — and the whole apply path must be indifferent to that.
+@testset "rewrapped parameters correct data identically" begin
     uvset, _ = _build_fringe_uvset()
     sol = fit(BaselineFringeFit() |> Bandpass(), uvset; gauge = PinAntenna(1))
-    sold_steps = [
-        CAL.StepSolution(
-            s.name, s.model, s.layout, DimArray(copy(s.θ), Dim{:param}(1:(s.layout.nθ))), s.info,
+    rewrapped = [
+        CAL.SolvedComponent(
+            c.step, c.path, c.component,
+            DimArray(view(copy(parent(c.params)), axes(c.params)...), dims(c.params)),
         )
-            for s in sol.steps
+            for c in sol.components
     ]
-    sold = CAL.CalibrationSolution(sold_steps, sol.geom, sol.info; sol.sequence, sol.gauge)
-    @test all(s.θ isa DimArray for s in sold.steps)
+    sold = CAL.CalibrationSolution(sol.geom, rewrapped, sol.steps, sol.info)
+    @test all(parent(c.params) isa SubArray for c in sold.components)
 
     a = Gustavo.UVData.apply_calibration(uvset, sol)
     b = Gustavo.UVData.apply_calibration(uvset, sold)

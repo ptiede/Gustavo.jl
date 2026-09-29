@@ -21,9 +21,8 @@ include("synthetic_uvset.jl")
         gauge = PinAntenna(1),
     )
     @test sol isa CAL.CalibrationSolution
-    for step in sol.steps
-        @test length(step.θ) == step.layout.nθ
-    end
+    @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
+    @test all(haskey(sol, k) for k in keys(sol.steps))
 
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
 
@@ -75,13 +74,9 @@ include("synthetic_uvset.jl")
         sol2 = CAL.load_solution(path)
         @test sol2.geom.times == sol.geom.times
         @test sol2.geom.channel_freqs == sol.geom.channel_freqs
-        @test length(sol2.steps) == length(sol.steps)
-        for step in sol.steps
-            step2 = sol2[step.name].steps[1]
-            @test step2.θ == step.θ
-            @test step2.layout.nθ == step.layout.nθ
-            @test length(CAL.phase_components(step2.model)) == length(CAL.phase_components(step.model))
-        end
+        @test sol2.components == sol.components
+        @test collect(keys(sol2.steps)) == collect(keys(sol.steps))
+        @test sol2.provenance == sol.provenance
 
         corr2 = Gustavo.UVData.apply_calibration(uvset, sol2)
         for (k, leaf) in DimensionalData.branches(corr)
@@ -110,7 +105,7 @@ include("synthetic_uvset.jl")
         # `show` gives each type its own summary line instead of a raw dump.
         @test occursin("CalibrationSolution", sprint(show, sol))
         @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
-        @test occursin("GainModel", sprint(show, sol[:fringe].steps[1].model))
+        @test occursin("SolvedComponent", sprint(show, first(sol[:fringe].components)))
 
         # ScanStream is an ordered container over its scan-group specs.
         stream = ST.scan_stream(uvset)
@@ -246,10 +241,9 @@ end
         uvset,
         gauge = PinAntenna(1),
     )
-    st = sol[:adhoc].steps[1]
-    plan = FP._adhoc_plan(st.model, st.layout)
-    @test plan.tying isa CAL.PerFeed
-    leaf = CAL._component_leaf(plan, st.θ)     # (param, node, fseg, tseg, ant)
+    adhoc_c = only(sol[:adhoc, :phase, :adhoc].components)
+    @test adhoc_c.component.Feed isa CAL.PerFeed
+    leaf = parent(adhoc_c.params)     # (param, node, fseg, tseg, ant)
     @test any(!=(0), @view leaf[1, 1, 1, :, :])
     @test any(!=(0), @view leaf[1, 2, 1, :, :])
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
@@ -322,8 +316,8 @@ end
     sol_a = fit(ff, uvset; gauge = PinAntenna(1))
     sol_cross = fit(FP.ApplySolution(sol_a[:fringe]) |> bp, uvset; gauge = PinAntenna(1))
 
-    θ_within = sol_within[:bandpass].steps[1].θ
-    θ_cross = sol_cross[:bandpass].steps[1].θ
+    θ_within = [parent(c.params) for c in sol_within[:bandpass].components]
+    θ_cross = [parent(c.params) for c in sol_cross[:bandpass].components]
     @test θ_within == θ_cross
 end
 
@@ -627,8 +621,8 @@ end
     # to per-band constant + slope components (the parts the per-band SBD and inter-feed
     # delay terms legitimately absorb). Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
-    bp_on = sol_on[:bandpass].steps[1]
-    plan = bp_on.layout.plantree.phase.bandpass
+    bp_on = only(CAL._applied(sol_on[:bandpass, :phase, :bandpass]).groups)
+    plan = only(bp_on.layout.plans)
     @test plan_off1(plan)[1, 2, 1, 1] != 0
     rec = [bp_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
     worst = 0.0
@@ -721,8 +715,8 @@ end
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, (1, 1))
         @test amp_ripple(don.spec_after, don, p) < 1.08
-        bp = sol[:bandpass].steps[1]
-        plan = bp.layout.plantree.logamp.bandpass
+        bp = only(CAL._applied(sol[:bandpass, :logamp, :bandpass]).groups)
+        plan = only(bp.layout.plans)
         for dg in dead_globals, a in 2:nant, f in 1:2
             nbr = 0.5 * (larec(bp.θ, plan, a, f, dg - 1) + larec(bp.θ, plan, a, f, dg + 1))
             @test isfinite(larec(bp.θ, plan, a, f, dg))
@@ -738,8 +732,8 @@ end
             AdhocPhase(adhoc), uvset,
             gauge = PinAntenna(1),
     )
-    bpf = solf[:bandpass].steps[1]
-    planf = bpf.layout.plantree.logamp.bandpass
+    bpf = only(CAL._applied(solf[:bandpass, :logamp, :bandpass]).groups)
+    planf = only(bpf.layout.plans)
     for dg in dead_globals, a in 2:nant, f in 1:2
         @test larec(bpf.θ, planf, a, f, dg) == 0.0
     end
@@ -788,7 +782,7 @@ end
         uvset,
         gauge = PinAntenna(1),
     )
-    @test all(>(10), filter(isfinite, sol[:fringe].steps[1].info.scan_snr))
+    @test all(>(10), filter(isfinite, sol.steps[:fringe].scan_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
 
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
@@ -837,17 +831,17 @@ end
     end
     @test any(e -> e[1] === :bandpass, events)                 # bandpass enabled by default
     inf = sol.info
-    fringe_step, bandpass_step, adhoc_step = sol[:fringe].steps[1], sol[:bandpass].steps[1], sol[:adhoc].steps[1]
-    @test fringe_step.info.t_pass > 0 && adhoc_step.info.t_pass > 0 && bandpass_step.info.t_pass >= 0
+    fringe_step, bandpass_step, adhoc_step = sol.steps[:fringe], sol.steps[:bandpass], sol.steps[:adhoc]
+    @test fringe_step.t_pass > 0 && adhoc_step.t_pass > 0 && bandpass_step.t_pass >= 0
     @test inf.ntasks_used >= 1 && inf.inner_tasks >= 1
     # Every step publishes the SAME generic per-scan timing shape — no
     # per-step-name code in the runner, so a third-party step gets this too.
     for step in (fringe_step, bandpass_step, adhoc_step)
-        t = step.info.timing
+        t = step.timing
         @test length(t.decode) == inf.nscan
         @test all(>=(0), t.decode) && all(>=(0), t.work)
     end
-    @test sum(fringe_step.info.timing.work) > 0
+    @test sum(fringe_step.timing.work) > 0
     buf = IOBuffer()
     FP.print_solve_timing(sol; io = buf)
     out = String(take!(buf))
@@ -873,8 +867,7 @@ end
     p2 = findfirst(pr -> pr[1] != pr[2], collect(bl2))
     @test _coherence(@view(parent(l2[:vis])[:, :, p2, 1]), @view(parent(l2[:weights])[:, :, p2, 1])) > 0.99
     # Solutions without timers degrade cleanly.
-    fringe = sol[:fringe].steps[1]
-    old = CAL.CalibrationSolution(fringe.model, fringe.layout, sol.geom, fringe.θ, (;))
+    old = CAL.CalibrationSolution(sol.geom, sol[:fringe].components)
     @test_nowarn FP.print_solve_timing(old; io = IOBuffer())
 end
 

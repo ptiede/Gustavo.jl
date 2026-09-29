@@ -27,7 +27,7 @@
     # spans windows far apart in frequency.
     ps, _ = _build_fringe_ps(nspw = 4, noise = 0.05, ref_freq = 3.0e9, spw_sep = 2.0e9)
     geom = CAL.DataGeometry(ps)
-    θ(sol, name) = sol[name].steps[1].θ
+    θ(sol, name) = vcat((vec(parent(c.params)) for c in sol[name].components)...)
     reference = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
     ref_search = FP.search_scan(ps, geom, FP.FringeSearch())
     @test any(parent(ref_search[:valid]))
@@ -44,7 +44,8 @@
         end
 
         @testset "residual_group" begin
-            layout = reference[:fringe].steps[1].layout
+            model = Gustavo.model_components(BaselineFringeFit(), (; geom))
+            layout = CAL.plan_parameters(model, length(geom.stations), geom)
             a = FP.residual_group(layout, θ(reference, :fringe), ps, geom)
             b = FP.residual_group(layout, θ(reference, :fringe), other, geom)
             for (k, ms) in pairs(b)

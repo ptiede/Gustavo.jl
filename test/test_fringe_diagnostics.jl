@@ -25,16 +25,16 @@
         # PFA column: the solve records the per-scan effective search cells, and
         # the synthetic fringes are strong → secure detections on every scan.
         @test haskey(r1, :pfa)
-        fringe = sol[:fringe].steps[1]
-        @test length(fringe.info.scan_ncells) == sol.info.nscan
-        @test all(>=(1), fringe.info.scan_ncells)
-        @test sol.info.search isa FP.FringeSearch
+        fringe = sol.steps[:fringe]
+        @test length(fringe.scan_ncells) == sol.info.nscan
+        @test all(>=(1), fringe.scan_ncells)
+        @test fringe.search isa FP.FringeSearch
         for r in rows
-            @test r.pfa ≈ FP.fringe_pfa(r.max_snr, fringe.info.scan_ncells[r.scan])
+            @test r.pfa ≈ FP.fringe_pfa(r.max_snr, fringe.scan_ncells[r.scan])
             r.max_snr > 10 && @test r.pfa < 1.0e-10
         end
         # A marginal SNR on the same search space would NOT be secure.
-        @test FP.fringe_pfa(3.0, fringe.info.scan_ncells[1]) > 0.01
+        @test FP.fringe_pfa(3.0, fringe.scan_ncells[1]) > 0.01
 
         buf = IOBuffer()
         @test_nowarn FP.print_fringe_snr_table(rows; io = buf)
@@ -49,10 +49,10 @@
 
     @testset "suspect_fringes (recorded detection table)" begin
         # The solve records every MEASURED cell as parallel plain vectors on
-        # the fringe step's own info, with `det_detected` marking the ones it
-        # accepted as real fringes.
+        # the fringe step's own diagnostics, with `det_detected` marking the ones
+        # it accepted as real fringes.
         info = sol.info
-        inf = sol[:fringe].steps[1].info
+        inf = sol.steps[:fringe]
         n = length(inf.det_pfa)
         @test n > 0
         @test length(inf.det_scan) == length(inf.det_ant_a) == length(inf.det_ant_b) ==
@@ -73,7 +73,7 @@
         @test length(rows) == count(inf.det_detected)     # accepted rows only
         @test issorted([r.pfa for r in rows]; rev = true)
         r = first(rows)
-        @test r.sta_a == info.ant_names[r.a] && r.sta_b == info.ant_names[r.b]
+        @test r.sta_a == sol.geom.stations[r.a] && r.sta_b == sol.geom.stations[r.b]
         # A flagged row is directly inspectable with fringe_search_map (same
         # scan/baseline/product → the same detection, up to FFT-plan noise).
         m = FP.fringe_search_map(uvset, sol; scan_index = r.scan, baseline = (r.a, r.b), pol = r.pol)
@@ -82,8 +82,7 @@
         @test m.map.detection.snr ≈ r.snr rtol = 1.0e-6
 
         # Solutions without the table (e.g. loaded from an older file) degrade cleanly.
-        fs = sol[:fringe].steps[1]
-        old = CAL.CalibrationSolution(fs.model, fs.layout, sol.geom, fs.θ, (; nscan = 1); name = :fringe)
+        old = CAL.CalibrationSolution(sol.geom, sol[:fringe].components, OrderedDict(:fringe => (; nscan = 1)))
         @test isempty(FP.suspect_fringes(old))
     end
 
@@ -92,20 +91,20 @@
         # time series as `gains(sol; Frequency = ci)` — an integer selector
         # windows the evaluation to that sample and drops the dimension.
         g = gains(sol; Ti = 1)
-        @test size(g) == (length(sol.geom.channel_freqs), CAL._nant(sol), 2)
+        @test size(g) == (length(sol.geom.channel_freqs), length(sol.geom.stations), 2)
         @test eltype(g) <: Complex
         @test lookup(g, UVP.Frequency) == sol.geom.channel_freqs
 
         gt = gains(sol; Frequency = 1)
-        @test size(gt) == (length(sol.geom.times), CAL._nant(sol), 2)
+        @test size(gt) == (length(sol.geom.times), length(sol.geom.stations), 2)
         @test lookup(gt, Ti) == sol.geom.times
 
         @test_throws BoundsError gains(sol; Ti = 10_000)
     end
 
     @testset "station codes available for plot labels" begin
-        # Spectrum/phase plots read codes from sol.info; baseline plots from the data.
-        @test sol.info.ant_names == ["A1", "A2", "A3", "A4"]
+        # Spectrum/phase plots read codes from the solution's geometry; baseline plots from the data.
+        @test sol.geom.stations == ["A1", "A2", "A3", "A4"]
         data = FP.baseline_fringe_data(uvset, sol)
         @test data.ant_names == ["A1", "A2", "A3", "A4"]
         a, b = data.bl_pairs[1]
@@ -224,7 +223,7 @@
         @test fsm.detection.valid
         # The strongest baseline's map peak is the scan's recorded max SNR (up to
         # peak refinement; the scan max is over all baselines/products searched).
-        @test fsm.detection.snr <= sol[:fringe].steps[1].info.scan_snr[m.scan_index] * (1 + 1.0e-9)
+        @test fsm.detection.snr <= sol.steps[:fringe].scan_snr[m.scan_index] * (1 + 1.0e-9)
         @test fsm.pfa < 1.0e-6
         # The map peak sits at the detection's (delay, rate) within a grid bin.
         pk = argmax(fsm.snr)

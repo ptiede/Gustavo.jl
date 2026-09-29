@@ -35,7 +35,7 @@ pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
     Bandpass() |> AdhocPhase()
 sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
-out = calibrate(sol, ps)                         # corrected, in memory
+out = calibrate(pipeline, sol, ps)               # the fit's data path, in memory
 save_solution("track.jls", sol)
 ```
 
@@ -71,16 +71,20 @@ from HOW it is solved (the step's options, or a pluggable smoother object).
 
 **Verbs.** [`fit`](@ref) solves and returns a
 [`CalibrationSolution`](@ref Gustavo.Calibration.CalibrationSolution) without
-producing corrected data; [`calibrate`](@ref) applies a finished solution to
-this or other data, replaying the recorded corrections and each step's gains
-in order, and runs its `post` function on each corrected Measurement Set.
+producing corrected data; [`calibrate`](@ref) applies a solution to this or
+other data and runs its `post` function on each corrected Measurement Set.
+`calibrate(pipeline, sol, ps)` repeats the fit's data path, each correction as
+written and each solve step as its gains; `calibrate(sol, ps)` divides by the
+gains alone.
 
-**Solutions.** A solution is inspectable per stage: `sol[:fringe]` selects
-one step (any selection is itself a solution that applies, plots, and
-differences like the whole), [`gains`](@ref Gustavo.Calibration.gains)
-evaluates a selection's complex station gains as a labelled `DimArray`,
-[`parameters`](@ref Gustavo.Calibration.parameters) shows the solved θ, and
-[`stage_info`](@ref Gustavo.Calibration.stage_info) returns a step's
+**Solutions.** A solution is a list of solved components
+(`sol.components`), each a [`SolvedComponent`](@ref Gustavo.Calibration.SolvedComponent)
+holding its step, its path in that step's model, its `GainComponent` and its
+parameters as a labeled `DimArray` (`c.params`). Any selection is itself a
+solution that applies, plots and differences like the whole: `sol[:fringe]`,
+`sol[:fringe, :phase, :mbd]` or `filter(pred, sol)`.
+[`gains`](@ref Gustavo.Calibration.gains) evaluates a selection's complex
+station gains as a labeled `DimArray`, and `sol.steps[:fringe]` holds a step's
 diagnostics. [`save_solution`](@ref Gustavo.Calibration.save_solution) /
 [`load_solution`](@ref Gustavo.Calibration.load_solution) round-trip it.
 

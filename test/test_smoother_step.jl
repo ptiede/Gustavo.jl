@@ -9,9 +9,12 @@
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
-# One component's θ block of a single STEP. `i` indexes that step's own
-# `layout.plans` (phase components first, then log-amplitude).
-_blk(step, i) = step.θ[[p.range for p in step.layout.plans][i]]
+# Every parameter a step solved, in component order.
+_step_θ(sol, step) = vcat((vec(parent(c.params)) for c in sol[step].components)...)
+
+# The parameters of a step's first per-integration phase component.
+_per_integration_params(sol, step) =
+    first(c for c in sol[step].components if first(c.path) === :phase && c.component.Ti isa CAL.PerIntegration).params
 
 # Worst parallel-hand coherence over the cross baselines of a corrected set.
 function _worst_parallel_coherence(corr)
@@ -59,13 +62,10 @@ end
     sol_n = fit(pipe, ps; exec = ExecutionConfig(), gauge = PinAntenna(1))
 
     @testset "3-scan full pipeline: structure, determinism, coherence" begin
-        @test keys(sol_n) == [:fringe, :bandpass, :adhoc]
-        adhoc_step = sol_n[:adhoc].steps[1]
-        phases = CAL.phase_components(adhoc_step.model)
+        @test collect(keys(sol_n.steps)) == [:fringe, :bandpass, :adhoc]
         # The adhoc block is really solved (nonzero) on every scan.
-        ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
-        @test any(!=(0), _blk(adhoc_step, ipi))
-        @test adhoc_step.info.t_pass > 0
+        @test any(!=(0), _per_integration_params(sol_n, :adhoc))
+        @test sol_n.steps[:adhoc].t_pass > 0
 
         # θ is bit-deterministic across runs.
         pipe4 = [BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc)]
@@ -82,17 +82,14 @@ end
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
         )
-        @test keys(sol_fs) == [:fringe, :adhoc]
-        @test !any(s -> haskey(s.layout.plantree.phase, :bandpass), sol_fs.steps)
-        adhoc_step_fs = sol_fs[:adhoc].steps[1]
-        phases = CAL.phase_components(adhoc_step_fs.model)
-        ipi = findfirst(tc -> tc.Ti isa CAL.PerIntegration, phases)
-        @test any(!=(0), _blk(adhoc_step_fs, ipi))
+        @test collect(keys(sol_fs.steps)) == [:fringe, :adhoc]
+        @test !any(c -> c.path[2] === :bandpass, sol_fs.components)
+        @test any(!=(0), _per_integration_params(sol_fs, :adhoc))
         # Without the bandpass stage the injected per-channel bandpass survives,
         # so full coherence is NOT reached — but the delay/rate/adhoc solve must
         # still be sane (all θ finite, per-scan SNRs strong).
-        @test all(s -> all(isfinite, s.θ), sol_fs.steps)
-        @test all(>(10), filter(isfinite, sol_fs[:fringe].steps[1].info.scan_snr))
+        @test all(c -> all(isfinite, c.params), sol_fs.components)
+        @test all(>(10), filter(isfinite, sol_fs.steps[:fringe].scan_snr))
     end
 
     @testset "a pipeline ≡ its steps fit separately" begin
@@ -102,32 +99,32 @@ end
         pre = ApplySolution(sol_n[:fringe])
 
         sol_pipe = fit(pre |> bp |> AdhocPhase(adhoc), ps; gauge = PinAntenna(1))
-        @test keys(sol_pipe) == [:bandpass, :adhoc]
+        @test collect(keys(sol_pipe.steps)) == [:bandpass, :adhoc]
         # Neither step is vacuous.
-        @test sol_pipe[:bandpass].steps[1].layout.nθ > 0
-        @test any(!=(0), sol_pipe[:bandpass].steps[1].θ)
-        @test any(!=(0), sol_pipe[:adhoc].steps[1].θ)
+        @test !isempty(_step_θ(sol_pipe, :bandpass))
+        @test any(!=(0), _step_θ(sol_pipe, :bandpass))
+        @test any(!=(0), _step_θ(sol_pipe, :adhoc))
 
         sol_a = fit(pre |> bp, ps; gauge = PinAntenna(1))
         bandpass_tf = ApplySolution(sol_a[:bandpass])
         sol_b = fit(pre |> bandpass_tf |> AdhocPhase(adhoc), ps; gauge = PinAntenna(1))
-        @test sol_pipe[:bandpass].steps[1].θ == sol_a[:bandpass].steps[1].θ
-        @test sol_pipe[:adhoc].steps[1].θ == sol_b[:adhoc].steps[1].θ
+        @test sol_pipe[:bandpass].components == sol_a[:bandpass].components
+        @test sol_pipe[:adhoc].components == sol_b[:adhoc].components
 
         sol_3 = fit(BaselineFringeFit() |> bp |> AdhocPhase(adhoc), ps; gauge = PinAntenna(1))
-        @test keys(sol_3) == [:fringe, :bandpass, :adhoc]
+        @test collect(keys(sol_3.steps)) == [:fringe, :bandpass, :adhoc]
         sol_f1 = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
         pre_f = ApplySolution(sol_f1[:fringe])
         sol_b1 = fit(pre_f |> bp, ps; gauge = PinAntenna(1))
         pre_b = ApplySolution(sol_b1[:bandpass])
         sol_a1 = fit(pre_f |> pre_b |> AdhocPhase(adhoc), ps; gauge = PinAntenna(1))
-        @test sol_3[:fringe].steps[1].θ == sol_f1[:fringe].steps[1].θ
-        @test sol_3[:bandpass].steps[1].θ == sol_b1[:bandpass].steps[1].θ
-        @test sol_3[:adhoc].steps[1].θ == sol_a1[:adhoc].steps[1].θ
+        @test sol_3[:fringe].components == sol_f1[:fringe].components
+        @test sol_3[:bandpass].components == sol_b1[:bandpass].components
+        @test sol_3[:adhoc].components == sol_a1[:adhoc].components
         # The fringe step reports the same flags and diagnostics either way.
-        @test sol_3.info.flagged_ant == sol_f1.info.flagged_ant
-        @test sol_3.info.flagged_scan == sol_f1.info.flagged_scan
-        @test sol_3[:fringe].steps[1].info.scan_snr == sol_f1[:fringe].steps[1].info.scan_snr
+        @test sol_3.steps[:fringe].flagged_ant == sol_f1.steps[:fringe].flagged_ant
+        @test sol_3.steps[:fringe].flagged_scan == sol_f1.steps[:fringe].flagged_scan
+        @test sol_3.steps[:fringe].scan_snr == sol_f1.steps[:fringe].scan_snr
 
         # With no correction in front of a step, reading may hand back an
         # in-memory set's own arrays; the caller's data is never written.

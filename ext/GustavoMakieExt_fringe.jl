@@ -22,7 +22,7 @@ _fringe_indices(sel::AbstractVector{<:Integer}, n::Integer) = collect(Int.(sel))
 _fringe_indices(sel::Symbol, n::Integer) = sel === :all ? collect(1:n) :
     error("site/feed selector Symbol must be :all")
 
-# Station label: the actual code when available (from `sol.info.ant_names` /
+# Station label: the actual code when available (from `sol.geom.stations` /
 # `BaselineFringeData.ant_names`), else a generic `ant{i}` fallback.
 _site_label(names, i::Integer) =
     (names !== nothing && i <= length(names)) ? String(names[i]) : string("ant", i)
@@ -53,7 +53,7 @@ function Fring.plot_fringe_spectrum(
         g = g[r, :, :]
     end
     nant = size(g, 2)
-    names = get(sol.info, :ant_names, nothing)
+    names = sol.geom.stations
     site_idx = _fringe_indices(sites, nant)
     feed_idx = _fringe_indices(feeds, 2)
     fghz = freqs ./ 1.0e9
@@ -77,7 +77,7 @@ function Fring.plot_fringe_spectrum(
 end
 
 function Fring.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false)
-    nrow = length(_fringe_indices(sites, sol.steps[1].layout.nant))
+    nrow = length(_fringe_indices(sites, length(sol.geom.stations)))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
     Fring.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, freqgroup = freqgroup, residual = residual)
@@ -98,7 +98,7 @@ function Fring.plot_fringe_phases(
     times = lookup(g, Ti)
     fghz = sol.geom.channel_freqs[ci0] / 1.0e9
     nant = size(g, 2)
-    names = get(sol.info, :ant_names, nothing)
+    names = sol.geom.stations
     site_idx = _fringe_indices(sites, nant)
     feed_idx = _fringe_indices(feeds, 2)
     for (row, ai) in enumerate(site_idx)
@@ -121,7 +121,7 @@ function Fring.plot_fringe_phases(
 end
 
 function Fring.plot_fringe_phases(sol::CalibrationSolution; sites = :all, feeds = :all, ci::Integer = 0)
-    nrow = length(_fringe_indices(sites, sol.steps[1].layout.nant))
+    nrow = length(_fringe_indices(sites, length(sol.geom.stations)))
     ncol = length(_fringe_indices(feeds, 2))
     fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
     Fring.plot_fringe_phases(fig, sol; sites = sites, feeds = feeds, ci = ci)

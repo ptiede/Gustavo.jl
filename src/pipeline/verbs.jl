@@ -43,7 +43,8 @@ supplies the run's schedulers, memory budget and progress callback.
 
 The solution is a [`CalibrationSolution`](@ref): a list of solved components,
 each step's diagnostics in `sol.steps`, and the pipeline and gauge as text in
-`sol.provenance`. Solving `A |> B` is equivalent to `sa = fit(A, ps)` followed
+`sol.provenance`; [`calibrate`](@ref)`(pipeline, sol, ps)` applies it along the
+same data path. Solving `A |> B` is equivalent to `sa = fit(A, ps)` followed
 by `fit(ApplySolution(sa[provides(A)]) |> B, ps)`.
 """
 function StatsAPI.fit(
@@ -63,46 +64,90 @@ StatsAPI.fit(x::PipelineElement, data::Union{XRadio.ProcessingSet, XRadio.Measur
 """
     calibrate(sol::CalibrationSolution, ps::ProcessingSet;
               post = identity, apply_flags = true, exec = ExecutionConfig()) -> ProcessingSet
+    calibrate(pipeline, sol::CalibrationSolution, ps::ProcessingSet; kwargs...) -> ProcessingSet
 
 Apply a fitted solution, or any selection of one (`sol[:bandpass]`,
 `sol[:fringe, :phase, :mbd]`, `filter(pred, sol)`), to data: each Measurement
 Set of `ps` is read and divided by the gains of the components `sol` holds,
 then the flags of its steps and `post`, a function from a Measurement Set to a
-Measurement Set, are applied. A gain cell that is zero or non-finite gives a NaN visibility and a
-flag.
+Measurement Set, are applied. A gain cell that is zero or non-finite gives a
+NaN visibility and a flag.
 
-The corrections the fit's pipeline applied before solving (such as
-[`AutocorrelationNormalization`](@ref)) are not part of the solution; apply
-them to `ps` first.
+The first form divides by the gains only. The second repeats the data path of
+the fit: `pipeline` is the one `sol` was fit with, walked in order, each
+correction applied as written and each solve step replaced by that step's
+gains in `sol`. Its solve steps must be exactly the steps `sol` holds.
+
+```julia
+pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |> Bandpass()
+sol = fit(pipeline, ps; gauge)
+out = calibrate(pipeline, sol, ps)   # normalized, then divided by each step's gains
+```
 
 `apply_flags` (default `true`) flags the baselines of each (station, scan)
-a step of `sol` left unconstrained (the fringe step records these): their gains are identity, so the data
-would pass through uncalibrated. The flagged samples keep their visibilities
-and weights.
+a step of `sol` left unconstrained (the fringe step records these): their gains
+are identity, so the data would pass through uncalibrated. The flagged samples
+keep their visibilities and weights.
 
 Each sample is placed in the solution by scan, spectral window and time as
 [`ApplySolution`](@ref) places it, so `ps` may be other data than the solution
 was fit on. `exec` supplies the schedulers and progress callback.
 """
-function calibrate(
-        sol::CalibrationSolution, ps::XRadio.ProcessingSet;
+calibrate(sol::CalibrationSolution, ps::XRadio.ProcessingSet; kwargs...) =
+    _calibrate(Any[_StepGains(Calibration._applied(sol))], sol, ps; kwargs...)
+
+calibrate(pipeline::Union{Tuple, AbstractVector, PipelineElement}, sol::CalibrationSolution, ps::XRadio.ProcessingSet; kwargs...) =
+    _calibrate(_replay_chain(pipeline, sol), sol, ps; kwargs...)
+
+function _calibrate(
+        chain, sol::CalibrationSolution, ps::XRadio.ProcessingSet;
         post = identity, apply_flags::Bool = true,
         exec::ExecutionConfig = ExecutionConfig(),
     )
-    app = Calibration._applied(sol)
     geom = DataGeometry(ps)
     flagged = apply_flags ? _solution_flag_sets(sol) : nothing
     names = collect(keys(ps))
     members = collect(values(ps))
     out = _map_groups(members, zeros(Int, length(members)), exec; stage = :output) do ms
-        m = read(ms)
-        corrected = _divide_gains(m, GeometryWindow(geom, m), app; flag_bad = true)
+        corrected = _apply_corrections(chain, read(ms), geom)
         post(_flag_unconstrained(corrected, sol.geom, geom, flagged))
     end
     return XRadio.ProcessingSet(
         OrderedDict{Symbol, XRadio.MeasurementSet}(names .=> out),
         copy(DimensionalData.metadata(ps)),
     )
+end
+
+# The gains of one solved step, as `calibrate` applies them: a degenerate gain
+# cell flags the sample.
+struct _StepGains{S <: Calibration._AppliedSolution}
+    app::S
+end
+
+_correct(g::_StepGains, ms::XRadio.MeasurementSet, geom::DataGeometry) =
+    _divide_gains(ms, GeometryWindow(geom, ms), g.app; flag_bad = true)
+
+# `pipeline` as corrections, each solve step replaced by its gains in `sol`; a
+# step that compiled no components contributes none.
+function _replay_chain(pipeline, sol::CalibrationSolution)
+    seq = collect(Any, _check_pipeline(pipeline isa PipelineElement ? (pipeline,) : pipeline))
+    steps = [provides(x) for x in seq if x isa SolveStep]
+    Set(steps) == Set(keys(sol.steps)) || throw(
+        ArgumentError(
+            "calibrate: the pipeline's solve steps $(steps) are not the solution's steps " *
+                "$(collect(keys(sol.steps))); pass the pipeline the solution was fit with, " *
+                "or select the solution to match"
+        )
+    )
+    chain = Any[]
+    for x in seq
+        if !(x isa SolveStep)
+            push!(chain, x)
+        elseif haskey(sol, provides(x))
+            push!(chain, _StepGains(Calibration._applied(sol[provides(x)])))
+        end
+    end
+    return chain
 end
 
 """

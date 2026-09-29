@@ -93,13 +93,13 @@ end
     for st in (Bandpass(), Bandpass(smoother = FP.PerTrackSmoother()), AdhocPhase())
         a = fit(st, ps; gauge = PinAntenna(1), exec = serial)
         b = fit(st, ps; gauge = PinAntenna(1), exec = wide)
-        @test a.steps[1].θ == b.steps[1].θ
-        @test stage_info(a, only(keys(a))).nscans == 3
+        @test a.components == b.components
+        @test only(values(a.steps)).nscans == 3
     end
-    @test stage_info(fit(Bandpass(), ps; gauge = PinAntenna(1)), :bandpass).sources == ["SRC1"]
+    @test fit(Bandpass(), ps; gauge = PinAntenna(1)).steps[:bandpass].sources == ["SRC1"]
 
     # The adhoc step reports each track's resolved prior, one `Ti` per scan.
-    info = stage_info(fit(AdhocPhase(), ps; gauge = PinAntenna(1)), :adhoc)
+    info = fit(AdhocPhase(), ps; gauge = PinAntenna(1)).steps[:adhoc]
     pr = info.priors
     @test DimensionalData.name(dims(pr)) == (:Ant, :Feed, :Ti)
     @test size(pr, Ti) == 3 && issorted(lookup(pr, Ti))
@@ -136,12 +136,13 @@ end
         bandpass = 0.3 .* randn(rng, 4, 2, 16), seed = 3,
     )
     st = Bandpass(smoother = FP.PerTrackSmoother())
-    θ = fit(st, ps; gauge = PinAntenna(1)).steps[1].θ
-    θoff = fit(st, _offset_scans(ps, 4); gauge = PinAntenna(1)).steps[1].θ
+    solved_θ(sol) = vcat((vec(parent(c.params)) for c in sol.components)...)
+    θ = solved_θ(fit(st, ps; gauge = PinAntenna(1)))
+    θoff = solved_θ(fit(st, _offset_scans(ps, 4); gauge = PinAntenna(1)))
     @test maximum(abs, θoff .- θ) < 1.0e-6
 
     # Pooling follows the data's type unless the smoother names one.
-    θ64 = fit(Bandpass(smoother = FP.PerTrackSmoother(eltype = Float64)), ps; gauge = PinAntenna(1)).steps[1].θ
+    θ64 = solved_θ(fit(Bandpass(smoother = FP.PerTrackSmoother(eltype = Float64)), ps; gauge = PinAntenna(1)))
     @test θ64 ≈ θ atol = 1.0e-5
     @test_throws "must be a real floating-point type" FP.PerTrackSmoother(eltype = ComplexF64)
 end

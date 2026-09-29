@@ -20,15 +20,19 @@ _bpmodel(; phase = nothing, amp = nothing, freq = CAL.ChannelBlocks(1)) = GainMo
     phase = (; bandpass = _bpc(freq; prior = phase)), logamp = (; bandpass = _bpc(freq; prior = amp)),
 )
 
-# One component's θ block from a step's own layout. `i` indexes
-# `step.layout.plans` (phase components first, then log-amplitude).
-_blk(step, i) = step.θ[[p.range for p in step.layout.plans][i]]
+# The parameters of the one component of `sol` under `path` (`:bandpass, :phase, :bandpass`).
+_bp_params(sol, path...) = only(sol[path...].components).params
 
 # The bandpass step's own components, reached by the names its model gives them.
-_bp_phase_plan(step) = step.layout.plantree.phase.bandpass
-_bp_amp_plan(step) = step.layout.plantree.logamp.bandpass
-_bp_phase(step) = step.θ[_bp_phase_plan(step).range]
-_bp_amp(step) = step.θ[_bp_amp_plan(step).range]
+_bp_phase(sol) = _bp_params(sol, :bandpass, :phase, :bandpass)
+_bp_amp(sol) = _bp_params(sol, :bandpass, :logamp, :bandpass)
+
+# The components of one grouped (station-specific) component as blocks: each
+# group's stations, by index into the geometry's, and its parameters.
+_bp_station_blocks(sol, path...) = [
+    (; stations = [findfirst(==(s), sol.geom.stations) for s in lookup(c.params, Ant)], θ = parent(c.params))
+        for c in sol[path...].components
+]
 
 # A bandpass leaf's values over `(Frequency, Feed, Ti, Ant)`, its unit `:param`
 # axis dropped.
@@ -63,25 +67,24 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     )
 
     @testset "θ blocks invariant under the appended smoother stage" begin
-        # Stage-B fringe blocks: bit-identical (components 1..4 in both models).
-        fn = sol_n[:fringe].steps[1]; fo = sol_o[:fringe].steps[1]
-        for i in 1:4
-            @test _blk(fn, i) == _blk(fo, i)
+        # Fringe components: bit-identical.
+        fn, fo = sol_n[:fringe].components, sol_o[:fringe].components
+        @test length(fn) == length(fo) == 4
+        for (a, b) in zip(fn, fo)
+            @test a == b
         end
         # Per-channel phase + log-amp bandpass: rtol 1e-12 (fold association).
-        bn = sol_n[:bandpass].steps[1]; bo = sol_o[:bandpass].steps[1]
-        @test isapprox(_bp_phase(bn), _bp_phase(bo); rtol = 1.0e-12, atol = 1.0e-12)
-        @test any(!=(0), _bp_phase(bn))
-        @test isapprox(_bp_amp(bn), _bp_amp(bo); rtol = 1.0e-12, atol = 1.0e-12)
-        @test any(!=(0), _bp_amp(bn))
-        # Stage provenance: the bandpass stage's own model carries only the
-        # bandpass component (nothing merged in from the fringe stage), so it is
-        # the sole entry of each group and spans that group's whole θ block.
-        @test keys(sol_n) == [:fringe, :bandpass]
-        @test length(CAL.phase_components(bn.model)) == 1 && length(CAL.logamp_components(bn.model)) == 1
-        @test _bp_phase(bn) == _blk(bn, 1) && _bp_amp(bn) == _blk(bn, bn.layout.nphase + 1)
-        @test stage_info(sol_n, :bandpass).nscans == length(XRadio.groupby(ps, XRadio.ByScan()))
-        @test stage_info(sol_n, :bandpass).t_pass > 0
+        @test isapprox(_bp_phase(sol_n), _bp_phase(sol_o); rtol = 1.0e-12, atol = 1.0e-12)
+        @test any(!=(0), _bp_phase(sol_n))
+        @test isapprox(_bp_amp(sol_n), _bp_amp(sol_o); rtol = 1.0e-12, atol = 1.0e-12)
+        @test any(!=(0), _bp_amp(sol_n))
+        # The bandpass step's own model carries only the bandpass component
+        # (nothing merged in from the fringe step).
+        @test collect(keys(sol_n.steps)) == [:fringe, :bandpass]
+        @test [c.path for c in sol_n[:bandpass].components] == [(:phase, :bandpass), (:logamp, :bandpass)]
+        @test all(c -> c.step === :bandpass, sol_n[:bandpass].components)
+        @test sol_n.steps[:bandpass].nscans == length(XRadio.groupby(ps, XRadio.ByScan()))
+        @test sol_n.steps[:bandpass].t_pass > 0
     end
 
     @testset "new-engine fold is deterministic across ntasks" begin
@@ -91,7 +94,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
         )
-        @test all(a.θ == b.θ for (a, b) in zip(sol_n4.steps, sol_n.steps))
+        @test sol_n4.components == sol_n.components
     end
 
     @testset "steps compose in any declared order" begin
@@ -111,24 +114,21 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     end
 
     @testset "the leaf holds one frequency segment per channel" begin
-        bn = sol_n[:bandpass].steps[1]
-        @test _bp_phase_plan(bn).shape == (1, 2, nglob, 1, nant)
-        @test length(_bp_phase(bn)) == nglob * 2 * nant
+        @test size(_bp_phase(sol_n)) == (1, 2, nglob, 1, nant)
+        @test collect(lookup(_bp_phase(sol_n), Ant)) == sol_n.geom.stations
     end
 
     @testset "step-selection extraction" begin
         bps = sol_n[:bandpass]
-        bp = only(bps.steps)
-        @test length(bp.model.phase) == 1 && length(bp.model.logamp) == 1
-        @test keys(bp.layout.plantree.phase) == (:bandpass,)
-        bn = sol_n[:bandpass].steps[1]
-        @test _bp_phase(bp) == _bp_phase(bn)
-        @test _bp_amp(bp) == _bp_amp(bn)
-        @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
+        @test [c.path for c in bps.components] == [(:phase, :bandpass), (:logamp, :bandpass)]
+        @test collect(keys(bps.steps)) == [:bandpass]
+        @test _bp_phase(bps) == _bp_phase(sol_n)
+        @test _bp_amp(bps) == _bp_amp(sol_n)
+        @test bps.geom.stations == sol_n.geom.stations
         # A solution with no bandpass STEP at all refuses extraction.
         sol_f = fit(BaselineFringeFit(model = fm), ps; gauge = PinAntenna(1))
         @test_throws ArgumentError sol_f[:bandpass]
-        @test_throws "no stage :bandpass" sol_f[:bandpass]
+        @test_throws "holds no component under bandpass" sol_f[:bandpass]
     end
 
     @testset "gate → spike guard → shape: a contaminated channel is excised, then estimated" begin
@@ -180,9 +180,9 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             ], uvc,
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
-        )[:bandpass].steps[1]
+        )
         track(s, a, f) = (
-            L = CAL._component_leaf(s.layout.plantree.logamp.bandpass, s.θ);
+            L = parent(_bp_amp(s));
             Float64[L[1, f, c, 1, a] for c in 1:nglobc]
         )
         gauge(x) = x .- sum(x) / length(x)
@@ -222,14 +222,13 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
     @testset "portable ApplySolution: same-set + cross-set by station name" begin
         bps = sol_n[:bandpass]
-        bp = only(bps.steps)
         correct(t, ps) = [Gustavo._correct(t, read(ms), CAL.DataGeometry(ps)) for ms in values(ps)]
         # `ms` with the gains `g[c, t, station, feed]` divided out, stations by
         # position in the solution's antenna names.
         function divided(ms, g; tconst = false)
             V = DimensionalData.modify(Array, ms[:visibility])
             W = DimensionalData.modify(Array, ms[:weight])
-            slot = Dict(n => i for (i, n) in pairs(bps.info.ant_names))
+            slot = Dict(n => i for (i, n) in pairs(bps.geom.stations))
             feeds = UVP.feed_pairs(ms)
             for (bi, (na, nb)) in pairs(collect(XRadio.baselines(ms))), p in axes(feeds, 1)
                 a, b = slot[String(na)], slot[String(nb)]
@@ -249,7 +248,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         # Same set (identical geometry): index-aligned division.
         for (ms, out) in zip(values(ps), correct(ApplySolution(bps), ps))
             win = CAL.GeometryWindow(bps.geom, ms)
-            V, W = divided(ms, CAL.evaluate_gains(bp.layout, bp.θ, win.chan_idx, win.ti_idx))
+            V, W = divided(ms, parent(gains(bps, win)))
             @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
         end
 
@@ -259,7 +258,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test CAL.DataGeometry(uvsub).times != bps.geom.times
         for (ms, out) in zip(values(uvsub), correct(ApplySolution(bps), uvsub))
             chan = CAL.GeometryWindow(bps.geom, ms).chan_idx
-            V, W = divided(ms, CAL.evaluate_gains(bp.layout, bp.θ, chan, 1:1); tconst = true)
+            V, W = divided(ms, parent(gains(bps, CAL.GeometryWindow(bps.geom, chan, 1:1))); tconst = true)
             @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
         end
 
@@ -280,8 +279,18 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         uv2, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
         @test_throws "is not in the solution" correct(ApplySolution(sol_n), uv2)
         # Stations are matched by name; a solution sharing none is refused.
+        g = bps.geom
+        others = ["Q$i" for i in eachindex(g.stations)]
         strangers = CAL.CalibrationSolution(
-            bps.steps, bps.geom, merge(bps.info, (; ant_names = ["QQ", "RR"])),
+            CAL.DataGeometry(
+                g.times, g.scan_of_time, g.channel_freqs, g.spw_of_chan, g.t0, g.f0,
+                g.scan_names, g.spw_names, others,
+            ),
+            [
+                CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (dims(c.params)[1:4]..., Ant(others))))
+                    for c in bps.components
+            ],
+            bps.steps, bps.info,
         )
         @test_throws "shares no station with this data" correct(ApplySolution(strangers), uvsub)
     end
@@ -297,7 +306,7 @@ end
         bandpass = 0.5 .* randn(rng, nant, 2, nglob), amp_bandpass = 0.2 .* randn(rng, nant, 2, nglob),
     )
     # One (feed, station) phase track over the solve's channels.
-    phase_track(sol, a, f) = _by_channel(CAL.parameters(sol[:bandpass, :phase, :bandpass]))[:, f, 1, a]
+    phase_track(sol, a, f) = _by_channel(_bp_phase(sol))[:, f, 1, a]
     curvature(trk) = maximum(abs, diff(diff(CAL.unwrap_phase_track(trk))))
     run(model) = fit(Bandpass(; model, smoother = FP.PerTrackSmoother()), ps; gauge = PinAntenna(1))
 
@@ -326,9 +335,8 @@ end
     # Stations differing only in prior share the layout; each fits under its own.
     mixed = with_station(_bpmodel(), "A3"; phase = (; bandpass = _bpc(CAL.ChannelBlocks(1); prior = stiff)))
     sol_mixed = run(mixed)
-    @test length(CAL.parameters(sol_mixed[:bandpass, :phase, :bandpass])) ==
-        length(CAL.parameters(sol_free[:bandpass, :phase, :bandpass]))
-    pri = stage_info(sol_mixed, :bandpass).phase_priors
+    @test size(_bp_phase(sol_mixed)) == size(_bp_phase(sol_free))
+    pri = sol_mixed.steps[:bandpass].phase_priors
     @test all(==(stiff), pri[3, :, :]) && all(isnothing, pri[[1, 2, 4], :, :])
     for f in 1:2, cs in spws
         @test curvature(phase_track(sol_mixed, 3, f)[cs]) < 1.0e-3
@@ -337,7 +345,7 @@ end
 
     # The zero band-mean log-amp gauge is applied AFTER the prior fit, so a prior
     # that rewrites every channel still leaves the bandpass SHAPE only.
-    amp = _by_channel(CAL.parameters(sol_stiff[:bandpass, :logamp, :bandpass]))
+    amp = _by_channel(_bp_amp(sol_stiff))
     for a in 1:nant, f in 1:2
         @test abs(mean(amp[:, f, 1, a])) < 4 * eps(eltype(amp))
     end
@@ -658,7 +666,7 @@ end
         exec = ExecutionConfig(),
         gauge = PinAntenna(1),
     )
-    info = stage_info(sol, :bandpass)
+    info = sol.steps[:bandpass]
     # (Ant, Feed, frequency segment, time segment): the default model's segments
     # are the spectral windows, and a time-stable bandpass is one time segment.
     @test size(info.phase_status) == (nant, 2, nspw, 1)
@@ -715,7 +723,7 @@ end
 
     @testset "θ carries one block per time segment" begin
         sol = fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1))
-        leaf = _by_channel(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
+        leaf = _by_channel(_bp_phase(sol))
         @test size(leaf, 3) == 2                       # (Frequency, Feed, Ti, Ant)
         # Each segment is solved from its own scans, so the halves disagree —
         # they would be one block under `GlobalTime`.
@@ -753,8 +761,8 @@ end
 
     @testset "the per-track record is labeled like θ" begin
         sol = fit(Bandpass(; model = model(seg), smoother = FP.PerTrackSmoother()), broken; gauge = PinAntenna(1))
-        st = stage_info(sol, :bandpass).phase_status
-        leaf = CAL.parameters(sol[:bandpass, :phase, :bandpass])
+        st = sol.steps[:bandpass].phase_status
+        leaf = _bp_phase(sol)
         @test lookup(st, Ti) == lookup(leaf, Ti)
         @test DimensionalData.intervalbounds(st, Ti) == DimensionalData.intervalbounds(leaf, Ti)
         @test length(lookup(st, Ti)) == 2
@@ -774,9 +782,9 @@ end
             stations = NamedTuple{(st1,)}(((; phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(seg))),)),
         )
         sol = fit(Bandpass(; model = het, smoother = FP.JointSmoother()), broken; gauge = PinAntenna(1))
-        info = stage_info(sol, :bandpass)
+        info = sol.steps[:bandpass]
         for obs in (:phase, :logamp)
-            leaves = CAL.parameters(sol[:bandpass, obs, :bandpass])
+            leaves = NamedTuple(last(c.path) => c.params for c in sol[:bandpass, obs, :bandpass].components)
             st = getproperty(info, obs === :phase ? :phase_status : :amp_status)
             @test keys(st) == keys(leaves) == (:g1, :g2)
             for k in keys(st)
@@ -792,8 +800,8 @@ end
 
     @testset "G3: the band mean is time-invariant across the break" begin
         sol = fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1))
-        leaf = _by_channel(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
-        aleaf = _by_channel(CAL.parameters(sol[:bandpass, :logamp, :bandpass]))
+        leaf = _by_channel(_bp_phase(sol))
+        aleaf = _by_channel(_bp_amp(sol))
         for a in axes(leaf, 4), f in axes(leaf, 2), ts in axes(leaf, 3)
             ph = leaf[:, f, ts, a]
             any(!iszero, ph) || continue
@@ -806,8 +814,7 @@ end
         # The break path must reduce exactly to the old one-segment solve.
         a = fit(Bandpass(; model = model(GlobalTime())), broken; gauge = PinAntenna(1))
         b = fit(Bandpass(; model = default_bandpass_terms()), broken; gauge = PinAntenna(1))
-        @test _by_channel(CAL.parameters(a[:bandpass, :phase, :bandpass])) ==
-            _by_channel(CAL.parameters(b[:bandpass, :phase, :bandpass]))
+        @test _bp_phase(a) == _bp_phase(b)
     end
 
     @testset "per-scan resolution is still refused" begin
@@ -910,14 +917,13 @@ end
         uvset,
         gauge = PinAntenna(1),
     )
-    step = only(sol[:bandpass].steps)
-    pb = CAL.station_blocks(step.layout, step.θ, :phase, :bandpass)
+    pb = _bp_station_blocks(sol, :bandpass, :phase, :bandpass)
 
     @testset "the uniform stations carry one time segment, not two" begin
         @test [b.stations for b in pb] == [[1], collect(2:nant)]
-        # `plan.shape` is (channel, feed node, frequency segment, time segment, station).
-        @test pb[1].plan.shape[4] == 2
-        @test pb[2].plan.shape[4] == 1
+        # A block's θ is (param, feed node, frequency segment, time segment, station).
+        @test size(pb[1].θ, 4) == 2
+        @test size(pb[2].θ, 4) == 1
     end
 
     @testset "the break is measured against the stations that span it" begin
@@ -941,11 +947,10 @@ end
             path = joinpath(dir, "het.h5")
             save_solution(path, sol)
             back = load_solution(path)
-            rb = only(back[:bandpass].steps)
-            @test rb.θ == step.θ
-            qb = CAL.station_blocks(rb.layout, rb.θ, :phase, :bandpass)
+            @test back.components == sol.components
+            qb = _bp_station_blocks(back, :bandpass, :phase, :bandpass)
             @test [b.stations for b in qb] == [b.stations for b in pb]
-            @test [b.plan.shape for b in qb] == [b.plan.shape for b in pb]
+            @test [size(b.θ) for b in qb] == [size(b.θ) for b in pb]
             for (x, y) in zip(qb, pb)
                 @test x.θ == y.θ
             end

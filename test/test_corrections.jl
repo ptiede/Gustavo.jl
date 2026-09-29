@@ -11,7 +11,7 @@ const CALc = Gustavo.Calibration
 
 # A solution over `geom` with a per-(scan, window) phase and a per-channel
 # amplitude, each per feed, set to seeded random values.
-function _hand_solution(geom; info = (;), sequence = (), seed = 7)
+function _hand_solution(geom; info = (;), seed = 7)
     model = CALc.GainModel(;
         phase = (; ph = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.PerScan(), Frequency = CALc.PerSpectralWindow(), Feed = CALc.PerFeed())),
         logamp = (; la = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.GlobalTime(), Frequency = CALc.ChannelBlocks(1), Feed = CALc.PerFeed())),
@@ -19,9 +19,14 @@ function _hand_solution(geom; info = (;), sequence = (), seed = 7)
     layout = CALc.plan_parameters(model, geom.stations, geom)
     θ = 0.3 .* randn(StableRNG(seed), layout.nθ)
     return CALc.CalibrationSolution(
-        model, layout, geom, θ, (; ant_names = geom.stations, info...); name = :hand, sequence,
+        model, layout, geom, θ, info; name = :hand,
     )
 end
+
+_with_stations(geom, stations) = CALc.DataGeometry(;
+    geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.t0, geom.f0,
+    geom.scan_names, geom.spw_names, stations,
+)
 
 # The largest relative error of `out` against `ms` divided by `sol`'s gains,
 # over every cell, visibilities and weights.
@@ -67,12 +72,11 @@ end
     end
 
     @testset "ApplySolution matches stations by name" begin
-        anon = CALc.CalibrationSolution(sol.steps, sol.geom, (;))
-        @test_throws "records no station names" Gustavo._correct(ApplySolution(anon), ms, geom)
-        strangers = CALc.CalibrationSolution(sol.steps, sol.geom, (; ant_names = ["X1", "X2", "X3", "X4"]))
+        @test_throws "must name its stations" CALc.CalibrationSolution(_with_stations(geom, String[]), sol.components)
+        strangers = _hand_solution(_with_stations(geom, ["X1", "X2", "X3", "X4"]))
         @test_throws "shares no station" Gustavo._correct(ApplySolution(strangers), ms, geom)
         # A station the solution lacks keeps identity gains.
-        partial = CALc.CalibrationSolution(sol.steps, sol.geom, (; ant_names = ["A1", "A2", "A3", "X4"]))
+        partial = _hand_solution(_with_stations(geom, ["A1", "A2", "A3", "X4"]))
         out = @test_logs (:warn, r"not in the solution") Gustavo._correct(ApplySolution(partial), ms, geom)
         a4 = findall(p -> "A4" in p, collect(XRadio.baselines(ms)))
         @test parent(out[:visibility][BaselineID = a4]) == parent(ms[:visibility][BaselineID = a4])
@@ -116,13 +120,13 @@ end
 @testset "calibrate" begin
     ps, _ = _build_fringe_ps(; nscans = 2, nspw = 2)
     geom = CALc.DataGeometry(ps)
-    sol = _hand_solution(geom; info = (; flagged_ant = [2], flagged_scan = [1]), sequence = (_halve_weights, GroupProbe()))
+    sol = _hand_solution(geom; info = (; flagged_ant = [2], flagged_scan = [1]))
 
-    @testset "replays the sequence in order, then flags" begin
+    @testset "divides by the gains only" begin
         out = calibrate(sol, ps; apply_flags = false)
         @test collect(keys(out)) == collect(keys(ps))
         for (name, lazy) in pairs(ps)
-            ref = Gustavo._correct(ApplySolution(sol), _halve_weights(read(lazy)), geom)
+            ref = Gustavo._correct(ApplySolution(sol), read(lazy), geom)
             @test isequal(parent(out[name][:visibility]), parent(ref[:visibility]))
             @test parent(out[name][:weight]) == parent(ref[:weight])
             @test !any(parent(out[name][:flag]))
@@ -148,16 +152,13 @@ end
 
     @testset "a degenerate gain flags the sample" begin
         bad = deepcopy(sol)
-        bad.steps[1].θ .= -1.0e4    # gain amplitude exp(-1e4) underflows to zero
+        foreach(c -> parent(c.params) .= -1.0e4, bad.components)    # gain amplitude exp(-1e4) underflows to zero
         out = calibrate(bad, ps; apply_flags = false)
         @test all(parent(first(out)[:flag]))
         @test all(isnan, parent(first(out)[:visibility]))
     end
 
-    @testset "refuses what it cannot replay" begin
-        lost = CALc.CalibrationSolution(sol.steps, sol.geom, sol.info; sequence = (missing, GroupProbe()))
-        @test_throws "did not survive serialization" calibrate(lost, ps)
-        short = CALc.CalibrationSolution(sol.steps, sol.geom, sol.info; sequence = (_halve_weights,))
-        @test_throws "sequence lists 0" calibrate(short, ps)
+    @testset "refuses an empty solution" begin
+        @test_throws "holds no components" calibrate(filter(_ -> false, sol), ps)
     end
 end

@@ -54,11 +54,10 @@
     @testset "multitone fit recovers the injected gains" begin
         sol = FP.phasecal_solution(pcal, uvset; sign = 1)
         @test sol isa CAL.CalibrationSolution
-        @test sol.info.nblocks == nant * 2 * sol.info.nscan * nspw
-        @test sol.info.nmissing == 0
-        step = sol.steps[1]
-        ev = step.layout
-        g = CAL.evaluate_gains(ev, step.θ, 1:nchan, 1:1)
+        pinfo = only(values(sol.steps))
+        @test pinfo.nblocks == nant * 2 * pinfo.nscan * nspw
+        @test pinfo.nmissing == 0
+        g = parent(CAL.gains(sol))
         for a in 1:nant, f in 1:2, c in 1:nchan
             @test isapprox(g[c, 1, a, f], inst_gain(a, f, c); atol = 1.0e-8)
         end
@@ -68,8 +67,7 @@
         pbad.tone[2, 1, 1, 1] *= cis(2.7)
         pbad.tone[2, 1, 1, 2] *= cis(2.7)                    # both epochs of ant 1
         solb = FP.phasecal_solution(pbad, uvset; sign = 1)
-        stepb = solb.steps[1]
-        gb = CAL.evaluate_gains(stepb.layout, stepb.θ, 1:nchan, 1:1)
+        gb = parent(CAL.gains(solb))
         for c in findall(==(1), spw_of_chan)
             @test isapprox(gb[c, 1, 1, 1], inst_gain(1, 1, c); atol = 1.0e-6)
         end
@@ -81,8 +79,7 @@
             pcal.freq[:, :, :, keep], pcal.tone[:, :, :, keep],
         )
         sols = FP.phasecal_solution(psub, uvset; sign = 1)
-        step = sols.steps[1]
-        gs = CAL.evaluate_gains(step.layout, step.θ, 1:nchan, 1:1)
+        gs = parent(CAL.gains(sols))
         @test all(gs[c, 1, 2, f] ≈ 1.0 for c in 1:nchan, f in 1:2)
     end
 
@@ -112,7 +109,8 @@
         # The precal hook: fringe solve on the corrupted set with precal divides
         # the instrumental gains out in-stream — the corrected+reduced output is
         # as coherent as a clean-data solve. The INPUT set must come through
-        # untouched (regression: pass 2 once divided eager leaves in place).
+        # untouched. `calibrate` divides by `solf`'s gains only, so it runs on the
+        # pre-calibrated set.
         lc = first(values(UVP.branches(corrupt)))
         snapshot = copy(parent(lc[:vis]))
         solf = fit(
@@ -122,7 +120,7 @@
             corrupt,
             gauge = PinAntenna(1),
         )
-        output = calibrate(solf, corrupt)
+        output = calibrate(solf, fixed)
         @test solf.info.precal_applied
         @test parent(lc[:vis]) == snapshot                 # caller's data unmutated
         worst = 1.0
@@ -153,12 +151,11 @@
 
         # Diagnostics see the pre-calibrated data when the same precal is passed:
         # the "before" spectra of the corrupted set + precal equal the clean
-        # set's RAW spectra (`transforms = ()` suppresses the recorded-chain
-        # replay — solf records the precal, and the no-kwarg default replays it).
-        d_clean = FP.baseline_fringe_data(uvset, solf; transforms = ())
+        # set's raw spectra, and `precal` is the explicit `ApplySolution` chain.
+        d_clean = FP.baseline_fringe_data(uvset, solf)
         d_pcal = FP.baseline_fringe_data(corrupt, solf; precal = sol)
-        d_replay = FP.baseline_fringe_data(corrupt, solf)   # replays recorded_transforms(solf)
-        @test isequal(d_replay.spec_before, d_pcal.spec_before)
+        d_chain = FP.baseline_fringe_data(corrupt, solf; transforms = (FP.ApplySolution(sol),))
+        @test isequal(d_chain.spec_before, d_pcal.spec_before)
         finite_close(x, y) = all(
             !isfinite(x[i]) || !isfinite(y[i]) || isapprox(x[i], y[i]; rtol = 1.0e-4, atol = 1.0e-10)
                 for i in eachindex(x, y)
@@ -179,7 +176,7 @@
             @test mask[c]
         end
 
-        # Solve with flagging: runs, and the output flags those channels.
+        # Solve with flagging runs; the caller's mask flags those channels of the output.
         sol2 = fit(
             FP.FlagChannels(mask) |> BaselineFringeFit() |>
                 Bandpass() |>
@@ -187,7 +184,7 @@
             uvset,
             gauge = PinAntenna(1),
         )
-        out2 = calibrate(sol2, uvset)
+        out2 = calibrate(sol2, uvset; post = FP.FlagChannels(mask))
         lo = first(values(UVP.branches(out2)))
         ci = CAL.leaf_window(geom, lo).chan_idx
         F = parent(lo[:flags])
