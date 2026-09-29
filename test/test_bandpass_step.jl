@@ -15,7 +15,11 @@
 @isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
-_bpc(freq) = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = freq, Feed = CAL.PerFeed())
+_bpc(freq; prior = nothing) =
+    CAL.GainComponent(CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = freq, Feed = CAL.PerFeed(), prior)
+_bpmodel(; phase = nothing, amp = nothing, freq = CAL.PerSpectralWindow()) = GainModel(;
+    phase = (; bandpass = _bpc(freq; prior = phase)), logamp = (; bandpass = _bpc(freq; prior = amp)),
+)
 
 # One component's θ block from a step's own layout. `i` indexes
 # `step.layout.plans` (phase components first, then log-amplitude).
@@ -103,33 +107,10 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test solbf isa CAL.CalibrationSolution
     end
 
-    @testset "grouped bandpass: ChannelBlocks(k) ties channels within a block" begin
-        # How finely the bandpass varies in frequency is said by the SEGMENTATION,
-        # so `ChannelBlocks(4)` gives one solved value per 4 consecutive channels
-        # of a spw — the channels of a block share a θ parameter, and the
-        # component is that many times smaller.
-        k = 4
-        sol_g = fit(
-            [BaselineFringeFit(model = fm), Bandpass(model = default_bandpass_terms(freq = CAL.ChannelBlocks(k)))],
-            uvset,
-            exec = ExecutionConfig(),
-            gauge = PinAntenna(1),
-        )
-        bg = sol_g[:bandpass].steps[1]; bn = sol_n[:bandpass].steps[1]
-        @test length(_bp_phase(bg)) * k == length(_bp_phase(bn))
-        @test any(!=(0), _bp_phase(bg))
-
-        # The tie is structural: every channel of a block addresses one θ slot,
-        # so the evaluated bandpass gain is constant across the block.
-        plan = _bp_phase_plan(bg)
-        @test plan.fseg_id == repeat(1:(nglob ÷ k), inner = k)
-        gbp = parent(gains(sol_g[:bandpass, :phase, :bandpass]; Ti = 1))
-        for a in 1:nant, f in 1:2, b in 1:(nglob ÷ k)
-            cs = ((b - 1) * k + 1):(b * k)
-            @test all(≈(gbp[first(cs), a, f]), gbp[cs, a, f])
-        end
-        # ...but the band still has shape: the blocks differ from each other.
-        @test !all(≈(gbp[1, 2, 1]), gbp[:, 2, 1])
+    @testset "the leaf holds a value per channel, one frequency segment per block" begin
+        bn = sol_n[:bandpass].steps[1]
+        @test _bp_phase_plan(bn).shape == (nchan, 2, nspw, 1, nant)
+        @test length(_bp_phase(bn)) == nglob * 2 * nant
     end
 
     @testset "step-selection extraction" begin
@@ -147,59 +128,6 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         @test_throws "no stage :bandpass" sol_f[:bandpass]
     end
 
-    @testset "PerTrackSmoother: a shape on both observables" begin
-        # θ slot for one (station, feed, GLOBAL channel) of a bandpass component.
-        bpθ(θ, plan, a, f, gc) =
-            (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : θ[off])
-
-        ffb = BaselineFringeFit(model = fm)
-        sol_free = fit(
-            ffb |> Bandpass(smoother = FP.PerTrackSmoother(phase = FP.FreeShape(), amp = FP.FreeShape())),
-            uvset,
-            gauge = PinAntenna(1),
-        )
-        sfree = sol_free[:bandpass].steps[1]
-
-        # A stiff roughness penalty on the PHASE leaves only the second-difference
-        # null space — a straight line in frequency, per spw. Phase carried no shape
-        # hook at all before, so this is the capability the spec pair adds.
-        sol_stiff = fit(
-            ffb |> Bandpass(smoother = FP.PerTrackSmoother(phase = FP.WhittakerShape(1.0e8))),
-            uvset,
-            gauge = PinAntenna(1),
-        )
-        sstiff = sol_stiff[:bandpass].steps[1]
-        pplan = _bp_phase_plan(sstiff)
-        for a in 1:nant, f in 1:2, s in 1:nspw
-            gcs = ((s - 1) * nchan + 1):(s * nchan)
-            trk = [bpθ(sstiff.θ, pplan, a, f, gc) for gc in gcs]
-            all(isfinite, trk) || continue
-            @test maximum(abs, diff(diff(CAL.unwrap_phase_track(trk)))) < 1.0e-3
-        end
-        # ...and the free fit is genuinely rougher, so the flatness above is the
-        # spec acting rather than a featureless track.
-        pplan_f = _bp_phase_plan(sfree)
-        rough = Float64[]
-        for a in 1:nant, f in 1:2, s in 1:nspw
-            gcs = ((s - 1) * nchan + 1):(s * nchan)
-            trk = [bpθ(sfree.θ, pplan_f, a, f, gc) for gc in gcs]
-            all(isfinite, trk) || continue
-            push!(rough, maximum(abs, diff(diff(CAL.unwrap_phase_track(trk)))))
-        end
-        @test !isempty(rough)
-        @test maximum(rough) > 0.1
-
-        # The zero band-mean log-amp gauge is applied AFTER the shape fit, so a spec
-        # that rewrites every segment (this solve's default `WhittakerShape(1.0)`
-        # amp) still leaves the bandpass SHAPE only.
-        aplan = _bp_amp_plan(sstiff)
-        for a in 1:nant, f in 1:2
-            la = [bpθ(sstiff.θ, aplan, a, f, gc) for gc in 1:nglob]
-            @test all(isfinite, la)
-            @test abs(sum(la) / length(la)) < 1.0e-8
-        end
-    end
-
     @testset "gate → spike guard → shape: a contaminated channel is excised, then estimated" begin
         # The synthetic visibilities carry no thermal noise, so an unconstrained
         # per-segment solve reproduces the injected bandpass exactly and nothing
@@ -208,14 +136,14 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         # contaminant, on the baselines of a single station. It shows as EXCESS
         # amplitude, so the Fisher weight of the very segment carrying it is the
         # LARGEST on the track — no Gaussian prior can outvote it, and rejection
-        # is the narrow-spike guard's job, not the spec's. What the spec then
+        # is the narrow-spike guard's job, not the prior's. What the prior then
         # supplies is the estimate of the excised channel.
         nspwc, nchanc, ntimec, nscansc = 1, 32, 4, 2
         nglobc = nspwc * nchanc
         chan_bw = 2.0e6
         rngc = MersenneTwister(0x000A51DE)
         # Injected truth: an OU (AR(1)) draw along frequency per (station, feed) —
-        # the process `ARShape` assumes, correlated over 6 channels.
+        # the process `OUPrior` assumes, correlated over 6 channels.
         nu = 6 * chan_bw
         sigma_bp = 0.15
         a1 = exp(-chan_bw / nu)
@@ -240,25 +168,25 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
         end
 
         fmc = default_fringe_terms()
-        runc(sm) = fit(
-            [BaselineFringeFit(model = fmc), Bandpass(smoother = sm)], uvc,
+        runc(amp) = fit(
+            [BaselineFringeFit(model = fmc), Bandpass(model = _bpmodel(; amp), smoother = FP.PerTrackSmoother())], uvc,
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
         )[:bandpass].steps[1]
         track(s, a, f) = (
             L = CAL._component_leaf(s.layout.plantree.logamp.bandpass, s.θ);
-            Float64[L[1, f, c, 1, a] for c in 1:nglobc]
+            Float64[L[c, f, 1, 1, a] for c in 1:nglobc]
         )
         gauge(x) = x .- sum(x) / length(x)
         cleanc = [c for c in 1:nglobc if abs(c - bad_chan) > 2]
         rms_clean(v, a, f) =
             sqrt(sum(abs2, gauge(v)[cleanc] .- gauge(abpc[a, f, :])[cleanc]) / length(cleanc))
 
-        s_free = runc(FP.PerTrackSmoother(amp = FP.FreeShape()))
-        s_ar = runc(FP.PerTrackSmoother(amp = FP.ARShape(nu)))
-        s_wh = runc(FP.PerTrackSmoother(amp = FP.WhittakerShape(1.0)))
+        s_free = runc(nothing)
+        s_ar = runc(CAL.OUPrior(Frequency; scale = LogNormal(log(nu), 1.0), σ = LogNormal(log(sigma_bp), 1.0)))
+        s_wh = runc(CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.02))
 
-        # The guard excises the contaminated segment; `FreeShape` estimates
+        # The guard excises the contaminated channel; no prior estimates
         # nothing it has no datum for, so that slot stays UNAPPLIED (log-amp 0)
         # while every uncontaminated channel is recovered exactly.
         vfree = track(s_free, bad_ant, 1)
@@ -268,16 +196,16 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             @test rms_clean(track(s_free, a, 1), a, 1) < 1.0e-6
         end
 
-        # A spec that estimates gaps fills that slot from the in-band shape, and
+        # A prior fills that slot from the in-band shape, and
         # lands far closer to the truth than leaving it unapplied did.
         var = track(s_ar, bad_ant, 1)
         err_at(v) = abs(gauge(v)[bad_chan] - gauge(abpc[bad_ant, 1, :])[bad_chan])
         @test var[bad_chan] != 0.0
         @test err_at(var) < 0.5 * err_at(vfree)
 
-        # The AR prior is the correctly-specified one for this track (the truth IS
+        # The OU prior is the correctly-specified one for this track (the truth IS
         # an OU draw along frequency), so on the uncontaminated channels it costs
-        # less than the shape-agnostic roughness penalty.
+        # less than the second-order random walk.
         ar_rms = mean(rms_clean(track(s_ar, a, f), a, f) for a in 1:nant, f in 1:2)
         wh_rms = mean(rms_clean(track(s_wh, a, f), a, f) for a in 1:nant, f in 1:2)
         @test ar_rms < 0.85 * wh_rms
@@ -364,6 +292,48 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
 
 end
 
+@testset "PerTrackSmoother: a prior on both observables, broken at its segments" begin
+    nant, nspw, nchan = 4, 2, 8
+    rng = MersenneTwister(11)
+    nglob = nspw * nchan
+    ps, _ = _build_fringe_ps(;
+        nant, nspw, nchan, station_gains = false,
+        bandpass = 0.5 .* randn(rng, nant, 2, nglob), amp_bandpass = 0.2 .* randn(rng, nant, 2, nglob),
+    )
+    # One (feed, station) phase track over the solve's channels.
+    phase_track(sol, a, f) = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))[:, f, 1, a]
+    curvature(trk) = maximum(abs, diff(diff(CAL.unwrap_phase_track(trk))))
+    run(model) = fit(Bandpass(; model, smoother = FP.PerTrackSmoother()), ps; gauge = PinAntenna(1))
+
+    # A stiff second-order walk on the PHASE leaves only its null space — a
+    # straight line in frequency within each spectral window, each with its own
+    # level and slope.
+    stiff = CAL.RandomWalkPrior(Frequency; order = 2, σ = 1.0e-6)
+    sol_stiff = run(_bpmodel(; phase = stiff, amp = CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01)))
+    sol_free = run(_bpmodel())
+    spws = [((s - 1) * nchan + 1):(s * nchan) for s in 1:nspw]
+    for a in 1:nant, f in 1:2, cs in spws
+        @test curvature(phase_track(sol_stiff, a, f)[cs]) < 1.0e-3
+    end
+    # ...the free fit is genuinely rougher, so the flatness above is the prior
+    # acting rather than a featureless track...
+    @test maximum(curvature(phase_track(sol_free, a, f)[cs]) for a in 2:nant, f in 1:2, cs in spws) > 0.1
+    # ...and the spectral windows are separate pieces: across the boundary the
+    # track is not one line. With one segment over the band it is.
+    @test maximum(curvature(phase_track(sol_stiff, a, f)) for a in 2:nant, f in 1:2) > 0.1
+    sol_one = run(_bpmodel(; phase = stiff, freq = CAL.GlobalFrequency()))
+    for a in 1:nant, f in 1:2
+        @test curvature(phase_track(sol_one, a, f)) < 1.0e-3
+    end
+
+    # The zero band-mean log-amp gauge is applied AFTER the prior fit, so a prior
+    # that rewrites every channel still leaves the bandpass SHAPE only.
+    amp = parent(CAL.parameters(sol_stiff[:bandpass, :logamp, :bandpass]))
+    for a in 1:nant, f in 1:2
+        @test abs(mean(amp[:, f, 1, a])) < 4 * eps(eltype(amp))
+    end
+end
+
 @testset "Bandpass step: model vetting" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
@@ -382,19 +352,38 @@ end
         # before any data is read.
         @test_throws ArgumentError fit(Bandpass(model = GainModel(), smoother = pertrack), ps; gauge = PinAntenna(1))
         @test_throws "fits nothing" fit(Bandpass(model = GainModel(), smoother = pertrack), ps; gauge = PinAntenna(1))
-        # JointSmoother is stricter: one complex gain per (station, feed, segment)
+        # JointSmoother is stricter: one complex gain per (station, feed, channel)
         # needs both observables, not just one — so it rejects a model
         # PerTrackSmoother would happily solve.
         @test_throws "JointSmoother requires" fit(Bandpass(model = phase_only), ps; gauge = PinAntenna(1))
         @test fit(Bandpass(model = phase_only, smoother = pertrack), ps; gauge = PinAntenna(1)) isa
             CAL.CalibrationSolution
-        # ...and its two components must share one frequency segmentation.
+        # Its two components may break at different frequency segments: the gains
+        # are per channel, and the segments only say where each prior breaks.
         mixed = GainModel(;
-            phase = (; bandpass = _bpc(CAL.ChannelBlocks(1))),
-            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
+            phase = (; bandpass = _bpc(CAL.PerSpectralWindow())),
+            logamp = (; bandpass = _bpc(CAL.GlobalFrequency())),
         )
-        @test_throws "share one frequency segmentation" model_components(
-            Bandpass(model = mixed), nothing,
+        @test model_components(Bandpass(model = mixed), nothing) isa CAL.GainModel
+        # A prior the smoothers do not fit, and the per-segment constant the
+        # bandpass used to be, are both rejected by `can_fit`.
+        @test_throws "cannot fit the component" model_components(
+            Bandpass(model = GainModel(; phase = (; bandpass = _bpc(CAL.PerSpectralWindow(); prior = CAL.IIDPrior(0.1))))),
+            nothing,
+        )
+        @test_throws "cannot fit the component" model_components(
+            Bandpass(
+                model = GainModel(;
+                    phase = (;
+                        bandpass = CAL.GainComponent(
+                            CAL.ConstantTerm(); Ti = CAL.GlobalTime(),
+                            Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(),
+                        ),
+                    ),
+                ),
+                smoother = pertrack,
+            ),
+            nothing,
         )
         # A component the smoothers' θ writes cannot address (here: a Delay
         # term) is rejected by `can_fit`, naming the component.
@@ -413,8 +402,8 @@ end
         # structurally unsolvable, whatever its form.
         doubled = GainModel(;
             phase = (;
-                bandpass = _bpc(CAL.ChannelBlocks(1)),
-                ripple = _bpc(CAL.ChannelBlocks(4)),
+                bandpass = _bpc(CAL.PerSpectralWindow()),
+                ripple = _bpc(CAL.GlobalFrequency()),
             ),
         )
         @test_throws "at most one" model_components(Bandpass(model = doubled), nothing)
@@ -443,8 +432,8 @@ end
         @test !supports_station_heterogeneity(Bandpass(smoother = pertrack))
         het = with_station(
             default_bandpass_terms(), "A1";
-            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
-            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+            phase = (; bandpass = _bpc(CAL.GlobalFrequency())),
+            logamp = (; bandpass = _bpc(CAL.GlobalFrequency())),
         )
         @test model_components(Bandpass(model = het), nothing) isa CAL.GainModel
         @test fit(Bandpass(model = het), ps; gauge = PinAntenna(1)) isa CAL.CalibrationSolution
@@ -475,7 +464,7 @@ end
         # The path is a NAME descent, so it reaches a component the user nested
         # under names of their own.
         nested = CAL.GainModel(
-            phase = (; inst = (; bp = _bpc(CAL.ChannelBlocks(1)))),
+            phase = (; inst = (; bp = _bpc(CAL.PerSpectralWindow()))),
         )
         @test FP._bandpass_path(CAL.plan_parameters(nested, anames, geom).plantree, :phase) ==
             (:phase, :inst, :bp)
@@ -485,8 +474,8 @@ end
         # observables — the blocks still resolve, one per signature group.
         mh = with_station(
             default_bandpass_terms(), "A1";
-            phase = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
-            logamp = (; bandpass = _bpc(CAL.ChannelBlocks(4))),
+            phase = (; bandpass = _bpc(CAL.GlobalFrequency())),
+            logamp = (; bandpass = _bpc(CAL.GlobalFrequency())),
         )
         lh = CAL.plan_parameters(mh, anames, geom)
         @test lh.nphase == 2 && length(lh.plans) == 4
@@ -512,48 +501,46 @@ end
 # cover the record that makes the difference visible, and the gate that keeps an
 # undetermined phase branch from being reported as a measured ramp.
 
-@testset "Bandpass: per-track outcome codes" begin
+@testset "Bandpass: per-piece outcome codes" begin
     rng = MersenneTwister(24601)
     nband, nchan = 4, 32
-    seg_spw = repeat(1:nband; inner = nchan)
-    seg_freq = collect(range(8.6e10, 8.6e10 + 1.28e8; length = nband * nchan))
-    spec = FP.ARShape(1.6e7)
+    pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]
+    x = collect(range(8.6e10, 8.6e10 + 1.28e8; length = nband * nchan))
+    prior = CAL.OUPrior(Frequency; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.3), 1.0))
+    fit!(track, w; unwrap) = (st = fill(Int8(-1), nband); FP._fit_track!(track, w, x, pieces, prior; unwrap, status = st); st)
 
-    # A clean, structured track: every band solved.
+    # A clean, structured track: every piece solved.
     smooth = 0.3 .* sin.(range(0, 6π; length = nband * nchan))
     w = fill(1.0e4, nband * nchan)
-    st = fill(Int8(-1), nband)
-    FP._fit_track_bands(spec, smooth, w, seg_spw, seg_freq; unwrap = true, status = st)
-    @test all(==(FP._BP_TRACK_SOLVED), st)
+    @test all(==(FP._BP_TRACK_SOLVED), fit!(copy(smooth), w; unwrap = true))
 
-    # A band with no usable segment estimates nothing and says so.
+    # A piece with no usable channel estimates nothing and says so.
     gappy = copy(smooth)
     wg = copy(w)
     gappy[1:nchan] .= NaN
     wg[1:nchan] .= 0
-    st = fill(Int8(-1), nband)
-    out = FP._fit_track_bands(spec, gappy, wg, seg_spw, seg_freq; unwrap = true, status = st)
+    st = fit!(gappy, wg; unwrap = true)
     @test st[1] == FP._BP_TRACK_NODATA
-    @test all(isnan, out[1:nchan])
+    @test all(isnan, gappy[1:nchan])
 
-    # A constant band is fit, but carries no shape — reported as flat rather than
-    # passed off as a measured response.
-    flat = fill(0.2, nband * nchan)
-    st = fill(Int8(-1), nband)
-    FP._fit_track_bands(spec, flat, w, seg_spw, seg_freq; unwrap = true, status = st)
-    @test all(==(FP._BP_TRACK_FLAT), st)
+    # A constant piece is fit, but carries no shape — reported as flat rather
+    # than passed off as a measured response.
+    @test all(==(FP._BP_TRACK_FLAT), fit!(fill(0.2, nband * nchan), w; unwrap = true))
 
-    # Phase noise past a radian leaves the 2π branch undetermined: the band is
+    # Phase noise past a radian leaves the 2π branch undetermined: the piece is
     # declined, not fit, so nothing is written for it and no invented trend can
     # reach θ. The amplitude path is never unwrapped and so is never declined.
     noisy = 2.0 .* randn(rng, nband * nchan)
-    st = fill(Int8(-1), nband)
-    out = FP._fit_track_bands(spec, noisy, w, seg_spw, seg_freq; unwrap = true, status = st)
-    @test all(==(FP._BP_TRACK_DECLINED), st)
+    out = copy(noisy)
+    @test all(==(FP._BP_TRACK_DECLINED), fit!(out, w; unwrap = true))
     @test all(isnan, out)
-    st = fill(Int8(-1), nband)
-    FP._fit_track_bands(spec, noisy, w, seg_spw, seg_freq; unwrap = false, status = st)
-    @test !any(==(FP._BP_TRACK_DECLINED), st)
+    @test !any(==(FP._BP_TRACK_DECLINED), fit!(copy(noisy), w; unwrap = false))
+
+    # The resolved prior is returned: hyperpriors become the fitted values.
+    resolved = FP._fit_track!(copy(smooth), w, x, pieces, prior)
+    @test CAL.is_fixed_hyper(resolved.scale) && CAL.is_fixed_hyper(resolved.σ)
+    # A track with no data keeps the prior it was given.
+    @test FP._fit_track!(fill(NaN, nband * nchan), w, x, pieces, prior) === prior
 end
 
 @testset "bandpass_track_report: counts and the unfitted observable" begin
@@ -567,6 +554,7 @@ end
     # record is serialized with the solution and every field must carry a value.
     @test rep.amp_status isa AbstractArray && isempty(rep.amp_status)
     @test rep.phase_status === phase_status
+    @test rep.phase_priors isa AbstractArray && isempty(rep.phase_priors)
     # Per-block arrays are counted together.
     blocks = FP.bandpass_track_report((g1 = phase_status, g2 = phase_status), nothing)
     @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata, blocks.n_declined) == (2, 2, 2, 2)
@@ -625,7 +613,8 @@ end
         gauge = PinAntenna(1),
     )
     info = stage_info(sol, :bandpass)
-    # (Ant, Feed, spw, time segment) — a time-stable bandpass is one segment.
+    # (Ant, Feed, frequency segment, time segment): the default model's segments
+    # are the spectral windows, and a time-stable bandpass is one time segment.
     @test size(info.phase_status) == (nant, 2, nspw, 1)
     @test size(info.amp_status) == (nant, 2, nspw, 1)
     @test dims(info.phase_status) == dims(info.amp_status)
@@ -635,6 +624,9 @@ end
     # measured, not placeholders.
     @test info.n_solved > total ÷ 2
     @test info.n_declined == 0
+    # No prior to resolve: every track records the component's own.
+    @test size(info.phase_priors) == (nant, 2, 1)
+    @test all(isnothing, info.phase_priors) && all(isnothing, info.amp_priors)
 end
 
 # ── Break segmentation: a bandpass that changes at named epochs ───────────────
@@ -672,18 +664,18 @@ end
         ms[:visibility] = rebuild(ms[:visibility], vis)
     end
 
-    bp(ti) = GainComponent(ConstantTerm(); Ti = ti, Frequency = ChannelBlocks(1), Feed = PerFeed())
+    bp(ti) = GainComponent(CAL.Bandpass(); Ti = ti, Frequency = PerSpectralWindow(), Feed = PerFeed())
     model(ti) = GainModel(phase = (; bandpass = bp(ti)), logamp = (; bandpass = bp(ti)))
 
     @testset "θ carries one block per time segment" begin
         sol = fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1))
         leaf = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
-        @test size(leaf, 4) == 2                       # (param, feed, Frequency, Ti, Ant)
+        @test size(leaf, 3) == 2                       # (Frequency, Feed, Ti, Ant)
         # Each segment is solved from its own scans, so the halves disagree —
         # they would be one block under `GlobalTime`.
-        @test any(!iszero, leaf[1, 1, :, 1, :])
-        @test any(!iszero, leaf[1, 1, :, 2, :])
-        @test !isapprox(leaf[1, 1, :, 1, :], leaf[1, 1, :, 2, :]; atol = 1.0e-3)
+        @test any(!iszero, leaf[:, 1, 1, :])
+        @test any(!iszero, leaf[:, 1, 2, :])
+        @test !isapprox(leaf[:, 1, 1, :], leaf[:, 1, 2, :]; atol = 1.0e-3)
     end
 
     @testset "a break tracks the data a time-global fit cannot" begin
@@ -756,11 +748,11 @@ end
         sol = fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1))
         leaf = parent(CAL.parameters(sol[:bandpass, :phase, :bandpass]))
         aleaf = parent(CAL.parameters(sol[:bandpass, :logamp, :bandpass]))
-        for a in axes(leaf, 5), f in axes(leaf, 2), ts in axes(leaf, 4)
-            ph = leaf[1, f, :, ts, a]
+        for a in axes(leaf, 4), f in axes(leaf, 2), ts in axes(leaf, 3)
+            ph = leaf[:, f, ts, a]
             any(!iszero, ph) || continue
             @test abs(angle(sum(cis, ph))) < 1.0e-8    # zero circular band mean
-            @test abs(mean(aleaf[1, f, :, ts, a])) < 1.0e-8
+            @test abs(mean(aleaf[:, f, ts, a])) < 1.0e-8
         end
     end
 
@@ -838,7 +830,7 @@ end
     t_break = (ts[ntime] + ts[ntime + 1]) / 2
 
     bpc(ti) = GainComponent(
-        ConstantTerm(); Ti = ti, Frequency = CAL.ChannelBlocks(1), Feed = PerFeed(),
+        CAL.Bandpass(); Ti = ti, Frequency = PerSpectralWindow(), Feed = PerFeed(),
     )
     het = GainModel(;
         phase = (; bandpass = bpc(GlobalTime())),
@@ -877,7 +869,7 @@ end
 
     @testset "the uniform stations carry one time segment, not two" begin
         @test [b.stations for b in pb] == [[1], collect(2:nant)]
-        # `plan.shape` is (1, feed node, frequency segment, time segment, station).
+        # `plan.shape` is (channel, feed node, frequency segment, time segment, station).
         @test pb[1].plan.shape[4] == 2
         @test pb[2].plan.shape[4] == 1
     end
@@ -887,13 +879,13 @@ end
         for f in 1:2
             # Station 1 is the gauge reference and the broken station both, so
             # the pin holds its FIRST segment and its second carries the break.
-            @test all(iszero, pb[1].θ[1, f, :, 1, 1])
-            @test pb[1].θ[1, f, :, 2, 1] ≈ cdemean(brk[f]) atol = 1.0e-6
+            @test all(iszero, pb[1].θ[:, f, 1, 1, 1])
+            @test pb[1].θ[:, f, 1, 2, 1] ≈ cdemean(brk[f]) atol = 1.0e-6
             # The other nine hold one bandpass across the gap, and it is the one
             # they really have — station 1's break leaks into none of them.
             for (ai, a) in pairs(pb[2].stations)
                 want = cdemean(bp_true[a, f, :, 1] .- bp_true[1, f, :, 1])
-                @test pb[2].θ[1, f, :, 1, ai] ≈ want atol = 1.0e-6
+                @test pb[2].θ[:, f, 1, 1, ai] ≈ want atol = 1.0e-6
             end
         end
     end

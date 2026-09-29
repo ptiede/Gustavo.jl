@@ -280,7 +280,7 @@ end
     @test τ ≈ 3.0e6 rtol = 0.01
     # With no ripple, type-II ML sends σ² to its floor; a hyperprior bounded away
     # from zero keeps it there.
-    _, σ2_ml = FRs.fit_ou_hypers_pooled(ycs, ws, xs; τ0 = 1.0e7, σ2_0 = 1.0e-2, τ_lo = lo, τ_hi = hi)
+    _, σ2_ml = FRs.fit_ou_hypers(ycs[1], ws[1], xs[1]; τ0 = 1.0e7, σ2_0 = 1.0e-2, τ_lo = lo, τ_hi = hi)
     @test σ2_ml ≤ 1.0e-6
     _, σ2 = map_hypers(1.0e7, LogNormal(log(0.1), 0.3))
     @test 0.01 < sqrt(σ2) < 0.1

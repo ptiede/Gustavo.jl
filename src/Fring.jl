@@ -36,7 +36,6 @@ include("Fring/stationize.jl")
 include("Fring/statespace.jl")
 # Per-observable frequency-shape specs and their per-track fit — pure functions
 # over one (station, feed, spw) track, independent of any solver stage.
-include("Fring/shapes.jl")
 include("Fring/prior_fits.jl")
 include("Fring/weighted_sums.jl")
 include("Fring/adhoc.jl")
@@ -130,8 +129,6 @@ export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, AdhocOptions, SavitzkyGolaySmoother, PenalizedSmoother
 export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing, default_adhoc_terms
-export AbstractShapeSpec, FreeShape, PolynomialShape, WhittakerShape, ARShape, fit_track
-export fit_track_group
 export default_bandpass_terms
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks

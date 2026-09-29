@@ -23,9 +23,9 @@ A model is a [`GainModel`](@ref): a `phase` group and a `logamp` group, each
 a `NamedTuple` of named [`GainComponent`](@ref)s:
 
 ```julia
-GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed())
+GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed(), prior = nothing)
 
-bp = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1))
+bp = GainComponent(Calibration.Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow())
 GainModel(phase = (; bp), logamp = (; bp))
 ```
 
@@ -45,7 +45,9 @@ Two rules of thumb anchor the vocabulary:
   `Ti` segmentations.
 - *How finely a value varies is said by its segmentation, never by the term.*
   A value free per channel is `ConstantTerm()` paired with `ChannelBlocks(1)`,
-  not a vector-valued term.
+  not a vector-valued term. The one exception is `Calibration.Bandpass()`, a
+  value per channel within each frequency segment, so that a prior can relate
+  neighboring channels; its segments are the breaks the prior never crosses.
 
 ### Terms
 
@@ -56,10 +58,28 @@ Two rules of thumb anchor the vocabulary:
 | [`Rate`](@ref)`()` | `2π·ṙ·(t − t0)` | fringe rate `ṙ` (Hz), `t0` the segment's own mean epoch |
 | [`Dispersion`](@ref)`()` | `K·θ·(1/f0 − 1/f)` | differential TEC `θ` (TECU) |
 | [`PolynomialFreq`](@ref)`(n)` / [`PolynomialTime`](@ref)`(n)` | `Σ cᵈ·xᵈ`, `d = 1…n`, over the segment-normalized axis coordinate | `n` coefficients per segment (the constant belongs to a `ConstantTerm`) |
+| `Calibration.Bandpass()` | the value at the channel | one value per channel of each frequency segment |
 
 A term contributes to whichever group (`phase` or `logamp`) its component is
 placed in. New terms are added with five small methods — see
 [Authoring a new gain term](@ref authoring-terms).
+
+### Priors
+
+A component's `prior` is the Gaussian belief about its parameters before the
+data, relating values within one parameter block and never across blocks:
+
+| Prior | Density |
+|:------|:--------|
+| `nothing` | none: every value is free |
+| [`IIDPrior`](@ref)`(σ)` | each parameter `N(0, σ²)` |
+| [`RandomWalkPrior`](@ref)`(dim; order, σ)` | the `order`-th difference between neighbors along `dim` is `N(0, σ²)` |
+| [`OUPrior`](@ref)`(dim; scale, σ)` | an Ornstein–Uhlenbeck process along `dim` about a free level; `scale` and `σ` each a number or a hyperprior |
+
+`σ` is in the parameter's own units. A correlated prior needs a term with a
+value per coordinate along its axis ([`value_axis`](@ref)), such as
+`Calibration.Bandpass()` along `Frequency`. Which priors a solver fits is part
+of its `can_fit`.
 
 ### Time segmentations
 
@@ -201,13 +221,14 @@ little differently.* [`with_station`](@ref) gives one station its own
 groups, used verbatim:
 
 ```julia
-m = GainModel(phase = (; bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1))))
-with_station(m, "AA"; phase = (; bandpass = GainComponent(PolynomialFreq(3); Ti = GlobalTime())))
+bp(prior) = GainComponent(Calibration.Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), prior)
+m = GainModel(phase = (; bandpass = bp(nothing)))
+with_station(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(Frequency; order = 2, σ = 0.01))))
 ```
 
-Here every station solves a free per-channel phase bandpass except AA, which
-gets a smooth cubic — the right model for a station too weak to constrain
-per-channel values. Replacement is **whole-group**: a station entry supplies
+Here every station solves a free per-channel phase bandpass except AA, whose
+channels are tied by a second-order random walk — the right model for a
+station too weak to constrain per-channel values. Replacement is **whole-group**: a station entry supplies
 complete `phase` and/or `logamp` trees (a group the entry omits is inherited
 from the base), because components within a group interact — they sum and
 share degeneracies — while the two groups do not. The model never merges

@@ -60,12 +60,13 @@ The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan it is given. What is fit
 is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_terms`](@ref) for the
-default and the component form the smoothers accept. How it is solved lives on
-`smoother`, a pluggable [`Fring.AbstractBandpassSmoother`](@ref) carrying one
-shape spec per observable; by default [`Fring.JointSmoother`](@ref), which
-fits the complex visibilities against an explicit per-scan source coherence and
-so does not assume the calibrator is unresolved and unpolarized. It solves one
-complex gain per (station, feed, segment), so it needs both halves of the
+default and the component form the smoothers accept; each component's prior
+states how its channels relate within a frequency segment. How it is solved
+lives on `smoother`, a pluggable [`Fring.AbstractBandpassSmoother`](@ref); by
+default [`Fring.JointSmoother`](@ref), which fits the complex visibilities
+against an explicit per-scan source coherence and so does not assume the
+calibrator is unresolved and unpolarized. It solves one complex gain per
+(station, feed, channel), so it needs both halves of the
 model — a phase-only or amplitude-only model must name
 [`Fring.PerTrackSmoother`](@ref) instead, which runs the per-channel closure
 solves and then fits each track. The model is self-contained, so placing
@@ -160,10 +161,11 @@ end
 
 model_components(s::Bandpass, spec) = _vet_step_model(
     s.smoother, s.model,
-    "Both shipped bandpass smoothers fit `GainComponent(ConstantTerm(); " *
+    "Both shipped bandpass smoothers fit `GainComponent(Calibration.Bandpass(); " *
         "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
-        "segmentation>, Feed = PerFeed())` — a time segmentation whose segments " *
-        "each span several scans. See `default_bandpass_terms`.",
+        "segmentation>, Feed = PerFeed(), prior = <nothing, RandomWalkPrior(Frequency; …) " *
+        "or OUPrior(Frequency; …)>)` — a time segmentation whose segments each span " *
+        "several scans. See `default_bandpass_terms`.",
     spec,
 )
 

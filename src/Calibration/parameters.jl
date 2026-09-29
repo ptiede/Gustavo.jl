@@ -38,12 +38,14 @@ applying a solution to a different time or channel sampling. `fseg` is stored
 [`materialize`](@ref)d, so a data-dependent segmentation never reaches a plan. `fstate`/`tstate`
 are the term's own coordinate constants, resolved once against the solve
 geometry ([`freq_coord_state`](@ref)), `nothing` on an axis the term does not
-declare.
+declare. `prior` is the component's [`AbstractPrior`](@ref) (or `nothing`); the
+forward map does not read it.
 """
 struct ComponentPlan{
         T <: AbstractGainTerm, Ty <: AbstractFeedTying,
         TS <: AbstractTimeSegmentation, FS <: AbstractFrequencySegmentation, TC, FC,
         XF <: AbstractVector{<:Real}, XT <: AbstractVector{<:Real},
+        P <: Union{Nothing, AbstractPrior},
     }
     term::T
     tseg::TS                    # the time segmentation `tseg_id` resolves
@@ -58,6 +60,7 @@ struct ComponentPlan{
     shape::NTuple{5, Int}       # (param, feed-node, freq-seg, time-seg, ant)
     fstate::FC                  # the term's resolved frequency-coordinate constants
     tstate::TC                  # …and its time-coordinate constants
+    prior::P                    # the component's prior, for solvers
 end
 
 """
@@ -266,7 +269,7 @@ function _plans_node(e::GainComponent, nant::Int, geom::DataGeometry, flat::Vect
     next[] += dof
     plan = ComponentPlan(
         e.term, cl.tseg, cl.fseg, cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg,
-        cl.tying, range, cl.shape, cl.fstate, cl.tstate,
+        cl.tying, range, cl.shape, cl.fstate, cl.tstate, e.prior,
     )
     push!(flat, plan)
     return plan

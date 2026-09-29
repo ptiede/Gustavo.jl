@@ -634,13 +634,13 @@ end
     @test freq_coh(don.spec_after, (FP.baseline_pol_index(don, (1, 1)),)) > 0.97
 end
 
-@testset "Amplitude bandpass: pluggable shape specs (poly / Whittaker / free)" begin
+@testset "Amplitude bandpass: component priors (random walk / OU / none)" begin
     # Inject a per-BAND log-amp roll-off (the filterbank passband, deep toward each
     # band's high-channel edge) shared by all stations, plus a small per-station
     # ripple. THEN kill one interior channel per band (zero its weight on every
-    # baseline). The two GAP-ESTIMATING specs (polynomial, Whittaker) must flatten
-    # the band AND estimate the killed channels from the in-spw shape; FreeShape must
-    # leave the killed channels untouched (|g| = 1).
+    # baseline). Both priors must flatten the band AND estimate the killed channels
+    # from the in-spw shape; with no prior the killed channels stay untouched
+    # (|g| = 1).
     nant, nspw, nchan = 4, 2, 8
     nchg = nspw * nchan
     rng = MersenneTwister(0x5A11)
@@ -665,7 +665,15 @@ end
     end
 
     adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
-    larec(θ, plan, a, f, gc) = (off = plan_off1(plan)[a, f, 1, plan.fseg_id[gc]]; off == 0 ? NaN : θ[off])
+    larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[plan.xf[gc], f, plan.fseg_id[gc], 1, a]
+    amp_model(prior) = GainModel(;
+        phase = default_bandpass_terms().phase,
+        logamp = (;
+            bandpass = CAL.GainComponent(
+                CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), Feed = CAL.PerFeed(), prior,
+            ),
+        ),
+    )
     function amp_ripple(spec, don, p)
         rs = Float64[]
         for bi in eachindex(don.bl_pairs)
@@ -688,11 +696,15 @@ end
     poff = FP.baseline_pol_index(doff, (1, 1))
     @test amp_ripple(doff.spec_after, doff, poff) > 1.3    # roll-off ripple without the stage
 
-    # The gap-estimating specs flatten the band AND fill the killed channels onto the
-    # in-spw curve (≈ the mean of the live neighbours, well away from log-amp 0).
-    for sm in (FP.PolynomialShape(4), FP.WhittakerShape(0.1))
+    # A prior flattens the band AND fills the killed channels onto the in-spw curve
+    # (≈ the mean of the live neighbours, well away from log-amp 0).
+    priors = (
+        CAL.RandomWalkPrior(CAL.Frequency; order = 2, σ = 0.02),
+        CAL.OUPrior(CAL.Frequency; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.2), 1.0)),
+    )
+    for prior in priors
         sol = fit(
-            ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = sm)) |>
+            ff |> Bandpass(model = amp_model(prior), smoother = FP.PerTrackSmoother()) |>
                 AdhocPhase(adhoc), uvset,
                 gauge = PinAntenna(1),
         )
@@ -709,10 +721,10 @@ end
         end
     end
 
-    # FreeShape does NOT estimate the killed channels — their θ slot is untouched
-    # (log-amp 0 ⇒ |g| = 1), the contrast that motivates the smoothing specs.
+    # With no prior the killed channels are NOT estimated — their θ slot is
+    # untouched (log-amp 0 ⇒ |g| = 1), the contrast that motivates the priors.
     solf = fit(
-        ff |> Bandpass(smoother = FP.PerTrackSmoother(amp = FP.FreeShape())) |>
+        ff |> Bandpass(smoother = FP.PerTrackSmoother()) |>
             AdhocPhase(adhoc), uvset,
             gauge = PinAntenna(1),
     )

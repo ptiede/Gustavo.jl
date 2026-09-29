@@ -33,9 +33,6 @@ end
     for order in 1:3
         @test FRpf._random_walk_track(y, w, order, 0.02) ≈ _dense_random_walk(y, w, order, 0.02) atol = 1.0e-12
     end
-    # Order 2 at σ = 1/√(λ·median w) is the Whittaker smoother at λ.
-    σ = 1 / sqrt(median(w))
-    @test FRpf._random_walk_track(y, w, 2, σ) ≈ FRpf._whittaker_track(y, w, 1.0, FRpf._SHAPE_RIDGE) atol = 1.0e-6
     @test eltype(FRpf._random_walk_track(Float32.(y), Float32.(w), 2, 0.02)) === Float32
     @test FRpf._random_walk_track(Float32.(y), Float32.(w), 2, 0.02) ≈ _dense_random_walk(y, w, 2, 0.02) rtol = 1.0e-5
 end

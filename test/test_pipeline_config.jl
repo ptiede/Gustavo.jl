@@ -165,8 +165,7 @@
         b = Bandpass()
         @test b.model == default_bandpass_terms()
         @test b.smoother isa FP.JointSmoother
-        @test b.smoother.phase == FP.FreeShape()
-        @test b.smoother.amp == FP.FreeShape()
+        @test isnothing(b.model.phase.bandpass.prior) && isnothing(b.model.logamp.bandpass.prior)
 
         t = AdhocPhase()
         @test t.model == default_adhoc_terms()

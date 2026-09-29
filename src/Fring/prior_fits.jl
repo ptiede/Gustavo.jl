@@ -10,6 +10,8 @@
 # whichever blocks the caller pools, and `_estimate_map` fits one block under the
 # resolved prior.
 
+_shape_usable(yk, wk) = isfinite(yk) && isfinite(wk) && wk > 0
+
 """
     _estimate_hypers(prior, ys, ws, xs) -> prior
 

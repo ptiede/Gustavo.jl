@@ -6,6 +6,7 @@ using Random
 using StructArrays
 using Dates
 using OrderedCollections
+using Distributions: LogNormal
 using FITSFiles: Card
 import XRadio
 using CairoMakie
@@ -51,9 +52,8 @@ include("test_stationize.jl")
 # OU / Matérn-1/2 state-space phase smoother primitives (underpins adhoc :gp).
 include("test_statespace.jl")
 
-# Per-observable frequency-shape specs and their per-track fit (the bandpass
-# smoother's shape assumptions; ARShape rides the OU primitives above).
-include("test_shapes.jl")
+# Fitting a bandpass block under a component prior (the OU prior rides the
+# primitives above).
 include("test_prior_fits.jl")
 
 # Globally-closing adhoc phasing (Phase 5 of the fringe-fitter refactor).
