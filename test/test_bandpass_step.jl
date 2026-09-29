@@ -12,7 +12,6 @@
 #   `ApplySolution` applies it same-set (index-aligned) and cross-set
 #   (station-name-mapped, channel-layout-validated, time-constant only).
 
-@isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 _bpc(freq; prior = nothing, Ti = CAL.GlobalTime()) =
@@ -41,7 +40,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     nglob = nspw * nchan
     bp_true = 0.5 .* randn(rng, nant, 2, nglob)
     abp_true = 0.2 .* randn(rng, nant, 2, nglob)
-    uvset, _ = _build_fringe_uvset(;
+    ps, _ = _build_fringe_ps(;
         nant, nspw, nchan, bandpass = bp_true, amp_bandpass = abp_true,
     )
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
@@ -52,13 +51,13 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     # so no later stage refines the compared slots).
     sol_o = fit(
         [BaselineFringeFit(model = fm), Bandpass(), AdhocPhase(adhoc)],
-        uvset,
+        ps,
         exec = ExecutionConfig(),
         gauge = PinAntenna(1),
     )
     sol_n = fit(
         [BaselineFringeFit(model = fm), Bandpass()],
-        uvset,
+        ps,
         exec = ExecutionConfig(),
         gauge = PinAntenna(1),
     )
@@ -81,14 +80,14 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test keys(sol_n) == [:fringe, :bandpass]
         @test length(CAL.phase_components(bn.model)) == 1 && length(CAL.logamp_components(bn.model)) == 1
         @test _bp_phase(bn) == _blk(bn, 1) && _bp_amp(bn) == _blk(bn, bn.layout.nphase + 1)
-        @test stage_info(sol_n, :bandpass).nscans == length(FP.scan_stream(uvset).groups)
+        @test stage_info(sol_n, :bandpass).nscans == length(XRadio.groupby(ps, XRadio.ByScan()))
         @test stage_info(sol_n, :bandpass).t_pass > 0
     end
 
     @testset "new-engine fold is deterministic across ntasks" begin
         sol_n4 = fit(
             [BaselineFringeFit(model = fm), Bandpass()],
-            uvset,
+            ps,
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
         )
@@ -103,17 +102,17 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         # BaselineFringeFit, it fits the UNCORRECTED residual instead and
         # completes without error — a quietly worse fit, not a
         # construction-time rejection.
-        solts = fit([AdhocPhase(), BaselineFringeFit(model = fm)], uvset; gauge = PinAntenna(1))
+        solts = fit([AdhocPhase(), BaselineFringeFit(model = fm)], ps; gauge = PinAntenna(1))
         @test solts isa CAL.CalibrationSolution
         # Bandpass's model is self-contained regardless of position,
         # so bandpass-before-fringe was always legal and stays so.
-        solbf = fit([Bandpass(), BaselineFringeFit(model = fm)], uvset; gauge = PinAntenna(1))
+        solbf = fit([Bandpass(), BaselineFringeFit(model = fm)], ps; gauge = PinAntenna(1))
         @test solbf isa CAL.CalibrationSolution
     end
 
-    @testset "the leaf holds a value per channel, one frequency segment per block" begin
+    @testset "the leaf holds one frequency segment per channel" begin
         bn = sol_n[:bandpass].steps[1]
-        @test _bp_phase_plan(bn).shape == (nchan, 2, nspw, 1, nant)
+        @test _bp_phase_plan(bn).shape == (1, 2, nglob, 1, nant)
         @test length(_bp_phase(bn)) == nglob * 2 * nant
     end
 
@@ -127,7 +126,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test _bp_amp(bp) == _bp_amp(bn)
         @test collect(bps.info.ant_names) == collect(sol_n.info.ant_names)
         # A solution with no bandpass STEP at all refuses extraction.
-        sol_f = fit(BaselineFringeFit(model = fm), uvset; gauge = PinAntenna(1))
+        sol_f = fit(BaselineFringeFit(model = fm), ps; gauge = PinAntenna(1))
         @test_throws ArgumentError sol_f[:bandpass]
         @test_throws "no stage :bandpass" sol_f[:bandpass]
     end
@@ -159,21 +158,26 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
                 trk[a, f, c] = a1 * trk[a, f, c - 1] + sqrt(sigma_bp^2 * (1 - a1^2)) * randn(rngc)
             end
         end
-        uvc, truthc = _build_fringe_uvset(;
+        uvc, truthc = _build_fringe_ps(;
             nant, nspw = nspwc, nchan = nchanc, ntime = ntimec, nscans = nscansc,
-            chan_bw, bandpass = bpc, amp_bandpass = abpc, seed = 7,
+            chan_bw, bandpass = bpc, amp_bandpass = abpc, seed = 7, eltype = ComplexF64,
         )
         bad_chan, bad_ant = 17, 2
-        for (_, leaf) in DimensionalData.branches(uvc)
-            for (bi, (a, b)) in enumerate(truthc.bl_pairs)
+        for ms in values(uvc)
+            V = DimensionalData.modify(Array, ms[:visibility])
+            for (bi, (a, b)) in pairs(truthc.bl_pairs)
                 (a == bad_ant || b == bad_ant) || continue
-                leaf[:vis][bad_chan, :, bi, :] .*= 8.0f0
+                view(V, Frequency(bad_chan), BaselineID(bi)) .*= 8
             end
+            ms[:visibility] = V
         end
 
         fmc = default_fringe_terms()
         runc(amp) = fit(
-            [BaselineFringeFit(model = fmc), Bandpass(model = _bpmodel(; amp), smoother = FP.PerTrackSmoother())], uvc,
+            [
+                BaselineFringeFit(model = fmc), AdhocPhase(adhoc),
+                Bandpass(model = _bpmodel(; amp), smoother = FP.PerTrackSmoother()),
+            ], uvc,
             exec = ExecutionConfig(),
             gauge = PinAntenna(1),
         )[:bandpass].steps[1]
@@ -219,80 +223,67 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     @testset "portable ApplySolution: same-set + cross-set by station name" begin
         bps = sol_n[:bandpass]
         bp = only(bps.steps)
-        ev = bp.layout
-
-        # Same-set (identical geometry): index-aligned division.
-        st0 = FP.scan_stream(uvset)
-        stack0, win0 = FP.materialize_cube(st0, st0.groups[1])
-        stt = FP.scan_stream(uvset; transforms = (FP.ApplySolution(bps),))
-        stackt, _ = FP.materialize_cube(stt, stt.groups[1])
-        g = CAL.evaluate_gains(ev, bp.θ, win0.chan_idx, win0.ti_idx)
-        Vm = copy(parent(stack0[:vis])); Wm = copy(parent(stack0[:weights]))
-        for p in axes(Vm, 4), (bi, (a, b)) in enumerate(baselines(stack0).pairs)
-            fa, fb = feed_pairs(stack0)[p]
-            for t in axes(Vm, 2), c in axes(Vm, 1)
-                den = g[c, t, a, fa] * conj(g[c, t, b, fb])
-                (isfinite(den) && abs2(den) > 0) || continue
-                Vm[c, t, bi, p] /= den
-                Wm[c, t, bi, p] *= abs2(den)
+        correct(t, ps) = [Gustavo._correct(t, read(ms), CAL.DataGeometry(ps)) for ms in values(ps)]
+        # `ms` with the gains `g[c, t, station, feed]` divided out, stations by
+        # position in the solution's antenna names.
+        function divided(ms, g; tconst = false)
+            V = DimensionalData.modify(Array, ms[:visibility])
+            W = DimensionalData.modify(Array, ms[:weight])
+            slot = Dict(n => i for (i, n) in pairs(bps.info.ant_names))
+            feeds = UVP.feed_pairs(ms)
+            for (bi, (na, nb)) in pairs(collect(XRadio.baselines(ms))), p in axes(feeds, 1)
+                a, b = slot[String(na)], slot[String(nb)]
+                fa, fb = feeds[p, bi]
+                Vp = UVP._cell_plane(V, bi, p); Wp = UVP._cell_plane(W, bi, p)
+                for t in axes(Vp, 2), c in axes(Vp, 1)
+                    tg = tconst ? 1 : t
+                    den = g[c, tg, a, fa] * conj(g[c, tg, b, fb])
+                    (isfinite(den) && abs2(den) > 0) || continue
+                    Vp[c, t] /= den
+                    Wp[c, t] *= abs2(den)
+                end
             end
+            return V, W
         end
-        @test isequal(parent(stackt[:vis]), Vm) && isequal(parent(stackt[:weights]), Wm)
+
+        # Same set (identical geometry): index-aligned division.
+        for (ms, out) in zip(values(ps), correct(ApplySolution(bps), ps))
+            win = CAL.GeometryWindow(bps.geom, ms)
+            V, W = divided(ms, CAL.evaluate_gains(bp.layout, bp.θ, win.chan_idx, win.ti_idx))
+            @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
+        end
 
         # Cross-set: a different track (fewer times) with a station subset —
         # the time-constant bandpass ports, stations matched by name.
-        uvsub, _ = _build_fringe_uvset(; nant = 3, nspw, nchan, ntime = 5)
-        sts = FP.scan_stream(uvsub; transforms = (FP.ApplySolution(bps),))
-        @test CAL.build_geometry(uvsub).times != bps.geom.times
-        stackx, _ = FP.materialize_cube(sts, sts.groups[1])
-        st0s = FP.scan_stream(uvsub)
-        stack0s, win0s = FP.materialize_cube(st0s, st0s.groups[1])
-        gx = CAL.evaluate_gains(ev, bp.θ, win0s.chan_idx, 1:1)   # A1..A3 ≡ solution rows 1..3
-        Vx = copy(parent(stack0s[:vis])); Wx = copy(parent(stack0s[:weights]))
-        for p in axes(Vx, 4), (bi, (a, b)) in enumerate(baselines(stack0s).pairs)
-            fa, fb = feed_pairs(stack0s)[p]
-            for t in axes(Vx, 2), c in axes(Vx, 1)
-                den = gx[c, 1, a, fa] * conj(gx[c, 1, b, fb])
-                (isfinite(den) && abs2(den) > 0) || continue
-                Vx[c, t, bi, p] /= den
-                Wx[c, t, bi, p] *= abs2(den)
-            end
+        uvsub, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5)
+        @test CAL.DataGeometry(uvsub).times != bps.geom.times
+        for (ms, out) in zip(values(uvsub), correct(ApplySolution(bps), uvsub))
+            chan = CAL.GeometryWindow(bps.geom, ms).chan_idx
+            V, W = divided(ms, CAL.evaluate_gains(bp.layout, bp.θ, chan, 1:1); tconst = true)
+            @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
         end
-        @test isequal(parent(stackx[:vis]), Vx) && isequal(parent(stackx[:weights]), Wx)
 
         # A station the solution never saw keeps identity gains (with a warning).
-        uvbig, _ = _build_fringe_uvset(; nant = 5, nspw, nchan, ntime = 5)
-        stb = FP.scan_stream(uvbig; transforms = (FP.ApplySolution(bps),))
-        @test_logs (:warn, r"A5") match_mode = :any FP.materialize_cube(stb, stb.groups[1])
+        uvbig, _ = _build_fringe_ps(; nant = 5, nspw, nchan, ntime = 5)
+        @test_logs (:warn, r"A5") match_mode = :any correct(ApplySolution(bps), uvbig)
 
         # A time-VARYING solution ports the same way: `sol_n`'s fringe terms are
         # per scan, and `uvsub` is the same scan sampled over fewer APs, so every
         # target sample places in the scan it belongs to.
-        stn = FP.scan_stream(uvsub; transforms = (FP.ApplySolution(sol_n),))
-        @test FP.materialize_cube(stn, stn.groups[1]) isa Tuple
+        @test all(ms -> ms isa XRadio.MeasurementSet, correct(ApplySolution(sol_n), uvsub))
 
         # Guard rails: a bandpass cuts the channel-INDEX axis, so a set indexing
         # different channels has no segment to place against…
-        uvnc, _ = _build_fringe_uvset(; nant = 3, nspw, nchan = 4, ntime = 5)
-        stnc = FP.scan_stream(uvnc; transforms = (FP.ApplySolution(bps),))
-        @test_throws "identical channel layout" FP.materialize_cube(stnc, stnc.groups[1])
+        uvnc, _ = _build_fringe_ps(; nant = 3, nspw, nchan = 4, ntime = 5)
+        @test_throws "identical channel layout" correct(ApplySolution(bps), uvnc)
         # …and a scan the solve never saw is refused, not served by a neighbour.
-        uv2, _ = _build_fringe_uvset(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
-        st2 = FP.scan_stream(uv2; transforms = (FP.ApplySolution(sol_n),))
-        @test_throws "is not in the solution" [
-            FP.materialize_cube(st2, g) for g in st2.groups
-        ]
-        # Station identity is what construction checks, and a name is all of it.
-        @test_throws "shares no station with this set" FP.scan_stream(
-            uvsub;
-            transforms = (
-                FP.ApplySolution(
-                    CAL.CalibrationSolution(
-                        bps.steps, bps.geom, merge(bps.info, (; ant_names = ["QQ", "RR"])),
-                    ),
-                ),
-            ),
+        uv2, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
+        @test_throws "is not in the solution" correct(ApplySolution(sol_n), uv2)
+        # Stations are matched by name; a solution sharing none is refused.
+        strangers = CAL.CalibrationSolution(
+            bps.steps, bps.geom, merge(bps.info, (; ant_names = ["QQ", "RR"])),
         )
+        @test_throws "shares no station with this data" correct(ApplySolution(strangers), uvsub)
     end
 
 end
@@ -654,7 +645,7 @@ end
     nant, nspw, nchan, ntime, nscans = 4, 2, 8, 6, 4
     rng = MersenneTwister(777)
     nglob = nspw * nchan
-    uvset, _ = _build_fringe_uvset(;
+    ps, _ = _build_fringe_ps(;
         nant, nspw, nchan, ntime, nscans,
         bandpass = 0.3 .* randn(rng, nant, 2, nglob),
         amp_bandpass = 0.1 .* randn(rng, nant, 2, nglob),
@@ -663,7 +654,7 @@ end
     sol = fit(
         [BaselineFringeFit(),
             Bandpass()],
-        uvset,
+        ps,
         exec = ExecutionConfig(),
         gauge = PinAntenna(1),
     )

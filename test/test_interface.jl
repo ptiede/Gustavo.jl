@@ -1,7 +1,9 @@
 # Composable-pipeline interface tests (protocol, transforms, stage
-# provenance/snapshots, and the fit/calibrate verbs). Every
-# pipeline runs on the new engine. Reuses `_build_fringe_uvset` and the
-# CAL/FP/UVP aliases from test_pipeline.jl (included earlier in runtests.jl).
+# provenance/snapshots, and the fit/calibrate verbs), on ProcessingSets from
+# `_build_fringe_ps`. Uses the CAL/FP/UVP aliases from test_pipeline.jl
+# (included earlier in runtests.jl).
+
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 # A throwaway solve step proving the protocol defaults exist.
 struct _ProtoProbe <: Gustavo.SolveStep end
@@ -13,21 +15,19 @@ struct _ThirdPartyStep <: Gustavo.SolveStep end
 Gustavo.provides(::_ThirdPartyStep) = :thirdparty
 
 # A third-party step that reads the data twice and reports each group's first
-# time index.
+# time.
 struct _TwoPassStep <: Gustavo.SolveStep end
 Gustavo.provides(::_TwoPassStep) = :twopass
+_first_time(group) = minimum(ms -> minimum(XRadio.times(ms)), values(group))
 function Gustavo.solve(::_TwoPassStep, ctx)
-    first_ti = Gustavo.each_group((stack, win) -> first(win.ti_idx), ctx)
-    again = Gustavo.each_group((stack, win) -> first(win.ti_idx), ctx)
-    return (; first_ti, again)
+    first_t = Gustavo.each_group(_first_time, ctx)
+    again = Gustavo.each_group(_first_time, ctx)
+    return (; first_t, again)
 end
 
 # A step whose `solve` returns something other than its diagnostics.
 struct _BadInfoStep <: Gustavo.SolveStep end
 Gustavo.solve(::_BadInfoStep, ctx) = 1.0
-
-# A transform with no apply_transform! implementation (error-path probe).
-struct _NoImpl <: Gustavo.Fring.AbstractDataTransform end
 
 # A model value that is not a `GainComponent`.
 struct _OpaqueTerm end
@@ -40,21 +40,21 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         s = _ProtoProbe()
         @test Gustavo.model_components(s, nothing) == GainModel()
         @test Gustavo.provides(s) == :nothing
-        uvset, _ = _build_fringe_uvset()
+        ps, _ = _build_fringe_ps()
         @test_throws "does not define `Gustavo.solve(::_ProtoProbe, ctx)`" fit(
-            _ProtoProbe(), uvset; gauge = PinAntenna(1),
+            _ProtoProbe(), ps; gauge = PinAntenna(1),
         )
-        @test_throws "must return a NamedTuple" fit(_BadInfoStep(), uvset; gauge = PinAntenna(1))
+        @test_throws "must return a NamedTuple" fit(_BadInfoStep(), ps; gauge = PinAntenna(1))
     end
 
     @testset "a step drives its own passes with each_group" begin
-        uvset, _ = _build_fringe_uvset(; nscans = 3)
-        sol = fit(_TwoPassStep(), uvset; gauge = PinAntenna(1))
+        ps, _ = _build_fringe_ps(; nscans = 3)
+        sol = fit(_TwoPassStep(), ps; gauge = PinAntenna(1))
         info = stage_info(sol, :twopass)
         # One result per scan group, in the same group order on every pass.
-        @test length(info.first_ti) == sol.info.nscan == 3
-        @test allunique(info.first_ti)
-        @test info.again == info.first_ti
+        @test length(info.first_t) == sol.info.nscan == 3
+        @test allunique(info.first_t)
+        @test info.again == info.first_t
         # The runner's timing covers both passes of every group.
         @test info.t_pass > 0
         @test length(info.timing.work) == 3 && all(>(0), info.timing.decode)
@@ -90,10 +90,10 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
     @testset "a step fit on a scan subset, carried into the full fit" begin
         nant, nspw, nchan = 4, 2, 8
         bp = [a == 1 ? 0.0 : 0.3 * sin(0.4 * c + a + f) for a in 1:nant, f in 1:2, c in 1:(nspw * nchan)]
-        uvset, _ = _build_fringe_uvset(; nant, nspw, nchan, nscans = 3, bandpass = bp)
-        sub = UVP.select_partition(uvset; scan = "3")
+        ps, _ = _build_fringe_ps(; nant, nspw, nchan, nscans = 3, bandpass = bp)
+        sub = XRadio.query(ps; scan_name = "3")
         gauge = PinAntenna(1)
-        fr = fit(BaselineFringeFit(), uvset; gauge)
+        fr = fit(BaselineFringeFit(), ps; gauge)
         # The scans' fringe phases differ, so the full-set solution corrects the
         # subset exactly as a fit on the subset alone does only if each of its
         # scans' gains lands on that scan.
@@ -101,17 +101,17 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         bp_sub = fit(ApplySolution(fr) |> Bandpass(), sub; gauge)
         @test bp_sub.steps[1].θ ≈ fit(ApplySolution(fr3) |> Bandpass(), sub; gauge).steps[1].θ atol = 1.0e-10
         # Noise-free and time-constant: one scan determines the bandpass all three do.
-        @test bp_sub.steps[1].θ ≈ fit(ApplySolution(fr) |> Bandpass(), uvset; gauge).steps[1].θ atol = 1.0e-6
+        @test maximum(abs, bp_sub.steps[1].θ .- fit(ApplySolution(fr) |> Bandpass(), ps; gauge).steps[1].θ) < 1.0e-6
 
-        sol = fit(ApplySolution(fr) |> ApplySolution(bp_sub) |> AdhocPhase(), uvset; gauge)
+        sol = fit(ApplySolution(fr) |> ApplySolution(bp_sub) |> AdhocPhase(), ps; gauge)
         @test sol.sequence[1] isa ApplySolution && sol.sequence[2] isa ApplySolution
-        @test calibrate(sol, uvset) isa UVP.UVSet
+        @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
     @testset "a fit without a gauge throws, naming the stations" begin
-        uvset, _ = _build_fringe_uvset()
-        @test_throws "no gauge given" fit(BaselineFringeFit(), uvset)
-        @test_throws join(Gustavo._antenna_names(uvset), ", ") fit(BaselineFringeFit(), uvset)
+        ps, _ = _build_fringe_ps()
+        @test_throws "no gauge given" fit(BaselineFringeFit(), ps)
+        @test_throws "A1, A2, A3, A4" fit(BaselineFringeFit(), ps)
     end
 
     @testset "steps compose in any declared order" begin
@@ -141,8 +141,8 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test br.solve_steps == [BaselineFringeFit(), _ThirdPartyStep()]
     end
 
-    @testset "chaining builds a vector" begin
-        cf = CalFunction((stack, win) -> nothing)
+    @testset "chaining builds a tuple" begin
+        cf = StationWeightScale(DimArray([2.0], XRadio.AntennaName(["A1"])))
         chain = cf |> BaselineFringeFit() |> Bandpass()
         @test chain isa Tuple
         @test chain[1] === cf && chain[2] isa BaselineFringeFit && chain[3] isa Bandpass
@@ -153,70 +153,9 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test_throws MethodError BaselineFringeFit() |> AverageFrequency(nout = 1)
     end
 
-    @testset "transforms on a scan stack + geometry window" begin
-        # Built the way production builds them — a real (tiny) leaf, the stack
-        # selected off it — there is no raw-array assembly path.
-        uvsmall, _ = _build_fringe_uvset(
-            nant = 3, nspw = 1, nchan = 4, ntime = 3, pol_labels = ["PP", "QQ"],
-        )
-        geom = CAL.build_geometry(uvsmall)
-        leaf = UVP.materialize_leaf(last(first(UVP.branches(uvsmall))))
-        scanname = UVP.metadata(leaf).scan_name
-        function mkwindow()
-            parent(leaf[:vis]) .= 1
-            parent(leaf[:weights]) .= 1
-            parent(leaf[:flags]) .= false
-            return leaf[(:vis, :weights, :flags)], CAL.leaf_window(geom, leaf)
-        end
-
-        # StationWeightScale: w → w·s_a·s_b per baseline; vis untouched.
-        stack, win = mkwindow()
-        apply_transform!(StationWeightScale([2.0, 3.0, 5.0]), stack, win)
-        W = stack[:weights]
-        @test all(W[:, :, 1, :] .== 6)
-        @test all(W[:, :, 2, :] .== 10)
-        @test all(W[:, :, 3, :] .== 15)
-        @test all(stack[:vis] .== 1)
-        @test_throws ErrorException StationWeightScale([1.0, -1.0, 1.0])
-        @test_throws ErrorException apply_transform!(StationWeightScale([1.0]), mkwindow()...)
-
-        # FlagChannels: sets the flag on the named GLOBAL channels only, and
-        # leaves every weight alone.
-        stack, win = mkwindow()
-        apply_transform!(FlagChannels(BitVector([true, false, false, true])), stack, win)
-        F = stack[:flags]
-        @test all(F[1, :, :, :]) && all(F[4, :, :, :])
-        @test !any(F[2:3, :, :, :])
-        @test all(stack[:weights] .== 1)
-        @test_throws ErrorException apply_transform!(FlagChannels(trues(3)), mkwindow()...)
-
-        # CalFunction: arbitrary per-(scan, baseline) mutation — the pain point.
-        stack, win = mkwindow()
-        hook = CalFunction() do st, w
-            scan_name(st) == scanname || return
-            for (bi, (a, b)) in enumerate(baselines(st).pairs)
-                minmax(a, b) == (1, 3) && (st[:weights][BaselineID = bi] .*= 0.5)
-            end
-        end
-        apply_transform!(hook, stack, win)
-        W = stack[:weights]
-        @test all(W[:, :, 2, :] .== 0.5)
-        @test all(W[:, :, 1, :] .== 1) && all(W[:, :, 3, :] .== 1)
-
-        # Chains run in order; `nothing` chain is a no-op.
-        stack, win = mkwindow()
-        ST.apply_transforms!([StationWeightScale([2.0, 1.0, 1.0]), hook], stack, win)
-        @test all(stack[:weights][:, :, 2, :] .== 1.0)   # (1,3): 2·1 then ×0.5
-        ST.apply_transforms!(nothing, stack, win)
-
-        # A transform without an implementation errors loudly.
-        @test_throws ErrorException apply_transform!(_NoImpl(), mkwindow()...)
-        @test_throws ErrorException FP.apply_transform(first(_build_fringe_uvset()), _NoImpl())
-    end
-
     @testset "full pipeline: stage provenance and snapshots" begin
-        uvset, _ = _build_fringe_uvset()
-        sol = fit(_full_chain(), uvset; gauge = PinAntenna(1))
+        ps, _ = _build_fringe_ps()
+        sol = fit(_full_chain(), ps; gauge = PinAntenna(1))
 
         @test sol isa CAL.CalibrationSolution
         @test keys(sol) == [:fringe, :bandpass, :adhoc]
@@ -267,7 +206,7 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test_throws "at least one step" sol[2:1]
 
         # A snapshot is a valid solution: it applies cleanly.
-        @test UVP.apply_calibration(uvset, fr) isa UVP.UVSet
+        @test calibrate(fr, ps) isa XRadio.ProcessingSet
         @test stage_info(sol, :fringe) isa NamedTuple
 
         # Gains factor multiplicatively over components: the elementwise
@@ -284,8 +223,8 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
     end
 
     @testset "solution container and selection algebra" begin
-        uvset, _ = _build_fringe_uvset()
-        sol = fit(_full_chain(), uvset; gauge = PinAntenna(1))
+        ps, _ = _build_fringe_ps()
+        sol = fit(_full_chain(), ps; gauge = PinAntenna(1))
 
         # Container contract: length/eachindex/keys/haskey, and iteration
         # yields each step as a single-step solution.
@@ -310,7 +249,7 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test !isempty(comps)
         csel = sol[:fringe, :phase, first(comps)]
         @test csel isa CAL.CalibrationSolution
-        @test UVP.apply_calibration(uvset, csel) isa UVP.UVSet
+        @test calibrate(csel, ps) isa XRadio.ProcessingSet
         # Chained selection descends into the selected subtree.
         @test parent(gains(sol[:fringe, :phase][:fringe, first(comps)])) ==
             parent(gains(csel))
@@ -328,40 +267,49 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
     end
 
     @testset "calibrate replays the recorded transforms (weight scale)" begin
-        uvset, _ = _build_fringe_uvset()
-        ws = [1.0, 0.5, 1.0, 2.0]
-        sol = fit(StationWeightScale(ws) |> _full_chain(), uvset; gauge = PinAntenna(1))
+        ps, _ = _build_fringe_ps()
+        ws = DimArray([1.0, 0.5, 1.0, 2.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
+        sol = fit(StationWeightScale(ws) |> _full_chain(), ps; gauge = PinAntenna(1))
         @test length(recorded_transforms(sol)) == 1
         @test recorded_transforms(sol)[1] isa StationWeightScale
-        @test recorded_transforms(sol)[1].s == ws
+        @test recorded_transforms(sol)[1].scale == ws
 
-        out = calibrate(sol, uvset; post = AverageFrequency(nout = 1))
-        ref = AverageFrequency(nout = 1)(Gustavo.UVData.apply_calibration(uvset, sol))
-        @test Set(keys(DimensionalData.branches(out))) == Set(keys(DimensionalData.branches(ref)))
-        for (k, leaf) in DimensionalData.branches(ref)
-            V = parent(DimensionalData.branches(out)[k][:vis])
-            @test size(V) == size(parent(leaf[:vis]))
-            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(parent(leaf[:vis]), V))
-            @test parent(DimensionalData.branches(out)[k][:weights]) ≈ parent(leaf[:weights])
+        # Replaying the recorded weight scale is the same as scaling the data
+        # first and calibrating with a solution that records no correction.
+        scaled = XRadio.ProcessingSet(
+            OrderedDict{Symbol, XRadio.MeasurementSet}(
+                k => StationWeightScale(ws)(read(ms)) for (k, ms) in pairs(ps)
+            ),
+            copy(DimensionalData.metadata(ps)),
+        )
+        bare = CAL.CalibrationSolution(
+            sol.steps, sol.geom, sol.info; sequence = sol.sequence[2:end], sol.gauge,
+        )
+        out = calibrate(sol, ps)
+        ref = calibrate(bare, scaled)
+        @test collect(keys(out)) == collect(keys(ref))
+        for (k, ms) in pairs(ref)
+            @test isequal(parent(out[k][:visibility]), parent(ms[:visibility]))
+            @test parent(out[k][:weight]) == parent(ms[:weight])
         end
 
         # Two weight-scale transforms compose (w·(s_a s_b)²), and both are
         # recorded. Two pipelines join by splatting.
-        sol_b = fit(((StationWeightScale(ws) |> StationWeightScale(ws))..., _full_chain()...), uvset; gauge = PinAntenna(1))
+        sol_b = fit(((StationWeightScale(ws) |> StationWeightScale(ws))..., _full_chain()...), ps; gauge = PinAntenna(1))
         @test length(recorded_transforms(sol_b)) == 2
-        @test parent(gains(fit(StationWeightScale(ws .* ws) |> _full_chain(), uvset; gauge = PinAntenna(1)))) ≈
+        @test parent(gains(fit(StationWeightScale(ws .* ws) |> _full_chain(), ps; gauge = PinAntenna(1)))) ≈
             parent(gains(sol_b))
 
         # A transform listed after a step does not reach that step.
-        early = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
-        late = fit(BaselineFringeFit() |> StationWeightScale(ws), uvset; gauge = PinAntenna(1))
+        early = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
+        late = fit(BaselineFringeFit() |> StationWeightScale(ws), ps; gauge = PinAntenna(1))
         @test parent(gains(late)) == parent(gains(early))
     end
 
     @testset "rate components must share the constant-phase epoch" begin
         # Two scans: the per-scan rate's origins (scan centers) then cannot
         # all coincide with the track-wide rate's single origin.
-        uvset, _ = _build_fringe_uvset(nscans = 2)
+        ps, _ = _build_fringe_ps(nscans = 2)
         # A second rate on a different time segmentation puts its origin in a
         # different place, so no single epoch zeroes both rate coordinates;
         # the fit rejects the model before its fringe pass reads any data.
@@ -369,12 +317,13 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
             default_fringe_terms();
             phase = (; rate2 = GainComponent(Rate(); Ti = GlobalTime(), Feed = SingleFeed(2))),
         )
-        @test_throws "disagree on the epoch" fit(BaselineFringeFit(model = bad), uvset; gauge = PinAntenna(1))
+        @test_throws "disagree on the epoch" fit(BaselineFringeFit(model = bad), ps; gauge = PinAntenna(1))
     end
 
     @testset "solution serialization round-trip; older files refused" begin
-        uvset, _ = _build_fringe_uvset()
-        sol = fit(StationWeightScale([1.0, 0.5, 1.0, 1.0]) |> _full_chain(), uvset; gauge = PinAntenna(1))
+        ps, _ = _build_fringe_ps()
+        ws = DimArray([1.0, 0.5, 1.0, 1.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
+        sol = fit(StationWeightScale(ws) |> _full_chain(), ps; gauge = PinAntenna(1))
         path = joinpath(mktempdir(), "sol.jls")
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)
@@ -397,7 +346,7 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         pathm = joinpath(mktempdir(), "solm.jls")
         CAL.save_solution(pathm, solm)
         @test ismissing(first(CAL.load_solution(pathm).sequence))
-        @test_throws "did not survive" calibrate(solm, uvset)
+        @test_throws "did not survive" calibrate(solm, ps)
 
         # Pre-v6 wrappers used a different solution shape; they are refused
         # rather than misread, so a caller re-solves instead of loading a stale

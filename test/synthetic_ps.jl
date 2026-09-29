@@ -44,6 +44,7 @@ keywords always give the same data.
 - `omit_station`: a station index in the antenna dataset but on no baseline.
 - `station_gains = false`: zero delay, rate, phase and screen, leaving the
   bandpass as the only station gain.
+- `eltype`: the visibilities' element type.
 """
 function _build_fringe_ps(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
@@ -54,7 +55,7 @@ function _build_fringe_ps(;
         bandpass = nothing, amp_bandpass = nothing, dtec = nothing,
         feed_common = false, station_rate = nothing, rel_rate = nothing,
         spw_origins = nothing, station_positions = nothing, omit_station = nothing,
-        station_gains = true,
+        station_gains = true, eltype = ComplexF32,
     )
     rng = StableRNG(seed)
     names = ["A$i" for i in 1:nant]
@@ -121,6 +122,7 @@ function _build_fringe_ps(;
             polarizations, integration_time = integration, channel_width = chan_bw,
             reference_frequency = ref_freq, spectral_window = "band_$b",
             scan = string(s), field = "SRC1", source = "SRC1", direction = (1.234, -0.56),
+            eltype,
         )
         feeds = Gustavo.UVData.feed_pairs(ms)
         ant1 = [index[n] for n in ms[:baseline_antenna1_name]]

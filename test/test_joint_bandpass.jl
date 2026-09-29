@@ -22,7 +22,22 @@
 # no baseline term at all — so that is where the joint solve's structural
 # advantage is unambiguous.
 
-@isdefined(_build_fringe_uvset) || include("synthetic_uvset.jl")
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
+
+# Multiply each (scan, baseline, product) of `ps` by `amp·cis(phase)`, indexed
+# `[scan, baseline, product]` in each Measurement Set's own baseline and product
+# order: per-scan source structure the station gains cannot absorb.
+function _scale_sources!(ps, amp, phase)
+    for ms in values(ps)
+        s = parse(Int, only(unique(ms[:scan_name])))
+        V = DimensionalData.modify(Array, ms[:visibility])
+        for p in axes(amp, 3), bi in axes(amp, 2)
+            view(V, BaselineID(bi), Polarization(p)) .*= ComplexF32(amp[s, bi, p] * cis(phase[s, bi, p]))
+        end
+        ms[:visibility] = V
+    end
+    return ps
+end
 
 @testset "Bandpass(smoother = JointSmoother()): recovers the bandpass under per-baseline/pol source structure" begin
     nant, nspw, nchan, ntime, nscans = 4, 1, 8, 6, 6
@@ -30,22 +45,16 @@
     nglob = nspw * nchan
     bp_true = 0.4 .* randn(rng, nant, 2, nglob)
     abp_true = 0.15 .* randn(rng, nant, 2, nglob)
-    uvset, truth = _build_fringe_uvset(;
+    ps, truth = _build_fringe_ps(;
         nant, nspw, nchan, ntime, nscans, bandpass = bp_true, amp_bandpass = abp_true,
         seed = 99,
     )
 
     nbl = length(truth.bl_pairs)
-    npol = length(truth.pol_labels)
+    npol = length(truth.polarizations)
     src_amp = 0.4 .+ 1.6 .* rand(rng, nscans, nbl, npol)
     src_phase = (2 .* rand(rng, nscans, nbl, npol) .- 1) .* pi
-    for (_, leaf) in DimensionalData.branches(uvset)
-        s = parse(Int, DimensionalData.metadata(leaf).scan_name)
-        V = leaf[:vis]
-        for p in 1:npol, bi in 1:nbl
-            V[:, :, bi, p] .*= ComplexF32(src_amp[s, bi, p] * cis(src_phase[s, bi, p]))
-        end
-    end
+    _scale_sources!(ps, src_amp, src_phase)
 
     fm = default_fringe_terms()
     # `ref_ant` indexes the truth arrays below; `gauge` is what the solve takes.
@@ -53,7 +62,7 @@
     gauge = PinAntenna(ref_ant)     # the gauge every test here passes to `fit`
     sol_closure = fit(
         [BaselineFringeFit(model = fm), Bandpass(smoother = FP.PerTrackSmoother())],
-        uvset,
+        ps,
         exec = ExecutionConfig(),
         gauge = PinAntenna(1),
     )
@@ -64,7 +73,7 @@
     sol_joint = fit(
         [BaselineFringeFit(model = fm),
             Bandpass(smoother = FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-10))],
-        uvset,
+        ps,
         exec = ExecutionConfig(),
         gauge = PinAntenna(1),
     )
@@ -128,7 +137,7 @@ end
     rng = MersenneTwister(0x101A)
     bp_true = 0.4 .* randn(rng, nant, 2, nglob)
     abp_true = 0.15 .* randn(rng, nant, 2, nglob)
-    uvset, _ = _build_fringe_uvset(;
+    ps, _ = _build_fringe_ps(;
         nant, nspw, nchan, ntime, nscans,
         bandpass = bp_true, amp_bandpass = abp_true, seed = 21,
     )
@@ -137,7 +146,7 @@ end
     runbp(sm; prior = nothing) = fit(
         [BaselineFringeFit(model = fm),
             Bandpass(model = CAL.GainModel(; phase = (; bandpass = bpc(prior)), logamp = (; bandpass = bpc(prior))), smoother = sm)],
-        uvset,
+        ps,
         exec = ExecutionConfig(), gauge = PinAntenna(1),
     )[:bandpass].steps[1]
 
@@ -181,27 +190,21 @@ end
     rng = MersenneTwister(0x9A17)
     bp_true = 0.4 .* randn(rng, nant, 2, nglob)
     abp_true = 0.25 .* randn(rng, nant, 2, nglob)
-    uvset, truth = _build_fringe_uvset(;
+    ps, truth = _build_fringe_ps(;
         nant, nspw, nchan, ntime, nscans,
         bandpass = bp_true, amp_bandpass = abp_true, seed = 33,
     )
     # Per-(scan, baseline, pol) structure: what the joint tier exists to absorb,
     # and what biases the closure.
-    nbl = length(truth.bl_pairs); npol = length(truth.pol_labels)
+    nbl = length(truth.bl_pairs); npol = length(truth.polarizations)
     samp = 0.4 .+ 1.6 .* rand(rng, nscans, nbl, npol)
     sph = (2 .* rand(rng, nscans, nbl, npol) .- 1) .* pi
-    for (_, leaf) in DimensionalData.branches(uvset)
-        sc = parse(Int, DimensionalData.metadata(leaf).scan_name)
-        V = leaf[:vis]
-        for p in 1:npol, bi in 1:nbl
-            V[:, :, bi, p] .*= ComplexF32(samp[sc, bi, p] * cis(sph[sc, bi, p]))
-        end
-    end
+    _scale_sources!(ps, samp, sph)
 
     fm = default_fringe_terms()
     runbp(sm) = fit(
         [BaselineFringeFit(model = fm), Bandpass(smoother = sm)],
-        uvset,
+        ps,
         exec = ExecutionConfig(), gauge = PinAntenna(1),
     )[:bandpass].steps[1]
     s_joint = runbp(FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-12))
