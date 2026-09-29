@@ -4,8 +4,8 @@
 #     out = calibrate(sol, ps; post)               # apply
 #
 # `fit` runs each solve step's `solve` on the data as the corrections and steps
-# before it leave it. `calibrate` replays the recorded sequence over each
-# Measurement Set, then the flags and `post`.
+# before it leave it. `calibrate` divides each Measurement Set by the solution's
+# gains, then applies its flags and `post`.
 
 # A solve's parallelism is across scan groups and, within a group, across
 # baselines; each task's WLS/QR solve is small. Multithreaded BLAS underneath
@@ -41,12 +41,10 @@ processing set of one.
 one `fit` throws, naming the stations. `exec` (an [`ExecutionConfig`](@ref))
 supplies the run's schedulers, memory budget and progress callback.
 
-The solution records the pipeline as a tuple (`sol.sequence`) and the gauge
-(`sol.gauge`), so `fit(sol.sequence, ps; sol.gauge)` repeats the run and
-[`calibrate`](@ref)`(sol, ps)` replays it. `sol[:fringe]` selects one step,
-`sol[1:i]` the cumulative view through step `i`, and [`stage_info`](@ref) a
-step's diagnostics. Solving `A |> B` is equivalent to `sa = fit(A, ps)`
-followed by `fit(ApplySolution(sa[provides(A)]) |> B, ps)`.
+The solution is a [`CalibrationSolution`](@ref): a list of solved components,
+each step's diagnostics in `sol.steps`, and the pipeline and gauge as text in
+`sol.provenance`. Solving `A |> B` is equivalent to `sa = fit(A, ps)` followed
+by `fit(ApplySolution(sa[provides(A)]) |> B, ps)`.
 """
 function StatsAPI.fit(
         pipeline::Union{Tuple, AbstractVector}, ps::XRadio.ProcessingSet;
@@ -66,14 +64,19 @@ StatsAPI.fit(x::PipelineElement, data::Union{XRadio.ProcessingSet, XRadio.Measur
     calibrate(sol::CalibrationSolution, ps::ProcessingSet;
               post = identity, apply_flags = true, exec = ExecutionConfig()) -> ProcessingSet
 
-Apply a fitted solution to data: each Measurement Set of `ps` is read, passed
-through `sol.sequence` in order (each correction as recorded, each solve step
-as that step's gains), then the solution's flags, then `post`, a function from
-a Measurement Set to a Measurement Set. A gain cell that is zero or non-finite
-gives a NaN visibility and a flag.
+Apply a fitted solution, or any selection of one (`sol[:bandpass]`,
+`sol[:fringe, :phase, :mbd]`, `filter(pred, sol)`), to data: each Measurement
+Set of `ps` is read and divided by the gains of the components `sol` holds,
+then the flags of its steps and `post`, a function from a Measurement Set to a
+Measurement Set, are applied. A gain cell that is zero or non-finite gives a NaN visibility and a
+flag.
+
+The corrections the fit's pipeline applied before solving (such as
+[`AutocorrelationNormalization`](@ref)) are not part of the solution; apply
+them to `ps` first.
 
 `apply_flags` (default `true`) flags the baselines of each (station, scan)
-the fringe solve left unconstrained: their gains are identity, so the data
+a step of `sol` left unconstrained (the fringe step records these): their gains are identity, so the data
 would pass through uncalibrated. The flagged samples keep their visibilities
 and weights.
 
@@ -86,20 +89,15 @@ function calibrate(
         post = identity, apply_flags::Bool = true,
         exec::ExecutionConfig = ExecutionConfig(),
     )
-    any(ismissing, sol.sequence) && throw(
-        ArgumentError(
-            "calibrate: this solution records a pipeline element that did not survive " *
-                "serialization (saved as `missing`) — re-fit, or apply it manually."
-        )
-    )
+    app = Calibration._applied(sol)
     geom = DataGeometry(ps)
-    replay = _replay_sequence(sol)
-    flagged = apply_flags ? _solution_flag_sets(sol.info) : nothing
+    flagged = apply_flags ? _solution_flag_sets(sol) : nothing
     names = collect(keys(ps))
     members = collect(values(ps))
     out = _map_groups(members, zeros(Int, length(members)), exec; stage = :output) do ms
-        corrected = _apply_corrections(replay, read(ms), geom)
-        post(_flag_unconstrained(corrected, sol, geom, flagged))
+        m = read(ms)
+        corrected = _divide_gains(m, GeometryWindow(geom, m), app; flag_bad = true)
+        post(_flag_unconstrained(corrected, sol.geom, geom, flagged))
     end
     return XRadio.ProcessingSet(
         OrderedDict{Symbol, XRadio.MeasurementSet}(names .=> out),
@@ -125,56 +123,25 @@ calibrate(
     kwargs...,
 ) = UVData.apply_calibration(uvset, spw_cals; kwargs...)
 
-# The gains of one solved step, as `calibrate` applies them: a degenerate gain
-# cell flags the sample.
-struct _StepGains{S <: CalibrationSolution}
-    sol::S
-end
-
-_correct(g::_StepGains, ms::XRadio.MeasurementSet, geom::DataGeometry) =
-    _divide_gains(ms, GeometryWindow(geom, ms), g.sol; flag_bad = true)
-
-# `sol.sequence` as corrections, each solve step replaced by its own gains.
-function _replay_sequence(sol::CalibrationSolution)
-    replay = Any[]
-    k = 0
-    for x in sol.sequence
-        if x isa SolveStep
-            k += 1
-            push!(replay, _StepGains(sol[k]))
-        else
-            push!(replay, x)
+# The unconstrained (station, scan id) pairs the steps of `sol` record, as a
+# lookup set, `nothing` when they record none.
+function _solution_flag_sets(sol::CalibrationSolution)
+    flagged = Set{Tuple{Int, Int}}()
+    for info in values(sol.steps)
+        haskey(info, :flagged_ant) || continue
+        for i in eachindex(info.flagged_ant, info.flagged_scan)
+            push!(flagged, (Int(info.flagged_ant[i]), Int(info.flagged_scan[i])))
         end
     end
-    k == length(sol.steps) || throw(
-        ArgumentError(
-            "calibrate: the solution records $(length(sol.steps)) solved step(s) but its " *
-                "sequence lists $k"
-        )
-    )
-    return replay
-end
-
-Calibration.recorded_transforms(sol::CalibrationSolution) =
-    Any[x for x in sol.sequence if !(x isa SolveStep)]
-
-# The solution's unconstrained (station, scan id) pairs as a lookup set,
-# `nothing` when the solution records none.
-function _solution_flag_sets(info::NamedTuple)
-    (haskey(info, :flagged_ant) && !isempty(info.flagged_ant)) || return nothing
-    return Set{Tuple{Int, Int}}(
-        (Int(info.flagged_ant[i]), Int(info.flagged_scan[i]))
-            for i in eachindex(info.flagged_ant)
-    )
+    return isempty(flagged) ? nothing : flagged
 end
 
 # Flag the samples of each baseline touching a (station, scan) in `flagged`,
-# stations and scans being the solution's own, matched by name.
-function _flag_unconstrained(ms::XRadio.MeasurementSet, sol::CalibrationSolution, geom::DataGeometry, flagged)
+# stations and scans indexing the solution's geometry `solgeom`, matched by name.
+function _flag_unconstrained(ms::XRadio.MeasurementSet, solgeom::DataGeometry, geom::DataGeometry, flagged)
     flagged === nothing && return ms
-    solnames = _solution_ant_names(sol)
-    station = [something(findfirst(==(n), solnames), 0) for n in geom.stations]
-    scan = [something(findfirst(==(String(c)), sol.geom.scan_names), 0) for c in ms[:scan_name]]
+    station = [something(findfirst(==(n), solgeom.stations), 0) for n in geom.stations]
+    scan = [something(findfirst(==(String(c)), solgeom.scan_names), 0) for c in ms[:scan_name]]
     flag = modify(Array, ms[:flag])
     hit = false
     for (bi, (a, b)) in pairs(GeometryWindow(geom, ms).stations)
@@ -215,7 +182,8 @@ function _run_pipeline(
     _check_memory_budget(charges, exec)
     spec = (; geom)
     corrections = Any[]
-    step_solutions = StepSolution[]
+    components = SolvedComponent[]
+    steps = OrderedDict{Symbol, NamedTuple}()
     for (st, before) in zip(br.solve_steps, br.before)
         append!(corrections, before)
         ctx = _step_context(st, spec, gauge, groups, charges, copy(corrections), exec)
@@ -227,17 +195,17 @@ function _run_pipeline(
                     "diagnostics, got a $(typeof(info))",
             ),
         )
-        push!(
-            step_solutions,
-            StepSolution(provides(st), ctx.model, ctx.layout, ctx.θ, _with_timing(info, ctx, t0)),
-        )
-        # Each step's θ is undivided (it solves its own private model), so it
-        # joins the corrections as-is and every later step reads corrected data.
-        push!(corrections, ApplySolution(_step_precal(st, ctx, geom)))
+        stepsol = CalibrationSolution(ctx.model, ctx.layout, geom, ctx.θ; name = provides(st))
+        append!(components, stepsol.components)
+        steps[provides(st)] = _with_timing(info, ctx, t0)
+        # Every later step reads data corrected by this one; a step that
+        # compiled no components corrects nothing.
+        isempty(stepsol.components) || push!(corrections, ApplySolution(stepsol))
     end
     return CalibrationSolution(
-        step_solutions, geom, _run_info(step_solutions, br, geom, groups, exec);
-        sequence = Tuple(br.sequence), gauge = gauge_spec,
+        geom, components, steps, _run_info(br, groups, exec);
+        pipeline = join((sprint(show, x; context = :limit => true) for x in br.sequence), " |> "),
+        gauge = sprint(show, gauge_spec),
     )
 end
 
@@ -273,29 +241,10 @@ function _with_timing(info::NamedTuple, ctx::SolveContext, t0::UInt64)
     return (; info..., t_pass = (time_ns() - t0) / 1.0e9, timing)
 end
 
-# One finished step's own solution, as the correction a later step divides out.
-# `ApplySolution` matches stations by NAME and refuses a solution that names
-# none, so the station table is recorded here as it is on the run's own
-# solution.
-_step_precal(st, c::SolveContext, geom::DataGeometry) = CalibrationSolution(
-    c.model, c.layout, geom, c.θ, (; ant_names = copy(geom.stations));
-    name = provides(st),
-)
-
-# The solution-level `info`: run-wide fields, plus the fringe step's
-# unconstrained (station, scan) flags, which `calibrate` applies, and its
-# search configuration. Every other per-step diagnostic lives on that step's
-# `StepSolution.info` (`stage_info(sol, name)`).
-function _run_info(step_solutions, br, geom, groups, exec)
-    ffi = findfirst(st -> st isa BaselineFringeFit, br.solve_steps)
-    ff_info = ffi === nothing ? nothing : step_solutions[ffi].info
+# The run-wide diagnostics. Each step's own diagnostics are `sol.steps[name]`.
+function _run_info(br, groups, exec)
     return (;
-        nant = length(geom.stations),
         nscan = length(groups),
-        flagged_ant = ff_info === nothing ? Int[] : ff_info.flagged_ant,
-        flagged_scan = ff_info === nothing ? Int[] : ff_info.flagged_scan,
-        ant_names = copy(geom.stations),
-        (ffi === nothing ? (;) : (; search = br.solve_steps[ffi].search))...,
         precal_applied = any(t -> t isa ApplySolution, Iterators.flatten(br.before)),
         ntasks_used = max_tasks(outer_executor(exec)),
         inner_tasks = max_tasks(inner_executor(exec)),
@@ -305,25 +254,20 @@ end
 # ── Pipeline parsing ─────────────────────────────────────────────────────────
 
 # Step order is never validated here — a step that cannot do its job with the
-# data it is handed fails at the point of use (its own solve kernel), the same
-# pattern `apply_calibration`'s data-level guards use. Only
-# `provides`'s NAMING role is checked: two steps sharing a non-`:nothing`
-# capability would silently collide in the by-name lookup behind `sol[name]`
-# (a `findfirst`, so the second step's solution would be unreachable) — that is a naming conflict, not an ordering rule, so it stays
-# a construction-time error regardless of where the two steps sit.
+# data it is handed fails at the point of use (its own solve kernel). Only
+# `provides`'s naming role is checked: a step's components and diagnostics are
+# keyed by it, so two steps sharing a value would collide.
 function _check_unique_provides(solve_steps::Vector{SolveStep})
     provided = Symbol[]
     for s in solve_steps
         p = provides(s)
-        if p !== :nothing
-            p in provided && throw(
-                ArgumentError(
-                    "fit: more than one step provides :$p — exactly one is " *
-                        "allowed per pipeline."
-                )
+        p in provided && throw(
+            ArgumentError(
+                "fit: more than one step provides :$p; a step's solution is keyed by " *
+                    "`provides`, so the names must be distinct."
             )
-            push!(provided, p)
-        end
+        )
+        push!(provided, p)
     end
     return nothing
 end

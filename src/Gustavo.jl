@@ -73,11 +73,10 @@ export supports_station_heterogeneity
 export AbstractDataTransform, AutocorrelationNormalization, ApplySolution,
     StationWeightScale, FlagChannels
 export search_scan
-# The solution surface: the container, selection (`sol[...]`), the two verbs,
-# and serialization.
-export CalibrationSolution, StepSolution, stage_info
-export component_names, gains, parameters
-export save_solution, load_solution, recorded_transforms
+# The solution surface: the container, its components, and serialization.
+export CalibrationSolution, SolvedComponent
+export gains
+export save_solution, load_solution
 
 # A step author extends `solve`; unexported because the name is common.
 @static if VERSION >= v"1.11"

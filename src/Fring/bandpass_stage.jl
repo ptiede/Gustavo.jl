@@ -786,7 +786,7 @@ _block_status_array(block, geom::DataGeometry) = _track_status_array(
 _block_prior_array(block, geom::DataGeometry) =
     _track_prior_array(geom.stations[block.stations], geom, block.plan, block.plan.shape[4])
 
-# One entry per station block, keyed `g1, g2, …` as `parameters(sol)` keys a
+# One entry per station block, keyed `g1, g2, …` as a `CalibrationSolution` keys a
 # station-heterogeneous component's leaves; a single block is its own array.
 _block_leaves(arrays) = isempty(arrays) ? nothing :
     length(arrays) == 1 ? only(arrays) :

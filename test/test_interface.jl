@@ -35,6 +35,9 @@ struct _OpaqueTerm end
 # The full three-stage production pipeline at defaults.
 _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
 
+# Every parameter of a solution, in component order.
+_all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
+
 @testset "Composable pipeline interface" begin
     @testset "step protocol defaults" begin
         s = _ProtoProbe()
@@ -50,7 +53,7 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
     @testset "a step drives its own passes with each_group" begin
         ps, _ = _build_fringe_ps(; nscans = 3)
         sol = fit(_TwoPassStep(), ps; gauge = PinAntenna(1))
-        info = stage_info(sol, :twopass)
+        info = sol.steps[:twopass]
         # One result per scan group, in the same group order on every pass.
         @test length(info.first_t) == sol.info.nscan == 3
         @test allunique(info.first_t)
@@ -99,12 +102,12 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         # scans' gains lands on that scan.
         fr3 = fit(BaselineFringeFit(), sub; gauge)
         bp_sub = fit(ApplySolution(fr) |> Bandpass(), sub; gauge)
-        @test bp_sub.steps[1].θ ≈ fit(ApplySolution(fr3) |> Bandpass(), sub; gauge).steps[1].θ atol = 1.0e-10
+        @test _all_params(bp_sub) ≈ _all_params(fit(ApplySolution(fr3) |> Bandpass(), sub; gauge)) atol = 1.0e-10
         # Noise-free and time-constant: one scan determines the bandpass all three do.
-        @test maximum(abs, bp_sub.steps[1].θ .- fit(ApplySolution(fr) |> Bandpass(), ps; gauge).steps[1].θ) < 1.0e-6
+        @test maximum(abs, _all_params(bp_sub) .- _all_params(fit(ApplySolution(fr) |> Bandpass(), ps; gauge))) < 1.0e-6
 
         sol = fit(ApplySolution(fr) |> ApplySolution(bp_sub) |> AdhocPhase(), ps; gauge)
-        @test sol.sequence[1] isa ApplySolution && sol.sequence[2] isa ApplySolution
+        @test startswith(sol.provenance.pipeline, "ApplySolution(fringe) |> ApplySolution(bandpass) |> AdhocPhase")
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
@@ -130,10 +133,11 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test_throws "more than one step provides :fringe" Gustavo._check_unique_provides(
             Gustavo.SolveStep[BaselineFringeFit(), BaselineFringeFit()]
         )
-        # provides(step) === :nothing never collides with itself.
-        @test Gustavo._check_unique_provides(
+        # Each step's solution is the branch named by `provides`, so the default
+        # `:nothing` collides with itself too.
+        @test_throws "more than one step provides :nothing" Gustavo._check_unique_provides(
             Gustavo.SolveStep[_ProtoProbe(), _ProtoProbe()]
-        ) === nothing
+        )
         # _parse_pipeline routes any SolveStep (built-in or third-party) into
         # solve_steps by abstract type alone, in declared order — it does not
         # reorder or reject based on that order.
@@ -153,150 +157,116 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         @test_throws MethodError BaselineFringeFit() |> AverageFrequency(nout = 1)
     end
 
-    @testset "full pipeline: stage provenance and snapshots" begin
+    @testset "full pipeline: components keyed by step" begin
         ps, _ = _build_fringe_ps()
         sol = fit(_full_chain(), ps; gauge = PinAntenna(1))
 
         @test sol isa CAL.CalibrationSolution
-        @test keys(sol) == [:fringe, :bandpass, :adhoc]
-        @test_throws ArgumentError sol[:bogus]
-        @test_throws "recorded stages: [:fringe, :bandpass, :adhoc]" sol[:bogus]
+        @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
+        @test unique(c.step for c in sol.components) == [:fringe, :bandpass, :adhoc]
+        @test all(c -> c isa CAL.SolvedComponent, sol.components)
+        @test sol.steps[:fringe] isa NamedTuple
+        @test sol.provenance.gauge == "PinAntenna{Int64}(1)"
+        @test_throws "holds no component under bogus" sol[:bogus]
 
-        # Component θ ranges: contiguous, disjoint, and tile 1:nθ — a per-step
-        # property now (each step owns its own layout, not a merged one).
-        for step in sol.steps
-            rng = [p.range for p in step.layout.plans]
-            @test length(rng) == length(step.layout.plans)
-            nonempty = [r for r in rng if !isempty(r)]
-            isempty(nonempty) && continue
-            @test first(first(nonempty)) == 1
-            @test last(last(nonempty)) == step.layout.nθ
-            for i in 2:length(nonempty)
-                @test first(nonempty[i]) == last(nonempty[i - 1]) + 1
-            end
-        end
+        # The fringe step's unconstrained stations and search settings are its
+        # own diagnostics.
+        @test haskey(sol.steps[:fringe], :flagged_ant)
+        @test sol.steps[:fringe].search isa Gustavo.Fring.FringeSearch
+        @test !haskey(sol.info, :flagged_ant) && !haskey(sol.info, :search)
 
-        # A `Symbol` selects that step alone; a range selects a run of them.
-        @test keys(sol[:adhoc]) == [:adhoc]
-
-        # Selecting every step reproduces the solution.
-        @test keys(sol[:]) == keys(sol)
-        @test parent(gains(sol[:])) == parent(gains(sol))
-
-        # A leading run carries only the steps up to and including that one —
-        # a later step contributes no gain there at all, rather than an
-        # explicit zeroed θ block over a shared layout.
-        fr = sol[1:1]
-        @test keys(fr) == [:fringe]
-        @test fr.steps[1].θ == sol.steps[1].θ
-        @test fr.steps[1].θ == sol[:fringe].steps[1].θ   # same step, selected either way
-
-        bp = sol[begin:2]
-        @test keys(bp) == [:fringe, :bandpass]
-        @test bp.steps[1].θ == sol.steps[1].θ
-        @test bp.steps[2].θ == sol.steps[2].θ
-
-        # `end` addresses the last step, and a selection keeps the provenance
-        # chains, so it stays replayable by `calibrate`.
-        @test keys(sol[end]) == [last(keys(sol))]
-        @test sol[:].sequence == sol.sequence
-        @test sol[:].gauge === sol.gauge
-        # A solution has at least one step, so an empty selection is refused.
-        @test_throws ArgumentError sol[2:1]
-        @test_throws "at least one step" sol[2:1]
-
-        # A snapshot is a valid solution: it applies cleanly.
-        @test calibrate(fr, ps) isa XRadio.ProcessingSet
-        @test stage_info(sol, :fringe) isa NamedTuple
-
-        # Gains factor multiplicatively over components: the elementwise
-        # product of every step's every top-level component selection's gain
-        # reproduces the full composed evaluation.
+        # Gains factor multiplicatively over steps and over components.
         g_full = parent(gains(sol))
+        @test parent(gains(sol[:fringe])) .* parent(gains(sol[:bandpass])) .* parent(gains(sol[:adhoc])) == g_full
         g_prod = ones(ComplexF64, size(g_full))
-        for (si, step) in enumerate(sol.steps), group in (:phase, :logamp)
-            for cname in keys(step.layout.plantree[group])
-                g_prod .*= parent(gains(sol[si, group, cname]))
-            end
+        for c in sol.components
+            g_prod .*= parent(gains(filter(==(c), sol)))
         end
         @test g_prod ≈ g_full
+
+        # Any selection applies. Calibrating step by step is calibrating by the
+        # whole solution.
+        whole = calibrate(sol, ps; apply_flags = false)
+        stepwise = ps
+        for k in (:fringe, :bandpass, :adhoc)
+            stepwise = calibrate(sol[k], stepwise; apply_flags = false)
+        end
+        for (k, ms) in pairs(whole)
+            @test isapprox(parent(stepwise[k][:visibility]), parent(ms[:visibility]); nans = true)
+            @test parent(stepwise[k][:weight]) ≈ parent(ms[:weight])
+        end
+        @test calibrate(sol[:fringe, :phase, :mbd], ps) isa XRadio.ProcessingSet
+        @test calibrate(filter(c -> c.component.term isa Delay, sol), ps) isa XRadio.ProcessingSet
+        @test_throws "holds no components" calibrate(filter(_ -> false, sol), ps)
+        @test_throws "holds no components" ApplySolution(filter(_ -> false, sol))
     end
 
-    @testset "solution container and selection algebra" begin
+    @testset "selections and gains selectors" begin
         ps, _ = _build_fringe_ps()
         sol = fit(_full_chain(), ps; gauge = PinAntenna(1))
 
-        # Container contract: length/eachindex/keys/haskey, and iteration
-        # yields each step as a single-step solution.
-        @test length(sol) == 3
-        @test eachindex(sol) == 1:3
-        @test keys(sol) == [:fringe, :bandpass, :adhoc]
-        @test haskey(sol, :bandpass) && !haskey(sol, :bogus)
-        @test collect(sol) == [sol[i] for i in eachindex(sol)]
-        @test [only(s.steps).name for s in sol] == [:fringe, :bandpass, :adhoc]
-
-        # A duplicated stage name refuses Symbol lookup; positions still work.
-        st = sol[:fringe].steps[1]
-        dup = CAL.CalibrationSolution([st, st], sol.geom, sol.info)
-        @test_throws ArgumentError dup[:fringe]
-        @test_throws "recorded 2 times" dup[:fringe]
-        @test dup[1].steps[1].name === :fringe
-
-        # A component selection is a solution: it applies like any other, and
-        # composing it with its complement reproduces the full step.
-        fr = sol[:fringe]
-        comps = keys(fr.steps[1].layout.plantree.phase)
-        @test !isempty(comps)
-        csel = sol[:fringe, :phase, first(comps)]
-        @test csel isa CAL.CalibrationSolution
-        @test calibrate(csel, ps) isa XRadio.ProcessingSet
-        # Chained selection descends into the selected subtree.
-        @test parent(gains(sol[:fringe, :phase][:fringe, first(comps)])) ==
-            parent(gains(csel))
+        # A path prefix selects the components under it; their gains multiply.
+        ph = sol[:fringe, :phase]
+        @test !isempty(ph.components)
+        @test collect(keys(ph.steps)) == [:fringe]
+        g_group = ones(ComplexF64, size(gains(sol)))
+        for c in ph.components
+            g_group .*= parent(gains(sol[:fringe, c.path...]))
+        end
+        @test parent(gains(ph)) ≈ g_group
 
         # `gains` keywords are DD dimension selectors, windowing the
         # evaluation under the invariant gains(sol; kw...) == gains(sol)[kw...].
         G = gains(sol)
+        geom = sol.geom
         @test gains(sol; Ti = 1) == G[Ti = 1]
         @test gains(sol; Frequency = 2:3, Feed = 2) == G[Frequency = 2:3, Feed = 2]
-        f2 = sol.geom.channel_freqs[2]
+        f2 = geom.channel_freqs[2]
         @test gains(sol; Frequency = At(f2), Ant = 2) == G[Frequency = At(f2), Ant = 2]
-        @test gains(sol; Ti = Near(sol.geom.times[end])) == G[Ti = Near(sol.geom.times[end])]
+        @test gains(sol; Ti = Near(geom.times[end])) == G[Ti = Near(geom.times[end])]
         @test_throws ArgumentError gains(sol; Polarization = 1)
         @test_throws "unknown dimension keyword" gains(sol; Polarization = 1)
     end
 
-    @testset "calibrate replays the recorded transforms (weight scale)" begin
+    @testset "flags come from the steps a selection holds" begin
+        ps, _ = _build_fringe_ps()
+        fitted = fit(_full_chain(), ps; gauge = PinAntenna(1))
+        steps = copy(fitted.steps)
+        steps[:fringe] = (; steps[:fringe]..., flagged_ant = [2], flagged_scan = [1])
+        sol = CAL.CalibrationSolution(fitted.geom, fitted.components, steps, fitted.info)
+        @test Gustavo._solution_flag_sets(sol) == Set([(2, 1)])
+        @test Gustavo._solution_flag_sets(sol[:fringe, :phase, :mbd]) == Set([(2, 1)])
+        @test Gustavo._solution_flag_sets(sol[:bandpass]) === nothing
+        flagged(out) = any(ms -> any(parent(ms[:flag])), values(out))
+        @test flagged(calibrate(sol, ps)) && !flagged(calibrate(sol, ps; apply_flags = false))
+        @test !flagged(calibrate(sol[:bandpass], ps))
+    end
+
+    @testset "calibrate applies gains only; corrections are the caller's" begin
         ps, _ = _build_fringe_ps()
         ws = DimArray([1.0, 0.5, 1.0, 2.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
         sol = fit(StationWeightScale(ws) |> _full_chain(), ps; gauge = PinAntenna(1))
-        @test length(recorded_transforms(sol)) == 1
-        @test recorded_transforms(sol)[1] isa StationWeightScale
-        @test recorded_transforms(sol)[1].scale == ws
+        @test startswith(sol.provenance.pipeline, "StationWeightScale")
 
-        # Replaying the recorded weight scale is the same as scaling the data
-        # first and calibrating with a solution that records no correction.
-        scaled = XRadio.ProcessingSet(
+        # The weight scale the fit applied is not replayed: scaling the data
+        # before or after `calibrate` gives the same result.
+        scale(set) = XRadio.ProcessingSet(
             OrderedDict{Symbol, XRadio.MeasurementSet}(
-                k => StationWeightScale(ws)(read(ms)) for (k, ms) in pairs(ps)
+                k => StationWeightScale(ws)(read(ms)) for (k, ms) in pairs(set)
             ),
-            copy(DimensionalData.metadata(ps)),
+            copy(DimensionalData.metadata(set)),
         )
-        bare = CAL.CalibrationSolution(
-            sol.steps, sol.geom, sol.info; sequence = sol.sequence[2:end], sol.gauge,
-        )
-        out = calibrate(sol, ps)
-        ref = calibrate(bare, scaled)
-        @test collect(keys(out)) == collect(keys(ref))
-        for (k, ms) in pairs(ref)
-            @test isequal(parent(out[k][:visibility]), parent(ms[:visibility]))
-            @test parent(out[k][:weight]) == parent(ms[:weight])
+        before = calibrate(sol, scale(ps))
+        after = scale(calibrate(sol, ps))
+        @test collect(keys(before)) == collect(keys(after))
+        for (k, ms) in pairs(after)
+            @test isequal(parent(before[k][:visibility]), parent(ms[:visibility]))
+            @test parent(before[k][:weight]) ≈ parent(ms[:weight])
         end
 
-        # Two weight-scale transforms compose (w·(s_a s_b)²), and both are
-        # recorded. Two pipelines join by splatting.
+        # Two weight-scale transforms compose (w·(s_a s_b)²). Two pipelines
+        # join by splatting.
         sol_b = fit(((StationWeightScale(ws) |> StationWeightScale(ws))..., _full_chain()...), ps; gauge = PinAntenna(1))
-        @test length(recorded_transforms(sol_b)) == 2
         @test parent(gains(fit(StationWeightScale(ws .* ws) |> _full_chain(), ps; gauge = PinAntenna(1)))) ≈
             parent(gains(sol_b))
 
@@ -327,34 +297,16 @@ _full_chain() = BaselineFringeFit() |> Bandpass() |> AdhocPhase()
         path = joinpath(mktempdir(), "sol.jls")
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)
-        @test all(s1.θ == s2.θ for (s1, s2) in zip(back.steps, sol.steps))
-        @test keys(back) == keys(sol)
-        @test recorded_transforms(back)[1] isa StationWeightScale
-        @test back[:fringe].steps[1].θ == sol[:fringe].steps[1].θ
+        @test back.components == sol.components
+        @test keys(back.steps) == keys(sol.steps)
+        @test back.provenance == sol.provenance
+        @test back.info == sol.info
+        @test parent(gains(back)) == parent(gains(sol))
 
-        # The pipeline and gauge are recorded, survive the round-trip, and ride
-        # along through selections.
-        @test length(back.sequence) == length(sol.sequence) == 4
-        @test back.gauge.refs == 1
-        @test sol[:fringe].sequence == sol.sequence
-
-        # An element that did not survive an earlier save round-trips as
-        # `missing`, and `calibrate` refuses rather than skip it.
-        solm = CAL.CalibrationSolution(
-            sol.steps, sol.geom, sol.info; sequence = (missing, sol.sequence[2:end]...), sol.gauge,
-        )
-        pathm = joinpath(mktempdir(), "solm.jls")
-        CAL.save_solution(pathm, solm)
-        @test ismissing(first(CAL.load_solution(pathm).sequence))
-        @test_throws "did not survive" calibrate(solm, ps)
-
-        # Pre-v6 wrappers used a different solution shape; they are refused
-        # rather than misread, so a caller re-solves instead of loading a stale
-        # parameter vector.
-        v1path = joinpath(mktempdir(), "sol_v1.jls")
-        Gustavo.Calibration.serialize(
-            v1path, (; version = 1, sol.steps, sol.geom, sol.info)
-        )
-        @test_throws "unsupported version" CAL.load_solution(v1path)
+        # Files from before the solution was a tree are refused rather than
+        # misread, so a caller re-solves instead of loading a stale shape.
+        v8path = joinpath(mktempdir(), "sol_v8.jls")
+        Gustavo.Calibration.serialize(v8path, (; version = 8, steps = []))
+        @test_throws "unsupported version" CAL.load_solution(v8path)
     end
 end

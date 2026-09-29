@@ -10,7 +10,7 @@
 #     writers slice the block for a `(feed, ti, c)` cell directly out of θ.
 #
 #   * `axes` — each component's leaf dimensions and the physical axis each
-#     carries, which `parameters(sol)` uses to label a solved θ.
+#     carries, which label the leaves of a `CalibrationSolution`.
 #
 # A component's leaf occupies exactly its `range` (column-major over parameters,
 # feed-node, freq-segment, time-segment, antenna), so `reshape(view(θ, range),

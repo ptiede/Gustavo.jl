@@ -500,15 +500,15 @@ end
     @test gb ≈ CAL.evaluate_gains(layout, θs)
 end
 
-@testset "parameters: component θ leaves as labelled DimArrays" begin
+@testset "a solution is a list of labeled solved components" begin
     freqs = [1.0e9, 2.0e9, 3.0e9, 4.0e9]
     times = [0.0, 1.0, 2.0, 3.0]
+    ants = ["PT", "LM", "AA"]
     geom = CAL.DataGeometry(;
-        times, channel_freqs = freqs,
+        times, channel_freqs = freqs, stations = ants,
         scan_of_time = [1, 1, 2, 2], spw_of_chan = [1, 1, 1, 1], t0 = 0.0, f0 = 2.5e9,
     )
     nant = 3
-    ants = ["PT", "LM", "AA"]
     model = CAL.GainModel(
         phase = (
             atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
@@ -521,26 +521,30 @@ end
     )
     layout = CAL.plan_parameters(model, nant, geom)
     θ = Float64.(1:layout.nθ)
-    sol = CAL.CalibrationSolution(model, layout, geom, θ, (; ant_names = ants))
+    sol = CAL.CalibrationSolution(model, layout, geom, θ, (;))
 
-    # A leaf's DimArray is shaped and rolled exactly as the layout stored it.
-    # The step (`:solution`, the single-model constructor's default) is always
-    # explicit: components are addressed within one step, never searched for
-    # by a bare name across steps.
-    a = CAL.parameters(sol[:solution, :phase, :atmos])
+    # One component per model entry, in model order, each labeled by step and path.
+    @test [(c.step, c.path) for c in sol.components] ==
+        [(:solution, (:phase, :atmos)), (:solution, (:phase, :bp)), (:solution, (:phase, :rl)), (:solution, (:logamp, :amp))]
+    @test length(sol) == 4 && collect(sol) == sol.components
+    @test haskey(sol, :solution) && !haskey(sol, :other)
+    # The one-step form records `info` as the step's diagnostics only.
+    @test CAL.CalibrationSolution(model, layout, geom, θ, (; note = 1)).steps[:solution] == (; note = 1)
+    @test CAL.CalibrationSolution(model, layout, geom, θ, (; note = 1)).info == (;)
+    c = first(sol.components)
+    @test c isa CAL.SolvedComponent
+    @test c.component == model.phase.atmos
+    a = c.params
     @test a isa DimArray
     @test size(a) == layout.axes.phase.atmos.dims
     @test name.(dims(a)) == layout.axes.phase.atmos.roles
-    @test name(a) == :atmos
 
     # PerFeed carries a physical Feed axis; the tied tyings carry a positional
     # node axis.
     @test name(dims(a, 2)) == :Feed
-    @test name(dims(CAL.parameters(sol[:solution, :phase, :bp]), 2)) == :node
-    @test size(CAL.parameters(sol[:solution, :phase, :rl]), 2) == 1
-
-    # The same lookup by step POSITION (not name) reaches the same leaf.
-    @test CAL.parameters(sol[1, :phase, :atmos]) == a
+    bpp = only(sol[:solution, :phase, :bp].components).params
+    @test name(dims(bpp, 2)) == :node
+    @test size(only(sol[:solution, :phase, :rl].components).params, 2) == 1
 
     # Segment axes span each segment's channels or samples, labeled by the
     # midpoint, so `Contains` finds the segment covering a coordinate.
@@ -550,39 +554,38 @@ end
     @test DimensionalData.intervalbounds(a, Ti) == [(0.0, 1.0), (2.0, 3.0)]
     @test a[Ti(Contains(2.2)), UVD.Ant(At("PT")), UVD.Feed(1)] == a[Ti(2), UVD.Ant(1), UVD.Feed(1)]
     @test_throws "No interval contains" a[Ti(Contains(1.5))]     # between scans
-    @test lookup(CAL.parameters(sol[:solution, :phase, :bp]), UVD.Frequency) ==
-        [mean(freqs[1:2]), mean(freqs[3:4])]                     # ChannelBlocks(2): block midpoints
+    @test lookup(bpp, UVD.Frequency) == [mean(freqs[1:2]), mean(freqs[3:4])]   # ChannelBlocks(2)
 
-    # Antennas take the solution's station names; feed is 1:2.
+    # Antennas take the geometry's station names; feed is 1:2.
     @test lookup(a, UVD.Ant) == ants
     @test lookup(a, UVD.Feed) == 1:2
 
-    # logamp descends the same way.
-    @test CAL.parameters(sol[:solution, :logamp, :amp]) isa DimArray
-
-    # A wider selection returns the NamedTuple tree of those leaves, mirroring
-    # the model.
-    tr = CAL.parameters(sol)
-    @test keys(tr) == (:phase, :logamp)
-    @test keys(tr.phase) == (:atmos, :bp, :rl)
-    @test tr.phase.atmos == a
-    @test CAL.parameters(sol[:solution, :phase]) == tr.phase
-
-    # The leaf is a view onto θ (no copy): its data is the component's block,
-    # and writing through it mirrors into θ — a component selection shares θ
-    # with the step it narrows.
+    # The parameters are a copy of θ's blocks.
     rng = [p.range for p in layout.plans]
     @test vec(parent(a)) == θ[rng[1]]
     a[1, 1, 1, 1, 1] = -7.0
-    @test sol.steps[1].θ[first(rng[1])] == -7.0
+    @test θ[first(rng[1])] == first(rng[1])
 
-    # No ant_names in info → the antenna axis falls back to 1:nant.
-    soln = CAL.CalibrationSolution(model, layout, geom, θ, (; nant))
-    @test lookup(CAL.parameters(soln[:solution, :phase, :atmos]), UVD.Ant) == 1:nant
+    # Selections are solutions: by step, by path prefix, or by any predicate.
+    @test sol[:solution] isa CAL.CalibrationSolution
+    @test length(sol[:solution, :phase]) == 3
+    @test [c.path for c in filter(c -> c.component.Feed isa CAL.SharedFeeds, sol)] == [(:phase, :bp), (:logamp, :amp)]
+    @test_throws "holds no component under solution.phase.nope" sol[:solution, :phase, :nope]
+    @test_throws "holds no component under other" sol[:other]
 
-    # A nested subtree (`sbd.delay` / `sbd.constant`) is reached leaf by leaf.
+    # Equal components hash equally, so they collapse in sets and `unique`.
+    twin = CAL.SolvedComponent(c.step, c.path, c.component, copy(c.params))
+    @test twin == c && hash(twin) == hash(c)
+    @test length(unique([c, twin])) == 1
+
+    # An empty selection is a solution, but applying it is refused.
+    none = filter(_ -> false, sol)
+    @test isempty(none.components) && isempty(none.steps)
+    @test_throws "holds no components" gains(none)
+
+    # A nested subtree (`sbd.delay` / `sbd.constant`) keeps its path.
     gb = CAL.DataGeometry(;
-        times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9],
+        times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9], stations = ["X", "Y"],
         scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 2], t0 = 0.0, f0 = 3.0e9,
     )
     groups = CAL.FreqGroups([1:2, 3:4])
@@ -592,52 +595,37 @@ end
     )
     msbd = CAL.GainModel(phase = (sbd = sbd,))
     lsbd = CAL.plan_parameters(msbd, 2, gb)
-    ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, Float64.(1:lsbd.nθ), (;))
-    dl = CAL.parameters(ssbd[:solution, :phase, :sbd, :delay])
-    @test dl isa DimArray
-    @test name(dl) == :delay
+    θsbd = Float64.(1:lsbd.nθ)
+    ssbd = CAL.CalibrationSolution(msbd, lsbd, gb, θsbd, (;))
+    @test [c.path for c in ssbd.components] == [(:phase, :sbd, :delay), (:phase, :sbd, :constant)]
+    dl = ssbd.components[1].params
     @test lookup(dl, UVD.Frequency) == [mean([1.0e9, 1.1e9]), mean([5.0e9, 5.1e9])]
-    @test vec(parent(dl)) == ssbd.steps[1].θ[lsbd.plantree.phase.sbd.delay.range]
+    @test vec(parent(dl)) == θsbd[lsbd.plantree.phase.sbd.delay.range]
+    @test parent(gains(ssbd)) ≈ CAL.evaluate_gains(lsbd, θsbd)
 
-    # A selection stopping at the wrapper's subtree yields its tree of leaves.
-    sbtree = CAL.parameters(ssbd[:solution, :phase, :sbd])
-    @test keys(sbtree) == keys(lsbd.plantree.phase.sbd)
-    @test sbtree.delay == dl
-
-    # An unknown component errors naming what is available at that point; an
-    # unknown step NAME needs the recorded stages spelled out; an out-of-range
-    # index does not — `BoundsError` already says it.
-    @test_throws ArgumentError sol[:solution, :phase, :nope]
-    @test_throws "available under phase: atmos, bp, rl" sol[:solution, :phase, :nope]
-    @test_throws "no subcomponent" sol[:solution, :phase, :atmos, :deeper]
-    @test_throws ArgumentError sol[:nosuchstep, :phase, :atmos]
-    @test_throws "recorded stages: [:solution]" sol[:nosuchstep, :phase, :atmos]
-    @test_throws BoundsError sol[2, :phase, :atmos]
-
-    # Component names are local to each step and may repeat across steps —
-    # splitting a solve into steps is exactly what makes that legal, so a
-    # component selection resolves by step, never by searching for a name
-    # across steps.
+    # Components from different steps may share a name.
     atmos2 = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds())
     model2 = CAL.GainModel(phase = (atmos = atmos2,))
     layout2 = CAL.plan_parameters(model2, nant, geom)
     θ2 = fill(-1.0, layout2.nθ)
     twostep = CAL.CalibrationSolution(
-        [
-            CAL.StepSolution(:bandpass, model, layout, θ, (;)),
-            CAL.StepSolution(:fringe, model2, layout2, θ2, (;)),
-        ],
-        geom, (; ant_names = ants),
+        geom,
+        vcat(
+            CAL.CalibrationSolution(model, layout, geom, θ; name = :bandpass).components,
+            CAL.CalibrationSolution(model2, layout2, geom, θ2; name = :fringe).components,
+        ),
     )
-    @test vec(parent(CAL.parameters(twostep[:bandpass, :phase, :atmos]))) == θ[rng[1]]
-    @test all(==(-1.0), CAL.parameters(twostep[:fringe, :phase, :atmos]))
-    @test CAL.parameters(twostep[1, :phase, :atmos]) == CAL.parameters(twostep[:bandpass, :phase, :atmos])
-    @test CAL.parameters(twostep[2, :phase, :atmos]) == CAL.parameters(twostep[:fringe, :phase, :atmos])
+    @test vec(parent(only(twostep[:bandpass, :phase, :atmos].components).params)) == θ[rng[1]]
+    @test all(==(-1.0), only(twostep[:fringe, :phase, :atmos].components).params)
+    @test parent(gains(twostep)) ≈ parent(gains(twostep[:bandpass])) .* parent(gains(twostep[:fringe]))
+    @test_throws "components repeat: bandpass.phase.atmos" CAL.CalibrationSolution(
+        geom, vcat(twostep.components, twostep[:bandpass, :phase, :atmos].components),
+    )
 
-    # A multi-step solution's tree is keyed by stage name.
-    tr2 = CAL.parameters(twostep)
-    @test keys(tr2) == (:bandpass, :fringe)
-    @test tr2.fringe.phase.atmos == CAL.parameters(twostep[:fringe, :phase, :atmos])
+    # A path starts at :phase or :logamp; a geometry must name its stations.
+    @test_throws "starts at :phase or :logamp" CAL.SolvedComponent(:s, (:atmos,), c.component, c.params)
+    nostations = CAL.DataGeometry(; times, channel_freqs = freqs, scan_of_time = [1, 1, 2, 2], spw_of_chan = [1, 1, 1, 1], t0 = 0.0, f0 = 2.5e9)
+    @test_throws "must name its stations" CAL.CalibrationSolution(model, layout, nostations, θ)
 end
 
 @testset "Calibration evaluate_gains: correctness, purity, inference" begin
@@ -784,7 +772,7 @@ end
 
     @testset "stations differing only in prior share a plan" begin
         geom = CAL.DataGeometry(;
-            times = [0.0, 1.0], scan_of_time = [1, 2],
+            times = [0.0, 1.0], scan_of_time = [1, 2], stations = ["AA", "BB", "CC"],
             channel_freqs = [1.0, 1.1, 1.2, 2.0, 2.1] .* 1.0e9, spw_of_chan = [1, 1, 1, 2, 2],
             t0 = 0.0, f0 = 1.5e9,
         )
@@ -816,12 +804,12 @@ end
 
         mat = CAL.materialize(m, names, geom)
         @test mat.phase.bp.prior === rw
-        soln = CAL.CalibrationSolution(mat, layout, geom, collect(1.0:layout.nθ), (; ant_names = names))
+        soln = CAL.CalibrationSolution(mat, layout, geom, collect(1.0:layout.nθ))
         path = joinpath(mktempdir(), "prior.jls")
         CAL.save_solution(path, soln)
         back = CAL.load_solution(path)
-        @test back.steps[1].model == mat
-        @test back.steps[1].model.stations.BB.phase.bp.prior == ou
+        @test back.components == soln.components
+        @test only(back.components).component == mat.phase.bp
     end
 end
 
@@ -852,15 +840,13 @@ end
     @test_throws "declares unknown coordinate axes (:Ant,)" CAL.plan_parameters(antmodel, 1, geom)
 end
 
-@testset "CalibrationSolution θ keeps its array type" begin
+@testset "CalibrationSolution parameters keep θ's element type" begin
     nant = 3
     freqs = collect(2.28e11:1.0e8:(2.28e11 + 5.0e8))
     times = [0.0, 0.5, 1.0]
     geom = CAL.DataGeometry(;
-        times, channel_freqs = freqs, t0 = 0.0, f0 = sum(freqs) / length(freqs),
+        times, channel_freqs = freqs, stations = ["A", "B", "C"], t0 = 0.0, f0 = sum(freqs) / length(freqs),
     )
-    # A delay term plus a per-channel bandpass, so step selection has
-    # something to extract.
     model = CAL.GainModel(
         phase = (
             delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),
@@ -871,42 +857,14 @@ end
     θv = collect(1:(layout.nθ)) ./ 1.0e10
 
     solv = CAL.CalibrationSolution(model, layout, geom, θv, (; nant))
-    @test solv.steps[1].θ isa Vector{Float64}
+    delay(s) = only(s[:solution, :phase, :delay].components).params
+    @test eltype(delay(solv)) == Float64
 
-    @testset "a DimArray θ survives construction and every derived path" begin
-        # Split into the delay-only :fringe step and the bandpass-only
-        # :bandpass step so the step-scoped accessors (`sol[i]`, component
-        # selections) have real steps to address.
-        model_fr = CAL.GainModel(phase = (delay = model.phase.delay,))
-        model_bp = CAL.GainModel(phase = (bandpass = model.phase.bandpass,))
-        layout_fr = CAL.plan_parameters(model_fr, nant, geom)
-        layout_bp = CAL.plan_parameters(model_bp, nant, geom)
-        θv_fr = θv[1:(layout_fr.nθ)]
-        θv_bp = θv[(layout_fr.nθ + 1):end]
-        two_step(θfr, θbp) = CAL.CalibrationSolution(
-            [
-                CAL.StepSolution(:fringe, model_fr, layout_fr, θfr),
-                CAL.StepSolution(:bandpass, model_bp, layout_bp, θbp),
-            ],
-            geom, (; nant),
-        )
-        solv2 = two_step(θv_fr, θv_bp)
-
-        θd_fr = DimArray(copy(θv_fr), Dim{:param}(1:(layout_fr.nθ)))
-        θd_bp = DimArray(copy(θv_bp), Dim{:param}(1:(layout_bp.nθ)))
-        sold2 = two_step(θd_fr, θd_bp)
-        @test sold2.steps[1].θ isa DimArray
-        @test sold2.steps[1].θ == θd_fr
-        # Same numbers as the Vector-backed solution, not merely close.
-        ev = layout_fr
-        @test CAL.evaluate_gains(ev, sold2.steps[1].θ) == CAL.evaluate_gains(ev, solv2.steps[1].θ)
-        @test parent(gains(sold2[:fringe, :phase, :delay])) == parent(gains(solv2[:fringe, :phase, :delay]))
-        # A step selection is index-matched to θ, so it propagates the array type.
-        @test sold2[1:1].steps[1].θ isa DimArray
-        @test sold2[1:1].steps[1].θ == solv2[1:1].steps[1].θ
-        # `sol[name]` returns the named step's own solution — its θ shares
-        # no parameter identity with the merged original, only the element type.
-        @test sold2[:bandpass].steps[1].θ == solv2[:bandpass].steps[1].θ
+    @testset "a DimArray θ gives the same components and gains" begin
+        θd = DimArray(copy(θv), Dim{:param}(1:(layout.nθ)))
+        sold = CAL.CalibrationSolution(model, layout, geom, θd, (; nant))
+        @test sold.components == solv.components
+        @test parent(gains(sold)) == parent(gains(solv))
     end
 
     @testset "gains(sol) labels the forward map for inspection" begin
@@ -915,15 +873,15 @@ end
         @test g isa DimArray
         @test size(g) == (length(freqs), length(times), nant, 2)
         # The same numbers `evaluate_gains` / `apply_calibration` use.
-        @test parent(g) == CAL.evaluate_gains(ev, solv.steps[1].θ)
+        @test parent(g) == CAL.evaluate_gains(ev, θv)
         # Axes carry the geometry, so a user can index by physical coordinate.
         @test lookup(g, UVD.Frequency) == freqs
         @test lookup(g, Ti) == times
-        @test lookup(g, UVD.Ant) == 1:nant           # no ant_names in info → 1:nant
+        @test lookup(g, UVD.Ant) == geom.stations
         @test lookup(g, UVD.Feed) == 1:2
         # amp/phase recover from the complex gain, no separate accessor needed.
-        @test abs.(g) == abs.(CAL.evaluate_gains(ev, solv.steps[1].θ))
-        @test angle.(g) == angle.(CAL.evaluate_gains(ev, solv.steps[1].θ))
+        @test abs.(g) == abs.(CAL.evaluate_gains(ev, θv))
+        @test angle.(g) == angle.(CAL.evaluate_gains(ev, θv))
         # Indifferent to θ's array type.
         θd = DimArray(copy(θv), Dim{:param}(1:(layout.nθ)))
         @test gains(CAL.CalibrationSolution(model, layout, geom, θd, (; nant))) == g
@@ -937,7 +895,7 @@ end
         @test lookup(gw, Ti) == times[ti]
         # Another geometry holding the same samples places each in the same
         # solve segment.
-        other = CAL.DataGeometry(; times, channel_freqs = freqs, t0 = 0.0, f0 = geom.f0)
+        other = CAL.DataGeometry(; times, channel_freqs = freqs, stations = geom.stations, t0 = 0.0, f0 = geom.f0)
         @test parent(gains(solv, CAL.GeometryWindow(other, ci, ti))) ≈ parent(gw)
     end
 
@@ -954,16 +912,44 @@ end
     end
 
     @testset "the element type is carried, not coerced to Float64" begin
-        @test CAL.CalibrationSolution(model, layout, geom, Float32.(θv), (;)).steps[1].θ isa Vector{Float32}
+        s32 = CAL.CalibrationSolution(model, layout, geom, Float32.(θv), (;))
+        @test all(c -> eltype(c.params) == Float32, s32.components)
+        @test eltype(gains(s32)) == ComplexF32
     end
 
     @testset "the solution copies θ rather than aliasing it" begin
-        # The fused output tail builds a solution per scan group from the run's
-        # live θ while sibling groups are still writing their own slots.
         θmut = copy(θv)
         s = CAL.CalibrationSolution(model, layout, geom, θmut, (;))
         θmut[1] = -999.0
-        @test s.steps[1].θ[1] == θv[1]
+        @test delay(s)[1] == θv[1]
+    end
+
+    @testset "an edited parameter value is what gains evaluate" begin
+        s = CAL.CalibrationSolution(model, layout, geom, θv, (; nant))
+        delay(s) .*= 2
+        θ2 = copy(θv)
+        θ2[layout.plantree.phase.delay.range] .*= 2
+        @test parent(gains(s)) == CAL.evaluate_gains(layout, θ2)
+    end
+
+    @testset "parameters whose labels or shape differ from their component are refused" begin
+        c = only(solv[:solution, :phase, :bandpass].components)
+        d = dims(c.params)
+        relabeled = CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (d[1:3]..., Ti([9.0]), d[5])))
+        @test_throws "Ti axis is [9.0]" gains(CAL.CalibrationSolution(geom, [relabeled]))
+        other_stations = CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (d[1:4]..., UVD.Ant(["A", "B", "Z"]))))
+        @test_throws "station `Z` is not among" gains(CAL.CalibrationSolution(geom, [other_stations]))
+        short = CAL.SolvedComponent(c.step, c.path, c.component, c.params[Ti(1:1), UVD.Frequency(1:2)])
+        @test_throws DimensionMismatch gains(CAL.CalibrationSolution(geom, [short]))
+    end
+
+    @testset "a component over some stations leaves the others at unit gain" begin
+        c = only(solv[:solution, :phase, :delay].components)
+        sub = CAL.SolvedComponent(c.step, c.path, c.component, c.params[UVD.Ant(At(["A", "C"]))])
+        g = parent(gains(CAL.CalibrationSolution(geom, [sub])))
+        full = parent(gains(solv[:solution, :phase, :delay]))
+        @test all(==(1), g[:, :, 2, :])
+        @test g[:, :, [1, 3], :] == full[:, :, [1, 3], :]
     end
 end
 
@@ -1104,7 +1090,7 @@ end
         times = [0.0, 0.1, 1.0, 1.1],
         scan_of_time = [1, 1, 2, 2],
         channel_freqs = collect(1.0:6.0) .* 1.0e9,
-        spw_of_chan = [1, 1, 1, 2, 2, 2],
+        spw_of_chan = [1, 1, 1, 2, 2, 2], stations = ["AA", "BB", "CC"],
         t0 = 0.0, f0 = 3.5e9,
     )
     names = ["AA", "BB", "CC"]
@@ -1314,37 +1300,41 @@ end
         ) isa CAL.GainModel
     end
 
-    @testset "parameters and gains on a grouped leaf" begin
-        soln = CAL.CalibrationSolution(
-            CAL.materialize(mh, names, geom), lh, geom, collect(1.0:lh.nθ),
-            (; ant_names = names),
-        )
-        # The grouped name yields one leaf per signature group; each group's
-        # leaf carries ITS stations on the Ant axis.
-        ph = CAL.parameters(soln[:solution, :phase, :bandpass])
-        @test keys(ph) == (:g1, :g2)
-        g1, g2 = ph.g1, ph.g2
-        @test lookup(g1, UVD.Ant) == ["AA"]
-        @test lookup(g2, UVD.Ant) == ["BB", "CC"]
-        @test vec(parent(g2)) ==
-            soln.steps[1].θ[lh.plantree.phase.bandpass.groups.g2.range]
-        # A single group is selectable directly; its gain is identity off its
-        # own stations, and the groups' product reproduces the whole name.
-        @test CAL.parameters(soln[:solution, :phase, :bandpass, :g1]) == g1
+    @testset "components and gains of a grouped component" begin
+        θh = collect(1.0:lh.nθ)
+        soln = CAL.CalibrationSolution(CAL.materialize(mh, names, geom), lh, geom, θh)
+        # The grouped name is one component per signature group; each group's
+        # parameters carry ITS stations on the Ant axis and its own specification.
+        bp = soln[:solution, :phase, :bandpass]
+        @test [c.path for c in bp.components] == [(:phase, :bandpass, :g1), (:phase, :bandpass, :g2)]
+        c1, c2 = bp.components
+        @test lookup(c1.params, UVD.Ant) == ["AA"]
+        @test lookup(c2.params, UVD.Ant) == ["BB", "CC"]
+        @test vec(parent(c2.params)) == θh[lh.plantree.phase.bandpass.groups.g2.range]
+        @test c1.component != c2.component
+        # A group's gain is identity off its own stations, and the groups'
+        # product reproduces the whole name.
         gg1 = parent(gains(soln[:solution, :phase, :bandpass, :g1]))
         gg2 = parent(gains(soln[:solution, :phase, :bandpass, :g2]))
         @test all(gg1[:, :, 2:3, :] .== 1)
         @test all(gg2[:, :, 1:1, :] .== 1)
-        @test gg1 .* gg2 ≈ parent(gains(soln[:solution, :phase, :bandpass]))
-        # The uniform component still labels with the full antenna list.
-        at = CAL.parameters(soln[:solution, :phase, :atmos])
-        @test lookup(at, UVD.Ant) == names
+        @test gg1 .* gg2 ≈ parent(gains(bp))
+        # The whole solution evaluates as the layout it came from, on its own
+        # geometry or on another holding the same samples.
+        @test parent(gains(soln)) ≈ CAL.evaluate_gains(lh, θh)
+        other = CAL.DataGeometry(;
+            geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.stations, geom.t0, geom.f0,
+        )
+        ci, ti = [2, 5], [1, 4]
+        @test parent(gains(bp, CAL.GeometryWindow(other, ci, ti))) ≈ parent(gains(bp))[ci, ti, :, :]
+        # The uniform component still labels with the full station list.
+        @test lookup(only(soln[:solution, :phase, :atmos].components).params, UVD.Ant) == names
 
-        # A station-heterogeneous layout round-trips through `save_solution`.
+        # A station-heterogeneous solution round-trips through `save_solution`.
         path = joinpath(mktempdir(), "het.jls")
         CAL.save_solution(path, soln)
         back = CAL.load_solution(path)
-        @test back.steps[1].θ == soln.steps[1].θ
+        @test back.components == soln.components
         @test parent(gains(back)) == parent(gains(soln))
     end
 end

@@ -75,11 +75,8 @@ export ParameterLayout, plan_parameters, station_blocks
 export evaluate_gains
 
 # Calibration solution container, apply, serialization
-export CalibrationSolution, StepSolution, GeometryWindow
-export save_solution, load_solution, recorded_transforms
-
-# Per-stage provenance and snapshots (composable pipeline)
-export stage_info
-export component_names, gains, parameters
+export CalibrationSolution, SolvedComponent, GeometryWindow
+export gains
+export save_solution, load_solution
 
 end

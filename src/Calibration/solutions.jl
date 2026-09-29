@@ -1,357 +1,357 @@
-# ── CalibrationSolution: container, geometry, apply, serialization ───────────
+# ── CalibrationSolution: a list of solved components ─────────────────────────
 #
-# A `CalibrationSolution` is the composition of every pipeline step's own
-# finished `StepSolution` — each step solved its own private `(model, layout,
-# θ)`, never merged with another step's (see `StepSolution`), and the
-# solution's gains are the ELEMENTWISE PRODUCT of every step's own gains
-# (equivalently a log-space sum, since `evaluate_gains` already returns
-# `exp(Σ logamp)·cis(Σ phase)` and a product of `cis`/`exp` factors is a sum of
-# their arguments). It is the hand-off object between a solver (e.g.
-# `Gustavo.fit`) and the data: `Gustavo.calibrate(sol, ps)` divides the data by
-# each step's gains, and `save_solution`/`load_solution`
-# round-trip it through the `Serialization` stdlib.
+# A solution is a flat list of `SolvedComponent`s, each holding one gain
+# component's fitted parameters as a labeled array. Gains are separable over
+# components (`exp(Σ logamp)·cis(Σ phase)`), so any subset of the list is a
+# solution in its own right. Applying one re-plans the components it holds
+# against the solution's geometry, one layout per (step, station set), and runs
+# the forward map on θ built from their parameters.
 
 using Serialization: serialize, deserialize
 using Statistics: mean
-using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions
+using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions, AbstractDimArray
 using DimensionalData.Lookups: Sampled, Explicit, Intervals, Center
+using OrderedCollections: OrderedDict
 using ..UVData: Frequency, Polarization, BaselineID, Ant, Feed
 
 """
-    StepSolution(name, model, layout, θ, info)
+    SolvedComponent(step, path, component, params)
 
-One finished pipeline step's own solved gain model: `model`/`layout` compiled
-from that step's own `model_components` alone — never merged with another
-step's — and `θ` its own solved parameter vector, plus `info`, that step's own
-solver diagnostics. A [`CalibrationSolution`](@ref) is the ordered
-`steps::Vector{StepSolution}` a pipeline run produced, one per solve step, in
-run order; gains compose multiplicatively across them ([`gains`](@ref),
-`calibrate`), and `name` (the step's `provides(step)`
-capability, e.g. `:fringe`/`:bandpass`/`:adhoc`) is how a later
-a user's [`stage_info`](@ref) or `sol[name]` looks a step up.
+One fitted gain component: `component` (a [`GainComponent`](@ref): term,
+segmentation, feed tying, prior) and its parameters `params`, a `DimArray`
+over `(param, Feed or node, Frequency, Ti, Ant)`. Each `Frequency`/`Ti`
+segment is labeled by the midpoint of the channels or samples it covers, with
+intervals so `Contains(x)` selects the segment covering `x`; `Ant` names the
+stations that carry the component.
 
-`θ` keeps whatever array type it is given — a labelled `DimArray` as readily as
-a `Vector` — subject to two requirements `layout` imposes: `length(θ) ==
-layout.nθ`, and 1-based indexing, since `layout` addresses θ by absolute
-position. Both are checked on construction. A step stores a copy, never an
-alias.
-
-`selection` is the component-tree path the step is restricted to — `()` (the
-whole model) unless the step came out of a component selection
-(`sol[step, path...]`, see `getindex`). A selected step evaluates only the
-selected subtree; every other component contributes unit gain.
+`step` is the solve step that fit it (`:fringe`, `:bandpass`, …) and `path`
+its place in that step's model, starting at `:phase` or `:logamp`
+(`(:phase, :mbd)`; `(:phase, :bandpass, :g1)` for one signature group of a
+component whose specification differs across stations).
 """
-struct StepSolution{M <: GainModel, L <: ParameterLayout, V <: AbstractVector{<:Real}}
-    name::Symbol
-    model::M
-    layout::L
-    θ::V
-    info::NamedTuple
-    selection::Tuple{Vararg{Symbol}}
-
-    function StepSolution{M, L, V}(name, model, layout, θ, info, selection = ()) where {M, L, V}
-        # `layout` addresses θ by absolute 1-based position (`ComponentPlan.range`)
-        # and the term kernels read those blocks under `@inbounds`, so an array
-        # with other axes would read out of bounds silently rather than throw.
-        Base.require_one_based_indexing(θ)
-        length(θ) == layout.nθ || throw(
-            DimensionMismatch(
-                "StepSolution($(repr(name))): θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)"
-            )
+struct SolvedComponent{C <: GainComponent, A <: AbstractDimArray}
+    step::Symbol
+    path::Tuple{Vararg{Symbol}}
+    component::C
+    params::A
+    function SolvedComponent{C, A}(step, path, component, params) where {C, A}
+        p = Tuple(path)
+        (!isempty(p) && first(p) in (:phase, :logamp)) || throw(
+            ArgumentError("a component's path starts at :phase or :logamp, got $(p)")
         )
-        return new{M, L, V}(name, model, layout, θ, info, selection)
+        return new{C, A}(step, p, component, params)
     end
 end
 
-# `copy(θ)`, not an alias: the fused output tail builds a step solution per
-# scan group from the run's working θ while sibling groups are still writing
-# their own slots, and each group must correct against its own snapshot. A
-# selection (`_select_component`) calls the inner constructor directly and
-# deliberately shares θ with the step it narrows.
-StepSolution(name::Symbol, model::GainModel, layout::ParameterLayout, θ::AbstractVector, info::NamedTuple = NamedTuple()) =
-    StepSolution{typeof(model), typeof(layout), typeof(θ)}(name, model, layout, copy(θ), info)
+SolvedComponent(step::Symbol, path, component::GainComponent, params::AbstractDimArray) =
+    SolvedComponent{typeof(component), typeof(params)}(step, path, component, params)
 
-# Fieldwise equality, so a selection of a solution compares as the same
-# solution content. `layout` (like `geom` below) has no value equality of its
-# own and compares by identity, so equality is meaningful among selections
-# and snapshots of one solve, not across serialization round-trips.
-Base.:(==)(a::StepSolution, b::StepSolution) =
-    a.name === b.name && a.model == b.model && a.layout == b.layout &&
-    a.θ == b.θ && a.info == b.info && a.selection == b.selection
+_label(c::SolvedComponent) = join((c.step, c.path...), '.')
+
+Base.show(io::IO, c::SolvedComponent) = print(
+    io, "SolvedComponent(", _label(c), ", ", nameof(typeof(c.component.term)), ", ",
+    join(size(c.params), "×"), ")",
+)
 
 """
-    CalibrationSolution(steps, geom, info = NamedTuple(); sequence = (), gauge = nothing)
-    CalibrationSolution(model, layout, geom, θ, info = NamedTuple(); name = :solution,
-                        sequence = (), gauge = nothing)
+    CalibrationSolution(geom, components, steps = OrderedDict(), info = (;); pipeline = "", gauge = "")
+    CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, pipeline = "", gauge = "")
 
-A solved calibration: the composition of every pipeline step's own finished
-[`StepSolution`](@ref). The second form is the common single-model
-convenience — a hand-built or extracted solution with exactly one step, named
-`name`. `geom::DataGeometry` is the grid every step's own layout was planned
-over, and `info` a NamedTuple of solution-level diagnostics (per-scan SNR,
-residuals, …) — distinct from each step's own `info`.
+A solved calibration: the list `components` of [`SolvedComponent`](@ref)s over
+the geometry `geom`, whose `stations` name every station a component may
+carry. Gains compose multiplicatively across components.
 
-Component names are local to each step's own model and may repeat across
-steps (e.g. a `bandpass` step and a `fringe` step can both carry an `atmos`
-component) — a component selection (`sol[step, path...]`, see `getindex`)
-always takes the step explicitly rather than searching for a name across
-`steps`.
+- `steps` maps each solve step, in run order, to its diagnostics (detections,
+  per-scan SNR, timing, the fringe step's unconstrained `flagged_ant` /
+  `flagged_scan`, …).
+- `info` holds run-wide diagnostics.
+- `provenance` is the pipeline and gauge the run was given, as text for the
+  record. A solution does not replay its pipeline: [`calibrate`](@ref) divides
+  by its gains only.
 
-`sequence` records the pipeline the solve ran, as a tuple, in order: its solve
-steps and corrections. `calibrate(sol, ps)` replays it in that order, each
-solve step as its own gains, and `fit(sol.sequence, ps; sol.gauge)` repeats
-the run. `gauge` is the gauge
-the solve was given. Both are empty for a hand-built solution; an element that
-did not survive serialization is `missing`.
+Any subset of the components is a solution: `filter(pred, sol)`,
+`sol[:fringe]` (one step), `sol[:fringe, :phase, :mbd]` (the components under a
+path). The fields are the interface: iterate `sol.components`, read
+`c.params`.
+
+The second form builds a one-step solution from a flat parameter vector `θ`
+laid out by `layout` (1-based, `length(θ) == layout.nθ`), copying θ; `info`
+is that step's diagnostics.
 """
 struct CalibrationSolution{G <: DataGeometry}
-    steps::Vector{StepSolution}
     geom::G
+    components::Vector{SolvedComponent}
+    steps::OrderedDict{Symbol, NamedTuple}
     info::NamedTuple
-    sequence::Tuple
-    gauge::Any
+    provenance::@NamedTuple{pipeline::String, gauge::String}
+    function CalibrationSolution{G}(geom, components, steps, info, provenance) where {G}
+        isempty(geom.stations) && throw(
+            ArgumentError(
+                "a solution's geometry must name its stations; build it with `DataGeometry(ps)` " *
+                    "or pass `stations`"
+            )
+        )
+        labels = map(_label, components)
+        allunique(labels) || throw(
+            ArgumentError("CalibrationSolution: components repeat: $(join(unique(filter(l -> count(==(l), labels) > 1, labels)), ", "))")
+        )
+        return new{G}(geom, components, steps, info, provenance)
+    end
 end
 
 function CalibrationSolution(
-        steps::AbstractVector{<:StepSolution}, geom::DataGeometry, info::NamedTuple = NamedTuple();
-        sequence = (), gauge = nothing,
+        geom::DataGeometry, components::AbstractVector{<:SolvedComponent},
+        steps::AbstractDict = OrderedDict{Symbol, NamedTuple}(), info::NamedTuple = NamedTuple();
+        pipeline::AbstractString = "", gauge::AbstractString = "",
     )
-    isempty(steps) && throw(ArgumentError("CalibrationSolution: at least one step is required."))
-    return CalibrationSolution(collect(StepSolution, steps), geom, info, Tuple(sequence), gauge)
+    return CalibrationSolution{typeof(geom)}(
+        geom, collect(SolvedComponent, components), OrderedDict{Symbol, NamedTuple}(steps), info,
+        (; pipeline = String(pipeline), gauge = String(gauge)),
+    )
 end
 
 function CalibrationSolution(
         model::GainModel, layout::ParameterLayout, geom::DataGeometry,
         θ::AbstractVector, info::NamedTuple = NamedTuple();
-        name::Symbol = :solution, sequence = (), gauge = nothing,
+        name::Symbol = :solution, pipeline::AbstractString = "", gauge::AbstractString = "",
     )
     return CalibrationSolution(
-        [StepSolution(name, model, layout, θ, info)], geom, info; sequence, gauge,
+        geom, _solved_components(name, model, layout, θ, geom),
+        OrderedDict{Symbol, NamedTuple}(name => info); pipeline, gauge,
     )
 end
 
+Base.:(==)(a::SolvedComponent, b::SolvedComponent) =
+    a.step === b.step && a.path == b.path && a.component == b.component && a.params == b.params
+Base.hash(c::SolvedComponent, h::UInt) =
+    hash(c.params, hash(c.component, hash(c.path, hash(c.step, hash(:SolvedComponent, h)))))
+
+# ── Selection ────────────────────────────────────────────────────────────────
+
+# The solution holding `components`, keeping the diagnostics of the steps they
+# came from.
+function _with_components(sol::CalibrationSolution, components)
+    steps = OrderedDict{Symbol, NamedTuple}(k => v for (k, v) in sol.steps if any(c -> c.step === k, components))
+    return CalibrationSolution{typeof(sol.geom)}(sol.geom, collect(SolvedComponent, components), steps, sol.info, sol.provenance)
+end
+
 """
-    recorded_transforms(sol::CalibrationSolution) -> Vector
+    filter(pred, sol::CalibrationSolution) -> CalibrationSolution
 
-The corrections in `sol.sequence`, in order, with any `missing` element kept
-so that a caller replaying them can refuse.
+The solution holding the components `c` of `sol` for which `pred(c)` is true.
 """
-function recorded_transforms end
+Base.filter(pred, sol::CalibrationSolution) = _with_components(sol, filter(pred, sol.components))
 
-Base.:(==)(a::CalibrationSolution, b::CalibrationSolution) =
-    a.steps == b.steps && a.geom == b.geom && a.info == b.info &&
-    a.sequence == b.sequence && a.gauge == b.gauge
+"""
+    sol[step]
+    sol[step, path...]
 
-# `nant` is a run-wide constant every step's own layout was planned with
-# (`plan_parameters(step_model, nant, geom)`), so any step's own layout reports
-# the same value.
-_nant(sol::CalibrationSolution) = sol.steps[1].layout.nant
+The components fit by `step`, or those of `step` whose path begins with
+`path` (`sol[:fringe, :phase]`, `sol[:bandpass, :phase, :bandpass, :g1]`), as a
+solution. Throws when nothing matches, naming what the solution holds;
+`haskey(sol, step)` tests for a step first.
+"""
+function Base.getindex(sol::CalibrationSolution, step::Symbol, path::Symbol...)
+    keep = filter(c -> c.step === step && length(c.path) >= length(path) && c.path[1:length(path)] == path, sol.components)
+    isempty(keep) && throw(
+        ArgumentError(
+            "the solution holds no component under $(join((step, path...), '.')); it holds " *
+                join(map(_label, sol.components), ", ")
+        )
+    )
+    return _with_components(sol, keep)
+end
 
-# A selected step shows its component path beside the stage name.
-_step_label(s::StepSolution) =
-    isempty(s.selection) ? string(s.name) : string(s.name, "[", join(s.selection, '.'), "]")
+Base.haskey(sol::CalibrationSolution, step::Symbol) = any(c -> c.step === step, sol.components)
+Base.length(sol::CalibrationSolution) = length(sol.components)
+Base.iterate(sol::CalibrationSolution, i...) = iterate(sol.components, i...)
+Base.eltype(::Type{<:CalibrationSolution}) = SolvedComponent
 
 function Base.show(io::IO, ::MIME"text/plain", sol::CalibrationSolution)
     println(io, "CalibrationSolution")
-    println(io, "  Steps     : ", join(map(_step_label, sol.steps), ", "))
-    println(
-        io, "  Grid      : ", _nant(sol), " antennas × ", nchannels(sol.geom), " channels × ",
-        ntimes(sol.geom), " times",
-    )
-    println(io, "  Parameters: ", sum(s.layout.nθ for s in sol.steps))
-    println(io, "  Components: ", join(component_names(sol), ", "))
-    print(
-        io, "  Pipeline  : ", length(sol.sequence), " element(s), gauge ",
-        sol.gauge === nothing ? "not recorded" : sol.gauge,
-    )
+    println(io, "  Steps     : ", join(keys(sol.steps), ", "))
+    println(io, "  Grid      : ", length(sol.geom.stations), " stations × ", nchannels(sol.geom), " channels × ", ntimes(sol.geom), " times")
+    print(io, "  Components:")
+    for c in sol.components
+        print(io, "\n    ", _label(c), "  ", nameof(typeof(c.component.term)), "  ", join(size(c.params), "×"))
+    end
     return io
 end
 
-Base.show(io::IO, sol::CalibrationSolution) = print(
-    io, "CalibrationSolution(", length(sol.steps), " step(s), ",
-    sum(s.layout.nθ for s in sol.steps), " parameters)",
+Base.show(io::IO, sol::CalibrationSolution) =
+    print(io, "CalibrationSolution(", length(sol.components), " components)")
+
+# ── From a solved step ───────────────────────────────────────────────────────
+
+# The components of one solved step: `layout` laid out `model` over the
+# geometry's stations, and `θ` holds its parameters.
+function _solved_components(step::Symbol, model::GainModel, layout::ParameterLayout, θ::AbstractVector, geom::DataGeometry)
+    Base.require_one_based_indexing(θ)
+    length(θ) == layout.nθ || throw(
+        DimensionMismatch("θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)")
+    )
+    names = _station_labels(geom, layout.nant)
+    out = SolvedComponent[]
+    for group in (:phase, :logamp)
+        _collect_components!(
+            out, step, getproperty(layout.plantree, group), getproperty(layout.axes, group),
+            (group,), θ, model, geom, names,
+        )
+    end
+    return out
+end
+
+function _collect_components!(out, step, nt::NamedTuple, axnode, path, θ, model, geom, names)
+    for k in keys(nt)
+        _collect_components!(out, step, nt[k], axnode[k], (path..., k), θ, model, geom, names)
+    end
+    return out
+end
+
+function _collect_components!(out, step, plan::ComponentPlan, axnode, path, θ, model, geom, names)
+    push!(out, SolvedComponent(step, path, _component_at(model, path, first(names)), _params_array(plan, axnode, θ, geom, names)))
+    return out
+end
+
+function _collect_components!(out, step, g::GroupedComponentPlan, axnode, path, θ, model, geom, names)
+    for (i, k) in enumerate(keys(g.groups))
+        comp = _component_at(model, path, names[first(g.stations[i])])
+        push!(out, SolvedComponent(step, (path..., k), comp, _params_array(g.groups[i], axnode[i], θ, geom, names)))
+    end
+    return out
+end
+
+# The `GainComponent` at `path` (`(:phase, name, …)`) in the component tree
+# `station` solves under. Where stations differ only in prior, this is the
+# named station's.
+function _component_at(model::GainModel, path, station)
+    node = station_components(model, station)
+    for k in path
+        node = getproperty(node, k)
+    end
+    node isa GainComponent || throw(
+        ArgumentError("the model holds no component at $(join(path, '.')), which the layout lays out")
+    )
+    return node
+end
+
+function _params_array(plan::ComponentPlan, axnode, θ, geom, names)
+    raw = Array{eltype(θ)}(undef, plan.shape)
+    copyto!(raw, view(θ, plan.range))
+    return DimArray(raw, _params_dims(plan, axnode, geom, names))
+end
+
+_params_dims(plan::ComponentPlan, axnode, geom, names) = ntuple(
+    d -> _role_dim(axnode.roles[d], plan.shape[d], geom, names, plan; stations = get(axnode, :stations, nothing)),
+    length(plan.shape),
 )
 
-# ── Per-stage views: snapshots of the solution as of each pipeline stage ─────
-
-"""
-    getindex(sol::CalibrationSolution, index) -> CalibrationSolution
-    getindex(sol::CalibrationSolution, step, path::Symbol...) -> CalibrationSolution
-
-Select a subtree of `sol` — steps, or one step's model components — as a
-solution in its own right.
-
-The first index selects steps, in run order. A `Symbol` names one step (see
-`keys`; a duplicated stage name is an error — index positionally); anything
-`sol.steps` accepts selects positionally — `sol[2]` the second step alone,
-`sol[1:2]` the first two, `sol[[1, 3]]` the first and third, `sol[:]` every
-one.
-
-Further `Symbol`s descend into that one step's component tree, starting at
-`:phase` or `:logamp`: `sol[:fringe, :phase]` is the fringe step's phase
-components alone, `sol[:fringe, :phase, :mbd]` one named component,
-`sol[:fringe, :phase, :sbd, :delay]` a wrapper's nested leaf, and a
-station-heterogeneous name descends into its signature groups
-(`sol[:bandpass, :phase, :bandpass, :g1]`). Indexing a component selection
-descends further into its subtree (`sol[:fringe, :phase][:fringe, :mbd]`).
-The selection remembers the tree path — θ is never copied or zeroed.
-
-Gains compose multiplicatively across steps and across components, so a
-selection's gain is exactly the product of the selected parts' own gains — a
-part left out contributes no gain at all. A leading run `sol[1:i]` is thus the
-solution AS OF step `i`, and a component selection's gain is that component's
-own contribution: apply it, plot it, or difference it against another.
-Geometry, `info` and both provenance chains carry over unchanged, so every
-selection is a valid solution for `calibrate` and `ApplySolution`,
-and `sol[:]` reproduces `sol`.
-
-Selecting no step at all is an error: a solution has at least one.
-"""
-function Base.getindex(sol::CalibrationSolution, index)
-    return step_solution(sol, index)
-end
-
-function Base.getindex(sol::CalibrationSolution, step::Union{Symbol, Integer}, path1::Symbol, path::Symbol...)
-    ssel = step_solution(sol, step)
-    s = _select_component(ssel.steps[1], (path1, path...))
-    return CalibrationSolution(
-        [s], sol.geom, sol.info;
-        sequence = sol.sequence, gauge = sol.gauge,
+# The station names a layout over `n` stations of `geom` addresses.
+function _station_labels(geom::DataGeometry, n::Int)
+    isempty(geom.stations) && throw(
+        ArgumentError(
+            "a solution's geometry must name its stations; build it with `DataGeometry(ps)` " *
+                "or pass `stations`"
+        )
     )
+    length(geom.stations) == n || throw(
+        DimensionMismatch("the layout covers $n stations but the geometry names $(length(geom.stations))")
+    )
+    return geom.stations
 end
 
-Base.firstindex(sol::CalibrationSolution) = firstindex(sol.steps)
-Base.lastindex(sol::CalibrationSolution) = lastindex(sol.steps)
+# ── Applying ─────────────────────────────────────────────────────────────────
 
-"""
-    length(sol::CalibrationSolution), iterate, keys, haskey, eachindex
+# Components of one step over one station set, planned together: `stations`
+# indexes `geom.stations`.
+struct _EvalGroup{L <: ParameterLayout, V <: AbstractVector}
+    step::Symbol
+    layout::L
+    θ::V
+    stations::Vector{Int}
+end
 
-`CalibrationSolution` is a container of its pipeline steps: `length` counts
-them, `eachindex` gives their positions, `keys` their stage names in run
-order, `haskey` membership by name, and iteration yields `sol[i]` — each step
-as a single-step solution, so `collect(sol) == [sol[i] for i in
-eachindex(sol)]`.
-"""
-Base.length(sol::CalibrationSolution) = length(sol.steps)
-Base.eachindex(sol::CalibrationSolution) = eachindex(sol.steps)
-Base.keys(sol::CalibrationSolution) = Symbol[s.name for s in sol.steps]
-Base.haskey(sol::CalibrationSolution, name::Symbol) = any(s -> s.name === name, sol.steps)
-Base.iterate(sol::CalibrationSolution, i::Int = 1) =
-    i > length(sol.steps) ? nothing : (sol[i], i + 1)
-Base.eltype(::Type{S}) where {S <: CalibrationSolution} = S
+# What a solution applies: its geometry and one planned group per
+# (step, station set), in component order.
+struct _AppliedSolution{G <: DataGeometry}
+    geom::G
+    groups::Vector{_EvalGroup}
+end
 
-# Narrow one step to a component subtree: extend its selection by `path`,
-# validated against the layout's plantree. Shares θ with the step it narrows
-# (inner-constructor call — see the outer constructor's copy note).
-_select_component(s::StepSolution{M, L, V}, path::Tuple{Vararg{Symbol}}) where {M, L, V} =
-    StepSolution{M, L, V}(s.name, s.model, s.layout, s.θ, s.info, _extend_selection(s, path))
+function _applied(sol::CalibrationSolution)
+    isempty(sol.components) && throw(
+        ArgumentError("the solution holds no components, so applying it would change nothing")
+    )
+    geom = sol.geom
+    keys_ = Tuple{Symbol, Vector{String}}[]
+    members = Vector{SolvedComponent}[]
+    for c in sol.components
+        k = (c.step, String.(collect(lookup(c.params, Ant))))
+        i = findfirst(==(k), keys_)
+        if isnothing(i)
+            push!(keys_, k)
+            push!(members, SolvedComponent[c])
+        else
+            push!(members[i], c)
+        end
+    end
+    groups = _EvalGroup[_eval_group(step, stations, cs, geom) for ((step, stations), cs) in zip(keys_, members)]
+    return _AppliedSolution(geom, groups)
+end
 
-# The step's selection extended by `path`, validated by walking the plantree:
-# a `GroupedComponentPlan` descends into its signature groups; naming an
-# absent key, or descending past a single component, errors naming what is
-# available at that point.
-function _extend_selection(s::StepSolution, path::Tuple{Vararg{Symbol}})
-    full = (s.selection..., path...)
-    node = s.layout.plantree
-    walked = Symbol[]
-    for k in full
-        children = node isa GroupedComponentPlan ? node.groups : node
-        children isa NamedTuple || throw(
-            ArgumentError(
-                "step $(repr(s.name)): $(join(walked, '.')) is a single component " *
-                    "with no subcomponent $(repr(k)) to select."
+function _eval_group(step::Symbol, stations::Vector{String}, cs::Vector{SolvedComponent}, geom::DataGeometry)
+    idx = map(stations) do s
+        i = findfirst(==(s), geom.stations)
+        isnothing(i) && throw(
+            ArgumentError("component station `$s` is not among the geometry's stations $(join(geom.stations, ", "))")
+        )
+        i
+    end
+    keys_ = [Symbol(:c, i) for i in eachindex(cs)]
+    group(g) = (sel = findall(c -> first(c.path) === g, cs); NamedTuple{Tuple(keys_[sel])}(Tuple(cs[i].component for i in sel)))
+    model = GainModel(; phase = group(:phase), logamp = group(:logamp))
+    layout = plan_parameters(model, length(stations), geom; require_nonempty = false)
+    T = mapreduce(c -> eltype(c.params), promote_type, cs)
+    θ = zeros(T, layout.nθ)
+    for (c, key) in zip(cs, keys_)
+        g = first(c.path)
+        plan = getproperty(getproperty(layout.plantree, g), key)
+        axnode = getproperty(getproperty(layout.axes, g), key)
+        _check_params_dims(DimensionalData.dims(c.params), _params_dims(plan, axnode, geom, stations), _label(c))
+        copyto!(view(θ, plan.range), parent(c.params))
+    end
+    return _EvalGroup(step, layout, θ, idx)
+end
+
+function _check_params_dims(got::Tuple, expected::Tuple, label)
+    map(DimensionalData.name, got) == map(DimensionalData.name, expected) || throw(
+        DimensionMismatch(
+            "$label has dims $(map(DimensionalData.name, got)), but its component lays out " *
+                "$(map(DimensionalData.name, expected))"
+        )
+    )
+    for (a, b) in zip(got, expected)
+        la, lb = collect(lookup(a)), collect(lookup(b))
+        la == lb || throw(
+            DimensionMismatch(
+                "$label's $(DimensionalData.name(a)) axis is $(repr(la)), but its component lays " *
+                    "out $(repr(lb))"
             )
         )
-        haskey(children, k) || throw(
-            ArgumentError(
-                "step $(repr(s.name)) has no component " *
-                    "$(join(vcat(walked, k), '.')); available under " *
-                    "$(isempty(walked) ? "the model" : join(walked, '.')): " *
-                    "$(join(keys(children), ", "))."
-            )
-        )
-        push!(walked, k)
-        node = getproperty(children, k)
     end
-    return full
+    return nothing
 end
 
-# The plantree restricted to a selection path: the full tree when the path is
-# empty, otherwise singleton NamedTuples nested along the path, the other
-# top-level group left empty. Component `range`s address absolute θ positions,
-# so the pruned tree evaluates against the step's full θ — the selected
-# components contribute their solved values and every other component
-# contributes nothing (a unit gain factor), with no zeroed-θ copy.
-_selected_plantree(layout::ParameterLayout, ::Tuple{}) = layout.plantree
-function _selected_plantree(layout::ParameterLayout, sel::Tuple{Vararg{Symbol}})
-    group = first(sel)
-    sub = _prune_node(getproperty(layout.plantree, group), Base.tail(sel))
-    return group === :phase ? (; phase = sub, logamp = (;)) : (; phase = (;), logamp = sub)
-end
+_nant(sol::_AppliedSolution) = length(sol.geom.stations)
 
-_prune_node(node, ::Tuple{}) = node
-_prune_node(node::NamedTuple, path::Tuple{Symbol, Vararg{Symbol}}) = NamedTuple{(first(path),)}(
-    (_prune_node(getproperty(node, first(path)), Base.tail(path)),)
-)
-# Selecting one signature group keeps the station routing: only that group's
-# stations carry the component; every other station contributes nothing.
-function _prune_node(g::GroupedComponentPlan, path::Tuple{Symbol, Vararg{Symbol}})
-    k = first(path)
-    gi = findfirst(==(k), keys(g.groups))
-    group_of = [go == gi ? 1 : 0 for go in g.group_of]
-    local_of = [go == gi ? lo : 0 for (go, lo) in zip(g.group_of, g.local_of)]
-    return GroupedComponentPlan(
-        NamedTuple{(k,)}((getproperty(g.groups, k),)), [g.stations[gi]], group_of, local_of,
-    )
-end
-
-# One step's layout, honoring its selection: the plantree pruned to the
-# selected subtree. `nθ`, the grid dims, and the flat `plans` stay those of the
-# full solve — pruning never re-lays-out θ.
-function _selected_layout(s::StepSolution)
-    isempty(s.selection) && return s.layout
-    lay = s.layout
-    return ParameterLayout(
-        lay.nθ, lay.nant, lay.ntime, lay.nchan, lay.nphase, lay.plans,
-        _selected_plantree(lay, s.selection), lay.axes,
-    )
-end
-
-"""
-    stage_info(sol::CalibrationSolution, name::Symbol) -> NamedTuple
-
-The diagnostics recorded by the step named `name` (detections and per-scan SNR
-for the fringe stage, calibrator choice for the bandpass stage, …).
-"""
-stage_info(sol::CalibrationSolution, name::Symbol) = sol[name].steps[1].info
-
-"""
-    component_names(sol::CalibrationSolution) -> Vector{Symbol}
-
-The top-level model component names across every step of `sol` (phase and
-log-amplitude groups combined, in step then declaration order, duplicates
-dropped) — what `show` lists under `Components:`. A name here can belong to
-several steps at once (component names are local to each step's own model);
-a step-qualified selection (`sol[step, :phase, name]`) reaches one
-unambiguously.
-"""
-function component_names(sol::CalibrationSolution)
-    names = Symbol[]
-    for s in sol.steps, k in (keys(s.model.phase)..., keys(s.model.logamp)...)
-        k in names || push!(names, k)
-    end
-    return names
-end
-
-# The elementwise product of every step's own gains, each evaluated by
-# `evaluate_gains(layout, θ, args...; kw...)`. A step reads as identity gain
-# wherever it has no component, so the product across steps is the same total
-# gain a single merged model would give, without ever building one.
-function _product_gains(sol::CalibrationSolution, args...; kw...)
-    s1 = sol.steps[1]
-    g = evaluate_gains(_selected_layout(s1), s1.θ, args...; kw...)
-    for s in view(sol.steps, 2:length(sol.steps))
-        g .*= evaluate_gains(_selected_layout(s), s.θ, args...; kw...)
+# The product of every group's gains over an `nchan × ntime` window, each
+# group's placed on its own stations; a station a group does not carry takes
+# unit gain from it. `args`/`kw` select the window as `evaluate_gains` does.
+function _product_gains(sol::_AppliedSolution, nchan::Int, ntime::Int, args...; kw...)
+    T = mapreduce(g -> float(eltype(g.θ)), promote_type, sol.groups)
+    g = ones(Complex{T}, nchan, ntime, _nant(sol), 2)
+    for grp in sol.groups
+        view(g, :, :, grp.stations, :) .*= evaluate_gains(grp.layout, grp.θ, args...; kw...)
     end
     return g
 end
@@ -359,29 +359,27 @@ end
 """
     gains(sol::CalibrationSolution; Frequency, Ti, Ant, Feed) -> DimArray
 
-The solved complex antenna gains of `sol` — the whole solution, or any
-selection of it (`sol[:bandpass]`, `sol[:fringe, :phase, :mbd]`, …) — labelled
-for inspection: a `DimArray` over `(Frequency, Ti, Ant, Feed)` — channel
-frequencies (Hz), integration times (seconds), antennas (named when `sol.info`
-carries `ant_names`, else `1:nant`), and feed. `gain = exp(Σ logamp) · cis(Σ
-phase)`, summed over the selection's components, is the same forward map
-`calibrate` divides by;
-`abs.(gains(sol))` and `angle.(gains(sol))` recover amplitude and phase.
+The complex antenna gains of `sol` — a whole solution or any selection of it
+(`sol[:bandpass]`, `sol[:fringe, :phase, :mbd]`, `filter(pred, sol)`) — as a
+`DimArray` over `(Frequency, Ti, Ant, Feed)`: channel frequencies (Hz),
+integration times (seconds), the geometry's stations, and feed.
+`gain = exp(Σ logamp) · cis(Σ phase)` over the components is the same forward
+map `calibrate` divides by.
 
-The keywords are the dimension names and accept anything `DimArray` indexing
-accepts — integers, ranges, `At`, `Near`, `Where`, intervals — under the
-invariant `gains(sol; kw...) == gains(sol)[kw...]`. A `Frequency`/`Ti`
-selector restricts the evaluation window (the gains are computed only at the
-selected samples, not sliced from the full cube); `Ant`/`Feed` slice the
+The keywords accept anything `DimArray` indexing accepts, under the invariant
+`gains(sol; kw...) == gains(sol)[kw...]`. A `Frequency`/`Ti` selector
+restricts the evaluation to the selected samples; `Ant`/`Feed` slice the
 result.
 """
-function gains(sol::CalibrationSolution; kw...)
+gains(sol::CalibrationSolution; kw...) = gains(_applied(sol); kw...)
+
+function gains(sol::_AppliedSolution; kw...)
     nant = _nant(sol)
     nfeed = 2
     nchan = nchannels(sol.geom)
     ntime = ntimes(sol.geom)
-    d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), Ant(_ant_labels(sol, nant)), Feed(1:nfeed))
-    isempty(kw) && return DimArray(_product_gains(sol), d)
+    d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), Ant(sol.geom.stations), Feed(1:nfeed))
+    isempty(kw) && return DimArray(_product_gains(sol, nchan, ntime), d)
     for k in keys(kw)
         k in (:Frequency, :Ti, :Ant, :Feed) || throw(
             ArgumentError(
@@ -401,7 +399,7 @@ function gains(sol::CalibrationSolution; kw...)
     # (a plain `BoundsError`), never inside the evaluation.
     fsel = sol.geom.channel_freqs[ci]
     tsel = sol.geom.times[ti]
-    g = _product_gains(sol, ci, ti)
+    g = _product_gains(sol, length(ci), length(ti), ci, ti)
     A = DimArray(g, (Frequency(fsel), Ti(tsel), d[3], d[4]))
     # Indexing the windowed wrap reproduces `gains(sol)[kw...]` exactly —
     # including an integer selector dropping its dimension.
@@ -418,99 +416,6 @@ _window_indices(v, ::Int) = v
 _post_index(::Integer) = 1
 _post_index(_) = Colon()
 
-# ── parameters: the selection's θ as labelled DimArray leaves ────────────────
-
-"""
-    parameters(sol::CalibrationSolution)
-
-What the selection solved: its raw θ, wrapped as labelled `DimArray` leaves.
-
-For a single-component selection (`parameters(sol[:fringe, :phase, :mbd])`)
-the result is that component's θ leaf: a `DimArray` over the five axes
-`(param, feed, Frequency, Ti, Ant)` — the second is `Feed` when the component
-is fit per feed, else the tied `node` axis — with coordinates materialized
-from `sol`'s geometry: each `Frequency` and `Ti` segment is an interval from
-its lowest to its highest channel frequency (Hz) or sample epoch (seconds),
-labeled by its midpoint, so `Frequency(Contains(ν))` or `Ti(Contains(t))`
-selects the segment covering `ν` or `t`; then feed/node ids, and antenna names
-(from `sol.info.ant_names` when present, else `1:nant`).
-
-A wider selection returns the NamedTuple tree of those leaves, mirroring the
-model: `parameters(sol[:fringe, :phase])` the fringe step's phase components,
-`parameters(sol[:fringe])` its `(; phase, logamp)` trees, and a multi-step
-solution one tree per step, keyed by stage name (a duplicated stage name is
-an error — select the step positionally first). A station-heterogeneous
-component appears as one leaf per signature group (`g1, g2, …`), each `Ant`
-axis labelled with just its own group's stations.
-
-The leaves share data with the selection's θ (no copy): an inspection view,
-never stored on the solution and never fed through the solve or AD. There are
-no selector keywords — index the returned `DimArray`.
-"""
-function parameters(sol::CalibrationSolution)
-    if length(sol.steps) > 1
-        ks = keys(sol)
-        allunique(ks) || throw(
-            ArgumentError(
-                "parameters: stage names $(ks) repeat; select one step positionally " *
-                    "(`parameters(sol[i])`)."
-            )
-        )
-        return NamedTuple{Tuple(ks)}(ntuple(i -> parameters(sol[i]), length(ks)))
-    end
-    s = sol.steps[1]
-    ok, plan = _try_descend(s.layout.plantree, s.selection)
-    ok || error("parameters: selection $(s.selection) no longer resolves in the layout")
-    _, axnode = _try_descend(s.layout.axes, s.selection)
-    name = isempty(s.selection) ? s.name : last(s.selection)
-    return _parameters_node(plan, axnode, sol, s, name)
-end
-
-# Recursion mirrors the plantree; the axes tree runs alongside it (its leaves
-# are `(; dims, roles[, stations])` records, so the plan node drives dispatch).
-_parameters_node(nt::NamedTuple, axnode, sol, s, name) = NamedTuple{keys(nt)}(
-    ntuple(i -> _parameters_node(nt[i], axnode[i], sol, s, keys(nt)[i]), length(nt))
-)
-_parameters_node(plan::ComponentPlan, axnode, sol, s, name) =
-    _leaf_dimarray(plan, axnode, sol, s, name)
-_parameters_node(g::GroupedComponentPlan, axnode, sol, s, name) = NamedTuple{keys(g.groups)}(
-    ntuple(i -> _leaf_dimarray(g.groups[i], axnode[i], sol, s, keys(g.groups)[i]), length(g.groups))
-)
-
-function _leaf_dimarray(plan::ComponentPlan, axnode, sol::CalibrationSolution, s::StepSolution, name::Symbol)
-    stations = hasproperty(axnode, :stations) ? axnode.stations : nothing
-    raw = _component_leaf(plan, s.θ)
-    dims = ntuple(d -> _role_dim(axnode.roles[d], size(raw, d), sol, plan; stations), ndims(raw))
-    return DimArray(raw, dims; name)
-end
-
-# Attempt to descend `tree` (a step's own `layout.plantree` or `layout.axes`)
-# by `path`; `(false, nothing)` without throwing when a name is absent along
-# the way. A `GroupedComponentPlan` descends into its signature groups, so a
-# path may address one group's leaf directly (`:phase, :bandpass, :g1`).
-function _try_descend(tree, path::Tuple{Vararg{Symbol}})
-    node = tree
-    for s in path
-        children = node isa GroupedComponentPlan ? node.groups : node
-        (children isa NamedTuple && haskey(children, s)) || return false, nothing
-        node = getproperty(children, s)
-    end
-    return true, node
-end
-
-# The DimensionalData dimension for one leaf axis, from its role and the
-# solution's geometry. A segment axis spans each segment's extent, from its
-# lowest to its highest channel or sample, labeled by the midpoint; the
-# antenna axis takes station names when the solution carries them — for a
-# signature group's leaf, the names of just the group's `stations`; `:param`
-# and `:node` are positional id spaces with no physical coordinate.
-# Station labels for an axis of length `n`: the solution's recorded names when
-# they cover it, else positional ids.
-function _ant_labels(sol::CalibrationSolution, n::Int)
-    an = hasproperty(sol.info, :ant_names) ? sol.info.ant_names : nothing
-    return an !== nothing && length(an) == n ? collect(an) : (1:n)
-end
-
 # A lookup over segments of the samples at `coords`, `groups` giving each
 # segment's sample indices: each segment is the interval from its lowest to its
 # highest sample, labeled by that interval's midpoint, so `Contains(x)` finds
@@ -524,54 +429,27 @@ function _segment_lookup(coords, groups)
     )
 end
 
-# The lookups of a plan's `n` frequency segments (over its channels) and time
-# segments (over its samples).
 _frequency_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape[3]) =
     _segment_lookup(geom.channel_freqs, segment_groups(plan.fseg_id, n))
 _time_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape[4]) =
     _segment_lookup(geom.times, segment_groups(plan.tseg_id, n))
 
-function _role_dim(role::Symbol, n::Int, sol::CalibrationSolution, plan::ComponentPlan; stations = nothing)
+# The dimension for one axis of a component's parameters, from its role:
+# segment axes over the geometry, `Ant` over station names (a signature
+# group's over just its `stations`), `param`/`node` positional.
+function _role_dim(role::Symbol, n::Int, geom::DataGeometry, names, plan::ComponentPlan; stations = nothing)
     if role === :Frequency
-        return Frequency(_frequency_segment_lookup(plan, sol.geom, n))
+        return Frequency(_frequency_segment_lookup(plan, geom, n))
     elseif role === :Ti
-        return Ti(_time_segment_lookup(plan, sol.geom, n))
+        return Ti(_time_segment_lookup(plan, geom, n))
     elseif role === :Ant
-        stations === nothing && return Ant(_ant_labels(sol, n))
-        an = hasproperty(sol.info, :ant_names) ? sol.info.ant_names : nothing
-        ants = an !== nothing && all(i -> 1 <= i <= length(an), stations) ?
-            collect(an)[stations] : collect(stations)
-        return Ant(ants)
+        return Ant(isnothing(stations) ? collect(names) : collect(names)[stations])
     elseif role === :Feed
         return Feed(1:n)
     else
         return Dim{role}(1:n)
     end
 end
-
-function step_solution(sol::CalibrationSolution, index)
-    stp = sol.steps[index]
-    stpout = stp isa AbstractVector ? stp : [stp]
-    return CalibrationSolution(
-        stpout, sol.geom, sol.info;
-        sequence = sol.sequence, gauge = sol.gauge,
-    )
-end
-
-function step_solution(sol::CalibrationSolution, name::Symbol)
-    idx = findall(s -> s.name === name, sol.steps)
-    isempty(idx) && throw(
-        ArgumentError("solution has no stage $(repr(name)); recorded stages: $(keys(sol)).")
-    )
-    length(idx) == 1 || throw(
-        ArgumentError(
-            "stage $(repr(name)) is recorded $(length(idx)) times (positions $(idx)); " *
-                "select it positionally."
-        )
-    )
-    return step_solution(sol, idx[1])
-end
-
 
 # ── Geometry from a ProcessingSet ────────────────────────────────────────────────────
 
@@ -842,22 +720,25 @@ end
     gains(sol::CalibrationSolution, win::GeometryWindow; time_span = nothing) -> DimArray
 
 The gains of `sol` at the samples `win` addresses: `win.chan_idx` and
-`win.ti_idx` index `win.geom`, which may be `sol.geom` itself or the geometry of
-other data. On a foreign geometry each sample is placed in the solve segment it
-belongs to (see [`evaluate_gains`](@ref)); `time_span[k]` is the interval the
-`k`-th selected time integrates over, so a sample straddling a segment boundary
-is rejected. Labelled like [`gains`](@ref)`(sol)`.
+`win.ti_idx` index `win.geom`, which may be `sol.geom` itself or the geometry
+of other data. On a foreign geometry each sample is placed in the solve
+segment it belongs to (see [`evaluate_gains`](@ref)); `time_span[k]` is the
+interval the `k`-th selected time integrates over, so a sample straddling a
+segment boundary is rejected. Labeled like [`gains`](@ref)`(sol)`.
 """
-function gains(sol::CalibrationSolution, win::GeometryWindow; time_span = nothing)
-    g = win.geom === sol.geom ? _product_gains(sol, win.chan_idx, win.ti_idx) :
+gains(sol::CalibrationSolution, win::GeometryWindow; time_span = nothing) =
+    gains(_applied(sol), win; time_span)
+
+function gains(sol::_AppliedSolution, win::GeometryWindow; time_span = nothing)
+    nc, nt = length(win.chan_idx), length(win.ti_idx)
+    g = win.geom === sol.geom ? _product_gains(sol, nc, nt, win.chan_idx, win.ti_idx) :
         _product_gains(
-            sol, sol.geom, win.geom; chan_idx = win.chan_idx, ti_idx = win.ti_idx, time_span,
+            sol, nc, nt, sol.geom, win.geom; chan_idx = win.chan_idx, ti_idx = win.ti_idx, time_span,
         )
-    nant = _nant(sol)
     return DimArray(
         g, (
             Frequency(win.geom.channel_freqs[win.chan_idx]), Ti(win.geom.times[win.ti_idx]),
-            Ant(_ant_labels(sol, nant)), Feed(1:2),
+            Ant(sol.geom.stations), Feed(1:2),
         ),
     )
 end
@@ -868,51 +749,25 @@ end
     save_solution(path, sol::CalibrationSolution)
 
 Serialize `sol` to `path` via the `Serialization` stdlib inside a versioned
-wrapper NamedTuple. The current version is 8 (the solution records its
-pipeline as `sequence` and its `gauge`); earlier versions are refused on load.
-A pipeline element that fails to serialize, such as a closure, is recorded as
-`missing` with a warning rather than failing the save.
+wrapper NamedTuple (version 9: a list of solved components).
 """
 function save_solution(path::AbstractString, sol::CalibrationSolution)
-    wrapper = (;
-        version = 8, sol.steps, sol.geom, sol.info,
-        sequence = Tuple(_serializable_elements(sol.sequence)), sol.gauge,
-    )
-    serialize(path, wrapper)
+    serialize(path, (; version = 9, sol))
     return path
-end
-
-function _serializable_elements(xs)
-    out = Any[]
-    for x in xs
-        ok = try
-            serialize(IOBuffer(), x)
-            true
-        catch
-            false
-        end
-        if ok
-            push!(out, x)
-        else
-            @warn "save_solution: pipeline element $(typeof(x)) is not serializable — recorded as `missing`."
-            push!(out, missing)
-        end
-    end
-    return out
 end
 
 """
     load_solution(path) -> CalibrationSolution
 
-Inverse of [`save_solution`](@ref). Only current-format (version 8) files are
-supported; files from an earlier Gustavo used a different solution shape and
-are refused — re-solve to produce a current-format solution.
+Inverse of [`save_solution`](@ref). Only version 9 files are supported; files
+from an earlier Gustavo used a different solution shape and are refused —
+re-solve to produce a current-format solution.
 """
 function load_solution(path::AbstractString)
     w = deserialize(path)
-    w.version == 8 || error(
+    w.version == 9 || error(
         "load_solution: unsupported version $(w.version) — saved by an incompatible " *
             "Gustavo (the solution shape changed); re-solve to produce a current file.",
     )
-    return CalibrationSolution(w.steps, w.geom, w.info; w.sequence, w.gauge)
+    return w.sol
 end

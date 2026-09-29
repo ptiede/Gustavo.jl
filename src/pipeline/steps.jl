@@ -255,7 +255,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         end
         flags = reduce(append!, (r.flags for r in results); init = Tuple{Int, Int}[])
         ncomp = sum((r.ncomp for r in results); init = 0)
-        return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)...)
+        return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)..., s.search)
     end
     local results, ncomp, flags
     for round in 1:max(s.rounds, 1)
@@ -264,7 +264,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         end
         ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])
     end
-    return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)...)
+    return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)..., s.search)
 end
 
 # One scan group's search. Round 1 searches the data; later rounds search the

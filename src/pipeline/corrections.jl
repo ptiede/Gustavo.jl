@@ -1,8 +1,8 @@
 # ── Corrections: Measurement Set → Measurement Set ──────────────────────────
 #
 # A correction takes a Measurement Set and returns a corrected copy. Any such
-# function may sit in a pipeline; the structs below are the ones a solution can
-# record and replay. Inside `fit` and `calibrate` a correction is applied through
+# function may sit in a pipeline; the structs below are the built-in ones.
+# Inside `fit` a correction is applied through
 # `_correct(x, ms, geom)`, which hands the ones that address the run's index
 # space (channels, stations) the run's geometry; called on its own, such a
 # correction builds the geometry of the Measurement Set it is given.
@@ -10,15 +10,14 @@
 """
     AbstractDataTransform
 
-A correction a solution records: a callable struct `t(ms) -> MeasurementSet`
-returning a corrected copy of `ms`. In a pipeline it corrects the data every
-later solve step reads, and `calibrate` replays it. Built-ins:
+A built-in correction: a callable struct `t(ms) -> MeasurementSet` returning a
+corrected copy of `ms`. In a pipeline it corrects the data every later solve
+step reads. Built-ins:
 [`AutocorrelationNormalization`](@ref), [`ApplySolution`](@ref),
 [`StationWeightScale`](@ref), [`FlagChannels`](@ref).
 
 A plain function from a Measurement Set to a Measurement Set can sit in a
-pipeline as well; a solution holding one cannot be replayed after
-[`load_solution`](@ref), since functions are not saved.
+pipeline as well.
 """
 abstract type AbstractDataTransform end
 
@@ -67,8 +66,8 @@ end
 
 Correction: [`normalize_by_autocorrelations`](@ref), so cross-correlations
 become correlation coefficients and the autocorrelation baselines are flagged.
-The default pipelines start with it, and a solution records it, so
-`calibrate` applies gains to data on the scale they were solved on.
+The default pipelines start with it; apply it to data before `calibrate` so
+the gains divide data on the scale they were solved on.
 """
 struct AutocorrelationNormalization <: AbstractDataTransform end
 
@@ -79,8 +78,9 @@ struct AutocorrelationNormalization <: AbstractDataTransform end
 """
     ApplySolution(sol::CalibrationSolution)
 
-Correction: divide `sol`'s gains out of the data (`V → V / (g_a·conj(g_b))`,
-`w → w·|g_a g_b|²`), e.g. a phase-cal solution or an earlier fit. A solution
+Correction: divide the gains of `sol` (a solution, or any selection of one) out
+of the data (`V → V / (g_a·conj(g_b))`, `w → w·|g_a g_b|²`), e.g. a phase-cal
+solution or an earlier fit. A solution
 fit on top of it is the correction on top of `sol`. Cells where the gain is
 non-finite or zero are left untouched.
 
@@ -95,14 +95,18 @@ channel-index axis, so they require the data to index the same channels: in a
 pipeline or `calibrate` that is the whole processing set's channel axis, and
 `ApplySolution(sol)(ms)` on its own uses the channels of `ms` alone.
 
-Stations are matched by name against the solution's recorded `ant_names`;
-stations the solution never solved keep identity gains, with a warning. A
-solution that records no `ant_names`, or shares no station with the data, is
-refused.
+Stations are matched by name against the solution's geometry; stations the
+solution never solved keep identity gains, with a warning. A solution that
+shares no station with the data is refused.
 """
-struct ApplySolution{S <: CalibrationSolution} <: AbstractDataTransform
+struct ApplySolution{S <: Calibration._AppliedSolution} <: AbstractDataTransform
     sol::S
 end
+
+ApplySolution(sol::CalibrationSolution) = ApplySolution(Calibration._applied(sol))
+
+Base.show(io::IO, t::ApplySolution) =
+    print(io, "ApplySolution(", join(unique(g.step for g in t.sol.groups), ", "), ")")
 
 (t::ApplySolution)(ms::XRadio.MeasurementSet) = _correct(t, ms, DataGeometry(_one_member(ms)))
 
@@ -110,8 +114,8 @@ _correct(t::ApplySolution, ms::XRadio.MeasurementSet, geom::DataGeometry) =
     _divide_gains(ms, GeometryWindow(geom, ms), t.sol; flag_bad = false)
 
 # Target station index → the solution's own (0 = absent from the solution).
-function _station_map(sol::CalibrationSolution, stations)
-    solnames = _solution_ant_names(sol)
+function _station_map(sol::Calibration._AppliedSolution, stations)
+    solnames = sol.geom.stations
     m = [something(findfirst(==(n), solnames), 0) for n in stations]
     all(iszero, m) && throw(
         ArgumentError(
@@ -127,20 +131,6 @@ function _station_map(sol::CalibrationSolution, stations)
     return m
 end
 
-# The station names a solution matches on. One that records none has no station
-# identity at all — only its own set's positional order, which means nothing
-# anywhere else — so it cannot be applied.
-function _solution_ant_names(sol::CalibrationSolution)
-    (hasproperty(sol.info, :ant_names) && !isempty(sol.info.ant_names)) || throw(
-        ArgumentError(
-            "ApplySolution: the solution records no station names, so its θ rows could only be " *
-                "matched to the data's stations by position — which means nothing across sets. " *
-                "Re-solve so the solution records `ant_names`."
-        )
-    )
-    return String.(collect(sol.info.ant_names))
-end
-
 # Whether the solution's gains are the same at every time in the window: no
 # component reads a time coordinate, and every sample places in one time segment.
 # A precal is usually such a solution (PerScan × PerSpectralWindow with no time
@@ -151,9 +141,9 @@ end
 # place — or whose span straddles a bin boundary — raises exactly as it would in
 # the full evaluation. This decides how many columns to evaluate, never whether
 # to check.
-function _time_constant_over(sol::CalibrationSolution, win::GeometryWindow, tspan)
+function _time_constant_over(sol::Calibration._AppliedSolution, win::GeometryWindow, tspan)
     length(win.ti_idx) <= 1 && return true
-    for s in sol.steps, plan in s.layout.plans
+    for grp in sol.groups, plan in grp.layout.plans
         Ti in Calibration.term_axes(plan.term) && return false
         ids = Calibration.time_segment_ids(
             plan.tseg, sol.geom, win.geom; ti_idx = win.ti_idx, time_span = tspan,
@@ -170,7 +160,7 @@ _head_span(span) = span === nothing || isempty(span) ? span : span[1:1]
 # whose gain is degenerate is left as it is (`flag_bad = false`), or given a NaN
 # visibility and a flag (`flag_bad = true`).
 function _divide_gains(
-        ms::XRadio.MeasurementSet, win::GeometryWindow, sol::CalibrationSolution;
+        ms::XRadio.MeasurementSet, win::GeometryWindow, sol::Calibration._AppliedSolution;
         flag_bad::Bool, executor = SerialScheduler(),
     )
     amap = _station_map(sol, win.geom.stations)
