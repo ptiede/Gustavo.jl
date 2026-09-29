@@ -4,7 +4,7 @@
 using Gustavo
 using Test
 using Random
-using Statistics: mean, std
+using Statistics: mean, median, std
 using Gustavo.DimensionalData: At, Dim, DimArray, Ti, dims, lookup
 using LinearAlgebra: Diagonal
 using OffsetArrays: OffsetArray
@@ -441,7 +441,7 @@ end
     end
     sol = solve_positional(
         rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref),
-        smoother = FRa.JointOUSmoother(coherence_time = 15.0), tying = CALa.SharedFeeds(),
+        smoother = FRa.JointKalmanSmoother(coherence_time = 15.0), tying = CALa.SharedFeeds(),
     )
     @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)     # ref pinned
     @test all(sol.phase[:, 1, :] .=== sol.phase[:, 2, :])                 # both feeds share the node
@@ -481,10 +481,45 @@ end
 
     none = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(), tying = CALa.SharedFeeds())
     gp = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = FRa.default_adhoc_prior(), tying = CALa.SharedFeeds())
-    gpj = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.JointOUSmoother(coherence_time = 20.0), tying = CALa.SharedFeeds())
+    gpj = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.JointKalmanSmoother(coherence_time = 20.0), tying = CALa.SharedFeeds())
 
     @test rms_to_truth(gpj) < rms_to_truth(none)          # joint solve denoises
-    @test rms_to_truth(gpj) < 1.5 * rms_to_truth(gp)      # competitive with per-track
+    @test rms_to_truth(gpj) < 1.1 * rms_to_truth(gp)      # competitive with per-track
+end
+
+@testset "Adhoc :gp_joint resolves each station's prior" begin
+    rng = MersenneTwister(0x70B1)
+    nant, nap = 5, 40
+    ref = 2
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    rbar, wbar = inject_screen(bl, pols, shared_screen(rng, nant, nap); amp = 5.0, noise = 1.0, rng)
+    solve(prior) = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        gauge = PinAntenna(ref), smoother = FRa.JointKalmanSmoother(), tying = CALa.SharedFeeds(), prior,
+    )
+
+    # Fixed hyperparameters are used as stated at every station.
+    fixed = OUPrior(; scale = 12.0, σ = 0.3)
+    @test all(==(fixed), solve(fixed).prior)
+
+    # Hyperpriors resolve to numbers per station; the reference station, whose
+    # track is zero by construction, takes the median of the others.
+    pr = solve(FRa.default_adhoc_prior()).prior
+    @test all(p -> p isa OUPrior && CALa.is_fixed_hyper(p.scale) && CALa.is_fixed_hyper(p.σ), pr)
+    others = [pr[a, 1] for a in 1:nant if a != ref]
+    @test pr[ref, 1].scale ≈ median(p.scale for p in others)
+    @test pr[ref, 1].σ ≈ median(p.σ for p in others)
+    @test isequal(pr[:, 1], pr[:, 2])
+
+    # A station keeps its own fixed values even where it takes no part in the fit.
+    mixed = [a == ref ? fixed : FRa.default_adhoc_prior() for a in 1:nant]
+    @test solve(mixed).prior[ref, 1] == fixed
+
+    # The joint state runs as an OU process, so any other prior is an error.
+    @test_throws "JointKalmanSmoother needs an OUPrior at every station" solve(RandomWalkPrior(; σ = 0.1))
+    @test_throws "JointKalmanSmoother needs an OUPrior at every station" solve(nothing)
 end
 
 @testset "Adhoc :gp_joint requires one node per station" begin
@@ -497,7 +532,7 @@ end
     rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0)
     @test_throws ErrorException solve_positional(
         rbar, wbar, bl, pols, nant, times;
-        smoother = FRa.JointOUSmoother(), tying = CALa.PerFeed(),
+        smoother = FRa.JointKalmanSmoother(), tying = CALa.PerFeed(),
     )
 end
 
@@ -759,7 +794,7 @@ end
         (FRa.PerTrackAdhocSmoother(), RandomWalkPrior(; σ = 0.3), CALa.PerFeed()),
         (FRa.PerTrackAdhocSmoother(), FRa.default_adhoc_prior(), CALa.PerFeed()),
         (FRa.PerTrackAdhocSmoother(), nothing, CALa.PerFeed()),
-        (FRa.JointOUSmoother(coherence_time = 15.0), FRa.default_adhoc_prior(), CALa.SharedFeeds()),
+        (FRa.JointKalmanSmoother(coherence_time = 15.0), FRa.default_adhoc_prior(), CALa.SharedFeeds()),
     ]
     for (sm, prior, ty) in cases
         @test sm isa FRa.AbstractAdhocSmoother
@@ -831,13 +866,18 @@ end
         sol = solve_positional(
             rbar, wbar, bl, pols, nant, times;
             gauge = PinAntenna(1),
-            smoother = FRa.JointOUSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
+            smoother = FRa.JointKalmanSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
             tying = CALa.SharedFeeds(),
         )
         track_rmse(sol, screen, nant, nap)
     end
     @test rms[2] < 0.85 * rms[1]     # weak baselines genuinely add information
     @test rms[2] < 0.15              # and the refined tracks are good in absolute terms
+    per_track = track_rmse(
+        solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.SharedFeeds()),
+        screen, nant, nap,
+    )
+    @test rms[2] < 1.1 * per_track   # the joint solve is competitive with per-track
 
     # Where the seed is already near-optimal (uniform moderate SNR), refinement
     # must not degrade it beyond its slightly different smoothing balance.
@@ -846,7 +886,7 @@ end
         sol = solve_positional(
             rbar, wbar, bl, pols, nant, times;
             gauge = PinAntenna(1),
-            smoother = FRa.JointOUSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
+            smoother = FRa.JointKalmanSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
             tying = CALa.SharedFeeds(),
         )
         track_rmse(sol, screen, nant, nap)

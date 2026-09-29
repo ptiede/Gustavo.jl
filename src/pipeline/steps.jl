@@ -95,7 +95,7 @@ fit is `model`, a [`GainModel`](@ref) holding the single adhoc component and
 its prior along time — see [`Fring.default_adhoc_terms`](@ref) for the default
 (feed-common, OU prior) form. How the tracks are fit under that prior lives on
 `smoother`, a pluggable [`Fring.AbstractAdhocSmoother`](@ref)
-([`Fring.PerTrackAdhocSmoother`](@ref) or [`Fring.JointOUSmoother`](@ref), which
+([`Fring.PerTrackAdhocSmoother`](@ref) or [`Fring.JointKalmanSmoother`](@ref), which
 requires the feed-common (`SharedFeeds`) model). The one-argument form takes
 the smoother and keeps the default model.
 
@@ -191,7 +191,7 @@ model_components(s::AdhocPhase, spec) = _vet_step_model(
     "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
         "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed(), prior = " *
         "<nothing, or a RandomWalkPrior or OUPrior along Ti>)` " *
-        "(`JointOUSmoother`: `SharedFeeds()` only) — see `default_adhoc_terms`.",
+        "(`JointKalmanSmoother`: `SharedFeeds()` and an `OUPrior` only) — see `default_adhoc_terms`.",
     spec,
 )
 

@@ -89,7 +89,7 @@ end
     @test mean(abs2, ŷ .- θ) < mean(abs2, y .- θ)   # smoother beats the raw track
 end
 
-@testset "fit_ou_hypers recovers (τ, σ²) by ML" begin
+@testset "type-II MAP recovers (τ, σ²) under weak hyperpriors" begin
     N, dt = 600, 1.0
     times = collect(0:(N - 1)) .* dt
     τ_true, σ_true = 20.0, 1.0
@@ -104,11 +104,14 @@ end
         rn = 0.01
         y = θ .+ sqrt(rn) .* randn(rng, N)
         w = fill(1.0 / rn, N)
-        τh, σ2h = FRs.fit_ou_hypers(y .- mean(y), w, times; τ0 = 10.0, σ2_0 = 0.5, τ_lo = dt, τ_hi = 100 * N * dt)
+        τh, σ2h = FRs._map_ou_hypers(
+            [y .- mean(y)], [w], [times], LogNormal(log(10.0), 2.0), LogNormal(0.0, 2.0);
+            τ_lo = dt, τ_hi = 100 * N * dt, σ2_seed = 0.5,
+        )
         push!(τs, τh); push!(σ2s, σ2h)
     end
-    @test 12.0 <= mean(τs) <= 32.0                  # ML τ near truth (finite-sample spread)
-    @test 0.6 <= mean(σ2s) <= 1.5                   # ML σ² near truth
+    @test 12.0 <= mean(τs) <= 32.0                  # τ near truth (finite-sample spread)
+    @test 0.6 <= mean(σ2s) <= 1.5                   # σ² near truth
 end
 
 @testset "Scalar OU path: element type follows the data" begin
@@ -126,25 +129,16 @@ end
     @test eltype(FRs.smooth_ou_track(y, w, times; τ = 20.0f0, σ2 = 1.0f0)) === Float32
     @test FRs._init_track_var(y, w) isa Float32
 
-    τh, σ2h = FRs.fit_ou_hypers(y, w, times; τ0 = 10.0f0, σ2_0 = 0.5f0, τ_lo = 1.0f0, τ_hi = 1.0f4)
+    hyper = (LogNormal(log(10.0), 2.0), LogNormal(0.0, 2.0))
+    τh, σ2h = FRs._map_ou_hypers([y], [w], [times], hyper...; τ_lo = 1.0f0, τ_hi = 1.0f4, σ2_seed = 0.5f0)
     @test τh isa Float32
     @test σ2h isa Float32
     # The Float32 fit lands near the Float64 fit on the same data.
-    τ64, σ264 = FRs.fit_ou_hypers(
-        Float64.(y), Float64.(w), Float64.(times);
-        τ0 = 10.0, σ2_0 = 0.5, τ_lo = 1.0, τ_hi = 1.0e4,
+    τ64, σ264 = FRs._map_ou_hypers(
+        [Float64.(y)], [Float64.(w)], [Float64.(times)], hyper...; τ_lo = 1.0, τ_hi = 1.0e4, σ2_seed = 0.5,
     )
     @test isapprox(τh, τ64; rtol = 0.05)
     @test isapprox(σ2h, σ264; rtol = 0.05)
-end
-
-@testset "fit_ou_hypers falls back on too-few samples" begin
-    y = [0.1, NaN, 0.2, NaN]
-    w = [1.0, 0.0, 1.0, 0.0]
-    times = collect(0.0:3.0)
-    τ, σ2 = FRs.fit_ou_hypers(y, w, times; τ0 = 7.0, σ2_0 = 0.3, τ_lo = 1.0, τ_hi = 100.0)
-    @test τ == 7.0
-    @test σ2 == 0.3
 end
 
 # Dense joint GP (independent OU per dim) log-likelihood and posterior mean under a
@@ -278,10 +272,8 @@ end
     # A concentrated hyperprior pins its hyperparameter.
     τ, _ = map_hypers(LogNormal(log(3.0e6), 0.01), 0.1)
     @test τ ≈ 3.0e6 rtol = 0.01
-    # With no ripple, type-II ML sends σ² to its floor; a hyperprior bounded away
-    # from zero keeps it there.
-    _, σ2_ml = FRs.fit_ou_hypers(ycs[1], ws[1], xs[1]; τ0 = 1.0e7, σ2_0 = 1.0e-2, τ_lo = lo, τ_hi = hi)
-    @test σ2_ml ≤ 1.0e-6
+    # With no ripple the likelihood alone would send σ² to its floor; a
+    # hyperprior bounded away from zero keeps it there.
     _, σ2 = map_hypers(1.0e7, LogNormal(log(0.1), 0.3))
     @test 0.01 < sqrt(σ2) < 0.1
 end

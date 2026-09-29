@@ -209,8 +209,8 @@ end
     # Compile-time vetting. The joint smoother cannot solve a per-feed model
     # (its Kalman state is one node per station)...
     pf = default_adhoc_terms(feed = CAL.PerFeed())
-    @test_throws "JointOUSmoother cannot fit" Gustavo.model_components(
-        AdhocPhase(model = pf, smoother = FP.JointOUSmoother()), nothing,
+    @test_throws "JointKalmanSmoother cannot fit" Gustavo.model_components(
+        AdhocPhase(model = pf, smoother = FP.JointKalmanSmoother()), nothing,
     )
     # ...no adhoc smoother can address a single-feed tying...
     @test_throws "cannot fit the component" Gustavo.model_components(
@@ -222,7 +222,12 @@ end
     @test_throws "is not identifiable" Gustavo.model_components(
         AdhocPhase(model = two), nothing,
     )
-    # ...and its prior is a random walk or OU process along time.
+    # ...the joint smoother needs an OU prior...
+    @test_throws "JointKalmanSmoother cannot fit" Gustavo.model_components(
+        AdhocPhase(model = default_adhoc_terms(; prior = RandomWalkPrior(; σ = 0.1)), smoother = FP.JointKalmanSmoother()),
+        nothing,
+    )
+    # ...and the prior is a random walk or OU process along time.
     @test_throws "cannot fit the component" Gustavo.model_components(
         AdhocPhase(model = default_adhoc_terms(; prior = IIDPrior(0.1))), nothing,
     )

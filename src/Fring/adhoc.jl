@@ -53,7 +53,7 @@
 How the [`AdhocPhase`](@ref Gustavo.AdhocPhase) step fits the per-AP station
 phase tracks the adhoc solve produces (`solve_adhoc_phasing`) under the adhoc
 component's prior: [`PerTrackAdhocSmoother`](@ref) (the default) or
-[`JointOUSmoother`](@ref).
+[`JointKalmanSmoother`](@ref).
 
 # Implementing a smoother
 
@@ -86,8 +86,8 @@ A smoother declares which adhoc components it can solve with
 checked at model-compile time. The default is the capability of the solve
 machinery — per-AP constant phase over the global band, `SharedFeeds` or
 `PerFeed`, with no prior or a `RandomWalkPrior` or `OUPrior` along `Ti`;
-`JointOUSmoother` restricts to `SharedFeeds` (its Kalman state is one dimension
-per station).
+`JointKalmanSmoother` restricts to `SharedFeeds` (its Kalman state is one
+dimension per station) and to an `OUPrior`.
 
 Every smoother carries its solve options in an `options::AdhocOptions` field;
 see [`AdhocOptions`](@ref).
@@ -156,23 +156,32 @@ Base.@kwdef struct PerTrackAdhocSmoother <: AbstractAdhocSmoother
 end
 
 """
-    JointOUSmoother(; coherence_time, fit_hypers, options)
+    JointKalmanSmoother(; coherence_time = 10.0, options = AdhocOptions())
 
-The paper-faithful JOINT solve — one multivariate OU Kalman over all station phases
-observing baseline phase differences directly, closing and denoising together (better
-at low SNR than per-track-solve-then-smooth). Seeded and rewrapped from the per-AP
-solve; see `_solve_gp_joint!`. Requires one phase node per station (e.g. a
-`SharedFeeds` adhoc component), since its state carries one dimension per station.
-`coherence_time` seeds the per-station OU scale; when `fit_hypers` (default
-`true`) the per-station OU `(τ, σ²)` are fit by maximum Kalman marginal
-likelihood, and when `false`, `τ = coherence_time` and `σ²` is seeded from the
-track scatter.
+Fit every station's phase track of a scan at once: one multivariate Kalman
+filter and RTS smoother over the station phases, observing the baseline phase
+differences directly under each station's [`OUPrior`](@ref) along `Ti`. Closure
+and denoising happen in one estimator, which conditions better at low SNR than
+fitting each track after the per-AP solve. Seeded and rewrapped from the per-AP
+solve; see `_solve_gp_joint!`.
+
+A station's hyperparameters given as hyperpriors are resolved per scan by
+type-II MAP on its per-AP track, with the track's level integrated out under a
+flat prior. The reference station's track is zero by construction and an
+unobserved station has none, so both take the median of the resolved values of
+the others (a station whose hyperparameters are fixed keeps them).
+
+Requires one phase node per station (a `SharedFeeds` adhoc component), since
+its state carries one dimension per station.
+
+`coherence_time` is the assumed atmospheric coherence time in seconds. It
+bounds how long a solved AP seeds the 2π branch of later ones; it does not
+enter any prior.
 
 `options` is an [`AdhocOptions`](@ref).
 """
-Base.@kwdef struct JointOUSmoother <: AbstractAdhocSmoother
+Base.@kwdef struct JointKalmanSmoother <: AbstractAdhocSmoother
     coherence_time::Float64 = 10.0
-    fit_hypers::Bool = true
     options::AdhocOptions = AdhocOptions()
 end
 
@@ -182,13 +191,13 @@ end
 # that do.
 _adhoc_coherence_time(::AbstractAdhocSmoother) = 10.0
 _adhoc_coherence_time(sm::PerTrackAdhocSmoother) = sm.coherence_time
-_adhoc_coherence_time(sm::JointOUSmoother) = sm.coherence_time
+_adhoc_coherence_time(sm::JointKalmanSmoother) = sm.coherence_time
 
 # Whether the smoother needs one phase node per station. The joint solve's Kalman
 # state is one dimension per station, so it cannot represent two independent feed
 # tracks.
 _requires_single_node(::AbstractAdhocSmoother) = false
-_requires_single_node(::JointOUSmoother) = true
+_requires_single_node(::JointKalmanSmoother) = true
 
 """
     default_adhoc_terms(; feed = SharedFeeds(), prior = default_adhoc_prior()) -> GainModel
@@ -242,8 +251,10 @@ _time_prior(::Nothing) = nothing
 _time_prior(p::NamedTuple) = p.Ti
 
 can_fit(::AbstractAdhocSmoother, tc, geom) = _fits_adhoc_track(tc)
-# The joint solve needs one phase node per station (`_requires_single_node`).
-can_fit(::JointOUSmoother, tc, geom) = _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds
+# The joint solve needs one phase node per station (`_requires_single_node`) and
+# an OU process for its state dynamics.
+can_fit(::JointKalmanSmoother, tc, geom) =
+    _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds && _time_prior(resolve_prior(tc)) isa OUPrior
 
 # The structural contract of the adhoc pass: exactly one per-integration phase
 # component (the stage runs one globally-closing phase solve and writes one θ
@@ -287,8 +298,14 @@ end
 
 # Joint state-space solve: one multivariate OU Kalman over all station phases
 # observing baseline differences directly, seeded/rewrapped from the per-AP solve.
-function apply_adhoc!(sm::JointOUSmoother, phase, track_w; obs, anchor, priors, resolved)
-    _solve_gp_joint!(phase, track_w, obs, anchor, sm)
+function apply_adhoc!(sm::JointKalmanSmoother, phase, track_w; obs, anchor, priors, resolved)
+    all(p -> p isa OUPrior, priors) || throw(
+        ArgumentError(
+            "JointKalmanSmoother needs an OUPrior at every station, got " *
+                join(unique(string.(typeof.(priors))), ", "),
+        ),
+    )
+    _solve_gp_joint!(phase, track_w, obs, anchor, sm, priors, resolved)
     return phase
 end
 
@@ -492,8 +509,9 @@ _source_corrected(obs, x, keep) = (;
 # whole station-phase vector, observing the baseline phase differences directly
 # under a per-station temporal OU prior, so closure and denoising happen in one
 # recursive estimator. This conditions better at low SNR than solving each AP
-# and smoothing afterwards. Mutates `phase[:, 1, :]` in place; the caller's
-# demean and node→feed expansion run afterwards.
+# and smoothing afterwards. Mutates `phase[:, 1, :]` in place and records each
+# written station's resolved prior in `resolved[:, 1]`; the caller's demean and
+# node→feed expansion run afterwards.
 #
 # State = `nant` station phases. `obs` arrives with each cell's source term
 # already removed, so a cell is a pure node difference and the filter needs no
@@ -501,7 +519,7 @@ _source_corrected(obs, x, keep) = (;
 # near 0; it is re-gauged to the anchor afterwards for pipeline consistency.
 # Requires one node per station.
 function _solve_gp_joint!(
-        phase, track_w, obs, anchor::Integer, sm::JointOUSmoother,
+        phase, track_w, obs, anchor::Integer, sm::JointKalmanSmoother, priors, resolved,
     )
     nant = size(phase, Ant)
     times = parent(lookup(phase, Ti))
@@ -511,41 +529,48 @@ function _solve_gp_joint!(
     # Seed (ref-gauged, unwrapped) per-station track from the per-AP solve.
     θseed = [T(phase[i, 1, ap]) for i in axes(phase, 1), ap in axes(phase, 3)]
 
-    # Per-station centering mean (weighted): the OU prior reverts to 0, so a nonzero-
-    # mean track would be biased. Removed again by the downstream demean (so its
-    # exact value is inert to the output — it only de-biases the solve).
-    mθ = [_weighted_mean_finite(view(θseed, i, :), view(track_w, i, 1, :)) for i in axes(θseed, 1)]
-
     # A station with no gated row anywhere in the scan has an all-zero column in every
     # H below, so the filter never updates it: it holds the OU prior mean for the whole
     # solve and the re-gauge turns that into minus the anchor's common mode — the same
     # information-free track for every such station. They are excluded from the hyper
     # fit and from the write-back.
     seen = [any(>(0), view(track_w, i, 1, :)) for i in axes(track_w, 1)]
-
-    # Per-station OU hypers from the (centered) seed track. The reference track is
-    # structurally 0 (per-AP gauge) so it carries no variance info — give it and any
-    # degenerate/uncovered station the ensemble-median dynamics, so the joint solve
-    # treats every station as a real OU process (none pinned during the solve).
-    τ_lo, τ_hi = _ou_tau_bounds(times)
-    τv = fill(T(sm.coherence_time), nant)
-    σ2v = fill(T(1.0e-2), nant)
     welldet = [seen[i] && i != anchor for i in eachindex(seen)]
-    for i in eachindex(welldet)
+    any(welldet) || return phase
+    track(i) = (view(θseed, i, :), collect(T, parent(view(track_w, i, 1, :))))
+
+    # Per-station OU hyperparameters from the seed track, the level integrated
+    # out. The anchor's track is structurally 0 (per-AP gauge) and carries no
+    # variance information, so it and every unseen station take the median of
+    # the well-determined stations' values, and every station stays a real OU
+    # process during the solve.
+    fitted = Vector{Any}(nothing, nant)
+    for i in eachindex(welldet, priors)
         welldet[i] || continue
-        _, _, τv[i], σ2v[i] = _track_ou_hypers(
-            view(θseed, i, :), view(track_w, i, 1, :), times;
-            τ0 = sm.coherence_time, τ_lo = τ_lo, τ_hi = τ_hi, fit = sm.fit_hypers,
+        y, w = track(i)
+        fitted[i] = _estimate_hypers(priors[i], [y], [w], [times]; level = [1])
+    end
+    τ_med = median(T(fitted[i].scale) for i in eachindex(welldet) if welldet[i])
+    σ_med = median(T(fitted[i].σ) for i in eachindex(welldet) if welldet[i])
+    for i in eachindex(welldet, priors)
+        welldet[i] && continue
+        p = priors[i]
+        fitted[i] = OUPrior(;
+            scale = is_fixed_hyper(p.scale) ? p.scale : τ_med, σ = is_fixed_hyper(p.σ) ? p.σ : σ_med,
         )
     end
-    σ2_med = let g = [σ2v[i] for i in eachindex(σ2v, welldet) if welldet[i]]
-        isempty(g) ? T(1.0e-2) : median(g)
-    end
-    τ_med = let g = [τv[i] for i in eachindex(τv, welldet) if welldet[i]]
-        isempty(g) ? T(sm.coherence_time) : median(g)
-    end
-    for i in eachindex(τv, σ2v, welldet)
-        welldet[i] || (τv[i] = τ_med; σ2v[i] = σ2_med)
+    τv = T[fitted[i].scale for i in 1:nant]
+    σ2v = T[fitted[i].σ^2 for i in 1:nant]
+
+    # Per-station level: the OU prior reverts to 0, so each track is centered on
+    # its GLS level under its own prior before the solve. The downstream demean
+    # removes the level again.
+    mθ = zeros(T, nant)
+    for i in eachindex(seen)
+        seen[i] || continue
+        y, w = track(i)
+        L = only(_estimate_levels(fitted[i], [y], [w], [times], [1], 1))
+        isfinite(L) && (mθ[i] = L)
     end
 
     # Per-cell measurement variance (1/snr²); 0 marks a gated-out cell, which the
@@ -599,6 +624,7 @@ function _solve_gp_joint!(
     for i in eachindex(seen)
         seen[i] || continue
         phase[i, 1, :] .= view(θf, i, :)
+        resolved[i, 1] = fitted[i]
     end
     return phase
 end

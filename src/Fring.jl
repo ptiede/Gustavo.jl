@@ -128,7 +128,7 @@ export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
 export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask
 export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
-export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointOUSmoother
+export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
 export solve_adhoc_phasing, default_adhoc_terms, default_adhoc_prior
 export default_bandpass_terms
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother

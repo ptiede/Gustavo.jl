@@ -5,9 +5,8 @@
 # Matérn-1/2 is an Ornstein–Uhlenbeck process, a first-order linear-Gaussian
 # state-space model, so the GP posterior mean is exact in O(n) from a scalar
 # Kalman filter plus RTS smoother — no dense covariance and no SparseArrays.
-# Unlike the first-difference penalty, OU is stationary and mean-reverting with
-# a physical timescale, and its Kalman marginal likelihood fits (τ, σ²) per
-# station from the data.
+# The same filter's marginal likelihood is what the prior's hyperparameters
+# are estimated from (prior_fits.jl); docs/src/priors.md derives both.
 #
 # Blackburn/Bouman et al., AJ (doi:10.3847/1538-3881/ae160f); for the OU
 # state-space form of a Matérn-1/2 GP see Särkkä & Solin, Applied SDEs.
@@ -227,47 +226,6 @@ function _init_track_var(y, w)
     return max(var_y - r_bar, T(1.0e-4))
 end
 
-"""
-    fit_ou_hypers(y, w, times; τ0, σ2_0, τ_lo, τ_hi) -> (τ, σ2)
-
-Maximum-likelihood point estimate of the OU coherence time `τ` and stationary
-phase variance `σ2` by maximizing the Kalman marginal likelihood
-([`kalman_ou_filter`](@ref)) over `(log τ, log σ2)`, seeded from `τ0`/`σ2_0`.
-Falls back to the seeds when fewer than 5 samples are observed. `τ` is clamped to
-`[τ_lo, τ_hi]` and `σ2` to a small positive floor.
-"""
-function fit_ou_hypers(y, w, times; τ0::Real, σ2_0::Real, τ_lo::Real, τ_hi::Real)
-    T = float(
-        promote_type(
-            eltype(y), eltype(w), eltype(times),
-            typeof(τ0), typeof(σ2_0), typeof(τ_lo), typeof(τ_hi),
-        ),
-    )
-    nobs = count(k -> isfinite(y[k]) && isfinite(w[k]) && w[k] > 0, eachindex(y, w))
-    nobs >= 5 || return T(τ0), T(σ2_0)
-    r = [(isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf) for wk in w]
-    σ2_lo = T(1.0e-8)
-    lτ_lo = log(T(τ_lo))
-    lτ_hi = log(T(τ_hi))
-    function negll(p)
-        τ = exp(clamp(p[1], lτ_lo, lτ_hi))
-        σ2 = max(exp(p[2]), σ2_lo)
-        ll = kalman_ou_filter(y, r, times; τ = τ, σ2 = σ2)[6]
-        val = isfinite(ll) ? -ll : T(Inf)
-        # Soft barrier: outside the [lτ_lo, lτ_hi] box τ saturates (clamped), so the
-        # objective would be flat there and Nelder–Mead could converge on a
-        # non-optimal boundary. Penalize the excursion so the simplex is driven back
-        # into the box toward the true constrained optimum.
-        excursion = max(lτ_lo - p[1], zero(T)) + max(p[1] - lτ_hi, zero(T))
-        return val + 100 * excursion
-    end
-    x0 = T[clamp(log(T(τ0)), lτ_lo, lτ_hi), log(max(T(σ2_0), σ2_lo))]
-    xbest, _ = _nelder_mead(negll, x0)
-    τ = exp(clamp(xbest[1], lτ_lo, lτ_hi))
-    σ2 = max(exp(xbest[2]), σ2_lo)
-    return τ, σ2
-end
-
 # The OU Kalman filter run over `y` and, with the same gains, over a vector of
 # ones. The filter is linear in its observations, so the innovations of
 # `y - L` are `vʸ - L·v¹`. Returns `(ll, b, c)` over the observed samples: the
@@ -398,23 +356,6 @@ function _group_ou_tau_bounds(xs)
     end
     isfinite(τ_lo) || return T(1.0e-3), T(1.0e-2)
     return τ_lo, max(τ_hi, 10 * τ_lo)
-end
-
-# Center a track and fit (or seed) its OU hypers, consistently for every caller.
-# Returns `(m, yc, τ, σ2)`: the weighted mean `m`, the mean-subtracted track `yc`
-# (OU reverts to 0), and the OU correlation scale / stationary variance — ML-fit
-# by Kalman marginal likelihood when `fit`, else `(τ0, seed)`. `σ2_0` seeds the
-# stationary variance; `nothing` takes the seed from the track's own scatter.
-function _track_ou_hypers(
-        trk, w, times; τ0::Real, τ_lo::Real, τ_hi::Real, fit::Bool,
-        σ2_0::Union{Nothing, Real} = nothing,
-    )
-    T = float(promote_type(eltype(trk), eltype(w)))
-    m = _weighted_mean_finite(trk, w)
-    yc = [isfinite(x) ? T(x) - m : T(NaN) for x in trk]
-    σ2_seed = σ2_0 === nothing ? _init_track_var(yc, w) : T(σ2_0)
-    τ, σ2 = fit ? fit_ou_hypers(yc, w, times; τ0, σ2_0 = σ2_seed, τ_lo, τ_hi) : (T(τ0), σ2_seed)
-    return m, yc, τ, σ2
 end
 
 # ── Multivariate OU state-space (joint station-phase solve) ─────────────────
