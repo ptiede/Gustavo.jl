@@ -8,7 +8,7 @@
     uvset, _truth = _build_fringe_uvset(; station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3])
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset,
         gauge = PinAntenna(1),
     )

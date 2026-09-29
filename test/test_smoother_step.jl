@@ -55,7 +55,7 @@ function _worst_parallel_coherence(corr)
 end
 
 @testset "AdhocPhase step + output sink (new engine)" begin
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     nant = 4
     nglob = 16
     # SMOOTH injected per-(station, feed) bandpass shapes (as in test_pipeline's

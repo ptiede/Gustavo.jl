@@ -67,14 +67,6 @@ using Gustavo.UVData: Frequency, Ti, BaselineID, Polarization
     end
 
     @testset "the 1-based paths declare themselves" begin
-        y = randn(MersenneTwister(7), 12)
-        @test_throws ArgumentError CAL.savitzky_golay_smooth(shift(y); window = 5)
-        @test_throws "offset arrays are not supported" CAL.savitzky_golay_smooth(
-            shift(y); window = 5
-        )
-        @test CAL.savitzky_golay_smooth(whole(y); window = 5) ==
-            CAL.savitzky_golay_smooth(y; window = 5)
-
         # `fringe_plane`'s lookups are the caller's `freqs`/`times`, so the
         # block is read 1-based. Both the matrix and the vector path refuse —
         # the vector path reshapes, which would otherwise drop the offset.

@@ -15,7 +15,7 @@ include("synthetic_uvset.jl")
     # keeps every well-determined AP in this high-SNR synthetic.
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset,
         gauge = PinAntenna(1),
     )
@@ -201,7 +201,7 @@ end
 end
 
 @testset "AdhocPhase model surface: vetting + per-feed adhoc" begin
-    sm = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    sm = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     # One-argument form: the smoother, with the default model.
     @test AdhocPhase(sm).model == default_adhoc_terms()
     @test AdhocPhase(sm).smoother === sm
@@ -219,8 +219,12 @@ end
     )
     # ...and the stage solves exactly one phase component, nothing in logamp.
     two = GainModel(; phase = (; a = pf.phase.adhoc, b = pf.phase.adhoc))
-    @test_throws "exactly one" Gustavo.model_components(
+    @test_throws "is not identifiable" Gustavo.model_components(
         AdhocPhase(model = two), nothing,
+    )
+    # ...and its prior is a random walk or OU process along time.
+    @test_throws "cannot fit the component" Gustavo.model_components(
+        AdhocPhase(model = default_adhoc_terms(; prior = IIDPrior(0.1))), nothing,
     )
     la = GainModel(; phase = pf.phase, logamp = pf.phase)
     @test_throws "phase only" Gustavo.model_components(
@@ -264,7 +268,7 @@ end
     # result as `apply_calibration(uvset, fit(pipe, uvset))`, because each
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     chain = BaselineFringeFit() |> Bandpass() |>
         AdhocPhase(adhoc)
 
@@ -342,7 +346,7 @@ end
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         gauge = PinAntenna(1),
     )
@@ -380,7 +384,7 @@ end
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         gauge = PinAntenna(1),
     )
@@ -454,7 +458,7 @@ end
     # Regression for the θ-overwrite bug: even rounds previously wiped the
     # round-1 solution (coherence collapsed). Accumulation keeps all rounds good.
     uvset, _ = _build_fringe_uvset()
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
         sol = fit(
             BaselineFringeFit(rounds = r) |>
@@ -512,7 +516,7 @@ end
         end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     ff = BaselineFringeFit()
     sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
     sol_off = fit(
@@ -580,7 +584,7 @@ end
         end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     ff = BaselineFringeFit()
     sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
     sol_off = fit(
@@ -664,7 +668,7 @@ end
         parent(leaf[:flags])[dead_local, :, :, :] .= true
     end
 
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[1, f, plan.fseg_id[gc], 1, a]
     amp_model(prior) = GainModel(;
         phase = default_bandpass_terms().phase,
@@ -735,13 +739,11 @@ end
     end
 end
 
-@testset "Adhoc auto window (:auto) flattens end-to-end" begin
-    # The default `SavitzkyGolaySmoother()` now uses `window = :auto` (EHT-HOPS coherence-time
-    # selection). Verify the default path still flattens the per-baseline phase.
+@testset "Default adhoc step flattens end-to-end" begin
     uvset, _ = _build_fringe_uvset()
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother()),   # window = :auto
+            AdhocPhase(),
         uvset,
         gauge = PinAntenna(1),
     )
@@ -776,7 +778,7 @@ end
 
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset,
         gauge = PinAntenna(1),
     )
@@ -822,7 +824,7 @@ end
     events = Tuple{Symbol, Int, Int}[]
     sol = fit(
         BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
         gauge = PinAntenna(1),
@@ -862,7 +864,7 @@ end
     solc = fit(
         BaselineFringeFit() |>
             Bandpass() |>
-            AdhocPhase(FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
         gauge = PinAntenna(1),

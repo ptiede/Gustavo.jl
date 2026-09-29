@@ -221,7 +221,11 @@ across the observation (HOPS-style).
 (common to both feeds), so it is solved feed-common — which both denoises it
 and contributes exactly zero inter-feed phase. A `PerFeed` adhoc lets per-AP
 solve noise differ between feeds and injects spurious cross-hand scatter on
-top of the real instrumental inter-feed offset.
+top of the real instrumental inter-feed offset. Its prior along time is an
+`OUPrior` with weakly informative hyperpriors by default
+([`default_adhoc_prior`](@ref Gustavo.Fring.default_adhoc_prior)); each
+track's weighted mean over a scan is removed, since a per-station constant
+trades against the source terms and so is a gauge rather than a parameter.
 
 And one log-amplitude component:
 

@@ -86,22 +86,26 @@ end
 provides(::Bandpass) = :bandpass
 
 """
-    AdhocPhase(; model = default_adhoc_terms(), smoother = SavitzkyGolaySmoother())
+    AdhocPhase(; model = default_adhoc_terms(), smoother = PerTrackAdhocSmoother())
     AdhocPhase(smoother)
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
 globally-closing per-AP station phase on the fringe/bandpass residual. What is
-fit is `model`, a [`GainModel`](@ref) holding the single adhoc component —
-see [`Fring.default_adhoc_terms`](@ref) for the default (feed-common) form and
-its `feed` tying knob. How the solved tracks are smoothed lives on `smoother`,
-a pluggable [`Fring.AbstractAdhocSmoother`](@ref) (`SavitzkyGolaySmoother`,
-`JointOUSmoother`, `OUSmoother`, `PenalizedSmoother`, …); `JointOUSmoother`
-requires the feed-common (`SharedFeeds`) model. The one-argument form takes the
-smoother and keeps the default model.
+fit is `model`, a [`GainModel`](@ref) holding the single adhoc component and
+its prior along time — see [`Fring.default_adhoc_terms`](@ref) for the default
+(feed-common, OU prior) form. How the tracks are fit under that prior lives on
+`smoother`, a pluggable [`Fring.AbstractAdhocSmoother`](@ref)
+([`Fring.PerTrackAdhocSmoother`](@ref) or [`Fring.JointOUSmoother`](@ref), which
+requires the feed-common (`SharedFeeds`) model). The one-argument form takes
+the smoother and keeps the default model.
+
+The step's info holds `nscans` and `priors`: the prior each (station, feed)
+track was fit under, its hyperparameters resolved, over `(Ant, Feed, Ti)` with
+one `Ti` value per scan, its first AP epoch.
 """
 Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: SolveStep
     model::M = Fring.default_adhoc_terms()
-    smoother::S = Fring.SavitzkyGolaySmoother()
+    smoother::S = Fring.PerTrackAdhocSmoother()
 end
 AdhocPhase(smoother::Fring.AbstractAdhocSmoother) = AdhocPhase(; smoother)
 provides(::AdhocPhase) = :adhoc
@@ -185,7 +189,8 @@ heterogeneity_rejector(s::Bandpass) =
 model_components(s::AdhocPhase, spec) = _vet_step_model(
     s.smoother, s.model,
     "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
-        "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed())` " *
+        "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed(), prior = " *
+        "<nothing, or a RandomWalkPrior or OUPrior along Ti>)` " *
         "(`JointOUSmoother`: `SharedFeeds()` only) — see `default_adhoc_terms`.",
     spec,
 )
@@ -423,16 +428,15 @@ end
 
 _group_setup(::AdhocPhase, ctx::SolveContext) = Fring._adhoc_plan(ctx.model, ctx.layout)
 
-function _solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, group)
-    Fring.adhoc_scan!(
-        ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge;
-        executor = inner_executor(ctx.exec),
-    )
-    return nothing
-end
+_solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, group) = Fring.adhoc_scan!(
+    ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge;
+    executor = inner_executor(ctx.exec),
+)
 
 function solve(s::AdhocPhase, ctx::SolveContext)
     adhoc_plan = _group_setup(s, ctx)
     results = each_group(group -> _solve_group(s, ctx, adhoc_plan, group), ctx)
-    return (; nscans = length(results))
+    isempty(results) && return (; nscans = 0)
+    sort!(results; by = r -> only(lookup(r, Ti)))
+    return (; nscans = length(results), priors = cat(results...; dims = Ti))
 end

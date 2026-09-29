@@ -16,13 +16,14 @@ using ..Calibration
 using ..Calibration: _epoch_atol
 import XRadio
 using DensityInterface: logdensityof
+using Distributions: LogNormal
 using ..Calibration: ComponentPlan, GeometryWindow,
     _flatten_components, _component_leaf, _feed_node, _block_index, component_is_per_scan,
     _segment_lookup, _frequency_segment_lookup, _time_segment_lookup,
     _freq_group_ranges
 # Numeric kernels the model layer keeps off its public surface.
 using ..Calibration: weighted_regularized_least_squares, ConstrainedWLS, FactoredWLS,
-    unwrap_phase_track, phase_unwrap_ambiguity, connected_components, savitzky_golay_smooth
+    unwrap_phase_track, phase_unwrap_ambiguity, connected_components
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimStack
@@ -127,8 +128,8 @@ export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
 export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask
 export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
-export AbstractAdhocSmoother, AdhocOptions, SavitzkyGolaySmoother, PenalizedSmoother
-export OUSmoother, JointOUSmoother, NoSmoothing, solve_adhoc_phasing, default_adhoc_terms
+export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointOUSmoother
+export solve_adhoc_phasing, default_adhoc_terms, default_adhoc_prior
 export default_bandpass_terms
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks,

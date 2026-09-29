@@ -169,7 +169,8 @@
 
         t = AdhocPhase()
         @test t.model == default_adhoc_terms()
-        @test t.smoother == FP.SavitzkyGolaySmoother()
+        @test t.smoother == FP.PerTrackAdhocSmoother()
+        @test t.model.phase.adhoc.prior == FP.default_adhoc_prior()
 
         e = ExecutionConfig()
         @test e.mem_fraction == 0.6 && e.mem_budget === nothing

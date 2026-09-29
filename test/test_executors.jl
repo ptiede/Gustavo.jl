@@ -73,7 +73,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
 
     @testset "full pipeline: θ and output bit-identical across OUTER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+        adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         run(ex) = fit(
             BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), ps;
             exec = ExecutionConfig(outer_executor = ex), gauge = PinAntenna(1),
@@ -91,7 +91,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
 
     @testset "full pipeline: θ bit-identical across INNER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
-        adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+        adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         run(inner) = fit(
             BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), ps;
             exec = ExecutionConfig(inner_executor = inner), gauge = PinAntenna(1),

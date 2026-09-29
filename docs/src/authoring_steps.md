@@ -58,7 +58,7 @@ The step carries the `GainModel` it solves and the solver options:
 ```julia
 Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: SolveStep
     model::M = Fring.default_adhoc_terms()
-    smoother::S = Fring.SavitzkyGolaySmoother()
+    smoother::S = Fring.PerTrackAdhocSmoother()
 end
 provides(::AdhocPhase) = :adhoc
 ```
@@ -80,7 +80,8 @@ model_components(s::AdhocPhase, spec) = _vet_step_model(
 
 can_fit(::AbstractAdhocSmoother, tc, geom) =
     tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
-    tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds)
+    tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds) &&
+    _is_time_prior(resolve_prior(tc))
 ```
 
 ### The solve
@@ -95,11 +96,13 @@ function solve(s::AdhocPhase, ctx::SolveContext)
     adhoc_plan = Fring._adhoc_plan(ctx.model, ctx.layout)
     results = each_group(ctx) do group
         Fring.adhoc_scan!(
-            ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge, ctx.nant;
+            ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge;
             executor = inner_executor(ctx.exec),
         )
     end
-    return (; nscans = length(results))
+    isempty(results) && return (; nscans = 0)
+    sort!(results; by = r -> only(lookup(r, Ti)))
+    return (; nscans = length(results), priors = cat(results...; dims = Ti))
 end
 ```
 

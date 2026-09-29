@@ -97,6 +97,17 @@ end
         @test stage_info(a, only(keys(a))).nscans == 3
     end
     @test stage_info(fit(Bandpass(), ps; gauge = PinAntenna(1)), :bandpass).sources == ["SRC1"]
+
+    # The adhoc step reports each track's resolved prior, one `Ti` per scan.
+    info = stage_info(fit(AdhocPhase(), ps; gauge = PinAntenna(1)), :adhoc)
+    pr = info.priors
+    @test DimensionalData.name(dims(pr)) == (:Ant, :Feed, :Ti)
+    @test size(pr, Ti) == 3 && issorted(lookup(pr, Ti))
+    fitted = filter(!isnothing, vec(parent(pr)))
+    @test !isempty(fitted)
+    @test all(p -> p isa OUPrior && CAL.is_fixed_hyper(p.scale) && CAL.is_fixed_hyper(p.σ), fitted)
+    # Feed-common model: both feeds of a station share one track and its prior.
+    @test isequal(parent(pr[Feed = 1]), parent(pr[Feed = 2]))
 end
 
 # Each scan's visibilities rotated by its own phase per baseline, as a source

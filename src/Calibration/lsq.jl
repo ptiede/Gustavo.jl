@@ -26,67 +26,6 @@ function weighted_complex_correction(samples, weights)
 end
 
 """
-    savitzky_golay_smooth(y, weights = nothing; window = 11, order = 2)
-
-Savitzky–Golay-style smoothing: at each index fit a degree-`order` polynomial by
-(optionally weighted) least squares over a centered window of `window` samples
-and evaluate it at the center. Samples with a non-finite value, or a weight that
-is not finite and positive, are skipped in each local fit (so the smoother also
-interpolates gaps), and the polynomial order is reduced where a window has too
-few usable samples. An index whose window has none keeps its input value.
-Returns `similar(y)` in `y`'s floating-point type, so a `DimArray` keeps its
-dimensions.
-"""
-function savitzky_golay_smooth(y::AbstractVector, weights = nothing; window::Integer = 11, order::Integer = 2)
-    Base.require_one_based_indexing(y)
-    isnothing(weights) || Base.require_one_based_indexing(weights)
-    T = float(eltype(y))
-    n = length(y)
-    h = window ÷ 2
-    moments = Vector{T}(undef, 2order + 1)
-    G = Matrix{T}(undef, order + 1, order + 1)
-    rhs = Vector{T}(undef, order + 1)
-    out = similar(y, T)
-    usable(j) = isfinite(y[j]) && (isnothing(weights) || (isfinite(weights[j]) && weights[j] > 0))
-    for i in eachindex(y)
-        window_idx = max(1, i - h):min(n, i + h)
-        nusable = count(usable, window_idx)
-        if nusable == 0
-            out[i] = y[i]
-            continue
-        end
-        m = min(order, nusable - 1) + 1
-        # Coordinates mapped to [-1, 1] over the usable samples, and values offset
-        # by one of them, keep the moment matrix well conditioned in single precision
-        # (a window at a gap edge has all its samples on one side of `i`).
-        jfirst = window_idx[findfirst(usable, window_idx)]
-        jlast = window_idx[findlast(usable, window_idx)]
-        center = T(jfirst + jlast) / 2
-        halfspan = max(T(jlast - jfirst) / 2, one(T))
-        y0 = T(y[jfirst])
-        fill!(moments, zero(T))
-        fill!(rhs, zero(T))
-        for j in window_idx
-            usable(j) || continue
-            x = (j - center) / halfspan
-            wx = isnothing(weights) ? one(T) : T(weights[j])
-            r = T(y[j]) - y0
-            for k in 1:(2m - 1)
-                k <= m && (rhs[k] += wx * r)
-                moments[k] += wx
-                wx *= x
-            end
-        end
-        for c in 1:m, r in 1:m
-            G[r, c] = moments[r + c - 1]
-        end
-        coef = ldiv!(cholesky!(Symmetric(view(G, 1:m, 1:m))), view(rhs, 1:m))
-        out[i] = y0 + evalpoly((i - center) / halfspan, coef)
-    end
-    return out
-end
-
-"""
     connected_components(nnodes, edges) -> (compid, ncomp, touched)
 
 Union–find connected components of an undirected graph on `nnodes` nodes given

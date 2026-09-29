@@ -44,7 +44,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     uvset, _ = _build_fringe_uvset(;
         nant, nspw, nchan, bandpass = bp_true, amp_bandpass = abp_true,
     )
-    adhoc = FP.SavitzkyGolaySmoother(; window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))
+    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     fm = default_fringe_terms()
 
     # The fuller-pipeline reference (adhoc is solved AFTER the bandpass, so its

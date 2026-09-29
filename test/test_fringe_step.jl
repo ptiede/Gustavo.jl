@@ -15,7 +15,7 @@
         uvset, _ = _build_fringe_uvset()
         solm = fit(
             BaselineFringeFit() |>
-                AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
             gauge = PinAntenna(1),
         )
@@ -73,7 +73,7 @@
             BaselineFringeFit(
                 model = default_fringe_terms(),
                 rounds = 2,
-            ) |> AdhocPhase(FP.SavitzkyGolaySmoother(window = 7, order = 2, options = FP.AdhocOptions(; snr_floor = 0.0))),
+            ) |> AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
             uvset,
             gauge = PinAntenna(1),
         )

@@ -64,7 +64,7 @@
         # is the RELATIVE inter-baseline weighting of the stages that accumulate
         # ACROSS baselines (stage B / bandpass / adhoc) and the exported weights.
         chain0 = BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.NoSmoothing())
+            AdhocPhase(model = default_adhoc_terms(; prior = nothing))
         base = let sol = fit(chain0, uvset; gauge = PinAntenna(1))
             (sol, calibrate(sol, uvset))
         end
@@ -92,7 +92,7 @@
     @testset "diagnostics replay the solve's recorded transforms" begin
         sol = fit(
             FP.StationWeightScale(ws) |> BaselineFringeFit() |>
-                Bandpass() |> AdhocPhase(FP.NoSmoothing()),
+                Bandpass() |> AdhocPhase(model = default_adhoc_terms(; prior = nothing)),
             uvset,
             gauge = PinAntenna(1),
         )
