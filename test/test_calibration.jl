@@ -783,82 +783,112 @@ end
 @testset "Priors on a component" begin
     @testset "construction and validation" begin
         @test CAL.IIDPrior(0.1).σ == 0.1
-        rw = CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01f0)
-        @test rw isa CAL.RandomWalkPrior{Frequency, Float32}
-        @test rw.order == 2 && CAL.prior_axis(rw) === Frequency
-        @test CAL.RandomWalkPrior(Ti; σ = 1.0).order == 1
-        ou = CAL.OUPrior(Frequency; scale = 5, σ = 0.2)
-        @test ou isa CAL.OUPrior{Frequency, Float64} && ou.scale === 5.0
-        @test isnothing(CAL.prior_axis(CAL.IIDPrior(1.0)))
+        rw = CAL.RandomWalkPrior(; order = 2, σ = 0.01f0)
+        @test rw isa CAL.RandomWalkPrior{Float32} && rw.order == 2
+        @test CAL.RandomWalkPrior(; σ = 1.0).order == 1
+        ou = CAL.OUPrior(; scale = 5, σ = 0.2)
+        @test ou isa CAL.OUPrior{Float64, Float64} && ou.scale === 5.0
 
         @test_throws "IIDPrior σ must be positive and finite, got 0" CAL.IIDPrior(0)
-        @test_throws "RandomWalkPrior σ must be positive and finite" CAL.RandomWalkPrior(Ti; σ = Inf)
-        @test_throws "RandomWalkPrior order must be ≥ 1, got 0" CAL.RandomWalkPrior(Ti; order = 0, σ = 1.0)
-        @test_throws "OUPrior scale must be positive" CAL.OUPrior(Ti; scale = -1.0, σ = 1.0)
-        @test_throws "RandomWalkPrior axis must be one of (:Frequency, :Ti), got Ant" CAL.RandomWalkPrior(UVD.Ant; σ = 1.0)
+        @test_throws "RandomWalkPrior σ must be positive and finite" CAL.RandomWalkPrior(; σ = Inf)
+        @test_throws "RandomWalkPrior order must be ≥ 1, got 0" CAL.RandomWalkPrior(; order = 0, σ = 1.0)
+        @test_throws "OUPrior scale must be positive" CAL.OUPrior(; scale = -1.0, σ = 1.0)
 
         # OU hyperparameters are fixed numbers or hyperpriors.
-        hp = CAL.OUPrior(Frequency; scale = LogNormal(log(1.0e7), 1.0), σ = 0.1)
+        hp = CAL.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = 0.1)
         @test hp.scale isa LogNormal && hp.σ === 0.1
         @test !CAL.is_fixed_hyper(hp.scale) && CAL.is_fixed_hyper(hp.σ)
-        @test hp == CAL.OUPrior(Frequency; scale = LogNormal(log(1.0e7), 1.0), σ = 0.1)
+        @test hp == CAL.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = 0.1)
         @test_throws "OUPrior σ must be a positive number or a density implementing " *
-            "DensityInterface.logdensityof, got String" CAL.OUPrior(Frequency; scale = 1.0, σ = "wide")
+            "DensityInterface.logdensityof, got String" CAL.OUPrior(; scale = 1.0, σ = "wide")
+    end
+
+    @testset "the axis comes from the component" begin
+        comp(; Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), prior) =
+            CAL.GainComponent(CAL.ConstantTerm(); Ti, Frequency, prior)
+        rw = CAL.RandomWalkPrior(; order = 2, σ = 0.01)
+        ou = CAL.OUPrior(; scale = 10.0, σ = 1.0)
+        @test isnothing(CAL.resolve_prior(CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan())))
+        @test CAL.resolve_prior(comp(; Frequency = CAL.ChannelBlocks(1), prior = rw)) == (Frequency = rw,)
+        @test CAL.resolve_prior(comp(; Ti = CAL.PerIntegration(), prior = ou)) == (Ti = ou,)
+        # IID relates nothing, so it needs no axis and fits any component.
+        iid = CAL.IIDPrior(1.0)
+        @test CAL.resolve_prior(comp(; prior = iid)) === iid
+
+        both = (; Ti = CAL.PerIntegration(), Frequency = CAL.ChannelBlocks(1))
+        @test CAL.resolve_prior(comp(; both..., prior = (Ti = ou, Frequency = rw))) == (Ti = ou, Frequency = rw)
+        @test CAL.resolve_prior(comp(; both..., prior = (Frequency = rw,))) == (Frequency = rw,)
+
+        @test_throws "relates nothing, the component segments neither Ti nor Frequency" comp(; prior = rw)
+        @test_throws "GainComponent(ConstantTerm(); Ti = GlobalTime()" comp(; prior = rw)
+        @test_throws "is ambiguous, the component segments both Ti and Frequency; key it by axis, " *
+            "e.g. `prior = (Frequency = RandomWalkPrior(; order = 2, σ = 0.01),)`" comp(; both..., prior = rw)
+        @test_throws "relates nothing, the component does not segment Ti" comp(;
+            Frequency = CAL.ChannelBlocks(1), prior = (Ti = ou,),
+        )
+        @test_throws "prior key Ant is not an axis" comp(; both..., prior = (Ant = ou,))
+        @test_throws "a keyed prior must be a RandomWalkPrior or OUPrior" comp(; both..., prior = (Ti = iid,))
+        @test_throws "a keyed prior needs at least one axis" comp(; both..., prior = (;))
     end
 
     @testset "attached to a component" begin
         bp(prior) = CAL.GainComponent(
             CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), prior,
         )
-        rw = CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01)
-        @test isnothing(CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan()).prior)
+        rw = CAL.RandomWalkPrior(; order = 2, σ = 0.01)
         @test bp(rw).prior === rw
-        # Any term takes an IID prior; a correlated one needs a value per
-        # coordinate along its axis within each block.
-        @test CAL.GainComponent(CAL.PolynomialFreq(3); Ti = CAL.GlobalTime(), prior = CAL.IIDPrior(1.0)).prior isa CAL.IIDPrior
-        @test_throws "has one value per block along it" CAL.GainComponent(
-            CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), prior = rw,
-        )
-        @test_throws "GainComponent(ConstantTerm(); Ti = GlobalTime()" CAL.GainComponent(
-            CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), prior = rw,
-        )
-        @test_throws "correlates values along Ti" bp(CAL.OUPrior(Ti; scale = 10.0, σ = 1.0))
 
         # The prior is part of the component's value and its printed form.
-        @test bp(rw) == bp(CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01))
-        @test hash(bp(rw)) == hash(bp(CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01)))
+        @test bp(rw) == bp(CAL.RandomWalkPrior(; order = 2, σ = 0.01))
+        @test hash(bp(rw)) == hash(bp(CAL.RandomWalkPrior(; order = 2, σ = 0.01)))
         @test bp(rw) != bp(nothing)
-        @test bp(rw) != bp(CAL.RandomWalkPrior(Frequency; order = 1, σ = 0.01))
+        @test bp(rw) != bp(CAL.RandomWalkPrior(; order = 1, σ = 0.01))
         @test !occursin("prior", CAL.component_label(bp(nothing)))
-        for p in (rw, CAL.OUPrior(Frequency; scale = 2.0e6, σ = 0.3), CAL.IIDPrior(0.5))
-            lbl = CAL.component_label(bp(p))
+        keyed = CAL.GainComponent(
+            CAL.ConstantTerm(); Ti = CAL.PerIntegration(), Frequency = CAL.ChannelBlocks(1),
+            prior = (Ti = CAL.OUPrior(; scale = 30.0, σ = 0.1), Frequency = rw),
+        )
+        for c in (bp(rw), bp(CAL.OUPrior(; scale = 2.0e6, σ = 0.3)), bp(CAL.IIDPrior(0.5)), keyed)
+            lbl = CAL.component_label(c)
             @test occursin("prior = ", lbl)
-            @test Core.eval(CAL, Meta.parse(lbl)) == bp(p)
+            @test Core.eval(CAL, Meta.parse(lbl)) == c
         end
         @test CAL.component_label(bp(rw)) ==
             "GainComponent(Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), " *
-            "Feed = PerFeed(), prior = RandomWalkPrior(Frequency; order = 2, σ = 0.01))"
+            "Feed = PerFeed(), prior = RandomWalkPrior(; order = 2, σ = 0.01))"
     end
 
-    @testset "a prior differing by station makes its own signature group" begin
+    @testset "stations differing only in prior share a plan" begin
         geom = CAL.DataGeometry(;
             times = [0.0, 1.0], scan_of_time = [1, 2],
             channel_freqs = [1.0, 1.1, 1.2, 2.0, 2.1] .* 1.0e9, spw_of_chan = [1, 1, 1, 2, 2],
             t0 = 0.0, f0 = 1.5e9,
         )
         names = ["AA", "BB", "CC"]
-        bp(prior) = CAL.GainComponent(
-            CAL.Bandpass(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), prior,
+        bp(prior; Ti = CAL.GlobalTime()) = CAL.GainComponent(
+            CAL.Bandpass(); Ti, Frequency = CAL.PerSpectralWindow(), prior,
         )
-        rw = CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01)
+        rw = CAL.RandomWalkPrior(; order = 2, σ = 0.01)
+        ou = CAL.OUPrior(; scale = LogNormal(18.0, 1.0), σ = 0.1)
         m = CAL.GainModel(
             phase = (bp = bp(rw),),
-            stations = (BB = (; phase = (bp = bp(CAL.OUPrior(Frequency; scale = LogNormal(18.0, 1.0), σ = 0.1)),)),),
+            stations = (BB = (; phase = (bp = bp(ou),)),),
         )
+        uniform = CAL.plan_parameters(CAL.GainModel(phase = (bp = bp(rw),)), names, geom)
         layout = CAL.plan_parameters(m, names, geom)
-        node = layout.plantree.phase.bp
-        @test node isa CAL.GroupedComponentPlan
-        @test node.stations == [[1, 3], [2]]
+        plan = layout.plantree.phase.bp
+        @test plan isa CAL.ComponentPlan
+        @test layout.nθ == uniform.nθ && plan.range == uniform.plantree.phase.bp.range
+        @test plan.priors == [(Frequency = rw,), (Frequency = ou,), (Frequency = rw,)]
+        @test eltype(uniform.plantree.phase.bp.priors) == typeof((Frequency = rw,))
+        @test CAL.require_station_uniform(m, names, "test") === m
+
+        # With a second signature, each group still carries its stations' own priors.
+        m2 = CAL.with_station(m, "CC"; phase = (bp = bp(nothing; Ti = CAL.PerScan()),))
+        g = CAL.plan_parameters(m2, names, geom).plantree.phase.bp
+        @test g isa CAL.GroupedComponentPlan && g.stations == [[1, 2], [3]]
+        @test g.groups.g1.priors == [(Frequency = rw,), (Frequency = ou,)]
+        @test g.groups.g2.priors == [nothing]
 
         mat = CAL.materialize(m, names, geom)
         @test mat.phase.bp.prior === rw
@@ -867,8 +897,7 @@ end
         CAL.save_solution(path, soln)
         back = CAL.load_solution(path)
         @test back.steps[1].model == mat
-        @test back.steps[1].model.stations.BB.phase.bp.prior ==
-            CAL.OUPrior(Frequency; scale = LogNormal(18.0, 1.0), σ = 0.1)
+        @test back.steps[1].model.stations.BB.phase.bp.prior == ou
     end
 end
 

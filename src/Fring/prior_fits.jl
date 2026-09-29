@@ -23,7 +23,7 @@ hyperpriors cannot be resolved and this throws.
 """
 _estimate_hypers(prior::Union{Nothing, RandomWalkPrior}, ys, ws, xs) = prior
 
-function _estimate_hypers(prior::OUPrior{D}, ys, ws, xs) where {D}
+function _estimate_hypers(prior::OUPrior, ys, ws, xs)
     is_fixed_hyper(prior.scale) && is_fixed_hyper(prior.σ) && return prior
     usable = [i for i in eachindex(ys, ws, xs) if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i]))]
     isempty(usable) && throw(
@@ -37,7 +37,7 @@ function _estimate_hypers(prior::OUPrior{D}, ys, ws, xs) where {D}
         ycs, wus, xus, prior.scale, prior.σ;
         τ_lo, τ_hi, σ2_seed = _init_track_var(reduce(vcat, ycs), reduce(vcat, wus)),
     )
-    return OUPrior(D; scale = τ, σ = sqrt(σ2))
+    return OUPrior(; scale = τ, σ = sqrt(σ2))
 end
 
 """
@@ -50,23 +50,23 @@ proper along every direction. `NaN` where the data and prior do not determine a
 value; a block without data is all `NaN`.
 
 - `nothing`: the measured values.
-- `RandomWalkPrior{Frequency}` of order `k`: the `k`-th difference between
+- `RandomWalkPrior` of order `k`: the `k`-th difference between
   neighboring channels is `N(0, σ²)`. A block with fewer than `k` usable
   channels does not determine the walk and returns its measured values.
-- `OUPrior{Frequency}`: an OU process about the block's weighted mean.
+- `OUPrior`: an OU process about the block's weighted mean.
 """
 function _estimate_map(::Nothing, y, w, x)
     T = _block_eltype(y, w)
     return T[_shape_usable(y[k], w[k]) ? y[k] : T(NaN) for k in eachindex(y, w)]
 end
 
-function _estimate_map(prior::RandomWalkPrior{Frequency}, y, w, x)
+function _estimate_map(prior::RandomWalkPrior, y, w, x)
     count(k -> _shape_usable(y[k], w[k]), eachindex(y, w)) >= prior.order ||
         return _estimate_map(nothing, y, w, x)
     return _random_walk_track(y, w, prior.order, prior.σ)
 end
 
-function _estimate_map(prior::OUPrior{Frequency}, y, w, x)
+function _estimate_map(prior::OUPrior, y, w, x)
     (is_fixed_hyper(prior.scale) && is_fixed_hyper(prior.σ)) || throw(
         ArgumentError("OUPrior hyperparameters must be fixed; resolve them with `_estimate_hypers` first"),
     )

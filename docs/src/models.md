@@ -67,19 +67,22 @@ placed in. New terms are added with five small methods — see
 ### Priors
 
 A component's `prior` is the Gaussian belief about its parameters before the
-data, relating values within one parameter block and never across blocks:
+data:
 
 | Prior | Density |
 |:------|:--------|
 | `nothing` | none: every value is free |
 | [`IIDPrior`](@ref)`(σ)` | each parameter `N(0, σ²)` |
-| [`RandomWalkPrior`](@ref)`(dim; order, σ)` | the `order`-th difference between neighbors along `dim` is `N(0, σ²)` |
-| [`OUPrior`](@ref)`(dim; scale, σ)` | an Ornstein–Uhlenbeck process along `dim` about a free level; `scale` and `σ` each a number or a hyperprior |
+| [`RandomWalkPrior`](@ref)`(; order, σ)` | the `order`-th difference between neighbors along the axis is `N(0, σ²)` |
+| [`OUPrior`](@ref)`(; scale, σ)` | an Ornstein–Uhlenbeck process along the axis about a free level; `scale` and `σ` each a number or a hyperprior |
 
-`σ` is in the parameter's own units. A correlated prior needs a term with a
-value per coordinate along its axis ([`value_axis`](@ref)), such as
-`Calibration.Bandpass()` along `Frequency`. Which priors a solver fits is part
-of its `can_fit`.
+`σ` is in the parameter's own units. A correlated prior runs along the one axis
+the component segments (the one whose segmentation is not `GlobalTime` or
+`GlobalFrequency`). A component segmenting both keys the prior by axis,
+`prior = (Ti = OUPrior(; …), Frequency = RandomWalkPrior(; …))`, and may leave
+either key out; see [`resolve_prior`](@ref). Stations that differ only in their
+priors share one parameter layout. Which priors a solver fits is part of its
+`can_fit`.
 
 ### Time segmentations
 
@@ -223,7 +226,7 @@ groups, used verbatim:
 ```julia
 bp(prior) = GainComponent(Calibration.Bandpass(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), prior)
 m = GainModel(phase = (; bandpass = bp(nothing)))
-with_station(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(Frequency; order = 2, σ = 0.01))))
+with_station(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(; order = 2, σ = 0.01))))
 ```
 
 Here every station solves a free per-channel phase bandpass except AA, whose
@@ -232,7 +235,9 @@ station too weak to constrain per-channel values. Replacement is **whole-group**
 complete `phase` and/or `logamp` trees (a group the entry omits is inherited
 from the base), because components within a group interact — they sum and
 share degeneracies — while the two groups do not. The model never merges
-within a group.
+within a group. Entries that differ from the base only in their priors, as AA's
+does here, keep the model uniform: the stations share one parameter layout, and
+each carries its own prior.
 
 Station codes resolve against the observation's antenna table when the model
 is materialized for a solve; an unknown code errors there, naming the known

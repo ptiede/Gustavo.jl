@@ -43,7 +43,7 @@ end
     x = collect(range(1.0e9, 1.03e9; length = n))
     y = 0.3 .* sin.(range(0, 2; length = n)) .+ 0.02 .* randn(rng, n)
     w = fill(2500.0, n)
-    rw = CALpf.RandomWalkPrior(Freq; order = 2, σ = 0.01)
+    rw = CALpf.RandomWalkPrior(; order = 2, σ = 0.01)
     @test FRpf._estimate_map(rw, y, w, x) ≈ _dense_random_walk(y, w, 2, 0.01)
 
     # No prior returns the measured values, `NaN` where there are none.
@@ -58,13 +58,13 @@ end
     @test all(isnan, FRpf._estimate_map(rw, fill(NaN, n), w, x))
 
     # OU is centered on the block's weighted mean.
-    ou = CALpf.OUPrior(Freq; scale = 1.0e7, σ = 0.2)
+    ou = CALpf.OUPrior(; scale = 1.0e7, σ = 0.2)
     yl = y .+ 3.0
     m = sum(yl .* w) / sum(w)
     @test FRpf._estimate_map(ou, yl, w, x) ≈ FRpf.smooth_ou_track(yl .- m, w, x; τ = 1.0e7, σ2 = 0.04) .+ m
     # Hyperparameters must be resolved first.
     @test_throws "OUPrior hyperparameters must be fixed" FRpf._estimate_map(
-        CALpf.OUPrior(Freq; scale = LogNormal(16.0, 1.0), σ = 0.2), y, w, x,
+        CALpf.OUPrior(; scale = LogNormal(16.0, 1.0), σ = 0.2), y, w, x,
     )
 end
 
@@ -75,15 +75,15 @@ end
     ws = [fill(400.0, 64) for _ in 1:3]
 
     # Priors without hyperpriors come back unchanged.
-    rw = CALpf.RandomWalkPrior(Freq; order = 2, σ = 0.01)
+    rw = CALpf.RandomWalkPrior(; order = 2, σ = 0.01)
     @test FRpf._estimate_hypers(rw, ys, ws, xs) === rw
     @test isnothing(FRpf._estimate_hypers(nothing, ys, ws, xs))
-    fixed = CALpf.OUPrior(Freq; scale = 1.0e7, σ = 0.2)
+    fixed = CALpf.OUPrior(; scale = 1.0e7, σ = 0.2)
     @test FRpf._estimate_hypers(fixed, ys, ws, xs) === fixed
 
     # Hyperpriors resolve to one fixed (scale, σ) for all the blocks: the
     # type-II MAP over the blocks, each centered on its own mean.
-    ou = CALpf.OUPrior(Freq; scale = LogNormal(log(1.0e7), 1.0), σ = LogNormal(log(0.2), 1.0))
+    ou = CALpf.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = LogNormal(log(0.2), 1.0))
     est = FRpf._estimate_hypers(ou, ys, ws, xs)
     @test CALpf.is_fixed_hyper(est.scale) && CALpf.is_fixed_hyper(est.σ)
     ycs = [y .- sum(y .* w) / sum(w) for (y, w) in zip(ys, ws)]

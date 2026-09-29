@@ -143,7 +143,7 @@ end
 
     s_free = runbp(FP.JointSmoother(max_iterations = 40, tolerance = 1.0e-10))
 
-    stiff = CAL.RandomWalkPrior(Frequency; order = 2, σ = 1.0e-6)
+    stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6)
     s_stiff = runbp(FP.JointSmoother(max_iterations = 40); prior = stiff)
     pleaf = CAL._component_leaf(s_stiff.layout.plantree.phase.bandpass, s_stiff.θ)
     aleaf = CAL._component_leaf(s_stiff.layout.plantree.logamp.bandpass, s_stiff.θ)
@@ -619,7 +619,7 @@ end
     feeds = [(1, 1), (2, 2)]
     # Stiff against the data weights here, yet well conditioned: a far smaller σ
     # puts the banded solve's condition number near 1e12.
-    stiff = CAL.RandomWalkPrior(Frequency; order = 2, σ = 1.0e-3)
+    stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-3)
     halves = CAL.FreqGroups([1:3, 4:6])
 
     # Station 1's truth is one line over the band; every other station's is a
@@ -703,7 +703,7 @@ end
     end
 
     @testset "hyperparameters are resolved every sweep and recorded" begin
-        ou = CAL.OUPrior(Frequency; scale = LogNormal(log(2.0e6), 1.0), σ = LogNormal(log(0.2), 1.0))
+        ou = CAL.OUPrior(; scale = LogNormal(log(2.0e6), 1.0), σ = LogNormal(log(0.2), 1.0))
         l = CAL.plan_parameters(model((halves, nothing), (halves, ou)), anames, geom)
         θ = zeros(l.nθ)
         pb, ab = blocks(l, θ)

@@ -163,8 +163,8 @@ model_components(s::Bandpass, spec) = _vet_step_model(
     s.smoother, s.model,
     "Both shipped bandpass smoothers fit `GainComponent(Calibration.Bandpass(); " *
         "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
-        "segmentation>, Feed = PerFeed(), prior = <nothing, RandomWalkPrior(Frequency; …) " *
-        "or OUPrior(Frequency; …)>)` — a time segmentation whose segments each span " *
+        "segmentation>, Feed = PerFeed(), prior = <nothing, or a RandomWalkPrior or " *
+        "OUPrior along Frequency>)` — a time segmentation whose segments each span " *
         "several scans. See `default_bandpass_terms`.",
     spec,
 )

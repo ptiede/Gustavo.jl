@@ -699,8 +699,8 @@ end
     # A prior flattens the band AND fills the killed channels onto the in-spw curve
     # (≈ the mean of the live neighbours, well away from log-amp 0).
     priors = (
-        CAL.RandomWalkPrior(CAL.Frequency; order = 2, σ = 0.02),
-        CAL.OUPrior(CAL.Frequency; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.2), 1.0)),
+        CAL.RandomWalkPrior(; order = 2, σ = 0.02),
+        CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.2), 1.0)),
     )
     for prior in priors
         sol = fit(

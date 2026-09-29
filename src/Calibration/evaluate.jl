@@ -238,6 +238,6 @@ function _resolve_node(plan::ComponentPlan, solve, target, chan_idx, ti_idx, tsp
         zeros(Float64, length(ti_idx))
     return ComponentPlan(
         t, plan.tseg, plan.fseg, tseg, fseg, xf, xt, plan.nchan_seg, plan.tying,
-        plan.range, plan.shape, plan.fstate, plan.tstate, plan.prior,
+        plan.range, plan.shape, plan.fstate, plan.tstate, plan.priors,
     )
 end

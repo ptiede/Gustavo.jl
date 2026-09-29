@@ -64,8 +64,9 @@ One contribution to a station's gain: a gain `term` replicated over a `Ti`
 two feeds share it. The keywords are the dimension names the block's axes
 carry. One parameter block is allocated per (time segment, frequency
 segment, feed block). `prior` is an [`AbstractPrior`](@ref) on the
-parameters, relating values within each block only; `nothing` leaves them
-free. A correlated prior's axis must be the term's [`value_axis`](@ref).
+parameters, or `nothing` to leave them free; a correlated prior runs along the
+axis the component segments, keyed by axis when it segments both (see
+[`resolve_prior`](@ref)).
 
 ```julia
 GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds())
@@ -77,7 +78,7 @@ error messages print it back verbatim.
 struct GainComponent{
         T <: AbstractGainTerm, TS <: AbstractTimeSegmentation,
         FS <: AbstractFrequencySegmentation, F <: AbstractFeedTying,
-        P <: Union{Nothing, AbstractPrior},
+        P <: Union{Nothing, AbstractPrior, NamedTuple},
     }
     term::T
     Ti::TS
@@ -86,7 +87,7 @@ struct GainComponent{
     prior::P
     function GainComponent{T, TS, FS, F, P}(term, Ti, Frequency, Feed, prior) where {T, TS, FS, F, P}
         e = new{T, TS, FS, F, P}(term, Ti, Frequency, Feed, prior)
-        _check_component_prior(e)
+        resolve_prior(e)
         return e
     end
 end

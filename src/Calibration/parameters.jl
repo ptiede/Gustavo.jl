@@ -38,14 +38,14 @@ applying a solution to a different time or channel sampling. `fseg` is stored
 [`materialize`](@ref)d, so a data-dependent segmentation never reaches a plan. `fstate`/`tstate`
 are the term's own coordinate constants, resolved once against the solve
 geometry ([`freq_coord_state`](@ref)), `nothing` on an axis the term does not
-declare. `prior` is the component's [`AbstractPrior`](@ref) (or `nothing`); the
-forward map does not read it.
+declare. `priors[a]` is the [`resolve_prior`](@ref)d prior of the plan's `a`-th
+station (the leaf's `:Ant` position): stations share a plan whatever their
+priors. The forward map does not read it.
 """
 struct ComponentPlan{
         T <: AbstractGainTerm, Ty <: AbstractFeedTying,
         TS <: AbstractTimeSegmentation, FS <: AbstractFrequencySegmentation, TC, FC,
-        XF <: AbstractVector{<:Real}, XT <: AbstractVector{<:Real},
-        P <: Union{Nothing, AbstractPrior},
+        XF <: AbstractVector{<:Real}, XT <: AbstractVector{<:Real}, PR <: AbstractVector,
     }
     term::T
     tseg::TS                    # the time segmentation `tseg_id` resolves
@@ -60,7 +60,7 @@ struct ComponentPlan{
     shape::NTuple{5, Int}       # (param, feed-node, freq-seg, time-seg, ant)
     fstate::FC                  # the term's resolved frequency-coordinate constants
     tstate::TC                  # …and its time-coordinate constants
-    prior::P                    # the component's prior, for solvers
+    priors::PR                  # length nant   → the station's resolved prior
 end
 
 """
@@ -170,18 +170,29 @@ end
 # resolution) canonicalizes before layout: per component name, stations are
 # grouped by identical `(term, Ti, Frequency, Feed)` signature, and each group
 # gets its own rectangular leaf whose `:Ant` axis spans just that group's
-# stations. θ is ragged across groups; segment lookup is per (station, time)
+# stations. Priors are not part of the signature: each station's plan slot
+# carries its own. θ is ragged across groups; segment lookup is per (station, time)
 # through each group's own plan tables. A name whose single signature covers
 # every station stays a plain `ComponentPlan` — the grouped machinery has zero
 # footprint until a model actually differs across stations.
 
-# One merged name's signature groups, before layout: the distinct components
-# and, per component, the global station indices carrying it (in antenna
-# order, so the grouping is deterministic).
+# One merged name's signature groups, before layout: per group, a component
+# carrying the signature, the global station indices carrying it (in antenna
+# order, so the grouping is deterministic), and those stations' resolved priors.
 struct _ComponentGroups
-    comps::Vector{Any}             # GainComponents, one per signature group
+    comps::Vector{GainComponent}   # one per signature group
     stations::Vector{Vector{Int}}  # global station indices per group
+    priors::Vector{Vector}         # resolved prior per station, per group
 end
+
+# A name with one signature at every station whose priors differ by station.
+struct _StationComponents{C <: GainComponent, P <: AbstractVector}
+    comp::C
+    priors::P                      # resolved prior per station
+end
+
+_same_signature(a::GainComponent, b::GainComponent) =
+    a.term == b.term && a.Ti == b.Ti && a.Frequency == b.Frequency && a.Feed == b.Feed
 
 # Merge per-station component trees into one canonical name tree. `vals[i]` is
 # the subtree station `members[i]` carries at `path`; keys appear in
@@ -200,19 +211,26 @@ function _merge_station_trees(vals::Vector{Any}, members::Vector{Int}, nant::Int
         sub = Any[vals[i][k] for i in idx]
         stn = members[idx]
         node = if all(x -> x isa GainComponent, sub)
-            comps = Any[]
+            comps = GainComponent[]
             groups = Vector{Int}[]
+            group_comps = Vector{GainComponent}[]
             for (x, a) in zip(sub, stn)
-                gi = findfirst(==(x), comps)
-                if gi === nothing
+                gi = findfirst(c -> _same_signature(c, x), comps)
+                if isnothing(gi)
                     push!(comps, x)
                     push!(groups, [a])
+                    push!(group_comps, [x])
                 else
                     push!(groups[gi], a)
+                    push!(group_comps[gi], x)
                 end
             end
-            length(comps) == 1 && length(stn) == nant ? comps[1] :
-                _ComponentGroups(comps, groups)
+            priors = [[resolve_prior(e) for e in m] for m in group_comps]
+            if length(comps) == 1 && length(stn) == nant
+                all(==(first(sub)), sub) ? first(sub) : _StationComponents(only(comps), only(priors))
+            else
+                _ComponentGroups(comps, groups, priors)
+            end
         elseif all(x -> x isa NamedTuple, sub)
             _merge_station_trees(sub, stn, nant, (path..., k))
         else
@@ -262,14 +280,18 @@ _group_keys(n::Int) = ntuple(i -> Symbol(:g, i), n)
 function _plans_tree(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
     return NamedTuple{keys(nt)}(map(v -> _plans_node(v, nant, geom, flat, next), values(nt)))
 end
-function _plans_node(e::GainComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
+_plans_node(e::GainComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}) =
+    _plans_leaf(e, fill(resolve_prior(e), nant), nant, geom, flat, next)
+_plans_node(s::_StationComponents, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}) =
+    _plans_leaf(s.comp, s.priors, nant, geom, flat, next)
+function _plans_leaf(e::GainComponent, priors::AbstractVector, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
     cl = _component_layout(e, nant, geom)
     dof = prod(cl.shape)
     range = next[]:(next[] + dof - 1)
     next[] += dof
     plan = ComponentPlan(
         e.term, cl.tseg, cl.fseg, cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg,
-        cl.tying, range, cl.shape, cl.fstate, cl.tstate, e.prior,
+        cl.tying, range, cl.shape, cl.fstate, cl.tstate, priors,
     )
     push!(flat, plan)
     return plan
@@ -279,8 +301,8 @@ _plans_node(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::B
 function _plans_node(g::_ComponentGroups, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
     plans = NamedTuple{_group_keys(length(g.comps))}(
         Tuple(
-            _plans_node(g.comps[i], length(g.stations[i]), geom, flat, next)
-                for i in eachindex(g.comps)
+            _plans_leaf(g.comps[i], g.priors[i], length(g.stations[i]), geom, flat, next)
+                for i in eachindex(g.comps, g.priors)
         )
     )
     group_of = zeros(Int, nant)
@@ -299,6 +321,7 @@ function _axes_node(e::GainComponent, nant::Int, geom::DataGeometry)
     return (; dims = cl.shape, roles = cl.roles)
 end
 _axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant, geom)
+_axes_node(s::_StationComponents, nant::Int, geom::DataGeometry) = _axes_node(s.comp, nant, geom)
 # A group leaf's axes node additionally records the global station indices its
 # `:Ant` axis spans, so a wrapped θ can be labelled with the group's stations
 # rather than the run's full antenna list.
@@ -322,7 +345,8 @@ The `nant::Integer` form lays out a station-uniform `GainModel` (empty
 `nant` antennas. The `antennas` form (an `AntennaTable` or an iterable of
 station codes) [`materialize`](@ref)s the model against the
 station set first and handles heterogeneity: per component name, stations
-group by identical `(term, Ti, Frequency, Feed)` signature, a name with one
+group by identical `(term, Ti, Frequency, Feed)` signature (priors do not
+split a group; each station keeps its own in `plan.priors`), a name with one
 signature covering every station lays out exactly as the uniform form does,
 and a heterogeneous name becomes a [`GroupedComponentPlan`](@ref) with one
 ragged leaf per group (`θ.phase.<name>.g1`, `.g2`, …). Iterate the groups with
@@ -466,7 +490,7 @@ function _hetero_leaves!(out, node::NamedTuple, path)
     end
     return out
 end
-_hetero_leaves!(out, ::GainComponent, path) = out
+_hetero_leaves!(out, ::Union{GainComponent, _StationComponents}, path) = out
 _hetero_leaves!(out, g::_ComponentGroups, path) = push!(out, (path, g))
 
 """

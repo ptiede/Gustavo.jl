@@ -183,8 +183,8 @@ _bp_amp(step) = step.θ[_bp_amp_plan(step).range]
             sqrt(sum(abs2, gauge(v)[cleanc] .- gauge(abpc[a, f, :])[cleanc]) / length(cleanc))
 
         s_free = runc(nothing)
-        s_ar = runc(CAL.OUPrior(Frequency; scale = LogNormal(log(nu), 1.0), σ = LogNormal(log(sigma_bp), 1.0)))
-        s_wh = runc(CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.02))
+        s_ar = runc(CAL.OUPrior(; scale = LogNormal(log(nu), 1.0), σ = LogNormal(log(sigma_bp), 1.0)))
+        s_wh = runc(CAL.RandomWalkPrior(; order = 2, σ = 0.02))
 
         # The guard excises the contaminated channel; no prior estimates
         # nothing it has no datum for, so that slot stays UNAPPLIED (log-amp 0)
@@ -308,8 +308,8 @@ end
     # A stiff second-order walk on the PHASE leaves only its null space — a
     # straight line in frequency within each spectral window, each with its own
     # level and slope.
-    stiff = CAL.RandomWalkPrior(Frequency; order = 2, σ = 1.0e-6)
-    sol_stiff = run(_bpmodel(; phase = stiff, amp = CAL.RandomWalkPrior(Frequency; order = 2, σ = 0.01)))
+    stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6)
+    sol_stiff = run(_bpmodel(; phase = stiff, amp = CAL.RandomWalkPrior(; order = 2, σ = 0.01)))
     sol_free = run(_bpmodel())
     spws = [((s - 1) * nchan + 1):(s * nchan) for s in 1:nspw]
     for a in 1:nant, f in 1:2, cs in spws
@@ -325,6 +325,18 @@ end
     for a in 1:nant, f in 1:2
         @test curvature(phase_track(sol_one, a, f)) < 1.0e-3
     end
+
+    # Stations differing only in prior share the layout; each fits under its own.
+    mixed = with_station(_bpmodel(), "A3"; phase = (; bandpass = _bpc(CAL.PerSpectralWindow(); prior = stiff)))
+    sol_mixed = run(mixed)
+    @test length(CAL.parameters(sol_mixed[:bandpass, :phase, :bandpass])) ==
+        length(CAL.parameters(sol_free[:bandpass, :phase, :bandpass]))
+    pri = stage_info(sol_mixed, :bandpass).phase_priors
+    @test all(==(stiff), pri[3, :, :]) && all(isnothing, pri[[1, 2, 4], :, :])
+    for f in 1:2, cs in spws
+        @test curvature(phase_track(sol_mixed, 3, f)[cs]) < 1.0e-3
+    end
+    @test maximum(curvature(phase_track(sol_mixed, a, f)[cs]) for a in (2, 4), f in 1:2, cs in spws) > 0.1
 
     # The zero band-mean log-amp gauge is applied AFTER the prior fit, so a prior
     # that rewrites every channel still leaves the bandpass SHAPE only.
@@ -506,7 +518,7 @@ end
     nband, nchan = 4, 32
     pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]
     x = collect(range(8.6e10, 8.6e10 + 1.28e8; length = nband * nchan))
-    prior = CAL.OUPrior(Frequency; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.3), 1.0))
+    prior = CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.3), 1.0))
     fit!(track, w; unwrap) = (st = fill(Int8(-1), nband); FP._fit_track!(track, w, x, pieces, prior; unwrap, status = st); st)
 
     # A clean, structured track: every piece solved.

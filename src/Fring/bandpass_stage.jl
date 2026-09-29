@@ -62,7 +62,7 @@ defaults to `false`, so an undeclared model is rejected at compile time
 rather than leaving θ blocks unsolved. Both shipped smoothers accept
 `GainComponent(Calibration.Bandpass(); Ti = <GlobalTime, InstrumentScans or
 TimeBlocks>, Frequency = <any segmentation>, Feed = PerFeed(), prior = <nothing,
-RandomWalkPrior(Frequency; …) or OUPrior(Frequency; …)>)` and nothing else — a
+or a RandomWalkPrior or OUPrior along Frequency>)` and nothing else — a
 time segmentation whose segments each span several scans, solved one segment at
 a time.
 
@@ -107,7 +107,15 @@ _fits_bandpass_track(tc) =
     tc.term isa Calibration.Bandpass &&
     tc.Ti isa Union{GlobalTime, InstrumentScans, TimeBlocks} &&
     tc.Feed isa PerFeed &&
-    tc.prior isa Union{Nothing, RandomWalkPrior{Frequency}, OUPrior{Frequency}}
+    _is_frequency_prior(resolve_prior(tc))
+
+_is_frequency_prior(::Nothing) = true
+_is_frequency_prior(p::NamedTuple) = keys(p) == (:Frequency,)
+_is_frequency_prior(_) = false
+
+# A station's prior along frequency, from its resolved prior (`plan.priors`).
+_frequency_prior(::Nothing) = nothing
+_frequency_prior(p::NamedTuple) = p.Frequency
 
 # A bandpass plan's frequency segments as channel groups: the pieces its prior is
 # fit over, each independently.
@@ -574,14 +582,15 @@ end
 
 # Fit every (station, feed) track of `tracks` in place (see `_fit_track!`), each
 # channel weighted by its seed precision. `tracks` and `prec` are over
-# `(Ant, Feed, Frequency)`; `status`, when given, is over `(Ant, Feed, Frequency)`
-# with one entry per piece, and `priors` over `(Ant, Feed)`, receiving each
-# track's resolved prior.
-function _fit_tracks!(tracks, prec, x, pieces, prior; unwrap::Bool, status = nothing, priors = nothing)
+# `(Ant, Feed, Frequency)`, and `station_priors[a]` is station `a`'s resolved
+# prior; `status`, when given, is over `(Ant, Feed, Frequency)` with one entry per
+# piece, and `priors` over `(Ant, Feed)`, receiving each track's resolved prior.
+function _fit_tracks!(tracks, prec, x, pieces, station_priors; unwrap::Bool, status = nothing, priors = nothing)
     for a in axes(tracks, Ant), f in axes(tracks, Feed)
         st = isnothing(status) ? nothing : view(status, Ant(a), Feed(f))
         resolved = _fit_track!(
-            view(tracks, Ant(a), Feed(f)), view(prec, Ant(a), Feed(f)), x, pieces, prior;
+            view(tracks, Ant(a), Feed(f)), view(prec, Ant(a), Feed(f)), x, pieces,
+            _frequency_prior(station_priors[a]);
             unwrap, status = st,
         )
         isnothing(priors) || (priors[a, f] = resolved)
@@ -603,11 +612,15 @@ function _track_status_array(stations, geom::DataGeometry, plan, nts::Integer)
 end
 
 # One observable's resolved prior per (station, feed, time segment), over
-# `(Ant, Feed, Ti)` labeled as `_track_status_array`; each slot starts at the
-# component's own prior.
+# `(Ant, Feed, Ti)` labeled as `_track_status_array`; each slot starts at its
+# station's own prior.
 function _track_prior_array(stations, geom::DataGeometry, plan, nts::Integer)
     ax = (_station_dim(stations), Feed(1:2), Ti(_time_segment_lookup(plan, geom, nts)))
-    return fill!(DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax), plan.prior)
+    arr = DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax)
+    for a in axes(arr, 1)
+        arr[a, :, :] .= Ref(_frequency_prior(plan.priors[a]))
+    end
+    return arr
 end
 
 # A station block's outcome and prior arrays: its own stations and time segments.
@@ -812,7 +825,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
             rbar, wbar = _pool_scans(results, idx, T)
             phase, prec = _seed_phase_tracks(rbar, wbar, geom.stations, channels, cells; gauge)
             _fit_tracks!(
-                phase, prec, x, pieces, plan.prior;
+                phase, prec, x, pieces, plan.priors;
                 unwrap = true, status = view(phase_status, Ti(ts)), priors = view(phase_priors, Ti(ts)),
             )
             _write_phase_bandpass!(θ, plan, phase, ts)
@@ -830,7 +843,7 @@ function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::Abstra
             la, prec = _seed_amp_tracks(rbar, wbar, geom.stations, channels, cells)
             _spike_guard!(la, pieces, _BP_SPIKE_SIGMA)
             _fit_tracks!(
-                la, prec, x, pieces, plan.prior;
+                la, prec, x, pieces, plan.priors;
                 unwrap = false, status = view(amp_status, Ti(ts)), priors = view(amp_priors, Ti(ts)),
             )
             _write_amp_bandpass!(θ, plan, la, _BP_MAX_LOGAMP, ts)
@@ -1188,7 +1201,7 @@ function _update_station_gains!(
             ast = isnothing(amp_status) ? nothing : view(amp_status[k], ai, feed, :, ts)
             pst = isnothing(phase_status) ? nothing : view(phase_status[k], ai, feed, :, ts)
             fit = fits[k]
-            amp_prior = _fit_track!(la, wf, x, fit.amp.pieces, fit.amp.prior; status = ast)
+            amp_prior = _fit_track!(la, wf, x, fit.amp.pieces, fit.amp.priors[ai]; status = ast)
             isnothing(amp_priors) || (amp_priors[k][ai, feed, ts] = amp_prior)
             if any(pins)
                 # A pinned track is known rather than fitted: report it as such
@@ -1196,7 +1209,7 @@ function _update_station_gains!(
                 isnothing(pst) || fill!(pst, _BP_TRACK_SOLVED)
                 fill!(φ̃, zero(T))
             else
-                phase_prior = _fit_track!(φ̃, wf, x, fit.phase.pieces, fit.phase.prior; unwrap = seed, status = pst)
+                phase_prior = _fit_track!(φ̃, wf, x, fit.phase.pieces, fit.phase.priors[ai]; unwrap = seed, status = pst)
                 isnothing(phase_priors) || (phase_priors[k][ai, feed, ts] = phase_prior)
             end
             la_new, φ_new = la, φ̃
@@ -1440,8 +1453,8 @@ function solve_joint_bandpass!(
     )
     fits = [
         (;
-                phase = (; pieces = _bandpass_pieces(pb.plan), prior = pb.plan.prior),
-                amp = (; pieces = _bandpass_pieces(ab.plan), prior = ab.plan.prior),
+                phase = (; pieces = _bandpass_pieces(pb.plan), priors = map(_frequency_prior, pb.plan.priors)),
+                amp = (; pieces = _bandpass_pieces(ab.plan), priors = map(_frequency_prior, ab.plan.priors)),
             ) for (pb, ab) in zip(phase_blocks, amp_blocks)
     ]
     gains = [_block_gains(b, geom, eltype(r)) for b in phase_blocks]
