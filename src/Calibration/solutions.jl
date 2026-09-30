@@ -7,7 +7,6 @@
 # against the solution's geometry, one layout per (step, station set), and runs
 # the forward map on θ built from their parameters.
 
-using Serialization: serialize, deserialize
 using Statistics: mean
 using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions, AbstractDimArray
 using DimensionalData.Lookups: Sampled, Explicit, Intervals, Center
@@ -742,33 +741,4 @@ function gains(sol::_AppliedSolution, win::GeometryWindow; time_span = nothing)
             Ant(sol.geom.stations), Feed(1:2),
         ),
     )
-end
-
-# ── Serialization ────────────────────────────────────────────────────────────
-
-"""
-    save_solution(path, sol::CalibrationSolution)
-
-Serialize `sol` to `path` via the `Serialization` stdlib inside a versioned
-wrapper NamedTuple (version 9: a list of solved components).
-"""
-function save_solution(path::AbstractString, sol::CalibrationSolution)
-    serialize(path, (; version = 9, sol))
-    return path
-end
-
-"""
-    load_solution(path) -> CalibrationSolution
-
-Inverse of [`save_solution`](@ref). Only version 9 files are supported; files
-from an earlier Gustavo used a different solution shape and are refused —
-re-solve to produce a current-format solution.
-"""
-function load_solution(path::AbstractString)
-    w = deserialize(path)
-    w.version == 9 || error(
-        "load_solution: unsupported version $(w.version) — saved by an incompatible " *
-            "Gustavo (the solution shape changed); re-solve to produce a current file.",
-    )
-    return w.sol
 end

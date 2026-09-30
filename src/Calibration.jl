@@ -12,7 +12,8 @@ using OhMyThreads: tforeach, DynamicScheduler, SerialScheduler
 import XRadio
 import DimensionalData
 import DensityInterface
-using Distributions: Normal, AbstractMvNormal, mean, cov, var
+import Distributions
+using Distributions: Distribution, Normal, AbstractMvNormal, mean, cov, var
 using ..UVData
 using ..UVData: feed_pairs, phase_relative_to_ref
 using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,
@@ -37,6 +38,7 @@ include("Calibration/models.jl")
 include("Calibration/parameters.jl")
 include("Calibration/evaluate.jl")
 include("Calibration/solutions.jl")
+include("Calibration/solution_store.jl")
 
 # Feed / correlation-product conventions
 export feed_pairs
@@ -77,6 +79,6 @@ export evaluate_gains
 # Calibration solution container, apply, serialization
 export CalibrationSolution, SolvedComponent, GeometryWindow
 export gains
-export save_solution, load_solution
+export save_solution, load_solution, storage_constructor, storage_arguments
 
 end

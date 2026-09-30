@@ -944,7 +944,7 @@ end
 
     @testset "a heterogeneous solution round-trips through save/load" begin
         mktempdir() do dir
-            path = joinpath(dir, "het.h5")
+            path = joinpath(dir, "het.zarr")
             save_solution(path, sol)
             back = load_solution(path)
             @test back.components == sol.components

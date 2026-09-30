@@ -4,6 +4,7 @@
 # (included earlier in runtests.jl).
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
+using Distributions: LogNormal, Gamma, MvNormal
 
 # A throwaway solve step proving the protocol defaults exist.
 struct _ProtoProbe <: Gustavo.SolveStep end
@@ -310,23 +311,42 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test_throws "disagree on the epoch" fit(BaselineFringeFit(model = bad), ps; gauge = PinAntenna(1))
     end
 
-    @testset "solution serialization round-trip; older files refused" begin
+    @testset "solution Zarr round-trip" begin
         ps, _ = _build_fringe_ps()
         ws = DimArray([1.0, 0.5, 1.0, 1.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
         sol = fit(StationWeightScale(ws) |> _full_chain(), ps; gauge = PinAntenna(1))
-        path = joinpath(mktempdir(), "sol.jls")
+        dir = mktempdir()
+        path = joinpath(dir, "sol.zarr")
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)
         @test back.components == sol.components
-        @test keys(back.steps) == keys(sol.steps)
-        @test back.provenance == sol.provenance
+        @test back.steps == sol.steps
         @test back.info == sol.info
+        @test back.provenance == sol.provenance
+        @test back.geom.stations == sol.geom.stations && back.geom.times == sol.geom.times
         @test parent(gains(back)) == parent(gains(sol))
 
-        # Files from before the solution was a tree are refused rather than
-        # misread, so a caller re-solves instead of loading a stale shape.
-        v8path = joinpath(mktempdir(), "sol_v8.jls")
-        Gustavo.Calibration.serialize(v8path, (; version = 8, steps = []))
-        @test_throws "unsupported version" CAL.load_solution(v8path)
+        @test_throws "exists" CAL.save_solution(path, sol)
+        @test_throws "not a Gustavo solution store" CAL.load_solution(joinpath(dir, "sol.zarr", "geometry"))
+
+        # A diagnostic with no stored form fails the save and leaves nothing behind.
+        bad = CalibrationSolution(sol.geom, sol.components, sol.steps, (; hook = x -> x))
+        badpath = joinpath(dir, "bad.zarr")
+        @test_throws "cannot save info.hook" CAL.save_solution(badpath, bad)
+        @test !ispath(badpath)
+    end
+
+    @testset "components with hyperpriors round-trip through Zarr" begin
+        rw = RandomWalkPrior(order = 2, σ = LogNormal(0, 1), init = MvNormal(zeros(2), [1.0 0.1; 0.1 2.0]))
+        c = GainComponent(
+            ConstantTerm(); Ti = InstrumentScans([1.0, 5.0]), Frequency = FreqGroups([1:3, 4:8]),
+            Feed = SingleFeed(2), prior = (Ti = rw, Frequency = OUPrior(scale = 3.0, σ = Gamma(2.0, 1.0))),
+        )
+        back = CAL._decode(CAL._encode_checked(c, "c"))
+        @test typeof(back) == typeof(c)
+        @test back.prior.Ti.init == rw.init && back.prior.Ti.σ == rw.σ
+        @test back.prior.Frequency == c.prior.Frequency
+        @test (back.term, back.Ti, back.Frequency, back.Feed) == (c.term, c.Ti, c.Frequency, c.Feed)
+        @test CAL._decode(CAL._encode_checked(PolynomialFreq(3), "p")) === PolynomialFreq(3)
     end
 end

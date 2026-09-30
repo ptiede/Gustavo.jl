@@ -36,7 +36,7 @@ pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
 sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
 
 out = calibrate(pipeline, sol, ps)               # the fit's data path, in memory
-save_solution("track.jls", sol)
+save_solution("track.sol.zarr", sol)
 ```
 
 ## The pieces
@@ -86,7 +86,8 @@ solution that applies, plots and differences like the whole: `sol[:fringe]`,
 [`gains`](@ref Gustavo.Calibration.gains) evaluates a selection's complex
 station gains as a labeled `DimArray`, and `sol.steps[:fringe]` holds a step's
 diagnostics. [`save_solution`](@ref Gustavo.Calibration.save_solution) /
-[`load_solution`](@ref Gustavo.Calibration.load_solution) round-trip it.
+[`load_solution`](@ref Gustavo.Calibration.load_solution) round-trip it through
+a Zarr store.
 
 ## Extending Gustavo
 

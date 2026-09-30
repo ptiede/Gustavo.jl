@@ -805,7 +805,7 @@ end
         mat = CAL.materialize(m, names, geom)
         @test mat.phase.bp.prior === rw
         soln = CAL.CalibrationSolution(mat, layout, geom, collect(1.0:layout.nθ))
-        path = joinpath(mktempdir(), "prior.jls")
+        path = joinpath(mktempdir(), "prior.zarr")
         CAL.save_solution(path, soln)
         back = CAL.load_solution(path)
         @test back.components == soln.components
@@ -1331,7 +1331,7 @@ end
         @test lookup(only(soln[:solution, :phase, :atmos].components).params, UVD.Ant) == names
 
         # A station-heterogeneous solution round-trips through `save_solution`.
-        path = joinpath(mktempdir(), "het.jls")
+        path = joinpath(mktempdir(), "het.zarr")
         CAL.save_solution(path, soln)
         back = CAL.load_solution(path)
         @test back.components == soln.components

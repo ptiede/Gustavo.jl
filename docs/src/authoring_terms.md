@@ -142,3 +142,8 @@ model = GainModel(
 From here `Quadratic` participates in `plan_parameters` and `evaluate_gains`
 exactly as the built-in terms do — nothing downstream of the five hooks above
 is aware that it is a third-party addition.
+
+A solution holding `Quadratic` saves with [`save_solution`](@ref) as it is:
+a term is stored as its type and fields and rebuilt through its positional
+constructor. A term whose constructor does not take its fields extends
+[`storage_constructor`](@ref) and [`storage_arguments`](@ref).
