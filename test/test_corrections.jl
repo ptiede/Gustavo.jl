@@ -94,7 +94,7 @@ end
         @test parent(Gustavo._correct(StationWeightScale(scale), ms, geom)[:weight]) == parent(out[:weight])
         @test_throws "finite and positive" StationWeightScale(DimArray([1.0, 0.0], XRadio.AntennaName(["A1", "A2"])))
         @test_throws "named more than once" StationWeightScale(DimArray([1.0, 2.0], XRadio.AntennaName(["A1", "A1"])))
-        @test_throws "index the factors by `AntennaName`" StationWeightScale(DimArray([1.0], Gustavo.Ant(["A1"])))
+        @test_throws "index the factors by `AntennaName`" StationWeightScale(DimArray([1.0], XRadio.StationName(["A1"])))
     end
 
     @testset "FlagChannels" begin

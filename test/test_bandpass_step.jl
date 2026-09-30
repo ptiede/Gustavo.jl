@@ -30,11 +30,11 @@ _bp_amp(sol) = _bp_params(sol, :bandpass, :logamp, :bandpass)
 # The components of one grouped (station-specific) component as blocks: each
 # group's stations, by index into the geometry's, and its parameters.
 _bp_station_blocks(sol, path...) = [
-    (; stations = [findfirst(==(s), sol.geom.stations) for s in lookup(c.params, Ant)], θ = parent(c.params))
+    (; stations = [findfirst(==(s), sol.geom.stations) for s in lookup(c.params, AntennaName)], θ = parent(c.params))
         for c in sol[path...].components
 ]
 
-# A bandpass leaf's values over `(Frequency, Feed, Ti, Ant)`, its unit `:param`
+# A bandpass leaf's values over `(Frequency, Feed, Ti, AntennaName)`, its unit `:param`
 # axis dropped.
 _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
@@ -115,7 +115,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
     @testset "the leaf holds one frequency segment per channel" begin
         @test size(_bp_phase(sol_n)) == (1, 2, nglob, 1, nant)
-        @test collect(lookup(_bp_phase(sol_n), Ant)) == sol_n.geom.stations
+        @test collect(lookup(_bp_phase(sol_n), AntennaName)) == sol_n.geom.stations
     end
 
     @testset "step-selection extraction" begin
@@ -287,7 +287,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
                 g.scan_names, g.spw_names, others,
             ),
             [
-                CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (dims(c.params)[1:4]..., Ant(others))))
+                CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (dims(c.params)[1:4]..., AntennaName(others))))
                     for c in bps.components
             ],
             bps.steps, bps.info,
@@ -637,14 +637,14 @@ end
     amp, aprec = @inferred FP._seed_amp_tracks(rl, wl, stations, fsegs, segs)
     for A in (phase, pprec, amp, aprec)
         @test eltype(A) == Float32
-        @test lookup(A, FP.Ant) == stations
+        @test lookup(A, FP.AntennaName) == stations
         @test lookup(A, Frequency) == freqs
     end
     @test maximum(abs, (phase .- (φ .- φ[1:1, :, :]))[FP.Feed(1)]) < 1.0e-4
     @test maximum(abs, amp .- la) < 1.0e-4
 
     # Storage order is not an input: the same sums stored permuted seed the same tracks.
-    rp, wp = permutedims(rl, (Frequency, FP.FeedPair, FP.StationPair)), permutedims(wl, (Frequency, FP.FeedPair, FP.StationPair))
+    rp, wp = permutedims(rl, (Frequency, FP.FeedPair, FP.AntennaPair)), permutedims(wl, (Frequency, FP.FeedPair, FP.AntennaPair))
     @test isequal(FP._seed_phase_tracks(rp, wp, stations, fsegs, segs; gauge = PinAntenna(1)), (phase, pprec))
     @test isequal(FP._seed_amp_tracks(rp, wp, stations, fsegs, segs), (amp, aprec))
 end
@@ -667,7 +667,7 @@ end
         gauge = PinAntenna(1),
     )
     info = sol.steps[:bandpass]
-    # (Ant, Feed, frequency segment, time segment): the default model's segments
+    # (AntennaName, Feed, frequency segment, time segment): the default model's segments
     # are the spectral windows, and a time-stable bandpass is one time segment.
     @test size(info.phase_status) == (nant, 2, nspw, 1)
     @test size(info.amp_status) == (nant, 2, nspw, 1)
@@ -724,7 +724,7 @@ end
     @testset "θ carries one block per time segment" begin
         sol = fit(Bandpass(; model = model(seg)), broken; gauge = PinAntenna(1))
         leaf = _by_channel(_bp_phase(sol))
-        @test size(leaf, 3) == 2                       # (Frequency, Feed, Ti, Ant)
+        @test size(leaf, 3) == 2                       # (Frequency, Feed, Ti, AntennaName)
         # Each segment is solved from its own scans, so the halves disagree —
         # they would be one block under `GlobalTime`.
         @test any(!iszero, leaf[:, 1, 1, :])
@@ -766,7 +766,7 @@ end
         @test lookup(st, Ti) == lookup(leaf, Ti)
         @test DimensionalData.intervalbounds(st, Ti) == DimensionalData.intervalbounds(leaf, Ti)
         @test length(lookup(st, Ti)) == 2
-        @test lookup(st, Ant) == geom.stations
+        @test lookup(st, AntennaName) == geom.stations
         @test only(DimensionalData.intervalbounds(st, Frequency)) == extrema(geom.channel_freqs)
         (_, first_end), (second_start, _) = DimensionalData.intervalbounds(st, Ti)
         @test st[Ti(Contains(second_start))] == st[Ti(2)]
@@ -788,7 +788,7 @@ end
             st = getproperty(info, obs === :phase ? :phase_status : :amp_status)
             @test keys(st) == keys(leaves) == (:g1, :g2)
             for k in keys(st)
-                @test collect(lookup(st[k], Ant)) == collect(lookup(leaves[k], Ant))
+                @test collect(lookup(st[k], AntennaName)) == collect(lookup(leaves[k], AntennaName))
                 @test lookup(st[k], Ti) == lookup(leaves[k], Ti)
                 @test DimensionalData.intervalbounds(st[k], Ti) == DimensionalData.intervalbounds(leaves[k], Ti)
             end

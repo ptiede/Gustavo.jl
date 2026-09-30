@@ -59,7 +59,7 @@ end
     exec = SerialScheduler()
     s = FP._ap_sums(group, geom; executor = exec)
     slot = Dict(n => i for (i, n) in pairs(geom.stations))
-    @test issorted(lookup(s.rbar, FP.StationPair); by = ((a, b),) -> (slot[a], slot[b]))
+    @test issorted(lookup(s.rbar, FP.AntennaPair); by = ((a, b),) -> (slot[a], slot[b]))
     @test lookup(s.rbar, FP.FeedPair) == [(1, 1), (1, 2), (2, 1), (2, 2)]
     @test lookup(s.rbar, Ti) == geom.times[s.ti]
     @test eltype(s.rbar) == ComplexF32 && eltype(s.wbar) == Float32
@@ -101,7 +101,7 @@ end
     # The adhoc step reports each track's resolved prior, one `Ti` per scan.
     info = fit(AdhocPhase(), ps; gauge = PinAntenna(1)).steps[:adhoc]
     pr = info.priors
-    @test DimensionalData.name(dims(pr)) == (:Ant, :Feed, :Ti)
+    @test DimensionalData.name(dims(pr)) == (:AntennaName, :Feed, :Ti)
     @test size(pr, Ti) == 3 && issorted(lookup(pr, Ti))
     fitted = filter(!isnothing, vec(parent(pr)))
     @test !isempty(fitted)
@@ -162,7 +162,7 @@ end
     exec = SerialScheduler()
 
     rl, wl = FP.accumulate_bandpass(first(groups), geom, stations, feeds; executor = exec)
-    @test lookup(rl, FP.StationPair) == stations
+    @test lookup(rl, FP.AntennaPair) == stations
     @test lookup(rl, FP.FeedPair) == feeds
     @test lookup(rl, Frequency) == geom.channel_freqs
     @test eltype(rl) == ComplexF32 && eltype(wl) == Float32

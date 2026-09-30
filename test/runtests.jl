@@ -261,7 +261,7 @@ end
     # Every axis name a stored or returned array can carry, so scripts index
     # leaves with a bare `using Gustavo`. `Ti` is DimensionalData's dim under
     # both names — the same binding, so no ambiguity when both are loaded.
-    for n in (:Polarization, :Frequency, :Ant, :BaselineID, :Ti, :UVW, :Feed, :Scan)
+    for n in (:Polarization, :Frequency, :AntennaName, :BaselineID, :Ti, :UVW, :Feed, :Scan)
         @test n in top
         @test getproperty(Gustavo, n) <: DimensionalData.Dimension
     end

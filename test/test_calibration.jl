@@ -327,7 +327,7 @@ end
     @test CAL.term_axes(CAL.PolynomialTime(3)) == (Ti,)
 
     @test_throws ArgumentError CAL.PolynomialFreq(0)
-    @test_throws "axis must be one of" CAL.Polynomial{UVD.Ant}(2)
+    @test_throws "axis must be one of" CAL.Polynomial{UVD.AntennaName}(2)
 
     # A term is handed the axes it declares, under the dimension names, and a
     # channel index is never one of them.
@@ -482,9 +482,9 @@ end
     @test layout.axes.phase.grp.c.dims == (1, 1, 1, 1, nant)
 
     # The stored axis roles name each dimension.
-    @test layout.axes.phase.a.roles == (:param, :Feed, :Frequency, :Ti, :Ant)
-    @test layout.axes.phase.bp.roles == (:param, :node, :Frequency, :Ti, :Ant)
-    @test layout.axes.phase.grp.d.roles == (:param, :node, :Frequency, :Ti, :Ant)
+    @test layout.axes.phase.a.roles == (:param, :Feed, :Frequency, :Ti, :AntennaName)
+    @test layout.axes.phase.bp.roles == (:param, :node, :Frequency, :Ti, :AntennaName)
+    @test layout.axes.phase.grp.d.roles == (:param, :node, :Frequency, :Ti, :AntennaName)
 
     # The plans tile θ depth-first — a, bp, grp.d, grp.c — each over its leaf.
     rng = [p.range for p in layout.plans]
@@ -552,12 +552,12 @@ end
     @test DimensionalData.intervalbounds(a, UVD.Frequency) == [(1.0e9, 4.0e9)]
     @test lookup(a, Ti) == [0.5, 2.5]                            # PerScan: one per scan
     @test DimensionalData.intervalbounds(a, Ti) == [(0.0, 1.0), (2.0, 3.0)]
-    @test a[Ti(Contains(2.2)), UVD.Ant(At("PT")), UVD.Feed(1)] == a[Ti(2), UVD.Ant(1), UVD.Feed(1)]
+    @test a[Ti(Contains(2.2)), UVD.AntennaName(At("PT")), UVD.Feed(1)] == a[Ti(2), UVD.AntennaName(1), UVD.Feed(1)]
     @test_throws "No interval contains" a[Ti(Contains(1.5))]     # between scans
     @test lookup(bpp, UVD.Frequency) == [mean(freqs[1:2]), mean(freqs[3:4])]   # ChannelBlocks(2)
 
     # Antennas take the geometry's station names; feed is 1:2.
-    @test lookup(a, UVD.Ant) == ants
+    @test lookup(a, UVD.AntennaName) == ants
     @test lookup(a, UVD.Feed) == 1:2
 
     # The parameters are a copy of θ's blocks.
@@ -738,7 +738,7 @@ end
         @test_throws "relates nothing, the component does not segment Ti" comp(;
             Frequency = CAL.ChannelBlocks(1), prior = (Ti = ou,),
         )
-        @test_throws "prior key Ant is not an axis" comp(; both..., prior = (Ant = ou,))
+        @test_throws "prior key AntennaName is not an axis" comp(; both..., prior = (AntennaName = ou,))
         @test_throws "a keyed prior must be a RandomWalkPrior or OUPrior" comp(; both..., prior = (Ti = iid,))
         @test_throws "a keyed prior needs at least one axis" comp(; both..., prior = (;))
     end
@@ -831,13 +831,13 @@ end
     # A dimension no term coordinate is built along fails at plan time, named.
     @eval CAL begin
         struct _AuditAntTerm <: AbstractGainTerm end
-        term_axes(::_AuditAntTerm) = ($(UVD.Ant),)
+        term_axes(::_AuditAntTerm) = ($(UVD.AntennaName),)
         param_shapes(::_AuditAntTerm, n) = (scale = (),)
     end
     antmodel = CAL.GainModel(
         phase = (bad = CAL.GainComponent(CAL._AuditAntTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.PerFeed()),),
     )
-    @test_throws "declares unknown coordinate axes (:Ant,)" CAL.plan_parameters(antmodel, 1, geom)
+    @test_throws "declares unknown coordinate axes (:AntennaName,)" CAL.plan_parameters(antmodel, 1, geom)
 end
 
 @testset "CalibrationSolution parameters keep θ's element type" begin
@@ -877,7 +877,7 @@ end
         # Axes carry the geometry, so a user can index by physical coordinate.
         @test lookup(g, UVD.Frequency) == freqs
         @test lookup(g, Ti) == times
-        @test lookup(g, UVD.Ant) == geom.stations
+        @test lookup(g, UVD.AntennaName) == geom.stations
         @test lookup(g, UVD.Feed) == 1:2
         # amp/phase recover from the complex gain, no separate accessor needed.
         @test abs.(g) == abs.(CAL.evaluate_gains(ev, θv))
@@ -937,7 +937,7 @@ end
         d = dims(c.params)
         relabeled = CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (d[1:3]..., Ti([9.0]), d[5])))
         @test_throws "Ti axis is [9.0]" gains(CAL.CalibrationSolution(geom, [relabeled]))
-        other_stations = CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (d[1:4]..., UVD.Ant(["A", "B", "Z"]))))
+        other_stations = CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (d[1:4]..., UVD.AntennaName(["A", "B", "Z"]))))
         @test_throws "station `Z` is not among" gains(CAL.CalibrationSolution(geom, [other_stations]))
         short = CAL.SolvedComponent(c.step, c.path, c.component, c.params[Ti(1:1), UVD.Frequency(1:2)])
         @test_throws DimensionMismatch gains(CAL.CalibrationSolution(geom, [short]))
@@ -945,7 +945,7 @@ end
 
     @testset "a component over some stations leaves the others at unit gain" begin
         c = only(solv[:solution, :phase, :delay].components)
-        sub = CAL.SolvedComponent(c.step, c.path, c.component, c.params[UVD.Ant(At(["A", "C"]))])
+        sub = CAL.SolvedComponent(c.step, c.path, c.component, c.params[UVD.AntennaName(At(["A", "C"]))])
         g = parent(gains(CAL.CalibrationSolution(geom, [sub])))
         full = parent(gains(solv[:solution, :phase, :delay]))
         @test all(==(1), g[:, :, 2, :])
@@ -1304,12 +1304,12 @@ end
         θh = collect(1.0:lh.nθ)
         soln = CAL.CalibrationSolution(CAL.materialize(mh, names, geom), lh, geom, θh)
         # The grouped name is one component per signature group; each group's
-        # parameters carry ITS stations on the Ant axis and its own specification.
+        # parameters carry ITS stations on the AntennaName axis and its own specification.
         bp = soln[:solution, :phase, :bandpass]
         @test [c.path for c in bp.components] == [(:phase, :bandpass, :g1), (:phase, :bandpass, :g2)]
         c1, c2 = bp.components
-        @test lookup(c1.params, UVD.Ant) == ["AA"]
-        @test lookup(c2.params, UVD.Ant) == ["BB", "CC"]
+        @test lookup(c1.params, UVD.AntennaName) == ["AA"]
+        @test lookup(c2.params, UVD.AntennaName) == ["BB", "CC"]
         @test vec(parent(c2.params)) == θh[lh.plantree.phase.bandpass.groups.g2.range]
         @test c1.component != c2.component
         # A group's gain is identity off its own stations, and the groups'
@@ -1328,7 +1328,7 @@ end
         ci, ti = [2, 5], [1, 4]
         @test parent(gains(bp, CAL.GeometryWindow(other, ci, ti))) ≈ parent(gains(bp))[ci, ti, :, :]
         # The uniform component still labels with the full station list.
-        @test lookup(only(soln[:solution, :phase, :atmos].components).params, UVD.Ant) == names
+        @test lookup(only(soln[:solution, :phase, :atmos].components).params, UVD.AntennaName) == names
 
         # A station-heterogeneous solution round-trips through `save_solution`.
         path = joinpath(mktempdir(), "het.zarr")

@@ -25,7 +25,7 @@
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 # The bandpass step's `obs` (`:phase` or `:logamp`) bandpass parameters over
-# `(param, Feed, Frequency, Ti, Ant)`.
+# `(param, Feed, Frequency, Ti, AntennaName)`.
 _jb_leaf(sol, obs) = parent(only(sol[:bandpass, obs, :bandpass].components).params)
 
 # Multiply each (scan, baseline, product) of `ps` by `amp·cis(phase)`, indexed
@@ -418,7 +418,7 @@ end
     @testset "a heterogeneous model writes through each station's own block" begin
         # Station 1 alone carries the break; the rest hold one gain over the
         # track, so the two signature groups become two blocks with different
-        # `:Ant` axes and different time segmentations, and the solve has to
+        # `:AntennaName` axes and different time segmentations, and the solve has to
         # place each station in the block that holds it.
         het_model = CAL.GainModel(;
             phase = (; bandpass = bp(CAL.GlobalTime())),
@@ -452,7 +452,7 @@ end
         phase_status = [FP._block_status_array(b, geom) for b in phase_blocks]
         amp_status = [FP._block_status_array(b, geom) for b in amp_blocks]
         for (st, b) in zip(phase_status, phase_blocks)
-            @test lookup(st, FP.Ant) == geom.stations[b.stations]
+            @test lookup(st, FP.AntennaName) == geom.stations[b.stations]
             @test size(st, Ti) == b.plan.shape[4]
             ref = CAL._time_segment_lookup(b.plan, geom)
             @test collect(lookup(st, Ti)) == collect(ref)
@@ -474,7 +474,7 @@ end
         want_amp(a, f, ts) = demean(log.(abs.(gtrue[a, f, ts, :])))
 
         for f in 1:2
-            # The broken station is alone on its block's `:Ant` axis, and both of
+            # The broken station is alone on its block's `:AntennaName` axis, and both of
             # its segments land in that block.
             for ts in 1:2
                 @test phase_blocks[1].θ[1, f, :, ts, 1] ≈ want_phase(1, f, ts) atol = 1.0e-8
@@ -486,7 +486,7 @@ end
                 @test phase_blocks[2].θ[1, f, :, 1, ai] ≈ want_phase(a, f, 1) atol = 1.0e-8
                 @test amp_blocks[2].θ[1, f, :, 1, ai] ≈ want_amp(a, f, 1) atol = 1.0e-8
             end
-            @test phase_status[1][FP.Ant(At("A1")), Feed(f), Ti(2)] == [FP._BP_TRACK_SOLVED]
+            @test phase_status[1][FP.AntennaName(At("A1")), Feed(f), Ti(2)] == [FP._BP_TRACK_SOLVED]
         end
         # The report keys the blocks as `parameters` keys their leaves, and counts
         # only the tracks the blocks have: station A1's two segments and one

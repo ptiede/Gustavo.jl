@@ -223,7 +223,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test gains(sol; Ti = 1) == G[Ti = 1]
         @test gains(sol; Frequency = 2:3, Feed = 2) == G[Frequency = 2:3, Feed = 2]
         f2 = geom.channel_freqs[2]
-        @test gains(sol; Frequency = At(f2), Ant = 2) == G[Frequency = At(f2), Ant = 2]
+        @test gains(sol; Frequency = At(f2), AntennaName = 2) == G[Frequency = At(f2), AntennaName = 2]
         @test gains(sol; Ti = Near(geom.times[end])) == G[Ti = Near(geom.times[end])]
         @test_throws ArgumentError gains(sol; Polarization = 1)
         @test_throws "unknown dimension keyword" gains(sol; Polarization = 1)

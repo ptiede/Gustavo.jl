@@ -818,7 +818,7 @@ end
         sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = sm, prior, tying = ty)
         @test sol isa Gustavo.DimensionalData.AbstractDimStack
         @test (:phase, :covered, :source, :prior) ⊆ keys(sol)     # DimStack layers
-        @test size(sol.phase) == (nant, 2, length(times))        # Ant × Feed × Ti
+        @test size(sol.phase) == (nant, 2, length(times))        # AntennaName × Feed × Ti
         @test count(isfinite, sol.phase) > 0                     # the stage actually ran
         @test all(abs.(filter(isfinite, sol.phase[ref, 1, :])) .< 1.0e-8)   # ref gauge held
     end
@@ -963,14 +963,14 @@ end
     R, W, names = label_sums(rbar, wbar, bl, pols, nant, times)
     sm = FRa.PerTrackAdhocSmoother()
     sol = FRa.solve_adhoc_phasing(R, W, names; smoother = sm)
-    @test lookup(sol.phase, FRa.Ant) == names
+    @test lookup(sol.phase, FRa.AntennaName) == names
     @test lookup(sol.phase, Ti) == times
-    @test lookup(sol.source, FRa.StationPair) == lookup(R, FRa.StationPair)
+    @test lookup(sol.source, FRa.AntennaPair) == lookup(R, FRa.AntennaPair)
     @test lookup(sol.source, FRa.FeedPair) == pols
 
     # Storage order is free, and a view along time solves only its APs.
     perm = FRa.solve_adhoc_phasing(
-        permutedims(R, (Ti, FRa.FeedPair, FRa.StationPair)), permutedims(W, (FRa.FeedPair, Ti, FRa.StationPair)),
+        permutedims(R, (Ti, FRa.FeedPair, FRa.AntennaPair)), permutedims(W, (FRa.FeedPair, Ti, FRa.AntennaPair)),
         names; smoother = sm,
     )
     @test isequal(perm.phase, sol.phase) && isequal(perm.source, sol.source)
@@ -981,7 +981,7 @@ end
     # Stations are matched by name: an extra, unobserved station is uncovered
     # and leaves the others untouched.
     wider = FRa.solve_adhoc_phasing(R, W, vcat(names, "X"); smoother = sm)
-    @test !any(wider.covered[FRa.Ant(At("X"))])
+    @test !any(wider.covered[FRa.AntennaName(At("X"))])
     @test parent(wider.phase)[1:nant, :, :] ≈ parent(sol.phase) atol = 1.0e-12
 
     @test_throws "station `S5` of a station pair is not among the stations" FRa.solve_adhoc_phasing(
@@ -992,10 +992,10 @@ end
     )
     shifted(A) = DimArray(
         OffsetArray(parent(A), 1, 0, 0),
-        (FRa.StationPair(OffsetArray(parent(lookup(A, FRa.StationPair)), 1)), dims(A, FRa.FeedPair), dims(A, Ti)),
+        (FRa.AntennaPair(OffsetArray(parent(lookup(A, FRa.AntennaPair)), 1)), dims(A, FRa.FeedPair), dims(A, Ti)),
     )
     @test_throws "offset arrays are not supported" FRa.solve_adhoc_phasing(shifted(R), shifted(W), names; smoother = sm)
-    @test_throws "must be over StationPair, FeedPair and Ti" FRa.solve_adhoc_phasing(
+    @test_throws "must be over AntennaPair, FeedPair and Ti" FRa.solve_adhoc_phasing(
         DimArray(rbar, (FRa.BaselineID(1:length(bl)), FRa.Polarization(1:4), Ti(times))), W, names,
     )
 end
