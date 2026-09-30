@@ -210,6 +210,15 @@
         # stage (F |> B — no final pass).
         sol_fb = fit([BaselineFringeFit(), Bandpass()], ps; gauge = PinAntenna(1))
         @test haskey(sol_fb, :bandpass)
+
+        # Any real `steer_cells`, and a Float32 station solve, agreeing with the default.
+        @test BaselineFringeFit(steer_cells = 9).steer_cells === 9
+        sol64 = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
+        sol32 = fit(BaselineFringeFit(closure = FP.Stationization(eltype = Float32), steer_cells = 9), ps; gauge = PinAntenna(1))
+        for (c32, c64) in zip(sol32[:fringe].components, sol64[:fringe].components)
+            @test c32.params ≈ c64.params atol = 1.0e-6
+        end
+        @test sol32.steps[:fringe].flagged_ant == sol64.steps[:fringe].flagged_ant
     end
 
     @testset "model compilation: order, gating, duplicate rejection" begin

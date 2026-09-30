@@ -175,6 +175,40 @@ end
     @test r.phase < 1.0e-9
 end
 
+@testset "Stationize: the solve runs in the options' element type" begin
+    @test FR.Stationization() isa FR.Stationization{Float64, FR.SoftL1}
+    o32 = FR.Stationization(eltype = Float32, pfa_max = 1.0e-2, loss = FR.Huber())
+    @test o32 isa FR.Stationization{Float32, FR.Huber}
+    @test o32.pfa_max === 1.0f-2
+    @test o32 == FR.Stationization{Float32}(pfa_max = 1.0e-2, loss = FR.Huber())
+
+    rng = MersenneTwister(0x5712)
+    nant = 5
+    bl = all_baselines(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2), 0.3 .* randn(rng, nant, 2), 0.6)
+    D32 = map(d -> FR.Detection{Float32}(Tuple(d)), D)
+    s64 = stationize(D, bl, pols, nant)
+    for d in (D, D32)
+        s32 = stationize(d, bl, pols, nant; opts = FR.Stationization(eltype = Float32))
+        @test s32.ref_covered == s64.ref_covered
+        @test s32.delay ≈ s64.delay atol = 1.0e-15
+        @test s32.rate ≈ s64.rate atol = 1.0e-9
+        @test s32.phase ≈ s64.phase atol = 1.0e-5
+    end
+
+    layout = perfeed_scan_layout(nant)
+    scans = (FR.detection_stack(D32, named(bl), pols; ti = 1, SCAN_SPREAD...),)
+    slot = Dict(n => i for (i, n) in pairs(STATIONS))
+    for (T, kind, plan) in ((Float32, :delay, layout.plans[2]), (Float64, :phase, layout.plans[1]))
+        r = @inferred FR._solve_kind_cols!(
+            zeros(layout.nθ), scans, [plan], slot, PinAntenna(1),
+            FR.Stationization(eltype = T), Val(kind),
+        )
+        @test r[3] isa Dict{Int, T}
+    end
+end
+
 @testset "Stationize: source cross-hand phase is absorbed, not fitted" begin
     # The source's cross-hand phase enters the phase system as a rigid shift of the
     # feed-2 block, so it is not separable from the instrumental inter-feed offset.

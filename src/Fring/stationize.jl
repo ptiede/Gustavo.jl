@@ -75,11 +75,17 @@ robust_weight(::Huber, u::Real) = u <= 1 ? one(u) : inv(sqrt(u))
 robust_weight(::Cauchy, u::Real) = inv(1 + u)
 
 """
-    Stationization(; pfa_max, weak_sys_scale, phase_rewrap_iters, loss,
-                     loss_scale, irls_iters, systematic_delay, systematic_rate,
+    Stationization(; eltype = Float64, pfa_max, weak_sys_scale, phase_rewrap_iters,
+                     loss, loss_scale, irls_iters, systematic_delay, systematic_rate,
                      systematic_phase, systematic_delay_cross, systematic_rate_cross)
+    Stationization{T}(; kw...)
 
 Options for [`solve_station_systems!`](@ref).
+
+`eltype` (or `T`) is the floating-point type the station systems are built and
+solved in, whatever the detections' own type. The default `Float64` is
+deliberate: weak rows sit ~1e-5 below accepted ones in `√w`, near `Float32`'s
+rank tolerance, and a phase row's epoch offset is taken from absolute times.
 
 `pfa_max` is the solve's one detection threshold, read against each
 detection's family-wise false-alarm probability (see [`Detection`](@ref)).
@@ -114,26 +120,38 @@ parallel-hand values) for error that does not shrink with SNR, such as
 leakage. `weak_sys_scale` multiplies the total σ of an above-threshold row,
 floor included. `phase_rewrap_iters` re-wraps phase residuals exceeding ±π.
 """
-Base.@kwdef struct Stationization
-    pfa_max::Float64 = 1.0e-4
-    weak_sys_scale::Float64 = 1.0e3
-    phase_rewrap_iters::Int = 3
-    loss::AbstractRobustLoss = SoftL1()
-    loss_scale::Float64 = 8.0
-    irls_iters::Int = 5
-    systematic_delay::Float64 = 0.0
-    systematic_rate::Float64 = 0.0
-    systematic_phase::Float64 = 0.0
-    systematic_delay_cross::Float64 = systematic_delay
-    systematic_rate_cross::Float64 = systematic_rate
+struct Stationization{T <: AbstractFloat, L <: AbstractRobustLoss}
+    pfa_max::T
+    weak_sys_scale::T
+    phase_rewrap_iters::Int
+    loss::L
+    loss_scale::T
+    irls_iters::Int
+    systematic_delay::T
+    systematic_rate::T
+    systematic_phase::T
+    systematic_delay_cross::T
+    systematic_rate_cross::T
+end
+
+Stationization(; eltype::Type{<:AbstractFloat} = Float64, kw...) = Stationization{eltype}(; kw...)
+
+function Stationization{T}(;
+        pfa_max = 1.0e-4, weak_sys_scale = 1.0e3, phase_rewrap_iters = 3,
+        loss = SoftL1(), loss_scale = 8.0, irls_iters = 5,
+        systematic_delay = 0.0, systematic_rate = 0.0, systematic_phase = 0.0,
+        systematic_delay_cross = systematic_delay, systematic_rate_cross = systematic_rate,
+    ) where {T}
+    return Stationization{T, typeof(loss)}(
+        pfa_max, weak_sys_scale, phase_rewrap_iters, loss, loss_scale, irls_iters,
+        systematic_delay, systematic_rate, systematic_phase,
+        systematic_delay_cross, systematic_rate_cross,
+    )
 end
 
 # IRLS weight update. `w` (mutated) is the effective weight vector fed to the
 # solver, `w0` the untouched noise-model weights that define the σ scale.
 # Returns whether any weight moved enough to be worth another solve.
-#
-# Kept behind its own function so the loss type — an abstract field on
-# `Stationization` — is resolved once per iteration rather than per row.
 function _irls_weights!(w, w0, loss::AbstractRobustLoss, scale::Real, resid)
     changed = false
     f2 = scale^2
@@ -228,6 +246,9 @@ function _solve_observable!(
         rewrap::Integer,
         seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
     )
+    # `_node` numbers stations and feeds from 1.
+    Base.require_one_based_indexing(vals, cov)
+    isnothing(seed_phase) || Base.require_one_based_indexing(seed_phase)
     T = eltype(val)
     nant = size(vals, 1)
     size(vals) == size(cov) == (nant, 2) ||
@@ -462,9 +483,7 @@ end
 # A detection stack's scan-level provenance: the representative global time
 # index, the epoch (seconds) the phases are referenced to, and the RMS
 # frequency/time spreads the weights need.
-_scan_meta(ti, epoch, freq_rms, time_rms) = Dict{Symbol, Any}(
-    :ti => Int(ti), :epoch => epoch, :freq_rms => freq_rms, :time_rms => time_rms,
-)
+_scan_meta(ti, epoch, freq_rms, time_rms) = (; ti = Int(ti), epoch, freq_rms, time_rms)
 
 # Attach a representative global time index to an existing detection stack (the
 # search's own `search_scan` return, which carries no `:ti` — the caller knows
@@ -480,9 +499,9 @@ _scan_feeds(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, FeedPair)
 _station_slot(slot, name) = get(slot, name) do
     throw(ArgumentError("detection antenna `$name` is not among the stations " * join(keys(slot), ", ")))
 end
-_scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc)[:ti]::Int
-_scan_epoch(sc::AbstractDimStack) = get(DimensionalData.metadata(sc), :epoch, nothing)
-_scan_spread(sc::AbstractDimStack, key::Symbol) = get(DimensionalData.metadata(sc), key, nothing)
+_scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc).ti
+_scan_epoch(sc::AbstractDimStack) = DimensionalData.metadata(sc).epoch
+_scan_spread(sc::AbstractDimStack, key::Symbol) = getproperty(DimensionalData.metadata(sc), key)
 
 """
     solve_station_systems!(θ, scans, components, stations; gauge, opts) -> (ncomp, covered)
@@ -507,8 +526,10 @@ each scan's system is independent and solves exactly as it would alone.
 """
 function solve_station_systems!(
         θ::AbstractVector, scans, components, stations;
-        gauge::AbstractGauge = PinAntenna(1), opts::Stationization = Stationization(),
-    )
+        gauge::AbstractGauge = PinAntenna(1), opts::Stationization{T} = Stationization(),
+    ) where {T}
+    # θ columns are numbered from 1 (`_block_index`).
+    Base.require_one_based_indexing(θ)
     slot = Dict(n => i for (i, n) in pairs(stations))
     ncomp = 0
     # (station, scan-index) pairs the solve constrains. A station with no
@@ -520,7 +541,7 @@ function solve_station_systems!(
     colkeys = Dict{Int, Tuple{Int, Int}}()
     first_kind = true
     rate_plans = [c[1] for c in components if c[2] === :rate]
-    rate_solved = Dict{Int, Float64}()
+    rate_solved = Dict{Int, T}()
     # :rate before :phase — a detection's phase is a constant only at the epoch
     # where every rate coordinate vanishes, so a rate referenced to some other
     # epoch has to be subtracted off the phase rows, and that needs it solved.
@@ -528,7 +549,7 @@ function solve_station_systems!(
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
         nc, cov, solved, keys_ = _solve_kind_cols!(
-            θ, scans, plans, slot, gauge, opts, kind;
+            θ, scans, plans, slot, gauge, opts, Val(kind);
             rate_plans = kind === :phase ? rate_plans : ComponentPlan[],
             rate_solved,
         )
@@ -563,11 +584,14 @@ end
 # `rate_plans`/`rate_solved` are non-empty only for `:phase`, and only matter
 # where a rate component's origin differs from the epoch the phases were
 # measured at — see `_phase_epoch_offset`.
+#
+# `kind` is a type parameter so every kind-dependent choice below is made at
+# compile time; the caller's `Val(kind)` is the only dynamic dispatch.
 function _solve_kind_cols!(
-        θ::AbstractVector, scans, plans, slot, gauge::AbstractGauge, opts::Stationization, kind::Symbol;
-        rate_plans = ComponentPlan[], rate_solved::Dict{Int, Float64} = Dict{Int, Float64}(),
-    )
-    getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
+        θ::AbstractVector, scans, plans, slot, gauge::AbstractGauge, opts::Stationization{T},
+        ::Val{kind}; rate_plans = ComponentPlan[], rate_solved::Dict{Int, T} = Dict{Int, T}(),
+    ) where {T, kind}
+    getval(d) = getfield(d, kind)
     # Phase has no cross-hand variant: its floor is dimensionless (radians), so
     # leakage and field rotation enter it at the same scale on either hand.
     sys_par = kind === :delay ? opts.systematic_delay :
@@ -609,7 +633,7 @@ function _solve_kind_cols!(
     # Rows in θ-column space: each side is the list of θ columns whose sum is
     # that station's value for this observable (+1 on a-side, −1 on b-side).
     rowA = Vector{Int}[]; rowB = Vector{Int}[]
-    rval = Float64[]; rw = Float64[]; rcross = Bool[]; rscan = Int[]
+    rval = T[]; rw = T[]; rcross = Bool[]; rscan = Int[]
     rsta_a = Int[]; rsta_b = Int[]
     # Per row: whether its detection is real (`pfa <= pfa_max`). Only these
     # connect stations into a fringe group; the rest constrain and no more.
@@ -624,10 +648,10 @@ function _solve_kind_cols!(
         epoch === nothing && _require_common_epoch(rate_plans, ti)
         # Per scan, not per row: the band and duration are properties of the
         # observation, so every row of one scan shares this lever arm.
-        σ = kind === :phase ? 1.0 :
-            _require_spread(_scan_spread(sc, spread_key), kind, opts.loss)
-        σν = kind === :delay ? σ : 1.0
-        σt = kind === :rate ? σ : 1.0
+        σ = kind === :phase ? one(T) :
+            T(_require_spread(_scan_spread(sc, spread_key), kind, opts.loss))
+        σν = kind === :delay ? σ : one(T)
+        σt = kind === :rate ? σ : one(T)
         # Stations whose feed-1 phase this scan's parallel rows measure — the
         # set eligible for a nuisance feed-2 offset column. A station observed
         # only on feed 2 (a single-feed receiver, or a feed-1 dropout) gets
@@ -687,7 +711,7 @@ function _solve_kind_cols!(
             push!(
                 rw, _row_weight(
                     _sigma_stat(kind, det.snr, σν, σt), cross ? sys_cross : sys_par,
-                    accept ? 1.0 : opts.weak_sys_scale,
+                    accept ? one(T) : opts.weak_sys_scale,
                 ),
             )
             push!(raccept, accept)
@@ -695,7 +719,7 @@ function _solve_kind_cols!(
             push!(rsta_a, a); push!(rsta_b, b)
         end
     end
-    isempty(rowA) && return (0, Set{Tuple{Int, Int}}(), Dict{Int, Float64}(), Dict{Int, Tuple{Int, Int}}())
+    isempty(rowA) && return (0, Set{Tuple{Int, Int}}(), Dict{Int, T}(), Dict{Int, Tuple{Int, Int}}())
 
     # Robust solve: IRLS over `opts.loss`, rescaling each row's noise-model
     # weight by the loss's derivative at that row's normalized residual (see
@@ -721,7 +745,7 @@ function _solve_kind_cols!(
             )
         end
     end
-    solved = Dict{Int, Float64}()
+    solved = Dict{Int, T}()
     colkeys = Dict{Int, Tuple{Int, Int}}()
     for n in eachindex(node_col)
         node_col[n] == 0 && continue          # nuisance offset: solved, discarded
@@ -747,18 +771,20 @@ end
 #
 # `solved` is this round's rate increment per θ column, which is what the phases
 # of this round, measured on the previous round's residual, contain.
-function _phase_epoch_offset(rate_plans, solved, ti::Integer, epoch, a::Integer, feed::Integer)
-    isempty(rate_plans) && return 0.0
-    off = 0.0
+# Epochs are absolute (s), so their difference is taken in Float64 before it
+# narrows to the solve's element type `T`.
+function _phase_epoch_offset(rate_plans, solved::AbstractDict{Int, T}, ti::Integer, epoch, a::Integer, feed::Integer) where {T}
+    off = zero(T)
+    isempty(rate_plans) && return off
     for plan in rate_plans
         node = _feed_node(plan.tying, feed)
         node == 0 && continue
         seg = plan.tseg_id[ti]
-        Δt = epoch === nothing ? 0.0 : (Float64(epoch) - Float64(plan.tstate[seg]))
-        Δt == 0.0 && continue
+        Δt = isnothing(epoch) ? zero(T) : T(Float64(epoch) - Float64(plan.tstate[seg]))
+        iszero(Δt) && continue
         col = _block_index(plan, node, 1, seg, a)
         col == 0 && continue
-        off += 2π * get(solved, col, 0.0) * Δt
+        off += 2 * T(π) * get(solved, col, zero(T)) * Δt
     end
     return off
 end
@@ -829,6 +855,7 @@ function _solve_tagged_system(
         nuisance::Union{Nothing, AbstractVector{Bool}} = nothing,
         raccept::Union{Nothing, AbstractVector{Bool}} = nothing,
     )
+    T = eltype(rval)
     # Union the columns of each row into one component, from accepted rows only.
     # A detection above `pfa_max` sits at an arbitrary noise peak, so letting it
     # define graph structure would hand the component count, the gauge pins and
@@ -855,8 +882,8 @@ function _solve_tagged_system(
 
     # Total row weight on each node — the score the pin falls back to when a
     # component holds no reference node.
-    nodew = zeros(Float64, nnodes)
-    for i in eachindex(rowA)
+    nodew = zeros(T, nnodes)
+    for i in eachindex(rowA, rowB, rw)
         for n in rowA[i]
             nodew[n] += rw[i]
         end
@@ -875,21 +902,17 @@ function _solve_tagged_system(
     end
     anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
     nrow = length(rowA)
-    A = zeros(Float64, nrow, nnodes)
-    b = zeros(Float64, nrow)
-    w = zeros(Float64, nrow)
-    # `rowA`/`rowB` hold node numbers, so `A[i, n]` is indexed by value — that
-    # is what the annotation still carries.
-    @inbounds for i in axes(A, 1)
+    A = zeros(T, nrow, nnodes)
+    for i in eachindex(rowA, rowB, rval, rw)
         for n in rowA[i]
-            A[i, n] += 1.0
+            A[i, n] += one(T)
         end
         for n in rowB[i]
-            A[i, n] -= 1.0
+            A[i, n] -= one(T)
         end
-        b[i] = rval[i]
-        w[i] = rw[i]
     end
+    b = copy(rval)
+    w = copy(rw)
     Cp = zeros(eltype(A), length(comps), nnodes)
     for (j, cn) in enumerate(comps)
         gauge_row!(view(Cp, j, :), gauge, cn, nodew, station_of, feed_of)
@@ -929,13 +952,14 @@ function _solve_tagged_system(
 
     if rewrap > 0
         xseed = _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes)
+        twopi = 2 * T(π)
         model = A * xseed
         bw = similar(b)
-        @. bw = b + 2π * round((model - b) / (2π))
+        @. bw = b + twopi * round((model - b) / twopi)
         x = solve_system(bw)
         for _ in 1:rewrap
             model = A * x
-            @. bw = b + 2π * round((model - b) / (2π))
+            @. bw = b + twopi * round((model - b) / twopi)
             x = solve_system(bw)
         end
         resid = bw .- A * x
@@ -955,10 +979,10 @@ end
 # feed-2 offset) displace the edge phase by less than a wrap, which is all a
 # branch-picking seed needs; the constrained WLS + re-wrap iterations resolve
 # them exactly.
-function _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes::Integer)
-    x = zeros(Float64, nnodes)
-    adj = [Vector{Tuple{Int, Float64, Float64}}() for _ in 1:nnodes]
-    for i in eachindex(rowA)
+function _seed_tagged(rowA, rowB, rval::AbstractVector{T}, rw, rcross, anchors, nnodes::Integer) where {T}
+    x = zeros(T, nnodes)
+    adj = [Vector{Tuple{Int, T, T}}() for _ in 1:nnodes]
+    for i in eachindex(rowA, rowB, rval, rw, rcross)
         rcross[i] && continue
         na, nb = rowA[i][1], rowB[i][1]
         push!(adj[na], (nb, -rval[i], rw[i]))
@@ -972,8 +996,8 @@ function _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes::Integer)
         (1 <= p <= nnodes && !visited[p]) || continue
         visited[p] = true
         while true
-            best_w = -Inf
-            best_u = 0; best_v = 0; best_add = 0.0
+            best_w = T(-Inf)
+            best_u = 0; best_v = 0; best_add = zero(T)
             for u in eachindex(visited)
                 visited[u] || continue
                 for (v, add, ww) in adj[u]

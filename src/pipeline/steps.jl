@@ -44,12 +44,12 @@ The search measures one delay across the whole band, so this step fits neither
 ionospheric dispersion (`Dispersion`) nor a per-band-group delay (a
 `FreqGroups`-segmented `Delay`), and no shipped step does.
 """
-Base.@kwdef struct BaselineFringeFit{M <: GainModel} <: SolveStep
+Base.@kwdef struct BaselineFringeFit{M <: GainModel, C <: Fring.Stationization, R <: Real} <: SolveStep
     model::M = Fring.default_fringe_terms()
     search::Fring.FringeSearch = Fring.FringeSearch()
-    closure::Fring.Stationization = Fring.Stationization()
+    closure::C = Fring.Stationization()
     rounds::Int = 1
-    steer_cells::Float64 = 9.0
+    steer_cells::R = 9.0
 end
 provides(::BaselineFringeFit) = :fringe
 
@@ -270,8 +270,7 @@ end
 # One scan group's search. Round 1 searches the data; later rounds search the
 # residual of the current θ.
 function _solve_group(
-        s::BaselineFringeFit, ctx::SolveContext, stageB, group;
-        round::Int = 1, local_solve::Bool = _scan_local_solve(s),
+        s::BaselineFringeFit, ctx::SolveContext, stageB, group; round::Int, local_solve::Bool,
     )
     round > 1 && (group = Fring.residual_group(ctx.layout, ctx.θ, group, ctx.geom))
     gc = Fring._GroupCells(group, ctx.geom)
@@ -363,8 +362,7 @@ function _solve_group(
         )
     end
     max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
-    local_solve && return (; ncomp, flags, max_snr, ncells, rows)
-    return (; det, max_snr, ncells, rows)
+    return (; det, ncomp, flags, max_snr, ncells, rows)
 end
 
 # ── Bandpass: accumulate per scan → per-channel/joint solves ─────────────────
