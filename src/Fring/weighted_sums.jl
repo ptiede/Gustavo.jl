@@ -97,10 +97,10 @@ function _station_pairs(pairs, geom::DataGeometry)
     return stations
 end
 
-_station_pair_dim(stations) = StationPair(
+_station_pair_dim(stations) = AntennaPair(
     DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered()),
 )
-_station_dim(stations) = Ant(
+_station_dim(stations) = AntennaName(
     DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered()),
 )
 
@@ -112,7 +112,7 @@ function _add_by_label!(rbar, wbar, wv, ws, stations, feeds, along; autos::Bool 
     for bi in axes(feeds, 2), p in axes(feeds, 1)
         a, b = stations[bi]
         autos || a != b || continue
-        sel = (StationPair(At(stations[bi])), FeedPair(At(feeds[p, bi])), along)
+        sel = (AntennaPair(At(stations[bi])), FeedPair(At(feeds[p, bi])), along)
         cell = (BaselineID(bi), Polarization(p))
         view(rbar, sel...) .+= view(wv, cell...)
         view(wbar, sel...) .+= view(ws, cell...)

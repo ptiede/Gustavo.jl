@@ -39,7 +39,7 @@ applying a solution to a different time or channel sampling. `fseg` is stored
 are the term's own coordinate constants, resolved once against the solve
 geometry ([`freq_coord_state`](@ref)), `nothing` on an axis the term does not
 declare. `priors[a]` is the [`resolve_prior`](@ref)d prior of the plan's `a`-th
-station (the leaf's `:Ant` position): stations share a plan whatever their
+station (the leaf's `:AntennaName` position): stations share a plan whatever their
 priors. The forward map does not read it.
 """
 struct ComponentPlan{
@@ -70,7 +70,7 @@ The resolved plan for a solve: total length `nθ`, the grid dims, the number of
 phase components `nphase`, the flat `plans` list and its `plantree` (the same
 plans nested under the model's names), and `axes` — a tree mirroring the
 model that records each leaf's dimension sizes and the physical axis each
-dimension carries (`:Ant`, `:Feed`, `:node`, `:Ti`, `:Frequency`, `:param`),
+dimension carries (`:AntennaName`, `:Feed`, `:node`, `:Ti`, `:Frequency`, `:param`),
 for labelling a solved θ.
 
 [`evaluate_gains`](@ref)`(layout, θ)` maps a parameter vector over this layout
@@ -164,10 +164,10 @@ end
 # keeps all five axes, size-1 ones included, so the shape is a fixed-rank reshape
 # of the component's θ block run: solve writers and the forward map address any
 # component the same way, and each name retains its own complete
-# `(param, node, Frequency, Ti, Ant)` role set for labelling a wrapped θ.
+# `(param, node, Frequency, Ti, AntennaName)` role set for labelling a wrapped θ.
 function _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tying)
     node_role = tying isa PerFeed ? :Feed : :node
-    return (bl, nfeed, nfseg, ntseg, nant), (:param, node_role, :Frequency, :Ti, :Ant)
+    return (bl, nfeed, nfseg, ntseg, nant), (:param, node_role, :Frequency, :Ti, :AntennaName)
 end
 
 # ── Station-signature canonicalization ───────────────────────────────────────
@@ -175,7 +175,7 @@ end
 # A heterogeneous model (per-station trees differing in components or
 # resolution) canonicalizes before layout: per component name, stations are
 # grouped by identical `(term, Ti, Frequency, Feed)` signature, and each group
-# gets its own rectangular leaf whose `:Ant` axis spans just that group's
+# gets its own rectangular leaf whose `:AntennaName` axis spans just that group's
 # stations. Priors are not part of the signature: each station's plan slot
 # carries its own. θ is ragged across groups; segment lookup is per (station, time)
 # through each group's own plan tables. A name whose single signature covers
@@ -258,7 +258,7 @@ end
 
 The plantree node of one station-heterogeneous component name: one
 [`ComponentPlan`](@ref) per signature group under `groups` (keys `g1, g2, …`,
-in first-station order), each plan's `:Ant` axis spanning just its group.
+in first-station order), each plan's `:AntennaName` axis spanning just its group.
 `stations[i]` holds group `i`'s global station indices; `group_of`/`local_of`
 map a global station index to its `(group, within-group)` position (`0` when
 the station carries this component in no group, contributing nothing). The
@@ -329,7 +329,7 @@ end
 _axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant, geom)
 _axes_node(s::_StationComponents, nant::Int, geom::DataGeometry) = _axes_node(s.comp, nant, geom)
 # A group leaf's axes node additionally records the global station indices its
-# `:Ant` axis spans, so a wrapped θ can be labelled with the group's stations
+# `:AntennaName` axis spans, so a wrapped θ can be labelled with the group's stations
 # rather than the run's full antenna list.
 _axes_node(g::_ComponentGroups, nant::Int, geom::DataGeometry) =
     NamedTuple{_group_keys(length(g.comps))}(
@@ -418,10 +418,10 @@ solver loops over. `path` descends the layout's plantree starting at `:phase`
 or `:logamp` (e.g. `station_blocks(layout, θ, :phase, :bandpass)`); each
 returned block is `(; stations, θ, plan)`:
 
-- `stations` — the global station indices this block's `:Ant` axis spans, in
+- `stations` — the global station indices this block's `:AntennaName` axis spans, in
   axis order;
 - `θ` — the block's shaped leaf, a view into the given `θ` with axes
-  `(param, node, Frequency, Ti, Ant)`;
+  `(param, node, Frequency, Ti, AntennaName)`;
 - `plan` — the block's [`ComponentPlan`](@ref), carrying the group's own
   segment-id tables and coordinates (segment lookup is per station through its
   block's plan).

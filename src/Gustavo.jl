@@ -39,7 +39,7 @@ export UVData, Calibration, Fring
 # Axis names for every array Gustavo stores or returns, so scripts can index
 # and slice leaves without reaching into `UVData` or `DimensionalData`.
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.
-export Polarization, Frequency, Ant, BaselineID, Ti, UVW, Feed, Scan
+export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, Scan
 # Data entry and exit: the set type plus the reader/writer pair for each
 # supported format, so a bare `using Gustavo` spans load → fit → calibrate → write.
 export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi

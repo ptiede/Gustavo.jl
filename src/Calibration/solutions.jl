@@ -11,16 +11,16 @@ using Statistics: mean
 using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions, AbstractDimArray
 using DimensionalData.Lookups: Sampled, Explicit, Intervals, Center
 using OrderedCollections: OrderedDict
-using ..UVData: Frequency, Polarization, BaselineID, Ant, Feed
+using ..UVData: Frequency, Polarization, BaselineID, AntennaName, Feed
 
 """
     SolvedComponent(step, path, component, params)
 
 One fitted gain component: `component` (a [`GainComponent`](@ref): term,
 segmentation, feed tying, prior) and its parameters `params`, a `DimArray`
-over `(param, Feed or node, Frequency, Ti, Ant)`. Each `Frequency`/`Ti`
+over `(param, Feed or node, Frequency, Ti, AntennaName)`. Each `Frequency`/`Ti`
 segment is labeled by the midpoint of the channels or samples it covers, with
-intervals so `Contains(x)` selects the segment covering `x`; `Ant` names the
+intervals so `Contains(x)` selects the segment covering `x`; `AntennaName` names the
 stations that carry the component.
 
 `step` is the solve step that fit it (`:fringe`, `:bandpass`, …) and `path`
@@ -286,7 +286,7 @@ function _applied(sol::CalibrationSolution)
     keys_ = Tuple{Symbol, Vector{String}}[]
     members = Vector{SolvedComponent}[]
     for c in sol.components
-        k = (c.step, String.(collect(lookup(c.params, Ant))))
+        k = (c.step, String.(collect(lookup(c.params, AntennaName))))
         i = findfirst(==(k), keys_)
         if isnothing(i)
             push!(keys_, k)
@@ -357,18 +357,18 @@ function _product_gains(sol::_AppliedSolution, nchan::Int, ntime::Int, args...; 
 end
 
 """
-    gains(sol::CalibrationSolution; Frequency, Ti, Ant, Feed) -> DimArray
+    gains(sol::CalibrationSolution; Frequency, Ti, AntennaName, Feed) -> DimArray
 
 The complex antenna gains of `sol` — a whole solution or any selection of it
 (`sol[:bandpass]`, `sol[:fringe, :phase, :mbd]`, `filter(pred, sol)`) — as a
-`DimArray` over `(Frequency, Ti, Ant, Feed)`: channel frequencies (Hz),
+`DimArray` over `(Frequency, Ti, AntennaName, Feed)`: channel frequencies (Hz),
 integration times (seconds), the geometry's stations, and feed.
 `gain = exp(Σ logamp) · cis(Σ phase)` over the components is the same forward
 map `calibrate` divides by.
 
 The keywords accept anything `DimArray` indexing accepts, under the invariant
 `gains(sol; kw...) == gains(sol)[kw...]`. A `Frequency`/`Ti` selector
-restricts the evaluation to the selected samples; `Ant`/`Feed` slice the
+restricts the evaluation to the selected samples; `AntennaName`/`Feed` slice the
 result.
 """
 gains(sol::CalibrationSolution; kw...) = gains(_applied(sol); kw...)
@@ -378,13 +378,13 @@ function gains(sol::_AppliedSolution; kw...)
     nfeed = 2
     nchan = nchannels(sol.geom)
     ntime = ntimes(sol.geom)
-    d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), Ant(sol.geom.stations), Feed(1:nfeed))
+    d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), AntennaName(sol.geom.stations), Feed(1:nfeed))
     isempty(kw) && return DimArray(_product_gains(sol, nchan, ntime), d)
     for k in keys(kw)
-        k in (:Frequency, :Ti, :Ant, :Feed) || throw(
+        k in (:Frequency, :Ti, :AntennaName, :Feed) || throw(
             ArgumentError(
                 "gains: unknown dimension keyword $(repr(k)); the gain axes are " *
-                    "Frequency, Ti, Ant, Feed."
+                    "Frequency, Ti, AntennaName, Feed."
             )
         )
     end
@@ -435,15 +435,15 @@ _time_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.
     _segment_lookup(geom.times, segment_groups(plan.tseg_id, n))
 
 # The dimension for one axis of a component's parameters, from its role:
-# segment axes over the geometry, `Ant` over station names (a signature
+# segment axes over the geometry, `AntennaName` over station names (a signature
 # group's over just its `stations`), `param`/`node` positional.
 function _role_dim(role::Symbol, n::Int, geom::DataGeometry, names, plan::ComponentPlan; stations = nothing)
     if role === :Frequency
         return Frequency(_frequency_segment_lookup(plan, geom, n))
     elseif role === :Ti
         return Ti(_time_segment_lookup(plan, geom, n))
-    elseif role === :Ant
-        return Ant(isnothing(stations) ? collect(names) : collect(names)[stations])
+    elseif role === :AntennaName
+        return AntennaName(isnothing(stations) ? collect(names) : collect(names)[stations])
     elseif role === :Feed
         return Feed(1:n)
     else
@@ -738,7 +738,7 @@ function gains(sol::_AppliedSolution, win::GeometryWindow; time_span = nothing)
     return DimArray(
         g, (
             Frequency(win.geom.channel_freqs[win.chan_idx]), Ti(win.geom.times[win.ti_idx]),
-            Ant(sol.geom.stations), Feed(1:2),
+            AntennaName(sol.geom.stations), Feed(1:2),
         ),
     )
 end

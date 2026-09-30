@@ -62,14 +62,14 @@ Define a struct and:
     Gustavo.Fring.apply_adhoc!(sm::MySmoother, phase, track_w; obs, anchor, priors, resolved)
 
 the single dispatch point; mutates `phase` in place. `phase` and `track_w` are
-`DimArray`s over `(Ant, FeedNode, Ti)`: each (station, feed node) phase track and
+`DimArray`s over `(AntennaName, FeedNode, Ti)`: each (station, feed node) phase track and
 its per-AP coherent weight, `Ti` carrying the AP epochs in seconds. `obs` holds the
 SNR-gated, source-corrected observations: `obs.val`, `obs.w` and the gate
-`obs.mask` over `(StationPair, FeedPair, Ti)`, and `obs.nodes`, each cell's
+`obs.mask` over `(AntennaPair, FeedPair, Ti)`, and `obs.nodes`, each cell's
 `((a, na), (b, nb))` — the station index and feed node at either end; `anchor`
 is the station the per-AP solves are pinned to. `priors[a]` is station `a`'s
 prior along time: `nothing`, a [`RandomWalkPrior`](@ref) or an
-[`OUPrior`](@ref). `resolved`, over `(Ant, FeedNode)`, receives the prior each
+[`OUPrior`](@ref). `resolved`, over `(AntennaName, FeedNode)`, receives the prior each
 track was fit under, its hyperparameters fixed. The default `apply_adhoc!` fits
 each (station, node) track that carries data independently through the
 per-track hook, so a smoother that acts track by track implements only
@@ -293,7 +293,7 @@ end
 
 # Default: fit each (station, node) track that carries data through the per-track hook.
 function apply_adhoc!(sm::AbstractAdhocSmoother, phase, track_w; obs, anchor, priors, resolved)
-    for a in axes(phase, Ant), f in axes(phase, FeedNode)
+    for a in axes(phase, AntennaName), f in axes(phase, FeedNode)
         track = view(phase, a, f, :)
         w = view(track_w, a, f, :)
         any(k -> _shape_usable(track[k], w[k]), eachindex(track, w)) || continue
@@ -427,7 +427,7 @@ function _cell_nodes(rbar, stations, tying)
     station(n) = get(slot, n) do
         throw(ArgumentError("station `$n` of a station pair is not among the stations " * join(stations, ", ")))
     end
-    sps = DimensionalData.dims(rbar, StationPair)
+    sps = DimensionalData.dims(rbar, AntennaPair)
     fps = DimensionalData.dims(rbar, FeedPair)
     ends = [
         ((station(sa), _feed_node(tying, fa)), (station(sb), _feed_node(tying, fb)))
@@ -440,7 +440,7 @@ end
 # feeds parameterized by the component.
 _solvable(((a, na), (b, nb))) = a != b && na != 0 && nb != 0
 
-# The seed pass's observations over `rbar`'s `(StationPair, FeedPair, Ti)`: each
+# The seed pass's observations over `rbar`'s `(AntennaPair, FeedPair, Ti)`: each
 # cell's phase `angle(r)`, weighted by its coherent SNR² and gated at
 # `snr_floor2`. Every correlation product contributes: a cross-hand cell's extra
 # phase is carried by its own free source term, so no product needs the
@@ -532,7 +532,7 @@ _source_corrected(obs, x, keep) = (;
 function _solve_gp_joint!(
         phase, track_w, obs, anchor::Integer, sm::JointKalmanSmoother, priors, resolved,
     )
-    nant = size(phase, Ant)
+    nant = size(phase, AntennaName)
     times = parent(lookup(phase, Ti))
     # Compute type flows from the data, not from the smoother's field types.
     T = float(promote_type(eltype(phase), eltype(track_w), eltype(times)))
@@ -820,16 +820,16 @@ carries the source's EVPA, D-terms, and closure phase, so the station tracks
 are unbiased by source structure.
 
 `rbar` is `Σ_chan w·V_residual` and `wbar` is `Σ_chan w`, both `DimArray`s
-over `StationPair`, `FeedPair` and `Ti` in any storage order, with the same
+over `AntennaPair`, `FeedPair` and `Ti` in any storage order, with the same
 lookups: station pairs labeled by station names, feed pairs by feed-index
 pairs, and `Ti` by the AP epochs in seconds. The coherent SNR² is
 `|rbar|²/wbar`. `stations` names the stations; each one's position in it is
 its station index.
 
-Returns a `DimStack`: `:phase` (`Ant(stations) × Feed × Ti`) is the
+Returns a `DimStack`: `:phase` (`AntennaName(stations) × Feed × Ti`) is the
 per-(station, feed) adhoc phase in radians, `NaN` where unsolved;
-`:covered` marks the solved cells; `:source` (`StationPair × FeedPair`) is
-the fitted source phase, `NaN` where unidentifiable; `:prior` (`Ant(stations)
+`:covered` marks the solved cells; `:source` (`AntennaPair × FeedPair`) is
+the fitted source phase, `NaN` where unidentifiable; `:prior` (`AntennaName(stations)
 × Feed`) is the prior each track was fit under, its hyperparameters resolved,
 `nothing` where the track had no prior or no data.
 
@@ -870,10 +870,10 @@ function solve_adhoc_phasing(
         tying::AbstractFeedTying = PerFeed(),
         prior = default_adhoc_prior(),
     )
-    cell_dims = (StationPair, FeedPair, Ti)
+    cell_dims = (AntennaPair, FeedPair, Ti)
     all(d -> DimensionalData.hasdim(rbar, d), cell_dims) || throw(
         ArgumentError(
-            "`rbar` must be over StationPair, FeedPair and Ti; got " *
+            "`rbar` must be over AntennaPair, FeedPair and Ti; got " *
                 join(DimensionalData.name(DimensionalData.dims(rbar)), ", "),
         ),
     )
@@ -914,7 +914,7 @@ function _station_priors(priors::AbstractVector, stations)
 end
 
 # Behind a function barrier: the working type comes from a runtime option.
-# `rbar`/`wbar` are stored `(StationPair, FeedPair, Ti)`, as is every derived array.
+# `rbar`/`wbar` are stored `(AntennaPair, FeedPair, Ti)`, as is every derived array.
 function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tying, priors)
     T = real(eltype(rbar))
     nant = length(stations)
@@ -922,7 +922,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
     times = parent(lookup(rbar, Ti))
 
     # Solved on the (station, feed node) graph; expanded back onto the feed axis at the end.
-    node_axes = (Ant(stations), FeedNode(1:2), DimensionalData.dims(rbar, Ti))
+    node_axes = (AntennaName(stations), FeedNode(1:2), DimensionalData.dims(rbar, Ti))
     phase = fill(T(NaN), node_axes)
     covered = DimArray(falses(nant, 2, nap), node_axes)
     # Track per-(station, feed node) coherent weight for smoothing and the demean.
@@ -1075,7 +1075,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
     # indexes: feeds sharing a node get identical tracks (so a `SharedFeeds` adhoc
     # contributes exactly zero inter-feed phase), and a feed the component does not
     # parameterize (node 0) stays NaN/uncovered.
-    feed_axes = (Ant(stations), Feed(1:2), DimensionalData.dims(rbar, Ti))
+    feed_axes = (AntennaName(stations), Feed(1:2), DimensionalData.dims(rbar, Ti))
     phase_out = fill(T(NaN), feed_axes)
     covered_out = DimArray(falses(nant, 2, nap), feed_axes)
     prior_out = DimArray(Union{Nothing, AbstractPrior}[nothing for _ in 1:nant, _ in 1:2], feed_axes[1:2])
@@ -1125,7 +1125,7 @@ parallel). The feed tying and the priors come from `adhoc_plan`, so the number
 of phase nodes per station is the model's choice and needs no separate
 argument.
 
-Returns the prior each track was fit under, over `(Ant, Feed, Ti)` with the
+Returns the prior each track was fit under, over `(AntennaName, Feed, Ti)` with the
 scan's first AP epoch as its one `Ti` value.
 """
 function adhoc_scan!(
@@ -1142,7 +1142,7 @@ function adhoc_scan!(
         tseg = adhoc_plan.tseg_id[gti]
         at_t = view(as.phase, Ti(At(geom.times[gti])))
         for (ant, name) in pairs(geom.stations), feed in lookup(at_t, Feed)
-            val = at_t[Ant(At(name)), Feed(At(feed))]
+            val = at_t[AntennaName(At(name)), Feed(At(feed))]
             isfinite(val) || continue
             node = _feed_node(adhoc_plan.tying, feed)
             node == 0 && continue

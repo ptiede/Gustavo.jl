@@ -299,7 +299,7 @@ function UVData.plot_gain_solutions(parent, gains, data::UVSet; quantity = :phas
         end
 
         for (ax, pi) in zip(axes_row, pol_idx)
-            # gains layout: (Frequency, Ti, Ant, Pol). Pull each Ti slice
+            # gains layout: (Frequency, Ti, AntennaName, Pol). Pull each Ti slice
             # — yields a length-nchan vector for the (ai, pi) site/pol.
             # `Base.parent` qualified because `parent` is the
             # GridPosition argument above; on plain Arrays it's identity.

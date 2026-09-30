@@ -100,7 +100,7 @@ requires the feed-common (`SharedFeeds`) model). The one-argument form takes
 the smoother and keeps the default model.
 
 The step's info holds `nscans` and `priors`: the prior each (station, feed)
-track was fit under, its hyperparameters resolved, over `(Ant, Feed, Ti)` with
+track was fit under, its hyperparameters resolved, over `(AntennaName, Feed, Ti)` with
 one `Ti` value per scan, its first AP epoch.
 """
 Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: SolveStep

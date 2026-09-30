@@ -1,17 +1,16 @@
-export Polarization, Frequency, Ant, BaselineID, Ti, UVW, Feed, FeedNode, Scan, StationPair, FeedPair
+export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, FeedNode, Scan, AntennaPair, FeedPair
 
 using DimensionalData: @dim, TimeDim, Ti
-# The frequency, baseline and polarization axes are MSv4's, not Gustavo's own:
+# The frequency, baseline, polarization and antenna axes are MSv4's, not Gustavo's own:
 # `@dim` defines a method on `DimensionalData.name2dim`, so two packages
 # declaring a dimension of the same name overwrite each other and neither can
 # precompile.
-using XRadio: BaselineID, Frequency, Polarization
-@dim Ant "Antenna Index"
+using XRadio: BaselineID, Frequency, Polarization, AntennaName
 @dim UVW "UVW "
 @dim Feed "Feed (receptor index)"
 @dim FeedNode "Feed node (one phase unknown, shared by the feeds a tying maps to it)"
 @dim Scan "Scan index"
-@dim StationPair "Station pair (antenna names)"
+@dim AntennaPair "Antenna pair (antenna names)"
 @dim FeedPair "Feed pair (receptor indices)"
 
 # The `(Frequency, Ti)` plane of layer `L` at baseline `bi` and product `p`, in

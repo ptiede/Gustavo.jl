@@ -210,7 +210,7 @@ end
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 
 # The two ends of a node-system edge on the (station, feed) graph. A cell of a
-# `(StationPair, FeedPair)` system observes `φ(a, na) − φ(b, nb)`, where
+# `(AntennaPair, FeedPair)` system observes `φ(a, na) − φ(b, nb)`, where
 # `nodes[cell] = ((a, na), (b, nb))` gives each end's station index and phase
 # node — `_feed_node(tying, feed)` of the product's feeds, so the node equals the
 # feed only under `PerFeed`. An edge with `na != nb` is cross-hand: the only kind
@@ -219,7 +219,7 @@ _edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nan
 
 # Solve one observable's WLS system on the (station, feed) graph into `vals`
 # and `cov`, each `(nant, 2)`: the node values, `NaN` where unsolved, and which
-# nodes were solved. `val`, `w`, `mask` and `nodes` share their `(StationPair,
+# nodes were solved. `val`, `w`, `mask` and `nodes` share their `(AntennaPair,
 # FeedPair)` axes; each cell with `mask` set is one observation `val` of its edge
 # (see `_edge`) with weight `w`. The system is solved in `val`'s element type.
 # Returns the number of connected components.
