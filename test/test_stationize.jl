@@ -632,7 +632,12 @@ end
         end
     end
     @test worst < 1.0e-13
-    @test ncomp == 1                          # global offset ties everything into one component
+    # One gauged component per scan: the global offset ties each scan's feeds
+    # but not the scans' levels, so the reference reads 0 in both.
+    @test ncomp == 2
+    for ti in (1, 4)
+        @test θ[plan_off1(d_sf)[ref, 1, d_sf.tseg_id[ti], 1]] == 0
+    end
 end
 
 # Robust loss on the PHASE system, where `w = snr²` is a true inverse variance

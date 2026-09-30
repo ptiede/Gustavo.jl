@@ -443,7 +443,10 @@ function _solve_kind_cols!(
 
     # Rows in θ-column space: each side is the list of θ columns whose sum is
     # that station's value for this observable (+1 on a-side, −1 on b-side).
-    rowA = Vector{Int}[]; rowB = Vector{Int}[]
+    # `rlinks` pairs each column with the same component's column on the other
+    # side, and a nuisance column with its side's model column; they define the
+    # gauge components (see `_solve_tagged_system`).
+    rowA = Vector{Int}[]; rowB = Vector{Int}[]; rlinks = Vector{Tuple{Int, Int}}[]
     rval = T[]; rw = T[]; rcross = Bool[]; rscan = Int[]
     rsta_a = Int[]; rsta_b = Int[]
     # Per row: whether its detection is real (`pfa <= pfa_max`). Only these
@@ -471,7 +474,7 @@ function _solve_kind_cols!(
         # the reference station's feed-2 frame — the parallel hands cannot
         # separate such a station's phase from the offsets' common mode, and
         # the nuisance-block gauge (see `_solve_tagged_system`) pins that mode
-        # at the reference rather than leaving it to the min-norm completion.
+        # at the reference.
         f1 = Set{Int}()
         if feedblind
             for bi in eachindex(bl_pairs), p in eachindex(feeds)
@@ -496,7 +499,7 @@ function _solve_kind_cols!(
             # the `rel_delay` common mode.
             feedblind && cross && continue
             accept = det.pfa <= opts.pfa_max
-            nsA = Int[]; nsB = Int[]
+            nsA = Int[]; nsB = Int[]; links = Tuple{Int, Int}[]
             for plan in plans
                 na = _feed_node(plan.tying, fa)
                 ca = na == 0 ? 0 : _block_index(plan, na, 1, plan.tseg_id[ti], a)
@@ -504,16 +507,21 @@ function _solve_kind_cols!(
                 nb = _feed_node(plan.tying, fb)
                 cb = nb == 0 ? 0 : _block_index(plan, nb, 1, plan.tseg_id[ti], b)
                 cb != 0 && push!(nsB, getnode(cb, b, fb, sidx))
+                ca != 0 && cb != 0 && push!(links, (last(nsA), last(nsB)))
             end
             (isempty(nsA) || isempty(nsB)) && continue
             # The nuisance column joins the side after the model columns, so a
             # row side's first entry is always a model column (`_seed_tagged`
             # reads sides that way).
-            if feedblind
-                fa == 2 && a in f1 && push!(nsA, nuisnode(sidx, a))
-                fb == 2 && b in f1 && push!(nsB, nuisnode(sidx, b))
+            if feedblind && fa == 2 && a in f1
+                push!(nsA, nuisnode(sidx, a))
+                push!(links, (first(nsA), last(nsA)))
             end
-            push!(rowA, nsA); push!(rowB, nsB)
+            if feedblind && fb == 2 && b in f1
+                push!(nsB, nuisnode(sidx, b))
+                push!(links, (first(nsB), last(nsB)))
+            end
+            push!(rowA, nsA); push!(rowB, nsB); push!(rlinks, links)
             push!(
                 rval, getval(det) -
                     _phase_epoch_offset(rate_plans, rate_solved, ti, epoch, a, fa) +
@@ -541,18 +549,13 @@ function _solve_kind_cols!(
     # every IRLS pass sees a converged branch assignment. Reversing them would
     # downweight rows whose residual is still a wrap away from its final value.
     w = copy(rw)
-    nuisance = node_col .== 0
-    x, ncomp, resid = _solve_tagged_system(
-        rowA, rowB, rval, w, rcross, length(node_col),
-        node_feed, node_station, node_scan, gauge; rewrap, nuisance, raccept,
-    )
+    rows = (; A = rowA, B = rowB, links = rlinks, val = rval, cross = rcross, accept = raccept)
+    nodes = (; feed = node_feed, station = node_station, scan = node_scan, nuisance = node_col .== 0)
+    x, ncomp, resid = _solve_tagged_system(rows, w, nodes, gauge, kind; rewrap)
     if !(opts.loss isa LeastSquares)
         for _ in 1:max(opts.irls_iters, 0)
             _irls_weights!(w, rw, opts.loss, opts.loss_scale, resid) || break
-            x, ncomp, resid = _solve_tagged_system(
-                rowA, rowB, rval, w, rcross, length(node_col),
-                node_feed, node_station, node_scan, gauge; rewrap, nuisance, raccept,
-            )
+            x, ncomp, resid = _solve_tagged_system(rows, w, nodes, gauge, kind; rewrap)
         end
     end
     solved = Dict{Int, T}()
@@ -650,59 +653,42 @@ function _covered_stations(rsta_a, rsta_b, rscan, raccept)
 end
 
 # Constrained WLS over a tagged node graph, the column-space generalization of
-# `_solve_observable!`. `node_feed`/`node_station`/`node_scan` tag each local node
-# (feed 0 = shared by both feeds; scan 0 = global column) so the gauge reproduces
-# `_solve_observable!`'s tie-breaks in the per-scan case. Rows may touch more than
-# one column per side, such as a feed-common column plus a global feed-offset
-# column. After the per-component gauge rows, any residual gauge freedom — the
-# per-scan absolute level once scans are globally coupled — is removed by a
-# minimum-norm null-space pin, so the engine is well-posed for any model
-# `plan_parameters` can flatten, with no model-specific gauge code. `rcross`
-# marks cross-hand rows, which are excluded from the unwrap seed's spanning tree.
-function _solve_tagged_system(
-        rowA, rowB, rval, rw, rcross, nnodes,
-        node_feed, node_station, node_scan, gauge::AbstractGauge; rewrap::Integer,
-        nuisance::AbstractVector{Bool}, raccept::AbstractVector{Bool},
-    )
-    T = eltype(rval)
-    # Union the columns of each row into one component, from accepted rows only.
-    # A detection above `pfa_max` sits at an arbitrary noise peak, so letting it
-    # define graph structure would hand the component count, the gauge pins and
-    # the unwrap anchors to noise. Acceptance is a hard connectivity cut; weak
-    # rows constrain the fit, σ-inflated, and no more. A node reached only by
-    # weak rows joins no component and gets no gauge row: its value is determined
-    # relative to the accepted structure by those weak rows, or for a genuinely
-    # isolated island falls to the min-norm completion. `_covered_stations`
-    # excludes it from coverage either way.
-    edges = Tuple{Int, Int}[]
-    for i in eachindex(rowA, rowB, raccept)
-        raccept[i] || continue
-        ns = vcat(rowA[i], rowB[i])
-        for k in 2:length(ns)
-            push!(edges, (ns[1], ns[k]))
-        end
-    end
-    compid, ncomp, _ = connected_components(nnodes, edges)
+# `_solve_observable!`. Row `i` observes `Σ x[rows.A[i]] − Σ x[rows.B[i]]` with
+# weight `w[i]`; `nodes` tags each local node with its station, feed (0 = shared
+# by both feeds), scan (0 = a column spanning scans) and whether it is a
+# nuisance offset. `rows.cross` marks cross-hand rows, which are excluded from
+# the unwrap seed's spanning tree. Returns the solution, the number of gauged
+# components the accepted rows form, and the residuals.
+#
+# The gauge: `rows.links` join each column to the same component's column on
+# the other side of a row (and a nuisance column to its side's model column).
+# A component of those links whose model columns can all shift together without
+# changing any row it must hold is a gauge freedom, and gets one constraint row
+# from `gauge`. That gives one per scan for per-scan columns, however columns
+# spanning scans couple them, and one for a feed-2 offset that no cross-hand
+# row fixes. Any other freedom is an error.
+function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol; rewrap::Integer)
+    T = eltype(rows.val)
+    nnodes = length(nodes.feed)
+    compid, ncomp, nfree = _gauge_components(rows, nodes)
 
-    # Node tags: feed 0 marks a column shared by both feeds, so anything other
-    # than 2 counts as feed-1/shared for gauge purposes.
-    station_of(n) = node_station[n]
-    feed_of(n) = node_feed[n]
+    station_of(n) = nodes.station[n]
+    feed_of(n) = nodes.feed[n]
 
     # Total row weight on each node — the score the pin falls back to when a
     # component holds no reference node.
-    nodew = _node_weights(nnodes, zip(rowA, rowB), rw)
+    nodew = _node_weights(nnodes, zip(rows.A, rows.B), w)
 
-    # One constraint row per component, from `gauge`; `anchors` names a real node
-    # per component for the phase-unwrap seed.
-    comps = [[n for n in eachindex(compid) if compid[n] == c] for c in 1:ncomp]
+    # One constraint row per gauged component; `anchors` names a real node per
+    # component for the phase-unwrap seed.
+    comps = [[n for n in eachindex(compid) if compid[n] == c] for c in 1:nfree]
     anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
-    A = zeros(T, length(rowA), nnodes)
-    for i in eachindex(rowA, rowB)
-        for n in rowA[i]
+    A = zeros(T, length(rows.A), nnodes)
+    for i in eachindex(rows.A, rows.B)
+        for n in rows.A[i]
             A[i, n] += one(T)
         end
-        for n in rowB[i]
+        for n in rows.B[i]
             A[i, n] -= one(T)
         end
     end
@@ -713,21 +699,15 @@ function _solve_tagged_system(
     # Nuisance-block gauge: the nuisance offset columns of one scan carry a
     # common-mode freedom the data cannot fix — shifting them together, along
     # with the shared column of every station observed only on feed 2, changes
-    # no row. Left to the min-norm completion it would land partly on those
-    # stations' shared columns, i.e. in the applied correction, so it is pinned
-    # like any other gauge freedom: one row per (component, scan) group of
-    # nuisance nodes, through `gauge`, which prefers the ranked reference — a
-    # feed-2-only station's phase is thereby referenced to the reference
-    # station's feed-2 frame, deterministically.
-    if any(nuisance)
+    # no row. It is pinned like any other gauge freedom: one row per
+    # (component, scan) group of nuisance nodes, through `gauge`, which prefers
+    # the ranked reference — a feed-2-only station's phase is thereby referenced
+    # to the reference station's feed-2 frame, deterministically.
+    if any(nodes.nuisance)
         groups = Dict{Tuple{Int, Int}, Vector{Int}}()
-        for n in eachindex(nuisance)
-            nuisance[n] || continue
-            # A nuisance node outside every accepted component carries no
-            # common-mode freedom worth pinning; its weak rows (or the
-            # min-norm completion) settle it.
-            compid[n] == 0 && continue
-            push!(get!(groups, (compid[n], node_scan[n]), Int[]), n)
+        for n in eachindex(nodes.nuisance)
+            (nodes.nuisance[n] && compid[n] != 0) || continue
+            push!(get!(groups, (compid[n], nodes.scan[n]), Int[]), n)
         end
         keyorder = sort!(collect(keys(groups)))
         Cn = zeros(T, length(keyorder), nnodes)
@@ -736,22 +716,79 @@ function _solve_tagged_system(
         end
         Cp = vcat(Cp, Cn)
     end
-    # Min-norm completion: fix any gauge freedom the per-component rows leave
-    # (the null space of [A; Cp]). Empty for a per-scan model; non-trivial once a
-    # global column couples scans. Taken from the QR's square `R`, which has the
-    # same singular values, instead of an SVD of the tall matrix itself.
-    nb = nullspace(qr(vcat(A, Cp)).R)
-    C = size(nb, 2) > 0 ? vcat(Cp, permutedims(nb)) : Cp
-    solve_system = ConstrainedWLS(A, rw, C)
+    solve_system = try
+        ConstrainedWLS(A, w, Cp)
+    catch err
+        err isa ArgumentError || rethrow()
+        throw(
+            ArgumentError(
+                "the $kind station system is not determined after its gauge ($(err.msg)): " *
+                    "the detections leave a combination of the model's columns free, such " *
+                    "as two components of this observable that every detection sees only " *
+                    "as their sum.",
+            ),
+        )
+    end
 
     if rewrap > 0
-        x, bw = _rewrap_solve(solve_system, A, rval, _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes), rewrap)
+        x, bw = _rewrap_solve(solve_system, A, rows.val, _seed_tagged(rows, w, anchors, nnodes), rewrap)
         resid = bw .- A * x
     else
-        x = solve_system(rval)
-        resid = rval .- A * x
+        x = solve_system(rows.val)
+        resid = rows.val .- A * x
     end
     return x, ncomp, resid
+end
+
+# The gauge components of a tagged system, numbered so that the gauged ones come
+# first: `compid` (0 for a node in none), the number of gauged components the
+# accepted rows form, and the number gauged in all.
+#
+# Components are built from accepted rows only. A detection above `pfa_max`
+# sits at an arbitrary noise peak, so letting it define graph structure would
+# hand the component count, the gauge pins and the unwrap anchors to noise.
+# Acceptance is a hard connectivity cut: where weak rows bridge two accepted
+# components, each keeps its own gauge row, and those rows fix the offset
+# between them. Nodes no accepted row links form islands over all rows, gauged
+# the same way; `_covered_stations` excludes them from coverage.
+function _gauge_components(rows, nodes)
+    nnodes = length(nodes.feed)
+    accepted = (l for i in eachindex(rows.links, rows.accept) if rows.accept[i] for l in rows.links[i])
+    compid, nacc, _ = connected_components(nnodes, accepted)
+    unlinked = (l for ls in rows.links for l in ls if compid[l[1]] == 0 && compid[l[2]] == 0)
+    island, nisl, _ = connected_components(nnodes, unlinked)
+    for n in eachindex(compid, island)
+        compid[n] == 0 && island[n] != 0 && (compid[n] = nacc + island[n])
+    end
+    free = _shift_invariant(compid, nacc + nisl, rows, nodes.nuisance, c -> c > nacc)
+    # Renumber: gauged accepted components, then gauged islands, then the rest.
+    order = [findall(c -> free[c] && c <= nacc, 1:(nacc + nisl)); findall(c -> free[c] && c > nacc, 1:(nacc + nisl)); findall(!, free)]
+    rank = invperm(order)
+    for n in eachindex(compid)
+        compid[n] == 0 || (compid[n] = rank[compid[n]])
+    end
+    return compid, count(c -> free[c], 1:nacc), count(free)
+end
+
+# Whether shifting each component's model columns by a common constant leaves
+# every row unchanged that the component must hold: accepted rows for all, and
+# weak rows too for the components `all_rows(c)` selects.
+function _shift_invariant(compid, ncomp::Integer, rows, nuisance, all_rows)
+    free = trues(ncomp)
+    tally = Dict{Int, Int}()
+    for i in eachindex(rows.A, rows.B, rows.accept)
+        empty!(tally)
+        for n in rows.A[i]
+            (compid[n] == 0 || nuisance[n]) || (tally[compid[n]] = get(tally, compid[n], 0) + 1)
+        end
+        for n in rows.B[i]
+            (compid[n] == 0 || nuisance[n]) || (tally[compid[n]] = get(tally, compid[n], 0) - 1)
+        end
+        for (c, k) in tally
+            k == 0 || !(rows.accept[i] || all_rows(c)) || (free[c] = false)
+        end
+    end
+    return free
 end
 
 # The spanning-tree phase seed in local-node space: each parallel-hand row is a
@@ -759,9 +796,12 @@ end
 # row construction. Further columns on a side (a global feed offset, a nuisance
 # feed-2 offset) are left out of the seed; the constrained WLS and the re-wrap
 # iterations solve for them.
-function _seed_tagged(rowA, rowB, rval::AbstractVector{T}, rw, rcross, anchors, nnodes::Integer) where {T}
-    parallel = ((rowA[i][1], rowB[i][1], rval[i], rw[i]) for i in eachindex(rowA, rowB, rval, rw, rcross) if !rcross[i])
-    return _prim_seed(T, nnodes, parallel, anchors)
+function _seed_tagged(rows, w, anchors, nnodes::Integer)
+    parallel = (
+        (rows.A[i][1], rows.B[i][1], rows.val[i], w[i]) for
+            i in eachindex(rows.A, rows.B, rows.val, w, rows.cross) if !rows.cross[i]
+    )
+    return _prim_seed(eltype(rows.val), nnodes, parallel, anchors)
 end
 
 # Total weight of the rows touching each of `nnodes` nodes. Each row is a pair of

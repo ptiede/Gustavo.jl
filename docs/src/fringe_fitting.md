@@ -407,6 +407,19 @@ is supplied by an
 [`ZeroSumPhase`](@ref Gustavo.Calibration.ZeroSumPhase) constrains a weighted
 sum of the nodes.
 
+When a station's value is a sum of several components, such as a per-scan
+delay plus a feed-2 offset, the components are formed per model column: a
+detection links each column to the same component's column at the other
+station. A component receives a constraint row when shifting all of its
+columns by a constant leaves every accepted detection unchanged. Per-scan
+columns therefore give one constraint per scan, even when a column spanning
+scans (a track-global feed-2 offset) couples them, and a feed-2 offset receives
+its own constraint only when no accepted cross-hand detection determines it.
+Under `PinAntenna` the reference station then reads zero in every scan, and its
+feed-2 offset reads zero when the data carry no cross hands. Any other
+undetermined combination of columns, such as two feed-2 offsets that every
+detection sees only as their sum, is an error.
+
 The constraint changes no gauge-invariant quantity: baseline differences,
 closure phases and the applied calibration are unaffected. It does determine
 which per-station values are reported, and hence whether values from different

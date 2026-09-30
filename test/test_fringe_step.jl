@@ -10,6 +10,26 @@
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
+@testset "station gauge: every scan pinned, undetermined columns throw" begin
+    ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
+    at_ref(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params[XRadio.AntennaName(At("A1"))]
+
+    # A track-global inter-feed delay couples the scans without moving the gauge.
+    glob = BaselineFringeFit(; model = FP.default_fringe_terms(; rel_time = CAL.GlobalTime()))
+    @test all(iszero, at_ref(fit(glob, ps; gauge = PinAntenna(1)), :mbd))
+
+    # Without cross hands the reference's feed-2 delay offset is itself a gauge.
+    psp, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64, polarizations = ["RR", "LL"])
+    @test all(iszero, at_ref(fit(BaselineFringeFit(), psp; gauge = PinAntenna(1)), :rel_delay))
+
+    # Two feed-2 delays that every detection sees only as their sum.
+    twice = merge(
+        FP.default_fringe_terms();
+        phase = (; rel_delay_global = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
+    )
+    @test_throws "delay station system is not determined" fit(BaselineFringeFit(; model = twice), ps; gauge = PinAntenna(1))
+end
+
 @testset "BaselineFringeFit step (new engine)" begin
     @testset "fringe blocks invariant under later stages" begin
         ps, _ = _build_fringe_ps()
