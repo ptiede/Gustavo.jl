@@ -94,7 +94,9 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
     @testset "a step fit on a scan subset, carried into the full fit" begin
         nant, nspw, nchan = 4, 2, 8
         bp = [a == 1 ? 0.0 : 0.3 * sin(0.4 * c + a + f) for a in 1:nant, f in 1:2, c in 1:(nspw * nchan)]
-        ps, _ = _build_fringe_ps(; nant, nspw, nchan, nscans = 3, bandpass = bp)
+        # ComplexF64: a Float32 search's delays leave ~3e-5 rad of bandpass
+        # difference, above the tolerance below.
+        ps, _ = _build_fringe_ps(; nant, nspw, nchan, nscans = 3, bandpass = bp, eltype = ComplexF64)
         sub = XRadio.query(ps; scan_name = "3")
         gauge = PinAntenna(1)
         fr = fit(BaselineFringeFit(), ps; gauge)

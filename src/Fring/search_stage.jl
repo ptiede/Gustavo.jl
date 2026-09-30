@@ -440,9 +440,11 @@ function steer_scan(
     lookup(res, AntennaPair) == gc.antenna_pairs && lookup(res, FeedPair) == gc.feeds || throw(
         DimensionMismatch("the detections do not label the scan group's cells"),
     )
-    nan() = fill(NaN, DimensionalData.dims(res))
+    C = eltype(first(first(gc.layers)))
+    T = real(C)
+    nan() = fill(T(NaN), DimensionalData.dims(res))
     sdelay, srate, samp, ssnr, spfa = nan(), nan(), nan(), nan(), nan()
-    ws = FringeWorkspace(eltype(first(first(gc.layers))))
+    ws = FringeWorkspace(C)
     station(x, a, f) = x[AntennaName(At(a)), Feed(At(f))]
     for q in eachindex(gc.feeds), j in eachindex(gc.antenna_pairs)
         cell = (AntennaPair(j), FeedPair(q))
@@ -463,10 +465,9 @@ function steer_scan(
         ) / snr0
         σ > 0 || continue
         D = _exact_matched_filter(V, W, F, gc.freqs, gc.times, f0, t0, dpred, rpred)
-        Wsum = 0.0
-        for i in eachindex(W, F)
-            w = W[i]
-            (!F[i] && isfinite(w) && w > 0) && (Wsum += w)
+        Wsum = zero(T)
+        for i in eachindex(V, W, F)
+            _usable(F[i], W[i], V[i]) && (Wsum += T(W[i]))
         end
         sdelay[cell] = dpred
         srate[cell] = rpred

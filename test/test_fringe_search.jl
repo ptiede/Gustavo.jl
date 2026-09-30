@@ -479,6 +479,34 @@ end
     @test eltype(wsm.mbd.Gb) === ComplexF32
     @test detm.valid
     @test isapprox(detm.delay, 137.3e-9; atol = 5.0f-9)
+
+    # Sums and refined peaks stay at the compute precision, whatever the weight
+    # eltype or the precision of the coordinates passed in.
+    F = falses(size(V32))
+    @test @inferred(FR._exact_matched_filter(V32, W32, F, freqs, times, f0, t0, τ_true, ṙ_true)) isa ComplexF32
+    @test @inferred(FR._exact_matched_filter(V32, Float64.(W32), F, freqs, times, f0, t0, τ_true, ṙ_true)) isa ComplexF32
+    @test @inferred(FR._phase_sum(V32[:, 1], freqs, f0, τ_true)) isa ComplexF32
+    pk = @inferred FR._polish_peak_exact!(
+        V32, W32, F, freqs, times, f0, t0, τ_true, ṙ_true;
+        delay_bin = 1.0e-9, rate_bin = 1.0e-3, refine_delay = true, refine_rate = true,
+    )
+    @test pk.delay isa Float32 && pk.rate isa Float32
+    axm = FR._search_axes(freqs_m, times, mbd, ComplexF32)
+    @test @inferred(FR._stage2_value(wsm.mbd, axm.mbd, 1, 1, 1)) isa ComplexF32
+    @test @inferred(
+        FR._baseline_fringe_search(Vm32, Wm32, falses(size(Vm32)), freqs_m, times, f0m, t0, axm, wsm, mbd, 1.0)
+    ) isa FR.Detection{Float32}
+
+    # The map is at the compute precision too, including a block with no usable data.
+    m32 = FR.baseline_fringe_map(FR.fringe_plane(V32, W32, freqs, times), f0, t0)
+    @test eltype(m32.snr) === Float32 && eltype(m32.delays) === Float32
+    @test m32.detection isa FR.Detection{Float32}
+    empty32 = FR.baseline_fringe_map(FR.fringe_plane(V32, zero(W32), freqs, times), f0, t0)
+    @test typeof(empty32) === typeof(m32)
+    @test !empty32.detection.valid
+
+    @test_throws "coordinate vector" FR._exact_matched_filter(V32, W32, F, freqs[2:end], times, f0, t0, τ_true, ṙ_true)
+    @test_throws "coordinate vector" FR._exact_matched_filter(V32, W32, F, freqs, times[2:end], f0, t0, τ_true, ṙ_true)
 end
 
 # An algorithm defined OUTSIDE the package — the only thing that proves
@@ -596,4 +624,25 @@ end
     @test lookup(det, Gustavo.UVData.FeedPair) == gc.feeds
     @test all(det[:valid])
     @test eltype(det[:delay]) == Float32
+end
+
+@testset "steer_scan weighs the samples the search uses" begin
+    UV = Gustavo.UVData
+    ps, _ = _build_fringe_ps(; nant = 3, nspw = 1)
+    ms = only(values(ps))
+    # A NaN visibility with a positive weight lands in cell (A1, A2), feeds (1, 1).
+    ms[:visibility][UV.Polarization(At("RR")), UV.BaselineID(1), UV.Frequency(3), Ti(5)] = NaN
+    geom = Gustavo.Calibration.DataGeometry(ps)
+    res = FR.search_scan(ps, geom, FR.FringeSearch())
+    cell = (UV.AntennaPair(At(("A1", "A2"))), UV.FeedPair(At((1, 1))))
+    # Station terms predicting the blind peak for that cell.
+    delay, rate = map(1:2) do _
+        DimArray(zeros(3, 2), (XRadio.AntennaName(["A1", "A2", "A3"]), UV.Feed(1:2)))
+    end
+    delay[XRadio.AntennaName(At("A1")), UV.Feed(1)] = res[:delay][cell...]
+    rate[XRadio.AntennaName(At("A1")), UV.Feed(1)] = res[:rate][cell...]
+    s = FR.steer_scan(ps, geom, res, geom.f0, geom.t0, delay, rate)
+    @test eltype(s.amp) === Float32
+    @test s.amp[cell...] ≈ res[:amp][cell...] rtol = 1.0e-5
+    @test s.snr[cell...] ≈ res[:snr][cell...] rtol = 1.0e-5
 end
