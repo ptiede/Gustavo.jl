@@ -738,8 +738,9 @@ function _solve_tagged_system(
     end
     # Min-norm completion: fix any gauge freedom the per-component rows leave
     # (the null space of [A; Cp]). Empty for a per-scan model; non-trivial once a
-    # global column couples scans.
-    nb = nullspace(vcat(A, Cp))
+    # global column couples scans. Taken from the QR's square `R`, which has the
+    # same singular values, instead of an SVD of the tall matrix itself.
+    nb = nullspace(qr(vcat(A, Cp)).R)
     C = size(nb, 2) > 0 ? vcat(Cp, permutedims(nb)) : Cp
     solve_system = ConstrainedWLS(A, rw, C)
 
