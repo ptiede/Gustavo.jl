@@ -494,7 +494,9 @@ once across the track (bright scans pin it; weak scans inherit it, tying feeds
 that would otherwise split). Returns the phase-system component count and
 `covered` — the `(station, scan-index)` pairs the solve CONSTRAINS, which is
 independent of the gauge (see `Stationization` for how inconsistent rows are
-weighted). With a single per-scan/per-feed component per kind and one scan,
+weighted). The columns of a (station, scan) outside `covered` are set to zero
+(identity gain), as are a station's scan-spanning columns when it is covered
+in no scan. With a single per-scan/per-feed component per kind and one scan,
 each scan's system is independent and solves exactly as it would alone.
 """
 function solve_station_systems!(
@@ -503,11 +505,12 @@ function solve_station_systems!(
     )
     ncomp = 0
     # (station, scan-index) pairs the solve constrains. A station with no
-    # accepted detection in a scan keeps θ = 0 there ⇒ identity gain, and must
+    # accepted detection in a scan gets θ = 0 there ⇒ identity gain, and must
     # be flagged downstream rather than silently passed through uncalibrated.
     # Intersected over the solved kinds: a station must be constrained in delay
     # And rate and phase to count as calibrated.
     covered = Set{Tuple{Int, Int}}()
+    colkeys = Dict{Int, Tuple{Int, Int}}()
     first_kind = true
     rate_plans = [c[1] for c in components if c[2] === :rate]
     rate_solved = Dict{Int, Float64}()
@@ -517,24 +520,38 @@ function solve_station_systems!(
     for kind in (:delay, :rate, :phase)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        nc, cov, solved = _solve_kind_cols!(
+        nc, cov, solved, keys_ = _solve_kind_cols!(
             θ, scans, plans, gauge, opts, kind;
             rate_plans = kind === :phase ? rate_plans : ComponentPlan[],
             rate_solved,
         )
         kind === :rate && (rate_solved = solved)
+        merge!(colkeys, keys_)
         covered = first_kind ? cov : intersect(covered, cov)
         first_kind = false
         kind === :phase && (ncomp = nc)
     end
+    _zero_unconstrained!(θ, colkeys, covered)
     return ncomp, covered
+end
+
+# Zero the θ columns of every (station, scan) no accepted detection constrains,
+# and a station's scan-spanning columns when it is constrained in no scan:
+# otherwise they hold values set by weak rows alone.
+function _zero_unconstrained!(θ, colkeys, covered)
+    constrained = Set(first(c) for c in covered)
+    for (col, (st, sidx)) in colkeys
+        (sidx == 0 ? st in constrained : (st, sidx) in covered) || (θ[col] = zero(eltype(θ)))
+    end
+    return θ
 end
 
 # Solve one observable kind across all scans, accumulating into θ. Each detection
 # becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
 # θ columns for that (station, feed, time) — a feed-common per-scan column and,
-# when present, a global feed-offset column. Returns (ncomp, covered, solved),
-# `solved` mapping each θ column this kind touched to the value it just added.
+# when present, a global feed-offset column. Returns (ncomp, covered, solved,
+# colkeys): `solved` maps each θ column this kind touched to the value it just
+# added, `colkeys` to its (station, scan index), scan 0 for a column spanning scans.
 #
 # `rate_plans`/`rate_solved` are non-empty only for `:phase`, and only matter
 # where a rate component's origin differs from the epoch the phases were
@@ -670,7 +687,7 @@ function _solve_kind_cols!(
             push!(rsta_a, a); push!(rsta_b, b)
         end
     end
-    isempty(rowA) && return (0, Set{Tuple{Int, Int}}(), Dict{Int, Float64}())
+    isempty(rowA) && return (0, Set{Tuple{Int, Int}}(), Dict{Int, Float64}(), Dict{Int, Tuple{Int, Int}}())
 
     # Robust solve: IRLS over `opts.loss`, rescaling each row's noise-model
     # weight by the loss's derivative at that row's normalized residual (see
@@ -697,12 +714,14 @@ function _solve_kind_cols!(
         end
     end
     solved = Dict{Int, Float64}()
+    colkeys = Dict{Int, Tuple{Int, Int}}()
     for n in eachindex(node_col)
         node_col[n] == 0 && continue          # nuisance offset: solved, discarded
         θ[node_col[n]] += x[n]
         solved[node_col[n]] = x[n]
+        colkeys[node_col[n]] = (node_station[n], node_scan[n])
     end
-    return ncomp, _covered_stations(rsta_a, rsta_b, rscan, raccept), solved
+    return ncomp, _covered_stations(rsta_a, rsta_b, rscan, raccept), solved, colkeys
 end
 
 # The phase a rate component contributes at `epoch` to one (station, feed):

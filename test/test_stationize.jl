@@ -410,6 +410,28 @@ end
     @test all(isnan, sol_hi.delay)
 end
 
+@testset "Stationize: an unconstrained station's θ is identity" begin
+    nant = 4
+    bl = all_baselines(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    rng = MersenneTwister(0x212)
+    τ, ṙ, φ = 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2), randn(rng, nant, 2)
+    D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
+    # Station 4's detections are all noise peaks: rows in the system, none accepted.
+    for bi in eachindex(bl), p in eachindex(pols)
+        4 in bl[bi] && (D[bi, p] = merge(D[bi, p], (; pfa = 1.0)))
+    end
+    layout = perfeed_scan_layout(nant)
+    θ = zeros(layout.nθ)
+    plans = ((layout.plans[1], :phase), (layout.plans[2], :delay), (layout.plans[3], :rate))
+    _, covered = FR.solve_station_systems!(θ, (FR.detection_stack(D, bl, pols; ti = 1, SCAN_SPREAD...),), plans)
+    @test covered == Set((a, 1) for a in 1:3)
+    for (plan, _) in plans, f in 1:2
+        @test θ[plan_off1(plan)[4, f, 1, 1]] == 0
+        @test any(a -> θ[plan_off1(plan)[a, f, 1, 1]] != 0, 1:3)
+    end
+end
+
 @testset "Stationize: rejected rows constrain but never connect" begin
     nant = 4
     bl = all_baselines(nant)

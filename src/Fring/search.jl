@@ -48,8 +48,11 @@ Hierarchical single-band → multi-band delay search (HOPS/fourfit style): a
 per-band in-band delay, then a multi-band delay over the band origins, which
 resolves the MBD ambiguity explicitly against the in-band delay. Far cheaper
 than [`FullGrid`](@ref) when narrow bands are spread over a wide span
-(VGOS-style). Falls back to the full grid when the axis cannot support it —
-fewer than two band blocks, a degenerate or unsorted frequency axis.
+(VGOS-style). Throws when the frequency axis cannot support it: a degenerate
+or unsorted axis, fewer than two band blocks, band origins on no common grid
+or sharing a grid bin, a band-origin grid over 65536 points, or no delay or
+rate inside the search windows. `algorithm = :auto` runs the full grid in
+those cases instead.
 """
 struct HierarchicalMBD <: AbstractSearchAlgorithm end
 
@@ -950,14 +953,29 @@ _mbd_axes(alg::AbstractSearchAlgorithm, freqs, fax, tax, rates, opts, ::Type{C})
 _mbd_axes(::FullGrid, freqs, fax, tax, rates, opts, ::Type{C}) where {C} = nothing
 
 function _mbd_axes(::HierarchicalMBD, freqs, fax, tax, rates, opts, ::Type{C}) where {C}
-    (fax.degenerate || !issorted(freqs)) && return nothing
+    mbd = _hierarchical_axes(freqs, fax, tax, rates, opts, C)
+    mbd isa AbstractString && throw(
+        ArgumentError("HierarchicalMBD cannot search this scan: $mbd. Use FullGrid() or algorithm = :auto.")
+    )
+    return mbd
+end
+
+# The hierarchical band geometry, or the reason the axis cannot support one.
+function _hierarchical_axes(freqs, fax, tax, rates, opts, ::Type{C}) where {C}
+    fax.degenerate && return "the frequency axis is degenerate"
+    issorted(freqs) || return "the channel frequencies are not sorted"
     freqgroups = _detect_freq_groups(freqs, fax.step)
-    length(freqgroups) >= 2 || return nothing
+    length(freqgroups) >= 2 || return "the channels form $(length(freqgroups)) band block(s), not at least two"
     return _build_mbd_axes(freqs, freqgroups, fax, tax, rates, opts, C)
 end
 
-_maybe_mbd_axes(freqs::AbstractVector, fax::_Axis, tax::_Axis, rates::AbstractVector, opts::FringeSearch, ::Type{C}) where {C} =
-    _mbd_axes(_resolve_algorithm(opts.algorithm, freqs, fax), freqs, fax, tax, rates, opts, C)
+# `:auto` runs the full grid wherever the hierarchical search cannot run.
+function _maybe_mbd_axes(freqs::AbstractVector, fax::_Axis, tax::_Axis, rates::AbstractVector, opts::FringeSearch, ::Type{C}) where {C}
+    alg = _resolve_algorithm(opts.algorithm, freqs, fax)
+    (opts.algorithm === :auto && alg isa HierarchicalMBD) || return _mbd_axes(alg, freqs, fax, tax, rates, opts, C)
+    mbd = _hierarchical_axes(freqs, fax, tax, rates, opts, C)
+    return mbd isa AbstractString ? nothing : mbd
+end
 
 function _build_mbd_axes(
         freqs::AbstractVector, freqgroups::Vector{UnitRange{Int}},
@@ -983,14 +1001,14 @@ function _build_mbd_axes(
     τmax = max(abs(opts.delay_window[1]), abs(opts.delay_window[2]), 1.0e-12)
     tol = 0.3 / (2π * τmax)
     Δbc = _approx_gcd(offs, tol)
-    Δbc > 0 || return nothing
-    maximum(abs(o - round(o / Δbc) * Δbc) for o in offs) <= tol || return nothing
+    (Δbc > 0 && maximum(abs(o - round(o / Δbc) * Δbc) for o in offs) <= tol) ||
+        return "the band origins lie on no common grid within $(tol) Hz"
     bc_bin = [round(Int, o / Δbc) + 1 for o in offs]
-    allunique(bc_bin) || return nothing
+    allunique(bc_bin) || return "two band origins fall in one band-origin grid bin"
     nbc_pad = _fast_fft_size(osb * maximum(bc_bin))
     # A near-continuum of origin bins means the hierarchy buys nothing (the
-    # band-center FFT approaches the full grid) — let the full path handle it.
-    nbc_pad <= 65536 || return nothing
+    # band-center FFT approaches the full grid).
+    nbc_pad <= 65536 || return "the band-origin grid needs $nbc_pad points, over 65536"
     A = T(1.0 / Δbc)
 
     # SBD rows: window ± (A/2 + one bin) — the peak's SBD may sit half an
@@ -1000,14 +1018,14 @@ function _build_mbd_axes(
     lo, hi = opts.delay_window
     margin = A / 2 + sbd_bin
     sbd_idx = [k for k in eachindex(sbd_all) if (lo - margin) <= sbd_all[k] <= (hi + margin)]
-    isempty(sbd_idx) && return nothing
+    isempty(sbd_idx) && return "no single-band delay falls inside the delay window"
     sort!(sbd_idx; by = k -> sbd_all[k])
     sbd_val = T[sbd_all[k] for k in sbd_idx]
 
     # Rate cols: the window bins plus one value-neighbour each side (for quad).
     ord = sortperm(rates)
     sel = [i for i in eachindex(ord) if _in_window(rates[ord[i]], opts.rate_window, tax.degenerate)]
-    isempty(sel) && return nothing
+    isempty(sel) && return "no rate falls inside the rate window"
     i1 = max(first(sel) - 1, 1)
     i2 = min(last(sel) + 1, length(ord))
     rate_idx = ord[i1:i2]

@@ -380,12 +380,13 @@ end
     d0 = FR.baseline_fringe_search(FR.fringe_plane(V, zeros(size(V)), freqs, times), f0, t0; opts = mbd)
     @test !d0.valid
 
-    # Explicit :mbd on a CONTIGUOUS band falls back to the full path (single
-    # block → no hierarchy), with identical results by construction.
+    # A CONTIGUOUS band is a single block: an explicit HierarchicalMBD throws,
+    # and :auto runs the full path with identical results.
     fc = 43.0e9 .+ (0:63) .* 0.5e6
-    @test FR._search_axes(fc, times, mbd, ComplexF64).mbd === nothing
+    @test_throws "1 band block" FR._search_axes(fc, times, mbd, ComplexF64)
+    @test FR._search_axes(fc, times, auto, ComplexF64).mbd === nothing
     Vc = inject_fringe(fc, times, mean(fc), t0; delay = 9.0e-9, rate = 3.0e-3, phase = 0.2)
-    d1 = FR.baseline_fringe_search(FR.fringe_plane(Vc, ones(size(Vc)), fc, times), mean(fc), t0; opts = mbd)
+    d1 = FR.baseline_fringe_search(FR.fringe_plane(Vc, ones(size(Vc)), fc, times), mean(fc), t0; opts = auto)
     d2 = FR.baseline_fringe_search(FR.fringe_plane(Vc, ones(size(Vc)), fc, times), mean(fc), t0; opts = full)
     @test d1.delay == d2.delay && d1.snr == d2.snr
 
@@ -507,6 +508,18 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
     # A contiguous axis has nothing to decompose, so :auto stays on the full grid.
     contig = collect(8.0e9 .+ (0:127) .* Δf)
     @test FR._resolve_algorithm(:auto, contig, FR._uniform_axis(contig)) isa FR.FullGrid
+
+    # An explicit HierarchicalMBD throws where the axis cannot support it; :auto
+    # runs the full grid there instead.
+    mbd = FR.FringeSearch(algorithm = FR.HierarchicalMBD())
+    auto = FR.FringeSearch()
+    @test_throws "not at least two" FR._search_axes(contig, times, mbd, ComplexF64)
+    @test_throws "not sorted" FR._search_axes(reverse(freqs), times, mbd, ComplexF64)
+    @test_throws "no rate falls inside the rate window" FR._search_axes(
+        freqs, times, FR.FringeSearch(algorithm = FR.HierarchicalMBD(), rate_window = (0.7, 0.8)), ComplexF64,
+    )
+    @test FR._search_axes(freqs, times, mbd, ComplexF64).mbd !== nothing
+    @test FR._search_axes(contig, times, auto, ComplexF64).mbd === nothing
 
     # The foreign algorithm reaches the search and selects the full-grid path.
     probe = FR.FringeSearch(algorithm = _ProbeFullGrid())
