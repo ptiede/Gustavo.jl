@@ -569,7 +569,7 @@ end
     nlo = length(XRadio.frequencies(lo))
 
     @test gc.freqs == vcat(XRadio.frequencies(lo), XRadio.frequencies(hi))
-    @test gc.bl_pairs == [(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]
+    @test gc.antenna_pairs == [("A1", "A2"), ("A1", "A3"), ("A1", "A4"), ("A2", "A3"), ("A2", "A4"), ("A3", "A4")]
     @test gc.feeds == [(1, 1), (1, 2), (2, 1), (2, 2)]
 
     ws = FR.FringeWorkspace(ComplexF32)
@@ -577,11 +577,11 @@ end
         p = findfirst(==(gc.feeds[q]), Gustavo.UVData.feed_pairs(ms)[:, bi])
         Gustavo.UVData._cell_plane(ms[:visibility], bi, p)
     end
-    j14 = findfirst(==((1, 4)), gc.bl_pairs)
+    j14 = findfirst(==(("A1", "A4")), gc.antenna_pairs)
     V, W, F = FR._gather_cell!(ws, gc, j14, 2)
     @test V[1:nlo, :] == member_plane(lo, ("A1", "A4"), 2)
     @test all(F[(nlo + 1):end, :]) && all(iszero, W[(nlo + 1):end, :])
-    j12 = findfirst(==((1, 2)), gc.bl_pairs)
+    j12 = findfirst(==(("A1", "A2")), gc.antenna_pairs)
     V, W, F = FR._gather_cell!(ws, gc, j12, 3)
     @test V[(nlo + 1):end, :] == member_plane(hi, ("A1", "A2"), 3)
 
@@ -592,7 +592,8 @@ end
     )
 
     det = FR.search_scan(group, geom, FR.FringeSearch())
-    @test lookup(det, Gustavo.UVData.BaselineID) == gc.bl_pairs
+    @test lookup(det, Gustavo.UVData.AntennaPair) == gc.antenna_pairs
+    @test lookup(det, Gustavo.UVData.FeedPair) == gc.feeds
     @test all(det[:valid])
     @test eltype(det[:delay]) == Float32
 end

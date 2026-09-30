@@ -261,20 +261,16 @@ end
 
 # EHT-HOPS-style station flags: a station that participates in a scan (has
 # baselines there) but is left unconstrained by the surviving stage-B rows
-# keeps identity gains — record it as (station, geometry scan id) so
-# `apply_calibration` flags its baselines instead of passing raw phases through
-# as if they had been corrected.
+# keeps identity gains — record it as (station name, geometry scan id) so
+# `calibrate` flags its baselines instead of passing raw phases through as if
+# they had been corrected. `covered` holds (station name, position in `dets`).
 function unconstrained_flags(dets, covered, geom::DataGeometry)
-    flags = Tuple{Int, Int}[]
+    Base.require_one_based_indexing(dets)
+    flags = Tuple{String, Int}[]
     for gi in eachindex(dets)
         scanid = geom.scan_of_time[_scan_ti(dets[gi])]
-        stations = Set{Int}()
-        for (a, b) in _scan_bl_pairs(dets[gi])
-            a == b && continue
-            push!(stations, a); push!(stations, b)
-        end
-        for st in stations
-            (st, gi) in covered || push!(flags, (st, scanid))
+        for name in unique(Iterators.flatten(p for p in _scan_pairs(dets[gi]) if p[1] != p[2]))
+            (name, gi) in covered || push!(flags, (name, scanid))
         end
     end
     return flags
@@ -285,8 +281,8 @@ end
 # measured cell is here, so `det_detected` is what selects the real fringes.
 function detection_table(scan_dets)
     n = sum(length, scan_dets; init = 0)
-    det_scan = Vector{Int}(undef, n); det_ant_a = Vector{Int}(undef, n)
-    det_ant_b = Vector{Int}(undef, n)
+    det_scan = Vector{Int}(undef, n); det_ant_a = Vector{String}(undef, n)
+    det_ant_b = Vector{String}(undef, n)
     det_feed_a = Vector{Int}(undef, n); det_feed_b = Vector{Int}(undef, n)
     det_snr = Vector{Float64}(undef, n); det_pfa = Vector{Float64}(undef, n)
     det_delay = Vector{Float64}(undef, n); det_rate = Vector{Float64}(undef, n)
@@ -299,7 +295,7 @@ function detection_table(scan_dets)
     for (gi, rows) in enumerate(scan_dets), r in rows
         i += 1
         det_scan[i] = gi; det_ant_a[i] = r.a; det_ant_b[i] = r.b
-        det_feed_a[i], det_feed_b[i] = r.pol; det_snr[i] = r.snr; det_pfa[i] = r.pfa
+        det_feed_a[i], det_feed_b[i] = r.feeds; det_snr[i] = r.snr; det_pfa[i] = r.pfa
         det_delay[i] = r.delay; det_rate[i] = r.rate; det_phase[i] = r.phase
         det_detected[i] = r.detected
         det_snr_steer[i] = r.snr_steer; det_pfa_steer[i] = r.pfa_steer
@@ -314,19 +310,23 @@ function detection_table(scan_dets)
 end
 
 """
-    scan_station_terms(model, layout, θ, ti) -> (delay, rate)
+    scan_station_terms(model, layout, θ, ti, stations) -> (delay, rate)
 
 Per-`(station, feed)` group delay (s) and fringe rate (Hz) at time index `ti`,
-summed over the stage-B components of `model`. This is the decode
+summed over the stage-B components of `model`, as `DimArray`s over
+`AntennaName(stations) × Feed`; `stations` names the layout's stations in order. This is the decode
 [`fringe_station_solutions`](@ref) reports, for one scan and without a finished
 solution, so a solve step can read its own station parameters while the scan's
 data is still resident. Entries are `NaN` where no component constrains that node.
 """
-function scan_station_terms(model, layout, θ, ti::Integer)
-    nant = layout.nant
+function scan_station_terms(model, layout, θ, ti::Integer, stations)
+    length(stations) == layout.nant || throw(
+        DimensionMismatch("the layout covers $(layout.nant) stations but $(length(stations)) are named")
+    )
     comps = fringe_stage_components(model, layout)
-    delay = fill(NaN, nant, 2)
-    rate = fill(NaN, nant, 2)
+    delay = fill(NaN, AntennaName(collect(stations)), Feed(1:2))
+    rate = similar(delay)
+    fill!(rate, NaN)
     for a in axes(delay, 1), f in axes(delay, 2)
         d = 0.0; r = 0.0; hd = false; hr = false
         for (plan, kind) in comps
@@ -415,8 +415,9 @@ end
 Re-measure every cell of `res`, the [`search_scan`](@ref) result for scan group
 `group`, at the delay and rate the station solution predicts for it
 (`τ_{a,fa} − τ_{b,fb}`, and the same difference in rate) rather than at a
-blind search peak. `sta_delay[a, f]` and `sta_rate[a, f]` are indexed by
-`geom`'s station number and feed.
+blind search peak. `sta_delay` and `sta_rate` are `DimArray`s over
+`AntennaName × Feed`, as [`scan_station_terms`](@ref) returns them; the result
+is labeled like `res`.
 
 This recovers a fringe too weak to survive a blind search: the trial count
 collapses from the search plane's ~1e4 cells to the `cells` covering the
@@ -433,30 +434,31 @@ steer_scan(group::XRadio.ProcessingSet, geom::DataGeometry, res, f0::Real, t0::R
 
 function steer_scan(
         gc::_GroupCells, res, f0::Real, t0::Real,
-        sta_delay::AbstractMatrix, sta_rate::AbstractMatrix;
+        sta_delay::DimensionalData.AbstractDimArray, sta_rate::DimensionalData.AbstractDimArray;
         cells::Real = 9.0,
     )
-    lookup(res, BaselineID) == gc.bl_pairs && lookup(res, Polarization) == gc.feeds || throw(
+    lookup(res, AntennaPair) == gc.antenna_pairs && lookup(res, FeedPair) == gc.feeds || throw(
         DimensionMismatch("the detections do not label the scan group's cells"),
     )
-    dims = size(res)
-    sdelay = fill(NaN, dims); srate = fill(NaN, dims)
-    samp = fill(NaN, dims); ssnr = fill(NaN, dims); spfa = fill(NaN, dims)
+    nan() = fill(NaN, DimensionalData.dims(res))
+    sdelay, srate, samp, ssnr, spfa = nan(), nan(), nan(), nan(), nan()
     ws = FringeWorkspace(eltype(first(first(gc.layers))))
-    for q in eachindex(gc.feeds), j in eachindex(gc.bl_pairs)
-        res[:valid][j, q] || continue
-        snr0 = res[:snr][j, q]
+    station(x, a, f) = x[AntennaName(At(a)), Feed(At(f))]
+    for q in eachindex(gc.feeds), j in eachindex(gc.antenna_pairs)
+        cell = (AntennaPair(j), FeedPair(q))
+        res[:valid][cell] || continue
+        snr0 = res[:snr][cell]
         snr0 > 0 || continue
-        a, b = gc.bl_pairs[j]
+        a, b = gc.antenna_pairs[j]
         fa, fb = gc.feeds[q]
-        dpred = sta_delay[a, fa] - sta_delay[b, fb]
-        rpred = sta_rate[a, fa] - sta_rate[b, fb]
+        dpred = station(sta_delay, a, fa) - station(sta_delay, b, fb)
+        rpred = station(sta_rate, a, fa) - station(sta_rate, b, fb)
         (isfinite(dpred) && isfinite(rpred)) || continue
         V, W, F = _gather_cell!(ws, gc, j, q)
         # σ of the blind pass, recovered from its own reported SNR.
         σ = abs(
             _exact_matched_filter(
-                V, W, F, gc.freqs, gc.times, f0, t0, res[:delay][j, q], res[:rate][j, q],
+                V, W, F, gc.freqs, gc.times, f0, t0, res[:delay][cell], res[:rate][cell],
             )
         ) / snr0
         σ > 0 || continue
@@ -466,20 +468,20 @@ function steer_scan(
             w = W[i]
             (!F[i] && isfinite(w) && w > 0) && (Wsum += w)
         end
-        sdelay[j, q] = dpred
-        srate[j, q] = rpred
-        samp[j, q] = Wsum > 0 ? abs(D) / Wsum : NaN
-        ssnr[j, q] = abs(D) / σ
-        spfa[j, q] = fringe_pfa(ssnr[j, q], cells)
+        sdelay[cell] = dpred
+        srate[cell] = rpred
+        samp[cell] = Wsum > 0 ? abs(D) / Wsum : NaN
+        ssnr[cell] = abs(D) / σ
+        spfa[cell] = fringe_pfa(ssnr[cell], cells)
     end
     return (delay = sdelay, rate = srate, amp = samp, snr = ssnr, pfa = spfa)
 end
 
 # The flag block for the solution `info` (plain parallel vectors): the
-# stage-B-unconstrained (station, scan) pairs.
+# stage-B-unconstrained (station name, scan) pairs.
 function flag_table(station_flags)
     return (;
-        flagged_ant = Int[f[1] for f in station_flags],
+        flagged_ant = String[f[1] for f in station_flags],
         flagged_scan = Int[f[2] for f in station_flags],
     )
 end

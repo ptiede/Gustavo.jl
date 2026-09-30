@@ -413,21 +413,22 @@ end
 # per-(scan, station) nuisance feed-2 offset columns and withholding cross-hand
 # rows from it.
 #
-# `scans` is a vector of `BaselineID × Polarization` Detection `DimStack`s, the shape
-# `search_scan` returns, each carrying its `BaselineID` lookup's `(a, b)` pairs,
-# per-product feeds from its `Polarization` lookup, and a representative global time
-# index `:ti` in metadata for the `tseg_id` lookup. θ slots are accumulated into
+# `scans` is a vector of `AntennaPair × FeedPair` Detection `DimStack`s, the shape
+# `search_scan` returns, read by label: each antenna pair names its stations,
+# which `stations` numbers, and a representative global time index `:ti` in
+# metadata selects the `tseg_id`. θ slots are accumulated into
 # with `+=`, matching `_pack_station!`, so `rounds > 1` — search on the residual
 # — stays correct.
 
 """
-    detection_stack(D::AbstractMatrix{<:Detection}, bl_pairs, feeds;
-                    ti, freq_rms, time_rms) -> DimStack
+    detection_stack(D::AbstractMatrix{<:Detection}, antenna_pairs, feeds;
+                    ti, epoch, freq_rms, time_rms) -> DimStack
 
-Package a plain `[baseline, product]` detection matrix as the `BaselineID × Polarization`
-DimStack shape `search_scan` returns, its products labeled by their feed pairs
-`feeds` (see [`feed_pairs`](@ref)), carrying `ti` (the representative global
-time index) in metadata — so a scan built directly (the refine stage, or a
+Package a plain `[antenna pair, feed pair]` detection matrix as the
+`AntennaPair × FeedPair` DimStack shape `search_scan` returns, labeled by the
+antenna-name pairs `antenna_pairs` and the feed-index pairs `feeds` (see
+[`feed_pairs`](@ref)), carrying `ti` (the representative global time index) in
+metadata — so a scan built directly (the refine stage, or a
 direct `solve_station_systems!` call) has the same shape as
 one that came from the search, and every consumer reads pairs/feeds/ti off the
 stack uniformly.
@@ -438,12 +439,12 @@ rate components are referenced, and is an error when those disagree among
 themselves — see `Fring.scan_phase_epoch`.
 """
 function detection_stack(
-        D::AbstractMatrix{<:Detection}, bl_pairs, feeds;
+        D::AbstractMatrix{<:Detection}, antenna_pairs, feeds;
         ti::Integer, epoch::Union{Nothing, Real} = nothing,
         freq_rms::Union{Nothing, Real} = nothing,
         time_rms::Union{Nothing, Real} = nothing,
     )
-    gdims = (BaselineID(collect(Tuple{Int, Int}, bl_pairs)), Polarization(collect(feeds)))
+    gdims = (_station_pair_dim(collect(antenna_pairs)), FeedPair(collect(feeds)))
     layers = (;
         delay = DimArray(getfield.(D, :delay), gdims),
         rate = DimArray(getfield.(D, :rate), gdims),
@@ -473,26 +474,31 @@ _with_ti(
     freq_rms::Union{Nothing, Real} = nothing, time_rms::Union{Nothing, Real} = nothing,
 ) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, epoch, freq_rms, time_rms))
 
-_scan_bl_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, BaselineID))
-_scan_pols(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, Polarization))
-_scan_feeds(sc::AbstractDimStack) = UVData._feed_pairs(_scan_pols(sc))
+_scan_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, AntennaPair))
+_scan_feeds(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, FeedPair))
+
+_station_slot(slot, name) = get(slot, name) do
+    throw(ArgumentError("detection antenna `$name` is not among the stations " * join(keys(slot), ", ")))
+end
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc)[:ti]::Int
 _scan_epoch(sc::AbstractDimStack) = get(DimensionalData.metadata(sc), :epoch, nothing)
 _scan_spread(sc::AbstractDimStack, key::Symbol) = get(DimensionalData.metadata(sc), key, nothing)
 
 """
-    solve_station_systems!(θ, scans, components; gauge, opts) -> (ncomp, covered)
+    solve_station_systems!(θ, scans, components, stations; gauge, opts) -> (ncomp, covered)
 
 Solve the stage-B fringe systems (delay, rate, constant phase) over `scans` and
 accumulate the per-(station, feed) values into `θ` at the columns the model
-declares. `components` is a vector of `(plan::ComponentPlan, kind::Symbol)` with
+declares. `stations` are the station names the layout numbers; each
+detection's antenna pair is matched to them by name. `components` is a vector
+of `(plan::ComponentPlan, kind::Symbol)` with
 `kind ∈ (:delay, :rate, :phase)`. Multiple components of the same kind are summed
 per (station, feed) observation: e.g. a feed-common `PerScan × SharedFeeds` term
 plus a `GlobalTime × SingleFeed(2)` inter-feed offset both feed the delay
 system, so a feed-2 row touches both columns and a stable inter-feed offset is solved
 once across the track (bright scans pin it; weak scans inherit it, tying feeds
 that would otherwise split). Returns the phase-system component count and
-`covered` — the `(station, scan-index)` pairs the solve CONSTRAINS, which is
+`covered` — the `(station name, scan index)` pairs the solve CONSTRAINS, which is
 independent of the gauge (see `Stationization` for how inconsistent rows are
 weighted). The columns of a (station, scan) outside `covered` are set to zero
 (identity gain), as are a station's scan-spanning columns when it is covered
@@ -500,9 +506,10 @@ in no scan. With a single per-scan/per-feed component per kind and one scan,
 each scan's system is independent and solves exactly as it would alone.
 """
 function solve_station_systems!(
-        θ::AbstractVector, scans, components;
+        θ::AbstractVector, scans, components, stations;
         gauge::AbstractGauge = PinAntenna(1), opts::Stationization = Stationization(),
     )
+    slot = Dict(n => i for (i, n) in pairs(stations))
     ncomp = 0
     # (station, scan-index) pairs the solve constrains. A station with no
     # accepted detection in a scan gets θ = 0 there ⇒ identity gain, and must
@@ -521,7 +528,7 @@ function solve_station_systems!(
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
         nc, cov, solved, keys_ = _solve_kind_cols!(
-            θ, scans, plans, gauge, opts, kind;
+            θ, scans, plans, slot, gauge, opts, kind;
             rate_plans = kind === :phase ? rate_plans : ComponentPlan[],
             rate_solved,
         )
@@ -532,7 +539,7 @@ function solve_station_systems!(
         kind === :phase && (ncomp = nc)
     end
     _zero_unconstrained!(θ, colkeys, covered)
-    return ncomp, covered
+    return ncomp, Set{Tuple{eltype(stations), Int}}((stations[a], si) for (a, si) in covered)
 end
 
 # Zero the θ columns of every (station, scan) no accepted detection constrains,
@@ -557,7 +564,7 @@ end
 # where a rate component's origin differs from the epoch the phases were
 # measured at — see `_phase_epoch_offset`.
 function _solve_kind_cols!(
-        θ::AbstractVector, scans, plans, gauge::AbstractGauge, opts::Stationization, kind::Symbol;
+        θ::AbstractVector, scans, plans, slot, gauge::AbstractGauge, opts::Stationization, kind::Symbol;
         rate_plans = ComponentPlan[], rate_solved::Dict{Int, Float64} = Dict{Int, Float64}(),
     )
     getval = kind === :delay ? (d -> d.delay) : kind === :rate ? (d -> d.rate) : (d -> d.phase)
@@ -608,8 +615,9 @@ function _solve_kind_cols!(
     # connect stations into a fringe group; the rest constrain and no more.
     raccept = Bool[]
     for (sidx, sc) in enumerate(scans)
-        nbl, npol = size(sc)
-        bl_pairs = _scan_bl_pairs(sc)
+        bl_pairs = map(_scan_pairs(sc)) do (a, b)
+            (_station_slot(slot, a), _station_slot(slot, b))
+        end
         feeds = _scan_feeds(sc)
         ti = _scan_ti(sc)
         epoch = _scan_epoch(sc)
@@ -631,8 +639,8 @@ function _solve_kind_cols!(
         # at the reference rather than leaving it to the min-norm completion.
         f1 = Set{Int}()
         if feedblind
-            for bi in axes(sc, 1), p in axes(sc, 2)
-                sc[bi, p].valid || continue
+            for bi in eachindex(bl_pairs), p in eachindex(feeds)
+                sc[AntennaPair(bi), FeedPair(p)].valid || continue
                 fa, fb = feeds[p]
                 (fa == 1 && fb == 1) || continue
                 a, b = bl_pairs[bi]
@@ -640,8 +648,8 @@ function _solve_kind_cols!(
                 push!(f1, a); push!(f1, b)
             end
         end
-        for bi in axes(sc, 1), p in axes(sc, 2)
-            det = sc[bi, p]
+        for bi in eachindex(bl_pairs), p in eachindex(feeds)
+            det = sc[AntennaPair(bi), FeedPair(p)]
             det.valid || continue                   # no data in this cell, no measurement
             a, b = bl_pairs[bi]
             a == b && continue
@@ -982,44 +990,42 @@ function _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes::Integer)
 end
 
 """
-    station_closure_residuals(detections, bl_pairs, feeds;
-                              observable = :phase, product = 1, pfa_max) -> Vector
+    station_closure_residuals(dets; observable = :phase, feeds = (1, 1), pfa_max) -> Vector
 
-For every closed triangle of baselines present in `bl_pairs`, the residual
-closure quantity of the chosen `observable` (`:delay`/`:rate`/`:phase`) using the
-*measured* detections — i.e. the signed sum around the triangle that station-based
-quantities must cancel. For noiseless station-differenced data these are ≈ 0
-(including triangles that mix feeds); large values flag non-closing data. This is a
-property of the data alone, so no solution is needed to evaluate it.
+For every closed triangle of antenna pairs in the detection stack `dets` (the
+`AntennaPair × FeedPair` shape [`search_scan`](@ref) returns), the residual
+closure quantity of the chosen `observable` (`:delay`/`:rate`/`:phase`) on the
+feed pair `feeds`, using the *measured* detections: the signed sum around the
+triangle that station-based quantities cancel. On noiseless station-differenced
+data a parallel-hand feed pair closes to ≈ 0; a cross-hand one does not, since
+its legs read different feeds at the shared station. This is a property of the
+data alone, so no solution is needed to evaluate it.
 
 A triangle counts only when all three legs are accepted detections
-(`pfa <= pfa_max`); a leg above that threshold carries an arbitrary delay, which
-would enter the sum as noise rather than as evidence of non-closure.
+(`pfa <= pfa_max`); a leg above that threshold carries an arbitrary value,
+which would enter the sum as noise rather than as evidence of non-closure.
 """
 function station_closure_residuals(
-        detections::AbstractMatrix{<:Detection},
-        bl_pairs::AbstractVector{<:Tuple{Integer, Integer}},
-        feeds::AbstractVector;
-        observable::Symbol = :phase,
-        product::Integer = 1,
+        dets::AbstractDimStack; observable::Symbol = :phase, feeds::Tuple{Integer, Integer} = (1, 1),
         pfa_max::Real = Stationization().pfa_max,
     )
-    getval = observable === :delay ? (d -> d.delay) :
-        observable === :rate ? (d -> d.rate) :
-        observable === :phase ? (d -> d.phase) :
-        error("observable must be :delay, :rate or :phase")
-    blindex = Dict((bl_pairs[bi][1], bl_pairs[bi][2]) => bi for bi in eachindex(bl_pairs))
+    observable in (:delay, :rate, :phase) || throw(ArgumentError("observable must be :delay, :rate or :phase"))
+    q = FeedPair(At(feeds))
+    # A pair read in the other order negates only on a parallel hand.
+    leg = Dict{Tuple{String, String}, Float64}()
+    for ab in _scan_pairs(dets)
+        d = dets[AntennaPair(At(ab)), q]
+        (d.valid && d.pfa <= pfa_max) || continue
+        leg[ab] = getfield(d, observable)
+        feeds[1] == feeds[2] && (leg[reverse(ab)] = -leg[ab])
+    end
+    ants = unique(Iterators.flatten(_scan_pairs(dets)))
     res = Float64[]
-    ants = sort(unique(Iterators.flatten(bl_pairs)))
     for i in eachindex(ants), j in eachindex(ants), k in eachindex(ants)
+        i < j < k || continue
         a, b, c = ants[i], ants[j], ants[k]
-        (a < b < c) || continue
-        (haskey(blindex, (a, b)) && haskey(blindex, (b, c)) && haskey(blindex, (a, c))) || continue
-        dab, dbc, dac = detections[blindex[(a, b)], product], detections[blindex[(b, c)], product], detections[blindex[(a, c)], product]
-        # Accepted detections only: a triangle closed through a noise peak sits at
-        # an arbitrary delay and its residual measures nothing.
-        (dab.pfa <= pfa_max && dbc.pfa <= pfa_max && dac.pfa <= pfa_max) || continue
-        s = getval(dab) + getval(dbc) - getval(dac)
+        (haskey(leg, (a, b)) && haskey(leg, (b, c)) && haskey(leg, (a, c))) || continue
+        s = leg[(a, b)] + leg[(b, c)] - leg[(a, c)]
         observable === :phase && (s = rem2pi(s, RoundNearest))
         push!(res, s)
     end

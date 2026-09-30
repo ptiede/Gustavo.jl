@@ -4,7 +4,7 @@
 # per-baseline kernels in `search.jl` over every (baseline, product) cell. The
 # pipeline reads and corrects the scan group and supplies it here.
 
-# One recorded search row: baseline antennas, correlation product, SNR, the
+# One recorded search row: the antenna names, feed pair, SNR, the
 # family-wise false-alarm probability, and whether that PFA accepted it as a real
 # fringe. Every measured cell gets a row, so `detected`, not the row's presence,
 # is what marks a detection.
@@ -16,14 +16,14 @@
 # atmospheric terms cancelling, at parallel-hand SNR and without cross-hand data
 # or any station fit in between.
 const DetectionRow = @NamedTuple{
-    a::Int, b::Int, pol::Tuple{Int, Int}, snr::Float64, pfa::Float64,
+    a::String, b::String, feeds::Tuple{Int, Int}, snr::Float64, pfa::Float64,
     delay::Float64, rate::Float64, phase::Float64, detected::Bool,
     snr_steer::Float64, pfa_steer::Float64,
     delay_steer::Float64, rate_steer::Float64, steered::Bool,
 }
 
 # A scan group indexed by cell: each member's layers and, for every cross
-# station pair `j` and feed pair `q` of the group, where that cell is stored in
+# antenna pair `j` (antenna names) and feed pair `q` of the group, where that cell is stored in
 # member `m` (`loc[m, j, q] = (bi, p)`, or `(0, 0)` when the member lacks it). A
 # stored product's feed pair varies by baseline, so the cells are joined by
 # label. Members are in frequency order and share one time axis; `freqs` is
@@ -33,7 +33,7 @@ struct _GroupCells{L, N, F, T, B, P, I}
     nchan::N
     freqs::F
     times::T
-    bl_pairs::B
+    antenna_pairs::B
     feeds::P
     loc::I
 end
@@ -51,7 +51,6 @@ function _GroupCells(group::XRadio.ProcessingSet, geom::DataGeometry)
     member_feeds = map(feed_pairs, members)
     stations = _station_pairs([p for ps in member_pairs for p in ps if p[1] != p[2]], geom)
     feeds = sort!(unique!([f for fs in member_feeds for f in fs]))
-    slot = Dict(n => i for (i, n) in pairs(geom.stations))
     row = Dict(p => j for (j, p) in pairs(stations))
     col = Dict(f => q for (q, f) in pairs(feeds))
     loc = fill((0, 0), length(members), length(stations), length(feeds))
@@ -65,7 +64,7 @@ function _GroupCells(group::XRadio.ProcessingSet, geom::DataGeometry)
     return _GroupCells(
         map(_member_layers, members), [length(XRadio.frequencies(ms)) for ms in members],
         reduce(vcat, (collect(XRadio.frequencies(ms)) for ms in members)), times,
-        [(slot[a], slot[b]) for (a, b) in stations], feeds, loc,
+        stations, feeds, loc,
     )
 end
 
@@ -101,12 +100,12 @@ end
     search_scan(group::XRadio.ProcessingSet, geom::DataGeometry, params::FringeSearch;
                 ngroups = 1, executor = SerialScheduler(), t0 = geom.t0) -> DimStack
 
-Fringe-search every cross-baseline (station pair, feed pair) cell of a scan
+Fringe-search every cross (antenna pair, feed pair) cell of a scan
 group, one Measurement Set per spectral window sharing one time axis. Each
 cell's plane is gathered across the members in frequency order, so the delay
 search spans every window. Autocorrelations are skipped. `geom` supplies the
-reference frequency `f0`, the default phase epoch, and the station numbering of
-the result. To search a residual, pass the group [`residual_group`](@ref)
+reference frequency `f0`, the default phase epoch, and the order of the
+antenna pairs. To search a residual, pass the group [`residual_group`](@ref)
 returns.
 
 `ngroups` sizes the false-alarm family each cell's `pfa` is computed over:
@@ -123,11 +122,11 @@ must reference them where the model's constant lives
 The default is `geom`'s track epoch, which is right only for a single-scan
 geometry.
 
-Returns a `DimStack` over `BaselineID × Polarization` whose layers are the seven
+Returns a `DimStack` over `AntennaPair × FeedPair` whose layers are the seven
 [`Detection`](@ref) fields (`:delay`/`:rate`/`:phase`/`:amp`/`:snr`/`:pfa`/`:valid`),
-so one cell `det[j, q]` reads back as a `Detection` `NamedTuple`. The
-`BaselineID` lookup holds each cross pair as indices into `geom.stations` and
-the `Polarization` lookup the feed pairs. The layers' element type is the real
+so one cell reads back as a `Detection` `NamedTuple`. The `AntennaPair` lookup
+holds each cross pair's antenna names, in `geom`'s station order, and the
+`FeedPair` lookup the feed-index pairs. The layers' element type is the real
 type of the visibilities. Results are bit-identical to the serial loop
 regardless of the fan-out `executor`.
 """
@@ -140,7 +139,7 @@ function search_scan(
     )
     C = eltype(first(first(gc.layers)))
     T = real(C)
-    dims = (BaselineID(gc.bl_pairs), Polarization(gc.feeds))
+    dims = (_station_pair_dim(gc.antenna_pairs), FeedPair(gc.feeds))
     delay = zeros(T, dims...)
     rate = similar(delay)
     phase = similar(delay)
@@ -153,7 +152,7 @@ function search_scan(
     scube = DimensionalData.DimStack((; delay, rate, phase, amp, snr, pfa, valid))
 
     ax = _search_axes(gc.freqs, gc.times, params, C)
-    nsearch = max(length(gc.bl_pairs) * length(gc.feeds), 1) * max(ngroups, 1)
+    nsearch = max(length(gc.antenna_pairs) * length(gc.feeds), 1) * max(ngroups, 1)
     family_cells = _search_cells(gc.freqs, gc.times, params) * nsearch
 
     workspace = TaskLocalValue{FringeWorkspace{C}}(() -> FringeWorkspace(C))
@@ -162,7 +161,7 @@ function search_scan(
         j, q = Tuple(I)
         ws = workspace[]
         V, W, F = _gather_cell!(ws, gc, j, q)
-        scube[j, q] = _baseline_fringe_search(
+        scube[AntennaPair(j), FeedPair(q)] = _baseline_fringe_search(
             V, W, F, gc.freqs, gc.times, geom.f0, Float64(t0), ax, ws, params, family_cells,
         )
     end

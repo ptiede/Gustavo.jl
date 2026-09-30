@@ -741,13 +741,12 @@ was constrained (or the solution predates flag recording).
 function fringe_station_flags(sol::CalibrationSolution)
     info = _fringe_info(sol)
     haskey(info, :flagged_ant) || return NamedTuple[]
-    names = sol.geom.stations
-    sta(i) = i <= length(names) ? String(names[i]) : string("ant", i)
+    ant(name) = something(findfirst(==(name), sol.geom.stations), 0)
     scname(s) = s <= length(sol.geom.scan_names) ? String(sol.geom.scan_names[s]) : string(s)
     rows = [
         (;
             scan = Int(info.flagged_scan[i]), scan_name = scname(Int(info.flagged_scan[i])),
-            ant = Int(info.flagged_ant[i]), station = sta(Int(info.flagged_ant[i])),
+            ant = ant(info.flagged_ant[i]), station = String(info.flagged_ant[i]),
         )
             for i in eachindex(info.flagged_ant)
     ]
@@ -778,16 +777,15 @@ first. Needs no data read — inspect a flagged row with
 function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
     info = _fringe_info(sol)
     haskey(info, :det_pfa) || return NamedTuple[]
-    names = sol.geom.stations
-    sta(i) = i <= length(names) ? String(names[i]) : string("ant", i)
+    ant(name) = something(findfirst(==(name), sol.geom.stations), 0)
     # A solution written before the table recorded rejected cells holds detections
     # only, so every row of one counts as accepted.
     detected = get(info, :det_detected, nothing)
     accepted(i) = detected === nothing || detected[i]
     rows = [
         (;
-            scan = Int(info.det_scan[i]), a = Int(info.det_ant_a[i]), b = Int(info.det_ant_b[i]),
-            sta_a = sta(Int(info.det_ant_a[i])), sta_b = sta(Int(info.det_ant_b[i])),
+            scan = Int(info.det_scan[i]), a = ant(info.det_ant_a[i]), b = ant(info.det_ant_b[i]),
+            sta_a = String(info.det_ant_a[i]), sta_b = String(info.det_ant_b[i]),
             pol = (Int(info.det_feed_a[i]), Int(info.det_feed_b[i])), snr = Float64(info.det_snr[i]), pfa = Float64(info.det_pfa[i]),
         )
             for i in eachindex(info.det_pfa) if accepted(i) && info.det_pfa[i] > pfa_max

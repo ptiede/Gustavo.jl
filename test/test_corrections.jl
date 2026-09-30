@@ -120,7 +120,7 @@ end
 @testset "calibrate" begin
     ps, _ = _build_fringe_ps(; nscans = 2, nspw = 2)
     geom = CALc.DataGeometry(ps)
-    sol = _hand_solution(geom; info = (; flagged_ant = [2], flagged_scan = [1]))
+    sol = _hand_solution(geom; info = (; flagged_ant = ["A2"], flagged_scan = [1]))
 
     @testset "divides by the gains only" begin
         out = calibrate(sol, ps; apply_flags = false)

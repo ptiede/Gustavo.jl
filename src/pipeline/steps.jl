@@ -221,7 +221,7 @@ end
 # where they couple — the two paths differ only in that argument.
 function _station_solve!(s::BaselineFringeFit, ctx::SolveContext, stageB, dets)
     ncomp, covered = Fring.solve_station_systems!(
-        ctx.θ, dets, stageB; gauge = ctx.gauge, opts = s.closure,
+        ctx.θ, dets, stageB, ctx.geom.stations; gauge = ctx.gauge, opts = s.closure,
     )
     return ncomp, Fring.unconstrained_flags(dets, covered, ctx.geom)
 end
@@ -253,8 +253,8 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         results = each_group(ctx) do group
             _solve_group(s, ctx, stageB, group; round = 1, local_solve = true)
         end
-        flags = reduce(append!, (r.flags for r in results); init = Tuple{Int, Int}[])
-        ncomp = sum((r.ncomp for r in results); init = 0)
+        flags = reduce(append!, (r.flags for r in results); init = Tuple{String, Int}[])::Vector{Tuple{String, Int}}
+        ncomp = sum((r.ncomp for r in results); init = 0)::Int
         return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)..., s.search)
     end
     local results, ncomp, flags
@@ -262,7 +262,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         results = each_group(ctx) do group
             _solve_group(s, ctx, stageB, group; round, local_solve = false)
         end
-        ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])
+        ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int}}}
     end
     return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)..., s.search)
 end
@@ -291,7 +291,7 @@ function _solve_group(
         ngroups = length(ctx.groups), executor = inner_executor(ctx.exec), t0 = epoch,
     )
     feeds = gc.feeds
-    bl_pairs = gc.bl_pairs
+    antenna_pairs = gc.antenna_pairs
     # The scan's frequency/time lever arms travel with its detections: they set
     # the CRB uncertainty of a delay and a rate, which is what puts the station
     # solve's residuals in units of σ (see `Stationization`).
@@ -307,9 +307,9 @@ function _solve_group(
     # (consumed by the station solve), so these are read off it here; `cells1` is
     # the only piece not already in the cube.
     cells1 = Fring._search_cells(gc.freqs, gc.times, s.search)
-    ncells = cells1 * max(length(bl_pairs) * length(feeds), 1)
+    ncells = cells1 * max(length(antenna_pairs) * length(feeds), 1)
     pfa_max = s.closure.pfa_max
-    ncomp, flags = 0, Tuple{Int, Int}[]
+    ncomp, flags = 0, Tuple{String, Int}[]
     # Steering needs θ for this scan, so it can only run where the station solve
     # closes here; a pooled solve has no station parameters until every group
     # has been read and the cube is long gone.
@@ -321,15 +321,14 @@ function _solve_group(
         # contention.
         ncomp, flags = _station_solve!(s, ctx, stageB, (det,))
         if s.steer_cells > 0
-            sd, sr = Fring.scan_station_terms(ctx.model, ctx.layout, ctx.θ, ti)
+            sd, sr = Fring.scan_station_terms(ctx.model, ctx.layout, ctx.θ, ti, ctx.geom.stations)
             # θ is dense: a station this scan never constrained reads back as an
             # identity 0, indistinguishable from a solved zero delay. Steering to
             # it would invent a prediction and manufacture detections, so the
             # solve's own unconstrained list is what makes those nodes unusable.
-            for (a, _) in flags
-                (1 <= a <= size(sd, 1)) || continue
-                sd[a, :] .= NaN
-                sr[a, :] .= NaN
+            for (name, _) in flags
+                sd[AntennaName(At(name))] .= NaN
+                sr[AntennaName(At(name))] .= NaN
             end
             steer = Fring.steer_scan(
                 # The same epoch the search above referenced: `sr` is a rate
@@ -339,26 +338,30 @@ function _solve_group(
             )
         end
     end
-    _st(field, j, p) = steer === nothing ? NaN : steer[field][j, p]
-    rows = [
-        (;
-            a = bl_pairs[j][1], b = bl_pairs[j][2], pol = feeds[p],
-            snr = res.snr[j, p], pfa = res.pfa[j, p],
-            delay = res.delay[j, p], rate = res.rate[j, p],
-            phase = res.phase[j, p],
-            detected = res.pfa[j, p] <= pfa_max,
-            snr_steer = _st(:snr, j, p), pfa_steer = _st(:pfa, j, p),
-            delay_steer = _st(:delay, j, p), rate_steer = _st(:rate, j, p),
-            # Measured at the station solution's delay and rate rather than found
-            # blind. There is no threshold here: `pfa_max` decides fringe-group
-            # membership on the blind pass, and once a station is in that group
-            # its baselines are measured at the known fringe location to
-            # arbitrarily low SNR. `pfa_steer` records the significance of what
-            # was measured; it does not gate it.
-            steered = res.pfa[j, p] > pfa_max && isfinite(_st(:snr, j, p)),
+    _st(field, cell) = steer === nothing ? NaN : steer[field][cell]
+    rows = Fring.DetectionRow[]
+    for p in eachindex(feeds), j in eachindex(antenna_pairs)
+        cell = (AntennaPair(j), FeedPair(p))
+        res.valid[cell] || continue
+        push!(
+            rows, (;
+                a = antenna_pairs[j][1], b = antenna_pairs[j][2], feeds = feeds[p],
+                snr = res.snr[cell], pfa = res.pfa[cell],
+                delay = res.delay[cell], rate = res.rate[cell],
+                phase = res.phase[cell],
+                detected = res.pfa[cell] <= pfa_max,
+                snr_steer = _st(:snr, cell), pfa_steer = _st(:pfa, cell),
+                delay_steer = _st(:delay, cell), rate_steer = _st(:rate, cell),
+                # Measured at the station solution's delay and rate rather than found
+                # blind. There is no threshold here: `pfa_max` decides fringe-group
+                # membership on the blind pass, and once a station is in that group
+                # its baselines are measured at the known fringe location to
+                # arbitrarily low SNR. `pfa_steer` records the significance of what
+                # was measured; it does not gate it.
+                steered = res.pfa[cell] > pfa_max && isfinite(_st(:snr, cell)),
+            ),
         )
-            for p in eachindex(feeds) for j in eachindex(bl_pairs) if res.valid[j, p]
-    ]
+    end
     max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
     local_solve && return (; ncomp, flags, max_snr, ncells, rows)
     return (; det, max_snr, ncells, rows)

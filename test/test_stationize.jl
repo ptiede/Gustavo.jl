@@ -69,7 +69,11 @@ all_baselines(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
 # shares the same factor.
 const SCAN_SPREAD = (freq_rms = 2.0e9 / sqrt(12), time_rms = 300.0 / sqrt(12))
 
-detstack(D, bl, pols; kw...) = FR.detection_stack(D, bl, pols; SCAN_SPREAD..., kw...)
+# Station `i` of these fixtures is named "A$i"; `STATIONS` numbers them so.
+const STATIONS = ["A$i" for i in 1:64]
+named(bl) = [(STATIONS[a], STATIONS[b]) for (a, b) in bl]
+detstack(D, bl, pols; kw...) = FR.detection_stack(D, named(bl), pols; SCAN_SPREAD..., kw...)
+solve_named!(θ, scans, comps; kw...) = FR.solve_station_systems!(θ, scans, comps, STATIONS; kw...)
 
 # The station model these tests are written against: one column per (station,
 # feed) for each of delay, rate and constant phase, over a single scan.
@@ -113,8 +117,8 @@ function stationize(
     layout = perfeed_scan_layout(nant)
     cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
     θ = zeros(layout.nθ)
-    scans = (FR.detection_stack(D, bl, pols; ti = 1, spreads...),)
-    ncomp, ref_covered = FR.solve_station_systems!(
+    scans = (FR.detection_stack(D, named(bl), pols; ti = 1, spreads...),)
+    ncomp, ref_covered = solve_named!(
         θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate));
         gauge = gauge, opts = opts,
     )
@@ -243,7 +247,7 @@ end
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     # Parallel-hand products (PP=1, QQ=4) close exactly on noiseless data.
     for prod in (1, 4), obs in (:delay, :phase)
-        res = FR.station_closure_residuals(D, bl, pols; observable = obs, product = prod)
+        res = FR.station_closure_residuals(detstack(D, bl, pols; ti = 1); observable = obs, feeds = pols[prod])
         @test !isempty(res)
         @test maximum(abs, res) < 1.0e-9
     end
@@ -324,8 +328,8 @@ end
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(absent_ref))
-    @test sol.ref_covered == Set((a, 1) for a in 1:4)
-    @test !((absent_ref, 1) in sol.ref_covered)     # never fabricated
+    @test sol.ref_covered == Set((STATIONS[a], 1) for a in 1:4)
+    @test !((STATIONS[absent_ref], 1) in sol.ref_covered)     # never fabricated
     # The solution is exact despite the missing reference: only its gauge is
     # arbitrary, and a gauge cancels on every baseline of its own component.
     r = recon_residuals(D, sol, bl, pols)
@@ -353,7 +357,7 @@ end
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
-    @test sol.ref_covered == Set((a, 1) for a in 1:nant)
+    @test sol.ref_covered == Set((STATIONS[a], 1) for a in 1:nant)
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-20
     @test r.phase < 1.0e-10
@@ -424,8 +428,8 @@ end
     layout = perfeed_scan_layout(nant)
     θ = zeros(layout.nθ)
     plans = ((layout.plans[1], :phase), (layout.plans[2], :delay), (layout.plans[3], :rate))
-    _, covered = FR.solve_station_systems!(θ, (FR.detection_stack(D, bl, pols; ti = 1, SCAN_SPREAD...),), plans)
-    @test covered == Set((a, 1) for a in 1:3)
+    _, covered = solve_named!(θ, (FR.detection_stack(D, named(bl), pols; ti = 1, SCAN_SPREAD...),), plans)
+    @test covered == Set((STATIONS[a], 1) for a in 1:3)
     for (plan, _) in plans, f in 1:2
         @test θ[plan_off1(plan)[4, f, 1, 1]] == 0
         @test any(a -> θ[plan_off1(plan)[a, f, 1, 1]] != 0, 1:3)
@@ -561,7 +565,7 @@ end
     comps = (
         (cf_sf, :phase), (cf_g, :phase), (d_sf, :delay), (d_g, :delay), (layout.plans[5], :rate),
     )
-    ncomp, = FR.solve_station_systems!(θ, scans, comps; gauge = PinAntenna(ref))
+    ncomp, = solve_named!(θ, scans, comps; gauge = PinAntenna(ref))
 
     # The track-global inter-feed delay offset is recovered absolutely (cross hands pin it).
     δrec = [plan_off1(d_g)[a, 2, 1, 1] == 0 ? NaN : θ[plan_off1(d_g)[a, 2, 1, 1]] for a in 1:nant]
@@ -783,7 +787,7 @@ end
         opts = FR.Stationization(loss = FR.SoftL1())
 
         θ = zeros(layout.nθ)
-        FR.solve_station_systems!(
+        solve_named!(
             θ, (
                 detstack(s1.D, s1.bl, s1.pols; ti = 1),
                 detstack(s2.D, s2.bl, s2.pols; ti = 3),
@@ -791,7 +795,7 @@ end
             ((cplan, :phase),); gauge = PinAntenna(ref), opts = opts,
         )
         θ1 = zeros(layout.nθ)
-        FR.solve_station_systems!(
+        solve_named!(
             θ1, (detstack(s1.D, s1.bl, s1.pols; ti = 1),),
             ((cplan, :phase),); gauge = PinAntenna(ref), opts = opts,
         )
@@ -856,12 +860,12 @@ end
     opts = FR.Stationization(loss = FR.SoftL1())
 
     θp = zeros(layout.nθ)
-    ncomp_p, cov_p = FR.solve_station_systems!(θp, Tuple(stacks), comps; gauge = PinAntenna(ref), opts)
+    ncomp_p, cov_p = solve_named!(θp, Tuple(stacks), comps; gauge = PinAntenna(ref), opts)
     θs = zeros(layout.nθ)
     ncomp_s = 0
-    cov_s = Set{Tuple{Int, Int}}()
+    cov_s = Set{Tuple{String, Int}}()
     for (gi, st) in enumerate(stacks)
-        nc, cov = FR.solve_station_systems!(θs, (st,), comps; gauge = PinAntenna(ref), opts)
+        nc, cov = solve_named!(θs, (st,), comps; gauge = PinAntenna(ref), opts)
         ncomp_s += nc
         union!(cov_s, Set((a, gi) for (a, _) in cov))
     end
@@ -1017,7 +1021,7 @@ end
     cplan, dplan, rplan = layout.plans
     θ = zeros(layout.nθ)
     scans = (detstack(D, bl, pols; ti = 1),)
-    FR.solve_station_systems!(
+    solve_named!(
         θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate));
         gauge = PinAntenna(1),
     )

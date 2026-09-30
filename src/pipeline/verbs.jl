@@ -168,24 +168,24 @@ calibrate(
     kwargs...,
 ) = UVData.apply_calibration(uvset, spw_cals; kwargs...)
 
-# The unconstrained (station, scan id) pairs the steps of `sol` record, as a
-# lookup set, `nothing` when they record none.
+# The unconstrained (station name, scan id) pairs the steps of `sol` record, as
+# a lookup set, `nothing` when they record none.
 function _solution_flag_sets(sol::CalibrationSolution)
-    flagged = Set{Tuple{Int, Int}}()
+    flagged = Set{Tuple{String, Int}}()
     for info in values(sol.steps)
         haskey(info, :flagged_ant) || continue
         for i in eachindex(info.flagged_ant, info.flagged_scan)
-            push!(flagged, (Int(info.flagged_ant[i]), Int(info.flagged_scan[i])))
+            push!(flagged, (String(info.flagged_ant[i]), Int(info.flagged_scan[i])))
         end
     end
     return isempty(flagged) ? nothing : flagged
 end
 
 # Flag the samples of each baseline touching a (station, scan) in `flagged`,
-# stations and scans indexing the solution's geometry `solgeom`, matched by name.
+# scans indexing the solution's geometry `solgeom`, matched by name.
 function _flag_unconstrained(ms::XRadio.MeasurementSet, solgeom::DataGeometry, geom::DataGeometry, flagged)
     flagged === nothing && return ms
-    station = [something(findfirst(==(n), solgeom.stations), 0) for n in geom.stations]
+    station = geom.stations
     scan = [something(findfirst(==(String(c)), solgeom.scan_names), 0) for c in ms[:scan_name]]
     flag = modify(Array, ms[:flag])
     hit = false
