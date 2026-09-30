@@ -374,6 +374,122 @@ function _cell_noise2(rbar, wbar, along)
     return DimArray(parent(n2), cells)
 end
 
+# ── Node-graph solve (adhoc per-AP and bandpass closures) ───────────────────
+
+# Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
+_node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
+
+# The two ends of a node-system edge on the (station, feed) graph. A cell of a
+# `(AntennaPair, FeedPair)` system observes `φ(a, na) − φ(b, nb)`, where
+# `nodes[cell] = ((a, na), (b, nb))` gives each end's station index and phase
+# node — `_feed_node(tying, feed)` of the product's feeds, so the node equals the
+# feed only under `PerFeed`. An edge with `na != nb` is cross-hand: the only kind
+# that ties the two feed blocks together.
+_edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nant))
+
+# Solve one observable's WLS system on the (station, feed) graph into `vals`
+# and `cov`, each `(nant, 2)`: the node values, `NaN` where unsolved, and which
+# nodes were solved. `val`, `w`, `mask` and `nodes` share their `(AntennaPair,
+# FeedPair)` axes; each cell with `mask` set is one observation `val` of its edge
+# (see `_edge`) with weight `w`. The system is solved in `val`'s element type.
+# Returns the number of connected components.
+function _solve_observable!(
+        vals, cov, val, w, mask, nodes, gauge::AbstractGauge;
+        rewrap::Integer,
+        seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
+    )
+    # `_node` numbers stations and feeds from 1.
+    Base.require_one_based_indexing(vals, cov)
+    isnothing(seed_phase) || Base.require_one_based_indexing(seed_phase)
+    T = eltype(val)
+    nant = size(vals, 1)
+    size(vals) == size(cov) == (nant, 2) ||
+        throw(DimensionMismatch("vals and cov must be (nant, 2); got $(size(vals)) and $(size(cov))"))
+    fill!(vals, NaN)
+    fill!(cov, false)
+    nnodes = 2 * nant
+    cells = [I for I in eachindex(val, w, mask, nodes) if mask[I]]
+    isempty(cells) && return 0
+
+    edges = [_edge(nodes[I], nant) for I in cells]
+    b = T[val[I] for I in cells]
+    wt = T[w[I] for I in cells]
+    compid, ncomp, touched = connected_components(nnodes, edges)
+
+    # `gauge` sets each component's offset (`_regauge!`). `anchors` names a real
+    # node per component as well — phase unwrapping propagates outward from an
+    # actual node, which a summed gauge row does not provide.
+    nodew = _node_weights(nnodes, edges, wt)
+    # Inverse of `_node`: the feed-1 block is 1:nant, feed-2 is nant+1:2nant.
+    station_of(n) = (n - 1) % nant + 1
+    feed_of(n) = n > nant ? 2 : 1
+    comps = [findall(==(c), compid) for c in 1:ncomp]
+    anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
+    A = zeros(T, length(edges), nnodes)
+    for (i, (u, v)) in enumerate(edges)
+        A[i, u] += one(T)
+        A[i, v] -= one(T)
+    end
+    # Only differences are observed, so each component is solved with its anchor
+    # held at 0 (untouched nodes also stay 0) and `_regauge!` then applies `gauge`.
+    free = [n for n in eachindex(touched) if touched[n] && n ∉ anchors]
+    solve_free = FactoredWLS(A[:, free], wt)
+    function solve_system(y)
+        full = zeros(T, nnodes)
+        full[free] .= solve_free(y)
+        return full
+    end
+
+    # Phase: unwrap toward a spanning-tree seed rather than solving the raw
+    # wrapped observations, whose WLS fit can lock onto the wrong 2π branch when
+    # a station difference exceeds ±π. Cross-hand edges carry the inter-feed
+    # offset, which the tree cannot place, so the tree runs over the
+    # parallel-hand edges only.
+    if rewrap > 0
+        parallel = ((u, v, y, wi) for ((u, v), y, wi) in zip(edges, b, wt) if (u - 1) ÷ nant == (v - 1) ÷ nant)
+        xseed = _prim_seed(T, nnodes, parallel, anchors)
+        # A `seed_phase` (the previous AP's solved node phases) overrides the
+        # tree wherever it is finite. It only picks each observation's 2π
+        # branch, and edge predictions are gauge-invariant, so a differently
+        # anchored neighboring AP is a valid seed; it keeps a weakly constrained
+        # station from flipping between branches from one AP to the next.
+        if !isnothing(seed_phase)
+            for ant in axes(seed_phase, 1), feed in axes(seed_phase, 2)
+                v = seed_phase[ant, feed]
+                isfinite(v) && (xseed[_node(ant, feed, nant)] = v)
+            end
+        end
+        x, _ = _rewrap_solve(solve_system, A, b, xseed, rewrap)
+    else
+        x = solve_system(b)
+    end
+    _regauge!(x, comps, gauge, nodew, station_of, feed_of)
+
+    for ant in axes(vals, 1), feed in axes(vals, 2)
+        n = _node(ant, feed, nant)
+        if touched[n]
+            vals[ant, feed] = x[n]
+            cov[ant, feed] = true
+        end
+    end
+    return ncomp
+end
+
+# Shift each component of `x` by a constant so that its `gauge` row sums to
+# zero. A constant per component changes no edge difference.
+function _regauge!(x, comps, gauge::AbstractGauge, nodew, station_of, feed_of)
+    row = zeros(eltype(x), length(x))
+    for cn in comps
+        fill!(row, zero(eltype(row)))
+        gauge_row!(row, gauge, cn, nodew, station_of, feed_of)
+        c = sum(n -> row[n] * x[n], cn) / sum(n -> row[n], cn)
+        for n in cn
+            x[n] -= c
+        end
+    end
+    return x
+end
+
 # Circular (complex-phasor) solve of one AP's system, z_a ← Σ_b w·e^{iφ_ab}·z_b,
 # gauged at the anchor. It seeds the linear solve at APs with no usable
 # warm-start snapshot and must not be replaced by a cold linear solve: the

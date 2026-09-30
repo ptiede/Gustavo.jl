@@ -16,7 +16,7 @@
 # assumption fails, with the priors entering inside the gain update.
 #
 # The graph/solve helpers (`_solve_observable!`, `_cell_noise2`, `_node`) live
-# in stationize.jl/adhoc.jl; the prior fits live in prior_fits.jl.
+# in adhoc.jl; the prior fits live in prior_fits.jl.
 
 """
     default_bandpass_terms(; freq = ChannelBlocks(1)) -> GainModel

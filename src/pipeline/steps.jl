@@ -303,10 +303,9 @@ function _solve_group(
     # family-wise PFA, and whether that PFA accepts it as a real fringe. Recording
     # the rejected cells too is what makes the near-threshold population visible;
     # `detected` is the column that separates them. The search cube is transient
-    # (consumed by the station solve), so these are read off it here; `cells1` is
-    # the only piece not already in the cube.
-    cells1 = Fring._search_cells(gc.freqs, gc.times, s.search)
-    ncells = cells1 * max(length(antenna_pairs) * length(feeds), 1)
+    # (consumed by the station solve), so these are read off it here; `ncells` is
+    # the family the recorded `pfa` was computed over.
+    ncells = Fring._family_cells(gc, s.search, length(ctx.groups))
     pfa_max = s.closure.pfa_max
     ncomp, flags = 0, Tuple{String, Int}[]
     # Steering needs θ for this scan, so it can only run where the station solve
@@ -337,7 +336,7 @@ function _solve_group(
             )
         end
     end
-    _st(field, cell) = steer === nothing ? NaN : steer[field][cell]
+    _st(field, cell) = isnothing(steer) ? NaN : steer[field][cell]
     rows = Fring.DetectionRow[]
     for p in eachindex(feeds), j in eachindex(antenna_pairs)
         cell = (AntennaPair(j), FeedPair(p))
@@ -372,9 +371,9 @@ function _group_setup(::Bandpass, ctx::SolveContext)
     # The accumulators' labels, shared by every scan group: each stored cross
     # pair and feed pair of the set.
     members = [ms for group in values(ctx.groups) for ms in values(group)]
-    cross = [p for ms in members for p in Fring._member_station_pairs(ms) if p[1] != p[2]]
-    station_pairs = Fring._station_pairs(cross, ctx.geom)
-    feeds = sort!(unique!([f for ms in members for f in feed_pairs(ms)]))
+    station_pairs, feeds = Fring._cross_cell_labels(
+        map(Fring._member_station_pairs, members), map(feed_pairs, members), ctx.geom,
+    )
     # `ctx.layout` holds only this step's own components. The two observables are
     # located by NAME through the layout's component tree: the flat `plans` list
     # carries one entry per station-signature group, so its positions stop naming

@@ -1,8 +1,9 @@
-# ── Fringe search over one materialized scan group ───────────────────────────
+# ── Fringe search over one scan group ────────────────────────────────────────
 #
-# Given a materialized scan `DimStack` and its `DataGeometry`, run the
-# per-baseline kernels in `search.jl` over every (baseline, product) cell. The
-# pipeline reads and corrects the scan group and supplies it here.
+# Given a scan group (a `ProcessingSet` of Measurement Sets sharing one time
+# axis) and its `DataGeometry`, run the per-baseline kernels in `search.jl` over
+# every (antenna pair, feed pair) cell. The pipeline reads and corrects the scan
+# group and supplies it here.
 
 # One recorded search row: the antenna names, feed pair, SNR, the
 # family-wise false-alarm probability, and whether that PFA accepted it as a real
@@ -13,7 +14,7 @@
 # (`scan_phase_epoch`). It is the only stage-A observable a station solve cannot
 # be inverted for: the parallel-hand pair of one baseline gives the inter-feed
 # offset difference `ρ_a − ρ_b` directly as `QQ − PP`, with the source and
-# atmospheric terms cancelling, at parallel-hand SNR and without cross-hand data
+# atmospheric terms canceling, at parallel-hand SNR and without cross-hand data
 # or any station fit in between.
 const DetectionRow = @NamedTuple{
     a::String, b::String, feeds::Tuple{Int, Int}, snr::Float64, pfa::Float64,
@@ -49,8 +50,7 @@ function _GroupCells(group::XRadio.ProcessingSet, geom::DataGeometry)
     end
     member_pairs = map(_member_station_pairs, members)
     member_feeds = map(feed_pairs, members)
-    stations = _station_pairs([p for ps in member_pairs for p in ps if p[1] != p[2]], geom)
-    feeds = sort!(unique!([f for fs in member_feeds for f in fs]))
+    stations, feeds = _cross_cell_labels(member_pairs, member_feeds, geom)
     row = Dict(p => j for (j, p) in pairs(stations))
     col = Dict(f => q for (q, f) in pairs(feeds))
     loc = fill((0, 0), length(members), length(stations), length(feeds))
@@ -66,6 +66,23 @@ function _GroupCells(group::XRadio.ProcessingSet, geom::DataGeometry)
         reduce(vcat, (collect(XRadio.frequencies(ms)) for ms in members)), times,
         stations, feeds, loc,
     )
+end
+
+# The cross antenna pairs of Measurement Sets with antenna pairs `member_pairs`
+# and feed pairs `member_feeds`, in `geom`'s station order, and the sorted union
+# of their feed pairs.
+function _cross_cell_labels(member_pairs, member_feeds, geom::DataGeometry)
+    cross = [p for ps in member_pairs for p in ps if p[1] != p[2]]
+    feeds = sort!(unique!([f for fs in member_feeds for f in fs]))
+    return _station_pairs(cross, geom), feeds
+end
+
+# The false-alarm family of a search of `gc` (see `search_scan`): the trial
+# count of one search times the `ncross×npol×ngroups` searches.
+function _family_cells(gc::_GroupCells, params::FringeSearch, ngroups::Integer)
+    ngroups >= 1 || throw(ArgumentError("ngroups must be at least 1; got $ngroups"))
+    nsearch = max(length(gc.antenna_pairs) * length(gc.feeds), 1) * ngroups
+    return _search_cells(gc.freqs, gc.times, params) * nsearch
 end
 
 # Cell `(j, q)`'s layers copied into `ws` frequency-fastest, one member's
@@ -108,8 +125,9 @@ reference frequency `f0`, the default phase epoch, and the order of the
 antenna pairs. To search a residual, pass the group [`residual_group`](@ref)
 returns.
 
-`ngroups` sizes the false-alarm family each cell's `pfa` is computed over:
-the family of `ncross×npol×ngroups` searches shares one budget (Bonferroni),
+`ngroups` (at least 1) sizes the false-alarm family each cell's `pfa` is
+computed over: the family of `ncross×npol×ngroups` searches shares one budget
+(Bonferroni),
 so a recorded `pfa` is directly comparable to `Stationization.pfa_max`. The
 default `ngroups = 1` scopes the family to this scan; a whole-track solve
 passes its scan count.
@@ -151,9 +169,8 @@ function search_scan(
     pfa = similar(delay)
     scube = DimensionalData.DimStack((; delay, rate, phase, amp, snr, pfa, valid))
 
+    family_cells = _family_cells(gc, params, ngroups)
     ax = _search_axes(gc.freqs, gc.times, params, C)
-    nsearch = max(length(gc.antenna_pairs) * length(gc.feeds), 1) * max(ngroups, 1)
-    family_cells = _search_cells(gc.freqs, gc.times, params) * nsearch
 
     workspace = TaskLocalValue{FringeWorkspace{C}}(() -> FringeWorkspace(C))
     cells = vec(CartesianIndices(valid))

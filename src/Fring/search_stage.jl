@@ -8,8 +8,8 @@
 # - What the matched filter (the per-baseline search and the station solve)
 #   can fit and requires of a model.
 # - The stage machinery the step drives through the streaming layer: residual
-#   cubes for `rounds > 1`, the stage-B component filter, and the
-#   detection/flag tables recorded on the solution.
+#   scan groups for `rounds > 1`, the stage-B component filter, steering, and
+#   the detection/flag tables recorded on the solution.
 
 """
     default_fringe_terms(; rel_time = PerScan()) -> GainModel
@@ -373,7 +373,7 @@ function _scan_epoch(comps, ti::Integer)
     for (plan, kind) in comps
         kind === :rate || continue
         o = Float64(plan.tstate[plan.tseg_id[ti]])
-        if epoch === nothing
+        if isnothing(epoch)
             epoch = o
         elseif !isapprox(o, epoch; atol = _epoch_atol(epoch))
             throw(

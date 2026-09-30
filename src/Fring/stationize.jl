@@ -208,7 +208,7 @@ _row_weight(σ_stat::Real, σ_sys::Real, scale::Real = 1.0) =
 # σ. Rather than silently leaving those rows at full weight — which reads as
 # "robust" while downweighting nothing — refuse the combination outright.
 function _require_spread(spread, kind::Symbol, loss::AbstractRobustLoss)
-    (spread !== nothing && spread > 0) && return float(spread)
+    (!isnothing(spread) && spread > 0) && return float(spread)
     loss isa LeastSquares && return 1.0     # unused: a common factor cancels
     what = kind === :delay ? ("freq_rms", "RMS frequency spread (Hz)") :
         ("time_rms", "RMS time spread (s)")
@@ -216,200 +216,12 @@ function _require_spread(spread, kind::Symbol, loss::AbstractRobustLoss)
         ArgumentError(
             "a $(nameof(typeof(loss))) loss on the $kind system needs the scan's " *
                 "$(what[2]) to express residuals in units of σ, but `$(what[1])` is " *
-                "$(spread === nothing ? "missing" : "$spread"). Supply it (see " *
+                "$(isnothing(spread) ? "missing" : "$spread"). Supply it (see " *
                 "`detection_stack`/`solve_station_systems!`), or set " *
                 "`Stationization(loss = LeastSquares())` to weight rows by the " *
                 "noise model alone.",
         ),
     )
-end
-
-# Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
-_node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
-
-# The two ends of a node-system edge on the (station, feed) graph. A cell of a
-# `(AntennaPair, FeedPair)` system observes `φ(a, na) − φ(b, nb)`, where
-# `nodes[cell] = ((a, na), (b, nb))` gives each end's station index and phase
-# node — `_feed_node(tying, feed)` of the product's feeds, so the node equals the
-# feed only under `PerFeed`. An edge with `na != nb` is cross-hand: the only kind
-# that ties the two feed blocks together.
-_edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nant))
-
-# Solve one observable's WLS system on the (station, feed) graph into `vals`
-# and `cov`, each `(nant, 2)`: the node values, `NaN` where unsolved, and which
-# nodes were solved. `val`, `w`, `mask` and `nodes` share their `(AntennaPair,
-# FeedPair)` axes; each cell with `mask` set is one observation `val` of its edge
-# (see `_edge`) with weight `w`. The system is solved in `val`'s element type.
-# Returns the number of connected components.
-function _solve_observable!(
-        vals, cov, val, w, mask, nodes, gauge::AbstractGauge;
-        rewrap::Integer,
-        seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
-    )
-    # `_node` numbers stations and feeds from 1.
-    Base.require_one_based_indexing(vals, cov)
-    isnothing(seed_phase) || Base.require_one_based_indexing(seed_phase)
-    T = eltype(val)
-    nant = size(vals, 1)
-    size(vals) == size(cov) == (nant, 2) ||
-        throw(DimensionMismatch("vals and cov must be (nant, 2); got $(size(vals)) and $(size(cov))"))
-    fill!(vals, NaN)
-    fill!(cov, false)
-    nnodes = 2 * nant
-    cells = [I for I in eachindex(val, w, mask, nodes) if mask[I]]
-    isempty(cells) && return 0
-
-    edges = [_edge(nodes[I], nant) for I in cells]
-    b = T[val[I] for I in cells]
-    wt = T[w[I] for I in cells]
-    compid, ncomp, touched = connected_components(nnodes, edges)
-
-    # `gauge` sets each component's offset (`_regauge!`). `anchors` names a real
-    # node per component as well — phase unwrapping propagates outward from an
-    # actual node, which a summed gauge row does not provide.
-    nodew = zeros(T, nnodes)
-    for ((u, v), wi) in zip(edges, wt)
-        nodew[u] += wi
-        nodew[v] += wi
-    end
-    # Inverse of `_node`: the feed-1 block is 1:nant, feed-2 is nant+1:2nant.
-    station_of(n) = (n - 1) % nant + 1
-    feed_of(n) = n > nant ? 2 : 1
-    comps = [findall(==(c), compid) for c in 1:ncomp]
-    anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
-    A = zeros(T, length(edges), nnodes)
-    for (i, (u, v)) in enumerate(edges)
-        A[i, u] += one(T)
-        A[i, v] -= one(T)
-    end
-    # Only differences are observed, so each component is solved with its anchor
-    # held at 0 (untouched nodes also stay 0) and `_regauge!` then applies `gauge`.
-    free = [n for n in eachindex(touched) if touched[n] && n ∉ anchors]
-    solve_free = FactoredWLS(A[:, free], wt)
-    function solve_system(y)
-        full = zeros(T, nnodes)
-        full[free] .= solve_free(y)
-        return full
-    end
-
-    # Phase re-wrap: unwrap observations toward a model and re-solve, so
-    # station-difference phases exceeding ±π are handled. The first model comes
-    # from a maximum-weight spanning-tree traversal of the (station, feed) graph:
-    # propagating wrapped edge phases from each pin gives a globally
-    # consistent unwrap that is correct even when a true station-difference
-    # exceeds ±π — far more robust than starting the iteration from a WLS fit on
-    # the raw wrapped observations, which can lock onto the wrong 2π branch. For
-    # delay/rate (`rewrap == 0`, no wrapping) we solve the raw system directly.
-    if rewrap > 0
-        xseed = _spanning_tree_seed(edges, b, wt, nant, anchors)
-        # Temporal warm-start: where a `seed_phase` (e.g. the previous AP's solved
-        # node phases) is available, override the per-solve spanning-tree seed with
-        # it. The model is used only to pick each observation's 2π branch, and edge
-        # predictions `φ_na − φ_nb` are gauge-invariant, so a warm-start from a
-        # differently-anchored neighbouring AP is safe. This gives the per-AP adhoc
-        # track temporal continuity, so a weakly-constrained station cannot flip
-        # between two sub-2π branches AP-to-AP (which the integer-2π unwrap and the
-        # smoother both leave intact). Stations the seed does not cover fall back to
-        # the spanning-tree estimate.
-        if seed_phase !== nothing
-            for ant in axes(seed_phase, 1), feed in axes(seed_phase, 2)
-                v = seed_phase[ant, feed]
-                isfinite(v) && (xseed[_node(ant, feed, nant)] = v)
-            end
-        end
-        model = A * xseed
-        bw = similar(b)
-        @. bw = b + 2π * round((model - b) / (2π))
-        x = solve_system(bw)
-        for _ in 1:rewrap
-            model = A * x
-            @. bw = b + 2π * round((model - b) / (2π))
-            x = solve_system(bw)
-        end
-    else
-        x = solve_system(b)
-    end
-    _regauge!(x, comps, gauge, nodew, station_of, feed_of)
-
-    for ant in axes(vals, 1), feed in axes(vals, 2)
-        n = _node(ant, feed, nant)
-        if touched[n]
-            vals[ant, feed] = x[n]
-            cov[ant, feed] = true
-        end
-    end
-    return ncomp
-end
-
-# Shift each component of `x` by a constant so that its `gauge` row sums to
-# zero. A constant per component changes no edge difference.
-function _regauge!(x, comps, gauge::AbstractGauge, nodew, station_of, feed_of)
-    row = zeros(eltype(x), length(x))
-    for cn in comps
-        fill!(row, zero(eltype(row)))
-        gauge_row!(row, gauge, cn, nodew, station_of, feed_of)
-        c = sum(n -> row[n] * x[n], cn) / sum(n -> row[n], cn)
-        for n in cn
-            x[n] -= c
-        end
-    end
-    return x
-end
-
-# Maximum-weight spanning-tree phase seed. Propagate wrapped edge phases
-# from each pin over the parallel-hand (same-feed-node) edges of the
-# (station, feed) graph, preferring high-weight edges, to build a globally
-# consistent node-phase estimate. Cross-hand edges are excluded from the tree:
-# they carry the inter-feed offset, which the tree has no way to place, so their
-# nodes are reached through the parallel-hand subgraph (or seeded 0 and resolved
-# by the WLS). The estimate is used only to unwrap the observations for the first
-# constrained solve, so any edge it cannot place stays 0 — the re-wrap iterations
-# refine from there. Edge `i` observes `φ[edges[i][1]] − φ[edges[i][2]] = val[i]`.
-function _spanning_tree_seed(edges, val::AbstractVector{T}, w, nant::Integer, anchors) where {T}
-    nnodes = 2 * nant
-    x = zeros(T, nnodes)
-    # Adjacency over parallel-hand edges: neighbor, phase to ADD (φ_v = φ_u + add), weight.
-    adj = [Vector{Tuple{Int, T, T}}() for _ in 1:nnodes]
-    for ((u, v), y, wi) in zip(edges, val, w)
-        (u - 1) ÷ nant == (v - 1) ÷ nant || continue
-        push!(adj[u], (v, -y, wi))
-        push!(adj[v], (u, y, wi))
-    end
-    # Visit strongest edges first so the tree follows high-SNR connections.
-    for n in eachindex(adj)
-        sort!(adj[n]; by = e -> e[3], rev = true)
-    end
-    # Grow a maximum-weight spanning tree per component (Prim): repeatedly attach the
-    # highest-weight edge from the visited set to an unvisited node. Following the
-    # strongest edges (not just any incident edge, as a plain BFS would) keeps the
-    # unwrapping on the most reliable, smallest-|Δφ| connections — a hub node
-    # directly joined to a far node by a low-SNR, >π edge does not get to define
-    # that node's branch.
-    visited = falses(nnodes)
-    for p in anchors
-        (1 <= p <= nnodes && !visited[p]) || continue
-        visited[p] = true                       # pinned node phase stays 0
-        while true
-            best_w = T(-Inf)
-            best_u = 0
-            best_v = 0
-            best_add = zero(T)
-            for u in eachindex(visited)
-                visited[u] || continue
-                for (v, add, w) in adj[u]
-                    (!visited[v] && w > best_w) || continue
-                    best_w = w
-                    best_u = u
-                    best_v = v
-                    best_add = add
-                end
-            end
-            best_v == 0 && break               # component exhausted
-            x[best_v] = x[best_u] + best_add
-            visited[best_v] = true
-        end
-    end
-    return x
 end
 
 # ── Generic, model-driven station solve ─────────────────────────────────────
@@ -438,8 +250,8 @@ end
 # `search_scan` returns, read by label: each antenna pair names its stations,
 # which `stations` numbers, and a representative global time index `:ti` in
 # metadata selects the `tseg_id`. θ slots are accumulated into
-# with `+=`, matching `_pack_station!`, so `rounds > 1` — search on the residual
-# — stays correct.
+# with `+=`, so `rounds > 1` — search on the residual — adds each round's
+# increment to the last.
 
 """
     detection_stack(D::AbstractMatrix{<:Detection}, antenna_pairs, feeds;
@@ -532,11 +344,10 @@ function solve_station_systems!(
     Base.require_one_based_indexing(θ)
     slot = Dict(n => i for (i, n) in pairs(stations))
     ncomp = 0
-    # (station, scan-index) pairs the solve constrains. A station with no
-    # accepted detection in a scan gets θ = 0 there ⇒ identity gain, and must
-    # be flagged downstream rather than silently passed through uncalibrated.
-    # Intersected over the solved kinds: a station must be constrained in delay
-    # And rate and phase to count as calibrated.
+    # (station, scan-index) pairs the solve constrains, intersected over the
+    # solved kinds: a station must be constrained in delay, rate and phase to
+    # count as calibrated. Everything else is zeroed (identity gain) and
+    # flagged downstream.
     covered = Set{Tuple{Int, Int}}()
     colkeys = Dict{Int, Tuple{Int, Int}}()
     first_kind = true
@@ -645,7 +456,7 @@ function _solve_kind_cols!(
         feeds = _scan_feeds(sc)
         ti = _scan_ti(sc)
         epoch = _scan_epoch(sc)
-        epoch === nothing && _require_common_epoch(rate_plans, ti)
+        isnothing(epoch) && _require_common_epoch(rate_plans, ti)
         # Per scan, not per row: the band and duration are properties of the
         # observation, so every row of one scan shares this lever arm.
         σ = kind === :phase ? one(T) :
@@ -731,17 +542,16 @@ function _solve_kind_cols!(
     # downweight rows whose residual is still a wrap away from its final value.
     w = copy(rw)
     nuisance = node_col .== 0
-    local x, ncomp
     x, ncomp, resid = _solve_tagged_system(
         rowA, rowB, rval, w, rcross, length(node_col),
-        node_feed, node_station, node_scan, gauge; rewrap = rewrap, nuisance, raccept,
+        node_feed, node_station, node_scan, gauge; rewrap, nuisance, raccept,
     )
     if !(opts.loss isa LeastSquares)
         for _ in 1:max(opts.irls_iters, 0)
             _irls_weights!(w, rw, opts.loss, opts.loss_scale, resid) || break
             x, ncomp, resid = _solve_tagged_system(
                 rowA, rowB, rval, w, rcross, length(node_col),
-                node_feed, node_station, node_scan, gauge; rewrap = rewrap, nuisance, raccept,
+                node_feed, node_station, node_scan, gauge; rewrap, nuisance, raccept,
             )
         end
     end
@@ -852,8 +662,7 @@ end
 function _solve_tagged_system(
         rowA, rowB, rval, rw, rcross, nnodes,
         node_feed, node_station, node_scan, gauge::AbstractGauge; rewrap::Integer,
-        nuisance::Union{Nothing, AbstractVector{Bool}} = nothing,
-        raccept::Union{Nothing, AbstractVector{Bool}} = nothing,
+        nuisance::AbstractVector{Bool}, raccept::AbstractVector{Bool},
     )
     T = eltype(rval)
     # Union the columns of each row into one component, from accepted rows only.
@@ -866,8 +675,8 @@ function _solve_tagged_system(
     # isolated island falls to the min-norm completion. `_covered_stations`
     # excludes it from coverage either way.
     edges = Tuple{Int, Int}[]
-    for i in eachindex(rowA)
-        (raccept === nothing || raccept[i]) || continue
+    for i in eachindex(rowA, rowB, raccept)
+        raccept[i] || continue
         ns = vcat(rowA[i], rowB[i])
         for k in 2:length(ns)
             push!(edges, (ns[1], ns[k]))
@@ -882,28 +691,14 @@ function _solve_tagged_system(
 
     # Total row weight on each node — the score the pin falls back to when a
     # component holds no reference node.
-    nodew = zeros(T, nnodes)
-    for i in eachindex(rowA, rowB, rw)
-        for n in rowA[i]
-            nodew[n] += rw[i]
-        end
-        for n in rowB[i]
-            nodew[n] += rw[i]
-        end
-    end
+    nodew = _node_weights(nnodes, zip(rowA, rowB), rw)
 
     # One constraint row per component, from `gauge`; `anchors` names a real node
     # per component for the phase-unwrap seed.
-    comps = Vector{Int}[]
-    for c in 1:ncomp
-        comp = [n for n in eachindex(compid) if compid[n] == c]
-        isempty(comp) && continue
-        push!(comps, comp)
-    end
+    comps = [[n for n in eachindex(compid) if compid[n] == c] for c in 1:ncomp]
     anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
-    nrow = length(rowA)
-    A = zeros(T, nrow, nnodes)
-    for i in eachindex(rowA, rowB, rval, rw)
+    A = zeros(T, length(rowA), nnodes)
+    for i in eachindex(rowA, rowB)
         for n in rowA[i]
             A[i, n] += one(T)
         end
@@ -911,9 +706,7 @@ function _solve_tagged_system(
             A[i, n] -= one(T)
         end
     end
-    b = copy(rval)
-    w = copy(rw)
-    Cp = zeros(eltype(A), length(comps), nnodes)
+    Cp = zeros(T, length(comps), nnodes)
     for (j, cn) in enumerate(comps)
         gauge_row!(view(Cp, j, :), gauge, cn, nodew, station_of, feed_of)
     end
@@ -926,7 +719,7 @@ function _solve_tagged_system(
     # nuisance nodes, through `gauge`, which prefers the ranked reference — a
     # feed-2-only station's phase is thereby referenced to the reference
     # station's feed-2 frame, deterministically.
-    if nuisance !== nothing && any(nuisance)
+    if any(nuisance)
         groups = Dict{Tuple{Int, Int}, Vector{Int}}()
         for n in eachindex(nuisance)
             nuisance[n] || continue
@@ -937,59 +730,65 @@ function _solve_tagged_system(
             push!(get!(groups, (compid[n], node_scan[n]), Int[]), n)
         end
         keyorder = sort!(collect(keys(groups)))
-        Cn = zeros(eltype(A), length(keyorder), nnodes)
+        Cn = zeros(T, length(keyorder), nnodes)
         for (j, k) in enumerate(keyorder)
             gauge_row!(view(Cn, j, :), gauge, groups[k], nodew, station_of, feed_of)
         end
         Cp = vcat(Cp, Cn)
     end
-    # Min-norm completion: fix any gauge freedom the per-component rows leave (the
-    # null space of [A; Cp]). Empty for the per-scan model (those rows suffice ⇒
-    # byte-identical), non-trivial once a global column couples scans.
+    # Min-norm completion: fix any gauge freedom the per-component rows leave
+    # (the null space of [A; Cp]). Empty for a per-scan model; non-trivial once a
+    # global column couples scans.
     nb = nullspace(vcat(A, Cp))
     C = size(nb, 2) > 0 ? vcat(Cp, permutedims(nb)) : Cp
-    solve_system = ConstrainedWLS(A, w, C)
+    solve_system = ConstrainedWLS(A, rw, C)
 
     if rewrap > 0
-        xseed = _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes)
-        twopi = 2 * T(π)
-        model = A * xseed
-        bw = similar(b)
-        @. bw = b + twopi * round((model - b) / twopi)
-        x = solve_system(bw)
-        for _ in 1:rewrap
-            model = A * x
-            @. bw = b + twopi * round((model - b) / twopi)
-            x = solve_system(bw)
-        end
+        x, bw = _rewrap_solve(solve_system, A, rval, _seed_tagged(rowA, rowB, rval, rw, rcross, anchors, nnodes), rewrap)
         resid = bw .- A * x
     else
-        x = solve_system(b)
-        resid = b .- A * x
+        x = solve_system(rval)
+        resid = rval .- A * x
     end
-
-    return x, ncomp, resid, compid
+    return x, ncomp, resid
 end
 
-# Max-weight spanning-tree phase seed in local-node space (column-space twin of
-# `_spanning_tree_seed`): propagate wrapped parallel-hand edge phases from each
-# pin to unwrap the first constrained solve. Every parallel-hand row is a tree
-# edge between the first column of each side — the primary model column, by row
-# construction. Any further columns on a side (a global feed offset, a nuisance
-# feed-2 offset) displace the edge phase by less than a wrap, which is all a
-# branch-picking seed needs; the constrained WLS + re-wrap iterations resolve
-# them exactly.
+# The spanning-tree phase seed in local-node space: each parallel-hand row is a
+# tree edge between the first column of each side, which is a model column by
+# row construction. Further columns on a side (a global feed offset, a nuisance
+# feed-2 offset) are left out of the seed; the constrained WLS and the re-wrap
+# iterations solve for them.
 function _seed_tagged(rowA, rowB, rval::AbstractVector{T}, rw, rcross, anchors, nnodes::Integer) where {T}
-    x = zeros(T, nnodes)
-    adj = [Vector{Tuple{Int, T, T}}() for _ in 1:nnodes]
-    for i in eachindex(rowA, rowB, rval, rw, rcross)
-        rcross[i] && continue
-        na, nb = rowA[i][1], rowB[i][1]
-        push!(adj[na], (nb, -rval[i], rw[i]))
-        push!(adj[nb], (na, rval[i], rw[i]))
+    parallel = ((rowA[i][1], rowB[i][1], rval[i], rw[i]) for i in eachindex(rowA, rowB, rval, rw, rcross) if !rcross[i])
+    return _prim_seed(T, nnodes, parallel, anchors)
+end
+
+# Total weight of the rows touching each of `nnodes` nodes. Each row is a pair of
+# sides, each a node or a collection of nodes.
+function _node_weights(nnodes::Integer, rows, w::AbstractVector{T}) where {T}
+    nodew = zeros(T, nnodes)
+    for ((sa, sb), wi) in zip(rows, w)
+        for n in sa
+            nodew[n] += wi
+        end
+        for n in sb
+            nodew[n] += wi
+        end
     end
-    for n in eachindex(adj)
-        sort!(adj[n]; by = e -> e[3], rev = true)
+    return nodew
+end
+
+# Maximum-weight spanning-tree phase seed on `nnodes` nodes. Each tree edge
+# `(u, v, y, w)` observes `φ[u] − φ[v] = y`, wrapped, with weight `w`. The tree
+# grown from each anchor (Prim) attaches the heaviest edge leaving the visited
+# set, so a node joined to the tree by a weak edge and a strong one takes its
+# branch from the strong one. Anchors, and nodes no tree reaches, stay 0.
+function _prim_seed(::Type{T}, nnodes::Integer, tree_edges, anchors) where {T}
+    x = zeros(T, nnodes)
+    adj = [Tuple{Int, T, T}[] for _ in 1:nnodes]
+    for (u, v, y, w) in tree_edges
+        push!(adj[u], (v, -y, w))
+        push!(adj[v], (u, y, w))
     end
     visited = falses(nnodes)
     for p in anchors
@@ -997,12 +796,13 @@ function _seed_tagged(rowA, rowB, rval::AbstractVector{T}, rw, rcross, anchors, 
         visited[p] = true
         while true
             best_w = T(-Inf)
-            best_u = 0; best_v = 0; best_add = zero(T)
+            best_u = best_v = 0
+            best_add = zero(T)
             for u in eachindex(visited)
                 visited[u] || continue
-                for (v, add, ww) in adj[u]
-                    (!visited[v] && ww > best_w) || continue
-                    best_w = ww; best_u = u; best_v = v; best_add = add
+                for (v, add, w) in adj[u]
+                    (!visited[v] && w > best_w) || continue
+                    best_w, best_u, best_v, best_add = w, u, v, add
                 end
             end
             best_v == 0 && break
@@ -1011,6 +811,22 @@ function _seed_tagged(rowA, rowB, rval::AbstractVector{T}, rw, rcross, anchors, 
         end
     end
     return x
+end
+
+# Solve `A x ≈ b` for phases `b` known modulo 2π: move each observation by whole
+# turns to the branch nearest the model `A x`, starting from `xseed`, and
+# re-solve, `iters + 1` times in all. Returns the solution and the unwrapped
+# observations it fits.
+function _rewrap_solve(solve, A, b, xseed, iters::Integer)
+    twopi = 2 * eltype(b)(π)
+    x = xseed
+    bw = similar(b)
+    for _ in 0:iters
+        model = A * x
+        @. bw = b + twopi * round((model - b) / twopi)
+        x = solve(bw)
+    end
+    return x, bw
 end
 
 """

@@ -33,6 +33,11 @@
         @test fi.det_snr == fim.det_snr
         @test fi.det_pfa == fim.det_pfa
 
+        # `scan_ncells` is the false-alarm family each recorded `pfa` was computed over.
+        solr = fit(BaselineFringeFit(), _build_fringe_ps(; nscans = 3, noise = 0.5)[1]; gauge = PinAntenna(1))
+        fr3 = solr.steps[:fringe]
+        @test fr3.det_pfa ≈ FP.fringe_pfa.(fr3.det_snr, fr3.scan_ncells[fr3.det_scan])
+
         # A gauge naming a station code resolves identically.
         sol_code = fit(
             BaselineFringeFit(),
