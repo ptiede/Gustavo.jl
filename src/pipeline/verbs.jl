@@ -157,9 +157,7 @@ end
 Apply an a-priori amplitude calibration — a single ANTAB table, or one per
 1-based band index as [`load_fitsidi_apriori`](@ref) returns — scaling
 visibilities and weights by the SEFD-derived gains. Keywords
-(`min_elevation_deg`, `on_missing_station`) pass through. To record the
-application on a fitted solution instead, put an [`AprioriAmplitude`](@ref)
-in the pipeline.
+(`min_elevation_deg`, `on_missing_station`) pass through.
 """
 calibrate(antab::UVData.AntabCalibration, uvset::UVSet; kwargs...) =
     UVData.apply_calibration(uvset, antab; kwargs...)

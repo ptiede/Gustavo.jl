@@ -51,12 +51,46 @@ end
         @test g.stations == ["A1", "A2", "B1", "B2"]
         @test length(g.times) == 4
         @test CALg.GeometryWindow(g, pair[:b]).stations == [(3, 4)]
+        # One label per timestamp, and neither scan is split.
+        @test length(g.scan_of_time) == 4
+        @test all(>(0), g.scan_of_time)
+        @test length(unique(g.scan_of_time)) == 1
 
         clash = XRadio.ProcessingSet(
             OrderedDict(:a => _subarray_ms(["A1", "A2"], "1"), :b => _subarray_ms(["A2", "B2"], "2"))
         )
         @test_throws "cannot be in two scans at one instant" CALg.DataGeometry(clash)
         @test_throws "A2" CALg.DataGeometry(clash)
+
+        # A scan running past another's window would be split between labels.
+        times = 1.6e9 .+ 30.0 .* (0:3)
+        partial = XRadio.ProcessingSet(
+            OrderedDict(
+                :a => _subarray_ms(["A1", "A2"], "1"; times = times[1:2]),
+                :b => _subarray_ms(["B1", "B2"], "2"; times),
+            )
+        )
+        @test_throws "partial overlap is not" CALg.DataGeometry(partial)
+
+        # Timestamps within `_epoch_atol` of each other are one instant.
+        nudged = nextfloat.(collect(times))
+        @test nudged != times
+        near = XRadio.ProcessingSet(
+            OrderedDict(
+                :a => _subarray_ms(["A1", "A2"], "1"; times),
+                :b => _subarray_ms(["B1", "B2"], "2"; times = nudged),
+            )
+        )
+        gn = CALg.DataGeometry(near)
+        @test length(gn.times) == length(times)
+        @test all(t -> any(g -> isapprox(g, t; atol = CALg._epoch_atol(t)), gn.times), nudged)
+        near_clash = XRadio.ProcessingSet(
+            OrderedDict(
+                :a => _subarray_ms(["A1", "A2"], "1"; times),
+                :b => _subarray_ms(["A2", "B2"], "2"; times = nudged),
+            )
+        )
+        @test_throws "cannot be in two scans at one instant" CALg.DataGeometry(near_clash)
     end
 
     @testset "errors" begin
@@ -65,6 +99,11 @@ end
         delete!(unlabelled, :scan_name)
         bare = XRadio.ProcessingSet(OrderedDict(:x => unlabelled))
         @test_throws "states no `scan_name`" CALg.DataGeometry(bare)
+
+        # Two spectral windows sharing a channel frequency cannot rank it to one.
+        overlapping, _ = _build_fringe_ps(; nant = 3, spw_sep = 0.0)
+        @test_throws ArgumentError CALg.DataGeometry(overlapping)
+        @test_throws "conflicting spectral windows" CALg.DataGeometry(overlapping)
     end
 end
 

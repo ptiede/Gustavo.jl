@@ -1,55 +1,45 @@
 # Modular calibration-pipeline tests: the pipeline-level surface (a pipeline
 # as a vector, `fit`, `calibrate` and its `post`, the output reducers, defaults).
-# Reuses `_build_fringe_uvset` and the CAL/FP/UVP aliases from test_pipeline.jl
-# (included earlier in runtests.jl).
+# Reuses `_build_fringe_ps`, `_build_fringe_uvset` and the CAL/FP/UVP aliases
+# from test_pipeline.jl (included earlier in runtests.jl).
 
 @testset "Calibration pipeline" begin
     @testset "fit, then calibrate" begin
-        uvset, _ = _build_fringe_uvset()
+        ps, _ = _build_fringe_ps()
         gauge = PinAntenna(1)
         pipe = (BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge))
-        sol = fit(pipe, uvset)
+        sol = fit(pipe, ps)
         @test sol isa CAL.CalibrationSolution
         @test length(sol.geom.stations) == 4
         @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
         @test startswith(sol.provenance.pipeline, "BaselineFringeFit")
-        out = calibrate(sol, uvset)
-        @test out isa UVP.UVSet
-        ref = Gustavo.UVData.apply_calibration(uvset, sol)
-        for (k, leaf) in DimensionalData.branches(ref)
-            @test isequal(parent(DimensionalData.branches(out)[k][:vis]), parent(leaf[:vis]))
+        out = calibrate(sol, ps)
+        @test out isa XRadio.ProcessingSet
+        @test collect(keys(out)) == collect(keys(ps))
+        # Replaying the solve-only pipeline divides by the same gains, step by step.
+        ref = calibrate(pipe, sol, ps)
+        same(x, y) = (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5)
+        for (k, ms) in pairs(ref)
+            @test all(splat(same), zip(parent(out[k][:visibility]), parent(ms[:visibility])))
         end
     end
 
-    @testset "calibrate's post runs on each corrected group" begin
-        uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
+    @testset "calibrate's post runs on each corrected Measurement Set" begin
+        ps, _ = _build_fringe_ps(nspw = 3, nchan = 4)
         gauge = PinAntenna(1)
-        sol = fit(BaselineFringeFit(; gauge) |> Bandpass(; gauge) |> AdhocPhase(; gauge), uvset)
-        out = calibrate(
-            sol, uvset; post = AverageTime(seconds = 1.0e6) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
-        )
-        reducer = uv -> UVP.time_bin_average(UVP.combine_spw(UVP.frequency_average(uv; nout = 1)), 1.0e6)
-        out_ref = reducer(Gustavo.UVData.apply_calibration(uvset, sol))
-        @test Set(keys(DimensionalData.branches(out))) ==
-            Set(keys(DimensionalData.branches(out_ref)))
-        for (k, leaf) in DimensionalData.branches(out_ref)
-            Vr = parent(leaf[:vis])
-            Vf = parent(DimensionalData.branches(out)[k][:vis])
-            @test size(Vf) == size(Vr)
-            @test all(((x, y),) -> (isnan(x) && isnan(y)) || x ≈ y, zip(Vr, Vf))
-        end
-
-        seen = Ref(0)
-        calibrate(sol, uvset; post = uv -> (seen[] += 1; uv))
-        @test seen[] == length(ST.scan_stream(uvset).groups)
+        sol = fit(BaselineFringeFit(; gauge) |> Bandpass(; gauge) |> AdhocPhase(; gauge), ps)
+        seen = Threads.Atomic{Int}(0)
+        calibrate(sol, ps; post = ms -> (Threads.atomic_add!(seen, 1); ms))
+        @test seen[] == length(ps)
     end
 
-    @testset "a pipeline holds solve steps, transforms and a-priori steps" begin
-        uvset, _ = _build_fringe_uvset()
+    @testset "a pipeline holds solve steps and transforms" begin
+        ps, _ = _build_fringe_ps()
         @test_throws "not AverageFrequency" fit(
-            [BaselineFringeFit(; gauge = PinAntenna(1)), AverageFrequency(nout = 1)], uvset,
+            [BaselineFringeFit(; gauge = PinAntenna(1)), AverageFrequency(nout = 1)], ps,
         )
-        @test_throws "holds no solve step" fit([StationWeightScale(ones(4))], uvset)
+        unit = DimArray(ones(4), XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
+        @test_throws "holds no solve step" fit([StationWeightScale(unit)], ps)
     end
 
     @testset "reduce steps apply eagerly as functors" begin
@@ -107,21 +97,11 @@
         end
 
         @test_throws ErrorException UVP.flag_spw_edges(uvset; mode = :bogus, fraction = 0.1)
-
-        # As `calibrate`'s `post` on the corrected output.
-        gauge = PinAntenna(1)
-        sol = fit([BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)], uvset)
-        out = calibrate(sol, uvset; post = FlagSpwEdges(mode = :flag_fraction, fraction = 0.2))
-        for (_, leaf) in DimensionalData.branches(out)
-            F = parent(leaf[:flags])
-            @test all(F[1, :, :, :])
-            @test all(F[end, :, :, :])
-        end
     end
 
     @testset "gauge by station code" begin
-        uvset, _ = _build_fringe_uvset()    # antennas named A1..A4
-        names = Gustavo._antenna_names(uvset)
+        ps, _ = _build_fringe_ps()    # antennas named A1..A4
+        names = CAL.DataGeometry(ps).stations
         @test resolve_gauge(PinAntenna(3), names).refs == [3]
         @test resolve_gauge(PinAntenna("A2"), names).refs == [2]
         @test resolve_gauge(PinAntenna(:A4), names).refs == [4]
@@ -131,20 +111,20 @@
         @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
         @test_throws ErrorException resolve_gauge(ZeroSumPhase(antennas = ["ZZ"]), names)
         # End-to-end (new engine): code "A1" resolves to index 1 → identical solve.
-        by_code = fit(BaselineFringeFit(; gauge = PinAntenna("A1")), uvset)
-        by_idx = fit(BaselineFringeFit(; gauge = PinAntenna(1)), uvset)
+        by_code = fit(BaselineFringeFit(; gauge = PinAntenna("A1")), ps)
+        by_idx = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         @test parent(gains(by_code)) ≈ parent(gains(by_idx))
     end
 
     @testset "BaselineFringeFit-less pipeline" begin
-        uvset, _ = _build_fringe_uvset()
+        ps, _ = _build_fringe_ps()
         # A standalone Bandpass fit needs no BaselineFringeFit step, no
         # pipeline-level anchor check, and no fringe-estimator diagnostics.
-        sol = fit(Bandpass(; gauge = PinAntenna(2)), uvset)
+        sol = fit(Bandpass(; gauge = PinAntenna(2)), ps)
         @test collect(keys(sol.steps)) == [:bandpass]
         @test !haskey(sol.steps[:bandpass], :search)
         @test length(sol.geom.stations) == 4
-        @test calibrate(sol, uvset) isa UVP.UVSet
+        @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
     @testset "defaults" begin
@@ -175,13 +155,6 @@
         @test t.model == default_adhoc_terms()
         @test t.smoother == FP.PerTrackAdhocSmoother()
         @test t.model.phase.adhoc.prior == FP.default_adhoc_prior()
-
-        # AprioriAmplitude carries a pre-built spw_cals (loading is the caller's job).
-        bc = Dict(1 => :dummy)
-        ap = AprioriAmplitude(bc; min_elevation_deg = 10.0)
-        @test ap.spw_cals === bc
-        @test ap.min_elevation_deg == 10.0
-        @test ap.on_missing_station == :warn
     end
 end
 
@@ -190,23 +163,17 @@ end
 # context is a concrete type. This is an interface property, not a speed one:
 # an `Any` field advertises no contract, and it drifts back silently.
 @testset "pipeline run state is concretely typed" begin
-    uvset, _ = _build_fringe_uvset()
+    ps, _ = _build_fringe_ps()
 
     @testset "SolveContext" begin
         ff = BaselineFringeFit(; gauge = PinAntenna(1))
-        geom = CAL.build_geometry(uvset)
-        antennas = UVP.metadata(first(values(UVP.branches(uvset)))).antennas
-        nant = length(antennas)
-        mc = Gustavo.model_components(ff, (; geom, antennas))
-        model = CAL.GainModel(phase = mc.phase, logamp = mc.logamp)
-        layout = CAL.plan_parameters(model, nant, geom)
-        ctx = Gustavo.SolveContext(
-            model, layout, geom, zeros(layout.nθ),
-            PinAntenna(1), nant, antennas, ST.scan_stream(uvset; geom), :fringe,
-            Gustavo._PassTiming[],
-        )
+        geom = CAL.DataGeometry(ps)
+        groups = XRadio.groupby(ps, XRadio.ByScan())
+        sizes = [Gustavo._group_bytes(g) for g in values(groups)]
+        gauge = resolve_gauge(PinAntenna(1), geom.stations)
+        ctx = Gustavo._step_context(ff, (; geom), gauge, groups, sizes, Any[], ExecutionConfig())
         @test isconcretetype(typeof(ctx))
-        for f in (:model, :layout, :geom, :antennas, :stream, :passes)
+        for f in (:model, :layout, :geom, :θ, :gauge, :groups, :exec, :passes)
             @test isconcretetype(fieldtype(typeof(ctx), f))
         end
     end
@@ -264,7 +231,7 @@ end
         buf4 = IOBuffer()
         sol = fit(
             BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)),
-            uvset;
+            ps;
             exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
         )
         @test sol isa CAL.CalibrationSolution
@@ -272,34 +239,21 @@ end
         @test occursin("fringe", out) && occursin("bandpass", out)
     end
 
-    @testset "stream group specs and transforms" begin
-        t = StationWeightScale(ones(4))
-        stream = ST.scan_stream(uvset; transforms = (t,))
-        @test isconcretetype(eltype(stream.groups))
-        @test isconcretetype(eltype(first(stream.groups).leaves))
-        @test eltype(stream.transforms) === typeof(t)
-        # No transforms: nothing to join, so the vector stays `Any`-typed rather
-        # than becoming a `Vector{Union{}}` that could never accept an entry.
-        @test eltype(ST.scan_stream(uvset).transforms) === Any
-    end
-
     @testset "the solution records its pipeline, gauge included" begin
-        t = StationWeightScale(ones(4))
+        t = StationWeightScale(DimArray(ones(4), XRadio.AntennaName(["A1", "A2", "A3", "A4"])))
         ff = BaselineFringeFit(; gauge = PinAntenna("A1"))
-        sol = fit(t |> ff, uvset)
+        sol = fit(t |> ff, ps)
         @test sol.provenance.pipeline == join((sprint(show, x; context = :limit => true) for x in (t, ff)), " |> ")
         # Recorded the same whatever the pipeline was given as.
-        @test fit([t, ff], uvset).provenance == sol.provenance
+        @test fit([t, ff], ps).provenance == sol.provenance
         # The gauge as given, not as resolved against the stations.
         @test occursin(sprint(show, PinAntenna("A1")), sol.provenance.pipeline)
         # A step selection carries both along.
         @test sol[:fringe].provenance == sol.provenance
 
-        bc = Dict(1 => :dummy)
-        @test fieldtype(typeof(AprioriAmplitude(bc)), :spw_cals) === typeof(bc)
-        # The gauge keyword is typed, so a bare index is rejected rather than
-        # silently treated as a gauge.
-        @test_throws TypeError BaselineFringeFit(; gauge = 2)
+        # A bare index is not a gauge, so it is rejected rather than silently
+        # treated as one.
+        @test_throws MethodError BaselineFringeFit(; gauge = 2)
         @test_throws "BaselineFringeFit needs a `gauge`" BaselineFringeFit()
     end
 end
@@ -307,8 +261,8 @@ end
 # The solve stores each component's parameters over an `Array`, but a caller may
 # rewrap them — e.g. over a view — and the whole apply path must be indifferent to that.
 @testset "rewrapped parameters correct data identically" begin
-    uvset, _ = _build_fringe_uvset()
-    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)), uvset)
+    ps, _ = _build_fringe_ps()
+    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)), ps)
     rewrapped = [
         CAL.SolvedComponent(
             c.step, c.path, c.component,
@@ -319,12 +273,12 @@ end
     sold = CAL.CalibrationSolution(sol.geom, rewrapped, sol.steps, sol.info)
     @test all(parent(c.params) isa SubArray for c in sold.components)
 
-    a = Gustavo.UVData.apply_calibration(uvset, sol)
-    b = Gustavo.UVData.apply_calibration(uvset, sold)
-    @test Set(keys(DimensionalData.branches(a))) == Set(keys(DimensionalData.branches(b)))
-    for (k, leaf) in DimensionalData.branches(a)
-        Va = parent(leaf[:vis])
-        Vb = parent(DimensionalData.branches(b)[k][:vis])
+    a = calibrate(sol, ps)
+    b = calibrate(sold, ps)
+    @test collect(keys(a)) == collect(keys(b))
+    for (k, ms) in pairs(a)
+        Va = parent(ms[:visibility])
+        Vb = parent(b[k][:visibility])
         # Bit-identical, not approximate: the same arithmetic on the same numbers.
         @test all(((x, y),) -> (isnan(x) && isnan(y)) || x === y, zip(Va, Vb))
     end

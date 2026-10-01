@@ -88,29 +88,6 @@ function fringe_solution_summary(sol::CalibrationSolution)
 end
 
 """
-    fringe_scan_groups(uvset, sol::CalibrationSolution) -> Vector{NamedTuple}
-
-Per scan-group metadata in solver order: `(; scan_index, source, scan, max_snr)`.
-Lazy — reads only leaf metadata (no visibilities), so it is cheap on a streamed
-`UVSet`. Use it to choose which scans to inspect with [`baseline_fringe_data`](@ref)
-/ `plot_baseline_fringes`, e.g. the highest-SNR scan of each source:
-
-    g = fringe_scan_groups(uvset, sol)
-    best = argmax(r -> r.max_snr, filter(r -> r.source == "M87", g))
-"""
-function fringe_scan_groups(uvset::UVSet, sol::CalibrationSolution)
-    specs = scan_stream(uvset; geom = sol.geom).groups
-    snr = get(_fringe_info(sol), :scan_snr, Float64[])
-    return [
-        (;
-            scan_index = gi, source = g.source, scan = g.scan,
-            max_snr = gi <= length(snr) ? Float64(snr[gi]) : NaN,
-        )
-            for (gi, g) in enumerate(specs)
-    ]
-end
-
-"""
     fringe_station_solutions(sol::CalibrationSolution) -> Vector{NamedTuple}
 
 Decode the stationized per-scan delay/rate/constant-phase parameters from
@@ -199,8 +176,7 @@ end
     BaselineFringeData
 
 Per-baseline coherent visibility averages for one scan, before and after applying
-a fringe `CalibrationSolution`. Produced by [`baseline_fringe_data`](@ref) and
-consumed by `plot_baseline_fringes`.
+a fringe `CalibrationSolution`, consumed by `plot_baseline_fringes`.
 
 Fields: `source`/`scan`/`scan_index`/`max_snr` identify the scan; `bl_pairs` and
 `feeds` (each product's feed pair, see [`feed_pairs`](@ref)) label the baseline
@@ -286,180 +262,6 @@ function BaselineFringeData(
     )
 end
 
-# The scan stream a diagnostic materializes through: the data as given, or
-# corrected by `transforms`, or by the explicit `precal`/`flag_channels`/
-# `weight_scale` in the solver's application order (precal division, weight
-# scale, channel mask). A solution records no executable corrections, so the
-# caller passes the ones the fit applied.
-function _diag_stream(
-        uvset::UVSet, sol::CalibrationSolution;
-        precal = nothing, flag_channels = nothing, weight_scale = nothing,
-        transforms = nothing,
-    )
-    tfs = if transforms !== nothing
-        collect(Any, transforms)
-    elseif precal !== nothing || flag_channels !== nothing || weight_scale !== nothing
-        t = Any[]
-        precal === nothing || push!(t, ApplySolution(precal))
-        weight_scale === nothing || push!(t, StationWeightScale(weight_scale))
-        flag_channels === nothing || push!(t, FlagChannels(BitVector(flag_channels)))
-        t
-    else
-        Any[]
-    end
-    # Diagnostics inspect one group at a time, so the outer level stays serial; the
-    # inner level still fans out across the group's leaves and baselines.
-    return scan_stream(
-        uvset; geom = sol.geom, transforms = tfs,
-        exec = ExecutionConfig(
-            outer_executor = SerialScheduler(), inner_executor = DynamicScheduler(),
-        ),
-    )
-end
-
-# Scan group with the largest detection SNR (the most informative to inspect),
-# falling back to the first group when no per-scan SNR is recorded.
-function _max_snr_scan(sol::CalibrationSolution, ngroups::Integer)
-    snr = get(_fringe_info(sol), :scan_snr, Float64[])
-    (isempty(snr) || all(!isfinite, snr)) && return 1
-    return argmax(i -> (isfinite(snr[i]) ? snr[i] : -Inf), 1:min(length(snr), ngroups))
-end
-
-# Divide a weighted sum by its weight, leaving NaN where there was no data.
-function _coherent_mean!(sum::Array{ComplexF64}, w::Array{Float64})
-    @inbounds for i in eachindex(sum, w)
-        sum[i] = w[i] > 0 ? sum[i] / w[i] : ComplexF64(NaN, NaN)
-    end
-    return sum
-end
-
-# Per-cell accumulation for `baseline_fringe_data`, in its own method so it
-# specializes on the cube's concrete array types — inlined in the caller it runs
-# untyped, at ~1 µs per cell over ~10^8 cells. One task per baseline: every
-# accumulator is indexed by `bi`, so the tasks write to disjoint slices and the
-# fan-out needs no reduction.
-function _accumulate_baseline_fringes!(
-        acc, Vg, Wg, Fg, g, gid, bl_pairs, feeds, executor,
-    )
-    UVData.check_layer_axes(Vg, Wg, Fg)
-    tforeach(axes(Vg, BaselineID); scheduler = executor) do bi
-        a, b = bl_pairs[bi]
-        a == b && return                                # skip autocorrelations
-        for p in axes(Vg, Polarization)
-            fa, fb = feeds[p]
-            @inbounds for ti in axes(Vg, Ti), c in axes(Vg, Frequency)
-                cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
-                Fg[cell] && continue
-                w = Wg[cell]
-                v = Vg[cell]
-                (w > 0 && isfinite(w) && isfinite(v)) || continue
-                k = gid[c]
-                acc.sb[c, bi, p] += w * v; acc.swb[c, bi, p] += w
-                acc.tb[ti, bi, p] += w * v; acc.twb[ti, bi, p] += w
-                acc.tbb[ti, bi, p, k] += w * v; acc.twbb[ti, bi, p, k] += w
-                ga = g[c, ti, a, fa]; gb = g[c, ti, b, fb]
-                denom = ga * conj(gb)
-                # Squared magnitudes: the guard is a threshold test, and `abs` on a
-                # complex number costs a `hypot` per cell.
-                (abs2(ga) > 1.0e-24 && abs2(gb) > 1.0e-24 && isfinite(denom)) || continue
-                vc = v / denom
-                isfinite(vc) || continue
-                # inverse-variance weight of the corrected datum (Var(V/g) =
-                # 1/(w·|g|²)) — matches apply_calibration's reweighting.
-                wd = w * abs2(denom)
-                acc.sa[c, bi, p] += wd * vc; acc.swa[c, bi, p] += wd
-                acc.ta[ti, bi, p] += wd * vc; acc.twa[ti, bi, p] += wd
-                acc.tab[ti, bi, p, k] += wd * vc; acc.twab[ti, bi, p, k] += wd
-            end
-        end
-    end
-    return nothing
-end
-
-"""
-    baseline_fringe_data(uvset, sol; scan_index = nothing) -> BaselineFringeData
-
-Materialize one scan of `uvset` and compute, per baseline and correlation product,
-the weighted coherent visibility average vs frequency and vs time, before and after
-dividing out the fringe solution `sol`. This is the per-baseline before/after check:
-a good fit flattens the phase slopes (delay in frequency, rate in time) and lifts
-the coherent amplitude.
-
-`scan_index` selects which `(source, scan)` group (in the same order
-the solve used); the default is the highest-SNR scan. The "after"
-visibility is `V / (g_a · conj(g_b))` with gains evaluated from `sol` exactly as the
-solver applies them — no second disk read of the full set, just this one scan.
-When the solve used a `precal` (e.g. `phasecal_solution`), pass the same one here
-so both before and after are pre-calibrated the way the solver saw the data; the
-same goes for `flag_channels` (e.g. `tone_channel_mask` — flagged channels drop
-out of the plotted averages exactly as they dropped out of the solve) and `weight_scale` (the per-station weight correction — see
-`StationWeightScale`).
-"""
-function baseline_fringe_data(
-        uvset::UVSet, sol::CalibrationSolution;
-        scan_index::Union{Integer, Nothing} = nothing,
-        precal::Union{Nothing, CalibrationSolution} = nothing,
-        flag_channels = nothing,
-        weight_scale = nothing,
-        transforms = nothing,
-    )
-    stream = _diag_stream(uvset, sol; precal, flag_channels, weight_scale, transforms)
-    groups = stream.groups
-    isempty(groups) && error("baseline_fringe_data: uvset has no scan groups")
-    gi = scan_index === nothing ? _max_snr_scan(sol, length(groups)) : Int(scan_index)
-    (1 <= gi <= length(groups)) || error("baseline_fringe_data: scan_index $gi out of range 1:$(length(groups))")
-
-    info = UVData.metadata(last(first(groups[gi].leaves)))   # source/scan from the lazy leaf
-    executor = inner_executor(stream)                   # within-group fan-out
-    stack, win = materialize_cube(stream, groups[gi])
-    g = parent(gains(sol, win))   # (nchan, nti, nant, 2)
-    fg = frequencies(stack)
-    Vg = stack[:vis]
-    Wg = stack[:weights]
-    Fg = stack[:flags]
-    nchan, nti, nbl, npol = size(Vg, Frequency), size(Vg, Ti), size(Vg, BaselineID), size(Vg, Polarization)
-
-    # Frequency-group split of the stacked frequency axis (per-channel group id).
-    bgs = fringe_freq_groups(fg)
-    ngrp = length(bgs)
-    gid = Vector{Int}(undef, nchan)
-    for (k, r) in enumerate(bgs), c in r
-        gid[c] = k
-    end
-
-    sb = zeros(ComplexF64, nchan, nbl, npol); swb = zeros(Float64, nchan, nbl, npol)
-    sa = zeros(ComplexF64, nchan, nbl, npol); swa = zeros(Float64, nchan, nbl, npol)
-    tb = zeros(ComplexF64, nti, nbl, npol); twb = zeros(Float64, nti, nbl, npol)
-    ta = zeros(ComplexF64, nti, nbl, npol); twa = zeros(Float64, nti, nbl, npol)
-    tbb = zeros(ComplexF64, nti, nbl, npol, ngrp); twbb = zeros(Float64, nti, nbl, npol, ngrp)
-    tab = zeros(ComplexF64, nti, nbl, npol, ngrp); twab = zeros(Float64, nti, nbl, npol, ngrp)
-
-    _accumulate_baseline_fringes!(
-        (; sb, swb, sa, swa, tb, twb, ta, twa, tbb, twbb, tab, twab),
-        Vg, Wg, Fg, g, gid, UVData.baselines(stack).pairs,
-        feed_pairs(stack),
-        executor,
-    )
-
-    fsnr = get(_fringe_info(sol), :scan_snr, Float64[])
-    msnr = gi <= length(fsnr) ? Float64(fsnr[gi]) : NaN
-    # Before the means overwrite their numerators: the weight sums are the
-    # accumulated inverse variances, so σ = 1/√Σw on every coherent mean.
-    σ_sb = _mean_sigma(swb); σ_sa = _mean_sigma(swa)
-    σ_tb = _mean_sigma(twb); σ_ta = _mean_sigma(twa)
-    σ_tbb = _mean_sigma(twbb); σ_tab = _mean_sigma(twab)
-    return BaselineFringeData(
-        info.source_name, info.scan_name, gi, msnr,
-        copy(UVData.baselines(stack).pairs), String.(collect(info.antennas.name)), feed_pairs(stack),
-        copy(fg), copy(timestamps(stack)),
-        _coherent_mean!(sb, swb), _coherent_mean!(sa, swa),
-        _coherent_mean!(tb, twb), _coherent_mean!(ta, twa),
-        bgs,
-        _coherent_mean!(tbb, twbb), _coherent_mean!(tab, twab),
-        σ_sb, σ_sa, σ_tb, σ_ta, σ_tbb, σ_tab,
-    )
-end
-
 """
     baseline_pol_index(data, pol) -> Int
 
@@ -472,7 +274,7 @@ baseline_pol_index(data::BaselineFringeData, pol) = _pol_index(data.feeds, pol)
     fringe_freq_group_stats(data::BaselineFringeData; pol)
         -> Vector{@NamedTuple{f_lo, f_hi, nchan, eta_before, eta_after}}
 
-Per-frequency-group coherence summary of one scan's [`baseline_fringe_data`](@ref):
+Per-frequency-group coherence summary of one scan's [`BaselineFringeData`](@ref):
 for each contiguous frequency group, the within-group coherence `|Σ_c z_c| / Σ_c |z_c|`
 of the per-channel time-averaged visibilities, pooled over cross baselines —
 before and after the fringe solution. A frequency group whose `eta_after` lags its
@@ -598,8 +400,7 @@ end
     BaselineFringeMap
 
 The delay–rate search map of one (baseline, correlation product) of one scan,
-with its scan/baseline labels — [`fringe_search_map`](@ref) output, consumed by
-`plot_fringe_search`. `source`/`scan`/`scan_index` identify the scan; `bl_pair`
+with its scan/baseline labels, consumed by `plot_fringe_search`. `source`/`scan`/`scan_index` identify the scan; `bl_pair`
 (antenna indices into `ant_names`) and `pol` (the product's feed pair) the searched block; `map` is the
 [`FringeSearchMap`](@ref) (axes, SNR surface, refined detection, `ncells`,
 `pfa`).
@@ -614,117 +415,6 @@ struct BaselineFringeMap
     map::FringeSearchMap
 end
 
-# Resolve a baseline selector against `bl_pairs`: an Integer index, an antenna-
-# index pair, or a station-code pair (order-insensitive). `nothing` → caller
-# picks a default.
-function _baseline_index(bl_pairs, ant_names, sel)
-    if sel isa Integer
-        (1 <= sel <= length(bl_pairs)) || error("baseline index $sel out of range 1:$(length(bl_pairs))")
-        return Int(sel)
-    end
-    a, b = if sel isa Tuple{<:Integer, <:Integer}
-        Int(sel[1]), Int(sel[2])
-    elseif sel isa Tuple && length(sel) == 2
-        ia = findfirst(==(String(sel[1])), ant_names)
-        ib = findfirst(==(String(sel[2])), ant_names)
-        (ia === nothing || ib === nothing) &&
-            error("baseline $(sel): station not in $(ant_names)")
-        ia, ib
-    else
-        error("baseline selector must be an Integer index, an (a, b) antenna-index tuple, or a station-code tuple")
-    end
-    bi = findfirst(pr -> pr == (a, b) || pr == (b, a), bl_pairs)
-    bi === nothing && error("baseline ($a, $b) not present in this scan")
-    return bi
-end
-
-"""
-    fringe_search_map(uvset, sol; scan_index = nothing, baseline = nothing,
-                      pol, search = nothing) -> BaselineFringeMap
-
-Recompute the delay–rate matched-filter surface (the HOPS-style fringe plot data,
-and the false-fringe check) for one baseline of one scan of `uvset` — exactly the
-search the fringe pass ran, but keeping the whole windowed `|D|` plane in
-SNR units instead of only the peak. A real fringe is a single sharp peak far
-above the sidelobe forest (`pfa ≪ 1`); a false fringe barely clears it.
-
-- `scan_index` — which `(source, scan)` group, in solver order (see
-  [`fringe_scan_groups`](@ref)); default the highest-SNR scan.
-- `baseline` — an Integer index into the scan's baseline table, an antenna-index
-  pair `(1, 3)`, or a station-code pair `("AA", "LM")` (order-insensitive).
-  Default: the baseline with the strongest detection on this scan.
-- `pol` — correlation-product selector as [`baseline_pol_index`](@ref).
-- `search` — `FringeSearch` options; defaults to the ones the solve used
-  (recorded in `sol.steps[:fringe]`).
-- `precal` — when the solve used one (e.g. `phasecal_solution`), pass the same
-  solution so the map is computed on the data the solver actually searched; the
-  same goes for `flag_channels` (e.g. `tone_channel_mask`) and `weight_scale`
-  (the per-station weight correction — see `StationWeightScale`),
-  without which this map's SNR/PFA would not match the solve's.
-
-Materializes only the one scan. Returns a [`BaselineFringeMap`](@ref).
-"""
-function fringe_search_map(
-        uvset::UVSet, sol::CalibrationSolution;
-        scan_index::Union{Integer, Nothing} = nothing,
-        baseline = nothing, pol,
-        search::Union{FringeSearch, Nothing} = nothing,
-        precal::Union{Nothing, CalibrationSolution} = nothing,
-        flag_channels = nothing,
-        weight_scale = nothing,
-        transforms = nothing,
-    )
-    stream = _diag_stream(uvset, sol; precal, flag_channels, weight_scale, transforms)
-    groups = stream.groups
-    isempty(groups) && error("fringe_search_map: uvset has no scan groups")
-    gi = scan_index === nothing ? _max_snr_scan(sol, length(groups)) : Int(scan_index)
-    (1 <= gi <= length(groups)) || error("fringe_search_map: scan_index $gi out of range 1:$(length(groups))")
-
-    info = UVData.metadata(last(first(groups[gi].leaves)))
-    ant_names = String.(collect(info.antennas.name))
-    stack, win = materialize_cube(stream, groups[gi])
-    Vg = stack[:vis]
-    fg = frequencies(stack)
-    opts = search === nothing ? get(_fringe_info(sol), :search, FringeSearch()) : search
-    p = _pol_index(feed_pairs(stack), pol)
-    times = timestamps(stack)
-    f0 = sol.geom.f0
-    t0 = sol.geom.t0
-
-    bi = if baseline === nothing
-        # Default to the strongest detection at this product — the same search the
-        # solver ran, sharing one workspace/axes across baselines.
-        C = eltype(Vg)
-        ax = _search_axes(fg, times, opts, C)
-        ws = FringeWorkspace(C)
-        family_cells = _search_cells(ax, opts)
-        best = 0
-        bestsnr = -Inf
-        for k in eachindex(UVData.baselines(stack).pairs)
-            a, b = UVData.baselines(stack).pairs[k]
-            a == b && continue
-            d = _baseline_fringe_search(
-                view(stack, BaselineID(k), Polarization(p)),
-                fg, times, f0, t0, ax, ws, opts, family_cells,
-            )
-            d.snr > bestsnr && (bestsnr = d.snr; best = k)
-        end
-        best == 0 && error("fringe_search_map: scan has no cross baselines")
-        best
-    else
-        k = _baseline_index(UVData.baselines(stack).pairs, ant_names, baseline)
-        a, b = UVData.baselines(stack).pairs[k]
-        a == b && error("fringe_search_map: ($a, $b) is an autocorrelation")
-        k
-    end
-
-    m = baseline_fringe_map(view(stack, BaselineID(bi), Polarization(p)), f0, t0; opts = opts)
-    return BaselineFringeMap(
-        info.source_name, info.scan_name, gi, UVData.baselines(stack).pairs[bi], ant_names,
-        feed_pairs(stack)[p], m,
-    )
-end
-
 """
     fringe_station_flags(sol::CalibrationSolution) -> Vector{NamedTuple}
 
@@ -733,8 +423,8 @@ detection (`pfa <= Stationization.pfa_max`) on any of the station's baselines,
 so nothing put it in a fringe group (the EHT-HOPS flag criterion). A measured
 but rejected baseline does not rescue it: such a row constrains the fit without
 fixing a fringe location. These stations carry
-identity gains for those scans, and [`apply_calibration`](@ref Gustavo.UVData.apply_calibration) flags
-their baselines there (`apply_flags = true`). Rows
+identity gains for those scans, and `calibrate` flags their baselines there
+(`apply_flags = true`). Rows
 `(; scan, scan_name, ant, station)`; empty when every participating station
 was constrained (or the solution predates flag recording).
 """
@@ -769,10 +459,7 @@ passed something STRICTER than the solve used: those are the accepted detections
 that would flip under a tighter threshold, i.e. the marginal ones worth eyeballing.
 
 Rows `(; scan, a, b, sta_a, sta_b, pol, snr, pfa)`, most-suspect (largest `pfa`)
-first. Needs no data read — inspect a flagged row with
-
-    m = fringe_search_map(uvset, sol; scan_index = r.scan, baseline = (r.a, r.b), pol = r.pol)
-    plot_fringe_search(m)
+first. Needs no data read.
 """
 function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
     info = _fringe_info(sol)

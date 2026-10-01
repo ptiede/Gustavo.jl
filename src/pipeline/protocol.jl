@@ -257,7 +257,7 @@ end
 # The pipeline elements `|>` joins: solve steps and recorded corrections. A plain
 # function may also sit in a pipeline, written as a tuple or vector, since
 # `f |> x` is Base's function application.
-const PipelineElement = Union{SolveStep, AbstractDataTransform, AprioriAmplitude}
+const PipelineElement = Union{SolveStep, AbstractDataTransform}
 
 """
     a |> b
@@ -275,8 +275,8 @@ function _check_pipeline(seq)
     for x in seq
         x isa Union{PipelineElement, Function} || throw(
             ArgumentError(
-                "a pipeline holds solve steps and corrections (an AbstractDataTransform, " *
-                    "AprioriAmplitude, or a function of a Measurement Set), not $(nameof(typeof(x)))"
+                "a pipeline holds solve steps and corrections (an AbstractDataTransform " *
+                    "or a function of a Measurement Set), not $(nameof(typeof(x)))"
             )
         )
     end

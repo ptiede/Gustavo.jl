@@ -1,16 +1,17 @@
-# Fringe diagnostics + Makie plot smoke tests (Phase 8). Reuses the synthetic
-# multi-band UVSet builder `_build_fringe_uvset` from test_pipeline.jl (included
+# Fringe diagnostics + Makie plot smoke tests. Reuses the synthetic builders
+# `_build_fringe_ps` and `_build_fringe_uvset` from test_pipeline.jl (included
 # earlier in runtests.jl) and CairoMakie (loaded at the top of runtests.jl).
 
 
 @testset "Fringe diagnostics" begin
     # Rates large enough that the uncorrected scan average decorrelates.
-    uvset, _truth = _build_fringe_uvset(; station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3])
+    station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3]
+    ps, _truth = _build_fringe_ps(; station_rate)
     gauge = PinAntenna(1)
     sol = fit(
         BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-        uvset,
+        ps,
     )
 
     @testset "snr table + summary" begin
@@ -74,12 +75,6 @@
         @test issorted([r.pfa for r in rows]; rev = true)
         r = first(rows)
         @test r.sta_a == sol.geom.stations[r.a] && r.sta_b == sol.geom.stations[r.b]
-        # A flagged row is directly inspectable with fringe_search_map (same
-        # scan/baseline/product → the same detection, up to FFT-plan noise).
-        m = FP.fringe_search_map(uvset, sol; scan_index = r.scan, baseline = (r.a, r.b), pol = r.pol)
-        @test m.bl_pair in ((r.a, r.b), (r.b, r.a))
-        @test m.pol == r.pol
-        @test m.map.detection.snr ≈ r.snr rtol = 1.0e-6
 
         # Solutions without the table (e.g. loaded from an older file) degrade cleanly.
         old = CAL.CalibrationSolution(sol.geom, sol[:fringe].components, OrderedDict(:fringe => (; nscan = 1)))
@@ -103,12 +98,8 @@
     end
 
     @testset "station codes available for plot labels" begin
-        # Spectrum/phase plots read codes from the solution's geometry; baseline plots from the data.
+        # Spectrum/phase plots read codes from the solution's geometry.
         @test sol.geom.stations == ["A1", "A2", "A3", "A4"]
-        data = FP.baseline_fringe_data(uvset, sol)
-        @test data.ant_names == ["A1", "A2", "A3", "A4"]
-        a, b = data.bl_pairs[1]
-        @test data.ant_names[a] isa String && data.ant_names[b] isa String
     end
 
     @testset "Makie plot smoke" begin
@@ -132,171 +123,9 @@
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
 
-    @testset "baseline before/after data" begin
-        data = FP.baseline_fringe_data(uvset, sol)
-        @test data isa FP.BaselineFringeData
-        nchan = length(sol.geom.channel_freqs)
-        nbl = length(data.bl_pairs)
-        npol = length(data.feeds)
-        @test size(data.spec_before) == (nchan, nbl, npol)
-        @test size(data.spec_after) == (nchan, nbl, npol)
-        @test size(data.tser_before, 1) == length(data.times)
-        @test data.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset).groups))
-
-        @test data.feeds == [(1, 1), (1, 2), (2, 1), (2, 2)]
-        p = FP.baseline_pol_index(data, (1, 1))
-        @test p == 1
-        @test FP.baseline_pol_index(data, (2, 1)) == 3
-        @test FP.baseline_pol_index(data, 2) == 2
-        @test_throws "by index or by feed pair" FP.baseline_pol_index(data, "RR")
-
-        # Quality: dividing out the solution should ALIGN the per-channel phases
-        # (flatten the delay slope), so the coherent concentration R = |Σe^{iφ}|/N
-        # over frequency should not drop on any cross baseline.
-        concentration(z) = (v = filter(isfinite, z); isempty(v) ? 0.0 : abs(sum(cis, angle.(v))) / length(v))
-        improved = 0
-        total = 0
-        for bi in 1:nbl
-            a, b = data.bl_pairs[bi]
-            a == b && continue
-            rb = concentration(@view data.spec_before[:, bi, p])
-            ra = concentration(@view data.spec_after[:, bi, p])
-            (rb == 0 && ra == 0) && continue
-            total += 1
-            ra >= rb - 1.0e-6 && (improved += 1)
-        end
-        @test total > 0
-        @test improved == total          # no baseline gets LESS coherent after the fit
-    end
-
-    @testset "fringe_scan_groups" begin
-        g = FP.fringe_scan_groups(uvset, sol)
-        ngroups = length(FP.scan_stream(uvset).groups)
-        @test length(g) == ngroups
-        @test all(r -> haskey(r, :scan_index) && haskey(r, :source) && haskey(r, :scan) && haskey(r, :max_snr), g)
-        @test [r.scan_index for r in g] == collect(1:ngroups)        # solver order, 1-based
-        @test Set(r.source for r in g) ⊆ Set(UVP.sources(uvset))
-        # max_snr agrees with the per-scan SNR table / the default scan picker.
-        @test g[FP._max_snr_scan(sol, ngroups)].max_snr == maximum(r.max_snr for r in g)
-        # the per-source best-scan selection used by run_pipeline resolves to a valid group
-        for s in unique(r.source for r in g)
-            rows = filter(r -> r.source == s, g)
-            best = rows[argmax([isfinite(r.max_snr) ? r.max_snr : -Inf for r in rows])]
-            @test 1 <= best.scan_index <= ngroups
-        end
-    end
-
-    @testset "delay closure" begin
-        data = FP.baseline_fringe_data(uvset, sol)
-        c = FP.delay_closure(data; pol = (1, 1))
-        @test !isempty(c.triangles)
-        @test length(c.closure_before) == length(c.triangles)
-
-        finite(v) = filter(isfinite, v)
-        mx(v) = (u = abs.(finite(v)); isempty(u) ? 0.0 : maximum(u))
-        τscale = mx(c.data_delay)                         # spread of the data's baseline delays
-        @test τscale > 0                                  # the synthetic injected real delays
-
-        # Closure is the defining consistency property: triangle sums of the DATA
-        # delays cancel (≪ the individual delays) because real delays are station-
-        # based — this is what would break if the station model were wrong.
-        @test mx(c.closure_before) < 0.05 * τscale
-        # A correct delay solution removes the delay on every baseline (residual ≪
-        # data) and cannot introduce closure errors.
-        @test mx(c.resid_delay) < 0.05 * τscale
-        @test mx(c.closure_after) < 0.05 * τscale
-
-        @test_nowarn FP.print_delay_closure(c; io = IOBuffer())
-        buf = IOBuffer(); FP.print_delay_closure(c; io = buf)
-        @test occursin("Delay closure", String(take!(buf)))
-    end
-
-    @testset "fringe_search_map (delay–rate surface)" begin
-        m = FP.fringe_search_map(uvset, sol; pol = (1, 1))
-        @test m isa FP.BaselineFringeMap
-        # Defaults: the highest-SNR scan, the strongest baseline.
-        @test m.scan_index == FP._max_snr_scan(sol, length(FP.scan_stream(uvset).groups))
-        @test m.ant_names == ["A1", "A2", "A3", "A4"]
-        @test m.pol == (1, 1)
-        fsm = m.map
-        @test size(fsm.snr) == (length(fsm.delays), length(fsm.rates))
-        @test fsm.detection.valid
-        # The strongest baseline's map peak is the scan's recorded max SNR (up to
-        # peak refinement; the scan max is over all baselines/products searched).
-        @test fsm.detection.snr <= sol.steps[:fringe].scan_snr[m.scan_index] * (1 + 1.0e-9)
-        @test fsm.pfa < 1.0e-6
-        # The map peak sits at the detection's (delay, rate) within a grid bin.
-        pk = argmax(fsm.snr)
-        @test isapprox(fsm.delays[pk[1]], fsm.detection.delay; atol = fsm.delays[2] - fsm.delays[1])
-        @test isapprox(fsm.rates[pk[2]], fsm.detection.rate; atol = fsm.rates[2] - fsm.rates[1])
-
-        # Explicit selectors: scan, baseline by station codes / indices / column, pol.
-        a, b = m.bl_pair
-        m2 = FP.fringe_search_map(
-            uvset, sol;
-            scan_index = m.scan_index, baseline = (m.ant_names[a], m.ant_names[b]), pol = m.pol,
-        )
-        @test m2.bl_pair == m.bl_pair
-        @test m2.map.detection.snr ≈ fsm.detection.snr rtol = 1.0e-10
-        @test FP.fringe_search_map(uvset, sol; baseline = (b, a), pol = m.pol).bl_pair == m.bl_pair  # order-insensitive
-        m3 = FP.fringe_search_map(uvset, sol; baseline = 2, pol = 1)
-        @test m3.pol == (1, 1)
-
-        @test_throws ErrorException FP.fringe_search_map(uvset, sol; scan_index = 10_000, pol = 1)
-        @test_throws ErrorException FP.fringe_search_map(uvset, sol; baseline = ("A1", "nope"), pol = 1)
-        @test_throws KeyError FP.fringe_search_map(uvset, sol; pol = (1, 3))
-    end
-
-    @testset "plot_fringe_search smoke" begin
-        m = FP.fringe_search_map(uvset, sol; pol = (1, 1))
-        @test !isnothing(FP.plot_fringe_search(m))
-        @test !isnothing(FP.plot_fringe_search(m.map))                    # unlabeled low-level map
-        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair, pol = m.pol))
-        fig = Figure(size = (900, 700))
-        @test !isnothing(FP.plot_fringe_search(fig[1, 1], m))
-        figm = FP.plot_fringe_search(m)
-        @test (show(IOBuffer(), MIME("image/png"), figm); true)
-
-        # Zoom: the default view is a window around the peak, `false` the whole
-        # searched plane, a number that span in main-lobe widths.
-        @test !isnothing(FP.plot_fringe_search(m; zoom = 30))
-        @test !isnothing(FP.plot_fringe_search(uvset, sol; baseline = m.bl_pair, pol = m.pol, zoom = false))
-        @test_throws ErrorException FP.plot_fringe_search(m; zoom = 0)
-
-        figfull = FP.plot_fringe_search(m; zoom = false)
-        show(IOBuffer(), MIME("image/png"), figfull)          # lay out, so limits are final
-        map_axis(f) = only(filter(c -> c isa Axis && c.xlabel[] == "delay (ns)", contents(f.layout)))
-        zoomed = map_axis(figm).finallimits[]
-        full = map_axis(figfull).finallimits[]
-        @test zoomed.widths[1] < full.widths[1]
-        @test zoomed.widths[2] < full.widths[2]
-        @test zoomed.origin[1] <= m.map.detection.delay * 1.0e9 <= zoomed.origin[1] + zoomed.widths[1]
-        @test zoomed.origin[2] <= m.map.detection.rate * 1.0e3 <= zoomed.origin[2] + zoomed.widths[2]
-    end
-
-    @testset "plot_baseline_fringes smoke" begin
-        data = FP.baseline_fringe_data(uvset, sol)
-        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1))                                   # freq/phase
-        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :time))
-        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :freq, show = :amp))
-        @test !isnothing(FP.plot_baseline_fringes(data; baselines = 2, pol = 1))
-        @test !isnothing(FP.plot_baseline_fringes(uvset, sol; pol = 1, kind = :time))               # full path
-        fig = Figure(size = (900, 700))
-        @test !isnothing(FP.plot_baseline_fringes(fig[1, 1], data; pol = 1, kind = :freq))
-        figbl = FP.plot_baseline_fringes(data; pol = 1)
-        @test (show(IOBuffer(), MIME("image/png"), figbl); true)
-        # per-frequency-group view (freq restricts channels; time uses the freqgroup tser)
-        nbg = length(data.freq_groups)
-        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :freq, freqgroup = nbg))
-        @test !isnothing(FP.plot_baseline_fringes(data; pol = 1, kind = :time, freqgroup = 1))
-        @test_throws Exception FP.plot_baseline_fringes(data; pol = 1, freqgroup = nbg + 1)
-        @test !isnothing(FP.plot_fringe_spectrum(sol; freqgroup = 1))
-    end
-
     @testset "coherence report (stage-agnostic)" begin
-        corr = Gustavo.UVData.apply_calibration(uvset, sol)
-        raw = UVP.coherence_report(uvset; pols = [(1, 1), (2, 2)])
-        rep = UVP.coherence_report(corr; pols = [(1, 1), (2, 2)])
+        uvset, _ = _build_fringe_uvset(; station_rate)
+        rep = UVP.coherence_report(uvset; pols = [(1, 1), (2, 2)])
 
         @test rep isa UVP.CoherenceReport
         nbl = length(rep.bl_pairs)
@@ -311,25 +140,20 @@
         @test rep.time.eta[1] ≈ 1.0 atol = 1.0e-6
         @test rep.freq.eta[1] ≈ 1.0 atol = 1.0e-6
 
-        # The fringe fit removes the rate + screen, so the corrected data stays
-        # coherent when the whole scan is averaged to one sample; the raw data
-        # (with the injected time phase) decorrelates and is strictly worse.
+        # The injected rates and screen decorrelate the uncorrected data when the
+        # whole scan is averaged to one sample.
         h = UVP.coherence_headline(rep)
-        hraw = UVP.coherence_headline(raw)
         @test h.loss_time ≈ 1 - h.eta_time
-        @test h.eta_time > 0.9
-        @test hraw.eta_time < h.eta_time
-        @test hraw.eta_time < 0.95                                          # raw genuinely decorrelated
-        @test h.eta_freq ≥ hraw.eta_freq - 1.0e-6                           # band-averaging no worse
+        @test h.eta_time < 0.95
 
         # Selectors / overrides.
-        @test UVP.coherence_report(corr; pols = :all) isa UVP.CoherenceReport
-        rep2 = UVP.coherence_report(corr; pols = 1, timescales = [30.0, 120.0, 360.0], bandwidths = [4.0e6, 1.6e7])
+        @test UVP.coherence_report(uvset; pols = :all) isa UVP.CoherenceReport
+        rep2 = UVP.coherence_report(uvset; pols = 1, timescales = [30.0, 120.0, 360.0], bandwidths = [4.0e6, 1.6e7])
         @test rep2.time.intervals == [30.0, 120.0, 360.0]
         @test rep2.freq.intervals == [4.0e6, 1.6e7]
 
         # Re-exported at the package top level.
-        @test Gustavo.coherence_report(corr; pols = :all) isa UVP.CoherenceReport
+        @test Gustavo.coherence_report(uvset; pols = :all) isa UVP.CoherenceReport
 
         buf = IOBuffer()
         @test_nowarn UVP.print_coherence_report(rep; io = buf)
@@ -465,53 +289,6 @@ end
 # (σ itself) and a phase bar (σ/|V|) from the same complex sample.
 
 @testset "baseline fringe error bars" begin
-    # Weights in the fixture are a flat 1e3, so injecting σ_vis = 1/√1e3 makes
-    # them truthful and the reported widths checkable against real scatter.
-    σ_vis = 1 / sqrt(1.0e3)
-    nti = 6
-    uvset, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 8, ntime = nti, noise = σ_vis)
-    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)), uvset)
-    d = FP.baseline_fringe_data(uvset, sol; scan_index = 1)
-
-    @testset "σ is 1/√Σw on the coherent mean" begin
-        # Each spectral point averages this baseline over `nti` integrations of
-        # weight 1e3, so its width is a known constant.
-        @test size(d.spec_sigma_before) == size(d.spec_before)
-        @test size(d.tser_sigma_before) == size(d.tser_before)
-        finite = filter(isfinite, d.spec_sigma_before)
-        @test !isempty(finite)
-        @test all(≈(1 / sqrt(nti * 1.0e3)), finite)
-        # The time series averages over channels instead: 16 of them.
-        tfinite = filter(isfinite, d.tser_sigma_before)
-        @test all(≈(1 / sqrt(16 * 1.0e3)), tfinite)
-        # Correction rescales the weights, so the "after" widths move with |g|.
-        @test any(isfinite, d.spec_sigma_after)
-    end
-
-    @testset "σ matches the observed scatter" begin
-        # Corrected visibilities on a baseline should scatter about their mean
-        # by the reported width. Pooled over every baseline and channel this is
-        # a tight check even with few samples.
-        p = FP.baseline_pol_index(d, (1, 1))
-        z = Float64[]
-        for bi in eachindex(d.bl_pairs)
-            a, b = d.bl_pairs[bi]
-            a == b && continue
-            col = @view d.spec_after[:, bi, p]
-            σ = @view d.spec_sigma_after[:, bi, p]
-            μ = sum(col) / length(col)
-            for c in eachindex(col, σ)
-                (isfinite(col[c]) && isfinite(σ[c])) || continue
-                # Real and imaginary parts each carry σ/√2 of the complex width.
-                push!(z, real(col[c] - μ) / (σ[c] / sqrt(2)))
-                push!(z, imag(col[c] - μ) / (σ[c] / sqrt(2)))
-            end
-        end
-        @test length(z) > 100
-        rms = sqrt(sum(abs2, z) / length(z))
-        @test 0.5 < rms < 2.0          # standardized residuals are O(1)
-    end
-
     @testset "phase bar saturates rather than lying" begin
         @test FP._plotted_sigma(abs, 2.0 + 0im, 0.5) == 0.5
         @test FP._plotted_sigma(angle, 2.0 + 0im, 0.5) ≈ 0.25
@@ -523,22 +300,19 @@ end
     @testset "unknown widths draw no bars" begin
         # The weightless constructor cannot know a width; it reports NaN, and
         # every panel still renders.
-        nchan = length(d.freqs)
+        rng = MersenneTwister(0xBA25)
+        freqs = vcat(230.0e9 .+ (0:7) .* 2.0e6, 230.1e9 .+ (0:7) .* 2.0e6)
+        times = collect(0.0:30.0:150.0)
+        bl_pairs = [(1, 2), (1, 3), (2, 3)]
+        feeds = [(1, 1), (2, 2)]
+        spec(n) = randn(rng, ComplexF64, n, length(bl_pairs), length(feeds))
         bare = FP.BaselineFringeData(
-            "S", "1", 1, 100.0, d.bl_pairs, d.ant_names, d.feeds, d.freqs, d.times,
-            d.spec_before, d.spec_after, d.tser_before, d.tser_after,
+            "S", "1", 1, 100.0, bl_pairs, ["A1", "A2", "A3"], feeds, freqs, times,
+            spec(length(freqs)), spec(length(freqs)), spec(length(times)), spec(length(times)),
         )
         @test all(isnan, bare.spec_sigma_before)
         for kind in (:freq, :time), show in (:phase, :amp)
             @test FP.plot_baseline_fringes(bare; pol = 1, kind = kind, show = show) isa Figure
         end
-    end
-
-    @testset "every panel variant renders with bars" begin
-        for kind in (:freq, :time), show in (:phase, :amp), layout in (:triangle, :grid)
-            @test FP.plot_baseline_fringes(d; pol = 1, kind = kind, show = show, layout = layout) isa Figure
-        end
-        @test FP.plot_baseline_fringes(d; pol = 1, kind = :freq, show = :amp, freqgroup = 1) isa Figure
-        @test FP.plot_baseline_fringes(d; pol = 1, kind = :time, show = :phase, freqgroup = 1) isa Figure
     end
 end

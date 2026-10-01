@@ -234,7 +234,7 @@ And one log-amplitude component:
 (the `Bandpass` step's logamp half). The instrumental amplitude passband
 (filterbank shape), measured on the calibrator under the component's prior,
 if any. The absolute flux scale is *not* its job — that stays with the a-priori
-amplitude calibration ([`AprioriAmplitude`](@ref Gustavo.AprioriAmplitude)).
+amplitude calibration.
 
 ## Per-station heterogeneity
 

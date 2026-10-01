@@ -8,27 +8,6 @@
 using .UVData: scan_average, time_bin_average, frequency_average, flag_spw_edges,
     combine_spw
 
-"""
-    AprioriAmplitude(spw_cals; min_elevation_deg = 0.0, on_missing_station = :warn)
-
-A-priori amplitude calibration, applied to the output: `spw_cals` (from
-`load_fitsidi_apriori(path)`) scales the corrected data after the solution's
-gains and before `post`, wherever the element sits in the pipeline, so a
-solve step never sees the scaled amplitudes. It is recorded in the solution's
-sequence, so `calibrate(sol, uvset)` applies it without re-passing `spw_cals`.
-"""
-struct AprioriAmplitude{C}
-    spw_cals::C
-    min_elevation_deg::Float64
-    on_missing_station::Symbol
-end
-AprioriAmplitude(spw_cals; min_elevation_deg::Real = 0.0, on_missing_station::Symbol = :warn) =
-    AprioriAmplitude(spw_cals, Float64(min_elevation_deg), on_missing_station)
-
-_apply_apriori(s::AprioriAmplitude, uv) = UVData.apply_calibration(
-    uv, s.spw_cals; min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
-)
-
 # Run-wide resources: schedulers, progress.
 include("pipeline/execution.jl")
 

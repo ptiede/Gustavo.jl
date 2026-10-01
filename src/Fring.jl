@@ -82,7 +82,6 @@ Per-scan max detection SNR from the solver diagnostics. Provided by
 function plot_fringe_snr end
 
 """
-    plot_fringe_search(uvset, sol; scan_index, baseline, pol, search, zoom)
     plot_fringe_search(m::BaselineFringeMap; zoom)
     plot_fringe_search(parent, m; zoom)
 
@@ -92,8 +91,7 @@ surface with delay/rate cross-sections through the peak, and annotates the
 refined detection (delay, rate, SNR) and its false-alarm probability. A real
 fringe is a single sharp peak far above the sidelobe forest with `pfa ≪ 1`; a
 false fringe barely clears the forest (`pfa` not small) and shows several
-comparable-height peaks. Selectors as [`fringe_search_map`](@ref). Provided by
-`GustavoMakieExt`.
+comparable-height peaks. Provided by `GustavoMakieExt`.
 
 `zoom` sets the view: `true` (default) centres both axes on the peak over a span
 of a dozen main-lobe widths, a `Real` gives that span in main-lobe widths, and
@@ -105,7 +103,6 @@ from the full plane either way.
 function plot_fringe_search end
 
 """
-    plot_baseline_fringes(uvset, sol; kind, pol, baselines, scan_index, show)
     plot_baseline_fringes(data::BaselineFringeData; ...)
     plot_baseline_fringes(parent, data; ...)
 
@@ -126,7 +123,7 @@ function plot_baseline_fringes end
 export FringeSearch, baseline_fringe_search, fringe_plane
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
-export PhaseCalTable, load_fitsidi_phasecal, phasecal_solution, tone_channel_mask
+export PhaseCalTable, load_fitsidi_phasecal
 export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
@@ -137,9 +134,9 @@ export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpas
     bandpass_level_blocks
 export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
 export fringe_station_solutions
-export BaselineFringeData, baseline_fringe_data, baseline_pol_index, fringe_scan_groups
+export BaselineFringeData, baseline_pol_index
 export fringe_freq_group_stats, fringe_freq_groups
-export BaselineFringeMap, fringe_search_map, suspect_fringes, fringe_station_flags
+export BaselineFringeMap, suspect_fringes, fringe_station_flags
 export delay_closure, print_delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_terms

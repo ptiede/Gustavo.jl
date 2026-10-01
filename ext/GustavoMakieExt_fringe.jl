@@ -7,12 +7,12 @@
 # stays Makie-free and tested without a backend.
 
 import Gustavo.Fring
-using Gustavo.UVData: UVSet, Frequency
+using Gustavo.UVData: Frequency
 using Gustavo.Calibration: CalibrationSolution, gains, _freq_group_ranges
 using DimensionalData: lookup, Ti
 using Gustavo.Fring: fringe_snr_table
-using Gustavo.Fring: BaselineFringeData, baseline_fringe_data, baseline_pol_index
-using Gustavo.Fring: FringeSearchMap, BaselineFringeMap, fringe_search_map, _fmt_pfa
+using Gustavo.Fring: BaselineFringeData, baseline_pol_index
+using Gustavo.Fring: FringeSearchMap, BaselineFringeMap, _fmt_pfa
 using Gustavo.Fring: _plotted_sigma
 
 # Resolve a `sites`/`feeds` selector into a vector of integer indices.
@@ -407,14 +407,6 @@ function Fring.plot_baseline_fringes(data::BaselineFringeData; kind::Symbol = :f
     return fig
 end
 
-function Fring.plot_baseline_fringes(
-        uvset::UVSet, sol::CalibrationSolution;
-        scan_index = nothing, kind::Symbol = :freq, kwargs...,
-    )
-    data = baseline_fringe_data(uvset, sol; scan_index = scan_index)
-    return Fring.plot_baseline_fringes(data; kind = kind, kwargs...)
-end
-
 # ── plot_fringe_search: delay–rate SNR surface + peak cross-sections ───────────
 #
 # HOPS-style fringe plot: the windowed matched-filter plane as a heatmap with the
@@ -535,11 +527,4 @@ function Fring.plot_fringe_search(m::Union{BaselineFringeMap, FringeSearchMap}; 
     fig = Figure(size = (900, 640))
     Fring.plot_fringe_search(fig, m; kwargs...)
     return fig
-end
-
-function Fring.plot_fringe_search(
-        uvset::UVSet, sol::CalibrationSolution;
-        zoom::Union{Bool, Real} = true, kwargs...,
-    )
-    return Fring.plot_fringe_search(fringe_search_map(uvset, sol; kwargs...); zoom = zoom)
 end

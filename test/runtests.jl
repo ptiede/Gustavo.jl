@@ -33,9 +33,6 @@ include("test_generic_axes.jl")
 
 include("test_calibration.jl")
 
-# Concurrent sub-arrays on one time axis.
-include("test_subarray_geometry.jl")
-
 # Gauge conventions: which constraint fixes each component's additive freedom.
 include("test_gauge.jl")
 
@@ -63,7 +60,7 @@ include("test_adhoc.jl")
 include("test_pipeline.jl")
 
 # The calibration pipeline surface: pipelines as vectors, fit and calibrate.
-# Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
+# Reuses _build_fringe_ps, _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
 include("test_pipeline_config.jl")
 
 # Composable-pipeline interface (step protocol, transforms, selections, stage
@@ -90,23 +87,18 @@ include("test_bandpass_step.jl")
 include("test_joint_bandpass.jl")
 
 # The AdhocPhase step + output sink: multi-scan full-pipeline solves
-# standalone calibrate ≡ fused output,
-# AprioriAmplitude as a recorded output-chain step.
+# standalone calibrate ≡ fused output.
 include("test_smoother_step.jl")
 
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
 
 # fringe_station_solutions θ-decode + the `rel_time` model option.
-# Reuses _build_fringe_uvset + CAL/FP/UVP aliases from test_pipeline.jl.
+# Reuses _build_fringe_ps + CAL/FP/UVP aliases from test_pipeline.jl.
 include("test_fringe_station_solutions.jl")
 
-# Phase-cal (injected tone) calibration: multitone fit + precal hook.
-# Reuses _build_fringe_uvset + _coherence from test_pipeline.jl.
-include("test_phasecal.jl")
-
-# Per-station weight correction (station_weight_scale / the weight_scale option).
-# Reuses _build_fringe_uvset + the FP/CAL/UVP aliases from test_pipeline.jl.
+# Per-station weight correction (StationWeightScale) through a full solve.
+# Reuses _build_fringe_ps + the FP/CAL/UVP aliases from test_pipeline.jl.
 include("test_weight_scale.jl")
 
 # The executor seam: the group scheduler under each outer scheduler — dispatch

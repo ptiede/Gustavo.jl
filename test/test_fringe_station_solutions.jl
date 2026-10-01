@@ -1,5 +1,5 @@
 # `fringe_station_solutions` (θ → per-(scan,station,feed) delay/rate/phase decode)
-# and the `rel_time` model option. Reuses `_build_fringe_uvset` and the
+# and the `rel_time` model option. Reuses `_build_fringe_ps` and the
 # CAL/FP/UVP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
 @testset "rel_time model option + fringe_station_solutions" begin
@@ -33,8 +33,8 @@
     end
 
     @testset "θ decode: units + feed-2 = shared + inter-feed offset" begin
-        uvset, _ = _build_fringe_uvset(nant = 4)
-        geom = CAL.build_geometry(uvset)
+        ps, _ = _build_fringe_ps(nant = 4)
+        geom = CAL.DataGeometry(ps)
         model = _full_fringe_model()
         layout = CAL.plan_parameters(model, 4, geom)
 
@@ -74,13 +74,13 @@
     end
 
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
-        uvset, truth = _build_fringe_uvset(nant = 4)
+        ps, truth = _build_fringe_ps(nant = 4)
         gauge = PinAntenna(1)
         sol = fit(
             BaselineFringeFit(; gauge) |>
                 Bandpass(; gauge) |>
                 AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            uvset,
+            ps,
         )
         rows = FP.fringe_station_solutions(sol)
         @test length(rows) == sol.info.nscan * length(sol.geom.stations) * 2

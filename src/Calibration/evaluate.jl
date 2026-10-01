@@ -137,7 +137,7 @@ end
 
 Windowed pure forward map: gains of shape `(length(chan_idx), length(ti_idx),
 nant, 2)` at the given GLOBAL channel and time indices (into `layout`'s geometry).
-Use this to evaluate the gains a single UVSet leaf needs without materializing
+Use this to evaluate the gains one Measurement Set needs without materializing
 the full `(nchan_total, ntime_total, …)` array.
 """
 function evaluate_gains(
@@ -179,8 +179,8 @@ every sample, which is exactly the statement that the gain is constant across
 it. A sample with no such segment is an error, naming the segmentation that
 could not place it; that is the "coarser is fine, finer is not" contract.
 
-`time_span[k]` is the interval the `k`-th selected sample integrates over (see
-`PartitionInfo.time_span`); where the segmentation bins a coordinate, a sample
+`time_span[k]` is the interval the `k`-th selected sample integrates over (the
+time coordinate's `integration_time`); where the segmentation bins a coordinate, a sample
 whose span crosses a bin boundary is rejected rather than assigned by its centre.
 
 Coordinates (a `Delay`'s `f − f0`, a `Polynomial`'s scaled offset) are read

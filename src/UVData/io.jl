@@ -143,7 +143,7 @@ function register_primary_cards! end
 Build per-band a-priori flux calibrations from a FITS-IDI file's `GAIN_CURVE`
 (DPFU + elevation gain polynomial) and `SYSTEM_TEMPERATURE` (Tsys) tables, one
 [`AntabCalibration`](@ref) per 1-based band index — ready to pass to
-`Gustavo.calibrate(spw_cals, uvset)` or an `AprioriAmplitude` pipeline step.
+`Gustavo.calibrate(spw_cals, uvset)`.
 Tsys values that are non-positive, the `999` placeholder, or `> tsys_max` are
 treated as missing and fall back to the other feed's value for the same
 (antenna, band, time); samples with no usable

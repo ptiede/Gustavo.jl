@@ -14,7 +14,6 @@ using Gustavo.UVData: Frequency, Ti, BaselineID, Polarization
     UV = Gustavo.UVData
     FR = Gustavo.Fring
     CAL = Gustavo.Calibration
-    ST = Gustavo.Streaming
 
     shift(a) = OffsetArray(a, ntuple(_ -> -2, ndims(a)))
     whole(a) = view(a, ntuple(_ -> Colon(), ndims(a))...)

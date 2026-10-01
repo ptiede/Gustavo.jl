@@ -61,7 +61,7 @@ export AbstractTimeSegmentation, GlobalTime, PerScan, PerIntegration, TimeBlocks
     InstrumentScans
 export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
     ChannelBlocks, FreqGroups, BandGroups
-export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
+export AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit
 export SolveStep, ExecutionConfig, ProgressLogger

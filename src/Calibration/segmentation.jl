@@ -140,7 +140,7 @@ end
 
 The concrete time/frequency grid a calibration solve runs over — the bridge
 from the abstract segmentation vocabulary to integer sample indices. Built once
-per solve (from a `UVSet` scan-group, or directly in tests).
+per solve (by `DataGeometry(ps)`, or directly in tests).
 
 Fields:
 - `times`         : `Ti` sample epochs (seconds since `UVData.JD_UNIX_EPOCH`).
@@ -517,7 +517,7 @@ The solve-side time segment id of each `target` epoch selected by `ti_idx` — t
 space `ComponentPlan.tseg_id` and a component's θ leaf are indexed by, so a
 solution evaluates on `target`'s grid by reading these ids. `ti_idx` selects the
 window to place; `time_span[k]` is the interval the `k`-th selected sample
-integrates over (see `PartitionInfo.time_span`), checked against the solution's
+integrates over (the time coordinate's `integration_time`), checked against the solution's
 own bins where the segmentation places by a formula on a coordinate.
 
 Throws when a target sample falls in no segment of `seg` as the solve resolved
