@@ -176,9 +176,6 @@
         @test t.smoother == FP.PerTrackAdhocSmoother()
         @test t.model.phase.adhoc.prior == FP.default_adhoc_prior()
 
-        e = ExecutionConfig()
-        @test e.mem_fraction == 0.6 && e.mem_budget === nothing
-
         # AprioriAmplitude carries a pre-built spw_cals (loading is the caller's job).
         bc = Dict(1 => :dummy)
         ap = AprioriAmplitude(bc; min_elevation_deg = 10.0)

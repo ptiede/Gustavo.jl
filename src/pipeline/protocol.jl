@@ -18,7 +18,7 @@
 # - `step_gauge(step)`             — the step's gauge, resolved into `ctx.gauge`;
 #                                    `nothing` (the default) for a step with none.
 #
-# Run-wide resources (task/memory budgets, progress) live on the
+# Run-wide resources (schedulers, progress) live on the
 # `ExecutionConfig` passed to `fit`. Anything that changes what a given step
 # solves, its gauge included, lives on that step.
 
@@ -140,7 +140,7 @@ struct SolveContext{
     gauge::GA
     nant::Int
     groups::G
-    charges::Vector{Int}
+    sizes::Vector{Int}
     corrections::Vector{Any}
     exec::X
     stage::Symbol
@@ -161,7 +161,7 @@ other than θ slots belonging to its own scan; it returns its scan's
 contribution instead, and the caller combines the returned values.
 """
 function each_group(f::F, ctx::SolveContext) where {F}
-    out = _map_groups(ctx.groups, ctx.charges, ctx.exec; stage = ctx.stage) do group
+    out = _map_groups(ctx.groups, ctx.sizes, ctx.exec; stage = ctx.stage) do group
         ta = time_ns()
         corrected = _read_group(group, ctx.corrections, ctx.geom, inner_executor(ctx.exec))
         tb = time_ns()
@@ -203,9 +203,9 @@ function _report_progress(cb, stage, done, total)
 end
 
 # `work(group)` over `groups` (their values) on the outer scheduler, heaviest
-# first by `charges`, with the results in group order and
+# first by `sizes`, with the results in group order and
 # `(stage, done, total)` reported to the run's progress callback.
-function _map_groups(work::F, groups, charges, exec::ExecutionConfig; stage::Symbol) where {F}
+function _map_groups(work::F, groups, sizes, exec::ExecutionConfig; stage::Symbol) where {F}
     items = collect(values(groups))
     total = length(items)
     progress = progress_callback(exec)
@@ -216,37 +216,37 @@ function _map_groups(work::F, groups, charges, exec::ExecutionConfig; stage::Sym
         _report_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
         return r
     end
-    return _scheduled_map(wrapped, items, charges; executor = outer_executor(exec))
+    return _scheduled_map(wrapped, items, sizes; executor = outer_executor(exec))
 end
 
 # Largest-first parallel map: run `work` over `items` on `executor`, dispatching
-# the heaviest item (by `charges`) first so the long poles start immediately.
+# the largest item (by `sizes`) first so the long poles start immediately.
 # Results in `items` order. A failed worker rethrows after the other workers
 # drain the queue. `executor` is used exactly as configured — how many items run
-# at once is its decision, checked against the memory budget upstream.
+# at once is its decision.
 #
 # Each backend fills an `Any` sink and returns `map(identity, sink)`: `work`'s
 # return type is not known before it runs, and tasks write their slots
 # concurrently, so the sink has to admit any value; `map` then recovers the
 # concrete element type for whatever consumes the pass.
-function _scheduled_map(work::F, items, charges; executor = SerialScheduler()) where {F}
-    length(items) == length(charges) || throw(
-        DimensionMismatch("items and charges must match: $(length(items)) vs $(length(charges))"),
+function _scheduled_map(work::F, items, sizes; executor = SerialScheduler()) where {F}
+    length(items) == length(sizes) || throw(
+        DimensionMismatch("items and sizes must match: $(length(items)) vs $(length(sizes))"),
     )
-    Base.require_one_based_indexing(items, charges)
-    return _scheduled_map(executor, work, items, charges)
+    Base.require_one_based_indexing(items, sizes)
+    return _scheduled_map(executor, work, items, sizes)
 end
 
 # With one worker the dispatch order cannot matter.
-_scheduled_map(::SerialScheduler, work::F, items, charges) where {F} = map(work, items)
+_scheduled_map(::SerialScheduler, work::F, items, sizes) where {F} = map(work, items)
 
 # `GreedyScheduler` is the one that keeps largest-first meaningful under uneven
-# charges — it hands each task the next group off the queue — where a chunking
+# sizes — it hands each task the next group off the queue — where a chunking
 # scheduler assigns groups to tasks up front. A backend with different
 # task-lifetime needs adds its own method on its executor type.
-function _scheduled_map(sched::Scheduler, work::F, items, charges) where {F}
+function _scheduled_map(sched::Scheduler, work::F, items, sizes) where {F}
     out = Vector{Any}(undef, length(items))
-    tforeach(sortperm(charges; rev = true); scheduler = sched) do k
+    tforeach(sortperm(sizes; rev = true); scheduler = sched) do k
         out[k] = work(items[k])
     end
     return map(identity, out)

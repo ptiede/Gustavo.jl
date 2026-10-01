@@ -66,8 +66,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         @test_throws MethodError Gustavo._scheduled_map(
             identity, 1:3, [1, 1, 1]; executor = UnbackedExecutor(),
         )
-        # Likewise for the memory gate: a scheduler whose task count cannot be
-        # read cannot be checked against the budget.
+        # Likewise its task count, which the run's info reports.
         @test_throws MethodError Gustavo.max_tasks(UnbackedExecutor())
     end
 

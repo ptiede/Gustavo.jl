@@ -29,7 +29,7 @@ _apply_apriori(s::AprioriAmplitude, uv) = UVData.apply_calibration(
     uv, s.spw_cals; min_elevation_deg = s.min_elevation_deg, on_missing_station = s.on_missing_station,
 )
 
-# Run-wide resources: schedulers, the memory budget, progress.
+# Run-wide resources: schedulers, progress.
 include("pipeline/execution.jl")
 
 # Corrections: Measurement Set → Measurement Set, the recorded ones as structs.

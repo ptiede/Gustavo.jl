@@ -38,8 +38,8 @@ processing set of one.
 
 Each solve step carries its own gauge ([`step_gauge`](@ref)); `fit` resolves
 its station codes against the data's antenna table. `exec` (an
-[`ExecutionConfig`](@ref)) supplies the run's schedulers, memory budget and
-progress callback.
+[`ExecutionConfig`](@ref)) supplies the run's schedulers and progress
+callback.
 
 The solution is a [`CalibrationSolution`](@ref): a list of solved components,
 each step's diagnostics in `sol.steps`, and the pipeline, its steps' gauges
@@ -219,14 +219,13 @@ function _run_pipeline(
     spec = (; geom)
     gauges = [_resolve_step_gauge(step_gauge(st), geom.stations) for st in br.solve_steps]
     groups = groupby(ps, XRadio.ByScan())
-    charges = [_group_charge(g) for g in values(groups)]
-    _check_memory_budget(charges, exec)
+    sizes = [_group_bytes(g) for g in values(groups)]
     corrections = Any[]
     components = SolvedComponent[]
     steps = OrderedDict{Symbol, NamedTuple}()
     for (st, before, gauge) in zip(br.solve_steps, br.before, gauges)
         append!(corrections, before)
-        ctx = _step_context(st, spec, gauge, groups, charges, copy(corrections), exec)
+        ctx = _step_context(st, spec, gauge, groups, sizes, copy(corrections), exec)
         t0 = time_ns()
         info = solve(st, ctx)
         info isa NamedTuple || throw(
@@ -254,7 +253,7 @@ end
 # context (and the solution's provenance) holds the concrete per-station trees
 # the solve uses; a step that has not opted into station heterogeneity
 # (`supports_station_heterogeneity`) is handed uniform models only — anything else is rejected before any data is read.
-function _step_context(st::SolveStep, spec, gauge, groups, charges, corrections, exec)
+function _step_context(st::SolveStep, spec, gauge, groups, sizes, corrections, exec)
     stations = spec.geom.stations
     model = Calibration.materialize(model_components(st, spec), stations, spec.geom)
     supports_station_heterogeneity(st) ||
@@ -262,7 +261,7 @@ function _step_context(st::SolveStep, spec, gauge, groups, charges, corrections,
     layout = plan_parameters(model, stations, spec.geom; require_nonempty = false)
     return SolveContext(
         model, layout, spec.geom, zeros(layout.nθ), gauge, length(stations),
-        groups, charges, corrections, exec, provides(st), _PassTiming[],
+        groups, sizes, corrections, exec, provides(st), _PassTiming[],
     )
 end
 

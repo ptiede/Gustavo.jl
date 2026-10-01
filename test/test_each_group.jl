@@ -1,7 +1,7 @@
 # ── Scan groups: what `each_group` hands a step ──────────────────────────────
 #
 # Grouping by scan, reading into memory, the corrections before a step,
-# scheduling and progress, the memory budget, and `fit`'s entry points.
+# scheduling and progress, and `fit`'s entry points.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
@@ -95,18 +95,9 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
         @test root isa ErrorException && root.msg == "boom"
     end
 
-    @testset "the memory budget gates the outer scheduler" begin
-        # The schedulers are used as configured, so a budget that cannot hold the
-        # groups they would keep resident is an error before any data is read.
-        @test_throws "memory budget" fit(
-            GroupProbe(), ps;
-            exec = ExecutionConfig(mem_budget = 1.0, outer_executor = GreedyScheduler(; ntasks = 4)),
-        )
-        # One group at a time is the floor: no task count would make an oversized
-        # group fit, so a serial run goes ahead however tight the budget.
-        @test length(_probe(GroupProbe(), ps; exec = ExecutionConfig(mem_budget = 1.0))) == 3
-        @test Gustavo._group_charge(first(values(by_scan))) ==
-            round(Int, 2.5 * sum(ms -> length(ms[:visibility]) * (8 + 4 + 1), values(first(values(by_scan)))))
+    @testset "group sizes and task bounds" begin
+        @test Gustavo._group_bytes(first(values(by_scan))) ==
+            sum(ms -> length(ms[:visibility]) * (8 + 4 + 1), values(first(values(by_scan))))
 
         @test Gustavo.max_tasks(SerialScheduler()) == 1
         @test Gustavo.max_tasks(GreedyScheduler(; ntasks = 3)) == 3

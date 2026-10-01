@@ -884,8 +884,8 @@ end
         x -> x == 2 ? error("boom") : x, 1:3, [1, 1, 1],
     )
 
-    # A charge per item is required.
-    @test_throws "items and charges must match" Gustavo._scheduled_map(
+    # A size per item is required.
+    @test_throws "items and sizes must match" Gustavo._scheduled_map(
         identity, 1:3, [1, 1],
     )
 end
