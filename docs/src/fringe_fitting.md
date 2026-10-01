@@ -401,7 +401,7 @@ the parallel hands is the common mode of the offsets, which is discarded.
 The rows ``e_i - e_j`` annihilate any vector constant on a connected component
 of the graph, so ``M`` has a null space of dimension equal to the number of
 components and the system is rank-deficient. One constraint row per component
-is supplied by an
+is supplied by the step's `gauge`, an
 [`AbstractGauge`](@ref Gustavo.Calibration.AbstractGauge):
 [`PinAntenna`](@ref Gustavo.Calibration.PinAntenna) sets one node to zero, and
 [`ZeroSumPhase`](@ref Gustavo.Calibration.ZeroSumPhase) constrains a weighted
@@ -424,6 +424,38 @@ The constraint changes no gauge-invariant quantity: baseline differences,
 closure phases and the applied calibration are unaffected. It does determine
 which per-station values are reported, and hence whether values from different
 scans are comparable.
+
+[`ByComponent`](@ref Gustavo.Calibration.ByComponent) chooses a gauge per
+model component, by the component names of the step's model (those a solution
+lists, such as `fringe.phase.rate`):
+
+```julia
+gauge = ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1"))
+sol = fit(BaselineFringeFit(; gauge), ps)
+```
+
+The step rejects a name its model does not have, listing the components it
+does have.
+
+A new convention subtypes `AbstractGauge`. Each freedom reaches it as a
+[`GaugeFreedom`](@ref Gustavo.Calibration.GaugeFreedom): its nodes and, per
+node, the station, feed, scan, component path and observable (`:delay`,
+`:rate` or `:phase`), with the shift direction and the row weight on each node.
+The gauge implements
+[`gauge_constraint`](@ref Gustavo.Calibration.gauge_constraint)`(g, freedom)`,
+returning a row over the freedom's nodes and its target value; the target need
+not be zero. A convention that ties freedoms together, such as holding the
+reference's value equal across scans, implements
+[`gauge_constraints`](@ref Gustavo.Calibration.gauge_constraints)`(g, freedoms)`
+instead, returning `C` and `d` for all freedoms of one system.
+
+The phase-unwrap seed and the joint bandpass solve also need one node per
+freedom; [`gauge_anchor`](@ref Gustavo.Calibration.gauge_anchor) supplies it,
+by default the first station of
+[`gauge_station_order`](@ref Gustavo.Calibration.gauge_station_order) present
+in the freedom. The joint bandpass solve pins that node, and the adhoc phase
+solve pins the first station of `gauge_station_order` it sees in the scan;
+neither reads a gauge's constraints.
 
 ### Detection threshold and robust weighting
 

@@ -417,7 +417,8 @@ function _solve_kind_cols!(
     node_feed = Int[]                        # exclusive feed (1/2), or 0 if a column is shared by both feeds
     node_station = Int[]
     node_scan = Int[]                        # scan id, or 0 if a column spans scans (global)
-    function getnode(col, st, fd, sidx)
+    node_path = Tuple{Vararg{Symbol}}[]      # the owning component's path, () for a nuisance offset
+    function getnode(col, st, fd, sidx, path)
         if haskey(colnode, col)
             n = colnode[col]
             node_feed[n] == fd || (node_feed[n] = 0)        # touched by both feeds → shared
@@ -425,6 +426,7 @@ function _solve_kind_cols!(
             return n
         end
         push!(node_col, col); push!(node_feed, fd); push!(node_station, st); push!(node_scan, sidx)
+        push!(node_path, path)
         return colnode[col] = length(node_col)
     end
 
@@ -437,6 +439,7 @@ function _solve_kind_cols!(
     function nuisnode(sidx, st)
         return get!(nuis, (sidx, st)) do
             push!(node_col, 0); push!(node_feed, 2); push!(node_station, st); push!(node_scan, sidx)
+            push!(node_path, ())
             length(node_col)
         end
     end
@@ -503,10 +506,10 @@ function _solve_kind_cols!(
             for plan in plans
                 na = _feed_node(plan.tying, fa)
                 ca = na == 0 ? 0 : _block_index(plan, na, 1, plan.tseg_id[ti], a)
-                ca != 0 && push!(nsA, getnode(ca, a, fa, sidx))
+                ca != 0 && push!(nsA, getnode(ca, a, fa, sidx, plan.path))
                 nb = _feed_node(plan.tying, fb)
                 cb = nb == 0 ? 0 : _block_index(plan, nb, 1, plan.tseg_id[ti], b)
-                cb != 0 && push!(nsB, getnode(cb, b, fb, sidx))
+                cb != 0 && push!(nsB, getnode(cb, b, fb, sidx, plan.path))
                 ca != 0 && cb != 0 && push!(links, (last(nsA), last(nsB)))
             end
             (isempty(nsA) || isempty(nsB)) && continue
@@ -550,7 +553,10 @@ function _solve_kind_cols!(
     # downweight rows whose residual is still a wrap away from its final value.
     w = copy(rw)
     rows = (; A = rowA, B = rowB, links = rlinks, val = rval, cross = rcross, accept = raccept)
-    nodes = (; feed = node_feed, station = node_station, scan = node_scan, nuisance = node_col .== 0)
+    nodes = (;
+        feed = node_feed, station = node_station, scan = node_scan, component = node_path,
+        nuisance = node_col .== 0,
+    )
     x, ncomp, resid = _solve_tagged_system(rows, w, nodes, gauge, kind; rewrap)
     if !(opts.loss isa LeastSquares)
         for _ in 1:max(opts.irls_iters, 0)
@@ -655,10 +661,10 @@ end
 # Constrained WLS over a tagged node graph, the column-space generalization of
 # `_solve_observable!`. Row `i` observes `Σ x[rows.A[i]] − Σ x[rows.B[i]]` with
 # weight `w[i]`; `nodes` tags each local node with its station, feed (0 = shared
-# by both feeds), scan (0 = a column spanning scans) and whether it is a
-# nuisance offset. `rows.cross` marks cross-hand rows, which are excluded from
-# the unwrap seed's spanning tree. Returns the solution, the number of gauged
-# components the accepted rows form, and the residuals.
+# by both feeds), scan (0 = a column spanning scans), component path and whether
+# it is a nuisance offset. `rows.cross` marks cross-hand rows, which are
+# excluded from the unwrap seed's spanning tree. Returns the solution, the
+# number of gauged components the accepted rows form, and the residuals.
 #
 # The gauge: `rows.links` join each column to the same component's column on
 # the other side of a row (and a nuisance column to its side's model column).
@@ -672,17 +678,15 @@ function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol
     nnodes = length(nodes.feed)
     compid, ncomp, nfree = _gauge_components(rows, nodes)
 
-    station_of(n) = nodes.station[n]
-    feed_of(n) = nodes.feed[n]
-
     # Total row weight on each node — the score the pin falls back to when a
     # component holds no reference node.
     nodew = _node_weights(nnodes, zip(rows.A, rows.B), w)
 
-    # One constraint row per gauged component; `anchors` names a real node per
+    # One freedom per gauged component; `anchors` names a real node per
     # component for the phase-unwrap seed.
     comps = [[n for n in eachindex(compid) if compid[n] == c] for c in 1:nfree]
-    anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
+    freedoms = [_tagged_freedom(cn, nodes, nodew, kind, T) for cn in comps]
+    anchors = [gauge_anchor(gauge, f) for f in freedoms]
     A = zeros(T, length(rows.A), nnodes)
     for i in eachindex(rows.A, rows.B)
         for n in rows.A[i]
@@ -692,32 +696,26 @@ function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol
             A[i, n] -= one(T)
         end
     end
-    Cp = zeros(T, length(comps), nnodes)
-    for (j, cn) in enumerate(comps)
-        gauge_row!(view(Cp, j, :), gauge, cn, nodew, station_of, feed_of)
-    end
     # Nuisance-block gauge: the nuisance offset columns of one scan carry a
     # common-mode freedom the data cannot fix — shifting them together, along
     # with the shared column of every station observed only on feed 2, changes
-    # no row. It is pinned like any other gauge freedom: one row per
-    # (component, scan) group of nuisance nodes, through `gauge`, which prefers
-    # the ranked reference — a feed-2-only station's phase is thereby referenced
-    # to the reference station's feed-2 frame, deterministically.
+    # no row. It is pinned like any other gauge freedom: one per (component,
+    # scan) group of nuisance nodes, through `gauge`, which prefers the ranked
+    # reference — a feed-2-only station's phase is thereby referenced to the
+    # reference station's feed-2 frame, deterministically.
     if any(nodes.nuisance)
         groups = Dict{Tuple{Int, Int}, Vector{Int}}()
         for n in eachindex(nodes.nuisance)
             (nodes.nuisance[n] && compid[n] != 0) || continue
             push!(get!(groups, (compid[n], nodes.scan[n]), Int[]), n)
         end
-        keyorder = sort!(collect(keys(groups)))
-        Cn = zeros(T, length(keyorder), nnodes)
-        for (j, k) in enumerate(keyorder)
-            gauge_row!(view(Cn, j, :), gauge, groups[k], nodew, station_of, feed_of)
+        for k in sort!(collect(keys(groups)))
+            push!(freedoms, _tagged_freedom(groups[k], nodes, nodew, kind, T))
         end
-        Cp = vcat(Cp, Cn)
     end
+    C, d = _gauge_system(gauge, GaugeFreedoms{T}(freedoms, nnodes))
     solve_system = try
-        ConstrainedWLS(A, w, Cp)
+        ConstrainedWLS(A, w, C, d)
     catch err
         err isa ArgumentError || rethrow()
         throw(
@@ -738,6 +736,17 @@ function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol
         resid = rows.val .- A * x
     end
     return x, ncomp, resid
+end
+
+# The gauge freedom on `cn`: its model columns shift together; a nuisance
+# offset column moves only in its own (component, scan) group's freedom.
+function _tagged_freedom(cn, nodes, nodew, kind::Symbol, ::Type{T}) where {T}
+    group = all(n -> nodes.nuisance[n], cn)
+    return GaugeFreedom(;
+        nodes = cn, station = nodes.station[cn], feed = nodes.feed[cn], scan = nodes.scan[cn],
+        component = nodes.component[cn], observable = fill(kind, length(cn)),
+        direction = T[nodes.nuisance[n] == group ? one(T) : zero(T) for n in cn], weight = nodew[cn],
+    )
 end
 
 # The gauge components of a tagged system, numbered so that the gauged ones come

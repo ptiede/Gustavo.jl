@@ -202,41 +202,52 @@ function _full_rank(R)
 end
 
 """
-    ConstrainedWLS(A, inv_variances, C)
-    ConstrainedWLS{T}(A, inv_variances, C)
+    ConstrainedWLS(A, inv_variances, C, d = nothing)
+    ConstrainedWLS{T}(A, inv_variances, C, d = nothing)
 
 The weighted least-squares problem `min_x ‖diag(√inv_variances)(Ax − b)‖²`
-subject to `Cx = 0`, factored once for any number of right-hand sides: `F(b)`
-returns `x`.
+subject to `Cx = d` (`Cx = 0` when `d` is `nothing` or zero), factored once for
+any number of right-hand sides: `F(b)` returns `x`.
 
 The constraints hold exactly: with `Cᵀ = [Q₁ Q₂]R`, every feasible `x` is
-`Q₂z`, and `z` solves the unconstrained problem in `A·Q₂` (a
-[`FactoredWLS`](@ref)). Throws if `C` has dependent rows or `A` does not
-determine `x` on the constraints' null space. `T` defaults to the common type
-of `A`, the weights and `C`.
+`x₀ + Q₂z` for the particular solution `x₀ = Q₁R⁻ᵀd`, and `z` solves the
+unconstrained problem in `A·Q₂` (a [`FactoredWLS`](@ref)) against `b − Ax₀`.
+Throws if `C` has dependent rows or `A` does not determine `x` on the
+constraints' null space. `T` defaults to the common type of `A`, the weights,
+`C` and `d`.
 """
-struct ConstrainedWLS{T, F <: FactoredWLS{T}}
+struct ConstrainedWLS{T, F <: FactoredWLS{T}, X}
     Z::Matrix{T}
     reduced::F
+    x0::X       # particular solution of `Cx = d`, `nothing` for `d = 0`
+    Ax0::X
 end
 
-ConstrainedWLS(A, inv_variances, C) =
-    ConstrainedWLS{promote_type(eltype(A), real(eltype(inv_variances)), eltype(C))}(A, inv_variances, C)
+ConstrainedWLS(A, inv_variances, C, d = nothing) = ConstrainedWLS{
+    promote_type(eltype(A), real(eltype(inv_variances)), eltype(C), isnothing(d) ? Bool : eltype(d)),
+}(A, inv_variances, C, d)
 
-function ConstrainedWLS{T}(A, inv_variances, C) where {T}
+function ConstrainedWLS{T}(A, inv_variances, C, d = nothing) where {T}
     Base.require_one_based_indexing(A, C)
     n = size(A, 2)
     size(C, 2) == n || throw(DimensionMismatch("C has $(size(C, 2)) columns; A has $n"))
     p = size(C, 1)
     p <= n || throw(ArgumentError("$p constraints on $n unknowns"))
+    isnothing(d) || length(d) == p || throw(DimensionMismatch("d has $(length(d)) entries; C has $p rows"))
     Fc = qr(Matrix{T}(transpose(C)))
     _full_rank(Fc.R) || throw(ArgumentError("the constraint rows are linearly dependent"))
-    Z = Matrix{T}(Fc.Q * Matrix{T}(I, n, n))[:, (p + 1):n]
+    Q = Matrix{T}(Fc.Q * Matrix{T}(I, n, n))
+    Z = Q[:, (p + 1):n]
     reduced = FactoredWLS{T}(A * Z, inv_variances)
-    return ConstrainedWLS{T, typeof(reduced)}(Z, reduced)
+    if isnothing(d) || iszero(d)
+        return ConstrainedWLS{T, typeof(reduced), Nothing}(Z, reduced, nothing, nothing)
+    end
+    x0 = Q[:, 1:p] * (transpose(UpperTriangular(Fc.R)) \ Vector{T}(d))
+    return ConstrainedWLS{T, typeof(reduced), Vector{T}}(Z, reduced, x0, A * x0)
 end
 
-(F::ConstrainedWLS)(b) = F.Z * F.reduced(b)
+(F::ConstrainedWLS{<:Any, <:Any, Nothing})(b) = F.Z * F.reduced(b)
+(F::ConstrainedWLS{<:Any, <:Any, <:AbstractVector})(b) = F.x0 .+ F.Z * F.reduced(b .- F.Ax0)
 
 # Inverse-variance weight of the increment between samples `k` and `k+1`: the
 # precision of a difference of two independent estimates, `1/(1/w_k + 1/w_{k+1})`.

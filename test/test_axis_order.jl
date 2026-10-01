@@ -28,7 +28,7 @@
     ps, _ = _build_fringe_ps(nspw = 4, noise = 0.05, ref_freq = 3.0e9, spw_sep = 2.0e9)
     geom = CAL.DataGeometry(ps)
     θ(sol, name) = vcat((vec(parent(c.params)) for c in sol[name].components)...)
-    reference = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
+    reference = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
     ref_search = FP.search_scan(ps, geom, FP.FringeSearch())
     @test any(parent(ref_search[:valid]))
 
@@ -44,7 +44,7 @@
         end
 
         @testset "residual_group" begin
-            model = Gustavo.model_components(BaselineFringeFit(), (; geom))
+            model = Gustavo.model_components(BaselineFringeFit(; gauge = PinAntenna(1)), (; geom))
             layout = CAL.plan_parameters(model, length(geom.stations), geom)
             a = FP.residual_group(layout, θ(reference, :fringe), ps, geom)
             b = FP.residual_group(layout, θ(reference, :fringe), other, geom)
@@ -54,9 +54,13 @@
             end
         end
 
-        @testset "$(nameof(typeof(step)))" for step in (BaselineFringeFit(), AdhocPhase(), Bandpass())
-            a = fit(step, ps; gauge = PinAntenna(1))
-            b = fit(step, other; gauge = PinAntenna(1))
+        @testset "$(nameof(typeof(step)))" for step in (
+                BaselineFringeFit(; gauge = PinAntenna(1)),
+                AdhocPhase(; gauge = PinAntenna(1)),
+                Bandpass(; gauge = PinAntenna(1)),
+            )
+            a = fit(step, ps)
+            b = fit(step, other)
             name = Gustavo.provides(step)
             @test maximum(abs, θ(a, name)) > 0
             @test isequal(θ(a, name), θ(b, name))

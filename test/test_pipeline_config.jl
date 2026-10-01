@@ -6,8 +6,9 @@
 @testset "Calibration pipeline" begin
     @testset "fit, then calibrate" begin
         uvset, _ = _build_fringe_uvset()
-        pipe = (BaselineFringeFit(), Bandpass(), AdhocPhase())
-        sol = fit(pipe, uvset; gauge = PinAntenna(1))
+        gauge = PinAntenna(1)
+        pipe = (BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge))
+        sol = fit(pipe, uvset)
         @test sol isa CAL.CalibrationSolution
         @test length(sol.geom.stations) == 4
         @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
@@ -22,7 +23,8 @@
 
     @testset "calibrate's post runs on each corrected group" begin
         uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
-        sol = fit(BaselineFringeFit() |> Bandpass() |> AdhocPhase(), uvset; gauge = PinAntenna(1))
+        gauge = PinAntenna(1)
+        sol = fit(BaselineFringeFit(; gauge) |> Bandpass(; gauge) |> AdhocPhase(; gauge), uvset)
         out = calibrate(
             sol, uvset; post = AverageTime(seconds = 1.0e6) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
         )
@@ -45,9 +47,9 @@
     @testset "a pipeline holds solve steps, transforms and a-priori steps" begin
         uvset, _ = _build_fringe_uvset()
         @test_throws "not AverageFrequency" fit(
-            [BaselineFringeFit(), AverageFrequency(nout = 1)], uvset; gauge = PinAntenna(1),
+            [BaselineFringeFit(; gauge = PinAntenna(1)), AverageFrequency(nout = 1)], uvset,
         )
-        @test_throws "holds no solve step" fit([StationWeightScale(ones(4))], uvset; gauge = PinAntenna(1))
+        @test_throws "holds no solve step" fit([StationWeightScale(ones(4))], uvset)
     end
 
     @testset "reduce steps apply eagerly as functors" begin
@@ -107,7 +109,8 @@
         @test_throws ErrorException UVP.flag_spw_edges(uvset; mode = :bogus, fraction = 0.1)
 
         # As `calibrate`'s `post` on the corrected output.
-        sol = fit([BaselineFringeFit(), Bandpass(), AdhocPhase()], uvset; gauge = PinAntenna(1))
+        gauge = PinAntenna(1)
+        sol = fit([BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)], uvset)
         out = calibrate(sol, uvset; post = FlagSpwEdges(mode = :flag_fraction, fraction = 0.2))
         for (_, leaf) in DimensionalData.branches(out)
             F = parent(leaf[:flags])
@@ -128,8 +131,8 @@
         @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
         @test_throws ErrorException resolve_gauge(ZeroSumPhase(antennas = ["ZZ"]), names)
         # End-to-end (new engine): code "A1" resolves to index 1 → identical solve.
-        by_code = fit(BaselineFringeFit(), uvset; gauge = PinAntenna("A1"))
-        by_idx = fit(BaselineFringeFit(), uvset; gauge = PinAntenna(1))
+        by_code = fit(BaselineFringeFit(; gauge = PinAntenna("A1")), uvset)
+        by_idx = fit(BaselineFringeFit(; gauge = PinAntenna(1)), uvset)
         @test parent(gains(by_code)) ≈ parent(gains(by_idx))
     end
 
@@ -137,7 +140,7 @@
         uvset, _ = _build_fringe_uvset()
         # A standalone Bandpass fit needs no BaselineFringeFit step, no
         # pipeline-level anchor check, and no fringe-estimator diagnostics.
-        sol = fit(Bandpass(), uvset; gauge = PinAntenna(2))
+        sol = fit(Bandpass(; gauge = PinAntenna(2)), uvset)
         @test collect(keys(sol.steps)) == [:bandpass]
         @test !haskey(sol.steps[:bandpass], :search)
         @test length(sol.geom.stations) == 4
@@ -145,7 +148,7 @@
     end
 
     @testset "defaults" begin
-        f = BaselineFringeFit()
+        f = BaselineFringeFit(; gauge = PinAntenna(1))
         @test f.model == default_fringe_terms()
         # The default model: 4 feed-by-feed instrument components, and no
         # inter-feed PHASE offset — see `default_fringe_terms`.
@@ -163,12 +166,12 @@
         @test f.rounds == 1
         @test f.steer_cells == 9.0
 
-        b = Bandpass()
+        b = Bandpass(; gauge = PinAntenna(1))
         @test b.model == default_bandpass_terms()
         @test b.smoother isa FP.JointSmoother
         @test isnothing(b.model.phase.bandpass.prior) && isnothing(b.model.logamp.bandpass.prior)
 
-        t = AdhocPhase()
+        t = AdhocPhase(; gauge = PinAntenna(1))
         @test t.model == default_adhoc_terms()
         @test t.smoother == FP.PerTrackAdhocSmoother()
         @test t.model.phase.adhoc.prior == FP.default_adhoc_prior()
@@ -193,7 +196,7 @@ end
     uvset, _ = _build_fringe_uvset()
 
     @testset "SolveContext" begin
-        ff = BaselineFringeFit()
+        ff = BaselineFringeFit(; gauge = PinAntenna(1))
         geom = CAL.build_geometry(uvset)
         antennas = UVP.metadata(first(values(UVP.branches(uvset)))).antennas
         nant = length(antennas)
@@ -263,10 +266,9 @@ end
         # Wired through a real fit: the pipeline's stages are named in the log.
         buf4 = IOBuffer()
         sol = fit(
-            BaselineFringeFit() |> Bandpass(),
+            BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)),
             uvset;
             exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
-            gauge = PinAntenna(1),
         )
         @test sol isa CAL.CalibrationSolution
         out = String(take!(buf4))
@@ -284,15 +286,15 @@ end
         @test eltype(ST.scan_stream(uvset).transforms) === Any
     end
 
-    @testset "the solution records its pipeline and gauge" begin
+    @testset "the solution records its pipeline, gauge included" begin
         t = StationWeightScale(ones(4))
-        ff = BaselineFringeFit()
-        sol = fit(t |> ff, uvset; gauge = PinAntenna("A1"))
+        ff = BaselineFringeFit(; gauge = PinAntenna("A1"))
+        sol = fit(t |> ff, uvset)
         @test sol.provenance.pipeline == join((sprint(show, x; context = :limit => true) for x in (t, ff)), " |> ")
         # Recorded the same whatever the pipeline was given as.
-        @test fit([t, ff], uvset; gauge = PinAntenna("A1")).provenance == sol.provenance
+        @test fit([t, ff], uvset).provenance == sol.provenance
         # The gauge as given, not as resolved against the stations.
-        @test sol.provenance.gauge == sprint(show, PinAntenna("A1"))
+        @test occursin(sprint(show, PinAntenna("A1")), sol.provenance.pipeline)
         # A step selection carries both along.
         @test sol[:fringe].provenance == sol.provenance
 
@@ -300,7 +302,8 @@ end
         @test fieldtype(typeof(AprioriAmplitude(bc)), :spw_cals) === typeof(bc)
         # The gauge keyword is typed, so a bare index is rejected rather than
         # silently treated as a gauge.
-        @test_throws TypeError fit(ff, uvset; gauge = 2)
+        @test_throws TypeError BaselineFringeFit(; gauge = 2)
+        @test_throws "BaselineFringeFit needs a `gauge`" BaselineFringeFit()
     end
 end
 
@@ -308,7 +311,7 @@ end
 # rewrap them — e.g. over a view — and the whole apply path must be indifferent to that.
 @testset "rewrapped parameters correct data identically" begin
     uvset, _ = _build_fringe_uvset()
-    sol = fit(BaselineFringeFit() |> Bandpass(), uvset; gauge = PinAntenna(1))
+    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)), uvset)
     rewrapped = [
         CAL.SolvedComponent(
             c.step, c.path, c.component,

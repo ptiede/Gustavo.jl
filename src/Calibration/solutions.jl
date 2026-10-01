@@ -53,8 +53,8 @@ Base.show(io::IO, c::SolvedComponent) = print(
 )
 
 """
-    CalibrationSolution(geom, components, steps = OrderedDict(), info = (;); pipeline = "", gauge = "")
-    CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, pipeline = "", gauge = "")
+    CalibrationSolution(geom, components, steps = OrderedDict(), info = (;); pipeline = "")
+    CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, pipeline = "")
 
 A solved calibration: the list `components` of [`SolvedComponent`](@ref)s over
 the geometry `geom`, whose `stations` name every station a component may
@@ -64,8 +64,8 @@ carry. Gains compose multiplicatively across components.
   per-scan SNR, timing, the fringe step's unconstrained `flagged_ant` /
   `flagged_scan`, …).
 - `info` holds run-wide diagnostics.
-- `provenance` is the pipeline and gauge the run was given, as text for the
-  record. A solution does not replay its pipeline: [`calibrate`](@ref) divides
+- `provenance` is the pipeline the run was given, its steps' gauges included,
+  as text for the record. A solution does not replay its pipeline: [`calibrate`](@ref) divides
   by its gains only.
 
 Any subset of the components is a solution: `filter(pred, sol)`,
@@ -82,7 +82,7 @@ struct CalibrationSolution{G <: DataGeometry}
     components::Vector{SolvedComponent}
     steps::OrderedDict{Symbol, NamedTuple}
     info::NamedTuple
-    provenance::@NamedTuple{pipeline::String, gauge::String}
+    provenance::@NamedTuple{pipeline::String}
     function CalibrationSolution{G}(geom, components, steps, info, provenance) where {G}
         isempty(geom.stations) && throw(
             ArgumentError(
@@ -101,22 +101,22 @@ end
 function CalibrationSolution(
         geom::DataGeometry, components::AbstractVector{<:SolvedComponent},
         steps::AbstractDict = OrderedDict{Symbol, NamedTuple}(), info::NamedTuple = NamedTuple();
-        pipeline::AbstractString = "", gauge::AbstractString = "",
+        pipeline::AbstractString = "",
     )
     return CalibrationSolution{typeof(geom)}(
         geom, collect(SolvedComponent, components), OrderedDict{Symbol, NamedTuple}(steps), info,
-        (; pipeline = String(pipeline), gauge = String(gauge)),
+        (; pipeline = String(pipeline)),
     )
 end
 
 function CalibrationSolution(
         model::GainModel, layout::ParameterLayout, geom::DataGeometry,
         θ::AbstractVector, info::NamedTuple = NamedTuple();
-        name::Symbol = :solution, pipeline::AbstractString = "", gauge::AbstractString = "",
+        name::Symbol = :solution, pipeline::AbstractString = "",
     )
     return CalibrationSolution(
         geom, _solved_components(name, model, layout, θ, geom),
-        OrderedDict{Symbol, NamedTuple}(name => info); pipeline, gauge,
+        OrderedDict{Symbol, NamedTuple}(name => info); pipeline,
     )
 end
 

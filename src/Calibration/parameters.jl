@@ -40,12 +40,14 @@ are the term's own coordinate constants, resolved once against the solve
 geometry ([`freq_coord_state`](@ref)), `nothing` on an axis the term does not
 declare. `priors[a]` is the [`resolve_prior`](@ref)d prior of the plan's `a`-th
 station (the leaf's `:AntennaName` position): stations share a plan whatever their
-priors. The forward map does not read it.
+priors. The forward map does not read it. `path` is the component's name in the
+model, `(:phase, …)` or `(:logamp, …)`; the station groups of one name share it.
 """
 struct ComponentPlan{
         T <: AbstractGainTerm, Ty <: AbstractFeedTying,
         TS <: AbstractTimeSegmentation, FS <: AbstractFrequencySegmentation, TC, FC,
         XF <: AbstractVector{<:Real}, XT <: AbstractVector{<:Real}, PR <: AbstractVector,
+        PA <: Tuple{Vararg{Symbol}},
     }
     term::T
     tseg::TS                    # the time segmentation `tseg_id` resolves
@@ -61,6 +63,7 @@ struct ComponentPlan{
     fstate::FC                  # the term's resolved frequency-coordinate constants
     tstate::TC                  # …and its time-coordinate constants
     priors::PR                  # length nant   → the station's resolved prior
+    path::PA                    # the component's name in the model, e.g. (:phase, :mbd)
 end
 
 """
@@ -283,31 +286,31 @@ _group_keys(n::Int) = ntuple(i -> Symbol(:g, i), n)
 # `GainComponent`s, or `_ComponentGroups` where the canonicalizer found station
 # heterogeneity.
 
-function _plans_tree(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
-    return NamedTuple{keys(nt)}(map(v -> _plans_node(v, nant, geom, flat, next), values(nt)))
+function _plans_tree(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple)
+    return NamedTuple{keys(nt)}(map((k, v) -> _plans_node(v, nant, geom, flat, next, (path..., k)), keys(nt), values(nt)))
 end
-_plans_node(e::GainComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}) =
-    _plans_leaf(e, fill(resolve_prior(e), nant), nant, geom, flat, next)
-_plans_node(s::_StationComponents, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}) =
-    _plans_leaf(s.comp, s.priors, nant, geom, flat, next)
-function _plans_leaf(e::GainComponent, priors::AbstractVector, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
+_plans_node(e::GainComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple) =
+    _plans_leaf(e, fill(resolve_prior(e), nant), nant, geom, flat, next, path)
+_plans_node(s::_StationComponents, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple) =
+    _plans_leaf(s.comp, s.priors, nant, geom, flat, next, path)
+function _plans_leaf(e::GainComponent, priors::AbstractVector, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple)
     cl = _component_layout(e, nant, geom)
     dof = prod(cl.shape)
     range = next[]:(next[] + dof - 1)
     next[] += dof
     plan = ComponentPlan(
         e.term, cl.tseg, cl.fseg, cl.tseg_id, cl.fseg_id, cl.xf, cl.xt, cl.nchan_seg,
-        cl.tying, range, cl.shape, cl.fstate, cl.tstate, priors,
+        cl.tying, range, cl.shape, cl.fstate, cl.tstate, priors, path,
     )
     push!(flat, plan)
     return plan
 end
-_plans_node(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}) =
-    _plans_tree(nt, nant, geom, flat, next)
-function _plans_node(g::_ComponentGroups, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int})
+_plans_node(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple) =
+    _plans_tree(nt, nant, geom, flat, next, path)
+function _plans_node(g::_ComponentGroups, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple)
     plans = NamedTuple{_group_keys(length(g.comps))}(
         Tuple(
-            _plans_leaf(g.comps[i], g.priors[i], length(g.stations[i]), geom, flat, next)
+            _plans_leaf(g.comps[i], g.priors[i], length(g.stations[i]), geom, flat, next, path)
                 for i in eachindex(g.comps, g.priors)
         )
     )
@@ -393,9 +396,9 @@ end
 function _plan_layout(ptree_spec::NamedTuple, ltree_spec::NamedTuple, nant::Int, geom::DataGeometry)
     flat = ComponentPlan[]
     next = Ref(1)
-    ptree = _plans_tree(ptree_spec, nant, geom, flat, next)
+    ptree = _plans_tree(ptree_spec, nant, geom, flat, next, (:phase,))
     nphase = length(flat)
-    ltree = _plans_tree(ltree_spec, nant, geom, flat, next)
+    ltree = _plans_tree(ltree_spec, nant, geom, flat, next, (:logamp,))
     nθ = next[] - 1
 
     axes = (

@@ -63,12 +63,13 @@
         # detections — SNR, delay, rate — are bit-identical. What the fix moves
         # is the RELATIVE inter-baseline weighting of the stages that accumulate
         # ACROSS baselines (stage B / bandpass / adhoc) and the exported weights.
-        chain0 = BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(model = default_adhoc_terms(; prior = nothing))
-        base = let sol = fit(chain0, uvset; gauge = PinAntenna(1))
+        gauge = PinAntenna(1)
+        chain0 = BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(; model = default_adhoc_terms(; prior = nothing), gauge)
+        base = let sol = fit(chain0, uvset)
             (sol, calibrate(sol, uvset))
         end
-        fixd = let sol = fit(FP.StationWeightScale(ws) |> chain0, uvset; gauge = PinAntenna(1))
+        fixd = let sol = fit(FP.StationWeightScale(ws) |> chain0, uvset)
             (sol, calibrate(sol, uvset))
         end
         bfr, ffr = base[1].steps[:fringe], fixd[1].steps[:fringe]
@@ -91,11 +92,11 @@
     end
 
     @testset "diagnostics see the weight scale they are given" begin
+        gauge = PinAntenna(1)
         sol = fit(
-            FP.StationWeightScale(ws) |> BaselineFringeFit() |>
-                Bandpass() |> AdhocPhase(model = default_adhoc_terms(; prior = nothing)),
+            FP.StationWeightScale(ws) |> BaselineFringeFit(; gauge) |>
+                Bandpass(; gauge) |> AdhocPhase(; model = default_adhoc_terms(; prior = nothing), gauge),
             uvset,
-            gauge = PinAntenna(1),
         )
         # A solution records no executable corrections: the `weight_scale`
         # keyword and the equivalent explicit transform chain see identical data.

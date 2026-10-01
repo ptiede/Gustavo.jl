@@ -14,7 +14,7 @@ Gustavo.provides(::GroupProbe) = :probe
 Gustavo.solve(s::GroupProbe, ctx) = (; seen = each_group(s.f, ctx))
 
 _probe(pipeline, data; kw...) =
-    fit(pipeline, data; gauge = PinAntenna(1), kw...).steps[:probe].seen
+    fit(pipeline, data; kw...).steps[:probe].seen
 
 _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w -> w ./ 2, ms[:weight]))
 
@@ -43,7 +43,7 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
         @test halved ≈ plain ./ 2
         # A correction after the step does not reach it; the solution's
         # provenance records it.
-        sol = fit(Any[GroupProbe(w), _halve_weights], ps; gauge = PinAntenna(1))
+        sol = fit(Any[GroupProbe(w), _halve_weights], ps)
         @test sol.steps[:probe].seen == plain
         @test occursin("_halve_weights", sol.provenance.pipeline)
         @test first(findfirst("GroupProbe", sol.provenance.pipeline)) < first(findfirst("_halve_weights", sol.provenance.pipeline))
@@ -75,7 +75,7 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
     @testset "progress and timing" begin
         events = Tuple{Symbol, Int, Int}[]
         cb = (stage, done, total) -> push!(events, (stage, done, total))
-        sol = fit(GroupProbe(), ps; gauge = PinAntenna(1), exec = ExecutionConfig(progress = cb))
+        sol = fit(GroupProbe(), ps; exec = ExecutionConfig(progress = cb))
         @test events[1] == (:probe, 0, 3)
         @test sort([e[2] for e in events[2:end]]) == 1:3
         timing = sol.steps[:probe].timing
@@ -86,7 +86,7 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
     @testset "a failing group surfaces its own error" begin
         boom = GroupProbe(g -> error("boom"))
         err = try
-            fit(boom, ps; gauge = PinAntenna(1), exec = ExecutionConfig(outer_executor = GreedyScheduler(; ntasks = 2)))
+            fit(boom, ps; exec = ExecutionConfig(outer_executor = GreedyScheduler(; ntasks = 2)))
             nothing
         catch e
             e
@@ -99,7 +99,7 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
         # The schedulers are used as configured, so a budget that cannot hold the
         # groups they would keep resident is an error before any data is read.
         @test_throws "memory budget" fit(
-            GroupProbe(), ps; gauge = PinAntenna(1),
+            GroupProbe(), ps;
             exec = ExecutionConfig(mem_budget = 1.0, outer_executor = GreedyScheduler(; ntasks = 4)),
         )
         # One group at a time is the floor: no task count would make an oversized
@@ -117,8 +117,7 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
     end
 
     @testset "what a pipeline may hold" begin
-        @test_throws "not Int64" fit((GroupProbe(), 3), ps; gauge = PinAntenna(1))
-        @test_throws "no gauge given" fit(GroupProbe(), ps)
-        @test_throws "holds no solve step" fit((AutocorrelationNormalization(),), ps; gauge = PinAntenna(1))
+        @test_throws "not Int64" fit((GroupProbe(), 3), ps)
+        @test_throws "holds no solve step" fit((AutocorrelationNormalization(),), ps)
     end
 end

@@ -14,11 +14,11 @@ include("synthetic_uvset.jl")
 
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
     # keeps every well-determined AP in this high-SNR synthetic.
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         uvset,
-        gauge = PinAntenna(1),
     )
     @test sol isa CAL.CalibrationSolution
     @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
@@ -191,7 +191,7 @@ end
 
     # The pipeline's own default carries the same tie: the AdhocPhase
     # step's compiled component is the feed-common adhoc form.
-    t = Gustavo.model_components(AdhocPhase(), nothing)
+    t = Gustavo.model_components(AdhocPhase(; gauge = PinAntenna(1)), nothing)
     @test t.phase.adhoc.Feed isa CAL.SharedFeeds
     @test isempty(t.logamp)
 end
@@ -199,47 +199,48 @@ end
 @testset "AdhocPhase model surface: vetting + per-feed adhoc" begin
     sm = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     # One-argument form: the smoother, with the default model.
-    @test AdhocPhase(sm).model == default_adhoc_terms()
-    @test AdhocPhase(sm).smoother === sm
+    gauge = PinAntenna(1)
+    @test AdhocPhase(sm; gauge).model == default_adhoc_terms()
+    @test AdhocPhase(sm; gauge).smoother === sm
 
     # Compile-time vetting. The joint smoother cannot solve a per-feed model
     # (its Kalman state is one node per station)...
     pf = default_adhoc_terms(feed = CAL.PerFeed())
     @test_throws "JointKalmanSmoother cannot fit" Gustavo.model_components(
-        AdhocPhase(model = pf, smoother = FP.JointKalmanSmoother()), nothing,
+        AdhocPhase(; model = pf, smoother = FP.JointKalmanSmoother(), gauge), nothing,
     )
     # ...no adhoc smoother can address a single-feed tying...
     @test_throws "cannot fit the component" Gustavo.model_components(
-        AdhocPhase(model = default_adhoc_terms(feed = CAL.SingleFeed(2))),
+        AdhocPhase(; model = default_adhoc_terms(feed = CAL.SingleFeed(2)), gauge),
         nothing,
     )
     # ...and the stage solves exactly one phase component, nothing in logamp.
     two = GainModel(; phase = (; a = pf.phase.adhoc, b = pf.phase.adhoc))
     @test_throws "is not identifiable" Gustavo.model_components(
-        AdhocPhase(model = two), nothing,
+        AdhocPhase(; model = two, gauge), nothing,
     )
     # ...the joint smoother needs an OU prior...
     @test_throws "JointKalmanSmoother cannot fit" Gustavo.model_components(
-        AdhocPhase(model = default_adhoc_terms(; prior = RandomWalkPrior(; σ = 0.1)), smoother = FP.JointKalmanSmoother()),
+        AdhocPhase(; model = default_adhoc_terms(; prior = RandomWalkPrior(; σ = 0.1)), smoother = FP.JointKalmanSmoother(), gauge),
         nothing,
     )
     # ...and the prior is a random walk or OU process along time.
     @test_throws "cannot fit the component" Gustavo.model_components(
-        AdhocPhase(model = default_adhoc_terms(; prior = IIDPrior(0.1))), nothing,
+        AdhocPhase(; model = default_adhoc_terms(; prior = IIDPrior(0.1)), gauge), nothing,
     )
     la = GainModel(; phase = pf.phase, logamp = pf.phase)
     @test_throws "phase only" Gustavo.model_components(
-        AdhocPhase(model = la), nothing,
+        AdhocPhase(; model = la, gauge), nothing,
     )
 
     # End-to-end per-feed adhoc: the layout realizes two nodes per station, both
     # feed tracks are solved, and (the screen being feed-common) the corrected
     # parallel hands still flatten.
     uvset, _ = _build_fringe_uvset()
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> AdhocPhase(model = pf, smoother = sm),
+        BaselineFringeFit(; gauge) |> AdhocPhase(; model = pf, smoother = sm, gauge),
         uvset,
-        gauge = PinAntenna(1),
     )
     adhoc_c = only(sol[:adhoc, :phase, :adhoc].components)
     @test adhoc_c.component.Feed isa CAL.PerFeed
@@ -269,10 +270,11 @@ end
     # leaf's gains depend only on its own (disjoint) θ slots.
     uvset, _ = _build_fringe_uvset()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-    chain = BaselineFringeFit() |> Bandpass() |>
-        AdhocPhase(adhoc)
+    gauge = PinAntenna(1)
+    chain = BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+        AdhocPhase(adhoc; gauge)
 
-    sol_ref = fit(chain, uvset; gauge = PinAntenna(1))
+    sol_ref = fit(chain, uvset)
     corr_ref = Gustavo.UVData.apply_calibration(uvset, sol_ref)
 
     out_fused = calibrate(sol_ref, uvset)
@@ -308,13 +310,14 @@ end
     # fitting `ApplySolution(sol_a[:fringe]) |> B` in a later,
     # unrelated call.
     uvset, _ = _build_fringe_uvset()
-    ff = BaselineFringeFit()
-    bp = Bandpass()
+    gauge = PinAntenna(1)
+    ff = BaselineFringeFit(; gauge)
+    bp = Bandpass(; gauge)
 
-    sol_within = fit(ff |> bp, uvset; gauge = PinAntenna(1))
+    sol_within = fit(ff |> bp, uvset)
 
-    sol_a = fit(ff, uvset; gauge = PinAntenna(1))
-    sol_cross = fit(FP.ApplySolution(sol_a[:fringe]) |> bp, uvset; gauge = PinAntenna(1))
+    sol_a = fit(ff, uvset)
+    sol_cross = fit(FP.ApplySolution(sol_a[:fringe]) |> bp, uvset)
 
     θ_within = [parent(c.params) for c in sol_within[:bandpass].components]
     θ_cross = [parent(c.params) for c in sol_cross[:bandpass].components]
@@ -344,11 +347,11 @@ end
     # `_build_fringe_uvset` registers NO primary cards, so write_uvfits must
     # synthesize them. Reduce + combine spws to channels, then round-trip via UVFITS.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         uvset;
-        gauge = PinAntenna(1),
     )
     reduced = calibrate(
         sol, uvset; post = AverageTime(seconds = 0.02) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
@@ -382,11 +385,11 @@ end
     # since both files traverse the identical write/load path, their records align
     # exactly and differ ONLY by that conjugation. This isolates the convention.
     uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 6)
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         uvset;
-        gauge = PinAntenna(1),
     )
     reduced = calibrate(
         sol, uvset; post = AverageTime(seconds = 0.02) ∘ CombineSpw() ∘ AverageFrequency(nout = 1),
@@ -460,11 +463,11 @@ end
     uvset, _ = _build_fringe_uvset()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
+        gauge = PinAntenna(1)
         sol = fit(
-            BaselineFringeFit(rounds = r) |>
-                Bandpass() |> AdhocPhase(adhoc),
+            BaselineFringeFit(; rounds = r, gauge) |>
+                Bandpass(; gauge) |> AdhocPhase(adhoc; gauge),
             uvset,
-            gauge = PinAntenna(1),
         )
         corr = Gustavo.UVData.apply_calibration(uvset, sol)
         worst = 1.0
@@ -517,12 +520,12 @@ end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-    ff = BaselineFringeFit()
-    sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+    gauge = PinAntenna(1)
+    ff = BaselineFringeFit(; gauge)
+    sol_on = fit(ff |> Bandpass(; gauge) |> AdhocPhase(adhoc; gauge), uvset)
     sol_off = fit(
-        ff |> Bandpass(model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
-            AdhocPhase(adhoc), uvset,
-            gauge = PinAntenna(1),
+        ff |> Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge) |>
+            AdhocPhase(adhoc; gauge), uvset,
     )
 
     don = FP.baseline_fringe_data(uvset, sol_on)
@@ -585,12 +588,12 @@ end
     end
     uvset, _ = _build_fringe_uvset(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-    ff = BaselineFringeFit()
-    sol_on = fit(ff |> Bandpass() |> AdhocPhase(adhoc), uvset; gauge = PinAntenna(1))
+    gauge = PinAntenna(1)
+    ff = BaselineFringeFit(; gauge)
+    sol_on = fit(ff |> Bandpass(; gauge) |> AdhocPhase(adhoc; gauge), uvset)
     sol_off = fit(
-        ff |> Bandpass(model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother()) |>
-            AdhocPhase(adhoc), uvset,
-            gauge = PinAntenna(1),
+        ff |> Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge) |>
+            AdhocPhase(adhoc; gauge), uvset,
     )
 
     don = FP.baseline_fringe_data(uvset, sol_on)
@@ -690,11 +693,11 @@ end
         isempty(rs) ? NaN : sum(rs) / length(rs)
     end
 
-    ff = BaselineFringeFit()
+    gauge = PinAntenna(1)
+    ff = BaselineFringeFit(; gauge)
     sol_off = fit(
-        ff |> Bandpass(model = GainModel(; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother()) |>
-            AdhocPhase(adhoc), uvset,
-            gauge = PinAntenna(1),
+        ff |> Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother(), gauge) |>
+            AdhocPhase(adhoc; gauge), uvset,
     )
     doff = FP.baseline_fringe_data(uvset, sol_off)
     poff = FP.baseline_pol_index(doff, (1, 1))
@@ -708,9 +711,8 @@ end
     )
     for prior in priors
         sol = fit(
-            ff |> Bandpass(model = amp_model(prior), smoother = FP.PerTrackSmoother()) |>
-                AdhocPhase(adhoc), uvset,
-                gauge = PinAntenna(1),
+            ff |> Bandpass(; model = amp_model(prior), smoother = FP.PerTrackSmoother(), gauge) |>
+                AdhocPhase(adhoc; gauge), uvset,
         )
         don = FP.baseline_fringe_data(uvset, sol)
         p = FP.baseline_pol_index(don, (1, 1))
@@ -728,9 +730,8 @@ end
     # With no prior the killed channels are NOT estimated — their θ slot is
     # untouched (log-amp 0 ⇒ |g| = 1), the contrast that motivates the priors.
     solf = fit(
-        ff |> Bandpass(smoother = FP.PerTrackSmoother()) |>
-            AdhocPhase(adhoc), uvset,
-            gauge = PinAntenna(1),
+        ff |> Bandpass(; smoother = FP.PerTrackSmoother(), gauge) |>
+            AdhocPhase(adhoc; gauge), uvset,
     )
     bpf = only(CAL._applied(solf[:bandpass, :logamp, :bandpass]).groups)
     planf = only(bpf.layout.plans)
@@ -741,11 +742,11 @@ end
 
 @testset "Default adhoc step flattens end-to-end" begin
     uvset, _ = _build_fringe_uvset()
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(),
+        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(; gauge),
         uvset,
-        gauge = PinAntenna(1),
     )
     corr = Gustavo.UVData.apply_calibration(uvset, sol)
     worst = 1.0
@@ -776,11 +777,11 @@ end
     ax = FP._search_axes(geom.channel_freqs, geom.times, FP.FringeSearch(), ComplexF64)
     @test ax.mbd !== nothing
 
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         uvset,
-        gauge = PinAntenna(1),
     )
     @test all(>(10), filter(isfinite, sol.steps[:fringe].scan_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
@@ -811,12 +812,12 @@ end
     # Stage timers land in the solution info and print; the progress callback
     # fires per completed scan of each pass (plus a done=0 pass announcement).
     events = Tuple{Symbol, Int, Int}[]
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ps;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
-        gauge = PinAntenna(1),
     )
     ngroups = length(XRadio.groupby(ps, XRadio.ByScan()))
     # Stages report under the pass names of the composable pipeline
@@ -850,13 +851,13 @@ end
     # The bandpass/adhoc chain still produces a working solve on a
     # single-scan uvset (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
+    gauge = PinAntenna(1)
     solc = fit(
-        BaselineFringeFit() |>
-            Bandpass() |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+        BaselineFringeFit(; gauge) |>
+            Bandpass(; gauge) |>
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         uvset;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
-        gauge = PinAntenna(1),
     )
     @test solc isa CAL.CalibrationSolution
     bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
@@ -907,13 +908,15 @@ end
             end
         end
     end
-    ff = BaselineFringeFit(
+    gauge = PinAntenna(1)
+    ff = BaselineFringeFit(;
         model = default_fringe_terms(),
         search = FP.FringeSearch(algorithm = FP.FullGrid()),
+        gauge,
     )
     # Each scan's station systems solve as it is searched.
     @test Gustavo._scan_local_solve(ff)
-    sol = fit(ff |> AdhocPhase(), uvset; gauge = PinAntenna(1))
+    sol = fit(ff |> AdhocPhase(; gauge), uvset)
     flags = FP.fringe_station_flags(sol)
     @test !isempty(flags)
     @test all(r -> r.ant == 4, flags)                 # only station 4 unconstrained

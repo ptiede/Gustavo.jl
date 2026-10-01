@@ -392,11 +392,14 @@ _edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nan
 # nodes were solved. `val`, `w`, `mask` and `nodes` share their `(AntennaPair,
 # FeedPair)` axes; each cell with `mask` set is one observation `val` of its edge
 # (see `_edge`) with weight `w`. The system is solved in `val`'s element type.
+# `component` and `scan` label the gauge freedoms, whose observable is `:phase`
+# (see `GaugeFreedom`).
 # Returns the number of connected components.
 function _solve_observable!(
         vals, cov, val, w, mask, nodes, gauge::AbstractGauge;
         rewrap::Integer,
         seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
+        component::Tuple{Vararg{Symbol}} = (), scan::Integer = 0,
     )
     # `_node` numbers stations and feeds from 1.
     Base.require_one_based_indexing(vals, cov)
@@ -423,8 +426,15 @@ function _solve_observable!(
     # Inverse of `_node`: the feed-1 block is 1:nant, feed-2 is nant+1:2nant.
     station_of(n) = (n - 1) % nant + 1
     feed_of(n) = n > nant ? 2 : 1
-    comps = [findall(==(c), compid) for c in 1:ncomp]
-    anchors = [gauge_anchor(gauge, cn, nodew, station_of, feed_of) for cn in comps]
+    freedoms = map(1:ncomp) do c
+        cn = findall(==(c), compid)
+        GaugeFreedom(;
+            nodes = cn, station = station_of.(cn), feed = feed_of.(cn), scan = fill(Int(scan), length(cn)),
+            component = fill(component, length(cn)), observable = fill(:phase, length(cn)),
+            direction = ones(T, length(cn)), weight = nodew[cn],
+        )
+    end
+    anchors = [gauge_anchor(gauge, f) for f in freedoms]
     A = zeros(T, length(edges), nnodes)
     for (i, (u, v)) in enumerate(edges)
         A[i, u] += one(T)
@@ -463,7 +473,7 @@ function _solve_observable!(
     else
         x = solve_system(b)
     end
-    _regauge!(x, comps, gauge, nodew, station_of, feed_of)
+    _regauge!(x, GaugeFreedoms{T}(freedoms, nnodes), gauge)
 
     for ant in axes(vals, 1), feed in axes(vals, 2)
         n = _node(ant, feed, nant)
@@ -475,14 +485,14 @@ function _solve_observable!(
     return ncomp
 end
 
-# Shift each component of `x` by a constant so that its `gauge` row sums to
-# zero. A constant per component changes no edge difference.
-function _regauge!(x, comps, gauge::AbstractGauge, nodew, station_of, feed_of)
-    row = zeros(eltype(x), length(x))
-    for cn in comps
-        fill!(row, zero(eltype(row)))
-        gauge_row!(row, gauge, cn, nodew, station_of, feed_of)
-        c = sum(n -> row[n] * x[n], cn) / sum(n -> row[n], cn)
+# Shift each freedom's nodes of `x` by a constant so that `x` meets its gauge
+# constraint. A constant per component changes no edge difference; each
+# freedom's `direction` is all ones here.
+function _regauge!(x, freedoms::GaugeFreedoms, gauge::AbstractGauge)
+    C, d = _gauge_system(gauge, freedoms)
+    for (j, f) in pairs(freedoms)
+        cn = f.nodes
+        c = (sum(n -> C[j, n] * x[n], cn) - d[j]) / sum(n -> C[j, n], cn)
         for n in cn
             x[n] -= c
         end
@@ -1103,7 +1113,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
         # A ranked gauge walks its references before falling back to the
         # best-observed station, so a dropout costs the next choice, not an
         # arbitrary hop.
-        cand = gauge_station_order(gauge, nant)
+        cand = gauge_station_order(gauge)
         j = findfirst(a -> 1 <= a <= nant && wtot[a] > 0, cand)
         j !== nothing ? Int(cand[j]) : (all(iszero, wtot) ? 1 : argmax(wtot))
     end
@@ -1251,7 +1261,8 @@ function adhoc_scan!(
     (; rbar, wbar, ti) = _ap_sums(group, geom; executor)
     as = solve_adhoc_phasing(
         rbar, wbar, geom.stations;
-        gauge, smoother = adhoc, tying = adhoc_plan.tying, prior = map(_time_prior, adhoc_plan.priors),
+        gauge = _gauge_for(gauge, adhoc_plan.path), smoother = adhoc, tying = adhoc_plan.tying,
+        prior = map(_time_prior, adhoc_plan.priors),
     )
     adhoc_leaf = _component_leaf(adhoc_plan, θ)
     for gti in ti

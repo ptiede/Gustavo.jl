@@ -2,7 +2,7 @@
 #
 # Layout of a store written by `save_solution`:
 #
-#   /                 attrs: format, pipeline, gauge, component labels, step names
+#   /                 attrs: format, pipeline, component labels, step names
 #   geometry/         times, scan_of_time, channel_freqs, spw_of_chan; t0, f0 and
 #                     the name vectors as attributes
 #   components/<label>/  one per SolvedComponent: `data` over the params dims plus
@@ -360,7 +360,7 @@ function _write_solution(path, sol::CalibrationSolution)
     root = Zarr.zgroup(
         path; attrs = Dict{String, Any}(
             "gustavo_solution_format" => _STORE_FORMAT,
-            "pipeline" => sol.provenance.pipeline, "gauge" => sol.provenance.gauge,
+            "pipeline" => sol.provenance.pipeline,
             "components" => labels, "steps" => _strings(keys(sol.steps)),
         )
     )
@@ -411,6 +411,6 @@ function load_solution(path::AbstractString)
     )
     return CalibrationSolution(
         _read_geometry(root.groups["geometry"]), components, steps, _read_node(root.groups["info"]);
-        pipeline = root.attrs["pipeline"], gauge = root.attrs["gauge"],
+        pipeline = root.attrs["pipeline"],
     )
 end

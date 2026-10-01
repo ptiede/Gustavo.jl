@@ -24,16 +24,18 @@ using XRadio
 
 ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
-pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
-    Bandpass() |> AdhocPhase()
-sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
+gauge = PinAntenna("AA")                        # reference antenna
+pipeline = AutocorrelationNormalization() |> BaselineFringeFit(; gauge) |>
+    Bandpass(; gauge) |> AdhocPhase(; gauge)
+sol = fit(pipeline, ps)
 
 out = calibrate(sol, ps)                         # corrected, in memory
 save_solution("track.jls", sol)
 ```
 
-Every step is optional and reorderable — a pipeline can equally be a single
-`Bandpass()` fit over data an earlier run already corrected. `fit` solves
+Each solve step takes its own `gauge`, which fixes the station values the data
+leave undetermined. Every step is optional and reorderable — a pipeline can equally be a single
+`Bandpass(; gauge)` fit over data an earlier run already corrected. `fit` solves
 without producing output; `calibrate(sol, ps)` applies a finished solution to
 this or other data, replaying the pipeline's corrections and each step's gains
 in order.

@@ -15,11 +15,12 @@
 # - `solve(step, ctx)`             — fills the step's θ, reading the data through
 #                                    `each_group(f, ctx)`, and returns the step's
 #                                    diagnostics.
+# - `step_gauge(step)`             — the step's gauge, resolved into `ctx.gauge`;
+#                                    `nothing` (the default) for a step with none.
 #
 # Run-wide resources (task/memory budgets, progress) live on the
-# `ExecutionConfig` passed to `fit`; the gauge is a run-wide choice passed to
-# `fit` and recorded on the solution. Anything that changes what a given step
-# solves is model specification and lives on that step.
+# `ExecutionConfig` passed to `fit`. Anything that changes what a given step
+# solves, its gauge included, lives on that step.
 
 """
     SolveStep
@@ -81,6 +82,15 @@ solutions would collide under the same name. Default: `:nothing`.
 provides(step::SolveStep) = :nothing
 
 """
+    step_gauge(step::SolveStep) -> Union{Nothing, AbstractGauge}
+
+The gauge this step fixes its undetermined station values with. `fit` resolves
+its station codes against the run's antenna table into `ctx.gauge`. Default:
+`nothing`, for a step with no gauge freedom.
+"""
+step_gauge(step::SolveStep) = nothing
+
+"""
     solve(step::SolveStep, ctx::SolveContext) -> NamedTuple
 
 Fit `step`'s own model: fill `ctx.θ` and return the step's diagnostics, which
@@ -110,7 +120,8 @@ What a step's [`solve`](@ref) works with: the step's own compiled model
 (`model`, `layout`, and `θ`, the flat parameter vector over `layout`, which
 `solve` fills; a component's block is `reshape(view(θ, plan.range),
 plan.shape)`), the data geometry `geom` (its `stations` are the run's station
-table), the resolved `gauge`, `nant`, the scan groups of the data
+table), the step's `gauge` with station codes resolved (`nothing` for a step
+whose [`step_gauge`](@ref) is `nothing`), `nant`, the scan groups of the data
 (`groupby(ps, ByScan())`), and the corrections the step's data pass through:
 the pipeline's corrections before the step and every earlier step's gains.
 Another step's θ is never visible here; it reaches the step only as a
@@ -120,13 +131,13 @@ const _PassTiming = @NamedTuple{decode::Vector{Float64}, work::Vector{Float64}}
 
 struct SolveContext{
         M <: GainModel, L <: ParameterLayout, V <: AbstractVector{Float64},
-        G <: AbstractDict, X <: ExecutionConfig,
+        GA <: Union{Nothing, AbstractGauge}, G <: AbstractDict, X <: ExecutionConfig,
     }
     model::M
     layout::L
     geom::DataGeometry
     θ::V
-    gauge::AbstractGauge
+    gauge::GA
     nant::Int
     groups::G
     charges::Vector{Int}

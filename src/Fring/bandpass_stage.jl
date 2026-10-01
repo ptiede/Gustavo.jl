@@ -203,16 +203,13 @@ validate_model(sm::AbstractBandpassSmoother, model) = validate_bandpass_groups(m
 # allows at most two components per group, and the shape is the one on
 # `ChannelBlocks`.
 function _bandpass_paths(plantree, group::Symbol)
-    paths = _component_paths(plantree[group], (group,))
+    paths = _leaf_paths(plantree[group], (group,))
     isempty(paths) && return (; shape = nothing, level = nothing)
     length(paths) == 1 && return (; shape = only(paths), level = nothing)
     a, b = paths
     return _is_shape_node(_plan_node(plantree, a)) ? (; shape = a, level = b) : (; shape = b, level = a)
 end
 
-_component_paths(_, path::Tuple) = [path]
-_component_paths(nt::NamedTuple, path::Tuple) =
-    reduce(vcat, (_component_paths(v, (path..., k)) for (k, v) in pairs(nt)); init = Tuple[])
 
 _plan_node(tree, path) = foldl((node, k) -> node[k], path; init = tree)
 
@@ -291,6 +288,7 @@ end
 function _seed_phase_tracks(
         rbar_bp, wbar_bp, stations, fsegs, segments::Frequency;
         gauge::AbstractGauge = PinAntenna(1), snr_floor::Real = 1.0,
+        component::Tuple{Vararg{Symbol}} = (),
     )
     noise2 = _cell_noise2(rbar_bp, wbar_bp, Frequency)
     T = real(eltype(rbar_bp))
@@ -318,7 +316,7 @@ function _seed_phase_tracks(
             prec[a, fa, fs] += snr2
             prec[b, fb, fs] += snr2
         end
-        _solve_observable!(view(phase, Frequency(fs)), solved, val, wt, mask, nodes, gauge; rewrap = 0)
+        _solve_observable!(view(phase, Frequency(fs)), solved, val, wt, mask, nodes, gauge; rewrap = 0, component)
     end
     return phase, prec
 end
@@ -992,7 +990,7 @@ function _per_track_observable!(θ, results, setup, group::Symbol, T; gauge)
         isempty(idx) && continue
         rbar, wbar = _pool_scans(results, idx, T)
         tracks, prec = group === :phase ?
-            _seed_phase_tracks(rbar, wbar, geom.stations, seg.fsegs, segments; gauge) :
+            _seed_phase_tracks(rbar, wbar, geom.stations, seg.fsegs, segments; gauge, component = plan.path) :
             _seed_amp_tracks(rbar, wbar, geom.stations, seg.fsegs, segments)
         group === :logamp && _spike_guard!(tracks, seg.pieces, _BP_SPIKE_SIGMA)
         levels = isnothing(level) ? nothing : fill(eltype(tracks)(NaN), length(geom.stations), 2, nlevel)
@@ -1241,10 +1239,15 @@ function _joint_bandpass_pins!(gains, data, layout, blocks, gauge)
     ids = _gain_slot_ids(gains)
     compid, ncomp, deg = _joint_bandpass_graph(data, layout, ids)
     slot = [(k, I) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
-    station_of(n) = blocks[slot[n][1]].stations[slot[n][2][1]]
-    feed_of(n) = slot[n][2][2]
     for c in 1:ncomp
-        k, I = slot[gauge_anchor(gauge, findall(==(c), compid), deg, station_of, feed_of)]
+        cn = findall(==(c), compid)
+        f = GaugeFreedom(;
+            nodes = cn, station = [blocks[slot[n][1]].stations[slot[n][2][1]] for n in cn],
+            feed = [slot[n][2][2] for n in cn], scan = zeros(Int, length(cn)),
+            component = [blocks[slot[n][1]].plan.path for n in cn], observable = fill(:phase, length(cn)),
+            direction = ones(length(cn)), weight = deg[cn],
+        )
+        k, I = slot[gauge_anchor(gauge, f)]
         gains[k].pinned[I] = true
     end
     return gains

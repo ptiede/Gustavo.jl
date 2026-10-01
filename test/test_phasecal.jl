@@ -113,12 +113,12 @@
         # pre-calibrated set.
         lc = first(values(UVP.branches(corrupt)))
         snapshot = copy(parent(lc[:vis]))
+        gauge = PinAntenna(1)
         solf = fit(
-            FP.ApplySolution(sol) |> BaselineFringeFit() |>
-                Bandpass() |>
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+            FP.ApplySolution(sol) |> BaselineFringeFit(; gauge) |>
+                Bandpass(; gauge) |>
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
             corrupt,
-            gauge = PinAntenna(1),
         )
         output = calibrate(solf, fixed)
         @test solf.info.precal_applied
@@ -144,10 +144,11 @@
         # The solution is per scan × per spw, so it ports to a set that samples
         # the same scan and spws differently — 6 channels per band instead of 8.
         other, _ = _build_fringe_uvset(nchan = 6)
-        @test fit(FP.ApplySolution(sol) |> BaselineFringeFit(), other; gauge = PinAntenna(1)) isa CAL.CalibrationSolution
+        precal_fit = FP.ApplySolution(sol) |> BaselineFringeFit(; gauge)
+        @test fit(precal_fit, other) isa CAL.CalibrationSolution
         # A scan it never saw is refused, fail-fast at stream construction.
         twoscan, _ = _build_fringe_uvset(nscans = 2)
-        @test_throws "is not in the solution" fit(FP.ApplySolution(sol) |> BaselineFringeFit(), twoscan; gauge = PinAntenna(1))
+        @test_throws "is not in the solution" fit(precal_fit, twoscan)
 
         # Diagnostics see the pre-calibrated data when the same precal is passed:
         # the "before" spectra of the corrupted set + precal equal the clean
@@ -177,12 +178,12 @@
         end
 
         # Solve with flagging runs; the caller's mask flags those channels of the output.
+        gauge = PinAntenna(1)
         sol2 = fit(
-            FP.FlagChannels(mask) |> BaselineFringeFit() |>
-                Bandpass() |>
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+            FP.FlagChannels(mask) |> BaselineFringeFit(; gauge) |>
+                Bandpass(; gauge) |>
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
             uvset,
-            gauge = PinAntenna(1),
         )
         out2 = calibrate(sol2, uvset; post = FP.FlagChannels(mask))
         lo = first(values(UVP.branches(out2)))

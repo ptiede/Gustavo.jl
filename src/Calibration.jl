@@ -44,9 +44,9 @@ include("Calibration/solution_store.jl")
 export feed_pairs
 
 # Gauge conventions for station-based solves
-export AbstractGauge, PinAntenna, ZeroSumPhase
-export gauge_anchor, gauge_row!, resolve_gauge, remap_gauge
-export gauge_station_order
+export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent
+export GaugeFreedom, GaugeFreedoms, gauge_constraints, gauge_constraint, gauge_anchor
+export resolve_gauge, remap_gauge, gauge_station_order, check_gauge_components
 
 # ── Unified gain-model framework ─────────────────────────────────────────────
 # Segmentation vocabulary

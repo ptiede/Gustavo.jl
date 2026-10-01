@@ -229,7 +229,7 @@ raises a station's weights (a correlator claiming more noise than the data
 carries). Visibilities are untouched.
 
     ws = DimArray([2.0, 2.0], AntennaName(["HS", "GL"]))
-    fit(StationWeightScale(ws) |> BaselineFringeFit(), ps; gauge)
+    fit(StationWeightScale(ws) |> BaselineFringeFit(; gauge = PinAntenna("HS")), ps)
 """
 struct StationWeightScale{S <: AbstractDimVector} <: AbstractDataTransform
     scale::S

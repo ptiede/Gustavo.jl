@@ -75,8 +75,9 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         run(ex) = fit(
-            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), ps;
-            exec = ExecutionConfig(outer_executor = ex), gauge = PinAntenna(1),
+            BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)) |>
+                AdhocPhase(adhoc; gauge = PinAntenna(1)), ps;
+            exec = ExecutionConfig(outer_executor = ex),
         )
         sol_t, sol_d = run(DynamicScheduler()), run(GreedyScheduler())
         @test parent(gains(sol_d)) == parent(gains(sol_t))
@@ -93,8 +94,9 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         run(inner) = fit(
-            BaselineFringeFit() |> Bandpass() |> AdhocPhase(adhoc), ps;
-            exec = ExecutionConfig(inner_executor = inner), gauge = PinAntenna(1),
+            BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)) |>
+                AdhocPhase(adhoc; gauge = PinAntenna(1)), ps;
+            exec = ExecutionConfig(inner_executor = inner),
         )
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are
         # order-fixed by the data layout, so θ is bit-identical.

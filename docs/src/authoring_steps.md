@@ -21,6 +21,7 @@ A `SolveStep` subtype implements [`solve`](@ref) and some of these hooks:
 |:-----|:--------|:--------|
 | [`model_components`](@ref) | what gain model does this step solve? | no components |
 | [`provides`](@ref) | the step's solution slot name (`sol[:name]`) | `:nothing` |
+| [`step_gauge`](@ref) | the gauge that fixes the step's undetermined station values | `nothing` |
 | [`solve`](@ref) | fill θ; return diagnostics | required |
 | [`supports_station_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
 
@@ -34,6 +35,11 @@ The execution model behind them:
   `GeometryWindow(ctx.geom, ms)` addresses a Measurement Set in the solve's
   index space. `each_group` returns `f`'s results in group order. A solve that iterates, such as a residual
   re-search, calls `each_group` once per round.
+- **A step carries its own gauge.** The built-in steps take a required `gauge`
+  keyword, and `step_gauge(step)` returns it. `fit` resolves the station codes
+  of the returned gauge against the run's antenna table and hands the result to
+  `solve` as `ctx.gauge`. A step without a `step_gauge` method has none:
+  `ctx.gauge` is `nothing`.
 - **Each step solves its own private θ.** `model_components(step, spec)`
   compiles to a per-step parameter layout; no step's θ block is shared with
   or visible to another step's. Gains compose multiplicatively across steps,
@@ -88,7 +94,8 @@ can_fit(::AbstractAdhocSmoother, tc, geom) =
 
 `solve` locates the step's θ block once, then solves each scan group. The
 adhoc phase is per scan, so each group writes only its own θ slots and the
-per-group function writes θ directly. The returned `NamedTuple` is the step's
+per-group function writes θ directly. It fixes the per-scan constant with
+`ctx.gauge`, the step's own gauge. The returned `NamedTuple` is the step's
 diagnostics:
 
 ```julia
@@ -152,6 +159,6 @@ A step reads every scan of the data `fit` is given; there is no per-step
 selection. To fit a step on a subset of the scans, fit it on that subset and
 carry its solution into the full-data fit as a correction:
 
-    fr = fit(BaselineFringeFit(), data; gauge)
-    bp = fit(ApplySolution(fr) |> Bandpass(), calibrator_scans; gauge)
-    sol = fit(ApplySolution(fr) |> ApplySolution(bp) |> AdhocPhase(), data; gauge)
+    fr = fit(BaselineFringeFit(; gauge), data)
+    bp = fit(ApplySolution(fr) |> Bandpass(; gauge), calibrator_scans)
+    sol = fit(ApplySolution(fr) |> ApplySolution(bp) |> AdhocPhase(; gauge), data)

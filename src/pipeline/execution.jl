@@ -5,8 +5,7 @@
                     outer_executor = SerialScheduler(), inner_executor = DynamicScheduler())
 
 Run-wide resources for `fit` and `calibrate`, shared by every pass over the
-data; per-step options live on the steps, and the gauge is an argument of
-`fit`. Two runs differing only in their `ExecutionConfig` solve the same
+data; per-step options, the gauge included, live on the steps. Two runs differing only in their `ExecutionConfig` solve the same
 problem. Each scheduler is used exactly as configured, so the task count you
 set is the concurrency you get.
 
@@ -63,7 +62,7 @@ completion rate so far. A pass's start (`done == 0`) and finish
 one `ProgressLogger` per `fit` or `calibrate` call; sharing an instance across
 concurrent runs mixes their timers.
 
-    fit(pipe, ps; gauge, exec = ExecutionConfig(progress = ProgressLogger()))
+    fit(pipe, ps; exec = ExecutionConfig(progress = ProgressLogger()))
 """
 mutable struct ProgressLogger{IOT}
     min_interval::Float64

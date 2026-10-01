@@ -16,16 +16,17 @@ _feed_of(n) = n > GN ? 2 : 1
 const GCOMP = [1, 2, 3, 5, 6, 7]
 const GW = Float64[10, 5, 3, 0, 8, 4, 2, 0]
 
-_row(g, comp = GCOMP, T = Float64) = begin
-    r = zeros(T, 2GN)
-    CALg.gauge_row!(view(r, :), g, comp, GW, _station_of, _feed_of)
-    r
-end
+_freedom(comp = GCOMP, T = Float64) = CALg.GaugeFreedom(;
+    nodes = comp, station = _station_of.(comp), feed = _feed_of.(comp), scan = zeros(Int, length(comp)),
+    component = fill((:phase, :x), length(comp)), observable = fill(:phase, length(comp)),
+    direction = ones(T, length(comp)), weight = GW[comp],
+)
+_row(g, comp = GCOMP, T = Float64) = vec(first(CALg.gauge_constraints(g, CALg.GaugeFreedoms{T}([_freedom(comp, T)], 2GN))))
 
 @testset "PinAntenna picks the ranked reference" begin
     # Feed 1 before feed 2, so a station's values stay referenced to one feed.
     @test _row(PinAntenna(2)) == [0, 1, 0, 0, 0, 0, 0, 0]
-    @test CALg.gauge_anchor(PinAntenna(2), GCOMP, GW, _station_of, _feed_of) == 2
+    @test CALg.gauge_anchor(PinAntenna(2), _freedom()) == 2
 
     # A ranked list falls to the next entry when the leading one is absent —
     # station 9 does not exist, station 4 is absent from this component.
@@ -83,12 +84,64 @@ end
 end
 
 @testset "gauge_station_order and remap_gauge" begin
-    @test CALg.gauge_station_order(PinAntenna([3, 1]), GN) == [3, 1]
+    @test CALg.gauge_station_order(PinAntenna([3, 1])) == [3, 1]
     # A summed gauge names no station, so a caller must choose on its own criterion.
-    @test isempty(CALg.gauge_station_order(ZeroSumPhase(), GN))
+    @test isempty(CALg.gauge_station_order(ZeroSumPhase()))
 
     # Tying stations into representatives rewrites the gauge through the map.
     map = [1, 1, 3, 3]
     @test CALg.remap_gauge(PinAntenna([2, 4]), map).refs == [1, 3]
     @test CALg.remap_gauge(ZeroSumPhase(antennas = [2, 4]), map).antennas == [1, 3]
+end
+
+struct PreferStation <: CALg.AbstractGauge
+    station::Int
+end
+CALg.gauge_station_order(g::PreferStation) = (g.station,)
+
+struct NoPreference <: CALg.AbstractGauge end
+
+@testset "gauge_anchor's default" begin
+    # The preferred station's feed-1 node, else its feed-2 node.
+    @test CALg.gauge_anchor(PreferStation(3), _freedom()) == 3
+    @test CALg.gauge_anchor(PreferStation(3), _freedom([5, 6, 7])) == 7
+    # A gauge naming no station, or one absent from the freedom, anchors on the
+    # best-observed node; ties go to the lowest node.
+    @test CALg.gauge_anchor(NoPreference(), _freedom()) == 1
+    @test CALg.gauge_anchor(PreferStation(4), _freedom()) == 1
+    @test CALg.gauge_anchor(NoPreference(), _freedom([2, 5])) == 5
+    @test CALg.gauge_anchor(NoPreference(), _freedom([8, 4])) == 4
+end
+
+@testset "gauge_constraints stacks one row per freedom" begin
+    fs = CALg.GaugeFreedoms{Float64}([_freedom([1, 2]), _freedom([6, 7])], 2GN)
+    C, d = CALg.gauge_constraints(PinAntenna(2), fs)
+    @test C == [0 1 0 0 0 0 0 0; 0 0 0 0 0 1 0 0]
+    @test d == [0, 0]
+end
+
+@testset "ByComponent chooses a gauge by component name" begin
+    g = ByComponent((; rate = PinAntenna(2), adhoc = (; scan = ZeroSumPhase())); default = PinAntenna(1))
+    @test CALg._component_choice(g, (:phase, :rate)) === g.choices.rate
+    @test CALg._component_choice(g, (:phase, :adhoc, :scan)) === g.choices.adhoc.scan
+    @test CALg._component_choice(g, (:phase, :mbd)) === g.default
+    @test CALg._component_choice(g, ()) === g.default
+    # A subtree's gauge covers every component under it.
+    @test CALg._component_choice(ByComponent((; adhoc = PinAntenna(3)); default = PinAntenna(1)), (:phase, :adhoc, :scan)).refs == 3
+
+    mixed = CALg.GaugeFreedom(;
+        nodes = [1, 2], station = [1, 2], feed = [1, 1], scan = [0, 0],
+        component = [(:phase, :rate), (:phase, :mbd)], observable = [:phase, :phase],
+        direction = ones(2), weight = ones(2),
+    )
+    @test_throws "spans components with different gauges" CALg.gauge_anchor(g, mixed)
+
+    r = resolve_gauge(ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1")), ["A1", "A2"])
+    @test r.choices.rate.refs == [2] && r.default.refs == [1]
+
+    names = [(:rate,), (:adhoc, :scan), (:mbd,)]
+    @test isnothing(CALg.check_gauge_components(g, names))
+    @test_throws "no component adhoc.integration" CALg.check_gauge_components(
+        ByComponent((; adhoc = (; integration = PinAntenna(2))); default = PinAntenna(1)), names,
+    )
 end

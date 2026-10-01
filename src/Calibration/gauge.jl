@@ -14,10 +14,15 @@
 """
     AbstractGauge
 
-How a station solve fixes the arbitrary additive constant on each connected
-component of the (station, feed) graph.
+How a station solve fixes the values its data leave undetermined: one
+constraint per [`GaugeFreedom`](@ref).
 
-Implementations provide [`gauge_anchor`](@ref) and [`gauge_row!`](@ref).
+A gauge implements [`gauge_constraint`](@ref)`(g, freedom) -> (row, value)`, one
+constraint per freedom, or, for a rule that ties freedoms together,
+[`gauge_constraints`](@ref)`(g, freedoms) -> (C, d)` over all freedoms of a
+system. [`gauge_anchor`](@ref) and [`gauge_station_order`](@ref) have defaults.
+A gauge that names stations also implements [`resolve_gauge`](@ref) and
+[`remap_gauge`](@ref).
 """
 abstract type AbstractGauge end
 
@@ -64,45 +69,136 @@ end
 ZeroSumPhase(; antennas = nothing, weights = nothing) = ZeroSumPhase(antennas, weights)
 
 """
-    gauge_anchor(g::AbstractGauge, comp_nodes, nodew, station_of, feed_of) -> Int
+    GaugeFreedom(; nodes, station, feed, scan, component, observable, direction, weight)
 
-A representative node of `comp_nodes`, used to seed phase unwrapping.
+One gauge freedom of a solve: moving the values of `nodes` together along
+`direction` changes no row the data must hold, so the solve needs one constraint
+to fix it. `nodes` index the system's unknowns; every other field runs parallel
+to `nodes` and describes each one:
+
+- `station`: station index;
+- `feed`: 1 or 2, or 0 for an unknown both feeds share;
+- `scan`: scan index, or 0 for an unknown spanning scans or a solve without scans;
+- `component`: the model component's path, e.g. `(:phase, :mbd)`, or `()` where
+  the solve names none (a nuisance offset, a seed solve);
+- `observable`: `:delay`, `:rate` or `:phase`;
+- `direction`: the shift's coefficient, in the solve's element type;
+- `weight`: the total weight of the rows touching the node.
+"""
+struct GaugeFreedom{N, S, F, SC, C, O, D, W}
+    nodes::N
+    station::S
+    feed::F
+    scan::SC
+    component::C
+    observable::O
+    direction::D
+    weight::W
+end
+GaugeFreedom(; nodes, station, feed, scan, component, observable, direction, weight) =
+    GaugeFreedom(nodes, station, feed, scan, component, observable, direction, weight)
+
+"""
+    GaugeFreedoms{T}(freedoms, nnodes)
+
+The gauge freedoms of one system of `nnodes` unknowns solved in element type `T`,
+as handed to [`gauge_constraints`](@ref). Indexes like `freedoms`.
+"""
+struct GaugeFreedoms{T, F, V <: AbstractVector{F}} <: AbstractVector{F}
+    freedoms::V
+    nnodes::Int
+end
+GaugeFreedoms{T}(freedoms::AbstractVector{F}, nnodes::Integer) where {T, F} =
+    GaugeFreedoms{T, F, typeof(freedoms)}(freedoms, nnodes)
+Base.size(fs::GaugeFreedoms) = size(fs.freedoms)
+Base.getindex(fs::GaugeFreedoms, i::Int) = fs.freedoms[i]
+
+"""
+    gauge_constraints(g::AbstractGauge, freedoms::GaugeFreedoms{T}) -> (C, d)
+
+The constraints `C * x == d` that fix every freedom of one system: `C` is
+`length(freedoms) × freedoms.nnodes` and `d` has one entry per row. The rows
+together must determine each freedom; a gauge that ties freedoms (the same
+value in consecutive scans, say) overrides this method.
+
+The default stacks [`gauge_constraint`](@ref) over the freedoms, in type `T`.
+"""
+function gauge_constraints(g::AbstractGauge, fs::GaugeFreedoms{T}) where {T}
+    C = zeros(T, length(fs), fs.nnodes)
+    d = zeros(T, length(fs))
+    for j in eachindex(fs)
+        f = fs[j]
+        row, value = gauge_constraint(g, f)
+        for i in eachindex(f.nodes, row)
+            C[j, f.nodes[i]] = row[i]
+        end
+        d[j] = value
+    end
+    return C, d
+end
+
+"""
+    gauge_constraint(g::AbstractGauge, f::GaugeFreedom) -> (row, value)
+
+One constraint `sum(row .* x[f.nodes]) == value` fixing the freedom `f`. `row`
+runs parallel to `f.nodes`, and must not be orthogonal to `f.direction`.
+"""
+function gauge_constraint end
+
+"""
+    gauge_anchor(g::AbstractGauge, f::GaugeFreedom) -> Int
+
+A node of `f`, used to seed phase unwrapping and, where a solver pins a single
+node per freedom, as that pin.
 
 This is a numerical starting point, not the gauge itself: unwrapping propagates
 relative phases outward from a real node, which a zero-sum constraint does not
-supply. Every gauge must name one.
-
-`station_of(n)` and `feed_of(n)` map a node index to its station index and feed
-(feed 2 is the second feed; anything else counts as feed 1 / shared). Passing
-them keeps a gauge independent of how the caller lays out its node vector — the
-per-scan station system and the tagged system that spans scans differ.
+supply. The default takes the first station of [`gauge_station_order`](@ref)
+present in `f` (its feed-1 or shared node before feed 2), else the node with
+the most row weight.
 """
-function gauge_anchor end
+function gauge_anchor(g::AbstractGauge, f::GaugeFreedom)
+    # Feed 1 (or a feed-shared node) before feed 2, so a station's reported
+    # values stay referenced to the same feed wherever both are present.
+    for a in gauge_station_order(g)
+        for i in eachindex(f.nodes, f.station, f.feed)
+            f.station[i] == a && f.feed[i] != 2 && return f.nodes[i]
+        end
+        for i in eachindex(f.nodes, f.station)
+            f.station[i] == a && return f.nodes[i]
+        end
+    end
+    return _best_gauge_node(f)
+end
 
-"""
-    gauge_row!(row, g::AbstractGauge, comp_nodes, nodew, station_of, feed_of) -> nothing
-
-Write this component's constraint into `row` (a view over one row of the
-constraint matrix, indexed by node). `row` arrives zeroed, and its element type
-is the one the solve runs in — write through `eltype(row)` rather than assuming
-a concrete float.
-"""
-function gauge_row! end
-
-# The fallback for a component holding no listed reference: its best-OBSERVED
+# The fallback for a freedom holding no listed reference: its best-OBSERVED
 # node, i.e. the one carrying the most total row weight, ties broken by lowest
-# node index. Such a component's gauge is arbitrary by construction — there is no
+# node index. Such a freedom's gauge is arbitrary by construction — there is no
 # reference to express it against — so the only properties that matter are
 # determinism and stability, and anchoring on the best-observed node is what buys
 # the second: a structurally-chosen node (the lowest index, say) hops as soon as a
 # marginal station's coverage flickers between solves, moving the whole
 # component's zero with it.
-function _best_gauge_node(comp_nodes, nodew)
-    best = first(comp_nodes)
-    for n in comp_nodes
-        (nodew[n] > nodew[best] || (nodew[n] == nodew[best] && n < best)) && (best = n)
+function _best_gauge_node(f::GaugeFreedom)
+    best = firstindex(f.nodes)
+    for i in eachindex(f.nodes, f.weight)
+        (f.weight[i] > f.weight[best] || (f.weight[i] == f.weight[best] && f.nodes[i] < f.nodes[best])) &&
+            (best = i)
     end
-    return best
+    return f.nodes[best]
+end
+
+# `gauge_constraints` with its shape checked: one row per freedom over every node.
+function _gauge_system(g::AbstractGauge, fs::GaugeFreedoms)
+    C, d = gauge_constraints(g, fs)
+    (size(C) == (length(fs), fs.nnodes) && length(d) == length(fs)) || throw(
+        DimensionMismatch(
+            "gauge_constraints for $(typeof(g)) must return one row per freedom over every node, " *
+                "C of size $((length(fs), fs.nnodes)) and d of length $(length(fs)); " *
+                "got $(size(C)) and $(length(d))",
+        ),
+    )
+    return C, d
 end
 
 # Iterate the references without materializing a container: a `Tuple` built from a
@@ -115,55 +211,40 @@ _gauge_refs(r) = error(
         "Call `resolve_gauge(gauge, ant_names)` first.",
 )
 
-function gauge_anchor(g::PinAntenna, comp_nodes, nodew, station_of, feed_of)
-    # Feed 1 (or a feed-shared node) before feed 2, so a station's reported
-    # values stay referenced to the same feed wherever both are present.
-    for a in _gauge_refs(g.refs)
-        for n in comp_nodes
-            station_of(n) == a && feed_of(n) != 2 && return n
-        end
-        for n in comp_nodes
-            station_of(n) == a && return n
-        end
-    end
-    return _best_gauge_node(comp_nodes, nodew)
+function gauge_constraint(g::PinAntenna, f::GaugeFreedom)
+    T = eltype(f.direction)
+    a = gauge_anchor(g, f)
+    return T[n == a ? one(T) : zero(T) for n in f.nodes], zero(T)
 end
 
-function gauge_row!(row, g::PinAntenna, comp_nodes, nodew, station_of, feed_of)
-    row[gauge_anchor(g, comp_nodes, nodew, station_of, feed_of)] = one(eltype(row))
-    return nothing
-end
-
-gauge_anchor(::ZeroSumPhase, comp_nodes, nodew, station_of, feed_of) =
-    _best_gauge_node(comp_nodes, nodew)
-
-function gauge_row!(row, g::ZeroSumPhase, comp_nodes, nodew, station_of, feed_of)
-    sel = if g.antennas === nothing
-        comp_nodes
+function gauge_constraint(g::ZeroSumPhase, f::GaugeFreedom)
+    T = eltype(f.direction)
+    sel = if isnothing(g.antennas)
+        collect(eachindex(f.nodes))
     else
         want = Set(Int(a) for a in g.antennas)
-        [n for n in comp_nodes if station_of(n) in want]
+        [i for i in eachindex(f.nodes, f.station) if f.station[i] in want]
     end
-    # A restricted set that misses this component entirely would leave the row
-    # empty and the system rank-deficient; sum over the whole component instead.
-    isempty(sel) && (sel = comp_nodes)
-    T = eltype(row)
-    if g.weights === nothing
+    # A restricted set that misses this freedom entirely would leave the row
+    # empty and the system rank-deficient; sum over the whole freedom instead.
+    isempty(sel) && (sel = collect(eachindex(f.nodes)))
+    row = zeros(T, length(f.nodes))
+    if isnothing(g.weights)
         s = one(T) / length(sel)
-        for n in sel
-            row[n] = s
+        for i in sel
+            row[i] = s
         end
     else
-        tot = sum(g.weights[n] for n in sel)
+        tot = sum(g.weights[f.nodes[i]] for i in sel)
         tot > zero(tot) || error(
-            "ZeroSumPhase: weights sum to $tot over this component's nodes $(collect(sel)); " *
+            "ZeroSumPhase: weights sum to $tot over this freedom's nodes $(f.nodes[sel]); " *
                 "the gauge row would be empty and the solve rank-deficient.",
         )
-        for n in sel
-            row[n] = g.weights[n] / tot
+        for i in sel
+            row[i] = g.weights[f.nodes[i]] / tot
         end
     end
-    return nothing
+    return row, zero(T)
 end
 
 """
@@ -176,37 +257,21 @@ resolve_gauge(g::AbstractGauge, ant_names) = g
 
 function resolve_gauge(g::PinAntenna, ant_names)
     refs = g.refs isa Union{Integer, AbstractString, Symbol} ? (g.refs,) : g.refs
-    out = Int[]
-    for r in refs
-        if r isa Integer
-            push!(out, Int(r))
-        else
-            i = findfirst(==(String(r)), ant_names)
-            i === nothing && error(
-                "PinAntenna: station code \"$r\" not in antenna table $(ant_names).",
-            )
-            push!(out, i)
-        end
-    end
+    out = Int[_antenna_index(r, ant_names, "PinAntenna") for r in refs]
     isempty(out) && error("PinAntenna: no references given.")
     return PinAntenna(out)
 end
 
 function resolve_gauge(g::ZeroSumPhase, ant_names)
-    g.antennas === nothing && return g
-    out = Int[]
-    for a in g.antennas
-        if a isa Integer
-            push!(out, Int(a))
-        else
-            i = findfirst(==(String(a)), ant_names)
-            i === nothing && error(
-                "ZeroSumPhase: station code \"$a\" not in antenna table $(ant_names).",
-            )
-            push!(out, i)
-        end
-    end
-    return ZeroSumPhase(out, g.weights)
+    isnothing(g.antennas) && return g
+    return ZeroSumPhase(Int[_antenna_index(a, ant_names, "ZeroSumPhase") for a in g.antennas], g.weights)
+end
+
+_antenna_index(r::Integer, ant_names, who) = Int(r)
+function _antenna_index(r, ant_names, who)
+    i = findfirst(==(String(r)), ant_names)
+    isnothing(i) && error("$who: station code \"$r\" not in antenna table $(ant_names).")
+    return i
 end
 
 """
@@ -221,13 +286,103 @@ remap_gauge(g::ZeroSumPhase, map) =
     ZeroSumPhase(g.antennas === nothing ? nothing : unique(map[a] for a in g.antennas), g.weights)
 
 """
-    gauge_station_order(g::AbstractGauge, nant) -> AbstractVector{Int}
+    gauge_station_order(g::AbstractGauge) -> collection of Int
 
 The station indices this gauge prefers as a numerical anchor, best first.
 
-Empty when the gauge expresses no preference (a summed constraint names no
-station), leaving the caller to pick on its own criterion — typically the
-best-observed station.
+Empty by default: a gauge that names no station (a summed constraint) leaves the
+caller to pick on its own criterion, typically the best-observed station.
 """
-gauge_station_order(g::PinAntenna, nant) = collect(_gauge_refs(g.refs))
-gauge_station_order(::AbstractGauge, nant) = Int[]
+gauge_station_order(g::PinAntenna) = _gauge_refs(g.refs)
+gauge_station_order(::AbstractGauge) = ()
+
+"""
+    ByComponent(choices::NamedTuple; default::AbstractGauge)
+
+Use a different gauge for some model components: `choices` maps component
+names to gauges, and every other freedom uses `default`. The names are the
+step model's own, as a solution lists its components (`fringe.phase.rate` is
+`rate`); a nested model takes nested choices, and a gauge given for a subtree
+covers every component under it.
+
+    BaselineFringeFit(; gauge = ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1")))
+
+A step rejects, when constructed, a name its model does not have. A freedom
+spanning components with different choices is an error.
+"""
+struct ByComponent{C <: NamedTuple, D <: AbstractGauge} <: AbstractGauge
+    choices::C
+    default::D
+end
+ByComponent(choices::NamedTuple; default::AbstractGauge) = ByComponent(choices, default)
+
+# The gauge for a component path `(:phase, names...)`.
+function _component_choice(g::ByComponent, path::Tuple)
+    node = g.choices
+    for k in Base.tail(path)
+        haskey(node, k) || return g.default
+        node = node[k]
+        node isa AbstractGauge && return node
+    end
+    return g.default
+end
+_component_choice(g::ByComponent, ::Tuple{}) = g.default
+
+function _component_choice(g::ByComponent, f::GaugeFreedom)
+    c = _component_choice(g, first(f.component))
+    for p in f.component
+        _component_choice(g, p) === c || throw(
+            ArgumentError(
+                "ByComponent: one gauge freedom spans components with different gauges " *
+                    "($(join(unique(f.component), ", "))); give them the same choice.",
+            ),
+        )
+    end
+    return c
+end
+
+function gauge_constraints(g::ByComponent, fs::GaugeFreedoms{T}) where {T}
+    C = zeros(T, length(fs), fs.nnodes)
+    d = zeros(T, length(fs))
+    choice = [_component_choice(g, f) for f in fs]
+    for c in unique(choice)
+        idx = findall(x -> x === c, choice)
+        C[idx, :], d[idx] = _gauge_system(c, GaugeFreedoms{T}(fs.freedoms[idx], fs.nnodes))
+    end
+    return C, d
+end
+
+gauge_anchor(g::ByComponent, f::GaugeFreedom) = gauge_anchor(_component_choice(g, f), f)
+
+# The gauge `g` applies to the component at `path`; a solver whose freedoms all
+# belong to one component reads that gauge's station order or type through it.
+_gauge_for(g::AbstractGauge, path::Tuple) = g
+_gauge_for(g::ByComponent, path::Tuple) = _component_choice(g, path)
+
+_map_choices(fn, nt::NamedTuple) = map(v -> v isa NamedTuple ? _map_choices(fn, v) : fn(v), nt)
+resolve_gauge(g::ByComponent, ant_names) =
+    ByComponent(_map_choices(c -> resolve_gauge(c, ant_names), g.choices), resolve_gauge(g.default, ant_names))
+remap_gauge(g::ByComponent, map) =
+    ByComponent(_map_choices(c -> remap_gauge(c, map), g.choices), remap_gauge(g.default, map))
+
+"""
+    check_gauge_components(g::AbstractGauge, names)
+
+Throw if `g` names a component absent from `names`, the component paths
+without their `:phase`/`:logamp` root (e.g. `(:rate,)`) of the model of the
+step `g` belongs to. The default checks nothing.
+"""
+check_gauge_components(::AbstractGauge, names) = nothing
+
+function check_gauge_components(g::ByComponent, names)
+    for key in _leaf_paths(g.choices)
+        any(n -> length(n) >= length(key) && n[1:length(key)] == key, names) || throw(
+            ArgumentError(
+                "ByComponent: no component $(join(key, '.')) in the step's model; " *
+                    "the components are $(join((join(n, '.') for n in names), ", ")).",
+            ),
+        )
+    end
+    check_gauge_components(g.default, names)
+    return nothing
+end

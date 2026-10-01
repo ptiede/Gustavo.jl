@@ -248,6 +248,11 @@ _flatten_vals(t::Tuple) = (_flatten_one(first(t))..., _flatten_vals(Base.tail(t)
 _flatten_one(e::GainComponent) = (e,)
 _flatten_one(nt::NamedTuple) = _flatten_components(nt)
 
+# The paths of a NamedTuple tree's leaves, depth first, each prefixed by `prefix`.
+_leaf_paths(nt::NamedTuple, prefix::Tuple = ()) =
+    reduce(vcat, (_leaf_paths(v, (prefix..., k)) for (k, v) in pairs(nt)); init = Tuple[])
+_leaf_paths(_, prefix::Tuple = ()) = Tuple[prefix]
+
 phase_components(m::GainModel) = _flatten_components(m.phase)
 logamp_components(m::GainModel) = _flatten_components(m.logamp)
 

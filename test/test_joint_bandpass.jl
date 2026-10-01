@@ -65,21 +65,19 @@ end
     ref_ant = 1
     gauge = PinAntenna(ref_ant)     # the gauge every test here passes to `fit`
     sol_closure = fit(
-        [BaselineFringeFit(model = fm), Bandpass(smoother = FP.PerTrackSmoother())],
+        [BaselineFringeFit(; model = fm, gauge), Bandpass(; smoother = FP.PerTrackSmoother(), gauge)],
         ps,
         exec = ExecutionConfig(),
-        gauge = PinAntenna(1),
     )
     # This synthetic truth is i.i.d. RANDOM per channel (a deliberately hard,
     # uncorrelated-neighbor case for the ALS to track) — noticeably slower to
     # converge than JointSmoother's own defaults, hence the raised iteration
     # count/tolerance.
     sol_joint = fit(
-        [BaselineFringeFit(model = fm),
-            Bandpass(smoother = FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-10))],
+        [BaselineFringeFit(; model = fm, gauge),
+            Bandpass(; smoother = FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-10), gauge)],
         ps,
         exec = ExecutionConfig(),
-        gauge = PinAntenna(1),
     )
 
     bp_leaves(sol) = (_jb_leaf(sol, :phase), _jb_leaf(sol, :logamp))
@@ -143,10 +141,10 @@ end
     fm = default_fringe_terms()
     bpc(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
     runbp(sm; prior = nothing) = fit(
-        [BaselineFringeFit(model = fm),
-            Bandpass(model = CAL.GainModel(; phase = (; bandpass = bpc(prior)), logamp = (; bandpass = bpc(prior))), smoother = sm)],
+        [BaselineFringeFit(; model = fm, gauge = PinAntenna(1)),
+            Bandpass(; model = CAL.GainModel(; phase = (; bandpass = bpc(prior)), logamp = (; bandpass = bpc(prior))), smoother = sm, gauge = PinAntenna(1))],
         ps,
-        exec = ExecutionConfig(), gauge = PinAntenna(1),
+        exec = ExecutionConfig(),
     )
 
     s_free = runbp(FP.JointSmoother(max_iterations = 40, tolerance = 1.0e-10))
@@ -201,9 +199,9 @@ end
 
     fm = default_fringe_terms()
     runbp(sm) = fit(
-        [BaselineFringeFit(model = fm), Bandpass(smoother = sm)],
+        [BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; smoother = sm, gauge = PinAntenna(1))],
         ps,
-        exec = ExecutionConfig(), gauge = PinAntenna(1),
+        exec = ExecutionConfig(),
     )
     s_joint = runbp(FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-12))
     s_closure = runbp(FP.PerTrackSmoother())

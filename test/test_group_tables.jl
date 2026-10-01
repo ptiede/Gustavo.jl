@@ -90,16 +90,17 @@ end
     ps, _ = _build_fringe_ps(; nant, nspw, nchan, ntime = 6, nscans = 3, bandpass = bp, seed = 3)
     serial = ExecutionConfig(inner_executor = SerialScheduler())
     wide = ExecutionConfig(outer_executor = DynamicScheduler(), inner_executor = DynamicScheduler(; nchunks = 4))
-    for st in (Bandpass(), Bandpass(smoother = FP.PerTrackSmoother()), AdhocPhase())
-        a = fit(st, ps; gauge = PinAntenna(1), exec = serial)
-        b = fit(st, ps; gauge = PinAntenna(1), exec = wide)
+    gauge = PinAntenna(1)
+    for st in (Bandpass(; gauge), Bandpass(; smoother = FP.PerTrackSmoother(), gauge), AdhocPhase(; gauge))
+        a = fit(st, ps; exec = serial)
+        b = fit(st, ps; exec = wide)
         @test a.components == b.components
         @test only(values(a.steps)).nscans == 3
     end
-    @test fit(Bandpass(), ps; gauge = PinAntenna(1)).steps[:bandpass].sources == ["SRC1"]
+    @test fit(Bandpass(; gauge), ps).steps[:bandpass].sources == ["SRC1"]
 
     # The adhoc step reports each track's resolved prior, one `Ti` per scan.
-    info = fit(AdhocPhase(), ps; gauge = PinAntenna(1)).steps[:adhoc]
+    info = fit(AdhocPhase(; gauge), ps).steps[:adhoc]
     pr = info.priors
     @test DimensionalData.name(dims(pr)) == (:AntennaName, :Feed, :Ti)
     @test size(pr, Ti) == 3 && issorted(lookup(pr, Ti))
@@ -135,14 +136,14 @@ end
         nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 3,
         bandpass = 0.3 .* randn(rng, 4, 2, 16), seed = 3,
     )
-    st = Bandpass(smoother = FP.PerTrackSmoother())
+    st = Bandpass(; smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1))
     solved_θ(sol) = vcat((vec(parent(c.params)) for c in sol.components)...)
-    θ = solved_θ(fit(st, ps; gauge = PinAntenna(1)))
-    θoff = solved_θ(fit(st, _offset_scans(ps, 4); gauge = PinAntenna(1)))
+    θ = solved_θ(fit(st, ps))
+    θoff = solved_θ(fit(st, _offset_scans(ps, 4)))
     @test maximum(abs, θoff .- θ) < 1.0e-6
 
     # Pooling follows the data's type unless the smoother names one.
-    θ64 = solved_θ(fit(Bandpass(smoother = FP.PerTrackSmoother(eltype = Float64)), ps; gauge = PinAntenna(1)))
+    θ64 = solved_θ(fit(Bandpass(; smoother = FP.PerTrackSmoother(eltype = Float64), gauge = PinAntenna(1)), ps))
     @test θ64 ≈ θ atol = 1.0e-5
     @test_throws "must be a real floating-point type" FP.PerTrackSmoother(eltype = ComplexF64)
 end

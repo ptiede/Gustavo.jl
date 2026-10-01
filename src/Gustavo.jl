@@ -44,7 +44,7 @@ export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, Scan
 # supported format, so a bare `using Gustavo` spans load → fit → calibrate → write.
 export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
-export AbstractGauge, PinAntenna, ZeroSumPhase, resolve_gauge
+export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate
 export BaselineFringeFit, default_fringe_terms, Bandpass, default_bandpass_terms, AdhocPhase,
     default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
@@ -66,7 +66,7 @@ export AprioriAmplitude, AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 export fit
 export SolveStep, ExecutionConfig, ProgressLogger
 export outer_executor, inner_executor
-export each_group, model_components, provides
+export each_group, model_components, provides, step_gauge
 export supports_station_heterogeneity
 # Re-export the transform vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.

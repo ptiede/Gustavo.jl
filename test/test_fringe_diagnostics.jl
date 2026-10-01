@@ -6,11 +6,11 @@
 @testset "Fringe diagnostics" begin
     # Rates large enough that the uncorrected scan average decorrelates.
     uvset, _truth = _build_fringe_uvset(; station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3])
+    gauge = PinAntenna(1)
     sol = fit(
-        BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         uvset,
-        gauge = PinAntenna(1),
     )
 
     @testset "snr table + summary" begin
@@ -470,7 +470,7 @@ end
     σ_vis = 1 / sqrt(1.0e3)
     nti = 6
     uvset, _ = _build_fringe_uvset(nant = 4, nspw = 2, nchan = 8, ntime = nti, noise = σ_vis)
-    sol = fit(BaselineFringeFit() |> Bandpass(), uvset; gauge = PinAntenna(1))
+    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)), uvset)
     d = FP.baseline_fringe_data(uvset, sol; scan_index = 1)
 
     @testset "σ is 1/√Σw on the coherent mean" begin

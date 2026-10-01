@@ -31,13 +31,17 @@ using XRadio
 
 ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
-pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |>
-    Bandpass() |> AdhocPhase()
-sol = fit(pipeline, ps; gauge = PinAntenna("AA"))   # run-wide reference antenna
+gauge = PinAntenna("AA")                        # reference antenna
+pipeline = AutocorrelationNormalization() |> BaselineFringeFit(; gauge) |>
+    Bandpass(; gauge) |> AdhocPhase(; gauge)
+sol = fit(pipeline, ps)
 
 out = calibrate(pipeline, sol, ps)               # the fit's data path, in memory
 save_solution("track.sol.zarr", sol)
 ```
+
+Each solve step takes its own `gauge`, which fixes the station values the data
+leave undetermined.
 
 ## The pieces
 

@@ -1,6 +1,6 @@
 # ── Pipeline verbs: fit / calibrate ──────────────────────────────────────────
 #
-#     sol = fit(pipeline, ps; gauge)               # solve
+#     sol = fit(pipeline, ps)                      # solve
 #     out = calibrate(sol, ps; post)               # apply
 #
 # `fit` runs each solve step's `solve` on the data as the corrections and steps
@@ -22,8 +22,8 @@ function _check_blas_threads()
 end
 
 """
-    fit(pipeline, ps::ProcessingSet; gauge, exec = ExecutionConfig()) -> CalibrationSolution
-    fit(pipeline, ms::MeasurementSet; gauge, exec = ExecutionConfig()) -> CalibrationSolution
+    fit(pipeline, ps::ProcessingSet; exec = ExecutionConfig()) -> CalibrationSolution
+    fit(pipeline, ms::MeasurementSet; exec = ExecutionConfig()) -> CalibrationSolution
 
 Solve the pipeline's solve steps on `ps`, in order, one scan group
 (`groupby(ps, ByScan())`) at a time. `pipeline` is a tuple (or vector) of
@@ -36,24 +36,23 @@ earlier correction and step has corrected.
 Narrow the data by subsetting `ps` first. A Measurement Set is fit as a
 processing set of one.
 
-`gauge` is required: an [`AbstractGauge`](@ref) such as `PinAntenna("PT")`,
-`PinAntenna(["PT", "LA"])` for a ranked fallback, or `ZeroSumPhase()`; without
-one `fit` throws, naming the stations. `exec` (an [`ExecutionConfig`](@ref))
-supplies the run's schedulers, memory budget and progress callback.
+Each solve step carries its own gauge ([`step_gauge`](@ref)); `fit` resolves
+its station codes against the data's antenna table. `exec` (an
+[`ExecutionConfig`](@ref)) supplies the run's schedulers, memory budget and
+progress callback.
 
 The solution is a [`CalibrationSolution`](@ref): a list of solved components,
-each step's diagnostics in `sol.steps`, and the pipeline and gauge as text in
-`sol.provenance`; [`calibrate`](@ref)`(pipeline, sol, ps)` applies it along the
+each step's diagnostics in `sol.steps`, and the pipeline, its steps' gauges
+included, as text in `sol.provenance`; [`calibrate`](@ref)`(pipeline, sol, ps)` applies it along the
 same data path. Solving `A |> B` is equivalent to `sa = fit(A, ps)` followed
 by `fit(ApplySolution(sa[provides(A)]) |> B, ps)`.
 """
 function StatsAPI.fit(
         pipeline::Union{Tuple, AbstractVector}, ps::XRadio.ProcessingSet;
-        gauge::Union{Nothing, AbstractGauge} = nothing,
         exec::ExecutionConfig = ExecutionConfig(),
     )
     _check_blas_threads()
-    return _run_pipeline(_parse_pipeline(pipeline), exec, gauge, ps)
+    return _run_pipeline(_parse_pipeline(pipeline), exec, ps)
 end
 
 StatsAPI.fit(pipeline::Union{Tuple, AbstractVector}, ms::XRadio.MeasurementSet; kwargs...) =
@@ -79,8 +78,9 @@ correction applied as written and each solve step replaced by that step's
 gains in `sol`. Its solve steps must be exactly the steps `sol` holds.
 
 ```julia
-pipeline = AutocorrelationNormalization() |> BaselineFringeFit() |> Bandpass()
-sol = fit(pipeline, ps; gauge)
+gauge = PinAntenna("AA")
+pipeline = AutocorrelationNormalization() |> BaselineFringeFit(; gauge) |> Bandpass(; gauge)
+sol = fit(pipeline, ps)
 out = calibrate(pipeline, sol, ps)   # normalized, then divided by each step's gains
 ```
 
@@ -204,13 +204,8 @@ end
 
 # ── The runner ───────────────────────────────────────────────────────────────
 
-_resolve_run_gauge(g::AbstractGauge, ant_names) = resolve_gauge(g, ant_names)
-_resolve_run_gauge(::Nothing, ant_names) = throw(
-    ArgumentError(
-        "no gauge given; pass `gauge = PinAntenna(station)` or `gauge = ZeroSumPhase()`. " *
-            "Stations: $(join(ant_names, ", ")).",
-    ),
-)
+_resolve_step_gauge(g::AbstractGauge, ant_names) = resolve_gauge(g, ant_names)
+_resolve_step_gauge(::Nothing, ant_names) = nothing
 
 # Solve a pipeline: each solve step compiles and solves its own private
 # (model, layout, θ), never a merged one. A step reads the data through the
@@ -218,18 +213,18 @@ _resolve_run_gauge(::Nothing, ant_names) = throw(
 # order, with each earlier step's own solution (`ApplySolution`) where that
 # step sat.
 function _run_pipeline(
-        br, exec::ExecutionConfig, gauge_spec::Union{Nothing, AbstractGauge}, ps::XRadio.ProcessingSet,
+        br, exec::ExecutionConfig, ps::XRadio.ProcessingSet,
     )
     geom = DataGeometry(ps)
-    gauge = _resolve_run_gauge(gauge_spec, geom.stations)
+    spec = (; geom)
+    gauges = [_resolve_step_gauge(step_gauge(st), geom.stations) for st in br.solve_steps]
     groups = groupby(ps, XRadio.ByScan())
     charges = [_group_charge(g) for g in values(groups)]
     _check_memory_budget(charges, exec)
-    spec = (; geom)
     corrections = Any[]
     components = SolvedComponent[]
     steps = OrderedDict{Symbol, NamedTuple}()
-    for (st, before) in zip(br.solve_steps, br.before)
+    for (st, before, gauge) in zip(br.solve_steps, br.before, gauges)
         append!(corrections, before)
         ctx = _step_context(st, spec, gauge, groups, charges, copy(corrections), exec)
         t0 = time_ns()
@@ -250,7 +245,6 @@ function _run_pipeline(
     return CalibrationSolution(
         geom, components, steps, _run_info(br, groups, exec);
         pipeline = join((sprint(show, x; context = :limit => true) for x in br.sequence), " |> "),
-        gauge = sprint(show, gauge_spec),
     )
 end
 

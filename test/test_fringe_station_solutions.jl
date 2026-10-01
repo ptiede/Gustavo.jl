@@ -75,12 +75,12 @@
 
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
         uvset, truth = _build_fringe_uvset(nant = 4)
+        gauge = PinAntenna(1)
         sol = fit(
-            BaselineFringeFit() |>
-                Bandpass() |>
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+            BaselineFringeFit(; gauge) |>
+                Bandpass(; gauge) |>
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
             uvset,
-            gauge = PinAntenna(1),
         )
         rows = FP.fringe_station_solutions(sol)
         @test length(rows) == sol.info.nscan * length(sol.geom.stations) * 2

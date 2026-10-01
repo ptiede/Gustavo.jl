@@ -15,31 +15,80 @@
     at_ref(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params[XRadio.AntennaName(At("A1"))]
 
     # A track-global inter-feed delay couples the scans without moving the gauge.
-    glob = BaselineFringeFit(; model = FP.default_fringe_terms(; rel_time = CAL.GlobalTime()))
-    @test all(iszero, at_ref(fit(glob, ps; gauge = PinAntenna(1)), :mbd))
+    glob = BaselineFringeFit(; model = FP.default_fringe_terms(; rel_time = CAL.GlobalTime()), gauge = PinAntenna(1))
+    @test all(iszero, at_ref(fit(glob, ps), :mbd))
 
     # Without cross hands the reference's feed-2 delay offset is itself a gauge.
     psp, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64, polarizations = ["RR", "LL"])
-    @test all(iszero, at_ref(fit(BaselineFringeFit(), psp; gauge = PinAntenna(1)), :rel_delay))
+    @test all(iszero, at_ref(fit(BaselineFringeFit(; gauge = PinAntenna(1)), psp), :rel_delay))
 
     # Two feed-2 delays that every detection sees only as their sum.
     twice = merge(
         FP.default_fringe_terms();
         phase = (; rel_delay_global = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
     )
-    @test_throws "delay station system is not determined" fit(BaselineFringeFit(; model = twice), ps; gauge = PinAntenna(1))
+    @test_throws "delay station system is not determined" fit(BaselineFringeFit(; model = twice, gauge = PinAntenna(1)), ps)
+end
+
+# Station 1's delays read `value` rather than zero.
+struct DelayOffset{T} <: CAL.AbstractGauge
+    value::T
+end
+function CAL.gauge_constraint(g::DelayOffset, f::CAL.GaugeFreedom)
+    row, _ = CAL.gauge_constraint(PinAntenna(1), f)
+    return row, all(==(:delay), f.observable) ? g.value : zero(g.value)
+end
+
+@testset "custom gauges drive the station solve" begin
+    ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
+    params(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params
+    at(sol, key, name) = params(sol, key)[XRadio.AntennaName(At(name))]
+    # Every station's value less station `i`'s: invariant under the gauge.
+    rel(sol, key, i) = (p = parent(params(sol, key)); p .- p[:, :, :, :, i:i])
+    pinned = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+
+    by_path = fit(BaselineFringeFit(; gauge = ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1"))), ps)
+    @test all(iszero, at(by_path, :rate, "A2"))
+    @test all(iszero, at(by_path, :mbd, "A1"))
+    @test rel(by_path, :rate, 2) ≈ rel(pinned, :rate, 2)
+    @test params(by_path, :mbd) == params(pinned, :mbd)
+    @test_throws "no component rat in the step's model; the components are atmos, mbd, rel_delay, rate" BaselineFringeFit(;
+        gauge = ByComponent((; rat = PinAntenna(2)); default = PinAntenna(1)),
+    )
+
+    offset = fit(BaselineFringeFit(; gauge = DelayOffset(2.0e-9)), ps)
+    @test all(≈(2.0e-9; atol = 1.0e-18), at(offset, :mbd, "A1"))
+    @test rel(offset, :mbd, 1) ≈ rel(pinned, :mbd, 1) atol = 1.0e-18
+    @test params(offset, :rate) == params(pinned, :rate)
+end
+
+@testset "each step applies its own gauge" begin
+    ps, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64)
+    sol = fit(BaselineFringeFit(; gauge = PinAntenna("A1")) |> AdhocPhase(; gauge = PinAntenna("A2")), ps)
+    at(c, name) = c.params[XRadio.AntennaName(At(name))]
+    mbd = only(c for c in sol[:fringe].components if last(c.path) === :mbd)
+    adhoc = only(sol[:adhoc].components)
+    @test all(iszero, at(mbd, "A1"))
+    @test all(iszero, at(adhoc, "A2"))
+    @test !all(iszero, at(adhoc, "A1"))
+    @test occursin("PinAntenna{String}(\"A1\")", sol.provenance.pipeline)
+    @test occursin("PinAntenna{String}(\"A2\")", sol.provenance.pipeline)
+
+    by_name = ByComponent((; adhoc = PinAntenna("A2")); default = PinAntenna("A1"))
+    sol2 = fit(BaselineFringeFit(; gauge = PinAntenna("A1")) |> AdhocPhase(; gauge = by_name), ps)
+    @test only(sol2[:adhoc].components).params == adhoc.params
 end
 
 @testset "BaselineFringeFit step (new engine)" begin
     @testset "fringe blocks invariant under later stages" begin
         ps, _ = _build_fringe_ps()
+        gauge = PinAntenna(1)
         solm = fit(
-            BaselineFringeFit() |>
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+            BaselineFringeFit(; gauge) |>
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
             ps,
-            gauge = PinAntenna(1),
         )
-        sol = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         fr, frm = sol[:fringe].components, solm[:fringe].components
         @test length(fr) == 4
         for (c, cm) in zip(fr, frm)
@@ -54,15 +103,12 @@ end
         @test fi.det_pfa == fim.det_pfa
 
         # `scan_ncells` is the false-alarm family each recorded `pfa` was computed over.
-        solr = fit(BaselineFringeFit(), _build_fringe_ps(; nscans = 3, noise = 0.5)[1]; gauge = PinAntenna(1))
+        solr = fit(BaselineFringeFit(; gauge = PinAntenna(1)), _build_fringe_ps(; nscans = 3, noise = 0.5)[1])
         fr3 = solr.steps[:fringe]
         @test fr3.det_pfa ≈ FP.fringe_pfa.(fr3.det_snr, fr3.scan_ncells[fr3.det_scan])
 
         # A gauge naming a station code resolves identically.
-        sol_code = fit(
-            BaselineFringeFit(),
-            ps; gauge = PinAntenna("A1"),
-        )
+        sol_code = fit(BaselineFringeFit(; gauge = PinAntenna("A1")), ps)
         @test sol_code[:fringe].components == fr
 
         # Step selection works on a single-step solution.
@@ -79,33 +125,34 @@ end
         ps, _ = _build_fringe_ps(nant = 4, omit_station = 4)
         model = default_fringe_terms()
 
-        sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna("A4"))
+        sol = fit(BaselineFringeFit(; model, gauge = PinAntenna("A4")), ps)
         @test isempty(sol.steps[:fringe].flagged_ant)
         @test isempty(FP.fringe_station_flags(sol))
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
 
         # The flags do not depend on which station holds the gauge.
-        present = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna("A1"))
+        present = fit(BaselineFringeFit(; model, gauge = PinAntenna("A1")), ps)
         @test present.steps[:fringe].flagged_ant == sol.steps[:fringe].flagged_ant
         @test present.steps[:fringe].flagged_scan == sol.steps[:fringe].flagged_scan
     end
 
     @testset "rounds > 1: fringe blocks invariant under later stages" begin
         ps, _ = _build_fringe_ps()
+        gauge = PinAntenna(1)
         solm = fit(
-            BaselineFringeFit(
+            BaselineFringeFit(;
                 model = default_fringe_terms(),
                 rounds = 2,
-            ) |> AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))),
+                gauge,
+            ) |> AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
             ps,
-            gauge = PinAntenna(1),
         )
         sol = fit(
-            BaselineFringeFit(
+            BaselineFringeFit(;
                 model = default_fringe_terms(),
                 rounds = 2,
+                gauge,
             ), ps,
-            gauge = PinAntenna(1),
         )
         for (c, cm) in zip(sol[:fringe].components, solm[:fringe].components)
             @test c == cm
@@ -123,19 +170,19 @@ end
             phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
         )
 
-        sol = fit(BaselineFringeFit(model = rel_terms), ps; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(; model = rel_terms, gauge = PinAntenna(1)), ps)
         @test count(c -> first(c.path) === :phase, sol[:fringe].components) == 5
         solved = only(sol[:fringe, :phase, :rel_rate].components).params
         @test vec(parent(solved)) ≈ inj .- inj[1] atol = 1.0e-7
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         ps0, _ = _build_fringe_ps()
-        sol0 = fit(BaselineFringeFit(model = rel_terms), ps0; gauge = PinAntenna(1))
+        sol0 = fit(BaselineFringeFit(; model = rel_terms, gauge = PinAntenna(1)), ps0)
         @test maximum(abs, only(sol0[:fringe, :phase, :rel_rate].components).params) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
-        sold = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
+        sold = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         @test length(sold[:fringe].components) == 4
     end
 
@@ -158,7 +205,7 @@ end
             phase = (; rel_phase = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Feed = CAL.SingleFeed(2))),
         )
         ps, truth = _build_fringe_ps(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
-        sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(; model, gauge = PinAntenna(1)), ps)
         rel = only(sol[:fringe, :phase, :rel_phase].components).params
         want = truth.phi[:, 2] .- truth.phi[:, 1]
         for a in eachindex(want), s in 1:nscans
@@ -174,11 +221,10 @@ end
         # the fringe θ matches the untransformed solve bit-for-bit.
         sol_ws = fit(
             StationWeightScale(ws) |>
-                BaselineFringeFit(),
+                BaselineFringeFit(; gauge = PinAntenna(1)),
             ps,
-            gauge = PinAntenna(1),
         )
-        sol = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         @test sol_ws[:fringe].components == sol[:fringe].components
         @test startswith(sol_ws.provenance.pipeline, "StationWeightScale")
 
@@ -197,8 +243,8 @@ end
             out[:flag] = flag
             return out
         end
-        pipeline_cf = (kill12, BaselineFringeFit())
-        sol_cf = fit(pipeline_cf, ps; gauge = PinAntenna(1))
+        pipeline_cf = (kill12, BaselineFringeFit(; gauge = PinAntenna(1)))
+        sol_cf = fit(pipeline_cf, ps)
         @test touched[] > 0
         @test occursin("kill12", sol_cf.provenance.pipeline)
         calibrated = calibrate(pipeline_cf, sol_cf, ps)
@@ -209,37 +255,38 @@ end
 
     @testset "model validation + full-pipeline option coverage" begin
         ps, _ = _build_fringe_ps()
-        # The model is the component tree alone (the gauge pin is run-wide, an
-        # argument of `fit`) — no per-effect fields or keywords on BaselineFringeFit.
-        @test fieldnames(typeof(BaselineFringeFit())) ==
-            (:model, :search, :closure, :rounds, :steer_cells)
+        # The model is the component tree alone, and the gauge a field of its own —
+        # no per-effect fields or keywords on BaselineFringeFit.
+        @test fieldnames(typeof(BaselineFringeFit(; gauge = PinAntenna(1)))) ==
+            (:model, :search, :closure, :rounds, :steer_cells, :gauge)
 
         # A custom Stationization, the inter-feed rate opt-in and a function
         # correction run in a full pipeline.
+        gauge = PinAntenna(1)
         sol_full = fit(
             [identity,
-                BaselineFringeFit(
+                BaselineFringeFit(;
                     model = merge(
                         default_fringe_terms();
                         phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
                     ),
                     closure = FP.Stationization(pfa_max = 1.0e-2),
+                    gauge,
                 ),
-                Bandpass(), AdhocPhase()],
+                Bandpass(; gauge), AdhocPhase(; gauge)],
             ps,
             exec = ExecutionConfig(),
-            gauge = PinAntenna(1),
         )
         @test collect(keys(sol_full.steps)) == [:fringe, :bandpass, :adhoc]
         # Bandpass without AdhocPhase still solves a :bandpass
         # stage (F |> B — no final pass).
-        sol_fb = fit([BaselineFringeFit(), Bandpass()], ps; gauge = PinAntenna(1))
+        sol_fb = fit([BaselineFringeFit(; gauge), Bandpass(; gauge)], ps)
         @test haskey(sol_fb, :bandpass)
 
         # Any real `steer_cells`, and a Float32 station solve, agreeing with the default.
-        @test BaselineFringeFit(steer_cells = 9).steer_cells === 9
-        sol64 = fit(BaselineFringeFit(), ps; gauge = PinAntenna(1))
-        sol32 = fit(BaselineFringeFit(closure = FP.Stationization(eltype = Float32), steer_cells = 9), ps; gauge = PinAntenna(1))
+        @test BaselineFringeFit(; steer_cells = 9, gauge).steer_cells === 9
+        sol64 = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+        sol32 = fit(BaselineFringeFit(; closure = FP.Stationization(eltype = Float32), steer_cells = 9, gauge = PinAntenna(1)), ps)
         for (c32, c64) in zip(sol32[:fringe].components, sol64[:fringe].components)
             @test c32.params ≈ c64.params atol = 1.0e-6
         end
@@ -250,7 +297,7 @@ end
         ps, _ = _build_fringe_ps()   # 2 band groups; narrow fractional bandwidth
         geom = CAL.DataGeometry(ps)
         fringe_phase(model) =
-            Gustavo.model_components(BaselineFringeFit(; model), (; geom)).phase
+            Gustavo.model_components(BaselineFringeFit(; model, gauge = PinAntenna(1)), (; geom)).phase
         sig(tc) = (
             typeof(tc.term), typeof(tc.Ti),
             typeof(tc.Frequency), typeof(tc.Feed),
@@ -318,7 +365,7 @@ end
     model = default_fringe_terms()
 
     @testset "the solution records the search configuration" begin
-        sol = fit(BaselineFringeFit(; model), ps; gauge = PinAntenna(1))
+        sol = fit(BaselineFringeFit(; model, gauge = PinAntenna(1)), ps)
         @test sol.steps[:fringe].search == FP.FringeSearch()
         @test haskey(sol.steps[:fringe], :flagged_ant) && haskey(sol.steps[:fringe], :flagged_scan)
     end
@@ -329,15 +376,14 @@ end
         # while the solution looked fitted.
         poly = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())
         @test_throws "BaselineFringeFit cannot fit the component" fit(
-            BaselineFringeFit(model = merge(default_fringe_terms(); phase = (; poly))), ps,
-            gauge = PinAntenna(1),
+            BaselineFringeFit(; model = merge(default_fringe_terms(); phase = (; poly)), gauge = PinAntenna(1)), ps,
         )
     end
 
     @testset "a model missing a term the step requires is rejected by name" begin
         # The kind is missing outright: nothing to write the rate search into.
         norate = GainModel(; phase = Base.structdiff(default_fringe_terms().phase, (; rate = nothing)))
-        @test_throws "requires a rate component" fit(BaselineFringeFit(model = norate), ps; gauge = PinAntenna(1))
+        @test_throws "requires a rate component" fit(BaselineFringeFit(; model = norate, gauge = PinAntenna(1)), ps)
 
         # The kind is PRESENT and the router signature is not: the inter-feed delay is
         # still a `:delay`, so only a signature-level check catches a wideband
@@ -347,8 +393,7 @@ end
                 CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
         end
         @test_throws "requires a per-scan feed-common wideband delay" fit(
-            BaselineFringeFit(model = GainModel(; phase = globaldelay)), ps,
-            gauge = PinAntenna(1),
+            BaselineFringeFit(; model = GainModel(; phase = globaldelay), gauge = PinAntenna(1)), ps,
         )
     end
 
@@ -363,12 +408,10 @@ end
             default_fringe_terms().phase,
         )
         @test_throws "BaselineFringeFit cannot fit the component" fit(
-            BaselineFringeFit(model = GainModel(; phase = subscan)), ps,
-            gauge = PinAntenna(1),
+            BaselineFringeFit(; model = GainModel(; phase = subscan), gauge = PinAntenna(1)), ps,
         )
         @test_throws "the data's own sampling" fit(
-            BaselineFringeFit(model = GainModel(; phase = subscan)), ps,
-            gauge = PinAntenna(1),
+            BaselineFringeFit(; model = GainModel(; phase = subscan), gauge = PinAntenna(1)), ps,
         )
 
         geom = CAL.DataGeometry(ps)
@@ -376,16 +419,16 @@ end
 
         # The same boundary expressed as an instrument scan edge, and the
         # per-integration limit the classifier used to special-case.
-        @test !FP.can_fit(BaselineFringeFit(), mbd(CAL.InstrumentScans([geom.times[1] + 150.0])), geom)
-        @test !FP.can_fit(BaselineFringeFit(), mbd(CAL.PerIntegration()), geom)
+        @test !FP.can_fit(BaselineFringeFit(; gauge = PinAntenna(1)), mbd(CAL.InstrumentScans([geom.times[1] + 150.0])), geom)
+        @test !FP.can_fit(BaselineFringeFit(; gauge = PinAntenna(1)), mbd(CAL.PerIntegration()), geom)
 
         # Coarser than a scan is fitted: one column several scans share is
         # written by all of them. The rule is the segmentation against the
         # geometry, not the segmentation alone — 3600 s blocks do not split a
         # 330 s scan.
-        @test FP.can_fit(BaselineFringeFit(), mbd(CAL.PerScan()), geom)
-        @test FP.can_fit(BaselineFringeFit(), mbd(CAL.GlobalTime()), geom)
-        @test FP.can_fit(BaselineFringeFit(), mbd(CAL.TimeBlocks(3600.0)), geom)
+        @test FP.can_fit(BaselineFringeFit(; gauge = PinAntenna(1)), mbd(CAL.PerScan()), geom)
+        @test FP.can_fit(BaselineFringeFit(; gauge = PinAntenna(1)), mbd(CAL.GlobalTime()), geom)
+        @test FP.can_fit(BaselineFringeFit(; gauge = PinAntenna(1)), mbd(CAL.TimeBlocks(3600.0)), geom)
     end
 
     @testset "the matched filter's kind vocabulary stays private" begin
