@@ -79,22 +79,6 @@ function partition_key(;
     return Symbol(join(parts, "_"))
 end
 
-"""
-    scan_key(id) -> Symbol
-
-Legacy scan-key helper retained for back-compat. Returns `:scan_<id>`.
-"""
-scan_key(id) = Symbol("scan_", id)
-
-# Preserve DimArray dim metadata when callers hand back a plain array result
-# of the same shape (e.g. an externally-built vis cube). Already-DimArray
-# inputs are passed through unchanged.
-_rewrap_like(A::AbstractDimArray, ::AbstractDimArray) = A
-_rewrap_like(A::AbstractDimArray, _) = A
-_rewrap_like(A, ref::AbstractDimArray) =
-    size(A) == size(ref) ? DimArray(A, dims(ref)) : A
-_rewrap_like(A, _) = A
-
 # Collect `xs` into a Vector whose element type is the tightest common supertype
 # of what it actually holds — concrete whenever the entries share a type, however
 # loosely the source container was typed. An empty `xs` has nothing to join and
@@ -108,30 +92,23 @@ end
     pol_products(x) -> Vector
 
 The values of the `Polarization` lookup of `x`'s visibilities: the stored
-product labels of a leaf or `UVSet` (`"PP"`, `"PQ"`, …), or the feed pairs of a
-solver cube (see [`feed_pairs`](@ref)). A `UVSet` answers for its first leaf;
-all leaves share one axis.
+product labels of a `UVSet` leaf (`"PP"`, `"PQ"`, …), or the feed pairs of a
+solver cube (see [`feed_pairs`](@ref)).
 """
 pol_products(vis::AbstractDimArray) = collect(lookup(vis, Polarization))
-pol_products(leaf::PartitionedData) = pol_products(leaf[:vis])
-function pol_products(uvset::UVSet)
-    bs = DimensionalData.branches(uvset)
-    isempty(bs) && error("pol_products: UVSet has no leaves")
-    return pol_products(first(values(bs)))
-end
+pol_products(leaf::DimensionalData.DimTree) = pol_products(leaf[:vis])
 
 """
     feed_pairs(x) -> Vector{Tuple{Int, Int}}
 
 The `(feed_a, feed_b)` pair each product along the `Polarization` axis of `x`
 relates, so that `V[a, b, p] = g_a[feed_a] · S · conj(g_b[feed_b])`. A solver
-cube's lookup holds these pairs directly. A leaf or `UVSet` labels its products
-`P` (feed 1) and `Q` (feed 2). A Measurement Set's labels are resolved through
-each antenna's receptors by
+cube's lookup holds these pairs directly; a `UVSet` leaf's visibilities label
+their products `P` (feed 1) and `Q` (feed 2). A Measurement Set's labels are
+resolved through each antenna's receptors by
 [`feed_pairs(::XRadio.MeasurementSet)`](@ref feed_pairs(::XRadio.MeasurementSet)).
 """
 feed_pairs(vis::AbstractDimArray) = _feed_pairs(lookup(vis, Polarization))
-feed_pairs(x::Union{PartitionedData, UVSet}) = _feed_pairs(pol_products(x))
 
 _feed_pairs(products::AbstractVector{<:Tuple{Integer, Integer}}) = collect(Tuple{Int, Int}, products)
 _feed_pairs(products::AbstractVector{<:AbstractString}) = map(_stored_feed_pair, products)
@@ -147,22 +124,18 @@ end
 """
     frequencies(x) -> Vector{Float64}
 
-Channel frequencies (Hz) off the `Frequency` lookup of `x`'s visibility array —
-a `DimArray`, a leaf `AbstractDimTree`, or a layer selection off one. The raw
-coordinate vector, not a lookup wrapper.
+Channel frequencies (Hz) off the `Frequency` lookup of the visibility array
+`x`. The raw coordinate vector, not a lookup wrapper.
 """
 frequencies(vis::AbstractDimArray) = parent(lookup(vis, Frequency))
-frequencies(leaf::PartitionedData) = frequencies(leaf[:vis])
 
 """
     timestamps(x) -> Vector{Float64}
 
-Integration times (seconds) off the `Ti` lookup of `x`'s visibility array — a
-`DimArray`, a leaf `AbstractDimTree`, or a layer selection off one. The raw
-coordinate vector, not a lookup wrapper.
+Integration times (seconds) off the `Ti` lookup of the visibility array `x`.
+The raw coordinate vector, not a lookup wrapper.
 """
 timestamps(vis::AbstractDimArray) = parent(lookup(vis, Ti))
-timestamps(leaf::PartitionedData) = timestamps(leaf[:vis])
 
 # ── Time axis ────────────────────────────────────────────────────────────────
 
@@ -217,3 +190,6 @@ amp = abs.(stack[:vis][Polarization = pol_at(stack, (1, 1))])
 ```
 """
 pol_at(x, pair::Tuple{Integer, Integer}) = At(pol_products(x)[pol_index(x, pair)])
+
+# Resolves a deferred form into its concrete one; `Calibration` adds the methods.
+function materialize end

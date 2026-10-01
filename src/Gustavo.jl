@@ -40,9 +40,8 @@ export UVData, Calibration, Fring
 # and slice leaves without reaching into `UVData` or `DimensionalData`.
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.
 export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, Scan
-# Data entry and exit: the set type plus the reader/writer pair for each
-# supported format, so a bare `using Gustavo` spans load → fit → calibrate → write.
-export UVSet, load_uvfits, load_fitsidi, write_uvfits, write_fitsidi
+# UVFITS entry: the reader and the set type it returns.
+export UVSet, load_uvfits
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate
@@ -61,7 +60,6 @@ export AbstractTimeSegmentation, GlobalTime, PerScan, PerIntegration, TimeBlocks
     InstrumentScans
 export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
     ChannelBlocks, FreqGroups, BandGroups
-export AverageFrequency, CombineSpw, AverageTime, FlagSpwEdges
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit
 export SolveStep, ExecutionConfig, ProgressLogger

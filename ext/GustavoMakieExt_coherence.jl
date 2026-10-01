@@ -1,8 +1,7 @@
 # ── Coherence-loss plots (GustavoMakieExt) ───────────────────────────────────
 #
 # Implements the `plot_coherence` / `plot_coherence_matrix` stubs from
-# `Gustavo.UVData`. The data is computed Makie-free by `coherence_report`; this
-# only draws.
+# `Gustavo.UVData`. The report is computed Makie-free; this only draws.
 #
 # - `plot_coherence`        — η versus Δt and Δν as curves; the aggregate bold,
 #   per-baseline traces faint, and (with `nlabel`) the worst baselines coloured

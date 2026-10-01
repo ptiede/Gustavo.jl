@@ -55,7 +55,7 @@ function Fring.load_fitsidi_phasecal(path::AbstractString)
         _rdate_jd_or_zero(strip(string(something(card_value(ag.cards, "RDATE"), "")))),
     )
 
-    # NOSTA → cleaned station name (must match what `load_fitsidi` stores).
+    # NOSTA → cleaned station name.
     nosta = round.(Int, collect(getproperty(ag.data, :NOSTA)))
     anames = _idi_clean.(collect(getproperty(ag.data, :ANNAME)))
     name_of = Dict(nosta[i] => anames[i] for i in eachindex(nosta))

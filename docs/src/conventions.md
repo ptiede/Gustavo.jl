@@ -16,17 +16,10 @@ FITS-IDI convention ``V = \langle E_{a_1} \overline{E_{a_2}} \rangle`` of AIPS
 Memo 114r §2.1. It is also the convention of CASA, of the Python `xradio`
 writer, and of AIPS random-groups UVFITS.
 
-Conversion happens at the format boundary, not in the solver:
-
-| Operation | Conjugated |
-|:----------|:-----------|
-| `load_fitsidi`, `write_fitsidi` | yes |
-| `load_uvfits` | no |
-| `write_uvfits(...; convention = :aips)` | no |
-| `write_uvfits(...; convention = :fitsidi)` | yes |
-
-`load_uvfits` assumes a standard AIPS file, so only `convention = :aips`
-round-trips through Gustavo as the identity.
+Conversion happens at the format boundary, not in the solver.
+[`load_uvfits`](@ref) assumes a standard AIPS file and reads its visibilities
+verbatim; a FITS-IDI file is converted, conjugation included, by
+`XRadio.fitsidi2msv4`.
 
 ## Fitted parameters
 
@@ -80,9 +73,8 @@ Solvers require both conditions, so a sample contributes when its flag is unset
 and its weight is finite and positive.
 
 UVFITS has no flag table, and a negative weight is the only means the format
-has of recording a flag. `write_uvfits` therefore negates the weight of a
-flagged sample, preserving its magnitude, and `load_uvfits` reads the sign back
-as the flag.
+has of recording a flag. [`load_uvfits`](@ref) therefore flags every sample
+whose weight is not positive.
 
 ## Feeds and correlation products
 
@@ -99,12 +91,12 @@ A Measurement Set stores products as receptor labels (`"RR"`, `"XY"`, …).
 [`feed_pairs`](@ref feed_pairs(::XRadio.MeasurementSet)) resolves each letter
 through its antenna's `polarization_type`, so one stored product can relate
 different feed pairs on different baselines; each baseline's products are
-reordered into one shared order when data becomes solver input. A `UVSet`
-leaf labels its products `P` (feed 1) and `Q` (feed 2).
+reordered into one shared order when data becomes solver input. A
+[`UVSet`](@ref) leaf labels its products `P` (feed 1) and `Q` (feed 2).
 
 ## Baseline coordinates
 
 FITS-IDI and AIPS UVFITS share one baseline-coordinate convention and one
-antenna ordering, so ``(u, v, w)`` is read and written verbatim by both
-readers and both writers, and is never negated. The conjugation applied to the
-visibilities on the FITS-IDI boundary does not extend to it.
+antenna ordering, so ``(u, v, w)`` is read verbatim and never negated. The
+conjugation applied to the visibilities on the FITS-IDI boundary does not
+extend to it.

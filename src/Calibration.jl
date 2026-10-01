@@ -15,11 +15,9 @@ import DensityInterface
 import Distributions
 using Distributions: Distribution, Normal, AbstractMvNormal, mean, cov, var
 using ..UVData
-using ..UVData: feed_pairs, phase_relative_to_ref
-using ..UVData: PolTypes, UVSet, channel_freqs, rebuild_visibilities, materialize_leaf,
-    is_lazy, pol_products, baselines
+using ..UVData: feed_pairs
 # Segmentation materialization is a METHOD of the data layer's `materialize`
-# generic — one package-wide verb for resolving a deferred form (a lazy leaf, a
+# generic — one package-wide verb for resolving a deferred form (a
 # data-dependent segmentation) into its concrete one. A bare `using` definition
 # would mint a second function of the same name and leave the two ambiguous
 # wherever both modules are in scope.

@@ -14,13 +14,11 @@
 # frequency (delay/bandpass removed), so averaging the data — the whole point of
 # fringe fitting — stays coherent out to long timescales and wide bandwidths.
 #
-# These helpers operate on any `UVSet` (raw, fringe-corrected, frequency- or
-# time-averaged), so the same metric can be read at every pipeline stage by
-# calling `coherence_report` on each stage's `UVSet`. `coherence_report` returns
-# two curves — η versus time-averaging interval Δt and η versus frequency-
-# averaging width Δν — plus the headline numbers at full-scan / full-band
-# averaging. Pure (no Makie); the `plot_coherence` stub is implemented by
-# `GustavoMakieExt`.
+# A `CoherenceReport` holds two curves — η versus time-averaging interval Δt
+# and η versus frequency-averaging width Δν — plus the headline numbers at
+# full-scan / full-band averaging. The accumulation kernels below work on
+# `(Frequency, Ti, BaselineID, Polarization)` cubes. Pure (no Makie); the
+# `plot_coherence` stub is implemented by `GustavoMakieExt`.
 #
 # CAVEAT: η is computed against the data's own finest resolution (a single
 # integration / channel gives η ≡ 1), so it is self-normalized and needs no
@@ -54,7 +52,7 @@
     CoherenceCurve
 
 Coherence factor versus averaging interval along one axis (`:time` or `:freq`),
-produced by [`coherence_report`](@ref).
+held by a [`CoherenceReport`](@ref).
 
 - `axis` — `:time` (averaging the `Ti` axis) or `:freq` (the `Frequency` axis).
 - `intervals` — the averaging intervals (seconds for `:time`, Hz for `:freq`),
@@ -77,7 +75,7 @@ end
 """
     CoherenceReport
 
-Stage-agnostic coherence summary of a `UVSet`, from [`coherence_report`](@ref).
+Stage-agnostic coherence summary of a visibility set.
 `bl_pairs`/`ant_names` label the baseline axis of the curves; `feeds` are the
 feed pairs of the correlation products that were included; `npts` is
 the valid-cell count per baseline. `time` and `freq` are the [`CoherenceCurve`](@ref)s
@@ -137,161 +135,6 @@ function _auto_intervals(diffs::Vector{Float64}, spans::Vector{Float64})
     return unique!(out)
 end
 
-"""
-    coherence_report(uvset::UVSet; timescales = nothing, bandwidths = nothing,
-                     pols) -> CoherenceReport
-
-Measure the per-baseline coherence factor η = |Σ w·V| / Σ(w·|V|) of `uvset` as a
-function of time-averaging interval Δt and frequency-averaging width Δν, pooling
-over the selected correlation products. Works on any `UVSet` — call it on the raw
-data, the fringe/bandpass-corrected data, and each reduction stage to see how much
-coherence each averaging step costs (the run is correct when averaging stays
-coherent: η ≈ 1 out to long Δt / wide Δν).
-
-For each interval the data is binned along that axis (within each leaf, per
-channel for time / per integration for frequency), coherently summed inside every
-bin, and the bin amplitudes pooled — so η is self-normalized (η ≡ 1 at the native
-one-sample-per-bin resolution) and needs no gain model. Lazy leaves are
-materialized one at a time (memory-safe on a streamed set).
-
-`timescales` (seconds) / `bandwidths` (Hz) override the default geometric sweeps
-(native spacing → full extent). `pols` selects the products to pool: `:all`, an index, a feed pair such as
-`(1, 1)` (see [`feed_pairs`](@ref)), or a vector of these. Products that are mostly noise bias η down.
-
-`debias` (default `false`) removes the thermal-noise bias from η. The
-weights set the relative cell weighting; the absolute noise scale is
-estimated per (baseline, product) from adjacent-sample differences, so a
-mis-calibrated WEIGHT column does not corrupt η. Without `debias` the raw η
-is pulled below 1 at coarse averaging by noise alone. The debiased estimator
-pools unbiased per-bin power estimates `(|Σ w·V|² − 2αΣw)/Σw` and takes one
-square root at the end, so η ≈ 1 for a flat-phase solution at any SNR. A
-baseline (or pooled aggregate) whose signal power does not clear 3σ of its
-null fluctuation reads `NaN`; a NaN baseline still enters the pooled
-aggregate, since excluding it on the realized sign would bias the pool.
-
-`marginalize` (default `true`) measures each curve on the data coherently
-averaged over the other axis first: the time curve on the per-AP
-band-average, the frequency curve on the per-channel time-average. This
-boosts the per-sample SNR (so `debias` is reliable); at native per-cell
-SNR ≲ 1 the unmarginalized curves measure noise and understate coherence.
-See [`CoherenceReport`](@ref) / [`print_coherence_report`](@ref) /
-`plot_coherence`.
-"""
-function coherence_report(
-        uvset::UVSet;
-        pols, timescales = nothing, bandwidths = nothing,
-        debias = false, marginalize = true,
-    )
-    src = DimensionalData.branches(uvset)
-    isempty(src) && error("coherence_report: uvset has no leaves")
-
-    # Pass 1 — metadata/dims only (eager even on lazy leaves): global baseline
-    # list, antenna labels, included products, and the native/full extents that
-    # set the default interval sweeps. Nothing is read from disk here.
-    blidx = OrderedDict{Tuple{Int, Int}, Int}()
-    bl_pairs = Tuple{Int, Int}[]
-    ant_names = String[]
-    pol_feeds = Tuple{Int, Int}[]
-    tdiffs = Float64[]; tspans = Float64[]
-    fdiffs = Float64[]; fspans = Float64[]
-    for leaf in values(src)
-        for (a, b) in baselines(leaf).pairs
-            a == b && continue
-            key = (a, b)
-            if !haskey(blidx, key)
-                push!(bl_pairs, key)
-                blidx[key] = length(bl_pairs)
-            end
-        end
-        isempty(ant_names) && (ant_names = String.(collect(metadata(leaf).antennas.name)))
-        if isempty(pol_feeds)
-            feeds = feed_pairs(leaf)
-            pol_feeds = feeds[_select_coherence_pols(feeds, pols)]
-        end
-        ts = sort(Float64.(lookup(leaf[:vis], Ti)))
-        if length(ts) > 1
-            append!(tdiffs, filter(>(0), diff(ts)))
-            push!(tspans, last(ts) - first(ts))
-        end
-        fs = sort(Float64.(lookup(leaf[:vis], Frequency)))
-        if length(fs) > 1
-            append!(fdiffs, filter(>(0), diff(fs)))
-            push!(fspans, last(fs) - first(fs))
-        end
-    end
-    isempty(bl_pairs) && error("coherence_report: uvset has no cross baselines")
-
-    dts = timescales === nothing ? _auto_intervals(tdiffs, tspans) : sort(Float64.(collect(timescales)))
-    dnus = bandwidths === nothing ? _auto_intervals(fdiffs, fspans) : sort(Float64.(collect(bandwidths)))
-    nbl = length(bl_pairs); nT = length(dts); nF = length(dnus)
-
-    numT = zeros(Float64, nT, nbl)
-    numF = zeros(Float64, nF, nbl)
-    # In `marginalize` mode the two curves use DIFFERENT denominators (the time curve
-    # references the per-AP band-averaged amplitude, the freq curve the per-channel
-    # time-averaged amplitude), so keep them separate; non-marginalized shares one.
-    denT = zeros(Float64, nbl)
-    denF = zeros(Float64, nbl)
-    # Null variance of each debiased denominator (Σ 4α² over its cells): the
-    # scale against which a denominator counts as a DETECTION of signal power.
-    dvarT = zeros(Float64, nbl)
-    dvarF = zeros(Float64, nbl)
-    npts = zeros(Int, nbl)
-    dumF = zeros(Float64, 1, nbl)
-    dumT = zeros(Float64, 1, nbl)
-    dumN = zeros(Int, nbl)
-
-    # Pass 2 — materialize each leaf and accumulate.
-    for leaf in values(src)
-        m = materialize_leaf(leaf)
-        V = parent(m[:vis]); W = parent(m[:weights]); Fl = parent(m[:flags])
-        feeds = feed_pairs(m)
-        plist = _select_coherence_pols(feeds, pols)
-        # Pass 1 captured the first leaf's labels/antennas, but pass 2 pools all
-        # leaves into one global baseline index — heterogeneous leaves would be
-        # silently mislabelled, so guard instead of trusting the first leaf.
-        leaf_feeds = feeds[plist]
-        leaf_feeds == pol_feeds || error(
-            "coherence_report: heterogeneous correlation products across leaves " *
-                "($(leaf_feeds) vs $(pol_feeds)); cannot pool into one report",
-        )
-        leaf_ants = String.(collect(metadata(m).antennas.name))
-        leaf_ants == ant_names || error(
-            "coherence_report: heterogeneous antenna names across leaves; " *
-                "cannot pool into one report",
-        )
-        blmap = [get(blidx, p, 0) for p in baselines(m).pairs]
-        times_sec = Float64.(lookup(m[:vis], Ti))
-        freqs = Float64.(lookup(m[:vis], Frequency))
-        # Per-(baseline, product) noise scale α, from adjacent-sample differences
-        # of the NATIVE cube (signal cancels in the difference; noise does not),
-        # so the debias trusts the weights only for RELATIVE cell weighting. α is
-        # a property of the weights against the true noise and is preserved
-        # exactly by the weighted averaging `_collapse_axis` performs.
-        alpha = debias ? _noise_scale(V, W, Fl, plist) : ones(Float64, size(V, 3), size(V, 4))
-        if marginalize
-            # Coherently average the other axis first (incoherent/segmented style), so
-            # each curve is measured on high-SNR samples and the debias is reliable.
-            f0m = isempty(freqs) ? 0.0 : sum(freqs) / length(freqs)
-            t0m = isempty(times_sec) ? 0.0 : sum(times_sec) / length(times_sec)
-            Vt, Wt = _collapse_axis(V, W, Fl, 1)        # band-average per AP → time curve
-            _coherence_accumulate!(numT, dumF, denT, dvarT, npts, Vt, Wt, nothing, blmap, plist, times_sec, [f0m], dts, [1.0], debias, alpha)
-            Vf, Wf = _collapse_axis(V, W, Fl, 2)        # time-average per channel → freq curve
-            _coherence_accumulate!(dumT, numF, denF, dvarF, dumN, Vf, Wf, nothing, blmap, plist, [t0m], freqs, [1.0], dnus, debias, alpha)
-        else
-            _coherence_accumulate!(numT, numF, denT, dvarT, npts, V, W, Fl, blmap, plist, times_sec, freqs, dts, dnus, debias, alpha)
-        end
-    end
-
-    etaT, aggT = _curve_from_sums(numT, denT, dvarT, debias)
-    etaF, aggF = _curve_from_sums(numF, marginalize ? denF : denT, marginalize ? dvarF : dvarT, debias)
-    return CoherenceReport(
-        bl_pairs, ant_names, pol_feeds, npts,
-        CoherenceCurve(:time, dts, aggT, etaT),
-        CoherenceCurve(:freq, dnus, aggF, etaF),
-    )
-end
-
 # Per-baseline η and the pooled aggregate, per interval.
 #
 # Amplitude mode (`power = false`, the raw estimator): η = num/den with
@@ -343,7 +186,7 @@ end
 # Accumulate one leaf's contribution. `V`/`W` are `(Frequency, Ti, BaselineID, Polarization)`;
 # `blmap[bli]` maps a local baseline to its global index (0 = skip: autocorr or
 # unmapped). A function barrier so the hot loops specialize on the concrete eltypes
-# of `parent(leaf[...])` (type-unstable at the call site, as in the reducers).
+# of `parent(leaf[...])`.
 #
 # Binning is made independent of on-disk storage direction: lower-sideband bands
 # have negative CH_WIDTH, so `freqs` (and occasionally `times_sec`) can be stored
@@ -573,8 +416,8 @@ end
 # 2 = Ti), returning `(Vbar, Wbar)` with that axis collapsed to length 1: `Vbar` is
 # the weighted mean `Σ w·V / Σ w` and `Wbar = Σ w` (so its noise variance is `1/Wbar`,
 # preserving the inverse-variance convention the debias relies on). For corrected
-# data this is the high-SNR band-average (axis 1) or time-average (axis 2) used by
-# `coherence_report(marginalize = true)`; cells with no weight become `NaN`.
+# data this is the high-SNR band-average (axis 1) or time-average (axis 2) a
+# marginalized coherence curve is measured on; cells with no weight become `NaN`.
 function _collapse_axis(
         V::AbstractArray{<:Any, 4}, W::AbstractArray{<:Any, 4},
         Fl::AbstractArray{Bool, 4}, axis::Int,
@@ -705,7 +548,7 @@ end
 Coherence factor η versus time-averaging interval Δt and frequency-averaging width
 Δν: the aggregate as a bold line plus faint per-baseline traces. A correct
 solution stays near η = 1 across the swept intervals. Provided by `GustavoMakieExt`
-(load Makie/CairoMakie). See [`coherence_report`](@ref).
+(load Makie/CairoMakie).
 """
 function plot_coherence end
 
@@ -717,8 +560,7 @@ Heatmap of the per-baseline coherence factor η: one row per baseline (labelled 
 station-pair code, sorted worst-first by default), one column per averaging
 interval, colour = η ∈ `[0, 1]` (red = decorrelated, green = coherent). The direct
 "which baseline/station is bad" view — a problem station shows as a band of red
-rows. `axis = :time` (Δt columns) or `:freq` (Δν columns). Choose the columns by
-passing `timescales` / `bandwidths` to [`coherence_report`](@ref) (e.g.
-`timescales = [1, 5, 10, 30, 60]`). Provided by `GustavoMakieExt`.
+rows. `axis = :time` (Δt columns) or `:freq` (Δν columns); the columns are the
+report's own intervals. Provided by `GustavoMakieExt`.
 """
 function plot_coherence_matrix end

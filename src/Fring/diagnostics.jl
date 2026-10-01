@@ -235,8 +235,7 @@ _mean_sigma(wsum::AbstractArray) = map(x -> x > 0 ? 1 / sqrt(x) : NaN, wsum)
 
 # The 1σ error bar on a plotted view of a complex sample, given the sample `z`
 # and its radial width `σ`: `abs` sees σ itself, `angle` sees the angle σ
-# subtends at radius |z| (the same small-angle form `phase_series_with_noise`
-# uses). Once σ reaches |z| the phase is unconstrained, so the bar saturates at
+# subtends at radius |z|. Once σ reaches |z| the phase is unconstrained, so the bar saturates at
 # π rather than reporting a misleadingly finite width.
 _plotted_sigma(::typeof(abs), z, σ) = σ
 _plotted_sigma(::typeof(angle), z, σ) = abs(z) > 0 ? min(σ / abs(z), Float64(π)) : Float64(π)

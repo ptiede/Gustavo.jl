@@ -879,7 +879,7 @@ end
         g = gains(solv)
         @test g isa DimArray
         @test size(g) == (length(freqs), length(times), nant, 2)
-        # The same numbers `evaluate_gains` / `apply_calibration` use.
+        # The same numbers `evaluate_gains` returns.
         @test parent(g) == CAL.evaluate_gains(ev, θv)
         # Axes carry the geometry, so a user can index by physical coordinate.
         @test lookup(g, UVD.Frequency) == freqs

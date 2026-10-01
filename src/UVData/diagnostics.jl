@@ -1,102 +1,6 @@
-# Baseline-level diagnostic series computed by walking `UVSet` leaves.
-#
-# The series functions below consume `(Ti, Frequency)` blocks — a single
-# (baseline, pol) selection concatenated across leaves — rather than a `UVSet`,
-# so they compose with any source of visibility/weight matrices. Use
-# `_baseline_scan_blocks` and `_concat_scan_blocks` to produce those blocks from
-# a `UVSet` pair.
-
-# Per-leaf scan windows, in branch insertion order.
-function _scans(data::UVSet)
-    out = Tuple{Float64, Float64}[]
-    for (_, leaf) in branches(data)
-        push!(out, scan_window(leaf))
-    end
-    return out
-end
-
-_antenna_names_v(data::UVSet) = union_antennas(data).name
-
-# Union baseline pair list: every (a, b) that appears in any leaf.
-function _baseline_pairs(data::UVSet)
-    seen = Set{Tuple{Int, Int}}()
-    out = Tuple{Int, Int}[]
-    for (_, leaf) in branches(data)
-        for p in baselines(leaf).pairs
-            p in seen && continue
-            push!(seen, p)
-            push!(out, p)
-        end
-    end
-    return out
-end
-
-# Locate `bl` (e.g. ("AA", "AX")) within a single leaf's local baseline
-# index. Returns `nothing` if the baseline is absent from that leaf.
-function _local_baseline_idx(leaf::AbstractDimTree, bl::Tuple{<:AbstractString, <:AbstractString})
-    bls = baselines(leaf)
-    a, b = String(bl[1]), String(bl[2])
-    for i in eachindex(bls.pairs)
-        bls.ant1_names[i] == a && bls.ant2_names[i] == b && return i
-    end
-    return nothing
-end
-
-# Collect per-scan (leaf) blocks of (vis_before, vis_after, w_before, w_after)
-# for one (baseline, pol) selection. Returns a Vector of NamedTuples ordered
-# by branch insertion order. The `sid` field is the leaf's index in branch
-# order — used as a stable per-block ordinal for plotting/grouping; downstream
-# consumers should not assume it indexes into any global scan table.
-# Leaves that don't carry the baseline are skipped.
-function _baseline_scan_blocks(data::UVSet, corr::UVSet, bl_plot, pol_index::Integer)
-    blocks = NamedTuple[]
-    src_d = branches(data)
-    src_c = branches(corr)
-    for (sid, (k, leaf_d)) in enumerate(src_d)
-        leaf_c = src_c[k]
-        bi_d = _local_baseline_idx(leaf_d, bl_plot)
-        isnothing(bi_d) && continue
-        bi_c = _local_baseline_idx(leaf_c, bl_plot)
-        isnothing(bi_c) && continue
-        # Layout: (Frequency, Ti, BaselineID, Polarization). Slice to (Frequency, Ti)
-        # for fixed (baseline, pol), then transpose to (Ti, Frequency) so
-        # downstream concat yields (nrec, nchan).
-        # A flagged sample carries no weight in the extracted block: every
-        # consumer below decides usability from the weight, and the block is a
-        # copy built for display, so the leaf's own layers stay independent.
-        push!(
-            blocks, (
-                sid = sid,
-                vis_b = copy(transpose(parent(leaf_d[:vis])[:, :, bi_d, pol_index])),
-                vis_a = copy(transpose(parent(leaf_c[:vis])[:, :, bi_c, pol_index])),
-                w_b = _unflagged_weights(leaf_d, bi_d, pol_index),
-                w_a = _unflagged_weights(leaf_c, bi_c, pol_index),
-            )
-        )
-    end
-    return blocks
-end
-
-# One (baseline, product) weight plane as `(Ti, Frequency)`, zeroed where the
-# leaf's flag is set.
-function _unflagged_weights(leaf, bi::Integer, pol_index::Integer)
-    w = copy(transpose(parent(leaf[:weights])[:, :, bi, pol_index]))
-    f = transpose(view(parent(leaf[:flags]), :, :, bi, pol_index))
-    for i in eachindex(w, f)
-        f[i] && (w[i] = zero(eltype(w)))
-    end
-    return w
-end
-
-# vcat per-scan blocks into a single (nrec, nchan) matrix and a parallel
-# `groups::Vector{Int}` of per-record scan ids.
-function _concat_scan_blocks(blocks; field::Symbol)
-    isempty(blocks) && return Matrix{ComplexF64}(undef, 0, 0), Int[]
-    cols = [getproperty(b, field) for b in blocks]
-    cat = vcat(cols...)
-    groups = vcat([fill(b.sid, size(getproperty(b, field), 1)) for b in blocks]...)
-    return cat, groups
-end
+# Baseline-level diagnostic series. They consume `(Ti, Frequency)` blocks — a
+# single (baseline, product) selection — so they compose with any source of
+# visibility/weight matrices.
 
 # ── Weighted channel statistics ─────────────────────────────────────────────
 
@@ -317,27 +221,6 @@ function amplitude_range_label(vis_block, weight_block; groups = nothing)
     return @sprintf("median rel amp span %.3f", median(ranges))
 end
 
-# ── Polarization selection ──────────────────────────────────────────────────
-
-function resolve_plot_polarizations(data::UVSet; pol)
-    feeds = feed_pairs(data)
-    pol_idx = if pol == :all
-        collect(eachindex(feeds))
-    elseif pol isa Union{Integer, Tuple{Integer, Integer}}
-        [resolve_single_polarization(data, pol)]
-    elseif pol isa AbstractVector
-        Int[resolve_single_polarization(data, item) for item in pol]
-    else
-        throw(ArgumentError("select products by :all, an index, a feed pair such as (1, 1), or a vector of these; got $(repr(pol))"))
-    end
-
-    all(in(eachindex(feeds)), pol_idx) || error("Polarization index out of bounds: $pol_idx")
-    return pol_idx, string.(feeds[pol_idx])
-end
-
-resolve_single_polarization(data::UVSet, pol::Integer) = Int(pol)
-resolve_single_polarization(data::UVSet, pol::Tuple{Integer, Integer}) = pol_index(data, pol)
-
 # ── Axis and track helpers ──────────────────────────────────────────────────
 
 function finite_series_ylims(
@@ -470,58 +353,6 @@ function coherence_label(stats)
     return string(loss_text, "\n", rms_text)
 end
 
-# ── Gain-track selection ────────────────────────────────────────────────────
-
-function resolve_gain_polarizations(data::UVSet; pol = :all)
-    if pol == :all
-        pol_idx = [1, 2]
-    elseif pol isa Integer
-        pol_idx = [Int(pol)]
-    elseif pol isa AbstractString
-        pol_idx = [resolve_single_gain_polarization(data, pol)]
-    elseif pol isa AbstractVector || pol isa Tuple
-        pol_idx = Int[resolve_single_gain_polarization(data, item) for item in pol]
-    else
-        error("Unsupported gain polarization selector: $pol")
-    end
-
-    all(1 .<= pol_idx .<= 2) || error("Gain polarization index must be 1 or 2: $pol_idx")
-    return pol_idx, ["Pol $pi" for pi in pol_idx]
-end
-
-resolve_single_gain_polarization(::UVSet, pol::Integer) = Int(pol)
-function resolve_single_gain_polarization(::UVSet, pol::AbstractString)
-    pol in ("11", "Pol 1") && return 1
-    pol in ("22", "Pol 2") && return 2
-    error("Unsupported gain polarization label: $pol; use \"11\" (POLA) or \"22\" (POLB)")
-end
-
-function resolve_gain_sites(data::UVSet; sites = :all)
-    ant_names = _antenna_names_v(data)
-    if sites == :all
-        site_idx = collect(eachindex(ant_names))
-    elseif sites isa Integer
-        site_idx = [Int(sites)]
-    elseif sites isa AbstractString
-        site_idx = [resolve_single_gain_site(data, sites)]
-    elseif sites isa AbstractVector || sites isa Tuple
-        site_idx = Int[resolve_single_gain_site(data, site) for site in sites]
-    else
-        error("Unsupported gain site selector: $sites")
-    end
-
-    all(1 .<= site_idx .<= length(ant_names)) || error("Gain site index out of bounds: $site_idx")
-    return site_idx, collect(ant_names[site_idx])
-end
-
-resolve_single_gain_site(data::UVSet, site::Integer) = Int(site)
-function resolve_single_gain_site(data::UVSet, site::AbstractString)
-    ant_names = _antenna_names_v(data)
-    idx = findfirst(==(site), ant_names)
-    isnothing(idx) && error("Site $site not found in $(collect(ant_names))")
-    return idx
-end
-
 function gain_quantity_series(quantity; relative = true)
     if quantity == :phase
         return values -> begin
@@ -547,56 +378,3 @@ function gain_quantity_label(quantity; relative = true)
         error("quantity must be :phase or :amplitude")
     end
 end
-
-# ── Plot entry points — implemented by `GustavoMakieExt` ────────────────────
-# Load Makie or CairoMakie to enable plotting.
-
-"""
-    plot_stability(data, corr, bl_plot; quantity, pol, relative, comparison_weights)
-
-Per-leaf time-stability scatter for a baseline. Provided by `GustavoMakieExt`.
-"""
-function plot_stability end
-
-"""
-    plot_baseline_phases(data, corr, bl_plot; relative, comparison_weights)
-
-Per-leaf phase-vs-channel scatter for a baseline. Provided by `GustavoMakieExt`.
-"""
-function plot_baseline_phases end
-
-"""
-    plot_gain_solutions(gains, data; quantity, pol, sites, relative)
-
-Grid of solved gain tracks. Provided by `GustavoMakieExt`.
-"""
-function plot_gain_solutions end
-
-"""
-    stability_plotting_config(quantity; relative)
-
-Axis labels and annotation callback for `plot_stability`. Provided by
-`GustavoMakieExt`, whose amplitude branch annotates with Makie's `text!`.
-"""
-function stability_plotting_config end
-
-"""
-    plot_noise_segments!(ax, series, noise, scan_index, scan_wheel, nscan; ...)
-
-Draw per-channel error bars onto `ax`. Provided by `GustavoMakieExt`.
-"""
-function plot_noise_segments! end
-
-"""
-    annotate_coherence!(ax, stats; fontsize)
-
-Annotate `ax` with `coherence_label(stats)`. Provided by `GustavoMakieExt`.
-"""
-function annotate_coherence! end
-
-"""
-    diagnostic_scan_colormap(nscan)
-
-Categorical scan colormap for plot helpers. Provided by `GustavoMakieExt`.
-"""
-function diagnostic_scan_colormap end

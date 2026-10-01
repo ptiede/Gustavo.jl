@@ -158,7 +158,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         # A transform belongs to the steps after it.
         @test Gustavo._parse_pipeline(chain).before == [[cf], []]
         # Only pipeline elements chain; anything else is function application.
-        @test_throws MethodError BaselineFringeFit(; gauge) |> AverageFrequency(nout = 1)
+        @test_throws MethodError BaselineFringeFit(; gauge) |> :average
     end
 
     @testset "full pipeline: components keyed by step" begin

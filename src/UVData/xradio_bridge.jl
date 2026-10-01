@@ -1,8 +1,5 @@
-# A `UVSet` rendered as an MSv4 `ProcessingSet`.
-#
-# Gustavo's partition tree and MSv4's store hold the same observation in
-# different shapes, so the same fixtures can drive both and a result computed
-# from one can be checked against the other.
+# A `UVSet` rendered as an MSv4 `ProcessingSet`: the route from a UVFITS file
+# to the solver, which reads only `ProcessingSet`s.
 
 """
     uvset_to_processingset(uvset::UVSet) -> XRadio.ProcessingSet
@@ -50,8 +47,7 @@ _measure(v, units) = XRadio.Measure(
     v, Dict{Symbol, Any}(:units => units, :type => "quantity"),
 )
 
-function _leaf_to_measurementset(leaf, root)
-    part = is_lazy(leaf) ? materialize_leaf(leaf) : leaf
+function _leaf_to_measurementset(part, root)
     info = metadata(part)
     fs = info.freq_setup
 

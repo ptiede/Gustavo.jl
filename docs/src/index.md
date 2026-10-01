@@ -19,8 +19,8 @@ using Pkg
 Pkg.add(url = "https://github.com/ptiede/Gustavo.jl")
 ```
 
-The FITS-IDI/UVFITS reader and writer live in a package extension: also load
-`FITSFiles` to enable them. Loading `CairoMakie` (or another Makie backend)
+The UVFITS reader and the FITS-IDI a-priori and phase-cal table readers live in
+a package extension: also load `FITSFiles` to enable them. Loading `CairoMakie` (or another Makie backend)
 enables the diagnostic plots.
 
 ## A calibration run

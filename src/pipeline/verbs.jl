@@ -150,22 +150,6 @@ function _replay_chain(pipeline, sol::CalibrationSolution)
     return chain
 end
 
-"""
-    calibrate(antab::UVData.AntabCalibration, uvset::UVSet; kwargs...) -> UVSet
-    calibrate(spw_cals::AbstractDict{<:Integer, UVData.AntabCalibration}, uvset::UVSet; kwargs...) -> UVSet
-
-Apply an a-priori amplitude calibration — a single ANTAB table, or one per
-1-based band index as [`load_fitsidi_apriori`](@ref) returns — scaling
-visibilities and weights by the SEFD-derived gains. Keywords
-(`min_elevation_deg`, `on_missing_station`) pass through.
-"""
-calibrate(antab::UVData.AntabCalibration, uvset::UVSet; kwargs...) =
-    UVData.apply_calibration(uvset, antab; kwargs...)
-calibrate(
-    spw_cals::AbstractDict{<:Integer, <:UVData.AntabCalibration}, uvset::UVSet;
-    kwargs...,
-) = UVData.apply_calibration(uvset, spw_cals; kwargs...)
-
 # The unconstrained (station name, scan id) pairs the steps of `sol` record, as
 # a lookup set, `nothing` when they record none.
 function _solution_flag_sets(sol::CalibrationSolution)

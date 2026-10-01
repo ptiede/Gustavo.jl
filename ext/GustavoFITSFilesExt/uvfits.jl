@@ -1,21 +1,20 @@
 using FITSFiles
-using FITSFiles: HDU, Random, Bintable, Card
+using FITSFiles: HDU
 using StructArrays
 using Dates: Date, DateTime, datetime2julian
 using DimensionalData
 using DimensionalData: DimArray
-using PolarizedTypes: CirBasis, LinBasis, XPol, YPol, RPol, LPol
+using PolarizedTypes: XPol, YPol, RPol, LPol
 
 import Gustavo.UVData
 using Gustavo.UVData:
-    UVSet, UVMetadata, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup,
+    UVSet, ObsArrayMetadata, FrequencySetup,
     Antenna, AntennaTable, BaselineIndex,
-    AbstractMount, Mount, MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
+    MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
     MountBWGR, MountBWGL, MountXY, MountOrbiting,
-    Polarization, Frequency, UVW, BaselineID,
-    sources, array_name, extras, XRadio,
-    channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name,
-    nchannels
+    Polarization, Frequency, UVW,
+    extras,
+    channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
 
 const POLBASIS = Union{RPol, LPol, XPol, YPol}
 
@@ -23,17 +22,9 @@ const POLBASIS = Union{RPol, LPol, XPol, YPol}
 # as `bl = a*256 + b`. Caps the array at 255 antennas. Lives in the FITS
 # extension only; format-neutral code in `src/` speaks `(a, b)` tuples.
 _decode_aips_baseline(bl::Integer)::Tuple{Int, Int} = (bl ÷ 256, bl % 256)
-function _encode_aips_baseline(a::Integer, b::Integer)
-    (1 <= a < 256 && 1 <= b < 256) || error(
-        "AIPS UVFITS BASELINE column packs (a, b) as a*256 + b; " *
-            "antenna index $((a, b)) exceeds the 255-antenna limit. " *
-            "Use BLN_NUM-style encoding (not yet supported)."
-    )
-    return Int32(a * 256 + b)
-end
 
 
-# AIPS POLTYA/POLTYB letter ↔ PolarizedTypes
+# AIPS POLTYA/POLTYB letter → PolarizedTypes
 function poltype(type)
     type == "R" && return RPol()
     type == "L" && return LPol()
@@ -41,11 +32,6 @@ function poltype(type)
     type == "Y" && return YPol()
     error("Unsupported polarization type: $type")
 end
-
-poltype_letter(::RPol) = "R"
-poltype_letter(::LPol) = "L"
-poltype_letter(::XPol) = "X"
-poltype_letter(::YPol) = "Y"
 
 
 # AIPS Stokes code → generic correlation-product label.
@@ -58,18 +44,6 @@ function aips_code_to_generic(code::Integer)
     code in (-3, -7) && return "PQ"
     code in (-4, -8) && return "QP"
     error("Unsupported Stokes code: $code")
-end
-
-# Inverse: pick AIPS Stokes codes for the given generic labels, in either the
-# circular (-1..-4) or linear (-5..-8) block. Mixed-feed arrays fall back to
-# the circular block by convention.
-function generic_to_aips_code(label::AbstractString, basis::Symbol)
-    block = basis === :linear ? (-5, -6, -7, -8) : (-1, -2, -3, -4)
-    label == "PP" && return block[1]
-    label == "QQ" && return block[2]
-    label == "PQ" && return block[3]
-    label == "QP" && return block[4]
-    error("Unsupported correlation label: $label")
 end
 
 # Product order written to a leaf; a subset keeps this relative order.
@@ -100,24 +74,8 @@ function mnt_codes_to_type(code, offset)
     return _MNTSTA_MOUNTS[code + 1](offset)
 end
 
-function mount_to_mntsta(m::AbstractMount)::Int32
-    for (code, make) in pairs(_MNTSTA_MOUNTS)
-        m == make(XRadio.axis_offset(m)) && return Int32(code - 1)
-    end
-    throw(ArgumentError("$m has no AIPS MNTSTA code"))
-end
-
 # The UVFITS AN table states one axis offset per antenna, along the station's x.
 _uvfits_axis_offset(staxof) = (Float64(staxof), 0.0, 0.0)
-
-function _uvfits_staxof(m::AbstractMount)
-    x, y, z = XRadio.axis_offset(m)
-    iszero(y) && iszero(z) || throw(ArgumentError(
-        "$m has an axis offset off the station's x axis, which the UVFITS AN " *
-            "table's scalar STAXOF cannot state; FITS-IDI can"
-    ))
-    return Float32(x)
-end
 
 
 # ── Card / HDU parsing helpers ──────────────────────────────────────────────
@@ -317,7 +275,7 @@ end
 
 Read every row of the FQ HDU. Each row becomes a `FrequencySetup` with
 MSv4-flavored `setup_name = "spw_<r-1>"`; the on-disk AIPS FRQSEL is
-preserved in `extras.frqsel` so write paths can recover it.
+preserved in `extras.frqsel`.
 
 Returns the dense vector of setups plus the parallel `frqsels` vector
 (per-row FRQSEL values). The setups vector is indexed 1..nrows; if the
@@ -426,10 +384,7 @@ function _build_source_info(primary_hdu)
         dec = Float64(something(_find_crval(cards, "DEC"), 0.0))
     end
     # AIPS UVFITS stores OBSRA/OBSDEC and the RA/DEC axis CRVALs in DEGREES
-    # (Memo 117 §3.1.1). Gustavo's internal source coordinates are radians (see
-    # the FITS-IDI reader), so convert here — the inverse of the `rad2deg`
-    # applied in `_synthesize_primary_cards`, making the write→read round-trip
-    # identity and matching the FITS-IDI-origin convention.
+    # (Memo 117 §3.1.1); Gustavo's internal source coordinates are radians.
     return (; source_name = object, ra = deg2rad(ra), dec = deg2rad(dec))
 end
 
@@ -440,219 +395,11 @@ function _find_crval(cards, ctype_prefix)
     return card_value(cards, "CRVAL$i")
 end
 
-# ── Primary-card stash ──────────────────────────────────────────────────────
-#
-# Primary-HDU cards are pure UVFITS write-back state (not format-neutral
-# observation metadata), so they live here, in the FITS extension, rather
-# than on `UVMetadata`. `WeakKeyDict` so the cards are GC'd when the UVSet
-# is.
-const _PRIMARY_CARDS = WeakKeyDict{UVSet, Vector{Card}}()
-
-# Synthesize a complete UVFITS primary-HDU card set from a UVSet's own metadata,
-# for UVSets that did not come from `load_uvfits` (FITS-IDI origin, or freshly
-# built). Mirrors the structure the loader produces and the writer consumes: a
-# NAXIS=7 random-groups layout with COMPLEX/STOKES/FREQ/IF/RA/DEC axis
-# descriptors plus the five standard UU/VV/WW/BASELINE/DATE PTYPEs. The STOKES
-# codes use the basis-agnostic generic block (-1..-N; `aips_code_to_generic`
-# maps -1→PP etc. regardless of feed basis), matching `write_fitsidi`; the
-# writer's `pol_perm` reorders the in-memory MSv4 pols onto this on-disk axis.
-function _synthesize_primary_cards(uvset::UVSet)
-    branches_dict = DimensionalData.branches(uvset)
-    isempty(branches_dict) &&
-        error("primary_cards(uvset): cannot synthesize cards for an empty UVSet.")
-    root = DimensionalData.metadata(uvset)
-    info = DimensionalData.metadata(first(values(branches_dict)))
-    obs = root.array_obs
-    fs = first(UVData.union_frequency_axis(uvset))
-
-    f_ref = Float64(ref_freq(fs))
-    cws = ch_widths(fs)
-    cdelt4 = isempty(cws) ? 1.0 : Float64(first(cws))
-    # AIPS Memo 117 §3.1.1: the RA/DEC axes carry the phase center in DEGREES
-    # at the stated equinox. Gustavo's internal source coordinates are radians
-    # (the FITS-IDI reader applies `deg2rad`; `load_uvfits` applies it too), so
-    # convert on the way out. `_build_source_info` performs the inverse on read.
-    obsra = rad2deg(Float64(info.ra))
-    obsdec = rad2deg(Float64(info.dec))
-    date_obs = isempty(string(obs.date_obs)) ? string(obs.rdate) : string(obs.date_obs)
-
-    # Emit the full CTYPE/CRVAL/CDELT/CRPIX/CROTA quintet for EVERY regular axis
-    # (2..7), exactly as AIPS `FITTP` writes it (Memo 117 Appendix B.2). Strict
-    # readers (DIFMAP, AIPS) require CRVAL/CRPIX/CDELT on each axis — the IF axis
-    # especially must carry CRVAL5=CRPIX5=CDELT5=1.0 (§3.1.1), and RA/DEC need
-    # CRPIX/CDELT=1.0 as degenerate length-1 axes. Missing descriptors make
-    # DIFMAP fail to establish the axis geometry.
-    equinox = Float64(obs.equinox)
-    return Card[
-        Card("NAXIS", 7),
-        # EXTEND=T tells readers extension HDUs (AIPS AN/FQ/NX) follow; without
-        # it a strict reader is not obliged to scan for the antenna table.
-        Card("EXTEND", true),
-        # BSCALE/BZERO for the data matrix: REAL = TAPE*BSCALE + BZERO (Table 5).
-        Card("BSCALE", 1.0), Card("BZERO", 0.0),
-        Card("OBJECT", string(info.source_name)),
-        Card("TELESCOP", string(obs.telescope)),
-        Card("INSTRUME", string(obs.instrume)),
-        Card("DATE-OBS", date_obs),
-        Card("BUNIT", string(obs.bunit)),
-        # EQUINOX is the modern keyword; EPOCH is emitted too for older DIFMAP.
-        Card("EQUINOX", equinox), Card("EPOCH", equinox),
-        # COMPLEX (axis 2): real, imag, weight — CRVAL/CDELT/CRPIX all 1.0.
-        Card("CTYPE2", "COMPLEX"),
-        Card("CRVAL2", 1.0), Card("CDELT2", 1.0), Card("CRPIX2", 1.0), Card("CROTA2", 0.0),
-        # STOKES (axis 3): codes -1,-2,-3,-4 = RR,LL,RL,LR (CDELT3 is negative).
-        Card("CTYPE3", "STOKES"),
-        Card("CRVAL3", -1.0), Card("CDELT3", -1.0), Card("CRPIX3", 1.0), Card("CROTA3", 0.0),
-        # FREQ (axis 4): CRVAL = reference frequency (Hz), CDELT = channel width.
-        Card("CTYPE4", "FREQ"),
-        Card("CRVAL4", f_ref), Card("CDELT4", cdelt4), Card("CRPIX4", 1.0), Card("CROTA4", 0.0),
-        # IF (axis 5): per-IF frequency offsets live in the FQ table; this axis is
-        # conventional with CRVAL=CRPIX=CDELT=1.0 (§3.1.1).
-        Card("CTYPE5", "IF"),
-        Card("CRVAL5", 1.0), Card("CDELT5", 1.0), Card("CRPIX5", 1.0), Card("CROTA5", 0.0),
-        # RA (axis 6): phase-center right ascension in DEGREES.
-        Card("CTYPE6", "RA"),
-        Card("CRVAL6", obsra), Card("CDELT6", 1.0), Card("CRPIX6", 1.0), Card("CROTA6", 0.0),
-        # DEC (axis 7): phase-center declination in DEGREES.
-        Card("CTYPE7", "DEC"),
-        Card("CRVAL7", obsdec), Card("CDELT7", 1.0), Card("CRPIX7", 1.0), Card("CROTA7", 0.0),
-        Card("OBSRA", obsra), Card("OBSDEC", obsdec),
-        Card("PTYPE1", "UU---SIN"),
-        Card("PTYPE2", "VV---SIN"),
-        Card("PTYPE3", "WW---SIN"),
-        Card("PTYPE4", "BASELINE"),
-        Card("PTYPE5", "DATE"),
-    ]
-end
-
-# The primary-HDU stash preserves the FITS layout a set was read with (axis
-# descriptors, scaling, PTYPE order) across `rebuild`/`select_*`/`merge_uvsets`.
-# Source identity is NOT layout: it describes the data, and the UVSet's own
-# leaves are its source of truth. `merge_uvsets` inherits the first input's
-# cards, so a set selected back out of a merge would otherwise be written under
-# whichever source happened to sort first. Refresh the three identity cards from
-# the set being written; everything else is left as stashed.
-function _refresh_source_cards(cards::AbstractVector, uvset::UVSet)
-    branches_dict = DimensionalData.branches(uvset)
-    isempty(branches_dict) && return cards
-    info = DimensionalData.metadata(first(values(branches_dict)))
-    out = Vector{Card}(cards)
-    # Every card carrying the phase centre, not just OBSRA/OBSDEC: the RA/DEC
-    # axes' CRVALs hold it too (`_synthesize_primary_cards` writes all four from
-    # the same `info.ra`/`info.dec`), and a reader is free to take the position
-    # from either. Leaving the axis pair stale puts one source's name and
-    # OBSRA/OBSDEC on another source's coordinates — which reads as a wrong
-    # parallactic angle at every station.
-    obsra = rad2deg(Float64(info.ra))
-    obsdec = rad2deg(Float64(info.dec))
-    replacements = (
-        "OBJECT" => Card("OBJECT", string(info.source_name)),
-        "OBSRA" => Card("OBSRA", obsra),
-        "OBSDEC" => Card("OBSDEC", obsdec),
-        "CRVAL6" => Card("CRVAL6", obsra),
-        "CRVAL7" => Card("CRVAL7", obsdec),
-    )
-    for (name, card) in replacements
-        i = findfirst(c -> rstrip(string(c.key)) == name, out)
-        i === nothing ? push!(out, card) : (out[i] = card)
-    end
-    return out
-end
-
-function UVData.primary_cards(uvset::UVSet)
-    haskey(_PRIMARY_CARDS, uvset) && return _PRIMARY_CARDS[uvset]
-    # No registered cards (FITS-IDI origin or freshly built): synthesize a
-    # complete set from the UVSet's own metadata and cache it so writes succeed.
-    cards = _synthesize_primary_cards(uvset)
-    _PRIMARY_CARDS[uvset] = cards
-    return cards
-end
-
-UVData.register_primary_cards!(uvset::UVSet, cards::AbstractVector) =
-    (_PRIMARY_CARDS[uvset] = Vector{Card}(cards); uvset)
-
-# Track the on-disk file each UVSet was loaded from. Both UVFITS and FITS-IDI
-# reads keep lazy/DiskArray references into the source file (and the eager
-# UVFITS path still reads the AN/FQ/NX tables lazily while writing). Writing
-# back to that same path calls `open(path; write=true)`, which truncates the
-# file *before* those reads complete — silently corrupting the output. We
-# record the source so the writers can refuse.
-#
-# Keyed by `objectid`, NOT a `WeakKeyDict{UVSet}`: `isequal(uvset, uvset)` is
-# `false` for these sets (their lazy DimArrays compare unequal to themselves),
-# so a value-keyed dict could never find its own entries. `objectid` is
-# identity-based and stable, and storing it does not pin the (large) UVSet in
-# memory; the tiny per-load entry is harmless. Paths normalized at registration.
-const _SOURCE_PATHS = Dict{UInt, String}()
-
-_norm_path(p) = try
-    realpath(String(p))
-catch
-    abspath(String(p))
-end
-
-register_source_path!(uvset::UVSet, path) =
-    (_SOURCE_PATHS[objectid(uvset)] = _norm_path(path); uvset)
-
-# Refuse an in-place write that would truncate the very file backing `uvset`.
-# A no-op when the destination is a different file (or the UVSet has no
-# recorded source, e.g. freshly built or fully materialized).
-function _assert_not_writing_to_source(output_path, uvset::UVSet)
-    src = get(_SOURCE_PATHS, objectid(uvset), nothing)
-    src === nothing && return nothing
-    isfile(output_path) || return nothing            # not an existing file → no clash
-    _norm_path(output_path) == src || return nothing
-    error(
-        "write: refusing to write to \"$(output_path)\" — this is the file the " *
-            "UVSet was loaded from. The write truncates the file before reading " *
-            "from it completes, which corrupts the data. Write to a different " *
-            "path (then move it into place if you need to overwrite).",
-    )
-end
-
-# FITS stores floating-point data at one of two widths, so a layer is written
-# at the narrower one that holds it. A type wider than `Float64` has no FITS
-# form at all and stops the write rather than losing digits on the way out.
-function _fits_float_type(what::AbstractString, T::Type{<:AbstractFloat})
-    promote_type(T, Float32) === Float32 && return Float32
-    promote_type(T, Float64) === Float64 && return Float64
-    throw(
-        ArgumentError(
-            "$what: the UVSet holds $T values, which FITS cannot store — its " *
-                "floating-point forms are Float32 and Float64",
-        ),
-    )
-end
-
-# Random groups carry one type for the data array and every group parameter
-# alike, so the file's width is the widest of the layers that go into it.
-_uvfits_float_type(leaf) = promote_type(
-    real(eltype(parent(leaf[:vis]))),
-    eltype(parent(leaf[:weights])),
-    eltype(parent(leaf[:uvw])),
-)
-
-# Hook so primary-HDU cards and the source path follow a UVSet through
-# `rebuild` / `select_*` / `merge_uvsets`. Source-of-truth lives only here;
-# format-neutral code in `src/` calls `_propagate_extension_state!` and gets a
-# no-op when the FITS extension isn't loaded.
-function UVData._propagate_extension_state!(new::UVSet, old::UVSet)
-    haskey(_PRIMARY_CARDS, old) && (_PRIMARY_CARDS[new] = _PRIMARY_CARDS[old])
-    let s = get(_SOURCE_PATHS, objectid(old), nothing)
-        s === nothing || (_SOURCE_PATHS[objectid(new)] = s)
-    end
-    return new
-end
 
 # ── Read path ───────────────────────────────────────────────────────────────
 
-function UVData.load_uvfits(path; element_type::Union{Nothing, Type} = nothing)
-    flat = _load_uvfits_flat(path; element_type)
-    uvset = UVSet(flat)
-    UVData.register_primary_cards!(uvset, flat.primary_cards)
-    register_source_path!(uvset, path)
-    return uvset
-end
+UVData.load_uvfits(path; element_type::Union{Nothing, Type} = nothing) =
+    UVSet(_load_uvfits_flat(path; element_type))
 
 # Slack on the NX window match. The DATE PTYPE's sub-day fraction is Float32,
 # which resolves ~5 ms of a day, so a record's decoded epoch and the NX window
@@ -957,7 +704,6 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
         aips_pol_codes = aips_codes,
         source_name = src_info.source_name,
         ra = src_info.ra, dec = src_info.dec,
-        primary_cards = primary_hdu.cards,
         basename = basename,
     )
 end
@@ -1087,31 +833,6 @@ function _rdate_jd_or_zero(rdate_str::AbstractString)
     end
 end
 
-# Reconstruct AIPS DATE PTYPE columns from a leaf's `obs_time` (seconds since
-# `UVData.JD_UNIX_EPOCH`). Emits two columns shaped `(nrec_leaf, 2)` whose sum
-# is the **full Julian Day** of the record (AIPS-strict convention) so external
-# readers — astropy/ehtim, AIPS APCAL, CASA — parse the timestamp correctly.
-# Column 1 carries the integer JD (which Float32 holds exactly up to ~16M) and
-# column 2 the sub-day fractional remainder, whose Float32 ULP is ~5 ms.
-function _build_date_param(
-        ::Type{T}, obs_time_s::AbstractVector{<:Real}, record_order
-    ) where {T}
-    n = length(record_order)
-    out = Matrix{T}(undef, n, 2)
-    @inbounds for (rec_i, (ti, _)) in enumerate(record_order)
-        jd = UVData.unix_to_jd(obs_time_s[ti])
-        intpart = floor(jd)
-        out[rec_i, 1] = T(intpart)
-        out[rec_i, 2] = T(jd - intpart)
-    end
-    return out
-end
-
-_wrap_int_pol_if(arr, obs_time, pol_labels, channel_freqs) = DimArray(
-    arr,
-    (Ti(obs_time), Polarization(pol_labels), Frequency(channel_freqs)),
-)
-
 # Warn if the AIPS Stokes axis (circular vs linear block) doesn't match the
 # antennas' nominal basis (POLTYA/POLTYB). For mixed arrays we just check the
 # circular vs linear block — fine-grained per-antenna mismatches are the
@@ -1148,590 +869,4 @@ function _collect_extra_columns(dt, primary_cards)
         push!(pairs, sym => collect(getproperty(dt, sym)))
     end
     return (; pairs...)
-end
-
-# ── Write path ──────────────────────────────────────────────────────────────
-
-"""
-    _strip_stale_shape_cards!(cards)
-
-Remove all PTYPE/PSCAL/PZERO/PUNIT/NAXIS\$j cards plus BITPIX, NAXIS,
-PCOUNT, GCOUNT from the copied primary header so `create_cards!` rebuilds
-them cleanly from the freshly-derived format/fields. Preserving the originals
-is unsafe because `create_cards!` reuses any existing `PTYPE\$j` card via
-`popat!`, which carries forward stale duplicate `DATE` entries from the
-input header.
-"""
-function _strip_stale_shape_cards!(cards)
-    pat = r"^(PTYPE|PSCAL|PZERO|PUNIT|NAXIS)\d+$|^(BITPIX|NAXIS|PCOUNT|GCOUNT)$"
-    filter!(c -> match(pat, strip(string(c.key))) === nothing, cards)
-    return cards
-end
-
-"""
-    _inject_duplicate_date!(hdu)
-
-Mutate the primary HDU's cards to add a second `PTYPE\$P=DATE` entry
-and bump `PCOUNT` accordingly, restoring the AIPS-convention
-integer-JD + fractional-day PTYPE pair. The HDU's `data.DATE` value
-must already be an N×2 matrix; on `Base.write`, FITSFiles' Random
-field layout reads two `DATE` PTYPE cards from the header and writes
-columns 1 and 2 of the matrix as the two parameter values.
-"""
-function _inject_duplicate_date!(hdu)
-    cards = getfield(hdu, :cards)
-    date_idxs = Int[]
-    pcount_idx = 0
-    naxis_val = 0
-    for (i, c) in enumerate(cards)
-        key = strip(string(c.key))
-        if key == "PCOUNT"
-            pcount_idx = i
-        elseif key == "NAXIS"
-            naxis_val = Int(c.value)
-        else
-            m = match(r"^PTYPE(\d+)$", key)
-            if m !== nothing && rstrip(string(c.value)) == "DATE"
-                push!(date_idxs, parse(Int, m.captures[1]))
-            end
-        end
-    end
-    isempty(date_idxs) && return hdu
-    length(date_idxs) >= 2 && return hdu
-    pcount_idx == 0 && return hdu
-    new_pcount = Int(cards[pcount_idx].value) + 1
-    cards[pcount_idx] = Card("PCOUNT", Int32(new_pcount))
-    push!(cards, Card("PTYPE$(new_pcount)", "DATE"))
-    return hdu
-end
-
-function _ptype_entries(primary_cards)
-    entries = Tuple{Int, String}[]
-    for card in primary_cards
-        m = match(r"^PTYPE(\d+)$", strip(string(card.key)))
-        m === nothing && continue
-        idx = parse(Int, m.captures[1])
-        push!(entries, (idx, rstrip(string(card.value))))
-    end
-    sort!(entries; by = first)
-    return entries
-end
-
-function _build_primary_data(uvset::UVSet, uu, vv, ww, bl_codes, date_param, extra_cols, raw_data)
-    canonical = Dict{String, Any}(
-        "UU" => uu,
-        "VV" => vv,
-        "WW" => ww,
-        "BASELINE" => convert.(eltype(raw_data), bl_codes),
-        "DATE" => date_param,
-    )
-    # Emit one NamedTuple entry per unique PTYPE name. Duplicate AIPS
-    # `DATE` PTYPEs (integer-JD + fractional-day pair) collapse to a
-    # single :DATE key whose value is an N×2 matrix; the second PTYPE
-    # card is re-injected into the header after HDU construction (see
-    # `_inject_duplicate_date!`).
-    pairs = Pair{Symbol, Any}[]
-    seen = Set{String}()
-    for (idx, name) in _ptype_entries(UVData.primary_cards(uvset))
-        name in seen && continue
-        push!(seen, name)
-        prefix = uppercase(String(split(name, "-")[1]))
-        col = if haskey(canonical, prefix)
-            canonical[prefix]
-        elseif haskey(canonical, uppercase(String(name)))
-            canonical[uppercase(String(name))]
-        elseif haskey(extra_cols, Symbol(name))
-            getproperty(extra_cols, Symbol(name))
-        else
-            error(
-                "write_uvfits: PTYPE$idx = \"$name\" has no mapped column " *
-                    "(neither a canonical UVData axis nor in extra_columns)"
-            )
-        end
-        push!(pairs, Symbol(name) => col)
-    end
-    if isempty(pairs)
-        for k in ("UU", "VV", "WW", "BASELINE", "DATE")
-            push!(pairs, Symbol(k) => canonical[k])
-        end
-    end
-    push!(pairs, :data => raw_data)
-    return (; pairs...)
-end
-
-function _build_an_hdu(
-        antennas::AntennaTable, array_obs::ObsArrayMetadata, ref_freq::Float64;
-        extver::Integer = 1, no_if::Integer = 1, freqid::Integer = 1,
-    )
-    nant = length(antennas)
-    nb = collect(antennas.nominal_basis)
-    pa = collect(antennas.pol_angles)
-    mounts = collect(antennas.mount)
-    xyz = collect(antennas.station_xyz)
-    ext = extras(antennas)
-    polcala = haskey(ext, :POLCALA) ? ext.POLCALA : [Float32[] for _ in 1:nant]
-    polcalb = haskey(ext, :POLCALB) ? ext.POLCALB : [Float32[] for _ in 1:nant]
-    extras_rest = NamedTuple{filter(s -> !(s in (:POLCALA, :POLCALB)), keys(ext))}(ext)
-
-    base = (
-        ANNAME = rpad.(antennas.name, 8),
-        STABXYZ = [collect(xyz[i]) for i in 1:nant],
-        # AIPS Memo 117 Table 10 mandates an ORBPARM column (orbital elements for
-        # orbiting antennas) in canonical position between STABXYZ and NOSTA. For
-        # ground arrays NUMORB=0, so it is a zero-length column (TFORM '0D').
-        ORBPARM = [Float64[] for _ in 1:nant],
-        NOSTA = Int32.(1:nant),
-        MNTSTA = [mount_to_mntsta(m) for m in mounts],
-        STAXOF = Float32[_uvfits_staxof(m) for m in mounts],
-        POLTYA = [poltype_letter(p[1]) for p in nb],
-        POLAA = Float32[rad2deg(a[1]) for a in pa],
-        POLTYB = [poltype_letter(p[2]) for p in nb],
-        POLAB = Float32[rad2deg(a[2]) for a in pa],
-        POLCALA = polcala,
-        POLCALB = polcalb,
-    )
-    data = merge(base, extras_rest)
-    # AIPS AN HDU header: time-system / Earth-orientation / coord-frame
-    # fields source from ObsArrayMetadata. Pure-AIPS bookkeeping fields
-    # (NUMORB, NO_IF, NOPCAL, FREQID, EXTVER) are reconstructed from the
-    # input data on write.
-    nopcal = isempty(polcala) ? 0 : max(length(polcala[1]), length(polcalb[1]))
-    cards = [
-        Card("EXTNAME", "AIPS AN"),
-        Card("EXTVER", Int32(extver)),
-        # `STABXYZ` is geocentric, so the array center is the geocenter.
-        Card("ARRAYX", 0.0),
-        Card("ARRAYY", 0.0),
-        Card("ARRAYZ", 0.0),
-        Card("ARRNAM", array_name(antennas)),
-        Card("FREQ", ref_freq),
-        Card("RDATE", array_obs.rdate),
-        Card("GSTIA0", array_obs.gst_iat0),
-        Card("DEGPDY", array_obs.earth_rot_rate),
-        Card("UT1UTC", array_obs.ut1utc),
-        Card("POLARX", array_obs.polarx),
-        Card("POLARY", array_obs.polary),
-        Card("DATUTC", array_obs.datutc),
-        Card("TIMSYS", array_obs.time_sys),
-        Card("FRAME", array_obs.frame),
-        Card("XYZHAND", array_obs.xyzhand),
-        Card("POLTYPE", array_obs.poltype),
-        Card("NUMORB", Int32(0)),
-        Card("NO_IF", Int32(no_if)),
-        Card("NOPCAL", Int32(nopcal)),
-        Card("FREQID", Int32(freqid)),
-    ]
-    return HDU(Bintable, data, cards)
-end
-
-"""
-    _collect_freq_setups(uvset) -> (Vector{FrequencySetup}, Dict{FrequencySetup,Int32})
-
-Walk leaves and gather their unique `FrequencySetup`s in first-seen
-order (via `union_frequency_axis`), then build a setup → FRQSEL
-lookup. The FRQSEL value is recovered from `setup.extras.frqsel` when
-present (preserved on read), else the setup's 1-based position. If the
-recovered FRQSELs collide, fall back to positional 1..N to guarantee
-uniqueness on disk.
-"""
-function _collect_freq_setups(uvset::UVSet)
-    setups = UVData.union_frequency_axis(uvset)
-    parsed = Int32[Int32(get(fs.extras, :frqsel, i)) for (i, fs) in enumerate(setups)]
-    freqids = length(unique(parsed)) == length(parsed) ? parsed : Int32.(1:length(setups))
-    lookup = Dict{eltype(setups), Int32}()
-    for (fs, fid) in zip(setups, freqids)
-        lookup[fs] = fid
-    end
-    return setups, lookup
-end
-
-function _build_fq_hdu(setups::AbstractVector{<:FrequencySetup}, freqids::AbstractVector{<:Integer})
-    isempty(setups) && error("_build_fq_hdu: empty setup list")
-    nif = length(channel_freqs(first(setups)))
-    for fs in setups
-        length(channel_freqs(fs)) == nif ||
-            error("_build_fq_hdu: ragged channel counts across setups not yet supported (Phase 1.5)")
-    end
-    # AIPS Memo 117 Table 22 column types: FRQSEL is J (int); IF FREQ is D
-    # (double — Hz offsets need the precision); CH WIDTH and TOTAL BANDWIDTH are
-    # E (single); SIDEBAND is J (int). Match them exactly so the on-disk TFORMs
-    # are '1J'/'nD'/'nE'/'nE'/'nJ' as AIPS/DIFMAP expect.
-    if_freqs_per_row = [Float64.(collect(channel_freqs(fs)) .- ref_freq(fs)) for fs in setups]
-    base = (
-        FRQSEL = Int32.(freqids),
-        var"IF FREQ" = if_freqs_per_row,
-        var"CH WIDTH" = [Float32.(collect(ch_widths(fs))) for fs in setups],
-        var"TOTAL BANDWIDTH" = [Float32.(collect(total_bandwidths(fs))) for fs in setups],
-        # AIPS Memo 117 Table 22: SIDEBAND is an INTEGER column (J), value ±1
-        # (-1 = lower sideband, +1 = upper). Emitting it as Float64 (TFORM 'nD')
-        # instead of 'nJ' is nonconformant and misparses in strict readers.
-        SIDEBAND = [round.(Int32, collect(sidebands(fs))) for fs in setups],
-    )
-    # Carry per-row extras only if every setup has the same extras keyset.
-    # `:frqsel` is preserved on read for round-trip recovery; it's already
-    # a top-level FRQSEL column here, so drop it from the extras merge.
-    _drop_frqsel(ex) = NamedTuple{filter(!=(:frqsel), keys(ex))}(ex)
-    extras_keys = keys(_drop_frqsel(first(setups).extras))
-    if all(keys(_drop_frqsel(fs.extras)) == extras_keys for fs in setups)
-        extras_per_row = NamedTuple{extras_keys}(
-            ntuple(i -> [_drop_frqsel(fs.extras)[i] for fs in setups], length(extras_keys))
-        )
-        data = merge(base, extras_per_row)
-    else
-        data = base
-    end
-    cards = Card[Card("EXTNAME", "AIPS FQ"), Card("NO_IF", Int32(nif))]
-    return HDU(Bintable, data, cards)
-end
-
-function _build_nx_hdu(
-        scan_windows::AbstractVector{Tuple{Float64, Float64}},
-        record_starts::AbstractVector, record_ends::AbstractVector,
-        freqid_per_scan::AbstractVector{<:Integer},
-        subarray_per_scan::AbstractVector{<:Integer} = fill(Int32(1), length(scan_windows));
-        rdate_jd::Real = 0.0,
-    )
-    nscan = length(scan_windows)
-    # scan_windows are absolute seconds; AIPS NX is days relative to RDATE.
-    rdate_unix = UVData.jd_to_unix(rdate_jd)
-    time_center = [((lo + hi) / 2 - rdate_unix) / 86400.0 for (lo, hi) in scan_windows]
-    time_interval = [Float32((hi - lo) / 86400.0) for (lo, hi) in scan_windows]
-    nt_data = (
-        TIME = time_center,
-        var"TIME INTERVAL" = time_interval,
-        var"SOURCE ID" = fill(Int32(1), nscan),
-        SUBARRAY = Int32.(subarray_per_scan),
-        var"FREQ ID" = Int32.(freqid_per_scan),
-        var"START VIS" = Int32.(record_starts),
-        var"END VIS" = Int32.(record_ends),
-    )
-    return HDU(Bintable, nt_data, Card[Card("EXTNAME", "AIPS NX")])
-end
-
-# Records to emit for a leaf, as (ti, baseline) index pairs. Raw leaves carry an
-# explicit `record_order`; averaging/binning reducers (TimeAverage,
-# TimeBinAverage) clear it because the original UV_DATA rows no longer map to the
-# collapsed grid — for those we densify to the full (ti, baseline) grid of the
-# leaf's own axes (every cell is a record; flagged/empty cells carry zero
-# weight). This is what lets a reduced UVSet be written out.
-#
-# The densified order is TIME-MAJOR: a leaf's `obs_time` is one vector shared by
-# every baseline, so emitting all baselines of one epoch before advancing keeps
-# the DATE random parameter non-decreasing. AIPS, CASA and DIFMAP require
-# time-ordered records and warn or mis-sort otherwise.
-function _leaf_record_order(leaf)
-    ro = DimensionalData.metadata(leaf).record_order
-    sz = size(parent(leaf[:vis]))     # (Frequency, Ti, BaselineID, Polarization)
-    nti, nbl = sz[2], sz[3]
-    # A recorded order is filtered on the same rule as a densified one: where a
-    # record comes from does not change whether it can be placed on the uv plane.
-    cand = isempty(ro) ? ((ti, bl) for ti in 1:nti for bl in 1:nbl) : ro
-    # Densifying the (time, baseline) grid names cells the observation never
-    # sampled — a baseline absent from an epoch, or one the reduction dropped.
-    # Those carry no uv position, and a record whose (u,v,w) is not finite cannot
-    # be placed on the uv plane: a reader that grids it, takes a uv range over it,
-    # or forms `Σ V·w` (where `NaN * 0` is NaN, not 0) is corrupted by a row that
-    # holds nothing. Emit only the cells with a real position.
-    uvw = parent(leaf[:uvw])          # (Ti, BaselineID, UVW)
-    w = parent(leaf[:weights])        # (Frequency, Ti, BaselineID, Polarization)
-    f = parent(leaf[:flags])          # (Frequency, Ti, BaselineID, Polarization)
-    nchan, npol = sz[1], sz[4]
-    out = Tuple{Int, Int}[]
-    sizehint!(out, nti * nbl)
-    for (ti, bl) in cand
-        if isfinite(uvw[ti, bl, 1]) && isfinite(uvw[ti, bl, 2]) && isfinite(uvw[ti, bl, 3])
-            push!(out, (ti, bl))
-            continue
-        end
-        # An unflagged cell with weight but no position is a bug upstream, not
-        # padding: dropping it would silently discard data, so it stops the
-        # write. A flagged one is a cell the pipeline already ruled out.
-        for p in 1:npol, c in 1:nchan
-            wc = w[c, ti, bl, p]
-            f[c, ti, bl, p] && continue
-            isfinite(wc) && wc > 0 && error(
-                "write_uvfits: (time $ti, baseline $bl) carries weight $wc at " *
-                    "(channel $c, pol $p) but its (u,v,w) is $(uvw[ti, bl, 1]), " *
-                    "$(uvw[ti, bl, 2]), $(uvw[ti, bl, 3]) — a record with no uv " *
-                    "position cannot be written.",
-            )
-        end
-    end
-    return out
-end
-
-function UVData.write_uvfits(output_path, uvset::UVSet; convention::Symbol = :aips)
-    # `convention` selects the on-disk visibility phase convention:
-    #   :aips    — the AIPS/CASA/UVFITS convention, the standard form that
-    #              DIFMAP/AIPS/CASA/ehtim/pyuvdata/VLBIFiles read correctly.
-    #              It is Gustavo's internal convention too, so the visibilities
-    #              are written verbatim. This is the default.
-    #   :fitsidi — conjugate to the FITS-IDI (TMS) phase convention, for tools
-    #              that expect that sense in a UVFITS file.
-    # (u,v,w) are IDENTICAL in both formats and are never negated (see load_uvfits).
-    # NOTE: load_uvfits always assumes a standard :aips file, so only :aips
-    # round-trips through Gustavo as the identity.
-    convention in (:aips, :fitsidi) || error(
-        "write_uvfits: `convention` must be :aips (the standard AIPS/CASA/UVFITS " *
-            "phase convention, which is also Gustavo's internal one, default) or " *
-            ":fitsidi (conjugate to the FITS-IDI phase sense); got " *
-            "$(repr(convention)).",
-    )
-    _assert_not_writing_to_source(output_path, uvset)
-    src_list = sources(uvset)
-    length(src_list) == 1 || error(
-        "write_uvfits: UVData is single-source; got sources=$(src_list). " *
-            "Use select_source(uvset, name) before writing."
-    )
-
-    branches_dict = DimensionalData.branches(uvset)
-    isempty(branches_dict) && error("write_uvfits: UVSet has no partitions")
-
-    # UVFITS limitation: a single global STOKES axis on the primary HDU
-    # forces the same pol product set across every record. UVSet supports
-    # per-leaf pol products natively, but writing them out via UVFITS is
-    # not possible without padding (lossy). Use MSv4 / xradio for that
-    # round-trip case.
-    UVData.union_pol_products(uvset)
-
-    # Sort leaves by scan-window start so NX rows ascend in time, matching
-    # AIPS convention. Within identical start times, fall back to scan_name.
-    leaf_list = sort(
-        collect(values(branches_dict));
-        by = leaf -> (
-            UVData.scan_window(leaf)[1],
-            DimensionalData.metadata(leaf).scan_name,
-        ),
-    )
-
-    root = DimensionalData.metadata(uvset)
-    msv4_labels = collect(UVData.pol_products(uvset))
-    npol = length(msv4_labels)
-    setups, freqid_lookup = _collect_freq_setups(uvset)
-    nchan = length(channel_freqs(first(setups)))
-
-    # Map MSv4 pol order (in-memory) back to whatever AIPS Stokes order the
-    # primary_cards specify, so the on-disk layout matches the round-tripped
-    # CRVAL/CDELT.
-    cards = _refresh_source_cards(UVData.primary_cards(uvset), uvset)
-    aips_codes_disk, aips_labels_disk, _, _ = parse_stokes_axis(cards, npol)
-    pol_perm = if isempty(aips_codes_disk) || aips_labels_disk == msv4_labels
-        collect(1:npol)
-    else
-        [findfirst(==(lab), msv4_labels) for lab in aips_labels_disk]
-    end
-    any(isnothing, pol_perm) && error("write_uvfits: cannot map MSv4 pols $msv4_labels to AIPS order $aips_labels_disk")
-
-    nrec_total = sum(length(_leaf_record_order(l)) for l in leaf_list)
-    nrec_total > 0 || error("write_uvfits: UVSet has no records to write")
-
-    # The DATE PTYPE is a full Julian Day, which the absolute `Ti` axis gives
-    # directly. The AIPS NX table is days relative to RDATE, so it alone needs
-    # the RDATE epoch.
-    rdate_jd = _rdate_jd_or_zero(root.array_obs.rdate)
-    if rdate_jd == 0.0
-        @warn(
-            "write_uvfits: `array_obs.rdate` is empty; the NX table's scan " *
-                "windows will be emitted relative to JD 0 (year -4713). " *
-                "External readers (astropy / ehtim) will reject this. " *
-                "Populate the RDATE metadata before writing.",
-        )
-    end
-
-    fp = first(leaf_list)
-    fp_info = DimensionalData.metadata(fp)
-    T = _fits_float_type(
-        "write_uvfits", mapreduce(_uvfits_float_type, promote_type, leaf_list)
-    )
-    # Per AIPS Memo 117 §3.1.1 + the FQ-table semantics, each entry of
-    # `FrequencySetup.channel_freqs` is an IF center frequency (one
-    # channel per IF — the loader enforces `nif == nvis_chan`). On the
-    # data array that means NAXIS5=nIF (the IF axis), NAXIS4=1 (one
-    # channel per IF). Putting all spectral entries on NAXIS4 would
-    # produce a file whose DATA shape contradicts the FQ table's NIF.
-    raw_data = zeros(T, nrec_total, 3, npol, 1, nchan, 1, 1)
-    uu = Vector{T}(undef, nrec_total)
-    vv = Vector{T}(undef, nrec_total)
-    ww_ = Vector{T}(undef, nrec_total)
-    bl_codes = Vector{Int}(undef, nrec_total)
-    # AIPS-strict DATE PTYPE: two columns whose sum is the full Julian Day.
-    # Splitting into floor + fractional parts keeps the sub-day precision a
-    # single-precision file would otherwise lose: Float32 represents the
-    # integer JD exactly up to ~16M, and the fractional remainder gives ~10 ms.
-    date_param_cat = Matrix{T}(undef, nrec_total, 2)
-    extras_keys = keys(fp_info.extra_columns)
-    extras_eltypes = ntuple(i -> eltype(fp_info.extra_columns[i]), length(extras_keys))
-    extras_bufs = ntuple(i -> Vector{extras_eltypes[i]}(undef, nrec_total), length(extras_keys))
-
-    # Dedup leaf antenna tables: each unique table becomes one AN HDU on
-    # disk with a distinct EXTVER (1, 2, ...). Single-subarray observations
-    # produce one entry; multi-subarray observations produce many.
-    unique_antennas = AntennaTable[]
-    extver_lookup = Dict{AntennaTable, Int32}()
-    for (_, leaf) in branches_dict
-        ants = DimensionalData.metadata(leaf).antennas
-        if !haskey(extver_lookup, ants)
-            push!(unique_antennas, ants)
-            extver_lookup[ants] = Int32(length(unique_antennas))
-        end
-    end
-
-    nscan = length(leaf_list)
-    record_starts = zeros(Int32, nscan)
-    record_ends = zeros(Int32, nscan)
-    freqid_per_scan = ones(Int32, nscan)
-    subarray_per_scan = ones(Int32, nscan)
-    scan_windows = Vector{Tuple{Float64, Float64}}(undef, nscan)
-
-    # :aips writes the imag part verbatim; :fitsidi conjugates (negates it).
-    imag_sign = convention === :aips ? one(T) : -one(T)
-
-    rec_offset = 0
-    for (sid, leaf) in enumerate(leaf_list)
-        info = DimensionalData.metadata(leaf)
-        bls = info.baselines
-        ro = _leaf_record_order(leaf)
-        first_row_in_scan = rec_offset + 1
-        # Re-encode pairs to AIPS BASELINE codes only at the FITS boundary.
-        bl_aips_codes = [_encode_aips_baseline(a, b) for (a, b) in bls.pairs]
-        date_param_leaf = _build_date_param(T, UVData.obs_time(leaf), ro)
-        _write_records_kernel!(
-            raw_data, uu, vv, ww_, bl_codes, date_param_cat,
-            parent(leaf[:vis]), parent(leaf[:weights]), parent(leaf[:flags]),
-            parent(leaf[:uvw]),
-            bl_aips_codes, ro, date_param_leaf, rec_offset, pol_perm, imag_sign,
-        )
-        for (rec_i, _) in enumerate(ro)
-            row = rec_offset + rec_i
-            for (i, _) in enumerate(extras_keys)
-                extras_bufs[i][row] = info.extra_columns[i][rec_i]
-            end
-        end
-        scan_windows[sid] = UVData.scan_window(leaf)
-        if !isempty(ro)
-            record_starts[sid] = Int32(first_row_in_scan)
-            record_ends[sid] = Int32(rec_offset + length(ro))
-            freqid_per_scan[sid] = freqid_lookup[info.freq_setup]
-            subarray_per_scan[sid] = extver_lookup[info.antennas]
-        end
-        rec_offset += length(ro)
-    end
-
-    # AIPS/CASA/DIFMAP require records in ascending time. Densified leaves are
-    # emitted time-major, and leaves are written in scan-start order, so the
-    # only remaining source of disorder is a `record_order` inherited from an
-    # unordered input file. Sum the DATE columns in Float64: Float32 cannot
-    # hold integer JD plus the sub-day fraction (its spacing at 2.46e6 is 0.25 d).
-    nback = count(
-        i -> (Float64(date_param_cat[i + 1, 1]) + Float64(date_param_cat[i + 1, 2])) <
-            (Float64(date_param_cat[i, 1]) + Float64(date_param_cat[i, 2])),
-        1:(nrec_total - 1),
-    )
-    nback == 0 || @warn(
-        "write_uvfits: $nback of $(nrec_total - 1) consecutive record pairs step " *
-            "BACKWARD in time; the file is not time-ordered and AIPS/CASA/DIFMAP " *
-            "will warn on it. The record order was inherited from the input file's " *
-            "`record_order`.",
-    )
-
-    extras_cat = NamedTuple{extras_keys}(extras_bufs)
-    primary_data = _build_primary_data(uvset, uu, vv, ww_, bl_codes, date_param_cat, extras_cat, raw_data)
-    primary_cards_out = _strip_stale_shape_cards!(copy(cards))
-    primary_hdu = HDU(Random, primary_data, primary_cards_out)
-    _inject_duplicate_date!(primary_hdu)
-    # One AN HDU per unique antenna table. Per-SPW reference frequencies
-    # live on each FQ row; the AN ref_freq is the array nominal taken from
-    # the first setup.
-    first_setup = first(setups)
-    no_if_v = nchannels(first_setup)
-    freqid_v = Int(get(first_setup.extras, :frqsel, Int32(1)))
-    an_hdus = HDU[
-        _build_an_hdu(
-            ants, root.array_obs, ref_freq(first_setup);
-            extver = extver_lookup[ants], no_if = no_if_v, freqid = freqid_v,
-        ) for ants in unique_antennas
-    ]
-    fq_hdu = _build_fq_hdu(setups, [freqid_lookup[fs] for fs in setups])
-    nx_hdu = _build_nx_hdu(
-        scan_windows, record_starts, record_ends, freqid_per_scan, subarray_per_scan;
-        rdate_jd,
-    )
-
-    out_hdus = HDU[primary_hdu]
-    append!(out_hdus, an_hdus)
-    push!(out_hdus, fq_hdu)
-    push!(out_hdus, nx_hdu)
-    write(output_path, out_hdus)
-    return output_path
-end
-
-function _write_records_kernel!(
-        raw_data::AbstractArray{T, 7},
-        uu::AbstractVector{T},
-        vv::AbstractVector{T},
-        ww_::AbstractVector{T},
-        bl_codes::AbstractVector{Int},
-        date_param_cat::AbstractMatrix{T},
-        vis_dense::AbstractArray{Tvis, 4},
-        w_dense::AbstractArray{Tw, 4},
-        f_dense::AbstractArray{Bool, 4},
-        uvw_dense::AbstractArray{Tuvw, 3},
-        bl_aips_codes_local::AbstractVector{Int32},
-        record_order::AbstractVector{Tuple{Int, Int}},
-        date_param::AbstractMatrix{T},
-        rec_offset::Integer,
-        pol_perm::AbstractVector{Int},
-        imag_sign::T,
-    ) where {T, Tvis, Tw, Tuvw}
-    # Leaf storage: (Frequency, Ti, BaselineID, Polarization) for vis/weights/flags;
-    # (Ti, BaselineID, UVW) for uvw.
-    #
-    # UVFITS has no flag table: a negative weight is the only way the format
-    # records a flag, so a flagged sample is written with its weight negated.
-    # The magnitude survives, and `load_uvfits` reads the sign back as the flag.
-    npol = length(pol_perm)
-    nchan = size(vis_dense, 1)
-    # In-memory `Frequency` dim entries are per-IF (1 channel each), so
-    # they go on axis 5 (IF) of the AIPS-format array, with NAXIS4=1.
-    @inbounds for (rec_i, (ti, bi)) in enumerate(record_order)
-        row = rec_offset + rec_i
-        for pdisk in 1:npol
-            pmem = pol_perm[pdisk]
-            for c in 1:nchan
-                v = vis_dense[c, ti, bi, pmem]
-                wc = w_dense[c, ti, bi, pmem]
-                flagged = f_dense[c, ti, bi, pmem]
-                if isfinite(real(v)) && isfinite(imag(v)) && isfinite(wc) && wc > 0
-                    raw_data[row, 1, pdisk, 1, c, 1, 1] = real(v)
-                    # imag_sign = +1 (:aips) writes the internal phase verbatim;
-                    # -1 (:fitsidi) conjugates to the FITS-IDI phase convention.
-                    raw_data[row, 2, pdisk, 1, c, 1, 1] = imag_sign * imag(v)
-                    raw_data[row, 3, pdisk, 1, c, 1, 1] = flagged ? -wc : wc
-                elseif !flagged && isfinite(wc) && wc > 0
-                    # A weighted cell with a non-finite visibility is corrupted
-                    # data, not padding: exporting it as zero would silently
-                    # discard a measurement.
-                    error(
-                        "write_uvfits: (time $ti, baseline $bi, channel $c, pol $pdisk) " *
-                            "carries weight $wc but a non-finite visibility $v.",
-                    )
-                else
-                    # Empty cells are NaN + zero weight in memory; on disk they
-                    # must be literal zeros. Readers form Σ V·w without masking
-                    # first, and NaN * 0 is NaN.
-                    raw_data[row, 1, pdisk, 1, c, 1, 1] = 0
-                    raw_data[row, 2, pdisk, 1, c, 1, 1] = 0
-                    raw_data[row, 3, pdisk, 1, c, 1, 1] = 0
-                end
-            end
-        end
-        # (u,v,w) written verbatim: FITS-IDI and AIPS UVFITS share the same
-        # baseline-coordinate convention (see the matching note in load_uvfits).
-        uu[row] = uvw_dense[ti, bi, 1]
-        vv[row] = uvw_dense[ti, bi, 2]
-        ww_[row] = uvw_dense[ti, bi, 3]
-        bl_codes[row] = Int(bl_aips_codes_local[bi])
-        date_param_cat[row, :] .= @view date_param[rec_i, :]
-    end
-    return nothing
 end

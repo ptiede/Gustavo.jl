@@ -4,7 +4,7 @@
 # that `fit` → `calibrate` flattens the residual baseline phases (the
 # coherence test) and that save/load round-trips.
 
-# Shared synthetic-UVSet generator + usings/aliases (CAL/FP/UVP).
+# Shared usings/aliases (CAL/FP/UVP) and the `_coherence` metric.
 include("synthetic_uvset.jl")
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
@@ -284,25 +284,6 @@ end
     θ_within = [parent(c.params) for c in sol_within[:bandpass].components]
     θ_cross = [parent(c.params) for c in sol_cross[:bandpass].components]
     @test θ_within == θ_cross
-end
-
-@testset "combine_spw: spws → Frequency axis" begin
-    uvset, _ = _build_fringe_uvset(nspw = 3, nchan = 4)
-    avg = UVP.frequency_average(uvset; nout = 1)          # each spw → 1 channel
-    @test length(UVP.union_frequency_axis(avg)) == 3      # 3 distinct spw setups
-
-    combined = UVP.combine_spw(avg)
-    @test length(DimensionalData.branches(combined)) == 1 # one leaf per (src,scan)
-    setups = UVP.union_frequency_axis(combined)
-    @test length(setups) == 1                             # single FREQID
-    cf = collect(channel_freqs(first(setups)))
-    @test length(cf) == 3                                 # 3 channels
-    @test issorted(cf)                                    # ascending channel freqs
-    # The combined channel frequencies are exactly the per-spw averaged centers.
-    spw_centers = sort([only(channel_freqs(fs)) for fs in UVP.union_frequency_axis(avg)])
-    @test cf ≈ spw_centers
-    leaf = first(values(DimensionalData.branches(combined)))
-    @test size(parent(leaf[:vis]), 1) == 3                # Frequency axis = 3 channels
 end
 
 @testset "Residual accumulation is a plain weighted mean of pre-corrected data" begin

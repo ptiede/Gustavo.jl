@@ -1,7 +1,8 @@
 # UVData
 
-The data model (`UVSet`, dimensions, antenna/frequency metadata), the I/O
-front doors, and a-priori amplitude calibration.
+The data model (dimensions, antenna/frequency metadata, the per-partition
+accessors on a Measurement Set), the UVFITS reader and its `UVSet`, and the
+a-priori amplitude-calibration kernels.
 
 ```@autodocs
 Modules = [Gustavo.UVData]

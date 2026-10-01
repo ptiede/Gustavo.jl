@@ -1,6 +1,6 @@
 # Gustavo
 
-The pipeline layer: steps, verbs, the step protocol, and output reducers.
+The pipeline layer: steps, verbs, and the step protocol.
 
 ```@autodocs
 Modules = [Gustavo]

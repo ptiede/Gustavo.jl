@@ -1,7 +1,7 @@
 # Modular calibration-pipeline tests: the pipeline-level surface (a pipeline
-# as a vector, `fit`, `calibrate` and its `post`, the output reducers, defaults).
-# Reuses `_build_fringe_ps`, `_build_fringe_uvset` and the CAL/FP/UVP aliases
-# from test_pipeline.jl (included earlier in runtests.jl).
+# as a vector, `fit`, `calibrate` and its `post`, defaults).
+# Reuses `_build_fringe_ps` and the CAL/FP/UVP aliases from test_pipeline.jl
+# (included earlier in runtests.jl).
 
 @testset "Calibration pipeline" begin
     @testset "fit, then calibrate" begin
@@ -35,68 +35,9 @@
 
     @testset "a pipeline holds solve steps and transforms" begin
         ps, _ = _build_fringe_ps()
-        @test_throws "not AverageFrequency" fit(
-            [BaselineFringeFit(; gauge = PinAntenna(1)), AverageFrequency(nout = 1)], ps,
-        )
+        @test_throws "not Symbol" fit([BaselineFringeFit(; gauge = PinAntenna(1)), :average], ps)
         unit = DimArray(ones(4), XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
         @test_throws "holds no solve step" fit([StationWeightScale(unit)], ps)
-    end
-
-    @testset "reduce steps apply eagerly as functors" begin
-        uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 8)
-
-        # The reducer types are the one public spelling of each reduction;
-        # calling one on a `UVSet` (or piping into it) applies it eagerly and
-        # matches the internal kernels.
-        red = uvset |> AverageFrequency(nout = 1) |> CombineSpw()
-        red_ref = UVP.combine_spw(UVP.frequency_average(uvset; nout = 1))
-        @test Set(keys(DimensionalData.branches(red))) ==
-            Set(keys(DimensionalData.branches(red_ref)))
-        for (k, leaf) in DimensionalData.branches(red)
-            @test isequal(
-                parent(leaf[:vis]), parent(DimensionalData.branches(red_ref)[k][:vis])
-            )
-        end
-
-        # `AverageTime()` with no bin width collapses each scan to one sample.
-        per_scan = AverageTime()(uvset)
-        per_scan_ref = UVP.scan_average(uvset)
-        for (k, leaf) in DimensionalData.branches(per_scan)
-            @test size(parent(leaf[:vis]), 2) == 1
-            @test isequal(
-                parent(leaf[:vis]), parent(DimensionalData.branches(per_scan_ref)[k][:vis])
-            )
-        end
-
-        flag_eager = FlagSpwEdges(mode = :flag_fraction, fraction = 0.2)(uvset)
-        flag_ref = UVP.flag_spw_edges(uvset; mode = :flag_fraction, fraction = 0.2)
-        for (k, leaf) in DimensionalData.branches(flag_eager)
-            @test parent(leaf[:weights]) ==
-                parent(DimensionalData.branches(flag_ref)[k][:weights])
-        end
-    end
-
-    @testset "band edges" begin
-        uvset, _ = _build_fringe_uvset(nspw = 2, nchan = 8)   # fraction 0.2 → 1 edge chan
-
-        flagged = UVP.flag_spw_edges(uvset; mode = :flag_fraction, fraction = 0.2)
-        for (k, leaf) in DimensionalData.branches(flagged)
-            F = parent(leaf[:flags])
-            @test all(F[1, :, :, :])
-            @test all(F[end, :, :, :])
-            @test !any(F[2:(end - 1), :, :, :])
-            # Edge flagging records a decision; it does not rewrite the data.
-            @test parent(leaf[:weights]) ==
-                parent(DimensionalData.branches(uvset)[k][:weights])
-        end
-
-        trimmed = UVP.flag_spw_edges(uvset; mode = :trim, fraction = 0.2)
-        for (_, leaf) in DimensionalData.branches(trimmed)
-            @test size(parent(leaf[:vis]), 1) == 6
-            @test length(channel_freqs(DimensionalData.metadata(leaf).freq_setup)) == 6
-        end
-
-        @test_throws ErrorException UVP.flag_spw_edges(uvset; mode = :bogus, fraction = 0.1)
     end
 
     @testset "gauge by station code" begin

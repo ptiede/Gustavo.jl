@@ -1,7 +1,6 @@
 # The per-partition accessors, answered from an MSv4 `MeasurementSet`.
 #
-# Each returns what the same accessor returns for a `UVSet` leaf, rebuilt from
-# the store on every call.
+# Each is rebuilt from the store on every call.
 
 """
     scan_name(ms::XRadio.MeasurementSet) -> String

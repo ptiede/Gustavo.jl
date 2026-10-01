@@ -32,26 +32,6 @@ using Gustavo.UVData: Frequency, Ti, BaselineID, Polarization
         @test parent(DimArray(whole(V), d)) === whole(V)
     end
 
-    @testset "phase/amplitude relative to a reference track their input's axes" begin
-        ph = [0.1, 0.5, NaN, 1.2, -0.3]
-        am = [2.0, 4.0, NaN, 1.0, 8.0]
-        for (f, x) in ((UV.phase_relative_to_ref, ph), (UV.amplitude_relative_to_ref, am))
-            ref = f(x)
-            out = f(shift(x))
-            @test collect(out) ≈ collect(ref) nans = true
-            @test axes(out) == axes(shift(x))
-            @test collect(f(whole(x))) ≈ collect(ref) nans = true
-        end
-        # `ref_idx` names a position in the input's own axes, not a count from
-        # the start of storage: the shifted vector's first index picks the same
-        # reference that `1` picks on the plain one, and an index outside those
-        # axes is refused the same way.
-        @test collect(UV.phase_relative_to_ref(shift(ph), firstindex(shift(ph)))) ≈
-            collect(UV.phase_relative_to_ref(ph, 1)) nans = true
-        @test all(isnan, UV.phase_relative_to_ref(shift(ph), lastindex(shift(ph)) + 1))
-        @test all(isnan, UV.phase_relative_to_ref(shift(ph), firstindex(shift(ph)) - 1))
-    end
-
     @testset "the per-baseline delay reads its own indices" begin
         freqs = collect(range(2.2e10, step = 2.0e6, length = 8))
         z = cis.(range(0.0, 2.1, length = 8))

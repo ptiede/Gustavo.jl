@@ -402,7 +402,7 @@ _segment_snr2(r, w, w2, n2) =
 
 # Narrow-spike guard: additive contamination (pcal tones, RFI) violates the
 # multiplicative gain model — a contaminated channel shows excess amplitude,
-# the fit hands it |g| > 1, and `apply_calibration` would then UP-weight it
+# the fit hands it |g| > 1, and applying that gain would then UP-weight it
 # (w → w·|g|²), amplifying exactly the channels that should be distrusted.
 # Genuine passband structure is smooth or negative (roll-off), so narrow
 # positive log-amp outliers vs the per-(station, feed, piece) robust scale are
@@ -451,7 +451,7 @@ function _write_amp_bandpass!(θ, plan, la, max_logamp::Real, ts::Integer = 1; l
             # interpolates gaps self-regularizes, but an unconstrained fit can hand a
             # low-SNR band-edge segment that barely clears the gate a huge log-amp;
             # applying it would up-weight that segment's noise, since
-            # `apply_calibration` scales weights by |g|². The bound is generous
+            # applying a gain scales weights by |g|². The bound is generous
             # (|g| ≤ 10) so real passband roll-off/structure passes unchanged — only
             # pathological noise blow-ups are gated.
             gated = abs(v - m) > max_logamp

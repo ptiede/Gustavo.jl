@@ -69,8 +69,7 @@ function Base.show(io::IO, t::AntennaTable)
 end
 
 # Structural equality and hashing. Two independently-constructed structs
-# with field-equal contents must compare `==` so they dedup in `Dict` and
-# the `merge_uvsets` strict-equality check works on independent loads.
+# with field-equal contents must compare `==` so they dedup in `Dict`.
 Base.:(==)(a::Antenna, b::Antenna) =
     a.name == b.name && a.station_xyz == b.station_xyz &&
     a.mount == b.mount && a.nominal_basis == b.nominal_basis &&

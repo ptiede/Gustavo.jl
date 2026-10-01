@@ -57,9 +57,7 @@ end
 
 Top-level inspectable container returned by [`load_antab`](@ref). Holds the
 station calibration records keyed by 2-character VEX station code (e.g.
-`"AA"`, `"NN"`) plus provenance fields used downstream by
-[`apply_calibration`](@ref) when aligning Tsys timestamps to a `UVSet`'s
-`obs_time` axis.
+`"AA"`, `"NN"`) plus provenance fields.
 """
 struct AntabCalibration
     source_path::String

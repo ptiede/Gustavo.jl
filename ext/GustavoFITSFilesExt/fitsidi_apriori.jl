@@ -1,13 +1,15 @@
 # A-priori amplitude calibration from a FITS-IDI file's GAIN_CURVE (DPFU +
 # elevation gain polynomial) and SYSTEM_TEMPERATURE (Tsys) tables. Produces one
-# `UVData.AntabCalibration` per spw, reusing Gustavo's existing SEFD/elevation
-# apply machinery (`apply_calibration(uvset, spw_cals)`). FITS-IDI specifics
-# (table layout, NOSTA→name mapping, time convention) live here; the calibration
-# math stays format-neutral in `src/UVData/apriori.jl`.
+# `UVData.AntabCalibration` per spw. FITS-IDI specifics (table layout,
+# NOSTA→name mapping, time convention) live here; the calibration math stays
+# format-neutral in `src/UVData/apriori.jl`.
 
 using Dates: Date, DateTime, Millisecond, year
 import Gustavo.UVData
 using Gustavo.UVData: AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
+
+# Strip FITS string padding (trailing spaces / NULs) from an `nA` column entry.
+_idi_clean(s) = filter(c -> isascii(c) && isprint(c) && !isspace(c), string(s))
 
 # Locate the first HDU whose EXTNAME (trimmed) equals `name`.
 function _idi_find_hdu(fid, name)
@@ -33,7 +35,7 @@ function UVData.load_fitsidi_apriori(path; tsys_max::Real = 1.0e4)
     gc === nothing && error("load_fitsidi_apriori: no GAIN_CURVE HDU in $(path)")
     st === nothing && error("load_fitsidi_apriori: no SYSTEM_TEMPERATURE HDU in $(path)")
 
-    # NOSTA → cleaned station name (must match what `load_fitsidi` stores).
+    # NOSTA → cleaned station name.
     nosta = round.(Int, collect(getproperty(ag.data, :NOSTA)))
     anames = _idi_clean.(collect(getproperty(ag.data, :ANNAME)))
     name_of = Dict(nosta[i] => anames[i] for i in eachindex(nosta))

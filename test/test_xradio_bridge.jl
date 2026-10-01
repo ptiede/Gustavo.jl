@@ -87,13 +87,6 @@ using XRadio: XRadio, ProcessingSet, MeasurementSet
             [Float64.(p) for p in info.antennas.pol_angles]
         @test collect(ant[:antenna_dish_diameter]) == Float64.(UV.extras(info.antennas).DIAMETER)
     end
-
-    @testset "a lazy set converts through materialization" begin
-        # `is_lazy` leaves are materialized on the way through, so a lazy and an
-        # eager set give the same store.
-        @test UV.uvset_to_processingset(uvset)[first(keys(ps))][:visibility] ==
-            ps[first(keys(ps))][:visibility]
-    end
 end
 
 # ── Gustavo's MSv4 schema extension ───────────────────────────────────────────
@@ -228,25 +221,22 @@ end
     ps = UV.uvset_to_processingset(uvset)
 
     function agrees(ms, leaf)
-        @test UV.scan_name(ms) == UV.scan_name(leaf)
-        @test UV.primary_scan_name(ms) == UV.primary_scan_name(leaf)
-        @test UV.source_name(ms) == UV.source_name(leaf)
-        @test UV.sub_scan_name(ms) == UV.sub_scan_name(leaf)
-        @test UV.scan_intents(ms) == UV.scan_intents(leaf)
+        info = DimensionalData.metadata(leaf)
+        @test UV.scan_name(ms) == info.scan_name
+        @test UV.primary_scan_name(ms) == info.scan_name
+        @test UV.source_name(ms) == info.source_name
+        @test UV.sub_scan_name(ms) == info.sub_scan_name
+        @test UV.scan_intents(ms) == info.scan_intents
         @test collect(UV.obs_time(ms)) == collect(UV.obs_time(leaf))
-        @test UV.scan_window(ms) == UV.scan_window(leaf)
         @test UV.pol_products(ms) == UV.pol_products(leaf)
-        @test UV.participating_antennas(ms) == UV.participating_antennas(leaf)
 
-        bm, bl = UV.baselines(ms), UV.baselines(leaf)
+        bm, bl = UV.baselines(ms), info.baselines
         @test bm.pairs == bl.pairs
         @test bm.labels == bl.labels
         @test bm.ant1_names == bl.ant1_names
         @test bm.ant2_names == bl.ant2_names
-        @test [UV.baseline_number(ms, p) for p in zip(bl.ant1_names, bl.ant2_names)] ==
-            collect(eachindex(bl.pairs))
 
-        fm, fl = UV.freq_setup(ms), UV.freq_setup(leaf)
+        fm, fl = UV.freq_setup(ms), info.freq_setup
         @test UV.setup_name(fm) == UV.setup_name(fl)
         @test UV.ref_freq(fm) == UV.ref_freq(fl)
         @test UV.channel_freqs(fm) == UV.channel_freqs(fl)
@@ -254,7 +244,7 @@ end
         @test UV.total_bandwidths(fm) == UV.total_bandwidths(fl)
         @test UV.sidebands(fm) == UV.sidebands(fl)
 
-        am, al = UV.antennas(ms), UV.antennas(leaf)
+        am, al = UV.antennas(ms), info.antennas
         @test am.name == al.name
         @test am.station_xyz == al.station_xyz
         @test am.mount == al.mount
@@ -335,23 +325,26 @@ end
         @test collect(UV.leaves(ps)) == collect(pairs(ps))
     end
 
+    infos = [DimensionalData.metadata(leaf) for leaf in values(UV.branches(uvset))]
+
     @testset "frequency and polarization unions agree with the UVSet's" begin
-        mine, theirs = UV.union_frequency_axis(ps), UV.union_frequency_axis(uvset)
+        mine, theirs = UV.union_frequency_axis(ps), unique(i.freq_setup for i in infos)
         @test length(mine) == length(theirs) == 2
         @test UV.channel_freqs.(mine) == UV.channel_freqs.(theirs)
         @test UV.setup_name.(mine) == UV.setup_name.(theirs)
-        @test UV.union_pol_products(ps) == UV.union_pol_products(uvset)
+        @test UV.union_pol_products(ps) == UV.pol_products(first(values(UV.branches(uvset))))
         @test_throws "2 distinct frequency setups" UV.freq_setup(ps)
 
         one_spw, _ = _build_fringe_uvset(; nant = 4, nspw = 1, nchan = 8, ntime = 6, nscans = 2)
         one_ps = UV.uvset_to_processingset(one_spw)
-        @test UV.channel_freqs(UV.freq_setup(one_ps)) ==
-            UV.channel_freqs(UV.freq_setup(one_spw))
-        @test UV.nchannels(one_ps) == UV.nchannels(one_spw) == 8
+        one_fs = DimensionalData.metadata(first(values(UV.branches(one_spw)))).freq_setup
+        @test UV.channel_freqs(UV.freq_setup(one_ps)) == UV.channel_freqs(one_fs)
+        @test UV.nchannels(one_ps) == 8
     end
 
     @testset "the antenna union agrees with the UVSet's" begin
-        mine, theirs = UV.union_antennas(ps), UV.union_antennas(uvset)
+        # The fixture's leaves share one antenna table.
+        mine, theirs = UV.union_antennas(ps), first(infos).antennas
         @test mine.name == theirs.name
         @test mine.station_xyz == theirs.station_xyz
         @test mine.mount == theirs.mount
@@ -361,9 +354,10 @@ end
     @testset "members that saw different sub-arrays" begin
         # The second scan drops the second antenna, so its antenna dataset
         # lists three stations and the union must restore the full order.
-        names = String.(UV.union_antennas(uvset).name)
+        names = String.(first(infos).antennas.name)
         keep = names[[1, 3, 4]]
-        sub = UV.apply(uvset) do leaf, info, root
+        function drop_second(leaf)
+            info = DimensionalData.metadata(leaf)
             info.scan_name == "2" || return leaf
             full = String.(info.antennas.name)
             rows = findall(in(keep), full)
@@ -385,12 +379,17 @@ end
                 ),
             )
         end
+        sub = DimensionalData.rebuild(
+            uvset; branches = DimensionalData.TreeDict(
+                k => drop_second(l) for (k, l) in UV.branches(uvset)
+            ),
+        )
         sub_ps = UV.uvset_to_processingset(sub)
         @test length(unique(XRadio.antennas.(values(sub_ps)))) == 2
 
         tab = UV.union_antennas(sub_ps)
         @test tab.name == names
-        @test UV.extras(tab).DIAMETER == UV.extras(UV.union_antennas(uvset)).DIAMETER
+        @test UV.extras(tab).DIAMETER == UV.extras(first(infos).antennas).DIAMETER
     end
 
     @testset "unstated receptor angles still union" begin
@@ -399,7 +398,7 @@ end
             delete!(DimensionalData.branches(ms)[:antenna], :antenna_receptor_angle)
         end
         tab = UV.union_antennas(bare)
-        @test tab.name == UV.union_antennas(uvset).name
+        @test tab.name == first(infos).antennas.name
         @test all(a -> all(isnan, a), tab.pol_angles)
     end
 

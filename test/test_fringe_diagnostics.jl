@@ -1,6 +1,6 @@
-# Fringe diagnostics + Makie plot smoke tests. Reuses the synthetic builders
-# `_build_fringe_ps` and `_build_fringe_uvset` from test_pipeline.jl (included
-# earlier in runtests.jl) and CairoMakie (loaded at the top of runtests.jl).
+# Fringe diagnostics + Makie plot smoke tests. Reuses the synthetic builder
+# `_build_fringe_ps` from test_pipeline.jl (included earlier in runtests.jl)
+# and CairoMakie (loaded at the top of runtests.jl).
 
 
 @testset "Fringe diagnostics" begin
@@ -121,59 +121,6 @@
         fig_spec = FP.plot_fringe_spectrum(sol; sites = 1)
         @test (show(IOBuffer(), MIME("image/png"), fig_spec); true)
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
-    end
-
-    @testset "coherence report (stage-agnostic)" begin
-        uvset, _ = _build_fringe_uvset(; station_rate)
-        rep = UVP.coherence_report(uvset; pols = [(1, 1), (2, 2)])
-
-        @test rep isa UVP.CoherenceReport
-        nbl = length(rep.bl_pairs)
-        @test nbl > 0
-        @test rep.feeds == [(1, 1), (2, 2)]
-        @test size(rep.time.eta_baseline) == (length(rep.time.intervals), nbl)
-        @test size(rep.freq.eta_baseline) == (length(rep.freq.intervals), nbl)
-        @test length(rep.time.eta) == length(rep.time.intervals)
-        @test rep.time.intervals == sort(rep.time.intervals)               # ascending sweep
-
-        # Native resolution (one sample/channel per bin) is the η ≡ 1 anchor.
-        @test rep.time.eta[1] ≈ 1.0 atol = 1.0e-6
-        @test rep.freq.eta[1] ≈ 1.0 atol = 1.0e-6
-
-        # The injected rates and screen decorrelate the uncorrected data when the
-        # whole scan is averaged to one sample.
-        h = UVP.coherence_headline(rep)
-        @test h.loss_time ≈ 1 - h.eta_time
-        @test h.eta_time < 0.95
-
-        # Selectors / overrides.
-        @test UVP.coherence_report(uvset; pols = :all) isa UVP.CoherenceReport
-        rep2 = UVP.coherence_report(uvset; pols = 1, timescales = [30.0, 120.0, 360.0], bandwidths = [4.0e6, 1.6e7])
-        @test rep2.time.intervals == [30.0, 120.0, 360.0]
-        @test rep2.freq.intervals == [4.0e6, 1.6e7]
-
-        # Re-exported at the package top level.
-        @test Gustavo.coherence_report(uvset; pols = :all) isa UVP.CoherenceReport
-
-        buf = IOBuffer()
-        @test_nowarn UVP.print_coherence_report(rep; io = buf)
-        @test occursin("Coherence report", String(take!(buf)))
-
-        fig = UVP.plot_coherence(rep)
-        @test !isnothing(fig)
-        @test !isnothing(UVP.plot_coherence(rep; baselines = 1))
-        @test !isnothing(UVP.plot_coherence(rep; nlabel = 3))          # worst baselines coloured + legend
-        parent = Figure(size = (1000, 420))
-        @test !isnothing(UVP.plot_coherence(parent[1, 1], rep))
-        @test (show(IOBuffer(), MIME("image/png"), fig); true)
-
-        # Per-baseline heatmap (rows = baselines, cols = intervals).
-        figm = UVP.plot_coherence_matrix(rep)
-        @test !isnothing(figm)
-        @test !isnothing(UVP.plot_coherence_matrix(rep; axis = :freq, sortworst = false))
-        pm = Figure(size = (700, 500))
-        @test !isnothing(UVP.plot_coherence_matrix(pm[1, 1], rep))
-        @test (show(IOBuffer(), MIME("image/png"), figm); true)
     end
 
     @testset "coherence thermal debias" begin
