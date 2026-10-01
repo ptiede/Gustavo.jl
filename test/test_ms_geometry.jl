@@ -23,6 +23,9 @@ end
     @test geom.channel_freqs == sort!(unique!(reduce(vcat, [XRadio.frequencies(ms) for ms in ps])))
     @test geom.stations == ["A1", "A2", "A3"]
     @test geom.f0 ≈ truth.f0
+    width(ms) = DimensionalData.metadata(lookup(ms[:visibility], Frequency))[:channel_width]
+    @test geom.channel_widths == fill(abs(XRadio.value(width(first(ps)))), length(geom.channel_freqs))
+    @test geom.channel_widths[1] > 0
     @test geom.t0 == truth.t0_sec
 
     @testset "a station on no baseline is still a station" begin

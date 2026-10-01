@@ -3,8 +3,9 @@
 # Layout of a store written by `save_solution`:
 #
 #   /                 attrs: format, pipeline, component labels, step names
-#   geometry/         times, scan_of_time, channel_freqs, spw_of_chan; t0, f0 and
-#                     the name vectors as attributes
+#   geometry/         times, scan_of_time, channel_freqs, spw_of_chan and, when
+#                     stated, channel_widths; t0, f0 and the name vectors as
+#                     attributes
 #   components/<label>/  one per SolvedComponent: `data` over the params dims plus
 #                     their coordinates; step, path and component as attributes
 #   steps/<step>/     that step's diagnostics
@@ -316,6 +317,7 @@ function _write_geometry!(root, geom::DataGeometry)
     _write_array!(g, "scan_of_time", geom.scan_of_time, ("time",))
     _write_array!(g, "channel_freqs", geom.channel_freqs, ("frequency",))
     _write_array!(g, "spw_of_chan", geom.spw_of_chan, ("frequency",))
+    isempty(geom.channel_widths) || _write_array!(g, "channel_widths", geom.channel_widths, ("frequency",))
     return g
 end
 
@@ -324,6 +326,7 @@ function _read_geometry(g)
     return DataGeometry(;
         times = _read_array(g.arrays["times"]), scan_of_time = _read_array(g.arrays["scan_of_time"]),
         channel_freqs = _read_array(g.arrays["channel_freqs"]), spw_of_chan = _read_array(g.arrays["spw_of_chan"]),
+        channel_widths = haskey(g.arrays, "channel_widths") ? _read_array(g.arrays["channel_widths"]) : Float64[],
         t0 = a["t0"], f0 = a["f0"], scan_names = _strings(a["scan_names"]),
         spw_names = _strings(a["spw_names"]), stations = _strings(a["stations"]),
     )

@@ -74,6 +74,7 @@ include("synthetic_uvset.jl")
         sol2 = CAL.load_solution(path)
         @test sol2.geom.times == sol.geom.times
         @test sol2.geom.channel_freqs == sol.geom.channel_freqs
+        @test sol2.geom.channel_widths == sol.geom.channel_widths
         @test sol2.components == sol.components
         @test collect(keys(sol2.steps)) == collect(keys(sol.steps))
         @test sol2.provenance == sol.provenance

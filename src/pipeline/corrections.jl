@@ -90,10 +90,10 @@ segmentation is defined on: a `PerScan` component by scan name, a
 `PerSpectralWindow` one by spectral window name, a `TimeBlocks` or
 `InstrumentScans` one by the solve's own bin formula, a `PerIntegration` one by
 exact epoch. So a solution segmented more coarsely than the data applies, while
-one segmented more finely is refused. `ChannelBlocks` and `FreqGroups` cut the
-channel-index axis, so they require the data to index the same channels: in a
-pipeline or `calibrate` that is the whole processing set's channel axis, and
-`ApplySolution(sol)(ms)` on its own uses the channels of `ms` alone.
+one segmented more finely is refused. A `ChannelBlocks` or `FreqGroups`
+component places each channel by its center frequency and width: the data's
+channel must be a channel of the solve, no wider, so averaged channels are
+refused.
 
 Stations are matched by name against the solution's geometry; stations the
 solution never solved keep identity gains, with a warning. A solution that
@@ -265,27 +265,46 @@ end
 # ── Built-in: channel flagging ───────────────────────────────────────────────
 
 """
-    FlagChannels(mask::AbstractVector{Bool})
+    FlagChannels(mask::AbstractDimVector{Bool})
 
-Correction: flag the channels of the run's channel axis
-(`DataGeometry(ps).channel_freqs`) where `mask` is `true`, e.g.
-`tone_channel_mask`. Visibilities and weights are left as they are.
+Correction: flag the channels where `mask`, indexed by `Frequency` (Hz), is
+`true`. Each channel of the data takes the mask entry at its center frequency;
+a channel the mask does not cover throws. Visibilities and weights are left as
+they are.
+
+    freqs = XRadio.frequencies(ms)
+    FlagChannels(DimArray(86.10e9 .< freqs .< 86.12e9, Frequency(freqs)))
 """
-struct FlagChannels <: AbstractDataTransform
-    mask::BitVector
-end
-FlagChannels(mask::AbstractVector{Bool}) = FlagChannels(BitVector(mask))
-
-(t::FlagChannels)(ms::XRadio.MeasurementSet) = _correct(t, ms, DataGeometry(_one_member(ms)))
-
-function _correct(t::FlagChannels, ms::XRadio.MeasurementSet, geom::DataGeometry)
-    length(t.mask) == length(geom.channel_freqs) || throw(
-        DimensionMismatch(
-            "FlagChannels: the mask covers $(length(t.mask)) channels, the data " *
-                "$(length(geom.channel_freqs))"
+struct FlagChannels{M <: AbstractDimVector{Bool}} <: AbstractDataTransform
+    mask::M
+    function FlagChannels{M}(mask) where {M}
+        only(dims(mask)) isa Frequency || throw(
+            ArgumentError(
+                "FlagChannels: index the mask by `Frequency`, not $(nameof(typeof(only(dims(mask)))))"
+            )
         )
-    )
-    sel = findall(t.mask[GeometryWindow(geom, ms).chan_idx])
+        allunique(lookup(mask, 1)) || throw(ArgumentError("FlagChannels: a frequency appears more than once in the mask"))
+        return new{M}(mask)
+    end
+end
+FlagChannels(mask::AbstractDimVector{Bool}) = FlagChannels{typeof(mask)}(mask)
+
+Base.show(io::IO, t::FlagChannels) =
+    print(io, "FlagChannels(", count(t.mask), " of ", length(t.mask), " channels)")
+
+function (t::FlagChannels)(ms::XRadio.MeasurementSet)
+    fm = Float64.(lookup(t.mask, 1))
+    perm = sortperm(fm)
+    sf = fm[perm]
+    sel = Int[]
+    for (c, f) in enumerate(XRadio.frequencies(ms))
+        tol = Calibration._FREQ_RTOL * abs(f)
+        j = searchsortedfirst(sf, f - tol)
+        (j <= length(sf) && abs(sf[j] - f) <= tol) || throw(
+            ArgumentError("FlagChannels: the mask does not cover the channel at $f Hz")
+        )
+        t.mask[perm[j]] && push!(sel, c)
+    end
     isempty(sel) && return ms
     flag = modify(Array, ms[:flag])
     view(flag, Frequency(sel)) .= true

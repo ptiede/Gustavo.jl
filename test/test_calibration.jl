@@ -248,30 +248,37 @@ end
         )
     end
 
-    @testset "channel-index segmentations require the same channel layout" begin
-        narrow = CAL.DataGeometry(;
+    @testset "channel segmentations place by frequency and width" begin
+        widths = fill(0.1e9, 6)
+        solvew = CAL.DataGeometry(;
+            solve.times, solve.scan_of_time, solve.channel_freqs, solve.spw_of_chan,
+            channel_widths = widths, scan_names = solve.scan_names, spw_names = solve.spw_names,
+        )
+        sub(idx; freqs = solve.channel_freqs[idx], w = widths[idx]) = CAL.DataGeometry(;
             times = solve.times, scan_of_time = solve.scan_of_time,
-            channel_freqs = solve.channel_freqs[1:4], spw_of_chan = solve.spw_of_chan[1:4],
-        )
-        @test_throws "target has 4 channels and the solution 6" CAL.freq_segment_ids(
-            CAL.ChannelBlocks(1), solve, narrow,
-        )
-        shifted = CAL.DataGeometry(;
-            times = solve.times, scan_of_time = solve.scan_of_time,
-            channel_freqs = solve.channel_freqs .+ 1.0e6, spw_of_chan = solve.spw_of_chan,
-        )
-        # The near miss prints both frequencies, so a unit slip or a shifted
-        # correlator setup is diagnosable at a glance.
-        @test_throws "target channel 1 is at 1.001e9 Hz" CAL.freq_segment_ids(
-            CAL.ChannelBlocks(2), solve, shifted,
-        )
-        @test_throws "solution's at 1.0e9 Hz" CAL.freq_segment_ids(
-            CAL.ChannelBlocks(2), solve, shifted,
+            channel_freqs = freqs, spw_of_chan = solve.spw_of_chan[idx], channel_widths = w,
         )
         @test CAL.freq_segment_ids(CAL.ChannelBlocks(2), solve, solve) == [1, 1, 2, 3, 3, 4]
         groups = CAL.FreqGroups([1:3, 4:6])
         @test CAL.freq_segment_ids(groups, solve, solve) == [1, 1, 1, 2, 2, 2]
-        @test_throws "FreqGroups" CAL.freq_segment_ids(groups, solve, narrow)
+        # One window, or any subset of channels, takes the segments of its own channels.
+        @test CAL.freq_segment_ids(CAL.ChannelBlocks(2), solvew, sub(4:6)) == [3, 3, 4]
+        @test CAL.freq_segment_ids(groups, solvew, sub([5, 2])) == [2, 1]
+        @test CAL.freq_segment_ids(groups, solvew, sub([5, 2]); chan_idx = [2]) == [1]
+        # A channel the solve never had: the message prints the nearest, so a unit
+        # slip or a shifted correlator setup is diagnosable at a glance.
+        shifted = sub(1:6; freqs = solve.channel_freqs .+ 1.0e6)
+        @test_throws "at 1.001e9 Hz is not a channel of the solution — the nearest is at 1.0e9 Hz" CAL.freq_segment_ids(
+            CAL.ChannelBlocks(2), solvew, shifted,
+        )
+        # Three channels averaged into one: its center is a solve channel's, its width is not.
+        averaged = sub([2]; w = [0.3e9])
+        @test_throws "wider than the solution's" CAL.freq_segment_ids(groups, solvew, averaged)
+        # Widths are needed on both sides once the grids differ.
+        @test_throws "SOLUTION geometry states no channel widths" CAL.freq_segment_ids(groups, solve, sub(4:6))
+        @test_throws "TARGET geometry states no channel widths" CAL.freq_segment_ids(groups, solvew, sub(4:6; w = Float64[]))
+        @test_throws "channel_widths length" sub(1:2; w = [1.0])
+        @test_throws "finite and positive" sub(1:2; w = [1.0, 0.0])
     end
 
     @testset "gains evaluate on the foreign grid in the solve's own basis" begin

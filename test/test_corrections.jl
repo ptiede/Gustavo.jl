@@ -24,7 +24,7 @@ function _hand_solution(geom; info = (;), seed = 7)
 end
 
 _with_stations(geom, stations) = CALc.DataGeometry(;
-    geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.t0, geom.f0,
+    geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.channel_widths, geom.t0, geom.f0,
     geom.scan_names, geom.spw_names, stations,
 )
 
@@ -62,9 +62,15 @@ end
     end
 
     @testset "ApplySolution on a Measurement Set alone" begin
-        # A channel-index segmentation needs the whole set's channel axis, which
-        # one window does not carry.
-        @test_throws "identical channel layout" ApplySolution(sol)(ms)
+        # A per-channel segmentation of the whole set places each channel of one
+        # window by frequency: the same correction a pipeline applies.
+        for m in values(ps)
+            one = read(m)
+            @test isequal(
+                parent(ApplySolution(sol)(one)[:visibility]),
+                parent(Gustavo._correct(ApplySolution(sol), one, geom)[:visibility]),
+            )
+        end
         # A solution segmented only by name applies with the window's own geometry.
         onewin = _hand_solution(CALc.DataGeometry(Gustavo._one_member(ms)))
         own = CALc.DataGeometry(Gustavo._one_member(ms))
@@ -98,14 +104,21 @@ end
     end
 
     @testset "FlagChannels" begin
-        mask = falses(length(geom.channel_freqs))
-        mask[[1, length(mask)]] .= true
-        out = Gustavo._correct(FlagChannels(mask), ms, geom)
-        flagged = mask[CALc.GeometryWindow(geom, ms).chan_idx]
-        for c in eachindex(flagged)
-            @test all(parent(out[:flag][Frequency = c])) == flagged[c]
+        freqs = geom.channel_freqs
+        hit = freqs[[1, end]]
+        mask = DimArray(map(in(hit), freqs), Frequency(freqs))
+        for m in values(ps)
+            one = read(m)
+            out = FlagChannels(mask)(one)
+            for (c, f) in enumerate(XRadio.frequencies(one))
+                @test all(parent(out[:flag][Frequency = c])) == (f in hit)
+            end
         end
-        @test_throws DimensionMismatch Gustavo._correct(FlagChannels(falses(3)), ms, geom)
+        @test sprint(show, FlagChannels(mask)) == "FlagChannels(2 of $(length(freqs)) channels)"
+        partial = DimArray(trues(2), Frequency(freqs[1:2]))
+        @test_throws "does not cover the channel" FlagChannels(partial)(ms)
+        @test_throws "index the mask by `Frequency`" FlagChannels(DimArray(trues(2), Ti([1.0, 2.0])))
+        @test_throws "more than once" FlagChannels(DimArray(trues(2), Frequency([1.0, 1.0])))
     end
 
     @testset "AutocorrelationNormalization" begin

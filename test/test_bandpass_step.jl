@@ -267,10 +267,20 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         # target sample places in the scan it belongs to.
         @test all(ms -> ms isa XRadio.MeasurementSet, correct(ApplySolution(sol_n), uvsub))
 
-        # Guard rails: a bandpass cuts the channel-INDEX axis, so a set indexing
-        # different channels has no segment to place against…
+        # A bandpass segments the solve's channels: a set holding some of them
+        # takes their segments, matched by frequency…
         uvnc, _ = _build_fringe_ps(; nant = 3, nspw, nchan = 4, ntime = 5)
-        @test_throws "identical channel layout" correct(ApplySolution(bps), uvnc)
+        for (ms, out) in zip(values(uvnc), correct(ApplySolution(bps), uvnc))
+            chan = CAL.GeometryWindow(bps.geom, ms).chan_idx
+            V, W = divided(ms, parent(gains(bps, CAL.GeometryWindow(bps.geom, chan, 1:1))); tconst = true)
+            @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
+        end
+        # …while wider channels on the same centers, or channels between the
+        # solve's, have no segment to place against…
+        uvwide, _ = _build_fringe_ps(; nant = 3, nspw, nchan = 4, ntime = 5, chan_bw = 4.0e6)
+        @test_throws "wider than the solution's" correct(ApplySolution(bps), uvwide)
+        uvoff, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, ref_freq = 230.0e9 + 1.0e6)
+        @test_throws "not a channel of the solution" correct(ApplySolution(bps), uvoff)
         # …and a scan the solve never saw is refused, not served by a neighbour.
         uv2, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
         @test_throws "is not in the solution" correct(ApplySolution(sol_n), uv2)
@@ -279,7 +289,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         others = ["Q$i" for i in eachindex(g.stations)]
         strangers = CAL.CalibrationSolution(
             CAL.DataGeometry(
-                g.times, g.scan_of_time, g.channel_freqs, g.spw_of_chan, g.t0, g.f0,
+                g.times, g.scan_of_time, g.channel_freqs, g.spw_of_chan, g.channel_widths, g.t0, g.f0,
                 g.scan_names, g.spw_names, others,
             ),
             [

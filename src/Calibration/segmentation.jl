@@ -148,6 +148,8 @@ Fields:
                     be 1-based or contiguous — `PerScan` dense-ranks them).
 - `channel_freqs` : concatenated channel center frequencies (Hz) across spws.
 - `spw_of_chan`   : spw id for each global channel (same labelling freedom).
+- `channel_widths`: width (Hz, positive) of each global channel, or empty when
+                    the widths are not stated.
 - `t0`            : rate reference epoch (seconds); rate phase ∝ (t − t0).
 - `f0`            : delay reference frequency (Hz); delay phase ∝ (f − f0).
 - `scan_names`    : scan label of each distinct `scan_of_time` id, in the order
@@ -161,13 +163,16 @@ placed in a `PerScan` or `PerSpectralWindow` segment by matching the name,
 never the raw integer id or the coordinate. Name vectors may be left empty,
 in which case a solution carrying such a segmentation applies only to a grid
 with identical labelling. A non-empty name vector must have one entry per
-distinct id (checked here).
+distinct id (checked here). Channel widths are what place a foreign channel in
+a `ChannelBlocks` or `FreqGroups` segment; without them such a solution applies
+only to an identical channel grid.
 """
 struct DataGeometry
     times::Vector{Float64}
     scan_of_time::Vector{Int}
     channel_freqs::Vector{Float64}
     spw_of_chan::Vector{Int}
+    channel_widths::Vector{Float64}
     t0::Float64
     f0::Float64
     scan_names::Vector{String}
@@ -180,6 +185,7 @@ function DataGeometry(;
         channel_freqs::AbstractVector{<:Real},
         scan_of_time::AbstractVector{<:Integer} = ones(Int, length(times)),
         spw_of_chan::AbstractVector{<:Integer} = ones(Int, length(channel_freqs)),
+        channel_widths::AbstractVector{<:Real} = Float64[],
         t0::Real = isempty(times) ? 0.0 : first(times),
         f0::Real = isempty(channel_freqs) ? 0.0 : sum(channel_freqs) / length(channel_freqs),
         scan_names::AbstractVector{<:AbstractString} = String[],
@@ -197,13 +203,21 @@ function DataGeometry(;
                 "channel_freqs length $(length(channel_freqs))"
         )
     )
+    isempty(channel_widths) || length(channel_widths) == length(channel_freqs) || throw(
+        DimensionMismatch(
+            "channel_widths length $(length(channel_widths)) ≠ " *
+                "channel_freqs length $(length(channel_freqs))"
+        )
+    )
+    all(w -> isfinite(w) && w > 0, channel_widths) ||
+        throw(ArgumentError("DataGeometry: channel widths must be finite and positive"))
     _check_names("scan_names", scan_names, scan_of_time)
     _check_names("spw_names", spw_names, spw_of_chan)
     allunique(stations) || throw(ArgumentError("DataGeometry: station names repeat: $(join(stations, ", "))"))
     return DataGeometry(
         Float64.(collect(times)), Int.(collect(scan_of_time)),
         Float64.(collect(channel_freqs)), Int.(collect(spw_of_chan)),
-        Float64(t0), Float64(f0),
+        Float64.(collect(channel_widths)), Float64(t0), Float64(f0),
         String.(collect(scan_names)), String.(collect(spw_names)), String.(collect(stations)),
     )
 end
@@ -665,37 +679,56 @@ function time_segment_ids(
     return out
 end
 
-# `FreqGroups` and `ChannelBlocks` cut the channel INDEX axis, so they mean the
-# same thing on another grid only when that grid indexes the same channels.
+# `FreqGroups` and `ChannelBlocks` cut the solve's channel axis, so a foreign
+# channel takes the segment of the solve channel it is: the same center
+# frequency, and no wider.
 function freq_segment_ids(
         seg::Union{FreqGroups, ChannelBlocks}, solve::DataGeometry, target::DataGeometry;
         chan_idx = eachindex(target.channel_freqs),
     )
-    _require_same_channels(seg, solve, target)
     ids, _ = freq_segment_ids(seg, solve)
-    return ids[chan_idx]
-end
-
-function _require_same_channels(seg, solve::DataGeometry, target::DataGeometry)
-    ns = nchannels(solve)
-    nt = nchannels(target)
-    ns == nt || throw(
-        ArgumentError(
-            "$(_seg_label(seg)) segments the channel axis by index, so it applies only to an " *
-                "identical channel layout; the target has $nt channels and the solution $ns."
-        )
-    )
-    for c in eachindex(target.channel_freqs, solve.channel_freqs)
-        isapprox(target.channel_freqs[c], solve.channel_freqs[c]; rtol = _FREQ_RTOL) || throw(
+    _same_channels(solve, target) && return ids[chan_idx]
+    for (g, which) in ((solve, "SOLUTION"), (target, "TARGET"))
+        isempty(g.channel_widths) && throw(
             ArgumentError(
-                "$(_seg_label(seg)) segments the channel axis by index, so it applies only to " *
-                    "an identical channel layout; target channel $c is at " *
-                    "$(target.channel_freqs[c]) Hz and the solution's at " *
-                    "$(solve.channel_freqs[c]) Hz."
+                "$(_seg_label(seg)): the $which geometry states no channel widths, so a " *
+                    "channel of a different grid cannot be matched to the solution's. Build it " *
+                    "with `DataGeometry(ps)`, which reads them."
             )
         )
     end
-    return nothing
+    perm = sortperm(solve.channel_freqs)
+    sf = solve.channel_freqs[perm]
+    return [ids[_matching_channel(seg, solve, target, perm, sf, c)] for c in chan_idx]
+end
+
+function _same_channels(a::DataGeometry, b::DataGeometry)
+    close(x, y) = length(x) == length(y) && all(isapprox(u, v; rtol = _FREQ_RTOL) for (u, v) in zip(x, y))
+    close(a.channel_freqs, b.channel_freqs) || return false
+    return isempty(a.channel_widths) || isempty(b.channel_widths) || close(a.channel_widths, b.channel_widths)
+end
+
+function _matching_channel(seg, solve::DataGeometry, target::DataGeometry, perm, sf, c)
+    f = target.channel_freqs[c]
+    tol = _FREQ_RTOL * abs(f)
+    j = searchsortedfirst(sf, f - tol)
+    (j <= length(sf) && abs(sf[j] - f) <= tol) || throw(
+        ArgumentError(
+            "$(_seg_label(seg)): the target channel at $f Hz is not a channel of the " *
+                "solution — the nearest is at $(_nearest(sf, f)) Hz. A solution segmented by " *
+                "channel cannot be resampled onto a different channel grid."
+        )
+    )
+    k = perm[j]
+    w, ws = target.channel_widths[c], solve.channel_widths[k]
+    w <= ws * (1 + _FREQ_RTOL) || throw(
+        ArgumentError(
+            "$(_seg_label(seg)): the target channel at $f Hz is $w Hz wide, wider than the " *
+                "solution's $ws Hz channel there — it averages channels the solution " *
+                "segments separately, so no single segment applies."
+        )
+    )
+    return k
 end
 
 # First-appearance raw bin → dense segment id, the map `_dense_rank` builds

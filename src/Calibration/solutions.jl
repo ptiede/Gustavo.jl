@@ -487,7 +487,8 @@ end
 
 The geometry a solve over `ps` runs on: the sorted distinct channel
 frequencies (Hz) and time samples (seconds) of every Measurement Set, each
-channel's spectral window from [`XRadio.spectralwindow`](@ref), each time's
+channel's spectral window from [`XRadio.spectralwindow`](@ref) and width from
+the frequency coordinate's `channel_width`, each time's
 scan from the `scan_name` coordinate, and the stations, every antenna named
 in an antenna dataset, in the order first seen. `f0` defaults to the mean
 channel frequency, `t0` to the first time.
@@ -495,8 +496,8 @@ channel frequency, `t0` to the first time.
 A Measurement Set may hold several scans. Sub-arrays observing different
 scans at the same timestamps are supported when their station sets are
 disjoint and they share the whole scan window, as for
-`DataGeometry`. Throws when a Measurement Set states no `scan_name`,
-when a frequency falls in two spectral windows, when two scans share a
+`DataGeometry`. Throws when a Measurement Set states no `scan_name` or `channel_width`,
+when a frequency falls in two spectral windows or has two widths, when two scans share a
 timestamp and a station, and when a scan overlaps another over part of its
 span.
 """
@@ -505,6 +506,7 @@ function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
     pieces = [
         (;
                 freqs = Float64.(XRadio.frequencies(ms)), spw = XRadio.spectralwindow(ms),
+                width = _channel_width(ms),
                 times = Float64.(XRadio.times(ms)), scans = _scan_labels(ms),
                 active = Set{String}(Iterators.flatten(XRadio.baselines(ms))),
             ) for ms in ps
@@ -514,6 +516,17 @@ function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
         String(name) in stations || push!(stations, String(name))
     end
     return _span_geometry(pieces, stations; f0, t0)
+end
+
+function _channel_width(ms::XRadio.MeasurementSet)
+    meta = DimensionalData.metadata(DimensionalData.lookup(ms[:visibility], XRadio.Frequency))
+    (meta isa AbstractDict && haskey(meta, :channel_width)) || throw(
+        ArgumentError(
+            "a Measurement Set's frequency coordinate states no `channel_width`; the " *
+                "geometry records each channel's width"
+        )
+    )
+    return abs(Float64(XRadio.value(meta[:channel_width])))
 end
 
 function _scan_labels(ms::XRadio.MeasurementSet)
@@ -531,6 +544,7 @@ end
 # by the stations in `active`.
 function _span_geometry(pieces, stations; f0, t0)
     freq_spw = Dict{Float64, String}()
+    freq_width = Dict{Float64, Float64}()
     time_scan = Dict{Float64, String}()
     time_stations = Dict{Float64, Set{String}}()
     time_canon = Float64[]
@@ -546,6 +560,13 @@ function _span_geometry(pieces, stations; f0, t0)
                 )
             )
             freq_spw[f] = piece.spw
+            w = get!(freq_width, f, piece.width)
+            w == piece.width || throw(
+                ArgumentError(
+                    "channel frequency $f Hz has widths $w Hz and $(piece.width) Hz in " *
+                        "different Measurement Sets of spectral window '$(piece.spw)'"
+                )
+            )
         end
         for (t, scan) in zip(piece.times, piece.scans)
             tk = _canonical_time!(time_canon, t)
@@ -605,7 +626,8 @@ function _span_geometry(pieces, stations; f0, t0)
     t0v = isnothing(t0) ? (isempty(times) ? 0.0 : first(times)) : Float64(t0)
 
     return DataGeometry(;
-        times, channel_freqs = freqs, scan_of_time, spw_of_chan, t0 = t0v, f0 = f0v,
+        times, channel_freqs = freqs, scan_of_time, spw_of_chan,
+        channel_widths = [freq_width[f] for f in freqs], t0 = t0v, f0 = f0v,
         scan_names = _unique_in_order(scan_labels), spw_names = _unique_in_order(spw_labels),
         stations,
     )
