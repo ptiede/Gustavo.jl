@@ -160,3 +160,7 @@ function _build_fringe_ps(;
         bandpass, amp_bandpass, dtec, f0, t0_sec = t0, bl_pairs, polarizations, feeds,
     )
 end
+
+# A correction dividing out `sol` as `fit` divides out an earlier step's
+# solution: a degenerate gain leaves the sample, and no flags are applied.
+_precal(sol) = calibrate!(sol; flag_bad = false, apply_flags = false)

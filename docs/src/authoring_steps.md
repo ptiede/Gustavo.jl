@@ -10,8 +10,8 @@ model it solves and fits it, reading each scan group through
 worked example: the shipped per-integration phase step, [`AdhocPhase`](@ref).
 
 A step is a [`SolveStep`](@ref), which solves gains. Corrections, which
-change what later steps read, are functions from a Measurement Set to a
-Measurement Set ([`AbstractDataTransform`](@ref)) instead.
+change what later steps read, are functions that modify a Measurement Set in
+place and return it ([`AbstractDataTransform`](@ref)) instead.
 
 ## The contract at a glance
 
@@ -160,5 +160,5 @@ selection. To fit a step on a subset of the scans, fit it on that subset and
 carry its solution into the full-data fit as a correction:
 
     fr = fit(BaselineFringeFit(; gauge), data)
-    bp = fit(ApplySolution(fr) |> Bandpass(; gauge), calibrator_scans)
-    sol = fit(ApplySolution(fr) |> ApplySolution(bp) |> AdhocPhase(; gauge), data)
+    bp = fit(calibrate!(fr) |> Bandpass(; gauge), calibrator_scans)
+    sol = fit(calibrate!(fr) |> calibrate!(bp) |> AdhocPhase(; gauge), data)

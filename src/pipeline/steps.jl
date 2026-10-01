@@ -85,8 +85,8 @@ To fit the bandpass on calibrator scans only, fit it on those scans and carry
 the solution into the full-data fit as a correction:
 
     fr = fit(BaselineFringeFit(; gauge), data)
-    bp = fit(ApplySolution(fr) |> Bandpass(; gauge), calibrator_scans)
-    sol = fit(ApplySolution(fr) |> ApplySolution(bp) |> AdhocPhase(; gauge), data)
+    bp = fit(calibrate!(fr) |> Bandpass(; gauge), calibrator_scans)
+    sol = fit(calibrate!(fr) |> calibrate!(bp) |> AdhocPhase(; gauge), data)
 """
 Base.@kwdef struct Bandpass{M <: GainModel, S <: Fring.AbstractBandpassSmoother, G <: AbstractGauge} <: SolveStep
     model::M = Fring.default_bandpass_terms()

@@ -12,7 +12,7 @@
 
 @testset "station gauge: every scan pinned, undetermined columns throw" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
-    at_ref(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params[XRadio.AntennaName(At("A1"))]
+    at_ref(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params[AntennaName(At("A1"))]
 
     # A track-global inter-feed delay couples the scans without moving the gauge.
     glob = BaselineFringeFit(; model = FP.default_fringe_terms(; rel_time = CAL.GlobalTime()), gauge = PinAntenna(1))
@@ -42,7 +42,7 @@ end
 @testset "custom gauges drive the station solve" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
     params(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params
-    at(sol, key, name) = params(sol, key)[XRadio.AntennaName(At(name))]
+    at(sol, key, name) = params(sol, key)[AntennaName(At(name))]
     # Every station's value less station `i`'s: invariant under the gauge.
     rel(sol, key, i) = (p = parent(params(sol, key)); p .- p[:, :, :, :, i:i])
     pinned = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
@@ -65,7 +65,7 @@ end
 @testset "each step applies its own gauge" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64)
     sol = fit(BaselineFringeFit(; gauge = PinAntenna("A1")) |> AdhocPhase(; gauge = PinAntenna("A2")), ps)
-    at(c, name) = c.params[XRadio.AntennaName(At(name))]
+    at(c, name) = c.params[AntennaName(At(name))]
     mbd = only(c for c in sol[:fringe].components if last(c.path) === :mbd)
     adhoc = only(sol[:adhoc].components)
     @test all(iszero, at(mbd, "A1"))
@@ -216,7 +216,7 @@ end
 
     @testset "corrections before the step, including a function" begin
         ps, _ = _build_fringe_ps()
-        ws = DimArray([1.0, 0.5, 1.0, 2.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
+        ws = DimArray([1.0, 0.5, 1.0, 2.0], AntennaName(["A1", "A2", "A3", "A4"]))
         # Weight scale: the search is invariant (snr from the |D|² plane), so
         # the fringe θ matches the untransformed solve bit-for-bit.
         sol_ws = fit(
@@ -235,13 +235,10 @@ end
         touched = Threads.Atomic{Int}(0)
         function kill12(ms)
             Threads.atomic_add!(touched, 1)
-            out = copy(ms)
-            flag = DimensionalData.modify(Array, ms[:flag])
             for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
-                is12(a, b) && (view(flag, BaselineID(bi)) .= true)
+                is12(a, b) && (view(ms[:flag], BaselineID(bi)) .= true)
             end
-            out[:flag] = flag
-            return out
+            return ms
         end
         pipeline_cf = (kill12, BaselineFringeFit(; gauge = PinAntenna(1)))
         sol_cf = fit(pipeline_cf, ps)

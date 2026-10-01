@@ -638,10 +638,10 @@ end
     cell = (UV.AntennaPair(At(("A1", "A2"))), UV.FeedPair(At((1, 1))))
     # Station terms predicting the blind peak for that cell.
     delay, rate = map(1:2) do _
-        DimArray(zeros(3, 2), (XRadio.AntennaName(["A1", "A2", "A3"]), UV.Feed(1:2)))
+        DimArray(zeros(3, 2), (AntennaName(["A1", "A2", "A3"]), UV.Feed(1:2)))
     end
-    delay[XRadio.AntennaName(At("A1")), UV.Feed(1)] = res[:delay][cell...]
-    rate[XRadio.AntennaName(At("A1")), UV.Feed(1)] = res[:rate][cell...]
+    delay[AntennaName(At("A1")), UV.Feed(1)] = res[:delay][cell...]
+    rate[AntennaName(At("A1")), UV.Feed(1)] = res[:rate][cell...]
     s = FR.steer_scan(ps, geom, res, geom.f0, geom.t0, delay, rate)
     @test eltype(s.amp) === Float32
     @test s.amp[cell...] ≈ res[:amp][cell...] rtol = 1.0e-5

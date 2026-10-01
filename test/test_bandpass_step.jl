@@ -9,7 +9,7 @@
 # - The refine kernels (dTEC, SBD) are inner-invariant and recover the
 #   injected dTEC standalone on a scan view.
 # - selection (`sol[:bandpass]`) extracts a portable bandpass-only solution and
-#   `ApplySolution` applies it same-set (index-aligned) and cross-set
+#   `calibrate!` applies it same-set (index-aligned) and cross-set
 #   (station-name-mapped, channel-layout-validated, time-constant only).
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
@@ -216,9 +216,9 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test ar_rms < 0.85 * wh_rms
     end
 
-    @testset "portable ApplySolution: same-set + cross-set by station name" begin
+    @testset "portable calibrate!: same-set + cross-set by station name" begin
         bps = sol_n[:bandpass]
-        correct(t, ps) = [Gustavo._correct(t, read(ms), CAL.DataGeometry(ps)) for ms in values(ps)]
+        correct(sol, ps) = collect(values(calibrate!(sol, deepcopy(ps); flag_bad = false, apply_flags = false)))
         # `ms` with the gains `g[c, t, station, feed]` divided out, stations by
         # position in the solution's antenna names.
         function divided(ms, g; tconst = false)
@@ -242,7 +242,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         end
 
         # Same set (identical geometry): index-aligned division.
-        for (ms, out) in zip(values(ps), correct(ApplySolution(bps), ps))
+        for (ms, out) in zip(values(ps), correct(bps, ps))
             win = CAL.GeometryWindow(bps.geom, ms)
             V, W = divided(ms, parent(gains(bps, win)))
             @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
@@ -252,7 +252,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         # the time-constant bandpass ports, stations matched by name.
         uvsub, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5)
         @test CAL.DataGeometry(uvsub).times != bps.geom.times
-        for (ms, out) in zip(values(uvsub), correct(ApplySolution(bps), uvsub))
+        for (ms, out) in zip(values(uvsub), correct(bps, uvsub))
             chan = CAL.GeometryWindow(bps.geom, ms).chan_idx
             V, W = divided(ms, parent(gains(bps, CAL.GeometryWindow(bps.geom, chan, 1:1))); tconst = true)
             @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
@@ -260,17 +260,17 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
         # A station the solution never saw keeps identity gains (with a warning).
         uvbig, _ = _build_fringe_ps(; nant = 5, nspw, nchan, ntime = 5)
-        @test_logs (:warn, r"A5") match_mode = :any correct(ApplySolution(bps), uvbig)
+        @test_logs (:warn, r"A5") match_mode = :any correct(bps, uvbig)
 
         # A time-VARYING solution ports the same way: `sol_n`'s fringe terms are
         # per scan, and `uvsub` is the same scan sampled over fewer APs, so every
         # target sample places in the scan it belongs to.
-        @test all(ms -> ms isa XRadio.MeasurementSet, correct(ApplySolution(sol_n), uvsub))
+        @test all(ms -> ms isa XRadio.MeasurementSet, correct(sol_n, uvsub))
 
         # A bandpass segments the solve's channels: a set holding some of them
         # takes their segments, matched by frequency…
         uvnc, _ = _build_fringe_ps(; nant = 3, nspw, nchan = 4, ntime = 5)
-        for (ms, out) in zip(values(uvnc), correct(ApplySolution(bps), uvnc))
+        for (ms, out) in zip(values(uvnc), correct(bps, uvnc))
             chan = CAL.GeometryWindow(bps.geom, ms).chan_idx
             V, W = divided(ms, parent(gains(bps, CAL.GeometryWindow(bps.geom, chan, 1:1))); tconst = true)
             @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
@@ -278,12 +278,12 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         # …while wider channels on the same centers, or channels between the
         # solve's, have no segment to place against…
         uvwide, _ = _build_fringe_ps(; nant = 3, nspw, nchan = 4, ntime = 5, chan_bw = 4.0e6)
-        @test_throws "wider than the solution's" correct(ApplySolution(bps), uvwide)
+        @test_throws "wider than the solution's" correct(bps, uvwide)
         uvoff, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, ref_freq = 230.0e9 + 1.0e6)
-        @test_throws "not a channel of the solution" correct(ApplySolution(bps), uvoff)
+        @test_throws "not a channel of the solution" correct(bps, uvoff)
         # …and a scan the solve never saw is refused, not served by a neighbour.
         uv2, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
-        @test_throws "is not in the solution" correct(ApplySolution(sol_n), uv2)
+        @test_throws "is not in the solution" correct(sol_n, uv2)
         # Stations are matched by name; a solution sharing none is refused.
         g = bps.geom
         others = ["Q$i" for i in eachindex(g.stations)]
@@ -298,7 +298,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             ],
             bps.steps, bps.info,
         )
-        @test_throws "shares no station with this data" correct(ApplySolution(strangers), uvsub)
+        @test_throws "shares no station with this data" correct(strangers, uvsub)
     end
 
 end

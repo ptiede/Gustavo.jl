@@ -75,7 +75,7 @@ using XRadio: XRadio, ProcessingSet, MeasurementSet
         info = DimensionalData.metadata(leaf)
         ant = DimensionalData.branches(ps[first(keys(ps))])[:antenna]
         names = String.(collect(info.antennas.name))
-        @test collect(lookup(ant[:station_name], XRadio.AntennaName)) == names
+        @test collect(lookup(ant[:station_name], AntennaName)) == names
         @test collect(ant[:station_name]) == names
         # Positions are (cartesian_pos_label, antenna_name) in Julia order.
         @test size(parent(ant[:antenna_position])) == (3, length(names))

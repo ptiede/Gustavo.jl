@@ -52,54 +52,70 @@ end
     geom = CALc.DataGeometry(ps)
     sol = _hand_solution(geom)
     ms = read(first(ps))
+    fresh() = deepcopy(ms)
 
-    @testset "ApplySolution divides out the gains" begin
-        out = Gustavo._correct(ApplySolution(sol), ms, geom)
+    @testset "calibrate! divides out the gains in place" begin
+        target = fresh()
+        out = calibrate!(sol, target; apply_flags = false)
+        @test out === target
         @test _division_error(out, ms, sol, geom) < 1.0e-6
         @test parent(out[:flag]) == parent(ms[:flag])
-        # The input is not modified.
-        @test isequal(parent(ms[:visibility]), parent(read(first(ps))[:visibility]))
     end
 
-    @testset "ApplySolution on a Measurement Set alone" begin
+    @testset "calibrate! on one window matches the run's geometry" begin
         # A per-channel segmentation of the whole set places each channel of one
         # window by frequency: the same correction a pipeline applies.
         for m in values(ps)
             one = read(m)
             @test isequal(
-                parent(ApplySolution(sol)(one)[:visibility]),
-                parent(Gustavo._correct(ApplySolution(sol), one, geom)[:visibility]),
+                parent(calibrate!(sol, deepcopy(one))[:visibility]),
+                parent(Gustavo._correct(calibrate!(sol), deepcopy(one), geom)[:visibility]),
             )
         end
         # A solution segmented only by name applies with the window's own geometry.
-        onewin = _hand_solution(CALc.DataGeometry(Gustavo._one_member(ms)))
         own = CALc.DataGeometry(Gustavo._one_member(ms))
-        @test _division_error(ApplySolution(onewin)(ms), ms, onewin, own) < 1.0e-6
+        onewin = _hand_solution(own)
+        @test _division_error(calibrate!(onewin, fresh()), ms, onewin, own) < 1.0e-6
     end
 
-    @testset "ApplySolution matches stations by name" begin
+    @testset "calibrate! matches stations by name" begin
         @test_throws "must name its stations" CALc.CalibrationSolution(_with_stations(geom, String[]), sol.components)
         strangers = _hand_solution(_with_stations(geom, ["X1", "X2", "X3", "X4"]))
-        @test_throws "shares no station" Gustavo._correct(ApplySolution(strangers), ms, geom)
+        @test_throws "shares no station" calibrate!(strangers, fresh())
         # A station the solution lacks keeps identity gains.
         partial = _hand_solution(_with_stations(geom, ["A1", "A2", "A3", "X4"]))
-        out = @test_logs (:warn, r"not in the solution") Gustavo._correct(ApplySolution(partial), ms, geom)
+        out = @test_logs (:warn, r"not in the solution") calibrate!(partial, fresh())
         a4 = findall(p -> "A4" in p, collect(XRadio.baselines(ms)))
         @test parent(out[:visibility][BaselineID = a4]) == parent(ms[:visibility][BaselineID = a4])
     end
 
+    @testset "calibrate!(sol) is a correction that composes" begin
+        g = calibrate!(sol; apply_flags = false)
+        @test g isa GainCorrection
+        @test sprint(show, g) == "calibrate!(hand; apply_flags = false)"
+        ref = calibrate!(sol, fresh(); apply_flags = false)
+        @test isequal(parent(g(fresh())[:visibility]), parent(ref[:visibility]))
+        twice = (g ∘ g)(fresh())
+        @test isequal(parent(twice[:visibility]), parent(g(ref)[:visibility]))
+        @test g |> GroupProbe() isa Tuple{GainCorrection, GroupProbe}
+        @test g |> g isa Tuple{GainCorrection, GainCorrection}
+        @test startswith(fit(g |> GroupProbe(), ps).provenance.pipeline, "calibrate!(hand; apply_flags = false) |> ")
+    end
+
     @testset "StationWeightScale" begin
-        scale = DimArray([2.0, 5.0], XRadio.AntennaName(["A2", "ZZ"]))
-        out = StationWeightScale(scale)(ms)
+        scale = DimArray([2.0, 5.0], AntennaName(["A2", "ZZ"]))
+        target = fresh()
+        out = StationWeightScale(scale)(target)
+        @test out === target
         for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
             f = ("A2" in (a, b)) ? 2.0 : 1.0
             @test parent(out[:weight][BaselineID = bi]) ≈ f .* parent(ms[:weight][BaselineID = bi])
         end
         @test parent(out[:visibility]) == parent(ms[:visibility])
         # In a pipeline it is the same correction.
-        @test parent(Gustavo._correct(StationWeightScale(scale), ms, geom)[:weight]) == parent(out[:weight])
-        @test_throws "finite and positive" StationWeightScale(DimArray([1.0, 0.0], XRadio.AntennaName(["A1", "A2"])))
-        @test_throws "named more than once" StationWeightScale(DimArray([1.0, 2.0], XRadio.AntennaName(["A1", "A1"])))
+        @test parent(Gustavo._correct(StationWeightScale(scale), fresh(), geom)[:weight]) == parent(out[:weight])
+        @test_throws "finite and positive" StationWeightScale(DimArray([1.0, 0.0], AntennaName(["A1", "A2"])))
+        @test_throws "named more than once" StationWeightScale(DimArray([1.0, 2.0], AntennaName(["A1", "A1"])))
         @test_throws "index the factors by `AntennaName`" StationWeightScale(DimArray([1.0], XRadio.StationName(["A1"])))
     end
 
@@ -108,25 +124,48 @@ end
         hit = freqs[[1, end]]
         mask = DimArray(map(in(hit), freqs), Frequency(freqs))
         for m in values(ps)
-            one = read(m)
+            one = deepcopy(read(m))
             out = FlagChannels(mask)(one)
+            @test out === one
             for (c, f) in enumerate(XRadio.frequencies(one))
                 @test all(parent(out[:flag][Frequency = c])) == (f in hit)
             end
         end
         @test sprint(show, FlagChannels(mask)) == "FlagChannels(2 of $(length(freqs)) channels)"
         partial = DimArray(trues(2), Frequency(freqs[1:2]))
-        @test_throws "does not cover the channel" FlagChannels(partial)(ms)
+        @test_throws "does not cover the channel" FlagChannels(partial)(fresh())
         @test_throws "index the mask by `Frequency`" FlagChannels(DimArray(trues(2), Ti([1.0, 2.0])))
         @test_throws "more than once" FlagChannels(DimArray(trues(2), Frequency([1.0, 1.0])))
     end
 
     @testset "AutocorrelationNormalization" begin
         auto = _set_autocorrelations!(_autocorrelated_ms())
-        @test isequal(
-            parent(AutocorrelationNormalization()(auto)[:visibility]),
-            parent(Gustavo.UVData.normalize_by_autocorrelations(auto)[:visibility]),
-        )
+        ref = Gustavo.UVData.normalize_by_autocorrelations(auto)
+        target = deepcopy(auto)
+        @test AutocorrelationNormalization()(target) === target
+        @test isequal(parent(target[:visibility]), parent(ref[:visibility]))
+    end
+
+    @testset "a correction returns the Measurement Set it modified" begin
+        copying(m) = deepcopy(m)
+        @test_throws "returned a different MeasurementSet" fit((copying, GroupProbe()), ps)
+        @test_throws "returned a Nothing" fit((m -> nothing, GroupProbe()), ps)
+    end
+
+    @testset "fit hands every correction one private copy of the group" begin
+        before = deepcopy(ps)
+        seen = []
+        record(m) = (push!(seen, parent(m[:visibility])); m)
+        serial = ExecutionConfig(; inner_executor = SerialScheduler())
+        _probe((record, _halve_weights, record) |> GroupProbe(), ps; exec = serial)
+        # Both records of a member see the same array, never the caller's.
+        @test all(seen[k] === seen[k + 1] for k in 1:2:length(seen))
+        callers = [parent(m[:visibility]) for m in values(ps)]
+        @test !any(v -> any(c -> c === v, callers), seen)
+        for k in keys(ps)
+            @test isequal(parent(ps[k][:visibility]), parent(before[k][:visibility]))
+            @test parent(ps[k][:weight]) == parent(before[k][:weight])
+        end
     end
 end
 
@@ -139,7 +178,7 @@ end
         out = calibrate(sol, ps; apply_flags = false)
         @test collect(keys(out)) == collect(keys(ps))
         for (name, lazy) in pairs(ps)
-            ref = Gustavo._correct(ApplySolution(sol), read(lazy), geom)
+            ref = Gustavo._correct(calibrate!(sol; apply_flags = false), deepcopy(read(lazy)), geom)
             @test isequal(parent(out[name][:visibility]), parent(ref[:visibility]))
             @test parent(out[name][:weight]) == parent(ref[:weight])
             @test !any(parent(out[name][:flag]))
@@ -161,6 +200,13 @@ end
         out = calibrate(sol, ps; post = _halve_weights, apply_flags = false)
         ref = calibrate(sol, ps; apply_flags = false)
         @test all(parent(out[k][:weight]) == parent(ref[k][:weight]) ./ 2 for k in keys(ps))
+    end
+
+    @testset "leaves its input as it was" begin
+        before = deepcopy(ps)
+        calibrate(sol, ps)
+        @test all(isequal(parent(ps[k][:visibility]), parent(before[k][:visibility])) for k in keys(ps))
+        @test all(parent(ps[k][:flag]) == parent(before[k][:flag]) for k in keys(ps))
     end
 
     @testset "a degenerate gain flags the sample" begin

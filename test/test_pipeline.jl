@@ -255,22 +255,19 @@ end
 
     # `post` runs on each corrected member: the same as applying it to every
     # member of the corrected set.
-    halve(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w -> w ./ 2, ms[:weight]))
+    halve(ms) = (parent(ms[:weight]) ./= 2; ms)
     out_post = calibrate(sol_ref, ps; post = halve)
     for (k, ms) in pairs(out_fused)
-        @test parent(out_post[k][:weight]) == parent(halve(ms)[:weight])
+        @test parent(out_post[k][:weight]) == parent(ms[:weight]) ./ 2
         @test isequal(parent(out_post[k][:visibility]), parent(ms[:visibility]))
     end
 end
 
 @testset "Cross-run step composition ≡ within-run pipeline" begin
-    # A multi-step pipeline's within-run composition (`_run_pipeline` appends
-    # each finished step's solution as an `ApplySolution` before the next
-    # step's pass) is the SAME mechanism a caller invokes by hand across
-    # separate `fit` calls via selection/`ApplySolution`. Fitting `A |>
-    # B` in one call must solve the SAME B-step θ as fitting `A` alone, then
-    # fitting `ApplySolution(sol_a[:fringe]) |> B` in a later,
-    # unrelated call.
+    # Within a run, each finished step's solution is divided out before the
+    # next step's pass, as `calibrate!` does across separate `fit` calls.
+    # Fitting `A |> B` in one call must solve the same B-step θ as fitting `A`
+    # alone, then fitting `_precal(sol_a[:fringe]) |> B` in a later call.
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
@@ -279,7 +276,7 @@ end
     sol_within = fit(ff |> bp, ps)
 
     sol_a = fit(ff, ps)
-    sol_cross = fit(ApplySolution(sol_a[:fringe]) |> bp, ps)
+    sol_cross = fit(_precal(sol_a[:fringe]) |> bp, ps)
 
     θ_within = [parent(c.params) for c in sol_within[:bandpass].components]
     θ_cross = [parent(c.params) for c in sol_cross[:bandpass].components]

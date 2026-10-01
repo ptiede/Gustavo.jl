@@ -5,7 +5,7 @@
 # - θ is bit-deterministic across runs, and the multi-scan solve flattens the
 #   data.
 # - A pipeline is the same as its steps fit one at a time, chained through
-#   `ApplySolution`, and never writes the caller's data.
+#   `calibrate!`, and never writes the caller's data.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
@@ -94,10 +94,10 @@ end
 
     @testset "a pipeline ≡ its steps fit separately" begin
         # The oracle is the composition a caller can write by hand: separate
-        # `fit` calls of one step each, chained through `ApplySolution`.
+        # `fit` calls of one step each, chained through `calibrate!`.
         bp = Bandpass(; gauge)
         adhoc_step = AdhocPhase(adhoc; gauge)
-        pre = ApplySolution(sol_n[:fringe])
+        pre = _precal(sol_n[:fringe])
 
         sol_pipe = fit(pre |> bp |> adhoc_step, ps)
         @test collect(keys(sol_pipe.steps)) == [:bandpass, :adhoc]
@@ -107,18 +107,18 @@ end
         @test any(!=(0), _step_θ(sol_pipe, :adhoc))
 
         sol_a = fit(pre |> bp, ps)
-        bandpass_tf = ApplySolution(sol_a[:bandpass])
-        sol_b = fit(pre |> bandpass_tf |> adhoc_step, ps)
+        bandpass_tf = _precal(sol_a[:bandpass])
+        sol_b = fit((pre, bandpass_tf, adhoc_step), ps)
         @test sol_pipe[:bandpass].components == sol_a[:bandpass].components
         @test sol_pipe[:adhoc].components == sol_b[:adhoc].components
 
         sol_3 = fit(BaselineFringeFit(; gauge) |> bp |> adhoc_step, ps)
         @test collect(keys(sol_3.steps)) == [:fringe, :bandpass, :adhoc]
         sol_f1 = fit(BaselineFringeFit(; gauge), ps)
-        pre_f = ApplySolution(sol_f1[:fringe])
+        pre_f = _precal(sol_f1[:fringe])
         sol_b1 = fit(pre_f |> bp, ps)
-        pre_b = ApplySolution(sol_b1[:bandpass])
-        sol_a1 = fit(pre_f |> pre_b |> adhoc_step, ps)
+        pre_b = _precal(sol_b1[:bandpass])
+        sol_a1 = fit((pre_f, pre_b, adhoc_step), ps)
         @test sol_3[:fringe].components == sol_f1[:fringe].components
         @test sol_3[:bandpass].components == sol_b1[:bandpass].components
         @test sol_3[:adhoc].components == sol_a1[:adhoc].components

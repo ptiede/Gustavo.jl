@@ -27,5 +27,5 @@
     dropped, _ = _build_fringe_ps(; nant = 4, nspw = 1, omit_station = 2)
     ms = only(values(dropped))
     @test "A2" ∉ ms[:baseline_antenna1_name] && "A2" ∉ ms[:baseline_antenna2_name]
-    @test "A2" in collect(lookup(ms.antenna, XRadio.AntennaName))
+    @test "A2" in collect(lookup(ms.antenna, AntennaName))
 end

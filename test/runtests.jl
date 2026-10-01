@@ -76,7 +76,7 @@ include("test_axis_order.jl")
 include("test_fringe_step.jl")
 
 # The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
-# vs the frozen monolith, step-selection extraction + portable ApplySolution.
+# vs the frozen monolith, step-selection extraction + portable calibrate!.
 include("test_bandpass_step.jl")
 
 # Bandpass(smoother = JointSmoother()): the alternating complex-visibility +
@@ -204,7 +204,7 @@ end
 
     # The corrections a pipeline records, and reading scan groups in a step.
     for n in (
-            :AbstractDataTransform, :AutocorrelationNormalization, :ApplySolution,
+            :AbstractDataTransform, :AutocorrelationNormalization, :GainCorrection, :calibrate!,
             :StationWeightScale, :FlagChannels, :each_group, :ExecutionConfig,
         )
         @test n in top

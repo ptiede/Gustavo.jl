@@ -7,10 +7,12 @@
 @isdefined(CAL) || const CAL = Gustavo.Calibration
 @isdefined(FP) || const FP = Gustavo.Fring
 
-_swap_baselines(ms) = Gustavo._with_layers(
-    ms; baseline_antenna1_name = ms[:baseline_antenna2_name],
-    baseline_antenna2_name = ms[:baseline_antenna1_name],
-)
+function _swap_baselines(ms)
+    a1, a2 = ms[:baseline_antenna1_name], ms[:baseline_antenna2_name]
+    ms[:baseline_antenna1_name] = a2
+    ms[:baseline_antenna2_name] = a1
+    return ms
+end
 
 @testset "weighted_sums reduces named dimensions" begin
     rng = MersenneTwister(21)
@@ -124,7 +126,8 @@ function _offset_scans(ps, seed)
             for bi in axes(V, BaselineID)
                 view(V, BaselineID(bi)) .*= cis(Float32(φ[bi]))
             end
-            members[k] = Gustavo._with_layers(m; visibility = V)
+            m[:visibility] = V
+            members[k] = m
         end
     end
     return XRadio.ProcessingSet(members, DimensionalData.metadata(ps))

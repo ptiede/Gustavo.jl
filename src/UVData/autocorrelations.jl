@@ -1,7 +1,7 @@
 """
-    normalize_by_autocorrelations(ms::XRadio.MeasurementSet) -> MeasurementSet
+    normalize_by_autocorrelations!(ms::XRadio.MeasurementSet) -> ms
 
-A copy of `ms` whose cross-correlations are correlation coefficients. Each
+Make the cross-correlations of `ms` correlation coefficients, in place. Each
 visibility on baseline `(a, b)` relating feeds `(fa, fb)` is divided by
 `√(A_a · A_b)`, where `A_a` is the amplitude of antenna `a`'s autocorrelation of
 feed `fa` at the same channel and time, and its weight is multiplied by
@@ -12,11 +12,10 @@ A sample whose two autocorrelations are not both present, unflagged, finite
 and positive is flagged instead, and left undivided. The autocorrelation
 baselines are then flagged: MSv4 keeps them, but they are no longer data.
 
-A Measurement Set with no autocorrelation baselines is returned unchanged:
-its visibilities are taken to be normalized already, or to need no
-normalization.
+A Measurement Set with no autocorrelation baselines is left unchanged: its
+visibilities are taken to be normalized already, or to need no normalization.
 """
-function normalize_by_autocorrelations(ms::XRadio.MeasurementSet)
+function normalize_by_autocorrelations!(ms::XRadio.MeasurementSet)
     feeds = feed_pairs(ms)
     stations = baselines(ms).pairs
     autos = Dict(
@@ -25,9 +24,9 @@ function normalize_by_autocorrelations(ms::XRadio.MeasurementSet)
             for p in axes(feeds, 1) if allequal(feeds[p, bi])
     )
     isempty(autos) && return ms
-    vis = modify(Array, ms[:visibility])
-    weight = modify(Array, ms[:weight])
-    flag = modify(Array, ms[:flag])
+    vis = ms[:visibility]
+    weight = ms[:weight]
+    flag = ms[:flag]
     for (bi, (a, b)) in pairs(stations)
         a == b && continue
         for p in axes(feeds, 1)
@@ -41,12 +40,31 @@ function normalize_by_autocorrelations(ms::XRadio.MeasurementSet)
     for (bi, (a, b)) in pairs(stations)
         a == b && (view(flag, BaselineID(bi)) .= true)
     end
-    out = copy(ms)
-    out[:visibility] = vis
-    out[:weight] = weight
-    out[:flag] = flag
+    return ms
+end
+
+"""
+    normalize_by_autocorrelations(ms::XRadio.MeasurementSet) -> MeasurementSet
+
+[`normalize_by_autocorrelations!`](@ref) applied to an in-memory copy of `ms`;
+`ms` is left as it is.
+"""
+normalize_by_autocorrelations(ms::XRadio.MeasurementSet) = normalize_by_autocorrelations!(_read_owned(ms))
+
+# `ms` read into memory, with layers no other Measurement Set shares, so they can
+# be modified in place.
+function _read_owned(ms::XRadio.MeasurementSet)
+    out = read(ms)
+    for k in keys(out)
+        parent(out[k]) === parent(ms[k]) && (out[k] = copy(out[k]))
+    end
     return out
 end
+
+_read_owned(ps::XRadio.ProcessingSet) = XRadio.ProcessingSet(
+    OrderedDict{Symbol, XRadio.MeasurementSet}(k => _read_owned(ms) for (k, ms) in pairs(ps)),
+    copy(DimensionalData.metadata(ps)),
+)
 
 function _normalize_cell!(vis, weight, flag, cell, auto_a, auto_b)
     f = view(flag, cell...)

@@ -7,8 +7,8 @@
 
 @testset "Per-station weight scale" begin
     ps, _ = _build_fringe_ps()
-    ws = DimArray([1.0, 0.5, 0.5, 1.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
-    scale(name) = ws[XRadio.AntennaName(At(name))]
+    ws = DimArray([1.0, 0.5, 0.5, 1.0], AntennaName(["A1", "A2", "A3", "A4"]))
+    scale(name) = ws[AntennaName(At(name))]
 
     @testset "search is invariant; calibrated weights carry the fix" begin
         # The search's SNR is data-driven (noise estimated from the |D|² plane,

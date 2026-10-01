@@ -101,6 +101,7 @@ end
 
     @testset "leaves a set without autocorrelations unchanged" begin
         ms = XRadio.Testing.measurement_set()
-        @test UV.normalize_by_autocorrelations(ms) === ms
+        @test UV.normalize_by_autocorrelations!(ms) === ms
+        @test UV.normalize_by_autocorrelations(ms) !== ms
     end
 end

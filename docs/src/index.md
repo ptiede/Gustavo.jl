@@ -59,15 +59,17 @@ phase). Every step is optional and reorderable; a single standalone step is
 a legal pipeline.
 
 **Corrections.** A step solves gains; a correction changes what every step
-after it *reads*. A correction is a function from a Measurement Set to a
-corrected Measurement Set, applied to each Measurement Set of a scan group as
-the group is read. The ones a solution records and [`calibrate`](@ref)
-replays are [`AbstractDataTransform`](@ref) structs:
-[`AutocorrelationNormalization`](@ref), [`ApplySolution`](@ref),
-[`StationWeightScale`](@ref) and [`FlagChannels`](@ref). A plain function
-can sit in a pipeline too, written as a tuple or vector
-(`(my_flagging, BaselineFringeFit())`), since `f |> step` is Base's function
-application.
+after it *reads*. A correction is a function that modifies a Measurement Set
+in place and returns it, applied to each Measurement Set of a scan group as the
+group is read; `fit` and [`calibrate`](@ref) hand it a copy, so the data passed
+to them is left as it was. The built-in ones are
+[`AbstractDataTransform`](@ref) structs:
+[`AutocorrelationNormalization`](@ref), [`StationWeightScale`](@ref),
+[`FlagChannels`](@ref) and [`GainCorrection`](@ref), which carries in an
+earlier solution: `calibrate!(sol) |> Bandpass(; gauge)`. A
+plain function joins `|>` beside a solve step; elsewhere it is written into a
+tuple or vector (`(my_flagging, my_weighting, BaselineFringeFit())`), since
+`f |> g` is Base's function application.
 
 **Models.** Each solve step separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —

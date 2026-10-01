@@ -16,7 +16,7 @@ Gustavo.solve(s::GroupProbe, ctx) = (; seen = each_group(s.f, ctx))
 _probe(pipeline, data; kw...) =
     fit(pipeline, data; kw...).steps[:probe].seen
 
-_halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w -> w ./ 2, ms[:weight]))
+_halve_weights(ms) = (parent(ms[:weight]) ./= 2; ms)
 
 @testset "each_group" begin
     ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
@@ -49,8 +49,8 @@ _halve_weights(ms) = Gustavo._with_layers(ms; weight = DimensionalData.modify(w 
         @test first(findfirst("GroupProbe", sol.provenance.pipeline)) < first(findfirst("_halve_weights", sol.provenance.pipeline))
     end
 
-    @testset "a correction must return a Measurement Set" begin
-        @test_throws "must return a MeasurementSet" _probe(Any[ms -> 1, GroupProbe()], ps)
+    @testset "a correction must return the Measurement Set it is handed" begin
+        @test_throws "returned a Int64" _probe(Any[ms -> 1, GroupProbe()], ps)
     end
 
     @testset "a Measurement Set is fit as a processing set of one" begin

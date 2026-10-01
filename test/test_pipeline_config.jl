@@ -36,7 +36,7 @@
     @testset "a pipeline holds solve steps and transforms" begin
         ps, _ = _build_fringe_ps()
         @test_throws "not Symbol" fit([BaselineFringeFit(; gauge = PinAntenna(1)), :average], ps)
-        unit = DimArray(ones(4), XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
+        unit = DimArray(ones(4), AntennaName(["A1", "A2", "A3", "A4"]))
         @test_throws "holds no solve step" fit([StationWeightScale(unit)], ps)
     end
 
@@ -181,7 +181,7 @@ end
     end
 
     @testset "the solution records its pipeline, gauge included" begin
-        t = StationWeightScale(DimArray(ones(4), XRadio.AntennaName(["A1", "A2", "A3", "A4"])))
+        t = StationWeightScale(DimArray(ones(4), AntennaName(["A1", "A2", "A3", "A4"])))
         ff = BaselineFringeFit(; gauge = PinAntenna("A1"))
         sol = fit(t |> ff, ps)
         @test sol.provenance.pipeline == join((sprint(show, x; context = :limit => true) for x in (t, ff)), " |> ")

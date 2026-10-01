@@ -173,12 +173,13 @@ function each_group(f::F, ctx::SolveContext) where {F}
 end
 
 # One scan group read into memory, each Measurement Set passed through
-# `corrections`.
+# `corrections`. Corrections modify their input, so they get layers of their own.
 function _read_group(group::XRadio.ProcessingSet, corrections, geom::DataGeometry, executor)
     named = collect(pairs(group))
     # Typed `tmap`: the untyped form rejects `GreedyScheduler`.
     members = tmap(XRadio.MeasurementSet, named; scheduler = executor) do (_, ms)
-        _apply_corrections(corrections, read(ms), geom)
+        isempty(corrections) ? read(ms) :
+            _apply_corrections!(corrections, UVData._read_owned(ms), geom)
     end
     return XRadio.ProcessingSet(
         OrderedDict{Symbol, XRadio.MeasurementSet}(first.(named) .=> members),
@@ -255,8 +256,8 @@ end
 # ── Pipelines ────────────────────────────────────────────────────────────────
 
 # The pipeline elements `|>` joins: solve steps and recorded corrections. A plain
-# function may also sit in a pipeline, written as a tuple or vector, since
-# `f |> x` is Base's function application.
+# function joins `|>` beside a solve step; elsewhere it is written into a tuple
+# or vector, since `f |> x` is Base's function application.
 const PipelineElement = Union{SolveStep, AbstractDataTransform}
 
 """
@@ -264,10 +265,13 @@ const PipelineElement = Union{SolveStep, AbstractDataTransform}
 
 Build a pipeline, the tuple `(a, b)`, from solve steps and corrections;
 `pipeline |> c` appends and `c |> pipeline` prepends:
-`AutocorrelationNormalization() |> BaselineFringeFit() |> Bandpass()`. Two pipelines
-join by splatting, `(p..., q...)`.
+`AutocorrelationNormalization() |> BaselineFringeFit() |> Bandpass()`. A
+function joins beside a solve step, `my_flagging |> Bandpass()`.
+Two pipelines join by splatting, `(p..., q...)`.
 """
 Base.:|>(a::PipelineElement, b::PipelineElement) = (a, b)
+Base.:|>(a::Function, b::SolveStep) = (a, b)
+Base.:|>(a::SolveStep, b::Function) = (a, b)
 Base.:|>(a::Tuple, b::PipelineElement) = (a..., b)
 Base.:|>(a::PipelineElement, b::Tuple) = (a, b...)
 

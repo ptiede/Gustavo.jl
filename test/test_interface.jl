@@ -105,13 +105,13 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         # subset exactly as a fit on the subset alone does only if each of its
         # scans' gains lands on that scan.
         fr3 = fit(BaselineFringeFit(; gauge), sub)
-        bp_sub = fit(ApplySolution(fr) |> Bandpass(; gauge), sub)
-        @test _all_params(bp_sub) ≈ _all_params(fit(ApplySolution(fr3) |> Bandpass(; gauge), sub)) atol = 1.0e-10
+        bp_sub = fit(_precal(fr) |> Bandpass(; gauge), sub)
+        @test _all_params(bp_sub) ≈ _all_params(fit(_precal(fr3) |> Bandpass(; gauge), sub)) atol = 1.0e-10
         # Noise-free and time-constant: one scan determines the bandpass all three do.
-        @test maximum(abs, _all_params(bp_sub) .- _all_params(fit(ApplySolution(fr) |> Bandpass(; gauge), ps))) < 1.0e-6
+        @test maximum(abs, _all_params(bp_sub) .- _all_params(fit(_precal(fr) |> Bandpass(; gauge), ps))) < 1.0e-6
 
-        sol = fit(ApplySolution(fr) |> ApplySolution(bp_sub) |> AdhocPhase(; gauge), ps)
-        @test startswith(sol.provenance.pipeline, "ApplySolution(fringe) |> ApplySolution(bandpass) |> AdhocPhase")
+        sol = fit((_precal(fr), _precal(bp_sub), AdhocPhase(; gauge)), ps)
+        @test count(" |> ", sol.provenance.pipeline) == 2
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
@@ -150,7 +150,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
     end
 
     @testset "chaining builds a tuple" begin
-        cf = StationWeightScale(DimArray([2.0], XRadio.AntennaName(["A1"])))
+        cf = StationWeightScale(DimArray([2.0], AntennaName(["A1"])))
         chain = cf |> BaselineFringeFit(; gauge) |> Bandpass(; gauge)
         @test chain isa Tuple
         @test chain[1] === cf && chain[2] isa BaselineFringeFit && chain[3] isa Bandpass
@@ -202,7 +202,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test calibrate(sol[:fringe, :phase, :mbd], ps) isa XRadio.ProcessingSet
         @test calibrate(filter(c -> c.component.term isa Delay, sol), ps) isa XRadio.ProcessingSet
         @test_throws "holds no components" calibrate(filter(_ -> false, sol), ps)
-        @test_throws "holds no components" ApplySolution(filter(_ -> false, sol))
+        @test_throws "holds no components" calibrate!(filter(_ -> false, sol), deepcopy(ps))
     end
 
     @testset "selections and gains selectors" begin
@@ -248,7 +248,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "calibrate: gains alone, or the fit's data path" begin
         ps, _ = _build_fringe_ps()
-        ws = DimArray([1.0, 0.5, 1.0, 2.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
+        ws = DimArray([1.0, 0.5, 1.0, 2.0], AntennaName(["A1", "A2", "A3", "A4"]))
         sol = fit(StationWeightScale(ws) |> _full_chain(), ps)
         @test startswith(sol.provenance.pipeline, "StationWeightScale")
 
@@ -256,7 +256,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         # before or after `calibrate` gives the same result.
         scale(set) = XRadio.ProcessingSet(
             OrderedDict{Symbol, XRadio.MeasurementSet}(
-                k => StationWeightScale(ws)(read(ms)) for (k, ms) in pairs(set)
+                k => StationWeightScale(ws)(deepcopy(read(ms))) for (k, ms) in pairs(set)
             ),
             copy(DimensionalData.metadata(set)),
         )
@@ -316,7 +316,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "solution Zarr round-trip" begin
         ps, _ = _build_fringe_ps()
-        ws = DimArray([1.0, 0.5, 1.0, 1.0], XRadio.AntennaName(["A1", "A2", "A3", "A4"]))
+        ws = DimArray([1.0, 0.5, 1.0, 1.0], AntennaName(["A1", "A2", "A3", "A4"]))
         sol = fit(StationWeightScale(ws) |> _full_chain(), ps)
         dir = mktempdir()
         path = joinpath(dir, "sol.zarr")

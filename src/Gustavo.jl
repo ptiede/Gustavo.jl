@@ -44,7 +44,7 @@ export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, Scan
 export UVSet, load_uvfits
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
-export calibrate
+export calibrate, calibrate!
 export BaselineFringeFit, default_fringe_terms, Bandpass, default_bandpass_terms, AdhocPhase,
     default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 # The gain-model vocabulary: everything a step's `model =` argument is written
@@ -68,7 +68,7 @@ export each_group, model_components, provides, step_gauge
 export supports_station_heterogeneity
 # Re-export the transform vocabulary and stage accessors so
 # pipelines read naturally with a bare `using Gustavo`.
-export AbstractDataTransform, AutocorrelationNormalization, ApplySolution,
+export AbstractDataTransform, AutocorrelationNormalization, GainCorrection,
     StationWeightScale, FlagChannels
 export search_scan
 # The solution surface: the container, its components, and serialization.

@@ -181,7 +181,7 @@ _receptor_label(p::PolTypes) =
 function _antenna_dataset(tab::AntennaTable)
     names = String.(collect(tab.name))
     n = length(names)
-    ant = XRadio.AntennaName(DimensionalData.Lookups.Categorical(names))
+    ant = AntennaName(DimensionalData.Lookups.Categorical(names))
     receptor = XRadio.ReceptorLabel(DimensionalData.Lookups.Categorical(["1", "2"]))
     cart = XRadio.CartesianPosLabel(DimensionalData.Lookups.Categorical(["x", "y", "z"]))
 
