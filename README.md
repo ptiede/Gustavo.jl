@@ -73,6 +73,17 @@ the components under a path (any selection is itself a solution),
 `gains(bp)` evaluates the complex station gains as a labeled `DimArray`, and
 `fr.steps[:fringe]` holds the step's diagnostics.
 
+`mapsets` returns its results keyed like its input, one per scan group here.
+A collection of per-scan solutions saves to one store and loads back with the
+same keys:
+
+```julia
+using OrderedCollections: OrderedDict
+
+save_solution("fringe.sol.zarr", OrderedDict(k => s.fr for (k, s) in sols))
+fringe = load_solution("fringe.sol.zarr")       # OrderedDict: scan group => solution
+```
+
 ## What is pluggable
 
 Each step separates WHAT it solves (a gain model: named components, each a

@@ -11,6 +11,9 @@
 #   steps/<step>/     that step's diagnostics
 #   info/             run-wide diagnostics
 #
+# A collection of solutions stores its keys in the root's attributes and each
+# solution, laid out as above, in a group named by its position (`1/`, `2/`, …).
+#
 # Plain numeric arrays are Zarr arrays with xarray's `_ARRAY_DIMENSIONS`;
 # everything else is JSON in the attributes, tagged with its Julia type so it
 # is rebuilt exactly on load.
@@ -336,21 +339,43 @@ end
 
 """
     save_solution(path, sol::CalibrationSolution) -> path
+    save_solution(path, sols::AbstractDict{<:Any, <:CalibrationSolution}) -> path
 
 Write `sol` to a new Zarr store at `path`: its geometry, each component's
 parameters as a labeled array (with the component's term, segmentation, feed
 tying and prior as attributes), each step's diagnostics, the run-wide `info`
 and the provenance text. [`load_solution`](@ref) rebuilds it.
 
+The second form writes a collection of solutions, such as the per-unit fits
+[`mapsets`](@ref Gustavo.mapsets) returns, one group per entry in order, each key stored with
+its type.
+
 Numeric arrays are stored as Zarr arrays with xarray dimension names; other
 values are stored as JSON attributes tagged with their Julia type (see
 [`storage_constructor`](@ref)). Throws when `path` exists, and when a value
 cannot be stored so that it rebuilds exactly; nothing is left at `path` then.
 """
-function save_solution(path::AbstractString, sol::CalibrationSolution)
+save_solution(path::AbstractString, sol::CalibrationSolution) =
+    _save_store(() -> _write_solution!(Zarr.zgroup(path; attrs = _solution_attrs(sol, true)), sol), path)
+
+function save_solution(path::AbstractString, sols::AbstractDict{<:Any, <:CalibrationSolution})
+    return _save_store(path) do
+        ks = Any[_encode_checked(k, "the key $(repr(k))") for k in keys(sols)]
+        root = Zarr.zgroup(
+            path; attrs = Dict{String, Any}(
+                "gustavo_solution_format" => _STORE_FORMAT, "kind" => "collection", "keys" => ks,
+            )
+        )
+        for (i, sol) in enumerate(values(sols))
+            _write_solution!(Zarr.zgroup(root, string(i); attrs = _solution_attrs(sol, false)), sol)
+        end
+    end
+end
+
+function _save_store(write, path)
     ispath(path) && throw(ArgumentError("save_solution: $path exists; remove it or choose another path"))
     try
-        _write_solution(path, sol)
+        write()
     catch
         rm(path; recursive = true, force = true)
         rethrow()
@@ -358,18 +383,20 @@ function save_solution(path::AbstractString, sol::CalibrationSolution)
     return path
 end
 
-function _write_solution(path, sol::CalibrationSolution)
-    labels = _strings(map(_label, sol.components))
-    root = Zarr.zgroup(
-        path; attrs = Dict{String, Any}(
-            "gustavo_solution_format" => _STORE_FORMAT,
-            "pipeline" => sol.provenance.pipeline,
-            "components" => labels, "steps" => _strings(keys(sol.steps)),
-        )
+function _solution_attrs(sol::CalibrationSolution, toplevel::Bool)
+    attrs = Dict{String, Any}(
+        "pipeline" => sol.provenance.pipeline,
+        "components" => _strings(map(_label, sol.components)), "steps" => _strings(keys(sol.steps)),
     )
+    toplevel && (attrs["gustavo_solution_format"] = _STORE_FORMAT)
+    return attrs
+end
+
+function _write_solution!(root, sol::CalibrationSolution)
     _write_geometry!(root, sol.geom)
     comps = Zarr.zgroup(root, "components")
-    for (c, label) in zip(sol.components, labels)
+    for c in sol.components
+        label = _label(c)
         _write_dimarray!(
             comps, label, c.params, label; attrs = Dict{String, Any}(
                 "step" => String(c.step), "path" => _strings(c.path),
@@ -386,11 +413,12 @@ function _write_solution(path, sol::CalibrationSolution)
 end
 
 """
-    load_solution(path) -> CalibrationSolution
+    load_solution(path) -> CalibrationSolution or OrderedDict
 
-Read the solution [`save_solution`](@ref) wrote to the Zarr store at `path`.
-Stored values are rebuilt by calling the constructors the store names, so load
-only stores from a trusted source.
+Read what [`save_solution`](@ref) wrote to the Zarr store at `path`: a
+`CalibrationSolution`, or, for a collection, an `OrderedDict` with the saved
+keys in the saved order. Stored values are rebuilt by calling the constructors
+the store names, so load only stores from a trusted source.
 """
 function load_solution(path::AbstractString)
     root = Zarr.zopen(path)
@@ -401,6 +429,13 @@ function load_solution(path::AbstractString)
                 "load_solution: $path has store format $fmt; this Gustavo reads format $_STORE_FORMAT"
         )
     )
+    get(root.attrs, "kind", nothing) == "collection" || return _read_solution(root)
+    return OrderedDict(
+        _decode(k) => _read_solution(root.groups[string(i)]) for (i, k) in enumerate(root.attrs["keys"])
+    )
+end
+
+function _read_solution(root)
     comps = root.groups["components"]
     components = map(root.attrs["components"]) do label
         g = comps.groups[label]

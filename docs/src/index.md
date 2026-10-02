@@ -117,7 +117,9 @@ solution that applies, plots and differences like the whole: `sol[:fringe]`,
 station gains as a labeled `DimArray`, and `sol.steps[:fringe]` holds a step's
 diagnostics. [`save_solution`](@ref Gustavo.Calibration.save_solution) /
 [`load_solution`](@ref Gustavo.Calibration.load_solution) round-trip it through
-a Zarr store.
+a Zarr store, as they do a collection of solutions such as the per-scan fits
+`mapsets` returns (`OrderedDict(k => s.fr for (k, s) in sols)`), keys and order
+included.
 
 ## Extending Gustavo
 

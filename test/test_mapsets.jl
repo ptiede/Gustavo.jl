@@ -54,6 +54,31 @@
         @test all(inside[k] == θ(fit(step, g)) for (k, g) in pairs(by_scan))
     end
 
+    @testset "per-unit solutions save and load as a collection" begin
+        step = BaselineFringeFit(; gauge = PinAntenna(1))
+        sols = mapsets(g -> fit(step, g), by_scan)
+        path = tempname()
+        try
+            @test save_solution(path, sols) == path
+            back = load_solution(path)
+            @test back isa OrderedDict
+            @test collect(keys(back)) == collect(keys(sols))
+            for (k, sol) in pairs(sols)
+                @test back[k].components == sol.components
+                @test all(f -> getfield(back[k].geom, f) == getfield(sol.geom, f), fieldnames(typeof(sol.geom)))
+                @test collect(keys(back[k].steps)) == collect(keys(sol.steps))
+                @test back[k].steps[:fringe].flagged_scan == sol.steps[:fringe].flagged_scan
+                @test back[k].provenance == sol.provenance
+            end
+            @test_throws "exists" save_solution(path, sols)
+        finally
+            rm(path; force = true, recursive = true)
+        end
+        unsaveable = OrderedDict((x -> x) => first(values(sols)))
+        @test_throws "cannot save the key" save_solution(path, unsaveable)
+        @test !ispath(path)
+    end
+
     @testset "concurrent units: same results, progress per unit" begin
         calls = Tuple{Symbol, Int, Int}[]
         exec = ExecutionConfig(;
