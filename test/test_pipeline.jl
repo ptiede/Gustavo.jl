@@ -341,6 +341,22 @@ end
     end
 end
 
+@testset "Fringe false-alarm family is one scan's searches" begin
+    # Noise puts every pfa strictly inside (0, 1), where the family size moves it.
+    ps, _ = _build_fringe_ps(; nscans = 2, noise = 10.0)
+    step = BaselineFringeFit(; gauge = PinAntenna(1))
+    both = fit(step, ps).steps[:fringe]
+    first_scan = first(values(XRadio.groupby(ps, XRadio.ByScan())))
+    alone = fit(step, first_scan).steps[:fringe]
+    rows = both.det_scan .== 1
+    @test count(rows) == length(alone.det_pfa) > 0
+    @test any(p -> 0 < p < 1, alone.det_pfa)
+    @test 0 < count(alone.det_detected) < length(alone.det_detected)
+    @test both.det_snr[rows] == alone.det_snr
+    @test both.det_pfa[rows] == alone.det_pfa
+    @test both.det_detected[rows] == alone.det_detected
+end
+
 @testset "Phase bandpass: per-channel phase recovered" begin
     # Inject a smooth per-(station, feed, channel) phase bandpass (ref ant 1 = 0)
     # on top of the usual delay/rate/phase/screen. The bandpass stage should

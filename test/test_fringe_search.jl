@@ -624,7 +624,6 @@ end
     @test lookup(det, Gustavo.UVData.FeedPair) == gc.feeds
     @test all(det[:valid])
     @test eltype(det[:delay]) == Float32
-    @test_throws "ngroups must be at least 1" FR.search_scan(group, geom, FR.FringeSearch(); ngroups = 0)
 end
 
 @testset "steer_scan weighs the samples the search uses" begin

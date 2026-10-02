@@ -78,10 +78,9 @@ function _cross_cell_labels(member_pairs, member_feeds, geom::DataGeometry)
 end
 
 # The false-alarm family of a search of `gc` (see `search_scan`): the trial
-# count of one search times the `ncross×npol×ngroups` searches.
-function _family_cells(gc::_GroupCells, params::FringeSearch, ngroups::Integer)
-    ngroups >= 1 || throw(ArgumentError("ngroups must be at least 1; got $ngroups"))
-    nsearch = max(length(gc.antenna_pairs) * length(gc.feeds), 1) * ngroups
+# count of one search times the scan's `ncross×npol` searches.
+function _family_cells(gc::_GroupCells, params::FringeSearch)
+    nsearch = max(length(gc.antenna_pairs) * length(gc.feeds), 1)
     return _search_cells(gc.freqs, gc.times, params) * nsearch
 end
 
@@ -115,7 +114,7 @@ end
 
 """
     search_scan(group::XRadio.ProcessingSet, geom::DataGeometry, params::FringeSearch;
-                ngroups = 1, executor = SerialScheduler(), t0 = geom.t0) -> DimStack
+                executor = SerialScheduler(), t0 = geom.t0) -> DimStack
 
 Fringe-search every cross (antenna pair, feed pair) cell of a scan
 group, one Measurement Set per spectral window sharing one time axis. Each
@@ -125,12 +124,10 @@ reference frequency `f0`, the default phase epoch, and the order of the
 antenna pairs. To search a residual, pass the group [`residual_group`](@ref)
 returns.
 
-`ngroups` (at least 1) sizes the false-alarm family each cell's `pfa` is
-computed over: the family of `ncross×npol×ngroups` searches shares one budget
-(Bonferroni),
-so a recorded `pfa` is directly comparable to `Stationization.pfa_max`. The
-default `ngroups = 1` scopes the family to this scan; a whole-track solve
-passes its scan count.
+Each cell's `pfa` is computed over the scan's family of `ncross×npol`
+searches, which share one budget (Bonferroni), so a recorded `pfa` is directly
+comparable to `Stationization.pfa_max` and does not depend on how many other
+scans a solve holds.
 
 `t0` (seconds) is the epoch the detection phases are referenced to
 (delay/rate/SNR are epoch-invariant). Quoting a phase a lever arm from the
@@ -153,7 +150,7 @@ search_scan(group::XRadio.ProcessingSet, geom::DataGeometry, params::FringeSearc
 
 function search_scan(
         gc::_GroupCells, geom::DataGeometry, params::FringeSearch;
-        ngroups::Integer = 1, executor = SerialScheduler(), t0::Real = geom.t0,
+        executor = SerialScheduler(), t0::Real = geom.t0,
     )
     C = eltype(first(first(gc.layers)))
     T = real(C)
@@ -169,7 +166,7 @@ function search_scan(
     pfa = similar(delay)
     scube = DimensionalData.DimStack((; delay, rate, phase, amp, snr, pfa, valid))
 
-    family_cells = _family_cells(gc, params, ngroups)
+    family_cells = _family_cells(gc, params)
     ax = _search_axes(gc.freqs, gc.times, params, C)
 
     workspace = TaskLocalValue{FringeWorkspace{C}}(() -> FringeWorkspace(C))

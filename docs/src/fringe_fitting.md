@@ -310,11 +310,10 @@ grows as ``\sqrt{\log(N_c/\mathrm{PFA})}``, so it varies slowly with both
 arguments.
 
 ``N_c`` is counted over a family of searches rather than one:
-[`search_scan`](@ref) uses ``n_\mathrm{baseline} \times n_\mathrm{pol} \times
-n_\mathrm{groups}``, a Bonferroni correction over a scan, or over a whole track
-when the caller supplies its scan count. A recorded PFA is therefore directly
-comparable with [`Stationization`](@ref)'s `pfa_max`, and is not a per-search
-quantity.
+[`search_scan`](@ref) uses ``n_\mathrm{baseline} \times n_\mathrm{pol}``, a
+Bonferroni correction over the scan. A recorded PFA is therefore directly
+comparable with [`Stationization`](@ref)'s `pfa_max`, is not a per-search
+quantity, and does not depend on how many other scans a solve holds.
 
 No threshold is applied during the search. Every block with usable data yields
 a detection, and acceptance is decided in the station solve.

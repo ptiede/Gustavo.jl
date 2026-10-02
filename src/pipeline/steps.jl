@@ -332,7 +332,7 @@ function _solve_group(
     isnothing(epoch) && (epoch = sum(gc.times) / length(gc.times))
     res = Fring.search_scan(
         gc, ctx.geom, s.search;
-        ngroups = length(ctx.groups), executor = inner_executor(ctx.exec), t0 = epoch,
+        executor = inner_executor(ctx.exec), t0 = epoch,
     )
     feeds = gc.feeds
     antenna_pairs = gc.antenna_pairs
@@ -350,7 +350,7 @@ function _solve_group(
     # `detected` is the column that separates them. The search cube is transient
     # (consumed by the station solve), so these are read off it here; `ncells` is
     # the family the recorded `pfa` was computed over.
-    ncells = Fring._family_cells(gc, s.search, length(ctx.groups))
+    ncells = Fring._family_cells(gc, s.search)
     pfa_max = s.closure.pfa_max
     ncomp, flags = 0, Tuple{String, Int}[]
     # Steering needs θ for this scan, so it can only run where the station solve
