@@ -240,3 +240,33 @@ function _channel_direction(channels)
     first(channels) > last(channels) && return -1
     throw(ArgumentError("the channel frequencies neither rise nor fall"))
 end
+
+"""
+    materialize(ms::MeasurementSet) -> MeasurementSet
+    materialize(ps::ProcessingSet) -> ProcessingSet
+
+`ms` or `ps` read into memory with arrays of its own, which no other
+Measurement Set shares, so in-place corrections such as `calibrate!` never
+reach the source. `read` of in-memory data shares its arrays; this copies
+those it would share.
+
+```julia
+map(values(groupby(ps, ByScan()))) do g
+    g = Gustavo.materialize(g)
+    calibrate!(sol, g)
+    ...
+end
+```
+"""
+function materialize(ms::XRadio.MeasurementSet)
+    out = read(ms)
+    for k in keys(out)
+        parent(out[k]) === parent(ms[k]) && (out[k] = copy(out[k]))
+    end
+    return out
+end
+
+materialize(ps::XRadio.ProcessingSet) = XRadio.ProcessingSet(
+    OrderedDict{Symbol, XRadio.MeasurementSet}(k => materialize(ms) for (k, ms) in pairs(ps)),
+    copy(DimensionalData.metadata(ps)),
+)

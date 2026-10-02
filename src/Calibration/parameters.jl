@@ -35,7 +35,7 @@ the segmentations they resolve, so the identical tables can be rebuilt for data
 sampled anywhere by placing each foreign sample in its segment
 ([`time_segment_ids`](@ref) / [`freq_segment_ids`](@ref)) — the basis for
 applying a solution to a different time or channel sampling. `fseg` is stored
-[`materialize`](@ref)d, so a data-dependent segmentation never reaches a plan. `fstate`/`tstate`
+[`resolve`](@ref)d, so a data-dependent segmentation never reaches a plan. `fstate`/`tstate`
 are the term's own coordinate constants, resolved once against the solve
 geometry ([`freq_coord_state`](@ref)), `nothing` on an axis the term does not
 declare. `priors[a]` is the [`resolve_prior`](@ref)d prior of the plan's `a`-th
@@ -116,8 +116,8 @@ function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     t = e.term
     tseg_id, ntseg = time_segment_ids(e.Ti, geom)
     # A data-dependent segmentation (`BandGroups`) resolves to its concrete form
-    # here, so ids, plans, and provenance only ever hold materialized ones.
-    fseg = materialize(e.Frequency, geom)
+    # here, so ids, plans, and provenance only ever hold resolved ones.
+    fseg = resolve(e.Frequency, geom)
     fseg_id, nfseg = freq_segment_ids(fseg, geom)
     fseg_groups = segment_groups(fseg_id, nfseg)
 
@@ -352,7 +352,7 @@ length of the parameter vector that `evaluate_gains` consumes.
 The `nant::Integer` form lays out a station-uniform `GainModel` (empty
 `stations` — the codes could not be resolved otherwise) replicated across
 `nant` antennas. The `antennas` form (an `AntennaTable` or an iterable of
-station codes) [`materialize`](@ref)s the model against the
+station codes) [`resolve`](@ref)s the model against the
 station set first and handles heterogeneity: per component name, stations
 group by identical `(term, Ti, Frequency, Feed)` signature (priors do not
 split a group; each station keeps its own in `plan.priors`), a name with one
@@ -381,7 +381,7 @@ end
 
 function plan_parameters(model::GainModel, antennas, geom::DataGeometry; require_nonempty::Bool = true)
     names = _station_names(antennas)
-    mat = materialize(model, names, geom)
+    mat = resolve(model, names, geom)
     require_nonempty && validate_gain_model(mat)
     nant = length(names)
     isempty(mat.stations) &&
@@ -478,7 +478,7 @@ end
 
 # ── Station-uniformity enforcement ───────────────────────────────────────────
 
-# The heterogeneous leaves of a materialized model over `nant` stations:
+# The heterogeneous leaves of a resolved model over `nant` stations:
 # `(path, groups)` pairs for every component name with more than one signature
 # or with stations that lack it. Empty exactly when every consumer may treat
 # the model as uniform.
@@ -505,7 +505,7 @@ _hetero_leaves!(out, g::_ComponentGroups, path) = push!(out, (path, g))
 """
     require_station_uniform(model::GainModel, antennas, who) -> model
 
-Assert that the materialized `model` assigns every station the same component
+Assert that the resolved `model` assigns every station the same component
 signatures, throwing otherwise with the differing components, their
 signatures, and the stations carrying each. `who` names the consumer in the
 error — the framework calls this for a solve step that has not opted into

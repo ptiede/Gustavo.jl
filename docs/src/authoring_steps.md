@@ -2,16 +2,17 @@
 CurrentModule = Gustavo
 ```
 
-# [Authoring a pipeline step](@id authoring-steps)
+# [Authoring a solve step](@id authoring-steps)
 
-A pipeline step is a solver that reads the data itself: it declares the gain
+A solve step is a solver that reads the data itself: it declares the gain
 model it solves and fits it, reading each scan group through
 [`each_group`](@ref) as many times as its solve needs. This page is the step contract, followed by a
 worked example: the shipped per-integration phase step, [`AdhocPhase`](@ref).
 
 A step is a [`SolveStep`](@ref), which solves gains. Corrections, which
-change what later steps read, are functions that modify a Measurement Set in
-place and return it ([`AbstractDataTransform`](@ref)) instead.
+change the data a later fit reads, are functions that modify a Measurement Set
+in place and return it, such as [`scale_weights!`](@ref) and
+[`calibrate!`](@ref); they are applied to the data before `fit` is called.
 
 ## The contract at a glance
 
@@ -28,10 +29,9 @@ A `SolveStep` subtype implements [`solve`](@ref) and some of these hooks:
 The execution model behind them:
 
 - **A step reads scan groups, never the whole set.** `each_group(f, ctx)`
-  reads each scan group into memory through the corrections before the step
-  (so the step reads data already corrected by every earlier step's finished
-  solution) and calls `f(group)`, where `group` is a `ProcessingSet` holding
-  one Measurement Set per spectral window of the scan.
+  reads each scan group of the data `fit` was given into memory and calls
+  `f(group)`, where `group` is a `ProcessingSet` holding one Measurement Set
+  per spectral window of the scan.
   `GeometryWindow(ctx.geom, ms)` addresses a Measurement Set in the solve's
   index space. `each_group` returns `f`'s results in group order. A solve that iterates, such as a residual
   re-search, calls `each_group` once per round.
@@ -52,8 +52,8 @@ The execution model behind them:
 
 ## Worked example: the adhoc step
 
-[`AdhocPhase`](@ref) solves a per-integration station phase on the residual
-of the steps before it. A new gain term, if an effect needs one, is authored
+[`AdhocPhase`](@ref) solves a per-integration station phase on data the
+fringe (and bandpass) solutions have already corrected. A new gain term, if an effect needs one, is authored
 separately (see [Authoring a new gain term](@ref authoring-terms)); this step
 uses the ordinary `ConstantTerm`.
 
@@ -156,9 +156,11 @@ blocks' stations, not per block.
 ## Selecting scans
 
 A step reads every scan of the data `fit` is given; there is no per-step
-selection. To fit a step on a subset of the scans, fit it on that subset and
-carry its solution into the full-data fit as a correction:
+selection. To fit a step on a subset of the scans, fit it on that subset, then
+divide its solution out of the full data before the next fit:
 
     fr = fit(BaselineFringeFit(; gauge), data)
-    bp = fit(calibrate!(fr) |> Bandpass(; gauge), calibrator_scans)
-    sol = fit(calibrate!(fr) |> calibrate!(bp) |> AdhocPhase(; gauge), data)
+    bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
+    corrected = calibrate(fr, data; flag_bad = false, apply_flags = false)
+    calibrate!(bp, corrected; flag_bad = false, apply_flags = false)
+    ad = fit(AdhocPhase(; gauge), corrected)

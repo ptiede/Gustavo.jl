@@ -2,9 +2,8 @@
 #
 # The bandpass stage on the composable engine. (The M4 parity gates against the
 # frozen monolith ran before its deletion.) Standing guarantees:
-# - BaselineFringeFit |> Bandpass's fringe and per-channel bandpass blocks are
-#   invariant under appending an AdhocPhase stage (later stages never move
-#   earlier blocks), and θ is bit-deterministic across group concurrency (the
+# - The bandpass step fit after BaselineFringeFit solves only its own
+#   per-channel blocks, and θ is bit-deterministic across group concurrency (the
 #   per-scan accumulator contributions fold in group-index order).
 # - The refine kernels (dTEC, SBD) are inner-invariant and recover the
 #   injected dTEC standalone on a scan view.
@@ -50,78 +49,54 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     fm = default_fringe_terms()
 
-    # The fuller-pipeline reference (adhoc is solved AFTER the bandpass, so its
-    # presence must not move the fringe/bandpass blocks; dispersion/sbd are OFF
-    # so no later stage refines the compared slots).
-    sol_o = fit(
-        [BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)), AdhocPhase(adhoc; gauge = PinAntenna(1))],
-        ps,
-        exec = ExecutionConfig(),
-    )
-    sol_n = fit(
-        [BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))],
-        ps,
-        exec = ExecutionConfig(),
+    fr_n, bp_n = _fit_chain(
+        (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
+        ps; exec = ExecutionConfig(),
     )
 
-    @testset "θ blocks invariant under the appended smoother stage" begin
-        # Fringe components: bit-identical.
-        fn, fo = sol_n[:fringe].components, sol_o[:fringe].components
-        @test length(fn) == length(fo) == 4
-        for (a, b) in zip(fn, fo)
-            @test a == b
-        end
-        # Per-channel phase + log-amp bandpass: rtol 1e-12 (fold association).
-        @test isapprox(_bp_phase(sol_n), _bp_phase(sol_o); rtol = 1.0e-12, atol = 1.0e-12)
-        @test any(!=(0), _bp_phase(sol_n))
-        @test isapprox(_bp_amp(sol_n), _bp_amp(sol_o); rtol = 1.0e-12, atol = 1.0e-12)
-        @test any(!=(0), _bp_amp(sol_n))
-        # The bandpass step's own model carries only the bandpass component
-        # (nothing merged in from the fringe step).
-        @test collect(keys(sol_n.steps)) == [:fringe, :bandpass]
-        @test [c.path for c in sol_n[:bandpass].components] == [(:phase, :bandpass), (:logamp, :bandpass)]
-        @test all(c -> c.step === :bandpass, sol_n[:bandpass].components)
-        @test sol_n.steps[:bandpass].nscans == length(XRadio.groupby(ps, XRadio.ByScan()))
-        @test sol_n.steps[:bandpass].t_pass > 0
+    @testset "the bandpass step solves only its own components" begin
+        @test length(fr_n.components) == 4
+        @test any(!=(0), _bp_phase(bp_n))
+        @test any(!=(0), _bp_amp(bp_n))
+        @test collect(keys(bp_n.steps)) == [:bandpass]
+        @test [c.path for c in bp_n.components] == [(:phase, :bandpass), (:logamp, :bandpass)]
+        @test all(c -> c.step === :bandpass, bp_n.components)
+        @test bp_n.steps[:bandpass].nscans == length(XRadio.groupby(ps, XRadio.ByScan()))
+        @test bp_n.steps[:bandpass].t_pass > 0
     end
 
     @testset "new-engine fold is deterministic across ntasks" begin
-        sol_n4 = fit(
-            [BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))],
-            ps,
-            exec = ExecutionConfig(),
+        sols4 = _fit_chain(
+            (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
+            ps; exec = ExecutionConfig(),
         )
-        @test sol_n4.components == sol_n.components
+        @test [c for s in sols4 for c in s.components] == vcat(fr_n.components, bp_n.components)
     end
 
-    @testset "steps compose in any declared order" begin
-        # No step vetoes its position at construction time — every SolveStep
-        # runs in whatever order the pipeline declares. AdhocPhase still solves
-        # for a fringe-corrected residual, but that is an assumption of its own
-        # solve kernel, not a checked precondition: placed ahead of
-        # BaselineFringeFit, it fits the UNCORRECTED residual instead and
-        # completes without error — a quietly worse fit, not a
-        # construction-time rejection.
-        solts = fit([AdhocPhase(; gauge = PinAntenna(1)), BaselineFringeFit(; model = fm, gauge = PinAntenna(1))], ps)
-        @test solts isa CAL.CalibrationSolution
-        # Bandpass's model is self-contained regardless of position,
-        # so bandpass-before-fringe was always legal and stays so.
-        solbf = fit([Bandpass(; gauge = PinAntenna(1)), BaselineFringeFit(; model = fm, gauge = PinAntenna(1))], ps)
-        @test solbf isa CAL.CalibrationSolution
+    @testset "steps run in any order" begin
+        # AdhocPhase solves for a fringe-corrected residual, but that is an
+        # assumption of its own solve kernel, not a checked precondition: fit
+        # before BaselineFringeFit, it fits the UNCORRECTED residual instead and
+        # completes without error — a quietly worse fit, not a rejection.
+        solts = _fit_chain((AdhocPhase(; gauge = PinAntenna(1)), BaselineFringeFit(; model = fm, gauge = PinAntenna(1))), ps)
+        @test all(s -> s isa CAL.CalibrationSolution, solts)
+        # Bandpass's model is self-contained, so bandpass-before-fringe is legal.
+        solbf = _fit_chain((Bandpass(; gauge = PinAntenna(1)), BaselineFringeFit(; model = fm, gauge = PinAntenna(1))), ps)
+        @test all(s -> s isa CAL.CalibrationSolution, solbf)
     end
 
     @testset "the leaf holds one frequency segment per channel" begin
-        @test size(_bp_phase(sol_n)) == (1, 2, nglob, 1, nant)
-        @test collect(lookup(_bp_phase(sol_n), AntennaName)) == sol_n.geom.stations
+        @test size(_bp_phase(bp_n)) == (1, 2, nglob, 1, nant)
+        @test collect(lookup(_bp_phase(bp_n), AntennaName)) == bp_n.geom.stations
     end
 
     @testset "step-selection extraction" begin
-        bps = sol_n[:bandpass]
+        bps = bp_n[:bandpass]
         @test [c.path for c in bps.components] == [(:phase, :bandpass), (:logamp, :bandpass)]
         @test collect(keys(bps.steps)) == [:bandpass]
-        @test _bp_phase(bps) == _bp_phase(sol_n)
-        @test _bp_amp(bps) == _bp_amp(sol_n)
-        @test bps.geom.stations == sol_n.geom.stations
+        @test _bp_phase(bps) == _bp_phase(bp_n)
+        @test _bp_amp(bps) == _bp_amp(bp_n)
+        @test bps.geom.stations == bp_n.geom.stations
         # A solution with no bandpass STEP at all refuses extraction.
         sol_f = fit(BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), ps)
         @test_throws ArgumentError sol_f[:bandpass]
@@ -170,12 +145,13 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         end
 
         fmc = default_fringe_terms()
-        runc(amp) = fit(
-            [
-                BaselineFringeFit(; model = fmc, gauge = PinAntenna(1)), AdhocPhase(adhoc; gauge = PinAntenna(1)),
-                Bandpass(; model = _bpmodel(; amp), smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)),
-            ], uvc,
-            exec = ExecutionConfig(),
+        runc(amp) = last(
+            _fit_chain(
+                (
+                    BaselineFringeFit(; model = fmc, gauge = PinAntenna(1)), AdhocPhase(adhoc; gauge = PinAntenna(1)),
+                    Bandpass(; model = _bpmodel(; amp), smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)),
+                ), uvc; exec = ExecutionConfig(),
+            )
         )
         track(s, a, f) = (
             L = parent(_bp_amp(s));
@@ -217,7 +193,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     end
 
     @testset "portable calibrate!: same-set + cross-set by station name" begin
-        bps = sol_n[:bandpass]
+        bps = bp_n[:bandpass]
         correct(sol, ps) = collect(values(calibrate!(sol, deepcopy(ps); flag_bad = false, apply_flags = false)))
         # `ms` with the gains `g[c, t, station, feed]` divided out, stations by
         # position in the solution's antenna names.
@@ -262,10 +238,10 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         uvbig, _ = _build_fringe_ps(; nant = 5, nspw, nchan, ntime = 5)
         @test_logs (:warn, r"A5") match_mode = :any correct(bps, uvbig)
 
-        # A time-VARYING solution ports the same way: `sol_n`'s fringe terms are
+        # A time-VARYING solution ports the same way: `fr_n`'s fringe terms are
         # per scan, and `uvsub` is the same scan sampled over fewer APs, so every
         # target sample places in the scan it belongs to.
-        @test all(ms -> ms isa XRadio.MeasurementSet, correct(sol_n, uvsub))
+        @test all(ms -> ms isa XRadio.MeasurementSet, correct(fr_n, uvsub))
 
         # A bandpass segments the solve's channels: a set holding some of them
         # takes their segments, matched by frequency…
@@ -283,7 +259,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test_throws "not a channel of the solution" correct(bps, uvoff)
         # …and a scan the solve never saw is refused, not served by a neighbour.
         uv2, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
-        @test_throws "is not in the solution" correct(sol_n, uv2)
+        @test_throws "is not in the solution" correct(fr_n, uv2)
         # Stations are matched by name; a solution sharing none is refused.
         g = bps.geom
         others = ["Q$i" for i in eachindex(g.stations)]
@@ -665,12 +641,7 @@ end
         amp_bandpass = 0.1 .* randn(rng, nant, 2, nglob),
         seed = 5,
     )
-    sol = fit(
-        [BaselineFringeFit(; gauge = PinAntenna(1)),
-            Bandpass(; gauge = PinAntenna(1))],
-        ps,
-        exec = ExecutionConfig(),
-    )
+    _, sol = _fit_chain((BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps)
     info = sol.steps[:bandpass]
     # (AntennaName, Feed, frequency segment, time segment): the default model's segments
     # are the spectral windows, and a time-stable bandpass is one time segment.

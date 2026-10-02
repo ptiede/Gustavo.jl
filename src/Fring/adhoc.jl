@@ -1241,8 +1241,8 @@ end
                 adhoc, gauge; executor = DynamicScheduler()) -> DimArray
 
 The per-integration atmospheric-phase (adhoc) solve of one scan group — the
-"caller" the module docstring above refers to. On data already gain-corrected
-by the pipeline's corrections: sum the per-(station pair, feed pair, AP)
+"caller" the module docstring above refers to. On data already gain-corrected:
+sum the per-(station pair, feed pair, AP)
 inverse-variance residual over every band (`weighted_sums`), solve the
 globally-closing per-AP station phase through the pluggable `adhoc` smoother
 under each station's prior (`solve_adhoc_phasing`), and write this scan's

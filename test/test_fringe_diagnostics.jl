@@ -8,10 +8,13 @@
     station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3]
     ps, _truth = _build_fringe_ps(; station_rate)
     gauge = PinAntenna(1)
-    sol = fit(
-        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-        ps,
+    sol = _combined(
+        _fit_chain(
+            (
+                BaselineFringeFit(; gauge), Bandpass(; gauge),
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+            ), ps,
+        )
     )
 
     @testset "snr table + summary" begin

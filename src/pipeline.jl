@@ -1,16 +1,16 @@
 # ── Calibration pipeline ──────────────────────────────────────────────────────
 #
-# A pipeline is an ordered tuple of solve steps and corrections. `fit` solves
-# the steps in order, each on the data the corrections and steps before it
-# produced, and records the sequence on the solution; `calibrate` replays it.
+# `fit` solves one step on a set of scan groups; `calibrate!` divides a
+# solution's gains out of the data; `mapsets` runs a function over units of data
+# read into memory.
 
 # Run-wide resources: schedulers, progress.
 include("pipeline/execution.jl")
 
-# Corrections: Measurement Set → Measurement Set, the recorded ones as structs.
+# Corrections: functions that modify a Measurement Set in place.
 include("pipeline/corrections.jl")
 
-# The step protocol: SolveStep, its hooks, and `|>` building a pipeline.
+# The step protocol: SolveStep and its hooks.
 include("pipeline/protocol.jl")
 
 # The built-in solve steps: BaselineFringeFit, Bandpass, AdhocPhase.
@@ -18,7 +18,7 @@ include("pipeline/steps.jl")
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-# The pipeline verbs: fit and calibrate.
+# The verbs: fit and calibrate.
 include("pipeline/verbs.jl")
 
 # `mapsets`: a function over units of data, each read into memory.

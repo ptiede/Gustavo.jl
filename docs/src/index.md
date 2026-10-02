@@ -5,9 +5,8 @@ CurrentModule = Gustavo
 # Gustavo
 
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package.
-It solves an ordered pipeline of calibration steps on MSv4 data, an XRadio
-`ProcessingSet`, reading one scan group at a time, so a full-track dataset is
-never resident in memory, and applies the solution to the data.
+It fits calibration steps on MSv4 data, an XRadio `ProcessingSet`, reading
+one scan group at a time, and applies the solutions to the data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
 deprecation.
@@ -32,16 +31,30 @@ using XRadio
 ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
 gauge = PinAntenna("AA")                        # reference antenna
-pipeline = AutocorrelationNormalization() |> BaselineFringeFit(; gauge) |>
-    Bandpass(; gauge) |> AdhocPhase(; gauge)
-sol = fit(pipeline, ps)
-
-out = calibrate(pipeline, sol, ps)               # the fit's data path, in memory
-save_solution("track.sol.zarr", sol)
+sols = mapsets(groupby(ps, ByScan())) do g      # g: one scan, in memory
+    foreach(normalize_by_autocorrelations!, values(g))
+    fr = fit(BaselineFringeFit(; gauge), g)
+    calibrate!(fr, g; flag_bad = false, apply_flags = false)
+    ad = fit(AdhocPhase(; gauge), g)
+    return (; fr, ad)
+end
 ```
 
 Each solve step takes its own `gauge`, which fixes the station values the data
-leave undetermined.
+leave undetermined. A bandpass is fit over the whole track. A track-wide
+bandpass fit after fringe correction currently needs the corrected data in
+memory, since scan averaging is not yet available:
+
+```julia
+data = read(ProcessingSet, "track.ps.zarr")     # the whole track, in memory
+foreach(normalize_by_autocorrelations!, values(data))
+fr = fit(BaselineFringeFit(; gauge), data)
+bp = fit(Bandpass(; gauge), calibrate(fr, data; flag_bad = false, apply_flags = false))
+
+calibrate!(fr, data)
+calibrate!(bp, data)
+save_solution("track.fringe.zarr", fr)
+```
 
 ## The pieces
 
@@ -51,25 +64,26 @@ scan (`groupby(ps, ByScan())`) and reads one group at a time, so an opened
 store stays on disk until a step reads it. Narrow the data by subsetting the
 `ProcessingSet` before fitting.
 
-**Pipeline.** A pipeline is a tuple of solve steps and corrections, usually
-built with `|>`, run in order. The built-in solve steps are [`BaselineFringeFit`](@ref) (delay /
-rate / phase search), [`Bandpass`](@ref) (time-stable station
-bandpass), and [`AdhocPhase`](@ref) (per-integration atmospheric
-phase). Every step is optional and reorderable; a single standalone step is
-a legal pipeline.
+**Solve steps.** A solve step fits one gain model. The built-in steps are
+[`BaselineFringeFit`](@ref) (delay / rate / phase search),
+[`Bandpass`](@ref) (time-stable station bandpass), and
+[`AdhocPhase`](@ref) (per-integration atmospheric phase). [`fit`](@ref)
+solves one step on the data it is given and never modifies that data. To fit
+a step on data an earlier solution has corrected, correct the data first,
+either on data held in memory or inside [`mapsets`](@ref), which reads one
+unit of data (a Measurement Set, or a scan group of a `groupby` result) at a
+time and hands it to a function.
 
-**Corrections.** A step solves gains; a correction changes what every step
-after it *reads*. A correction is a function that modifies a Measurement Set
-in place and returns it, applied to each Measurement Set of a scan group as the
-group is read; `fit` and [`calibrate`](@ref) hand it a copy, so the data passed
-to them is left as it was. The built-in ones are
-[`AbstractDataTransform`](@ref) structs:
-[`AutocorrelationNormalization`](@ref), [`StationWeightScale`](@ref),
-[`FlagChannels`](@ref) and [`GainCorrection`](@ref), which carries in an
-earlier solution: `calibrate!(sol) |> Bandpass(; gauge)`. A
-plain function joins `|>` beside a solve step; elsewhere it is written into a
-tuple or vector (`(my_flagging, my_weighting, BaselineFringeFit())`), since
-`f |> g` is Base's function application.
+**Corrections.** A correction is a function that modifies a Measurement Set in
+place and returns it. The built-in ones are
+[`normalize_by_autocorrelations!`](@ref Gustavo.UVData.normalize_by_autocorrelations!),
+[`scale_weights!`](@ref), [`flag_channels!`](@ref), and
+[`calibrate!`](@ref), which divides a solution's gains out of the data. Each
+applies to one Measurement Set; a `ProcessingSet` is corrected member by
+member, `foreach(ms -> scale_weights!(ms, ws), values(ps))`, except
+`calibrate!`, which also takes a `ProcessingSet`. Data opened lazily must be
+read into memory before it is corrected: [`Gustavo.materialize`](@ref Gustavo.UVData.materialize) reads it with
+arrays of its own, so the source is left as it was.
 
 **Models.** Each solve step separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —
@@ -77,11 +91,12 @@ from HOW it is solved (the step's options, or a pluggable smoother object).
 
 **Verbs.** [`fit`](@ref) solves and returns a
 [`CalibrationSolution`](@ref Gustavo.Calibration.CalibrationSolution) without
-producing corrected data; [`calibrate`](@ref) applies a solution to this or
-other data and runs its `post` function on each corrected Measurement Set.
-`calibrate(pipeline, sol, ps)` repeats the fit's data path, each correction as
-written and each solve step as its gains; `calibrate(sol, ps)` divides by the
-gains alone.
+producing corrected data. [`calibrate!`](@ref) divides a solution's gains out
+of data in memory, applies the solution's flags, and runs its `post` function
+on each corrected Measurement Set; [`calibrate`](@ref) does the same to a copy
+and leaves the data passed to it as it was. `flag_bad = false, apply_flags =
+false` divides out the gains without flagging, as suits data handed to a later
+fit.
 
 **Solutions.** A solution is a list of solved components
 (`sol.components`), each a [`SolvedComponent`](@ref Gustavo.Calibration.SolvedComponent)
@@ -104,6 +119,6 @@ Three seams, in increasing scope:
 - a new **smoother** behind an existing step — a different way to solve the
   same model: see
   [`AbstractBandpassSmoother`](@ref Gustavo.Fring.AbstractBandpassSmoother);
-- a new **pipeline step** — a solver that reads the data through
+- a new **solve step** — a solver that reads the data through
   [`each_group`](@ref Gustavo.each_group):
-  [Authoring a pipeline step](@ref authoring-steps).
+  [Authoring a solve step](@ref authoring-steps).

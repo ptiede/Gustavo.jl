@@ -190,6 +190,3 @@ amp = abs.(stack[:vis][Polarization = pol_at(stack, (1, 1))])
 ```
 """
 pol_at(x, pair::Tuple{Integer, Integer}) = At(pol_products(x)[pol_index(x, pair)])
-
-# Resolves a deferred form into its concrete one; `Calibration` adds the methods.
-function materialize end

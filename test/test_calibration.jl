@@ -73,18 +73,18 @@ end
         spw_of_chan = [1, 1, 2, 3],
     )
 
-    # Concrete segmentations materialize to themselves; the data-dependent
+    # Concrete segmentations resolve to themselves; the data-dependent
     # `BandGroups` resolves to the `FreqGroups` its gap detection finds.
     @test CAL.BandGroups() isa CAL.AbstractFrequencySegmentation
     for seg in (
             CAL.GlobalFrequency(), CAL.PerSpectralWindow(), CAL.ChannelBlocks(2),
             CAL.FreqGroups([1:3, 4:4]),
         )
-        @test CAL.materialize(seg, geom) === seg
+        @test CAL.resolve(seg, geom) === seg
     end
-    @test CAL.materialize(CAL.BandGroups(), geom) == CAL.FreqGroups([1:3, 4:4])
+    @test CAL.resolve(CAL.BandGroups(), geom) == CAL.FreqGroups([1:3, 4:4])
     # `gap_factor` reaches the gap detection: an unreachable ratio keeps one group.
-    @test CAL.materialize(CAL.BandGroups(gap_factor = 1.0e9), geom) ==
+    @test CAL.resolve(CAL.BandGroups(gap_factor = 1.0e9), geom) ==
         CAL.FreqGroups([1:4])
 
     # The range form of each shipped concrete segmentation.
@@ -101,7 +101,7 @@ end
         CAL.PerSpectralWindow(), inter
     )
 
-    # Layouts materialize: a plan built from a `BandGroups` component records the
+    # Layouts resolve: a plan built from a `BandGroups` component records the
     # concrete `FreqGroups`, so solutions and foreign-grid placement never see
     # the data-dependent form.
     model = CAL.GainModel(
@@ -809,7 +809,7 @@ end
         @test g.groups.g1.priors == [(Frequency = rw,), (Frequency = ou,)]
         @test g.groups.g2.priors == [nothing]
 
-        mat = CAL.materialize(m, names, geom)
+        mat = CAL.resolve(m, names, geom)
         @test mat.phase.bp.prior === rw
         soln = CAL.CalibrationSolution(mat, layout, geom, collect(1.0:layout.nθ))
         path = joinpath(mktempdir(), "prior.zarr")
@@ -1175,9 +1175,9 @@ end
         @test_throws "must be a `GainComponent`" merge(m; phase = (; x = 1.0))
     end
 
-    @testset "materialize" begin
-        # Segmentations materialize inside per-station trees, and an entry
-        # equal to the base (after materialization) collapses away.
+    @testset "resolve" begin
+        # Segmentations resolve inside per-station trees, and an entry
+        # equal to the base (after resolution) collapses away.
         m = CAL.GainModel(
             phase = (bandpass = bp(CAL.BandGroups()), atmos),
             stations = (
@@ -1185,15 +1185,15 @@ end
                 CC = (; phase = (bandpass = bp(CAL.GlobalFrequency()),)),
             ),
         )
-        mat = CAL.materialize(m, names, geom)
+        mat = CAL.resolve(m, names, geom)
         @test mat.phase.bandpass.Frequency isa CAL.FreqGroups
         @test keys(mat.stations) == (:CC,)
-        @test CAL.materialize(mat, names, geom) == mat        # idempotent
+        @test CAL.resolve(mat, names, geom) == mat        # idempotent
 
         # Unknown station codes error, naming the known stations.
         bad = CAL.GainModel(; base..., stations = (XX = (; phase = base.phase),))
-        @test_throws "unknown station :XX" CAL.materialize(bad, names, geom)
-        @test_throws "AA, BB, CC" CAL.materialize(bad, names, geom)
+        @test_throws "unknown station :XX" CAL.resolve(bad, names, geom)
+        @test_throws "AA, BB, CC" CAL.resolve(bad, names, geom)
     end
 
     mu = CAL.GainModel(; base...)
@@ -1286,7 +1286,7 @@ end
     end
 
     @testset "require_station_uniform" begin
-        mat = CAL.materialize(mh, names, geom)
+        mat = CAL.resolve(mh, names, geom)
         err = try
             CAL.require_station_uniform(mat, names, "Bandpass")
             nothing
@@ -1303,13 +1303,13 @@ end
         @test !occursin("atmos", err.msg)
         # A uniform model passes through, entries collapsed or not.
         @test CAL.require_station_uniform(
-            CAL.materialize(mu, names, geom), names, "Bandpass",
+            CAL.resolve(mu, names, geom), names, "Bandpass",
         ) isa CAL.GainModel
     end
 
     @testset "components and gains of a grouped component" begin
         θh = collect(1.0:lh.nθ)
-        soln = CAL.CalibrationSolution(CAL.materialize(mh, names, geom), lh, geom, θh)
+        soln = CAL.CalibrationSolution(CAL.resolve(mh, names, geom), lh, geom, θh)
         # The grouped name is one component per signature group; each group's
         # parameters carry ITS stations on the AntennaName axis and its own specification.
         bp = soln[:solution, :phase, :bandpass]

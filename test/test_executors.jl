@@ -70,37 +70,41 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         @test_throws MethodError Gustavo.max_tasks(UnbackedExecutor())
     end
 
-    @testset "full pipeline: θ and output bit-identical across OUTER executors" begin
+    @testset "full chain: θ and output bit-identical across OUTER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-        run(ex) = fit(
-            BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)) |>
-                AdhocPhase(adhoc; gauge = PinAntenna(1)), ps;
-            exec = ExecutionConfig(outer_executor = ex),
+        steps = (
+            BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
+            AdhocPhase(adhoc; gauge = PinAntenna(1)),
         )
-        sol_t, sol_d = run(DynamicScheduler()), run(GreedyScheduler())
-        @test parent(gains(sol_d)) == parent(gains(sol_t))
-        @test collect(keys(sol_d.steps)) == collect(keys(sol_t.steps))
-        out_t = calibrate(sol_t, ps; exec = ExecutionConfig(outer_executor = DynamicScheduler()))
-        out_d = calibrate(sol_d, ps; exec = ExecutionConfig(outer_executor = GreedyScheduler()))
+        run(ex) = _fit_chain(steps, ps; exec = ExecutionConfig(outer_executor = ex))
+        sols_t, sols_d = run(DynamicScheduler()), run(GreedyScheduler())
+        for (sol_t, sol_d) in zip(sols_t, sols_d)
+            @test parent(gains(sol_d)) == parent(gains(sol_t))
+            @test collect(keys(sol_d.steps)) == collect(keys(sol_t.steps))
+        end
+        out_t = _calibrate_chain(sols_t, ps; exec = ExecutionConfig(outer_executor = DynamicScheduler()))
+        out_d = _calibrate_chain(sols_d, ps; exec = ExecutionConfig(outer_executor = GreedyScheduler()))
         for k in keys(ps)
             @test isequal(parent(out_t[k][:visibility]), parent(out_d[k][:visibility]))
             @test isequal(parent(out_t[k][:weight]), parent(out_d[k][:weight]))
         end
     end
 
-    @testset "full pipeline: θ bit-identical across INNER executors" begin
+    @testset "full chain: θ bit-identical across INNER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-        run(inner) = fit(
-            BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)) |>
-                AdhocPhase(adhoc; gauge = PinAntenna(1)), ps;
-            exec = ExecutionConfig(inner_executor = inner),
+        steps = (
+            BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
+            AdhocPhase(adhoc; gauge = PinAntenna(1)),
         )
+        run(inner) = _fit_chain(steps, ps; exec = ExecutionConfig(inner_executor = inner))
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are
         # order-fixed by the data layout, so θ is bit-identical.
-        sol_ser = run(SerialScheduler())
-        sol_dyn = run(DynamicScheduler(; nchunks = 4))
-        @test parent(gains(sol_ser)) == parent(gains(sol_dyn))
+        sols_ser = run(SerialScheduler())
+        sols_dyn = run(DynamicScheduler(; nchunks = 4))
+        for (sol_ser, sol_dyn) in zip(sols_ser, sols_dyn)
+            @test parent(gains(sol_ser)) == parent(gains(sol_dyn))
+        end
     end
 end

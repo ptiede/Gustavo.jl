@@ -161,6 +161,30 @@ function _build_fringe_ps(;
     )
 end
 
-# A correction dividing out `sol` as `fit` divides out an earlier step's
-# solution: a degenerate gain leaves the sample, and no flags are applied.
-_precal(sol) = calibrate!(sol; flag_bad = false, apply_flags = false)
+# A copy of `data` with `sol` divided out: a degenerate gain leaves the sample,
+# and no flags are applied.
+_precal(sol, data) = calibrate(sol, data; flag_bad = false, apply_flags = false)
+
+# Each step fit in turn on `data`, with the solutions of the steps before it
+# divided out as `_precal` divides them.
+function _fit_chain(steps, data; kwargs...)
+    sols = CalibrationSolution[]
+    for st in steps
+        isempty(sols) || (data = _precal(last(sols), data))
+        push!(sols, fit(st, data; kwargs...))
+    end
+    return sols
+end
+
+# A copy of `data` with each solution of `sols` divided out in turn.
+function _calibrate_chain(sols, data; kwargs...)
+    out = calibrate(first(sols), data; kwargs...)
+    foreach(s -> calibrate!(s, out; kwargs...), sols[2:end])
+    return out
+end
+
+# One solution holding the components and diagnostics of every solution in `sols`.
+_combined(sols) = CalibrationSolution(
+    first(sols).geom, reduce(vcat, [s.components for s in sols]),
+    merge((s.steps for s in sols)...), first(sols).info,
+)

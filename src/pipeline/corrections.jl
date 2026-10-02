@@ -1,31 +1,7 @@
 # ── Corrections: modify a Measurement Set in place ──────────────────────────
 #
 # A correction modifies the layers of the Measurement Set it is handed and
-# returns it. Any such function may sit in a pipeline; the structs below are the
-# built-in ones. Inside `fit` a correction is applied through
-# `_correct(x, ms, geom)`, which hands the ones that address the run's index
-# space (channels, stations) the run's geometry; called on its own, such a
-# correction builds the geometry of the Measurement Set it is given.
-
-"""
-    AbstractDataTransform
-
-A built-in correction: a callable struct `t(ms) -> ms` that modifies the
-layers of `ms` in place and returns it, as an `f!` function would. To keep the
-original, correct a copy that owns its arrays (`t(deepcopy(ms))`); `copy` and
-`read` of an in-memory Measurement Set share them. In a pipeline it corrects
-the data every later solve step reads; `fit` and `calibrate` hand it a group
-read for the purpose, so the data passed to them is never modified. Built-ins:
-[`AutocorrelationNormalization`](@ref), [`StationWeightScale`](@ref),
-[`FlagChannels`](@ref), and [`GainCorrection`](@ref), which
-[`calibrate!`](@ref)`(sol)` returns to carry in an earlier solution.
-
-A plain function that modifies a Measurement Set and returns it can sit in a
-pipeline as well.
-"""
-abstract type AbstractDataTransform end
-
-_correct(x, ms::XRadio.MeasurementSet, geom::DataGeometry) = x(ms)
+# returns it, as an `f!` function does.
 
 function _check_corrected(x, ms, got)
     got === ms || throw(
@@ -37,10 +13,6 @@ function _check_corrected(x, ms, got)
     )
     return got
 end
-
-# `corrections` applied to `ms` in order, in place.
-_apply_corrections!(corrections, ms::XRadio.MeasurementSet, geom::DataGeometry) =
-    foldl((acc, x) -> _check_corrected(x, acc, _correct(x, acc, geom)), corrections; init = ms)
 
 _one_member(ms::XRadio.MeasurementSet) =
     XRadio.ProcessingSet(OrderedDict{Symbol, XRadio.MeasurementSet}(:ms => ms))
@@ -55,50 +27,7 @@ function _time_span(ms::XRadio.MeasurementSet)
     return fill(Float64(it.value), length(XRadio.times(ms)))
 end
 
-# ── Built-in: normalization by the autocorrelations ─────────────────────────
-
-"""
-    AutocorrelationNormalization()
-
-Correction: [`normalize_by_autocorrelations!`](@ref), so cross-correlations
-become correlation coefficients and the autocorrelation baselines are flagged.
-The default pipelines start with it; `calibrate(pipeline, sol, ps)` repeats it,
-so the gains divide data on the scale they were solved on.
-"""
-struct AutocorrelationNormalization <: AbstractDataTransform end
-
-(::AutocorrelationNormalization)(ms::XRadio.MeasurementSet) = normalize_by_autocorrelations!(ms)
-
 # ── Dividing out a solution's gains ──────────────────────────────────────────
-
-"""
-    GainCorrection
-
-The correction [`calibrate!`](@ref)`(sol; flag_bad, apply_flags)` returns:
-`g(ms)` is `calibrate!(sol, ms; flag_bad, apply_flags)`, with `sol` compiled
-once. It sits in a pipeline beside solve steps and other corrections, and
-composes with `∘`.
-"""
-struct GainCorrection{S <: Calibration._AppliedSolution, F} <: AbstractDataTransform
-    app::S
-    flag_bad::Bool
-    apply_flags::Bool
-    flagged::F
-end
-
-function Base.show(io::IO, g::GainCorrection)
-    print(io, "calibrate!(", join(unique(grp.step for grp in g.app.groups), ", "))
-    kw = [k for (k, on) in ("flag_bad = false" => g.flag_bad, "apply_flags = false" => g.apply_flags) if !on]
-    isempty(kw) || print(io, "; ", join(kw, ", "))
-    print(io, ")")
-end
-
-(g::GainCorrection)(ms::XRadio.MeasurementSet) = _correct(g, ms, DataGeometry(_one_member(ms)))
-
-function _correct(g::GainCorrection, ms::XRadio.MeasurementSet, geom::DataGeometry)
-    _divide_gains!(ms, GeometryWindow(geom, ms), g.app; g.flag_bad)
-    return _flag_unconstrained!(ms, g.app.geom, geom, g.flagged)
-end
 
 # Target station index → the solution's own (0 = absent from the solution).
 function _station_map(sol::Calibration._AppliedSolution, stations)
@@ -204,42 +133,34 @@ function _divide_sample!(V, W, F, g, t, gt, stations, amap, feeds, flag_bad::Boo
     return nothing
 end
 
-# ── Built-in: per-station weight scaling ─────────────────────────────────────
+# ── Per-station weight scaling ──────────────────────────────────────────────
 
 """
-    StationWeightScale(scale::AbstractDimVector)
+    scale_weights!(ms::MeasurementSet, scale::AbstractDimVector) -> ms
 
-Correction: per-station weight scaling in place, `w → w·s_a·s_b` on each baseline
-`(a, b)`. `scale` holds one finite, positive factor per station, indexed by
-`AntennaName`; a station it does not name keeps its weights. A factor above 1
-raises a station's weights (a correlator claiming more noise than the data
-carries). Visibilities are untouched.
+Scale the weights of `ms` per station in place, `w → w·s_a·s_b` on each
+baseline `(a, b)`. `scale` holds one finite, positive factor per station,
+indexed by `AntennaName`; a station it does not name keeps its weights. A
+factor above 1 raises a station's weights (a correlator claiming more noise
+than the data carries). Visibilities are untouched.
 
     ws = DimArray([2.0, 2.0], AntennaName(["HS", "GL"]))
-    fit(StationWeightScale(ws) |> BaselineFringeFit(; gauge = PinAntenna("HS")), ps)
+    scale_weights!(ms, ws)
 """
-struct StationWeightScale{S <: AbstractDimVector} <: AbstractDataTransform
-    scale::S
-    function StationWeightScale{S}(scale) where {S}
-        only(dims(scale)) isa AntennaName || throw(
-            ArgumentError(
-                "StationWeightScale: index the factors by `AntennaName`, not " *
-                    "$(nameof(typeof(only(dims(scale)))))"
-            )
+function scale_weights!(ms::XRadio.MeasurementSet, scale::AbstractDimVector)
+    only(dims(scale)) isa AntennaName || throw(
+        ArgumentError(
+            "scale_weights!: index the factors by `AntennaName`, not " *
+                "$(nameof(typeof(only(dims(scale)))))"
         )
-        allunique(lookup(scale, 1)) || throw(
-            ArgumentError("StationWeightScale: a station is named more than once: $(collect(lookup(scale, 1)))")
-        )
-        all(x -> isfinite(x) && x > 0, scale) || throw(
-            ArgumentError("StationWeightScale: every factor must be finite and positive, got $(collect(scale)).")
-        )
-        return new{S}(scale)
-    end
-end
-StationWeightScale(scale::AbstractDimVector) = StationWeightScale{typeof(scale)}(scale)
-
-function (t::StationWeightScale)(ms::XRadio.MeasurementSet)
-    factor = Dict(String(n) => Float64(f) for (n, f) in zip(lookup(t.scale, 1), t.scale))
+    )
+    allunique(lookup(scale, 1)) || throw(
+        ArgumentError("scale_weights!: a station is named more than once: $(collect(lookup(scale, 1)))")
+    )
+    all(x -> isfinite(x) && x > 0, scale) || throw(
+        ArgumentError("scale_weights!: every factor must be finite and positive, got $(collect(scale)).")
+    )
+    factor = Dict(String(n) => Float64(f) for (n, f) in zip(lookup(scale, 1), scale))
     weight = ms[:weight]
     for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
         f = get(factor, String(a), 1.0) * get(factor, String(b), 1.0)
@@ -249,38 +170,27 @@ function (t::StationWeightScale)(ms::XRadio.MeasurementSet)
     return ms
 end
 
-# ── Built-in: channel flagging ───────────────────────────────────────────────
+# ── Channel flagging ────────────────────────────────────────────────────────
 
 """
-    FlagChannels(mask::AbstractDimVector{Bool})
+    flag_channels!(ms::MeasurementSet, mask::AbstractDimVector{Bool}) -> ms
 
-Correction: flag, in place, the channels where `mask`, indexed by `Frequency` (Hz), is
-`true`. Each channel of the data takes the mask entry at its center frequency;
-a channel the mask does not cover throws. Visibilities and weights are left as
+Flag, in place, the channels of `ms` where `mask`, indexed by `Frequency`
+(Hz), is `true`. Each channel takes the mask entry at its center frequency; a
+channel the mask does not cover throws. Visibilities and weights are left as
 they are.
 
     freqs = XRadio.frequencies(ms)
-    FlagChannels(DimArray(86.10e9 .< freqs .< 86.12e9, Frequency(freqs)))
+    flag_channels!(ms, DimArray(86.10e9 .< freqs .< 86.12e9, Frequency(freqs)))
 """
-struct FlagChannels{M <: AbstractDimVector{Bool}} <: AbstractDataTransform
-    mask::M
-    function FlagChannels{M}(mask) where {M}
-        only(dims(mask)) isa Frequency || throw(
-            ArgumentError(
-                "FlagChannels: index the mask by `Frequency`, not $(nameof(typeof(only(dims(mask)))))"
-            )
+function flag_channels!(ms::XRadio.MeasurementSet, mask::AbstractDimVector{Bool})
+    only(dims(mask)) isa Frequency || throw(
+        ArgumentError(
+            "flag_channels!: index the mask by `Frequency`, not $(nameof(typeof(only(dims(mask)))))"
         )
-        allunique(lookup(mask, 1)) || throw(ArgumentError("FlagChannels: a frequency appears more than once in the mask"))
-        return new{M}(mask)
-    end
-end
-FlagChannels(mask::AbstractDimVector{Bool}) = FlagChannels{typeof(mask)}(mask)
-
-Base.show(io::IO, t::FlagChannels) =
-    print(io, "FlagChannels(", count(t.mask), " of ", length(t.mask), " channels)")
-
-function (t::FlagChannels)(ms::XRadio.MeasurementSet)
-    fm = Float64.(lookup(t.mask, 1))
+    )
+    allunique(lookup(mask, 1)) || throw(ArgumentError("flag_channels!: a frequency appears more than once in the mask"))
+    fm = Float64.(lookup(mask, 1))
     perm = sortperm(fm)
     sf = fm[perm]
     sel = Int[]
@@ -288,9 +198,9 @@ function (t::FlagChannels)(ms::XRadio.MeasurementSet)
         tol = Calibration._FREQ_RTOL * abs(f)
         j = searchsortedfirst(sf, f - tol)
         (j <= length(sf) && abs(sf[j] - f) <= tol) || throw(
-            ArgumentError("FlagChannels: the mask does not cover the channel at $f Hz")
+            ArgumentError("flag_channels!: the mask does not cover the channel at $f Hz")
         )
-        t.mask[perm[j]] && push!(sel, c)
+        mask[perm[j]] && push!(sel, c)
     end
     isempty(sel) || (view(ms[:flag], Frequency(sel)) .= true)
     return ms

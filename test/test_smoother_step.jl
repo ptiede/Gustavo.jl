@@ -1,16 +1,12 @@
 # ── AdhocPhase step + calibrate ───────────────────────────────────────────────
 #
-# The full three-stage pipeline (BaselineFringeFit |> Bandpass |>
-# AdhocPhase) on a ProcessingSet:
+# BaselineFringeFit, Bandpass and AdhocPhase fit in turn on a ProcessingSet,
+# each on the data the earlier solutions corrected:
 # - θ is bit-deterministic across runs, and the multi-scan solve flattens the
 #   data.
-# - A pipeline is the same as its steps fit one at a time, chained through
-#   `calibrate!`, and never writes the caller's data.
+# - `fit` never writes the caller's data.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
-
-# Every parameter a step solved, in component order.
-_step_θ(sol, step) = vcat((vec(parent(c.params)) for c in sol[step].components)...)
 
 # The parameters of a step's first per-integration phase component.
 _per_integration_params(sol, step) =
@@ -59,81 +55,49 @@ end
         bandpass = bp_true, amp_bandpass = abp_true,
     )
     fm = default_fringe_terms()
-    pipe = [BaselineFringeFit(; model = fm, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)]
-    sol_n = fit(pipe, ps; exec = ExecutionConfig())
+    steps = (BaselineFringeFit(; model = fm, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge))
+    sols_n = _fit_chain(steps, ps; exec = ExecutionConfig())
+    ad_n = last(sols_n)
 
-    @testset "3-scan full pipeline: structure, determinism, coherence" begin
-        @test collect(keys(sol_n.steps)) == [:fringe, :bandpass, :adhoc]
+    @testset "3-scan full chain: structure, determinism, coherence" begin
+        @test [only(keys(s.steps)) for s in sols_n] == [:fringe, :bandpass, :adhoc]
         # The adhoc block is really solved (nonzero) on every scan.
-        @test any(!=(0), _per_integration_params(sol_n, :adhoc))
-        @test sol_n.steps[:adhoc].t_pass > 0
+        @test any(!=(0), _per_integration_params(ad_n, :adhoc))
+        @test ad_n.steps[:adhoc].t_pass > 0
 
         # θ is bit-deterministic across runs.
-        pipe4 = [BaselineFringeFit(; model = fm, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)]
-        @test parent(gains(fit(pipe4, ps; exec = ExecutionConfig()))) == parent(gains(sol_n))
+        sols4 = _fit_chain(steps, ps; exec = ExecutionConfig())
+        for (s4, s) in zip(sols4, sols_n)
+            @test parent(gains(s4)) == parent(gains(s))
+        end
 
         # The multi-scan solve flattens the data (bandpass + screen recovered).
-        @test _worst_parallel_coherence(calibrate(sol_n, ps)) > 0.99
+        @test _worst_parallel_coherence(_calibrate_chain(sols_n, ps)) > 0.99
     end
 
-    @testset "BaselineFringeFit |> AdhocPhase (no bandpass)" begin
-        sol_fs = fit(
-            [BaselineFringeFit(; model = fm, gauge), AdhocPhase(adhoc; gauge)],
-            ps,
+    @testset "BaselineFringeFit then AdhocPhase (no bandpass)" begin
+        fr_fs, ad_fs = _fit_chain(
+            (BaselineFringeFit(; model = fm, gauge), AdhocPhase(adhoc; gauge)), ps;
             exec = ExecutionConfig(),
         )
-        @test collect(keys(sol_fs.steps)) == [:fringe, :adhoc]
-        @test !any(c -> c.path[2] === :bandpass, sol_fs.components)
-        @test any(!=(0), _per_integration_params(sol_fs, :adhoc))
+        components = vcat(fr_fs.components, ad_fs.components)
+        @test !any(c -> c.path[2] === :bandpass, components)
+        @test any(!=(0), _per_integration_params(ad_fs, :adhoc))
         # Without the bandpass stage the injected per-channel bandpass survives,
         # so full coherence is NOT reached — but the delay/rate/adhoc solve must
         # still be sane (all θ finite, per-scan SNRs strong).
-        @test all(c -> all(isfinite, c.params), sol_fs.components)
-        @test all(>(10), filter(isfinite, sol_fs.steps[:fringe].scan_snr))
+        @test all(c -> all(isfinite, c.params), components)
+        @test all(>(10), filter(isfinite, fr_fs.steps[:fringe].scan_snr))
     end
 
-    @testset "a pipeline ≡ its steps fit separately" begin
-        # The oracle is the composition a caller can write by hand: separate
-        # `fit` calls of one step each, chained through `calibrate!`.
-        bp = Bandpass(; gauge)
-        adhoc_step = AdhocPhase(adhoc; gauge)
-        pre = _precal(sol_n[:fringe])
-
-        sol_pipe = fit(pre |> bp |> adhoc_step, ps)
-        @test collect(keys(sol_pipe.steps)) == [:bandpass, :adhoc]
-        # Neither step is vacuous.
-        @test !isempty(_step_θ(sol_pipe, :bandpass))
-        @test any(!=(0), _step_θ(sol_pipe, :bandpass))
-        @test any(!=(0), _step_θ(sol_pipe, :adhoc))
-
-        sol_a = fit(pre |> bp, ps)
-        bandpass_tf = _precal(sol_a[:bandpass])
-        sol_b = fit((pre, bandpass_tf, adhoc_step), ps)
-        @test sol_pipe[:bandpass].components == sol_a[:bandpass].components
-        @test sol_pipe[:adhoc].components == sol_b[:adhoc].components
-
-        sol_3 = fit(BaselineFringeFit(; gauge) |> bp |> adhoc_step, ps)
-        @test collect(keys(sol_3.steps)) == [:fringe, :bandpass, :adhoc]
-        sol_f1 = fit(BaselineFringeFit(; gauge), ps)
-        pre_f = _precal(sol_f1[:fringe])
-        sol_b1 = fit(pre_f |> bp, ps)
-        pre_b = _precal(sol_b1[:bandpass])
-        sol_a1 = fit((pre_f, pre_b, adhoc_step), ps)
-        @test sol_3[:fringe].components == sol_f1[:fringe].components
-        @test sol_3[:bandpass].components == sol_b1[:bandpass].components
-        @test sol_3[:adhoc].components == sol_a1[:adhoc].components
-        # The fringe step reports the same flags and diagnostics either way.
-        @test sol_3.steps[:fringe].flagged_ant == sol_f1.steps[:fringe].flagged_ant
-        @test sol_3.steps[:fringe].flagged_scan == sol_f1.steps[:fringe].flagged_scan
-        @test sol_3.steps[:fringe].scan_snr == sol_f1.steps[:fringe].scan_snr
-
-        # With no correction in front of a step, reading may hand back an
-        # in-memory set's own arrays; the caller's data is never written.
+    @testset "fit never writes the caller's data" begin
+        # Reading may hand back an in-memory set's own arrays.
         snap = Dict(
             k => (copy(parent(ms[:visibility])), copy(parent(ms[:weight])))
                 for (k, ms) in pairs(ps)
         )
-        fit(bp |> adhoc_step, ps)
+        fit(Bandpass(; gauge), ps)
+        fit(AdhocPhase(adhoc; gauge), ps)
         @test all(
             isequal(snap[k][1], parent(ms[:visibility])) && isequal(snap[k][2], parent(ms[:weight]))
                 for (k, ms) in pairs(ps)

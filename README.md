@@ -6,17 +6,22 @@
 [![Coverage](https://codecov.io/gh/ptiede/Gustavo.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/ptiede/Gustavo.jl)
 
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package
-for radio interferometry. It solves an ordered pipeline of calibration steps
-on MSv4 data (an XRadio `ProcessingSet`) — fringe search (delay/rate/phase),
-ionospheric dispersion and single-band delay refinement, station bandpass,
-per-integration atmospheric phase — reading one scan group at a time, so a
-full-track dataset is never resident in memory, and applies the solution to
-the data.
+for radio interferometry. It fits calibration steps on MSv4 data (an XRadio
+`ProcessingSet`) — fringe search (delay/rate/phase), ionospheric dispersion
+and single-band delay refinement, station bandpass, per-integration
+atmospheric phase — reading one scan group at a time, and applies the
+solutions to the data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
 deprecation. (It also operates entirely on vibes and fried chicken.)
 
 ## A calibration run
+
+`fit(step, data)` solves one step; `calibrate!(sol, data)` divides a solution's
+gains out of data in memory, and `calibrate(sol, data)` does the same to a copy.
+To fit a step on data an earlier solution has corrected, correct the data
+first. `mapsets` does this one scan group at a time, holding only that group
+in memory:
 
 ```julia
 using Gustavo
@@ -25,26 +30,40 @@ using XRadio
 ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 
 gauge = PinAntenna("AA")                        # reference antenna
-pipeline = AutocorrelationNormalization() |> BaselineFringeFit(; gauge) |>
-    Bandpass(; gauge) |> AdhocPhase(; gauge)
-sol = fit(pipeline, ps)
+sols = mapsets(groupby(ps, ByScan())) do g      # g: one scan, in memory
+    foreach(normalize_by_autocorrelations!, values(g))
+    fr = fit(BaselineFringeFit(; gauge), g)
+    calibrate!(fr, g; flag_bad = false, apply_flags = false)
+    ad = fit(AdhocPhase(; gauge), g)
+    return (; fr, ad)
+end
+```
 
-out = calibrate(sol, ps)                         # corrected, in memory
-save_solution("track.jls", sol)
+A bandpass is fit over the whole track. A track-wide bandpass fit after fringe
+correction currently needs the corrected data in memory, since scan averaging
+is not yet available:
+
+```julia
+data = read(ProcessingSet, "track.ps.zarr")     # the whole track, in memory
+foreach(normalize_by_autocorrelations!, values(data))
+fr = fit(BaselineFringeFit(; gauge), data)
+bp = fit(Bandpass(; gauge), calibrate(fr, data; flag_bad = false, apply_flags = false))
+
+calibrate!(fr, data)
+calibrate!(bp, data)
+save_solution("track.fringe.zarr", fr)
 ```
 
 Each solve step takes its own `gauge`, which fixes the station values the data
-leave undetermined. Every step is optional and reorderable — a pipeline can equally be a single
-`Bandpass(; gauge)` fit over data an earlier run already corrected. `fit` solves
-without producing output; `calibrate(sol, ps)` applies a finished solution to
-this or other data, replaying the pipeline's corrections and each step's gains
-in order.
+leave undetermined. `fit` never modifies the data it is given. `flag_bad =
+false, apply_flags = false` divides out the gains without flagging, as suits
+data handed to a later fit; the defaults also flag samples whose gain is
+degenerate and the baselines of stations the fringe fit left unconstrained.
 
-The solution is inspectable per stage: `sol[:fringe]` selects one step (any
-selection is itself a solution), `gains(sol[:bandpass])` evaluates its complex
-station gains as a labelled `DimArray`, `parameters(sol[:fringe, :phase, :mbd])`
-shows the solved θ of one model component, and `stage_info(sol, :fringe)`
-returns the step's diagnostics.
+A solution is inspectable per component: `fr[:fringe, :phase, :mbd]` selects
+the components under a path (any selection is itself a solution),
+`gains(bp)` evaluates the complex station gains as a labeled `DimArray`, and
+`fr.steps[:fringe]` holds the step's diagnostics.
 
 ## What is pluggable
 
@@ -54,7 +73,7 @@ term at a time/frequency resolution with a feed tying) from HOW it is solved
 
 - a new **gain term** (a physical effect in the forward model) — six small
   methods;
-- a new **pipeline step** — a `solve` method that reads the data through
+- a new **solve step** — a `solve` method that reads the data through
   `each_group`;
 - a new **bandpass** or **adhoc smoother** behind an existing step.
 

@@ -64,9 +64,8 @@ carry. Gains compose multiplicatively across components.
   per-scan SNR, timing, the fringe step's unconstrained `flagged_ant` /
   `flagged_scan`, …).
 - `info` holds run-wide diagnostics.
-- `provenance` is the pipeline the run was given, its steps' gauges included,
-  as text for the record. A solution does not replay its pipeline: [`calibrate`](@ref) divides
-  by its gains only.
+- `provenance` is the solve step the run was given, its gauge included, as
+  text for the record (`provenance.pipeline`).
 
 Any subset of the components is a solution: `filter(pred, sol)`,
 `sol[:fringe]` (one step), `sol[:fringe, :phase, :mbd]` (the components under a

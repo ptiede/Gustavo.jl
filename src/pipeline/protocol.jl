@@ -1,13 +1,7 @@
 # ── Step protocol ────────────────────────────────────────────────────────────
 #
-# A pipeline is an ordered tuple of solve steps and corrections, each step
-# solving its own compiled gain model: at fit time a `SolveStep` declares its
-# model components and `plan_parameters` lays out that step's own θ alone — no
-# step's θ block is ever shared with, or visible to, another step's. A step
-# reads the data the corrections before it and the earlier steps' gains
-# produced (each finished step's solution joins the corrections of every later
-# step), and every stage remains individually inspectable through the
-# solution's per-stage records.
+# A `SolveStep` solves its own compiled gain model: at fit time it declares its
+# model components and `plan_parameters` lays out its θ.
 #
 # Hooks a step may implement:
 # - `model_components(step, spec)` — the gain-model components this step solves.
@@ -25,7 +19,7 @@
 """
     SolveStep
 
-A pipeline stage that solves its own gain model (fringe fit, bandpass
+A solve of one gain model (fringe fit, bandpass
 estimation, adhoc phasing, …). A solve step declares its model components
 with [`model_components`](@ref) and fits them in [`solve`](@ref), reading the
 data with [`each_group`](@ref).
@@ -75,9 +69,7 @@ heterogeneity_rejector(step::SolveStep) = string(nameof(typeof(step)))
 
 The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
 names its components and diagnostics in the solution (`sol[name]`,
-`sol.steps[name]`) and labels its progress-callback stage. Two steps in the same
-pipeline must not share a value, the default `:nothing` included: their
-solutions would collide under the same name. Default: `:nothing`.
+`sol.steps[name]`) and labels its progress-callback stage. Default: `:nothing`.
 """
 provides(step::SolveStep) = :nothing
 
@@ -121,11 +113,8 @@ What a step's [`solve`](@ref) works with: the step's own compiled model
 `solve` fills; a component's block is `reshape(view(θ, plan.range),
 plan.shape)`), the data geometry `geom` (its `stations` are the run's station
 table), the step's `gauge` with station codes resolved (`nothing` for a step
-whose [`step_gauge`](@ref) is `nothing`), `nant`, the scan groups of the data
-(`groupby(ps, ByScan())`), and the corrections the step's data pass through:
-the pipeline's corrections before the step and every earlier step's gains.
-Another step's θ is never visible here; it reaches the step only as a
-correction of the data.
+whose [`step_gauge`](@ref) is `nothing`), `nant`, and the scan groups of the
+data (`groupby(ps, ByScan())`).
 """
 const _PassTiming = @NamedTuple{decode::Vector{Float64}, work::Vector{Float64}}
 
@@ -141,7 +130,6 @@ struct SolveContext{
     nant::Int
     groups::G
     sizes::Vector{Int}
-    corrections::Vector{Any}
     exec::X
     stage::Symbol
     passes::Vector{_PassTiming}
@@ -152,8 +140,7 @@ end
 
 Read each scan group of the step's data and return `f(group)` for every
 group, in group order. `group` is a `ProcessingSet` of in-memory Measurement
-Sets, one per spectral window of the scan, with the corrections before the
-step applied. Groups run on the run's outer scheduler, heaviest first, and the
+Sets, one per spectral window of the scan. Groups run on the run's outer scheduler, heaviest first, and the
 progress callback is told of each.
 
 `f` may run concurrently across groups, so it must not write shared state
@@ -163,23 +150,21 @@ contribution instead, and the caller combines the returned values.
 function each_group(f::F, ctx::SolveContext) where {F}
     out = _map_groups(ctx.groups, ctx.sizes, ctx.exec; stage = ctx.stage) do group
         ta = time_ns()
-        corrected = _read_group(group, ctx.corrections, ctx.geom, inner_executor(ctx.exec))
+        data = _read_group(group, inner_executor(ctx.exec))
         tb = time_ns()
-        r = f(corrected)
+        r = f(data)
         (; decode = (tb - ta) / 1.0e9, work = (time_ns() - tb) / 1.0e9, r)
     end
     push!(ctx.passes, (; decode = Float64[o.decode for o in out], work = Float64[o.work for o in out]))
     return map(o -> o.r, out)
 end
 
-# One scan group read into memory, each Measurement Set passed through
-# `corrections`. Corrections modify their input, so they get layers of their own.
-function _read_group(group::XRadio.ProcessingSet, corrections, geom::DataGeometry, executor)
+# One scan group read into memory, each Measurement Set by `readms`.
+function _read_group(group::XRadio.ProcessingSet, executor, readms = read)
     named = collect(pairs(group))
     # Typed `tmap`: the untyped form rejects `GreedyScheduler`.
     members = tmap(XRadio.MeasurementSet, named; scheduler = executor) do (_, ms)
-        isempty(corrections) ? read(ms) :
-            _apply_corrections!(corrections, UVData._read_owned(ms), geom)
+        readms(ms)
     end
     return XRadio.ProcessingSet(
         OrderedDict{Symbol, XRadio.MeasurementSet}(first.(named) .=> members),
@@ -251,38 +236,4 @@ function _scheduled_map(sched::Scheduler, work::F, items, sizes) where {F}
         out[k] = work(items[k])
     end
     return map(identity, out)
-end
-
-# ── Pipelines ────────────────────────────────────────────────────────────────
-
-# The pipeline elements `|>` joins: solve steps and recorded corrections. A plain
-# function joins `|>` beside a solve step; elsewhere it is written into a tuple
-# or vector, since `f |> x` is Base's function application.
-const PipelineElement = Union{SolveStep, AbstractDataTransform}
-
-"""
-    a |> b
-
-Build a pipeline, the tuple `(a, b)`, from solve steps and corrections;
-`pipeline |> c` appends and `c |> pipeline` prepends:
-`AutocorrelationNormalization() |> BaselineFringeFit() |> Bandpass()`. A
-function joins beside a solve step, `my_flagging |> Bandpass()`.
-Two pipelines join by splatting, `(p..., q...)`.
-"""
-Base.:|>(a::PipelineElement, b::PipelineElement) = (a, b)
-Base.:|>(a::Function, b::SolveStep) = (a, b)
-Base.:|>(a::SolveStep, b::Function) = (a, b)
-Base.:|>(a::Tuple, b::PipelineElement) = (a..., b)
-Base.:|>(a::PipelineElement, b::Tuple) = (a, b...)
-
-function _check_pipeline(seq)
-    for x in seq
-        x isa Union{PipelineElement, Function} || throw(
-            ArgumentError(
-                "a pipeline holds solve steps and corrections (an AbstractDataTransform " *
-                    "or a function of a Measurement Set), not $(nameof(typeof(x)))"
-            )
-        )
-    end
-    return seq
 end

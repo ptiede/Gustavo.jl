@@ -2,8 +2,7 @@
 #
 # Given a scan group (a `ProcessingSet` of Measurement Sets sharing one time
 # axis) and its `DataGeometry`, run the per-baseline kernels in `search.jl` over
-# every (antenna pair, feed pair) cell. The pipeline reads and corrects the scan
-# group and supplies it here.
+# every (antenna pair, feed pair) cell.
 
 # One recorded search row: the antenna names, feed pair, SNR, the
 # family-wise false-alarm probability, and whether that PFA accepted it as a real

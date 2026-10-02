@@ -1,6 +1,6 @@
 # ── Built-in solve steps ─────────────────────────────────────────────────────
 #
-# The stages of the fringe pipeline as `SolveStep`s: each declares its model
+# The fringe-fitting solves as `SolveStep`s: each declares its model
 # components and implements `solve`, reading the data through `each_group`.
 
 """
@@ -81,12 +81,11 @@ model — a phase-only or amplitude-only model must name
 solves and then fits each track. The model is self-contained, so placing
 `Bandpass` before or after `BaselineFringeFit` is equally legal.
 
-To fit the bandpass on calibrator scans only, fit it on those scans and carry
-the solution into the full-data fit as a correction:
+The bandpass is fit on data the fringe solution has already corrected, for
+example on calibrator scans held in memory:
 
-    fr = fit(BaselineFringeFit(; gauge), data)
-    bp = fit(calibrate!(fr) |> Bandpass(; gauge), calibrator_scans)
-    sol = fit(calibrate!(fr) |> calibrate!(bp) |> AdhocPhase(; gauge), data)
+    fr = fit(BaselineFringeFit(; gauge), calibrator_scans)
+    bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
 """
 Base.@kwdef struct Bandpass{M <: GainModel, S <: Fring.AbstractBandpassSmoother, G <: AbstractGauge} <: SolveStep
     model::M = Fring.default_bandpass_terms()
@@ -180,7 +179,7 @@ model_components(s::BaselineFringeFit, spec) = _vet_step_model(
 # `stations` entry's effective pair — with the can_fit error naming the station
 # whose entry carries the component. `accepted` finishes that error with the
 # component form the solver family does fit. Returns `m`; the runner
-# materializes it against the antenna table.
+# resolves it against the antenna table.
 function _vet_step_model(solver, m::GainModel, accepted, spec = nothing)
     for (station, tree) in _station_variants(m)
         at = station === nothing ? "" : " (station $(repr(station)) entry)"

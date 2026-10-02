@@ -125,7 +125,7 @@ or one full-range group on a contiguous axis. `gap_factor` is the ratio an
 inter-block gap must exceed to count as a between-group one.
 
 Data-dependent: it names the partition RULE, not the partition.
-[`materialize`](@ref) resolves it against a `DataGeometry` into the concrete
+[`resolve`](@ref) resolves it against a `DataGeometry` into the concrete
 [`FreqGroups`](@ref) that layouts, solutions, and foreign-grid placement work
 with, so `BandGroups` itself needs no `freq_segment_ids` methods.
 """
@@ -368,18 +368,18 @@ end
 # ── Materialization and the range form ───────────────────────────────────────
 
 """
-    materialize(seg::AbstractFrequencySegmentation, geom::DataGeometry)
+    resolve(seg::AbstractFrequencySegmentation, geom::DataGeometry)
         -> AbstractFrequencySegmentation
 
 Resolve a frequency segmentation against the concrete geometry it partitions.
 Identity for a segmentation that already names its partition; a data-dependent
 one ([`BandGroups`](@ref)) resolves to the concrete segmentation its rule finds
-on `geom`. Parameter layouts materialize every component's frequency
+on `geom`. Parameter layouts resolve every component's frequency
 segmentation, so segment ids, solutions, and foreign-grid placement only ever
-see the materialized form.
+see the resolved form.
 """
-materialize(seg::AbstractFrequencySegmentation, ::DataGeometry) = seg
-materialize(b::BandGroups, geom::DataGeometry) =
+resolve(seg::AbstractFrequencySegmentation, ::DataGeometry) = seg
+resolve(b::BandGroups, geom::DataGeometry) =
     FreqGroups(fringe_freq_groups(geom.channel_freqs; gap_factor = b.gap_factor))
 
 """

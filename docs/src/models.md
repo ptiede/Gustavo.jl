@@ -4,7 +4,7 @@ CurrentModule = Gustavo.Calibration
 
 # [Specifying gain models](@id specifying-models)
 
-Every solve step in a Gustavo pipeline separates WHAT it solves from HOW.
+Every solve step in Gustavo separates WHAT it solves from HOW.
 The WHAT is a *gain model*: named parametric contributions to each station's
 complex gain,
 
@@ -15,7 +15,7 @@ gain(station, feed, channel, time) = exp(Σ logamp) · cis(Σ phase)
 where each sum runs over that station's named components. This page is the
 model vocabulary: what a component is, the terms, resolutions, and feed
 tyings it is built from, how the built-in steps accept one, and what the
-standard pipeline's model solves and why.
+standard steps' models solve and why.
 
 ## The atom: `GainComponent`
 
@@ -121,7 +121,7 @@ free, as is a shape with no prior.
 | [`BandGroups`](@ref)`(; gap_factor)` | gap-detected band group |
 
 `BandGroups` is data-dependent: at plan time it
-[`materialize`](@ref Gustavo.UVData.materialize)s into the `FreqGroups` that
+[`resolve`](@ref Gustavo.Calibration.resolve)s into the `FreqGroups` that
 [`fringe_freq_groups`](@ref) detects from the actual channel frequencies, so
 a configuration written before the data is seen adapts to the band layout it
 meets.
@@ -178,10 +178,10 @@ Each step compiles and solves its own model on its own private θ — no step's
 parameter block is shared with or visible to another's. Gains compose
 multiplicatively across steps.
 
-## The standard pipeline's model, component by component
+## The standard model, component by component
 
-The three-step pipeline `BaselineFringeFit() |> Bandpass() |> AdhocPhase()`
-solves, across its steps, the following phase components
+The three steps `BaselineFringeFit()`, `Bandpass()` and `AdhocPhase()`, fit in
+turn, solve the following phase components
 — this is the standard VLBI calibration model, and each tying below is a
 physics decision:
 
@@ -261,7 +261,7 @@ does here, keep the model uniform: the stations share one parameter layout, and
 each carries its own prior.
 
 Station codes resolve against the observation's antenna table when the model
-is materialized for a solve; an unknown code errors there, naming the known
+is resolved for a solve; an unknown code errors there, naming the known
 stations. A rule ("every station matching a prefix gets a smoother
 bandpass") is a loop of `with_station` calls over the station codes.
 
@@ -271,7 +271,7 @@ a solver that has not declared support rejects a heterogeneous model at
 compile time with an error naming the differing component, rather than
 silently leaving θ blocks unsolved. No shipped step declares support yet;
 the seam exists for solvers written against the station-block iterator (see
-[Authoring a pipeline step](@ref authoring-steps)).
+[Authoring a solve step](@ref authoring-steps)).
 
 ## Inspecting a model
 

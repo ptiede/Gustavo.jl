@@ -133,7 +133,7 @@ whole-group because components within a group interact (they sum and share
 degeneracies) while the two groups do not.
 
 Station codes resolve against the observation's antenna table when the model is
-[`materialize`](@ref)d for a solve; an unknown code errors there, naming the
+[`resolve`](@ref)d for a solve; an unknown code errors there, naming the
 known stations. Equality is order-insensitive in `stations`.
 """
 struct GainModel{P <: NamedTuple, A <: NamedTuple, S <: NamedTuple}
@@ -378,16 +378,16 @@ end
 
 # ── Materialization against an observation ───────────────────────────────────
 #
-# `materialize(model, antennas, geom)` resolves a gain model into the concrete
+# `resolve(model, antennas, geom)` resolves a gain model into the concrete
 # `GainModel` a solve uses and a solution records: station codes checked
 # against the antenna table, every component's data-dependent frequency
-# segmentation resolved (`materialize(seg, geom)`), and `stations` entries that
+# segmentation resolved (`resolve(seg, geom)`), and `stations` entries that
 # turn out identical to the base dropped. The result is idempotent under
-# re-materialization, and is what provenance stores.
+# re-resolution, and is what provenance stores.
 
-materialize(e::GainComponent, geom::DataGeometry) =
-    GainComponent(e.term, e.Ti, materialize(e.Frequency, geom), e.Feed, e.prior)
-materialize(nt::NamedTuple, geom::DataGeometry) = map(v -> materialize(v, geom), nt)
+resolve(e::GainComponent, geom::DataGeometry) =
+    GainComponent(e.term, e.Ti, resolve(e.Frequency, geom), e.Feed, e.prior)
+resolve(nt::NamedTuple, geom::DataGeometry) = map(v -> resolve(v, geom), nt)
 
 # Station codes of an antenna table or an iterable of codes, as `String`s.
 _station_names(antennas::UVData.AntennaTable) = String.(collect(antennas.name))
@@ -412,7 +412,7 @@ function _validate_station_keys(stations::NamedTuple, names)
 end
 
 """
-    materialize(model::GainModel, antennas, geom::DataGeometry) -> GainModel
+    resolve(model::GainModel, antennas, geom::DataGeometry) -> GainModel
 
 Resolve `model` against an observation: `antennas` (an `AntennaTable` or an
 iterable of station codes) fixes the station set, and `geom` resolves every
@@ -422,14 +422,14 @@ only for stations whose trees differ from the base — and is what a solution
 records as provenance. A `stations` key not in the antenna table errors, naming
 the known stations.
 """
-function materialize(m::GainModel, antennas, geom::DataGeometry)
+function resolve(m::GainModel, antennas, geom::DataGeometry)
     names = _station_names(antennas)
     _validate_station_keys(m.stations, names)
-    phase = materialize(m.phase, geom)
-    logamp = materialize(m.logamp, geom)
+    phase = resolve(m.phase, geom)
+    logamp = resolve(m.logamp, geom)
     ents = Pair{Symbol, Any}[]
     for k in keys(m.stations)
-        e = map(nt -> materialize(nt, geom), m.stations[k])
+        e = map(nt -> resolve(nt, geom), m.stations[k])
         full = (;
             phase = haskey(e, :phase) ? e.phase : phase,
             logamp = haskey(e, :logamp) ? e.logamp : logamp,

@@ -248,8 +248,7 @@ solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
                         executor = SerialScheduler()) -> (rl, wl)
 
 One scan group's inverse-variance sums over time per (station pair, feed pair,
-channel), `rl = Σ w·v` and `wl = Σ w`, on data already gain-corrected by the
-pipeline's corrections. Both are `DimArray`s over `AntennaPair(station_pairs)`,
+channel), `rl = Σ w·v` and `wl = Σ w`, on data already gain-corrected. Both are `DimArray`s over `AntennaPair(station_pairs)`,
 `FeedPair(feeds)` and `Frequency(geom.channel_freqs)` — labels shared by every
 group of a solve, so the sums of different scans line up — in the element types
 of the data. Autocorrelations never contribute; a cross pair or feed pair of the

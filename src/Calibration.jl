@@ -16,12 +16,6 @@ import Distributions
 using Distributions: Distribution, Normal, AbstractMvNormal, mean, cov, var
 using ..UVData
 using ..UVData: feed_pairs
-# Segmentation materialization is a METHOD of the data layer's `materialize`
-# generic — one package-wide verb for resolving a deferred form (a
-# data-dependent segmentation) into its concrete one. A bare `using` definition
-# would mint a second function of the same name and leave the two ambiguous
-# wherever both modules are in scope.
-import ..UVData: materialize
 using LinearAlgebra
 using LinearSolve
 using Statistics: median
@@ -52,7 +46,7 @@ export AbstractTimeSegmentation, AbstractFrequencySegmentation
 export GlobalTime, PerScan, PerIntegration, TimeBlocks, InstrumentScans
 export GlobalFrequency, PerSpectralWindow, ChannelBlocks, FreqGroups, BandGroups
 export DataGeometry, time_segment_ids, freq_segment_ids, segment_groups, common_refinement
-export materialize, segment_ranges, fringe_freq_groups
+export resolve, segment_ranges, fringe_freq_groups
 
 # Terms
 export AbstractGainTerm

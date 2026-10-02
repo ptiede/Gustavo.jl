@@ -3,13 +3,15 @@
     mapsets(f, groups::AbstractDict{<:Any, <:ProcessingSet}; exec = ExecutionConfig()) -> Vector
 
 Apply `f` to each unit of data read into memory, and return `f`'s results in
-unit order. The units of `ps` are its Measurement Sets; the units of `groups`,
-a `groupby` result such as `groupby(ps, ByScan())`, are its processing sets.
-The fringe and adhoc steps need every spectral window of a scan, so a body
-that fits them takes scan groups.
+unit order: `map(u -> f(Gustavo.materialize(u)), values(src))`, with the units
+scheduled across tasks and progress reported. The units of `ps` are its
+Measurement Sets; the units of `groups`, a `groupby` result such as
+`groupby(ps, ByScan())`, are its processing sets. The fringe and adhoc steps
+need every spectral window of a scan, so a body that fits them takes scan
+groups.
 
-Each unit is read with arrays of its own, so `f` may modify it in place
-(`calibrate!`) without changing the source or another unit. A unit is held
+Each unit is read with arrays of its own ([`Gustavo.materialize`](@ref UVData.materialize)), so `f` may
+modify it in place (`calibrate!`) without changing the source or another unit. A unit is held
 only while `f` runs, unless `f` returns it: return solutions or reduced data,
 and write full-size data out from inside `f`.
 
@@ -22,7 +24,7 @@ Measurement Sets are read on its `inner_executor`. With more than one task,
 gauge = PinAntenna(1)
 sols = mapsets(groupby(ps, ByScan())) do g
     fr = fit(BaselineFringeFit(; gauge), g)
-    calibrate!(fr, g)
+    calibrate!(fr, g; flag_bad = false, apply_flags = false)
     return (; fr, ad = fit(AdhocPhase(; gauge), g))
 end
 ```
@@ -47,16 +49,6 @@ function _map_units(f, units, sizes, exec::ExecutionConfig)
     return _map_groups(work, units, sizes, exec; stage = :mapsets)
 end
 
-_read_unit(ms::XRadio.MeasurementSet, executor) = UVData._read_owned(ms)
+_read_unit(ms::XRadio.MeasurementSet, executor) = materialize(ms)
 
-function _read_unit(group::XRadio.ProcessingSet, executor)
-    named = collect(pairs(group))
-    # Typed `tmap`: the untyped form rejects `GreedyScheduler`.
-    members = tmap(XRadio.MeasurementSet, named; scheduler = executor) do (_, ms)
-        UVData._read_owned(ms)
-    end
-    return XRadio.ProcessingSet(
-        OrderedDict{Symbol, XRadio.MeasurementSet}(first.(named) .=> members),
-        copy(DimensionalData.metadata(group)),
-    )
-end
+_read_unit(group::XRadio.ProcessingSet, executor) = _read_group(group, executor, materialize)

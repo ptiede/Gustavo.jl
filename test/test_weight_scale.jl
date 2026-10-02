@@ -1,4 +1,4 @@
-# Per-station weight correction (`StationWeightScale`): a NOISE-ESTIMATE fix
+# Per-station weight correction (`scale_weights!`): a NOISE-ESTIMATE fix
 # for correlator weights that are miscalibrated on particular stations. It must
 # leave the fringe search alone, move the solve only through the stages that
 # weight baselines against each other, and carry into the calibrated weights.
@@ -17,23 +17,25 @@
         # is the RELATIVE inter-baseline weighting of the stages that accumulate
         # ACROSS baselines (stage B / bandpass / adhoc) and the calibrated weights.
         gauge = PinAntenna(1)
-        chain0 = BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
-            AdhocPhase(; model = default_adhoc_terms(; prior = nothing), gauge)
-        base = let sol = fit(chain0, ps)
-            (sol, calibrate(sol, ps))
+        steps = (
+            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            AdhocPhase(; model = default_adhoc_terms(; prior = nothing), gauge),
+        )
+        base = let sols = _fit_chain(steps, ps)
+            (sols, _calibrate_chain(sols, ps))
         end
-        pipe = StationWeightScale(ws) |> chain0
-        fixd = let sol = fit(pipe, ps)
-            (sol, calibrate(pipe, sol, ps))
+        scaled = Gustavo.materialize(ps)
+        foreach(ms -> scale_weights!(ms, ws), values(scaled))
+        fixd = let sols = _fit_chain(steps, scaled)
+            (sols, _calibrate_chain(sols, scaled))
         end
-        @test startswith(fixd[1].provenance.pipeline, "StationWeightScale")
-        bfr, ffr = base[1].steps[:fringe], fixd[1].steps[:fringe]
+        bfr, ffr = base[1][1].steps[:fringe], fixd[1][1].steps[:fringe]
         @test ffr.scan_snr == bfr.scan_snr
         @test ffr.det_snr == bfr.det_snr
         # …so the solution only shifts at the level of the re-weighted stages.
         @test all(
             isapprox(parent(c1.params), parent(c2.params); atol = 1.0e-3)
-                for (c1, c2) in zip(fixd[1].components, base[1].components)
+                for (s1, s2) in zip(fixd[1], base[1]) for (c1, c2) in zip(s1.components, s2.components)
         )
 
         # The correction factorizes per station, so a baseline with ONE affected

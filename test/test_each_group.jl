@@ -1,7 +1,7 @@
 # ── Scan groups: what `each_group` hands a step ──────────────────────────────
 #
-# Grouping by scan, reading into memory, the corrections before a step,
-# scheduling and progress, and `fit`'s entry points.
+# Grouping by scan, reading into memory, scheduling and progress, and `fit`'s
+# entry points.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
@@ -13,10 +13,8 @@ GroupProbe() = GroupProbe(group -> group)
 Gustavo.provides(::GroupProbe) = :probe
 Gustavo.solve(s::GroupProbe, ctx) = (; seen = each_group(s.f, ctx))
 
-_probe(pipeline, data; kw...) =
-    fit(pipeline, data; kw...).steps[:probe].seen
-
-_halve_weights(ms) = (parent(ms[:weight]) ./= 2; ms)
+_probe(step, data; kw...) =
+    fit(step, data; kw...).steps[:probe].seen
 
 @testset "each_group" begin
     ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
@@ -34,23 +32,6 @@ _halve_weights(ms) = (parent(ms[:weight]) ./= 2; ms)
                 @test isequal(parent(ms[:visibility]), parent(read(lazy[name])[:visibility]))
             end
         end
-    end
-
-    @testset "a step sees the corrections before it, and only those" begin
-        w(group) = sum(ms -> sum(parent(ms[:weight])), values(group))
-        plain = _probe(GroupProbe(w), ps)
-        halved = _probe(Any[_halve_weights, GroupProbe(w)], ps)
-        @test halved ≈ plain ./ 2
-        # A correction after the step does not reach it; the solution's
-        # provenance records it.
-        sol = fit(Any[GroupProbe(w), _halve_weights], ps)
-        @test sol.steps[:probe].seen == plain
-        @test occursin("_halve_weights", sol.provenance.pipeline)
-        @test first(findfirst("GroupProbe", sol.provenance.pipeline)) < first(findfirst("_halve_weights", sol.provenance.pipeline))
-    end
-
-    @testset "a correction must return the Measurement Set it is handed" begin
-        @test_throws "returned a Int64" _probe(Any[ms -> 1, GroupProbe()], ps)
     end
 
     @testset "a Measurement Set is fit as a processing set of one" begin
@@ -107,8 +88,7 @@ _halve_weights(ms) = (parent(ms[:weight]) ./= 2; ms)
         @test Gustavo.max_tasks(DynamicScheduler(; chunksize = 2)) == Threads.nthreads()
     end
 
-    @testset "what a pipeline may hold" begin
-        @test_throws "not Int64" fit((GroupProbe(), 3), ps)
-        @test_throws "holds no solve step" fit((AutocorrelationNormalization(),), ps)
+    @testset "fit takes one solve step" begin
+        @test_throws MethodError fit((GroupProbe(), GroupProbe()), ps)
     end
 end

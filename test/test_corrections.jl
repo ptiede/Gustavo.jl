@@ -4,10 +4,10 @@
 # solution, so these tests do not depend on any solver.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
-@isdefined(_autocorrelated_ms) || include("test_autocorrelations.jl")
-@isdefined(GroupProbe) || include("test_each_group.jl")
 
 const CALc = Gustavo.Calibration
+
+_halve_weights(ms) = (parent(ms[:weight]) ./= 2; ms)
 
 # A solution over `geom` with a per-(scan, window) phase and a per-channel
 # amplitude, each per feed, set to seeded random values.
@@ -64,12 +64,12 @@ end
 
     @testset "calibrate! on one window matches the run's geometry" begin
         # A per-channel segmentation of the whole set places each channel of one
-        # window by frequency: the same correction a pipeline applies.
-        for m in values(ps)
-            one = read(m)
+        # window by frequency: the same correction the whole set receives.
+        whole = calibrate(sol, ps)
+        for (k, m) in pairs(ps)
             @test isequal(
-                parent(calibrate!(sol, deepcopy(one))[:visibility]),
-                parent(Gustavo._correct(calibrate!(sol), deepcopy(one), geom)[:visibility]),
+                parent(calibrate!(sol, deepcopy(read(m)))[:visibility]),
+                parent(whole[k][:visibility]),
             )
         end
         # A solution segmented only by name applies with the window's own geometry.
@@ -89,83 +89,47 @@ end
         @test parent(out[:visibility][BaselineID = a4]) == parent(ms[:visibility][BaselineID = a4])
     end
 
-    @testset "calibrate!(sol) is a correction that composes" begin
-        g = calibrate!(sol; apply_flags = false)
-        @test g isa GainCorrection
-        @test sprint(show, g) == "calibrate!(hand; apply_flags = false)"
-        ref = calibrate!(sol, fresh(); apply_flags = false)
-        @test isequal(parent(g(fresh())[:visibility]), parent(ref[:visibility]))
-        twice = (g ∘ g)(fresh())
-        @test isequal(parent(twice[:visibility]), parent(g(ref)[:visibility]))
-        @test g |> GroupProbe() isa Tuple{GainCorrection, GroupProbe}
-        @test g |> g isa Tuple{GainCorrection, GainCorrection}
-        @test startswith(fit(g |> GroupProbe(), ps).provenance.pipeline, "calibrate!(hand; apply_flags = false) |> ")
-    end
-
-    @testset "StationWeightScale" begin
+    @testset "scale_weights!" begin
         scale = DimArray([2.0, 5.0], AntennaName(["A2", "ZZ"]))
         target = fresh()
-        out = StationWeightScale(scale)(target)
+        out = scale_weights!(target, scale)
         @test out === target
         for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
             f = ("A2" in (a, b)) ? 2.0 : 1.0
             @test parent(out[:weight][BaselineID = bi]) ≈ f .* parent(ms[:weight][BaselineID = bi])
         end
         @test parent(out[:visibility]) == parent(ms[:visibility])
-        # In a pipeline it is the same correction.
-        @test parent(Gustavo._correct(StationWeightScale(scale), fresh(), geom)[:weight]) == parent(out[:weight])
-        @test_throws "finite and positive" StationWeightScale(DimArray([1.0, 0.0], AntennaName(["A1", "A2"])))
-        @test_throws "named more than once" StationWeightScale(DimArray([1.0, 2.0], AntennaName(["A1", "A1"])))
-        @test_throws "index the factors by `AntennaName`" StationWeightScale(DimArray([1.0], XRadio.StationName(["A1"])))
+        @test_throws "scale_weights!: every factor must be finite and positive" scale_weights!(
+            fresh(), DimArray([1.0, 0.0], AntennaName(["A1", "A2"]))
+        )
+        @test_throws "scale_weights!: a station is named more than once" scale_weights!(
+            fresh(), DimArray([1.0, 2.0], AntennaName(["A1", "A1"]))
+        )
+        @test_throws "scale_weights!: index the factors by `AntennaName`" scale_weights!(
+            fresh(), DimArray([1.0], XRadio.StationName(["A1"]))
+        )
     end
 
-    @testset "FlagChannels" begin
+    @testset "flag_channels!" begin
         freqs = geom.channel_freqs
         hit = freqs[[1, end]]
         mask = DimArray(map(in(hit), freqs), Frequency(freqs))
         for m in values(ps)
             one = deepcopy(read(m))
-            out = FlagChannels(mask)(one)
+            out = flag_channels!(one, mask)
             @test out === one
             for (c, f) in enumerate(XRadio.frequencies(one))
                 @test all(parent(out[:flag][Frequency = c])) == (f in hit)
             end
         end
-        @test sprint(show, FlagChannels(mask)) == "FlagChannels(2 of $(length(freqs)) channels)"
         partial = DimArray(trues(2), Frequency(freqs[1:2]))
-        @test_throws "does not cover the channel" FlagChannels(partial)(fresh())
-        @test_throws "index the mask by `Frequency`" FlagChannels(DimArray(trues(2), Ti([1.0, 2.0])))
-        @test_throws "more than once" FlagChannels(DimArray(trues(2), Frequency([1.0, 1.0])))
-    end
-
-    @testset "AutocorrelationNormalization" begin
-        auto = _set_autocorrelations!(_autocorrelated_ms())
-        ref = Gustavo.UVData.normalize_by_autocorrelations(auto)
-        target = deepcopy(auto)
-        @test AutocorrelationNormalization()(target) === target
-        @test isequal(parent(target[:visibility]), parent(ref[:visibility]))
-    end
-
-    @testset "a correction returns the Measurement Set it modified" begin
-        copying(m) = deepcopy(m)
-        @test_throws "returned a different MeasurementSet" fit((copying, GroupProbe()), ps)
-        @test_throws "returned a Nothing" fit((m -> nothing, GroupProbe()), ps)
-    end
-
-    @testset "fit hands every correction one private copy of the group" begin
-        before = deepcopy(ps)
-        seen = []
-        record(m) = (push!(seen, parent(m[:visibility])); m)
-        serial = ExecutionConfig(; inner_executor = SerialScheduler())
-        _probe((record, _halve_weights, record) |> GroupProbe(), ps; exec = serial)
-        # Both records of a member see the same array, never the caller's.
-        @test all(seen[k] === seen[k + 1] for k in 1:2:length(seen))
-        callers = [parent(m[:visibility]) for m in values(ps)]
-        @test !any(v -> any(c -> c === v, callers), seen)
-        for k in keys(ps)
-            @test isequal(parent(ps[k][:visibility]), parent(before[k][:visibility]))
-            @test parent(ps[k][:weight]) == parent(before[k][:weight])
-        end
+        @test_throws "flag_channels!: the mask does not cover the channel" flag_channels!(fresh(), partial)
+        @test_throws "flag_channels!: index the mask by `Frequency`" flag_channels!(
+            fresh(), DimArray(trues(2), Ti([1.0, 2.0]))
+        )
+        @test_throws "flag_channels!: a frequency appears more than once" flag_channels!(
+            fresh(), DimArray(trues(2), Frequency([1.0, 1.0]))
+        )
     end
 end
 
@@ -178,9 +142,7 @@ end
         out = calibrate(sol, ps; apply_flags = false)
         @test collect(keys(out)) == collect(keys(ps))
         for (name, lazy) in pairs(ps)
-            ref = Gustavo._correct(calibrate!(sol; apply_flags = false), deepcopy(read(lazy)), geom)
-            @test isequal(parent(out[name][:visibility]), parent(ref[:visibility]))
-            @test parent(out[name][:weight]) == parent(ref[:weight])
+            @test _division_error(out[name], read(lazy), sol, geom) < 1.0e-6
             @test !any(parent(out[name][:flag]))
         end
     end
@@ -200,6 +162,11 @@ end
         out = calibrate(sol, ps; post = _halve_weights, apply_flags = false)
         ref = calibrate(sol, ps; apply_flags = false)
         @test all(parent(out[k][:weight]) == parent(ref[k][:weight]) ./ 2 for k in keys(ps))
+    end
+
+    @testset "post returns the Measurement Set it modified" begin
+        @test_throws "returned a different MeasurementSet" calibrate(sol, ps; post = deepcopy)
+        @test_throws "returned a Nothing" calibrate(sol, ps; post = m -> nothing)
     end
 
     @testset "leaves its input as it was" begin

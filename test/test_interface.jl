@@ -1,19 +1,12 @@
-# Composable-pipeline interface tests (protocol, transforms, stage
-# provenance/snapshots, and the fit/calibrate verbs), on ProcessingSets from
-# `_build_fringe_ps`. Uses the CAL/FP/UVP aliases from test_pipeline.jl
-# (included earlier in runtests.jl).
+# Solve-step interface tests (protocol, provenance, solutions of several steps,
+# and the fit/calibrate verbs), on ProcessingSets from `_build_fringe_ps`. Uses
+# the CAL/FP/UVP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 using Distributions: LogNormal, Gamma, MvNormal
 
 # A throwaway solve step proving the protocol defaults exist.
 struct _ProtoProbe <: Gustavo.SolveStep end
-
-# A THIRD-PARTY-shaped solve step: declares provides like a built-in one, but
-# `_parse_pipeline` knows nothing about its type — proving it routes by
-# abstract type alone, not an isa-chain in disguise.
-struct _ThirdPartyStep <: Gustavo.SolveStep end
-Gustavo.provides(::_ThirdPartyStep) = :thirdparty
 
 # A third-party step that reads the data twice and reports each group's first
 # time.
@@ -33,13 +26,13 @@ Gustavo.solve(::_BadInfoStep, ctx) = 1.0
 # A model value that is not a `GainComponent`.
 struct _OpaqueTerm end
 
-# The full three-stage production pipeline at defaults.
-_full_chain(; gauge = PinAntenna(1)) = BaselineFringeFit(; gauge) |> Bandpass(; gauge) |> AdhocPhase(; gauge)
+# The three production steps at defaults.
+_full_chain(; gauge = PinAntenna(1)) = (BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge))
 
 # Every parameter of a solution, in component order.
 _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
-@testset "Composable pipeline interface" begin
+@testset "Solve-step interface" begin
     gauge = PinAntenna(1)
     @testset "step protocol defaults" begin
         s = _ProtoProbe()
@@ -105,13 +98,14 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         # subset exactly as a fit on the subset alone does only if each of its
         # scans' gains lands on that scan.
         fr3 = fit(BaselineFringeFit(; gauge), sub)
-        bp_sub = fit(_precal(fr) |> Bandpass(; gauge), sub)
-        @test _all_params(bp_sub) ≈ _all_params(fit(_precal(fr3) |> Bandpass(; gauge), sub)) atol = 1.0e-10
+        bp_sub = fit(Bandpass(; gauge), _precal(fr, sub))
+        @test _all_params(bp_sub) ≈ _all_params(fit(Bandpass(; gauge), _precal(fr3, sub))) atol = 1.0e-10
         # Noise-free and time-constant: one scan determines the bandpass all three do.
-        @test maximum(abs, _all_params(bp_sub) .- _all_params(fit(_precal(fr) |> Bandpass(; gauge), ps))) < 1.0e-6
+        @test maximum(abs, _all_params(bp_sub) .- _all_params(fit(Bandpass(; gauge), _precal(fr, ps)))) < 1.0e-6
 
-        sol = fit((_precal(fr), _precal(bp_sub), AdhocPhase(; gauge)), ps)
-        @test count(" |> ", sol.provenance.pipeline) == 2
+        corrected = _precal(fr, ps)
+        calibrate!(bp_sub, corrected; flag_bad = false, apply_flags = false)
+        sol = fit(AdhocPhase(; gauge), corrected)
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
@@ -121,56 +115,17 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test_throws "station code \"ZZ\" not in antenna table" fit(BaselineFringeFit(; gauge = PinAntenna("ZZ")), ps)
     end
 
-    @testset "steps compose in any declared order" begin
-        # A third-party SolveStep composes purely by declaring provides — no
-        # isa-case anywhere in _parse_pipeline for it, and no construction-time
-        # veto on where it sits.
-        @test Gustavo._check_unique_provides(
-            Gustavo.SolveStep[BaselineFringeFit(; gauge), _ThirdPartyStep()]
-        ) === nothing
-        @test Gustavo._check_unique_provides(
-            Gustavo.SolveStep[_ThirdPartyStep(), BaselineFringeFit(; gauge)]
-        ) === nothing
-        # Two steps providing the same capability are rejected, regardless of
-        # their concrete types or position — a naming conflict, not an
-        # ordering rule.
-        @test_throws "more than one step provides :fringe" Gustavo._check_unique_provides(
-            Gustavo.SolveStep[BaselineFringeFit(; gauge), BaselineFringeFit(; gauge)]
-        )
-        # Each step's solution is the branch named by `provides`, so the default
-        # `:nothing` collides with itself too.
-        @test_throws "more than one step provides :nothing" Gustavo._check_unique_provides(
-            Gustavo.SolveStep[_ProtoProbe(), _ProtoProbe()]
-        )
-        # _parse_pipeline routes any SolveStep (built-in or third-party) into
-        # solve_steps by abstract type alone, in declared order — it does not
-        # reorder or reject based on that order.
-        br = Gustavo._parse_pipeline([BaselineFringeFit(; gauge), _ThirdPartyStep()])
-        @test br.solve_steps == [BaselineFringeFit(; gauge), _ThirdPartyStep()]
-    end
-
-    @testset "chaining builds a tuple" begin
-        cf = StationWeightScale(DimArray([2.0], AntennaName(["A1"])))
-        chain = cf |> BaselineFringeFit(; gauge) |> Bandpass(; gauge)
-        @test chain isa Tuple
-        @test chain[1] === cf && chain[2] isa BaselineFringeFit && chain[3] isa Bandpass
-        @test (cf |> (BaselineFringeFit(; gauge),))[1] === cf
-        # A transform belongs to the steps after it.
-        @test Gustavo._parse_pipeline(chain).before == [[cf], []]
-        # Only pipeline elements chain; anything else is function application.
-        @test_throws MethodError BaselineFringeFit(; gauge) |> :average
-    end
-
-    @testset "full pipeline: components keyed by step" begin
+    @testset "a solution of several steps: components keyed by step" begin
         ps, _ = _build_fringe_ps()
-        sol = fit(_full_chain(), ps)
+        sols = _fit_chain(_full_chain(), ps)
+        sol = _combined(sols)
 
         @test sol isa CAL.CalibrationSolution
         @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
         @test unique(c.step for c in sol.components) == [:fringe, :bandpass, :adhoc]
         @test all(c -> c isa CAL.SolvedComponent, sol.components)
         @test sol.steps[:fringe] isa NamedTuple
-        @test occursin("PinAntenna{Int64}(1)", sol.provenance.pipeline)
+        @test all(s -> occursin("PinAntenna{Int64}(1)", s.provenance.pipeline), sols)
         @test_throws "holds no component under bogus" sol[:bogus]
 
         # The fringe step's unconstrained stations and search settings are its
@@ -207,7 +162,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "selections and gains selectors" begin
         ps, _ = _build_fringe_ps()
-        sol = fit(_full_chain(), ps)
+        sol = _combined(_fit_chain(_full_chain(), ps))
 
         # A path prefix selects the components under it; their gains multiply.
         ph = sol[:fringe, :phase]
@@ -234,7 +189,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "flags come from the steps a selection holds" begin
         ps, _ = _build_fringe_ps()
-        fitted = fit(_full_chain(), ps)
+        fitted = _combined(_fit_chain(_full_chain(), ps))
         steps = copy(fitted.steps)
         steps[:fringe] = (; steps[:fringe]..., flagged_ant = ["A2"], flagged_scan = [1])
         sol = CAL.CalibrationSolution(fitted.geom, fitted.components, steps, fitted.info)
@@ -246,20 +201,18 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test !flagged(calibrate(sol[:bandpass], ps))
     end
 
-    @testset "calibrate: gains alone, or the fit's data path" begin
+    @testset "calibrate divides by the gains alone" begin
         ps, _ = _build_fringe_ps()
         ws = DimArray([1.0, 0.5, 1.0, 2.0], AntennaName(["A1", "A2", "A3", "A4"]))
-        sol = fit(StationWeightScale(ws) |> _full_chain(), ps)
-        @test startswith(sol.provenance.pipeline, "StationWeightScale")
-
-        # The weight scale the fit applied is not replayed: scaling the data
-        # before or after `calibrate` gives the same result.
-        scale(set) = XRadio.ProcessingSet(
+        scale(set, w = ws) = XRadio.ProcessingSet(
             OrderedDict{Symbol, XRadio.MeasurementSet}(
-                k => StationWeightScale(ws)(deepcopy(read(ms))) for (k, ms) in pairs(set)
+                k => scale_weights!(deepcopy(read(ms)), w) for (k, ms) in pairs(set)
             ),
             copy(DimensionalData.metadata(set)),
         )
+        sol = _combined(_fit_chain(_full_chain(), scale(ps)))
+
+        # Scaling the data before or after `calibrate` gives the same result.
         before = calibrate(sol, scale(ps))
         after = scale(calibrate(sol, ps))
         @test collect(keys(before)) == collect(keys(after))
@@ -268,36 +221,10 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             @test parent(before[k][:weight]) ≈ parent(ms[:weight])
         end
 
-        # Given the pipeline, `calibrate` repeats the fit's data path, dividing
-        # step by step rather than by the gains' product.
-        replayed = calibrate(StationWeightScale(ws) |> _full_chain(), sol, ps)
-        for (k, ms) in pairs(before)
-            @test isapprox(parent(replayed[k][:visibility]), parent(ms[:visibility]); nans = true)
-            @test parent(replayed[k][:weight]) ≈ parent(ms[:weight])
-        end
-        # Its solve steps must be the solution's.
-        @test_throws "not the solution's steps" calibrate(StationWeightScale(ws) |> _full_chain(), sol[:fringe], ps)
-        @test_throws "not the solution's steps" calibrate(BaselineFringeFit(; gauge), sol, ps)
-
-        # Two weight-scale transforms compose (w·(s_a s_b)²). Two pipelines
-        # join by splatting.
-        sol_b = fit(((StationWeightScale(ws) |> StationWeightScale(ws))..., _full_chain()...), ps)
-        @test parent(gains(fit(StationWeightScale(ws .* ws) |> _full_chain(), ps))) ≈
+        # Two weight scales compose (w·(s_a s_b)²).
+        sol_b = _combined(_fit_chain(_full_chain(), scale(scale(ps))))
+        @test parent(gains(_combined(_fit_chain(_full_chain(), scale(ps, ws .* ws))))) ≈
             parent(gains(sol_b))
-
-        # A transform listed after a step does not reach that step.
-        early = fit(BaselineFringeFit(; gauge), ps)
-        late = fit(BaselineFringeFit(; gauge) |> StationWeightScale(ws), ps)
-        @test parent(gains(late)) == parent(gains(early))
-
-        # A correction between two steps is repeated in its place.
-        between = BaselineFringeFit(; gauge) |> StationWeightScale(ws) |> Bandpass(; gauge)
-        solb = fit(between, ps)
-        by_hand = calibrate(solb[:bandpass], scale(calibrate(solb[:fringe], ps; apply_flags = false)); apply_flags = false)
-        for (k, ms) in pairs(calibrate(between, solb, ps; apply_flags = false))
-            @test isapprox(parent(ms[:visibility]), parent(by_hand[k][:visibility]); nans = true)
-            @test parent(ms[:weight]) ≈ parent(by_hand[k][:weight])
-        end
     end
 
     @testset "rate components must share the constant-phase epoch" begin
@@ -317,7 +244,9 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
     @testset "solution Zarr round-trip" begin
         ps, _ = _build_fringe_ps()
         ws = DimArray([1.0, 0.5, 1.0, 1.0], AntennaName(["A1", "A2", "A3", "A4"]))
-        sol = fit(StationWeightScale(ws) |> _full_chain(), ps)
+        scaled = Gustavo.materialize(ps)
+        foreach(ms -> scale_weights!(ms, ws), values(scaled))
+        sol = _combined(_fit_chain(_full_chain(), scaled))
         dir = mktempdir()
         path = joinpath(dir, "sol.zarr")
         CAL.save_solution(path, sol)

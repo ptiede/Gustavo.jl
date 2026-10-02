@@ -49,22 +49,8 @@ end
 [`normalize_by_autocorrelations!`](@ref) applied to an in-memory copy of `ms`;
 `ms` is left as it is.
 """
-normalize_by_autocorrelations(ms::XRadio.MeasurementSet) = normalize_by_autocorrelations!(_read_owned(ms))
+normalize_by_autocorrelations(ms::XRadio.MeasurementSet) = normalize_by_autocorrelations!(materialize(ms))
 
-# `ms` read into memory, with layers no other Measurement Set shares, so they can
-# be modified in place.
-function _read_owned(ms::XRadio.MeasurementSet)
-    out = read(ms)
-    for k in keys(out)
-        parent(out[k]) === parent(ms[k]) && (out[k] = copy(out[k]))
-    end
-    return out
-end
-
-_read_owned(ps::XRadio.ProcessingSet) = XRadio.ProcessingSet(
-    OrderedDict{Symbol, XRadio.MeasurementSet}(k => _read_owned(ms) for (k, ms) in pairs(ps)),
-    copy(DimensionalData.metadata(ps)),
-)
 
 function _normalize_cell!(vis, weight, flag, cell, auto_a, auto_b)
     f = view(flag, cell...)

@@ -1,12 +1,8 @@
 # ── The BaselineFringeFit step (stage A on the composable engine) ─────────────
 #
-# A BaselineFringeFit-only pipeline solves the matched-filter stage standalone. The M3
-# bit-parity gates against the frozen monolith ran before its deletion; the
-# standing invariant kept here is that LATER STAGES NEVER MOVE THE FRINGE
-# BLOCKS: a fringe-only fit's θ blocks are bit-identical to the same blocks of
-# a fuller pipeline (dispersion/SBD off, so no later stage refines the compared
-# slots). Plus the step's capabilities: the opt-in cross-feed rate solve,
-# fit-on-subset cross-hand masking, and transforms on the streaming path.
+# A BaselineFringeFit fit solves the matched-filter stage standalone. Tested
+# here: the step's gauges and capabilities, the opt-in cross-feed rate solve,
+# fit-on-subset cross-hand masking, and corrections applied before the step.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
@@ -64,43 +60,28 @@ end
 
 @testset "each step applies its own gauge" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64)
-    sol = fit(BaselineFringeFit(; gauge = PinAntenna("A1")) |> AdhocPhase(; gauge = PinAntenna("A2")), ps)
+    fr, ad = _fit_chain((BaselineFringeFit(; gauge = PinAntenna("A1")), AdhocPhase(; gauge = PinAntenna("A2"))), ps)
     at(c, name) = c.params[AntennaName(At(name))]
-    mbd = only(c for c in sol[:fringe].components if last(c.path) === :mbd)
-    adhoc = only(sol[:adhoc].components)
+    mbd = only(c for c in fr[:fringe].components if last(c.path) === :mbd)
+    adhoc = only(ad[:adhoc].components)
     @test all(iszero, at(mbd, "A1"))
     @test all(iszero, at(adhoc, "A2"))
     @test !all(iszero, at(adhoc, "A1"))
-    @test occursin("PinAntenna{String}(\"A1\")", sol.provenance.pipeline)
-    @test occursin("PinAntenna{String}(\"A2\")", sol.provenance.pipeline)
+    @test occursin("PinAntenna{String}(\"A1\")", fr.provenance.pipeline)
+    @test occursin("PinAntenna{String}(\"A2\")", ad.provenance.pipeline)
 
     by_name = ByComponent((; adhoc = PinAntenna("A2")); default = PinAntenna("A1"))
-    sol2 = fit(BaselineFringeFit(; gauge = PinAntenna("A1")) |> AdhocPhase(; gauge = by_name), ps)
-    @test only(sol2[:adhoc].components).params == adhoc.params
+    _, ad2 = _fit_chain((BaselineFringeFit(; gauge = PinAntenna("A1")), AdhocPhase(; gauge = by_name)), ps)
+    @test only(ad2[:adhoc].components).params == adhoc.params
 end
 
 @testset "BaselineFringeFit step (new engine)" begin
-    @testset "fringe blocks invariant under later stages" begin
+    @testset "a fringe-only solution" begin
         ps, _ = _build_fringe_ps()
-        gauge = PinAntenna(1)
-        solm = fit(
-            BaselineFringeFit(; gauge) |>
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            ps,
-        )
         sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
-        fr, frm = sol[:fringe].components, solm[:fringe].components
+        fr = sol[:fringe].components
         @test length(fr) == 4
-        for (c, cm) in zip(fr, frm)
-            @test c == cm        # bit-identical
-        end
         @test collect(keys(sol.steps)) == [:fringe]
-        @test sol.info.nscan == solm.info.nscan
-        fi, fim = sol.steps[:fringe], solm.steps[:fringe]
-        @test fi.scan_snr == fim.scan_snr
-        @test fi.scan_ncells == fim.scan_ncells
-        @test fi.det_snr == fim.det_snr
-        @test fi.det_pfa == fim.det_pfa
 
         # `scan_ncells` is the false-alarm family each recorded `pfa` was computed over.
         solr = fit(BaselineFringeFit(; gauge = PinAntenna(1)), _build_fringe_ps(; nscans = 3, noise = 0.5)[1])
@@ -134,29 +115,6 @@ end
         present = fit(BaselineFringeFit(; model, gauge = PinAntenna("A1")), ps)
         @test present.steps[:fringe].flagged_ant == sol.steps[:fringe].flagged_ant
         @test present.steps[:fringe].flagged_scan == sol.steps[:fringe].flagged_scan
-    end
-
-    @testset "rounds > 1: fringe blocks invariant under later stages" begin
-        ps, _ = _build_fringe_ps()
-        gauge = PinAntenna(1)
-        solm = fit(
-            BaselineFringeFit(;
-                model = default_fringe_terms(),
-                rounds = 2,
-                gauge,
-            ) |> AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            ps,
-        )
-        sol = fit(
-            BaselineFringeFit(;
-                model = default_fringe_terms(),
-                rounds = 2,
-                gauge,
-            ), ps,
-        )
-        for (c, cm) in zip(sol[:fringe].components, solm[:fringe].components)
-            @test c == cm
-        end
     end
 
     @testset "opt-in cross-feed rate (a feed-2 Rate list element)" begin
@@ -219,49 +177,42 @@ end
         ws = DimArray([1.0, 0.5, 1.0, 2.0], AntennaName(["A1", "A2", "A3", "A4"]))
         # Weight scale: the search is invariant (snr from the |D|² plane), so
         # the fringe θ matches the untransformed solve bit-for-bit.
-        sol_ws = fit(
-            StationWeightScale(ws) |>
-                BaselineFringeFit(; gauge = PinAntenna(1)),
-            ps,
-        )
+        scaled = Gustavo.materialize(ps)
+        foreach(ms -> scale_weights!(ms, ws), values(scaled))
+        sol_ws = fit(BaselineFringeFit(; gauge = PinAntenna(1)), scaled)
         sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         @test sol_ws[:fringe].components == sol[:fringe].components
-        @test startswith(sol_ws.provenance.pipeline, "StationWeightScale")
 
-        # A plain function is a correction: it runs before the step, and
-        # calibrating through the same pipeline replays it, so flagging one
-        # baseline flags it in the calibrated output.
+        # Flagging one baseline before the step keeps it flagged in the
+        # calibrated output.
         is12(a, b) = Set((a, b)) == Set(("A1", "A2"))
-        touched = Threads.Atomic{Int}(0)
         function kill12(ms)
-            Threads.atomic_add!(touched, 1)
             for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
                 is12(a, b) && (view(ms[:flag], BaselineID(bi)) .= true)
             end
             return ms
         end
-        pipeline_cf = (kill12, BaselineFringeFit(; gauge = PinAntenna(1)))
-        sol_cf = fit(pipeline_cf, ps)
-        @test touched[] > 0
-        @test occursin("kill12", sol_cf.provenance.pipeline)
-        calibrated = calibrate(pipeline_cf, sol_cf, ps)
+        killed = Gustavo.materialize(ps)
+        foreach(kill12, values(killed))
+        sol_cf = fit(BaselineFringeFit(; gauge = PinAntenna(1)), killed)
+        calibrated = calibrate(sol_cf, killed)
         for ms in values(calibrated), (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
             is12(a, b) && @test all(view(ms[:flag], BaselineID(bi)))
         end
     end
 
-    @testset "model validation + full-pipeline option coverage" begin
+    @testset "model validation + option coverage ahead of later steps" begin
         ps, _ = _build_fringe_ps()
         # The model is the component tree alone, and the gauge a field of its own —
         # no per-effect fields or keywords on BaselineFringeFit.
         @test fieldnames(typeof(BaselineFringeFit(; gauge = PinAntenna(1)))) ==
             (:model, :search, :closure, :rounds, :steer_cells, :gauge)
 
-        # A custom Stationization, the inter-feed rate opt-in and a function
-        # correction run in a full pipeline.
+        # A custom Stationization and the inter-feed rate opt-in run ahead of
+        # the bandpass and adhoc steps.
         gauge = PinAntenna(1)
-        sol_full = fit(
-            [identity,
+        sols_full = _fit_chain(
+            (
                 BaselineFringeFit(;
                     model = merge(
                         default_fringe_terms();
@@ -270,14 +221,13 @@ end
                     closure = FP.Stationization(pfa_max = 1.0e-2),
                     gauge,
                 ),
-                Bandpass(; gauge), AdhocPhase(; gauge)],
-            ps,
-            exec = ExecutionConfig(),
+                Bandpass(; gauge), AdhocPhase(; gauge),
+            ),
+            ps; exec = ExecutionConfig(),
         )
-        @test collect(keys(sol_full.steps)) == [:fringe, :bandpass, :adhoc]
-        # Bandpass without AdhocPhase still solves a :bandpass
-        # stage (F |> B — no final pass).
-        sol_fb = fit([BaselineFringeFit(; gauge), Bandpass(; gauge)], ps)
+        @test [only(keys(s.steps)) for s in sols_full] == [:fringe, :bandpass, :adhoc]
+        # Bandpass after the fringe step alone still solves a :bandpass stage.
+        _, sol_fb = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge)), ps)
         @test haskey(sol_fb, :bandpass)
 
         # Any real `steer_cells`, and a Float32 station solve, agreeing with the default.

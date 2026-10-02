@@ -22,6 +22,7 @@ using StatsAPI: fit
 
 include("UVData/UVData.jl")
 using .UVData
+using .UVData: materialize
 
 include("Calibration.jl")
 using .Calibration
@@ -60,24 +61,22 @@ export AbstractTimeSegmentation, GlobalTime, PerScan, PerIntegration, TimeBlocks
     InstrumentScans
 export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
     ChannelBlocks, FreqGroups, BandGroups
-# Composable-pipeline surface: verbs, step protocol, execution config.
+# Verbs, step protocol, execution config.
 export fit
 export SolveStep, ExecutionConfig, ProgressLogger, mapsets
 export outer_executor, inner_executor
 export each_group, model_components, provides, step_gauge
 export supports_station_heterogeneity
-# Re-export the transform vocabulary and stage accessors so
-# pipelines read naturally with a bare `using Gustavo`.
-export AbstractDataTransform, AutocorrelationNormalization, GainCorrection,
-    StationWeightScale, FlagChannels
+export scale_weights!, flag_channels!, normalize_by_autocorrelations!
 export search_scan
 # The solution surface: the container, its components, and serialization.
 export CalibrationSolution, SolvedComponent
 export gains
 export save_solution, load_solution
 
-# A step author extends `solve`; unexported because the name is common.
+# Unexported because the names are common: a step author extends `solve`;
+# FITSFiles exports a `materialize` of its own.
 @static if VERSION >= v"1.11"
-    eval(Meta.parse("public solve, SolveContext"))
+    eval(Meta.parse("public solve, SolveContext, materialize"))
 end
 end

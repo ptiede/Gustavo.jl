@@ -61,10 +61,13 @@ end
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
     # keeps every well-determined AP in this high-SNR synthetic.
     gauge = PinAntenna(1)
-    sol = fit(
-        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-        ps,
+    sol = _combined(
+        _fit_chain(
+            (
+                BaselineFringeFit(; gauge), Bandpass(; gauge),
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+            ), ps,
+        )
     )
     @test sol isa CAL.CalibrationSolution
     @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
@@ -169,8 +172,8 @@ end
         @test any(!=(0), off1[:, 1, :, :])           # ...and the plan is non-trivial
     end
 
-    # The pipeline's own default carries the same tie: the AdhocPhase
-    # step's compiled component is the feed-common adhoc form.
+    # The step's default carries the same tie: the AdhocPhase step's compiled
+    # component is the feed-common adhoc form.
     t = Gustavo.model_components(AdhocPhase(; gauge = PinAntenna(1)), nothing)
     @test t.phase.adhoc.Feed isa CAL.SharedFeeds
     @test isempty(t.logamp)
@@ -218,10 +221,7 @@ end
     # parallel hands still flatten.
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
-    sol = fit(
-        BaselineFringeFit(; gauge) |> AdhocPhase(; model = pf, smoother = sm, gauge),
-        ps,
-    )
+    sol = _combined(_fit_chain((BaselineFringeFit(; gauge), AdhocPhase(; model = pf, smoother = sm, gauge)), ps))
     adhoc_c = only(sol[:adhoc, :phase, :adhoc].components)
     @test adhoc_c.component.Feed isa CAL.PerFeed
     leaf = parent(adhoc_c.params)     # (param, node, fseg, tseg, ant)
@@ -237,10 +237,7 @@ end
     ps, _ = _build_fringe_ps()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
-    chain = BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
-        AdhocPhase(adhoc; gauge)
-
-    sol_ref = fit(chain, ps)
+    sol_ref = _combined(_fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
     out_fused = calibrate(sol_ref, ps)
     @test collect(keys(out_fused)) == collect(keys(ps))
     same(x, y) = (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5)
@@ -263,28 +260,8 @@ end
     end
 end
 
-@testset "Cross-run step composition ≡ within-run pipeline" begin
-    # Within a run, each finished step's solution is divided out before the
-    # next step's pass, as `calibrate!` does across separate `fit` calls.
-    # Fitting `A |> B` in one call must solve the same B-step θ as fitting `A`
-    # alone, then fitting `_precal(sol_a[:fringe]) |> B` in a later call.
-    ps, _ = _build_fringe_ps()
-    gauge = PinAntenna(1)
-    ff = BaselineFringeFit(; gauge)
-    bp = Bandpass(; gauge)
-
-    sol_within = fit(ff |> bp, ps)
-
-    sol_a = fit(ff, ps)
-    sol_cross = fit(_precal(sol_a[:fringe]) |> bp, ps)
-
-    θ_within = [parent(c.params) for c in sol_within[:bandpass].components]
-    θ_cross = [parent(c.params) for c in sol_cross[:bandpass].components]
-    @test θ_within == θ_cross
-end
-
 @testset "Residual accumulation is a plain weighted mean of pre-corrected data" begin
-    # The pipeline's corrections divide out the gains, including the |g|² weight
+    # `calibrate!` divides out the gains, including the |g|² weight
     # reweighting (Var(V/g) = 1/(w·|g|²)), before `weighted_sums` sees the
     # data. Feeding it already-reweighted (V, W) must give back exactly that
     # inverse-variance mean, with no further correction applied.
@@ -332,11 +309,7 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
         gauge = PinAntenna(1)
-        sol = fit(
-            BaselineFringeFit(; rounds = r, gauge) |>
-                Bandpass(; gauge) |> AdhocPhase(adhoc; gauge),
-            ps,
-        )
+        sol = _combined(_fit_chain((BaselineFringeFit(; rounds = r, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
         @test minimum(_product_coherences(calibrate(sol, ps); keep = _parallel_hand)) > 0.99
     end
 end
@@ -375,10 +348,15 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
-    sol_on = fit(ff |> Bandpass(; gauge) |> AdhocPhase(adhoc; gauge), ps)
-    sol_off = fit(
-        ff |> Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge) |>
-            AdhocPhase(adhoc; gauge), ps,
+    sol_on = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
+    sol_off = _combined(
+        _fit_chain(
+            (
+                ff,
+                Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge),
+                AdhocPhase(adhoc; gauge),
+            ), ps,
+        )
     )
 
     don = _time_averaged_spectra(calibrate(sol_on, ps))
@@ -437,10 +415,15 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
-    sol_on = fit(ff |> Bandpass(; gauge) |> AdhocPhase(adhoc; gauge), ps)
-    sol_off = fit(
-        ff |> Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge) |>
-            AdhocPhase(adhoc; gauge), ps,
+    sol_on = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
+    sol_off = _combined(
+        _fit_chain(
+            (
+                ff,
+                Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge),
+                AdhocPhase(adhoc; gauge),
+            ), ps,
+        )
     )
 
     don = _time_averaged_spectra(calibrate(sol_on, ps))
@@ -544,9 +527,14 @@ end
 
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
-    sol_off = fit(
-        ff |> Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother(), gauge) |>
-            AdhocPhase(adhoc; gauge), ps,
+    sol_off = _combined(
+        _fit_chain(
+            (
+                ff,
+                Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother(), gauge),
+                AdhocPhase(adhoc; gauge),
+            ), ps,
+        )
     )
     doff = _time_averaged_spectra(calibrate(sol_off, ps))
     poff = findfirst(==((1, 1)), doff.feeds)
@@ -560,9 +548,11 @@ end
         CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.2), 1.0)),
     )
     for prior in priors
-        sol = fit(
-            ff |> Bandpass(; model = amp_model(prior), smoother = FP.PerTrackSmoother(), gauge) |>
-                AdhocPhase(adhoc; gauge), ps,
+        sol = _combined(
+            _fit_chain(
+                (ff, Bandpass(; model = amp_model(prior), smoother = FP.PerTrackSmoother(), gauge), AdhocPhase(adhoc; gauge)),
+                ps,
+            )
         )
         don = _time_averaged_spectra(calibrate(sol, ps))
         p = findfirst(==((1, 1)), don.feeds)
@@ -581,10 +571,7 @@ end
 
     # With no prior the killed channels are NOT estimated — their θ slot is
     # untouched (log-amp 0 ⇒ |g| = 1), the contrast that motivates the priors.
-    solf = fit(
-        ff |> Bandpass(; smoother = FP.PerTrackSmoother(), gauge) |>
-            AdhocPhase(adhoc; gauge), ps,
-    )
+    solf = _combined(_fit_chain((ff, Bandpass(; smoother = FP.PerTrackSmoother(), gauge), AdhocPhase(adhoc; gauge)), ps))
     bpf = only(CAL._applied(solf[:bandpass, :logamp, :bandpass]).groups)
     planf = only(bpf.layout.plans)
     for dg in dead_globals, a in 2:nant, f in 1:2
@@ -595,11 +582,7 @@ end
 @testset "Default adhoc step flattens end-to-end" begin
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
-    sol = fit(
-        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
-            AdhocPhase(; gauge),
-        ps,
-    )
+    sol = _combined(_fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps))
     @test minimum(_product_coherences(calibrate(sol, ps); keep = _parallel_hand)) > 0.99
 end
 
@@ -614,10 +597,13 @@ end
     @test ax.mbd !== nothing
 
     gauge = PinAntenna(1)
-    sol = fit(
-        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-        ps,
+    sol = _combined(
+        _fit_chain(
+            (
+                BaselineFringeFit(; gauge), Bandpass(; gauge),
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+            ), ps,
+        )
     )
     @test all(>(10), filter(isfinite, sol.steps[:fringe].scan_snr))
     @test isempty(FP.suspect_fringes(sol))                 # all detections secure
@@ -635,15 +621,17 @@ end
     # fires per completed scan of each pass (plus a done=0 pass announcement).
     events = Tuple{Symbol, Int, Int}[]
     gauge = PinAntenna(1)
-    sol = fit(
-        BaselineFringeFit(; gauge) |> Bandpass(; gauge) |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-        ps;
-        exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
+    sol = _combined(
+        _fit_chain(
+            (
+                BaselineFringeFit(; gauge), Bandpass(; gauge),
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+            ), ps;
+            exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
+        )
     )
     ngroups = length(XRadio.groupby(ps, XRadio.ByScan()))
-    # Stages report under the pass names of the composable pipeline
-    # (:fringe/:bandpass/:adhoc — the monolith's :search stage died with it).
+    # Stages report under each step's `provides` name (:fringe/:bandpass/:adhoc).
     for st in (:fringe, :adhoc)
         ev = [(d, t) for (s2, d, t) in events if s2 == st]
         @test !isempty(ev)
@@ -674,12 +662,14 @@ end
     # single-scan set (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
     gauge = PinAntenna(1)
-    solc = fit(
-        BaselineFringeFit(; gauge) |>
-            Bandpass(; gauge) |>
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-        ps;
-        exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
+    solc = _combined(
+        _fit_chain(
+            (
+                BaselineFringeFit(; gauge), Bandpass(; gauge),
+                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+            ), ps;
+            exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
+        )
     )
     @test solc isa CAL.CalibrationSolution
     bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
@@ -736,7 +726,7 @@ end
     )
     # Each scan's station systems solve as it is searched.
     @test Gustavo._scan_local_solve(ff)
-    sol = fit(ff |> AdhocPhase(; gauge), ps)
+    sol = _combined(_fit_chain((ff, AdhocPhase(; gauge)), ps))
     flags = FP.fringe_station_flags(sol)
     @test !isempty(flags)
     @test all(r -> r.ant == 4, flags)                 # only station 4 unconstrained

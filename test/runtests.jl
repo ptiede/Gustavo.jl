@@ -57,15 +57,15 @@ include("test_adhoc.jl")
 # End-to-end CalibrationSolution + fit pipeline (Phase 6).
 include("test_pipeline.jl")
 
-# The calibration pipeline surface: pipelines as vectors, fit and calibrate.
+# The calibration surface: fit and calibrate, gauges, provenance, defaults.
 # Reuses _build_fringe_ps + CAL/FP/UVP aliases from test_pipeline.jl.
 include("test_pipeline_config.jl")
 
-# Composable-pipeline interface (step protocol, transforms, selections, stage
-# snapshots, fit/calibrate). Reuses the same aliases.
+# Solve-step interface (step protocol, selections, solutions of several steps,
+# fit/calibrate). Reuses the same aliases.
 include("test_interface.jl")
 
-# Reading scan groups through the corrections, and the corrections themselves.
+# Reading scan groups, and the corrections.
 include("test_each_group.jl")
 include("test_corrections.jl")
 include("test_mapsets.jl")
@@ -73,7 +73,7 @@ include("test_group_tables.jl")
 include("test_axis_order.jl")
 
 # The BaselineFringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
-# cross-feed rate opt-in, fit-on-subset masking, transforms on the new path.
+# cross-feed rate opt-in, fit-on-subset masking, corrections before the step.
 include("test_fringe_step.jl")
 
 # The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
@@ -85,8 +85,8 @@ include("test_bandpass_step.jl")
 # default, and the shape specs acting as priors inside its gain update.
 include("test_joint_bandpass.jl")
 
-# The AdhocPhase step + output sink: multi-scan full-pipeline solves
-# standalone calibrate ≡ fused output.
+# The AdhocPhase step + output sink: multi-scan solves of the three steps in
+# turn, and calibrate.
 include("test_smoother_step.jl")
 
 # Fringe diagnostics + Makie plot stubs (Phase 8).
@@ -96,7 +96,7 @@ include("test_fringe_diagnostics.jl")
 # Reuses _build_fringe_ps + CAL/FP/UVP aliases from test_pipeline.jl.
 include("test_fringe_station_solutions.jl")
 
-# Per-station weight correction (StationWeightScale) through a full solve.
+# Per-station weight correction (scale_weights!) through a full solve.
 # Reuses _build_fringe_ps + the FP/CAL/UVP aliases from test_pipeline.jl.
 include("test_weight_scale.jl")
 
@@ -203,10 +203,10 @@ end
         @test n in top
     end
 
-    # The corrections a pipeline records, and reading scan groups in a step.
+    # The corrections, and reading scan groups in a step.
     for n in (
-            :AbstractDataTransform, :AutocorrelationNormalization, :GainCorrection, :calibrate!,
-            :StationWeightScale, :FlagChannels, :each_group, :ExecutionConfig,
+            :normalize_by_autocorrelations!, :scale_weights!, :flag_channels!, :calibrate!,
+            :each_group, :ExecutionConfig,
         )
         @test n in top
     end

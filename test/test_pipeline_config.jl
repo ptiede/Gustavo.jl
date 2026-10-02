@@ -1,43 +1,29 @@
-# Modular calibration-pipeline tests: the pipeline-level surface (a pipeline
-# as a vector, `fit`, `calibrate` and its `post`, defaults).
+# The calibration surface: `fit`, `calibrate` and its `post`, gauges,
+# provenance, defaults.
 # Reuses `_build_fringe_ps` and the CAL/FP/UVP aliases from test_pipeline.jl
 # (included earlier in runtests.jl).
 
-@testset "Calibration pipeline" begin
+@testset "Calibration surface" begin
     @testset "fit, then calibrate" begin
         ps, _ = _build_fringe_ps()
         gauge = PinAntenna(1)
-        pipe = (BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge))
-        sol = fit(pipe, ps)
-        @test sol isa CAL.CalibrationSolution
-        @test length(sol.geom.stations) == 4
-        @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
-        @test startswith(sol.provenance.pipeline, "BaselineFringeFit")
-        out = calibrate(sol, ps)
+        sols = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
+        @test all(s -> s isa CAL.CalibrationSolution, sols)
+        @test all(s -> length(s.geom.stations) == 4, sols)
+        @test [only(keys(s.steps)) for s in sols] == [:fringe, :bandpass, :adhoc]
+        @test startswith(first(sols).provenance.pipeline, "BaselineFringeFit")
+        out = _calibrate_chain(sols, ps)
         @test out isa XRadio.ProcessingSet
         @test collect(keys(out)) == collect(keys(ps))
-        # Replaying the solve-only pipeline divides by the same gains, step by step.
-        ref = calibrate(pipe, sol, ps)
-        same(x, y) = (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5)
-        for (k, ms) in pairs(ref)
-            @test all(splat(same), zip(parent(out[k][:visibility]), parent(ms[:visibility])))
-        end
     end
 
     @testset "calibrate's post runs on each corrected Measurement Set" begin
         ps, _ = _build_fringe_ps(nspw = 3, nchan = 4)
         gauge = PinAntenna(1)
-        sol = fit(BaselineFringeFit(; gauge) |> Bandpass(; gauge) |> AdhocPhase(; gauge), ps)
+        sol = fit(BaselineFringeFit(; gauge), ps)
         seen = Threads.Atomic{Int}(0)
         calibrate(sol, ps; post = ms -> (Threads.atomic_add!(seen, 1); ms))
         @test seen[] == length(ps)
-    end
-
-    @testset "a pipeline holds solve steps and transforms" begin
-        ps, _ = _build_fringe_ps()
-        @test_throws "not Symbol" fit([BaselineFringeFit(; gauge = PinAntenna(1)), :average], ps)
-        unit = DimArray(ones(4), AntennaName(["A1", "A2", "A3", "A4"]))
-        @test_throws "holds no solve step" fit([StationWeightScale(unit)], ps)
     end
 
     @testset "gauge by station code" begin
@@ -57,10 +43,10 @@
         @test parent(gains(by_code)) ≈ parent(gains(by_idx))
     end
 
-    @testset "BaselineFringeFit-less pipeline" begin
+    @testset "Bandpass without BaselineFringeFit" begin
         ps, _ = _build_fringe_ps()
-        # A standalone Bandpass fit needs no BaselineFringeFit step, no
-        # pipeline-level anchor check, and no fringe-estimator diagnostics.
+        # A standalone Bandpass fit needs no BaselineFringeFit step, no anchor
+        # check, and no fringe-estimator diagnostics.
         sol = fit(Bandpass(; gauge = PinAntenna(2)), ps)
         @test collect(keys(sol.steps)) == [:bandpass]
         @test !haskey(sol.steps[:bandpass], :search)
@@ -99,11 +85,11 @@
     end
 end
 
-# The run-state types the pipeline layer threads through its solve loop carry
+# The run-state types `fit` threads through its solve loop carry
 # their contents as type parameters rather than as `Any`, so the whole solve
 # context is a concrete type. This is an interface property, not a speed one:
 # an `Any` field advertises no contract, and it drifts back silently.
-@testset "pipeline run state is concretely typed" begin
+@testset "run state is concretely typed" begin
     ps, _ = _build_fringe_ps()
 
     @testset "SolveContext" begin
@@ -112,7 +98,7 @@ end
         groups = XRadio.groupby(ps, XRadio.ByScan())
         sizes = [Gustavo._group_bytes(g) for g in values(groups)]
         gauge = resolve_gauge(PinAntenna(1), geom.stations)
-        ctx = Gustavo._step_context(ff, (; geom), gauge, groups, sizes, Any[], ExecutionConfig())
+        ctx = Gustavo._step_context(ff, (; geom), gauge, groups, sizes, ExecutionConfig())
         @test isconcretetype(typeof(ctx))
         for f in (:model, :layout, :geom, :θ, :gauge, :groups, :exec, :passes)
             @test isconcretetype(fieldtype(typeof(ctx), f))
@@ -168,28 +154,24 @@ end
         @test occursin("fringe", lines3[1]) && occursin("fringe", lines3[2])
         @test occursin("bandpass", lines3[3]) && occursin("bandpass", lines3[4])
 
-        # Wired through a real fit: the pipeline's stages are named in the log.
+        # Wired through real fits: each step's stage is named in the log.
         buf4 = IOBuffer()
-        sol = fit(
-            BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)),
-            ps;
+        sols = _fit_chain(
+            (BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps;
             exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
         )
-        @test sol isa CAL.CalibrationSolution
+        @test all(s -> s isa CAL.CalibrationSolution, sols)
         out = String(take!(buf4))
         @test occursin("fringe", out) && occursin("bandpass", out)
     end
 
-    @testset "the solution records its pipeline, gauge included" begin
-        t = StationWeightScale(DimArray(ones(4), AntennaName(["A1", "A2", "A3", "A4"])))
+    @testset "the solution records its step, gauge included" begin
         ff = BaselineFringeFit(; gauge = PinAntenna("A1"))
-        sol = fit(t |> ff, ps)
-        @test sol.provenance.pipeline == join((sprint(show, x; context = :limit => true) for x in (t, ff)), " |> ")
-        # Recorded the same whatever the pipeline was given as.
-        @test fit([t, ff], ps).provenance == sol.provenance
+        sol = fit(ff, ps)
+        @test sol.provenance.pipeline == sprint(show, ff; context = :limit => true)
         # The gauge as given, not as resolved against the stations.
         @test occursin(sprint(show, PinAntenna("A1")), sol.provenance.pipeline)
-        # A step selection carries both along.
+        # A step selection carries it along.
         @test sol[:fringe].provenance == sol.provenance
 
         # A bare index is not a gauge, so it is rejected rather than silently
@@ -203,7 +185,7 @@ end
 # rewrap them — e.g. over a view — and the whole apply path must be indifferent to that.
 @testset "rewrapped parameters correct data identically" begin
     ps, _ = _build_fringe_ps()
-    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)) |> Bandpass(; gauge = PinAntenna(1)), ps)
+    sol = last(_fit_chain((BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps))
     rewrapped = [
         CAL.SolvedComponent(
             c.step, c.path, c.component,
