@@ -20,6 +20,12 @@ function _cell_plane(L, bi, p)
     return PermutedDimsArray(parent(v), DimensionalData.dimnum(v, (Frequency, Ti)))
 end
 
+# Layer `L` as a plain array in MSv4's storage order
+# `(Polarization, Frequency, BaselineID, Ti)`, whatever order `L` is stored in.
+_storage_order(L) = PermutedDimsArray(
+    parent(L), DimensionalData.dimnum(L, (Polarization, Frequency, BaselineID, Ti)),
+)
+
 # `A`, a plain array laid out `(Frequency, Ti, BaselineID, Polarization)`,
 # viewed lazily in the axis order of the visibility array `ref`.
 _in_axis_order(ref, A::AbstractArray{<:Any, 4}) = PermutedDimsArray(

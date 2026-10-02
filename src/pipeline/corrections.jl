@@ -148,7 +148,7 @@ _head_span(span) = span === nothing || isempty(span) ? span : span[1:1]
 # visibility and a flag (`flag_bad = true`).
 function _divide_gains!(
         ms::XRadio.MeasurementSet, win::GeometryWindow, sol::Calibration._AppliedSolution;
-        flag_bad::Bool, executor = SerialScheduler(),
+        flag_bad::Bool, executor = DynamicScheduler(),
     )
     amap = _station_map(sol, win.geom.stations)
     vis = ms[:visibility]
@@ -159,17 +159,15 @@ function _divide_gains!(
     tconst = _time_constant_over(sol, win, tspan)
     gwin = tconst ? GeometryWindow(win.geom, win.chan_idx, win.ti_idx[1:1]) : win
     g = parent(gains(sol, gwin; time_span = tconst ? _head_span(tspan) : tspan))
-    cols = vec(CartesianIndices(feeds))
-    tforeach(cols; scheduler = executor) do col
-        p, bi = Tuple(col)
-        a, b = win.stations[bi]
-        sa, sb = amap[a], amap[b]
-        (sa == 0 || sb == 0) && return
-        fa, fb = feeds[p, bi]
-        _divide_column!(
-            UVData._cell_plane(vis, bi, p), UVData._cell_plane(weight, bi, p),
-            UVData._cell_plane(flag, bi, p), g, sa, sb, fa, fb, tconst, flag_bad,
-        )
+    V, W, F = UVData._storage_order(vis), UVData._storage_order(weight), UVData._storage_order(flag)
+    axes(V, 2) == axes(g, 1) && (tconst || axes(V, 4) == axes(g, 2)) || throw(
+        DimensionMismatch("gains $(axes(g)) do not cover the data $(axes(V))"),
+    )
+    # Tasks own whole time samples: the products of a cell are adjacent in
+    # storage, so tasks split by product would share and write cache lines.
+    tforeach(axes(V, 4); scheduler = executor) do t
+        gt = tconst ? firstindex(g, 2) : t
+        _divide_sample!(V, W, F, g, t, gt, win.stations, amap, feeds, flag_bad)
     end
     return ms
 end
@@ -178,27 +176,29 @@ end
 # divided through: the correction would amplify noise without bound.
 const _GAIN_FLOOR = 1.0e-12
 
-# One `(Frequency, Ti)` plane of `_divide_gains`. The gains share its axes (one
-# time when `tconst`).
-function _divide_column!(V, W, F, g, a, b, fa, fb, tconst::Bool, flag_bad::Bool)
-    axes(V, 1) == axes(g, 1) && (tconst || axes(V, 2) == axes(g, 2)) || throw(
-        DimensionMismatch("gains $(axes(g)) do not cover the plane $(axes(V))"),
-    )
-    for t in axes(V, 2)
-        gt = tconst ? firstindex(g, 2) : t
-        for c in axes(V, 1)
-            ga = g[c, gt, a, fa]
-            gb = g[c, gt, b, fb]
+# Time sample `t` of `_divide_gains`, its gains at time index `gt`.
+function _divide_sample!(V, W, F, g, t, gt, stations, amap, feeds, flag_bad::Bool)
+    for bi in axes(V, 3)
+        a, b = stations[bi]
+        sa, sb = amap[a], amap[b]
+        (sa == 0 || sb == 0) && continue
+        for c in axes(V, 2), p in axes(V, 1)
+            fa, fb = feeds[p, bi]
+            ga = g[c, gt, sa, fa]
+            gb = g[c, gt, sb, fb]
             den = ga * conj(gb)
-            if !isfinite(den) || abs(ga) < _GAIN_FLOOR || abs(gb) < _GAIN_FLOOR
+            if !isfinite(den) || abs2(ga) < _GAIN_FLOOR^2 || abs2(gb) < _GAIN_FLOOR^2
                 if flag_bad
-                    V[c, t] = convert(eltype(V), NaN)
-                    F[c, t] = true
+                    V[p, c, bi, t] = convert(eltype(V), NaN)
+                    F[p, c, bi, t] = true
                 end
                 continue
             end
-            V[c, t] /= den
-            W[c, t] *= abs2(den)
+            # Both gains are above the floor, so the plain reciprocal cannot
+            # overflow; Base's robust complex division costs several times more.
+            den2 = abs2(den)
+            V[p, c, bi, t] *= conj(den) / den2
+            W[p, c, bi, t] *= den2
         end
     end
     return nothing
