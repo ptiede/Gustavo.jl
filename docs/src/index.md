@@ -41,19 +41,28 @@ end
 ```
 
 Each solve step takes its own `gauge`, which fixes the station values the data
-leave undetermined. A bandpass is fit over the whole track. A track-wide
-bandpass fit after fringe correction currently needs the corrected data in
-memory, since scan averaging is not yet available:
+leave undetermined. A bandpass is fit over the
+whole track: each scan group is fringe-corrected and averaged over the scan
+(`average(g, ByScan())`, one sample per scan), and the bandpass is fit on the
+averaged groups, so one scan group is in memory at a time. The bandpass
+solution applies to the unaveraged data:
 
 ```julia
-data = read(ProcessingSet, "track.ps.zarr")     # the whole track, in memory
-foreach(normalize_by_autocorrelations!, values(data))
-fr = fit(BaselineFringeFit(; gauge), data)
-bp = fit(Bandpass(; gauge), calibrate(fr, data; flag_bad = false, apply_flags = false))
+averaged = mapsets(groupby(ps, ByScan())) do g
+    foreach(normalize_by_autocorrelations!, values(g))
+    fr = fit(BaselineFringeFit(; gauge), g)
+    calibrate!(fr, g; flag_bad = false, apply_flags = false)
+    return average(g, ByScan())
+end
+bp = fit(Bandpass(; gauge), merge(values(averaged)...))
 
-calibrate!(fr, data)
-calibrate!(bp, data)
-save_solution("track.fringe.zarr", fr)
+sols = mapsets(groupby(ps, ByScan())) do g
+    foreach(normalize_by_autocorrelations!, values(g))
+    calibrate!(bp, g; flag_bad = false, apply_flags = false)
+    fr = fit(BaselineFringeFit(; gauge), g)
+    calibrate!(fr, g; flag_bad = false, apply_flags = false)
+    return (; fr, ad = fit(AdhocPhase(; gauge), g))
+end
 ```
 
 ## The pieces

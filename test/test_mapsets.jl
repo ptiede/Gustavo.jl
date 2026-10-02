@@ -6,14 +6,27 @@
     ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
     by_scan = DimensionalData.groupby(ps, XRadio.ByScan())
 
-    @testset "a ProcessingSet's units are its Measurement Sets, in order" begin
+    @testset "a ProcessingSet's units are its Measurement Sets, keyed by name" begin
         out = mapsets(ms -> (ms isa XRadio.MeasurementSet, size(ms[:visibility])), ps)
-        @test out == [(true, size(ms[:visibility])) for ms in values(ps)]
+        @test out isa OrderedDict
+        @test collect(keys(out)) == collect(keys(ps))
+        @test all(out[k] == (true, size(ms[:visibility])) for (k, ms) in pairs(ps))
+        averaged = mapsets(ms -> XRadio.average(ms, XRadio.ByScan()), ps)
+        @test collect(keys(XRadio.ProcessingSet(averaged, copy(DimensionalData.metadata(ps))))) ==
+            collect(keys(ps))
     end
 
-    @testset "a groupby result's units are its groups, in order" begin
+    @testset "a groupby result's units are its groups, keyed by label" begin
         out = mapsets(g -> (g isa XRadio.ProcessingSet, collect(keys(g))), by_scan)
-        @test out == [(true, collect(keys(g))) for g in values(by_scan)]
+        @test collect(keys(out)) == collect(keys(by_scan))
+        @test all(out[k] == (true, collect(keys(g))) for (k, g) in pairs(by_scan))
+    end
+
+    @testset "any ordered keyed collection of units" begin
+        picked = OrderedDict(k => by_scan[k] for k in collect(keys(by_scan))[[3, 1]])
+        out = mapsets(g -> collect(keys(g)), picked)
+        @test collect(keys(out)) == collect(keys(picked))
+        @test all(out[k] == collect(keys(g)) for (k, g) in pairs(picked))
     end
 
     @testset "units hold arrays of their own; the source is unchanged" begin
@@ -26,7 +39,7 @@
             end
             return [parent(ms[:visibility]) for ms in values(g)]
         end
-        for ms in values(ps), arrays in out, A in arrays
+        for ms in values(ps), arrays in values(out), A in arrays
             @test A !== parent(ms[:visibility])
         end
         for (k, ms) in pairs(ps), layer in (:visibility, :weight, :flag)
@@ -38,7 +51,7 @@
         step = BaselineFringeFit(; gauge = PinAntenna(1))
         θ(sol) = [collect(c.params) for c in sol[:fringe].components]
         inside = mapsets(g -> θ(fit(step, g)), by_scan)
-        @test inside == [θ(fit(step, g)) for g in values(by_scan)]
+        @test all(inside[k] == θ(fit(step, g)) for (k, g) in pairs(by_scan))
     end
 
     @testset "concurrent units: same results, progress per unit" begin

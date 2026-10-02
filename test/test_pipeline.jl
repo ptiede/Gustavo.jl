@@ -382,6 +382,42 @@ end
     @test R_off < 0.95                  # bandpass survives without the stage
 end
 
+@testset "Bandpass on scan-averaged data applies to the full data" begin
+    nant, nspw, nchan = 4, 2, 8
+    nchg = nspw * nchan
+    rng = MersenneTwister(0xA7E2)
+    bp = zeros(nant, 2, nchg)
+    for a in 2:nant, f in 1:2, gc in 1:nchg
+        bp[a, f, gc] = 0.8 * sin(2π * gc / nchg + a + f)
+    end
+    ps, _ = _build_fringe_ps(; nant, nspw, nchan, nscans = 3, bandpass = bp)
+    gauge = PinAntenna(1)
+    ff = BaselineFringeFit(; gauge)
+
+    averaged = mapsets(XRadio.groupby(ps, XRadio.ByScan())) do g
+        calibrate!(fit(ff, g), g; flag_bad = false, apply_flags = false)
+        return XRadio.average(g, XRadio.ByScan())
+    end
+    avg = merge(values(averaged)...)
+    @test all(ms -> length(XRadio.times(ms)) == 1, values(avg))
+    bp_avg = fit(Bandpass(; gauge), avg)
+
+    fr = fit(ff, ps)
+    bp_full = fit(Bandpass(; gauge), _precal(fr, ps))
+    θ(sol) = reduce(vcat, [vec(collect(c.params)) for c in sol.components])
+    @test θ(bp_avg) ≈ θ(bp_full) rtol = 1.0e-4
+
+    out = _precal(fr, ps)
+    calibrate!(bp_avg, out)
+    spec = _time_averaged_spectra(out)
+    p = findfirst(==((1, 1)), spec.feeds)
+    R = [
+        abs(sum(z)) / sum(abs.(z)) for (bi, (a, b)) in pairs(spec.bls) if a != b
+            for z in (filter(isfinite, spec.spec[:, bi, p]),) if !isempty(z)
+    ]
+    @test minimum(R) > 0.97
+end
+
 @testset "Phase bandpass: reference inter-feed shape solved" begin
     # Cross-hand rows tie the two feed blocks at every frequency segment, so the
     # reference's relative inter-feed phase bandpass is SOLVED across the band
