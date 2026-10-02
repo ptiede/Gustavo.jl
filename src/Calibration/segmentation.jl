@@ -164,8 +164,10 @@ never the raw integer id or the coordinate. Name vectors may be left empty,
 in which case a solution carrying such a segmentation applies only to a grid
 with identical labelling. A non-empty name vector must have one entry per
 distinct id (checked here). Channel widths are what place a foreign channel in
-a `ChannelBlocks` or `FreqGroups` segment; without them such a solution applies
-only to an identical channel grid.
+a `ChannelBlocks` or `FreqGroups` segment: it takes the segment of the solve
+channel whose band, center ± width/2, contains its own, so a solution fit on
+averaged channels applies to the channels averaged. Without widths such a
+solution applies only to an identical channel grid.
 """
 struct DataGeometry
     times::Vector{Float64}
@@ -680,8 +682,8 @@ function time_segment_ids(
 end
 
 # `FreqGroups` and `ChannelBlocks` cut the solve's channel axis, so a foreign
-# channel takes the segment of the solve channel it is: the same center
-# frequency, and no wider.
+# channel takes the segment of the one solve channel whose stated band
+# (center ± width/2) contains its own band.
 function freq_segment_ids(
         seg::Union{FreqGroups, ChannelBlocks}, solve::DataGeometry, target::DataGeometry;
         chan_idx = eachindex(target.channel_freqs),
@@ -699,7 +701,9 @@ function freq_segment_ids(
     end
     perm = sortperm(solve.channel_freqs)
     sf = solve.channel_freqs[perm]
-    return [ids[_matching_channel(seg, solve, target, perm, sf, c)] for c in chan_idx]
+    sw = solve.channel_widths[perm]
+    halfmax = maximum(sw; init = 0.0) / 2
+    return [ids[perm[_containing_channel(seg, sf, sw, halfmax, target, c)]] for c in chan_idx]
 end
 
 function _same_channels(a::DataGeometry, b::DataGeometry)
@@ -708,27 +712,38 @@ function _same_channels(a::DataGeometry, b::DataGeometry)
     return isempty(a.channel_widths) || isempty(b.channel_widths) || close(a.channel_widths, b.channel_widths)
 end
 
-function _matching_channel(seg, solve::DataGeometry, target::DataGeometry, perm, sf, c)
-    f = target.channel_freqs[c]
+# The position in the sorted solve channels `sf` (widths `sw`) whose band
+# contains target channel `c`'s band; none, or more than one, throws.
+function _containing_channel(seg, sf, sw, halfmax, target::DataGeometry, c)
+    f, w = target.channel_freqs[c], target.channel_widths[c]
     tol = _FREQ_RTOL * abs(f)
-    j = searchsortedfirst(sf, f - tol)
-    (j <= length(sf) && abs(sf[j] - f) <= tol) || throw(
+    near = searchsortedfirst(sf, f - halfmax - tol):searchsortedlast(sf, f + halfmax + tol)
+    holds = [j for j in near if abs(sf[j] - f) <= sw[j] / 2 + tol]
+    isempty(holds) && throw(
         ArgumentError(
-            "$(_seg_label(seg)): the target channel at $f Hz is not a channel of the " *
+            "$(_seg_label(seg)): the target channel at $f Hz lies in no channel of the " *
                 "solution — the nearest is at $(_nearest(sf, f)) Hz. A solution segmented by " *
-                "channel cannot be resampled onto a different channel grid."
+                "channel applies only within the channels it was solved on."
         )
     )
-    k = perm[j]
-    w, ws = target.channel_widths[c], solve.channel_widths[k]
-    w <= ws * (1 + _FREQ_RTOL) || throw(
+    within = [j for j in holds if f - w / 2 >= sf[j] - sw[j] / 2 - tol && f + w / 2 <= sf[j] + sw[j] / 2 + tol]
+    length(within) > 1 && throw(
         ArgumentError(
-            "$(_seg_label(seg)): the target channel at $f Hz is $w Hz wide, wider than the " *
-                "solution's $ws Hz channel there — it averages channels the solution " *
-                "segments separately, so no single segment applies."
+            "$(_seg_label(seg)): the target channel at $f Hz lies in the solution channels at " *
+                "$(join(sf[within], ", ")) Hz, whose stated widths overlap, so no single segment applies."
         )
     )
-    return k
+    if isempty(within)
+        j = holds[argmin(abs.(sf[holds] .- f))]
+        throw(
+            ArgumentError(
+                "$(_seg_label(seg)): the target channel at $f Hz, $w Hz wide, extends beyond the " *
+                    "solution's $(sw[j]) Hz channel at $(sf[j]) Hz — it averages over channels the " *
+                    "solution segments separately, so no single segment applies."
+            )
+        )
+    end
+    return only(within)
 end
 
 # First-appearance raw bin → dense segment id, the map `_dense_rank` builds

@@ -252,11 +252,11 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
         end
         # …while wider channels on the same centers, or channels between the
-        # solve's, have no segment to place against…
+        # solve's, cross a solve channel's edge…
         uvwide, _ = _build_fringe_ps(; nant = 3, nspw, nchan = 4, ntime = 5, chan_bw = 4.0e6)
-        @test_throws "wider than the solution's" correct(bps, uvwide)
+        @test_throws "extends beyond the solution's" correct(bps, uvwide)
         uvoff, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, ref_freq = 230.0e9 + 1.0e6)
-        @test_throws "not a channel of the solution" correct(bps, uvoff)
+        @test_throws "extends beyond the solution's" correct(bps, uvoff)
         # …and a scan the solve never saw is refused, not served by a neighbour.
         uv2, _ = _build_fringe_ps(; nant = 3, nspw, nchan, ntime = 5, nscans = 2)
         @test_throws "is not in the solution" correct(fr_n, uv2)

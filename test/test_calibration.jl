@@ -265,15 +265,28 @@ end
         @test CAL.freq_segment_ids(CAL.ChannelBlocks(2), solvew, sub(4:6)) == [3, 3, 4]
         @test CAL.freq_segment_ids(groups, solvew, sub([5, 2])) == [2, 1]
         @test CAL.freq_segment_ids(groups, solvew, sub([5, 2]); chan_idx = [2]) == [1]
-        # A channel the solve never had: the message prints the nearest, so a unit
-        # slip or a shifted correlator setup is diagnosable at a glance.
+        # A channel outside every solve channel: the message prints the nearest, so a
+        # unit slip or a shifted correlator setup is diagnosable at a glance.
+        @test_throws "at 1.5e9 Hz lies in no channel of the solution — the nearest is at 1.2e9 Hz" CAL.freq_segment_ids(
+            CAL.ChannelBlocks(2), solvew, sub([3]; freqs = [1.5e9]),
+        )
         shifted = sub(1:6; freqs = solve.channel_freqs .+ 1.0e6)
-        @test_throws "at 1.001e9 Hz is not a channel of the solution — the nearest is at 1.0e9 Hz" CAL.freq_segment_ids(
+        @test_throws "extends beyond the solution's 1.0e8 Hz channel at 1.0e9 Hz" CAL.freq_segment_ids(
             CAL.ChannelBlocks(2), solvew, shifted,
         )
-        # Three channels averaged into one: its center is a solve channel's, its width is not.
+        # Three channels averaged into one: its center is a solve channel's, its band is wider.
         averaged = sub([2]; w = [0.3e9])
-        @test_throws "wider than the solution's" CAL.freq_segment_ids(groups, solvew, averaged)
+        @test_throws "extends beyond the solution's" CAL.freq_segment_ids(groups, solvew, averaged)
+        # A solution on averaged channels places the channels each one averaged.
+        coarse(freqs, w) = CAL.DataGeometry(;
+            times = solve.times, scan_of_time = solve.scan_of_time, channel_freqs = freqs,
+            spw_of_chan = [3, 4], channel_widths = w,
+        )
+        twobins = coarse([1.05, 2.05] .* 1.0e9, [0.2e9, 0.2e9])
+        @test CAL.freq_segment_ids(CAL.ChannelBlocks(1), twobins, sub([1, 2, 4, 5])) == [1, 1, 2, 2]
+        @test_throws "at 1.2e9 Hz lies in no channel" CAL.freq_segment_ids(CAL.ChannelBlocks(1), twobins, sub([3]))
+        overlapping = coarse([1.05, 1.1] .* 1.0e9, [0.2e9, 0.2e9])
+        @test_throws "whose stated widths overlap" CAL.freq_segment_ids(CAL.ChannelBlocks(1), overlapping, sub([2]))
         # Widths are needed on both sides once the grids differ.
         @test_throws "SOLUTION geometry states no channel widths" CAL.freq_segment_ids(groups, solve, sub(4:6))
         @test_throws "TARGET geometry states no channel widths" CAL.freq_segment_ids(groups, solvew, sub(4:6; w = Float64[]))
