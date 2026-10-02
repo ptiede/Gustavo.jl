@@ -62,7 +62,7 @@ export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
     ChannelBlocks, FreqGroups, BandGroups
 # Composable-pipeline surface: verbs, step protocol, execution config.
 export fit
-export SolveStep, ExecutionConfig, ProgressLogger
+export SolveStep, ExecutionConfig, ProgressLogger, mapsets
 export outer_executor, inner_executor
 export each_group, model_components, provides, step_gauge
 export supports_station_heterogeneity

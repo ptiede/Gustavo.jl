@@ -20,3 +20,6 @@ include("pipeline/steps.jl")
 
 # The pipeline verbs: fit and calibrate.
 include("pipeline/verbs.jl")
+
+# `mapsets`: a function over units of data, each read into memory.
+include("pipeline/mapsets.jl")
