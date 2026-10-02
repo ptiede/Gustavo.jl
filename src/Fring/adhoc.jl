@@ -344,36 +344,6 @@ function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::Union{OUPrior, 
     return resolved
 end
 
-# Data-driven noise variance of one (baseline, product) coherent track
-# `V̄ = r/w`, `r` and `w` its sums along time or frequency, from the robust
-# scatter of successive differences. The source/atmosphere vary slowly from one
-# sample to the next while noise is independent, so successive differences
-# isolate the noise. For complex-Gaussian noise, `median(|ΔV̄|²) = 2 ln2 · σ²`
-# (Δ of two samples has twice the variance, and the median of an exponential is
-# `ln2 ×` its mean), so `σ² = median(|ΔV̄|²) / (2 ln2)`. Returns `NaN` when
-# fewer than 4 differences are available (caller falls back).
-function _track_noise2(r::AbstractVector, w::AbstractVector)
-    C = eltype(r)
-    T = real(C)
-    d2 = T[]
-    prev = C(NaN, NaN)
-    for k in eachindex(r, w)
-        wk = w[k]
-        v = wk > 0 ? r[k] / wk : C(NaN, NaN)
-        (isfinite(v) && isfinite(prev)) && push!(d2, abs2(v - prev))
-        prev = v
-    end
-    length(d2) >= 4 || return T(NaN)
-    return median(d2) / (2 * log(T(2)))
-end
-
-# `_track_noise2` of each cell's track along `along`, over `rbar`'s other dimensions.
-function _cell_noise2(rbar, wbar, along)
-    cells = DimensionalData.otherdims(rbar, along)
-    n2 = [_track_noise2(view(rbar, I...), view(wbar, I...)) for I in DimensionalData.DimIndices(cells)]
-    return DimArray(parent(n2), cells)
-end
-
 # ── Node-graph solve (adhoc per-AP and bandpass closures) ───────────────────
 
 # Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
@@ -571,7 +541,7 @@ _solvable(((a, na), (b, nb))) = a != b && na != 0 && nb != 0
 # `snr_floor2`. Every correlation product contributes: a cross-hand cell's extra
 # phase is carried by its own free source term, so no product needs the
 # polarization basis to be known.
-function _adhoc_obs(rbar, wbar, nodes, noise2, snr_floor2::Real)
+function _adhoc_obs(rbar, wbar, nodes, snr_floor2::Real)
     T = real(eltype(rbar))
     val = similar(rbar, T)
     w = similar(rbar, T)
@@ -579,8 +549,7 @@ function _adhoc_obs(rbar, wbar, nodes, noise2, snr_floor2::Real)
     for I in DimensionalData.DimIndices(rbar)
         cell = DimensionalData.otherdims(I, Ti)
         r, wr = rbar[I], wbar[I]
-        n2 = noise2[cell]
-        snr2 = isfinite(n2) && n2 > 0 ? abs2(r / wr) / n2 : abs2(r) / wr   # fall back if unestimable
+        snr2 = abs2(r) / wr
         ok = _solvable(nodes[cell]) && isfinite(r) && abs(r) > 0 && isfinite(wr) && wr > 0 &&
             snr2 >= snr_floor2
         val[I] = angle(r)
@@ -897,13 +866,13 @@ end
 # current tracks, `V̄·conj(s̄)e^{-iΔφ̂} ≈ |s̄|²(1 + i(Δφ − Δφ̂)) + n·conj(s̄)`, so
 #
 #     val  = Δφ̂ + Im(V̄·conj(s̄)e^{-iΔφ̂}) / |s̄|²
-#     info = 2|s̄|² / σ²        (σ² the complex noise power of V̄, data-driven)
+#     info = |s̄|² · w̄          (w̄ = Σw, the inverse variance of V̄ per real component)
 #
 # is a linear measurement of Δφ with Gaussian noise at any per-AP SNR. Every AP
 # with data and a track therefore enters ungated, carrying its honest weight;
 # a per-AP extracted phase would instead collapse nonlinearly below SNR ≈ 1.
 # The source term is already divided out through `conj(s̄)`.
-function _linearized_obs(rbar, wbar, nodes, noise2, phase, sbar)
+function _linearized_obs(rbar, wbar, nodes, phase, sbar)
     T = real(eltype(rbar))
     val = fill!(similar(rbar, T), T(NaN))
     w = fill!(similar(rbar, T), zero(T))
@@ -922,11 +891,8 @@ function _linearized_obs(rbar, wbar, nodes, noise2, phase, sbar)
         (isfinite(s2) && s2 > 0) || continue
         z = imag((r / wr) * conj(s) * cis(-dphi)) / s2
         isfinite(z) || continue
-        n2 = noise2[I...]
         val[c...] = dphi + z
-        # Fall back to the weight column's noise claim when the track is too
-        # short to estimate its own (mirrors `_adhoc_obs`'s fallback).
-        w[c...] = isfinite(n2) && n2 > 0 ? 2 * s2 / n2 : s2 * wr
+        w[c...] = s2 * wr
         mask[c...] = true
     end
     return (; val, w, mask, nodes)
@@ -1055,19 +1021,9 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
     track_w = zeros(T, node_axes)
     resolved = DimArray(Union{Nothing, AbstractPrior}[nothing for _ in 1:nant, _ in 1:2], node_axes[1:2])
 
-    # Per-(baseline, product) noise of the coherent track, estimated data-driven
-    # from its AP-to-AP scatter — see `_track_noise2`. The per-AP coherent SNR² is
-    # then |V̄_ap|² / noise², which is scale-invariant in the weight column: the
-    # naive `|rbar|²/wbar` is only a true SNR when weight is calibrated inverse-
-    # variance, and on raw correlator output (uncalibrated/uniform weights, common
-    # in FITS-IDI) it is mis-scaled by an arbitrary factor, silently dropping every
-    # row at any fixed `snr_floor` and killing the whole adhoc stage. For calibrated
-    # weights `noise² → 1/wbar`, so this reduces to `|rbar|²/wbar` exactly.
-    noise2 = _cell_noise2(rbar, wbar, Ti)
-
     # The SNR gate does not depend on the source terms, so the gated observations
     # are built once and reused by every alternation pass (and by the joint smoother).
-    raw = _adhoc_obs(rbar, wbar, nodes, noise2, smoother.options.snr_floor^2)
+    raw = _adhoc_obs(rbar, wbar, nodes, smoother.options.snr_floor^2)
 
     # Source terms, one per (station pair, feed pair). `source_iters == 1` never
     # updates them, so the model reduces exactly to a pure station-difference
@@ -1178,7 +1134,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
         sbar, napu = _complex_source_means(rbar, wbar, phase, nodes)
         sbar_ref = sbar
         nap_ref = napu
-        lin = _linearized_obs(rbar, wbar, nodes, noise2, phase, sbar)
+        lin = _linearized_obs(rbar, wbar, nodes, phase, sbar)
         _solve_ap_sweep!(
             phase, covered, track_w, lin, nant, anchor,
             smoother.options.phase_rewrap_iters, max_stale,

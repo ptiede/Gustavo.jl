@@ -239,10 +239,11 @@ end
 
     # fringe_pfa: bounds, monotonicity, small-p linearization, edge cases.
     @test FR.fringe_pfa(0.0, 1.0e6) == 1.0
-    @test FR.fringe_pfa(6.0, 1.0e6) < 1.0e-6
+    @test FR.fringe_pfa(8.0, 1.0e6) < 1.0e-6
     @test FR.fringe_pfa(6.0, 1.0e6) > FR.fringe_pfa(7.0, 1.0e6)      # ↓ in snr
     @test FR.fringe_pfa(6.0, 1.0e8) > FR.fringe_pfa(6.0, 1.0e6)      # ↑ in ncells
-    @test isapprox(FR.fringe_pfa(5.0, 1.0e3), 1.0e3 * exp(-25.0); rtol = 1.0e-6)
+    @test isapprox(FR.fringe_pfa(7.0, 1.0e3), 1.0e3 * exp(-24.5); rtol = 1.0e-6)
+    @test isapprox(FR.fringe_snr_cut(FR.fringe_pfa(5.5, 1.0e4), 1.0e4), 5.5; rtol = 1.0e-9)
     @test FR.fringe_pfa(100.0, 1.0e12) == 0.0                        # underflow → secure
     @test isnan(FR.fringe_pfa(NaN, 10.0))
     @test 0.0 <= FR.fringe_pfa(2.0, 1.0e4) <= 1.0
@@ -451,7 +452,6 @@ end
     det = FR.baseline_fringe_search(FR.fringe_plane(V32, W32, freqs, times), f0, t0; workspace = ws)
     @test eltype(ws.G) === ComplexF32
     @test eltype(ws.D) === ComplexF32
-    @test eltype(ws.dwin) === Float32
     @test det isa FR.Detection{Float32}
 
     @test det.valid

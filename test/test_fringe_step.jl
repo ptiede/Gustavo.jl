@@ -175,13 +175,16 @@ end
     @testset "corrections before the step, including a function" begin
         ps, _ = _build_fringe_ps()
         ws = DimArray([1.0, 0.5, 1.0, 2.0], AntennaName(["A1", "A2", "A3", "A4"]))
-        # Weight scale: the search is invariant (snr from the |D|² plane), so
-        # the fringe θ matches the untransformed solve bit-for-bit.
+        # Weight scale: on noiseless data every baseline's delay and rate are
+        # exact, so re-weighting baselines leaves the fringe θ where it was.
         scaled = Gustavo.materialize(ps)
         foreach(ms -> scale_weights!(ms, ws), values(scaled))
         sol_ws = fit(BaselineFringeFit(; gauge = PinAntenna(1)), scaled)
         sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
-        @test sol_ws[:fringe].components == sol[:fringe].components
+        @test all(
+            isapprox(parent(a.params), parent(b.params); rtol = 1.0e-4)
+                for (a, b) in zip(sol_ws[:fringe].components, sol[:fringe].components)
+        )
 
         # Flagging one baseline before the step keeps it flagged in the
         # calibrated output.

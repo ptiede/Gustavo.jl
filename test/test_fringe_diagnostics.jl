@@ -147,7 +147,7 @@
             numF = zeros(1, 1); den = zeros(1); dvar = zeros(1); npts = zeros(Int, 1)
             UVP._coherence_accumulate!(
                 zeros(0, 1), numF, den, dvar, npts, V, W, nothing, [1], [1], [0.0], freqs,
-                Float64[], [2.0e8], debias, ones(1, 1),
+                Float64[], [2.0e8], debias,
             )
             # ratio as `_curve_from_sums` forms it: debiased sums are POWERS
             # (η = √ of the clamped ratio), raw sums are amplitudes.
@@ -183,7 +183,7 @@
         # per-cell SNR ≈ 0.4, so ≈ 1 for a flat-phase source — just noisier
         # than the marginalized version below.
         nT = zeros(1, 1); den = zeros(1)
-        UVP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(1), zeros(Int, 1), V, W, nothing, [1], [1], times, freqs, dts, [1.0e8], true, ones(1, 1))
+        UVP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(1), zeros(Int, 1), V, W, nothing, [1], [1], times, freqs, dts, [1.0e8], true)
         eta_perchan = eta(nT, den)
         @test eta_perchan > 0.9
         # marginalized: band-average per AP, then time η — same estimand,
@@ -191,7 +191,7 @@
         Vt, Wt = UVP._collapse_axis(V, W, falses(size(V)), 1)
         @test size(Vt) == (1, nti, 1, 1)
         nT2 = zeros(1, 1); denT = zeros(1)
-        UVP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(1), zeros(Int, 1), Vt, Wt, nothing, [1], [1], times, [1.5e9], dts, [1.0], true, ones(1, 1))
+        UVP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(1), zeros(Int, 1), Vt, Wt, nothing, [1], [1], times, [1.5e9], dts, [1.0], true)
         eta_marg = eta(nT2, denT)
         @test eta_marg > 0.95               # ≈ 1 for a flat-phase source
     end

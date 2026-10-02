@@ -136,10 +136,11 @@ _invalid_detection(::Type{T}) where {T} =
     Detection{T}((zero(T), zero(T), zero(T), zero(T), zero(T), one(T), false))
 
 # The detection at the refined peak `Dref` of the matched filter, from the
-# plane's total weight `Wsum` and noise variance `noise2`.
-function _detection(Dref, delay, rate, Wsum::T, noise2::T, family_cells::Real) where {T}
+# plane's total weight `Wsum`: each component of `D` has variance `Wsum` under
+# noise, so `|Dref| / √Wsum` is the amplitude over its per-component σ.
+function _detection(Dref, delay, rate, Wsum::T, family_cells::Real) where {T}
     absref = abs(Dref)
-    snr = absref / sqrt(noise2)
+    snr = absref / sqrt(Wsum)
     phase = rem2pi(angle(Dref), RoundNearest)
     return Detection{T}((delay, rate, phase, absref / Wsum, snr, T(fringe_pfa(snr, family_cells)), true))
 end
@@ -162,7 +163,6 @@ mutable struct FringeWorkspace{C, T}
     nt::Int
     G::Matrix{C}
     D::Matrix{C}
-    dwin::Vector{T}            # scratch for the sampled |D|² noise estimate
     mbd::Any                   # lazily-built `_MBDWorkspace{C}` for the hierarchical path
     # The cell's gathered `(vis, weights, flags)` planes. Untyped: the weight and
     # flag eltypes come from the data, so the kernels take them through a
@@ -170,7 +170,7 @@ mutable struct FringeWorkspace{C, T}
     planes::Any
 end
 FringeWorkspace{C}() where {C} = FringeWorkspace{C, real(C)}(
-    0, 0, Matrix{C}(undef, 0, 0), Matrix{C}(undef, 0, 0), real(C)[], nothing, nothing,
+    0, 0, Matrix{C}(undef, 0, 0), Matrix{C}(undef, 0, 0), nothing, nothing,
 )
 FringeWorkspace(::Type{C}) where {C} = FringeWorkspace{C}()
 
@@ -482,29 +482,6 @@ function _grid_visibilities!(
     return _grid!(ws.G, V, W, F, freqs, times, axes(V, 1), ax.fax.origin, ax.fax, ax.tax, zero(T))
 end
 
-# Mean |D|² under noise, from the median of a strided sample of about `nsample`
-# cells of `D` (`median(|D|²) = ln2·mean` for Rayleigh-distributed noise), or
-# `nothing` when fewer than three cells are sampled. The sample spans the whole
-# plane: the search window holds the fringe and its sidelobes, which would bias
-# the estimate.
-function _sampled_noise2!(dwin::AbstractVector{T}, D, nsample::Integer) where {T}
-    empty!(dwin)
-    stride = max(1, length(D) ÷ nsample)
-    for idx in firstindex(D):stride:lastindex(D)
-        push!(dwin, abs2(D[idx]))
-    end
-    length(dwin) > 2 || return nothing
-    return median(dwin) / log(T(2))
-end
-
-# Noise variance of the full-grid plane `ws.D`, or `Wsum` — its value for
-# calibrated weights — when the plane is too small to sample. See the SNR note
-# in `_baseline_fringe_search`.
-function _plane_noise2!(ws::FringeWorkspace{C, T}, Wsum::T) where {C, T}
-    n2 = _sampled_noise2!(ws.dwin, ws.D, 20000)
-    return isnothing(n2) ? Wsum : max(n2, eps(T))
-end
-
 # Core matched-filter search on a precomputed `_SearchAxes` — the hot path called
 # once per (baseline, product). `baseline_fringe_search` above is the public,
 # one-off wrapper that builds the axes then calls this; the group search builds the
@@ -572,9 +549,6 @@ function _baseline_fringe_search(
     end
     peakabs >= 0 || return _invalid_detection(T)
 
-    # Noise estimate from the full |D|² plane (see `_plane_noise2!`).
-    noise2 = _plane_noise2!(ws, Wsum)
-
     # Refine the peak on the exact matched filter (scalloping-free), seeded at the
     # FFT peak cell: the FFT only locates the main lobe, and `_polish_peak_exact!`
     # finds the sub-cell peak of the true objective, so accuracy does not rest on
@@ -596,15 +570,7 @@ function _baseline_fringe_search(
     else
         Dref = _exact_matched_filter(V, W, F, freqs, times, f0, t0, delay, rate)
     end
-    # Data-driven SNR: the matched-filter noise is estimated from the spread of
-    # |D| over the whole plane, robustly (median) so the bright peak and its
-    # sidelobes don't bias it. `mean(|D|²) = Σw` when the weights are true
-    # inverse variances, so this reduces to the matched-filter |Dref|/√Σw for
-    # calibrated data, but stays correct when the weight column is uncalibrated
-    # or uniform (common in raw correlator output), where √Σw mis-scales the SNR
-    # and so its false-alarm probability. A plane too small to sample falls back
-    # to √Σw.
-    return _detection(Dref, delay, rate, Wsum, noise2, family_cells)
+    return _detection(Dref, delay, rate, Wsum, family_cells)
 end
 
 function _exact_matched_filter(
@@ -1133,29 +1099,17 @@ function _mbd_fringe_search(
     nfreqgroup = w.nfreqgroup
 
     # Stage 1: per band, grid + 2-D FFT (in-band delay × rate); keep the windowed
-    # (SBD row, rate col) block. The noise is estimated here, from a strided
-    # median of each band's full |D_b|² plane (the windowed stage-2 cube sits on
-    # the fringe's sidelobe ridge and would bias it — same rationale as the full
-    # path's whole-plane sample): the band contributions to D are independent, so
-    # Var(D) = Σ_b Var(D_b), each `median|D_b|²/ln2` (Rayleigh median → mean).
+    # (SBD row, rate col) block.
     Wsum = zero(T)
-    noise2 = zero(T)
-    nnoise = 0
     for bi in eachindex(mx.freqgroups)
         Wsum = _grid!(w.Gb, V, W, F, freqs, times, mx.freqgroups[bi], mx.f_lo[bi], ax.fax, tax, Wsum)
         mul!(w.Db, mx.planb, w.Gb)
-        n2 = _sampled_noise2!(ws.dwin, w.Db, max(64, 20000 ÷ nfreqgroup))
-        if !isnothing(n2)
-            noise2 += n2
-            nnoise += 1
-        end
         for (rj, l) in zip(axes(w.X, 2), mx.rate_idx),
                 (sj, k) in zip(axes(w.X, 1), mx.sbd_idx)
             w.X[sj, rj, bi] = w.Db[k, l]
         end
     end
     Wsum > 0 || return _invalid_detection(T)
-    noise2 = (nnoise == nfreqgroup && noise2 > 0) ? max(noise2, eps(T)) : Wsum
 
     # Stage 2: scan the (SBD, MBD, rate) cube for the windowed peak.
     nsbd = w.nsbd
@@ -1241,7 +1195,7 @@ function _mbd_fringe_search(
         delay, rate_ref, Dref = pk.delay, pk.rate, pk.Dref
     end
 
-    return _detection(Dref, delay, rate_ref, Wsum, noise2, family_cells)
+    return _detection(Dref, delay, rate_ref, Wsum, family_cells)
 end
 
 # ── False-fringe statistics + the delay–rate map extractor ─────────────────────
@@ -1272,20 +1226,21 @@ end
 
 Probability of false alarm of a fringe detection: the probability that pure
 noise, searched over `ncells` independent (delay, rate) cells, produces a peak
-of at least `snr` (HOPS-style). With this module's SNR convention
-(`snr = |D| / √E[|D|²]` under noise, so a noise cell exceeds `s` with
-probability `exp(−s²)`),
+of at least `snr` (HOPS-style). With `snr` the amplitude over its per-component
+σ (`|D| / √Σw` for weights that are inverse variances per real component), a
+noise cell exceeds `s` with probability `exp(−s²/2)`, so
 
-    pfa = 1 − (1 − exp(−snr²))^ncells
+    pfa = 1 − (1 − exp(−snr²/2))^ncells
 
-evaluated stably (`≈ ncells·exp(−snr²)` when small). `pfa ≪ 1` marks a secure
+evaluated stably (`≈ ncells·exp(−snr²/2)` when small). See the "Detection
+statistics" section of the fringe-fitting manual for the derivation. `pfa ≪ 1` marks a secure
 detection; `pfa ≳ 0.01` means the peak is consistent with the noise sidelobe
 forest — a likely FALSE fringe. Returns `NaN` for non-finite inputs.
 """
 function fringe_pfa(snr::Real, ncells::Real)
     (isfinite(snr) && isfinite(ncells)) || return NaN
     snr <= 0 && return 1.0
-    p1 = exp(-float(snr)^2)                    # single-cell exceedance
+    p1 = exp(-float(snr)^2 / 2)                # single-cell exceedance
     p1 >= 1 && return 1.0
     return -expm1(max(ncells, 1.0) * log1p(-p1))
 end
@@ -1297,7 +1252,7 @@ Inverse of [`fringe_pfa`](@ref) in `snr`: the SNR at which a search over
 `ncells` independent (delay, rate) cells reaches false-alarm probability `pfa` —
 i.e. the effective SNR detection threshold implied by a PFA gate
 (`fringe_pfa(fringe_snr_cut(pfa, ncells), ncells) = pfa`). Because the cut only
-grows as `√log(ncells/pfa)`, it moves slowly with both arguments: a PFA-gated
+grows as `√(2 log(ncells/pfa))`, it moves slowly with both arguments: a PFA-gated
 acceptance threshold is nearly flat across scans while still self-adjusting to
 the search size. Returns `0.0` for `pfa ≥ 1` and `Inf` for `pfa ≤ 0`.
 """
@@ -1306,7 +1261,7 @@ function fringe_snr_cut(pfa::Real, ncells::Real)
     pfa >= 1 && return 0.0
     pfa <= 0 && return Inf
     p1 = -expm1(log1p(-float(pfa)) / max(ncells, 1.0))   # per-cell exceedance
-    return sqrt(-log(p1))
+    return sqrt(-2 * log(p1))
 end
 
 """
@@ -1366,7 +1321,6 @@ function baseline_fringe_map(
     Wsum > 0 || return FringeSearchMap(T[], T[], zeros(T, 0, 0), _invalid_detection(T), ncells, NaN)
     D = ws.D
     mul!(D, axf.plan, ws.G)
-    noise2 = _plane_noise2!(ws, Wsum)
 
     # In-window bins of each conjugate axis, in ascending coordinate order (the
     # fftfreq vectors are in FFT order [0, +…, −…]).
@@ -1374,7 +1328,7 @@ function baseline_fringe_map(
     lidx = [l for l in eachindex(axf.rates) if _in_window(axf.rates[l], opts.rate_window, axf.tax.degenerate)]
     sort!(kidx; by = k -> axf.delays[k])
     sort!(lidx; by = l -> axf.rates[l])
-    inv_noise = inv(sqrt(noise2))
+    inv_noise = inv(sqrt(Wsum))
     snrmap = abs.(D[kidx, lidx]) .* inv_noise
 
     # The refined peak, via the standard search (re-grids + re-FFTs the same data

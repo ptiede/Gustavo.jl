@@ -622,9 +622,7 @@ end
         )
         don = _time_averaged_spectra(calibrate(sol, ps))
         p = findfirst(==((1, 1)), don.feeds)
-        # Under either prior the band edge stays under-corrected on this
-        # noiseless data (ripple ≈ 1.17–1.22; ≈ 1.0003 with no prior).
-        @test_broken amp_ripple(don.spec, don, p) < 1.08
+        @test amp_ripple(don.spec, don, p) < 1.08
         bp = only(CAL._applied(sol[:bandpass, :logamp, :bandpass]).groups)
         plan = only(bp.layout.plans)
         for dg in dead_globals, a in 2:nant, f in 1:2

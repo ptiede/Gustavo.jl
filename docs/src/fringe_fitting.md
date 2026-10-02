@@ -252,48 +252,80 @@ and detection statistics, so their detections are directly comparable.
 
 ## Detection statistics
 
-Under the null hypothesis ``V = n``, the filter is a weighted sum of
-independent circular Gaussians, so ``D`` is itself circular Gaussian with
+### Noise model
+
+Each visibility is ``V_k = s_k + n_k``, where the noise ``n_k`` has independent
+real and imaginary parts of equal variance, and the weight is the inverse of
+that per-component variance:
 
 ```math
-\mathbb{E}[D] = 0,
+\operatorname{Re} n_k,\ \operatorname{Im} n_k \sim \mathcal{N}\!\left(0,\ \frac{1}{w_k}\right),
 \qquad
-\mathrm{Var}(D) = \sum w^2 \sigma^2 = \sum w^2 \frac{1}{w} = \sum w .
+\mathbb{E}|n_k|^2 = \frac{2}{w_k}.
 ```
 
-Hence ``|D|^2/\sum w`` is exponentially distributed with unit mean, and for the
-normalized statistic ``\rho = |D|/\sqrt{\sum w}``,
+This is the convention of the radiometer equation: XRadio's FITS-IDI reader
+writes ``w = f \cdot 2\Delta\nu\,\tau\,\eta_a\eta_b`` for a correlation
+coefficient, the inverse variance of each of its real and imaginary parts. A
+weight column that departs from it (a station whose weights are off by a
+factor) is corrected before fitting with `scale_weights!`.
+
+### The matched filter under noise
+
+The matched filter at a trial (delay, rate) is
+``D = \sum_k w_k V_k e^{-i\theta_k}`` with ``\theta_k`` the trial phase of
+sample ``k``. Under the null hypothesis ``V = n``, ``D`` is a weighted sum of
+independent circular Gaussians, and rotating a circular Gaussian by
+``e^{-i\theta_k}`` leaves its distribution unchanged, so each component of
+``D`` is Gaussian with
 
 ```math
-\Pr(\rho > s) = e^{-s^2}.
-```
-
-This identity holds only where the weights are true inverse variances. Raw
-correlator output frequently carries uniform or uncalibrated weights, for which
-``\sqrt{\sum w}`` misestimates the noise and hence every probability derived
-from it. The search therefore estimates the denominator from the data. It takes
-a strided sample of ``|D|^2`` over the search plane and uses the median, since
-for an exponential distribution ``\mathrm{median} = \ln 2 \cdot \mathrm{mean}``:
-
-```math
-\widehat{\mathrm{Var}}(D) = \frac{\mathrm{median}(|D|^2)}{\ln 2},
+\mathbb{E}[\operatorname{Re} D] = \mathbb{E}[\operatorname{Im} D] = 0,
 \qquad
-\mathrm{SNR} = \frac{|D_\mathrm{ref}|}{\sqrt{\widehat{\mathrm{Var}}(D)}} .
+\operatorname{Var}(\operatorname{Re} D) = \operatorname{Var}(\operatorname{Im} D)
+= \sum_k w_k^2 \cdot \frac{1}{w_k} = \sum_k w_k ,
 ```
 
-The median is used in place of the mean so that the peak and its sidelobes do
-not inflate the estimate. The sample is taken over the whole plane rather than
-over the search window, which lies on the sidelobe ridge of the fringe. Where
-the weights are calibrated the estimate reduces to
-``|D_\mathrm{ref}|/\sqrt{\sum w}``, and with too few samples to form a median it
-falls back to ``\sum w``.
+and the two components are independent.
+
+### SNR
+
+The fringe amplitude is ``A = |D|/\sum w`` and the noise on each component of
+``D/\sum w`` is ``1/\sqrt{\sum w}``, so the signal-to-noise ratio is the
+amplitude over its per-component noise,
+
+```math
+\mathrm{SNR} = \frac{|D|}{\sqrt{\sum w}} .
+```
+
+At high SNR the phase of ``D`` has standard deviation ``1/\mathrm{SNR}`` (the
+noise component perpendicular to ``D``, divided by ``|D|``), and so does
+``\log A``. The bandpass and adhoc steps use the same quantity for a coherent
+sum of visibilities, ``|\sum w V|^2 / \sum w``, as the inverse variance of its
+phase and log-amplitude.
+
+### Single-cell exceedance
+
+Under the null, ``\mathrm{SNR}^2 = (\operatorname{Re} D)^2/\sum w + (\operatorname{Im} D)^2/\sum w``
+is the sum of the squares of two independent standard normals, a ``\chi^2``
+variable with two degrees of freedom, which is exponential with mean 2.
+Equivalently, ``\mathrm{SNR}`` is Rayleigh distributed with unit scale. The
+probability that one cell of pure noise reaches ``s`` is therefore
+
+```math
+p_1(s) = \Pr(\mathrm{SNR} > s) = e^{-s^2/2}.
+```
+
+### Probability of false alarm
 
 A search reports a peak whether or not a fringe is present, so each detection
-carries the probability that noise alone produced it. With ``N_c`` independent
-cells searched and single-cell exceedance ``e^{-\mathrm{SNR}^2}``,
+carries the probability that noise alone produced it. The search takes the
+largest of ``N_c`` independent cells; the probability that none of them
+exceeds ``s`` is ``(1 - p_1)^{N_c}``, so
 
 ```math
-\mathrm{PFA} = 1 - \left(1 - e^{-\mathrm{SNR}^2}\right)^{N_c},
+\mathrm{PFA}(s) = 1 - \left(1 - e^{-s^2/2}\right)^{N_c}
+\;\approx\; N_c\, e^{-s^2/2} \quad (\mathrm{PFA} \ll 1),
 ```
 
 computed by [`fringe_pfa`](@ref). The number of independent cells is the window
@@ -305,9 +337,16 @@ N_c = \big(\Delta\tau_\mathrm{win} \cdot B\big) \times \big(\Delta\dot r_\mathrm
 
 each factor clamped below at one and above at the number of gridded samples on
 that axis, since zero-padding refines the sampling without adding independent
-trials. [`fringe_snr_cut`](@ref) inverts the relation; the implied threshold
-grows as ``\sqrt{\log(N_c/\mathrm{PFA})}``, so it varies slowly with both
-arguments.
+trials. [`fringe_snr_cut`](@ref) inverts the relation,
+
+```math
+s = \sqrt{-2 \log\!\left(1 - (1 - \mathrm{PFA})^{1/N_c}\right)}
+\;\approx\; \sqrt{2 \log(N_c / \mathrm{PFA})},
+```
+
+so the implied threshold varies slowly with both arguments: for
+``N_c = 10^4`` cells, ``\mathrm{PFA} = 10^{-3}`` corresponds to
+``\mathrm{SNR} \approx 5.7``.
 
 ``N_c`` is counted over a family of searches rather than one:
 [`search_scan`](@ref) uses ``n_\mathrm{baseline} \times n_\mathrm{pol}``, a

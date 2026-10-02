@@ -31,6 +31,8 @@ keywords always give the same data.
   samples are 30 s apart and scans start `scan_gap` seconds apart, by default
   two samples after the previous one ends.
 - `noise`: σ per visibility sample, against a signal amplitude of 2.5.
+- `weight`: every sample's weight; by default the inverse variance per real
+  component, `2 / noise^2`, or `1e3` without noise.
 - `polarizations`: the stored correlation labels.
 - `ref_freq`, `chan_bw`, `spw_sep`, or `spw_origins` for explicit window starts.
 - `bandpass`, `amp_bandpass`: per-channel phase (rad) and log-amplitude, sized
@@ -56,6 +58,7 @@ function _build_fringe_ps(;
         feed_common = false, station_rate = nothing, rel_rate = nothing,
         spw_origins = nothing, station_positions = nothing, omit_station = nothing,
         station_gains = true, eltype = ComplexF32,
+        weight = isnothing(noise) ? 1.0e3 : 2 / noise^2,
     )
     rng = StableRNG(seed)
     names = ["A$i" for i in 1:nant]
@@ -150,7 +153,7 @@ function _build_fringe_ps(;
             vis[p, c, bl, ti] = z
         end
         ms[:visibility] = rebuild(ms[:visibility], vis)
-        ms[:weight] = rebuild(ms[:weight], fill!(similar(parent(ms[:weight])), 1.0f3))
+        ms[:weight] = rebuild(ms[:weight], fill!(similar(parent(ms[:weight])), weight))
         sets[Symbol("synth_fringe_", s, "_", b)] = ms
     end
 

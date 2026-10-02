@@ -25,7 +25,7 @@ function inject_screen(bl_pairs, pol_products, screen, x = nothing; amp = 10.0, 
     feeds = collect(pol_products)
     xs = x === nothing ? zeros(nbl, npol) : x
     rbar = Array{ComplexF64}(undef, nbl, npol, nap)
-    wbar = ones(nbl, npol, nap)
+    wbar = fill(noise > 0 ? 2 / noise^2 : 1.0, nbl, npol, nap)
     for ap in 1:nap, bi in 1:nbl, p in 1:npol
         a, b = bl_pairs[bi]
         fa, fb = feeds[p]
@@ -277,36 +277,6 @@ end
         @test abs(mean(tr)) < 1.0e-8
         slope = sum(tc .* (tr .- mean(tr))) / sum(tc .^ 2)
         @test isapprox(slope, c1[a, f] - c1[ref, 1]; atol = 1.0e-8)
-    end
-end
-
-@testset "Adhoc: SNR gate is invariant to WEIGHT column scale" begin
-    # Regression: the per-AP SNR gate used |rbar|²/wbar, a true SNR only for
-    # calibrated inverse-variance weights. On raw correlator output (uniform/
-    # uncalibrated WEIGHT) the absolute scale is arbitrary, so a fixed snr_floor
-    # dropped every row and killed the whole adhoc stage. The data-driven gate must
-    # be invariant to a global weight rescale (rbar and wbar both scale by k).
-    rng = MersenneTwister(0xBEEF)
-    nant, nap = 4, 40
-    ref = 1
-    bl = all_bl_a(nant)
-    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    times = collect(0:(nap - 1)) .* 1.0
-    screen = Array{Float64}(undef, nant, 2, nap)
-    for a in 1:nant, f in 1:2, ap in 1:nap
-        screen[a, f, ap] = 0.3 * randn(rng) + 0.04 * sin(2π * ap / nap + a)
-    end
-    rbar, wbar = inject_screen(bl, pols, screen; amp = 5.0, noise = 0.4, rng = rng)
-    sm = FRa.PerTrackAdhocSmoother(options = FRa.AdhocOptions(; snr_floor = 1.0))
-    s1 = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = sm)
-    k = 1.0e-6
-    s2 = solve_positional(k .* rbar, k .* wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = sm)
-
-    @test count(isfinite, s1.phase) > 0                      # adhoc actually runs
-    @test count(isfinite, s2.phase) == count(isfinite, s1.phase)   # scale doesn't change coverage
-    for i in eachindex(s1.phase)
-        (isfinite(s1.phase[i]) && isfinite(s2.phase[i])) || continue
-        @test isapprox(s1.phase[i], s2.phase[i]; atol = 1.0e-9)
     end
 end
 
@@ -934,13 +904,11 @@ end
 
     R, W, names = label_sums(r32, w32, bl, pols, nant, times)
     nodes = FRa._cell_nodes(R, names, CALa.PerFeed())
-    noise2 = @inferred FRa._cell_noise2(R, W, Ti)
-    @test eltype(noise2) == Float32
-    obs = @inferred FRa._adhoc_obs(R, W, nodes, noise2, 1.0)
+    obs = @inferred FRa._adhoc_obs(R, W, nodes, 1.0)
     @test eltype(obs.val) == eltype(obs.w) == Float32
     phase = zeros(Float32, nant, 2, nap)
     sbar = ones(ComplexF32, dims(nodes))
-    @test eltype((@inferred FRa._linearized_obs(R, W, nodes, noise2, phase, sbar)).val) == Float32
+    @test eltype((@inferred FRa._linearized_obs(R, W, nodes, phase, sbar)).val) == Float32
     slice(A) = view(A, Ti(1))
     ph, cov = zeros(Float32, nant, 2), falses(nant, 2)
     @test (@inferred FRa._solve_observable!(

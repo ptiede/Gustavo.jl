@@ -15,7 +15,7 @@
 # complex visibilities against an explicit per-scan source term, for when that
 # assumption fails, with the priors entering inside the gain update.
 #
-# The graph/solve helpers (`_solve_observable!`, `_cell_noise2`, `_node`) live
+# The graph/solve helpers (`_solve_observable!`, `_node`) live
 # in adhoc.jl; the prior fits live in prior_fits.jl.
 
 """
@@ -289,7 +289,6 @@ function _seed_phase_tracks(
         gauge::AbstractGauge = PinAntenna(1), snr_floor::Real = 1.0,
         component::Tuple{Vararg{Symbol}} = (),
     )
-    noise2 = _cell_noise2(rbar_bp, wbar_bp, Frequency)
     T = real(eltype(rbar_bp))
     nodes = _cell_nodes(rbar_bp, stations, PerFeed())
     val = zeros(T, dims(nodes))
@@ -305,9 +304,9 @@ function _seed_phase_tracks(
             c = (AntennaPair(bi), FeedPair(p))
             _solvable(nodes[c...]) || continue
             (a, fa), (b, fb) = nodes[c...]
-            r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
+            r, w = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
             (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            snr2 = _segment_snr2(r, w, w2, noise2[c...])
+            snr2 = abs2(r) / w
             snr2 >= snr_floor^2 || continue
             val[c...] = angle(r)
             wt[c...] = snr2
@@ -368,19 +367,12 @@ function _write_level!(lw, f, ts, gauge)
     return L
 end
 
-# One frequency segment's coherent residual `(r, w, w2)`: the sums of the
-# accumulators over the channels it holds, plus `w2 = Σ wᶜ²`, which converts a
-# per-channel noise variance into the variance of this segment's normalized
-# value `r/w` — `n2 · w2 / w²`, or `n2/k` for `k` equally-weighted channels.
-# Scaling the noise any other way would make a wide block look worse than its
-# channels, and the SNR gate would reject the very observations grouping exists
-# to strengthen.
-#
-# A one-channel segment leaves all three quantities at that channel's own.
+# One frequency segment's coherent residual `(r, w)`: the sums of the
+# accumulators over the channels it holds. `abs2(r) / w` is the SNR² of its
+# phase and log-amplitude, since the weights are inverse variances.
 function _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
     r = zero(eltype(rbar_bp))
     w = zero(eltype(wbar_bp))
-    w2 = zero(eltype(wbar_bp))
     for gc in chans
         cell = (AntennaPair(bi), FeedPair(p), Frequency(gc))
         rc = rbar_bp[cell...]
@@ -388,15 +380,9 @@ function _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
         (isfinite(rc) && isfinite(wc) && wc > 0) || continue
         r += rc
         w += wc
-        w2 += wc^2
     end
-    return r, w, w2
+    return r, w
 end
-
-# Segment SNR² under the per-channel noise estimate `n2` (`NaN` when the track
-# had too few channels to estimate one — then fall back to the weight itself).
-_segment_snr2(r, w, w2, n2) =
-    isfinite(n2) && n2 > 0 ? abs2(r / w) * w^2 / (n2 * w2) : abs2(r) / w
 
 
 # Narrow-spike guard: additive contamination (pcal tones, RFI) violates the
@@ -474,7 +460,6 @@ function _seed_amp_tracks(
         rbar_bp, wbar_bp, stations, fsegs, segments::Frequency;
         snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
     )
-    noise2 = _cell_noise2(rbar_bp, wbar_bp, Frequency)
     T = real(eltype(rbar_bp))
     nodes = _cell_nodes(rbar_bp, stations, PerFeed())
     val = zeros(T, dims(nodes))
@@ -489,9 +474,9 @@ function _seed_amp_tracks(
             c = (AntennaPair(bi), FeedPair(p))
             _solvable(nodes[c...]) || continue
             (a, fa), (b, fb) = nodes[c...]
-            r, w, w2 = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
+            r, w = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
             (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            snr2 = _segment_snr2(r, w, w2, noise2[c...])
+            snr2 = abs2(r) / w
             snr2 >= snr_floor^2 || continue
             amp = abs(r / w); amp > 0 || continue
             val[c...] = log(amp)
@@ -1047,7 +1032,7 @@ end
 function _reduce_scan_segments!(rview, wview, sc, segs)
     for p in axes(rview, FeedPair), bi in axes(rview, AntennaPair)
         for (fs, chans) in enumerate(segs)
-            rc, wc, _ = _segment_residual(sc.rl, sc.wl, bi, p, chans)
+            rc, wc = _segment_residual(sc.rl, sc.wl, bi, p, chans)
             keep = isfinite(rc) && isfinite(wc) && wc > 0
             rview[bi, p, fs] = keep ? rc : zero(rc)
             wview[bi, p, fs] = keep ? wc : zero(wc)

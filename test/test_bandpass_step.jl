@@ -177,12 +177,15 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             @test rms_clean(track(s_free, a, 1), a, 1) < 1.0e-6
         end
 
-        # A prior fills that slot from the in-band shape, and
-        # lands far closer to the truth than leaving it unapplied did.
+        # A prior fills that slot from the in-band shape, closer to the truth than
+        # leaving it unapplied, and about as close as the OU conditional mean of
+        # the true neighbors under the true parameters allows.
         var = track(s_ar, bad_ant, 1)
         err_at(v) = abs(gauge(v)[bad_chan] - gauge(abpc[bad_ant, 1, :])[bad_chan])
+        oracle = a1 * (abpc[bad_ant, 1, bad_chan - 1] + abpc[bad_ant, 1, bad_chan + 1]) / (1 + a1^2)
         @test var[bad_chan] != 0.0
-        @test err_at(var) < 0.5 * err_at(vfree)
+        @test err_at(var) < err_at(vfree)
+        @test err_at(var) < 1.25 * abs(oracle - abpc[bad_ant, 1, bad_chan])
 
         # The OU prior is the correctly-specified one for this track (the truth IS
         # an OU draw along frequency), so on the uncontaminated channels it costs

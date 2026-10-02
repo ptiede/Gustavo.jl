@@ -10,12 +10,11 @@
     ws = DimArray([1.0, 0.5, 0.5, 1.0], AntennaName(["A1", "A2", "A3", "A4"]))
     scale(name) = ws[AntennaName(At(name))]
 
-    @testset "search is invariant; calibrated weights carry the fix" begin
-        # The search's SNR is data-driven (noise estimated from the |D|² plane,
-        # not from Σw), so a PER-BASELINE weight rescale cancels exactly: the
-        # detections — SNR, delay, rate — are bit-identical. What the fix moves
-        # is the RELATIVE inter-baseline weighting of the stages that accumulate
-        # ACROSS baselines (stage B / bandpass / adhoc) and the calibrated weights.
+    @testset "search SNR follows the weights; calibrated weights carry the fix" begin
+        # The search's SNR is |D|/√Σw, so rescaling a baseline's weights by s
+        # scales its SNR by √s and leaves its peak where it was. The solve moves
+        # only through the relative weighting of the stages that combine
+        # baselines (station solve, bandpass, adhoc).
         gauge = PinAntenna(1)
         steps = (
             BaselineFringeFit(; gauge), Bandpass(; gauge),
@@ -30,8 +29,11 @@
             (sols, _calibrate_chain(sols, scaled))
         end
         bfr, ffr = base[1][1].steps[:fringe], fixd[1][1].steps[:fringe]
-        @test ffr.scan_snr == bfr.scan_snr
-        @test ffr.det_snr == bfr.det_snr
+        for i in eachindex(bfr.det_snr, ffr.det_snr)
+            s = scale(bfr.det_ant_a[i]) * scale(bfr.det_ant_b[i])
+            @test ffr.det_snr[i] ≈ sqrt(s) * bfr.det_snr[i] rtol = 1.0e-4
+            @test ffr.det_delay[i] ≈ bfr.det_delay[i]
+        end
         # …so the solution only shifts at the level of the re-weighted stages.
         @test all(
             isapprox(parent(c1.params), parent(c2.params); atol = 1.0e-3)
