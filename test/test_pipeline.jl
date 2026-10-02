@@ -398,7 +398,7 @@ end
         calibrate!(fit(ff, g), g; flag_bad = false, apply_flags = false)
         return XRadio.average(g, XRadio.ByScan())
     end
-    avg = merge(values(averaged)...)
+    avg = XRadio.ProcessingSet(averaged)
     @test all(ms -> length(XRadio.times(ms)) == 1, values(avg))
     bp_avg = fit(Bandpass(; gauge), avg)
 

@@ -54,7 +54,7 @@ averaged = mapsets(groupby(ps, ByScan())) do g
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     return average(g, ByScan())
 end
-bp = fit(Bandpass(; gauge), merge(values(averaged)...))
+bp = fit(Bandpass(; gauge), ProcessingSet(averaged))
 
 sols = mapsets(groupby(ps, ByScan())) do g
     foreach(normalize_by_autocorrelations!, values(g))
