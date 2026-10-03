@@ -83,6 +83,40 @@
         @test parent(ms[:visibility])[1, 1, 1, 1] ≈ sqrt(100.0 / (0.1 * gain_aa) * sefd_mg(1, 1))
     end
 
+    @testset "implausible system temperatures count as unmeasured" begin
+        screened = tempname()
+        write(screened, """
+        GAIN AA ELEV DPFU = 0.1, 0.2 POLY = 1.0, 0.01 /
+        GAIN MG ALTAZ DPFU = 0.5 POLY = 2.0 /
+        TSYS AA INDEX = 'R1', 'L1' /
+        63 00:00:00   100.0  200.0
+        63 00:00:30   999.0  -5.0
+        63 00:02:00   2.0e4  2.0e4
+        /
+        TSYS MG INDEX = 'R1:1', 'L1:1' /
+        63 00:00:00   50.0   60.0
+        63 00:02:00   70.0   80.0
+        /
+        """)
+        function filled()
+            ms = uncalibrated()
+            @test_logs (:warn,) XRadio.read_antab!(one_member(ms), screened; ifs = Dict("spw_0" => 1))
+            return ms
+        end
+        ms = apriori_calibrate!(filled())
+        V, F = parent(ms[:visibility]), parent(ms[:flag])
+        # The placeholder and the negative row leave the first scan's mean alone.
+        @test V[1, 1, 1, 1] ≈ sqrt(100.0 / (0.1 * gain_aa) * sefd_mg(1, 1))
+        @test V[4, 1, 1, 2] ≈ sqrt(200.0 / (0.2 * gain_aa) * sefd_mg(2, 1))
+        # The second scan's only row is above `max_tsys`, so AA is unmeasured there.
+        @test all(F[:, :, 1:2, 3:4]) && all(==(1), V[:, :, 1:2, 3:4])
+        # The store keeps what the file said.
+        @test 999.0 in XRadio.system_temperatures(ms)
+
+        raised = apriori_calibrate!(filled(); max_tsys = 3.0e4)
+        @test parent(raised[:visibility])[1, 1, 1, 3] ≈ sqrt(2.0e4 / (0.1 * gain_aa) * sefd_mg(1, 2))
+    end
+
     @testset "below the elevation limit" begin
         ms = from_antab()
         apriori_calibrate!(ms; min_elevation = dec + 0.01)

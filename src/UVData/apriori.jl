@@ -1,5 +1,6 @@
 """
-    apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation = 0.0) -> ms
+    apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation = 0.0,
+                       max_tsys = 1.0e4, tsys_placeholders = (999.0,)) -> ms
 
 Put the visibilities of `ms` in janskys, in place, from the system
 temperatures and gain curves the Measurement Set records
@@ -15,7 +16,10 @@ so the weight stays `1/σ²` of the visibility it describes. Receptors come from
 
 `tsys` places the system temperatures, which are sampled on their own clock, on
 the visibilities' times: [`ScanMean`](@ref), [`LinearInTime`](@ref) or
-[`NearestInTime`](@ref). Elevations come from the antenna positions, the field
+[`NearestInTime`](@ref). A system temperature that is not positive, exceeds
+`max_tsys` (kelvin), or equals one of `tsys_placeholders` (values written for
+"not measured") counts as unmeasured before it is placed; the store keeps it.
+Elevations come from the antenna positions, the field
 phase centre and the time; a source below `min_elevation` (radians) has no
 usable gain.
 
@@ -25,7 +29,10 @@ flagged. The visibility `units` become `Jy`; a Measurement Set whose
 visibilities are already in janskys is an error, as is one that records no
 system temperatures or no gain curves.
 """
-function apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation::Real = 0.0)
+function apriori_calibrate!(
+        ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation::Real = 0.0,
+        max_tsys::Real = 1.0e4, tsys_placeholders = (999.0,),
+    )
     vis = ms[:visibility]
     units = get(metadata(vis), :units, nothing)
     units == "Jy" && throw(ArgumentError(
@@ -42,7 +49,8 @@ function apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_el
             "`XRadio.read_antab!` reads them from an ANTAB file"
     ))
 
-    scale = _sefd_scale(ms, T, curves, tsys, Float64(min_elevation))
+    plausible(v) = isfinite(v) && 0 < v <= max_tsys && !(v in tsys_placeholders)
+    scale = _sefd_scale(ms, T, curves, tsys, Float64(min_elevation), plausible)
     feeds = feed_pairs(ms)
     V, W, F = _storage_order(vis), _storage_order(ms[:weight]), _storage_order(ms[:flag])
     for (bi, (a, b)) in pairs(baselines(ms).pairs)
@@ -72,7 +80,7 @@ _channel(scale, c) = size(scale, 4) == 1 ? 1 : c
 # √SEFD over (receptor, antenna, time, channel) in the antenna dataset's order,
 # with a channel axis of length one unless the system temperatures resolve the
 # data's channels. `NaN` where any ingredient is missing or unusable.
-function _sefd_scale(ms, T, curves, rule, min_elevation)
+function _sefd_scale(ms, T, curves, rule, min_elevation, plausible)
     A, R = XRadio.AntennaName, XRadio.ReceptorLabel
     types = XRadio.polarization_types(ms)
     names, receptors = collect(lookup(types, A)), collect(lookup(types, R))
@@ -100,7 +108,7 @@ function _sefd_scale(ms, T, curves, rule, min_elevation)
         dpfu = curves[:sensitivity][A(At(a)), R(At(r))]
         series = T[A(At(a)), R(At(r))]
         for c in 1:nchan
-            values = collect(resolved ? series[XRadio.Frequency(c)] : series)
+            values = [plausible(v) ? v : NaN for v in (resolved ? series[XRadio.Frequency(c)] : series)]
             placed = place_tsys(rule, rows, values, times, scans, half)
             for t in eachindex(times)
                 el = elevation[t, i]
