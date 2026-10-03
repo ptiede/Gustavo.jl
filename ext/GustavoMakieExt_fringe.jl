@@ -9,10 +9,10 @@
 import Gustavo.Fring
 using Gustavo.UVData: Frequency
 using Gustavo.Calibration: CalibrationSolution, gains, _freq_group_ranges
-using DimensionalData: lookup, Ti
-using Gustavo.Fring: fringe_snr_table
+using DimensionalData: lookup, Ti, AbstractDimStack
+using Gustavo.UVData: Scan
 using Gustavo.Fring: BaselineFringeData, baseline_pol_index
-using Gustavo.Fring: FringeSearchMap, BaselineFringeMap, _fmt_pfa
+using Gustavo.Fring: FringeSearchMap, BaselineFringeMap
 using Gustavo.Fring: _plotted_sigma
 
 # Resolve a `sites`/`feeds` selector into a vector of integer indices.
@@ -128,22 +128,29 @@ function Fring.plot_fringe_phases(sol::CalibrationSolution; sites = :all, feeds 
     return fig
 end
 
+# Probabilities span many decades: scientific notation below 10⁻³.
+_fmt_pfa(x::Real) = !isfinite(x) ? "NaN" :
+    (x > 0 && x < 1.0e-3 ? @sprintf("%.1e", x) : string(round(x; digits = 3)))
+
 # ── plot_fringe_snr: per-scan max SNR ─────────────────────────────────────────
-function Fring.plot_fringe_snr(parent, sol::CalibrationSolution)
-    rows = fringe_snr_table(sol)
-    scans = [Float64(r.scan) for r in rows]
-    snr = [r.max_snr for r in rows]
-    ax = Axis(parent[1, 1]; xlabel = "scan", ylabel = "max detection SNR", title = "Fringe per-scan SNR")
-    if !isempty(scans)
-        scatter!(ax, scans, snr; markersize = 8, color = :seagreen)
-        lines!(ax, scans, snr; color = (:seagreen, 0.5))
+function Fring.plot_fringe_snr(parent, table::AbstractDimStack)
+    names = String.(collect(lookup(table, Scan)))
+    x = collect(eachindex(names))
+    snr = collect(table.max_snr)
+    ax = Axis(
+        parent[1, 1]; xlabel = "scan", ylabel = "max detection SNR", title = "Fringe per-scan SNR",
+        xticks = (x, names),
+    )
+    if !isempty(x)
+        scatter!(ax, x, snr; markersize = 8, color = :seagreen)
+        lines!(ax, x, snr; color = (:seagreen, 0.5))
     end
     return parent
 end
 
-function Fring.plot_fringe_snr(sol::CalibrationSolution)
+function Fring.plot_fringe_snr(table::AbstractDimStack)
     fig = Figure(size = (640, 280))
-    Fring.plot_fringe_snr(fig, sol)
+    Fring.plot_fringe_snr(fig, table)
     return fig
 end
 

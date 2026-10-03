@@ -527,12 +527,25 @@ is recorded and is not used as a threshold.
 
 ## Diagnostics
 
+A fringe solution's diagnostics are labeled arrays keyed by scan name,
+station and feed: [`fringe_snr_table`](@ref) (per-scan peak SNR and
+false-alarm probability), [`fringe_detections`](@ref) (every measured
+baseline and product), [`fringe_station_solutions`](@ref) (per-scan station
+delay, rate and phase) and [`fringe_station_flags`](@ref) (stations a scan
+left unconstrained). Per-scan solutions from [`mapsets`](@ref) combine with
+[`cat_scans`](@ref):
+
+```julia
+sols = mapsets(g -> fit(BaselineFringeFit(; gauge), g), groupby(ps, ByScan()))
+det = cat_scans(fringe_detections.(values(sols)))
+findall(det.detected .& (det.pfa .> 1e-6))     # accepted, but marginal
+```
+
 [`baseline_fringe_map`](@ref) returns the windowed delay–rate surface itself as
 a [`FringeSearchMap`](@ref), rather than only its maximum. This is required to
 determine why a detection occurred at a given delay and rate, and whether a
 competing peak of comparable height was present.
 [`fringe_search_map`](@ref) builds one from the detections
-recorded on a solution, [`suspect_fringes`](@ref) lists detections whose
-statistics are inconsistent, and [`delay_closure`](@ref) evaluates delay
+recorded on a solution, and [`delay_closure`](@ref) evaluates delay
 closure around triangles. With a Makie backend loaded,
 [`plot_fringe_search`](@ref) plots the surface.
