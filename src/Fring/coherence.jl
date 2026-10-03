@@ -14,11 +14,10 @@
 # frequency (delay/bandpass removed), so averaging the data — the whole point of
 # fringe fitting — stays coherent out to long timescales and wide bandwidths.
 #
-# A `CoherenceReport` holds two curves — η versus time-averaging interval Δt
-# and η versus frequency-averaging width Δν — plus the headline numbers at
-# full-scan / full-band averaging. The accumulation kernels below work on
-# `(Frequency, Ti, BaselineID, Polarization)` cubes. Pure (no Makie); the
-# `plot_coherence` stub is implemented by `GustavoMakieExt`.
+# `coherence_report` measures η of one scan group against time-averaging
+# interval Δt and frequency-averaging width Δν, per (antenna pair, feed pair)
+# and pooled over antenna pairs. The accumulation kernels below work on
+# `(Frequency, Ti, BaselineID, Polarization)` cubes.
 #
 # CAVEAT: η is computed against the data's own finest resolution (a single
 # integration / channel gives η ≡ 1), so it is self-normalized and needs no
@@ -46,91 +45,22 @@
 # noise — and a weak baseline's trace is noisy-but-unbiased rather than
 # smoothly wrong.
 
-"""
-    CoherenceCurve
-
-Coherence factor versus averaging interval along one axis (`:time` or `:freq`),
-held by a [`CoherenceReport`](@ref).
-
-- `axis` — `:time` (averaging the `Ti` axis) or `:freq` (the `Frequency` axis).
-- `intervals` — the averaging intervals (seconds for `:time`, Hz for `:freq`),
-  ascending from the data's native spacing to its full extent.
-- `eta` — the aggregate coherence factor at each interval (weight-pooled over all
-  baselines/products), `length(intervals)`.
-- `eta_baseline` — per-baseline coherence, `(length(intervals), nbaseline)`; `NaN`
-  for a baseline with no valid data.
-
-`eta` starts at ≈1 (native resolution, one sample per cell) and decreases as the
-interval grows if residual phase decorrelates the average.
-"""
-struct CoherenceCurve
-    axis::Symbol
-    intervals::Vector{Float64}
-    eta::Vector{Float64}
-    eta_baseline::Matrix{Float64}
-end
-
-"""
-    CoherenceReport
-
-Stage-agnostic coherence summary of a visibility set.
-`bl_pairs`/`ant_names` label the baseline axis of the curves; `feeds` are the
-feed pairs of the correlation products that were included; `npts` is
-the valid-cell count per baseline. `time` and `freq` are the [`CoherenceCurve`](@ref)s
-versus Δt and Δν. The headline stage numbers are `time.eta[end]` (coherence
-retained averaging the whole scan to one sample) and `freq.eta[end]` (averaging
-the whole band to one channel) — see [`coherence_headline`](@ref).
-"""
-struct CoherenceReport
-    bl_pairs::Vector{Tuple{Int, Int}}
-    ant_names::Vector{String}
-    feeds::Vector{Tuple{Int, Int}}
-    npts::Vector{Int}
-    time::CoherenceCurve
-    freq::CoherenceCurve
-end
-
-# Resolve a `pols` selector against this leaf's feed pairs → local indices.
-function _select_coherence_pols(feeds::Vector{Tuple{Int, Int}}, pols)
-    if pols === :all
-        return collect(eachindex(feeds))
-    elseif pols isa Integer
-        return [Int(pols)]
-    elseif pols isa Tuple{Integer, Integer}
-        return [_pol_index_lookup(feeds, pols)]
-    elseif pols isa AbstractVector && all(p -> p isa Union{Integer, Tuple{Integer, Integer}}, pols)
-        return [p isa Integer ? Int(p) : _pol_index_lookup(feeds, p) for p in pols]
-    else
-        throw(ArgumentError("coherence: `pols` must be :all, an index, a feed pair such as (1, 1), or a vector of these; got $(repr(pols))"))
-    end
-end
-
-# Geometric sweep of averaging intervals from the native spacing to the full
-# extent (largest per-leaf span), doubling each step. The finest interval is the
-# *minimum* positive consecutive difference (not the median): with a uniform grid
-# the two agree, but on a non-uniform grid the median can be larger than the
-# closest pair, merging those two samples into one bin at the "native" step and
-# breaking the η ≡ 1 anchor. Anchoring at the minimum step guarantees
-# one-sample-per-bin (η ≡ 1) at native resolution regardless of grid uniformity.
-# Empty when the axis has no spacing (single sample/channel everywhere) — that
-# axis simply gets no coherence curve.
+# Doubling sweep of averaging intervals from the native spacing until one
+# interval exceeds the largest span, so the last bin holds the whole extent.
+# The native spacing is the *minimum* positive step, not the median: on a
+# non-uniform grid a median step merges the closest pair into one bin and
+# breaks the η ≡ 1 anchor at native resolution. Empty when the axis has no
+# spacing (one sample or channel everywhere).
 function _auto_intervals(diffs::Vector{Float64}, spans::Vector{Float64})
     isempty(diffs) && return Float64[]
     native = minimum(diffs)
     (native > 0 && isfinite(native)) || return Float64[]
-    full = isempty(spans) ? native : maximum(spans)
-    out = Float64[]
-    v = native
-    while v < full
-        push!(out, v)
-        v *= 2
+    full = isempty(spans) ? 0.0 : maximum(spans)
+    out = [native]
+    while last(out) <= full
+        push!(out, 2 * last(out))
     end
-    # Terminal "average everything" interval. Bins are half-open [k·Δ, (k+1)·Δ),
-    # so a sample sitting exactly at `full` (span an exact multiple of Δ — the
-    # common uniform grid) would floor into a spurious singleton top bin; nudging
-    # the terminal interval just above the span keeps the whole leaf in one bin.
-    push!(out, full * (1 + 1.0e-9))
-    return unique!(out)
+    return out
 end
 
 # Per-baseline η and the pooled aggregate, per interval.
@@ -200,14 +130,10 @@ end
 # Once (`tid`/`fid`) and each (c, ti) cell is read O(1) times w.r.t. the number of
 # intervals: a single walk fans every cell into all nT (or nF) running
 # accumulators. The denominator Σ w·|V| and `npts` are interval-independent, summed
-# once. Intervals are used as given (the auto sweep nudges its terminal just above
-# the span so the whole leaf lands in one bin).
+# once. Intervals are used as given.
 # `Fl` is the flag layer over `V`, or `nothing` for an already-collapsed cube:
 # `_collapse_axis` has excluded the flagged samples, so the reduced cells carry
 # no flag of their own.
-@inline _flagged(::Nothing, I...) = false
-Base.@propagate_inbounds _flagged(Fl, I...) = Fl[I...]
-
 function _coherence_accumulate!(
         numT::Matrix{Float64}, numF::Matrix{Float64}, den::Vector{Float64}, dvar::Vector{Float64},
         npts::Vector{Int},
@@ -215,7 +141,7 @@ function _coherence_accumulate!(
         times_sec::Vector{Float64}, freqs::Vector{Float64}, dts::Vector{Float64}, dnus::Vector{Float64},
         debias::Bool,
     ) where {Tv, Tw}
-    Fl === nothing || check_layer_axes(V, W, Fl)
+    Fl === nothing || UVData.check_layer_axes(V, W, Fl)
     nchan, nti, nbl, npol = size(V)
     nT = length(dts); nF = length(dnus)
     tperm = sortperm(times_sec)
@@ -383,121 +309,120 @@ function _collapse_axis(
     return Vbar, Wbar
 end
 
-"""
-    coherence_headline(report::CoherenceReport) -> NamedTuple
 
-The two stage-summary numbers: `(; eta_time, eta_freq, loss_time, loss_freq)`,
-where `eta_time` is the aggregate coherence retained averaging the whole scan to
-one sample (`report.time.eta[end]`), `eta_freq` averaging the whole band to one
-channel, and `loss_* = 1 − eta_*`. `NaN` if an axis had no averaging to do.
-"""
-function coherence_headline(report::CoherenceReport)
-    et = isempty(report.time.eta) ? NaN : last(report.time.eta)
-    ef = isempty(report.freq.eta) ? NaN : last(report.freq.eta)
-    return (; eta_time = et, eta_freq = ef, loss_time = 1 - et, loss_freq = 1 - ef)
-end
-
-_cohfmt(x::Real) = isfinite(x) ? string(round(x; digits = 4)) : "NaN"
+DimensionalData.@dim AveragingTime "Time-averaging interval (s)"
+DimensionalData.@dim AveragingBandwidth "Frequency-averaging width (Hz)"
 
 """
-    print_coherence_report(report::CoherenceReport; io = stdout, nworst = 5)
+    coherence_report(group; timescales = nothing, bandwidths = nothing,
+                     debias = false, marginalize = true) -> DimStack
 
-Pretty-print a [`CoherenceReport`](@ref): the aggregate η versus Δt and Δν, the
-headline full-scan / full-band coherence (and loss), and the `nworst` least-
-coherent baselines at full averaging.
+The coherence factor η = |Σ w·V| / Σ(w·|V|) of `group`, one scan
+(`groupby(ps, ByScan())`), against time-averaging interval and
+frequency-averaging width. Call it on the data before and after a solution
+to see how much coherence each averaging costs: a good solution keeps η ≈ 1
+out to the whole scan and the whole spectral window. Layers:
+
+- `time` — over `(Scan, AntennaPair, FeedPair, AveragingTime)` (s).
+- `freq` — over `(Scan, AntennaPair, FeedPair, AveragingBandwidth)` (Hz);
+  frequency bins stay within one spectral window.
+- `time_pooled`, `freq_pooled` — the same over `(Scan, FeedPair, …)`, pooled
+  over antenna pairs.
+
+Each interval bins the data along its axis, sums coherently within every bin
+and pools the bins, so η ≡ 1 at native resolution and no gain model is
+needed. A cell with no usable data is `NaN`. `timescales` (s) and
+`bandwidths` (Hz) replace the default sweeps, which double from the native
+spacing until one interval spans the whole extent.
+
+`debias` removes the thermal-noise bias, which otherwise pulls η below 1 at
+coarse averaging; it takes the weights as inverse variances per real
+component (`w = 1/Var(Re V)`). The debiased η pools unbiased per-bin powers and
+takes one square root at the end; where the pooled power does not clear 3σ of
+its null fluctuation it is `NaN`. `marginalize` measures each curve on data
+coherently averaged over the other axis first (the time curve on per-integration
+window averages, the frequency curve on per-channel scan averages), which
+raises the per-sample SNR the debias needs.
+
+Per-scan results combine with [`cat_scans`](@ref); pass the same `timescales`
+and `bandwidths` to every scan so the intervals line up.
 """
-function print_coherence_report(report::CoherenceReport; io = stdout, nworst::Integer = 5)
-    println(io)
-    println(io, "Coherence report [", join(report.feeds, ","), "], ", length(report.bl_pairs), " baselines")
+function coherence_report(
+        group::XRadio.ProcessingSet;
+        timescales = nothing, bandwidths = nothing, debias::Bool = false, marginalize::Bool = true,
+    )
+    scan = _group_scan(group)
+    members = collect(values(group))
+    member_pairs = map(_member_station_pairs, members)
+    stations, feeds = _cross_cell_labels(member_pairs, map(feed_pairs, members), DataGeometry(group))
+    isempty(stations) && throw(ArgumentError("scan $scan holds no cross baselines"))
+    times = [Float64.(collect(XRadio.times(ms))) for ms in members]
+    freqs = [Float64.(collect(XRadio.frequencies(ms))) for ms in members]
+    dts = isnothing(timescales) ? _sweep(times) : sort!(Float64.(collect(timescales)))
+    dnus = isnothing(bandwidths) ? _sweep(freqs) : sort!(Float64.(collect(bandwidths)))
 
-    _print_curve(io, "time-averaging", report.time, "Δt", 1.0, "s")
-    _print_curve(io, "frequency-averaging", report.freq, "Δν", 1.0e-6, "MHz")
-
-    h = coherence_headline(report)
-    println(io, "  headline:")
-    println(io, "    full-scan  η = ", _cohfmt(h.eta_time), "   (loss ", _cohpct(h.loss_time), ")")
-    println(io, "    full-band  η = ", _cohfmt(h.eta_freq), "   (loss ", _cohpct(h.loss_freq), ")")
-
-    _print_worst(io, report, nworst)
-    return nothing
-end
-
-_cohpct(x::Real) = isfinite(x) ? string(round(100x; digits = 2), "%") : "NaN"
-
-function _print_curve(io, title, curve::CoherenceCurve, xlabel, scale, unit)
-    if isempty(curve.intervals)
-        println(io, "  ", title, ": (single sample — no averaging)")
-        return nothing
+    cell = LinearIndices((length(stations), length(feeds)))
+    pair_i = Dict(p => j for (j, p) in pairs(stations))
+    feed_i = Dict(f => q for (q, f) in pairs(feeds))
+    numT, numF = zeros(length(dts), length(cell)), zeros(length(dnus), length(cell))
+    denT, denF, dvarT, dvarF = (zeros(length(cell)) for _ in 1:4)
+    npts = zeros(Int, length(cell))
+    for (ms, ps, ts, fs) in zip(members, member_pairs, times, freqs)
+        V, W, F = map(_coherence_cube, _member_layers(ms))
+        fp = feed_pairs(ms)
+        blmap(p) = [haskey(pair_i, ps[bi]) ? cell[pair_i[ps[bi]], feed_i[fp[p, bi]]] : 0 for bi in axes(V, 3)]
+        if marginalize
+            Vt, Wt = _collapse_axis(V, W, F, 1)
+            Vf, Wf = _collapse_axis(V, W, F, 2)
+            for p in axes(V, 4)
+                _coherence_accumulate!(
+                    numT, zeros(1, length(cell)), denT, dvarT, npts, Vt, Wt, nothing, blmap(p), [p],
+                    ts, [sum(fs) / length(fs)], dts, [1.0], debias,
+                )
+                _coherence_accumulate!(
+                    zeros(1, length(cell)), numF, denF, dvarF, zeros(Int, length(cell)), Vf, Wf, nothing,
+                    blmap(p), [p], [sum(ts) / length(ts)], fs, [1.0], dnus, debias,
+                )
+            end
+        else
+            for p in axes(V, 4)
+                _coherence_accumulate!(numT, numF, denT, dvarT, npts, V, W, F, blmap(p), [p], ts, fs, dts, dnus, debias)
+            end
+        end
     end
-    println(io, "  ", title, ":")
-    println(io, "    ", rpad(string(xlabel, " (", unit, ")"), 14), "η")
-    for k in eachindex(curve.intervals)
-        println(io, "    ", rpad(_cohfmt(curve.intervals[k] * scale), 14), _cohfmt(curve.eta[k]))
+    marginalize || (denF, dvarF = denT, dvarT)
+
+    sd, pd, fd = _scan_dim([scan]), _station_pair_dim(stations), FeedPair(feeds)
+    time, time_pooled = _feed_curves(numT, denT, dvarT, debias, (sd, pd, fd), AveragingTime(dts))
+    freq, freq_pooled = _feed_curves(numF, denF, dvarF, debias, (sd, pd, fd), AveragingBandwidth(dnus))
+    return DimStack((; time, freq, time_pooled, freq_pooled))
+end
+
+# A Measurement Set layer as a plain `(Frequency, Ti, BaselineID, Polarization)` array.
+_coherence_cube(L) = PermutedDimsArray(parent(L), dimnum(L, (Frequency, Ti, BaselineID, Polarization)))
+
+function _sweep(coords)
+    diffs, spans = Float64[], Float64[]
+    for x in coords
+        length(x) > 1 || continue
+        s = sort(x)
+        append!(diffs, filter(>(0), diff(s)))
+        push!(spans, last(s) - first(s))
     end
-    return nothing
+    return _auto_intervals(diffs, spans)
 end
 
-# The "na–nb" station-pair code for baseline `bi`, with an `ant{i}` fallback when
-# an antenna index is past the name table. Non-exported; reused by sibling tools.
-function coherence_baseline_label(report::CoherenceReport, bi::Integer)::String
-    a, b = report.bl_pairs[bi]
-    na = a <= length(report.ant_names) ? report.ant_names[a] : string("ant", a)
-    nb = b <= length(report.ant_names) ? report.ant_names[b] : string("ant", b)
-    return string(na, "–", nb)
-end
-
-# Indices of the `n` least-coherent baselines at the coarsest swept interval,
-# ranked on the time curve (falling back to the freq curve when there is no time
-# curve), NaN excluded. Non-exported; reused by sibling tools.
-function worst_baselines(report::CoherenceReport, n::Integer; axis::Symbol = :time)::Vector{Int}
-    curve = axis === :freq ? report.freq : report.time
-    isempty(curve.eta) && (curve = axis === :freq ? report.time : report.freq)
-    isempty(curve.eta) && return Int[]
-    k = lastindex(curve.eta)
-    rows = [(bi, curve.eta_baseline[k, bi]) for bi in eachindex(report.bl_pairs)]
-    finite = filter(r -> isfinite(r[2]), rows)
-    isempty(finite) && return Int[]
-    sort!(finite; by = r -> r[2])
-    m = min(n, length(finite))
-    return [finite[i][1] for i in 1:m]
-end
-
-# The least-coherent baselines at full time-averaging (the headline-worst), shown
-# only when there is a time curve to rank by.
-function _print_worst(io, report::CoherenceReport, nworst::Integer)
-    (nworst <= 0 || isempty(report.time.eta)) && return nothing
-    worst = worst_baselines(report, nworst; axis = :time)
-    isempty(worst) && return nothing
-    k = lastindex(report.time.eta)
-    println(io, "  least coherent (full-scan):")
-    for bi in worst
-        e = report.time.eta_baseline[k, bi]
-        println(io, "    ", rpad(coherence_baseline_label(report, bi), 12), "η = ", _cohfmt(e))
+# The per-cell and per-feed-pair curves from the interval × cell sums, whose
+# cells are `LinearIndices` over (antenna pair, feed pair).
+function _feed_curves(num, den, dvar, power::Bool, (sd, pd, fd), xd)
+    eta = fill(NaN, 1, length(pd), length(fd), length(xd))
+    pooled = fill(NaN, 1, length(fd), length(xd))
+    cell = LinearIndices((length(pd), length(fd)))
+    for q in axes(cell, 2)
+        cols = cell[:, q]
+        e, agg = _curve_from_sums(num[:, cols], den[cols], dvar[cols], power)
+        eta[1, :, q, :] = permutedims(e)
+        pooled[1, q, :] = agg
     end
-    return nothing
+    return DimArray(eta, (sd, pd, fd, xd)), DimArray(pooled, (sd, fd, xd))
 end
-
-# ── Plot stub — implemented by `GustavoMakieExt`. ─────────────────────────────
-"""
-    plot_coherence(report::CoherenceReport; baselines = :all)
-    plot_coherence(parent, report::CoherenceReport; baselines = :all)
-
-Coherence factor η versus time-averaging interval Δt and frequency-averaging width
-Δν: the aggregate as a bold line plus faint per-baseline traces. A correct
-solution stays near η = 1 across the swept intervals. Provided by `GustavoMakieExt`
-(load Makie/CairoMakie).
-"""
-function plot_coherence end
-
-"""
-    plot_coherence_matrix(report::CoherenceReport; axis = :time, sortworst = true)
-    plot_coherence_matrix(parent, report::CoherenceReport; ...)
-
-Heatmap of the per-baseline coherence factor η: one row per baseline (labelled by
-station-pair code, sorted worst-first by default), one column per averaging
-interval, colour = η ∈ `[0, 1]` (red = decorrelated, green = coherent). The direct
-"which baseline/station is bad" view — a problem station shows as a band of red
-rows. `axis = :time` (Δt columns) or `:freq` (Δν columns); the columns are the
-report's own intervals. Provided by `GustavoMakieExt`.
-"""
-function plot_coherence_matrix end

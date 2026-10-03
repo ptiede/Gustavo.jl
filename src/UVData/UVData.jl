@@ -24,7 +24,6 @@ include("frequencyband.jl")
 include("metadata.jl")
 include("UVSet/UVSet.jl")
 include("io.jl")
-include("coherence.jl")
 include("antab.jl")
 include("apriori.jl")
 include("utilities.jl")
@@ -53,8 +52,6 @@ export feed_pairs, normalize_by_autocorrelations, normalize_by_autocorrelations!
 export AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
 export load_antab, load_fitsidi_apriori, tsys_at, elevation_gain, stations
 export AprioriFluxGains, apriori_gains
-export CoherenceReport, CoherenceCurve, coherence_headline
-export print_coherence_report, plot_coherence, plot_coherence_matrix
 export spw_center_frequency, centered_channel_freqs
 export nchannels
 

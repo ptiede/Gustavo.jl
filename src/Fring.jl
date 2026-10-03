@@ -49,6 +49,7 @@ include("Fring/scan_search.jl")
 include("Fring/search_stage.jl")
 include("Fring/model_plans.jl")
 include("Fring/bandpass_stage.jl")
+include("Fring/coherence.jl")
 include("Fring/diagnostics.jl")
 
 # ── Plot stubs — implemented by `GustavoMakieExt`. Load Makie or CairoMakie
@@ -76,6 +77,19 @@ from the full plane either way.
 """
 function plot_fringe_search end
 
+"""
+    plot_coherence(coh; nlabel = 0)
+    plot_coherence(parent, coh; nlabel = 0)
+
+Coherence factor η against time-averaging interval and frequency-averaging
+width for one scan and feed pair of a [`coherence_report`](@ref) result,
+selected first (`coh[Scan = 1, FeedPair = At((1, 1))]`): log-scaled panels with
+a faint trace per antenna pair and the pooled η bold. `nlabel` colors and
+labels the `nlabel` antenna pairs with the lowest η at the longest time
+interval. Provided by `GustavoMakieExt`.
+"""
+function plot_coherence end
+
 export FringeSearch, baseline_fringe_search, fringe_plane
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, FringeDelay, FringeRate, baseline_fringe_map, fringe_search_map, fringe_pfa, fringe_snr_cut
@@ -96,6 +110,7 @@ export baseline_delays, delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_terms
 export search_scan
-export plot_fringe_search
+export plot_fringe_search, plot_coherence
+export coherence_report, AveragingTime, AveragingBandwidth
 
 end

@@ -226,7 +226,7 @@ end
 function _cat_scans(::AbstractDimStack, xs, out_dims)
     names = keys(first(xs))
     layers = map(names) do k
-        _cat_scans(first(xs)[k], [x[k] for x in xs], out_dims)
+        _cat_scans(first(xs)[k], [x[k] for x in xs], dims(out_dims, dims(first(xs)[k])))
     end
     return DimStack(NamedTuple{names}(layers))
 end

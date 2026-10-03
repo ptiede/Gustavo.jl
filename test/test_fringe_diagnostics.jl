@@ -271,6 +271,66 @@
         @test zoomed.origin[2] <= m.detection.rate * 1.0e3 <= zoomed.origin[2] + zoomed.widths[2]
     end
 
+    @testset "coherence report" begin
+        raw = FP.coherence_report(ps)
+        coh = FP.coherence_report(calibrate(sol, ps; flag_bad = false, apply_flags = false))
+        @test keys(coh) == (:time, :freq, :time_pooled, :freq_pooled)
+        @test map(DimensionalData.basetypeof, dims(coh.time)) == (UVP.Scan, AntennaPair, FeedPair, FP.AveragingTime)
+        @test map(DimensionalData.basetypeof, dims(coh.freq_pooled)) == (UVP.Scan, FeedPair, FP.AveragingBandwidth)
+        @test collect(lookup(coh, UVP.Scan)) == sol.geom.scan_names
+        @test length(lookup(coh, AntennaPair)) == 6
+        @test collect(lookup(coh, FeedPair)) == [(1, 1), (1, 2), (2, 1), (2, 2)]
+        dts = collect(lookup(coh, FP.AveragingTime))
+        times = sol.geom.times
+        @test first(dts) ≈ times[2] - times[1]
+        @test all(dts[2:end] .== 2 .* dts[1:(end - 1)])
+        @test last(dts) > last(times) - first(times) >= dts[end - 1]
+
+        # Native resolution (one sample per bin) is the η ≡ 1 anchor.
+        @test all(coh.time_pooled[FP.AveragingTime(1)] .≈ 1)
+        @test all(coh.freq_pooled[FP.AveragingBandwidth(1)] .≈ 1)
+
+        # The solution removes the rates, so the corrected parallel hands stay
+        # coherent averaged over the whole scan while the raw data decorrelate;
+        # averaging over the band is no worse.
+        par = FeedPair(At([(1, 1), (2, 2)]))
+        full_t(c) = c.time_pooled[par, FP.AveragingTime(length(dts))]
+        full_f(c) = c.freq_pooled[par, FP.AveragingBandwidth(length(lookup(c, FP.AveragingBandwidth)))]
+        @test all(>(0.9), full_t(coh))
+        @test all(full_t(raw) .< 0.95)
+        @test all(full_t(raw) .< full_t(coh))
+        @test all(full_f(coh) .>= full_f(raw) .- 1.0e-6)
+
+        # Explicit intervals; per-scan results combine along `Scan`.
+        given = FP.coherence_report(ps; timescales = [30.0, 120.0, 360.0], bandwidths = [4.0e6, 1.6e7])
+        @test lookup(given, FP.AveragingTime) == [30.0, 120.0, 360.0]
+        @test lookup(given, FP.AveragingBandwidth) == [4.0e6, 1.6e7]
+        ps2, _ = _build_fringe_ps(; nscans = 2)
+        per_scan = [
+            FP.coherence_report(g; timescales = [30.0, 120.0], bandwidths = [4.0e6])
+                for g in values(XRadio.groupby(ps2, XRadio.ByScan()))
+        ]
+        both = FP.cat_scans(per_scan)
+        @test length(lookup(both, UVP.Scan)) == 2
+        @test size(both.time_pooled) == (2, 4, 2)
+        @test_throws "must hold one scan" FP.coherence_report(ps2)
+    end
+
+    @testset "plot_coherence" begin
+        coh = FP.coherence_report(calibrate(sol, ps; flag_bad = false, apply_flags = false))
+        one = coh[UVP.Scan(1), FeedPair(At((1, 1)))]
+        fig = FP.plot_coherence(one)
+        @test (show(IOBuffer(), MIME("image/png"), fig); true)
+        @test !isnothing(FP.plot_coherence(one; nlabel = 3))
+        @test !isnothing(FP.plot_coherence(Figure(size = (1000, 420))[1, 1], one))
+        @test_throws "select them first" FP.plot_coherence(coh)
+        # Antenna pairs worst first, by indexing.
+        full = one.time[FP.AveragingTime(length(lookup(one, FP.AveragingTime)))]
+        worst = full[AntennaPair(sortperm(collect(full)))]
+        @test issorted(collect(worst))
+        @test Set(lookup(worst, AntennaPair)) == Set(lookup(one, AntennaPair))
+    end
+
     @testset "coherence thermal debias" begin
         # One (baseline, pol) of `nchan` cells with inverse-variance weights:
         # flat phase + noise should debias to η ≈ 1 (raw is pulled below by the noise);
@@ -290,7 +350,7 @@
             end
             freqs = collect(range(1.0e9, 1.1e9; length = nchan))
             numF = zeros(1, 1); den = zeros(1); dvar = zeros(1); npts = zeros(Int, 1)
-            UVP._coherence_accumulate!(
+            FP._coherence_accumulate!(
                 zeros(0, 1), numF, den, dvar, npts, V, W, nothing, [1], [1], [0.0], freqs,
                 Float64[], [2.0e8], debias,
             )
@@ -328,15 +388,15 @@
         # per-cell SNR ≈ 0.4, so ≈ 1 for a flat-phase source — just noisier
         # than the marginalized version below.
         nT = zeros(1, 1); den = zeros(1)
-        UVP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(1), zeros(Int, 1), V, W, nothing, [1], [1], times, freqs, dts, [1.0e8], true)
+        FP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(1), zeros(Int, 1), V, W, nothing, [1], [1], times, freqs, dts, [1.0e8], true)
         eta_perchan = eta(nT, den)
         @test eta_perchan > 0.9
         # marginalized: band-average per AP, then time η — same estimand,
         # measured on high-SNR samples, so lower variance.
-        Vt, Wt = UVP._collapse_axis(V, W, falses(size(V)), 1)
+        Vt, Wt = FP._collapse_axis(V, W, falses(size(V)), 1)
         @test size(Vt) == (1, nti, 1, 1)
         nT2 = zeros(1, 1); denT = zeros(1)
-        UVP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(1), zeros(Int, 1), Vt, Wt, nothing, [1], [1], times, [1.5e9], dts, [1.0], true)
+        FP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(1), zeros(Int, 1), Vt, Wt, nothing, [1], [1], times, [1.5e9], dts, [1.0], true)
         eta_marg = eta(nT2, denT)
         @test eta_marg > 0.95               # ≈ 1 for a flat-phase source
     end

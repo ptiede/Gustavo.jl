@@ -3,12 +3,10 @@ module GustavoMakieExt
 using Makie
 using Makie:
     Figure, Axis, Colorbar, Label,
-    scatter!, lines!, linesegments!, hlines!, text!,
-    linkxaxes!, linkyaxes!, ylims!, axislegend,
-    MarkerElement, LineElement,
+    scatter!, lines!, hlines!,
+    linkxaxes!, linkyaxes!, ylims!,
     hidexdecorations!, hideydecorations!,
-    colsize!, Fixed, resize_to_layout!,
-    cgrad
+    colsize!
 
 using Printf: @sprintf
 

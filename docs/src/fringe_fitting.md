@@ -590,3 +590,22 @@ plot_fringe_search(m)
 
 [`baseline_fringe_map`](@ref) computes the same surface from a single
 visibility plane.
+
+[`coherence_report`](@ref) measures how much amplitude coherent averaging
+loses, η = |Σ w·V| / Σ(w·|V|), against time-averaging interval and
+frequency-averaging width, per antenna pair and feed pair and pooled over
+antenna pairs. A good solution keeps η near 1 out to the whole scan and the
+whole spectral window; the uncorrected data decorrelate. With a Makie backend
+loaded, [`plot_coherence`](@ref) draws one scan and feed pair:
+
+```julia
+before = coherence_report(g)
+after = coherence_report(calibrate(sol, g; flag_bad = false, apply_flags = false))
+one = after[Scan = 1, FeedPair = At((1, 1))]
+plot_coherence(one; nlabel = 3)                      # the three worst pairs colored
+full = one.time[:, end]                              # η averaged over the whole scan
+full[AntennaPair = sortperm(collect(full))]          # antenna pairs, worst first
+```
+
+Per-scan results combine with [`cat_scans`](@ref) when every scan was given
+the same `timescales` and `bandwidths`.
