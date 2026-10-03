@@ -19,15 +19,3 @@ sense. A non-positive weight is read as a flag. See [Conventions](@ref conventio
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
 function load_uvfits end
-
-"""
-    load_fitsidi_apriori(path; tsys_max = 1.0e4) -> Dict{Int, AntabCalibration}
-
-Build per-band a-priori flux calibrations from a FITS-IDI file's `GAIN_CURVE`
-(DPFU + elevation gain polynomial) and `SYSTEM_TEMPERATURE` (Tsys) tables, one
-[`AntabCalibration`](@ref) per 1-based band index.
-Tsys values that are non-positive, the `999` placeholder, or `> tsys_max` are
-treated as missing and fall back to the other feed's value for the same
-(antenna, band, time). Provided by the `GustavoFITSFilesExt` extension.
-"""
-function load_fitsidi_apriori end

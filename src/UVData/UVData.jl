@@ -24,7 +24,6 @@ include("frequencyband.jl")
 include("metadata.jl")
 include("UVSet/UVSet.jl")
 include("io.jl")
-include("antab.jl")
 include("apriori.jl")
 include("utilities.jl")
 include("msv4_schema.jl")
@@ -49,9 +48,7 @@ export source_name, scan_name, primary_scan_name, scan_intents, sub_scan_name
 export load_uvfits
 export check_layer_axes
 export feed_pairs, normalize_by_autocorrelations, normalize_by_autocorrelations!
-export AntabCalibration, AntabStation, AntabGainCurve, AntabTsysSeries
-export load_antab, load_fitsidi_apriori, tsys_at, elevation_gain, stations
-export AprioriFluxGains, apriori_gains
+export apriori_calibrate!, TsysPlacement, ScanMean, LinearInTime, NearestInTime
 export spw_center_frequency, centered_channel_freqs
 export nchannels
 

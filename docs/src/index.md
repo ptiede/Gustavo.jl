@@ -18,7 +18,7 @@ using Pkg
 Pkg.add(url = "https://github.com/ptiede/Gustavo.jl")
 ```
 
-The UVFITS reader and the FITS-IDI a-priori and phase-cal table readers live in
+The UVFITS reader and the FITS-IDI phase-cal table reader live in
 a package extension: also load `FITSFiles` to enable them. Loading `CairoMakie` (or another Makie backend)
 enables the diagnostic plots.
 
@@ -86,8 +86,11 @@ time and hands it to a function.
 **Corrections.** A correction is a function that modifies a Measurement Set in
 place and returns it. The built-in ones are
 [`normalize_by_autocorrelations!`](@ref Gustavo.UVData.normalize_by_autocorrelations!),
-[`scale_weights!`](@ref), and
-[`calibrate!`](@ref), which divides a solution's gains out of the data. Each
+[`scale_weights!`](@ref),
+[`apriori_calibrate!`](@ref Gustavo.UVData.apriori_calibrate!), which puts the
+visibilities in janskys from the system temperatures and gain curves the
+Measurement Set records (XRadio's `read_antab!` adds them from an ANTAB file),
+and [`calibrate!`](@ref), which divides a solution's gains out of the data. Each
 applies to one Measurement Set; a `ProcessingSet` is corrected member by
 member, `foreach(ms -> scale_weights!(ms, ws), values(ps))`, except
 `calibrate!`, which also takes a `ProcessingSet`. Data opened lazily must be

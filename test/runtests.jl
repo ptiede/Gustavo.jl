@@ -24,6 +24,7 @@ include("test_xradio_bridge.jl")
 include("test_ms_baselines.jl")
 include("test_ms_geometry.jl")
 include("test_autocorrelations.jl")
+include("test_apriori.jl")
 
 # FLAG and WEIGHT as independent layers.
 include("test_flags.jl")
@@ -601,110 +602,6 @@ end
     # instance (shared reference). Mutation requires constructing a new
     # table — silent inconsistency requires explicit work.
     @test UV.metadata(leaf1).antennas === UV.metadata(leaf2).antennas
-end
-
-@testset "ANTAB parser: GAIN + TSYS layouts" begin
-    BP = Gustavo.UVData
-    text = """
-    GAIN AA ELEV DPFU = 0.031000 POLY = 1.0 /
-    GAIN MG ELEV DPFU = 0.0179, 0.0168 POLY = 0.727119, 0.00947339, -0.00008222 /
-    GAIN NN ELEV DPFU = 1.000000, 1.000000 POLY = 1.0 /
-
-    TSYS AA  FT=1.0  TIMEOFF=0
-    INDEX = 'L1|R1', 'L2|R2'
-    /
-    100 12:00:00     2.5    3.5
-    100 12:30:00     2.7    3.7
-    /
-    TSYS MG timeoff= 0.0  FT = 1.0  INDEX = 'R1:32', 'L1:32' /
-    100 12:00:00     200.0  220.0
-    100 13:00:00     180.0  210.0
-    /
-    TSYS NN timeoff= 0.0  FT = 1.0  INDEX = 'R1:32', 'L1:32' /
-    100 12:00:00     500.0  600.0
-    100 13:00:00     520.0  580.0
-    /
-    """
-    path, io = mktemp()
-    try
-        write(io, text); close(io)
-        new_path = path * "_e22a26_b1_proc.AN"
-        cp(path, new_path; force = true)
-        antab = BP.load_antab(new_path)
-
-        @test length(antab.stations) == 3
-        @test haskey(antab, "AA") && haskey(antab, "MG") && haskey(antab, "NN")
-        @test antab.year == 2022
-        @test antab.track_label == "e22a26_b1"
-
-        # Per-channel ALMA block, paired-pol columns.
-        st_aa = antab["AA"]
-        @test st_aa.nchannels == 2
-        @test length(st_aa.tsys.times) == 2
-        @test BP.tsys_at(st_aa, st_aa.tsys.times[1], 1, :R) ≈ 2.5
-        @test BP.tsys_at(st_aa, st_aa.tsys.times[1], 1, :L) ≈ 2.5    # paired
-        @test BP.tsys_at(st_aa, st_aa.tsys.times[1], 2, :L) ≈ 3.5
-
-        # Aggregate per-pol columns broadcast across channels.
-        st_mg = antab["MG"]
-        @test st_mg.nchannels == 0
-        @test BP.tsys_at(st_mg, st_mg.tsys.times[1], 1, :R) ≈ 200.0
-        @test BP.tsys_at(st_mg, st_mg.tsys.times[1], 17, :L) ≈ 220.0
-
-        # Time interpolation midpoint.
-        midpoint = st_mg.tsys.times[1] + (st_mg.tsys.times[2] - st_mg.tsys.times[1]) ÷ 2
-        @test BP.tsys_at(st_mg, midpoint, 1, :R) ≈ 190.0 atol = 0.5
-
-        # Out-of-range time returns NaN.
-        @test isnan(BP.tsys_at(st_mg, st_mg.tsys.times[end] + Dates.Hour(2), 1, :R))
-
-        # Elevation-gain Horner.
-        @test BP.elevation_gain(st_aa.gain, 30.0) ≈ 1.0
-        @test BP.elevation_gain(st_mg.gain, 0.0) ≈ st_mg.gain.poly[1]
-        @test BP.elevation_gain(st_mg.gain, 45.0) ≈
-            (st_mg.gain.poly[1] + st_mg.gain.poly[2] * 45 + st_mg.gain.poly[3] * 45^2)
-
-        # DPFU broadcasting for single-value GAIN rows.
-        @test st_aa.gain.dpfu == (0.031, 0.031)
-        @test st_mg.gain.dpfu == (0.0179, 0.0168)
-
-        # Year override and unparseable filename should error.
-        antab2 = BP.load_antab(new_path; year = 2017)
-        @test antab2.year == 2017
-    finally
-        isfile(path) && rm(path)
-    end
-end
-
-@testset "tsys_in_window rejects outliers outside the scan window" begin
-    BP = Gustavo.UVData
-    # Three rows: an "in-scan" row, a slew-time outlier outside the window,
-    # and another "in-scan" row. The window-mean must average only the
-    # in-window rows and never see the outlier.
-    base_dt = DateTime(2022, 3, 27, 0, 0, 0)
-    times = [base_dt, base_dt + Minute(2), base_dt + Minute(10), base_dt + Minute(20)]
-    cols = [(0, :R), (0, :L)]
-    vals = Float64[
-        100.0   120.0;
-        110.0   130.0;
-        1.0e6   1.0e6;        # slew/outlier — outside the scan window below
-        105.0   125.0;
-    ]
-    st = BP.AntabStation(
-        "XX",
-        BP.AntabGainCurve((1.0, 1.0), [1.0]),
-        BP.AntabTsysSeries(times, cols, vals),
-        0,
-    )
-
-    # Window covers rows 1 + 2 (mean = 105 R, 125 L), excludes the outlier at +10min.
-    t_lo, t_hi = base_dt - Second(1), base_dt + Minute(5)
-    @test BP.tsys_in_window(st, t_lo, t_hi, 1, :R) ≈ 105.0
-    @test BP.tsys_in_window(st, t_lo, t_hi, 1, :L) ≈ 125.0
-    # No rows in window → NaN
-    @test isnan(BP.tsys_in_window(st, base_dt + Hour(2), base_dt + Hour(3), 1, :R))
-    # Window that covers only the outlier returns the outlier (caller's responsibility)
-    @test BP.tsys_in_window(st, base_dt + Minute(8), base_dt + Minute(15), 1, :R) ≈ 1.0e6
 end
 
 @testset "BaselineIndex lookup sugar" begin

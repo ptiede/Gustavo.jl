@@ -1,3 +1,217 @@
+"""
+    apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation = 0.0) -> ms
+
+Put the visibilities of `ms` in janskys, in place, from the system
+temperatures and gain curves the Measurement Set records
+(`XRadio.system_temperatures`, `XRadio.gaincurves`), whether they came from
+FITS-IDI (`XRadio.fitsidi2msv4`) or ANTAB (`XRadio.read_antab!`).
+
+Each receptor's system equivalent flux density is `T_sys / (DPFU · g)`, with
+`g` its gain curve at the source's elevation and `DPFU` the curve's
+sensitivity. A visibility on baseline `(a, b)` relating receptors `(fa, fb)` is
+multiplied by `√(SEFD_a · SEFD_b)` and its weight divided by `SEFD_a · SEFD_b`,
+so the weight stays `1/σ²` of the visibility it describes. Receptors come from
+[`feed_pairs`](@ref).
+
+`tsys` places the system temperatures, which are sampled on their own clock, on
+the visibilities' times: [`ScanMean`](@ref), [`LinearInTime`](@ref) or
+[`NearestInTime`](@ref). Elevations come from the antenna positions, the field
+phase centre and the time; a source below `min_elevation` (radians) has no
+usable gain.
+
+A sample whose antennas lack a usable system temperature, gain curve or
+elevation is flagged and keeps its visibility and weight. Autocorrelations are
+flagged. The visibility `units` become `Jy`; a Measurement Set whose
+visibilities are already in janskys is an error, as is one that records no
+system temperatures or no gain curves.
+"""
+function apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation::Real = 0.0)
+    vis = ms[:visibility]
+    units = get(metadata(vis), :units, nothing)
+    units == "Jy" && throw(ArgumentError(
+        "the visibilities of spectral window `$(XRadio.spectralwindow(ms))` are already in Jy"
+    ))
+    T = XRadio.system_temperatures(ms)
+    isempty(T) && throw(ArgumentError(
+        "spectral window `$(XRadio.spectralwindow(ms))` records no system temperatures; " *
+            "`XRadio.read_antab!` reads them from an ANTAB file"
+    ))
+    curves = XRadio.gaincurves(ms)
+    isempty(curves[:curve]) && throw(ArgumentError(
+        "spectral window `$(XRadio.spectralwindow(ms))` records no gain curves; " *
+            "`XRadio.read_antab!` reads them from an ANTAB file"
+    ))
+
+    scale = _sefd_scale(ms, T, curves, tsys, Float64(min_elevation))
+    feeds = feed_pairs(ms)
+    V, W, F = _storage_order(vis), _storage_order(ms[:weight]), _storage_order(ms[:flag])
+    for (bi, (a, b)) in pairs(baselines(ms).pairs)
+        if a == b
+            view(F, :, :, bi, :) .= true
+            continue
+        end
+        for t in axes(V, 4), p in axes(V, 1)
+            fa, fb = feeds[p, bi]
+            for c in axes(V, 2)
+                s = scale[fa, a, t, _channel(scale, c)] * scale[fb, b, t, _channel(scale, c)]
+                if isfinite(s) && s > 0
+                    V[p, c, bi, t] *= s
+                    W[p, c, bi, t] /= s^2
+                else
+                    F[p, c, bi, t] = true
+                end
+            end
+        end
+    end
+    metadata(vis)[:units] = "Jy"
+    return ms
+end
+
+_channel(scale, c) = size(scale, 4) == 1 ? 1 : c
+
+# √SEFD over (receptor, antenna, time, channel) in the antenna dataset's order,
+# with a channel axis of length one unless the system temperatures resolve the
+# data's channels. `NaN` where any ingredient is missing or unusable.
+function _sefd_scale(ms, T, curves, rule, min_elevation)
+    A, R = XRadio.AntennaName, XRadio.ReceptorLabel
+    types = XRadio.polarization_types(ms)
+    names, receptors = collect(lookup(types, A)), collect(lookup(types, R))
+    times = XRadio.times(ms)
+    scans = collect(ms[:scan_name])
+    meta = metadata(lookup(ms[:visibility], Ti))
+    half = haskey(meta, :integration_time) ? meta[:integration_time].value / 2 : 0.0
+
+    tdim = only(d for d in dims(T) if d isa Union{XRadio.TimeSystemCal, Ti})
+    hasdim(T, XRadio.FrequencySystemCal) && throw(ArgumentError(
+        "the system temperatures are over `frequency_system_cal`, which MSv4 does not define"
+    ))
+    resolved = hasdim(T, XRadio.Frequency)
+    resolved && collect(lookup(T, XRadio.Frequency)) != XRadio.frequencies(ms) && throw(ArgumentError(
+        "the system temperatures are resolved over frequencies other than the visibilities'"
+    ))
+    nchan = resolved ? length(XRadio.frequencies(ms)) : 1
+    rows = collect(lookup(tdim))
+    elevation = _elevations(ms, names, times)
+
+    scale = fill(NaN, length(receptors), length(names), length(times), nchan)
+    for (i, a) in pairs(names), (j, r) in pairs(receptors)
+        (a in lookup(T, A) && a in lookup(curves[:curve], A) && r in lookup(T, R)) || continue
+        curve = curves[:curve][A(At(a)), R(At(r))]
+        dpfu = curves[:sensitivity][A(At(a)), R(At(r))]
+        series = T[A(At(a)), R(At(r))]
+        for c in 1:nchan
+            values = collect(resolved ? series[XRadio.Frequency(c)] : series)
+            placed = place_tsys(rule, rows, values, times, scans, half)
+            for t in eachindex(times)
+                el = elevation[t, i]
+                el >= min_elevation || continue
+                g = XRadio.gain(curve, (; elevation = el, zenith_angle = π / 2 - el))
+                XRadio.gain_quantity(curve) === :voltage && (g = g^2)
+                sefd = placed[t] / (dpfu * g)
+                isfinite(sefd) && sefd > 0 && (scale[j, i, t, c] = sqrt(sefd))
+            end
+        end
+    end
+    return scale
+end
+
+# Source elevation (radians) over (time, antenna), from each antenna's position,
+# the phase centre of the field observed at each time, and the time as UTC.
+function _elevations(ms, names, times)
+    meta = metadata(lookup(ms[:visibility], Ti))
+    (get(meta, :scale, nothing), get(meta, :format, nothing)) == ("utc", "unix") || throw(ArgumentError(
+        "elevations need UTC times, and this Measurement Set's are " *
+            "$(get(meta, :scale, nothing)) $(get(meta, :format, nothing))"
+    ))
+    positions = XRadio.antenna_positions(ms)
+    directions = XRadio.field_and_source(ms)[:field_phase_center_direction]
+    frame = get(metadata(directions), :frame, nothing)
+    frame in ("icrs", "fk5") || throw(ArgumentError(
+        "elevations need an equatorial phase centre, and this one's frame is $frame"
+    ))
+    fields = collect(ms[:field_name])
+    sky = XRadio.SkyDirLabel
+    out = Matrix{Float64}(undef, length(times), length(names))
+    for (i, a) in pairs(names)
+        xyz = collect(positions[XRadio.AntennaName(At(a))])
+        for (t, time) in pairs(times)
+            d = directions[XRadio.FieldName(At(fields[t]))]
+            out[t, i] = _source_elevation(xyz, d[sky(At("ra"))], d[sky(At("dec"))], time / 86400 + 2440587.5)
+        end
+    end
+    return out
+end
+
+"""
+    TsysPlacement
+
+How [`apriori_calibrate!`](@ref) places system temperatures, sampled on their
+own clock, on the visibilities' times: [`ScanMean`](@ref),
+[`LinearInTime`](@ref) or [`NearestInTime`](@ref). A new rule is a subtype with
+a method of
+
+    Gustavo.UVData.place_tsys(rule, rows, values, times, scans, half) -> Vector
+
+returning one temperature per visibility time (`NaN` for none), given the
+temperature rows' times and values (`NaN` where unmeasured), the visibility
+times and their scan names, and half the integration time.
+"""
+abstract type TsysPlacement end
+
+"""
+    ScanMean()
+
+The mean of the system temperatures inside each scan's time span, so a
+measurement taken while slewing or on another source between scans does not
+reach the scan. A scan with none is `NaN`.
+"""
+struct ScanMean <: TsysPlacement end
+
+"""
+    LinearInTime()
+
+Linear interpolation between the system temperature rows either side of each
+visibility time; `NaN` outside the first and last rows.
+"""
+struct LinearInTime <: TsysPlacement end
+
+"""
+    NearestInTime()
+
+The system temperature row nearest each visibility time.
+"""
+struct NearestInTime <: TsysPlacement end
+
+function place_tsys(::ScanMean, rows, values, times, scans, half)
+    out = fill(NaN, length(times))
+    for s in unique(scans)
+        idx = findall(==(s), scans)
+        lo, hi = minimum(times[idx]) - half, maximum(times[idx]) + half
+        inside = [v for (t, v) in zip(rows, values) if lo <= t <= hi && isfinite(v)]
+        isempty(inside) || (out[idx] .= mean(inside))
+    end
+    return out
+end
+
+function place_tsys(::LinearInTime, rows, values, times, scans, half)
+    keep = findall(isfinite, values)
+    r, v = rows[keep], values[keep]
+    return map(times) do t
+        isempty(r) && return NaN
+        (t < first(r) || t > last(r)) && return NaN
+        hi = searchsortedfirst(r, t)
+        r[hi] == t && return v[hi]
+        lo = hi - 1
+        return v[lo] + (t - r[lo]) / (r[hi] - r[lo]) * (v[hi] - v[lo])
+    end
+end
+
+function place_tsys(::NearestInTime, rows, values, times, scans, half)
+    keep = findall(isfinite, values)
+    isempty(keep) && return fill(NaN, length(times))
+    return [values[keep[argmin(abs.(rows[keep] .- t))]] for t in times]
+end
+
 # ECEF (m) → geodetic (lat_rad, lon_rad, h_m). WGS84.
 function _ecef_to_geodetic(xyz::AbstractVector{<:Real})
     a = 6378137.0                              # WGS84 semi-major axis (m)
@@ -24,188 +238,4 @@ function _source_elevation(ecef::AbstractVector{<:Real}, ra::Real, dec::Real, jd
     ha = mod(deg2rad(lst_hr * 15.0) - ra + π, 2π) - π
     sin_alt = sin(lat) * sin(dec) + cos(lat) * cos(dec) * cos(ha)
     return asin(clamp(sin_alt, -1.0, 1.0))
-end
-
-"""
-    AprioriFluxGains
-
-A-priori calibration result for one block of data, returned by
-[`apriori_gains`](@ref). The `gains` field carries the real, positive
-amplitude gains, indexed as `gains[c, ti, a, p]` where `p ∈ {1, 2}` is the
-feed slot (P/Q in MSv4 labels, R/L in EHT convention).
-"""
-struct AprioriFluxGains
-    gains::Array{Float64, 4}                  # (nchan, nti, nant, 2)
-    sefd::Array{Float64, 4}                   # raw SEFD per (chan, ti, ant, feed)
-    elevation_deg::Matrix{Float64}            # (nti, nant)
-    antennas::Vector{String}
-    missing_stations::Vector{String}
-end
-
-"""
-    apriori_gains(antab, antennas, chan_index, jds, t_lo, t_hi, ra, dec;
-                  on_missing_station = :warn, min_elevation_deg = 0.0)
-        -> AprioriFluxGains
-
-SEFD-derived amplitude gains for one block of data, from explicit coordinates:
-`antennas` is an [`AntennaTable`](@ref), `jds` the block's
-integration epochs as Julian Dates (UTC), `[t_lo, t_hi]` the scan window whose
-ANTAB rows are averaged for Tsys, and `ra`/`dec` the source position in radians.
-
-`chan_index[c]` is the ANTAB channel number of the block's `c`-th channel. An
-ANTAB numbers channels **within a spectral window** (ALMA's `'L1|R1' … 'L32|R32'`
-declares 32 per-channel SEFDs for one band), so a block spanning several spws
-must say which channel of which band each of its columns is; a single-spw block
-passes `Base.OneTo(nchan)`. Stations whose ANTAB declares aggregate Tsys ignore
-the index entirely.
-"""
-function apriori_gains(
-        antab::AntabCalibration, ant_table::AntennaTable,
-        chan_index::AbstractVector{<:Integer}, jds::AbstractVector{<:Real},
-        t_lo::DateTime, t_hi::DateTime, ra::Real, dec::Real;
-        on_missing_station::Symbol = :warn, min_elevation_deg::Real = 0.0,
-    )
-    on_missing_station in (:warn, :error, :ignore) || throw(
-        ArgumentError(
-            "on_missing_station must be :warn, :error, or :ignore (got :$(on_missing_station))"
-        )
-    )
-    # The gain/SEFD cubes below are freshly allocated 1-based arrays indexed in
-    # lockstep with these inputs.
-    Base.require_one_based_indexing(chan_index, jds)
-
-    ant_names = ant_table.name
-    ant_xyz = ant_table.station_xyz
-    nant = length(ant_names)
-    nchan = length(chan_index)
-    nti = length(jds)
-
-    ra_rad = Float64(ra)
-    dec_rad = Float64(dec)
-
-    elevation_deg = Matrix{Float64}(undef, nti, nant)
-    sefd = Array{Float64}(undef, nchan, nti, nant, 2)
-    gains = Array{Float64}(undef, nchan, nti, nant, 2)
-
-    pol_syms = (:R, :L)
-    missing_stations = String[]
-
-    for (a, name) in pairs(ant_names)
-        if !haskey(antab, name)
-            push!(missing_stations, String(name))
-            for ti in axes(elevation_deg, 1)
-                elevation_deg[ti, a] = NaN
-                for c in axes(sefd, 1), p in axes(sefd, 4)
-                    sefd[c, ti, a, p] = NaN
-                    gains[c, ti, a, p] = 1.0
-                end
-            end
-            continue
-        end
-        st = antab[name]
-        # Per-time elevation only depends on the antenna position, not channel/pol.
-        for ti in axes(elevation_deg, 1)
-            el_rad = _source_elevation(ant_xyz[a], ra_rad, dec_rad, jds[ti])
-            elevation_deg[ti, a] = rad2deg(el_rad)
-        end
-
-        # Tsys is constant across the scan window; precompute once per
-        # (channel, pol) for this antenna by averaging antab rows in the
-        # scan window.
-        scan_tsys = Matrix{Float64}(undef, nchan, 2)
-        for p in axes(scan_tsys, 2), c in axes(scan_tsys, 1)
-            scan_tsys[c, p] = tsys_in_window(st, t_lo, t_hi, Int(chan_index[c]), pol_syms[p])
-        end
-
-        for ti in axes(elevation_deg, 1)
-            el = elevation_deg[ti, a]
-            gE = elevation_gain(st.gain, el)
-            # Below the elevation cutoff (default: the horizon) the source is
-            # not observable and the gain-curve polynomial extrapolates to tiny
-            # / negative values, which makes SEFD = Tsys/(DPFU·gE) explode. Flag
-            # those samples on apply rather than apply a blown-up gain.
-            el_ok = isfinite(el) && el >= min_elevation_deg
-            for p in axes(sefd, 4)
-                dpfu = st.gain.dpfu[p]
-                for c in axes(sefd, 1)
-                    tsys = scan_tsys[c, p]
-                    if !(el_ok && isfinite(tsys) && isfinite(gE) && isfinite(dpfu) && dpfu > 0 && gE > 0 && tsys > 0)
-                        sefd[c, ti, a, p] = NaN
-                        gains[c, ti, a, p] = NaN
-                    else
-                        s = tsys / (dpfu * gE)
-                        sefd[c, ti, a, p] = s
-                        gains[c, ti, a, p] = 1.0 / sqrt(s)
-                    end
-                end
-            end
-        end
-    end
-
-    if !isempty(missing_stations)
-        if on_missing_station === :error
-            throw(
-                ArgumentError(
-                    "ANTAB $(repr(antab.track_label)) has no record for stations " *
-                        "$(missing_stations); baselines involving them would pass through " *
-                        "uncalibrated. Pass `on_missing_station = :warn` or `:ignore` to " *
-                        "allow that.",
-                )
-            )
-        elseif on_missing_station === :warn
-            @warn "apriori_gains: ANTAB has no record for stations; baselines involving them are left unchanged" stations = missing_stations track = antab.track_label
-        end
-    end
-
-    return AprioriFluxGains(
-        gains, sefd, elevation_deg, collect(String.(ant_names)), missing_stations,
-    )
-end
-
-# Apply per-(channel, integration, antenna, feed) real-valued gains. A
-# non-finite gain flags the sample; non-NaN scaling matches the bandpass kernel
-# convention so the two corrections compose cleanly.
-#
-# A flagged sample keeps the visibility and weight it arrived with: no gain was
-# applied to it, so there is nothing to record beyond the flag itself.
-function _apply_apriori_kernel(
-        vis_p::AbstractArray, w_p::AbstractArray, flags_p::AbstractArray,
-        gains::AbstractArray{Float64, 4},
-        bl_pairs, feeds,
-    )
-    check_layer_axes(vis_p, w_p, flags_p)
-    vis_corr = copy(vis_p)
-    weights_corr = copy(w_p)
-    flags_corr = copy(flags_p)
-    for ti in axes(vis_p, Ti), bi in axes(vis_p, BaselineID)
-        a, b = bl_pairs[bi]
-        # Autocorrelations (a == b) are total power, not interferometric
-        # visibilities: `√(SEFD_a·SEFD_b)` flux-scaling is meaningless and blows
-        # their amplitude up by the SEFD. Flag them so they are not used
-        # downstream — the fringe solve already skips them.
-        if a == b
-            for p in axes(vis_p, Polarization), c in axes(vis_p, Frequency)
-                flags_corr[Frequency(c), Ti(ti), BaselineID(bi), Polarization(p)] = true
-            end
-            continue
-        end
-        for p in axes(vis_p, Polarization)
-            fa, fb = feeds[p]
-            for c in axes(vis_p, Frequency)
-                cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
-                flags_p[cell] && continue
-                w = w_p[cell]
-                (w > 0 && isfinite(w)) || continue
-                ga = gains[c, ti, a, fa]
-                gb = gains[c, ti, b, fb]
-                if !(isfinite(ga) && isfinite(gb))
-                    flags_corr[cell] = true
-                    continue
-                end
-                vis_corr[cell] /= ga * gb
-                weights_corr[cell] *= (ga * gb)^2
-            end
-        end
-    end
-    return vis_corr, weights_corr, flags_corr
 end
