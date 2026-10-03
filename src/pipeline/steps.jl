@@ -270,10 +270,11 @@ function _station_solve!(s::BaselineFringeFit, ctx::SolveContext, stageB, dets)
     return ncomp, Fring.unconstrained_flags(dets, covered, ctx.geom)
 end
 
-# `scan_snr`, `scan_ncells` and the detection table are pure logging
-# (`fringe_snr_table` / `suspect_fringes` read them off the step's `info`),
-# built from the final round only.
-_fringe_report(results) = (;
+# `scan_names`, `scan_snr`, `scan_ncells` and the detection table are pure
+# logging (`fringe_snr_table` / `fringe_detections` read them off the step's
+# `info`), built from the final round only. `det_scan` indexes `scan_names`.
+_fringe_report(results, ctx) = (;
+    scan_names = _group_scan_names(ctx.groups),
     scan_snr = Float64[r.max_snr for r in results],
     scan_ncells = Float64[r.ncells for r in results],
     Fring.detection_table(Vector{Fring.DetectionRow}[r.rows for r in results])...,
@@ -299,7 +300,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         end
         flags = reduce(append!, (r.flags for r in results); init = Tuple{String, Int}[])::Vector{Tuple{String, Int}}
         ncomp = sum((r.ncomp for r in results); init = 0)::Int
-        return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)..., s.search)
+        return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results, ctx)..., s.search)
     end
     local results, ncomp, flags
     for round in 1:max(s.rounds, 1)
@@ -308,7 +309,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         end
         ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int}}}
     end
-    return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results)..., s.search)
+    return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results, ctx)..., s.search)
 end
 
 # One scan group's search. Round 1 searches the data; later rounds search the

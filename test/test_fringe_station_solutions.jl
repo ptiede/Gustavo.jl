@@ -52,16 +52,18 @@
         θ[plan_off1(rel)[2, 2, 1, 1]] = 0.5e-9      # station 2 inter-feed delay: +0.5 ns on feed 2
         sol = CAL.CalibrationSolution(model, layout, geom, θ, (; nscan = 1); name = :fringe)
 
-        rows = FP.fringe_station_solutions(sol)
-        @test rows isa Vector{<:NamedTuple}
-        @test length(rows) == 4 * 2               # dense: nscan(1) × nant(4) × 2 feeds
-        f(st, fd) = only(filter(r -> r.scan == 1 && r.station == st && r.feed == fd, rows)).delay_ns
-        @test f(2, 1) ≈ 2.0                        # feed 1: shared only, s → ns
-        @test f(2, 2) ≈ 2.5                        # feed 2: shared + inter-feed offset
+        st = FP.fringe_station_solutions(sol)
+        @test st isa DimStack
+        @test keys(st) == (:delay, :rate, :phase)
+        @test size(st) == (1, 4, 2)               # dense: nscan(1) × nant(4) × 2 feeds
+        @test collect(lookup(st, AntennaName)) == geom.stations
+        f(a, fd) = st.delay[UVP.Scan(1), AntennaName(a), Feed(fd)]
+        @test f(2, 1) ≈ 2.0e-9                     # feed 1: shared only
+        @test f(2, 2) ≈ 2.5e-9                     # feed 2: shared + inter-feed offset
         @test f(1, 1) ≈ 0.0                        # untouched station stays identity-0
         @test f(3, 2) ≈ 0.0
 
-        # Rate (Hz → mHz) and phase (rad → deg) route through their own kinds.
+        # Rate and phase route through their own kinds.
         rplan = only(
             p for (p, k) in FP.fringe_stage_components(model, layout)
                 if k === :rate
@@ -69,24 +71,25 @@
         θ2 = zeros(layout.nθ)
         θ2[plan_off1(rplan)[3, 1, 1, 1]] = 1.0e-3       # 1 mHz
         sol2 = CAL.CalibrationSolution(model, layout, geom, θ2, (; nscan = 1); name = :fringe)
-        rows2 = FP.fringe_station_solutions(sol2)
-        @test only(filter(r -> r.station == 3 && r.feed == 1, rows2)).rate_mHz ≈ 1.0
+        st2 = FP.fringe_station_solutions(sol2)
+        @test st2.rate[UVP.Scan(1), AntennaName(3), Feed(1)] ≈ 1.0e-3
     end
 
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
         ps, truth = _build_fringe_ps(nant = 4)
         gauge = PinAntenna(1)
         sol = fit(BaselineFringeFit(; gauge), ps)
-        rows = FP.fringe_station_solutions(sol)
-        @test length(rows) == sol.info.nscan * length(sol.geom.stations) * 2
-        val(st, fd) = only(filter(r -> r.scan == 1 && r.station == st && r.feed == fd, rows)).delay_ns
+        st = FP.fringe_station_solutions(sol)
+        @test size(st) == (sol.info.nscan, length(sol.geom.stations), 2)
+        @test collect(lookup(st, UVP.Scan)) == sol.geom.scan_names
+        val(a, fd) = st.delay[UVP.Scan(1), AntennaName(a), Feed(fd)]
 
         # Gauge: reference station (1) is pinned to 0 on both feeds.
-        @test val(1, 1) ≈ 0.0 atol = 1.0e-3
-        # Recovery: absolute (ref-gauged) delay ≈ the injected per-feed delay (ns).
+        @test val(1, 1) ≈ 0.0 atol = 1.0e-12
+        # Recovery: absolute (ref-gauged) delay ≈ the injected per-feed delay.
         # feed 1 ≈ shared per-scan delay; feed 2 ≈ that + the inter-feed delay = truth[a,2].
         for a in 2:4, fd in 1:2
-            @test val(a, fd) ≈ truth.delay[a, fd] * 1.0e9 atol = 0.05
+            @test val(a, fd) ≈ truth.delay[a, fd] atol = 0.05e-9
         end
     end
 end

@@ -17,71 +17,82 @@
         )
     )
 
-    @testset "snr table + summary" begin
-        rows = FP.fringe_snr_table(sol)
-        @test rows isa Vector{<:NamedTuple}
-        @test !isempty(rows)
-        @test length(rows) == sol.info.nscan
-        r1 = first(rows)
-        @test haskey(r1, :scan) && haskey(r1, :max_snr) && haskey(r1, :ncomp)
-        @test all(r -> r.max_snr >= 0, rows)
-
-        # PFA column: the solve records the per-scan effective search cells, and
-        # the synthetic fringes are strong → secure detections on every scan.
-        @test haskey(r1, :pfa)
+    @testset "snr table" begin
+        t = FP.fringe_snr_table(sol)
         fringe = sol.steps[:fringe]
-        @test length(fringe.scan_ncells) == sol.info.nscan
+        @test t isa DimStack
+        @test keys(t) == (:max_snr, :pfa)
+        @test collect(lookup(t, UVP.Scan)) == fringe.scan_names
+        @test length(fringe.scan_names) == sol.info.nscan
+        @test all(>=(0), t.max_snr)
+
+        # The solve records the per-scan effective search cells, and the
+        # synthetic fringes are strong → secure detections on every scan.
         @test all(>=(1), fringe.scan_ncells)
         @test fringe.search isa FP.FringeSearch
-        for r in rows
-            @test r.pfa ≈ FP.fringe_pfa(r.max_snr, fringe.scan_ncells[r.scan])
-            r.max_snr > 10 && @test r.pfa < 1.0e-10
-        end
+        @test parent(t.pfa) ≈ FP.fringe_pfa.(fringe.scan_snr, fringe.scan_ncells)
+        @test all(t.pfa[t.max_snr .> 10] .< 1.0e-10)
         # A marginal SNR on the same search space would NOT be secure.
         @test FP.fringe_pfa(3.0, fringe.scan_ncells[1]) > 0.01
 
-        buf = IOBuffer()
-        @test_nowarn FP.print_fringe_snr_table(rows; io = buf)
-        @test occursin("Fringe per-scan summary", String(take!(buf)))
-        # Empty-info path prints a friendly message rather than erroring.
-        @test_nowarn FP.print_fringe_snr_table(NamedTuple[]; io = IOBuffer())
-
-        s = FP.fringe_solution_summary(sol)
-        @test s isa String
-        @test occursin("FringeSolution", s)
+        bp_only = sol[:bandpass]
+        @test_throws "the solution has no :fringe step" FP.fringe_snr_table(bp_only)
     end
 
-    @testset "suspect_fringes (recorded detection table)" begin
-        # The solve records every MEASURED cell as parallel plain vectors on
-        # the fringe step's own diagnostics, with `det_detected` marking the ones
-        # it accepted as real fringes.
-        info = sol.info
+    @testset "fringe_detections" begin
+        # The solve records every MEASURED cell; `det_detected` marks the ones it
+        # accepted as real fringes.
         inf = sol.steps[:fringe]
-        n = length(inf.det_pfa)
-        @test n > 0
-        @test length(inf.det_scan) == length(inf.det_ant_a) == length(inf.det_ant_b) ==
-            length(inf.det_feed_a) == length(inf.det_feed_b) == length(inf.det_snr) == n
-        @test all(s -> 1 <= s <= info.nscan, inf.det_scan)
-        @test length(inf.det_detected) == n
-        @test all(p -> 0.0 <= p <= 1.0, inf.det_pfa)
+        det = FP.fringe_detections(sol)
+        @test keys(det) == (:snr, :pfa, :delay, :rate, :phase, :detected)
+        @test map(DimensionalData.basetypeof, dims(det)) == (UVP.Scan, UVP.AntennaPair, UVP.FeedPair)
+        measured = .!isnan.(det.snr)
+        @test count(measured) == length(inf.det_snr)
+        @test count(det.detected) == count(inf.det_detected)
+        @test all(p -> 0.0 <= p <= 1.0, det.pfa[measured])
         # `detected` IS the PFA test at the solve's own threshold — nothing else.
         pfa_max = FP.Stationization().pfa_max
-        @test inf.det_detected == (inf.det_pfa .<= pfa_max)
-        # Strong synthetic fringes: every accepted row outscores every rejected one.
-        @test all(inf.det_snr[inf.det_detected] .> maximum(inf.det_snr[.!inf.det_detected]; init = -Inf))
+        @test det.detected == (det.pfa .<= pfa_max)
+        # Strong synthetic fringes: every accepted cell outscores every rejected one.
+        @test minimum(det.snr[det.detected]) > maximum(det.snr[measured .& .!det.detected]; init = -Inf)
 
-        # Strong synthetic fringes → nothing suspect at the default threshold.
-        @test isempty(FP.suspect_fringes(sol))
-        # ...and an all-pass threshold returns every recorded row, most-suspect first.
-        rows = FP.suspect_fringes(sol; pfa_max = -1.0)
-        @test length(rows) == count(inf.det_detected)     # accepted rows only
-        @test issorted([r.pfa for r in rows]; rev = true)
-        r = first(rows)
-        @test r.sta_a == sol.geom.stations[r.a] && r.sta_b == sol.geom.stations[r.b]
+        # Cells are labeled by name.
+        i = findfirst(inf.det_detected)
+        cell = det[
+            UVP.Scan(At(inf.scan_names[inf.det_scan[i]])),
+            UVP.AntennaPair(At((inf.det_ant_a[i], inf.det_ant_b[i]))),
+            UVP.FeedPair(At((inf.det_feed_a[i], inf.det_feed_b[i]))),
+        ]
+        @test cell.snr == inf.det_snr[i] && cell.delay == inf.det_delay[i] && cell.detected
+    end
 
-        # Solutions without the table (e.g. loaded from an older file) degrade cleanly.
-        old = CAL.CalibrationSolution(sol.geom, sol[:fringe].components, OrderedDict(:fringe => (; nscan = 1)))
-        @test isempty(FP.suspect_fringes(old))
+    @testset "cat_scans combines per-scan results" begin
+        ps2, _ = _build_fringe_ps(; nscans = 2, noise = 0.05)
+        whole = fit(BaselineFringeFit(; gauge), ps2)
+        per_scan = mapsets(g -> fit(BaselineFringeFit(; gauge), g), XRadio.groupby(ps2, XRadio.ByScan()))
+        @test length(per_scan) == 2
+
+        t = FP.cat_scans(FP.fringe_snr_table.(values(per_scan)))
+        @test lookup(t, UVP.Scan) == lookup(FP.fringe_snr_table(whole), UVP.Scan)
+        @test t.max_snr == FP.fringe_snr_table(whole).max_snr
+        st = FP.cat_scans(FP.fringe_station_solutions.(values(per_scan)))
+        @test st.delay ≈ FP.fringe_station_solutions(whole).delay
+        det = FP.cat_scans(FP.fringe_detections.(values(per_scan)))
+        @test count(det.detected) == count(FP.fringe_detections(whole).detected)
+
+        # Differing labels form a union; a cell an input lacks is NaN (false for Bool).
+        a = DimArray([1.0 2.0], (FP._scan_dim(["s1"]), FP._station_dim(["A", "B"])))
+        b = DimArray([3.0 4.0], (FP._scan_dim(["s2"]), FP._station_dim(["B", "C"])))
+        ab = FP.cat_scans([a, b])
+        @test collect(lookup(ab, UVP.AntennaName)) == ["A", "B", "C"]
+        @test isequal(parent(ab), [1.0 2.0 NaN; NaN 3.0 4.0])
+        fa = DimArray([true;;], (FP._scan_dim(["s1"]), FP._station_dim(["A"])))
+        fb = DimArray([true;;], (FP._scan_dim(["s2"]), FP._station_dim(["B"])))
+        @test parent(FP.cat_scans([fa, fb])) == [true false; false true]
+
+        @test_throws "cat_scans: scans repeat: s1" FP.cat_scans([a, a])
+        @test_throws "cat_scans: nothing to concatenate" FP.cat_scans(DimArray[])
+        @test_throws "cat_scans: dimensions differ" FP.cat_scans([a, DimArray([1.0], (FP._scan_dim(["s3"]),))])
     end
 
     @testset "windowed gain evaluation for plots" begin
@@ -111,12 +122,12 @@
         @test !isnothing(FP.plot_fringe_spectrum(sol; sites = 1, residual = true))
         @test !isnothing(FP.plot_fringe_phases(sol))
         @test !isnothing(FP.plot_fringe_phases(sol; sites = [1, 2], feeds = :all, ci = 2))
-        @test !isnothing(FP.plot_fringe_snr(sol))
+        @test !isnothing(FP.plot_fringe_snr(FP.fringe_snr_table(sol)))
 
         fig = Figure(size = (1600, 500))
         @test !isnothing(FP.plot_fringe_spectrum(fig[1, 1], sol; sites = 1))
         @test !isnothing(FP.plot_fringe_phases(fig[1, 2], sol; sites = 1))
-        @test !isnothing(FP.plot_fringe_snr(fig[1, 3], sol))
+        @test !isnothing(FP.plot_fringe_snr(fig[1, 3], FP.fringe_snr_table(sol)))
 
         # Smoke: rendering must run to completion without throwing. (We do not
         # use @test_nowarn — the Makie/PlotUtils backend emits benign cosmetic

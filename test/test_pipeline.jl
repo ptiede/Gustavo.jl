@@ -670,7 +670,8 @@ end
         )
     )
     @test all(>(10), filter(isfinite, sol.steps[:fringe].scan_snr))
-    @test isempty(FP.suspect_fringes(sol))                 # all detections secure
+    det = FP.fringe_detections(sol)
+    @test all(det.pfa[det.detected] .< 1.0e-10)             # all detections secure
     @test minimum(_product_coherences(calibrate(sol, ps))) > 0.99
 end
 
@@ -713,14 +714,10 @@ end
     # per-step-name code in the runner, so a third-party step gets this too.
     for step in (fringe_step, bandpass_step, adhoc_step)
         t = step.timing
-        @test length(t.decode) == inf.nscan
+        @test collect(lookup(t, UVP.Scan)) == sol.geom.scan_names
         @test all(>=(0), t.decode) && all(>=(0), t.work)
     end
     @test sum(fringe_step.timing.work) > 0
-    buf = IOBuffer()
-    FP.print_solve_timing(sol; io = buf)
-    out = String(take!(buf))
-    @test occursin("Solve timing", out) && occursin("fringe", out)
 
     # The bandpass/adhoc chain still produces a working solve on a
     # single-scan set (the stage-B/bandpass/adhoc chain is intact).
@@ -741,9 +738,6 @@ end
     l2 = first(values(calibrate(solc, ps)))
     b2 = findfirst(pr -> pr[1] != pr[2], collect(XRadio.baselines(l2)))
     @test _coherence(UVP._cell_plane(l2[:visibility], b2, 1), UVP._cell_plane(l2[:weight], b2, 1)) > 0.99
-    # Solutions without timers degrade cleanly.
-    old = CAL.CalibrationSolution(sol.geom, sol[:fringe].components)
-    @test_nowarn FP.print_solve_timing(old; io = IOBuffer())
 end
 
 @testset "Largest-first group map" begin
@@ -792,9 +786,9 @@ end
     @test Gustavo._scan_local_solve(ff)
     sol = _combined(_fit_chain((ff, AdhocPhase(; gauge)), ps))
     flags = FP.fringe_station_flags(sol)
-    @test !isempty(flags)
-    @test all(r -> r.ant == 4, flags)                 # only station 4 unconstrained
-    @test any(r -> r.station == "A4", flags)
+    @test any(flags)
+    @test all(flags[AntennaName = At("A4")])          # only station 4 unconstrained
+    @test !any(flags[AntennaName = At(["A1", "A2", "A3"])])
 
     # An unconstrained row is flagged, not blanked: it holds real data that the
     # solve left uncalibrated, so its visibilities and weights survive and

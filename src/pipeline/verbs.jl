@@ -230,8 +230,17 @@ function _with_timing(info::NamedTuple, ctx::SolveContext, t0::UInt64)
         decode .+= pass.decode
         work .+= pass.work
     end
-    timing = DimensionalData.DimStack((; decode, work), (UVData.Scan(1:ngroups),))
+    timing = DimensionalData.DimStack((; decode, work), (Fring._scan_dim(_group_scan_names(ctx.groups)),))
     return (; info..., t_pass = (time_ns() - t0) / 1.0e9, timing)
+end
+
+# The scan name of each `ByScan` group, in group order.
+function _group_scan_names(groups)
+    names = String[String(k.scan) for k in keys(groups)]
+    allunique(names) || throw(
+        ArgumentError("scan names repeat across scan groups: $(join(unique(filter(n -> count(==(n), names) > 1, names)), ", "))")
+    )
+    return names
 end
 
 # The run-wide diagnostics. Each step's own diagnostics are `sol.steps[name]`.

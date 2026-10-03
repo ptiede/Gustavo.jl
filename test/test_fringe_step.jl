@@ -108,7 +108,7 @@ end
 
         sol = fit(BaselineFringeFit(; model, gauge = PinAntenna("A4")), ps)
         @test isempty(sol.steps[:fringe].flagged_ant)
-        @test isempty(FP.fringe_station_flags(sol))
+        @test !any(FP.fringe_station_flags(sol))
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
 
         # The flags do not depend on which station holds the gauge.

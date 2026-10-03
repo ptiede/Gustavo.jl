@@ -27,7 +27,7 @@ using ..Calibration: weighted_regularized_least_squares, ConstrainedWLS, Factore
     unwrap_phase_track, phase_unwrap_ambiguity, connected_components
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
-using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimStack
+using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
 using StaticArrays: SMatrix, SVector
@@ -73,10 +73,11 @@ Provided by `GustavoMakieExt`.
 function plot_fringe_phases end
 
 """
-    plot_fringe_snr(sol)
-    plot_fringe_snr(parent, sol)
+    plot_fringe_snr(table)
+    plot_fringe_snr(parent, table)
 
-Per-scan max detection SNR from the solver diagnostics. Provided by
+Per-scan max detection SNR of `table`, a [`fringe_snr_table`](@ref) (or several
+combined with [`cat_scans`](@ref)), labeled by scan name. Provided by
 `GustavoMakieExt`.
 """
 function plot_fringe_snr end
@@ -132,11 +133,11 @@ export default_bandpass_terms
 export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
 export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks,
     bandpass_level_blocks
-export fringe_snr_table, print_fringe_snr_table, fringe_solution_summary, print_solve_timing
+export fringe_snr_table, fringe_detections, cat_scans
 export fringe_station_solutions
 export BaselineFringeData, baseline_pol_index
 export fringe_freq_group_stats, fringe_freq_groups
-export BaselineFringeMap, suspect_fringes, fringe_station_flags
+export BaselineFringeMap, fringe_station_flags
 export delay_closure, print_delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_terms

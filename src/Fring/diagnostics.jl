@@ -1,121 +1,112 @@
 # ── Fringe diagnostics ───────────────────────────────────────────────────────
 #
-# Report-style (non-plotting) diagnostics for a fringe `CalibrationSolution`,
-# plus the pure gain-extraction helpers the Makie plot stubs consume. Everything
-# here works off the solved model/θ/geometry and the solver's `info` NamedTuple
-# (per-scan max SNR / component count), so it is Makie-free and unit-testable
-# without loading a plotting backend. The plot entry points themselves
-# (`plot_fringe_spectrum`, `plot_fringe_phases`, `plot_fringe_snr`) are stubs in
-# `Fring.jl`, implemented by `GustavoMakieExt`.
+# Diagnostics read off a fringe `CalibrationSolution` — its solved parameters
+# and the fringe step's `info` — returned as labeled `DimStack`s and
+# `DimArray`s keyed by scan name, station name and feed, plus the per-baseline
+# data helpers the Makie plot stubs consume. The plot entry points themselves
+# are stubs in `Fring.jl`, implemented by `GustavoMakieExt`.
 
-# The `:fringe` step's diagnostics, or an empty NamedTuple when the solution
-# has no fringe stage — every diagnostic below then returns an empty result.
-_fringe_info(sol::CalibrationSolution) = get(sol.steps, :fringe, (;))
+function _fringe_info(sol::CalibrationSolution)
+    haskey(sol.steps, :fringe) || throw(
+        ArgumentError(
+            "the solution has no :fringe step; it holds $(join(repr.(collect(keys(sol.steps))), ", "))"
+        )
+    )
+    return sol.steps[:fringe]
+end
+
+_scan_dim(names) = Scan(DimensionalData.Lookups.Categorical(collect(String, names); order = DimensionalData.Lookups.Unordered()))
 
 """
-    fringe_snr_table(sol::CalibrationSolution) -> Vector{NamedTuple}
+    fringe_snr_table(sol::CalibrationSolution) -> DimStack
 
-Per-scan fringe-fit summary rows `(scan, max_snr, ncomp, pfa)`, all pulled
-from the fringe step's own diagnostics (`sol.steps[:fringe]`). `ncomp` is a
-solve-wide scalar (the same value on every row, not literally per-scan). `pfa` is the scan's false-alarm probability [`fringe_pfa`](@ref):
-the chance that pure noise, searched over the scan's full
-delay×rate×baseline×product space, would produce a peak of at least `max_snr`
-— `pfa ≪ 1` marks a secure detection, `pfa` near 1 a likely FALSE fringe (`NaN`
-when the solution predates `scan_ncells`). Returns an empty vector if the
-solution carries no `:fringe` stage, or that stage no per-scan diagnostics.
+Per-scan fringe-search summary of the fringe step, over `Scan` (scan names):
+
+- `max_snr` — the largest detection SNR in the scan.
+- `pfa` — the scan's false-alarm probability [`fringe_pfa`](@ref): the chance
+  that pure noise, searched over the scan's full delay × rate × baseline ×
+  product space, gives a peak of at least `max_snr`. `pfa ≪ 1` marks a secure
+  detection, `pfa` near 1 a likely false fringe.
+
+Throws when `sol` has no `:fringe` step. Per-scan results of
+[`mapsets`](@ref) combine with [`cat_scans`](@ref).
 """
 function fringe_snr_table(sol::CalibrationSolution)
     info = _fringe_info(sol)
-    (haskey(info, :scan_snr) && haskey(info, :ncomp)) || return NamedTuple[]
-    snr = info.scan_snr
-    ncomp = Int(info.ncomp)
-    ncells = get(info, :scan_ncells, Float64[])
-    return [
+    pfa = fringe_pfa.(info.scan_snr, info.scan_ncells)
+    return DimStack((; max_snr = info.scan_snr, pfa), (_scan_dim(info.scan_names),))
+end
+
+"""
+    fringe_detections(sol::CalibrationSolution) -> DimStack
+
+Every (baseline, product) cell the fringe search measured, over
+`(Scan, AntennaPair, FeedPair)` — scan name, `(station, station)` and
+`(feed, feed)`. Layers: `snr`, `pfa` (family-wise, [`fringe_pfa`](@ref)),
+`delay` (s), `rate` (Hz), `phase` (rad), and `detected`, whether the search
+accepted the cell as a fringe (`pfa ≤ Stationization.pfa_max`). A cell a scan
+did not measure holds `NaN` and `detected = false`.
+
+The accepted detections that a stricter threshold would reject are the
+marginal ones worth inspecting:
+
+```julia
+det = fringe_detections(sol)
+findall(det.detected .& (det.pfa .> 1e-6))
+```
+"""
+function fringe_detections(sol::CalibrationSolution)
+    info = _fringe_info(sol)
+    pairs = unique(tuple.(String.(info.det_ant_a), String.(info.det_ant_b)))
+    feeds = sort!(unique(tuple.(Int.(info.det_feed_a), Int.(info.det_feed_b))))
+    d = (_scan_dim(info.scan_names), _station_pair_dim(pairs), FeedPair(feeds))
+    n = map(length, d)
+    stack = DimStack(
         (;
-            scan = s, max_snr = Float64(snr[s]), ncomp = ncomp,
-            pfa = s <= length(ncells) ? fringe_pfa(snr[s], ncells[s]) : NaN,
-        )
-            for s in eachindex(snr)
-    ]
-end
-
-"""
-    print_fringe_snr_table(rows; io = stdout)
-
-Pretty-print the rows from [`fringe_snr_table`](@ref).
-"""
-function print_fringe_snr_table(rows; io = stdout)
-    isempty(rows) && return println(io, "No per-scan fringe diagnostics available")
-    println(io)
-    println(io, "Fringe per-scan summary")
-    println(io, "scan   max_snr   ncomp        pfa")
-    for r in rows
-        println(
-            io,
-            lpad(string(r.scan), 4), "   ",
-            lpad(_fmt(r.max_snr), 7), "   ",
-            lpad(string(r.ncomp), 5), "   ",
-            lpad(_fmt_pfa(get(r, :pfa, NaN)), 8),
-        )
-    end
-    return nothing
-end
-
-_fmt(x::Real) = isfinite(x) ? string(round(x; digits = 3)) : "NaN"
-
-# PFA formatting: probabilities span many decades, so switch to scientific
-# notation below 10⁻³ instead of rounding to "0.0".
-_fmt_pfa(x::Real) = !isfinite(x) ? "NaN" :
-    (x > 0 && x < 1.0e-3 ? @sprintf("%.1e", x) : string(round(x; digits = 3)))
-
-"""
-    fringe_solution_summary(sol::CalibrationSolution) -> String
-
-One-line summary of a fringe solution: antenna/scan/parameter counts and the
-median per-scan max SNR.
-"""
-function fringe_solution_summary(sol::CalibrationSolution)
-    rows = fringe_snr_table(sol)
-    nant = length(sol.geom.stations)
-    nscan = get(sol.info, :nscan, length(rows))
-    snrs = [r.max_snr for r in rows if isfinite(r.max_snr)]
-    medsnr = isempty(snrs) ? NaN : median(snrs)
-    nθ = sum(c -> length(c.params), sol.components; init = 0)
-    return string(
-        "FringeSolution: ", nant, " antennas, ", nscan, " scans, ",
-        nθ, " parameters; median scan max-SNR = ", _fmt(medsnr),
+            snr = fill(NaN, n), pfa = fill(NaN, n), delay = fill(NaN, n),
+            rate = fill(NaN, n), phase = fill(NaN, n), detected = fill(false, n),
+        ), d,
     )
+    pair_index = Dict(p => i for (i, p) in enumerate(pairs))
+    feed_index = Dict(f => i for (i, f) in enumerate(feeds))
+    for i in eachindex(info.det_scan)
+        cell = (
+            Scan(info.det_scan[i]),
+            AntennaPair(pair_index[(String(info.det_ant_a[i]), String(info.det_ant_b[i]))]),
+            FeedPair(feed_index[(Int(info.det_feed_a[i]), Int(info.det_feed_b[i]))]),
+        )
+        stack.snr[cell] = info.det_snr[i]
+        stack.pfa[cell] = info.det_pfa[i]
+        stack.delay[cell] = info.det_delay[i]
+        stack.rate[cell] = info.det_rate[i]
+        stack.phase[cell] = info.det_phase[i]
+        stack.detected[cell] = info.det_detected[i]
+    end
+    return stack
 end
 
 """
-    fringe_station_solutions(sol::CalibrationSolution) -> Vector{NamedTuple}
+    fringe_station_solutions(sol::CalibrationSolution) -> DimStack
 
-Decode the stationized per-scan delay/rate/constant-phase parameters from
-the fringe step's θ into a per-`(scan, station, feed)` table; no data is
-read. One row per (scan-group index `scan`, 1-based `station`,
-`feed ∈ {1, 2}`):
+The fringe step's per-scan station delay, rate and constant phase, decoded
+from its solved parameters (no data is read), over
+`(Scan, AntennaName, Feed)`:
 
-- `delay_ns`  — station group delay (ns): the feed-common delay plus, on
-  feed 2, the fitted inter-feed offset.
-- `rate_mHz`  — station fringe rate (mHz).
-- `phase_deg` — station constant phase (deg), at the epoch the scan's rate
-  column is referenced to (the scan's own mean time), so it is comparable
-  across scans only through a difference taken within one scan.
+- `delay` — station group delay (s): the feed-common delay plus, on feed 2,
+  the fitted inter-feed offset.
+- `rate` — station fringe rate (Hz).
+- `phase` — station constant phase (rad), at the epoch the scan's rate is
+  referenced to (the scan's own mean time), so it compares across scans only
+  through a difference taken within one scan.
 
-Summed from every stage-B component the fringe stage owns (delay/rate/
-constant terms — not adhoc or bandpass).
-Values are gauge-fixed to the solve's reference pin; a within-scan
-difference against the same feed of a reference station is gauge-invariant
-(the reported `delay_rel`/`rate_rel`).
+Each sums every delay, rate and constant term the fringe step owns; a term
+the model lacks reads `NaN`. Values are fixed to the solve's gauge; a
+within-scan difference against the same feed of a reference station is
+gauge-invariant.
 
-The table is dense: a (station, feed, scan) the solve never constrained
-reads back as the identity 0, indistinguishable from a genuine gauge-zero.
-Mask it with the detection/flag info (`suspect_fringes`,
-`info.flagged_ant`/`flagged_scan`); this accessor is a pure θ-decode and
-does not consult the detections.
-
-Scan index matches the scan-group ordering of [`fringe_snr_table`](@ref) and
-`info.det_scan`.
+The parameters are dense: a (scan, station, feed) the solve never constrained
+reads back as 0, indistinguishable from a solved zero. Mask it with
+[`fringe_station_flags`](@ref).
 """
 function fringe_station_solutions(sol::CalibrationSolution)
     groups = Calibration._applied(sol[:fringe]).groups
@@ -130,6 +121,11 @@ function fringe_station_solutions(sol::CalibrationSolution)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
     nscan = refplan.shape[4]                                # PerScan ⇒ ntseg == #scan groups
+    names = sol.geom.scan_names
+    length(names) == nscan || error(
+        "fringe_station_solutions: the solution's geometry names $(length(names)) scans for " *
+            "$nscan scan segments"
+    )
     # First time index landing in each scan segment — used to look up every plan's
     # own segment id for this scan (a `GlobalTime` inter-feed plan maps them all to 1, a
     # `PerScan` one to the scan itself, so the same lookup handles both bases).
@@ -138,36 +134,98 @@ function fringe_station_solutions(sol::CalibrationSolution)
         k = refplan.tseg_id[ti]
         (1 <= k <= nscan && t0[k] == 0) && (t0[k] = ti)
     end
-    out = NamedTuple[]
-    for k in eachindex(t0)
+    scans = findall(!=(0), t0)
+    d = (_scan_dim(names[scans]), _station_dim(sol.geom.stations), Feed(1:2))
+    n = map(length, d)
+    delay, rate, phase = fill(NaN, n), fill(NaN, n), fill(NaN, n)
+    for (s, k) in enumerate(scans), a in 1:nant, f in 1:2
         ti = t0[k]
-        ti == 0 && continue
-        for a in 1:nant, f in 1:2
-            d = 0.0; r = 0.0; p = 0.0
-            hd = false; hr = false; hp = false
-            for (plan, kind) in comps
-                node = _feed_node(plan.tying, f)            # fseg 1: stage-B terms are GlobalFrequency
-                node == 0 && continue
-                v = _component_leaf(plan, θ)[1, node, 1, plan.tseg_id[ti], a]
-                if kind === :delay
-                    d += v; hd = true
-                elseif kind === :rate
-                    r += v; hr = true
-                else
-                    p += v; hp = true
-                end
-            end
-            push!(
-                out, (;
-                    scan = k, station = a, feed = f,
-                    delay_ns = hd ? d * 1.0e9 : NaN,       # τ (s) → ns
-                    rate_mHz = hr ? r * 1.0e3 : NaN,       # ṙ (Hz) → mHz
-                    phase_deg = hp ? rad2deg(p) : NaN,   # φ (rad) → deg
-                ),
-            )
+        for (plan, kind) in comps
+            node = _feed_node(plan.tying, f)            # fseg 1: stage-B terms are GlobalFrequency
+            node == 0 && continue
+            v = _component_leaf(plan, θ)[1, node, 1, plan.tseg_id[ti], a]
+            out = kind === :delay ? delay : kind === :rate ? rate : phase
+            out[s, a, f] = isnan(out[s, a, f]) ? v : out[s, a, f] + v
         end
     end
+    return DimStack((; delay, rate, phase), d)
+end
+
+"""
+    fringe_station_flags(sol::CalibrationSolution) -> DimArray{Bool}
+
+Over `(Scan, AntennaName)`: `true` where the fringe step left the station
+unconstrained in the scan — no accepted detection (`pfa ≤
+Stationization.pfa_max`) on any of its baselines, so nothing put it in a
+fringe group. A measured but rejected baseline does not rescue it: such a row
+constrains the fit without fixing a fringe location. These stations carry
+identity gains for those scans, and `calibrate` flags their baselines there
+(`apply_flags = true`).
+"""
+function fringe_station_flags(sol::CalibrationSolution)
+    info = _fringe_info(sol)
+    d = (_scan_dim(info.scan_names), _station_dim(sol.geom.stations))
+    flags = DimArray(fill(false, map(length, d)), d)
+    for i in eachindex(info.flagged_ant, info.flagged_scan)
+        flags[Scan(At(sol.geom.scan_names[info.flagged_scan[i]])), AntennaName(At(String(info.flagged_ant[i])))] = true
+    end
+    return flags
+end
+
+"""
+    cat_scans(xs) -> DimStack or DimArray
+
+Concatenate per-scan diagnostics — each a `DimStack` or `DimArray` with a
+`Scan` dimension, such as [`fringe_snr_table`](@ref) of each solution
+[`mapsets`](@ref) returns — along `Scan`. Every other dimension takes the
+union of the inputs' labels, in first-seen order, so scans whose stations,
+baselines or products differ line up by name; a cell an input lacks holds
+`NaN`, or `false` in a `Bool` layer. The inputs share their dimensions'
+types and order.
+
+```julia
+sols = mapsets(g -> fit(BaselineFringeFit(; gauge), g), groupby(ps, ByScan()))
+snr = cat_scans(fringe_snr_table.(values(sols)))
+```
+"""
+function cat_scans(xs)
+    xs = collect(xs)
+    isempty(xs) && throw(ArgumentError("cat_scans: nothing to concatenate"))
+    ref = dims(first(xs))
+    for x in xs
+        map(DimensionalData.basetypeof, dims(x)) == map(DimensionalData.basetypeof, ref) || throw(
+            DimensionMismatch("cat_scans: dimensions differ: $(map(DimensionalData.name, dims(x))) vs $(map(DimensionalData.name, ref))")
+        )
+    end
+    scans = reduce(vcat, (collect(lookup(x, Scan)) for x in xs))
+    allunique(scans) || throw(ArgumentError("cat_scans: scans repeat: $(join(unique(filter(s -> count(==(s), scans) > 1, scans)), ", "))"))
+    out_dims = map(ref) do d
+        D = DimensionalData.basetypeof(d)
+        D === Scan && return _scan_dim(scans)
+        all(x -> lookup(x, D) == lookup(d), xs) && return d
+        labels = unique(reduce(vcat, (collect(lookup(x, D)) for x in xs)))
+        return D(DimensionalData.Lookups.Categorical(labels; order = DimensionalData.Lookups.Unordered()))
+    end
+    return _cat_scans(first(xs), xs, out_dims)
+end
+
+_filler(::Type{Bool}) = false
+_filler(::Type{T}) where {T <: AbstractFloat} = T(NaN)
+
+function _cat_scans(::AbstractDimArray, xs, out_dims)
+    out = DimArray(fill(_filler(eltype(first(xs))), map(length, out_dims)), out_dims)
+    for x in xs
+        out[map(d -> DimensionalData.basetypeof(d)(At(collect(lookup(d)))), dims(x))] = parent(x)
+    end
     return out
+end
+
+function _cat_scans(::AbstractDimStack, xs, out_dims)
+    names = keys(first(xs))
+    layers = map(names) do k
+        _cat_scans(first(xs)[k], [x[k] for x in xs], out_dims)
+    end
+    return DimStack(NamedTuple{names}(layers))
 end
 
 # ── Per-baseline before/after data (the fringe-fit quality check) ──────────────
@@ -412,112 +470,6 @@ struct BaselineFringeMap
     ant_names::Vector{String}
     pol::Tuple{Int, Int}
     map::FringeSearchMap
-end
-
-"""
-    fringe_station_flags(sol::CalibrationSolution) -> Vector{NamedTuple}
-
-The (station, scan) pairs the stage-B solve left UNCONSTRAINED — no ACCEPTED
-detection (`pfa <= Stationization.pfa_max`) on any of the station's baselines,
-so nothing put it in a fringe group (the EHT-HOPS flag criterion). A measured
-but rejected baseline does not rescue it: such a row constrains the fit without
-fixing a fringe location. These stations carry
-identity gains for those scans, and `calibrate` flags their baselines there
-(`apply_flags = true`). Rows
-`(; scan, scan_name, ant, station)`; empty when every participating station
-was constrained (or the solution predates flag recording).
-"""
-function fringe_station_flags(sol::CalibrationSolution)
-    info = _fringe_info(sol)
-    haskey(info, :flagged_ant) || return NamedTuple[]
-    ant(name) = something(findfirst(==(name), sol.geom.stations), 0)
-    scname(s) = s <= length(sol.geom.scan_names) ? String(sol.geom.scan_names[s]) : string(s)
-    rows = [
-        (;
-            scan = Int(info.flagged_scan[i]), scan_name = scname(Int(info.flagged_scan[i])),
-            ant = ant(info.flagged_ant[i]), station = String(info.flagged_ant[i]),
-        )
-            for i in eachindex(info.flagged_ant)
-    ]
-    sort!(rows; by = r -> (r.scan, r.ant))
-    return rows
-end
-
-"""
-    suspect_fringes(sol::CalibrationSolution; pfa_max = 1.0e-4) -> Vector{NamedTuple}
-
-Screen the solution's ACCEPTED detections against a false-alarm probability of
-`pfa_max`: the rows the stage-B solve treated as real fringes whose PFA exceeds
-the threshold given here. The search pass records every measured cell, accepted
-or not, so this reads the `detected` ones only — a rejected cell is not a suspect
-fringe, it is a non-detection.
-
-At the default this returns the empty set by construction, since acceptance is a
-PFA test at the solve's own `Stationization.pfa_max`. It earns its keep when
-passed something STRICTER than the solve used: those are the accepted detections
-that would flip under a tighter threshold, i.e. the marginal ones worth eyeballing.
-
-Rows `(; scan, a, b, sta_a, sta_b, pol, snr, pfa)`, most-suspect (largest `pfa`)
-first. Needs no data read.
-"""
-function suspect_fringes(sol::CalibrationSolution; pfa_max::Real = 1.0e-4)
-    info = _fringe_info(sol)
-    haskey(info, :det_pfa) || return NamedTuple[]
-    ant(name) = something(findfirst(==(name), sol.geom.stations), 0)
-    # A solution written before the table recorded rejected cells holds detections
-    # only, so every row of one counts as accepted.
-    detected = get(info, :det_detected, nothing)
-    accepted(i) = detected === nothing || detected[i]
-    rows = [
-        (;
-            scan = Int(info.det_scan[i]), a = ant(info.det_ant_a[i]), b = ant(info.det_ant_b[i]),
-            sta_a = String(info.det_ant_a[i]), sta_b = String(info.det_ant_b[i]),
-            pol = (Int(info.det_feed_a[i]), Int(info.det_feed_b[i])), snr = Float64(info.det_snr[i]), pfa = Float64(info.det_pfa[i]),
-        )
-            for i in eachindex(info.det_pfa) if accepted(i) && info.det_pfa[i] > pfa_max
-    ]
-    sort!(rows; by = r -> r.pfa, rev = true)
-    return rows
-end
-
-"""
-    print_solve_timing(sol::CalibrationSolution; io = stdout, top = 5)
-
-Profiling summary of a solve, GENERIC over every step (built-in or
-third-party): one line per step that published timing (`sol.steps[name].t_pass`, the pass's total wall time, and `.timing`, a `Scan`-indexed
-`DimStack` of `decode`/`work`/`reduce` task-seconds — with N concurrent group
-tasks the wall share is up to N× smaller), then the `top` slowest scans of
-whichever step spent the most per-scan time. Prints a notice when the
-solution carries no step timing at all.
-"""
-function print_solve_timing(sol::CalibrationSolution; io = stdout, top::Integer = 5)
-    timed = [(; name, info) for (name, info) in sol.steps if haskey(info, :t_pass)]
-    isempty(timed) && return println(io, "No solve timing recorded in this solution")
-    println(io)
-    println(
-        io, "Solve timing (peak ", get(sol.info, :ntasks_used, "?"), " concurrent groups × ",
-        get(sol.info, :inner_tasks, "?"), " inner tasks)",
-    )
-    for s in timed
-        line = @sprintf("  %-10s %8.1f s wall", String(s.name), s.info.t_pass)
-        if haskey(s.info, :timing)
-            t = s.info.timing
-            line *= @sprintf(
-                "   (Σ decode %8.1f s, Σ work %8.1f s)", sum(t.decode), sum(t.work),
-            )
-        end
-        println(io, line)
-    end
-    heaviest = argmax(s -> haskey(s.info, :timing) ? sum(s.info.timing.work) : -Inf, timed)
-    haskey(heaviest.info, :timing) || return nothing
-    t = heaviest.info.timing
-    tot = t.decode .+ t.work
-    ord = sortperm(tot; rev = true)
-    println(io, "  slowest scans (", heaviest.name, ", decode/work s):")
-    for i in ord[1:min(Int(top), length(ord))]
-        println(io, @sprintf("    scan %3d  %6.1f = %.1f/%.1f", i, tot[i], t.decode[i], t.work[i]))
-    end
-    return nothing
 end
 
 """

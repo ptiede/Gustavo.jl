@@ -277,7 +277,7 @@ function unconstrained_flags(dets, covered, geom::DataGeometry)
 end
 
 # Flatten per-scan search rows into parallel plain vectors for the solution
-# `info`, cheap to filter (`suspect_fringes`). Every
+# `info` (read back by `fringe_detections`). Every
 # measured cell is here, so `det_detected` is what selects the real fringes.
 function detection_table(scan_dets)
     n = sum(length, scan_dets; init = 0)
