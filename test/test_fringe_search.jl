@@ -189,11 +189,12 @@ end
 
     m = FR.baseline_fringe_map(FR.fringe_plane(V, W, freqs, times), f0, t0)
     @test m isa FR.FringeSearchMap
-    @test size(m.snr) == (length(m.delays), length(m.rates))
-    @test issorted(m.delays) && issorted(m.rates)
+    delays, rates = lookup(m.snr, FR.FringeDelay), lookup(m.snr, FR.FringeRate)
+    @test size(m.snr) == (length(delays), length(rates))
+    @test issorted(delays) && issorted(rates)
     opts = FR.FringeSearch()
-    @test all(d -> opts.delay_window[1] <= d <= opts.delay_window[2], m.delays)
-    @test all(r -> opts.rate_window[1] <= r <= opts.rate_window[2], m.rates)
+    @test all(d -> opts.delay_window[1] <= d <= opts.delay_window[2], delays)
+    @test all(r -> opts.rate_window[1] <= r <= opts.rate_window[2], rates)
 
     # The embedded detection is what the standalone search returns (≈ only
     # because the two calls plan separate FFTW MEASURE transforms).
@@ -206,10 +207,10 @@ end
     # The map's discrete peak sits at the injected (delay, rate) — within a grid
     # bin (quad refinement of the detection goes below the bin; the map does not).
     pk = argmax(m.snr)
-    dbin = m.delays[2] - m.delays[1]
-    rbin = m.rates[2] - m.rates[1]
-    @test isapprox(m.delays[pk[1]], τ; atol = dbin)
-    @test isapprox(m.rates[pk[2]], ṙ; atol = rbin)
+    dbin = delays[2] - delays[1]
+    rbin = rates[2] - rates[1]
+    @test isapprox(delays[pk[1]], τ; atol = dbin)
+    @test isapprox(rates[pk[2]], ṙ; atol = rbin)
     # ...and its height matches the refined detection SNR to within the grid's
     # scalloping loss. A peak falling between cells is read low by up to
     # sinc(1/2oversample) on each axis, so the bound follows `oversample` rather
@@ -233,7 +234,7 @@ end
 
     # All-flagged block → empty map, invalid detection.
     m0 = FR.baseline_fringe_map(FR.fringe_plane(V, zeros(size(V)), freqs, times), f0, t0)
-    @test isempty(m0.delays) && isempty(m0.rates)
+    @test isempty(m0.snr)
     @test !m0.detection.valid
     @test isnan(m0.pfa)
 
@@ -499,7 +500,7 @@ end
 
     # The map is at the compute precision too, including a block with no usable data.
     m32 = FR.baseline_fringe_map(FR.fringe_plane(V32, W32, freqs, times), f0, t0)
-    @test eltype(m32.snr) === Float32 && eltype(m32.delays) === Float32
+    @test eltype(m32.snr) === Float32 && eltype(lookup(m32.snr, FR.FringeDelay)) === Float32
     @test m32.detection isa FR.Detection{Float32}
     empty32 = FR.baseline_fringe_map(FR.fringe_plane(V32, zero(W32), freqs, times), f0, t0)
     @test typeof(empty32) === typeof(m32)

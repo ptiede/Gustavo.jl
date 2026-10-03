@@ -3,18 +3,28 @@
 # Implements `plot_fringe_search`, declared in `Gustavo.Fring`.
 
 import Gustavo.Fring
-using Gustavo.Fring: FringeSearchMap, BaselineFringeMap
-
-# Station label: the name from `sol.geom.stations` when available, else a
-# generic `ant{i}` fallback.
-_site_label(names, i::Integer) =
-    (names !== nothing && i <= length(names)) ? String(names[i]) : string("ant", i)
+using Gustavo.Fring: FringeSearchMap, FringeDelay, FringeRate
+using Gustavo.UVData: AntennaPair
+using DimensionalData: lookup, name, refdims
 
 # Probabilities span many decades: scientific notation below 10⁻³.
 _fmt_pfa(x::Real) = !isfinite(x) ? "NaN" :
     (x > 0 && x < 1.0e-3 ? @sprintf("%.1e", x) : string(round(x; digits = 3)))
 
-_bl_label((a, b)::Tuple, names) = string(_site_label(names, a), "–", _site_label(names, b))
+_refdim_label(d) = string(name(d), " ", only(lookup(d)))
+_refdim_label(d::AntennaPair) = join(only(lookup(d)), "–")
+
+function _map_title(fsm::FringeSearchMap)
+    det = fsm.detection
+    return string(
+        join(map(_refdim_label, refdims(fsm.snr)), "  "), "   ",
+        "SNR ", round(det.snr; digits = 1),
+        det.valid ? "" : " (below snr_min)",
+        @sprintf("   τ = %.3f ns", det.delay * 1.0e9),
+        @sprintf("   ṙ = %.3f mHz", det.rate * 1.0e3),
+        "   PFA ", _fmt_pfa(fsm.pfa),
+    )
+end
 
 # ── plot_fringe_search: delay–rate SNR surface + peak cross-sections ───────────
 #
@@ -62,27 +72,27 @@ _zoom_span(zoom::Bool) = zoom ? _FRINGE_ZOOM_SPAN : nothing
 _zoom_span(zoom::Real) = (zoom > 0 || error("plot_fringe_search: zoom must be positive"); Float64(zoom))
 
 function Fring.plot_fringe_search(
-        parent, fsm::FringeSearchMap;
-        title::AbstractString = "", zoom::Union{Bool, Real} = true,
+        parent, fsm::FringeSearchMap; zoom::Union{Bool, Real} = true,
     )
-    isempty(fsm.delays) && error("plot_fringe_search: empty map (no unflagged data)")
+    isempty(fsm.snr) && error("plot_fringe_search: empty map (no unflagged data)")
     det = fsm.detection
-    dns = fsm.delays .* 1.0e9                 # ns
-    rmhz = fsm.rates .* 1.0e3                 # mHz
-    pk = argmax(fsm.snr)                      # discrete map peak (cross-section anchor)
-    peaksnr = max(fsm.snr[pk], 1.0)
-    dprof = fsm.snr[:, pk[2]]
-    rprof = fsm.snr[pk[1], :]
+    snr = Base.parent(permutedims(fsm.snr, (FringeDelay, FringeRate)))
+    dns = lookup(fsm.snr, FringeDelay) .* 1.0e9      # ns
+    rmhz = lookup(fsm.snr, FringeRate) .* 1.0e3      # mHz
+    pk = argmax(snr)                          # discrete map peak (cross-section anchor)
+    peaksnr = max(snr[pk], 1.0)
+    dprof = snr[:, pk[2]]
+    rprof = snr[pk[1], :]
 
     ax = Axis(
         parent[2, 1];
         xlabel = "delay (ns)", ylabel = "rate (mHz)",
     )
-    hm = heatmap!(ax, dns, rmhz, fsm.snr; colormap = :viridis, colorrange = (0.0, peaksnr))
+    hm = heatmap!(ax, dns, rmhz, snr; colormap = :viridis, colorrange = (0.0, peaksnr))
     vlines!(ax, [det.delay * 1.0e9]; color = (:white, 0.8), linestyle = :dash, linewidth = 1)
     hlines!(ax, [det.rate * 1.0e3]; color = (:white, 0.8), linestyle = :dash, linewidth = 1)
 
-    axd = Axis(parent[1, 1]; ylabel = "SNR", title = title, titlesize = 12)
+    axd = Axis(parent[1, 1]; ylabel = "SNR", title = _map_title(fsm), titlesize = 12)
     lines!(axd, dns, dprof; color = :steelblue)
     vlines!(axd, [det.delay * 1.0e9]; color = (:firebrick, 0.7), linestyle = :dash, linewidth = 1)
     hidexdecorations!(axd; grid = false)
@@ -118,21 +128,7 @@ function Fring.plot_fringe_search(
     return parent
 end
 
-function Fring.plot_fringe_search(parent, m::BaselineFringeMap; kwargs...)
-    det = m.map.detection
-    title = string(
-        m.source, "  scan ", m.scan, "  ",
-        _bl_label(m.bl_pair, m.ant_names), " [", m.pol, "]   ",
-        "SNR ", round(det.snr; digits = 1),
-        det.valid ? "" : " (below snr_min)",
-        @sprintf("   τ = %.3f ns", det.delay * 1.0e9),
-        @sprintf("   ṙ = %.3f mHz", det.rate * 1.0e3),
-        "   PFA ", _fmt_pfa(m.map.pfa),
-    )
-    return Fring.plot_fringe_search(parent, m.map; title = title, kwargs...)
-end
-
-function Fring.plot_fringe_search(m::Union{BaselineFringeMap, FringeSearchMap}; kwargs...)
+function Fring.plot_fringe_search(m::FringeSearchMap; kwargs...)
     fig = Figure(size = (900, 640))
     Fring.plot_fringe_search(fig, m; kwargs...)
     return fig

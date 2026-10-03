@@ -54,13 +54,15 @@ include("Fring/diagnostics.jl")
 # ── Plot stubs — implemented by `GustavoMakieExt`. Load Makie or CairoMakie
 # to enable plotting.
 """
-    plot_fringe_search(m::BaselineFringeMap; zoom)
+    plot_fringe_search(m::FringeSearchMap; zoom)
     plot_fringe_search(parent, m; zoom)
 
 HOPS-style fringe-search diagnostic for one baseline of one scan — the plot for
-judging a suspected false fringe. Draws the delay–rate matched-filter SNR
-surface with delay/rate cross-sections through the peak, and annotates the
-refined detection (delay, rate, SNR) and its false-alarm probability. A real
+judging a suspected false fringe, from [`fringe_search_map`](@ref) or
+[`baseline_fringe_map`](@ref). Draws the delay–rate matched-filter SNR
+surface with delay/rate cross-sections through the peak, titled with the map's
+`refdims` (scan, baseline, feed pair), the refined detection (delay, rate,
+SNR) and its false-alarm probability. A real
 fringe is a single sharp peak far above the sidelobe forest with `pfa ≪ 1`; a
 false fringe barely clears the forest (`pfa` not small) and shows several
 comparable-height peaks. Provided by `GustavoMakieExt`.
@@ -76,7 +78,7 @@ function plot_fringe_search end
 
 export FringeSearch, baseline_fringe_search, fringe_plane
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
-export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
+export FringeSearchMap, FringeDelay, FringeRate, baseline_fringe_map, fringe_search_map, fringe_pfa, fringe_snr_cut
 export PhaseCalTable, load_fitsidi_phasecal
 export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
@@ -89,7 +91,7 @@ export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpas
 export fringe_snr_table, fringe_detections, cat_scans
 export fringe_station_solutions
 export baseline_spectra, freq_group_coherence, fringe_freq_groups, FreqGroup, Triangle
-export BaselineFringeMap, fringe_station_flags
+export fringe_station_flags
 export baseline_delays, delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_terms

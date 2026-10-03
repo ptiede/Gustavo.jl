@@ -571,8 +571,22 @@ series(angle.(after.vis[Scan = 1, FeedPair = At((1, 1))]))   # one line per base
 delay_closure(before)
 ```
 
-[`baseline_fringe_map`](@ref) returns the windowed delay–rate surface itself as
+[`fringe_search_map`](@ref) reruns the fringe step's search on one baseline
+and feed pair of a scan and returns the windowed delay–rate surface itself as
 a [`FringeSearchMap`](@ref), rather than only its maximum. This is required to
 determine why a detection occurred at a given delay and rate, and whether a
-competing peak of comparable height was present. With a Makie backend loaded,
-[`plot_fringe_search`](@ref) plots the surface.
+competing peak of comparable height was present. Its `snr` is a `DimArray`
+over `(FringeDelay, FringeRate)`; with a Makie backend loaded,
+[`plot_fringe_search`](@ref) plots it with cross-sections through the peak.
+The accepted detections a stricter threshold would reject are the ones to
+inspect:
+
+```julia
+det = fringe_detections(fr)
+findall(det.detected .& (det.pfa .> 1e-6))
+m = fringe_search_map(fr, g; baseline = ("AA", "LM"), feeds = (1, 1))
+plot_fringe_search(m)
+```
+
+[`baseline_fringe_map`](@ref) computes the same surface from a single
+visibility plane.

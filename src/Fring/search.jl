@@ -1264,25 +1264,27 @@ function fringe_snr_cut(pfa::Real, ncells::Real)
     return sqrt(-2 * log(p1))
 end
 
+DimensionalData.@dim FringeDelay "Fringe delay (s)"
+DimensionalData.@dim FringeRate "Fringe rate (Hz)"
+
 """
     FringeSearchMap
 
 The windowed delay–rate matched-filter surface of one visibility block, produced
-by [`baseline_fringe_map`](@ref) — the classic false-fringe diagnostic. The
-coordinates, map and detection are at the search's compute precision, the real
-type of the visibilities. Fields:
+by [`baseline_fringe_map`](@ref) and [`fringe_search_map`](@ref) — the classic
+false-fringe diagnostic. The coordinates, map and detection are at the search's
+compute precision, the real type of the visibilities. Fields:
 
-- `delays` (s) / `rates` (Hz) — the in-window grid coordinates, ascending.
-- `snr` — `(ndelay, nrate)` map of `|D| / noise` in the same units as
-  the detection's `snr`, so the map's peak sits at ≈ `detection.snr`.
+- `snr` — `DimArray` of `|D| / noise` over `(FringeDelay, FringeRate)` (s, Hz;
+  the in-window grid, ascending), in the same units as the detection's `snr`,
+  so the map's peak sits at ≈ `detection.snr`. Its `refdims` name the scan,
+  baseline and feed pair when the map came from [`fringe_search_map`](@ref).
 - `detection` — the refined peak, exactly as [`baseline_fringe_search`](@ref)
   returns it.
 - `ncells` — effective number of independent search cells (see `fringe_pfa`).
-- `pfa` — `fringe_pfa(detection.snr, ncells)` for this single search.
+- `pfa` — `fringe_pfa(detection.snr, ncells)`.
 """
-struct FringeSearchMap{D, R, S, Det}
-    delays::D
-    rates::R
+struct FringeSearchMap{S, Det}
     snr::S
     detection::Det
     ncells::Float64
@@ -1301,7 +1303,7 @@ diagnostic — while the embedded `detection` honors `opts.algorithm`, so it is
 identical to what [`baseline_fringe_search`](@ref) (and the solver) returns. A
 diagnostic (a full-grid FFT per call — on VGOS-style axes this single plane is
 much more expensive than the hierarchical search that produced the solution),
-not a hot path.
+not a hot path. `ncells` and `pfa` are those of this one search.
 """
 function baseline_fringe_map(
         plane::AbstractDimStack, f0::Real, t0::Real;
@@ -1309,16 +1311,30 @@ function baseline_fringe_map(
         workspace::Union{Nothing, FringeWorkspace} = nothing,
     )
     freqs, times = _plane_axes(plane)
-    V, W, flags = _plane_layers(plane)
+    ws = something(workspace, FringeWorkspace(eltype(plane[:vis])))
+    V, W, F = _gather_plane!(ws, plane)
+    return _fringe_map(V, W, F, freqs, times, f0, t0, opts, ws, nothing)
+end
+
+# Explicit lookups: an empty map would otherwise infer a different lookup type.
+_ascending(x) = DimensionalData.Lookups.Sampled(
+    x; order = DimensionalData.Lookups.ForwardOrdered(), span = DimensionalData.Lookups.Irregular(),
+    sampling = DimensionalData.Lookups.Points(),
+)
+_snr_map(snr, delays, rates) = DimArray(snr, (FringeDelay(_ascending(delays)), FringeRate(_ascending(rates))); name = :snr)
+
+# `family_cells` is the false-alarm family of the detection's `pfa`; `nothing`
+# takes this one search's cells.
+function _fringe_map(V, W, F, freqs, times, f0, t0, opts::FringeSearch, ws::FringeWorkspace, family_cells)
     C = eltype(V)
     T = real(C)
     ax = _search_axes(freqs, times, opts, C)              # detection axes (honor opts.algorithm)
     axf = isnothing(ax.mbd) ? ax :                       # plane axes: always the full grid
         _search_axes(freqs, times, FringeSearch(opts.delay_window, opts.rate_window, opts.oversample, opts.quad_interp, FullGrid()), C)
-    ncells = _search_cells(axf, opts)
-    ws = _ensure_workspace!(something(workspace, FringeWorkspace(C)), C, axf.nf_pad, axf.nt_pad)
-    Wsum = _grid_visibilities!(ws, V, W, flags, freqs, times, axf)
-    Wsum > 0 || return FringeSearchMap(T[], T[], zeros(T, 0, 0), _invalid_detection(T), ncells, NaN)
+    ncells = something(family_cells, _search_cells(axf, opts))
+    _ensure_workspace!(ws, C, axf.nf_pad, axf.nt_pad)
+    Wsum = _grid_visibilities!(ws, V, W, F, freqs, times, axf)
+    Wsum > 0 || return FringeSearchMap(_snr_map(zeros(T, 0, 0), T[], T[]), _invalid_detection(T), ncells, NaN)
     D = ws.D
     mul!(D, axf.plan, ws.G)
 
@@ -1329,11 +1345,11 @@ function baseline_fringe_map(
     sort!(kidx; by = k -> axf.delays[k])
     sort!(lidx; by = l -> axf.rates[l])
     inv_noise = inv(sqrt(Wsum))
-    snrmap = abs.(D[kidx, lidx]) .* inv_noise
+    snrmap = _snr_map(abs.(D[kidx, lidx]) .* inv_noise, axf.delays[kidx], axf.rates[lidx])
 
     # The refined peak, via the standard search (re-grids + re-FFTs the same data
     # in `ws` — the map above is already copied out, and reusing the search keeps
     # the peak/refinement logic in one place).
-    det = _baseline_fringe_search(plane, freqs, times, f0, t0, ax, ws, opts, ncells)
-    return FringeSearchMap(axf.delays[kidx], axf.rates[lidx], snrmap, det, ncells, fringe_pfa(det.snr, ncells))
+    det = _baseline_fringe_search(V, W, F, freqs, times, f0, t0, ax, ws, opts, ncells)
+    return FringeSearchMap(snrmap, det, ncells, fringe_pfa(det.snr, ncells))
 end

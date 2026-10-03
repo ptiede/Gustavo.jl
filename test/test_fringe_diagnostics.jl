@@ -178,6 +178,99 @@
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
 
+    det = FP.fringe_detections(sol)
+    labels(m) = map(d -> only(lookup(d)), DimensionalData.refdims(m.snr))
+    recorded(scan, pair, feeds) = det[UVP.Scan(At(scan)), AntennaPair(At(pair)), FeedPair(At(feeds))]
+
+    @testset "fringe_search_map (delay–rate surface)" begin
+        m = FP.fringe_search_map(sol, ps)
+        @test m isa FP.FringeSearchMap
+        scan, pair, feeds = labels(m)
+        @test scan == only(sol.geom.scan_names)
+        # Default: the scan's strongest measured cell; the map's peak is that
+        # recorded detection, with the pfa over the scan's search family.
+        rec = recorded(scan, pair, feeds)
+        @test rec.snr == maximum(filter(!isnan, det.snr))
+        @test m.detection.snr ≈ rec.snr rtol = 1.0e-6
+        @test m.detection.delay ≈ rec.delay rtol = 1.0e-6
+        @test m.detection.rate ≈ rec.rate rtol = 1.0e-6
+        @test m.ncells == only(sol.steps[:fringe].scan_ncells)
+        @test m.pfa == FP.fringe_pfa(m.detection.snr, m.ncells)
+        @test m.pfa < 1.0e-6
+        # The map's discrete peak sits at the detection within a grid bin.
+        delays, rates = lookup(m.snr, FP.FringeDelay), lookup(m.snr, FP.FringeRate)
+        pk = argmax(m.snr)
+        @test isapprox(delays[pk[1]], m.detection.delay; atol = delays[2] - delays[1])
+        @test isapprox(rates[pk[2]], m.detection.rate; atol = rates[2] - rates[1])
+
+        # Selectors: baseline in either order, either one alone.
+        m2 = FP.fringe_search_map(sol, ps; baseline = reverse(pair), feeds)
+        @test labels(m2) == (scan, pair, feeds)
+        @test m2.detection.snr ≈ m.detection.snr rtol = 1.0e-10
+        other = first(p for p in lookup(det, AntennaPair) if p != pair)
+        @test labels(FP.fringe_search_map(sol, ps; baseline = other))[2] == other
+        @test labels(FP.fringe_search_map(sol, ps; feeds = (2, 2)))[3] == (2, 2)
+
+        # The weakest accepted detection reproduces through its map.
+        I = argmin(ifelse.(det.detected, det.snr, Inf))
+        weak = (lookup(det, AntennaPair)[I[2]], lookup(det, FeedPair)[I[3]])
+        mw = FP.fringe_search_map(sol, ps; baseline = weak[1], feeds = weak[2])
+        @test mw.detection.snr ≈ recorded(scan, weak...).snr rtol = 1.0e-6
+
+        @test_throws "is not a cross baseline" FP.fringe_search_map(sol, ps; baseline = ("A1", "A1"), feeds = (1, 1))
+        @test_throws "holds no feed pair" FP.fringe_search_map(sol, ps; baseline = pair, feeds = (1, 3))
+        @test_throws "measured no cell" FP.fringe_search_map(sol, ps; baseline = ("A1", "nope"))
+        @test_throws "the solution has no :fringe step" FP.fringe_search_map(sol[:bandpass], ps)
+        ps2, _ = _build_fringe_ps(; nscans = 2)
+        @test_throws "must hold one scan" FP.fringe_search_map(sol, ps2)
+    end
+
+    @testset "fringe_search_map after a hierarchical (MBD) search" begin
+        # The solve's detection comes from the hierarchical search; the plotted
+        # surface is always the full grid, and its peak must sit on that detection.
+        search = FP.FringeSearch(algorithm = FP.HierarchicalMBD())
+        gc = FP._GroupCells(ps, sol.geom)
+        @test !isnothing(FP._search_axes(gc.freqs, gc.times, search, ComplexF32).mbd)
+        mbd = fit(BaselineFringeFit(; gauge, search), ps)
+        mdet = FP.fringe_detections(mbd)
+        m = FP.fringe_search_map(mbd, ps)
+        rec = mdet[UVP.Scan(At(labels(m)[1])), AntennaPair(At(labels(m)[2])), FeedPair(At(labels(m)[3]))]
+        @test m.detection.snr ≈ rec.snr rtol = 1.0e-6
+        @test m.detection.delay ≈ rec.delay rtol = 1.0e-6
+        @test m.detection.rate ≈ rec.rate rtol = 1.0e-6
+        delays, rates = lookup(m.snr, FP.FringeDelay), lookup(m.snr, FP.FringeRate)
+        pk = argmax(m.snr)
+        @test isapprox(delays[pk[1]], m.detection.delay; atol = delays[2] - delays[1])
+        @test isapprox(rates[pk[2]], m.detection.rate; atol = rates[2] - rates[1])
+    end
+
+    @testset "plot_fringe_search smoke" begin
+        m = FP.fringe_search_map(sol, ps)
+        figm = FP.plot_fringe_search(m)
+        @test (show(IOBuffer(), MIME("image/png"), figm); true)
+        map_axis(f) = only(filter(c -> c isa Axis && c.xlabel[] == "delay (ns)", contents(f.layout)))
+        title_axis(f) = only(filter(c -> c isa Axis && !isempty(c.title[]), contents(f.layout)))
+        @test occursin(join(labels(m)[2], "–"), title_axis(figm).title[])
+        fig = Figure(size = (900, 700))
+        @test !isnothing(FP.plot_fringe_search(fig[1, 1], m))
+        unlabeled = FP.FringeSearchMap(DimensionalData.rebuild(m.snr; refdims = ()), m.detection, m.ncells, m.pfa)
+        @test !isnothing(FP.plot_fringe_search(unlabeled))
+        @test (show(IOBuffer(), MIME("image/png"), heatmap(m.snr)); true)
+
+        # Zoom: the default view is a window around the peak, `false` the whole
+        # searched plane, a number that span in main-lobe widths.
+        @test !isnothing(FP.plot_fringe_search(m; zoom = 30))
+        @test_throws "zoom must be positive" FP.plot_fringe_search(m; zoom = 0)
+        figfull = FP.plot_fringe_search(m; zoom = false)
+        show(IOBuffer(), MIME("image/png"), figfull)          # lay out, so limits are final
+        zoomed = map_axis(figm).finallimits[]
+        full = map_axis(figfull).finallimits[]
+        @test zoomed.widths[1] < full.widths[1]
+        @test zoomed.widths[2] < full.widths[2]
+        @test zoomed.origin[1] <= m.detection.delay * 1.0e9 <= zoomed.origin[1] + zoomed.widths[1]
+        @test zoomed.origin[2] <= m.detection.rate * 1.0e3 <= zoomed.origin[2] + zoomed.widths[2]
+    end
+
     @testset "coherence thermal debias" begin
         # One (baseline, pol) of `nchan` cells with inverse-variance weights:
         # flat phase + noise should debias to η ≈ 1 (raw is pulled below by the noise);

@@ -434,20 +434,72 @@ end
 # ── Delay–rate search map (the false-fringe check) ─────────────────────────────
 
 """
-    BaselineFringeMap
+    fringe_search_map(sol, group; baseline = nothing, feeds = nothing) -> FringeSearchMap
 
-The delay–rate search map of one (baseline, correlation product) of one scan,
-with its scan/baseline labels, consumed by `plot_fringe_search`. `source`/`scan`/`scan_index` identify the scan; `bl_pair`
-(antenna indices into `ant_names`) and `pol` (the product's feed pair) the searched block; `map` is the
-[`FringeSearchMap`](@ref) (axes, SNR surface, refined detection, `ncells`,
-`pfa`).
+The delay–rate search surface of one cross baseline of `group`, one scan
+(`groupby(ps, ByScan())`) of the data `sol`'s fringe step searched: the search
+the step ran on that cell, with its own [`FringeSearch`](@ref) options, keeping
+the whole windowed matched-filter plane in SNR units instead of only its peak.
+A real fringe is a single sharp peak far above the sidelobes (`pfa ≪ 1`); a
+false fringe barely clears them.
+
+- `baseline` — a station-name pair such as `("A1", "A3")`, in either order.
+- `feeds` — a feed-index pair such as `(1, 1)`.
+
+Either one left out is the scan's strongest cell in
+[`fringe_detections`](@ref)`(sol)` that matches the other. The map's `pfa` is
+over the scan's search family, as the solve recorded it, so it compares with
+`fringe_detections` and `Stationization.pfa_max`. The detection phase is
+referenced to the scan's mean time.
+
+The map reproduces the recorded detection only for the data the step searched:
+pass the group with the same flags, weights and corrections. A solve with
+`rounds > 1` recorded its search of the final residual.
 """
-struct BaselineFringeMap
-    source::String
-    scan::String
-    scan_index::Int
-    bl_pair::Tuple{Int, Int}
-    ant_names::Vector{String}
-    pol::Tuple{Int, Int}
-    map::FringeSearchMap
+function fringe_search_map(
+        sol::CalibrationSolution, group::XRadio.ProcessingSet; baseline = nothing, feeds = nothing,
+    )
+    opts = _fringe_info(sol).search
+    scan = _group_scan(group)
+    baseline, feeds = _strongest_cell(sol, scan, baseline, feeds)
+    gc = _GroupCells(group, sol.geom)
+    j = findfirst(p -> p == baseline || p == reverse(baseline), gc.antenna_pairs)
+    isnothing(j) && throw(
+        ArgumentError("$(baseline) is not a cross baseline of scan $scan; it holds $(join(gc.antenna_pairs, ", "))")
+    )
+    q = findfirst(==(feeds), gc.feeds)
+    isnothing(q) && throw(ArgumentError("scan $scan holds no feed pair $(feeds); it holds $(join(gc.feeds, ", "))"))
+    ws = FringeWorkspace(eltype(first(first(gc.layers))))
+    V, W, F = _gather_cell!(ws, gc, j, q)
+    t0 = sum(gc.times) / length(gc.times)
+    m = _fringe_map(V, W, F, gc.freqs, gc.times, sol.geom.f0, t0, opts, ws, _family_cells(gc, opts))
+    refdims = (
+        _scan_dim([scan]), _station_pair_dim([gc.antenna_pairs[j]]),
+        FeedPair(DimensionalData.Lookups.Categorical([gc.feeds[q]]; order = DimensionalData.Lookups.Unordered())),
+    )
+    return FringeSearchMap(DimensionalData.rebuild(m.snr; refdims), m.detection, m.ncells, m.pfa)
+end
+
+function _group_scan(group::XRadio.ProcessingSet)
+    names = unique(String(n) for ms in values(group) for n in ms[:scan_name])
+    length(names) == 1 || throw(
+        ArgumentError("the group must hold one scan, as `groupby(ps, ByScan())` yields; it holds $(join(names, ", "))")
+    )
+    return only(names)
+end
+
+function _strongest_cell(sol::CalibrationSolution, scan, baseline, feeds)
+    isnothing(baseline) || isnothing(feeds) || return baseline, feeds
+    det = fringe_detections(sol)
+    scan in lookup(det, Scan) || throw(ArgumentError("the solution's fringe step did not search scan $scan"))
+    snr = det.snr[Scan(At(scan))]
+    cells = [
+        (p, f) for p in lookup(snr, AntennaPair), f in lookup(snr, FeedPair)
+            if (isnothing(baseline) || p == baseline || p == reverse(baseline)) &&
+            (isnothing(feeds) || f == feeds) && !isnan(snr[AntennaPair(At(p)), FeedPair(At(f))])
+    ]
+    isempty(cells) && throw(
+        ArgumentError("the fringe step measured no cell of scan $scan with baseline = $(repr(baseline)), feeds = $(repr(feeds))")
+    )
+    return argmax(((p, f),) -> snr[AntennaPair(At(p)), FeedPair(At(f))], cells)
 end
