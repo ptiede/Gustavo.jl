@@ -1,156 +1,18 @@
-# ── Fringe-solution plots (GustavoMakieExt) ──────────────────────────────────
+# ── Fringe-search plot (GustavoMakieExt) ──────────────────────────────────
 #
-# Implements the plot stubs declared in `Gustavo.Fring`. Each entry point has a
-# `(parent, sol; …)` form that draws into a `Figure`/`GridPosition` and a
-# `(sol; …)` convenience form that creates and returns a `Figure`. Gains are
-# pulled through `gains` on a solution selection, so all the data wrangling
-# stays Makie-free and tested without a backend.
+# Implements `plot_fringe_search`, declared in `Gustavo.Fring`.
 
 import Gustavo.Fring
-using Gustavo.UVData: Frequency
-using Gustavo.Calibration: CalibrationSolution, gains, _freq_group_ranges
-using DimensionalData: lookup, Ti, AbstractDimStack
-using Gustavo.UVData: Scan
 using Gustavo.Fring: FringeSearchMap, BaselineFringeMap
-
-# Resolve a `sites`/`feeds` selector into a vector of integer indices.
-_fringe_indices(sel::Colon, n::Integer) = collect(1:n)
-_fringe_indices(sel::Integer, n::Integer) = [Int(sel)]
-_fringe_indices(sel::AbstractVector{<:Integer}, n::Integer) = collect(Int.(sel))
-_fringe_indices(sel::Symbol, n::Integer) = sel === :all ? collect(1:n) :
-    error("site/feed selector Symbol must be :all")
 
 # Station label: the name from `sol.geom.stations` when available, else a
 # generic `ant{i}` fallback.
 _site_label(names, i::Integer) =
     (names !== nothing && i <= length(names)) ? String(names[i]) : string("ant", i)
-_feed_label(f::Integer) = string("feed", f)
-
-# ── plot_fringe_spectrum: phase vs frequency, rows = sites, cols = feeds ───────
-function Fring.plot_fringe_spectrum(
-        parent, sol::CalibrationSolution;
-        sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false,
-    )
-    # `residual = true`: plot the per-channel bandpass ripple with the per-scan delay
-    # slope removed (readable — otherwise a big station delay wraps 2π·τ·(f−f0) across
-    # the band and hides the ripple; the bandpass is time-invariant, so any time
-    # sample works). `false`: the full solved gain phase at time `ti`.
-    # NB: `parent` here is the Figure argument — keep the labelled DimArray and
-    # index it positionally; its lookups carry the coordinates the plot needs.
-    g = residual ? gains(sol[:bandpass, :phase, :bandpass]; Ti = 1) : gains(sol; Ti = ti)
-    freqs = lookup(g, Frequency)
-    phaselab = residual ? "bandpass phase (rad)" : "phase (rad)"
-    # Optional restriction to one frequency group of the (possibly gappy) channel axis.
-    fglab = ""
-    if freqgroup !== nothing
-        fgs = Fring.fringe_freq_groups(freqs)
-        (1 <= Int(freqgroup) <= length(fgs)) || error("freqgroup must be in 1:$(length(fgs)) (got $freqgroup)")
-        r = fgs[Int(freqgroup)]
-        fglab = @sprintf(" — freqgroup %d/%d", Int(freqgroup), length(fgs))
-        freqs = freqs[r]
-        g = g[r, :, :]
-    end
-    nant = size(g, 2)
-    names = sol.geom.stations
-    site_idx = _fringe_indices(sites, nant)
-    feed_idx = _fringe_indices(feeds, 2)
-    fghz = freqs ./ 1.0e9
-    for (row, ai) in enumerate(site_idx)
-        axrow = Axis[]
-        for (col, fi) in enumerate(feed_idx)
-            ax = Axis(
-                parent[row, col];
-                xlabel = "frequency (GHz)", ylabel = _site_label(names, ai),
-                title = (row == 1 ? string(_feed_label(fi), " ", phaselab, fglab) : ""),
-            )
-            scatter!(ax, fghz, vec(angle.(g[:, ai, fi])); markersize = 5, color = :steelblue)
-            push!(axrow, ax)
-        end
-        for ax in axrow[2:end]
-            linkxaxes!(axrow[1], ax)
-            linkyaxes!(axrow[1], ax)
-        end
-    end
-    return parent
-end
-
-function Fring.plot_fringe_spectrum(sol::CalibrationSolution; sites = :all, feeds = :all, ti::Integer = 1, freqgroup = nothing, residual::Bool = false)
-    nrow = length(_fringe_indices(sites, length(sol.geom.stations)))
-    ncol = length(_fringe_indices(feeds, 2))
-    fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
-    Fring.plot_fringe_spectrum(fig, sol; sites = sites, feeds = feeds, ti = ti, freqgroup = freqgroup, residual = residual)
-    return fig
-end
-
-# ── plot_fringe_phases: phase vs time, rows = sites, cols = feeds ──────────────
-# `ci = 0` (default) evaluates at the channel nearest the reference frequency f0,
-# where the per-scan delay term contributes ~nothing. Any other channel adds
-# 2π·τ·(f_ci − f0) — thousands of radians on real data — so the scan-to-scan
-# phase track is wrap-scrambled by the delay and unreadable there.
-function Fring.plot_fringe_phases(
-        parent, sol::CalibrationSolution;
-        sites = :all, feeds = :all, ci::Integer = 0,
-    )
-    ci0 = ci > 0 ? Int(ci) : argmin(abs.(sol.geom.channel_freqs .- sol.geom.f0))
-    g = gains(sol; Frequency = ci0)
-    times = lookup(g, Ti)
-    fghz = sol.geom.channel_freqs[ci0] / 1.0e9
-    nant = size(g, 2)
-    names = sol.geom.stations
-    site_idx = _fringe_indices(sites, nant)
-    feed_idx = _fringe_indices(feeds, 2)
-    for (row, ai) in enumerate(site_idx)
-        axrow = Axis[]
-        for (col, fi) in enumerate(feed_idx)
-            ax = Axis(
-                parent[row, col];
-                xlabel = "time (h)", ylabel = _site_label(names, ai),
-                title = (row == 1 ? string(_feed_label(fi), @sprintf(" phase (rad) @ %.2f GHz", fghz)) : ""),
-            )
-            scatter!(ax, times, vec(angle.(g[:, ai, fi])); markersize = 5, color = :darkorange)
-            push!(axrow, ax)
-        end
-        for ax in axrow[2:end]
-            linkxaxes!(axrow[1], ax)
-            linkyaxes!(axrow[1], ax)
-        end
-    end
-    return parent
-end
-
-function Fring.plot_fringe_phases(sol::CalibrationSolution; sites = :all, feeds = :all, ci::Integer = 0)
-    nrow = length(_fringe_indices(sites, length(sol.geom.stations)))
-    ncol = length(_fringe_indices(feeds, 2))
-    fig = Figure(size = (480 * ncol + 40, 220 * nrow + 40))
-    Fring.plot_fringe_phases(fig, sol; sites = sites, feeds = feeds, ci = ci)
-    return fig
-end
 
 # Probabilities span many decades: scientific notation below 10⁻³.
 _fmt_pfa(x::Real) = !isfinite(x) ? "NaN" :
     (x > 0 && x < 1.0e-3 ? @sprintf("%.1e", x) : string(round(x; digits = 3)))
-
-# ── plot_fringe_snr: per-scan max SNR ─────────────────────────────────────────
-function Fring.plot_fringe_snr(parent, table::AbstractDimStack)
-    names = String.(collect(lookup(table, Scan)))
-    x = collect(eachindex(names))
-    snr = collect(table.max_snr)
-    ax = Axis(
-        parent[1, 1]; xlabel = "scan", ylabel = "max detection SNR", title = "Fringe per-scan SNR",
-        xticks = (x, names),
-    )
-    if !isempty(x)
-        scatter!(ax, x, snr; markersize = 8, color = :seagreen)
-        lines!(ax, x, snr; color = (:seagreen, 0.5))
-    end
-    return parent
-end
-
-function Fring.plot_fringe_snr(table::AbstractDimStack)
-    fig = Figure(size = (640, 280))
-    Fring.plot_fringe_snr(fig, table)
-    return fig
-end
 
 _bl_label((a, b)::Tuple, names) = string(_site_label(names, a), "–", _site_label(names, b))
 

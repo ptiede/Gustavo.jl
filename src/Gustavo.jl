@@ -71,7 +71,7 @@ export scale_weights!, flag_channels!, normalize_by_autocorrelations!
 export search_scan
 # The solution surface: the container, its components, and serialization.
 export CalibrationSolution, SolvedComponent
-export gains
+export gains, plot_gain_phases
 export save_solution, load_solution
 
 # Unexported because the names are common: a step author extends `solve`;

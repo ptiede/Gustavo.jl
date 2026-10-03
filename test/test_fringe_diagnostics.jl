@@ -163,24 +163,18 @@
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
 
-    @testset "Makie plot smoke" begin
-        @test !isnothing(FP.plot_fringe_spectrum(sol))
-        @test !isnothing(FP.plot_fringe_spectrum(sol; sites = 1, feeds = [1]))
-        @test !isnothing(FP.plot_fringe_spectrum(sol; sites = 1, residual = true))
-        @test !isnothing(FP.plot_fringe_phases(sol))
-        @test !isnothing(FP.plot_fringe_phases(sol; sites = [1, 2], feeds = :all, ci = 2))
-        @test !isnothing(FP.plot_fringe_snr(FP.fringe_snr_table(sol)))
+    @testset "plot_gain_phases" begin
+        fig = plot_gain_phases(gains(sol; Ti = 1))
+        @test (show(IOBuffer(), MIME("image/png"), fig); true)
+        @test !isnothing(plot_gain_phases(gains(sol; Frequency = 1, AntennaName = At(["A1", "A2"]))))
+        @test !isnothing(plot_gain_phases(gains(sol; Frequency = Near(sol.geom.f0))))
+        grid = Figure()
+        @test !isnothing(plot_gain_phases(grid[1, 2], gains(sol; Ti = 1, Feed = 1:1)))
+        @test_throws "AntennaName, Feed and one more dimension" plot_gain_phases(gains(sol))
+    end
 
-        fig = Figure(size = (1600, 500))
-        @test !isnothing(FP.plot_fringe_spectrum(fig[1, 1], sol; sites = 1))
-        @test !isnothing(FP.plot_fringe_phases(fig[1, 2], sol; sites = 1))
-        @test !isnothing(FP.plot_fringe_snr(fig[1, 3], FP.fringe_snr_table(sol)))
-
-        # Smoke: rendering must run to completion without throwing. (We do not
-        # use @test_nowarn — the Makie/PlotUtils backend emits benign cosmetic
-        # "No strict ticks found" warnings on sparse synthetic axes.)
-        fig_spec = FP.plot_fringe_spectrum(sol; sites = 1)
-        @test (show(IOBuffer(), MIME("image/png"), fig_spec); true)
+    @testset "per-scan SNR with DimensionalData's recipes" begin
+        fig = plot(FP.fringe_snr_table(sol).max_snr)
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
 

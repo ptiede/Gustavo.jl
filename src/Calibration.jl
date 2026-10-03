@@ -32,6 +32,19 @@ include("Calibration/evaluate.jl")
 include("Calibration/solutions.jl")
 include("Calibration/solution_store.jl")
 
+"""
+    plot_gain_phases(g)
+    plot_gain_phases(parent, g)
+
+Gain phase of `g`, a [`gains`](@ref) array reduced to `AntennaName`, `Feed` and
+one more dimension: one panel per antenna (rows) and feed (columns), with the
+remaining dimension on the x axis. Select that dimension by indexing, e.g.
+`plot_gain_phases(gains(sol; Ti = 1))` for phase against frequency or
+`plot_gain_phases(gains(sol[:bandpass]; Ti = 1))` for the bandpass alone.
+Provided by `GustavoMakieExt`.
+"""
+function plot_gain_phases end
+
 # Feed / correlation-product conventions
 export feed_pairs
 
@@ -70,7 +83,7 @@ export evaluate_gains
 
 # Calibration solution container, apply, serialization
 export CalibrationSolution, SolvedComponent, GeometryWindow
-export gains
+export gains, plot_gain_phases
 export save_solution, load_solution, storage_constructor, storage_arguments
 
 end

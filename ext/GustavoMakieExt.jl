@@ -13,6 +13,7 @@ using Makie:
 using Printf: @sprintf
 
 include("GustavoMakieExt_fringe.jl")
+include("GustavoMakieExt_gains.jl")
 include("GustavoMakieExt_coherence.jl")
 
 end # module

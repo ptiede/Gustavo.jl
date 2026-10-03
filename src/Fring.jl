@@ -54,34 +54,6 @@ include("Fring/diagnostics.jl")
 # ── Plot stubs — implemented by `GustavoMakieExt`. Load Makie or CairoMakie
 # to enable plotting.
 """
-    plot_fringe_spectrum(sol; sites, feeds, ti)
-    plot_fringe_spectrum(parent, sol; ...)
-
-Per-station gain phase vs frequency at one time index (delay slope + constant).
-Provided by `GustavoMakieExt`.
-"""
-function plot_fringe_spectrum end
-
-"""
-    plot_fringe_phases(sol; sites, feeds, ci)
-    plot_fringe_phases(parent, sol; ...)
-
-Per-station gain phase vs time at one channel (rate + adhoc evolution).
-Provided by `GustavoMakieExt`.
-"""
-function plot_fringe_phases end
-
-"""
-    plot_fringe_snr(table)
-    plot_fringe_snr(parent, table)
-
-Per-scan max detection SNR of `table`, a [`fringe_snr_table`](@ref) (or several
-combined with [`cat_scans`](@ref)), labeled by scan name. Provided by
-`GustavoMakieExt`.
-"""
-function plot_fringe_snr end
-
-"""
     plot_fringe_search(m::BaselineFringeMap; zoom)
     plot_fringe_search(parent, m; zoom)
 
@@ -122,7 +94,6 @@ export baseline_delays, delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_terms
 export search_scan
-export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr
 export plot_fringe_search
 
 end

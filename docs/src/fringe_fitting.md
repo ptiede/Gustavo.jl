@@ -541,6 +541,18 @@ det = cat_scans(fringe_detections.(values(sols)))
 findall(det.detected .& (det.pfa .> 1e-6))     # accepted, but marginal
 ```
 
+With a Makie backend loaded, the labeled results plot with DimensionalData's
+recipes, and [`plot_gain_phases`](@ref) draws the gain phase of a
+[`gains`](@ref) array one panel per station and feed:
+
+```julia
+snr = cat_scans(fringe_snr_table.(values(sols)))
+plot(snr.max_snr)                                        # peak SNR per scan
+plot_gain_phases(gains(sol; Ti = 1))                     # phase against frequency
+plot_gain_phases(gains(sol[:bandpass]; Ti = 1))          # the bandpass alone
+plot_gain_phases(gains(sol; Frequency = Near(sol.geom.f0)))  # phase against time
+```
+
 The data themselves show what a solution removed. XRadio's `average`
 reduces a scan to its inverse-variance weighted means, and
 [`baseline_spectra`](@ref) lays a time-averaged set out by station pair, feed
