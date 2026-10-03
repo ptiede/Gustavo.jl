@@ -31,7 +31,6 @@ using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, Abstrac
 using Statistics: median, mean
 using LinearAlgebra
 using StaticArrays: SMatrix, SVector
-using Printf: @sprintf
 
 include("Fring/search.jl")
 include("Fring/stationize.jl")
@@ -103,24 +102,6 @@ from the full plane either way.
 """
 function plot_fringe_search end
 
-"""
-    plot_baseline_fringes(data::BaselineFringeData; ...)
-    plot_baseline_fringes(parent, data; ...)
-
-Per-baseline before/after fringe-fit check for one scan: a grid of panels (one per
-baseline) overlaying the coherent visibility before and after applying `sol`.
-`kind = :freq` plots phase (or amplitude) vs frequency — a group delay shows as a
-slope that flattens after a good fit; `kind = :time` plots vs time — a fringe rate
-shows as a slope that flattens. `show = :phase` (default) or `:amp`. `pol` selects
-the correlation product (required); `baselines` selects which to draw.
-`freqgroup = k` restricts the view to the k-th frequency group ([`fringe_freq_groups`](@ref)):
-`:freq` panels show only that group's channels on the real frequency axis, `:time`
-panels average over only that group — the readable view on wide multi-group data
-(VGOS), where the all-group view hides which group misfits.
-Provided by `GustavoMakieExt`.
-"""
-function plot_baseline_fringes end
-
 export FringeSearch, baseline_fringe_search, fringe_plane
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, baseline_fringe_map, fringe_pfa, fringe_snr_cut
@@ -135,14 +116,13 @@ export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpas
     bandpass_level_blocks
 export fringe_snr_table, fringe_detections, cat_scans
 export fringe_station_solutions
-export BaselineFringeData, baseline_pol_index
-export fringe_freq_group_stats, fringe_freq_groups
+export baseline_spectra, freq_group_coherence, fringe_freq_groups, FreqGroup, Triangle
 export BaselineFringeMap, fringe_station_flags
-export delay_closure, print_delay_closure
+export baseline_delays, delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_terms
 export search_scan
-export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr, plot_baseline_fringes
+export plot_fringe_spectrum, plot_fringe_phases, plot_fringe_snr
 export plot_fringe_search
 
 end

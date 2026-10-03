@@ -6,6 +6,9 @@
 # data helpers the Makie plot stubs consume. The plot entry points themselves
 # are stubs in `Fring.jl`, implemented by `GustavoMakieExt`.
 
+DimensionalData.@dim FreqGroup "Frequency group"
+DimensionalData.@dim Triangle "Station triangle"
+
 function _fringe_info(sol::CalibrationSolution)
     haskey(sol.steps, :fringe) || throw(
         ArgumentError(
@@ -228,154 +231,116 @@ function _cat_scans(::AbstractDimStack, xs, out_dims)
     return DimStack(NamedTuple{names}(layers))
 end
 
-# ── Per-baseline before/after data (the fringe-fit quality check) ──────────────
+# ── Per-baseline spectra (the fringe-fit quality check) ──────────────────────
 
 """
-    BaselineFringeData
+    baseline_spectra(avg) -> DimStack
 
-Per-baseline coherent visibility averages for one scan, before and after applying
-a fringe `CalibrationSolution`, consumed by `plot_baseline_fringes`.
+The time-averaged spectra of `avg`, a processing set XRadio's `average`
+reduced to one sample per scan (`average(ps, ByScan())`), laid out by label
+across its spectral windows: layers `vis` (the inverse-variance weighted mean
+visibility) and `weight` (its summed weight, so `1/√weight` is its width per
+real component), over `(Scan, AntennaPair, FeedPair, Frequency)`, cross
+baselines only. A cell no Measurement Set holds, or holds flagged, is `NaN`
+with weight zero. Throws when a Measurement Set holds more than one sample of
+a scan.
 
-Fields: `source`/`scan`/`scan_index`/`max_snr` identify the scan; `bl_pairs` and
-`feeds` (each product's feed pair, see [`feed_pairs`](@ref)) label the baseline
-and correlation axes; `freqs` (Hz, all spws
-stacked) and `times` (h) the data axes. The four data arrays are weighted coherent
-means (vector averages, `NaN` where a cell has no unflagged data):
+Spectra of a scan before and after a solution show what it removed; a good
+fringe fit flattens the phase slope. DimensionalData's Makie recipes plot them
+directly, one line per baseline:
 
-- `spec_before`/`spec_after` — `(nchan, nbl, npol)`, averaged over time. `angle`
-  vs frequency shows the group-delay slope (flat after a good fit); `abs` shows
-  the group-averaged coherence.
-- `tser_before`/`tser_after` — `(ntime, nbl, npol)`, averaged over frequency.
-  `angle` vs time shows the fringe-rate slope (flat after a good fit).
+```julia
+before = baseline_spectra(average(g, ByScan()))
+after = baseline_spectra(average(calibrate(fr, g; flag_bad = false, apply_flags = false), ByScan()))
+series(angle.(after.vis[Scan = 1, FeedPair = At((1, 1))]))
+```
 
-Wide-band multi-group data (e.g. the four VGOS 3/5/6/10 GHz frequency groups) also
-carries the per-frequency-group split, so diagnostics can be viewed one frequency
-group at a time (`plot_baseline_fringes(data; freqgroup = k)`):
-
-- `freq_groups` — channel ranges of each frequency group ([`fringe_freq_groups`](@ref)
-  of `freqs`; a single full range on contiguous data).
-- `tser_freqgroup_before`/`tser_freqgroup_after` — `(ntime, nbl, npol, ngroups)`, the time
-  series averaged over only that frequency group's channels.
+Per-scan results combine with [`cat_scans`](@ref).
 """
-struct BaselineFringeData
-    source::String
-    scan::String
-    scan_index::Int
-    max_snr::Float64
-    bl_pairs::Vector{Tuple{Int, Int}}
-    ant_names::Vector{String}        # station codes, indexed by antenna number
-    feeds::Vector{Tuple{Int, Int}}
-    freqs::Vector{Float64}
-    times::Vector{Float64}
-    spec_before::Array{ComplexF64, 3}
-    spec_after::Array{ComplexF64, 3}
-    tser_before::Array{ComplexF64, 3}
-    tser_after::Array{ComplexF64, 3}
-    freq_groups::Vector{UnitRange{Int}}
-    tser_freqgroup_before::Array{ComplexF64, 4}
-    tser_freqgroup_after::Array{ComplexF64, 4}
-    # Thermal 1σ on each coherent mean above, in visibility units — the radial
-    # width of the complex sample, from which a phase error is σ/|V|. `NaN`
-    # where the mean has no contributing data, or where the caller did not
-    # supply weights.
-    spec_sigma_before::Array{Float64, 3}
-    spec_sigma_after::Array{Float64, 3}
-    tser_sigma_before::Array{Float64, 3}
-    tser_sigma_after::Array{Float64, 3}
-    tser_freqgroup_sigma_before::Array{Float64, 4}
-    tser_freqgroup_sigma_after::Array{Float64, 4}
-end
-
-# 1σ on a weighted coherent mean: with `w = 1/σ_vis²` per sample, the mean
-# `Σwv / Σw` has variance `1/Σw`. `_coherent_mean!` leaves its weight-sum
-# argument untouched, so this reads the same accumulator the mean divided by.
-_mean_sigma(wsum::AbstractArray) = map(x -> x > 0 ? 1 / sqrt(x) : NaN, wsum)
-
-# The 1σ error bar on a plotted view of a complex sample, given the sample `z`
-# and its radial width `σ`: `abs` sees σ itself, `angle` sees the angle σ
-# subtends at radius |z|. Once σ reaches |z| the phase is unconstrained, so the bar saturates at
-# π rather than reporting a misleadingly finite width.
-_plotted_sigma(::typeof(abs), z, σ) = σ
-_plotted_sigma(::typeof(angle), z, σ) = abs(z) > 0 ? min(σ / abs(z), Float64(π)) : Float64(π)
-
-# Backwards-compatible constructor (no frequency-group split): one group spanning
-# all channels, per-group time series = the full-span ones.
-function BaselineFringeData(
-        source, scan, scan_index, max_snr, bl_pairs, ant_names, feeds,
-        freqs, times, spec_before, spec_after, tser_before, tser_after,
+function baseline_spectra(avg::XRadio.ProcessingSet)
+    isempty(avg) && throw(ArgumentError("the processing set holds no Measurement Sets"))
+    members = collect(values(avg))
+    geom = DataGeometry(avg)
+    pairs = [p for p in _station_pairs(reduce(vcat, map(_member_station_pairs, members)), geom) if p[1] != p[2]]
+    feeds = sort!(unique!(reduce(vcat, (vec(feed_pairs(ms)) for ms in members))))
+    scans = unique(reduce(vcat, (String.(collect(ms[:scan_name])) for ms in members)))
+    freqs = sort!(unique!(reduce(vcat, (collect(XRadio.frequencies(ms)) for ms in members))))
+    d = (_scan_dim(scans), _station_pair_dim(pairs), FeedPair(feeds), Frequency(freqs))
+    n = map(length, d)
+    V = promote_type((eltype(ms[:visibility]) for ms in members)...)
+    W = promote_type((eltype(ms[:weight]) for ms in members)...)
+    vis = fill(V(NaN), n)
+    weight = zeros(W, n)
+    seen = falses(n)
+    index = (
+        Dict(s => i for (i, s) in enumerate(scans)), Dict(p => i for (i, p) in enumerate(pairs)),
+        Dict(f => i for (i, f) in enumerate(feeds)), Dict(f => i for (i, f) in enumerate(freqs)),
     )
-    nti, nbl, npol = size(tser_before)
-    return BaselineFringeData(
-        source, scan, scan_index, max_snr, bl_pairs, ant_names, feeds,
-        freqs, times, spec_before, spec_after, tser_before, tser_after,
-        [1:length(freqs)],
-        reshape(copy(tser_before), nti, nbl, npol, 1),
-        reshape(copy(tser_after), nti, nbl, npol, 1),
-        # No weights were supplied, so the thermal widths are unknown; plots
-        # draw no error bars for a NaN σ.
-        fill(NaN, size(spec_before)), fill(NaN, size(spec_after)),
-        fill(NaN, size(tser_before)), fill(NaN, size(tser_after)),
-        fill(NaN, nti, nbl, npol, 1), fill(NaN, nti, nbl, npol, 1),
-    )
-end
-
-"""
-    baseline_pol_index(data, pol) -> Int
-
-Resolve a correlation-product selector, an `Integer` index or a feed pair such as
-`(1, 1)`, against `data.feeds`.
-"""
-baseline_pol_index(data::BaselineFringeData, pol) = _pol_index(data.feeds, pol)
-
-"""
-    fringe_freq_group_stats(data::BaselineFringeData; pol)
-        -> Vector{@NamedTuple{f_lo, f_hi, nchan, eta_before, eta_after}}
-
-Per-frequency-group coherence summary of one scan's [`BaselineFringeData`](@ref):
-for each contiguous frequency group, the within-group coherence `|Σ_c z_c| / Σ_c |z_c|`
-of the per-channel time-averaged visibilities, pooled over cross baselines —
-before and after the fringe solution. A frequency group whose `eta_after` lags its
-neighbours localises residual frequency structure (RFI, station passband
-defect) to that group.
-"""
-function fringe_freq_group_stats(data::BaselineFringeData; pol)
-    p = _pol_index(data.feeds, pol)
-    out = @NamedTuple{f_lo::Float64, f_hi::Float64, nchan::Int, eta_before::Float64, eta_after::Float64}[]
-    for r in _freq_group_ranges(data.freqs)
-        stats = map((data.spec_before, data.spec_after)) do spec
-            num = 0.0
-            den = 0.0
-            for (bi, (a, b)) in enumerate(data.bl_pairs)
-                a == b && continue
-                acc = zero(ComplexF64)
-                s = 0.0
-                for c in r
-                    z = spec[c, bi, p]
-                    (isfinite(real(z)) && isfinite(imag(z))) || continue
-                    acc += z
-                    s += abs(z)
-                end
-                num += abs(acc)
-                den += s
-            end
-            den > 0 ? num / den : NaN
-        end
-        push!(
-            out, (
-                f_lo = data.freqs[first(r)], f_hi = data.freqs[last(r)],
-                nchan = length(r), eta_before = stats[1], eta_after = stats[2],
-            )
-        )
+    for ms in members
+        _place_spectra!(vis, weight, seen, index, _member_layers(ms)..., ms)
     end
-    return out
+    return DimStack((; vis = DimArray(vis, d), weight = DimArray(weight, d)))
 end
 
-# Selector resolution shared by `baseline_pol_index` and `fringe_search_map`.
-_pol_index(feeds, pol::Integer) = Int(pol)
-_pol_index(feeds, pol::Tuple{Integer, Integer}) = UVData._pol_index_lookup(feeds, pol)
-_pol_index(feeds, pol) = throw(
-    ArgumentError("select a correlation product by index or by feed pair such as (1, 1), got $(repr(pol))")
-)
+function _place_spectra!(vis, weight, seen, (scan_i, pair_i, feed_i, freq_i), V, W, F, ms)
+    stations = _member_station_pairs(ms)
+    feeds = feed_pairs(ms)
+    scans = String.(collect(ms[:scan_name]))
+    freqs = collect(lookup(V, Frequency))
+    for ti in axes(V, Ti), bi in axes(V, BaselineID), p in axes(V, Polarization)
+        haskey(pair_i, stations[bi]) || continue                # autocorrelations
+        s, j, q = scan_i[scans[ti]], pair_i[stations[bi]], feed_i[feeds[p, bi]]
+        for c in axes(V, Frequency)
+            k = freq_i[freqs[c]]
+            seen[s, j, q, k] && throw(
+                ArgumentError(
+                    "the set holds more than one sample of scan $(scans[ti]) on $(stations[bi]); " *
+                        "average over time first: `average(ps, ByScan())`"
+                )
+            )
+            seen[s, j, q, k] = true
+            cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
+            _usable(F[cell], W[cell], V[cell]) || continue
+            vis[s, j, q, k] = V[cell]
+            weight[s, j, q, k] = W[cell]
+        end
+    end
+    return nothing
+end
+
+"""
+    freq_group_coherence(spectra) -> DimArray
+
+The coherence `η = Σ |Σ_c z_c| / Σ Σ_c |z_c|` of each frequency group
+([`fringe_freq_groups`](@ref)) of `spectra`, a [`baseline_spectra`](@ref)
+result, pooled over cross baselines: the inner sums run
+over the group's channels, the outer over baselines. Over
+`(Scan, FeedPair, FreqGroup)`, each `FreqGroup` labeled by its lowest and
+highest channel frequency. A group whose coherence lags its neighbours after a
+fit localises residual frequency structure (RFI, a station passband defect)
+to that group.
+"""
+function freq_group_coherence(spectra::AbstractDimStack)
+    spec = spectra.vis
+    freqs = collect(lookup(spec, Frequency))
+    groups = _freq_group_ranges(freqs)
+    d = (
+        dims(spec, Scan), dims(spec, FeedPair),
+        FreqGroup(DimensionalData.Lookups.Categorical([(freqs[first(r)], freqs[last(r)]) for r in groups]; order = DimensionalData.Lookups.Unordered())),
+    )
+    η = DimArray(fill(NaN, map(length, d)), d)
+    for s in axes(spec, Scan), p in axes(spec, FeedPair), (k, r) in enumerate(groups)
+        num = 0.0
+        den = 0.0
+        for bl in axes(spec, AntennaPair)
+            z = filter(isfinite, view(spec, Scan(s), AntennaPair(bl), FeedPair(p), Frequency(r)))
+            num += abs(sum(z; init = zero(eltype(spec))))
+            den += sum(abs, z; init = 0.0)
+        end
+        den > 0 && (η[Scan(s), FeedPair(p), FreqGroup(k)] = num / den)
+    end
+    return η
+end
 
 # Coherence-weighted group delay (s) of one baseline's spectrum `z` over `freqs`
 # from the per-channel phase increment: τ = ⟨angle(z[c+1] z[c]*)⟩ / (2π Δf). Uses
@@ -405,50 +370,65 @@ function _baseline_delay(z::AbstractVector, freqs::AbstractVector)
 end
 
 """
-    delay_closure(data::BaselineFringeData; pol) -> NamedTuple
+    baseline_delays(spectra) -> DimArray
 
-Triangle delay-closure check, the consistency test a station-based delay solution
-must pass. For every closed triangle `(a,b,c)` it forms `τ_ab + τ_bc − τ_ac` from
-the per-baseline group delays fitted to the coherent spectra:
-
-- `closure_before` — from the raw data. A property of the *data*: real station-
-  based delays cancel around a triangle, so these are ≈ 0 (up to noise). Large
-  values would mean the data itself is non-closing (not something a fit can fix).
-- `closure_after` — from the corrected data. Must stay ≈ 0 (a correct station-based
-  solution cannot create closure errors).
-- `resid_delay` — the per-baseline residual group delay after correction; a correct
-  delay solution drives these to ≈ 0 on every baseline.
-
-Returns `(; pol, triangles, closure_before, closure_after, resid_delay, bl_pairs)`.
-A station-structure or sign mistake shows up as nonzero `resid_delay` (and, if it
-breaks closure, nonzero `closure_after`).
+Each cross baseline's group delay (s) in `spectra`, a
+[`baseline_spectra`](@ref) result, over `(Scan, AntennaPair, FeedPair)`: the
+coherence-weighted mean phase increment between adjacent channels over 2π
+times their spacing. On data a correct delay solution has corrected, every
+baseline's delay is ≈ 0.
 """
-function delay_closure(data::BaselineFringeData; pol)
-    p = baseline_pol_index(data, pol)
-    nbl = length(data.bl_pairs)
-    τb = fill(NaN, nbl); τa = fill(NaN, nbl)
-    for bi in eachindex(τb, τa)
-        a, b = data.bl_pairs[bi]
-        a == b && continue
-        τb[bi] = _baseline_delay(view(data.spec_before, :, bi, p), data.freqs)
-        τa[bi] = _baseline_delay(view(data.spec_after, :, bi, p), data.freqs)
+function baseline_delays(spectra::AbstractDimStack)
+    spec = spectra.vis
+    freqs = collect(lookup(spec, Frequency))
+    d = (dims(spec, Scan), dims(spec, AntennaPair), dims(spec, FeedPair))
+    delay = DimArray(fill(NaN, map(length, d)), d)
+    for I in DimensionalData.DimIndices(delay)
+        delay[I] = _baseline_delay(collect(spec[I]), freqs)
     end
-    blindex = Dict(data.bl_pairs[bi] => bi for bi in eachindex(data.bl_pairs))
-    ants = sort(unique(Iterators.flatten(data.bl_pairs)))
-    tris = NTuple{3, Int}[]; cb = Float64[]; ca = Float64[]
-    for a in ants, b in ants, c in ants
-        (a < b < c) || continue
-        (haskey(blindex, (a, b)) && haskey(blindex, (b, c)) && haskey(blindex, (a, c))) || continue
-        ab, bc, ac = blindex[(a, b)], blindex[(b, c)], blindex[(a, c)]
-        (isfinite(τb[ab]) && isfinite(τb[bc]) && isfinite(τb[ac])) || continue
-        push!(tris, (a, b, c))
-        push!(cb, τb[ab] + τb[bc] - τb[ac])
-        push!(ca, τa[ab] + τa[bc] - τa[ac])
-    end
-    return (;
-        pol = data.feeds[p], triangles = tris, closure_before = cb,
-        closure_after = ca, data_delay = τb, resid_delay = τa, bl_pairs = copy(data.bl_pairs),
+    return delay
+end
+
+"""
+    delay_closure(spectra) -> DimArray
+
+The triangle delay closure `τ_ab + τ_bc + τ_ca` of the
+[`baseline_delays`](@ref) of `spectra`, a [`baseline_spectra`](@ref) result,
+around every triangle of stations whose three baselines were measured. Over
+`(Scan, Triangle, FeedPair)`, each `Triangle` labeled by its station names,
+for the products that pair a feed with itself: on a product `(f, g)` with
+`f ≠ g` each station enters the triangle once with each feed, so the feeds'
+delay difference does not cancel.
+
+Station-based delays cancel around a triangle, so the closure of raw data is
+≈ 0 up to noise, and a correct station-based solution keeps it there. A
+station-structure or sign mistake shows as residual
+[`baseline_delays`](@ref) after correction and, if it breaks closure, as a
+nonzero closure.
+"""
+function delay_closure(spectra::AbstractDimStack)
+    delay = baseline_delays(spectra)
+    pairs = collect(lookup(delay, AntennaPair))
+    stations = unique(Iterators.flatten(pairs))
+    index = Dict(p => i for (i, p) in enumerate(pairs))
+    triangles = [
+        (a, b, c) for (i, a) in enumerate(stations) for (j, b) in enumerate(stations) for (k, c) in enumerate(stations)
+            if i < j < k && all(e -> haskey(index, e) || haskey(index, reverse(e)), ((a, b), (b, c), (c, a)))
+    ]
+    parallel = [f for f in lookup(delay, FeedPair) if f[1] == f[2]]
+    d = (
+        dims(delay, Scan),
+        Triangle(DimensionalData.Lookups.Categorical(triangles; order = DimensionalData.Lookups.Unordered())),
+        FeedPair(parallel),
     )
+    closure = DimArray(fill(NaN, map(length, d)), d)
+    # A baseline stored as (y, x) has the negated delay of (x, y).
+    τ(s, e, f) = haskey(index, e) ? delay[Scan(s), AntennaPair(index[e]), FeedPair(At(f))] :
+        -delay[Scan(s), AntennaPair(index[reverse(e)]), FeedPair(At(f))]
+    for s in axes(closure, Scan), (t, (a, b, c)) in enumerate(triangles), f in parallel
+        closure[Scan(s), Triangle(t), FeedPair(At(f))] = τ(s, (a, b), f) + τ(s, (b, c), f) + τ(s, (c, a), f)
+    end
+    return closure
 end
 
 # ── Delay–rate search map (the false-fringe check) ─────────────────────────────
@@ -470,21 +450,4 @@ struct BaselineFringeMap
     ant_names::Vector{String}
     pol::Tuple{Int, Int}
     map::FringeSearchMap
-end
-
-"""
-    print_delay_closure(c; io = stdout)
-
-Summarize [`delay_closure`](@ref): RMS/max triangle closure (data and residual)
-and the RMS/max residual per-baseline delay, all in ns.
-"""
-function print_delay_closure(c; io = stdout)
-    rms(v) = (u = filter(isfinite, v); isempty(u) ? NaN : sqrt(sum(abs2, u) / length(u)))
-    mx(v) = (u = abs.(filter(isfinite, v)); isempty(u) ? NaN : maximum(u))
-    ns(x) = 1.0e9 * x
-    println(io, "Delay closure [", c.pol, "], ", length(c.triangles), " triangles:")
-    println(io, @sprintf("  data     closure rms = %9.4f ns  max = %9.4f ns", ns(rms(c.closure_before)), ns(mx(c.closure_before))))
-    println(io, @sprintf("  residual closure rms = %9.4f ns  max = %9.4f ns", ns(rms(c.closure_after)), ns(mx(c.closure_after))))
-    println(io, @sprintf("  residual delay   rms = %9.4f ns  max = %9.4f ns", ns(rms(c.resid_delay)), ns(mx(c.resid_delay))))
-    return nothing
 end

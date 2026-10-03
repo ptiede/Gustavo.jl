@@ -380,6 +380,14 @@ end
     @test R_on > R_off                  # the bandpass stage flattens per-channel phase
     @test R_on > 0.97                   # nearly flat after the bandpass
     @test R_off < 0.95                  # bandpass survives without the stage
+
+    # The bandpass is station-based, so the corrected data still close around
+    # every triangle, with or without it.
+    mx(c) = maximum(abs, filter(isfinite, c); init = 0.0)
+    τscale = mx(FP.baseline_delays(FP.baseline_spectra(XRadio.average(ps, XRadio.ByScan()))))
+    @test τscale > 0
+    @test mx(FP.delay_closure(FP.baseline_spectra(XRadio.average(calibrate(sol_on, ps), XRadio.ByScan())))) < 1.0e-3 * τscale
+    @test mx(FP.delay_closure(FP.baseline_spectra(XRadio.average(calibrate(sol_off, ps), XRadio.ByScan())))) < 1.0e-3 * τscale
 end
 
 @testset "Bandpass on scan-averaged data applies to the full data" begin

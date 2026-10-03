@@ -541,11 +541,26 @@ det = cat_scans(fringe_detections.(values(sols)))
 findall(det.detected .& (det.pfa .> 1e-6))     # accepted, but marginal
 ```
 
+The data themselves show what a solution removed. XRadio's `average`
+reduces a scan to its inverse-variance weighted means, and
+[`baseline_spectra`](@ref) lays a time-averaged set out by station pair, feed
+pair and frequency across its spectral windows. Spectra of the raw and the
+corrected scan show the delay slope a good fit flattens, and plot directly
+with DimensionalData's Makie recipes. [`baseline_delays`](@ref) and
+[`delay_closure`](@ref) test the station-based structure: delays close around
+triangles before correction and vanish after it. [`freq_group_coherence`](@ref)
+localises residual structure to a frequency group.
+
+```julia
+using XRadio: average, ByScan
+before = baseline_spectra(average(g, ByScan()))
+after = baseline_spectra(average(calibrate(fr, g; flag_bad = false, apply_flags = false), ByScan()))
+series(angle.(after.vis[Scan = 1, FeedPair = At((1, 1))]))   # one line per baseline
+delay_closure(before)
+```
+
 [`baseline_fringe_map`](@ref) returns the windowed delay–rate surface itself as
 a [`FringeSearchMap`](@ref), rather than only its maximum. This is required to
 determine why a detection occurred at a given delay and rate, and whether a
-competing peak of comparable height was present.
-[`fringe_search_map`](@ref) builds one from the detections
-recorded on a solution, and [`delay_closure`](@ref) evaluates delay
-closure around triangles. With a Makie backend loaded,
+competing peak of comparable height was present. With a Makie backend loaded,
 [`plot_fringe_search`](@ref) plots the surface.

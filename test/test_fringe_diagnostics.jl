@@ -116,6 +116,53 @@
         @test sol.geom.stations == ["A1", "A2", "A3", "A4"]
     end
 
+    scan_average(data) = XRadio.average(data, XRadio.ByScan())
+    before = FP.baseline_spectra(scan_average(ps))
+    after = FP.baseline_spectra(scan_average(calibrate(sol[:fringe], ps; flag_bad = false, apply_flags = false)))
+
+    @testset "baseline spectra before/after" begin
+        @test keys(before) == (:vis, :weight)
+        pairs = collect(lookup(before, AntennaPair))
+        @test all(((a, b),) -> a != b, pairs)
+        @test length(pairs) == 6
+        @test collect(lookup(before, FeedPair)) == [(1, 1), (1, 2), (2, 1), (2, 2)]
+        @test collect(lookup(before, UVP.Scan)) == sol.geom.scan_names
+        @test size(before.vis) == (1, 6, 4, length(sol.geom.channel_freqs))
+        @test lookup(before, Frequency) == sol.geom.channel_freqs
+
+        # Dividing out the fringe solution aligns the per-channel phases, so the
+        # concentration R = |Σe^{iφ}|/N over frequency drops on no cross baseline.
+        concentration(z) = (v = filter(isfinite, z); isempty(v) ? 0.0 : abs(sum(cis, angle.(v))) / length(v))
+        for pr in pairs
+            sel = (UVP.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
+            @test concentration(after.vis[sel]) >= concentration(before.vis[sel]) - 1.0e-6
+        end
+
+        @test_throws "average over time first" FP.baseline_spectra(ps)
+        ps2, _ = _build_fringe_ps(; nscans = 2)
+        two = FP.baseline_spectra(scan_average(ps2))
+        @test length(lookup(two, UVP.Scan)) == 2
+    end
+
+    @testset "delay closure" begin
+        mx(v) = maximum(abs, filter(isfinite, v); init = 0.0)
+        τscale = mx(FP.baseline_delays(before))
+        @test τscale > 0                                  # the fixture injects real delays
+        c = FP.delay_closure(before)
+        @test collect(lookup(c, FeedPair)) == [(1, 1), (2, 2)]
+        @test collect(lookup(c, FP.Triangle)) == [("A1", "A2", "A3"), ("A1", "A2", "A4"), ("A1", "A3", "A4"), ("A2", "A3", "A4")]
+        # Station-based delays cancel around a triangle; a correct delay solution
+        # removes the delay on every baseline and introduces no closure error.
+        @test mx(c) < 0.05 * τscale
+        @test mx(FP.baseline_delays(after)[FeedPair(At([(1, 1), (2, 2)]))]) < 0.05 * τscale
+        @test mx(FP.delay_closure(after)) < 0.05 * τscale
+    end
+
+    @testset "baseline spectra plot with DimensionalData's recipes" begin
+        fig = series(angle.(after.vis[UVP.Scan(1), FeedPair(At((1, 1)))]))
+        @test (show(IOBuffer(), MIME("image/png"), fig); true)
+    end
+
     @testset "Makie plot smoke" begin
         @test !isnothing(FP.plot_fringe_spectrum(sol))
         @test !isnothing(FP.plot_fringe_spectrum(sol; sites = 1, feeds = [1]))
@@ -208,25 +255,18 @@
     end
 end
 
-@testset "fringe_freq_group_stats: per-band coherence + band splitting" begin
-    # 3 bands of 4 channels with gaps; after = flat phase (η=1), before = ramp.
+@testset "freq_group_coherence: per-group coherence + group splitting" begin
+    # 3 bands of 4 channels with gaps; flat phase gives η = 1, a ramp less.
     freqs = vcat(1.0e9 .+ (0:3) .* 1.0e6, 1.1e9 .+ (0:3) .* 1.0e6, 1.3e9 .+ (0:3) .* 1.0e6)
     @test FP._freq_group_ranges(freqs) == [1:4, 5:8, 9:12]
-    nchan = length(freqs)
-    bl = [(1, 2)]
-    spec_b = reshape(ComplexF64[cis(2π * c / 6) for c in 1:nchan], nchan, 1, 1)
-    spec_a = reshape(fill(1.0 + 0.0im, nchan), nchan, 1, 1)
-    data = FP.BaselineFringeData(
-        "S", "1", 1, 100.0, bl, ["A", "B"], [(1, 1)], freqs, [0.0],
-        spec_b, spec_a,
-        zeros(ComplexF64, 1, 1, 1), zeros(ComplexF64, 1, 1, 1),
-    )
-    stats = FP.fringe_freq_group_stats(data; pol = 1)
-    @test length(stats) == 3
-    @test all(r -> r.nchan == 4, stats)
-    @test all(r -> r.eta_after ≈ 1.0, stats)
-    @test all(r -> r.eta_before < 0.9, stats)
-    @test stats[1].f_lo == freqs[1] && stats[3].f_hi == freqs[end]
+    d = (FP._scan_dim(["1"]), FP._station_pair_dim([("A", "B")]), FeedPair([(1, 1)]), Frequency(freqs))
+    spectra(z) = DimStack((; vis = DimArray(reshape(z, 1, 1, 1, :), d)))
+    ramp = FP.freq_group_coherence(spectra(ComplexF64[cis(2π * c / 6) for c in eachindex(freqs)]))
+    flat = FP.freq_group_coherence(spectra(fill(1.0 + 0.0im, length(freqs))))
+    @test map(DimensionalData.basetypeof, dims(flat)) == (UVP.Scan, FeedPair, FP.FreqGroup)
+    @test collect(lookup(flat, FP.FreqGroup)) == [(freqs[1], freqs[4]), (freqs[5], freqs[8]), (freqs[9], freqs[12])]
+    @test all(≈(1.0), flat)
+    @test all(<(0.9), ramp)
 
     # Band GROUPS: comparable inter-block gaps merge into one group; a far-away
     # block splits off its own group (the VGOS 3/5/6/10 GHz situation).
@@ -234,46 +274,31 @@ end
     freqs2 = vcat(freqs, 5.0e9 .+ (0:3) .* 1.0e6)
     @test FP.fringe_freq_groups(freqs2) == [1:12, 13:16]
     @test FP.fringe_freq_groups(freqs2[1:1]) == [1:1]
-
-    # Compat constructor: one full-range group whose band time series mirror the
-    # full-band ones.
-    @test data.freq_groups == [1:12]
-    @test data.tser_freqgroup_before[:, :, :, 1] == data.tser_before
-    @test data.tser_freqgroup_after[:, :, :, 1] == data.tser_after
 end
 
-# ── Thermal error bars on the baseline-fringe panels ─────────────────────────
-#
-# `plot_baseline_fringes` draws DATA — coherent visibility averages — so every
-# point has a thermal width and no gain uncertainty is involved. The width is
-# `σ = 1/√Σw` on the weighted mean, and the panels derive an amplitude bar
-# (σ itself) and a phase bar (σ/|V|) from the same complex sample.
+@testset "baseline spectra carry the averages' widths" begin
+    noise = 0.05
+    w = 2 / noise^2                       # the fixture's weight per real component
+    nti = 6
+    ps, _ = _build_fringe_ps(; nant = 4, nspw = 2, nchan = 8, ntime = nti, noise)
+    fr = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+    corrected = calibrate(fr, ps; flag_bad = false, apply_flags = false)
+    spectra = FP.baseline_spectra(XRadio.average(corrected, XRadio.ByScan()))
 
-@testset "baseline fringe error bars" begin
-    @testset "phase bar saturates rather than lying" begin
-        @test FP._plotted_sigma(abs, 2.0 + 0im, 0.5) == 0.5
-        @test FP._plotted_sigma(angle, 2.0 + 0im, 0.5) ≈ 0.25
-        # Once the width reaches the sample the phase is unconstrained.
-        @test FP._plotted_sigma(angle, 0.1 + 0im, 5.0) == Float64(π)
-        @test FP._plotted_sigma(angle, 0.0 + 0im, 1.0) == Float64(π)
-    end
+    # Each spectral point averages a baseline over `nti` integrations.
+    @test all(≈(nti * w), FP.baseline_spectra(XRadio.average(ps, XRadio.ByScan())).weight)
 
-    @testset "unknown widths draw no bars" begin
-        # The weightless constructor cannot know a width; it reports NaN, and
-        # every panel still renders.
-        rng = MersenneTwister(0xBA25)
-        freqs = vcat(230.0e9 .+ (0:7) .* 2.0e6, 230.1e9 .+ (0:7) .* 2.0e6)
-        times = collect(0.0:30.0:150.0)
-        bl_pairs = [(1, 2), (1, 3), (2, 3)]
-        feeds = [(1, 1), (2, 2)]
-        spec(n) = randn(rng, ComplexF64, n, length(bl_pairs), length(feeds))
-        bare = FP.BaselineFringeData(
-            "S", "1", 1, 100.0, bl_pairs, ["A1", "A2", "A3"], feeds, freqs, times,
-            spec(length(freqs)), spec(length(freqs)), spec(length(times)), spec(length(times)),
-        )
-        @test all(isnan, bare.spec_sigma_before)
-        for kind in (:freq, :time), show in (:phase, :amp)
-            @test FP.plot_baseline_fringes(bare; pol = 1, kind = kind, show = show) isa Figure
-        end
+    # Corrected visibilities on a baseline scatter about their mean by 1/√weight
+    # per real component. Pooled over every baseline and channel this is a tight
+    # check even with few samples.
+    z = Float64[]
+    for pr in lookup(spectra, AntennaPair)
+        sel = (UVP.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
+        col = collect(spectra.vis[sel])
+        σ = inv.(sqrt.(collect(spectra.weight[sel])))
+        μ = sum(col) / length(col)
+        append!(z, real.(col .- μ) ./ σ, imag.(col .- μ) ./ σ)
     end
+    @test length(z) > 100
+    @test 0.5 < sqrt(sum(abs2, z) / length(z)) < 2.0
 end
