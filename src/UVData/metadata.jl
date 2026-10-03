@@ -11,9 +11,8 @@ partition** in a UVSet: telescope identity, observation epoch, time
 system, Earth-orientation parameters, coord frame, polcal scheme.
 Source-specific fields (`object`, `ra`, `dec`) and the per-partition
 `freq_setup` live on each per-leaf `PartitionInfo`. Polarization products
-are not stored here — they live on the `Pol` dimension of the data cube
-and can be read with `pol_products(uvset)` / `pol_products(leaf)` /
-`pol_products(data)`.
+are not stored here — they live on the `Polarization` dimension of the data cube
+and can be read with `pol_products(leaf)`.
 
 - `rdate`, `gst_iat0`, `earth_rot_rate`, `ut1utc`, `polarx`, `polary`,
   `datutc`: time-system / Earth-orientation parameters (sourced from
@@ -77,20 +76,13 @@ end
     UVMetadata
 
 Bundle of array-wide observation globals shared across every leaf of a
-`UVSet`: antenna table, array config, and the array-wide
-`ObsArrayMetadata` (telescope / observation epoch).
+`UVSet`: the array-wide `ObsArrayMetadata` (telescope / observation epoch).
 
 Per-leaf metadata — including the leaf's frequency setup, scan handles
 (`scan_name`, `scan_intents`, `sub_scan_name`), and source identification
 (`source_name`/`ra`/`dec`) — lives on each leaf's `PartitionInfo`. There
 is *no* root-level scan table; scan time bounds derive from each leaf's
 `Ti` axis (mirrors xradio's `ScanArray` / `ProcessingSet` model).
-
-FITS primary-HDU cards (write-back state) live in a FITS-extension-owned
-`WeakKeyDict` keyed by `UVSet`; access via the extension's
-`primary_cards(uvset)` accessor. They are not part of `UVMetadata`
-because they are pure UVFITS-format state, not format-neutral
-observation metadata.
 """
 struct UVMetadata{TObs <: ObsArrayMetadata}
     array_obs::TObs

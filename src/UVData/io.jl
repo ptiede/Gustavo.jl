@@ -1,44 +1,33 @@
 """
-    load_uvfits(path) -> UVSet
+    load_uvfits(path; element_type = nothing) -> UVSet
 
-Load a UVData file, returning a `UVSet` whose `branches` is a flat
-`OrderedDict` of MSv4-shaped per-scan leaf `DimTree`s keyed by sanitized
-`:<source>_scan_<n>` Symbols. Each leaf carries dense
-`(Ti, Baseline, Pol, IF)` cubes for `vis`/`weights` and
-`(Ti, Baseline, UVW)` for `uvw`, mirroring xradio's MSv4 visibility schema.
+Load an AIPS random-groups UVFITS file, returning a `UVSet` whose `branches` is
+a flat `OrderedDict` of MSv4-shaped per-scan leaf `DimTree`s keyed by sanitized
+`:<source>_<spw>_scan_<n>` Symbols. Each leaf carries dense
+`(Frequency, Ti, BaselineID, Polarization)` cubes for `vis`/`weights`/`flags` and
+`(Ti, BaselineID, UVW)` for `uvw`. [`uvset_to_processingset`](@ref) converts the
+result to the `XRadio.ProcessingSet` the solver reads.
+
+`element_type` is the real float type the `vis`/`weights` cubes are stored at;
+`nothing` takes the precision the file itself holds, so a double-precision
+random-groups file is read as `ComplexF64`/`Float64`. Name it explicitly to
+store at a different precision — including to narrow a double file deliberately.
+
+Visibilities are read verbatim: AIPS UVFITS shares Gustavo's internal phase
+sense. A non-positive weight is read as a flag. See [Conventions](@ref conventions).
 
 Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
 """
 function load_uvfits end
 
 """
-    write_uvfits(output_path, uvset::UVSet)
+    load_fitsidi_apriori(path; tsys_max = 1.0e4) -> Dict{Int, AntabCalibration}
 
-Write a UVData file by walking the leaves of `uvset` directly and emitting
-random-groups records in scan-insertion order, then assembling the AN, FQ,
-and NX bintables from the root metadata.
-
-Single-source UVSets only — multi-source UVSets must first be narrowed via
-`select_source(uvset, name)`.
-
-Provided by the `GustavoFITSFilesExt` extension; load `FITSFiles` to enable.
+Build per-band a-priori flux calibrations from a FITS-IDI file's `GAIN_CURVE`
+(DPFU + elevation gain polynomial) and `SYSTEM_TEMPERATURE` (Tsys) tables, one
+[`AntabCalibration`](@ref) per 1-based band index.
+Tsys values that are non-positive, the `999` placeholder, or `> tsys_max` are
+treated as missing and fall back to the other feed's value for the same
+(antenna, band, time). Provided by the `GustavoFITSFilesExt` extension.
 """
-function write_uvfits end
-
-"""
-    primary_cards(uvset::UVSet) -> Vector
-
-Return the FITS primary-HDU cards registered for `uvset`. Provided by
-the `GustavoFITSFilesExt` extension; cards are registered automatically
-on `load_uvfits` and can be set explicitly via `register_primary_cards!`.
-"""
-function primary_cards end
-
-"""
-    register_primary_cards!(uvset::UVSet, cards)
-
-Register a vector of FITS primary-HDU cards for `uvset`. Used by callers
-that build a `UVSet` from scratch (e.g. test fixtures) before calling
-`write_uvfits`. Provided by the `GustavoFITSFilesExt` extension.
-"""
-function register_primary_cards! end
+function load_fitsidi_apriori end

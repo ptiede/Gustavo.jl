@@ -12,7 +12,7 @@ Per-baseline (each vector has one entry per unique baseline):
 - `ant2_names`   — antenna-2 (POLB-side) name (parallel to `pairs`).
 
 Per-record (length `nrecord`, only meaningful in the legacy flat
-layout where `(time, baseline)` are fused on the `Integration` axis;
+layout where `(time, baseline)` are fused on the `Ti` axis;
 not used by the partitioned `UVSet` storage):
 - `pairs_per_record` — `(a, b)` pair per record.
 
@@ -84,9 +84,11 @@ function baseline_index(bls::BaselineIndex, key::Tuple{<:AbstractString, <:Abstr
     return 0
 end
 function baseline_index(bls::BaselineIndex, key::AbstractVector{<:AbstractString})
-    length(key) == 2 || throw(ArgumentError(
-        "baseline_index: name-vector keys must have length 2 (got $(length(key)))",
-    ))
+    length(key) == 2 || throw(
+        ArgumentError(
+            "baseline_index: name-vector keys must have length 2 (got $(length(key)))",
+        )
+    )
     return baseline_index(bls, (String(key[1]), String(key[2])))
 end
 function baseline_index(bls::BaselineIndex, key::AbstractString)

@@ -1,32 +1,3 @@
-# ── Partitions accessor (tab-completable wrapper) ────────────────────────────
-
-"""
-    Partitions(uvset::UVSet)
-    partitions(uvset::UVSet) -> Partitions
-
-Wrapper struct exposing each branch key as a tab-completable property.
-`partitions(uvset).<TAB>` lists sanitized partition keys; access a leaf
-by `partitions(uvset).M3C273_scan_1`. `uvset.M3C273_scan_1` works equally
-well via the inherited `AbstractDimTree.getproperty`.
-"""
-struct Partitions{T <: UVSet}
-    uvset::T
-end
-
-partitions(uvset::UVSet) = Partitions(uvset)
-
-Base.propertynames(p::Partitions) =
-    Tuple(collect(keys(DimensionalData.branches(getfield(p, :uvset)))))
-
-function Base.getproperty(p::Partitions, k::Symbol)
-    k === :uvset && return getfield(p, :uvset)
-    return DimensionalData.branches(getfield(p, :uvset))[k]
-end
-
-Base.show(io::IO, ::MIME"text/plain", p::Partitions) =
-    Base.show(io, MIME"text/plain"(), summary(getfield(p, :uvset)))
-
-
 """
     PartitionInfo
 
@@ -38,6 +9,10 @@ Holds source identification (`source_name`/`source_key`/`field_name`/`ra`/
 `baselines::BaselineIndex`, the per-record bookkeeping carried in
 `record_order`/`date_param`/`extra_columns`, the human-readable
 `partition_name`, the leaf's own `freq_setup`, and the leaf's scan handles.
+
+`time_span` is the interval (seconds) each `Ti` sample integrates over — the time
+counterpart of `freq_setup`'s `ch_width`. Empty when the samples are
+instantaneous.
 
 Scan model follows xradio's `ScanArray` (schema.py:779): the *primary*
 scan label is cached here as `scan_name::String`, while the per-time
@@ -53,6 +28,7 @@ a copy with field overrides.
 struct PartitionInfo{
         TAnt <: AntennaTable, TBL <: BaselineIndex,
         TFS <: AbstractFrequencySetup, TEx <: NamedTuple,
+        TSp <: AbstractVector{<:Real},
     }
     source_name::String
     source_key::Symbol
@@ -72,6 +48,7 @@ struct PartitionInfo{
     record_order::Vector{Tuple{Int, Int}}
     extra_columns::TEx
     freq_setup::TFS
+    time_span::TSp
 end
 
 function PartitionInfo(;
@@ -81,6 +58,7 @@ function PartitionInfo(;
         baselines::BaselineIndex,
         record_order::Vector{Tuple{Int, Int}},
         freq_setup::AbstractFrequencySetup,
+        time_span::AbstractVector{<:Real} = Float64[],
         extra_columns::NamedTuple = NamedTuple(),
         scan_intents::AbstractVector{<:AbstractString} = String[],
         sub_scan_name::AbstractString = "",
@@ -105,7 +83,7 @@ function PartitionInfo(;
         String(spw_name), String(subarray_name), String(intent),
         Float64(ra), Float64(dec),
         Int(ddi), pname, antennas, baselines, record_order,
-        extra_columns, freq_setup,
+        extra_columns, freq_setup, time_span,
     )
 end
 
@@ -113,7 +91,6 @@ end
     update(info::PartitionInfo; kwargs...) -> PartitionInfo
 
 Return a copy of `info` with the fields named by `kwargs` overridden.
-Replaces the prior `merge(info, (; field = value))` NamedTuple pattern.
 """
 function update(info::PartitionInfo; kwargs...)
     return PartitionInfo(
@@ -135,6 +112,7 @@ function update(info::PartitionInfo; kwargs...)
         get(kwargs, :record_order, info.record_order),
         get(kwargs, :extra_columns, info.extra_columns),
         get(kwargs, :freq_setup, info.freq_setup),
+        get(kwargs, :time_span, info.time_span),
     )
 end
 
@@ -163,7 +141,7 @@ shape: `:source`, `:spw`, `:scan`, `:sub_scan`. Each renderer carries
 its own prefix convention (e.g. `scan_<n>`); empty values are skipped.
 
 Default key shape: `:<source>_<spw_name>_scan_<scan_name>[_<sub_scan>]`,
-e.g. `:M3C273_spw_0_scan_1` or `:M3C273_spw_1_scan_1_A`.
+e.g. `:src_3C273_spw_0_scan_1` or `:src_3C273_spw_1_scan_1_A`.
 """
 const DEFAULT_PARTITION_AXES = (
     PartitionAxis(:source, info -> string(info.source_key)),
@@ -185,17 +163,11 @@ to add an `intent` segment in a downstream extension). Defaults to
 """
 partition_axes(::PartitionInfo) = DEFAULT_PARTITION_AXES
 
-function _show_partition(io::IO, leaf::DimensionalData.AbstractDimTree)
-    info = DimensionalData.metadata(leaf)
-    nti = length(obs_time(leaf))
-    nbl = length(info.baselines.pairs)
-    sub = isempty(info.sub_scan_name) ? "" : "/" * info.sub_scan_name
-    return print(io, "UVDataSet(scan=$(info.scan_name)$(sub), nti=$(nti), nbaselines=$(nbl))")
-end
-
 # DimensionalData's `print_metadata_block` calls `isempty(metadata)` —
-# `PartitionInfo` is never empty, so short-circuit before iterate is hit.
+# `PartitionInfo` and `UVMetadata` are never empty, so short-circuit before
+# iterate is hit.
 Base.isempty(::PartitionInfo) = false
+Base.isempty(::UVMetadata) = false
 
 function Base.show(io::IO, ::MIME"text/plain", info::PartitionInfo)
     nant = length(info.antennas)
