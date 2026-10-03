@@ -205,7 +205,7 @@ end
 
     # The corrections, and reading scan groups in a step.
     for n in (
-            :normalize_by_autocorrelations!, :scale_weights!, :flag_channels!, :calibrate!,
+            :normalize_by_autocorrelations!, :scale_weights!, :calibrate!,
             :each_group, :ExecutionConfig,
         )
         @test n in top

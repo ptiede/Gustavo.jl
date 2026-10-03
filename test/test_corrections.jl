@@ -110,26 +110,39 @@ end
         )
     end
 
-    @testset "flag_channels!" begin
-        freqs = geom.channel_freqs
-        hit = freqs[[1, end]]
-        mask = DimArray(map(in(hit), freqs), Frequency(freqs))
-        for m in values(ps)
-            one = deepcopy(read(m))
-            out = flag_channels!(one, mask)
-            @test out === one
-            for (c, f) in enumerate(XRadio.frequencies(one))
-                @test all(parent(out[:flag][Frequency = c])) == (f in hit)
-            end
-        end
-        partial = DimArray(trues(2), Frequency(freqs[1:2]))
-        @test_throws "flag_channels!: the mask does not cover the channel" flag_channels!(fresh(), partial)
-        @test_throws "flag_channels!: index the mask by `Frequency`" flag_channels!(
-            fresh(), DimArray(trues(2), Ti([1.0, 2.0]))
-        )
-        @test_throws "flag_channels!: a frequency appears more than once" flag_channels!(
-            fresh(), DimArray(trues(2), Frequency([1.0, 1.0]))
-        )
+    @testset "flagging with selectors" begin
+        # The forms the docs show: each writes the flag layer in place.
+        f, t = XRadio.frequencies(ms), XRadio.times(ms)
+        flagged_channels(m) = [any(parent(XRadio.flags(m)[Frequency = c])) for c in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[Frequency = f[2] .. f[3]] .= true
+        @test flagged_channels(m) == [f[2] <= x <= f[3] for x in f]
+
+        m = fresh()
+        k = 2
+        XRadio.flags(m)[Frequency = DimensionalData.Begin:(DimensionalData.Begin + k - 1)] .= true
+        XRadio.flags(m)[Frequency = (DimensionalData.End - k + 1):DimensionalData.End] .= true
+        @test flagged_channels(m) == [i - firstindex(f) < k || lastindex(f) - i < k for i in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[Frequency = Where(>(f[end - 1]))] .= true
+        @test flagged_channels(m) == [i == lastindex(f) for i in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[Ti = t[1] .. t[2]] .= true
+        @test [any(parent(XRadio.flags(m)[Ti = i])) for i in eachindex(t)] == [i <= firstindex(t) + 1 for i in eachindex(t)]
+
+        m = fresh()
+        XRadio.flags(m)[XRadio.baselines(m, "A2"), Frequency(f[1] .. f[2])] .= true
+        pairs_hit = [p for (bi, p) in enumerate(XRadio.baselines(m)) if any(parent(XRadio.flags(m)[BaselineID = bi]))]
+        @test Set(pairs_hit) == Set(p for p in XRadio.baselines(m) if "A2" in p)
+        @test flagged_channels(m) == [i - firstindex(f) < 2 for i in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[XRadio.baseline(m, ("A1", "A3"))] .= true
+        @test all(parent(XRadio.flags(m)[XRadio.baseline(m, ("A1", "A3"))]))
+        @test count(XRadio.flags(m)) == length(XRadio.flags(m)[XRadio.baseline(m, ("A1", "A3"))])
     end
 end
 

@@ -67,7 +67,7 @@ export SolveStep, ExecutionConfig, ProgressLogger, mapsets
 export outer_executor, inner_executor
 export each_group, model_components, provides, step_gauge
 export supports_station_heterogeneity
-export scale_weights!, flag_channels!, normalize_by_autocorrelations!
+export scale_weights!, normalize_by_autocorrelations!
 export search_scan
 # The solution surface: the container, its components, and serialization.
 export CalibrationSolution, SolvedComponent

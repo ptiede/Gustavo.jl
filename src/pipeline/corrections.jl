@@ -169,39 +169,3 @@ function scale_weights!(ms::XRadio.MeasurementSet, scale::AbstractDimVector)
     end
     return ms
 end
-
-# ── Channel flagging ────────────────────────────────────────────────────────
-
-"""
-    flag_channels!(ms::MeasurementSet, mask::AbstractDimVector{Bool}) -> ms
-
-Flag, in place, the channels of `ms` where `mask`, indexed by `Frequency`
-(Hz), is `true`. Each channel takes the mask entry at its center frequency; a
-channel the mask does not cover throws. Visibilities and weights are left as
-they are.
-
-    freqs = XRadio.frequencies(ms)
-    flag_channels!(ms, DimArray(86.10e9 .< freqs .< 86.12e9, Frequency(freqs)))
-"""
-function flag_channels!(ms::XRadio.MeasurementSet, mask::AbstractDimVector{Bool})
-    only(dims(mask)) isa Frequency || throw(
-        ArgumentError(
-            "flag_channels!: index the mask by `Frequency`, not $(nameof(typeof(only(dims(mask)))))"
-        )
-    )
-    allunique(lookup(mask, 1)) || throw(ArgumentError("flag_channels!: a frequency appears more than once in the mask"))
-    fm = Float64.(lookup(mask, 1))
-    perm = sortperm(fm)
-    sf = fm[perm]
-    sel = Int[]
-    for (c, f) in enumerate(XRadio.frequencies(ms))
-        tol = Calibration._FREQ_RTOL * abs(f)
-        j = searchsortedfirst(sf, f - tol)
-        (j <= length(sf) && abs(sf[j] - f) <= tol) || throw(
-            ArgumentError("flag_channels!: the mask does not cover the channel at $f Hz")
-        )
-        mask[perm[j]] && push!(sel, c)
-    end
-    isempty(sel) || (view(ms[:flag], Frequency(sel)) .= true)
-    return ms
-end

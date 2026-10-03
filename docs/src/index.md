@@ -86,13 +86,34 @@ time and hands it to a function.
 **Corrections.** A correction is a function that modifies a Measurement Set in
 place and returns it. The built-in ones are
 [`normalize_by_autocorrelations!`](@ref Gustavo.UVData.normalize_by_autocorrelations!),
-[`scale_weights!`](@ref), [`flag_channels!`](@ref), and
+[`scale_weights!`](@ref), and
 [`calibrate!`](@ref), which divides a solution's gains out of the data. Each
 applies to one Measurement Set; a `ProcessingSet` is corrected member by
 member, `foreach(ms -> scale_weights!(ms, ws), values(ps))`, except
 `calibrate!`, which also takes a `ProcessingSet`. Data opened lazily must be
 read into memory before it is corrected: [`Gustavo.materialize`](@ref Gustavo.UVData.materialize) reads it with
 arrays of its own, so the source is left as it was.
+
+**Flagging.** XRadio's `flags(ms)` is the Measurement Set's own flag array,
+so flagging is assignment through DimensionalData's selectors and XRadio's
+baseline selectors, which combine freely:
+
+```julia
+using DimensionalData, XRadio
+F = flags(ms)
+F[Frequency = 86.10e9 .. 86.12e9] .= true                 # a frequency range (Hz)
+F[Frequency = Begin:(Begin + k - 1)] .= true              # the first k channels
+F[Frequency = (End - k + 1):End] .= true                  # the last k channels
+F[Frequency = Where(f -> f > 86.2e9)] .= true             # any predicate
+F[Ti = t1 .. t2] .= true                                  # a time range
+F[baselines(ms, "LA"), Frequency(f1 .. f2)] .= true       # every baseline of a station
+F[baseline(ms, ("LA", "PV"))] .= true                     # one baseline
+```
+
+A Measurement Set holds one spectral window, so the channel selections act per
+window; flag a `ProcessingSet` member by member. A range no channel of a
+window falls in selects nothing there. FITSFiles also exports `End`; with it
+loaded, write `DimensionalData.End`.
 
 **Models.** Each solve step separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —
