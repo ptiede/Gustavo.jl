@@ -149,7 +149,7 @@ end
 @testset "calibrate" begin
     ps, _ = _build_fringe_ps(; nscans = 2, nspw = 2)
     geom = CALc.DataGeometry(ps)
-    sol = _hand_solution(geom; info = (; flagged_ant = ["A2"], flagged_scan = [1]))
+    sol = _hand_solution(geom; info = (; flagged_ant = ["A2", "A2"], flagged_feed = [1, 2], flagged_scan = [1, 1]))
 
     @testset "divides by the gains only" begin
         out = calibrate(sol, ps; apply_flags = false)
@@ -168,6 +168,27 @@ end
             for (t, s1) in pairs(on_scan1)
                 @test all(parent(fl[Ti = t])) == ("A2" in pair && s1)
             end
+        end
+    end
+
+    @testset "flags only the products touching an unconstrained feed" begin
+        feed2 = _hand_solution(geom; info = (; flagged_ant = ["A2"], flagged_feed = [2], flagged_scan = [1]))
+        @test !any(ms -> any(parent(ms[:flag])), values(calibrate(feed2, ps; apply_flags = false)))
+        out = calibrate(feed2, ps)
+        for ms in values(out)
+            feeds = Gustavo.UVData.feed_pairs(ms)
+            @test Set(feeds) == Set([(1, 1), (1, 2), (2, 1), (2, 2)])
+            on_scan1 = ms[:scan_name] .== "1"
+            names = collect(XRadio.baselines(ms))
+            hit(p, bi) = let (a, b) = names[bi], (fa, fb) = feeds[p, bi]
+                (a == "A2" && fa == 2) || (b == "A2" && fb == 2)
+            end
+            flag = parent(ms[:flag])
+            expected = [
+                hit(p, bi) && on_scan1[t]
+                    for p in axes(flag, 1), _ in axes(flag, 2), bi in axes(flag, 3), t in axes(flag, 4)
+            ]
+            @test flag == expected
         end
     end
 

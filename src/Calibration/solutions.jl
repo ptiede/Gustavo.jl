@@ -62,7 +62,7 @@ carry. Gains compose multiplicatively across components.
 
 - `steps` maps each solve step, in run order, to its diagnostics (detections,
   per-scan SNR, timing, the fringe step's unconstrained `flagged_ant` /
-  `flagged_scan`, …).
+  `flagged_feed` / `flagged_scan`, …).
 - `info` holds run-wide diagnostics.
 - `provenance` is the solve step the run was given, its gauge included, as
   text for the record (`provenance.pipeline`).

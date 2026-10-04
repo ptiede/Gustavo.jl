@@ -260,7 +260,7 @@ function _scan_local_solve(s::BaselineFringeFit)
 end
 
 # Solve into `ctx.θ` the station systems `dets` closes, reporting the components
-# written and the (station, geometry scan id) pairs left unconstrained. `dets`
+# written and the (station, feed, geometry scan id) triples left unconstrained. `dets`
 # is one scan's detections where the systems are block-diagonal, every scan's
 # where they couple — the two paths differ only in that argument.
 function _station_solve!(s::BaselineFringeFit, ctx::SolveContext, stageB, dets)
@@ -298,7 +298,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         results = each_group(ctx) do group
             _solve_group(s, ctx, stageB, group; round = 1, local_solve = true)
         end
-        flags = reduce(append!, (r.flags for r in results); init = Tuple{String, Int}[])::Vector{Tuple{String, Int}}
+        flags = reduce(append!, (r.flags for r in results); init = Tuple{String, Int, Int}[])::Vector{Tuple{String, Int, Int}}
         ncomp = sum((r.ncomp for r in results); init = 0)::Int
         return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results, ctx)..., s.search)
     end
@@ -307,7 +307,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         results = each_group(ctx) do group
             _solve_group(s, ctx, stageB, group; round, local_solve = false)
         end
-        ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int}}}
+        ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int, Int}}}
     end
     return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results, ctx)..., s.search)
 end
@@ -352,7 +352,7 @@ function _solve_group(
     # the family the recorded `pfa` was computed over.
     ncells = Fring._family_cells(gc, s.search)
     pfa_max = s.closure.pfa_max
-    ncomp, flags = 0, Tuple{String, Int}[]
+    ncomp, flags = 0, Tuple{String, Int, Int}[]
     # Steering needs θ for this scan, so it can only run where the station solve
     # closes here; a pooled solve has no station parameters until every group
     # has been read and the cube is long gone.
@@ -369,9 +369,9 @@ function _solve_group(
             # identity 0, indistinguishable from a solved zero delay. Steering to
             # it would invent a prediction and manufacture detections, so the
             # solve's own unconstrained list is what makes those nodes unusable.
-            for (name, _) in flags
-                sd[AntennaName(At(name))] .= NaN
-                sr[AntennaName(At(name))] .= NaN
+            for (name, f, _) in flags
+                sd[AntennaName(At(name)), Feed(At(f))] = NaN
+                sr[AntennaName(At(name)), Feed(At(f))] = NaN
             end
             steer = Fring.steer_scan(
                 # The same epoch the search above referenced: `sr` is a rate

@@ -141,32 +141,35 @@ function _apply_solution!(
     return _flag_unconstrained!(ms, app.geom, geom, flagged)
 end
 
-# The unconstrained (station name, scan id) pairs the steps of `sol` record, as
-# a lookup set, `nothing` when they record none.
+# The unconstrained (station name, feed, scan id) triples the steps of `sol`
+# record, as a lookup set, `nothing` when they record none.
 function _solution_flag_sets(sol::CalibrationSolution)
-    flagged = Set{Tuple{String, Int}}()
+    flagged = Set{Tuple{String, Int, Int}}()
     for info in values(sol.steps)
         haskey(info, :flagged_ant) || continue
-        for i in eachindex(info.flagged_ant, info.flagged_scan)
-            push!(flagged, (String(info.flagged_ant[i]), Int(info.flagged_scan[i])))
+        for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
+            push!(flagged, (String(info.flagged_ant[i]), Int(info.flagged_feed[i]), Int(info.flagged_scan[i])))
         end
     end
     return isempty(flagged) ? nothing : flagged
 end
 
-# Flag the samples of each baseline touching a (station, scan) in `flagged`,
-# scans indexing the solution's geometry `solgeom`, matched by name.
+# Flag the samples of each product whose (station, feed) on either side is in
+# `flagged` for that scan, scans indexing the solution's geometry `solgeom`,
+# matched by name.
 function _flag_unconstrained!(ms::XRadio.MeasurementSet, solgeom::DataGeometry, geom::DataGeometry, flagged)
-    flagged === nothing && return ms
+    isnothing(flagged) && return ms
     station = geom.stations
     scan = [something(findfirst(==(String(c)), solgeom.scan_names), 0) for c in ms[:scan_name]]
+    feeds = feed_pairs(ms)
     flag = ms[:flag]
     for (bi, (a, b)) in pairs(GeometryWindow(geom, ms).stations)
         a == b && continue
         sa, sb = station[a], station[b]
-        for ti in eachindex(scan)
-            ((sa, scan[ti]) in flagged || (sb, scan[ti]) in flagged) || continue
-            view(flag, BaselineID(bi), Ti(ti)) .= true
+        for ti in eachindex(scan), p in axes(feeds, 1)
+            fa, fb = feeds[p, bi]
+            ((sa, fa, scan[ti]) in flagged || (sb, fb, scan[ti]) in flagged) || continue
+            view(flag, Polarization(p), BaselineID(bi), Ti(ti)) .= true
         end
     end
     return ms

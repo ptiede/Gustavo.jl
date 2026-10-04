@@ -259,18 +259,24 @@ function _divide_residual!(V, g, stations, feeds)
     return V
 end
 
-# EHT-HOPS-style station flags: a station that participates in a scan (has
-# baselines there) but is left unconstrained by the surviving stage-B rows
-# keeps identity gains — record it as (station name, geometry scan id) so
-# `calibrate` flags its baselines instead of passing raw phases through as if
-# they had been corrected. `covered` holds (station name, position in `dets`).
+# EHT-HOPS-style station flags: a station's feed that participates in a scan
+# (has products there) but is left unconstrained by the surviving stage-B rows
+# keeps identity gains — record it as (station name, feed, geometry scan id) so
+# `calibrate` flags its products instead of passing raw phases through as if
+# they had been corrected. `covered` holds (station name, feed, position in
+# `dets`).
 function unconstrained_flags(dets, covered, geom::DataGeometry)
     Base.require_one_based_indexing(dets)
-    flags = Tuple{String, Int}[]
+    flags = Tuple{String, Int, Int}[]
     for gi in eachindex(dets)
         scanid = geom.scan_of_time[_scan_ti(dets[gi])]
-        for name in unique(Iterators.flatten(p for p in _scan_pairs(dets[gi]) if p[1] != p[2]))
-            (name, gi) in covered || push!(flags, (name, scanid))
+        feeds = _scan_feeds(dets[gi])
+        present = unique(
+            st for (a, b) in _scan_pairs(dets[gi]) if a != b
+                for (fa, fb) in feeds for st in ((a, fa), (b, fb))
+        )
+        for (name, f) in present
+            (name, f, gi) in covered || push!(flags, (name, f, scanid))
         end
     end
     return flags
@@ -479,10 +485,11 @@ function steer_scan(
 end
 
 # The flag block for the solution `info` (plain parallel vectors): the
-# stage-B-unconstrained (station name, scan) pairs.
+# stage-B-unconstrained (station name, feed, scan) triples.
 function flag_table(station_flags)
     return (;
         flagged_ant = String[f[1] for f in station_flags],
-        flagged_scan = Int[f[2] for f in station_flags],
+        flagged_feed = Int[f[2] for f in station_flags],
+        flagged_scan = Int[f[3] for f in station_flags],
     )
 end

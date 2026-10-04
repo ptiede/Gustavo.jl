@@ -329,11 +329,12 @@ plus a `GlobalTime × SingleFeed(2)` inter-feed offset both feed the delay
 system, so a feed-2 row touches both columns and a stable inter-feed offset is solved
 once across the track (bright scans pin it; weak scans inherit it, tying feeds
 that would otherwise split). Returns the phase-system component count and
-`covered` — the `(station name, scan index)` pairs the solve CONSTRAINS, which is
-independent of the gauge (see `Stationization` for how inconsistent rows are
-weighted). The columns of a (station, scan) outside `covered` are set to zero
-(identity gain), as are a station's scan-spanning columns when it is covered
-in no scan. With a single per-scan/per-feed component per kind and one scan,
+`covered` — the `(station name, feed, scan index)` triples the solve CONSTRAINS
+in every solved kind: those an accepted detection (`pfa ≤ pfa_max`) touches on
+that feed. Coverage is independent of the gauge (see `Stationization` for how
+inconsistent rows are weighted). A θ column no accepted detection touches —
+per-scan or scan-spanning, single-feed or shared by both feeds — is set to zero
+(identity gain). With a single per-scan/per-feed component per kind and one scan,
 each scan's system is independent and solves exactly as it would alone.
 """
 function solve_station_systems!(
@@ -344,12 +345,11 @@ function solve_station_systems!(
     Base.require_one_based_indexing(θ)
     slot = Dict(n => i for (i, n) in pairs(stations))
     ncomp = 0
-    # (station, scan-index) pairs the solve constrains, intersected over the
-    # solved kinds: a station must be constrained in delay, rate and phase to
-    # count as calibrated. Everything else is zeroed (identity gain) and
-    # flagged downstream.
-    covered = Set{Tuple{Int, Int}}()
-    colkeys = Dict{Int, Tuple{Int, Int}}()
+    # (station, feed, scan-index) triples the solve constrains, intersected over
+    # the solved kinds: a station's feed must be constrained in delay, rate and
+    # phase to count as calibrated. Everything else is flagged downstream.
+    covered = Set{Tuple{Int, Int, Int}}()
+    unconstrained = Set{Int}()
     first_kind = true
     rate_plans = [c[1] for c in components if c[2] === :rate]
     rate_solved = Dict{Int, T}()
@@ -359,38 +359,30 @@ function solve_station_systems!(
     for kind in (:delay, :rate, :phase)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        nc, cov, solved, keys_ = _solve_kind_cols!(
+        nc, cov, solved, constrained = _solve_kind_cols!(
             θ, scans, plans, slot, gauge, opts, Val(kind);
             rate_plans = kind === :phase ? rate_plans : ComponentPlan[],
             rate_solved,
         )
         kind === :rate && (rate_solved = solved)
-        merge!(colkeys, keys_)
+        union!(unconstrained, setdiff(keys(solved), constrained))
         covered = first_kind ? cov : intersect(covered, cov)
         first_kind = false
         kind === :phase && (ncomp = nc)
     end
-    _zero_unconstrained!(θ, colkeys, covered)
-    return ncomp, Set{Tuple{eltype(stations), Int}}((stations[a], si) for (a, si) in covered)
-end
-
-# Zero the θ columns of every (station, scan) no accepted detection constrains,
-# and a station's scan-spanning columns when it is constrained in no scan:
-# otherwise they hold values set by weak rows alone.
-function _zero_unconstrained!(θ, colkeys, covered)
-    constrained = Set(first(c) for c in covered)
-    for (col, (st, sidx)) in colkeys
-        (sidx == 0 ? st in constrained : (st, sidx) in covered) || (θ[col] = zero(eltype(θ)))
+    # Columns no accepted row touches hold values set by weak rows alone.
+    for col in unconstrained
+        θ[col] = zero(eltype(θ))
     end
-    return θ
+    return ncomp, Set{Tuple{eltype(stations), Int, Int}}((stations[a], f, si) for (a, f, si) in covered)
 end
 
 # Solve one observable kind across all scans, accumulating into θ. Each detection
 # becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
 # θ columns for that (station, feed, time) — a feed-common per-scan column and,
 # when present, a global feed-offset column. Returns (ncomp, covered, solved,
-# colkeys): `solved` maps each θ column this kind touched to the value it just
-# added, `colkeys` to its (station, scan index), scan 0 for a column spanning scans.
+# constrained): `solved` maps each θ column this kind touched to the value it
+# just added, and `constrained` holds the θ columns an accepted row touches.
 #
 # `rate_plans`/`rate_solved` are non-empty only for `:phase`, and only matter
 # where a rate component's origin differs from the epoch the phases were
@@ -451,7 +443,7 @@ function _solve_kind_cols!(
     # gauge components (see `_solve_tagged_system`).
     rowA = Vector{Int}[]; rowB = Vector{Int}[]; rlinks = Vector{Tuple{Int, Int}}[]
     rval = T[]; rw = T[]; rcross = Bool[]; rscan = Int[]
-    rsta_a = Int[]; rsta_b = Int[]
+    rsta_a = Int[]; rsta_b = Int[]; rfeed_a = Int[]; rfeed_b = Int[]
     # Per row: whether its detection is real (`pfa <= pfa_max`). Only these
     # connect stations into a fringe group; the rest constrain and no more.
     raccept = Bool[]
@@ -538,10 +530,10 @@ function _solve_kind_cols!(
             )
             push!(raccept, accept)
             push!(rcross, cross); push!(rscan, sidx)
-            push!(rsta_a, a); push!(rsta_b, b)
+            push!(rsta_a, a); push!(rsta_b, b); push!(rfeed_a, fa); push!(rfeed_b, fb)
         end
     end
-    isempty(rowA) && return (0, Set{Tuple{Int, Int}}(), Dict{Int, T}(), Dict{Int, Tuple{Int, Int}}())
+    isempty(rowA) && return (0, Set{Tuple{Int, Int, Int}}(), Dict{Int, T}(), Set{Int}())
 
     # Robust solve: IRLS over `opts.loss`, rescaling each row's noise-model
     # weight by the loss's derivative at that row's normalized residual (see
@@ -565,14 +557,17 @@ function _solve_kind_cols!(
         end
     end
     solved = Dict{Int, T}()
-    colkeys = Dict{Int, Tuple{Int, Int}}()
     for n in eachindex(node_col)
         node_col[n] == 0 && continue          # nuisance offset: solved, discarded
         θ[node_col[n]] += x[n]
         solved[node_col[n]] = x[n]
-        colkeys[node_col[n]] = (node_station[n], node_scan[n])
     end
-    return ncomp, _covered_stations(rsta_a, rsta_b, rscan, raccept), solved, colkeys
+    constrained = Set{Int}(
+        node_col[n] for i in eachindex(rowA, rowB, raccept) if raccept[i]
+            for n in Iterators.flatten((rowA[i], rowB[i])) if node_col[n] != 0
+    )
+    covered = _covered_station_feeds(rsta_a, rfeed_a, rsta_b, rfeed_b, rscan, raccept)
+    return ncomp, covered, solved, constrained
 end
 
 # The phase a rate component contributes at `epoch` to one (station, feed):
@@ -627,9 +622,9 @@ function _require_common_epoch(rate_plans, ti::Integer)
     return nothing
 end
 
-# The (station, scan) pairs this system calibrates: those carrying at least one
-# accepted detection, and so constrained by the solve rather than left at θ = 0
-# (identity gain). Everything else is flagged downstream.
+# The (station, feed, scan) triples this system calibrates: those carrying at
+# least one accepted detection on that feed. Everything else is flagged
+# downstream.
 #
 # Acceptance must be read from `raccept`, not from the rows: every measured cell
 # contributes a row, so reading coverage off the rows alone would call a station
@@ -648,12 +643,12 @@ end
 # looks like; the robust loss then arbitrates inconsistency among those rows
 # without removing any. A station with no accepted detection is uncalibrated
 # however the surviving rows are weighted.
-function _covered_stations(rsta_a, rsta_b, rscan, raccept)
-    cov = Set{Tuple{Int, Int}}()
-    for i in eachindex(rsta_a, rsta_b, rscan, raccept)
+function _covered_station_feeds(sta_a, feed_a, sta_b, feed_b, rscan, raccept)
+    cov = Set{Tuple{Int, Int, Int}}()
+    for i in eachindex(sta_a, feed_a, sta_b, feed_b, rscan, raccept)
         raccept[i] || continue
-        push!(cov, (rsta_a[i], rscan[i]))
-        push!(cov, (rsta_b[i], rscan[i]))
+        push!(cov, (sta_a[i], feed_a[i], rscan[i]))
+        push!(cov, (sta_b[i], feed_b[i], rscan[i]))
     end
     return cov
 end
@@ -759,7 +754,7 @@ end
 # Acceptance is a hard connectivity cut: where weak rows bridge two accepted
 # components, each keeps its own gauge row, and those rows fix the offset
 # between them. Nodes no accepted row links form islands over all rows, gauged
-# the same way; `_covered_stations` excludes them from coverage.
+# the same way; `_covered_station_feeds` excludes them from coverage.
 function _gauge_components(rows, nodes)
     nnodes = length(nodes.feed)
     accepted = (l for i in eachindex(rows.links, rows.accept) if rows.accept[i] for l in rows.links[i])

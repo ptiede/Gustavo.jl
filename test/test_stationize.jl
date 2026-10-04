@@ -362,8 +362,8 @@ end
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(absent_ref))
-    @test sol.ref_covered == Set((STATIONS[a], 1) for a in 1:4)
-    @test !((STATIONS[absent_ref], 1) in sol.ref_covered)     # never fabricated
+    @test sol.ref_covered == Set((STATIONS[a], f, 1) for a in 1:4 for f in 1:2)
+    @test !any(c -> first(c) == STATIONS[absent_ref], sol.ref_covered)     # never fabricated
     # The solution is exact despite the missing reference: only its gauge is
     # arbitrary, and a gauge cancels on every baseline of its own component.
     r = recon_residuals(D, sol, bl, pols)
@@ -391,7 +391,7 @@ end
     D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
-    @test sol.ref_covered == Set((STATIONS[a], 1) for a in 1:nant)
+    @test sol.ref_covered == Set((STATIONS[a], f, 1) for a in 1:nant for f in 1:2)
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-20
     @test r.phase < 1.0e-10
@@ -463,11 +463,55 @@ end
     θ = zeros(layout.nθ)
     plans = ((layout.plans[1], :phase), (layout.plans[2], :delay), (layout.plans[3], :rate))
     _, covered = solve_named!(θ, (FR.detection_stack(D, named(bl), pols; ti = 1, SCAN_SPREAD...),), plans)
-    @test covered == Set((STATIONS[a], 1) for a in 1:3)
+    @test covered == Set((STATIONS[a], f, 1) for a in 1:3 for f in 1:2)
     for (plan, _) in plans, f in 1:2
         @test θ[plan_off1(plan)[4, f, 1, 1]] == 0
         @test any(a -> θ[plan_off1(plan)[a, f, 1, 1]] != 0, 1:3)
     end
+end
+
+@testset "Stationize: a feed only rejected rows touch is unconstrained" begin
+    nant, ref, lone = 4, 1, 4
+    bl = all_baselines(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    rng = MersenneTwister(0x04e1)
+    τ = 1.0e-9 .* randn(rng, nant)
+    δ = 1.0e-10 .* randn(rng, nant)
+    ṙ = 1.0e-3 .* randn(rng, nant)
+    φ = 0.3 .* randn(rng, nant)
+    D = Matrix{FR.Detection{Float64}}(undef, length(bl), length(pols))
+    for (bi, (a, b)) in pairs(bl), (p, (fa, fb)) in pairs(pols)
+        delay = τ[a] + (fa == 2) * δ[a] - τ[b] - (fb == 2) * δ[b]
+        D[bi, p] = FR.Detection{Float64}((delay, ṙ[a] - ṙ[b], φ[a] - φ[b], 1.0, 100.0, 0.0, true))
+        if (a == lone && fa == 2) || (b == lone && fb == 2)
+            D[bi, p] = FR.Detection{Float64}((delay + 3.0e-7, 0.01, 2.0, 1.0, 4.0, 1.0, true))
+        end
+    end
+    geom = CALs.DataGeometry(; times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
+    mk(term, tying) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = tying)
+    model = CALs.GainModel(
+        phase = (
+            atmos = mk(CALs.ConstantTerm(), CALs.SharedFeeds()),
+            mbd = mk(CALs.Delay(), CALs.SharedFeeds()),
+            rel_delay = mk(CALs.Delay(), CALs.SingleFeed(2)),
+            rate = mk(CALs.Rate(), CALs.SharedFeeds()),
+        ),
+    )
+    layout = CALs.plan_parameters(model, nant, geom)
+    atmos, mbd, rel, rate = layout.plans
+    θ = zeros(layout.nθ)
+    comps = ((atmos, :phase), (mbd, :delay), (rel, :delay), (rate, :rate))
+    _, covered = solve_named!(θ, (detstack(D, bl, pols; ti = 1),), comps; gauge = PinAntenna(ref))
+
+    col(plan, a, f) = θ[plan_off1(plan)[a, f, 1, 1]]
+    @test covered == Set((STATIONS[a], f, 1) for a in 1:nant for f in 1:2 if (a, f) != (lone, 2))
+    @test col(rel, lone, 2) == 0
+    for a in 1:nant
+        a == lone || @test col(rel, a, 2) ≈ δ[a] atol = 1.0e-12
+    end
+    @test col(mbd, lone, 1) ≈ τ[lone] - τ[ref] atol = 1.0e-12
+    @test col(rate, lone, 1) ≈ ṙ[lone] - ṙ[ref] atol = 1.0e-9
+    @test rem2pi(col(atmos, lone, 1) - (φ[lone] - φ[ref]), RoundNearest) ≈ 0 atol = 1.0e-6
 end
 
 @testset "Stationize: rejected rows constrain but never connect" begin
@@ -902,11 +946,11 @@ end
     ncomp_p, cov_p = solve_named!(θp, Tuple(stacks), comps; gauge = PinAntenna(ref), opts)
     θs = zeros(layout.nθ)
     ncomp_s = 0
-    cov_s = Set{Tuple{String, Int}}()
+    cov_s = Set{Tuple{String, Int, Int}}()
     for (gi, st) in enumerate(stacks)
         nc, cov = solve_named!(θs, (st,), comps; gauge = PinAntenna(ref), opts)
         ncomp_s += nc
-        union!(cov_s, Set((a, gi) for (a, _) in cov))
+        union!(cov_s, Set((a, f, gi) for (a, f, _) in cov))
     end
     @test ncomp_s == ncomp_p
     @test cov_s == cov_p

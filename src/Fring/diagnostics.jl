@@ -157,20 +157,23 @@ end
 """
     fringe_station_flags(sol::CalibrationSolution) -> DimArray{Bool}
 
-Over `(Scan, AntennaName)`: `true` where the fringe step left the station
-unconstrained in the scan — no accepted detection (`pfa ≤
-Stationization.pfa_max`) on any of its baselines, so nothing put it in a
-fringe group. A measured but rejected baseline does not rescue it: such a row
-constrains the fit without fixing a fringe location. These stations carry
-identity gains for those scans, and `calibrate` flags their baselines there
+Over `(Scan, AntennaName, Feed)`: `true` where the fringe step left the
+station's feed unconstrained in the scan — no accepted detection (`pfa ≤
+Stationization.pfa_max`) on any of its products with that feed, so nothing put
+it in a fringe group. A measured but rejected product does not rescue it: such
+a row constrains the fit without fixing a fringe location. `calibrate` flags
+every product with a flagged (station, feed) on either side in that scan
 (`apply_flags = true`).
 """
 function fringe_station_flags(sol::CalibrationSolution)
     info = _fringe_info(sol)
-    d = (_scan_dim(info.scan_names), _station_dim(sol.geom.stations))
+    d = (_scan_dim(info.scan_names), _station_dim(sol.geom.stations), Feed(1:2))
     flags = DimArray(fill(false, map(length, d)), d)
-    for i in eachindex(info.flagged_ant, info.flagged_scan)
-        flags[Scan(At(sol.geom.scan_names[info.flagged_scan[i]])), AntennaName(At(String(info.flagged_ant[i])))] = true
+    for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
+        flags[
+            Scan(At(sol.geom.scan_names[info.flagged_scan[i]])),
+            AntennaName(At(String(info.flagged_ant[i]))), Feed(At(info.flagged_feed[i])),
+        ] = true
     end
     return flags
 end
