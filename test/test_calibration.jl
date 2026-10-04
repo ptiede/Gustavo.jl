@@ -174,7 +174,7 @@ end
     end
 
     @testset "identity placement needs names, not raw ids" begin
-        # Raw ids agree with themselves, so an identical labelling still places:
+        # Raw ids agree with themselves, so an identical labeling still places:
         # the two grids then correspond sample for sample and no name is needed.
         unnamed = CAL.DataGeometry(;
             times = solve.times, scan_of_time = solve.scan_of_time,
@@ -183,7 +183,7 @@ end
         @test CAL.time_segment_ids(CAL.PerScan(), unnamed, unnamed) == [1, 1, 2, 2]
         @test CAL.freq_segment_ids(CAL.PerSpectralWindow(), unnamed, unnamed) == [1, 1, 1, 2, 2, 2]
 
-        # Across two differently-labelled grids they do not: matching id 1 to
+        # Across two differently-labeled grids they do not: matching id 1 to
         # id 1 is positional matching, which identity placement exists to avoid.
         unnamed_fine = CAL.DataGeometry(;
             times = fine.times, scan_of_time = fine.scan_of_time,
@@ -1082,7 +1082,7 @@ end
     w = fill(100.0, n)
 
     # A clean track: its increments sit in a tight cluster, so there is no scatter
-    # to report however steep the trend that cluster is centred on. Steepness is a
+    # to report however steep the trend that cluster is centered on. Steepness is a
     # separate failure of the walk and deliberately not this statistic's business.
     clean = rem2pi.(1.1 .* k .+ 0.3 .* sin.(k ./ 7), RoundNearest)
     @test CAL.phase_unwrap_ambiguity(clean; weights = w) == 0

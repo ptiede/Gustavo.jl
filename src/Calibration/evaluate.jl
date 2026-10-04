@@ -181,7 +181,7 @@ could not place it; that is the "coarser is fine, finer is not" contract.
 
 `time_span[k]` is the interval the `k`-th selected sample integrates over (the
 time coordinate's `integration_time`); where the segmentation bins a coordinate, a sample
-whose span crosses a bin boundary is rejected rather than assigned by its centre.
+whose span crosses a bin boundary is rejected rather than assigned by its center.
 
 Coordinates (a `Delay`'s `f − f0`, a `Polynomial`'s scaled offset) are read
 pointwise from the solution's own resolved state, so they stay in the basis θ

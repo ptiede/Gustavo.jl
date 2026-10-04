@@ -147,7 +147,7 @@ Fields:
 - `scan_of_time`  : scan id for each time sample (any integer labels; need not
                     be 1-based or contiguous — `PerScan` dense-ranks them).
 - `channel_freqs` : concatenated channel center frequencies (Hz) across spws.
-- `spw_of_chan`   : spw id for each global channel (same labelling freedom).
+- `spw_of_chan`   : spw id for each global channel (same labeling freedom).
 - `channel_widths`: width (Hz, positive) of each global channel, or empty when
                     the widths are not stated.
 - `t0`            : rate reference epoch (seconds); rate phase ∝ (t − t0).
@@ -162,7 +162,7 @@ The names are the identity a solution is applied on: a foreign sample is
 placed in a `PerScan` or `PerSpectralWindow` segment by matching the name,
 never the raw integer id or the coordinate. Name vectors may be left empty,
 in which case a solution carrying such a segmentation applies only to a grid
-with identical labelling. A non-empty name vector must have one entry per
+with identical labeling. A non-empty name vector must have one entry per
 distinct id (checked here). Channel widths are what place a foreign channel in
 a `ChannelBlocks` or `FreqGroups` segment: it takes the segment of the solve
 channel whose band, center ± width/2, contains its own, so a solution fit on
@@ -552,7 +552,7 @@ function time_segment_ids(
         ti_idx = eachindex(target.times), time_span = nothing,
     )
     ids, _ = _dense_rank(solve.scan_of_time)
-    # An identical labelling is the identity — the two grids agree sample for
+    # An identical labeling is the identity — the two grids agree sample for
     # sample, so no name is needed to say which scan a sample belongs to.
     solve.scan_of_time == target.scan_of_time && return ids[ti_idx]
     _require_names(seg, "scan", solve.scan_names, target.scan_names)

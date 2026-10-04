@@ -20,7 +20,7 @@ the visibilities' times: [`ScanMean`](@ref), [`LinearInTime`](@ref) or
 `max_tsys` (kelvin), or equals one of `tsys_placeholders` (values written for
 "not measured") counts as unmeasured before it is placed; the store keeps it.
 Elevations come from the antenna positions, the field
-phase centre and the time; a source below `min_elevation` (radians) has no
+phase center and the time; a source below `min_elevation` (radians) has no
 usable gain.
 
 A sample whose antennas lack a usable system temperature, gain curve or
@@ -124,7 +124,7 @@ function _sefd_scale(ms, T, curves, rule, min_elevation, plausible)
 end
 
 # Source elevation (radians) over (time, antenna), from each antenna's position,
-# the phase centre of the field observed at each time, and the time as UTC.
+# the phase center of the field observed at each time, and the time as UTC.
 function _elevations(ms, names, times)
     meta = metadata(lookup(ms[:visibility], Ti))
     (get(meta, :scale, nothing), get(meta, :format, nothing)) == ("utc", "unix") || throw(ArgumentError(
@@ -135,7 +135,7 @@ function _elevations(ms, names, times)
     directions = XRadio.field_and_source(ms)[:field_phase_center_direction]
     frame = get(metadata(directions), :frame, nothing)
     frame in ("icrs", "fk5") || throw(ArgumentError(
-        "elevations need an equatorial phase centre, and this one's frame is $frame"
+        "elevations need an equatorial phase center, and this one's frame is $frame"
     ))
     fields = collect(ms[:field_name])
     sky = XRadio.SkyDirLabel

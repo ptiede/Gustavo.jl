@@ -32,7 +32,7 @@ Per-scan fringe-search summary of the fringe step, over `Scan` (scan names):
   detection, `pfa` near 1 a likely false fringe.
 
 Throws when `sol` has no `:fringe` step. Per-scan results of
-[`mapsets`](@ref) combine with [`cat_scans`](@ref).
+[`mapsets`](@ref Gustavo.mapsets) combine with [`cat_scans`](@ref).
 """
 function fringe_snr_table(sol::CalibrationSolution)
     info = _fringe_info(sol)
@@ -180,7 +180,7 @@ end
 
 Concatenate per-scan diagnostics — each a `DimStack` or `DimArray` with a
 `Scan` dimension, such as [`fringe_snr_table`](@ref) of each solution
-[`mapsets`](@ref) returns — along `Scan`. Every other dimension takes the
+[`mapsets`](@ref Gustavo.mapsets) returns — along `Scan`. Every other dimension takes the
 union of the inputs' labels, in first-seen order, so scans whose stations,
 baselines or products differ line up by name; a cell an input lacks holds
 `NaN`, or `false` in a `Bool` layer. The inputs share their dimensions'

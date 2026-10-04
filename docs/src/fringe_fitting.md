@@ -264,7 +264,7 @@ that per-component variance:
 \mathbb{E}|n_k|^2 = \frac{2}{w_k}.
 ```
 
-This is the convention of the radiometer equation: XRadio's FITS-IDI reader
+This is the convention of the radiometer equation: `XRadio.fitsidi2msv4`
 writes ``w = f \cdot 2\Delta\nu\,\tau\,\eta_a\eta_b`` for a correlation
 coefficient, the inverse variance of each of its real and imaginary parts. A
 weight column that departs from it (a station whose weights are off by a
@@ -532,7 +532,7 @@ station and feed: [`fringe_snr_table`](@ref) (per-scan peak SNR and
 false-alarm probability), [`fringe_detections`](@ref) (every measured
 baseline and product), [`fringe_station_solutions`](@ref) (per-scan station
 delay, rate and phase) and [`fringe_station_flags`](@ref) (stations a scan
-left unconstrained). Per-scan solutions from [`mapsets`](@ref) combine with
+left unconstrained). Per-scan solutions from [`mapsets`](@ref Gustavo.mapsets) combine with
 [`cat_scans`](@ref):
 
 ```julia

@@ -56,8 +56,8 @@ are reported as uncovered by the solve and are to be flagged on that basis.
 | Delay | seconds |
 | Fringe rate | Hz |
 | Phase, differential TEC coefficient | radians |
-| `:weights` | inverse variance, ``1/\sigma^2`` |
-| `:uvw` | meters, as MSv4's `UVW`; FITS-IDI and AIPS UVFITS store seconds of light travel, converted on reading |
+| `:weight` | inverse variance, ``1/\sigma^2`` |
+| `:uvw` | meters, as MSv4's `UVW`; FITS-IDI and AIPS UVFITS store seconds of light travel, converted on reading and by `write_uvfits` on writing |
 
 Times are absolute. A `Float64` resolves about 0.24 µs at present epochs, and
 every delay and rate term is evaluated on ``t - t_0`` about a segment-local
@@ -65,8 +65,8 @@ origin, where the resolution is picoseconds.
 
 ## Flags and weights
 
-`:flags` is a `Bool` layer on the axes of `:vis`, and is `true` where the datum
-must not be used. `:weights` states how good the datum would have been. The two
+`:flag` is a `Bool` layer on the axes of `:visibility`, and is `true` where the
+datum must not be used. `:weight` states how good the datum would have been. The two
 are independent, matching MSv4's `FLAG`/`WEIGHT` pair: a flagged sample may
 carry a positive weight, and a zero weight does not by itself flag a sample.
 Solvers require both conditions, so a sample contributes when its flag is unset
@@ -100,7 +100,7 @@ reordered into one shared order when data becomes solver input.
 ## Baseline coordinates
 
 FITS-IDI and AIPS UVFITS share one baseline-coordinate convention and one
-antenna ordering, so ``(u, v, w)`` is never negated; it is only converted from
-light-seconds to meters. The
+antenna ordering, so ``(u, v, w)`` is never negated; it is only converted between
+light-seconds and meters. The
 conjugation applied to the visibilities on the FITS-IDI boundary does not
 extend to it.

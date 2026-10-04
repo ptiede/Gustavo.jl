@@ -74,7 +74,7 @@ phase components `nphase`, the flat `plans` list and its `plantree` (the same
 plans nested under the model's names), and `axes` — a tree mirroring the
 model that records each leaf's dimension sizes and the physical axis each
 dimension carries (`:AntennaName`, `:Feed`, `:node`, `:Ti`, `:Frequency`, `:param`),
-for labelling a solved θ.
+for labeling a solved θ.
 
 [`evaluate_gains`](@ref)`(layout, θ)` maps a parameter vector over this layout
 to gains.
@@ -167,7 +167,7 @@ end
 # keeps all five axes, size-1 ones included, so the shape is a fixed-rank reshape
 # of the component's θ block run: solve writers and the forward map address any
 # component the same way, and each name retains its own complete
-# `(param, node, Frequency, Ti, AntennaName)` role set for labelling a wrapped θ.
+# `(param, node, Frequency, Ti, AntennaName)` role set for labeling a wrapped θ.
 function _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tying)
     node_role = tying isa PerFeed ? :Feed : :node
     return (bl, nfeed, nfseg, ntseg, nant), (:param, node_role, :Frequency, :Ti, :AntennaName)
@@ -332,7 +332,7 @@ end
 _axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant, geom)
 _axes_node(s::_StationComponents, nant::Int, geom::DataGeometry) = _axes_node(s.comp, nant, geom)
 # A group leaf's axes node additionally records the global station indices its
-# `:AntennaName` axis spans, so a wrapped θ can be labelled with the group's stations
+# `:AntennaName` axis spans, so a wrapped θ can be labeled with the group's stations
 # rather than the run's full antenna list.
 _axes_node(g::_ComponentGroups, nant::Int, geom::DataGeometry) =
     NamedTuple{_group_keys(length(g.comps))}(

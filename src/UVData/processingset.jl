@@ -12,7 +12,7 @@ leaves(ps::XRadio.ProcessingSet) = pairs(ps)
     union_frequency_axis(ps::XRadio.ProcessingSet) -> Vector{FrequencySetup}
 
 Vector of `FrequencySetup`s spanning every partition, deduplicated by `==`/`hash`,
-in first-seen order. Mirrors xradio's `ProcessingSet.get_freq_axis()`.
+in first-seen order, like xradio's `ProcessingSet.get_freq_axis()`.
 """
 function union_frequency_axis(data::XRadio.ProcessingSet)
     out = FrequencySetup[]

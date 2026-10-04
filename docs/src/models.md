@@ -278,6 +278,6 @@ the seam exists for solvers written against the station-block iterator (see
 [`component_label`](@ref) prints a component as its constructor call — a form
 you can paste back — and error messages use the same spelling.
 Showing a `GainModel` lists its components the same way, and the stations
-with their own groups. After a fit,
-[`parameters`](@ref) shows each component's solved θ as a labelled
-`DimArray`.
+with their own groups. After a fit, each
+[`SolvedComponent`](@ref) of the solution holds its solved θ as a labeled
+`DimArray` (`c.params`).

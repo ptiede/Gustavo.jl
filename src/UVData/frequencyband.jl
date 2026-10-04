@@ -1,7 +1,7 @@
 """
     AbstractFrequencySetup
 
-Per-leaf frequency-axis description. Concrete subtypes implement
+Frequency-axis description of one spectral window. Concrete subtypes implement
 `channel_freqs`, `ref_freq`, `ch_widths`, `total_bandwidths`, `sidebands`,
 and `setup_name`; defaults are provided for `nchannels`, `spw_center_frequency`,
 and `centered_channel_freqs`. `Base.length` and `Base.iterate` walk the
@@ -13,7 +13,7 @@ abstract type AbstractFrequencySetup end
     FrequencySetup(; name, ref_freq, channel_freqs, ch_widths, total_bandwidths,
                      sidebands, extras = NamedTuple())
 
-Frequency-axis description for a UVData dataset. Basis-agnostic — no AIPS-
+Frequency-axis description of one spectral window. Basis-agnostic — no AIPS-
 specific identifiers beyond the optional `extras`.
 
 - `name`              : Identifier for this spectral setup (typically `String`).

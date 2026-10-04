@@ -137,15 +137,15 @@ end
     end
 
     # Every axis name a stored or returned array can carry, so scripts index
-    # leaves with a bare `using Gustavo`. `Ti` is DimensionalData's dim under
+    # them with a bare `using Gustavo`. `Ti` is DimensionalData's dim under
     # both names — the same binding, so no ambiguity when both are loaded.
     for n in (:Polarization, :Frequency, :AntennaName, :BaselineID, :Ti, :UVW, :Feed, :Scan, :AntennaPair, :FeedPair)
         @test n in top
         @test getproperty(Gustavo, n) <: DimensionalData.Dimension
     end
     @test Gustavo.Ti === DimensionalData.Ti
-    # A leaf and a Measurement Set subset share their axis types, so a kernel
-    # indexing by name reads either.
+    # Gustavo and XRadio share these axis types, so a kernel indexing by name
+    # reads a Measurement Set's layers directly.
     for n in (:Frequency, :BaselineID, :Polarization)
         @test getproperty(Gustavo, n) === getproperty(XRadio, n)
     end
@@ -164,9 +164,8 @@ end
 end
 
 @testset "Weighted LSQ accepts mixed-precision RHS" begin
-    # Regression: Memo-117 cleanup made `weights` Float32 while `A` is built in
-    # Float64 by `design_matrices`. LinearSolve's QR `ldiv!` errored on the
-    # Float64 factorization against a Float32 RHS — promote to a shared eltype.
+    # `weights` may be Float32 while `design_matrices` builds `A` in Float64; the
+    # solve promotes them to a shared eltype.
     CALIB = Gustavo.Calibration
     A = Float64[1.0 0.0; 1.0 1.0; 1.0 2.0; 1.0 3.0]
     b32 = Float32[1.0, 2.0, 3.1, 3.9]

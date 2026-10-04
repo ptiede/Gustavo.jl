@@ -111,10 +111,10 @@ function _curve_from_sums(
     return eta_bl, agg
 end
 
-# Accumulate one leaf's contribution. `V`/`W` are `(Frequency, Ti, BaselineID, Polarization)`;
+# Accumulate one Measurement Set's contribution. `V`/`W` are `(Frequency, Ti, BaselineID, Polarization)`;
 # `blmap[bli]` maps a local baseline to its global index (0 = skip: autocorr or
 # unmapped). A function barrier so the hot loops specialize on the concrete eltypes
-# of `parent(leaf[...])`.
+# of the layer arrays.
 #
 # Binning is made independent of on-disk storage direction: lower-sideband bands
 # have negative CH_WIDTH, so `freqs` (and occasionally `times_sec`) can be stored

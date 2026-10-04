@@ -67,7 +67,7 @@ fringe is a single sharp peak far above the sidelobe forest with `pfa ≪ 1`; a
 false fringe barely clears the forest (`pfa` not small) and shows several
 comparable-height peaks. Provided by `GustavoMakieExt`.
 
-`zoom` sets the view: `true` (default) centres both axes on the peak over a span
+`zoom` sets the view: `true` (default) centers both axes on the peak over a span
 of a dozen main-lobe widths, a `Real` gives that span in main-lobe widths, and
 `false` shows the whole searched window. The main lobe is a few grid cells wide
 against a window sized for the clock search, so the unzoomed plane resolves the

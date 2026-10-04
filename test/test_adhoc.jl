@@ -210,8 +210,8 @@ end
         rbar, wbar, bl, pols, nant, times;
         prior = nothing, smoother = FRa.PerTrackAdhocSmoother(options = FRa.AdhocOptions(; snr_floor = 0.0, source_iters = 1)), opts...,
     )
-    @test wobble(off) > 0.3                       # unmodelled source phase corrupts the tracks
-    @test wobble(on) < 1.0e-3                     # modelling it removes the corruption
+    @test wobble(off) > 0.3                       # unmodeled source phase corrupts the tracks
+    @test wobble(on) < 1.0e-3                     # modeling it removes the corruption
     @test wobble(off) > 100 * wobble(on)          # by orders of magnitude, not marginally
     @test wobble(refined) < 0.05
 
@@ -630,12 +630,12 @@ end
 end
 
 @testset "Adhoc: warm-start selects the rewrap branch (no per-AP flips)" begin
-    # Regression for the LA-baseline bimodality: a weakly-constrained station's
-    # per-AP solve can be BISTABLE — two rewrap fixed points a sub-2π distance
-    # apart — and which one the spanning-tree seed lands on can flip AP-to-AP,
-    # injecting a phantom phase jump the integer-2π unwrap and the smoother both
-    # leave intact. The per-AP solve must therefore accept a temporal warm-start
-    # (`seed_phase`, the previous AP's solution) that pins the branch.
+    # A weakly constrained station's per-AP solve can be BISTABLE — two rewrap
+    # fixed points a sub-2π distance apart — and which one the spanning-tree
+    # seed lands on can flip AP-to-AP, injecting a phantom phase jump the
+    # integer-2π unwrap and the smoother both leave intact. The per-AP solve
+    # therefore accepts a temporal warm-start (`seed_phase`, the previous AP's
+    # solution) that pins the branch.
     #
     # Construct a genuinely bistable solve: station 4 sees two weak edges (to 2 and
     # 3, both pinned ≈0 by strong edges to ref=1) whose WRAPPED phases disagree by

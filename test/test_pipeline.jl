@@ -303,8 +303,8 @@ end
 end
 
 @testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
-    # Regression for the θ-overwrite bug: even rounds previously wiped the
-    # round-1 solution (coherence collapsed). Accumulation keeps all rounds good.
+    # Each round accumulates onto the solution of the rounds before it, so
+    # coherence stays high on every round.
     ps, _ = _build_fringe_ps()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
@@ -471,7 +471,7 @@ end
     # orthogonalized against per-band constant + slope: those components are
     # legitimately (and feed-COMMONLY) absorbed by the per-band SBD delay/const
     # and inter-feed delay stages, so leaving them in would make the earlier solves fight
-    # an unmodelled feed-2-only per-band ramp instead of exercising the band shape
+    # an unmodeled feed-2-only per-band ramp instead of exercising the band shape
     # this test is about.
     for b in 1:nspw
         cs = ((b - 1) * nchan + 1):(b * nchan)

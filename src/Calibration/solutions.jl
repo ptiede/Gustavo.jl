@@ -486,7 +486,7 @@ end
 
 The geometry a solve over `ps` runs on: the sorted distinct channel
 frequencies (Hz) and time samples (seconds) of every Measurement Set, each
-channel's spectral window from [`XRadio.spectralwindow`](@ref) and width from
+channel's spectral window from `XRadio.spectralwindow` and width from
 the frequency coordinate's `channel_width`, each time's
 scan from the `scan_name` coordinate, and the stations, every antenna named
 in an antenna dataset, in the order first seen. `f0` defaults to the mean
@@ -539,7 +539,7 @@ function _scan_labels(ms::XRadio.MeasurementSet)
 end
 
 # The union geometry of `pieces`, each holding channels `freqs` of one spectral
-# window `spw` and time samples `times` labelled per sample by `scans`, observed
+# window `spw` and time samples `times` labeled per sample by `scans`, observed
 # by the stations in `active`.
 function _span_geometry(pieces, stations; f0, t0)
     freq_spw = Dict{Float64, String}()

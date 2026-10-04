@@ -84,7 +84,7 @@ solve: `station_pairs` and `feeds` label the sums' `AntennaPair` and `FeedPair`
 axes, and `geom` is the solve's `DataGeometry`, whose `stations` are θ's
 stations. Reach each observable's parameters through
 [`bandpass_blocks`](@ref)`(setup, θ, :phase)` / `(…, :logamp)`, and its level
-through [`bandpass_level_blocks`](@ref), rather than the paths directly.
+through [`bandpass_level_blocks`](@ref bandpass_blocks), rather than the paths directly.
 `report` is published on the step's solution record and
 should say which tracks were measured (see [`bandpass_track_report`](@ref));
 θ alone cannot distinguish a measured flat response from an unfitted one.
@@ -792,8 +792,8 @@ over the extent of its samples. `phase_priors`/`amp_priors` hold the prior each
 (station, feed, time segment) track was fit under, its hyperparameters resolved,
 over `(AntennaName, Feed, Ti)`. Where the model gives stations different segmentations,
 [`JointSmoother`](@ref) passes one array per station block, keyed `g1, g2, …`
-as [`parameters`](@ref Gustavo.Calibration.parameters) keys the blocks' leaves,
-each over its own stations and segments.
+as the solution's components name the station blocks, each over its own
+stations and segments.
 
 Returns the arrays as `phase_status`/`amp_status`/`phase_priors`/`amp_priors`
 alongside `track_labels` (the code → name mapping, so a reader needs no constant
@@ -1589,7 +1589,7 @@ write the result into the station blocks of the two observables
 `phase_blocks` and `amp_blocks` are [`bandpass_blocks`](@ref)`(setup, θ, :phase)`
 and `(…, :logamp)` — station blocks over the SAME `θ` this call is handed, since
 each block's `θ` is a view into it — and `phase_level_blocks`/`amp_level_blocks`
-the matching [`bandpass_level_blocks`](@ref), empty without a level. A
+the matching [`bandpass_level_blocks`](@ref bandpass_blocks), empty without a level. A
 station-uniform model gives one block per component spanning every station;
 where the model differs across stations, each block carries its own stations,
 feed tying, segments and prior, and a station no block covers is left at unit

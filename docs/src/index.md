@@ -5,8 +5,9 @@ CurrentModule = Gustavo
 # Gustavo
 
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package.
-It fits calibration steps on MSv4 data, an XRadio `ProcessingSet`, reading
-one scan group at a time, and applies the solutions to the data.
+Data are MSv4: an XRadio.jl `ProcessingSet` of `MeasurementSet`s, each holding
+one spectral window. Gustavo fits calibration steps on them, reading one scan
+group at a time, and applies the solutions to the data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
 deprecation.
@@ -18,9 +19,28 @@ using Pkg
 Pkg.add(url = "https://github.com/ptiede/Gustavo.jl")
 ```
 
-The UVFITS reader lives in a package extension: also load `FITSFiles` to
-enable it. Loading `CairoMakie` (or another Makie backend)
-enables the diagnostic plots.
+Loading `FITSFiles` enables the FITS-IDI converter (`XRadio.fitsidi2msv4`)
+and the UVFITS reader and writer ([`load_uvfits`](@ref),
+[`write_uvfits`](@ref)), which live in package extensions. Loading
+`CairoMakie` (or another Makie backend) enables the diagnostic plots.
+
+## Getting data in and out
+
+```julia
+using Gustavo, XRadio
+using FITSFiles
+
+fitsidi2msv4("track.idifits", "track.ps.zarr")  # FITS-IDI to an MSv4 Zarr store
+ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
+read_antab!(ps, "track.antab")                  # Tsys and gain curves, when the file has none
+
+ps = load_uvfits("track.uvfits")                # AIPS UVFITS, read into memory
+write_uvfits("out.uvfits", ps)                  # one source, frequency setup and subarray
+```
+
+A FITS-IDI file is converted once to a Zarr store, which `open` reads lazily.
+A UVFITS file is read whole. [Conventions](@ref conventions) gives the phase
+sense, units and weight and flag mapping at each boundary.
 
 ## A calibration run
 

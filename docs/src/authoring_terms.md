@@ -84,7 +84,7 @@ freq_coord_state(::Quadratic, geom, fseg_id, nfseg) = geom.f0
 ```
 
 `Delay` and `Dispersion` resolve a reference frequency this way, `Rate` a
-reference epoch, and `Polynomial` a per-segment centre and scale (which is why
+reference epoch, and `Polynomial` a per-segment center and scale (which is why
 the builder is given `seg`). A term needing nothing stores whatever it likes,
 including `nothing`.
 
@@ -146,4 +146,4 @@ is aware that it is a third-party addition.
 A solution holding `Quadratic` saves with [`save_solution`](@ref) as it is:
 a term is stored as its type and fields and rebuilt through its positional
 constructor. A term whose constructor does not take its fields extends
-[`storage_constructor`](@ref) and [`storage_arguments`](@ref).
+[`storage_constructor`](@ref) and [`storage_arguments`](@ref storage_constructor).

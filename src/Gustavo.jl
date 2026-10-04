@@ -38,7 +38,7 @@ include("pipeline.jl")
 
 export UVData, Calibration, Fring
 # Axis names for every array Gustavo stores or returns, so scripts can index
-# and slice leaves without reaching into `UVData` or `DimensionalData`.
+# and slice them without reaching into `UVData` or `DimensionalData`.
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.
 export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, Scan, AntennaPair, FeedPair
 # UVFITS entry: the reader and writer of a `ProcessingSet`.

@@ -6,14 +6,37 @@
 [![Coverage](https://codecov.io/gh/ptiede/Gustavo.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/ptiede/Gustavo.jl)
 
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package
-for radio interferometry. It fits calibration steps on MSv4 data (an XRadio
-`ProcessingSet`) — fringe search (delay/rate/phase), ionospheric dispersion
-and single-band delay refinement, station bandpass, per-integration
-atmospheric phase — reading one scan group at a time, and applies the
-solutions to the data.
+for radio interferometry. Data are MSv4: an XRadio.jl `ProcessingSet` of
+`MeasurementSet`s, each holding one spectral window. Gustavo fits
+calibration steps on them (fringe search for delay, rate and phase; ionospheric
+dispersion and single-band delay; station bandpass; per-integration
+atmospheric phase), one scan group at a time, and applies the solutions to the
+data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
 deprecation. (It also operates entirely on vibes and fried chicken.)
+
+## Getting data in and out
+
+Loading `FITSFiles` enables the FITS readers and writers of both packages:
+
+```julia
+using Gustavo, XRadio
+using FITSFiles
+
+fitsidi2msv4("track.idifits", "track.ps.zarr")  # FITS-IDI to an MSv4 Zarr store
+ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
+read_antab!(ps, "track.antab")                  # Tsys and gain curves, when the file has none
+
+ps = load_uvfits("track.uvfits")                # AIPS UVFITS, read into memory
+write_uvfits("out.uvfits", ps)                  # one source, frequency setup and subarray
+```
+
+`apriori_calibrate!(ms)` puts one Measurement Set's visibilities in janskys
+from the system temperatures and gain curves it records. Like every correction
+it modifies a Measurement Set held in memory, so it runs member by member, for
+example `foreach(apriori_calibrate!, values(g))` inside the `mapsets` bodies
+below.
 
 ## A calibration run
 
@@ -90,7 +113,7 @@ Each step separates WHAT it solves (a gain model: named components, each a
 term at a time/frequency resolution with a feed tying) from HOW it is solved
 (the step's options, or a smoother object). Third-party code can add
 
-- a new **gain term** (a physical effect in the forward model) — six small
+- a new **gain term** (a physical effect in the forward model) — six
   methods;
 - a new **solve step** — a `solve` method that reads the data through
   `each_group`;

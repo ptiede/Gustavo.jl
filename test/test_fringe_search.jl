@@ -49,7 +49,7 @@ end
     Δf, Δt = 1.0e6, 2.0
     freqs = 86.0e9 .+ (0:(nchan - 1)) .* Δf
     times = (0:(nt - 1)) .* Δt
-    # Reference at the band edge / first time (NOT the grid centre) to exercise
+    # Reference at the band edge / first time (NOT the grid center) to exercise
     # the phase rotation from grid origin to (f0, t0).
     f0, t0 = freqs[1], times[1]
     τ, ṙ, φ = -20.0e-9, -6.0e-3, -1.3
@@ -442,9 +442,8 @@ end
     V32 = ComplexF32.(V64)
     W32 = ones(Float32, size(V32))
 
-    # The search grid, FFT plan, and workspace buffers must be native ComplexF32
-    # — not the pre-CHUNK-084 behavior of silently upcasting into ComplexF64 —
-    # since that's the whole point of flowing the compute type from `V`'s eltype.
+    # The search grid, FFT plan and workspace buffers take their element type
+    # from `V`, so a ComplexF32 input is searched in ComplexF32.
     ax = FR._search_axes(freqs, times, FR.FringeSearch(), ComplexF32)
     @test eltype(ax.delays) === Float32
     @test eltype(ax.rates) === Float32
