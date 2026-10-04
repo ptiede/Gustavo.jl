@@ -40,10 +40,6 @@ function _station_map(sol::Calibration._AppliedSolution, stations)
                 "$(join(map(repr, stations), ", "))."
         )
     )
-    if any(iszero, m)
-        missing_names = [n for (n, k) in zip(stations, m) if k == 0]
-        @warn "stations $(missing_names) are not in the solution — they keep identity gains." maxlog = 1
-    end
     return m
 end
 

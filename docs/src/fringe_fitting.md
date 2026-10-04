@@ -531,7 +531,7 @@ A fringe solution's diagnostics are labeled arrays keyed by scan name,
 station and feed: [`fringe_snr_table`](@ref) (per-scan peak SNR and
 false-alarm probability), [`fringe_detections`](@ref) (every measured
 baseline and product), [`fringe_station_solutions`](@ref) (per-scan station
-delay, rate and phase) and [`fringe_station_flags`](@ref) (stations a scan
+delay, rate and phase) and [`fringe_station_flags`](@ref) (station feeds a scan
 left unconstrained). Per-scan solutions from [`mapsets`](@ref Gustavo.mapsets) combine with
 [`cat_scans`](@ref):
 

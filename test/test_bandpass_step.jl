@@ -237,7 +237,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             @test isequal(parent(out[:visibility]), parent(V)) && isequal(parent(out[:weight]), parent(W))
         end
 
-        # A station the solution never saw keeps identity gains (with a warning).
+        # A station the solution never saw is named in a warning.
         uvbig, _ = _build_fringe_ps(; nant = 5, nspw, nchan, ntime = 5)
         @test_logs (:warn, r"A5") match_mode = :any correct(bps, uvbig)
 

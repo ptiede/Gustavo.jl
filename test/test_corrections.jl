@@ -82,11 +82,19 @@ end
         @test_throws "must name its stations" CALc.CalibrationSolution(_with_stations(geom, String[]), sol.components)
         strangers = _hand_solution(_with_stations(geom, ["X1", "X2", "X3", "X4"]))
         @test_throws "shares no station" calibrate!(strangers, fresh())
-        # A station the solution lacks keeps identity gains.
+        # A station the solution lacks: its cross baselines are flagged under
+        # `apply_flags`, and otherwise pass through uncorrected.
         partial = _hand_solution(_with_stations(geom, ["A1", "A2", "A3", "X4"]))
-        out = @test_logs (:warn, r"not in the solution") calibrate!(partial, fresh())
-        a4 = findall(p -> "A4" in p, collect(XRadio.baselines(ms)))
+        names = collect(XRadio.baselines(ms))
+        a4 = findall(((a, b),) -> "A4" in (a, b) && a != b, names)
+        others = findall(((a, b),) -> !("A4" in (a, b)), names)
+        out = @test_logs (:warn, r"\[\"A4\"\] are not in the solution; their baselines are flagged") calibrate!(partial, fresh())
+        @test all(parent(out[:flag][BaselineID = a4]))
+        @test !any(parent(out[:flag][BaselineID = others]))
         @test parent(out[:visibility][BaselineID = a4]) == parent(ms[:visibility][BaselineID = a4])
+        kept = @test_logs (:warn, r"left uncorrected") calibrate!(partial, fresh(); apply_flags = false)
+        @test !any(parent(kept[:flag][BaselineID = a4]))
+        @test parent(kept[:visibility][BaselineID = a4]) == parent(ms[:visibility][BaselineID = a4])
     end
 
     @testset "scale_weights!" begin

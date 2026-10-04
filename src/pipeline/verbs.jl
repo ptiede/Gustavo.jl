@@ -103,9 +103,10 @@ component places each channel by its center frequency and width: the data's
 channel must be a channel of the solve, no wider, so averaged channels are
 refused.
 
-Stations are matched by name against the solution's geometry; stations the
-solution never solved keep identity gains, with a warning. A solution that
-shares no station with the data is refused. `exec` supplies the schedulers and
+Stations are matched by name against the solution's geometry. The baselines of
+a station the solution does not name are flagged under `apply_flags`, as an
+unconstrained station's are, and otherwise left uncorrected; either way with a
+warning. A solution that shares no station with the data is refused. `exec` supplies the schedulers and
 progress callback.
 """
 function calibrate!(
@@ -118,7 +119,7 @@ function calibrate!(
     geom = DataGeometry(ps)
     members = collect(values(ps))
     _map_groups(members, zeros(Int, length(members)), exec; stage = :output) do ms
-        _apply_solution!(ms, app, geom, flagged; flag_bad, executor = inner_executor(exec))
+        _apply_solution!(ms, app, geom, flagged; flag_bad, apply_flags, executor = inner_executor(exec))
         _check_corrected(post, ms, post(ms))
     end
     return ps
@@ -129,16 +130,35 @@ function calibrate!(
         flag_bad::Bool = true, apply_flags::Bool = true,
     )
     flagged = apply_flags ? _solution_flag_sets(sol) : nothing
-    return _apply_solution!(ms, Calibration._applied(sol), DataGeometry(_one_member(ms)), flagged; flag_bad)
+    return _apply_solution!(ms, Calibration._applied(sol), DataGeometry(_one_member(ms)), flagged; flag_bad, apply_flags)
 end
 
 # `app`'s gains divided out of `ms`, then the baselines of `flagged` flagged.
 function _apply_solution!(
         ms::XRadio.MeasurementSet, app::Calibration._AppliedSolution, geom::DataGeometry, flagged;
-        flag_bad::Bool, executor = DynamicScheduler(),
+        flag_bad::Bool, apply_flags::Bool, executor = DynamicScheduler(),
     )
-    _divide_gains!(ms, GeometryWindow(geom, ms), app; flag_bad, executor)
+    win = GeometryWindow(geom, ms)
+    _divide_gains!(ms, win, app; flag_bad, executor)
+    _flag_absent_stations!(ms, win, app.geom.stations; apply_flags)
     return _flag_unconstrained!(ms, app.geom, geom, flagged)
+end
+
+# The cross baselines of stations `solved` does not name have no gains to divide
+# out; flag them (`apply_flags`) or leave them as they are, and warn either way.
+function _flag_absent_stations!(ms::XRadio.MeasurementSet, win::GeometryWindow, solved; apply_flags::Bool)
+    absent = [!(n in solved) for n in win.geom.stations]
+    names = Set{String}()
+    flag = ms[:flag]
+    for (bi, (a, b)) in pairs(win.stations)
+        (a != b && (absent[a] || absent[b])) || continue
+        absent[a] && push!(names, String(win.geom.stations[a]))
+        absent[b] && push!(names, String(win.geom.stations[b]))
+        apply_flags && (view(flag, BaselineID(bi)) .= true)
+    end
+    isempty(names) || @warn "stations $(sort!(collect(names))) are not in the solution; their baselines are " *
+        (apply_flags ? "flagged" : "left uncorrected") maxlog = 1
+    return ms
 end
 
 # The unconstrained (station name, feed, scan id) triples the steps of `sol`
