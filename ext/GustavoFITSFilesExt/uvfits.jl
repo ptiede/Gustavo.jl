@@ -361,8 +361,8 @@ end
 
 _is_lazy_random(data) = data isa FITSFiles.LazyStructuredData && data.hdu_type === FITSFiles.Random
 
-# The data array as `(record, complex, stokes, IF)`. Each IF holds one channel,
-# which is how the FQ table describes the band; a file with no IF axis has one.
+# The data array as `(record, complex, stokes, channel, IF)`; a file with no IF
+# axis has one IF.
 function _record_cube(cards, data)
     function axis(name)
         i = _find_axis(cards, ==(name))
@@ -381,18 +381,32 @@ function _record_cube(cards, data)
                 "a record states real, imaginary and weight"
         )
     )
-    size(data, freq) == 1 || throw(
-        ArgumentError(
-            "load_uvfits: the FREQ axis has $(size(data, freq)) channels per IF; " *
-                "only one channel per IF is supported"
-        )
-    )
     rest = setdiff(2:ndims(data), (complex_, stokes, freq, if_))
     all(d -> size(data, d) == 1, rest) || throw(
         ArgumentError("load_uvfits: the data array has more than one pixel along an axis other than COMPLEX, STOKES, FREQ and IF")
     )
-    cube = permutedims(data, (1, complex_, stokes, if_, freq, rest...))
-    return reshape(cube, size(cube, 1), size(cube, 2), size(cube, 3), size(cube, 4))
+    cube = permutedims(data, (1, complex_, stokes, freq, if_, rest...))
+    return reshape(cube, ntuple(d -> size(cube, d), 5))
+end
+
+# The spectral windows of one FQ row, each as its setup and its
+# `(record, polarization, channel)` visibilities and weights. IFs of one channel
+# are the channels of one window; IFs of several channels are one window each,
+# channel `k` of IF `i` at `IF FREQ[i] + (k - CRPIX) * CH WIDTH[i]` from the
+# reference frequency.
+function _windows(setup, vis_raw, weights_raw, crpix)
+    nchan = size(vis_raw, 3)
+    if nchan == 1
+        return [(; setup, vis = view(vis_raw, :, :, 1, :), weight = view(weights_raw, :, :, 1, :))]
+    end
+    return map(eachindex(setup.channel_freqs)) do i
+        channels = setup.channel_freqs[i] .+ ((1:nchan) .- crpix) .* setup.ch_width[i]
+        window = (;
+            setup.ref_freq, channel_freqs = channels, ch_width = setup.ch_width[i:i],
+            total_bandwidth = setup.total_bandwidth[i:i], sideband = setup.sideband[i:i],
+        )
+        (; setup = window, vis = view(vis_raw, :, :, :, i), weight = view(weights_raw, :, :, :, i))
+    end
 end
 
 function _visibility_units(cards, path)
@@ -403,7 +417,10 @@ function _visibility_units(cards, path)
                stated in the file." file = path
         return "uncalib"
     end
-    return uppercase(string(u)) == "JY" ? "Jy" : string(u)
+    unit = uppercase(string(u))
+    unit == "JY" && return "Jy"
+    unit == "UNCALIB" && return "uncalib"
+    return string(u)
 end
 
 function _read_uvfits(path, element_type)
@@ -443,12 +460,12 @@ function _read_uvfits(path, element_type)
     # casacore FitsIDItoMS.cc: "FITS-IDI convention is conjugate of AIPS and CASA
     # convention"). (u,v,w) and the 256·a1+a2 baseline codes agree too, so only
     # UVW's units change on this boundary.
-    vis_raw = Complex{T}.(view(raw, :, 1, perm, :), view(raw, :, 2, perm, :))
-    weights_raw = T.(view(raw, :, 3, perm, :))
+    vis_raw = Complex{T}.(view(raw, :, 1, perm, :, :), view(raw, :, 2, perm, :, :))
+    weights_raw = T.(view(raw, :, 3, perm, :, :))
 
     antenna_tables = [_read_antenna_table(h) for h in an_hdus]
     _check_stokes_vs_poltya(aips_codes, first(antenna_tables))
-    freq_setups, fq_frqsels = _read_frequency_setups(cards, fq_hdu.data, size(raw, 4))
+    freq_setups, fq_frqsels = _read_frequency_setups(cards, fq_hdu.data, size(raw, 5))
     src_info = _build_source_info(primary_hdu)
 
     # AIPS UVFITS stores DATE as two PTYPE columns. Different writers use
@@ -588,7 +605,7 @@ function _read_uvfits(path, element_type)
     isempty(groups) && error("load_uvfits: no records in $(path)")
 
     shared = (;
-        vis_raw, weights_raw, uvw_raw, obs_time, bl_pairs, inttim, pol_labels,
+        uvw_raw, obs_time, bl_pairs, inttim, pol_labels,
         units = _visibility_units(cards, path),
         source = src_info,
         observation_info = Dict{Symbol, Any}(
@@ -603,15 +620,21 @@ function _read_uvfits(path, element_type)
     )
     source_key = string(sanitize_source(src_info.source_name))
     sets = OrderedDict{Symbol, XRadio.MeasurementSet}()
+    freq_axis = _find_axis(cards, ==("FREQ"))
+    crpix = Float64(something(card_value(cards, "CRPIX$freq_axis"), 1.0))
     for ((scan, spw, sub), records) in groups
-        parts = [source_key, "spw_$(spw - 1)"]
-        length(antenna_tables) > 1 && push!(parts, "sub_$(sub - 1)")
-        push!(parts, "scan_$scan")
-        key = Symbol(join(parts, "_"))
-        haskey(sets, key) && error("load_uvfits: duplicate partition key $(key)")
-        sets[key] = _measurement_set(
-            shared, records, string(scan), spw - 1, freq_setups[spw], antenna_tables[sub],
-        )
+        windows = _windows(freq_setups[spw], vis_raw, weights_raw, crpix)
+        for (w, window) in pairs(windows)
+            spw_id = (spw - 1) * length(windows) + w - 1
+            parts = [source_key, "spw_$spw_id"]
+            length(antenna_tables) > 1 && push!(parts, "sub_$(sub - 1)")
+            push!(parts, "scan_$scan")
+            key = Symbol(join(parts, "_"))
+            haskey(sets, key) && error("load_uvfits: duplicate partition key $(key)")
+            sets[key] = _measurement_set(
+                shared, records, string(scan), spw_id, window, antenna_tables[sub],
+            )
+        end
     end
     return XRadio.ProcessingSet(sets)
 end
@@ -762,7 +785,7 @@ function _integration_time(inttim, records, times)
     return minimum(filter(>(0), diff(times)))
 end
 
-function _measurement_set(shared, records, scan_name, spw_id, setup, tab)
+function _measurement_set(shared, records, scan_name, spw_id, window, tab)
     times = sort!(unique(shared.obs_time[records]))
     pairs_ = sort!(unique(shared.bl_pairs[records]))
     time_of = Dict(t => k for (k, t) in pairs(times))
@@ -772,7 +795,7 @@ function _measurement_set(shared, records, scan_name, spw_id, setup, tab)
         throw(ArgumentError("load_uvfits: BASELINE names antenna $a, which the AN table does not number"))
     end
 
-    vis_raw, weights_raw = shared.vis_raw, shared.weights_raw
+    setup, vis_raw, weights_raw = window.setup, window.vis, window.weight
     npol, nchan = size(vis_raw, 2), size(vis_raw, 3)
     C = eltype(vis_raw)
     shape = (npol, nchan, length(pairs_), length(times))
@@ -796,10 +819,10 @@ function _measurement_set(shared, records, scan_name, spw_id, setup, tab)
                 ArgumentError("load_uvfits: record $r carries weight $w, which states neither a weight nor a flag")
             )
             vis[p, c, b, k] = vis_raw[r, p, c]
-            # UVFITS records a flag as a negative weight; its magnitude is the
-            # weight the sample would have had.
+            # UVFITS records a flag as a negative weight, `-0.0` included; its
+            # magnitude is the weight the sample would have had.
             weight[p, c, b, k] = abs(w)
-            flag[p, c, b, k] = w < 0
+            flag[p, c, b, k] = signbit(w)
         end
     end
 

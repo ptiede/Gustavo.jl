@@ -41,8 +41,8 @@ export UVData, Calibration, Fring
 # and slice leaves without reaching into `UVData` or `DimensionalData`.
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.
 export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, Scan, AntennaPair, FeedPair
-# UVFITS entry: the reader of a `ProcessingSet`.
-export load_uvfits
+# UVFITS entry: the reader and writer of a `ProcessingSet`.
+export load_uvfits, write_uvfits
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!

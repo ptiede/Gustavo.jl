@@ -141,7 +141,7 @@ end
     @testset "visibility units" begin
         units(ps) = DimensionalData.metadata(ps[1][:visibility])[:units]
         @test units(ps) == "Jy"
-        @test units(load_uvfits(first(uvfits_fixture(; bunit = "UNCALIB")))) == "UNCALIB"
+        @test units(load_uvfits(first(uvfits_fixture(; bunit = "UNCALIB")))) == "uncalib"
         nounit = first(uvfits_fixture(; bunit = nothing))
         @test_logs (:warn, r"no BUNIT") match_mode = :any load_uvfits(nounit)
         @test units(@test_logs (:warn,) match_mode = :any load_uvfits(nounit)) == "uncalib"

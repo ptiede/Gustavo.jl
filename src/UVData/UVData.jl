@@ -42,7 +42,7 @@ export pol_index, pol_at, baseline_index
 export obs_time
 export GUSTAVO_VISIBILITY_SCHEMA
 export source_name, scan_name, primary_scan_name, scan_intents, sub_scan_name
-export load_uvfits
+export load_uvfits, write_uvfits
 export check_layer_axes
 export feed_pairs, normalize_by_autocorrelations, normalize_by_autocorrelations!
 export apriori_calibrate!, TsysPlacement, ScanMean, LinearInTime, NearestInTime
