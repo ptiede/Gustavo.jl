@@ -1,6 +1,6 @@
 # Compares the current solver against the stores `record.jl` wrote.
 #
-#     julia --project=test/references test/references/compare.jl
+#     julia --project=test/references test/references/compare.jl [bt164a]
 #
 # Each synthetic case's recorded FITS-IDI input is converted with
 # `fitsidi2msv4` (to `testdata/references/<case>.ps.zarr`, ignored by git), so
@@ -20,6 +20,7 @@ using XRadio
 using FITSFiles
 using Zarr
 using DimensionalData
+using DimensionalData.Lookups: Categorical, Unordered
 using LinearAlgebra: BLAS
 using Printf: @sprintf
 
@@ -51,7 +52,10 @@ zread(g, path) = (a = zpath(g, path); a[ntuple(_ -> Colon(), ndims(a))...])
 function recorded_gains(g, axes)
     return DimArray(
         zread(g, "gains"),
-        (Frequency(axes.frequency), Ti(axes.time), AntennaName(axes.station), Feed(1:2)),
+        (
+            Frequency(axes.frequency), Ti(axes.time),
+            AntennaName(Categorical(axes.station; order = Unordered())), Feed(1:2),
+        ),
     )
 end
 
@@ -93,16 +97,32 @@ end
 wrap(x) = rem2pi(x, RoundNearest)
 
 # Recorded and current gains on the recorded grid, stations matched by name.
+# A station only one side has is listed, with whether its recorded gains are
+# all identity (a station without data).
 function gain_difference(recorded, current)
-    current = current[AntennaName = At(collect(lookup(recorded, AntennaName)))]
+    shared = intersect(lookup(recorded, AntennaName), lookup(current, AntennaName))
+    recorded_only = [
+        (name, all(isone, recorded[AntennaName = At(name)]))
+            for name in setdiff(lookup(recorded, AntennaName), shared)
+    ]
+    current_only = setdiff(lookup(current, AntennaName), shared)
+    recorded = recorded[AntennaName = At(shared)]
+    current = current[AntennaName = At(shared)]
     size(current) == size(recorded) || throw(DimensionMismatch("gain grids differ: $(size(current)) vs $(size(recorded))"))
     ok = isfinite.(parent(recorded)) .& isfinite.(parent(current))
     ratio = parent(current)[ok] ./ parent(recorded)[ok]
     return (;
         phase = isempty(ratio) ? NaN : maximum(abs ∘ angle, ratio),
         logamp = isempty(ratio) ? NaN : maximum(r -> abs(log(abs(r))), ratio),
-        nonfinite = count(!, ok),
+        nonfinite = count(!, ok), recorded_only, current_only,
     )
+end
+
+# The recorded value's station axis: the one whose length is the station count.
+function _station_axis(value, nstation)
+    d = findall(==(nstation), size(value))
+    length(d) == 1 || error("cannot identify the station axis of a recorded parameter of size $(size(value))")
+    return only(d)
 end
 
 function parameter_differences(recorded, sol::CalibrationSolution)
@@ -111,12 +131,14 @@ function parameter_differences(recorded, sol::CalibrationSolution)
         path = c.path
         haskey(recorded, path) || (push!(rows, (; path, note = "not recorded")); continue)
         r = recorded[path]
-        cur = c.params[AntennaName = At(r.station)]
-        size(parent(cur)) == size(r.value) || (push!(rows, (; path, note = "shape $(size(parent(cur))) vs recorded $(size(r.value))")); continue)
-        d = parent(cur) .- r.value
+        keep = findall(in(lookup(c.params, AntennaName)), r.station)
+        cur = c.params[AntennaName = At(r.station[keep])]
+        value = selectdim(r.value, _station_axis(r.value, length(r.station)), keep)
+        size(parent(cur)) == size(value) || (push!(rows, (; path, note = "shape $(size(parent(cur))) vs recorded $(size(value))")); continue)
+        d = parent(cur) .- value
         isphase = first(path) === :phase && c.component.term isa ConstantTerm
         isphase && (d = wrap.(d))
-        push!(rows, (; path, maxabs = maximum(abs, d; init = 0.0), scale = maximum(abs, r.value; init = 0.0)))
+        push!(rows, (; path, maxabs = maximum(abs, d; init = 0.0), scale = maximum(abs, value; init = 0.0)))
     end
     for path in setdiff(keys(recorded), [c.path for c in sol.components])
         push!(rows, (; path, note = "recorded only"))
@@ -160,11 +182,14 @@ function with_weight(ps, w)
     return ps
 end
 
+# Each step is fit on data the steps before it corrected in place, so one copy
+# of the set is held.
 function replay(ps, gauge)
+    ps = Gustavo.UVData.materialize(ps)
     fringe = fit(BaselineFringeFit(; gauge), ps)
-    ps = calibrate(fringe, ps; flag_bad = false, apply_flags = false)
+    calibrate!(fringe, ps; flag_bad = false, apply_flags = false)
     bandpass = fit(Bandpass(; gauge), ps)
-    ps = calibrate(bandpass, ps; flag_bad = false, apply_flags = false)
+    calibrate!(bandpass, ps; flag_bad = false, apply_flags = false)
     adhoc = fit(AdhocPhase(; gauge), ps)
     return (; fringe, bandpass, adhoc)
 end
@@ -193,7 +218,9 @@ function compare_run(root, sols)
     if haskey(recorded, "refine")
         refine = recorded_gains(recorded["refine"], ax)
         out[:refine] = gain_difference(refine, one.(composed))
-        out[:composed_with_recorded_refine] = gain_difference(recorded_gains(root, ax), composed .* refine)
+        shared = intersect(lookup(composed, AntennaName), lookup(refine, AntennaName))
+        refined = composed[AntennaName = At(shared)] .* refine[AntennaName = At(shared)]
+        out[:composed_with_recorded_refine] = gain_difference(recorded_gains(root, ax), refined)
     end
     return out
 end
@@ -208,6 +235,24 @@ function compare_case(case)
     )
 end
 
+# BT164A is converted once, beside its data, by `convert_bt164a`; the replay
+# reads the scans the reference was recorded on.
+const BT164A_DIR = expanduser("~/Research/M87Monitor/BT164/BT164A")
+const BT164A_QBAND = joinpath(BT164A_DIR, "VLBA_BT164A_bt164aQband_BIN0_SRC0_0_260108T230453.idifits")
+const BT164A_STORE = joinpath(BT164A_DIR, "VLBA_BT164A_bt164aQband.ps.zarr")
+const BT164A_REFERENCE = joinpath(BT164A_DIR, "reference_Qband_scans_1-4.zarr")
+const BT164A_SCANS = string.(1:4)
+
+convert_bt164a() = fitsidi2msv4(BT164A_QBAND, BT164A_STORE; mode = "w-", release_date = "2000-01-01")
+
+function compare_bt164a()
+    root = zopen(BT164A_REFERENCE)
+    gauge = PinAntenna(first(recorded_axes(root).station))
+    ps = filter(ms -> all(in(BT164A_SCANS), ms[:scan_name]), open(ProcessingSet, BT164A_STORE))
+    isempty(ps) && error("no Measurement Set of $(BT164A_STORE) holds scans $(BT164A_SCANS)")
+    return compare_run(root, replay(ps, gauge))
+end
+
 # ── Report ───────────────────────────────────────────────────────────────────
 
 fmt(x::Real) = @sprintf("%.2e", x)
@@ -219,7 +264,9 @@ function report(io, name, run)
         haskey(run, k) || continue
         g = k in (:fringe, :bandpass, :adhoc) ? run[k].gains : run[k]
         println(io, "    ", rpad(k, 30), "gains: phase ", fmt(g.phase), " rad, logamp ", fmt(g.logamp),
-            g.nonfinite > 0 ? ", $(g.nonfinite) non-finite" : "")
+            g.nonfinite > 0 ? ", $(g.nonfinite) non-finite" : "",
+            isempty(g.recorded_only) ? "" : ", recorded only $(g.recorded_only)",
+            isempty(g.current_only) ? "" : ", current only $(g.current_only)")
         k in (:fringe, :bandpass, :adhoc) || continue
         for r in run[k].parameters
             println(io, "      ", rpad(join(r.path, '.'), 26),
@@ -246,5 +293,11 @@ function main(io = stdout)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    main()
+    if "bt164a" in ARGS
+        BLAS.set_num_threads(1)
+        result = @time compare_bt164a()
+        report(stdout, "BT164A Q band, scans $(join(BT164A_SCANS, ", "))", result)
+    else
+        main()
+    end
 end
