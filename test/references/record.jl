@@ -18,7 +18,7 @@ using Zarr
 using Dates: now
 using StableRNGs: StableRNG
 
-include(joinpath(@__DIR__, "..", "synthetic_uvset.jl"))
+include(joinpath(@__DIR__, "..", "pipeline_helpers.jl"))
 
 const REPO = normpath(joinpath(@__DIR__, "..", ".."))
 const SYNTHETIC_DIR = joinpath(REPO, "testdata", "references")

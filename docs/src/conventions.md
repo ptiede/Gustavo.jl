@@ -57,7 +57,7 @@ are reported as uncovered by the solve and are to be flagged on that basis.
 | Fringe rate | Hz |
 | Phase, differential TEC coefficient | radians |
 | `:weights` | inverse variance, ``1/\sigma^2`` |
-| `:uvw` | as the source file stores it, seconds of light travel for FITS-IDI and AIPS UVFITS |
+| `:uvw` | meters, as MSv4's `UVW`; FITS-IDI and AIPS UVFITS store seconds of light travel, converted on reading |
 
 Times are absolute. A `Float64` resolves about 0.24 µs at present epochs, and
 every delay and rate term is evaluated on ``t - t_0`` about a segment-local
@@ -73,8 +73,10 @@ Solvers require both conditions, so a sample contributes when its flag is unset
 and its weight is finite and positive.
 
 UVFITS has no flag table, and a negative weight is the only means the format
-has of recording a flag. [`load_uvfits`](@ref) therefore flags every sample
-whose weight is not positive.
+has of recording a flag. [`load_uvfits`](@ref) therefore flags a sample whose
+weight is negative and keeps its magnitude as the weight; a zero weight is read
+as an unflagged sample of zero weight, and a (time, baseline) slot no record
+fills is flagged with zero weight.
 
 ## Feeds and correlation products
 
@@ -91,12 +93,12 @@ A Measurement Set stores products as receptor labels (`"RR"`, `"XY"`, …).
 [`feed_pairs`](@ref feed_pairs(::XRadio.MeasurementSet)) resolves each letter
 through its antenna's `polarization_type`, so one stored product can relate
 different feed pairs on different baselines; each baseline's products are
-reordered into one shared order when data becomes solver input. A
-[`UVSet`](@ref) leaf labels its products `P` (feed 1) and `Q` (feed 2).
+reordered into one shared order when data becomes solver input.
 
 ## Baseline coordinates
 
 FITS-IDI and AIPS UVFITS share one baseline-coordinate convention and one
-antenna ordering, so ``(u, v, w)`` is read verbatim and never negated. The
+antenna ordering, so ``(u, v, w)`` is never negated; it is only converted from
+light-seconds to meters. The
 conjugation applied to the visibilities on the FITS-IDI boundary does not
 extend to it.

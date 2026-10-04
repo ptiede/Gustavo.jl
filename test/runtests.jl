@@ -12,7 +12,7 @@ import XRadio
 using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
-using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, UVSet, pol_products, feed_pairs
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, pol_products, feed_pairs
 using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
 using PolarizedTypes: RPol, LPol
 
@@ -20,7 +20,8 @@ using PolarizedTypes: RPol, LPol
 include("plan_offsets.jl")
 
 include("test_synthetic_ps.jl")
-include("test_xradio_bridge.jl")
+include("test_measurementset.jl")
+include("test_uvfits.jl")
 include("test_ms_baselines.jl")
 include("test_ms_geometry.jl")
 include("test_autocorrelations.jl")
@@ -105,89 +106,6 @@ include("test_weight_scale.jl")
 # order, task cap, and bit-identical θ/outputs whichever one runs the pass.
 include("test_executors.jl")
 
-function synthetic_uvdata()
-    vis = ComplexF64[
-        1.0 + 0.0im 0.8 + 0.1im 0.9 - 0.1im 0.7 + 0.2im;
-        0.9 + 0.1im 0.7 + 0.2im 0.8 + 0.0im 0.6 + 0.1im;
-        1.1 - 0.1im 0.9 + 0.0im 1.0 + 0.1im 0.8 - 0.1im;
-        1.0 + 0.2im 0.8 + 0.3im 0.9 + 0.1im 0.7 + 0.0im;
-
-        0.9 + 0.0im 0.7 + 0.1im 0.8 - 0.1im 0.6 + 0.2im;
-        0.8 + 0.1im 0.6 + 0.2im 0.7 + 0.0im 0.5 + 0.1im;
-        1.0 - 0.1im 0.8 + 0.0im 0.9 + 0.1im 0.7 - 0.1im;
-        0.9 + 0.2im 0.7 + 0.3im 0.8 + 0.1im 0.6 + 0.0im;
-    ]
-    vis = ComplexF32.(reshape(vis, 2, 4, 4))
-    weights = fill(1.0f0, size(vis))
-    obs_time_synth = [0.0, 1.0]
-    # Internal MSv4-canonical correlation order. AIPS Stokes axis on disk is
-    # [-1,-2,-3,-4] (RR/LL/RL/LR) which maps to ["PP","QQ","PQ","QP"]; the
-    # FITS read path permutes to MSv4 ["PP","PQ","QP","QQ"]. Since the
-    # synthetic vis values are placeholders, we just label the dim in MSv4
-    # order — the round-trip test exercises the read/write permutation.
-    pol_labels_synth = ["PP", "PQ", "QP", "QQ"]
-    channel_freqs_synth = collect(1.0:4.0)
-    vis = DimArray(vis, (Ti(obs_time_synth), Polarization(pol_labels_synth), Frequency(channel_freqs_synth)))
-    weights = DimArray(weights, (Ti(obs_time_synth), Polarization(pol_labels_synth), Frequency(channel_freqs_synth)))
-    uvw = DimArray(zeros(Float32, 2, 3), (Ti(obs_time_synth), UVW(["U", "V", "W"])))
-
-    UV = Gustavo.UVData
-    nominal_basis_v = [(RPol(), LPol()), (RPol(), LPol())]
-    pol_angles_v = [(0.0f0, 0.0f0), (0.3f0, 1.2f0)]
-    antennas_v = [
-        UV.Antenna(;
-            name = "AA",
-            station_xyz = zeros(3),
-            mount = UV.MountAltAz(),
-            nominal_basis = nominal_basis_v[1],
-            pol_angles = pol_angles_v[1],
-        ),
-        UV.Antenna(;
-            name = "AX",
-            station_xyz = zeros(3),
-            mount = UV.MountNasmythR((1.5, 0.0, 0.0)),
-            nominal_basis = nominal_basis_v[2],
-            pol_angles = pol_angles_v[2],
-        ),
-    ]
-    antennas = UV.AntennaTable(
-        StructArray(antennas_v), "TEST",
-        (POLCALA = [Float32[], Float32[]], POLCALB = [Float32[], Float32[]]),
-    )
-    freq_setup = UV.FrequencySetup(;
-        name = "FRQSEL_1",
-        ref_freq = 1.0e9,
-        channel_freqs = collect(1.0:4.0),
-        ch_widths = fill(1.0f0, 4),
-        total_bandwidths = fill(1.0f0, 4),
-        sidebands = Int32.(fill(1, 4)),
-    )
-    array_obs = UV.ObsArrayMetadata(;
-        telescope = "TEST", instrume = "TEST",
-        date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
-        rdate = "2000-01-01", earth_rot_rate = 360.0f0, poltype = "APPROX",
-    )
-    uvset = UVSet(
-        (
-            vis = vis,
-            weights = weights,
-            uvw = uvw,
-            obs_time = obs_time_synth,
-            record_scan_name = ["1", "2"],
-            baselines = UV.BaselineIndex([(1, 2), (1, 2)], [(1, 2)]; antenna_names = ["AA", "AX"]),
-            extra_columns = NamedTuple(),
-            antennas = antennas,
-            array_obs = array_obs,
-            freq_setups = UV.FrequencySetup[freq_setup],
-            record_spw_index = Int32[1, 1],
-            source_name = "TEST",
-            ra = 0.0, dec = 0.0,
-            basename = "synthetic",
-        )
-    )
-    return uvset
-end
-
 @testset "Gustavo.jl" begin
     for sub in (:UVData, :Calibration, :Fring)
         @test isdefined(Gustavo, sub)
@@ -200,7 +118,7 @@ end
 
     # A bare `using Gustavo` spans the production path: read a set, then fit and
     # calibrate it.
-    for n in (:UVSet, :load_uvfits, :fit, :calibrate)
+    for n in (:load_uvfits, :fit, :calibrate)
         @test n in top
     end
 
@@ -242,22 +160,6 @@ end
     end
     @test !(:nparams_per_block in names(Gustavo.Calibration))
     @test Gustavo.Calibration.nparams_per_block isa Function
-end
-
-@testset "UVSet partition tree shape" begin
-    UV = Gustavo.UVData
-    uvset = synthetic_uvdata()
-    @test uvset isa UV.UVSet
-    nleaves = length(UV.branches(uvset))
-    @test nleaves == 2
-    for s in 1:nleaves
-        key = UV.partition_key(; source_key = :src_TEST, scan_name = string(s))
-        @test haskey(UV.branches(uvset), key)
-        leaf = UV.branches(uvset)[key]
-        @test UV.metadata(leaf).scan_name == string(s)
-        @test ndims(parent(leaf[:vis])) == 4
-        @test ndims(parent(leaf[:uvw])) == 3
-    end
 end
 
 @testset "Weighted LSQ accepts mixed-precision RHS" begin
@@ -365,17 +267,6 @@ end
     @test x_r ≈ x_ref rtol = 1.0e-10
 end
 
-@testset "DimArray slicing" begin
-    using DimensionalData
-    UV = Gustavo.UVData
-    raw = synthetic_uvdata()
-
-    # Per-leaf Polarization slice on a UVSet: pull leaf, then DimTree's selector.
-    leaf1 = UV.branches(raw)[UV.partition_key(; source_key = :src_TEST, scan_name = "1")]
-    sliced = leaf1[Polarization = At("PP")]
-    @test sliced isa DimensionalData.AbstractDimTree
-end
-
 @testset "Source name sanitization" begin
     UV = Gustavo.UVData
     @test UV.sanitize_source("TEST") == :src_TEST
@@ -384,7 +275,6 @@ end
     @test UV.sanitize_source("NGC 4486") == :src_NGC_4486
     @test UV.sanitize_source("") == :src_unknown
     @test UV.sanitize_source("  ") == :src_unknown
-    @test UV.partition_key(; source_key = :src_3C273, scan_name = "5") == :src_3C273_spw_0_scan_5
 end
 
 @testset "Structural ==/hash for metadata types" begin
@@ -412,13 +302,6 @@ end
     @test d[fs1()] == :second
     @test length(d) == 1
 
-    obs1() = UV.ObsArrayMetadata(;
-        telescope = "TEST", instrume = "TEST",
-        date_obs = "2000-01-01", equinox = 2000.0f0, bunit = "JY",
-    )
-    @test obs1() == obs1()
-    @test hash(obs1()) == hash(obs1())
-
     mnt() = UV.MountAltAz()
     @test mnt() == mnt()
     @test hash(mnt()) == hash(mnt())
@@ -432,91 +315,7 @@ end
     @test hash(ant()) == hash(ant())
 end
 
-@testset "partition_axes is single-point-of-extension" begin
-    UV = Gustavo.UVData
-    leaf = first(values(UV.branches(synthetic_uvdata())))
-    info = UV.metadata(leaf)
-    @test UV.partition_key(info) == :src_TEST_spw_0_scan_1
-
-    # Append a synthetic axis without touching `partition_key` or any other
-    # call site — only the axis tuple changes.
-    extended = (
-        UV.DEFAULT_PARTITION_AXES...,
-        UV.PartitionAxis(:obs, info -> isempty(info.intent) ? "" : "obs_$(info.intent)"),
-    )
-    @test UV.partition_key(info, extended) == :src_TEST_spw_0_scan_1
-    info_with_intent = UV.update(info; intent = "TARGET")
-    @test UV.partition_key(info_with_intent, extended) == :src_TEST_spw_0_scan_1_obs_TARGET
-end
-
-"""
-    synthetic_two_spw_flat()
-
-Build a flat NamedTuple with two `FrequencySetup`s and per-record
-`record_spw_index = [1, 2]` so `UVSet(flat)` splits records into two
-leaves sharing scan_name "1" but differing in SPW. Mirrors
-`synthetic_uvdata` shape but with two FQ rows.
-"""
-function synthetic_two_spw_flat()
-    UV = Gustavo.UVData
-    obs_t = [0.0, 1.0]
-    pol_lab = ["PP", "PQ", "QP", "QQ"]
-    chan_freq = collect(1.0:4.0)
-    vis = ComplexF32.(rand(ComplexF32, 2, 4, 4))
-    weights = fill(1.0f0, 2, 4, 4)
-    vis_da = DimArray(vis, (Ti(obs_t), Polarization(pol_lab), Frequency(chan_freq)))
-    weights_da = DimArray(weights, (Ti(obs_t), Polarization(pol_lab), Frequency(chan_freq)))
-    uvw_da = DimArray(zeros(Float32, 2, 3), (Ti(obs_t), UVW(["U", "V", "W"])))
-
-    # Reuse antennas / array_obs from the single-source fixture. Same
-    # structure, just two SPWs.
-    base = synthetic_uvdata()
-    base_meta = UV.metadata(base)
-
-    fs_a = UV.FrequencySetup(;
-        name = "spw_0", ref_freq = 1.0e9,
-        channel_freqs = collect(1.0:4.0), ch_widths = fill(1.0f0, 4),
-        total_bandwidths = fill(1.0f0, 4), sidebands = Int32.(fill(1, 4)),
-        extras = (; frqsel = Int32(1)),
-    )
-    fs_b = UV.FrequencySetup(;
-        name = "spw_1", ref_freq = 1.0e9,
-        channel_freqs = collect(5.0:8.0), ch_widths = fill(1.0f0, 4),
-        total_bandwidths = fill(1.0f0, 4), sidebands = Int32.(fill(1, 4)),
-        extras = (; frqsel = Int32(2)),
-    )
-
-    flat = (
-        vis = vis_da, weights = weights_da, uvw = uvw_da,
-        obs_time = obs_t,
-        record_scan_name = ["1", "1"],
-        record_spw_index = Int32[1, 2],
-        baselines = UV.BaselineIndex(
-            [(1, 2), (1, 2)], [(1, 2)]; antenna_names = ["AA", "AX"]
-        ),
-        extra_columns = NamedTuple(),
-        antennas = UV.metadata(first(values(UV.branches(base)))).antennas,
-        array_obs = base_meta.array_obs,
-        freq_setups = UV.FrequencySetup[fs_a, fs_b],
-        source_name = "TEST", ra = 0.0, dec = 0.0,
-        basename = "synthetic_2spw",
-    )
-    return flat, fs_a, fs_b
-end
-
-@testset "synthetic two-FREQID flat → UVSet" begin
-    UV = Gustavo.UVData
-    flat, fs_a, fs_b = synthetic_two_spw_flat()
-    uvset = UV.UVSet(flat)
-
-    @test length(UV.branches(uvset)) == 2
-    @test haskey(UV.branches(uvset), :src_TEST_spw_0_scan_1)
-    @test haskey(UV.branches(uvset), :src_TEST_spw_1_scan_1)
-    @test UV.metadata(UV.branches(uvset)[:src_TEST_spw_0_scan_1]).freq_setup == fs_a
-    @test UV.metadata(UV.branches(uvset)[:src_TEST_spw_1_scan_1]).freq_setup == fs_b
-end
-
-@testset "Phase 1.6 invariants: BaselineIndex + UVMetadata" begin
+@testset "BaselineIndex carries no AIPS-only fields" begin
     UV = Gustavo.UVData
     # decode_baseline must not exist in the UVData public namespace.
     @test !isdefined(UV, :decode_baseline)
@@ -526,89 +325,9 @@ end
     @test :pairs_per_record in fieldnames(UV.BaselineIndex)
 end
 
-@testset "AIPS leak check: setup_name is MSv4, no record_freqid" begin
-    UV = Gustavo.UVData
-    fs = UV.metadata(first(values(UV.branches(synthetic_uvdata())))).freq_setup
-    @test UV.setup_name(fs) == "FRQSEL_1" || startswith(UV.setup_name(fs), "spw_")
-    # `flat.record_freqid` no longer exists; constructing a UVSet from a flat
-    # tuple with that legacy key should fail (renamed to record_spw_index).
-    base = synthetic_uvdata()
-    bl = first(values(UV.branches(base)))
-    info = UV.metadata(bl)
-    bad_flat = (
-        vis = bl[:vis], weights = bl[:weights], uvw = bl[:uvw],
-        obs_time = collect(UV.obs_time(bl)),
-        record_scan_name = ["1", "1"],
-        record_freqid = Int32[1, 1],   # legacy name — should not be picked up
-        baselines = info.baselines,
-        extra_columns = NamedTuple(),
-        antennas = info.antennas,
-        array_obs = UV.metadata(base).array_obs,
-        freq_setups = UV.FrequencySetup[info.freq_setup],
-        source_name = "TEST", ra = 0.0, dec = 0.0,
-    )
-    @test_throws Exception UV.UVSet(bad_flat)
-end
-
-@testset "sub_scan_name disambiguates colliding (source, scan)" begin
-    # Mirrors xradio's SUB_SCAN_NUMBER partitioning: two sub-arrays
-    # observing the same source at the same scan would collide on
-    # `:<source>_scan_<n>`. Setting `sub_scan_name` distinctly on each leaf
-    # disambiguates via `:<source>_scan_<n>_<sub>`.
-    UV = Gustavo.UVData
-    base = synthetic_uvdata()
-    @test UV.partition_key(; source_key = :TEST, scan_name = "1") === :TEST_spw_0_scan_1
-    @test UV.partition_key(; source_key = :TEST, scan_name = "1", sub_scan_name = "A") ===
-        :TEST_spw_0_scan_1_A
-    @test UV.partition_key(; source_key = :TEST, scan_name = "1", sub_scan_name = "A") !==
-        UV.partition_key(; source_key = :TEST, scan_name = "1", sub_scan_name = "B")
-
-    # Build a sibling leaf with a distinct sub_scan_name on top of an
-    # existing leaf and confirm both coexist in one set.
-    branches = Gustavo.UVData.DimensionalData.TreeDict()
-    for (k, leaf) in UV.branches(base)
-        branches[k] = leaf
-        info = UV.metadata(leaf)
-        if info.scan_name == "1"
-            sub_info = UV.update(info; sub_scan_name = "B")
-            sub_leaf = UV._build_leaf(
-                leaf[:vis], leaf[:weights], leaf[:uvw], leaf[:flags];
-                partition_info = sub_info,
-            )
-            sub_key = UV.partition_key(sub_info)
-            branches[sub_key] = sub_leaf
-        end
-    end
-    multi_sa = Gustavo.UVData.DimensionalData.rebuild(base; branches = branches)
-    @test haskey(UV.branches(multi_sa), :src_TEST_spw_0_scan_1)
-    @test haskey(UV.branches(multi_sa), :src_TEST_spw_0_scan_1_B)
-end
-
-@testset "Phase 1.7 invariants: per-leaf antennas, ArrayConfig deletion" begin
-    UV = Gustavo.UVData
-    @test !isdefined(UV, :ArrayConfig)
-    @test fieldnames(UV.UVMetadata) == (:array_obs,)
-    @test :antennas in fieldnames(UV.PartitionInfo)
-    @test :subarray_name in fieldnames(UV.PartitionInfo)
-end
-
-@testset "leaves share one AntennaTable" begin
-    UV = Gustavo.UVData
-    base = synthetic_uvdata()
-    leaves_v = collect(values(UV.branches(base)))
-    leaf1 = first(leaves_v)
-    leaf2 = last(leaves_v)
-    # Single-subarray fixture: every leaf points at the same AntennaTable
-    # instance (shared reference). Mutation requires constructing a new
-    # table — silent inconsistency requires explicit work.
-    @test UV.metadata(leaf1).antennas === UV.metadata(leaf2).antennas
-end
-
 @testset "BaselineIndex lookup sugar" begin
     UV = Gustavo.UVData
-    base = synthetic_uvdata()
-    leaf = first(values(UV.branches(base)))
-    bls = UV.metadata(leaf).baselines
+    bls = UV.baselines(XRadio.Testing.measurement_set())
     @test length(bls) == length(bls.pairs) > 0
 
     p = bls.pairs[1]
@@ -626,8 +345,7 @@ end
 
 @testset "pol_index / pol_at select by feed pair" begin
     UV = Gustavo.UVData
-    base = synthetic_uvdata()
-    vis = first(values(UV.branches(base)))[:vis]
+    vis = DimArray(zeros(ComplexF32, 4, 2), (Polarization([(1, 1), (1, 2), (2, 1), (2, 2)]), Ti([0.0, 1.0])))
     @test UV.feed_pairs(vis) == [(1, 1), (1, 2), (2, 1), (2, 2)]
     @test [UV.pol_index(vis, fp) for fp in UV.feed_pairs(vis)] == 1:4
     @test_throws KeyError UV.pol_index(vis, (1, 3))
@@ -636,8 +354,6 @@ end
     sel = UV.pol_at(vis, (2, 1))
     @test sel isa DimensionalData.At
     @test getfield(sel, :val) == UV.pol_products(vis)[3]
-
-    @test_throws "P (feed 1) and Q (feed 2)" UV._feed_pairs(["RR"])
 end
 
 @testset "a Measurement Set's products resolve through each antenna's receptors" begin

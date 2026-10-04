@@ -1,37 +1,18 @@
 using FITSFiles
 using FITSFiles: HDU
-using StructArrays
-using Dates: Date, DateTime, datetime2julian
-using DimensionalData
-using DimensionalData: DimArray
-using PolarizedTypes: XPol, YPol, RPol, LPol
+using Dates: Dates, Date, DateTime, datetime2julian
+using OrderedCollections: OrderedDict
+import XRadio
 
 import Gustavo.UVData
 using Gustavo.UVData:
-    UVSet, ObsArrayMetadata, FrequencySetup,
-    Antenna, AntennaTable, BaselineIndex,
     MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
-    MountBWGR, MountBWGL, MountXY, MountOrbiting,
-    Polarization, Frequency, UVW,
-    extras,
-    channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
-
-const POLBASIS = Union{RPol, LPol, XPol, YPol}
+    MountBWGR, MountBWGL, MountXY, MountOrbiting, sanitize_source
 
 # AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices
 # as `bl = a*256 + b`. Caps the array at 255 antennas. Lives in the FITS
 # extension only; format-neutral code in `src/` speaks `(a, b)` tuples.
 _decode_aips_baseline(bl::Integer)::Tuple{Int, Int} = (bl ÷ 256, bl % 256)
-
-
-# AIPS POLTYA/POLTYB letter → PolarizedTypes
-function poltype(type)
-    type == "R" && return RPol()
-    type == "L" && return LPol()
-    type == "X" && return XPol()
-    type == "Y" && return YPol()
-    error("Unsupported polarization type: $type")
-end
 
 
 # AIPS Stokes code → generic correlation-product label.
@@ -46,7 +27,12 @@ function aips_code_to_generic(code::Integer)
     error("Unsupported Stokes code: $code")
 end
 
-# Product order written to a leaf; a subset keeps this relative order.
+const _AIPS_STOKES_LABELS = Dict(
+    -1 => "RR", -2 => "LL", -3 => "RL", -4 => "LR",
+    -5 => "XX", -6 => "YY", -7 => "XY", -8 => "YX",
+)
+
+# Product order of a Measurement Set; a subset keeps this relative order.
 const _MSV4_CANONICAL = ("PP", "PQ", "QP", "QQ")
 function _msv4_order(labels::AbstractVector{<:AbstractString})
     out = String[]
@@ -127,19 +113,18 @@ function _find_axis(cards, pred)
 end
 
 """
-    parse_stokes_axis(cards, npol) -> (aips_codes, aips_labels, msv4_labels, perm)
+    parse_stokes_axis(cards, npol) -> (aips_codes, labels, perm)
 
 Parse AIPS STOKES axis. Returns the raw AIPS pol codes (e.g. `[-1,-2,-3,-4]`),
-the corresponding generic labels in the original AIPS axis order, the same
-labels permuted to MSv4 canonical order (`["PP","PQ","QP","QQ"]`), and the
-permutation `perm` such that `aips_labels[perm] == msv4_labels`.
+the MSv4 labels of the products in canonical feed-pair order (`PP`, `PQ`, `QP`,
+`QQ`, so `["RR", "RL", "LR", "LL"]` for a circular file), and the permutation
+`perm` taking the file's axis order to that one.
 """
 function parse_stokes_axis(cards, npol)
     axis = _find_axis(cards, ==("STOKES"))
-    if isnothing(axis)
-        labels = string.(1:npol)
-        return Int[], labels, labels, collect(1:npol)
-    end
+    isnothing(axis) && throw(
+        ArgumentError("load_uvfits: the primary HDU has no STOKES axis to label its products")
+    )
 
     crval = something(card_value(cards, "CRVAL$axis"), 1.0)
     cdelt = something(card_value(cards, "CDELT$axis"), 1.0)
@@ -148,8 +133,8 @@ function parse_stokes_axis(cards, npol)
     aips_labels = aips_code_to_generic.(aips_codes)
     msv4_labels = _msv4_order(aips_labels)
     perm = [findfirst(==(lab), aips_labels) for lab in msv4_labels]
-    any(isnothing, perm) && error("parse_stokes_axis: cannot reconcile AIPS labels $aips_labels with MSv4 order $msv4_labels")
-    return aips_codes, aips_labels, msv4_labels, Vector{Int}(perm)
+    labels = [_AIPS_STOKES_LABELS[c] for c in aips_codes[perm]]
+    return aips_codes, labels, Vector{Int}(perm)
 end
 
 function _find_freq_axis(cards)
@@ -158,218 +143,108 @@ function _find_freq_axis(cards)
     return something(card_value(cards, "CRVAL$i"), 0.0)
 end
 
-const _AN_MANDATORY_COLS = Set(
-    [
-        :ANNAME, :STABXYZ, :ORBPARM, :NOSTA, :MNTSTA, :STAXOF,
-        :POLTYA, :POLAA, :POLCALA, :POLTYB, :POLAB, :POLCALB,
-    ]
-)
+_clean_name(s) = filter(c -> isascii(c) && isprint(c) && !isspace(c), string(s))
 
-function _collect_an_extras(an)
-    pairs = Pair{Symbol, Any}[]
-    for sym in propertynames(an)
-        sym in _AN_MANDATORY_COLS && continue
-        push!(pairs, sym => getproperty(an, sym))
-    end
-    return (; pairs...)
-end
-
-function _split_per_antenna_polcal(an, sym::Symbol, nant)
-    hasproperty(an, sym) || return [Float32[] for _ in 1:nant]
-    raw = getproperty(an, sym)
-    # Materialize eagerly via `collect`: the AN HDU column may come
-    # back as a lazy `LazyFieldArray`, and downstream `hash`/`==` on
-    # the antenna struct iterates the per-antenna POLCAL vectors —
-    # which crashes on lazy 0-length chunked arrays. We avoid
-    # `Matrix{T}(::LazyFieldArray)` because that path goes through
-    # DiskArrays' broadcast machinery and also fails on empty fields.
-    raw_mat = collect(raw)
-    if raw_mat isa AbstractMatrix
-        return [Float32.(raw_mat[i, :]) for i in 1:nant]
-    end
-    return [Float32.(collect(x)) for x in raw_mat]
-end
-
-function _build_antenna_table(an_hdu)
+# One AN table, as the columns the antenna sub-dataset and the baseline names
+# are built from.
+function _read_antenna_table(an_hdu)
     cards = an_hdu.cards
     an = an_hdu.data
-
-    clean(s) = filter(c -> isascii(c) && isprint(c) && !isspace(c), string(s))
-
-    names = clean.(collect(an.ANNAME))
+    names = _clean_name.(collect(an.ANNAME))
     nant = length(names)
-    xyz_raw = collect(an.STABXYZ)
-    mount_raw = collect(an.MNTSTA)
-    staxof_raw::Vector{Float32} = hasproperty(an, :STAXOF) ? collect(an.STAXOF) : fill(0.0f0, nant)
-    mnts = mnt_codes_to_type.(mount_raw, _uvfits_axis_offset.(staxof_raw))
-    poltya_raw = hasproperty(an, :POLTYA) ? collect(an.POLTYA) : fill("R", nant)
-    poltya::Vector{POLBASIS} = poltype.(poltya_raw)
-    poltyb_raw = hasproperty(an, :POLTYB) ? collect(an.POLTYB) : fill("L", nant)
-    poltyb::Vector{POLBASIS} = poltype.(poltyb_raw)
-    polaa_raw::Vector{Float32} = hasproperty(an, :POLAA) ? collect(an.POLAA) : fill(0.0f0, nant)
-    polab_raw::Vector{Float32} = hasproperty(an, :POLAB) ? collect(an.POLAB) : fill(0.0f0, nant)
-    pol_angles::Vector{Tuple{Float32, Float32}} = tuple.(deg2rad.(polaa_raw), deg2rad.(polab_raw))
+    numbers = hasproperty(an, :NOSTA) ? Int.(collect(an.NOSTA)) : collect(1:nant)
+    xyz = collect(an.STABXYZ)
+    staxof = hasproperty(an, :STAXOF) ? collect(an.STAXOF) : zeros(nant)
+    mounts = mnt_codes_to_type.(collect(an.MNTSTA), _uvfits_axis_offset.(staxof))
+    poltya = hasproperty(an, :POLTYA) ? strip.(collect(an.POLTYA)) : fill("R", nant)
+    poltyb = hasproperty(an, :POLTYB) ? strip.(collect(an.POLTYB)) : fill("L", nant)
+    polaa = hasproperty(an, :POLAA) ? collect(an.POLAA) : zeros(nant)
+    polab = hasproperty(an, :POLAB) ? collect(an.POLAB) : zeros(nant)
+    for p in Iterators.flatten((poltya, poltyb))
+        p in ("R", "L", "X", "Y") || throw(ArgumentError("Unsupported polarization type: $p"))
+    end
 
     # `STABXYZ` is measured from the ARRAYX/Y/Z array center.
     center = [Float64(something(card_value(cards, k), 0.0)) for k in ("ARRAYX", "ARRAYY", "ARRAYZ")]
-    station_xyz::Vector{Vector{Float64}} = [center .+ Float64.(xyz_raw[i, :]) for i in eachindex(names)]
-    nominal_basis::Vector{Tuple{POLBASIS, POLBASIS}} = tuple.(poltya, poltyb)
-
-    antennas = [
-        Antenna(;
-            name = names[i],
-            station_xyz = station_xyz[i],
-            mount = mnts[i],
-            nominal_basis = nominal_basis[i],
-            pol_angles = pol_angles[i],
-        )
-            for i in 1:nant
-    ]
-
-    arrnam::String = string(something(card_value(cards, "ARRNAM"), ""))
-
-    ant_extras = (;
-        POLCALA = _split_per_antenna_polcal(an, :POLCALA, nant),
-        POLCALB = _split_per_antenna_polcal(an, :POLCALB, nant),
-        _collect_an_extras(an)...,
+    positions = [center[c] + Float64(xyz[i, c]) for c in 1:3, i in 1:nant]
+    return (;
+        names, numbers, positions, mounts,
+        polarization_type = [String(r == 1 ? poltya[i] : poltyb[i]) for r in 1:2, i in 1:nant],
+        receptor_angle = [deg2rad(Float64(r == 1 ? polaa[i] : polab[i])) for r in 1:2, i in 1:nant],
+        diameter = hasproperty(an, :DIAMETER) ? Float64.(collect(an.DIAMETER)) : nothing,
+        array_name = string(something(card_value(cards, "ARRNAM"), "")),
+        rdate = string(something(card_value(cards, "RDATE"), "")),
+        earth_orientation = Dict{Symbol, Any}(
+            :gst_iat0 => Float64(something(card_value(cards, "GSTIA0"), 0.0)),
+            :earth_rot_rate => Float64(something(card_value(cards, "DEGPDY"), 360.0)),
+            :ut1utc => Float64(something(card_value(cards, "UT1UTC"), 0.0)),
+            :polarx => Float64(something(card_value(cards, "POLARX"), 0.0)),
+            :polary => Float64(something(card_value(cards, "POLARY"), 0.0)),
+            :datutc => Float64(something(card_value(cards, "DATUTC"), 0.0)),
+            :xyzhand => string(something(card_value(cards, "XYZHAND"), "RIGHT")),
+            :poltype => string(something(card_value(cards, "POLTYPE"), "")),
+        ),
     )
-
-    ant_table = AntennaTable(StructArray(antennas), arrnam, ant_extras)
-    return ant_table
 end
 
-const _FQ_MANDATORY_COLS = Set(
-    [
-        :FRQSEL, Symbol("IF FREQ"), Symbol("CH WIDTH"),
-        Symbol("TOTAL BANDWIDTH"), :SIDEBAND,
+function _antenna_dataset(tab)
+    n = length(tab.names)
+    ds = XRadio.subdataset(
+        :antenna;
+        antenna_name = tab.names,
+        cartesian_pos_label = ["x", "y", "z"],
+        receptor_label = ["pol_0", "pol_1"],
+        antenna_position = tab.positions,
+        station_name = tab.names,
+        telescope_name = fill(tab.array_name, n),
+        polarization_type = tab.polarization_type,
+        antenna_receptor_angle = tab.receptor_angle,
+        antenna_dish_diameter = tab.diameter,
+        metadata = (; overall_telescope_name = tab.array_name, relocatable_antennas = false),
+        array_metadata = (;
+            antenna_position = (;
+                frame = "ITRS", coordinate_system = "geocentric", origin_object_name = "earth",
+            ),
+        ),
+    )
+    return XRadio.set_mounts!(ds, tab.mounts)
+end
+
+# An FQ column as an `(nrows, nif)` matrix. A column of one value per row is a
+# single IF.
+function _fq_matrix(col)
+    m = collect(col)
+    return Float64.(m isa AbstractVector ? reshape(m, :, 1) : m)
+end
+
+"""
+    _read_frequency_setups(cards, fq, nif) -> (setups, frqsels)
+
+Read every row of the FQ HDU into the channel frequencies, widths, total
+bandwidths and sidebands of one spectral window, together with the rows' AIPS
+FRQSEL values. Errors when a row's IF count is not the data's.
+"""
+function _read_frequency_setups(cards, fq, nif)
+    ref_freq = Float64(_find_freq_axis(cards))
+    if_freqs = _fq_matrix(getproperty(fq, Symbol("IF FREQ")))
+    widths = _fq_matrix(getproperty(fq, Symbol("CH WIDTH")))
+    bandwidths = _fq_matrix(getproperty(fq, Symbol("TOTAL BANDWIDTH")))
+    sidebands = _fq_matrix(getproperty(fq, :SIDEBAND))
+    size(if_freqs, 2) == nif ||
+        error("FQ table reports $(size(if_freqs, 2)) IFs but vis has $nif channels")
+    nrows = size(if_freqs, 1)
+    frqsels = hasproperty(fq, :FRQSEL) ?
+        round.(Int32, collect(getproperty(fq, :FRQSEL))) : Int32.(1:nrows)
+    setups = [
+        (;
+            ref_freq,
+            channel_freqs = ref_freq .+ if_freqs[r, :],
+            ch_width = widths[r, :],
+            total_bandwidth = bandwidths[r, :],
+            sideband = Int.(sidebands[r, :]),
+        ) for r in 1:nrows
     ]
-)
-
-function _collect_fq_extras(fq, r::Integer)
-    pairs = Pair{Symbol, Any}[]
-    for sym in propertynames(fq)
-        sym in _FQ_MANDATORY_COLS && continue
-        col = getproperty(fq, sym)
-        # FQ extras come as either a per-row vector or an (nrows, ncol) matrix.
-        val = ndims(col) == 1 ? col[r] : vec(col[r, :])
-        push!(pairs, sym => val)
-    end
-    return (; pairs...)
-end
-
-const _OBS_OPTIONAL_CARDS = ("OBSERVER", "DATE-MAP", "BSCALE", "BZERO", "ALTRPIX")
-
-function _collect_obs_card_extras(cards)
-    pairs = Pair{Symbol, Any}[]
-    for key in _OBS_OPTIONAL_CARDS
-        v = card_value(cards, key)
-        v === nothing && continue
-        push!(pairs, Symbol(replace(key, "-" => "_")) => v)
-    end
-    return (; pairs...)
-end
-
-"""
-    _build_frequency_setups(cards, fq, nvis_chan)
-        -> (Vector{FrequencySetup}, Vector{Int32})
-
-Read every row of the FQ HDU. Each row becomes a `FrequencySetup` with
-MSv4-flavored `setup_name = "spw_<r-1>"`; the on-disk AIPS FRQSEL is
-preserved in `extras.frqsel`.
-
-Returns the dense vector of setups plus the parallel `frqsels` vector
-(per-row FRQSEL values). The setups vector is indexed 1..nrows; if the
-on-disk FRQSEL column is sparse, callers must densify per-record SPW
-indices via `frqsels`.
-
-Errors when channel counts differ across rows (ragged setups deferred).
-"""
-function _build_frequency_setups(cards, fq, nvis_chan)
-    ref_freq_v::Float64 = Float64(_find_freq_axis(cards))
-
-    if_freqs_all::Matrix{Float64} = collect(getproperty(fq, Symbol("IF FREQ")))
-    ch_widths_all::Matrix{Float64} = collect(getproperty(fq, Symbol("CH WIDTH")))
-    total_bw_all::Matrix{Float64} = collect(getproperty(fq, Symbol("TOTAL BANDWIDTH")))
-    sidebands_all::Matrix{Float64} = collect(getproperty(fq, :SIDEBAND))
-    nrows::Int = ndims(if_freqs_all) == 1 ? 1 : size(if_freqs_all, 1)
-    nif::Int = ndims(if_freqs_all) == 1 ? length(if_freqs_all) : size(if_freqs_all, 2)
-    nif == nvis_chan ||
-        error("FQ table reports $nif IFs but vis has $nvis_chan channels")
-
-    frqsels::Vector{Int32} = if hasproperty(fq, :FRQSEL)
-        round.(Int32, collect(getproperty(fq, :FRQSEL)))
-    else
-        round.(Int32, collect(1:nrows))
-    end
-
-    _row(M, r) = ndims(M) == 1 ? collect(M) : vec(M[r, :])
-
-    setups = FrequencySetup[]
-    for r in 1:nrows
-        if_freqs_r = _row(if_freqs_all, r)
-        ch_widths_r = _row(ch_widths_all, r)
-        total_bw_r = _row(total_bw_all, r)
-        sidebands_r = _row(sidebands_all, r)
-        length(if_freqs_r) == nif ||
-            error("FQ row $r has $(length(if_freqs_r)) IFs; expected $nif (ragged setups not yet supported)")
-
-        extras = merge(_collect_fq_extras(fq, r), (; frqsel = frqsels[r]))
-        push!(
-            setups, FrequencySetup(;
-                name = string("spw_", r - 1),
-                ref_freq = ref_freq_v,
-                channel_freqs = ref_freq_v .+ if_freqs_r,
-                ch_widths = ch_widths_r,
-                total_bandwidths = total_bw_r,
-                sidebands = sidebands_r,
-                extras,
-            )
-        )
-    end
     return setups, frqsels
-end
-
-function _build_array_obs_metadata(primary_hdu, an_hdu = nothing)
-    cards = primary_hdu.cards
-
-    telescope::String = string(something(card_value(cards, "TELESCOP"), ""))
-    instrume::String = string(something(card_value(cards, "INSTRUME"), ""))
-    date_obs::String = string(something(card_value(cards, "DATE-OBS"), ""))
-    equinox::Float32 = Float32(something(card_value(cards, "EQUINOX"), 2000.0f0))
-    bunit::String = string(something(card_value(cards, "BUNIT"), "UNCALIB"))
-
-    # Time-system / Earth-orientation / coord-frame fields live on the AIPS
-    # AN HDU header (Memo 117 §4.1). When no AN HDU is supplied (synthetic
-    # path), defaults kick in via the kwarg constructor.
-    if an_hdu === nothing
-        return ObsArrayMetadata(;
-            telescope, instrume, date_obs, equinox, bunit,
-            extras = _collect_obs_card_extras(cards),
-        )
-    end
-
-
-    an_cards = an_hdu.cards
-
-    rdate::String = string(something(card_value(an_cards, "RDATE"), ""))
-    gst_iat0::Float32 = Float32(something(card_value(an_cards, "GSTIA0"), 0.0))
-    earth_rot_rate::Float32 = Float32(something(card_value(an_cards, "DEGPDY"), 360.0))
-    ut1utc::Float32 = Float32(something(card_value(an_cards, "UT1UTC"), 0.0))
-    polarx::Float32 = Float32(something(card_value(an_cards, "POLARX"), 0.0))
-    polary::Float32 = Float32(something(card_value(an_cards, "POLARY"), 0.0))
-    datutc::Float32 = Float32(something(card_value(an_cards, "DATUTC"), 0.0))
-    time_sys::String = string(something(card_value(an_cards, "TIMSYS"), "UTC"))
-    frame::String = string(something(card_value(an_cards, "FRAME"), "ITRF"))
-    xyzhand::String = string(something(card_value(an_cards, "XYZHAND"), "RIGHT"))
-    poltype::String = string(something(card_value(an_cards, "POLTYPE"), ""))
-
-
-    return ObsArrayMetadata(;
-        telescope, instrume, date_obs, equinox, bunit,
-        rdate, gst_iat0, earth_rot_rate, ut1utc, polarx, polary, datutc, time_sys,
-        frame, xyzhand, poltype,
-        extras = _collect_obs_card_extras(cards),
-    )
 end
 
 function _build_source_info(primary_hdu)
@@ -398,8 +273,16 @@ end
 
 # ── Read path ───────────────────────────────────────────────────────────────
 
-UVData.load_uvfits(path; element_type::Union{Nothing, Type} = nothing) =
-    UVSet(_load_uvfits_flat(path; element_type))
+const _C_LIGHT = 299792458.0
+
+function UVData.load_uvfits(path; element_type::Union{Nothing, Type} = nothing)
+    isnothing(element_type) || element_type <: AbstractFloat || throw(
+        ArgumentError(
+            "load_uvfits: element_type must be a real float type, got $(element_type)",
+        ),
+    )
+    return _read_uvfits(path, element_type)
+end
 
 # Slack on the NX window match. The DATE PTYPE's sub-day fraction is Float32,
 # which resolves ~5 ms of a day, so a record's decoded epoch and the NX window
@@ -478,16 +361,61 @@ end
 
 _is_lazy_random(data) = data isa FITSFiles.LazyStructuredData && data.hdu_type === FITSFiles.Random
 
-function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
+# The data array as `(record, complex, stokes, IF)`. Each IF holds one channel,
+# which is how the FQ table describes the band; a file with no IF axis has one.
+function _record_cube(cards, data)
+    function axis(name)
+        i = _find_axis(cards, ==(name))
+        isnothing(i) && throw(ArgumentError("load_uvfits: the primary HDU has no $name axis"))
+        return i
+    end
+    complex_, stokes, freq = axis("COMPLEX"), axis("STOKES"), axis("FREQ")
+    if_ = _find_axis(cards, ==("IF"))
+    if isnothing(if_)
+        data = reshape(data, size(data)..., 1)
+        if_ = ndims(data)
+    end
+    size(data, complex_) == 3 || throw(
+        ArgumentError(
+            "load_uvfits: the COMPLEX axis has $(size(data, complex_)) entries; " *
+                "a record states real, imaginary and weight"
+        )
+    )
+    size(data, freq) == 1 || throw(
+        ArgumentError(
+            "load_uvfits: the FREQ axis has $(size(data, freq)) channels per IF; " *
+                "only one channel per IF is supported"
+        )
+    )
+    rest = setdiff(2:ndims(data), (complex_, stokes, freq, if_))
+    all(d -> size(data, d) == 1, rest) || throw(
+        ArgumentError("load_uvfits: the data array has more than one pixel along an axis other than COMPLEX, STOKES, FREQ and IF")
+    )
+    cube = permutedims(data, (1, complex_, stokes, if_, freq, rest...))
+    return reshape(cube, size(cube, 1), size(cube, 2), size(cube, 3), size(cube, 4))
+end
+
+function _visibility_units(cards, path)
+    u = card_value(cards, "BUNIT")
+    if isnothing(u) || isempty(string(u))
+        @warn "UVFITS primary HDU carries no BUNIT; writing `uncalib` as \
+               `VISIBILITY.units`. Data calibrated elsewhere needs its units \
+               stated in the file." file = path
+        return "uncalib"
+    end
+    return uppercase(string(u)) == "JY" ? "Jy" : string(u)
+end
+
+function _read_uvfits(path, element_type)
     fid = FITSFiles.fits(path)
     primary_hdu = fid[1]
+    cards = primary_hdu.cards
     # Bypass FITSFiles' per-record Vector{Float32} allocation when the
     # primary HDU is lazy random-group data.
     primary_lazy = getfield(primary_hdu, :data)
     dt = _is_lazy_random(primary_lazy) ?
         _fast_random_read(primary_lazy) : primary_hdu.data
-    # Collect every AN HDU (filtered by EXTNAME=AIPS AN) — multi-AN-extver
-    # files carry one AN table per subarray.
+    # Multi-AN-extver files carry one AN table per subarray.
     an_hdus = HDU[]
     fq_hdu = nothing
     nx = nothing
@@ -502,46 +430,32 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
         end
     end
     isempty(an_hdus) && error("load_uvfits: no AIPS AN HDU found in $(path)")
-    fq_hdu === nothing && error("load_uvfits: no AIPS FQ HDU found in $(path)")
-    nx === nothing && error("load_uvfits: no AIPS NX HDU found in $(path)")
-    an_hdu = first(an_hdus)
+    isnothing(fq_hdu) && error("load_uvfits: no AIPS FQ HDU found in $(path)")
+    isnothing(nx) && error("load_uvfits: no AIPS NX HDU found in $(path)")
 
-    dim1 = findall(==(1), size(dt.data))
-    raw = dropdims(dt.data, dims = Tuple(dim1))
-    element_type === nothing || element_type <: AbstractFloat || throw(
-        ArgumentError(
-            "load_uvfits: element_type must be a real float type, got $(element_type)",
-        ),
-    )
-    T = element_type === nothing ? eltype(raw) : element_type
+    raw = _record_cube(cards, dt.data)
+    T = isnothing(element_type) ? eltype(raw) : element_type
 
-    # Read the visibilities verbatim. AIPS random-groups UVFITS shares Gustavo's
-    # internal phase convention — both are the AIPS/CASA/casacore sense, which is
-    # the conjugate of FITS-IDI's V = ⟨E_a1 · conj(E_a2)⟩ (AIPS Memo 114r §2.1;
+    aips_codes, pol_labels, perm = parse_stokes_axis(cards, size(raw, 3))
+    # Read the visibilities verbatim. AIPS random-groups UVFITS shares MSv4's
+    # phase convention — both are the AIPS/CASA/casacore sense, which is the
+    # conjugate of FITS-IDI's V = ⟨E_a1 · conj(E_a2)⟩ (AIPS Memo 114r §2.1;
     # casacore FitsIDItoMS.cc: "FITS-IDI convention is conjugate of AIPS and CASA
-    # convention"). (u,v,w) and the 256·a1+a2 baseline codes agree too, so nothing
-    # on this boundary is transformed.
-    vis_raw::Array{Complex{T}, 3} = complex.(raw[:, 1, :, :], raw[:, 2, :, :])
-    weights_raw::Array{T, 3} = raw[:, 3, :, :]
+    # convention"). (u,v,w) and the 256·a1+a2 baseline codes agree too, so only
+    # UVW's units change on this boundary.
+    vis_raw = Complex{T}.(view(raw, :, 1, perm, :), view(raw, :, 2, perm, :))
+    weights_raw = T.(view(raw, :, 3, perm, :))
 
-    antenna_tables = AntennaTable[_build_antenna_table(h) for h in an_hdus]
-    antennas = first(antenna_tables)
-    array_obs = _build_array_obs_metadata(primary_hdu, an_hdu)
-    freq_setups, fq_frqsels = _build_frequency_setups(
-        primary_hdu.cards, fq_hdu.data, size(vis_raw, 3)
-    )
+    antenna_tables = [_read_antenna_table(h) for h in an_hdus]
+    _check_stokes_vs_poltya(aips_codes, first(antenna_tables))
+    freq_setups, fq_frqsels = _read_frequency_setups(cards, fq_hdu.data, size(raw, 4))
     src_info = _build_source_info(primary_hdu)
-
-    aips_codes, aips_labels, msv4_labels, perm = parse_stokes_axis(primary_hdu.cards, size(vis_raw, 2))
-    _check_stokes_vs_poltya(aips_codes, antennas)
-    vis_raw = vis_raw[:, perm, :]
-    weights_raw = weights_raw[:, perm, :]
 
     # AIPS UVFITS stores DATE as two PTYPE columns. Different writers use
     # different splits:
     #   * AIPS strict: col1 = integer JD (~2.46e6 for 2022 data), col2 =
     #     fractional day. Sum is full JD.
-    #   * Gustavo / round-tripped: col1 = floor(days_since_RDATE) (~0..few),
+    #   * RDATE-relative: col1 = floor(days_since_RDATE) (~0..few),
     #     col2 = fractional remainder. Sum is days_since_RDATE.
     # We lift each column to Float64 *before* combining (Float32 ULP at JD
     # magnitude is ~0.25 days, which would collapse sub-second timestamps),
@@ -550,7 +464,7 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
     # The two columns stay separate through the epoch subtraction: a Float64
     # resolves only ~40 µs at Julian-Day magnitude, so summing them first
     # would discard the split's whole purpose.
-    rdate_jd = _rdate_jd_or_zero(array_obs.rdate)
+    rdate_jd = _rdate_jd_or_zero(first(antenna_tables).rdate)
     date_raw = collect(dt.DATE)
     date_hi, date_lo = if ndims(date_raw) == 2
         Float64.(@view date_raw[:, 1]), Float64.(@view date_raw[:, 2])
@@ -584,27 +498,19 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
             )
         end
     end
-    bl_codes::Vector{Int} = round.(Int, collect(dt.BASELINE))
+    bl_pairs::Vector{Tuple{Int, Int}} = _decode_aips_baseline.(round.(Int, collect(dt.BASELINE)))
+    inttim = hasproperty(dt, :INTTIM) ? Float64.(collect(dt.INTTIM)) : nothing
 
     _col(nt, prefix) = collect(getproperty(nt, first(filter(k -> startswith(string(k), prefix), propertynames(nt)))))
-    # (u,v,w) are read verbatim: every FITS flavour Gustavo reads shares one
-    # baseline-coordinate convention (u,v,w in light-seconds, coord = r_a1 − r_a2;
-    # AIPS Memo 117r §4.1.2 = Memo 114r §4.1.2 word for word). The FITS-IDI↔AIPS
-    # difference is purely the visibility conjugation, which FITS-IDI carries and
-    # UVFITS does not.
+    # (u,v,w) share one baseline-coordinate convention across every FITS
+    # flavour (coord = r_a1 − r_a2; AIPS Memo 117r §4.1.2 = Memo 114r §4.1.2
+    # word for word), stated in light-seconds where MSv4 states meters.
     uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
-
-    cfq::Vector{Float64} = channel_freqs(first(freq_setups))
-    dims = (Ti(obs_time), Polarization(msv4_labels), Frequency(cfq))
-
-    vis, weights, uvw = _build_arrays(vis_raw, weights_raw, uvw_raw, dims)
-
-    extra_columns = _collect_extra_columns(dt, primary_hdu.cards)
 
     # Materialize the NX columns up front: they come back as lazy
     # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition.
     # AIPS NX has no SCAN_NUMBER column, so the row index becomes the
-    # canonical scan label (string-cast for xradio `ScanArray` shape).
+    # canonical scan label.
     nx_time::Vector{Float64} = Float64.(collect(nx.TIME))
     nx_dt::Vector{Float64} = Float64.(collect(nx.var"TIME INTERVAL"))
     # NX TIME / TIME INTERVAL are days-since-RDATE; shift onto `obs_time`'s
@@ -628,29 +534,6 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
         obs_time, nx_lower, nx_upper;
         nx_start_vis = nx_start_vis, nx_end_vis = nx_end_vis,
     )
-    record_scan_name = [r == 0 ? "" : string(r) for r in record_nx_row]
-    valid = findall(!=(""), record_scan_name)
-    if length(valid) != length(obs_time)
-        obs_time = obs_time[valid]
-        record_scan_name = record_scan_name[valid]
-        record_nx_row = record_nx_row[valid]
-        bl_codes = bl_codes[valid]
-        vis = vis[Ti = valid]
-        weights = weights[Ti = valid]
-        uvw = uvw[Ti = valid]
-        extra_columns = NamedTuple{keys(extra_columns)}(
-            ntuple(i -> extra_columns[i][valid], length(extra_columns))
-        )
-    end
-
-    bl_pairs_per_record::Vector{Tuple{Int, Int}} = _decode_aips_baseline.(bl_codes)
-    bl_pairs::Vector{Tuple{Int, Int}} = sort(unique(bl_pairs_per_record))
-    baselines = BaselineIndex(
-        bl_pairs_per_record, bl_pairs;
-        antenna_names = antennas.name::Vector{String},
-    )
-
-    basename = String(splitext(_basename_of_path(path))[1])
 
     # Per-record SPW index: prefer a per-record PTYPE (FREQSEL / FREQID),
     # else propagate the per-NX-row FREQ ID column, else default to 1.
@@ -661,7 +544,7 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
     elseif hasproperty(dt, :FREQID)
         round.(Int32, collect(getproperty(dt, :FREQID)))
     elseif length(nx_freqid) > 0
-        Int32[nx_freqid[r] for r in record_nx_row]
+        Int32[r == 0 ? Int32(1) : nx_freqid[r] for r in record_nx_row]
     else
         ones(Int32, length(obs_time))
     end
@@ -681,7 +564,7 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
     end
     if nfreq > 1 && all(==(record_spw_index[1]), record_spw_index)
         @warn "load_uvfits: $nfreq FQ rows but every record reports the same SPW " *
-            "index $(record_spw_index[1]); resulting UVSet will have one leaf per scan."
+            "index $(record_spw_index[1]); the result has one Measurement Set per scan."
     end
 
     # Per-record subarray index. AIPS UVFITS rarely emits a per-record
@@ -689,33 +572,49 @@ function _load_uvfits_flat(path; element_type::Union{Nothing, Type} = nothing)
     record_subarray_index::Vector{Int32} = if hasproperty(dt, :SUBARRAY)
         round.(Int32, collect(getproperty(dt, :SUBARRAY)))
     elseif length(nx_subarray) > 0
-        Int32[nx_subarray[r] for r in record_nx_row]
+        Int32[r == 0 ? Int32(1) : nx_subarray[r] for r in record_nx_row]
     else
         ones(Int32, length(obs_time))
     end
 
-    return (;
-        vis, weights, uvw, obs_time, baselines,
-        extra_columns,
-        antenna_tables, array_obs,
-        freq_setups, record_spw_index, record_scan_name,
-        record_subarray_index,
-        pol_labels = msv4_labels,
-        aips_pol_codes = aips_codes,
-        source_name = src_info.source_name,
-        ra = src_info.ra, dec = src_info.dec,
-        basename = basename,
+    # One Measurement Set per (NX scan, spectral window, subarray), in the
+    # order the records first name them. Records in no NX scan are dropped.
+    groups = OrderedDict{Tuple{Int, Int, Int}, Vector{Int}}()
+    for i in eachindex(obs_time)
+        record_nx_row[i] == 0 && continue
+        key = (record_nx_row[i], Int(record_spw_index[i]), Int(record_subarray_index[i]))
+        push!(get!(Vector{Int}, groups, key), i)
+    end
+    isempty(groups) && error("load_uvfits: no records in $(path)")
+
+    shared = (;
+        vis_raw, weights_raw, uvw_raw, obs_time, bl_pairs, inttim, pol_labels,
+        units = _visibility_units(cards, path),
+        source = src_info,
+        observation_info = Dict{Symbol, Any}(
+            :observer => String[string(something(card_value(cards, "TELESCOP"), ""))],
+            :release_date => "",
+            :project_UID => "",
+        ),
+        processor_info = Dict{Symbol, Any}(
+            :type => "CORRELATOR",
+            :sub_type => string(something(card_value(cards, "INSTRUME"), "")),
+        ),
     )
+    source_key = string(sanitize_source(src_info.source_name))
+    sets = OrderedDict{Symbol, XRadio.MeasurementSet}()
+    for ((scan, spw, sub), records) in groups
+        parts = [source_key, "spw_$(spw - 1)"]
+        length(antenna_tables) > 1 && push!(parts, "sub_$(sub - 1)")
+        push!(parts, "scan_$scan")
+        key = Symbol(join(parts, "_"))
+        haskey(sets, key) && error("load_uvfits: duplicate partition key $(key)")
+        sets[key] = _measurement_set(
+            shared, records, string(scan), spw - 1, freq_setups[spw], antenna_tables[sub],
+        )
+    end
+    return XRadio.ProcessingSet(sets)
 end
-
-function _build_arrays(vis_raw, weights_raw, uvw_raw, dims)
-    vis = DimArray(vis_raw, dims)
-    weights = DimArray(weights_raw, dims)
-    uvw = DimArray(uvw_raw, (dims[1], UVW(["U", "V", "W"])))
-    return vis, weights, uvw
-end
-
-_basename_of_path(path) = isempty(path) ? "uvfits" : Base.basename(String(path))
 
 # Bypass FITSFiles' per-record `Vector{Float32}` allocation by streaming
 # the entire random-group data section into a single buffer. Returns a
@@ -837,15 +736,11 @@ end
 # antennas' nominal basis (POLTYA/POLTYB). For mixed arrays we just check the
 # circular vs linear block — fine-grained per-antenna mismatches are the
 # user's problem.
-function _check_stokes_vs_poltya(aips_codes, antennas)
-    isempty(aips_codes) && return nothing
+function _check_stokes_vs_poltya(aips_codes, tab)
     stokes_is_linear = all(c -> c <= -5, aips_codes)
     stokes_is_circular = all(c -> -4 <= c <= -1, aips_codes)
-    feeds = collect(antennas.nominal_basis)
-    poltype_is_linear(p::Tuple) = all(x -> x isa Union{XPol, YPol}, p)
-    poltype_is_circular(p::Tuple) = all(x -> x isa Union{RPol, LPol}, p)
-    feeds_linear = all(poltype_is_linear, feeds)
-    feeds_circular = all(poltype_is_circular, feeds)
+    feeds_linear = all(in(("X", "Y")), tab.polarization_type)
+    feeds_circular = all(in(("R", "L")), tab.polarization_type)
     if stokes_is_linear && !feeds_linear
         @warn "Stokes axis is linear (XX/YY/XY/YX) but POLTYA/POLTYB are not all linear"
     elseif stokes_is_circular && !feeds_circular
@@ -854,19 +749,111 @@ function _check_stokes_vs_poltya(aips_codes, antennas)
     return nothing
 end
 
-_wrap_uvw(arr, obs_time) = DimArray(arr, (Ti(obs_time), UVW(["U", "V", "W"])))
+_quantity(v, units) = XRadio.Measure(
+    Float64(v), Dict{Symbol, Any}(:units => units, :type => "quantity"),
+)
 
-function _collect_extra_columns(dt, primary_cards)
-    canonical_prefixes = Set(["UU", "VV", "WW", "BASELINE", "DATE"])
-    pairs = Pair{Symbol, Any}[]
-    for sym in propertynames(dt)
-        sym === :data && continue
-        prefix = uppercase(String(split(String(sym), "-")[1]))
-        prefix in canonical_prefixes && continue
-        # Materialize: per-scan partition extraction indexes these columns
-        # repeatedly; leaving them as lazy DiskArrays makes each `[int_inds]`
-        # re-open the FITS file.
-        push!(pairs, sym => collect(getproperty(dt, sym)))
+# The nominal integration time of a Measurement Set: the largest of its records'
+# INTTIM where the file states one, and otherwise the smallest positive spacing
+# of its times.
+function _integration_time(inttim, records, times)
+    isnothing(inttim) || return maximum(inttim[records])
+    length(times) < 2 && return 0.0
+    return minimum(filter(>(0), diff(times)))
+end
+
+function _measurement_set(shared, records, scan_name, spw_id, setup, tab)
+    times = sort!(unique(shared.obs_time[records]))
+    pairs_ = sort!(unique(shared.bl_pairs[records]))
+    time_of = Dict(t => k for (k, t) in pairs(times))
+    base_of = Dict(p => b for (b, p) in pairs(pairs_))
+    name_of = Dict(zip(tab.numbers, tab.names))
+    antenna_name(a) = get(name_of, a) do
+        throw(ArgumentError("load_uvfits: BASELINE names antenna $a, which the AN table does not number"))
     end
-    return (; pairs...)
+
+    vis_raw, weights_raw = shared.vis_raw, shared.weights_raw
+    npol, nchan = size(vis_raw, 2), size(vis_raw, 3)
+    C = eltype(vis_raw)
+    shape = (npol, nchan, length(pairs_), length(times))
+    vis = fill(C(NaN, NaN), shape)
+    weight = zeros(real(C), shape)
+    flag = trues(shape)
+    # `Float64` whatever the science arrays are: a VLBI baseline is ~1e7 m and
+    # the phase it fixes turns over in a wavelength of millimeters.
+    uvw = fill(NaN, 3, length(pairs_), length(times))
+    effective = isnothing(shared.inttim) ? nothing : zeros(length(pairs_), length(times))
+    for r in records
+        k = time_of[shared.obs_time[r]]
+        b = base_of[shared.bl_pairs[r]]
+        for axis in 1:3
+            uvw[axis, b, k] = Float64(shared.uvw_raw[r, axis]) * _C_LIGHT
+        end
+        isnothing(effective) || (effective[b, k] = shared.inttim[r])
+        for c in 1:nchan, p in 1:npol
+            w = weights_raw[r, p, c]
+            isfinite(w) || throw(
+                ArgumentError("load_uvfits: record $r carries weight $w, which states neither a weight nor a flag")
+            )
+            vis[p, c, b, k] = vis_raw[r, p, c]
+            # UVFITS records a flag as a negative weight; its magnitude is the
+            # weight the sample would have had.
+            weight[p, c, b, k] = abs(w)
+            flag[p, c, b, k] = w < 0
+        end
+    end
+
+    freq_attrs = (;
+        spectral_window_name = "spw_$spw_id",
+        spectral_window_intents = [""],
+        reference_frequency = XRadio.Measure(
+            setup.ref_freq,
+            Dict{Symbol, Any}(:units => "Hz", :type => "spectral_coord", :observer => "icrs"),
+        ),
+        # MSv4 states one channel width for the window; the file states one per IF.
+        channel_width = _quantity(first(setup.ch_width), "Hz"),
+        # Neither has an MSv4 field; `GUSTAVO_VISIBILITY_SCHEMA` describes them.
+        sideband = first(setup.sideband),
+        total_bandwidth = _quantity(first(setup.total_bandwidth), "Hz"),
+    )
+    src = shared.source
+    field_and_source = XRadio.subdataset(
+        :field_and_source;
+        field_name = [src.source_name],
+        sky_dir_label = ["ra", "dec"],
+        source_name = [src.source_name],
+        field_phase_center_direction = reshape([src.ra, src.dec], 2, 1),
+        array_metadata = (; field_phase_center_direction = (; frame = "icrs")),
+    )
+    nt = length(times)
+    return XRadio.measurement_set(;
+        time = times,
+        frequency = setup.channel_freqs,
+        polarization = shared.pol_labels,
+        baseline_id = collect(1:length(pairs_)),
+        baseline_antenna1_name = [antenna_name(a) for (a, _) in pairs_],
+        baseline_antenna2_name = [antenna_name(b) for (_, b) in pairs_],
+        uvw_label = ["u", "v", "w"],
+        visibility = vis, flag, weight, uvw,
+        effective_integration_time = effective,
+        field_name = fill(src.source_name, nt),
+        scan_name = fill(scan_name, nt),
+        metadata = (;
+            observation_info = shared.observation_info,
+            processor_info = shared.processor_info,
+            creator = Dict{Symbol, Any}(
+                :software_name => "Gustavo.jl", :version => string(pkgversion(UVData)),
+            ),
+            # No MSv4 field; `GUSTAVO_VISIBILITY_SCHEMA` describes the block.
+            earth_orientation = tab.earth_orientation,
+        ),
+        array_metadata = (;
+            time = (; integration_time = _quantity(_integration_time(shared.inttim, records, times), "s")),
+            frequency = freq_attrs,
+            visibility = (; units = shared.units),
+            uvw = (; frame = "icrs"),
+            scan_name = (; scan_intents = String[]),
+        ),
+        subdatasets = (; antenna = _antenna_dataset(tab), field_and_source_base = field_and_source),
+    )
 end

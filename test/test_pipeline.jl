@@ -5,7 +5,7 @@
 # coherence test) and that save/load round-trips.
 
 # Shared usings/aliases (CAL/FP/UVP) and the `_coherence` metric.
-include("synthetic_uvset.jl")
+include("pipeline_helpers.jl")
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 # Coherence of every cross-baseline product of a corrected set whose feed pair

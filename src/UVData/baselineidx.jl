@@ -11,16 +11,15 @@ Per-baseline (each vector has one entry per unique baseline):
 - `ant1_names`   — antenna-1 (POLA-side) name (parallel to `pairs`).
 - `ant2_names`   — antenna-2 (POLB-side) name (parallel to `pairs`).
 
-Per-record (length `nrecord`, only meaningful in the legacy flat
-layout where `(time, baseline)` are fused on the `Ti` axis;
-not used by the partitioned `UVSet` storage):
+Per-record (length `nrecord`, for a layout where `(time, baseline)` are
+fused on one axis):
 - `pairs_per_record` — `(a, b)` pair per record.
 
 Lookup:
 - `lookup` — `Dict((a, b) => slot)` for O(1) pair-to-slot mapping.
 """
 struct BaselineIndex{TPairs, TLookup, TLabels, TNames}
-    pairs_per_record::TPairs   # per-record (a, b) tuples (legacy flat layout)
+    pairs_per_record::TPairs   # per-record (a, b) tuples
     pairs::TPairs              # unique deduped (a, b) pairs
     lookup::TLookup            # (a, b) → slot index in `pairs`
     labels::TLabels            # "AA-AX" string per baseline (parallel to pairs)

@@ -40,7 +40,6 @@ include("Fring/statespace.jl")
 include("Fring/prior_fits.jl")
 include("Fring/weighted_sums.jl")
 include("Fring/adhoc.jl")
-include("Fring/phasecal.jl")
 # The composable-pipeline engine: the solver capability checks, the
 # search over one streamed scan group, the model/plan routers, and the three
 # carved-out stage implementations the steps call into.
@@ -93,7 +92,6 @@ function plot_coherence end
 export FringeSearch, baseline_fringe_search, fringe_plane
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, FringeDelay, FringeRate, baseline_fringe_map, fringe_search_map, fringe_pfa, fringe_snr_cut
-export PhaseCalTable, load_fitsidi_phasecal
 export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother

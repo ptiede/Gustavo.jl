@@ -7,7 +7,7 @@ axes.
 The solver kernels walk parallel `:vis`, `:weights` and `:flags` planes with one
 set of loop variables, so a layer whose axes differ would be read at the wrong
 cells instead of being reported. Call this where the layers arrive as separate
-arrays; a leaf built through `_build_leaf` is already checked.
+arrays.
 """
 function check_layer_axes(reference, layers...)
     ref = axes(reference)
@@ -27,56 +27,13 @@ with `src_` so the key is identifier-safe (digit-leading catalog names like
 `3C273` are otherwise illegal identifiers) and never masquerades as a real
 source name. Non-identifier chars are replaced with `_`. Examples:
 `"3C273"` → `:src_3C273`, `"Sgr A*"` → `:src_Sgr_A_`,
-`"NGC 4486"` → `:src_NGC_4486`. Used as the source-segment of a partition key.
+`"NGC 4486"` → `:src_NGC_4486`. Used as the source segment of the Measurement
+Set keys [`load_uvfits`](@ref) gives.
 """
 function sanitize_source(name::AbstractString)
     s = replace(strip(String(name)), r"[^A-Za-z0-9_]" => "_")
     isempty(s) && (s = "unknown")
     return Symbol("src_", s)
-end
-
-"""
-    partition_key(info::PartitionInfo) -> Symbol
-
-Compose the leaf branch key by walking `partition_axes(info)`.
-Empty axis values are skipped; remaining values are joined with
-underscores. Default key shape (xradio MSv4):
-`:<source>_<spw_name>_scan_<scan_name>[_<sub_scan_name>]`.
-
-Adding a new axis is a one-line change to `DEFAULT_PARTITION_AXES` (or
-a method override of `partition_axes`); this function never needs to
-change.
-"""
-partition_key(info::PartitionInfo) = partition_key(info, partition_axes(info))
-
-function partition_key(info::PartitionInfo, axes)
-    parts = String[]
-    for ax in axes
-        s = ax.value(info)
-        isempty(s) || push!(parts, s)
-    end
-    return Symbol(join(parts, "_"))
-end
-
-"""
-    partition_key(; source_key, scan_name, spw_name = "spw_0",
-                    sub_scan_name = "") -> Symbol
-
-Lightweight key-only helper for tests / fixtures that don't have a
-real `PartitionInfo`. Mirrors `DEFAULT_PARTITION_AXES` shape; production
-code goes through `partition_key(info)` exclusively.
-"""
-function partition_key(;
-        source_key::Symbol,
-        scan_name::AbstractString,
-        spw_name::AbstractString = "spw_0",
-        sub_scan_name::AbstractString = "",
-    )
-    parts = String[string(source_key)]
-    isempty(spw_name) || push!(parts, spw_name)
-    isempty(scan_name) || push!(parts, "scan_" * scan_name)
-    isempty(sub_scan_name) || push!(parts, sub_scan_name)
-    return Symbol(join(parts, "_"))
 end
 
 # Collect `xs` into a Vector whose element type is the tightest common supertype
@@ -91,35 +48,21 @@ end
 """
     pol_products(x) -> Vector
 
-The values of the `Polarization` lookup of `x`'s visibilities: the stored
-product labels of a `UVSet` leaf (`"PP"`, `"PQ"`, …), or the feed pairs of a
-solver cube (see [`feed_pairs`](@ref)).
+The values of the `Polarization` lookup of `x`: the feed pairs of a solver cube
+(see [`feed_pairs`](@ref)), or a Measurement Set's stored product labels.
 """
 pol_products(vis::AbstractDimArray) = collect(lookup(vis, Polarization))
-pol_products(leaf::DimensionalData.DimTree) = pol_products(leaf[:vis])
 
 """
     feed_pairs(x) -> Vector{Tuple{Int, Int}}
 
 The `(feed_a, feed_b)` pair each product along the `Polarization` axis of `x`
 relates, so that `V[a, b, p] = g_a[feed_a] · S · conj(g_b[feed_b])`. A solver
-cube's lookup holds these pairs directly; a `UVSet` leaf's visibilities label
-their products `P` (feed 1) and `Q` (feed 2). A Measurement Set's labels are
+cube's lookup holds these pairs directly. A Measurement Set's labels are
 resolved through each antenna's receptors by
 [`feed_pairs(::XRadio.MeasurementSet)`](@ref feed_pairs(::XRadio.MeasurementSet)).
 """
-feed_pairs(vis::AbstractDimArray) = _feed_pairs(lookup(vis, Polarization))
-
-_feed_pairs(products::AbstractVector{<:Tuple{Integer, Integer}}) = collect(Tuple{Int, Int}, products)
-_feed_pairs(products::AbstractVector{<:AbstractString}) = map(_stored_feed_pair, products)
-
-function _stored_feed_pair(label::AbstractString)
-    feed(c) = c == 'P' ? 1 : c == 'Q' ? 2 : throw(
-        ArgumentError("a leaf labels its products P (feed 1) and Q (feed 2), got \"$label\"")
-    )
-    length(label) == 2 || throw(ArgumentError("a product label has two feeds, got \"$label\""))
-    return (feed(label[1]), feed(label[2]))
-end
+feed_pairs(vis::AbstractDimArray) = collect(Tuple{Int, Int}, lookup(vis, Polarization))
 
 """
     frequencies(x) -> Vector{Float64}

@@ -21,29 +21,26 @@ include("dimensions.jl")
 include("antenna.jl")
 include("baselineidx.jl")
 include("frequencyband.jl")
-include("metadata.jl")
-include("UVSet/UVSet.jl")
 include("io.jl")
 include("apriori.jl")
 include("utilities.jl")
 include("msv4_schema.jl")
-include("xradio_bridge.jl")
 include("measurementset.jl")
 include("processingset.jl")
 include("autocorrelations.jl")
 
-export Antenna, AntennaTable, ObsArrayMetadata, FrequencySetup, AbstractFrequencySetup, UVMetadata
+export Antenna, AntennaTable, FrequencySetup, AbstractFrequencySetup
 export antennas, union_antennas, union_pol_products
 export freq_setup, union_frequency_axis, channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands, setup_name
 export AbstractMount, Mount, MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
     MountBWGR, MountBWGL, MountXY, MountOrbiting, MountOther
-export BaselineIndex, UVSet
+export BaselineIndex
 export leaves, pol_products
 export frequencies, timestamps
 export baselines
 export pol_index, pol_at, baseline_index
 export obs_time
-export uvset_to_processingset, GUSTAVO_VISIBILITY_SCHEMA
+export GUSTAVO_VISIBILITY_SCHEMA
 export source_name, scan_name, primary_scan_name, scan_intents, sub_scan_name
 export load_uvfits
 export check_layer_axes
