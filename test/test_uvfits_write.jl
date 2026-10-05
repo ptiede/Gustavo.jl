@@ -45,12 +45,14 @@ function _test_same_set(a, b; same_keys = true, time_atol = 0.0)
                 for b in axes(written, 1), k in axes(written, 2) if written[b, k]
         )
         @test all(isnan, uvw_n[:, .!written])
-        @test isequal(Gustavo.UVData._antenna_table(m), Gustavo.UVData._antenna_table(n))
+        @test isequal(_FITS_EXT._antenna_union([m]), _FITS_EXT._antenna_union([n]))
         @test DimensionalData.metadata(m[:visibility])[:units] ==
             DimensionalData.metadata(n[:visibility])[:units]
     end
     return nothing
 end
+
+const _FITS_EXT = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
 
 _scan(ps, name) = filter(ms -> only(XRadio.scans(ms)) == name, ps)
 _tmp(name = "out.uvfits") = joinpath(mktempdir(), name)
@@ -191,6 +193,27 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
         else
             @test_skip isfile(idi)
         end
+    end
+
+    @testset "FQ sideband and bandwidth, stated or derived" begin
+        freqs = 2.3e11 .+ 2.0e6 .* (0:7)
+        for sideband in (1, -1)
+            m = XRadio.Testing.measurement_set(; frequencies = sideband > 0 ? freqs : reverse(freqs))
+            meta = _attrs(m, XRadio.Frequency)
+            meta[:sideband] = sideband
+            meta[:total_bandwidth] = XRadio.Measure(
+                5.0e7, Dict{Symbol, Any}(:units => "Hz", :type => "quantity")
+            )
+            # A stated bandwidth wider than the channels span, so reading the
+            # stored value and deriving one give different answers.
+            @test _FITS_EXT._window_signature(m).total_bandwidth == 5.0e7
+            delete!(meta, :sideband)
+            delete!(meta, :total_bandwidth)
+            derived = _FITS_EXT._window_signature(m)
+            @test derived.sideband == sideband
+            @test derived.total_bandwidth == 8 * 2.0e6
+        end
+        @test_throws "no direction to derive one from" _FITS_EXT._channel_direction([2.3e11])
     end
 
     @testset "refusals" begin

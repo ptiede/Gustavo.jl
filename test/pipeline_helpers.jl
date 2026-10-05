@@ -5,11 +5,10 @@ using Test
 using Random
 using StableRNGs: StableRNG
 using LinearAlgebra: Diagonal
-using StructArrays
 using DimensionalData
 using DimensionalData: DimArray, Ti, dims, lookup
 using PolarizedTypes: RPol, LPol
-using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, channel_freqs
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID
 using Dates: Date, DateTime, datetime2unix
 using FITSFiles   # triggers GustavoFITSFilesExt
 

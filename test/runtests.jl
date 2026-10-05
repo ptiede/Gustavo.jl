@@ -3,7 +3,6 @@ using Test
 using LinearAlgebra
 using Statistics
 using Random
-using StructArrays
 using Dates
 using OrderedCollections
 using Distributions: LogNormal, Normal, MvNormal
@@ -266,51 +265,13 @@ end
 end
 
 @testset "Source name sanitization" begin
-    UV = Gustavo.UVData
-    @test UV.sanitize_source("TEST") == :src_TEST
-    @test UV.sanitize_source("3C273") == :src_3C273    # digit-leading
-    @test UV.sanitize_source("Sgr A*") == :src_Sgr_A_  # non-identifier chars
-    @test UV.sanitize_source("NGC 4486") == :src_NGC_4486
-    @test UV.sanitize_source("") == :src_unknown
-    @test UV.sanitize_source("  ") == :src_unknown
-end
-
-@testset "Structural ==/hash for metadata types" begin
-    UV = Gustavo.UVData
-    using LinearAlgebra: Diagonal
-
-    fs1() = UV.FrequencySetup(;
-        name = "FRQSEL_1", ref_freq = 1.0e9,
-        channel_freqs = collect(1.0:4.0),
-        ch_widths = fill(1.0f0, 4), total_bandwidths = fill(1.0f0, 4),
-        sidebands = Int32.(fill(1, 4)),
-    )
-    @test fs1() == fs1()
-    @test hash(fs1()) == hash(fs1())
-    # Differing field flips equality.
-    fs_alt = UV.FrequencySetup(;
-        name = "FRQSEL_1", ref_freq = 1.0e9,
-        channel_freqs = collect(1.0:5.0), ch_widths = fill(1.0f0, 5),
-        total_bandwidths = fill(1.0f0, 5), sidebands = Int32.(fill(1, 5)),
-    )
-    @test fs1() != fs_alt
-    # Dedup in a Dict relies on both `==` and `hash`.
-    d = Dict(fs1() => :first)
-    d[fs1()] = :second
-    @test d[fs1()] == :second
-    @test length(d) == 1
-
-    mnt() = XRadio.MountAltAz()
-    @test mnt() == mnt()
-    @test hash(mnt()) == hash(mnt())
-
-    ant() = UV.Antenna(;
-        name = "AA", station_xyz = zeros(3), mount = XRadio.MountAltAz(),
-        nominal_basis = (RPol(), LPol()),
-        pol_angles = (0.0f0, 0.0f0),
-    )
-    @test ant() == ant()
-    @test hash(ant()) == hash(ant())
+    ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+    @test ext.sanitize_source("TEST") == :src_TEST
+    @test ext.sanitize_source("3C273") == :src_3C273    # digit-leading
+    @test ext.sanitize_source("Sgr A*") == :src_Sgr_A_  # non-identifier chars
+    @test ext.sanitize_source("NGC 4486") == :src_NGC_4486
+    @test ext.sanitize_source("") == :src_unknown
+    @test ext.sanitize_source("  ") == :src_unknown
 end
 
 @testset "feed_pairs of a solver cube" begin

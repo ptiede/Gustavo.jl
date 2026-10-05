@@ -1,6 +1,5 @@
 module UVData
 
-using StructArrays
 using DimensionalData
 using DimensionalData:
     AbstractDimArray, AbstractDimStack, AbstractDimTree, DimArray, DimStack, DimTree,
@@ -8,27 +7,20 @@ using DimensionalData:
 import DimensionalData: metadata, branches
 using OrderedCollections: OrderedDict
 using OhMyThreads: SerialScheduler
-using PolarizedTypes: CirBasis, LinBasis, XPol, YPol, RPol, LPol
 using Statistics: mean, median
 using Printf: @sprintf
 using Dates
 using AstroLib: ct2lst
 import XRadio
-using XRadio: AbstractMount
 
 include("dimensions.jl")
-include("antenna.jl")
-include("frequencyband.jl")
 include("io.jl")
 include("apriori.jl")
 include("utilities.jl")
 include("msv4_schema.jl")
 include("measurementset.jl")
-include("processingset.jl")
 include("autocorrelations.jl")
 
-export Antenna, AntennaTable, FrequencySetup, AbstractFrequencySetup
-export freq_setup, channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands
 export GUSTAVO_VISIBILITY_SCHEMA
 export load_uvfits, write_uvfits
 export check_layer_axes

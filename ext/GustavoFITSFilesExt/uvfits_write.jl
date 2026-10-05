@@ -1,5 +1,5 @@
 using FITSFiles: Bintable, Card, Random
-using DimensionalData: DimensionalData, Ti, lookup
+using DimensionalData: DimensionalData, Ti, branches, lookup
 using Dates: unix2datetime
 using XRadio: AbstractMount
 
@@ -16,8 +16,6 @@ function _encode_aips_baseline(a::Integer, b::Integer)
 end
 
 const _AIPS_STOKES_CODES = Dict(label => code for (code, label) in _AIPS_STOKES_LABELS)
-
-const _POLTYPE_LETTERS = Dict(v => k for (k, v) in UVData._POL_TYPES)
 
 function _mount_to_mntsta(m::AbstractMount)
     for (code, make) in pairs(_MNTSTA_MOUNTS)
@@ -76,11 +74,32 @@ function _scans(ps)
     return scans
 end
 
-_window_signature(fs) = (
-    channel_freqs = collect(UVData.channel_freqs(fs)), ch_width = first(UVData.ch_widths(fs)),
-    sideband = Int(first(UVData.sidebands(fs))), total_bandwidth = first(UVData.total_bandwidths(fs)),
-    ref_freq = UVData.ref_freq(fs),
-)
+# The FQ-table description of `ms`'s window. MSv4 states one `channel_width`
+# per window. Where the store states no `sideband` or `total_bandwidth`
+# (`GUSTAVO_VISIBILITY_SCHEMA`), the sideband is the direction of the channel
+# axis and the total bandwidth the channel count times the width.
+function _window_signature(ms)
+    meta = DimensionalData.metadata(lookup(ms, XRadio.Frequency))
+    channel_freqs = collect(lookup(ms, XRadio.Frequency))
+    ch_width = XRadio.value(meta[:channel_width])
+    sideband = haskey(meta, :sideband) ? Int(meta[:sideband]) : _channel_direction(channel_freqs)
+    total_bandwidth = haskey(meta, :total_bandwidth) ?
+        XRadio.value(meta[:total_bandwidth]) : length(channel_freqs) * abs(ch_width)
+    ref_freq = XRadio.value(meta[:reference_frequency])
+    return (; channel_freqs, ch_width, sideband, total_bandwidth, ref_freq)
+end
+
+function _channel_direction(channels)
+    length(channels) > 1 || throw(
+        ArgumentError(
+            "write_uvfits: the store states no sideband, and a window of " *
+                "$(length(channels)) channel(s) has no direction to derive one from"
+        )
+    )
+    first(channels) < last(channels) && return 1
+    first(channels) > last(channels) && return -1
+    throw(ArgumentError("write_uvfits: the channel frequencies neither rise nor fall"))
+end
 
 # The windows every scan shares, checking that each scan holds them on one time
 # and baseline axis.
@@ -97,7 +116,7 @@ function _windows_of(scans)
                 )
             )
         end
-        signature = [_window_signature(UVData.freq_setup(ms)) for ms in sets]
+        signature = [_window_signature(ms) for ms in sets]
         allunique(s.channel_freqs for s in signature) || throw(
             ArgumentError(
                 "write_uvfits: scan $name holds two Measurement Sets with the same " *
@@ -200,30 +219,54 @@ function _stokes_codes(ps)
     return codes
 end
 
+# The AN-table row of each antenna of `ms`.
+function _antenna_rows(ms)
+    types = XRadio.polarization_types(ms)
+    size(types, 1) == 2 || throw(
+        ArgumentError(
+            "write_uvfits: each antenna has $(size(types, 1)) receptors; the AN table states two"
+        )
+    )
+    for t in types
+        t in ("R", "L", "X", "Y") || throw(
+            ArgumentError("write_uvfits: receptor polarization `$t` is not one of R, L, X, Y")
+        )
+    end
+    positions, mounts, angles = XRadio.antenna_positions(ms), XRadio.mounts(ms), XRadio.receptor_angles(ms)
+    return [
+        (;
+                name = String(n), position = collect(positions[:, a]), mount = mounts[a],
+                poltype = (String(types[1, a]), String(types[2, a])),
+                polangle = (angles[1, a], angles[2, a]),
+            ) for (a, n) in zip(axes(positions, 2), XRadio.antennas(ms))
+    ]
+end
+
+function _dish_diameters(ms)
+    xds = branches(ms)[:antenna]
+    haskey(xds, :antenna_dish_diameter) || return fill(nothing, length(XRadio.antennas(ms)))
+    return Float64.(collect(xds[:antenna_dish_diameter]))
+end
+
+_array_name(ms) = String(get(DimensionalData.metadata(branches(ms)[:antenna]), :overall_telescope_name, ""))
+
 function _antenna_union(ps)
-    rows = UVData.Antenna[]
-    diameters = Union{Nothing, Float64}[]
-    for ms in ps
-        tab = UVData._antenna_table(ms)
-        diameter = get(UVData.extras(tab), :DIAMETER, nothing)
-        for (i, ant) in pairs(getfield(tab, :antennas))
-            j = findfirst(r -> r.name == ant.name, rows)
-            if isnothing(j)
-                push!(rows, ant)
-                push!(diameters, isnothing(diameter) ? nothing : Float64(diameter[i]))
-            else
-                isequal(rows[j], ant) || throw(
-                    ArgumentError(
-                        "write_uvfits: antenna $(ant.name) has different positions, mounts " *
-                            "or receptors in different Measurement Sets; a UVFITS file " *
-                            "written here holds one antenna table"
-                    )
+    seen = OrderedDict{String, Any}()
+    for ms in ps, (row, diameter) in zip(_antenna_rows(ms), _dish_diameters(ms))
+        if haskey(seen, row.name)
+            isequal(first(seen[row.name]), row) || throw(
+                ArgumentError(
+                    "write_uvfits: antenna $(row.name) has different positions, mounts " *
+                        "or receptors in different Measurement Sets; a UVFITS file " *
+                        "written here holds one antenna table"
                 )
-            end
+            )
+        else
+            seen[row.name] = (row, diameter)
         end
     end
-    return rows, any(isnothing, diameters) ? nothing : Float64.(diameters),
-        UVData.array_name(UVData._antenna_table(first(ps)))
+    rows, diameters = first.(values(seen)), last.(values(seen))
+    return rows, any(isnothing, diameters) ? nothing : Float64.(diameters), _array_name(first(ps))
 end
 
 function _only_value(ps, f, what)
@@ -326,7 +369,7 @@ function UVData.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = f
 
     t0 = minimum(s.times[first(first(s.keep))] for s in written if !isempty(s.keep))
     rdate = string(Date(unix2datetime(t0)))
-    rdate_unix = UVData.jd_to_unix(_rdate_jd_or_zero(rdate))
+    rdate_unix = jd_to_unix(_rdate_jd_or_zero(rdate))
 
     npol = length(codes)
     data = zeros(T, nrec, 3, npol, layout.nfreq, layout.nif, 1, 1)
@@ -354,9 +397,9 @@ function UVData.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = f
             row += 1
             t = s.times[k]
             # The Julian Date of the day's 0h UT, and the fraction of that day.
-            day = floor(UVData.JD_UNIX_EPOCH + t / 86400 - 0.5) + 0.5
+            day = floor(JD_UNIX_EPOCH + t / 86400 - 0.5) + 0.5
             date[row, 1] = day
-            date[row, 2] = t / 86400 - (day - UVData.JD_UNIX_EPOCH)
+            date[row, 2] = t / 86400 - (day - JD_UNIX_EPOCH)
             uu[row], vv[row], ww[row] = (uvw[i, b, k] / _C_LIGHT for i in 1:3)
             a1, a2 = names[b]
             baseline[row] = _encode_aips_baseline(number[a1], number[a2])
@@ -416,15 +459,15 @@ function UVData.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = f
     nant = length(rows)
     an_data = (;
         ANNAME = [rpad(ant.name, 8) for ant in rows],
-        STABXYZ = [Float64.(collect(ant.station_xyz)) for ant in rows],
+        STABXYZ = [Float64.(ant.position) for ant in rows],
         ORBPARM = [Float64[] for _ in 1:nant],
         NOSTA = Int32.(1:nant),
         MNTSTA = [_mount_to_mntsta(ant.mount) for ant in rows],
         STAXOF = [_uvfits_staxof(ant.mount) for ant in rows],
-        POLTYA = [_POLTYPE_LETTERS[ant.nominal_basis[1]] for ant in rows],
-        POLAA = [Float32(rad2deg(ant.pol_angles[1])) for ant in rows],
-        POLTYB = [_POLTYPE_LETTERS[ant.nominal_basis[2]] for ant in rows],
-        POLAB = [Float32(rad2deg(ant.pol_angles[2])) for ant in rows],
+        POLTYA = [ant.poltype[1] for ant in rows],
+        POLAA = [Float32(rad2deg(ant.polangle[1])) for ant in rows],
+        POLTYB = [ant.poltype[2] for ant in rows],
+        POLAB = [Float32(rad2deg(ant.polangle[2])) for ant in rows],
         POLCALA = [Float32[] for _ in 1:nant],
         POLCALB = [Float32[] for _ in 1:nant],
         (isnothing(diameters) ? (;) : (; DIAMETER = Float32.(diameters)))...,

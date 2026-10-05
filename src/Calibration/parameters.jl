@@ -351,8 +351,7 @@ length of the parameter vector that `evaluate_gains` consumes.
 
 The `nant::Integer` form lays out a station-uniform `GainModel` (empty
 `stations` — the codes could not be resolved otherwise) replicated across
-`nant` antennas. The `antennas` form (an `AntennaTable` or an iterable of
-station codes) [`resolve`](@ref)s the model against the
+`nant` antennas. The `antennas` form (an iterable of station codes) [`resolve`](@ref)s the model against the
 station set first and handles heterogeneity: per component name, stations
 group by identical `(term, Ti, Frequency, Feed)` signature (priors do not
 split a group; each station keeps its own in `plan.priors`), a name with one

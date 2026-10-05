@@ -8,12 +8,27 @@ using XRadio:
     MountBWGR, MountBWGL, MountXY, MountOrbiting
 
 import Gustavo.UVData
-using Gustavo.UVData: sanitize_source
 
 # AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices
 # as `bl = a*256 + b`. Caps the array at 255 antennas. Lives in the FITS
 # extension only; format-neutral code in `src/` speaks `(a, b)` tuples.
 _decode_aips_baseline(bl::Integer)::Tuple{Int, Int} = (bl ÷ 256, bl % 256)
+
+# Julian Day of 1970-01-01T00:00:00 UTC, the origin of the `Ti` axis.
+const JD_UNIX_EPOCH = 2440587.5
+
+# A day and its fraction held separately keep sub-microsecond timestamps only
+# if the epoch is subtracted from the day before the fraction is added: a
+# Float64 resolves ~40 µs at Julian-Day magnitude.
+jd_to_unix(jd::Real) = (Float64(jd) - JD_UNIX_EPOCH) * 86400.0
+
+# The source segment of a Measurement Set key: `src_` and the name with
+# non-identifier characters replaced by `_` (`"Sgr A*"` → `:src_Sgr_A_`).
+function sanitize_source(name::AbstractString)
+    s = replace(strip(String(name)), r"[^A-Za-z0-9_]" => "_")
+    isempty(s) && (s = "unknown")
+    return Symbol("src_", s)
+end
 
 
 # AIPS Stokes code → generic correlation-product label.
@@ -478,7 +493,7 @@ function _read_uvfits(path, element_type)
     # We lift each column to Float64 *before* combining (Float32 ULP at JD
     # magnitude is ~0.25 days, which would collapse sub-second timestamps),
     # then detect whether the pair is a full JD or already RDATE-relative and
-    # produce **seconds since `UVData.JD_UNIX_EPOCH`**, the `Ti` convention.
+    # produce **seconds since `JD_UNIX_EPOCH`**, the `Ti` convention.
     # The two columns stay separate through the epoch subtraction: a Float64
     # resolves only ~40 µs at Julian-Day magnitude, so summing them first
     # would discard the split's whole purpose.
@@ -499,14 +514,14 @@ function _read_uvfits(path, element_type)
     else
         raw_max = maximum(date_hi .+ date_lo)
         if raw_max >= 2.4e6
-            ((date_hi .- UVData.JD_UNIX_EPOCH) .+ date_lo) .* 86400.0
+            ((date_hi .- JD_UNIX_EPOCH) .+ date_lo) .* 86400.0
         elseif raw_max <= 1.0e3
             rdate_jd == 0.0 && error(
                 "load_uvfits: DATE PTYPE values are days relative to RDATE " *
                     "(max(col1+col2) = $raw_max), but the AN HDU carries no " *
                     "usable RDATE, so the records have no absolute epoch."
             )
-            UVData.jd_to_unix(rdate_jd) .+ (date_hi .+ date_lo) .* 86400.0
+            jd_to_unix(rdate_jd) .+ (date_hi .+ date_lo) .* 86400.0
         else
             error(
                 "load_uvfits: ambiguous DATE PTYPE values — max(col1+col2) = $raw_max " *
@@ -533,7 +548,7 @@ function _read_uvfits(path, element_type)
     nx_dt::Vector{Float64} = Float64.(collect(nx.var"TIME INTERVAL"))
     # NX TIME / TIME INTERVAL are days-since-RDATE; shift onto `obs_time`'s
     # absolute seconds.
-    nx_rdate_unix = UVData.jd_to_unix(rdate_jd)
+    nx_rdate_unix = jd_to_unix(rdate_jd)
     nx_lower::Vector{Float64} = nx_rdate_unix .+ (nx_time .- nx_dt ./ 2) .* 86400.0
     nx_upper::Vector{Float64} = nx_rdate_unix .+ (nx_time .+ nx_dt ./ 2) .* 86400.0
     nx_freqid::Vector{Int32} = hasproperty(nx, Symbol("FREQ ID")) ?

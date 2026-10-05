@@ -389,14 +389,10 @@ resolve(e::GainComponent, geom::DataGeometry) =
     GainComponent(e.term, e.Ti, resolve(e.Frequency, geom), e.Feed, e.prior)
 resolve(nt::NamedTuple, geom::DataGeometry) = map(v -> resolve(v, geom), nt)
 
-# Station codes of an antenna table or an iterable of codes, as `String`s.
-_station_names(antennas::UVData.AntennaTable) = String.(collect(antennas.name))
+# An iterable of station codes, as `String`s.
 _station_names(names) = String.(collect(names))
 _station_names(n::Integer) = throw(
-    ArgumentError(
-        "an antenna COUNT cannot resolve station codes; pass the antenna table " *
-            "or the station codes themselves.",
-    ),
+    ArgumentError("an antenna COUNT cannot resolve station codes; pass the station codes themselves."),
 )
 
 function _validate_station_keys(stations::NamedTuple, names)
@@ -414,13 +410,13 @@ end
 """
     resolve(model::GainModel, antennas, geom::DataGeometry) -> GainModel
 
-Resolve `model` against an observation: `antennas` (an `AntennaTable` or an
-iterable of station codes) fixes the station set, and `geom` resolves every
-component's data-dependent frequency segmentation to its concrete form. The
-result holds the per-station trees the solve actually uses — `stations` entries
-only for stations whose trees differ from the base — and is what a solution
-records as provenance. A `stations` key not in the antenna table errors, naming
-the known stations.
+Resolve `model` against an observation: `antennas` (an iterable of
+station codes) fixes the station set, and `geom` resolves every component's
+data-dependent frequency segmentation to its concrete form. The result holds
+the per-station trees the solve actually uses — `stations` entries only for
+stations whose trees differ from the base — and is what a solution records as
+provenance. A `stations` key not among `antennas` errors, naming the known
+stations.
 """
 function resolve(m::GainModel, antennas, geom::DataGeometry)
     names = _station_names(antennas)

@@ -45,8 +45,8 @@ const EARTH_ORIENTATION = XRadio.DictSpec(
     GUSTAVO_VISIBILITY_SCHEMA
 
 `XRadio.VISIBILITY_SCHEMA` with the three things Gustavo needs and MSv4 does not
-define: the [`EARTH_ORIENTATION`](@ref) block, the per-channel `sideband` and
-`total_bandwidth` of a [`FrequencySetup`](@ref), and a `sub_scan_name`
+define: the [`EARTH_ORIENTATION`](@ref) block, the `sideband` and `total_bandwidth`
+of a spectral window (the UVFITS FQ table states both), and a `sub_scan_name`
 coordinate.
 
 Pass it to `XRadio.check` and `XRadio.write` as `schemas`:

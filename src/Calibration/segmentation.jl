@@ -50,8 +50,7 @@ _period_seconds(p::Period) = Float64(Nanosecond(p).value) / 1.0e9
 
 """
 One segment per user-specified instrument-scan window. `boundaries_s` lists
-the interior boundaries as epochs on the `Ti` axis (seconds since
-`UVData.JD_UNIX_EPOCH`); `n+1` segments result from `n` boundaries. A vector of
+the interior boundaries as epochs on the `Ti` axis (Unix seconds); `n+1` segments result from `n` boundaries. A vector of
 `DateTime`s is accepted and converted.
 """
 struct InstrumentScans <: AbstractTimeSegmentation
@@ -143,7 +142,7 @@ from the abstract segmentation vocabulary to integer sample indices. Built once
 per solve (by `DataGeometry(ps)`, or directly in tests).
 
 Fields:
-- `times`         : `Ti` sample epochs (seconds since `UVData.JD_UNIX_EPOCH`).
+- `times`         : `Ti` sample epochs (Unix seconds).
 - `scan_of_time`  : scan id for each time sample (any integer labels; need not
                     be 1-based or contiguous — `PerScan` dense-ranks them).
 - `channel_freqs` : concatenated channel center frequencies (Hz) across spws.
