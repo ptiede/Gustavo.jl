@@ -910,12 +910,12 @@ end
             # Station 1 is the gauge reference and the broken station both, so
             # the pin holds its FIRST segment and its second carries the break.
             @test all(iszero, pb[1].θ[1, f, :, 1, 1])
-            @test pb[1].θ[1, f, :, 2, 1] ≈ cdemean(brk[f]) atol = 1.0e-6
+            @test maximum(abs, pb[1].θ[1, f, :, 2, 1] .- cdemean(brk[f])) < 1.0e-6
             # The other nine hold one bandpass across the gap, and it is the one
             # they really have — station 1's break leaks into none of them.
             for (ai, a) in pairs(pb[2].stations)
                 want = cdemean(bp_true[a, f, :, 1] .- bp_true[1, f, :, 1])
-                @test pb[2].θ[1, f, :, 1, ai] ≈ want atol = 1.0e-6
+                @test maximum(abs, pb[2].θ[1, f, :, 1, ai] .- want) < 1.0e-6
             end
         end
     end

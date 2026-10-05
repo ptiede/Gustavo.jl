@@ -1284,8 +1284,7 @@ end
 # iterations. `fits[a]` holds station `a`'s phase and amplitude
 # `(; x, pieces, prior, level, nlevel)` and `levels[a]` its fitted levels, each
 # over `(Feed, level segment, Ti)` or `nothing`. The status and prior arrays,
-# when given, hold one array per block. Returns the largest relative gain change,
-# for the caller's convergence check.
+# when given, hold one array per block.
 function _update_station_gains!(
         gains, data, layout; fits, levels, seed::Bool,
         phase_status = nothing, amp_status = nothing, phase_priors = nothing, amp_priors = nothing,
@@ -1294,7 +1293,6 @@ function _update_station_gains!(
     (; loc, touching, tseg, fseg, present) = layout
     C = eltype(first(gains).g)
     T = real(C)
-    maxrel = zero(T)
     nfsmax = maximum(st -> size(st, Frequency), gains)
     num = Vector{C}(undef, nfsmax)
     den = Vector{T}(undef, nfsmax)
@@ -1394,16 +1392,55 @@ function _update_station_gains!(
             end
             for fs in 1:nfs
                 (isfinite(la[fs]) && isfinite(φ̃[fs])) || continue
-                gold = g[ai, feed, fs, ts]
-                gnew = exp(C(la[fs], φ̃[fs]))
-                g[ai, feed, fs, ts] = gnew
+                g[ai, feed, fs, ts] = exp(C(la[fs], φ̃[fs]))
                 φ[ai, feed, fs, ts] = φ̃[fs]
                 touched[ai, feed, fs, ts] = true
-                maxrel = max(maxrel, abs(gnew - gold) / max(abs(gold), abs(gnew), eps(T)))
             end
         end
     end
-    return maxrel
+    return gains
+end
+
+# Move each (station, feed, time segment) track's band-mean log-amplitude and
+# phase into `S`, which absorbs any band-constant station factor: the data leave
+# that level free, and under a prior the sweep would otherwise drift along it.
+# A pinned track keeps its phase; levels move with their track.
+function _remove_band_levels!(gains, levels, layout)
+    for (a, (k, ai)) in pairs(layout.loc)
+        iszero(k) && continue
+        (; g, φ, touched, pinned) = gains[k]
+        T = real(eltype(g))
+        for f in axes(g, Feed), ts in layout.present[a]
+            valid = view(touched, ai, f, :, ts)
+            n = count(valid)
+            iszero(n) && continue
+            mla = sum(log(abs(g[ai, f, fs, ts])) for fs in axes(g, Frequency) if valid[fs]) / n
+            mφ = any(view(pinned, ai, f, :, ts)) ? zero(T) :
+                sum(φ[ai, f, fs, ts] for fs in axes(g, Frequency) if valid[fs]) / n
+            shift = exp(-complex(mla, mφ))
+            for fs in axes(g, Frequency)
+                valid[fs] || continue
+                g[ai, f, fs, ts] *= shift
+                φ[ai, f, fs, ts] -= mφ
+            end
+            lv = levels[a]
+            isnothing(lv.amp) || (view(lv.amp, f, :, ts) .-= mla)
+            isnothing(lv.phase) || (view(lv.phase, f, :, ts) .-= mφ)
+        end
+    end
+    return gains
+end
+
+# The largest relative change of any gain from `previous`, the gains a sweep
+# started from.
+function _largest_relative_change(gains, previous)
+    T = real(eltype(first(gains).g))
+    worst = zero(T)
+    for (gk, prev) in zip(gains, previous), I in eachindex(gk.g, prev)
+        new, old = gk.g[I], prev[I]
+        worst = max(worst, abs(new - old) / max(abs(old), abs(new), eps(T)))
+    end
+    return worst
 end
 
 # A joint level writer's values at time segment `ts`.
@@ -1701,11 +1738,15 @@ function solve_joint_bandpass!(
     T = real(eltype(r))
     tolerance = something(tolerance, max(1.0e-8, 16 * eps(T)))
     maxrel = convert(T, Inf)
+    previous = [copy(gk.g) for gk in gains]
     for iter in 1:max_iterations
-        maxrel = _update_station_gains!(
+        foreach((dst, gk) -> copyto!(dst, gk.g), previous, gains)
+        _update_station_gains!(
             gains, data, layout;
             fits, levels, seed = iter == 1, phase_status, amp_status, phase_priors, amp_priors,
         )
+        _remove_band_levels!(gains, levels, layout)
+        maxrel = _largest_relative_change(gains, previous)
         _update_source_coherence!(data, gains, layout)
         maxrel < tolerance && break
     end

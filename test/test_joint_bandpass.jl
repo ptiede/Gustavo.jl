@@ -155,7 +155,10 @@ end
 
     # σ = 1e-6 rad per channel (2 MHz) as rad/Hz^(3/2).
     stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6 * sqrt(3 / (2 * 2.0e6^3)))
-    s_stiff = runbp(FP.JointSmoother(max_iterations = 40); prior = stiff)
+    # A prior the gains cannot follow exactly must still converge: the band
+    # level that trades with the source coherence is held fixed in the sweep.
+    logs, s_stiff = Test.collect_test_logs(() -> runbp(FP.JointSmoother(); prior = stiff))
+    @test !any(l -> occursin("did not converge", string(l.message)), logs)
     pleaf, aleaf = _jb_leaf(s_stiff, :phase), _jb_leaf(s_stiff, :logamp)
     nflat = 0
     for a in 1:nant, f in 1:2
@@ -868,7 +871,7 @@ end
     results = _joint_scan_accumulators(gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom)
     FP.solve_joint_bandpass!(
         θ, results, geom, pb, ab; phase_level_blocks = plb, amp_level_blocks = alb,
-        gauge = PinAntenna(1), max_iterations = 400, tolerance = 1.0e-12,
+        gauge = PinAntenna(1),
     )
 
     level_leaf(b) = only(b).θ
