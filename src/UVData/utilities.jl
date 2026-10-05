@@ -47,14 +47,6 @@ resolved through each antenna's receptors by
 """
 feed_pairs(vis::AbstractDimArray) = collect(Tuple{Int, Int}, lookup(vis, Polarization))
 
-"""
-    frequencies(x) -> Vector{Float64}
-
-Channel frequencies (Hz) off the `Frequency` lookup of the visibility array
-`x`. The raw coordinate vector, not a lookup wrapper.
-"""
-frequencies(vis::AbstractDimArray) = parent(lookup(vis, Frequency))
-
 # ── Time axis ────────────────────────────────────────────────────────────────
 
 """

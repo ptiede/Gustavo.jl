@@ -18,7 +18,6 @@ using XRadio: AbstractMount
 
 include("dimensions.jl")
 include("antenna.jl")
-include("baselineidx.jl")
 include("frequencyband.jl")
 include("io.jl")
 include("apriori.jl")
@@ -29,11 +28,7 @@ include("processingset.jl")
 include("autocorrelations.jl")
 
 export Antenna, AntennaTable, FrequencySetup, AbstractFrequencySetup
-export antennas
 export freq_setup, channel_freqs, ref_freq, ch_widths, total_bandwidths, sidebands
-export BaselineIndex
-export frequencies
-export baselines
 export GUSTAVO_VISIBILITY_SCHEMA
 export load_uvfits, write_uvfits
 export check_layer_axes

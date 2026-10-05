@@ -114,18 +114,12 @@ end
     ms = make()
 
     function agrees(ms)
-        bm = UV.baselines(ms)
-        @test bm.pairs == [(a, b) for a in 1:4 for b in (a + 1):4]
-        @test bm.ant1_names == [names[a] for (a, _) in bm.pairs]
-        @test bm.ant2_names == [names[b] for (_, b) in bm.pairs]
-        @test bm.labels == string.(bm.ant1_names, "-", bm.ant2_names)
-
         fs = UV.freq_setup(ms)
         @test UV.ref_freq(fs) == first(freqs)
         @test UV.channel_freqs(fs) == freqs
         @test all(==(2.0e6), UV.ch_widths(fs))
 
-        am = UV.antennas(ms)
+        am = UV._antenna_table(ms)
         @test am.name == names
         @test am.station_xyz == [positions[:, i] for i in 1:4]
         @test am.mount == mounts

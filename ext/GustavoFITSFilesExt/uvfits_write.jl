@@ -204,7 +204,7 @@ function _antenna_union(ps)
     rows = UVData.Antenna[]
     diameters = Union{Nothing, Float64}[]
     for ms in ps
-        tab = UVData.antennas(ms)
+        tab = UVData._antenna_table(ms)
         diameter = get(UVData.extras(tab), :DIAMETER, nothing)
         for (i, ant) in pairs(getfield(tab, :antennas))
             j = findfirst(r -> r.name == ant.name, rows)
@@ -223,7 +223,7 @@ function _antenna_union(ps)
         end
     end
     return rows, any(isnothing, diameters) ? nothing : Float64.(diameters),
-        UVData.array_name(UVData.antennas(first(ps)))
+        UVData.array_name(UVData._antenna_table(first(ps)))
 end
 
 function _only_value(ps, f, what)

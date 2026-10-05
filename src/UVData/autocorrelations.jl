@@ -17,7 +17,7 @@ visibilities are taken to be normalized already, or to need no normalization.
 """
 function normalize_by_autocorrelations!(ms::XRadio.MeasurementSet)
     feeds = feed_pairs(ms)
-    stations = baselines(ms).pairs
+    stations = _antenna_pairs(ms)
     autos = Dict(
         (a, first(feeds[p, bi])) => (Polarization(p), BaselineID(bi))
             for (bi, (a, b)) in pairs(stations) if a == b

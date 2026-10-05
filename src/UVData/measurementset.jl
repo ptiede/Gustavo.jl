@@ -24,7 +24,7 @@ function feed_pairs(ms::XRadio.MeasurementSet)
     end
     return [
         (_receptor_feed(p[1], receptors[a], names[a]), _receptor_feed(p[2], receptors[b], names[b]))
-            for p in products, (a, b) in baselines(ms).pairs
+            for p in products, (a, b) in _antenna_pairs(ms)
     ]
 end
 
@@ -64,49 +64,18 @@ function _feed_permutation(pairs::AbstractMatrix{Tuple{Int, Int}})
     return order, perm
 end
 
-"""
-    baselines(ms::XRadio.MeasurementSet) -> BaselineIndex
-
-The baselines of `ms` in `baseline_id` order, their antenna indices counting
-into [`antennas(ms)`](@ref antennas(::XRadio.MeasurementSet)).
-"""
-baselines(ms::XRadio.MeasurementSet) =
-    _baselines_into(ms, XRadio.antennas(ms), "the antenna dataset")
-
-"""
-    baselines(ms::XRadio.MeasurementSet, stations::AntennaTable) -> BaselineIndex
-
-The baselines of `ms` in `baseline_id` order, their antenna indices counting
-into `stations`, matched by name. This is how Measurement Sets that saw
-different sub-arrays share one station axis: MSv4 names each baseline's
-antennas, and `stations` fixes the numbering.
-"""
-baselines(ms::XRadio.MeasurementSet, stations::AntennaTable) =
-    _baselines_into(ms, collect(String.(stations.name)), "the station table")
-
-function _baselines_into(ms, names, what)
-    slot = Dict(n => i for (i, n) in pairs(names))
-    index(n) = get(slot, n) do
-        throw(
-            ArgumentError(
-                "baseline antenna `$n` is not in $what, which names " * join(names, ", ")
-            )
-        )
-    end
-    pairs_v = [(index(a), index(b)) for (a, b) in XRadio.baselines(ms)]
-    return BaselineIndex(pairs_v, pairs_v; antenna_names = names)
+# The baselines of `ms` in `baseline_id` order, as indices into `XRadio.antennas(ms)`.
+function _antenna_pairs(ms::XRadio.MeasurementSet)
+    slot = Dict(n => i for (i, n) in pairs(XRadio.antennas(ms)))
+    return [(slot[a], slot[b]) for (a, b) in XRadio.baselines(ms)]
 end
 
 const _POL_TYPES = Dict("R" => RPol(), "L" => LPol(), "X" => XPol(), "Y" => YPol())
 
-"""
-    antennas(ms::XRadio.MeasurementSet) -> AntennaTable
-
-The antenna table of `ms`, from its antenna dataset: geocentric positions,
-mounts, receptor polarizations and angles, and dish diameters where stated
-(under `extras(tab).DIAMETER`). An unstated receptor angle is `NaN`.
-"""
-function antennas(ms::XRadio.MeasurementSet)
+# The antenna table of `ms`, from its antenna dataset: geocentric positions,
+# mounts, receptor polarizations and angles, and dish diameters where stated
+# (under `extras(tab).DIAMETER`). An unstated receptor angle is `NaN`.
+function _antenna_table(ms::XRadio.MeasurementSet)
     haskey(branches(ms), :antenna) ||
         throw(ArgumentError("this Measurement Set has no antenna dataset"))
     xds = branches(ms)[:antenna]

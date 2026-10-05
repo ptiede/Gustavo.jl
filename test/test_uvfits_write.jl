@@ -45,7 +45,7 @@ function _test_same_set(a, b; same_keys = true, time_atol = 0.0)
                 for b in axes(written, 1), k in axes(written, 2) if written[b, k]
         )
         @test all(isnan, uvw_n[:, .!written])
-        @test isequal(Gustavo.UVData.antennas(m), Gustavo.UVData.antennas(n))
+        @test isequal(Gustavo.UVData._antenna_table(m), Gustavo.UVData._antenna_table(n))
         @test DimensionalData.metadata(m[:visibility])[:units] ==
             DimensionalData.metadata(n[:visibility])[:units]
     end

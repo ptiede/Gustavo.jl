@@ -13,7 +13,6 @@ using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
 using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, feed_pairs
-using Gustavo.UVData: antennas, baselines, frequencies
 using PolarizedTypes: RPol, LPol
 
 # Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
@@ -23,7 +22,6 @@ include("test_synthetic_ps.jl")
 include("test_measurementset.jl")
 include("test_uvfits.jl")
 include("test_uvfits_write.jl")
-include("test_ms_baselines.jl")
 include("test_ms_geometry.jl")
 include("test_autocorrelations.jl")
 include("test_apriori.jl")
@@ -315,33 +313,6 @@ end
     @test hash(ant()) == hash(ant())
 end
 
-@testset "BaselineIndex carries no AIPS-only fields" begin
-    UV = Gustavo.UVData
-    # decode_baseline must not exist in the UVData public namespace.
-    @test !isdefined(UV, :decode_baseline)
-    # BaselineIndex must not carry AIPS-only fields.
-    @test !(:codes in fieldnames(UV.BaselineIndex))
-    @test !(:unique_codes in fieldnames(UV.BaselineIndex))
-    @test :pairs_per_record in fieldnames(UV.BaselineIndex)
-end
-
-@testset "BaselineIndex lookup sugar" begin
-    UV = Gustavo.UVData
-    bls = UV.baselines(XRadio.Testing.measurement_set())
-    @test length(bls) == length(bls.pairs) > 0
-
-    p = bls.pairs[1]
-    lbl = bls.labels[1]
-    a, b = bls.ant1_names[1], bls.ant2_names[1]
-    @test bls[p] == 1
-    @test bls[lbl] == 1
-    @test bls[(a, b)] == 1
-    @test haskey(bls, p) && haskey(bls, lbl) && haskey(bls, (a, b))
-    @test !haskey(bls, (-1, -2))
-    @test !haskey(bls, "ZZ-ZZ")
-    @test_throws KeyError bls[(-1, -2)]
-end
-
 @testset "feed_pairs of a solver cube" begin
     UV = Gustavo.UVData
     vis = DimArray(zeros(ComplexF32, 4, 2), (Polarization([(1, 1), (1, 2), (2, 1), (2, 2)]), Ti([0.0, 1.0])))
@@ -358,7 +329,7 @@ end
     types[:, 3] .= ["X", "Y"]
     ms = Testing.measurement_set(; antennas = names, antenna_xds = ant)
     @test XRadio.polarizations(ms) == ["RR", "RL", "LR", "LL"]
-    @test UV.baselines(ms).pairs == [(1, 2), (1, 3), (2, 3)]
+    @test XRadio.baselines(ms) == [("SMA", "LMT"), ("SMA", "ALMA"), ("LMT", "ALMA")]
 
     pairs = UV.feed_pairs(ms)
     # SMA–LMT: LMT's R is its second receptor.

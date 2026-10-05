@@ -69,7 +69,7 @@ function apriori_calibrate!(
     scale = _sefd_scale(ms, T, curves, tsys, Float64(min_elevation), plausible)
     feeds = feed_pairs(ms)
     V, W, F = _storage_order(vis), _storage_order(ms[:weight]), _storage_order(ms[:flag])
-    for (bi, (a, b)) in pairs(baselines(ms).pairs)
+    for (bi, (a, b)) in pairs(_antenna_pairs(ms))
         if a == b
             view(F, :, :, bi, :) .= true
             continue
