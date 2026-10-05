@@ -98,7 +98,7 @@ end
     end
 
     @testset "scale_weights!" begin
-        scale = DimArray([2.0, 5.0], AntennaName(["A2", "ZZ"]))
+        scale = Dict("A2" => 2.0, :ZZ => 5.0)
         target = fresh()
         out = scale_weights!(target, scale)
         @test out === target
@@ -108,13 +108,7 @@ end
         end
         @test parent(out[:visibility]) == parent(ms[:visibility])
         @test_throws "scale_weights!: every factor must be finite and positive" scale_weights!(
-            fresh(), DimArray([1.0, 0.0], AntennaName(["A1", "A2"]))
-        )
-        @test_throws "scale_weights!: a station is named more than once" scale_weights!(
-            fresh(), DimArray([1.0, 2.0], AntennaName(["A1", "A1"]))
-        )
-        @test_throws "scale_weights!: index the factors by `AntennaName`" scale_weights!(
-            fresh(), DimArray([1.0], XRadio.StationName(["A1"]))
+            fresh(), Dict("A1" => 1.0, "A2" => 0.0)
         )
     end
 

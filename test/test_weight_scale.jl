@@ -7,8 +7,8 @@
 
 @testset "Per-station weight scale" begin
     ps, _ = _build_fringe_ps()
-    ws = DimArray([1.0, 0.5, 0.5, 1.0], AntennaName(["A1", "A2", "A3", "A4"]))
-    scale(name) = ws[AntennaName(At(name))]
+    ws = Dict("A1" => 1.0, "A2" => 0.5, "A3" => 0.5, "A4" => 1.0)
+    scale(name) = ws[name]
 
     @testset "search SNR follows the weights; calibrated weights carry the fix" begin
         # The search's SNR is |D|/√Σw, so rescaling a baseline's weights by s

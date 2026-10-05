@@ -1,6 +1,7 @@
 """
     apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation = 0.0,
-                       max_tsys = 1.0e4, tsys_placeholders = (999.0,)) -> ms
+                       max_tsys = 1.0e4, tsys_placeholders = (999.0,),
+                       quantization_efficiency = nothing) -> ms
 
 Put the visibilities of `ms` in janskys, in place, from the system
 temperatures and gain curves the Measurement Set records
@@ -13,6 +14,19 @@ sensitivity. A visibility on baseline `(a, b)` relating receptors `(fa, fb)` is
 multiplied by `√(SEFD_a · SEFD_b)` and its weight divided by `SEFD_a · SEFD_b`,
 so the weight stays `1/σ²` of the visibility it describes. Receptors come from
 [`feed_pairs`](@ref).
+
+The same visibility is divided by `η_a · η_b` and its weight multiplied by
+`(η_a · η_b)²`, which corrects the loss of correlated amplitude to the
+correlator's quantization. `η` is each antenna's quantization efficiency,
+from the `digitizer_levels` variable of the antenna dataset: 2, 3 and 4 levels
+give `2/π`, 0.8098 and 0.8825, the weak-signal efficiencies with optimal
+thresholds (Thompson, Moran & Swenson, *Interferometry and Synthesis in Radio
+Astronomy*, ch. 8). A Measurement Set without `digitizer_levels` needs
+`quantization_efficiency`: one number for every antenna, or a `Dict` from
+antenna name (string or symbol) to η holding every antenna. Where
+`digitizer_levels` are recorded, `quantization_efficiency` supplies η only for
+the antennas whose level count has none tabulated, and must be given for them:
+one number for all of them, or a `Dict` naming no other antenna.
 
 `tsys` places the system temperatures, which are sampled on their own clock, on
 the visibilities' times: [`ScanMean`](@ref), [`LinearInTime`](@ref) or
@@ -31,7 +45,7 @@ system temperatures or no gain curves.
 """
 function apriori_calibrate!(
         ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation::Real = 0.0,
-        max_tsys::Real = 1.0e4, tsys_placeholders = (999.0,),
+        max_tsys::Real = 1.0e4, tsys_placeholders = (999.0,), quantization_efficiency = nothing,
     )
     vis = ms[:visibility]
     units = get(metadata(vis), :units, nothing)
@@ -49,6 +63,8 @@ function apriori_calibrate!(
             "`XRadio.read_antab!` reads them from an ANTAB file"
     ))
 
+    names = collect(lookup(XRadio.polarization_types(ms), XRadio.AntennaName))
+    η = _quantization_efficiencies(ms, names, quantization_efficiency)
     plausible(v) = isfinite(v) && 0 < v <= max_tsys && !(v in tsys_placeholders)
     scale = _sefd_scale(ms, T, curves, tsys, Float64(min_elevation), plausible)
     feeds = feed_pairs(ms)
@@ -61,7 +77,8 @@ function apriori_calibrate!(
         for t in axes(V, 4), p in axes(V, 1)
             fa, fb = feeds[p, bi]
             for c in axes(V, 2)
-                s = scale[fa, a, t, _channel(scale, c)] * scale[fb, b, t, _channel(scale, c)]
+                s = scale[fa, a, t, _channel(scale, c)] * scale[fb, b, t, _channel(scale, c)] /
+                    (η[a] * η[b])
                 if isfinite(s) && s > 0
                     V[p, c, bi, t] *= s
                     W[p, c, bi, t] /= s^2
@@ -76,6 +93,61 @@ function apriori_calibrate!(
 end
 
 _channel(scale, c) = size(scale, 4) == 1 ? 1 : c
+
+# Weak-signal quantization efficiency with optimal thresholds, by digitizer
+# level count (Thompson, Moran & Swenson, ch. 8).
+const _QUANTIZATION_EFFICIENCY = Dict(2 => 2 / π, 3 => 0.8098, 4 => 0.8825)
+
+function _quantization_efficiencies(ms, names, given)
+    xds = branches(ms)[:antenna]
+    window = XRadio.spectralwindow(ms)
+    if !haskey(xds, :digitizer_levels)
+        isnothing(given) && throw(ArgumentError(
+            "spectral window `$window` records no `digitizer_levels`; pass " *
+                "`quantization_efficiency` (e.g. `2/π` for 2-level sampling) or record " *
+                "`digitizer_levels` in the antenna dataset"
+        ))
+        return _given_efficiencies(given, names)
+    end
+    levels = xds[:digitizer_levels]
+    level(a) = levels[XRadio.AntennaName(At(a))]
+    untabulated = filter(a -> !haskey(_QUANTIZATION_EFFICIENCY, level(a)), names)
+    if isnothing(given)
+        isempty(untabulated) || throw(ArgumentError(
+            "antennas $(join(untabulated, ", ")) have $(join(map(level, untabulated), ", ")) " *
+                "digitizer levels, for which no quantization efficiency is tabulated (2, 3 " *
+                "and 4 are); pass `quantization_efficiency` for them"
+        ))
+    else
+        isempty(untabulated) && throw(ArgumentError(
+            "spectral window `$window` records `digitizer_levels` with a tabulated quantization " *
+                "efficiency for every antenna; `quantization_efficiency` cannot also be given"
+        ))
+        _check_untabulated_only(given, untabulated)
+    end
+    supplied = isnothing(given) ? Dict{String, Float64}() :
+        Dict(zip(untabulated, _given_efficiencies(given, untabulated)))
+    return [a in untabulated ? supplied[a] : _QUANTIZATION_EFFICIENCY[level(a)] for a in names]
+end
+
+_check_untabulated_only(::Real, untabulated) = nothing
+function _check_untabulated_only(η::AbstractDict, untabulated)
+    extra = setdiff(String.(keys(η)), untabulated)
+    isempty(extra) || throw(ArgumentError(
+        "`quantization_efficiency` gives antennas $(join(extra, ", ")), whose " *
+            "`digitizer_levels` fix it; give it only for $(join(untabulated, ", "))"
+    ))
+    return nothing
+end
+
+_given_efficiencies(η::Real, names) = fill(η, length(names))
+function _given_efficiencies(η::AbstractDict, names)
+    byname = Dict(String(k) => v for (k, v) in η)
+    return map(names) do a
+        haskey(byname, a) || throw(ArgumentError("`quantization_efficiency` has no value for antenna $a"))
+        byname[a]
+    end
+end
 
 # √SEFD over (receptor, antenna, time, channel) in the antenna dataset's order,
 # with a channel axis of length one unless the system temperatures resolve the

@@ -33,7 +33,12 @@ write_uvfits("out.uvfits", ps)                  # one source, frequency setup an
 ```
 
 `apriori_calibrate!(ms)` puts one Measurement Set's visibilities in janskys
-from the system temperatures and gain curves it records. Like every correction
+from the system temperatures and gain curves it records, and corrects the
+correlator's quantization loss from each antenna's `digitizer_levels` (which
+XRadio's `fitsidi2msv4` records from FITS-IDI's `NO_LEVELS`). A store without
+them needs the efficiency stated, as in
+`apriori_calibrate!(ms; quantization_efficiency = 2 / π)` for 2-level sampling.
+Like every correction
 it modifies a Measurement Set held in memory, so it runs member by member, for
 example `foreach(apriori_calibrate!, values(g))` inside the `mapsets` bodies
 below.

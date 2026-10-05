@@ -174,7 +174,7 @@ end
 
     @testset "corrections before the step, including a function" begin
         ps, _ = _build_fringe_ps()
-        ws = DimArray([1.0, 0.5, 1.0, 2.0], AntennaName(["A1", "A2", "A3", "A4"]))
+        ws = Dict("A1" => 1.0, "A2" => 0.5, "A3" => 1.0, "A4" => 2.0)
         # Weight scale: on noiseless data every baseline's delay and rate are
         # exact, so re-weighting baselines leaves the fringe θ where it was.
         scaled = Gustavo.materialize(ps)

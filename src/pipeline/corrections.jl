@@ -132,31 +132,21 @@ end
 # ── Per-station weight scaling ──────────────────────────────────────────────
 
 """
-    scale_weights!(ms::MeasurementSet, scale::AbstractDimVector) -> ms
+    scale_weights!(ms::MeasurementSet, scale::AbstractDict) -> ms
 
 Scale the weights of `ms` per station in place, `w → w·s_a·s_b` on each
-baseline `(a, b)`. `scale` holds one finite, positive factor per station,
-indexed by `AntennaName`; a station it does not name keeps its weights. A
-factor above 1 raises a station's weights (a correlator claiming more noise
-than the data carries). Visibilities are untouched.
+baseline `(a, b)`. `scale` maps station names (strings or symbols) to finite,
+positive factors; a station it does not name keeps its weights. A factor above
+1 raises a station's weights (a correlator claiming more noise than the data
+carries). Visibilities are untouched.
 
-    ws = DimArray([2.0, 2.0], AntennaName(["HS", "GL"]))
-    scale_weights!(ms, ws)
+    scale_weights!(ms, Dict("HS" => 2.0, "GL" => 2.0))
 """
-function scale_weights!(ms::XRadio.MeasurementSet, scale::AbstractDimVector)
-    only(dims(scale)) isa AntennaName || throw(
-        ArgumentError(
-            "scale_weights!: index the factors by `AntennaName`, not " *
-                "$(nameof(typeof(only(dims(scale)))))"
-        )
+function scale_weights!(ms::XRadio.MeasurementSet, scale::AbstractDict)
+    all(x -> isfinite(x) && x > 0, values(scale)) || throw(
+        ArgumentError("scale_weights!: every factor must be finite and positive, got $(scale).")
     )
-    allunique(lookup(scale, 1)) || throw(
-        ArgumentError("scale_weights!: a station is named more than once: $(collect(lookup(scale, 1)))")
-    )
-    all(x -> isfinite(x) && x > 0, scale) || throw(
-        ArgumentError("scale_weights!: every factor must be finite and positive, got $(collect(scale)).")
-    )
-    factor = Dict(String(n) => Float64(f) for (n, f) in zip(lookup(scale, 1), scale))
+    factor = Dict(String(n) => Float64(f) for (n, f) in scale)
     weight = ms[:weight]
     for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
         f = get(factor, String(a), 1.0) * get(factor, String(b), 1.0)

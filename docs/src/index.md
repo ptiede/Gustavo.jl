@@ -109,8 +109,9 @@ place and returns it. The built-in ones are
 [`scale_weights!`](@ref),
 [`apriori_calibrate!`](@ref Gustavo.UVData.apriori_calibrate!), which puts the
 visibilities in janskys from the system temperatures and gain curves the
-Measurement Set records (XRadio's `read_antab!` adds them from an ANTAB file),
-and [`calibrate!`](@ref), which divides a solution's gains out of the data. Each
+Measurement Set records (XRadio's `read_antab!` adds them from an ANTAB file)
+and corrects the correlator's quantization loss from each antenna's
+`digitizer_levels` or a `quantization_efficiency` keyword, and [`calibrate!`](@ref), which divides a solution's gains out of the data. Each
 applies to one Measurement Set; a `ProcessingSet` is corrected member by
 member, `foreach(ms -> scale_weights!(ms, ws), values(ps))`, except
 `calibrate!`, which also takes a `ProcessingSet`. Data opened lazily must be

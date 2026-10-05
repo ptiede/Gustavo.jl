@@ -203,7 +203,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "calibrate divides by the gains alone" begin
         ps, _ = _build_fringe_ps()
-        ws = DimArray([1.0, 0.5, 1.0, 2.0], AntennaName(["A1", "A2", "A3", "A4"]))
+        ws = Dict("A1" => 1.0, "A2" => 0.5, "A3" => 1.0, "A4" => 2.0)
         scale(set, w = ws) = XRadio.ProcessingSet(
             OrderedDict{Symbol, XRadio.MeasurementSet}(
                 k => scale_weights!(deepcopy(read(ms)), w) for (k, ms) in pairs(set)
@@ -223,7 +223,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
         # Two weight scales compose (w·(s_a s_b)²).
         sol_b = _combined(_fit_chain(_full_chain(), scale(scale(ps))))
-        @test parent(gains(_combined(_fit_chain(_full_chain(), scale(ps, ws .* ws))))) ≈
+        @test parent(gains(_combined(_fit_chain(_full_chain(), scale(ps, Dict(k => v^2 for (k, v) in ws)))))) ≈
             parent(gains(sol_b))
     end
 
@@ -243,7 +243,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "solution Zarr round-trip" begin
         ps, _ = _build_fringe_ps()
-        ws = DimArray([1.0, 0.5, 1.0, 1.0], AntennaName(["A1", "A2", "A3", "A4"]))
+        ws = Dict("A1" => 1.0, "A2" => 0.5, "A3" => 1.0, "A4" => 1.0)
         scaled = Gustavo.materialize(ps)
         foreach(ms -> scale_weights!(ms, ws), values(scaled))
         sol = _combined(_fit_chain(_full_chain(), scaled))
