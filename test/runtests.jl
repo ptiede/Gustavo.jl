@@ -88,6 +88,7 @@ include("test_joint_bandpass.jl")
 # The AdhocPhase step + output sink: multi-scan solves of the three steps in
 # turn, and calibrate.
 include("test_smoother_step.jl")
+include("test_gauge_invariance.jl")
 
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
