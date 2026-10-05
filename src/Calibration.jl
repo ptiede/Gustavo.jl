@@ -14,7 +14,7 @@ import DimensionalData
 import DensityInterface
 import Distributions
 using Distributions: Distribution, Normal, AbstractMvNormal, mean, cov, var
-using ..Gustavo: Frequency, Polarization, BaselineID, AntennaName, Feed, Ti, feed_pairs, _feed_permutation
+using ..Gustavo: Frequency, Polarization, BaselineID, AntennaName, Feed, Ti, feed_pairs
 using LinearAlgebra
 using LinearSolve
 using Statistics: median

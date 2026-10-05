@@ -94,8 +94,8 @@ mapped back to a physical receptor.
 A Measurement Set stores products as receptor labels (`"RR"`, `"XY"`, …).
 [`feed_pairs`](@ref feed_pairs(::XRadio.MeasurementSet)) resolves each letter
 through its antenna's `polarization_type`, so one stored product can relate
-different feed pairs on different baselines; each baseline's products are
-reordered into one shared order when data becomes solver input.
+different feed pairs on different baselines. The solver reads each
+baseline's pairs from that map, so a baseline need not store every pair.
 
 ## Baseline coordinates
 

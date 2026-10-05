@@ -298,16 +298,10 @@ end
     # LMT–ALMA
     @test pairs[:, 3] == [(2, 1), (2, 2), (1, 1), (1, 2)]
 
-    order, perm = Gustavo._feed_permutation(pairs)
-    @test order == [(1, 1), (1, 2), (2, 1), (2, 2)]
-    @test perm[:, 1] == [2, 1, 4, 3]
-    @test all(bi -> pairs[perm[:, bi], bi] == order, axes(pairs, 2))
-
     types[:, 3] .= ["R", "X"]
     @test_throws "product letter `L` names no receptor of antenna `ALMA`, whose receptors are R, X" Gustavo.feed_pairs(
         Testing.measurement_set(; antennas = names, antenna_xds = ant)
     )
-    @test_throws "every baseline must relate each of" Gustavo._feed_permutation([(1, 1) (1, 1); (2, 2) (1, 2)])
 end
 
 # Every extension must precompile and load. An extension method that shares a

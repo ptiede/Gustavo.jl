@@ -43,27 +43,6 @@ function _receptor_feed(letter::Char, receptors, antenna)
         )
     )
 end
-
-# The shared feed-pair order of a solver cube, and for each baseline the stored
-# product holding each pair: `perm[k, bi]` is the product of baseline `bi` that
-# relates `order[k]`. Every baseline must relate each pair exactly once.
-function _feed_permutation(pairs::AbstractMatrix{Tuple{Int, Int}})
-    order = sort!(unique(vec(pairs)))
-    perm = similar(pairs, Int, (eachindex(order), axes(pairs, 2)))
-    for bi in axes(pairs, 2)
-        col = view(pairs, :, bi)
-        (allunique(col) && length(col) == length(order)) || throw(
-            ArgumentError(
-                "baseline $bi relates feed pairs $(collect(col)); every baseline must relate each of $order once"
-            )
-        )
-        for k in eachindex(order)
-            perm[k, bi] = findfirst(==(order[k]), col)
-        end
-    end
-    return order, perm
-end
-
 # The baselines of `ms` in `baseline_id` order, as indices into `XRadio.antennas(ms)`.
 function _antenna_pairs(ms::XRadio.MeasurementSet)
     slot = Dict(n => i for (i, n) in pairs(XRadio.antennas(ms)))

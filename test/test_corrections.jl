@@ -54,6 +54,13 @@ end
     ms = read(first(ps))
     fresh() = deepcopy(ms)
 
+    @testset "baselines relating different feed pairs" begin
+        lr_ps, _ = _build_fringe_ps(; polarizations = ["RR", "LL"], receptor_order = Dict("A2" => ["L", "R"]))
+        lr_geom = CALc.DataGeometry(lr_ps)
+        lr = read(first(lr_ps))
+        @test _division_error(calibrate!(_hand_solution(lr_geom), deepcopy(lr); apply_flags = false), lr, _hand_solution(lr_geom), lr_geom) < 1.0e-6
+    end
+
     @testset "calibrate! divides out the gains in place" begin
         target = fresh()
         out = calibrate!(sol, target; apply_flags = false)

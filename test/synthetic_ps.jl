@@ -44,6 +44,7 @@ keywords always give the same data.
   `rel_rate`: a feed-2 − feed-1 rate offset (Hz).
 - `station_positions`: per-station xyz (m).
 - `omit_station`: a station index in the antenna dataset but on no baseline.
+- `receptor_order`: station name => its receptors, in place of `R, L`.
 - `station_gains = false`: zero delay, rate, phase and screen, leaving the
   bandpass as the only station gain.
 - `eltype`: the visibilities' element type.
@@ -57,6 +58,7 @@ function _build_fringe_ps(;
         bandpass = nothing, amp_bandpass = nothing, dtec = nothing,
         feed_common = false, station_rate = nothing, rel_rate = nothing,
         spw_origins = nothing, station_positions = nothing, omit_station = nothing,
+        receptor_order = Dict{String, Vector{String}}(),
         station_gains = true, eltype = ComplexF32,
         weight = isnothing(noise) ? 1.0e3 : 2 / noise^2,
     )
@@ -68,6 +70,13 @@ function _build_fringe_ps(;
             [1.0e4 * c * i for c in 1:3, i in 1:nant] :
             reduce(hcat, (Float64.(p) for p in station_positions)),
     )
+    if !isempty(receptor_order)
+        types = copy(parent(antenna_xds[:polarization_type]))
+        for (n, r) in receptor_order
+            types[:, findfirst(==(n), names)] = r
+        end
+        antenna_xds[:polarization_type] = rebuild(antenna_xds[:polarization_type], types)
+    end
     drop = omit_station === nothing ? String[] : [names[omit_station]]
 
     integration = 30.0

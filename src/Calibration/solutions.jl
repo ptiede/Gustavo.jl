@@ -672,9 +672,6 @@ one Measurement Set, with no data attached.
   of each channel and time of the Measurement Set, in its own order.
 - `stations` — for each baseline, in `baseline_id` order, the pair of indices
   into `geom.stations` of its two antennas.
-- `feed_order` — the feed pairs `(feed_a, feed_b)` the baselines relate, sorted.
-- `feeds` — `feeds[k, b]` is the stored product of baseline `b` that relates
-  `feed_order[k]`.
 
 θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
 tseg_id, ant)` over global-length segment-id tables — while a Measurement Set's
@@ -684,20 +681,18 @@ this join cannot be recovered from the data alone.
 `GeometryWindow(geom, ms)` matches channels by frequency (`isapprox`, rtol
 1e-9), times by `_epoch_atol` on absolute seconds, and antennas by name, and
 throws on any that `geom` does not hold. The three-argument form addresses
-channels and times only, which is all evaluating gains needs; its station and
-feed maps are empty.
+channels and times only, which is all evaluating gains needs; its station
+map is empty.
 """
 struct GeometryWindow
     geom::DataGeometry
     chan_idx::Vector{Int}
     ti_idx::Vector{Int}
     stations::Vector{Tuple{Int, Int}}
-    feed_order::Vector{Tuple{Int, Int}}
-    feeds::Matrix{Int}
 end
 
 GeometryWindow(geom::DataGeometry, chan_idx, ti_idx) =
-    GeometryWindow(geom, chan_idx, ti_idx, Tuple{Int, Int}[], Tuple{Int, Int}[], zeros(Int, 0, 0))
+    GeometryWindow(geom, chan_idx, ti_idx, Tuple{Int, Int}[])
 
 function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
     isempty(geom.stations) && throw(
@@ -713,10 +708,8 @@ function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
         )
     end
     stations = [(station(a), station(b)) for (a, b) in XRadio.baselines(ms)]
-    order, perm = _feed_permutation(feed_pairs(ms))
     return GeometryWindow(
-        geom, _channel_indices(geom, XRadio.frequencies(ms)),
-        _time_indices(geom, XRadio.times(ms)), stations, order, perm,
+        geom, _channel_indices(geom, XRadio.frequencies(ms)), _time_indices(geom, XRadio.times(ms)), stations,
     )
 end
 

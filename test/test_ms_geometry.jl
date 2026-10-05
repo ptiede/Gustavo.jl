@@ -117,9 +117,6 @@ end
     @test win.chan_idx == 5:8
     @test win.ti_idx == 6:10
     @test win.stations == truth.bl_pairs
-    @test win.feed_order == [(1, 1), (1, 2), (2, 1), (2, 2)]
-    pairs = Gustavo.feed_pairs(ms)
-    @test all(pairs[win.feeds[k, b], b] == win.feed_order[k] for k in axes(win.feeds, 1), b in axes(win.feeds, 2))
 
     @testset "a view addresses its own samples" begin
         part = view(ms, XRadio.Ti(At(XRadio.times(ms)[2:3])))
@@ -142,8 +139,15 @@ end
         rr = findfirst(==("RR"), XRadio.polarizations(lr))
         # RR on A1–A2 relates A1's feed 1 to A2's feed 2.
         @test lr_pairs[rr, a1a2] == (1, 2)
-        @test w.feeds[findfirst(==((1, 2)), w.feed_order), a1a2] == rr
-        @test all(lr_pairs[w.feeds[k, b], b] == w.feed_order[k] for k in axes(w.feeds, 1), b in axes(w.feeds, 2))
+
+        # With only RR and LL stored, A2's baselines relate (1, 2) and (2, 1)
+        # while A1–A3 relates (1, 1) and (2, 2).
+        parallel = XRadio.Testing.measurement_set(;
+            antennas = names, antenna_xds = ax, times = 1.6e9 .+ 30.0 .* (0:3),
+            frequencies = 230.0e9 .+ 2.0e6 .* (0:3), scan = "1", polarizations = ["RR", "LL"],
+        )
+        pw = CALg.GeometryWindow(CALg.DataGeometry(XRadio.ProcessingSet(OrderedDict(:p => parallel))), parallel)
+        @test pw.stations == w.stations
     end
 
     @testset "errors" begin
