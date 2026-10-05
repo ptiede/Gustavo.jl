@@ -1,6 +1,6 @@
 # The calibration surface: `fit`, `calibrate` and its `post`, gauges,
 # provenance, defaults.
-# Reuses `_build_fringe_ps` and the CAL/FP/UVP aliases from test_pipeline.jl
+# Reuses `_build_fringe_ps` and the CAL/FP aliases from test_pipeline.jl
 # (included earlier in runtests.jl).
 
 @testset "Calibration surface" begin

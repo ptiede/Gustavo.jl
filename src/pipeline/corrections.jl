@@ -84,7 +84,7 @@ function _divide_gains!(
     tconst = _time_constant_over(sol, win, tspan)
     gwin = tconst ? GeometryWindow(win.geom, win.chan_idx, win.ti_idx[1:1]) : win
     g = parent(gains(sol, gwin; time_span = tconst ? _head_span(tspan) : tspan))
-    V, W, F = UVData._storage_order(vis), UVData._storage_order(weight), UVData._storage_order(flag)
+    V, W, F = _storage_order(vis), _storage_order(weight), _storage_order(flag)
     axes(V, 2) == axes(g, 1) && (tconst || axes(V, 4) == axes(g, 2)) || throw(
         DimensionMismatch("gains $(axes(g)) do not cover the data $(axes(V))"),
     )

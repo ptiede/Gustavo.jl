@@ -106,7 +106,7 @@ function _copy_cell_rows!(bufs, layers, (bi, p), rows)
         return nothing
     end
     foreach(bufs, layers) do buf, L
-        buf[rows, :] .= UVData._cell_plane(L, bi, p)
+        buf[rows, :] .= _cell_plane(L, bi, p)
     end
     return nothing
 end

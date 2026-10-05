@@ -332,7 +332,7 @@ _is_gap(A, k, b) = all(
     A.flag[p, c, b, k] && iszero(A.weight[p, c, b, k]) for p in A.pol, c in axes(A.vis, 2)
 )
 
-function UVData.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = false)
+function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = false)
     ispath(path) && !overwrite && throw(
         ArgumentError("write_uvfits: $path exists; pass `overwrite = true` to replace it")
     )

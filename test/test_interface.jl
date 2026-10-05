@@ -1,6 +1,6 @@
 # Solve-step interface tests (protocol, provenance, solutions of several steps,
 # and the fit/calibrate verbs), on ProcessingSets from `_build_fringe_ps`. Uses
-# the CAL/FP/UVP aliases from test_pipeline.jl (included earlier in runtests.jl).
+# the CAL/FP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 using Distributions: LogNormal, Gamma, MvNormal

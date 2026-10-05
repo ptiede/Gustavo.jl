@@ -16,13 +16,13 @@ _per_integration_params(sol, step) =
 function _worst_parallel_coherence(corr)
     worst = 1.0
     for ms in values(corr)
-        feeds = UVP.feed_pairs(ms)
+        feeds = Gustavo.feed_pairs(ms)
         for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms))), p in axes(feeds, 1)
             a == b && continue
             fa, fb = feeds[p, bi]
             fa == fb || continue
-            V = UVP._cell_plane(ms[:visibility], bi, p)
-            W = UVP._cell_plane(ms[:weight], bi, p)
+            V = Gustavo._cell_plane(ms[:visibility], bi, p)
+            W = Gustavo._cell_plane(ms[:weight], bi, p)
             worst = min(worst, _coherence(V, W))
         end
     end

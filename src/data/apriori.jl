@@ -230,7 +230,7 @@ own clock, on the visibilities' times: [`ScanMean`](@ref),
 [`LinearInTime`](@ref) or [`NearestInTime`](@ref). A new rule is a subtype with
 a method of
 
-    Gustavo.UVData.place_tsys(rule, rows, values, times, scans, half) -> Vector
+    Gustavo.place_tsys(rule, rows, values, times, scans, half) -> Vector
 
 returning one temperature per visibility time (`NaN` for none), given the
 temperature rows' times and values (`NaN` where unmeasured), the visibility

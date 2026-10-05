@@ -1,7 +1,7 @@
 # Implements `plot_gain_phases`, declared in `Gustavo.Calibration`.
 
 import Gustavo.Calibration
-using Gustavo.UVData: AntennaName, Feed
+using Gustavo: AntennaName, Feed
 using DimensionalData: AbstractDimArray, At, dims, hasdim, lookup, name, otherdims
 
 function _gain_phase_xdim(g::AbstractDimArray)

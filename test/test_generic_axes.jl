@@ -2,7 +2,7 @@ using Test
 using Random
 using OffsetArrays: OffsetArray
 using DimensionalData: DimArray
-using Gustavo.UVData: Frequency, Ti, BaselineID, Polarization
+using Gustavo: Frequency, Ti, BaselineID, Polarization
 
 # An `AbstractArray` annotation promises the function works for any array — any
 # axes, and lazy wrappers as well as `Array`. These tests hold the package to
@@ -11,7 +11,6 @@ using Gustavo.UVData: Frequency, Ti, BaselineID, Polarization
 # cells. `_baseline_delay` did the latter under `@inbounds`, returning a
 # plausible delay built partly from memory past the end of its input.
 @testset "generic axes" begin
-    UV = Gustavo.UVData
     FR = Gustavo.Fring
     CAL = Gustavo.Calibration
 

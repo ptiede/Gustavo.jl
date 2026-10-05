@@ -602,8 +602,8 @@ end
 
     ws = FR.FringeWorkspace(ComplexF32)
     member_plane(ms, pair, q) = let bi = findfirst(==(pair), collect(XRadio.baselines(ms)))
-        p = findfirst(==(gc.feeds[q]), Gustavo.UVData.feed_pairs(ms)[:, bi])
-        Gustavo.UVData._cell_plane(ms[:visibility], bi, p)
+        p = findfirst(==(gc.feeds[q]), Gustavo.feed_pairs(ms)[:, bi])
+        Gustavo._cell_plane(ms[:visibility], bi, p)
     end
     j14 = findfirst(==(("A1", "A4")), gc.antenna_pairs)
     V, W, F = FR._gather_cell!(ws, gc, j14, 2)
@@ -620,27 +620,26 @@ end
     )
 
     det = FR.search_scan(group, geom, FR.FringeSearch())
-    @test lookup(det, Gustavo.UVData.AntennaPair) == gc.antenna_pairs
-    @test lookup(det, Gustavo.UVData.FeedPair) == gc.feeds
+    @test lookup(det, Gustavo.AntennaPair) == gc.antenna_pairs
+    @test lookup(det, Gustavo.FeedPair) == gc.feeds
     @test all(det[:valid])
     @test eltype(det[:delay]) == Float32
 end
 
 @testset "steer_scan weighs the samples the search uses" begin
-    UV = Gustavo.UVData
     ps, _ = _build_fringe_ps(; nant = 3, nspw = 1)
     ms = only(values(ps))
     # A NaN visibility with a positive weight lands in cell (A1, A2), feeds (1, 1).
-    ms[:visibility][UV.Polarization(At("RR")), UV.BaselineID(1), UV.Frequency(3), Ti(5)] = NaN
+    ms[:visibility][Gustavo.Polarization(At("RR")), Gustavo.BaselineID(1), Gustavo.Frequency(3), Ti(5)] = NaN
     geom = Gustavo.Calibration.DataGeometry(ps)
     res = FR.search_scan(ps, geom, FR.FringeSearch())
-    cell = (UV.AntennaPair(At(("A1", "A2"))), UV.FeedPair(At((1, 1))))
+    cell = (Gustavo.AntennaPair(At(("A1", "A2"))), Gustavo.FeedPair(At((1, 1))))
     # Station terms predicting the blind peak for that cell.
     delay, rate = map(1:2) do _
-        DimArray(zeros(3, 2), (AntennaName(["A1", "A2", "A3"]), UV.Feed(1:2)))
+        DimArray(zeros(3, 2), (AntennaName(["A1", "A2", "A3"]), Gustavo.Feed(1:2)))
     end
-    delay[AntennaName(At("A1")), UV.Feed(1)] = res[:delay][cell...]
-    rate[AntennaName(At("A1")), UV.Feed(1)] = res[:rate][cell...]
+    delay[AntennaName(At("A1")), Gustavo.Feed(1)] = res[:delay][cell...]
+    rate[AntennaName(At("A1")), Gustavo.Feed(1)] = res[:rate][cell...]
     s = FR.steer_scan(ps, geom, res, geom.f0, geom.t0, delay, rate)
     @test eltype(s.amp) === Float32
     @test s.amp[cell...] ≈ res[:amp][cell...] rtol = 1.0e-5

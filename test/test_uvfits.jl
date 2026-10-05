@@ -30,8 +30,7 @@ function _record_cell(ps, args, r)
 end
 
 @testset "load_uvfits" begin
-    UV = Gustavo.UVData
-    schema = UV.GUSTAVO_VISIBILITY_SCHEMA
+    schema = Gustavo.GUSTAVO_VISIBILITY_SCHEMA
     path, args = uvfits_fixture()
     ps = load_uvfits(path)
 
@@ -99,7 +98,7 @@ end
         @test parent(ant[:antenna_receptor_angle]) ≈ deg2rad.([args.polaa'; args.polab'])
         @test collect(XRadio.polarization_types(ps[1])[:, 1]) == ["R", "L"]
         @test collect(ant[:antenna_dish_diameter]) == fill(25.0, 3)
-        @test all(==([(1, 1), (2, 2)]), eachcol(UV.feed_pairs(ps[1])))
+        @test all(==([(1, 1), (2, 2)]), eachcol(Gustavo.feed_pairs(ps[1])))
     end
 
     @testset "integration time" begin

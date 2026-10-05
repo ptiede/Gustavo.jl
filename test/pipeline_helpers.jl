@@ -8,13 +8,12 @@ using LinearAlgebra: Diagonal
 using DimensionalData
 using DimensionalData: DimArray, Ti, dims, lookup
 using PolarizedTypes: RPol, LPol
-using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID
+using Gustavo: Polarization, Frequency, UVW, BaselineID
 using Dates: Date, DateTime, datetime2unix
 using FITSFiles   # triggers GustavoFITSFilesExt
 
 const CAL = Gustavo.Calibration
 const FP = Gustavo.Fring
-const UVP = Gustavo.UVData
 
 include("synthetic_ps.jl")
 

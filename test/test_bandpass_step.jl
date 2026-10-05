@@ -204,11 +204,11 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             V = DimensionalData.modify(Array, ms[:visibility])
             W = DimensionalData.modify(Array, ms[:weight])
             slot = Dict(n => i for (i, n) in pairs(bps.geom.stations))
-            feeds = UVP.feed_pairs(ms)
+            feeds = Gustavo.feed_pairs(ms)
             for (bi, (na, nb)) in pairs(collect(XRadio.baselines(ms))), p in axes(feeds, 1)
                 a, b = slot[String(na)], slot[String(nb)]
                 fa, fb = feeds[p, bi]
-                Vp = UVP._cell_plane(V, bi, p); Wp = UVP._cell_plane(W, bi, p)
+                Vp = Gustavo._cell_plane(V, bi, p); Wp = Gustavo._cell_plane(W, bi, p)
                 for t in axes(Vp, 2), c in axes(Vp, 1)
                     tg = tconst ? 1 : t
                     den = g[c, tg, a, fa] * conj(g[c, tg, b, fb])
@@ -689,7 +689,7 @@ end
         vis = copy(parent(ms[:visibility]))
         V = DimArray(vis, dims(ms[:visibility]))
         for (bi, (a, b)) in enumerate(pairs_), p in axes(V, XRadio.Polarization)
-            plane = UVP._cell_plane(V, bi, p)
+            plane = Gustavo._cell_plane(V, bi, p)
             for c in axes(plane, 1)
                 plane[c, :] .*= cis(Δ[a, c] - Δ[b, c])
             end
@@ -727,7 +727,7 @@ end
         function scan_spread(sol)
             corr = calibrate(sol, broken)
             tracks = [
-                detrend(angle.(vec(sum(UVP._cell_plane(ms[:visibility], 1, 1); dims = 2))))
+                detrend(angle.(vec(sum(Gustavo._cell_plane(ms[:visibility], 1, 1); dims = 2))))
                     for ms in values(corr)
             ]
             med = [median([tr[c] for tr in tracks]) for c in 1:nchan]

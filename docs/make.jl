@@ -22,7 +22,6 @@ makedocs(;
         "Authoring a solve step" => "authoring_steps.md",
         "API reference" => [
             "Gustavo" => "api/gustavo.md",
-            "UVData" => "api/uvdata.md",
             "Calibration" => "api/calibration.md",
             "Fring" => "api/fring.md",
         ],

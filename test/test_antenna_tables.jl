@@ -6,7 +6,6 @@
 using FITSFiles: Card
 
 @testset "FITS antenna tables" begin
-    UV = Gustavo.UVData
     ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
     center = [1.0e6, -2.0e6, 3.0e6]
     stabxyz = [10.0 20.0 30.0; -5.0 0.0 5.0]

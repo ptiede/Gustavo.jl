@@ -19,10 +19,9 @@ end
 _power(a, f, c, t) = Float32(a + 3f + c / 10 + t / 100)
 
 function _set_autocorrelations!(ms)
-    UV = Gustavo.UVData
-    feeds = UV.feed_pairs(ms)
+    feeds = Gustavo.feed_pairs(ms)
     vis = parent(ms[:visibility])
-    for (bi, (a, b)) in pairs(UV._antenna_pairs(ms)), p in axes(feeds, 1)
+    for (bi, (a, b)) in pairs(Gustavo._antenna_pairs(ms)), p in axes(feeds, 1)
         fa, fb = feeds[p, bi]
         (a == b && fa == fb) || continue
         for c in axes(vis, 2), t in axes(vis, 4)
@@ -33,18 +32,17 @@ function _set_autocorrelations!(ms)
 end
 
 @testset "normalize_by_autocorrelations!" begin
-    UV = Gustavo.UVData
 
     @testset "divides each product by its feeds' autocorrelations" begin
         ms = _set_autocorrelations!(_autocorrelated_ms())
         before = copy(parent(ms[:visibility]))
-        out = UV.normalize_by_autocorrelations!(Gustavo.materialize(ms))
+        out = Gustavo.normalize_by_autocorrelations!(Gustavo.materialize(ms))
         @test parent(ms[:visibility]) == before
         @test !any(parent(ms[:flag]))
 
-        feeds = UV.feed_pairs(out)
+        feeds = Gustavo.feed_pairs(out)
         vis, weight, flag = parent(out[:visibility]), parent(out[:weight]), parent(out[:flag])
-        for (bi, (a, b)) in pairs(UV._antenna_pairs(out))
+        for (bi, (a, b)) in pairs(Gustavo._antenna_pairs(out))
             if a == b
                 @test all(view(flag, :, :, bi, :))
                 @test view(vis, :, :, bi, :) == view(before, :, :, bi, :)
@@ -70,11 +68,11 @@ end
         rr = findfirst(==("RR"), XRadio.polarizations(ms))
         parent(ms[:flag])[rr, 3, 1, 1] = true    # A1's feed 1, channel 3, time 1
         vis[rr, 4, 1, 2] = 0                     # A1's feed 1, channel 4, time 2
-        out = UV.normalize_by_autocorrelations!(Gustavo.materialize(ms))
+        out = Gustavo.normalize_by_autocorrelations!(Gustavo.materialize(ms))
 
-        feeds = UV.feed_pairs(out)
+        feeds = Gustavo.feed_pairs(out)
         flag = parent(out[:flag])
-        for (bi, (a, b)) in pairs(UV._antenna_pairs(out)), p in axes(feeds, 1)
+        for (bi, (a, b)) in pairs(Gustavo._antenna_pairs(out)), p in axes(feeds, 1)
             a == b && continue
             uses = (a == 1 && feeds[p, bi][1] == 1) || (b == 1 && feeds[p, bi][2] == 1)
             @test flag[p, 3, bi, 1] == uses
@@ -91,9 +89,9 @@ end
         ms = _set_autocorrelations!(
             _autocorrelated_ms(; antenna2 = ["A1", "A2", "A3", "A2", "A3", "A4"])
         )
-        out = UV.normalize_by_autocorrelations!(Gustavo.materialize(ms))
+        out = Gustavo.normalize_by_autocorrelations!(Gustavo.materialize(ms))
         flag = parent(out[:flag])
-        for (bi, (a, b)) in pairs(UV._antenna_pairs(out))
+        for (bi, (a, b)) in pairs(Gustavo._antenna_pairs(out))
             @test all(view(flag, :, :, bi, :)) == (a == b || 3 in (a, b) || 4 in (a, b))
             @test any(view(flag, :, :, bi, :)) == all(view(flag, :, :, bi, :))
         end
@@ -101,6 +99,6 @@ end
 
     @testset "leaves a set without autocorrelations unchanged" begin
         ms = XRadio.Testing.measurement_set()
-        @test UV.normalize_by_autocorrelations!(ms) === ms
+        @test Gustavo.normalize_by_autocorrelations!(ms) === ms
     end
 end

@@ -175,7 +175,7 @@ function convert_case(name; dir = SYNTHETIC_DIR)
 end
 
 function with_weight(ps, w)
-    ps = Gustavo.UVData.materialize(ps)
+    ps = Gustavo.materialize(ps)
     for ms in values(ps)
         ms[:weight] .= w
     end
@@ -185,7 +185,7 @@ end
 # Each step is fit on data the steps before it corrected in place, so one copy
 # of the set is held.
 function replay(ps, gauge)
-    ps = Gustavo.UVData.materialize(ps)
+    ps = Gustavo.materialize(ps)
     fringe = fit(BaselineFringeFit(; gauge), ps)
     calibrate!(fringe, ps; flag_bad = false, apply_flags = false)
     bandpass = fit(Bandpass(; gauge), ps)

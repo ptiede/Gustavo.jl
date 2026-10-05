@@ -10,7 +10,7 @@ using Distributions: LogNormal, Normal, MvNormal
 
 const FRpf = Gustavo.Fring
 const CALpf = Gustavo.Calibration
-const Freq = Gustavo.UVData.Frequency
+const Freq = Gustavo.Frequency
 
 # The zero-mean OU posterior covariance pieces by dense linear algebra.
 _ou_cov(x, τ, σ2) = [σ2 * exp(-abs(a - b) / τ) for a in x, b in x]

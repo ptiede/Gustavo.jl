@@ -146,7 +146,7 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
 
     @testset "windows of several channels" begin
         ps = XRadio.Testing.processing_set(; nscan = 2, nspw = 2, nantenna = 3)
-        ms = Gustavo.UVData.materialize(ps)
+        ms = Gustavo.materialize(ps)
         for (i, m) in pairs(collect(ms))
             m[:visibility] .= complex.(Float32.(i .+ reshape(1:length(m[:visibility]), size(m[:visibility]))), 1.0f0)
         end
@@ -177,7 +177,7 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
             Test.@test_logs (:warn,) (:warn,) match_mode = :any XRadio.fitsidi2msv4(
                 idi, dest; mode = "w", release_date = "2000-01-01"
             )
-            ps = Gustavo.UVData.materialize(open(XRadio.ProcessingSet, dest))
+            ps = Gustavo.materialize(open(XRadio.ProcessingSet, dest))
             for m in _scan(ps, "2")
                 m[:flag][:, :, 3, 4] .= true
                 m[:weight][:, :, 3, 4] .= 0
@@ -233,7 +233,7 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
         rr_rl = XRadio.Testing.processing_set(; polarizations = ["RR", "RL"])
         @test_throws "not a contiguous run" write_uvfits(_tmp(), rr_rl)
 
-        two = Gustavo.UVData.materialize(XRadio.Testing.processing_set(; nspw = 2, nantenna = 3))
+        two = Gustavo.materialize(XRadio.Testing.processing_set(; nspw = 2, nantenna = 3))
         _scan(two, "1")[2][:uvw] .+= 1
         @test_throws "of one scan state different uvw" write_uvfits(_tmp(), two)
     end

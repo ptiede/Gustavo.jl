@@ -85,7 +85,7 @@ and leaves out a record whose every sample is flagged with zero weight.
 Inside the solver a correlation product is the pair of feed indices it
 relates: product ``(f_a, f_b)`` relates ``V[a, b, p]`` to antenna ``a``'s feed
 ``f_a`` and antenna ``b``'s feed ``f_b``. A solver cube's `Polarization` axis
-holds these pairs, [`feed_pairs`](@ref Gustavo.UVData.feed_pairs) returns them,
+holds these pairs, [`feed_pairs`](@ref Gustavo.feed_pairs) returns them,
 and products are selected by index or by pair (`pol = (1, 1)`). No label is
 read: a feed's nominal polarization is recorded per antenna
 (`polarization_type` in a Measurement Set) and matters only where a feed is

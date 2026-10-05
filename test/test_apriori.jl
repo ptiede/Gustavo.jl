@@ -74,13 +74,13 @@
         values = [100.0, NaN, 1.0e6, 120.0, 130.0]
         times = [0.0, 30.0, 120.0, 150.0]
         scans = ["1", "1", "2", "2"]
-        place(rule) = Gustavo.UVData.place_tsys(rule, rows, values, times, scans, 15.0)
+        place(rule) = Gustavo.place_tsys(rule, rows, values, times, scans, 15.0)
         @test place(ScanMean()) == [100.0, 100.0, 125.0, 125.0]
         @test place(NearestInTime()) == [100.0, 100.0, 120.0, 130.0]
         # Interpolation does cross the slew row, which is what `ScanMean` avoids.
         @test place(LinearInTime()) ≈ [100.0, 100.0 + 30 / 75 * (1.0e6 - 100.0), 120.0, 130.0]
-        @test isnan(only(Gustavo.UVData.place_tsys(LinearInTime(), rows, values, [200.0], ["3"], 15.0)))
-        @test isnan(only(Gustavo.UVData.place_tsys(ScanMean(), rows, values, [200.0], ["3"], 15.0)))
+        @test isnan(only(Gustavo.place_tsys(LinearInTime(), rows, values, [200.0], ["3"], 15.0)))
+        @test isnan(only(Gustavo.place_tsys(ScanMean(), rows, values, [200.0], ["3"], 15.0)))
 
         ms = from_antab()
         apriori_calibrate!(ms; tsys = NearestInTime())

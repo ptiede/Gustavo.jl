@@ -118,7 +118,7 @@ end
     @test win.ti_idx == 6:10
     @test win.stations == truth.bl_pairs
     @test win.feed_order == [(1, 1), (1, 2), (2, 1), (2, 2)]
-    pairs = Gustavo.UVData.feed_pairs(ms)
+    pairs = Gustavo.feed_pairs(ms)
     @test all(pairs[win.feeds[k, b], b] == win.feed_order[k] for k in axes(win.feeds, 1), b in axes(win.feeds, 2))
 
     @testset "a view addresses its own samples" begin
@@ -137,7 +137,7 @@ end
             frequencies = 230.0e9 .+ 2.0e6 .* (0:3), scan = "1",
         )
         w = CALg.GeometryWindow(CALg.DataGeometry(XRadio.ProcessingSet(OrderedDict(:lr => lr))), lr)
-        lr_pairs = Gustavo.UVData.feed_pairs(lr)
+        lr_pairs = Gustavo.feed_pairs(lr)
         a1a2 = findfirst(==((1, 2)), w.stations)
         rr = findfirst(==("RR"), XRadio.polarizations(lr))
         # RR on A1–A2 relates A1's feed 1 to A2's feed 2.

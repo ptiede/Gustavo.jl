@@ -7,7 +7,7 @@ using XRadio:
     MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
     MountBWGR, MountBWGL, MountXY, MountOrbiting
 
-import Gustavo.UVData
+import Gustavo
 
 # AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices
 # as `bl = a*256 + b`. Caps the array at 255 antennas. Lives in the FITS
@@ -291,7 +291,7 @@ end
 
 const _C_LIGHT = 299792458.0
 
-function UVData.load_uvfits(path; element_type::Union{Nothing, Type} = nothing)
+function Gustavo.load_uvfits(path; element_type::Union{Nothing, Type} = nothing)
     isnothing(element_type) || element_type <: AbstractFloat || throw(
         ArgumentError(
             "load_uvfits: element_type must be a real float type, got $(element_type)",
@@ -881,7 +881,7 @@ function _measurement_set(shared, records, scan_name, spw_id, window, tab)
             observation_info = shared.observation_info,
             processor_info = shared.processor_info,
             creator = Dict{Symbol, Any}(
-                :software_name => "Gustavo.jl", :version => string(pkgversion(UVData)),
+                :software_name => "Gustavo.jl", :version => string(pkgversion(Gustavo)),
             ),
             # No MSv4 field; `GUSTAVO_VISIBILITY_SCHEMA` describes the block.
             earth_orientation = tab.earth_orientation,

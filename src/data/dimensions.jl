@@ -1,6 +1,4 @@
-export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, FeedNode, Scan, AntennaPair, FeedPair
-
-using DimensionalData: @dim, TimeDim, Ti
+using DimensionalData: @dim
 # The frequency, baseline, polarization and antenna axes are MSv4's, not Gustavo's own:
 # `@dim` defines a method on `DimensionalData.name2dim`, so two packages
 # declaring a dimension of the same name overwrite each other and neither can

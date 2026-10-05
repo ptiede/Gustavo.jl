@@ -22,9 +22,17 @@ using LinearAlgebra: BLAS
 import StatsAPI
 using StatsAPI: fit
 
-include("UVData/UVData.jl")
-using .UVData
-using .UVData: materialize
+using DimensionalData: AbstractDimArray, hasdim, branches, metadata
+using Statistics: mean
+using AstroLib: ct2lst
+
+include("data/dimensions.jl")
+include("data/io.jl")
+include("data/apriori.jl")
+include("data/utilities.jl")
+include("data/msv4_schema.jl")
+include("data/measurementset.jl")
+include("data/autocorrelations.jl")
 
 include("Calibration.jl")
 using .Calibration
@@ -38,13 +46,14 @@ using .Fring
 # Top-level modular calibration pipeline (orchestrates all three submodules).
 include("pipeline.jl")
 
-export UVData, Calibration, Fring
+export Calibration, Fring
 # Axis names for every array Gustavo stores or returns, so scripts can index
-# and slice them without reaching into `UVData` or `DimensionalData`.
+# and slice them without reaching into XRadio or `DimensionalData`.
 # `Ti` is DimensionalData's own dim, re-exported here for the same reason.
 export Polarization, Frequency, AntennaName, BaselineID, Ti, UVW, Feed, Scan, AntennaPair, FeedPair
 # UVFITS entry: the reader and writer of a `ProcessingSet`.
 export load_uvfits, write_uvfits
+export GUSTAVO_VISIBILITY_SCHEMA, feed_pairs
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!

@@ -4,7 +4,7 @@
 
 import Gustavo.Fring
 using Gustavo.Fring: FringeSearchMap, FringeDelay, FringeRate
-using Gustavo.UVData: AntennaPair
+using Gustavo: AntennaPair
 using DimensionalData: lookup, name, refdims
 
 # Probabilities span many decades: scientific notation below 10⁻³.

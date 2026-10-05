@@ -90,7 +90,7 @@ a template of the store first, then fill it from inside the body with
 [`write!`](@ref), which is safe from concurrent units:
 
 ```julia
-write(out, ps; data = false, chunks = (; time = 1), schemas = [UVData.GUSTAVO_VISIBILITY_SCHEMA])
+write(out, ps; data = false, chunks = (; time = 1), schemas = [GUSTAVO_VISIBILITY_SCHEMA])
 dest = open(ProcessingSet, out; mode = "r+")
 mapsets(groupby(ps, ByScan())) do g
     calibrate!(bp, g)
@@ -119,9 +119,9 @@ time and hands it to a function.
 
 **Corrections.** A correction is a function that modifies a Measurement Set in
 place and returns it. The built-in ones are
-[`normalize_by_autocorrelations!`](@ref Gustavo.UVData.normalize_by_autocorrelations!),
+[`normalize_by_autocorrelations!`](@ref Gustavo.normalize_by_autocorrelations!),
 [`scale_weights!`](@ref),
-[`apriori_calibrate!`](@ref Gustavo.UVData.apriori_calibrate!), which puts the
+[`apriori_calibrate!`](@ref Gustavo.apriori_calibrate!), which puts the
 visibilities in janskys from the system temperatures and gain curves the
 Measurement Set records (XRadio's `read_antab!` adds them from an ANTAB file)
 and corrects the correlator's quantization loss from each antenna's

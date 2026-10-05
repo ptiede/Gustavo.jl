@@ -4,7 +4,7 @@
 # that `fit` → `calibrate` flattens the residual baseline phases (the
 # coherence test) and that save/load round-trips.
 
-# Shared usings/aliases (CAL/FP/UVP) and the `_coherence` metric.
+# Shared usings/aliases (CAL/FP) and the `_coherence` metric.
 include("pipeline_helpers.jl")
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
@@ -13,11 +13,11 @@ include("pipeline_helpers.jl")
 function _product_coherences(corr; keep = Returns(true))
     out = Float64[]
     for ms in values(corr)
-        feeds = UVP.feed_pairs(ms)
+        feeds = Gustavo.feed_pairs(ms)
         for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms))), p in axes(feeds, 1)
             (a == b || !keep(feeds[p, bi])) && continue
-            V = UVP._cell_plane(ms[:visibility], bi, p)
-            W = UVP._cell_plane(ms[:weight], bi, p)
+            V = Gustavo._cell_plane(ms[:visibility], bi, p)
+            W = Gustavo._cell_plane(ms[:weight], bi, p)
             push!(out, _coherence(V, W))
         end
     end
@@ -32,14 +32,14 @@ _parallel_hand(fp) = fp[1] == fp[2]
 function _time_averaged_spectra(corr)
     members = sort!(collect(values(corr)); by = ms -> first(XRadio.frequencies(ms)))
     bls = collect(XRadio.baselines(first(members)))
-    feeds = UVP.feed_pairs(first(members))
+    feeds = Gustavo.feed_pairs(first(members))
     spectra = map(members) do ms
-        @assert collect(XRadio.baselines(ms)) == bls && UVP.feed_pairs(ms) == feeds
+        @assert collect(XRadio.baselines(ms)) == bls && Gustavo.feed_pairs(ms) == feeds
         S = fill(complex(NaN), length(XRadio.frequencies(ms)), length(bls), size(feeds, 1))
         for bi in eachindex(bls), p in axes(feeds, 1)
-            V = UVP._cell_plane(ms[:visibility], bi, p)
-            W = UVP._cell_plane(ms[:weight], bi, p)
-            F = UVP._cell_plane(ms[:flag], bi, p)
+            V = Gustavo._cell_plane(ms[:visibility], bi, p)
+            W = Gustavo._cell_plane(ms[:weight], bi, p)
+            F = Gustavo._cell_plane(ms[:flag], bi, p)
             for c in axes(V, 1)
                 num, den = zero(ComplexF64), 0.0
                 for t in axes(V, 2)
@@ -722,7 +722,7 @@ end
     # per-step-name code in the runner, so a third-party step gets this too.
     for step in (fringe_step, bandpass_step, adhoc_step)
         t = step.timing
-        @test collect(lookup(t, UVP.Scan)) == sol.geom.scan_names
+        @test collect(lookup(t, Gustavo.Scan)) == sol.geom.scan_names
         @test all(>=(0), t.decode) && all(>=(0), t.work)
     end
     @test sum(fringe_step.timing.work) > 0
@@ -745,7 +745,7 @@ end
     @test !isempty(bp2) && bp2[1][2] == 1                     # one scan in this set
     l2 = first(values(calibrate(solc, ps)))
     b2 = findfirst(pr -> pr[1] != pr[2], collect(XRadio.baselines(l2)))
-    @test _coherence(UVP._cell_plane(l2[:visibility], b2, 1), UVP._cell_plane(l2[:weight], b2, 1)) > 0.99
+    @test _coherence(Gustavo._cell_plane(l2[:visibility], b2, 1), Gustavo._cell_plane(l2[:weight], b2, 1)) > 0.99
 end
 
 @testset "Largest-first group map" begin

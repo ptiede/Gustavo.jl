@@ -2,7 +2,7 @@
     Fring
 
 VLBI fringe fitting on top of the unified `Gustavo.Calibration` model framework
-and the `Gustavo.UVData` visibility model (EHT-HOPS-inspired, Blackburn et al.
+and the Gustavo visibility model (EHT-HOPS-inspired, Blackburn et al.
 2019, but with globally-closing per-feed solutions): per-baseline FFT
 delay/rate search, stationization, bandpass and adhoc-phase stages, and the
 diagnostics over them.
@@ -10,8 +10,8 @@ diagnostics over them.
 module Fring
 
 using OhMyThreads: tforeach, tmap, DynamicScheduler, SerialScheduler, TaskLocalValue
-using ..UVData
-using ..UVData: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, AntennaPair, FeedPair
+using ..Gustavo: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, AntennaPair, FeedPair, AntennaName,
+    feed_pairs, check_layer_axes, _cell_plane
 using ..Calibration
 using ..Calibration: _epoch_atol
 import XRadio

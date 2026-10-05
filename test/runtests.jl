@@ -11,7 +11,7 @@ import XRadio
 using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
-using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, feed_pairs
+using Gustavo: Polarization, Frequency, UVW, BaselineID, feed_pairs
 using PolarizedTypes: RPol, LPol
 
 # Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
@@ -58,7 +58,7 @@ include("test_adhoc.jl")
 include("test_pipeline.jl")
 
 # The calibration surface: fit and calibrate, gauges, provenance, defaults.
-# Reuses _build_fringe_ps + CAL/FP/UVP aliases from test_pipeline.jl.
+# Reuses _build_fringe_ps + CAL/FP aliases from test_pipeline.jl.
 include("test_pipeline_config.jl")
 
 # Solve-step interface (step protocol, selections, solutions of several steps,
@@ -93,11 +93,11 @@ include("test_smoother_step.jl")
 include("test_fringe_diagnostics.jl")
 
 # fringe_station_solutions θ-decode + the `rel_time` model option.
-# Reuses _build_fringe_ps + CAL/FP/UVP aliases from test_pipeline.jl.
+# Reuses _build_fringe_ps + CAL/FP aliases from test_pipeline.jl.
 include("test_fringe_station_solutions.jl")
 
 # Per-station weight correction (scale_weights!) through a full solve.
-# Reuses _build_fringe_ps + the FP/CAL/UVP aliases from test_pipeline.jl.
+# Reuses _build_fringe_ps + the FP/CAL aliases from test_pipeline.jl.
 include("test_weight_scale.jl")
 
 # The executor seam: the group scheduler under each outer scheduler — dispatch
@@ -105,7 +105,7 @@ include("test_weight_scale.jl")
 include("test_executors.jl")
 
 @testset "Gustavo.jl" begin
-    for sub in (:UVData, :Calibration, :Fring)
+    for sub in (:Calibration, :Fring)
         @test isdefined(Gustavo, sub)
         @test getfield(Gustavo, sub) isa Module
     end
@@ -128,8 +128,8 @@ end
         @test n in top
     end
 
-    # The three submodules, named at the top level.
-    for n in (:UVData, :Calibration, :Fring)
+    # The two submodules, named at the top level.
+    for n in (:Calibration, :Fring)
         @test n in top
     end
 
@@ -275,13 +275,11 @@ end
 end
 
 @testset "feed_pairs of a solver cube" begin
-    UV = Gustavo.UVData
     vis = DimArray(zeros(ComplexF32, 4, 2), (Polarization([(1, 1), (1, 2), (2, 1), (2, 2)]), Ti([0.0, 1.0])))
-    @test UV.feed_pairs(vis) == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    @test Gustavo.feed_pairs(vis) == [(1, 1), (1, 2), (2, 1), (2, 2)]
 end
 
 @testset "a Measurement Set's products resolve through each antenna's receptors" begin
-    UV = Gustavo.UVData
     Testing = XRadio.Testing
     names = ["SMA", "LMT", "ALMA"]
     ant = Testing.antenna(names)
@@ -292,7 +290,7 @@ end
     @test XRadio.polarizations(ms) == ["RR", "RL", "LR", "LL"]
     @test XRadio.baselines(ms) == [("SMA", "LMT"), ("SMA", "ALMA"), ("LMT", "ALMA")]
 
-    pairs = UV.feed_pairs(ms)
+    pairs = Gustavo.feed_pairs(ms)
     # SMA–LMT: LMT's R is its second receptor.
     @test pairs[:, 1] == [(1, 2), (1, 1), (2, 2), (2, 1)]
     # SMA–ALMA: ALMA has no R/L receptor, so R is its first and L its second.
@@ -300,16 +298,16 @@ end
     # LMT–ALMA
     @test pairs[:, 3] == [(2, 1), (2, 2), (1, 1), (1, 2)]
 
-    order, perm = UV._feed_permutation(pairs)
+    order, perm = Gustavo._feed_permutation(pairs)
     @test order == [(1, 1), (1, 2), (2, 1), (2, 2)]
     @test perm[:, 1] == [2, 1, 4, 3]
     @test all(bi -> pairs[perm[:, bi], bi] == order, axes(pairs, 2))
 
     types[:, 3] .= ["R", "X"]
-    @test_throws "product letter `L` names no receptor of antenna `ALMA`, whose receptors are R, X" UV.feed_pairs(
+    @test_throws "product letter `L` names no receptor of antenna `ALMA`, whose receptors are R, X" Gustavo.feed_pairs(
         Testing.measurement_set(; antennas = names, antenna_xds = ant)
     )
-    @test_throws "every baseline must relate each of" UV._feed_permutation([(1, 1) (1, 1); (2, 2) (1, 2)])
+    @test_throws "every baseline must relate each of" Gustavo._feed_permutation([(1, 1) (1, 1); (2, 2) (1, 2)])
 end
 
 # Every extension must precompile and load. An extension method that shares a

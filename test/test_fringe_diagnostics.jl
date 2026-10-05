@@ -22,7 +22,7 @@
         fringe = sol.steps[:fringe]
         @test t isa DimStack
         @test keys(t) == (:max_snr, :pfa)
-        @test collect(lookup(t, UVP.Scan)) == fringe.scan_names
+        @test collect(lookup(t, Gustavo.Scan)) == fringe.scan_names
         @test length(fringe.scan_names) == sol.info.nscan
         @test all(>=(0), t.max_snr)
 
@@ -45,7 +45,7 @@
         inf = sol.steps[:fringe]
         det = FP.fringe_detections(sol)
         @test keys(det) == (:snr, :pfa, :delay, :rate, :phase, :detected)
-        @test map(DimensionalData.basetypeof, dims(det)) == (UVP.Scan, UVP.AntennaPair, UVP.FeedPair)
+        @test map(DimensionalData.basetypeof, dims(det)) == (Gustavo.Scan, Gustavo.AntennaPair, Gustavo.FeedPair)
         measured = .!isnan.(det.snr)
         @test count(measured) == length(inf.det_snr)
         @test count(det.detected) == count(inf.det_detected)
@@ -59,9 +59,9 @@
         # Cells are labeled by name.
         i = findfirst(inf.det_detected)
         cell = det[
-            UVP.Scan(At(inf.scan_names[inf.det_scan[i]])),
-            UVP.AntennaPair(At((inf.det_ant_a[i], inf.det_ant_b[i]))),
-            UVP.FeedPair(At((inf.det_feed_a[i], inf.det_feed_b[i]))),
+            Gustavo.Scan(At(inf.scan_names[inf.det_scan[i]])),
+            Gustavo.AntennaPair(At((inf.det_ant_a[i], inf.det_ant_b[i]))),
+            Gustavo.FeedPair(At((inf.det_feed_a[i], inf.det_feed_b[i]))),
         ]
         @test cell.snr == inf.det_snr[i] && cell.delay == inf.det_delay[i] && cell.detected
     end
@@ -73,7 +73,7 @@
         @test length(per_scan) == 2
 
         t = FP.cat_scans(FP.fringe_snr_table.(values(per_scan)))
-        @test lookup(t, UVP.Scan) == lookup(FP.fringe_snr_table(whole), UVP.Scan)
+        @test lookup(t, Gustavo.Scan) == lookup(FP.fringe_snr_table(whole), Gustavo.Scan)
         @test t.max_snr == FP.fringe_snr_table(whole).max_snr
         st = FP.cat_scans(FP.fringe_station_solutions.(values(per_scan)))
         @test st.delay ≈ FP.fringe_station_solutions(whole).delay
@@ -84,7 +84,7 @@
         a = DimArray([1.0 2.0], (FP._scan_dim(["s1"]), FP._station_dim(["A", "B"])))
         b = DimArray([3.0 4.0], (FP._scan_dim(["s2"]), FP._station_dim(["B", "C"])))
         ab = FP.cat_scans([a, b])
-        @test collect(lookup(ab, UVP.AntennaName)) == ["A", "B", "C"]
+        @test collect(lookup(ab, Gustavo.AntennaName)) == ["A", "B", "C"]
         @test isequal(parent(ab), [1.0 2.0 NaN; NaN 3.0 4.0])
         fa = DimArray([true;;], (FP._scan_dim(["s1"]), FP._station_dim(["A"])))
         fb = DimArray([true;;], (FP._scan_dim(["s2"]), FP._station_dim(["B"])))
@@ -102,7 +102,7 @@
         g = gains(sol; Ti = 1)
         @test size(g) == (length(sol.geom.channel_freqs), length(sol.geom.stations), 2)
         @test eltype(g) <: Complex
-        @test lookup(g, UVP.Frequency) == sol.geom.channel_freqs
+        @test lookup(g, Gustavo.Frequency) == sol.geom.channel_freqs
 
         gt = gains(sol; Frequency = 1)
         @test size(gt) == (length(sol.geom.times), length(sol.geom.stations), 2)
@@ -126,7 +126,7 @@
         @test all(((a, b),) -> a != b, pairs)
         @test length(pairs) == 6
         @test collect(lookup(before, FeedPair)) == [(1, 1), (1, 2), (2, 1), (2, 2)]
-        @test collect(lookup(before, UVP.Scan)) == sol.geom.scan_names
+        @test collect(lookup(before, Gustavo.Scan)) == sol.geom.scan_names
         @test size(before.vis) == (1, 6, 4, length(sol.geom.channel_freqs))
         @test lookup(before, Frequency) == sol.geom.channel_freqs
 
@@ -134,14 +134,14 @@
         # concentration R = |Σe^{iφ}|/N over frequency drops on no cross baseline.
         concentration(z) = (v = filter(isfinite, z); isempty(v) ? 0.0 : abs(sum(cis, angle.(v))) / length(v))
         for pr in pairs
-            sel = (UVP.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
+            sel = (Gustavo.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
             @test concentration(after.vis[sel]) >= concentration(before.vis[sel]) - 1.0e-6
         end
 
         @test_throws "average over time first" FP.baseline_spectra(ps)
         ps2, _ = _build_fringe_ps(; nscans = 2)
         two = FP.baseline_spectra(scan_average(ps2))
-        @test length(lookup(two, UVP.Scan)) == 2
+        @test length(lookup(two, Gustavo.Scan)) == 2
     end
 
     @testset "delay closure" begin
@@ -159,7 +159,7 @@
     end
 
     @testset "baseline spectra plot with DimensionalData's recipes" begin
-        fig = series(angle.(after.vis[UVP.Scan(1), FeedPair(At((1, 1)))]))
+        fig = series(angle.(after.vis[Gustavo.Scan(1), FeedPair(At((1, 1)))]))
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
 
@@ -180,7 +180,7 @@
 
     det = FP.fringe_detections(sol)
     labels(m) = map(d -> only(lookup(d)), DimensionalData.refdims(m.snr))
-    recorded(scan, pair, feeds) = det[UVP.Scan(At(scan)), AntennaPair(At(pair)), FeedPair(At(feeds))]
+    recorded(scan, pair, feeds) = det[Gustavo.Scan(At(scan)), AntennaPair(At(pair)), FeedPair(At(feeds))]
 
     @testset "fringe_search_map (delay–rate surface)" begin
         m = FP.fringe_search_map(sol, ps)
@@ -234,7 +234,7 @@
         mbd = fit(BaselineFringeFit(; gauge, search), ps)
         mdet = FP.fringe_detections(mbd)
         m = FP.fringe_search_map(mbd, ps)
-        rec = mdet[UVP.Scan(At(labels(m)[1])), AntennaPair(At(labels(m)[2])), FeedPair(At(labels(m)[3]))]
+        rec = mdet[Gustavo.Scan(At(labels(m)[1])), AntennaPair(At(labels(m)[2])), FeedPair(At(labels(m)[3]))]
         @test m.detection.snr ≈ rec.snr rtol = 1.0e-6
         @test m.detection.delay ≈ rec.delay rtol = 1.0e-6
         @test m.detection.rate ≈ rec.rate rtol = 1.0e-6
@@ -275,9 +275,9 @@
         raw = FP.coherence_report(ps)
         coh = FP.coherence_report(calibrate(sol, ps; flag_bad = false, apply_flags = false))
         @test keys(coh) == (:time, :freq, :time_pooled, :freq_pooled)
-        @test map(DimensionalData.basetypeof, dims(coh.time)) == (UVP.Scan, AntennaPair, FeedPair, FP.AveragingTime)
-        @test map(DimensionalData.basetypeof, dims(coh.freq_pooled)) == (UVP.Scan, FeedPair, FP.AveragingBandwidth)
-        @test collect(lookup(coh, UVP.Scan)) == sol.geom.scan_names
+        @test map(DimensionalData.basetypeof, dims(coh.time)) == (Gustavo.Scan, AntennaPair, FeedPair, FP.AveragingTime)
+        @test map(DimensionalData.basetypeof, dims(coh.freq_pooled)) == (Gustavo.Scan, FeedPair, FP.AveragingBandwidth)
+        @test collect(lookup(coh, Gustavo.Scan)) == sol.geom.scan_names
         @test length(lookup(coh, AntennaPair)) == 6
         @test collect(lookup(coh, FeedPair)) == [(1, 1), (1, 2), (2, 1), (2, 2)]
         dts = collect(lookup(coh, FP.AveragingTime))
@@ -311,14 +311,14 @@
                 for g in values(XRadio.groupby(ps2, XRadio.ByScan()))
         ]
         both = FP.cat_scans(per_scan)
-        @test length(lookup(both, UVP.Scan)) == 2
+        @test length(lookup(both, Gustavo.Scan)) == 2
         @test size(both.time_pooled) == (2, 4, 2)
         @test_throws "must hold one scan" FP.coherence_report(ps2)
     end
 
     @testset "plot_coherence" begin
         coh = FP.coherence_report(calibrate(sol, ps; flag_bad = false, apply_flags = false))
-        one = coh[UVP.Scan(1), FeedPair(At((1, 1)))]
+        one = coh[Gustavo.Scan(1), FeedPair(At((1, 1)))]
         fig = FP.plot_coherence(one)
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
         @test !isnothing(FP.plot_coherence(one; nlabel = 3))
@@ -410,7 +410,7 @@ end
     spectra(z) = DimStack((; vis = DimArray(reshape(z, 1, 1, 1, :), d)))
     ramp = FP.freq_group_coherence(spectra(ComplexF64[cis(2π * c / 6) for c in eachindex(freqs)]))
     flat = FP.freq_group_coherence(spectra(fill(1.0 + 0.0im, length(freqs))))
-    @test map(DimensionalData.basetypeof, dims(flat)) == (UVP.Scan, FeedPair, FP.FreqGroup)
+    @test map(DimensionalData.basetypeof, dims(flat)) == (Gustavo.Scan, FeedPair, FP.FreqGroup)
     @test collect(lookup(flat, FP.FreqGroup)) == [(freqs[1], freqs[4]), (freqs[5], freqs[8]), (freqs[9], freqs[12])]
     @test all(≈(1.0), flat)
     @test all(<(0.9), ramp)
@@ -440,7 +440,7 @@ end
     # check even with few samples.
     z = Float64[]
     for pr in lookup(spectra, AntennaPair)
-        sel = (UVP.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
+        sel = (Gustavo.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
         col = collect(spectra.vis[sel])
         σ = inv.(sqrt.(collect(spectra.weight[sel])))
         μ = sum(col) / length(col)

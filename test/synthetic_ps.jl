@@ -20,7 +20,7 @@ _bp_at(bp::AbstractArray{<:Any, 4}, a, f, gc, s) = bp[a, f, gc, s]
 One Measurement Set per (scan, spectral window), holding
 `V = A · exp(i·[Δφ + 2π·Δτ·(f − f0) + 2π·Δṙ·(t − t0) + Δscreen + Δbandpass + Δdtec])`
 on each baseline and product, with `Δx = x[a, fa] − x[b, fb]` and the feeds
-`(fa, fb)` from [`Gustavo.UVData.feed_pairs`](@ref). `f0` is the mean channel
+`(fa, fb)` from [`Gustavo.feed_pairs`](@ref). `f0` is the mean channel
 frequency across windows and `t0` the first sample time.
 
 The random draws are made in a fixed order from `StableRNG(seed)`, so the same
@@ -127,7 +127,7 @@ function _build_fringe_ps(;
             scan = string(s), field = "SRC1", source = "SRC1", direction = (1.234, -0.56),
             eltype,
         )
-        feeds = Gustavo.UVData.feed_pairs(ms)
+        feeds = Gustavo.feed_pairs(ms)
         ant1 = [index[n] for n in ms[:baseline_antenna1_name]]
         ant2 = [index[n] for n in ms[:baseline_antenna2_name]]
         bl_pairs = collect(zip(ant1, ant2))

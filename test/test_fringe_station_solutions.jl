@@ -1,6 +1,6 @@
 # `fringe_station_solutions` (θ → per-(scan,station,feed) delay/rate/phase decode)
 # and the `rel_time` model option. Reuses `_build_fringe_ps` and the
-# CAL/FP/UVP aliases from test_pipeline.jl (included earlier in runtests.jl).
+# CAL/FP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
 @testset "rel_time model option + fringe_station_solutions" begin
 
@@ -57,7 +57,7 @@
         @test keys(st) == (:delay, :rate, :phase)
         @test size(st) == (1, 4, 2)               # dense: nscan(1) × nant(4) × 2 feeds
         @test collect(lookup(st, AntennaName)) == geom.stations
-        f(a, fd) = st.delay[UVP.Scan(1), AntennaName(a), Feed(fd)]
+        f(a, fd) = st.delay[Gustavo.Scan(1), AntennaName(a), Feed(fd)]
         @test f(2, 1) ≈ 2.0e-9                     # feed 1: shared only
         @test f(2, 2) ≈ 2.5e-9                     # feed 2: shared + inter-feed offset
         @test f(1, 1) ≈ 0.0                        # untouched station stays identity-0
@@ -72,7 +72,7 @@
         θ2[plan_off1(rplan)[3, 1, 1, 1]] = 1.0e-3       # 1 mHz
         sol2 = CAL.CalibrationSolution(model, layout, geom, θ2, (; nscan = 1); name = :fringe)
         st2 = FP.fringe_station_solutions(sol2)
-        @test st2.rate[UVP.Scan(1), AntennaName(3), Feed(1)] ≈ 1.0e-3
+        @test st2.rate[Gustavo.Scan(1), AntennaName(3), Feed(1)] ≈ 1.0e-3
     end
 
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
@@ -81,8 +81,8 @@
         sol = fit(BaselineFringeFit(; gauge), ps)
         st = FP.fringe_station_solutions(sol)
         @test size(st) == (sol.info.nscan, length(sol.geom.stations), 2)
-        @test collect(lookup(st, UVP.Scan)) == sol.geom.scan_names
-        val(a, fd) = st.delay[UVP.Scan(1), AntennaName(a), Feed(fd)]
+        @test collect(lookup(st, Gustavo.Scan)) == sol.geom.scan_names
+        val(a, fd) = st.delay[Gustavo.Scan(1), AntennaName(a), Feed(fd)]
 
         # Gauge: reference station (1) is pinned to 0 on both feeds.
         @test val(1, 1) ≈ 0.0 atol = 1.0e-12

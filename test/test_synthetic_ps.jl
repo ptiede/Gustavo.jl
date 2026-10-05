@@ -2,7 +2,7 @@
 
 @testset "synthetic ProcessingSet fixture" begin
     ps, truth = _build_fringe_ps(; nant = 3, nspw = 2, nchan = 4, ntime = 5, nscans = 2)
-    @test isempty(XRadio.check(ps; schemas = [Gustavo.UVData.GUSTAVO_VISIBILITY_SCHEMA]))
+    @test isempty(XRadio.check(ps; schemas = [Gustavo.GUSTAVO_VISIBILITY_SCHEMA]))
     @test length(ps) == 4
     @test [only(unique(ms[:scan_name])) for ms in values(ps)] == ["1", "1", "2", "2"]
     @test [XRadio.spectralwindow(ms) for ms in values(ps)] == ["band_1", "band_2", "band_1", "band_2"]

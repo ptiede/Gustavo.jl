@@ -9,9 +9,8 @@ using XRadio: XRadio, ProcessingSet, MeasurementSet, Testing
 @isdefined(uvfits_fixture) || include("synthetic_uvfits.jl")
 
 @testset "GUSTAVO_VISIBILITY_SCHEMA" begin
-    UV = Gustavo.UVData
     ps = load_uvfits(first(uvfits_fixture()))
-    spec = UV.GUSTAVO_VISIBILITY_SCHEMA
+    spec = Gustavo.GUSTAVO_VISIBILITY_SCHEMA
 
     @testset "it extends the standard rather than replacing it" begin
         @test spec.type == XRadio.VISIBILITY_SCHEMA.type

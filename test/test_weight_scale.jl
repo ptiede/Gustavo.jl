@@ -2,7 +2,7 @@
 # for correlator weights that are miscalibrated on particular stations. It must
 # leave the fringe search alone, move the solve only through the stages that
 # weight baselines against each other, and carry into the calibrated weights.
-# Reuses `_build_fringe_ps` + the FP/CAL/UVP aliases from test_pipeline.jl
+# Reuses `_build_fringe_ps` + the FP/CAL aliases from test_pipeline.jl
 # (included earlier in runtests.jl).
 
 @testset "Per-station weight scale" begin

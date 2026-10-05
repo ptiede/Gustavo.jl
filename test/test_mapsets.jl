@@ -99,7 +99,7 @@ end
 
 @testset "write! fills a template from concurrent units" begin
     ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
-    schemas = [UVData.GUSTAVO_VISIBILITY_SCHEMA]
+    schemas = [GUSTAVO_VISIBILITY_SCHEMA]
     data_layers = (:visibility, :flag, :weight, :uvw)
     # One unit per integration: every unit is a time slice of each member.
     per_time(ms) = collect(eachindex(lookup(ms, Ti)))

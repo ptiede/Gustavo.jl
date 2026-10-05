@@ -251,7 +251,7 @@ function _divide_residual!(V, g, stations, feeds)
         p, bi = Tuple(I)
         a, b = stations[bi]
         fa, fb = feeds[p, bi]
-        plane = UVData._cell_plane(V, bi, p)
+        plane = _cell_plane(V, bi, p)
         for t in axes(plane, 2), c in axes(plane, 1)
             plane[c, t] = _residual_cell(plane[c, t], g[c, t, a, fa], g[c, t, b, fb])
         end

@@ -141,7 +141,7 @@ function _coherence_accumulate!(
         times_sec::Vector{Float64}, freqs::Vector{Float64}, dts::Vector{Float64}, dnus::Vector{Float64},
         debias::Bool,
     ) where {Tv, Tw}
-    Fl === nothing || UVData.check_layer_axes(V, W, Fl)
+    Fl === nothing || check_layer_axes(V, W, Fl)
     nchan, nti, nbl, npol = size(V)
     nT = length(dts); nF = length(dnus)
     tperm = sortperm(times_sec)

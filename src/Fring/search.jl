@@ -434,8 +434,8 @@ Base.@propagate_inbounds _flagged(F, I...) = F[I...]
 
 # The kernels index the three planes with one set of loop variables, so their
 # axes must agree. A caller with no flag layer passes `nothing`.
-_check_plane_axes(V, W, ::Nothing) = UVData.check_layer_axes(V, W)
-_check_plane_axes(V, W, F) = UVData.check_layer_axes(V, W, F)
+_check_plane_axes(V, W, ::Nothing) = check_layer_axes(V, W)
+_check_plane_axes(V, W, F) = check_layer_axes(V, W, F)
 
 # `x` labels dimension `d` of the plane `V`.
 function _check_coord(V, d, x)

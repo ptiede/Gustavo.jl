@@ -33,7 +33,7 @@ _with_stations(geom, stations) = CALc.DataGeometry(;
 function _division_error(out, ms, sol, geom)
     win = CALc.GeometryWindow(geom, ms)
     g = parent(CALc.gains(sol, win))
-    feeds = Gustavo.UVData.feed_pairs(ms)
+    feeds = Gustavo.feed_pairs(ms)
     worst = 0.0
     for p in axes(feeds, 1), bi in axes(feeds, 2), c in eachindex(win.chan_idx), t in eachindex(win.ti_idx)
         a, b = win.stations[bi]
@@ -178,7 +178,7 @@ end
         @test !any(ms -> any(parent(ms[:flag])), values(calibrate(feed2, ps; apply_flags = false)))
         out = calibrate(feed2, ps)
         for ms in values(out)
-            feeds = Gustavo.UVData.feed_pairs(ms)
+            feeds = Gustavo.feed_pairs(ms)
             @test Set(feeds) == Set([(1, 1), (1, 2), (2, 1), (2, 2)])
             on_scan1 = ms[:scan_name] .== "1"
             names = collect(XRadio.baselines(ms))

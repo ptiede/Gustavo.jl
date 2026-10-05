@@ -55,7 +55,7 @@ Write the data variables of each Measurement Set of `unit` into the Measurement
 Set of the same name in `out`, a store opened with
 `open(ProcessingSet, path; mode = "r+")`. A member holds some of the stored
 times and all of every other axis, as a [`mapsets`](@ref) unit of a `groupby`
-does; data variables are the layers [`UVData.GUSTAVO_VISIBILITY_SCHEMA`](@ref) does
+does; data variables are the layers [`GUSTAVO_VISIBILITY_SCHEMA`](@ref) does
 not call coordinates.
 
 `write!` creates no arrays and writes no metadata, and refuses a member whose
@@ -65,7 +65,7 @@ than the shortest unit, such as `chunks = (; time = 1)`; the store's
 consolidated metadata stays valid.
 
 ```julia
-write(path, ps; data = false, chunks = (; time = 1), schemas = [UVData.GUSTAVO_VISIBILITY_SCHEMA])
+write(path, ps; data = false, chunks = (; time = 1), schemas = [GUSTAVO_VISIBILITY_SCHEMA])
 out = open(ProcessingSet, path; mode = "r+")
 mapsets(groupby(ps, ByScan())) do g
     calibrate!(sol, g)

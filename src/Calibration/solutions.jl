@@ -11,7 +11,6 @@ using Statistics: mean
 using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions, AbstractDimArray
 using DimensionalData.Lookups: Sampled, Explicit, Intervals, Center
 using OrderedCollections: OrderedDict
-using ..UVData: Frequency, Polarization, BaselineID, AntennaName, Feed
 
 """
     SolvedComponent(step, path, component, params)
@@ -714,7 +713,7 @@ function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
         )
     end
     stations = [(station(a), station(b)) for (a, b) in XRadio.baselines(ms)]
-    order, perm = UVData._feed_permutation(feed_pairs(ms))
+    order, perm = _feed_permutation(feed_pairs(ms))
     return GeometryWindow(
         geom, _channel_indices(geom, XRadio.frequencies(ms)),
         _time_indices(geom, XRadio.times(ms)), stations, order, perm,
