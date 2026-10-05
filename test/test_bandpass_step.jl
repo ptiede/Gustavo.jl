@@ -885,8 +885,8 @@ end
         )
     end
 
-    # `JointSmoother`'s default of 8 sweeps leaves 0.4 rad on this model; the
-    # alternating solve reaches 1e-7 by 150 and holds there.
+    # The alternating solve converges slowly on this model: a sweep change of
+    # 2e-6 still leaves 1e-5 rad, so it runs to Float32's resolution instead.
     sol = fit(
         Bandpass(;
             model = het,

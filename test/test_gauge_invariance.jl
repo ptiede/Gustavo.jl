@@ -45,10 +45,10 @@ end
             @test dphase < 1.0e-6
             @test dlogamp < 1.0e-6
             dphase, dlogamp = _baseline_product_difference(zs[step], pinned[step])
-            # Bandpass and AdhocPhase smooth each station's track after the
-            # gauge is applied, and a time-varying common offset does not pass
-            # through per-station smoothing unchanged.
-            if step in (:bandpass, :adhoc)
+            # AdhocPhase smooths each station's track after a per-sample
+            # gauge, and a time-varying common offset does not pass through
+            # per-station smoothing unchanged.
+            if step === :adhoc
                 @test_broken dphase < 1.0e-6
             else
                 @test dphase < 1.0e-6

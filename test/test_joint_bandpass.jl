@@ -75,7 +75,7 @@ end
     _, sol_joint = _fit_chain(
         (
             BaselineFringeFit(; model = fm, gauge),
-            Bandpass(; smoother = FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-10), gauge),
+            Bandpass(; smoother = FP.JointSmoother(), gauge),
         ),
         ps; exec = ExecutionConfig(),
     )
@@ -150,7 +150,8 @@ end
         )
     )
 
-    s_free = runbp(FP.JointSmoother(max_iterations = 40, tolerance = 1.0e-10))
+    s_free = runbp(FP.JointSmoother())
+    @test_logs (:warn, r"did not converge in 2 sweeps") match_mode = :any runbp(FP.JointSmoother(max_iterations = 2))
 
     # σ = 1e-6 rad per channel (2 MHz) as rad/Hz^(3/2).
     stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6 * sqrt(3 / (2 * 2.0e6^3)))
@@ -207,7 +208,7 @@ end
             ps; exec = ExecutionConfig(),
         )
     )
-    s_joint = runbp(FP.JointSmoother(max_iterations = 60, tolerance = 1.0e-12))
+    s_joint = runbp(FP.JointSmoother())
     s_closure = runbp(FP.PerTrackSmoother())
 
     la(s, a, f) = (
@@ -343,7 +344,7 @@ end
             FP.solve_joint_bandpass!(
                 θ_merged, results[idx], geom,
                 merged_blocks, merged_blocks;
-                gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
+                gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-12,
                 tseg = view(tseg, :, idx),
             )
         end
@@ -354,7 +355,7 @@ end
             FP.solve_joint_bandpass!(
                 θ_loop, results[idx], geom,
                 loop_blocks, loop_blocks;
-                gauge = PinAntenna(2), max_iterations = 40, tolerance = 1.0e-12,
+                gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-12,
                 tseg = fill(ts, nant, length(idx)),
             )
         end

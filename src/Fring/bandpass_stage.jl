@@ -1463,7 +1463,7 @@ function _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_w
 end
 
 """
-    JointSmoother(; max_iterations = 8, tolerance = 1.0e-6)
+    JointSmoother(; max_iterations = 200, tolerance = nothing)
 
 Fit the station bandpass against the actual complex visibilities, with each
 component's prior acting inside the solve rather than as a fit applied to it
@@ -1480,13 +1480,19 @@ assumption would bias the bandpass. It solves one complex gain per
 (station, feed, frequency segment), so it requires a model with both a phase
 and a log-amplitude shape on one frequency and one time segmentation per
 station; their priors and levels may differ.
+
+Sweeps stop once no gain changes by more than `tolerance` relative to its
+magnitude, and warn if `max_iterations` sweeps pass first: an unconverged
+solve still depends on its starting point, which the gauge sets. The default
+`tolerance = nothing` is `max(1e-8, 16·eps(T))` for the data's real type `T`,
+the smallest a `Float32` solve can resolve.
 """
 struct JointSmoother <: AbstractBandpassSmoother
     max_iterations::Int
-    tolerance::Float64
+    tolerance::Union{Nothing, Float64}
 end
-JointSmoother(; max_iterations::Integer = 8, tolerance::Real = 1.0e-6) =
-    JointSmoother(Int(max_iterations), Float64(tolerance))
+JointSmoother(; max_iterations::Integer = 200, tolerance::Union{Nothing, Real} = nothing) =
+    JointSmoother(Int(max_iterations), isnothing(tolerance) ? nothing : Float64(tolerance))
 
 can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
@@ -1562,7 +1568,7 @@ end
 """
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
-                          gauge = PinAntenna(1), max_iterations = 8, tolerance = 1.0e-6,
+                          gauge = PinAntenna(1), max_iterations = 200, tolerance = nothing,
                           max_logamp = log(10.0), phase_status = nothing,
                           amp_status = nothing, phase_priors = nothing,
                           amp_priors = nothing, tseg = nothing)
@@ -1632,7 +1638,7 @@ only its own time segments.
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
-        gauge::AbstractGauge = PinAntenna(1), max_iterations::Integer = 8, tolerance::Real = 1.0e-6,
+        gauge::AbstractGauge = PinAntenna(1), max_iterations::Integer = 200, tolerance::Union{Nothing, Real} = nothing,
         max_logamp::Real = _BP_MAX_LOGAMP,
         phase_status = nothing, amp_status = nothing,
         phase_priors = nothing, amp_priors = nothing,
@@ -1692,6 +1698,9 @@ function solve_joint_bandpass!(
     _reject_partial_pins(gains, fits, loc, phase_blocks, geom)
 
     _update_source_coherence!(data, gains, layout)
+    T = real(eltype(r))
+    tolerance = something(tolerance, max(1.0e-8, 16 * eps(T)))
+    maxrel = convert(T, Inf)
     for iter in 1:max_iterations
         maxrel = _update_station_gains!(
             gains, data, layout;
@@ -1700,6 +1709,9 @@ function solve_joint_bandpass!(
         _update_source_coherence!(data, gains, layout)
         maxrel < tolerance && break
     end
+    maxrel < tolerance || @warn "the joint bandpass solve did not converge in $max_iterations sweeps: " *
+        "the largest relative gain change is $maxrel against a tolerance of $tolerance; " *
+        "raise `JointSmoother(; max_iterations)`"
 
     level_writers = [
         (; phase = _joint_level_writer(phase_level[a], levels[a].phase), amp = _joint_level_writer(amp_level[a], levels[a].amp))
