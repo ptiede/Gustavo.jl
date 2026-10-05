@@ -8,6 +8,8 @@ import DimensionalData
 using DimensionalData: lookup, modify, groupby, dims, Ti, At, AbstractDimVector
 using OrderedCollections: OrderedDict
 import XRadio
+import Zarr
+import DiskArrays
 
 # The scheduler types users select for either fan-out level; re-exported so a
 # bare `using Gustavo` can name them in
@@ -63,7 +65,7 @@ export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
     ChannelBlocks, FreqGroups, BandGroups
 # Verbs, step protocol, execution config.
 export fit
-export SolveStep, ExecutionConfig, ProgressLogger, mapsets
+export SolveStep, ExecutionConfig, ProgressLogger, mapsets, write!
 export outer_executor, inner_executor
 export each_group, model_components, provides, step_gauge
 export supports_station_heterogeneity

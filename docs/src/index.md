@@ -85,6 +85,20 @@ sols = mapsets(groupby(ps, ByScan())) do g
 end
 ```
 
+Corrected data go to a new store the same way, one scan group at a time: write
+a template of the store first, then fill it from inside the body with
+[`write!`](@ref), which is safe from concurrent units:
+
+```julia
+write(out, ps; data = false, chunks = (; time = 1), schemas = [UVData.GUSTAVO_VISIBILITY_SCHEMA])
+dest = open(ProcessingSet, out; mode = "r+")
+mapsets(groupby(ps, ByScan())) do g
+    calibrate!(bp, g)
+    write!(dest, g)
+    return nothing
+end
+```
+
 ## The pieces
 
 **Data.** A `ProcessingSet` holds Measurement Sets, each one spectral window

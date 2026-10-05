@@ -96,3 +96,41 @@
         @test_throws "boom" mapsets(_ -> error("boom"), ps)
     end
 end
+
+@testset "write! fills a template from concurrent units" begin
+    ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
+    schemas = [UVData.GUSTAVO_VISIBILITY_SCHEMA]
+    data_layers = (:visibility, :flag, :weight, :uvw)
+    # One unit per integration: every unit is a time slice of each member.
+    per_time(ms) = collect(eachindex(lookup(ms, Ti)))
+    halves(ms) = (eachindex(lookup(ms, Ti)) .- 1) .÷ 6
+
+    path = joinpath(mktempdir(), "filled.ps.zarr")
+    write(path, ps; data = false, chunks = (; time = 1), schemas)
+    out = open(XRadio.ProcessingSet, path; mode = "r+")
+    exec = ExecutionConfig(; outer_executor = GreedyScheduler(; ntasks = 4))
+    mapsets(DimensionalData.groupby(ps, per_time); exec) do g
+        write!(out, g)
+        return nothing
+    end
+    back = read(XRadio.ProcessingSet, path)
+    for (name, ms) in pairs(ps), layer in data_layers
+        @test parent(back[name][layer]) == parent(ms[layer])
+    end
+    @test isempty(XRadio.check(back; schemas))
+
+    unit = first(values(DimensionalData.groupby(ps, halves)))
+    coarse = joinpath(mktempdir(), "coarse.ps.zarr")
+    write(coarse, ps; data = false, chunks = (; time = 4), schemas)
+    @test_throws "cover part of a stored chunk of" write!(
+        open(XRadio.ProcessingSet, coarse; mode = "r+"), unit
+    )
+    @test_throws "open the store with `mode = \"r+\"`" write!(open(XRadio.ProcessingSet, path), unit)
+
+    name, ms = first(pairs(unit))
+    renamed = XRadio.ProcessingSet(OrderedDict(:elsewhere => ms))
+    @test_throws "the store holds no Measurement Set `elsewhere`" write!(out, renamed)
+    extra = copy(Gustavo.materialize(ms))
+    extra[:visibility_model] = extra[:visibility]
+    @test_throws "has no layer `visibility_model`" write!(out, XRadio.ProcessingSet(OrderedDict(name => extra)))
+end
