@@ -360,7 +360,7 @@ end
         @test_throws "BaselineFringeFit cannot fit the component" fit(
             BaselineFringeFit(; model = GainModel(; phase = subscan), gauge = PinAntenna(1)), ps,
         )
-        @test_throws "the data's own sampling" fit(
+        @test_throws "a segmentation that splits a scan" fit(
             BaselineFringeFit(; model = GainModel(; phase = subscan), gauge = PinAntenna(1)), ps,
         )
 

@@ -101,10 +101,6 @@ so it must re-establish the base checks, available as
 """
 abstract type AbstractBandpassSmoother end
 
-# The `false` default of `can_fit` (capability.jl) makes an undeclared smoother
-# reject loudly instead of accepting silently.
-can_fit(::AbstractBandpassSmoother, tc, geom) = false
-
 # A bandpass track is one value per frequency segment, per feed, held over a
 # stretch of time, under a prior along frequency. Both smoothers pool the scans
 # of a time segment and solve that stretch as a unit, so any segmentation whose
@@ -117,15 +113,7 @@ _fits_bandpass_track(tc) =
     tc.term isa ConstantTerm &&
     tc.Ti isa Union{GlobalTime, InstrumentScans, TimeBlocks} &&
     tc.Feed isa PerFeed &&
-    _is_frequency_prior(resolve_prior(tc))
-
-_is_frequency_prior(::Nothing) = true
-_is_frequency_prior(p::NamedTuple) = keys(p) == (:Frequency,)
-_is_frequency_prior(_) = false
-
-# A station's prior along frequency, from its resolved prior (`plan.priors`).
-_frequency_prior(::Nothing) = nothing
-_frequency_prior(p::NamedTuple) = p.Frequency
+    _is_prior_along(resolve_prior(tc), :Frequency)
 
 """
     validate_bandpass_groups(model)
@@ -185,7 +173,7 @@ function _validate_level_pair(name, a, b)
                 "segmentation. Got $(repr(level.Ti)) (level) vs $(repr(shape.Ti)) (shape).",
         ),
     )
-    _proper_prior(_frequency_prior(resolve_prior(shape))) || throw(
+    _proper_prior(_prior_along(resolve_prior(shape), :Frequency)) || throw(
         ArgumentError(
             "Bandpass model group `$name`: the shape $(component_label(shape)) beside a " *
                 "level needs a zero-mean OUPrior or a RandomWalkPrior with an `init` to " *
@@ -727,7 +715,7 @@ function _fit_tracks!(
         st = isnothing(status) ? nothing : view(status, AntennaName(a), Feed(f))
         resolved, L = _fit_track!(
             view(tracks, AntennaName(a), Feed(f)), view(prec, AntennaName(a), Feed(f)), x, pieces,
-            _frequency_prior(station_priors[a]);
+            _prior_along(station_priors[a], :Frequency);
             level, nlevel, unwrap, status = st,
         )
         isnothing(priors) || (priors[a, f] = resolved)
@@ -756,7 +744,7 @@ function _track_prior_array(stations, geom::DataGeometry, plan, nts::Integer)
     ax = (_station_dim(stations), Feed(1:2), Ti(_time_segment_lookup(plan, geom, nts)))
     arr = DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax)
     for a in axes(arr, 1)
-        arr[a, :, :] .= Ref(_frequency_prior(plan.priors[a]))
+        arr[a, :, :] .= Ref(_prior_along(plan.priors[a], :Frequency))
     end
     return arr
 end
@@ -1695,7 +1683,7 @@ function solve_joint_bandpass!(
         iszero(k) && return nothing
         seg = segs[k]
         track(blocks, level) = (;
-            seg.x, seg.pieces, prior = _frequency_prior(blocks[k].plan.priors[ai]),
+            seg.x, seg.pieces, prior = _prior_along(blocks[k].plan.priors[ai], :Frequency),
             level = isnothing(level) ? nothing : level.level, nlevel = isnothing(level) ? 0 : level.nlevel,
         )
         return (; phase = track(phase_blocks, phase_level[a]), amp = track(amp_blocks, amp_level[a]))

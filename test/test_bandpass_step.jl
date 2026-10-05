@@ -801,6 +801,8 @@ end
         @test_throws "cannot fit the component" fit(
             Bandpass(; model = model(PerScan()), smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)), broken,
         )
+        @test_throws "degenerate with that scan's source coherence" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
+        @test_throws "GlobalTime, InstrumentScans or TimeBlocks" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
     end
 
     @testset "JointSmoother holds both observables to one time segmentation" begin

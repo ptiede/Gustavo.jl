@@ -26,6 +26,14 @@ _proper_prior(::OUPrior) = true
 _proper_prior(p::RandomWalkPrior) = !isnothing(p.init)
 _proper_prior(_) = false
 
+# A resolved prior is `nothing` or a NamedTuple keyed by the dimensions it runs along.
+_is_prior_along(::Nothing, dim) = true
+_is_prior_along(p::NamedTuple, dim) = keys(p) == (dim,)
+_is_prior_along(_, dim) = false
+
+_prior_along(::Nothing, dim) = nothing
+_prior_along(p::NamedTuple, dim) = p[dim]
+
 """
     _estimate_hypers(prior, ys, ws, xs; level = nothing) -> prior
 

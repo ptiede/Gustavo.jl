@@ -246,21 +246,13 @@ default_adhoc_prior() = OUPrior(; scale = LogNormal(log(10.0), 1.0), σ = LogNor
 _fits_adhoc_track(tc) =
     tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
     tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds) &&
-    _is_time_prior(resolve_prior(tc))
-
-_is_time_prior(::Nothing) = true
-_is_time_prior(p::NamedTuple) = keys(p) == (:Ti,)
-_is_time_prior(_) = false
-
-# A station's prior along time, from its resolved prior (`plan.priors`).
-_time_prior(::Nothing) = nothing
-_time_prior(p::NamedTuple) = p.Ti
+    _is_prior_along(resolve_prior(tc), :Ti)
 
 can_fit(::AbstractAdhocSmoother, tc, geom) = _fits_adhoc_track(tc)
 # The joint solve needs one phase node per station (`_requires_single_node`) and
 # a proper prior, which holds the common mode the baseline differences leave free.
 can_fit(::JointKalmanSmoother, tc, geom) =
-    _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds && _proper_prior(_time_prior(resolve_prior(tc)))
+    _fits_adhoc_track(tc) && tc.Feed isa SharedFeeds && _proper_prior(_prior_along(resolve_prior(tc), :Ti))
 
 # The structural contract of the adhoc pass: exactly one per-integration phase
 # component (the stage runs one globally-closing phase solve and writes one θ
@@ -1218,7 +1210,7 @@ function adhoc_scan!(
     as = solve_adhoc_phasing(
         rbar, wbar, geom.stations;
         gauge = _gauge_for(gauge, adhoc_plan.path), smoother = adhoc, tying = adhoc_plan.tying,
-        prior = map(_time_prior, adhoc_plan.priors),
+        prior = map(p -> _prior_along(p, :Ti), adhoc_plan.priors),
     )
     adhoc_leaf = _component_leaf(adhoc_plan, θ)
     for gti in ti

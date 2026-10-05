@@ -160,14 +160,16 @@ _check_step_gauge(gauge::AbstractGauge, model::GainModel) =
 # components (`model_components(step, nothing)`). `can_fit` is handed the
 # `nothing` rather than a substitute, so a capability that genuinely needs the
 # geometry fails there instead of being answered from a default.
-_spec_geom(spec) = spec === nothing ? nothing : spec.geom
+_spec_geom(spec) = isnothing(spec) ? nothing : spec.geom
 
 model_components(s::BaselineFringeFit, spec) = _vet_step_model(
     s, s.model,
-    "See `BaselineFringeFit` for the models it fits — a capability " *
-        "can depend on the data's own sampling, so a term this step fits " *
-        "elsewhere may still be unfittable here. No shipped step fits dispersion " *
-        "(`Dispersion`) or a per-band-group delay (a `FreqGroups`-segmented `Delay`).",
+    "It fits a `Delay`, `Rate` or `ConstantTerm` on `Frequency = GlobalFrequency()` " *
+        "with a time segmentation no finer than the data's scans: the search measures " *
+        "one value per scan, so a segmentation that splits a scan (`PerIntegration`, " *
+        "or `TimeBlocks` shorter than a scan) leaves columns unmeasured. See " *
+        "`BaselineFringeFit`. No shipped step fits dispersion (`Dispersion`) or a " *
+        "per-band-group delay (a `FreqGroups`-segmented `Delay`).",
     spec,
 )
 
@@ -213,7 +215,9 @@ model_components(s::Bandpass, spec) = _vet_step_model(
         "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
         "segmentation>, Feed = PerFeed(), prior = <nothing, or a RandomWalkPrior or " *
         "OUPrior along Frequency>)` — a time segmentation whose segments each span " *
-        "several scans. See `default_bandpass_terms`.",
+        "several scans. A segment holding one scan (`PerScan`, `PerIntegration`) is " *
+        "not fitted: the band mean of its gain is degenerate with that scan's source " *
+        "coherence. See `default_bandpass_terms`.",
     spec,
 )
 
