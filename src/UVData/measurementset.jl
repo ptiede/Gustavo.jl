@@ -189,15 +189,7 @@ end
 `ms` or `ps` read into memory with arrays of its own, which no other
 Measurement Set shares, so in-place corrections such as `calibrate!` never
 reach the source. `read` of in-memory data shares its arrays; this copies
-those it would share.
-
-```julia
-map(values(groupby(ps, ByScan()))) do g
-    g = Gustavo.materialize(g)
-    calibrate!(sol, g)
-    ...
-end
-```
+those it would share. What `mapsets` and `calibrate` hand to in-place corrections.
 """
 function materialize(ms::XRadio.MeasurementSet)
     out = read(ms)

@@ -2,16 +2,16 @@
     mapsets(f, src; exec = ExecutionConfig()) -> OrderedDict
 
 Apply `f` to each unit of data in `src`, read into memory, and return `f`'s
-results under the units' keys, in `src`'s order: `k => f(Gustavo.materialize(u))`
-for each `k => u` of `src`, with the units scheduled across tasks and progress
+results under the units' keys, in `src`'s order: `k => f(read(u))` for each
+`k => u` of `src`, with the units scheduled across tasks and progress
 reported. `src` is an ordered keyed collection whose values are Measurement
 Sets or processing sets: a `ProcessingSet` (its Measurement Sets, keyed by
 name), a `groupby` result such as `groupby(ps, ByScan())` (its processing sets,
 keyed by label), or an `OrderedDict` of either. The fringe and adhoc steps need
 every spectral window of a scan, so a body that fits them takes scan groups.
 
-Each unit is read with arrays of its own ([`Gustavo.materialize`](@ref UVData.materialize)),
-so `f` may modify it in place (`calibrate!`) without changing the source or
+Each unit is read with arrays of its own, copied where the source is already in
+memory, so `f` may modify it in place (`calibrate!`) without changing the source or
 another unit. A unit is held only while `f` runs, unless `f` returns it: return
 solutions or reduced data, and write full-size data out from inside `f`.
 Results that are Measurement Sets or processing sets form one processing set

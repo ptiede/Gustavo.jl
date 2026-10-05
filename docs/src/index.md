@@ -129,8 +129,10 @@ and corrects the correlator's quantization loss from each antenna's
 applies to one Measurement Set; a `ProcessingSet` is corrected member by
 member, `foreach(ms -> scale_weights!(ms, ws), values(ps))`, except
 `calibrate!`, which also takes a `ProcessingSet`. Data opened lazily must be
-read into memory before it is corrected: [`Gustavo.materialize`](@ref Gustavo.UVData.materialize) reads it with
-arrays of its own, so the source is left as it was.
+read into memory before it is corrected; `read(ms)` reads it into arrays of its
+own, so the store is left as it was. Data already in memory is changed in
+place: [`calibrate`](@ref) returns a corrected copy instead, and
+[`mapsets`](@ref) hands each body a copy.
 
 **Flagging.** XRadio's `flags(ms)` is the Measurement Set's own flag array,
 so flagging is assignment through DimensionalData's selectors and XRadio's

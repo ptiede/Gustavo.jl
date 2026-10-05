@@ -77,9 +77,8 @@ export CalibrationSolution, SolvedComponent
 export gains, plot_gain_phases
 export save_solution, load_solution
 
-# Unexported because the names are common: a step author extends `solve`;
-# FITSFiles exports a `materialize` of its own.
+# Unexported because the names are common: a step author extends `solve`.
 @static if VERSION >= v"1.11"
-    eval(Meta.parse("public solve, SolveContext, materialize"))
+    eval(Meta.parse("public solve, SolveContext"))
 end
 end
