@@ -61,17 +61,10 @@ end
 #   `"AA-AX"`                 — the dash-joined label.
 # Throws `KeyError` on miss; use [`Base.haskey`](@ref) to test.
 
-"""
-    baseline_index(bls::BaselineIndex, key) -> Int
-
-Slot index into `bls.pairs` / `bls.labels` for the requested baseline.
-Same key shapes as `Base.getindex(bls, key)`. Returns `0` when the
-baseline is absent (use `haskey(bls, key)` for an explicit test).
-"""
-function baseline_index(bls::BaselineIndex, key::Tuple{Integer, Integer})
+function _baseline_slot(bls::BaselineIndex, key::Tuple{Integer, Integer})
     return get(bls.lookup, (Int(key[1]), Int(key[2])), 0)
 end
-function baseline_index(bls::BaselineIndex, key::Tuple{<:AbstractString, <:AbstractString})
+function _baseline_slot(bls::BaselineIndex, key::Tuple{<:AbstractString, <:AbstractString})
     a = findfirst(==(String(key[1])), bls.ant1_names)
     a === nothing && return 0
     # Walk forward from `a` so we match the (ant1, ant2) ordering.
@@ -82,24 +75,24 @@ function baseline_index(bls::BaselineIndex, key::Tuple{<:AbstractString, <:Abstr
     end
     return 0
 end
-function baseline_index(bls::BaselineIndex, key::AbstractVector{<:AbstractString})
+function _baseline_slot(bls::BaselineIndex, key::AbstractVector{<:AbstractString})
     length(key) == 2 || throw(
         ArgumentError(
-            "baseline_index: name-vector keys must have length 2 (got $(length(key)))",
+            "a baseline name-vector key must have length 2 (got $(length(key)))",
         )
     )
-    return baseline_index(bls, (String(key[1]), String(key[2])))
+    return _baseline_slot(bls, (String(key[1]), String(key[2])))
 end
-function baseline_index(bls::BaselineIndex, key::AbstractString)
+function _baseline_slot(bls::BaselineIndex, key::AbstractString)
     i = findfirst(==(String(key)), bls.labels)
     return i === nothing ? 0 : i
 end
 
 function Base.getindex(bls::BaselineIndex, key)
-    i = baseline_index(bls, key)
+    i = _baseline_slot(bls, key)
     i == 0 && throw(KeyError(key))
     return i
 end
 
-Base.haskey(bls::BaselineIndex, key) = baseline_index(bls, key) > 0
+Base.haskey(bls::BaselineIndex, key) = _baseline_slot(bls, key) > 0
 Base.length(bls::BaselineIndex) = length(bls.pairs)

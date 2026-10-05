@@ -3,11 +3,12 @@ using FITSFiles: HDU
 using Dates: Dates, Date, DateTime, datetime2julian
 using OrderedCollections: OrderedDict
 import XRadio
+using XRadio:
+    MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
+    MountBWGR, MountBWGL, MountXY, MountOrbiting
 
 import Gustavo.UVData
-using Gustavo.UVData:
-    MountAltAz, MountEquatorial, MountNasmythR, MountNasmythL,
-    MountBWGR, MountBWGL, MountXY, MountOrbiting, sanitize_source
+using Gustavo.UVData: sanitize_source
 
 # AIPS UVFITS BASELINE-column convention: pack `(a, b)` antenna indices
 # as `bl = a*256 + b`. Caps the array at 255 antennas. Lives in the FITS

@@ -2,10 +2,8 @@
     AbstractFrequencySetup
 
 Frequency-axis description of one spectral window. Concrete subtypes implement
-`channel_freqs`, `ref_freq`, `ch_widths`, `total_bandwidths`, `sidebands`,
-and `setup_name`; defaults are provided for `nchannels`, `spw_center_frequency`,
-and `centered_channel_freqs`. `Base.length` and `Base.iterate` walk the
-channel frequencies, so `for ν in fs end` and broadcast over a setup work.
+`channel_freqs`, `ref_freq`, `ch_widths`, `total_bandwidths`, and
+`sidebands`. `Base.length` and `Base.iterate` walk the channel frequencies, so `for ν in fs end` and broadcast over a setup work.
 """
 abstract type AbstractFrequencySetup end
 
@@ -41,18 +39,8 @@ ref_freq(fs::FrequencySetup) = fs.ref_freq
 ch_widths(fs::FrequencySetup) = fs.ch_widths
 total_bandwidths(fs::FrequencySetup) = fs.total_bandwidths
 sidebands(fs::FrequencySetup) = fs.sidebands
-setup_name(fs::FrequencySetup) = fs.name
 
-# Defaults that lean on the interface methods so subtypes inherit them.
-nchannels(fs::AbstractFrequencySetup) = length(channel_freqs(fs))
-function spw_center_frequency(fs::AbstractFrequencySetup)
-    cf = channel_freqs(fs)
-    return (first(cf) + last(cf)) / 2
-end
-centered_channel_freqs(fs::AbstractFrequencySetup) =
-    channel_freqs(fs) .- spw_center_frequency(fs)
-
-Base.length(fs::AbstractFrequencySetup) = nchannels(fs)
+Base.length(fs::AbstractFrequencySetup) = length(channel_freqs(fs))
 Base.iterate(fs::AbstractFrequencySetup, state...) = iterate(channel_freqs(fs), state...)
 Base.eltype(::Type{<:AbstractFrequencySetup}) = Any
 

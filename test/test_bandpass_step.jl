@@ -683,7 +683,7 @@ end
     Δ = [0.5 * sin(4π * (c - 1) / nchan + a) for a in 1:nant, c in 1:nchan]
     broken = deepcopy(ps)
     for ms in values(broken)
-        UVP.scan_name(ms) in ("4", "5", "6") || continue
+        only(XRadio.scans(ms)) in ("4", "5", "6") || continue
         slot = Dict(n => i for (i, n) in pairs(geom.stations))
         pairs_ = [(slot[String(a)], slot[String(b)]) for (a, b) in XRadio.baselines(ms)]
         vis = copy(parent(ms[:visibility]))

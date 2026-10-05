@@ -9,8 +9,8 @@ using StructArrays
 using DimensionalData
 using DimensionalData: DimArray, Ti, dims, lookup
 using PolarizedTypes: RPol, LPol
-using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, pol_products, channel_freqs
-using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, channel_freqs
+using Gustavo.UVData: antennas, baselines, frequencies
 using Dates: Date, DateTime, datetime2unix
 using FITSFiles   # triggers GustavoFITSFilesExt
 

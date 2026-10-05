@@ -51,7 +51,7 @@ are reported as uncovered by the solve and are to be flagged on that basis.
 
 | Quantity | Unit |
 |:---------|:-----|
-| Time axis (`Ti` lookup, `obs_time`) | seconds since the Unix epoch, as MSv4's `time` in `unix` format |
+| Time axis (`Ti` lookup, `XRadio.times(ms)`) | seconds since the Unix epoch, as MSv4's `time` in `unix` format |
 | Frequency axis (`Frequency` lookup, `channel_freqs`) | Hz |
 | Delay | seconds |
 | Fringe rate | Hz |

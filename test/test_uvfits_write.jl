@@ -52,7 +52,7 @@ function _test_same_set(a, b; same_keys = true, time_atol = 0.0)
     return nothing
 end
 
-_scan(ps, name) = filter(ms -> Gustavo.UVData.scan_name(ms) == name, ps)
+_scan(ps, name) = filter(ms -> only(XRadio.scans(ms)) == name, ps)
 _tmp(name = "out.uvfits") = joinpath(mktempdir(), name)
 _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvfits(path, ps)
 

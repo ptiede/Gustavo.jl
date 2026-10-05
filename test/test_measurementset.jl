@@ -105,7 +105,7 @@ end
     times = 1.614816e9 .+ (0:5) .* 30.0
     freqs = 2.3e11 .+ 2.0e6 .* (0:7)
     positions = [1.0e4 * c * i for c in 1:3, i in 1:4]
-    mounts = [UV.MountAltAz(), UV.MountEquatorial(), UV.MountNasmythR((1.5, 0.0, 0.0)), UV.MountAltAz()]
+    mounts = [XRadio.MountAltAz(), XRadio.MountEquatorial(), XRadio.MountNasmythR((1.5, 0.0, 0.0)), XRadio.MountAltAz()]
     make() = Testing.measurement_set(;
         antennas = names, times, frequencies = freqs, spectral_window = "spw_3",
         scan = "7", source = "3C273", field = "3C273",
@@ -114,14 +114,6 @@ end
     ms = make()
 
     function agrees(ms)
-        @test UV.scan_name(ms) == "7"
-        @test UV.primary_scan_name(ms) == "7"
-        @test UV.source_name(ms) == "3C273"
-        @test UV.sub_scan_name(ms) == ""
-        @test UV.scan_intents(ms) == ["OBSERVE_TARGET#ON_SOURCE"]
-        @test collect(UV.obs_time(ms)) == times
-        @test UV.pol_products(ms) == ["RR", "RL", "LR", "LL"]
-
         bm = UV.baselines(ms)
         @test bm.pairs == [(a, b) for a in 1:4 for b in (a + 1):4]
         @test bm.ant1_names == [names[a] for (a, _) in bm.pairs]
@@ -129,7 +121,6 @@ end
         @test bm.labels == string.(bm.ant1_names, "-", bm.ant2_names)
 
         fs = UV.freq_setup(ms)
-        @test UV.setup_name(fs) == "spw_3"
         @test UV.ref_freq(fs) == first(freqs)
         @test UV.channel_freqs(fs) == freqs
         @test all(==(2.0e6), UV.ch_widths(fs))
@@ -154,16 +145,6 @@ end
         agrees(read(XRadio.ProcessingSet, path)[:one])
     end
 
-    @testset "a named sub-scan and stated intents" begin
-        intents = ["OBSERVE_TARGET#ON_SOURCE", "CALIBRATE_DELAY#ON_SOURCE"]
-        named = make()
-        t = dims(named, Ti)
-        named[:sub_scan_name] = DimArray(fill("sub_1", length(t)), (t,))
-        DimensionalData.metadata(named[:scan_name])[:scan_intents] = intents
-        @test UV.sub_scan_name(named) == "sub_1"
-        @test UV.scan_intents(named) == intents
-    end
-
     @testset "sideband and bandwidth derived where the store states none" begin
         for sideband in (1, -1)
             m = Testing.measurement_set(; frequencies = sideband > 0 ? freqs : reverse(freqs))
@@ -183,14 +164,6 @@ end
         end
         @test_throws "no direction to derive one from" UV._channel_direction([2.3e11])
     end
-
-    @testset "a Measurement Set holding two scans has no scan name" begin
-        two = make()
-        t = dims(two, Ti)
-        two[:scan_name] = DimArray([i <= length(t) ÷ 2 ? "1" : "2" for i in eachindex(t)], (t,))
-        @test_throws "holds 2 scan names (1, 2)" UV.scan_name(two)
-        @test_throws "holds 2 scan names" UV.primary_scan_name(two)
-    end
 end
 
 # ── Set-level functions on a ProcessingSet ────────────────────────────────────
@@ -199,70 +172,9 @@ end
     UV = Gustavo.UVData
     ps = Testing.processing_set(; nantenna = 4, nspw = 2, nscan = 2)
 
-    @testset "leaves are the Measurement Sets, by name" begin
-        @test collect(UV.leaves(ps)) == collect(pairs(ps))
-    end
-
-    @testset "frequency and polarization unions" begin
-        mine = UV.union_frequency_axis(ps)
-        @test length(mine) == 2
-        @test UV.channel_freqs.(mine) == [
-            2.3e11 .+ 2.0e6 .* (0:7), 2.3e11 + 1.0e8 .+ 2.0e6 .* (0:7),
-        ]
-        @test UV.union_pol_products(ps) == ["RR", "RL", "LR", "LL"]
+    @testset "one frequency setup across the set" begin
         @test_throws "2 distinct frequency setups" UV.freq_setup(ps)
-
         one_ps = Testing.processing_set(; nantenna = 4, nspw = 1, nscan = 2)
         @test UV.channel_freqs(UV.freq_setup(one_ps)) == 2.3e11 .+ 2.0e6 .* (0:7)
-        @test UV.nchannels(one_ps) == 8
-    end
-
-    @testset "the antenna union" begin
-        tab = UV.union_antennas(ps)
-        @test tab.name == ["A1", "A2", "A3", "A4"]
-        @test tab.station_xyz == [[1.0e4 * c * i for c in 1:3] for i in 1:4]
-        @test all(==(UV.MountAltAz()), tab.mount)
-        @test UV.extras(tab).DIAMETER == fill(25.0, 4)
-    end
-
-    @testset "members that saw different sub-arrays" begin
-        # The second scan drops the second antenna from its antenna dataset, so
-        # the union must restore the full order.
-        names = ["A1", "A2", "A3", "A4"]
-        keep = names[[1, 3, 4]]
-        positions = [1.0e4 * c * i for c in 1:3, i in 1:4]
-        full = Testing.measurement_set(; antennas = names, antenna_xds = Testing.antenna(names; positions))
-        sub = Testing.measurement_set(;
-            antennas = keep, times = [1.614816e9 + 300, 1.614816e9 + 330],
-            scan = "2", antenna_xds = Testing.antenna(keep; positions = positions[:, [1, 3, 4]]),
-        )
-        sub_ps = ProcessingSet(OrderedDict(:one => full, :two => sub))
-        @test length(unique(XRadio.antennas.(values(sub_ps)))) == 2
-
-        tab = UV.union_antennas(sub_ps)
-        @test tab.name == names
-        @test UV.extras(tab).DIAMETER == fill(25.0, 4)
-    end
-
-    @testset "unstated receptor angles still union" begin
-        bare = Testing.processing_set(; nantenna = 4, nspw = 2, nscan = 2)
-        for ms in values(bare)
-            delete!(DimensionalData.branches(ms)[:antenna], :antenna_receptor_angle)
-        end
-        tab = UV.union_antennas(bare)
-        @test tab.name == ["A1", "A2", "A3", "A4"]
-        @test all(a -> all(isnan, a), tab.pol_angles)
-    end
-
-    @testset "one antenna stated two ways is refused" begin
-        moved = Testing.antenna(["A1", "A2", "A3"])
-        parent(moved[:antenna_position])[1, 1] += 1.0
-        clash = ProcessingSet(
-            OrderedDict(
-                :one => Testing.measurement_set(),
-                :two => Testing.measurement_set(; scan = "2", antenna_xds = moved),
-            )
-        )
-        @test_throws "inconsistent metadata across partitions" UV.union_antennas(clash)
     end
 end

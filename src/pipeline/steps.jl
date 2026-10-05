@@ -445,7 +445,7 @@ function _solve_group(s::Bandpass, ctx::SolveContext, setup, group)
     # lies within one segment of any segmentation coarser than a scan, so its
     # first sample names the segment.
     t0 = minimum(minimum(XRadio.times(ms)) for ms in values(group))
-    sources = unique(source_name(ms) for ms in values(group))
+    sources = unique(only(XRadio.sources(ms)) for ms in values(group))
     length(sources) == 1 || throw(
         ArgumentError("a scan group observes several sources: $(join(sources, ", "))")
     )

@@ -25,9 +25,3 @@ end
 _storage_order(L) = PermutedDimsArray(
     parent(L), DimensionalData.dimnum(L, (Polarization, Frequency, BaselineID, Ti)),
 )
-
-# `A`, a plain array laid out `(Frequency, Ti, BaselineID, Polarization)`,
-# viewed lazily in the axis order of the visibility array `ref`.
-_in_axis_order(ref, A::AbstractArray{<:Any, 4}) = PermutedDimsArray(
-    A, invperm(DimensionalData.dimnum(ref, (Frequency, Ti, BaselineID, Polarization))),
-)

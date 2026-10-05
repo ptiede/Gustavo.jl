@@ -36,23 +36,6 @@ function sanitize_source(name::AbstractString)
     return Symbol("src_", s)
 end
 
-# Collect `xs` into a Vector whose element type is the tightest common supertype
-# of what it actually holds — concrete whenever the entries share a type, however
-# loosely the source container was typed. An empty `xs` has nothing to join and
-# becomes `Vector{Any}`; `Vector{Union{}}` could hold no entry at all.
-function _narrow_eltype(xs)
-    isempty(xs) && return Vector{Any}(undef, 0)
-    return collect(mapreduce(typeof, typejoin, xs), xs)
-end
-
-"""
-    pol_products(x) -> Vector
-
-The values of the `Polarization` lookup of `x`: the feed pairs of a solver cube
-(see [`feed_pairs`](@ref)), or a Measurement Set's stored product labels.
-"""
-pol_products(vis::AbstractDimArray) = collect(lookup(vis, Polarization))
-
 """
     feed_pairs(x) -> Vector{Tuple{Int, Int}}
 
@@ -72,14 +55,6 @@ Channel frequencies (Hz) off the `Frequency` lookup of the visibility array
 """
 frequencies(vis::AbstractDimArray) = parent(lookup(vis, Frequency))
 
-"""
-    timestamps(x) -> Vector{Float64}
-
-Integration times (seconds) off the `Ti` lookup of the visibility array `x`.
-The raw coordinate vector, not a lookup wrapper.
-"""
-timestamps(vis::AbstractDimArray) = parent(lookup(vis, Ti))
-
 # ── Time axis ────────────────────────────────────────────────────────────────
 
 """
@@ -91,10 +66,8 @@ const JD_UNIX_EPOCH = 2440587.5
 
 """
     jd_to_unix(jd) -> Float64
-    unix_to_jd(t) -> Float64
 
-Convert between a Julian Day and the `Ti` axis' seconds since
-[`JD_UNIX_EPOCH`](@ref).
+Convert a Julian Day to the `Ti` axis' seconds since [`JD_UNIX_EPOCH`](@ref).
 
 A Julian Day near the present is ~2.46e6, where a `Float64` resolves only
 ~40 µs, so a caller holding the day and its fraction separately — as FITS-IDI
@@ -103,33 +76,3 @@ from the integer part *before* adding the fraction to keep sub-microsecond
 timestamps.
 """
 jd_to_unix(jd::Real) = (Float64(jd) - JD_UNIX_EPOCH) * 86400.0
-unix_to_jd(t::Real) = JD_UNIX_EPOCH + Float64(t) / 86400.0
-
-# ── Selecting a product ───────────────────────────────────────────────
-
-"""
-    pol_index(x, pair::Tuple{Integer, Integer}) -> Int
-
-The index along the `Polarization` axis of `x` of the product relating feed
-`pair[1]` of the first antenna to feed `pair[2]` of the second (see
-[`feed_pairs`](@ref)). Throws `KeyError` when `x` has no such product.
-"""
-pol_index(x, pair::Tuple{Integer, Integer}) = _pol_index_lookup(feed_pairs(x), pair)
-
-function _pol_index_lookup(pairs::AbstractVector{<:Tuple{Integer, Integer}}, pair)
-    i = findfirst(==(pair), pairs)
-    i === nothing && throw(KeyError(pair))
-    return i
-end
-
-"""
-    pol_at(x, pair::Tuple{Integer, Integer}) -> DimensionalData.At
-
-A selector for the product of `x` relating feed pair `pair`, for indexing
-`Polarization`-dimensioned arrays:
-
-```julia
-amp = abs.(stack[:vis][Polarization = pol_at(stack, (1, 1))])
-```
-"""
-pol_at(x, pair::Tuple{Integer, Integer}) = At(pol_products(x)[pol_index(x, pair)])

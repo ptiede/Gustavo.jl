@@ -43,15 +43,6 @@ function normalize_by_autocorrelations!(ms::XRadio.MeasurementSet)
     return ms
 end
 
-"""
-    normalize_by_autocorrelations(ms::XRadio.MeasurementSet) -> MeasurementSet
-
-[`normalize_by_autocorrelations!`](@ref) applied to an in-memory copy of `ms`;
-`ms` is left as it is.
-"""
-normalize_by_autocorrelations(ms::XRadio.MeasurementSet) = normalize_by_autocorrelations!(materialize(ms))
-
-
 function _normalize_cell!(vis, weight, flag, cell, auto_a, auto_b)
     f = view(flag, cell...)
     if auto_a === nothing || auto_b === nothing

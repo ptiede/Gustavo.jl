@@ -23,14 +23,14 @@ using FITSFiles: Card
         )
         tab = ext._read_antenna_table((; cards, data = an))
         @test tab.positions == center .+ stabxyz'
-        @test tab.mounts == [UV.MountAltAz(), UV.MountNasmythR((1.5, 0.0, 0.0))]
+        @test tab.mounts == [XRadio.MountAltAz(), XRadio.MountNasmythR((1.5, 0.0, 0.0))]
         @test tab.receptor_angle ≈ [0 π / 4; π / 2 3π / 4] rtol = 1.0e-6
         @test tab.polarization_type == ["R" "R"; "L" "L"]
     end
 
     @testset "AIPS mount codes" begin
-        @test ext.mnt_codes_to_type(6, (0.0, 0.0, 0.0)) == UV.MountBWGR()
-        @test ext.mnt_codes_to_type(7, (0.0, 0.0, 0.0)) == UV.MountBWGL()
+        @test ext.mnt_codes_to_type(6, (0.0, 0.0, 0.0)) == XRadio.MountBWGR()
+        @test ext.mnt_codes_to_type(7, (0.0, 0.0, 0.0)) == XRadio.MountBWGL()
         @test_throws "MNTSTA 8 names no mount" ext.mnt_codes_to_type(8, (0.0, 0.0, 0.0))
     end
 end

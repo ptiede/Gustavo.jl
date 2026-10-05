@@ -1,7 +1,7 @@
 using FITSFiles: Bintable, Card, Random
 using DimensionalData: DimensionalData, Ti, lookup
 using Dates: unix2datetime
-using Gustavo.UVData: AbstractMount
+using XRadio: AbstractMount
 
 # ── Encoders ────────────────────────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ const _EARTH_ORIENTATION_DEFAULTS = (
 function _scans(ps)
     groups = OrderedDict{String, Vector{XRadio.MeasurementSet}}()
     for ms in ps
-        push!(get!(Vector{XRadio.MeasurementSet}, groups, UVData.scan_name(ms)), ms)
+        push!(get!(Vector{XRadio.MeasurementSet}, groups, only(XRadio.scans(ms))), ms)
     end
     scans = [name => sort(sets; by = ms -> minimum(XRadio.frequencies(ms))) for (name, sets) in groups]
     sort!(scans; by = s -> minimum(XRadio.times(first(last(s)))))

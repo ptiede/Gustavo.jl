@@ -3,64 +3,6 @@
 # Each is rebuilt from the store on every call.
 
 """
-    scan_name(ms::XRadio.MeasurementSet) -> String
-
-The one scan `ms` holds. Throws when it holds none or several, since MSv4 does
-not limit a Measurement Set to one scan.
-"""
-scan_name(ms::XRadio.MeasurementSet) = _only_name(XRadio.scans(ms), "scan")
-primary_scan_name(ms::XRadio.MeasurementSet) = scan_name(ms)
-
-"""
-    source_name(ms::XRadio.MeasurementSet) -> String
-
-The one source `ms` observes, from the `field_and_source` dataset of its `base`
-data group. Throws when it names none or several.
-"""
-source_name(ms::XRadio.MeasurementSet) =
-    _only_name(XRadio.partition_info(ms).source_name, "source")
-
-"""
-    sub_scan_name(ms::XRadio.MeasurementSet) -> String
-
-The one sub-scan `ms` holds, from the `sub_scan_name` coordinate of
-[`GUSTAVO_VISIBILITY_SCHEMA`](@ref). A store without that coordinate has no
-sub-scans, and gives `""`.
-"""
-function sub_scan_name(ms::XRadio.MeasurementSet)
-    haskey(ms, :sub_scan_name) || return ""
-    return _only_name(unique(String.(collect(ms[:sub_scan_name]))), "sub-scan")
-end
-
-function _only_name(names, what)
-    length(names) == 1 && return String(only(names))
-    throw(
-        ArgumentError(
-            "this Measurement Set holds $(length(names)) $(what) names " *
-                "($(join(names, ", "))), and a partition accessor needs exactly one"
-        )
-    )
-end
-
-"""
-    scan_intents(ms::XRadio.MeasurementSet) -> Vector{String}
-
-The scan intents as the store writes them, such as `"OBSERVE_TARGET#ON_SOURCE"`:
-the `intents` of `observation_info` where stated, else the `scan_intents` of the
-`scan_name` coordinate, else none.
-"""
-function scan_intents(ms::XRadio.MeasurementSet)
-    info = get(DimensionalData.metadata(ms), :observation_info, Dict{Symbol, Any}())
-    haskey(info, :intents) && return String.(info[:intents])
-    haskey(ms, :scan_name) || return String[]
-    return String.(get(DimensionalData.metadata(ms[:scan_name]), :scan_intents, String[]))
-end
-
-obs_time(ms::XRadio.MeasurementSet) = lookup(dims(ms, Ti))
-
-pol_products(ms::XRadio.MeasurementSet) = XRadio.polarizations(ms)
-
-"""
     feed_pairs(ms::XRadio.MeasurementSet) -> Matrix{Tuple{Int, Int}}
 
 The `(feed_a, feed_b)` pair each stored product relates on each baseline,
@@ -76,7 +18,7 @@ function feed_pairs(ms::XRadio.MeasurementSet)
     types = XRadio.polarization_types(ms)
     names = XRadio.antennas(ms)
     receptors = [String.(collect(types[:, a])) for a in axes(types, 2)]
-    products = pol_products(ms)
+    products = XRadio.polarizations(ms)
     for p in products
         length(p) == 2 || throw(ArgumentError("a product label has two receptors, got \"$p\""))
     end
@@ -137,8 +79,7 @@ baselines(ms::XRadio.MeasurementSet) =
 The baselines of `ms` in `baseline_id` order, their antenna indices counting
 into `stations`, matched by name. This is how Measurement Sets that saw
 different sub-arrays share one station axis: MSv4 names each baseline's
-antennas, and `stations` — usually [`union_antennas`](@ref) of the set — fixes
-the numbering.
+antennas, and `stations` fixes the numbering.
 """
 baselines(ms::XRadio.MeasurementSet, stations::AntennaTable) =
     _baselines_into(ms, collect(String.(stations.name)), "the station table")

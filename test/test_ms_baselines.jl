@@ -15,7 +15,7 @@ using XRadio: XRadio, ProcessingSet
     # The same antennas as `full`'s, at the same positions.
     sub_ant = Testing.antenna(["A2", "A4"]; positions = [1.0e4 * c * i for c in 1:3, i in (2, 4)])
     sub = Testing.measurement_set(; antennas = ["A2", "A4"], antenna_xds = sub_ant)
-    stations = UV.union_antennas(ProcessingSet(OrderedDict(:full => full, :sub => sub)))
+    stations = UV.antennas(full)
     @test collect(stations.name) == ["A1", "A2", "A3", "A4"]
 
     # Its own antenna dataset numbers A2 and A4 as 1 and 2; the station table

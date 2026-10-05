@@ -32,13 +32,13 @@ function _set_autocorrelations!(ms)
     return ms
 end
 
-@testset "normalize_by_autocorrelations" begin
+@testset "normalize_by_autocorrelations!" begin
     UV = Gustavo.UVData
 
     @testset "divides each product by its feeds' autocorrelations" begin
         ms = _set_autocorrelations!(_autocorrelated_ms())
         before = copy(parent(ms[:visibility]))
-        out = UV.normalize_by_autocorrelations(ms)
+        out = UV.normalize_by_autocorrelations!(Gustavo.materialize(ms))
         @test parent(ms[:visibility]) == before
         @test !any(parent(ms[:flag]))
 
@@ -67,10 +67,10 @@ end
     @testset "flags instead of dividing where an autocorrelation is unusable" begin
         ms = _set_autocorrelations!(_autocorrelated_ms())
         vis = parent(ms[:visibility])
-        rr = findfirst(==("RR"), UV.pol_products(ms))
+        rr = findfirst(==("RR"), XRadio.polarizations(ms))
         parent(ms[:flag])[rr, 3, 1, 1] = true    # A1's feed 1, channel 3, time 1
         vis[rr, 4, 1, 2] = 0                     # A1's feed 1, channel 4, time 2
-        out = UV.normalize_by_autocorrelations(ms)
+        out = UV.normalize_by_autocorrelations!(Gustavo.materialize(ms))
 
         feeds = UV.feed_pairs(out)
         flag = parent(out[:flag])
@@ -91,7 +91,7 @@ end
         ms = _set_autocorrelations!(
             _autocorrelated_ms(; antenna2 = ["A1", "A2", "A3", "A2", "A3", "A4"])
         )
-        out = UV.normalize_by_autocorrelations(ms)
+        out = UV.normalize_by_autocorrelations!(Gustavo.materialize(ms))
         flag = parent(out[:flag])
         for (bi, (a, b)) in pairs(UV.baselines(out).pairs)
             @test all(view(flag, :, :, bi, :)) == (a == b || 3 in (a, b) || 4 in (a, b))
@@ -102,6 +102,5 @@ end
     @testset "leaves a set without autocorrelations unchanged" begin
         ms = XRadio.Testing.measurement_set()
         @test UV.normalize_by_autocorrelations!(ms) === ms
-        @test UV.normalize_by_autocorrelations(ms) !== ms
     end
 end

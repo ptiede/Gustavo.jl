@@ -12,8 +12,8 @@ import XRadio
 using CairoMakie
 using DimensionalData
 using DimensionalData: DimArray, DimStack, dims, Ti
-using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, pol_products, feed_pairs
-using Gustavo.UVData: antennas, baselines, source_name, scan_name, frequencies, timestamps
+using Gustavo.UVData: Polarization, Frequency, UVW, BaselineID, feed_pairs
+using Gustavo.UVData: antennas, baselines, frequencies
 using PolarizedTypes: RPol, LPol
 
 # Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
@@ -302,12 +302,12 @@ end
     @test d[fs1()] == :second
     @test length(d) == 1
 
-    mnt() = UV.MountAltAz()
+    mnt() = XRadio.MountAltAz()
     @test mnt() == mnt()
     @test hash(mnt()) == hash(mnt())
 
     ant() = UV.Antenna(;
-        name = "AA", station_xyz = zeros(3), mount = UV.MountAltAz(),
+        name = "AA", station_xyz = zeros(3), mount = XRadio.MountAltAz(),
         nominal_basis = (RPol(), LPol()),
         pol_angles = (0.0f0, 0.0f0),
     )
@@ -340,20 +340,12 @@ end
     @test !haskey(bls, (-1, -2))
     @test !haskey(bls, "ZZ-ZZ")
     @test_throws KeyError bls[(-1, -2)]
-    @test UV.baseline_index(bls, (-1, -2)) == 0
 end
 
-@testset "pol_index / pol_at select by feed pair" begin
+@testset "feed_pairs of a solver cube" begin
     UV = Gustavo.UVData
     vis = DimArray(zeros(ComplexF32, 4, 2), (Polarization([(1, 1), (1, 2), (2, 1), (2, 2)]), Ti([0.0, 1.0])))
     @test UV.feed_pairs(vis) == [(1, 1), (1, 2), (2, 1), (2, 2)]
-    @test [UV.pol_index(vis, fp) for fp in UV.feed_pairs(vis)] == 1:4
-    @test_throws KeyError UV.pol_index(vis, (1, 3))
-    @test_throws MethodError UV.pol_index(vis, "RR")
-
-    sel = UV.pol_at(vis, (2, 1))
-    @test sel isa DimensionalData.At
-    @test getfield(sel, :val) == UV.pol_products(vis)[3]
 end
 
 @testset "a Measurement Set's products resolve through each antenna's receptors" begin
@@ -365,7 +357,7 @@ end
     types[:, 2] .= ["L", "R"]
     types[:, 3] .= ["X", "Y"]
     ms = Testing.measurement_set(; antennas = names, antenna_xds = ant)
-    @test UV.pol_products(ms) == ["RR", "RL", "LR", "LL"]
+    @test XRadio.polarizations(ms) == ["RR", "RL", "LR", "LL"]
     @test UV.baselines(ms).pairs == [(1, 2), (1, 3), (2, 3)]
 
     pairs = UV.feed_pairs(ms)

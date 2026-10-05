@@ -94,7 +94,7 @@ end
         @test collect(lookup(ant[:antenna_position], XRadio.AntennaName)) == ["AA", "BB", "CC"]
         @test parent(ant[:antenna_position]) == args.positions
         @test collect(XRadio.mounts(ant)) == [
-            UV.MountAltAz(), UV.MountEquatorial((2.5, 0.0, 0.0)), UV.MountNasmythR(),
+            XRadio.MountAltAz(), XRadio.MountEquatorial((2.5, 0.0, 0.0)), XRadio.MountNasmythR(),
         ]
         @test parent(ant[:antenna_receptor_angle]) ≈ deg2rad.([args.polaa'; args.polab'])
         @test collect(XRadio.polarization_types(ps[1])[:, 1]) == ["R", "L"]
