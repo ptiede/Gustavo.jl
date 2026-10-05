@@ -150,6 +150,14 @@ F[baselines(ms, "LA"), Frequency(f1 .. f2)] .= true       # every baseline of a 
 F[baseline(ms, ("LA", "PV"))] .= true                     # one baseline
 ```
 
+A flag leaves the sample's weight as it was, so assigning `false` the same way
+returns flagged samples to a solve, where the correlator flagged more than it
+should have:
+
+```julia
+F[baseline(ms, ("LA", "PV")), Ti = t1 .. t2] .= false     # use these samples again
+```
+
 A Measurement Set holds one spectral window, so the channel selections act per
 window; flag a `ProcessingSet` member by member. A range no channel of a
 window falls in selects nothing there. FITSFiles also exports `End`; with it

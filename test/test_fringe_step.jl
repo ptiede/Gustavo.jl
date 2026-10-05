@@ -204,6 +204,24 @@ end
         end
     end
 
+    @testset "a solve uses samples whose input flags are cleared" begin
+        ps, _ = _build_fringe_ps(; noise = 0.3)
+        step = BaselineFringeFit(; gauge = PinAntenna(1))
+        params(sol) = [parent(c.params) for c in sol[:fringe].components]
+        reference = params(fit(step, ps))
+        data = Gustavo.materialize(ps)
+        function set_flags!(value)
+            for ms in values(data), (bi, pair) in pairs(collect(XRadio.baselines(ms)))
+                pair == ("A1", "A2") || continue
+                view(ms[:flag], BaselineID(bi), Ti(1:(length(XRadio.times(ms)) ÷ 2))) .= value
+            end
+            return data
+        end
+        flagged = params(fit(step, set_flags!(true)))
+        @test !all(isapprox.(flagged, reference; rtol = 1.0e-6))
+        @test all(isapprox.(params(fit(step, set_flags!(false))), reference; rtol = 1.0e-10))
+    end
+
     @testset "model validation + option coverage ahead of later steps" begin
         ps, _ = _build_fringe_ps()
         # The model is the component tree alone, and the gauge a field of its own —
