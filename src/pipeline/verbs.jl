@@ -141,7 +141,7 @@ function _apply_solution!(
     win = GeometryWindow(geom, ms)
     _divide_gains!(ms, win, app; flag_bad, executor)
     _flag_absent_stations!(ms, win, app.geom.stations; apply_flags)
-    return _flag_unconstrained!(ms, app.geom, geom, flagged)
+    return _flag_unconstrained!(ms, win, app.geom, flagged)
 end
 
 # The cross baselines of stations `solved` does not name have no gains to divide
@@ -177,13 +177,13 @@ end
 # Flag the samples of each product whose (station, feed) on either side is in
 # `flagged` for that scan, scans indexing the solution's geometry `solgeom`,
 # matched by name.
-function _flag_unconstrained!(ms::XRadio.MeasurementSet, solgeom::DataGeometry, geom::DataGeometry, flagged)
+function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, solgeom::DataGeometry, flagged)
     isnothing(flagged) && return ms
-    station = geom.stations
+    station = win.geom.stations
     scan = [something(findfirst(==(String(c)), solgeom.scan_names), 0) for c in ms[:scan_name]]
     feeds = feed_pairs(ms)
     flag = ms[:flag]
-    for (bi, (a, b)) in pairs(GeometryWindow(geom, ms).stations)
+    for (bi, (a, b)) in pairs(win.stations)
         a == b && continue
         sa, sb = station[a], station[b]
         for ti in eachindex(scan), p in axes(feeds, 1)
