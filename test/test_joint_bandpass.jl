@@ -247,7 +247,7 @@ end
 # A four-scan, one-time-sample-per-scan geometry of `nant` stations `A1, A2, …`
 # whose second half is a separate instrument segment.
 function _seg_geometry(nchan; nant = 4)
-    return CAL.DataGeometry(;
+    return CAL.DataGeometry(; nfeed = 2,
         times = collect(0.0:3.0), scan_of_time = collect(1:4),
         channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
         spw_of_chan = ones(Int, nchan),
@@ -837,7 +837,7 @@ end
 @testset "JointSmoother: levels per spectral window plus an OU shape" begin
     nant, nchan = 4, 12
     anames = ["A$i" for i in 1:nant]
-    geom = CAL.DataGeometry(;
+    geom = CAL.DataGeometry(; nfeed = 2,
         times = collect(0.0:3.0), scan_of_time = collect(1:4),
         channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
         spw_of_chan = repeat([1, 2]; inner = nchan ÷ 2),

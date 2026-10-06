@@ -347,7 +347,7 @@ _nant(sol::_AppliedSolution) = length(sol.geom.stations)
 # unit gain from it. `args`/`kw` select the window as `evaluate_gains` does.
 function _product_gains(sol::_AppliedSolution, nchan::Int, ntime::Int, args...; kw...)
     T = mapreduce(g -> float(eltype(g.θ)), promote_type, sol.groups)
-    g = ones(Complex{T}, nchan, ntime, _nant(sol), 2)
+    g = ones(Complex{T}, nchan, ntime, _nant(sol), sol.geom.nfeed)
     for grp in sol.groups
         view(g, :, :, grp.stations, :) .*= evaluate_gains(grp.layout, grp.θ, args...; kw...)
     end
@@ -373,7 +373,7 @@ gains(sol::CalibrationSolution; kw...) = gains(_applied(sol); kw...)
 
 function gains(sol::_AppliedSolution; kw...)
     nant = _nant(sol)
-    nfeed = 2
+    nfeed = sol.geom.nfeed
     nchan = nchannels(sol.geom)
     ntime = ntimes(sol.geom)
     d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), AntennaName(sol.geom.stations), Feed(1:nfeed))
@@ -488,16 +488,17 @@ frequencies (Hz) and time samples (seconds) of every Measurement Set, each
 channel's spectral window from `XRadio.spectralwindow` and width from
 the frequency coordinate's `channel_width`, each time's
 scan from the `scan_name` coordinate, and the stations, every antenna named
-in an antenna dataset, in the order first seen. `f0` defaults to the mean
-channel frequency, `t0` to the first time.
+in an antenna dataset, in the order first seen. The feed count is each
+Measurement Set's receptor count, `size(XRadio.polarization_types(ms), 1)`.
+`f0` defaults to the mean channel frequency, `t0` to the first time.
 
 A Measurement Set may hold several scans. Sub-arrays observing different
 scans at the same timestamps are supported when their station sets are
 disjoint and they share the whole scan window, as for
 `DataGeometry`. Throws when a Measurement Set states no `scan_name` or `channel_width`,
 when a frequency falls in two spectral windows or has two widths, when two scans share a
-timestamp and a station, and when a scan overlaps another over part of its
-span.
+timestamp and a station, when a scan overlaps another over part of its
+span, and when the Measurement Sets' receptor counts differ.
 """
 function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
     isempty(ps) && throw(ArgumentError("the processing set holds no Measurement Sets"))
@@ -513,7 +514,19 @@ function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
     for ms in ps, name in XRadio.antennas(ms)
         String(name) in stations || push!(stations, String(name))
     end
-    return _span_geometry(pieces, stations; f0, t0)
+    return _span_geometry(pieces, stations, _feed_count(ps); f0, t0)
+end
+
+function _feed_count(ps::XRadio.ProcessingSet)
+    counts = Dict(name => size(XRadio.polarization_types(ms), 1) for (name, ms) in pairs(ps))
+    length(unique(values(counts))) == 1 || throw(
+        ArgumentError(
+            "the Measurement Sets hold different numbers of receptors per antenna, " *
+                join(("$name: $n" for (name, n) in sort!(collect(counts); by = first)), ", ") *
+                "; a solve runs on one feed count"
+        )
+    )
+    return first(values(counts))
 end
 
 function _channel_width(ms::XRadio.MeasurementSet)
@@ -540,7 +553,7 @@ end
 # The union geometry of `pieces`, each holding channels `freqs` of one spectral
 # window `spw` and time samples `times` labeled per sample by `scans`, observed
 # by the stations in `active`.
-function _span_geometry(pieces, stations; f0, t0)
+function _span_geometry(pieces, stations, nfeed; f0, t0)
     freq_spw = Dict{Float64, String}()
     freq_width = Dict{Float64, Float64}()
     time_scan = Dict{Float64, String}()
@@ -627,7 +640,7 @@ function _span_geometry(pieces, stations; f0, t0)
         times, channel_freqs = freqs, scan_of_time, spw_of_chan,
         channel_widths = [freq_width[f] for f in freqs], t0 = t0v, f0 = f0v,
         scan_names = _unique_in_order(scan_labels), spw_names = _unique_in_order(spw_labels),
-        stations,
+        stations, nfeed,
     )
 end
 
@@ -751,7 +764,7 @@ function gains(sol::_AppliedSolution, win::GeometryWindow; time_span = nothing)
     return DimArray(
         g, (
             Frequency(win.geom.channel_freqs[win.chan_idx]), Ti(win.geom.times[win.ti_idx]),
-            AntennaName(sol.geom.stations), Feed(1:2),
+            AntennaName(sol.geom.stations), Feed(1:sol.geom.nfeed),
         ),
     )
 end

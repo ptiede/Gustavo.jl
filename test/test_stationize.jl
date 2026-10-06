@@ -78,7 +78,7 @@ solve_named!(θ, scans, comps; kw...) = FR.solve_station_systems!(θ, scans, com
 # The station model these tests are written against: one column per (station,
 # feed) for each of delay, rate and constant phase, over a single scan.
 function perfeed_scan_layout(nant)
-    geom = CALs.DataGeometry(;
+    geom = CALs.DataGeometry(; nfeed = 2,
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
@@ -487,7 +487,7 @@ end
             D[bi, p] = FR.Detection{Float64}((delay + 3.0e-7, 0.01, 2.0, 1.0, 4.0, 1.0, true))
         end
     end
-    geom = CALs.DataGeometry(; times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
+    geom = CALs.DataGeometry(; nfeed = 2, times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9)
     mk(term, tying) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = tying)
     model = CALs.GainModel(
         phase = (
@@ -620,7 +620,7 @@ end
     D1 = scan_det(1; with_cross = true)
     D2 = scan_det(2; with_cross = false)     # weak scan: cross hands undetected
 
-    geom = CALs.DataGeometry(;
+    geom = CALs.DataGeometry(; nfeed = 2,
         times = [0.0, 1.0, 2.0, 100.0, 101.0, 102.0],
         scan_of_time = [1, 1, 1, 2, 2, 2],
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
@@ -856,7 +856,7 @@ end
         s2 = poisoned_scan(nant; offset = 2.0, seed = 0x42)     # poisoned
         # `scan_of_time` is what gives `PerScan` two distinct segments, so the
         # two scans land in separate θ columns.
-        geom = CALs.DataGeometry(;
+        geom = CALs.DataGeometry(; nfeed = 2,
             times = [0.0, 1.0, 100.0, 101.0], scan_of_time = [1, 1, 2, 2],
             channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
         )
@@ -908,7 +908,7 @@ end
 # stacked QR rounds differently than the per-block ones.
 @testset "Stationize: per-scan solves ≡ the pooled block-diagonal system" begin
     nant, ref = 5, 1
-    geom = CALs.DataGeometry(;
+    geom = CALs.DataGeometry(; nfeed = 2,
         times = [0.0, 1.0, 100.0, 101.0, 200.0, 201.0], scan_of_time = [1, 1, 2, 2, 3, 3],
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
@@ -1064,7 +1064,7 @@ end
 # feed-2 phase in the shared column so its data is completely corrected.
 
 function sharedfeeds_scan_layout(nant)
-    geom = CALs.DataGeometry(;
+    geom = CALs.DataGeometry(; nfeed = 2,
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.SharedFeeds())

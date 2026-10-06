@@ -156,6 +156,8 @@ Fields:
 - `spw_names`     : spw label of each distinct `spw_of_chan` id, likewise.
 - `stations`      : the run's station names; a baseline's antennas are
                     indices into it. Empty for a geometry built without one.
+- `nfeed`         : the number of feeds (receptors) per station, every
+                    station's feed axis `1:nfeed`.
 
 The names are the identity a solution is applied on: a foreign sample is
 placed in a `PerScan` or `PerSpectralWindow` segment by matching the name,
@@ -179,6 +181,7 @@ struct DataGeometry
     scan_names::Vector{String}
     spw_names::Vector{String}
     stations::Vector{String}
+    nfeed::Int
 end
 
 function DataGeometry(;
@@ -192,7 +195,9 @@ function DataGeometry(;
         scan_names::AbstractVector{<:AbstractString} = String[],
         spw_names::AbstractVector{<:AbstractString} = String[],
         stations::AbstractVector{<:AbstractString} = String[],
+        nfeed::Integer,
     )
+    nfeed >= 1 || throw(ArgumentError("DataGeometry: nfeed must be at least 1, got $nfeed"))
     length(scan_of_time) == length(times) || throw(
         DimensionMismatch(
             "scan_of_time length $(length(scan_of_time)) ≠ times length $(length(times))"
@@ -220,6 +225,7 @@ function DataGeometry(;
         Float64.(collect(channel_freqs)), Int.(collect(spw_of_chan)),
         Float64.(collect(channel_widths)), Float64(t0), Float64(f0),
         String.(collect(scan_names)), String.(collect(spw_names)), String.(collect(stations)),
+        Int(nfeed),
     )
 end
 

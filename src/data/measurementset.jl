@@ -36,7 +36,8 @@ function _receptor_feed(letter::Char, receptors, antenna)
     i === nothing || return i
     own = findfirst(basis -> r in basis, _BASES)
     other = own === nothing ? nothing : _BASES[3 - own]
-    (other !== nothing && all(in(other), receptors)) && return findfirst(==(r), _BASES[own])
+    (other !== nothing && length(receptors) == 2 && all(in(other), receptors)) &&
+        return findfirst(==(r), _BASES[own])
     throw(
         ArgumentError(
             "product letter `$r` names no receptor of antenna `$antenna`, whose receptors are $(join(receptors, ", "))"

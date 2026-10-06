@@ -25,7 +25,7 @@ end
 
 _with_stations(geom, stations) = CALc.DataGeometry(;
     geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.channel_widths, geom.t0, geom.f0,
-    geom.scan_names, geom.spw_names, stations,
+    geom.scan_names, geom.spw_names, stations, geom.nfeed,
 )
 
 # The largest relative error of `out` against `ms` divided by `sol`'s gains,
@@ -59,6 +59,31 @@ end
         lr_geom = CALc.DataGeometry(lr_ps)
         lr = read(first(lr_ps))
         @test _division_error(calibrate!(_hand_solution(lr_geom), deepcopy(lr); apply_flags = false), lr, _hand_solution(lr_geom), lr_geom) < 1.0e-6
+    end
+
+    @testset "a feed count read from the antenna table" begin
+        @test geom.nfeed == 2
+        for receptors in (("R",), ("R", "L", "X"))
+            n = length(receptors)
+            products = [a * b for a in receptors for b in receptors]
+            ps_n, _ = _build_fringe_ps(; polarizations = products, receptors)
+            geom_n = CALc.DataGeometry(ps_n)
+            @test geom_n.nfeed == n
+            sol_n = _hand_solution(geom_n)
+            @test lookup(CALc.gains(sol_n), Gustavo.Feed) == 1:n
+            m = read(first(ps_n))
+            @test _division_error(calibrate!(sol_n, deepcopy(m); apply_flags = false), m, sol_n, geom_n) < 1.0e-6
+            mktempdir() do dir
+                @test load_solution(save_solution(joinpath(dir, "sol.zarr"), sol_n)).geom.nfeed == n
+            end
+        end
+
+        one, _ = _build_fringe_ps(; polarizations = ["RR"], receptors = ("R",))
+        mixed = XRadio.ProcessingSet(merge(OrderedDict(pairs(ps)), OrderedDict(Symbol(k, "_one") => v for (k, v) in pairs(one))))
+        @test_throws "different numbers of receptors per antenna" CALc.DataGeometry(mixed)
+
+        model = CALc.GainModel(; phase = (; p = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.GlobalTime(), Feed = CALc.SingleFeed(3))))
+        @test_throws "SingleFeed(3) names a feed the data does not have" CALc.plan_parameters(model, geom.stations, geom)
     end
 
     @testset "calibrate! divides out the gains in place" begin

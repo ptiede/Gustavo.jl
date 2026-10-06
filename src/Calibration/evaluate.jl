@@ -94,15 +94,15 @@ end
 """
     evaluate_gains(layout::ParameterLayout, θ) -> Array{Complex,4}
 
-Pure forward map θ → complex antenna gains of shape `(nchan, ntime, nant, 2)`,
-where the last axis is the feed (1, 2). `gain = exp(Σ logamp) · cis(Σ phase)`.
+Pure forward map θ → complex antenna gains of shape `(nchan, ntime, nant, nfeed)`,
+where the last axis is the feed. `gain = exp(Σ logamp) · cis(Σ phase)`.
 Element type follows `eltype(θ)` (so AD / Reactant tracing flows through).
 """
 function evaluate_gains(lay::ParameterLayout, θ::AbstractVector)
     length(θ) == lay.nθ ||
         error("evaluate_gains: θ has length $(length(θ)), expected $(lay.nθ)")
     T = float(eltype(θ))
-    gains = Array{Complex{T}}(undef, lay.nchan, lay.ntime, lay.nant, 2)
+    gains = Array{Complex{T}}(undef, lay.nchan, lay.ntime, lay.nant, lay.nfeed)
     pp = lay.plantree.phase
     lp = lay.plantree.logamp
     # Spanning `gains`'s own axes is what lets the compiler drop the bounds
@@ -136,7 +136,7 @@ end
     evaluate_gains(layout::ParameterLayout, θ, chan_idx, ti_idx) -> Array{Complex,4}
 
 Windowed pure forward map: gains of shape `(length(chan_idx), length(ti_idx),
-nant, 2)` at the given GLOBAL channel and time indices (into `layout`'s geometry).
+nant, nfeed)` at the given GLOBAL channel and time indices (into `layout`'s geometry).
 Use this to evaluate the gains one Measurement Set needs without materializing
 the full `(nchan_total, ntime_total, …)` array.
 """
@@ -149,7 +149,7 @@ function evaluate_gains(
     _check_window(chan_idx, lay.nchan, "chan_idx", "channel")
     _check_window(ti_idx, lay.ntime, "ti_idx", "time")
     T = float(eltype(θ))
-    gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
+    gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, lay.nfeed)
     pp = lay.plantree.phase
     lp = lay.plantree.logamp
     @inbounds for feed in axes(gains, 4), ant in axes(gains, 3)
@@ -167,7 +167,7 @@ end
                    chan_idx = …, ti_idx = …, time_span = nothing)
 
 Forward map onto a FOREIGN grid: gains of shape `(length(chan_idx),
-length(ti_idx), nant, 2)` for the samples of `target` selected by
+length(ti_idx), nant, nfeed)` for the samples of `target` selected by
 `chan_idx`/`ti_idx`, evaluated from a θ laid out over `solve_geom` (the geometry
 `layout` was planned on).
 
@@ -198,7 +198,7 @@ function evaluate_gains(
     pp = _resolve_tree(lay.plantree.phase, solve_geom, target, chan_idx, ti_idx, time_span)
     lp = _resolve_tree(lay.plantree.logamp, solve_geom, target, chan_idx, ti_idx, time_span)
     T = float(eltype(θ))
-    gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, 2)
+    gains = Array{Complex{T}}(undef, length(chan_idx), length(ti_idx), lay.nant, lay.nfeed)
     @inbounds for feed in axes(gains, 4), ant in axes(gains, 3)
         for ti in axes(gains, 2), c in axes(gains, 1)
             phase = _sum_group(pp, θ, ant, feed, ti, c)

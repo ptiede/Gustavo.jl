@@ -25,31 +25,31 @@
 """
     AbstractFeedTying
 
-How a [`GainComponent`](@ref)'s parameter blocks are shared between the two
-polarization feeds: [`PerFeed`](@ref) (each feed its own block),
-[`SharedFeeds`](@ref) (one block read by both), or [`SingleFeed`](@ref) (one
-feed only).
+How a [`GainComponent`](@ref)'s parameter blocks are shared between a
+station's feeds: [`PerFeed`](@ref) (each feed its own block),
+[`SharedFeeds`](@ref) (one block read by every feed), or [`SingleFeed`](@ref)
+(one feed only).
 """
 abstract type AbstractFeedTying end
 
-"Independent parameters per feed — feed 1 and feed 2 solved separately."
+"Independent parameters per feed, each feed solved separately."
 struct PerFeed <: AbstractFeedTying end
 
-"One shared parameter block used by both feeds."
+"One shared parameter block used by every feed."
 struct SharedFeeds <: AbstractFeedTying end
 
 """
     SingleFeed(feed)
 
-The component applies to one `feed` (1 or 2) only; the other feed gets no
-contribution from it. Allocates a single parameter block. A reference/relative
+The component applies to one `feed` (an index from 1, at most the data's feed
+count) only; the other feeds get no contribution from it. Allocates a single
+parameter block. A reference/relative
 model is a `SharedFeeds` common part plus a `SingleFeed(partner)` deviation.
 """
 struct SingleFeed <: AbstractFeedTying
     feed::Int
     function SingleFeed(feed::Integer)
-        feed in (1, 2) ||
-            throw(ArgumentError("SingleFeed feed must be 1 or 2, got $feed"))
+        feed >= 1 || throw(ArgumentError("SingleFeed feed must be at least 1, got $feed"))
         return new(Int(feed))
     end
 end
@@ -99,9 +99,14 @@ GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed(), prior =
     GainComponent(term, Ti, Frequency, Feed, prior)
 
 # Number of distinct feed-blocks this tying allocates per (ant, tseg, fseg).
-nfeed_blocks(::PerFeed) = 2
-nfeed_blocks(::SharedFeeds) = 1
-nfeed_blocks(::SingleFeed) = 1
+nfeed_blocks(::PerFeed, nfeed::Integer) = nfeed
+nfeed_blocks(::SharedFeeds, nfeed::Integer) = 1
+function nfeed_blocks(t::SingleFeed, nfeed::Integer)
+    t.feed <= nfeed || throw(
+        ArgumentError("SingleFeed($(t.feed)) names a feed the data does not have; its stations have $nfeed")
+    )
+    return 1
+end
 
 # The feed-node (column of a component's leaf `:Feed`/`:node` axis) a feed reads
 # its block from, or 0 when the tying carries no block for that feed.

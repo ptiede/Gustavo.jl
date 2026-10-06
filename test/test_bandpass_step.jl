@@ -269,7 +269,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         strangers = CAL.CalibrationSolution(
             CAL.DataGeometry(
                 g.times, g.scan_of_time, g.channel_freqs, g.spw_of_chan, g.channel_widths, g.t0, g.f0,
-                g.scan_names, g.spw_names, others,
+                g.scan_names, g.spw_names, others, g.nfeed,
             ),
             [
                 CAL.SolvedComponent(c.step, c.path, c.component, DimArray(parent(c.params), (dims(c.params)[1:4]..., AntennaName(others))))
@@ -443,7 +443,7 @@ end
 
     @testset "observables are located by name, not plan-list position" begin
         anames = ["A1", "A2", "A3"]
-        geom = CAL.DataGeometry(;
+        geom = CAL.DataGeometry(; nfeed = 2,
             times = [0.0, 1.0], scan_of_time = [1, 1],
             channel_freqs = collect(1.0e9 .+ (0:3) .* 1.0e6), spw_of_chan = ones(Int, 4),
             scan_names = ["No001"], spw_names = ["A"],

@@ -23,7 +23,7 @@ import Zarr
 using DimensionalData: AbstractDimStack, DimStack, basetypeof, layers
 using DimensionalData.Lookups: Categorical, Points, span, sampling, order
 
-const _STORE_FORMAT = 1
+const _STORE_FORMAT = 2
 
 # Typed even when empty: JSON writes an empty `Vector{Union{}}` as `{}`.
 _strings(xs) = String[String(x) for x in xs]
@@ -313,7 +313,7 @@ function _write_geometry!(root, geom::DataGeometry)
     g = Zarr.zgroup(
         root, "geometry"; attrs = Dict{String, Any}(
             "t0" => geom.t0, "f0" => geom.f0, "scan_names" => geom.scan_names,
-            "spw_names" => geom.spw_names, "stations" => geom.stations,
+            "spw_names" => geom.spw_names, "stations" => geom.stations, "nfeed" => geom.nfeed,
         )
     )
     _write_array!(g, "times", geom.times, ("time",))
@@ -331,7 +331,7 @@ function _read_geometry(g)
         channel_freqs = _read_array(g.arrays["channel_freqs"]), spw_of_chan = _read_array(g.arrays["spw_of_chan"]),
         channel_widths = haskey(g.arrays, "channel_widths") ? _read_array(g.arrays["channel_widths"]) : Float64[],
         t0 = a["t0"], f0 = a["f0"], scan_names = _strings(a["scan_names"]),
-        spw_names = _strings(a["spw_names"]), stations = _strings(a["stations"]),
+        spw_names = _strings(a["spw_names"]), stations = _strings(a["stations"]), nfeed = a["nfeed"],
     )
 end
 

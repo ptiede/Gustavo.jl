@@ -34,9 +34,10 @@ keywords always give the same data.
 - `weight`: every sample's weight; by default the inverse variance per real
   component, `2 / noise^2`, or `1e3` without noise.
 - `polarizations`: the stored correlation labels.
+- `receptors`: every station's receptors; the feed count is their number.
 - `ref_freq`, `chan_bw`, `spw_sep`, or `spw_origins` for explicit window starts.
 - `bandpass`, `amp_bandpass`: per-channel phase (rad) and log-amplitude, sized
-  `(nant, 2, nspw·nchan)`, or `(nant, 2, nspw·nchan, nscans)` to change between
+  `(nant, nfeed, nspw·nchan)`, or `(nant, nfeed, nspw·nchan, nscans)` to change between
   scans.
 - `dtec`: per-station TEC (TECU), feed-common.
 - `feed_common`: tie delay and phase across feeds.
@@ -44,7 +45,7 @@ keywords always give the same data.
   `rel_rate`: a feed-2 − feed-1 rate offset (Hz).
 - `station_positions`: per-station xyz (m).
 - `omit_station`: a station index in the antenna dataset but on no baseline.
-- `receptor_order`: station name => its receptors, in place of `R, L`.
+- `receptor_order`: station name => its receptors, in place of `receptors`.
 - `station_gains = false`: zero delay, rate, phase and screen, leaving the
   bandpass as the only station gain.
 - `eltype`: the visibilities' element type.
@@ -52,7 +53,7 @@ keywords always give the same data.
 function _build_fringe_ps(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
         scan_gap = nothing, noise = nothing,
-        polarizations = ["RR", "RL", "LR", "LL"],
+        polarizations = ["RR", "RL", "LR", "LL"], receptors = ("R", "L"),
         ref_freq = 230.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         seed = 1234,
         bandpass = nothing, amp_bandpass = nothing, dtec = nothing,
@@ -69,6 +70,7 @@ function _build_fringe_ps(;
         positions = station_positions === nothing ?
             [1.0e4 * c * i for c in 1:3, i in 1:nant] :
             reduce(hcat, (Float64.(p) for p in station_positions)),
+        receptors,
     )
     if !isempty(receptor_order)
         types = copy(parent(antenna_xds[:polarization_type]))
@@ -93,13 +95,14 @@ function _build_fringe_ps(;
     end
     t0 = first(times)
 
-    delay = zeros(nant, 2)
-    rate = zeros(nant, 2)
-    phi = zeros(nant, 2)
+    nfeed = length(receptors)
+    delay = zeros(nant, nfeed)
+    rate = zeros(nant, nfeed)
+    phi = zeros(nant, nfeed)
     if station_gains
         for a in 2:nant
             rc = (rand(rng) - 0.5) * 2.0e-3
-            for f in 1:2
+            for f in 1:nfeed
                 delay[a, f] = (rand(rng) - 0.5) * 2.0e-9
                 rate[a, f] = rc
                 phi[a, f] = (rand(rng) - 0.5) * 2.0
@@ -109,13 +112,13 @@ function _build_fringe_ps(;
     station_rate === nothing || (rate .= station_rate)
     rel_rate === nothing || (rate[:, 2] .= rate[:, 1] .+ rel_rate)
     if feed_common
-        delay[:, 2] .= delay[:, 1]
-        phi[:, 2] .= phi[:, 1]
+        delay .= delay[:, 1]
+        phi .= phi[:, 1]
     end
 
     # Feed-common, since the atmosphere is not birefringent: a per-station
     # offset plus a slow track, drawn afresh for each scan.
-    screen = zeros(nant, 2, ntime, nscans)
+    screen = zeros(nant, nfeed, ntime, nscans)
     for s in 1:nscans, a in (station_gains ? (2:nant) : 1:0)
         base = (rand(rng) - 0.5) * 1.0
         for ti in 1:ntime
@@ -168,7 +171,7 @@ function _build_fringe_ps(;
 
     return XRadio.ProcessingSet(sets), (;
         delay, rate, phi,
-        screen = nscans == 1 ? reshape(screen, nant, 2, ntime) : screen,
+        screen = nscans == 1 ? reshape(screen, nant, nfeed, ntime) : screen,
         bandpass, amp_bandpass, dtec, f0, t0_sec = t0, bl_pairs, polarizations, feeds,
     )
 end

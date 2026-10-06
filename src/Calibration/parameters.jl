@@ -82,6 +82,7 @@ to gains.
 struct ParameterLayout{PT, AX}
     nθ::Int
     nant::Int
+    nfeed::Int
     ntime::Int
     nchan::Int
     nphase::Int
@@ -146,7 +147,7 @@ function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     # whose arity comes from the data vary with it).
     nchan_seg = [length(grp) for grp in fseg_groups]
     blocklen = [nparams_per_block(t, n) for n in nchan_seg]
-    nfeed = nfeed_blocks(e.Feed)
+    nfeed = nfeed_blocks(e.Feed, geom.nfeed)
     bl = first(blocklen)                         # nchan_seg has one entry per segment (nfseg ≥ 1)
     all(==(bl), blocklen) || throw(
         ArgumentError(
@@ -405,7 +406,7 @@ function _plan_layout(ptree_spec::NamedTuple, ltree_spec::NamedTuple, nant::Int,
         logamp = _axes_tree(ltree_spec, nant, geom),
     )
     return ParameterLayout(
-        nθ, nant, ntimes(geom), nchannels(geom), nphase,
+        nθ, nant, geom.nfeed, ntimes(geom), nchannels(geom), nphase,
         flat, (; phase = ptree, logamp = ltree), axes,
     )
 end

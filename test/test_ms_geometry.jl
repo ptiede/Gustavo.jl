@@ -159,7 +159,7 @@ end
         late = _subarray_ms(["A1", "A2"], "1"; times = 2.0e9 .+ 30.0 .* (0:3))
         @test_throws "is not in the geometry" CALg.GeometryWindow(geom, late)
         @test_throws "names no stations" CALg.GeometryWindow(
-            CALg.DataGeometry(; times = geom.times, channel_freqs = geom.channel_freqs), ms,
+            CALg.DataGeometry(; geom.nfeed, times = geom.times, channel_freqs = geom.channel_freqs), ms,
         )
     end
 end
