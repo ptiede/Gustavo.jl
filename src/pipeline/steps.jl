@@ -20,10 +20,11 @@ the scan is searched. A track-global column or `rounds > 1` instead pools every
 scan's detections into one solve after the pass. `rounds` re-runs the search
 on the residual of the current solution, reading the data once per round.
 
-The models it fits: a `Delay`, `Rate` or `ConstantTerm` spanning the whole band
+The models it fits: a `Delay` or `Rate` spanning the whole band
 (`Frequency = GlobalFrequency()`), under any feed scope, with a time
-segmentation no finer than a scan. One search per scan group measures one
-delay, rate and phase per scan, so a segmentation that splits a scan (a
+segmentation no finer than a scan. It fits no constant phase (see
+[`Fring.default_fringe_terms`](@ref)). One search per scan group measures one
+delay and rate per scan, so a segmentation that splits a scan (a
 `TimeBlocks` shorter than the scans, `PerIntegration`) asks for θ columns the
 search has no measurement to fill and is rejected when the step compiles the
 model. A segmentation coarser than a scan is fitted: one column shared by
@@ -165,7 +166,7 @@ _spec_geom(spec) = isnothing(spec) ? nothing : spec.geom
 
 model_components(s::BaselineFringeFit, spec) = _vet_step_model(
     s, s.model,
-    "It fits a `Delay`, `Rate` or `ConstantTerm` on `Frequency = GlobalFrequency()` " *
+    "It fits a `Delay` or `Rate` on `Frequency = GlobalFrequency()` " *
         "with a time segmentation no finer than the data's scans: the search measures " *
         "one value per scan, so a segmentation that splits a scan (`PerIntegration`, " *
         "or `TimeBlocks` shorter than a scan) leaves columns unmeasured. See " *
@@ -269,10 +270,29 @@ end
 # is one scan's detections where the systems are block-diagonal, every scan's
 # where they couple — the two paths differ only in that argument.
 function _station_solve!(s::BaselineFringeFit, ctx::SolveContext, stageB, dets)
-    ncomp, covered = Fring.solve_station_systems!(
+    ncomp, covered, unlinked = Fring.solve_station_systems!(
         ctx.θ, dets, stageB, ctx.geom.stations; gauge = ctx.gauge, opts = s.closure,
     )
-    return ncomp, Fring.unconstrained_flags(dets, covered, ctx.geom)
+    scan_name(si) = ctx.geom.scan_names[ctx.geom.scan_of_time[Fring._scan_ti(dets[si])]]
+    unlinked_named = Tuple{Symbol, String}[(kind, scan_name(si)) for (kind, si) in unlinked]
+    return ncomp, Fring.unconstrained_flags(dets, covered, ctx.geom), unlinked_named
+end
+
+# A gauge sets what the detections leave free. One zero point per fringe group
+# is expected; a second means the group's feeds are not linked, so the offset
+# between them is the gauge's choice rather than a measurement.
+function _warn_unlinked(unlinked)
+    isempty(unlinked) && return nothing
+    byscan = Dict{String, Vector{Symbol}}()
+    for (kind, scan) in unlinked
+        push!(get!(byscan, scan, Symbol[]), kind)
+    end
+    lines = ["scan $scan: $(join(sort!(unique(kinds)), ", "))" for (scan, kinds) in sort!(collect(byscan); by = first)]
+    @warn "BaselineFringeFit: no accepted detection relates different feeds of a fringe group, so the " *
+        "offset between its feeds is not measured; the gauge sets it to zero at its preferred station. " *
+        "Detections relating different feeds (`fringe_detections`) or `closure.pfa_max` decide this.\n" *
+        join(lines, "\n")
+    return nothing
 end
 
 # `scan_names`, `scan_snr`, `scan_ncells` and the detection table are pure
@@ -288,14 +308,7 @@ _fringe_report(results, ctx) = (;
 # Each step's per-group kernel is `_solve_group(step, ctx, setup, …)`,
 # with `setup = _group_setup(step, ctx)` computed once before the data are read.
 
-# The stage-B components. A model whose rate components disagree on any
-# constant-phase epoch is rejected here, before any data is read (see
-# `scan_phase_epoch`).
-function _group_setup(s::BaselineFringeFit, ctx::SolveContext)
-    stageB = Fring.fringe_stage_components(ctx.model, ctx.layout)
-    Fring.validate_scan_epochs(stageB, length(ctx.geom.times))
-    return stageB
-end
+_group_setup(s::BaselineFringeFit, ctx::SolveContext) = Fring.fringe_stage_components(ctx.model, ctx.layout)
 
 function solve(s::BaselineFringeFit, ctx::SolveContext)
     stageB = _group_setup(s, ctx)
@@ -305,15 +318,17 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         end
         flags = reduce(append!, (r.flags for r in results); init = Tuple{String, Int, Int}[])::Vector{Tuple{String, Int, Int}}
         ncomp = sum((r.ncomp for r in results); init = 0)::Int
+        _warn_unlinked(reduce(append!, (r.unlinked for r in results); init = Tuple{Symbol, String}[]))
         return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results, ctx)..., s.search)
     end
-    local results, ncomp, flags
+    local results, ncomp, flags, unlinked
     for round in 1:max(s.rounds, 1)
         results = each_group(ctx) do group
             _solve_group(s, ctx, stageB, group; round, local_solve = false)
         end
-        ncomp, flags = _station_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int, Int}}}
+        ncomp, flags, unlinked = _station_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int, Int}}, Vector{Tuple{Symbol, String}}}
     end
+    _warn_unlinked(unlinked)
     return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results, ctx)..., s.search)
 end
 
@@ -325,16 +340,8 @@ function _solve_group(
     round > 1 && (group = Fring.residual_group(ctx.layout, ctx.θ, group, ctx.geom))
     gc = Fring._GroupCells(group, ctx.geom)
     ti = Calibration._time_index(ctx.geom, first(gc.times))
-    # Reference the detection phases to the epoch this scan's constant phase
-    # columns are the phase at (`scan_phase_epoch`), not to the track epoch
-    # `search_scan` defaults to for a standalone caller. The station solve reads
-    # each phase as a constant, so any gap between the two epochs pours that
-    # row's rate uncertainty into the constant — and the inter-feed offset,
-    # which the model gives no rate of its own, has nothing to absorb it with.
-    # A model with no rate column pins no epoch; the scan's own mean time is
-    # then the natural place to measure a constant.
-    epoch = Fring.scan_phase_epoch(ctx.model, ctx.layout, ti)
-    isnothing(epoch) && (epoch = sum(gc.times) / length(gc.times))
+    # The recorded detection phases are referenced to the scan's mean time.
+    epoch = sum(gc.times) / length(gc.times)
     res = Fring.search_scan(
         gc, ctx.geom, s.search;
         executor = inner_executor(ctx.exec), t0 = epoch,
@@ -345,7 +352,7 @@ function _solve_group(
     # the CRB uncertainty of a delay and a rate, which is what puts the station
     # solve's residuals in units of σ (see `Stationization`).
     det = Fring._with_ti(
-        res, ti; epoch,
+        res, ti;
         freq_rms = Fring._rms_spread(gc.freqs), time_rms = Fring._rms_spread(gc.times),
     )
 
@@ -357,7 +364,7 @@ function _solve_group(
     # the family the recorded `pfa` was computed over.
     ncells = Fring._family_cells(gc, s.search)
     pfa_max = s.closure.pfa_max
-    ncomp, flags = 0, Tuple{String, Int, Int}[]
+    ncomp, flags, unlinked = 0, Tuple{String, Int, Int}[], Tuple{Symbol, String}[]
     # Steering needs θ for this scan, so it can only run where the station solve
     # closes here; a pooled solve has no station parameters until every group
     # has been read and the cube is long gone.
@@ -367,7 +374,7 @@ function _solve_group(
         # detections, so its θ columns are complete before this returns. The
         # slots are disjoint per scan, so concurrent groups write without
         # contention.
-        ncomp, flags = _station_solve!(s, ctx, stageB, (det,))
+        ncomp, flags, unlinked = _station_solve!(s, ctx, stageB, (det,))
         if s.steer_cells > 0
             sd, sr = Fring.scan_station_terms(ctx.model, ctx.layout, ctx.θ, ti, ctx.geom.stations)
             # θ is dense: a station this scan never constrained reads back as an
@@ -379,8 +386,6 @@ function _solve_group(
                 sr[AntennaName(At(name)), Feed(At(f))] = NaN
             end
             steer = Fring.steer_scan(
-                # The same epoch the search above referenced: `sr` is a rate
-                # about it, as is the model's own Rate component.
                 gc, res, ctx.geom.f0, epoch, sd, sr;
                 cells = s.steer_cells,
             )
@@ -411,7 +416,7 @@ function _solve_group(
         )
     end
     max_snr = isempty(rows) ? 0.0 : maximum((r.snr for r in rows if r.detected); init = 0.0)
-    return (; det, ncomp, flags, max_snr, ncells, rows)
+    return (; det, ncomp, flags, unlinked, max_snr, ncells, rows)
 end
 
 # ── Bandpass: accumulate per scan → per-channel/joint solves ─────────────────

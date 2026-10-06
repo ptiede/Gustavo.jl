@@ -9,14 +9,37 @@
 @testset "station gauge: every scan pinned, undetermined columns throw" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
     at_ref(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params[AntennaName(At("A1"))]
+    # The fit, and whether it warned that a fringe group's feeds are not linked.
+    function fit_unlinked(step, data)
+        logs, sol = Test.collect_test_logs(() -> fit(step, data))
+        return sol, any(l -> occursin("offset between its feeds is not measured", string(l.message)), logs)
+    end
 
     # A track-global inter-feed delay couples the scans without moving the gauge.
     glob = BaselineFringeFit(; model = FP.default_fringe_terms(; rel_time = CAL.GlobalTime()), gauge = PinAntenna(1))
-    @test all(iszero, at_ref(fit(glob, ps), :mbd))
+    sol, warned = fit_unlinked(glob, ps)
+    @test all(iszero, at_ref(sol, :mbd))
+    @test !warned
 
-    # Without cross hands the reference's feed-2 delay offset is itself a gauge.
+    # Without detections relating different feeds the reference's feed-2 delay
+    # offset is a gauge too, and the fit says so.
     psp, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64, polarizations = ["RR", "LL"])
-    @test all(iszero, at_ref(fit(BaselineFringeFit(; gauge = PinAntenna(1)), psp), :rel_delay))
+    sol, warned = fit_unlinked(BaselineFringeFit(; gauge = PinAntenna(1)), psp)
+    @test all(iszero, at_ref(sol, :rel_delay))
+    @test warned
+
+    # Likewise for a station whose feed order differs from the reference's: the
+    # free offset is pinned whichever feed index carries it.
+    for order in (["R", "L"], ["L", "R"])
+        pso, truth = _build_fringe_ps(;
+            nant = 4, noise = 0.3, eltype = ComplexF64, polarizations = ["RR", "LL"],
+            receptor_order = Dict("A2" => order),
+        )
+        sol, warned = fit_unlinked(BaselineFringeFit(; gauge = PinAntenna(1)), pso)
+        d = parent(FP.fringe_station_solutions(sol).delay)[1, :, :]
+        @test maximum(abs, (d .- d[1:1, :]) .- (truth.delay .- truth.delay[1:1, :])) < 5.0e-11
+        @test warned
+    end
 
     # Two feed-2 delays that every detection sees only as their sum.
     twice = merge(
@@ -48,7 +71,7 @@ end
     @test all(iszero, at(by_path, :mbd, "A1"))
     @test rel(by_path, :rate, 2) ≈ rel(pinned, :rate, 2)
     @test params(by_path, :mbd) == params(pinned, :mbd)
-    @test_throws "no component rat in the step's model; the components are atmos, mbd, rel_delay, rate" BaselineFringeFit(;
+    @test_throws "no component rat in the step's model; the components are mbd, rel_delay, rate" BaselineFringeFit(;
         gauge = ByComponent((; rat = PinAntenna(2)); default = PinAntenna(1)),
     )
 
@@ -80,7 +103,7 @@ end
         ps, _ = _build_fringe_ps()
         sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         fr = sol[:fringe].components
-        @test length(fr) == 4
+        @test length(fr) == 3
         @test collect(keys(sol.steps)) == [:fringe]
 
         # `scan_ncells` is the false-alarm family each recorded `pfa` was computed over.
@@ -129,7 +152,7 @@ end
         )
 
         sol = fit(BaselineFringeFit(; model = rel_terms, gauge = PinAntenna(1)), ps)
-        @test count(c -> first(c.path) === :phase, sol[:fringe].components) == 5
+        @test count(c -> first(c.path) === :phase, sol[:fringe].components) == 4
         solved = only(sol[:fringe, :phase, :rel_rate].components).params
         @test vec(parent(solved)) ≈ inj .- inj[1] atol = 1.0e-7
 
@@ -141,35 +164,7 @@ end
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
         sold = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
-        @test length(sold[:fringe].components) == 4
-    end
-
-    @testset "a constant phase is referenced to its own scan" begin
-        # A rate is measured only to within its own uncertainty, so a constant
-        # phase quoted a lever arm Δt from the data carries 2π·σ_ṙ·Δt of it.
-        # A feed-COMMON constant hides that — the station rate solved from the
-        # same rows moves with it — so the probe is a feed-2 constant, which the
-        # model gives no rate of its own: it keeps the whole lever arm. Referred
-        # to a track-wide epoch instead of its own scan's, hours of lever arm
-        # randomize it outright. Noise is what makes this visible; with exact
-        # rates there is no uncertainty to lever.
-        #
-        # Not part of `default_fringe_terms` (see there for why the inter-feed
-        # phase offset is deliberately absent) — added here precisely because it
-        # is the column most sensitive to the epoch.
-        nscans = 4
-        model = merge(
-            default_fringe_terms();
-            phase = (; rel_phase = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Feed = CAL.SingleFeed(2))),
-        )
-        ps, truth = _build_fringe_ps(; nscans, scan_gap = 2.0, noise = 0.5, seed = 21)
-        sol = fit(BaselineFringeFit(; model, gauge = PinAntenna(1)), ps)
-        rel = only(sol[:fringe, :phase, :rel_phase].components).params
-        want = truth.phi[:, 2] .- truth.phi[:, 1]
-        for a in eachindex(want), s in 1:nscans
-            got = only(rel[1, :, 1, s, a])
-            @test abs(rem2pi(got - want[a], RoundNearest)) < 0.2
-        end
+        @test length(sold[:fringe].components) == 3
     end
 
     @testset "corrections before the step, including a function" begin
@@ -272,10 +267,9 @@ end
         )
 
         # The default model compiles in order to the standard sequence, with no
-        # inter-feed CONSTANT (see `default_fringe_terms`).
+        # constant phase (see `default_fringe_terms`).
         comps = fringe_phase(default_fringe_terms())
         @test collect(map(sig, CAL._flatten_components(comps))) == [
-            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SingleFeed),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -284,7 +278,6 @@ end
         # `rel_time` moves the inter-feed delay onto a track-global column.
         gcomps = fringe_phase(default_fringe_terms(rel_time = CAL.GlobalTime()))
         @test collect(map(sig, CAL._flatten_components(gcomps))) == [
-            (CAL.ConstantTerm, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.SingleFeed),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
@@ -309,9 +302,15 @@ end
         )
         @test_throws "per-scan feed-common delay signature" fringe_phase(collide)
 
+        withphase(; kw...) = merge(default_fringe_terms(); phase = NamedTuple(kw))
+
+        # A constant phase is not fitted: the data do not determine it.
+        @test_throws "It fits a `Delay` or `Rate`" fringe_phase(
+            withphase(atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())),
+        )
+
         # Dispersion and a per-band-group delay are rejected: no shipped step
         # fits either.
-        withphase(; kw...) = merge(default_fringe_terms(); phase = NamedTuple(kw))
         @test_throws "No shipped step fits dispersion" fringe_phase(
             withphase(dtec2 = CAL.GainComponent(CAL.Dispersion(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())),
         )
@@ -321,7 +320,7 @@ end
 
         # The fringe step fits phase only.
         @test_throws "`logamp` group must be empty" fringe_phase(
-            merge(default_fringe_terms(); logamp = (; a = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds()))),
+            merge(default_fringe_terms(); logamp = (; a = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds()))),
         )
     end
 end

@@ -54,7 +54,7 @@
 
         st = FP.fringe_station_solutions(sol)
         @test st isa DimStack
-        @test keys(st) == (:delay, :rate, :phase)
+        @test keys(st) == (:delay, :rate)
         @test size(st) == (1, 4, 2)               # dense: nscan(1) × nant(4) × 2 feeds
         @test collect(lookup(st, AntennaName)) == geom.stations
         f(a, fd) = st.delay[Gustavo.Scan(1), AntennaName(a), Feed(fd)]

@@ -9,12 +9,8 @@
 # fringe. Every measured cell gets a row, so `detected`, not the row's presence,
 # is what marks a detection.
 #
-# `phase` (rad) is the measured constant phase at the epoch the search referenced
-# (`scan_phase_epoch`). It is the only stage-A observable a station solve cannot
-# be inverted for: the parallel-hand pair of one baseline gives the inter-feed
-# offset difference `ρ_a − ρ_b` directly as `QQ − PP`, with the source and
-# atmospheric terms canceling, at parallel-hand SNR and without cross-hand data
-# or any station fit in between.
+# `phase` (rad) is the measured phase at the epoch the search referenced, the
+# scan's mean time. No station solve uses it.
 const DetectionRow = @NamedTuple{
     a::String, b::String, feeds::Tuple{Int, Int}, snr::Float64, pfa::Float64,
     delay::Float64, rate::Float64, phase::Float64, detected::Bool,
@@ -130,10 +126,8 @@ scans a solve holds.
 
 `t0` (seconds) is the epoch the detection phases are referenced to
 (delay/rate/SNR are epoch-invariant). Quoting a phase a lever arm from the
-data costs it `2π·σ_rate·Δt`, so a caller comparing phases against a model
-must reference them where the model's constant lives
-([`scan_phase_epoch`](@ref)); a standalone caller wants the scan midpoint.
-The default is `geom`'s track epoch, which is right only for a single-scan
+data costs it `2π·σ_rate·Δt`, so the scan midpoint is usually wanted. The
+default is `geom`'s track epoch, which is the midpoint only for a single-scan
 geometry.
 
 Returns a `DimStack` over `AntennaPair × FeedPair` whose layers are the seven

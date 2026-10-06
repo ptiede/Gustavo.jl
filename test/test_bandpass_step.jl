@@ -55,7 +55,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     )
 
     @testset "the bandpass step solves only its own components" begin
-        @test length(fr_n.components) == 4
+        @test length(fr_n.components) == 3
         @test any(!=(0), _bp_phase(bp_n))
         @test any(!=(0), _bp_amp(bp_n))
         @test collect(keys(bp_n.steps)) == [:bandpass]

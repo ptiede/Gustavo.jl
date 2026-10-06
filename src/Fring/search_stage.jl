@@ -18,18 +18,14 @@ The default model of a [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit) ste
 standard VLBI fringe model, phase components only (each key names its
 component; the order is the parameter order):
 
-1. `atmos` — per-scan constant phase, feed-common (atmosphere/clock).
-2. `mbd` — per-scan wideband delay, feed-common.
-3. `rel_delay` — inter-feed delay offset, `Ti = rel_time`,
+1. `mbd` — per-scan wideband delay, feed-common.
+2. `rel_delay` — inter-feed delay offset, `Ti = rel_time`,
    `Feed = SingleFeed(2)`: the instrumental feed-2 − feed-1 group-delay
    offset.
-4. `rate` — per-scan rate, feed-common. There is no feed-specific rate: the
+3. `rate` — per-scan rate, feed-common. There is no feed-specific rate: the
    inter-feed rate is negligible (EHT-HOPS convention). A genuine offset is
    added with
-   `merge(default_fringe_terms(); phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = SingleFeed(2))))`;
-   an added rate component must carry the same time segmentation as the
-   constants beside it, so one epoch zeroes every rate coordinate at once —
-   see [`scan_phase_epoch`](@ref).
+   `merge(default_fringe_terms(); phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = SingleFeed(2))))`.
 
 `rel_time` is the inter-feed delay's time segmentation: `PerScan()` (the
 default) fits an offset per scan, so its scan-to-scan scatter is an
@@ -38,21 +34,18 @@ fits one offset per station for the whole track (the EHT-HOPS / rPICARD
 assumption) — bright scans pin it and weak scans inherit it, at the cost of
 coupling every scan into one system, solved after every scan is searched.
 
-There is no inter-feed phase offset. A feed-2 constant is not separable from
-the source's cross-hand phase (the model has no source column), so fitting
-one would remove the source's polarization angle along with the instrument's
-offset. Omitting it costs nothing: the offset lands in the feed-common
-constant, which cancels in every feed difference, and the R–L phase stays in
-the data for a downstream polarization fit — `QQ − PP` on one baseline
-measures it directly at parallel-hand SNR (see `DetectionRow`'s `phase`).
-The inter-feed DELAY is kept because a delay decoheres across the band, so
-leaving it in costs signal.
+The step fits no constant phase. A station's per-scan phase trades against
+the source's phase, so the data do not determine it without a source model;
+it stays in the data for imaging or self-calibration. The later steps do not
+need it: [`Bandpass`](@ref Gustavo.Bandpass) aligns each scan's band-averaged
+phase per baseline and feed pair, and [`AdhocPhase`](@ref Gustavo.AdhocPhase)
+removes each track's scan mean. The inter-feed delay is fit because a delay
+decoheres across the band, so leaving it in costs signal.
 
 Add or replace a component with [`merge`](@ref Base.merge(::GainModel)).
 """
 default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = GainModel(
     phase = (
-        atmos = GainComponent(ConstantTerm(); Ti = PerScan(), Feed = SharedFeeds()),
         mbd = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds()),
         rel_delay = GainComponent(Delay(); Ti = rel_time, Feed = SingleFeed(2)),
         rate = GainComponent(Rate(); Ti = PerScan(), Feed = SharedFeeds()),
@@ -95,7 +88,7 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 
 # What the matched filter does with a compiled component's θ block:
 #
-#   :delay / :rate / :phase — stage B's station system of that kind writes it,
+#   :delay / :rate          — stage B's station system of that kind writes it,
 #                             from the per-baseline search observable of the
 #                             same name.
 #   nothing                 — the matched filter does not touch it.
@@ -108,28 +101,24 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 # unfittable by the matched filter rather than approximated: `_solve_kind_cols!`
 # writes one θ column per (station, feed, time) node — the block's first
 # parameter at the first frequency segment — so a multi-parameter term such as a
-# polynomial would have its trailing parameters left at zero, and a
-# frequency-resolved term such as `ConstantTerm` over `ChannelBlocks` would have
-# every segment but the first left at zero while the search wrote its band-wide
-# phase into that one. A `Dispersion` or `FreqGroups`-segmented term falls
-# through to `nothing` on the term/freq-type checks below, so `can_fit` rejects
-# either.
+# polynomial would have its trailing parameters left at zero. A constant phase,
+# a `Dispersion` and a frequency-segmented term fall through to `nothing` on the
+# checks below, so `can_fit` rejects them.
 #
 # The time axis is not decided here: whether a segmentation leaves a scan with
 # more than one θ column depends on the scan lengths, so `can_fit` answers it
 # against the geometry.
 function matched_kind(tc)
-    # The per-baseline search measures one delay/rate/phase across the whole
+    # The per-baseline search measures one delay and rate across the whole
     # band, so only a component spanning it can receive that estimate.
     tc.Frequency isa GlobalFrequency || return nothing
     term = tc.term
     term isa Delay && return :delay
     term isa Rate && return :rate
-    term isa ConstantTerm && return :phase
     return nothing
 end
 
-# Stage-B engine components `(plan, kind)` — the delay/rate/phase terms the
+# Stage-B engine components `(plan, kind)` — the delay and rate terms the
 # search + stationization solve, as declared by `matched_kind`, over every
 # phase component of `model`. Called on a single step's own private model
 # (the fringe step's), so every component here genuinely belongs to that step
@@ -139,7 +128,7 @@ function fringe_stage_components(model, layout)
     comps = Tuple{ComponentPlan, Symbol}[]
     for (i, tc) in enumerate(phase_components(model))
         kind = matched_kind(tc)
-        kind in (:delay, :rate, :phase) || continue
+        kind in (:delay, :rate) || continue
         push!(comps, (layout.plans[i], kind))
     end
     return comps
@@ -147,7 +136,7 @@ end
 
 # ── The matched filter's capability ──────────────────────────────────────────
 
-# One search per scan group yields one (delay, rate, phase) per scan, written to
+# One search per scan group yields one (delay, rate) per scan, written to
 # the θ column holding the scan's first epoch. A term whose time segmentation
 # splits a scan therefore has every other column of that scan left at identity
 # while `calibrate` places each sample in the column its own epoch falls in, so
@@ -184,7 +173,6 @@ function validate_fringe_model(model)
     for (kind, what) in (
             (:delay, "a delay component (the per-baseline delay search has nowhere to go)"),
             (:rate, "a rate component (the per-baseline rate search has nowhere to go)"),
-            (:phase, "a constant-phase component (the station phase solve has nowhere to go)"),
         )
         kind in kinds || throw(
             ArgumentError(
@@ -349,70 +337,6 @@ function scan_station_terms(model, layout, θ, ti::Integer, stations)
         hr && (rate[a, f] = r)
     end
     return (delay, rate)
-end
-
-"""
-    scan_phase_epoch(model, layout, ti) -> Union{Float64, Nothing}
-
-The epoch (seconds) at which `model`'s constant phase terms are the phase, for the
-time segment holding time index `ti`: the origin of the rate columns covering
-that segment, since a rate contributes `2π·ṙ·(t − t0)` and vanishes only there.
-`nothing` when the model carries no rate component, which leaves the constant
-free of any epoch.
-
-A search must reference its detection phases to this epoch, or the station
-solve reads them as a constant they are not. Getting it wrong is not a bias but
-a variance: a phase quoted a lever arm `Δt` from where it was measured inherits
-`2π·σ_ṙ·Δt` of the rate's own uncertainty, which the feed-common columns can
-absorb through their rate but a feed-relative offset — modeled with no rate of
-its own — cannot.
-
-Rate components of different time segmentations put their origins in different
-places, and no single epoch then zeroes them all; that model is rejected rather
-than silently referenced to one of them.
-"""
-scan_phase_epoch(model, layout, ti::Integer) =
-    _scan_epoch(fringe_stage_components(model, layout), ti)
-
-function _scan_epoch(comps, ti::Integer)
-    epoch = nothing
-    for (plan, kind) in comps
-        kind === :rate || continue
-        o = Float64(plan.tstate[plan.tseg_id[ti]])
-        if isnothing(epoch)
-            epoch = o
-        elseif !isapprox(o, epoch; atol = _epoch_atol(epoch))
-            throw(
-                ArgumentError(
-                    "scan_phase_epoch: the model's rate components disagree on the epoch of " *
-                        "time index $ti ($epoch s vs $o s). A constant phase is the phase at " *
-                        "the epoch where every rate coordinate vanishes, and rate components " *
-                        "with different time segmentations have no such epoch in common. Give " *
-                        "every Rate term the same time segmentation as the constant it " *
-                        "accompanies (`PerScan()` for `default_fringe_terms`).",
-                )
-            )
-        end
-    end
-    return epoch
-end
-
-"""
-    validate_scan_epochs(comps, ntimes)
-
-Reject a model whose rate components disagree on the constant-phase epoch at
-Any time index — the [`scan_phase_epoch`](@ref) error, raised over the whole
-time axis at once so a fringe pass fails before it reads any data rather than
-mid-stream at the first offending scan. `comps` is
-`fringe_stage_components`' output; a model with at most one rate
-component cannot disagree and is skipped outright.
-"""
-function validate_scan_epochs(comps, ntimes::Integer)
-    count(((plan, kind),) -> kind === :rate, comps) < 2 && return nothing
-    for ti in 1:ntimes
-        _scan_epoch(comps, ti)
-    end
-    return nothing
 end
 
 """

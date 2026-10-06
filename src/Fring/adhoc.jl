@@ -464,6 +464,57 @@ function _regauge!(x, freedoms::GaugeFreedoms, gauge::AbstractGauge)
     return x
 end
 
+# Maximum-weight spanning-tree phase seed on `nnodes` nodes. Each tree edge
+# `(u, v, y, w)` observes `φ[u] − φ[v] = y`, wrapped, with weight `w`. The tree
+# grown from each anchor (Prim) attaches the heaviest edge leaving the visited
+# set, so a node joined to the tree by a weak edge and a strong one takes its
+# branch from the strong one. Anchors, and nodes no tree reaches, stay 0.
+function _prim_seed(::Type{T}, nnodes::Integer, tree_edges, anchors) where {T}
+    x = zeros(T, nnodes)
+    adj = [Tuple{Int, T, T}[] for _ in 1:nnodes]
+    for (u, v, y, w) in tree_edges
+        push!(adj[u], (v, -y, w))
+        push!(adj[v], (u, y, w))
+    end
+    visited = falses(nnodes)
+    for p in anchors
+        (1 <= p <= nnodes && !visited[p]) || continue
+        visited[p] = true
+        while true
+            best_w = T(-Inf)
+            best_u = best_v = 0
+            best_add = zero(T)
+            for u in eachindex(visited)
+                visited[u] || continue
+                for (v, add, w) in adj[u]
+                    (!visited[v] && w > best_w) || continue
+                    best_w, best_u, best_v, best_add = w, u, v, add
+                end
+            end
+            best_v == 0 && break
+            x[best_v] = x[best_u] + best_add
+            visited[best_v] = true
+        end
+    end
+    return x
+end
+
+# Solve `A x ≈ b` for phases `b` known modulo 2π: move each observation by whole
+# turns to the branch nearest the model `A x`, starting from `xseed`, and
+# re-solve, `iters + 1` times in all. Returns the solution and the unwrapped
+# observations it fits.
+function _rewrap_solve(solve, A, b, xseed, iters::Integer)
+    twopi = 2 * eltype(b)(π)
+    x = xseed
+    bw = similar(b)
+    for _ in 0:iters
+        model = A * x
+        @. bw = b + twopi * round((model - b) / twopi)
+        x = solve(bw)
+    end
+    return x, bw
+end
+
 # Circular (complex-phasor) solve of one AP's system, z_a ← Σ_b w·e^{iφ_ab}·z_b,
 # gauged at the anchor. It seeds the linear solve at APs with no usable
 # warm-start snapshot and must not be replaced by a cold linear solve: the

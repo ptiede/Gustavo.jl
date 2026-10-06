@@ -4,12 +4,16 @@ CurrentModule = Gustavo.Fring
 
 # [Fringe fitting](@id fringe-fitting)
 
-Fringe fitting estimates, for each station, the delay, fringe rate and phase
-that align the visibility phasor across frequency and time. It proceeds in two
+Fringe fitting estimates, for each station, the delay and fringe rate that
+align the visibility phasor across frequency and time. It proceeds in two
 stages. The first estimates a delay, rate and phase for each baseline and
 correlation product separately, by maximizing a matched filter. The second
-treats those estimates as differences of per-station quantities and solves for
-the stations by weighted least squares.
+treats the delays and rates as differences of per-station quantities and
+solves for the stations by weighted least squares.
+
+The per-scan station phase is not solved. It trades against the source's own
+phase, so the data do not determine it without a source model; it is left in
+the data for imaging or self-calibration.
 
 Both stages are derived below. The choice of which parameters are solved, at
 what time and frequency resolution, and with what tying across feeds belongs to
@@ -366,8 +370,6 @@ baseline ``(a,b)`` and correlation product ``p`` with feeds ``(f_a, f_b)``,
 \tau^p_{ab} = \tau_{a,f_a} - \tau_{b,f_b},
 \qquad
 \dot r^p_{ab} = \dot r_{a,f_a} - \dot r_{b,f_b},
-\qquad
-\varphi^p_{ab} = \varphi_{a,f_a} - \varphi_{b,f_b},
 ```
 
 so each observable gives a linear system ``M x = y`` on a graph of
@@ -415,24 +417,13 @@ rows of one scan, so these factors do not affect the fit. They fix the meaning
 of the normalized residual ``z = r\sqrt{w}``, on which the robust loss
 thresholds.
 
-### Cross-hand rows
+### Rows relating different feeds
 
-All four correlation products contribute rows. A cross-hand row connects a
-feed-1 node to a feed-2 node, merging the two feeds into a single connected
-component. The inter-feed offset is then determined by the data, and no
-separate alignment step is required. Which parameters a row enters follows from
-the model's feed tying; the product is not treated as a special case.
-
-The phase system is an exception when the model carries no feed-relative phase
-term. This is the default, the R–L offset being left in the data for a
-subsequent polarization fit. The four product families are then mutually
-inconsistent: a QQ row sits a station-based offset away from its PP
-counterpart, and a cross-hand row adds the source's cross-hand phase. Fitting
-them to a single shared parameter returns a weighted compromise between them.
-That system is therefore augmented with per-(scan, station) nuisance feed-2
-offset parameters, so that the shared parameter is the feed-1 phase, and
-cross-hand rows are withheld from it. What those rows would constrain beyond
-the parallel hands is the common mode of the offsets, which is discarded.
+Every correlation product contributes a row. A row relating different feeds
+connects a node of one feed to a node of another, merging the feeds into a
+single connected component, so the inter-feed offset is determined by the data
+and no separate alignment step is required. Which parameters a row enters
+follows from the model's feed tying; no product is treated as a special case.
 
 ### Gauge freedom
 
@@ -452,9 +443,16 @@ station. A component receives a constraint row when shifting all of its
 columns by a constant leaves every accepted detection unchanged. Per-scan
 columns therefore give one constraint per scan, even when a column spanning
 scans (a track-global feed-2 offset) couples them, and a feed-2 offset receives
-its own constraint only when no accepted cross-hand detection determines it.
-Under `PinAntenna` the reference station then reads zero in every scan, and its
-feed-2 offset reads zero when the data carry no cross hands. Any other
+its own constraint only when no accepted detection relating different feeds
+determines it. Under `PinAntenna` the reference station then reads zero in
+every scan, and its feed-2 offset reads zero when the data carry no such
+products. A freedom that moves columns of several components together, as when
+a station's feed order differs from the reference's and no accepted detection
+relates different feeds, is fixed by setting one (station, feed) value to
+zero, at the gauge's preferred station where it can. Whenever a fringe group's
+feeds are not linked by an accepted detection, so that the offset between them
+is set by the gauge rather than measured, the step warns, naming the scans.
+Any other
 undetermined combination of columns, such as two feed-2 offsets that every
 detection sees only as their sum, is an error.
 
@@ -487,13 +485,13 @@ reference's value equal across scans, implements
 [`gauge_constraints`](@ref Gustavo.Calibration.gauge_constraints)`(g, freedoms)`
 instead, returning `C` and `d` for all freedoms of one system.
 
-The phase-unwrap seed and the joint bandpass solve also need one node per
-freedom; [`gauge_anchor`](@ref Gustavo.Calibration.gauge_anchor) supplies it,
-by default the first station of
+The joint bandpass solve also needs one node per freedom;
+[`gauge_anchor`](@ref Gustavo.Calibration.gauge_anchor) supplies it, by
+default the first station of
 [`gauge_station_order`](@ref Gustavo.Calibration.gauge_station_order) present
-in the freedom. The joint bandpass solve pins that node, and the adhoc phase
-solve pins the first station of `gauge_station_order` it sees in the scan;
-neither reads a gauge's constraints.
+in the freedom, and the solve pins that node. The adhoc phase solve smooths
+its tracks in a frame independent of the gauge and applies the gauge's
+constraint to each integration afterwards.
 
 ### Detection threshold and robust weighting
 

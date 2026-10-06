@@ -185,8 +185,10 @@ turn, solve the following phase components
 — this is the standard VLBI calibration model, and each tying below is a
 physics decision:
 
-**`atmos` — per-scan constant phase, feed-common.** The atmosphere/clock
-phase that varies scan to scan and is the same for both polarization feeds.
+There is no per-scan constant phase. A station's per-scan phase trades
+against the source's own phase, so the data do not determine it without a
+source model; it is left for imaging or self-calibration — see
+[`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms).
 
 **`mbd` — per-scan wideband (multi-band) delay, feed-common.** One slope
 across the whole band per scan.
@@ -196,16 +198,10 @@ feed-2 − feed-1 group-delay offset. `PerScan()` (the default) fits it per
 scan, so its scan-to-scan scatter is an instrument-stability diagnostic and
 no column couples scans; `GlobalTime()` fits one offset per station for the
 whole track (the EHT-HOPS / rPICARD assumption), so bright scans pin it and
-weak scans inherit it through the shared column. There is deliberately no
-inter-feed *phase* offset: a feed-2 constant is not separable from the
-source's cross-hand phase, so fitting one would remove the source's
-polarization angle along with the instrument's offset — see
-[`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms) for the
-full argument.
+weak scans inherit it through the shared column.
 
 **`rate` — per-scan fringe rate, feed-common.** The fringe rate is common to
-both feeds, so it is tied across them exactly like the per-scan constant and
-delay. Solving it `PerFeed` instead lets a spurious inter-feed rate
+both feeds, so it is tied across them exactly like the delay. Solving it `PerFeed` instead lets a spurious inter-feed rate
 (`ṙ₂ − ṙ₁`) float on noise — and, multiplied by the hours-long rate lever
 arm, inject arbitrary scan-to-scan cross-hand phase jumps. The inter-feed
 rate is negligible (EHT-HOPS), so it is tied; a genuine offset would be

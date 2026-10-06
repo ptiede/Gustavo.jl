@@ -13,7 +13,6 @@ using OhMyThreads: tforeach, tmap, DynamicScheduler, SerialScheduler, TaskLocalV
 using ..Gustavo: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, AntennaPair, FeedPair, AntennaName,
     feed_pairs, check_layer_axes, _cell_plane
 using ..Calibration
-using ..Calibration: _epoch_atol
 import XRadio
 using OrderedCollections: OrderedDict
 using DensityInterface: logdensityof

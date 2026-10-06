@@ -227,20 +227,6 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             parent(gains(sol_b))
     end
 
-    @testset "rate components must share the constant-phase epoch" begin
-        # Two scans: the per-scan rate's origins (scan centers) then cannot
-        # all coincide with the track-wide rate's single origin.
-        ps, _ = _build_fringe_ps(nscans = 2)
-        # A second rate on a different time segmentation puts its origin in a
-        # different place, so no single epoch zeroes both rate coordinates;
-        # the fit rejects the model before its fringe pass reads any data.
-        bad = merge(
-            default_fringe_terms();
-            phase = (; rate2 = GainComponent(Rate(); Ti = GlobalTime(), Feed = SingleFeed(2))),
-        )
-        @test_throws "disagree on the epoch" fit(BaselineFringeFit(; model = bad, gauge), ps)
-    end
-
     @testset "solution Zarr round-trip" begin
         ps, _ = _build_fringe_ps()
         ws = Dict("A1" => 1.0, "A2" => 0.5, "A3" => 1.0, "A4" => 1.0)

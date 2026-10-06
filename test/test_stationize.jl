@@ -9,55 +9,38 @@ using Statistics: mean
 const FR = Gustavo.Fring
 const CALs = Gustavo.Calibration
 
-# Sign with which an unresolved source's cross-hand phase enters a product with
-# feeds (fa, fb): +1 on (1,2), −1 on (2,1), 0 on parallel hands.
-_cross_sign(fa, fb) = fa == fb ? 0 : (fa < fb ? 1 : -1)
-
 # Build a noiseless per-baseline detection matrix from injected per-(station,
-# feed) delays/rates/phases and a source cross-hand phase χ. Baselines are exact
-# station differences, with ±χ added to the cross-hand phase rows.
-#
-# χ enters the phase rows exactly as a rigid −χ shift of every feed-2 station
-# phase, so it is not separable from the instrumental inter-feed offset — the
-# solve absorbs it rather than estimating it. `absorbed_phase` is the station
-# phase the solve can actually recover from data built this way.
-function inject_detections(bl_pairs, pol_products, τ, ṙ, φ, χ; snr = 100.0, pfa = 0.0)
+# feed) delays/rates (and optionally phases). Baselines are exact station
+# differences.
+function inject_detections(bl_pairs, pol_products, τ, ṙ; φ = zero(τ), snr = 100.0, pfa = 0.0)
     nbl, npol = length(bl_pairs), length(pol_products)
     feeds = collect(pol_products)
     D = Matrix{FR.Detection{Float64}}(undef, nbl, npol)
     for bi in 1:nbl, p in 1:npol
         a, b = bl_pairs[bi]
         fa, fb = feeds[p]
-        cs = _cross_sign(fa, fb)
         delay = τ[a, fa] - τ[b, fb]
         rate = ṙ[a, fa] - ṙ[b, fb]
-        phase = rem2pi(φ[a, fa] - φ[b, fb] + cs * χ, RoundNearest)
+        phase = rem2pi(φ[a, fa] - φ[b, fb], RoundNearest)
         D[bi, p] = FR.Detection{Float64}((delay, rate, phase, 1.0, snr, pfa, true))
     end
     return D
 end
 
-# The per-(station, feed) phase a χ-carrying injection is estimable up to: feed 1
-# untouched, feed 2 shifted by −χ.
-absorbed_phase(φ, χ) = hcat(φ[:, 1], φ[:, 2] .- χ)
-
 # Max |measured − model-from-solution| over all valid, non-auto baselines.
 function recon_residuals(D, sol, bl_pairs, pol_products)
     feeds = collect(pol_products)
-    rd = rr = rp = 0.0
+    rd = rr = 0.0
     for bi in eachindex(bl_pairs), p in eachindex(pol_products)
         det = D[bi, p]
         det.valid || continue
         a, b = bl_pairs[bi]
         a == b && continue
         fa, fb = feeds[p]
-        cs = _cross_sign(fa, fb)
         rd = max(rd, abs(det.delay - (sol.delay[a, fa] - sol.delay[b, fb])))
         rr = max(rr, abs(det.rate - (sol.rate[a, fa] - sol.rate[b, fb])))
-        mph = sol.phase[a, fa] - sol.phase[b, fb]
-        rp = max(rp, abs(rem2pi(det.phase - mph, RoundNearest)))
     end
-    return (delay = rd, rate = rr, phase = rp)
+    return (delay = rd, rate = rr)
 end
 
 all_baselines(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
@@ -69,6 +52,10 @@ all_baselines(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
 # shares the same factor.
 const SCAN_SPREAD = (freq_rms = 2.0e9 / sqrt(12), time_rms = 300.0 / sqrt(12))
 
+# CRB σ of one delay / rate detection at `snr` on that geometry.
+delay_sigma(snr) = inv(2π * SCAN_SPREAD.freq_rms * snr)
+rate_sigma(snr) = inv(2π * SCAN_SPREAD.time_rms * snr)
+
 # Station `i` of these fixtures is named "A$i"; `STATIONS` numbers them so.
 const STATIONS = ["A$i" for i in 1:64]
 named(bl) = [(STATIONS[a], STATIONS[b]) for (a, b) in bl]
@@ -76,17 +63,13 @@ detstack(D, bl, pols; kw...) = FR.detection_stack(D, named(bl), pols; SCAN_SPREA
 solve_named!(θ, scans, comps; kw...) = FR.solve_station_systems!(θ, scans, comps, STATIONS; kw...)
 
 # The station model these tests are written against: one column per (station,
-# feed) for each of delay, rate and constant phase, over a single scan.
+# feed) for each of delay and rate, over a single scan.
 function perfeed_scan_layout(nant)
     geom = CALs.DataGeometry(; nfeed = 2,
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
-    model = CALs.GainModel(
-        phase = (
-            offset = mk(CALs.ConstantTerm()), delay = mk(CALs.Delay()), rate = mk(CALs.Rate()),
-        ),
-    )
+    model = CALs.GainModel(phase = (delay = mk(CALs.Delay()), rate = mk(CALs.Rate())))
     return CALs.plan_parameters(model, nant, geom)
 end
 
@@ -115,12 +98,11 @@ function stationize(
         spreads = SCAN_SPREAD,
     )
     layout = perfeed_scan_layout(nant)
-    cplan, dplan, rplan = layout.plans[1], layout.plans[2], layout.plans[3]
+    dplan, rplan = layout.plans[1], layout.plans[2]
     θ = zeros(layout.nθ)
     scans = (FR.detection_stack(D, named(bl), pols; ti = 1, spreads...),)
     ncomp, ref_covered = solve_named!(
-        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate));
-        gauge = gauge, opts = opts,
+        θ, scans, ((dplan, :delay), (rplan, :rate)); gauge, opts,
     )
     touched = touched_cells(D, bl, pols, nant, opts)
     readcols(plan) = [
@@ -130,7 +112,7 @@ function stationize(
             for a in 1:nant, f in 1:2
     ]
     return (;
-        delay = readcols(dplan), rate = readcols(rplan), phase = readcols(cplan),
+        delay = readcols(dplan), rate = readcols(rplan),
         covered = touched, ncomp, ref_covered,
     )
 end
@@ -143,36 +125,23 @@ end
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)         # small enough to avoid wraps
-    χ = 0.6
 
-    D = inject_detections(bl, pols, τ, ṙ, φ, χ)
+    D = inject_detections(bl, pols, τ, ṙ)
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
 
-    @test size(sol.delay) == size(sol.rate) == size(sol.phase) == (nant, 2)
+    @test size(sol.delay) == size(sol.rate) == (nant, 2)
 
-    # Cross hands tie the feeds: delay is one component, gauged at (ref, feed1).
+    # Products relating different feeds tie the feeds: one component, gauged at
+    # (ref, feed1), for delay and rate alike.
     for a in 1:nant, f in 1:2
         @test isapprox(sol.delay[a, f], τ[a, f] - τ[ref, 1]; atol = 1.0e-18)
-    end
-    # Every product's rate row enters the system, so cross hands tie the feeds
-    # here exactly as they do for delay: one component, gauged at (ref, feed1).
-    for a in 1:nant, f in 1:2
         @test isapprox(sol.rate[a, f], ṙ[a, f] - ṙ[ref, 1]; atol = 1.0e-12)
-    end
-    # Phase: cross hands merge the feeds into one component, gauged at (ref, feed1).
-    # The source's χ is absorbed as a rigid −χ shift of every feed-2 phase, so what
-    # comes back is `absorbed_phase`, not φ itself.
-    ψ = absorbed_phase(φ, χ)
-    for a in 1:nant, f in 1:2
-        @test isapprox(rem2pi(sol.phase[a, f] - (ψ[a, f] - ψ[ref, 1]), RoundNearest), 0.0; atol = 1.0e-10)
     end
 
     # Solution reconstructs every product (closure of the data).
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-15
     @test r.rate < 1.0e-12
-    @test r.phase < 1.0e-9
 end
 
 @testset "Stationize: the solve runs in the options' element type" begin
@@ -186,7 +155,7 @@ end
     nant = 5
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2), 0.3 .* randn(rng, nant, 2), 0.6)
+    D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2))
     D32 = map(d -> FR.Detection{Float32}(Tuple(d)), D)
     s64 = stationize(D, bl, pols, nant)
     for d in (D, D32)
@@ -194,13 +163,12 @@ end
         @test s32.ref_covered == s64.ref_covered
         @test s32.delay ≈ s64.delay atol = 1.0e-15
         @test s32.rate ≈ s64.rate atol = 1.0e-9
-        @test s32.phase ≈ s64.phase atol = 1.0e-5
     end
 
     layout = perfeed_scan_layout(nant)
     scans = (FR.detection_stack(D32, named(bl), pols; ti = 1, SCAN_SPREAD...),)
     slot = Dict(n => i for (i, n) in pairs(STATIONS))
-    for (T, kind, plan) in ((Float32, :delay, layout.plans[2]), (Float64, :phase, layout.plans[1]))
+    for (T, kind, plan) in ((Float32, :delay, layout.plans[1]), (Float64, :rate, layout.plans[2]))
         r = @inferred FR._solve_kind_cols!(
             zeros(layout.nθ), scans, [plan], slot, PinAntenna(1),
             FR.Stationization(eltype = T), Val(kind),
@@ -209,97 +177,41 @@ end
     end
 end
 
-@testset "Stationize: source cross-hand phase is absorbed, not fitted" begin
-    # The source's cross-hand phase enters the phase system as a rigid shift of the
-    # feed-2 block, so it is not separable from the instrumental inter-feed offset.
-    # Injecting it must therefore leave every fitted row prediction and every feed-1
-    # phase untouched, moving only the feed-2 phases — all of them by the same
-    # constant. A solve carrying station phases alone represents this data exactly.
-    rng = MersenneTwister(0x2C41)
-    nant = 5
-    ref = 1
-    bl = all_baselines(nant)
-    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    τ = 1.0e-9 .* randn(rng, nant, 2)
-    ṙ = 1.0e-3 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)
-    χ = 0.8
-
-    sol0 = stationize(inject_detections(bl, pols, τ, ṙ, φ, 0.0), bl, pols, nant; gauge = PinAntenna(ref))
-    Dχ = inject_detections(bl, pols, τ, ṙ, φ, χ)
-    solχ = stationize(Dχ, bl, pols, nant; gauge = PinAntenna(ref))
-
-    # Feed 1 is untouched.
-    for a in 1:nant
-        @test isapprox(rem2pi(solχ.phase[a, 1] - sol0.phase[a, 1], RoundNearest), 0.0; atol = 1.0e-10)
-    end
-    # Feed 2 moves rigidly: every station shifts by the SAME constant.
-    shifts = [rem2pi(solχ.phase[a, 2] - sol0.phase[a, 2], RoundNearest) for a in 1:nant]
-    for a in 1:nant
-        @test isapprox(rem2pi(shifts[a] - shifts[1], RoundNearest), 0.0; atol = 1.0e-10)
-    end
-    # And the fit still reproduces every measured row, cross hands included.
-    @test recon_residuals(Dχ, solχ, bl, pols).phase < 1.0e-9
-    # Delay and rate carry no cross-hand source term at all.
-    @test maximum(abs, filter(isfinite, solχ.delay .- sol0.delay)) < 1.0e-18
-end
-
-@testset "Stationize: inter-feed offset recovered from cross hands" begin
+@testset "Stationize: inter-feed offset recovered from products relating different feeds" begin
     rng = MersenneTwister(0x99)
     nant = 4
     ref = 1
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    # Feed-2 = feed-1 + a per-station inter-feed offset (delay and phase).
+    # Feed-2 = feed-1 + a per-station inter-feed delay offset.
     τ1 = 2.0e-9 .* randn(rng, nant)
     rel_delay = 5.0e-9 .* randn(rng, nant)
     τ = hcat(τ1, τ1 .+ rel_delay)
-    ṙ = zeros(nant, 2)
-    φ1 = 0.2 .* randn(rng, nant)
-    rel_phase = 0.4 .* randn(rng, nant)
-    φ = hcat(φ1, φ1 .+ rel_phase)
-    χ = -0.3
 
-    D = inject_detections(bl, pols, τ, ṙ, φ, χ)
+    D = inject_detections(bl, pols, τ, zeros(nant, 2))
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
 
-    # Delay is ONE component (both feeds share the ref-feed-1 gauge via cross-hand
-    # delay), so the per-station inter-feed offset is recovered *absolutely*.
+    # Delay is ONE component (both feeds share the ref-feed-1 gauge), so the
+    # per-station inter-feed offset is recovered *absolutely*.
     for a in 1:nant
         recovered = sol.delay[a, 2] - sol.delay[a, 1]
         @test isapprox(recovered, rel_delay[a]; atol = 1.0e-15)
     end
-    @test sol.ncomp == 1                                # cross hands merge feeds
+    @test sol.ncomp == 1
 end
 
-@testset "Stationize: parallel-hand triangle closure ≈ 0" begin
+@testset "Stationize: same-feed triangle closure ≈ 0" begin
     rng = MersenneTwister(0x04)
     nant = 5
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), zeros(nant, 2), 0.25 .* randn(rng, nant, 2), 0.5)
-    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
-    # Parallel-hand products (PP=1, QQ=4) close exactly on noiseless data.
+    D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), zeros(nant, 2); φ = 0.25 .* randn(rng, nant, 2))
+    # Same-feed products (11 = 1, 22 = 4) close exactly on noiseless data.
     for prod in (1, 4), obs in (:delay, :phase)
         res = FR.station_closure_residuals(detstack(D, bl, pols; ti = 1); observable = obs, feeds = pols[prod])
         @test !isempty(res)
         @test maximum(abs, res) < 1.0e-9
     end
-end
-
-@testset "Stationize: phase re-wrap handles |Δφ| > π" begin
-    rng = MersenneTwister(0x2025)
-    nant = 5
-    ref = 1
-    bl = all_baselines(nant)
-    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    # Per-feed phases large enough that a fraction of station differences exceed
-    # ±π and wrap (realistic residual-phase scale after delay/rate removal).
-    φ = 1.2 .* randn(rng, nant, 2)
-    D = inject_detections(bl, pols, zeros(nant, 2), zeros(nant, 2), φ, 0.0)
-    sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref), opts = FR.Stationization(phase_rewrap_iters = 6))
-    r = recon_residuals(D, sol, bl, pols)
-    @test r.phase < 1.0e-8                              # re-wrap closes despite wrapping
 end
 
 @testset "Stationize: disconnected array (two islands)" begin
@@ -310,26 +222,23 @@ end
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)
-    D = inject_detections(bl, pols, τ, ṙ, φ, 0.4)
+    D = inject_detections(bl, pols, τ, ṙ)
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     @test sol.ncomp == 2                                # one component per island (feeds tied within each)
     # Reconstruction is gauge-invariant → residuals close within each island.
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-15
-    @test r.phase < 1.0e-9
+    @test r.rate < 1.0e-12
 end
 
-@testset "Stationize: parallel-only fallback (cross hands undetected)" begin
+@testset "Stationize: same-feed-only fallback (different-feed products undetected)" begin
     rng = MersenneTwister(0x07)
     nant = 5
     ref = 1
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)
-    D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.5)
-    # Knock out every cross-hand detection (low SNR).
+    D = inject_detections(bl, pols, τ, zeros(nant, 2))
     feeds = collect(pols)
     for bi in eachindex(bl), p in eachindex(pols)
         if feeds[p][1] != feeds[p][2]
@@ -338,11 +247,10 @@ end
         end
     end
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
-    @test sol.ncomp == 2                                # feeds NOT tied without cross hands
+    @test sol.ncomp == 2                                # feeds NOT tied
     # Each feed gauged independently; delay relative to that feed's ref.
     for a in 1:nant, f in 1:2
         @test isapprox(sol.delay[a, f], τ[a, f] - τ[ref, f]; atol = 1.0e-15)
-        @test isapprox(rem2pi(sol.phase[a, f] - (φ[a, f] - φ[ref, f]), RoundNearest), 0.0; atol = 1.0e-10)
     end
 end
 
@@ -358,8 +266,7 @@ end
     rng = MersenneTwister(0x9c31)
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)
-    D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
+    D = inject_detections(bl, pols, τ, ṙ)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(absent_ref))
     @test sol.ref_covered == Set((STATIONS[a], f, 1) for a in 1:4 for f in 1:2)
@@ -369,7 +276,6 @@ end
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-20
     @test r.rate < 1.0e-15
-    @test r.phase < 1.0e-10
 
     # Pin-invariance: the same data referenced to a present station reports the
     # same coverage, so a reporting reference can be chosen after the solve.
@@ -387,14 +293,13 @@ end
     rng = MersenneTwister(0x4a17)
     τ = 1.0e-9 .* randn(rng, nant, 2)
     ṙ = 1.0e-3 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)
-    D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
+    D = inject_detections(bl, pols, τ, ṙ)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     @test sol.ref_covered == Set((STATIONS[a], f, 1) for a in 1:nant for f in 1:2)
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-20
-    @test r.phase < 1.0e-10
+    @test r.rate < 1.0e-15
 end
 
 @testset "Stationize: a reference-free component pins its best-observed node" begin
@@ -407,7 +312,7 @@ end
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     rng = MersenneTwister(0x1d05)
     τ = 1.0e-9 .* randn(rng, nant, 2)
-    D0 = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 100.0)
+    D0 = inject_detections(bl, pols, τ, zeros(nant, 2); snr = 100.0)
 
     # The pin is imposed as a constraint row, so the gauge zero is zero to solver
     # precision against a ~ns signal, not bit-exactly.
@@ -437,7 +342,7 @@ end
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     τ = 1.0e-9 .* randn(MersenneTwister(0x33), nant, 2)
-    D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 5.0, pfa = 1.0e-3)
+    D = inject_detections(bl, pols, τ, zeros(nant, 2); snr = 5.0, pfa = 1.0e-3)
     # Every detection at PFA 1e-3: a looser threshold accepts them and the solve
     # covers the array; a stricter one accepts nothing, so no station is
     # calibrated even though every row still entered the system.
@@ -453,15 +358,15 @@ end
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     rng = MersenneTwister(0x212)
-    τ, ṙ, φ = 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2), randn(rng, nant, 2)
-    D = inject_detections(bl, pols, τ, ṙ, φ, 0.0)
+    τ, ṙ = 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2)
+    D = inject_detections(bl, pols, τ, ṙ)
     # Station 4's detections are all noise peaks: rows in the system, none accepted.
     for bi in eachindex(bl), p in eachindex(pols)
         4 in bl[bi] && (D[bi, p] = merge(D[bi, p], (; pfa = 1.0)))
     end
     layout = perfeed_scan_layout(nant)
     θ = zeros(layout.nθ)
-    plans = ((layout.plans[1], :phase), (layout.plans[2], :delay), (layout.plans[3], :rate))
+    plans = ((layout.plans[1], :delay), (layout.plans[2], :rate))
     _, covered = solve_named!(θ, (FR.detection_stack(D, named(bl), pols; ti = 1, SCAN_SPREAD...),), plans)
     @test covered == Set((STATIONS[a], f, 1) for a in 1:3 for f in 1:2)
     for (plan, _) in plans, f in 1:2
@@ -478,11 +383,10 @@ end
     τ = 1.0e-9 .* randn(rng, nant)
     δ = 1.0e-10 .* randn(rng, nant)
     ṙ = 1.0e-3 .* randn(rng, nant)
-    φ = 0.3 .* randn(rng, nant)
     D = Matrix{FR.Detection{Float64}}(undef, length(bl), length(pols))
     for (bi, (a, b)) in pairs(bl), (p, (fa, fb)) in pairs(pols)
         delay = τ[a] + (fa == 2) * δ[a] - τ[b] - (fb == 2) * δ[b]
-        D[bi, p] = FR.Detection{Float64}((delay, ṙ[a] - ṙ[b], φ[a] - φ[b], 1.0, 100.0, 0.0, true))
+        D[bi, p] = FR.Detection{Float64}((delay, ṙ[a] - ṙ[b], 0.0, 1.0, 100.0, 0.0, true))
         if (a == lone && fa == 2) || (b == lone && fb == 2)
             D[bi, p] = FR.Detection{Float64}((delay + 3.0e-7, 0.01, 2.0, 1.0, 4.0, 1.0, true))
         end
@@ -491,16 +395,15 @@ end
     mk(term, tying) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = tying)
     model = CALs.GainModel(
         phase = (
-            atmos = mk(CALs.ConstantTerm(), CALs.SharedFeeds()),
             mbd = mk(CALs.Delay(), CALs.SharedFeeds()),
             rel_delay = mk(CALs.Delay(), CALs.SingleFeed(2)),
             rate = mk(CALs.Rate(), CALs.SharedFeeds()),
         ),
     )
     layout = CALs.plan_parameters(model, nant, geom)
-    atmos, mbd, rel, rate = layout.plans
+    mbd, rel, rate = layout.plans
     θ = zeros(layout.nθ)
-    comps = ((atmos, :phase), (mbd, :delay), (rel, :delay), (rate, :rate))
+    comps = ((mbd, :delay), (rel, :delay), (rate, :rate))
     _, covered = solve_named!(θ, (detstack(D, bl, pols; ti = 1),), comps; gauge = PinAntenna(ref))
 
     col(plan, a, f) = θ[plan_off1(plan)[a, f, 1, 1]]
@@ -511,7 +414,6 @@ end
     end
     @test col(mbd, lone, 1) ≈ τ[lone] - τ[ref] atol = 1.0e-12
     @test col(rate, lone, 1) ≈ ṙ[lone] - ṙ[ref] atol = 1.0e-9
-    @test rem2pi(col(atmos, lone, 1) - (φ[lone] - φ[ref]), RoundNearest) ≈ 0 atol = 1.0e-6
 end
 
 @testset "Stationize: rejected rows constrain but never connect" begin
@@ -521,7 +423,7 @@ end
     τ = 1.0e-9 .* randn(MersenneTwister(0x51), nant, 2)
     # One weak baseline among strong ones: it must not extend coverage, and the
     # accepted detections must still solve exactly.
-    D = inject_detections(bl, pols, τ, zeros(nant, 2), zeros(nant, 2), 0.0; snr = 100.0)
+    D = inject_detections(bl, pols, τ, zeros(nant, 2); snr = 100.0)
     strong = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
     Dw = copy(D)
     for p in eachindex(pols)
@@ -536,60 +438,42 @@ end
     @test maximum(abs, filter(isfinite, weak.delay .- strong.delay)) < 1.0e-15
 end
 
-@testset "Stationize: spanning-tree re-wrap recovers |Δφ| > π (K1)" begin
-    # A chain of high-SNR baselines (1-2-3-4-5) carries small per-step phase
-    # increments that accumulate to a station-to-station difference exceeding ±π.
-    # Redundant (lower-SNR) baselines therefore have TRUE phase differences > π,
-    # whose measured values wrap into (−π, π]. The max-weight spanning-tree seed
-    # propagates the unambiguous chain unwrapping so the redundant edges are
-    # re-wrapped to the correct 2π branch; a fit seeded from the raw wrapped
-    # observations can lock onto the wrong branch.
-    nant = 5
-    ref = 1
+@testset "Stationize: delay does not depend on feed labels" begin
+    # Swapping one station's receptor order relabels its feeds in every product it
+    # takes part in. The physical feeds are unchanged, so each must solve to the
+    # same delay under either label.
+    rng = MersenneTwister(0xfeed)
+    nant, ref, swapped = 5, 1, 3
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    feeds = collect(pols)
-
-    # Cumulative phase: φ[a] − φ[ref] grows past π along the chain.
-    φ = zeros(nant, 2)
-    for a in 1:nant
-        φ[a, 1] = 1.2 * (a - 1)            # 0, 1.2, 2.4, 3.6, 4.8  (1↔5 diff = 4.8 > π)
-        φ[a, 2] = 1.2 * (a - 1) + 0.4
-    end
-    χ = 0.3
-    τ = zeros(nant, 2)
-    ṙ = zeros(nant, 2)
-
-    # Chain edges get the highest SNR so the spanning tree follows them.
-    is_chain(a, b) = abs(a - b) == 1
-    D = Matrix{FR.Detection{Float64}}(undef, length(bl), length(pols))
-    for (bi, (a, b)) in enumerate(bl), (p, (fa, fb)) in enumerate(feeds)
-        cs = _cross_sign(fa, fb)
-        phase = rem2pi(φ[a, fa] - φ[b, fb] + cs * χ, RoundNearest)
-        snr = is_chain(a, b) ? 200.0 : 100.0
-        D[bi, p] = FR.Detection{Float64}((τ[a, fa] - τ[b, fb], ṙ[a, fa] - ṙ[b, fb], phase, 1.0, snr, 0.0, true))
+    snr = 30.0
+    D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2); snr)
+    D = map(D) do d
+        merge(d, (; delay = d.delay + 2 * delay_sigma(snr) * randn(rng), rate = d.rate + 2 * rate_sigma(snr) * randn(rng)))
     end
 
-    # At least one redundant baseline genuinely exceeds ±π in parallel hand.
-    @test any(!is_chain(a, b) && abs(φ[a, 1] - φ[b, 1]) > π for (a, b) in bl)
+    relabel(a, f) = a == swapped ? 3 - f : f
+    Dr = similar(D)
+    for (bi, (a, b)) in pairs(bl), (p, (fa, fb)) in pairs(pols)
+        Dr[bi, p] = D[bi, findfirst(==((relabel(a, fa), relabel(b, fb))), pols)]
+    end
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(ref))
-
-    # Model reproduces every measured phase (closure after correct unwrap).
-    @test recon_residuals(D, sol, bl, pols).phase < 1.0e-6
-    # The recovered absolute (unwrapped) station phases match the injected branch
-    # — not a wrapped alias. Feed-1 is gauged at (ref, feed1).
-    for a in 1:nant
-        @test isapprox(sol.phase[a, 1] - sol.phase[ref, 1], φ[a, 1] - φ[ref, 1]; atol = 1.0e-6)
+    solr = stationize(Dr, bl, pols, nant; gauge = PinAntenna(ref))
+    @test recon_residuals(D, sol, bl, pols).delay > 1.0e-13          # noisy: not a trivial exact fit
+    for a in 1:nant, f in 1:2
+        @test solr.delay[a, f] ≈ sol.delay[a, relabel(a, f)] atol = 1.0e-20
+        @test solr.rate[a, f] ≈ sol.rate[a, relabel(a, f)] atol = 1.0e-15
     end
+    @test solr.ref_covered == sol.ref_covered
 end
 
 @testset "Track-global inter-feed offset: stable across scans, weak scan inherits it" begin
-    # Two scans share ONE stable inter-feed (feed-2 − feed-1) delay/phase offset per
-    # station; the per-scan feed-common delays/phases differ. Scan 2 has NO
-    # cross-hand detections (the weak case that splits into ncomp=2 per-scan). The
-    # global SingleFeed(2) × GlobalTime offset, pinned by scan 1's cross hands,
-    # must tie scan 2's feeds too.
+    # Two scans share ONE stable inter-feed (feed-2 − feed-1) delay offset per
+    # station; the per-scan feed-common delays differ. Scan 2 has NO detections
+    # relating different feeds (the weak case that splits into ncomp=2 per-scan).
+    # The global SingleFeed(2) × GlobalTime offset, pinned by scan 1's
+    # different-feed products, must tie scan 2's feeds too.
     rng = MersenneTwister(0x5EED)
     nant = 4
     ref = 1
@@ -598,27 +482,20 @@ end
     feeds = collect(pols)
 
     δ = 1.0e-9 .* randn(rng, nant)          # track-global inter-feed delay offset (feed2 − feed1)
-    ε = 0.5 .* randn(rng, nant)             # track-global inter-feed phase offset
     Dc = [1.0e-9 .* randn(rng, nant), 1.0e-9 .* randn(rng, nant)]   # per-scan feed-common delay
-    Φc = [0.3 .* randn(rng, nant), 0.3 .* randn(rng, nant)]          # per-scan feed-common phase
-    χs = [0.6, -0.4]
 
-    function scan_det(s; with_cross)
+    function scan_det(s; mixed_feeds)
         D = Matrix{FR.Detection{Float64}}(undef, length(bl), length(pols))
         for (bi, (a, b)) in enumerate(bl), (p, (fa, fb)) in enumerate(feeds)
-            cs = _cross_sign(fa, fb)
-            valid = with_cross || cs == 0
+            valid = mixed_feeds || fa == fb
             τa = Dc[s][a] + (fa == 2 ? δ[a] : 0.0)
             τb = Dc[s][b] + (fb == 2 ? δ[b] : 0.0)
-            φa = Φc[s][a] + (fa == 2 ? ε[a] : 0.0)
-            φb = Φc[s][b] + (fb == 2 ? ε[b] : 0.0)
-            phase = rem2pi(φa - φb + cs * χs[s], RoundNearest)
-            D[bi, p] = FR.Detection{Float64}((τa - τb, 0.0, phase, 1.0, 100.0, valid ? 0.0 : 1.0, valid))
+            D[bi, p] = FR.Detection{Float64}((τa - τb, 0.0, 0.0, 1.0, 100.0, valid ? 0.0 : 1.0, valid))
         end
         return D
     end
-    D1 = scan_det(1; with_cross = true)
-    D2 = scan_det(2; with_cross = false)     # weak scan: cross hands undetected
+    D1 = scan_det(1; mixed_feeds = true)
+    D2 = scan_det(2; mixed_feeds = false)     # weak scan: different-feed products undetected
 
     geom = CALs.DataGeometry(; nfeed = 2,
         times = [0.0, 1.0, 2.0, 100.0, 101.0, 102.0],
@@ -628,39 +505,27 @@ end
     mkc(term, tseg, tying) = CALs.GainComponent(term; Ti = tseg, Frequency = CALs.GlobalFrequency(), Feed = tying)
     model = CALs.GainModel(
         phase = (
-            atmos = mkc(CALs.ConstantTerm(), CALs.PerScan(), CALs.SharedFeeds()),
-            rel_phase = mkc(CALs.ConstantTerm(), CALs.GlobalTime(), CALs.SingleFeed(2)),
             mbd = mkc(CALs.Delay(), CALs.PerScan(), CALs.SharedFeeds()),
             rel_delay = mkc(CALs.Delay(), CALs.GlobalTime(), CALs.SingleFeed(2)),
             rate = mkc(CALs.Rate(), CALs.PerScan(), CALs.PerFeed()),
         ),
     )
     layout = CALs.plan_parameters(model, nant, geom)
-    cf_sf, cf_g, d_sf, d_g, _ = layout.plans
+    d_sf, d_g, rplan = layout.plans
 
     θ = zeros(layout.nθ)
     scans = (detstack(D1, bl, pols; ti = 1), detstack(D2, bl, pols; ti = 4))
-    comps = (
-        (cf_sf, :phase), (cf_g, :phase), (d_sf, :delay), (d_g, :delay), (layout.plans[5], :rate),
-    )
+    comps = ((d_sf, :delay), (d_g, :delay), (rplan, :rate))
     ncomp, = solve_named!(θ, scans, comps; gauge = PinAntenna(ref))
 
-    # The track-global inter-feed delay offset is recovered absolutely (cross hands pin it).
+    # The track-global inter-feed delay offset is recovered absolutely.
     δrec = [plan_off1(d_g)[a, 2, 1, 1] == 0 ? NaN : θ[plan_off1(d_g)[a, 2, 1, 1]] for a in 1:nant]
     for a in 1:nant
         @test δrec[a] ≈ δ[a] atol = 1.0e-13
     end
-    # The track-global inter-feed phase offset is recovered up to one additive
-    # constant — the reference's own offset plus the source's cross-hand phase,
-    # which share this column — so only differences against the reference are
-    # checked.
-    εrec = [plan_off1(cf_g)[a, 2, 1, 1] == 0 ? NaN : θ[plan_off1(cf_g)[a, 2, 1, 1]] for a in 1:nant]
-    for a in 1:nant
-        @test (εrec[a] - εrec[ref]) ≈ (ε[a] - ε[ref]) atol = 1.0e-9
-    end
 
     # Reconstruction: recovered feed values reproduce EVERY observed delay,
-    # including scan 2's QQ rows whose feed-2 is tied only through the global δ.
+    # including scan 2's feed-2 rows, tied to feed 1 only through the global δ.
     recov_delay(a, feed, ti) = begin
         seg = d_sf.tseg_id[ti]
         cc = plan_off1(d_sf)[a, feed, seg, 1]
@@ -684,35 +549,26 @@ end
     end
 end
 
-# Robust loss on the PHASE system, where `w = snr²` is a true inverse variance
-# (σ_phase = 1/snr rad) so `z = resid·√w` is genuinely in units of σ. The delay
-# and rate systems weight rows by the same `snr²` but their residuals are in
-# seconds / Hz, so a dimensionless `loss_scale` does not normalize them — see
-# the `Stationization` docstring.
+# Robust loss on the delay system. Row weights are the CRB inverse variance on
+# the scan geometry, so `z = resid·√w` is in units of σ and the outliers and
+# tolerances below are stated in multiples of `delay_sigma`.
 @testset "Robust loss: IRLS at the noise-model scale" begin
-    # One clean scan with a single grossly inconsistent phase row.
-    function poisoned_scan(nant; offset = 2.0, snr = 100.0, seed = 0x33)
+    # One clean scan with a single grossly inconsistent delay row, `offset` σ off.
+    function poisoned_scan(nant; offset = 200.0, snr = 100.0, seed = 0x33)
         rng = MersenneTwister(seed)
         bl = all_baselines(nant)
         pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
         τ = 1.0e-9 .* randn(rng, nant, 2)
-        φ = 0.3 .* randn(rng, nant, 2)
-        D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0; snr = snr)
-        # Poison one parallel-hand row: closure-breaking, so it cannot be
-        # absorbed by any station solution.
-        d = D[2, 1]
-        D[2, 1] = FR.Detection{Float64}(
-            (d.delay, d.rate, rem2pi(d.phase + offset, RoundNearest), d.amp, d.snr, 0.0, true),
-        )
-        return (; bl, pols, τ, φ, D)
+        D = inject_detections(bl, pols, τ, zeros(nant, 2); snr)
+        # Poison one same-feed row: closure-breaking, so it cannot be absorbed
+        # by any station solution.
+        D[2, 1] = merge(D[2, 1], (; delay = D[2, 1].delay + offset * delay_sigma(snr)))
+        return (; bl, pols, τ, D, σ = delay_sigma(snr))
     end
-    # Cross hands merge the feeds into one component, so BOTH feeds are gauged
-    # against the reference's feed-1 node.
-    pherr(sol, φ, ref, nant) =
-        maximum(
-        abs(rem2pi(sol.phase[a, f] - (φ[a, f] - φ[ref, 1]), RoundNearest))
-            for a in 1:nant, f in 1:2
-    )
+    # Products relating different feeds merge the feeds into one component, so
+    # BOTH feeds are gauged against the reference's feed-1 node. Error in σ.
+    derr(sol, s, ref, nant) =
+        maximum(abs(sol.delay[a, f] - (s.τ[a, f] - s.τ[ref, 1])) for a in 1:nant, f in 1:2) / s.σ
 
     @testset "the identity element is plain weighted least squares" begin
         s = poisoned_scan(5)
@@ -727,11 +583,10 @@ end
             s.D, s.bl, s.pols, 5; gauge = PinAntenna(1),
             opts = FR.Stationization(loss = FR.SoftL1(), irls_iters = 0),
         )
-        @test ls.phase == wls.phase
         @test ls.delay == wls.delay
         @test ls.rate == wls.rate
         # And it is genuinely non-robust: the outlier drags the solution.
-        @test pherr(ls, s.φ, 1, 5) > 0.1
+        @test derr(ls, s, 1, 5) > 10
     end
 
     @testset "SoftL1 recovers truth through an outlier" begin
@@ -744,8 +599,8 @@ end
             s.D, s.bl, s.pols, 5; gauge = PinAntenna(1),
             opts = FR.Stationization(loss = FR.LeastSquares()),
         )
-        @test pherr(rob, s.φ, 1, 5) < 0.1
-        @test pherr(rob, s.φ, 1, 5) < 0.2 * pherr(ls, s.φ, 1, 5)
+        @test derr(rob, s, 1, 5) < 10
+        @test derr(rob, s, 1, 5) < 0.2 * derr(ls, s, 1, 5)
         # Every station keeps a solution — a downweighted row is still a row, so
         # the graph stays connected and no feed splits off.
         @test all(rob.covered)
@@ -758,9 +613,9 @@ end
             sol = stationize(
                 s.D, s.bl, s.pols, 5; gauge = PinAntenna(1), opts = FR.Stationization(; loss),
             )
-            pherr(sol, s.φ, 1, 5)
+            derr(sol, s, 1, 5)
         end
-        @test all(<(0.1), errs)
+        @test all(<(10), errs)
         @test errs[3] < errs[1]                       # Cauchy redescends; SoftL1 does not
     end
 
@@ -780,27 +635,21 @@ end
                 s.D, s.bl, s.pols, nant; gauge = PinAntenna(1),
                 opts = FR.Stationization(loss = FR.LeastSquares()),
             )
-            @test pherr(rob, s.φ, 1, nant) < 0.1
-            @test pherr(rob, s.φ, 1, nant) < 0.5 * pherr(ls, s.φ, 1, nant)
+            @test derr(rob, s, 1, nant) < 10
+            @test derr(rob, s, 1, nant) < 0.5 * derr(ls, s, 1, nant)
         end
     end
 
-    @testset "the delay system is robust too, not just the phase system" begin
-        # `w = snr²` alone is an inverse variance ONLY for phase (σ_φ = 1/snr
-        # rad). A delay residual is in seconds, so it takes the band's lever arm
-        # to express it in σ — without that the loss silently never fires here,
-        # which is the whole reason `freq_rms`/`time_rms` are threaded through.
+    @testset "a 50 ns outlier is suppressed by orders of magnitude" begin
         rng = MersenneTwister(0x51)
         nant, ref = 5, 1
         bl = all_baselines(nant)
         pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
         τ = 1.0e-9 .* randn(rng, nant, 2)
-        φ = 0.3 .* randn(rng, nant, 2)
-        D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0)
-        d = D[3, 1]
-        D[3, 1] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, 0.0, true))
+        D = inject_detections(bl, pols, τ, zeros(nant, 2))
+        D[3, 1] = merge(D[3, 1], (; delay = 50.0e-9))
 
-        derr(sol) = maximum(
+        derr50(sol) = maximum(
             abs(sol.delay[a, f] - (τ[a, f] - τ[ref, 1]))
                 for a in 1:nant, f in 1:2
         )
@@ -812,9 +661,9 @@ end
             D, bl, pols, nant; gauge = PinAntenna(ref),
             opts = FR.Stationization(loss = FR.LeastSquares())
         )
-        @test derr(ls) > 1.0e-9                       # dragged by the 50 ns outlier
-        @test derr(rob) < 1.0e-11                     # suppressed
-        @test derr(rob) < 1.0e-3 * derr(ls)
+        @test derr50(ls) > 1.0e-9
+        @test derr50(rob) < 1.0e-11
+        @test derr50(rob) < 1.0e-3 * derr50(ls)
     end
 
     @testset "a robust loss without the scan geometry is refused" begin
@@ -848,12 +697,11 @@ end
     end
 
     @testset "multi-scan: an outlier in one scan does not leak into another" begin
-        # No test exercised multi-scan robustness before this one. Two scans
-        # share one model; the poison sits in scan 2 only, so scan 1 must come
-        # back exactly as if solved alone.
+        # Two scans share one model; the poison sits in scan 2 only, so scan 1
+        # must come back exactly as if solved alone.
         nant, ref = 5, 1
         s1 = poisoned_scan(nant; offset = 0.0, seed = 0x41)     # clean
-        s2 = poisoned_scan(nant; offset = 2.0, seed = 0x42)     # poisoned
+        s2 = poisoned_scan(nant; seed = 0x42)                   # poisoned
         # `scan_of_time` is what gives `PerScan` two distinct segments, so the
         # two scans land in separate θ columns.
         geom = CALs.DataGeometry(; nfeed = 2,
@@ -862,11 +710,11 @@ end
         )
         model = CALs.GainModel(
             phase = (
-                offset = CALs.GainComponent(CALs.ConstantTerm(); Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed()),
+                delay = CALs.GainComponent(CALs.Delay(); Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed()),
             ),
         )
         layout = CALs.plan_parameters(model, nant, geom)
-        cplan = layout.plans[1]
+        dplan = layout.plans[1]
         opts = FR.Stationization(loss = FR.SoftL1())
 
         θ = zeros(layout.nθ)
@@ -875,26 +723,26 @@ end
                 detstack(s1.D, s1.bl, s1.pols; ti = 1),
                 detstack(s2.D, s2.bl, s2.pols; ti = 3),
             ),
-            ((cplan, :phase),); gauge = PinAntenna(ref), opts = opts,
+            ((dplan, :delay),); gauge = PinAntenna(ref), opts,
         )
         θ1 = zeros(layout.nθ)
         solve_named!(
             θ1, (detstack(s1.D, s1.bl, s1.pols; ti = 1),),
-            ((cplan, :phase),); gauge = PinAntenna(ref), opts = opts,
+            ((dplan, :delay),); gauge = PinAntenna(ref), opts,
         )
         # Scan 1's columns are untouched by scan 2's outlier: with a per-scan
         # model the systems are block-diagonal, and the loss keeps them that way
         # because it reweights rows rather than pooling a scale across them.
         for a in 1:nant, f in 1:2
-            c = plan_off1(cplan)[a, f, 1, 1]
+            c = plan_off1(dplan)[a, f, 1, 1]
             c == 0 && continue
-            @test θ[c] ≈ θ1[c] atol = 1.0e-12
+            @test θ[c] ≈ θ1[c] atol = 1.0e-3 * s1.σ
         end
         # Scan 2 still recovers its own truth despite carrying the outlier.
         for a in 1:nant, f in 1:2
-            c = plan_off1(cplan)[a, f, 2, 1]
+            c = plan_off1(dplan)[a, f, 2, 1]
             c == 0 && continue
-            @test abs(rem2pi(θ[c] - (s2.φ[a, f] - s2.φ[ref, 1]), RoundNearest)) < 0.1
+            @test abs(θ[c] - (s2.τ[a, f] - s2.τ[ref, 1])) < 10 * s2.σ
         end
     end
 end
@@ -913,30 +761,17 @@ end
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
-    model = CALs.GainModel(
-        phase = (phi = mk(CALs.ConstantTerm()), mbd = mk(CALs.Delay()), rate = mk(CALs.Rate())),
-    )
+    model = CALs.GainModel(phase = (mbd = mk(CALs.Delay()), rate = mk(CALs.Rate())))
     layout = CALs.plan_parameters(model, nant, geom)
-    comps = ((layout.plans[1], :phase), (layout.plans[2], :delay), (layout.plans[3], :rate))
+    comps = ((layout.plans[1], :delay), (layout.plans[2], :rate))
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    # Scan 2 carries a closure-breaking delay+phase outlier, so the robust loss
+    # Scan 2 carries a closure-breaking delay outlier, so the robust loss
     # genuinely iterates and the pooled stopping-rule coupling is exercised.
     function scan_D(seed; poison)
         rng = MersenneTwister(seed)
-        D = inject_detections(
-            bl, pols, 1.0e-9 .* randn(rng, nant, 2), 1.0e-12 .* randn(rng, nant, 2),
-            0.3 .* randn(rng, nant, 2), 0.0,
-        )
-        if poison
-            d = D[2, 1]
-            D[2, 1] = FR.Detection{Float64}(
-                (
-                    d.delay + 50.0e-9, d.rate, rem2pi(d.phase + 2.0, RoundNearest),
-                    d.amp, d.snr, 0.0, true,
-                )
-            )
-        end
+        D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), 1.0e-12 .* randn(rng, nant, 2))
+        poison && (D[2, 1] = merge(D[2, 1], (; delay = D[2, 1].delay + 50.0e-9)))
         return D
     end
     stacks = [detstack(scan_D(0x40 + i; poison = i == 2), bl, pols; ti = 2i - 1) for i in 1:3]
@@ -958,125 +793,26 @@ end
     @test maximum(abs, θs .- θp) < 1.0e-11
 end
 
-@testset "Stationize: per-product systematic floor" begin
-    # A delay outlier on one cross-hand row stands in for leakage: error that
-    # does not shrink with SNR, which is what the `_cross` floors exist to put
-    # into the weights.
-    rng = MersenneTwister(0x77)
-    nant, ref = 5, 1
-    bl = all_baselines(nant)
-    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    τ = 1.0e-9 .* randn(rng, nant, 2)
-    φ = 0.3 .* randn(rng, nant, 2)
-    D = inject_detections(bl, pols, τ, zeros(nant, 2), φ, 0.0)
-    d = D[3, 2]                                   # a PQ row
-    D[3, 2] = FR.Detection{Float64}((50.0e-9, d.rate, d.phase, d.amp, d.snr, 0.0, true))
-
-    @testset "defaulted cross floors reproduce the single-scalar path bit-for-bit" begin
-        uniform = stationize(
-            D, bl, pols, nant; gauge = PinAntenna(ref),
-            opts = FR.Stationization(systematic_delay = 1.0e-12, systematic_rate = 1.0e-3),
-        )
-        explicit = stationize(
-            D, bl, pols, nant; gauge = PinAntenna(ref),
-            opts = FR.Stationization(
-                systematic_delay = 1.0e-12, systematic_rate = 1.0e-3,
-                systematic_delay_cross = 1.0e-12, systematic_rate_cross = 1.0e-3,
-            ),
-        )
-        @test uniform.delay == explicit.delay
-        @test uniform.rate == explicit.rate
-        @test uniform.phase == explicit.phase
-    end
-
-    @testset "with no cross-hand rows the cross floors are inert" begin
-        pols_par = [(1, 1), (2, 2)]
-        Dp = inject_detections(bl, pols_par, τ, zeros(nant, 2), φ, 0.0)
-        dp = Dp[2, 1]
-        Dp[2, 1] = FR.Detection{Float64}((10.0e-9, dp.rate, dp.phase, dp.amp, dp.snr, 0.0, true))
-        base = stationize(
-            Dp, bl, pols_par, nant; gauge = PinAntenna(ref),
-            opts = FR.Stationization(systematic_delay = 1.0e-12),
-        )
-        crossed = stationize(
-            Dp, bl, pols_par, nant; gauge = PinAntenna(ref),
-            opts = FR.Stationization(
-                systematic_delay = 1.0e-12,
-                systematic_delay_cross = 1.0e-8, systematic_rate_cross = 1.0,
-            ),
-        )
-        @test isequal(base.delay, crossed.delay)
-        @test isequal(base.rate, crossed.rate)
-        @test isequal(base.phase, crossed.phase)
-    end
-
-    @testset "a cross-only floor reweights exactly the cross-hand rows" begin
-        # `LeastSquares` isolates the floor's effect from IRLS reweighting.
-        derr1(sol) = maximum(abs(sol.delay[a, 1] - (τ[a, 1] - τ[ref, 1])) for a in 1:nant)
-        # Within-feed-2 differences are set by the (consistent) QQ rows alone
-        # once the cross rows are floored away; the inter-feed offset stays with
-        # the cross rows, so it is excluded by differencing against station 1.
-        derr2(sol) = maximum(
-            abs((sol.delay[a, 2] - sol.delay[1, 2]) - (τ[a, 2] - τ[1, 2])) for a in 1:nant
-        )
-        uniform = stationize(
-            D, bl, pols, nant; gauge = PinAntenna(ref),
-            opts = FR.Stationization(loss = FR.LeastSquares(), systematic_delay = 1.0e-12),
-        )
-        floored = stationize(
-            D, bl, pols, nant; gauge = PinAntenna(ref),
-            opts = FR.Stationization(
-                loss = FR.LeastSquares(),
-                systematic_delay = 1.0e-12, systematic_delay_cross = 1.0e-8,
-            ),
-        )
-        # The floor moved the cross rows' delay weight, so the delay solution
-        # moved — away from the outlier: parallel-hand structure comes back.
-        @test floored.delay != uniform.delay
-        @test derr1(uniform) > 1.0e-11                # dragged by the 50 ns outlier
-        @test derr1(floored) < 1.0e-13
-        @test derr2(floored) < 1.0e-13
-        # Rate and phase carry no cross delay floor, so they are untouched.
-        @test floored.rate == uniform.rate
-        @test floored.phase == uniform.phase
-        # A floored row is still a row: coverage cannot change.
-        @test all(floored.covered)
-    end
-
-    @testset "constructor defaults" begin
-        o = FR.Stationization(systematic_delay = 3.0e-12, systematic_rate = 2.0e-3)
-        @test o.systematic_delay_cross == 3.0e-12
-        @test o.systematic_rate_cross == 2.0e-3
-        o2 = FR.Stationization(systematic_delay = 1.0e-12, systematic_delay_cross = 2.0e-11)
-        @test o2.systematic_delay == 1.0e-12
-        @test o2.systematic_delay_cross == 2.0e-11
-        @test FR.Stationization() == FR.Stationization()
-    end
+@testset "Stationize: systematic floor constructor defaults" begin
+    o = FR.Stationization(systematic_delay = 3.0e-12, systematic_rate = 2.0e-3)
+    @test o.systematic_delay == 3.0e-12
+    @test o.systematic_rate == 2.0e-3
+    @test FR.Stationization().systematic_delay == FR.Stationization().systematic_rate == 0
+    @test FR.Stationization() == FR.Stationization()
 end
 
-# ── Feed-blind phase solve: nuisance feed-2 offsets ──────────────────────────
-#
-# Under a SharedFeeds phase model the QQ rows sit a station-based R–L offset
-# away from their PP siblings and the cross hands add the source's cross-hand
-# phase on top. The shared column must come back as the FEED-1 phase — the
-# offsets and χ land in discarded nuisance columns, never in a weighted
-# compromise — while a single-feed station (no feed-1 data) keeps its full
-# feed-2 phase in the shared column so its data is completely corrected.
-
+# Delay and rate on a SharedFeeds model: one column per station, fed by every
+# product whatever feeds it relates.
 function sharedfeeds_scan_layout(nant)
     geom = CALs.DataGeometry(; nfeed = 2,
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.SharedFeeds())
-    model = CALs.GainModel(
-        phase = (
-            offset = mk(CALs.ConstantTerm()), delay = mk(CALs.Delay()), rate = mk(CALs.Rate()),
-        ),
-    )
+    model = CALs.GainModel(phase = (delay = mk(CALs.Delay()), rate = mk(CALs.Rate())))
     return CALs.plan_parameters(model, nant, geom)
 end
 
-@testset "Stationize: feed-blind phase is the feed-1 phase, offsets discarded" begin
+@testset "Stationize: a single-feed station solves on shared-feed delay and rate" begin
     rng = MersenneTwister(0x7a11)
     nant = 5
     single = 4                                    # single-feed station: feed 2 only
@@ -1084,14 +820,9 @@ end
     pols = [(1, 1), (2, 2), (1, 2), (2, 1)]
     pfeeds = collect(pols)
 
-    τ = repeat(randn(rng, nant) .* 1.0e-9, 1, 2)  # feed-independent delay/rate, so
-    ṙ = repeat(randn(rng, nant) .* 1.0e-3, 1, 2)  # those systems stay consistent
-    φ1 = 0.5 .* randn(rng, nant)
-    ρ = 1.2 .* (2 .* rand(rng, nant) .- 1)        # station R–L phase offsets
-    φ = hcat(φ1, φ1 .+ ρ)
-    χ = 0.9                                       # source cross-hand phase
-
-    D = inject_detections(bl, pols, τ, ṙ, φ, χ)
+    τ = repeat(randn(rng, nant) .* 1.0e-9, 1, 2)
+    ṙ = repeat(randn(rng, nant) .* 1.0e-3, 1, 2)
+    D = inject_detections(bl, pols, τ, ṙ)
     for bi in eachindex(bl), p in eachindex(pols)
         a, b = bl[bi]
         fa, fb = pfeeds[p]
@@ -1101,28 +832,11 @@ end
     end
 
     layout = sharedfeeds_scan_layout(nant)
-    cplan, dplan, rplan = layout.plans
+    dplan, rplan = layout.plans
     θ = zeros(layout.nθ)
-    scans = (detstack(D, bl, pols; ti = 1),)
-    solve_named!(
-        θ, scans, ((cplan, :phase), (dplan, :delay), (rplan, :rate));
-        gauge = PinAntenna(1),
-    )
+    solve_named!(θ, (detstack(D, bl, pols; ti = 1),), ((dplan, :delay), (rplan, :rate)); gauge = PinAntenna(1))
 
     col(plan, a) = plan_off1(plan)[a, 1, 1, 1]
-    # Dual-feed stations: the shared column is the feed-1 phase (gauge zero at
-    # station 1), untouched by ρ and χ.
-    for a in 2:nant
-        a == single && continue
-        @test θ[col(cplan, a)] ≈ φ[a, 1] - φ[1, 1] atol = 1.0e-8
-    end
-    # The single-feed station's shared column carries its feed-2 phase in the
-    # reference's feed-2 frame: the parallel hands cannot separate it from the
-    # offsets' common mode, which the nuisance-block gauge pins at station 1
-    # (so station 1's offset ρ[1] is the frame shift).
-    @test θ[col(cplan, single)] ≈ φ[single, 2] - φ[1, 1] - ρ[1] atol = 1.0e-8
-    # Delay and rate keep every row (cross hands included) and are untouched by
-    # the nuisance machinery.
     for a in 2:nant
         @test θ[col(dplan, a)] ≈ τ[a, 1] - τ[1, 1] atol = 1.0e-18
         @test θ[col(rplan, a)] ≈ ṙ[a, 1] - ṙ[1, 1] atol = 1.0e-12

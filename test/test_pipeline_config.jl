@@ -57,10 +57,10 @@
     @testset "defaults" begin
         f = BaselineFringeFit(; gauge = PinAntenna(1))
         @test f.model == default_fringe_terms()
-        # The default model: 4 feed-by-feed instrument components, and no
-        # inter-feed PHASE offset — see `default_fringe_terms`.
+        # The default model: delay, inter-feed delay and rate, and no constant
+        # phase — see `default_fringe_terms`.
         @test isempty(f.model.logamp)
-        @test length(f.model.phase) == 4
+        @test length(f.model.phase) == 3
         @test !haskey(f.model.phase, :rel_phase)
         # No feed-specific Rate element: the inter-feed rate is tied ≡ 0 by default.
         @test !any(

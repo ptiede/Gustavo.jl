@@ -55,6 +55,23 @@ function _time_averaged_spectra(corr)
     return (; spec = reduce(vcat, spectra), bls, feeds = feeds[:, 1])
 end
 
+# The band coherence |Σ V| / Σ |V| of each cross baseline's time-averaged
+# spectrum on feed pair `feeds`, one value per scan and baseline. Each scan
+# keeps its own station phases, so spectra of different scans are not summed.
+function _band_coherence(ps, feeds)
+    R = Float64[]
+    for g in values(XRadio.groupby(ps, XRadio.ByScan()))
+        spec = _time_averaged_spectra(g)
+        p = findfirst(==(feeds), spec.feeds)
+        for (bi, (a, b)) in pairs(spec.bls)
+            a == b && continue
+            z = filter(isfinite, spec.spec[:, bi, p])
+            isempty(z) || push!(R, abs(sum(z)) / sum(abs.(z)))
+        end
+    end
+    return R
+end
+
 @testset "Fringe pipeline end-to-end" begin
     ps, _truth = _build_fringe_ps()
 
@@ -417,12 +434,7 @@ end
 
     out = _precal(fr, ps)
     calibrate!(bp_avg, out)
-    spec = _time_averaged_spectra(out)
-    p = findfirst(==((1, 1)), spec.feeds)
-    R = [
-        abs(sum(z)) / sum(abs.(z)) for (bi, (a, b)) in pairs(spec.bls) if a != b
-            for z in (filter(isfinite, spec.spec[:, bi, p]),) if !isempty(z)
-    ]
+    R = _band_coherence(out, (1, 1))
     @test minimum(R) > 0.97
 end
 
@@ -447,12 +459,7 @@ end
 
     out = _precal(fit(ff, ps), ps)
     calibrate!(bp_avg, out)
-    spec = _time_averaged_spectra(out)
-    p = findfirst(==((1, 1)), spec.feeds)
-    R = [
-        abs(sum(z)) / sum(abs.(z)) for (bi, (a, b)) in pairs(spec.bls) if a != b
-            for z in (filter(isfinite, spec.spec[:, bi, p]),) if !isempty(z)
-    ]
+    R = _band_coherence(out, (1, 1))
     @test minimum(R) > 0.95
 end
 

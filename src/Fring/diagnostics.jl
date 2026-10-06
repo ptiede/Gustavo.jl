@@ -91,18 +91,15 @@ end
 """
     fringe_station_solutions(sol::CalibrationSolution) -> DimStack
 
-The fringe step's per-scan station delay, rate and constant phase, decoded
+The fringe step's per-scan station delay and rate, decoded
 from its solved parameters (no data is read), over
 `(Scan, AntennaName, Feed)`:
 
 - `delay` — station group delay (s): the feed-common delay plus, on feed 2,
   the fitted inter-feed offset.
 - `rate` — station fringe rate (Hz).
-- `phase` — station constant phase (rad), at the epoch the scan's rate is
-  referenced to (the scan's own mean time), so it compares across scans only
-  through a difference taken within one scan.
 
-Each sums every delay, rate and constant term the fringe step owns; a term
+Each sums every delay and rate term the fringe step owns; a term
 the model lacks reads `NaN`. Values are fixed to the solve's gauge; a
 within-scan difference against the same feed of a reference station is
 gauge-invariant.
@@ -119,7 +116,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
     )
     (; model, layout, θ) = only(groups)
     nant = layout.nant
-    comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate/:phase)
+    comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate)
     refplan = _perscan_delay_plan(model, layout)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
@@ -140,18 +137,18 @@ function fringe_station_solutions(sol::CalibrationSolution)
     scans = findall(!=(0), t0)
     d = (_scan_dim(names[scans]), _station_dim(sol.geom.stations), Feed(1:2))
     n = map(length, d)
-    delay, rate, phase = fill(NaN, n), fill(NaN, n), fill(NaN, n)
+    delay, rate = fill(NaN, n), fill(NaN, n)
     for (s, k) in enumerate(scans), a in 1:nant, f in 1:2
         ti = t0[k]
         for (plan, kind) in comps
             node = _feed_node(plan.tying, f)            # fseg 1: stage-B terms are GlobalFrequency
             node == 0 && continue
             v = _component_leaf(plan, θ)[1, node, 1, plan.tseg_id[ti], a]
-            out = kind === :delay ? delay : kind === :rate ? rate : phase
+            out = kind === :delay ? delay : rate
             out[s, a, f] = isnan(out[s, a, f]) ? v : out[s, a, f] + v
         end
     end
-    return DimStack((; delay, rate, phase), d)
+    return DimStack((; delay, rate), d)
 end
 
 """
