@@ -23,13 +23,14 @@ function _baseline_product_difference(sol1, sol2)
 end
 
 # The fringe fit one scan at a time and pooled, then `Bandpass` and
-# `AdhocPhase` on data the first corrected.
+# `AdhocPhase` (with each smoother) on data the first corrected.
 function _fit_each_step(ps, gauge)
     fringe = fit(BaselineFringeFit(; gauge), ps)
     corrected = calibrate(fringe, ps; flag_bad = false, apply_flags = false)
     return (;
         fringe, pooled = fit(BaselineFringeFit(; rounds = 2, gauge), ps),
         bandpass = fit(Bandpass(; gauge), corrected), adhoc = fit(AdhocPhase(; gauge), corrected),
+        adhoc_joint = fit(AdhocPhase(Gustavo.Fring.JointKalmanSmoother(); gauge), corrected),
     )
 end
 
@@ -45,14 +46,7 @@ end
             @test dphase < 1.0e-6
             @test dlogamp < 1.0e-6
             dphase, dlogamp = _baseline_product_difference(zs[step], pinned[step])
-            # AdhocPhase smooths each station's track after a per-sample
-            # gauge, and a time-varying common offset does not pass through
-            # per-station smoothing unchanged.
-            if step === :adhoc
-                @test_broken dphase < 1.0e-6
-            else
-                @test dphase < 1.0e-6
-            end
+            @test dphase < 1.0e-6
             @test dlogamp < 1.0e-4
         end
     end

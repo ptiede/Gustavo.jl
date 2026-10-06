@@ -473,36 +473,39 @@ end
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
     rbar, wbar = inject_screen(bl, pols, shared_screen(rng, nant, nap); amp = 5.0, noise = 1.0, rng)
-    solve(prior) = solve_positional(
-        rbar, wbar, bl, pols, nant, times;
-        gauge = PinAntenna(ref), smoother = FRa.JointKalmanSmoother(), tying = CALa.SharedFeeds(), prior,
+    solve(prior; gauge = PinAntenna(ref), w = wbar) = solve_positional(
+        rbar, w, bl, pols, nant, times;
+        gauge, smoother = FRa.JointKalmanSmoother(), tying = CALa.SharedFeeds(), prior,
     )
+    same_hypers(p, q) = all(name -> getproperty(p, name) ≈ getproperty(q, name), (:scale, :σ))
 
     # Fixed hyperparameters are used as stated at every station.
     fixed = OUPrior(; scale = 12.0, σ = 0.3)
     @test all(==(fixed), solve(fixed).prior)
 
-    # Hyperpriors resolve to numbers per station; the reference station, whose
-    # track is zero by construction, takes the median of the others.
+    # Hyperpriors resolve to numbers per station, the reference station's
+    # included, and do not depend on the gauge.
     pr = solve(FRa.default_adhoc_prior()).prior
     @test all(p -> p isa OUPrior && CALa.is_fixed_hyper(p.scale) && CALa.is_fixed_hyper(p.σ), pr)
-    others = [pr[a, 1] for a in 1:nant if a != ref]
-    @test pr[ref, 1].scale ≈ median(p.scale for p in others)
-    @test pr[ref, 1].σ ≈ median(p.σ for p in others)
+    @test all(splat(same_hypers), zip(pr, solve(FRa.default_adhoc_prior(); gauge = ZeroSumPhase()).prior))
     @test isequal(pr[:, 1], pr[:, 2])
 
-    # A station keeps its own fixed values even where it takes no part in the fit.
+    # A station keeps its own fixed values.
     mixed = [a == ref ? fixed : FRa.default_adhoc_prior() for a in 1:nant]
     @test solve(mixed).prior[ref, 1] == fixed
 
-    # A walk's σ resolves the same way, and the reference station takes the
-    # median of the other walks'; the init is kept as given.
+    # A walk's σ resolves the same way; the init is kept as given.
     walk = RandomWalkPrior(; order = 1, σ = LogNormal(log(0.1), 1.0), init = Normal(0.0, 1.0))
     pw = solve(walk).prior
     @test all(p -> p isa RandomWalkPrior && CALa.is_fixed_hyper(p.σ) && p.init == walk.init, pw)
-    @test pw[ref, 1].σ ≈ median(pw[a, 1].σ for a in 1:nant if a != ref)
-    # The reference takes its median from stations of the same form only.
-    @test_throws "no other station has a prior of the same form" solve([a == ref ? walk : fixed for a in 1:nant])
+    # An unobserved station takes the median of the stations of the same form,
+    # and there must be one.
+    unseen = nant
+    w_unseen = copy(wbar)
+    for (bi, (a, b)) in pairs(bl)
+        unseen in (a, b) && (w_unseen[bi, :, :] .= 0)
+    end
+    @test_throws "no other station has a prior of the same form" solve([a == unseen ? walk : fixed for a in 1:nant]; w = w_unseen)
 
     # The joint state needs a proper prior: a flat walk or no prior is an error.
     @test_throws "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init`" solve(RandomWalkPrior(; σ = 0.1))

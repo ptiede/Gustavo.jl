@@ -111,9 +111,10 @@ its prior along time — see [`Fring.default_adhoc_terms`](@ref) for the default
 ([`Fring.PerTrackAdhocSmoother`](@ref) or [`Fring.JointKalmanSmoother`](@ref), which
 requires the feed-common (`SharedFeeds`) model). The one-argument form takes
 the smoother and keeps the default model. `gauge` (required, an
-[`AbstractGauge`](@ref)) picks each scan's anchor station, the first of its
-[`gauge_station_order`](@ref) the scan observes; a `ZeroSumPhase` also
-references every AP to the stations covered throughout the scan.
+[`AbstractGauge`](@ref)) sets each AP's convention after smoothing, so the
+applied correction does not depend on it: `PinAntenna` holds the first of its
+references present in that AP at 0, and `ZeroSumPhase` centers every AP on the
+stations covered throughout the scan.
 
 The step's info holds `nscans` and `priors`: the prior each (station, feed)
 track was fit under, its hyperparameters resolved, over `(AntennaName, Feed, Ti)` with

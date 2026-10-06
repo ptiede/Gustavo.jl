@@ -59,15 +59,17 @@ component's prior: [`PerTrackAdhocSmoother`](@ref) (the default) or
 
 Define a struct and:
 
-    Gustavo.Fring.apply_adhoc!(sm::MySmoother, phase, track_w; obs, anchor, priors, resolved)
+    Gustavo.Fring.apply_adhoc!(sm::MySmoother, phase, track_w; obs, priors, resolved)
 
 the single dispatch point; mutates `phase` in place. `phase` and `track_w` are
 `DimArray`s over `(AntennaName, FeedNode, Ti)`: each (station, feed node) phase track and
-its per-AP coherent weight, `Ti` carrying the AP epochs in seconds. `obs` holds the
+its per-AP coherent weight, `Ti` carrying the AP epochs in seconds. Each AP of
+`phase` is centered on the cells covered throughout the scan; the step's gauge
+is applied after smoothing. `obs` holds the
 SNR-gated, source-corrected observations: `obs.val`, `obs.w` and the gate
 `obs.mask` over `(AntennaPair, FeedPair, Ti)`, and `obs.nodes`, each cell's
-`((a, na), (b, nb))` — the station index and feed node at either end; `anchor`
-is the station the per-AP solves are pinned to. `priors[a]` is station `a`'s
+`((a, na), (b, nb))` — the station index and feed node at either end.
+`priors[a]` is station `a`'s
 prior along time: `nothing`, a [`RandomWalkPrior`](@ref) or an
 [`OUPrior`](@ref). `resolved`, over `(AntennaName, FeedNode)`, receives the prior each
 track was fit under, its hyperparameters fixed. The default `apply_adhoc!` fits
@@ -172,10 +174,10 @@ solve; see `_solve_gp_joint!`.
 
 A station's hyperparameters given as hyperpriors are resolved per scan by
 type-II MAP on its per-AP track, with the track's level integrated out under a
-flat prior. The reference station's track is zero by construction and an
-unobserved station has none, so both take the median of the resolved values of
-the stations whose prior has the same form (an `OUPrior`, or a walk of the same
-order); a station whose hyperparameters are fixed keeps them.
+flat prior. A station without a track of its own takes the median of the
+resolved values of the stations whose prior has the same form (an `OUPrior`,
+or a walk of the same order); a station whose hyperparameters are fixed keeps
+them.
 
 Requires one phase node per station (a `SharedFeeds` adhoc component), since
 its state carries one dimension per station.
@@ -284,7 +286,7 @@ end
 # smoother sees the same observations; per-track smoothers ignore it.
 
 # Default: fit each (station, node) track that carries data through the per-track hook.
-function apply_adhoc!(sm::AbstractAdhocSmoother, phase, track_w; obs, anchor, priors, resolved)
+function apply_adhoc!(sm::AbstractAdhocSmoother, phase, track_w; obs, priors, resolved)
     for a in axes(phase, AntennaName), f in axes(phase, FeedNode)
         track = view(phase, a, f, :)
         w = view(track_w, a, f, :)
@@ -296,7 +298,7 @@ end
 
 # Joint state-space solve: one Kalman filter over all station phases observing
 # baseline differences directly, seeded/rewrapped from the per-AP solve.
-function apply_adhoc!(sm::JointKalmanSmoother, phase, track_w; obs, anchor, priors, resolved)
+function apply_adhoc!(sm::JointKalmanSmoother, phase, track_w; obs, priors, resolved)
     all(_proper_prior, priors) || throw(
         ArgumentError(
             "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init` at " *
@@ -304,7 +306,7 @@ function apply_adhoc!(sm::JointKalmanSmoother, phase, track_w; obs, anchor, prio
                 join(unique(map(p -> isnothing(p) ? "nothing" : _call_string(p), priors)), ", "),
         ),
     )
-    _solve_gp_joint!(phase, track_w, obs, anchor, sm, priors, resolved)
+    _solve_gp_joint!(phase, track_w, obs, sm, priors, resolved)
     return phase
 end
 
@@ -613,35 +615,31 @@ _source_corrected(obs, x, keep) = (;
 # State = each station's model state, its phase first. `obs` arrives with each
 # cell's source term already removed, so a cell is a pure node difference and
 # the filter needs no augmented source dimension. The proper priors pin the
-# unobservable common mode near 0; it is re-gauged to the anchor afterwards for
-# pipeline consistency.
+# unobservable common mode near 0; the caller applies the gauge afterwards.
 # Requires one node per station.
-function _solve_gp_joint!(
-        phase, track_w, obs, anchor::Integer, sm::JointKalmanSmoother, priors, resolved,
-    )
+function _solve_gp_joint!(phase, track_w, obs, sm::JointKalmanSmoother, priors, resolved)
     nant = size(phase, AntennaName)
     times = parent(lookup(phase, Ti))
     # Compute type flows from the data, not from the smoother's field types.
     T = float(promote_type(eltype(phase), eltype(track_w), eltype(times)))
 
-    # Seed (ref-gauged, unwrapped) per-station track from the per-AP solve.
+    # Seed (unwrapped) per-station track from the per-AP solve.
     θseed = [T(phase[i, 1, ap]) for i in axes(phase, 1), ap in axes(phase, 3)]
 
     # A station with no gated row anywhere in the scan has an all-zero column in every
     # H below, so the filter never updates it: it holds its prior mean for the whole
-    # solve and the re-gauge turns that into minus the anchor's common mode — the same
-    # information-free track for every such station. They are excluded from the hyper
-    # fit and from the write-back.
+    # solve, an information-free track. Such stations are excluded from the hyper
+    # fit and from the write-back. A track that is identically zero, the pinned
+    # station's when no cell is covered throughout the scan, carries no variance
+    # information either.
     seen = [any(>(0), view(track_w, i, 1, :)) for i in axes(track_w, 1)]
-    welldet = [seen[i] && i != anchor for i in eachindex(seen)]
+    welldet = [seen[i] && any(v -> isfinite(v) && !iszero(v), view(phase, i, 1, :)) for i in eachindex(seen)]
     any(welldet) || return phase
     track(i) = (view(θseed, i, :), collect(T, parent(view(track_w, i, 1, :))))
 
     # Per-station hyperparameters from the seed track, the level integrated out.
-    # The anchor's track is structurally 0 (per-AP gauge) and carries no variance
-    # information, so it and every unseen station take the median of the
-    # well-determined stations' values, and every station keeps a proper prior
-    # during the solve.
+    # A station without a well-determined track takes the median of the others'
+    # values, so every station keeps a proper prior during the solve.
     fitted = Vector{Any}(nothing, nant)
     for i in eachindex(welldet, priors)
         welldet[i] || continue
@@ -702,15 +700,6 @@ function _solve_gp_joint!(
         end
     end
 
-    # Re-gauge to the anchor (its phase → 0 per AP), matching the per-AP path.
-    for ap in axes(θf, 2)
-        θref = θf[anchor, ap]
-        isfinite(θref) || continue
-        for i in axes(θf, 1)
-            θf[i, ap] -= θref
-        end
-    end
-
     # Write back the joint track; internal gaps stay interpolated by the filter. An
     # unseen station keeps the per-AP solve's NaN, so it is never fabricated into θ
     # (`adhoc_scan!` gates its θ write on `isfinite`, not on `covered`).
@@ -726,9 +715,9 @@ end
 _state_model(p::OUPrior, ::Type{T}) where {T} = OUModel{T}(p.scale, p.σ^2)
 _state_model(p::RandomWalkPrior, ::Type{T}) where {T} = _random_walk_model(p.order, p.σ, p.init, one(T), T)
 
-# The prior of a station without a track of its own (the anchor, an unseen
-# station): its fixed hyperparameters, and for each hyperprior the median of the
-# resolved values of the `peers` whose prior has the same form.
+# The prior of a station without a well-determined track of its own: its fixed
+# hyperparameters, and for each hyperprior the median of the resolved values of
+# the `peers` whose prior has the same form.
 _peer_resolved(p::OUPrior, peers, station) =
     OUPrior(; scale = _peer_median(p, :scale, peers, station), σ = _peer_median(p, :σ, peers, station))
 _peer_resolved(p::RandomWalkPrior, peers, station) =
@@ -922,7 +911,8 @@ constant is a gauge, since a per-station constant trades against the source
 terms, so every track is returned with zero weighted mean. The residual-rate
 slope is kept.
 
-`gauge` sets the per-AP convention: `PinAntenna` holds its reference's phase
+`gauge` sets the per-AP convention, applied after smoothing so that it does
+not change any baseline difference: `PinAntenna` holds its reference's phase
 at 0, `ZeroSumPhase` centers each AP on zero mean.
 
 `tying` is the adhoc component's [`AbstractFeedTying`](@ref). `PerFeed()`
@@ -1039,15 +1029,10 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
     end
     obs = _source_corrected(raw, x, keep)
 
-    # Effective per-scan anchor station: the gauge's preferred station when it
-    # observes in this scan, else the best-covered station by total gated
-    # weight. Everything gauge-related below — the per-AP pin, the warm-start
-    # seed condition, the gauge restitch, the joint solve's re-gauge — keys on
-    # the anchor being present, so it must not key on the literal reference:
-    # a scan that never sees the reference would disable all of it, which is
-    # common in multi-subarray tracks. The anchor choice is inert to the applied
-    # correction, a per-AP common mode cancelling on every baseline; it exists so
-    # the per-station tracks are temporally consistent, and so smoothable.
+    # The per-AP solves' anchor: the station with the most gated weight in the
+    # scan. The per-AP pin, the warm-start seed condition and the restitch key
+    # on it being present. It is internal and independent of `gauge`, which is
+    # applied once, after smoothing.
     anchor = let wtot = zeros(T, nant)
         for ap in axes(obs.w, Ti)
             wk, mk = view(obs.w, Ti(ap)), view(obs.mask, Ti(ap))
@@ -1058,12 +1043,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
                 wtot[b] += wk[I]
             end
         end
-        # A ranked gauge walks its references before falling back to the
-        # best-observed station, so a dropout costs the next choice, not an
-        # arbitrary hop.
-        cand = gauge_station_order(gauge)
-        j = findfirst(a -> 1 <= a <= nant && wtot[a] > 0, cand)
-        j !== nothing ? Int(cand[j]) : (all(iszero, wtot) ? 1 : argmax(wtot))
+        all(iszero, wtot) ? 1 : argmax(wtot)
     end
 
     cell_w = dropdims(sum(map((w, m) -> m ? w : zero(w), raw.w, raw.mask); dims = Ti); dims = Ti)
@@ -1103,10 +1083,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
         moved <= smoother.options.source_tol && break
     end
 
-    # Fit the tracks under the prior: per-track smoothers loop the (station, node)
-    # tracks; the joint solve runs one multivariate OU Kalman over all station
-    # phases (re-gauged to the anchor, matching the per-AP path). See `apply_adhoc!`.
-    apply_adhoc!(smoother, phase, track_w; obs, anchor, priors, resolved)
+    _smooth_tracks!(smoother, phase, covered, track_w; obs, priors, resolved)
 
     # Gauss–Newton refinement in the complex domain. Everything above is the
     # seed: the phase-extraction solve's spanning-tree unwrap and warm starts
@@ -1131,7 +1108,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
             phase, covered, track_w, lin, nant, anchor,
             smoother.options.phase_rewrap_iters, max_stale,
         )
-        apply_adhoc!(smoother, phase, track_w; obs = lin, anchor, priors, resolved)
+        _smooth_tracks!(smoother, phase, covered, track_w; obs = lin, priors, resolved)
     end
 
     # The per-station constant's gauge; see `_detrend_track!`.
@@ -1143,7 +1120,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
     # global constant — and that constant is a per-AP common mode, which cancels on
     # every baseline. The two conventions are compatible only up to that constant;
     # this order is what makes the gauge the exact one.
-    _apply_ap_gauge!(phase, covered, gauge, 2)
+    _apply_ap_gauge!(phase, covered, track_w, gauge)
 
     # Expand the (station, feed node) solution onto the feed axis the caller
     # indexes: feeds sharing a node get identical tracks (so a `SharedFeeds` adhoc
@@ -1228,21 +1205,44 @@ function adhoc_scan!(
     return cat(as.prior; dims = Ti([t0]))
 end
 
-# Put each AP on the gauge's own convention, over a station set that does not
-# move between APs. The per-AP common mode is unobservable — it cancels on every
-# baseline — so this changes how the tracks read, never the applied correction.
-# That is why the set must be fixed: a sum taken over whatever stations happen
-# to be covered shifts frame whenever coverage flickers, putting steps into
-# every track for a quantity that carries no information. Summing over the
-# stations covered in every AP keeps one frame for the whole scan.
-#
-# A pinned gauge needs nothing here: the per-AP solves already pin the anchor,
-# and `_restitch_refant_gauge!` carries that frame across the APs where it
-# drops out.
-_apply_ap_gauge!(phase, covered, ::AbstractGauge, nnode::Integer) = phase
+# Smoothers see each AP centered on the cells covered throughout the scan, a
+# frame that depends on neither the per-AP solves' anchor nor the user's gauge.
+# A track smoothed relative to one station carries that station's noise, which
+# per-track priors do not pass through equally, so the smoothed baseline
+# differences would depend on the station.
+function _smooth_tracks!(smoother, phase, covered, track_w; obs, priors, resolved)
+    _apply_ap_gauge!(phase, covered, track_w, ZeroSumPhase())
+    return apply_adhoc!(smoother, phase, track_w; obs, priors, resolved)
+end
 
-function _apply_ap_gauge!(phase, covered, gauge::ZeroSumPhase, nnode::Integer)
-    nant, _, nap = size(phase)
+# Put each AP on the gauge's own convention. The per-AP common mode is
+# unobservable — it cancels on every baseline — so this changes how the tracks
+# read, never the applied correction. One constant per AP spans both feed
+# nodes: cross-hand rows join them into one component with one freedom.
+function _apply_ap_gauge!(phase, covered, track_w, gauge::AbstractGauge)
+    T = eltype(phase)
+    for ap in axes(phase, 3)
+        x = view(parent(phase), :, :, ap)
+        nodes = [n for n in eachindex(x) if isfinite(x[n])]
+        isempty(nodes) && continue
+        cells = CartesianIndices(x)[nodes]
+        f = GaugeFreedom(;
+            nodes, station = [I[1] for I in cells], feed = [I[2] for I in cells],
+            scan = zeros(Int, length(nodes)), component = fill((), length(nodes)),
+            observable = fill(:phase, length(nodes)), direction = ones(T, length(nodes)),
+            weight = T[track_w[I, ap] for I in cells],
+        )
+        _regauge!(x, GaugeFreedoms{T}([f], length(x)), gauge)
+    end
+    return phase
+end
+
+# Summed over a station set that does not move between APs: a sum over whatever
+# stations happen to be covered shifts frame whenever coverage flickers,
+# putting steps into every track for a quantity that carries no information.
+# Summing over the cells covered in every AP keeps one frame for the whole scan.
+function _apply_ap_gauge!(phase, covered, track_w, gauge::ZeroSumPhase)
+    nnode = size(phase, 2)
     # One constant per AP, across both feed nodes. Cross-hand rows join the two
     # feeds into a single connected component carrying a single additive freedom,
     # so a separate constant per feed would invent a second one and shift every
