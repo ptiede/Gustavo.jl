@@ -352,7 +352,7 @@ _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 _edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nant))
 
 # Solve one observable's WLS system on the (station, feed) graph into `vals`
-# and `cov`, each `(nant, 2)`: the node values, `NaN` where unsolved, and which
+# and `cov`, each `(nant, nnode)`: the node values, `NaN` where unsolved, and which
 # nodes were solved. `val`, `w`, `mask` and `nodes` share their `(AntennaPair,
 # FeedPair)` axes; each cell with `mask` set is one observation `val` of its edge
 # (see `_edge`) with weight `w`. The system is solved in `val`'s element type.
@@ -369,12 +369,12 @@ function _solve_observable!(
     Base.require_one_based_indexing(vals, cov)
     isnothing(seed_phase) || Base.require_one_based_indexing(seed_phase)
     T = eltype(val)
-    nant = size(vals, 1)
-    size(vals) == size(cov) == (nant, 2) ||
-        throw(DimensionMismatch("vals and cov must be (nant, 2); got $(size(vals)) and $(size(cov))"))
+    nant, nnode = size(vals)
+    size(vals) == size(cov) ||
+        throw(DimensionMismatch("vals and cov must have the same size; got $(size(vals)) and $(size(cov))"))
     fill!(vals, NaN)
     fill!(cov, false)
-    nnodes = 2 * nant
+    nnodes = nnode * nant
     cells = [I for I in eachindex(val, w, mask, nodes) if mask[I]]
     isempty(cells) && return 0
 
@@ -389,7 +389,7 @@ function _solve_observable!(
     nodew = _node_weights(nnodes, edges, wt)
     # Inverse of `_node`.
     station_of(n) = (n - 1) % nant + 1
-    feed_of(n) = n > nant ? 2 : 1
+    feed_of(n) = (n - 1) ÷ nant + 1
     freedoms = map(1:ncomp) do c
         cn = findall(==(c), compid)
         GaugeFreedom(;
@@ -522,19 +522,19 @@ end
 # leaving a smooth ±π-scale arc in the station track. The phasor iteration is
 # circular and so has no branch structure. Every gated cell is a pure node
 # difference, its source term already removed, so all of them drive the iteration.
-function _circular_ap_seed(val, w, mask, nodes, nant::Integer, anchor::Integer)
+function _circular_ap_seed(val, w, mask, nodes, nant::Integer, nnode::Integer, anchor::Integer)
     T = eltype(val)
     cells = [I for I in eachindex(val, w, mask, nodes) if mask[I]]
     isempty(cells) && return nothing
-    z = ones(Complex{T}, nant, 2)
-    present = falses(nant, 2)
+    z = ones(Complex{T}, nant, nnode)
+    present = falses(nant, nnode)
     for I in cells
         (a, na), (b, nb) = nodes[I]
         present[a, na] = true
         present[b, nb] = true
     end
     for _ in 1:50
-        acc = zeros(Complex{T}, nant, 2)
+        acc = zeros(Complex{T}, nant, nnode)
         for I in cells
             (a, na), (b, nb) = nodes[I]
             R = cis(val[I])
@@ -552,7 +552,7 @@ function _circular_ap_seed(val, w, mask, nodes, nant::Integer, anchor::Integer)
     # prediction differences, so a common gauge offset cancels.
     pin = findfirst(view(present, anchor, :))
     g = isnothing(pin) ? one(Complex{T}) : conj(z[anchor, pin]) / abs(z[anchor, pin])
-    ph = fill(T(NaN), nant, 2)
+    ph = fill(T(NaN), nant, nnode)
     for f in axes(ph, 2), a in axes(ph, 1)
         present[a, f] && (ph[a, f] = angle(z[a, f] * g))
     end
@@ -629,11 +629,11 @@ end
 # c[b, nb]` to every term and subtracting `c` from the tracks leaves the model
 # unchanged. Returns the largest change from `x_prev` to `x` that no such `c`
 # absorbs, fitting `c` by weighted least squares over the cells in `mask`.
-function _source_move(x, x_prev, cell_w, mask, nodes, nant::Integer, anchor::Integer)
+function _source_move(x, x_prev, cell_w, mask, nodes, nant::Integer, nnode::Integer, anchor::Integer)
     T = eltype(x)
     dx = map((a, b) -> rem2pi(a - b, RoundNearest), x, x_prev)
-    c = fill(T(NaN), nant, 2)
-    _solve_observable!(c, falses(nant, 2), dx, cell_w, mask, nodes, PinAntenna(anchor); rewrap = 0)
+    c = fill(T(NaN), nant, nnode)
+    _solve_observable!(c, falses(nant, nnode), dx, cell_w, mask, nodes, PinAntenna(anchor); rewrap = 0)
     moved = zero(T)
     for I in eachindex(dx, mask, nodes)
         mask[I] || continue
@@ -803,8 +803,9 @@ function _solve_ap_sweep!(
     fill!(phase, convert(eltype(phase), NaN))
     fill!(covered, false)
     fill!(track_w, zero(eltype(track_w)))
-    prev_phase = fill(convert(eltype(phase), NaN), nant, 2)  # cells no anchor-present AP has covered yet
-    prev_age = zeros(Int, nant, 2)    # APs since a cell was last refreshed (staleness)
+    nnode = size(phase, 2)
+    prev_phase = fill(convert(eltype(phase), NaN), nant, nnode)  # cells no anchor-present AP has covered yet
+    prev_age = zeros(Int, nant, nnode)    # APs since a cell was last refreshed (staleness)
     for ap in axes(val, Ti)
         v, wk, mk = view(val, Ti(ap)), view(w, Ti(ap)), view(mask, Ti(ap))
         # The anchor has data this AP iff some observation touches it (⇒ the solve
@@ -820,7 +821,7 @@ function _solve_ap_sweep!(
         end
         seed = nothing
         if ref_here
-            seed = fill(convert(eltype(phase), NaN), nant, 2)
+            seed = fill(convert(eltype(phase), NaN), nant, nnode)
             for a in axes(seed, 1), n in axes(seed, 2)
                 (isfinite(prev_phase[a, n]) && prev_age[a, n] <= max_stale) &&
                     (seed[a, n] = prev_phase[a, n])
@@ -831,7 +832,7 @@ function _solve_ap_sweep!(
         # trusting the tree-initialized linear solve's 2π branch — see
         # `_circular_ap_seed`.
         if seed === nothing || !any(isfinite, seed)
-            seed = _circular_ap_seed(v, wk, mk, nodes, nant, anchor)
+            seed = _circular_ap_seed(v, wk, mk, nodes, nant, nnode, anchor)
         end
         ph, cov = view(phase, :, :, ap), view(covered, :, :, ap)
         _solve_observable!(ph, cov, v, wk, mk, nodes, PinAntenna(anchor); rewrap, seed_phase = seed)
@@ -947,7 +948,8 @@ over `AntennaPair`, `FeedPair` and `Ti` in any storage order, with the same
 lookups: station pairs labeled by station names, feed pairs by feed-index
 pairs, and `Ti` by the AP epochs in seconds. The coherent SNR² is
 `|rbar|²/wbar`. `stations` names the stations; each one's position in it is
-its station index.
+its station index. The number of feeds per station is the largest feed index
+in the `FeedPair` labels.
 
 Returns a `DimStack`: `:phase` (`AntennaName(stations) × Feed × Ti`) is the
 per-(station, feed) adhoc phase in radians, `NaN` where unsolved;
@@ -1013,7 +1015,9 @@ function solve_adhoc_phasing(
                 join((n for n in unique(stations) if count(==(n), stations) > 1), ", "),
         ),
     )
-    _requires_single_node(smoother) && _feed_node(tying, 1) != _feed_node(tying, 2) && error(
+    nfeed = maximum(maximum, lookup(rbar, FeedPair))
+    nnode = nfeed_blocks(tying, nfeed)
+    _requires_single_node(smoother) && nnode != 1 && error(
         "$(typeof(smoother)) requires one phase node per station (its Kalman state " *
             "is one dimension per station), but the adhoc component ties feeds as " *
             "$(typeof(tying)). Use PerTrackAdhocSmoother for an independent per-feed track.",
@@ -1022,7 +1026,7 @@ function solve_adhoc_phasing(
     T = something(smoother.options.eltype, float(real(eltype(rbar))))
     r = Complex{T}.(permutedims(rbar, cell_dims))
     w = T.(permutedims(wbar, cell_dims))
-    return _solve_adhoc_phasing(r, w, _cell_nodes(r, stations, tying), stations, gauge, smoother, tying, priors)
+    return _solve_adhoc_phasing(r, w, _cell_nodes(r, stations, tying), stations, nfeed, nnode, gauge, smoother, tying, priors)
 end
 
 _station_priors(prior, stations) = _station_priors(fill(prior, length(stations)), stations)
@@ -1040,19 +1044,19 @@ end
 
 # Behind a function barrier: the working type comes from a runtime option.
 # `rbar`/`wbar` are stored `(AntennaPair, FeedPair, Ti)`, as is every derived array.
-function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tying, priors)
+function _solve_adhoc_phasing(rbar, wbar, nodes, stations, nfeed, nnode, gauge, smoother, tying, priors)
     T = real(eltype(rbar))
     nant = length(stations)
     nap = size(rbar, Ti)
     times = parent(lookup(rbar, Ti))
 
     # Solved on the (station, feed node) graph; expanded back onto the feed axis at the end.
-    node_axes = (AntennaName(stations), FeedNode(1:2), DimensionalData.dims(rbar, Ti))
+    node_axes = (AntennaName(stations), FeedNode(1:nnode), DimensionalData.dims(rbar, Ti))
     phase = fill(T(NaN), node_axes)
-    covered = DimArray(falses(nant, 2, nap), node_axes)
+    covered = DimArray(falses(nant, nnode, nap), node_axes)
     # Track per-(station, feed node) coherent weight for smoothing and the demean.
     track_w = zeros(T, node_axes)
-    resolved = DimArray(Union{Nothing, AbstractPrior}[nothing for _ in 1:nant, _ in 1:2], node_axes[1:2])
+    resolved = DimArray(Union{Nothing, AbstractPrior}[nothing for _ in 1:nant, _ in 1:nnode], node_axes[1:2])
 
     # The SNR gate does not depend on the source terms, so the gated observations
     # are built once and reused by every alternation pass (and by the joint smoother).
@@ -1076,7 +1080,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
         # make the first solve fit rows a full source phase away from their model,
         # which for a source phase near ±π locks the wrong 2π branch — one the
         # later passes inherit through the warm start and cannot leave.
-        _update_source_terms!(x, raw, zeros(T, nant, 2, nap))
+        _update_source_terms!(x, raw, zeros(T, nant, nnode, nap))
     end
     obs = _source_corrected(raw, x, keep)
 
@@ -1130,7 +1134,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
         x_prev = copy(x)
         _update_source_terms!(x, raw, phase)
         obs = _source_corrected(raw, x, keep)
-        moved = _source_move(x, x_prev, cell_w, keep, nodes, nant, anchor)
+        moved = _source_move(x, x_prev, cell_w, keep, nodes, nant, nnode, anchor)
         moved <= smoother.options.source_tol && break
     end
 
@@ -1177,10 +1181,10 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, gauge, smoother, tyin
     # indexes: feeds sharing a node get identical tracks (so a `SharedFeeds` adhoc
     # contributes exactly zero inter-feed phase), and a feed the component does not
     # parameterize (node 0) stays NaN/uncovered.
-    feed_axes = (AntennaName(stations), Feed(1:2), DimensionalData.dims(rbar, Ti))
+    feed_axes = (AntennaName(stations), Feed(1:nfeed), DimensionalData.dims(rbar, Ti))
     phase_out = fill(T(NaN), feed_axes)
-    covered_out = DimArray(falses(nant, 2, nap), feed_axes)
-    prior_out = DimArray(Union{Nothing, AbstractPrior}[nothing for _ in 1:nant, _ in 1:2], feed_axes[1:2])
+    covered_out = DimArray(falses(nant, nfeed, nap), feed_axes)
+    prior_out = DimArray(Union{Nothing, AbstractPrior}[nothing for _ in 1:nant, _ in 1:nfeed], feed_axes[1:2])
     for f in lookup(phase_out, Feed)
         n = _feed_node(tying, f)
         n == 0 && continue

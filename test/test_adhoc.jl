@@ -919,7 +919,7 @@ end
     )) == 1
     @test all(isfinite, ph) && all(cov)
     seed = @inferred Union{Nothing, Matrix{Float32}} FRa._circular_ap_seed(
-        slice(obs.val), slice(obs.w), slice(obs.mask), nodes, nant, 1,
+        slice(obs.val), slice(obs.w), slice(obs.mask), nodes, nant, 2, 1,
     )
     @test seed isa Matrix{Float32}
 end
@@ -983,10 +983,10 @@ end
     mask = map(_ -> true, x_prev)
     c = 0.1 .* randn(rng, nant, 2)
     shifted = map((x, ((a, na), (b, nb))) -> x + c[a, na] - c[b, nb], x_prev, nodes)
-    @test FRa._source_move(shifted, x_prev, cell_w, mask, nodes, nant, 1) < 1.0e-12
+    @test FRa._source_move(shifted, x_prev, cell_w, mask, nodes, nant, 2, 1) < 1.0e-12
     moved = copy(shifted)
     moved[3, 2] += 0.01
-    @test 1.0e-3 < FRa._source_move(moved, x_prev, cell_w, mask, nodes, nant, 1) <= 0.01
+    @test 1.0e-3 < FRa._source_move(moved, x_prev, cell_w, mask, nodes, nant, 2, 1) <= 0.01
 end
 
 # Relabel station `s`'s feeds by `σ` (new feed `σ[f]` holds old feed `f`) or
@@ -1069,4 +1069,44 @@ end
     rot = solve_positional(restation(rbar, bl, pols, 3; U), wbar, bl, pols, nant, times; kw...)
     @test isequal(isfinite.(rot.phase), isfinite.(sol.phase))
     @test maximum(abs, filter(isfinite, rot.phase .- sol.phase)) < 1.0e-6
+end
+
+@testset "Adhoc: stations with one or three receptors" begin
+    rng = MersenneTwister(0x0267)
+    nant, nap = 5, 20
+    ref = 1
+    bl = all_bl_a(nant)
+    times = collect(0:(nap - 1)) .* 1.0
+    for nfeed in (1, 3), tying in (CALa.PerFeed(), CALa.SharedFeeds())
+        pols = [(fa, fb) for fa in 1:nfeed for fb in 1:nfeed]
+        screen = 0.3 .* randn(rng, nant, nfeed, nap)
+        tying isa CALa.SharedFeeds && (screen .= screen[:, 1:1, :])
+        rbar, wbar = inject_screen(bl, pols, screen)
+        sol = solve_positional(
+            rbar, wbar, bl, pols, nant, times;
+            tying, gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+        )
+        @test lookup(sol.phase, FRa.Feed) == 1:nfeed
+        @test all(sol.covered)
+        @test adhoc_recon(rbar, sol, bl, pols) < 1.0e-9
+        for a in 1:nant, f in 1:nfeed
+            t = [screen[a, f, ap] - screen[ref, 1, ap] for ap in 1:nap]
+            @test maximum(abs.(sol.phase[a, f, :] .- (t .- mean(t)))) < 1.0e-8
+        end
+    end
+
+    # One node per station: the joint solve takes a single receptor under
+    # either tying, and any count under `SharedFeeds`.
+    pols = [(1, 1)]
+    rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 1, nap))
+    joint = FRa.JointKalmanSmoother(coherence_time = 15.0)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; tying = CALa.PerFeed(), smoother = joint)
+    @test all(isfinite, sol.phase)
+    pols = [(fa, fb) for fa in 1:3 for fb in 1:3]
+    rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 3, nap))
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; tying = CALa.SharedFeeds(), smoother = joint)
+    @test all(isfinite, sol.phase)
+    @test_throws "requires one phase node per station" solve_positional(
+        rbar, wbar, bl, pols, nant, times; tying = CALa.PerFeed(), smoother = joint,
+    )
 end

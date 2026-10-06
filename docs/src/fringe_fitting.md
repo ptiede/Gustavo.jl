@@ -556,6 +556,66 @@ x^p_{ab} \to x^p_{ab} - \left(c_{a,n(f_a)} - c_{b,n(f_b)}\right),
 so each track ``\phi_{a,n}(t)`` is reported with zero weighted mean over the
 scan, and its time variation, including a slope, is what the step solves.
 
+### Using every product
+
+Every product of every baseline enters one solve per AP; the station phases are
+shared across products, and only the constants ``x^p_{ab}`` are per product.
+Under `SharedFeeds` all of a station's products constrain its single node;
+under `PerFeed` a product constrains the two feed nodes it pairs.
+
+The solve runs in two passes. A seed pass takes each product's phase
+``\arg \bar V^p_{ab}(t)`` at each AP, keeps it if its coherent SNR reaches
+`snr_floor` ([`AdhocOptions`](@ref)), and minimizes
+
+```math
+\sum_t \sum_{ab,p} w^p_{ab}(t)\,
+  \operatorname{wrap}\!\left(\arg \bar V^p_{ab}(t)
+  - \phi_{a,n(f_a)}(t) + \phi_{b,n(f_b)}(t) - x^p_{ab}\right)^2
+```
+
+by alternating two steps: the per-AP station phases with ``x`` fixed (the
+system below), and each source term with ``\phi`` fixed, as the weighted
+circular mean
+
+```math
+x^p_{ab} = \arg \sum_t w^p_{ab}(t)\,
+  e^{i\left(\arg \bar V^p_{ab}(t) - \Delta\phi_{ab}(t)\right)} ,
+```
+
+until no source term moves by more than `source_tol` beyond what per-node
+constants absorb, or for at most `source_iters` passes. Its role is to place
+every track on the right 2π branch. A complex-domain refinement then takes
+Gauss–Newton steps on
+
+```math
+\sum_t \sum_{ab,p} \bar w^p_{ab}(t)\,
+  \left|\bar V^p_{ab}(t) - s^p_{ab}\, e^{i\Delta\phi_{ab}(t)}\right|^2 ,
+```
+
+using every product at every AP, ungated. With ``s^p_{ab}`` the product's mean derotated
+visibility over the scan, an AP contributes
+
+```math
+\Delta\phi^{p}_{ab} \approx \Delta\hat\phi_{ab}
+  + \frac{\operatorname{Im}\!\left(\bar V^p_{ab}\,\overline{s^p_{ab}}\,
+    e^{-i\Delta\hat\phi_{ab}}\right)}{|s^p_{ab}|^2},
+\qquad
+\text{weight } w^p_{ab}\,|s^p_{ab}|^2 ,
+```
+
+a linear measurement of the station-phase difference ``\Delta\phi_{ab}``
+around the current tracks ``\Delta\hat\phi_{ab}``. A product weighs in
+by its signal power, so a weak product (a cross-hand product on a weakly
+polarized source in a circular basis, say) contributes little rather than
+being excluded; the SNR gate applies to the seed pass only.
+
+The tracks are then fit along time under the component's prior.
+[`PerTrackAdhocSmoother`](@ref) fits each (station, node) track on its own: one
+per station under `SharedFeeds`, one per feed under `PerFeed`.
+[`JointKalmanSmoother`](@ref) fits every station's track at once from the
+baseline differences, and needs one node per station: `SharedFeeds`, or a
+single receptor.
+
 ### Feed order and feed basis
 
 No product is treated differently because of its feed indices, so the solution
@@ -575,8 +635,8 @@ Z_{ab}(t) = G_a(t)\, S_{ab}\, G_b(t)^\dagger .
 A change of feed basis at station ``a`` by a unitary ``U`` replaces ``Z_{ab}``
 with ``U Z_{ab}``. A feed-common gain ``G_a = e^{i\phi_a} I`` commutes with
 ``U``, so the same ``\phi_a`` fits the new data, with ``U S_{ab}`` in place of
-``S_{ab}``, and the free source terms absorb the change. The complex-domain
-refinement weights a baseline by ``\sum_p w\,|s^p_{ab}|^2 = w\,\lVert S_{ab}
+``S_{ab}``, and the free source terms absorb the change. Summed over a
+baseline's products, the refinement above weights it by ``\sum_p w\,|s^p_{ab}|^2 = w\,\lVert S_{ab}
 \rVert_F^2`` and measures it through ``\operatorname{Im} \sum_p \bar V^p_{ab}
 \overline{s^p_{ab}}\, e^{-i\Delta\phi}``, a Frobenius inner product, and both
 are unchanged by ``U`` when every product has the same weight. A per-feed gain
@@ -586,21 +646,44 @@ by construction.
 
 ### Per-integration solves and their gauge
 
-Each AP is solved by weighted least squares on a graph whose nodes are the
-(station, node) pairs and whose edges are the products that pass the SNR gate,
-with the source terms removed. A row ``e_u - e_v`` annihilates any vector
-constant on a connected component ``C`` of that graph, so each component has
-one free constant per AP, ``\phi \to \phi + \delta\,\mathbf 1_C``. Under
+Each AP is a weighted least-squares problem on a graph whose nodes are the
+(station, node) pairs, ``\phi \in \mathbb R^{N}`` with
+``N = n_\mathrm{ant} n_\mathrm{node}``. Each product ``(ab, p)`` the pass uses
+is a row ``i`` joining ``u_i = (a, n(f_a))`` to ``v_i = (b, n(f_b))``:
+
+```math
+\min_\phi \sum_i w_i \left((A\phi)_i - y_i\right)^2,
+\qquad
+A_{i u_i} = 1,\; A_{i v_i} = -1 .
+```
+
+In the seed pass ``y_i = \arg \bar V^p_{ab}(t) - x^p_{ab}`` with
+``w_i = |r^p_{ab}(t)|^2 / \bar w^p_{ab}(t)``, the coherent SNR², where
+``r = \sum w V`` and ``\bar w = \sum w`` over the band. In the refinement
+``y_i`` is the linearized measurement above and ``w_i = \bar w^p_{ab}(t)\,
+|s^p_{ab}|^2``. Because ``y_i`` is known only modulo ``2\pi``, the solve
+starts from a seed ``\phi^0`` and alternates
+
+```math
+y_i \leftarrow y_i + 2\pi \operatorname{round}\!\left(\frac{(A\phi)_i - y_i}{2\pi}\right),
+\qquad
+\left(A_F^\top W A_F\right) \phi_F = A_F^\top W y ,
+```
+
+`phase_rewrap_iters` + 1 times, where ``F`` is every node except one pinned
+node per connected component, held at zero. The pin is needed because
+``A \mathbf 1_C = 0`` for each connected component ``C`` of the graph: each
+component has one free constant per AP, ``\phi \to \phi + \delta\,\mathbf 1_C``. Under
 `PerFeed`, a product pairing different nodes joins their blocks into one
 component; where no such product passes the gate, the blocks are separate
 components with a constant each.
 
-Each AP's solve pins one node of each component, at an anchor station chosen
-as the one with the most gated weight in the scan, so that tracks are
-continuous from one AP to the next and can be unwrapped. The 2π branch of each
-observation is seeded by a maximum-weight spanning tree over all of the AP's
-edges, each of which is a pure node difference once the source terms are
-removed.
+The pinned node is at an anchor station, chosen as the one with the most gated
+weight in the scan, so that tracks are continuous from one AP to the next and
+can be unwrapped. The seed ``\phi^0`` is the previous AP's solution where it is
+recent, and otherwise a circular solve of the AP's phasors; a maximum-weight
+spanning tree over all of the AP's edges, each a pure node difference once the
+source terms are removed, fills any node neither covers.
 
 A component that holds no anchor node at some AP is pinned elsewhere, which
 offsets it by an arbitrary constant. That constant is removed by registering
