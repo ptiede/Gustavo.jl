@@ -17,8 +17,8 @@
 # `x` must stay free per (baseline, product): that is what keeps the model
 # independent of the polarization basis, since the source EVPA, the D-terms and
 # the source's own closure phase then land in `x` rather than biasing the
-# station tracks. One cross-hand phase shared by every baseline is the rank-one
-# restriction `x_{ab,p} = ±c`, which cannot represent closure phase at all.
+# station tracks. A source term shared by every baseline is a rank-one
+# restriction, which cannot represent closure phase at all.
 #
 # `x` is degenerate with a per-station constant (`φ_a → φ_a + c_a`, `x_{ab,p} →
 # x_{ab,p} − (c_a − c_b)`), a gauge the per-scan demean in step (5) fixes. A
@@ -214,9 +214,10 @@ The default [`AdhocPhase`](@ref Gustavo.AdhocPhase) step model: one per-AP const
 over the global band — a `phase.adhoc` component with `Ti = PerIntegration()`.
 `feed` is its feed tying: `SharedFeeds()` (the default) solves one track per
 station — residual atmospheric phase is non-birefringent, and a feed-common
-track contributes ZERO inter-feed phase, where a `PerFeed()` solve lets per-AP
-noise differ between feeds and so injects spurious cross-hand scatter.
-`PerFeed()` fits each feed's own track when the per-feed structure is real.
+track contributes zero inter-feed phase in any feed basis, where a `PerFeed()`
+solve lets per-AP noise differ between feeds and so scatters the inter-feed
+phase. `PerFeed()` fits each feed's own track when the per-feed structure is
+real.
 
 `prior` is the component's prior along `Ti`: by default an [`OUPrior`](@ref)
 with weakly informative hyperpriors ([`default_adhoc_prior`](@ref)); `nothing`
@@ -340,15 +341,14 @@ end
 
 # ── Node-graph solve (adhoc per-AP and bandpass closures) ───────────────────
 
-# Node index on the (station, feed) graph: feed-1 block 1:nant, feed-2 nant+1:2nant.
+# Node index on the (station, feed node) graph: node `n`'s block is `(n - 1) * nant .+ (1:nant)`.
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
 
 # The two ends of a node-system edge on the (station, feed) graph. A cell of a
 # `(AntennaPair, FeedPair)` system observes `φ(a, na) − φ(b, nb)`, where
 # `nodes[cell] = ((a, na), (b, nb))` gives each end's station index and phase
 # node — `_feed_node(tying, feed)` of the product's feeds, so the node equals the
-# feed only under `PerFeed`. An edge with `na != nb` is cross-hand: the only kind
-# that ties the two feed blocks together.
+# feed only under `PerFeed`.
 _edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nant))
 
 # Solve one observable's WLS system on the (station, feed) graph into `vals`
@@ -387,7 +387,7 @@ function _solve_observable!(
     # node per component as well — phase unwrapping propagates outward from an
     # actual node, which a summed gauge row does not provide.
     nodew = _node_weights(nnodes, edges, wt)
-    # Inverse of `_node`: the feed-1 block is 1:nant, feed-2 is nant+1:2nant.
+    # Inverse of `_node`.
     station_of(n) = (n - 1) % nant + 1
     feed_of(n) = n > nant ? 2 : 1
     freedoms = map(1:ncomp) do c
@@ -416,12 +416,10 @@ function _solve_observable!(
 
     # Phase: unwrap toward a spanning-tree seed rather than solving the raw
     # wrapped observations, whose WLS fit can lock onto the wrong 2π branch when
-    # a station difference exceeds ±π. Cross-hand edges carry the inter-feed
-    # offset, which the tree cannot place, so the tree runs over the
-    # parallel-hand edges only.
+    # a station difference exceeds ±π. Every edge is a pure node difference
+    # (the caller removes the source terms), so the tree may use any of them.
     if rewrap > 0
-        parallel = ((u, v, y, wi) for ((u, v), y, wi) in zip(edges, b, wt) if (u - 1) ÷ nant == (v - 1) ÷ nant)
-        xseed = _prim_seed(T, nnodes, parallel, anchors)
+        xseed = _prim_seed(T, nnodes, zip(first.(edges), last.(edges), b, wt), anchors)
         # A `seed_phase` (the previous AP's solved node phases) overrides the
         # tree wherever it is finite. It only picks each observation's 2π
         # branch, and edge predictions are gauge-invariant, so a differently
@@ -549,10 +547,11 @@ function _circular_ap_seed(val, w, mask, nodes, nant::Integer, anchor::Integer)
             a > 0 && (z[i] = acc[i] / a)
         end
     end
-    # One common gauge for the whole seed, the anchor when present. A fully
+    # One common gauge for the whole seed, an anchor node when present. A fully
     # consistent seed is safe on anchor-dropout APs too: the rewrap uses
     # prediction differences, so a common gauge offset cancels.
-    g = present[anchor, 1] ? conj(z[anchor, 1]) / abs(z[anchor, 1]) : one(Complex{T})
+    pin = findfirst(view(present, anchor, :))
+    g = isnothing(pin) ? one(Complex{T}) : conj(z[anchor, pin]) / abs(z[anchor, pin])
     ph = fill(T(NaN), nant, 2)
     for f in axes(ph, 2), a in axes(ph, 1)
         present[a, f] && (ph[a, f] = angle(z[a, f] * g))
@@ -583,8 +582,8 @@ _solvable(((a, na), (b, nb))) = a != b && na != 0 && nb != 0
 
 # The seed pass's observations over `rbar`'s `(AntennaPair, FeedPair, Ti)`: each
 # cell's phase `angle(r)`, weighted by its coherent SNR² and gated at
-# `snr_floor2`. Every correlation product contributes: a cross-hand cell's extra
-# phase is carried by its own free source term, so no product needs the
+# `snr_floor2`. Every correlation product contributes: a product's own phase
+# offset is carried by its free source term, so no product needs the
 # polarization basis to be known.
 function _adhoc_obs(rbar, wbar, nodes, snr_floor2::Real)
     T = real(eltype(rbar))
@@ -855,7 +854,7 @@ function _solve_ap_sweep!(
     # pin node, so that AP's whole solution is offset by an arbitrary, non-2π
     # constant, which would otherwise inject a spurious common-mode jump into
     # every station's track.
-    _restitch_refant_gauge!(phase, covered, track_w, anchor)
+    _restitch_refant_gauge!(phase, covered, track_w, obs, anchor)
 
     # Unwrap each (station, node) track across APs (per-AP solves share the ref
     # gauge, so a track is continuous up to ±2π steps the unwrap removes).
@@ -968,11 +967,12 @@ at 0, `ZeroSumPhase` centers each AP on zero mean.
 
 `tying` is the adhoc component's [`AbstractFeedTying`](@ref). `PerFeed()`
 (the default) solves an independent track per feed; `SharedFeeds()` solves
-one feed-common phase, constrained by all four correlation products and
-contributing zero inter-feed phase. Under `PerFeed`, cross-hand rows join the two feed blocks
-into one connected component with a single gauge freedom, pinned at the
-reference's feed-1 node, so the reference's inter-feed phase stays in the
-solution.
+one feed-common phase, constrained by every correlation product and
+contributing zero inter-feed phase. Under `PerFeed`, an AP's products that pair
+different feed nodes join their blocks into one connected component with a
+single gauge freedom; blocks no such product joins keep a freedom each. The
+solved phases do not depend on how a station orders its feeds, and under
+`SharedFeeds` they do not depend on its feed basis either.
 
 `prior` is the adhoc component's prior along time — `nothing`, a
 [`RandomWalkPrior`](@ref) or an [`OUPrior`](@ref) — for every station, or a
@@ -1268,8 +1268,8 @@ end
 
 # Put each AP on the gauge's own convention. The per-AP common mode is
 # unobservable — it cancels on every baseline — so this changes how the tracks
-# read, never the applied correction. One constant per AP spans both feed
-# nodes: cross-hand rows join them into one component with one freedom.
+# read, never the applied correction. One constant per AP spans every feed
+# node, so differences between nodes in one component are left untouched.
 function _apply_ap_gauge!(phase, covered, track_w, gauge::AbstractGauge)
     T = eltype(phase)
     for ap in axes(phase, 3)
@@ -1294,13 +1294,8 @@ end
 # Summing over the cells covered in every AP keeps one frame for the whole scan.
 function _apply_ap_gauge!(phase, covered, track_w, gauge::ZeroSumPhase)
     nnode = size(phase, 2)
-    # One constant per AP, across both feed nodes. Cross-hand rows join the two
-    # feeds into a single connected component carrying a single additive freedom,
-    # so a separate constant per feed would invent a second one and shift every
-    # cross-hand difference `φ_{a,1} − φ_{b,2}` by the gap between them, breaking
-    # the reconstruction the gauge must leave untouched. Subtracting the same
-    # constant from every cell cancels in every baseline difference, parallel and
-    # cross alike.
+    # One constant per AP, across every feed node: a product pairing different
+    # nodes observes their difference, which a constant per node would shift.
     #
     # The summed cells are those covered in every AP: a sum over whatever happens
     # to be covered moves frame with coverage, putting steps into every track for
@@ -1332,55 +1327,49 @@ function _apply_ap_gauge!(phase, covered, track_w, gauge::ZeroSumPhase)
     return phase
 end
 
-# Re-reference anchor-absent APs to the trusted frame. Where the anchor is
-# solved, that AP's own solve already pins it and the running anchor is
-# refreshed from it, so real drift propagates. Where it is absent, the AP
-# carries an arbitrary global offset δ, estimated as the weighted circular mean
-# over the cells common to this AP and the anchor and subtracted from every
-# solved cell. This is a no-op when the anchor is present in every AP, and it
-# removes only a single global per-AP constant: per-(station, feed) means and
-# slopes are left to `_detrend_track!`. Leading APs with no trusted anchor yet
-# are left untouched, and a multi-component AP keeps one global δ dominated by
-# the largest overlap, per-island offsets being a gauge freedom.
-function _restitch_refant_gauge!(phase, covered, track_w, ref_station::Integer)
+# Re-reference anchor-absent APs to the trusted frame. Each connected component
+# of an AP's gated graph carries one additive freedom, which that AP's solve pins
+# at an anchor node when the component holds one and at some other node when it
+# does not. A component without an anchor node is offset by an arbitrary,
+# non-2π constant δ, estimated as the weighted circular mean of its cells'
+# change from their last trusted values and subtracted from them. Every
+# component then in the trusted frame refreshes those values, so real drift
+# propagates.
+# APs before any trusted value exists are left untouched; per-(station, node)
+# means and slopes are left to `_detrend_track!`.
+function _restitch_refant_gauge!(phase, covered, track_w, obs, ref_station::Integer)
     T = eltype(phase)
-    anchor = fill(T(NaN), size(phase, 1), size(phase, 2))
-    have_anchor = false
+    nant, nnode = size(phase, 1), size(phase, 2)
+    trusted = fill(T(NaN), nant, nnode)
     for ap in axes(phase, 3)
-        ref_present = covered[ref_station, 1, ap] || covered[ref_station, 2, ap]
-        if !ref_present && have_anchor
-            # Register per feed. With cross hands the two feeds share a component
-            # but carry two gauge freedoms (the overall phase pin and the feed-2
-            # EVPA pin); when the anchor drops out both fall back to a different
-            # antenna, shifting each feed by its own constant. The per-feed
-            # convention (each feed gauged relative to the anchor's feed) matches the
-            # rest of the adhoc solve, so a separate δ per feed restores it.
-            for f in axes(phase, 2)
-                num_s = zero(T)
-                num_c = zero(T)
-                wsum = zero(T)
-                for a in axes(phase, 1)
-                    (covered[a, f, ap] && isfinite(anchor[a, f]) && isfinite(phase[a, f, ap])) || continue
-                    d = phase[a, f, ap] - anchor[a, f]
-                    wk = (isfinite(track_w[a, f, ap]) && track_w[a, f, ap] > 0) ? T(track_w[a, f, ap]) : one(T)
-                    num_s += wk * sin(d)
-                    num_c += wk * cos(d)
-                    wsum += wk
-                end
-                if wsum > 0 && (num_s != 0 || num_c != 0)
-                    δ = atan(num_s, num_c)
-                    for a in axes(phase, 1)
-                        covered[a, f, ap] && (phase[a, f, ap] -= δ)
-                    end
-                end
-            end
+        mk = view(obs.mask, Ti(ap))
+        edges = [_edge(obs.nodes[I], nant) for I in eachindex(mk, obs.nodes) if mk[I]]
+        compid, ncomp, _ = connected_components(nant * nnode, edges)
+        comp(a, n) = compid[_node(a, n, nant)]
+        framed = falses(ncomp)
+        for n in 1:nnode
+            c = comp(ref_station, n)
+            c > 0 && covered[ref_station, n, ap] && (framed[c] = true)
         end
-        # Refresh the anchor from this AP's (now registered) solved cells.
-        if ref_present || have_anchor
-            for a in axes(phase, 1), f in axes(phase, 2)
-                (covered[a, f, ap] && isfinite(phase[a, f, ap])) && (anchor[a, f] = phase[a, f, ap])
+        for c in 1:ncomp
+            framed[c] && continue
+            num = zero(Complex{T})
+            for a in 1:nant, n in 1:nnode
+                (comp(a, n) == c && covered[a, n, ap] && isfinite(trusted[a, n]) && isfinite(phase[a, n, ap])) || continue
+                wk = (isfinite(track_w[a, n, ap]) && track_w[a, n, ap] > 0) ? T(track_w[a, n, ap]) : one(T)
+                num += wk * cis(phase[a, n, ap] - trusted[a, n])
             end
-            have_anchor = true
+            iszero(num) && continue
+            δ = angle(num)
+            for a in 1:nant, n in 1:nnode
+                comp(a, n) == c && covered[a, n, ap] && (phase[a, n, ap] -= δ)
+            end
+            framed[c] = true
+        end
+        for a in 1:nant, n in 1:nnode
+            c = comp(a, n)
+            (c > 0 && framed[c] && covered[a, n, ap] && isfinite(phase[a, n, ap])) || continue
+            trusted[a, n] = phase[a, n, ap]
         end
     end
     return phase

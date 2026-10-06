@@ -523,6 +523,105 @@ group then has its baselines measured at a known fringe position, and so to
 arbitrarily low signal-to-noise. The significance of these steered measurements
 is recorded and is not used as a threshold.
 
+## Adhoc phase
+
+The adhoc step ([`AdhocPhase`](@ref Gustavo.AdhocPhase)) solves a phase per
+station and accumulation period (AP) that a per-scan delay and rate cannot
+follow, such as atmospheric turbulence. It works on residual visibilities, with
+the fringe solution already divided out and the band coherently averaged to one
+complex number ``\bar V^p_{ab}(t)`` per baseline, product and AP.
+
+### Model
+
+Let ``n(f)`` be the phase node of feed ``f`` under the component's feed tying:
+``n(f) = 1`` for every feed under `SharedFeeds`, ``n(f) = f`` under `PerFeed`.
+For baseline ``(a,b)`` and product ``p`` with feeds ``(f_a, f_b)``,
+
+```math
+\arg \bar V^p_{ab}(t) = \phi_{a,n(f_a)}(t) - \phi_{b,n(f_b)}(t) + x^p_{ab} + \varepsilon ,
+```
+
+with one free source term ``x^p_{ab}`` per baseline and product, constant over
+the scan. The source term carries everything constant that a product adds to
+the station difference: source structure and closure phase, the source's
+polarization, leakage, and constant offsets between feeds. A constant on a node
+trades against the source terms,
+
+```math
+\phi_{a,n} \to \phi_{a,n} + c_{a,n},
+\qquad
+x^p_{ab} \to x^p_{ab} - \left(c_{a,n(f_a)} - c_{b,n(f_b)}\right),
+```
+
+so each track ``\phi_{a,n}(t)`` is reported with zero weighted mean over the
+scan, and its time variation, including a slope, is what the step solves.
+
+### Feed order and feed basis
+
+No product is treated differently because of its feed indices, so the solution
+does not depend on how a station orders its feeds. Relabeling station ``a``'s
+feeds by a permutation ``\pi`` moves its data from product ``(f_a, f_b)`` to
+``(\pi(f_a), f_b)``, and under `PerFeed` the solved tracks move with them,
+``\phi'_{a,\pi(f)} = \phi_{a,f}``.
+
+Under `SharedFeeds` the solution also does not depend on the station's feed
+basis. Write a baseline's products as a matrix ``Z_{ab}`` over
+``(f_a, f_b)``, with station gains ``G_a``:
+
+```math
+Z_{ab}(t) = G_a(t)\, S_{ab}\, G_b(t)^\dagger .
+```
+
+A change of feed basis at station ``a`` by a unitary ``U`` replaces ``Z_{ab}``
+with ``U Z_{ab}``. A feed-common gain ``G_a = e^{i\phi_a} I`` commutes with
+``U``, so the same ``\phi_a`` fits the new data, with ``U S_{ab}`` in place of
+``S_{ab}``, and the free source terms absorb the change. The complex-domain
+refinement weights a baseline by ``\sum_p w\,|s^p_{ab}|^2 = w\,\lVert S_{ab}
+\rVert_F^2`` and measures it through ``\operatorname{Im} \sum_p \bar V^p_{ab}
+\overline{s^p_{ab}}\, e^{-i\Delta\phi}``, a Frobenius inner product, and both
+are unchanged by ``U`` when every product has the same weight. A per-feed gain
+``G_a = \operatorname{diag}(e^{i\phi_{a,1}}, e^{i\phi_{a,2}}, \dots)`` is
+diagonal only in the stored basis, so a `PerFeed` solve depends on that basis
+by construction.
+
+### Per-integration solves and their gauge
+
+Each AP is solved by weighted least squares on a graph whose nodes are the
+(station, node) pairs and whose edges are the products that pass the SNR gate,
+with the source terms removed. A row ``e_u - e_v`` annihilates any vector
+constant on a connected component ``C`` of that graph, so each component has
+one free constant per AP, ``\phi \to \phi + \delta\,\mathbf 1_C``. Under
+`PerFeed`, a product pairing different nodes joins their blocks into one
+component; where no such product passes the gate, the blocks are separate
+components with a constant each.
+
+Each AP's solve pins one node of each component, at an anchor station chosen
+as the one with the most gated weight in the scan, so that tracks are
+continuous from one AP to the next and can be unwrapped. The 2π branch of each
+observation is seeded by a maximum-weight spanning tree over all of the AP's
+edges, each of which is a pure node difference once the source terms are
+removed.
+
+A component that holds no anchor node at some AP is pinned elsewhere, which
+offsets it by an arbitrary constant. That constant is removed by registering
+the component against the last values ``\hat\phi_u`` of its nodes in the
+anchor's frame:
+
+```math
+\delta_C(t) = \arg \sum_{u \in C} w_u(t)\, e^{i(\phi_u(t) - \hat\phi_u)},
+\qquad
+\phi_u(t) \to \phi_u(t) - \delta_C(t) \quad (u \in C),
+```
+
+with ``w_u(t)`` the node's gated weight. One constant per component is exactly
+the freedom the data leave: shifting a set of nodes that is not a whole
+component would change the observed difference on every edge leaving it.
+
+The gauge given to the step is applied last, once per AP across every node.
+It changes no baseline difference, so it does not change the applied
+correction; the per-AP pin, the registration above, and the smoothing frame
+are internal to the solve and independent of it.
+
 ## Diagnostics
 
 A fringe solution's diagnostics are labeled arrays keyed by scan name,

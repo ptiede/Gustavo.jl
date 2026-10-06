@@ -215,10 +215,10 @@ across the observation (HOPS-style).
 
 **`adhoc` — per-integration constant phase, feed-common** (the
 `AdhocPhase` step). Residual atmospheric phase is non-birefringent
-(common to both feeds), so it is solved feed-common — which both denoises it
-and contributes exactly zero inter-feed phase. A `PerFeed` adhoc lets per-AP
-solve noise differ between feeds and injects spurious cross-hand scatter on
-top of the real instrumental inter-feed offset. Its prior along time is an
+(common to every feed), so it is solved feed-common — which both denoises it
+and contributes exactly zero inter-feed phase in any feed basis. A `PerFeed`
+adhoc lets per-AP solve noise differ between feeds and scatters the inter-feed
+phase on top of the real instrumental offset. Its prior along time is an
 `OUPrior` with weakly informative hyperpriors by default
 ([`default_adhoc_prior`](@ref Gustavo.Fring.default_adhoc_prior)); each
 track's weighted mean over a scan is removed, since a per-station constant

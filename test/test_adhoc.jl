@@ -988,3 +988,85 @@ end
     moved[3, 2] += 0.01
     @test 1.0e-3 < FRa._source_move(moved, x_prev, cell_w, mask, nodes, nant, 1) <= 0.01
 end
+
+# Relabel station `s`'s feeds by `σ` (new feed `σ[f]` holds old feed `f`) or
+# change its feed basis by the unitary `U`, in the sums `rbar[bl, product, ap]`.
+function restation(rbar, bl_pairs, pols, s; σ = nothing, U = nothing)
+    out = copy(rbar)
+    slot = Dict(p => i for (i, p) in pairs(pols))
+    for (bi, (a, b)) in pairs(bl_pairs), ap in axes(rbar, 3)
+        (a == s || b == s) || continue
+        Z = zeros(eltype(rbar), 2, 2)
+        for (i, (fa, fb)) in pairs(pols)
+            Z[fa, fb] = rbar[bi, i, ap]
+        end
+        if !isnothing(σ)
+            Z = a == s ? Z[invperm(σ), :] : Z[:, invperm(σ)]
+        else
+            Z = a == s ? U * Z : Z * U'
+        end
+        for (i, (fa, fb)) in pairs(pols)
+            out[bi, i, ap] = Z[fa, fb]
+        end
+    end
+    return out
+end
+
+@testset "Adhoc: solved phases follow a station's feed labels, not its feed order" begin
+    rng = MersenneTwister(0x0129)
+    nant, nap = 5, 24
+    bl = all_bl_a(nant)
+    times = collect(0:(nap - 1)) .* 2.0
+    t = reshape(times, 1, 1, :)
+    screen = 0.8 .* sin.(t ./ 9 .+ 6 .* rand(rng, nant, 2, 1)) .+ 0.3 .* randn(rng, nant, 2, 1)
+    # Station 2 dominates the gated weight, so it anchors the per-AP solves, and
+    # it drops out in the middle APs.
+    dropaps = 9:13
+    σ = [2, 1]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    # With `linked = false` only same-index products carry weight, so under
+    # `PerFeed` each AP's feed blocks are separate components; relabeled,
+    # station 3 joins the other block.
+    for linked in (true, false), tying in (CALa.PerFeed(), CALa.SharedFeeds())
+        x = 0.5 .* randn(rng, length(bl), length(pols))
+        rbar, wbar = inject_screen(bl, pols, screen, x; noise = 1.0, rng)
+        for (bi, (a, b)) in pairs(bl)
+            2 in (a, b) && (rbar[bi, :, :] .*= 3)
+            2 in (a, b) && (rbar[bi, :, dropaps] .= 0; wbar[bi, :, dropaps] .= 0)
+        end
+        if !linked
+            rbar[:, [2, 3], :] .= 0
+            wbar[:, [2, 3], :] .= 0
+        end
+        kw = (; gauge = PinAntenna(1), tying, smoother = FRa.PerTrackAdhocSmoother())
+        sol = solve_positional(rbar, wbar, bl, pols, nant, times; kw...)
+        perm = solve_positional(
+            restation(rbar, bl, pols, 3; σ), restation(wbar, bl, pols, 3; σ), bl, pols, nant, times; kw...,
+        )
+        relabeled = copy(parent(sol.phase))
+        relabeled[3, σ, :] .= parent(sol.phase)[3, :, :]
+        @test isequal(isfinite.(parent(perm.phase)), isfinite.(relabeled))
+        @test all(isapprox.(parent(perm.phase), relabeled; atol = 1.0e-8) .| isnan.(relabeled))
+    end
+end
+
+@testset "Adhoc: a feed-common track ignores a station's feed basis" begin
+    rng = MersenneTwister(0x1290)
+    nant, nap = 5, 24
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 2.0
+    common = 0.8 .* sin.(reshape(times, 1, 1, :) ./ 9 .+ 6 .* rand(rng, nant, 1, 1))
+    screen = repeat(common, 1, 2, 1)
+    # A source with every product present, so a basis change keeps every product
+    # above the gate.
+    x = 0.5 .* randn(rng, length(bl), length(pols))
+    rbar, wbar = inject_screen(bl, pols, screen, x; amp = 20.0, noise = 1.0, rng)
+    θ = 0.7
+    U = [cos(θ) -sin(θ); sin(θ) cos(θ)] * [cis(0.4) 0; 0 cis(-0.9)]
+    kw = (; gauge = PinAntenna(1), tying = CALa.SharedFeeds(), smoother = FRa.PerTrackAdhocSmoother(), prior = nothing)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; kw...)
+    rot = solve_positional(restation(rbar, bl, pols, 3; U), wbar, bl, pols, nant, times; kw...)
+    @test isequal(isfinite.(rot.phase), isfinite.(sol.phase))
+    @test maximum(abs, filter(isfinite, rot.phase .- sol.phase)) < 1.0e-6
+end
