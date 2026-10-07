@@ -643,9 +643,10 @@ _segment_levels(level, seg) = [level[p] for p in seg.piece_of]
 # `unwrap` re-references each piece of a phase track to a continuous branch along
 # frequency first, because the prior fits a real track and the ±π branch cuts of
 # a raw phase solve would otherwise read as genuine structure; the pieces sharing
-# a level are then put on one branch. A piece whose branch the data do not
-# determine (`phase_unwrap_ambiguity` past `_BP_MAX_UNWRAP_AMBIGUITY`) is dropped
-# instead; see that constant.
+# a level are then put on one branch. Under a prior, a piece whose branch the
+# data do not determine (`phase_unwrap_ambiguity` past `_BP_MAX_UNWRAP_AMBIGUITY`)
+# is dropped instead; see that constant. Without one the segments are fit
+# independently and the branch does not affect the fit.
 #
 # `status` receives one `_BP_TRACK_*` code per piece.
 #
@@ -665,7 +666,7 @@ function _fit_track!(
     declined = falses(length(pieces))
     if unwrap
         for j in eachindex(ys, ws)
-            if phase_unwrap_ambiguity(ys[j]; weights = ws[j]) > _BP_MAX_UNWRAP_AMBIGUITY
+            if !isnothing(prior) && phase_unwrap_ambiguity(ys[j]; weights = ws[j]) > _BP_MAX_UNWRAP_AMBIGUITY
                 declined[j] = true
                 fill!(ys[j], T(NaN))
             else
@@ -1232,10 +1233,10 @@ holds one gain across cells the others split, those cells lie in one component,
 and its single pin fixes ONE segment of the pinned station's track while the
 rest of that track is fitted.
 
-The magnitude does not cancel, and `S` is frequency-flat, so it can only absorb
-`|c|²` when `|c|` is constant across the band — leaving exactly one free
-amplitude parameter overall, which the zero-band-mean gauge in
-`_write_joint_bandpass!` removes. Pinning `|g|` as well
+Besides that common phase, each (station, feed, time segment) track has a free
+band-constant phase and log-amplitude: `S` is per scan and baseline but
+frequency-flat, so it absorbs a band-constant factor on any one station, and
+`_remove_band_levels!` moves those levels into `S`. Pinning `|g|` as well
 would assert the reference antenna has a flat amplitude bandpass, discarding
 structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 over the band eliminates `ls` and leaves the full-rank signless-Laplacian
@@ -1405,6 +1406,9 @@ end
 # `nothing` for a pinned gauge, adds each slot's constraint terms to its phase
 # track as a pseudo-observation (`_joint_gauge_observation`); the first sweep
 # runs without them and collects the data weights that set the penalty.
+#
+# Returns the number of slots the sweep updated and the `(station, feed, time
+# segment)` of each phase track with a piece declined at unwrapping.
 function _update_station_gains!(
         gains, data, layout; fits, levels, seed::Bool, gauge_state = nothing,
         phase_status = nothing, amp_status = nothing, phase_priors = nothing, amp_priors = nothing,
@@ -1422,6 +1426,8 @@ function _update_station_gains!(
     φ̃ = Vector{T}(undef, nfsmax)
     yg = Vector{T}(undef, nfsmax)
     wg = Vector{T}(undef, nfsmax)
+    nupdated = 0
+    declined = Tuple{Int, Int, Int}[]
     for feed in axes(touching, 2), ant in eachindex(loc)
         k, ai = loc[ant]
         iszero(k) && continue
@@ -1484,7 +1490,7 @@ function _update_station_gains!(
             # The status of the last sweep is the status of the solve: each sweep
             # overwrites the previous one's codes for this node.
             ast = isnothing(amp_status) ? nothing : view(amp_status[k], ai, feed, :, ts)
-            pst = isnothing(phase_status) ? nothing : view(phase_status[k], ai, feed, :, ts)
+            pst = isnothing(phase_status) ? similar(fit.phase.pieces, Int8) : view(phase_status[k], ai, feed, :, ts)
             amp_prior, amp_levels = _fit_track!(
                 la, wf, fit.amp.x, fit.amp.pieces, fit.amp.prior;
                 fit.amp.level, fit.amp.nlevel, status = ast,
@@ -1494,7 +1500,7 @@ function _update_station_gains!(
             if all(pins)
                 # A wholly pinned track is known rather than fitted: report it as such
                 # instead of leaving it at NODATA.
-                isnothing(pst) || fill!(pst, _BP_TRACK_SOLVED)
+                fill!(pst, _BP_TRACK_SOLVED)
                 fill!(φ̃, zero(T))
                 isnothing(levels[ant].phase) || (levels[ant].phase[feed, :, ts] .= zero(T))
             else
@@ -1512,6 +1518,7 @@ function _update_station_gains!(
                     φ̃, wf, fit.phase.x, fit.phase.pieces, fit.phase.prior;
                     fit.phase.level, fit.phase.nlevel, unwrap = seed, status = pst, constraint,
                 )
+                any(==(_BP_TRACK_DECLINED), pst) && push!(declined, (ant, feed, ts))
                 isnothing(phase_priors) || (phase_priors[k][ai, feed, ts] = phase_prior)
                 isnothing(phase_levels) || (levels[ant].phase[feed, :, ts] .= phase_levels)
                 # A partial pin holds its own segments and leaves the rest fitted.
@@ -1529,10 +1536,11 @@ function _update_station_gains!(
                 g[ai, feed, fs, ts] = exp(C(la[fs], φ̃[fs]))
                 φ[ai, feed, fs, ts] = φ̃[fs]
                 touched[ai, feed, fs, ts] = true
+                nupdated += 1
             end
         end
     end
-    return gains
+    return nupdated, declined
 end
 
 # Move each (station, feed, time segment) track's band-mean log-amplitude and
@@ -1881,10 +1889,11 @@ function solve_joint_bandpass!(
     previous = [copy(gk.g) for gk in gains]
     for iter in 1:max_iterations
         foreach((dst, gk) -> copyto!(dst, gk.g), previous, gains)
-        _update_station_gains!(
+        nupdated, declined = _update_station_gains!(
             gains, data, layout;
             fits, levels, seed = iter == 1, gauge_state, phase_status, amp_status, phase_priors, amp_priors,
         )
+        iszero(nupdated) && _throw_unchanged_sweep(declined, geom)
         _remove_band_levels!(gains, levels, layout)
         maxrel = _largest_relative_change(gains, previous)
         isnothing(gauge_state) || (maxres = _advance_joint_gauge!(gauge_state, gains; seed = iter == 1))
@@ -1902,6 +1911,21 @@ function solve_joint_bandpass!(
     ]
     _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers; max_logamp)
     return θ
+end
+
+function _throw_unchanged_sweep(declined, geom::DataGeometry)
+    head = "solve_joint_bandpass!: the joint bandpass changed no gain in a sweep. "
+    isempty(declined) && throw(ArgumentError(head * "No gain slot had data to fit."))
+    named = join(("$(geom.stations[a]) (feed $f, time segment $ts)" for (a, f, ts) in first(declined, 3)), ", ")
+    more = length(declined) > 3 ? ", …" : ""
+    throw(
+        ArgumentError(
+            head * "$(length(declined)) phase tracks were declined at unwrapping: $named$more. " *
+                "Their phase changes between adjacent frequency segments are too scattered to " *
+                "unwrap, which a phase prior requires; without a phase prior the segments are " *
+                "fit independently and are not declined.",
+        ),
+    )
 end
 
 # Each station's level for one observable, `nothing` where it has none: its

@@ -986,3 +986,71 @@ end
 
     @test Bandpass().gauge === ZeroSumPhase()
 end
+
+# ── Band-referenced products and declined tracks ─────────────────────────────
+
+@testset "JointSmoother: gauges agree on band-referenced products" begin
+    bl_pairs(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    feeds = [(1, 1), (2, 2)]
+    bpf(fs; prior = nothing) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = fs, Feed = PerFeed(), prior)
+    hetmodel(a1, rest; prior = nothing) = CAL.GainModel(;
+        phase = (; bandpass = bpf(rest; prior)), logamp = (; bandpass = bpf(rest)),
+        stations = (A1 = (; phase = (; bandpass = bpf(a1; prior)), logamp = (; bandpass = bpf(a1))),),
+    )
+    setup(l) = (;
+        layout = l,
+        paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)),
+    )
+    # Station 1 holds one gain per `n1` channels and the rest one per `nrest`.
+    function synthetic(n1, nrest; nant, nchan, spread, seed)
+        rng = MersenneTwister(seed)
+        gtrue = ones(ComplexF64, nant, 2, 1, nchan)
+        for a in 1:nant, f in 1:2
+            n = a == 1 ? n1 : nrest
+            for c0 in 1:n:nchan
+                gtrue[a, f, 1, c0:(c0 + n - 1)] .= exp(complex(0.2 * randn(rng), spread * randn(rng)))
+            end
+        end
+        S = [(0.5 + rand(rng)) * cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs(nant), _ in feeds]
+        geom = _seg_geometry(nchan; nant)
+        return gtrue, geom, _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs(nant), feeds, geom)
+    end
+    function solve(n1, nrest, gauge, geom, results; prior = nothing)
+        nant = length(geom.stations)
+        l = CAL.plan_parameters(hetmodel(ChannelBlocks(n1), ChannelBlocks(nrest); prior), geom.stations, geom)
+        θ = zeros(l.nθ)
+        pb, ab = FP.bandpass_blocks(setup(l), θ, :phase), FP.bandpass_blocks(setup(l), θ, :logamp)
+        FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, max_iterations = 2000, tolerance = 1.0e-12)
+        φ = zeros(nant, 2, length(geom.channel_freqs))
+        for blk in pb, (ai, a) in pairs(blk.stations), f in 1:2, c in axes(φ, 3)
+            φ[a, f, c] = blk.θ[1, f, blk.plan.fseg_id[c], 1, ai]
+        end
+        return φ
+    end
+    # The largest phase error of every baseline product against truth, each
+    # referenced to its own circular band mean, the constant `S` absorbs.
+    function product_error(φ, gtrue)
+        worst = 0.0
+        for (a, b) in bl_pairs(size(φ, 1)), f in 1:2
+            e = [φ[a, f, c] - φ[b, f, c] - angle(gtrue[a, f, 1, c] * conj(gtrue[b, f, 1, c])) for c in axes(φ, 3)]
+            e = rem2pi.(e .- angle(sum(cis, e)), RoundNearest)
+            worst = max(worst, maximum(abs, e))
+        end
+        return worst
+    end
+
+    @testset "station 1 on $n1-channel blocks, the rest on $nrest" for (n1, nrest) in ((1, 2), (2, 1))
+        gtrue, geom, results = synthetic(n1, nrest; nant = 4, nchan = 4, spread = 0.6, seed = 302)
+        for gauge in (PinAntenna(1), PinAntenna(2), ZeroSumPhase())
+            @test product_error(solve(n1, nrest, gauge, geom, results), gtrue) < 1.0e-8
+        end
+    end
+
+    @testset "per-channel structure past unwrapping" begin
+        gtrue, geom, results = synthetic(1, 1; nant = 6, nchan = 16, spread = 2.0, seed = 302)
+        @test product_error(solve(1, 1, ZeroSumPhase(), geom, results), gtrue) < 1.0e-8
+        # Under a prior every track is declined at unwrapping, so no gain changes.
+        prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * 1.0e6^3)))
+        @test_throws "changed no gain" solve(1, 1, ZeroSumPhase(), geom, results; prior)
+    end
+end
