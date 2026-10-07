@@ -736,9 +736,9 @@ function _solve_gp_joint!(phase, track_w, obs, sm::JointKalmanSmoother, priors, 
             for j in eachindex(ends, y, v)
                 a, b = ends[j]
                 model = θf[a, ap] - θf[b, ap]
-                centre = mθ[a] - mθ[b]
+                center = mθ[a] - mθ[b]
                 raw = T(v[j])
-                y[j] = raw + twoπ * round((model - raw) / twoπ) - centre
+                y[j] = raw + twoπ * round((model - raw) / twoπ) - center
             end
         end
         xf, Pf, xp, Pp, As, _ = kalman_mv_filter(ends, ys, rs, times, models)

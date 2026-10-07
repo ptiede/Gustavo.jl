@@ -58,8 +58,8 @@ function _ap_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
     ti = sort!(unique!(reduce(vcat, (p.ti for p in parts))))
 
     ax = (_station_pair_dim(stations), FeedPair(feeds), Ti(geom.times[ti]))
-    rbar = zeros(promote_type((eltype(p.wv) for p in parts)...), ax)
-    wbar = zeros(promote_type((eltype(p.ws) for p in parts)...), ax)
+    rbar = zeros(mapreduce(p -> eltype(p.wv), promote_type, parts), ax)
+    wbar = zeros(mapreduce(p -> eltype(p.ws), promote_type, parts), ax)
     for p in parts
         _add_by_label!(rbar, wbar, p.wv, p.ws, p.stations, p.feeds, Ti(At(geom.times[p.ti])))
     end

@@ -268,9 +268,9 @@ Heterogeneity is opt-in per solver
 ([`supports_station_heterogeneity`](@ref Gustavo.supports_station_heterogeneity)):
 a solver that has not declared support rejects a heterogeneous model at
 compile time with an error naming the differing component, rather than
-silently leaving θ blocks unsolved. No shipped step declares support yet;
-the seam exists for solvers written against the station-block iterator (see
-[Authoring a solve step](@ref authoring-steps)).
+silently leaving θ blocks unsolved. Among the shipped steps, `Bandpass` with a
+`JointSmoother` declares support; solvers written against the station-block
+iterator can declare it too (see [Authoring a solve step](@ref authoring-steps)).
 
 ## Inspecting a model
 

@@ -382,8 +382,7 @@ function _solve_group(
     # Steering needs θ for this scan, so it can only run where the station solve
     # closes here; a pooled solve has no station parameters until every group
     # has been read and the cube is long gone.
-    steer = nothing
-    if local_solve
+    steer = if local_solve
         # Block-diagonal model: this scan's station systems close from its own
         # detections, so its θ columns are complete before this returns. The
         # slots are disjoint per scan, so concurrent groups write without
@@ -399,7 +398,7 @@ function _solve_group(
                 sd[AntennaName(At(name)), Feed(At(f))] = NaN
                 sr[AntennaName(At(name)), Feed(At(f))] = NaN
             end
-            steer = Fring.steer_scan(
+            Fring.steer_scan(
                 gc, res, ctx.geom.f0, epoch, sd, sr;
                 cells = s.steer_cells,
             )

@@ -10,7 +10,7 @@ using Statistics: mean, median
 using Dates: Minute, Second, Nanosecond, Month, DateTime, datetime2unix
 using Random
 import OffsetArrays
-using Distributions: LogNormal
+using Distributions: LogNormal, MvNormal
 
 
 const CAL = Gustavo.Calibration
@@ -798,6 +798,18 @@ end
         @test CAL.component_label(bp(rw)) ==
             "GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), " *
             "Feed = PerFeed(), prior = RandomWalkPrior(; order = 2, σ = 0.01))"
+
+        rw_init = CAL.RandomWalkPrior(; order = 2, σ = 0.01, init = MvNormal(zeros(2), [1.0 0.0; 0.0 2.0]))
+        ou_hyper = CAL.OUPrior(; scale = LogNormal(18.0, 1.0), σ = 0.1)
+        for p in (rw_init, ou_hyper, CAL.IIDPrior(0.5))
+            twin = deepcopy(bp(p))
+            @test twin == bp(p) && hash(twin) == hash(bp(p))
+        end
+        @test bp(rw_init) != bp(CAL.RandomWalkPrior(; order = 2, σ = 0.01, init = MvNormal(zeros(2), [1.0 0.0; 0.0 3.0])))
+        @test bp(rw_init) != bp(CAL.RandomWalkPrior(; order = 2, σ = 0.02, init = rw_init.init))
+        @test bp(ou_hyper) != bp(CAL.OUPrior(; scale = LogNormal(18.0, 2.0), σ = 0.1))
+        @test bp(ou_hyper) != bp(CAL.OUPrior(; scale = LogNormal(18.0, 1.0), σ = 0.2))
+        @test bp(CAL.IIDPrior(0.5)) != bp(CAL.IIDPrior(0.6))
     end
 
     @testset "stations differing only in prior share a plan" begin

@@ -113,6 +113,13 @@ function OUPrior(; scale, σ)
     return OUPrior{typeof(s), typeof(g)}(s, g)
 end
 
+Base.:(==)(a::IIDPrior, b::IIDPrior) = a.σ == b.σ
+Base.hash(p::IIDPrior, h::UInt) = hash(p.σ, hash(:IIDPrior, h))
+Base.:(==)(a::RandomWalkPrior, b::RandomWalkPrior) = a.order == b.order && a.σ == b.σ && a.init == b.init
+Base.hash(p::RandomWalkPrior, h::UInt) = hash(p.init, hash(p.σ, hash(p.order, hash(:RandomWalkPrior, h))))
+Base.:(==)(a::OUPrior, b::OUPrior) = a.scale == b.scale && a.σ == b.σ
+Base.hash(p::OUPrior, h::UInt) = hash(p.σ, hash(p.scale, hash(:OUPrior, h)))
+
 const _CorrelatedPrior = Union{RandomWalkPrior, OUPrior}
 
 _promote_fixed(a::Real, b::Real) = promote(a, b)

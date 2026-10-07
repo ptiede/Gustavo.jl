@@ -535,16 +535,14 @@ function _baseline_fringe_search(
     # Peak of |D| inside the search windows.
     kbest = lbest = 0
     peakabs = -one(T)
-    for l in eachindex(rates)
-        _in_window(rates[l], opts.rate_window, tax.degenerate) || continue
-        for k in eachindex(delays)
-            _in_window(delays[k], opts.delay_window, fax.degenerate) || continue
-            a = abs(D[k, l])
-            if a > peakabs
-                peakabs = a
-                kbest = k
-                lbest = l
-            end
+    kidx = [k for k in eachindex(delays) if _in_window(delays[k], opts.delay_window, fax.degenerate)]
+    lidx = [l for l in eachindex(rates) if _in_window(rates[l], opts.rate_window, tax.degenerate)]
+    for l in lidx, k in kidx
+        a = abs(D[k, l])
+        if a > peakabs
+            peakabs = a
+            kbest = k
+            lbest = l
         end
     end
     peakabs >= 0 || return _invalid_detection(T)

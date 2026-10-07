@@ -250,8 +250,8 @@ function accumulate_bandpass(
     isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
     parts = tmap(ms -> _member_bandpass_sums(ms, geom), _members_by_frequency(group); scheduler = executor)
     ax = (_station_pair_dim(station_pairs), FeedPair(feeds), Frequency(geom.channel_freqs))
-    rl = zeros(promote_type((eltype(p.wv) for p in parts)...), ax)
-    wl = zeros(promote_type((eltype(p.ws) for p in parts)...), ax)
+    rl = zeros(mapreduce(p -> eltype(p.wv), promote_type, parts), ax)
+    wl = zeros(mapreduce(p -> eltype(p.ws), promote_type, parts), ax)
     for p in parts
         chans = Frequency(At(geom.channel_freqs[p.chan]))
         _add_by_label!(rl, wl, p.wv, p.ws, p.stations, p.feeds, chans; autos = false)
@@ -1121,14 +1121,10 @@ end
 # Dense ids of the gain slots, one array per block in its gain array's shape,
 # numbered consecutively across the blocks.
 function _gain_slot_ids(gains)
-    next = 0
-    ids = map(gains) do st
-        n = size(st.g)
-        idk = reshape((next + 1):(next + prod(n)), n)
-        next += prod(n)
-        idk
+    lasts = cumsum(map(st -> length(st.g), gains))
+    return map(gains, lasts) do st, l
+        reshape((l - length(st.g) + 1):l, size(st.g))
     end
-    return ids
 end
 
 # The phase-gauge graph of a joint bandpass solve: one node per gain slot —

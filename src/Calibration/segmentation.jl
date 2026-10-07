@@ -366,8 +366,9 @@ read on at once, and each station's own segment is then a union of its cells.
 function common_refinement(idvecs)
     ids, nseg = _dense_rank(first(idvecs))
     for other in Iterators.drop(idvecs, 1)
+        prev = ids
         k = maximum(other)
-        ids, nseg = _dense_rank([(ids[i] - 1) * k + other[i] for i in eachindex(ids, other)])
+        ids, nseg = _dense_rank([(prev[i] - 1) * k + other[i] for i in eachindex(prev, other)])
     end
     return ids, nseg
 end
