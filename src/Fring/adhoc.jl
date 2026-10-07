@@ -1274,55 +1274,32 @@ end
 # unobservable — it cancels on every baseline — so this changes how the tracks
 # read, never the applied correction. One constant per AP spans every feed
 # node, so differences between nodes in one component are left untouched.
+#
+# The constraint is built once, over the cells covered in every AP that has any
+# coverage, and weighted by their scan totals: a constraint over whatever
+# happens to be covered moves frame with coverage (a pin falling back to a
+# different node per AP), putting steps into every track for a quantity that
+# carries no information. Each AP is shifted wherever its phase is finite.
 function _apply_ap_gauge!(phase, covered, track_w, gauge::AbstractGauge)
     T = eltype(phase)
+    aps = [ap for ap in axes(covered, 3) if any(view(parent(covered), :, :, ap))]
+    cells = CartesianIndices((axes(covered, 1), axes(covered, 2)))
+    always = [I for I in cells if all(ap -> covered[I, ap], aps)]
+    (isempty(aps) || isempty(always)) && return phase
+    f = GaugeFreedom(;
+        nodes = LinearIndices(cells)[always], station = [I[1] for I in always], feed = [I[2] for I in always],
+        scan = zeros(Int, length(always)), component = fill((), length(always)),
+        observable = fill(:phase, length(always)), direction = ones(T, length(always)),
+        weight = T[sum(ap -> track_w[I, ap], aps) for I in always],
+    )
+    C, d = _gauge_system(gauge, GaugeFreedoms{T}([f], length(cells)))
+    row = T[C[1, n] for n in f.nodes]
     for ap in axes(phase, 3)
         x = view(parent(phase), :, :, ap)
-        nodes = [n for n in eachindex(x) if isfinite(x[n])]
-        isempty(nodes) && continue
-        cells = CartesianIndices(x)[nodes]
-        f = GaugeFreedom(;
-            nodes, station = [I[1] for I in cells], feed = [I[2] for I in cells],
-            scan = zeros(Int, length(nodes)), component = fill((), length(nodes)),
-            observable = fill(:phase, length(nodes)), direction = ones(T, length(nodes)),
-            weight = T[track_w[I, ap] for I in cells],
-        )
-        _regauge!(x, GaugeFreedoms{T}([f], length(x)), gauge)
-    end
-    return phase
-end
-
-# Summed over a station set that does not move between APs: a sum over whatever
-# stations happen to be covered shifts frame whenever coverage flickers,
-# putting steps into every track for a quantity that carries no information.
-# Summing over the cells covered in every AP keeps one frame for the whole scan.
-function _apply_ap_gauge!(phase, covered, track_w, gauge::ZeroSumPhase)
-    nnode = size(phase, 2)
-    # One constant per AP, across every feed node: a product pairing different
-    # nodes observes their difference, which a constant per node would shift.
-    #
-    # The summed cells are those covered in every AP: a sum over whatever happens
-    # to be covered moves frame with coverage, putting steps into every track for
-    # a quantity that carries no information.
-    cells = [
-        (a, n) for a in axes(covered, 1) for n in 1:nnode
-            if all(covered[a, n, ap] for ap in axes(covered, 3))
-    ]
-    isempty(cells) && return phase
-    for ap in axes(phase, 3)
-        tot = zero(eltype(phase))
-        cnt = 0
-        for (a, n) in cells
-            v = phase[a, n, ap]
-            isfinite(v) || continue
-            tot += v
-            cnt += 1
-        end
-        cnt == 0 && continue
-        d = tot / cnt
-        for a in axes(phase, 1), n in 1:nnode
-            isfinite(phase[a, n, ap]) && (phase[a, n, ap] -= d)
-        end
+        vals = x[f.nodes]
+        all(isfinite, vals) || continue
+        c = (sum(row .* vals) - d[1]) / sum(row)
+        x[isfinite.(x)] .-= c
     end
     return phase
 end

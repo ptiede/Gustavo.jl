@@ -700,8 +700,11 @@ with ``w_u(t)`` the node's gated weight. One constant per component is exactly
 the freedom the data leave: shifting a set of nodes that is not a whole
 component would change the observed difference on every edge leaving it.
 
-The gauge given to the step is applied last, once per AP across every node.
-It changes no baseline difference, so it does not change the applied
+The gauge given to the step is applied last, one constant per AP across every
+node. Its constraint is built once per scan, over the nodes covered in every
+AP, so a pinned station that drops out of some APs falls back to the same node
+throughout the scan rather than to a different one per AP. It changes no
+baseline difference, so it does not change the applied
 correction; the per-AP pin, the registration above, and the smoothing frame
 are internal to the solve and independent of it.
 

@@ -632,6 +632,38 @@ end
     end
 end
 
+@testset "Adhoc: per-AP gauge over the always-covered cells" begin
+    nant, nap = 5, 12
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    rng = MersenneTwister(0x287)
+    screen = 0.4 .* randn(rng, nant, 2, nap)
+    rbar, wbar = inject_screen(bl, pols, screen)
+    dropaps = 5:8
+    for ap in dropaps, bi in eachindex(bl)
+        ref in bl[bi] || continue
+        rbar[bi, :, ap] .= 0
+        wbar[bi, :, ap] .= 0
+    end
+    kw = (; prior = nothing, smoother = FRa.PerTrackAdhocSmoother())
+
+    pin = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), kw...)
+    always = [(a, f) for a in 1:nant, f in 1:2 if all(pin.covered[a, f, :])]
+    @test (ref, 1) ∉ always
+    zeroed = [(a, f) for (a, f) in always if all(iszero, pin.phase[a, f, :])]
+    @test length(zeroed) == 1
+    @test all(!iszero(pin.phase[ref, 1, ap]) for ap in 1:nap if !(ap in dropaps))
+
+    zs = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = ZeroSumPhase(), kw...)
+    @test all(abs(sum(zs.phase[a, f, ap] for (a, f) in always)) < 1.0e-10 for ap in 1:nap)
+    (a0, f0) = first(always)
+    for (a, f) in always
+        @test pin.phase[a, f, :] .- pin.phase[a0, f0, :] ≈ zs.phase[a, f, :] .- zs.phase[a0, f0, :] atol = 1.0e-8
+    end
+end
+
 @testset "Adhoc: warm-start selects the rewrap branch (no per-AP flips)" begin
     # A weakly constrained station's per-AP solve can be BISTABLE — two rewrap
     # fixed points a sub-2π distance apart — and which one the spanning-tree
