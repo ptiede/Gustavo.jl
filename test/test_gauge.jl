@@ -45,20 +45,6 @@ end
     @test sum(r) ≈ 1
     @test count(!iszero, r) == length(GCOMP)      # station 4 contributes nothing
     @test all(r[n] ≈ 1 / length(GCOMP) for n in GCOMP)
-
-    # Restricting to a fixed station set is what makes the sum comparable across
-    # scans; only that set's nodes appear.
-    rs = _row(ZeroSumPhase(antennas = [2, 3]))
-    @test sum(rs) ≈ 1
-    @test findall(!iszero, rs) == [2, 3, 6, 7]
-
-    # A restricted set disjoint from the component would leave an empty row and a
-    # rank-deficient system, so it falls back to the whole component.
-    @test _row(ZeroSumPhase(antennas = [4])) ≈ _row(ZeroSumPhase())
-
-    # Weights must not sum to zero — that is the rank-deficient case, and it fails
-    # loudly rather than producing a silently unconstrained solve.
-    @test_throws ErrorException _row(ZeroSumPhase(weights = zeros(2GN)))
 end
 
 @testset "gauge rows follow the solve's element type" begin
@@ -76,11 +62,9 @@ end
     @test resolve_gauge(PinAntenna(:A4), names).refs == [4]
     # Rank order is preserved, and codes and indices may be mixed.
     @test resolve_gauge(PinAntenna(["A4", 1]), names).refs == [4, 1]
-    @test resolve_gauge(ZeroSumPhase(antennas = ["A2", "A4"]), names).antennas == [2, 4]
-    @test resolve_gauge(ZeroSumPhase(), names).antennas === nothing
+    @test resolve_gauge(ZeroSumPhase(), names) === ZeroSumPhase()
     # A code the antenna table does not carry is an error, not a silent fallback.
     @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
-    @test_throws ErrorException resolve_gauge(ZeroSumPhase(antennas = ["ZZ"]), names)
 end
 
 @testset "gauge_station_order and remap_gauge" begin
@@ -91,7 +75,7 @@ end
     # Tying stations into representatives rewrites the gauge through the map.
     map = [1, 1, 3, 3]
     @test CALg.remap_gauge(PinAntenna([2, 4]), map).refs == [1, 3]
-    @test CALg.remap_gauge(ZeroSumPhase(antennas = [2, 4]), map).antennas == [1, 3]
+    @test CALg.remap_gauge(ZeroSumPhase(), map) === ZeroSumPhase()
 end
 
 struct PreferStation <: CALg.AbstractGauge

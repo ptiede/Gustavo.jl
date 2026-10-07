@@ -692,7 +692,7 @@ end
         lu = CAL.plan_parameters(hetmodel(ChannelBlocks(3), ChannelBlocks(3)), anames, geom)
         θu = zeros(lu.nθ)
         @test_throws "different segmentations" FP.solve_joint_bandpass!(
-            θ, results, geom, pb, FP.bandpass_blocks(setup(lu), θu, :logamp),
+            θ, results, geom, pb, FP.bandpass_blocks(setup(lu), θu, :logamp); gauge = PinAntenna(1),
         )
 
         # A phase prior relates a track's segments, so it cannot express the

@@ -274,7 +274,7 @@ end
 # feed as its own node.
 function _seed_phase_tracks(
         rbar_bp, wbar_bp, stations, fsegs, segments::Frequency;
-        gauge::AbstractGauge = PinAntenna(1), snr_floor::Real = 1.0,
+        gauge::AbstractGauge, snr_floor::Real = 1.0,
         component::Tuple{Vararg{Symbol}} = (),
     )
     T = real(eltype(rbar_bp))
@@ -1603,7 +1603,7 @@ end
 """
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
-                          gauge = PinAntenna(1), max_iterations = 200, tolerance = nothing,
+                          gauge, max_iterations = 200, tolerance = nothing,
                           max_logamp = log(10.0), phase_status = nothing,
                           amp_status = nothing, phase_priors = nothing,
                           amp_priors = nothing, tseg = nothing)
@@ -1673,7 +1673,7 @@ only its own time segments.
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
-        gauge::AbstractGauge = PinAntenna(1), max_iterations::Integer = 200, tolerance::Union{Nothing, Real} = nothing,
+        gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Union{Nothing, Real} = nothing,
         max_logamp::Real = _BP_MAX_LOGAMP,
         phase_status = nothing, amp_status = nothing,
         phase_priors = nothing, amp_priors = nothing,

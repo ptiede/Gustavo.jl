@@ -992,7 +992,7 @@ function solve_adhoc_phasing(
         rbar::DimensionalData.AbstractDimArray{<:Complex, 3},
         wbar::DimensionalData.AbstractDimArray{<:Real, 3},
         stations::AbstractVector;
-        gauge::AbstractGauge = PinAntenna(1),
+        gauge::AbstractGauge,
         smoother::AbstractAdhocSmoother = PerTrackAdhocSmoother(),
         tying::AbstractFeedTying = PerFeed(),
         prior = default_adhoc_prior(),
@@ -1304,13 +1304,9 @@ function _apply_ap_gauge!(phase, covered, track_w, gauge::ZeroSumPhase)
     # The summed cells are those covered in every AP: a sum over whatever happens
     # to be covered moves frame with coverage, putting steps into every track for
     # a quantity that carries no information.
-    #
-    # `weights` describes the station-solve constraint row, whose nodes are not
-    # these cells, so the per-AP frame is unweighted.
     cells = [
         (a, n) for a in axes(covered, 1) for n in 1:nnode
-            if all(covered[a, n, ap] for ap in axes(covered, 3)) &&
-            (gauge.antennas === nothing || a in gauge.antennas)
+            if all(covered[a, n, ap] for ap in axes(covered, 3))
     ]
     isempty(cells) && return phase
     for ap in axes(phase, 3)

@@ -34,9 +34,7 @@
         @test resolve_gauge(PinAntenna(:A4), names).refs == [4]
         # A ranked list resolves entry by entry, keeping order.
         @test resolve_gauge(PinAntenna(["A4", 1]), names).refs == [4, 1]
-        @test resolve_gauge(ZeroSumPhase(antennas = ["A2", "A4"]), names).antennas == [2, 4]
         @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
-        @test_throws ErrorException resolve_gauge(ZeroSumPhase(antennas = ["ZZ"]), names)
         # End-to-end (new engine): code "A1" resolves to index 1 → identical solve.
         by_code = fit(BaselineFringeFit(; gauge = PinAntenna("A1")), ps)
         by_idx = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)

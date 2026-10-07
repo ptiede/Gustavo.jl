@@ -317,7 +317,7 @@ it, at the gauge's preferred station, so it is not measured.
 """
 function solve_station_systems!(
         θ::AbstractVector, scans, components, stations;
-        gauge::AbstractGauge = PinAntenna(1), opts::Stationization{T} = Stationization(),
+        gauge::AbstractGauge, opts::Stationization{T} = Stationization(),
     ) where {T}
     # θ columns are numbered from 1 (`_block_index`).
     Base.require_one_based_indexing(θ)

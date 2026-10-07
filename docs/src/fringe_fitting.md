@@ -433,8 +433,8 @@ components and the system is rank-deficient. One constraint row per component
 is supplied by the step's `gauge`, an
 [`AbstractGauge`](@ref Gustavo.Calibration.AbstractGauge):
 [`PinAntenna`](@ref Gustavo.Calibration.PinAntenna) sets one node to zero, and
-[`ZeroSumPhase`](@ref Gustavo.Calibration.ZeroSumPhase) constrains a weighted
-sum of the nodes.
+[`ZeroSumPhase`](@ref Gustavo.Calibration.ZeroSumPhase) constrains the mean
+of the nodes to zero.
 
 When a station's value is a sum of several components, such as a per-scan
 delay plus a feed-2 offset, the components are formed per model column: a

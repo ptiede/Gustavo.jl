@@ -39,12 +39,8 @@ end
     zs = _fit_each_step(ps64, ZeroSumPhase())
 
     @testset "baseline products do not depend on the gauge" begin
-        subset = _fit_each_step(ps64, ZeroSumPhase(antennas = [1, 2]))
         pinned = _fit_each_step(ps64, PinAntenna([3, 1]))
         for step in keys(zs)
-            dphase, dlogamp = _baseline_product_difference(zs[step], subset[step])
-            @test dphase < 1.0e-6
-            @test dlogamp < 1.0e-6
             dphase, dlogamp = _baseline_product_difference(zs[step], pinned[step])
             @test dphase < 1.0e-6
             @test dlogamp < 1.0e-4

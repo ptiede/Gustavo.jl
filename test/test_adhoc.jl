@@ -522,7 +522,7 @@ end
     rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0)
     @test_throws ErrorException solve_positional(
         rbar, wbar, bl, pols, nant, times;
-        smoother = FRa.JointKalmanSmoother(), tying = CALa.PerFeed(),
+        gauge = PinAntenna(1), smoother = FRa.JointKalmanSmoother(), tying = CALa.PerFeed(),
     )
 end
 
@@ -933,7 +933,8 @@ end
     rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 2, nap); noise = 1.0, rng)
     R, W, names = label_sums(rbar, wbar, bl, pols, nant, times)
     sm = FRa.PerTrackAdhocSmoother()
-    sol = FRa.solve_adhoc_phasing(R, W, names; smoother = sm)
+    gauge = PinAntenna(1)
+    sol = FRa.solve_adhoc_phasing(R, W, names; gauge, smoother = sm)
     @test lookup(sol.phase, FRa.AntennaName) == names
     @test lookup(sol.phase, Ti) == times
     @test lookup(sol.source, FRa.AntennaPair) == lookup(R, FRa.AntennaPair)
@@ -942,32 +943,32 @@ end
     # Storage order is free, and a view along time solves only its APs.
     perm = FRa.solve_adhoc_phasing(
         permutedims(R, (Ti, FRa.FeedPair, FRa.AntennaPair)), permutedims(W, (FRa.FeedPair, Ti, FRa.AntennaPair)),
-        names; smoother = sm,
+        names; gauge, smoother = sm,
     )
     @test isequal(perm.phase, sol.phase) && isequal(perm.source, sol.source)
     R2, W2, _ = label_sums(cat(rbar, rbar; dims = 3), cat(wbar, wbar; dims = 3), bl, pols, nant, vcat(times, times .+ 100))
-    part = FRa.solve_adhoc_phasing(view(R2, Ti(1:nap)), view(W2, Ti(1:nap)), names; smoother = sm)
+    part = FRa.solve_adhoc_phasing(view(R2, Ti(1:nap)), view(W2, Ti(1:nap)), names; gauge, smoother = sm)
     @test isequal(parent(part.phase), parent(sol.phase))
 
     # Stations are matched by name: an extra, unobserved station is uncovered
     # and leaves the others untouched.
-    wider = FRa.solve_adhoc_phasing(R, W, vcat(names, "X"); smoother = sm)
+    wider = FRa.solve_adhoc_phasing(R, W, vcat(names, "X"); gauge, smoother = sm)
     @test !any(wider.covered[FRa.AntennaName(At("X"))])
     @test parent(wider.phase)[1:nant, :, :] ≈ parent(sol.phase) atol = 1.0e-12
 
     @test_throws "station `S5` of a station pair is not among the stations" FRa.solve_adhoc_phasing(
-        R, W, names[1:4]; smoother = sm,
+        R, W, names[1:4]; gauge, smoother = sm,
     )
     @test_throws "station names must be unique; repeated: S2" FRa.solve_adhoc_phasing(
-        R, W, vcat(names, "S2"); smoother = sm,
+        R, W, vcat(names, "S2"); gauge, smoother = sm,
     )
     shifted(A) = DimArray(
         OffsetArray(parent(A), 1, 0, 0),
         (FRa.AntennaPair(OffsetArray(parent(lookup(A, FRa.AntennaPair)), 1)), dims(A, FRa.FeedPair), dims(A, Ti)),
     )
-    @test_throws "offset arrays are not supported" FRa.solve_adhoc_phasing(shifted(R), shifted(W), names; smoother = sm)
+    @test_throws "offset arrays are not supported" FRa.solve_adhoc_phasing(shifted(R), shifted(W), names; gauge, smoother = sm)
     @test_throws "must be over AntennaPair, FeedPair and Ti" FRa.solve_adhoc_phasing(
-        DimArray(rbar, (FRa.BaselineID(1:length(bl)), FRa.Polarization(1:4), Ti(times))), W, names,
+        DimArray(rbar, (FRa.BaselineID(1:length(bl)), FRa.Polarization(1:4), Ti(times))), W, names; gauge,
     )
 end
 
@@ -1100,13 +1101,13 @@ end
     pols = [(1, 1)]
     rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 1, nap))
     joint = FRa.JointKalmanSmoother(coherence_time = 15.0)
-    sol = solve_positional(rbar, wbar, bl, pols, nant, times; tying = CALa.PerFeed(), smoother = joint)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.PerFeed(), smoother = joint)
     @test all(isfinite, sol.phase)
     pols = [(fa, fb) for fa in 1:3 for fb in 1:3]
     rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 3, nap))
-    sol = solve_positional(rbar, wbar, bl, pols, nant, times; tying = CALa.SharedFeeds(), smoother = joint)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.SharedFeeds(), smoother = joint)
     @test all(isfinite, sol.phase)
     @test_throws "requires one phase node per station" solve_positional(
-        rbar, wbar, bl, pols, nant, times; tying = CALa.PerFeed(), smoother = joint,
+        rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.PerFeed(), smoother = joint,
     )
 end

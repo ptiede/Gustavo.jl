@@ -46,27 +46,18 @@ end
 PinAntenna(refs...) = PinAntenna(collect(refs))
 
 """
-    ZeroSumPhase(; antennas = nothing, weights = nothing)
+    ZeroSumPhase()
 
-Constrain the weighted sum of each component's nodes to zero rather than pinning
-one of them.
+Constrain the mean over every node of each connected component to zero rather
+than pinning one of them.
 
 No single node carries the gauge, so the solve does not change character when one
 station drops out — the failure mode `PinAntenna` has when its reference is
-absent. `antennas` restricts the sum to a fixed set of station indices (those
-present in the component); `weights` gives per-node weights. Both `nothing` sums
-uniformly over every node in the component.
-
-A sum taken over whatever stations happen to be present shifts when that set
-changes, so a bare `ZeroSumPhase()` is no more comparable ACROSS scans than a
-pin is. Pass `antennas` to hold the summed set fixed when cross-scan comparison
-matters.
+absent. The mean is over whatever stations a component holds, so it shifts when
+that set changes: values under `ZeroSumPhase` are no more comparable ACROSS
+scans than under a pin.
 """
-struct ZeroSumPhase{A, W} <: AbstractGauge
-    antennas::A
-    weights::W
-end
-ZeroSumPhase(; antennas = nothing, weights = nothing) = ZeroSumPhase(antennas, weights)
+struct ZeroSumPhase <: AbstractGauge end
 
 """
     GaugeFreedom(; nodes, station, feed, scan, component, observable, direction, weight)
@@ -218,32 +209,7 @@ end
 
 function gauge_constraint(g::ZeroSumPhase, f::GaugeFreedom)
     T = eltype(f.direction)
-    sel = if isnothing(g.antennas)
-        collect(eachindex(f.nodes))
-    else
-        want = Set(Int(a) for a in g.antennas)
-        [i for i in eachindex(f.nodes, f.station) if f.station[i] in want]
-    end
-    # A restricted set that misses this freedom entirely would leave the row
-    # empty and the system rank-deficient; sum over the whole freedom instead.
-    isempty(sel) && (sel = collect(eachindex(f.nodes)))
-    row = zeros(T, length(f.nodes))
-    if isnothing(g.weights)
-        s = one(T) / length(sel)
-        for i in sel
-            row[i] = s
-        end
-    else
-        tot = sum(g.weights[f.nodes[i]] for i in sel)
-        tot > zero(tot) || error(
-            "ZeroSumPhase: weights sum to $tot over this freedom's nodes $(f.nodes[sel]); " *
-                "the gauge row would be empty and the solve rank-deficient.",
-        )
-        for i in sel
-            row[i] = g.weights[f.nodes[i]] / tot
-        end
-    end
-    return row, zero(T)
+    return fill(one(T) / length(f.nodes), length(f.nodes)), zero(T)
 end
 
 """
@@ -261,11 +227,6 @@ function resolve_gauge(g::PinAntenna, ant_names)
     return PinAntenna(out)
 end
 
-function resolve_gauge(g::ZeroSumPhase, ant_names)
-    isnothing(g.antennas) && return g
-    return ZeroSumPhase(Int[_antenna_index(a, ant_names, "ZeroSumPhase") for a in g.antennas], g.weights)
-end
-
 _antenna_index(r::Integer, ant_names, who) = Int(r)
 function _antenna_index(r, ant_names, who)
     i = findfirst(==(String(r)), ant_names)
@@ -281,8 +242,7 @@ its representative. Used where feeds or stations are tied into groups before the
 solve.
 """
 remap_gauge(g::PinAntenna, map) = PinAntenna([map[a] for a in _gauge_refs(g.refs)])
-remap_gauge(g::ZeroSumPhase, map) =
-    ZeroSumPhase(g.antennas === nothing ? nothing : unique(map[a] for a in g.antennas), g.weights)
+remap_gauge(g::ZeroSumPhase, map) = g
 
 """
     gauge_station_order(g::AbstractGauge) -> collection of Int

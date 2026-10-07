@@ -367,7 +367,7 @@ end
     layout = perfeed_scan_layout(nant)
     θ = zeros(layout.nθ)
     plans = ((layout.plans[1], :delay), (layout.plans[2], :rate))
-    _, covered = solve_named!(θ, (FR.detection_stack(D, named(bl), pols; ti = 1, SCAN_SPREAD...),), plans)
+    _, covered = solve_named!(θ, (FR.detection_stack(D, named(bl), pols; ti = 1, SCAN_SPREAD...),), plans; gauge = PinAntenna(1))
     @test covered == Set((STATIONS[a], f, 1) for a in 1:3 for f in 1:2)
     for (plan, _) in plans, f in 1:2
         @test θ[plan_off1(plan)[4, f, 1, 1]] == 0
