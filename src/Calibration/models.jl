@@ -27,8 +27,8 @@
 
 How a [`GainComponent`](@ref)'s parameter blocks are shared between a
 station's feeds: [`PerFeed`](@ref) (each feed its own block),
-[`SharedFeeds`](@ref) (one block read by every feed), or [`SingleFeed`](@ref)
-(one feed only).
+[`SharedFeeds`](@ref) (one block read by every feed), [`SingleFeed`](@ref)
+(one feed only), or [`ExceptFeed`](@ref) (every feed but one).
 """
 abstract type AbstractFeedTying end
 
@@ -54,14 +54,31 @@ struct SingleFeed <: AbstractFeedTying
     end
 end
 
+"""
+    ExceptFeed(feed)
+
+Each feed other than `feed` (an index from 1, at most the data's feed count)
+has its own parameter block; `feed` gets no contribution. A `SharedFeeds`
+common part plus an `ExceptFeed(ref)` deviation gives every feed its own value,
+measured relative to feed `ref`, for any feed count; with one feed it has no
+parameters.
+"""
+struct ExceptFeed <: AbstractFeedTying
+    feed::Int
+    function ExceptFeed(feed::Integer)
+        feed >= 1 || throw(ArgumentError("ExceptFeed feed must be at least 1, got $feed"))
+        return new(Int(feed))
+    end
+end
+
 # ── GainComponent ────────────────────────────────────────────────────────────
 
 """
     GainComponent(term; Ti, Frequency = GlobalFrequency(), Feed = PerFeed(), prior = nothing)
 
 One contribution to a station's gain: a gain `term` replicated over a `Ti`
-(time) segmentation and a `Frequency` segmentation, with `Feed` saying how the
-two feeds share it. The keywords are the dimension names the block's axes
+(time) segmentation and a `Frequency` segmentation, with `Feed` saying how a
+station's feeds share it. The keywords are the dimension names the block's axes
 carry. One parameter block is allocated per (time segment, frequency
 segment, feed block). `prior` is an [`AbstractPrior`](@ref) on the
 parameters, or `nothing` to leave them free; a correlated prior runs along the
@@ -107,12 +124,19 @@ function nfeed_blocks(t::SingleFeed, nfeed::Integer)
     )
     return 1
 end
+function nfeed_blocks(t::ExceptFeed, nfeed::Integer)
+    t.feed <= nfeed || throw(
+        ArgumentError("ExceptFeed($(t.feed)) names a feed the data does not have; its stations have $nfeed")
+    )
+    return nfeed - 1
+end
 
 # The feed-node (column of a component's leaf `:Feed`/`:node` axis) a feed reads
 # its block from, or 0 when the tying carries no block for that feed.
 _feed_node(::PerFeed, feed::Integer) = feed
 _feed_node(::SharedFeeds, feed::Integer) = 1
 _feed_node(t::SingleFeed, feed::Integer) = feed == t.feed ? 1 : 0
+_feed_node(t::ExceptFeed, feed::Integer) = feed == t.feed ? 0 : feed < t.feed ? feed : feed - 1
 
 """
     GainModel(; phase = (;), logamp = (;), stations = (;))
@@ -201,7 +225,7 @@ as they are.
 
 ```julia
 merge(default_fringe_terms();
-    phase = (; rel_rate = GainComponent(Rate(); Ti = GlobalTime(), Feed = SingleFeed(2))))
+    phase = (; rel_rate = GainComponent(Rate(); Ti = GlobalTime(), Feed = ExceptFeed(1))))
 ```
 """
 Base.merge(m::GainModel; phase = (;), logamp = (;)) = GainModel(

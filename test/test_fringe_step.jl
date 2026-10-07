@@ -271,7 +271,7 @@ end
         comps = fringe_phase(default_fringe_terms())
         @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
-            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SingleFeed),
+            (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.ExceptFeed),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
         ]
 
@@ -279,7 +279,7 @@ end
         gcomps = fringe_phase(default_fringe_terms(rel_time = CAL.GlobalTime()))
         @test collect(map(sig, CAL._flatten_components(gcomps))) == [
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
-            (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.SingleFeed),
+            (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.ExceptFeed),
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
         ]
 
@@ -407,4 +407,35 @@ end
         @test :validate_model in names(Gustavo.Fring)
     end
 
+end
+
+@testset "stations with one or three receptors" begin
+    gauge = PinAntenna(1)
+    for receptors in (("R",), ("R", "L", "X"))
+        n = length(receptors)
+        products = [a * b for a in receptors for b in receptors]
+        ps, truth = _build_fringe_ps(; polarizations = products, receptors, noise = 0.3, eltype = ComplexF64)
+        fr = fit(BaselineFringeFit(; gauge), ps)
+        st = FP.fringe_station_solutions(fr)
+        @test lookup(st, Gustavo.Feed) == 1:n
+        @test !any(FP.fringe_station_flags(fr))
+        d = parent(st.delay)[1, :, :]
+        @test maximum(abs, (d .- d[1:1, :]) .- (truth.delay .- truth.delay[1:1, :])) < 5.0e-11
+
+        # The bandpass flattens every product's spectrum, for either smoother.
+        bp = 0.5 .* randn(MersenneTwister(0x268), 4, n, 2 * 8)
+        bp[1, :, :] .= 0
+        ps, _ = _build_fringe_ps(; polarizations = products, receptors, noise = 0.3, eltype = ComplexF64, bandpass = bp)
+        fr = fit(BaselineFringeFit(; gauge), ps)
+        for smoother in (FP.JointSmoother(), FP.PerTrackSmoother())
+            bp_sol = fit(Bandpass(; gauge, smoother), _precal(fr, ps))
+            @test lookup(only(bp_sol[:bandpass, :phase, :bandpass].components).params, Gustavo.Feed) == 1:n
+            out = _calibrate_chain([fr, bp_sol], ps; flag_bad = false, apply_flags = false)
+            coh = [
+                abs(sum(z)) / sum(abs, z)
+                    for ms in values(out) for z in eachslice(dropdims(sum(parent(ms[:visibility]); dims = 4); dims = 4); dims = (1, 3))
+            ]
+            @test minimum(coh) > 0.97
+        end
+    end
 end

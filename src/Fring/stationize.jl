@@ -298,15 +298,15 @@ detection's antenna pair is matched to them by name. `components` is a vector
 of `(plan::ComponentPlan, kind::Symbol)` with
 `kind ∈ (:delay, :rate)`. Multiple components of the same kind are summed
 per (station, feed) observation: e.g. a feed-common `PerScan × SharedFeeds` term
-plus a `GlobalTime × SingleFeed(2)` inter-feed offset both feed the delay
-system, so a feed-2 row touches both columns and a stable inter-feed offset is solved
+plus a `GlobalTime × ExceptFeed(1)` inter-feed offset both feed the delay
+system, so a row on feed `k ≠ 1` touches both columns and a stable inter-feed offset is solved
 once across the track (bright scans pin it; weak scans inherit it, tying feeds
 that would otherwise split). Returns the delay system's component count and
 `covered` — the `(station name, feed, scan index)` triples the solve CONSTRAINS
 in every solved kind: those an accepted detection (`pfa ≤ pfa_max`) touches on
 that feed. Coverage is independent of the gauge (see `Stationization` for how
 inconsistent rows are weighted). A θ column no accepted detection touches —
-per-scan or scan-spanning, single-feed or shared by both feeds — is set to zero
+per-scan or scan-spanning, per-feed or shared by every feed — is set to zero
 (identity gain). With a single per-scan/per-feed component per kind and one scan,
 each scan's system is independent and solves exactly as it would alone.
 
@@ -607,7 +607,7 @@ end
 # each fixed by setting one (station, feed, scan) value to zero. Such a
 # direction moves columns of several components together: without products
 # relating different feeds, a station whose feed order differs from the
-# reference's has its two feeds in different groups than the feed-2 offset
+# reference's has its feeds in different groups than the inter-feed offset
 # columns assume. Values are tried in the gauge's station order, then by row
 # weight, lowest feed first, and one is kept only if it fixes a further
 # direction. A direction no value fixes is left for the solve to reject.

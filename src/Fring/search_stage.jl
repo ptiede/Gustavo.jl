@@ -19,13 +19,13 @@ standard VLBI fringe model, phase components only (each key names its
 component; the order is the parameter order):
 
 1. `mbd` — per-scan wideband delay, feed-common.
-2. `rel_delay` — inter-feed delay offset, `Ti = rel_time`,
-   `Feed = SingleFeed(2)`: the instrumental feed-2 − feed-1 group-delay
-   offset.
+2. `rel_delay` — inter-feed delay offsets, `Ti = rel_time`,
+   `Feed = ExceptFeed(1)`: each other feed's instrumental group-delay offset
+   from feed 1. With one feed per station it has no parameters.
 3. `rate` — per-scan rate, feed-common. There is no feed-specific rate: the
    inter-feed rate is negligible (EHT-HOPS convention). A genuine offset is
    added with
-   `merge(default_fringe_terms(); phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = SingleFeed(2))))`.
+   `merge(default_fringe_terms(); phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = ExceptFeed(1))))`.
 
 `rel_time` is the inter-feed delay's time segmentation: `PerScan()` (the
 default) fits an offset per scan, so its scan-to-scan scatter is an
@@ -47,7 +47,7 @@ Add or replace a component with [`merge`](@ref Base.merge(::GainModel)).
 default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = GainModel(
     phase = (
         mbd = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds()),
-        rel_delay = GainComponent(Delay(); Ti = rel_time, Feed = SingleFeed(2)),
+        rel_delay = GainComponent(Delay(); Ti = rel_time, Feed = ExceptFeed(1)),
         rate = GainComponent(Rate(); Ti = PerScan(), Feed = SharedFeeds()),
     ),
 )
@@ -226,7 +226,7 @@ end
 
 function _residual_member(layout::ParameterLayout, θ, ms::XRadio.MeasurementSet, geom::DataGeometry)
     win = GeometryWindow(geom, ms)
-    g = evaluate_gains(layout, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, 2)
+    g = evaluate_gains(layout, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, nfeed)
     V = DimensionalData.modify(Array, ms[:visibility])
     _divide_residual!(V, g, win.stations, feed_pairs(ms))
     out = copy(ms)
@@ -318,7 +318,7 @@ function scan_station_terms(model, layout, θ, ti::Integer, stations)
         DimensionMismatch("the layout covers $(layout.nant) stations but $(length(stations)) are named")
     )
     comps = fringe_stage_components(model, layout)
-    delay = fill(NaN, AntennaName(collect(stations)), Feed(1:2))
+    delay = fill(NaN, AntennaName(collect(stations)), Feed(1:layout.nfeed))
     rate = similar(delay)
     fill!(rate, NaN)
     for a in axes(delay, 1), f in axes(delay, 2)

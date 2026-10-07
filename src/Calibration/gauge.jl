@@ -30,7 +30,7 @@ abstract type AbstractGauge end
     PinAntenna(refs)
 
 Set one node to zero per connected component: the first entry of `refs` present
-in that component (feed 1 preferred over feed 2), else the component's
+in that component (its lowest feed), else the component's
 best-observed node.
 
 `refs` is a station index, a station code, or a ranked collection of either. A
@@ -77,7 +77,7 @@ to fix it. `nodes` index the system's unknowns; every other field runs parallel
 to `nodes` and describes each one:
 
 - `station`: station index;
-- `feed`: 1 or 2, or 0 for an unknown both feeds share;
+- `feed`: feed index from 1, or 0 for an unknown every feed shares;
 - `scan`: scan index, or 0 for an unknown spanning scans or a solve without scans;
 - `component`: the model component's path, e.g. `(:phase, :mbd)`, or `()` where
   the solve names none (a nuisance offset, a seed solve);

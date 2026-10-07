@@ -67,7 +67,7 @@ export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior
 export station_components, component_label
 export AbstractGainTerm, ConstantTerm, Delay, Dispersion, Rate, Polynomial,
     PolynomialFreq, PolynomialTime
-export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed
+export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed, ExceptFeed
 export AbstractTimeSegmentation, GlobalTime, PerScan, PerIntegration, TimeBlocks,
     InstrumentScans
 export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,

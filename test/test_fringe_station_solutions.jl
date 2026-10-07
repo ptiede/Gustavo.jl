@@ -8,7 +8,7 @@
         mg = _full_fringe_model(rel_time = CAL.GlobalTime())
         mp = _full_fringe_model(rel_time = CAL.PerScan())
         @test length(mg.phase) == length(mp.phase)
-        # Exactly the one `SingleFeed`-tied offset differs between the models,
+        # Exactly the one `ExceptFeed`-tied offset differs between the models,
         # and only in its time-segmentation type. (There is no inter-feed
         # CONSTANT — see `default_fringe_terms`.)
         diff = findall(
@@ -17,7 +17,7 @@
         )
         @test length(diff) == 1
         for i in diff
-            @test mg.phase[i].Feed isa CAL.SingleFeed
+            @test mg.phase[i].Feed isa CAL.ExceptFeed
             @test mg.phase[i].Ti isa CAL.GlobalTime
             @test mp.phase[i].Ti isa CAL.PerScan
         end
@@ -28,7 +28,7 @@
         md = _full_fringe_model()
         @test all(
             tc -> tc.Ti isa CAL.PerScan,
-            filter(tc -> tc.Feed isa CAL.SingleFeed, collect(md.phase)),
+            filter(tc -> tc.Feed isa CAL.ExceptFeed, collect(md.phase)),
         )
     end
 

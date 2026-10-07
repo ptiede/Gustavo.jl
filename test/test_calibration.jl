@@ -424,6 +424,7 @@ end
             (CAL.TimeBlocks(1.5), "TimeBlocks(1.5)"),
             (CAL.ChannelBlocks(4), "ChannelBlocks(4)"),
             (CAL.SingleFeed(2), "SingleFeed(2)"),
+            (CAL.ExceptFeed(1), "ExceptFeed(1)"),
         )
         @test CAL._call_string(x) == want
     end
@@ -469,6 +470,16 @@ end
     r = lay_1f.plans[1]
     @test plan_off1(r)[1, 1, 1, 1] == 0                           # feed 1 has no block
     @test plan_off1(r)[1, 2, 1, 1] != 0
+
+    geom3 = CAL.DataGeometry(; nfeed = 3, times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
+    lay_ex = CAL.plan_parameters(mk(CAL.ExceptFeed(2)), 2, geom3)
+    @test lay_ex.nθ == 4                                    # 2 ant × feeds 1 and 3
+    @test lay_ex.plans[1].shape == (1, 2, 1, 1, 2)
+    @test [CAL._feed_node(CAL.ExceptFeed(2), f) for f in 1:3] == [1, 0, 2]   # feed 2 has no block
+    geom1 = CAL.DataGeometry(; nfeed = 1, times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
+    @test CAL.plan_parameters(mk(CAL.ExceptFeed(1)), 2, geom1).nθ == 0
+    @test_throws "ExceptFeed(3) names a feed the data does not have" CAL.plan_parameters(mk(CAL.ExceptFeed(3)), 2, geom)
+    @test_throws "ExceptFeed feed must be at least 1" CAL.ExceptFeed(0)
 end
 
 @testset "Calibration parameter layout" begin

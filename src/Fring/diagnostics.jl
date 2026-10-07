@@ -95,8 +95,8 @@ The fringe step's per-scan station delay and rate, decoded
 from its solved parameters (no data is read), over
 `(Scan, AntennaName, Feed)`:
 
-- `delay` — station group delay (s): the feed-common delay plus, on feed 2,
-  the fitted inter-feed offset.
+- `delay` — station group delay (s): the feed-common delay plus, on each feed
+  the model gives one, the fitted inter-feed offset.
 - `rate` — station fringe rate (Hz).
 
 Each sums every delay and rate term the fringe step owns; a term
@@ -135,10 +135,10 @@ function fringe_station_solutions(sol::CalibrationSolution)
         (1 <= k <= nscan && t0[k] == 0) && (t0[k] = ti)
     end
     scans = findall(!=(0), t0)
-    d = (_scan_dim(names[scans]), _station_dim(sol.geom.stations), Feed(1:2))
+    d = (_scan_dim(names[scans]), _station_dim(sol.geom.stations), Feed(1:sol.geom.nfeed))
     n = map(length, d)
     delay, rate = fill(NaN, n), fill(NaN, n)
-    for (s, k) in enumerate(scans), a in 1:nant, f in 1:2
+    for (s, k) in enumerate(scans), a in 1:nant, f in 1:sol.geom.nfeed
         ti = t0[k]
         for (plan, kind) in comps
             node = _feed_node(plan.tying, f)            # fseg 1: stage-B terms are GlobalFrequency
@@ -164,7 +164,7 @@ every product with a flagged (station, feed) on either side in that scan
 """
 function fringe_station_flags(sol::CalibrationSolution)
     info = _fringe_info(sol)
-    d = (_scan_dim(info.scan_names), _station_dim(sol.geom.stations), Feed(1:2))
+    d = (_scan_dim(info.scan_names), _station_dim(sol.geom.stations), Feed(1:sol.geom.nfeed))
     flags = DimArray(fill(false, map(length, d)), d)
     for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
         flags[

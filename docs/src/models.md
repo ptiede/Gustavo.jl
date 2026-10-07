@@ -130,15 +130,17 @@ meets.
 
 | Tying | Blocks | Meaning |
 |:-----|:----|:----|
-| [`PerFeed`](@ref)`()` | 2 | each feed solves its own value |
-| [`SharedFeeds`](@ref)`()` | 1 | one value, read by both feeds |
-| [`SingleFeed`](@ref)`(k)` | 1 | feed `k` only; the other feed gets no contribution |
+| [`PerFeed`](@ref)`()` | ``n`` | each feed solves its own value |
+| [`SharedFeeds`](@ref)`()` | 1 | one value, read by every feed |
+| [`SingleFeed`](@ref)`(k)` | 1 | feed `k` only; the other feeds get no contribution |
+| [`ExceptFeed`](@ref)`(k)` | ``n - 1`` | every feed but `k`, each its own value; feed `k` gets no contribution |
 
-A reference/relative model is a `SharedFeeds` component for the common part
-plus a `SingleFeed(k)` component for the partner's deviation.
+``n`` is the number of feeds per station. A reference/relative model is a
+`SharedFeeds` component for the common part plus an `ExceptFeed(k)` component
+for every other feed's deviation from feed `k`.
 
-The tying is physics: a feed-common quantity solved `PerFeed` lets the two
-feeds' solve noise diverge, injecting spurious cross-hand structure (see the
+The tying is physics: a feed-common quantity solved `PerFeed` lets the
+feeds' solve noise diverge, injecting spurious inter-feed structure (see the
 rate and adhoc components below), while a genuinely instrumental per-feed
 quantity solved `SharedFeeds` averages away a real signal.
 
@@ -171,7 +173,7 @@ or replacing named components:
 
 ```julia
 BaselineFringeFit(model = merge(default_fringe_terms();
-    phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = SingleFeed(2)))))
+    phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = ExceptFeed(1)))))
 ```
 
 Each step compiles and solves its own model on its own private θ — no step's
@@ -193,19 +195,20 @@ source model; it is left for imaging or self-calibration — see
 **`mbd` — per-scan wideband (multi-band) delay, feed-common.** One slope
 across the whole band per scan.
 
-**`rel_delay` — inter-feed delay offset, `SingleFeed(2)`.** The instrumental
-feed-2 − feed-1 group-delay offset. `PerScan()` (the default) fits it per
+**`rel_delay` — inter-feed delay offsets, `ExceptFeed(1)`.** Each other
+feed's instrumental group-delay offset from feed 1; with one feed per station
+the component has no parameters. `PerScan()` (the default) fits it per
 scan, so its scan-to-scan scatter is an instrument-stability diagnostic and
 no column couples scans; `GlobalTime()` fits one offset per station for the
 whole track (the EHT-HOPS / rPICARD assumption), so bright scans pin it and
 weak scans inherit it through the shared column.
 
 **`rate` — per-scan fringe rate, feed-common.** The fringe rate is common to
-both feeds, so it is tied across them exactly like the delay. Solving it `PerFeed` instead lets a spurious inter-feed rate
+every feed, so it is tied across them exactly like the delay. Solving it `PerFeed` instead lets a spurious inter-feed rate
 (`ṙ₂ − ṙ₁`) float on noise — and, multiplied by the hours-long rate lever
-arm, inject arbitrary scan-to-scan cross-hand phase jumps. The inter-feed
+arm, inject arbitrary scan-to-scan inter-feed phase jumps. The inter-feed
 rate is negligible (EHT-HOPS), so it is tied; a genuine offset would be
-opted into as a separate `PerScan × SingleFeed(2)` rate component, not by
+opted into as a separate `PerScan × ExceptFeed(1)` rate component, not by
 untying this one.
 
 **`bandpass` — per-channel constant phase, time-global, per-feed** (the

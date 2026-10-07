@@ -282,10 +282,11 @@ function _seed_phase_tracks(
     val = zeros(T, dims(nodes))
     wt = zeros(T, dims(nodes))
     mask = fill!(similar(nodes, Bool), false)
-    tracks = (_station_dim(stations), Feed(1:2), segments)
+    nfeed = maximum(maximum, lookup(rbar_bp, FeedPair))
+    tracks = (_station_dim(stations), Feed(1:nfeed), segments)
     phase = fill!(zeros(T, tracks), T(NaN))
     prec = zeros(T, tracks)
-    solved = falses(length(stations), 2)
+    solved = falses(length(stations), nfeed)
     for (fs, chans) in enumerate(fsegs)
         fill!(mask, false)
         for bi in axes(nodes, AntennaPair), p in axes(nodes, FeedPair)
@@ -453,7 +454,7 @@ function _seed_amp_tracks(
     val = zeros(T, dims(nodes))
     wt = zeros(T, dims(nodes))
     mask = fill!(similar(nodes, Bool), false)
-    tracks = (_station_dim(stations), Feed(1:2), segments)
+    tracks = (_station_dim(stations), Feed(1:maximum(maximum, lookup(rbar_bp, FeedPair))), segments)
     la = fill!(zeros(T, tracks), T(NaN))
     prec = zeros(T, tracks)
     for (fs, chans) in enumerate(fsegs)
@@ -478,7 +479,7 @@ function _seed_amp_tracks(
     return la, prec
 end
 
-# Solve the sum closure over the masked cells of `val` into `la` `(nant, 2)`,
+# Solve the sum closure over the masked cells of `val` into `la` `(nant, nfeed)`,
 # leaving nodes no cell touches untouched. A component whose graph is bipartite
 # determines its nodes only up to an alternating offset; `ridge` picks the
 # smallest solution.
@@ -489,7 +490,7 @@ function _solve_log_amp!(la, val, w, mask, nodes, ridge::Real)
     isempty(cells) && return la
     edges = [_edge(nodes[I], nant) for I in cells]
     touched = sort!(unique!([n for e in edges for n in e]))
-    column = zeros(Int, 2nant)
+    column = zeros(Int, length(la))
     column[touched] .= eachindex(touched)
     ncell = length(cells)
     A = zeros(T, ncell + length(touched), length(touched))
@@ -504,7 +505,7 @@ function _solve_log_amp!(la, val, w, mask, nodes, ridge::Real)
     wts = [T[w[I] for I in cells]; fill(T(ridge), length(touched))]
     x = FactoredWLS(A, wts)(b)
     for (j, n) in pairs(touched)
-        la[(n - 1) % nant + 1, n > nant ? 2 : 1] = x[j]
+        la[(n - 1) % nant + 1, (n - 1) ÷ nant + 1] = x[j]
     end
     return la
 end
@@ -725,12 +726,12 @@ function _fit_tracks!(
 end
 
 # One observable's per-piece outcome array over `(AntennaName, Feed, Frequency, Ti)`:
-# `stations`, the two feeds, each spectral window of `seg` over the extent of its
+# `stations`, every feed, each spectral window of `seg` over the extent of its
 # channels, and each of `plan`'s `nts` time segments over the extent of its
 # samples.
 function _track_status_array(stations, geom::DataGeometry, plan, seg, nts::Integer)
     ax = (
-        _station_dim(stations), Feed(1:2),
+        _station_dim(stations), Feed(1:geom.nfeed),
         Frequency(_segment_lookup(geom.channel_freqs, seg.piece_chans)),
         Ti(_time_segment_lookup(plan, geom, nts)),
     )
@@ -741,7 +742,7 @@ end
 # `(AntennaName, Feed, Ti)` labeled as `_track_status_array`; each slot starts at its
 # station's own prior.
 function _track_prior_array(stations, geom::DataGeometry, plan, nts::Integer)
-    ax = (_station_dim(stations), Feed(1:2), Ti(_time_segment_lookup(plan, geom, nts)))
+    ax = (_station_dim(stations), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom, nts)))
     arr = DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax)
     for a in axes(arr, 1)
         arr[a, :, :] .= Ref(_prior_along(plan.priors[a], :Frequency))
@@ -774,7 +775,7 @@ Summarize a bandpass solve's per-piece outcomes into the record the
 [`Bandpass`](@ref Gustavo.Bandpass) step publishes. `phase_status`/`amp_status`
 hold one `_BP_TRACK_*` code per (station, feed, frequency segment, time segment)
 — either may be `nothing` when that half was not fit — as `DimArray`s over
-`(AntennaName, Feed, Frequency, Ti)`: the stations, the two feeds, each frequency
+`(AntennaName, Feed, Frequency, Ti)`: the stations, every feed, each frequency
 segment of the component over the extent of its channels and each time segment
 over the extent of its samples. `phase_priors`/`amp_priors` hold the prior each
 (station, feed, time segment) track was fit under, its hyperparameters resolved,
@@ -965,7 +966,7 @@ function _per_track_observable!(θ, results, setup, group::Symbol, T; gauge)
             _seed_phase_tracks(rbar, wbar, geom.stations, seg.fsegs, segments; gauge, component = plan.path) :
             _seed_amp_tracks(rbar, wbar, geom.stations, seg.fsegs, segments)
         group === :logamp && _spike_guard!(tracks, seg.pieces, _BP_SPIKE_SIGMA)
-        levels = isnothing(level) ? nothing : fill(eltype(tracks)(NaN), length(geom.stations), 2, nlevel)
+        levels = isnothing(level) ? nothing : fill(eltype(tracks)(NaN), length(geom.stations), geom.nfeed, nlevel)
         _fit_tracks!(
             tracks, prec, seg.x, seg.pieces, plan.priors;
             unwrap = group === :phase, level, levels,
@@ -1013,9 +1014,10 @@ end
 # any SNR: a weak cell contributes its information at its honest weight and
 # costs variance, never validity. The closure tier's gate is justified there
 # because that tier extracts a per-segment phase, which is meaningless below the
-# noise. Applied here it would preferentially delete the cross-hand cells, the
-# only rows tying the feed-2 gain block to feed-1 and so the only measurement of
-# the relative R–L bandpass, leaving that block at its initialization. Outliers
+# noise. Applied here it would preferentially delete the weak cells pairing
+# different feeds, the only rows tying one feed's gain block to another's and so
+# the only measurement of the bandpass between feeds, leaving those blocks at
+# their initialization. Outliers
 # belong to a flagging step upstream of the solve, not to a cell gate.
 function _reduce_scan_segments!(rview, wview, sc, segs)
     for p in axes(rview, FeedPair), bi in axes(rview, AntennaPair)
@@ -1060,13 +1062,13 @@ function _block_locations(blocks, nant)
 end
 
 # One phase block's solve state over `(AntennaName, Feed, Frequency, Ti)` — its
-# stations, the two feeds, its frequency segments and its time segments: the
+# stations, every feed, its frequency segments and its time segments: the
 # complex gains `g`; their unwrapped phase tracks `φ`, carried across sweeps so
 # the prior fit never sees a 2π branch cut; the slots a sweep has solved
 # (`touched`) and the gauge pins (`pinned`).
 function _block_gains(block, geom::DataGeometry, C::Type)
     ax = (
-        _station_dim(geom.stations[block.stations]), Feed(1:2),
+        _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
         Frequency(_frequency_segment_lookup(block.plan, geom)),
         Ti(_time_segment_lookup(block.plan, geom)),
     )
@@ -1105,8 +1107,8 @@ end
 # Every (station pair, feed pair) cell touching (station, feed): the cell, the
 # station and feed at its other end, and whether (station, feed) is the cell's
 # first end — built once, reused by every ALS iteration's gain update.
-function _joint_bandpass_touching(cells, nant)
-    touching = [Tuple{Int, Int, Int, Int, Bool}[] for _ in 1:nant, _ in 1:2]
+function _joint_bandpass_touching(cells, nant, nfeed)
+    touching = [Tuple{Int, Int, Int, Int, Bool}[] for _ in 1:nant, _ in 1:nfeed]
     for p in axes(cells, FeedPair), bi in axes(cells, AntennaPair)
         _solvable(cells[bi, p]) || continue
         (a, fa), (b, fb) = cells[bi, p]
@@ -1300,7 +1302,7 @@ function _update_station_gains!(
     wf = Vector{T}(undef, nfsmax)
     la = Vector{T}(undef, nfsmax)
     φ̃ = Vector{T}(undef, nfsmax)
-    for feed in 1:2, ant in eachindex(loc)
+    for feed in axes(touching, 2), ant in eachindex(loc)
         k, ai = loc[ant]
         iszero(k) && continue
         entries = touching[ant, feed]
@@ -1713,7 +1715,7 @@ function solve_joint_bandpass!(
     layout = (;
         loc, tseg = tsg, fseg,
         present = [sort!(filter!(!iszero, unique(view(tsg, a, :)))) for a in axes(tsg, 1)],
-        touching = _joint_bandpass_touching(ends, nant),
+        touching = _joint_bandpass_touching(ends, nant, geom.nfeed),
     )
     gains = [_block_gains(b, geom, eltype(r)) for b in phase_blocks]
     _joint_bandpass_pins!(gains, data, layout, phase_blocks, gauge)
@@ -1774,14 +1776,14 @@ function _station_levels(level_blocks, segs, loc, geom::DataGeometry, θ, T)
         level, nlevel = _piece_levels(lb.plan, segs[k])
         out[a] = (;
             level, nlevel, leaf = lb.θ, tying = lb.plan.tying, ai = li,
-            seg = _segment_levels(level, segs[k]), nts = lb.plan.shape[4], T,
+            seg = _segment_levels(level, segs[k]), nts = lb.plan.shape[4], geom.nfeed, T,
         )
     end
     return out
 end
 
 _level_values(::Nothing) = nothing
-_level_values(l) = fill(l.T(NaN), 2, l.nlevel, l.nts)
+_level_values(l) = fill(l.T(NaN), l.nfeed, l.nlevel, l.nts)
 
 _joint_level_writer(::Nothing, values) = nothing
 _joint_level_writer(l, values) = (; l.leaf, l.tying, l.seg, values, l.ai)
