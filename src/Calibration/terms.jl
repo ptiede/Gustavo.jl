@@ -241,7 +241,7 @@ time_coordinate(::Polynomial{Ti}, t, st, seg::Integer) =
 
 # Center each segment on the mean of its coordinates and scale by the widest
 # excursion from it. A single-sample segment has zero spread; its scale is
-# REPLACED by 1 rather than floored — the coordinate is then identically zero
+# replaced by 1 rather than floored — the coordinate is then identically zero
 # either way, and a floor in physical units would mean nothing shared between a
 # frequency axis (Hz) and a time axis (seconds).
 function _poly_norm(coords::AbstractVector{<:Real}, ids::AbstractVector{<:Integer}, nseg::Integer)

@@ -109,7 +109,7 @@ function _group_bytes(group)
     return bytes
 end
 
-# The most tasks `sched` runs at once. An UPPER BOUND — a scheduler whose chunk
+# The most tasks `sched` runs at once. An upper bound — a scheduler whose chunk
 # count follows the collection (`chunksize`), or that spawns one task per
 # element (`chunking = false`), is bounded by the thread count instead.
 max_tasks(::SerialScheduler) = 1

@@ -74,17 +74,9 @@ function connected_components(nnodes::Integer, edges)
     return compid, ncomp, touched
 end
 
-# Convention across Gustavo: a "weight" is always an *inverse variance*
-# (precision, 1/σ²), matching both the Gaussian-likelihood derivation of
-# weighted least squares and the AIPS UVData convention (Memo 117: visibility
-# weights are in Jy⁻² = variance⁻¹).
-#
-# For y_i = A_i x + ε_i with independent ε_i ~ N(0, σ_i²) the MLE is
-#   x* = (Aᵀ W A)⁻¹ Aᵀ W y,   W = diag(1/σ_i²).
-# To solve this with QR we need S with SᵀS = W; since W is diagonal-positive,
-# S = diag(√W_ii) = diag(1/σ_i), so we scale each row by √(weight) before
-# handing to QR. **Callers pass inverse variance and never take the sqrt
-# themselves.**
+# Across Gustavo a "weight" is an inverse variance 1/σ², as in AIPS Memo 117
+# (visibility weights in Jy⁻²). QR solves the weighted problem on rows scaled
+# by √weight; callers pass the inverse variance and never take the root.
 _row_scale(inv_variances) = sqrt.(inv_variances)
 
 # A solve works in the common type of its data (`A`, `b`, the weights), so a
@@ -259,8 +251,8 @@ function _increment_weight(weights, k)
     return wa * wb / (wa + wb)
 end
 
-# Where a track's step-to-step increments CENTER: the weighted circular mean of the
-# wrapped increments between ADJACENT finite samples, which is also the track's
+# Where a track's step-to-step increments center: the weighted circular mean of the
+# wrapped increments between adjacent finite samples, which is also the track's
 # dominant per-sample trend. Only strictly adjacent pairs contribute — across a gap
 # the true increment is unknown modulo 2π, so a gap-spanning pair says nothing about
 # either.

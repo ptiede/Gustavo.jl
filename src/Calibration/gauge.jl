@@ -2,12 +2,12 @@
 #
 # A station solve determines node values only up to one additive constant per
 # connected component of the (station, feed) graph: every observation is a
-# DIFFERENCE of two nodes, so the design matrix has a null vector per component.
+# difference of two nodes, so the design matrix has a null vector per component.
 # A gauge supplies the missing constraint row.
 #
 # The constraint is what makes the system full rank; it does not change any
 # gauge-invariant quantity (baseline differences, closure phases, the applied
-# calibration). It DOES fix what per-station values are reported, and — where a
+# calibration). It does fix what per-station values are reported, and — where a
 # quantity is compared across scans, as the R–L phase is — which comparisons are
 # meaningful.
 
@@ -170,7 +170,7 @@ function gauge_anchor(g::AbstractGauge, f::GaugeFreedom)
     return _best_gauge_node(f)
 end
 
-# The fallback for a freedom holding no listed reference: its best-OBSERVED
+# The fallback for a freedom holding no listed reference: its best-observed
 # node, i.e. the one carrying the most total row weight, ties broken by lowest
 # node index. Such a freedom's gauge is arbitrary by construction — there is no
 # reference to express it against — so the only properties that matter are

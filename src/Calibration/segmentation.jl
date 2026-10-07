@@ -624,7 +624,7 @@ function time_segment_ids(
     for (k, i) in enumerate(ti_idx)
         t = target.times[i]
         b = bin(t)
-        # A sample integrating ACROSS a bin boundary would silently take
+        # A sample integrating across a bin boundary would silently take
         # whichever bin its center landed in — the one place identity placement
         # still rests on a coordinate, so the span closes it.
         w = _span_at(time_span, k)

@@ -430,7 +430,7 @@ function _group_setup(::Bandpass, ctx::SolveContext)
         map(Fring._member_station_pairs, members), map(feed_pairs, members), ctx.geom,
     )
     # `ctx.layout` holds only this step's own components. The two observables are
-    # located by NAME through the layout's component tree: the flat `plans` list
+    # located by name through the layout's component tree: the flat `plans` list
     # carries one entry per station-signature group, so its positions stop naming
     # them as soon as a model differs across stations.
     return (;

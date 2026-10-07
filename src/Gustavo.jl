@@ -36,14 +36,12 @@ include("data/autocorrelations.jl")
 
 include("Calibration.jl")
 using .Calibration
-# The pipeline layer's step methods extend the model layer's
-# element-compilation generic (see pipeline/protocol.jl).
+# Solve steps add methods to `model_components`.
 import .Calibration: model_components
 
 include("Fring.jl")
 using .Fring
 
-# Top-level modular calibration pipeline (orchestrates all three submodules).
 include("pipeline.jl")
 
 export Calibration, Fring

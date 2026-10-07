@@ -1,20 +1,9 @@
 # ── Step protocol ────────────────────────────────────────────────────────────
 #
-# A `SolveStep` solves its own compiled gain model: at fit time it declares its
-# model components and `plan_parameters` lays out its θ.
-#
-# Hooks a step may implement:
-# - `model_components(step, spec)` — the gain-model components this step solves.
-# - `provides(step)`               — names the step's solution slot.
-# - `solve(step, ctx)`             — fills the step's θ, reading the data through
-#                                    `each_group(f, ctx)`, and returns the step's
-#                                    diagnostics.
-# - `step_gauge(step)`             — the step's gauge, resolved into `ctx.gauge`;
-#                                    `nothing` (the default) for a step with none.
-#
-# Run-wide resources (schedulers, progress) live on the
-# `ExecutionConfig` passed to `fit`. Anything that changes what a given step
-# solves, its gauge included, lives on that step.
+# The hooks a `SolveStep` implements are defined below; docs/src/authoring_steps.md
+# walks through writing a step. Run-wide resources (schedulers, progress) live on the `ExecutionConfig` passed
+# to `fit`; anything that changes what a step solves, its gauge included, lives
+# on the step.
 
 """
     SolveStep

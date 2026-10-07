@@ -14,9 +14,7 @@
 #
 # A component's leaf occupies exactly its `range` (column-major over parameters,
 # feed-node, freq-segment, time-segment, antenna), so `reshape(view(θ, range),
-# shape)` is the component's block space. The map recurses the `plantree` (names are compile-time constants) and slices θ
-# by `range`, so it needs no offset tables, Dicts, or closures and stays
-# type-stable and AD/Reactant-traceable.
+# shape)` is the component's block space.
 
 """
     ComponentPlan
@@ -106,13 +104,9 @@ end
 # ── Per-component layout ─────────────────────────────────────────────────────
 #
 # One resolution of an `GainComponent` over a geometry: the segment ids and
-# coordinates the `ComponentPlan` needs, plus the shaped-leaf description the
-# range and axes build from. The leaf `shape`/`roles` describe the block run
-# as a fixed-rank column-major array: fastest to slowest over parameters,
-# feed-node, frequency segment, time segment, then antenna, size-1 axes kept so
-# every component reshapes to the same five axes and any consumer addresses it
-# the same way. A term whose block length varies across frequency segments has no
-# rectangular leaf and is rejected here.
+# coordinates the `ComponentPlan` needs, plus the leaf `shape`/`roles`
+# (`_leaf_shape`). A term whose block length varies across frequency segments
+# has no rectangular leaf and is rejected here.
 function _component_layout(e::GainComponent, nant::Int, geom::DataGeometry)
     t = e.term
     tseg_id, ntseg = time_segment_ids(e.Ti, geom)

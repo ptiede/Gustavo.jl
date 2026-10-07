@@ -225,12 +225,12 @@ function _run_step(st::SolveStep, exec::ExecutionConfig, ps::XRadio.ProcessingSe
     )
 end
 
-# A step compiles its own model against the run's geometry, and may
-# legitimately compile no components at all; it still runs, with nothing to
-# solve. The model is resolved against the run's stations here, so the
-# context (and the solution's provenance) holds the concrete per-station trees
-# the solve uses; a step that has not opted into station heterogeneity
-# (`supports_station_heterogeneity`) is handed uniform models only — anything else is rejected before any data is read.
+# A step compiles its own model against the run's geometry and may compile no
+# components at all; it still runs, with nothing to solve. The model is resolved
+# against the run's stations here, so the context and the solution's provenance
+# hold the per-station trees the solve uses. A step that does not declare
+# `supports_station_heterogeneity` is handed uniform models only; anything else
+# is rejected before any data is read.
 function _step_context(st::SolveStep, spec, gauge, groups, sizes, exec)
     stations = spec.geom.stations
     model = Calibration.resolve(model_components(st, spec), stations, spec.geom)

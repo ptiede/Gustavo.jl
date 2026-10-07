@@ -1,10 +1,9 @@
 # ── Pure forward evaluation ──────────────────────────────────────────────────
 #
-# `evaluate_gains(layout, θ)` maps a parameter vector to gains. The map is pure: no mutation of θ, no global state, allocation only of the
-# output array, and fully type-stable (verified by `@inferred` in the tests).
-# This is the surface a future Comrade/Reactant global solver will trace; the
-# WLS solvers may mutate their own scratch, but they go through this same map to
-# predict visibilities.
+# `evaluate_gains(layout, θ)` maps a parameter vector to gains. The map is pure:
+# no mutation of θ, no global state, allocation only of the output array, and
+# type-stable (checked by `@inferred` in the tests), so it can be traced by AD
+# or Reactant. The WLS solvers predict visibilities through this same map.
 #
 # The map recurses the layout's `plantree` (a `NamedTuple` mirroring the model,
 # so names are compile-time constants) and, at each component, slices its shaped
