@@ -1,6 +1,6 @@
 using FITSFiles
 using FITSFiles: HDU
-using Dates: Dates, Date, DateTime, datetime2julian
+using Dates: Dates, Date, DateTime, datetime2julian, @dateformat_str
 using OrderedCollections: OrderedDict
 import XRadio
 using XRadio:
@@ -444,8 +444,14 @@ function _read_uvfits(path, element_type)
     primary_hdu = fid[1]
     cards = primary_hdu.cards
     primary_lazy = getfield(primary_hdu, :data)
-    dt = _is_lazy_random(primary_lazy) ?
-        _fast_random_read(primary_lazy) : primary_hdu.data
+    _is_lazy_random(primary_lazy) || throw(
+        ArgumentError(
+            "load_uvfits: the primary HDU of $(path) is not random-group data read from disk " *
+                "(FITSFiles returned $(typeof(primary_lazy))). A UVFITS file holds its " *
+                "visibilities as random groups in the primary HDU; check that the file is UVFITS."
+        )
+    )
+    dt = _fast_random_read(primary_lazy)
     # Multi-AN-extver files carry one AN table per subarray.
     an_hdus = HDU[]
     fq_hdu = nothing
@@ -672,7 +678,7 @@ function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyStructuredData) where 
         seek(io, lazy.begpos)
         read!(io, buf)
     end
-    @inbounds @simd for i in eachindex(buf)
+    for i in eachindex(buf)
         buf[i] = ntoh(buf[i])
     end
     # View the buffer as `(L, N)`: column j holds the j-th record laid
@@ -742,16 +748,30 @@ function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyStructuredData) where 
     return (; pairs...)
 end
 
-# Parse `array_obs.rdate` (e.g. "2022-01-01") to a Julian Day at 0h UT.
-# Anchors the AIPS NX table, whose times are days relative to RDATE.
-# Returns 0.0 when the string is empty or unparseable.
+# Parse `array_obs.rdate` to a Julian Day at 0h UT. Anchors the AIPS NX table,
+# whose times are days relative to RDATE. Accepts the FITS date forms
+# `YYYY-MM-DD`, `YYYY-MM-DDThh:mm:ss[.s]` (time ignored) and the pre-2000
+# `DD/MM/YY` (19YY). Returns 0.0 when the string is empty.
 function _rdate_jd_or_zero(rdate_str::AbstractString)
-    isempty(rdate_str) && return 0.0
-    return try
-        datetime2julian(DateTime(Date(rdate_str)))
-    catch
-        0.0
-    end
+    s = strip(rdate_str)
+    isempty(s) && return 0.0
+    d = _parse_fits_date(s)
+    isnothing(d) && throw(
+        ArgumentError(
+            "load_uvfits: the AN table's RDATE $(repr(rdate_str)) is not a FITS date " *
+                "(YYYY-MM-DD, YYYY-MM-DDThh:mm:ss or DD/MM/YY), so the times relative to it " *
+                "cannot be placed. Correct the RDATE card of the AIPS AN table."
+        )
+    )
+    return datetime2julian(DateTime(d))
+end
+
+function _parse_fits_date(s::AbstractString)
+    d = tryparse(Date, first(s, 10), dateformat"yyyy-mm-dd")
+    !isnothing(d) && (length(s) == 10 || s[nextind(s, 10)] == 'T') && return d
+    m = match(r"^(\d{2})/(\d{2})/(\d{2})$", s)
+    isnothing(m) && return nothing
+    return tryparse(Date, "19$(m[3])-$(m[2])-$(m[1])", dateformat"yyyy-mm-dd")
 end
 
 # Warn if the AIPS Stokes axis (circular or linear block) doesn't match the
@@ -804,9 +824,22 @@ function _measurement_set(shared, records, scan_name, spw_id, window, tab)
     # the phase it fixes turns over in a wavelength of millimeters.
     uvw = fill(NaN, 3, length(pairs_), length(times))
     effective = isnothing(shared.inttim) ? nothing : zeros(length(pairs_), length(times))
+    record_of = zeros(Int, length(pairs_), length(times))
     for r in records
         k = time_of[shared.obs_time[r]]
         b = base_of[shared.bl_pairs[r]]
+        if record_of[b, k] != 0
+            a1, a2 = map(antenna_name, shared.bl_pairs[r])
+            throw(
+                ArgumentError(
+                    "load_uvfits: records $(record_of[b, k]) and $r of scan $(scan_name) both hold " *
+                        "baseline $a1-$a2 at time $(times[k]) s, and one would overwrite the other. " *
+                        "A file built by concatenating or merging observations can repeat records; " *
+                        "remove the duplicates (e.g. AIPS UVSRT then DBCON) before loading."
+                )
+            )
+        end
+        record_of[b, k] = r
         for axis in 1:3
             uvw[axis, b, k] = Float64(shared.uvw_raw[r, axis]) * _C_LIGHT
         end

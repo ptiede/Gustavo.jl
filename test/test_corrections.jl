@@ -226,6 +226,18 @@ end
         end
     end
 
+    @testset "a scan the solution does not cover" begin
+        ms = read(first(ps))
+        renamed = CALc.DataGeometry(;
+            geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.channel_widths, geom.t0, geom.f0,
+            scan_names = ["x" * n for n in geom.scan_names], geom.spw_names, geom.stations, geom.nfeed,
+        )
+        win = CALc.GeometryWindow(geom, ms)
+        @test_throws "is not in the solution, which covers" Gustavo._flag_unconstrained!(
+            ms, win, renamed, Gustavo._solution_flag_sets(sol),
+        )
+    end
+
     @testset "post runs on each corrected Measurement Set" begin
         out = calibrate(sol, ps; post = _halve_weights, apply_flags = false)
         ref = calibrate(sol, ps; apply_flags = false)

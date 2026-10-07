@@ -9,6 +9,7 @@ using DimensionalData
 using DimensionalData: dims, lookup, Ti
 using FITSFiles
 using StableRNGs: StableRNG
+using Dates: DateTime, datetime2julian
 import XRadio
 
 @isdefined(uvfits_fixture) || include("synthetic_uvfits.jl")
@@ -179,6 +180,24 @@ end
             @test DimensionalData.metadata(back[k])[:earth_orientation][:poltype] == "APPROX"
             @test DimensionalData.metadata(back[k][:visibility])[:units] == "Jy"
         end
+    end
+
+    @testset "a file the reader cannot place" begin
+        image = joinpath(mktempdir(), "image.fits")
+        write(image, HDU[HDU(FITSFiles.Primary, zeros(Float32, 4, 4))])
+        @test_throws "is not random-group data read from disk" load_uvfits(image)
+
+        repeated = copy(args.baselines)
+        repeated[2] = repeated[1]
+        @test_throws "both hold baseline AA-BB" load_uvfits(first(uvfits_fixture(; baselines = repeated)))
+
+        ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+        @test ext._rdate_jd_or_zero("") == 0.0
+        jd = ext._rdate_jd_or_zero("2024-04-08")
+        @test jd == datetime2julian(DateTime(2024, 4, 8))
+        @test ext._rdate_jd_or_zero("2024-04-08T00:00:00.0") == jd
+        @test ext._rdate_jd_or_zero("08/04/94") == datetime2julian(DateTime(1994, 4, 8))
+        @test_throws "RDATE \"2024/04/08\" is not a FITS date" ext._rdate_jd_or_zero("2024/04/08")
     end
 
     @testset "a flag read from the file is a flag like the solver's" begin

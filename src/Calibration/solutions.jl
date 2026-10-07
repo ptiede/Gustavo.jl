@@ -451,29 +451,34 @@ end
 
 # ── Geometry from a ProcessingSet ────────────────────────────────────────────────────
 
-# Two timestamps within `_epoch_atol` of each other are the same instant. The
-# axis is built by matching each new value against the canonical ones already
-# seen, not by rounding to a grid: a grid still splits two values that straddle
-# a bucket edge, which is the case this exists to remove. The canonical value is
-# a real observed timestamp, so the axis keeps feeding physical `t - t0`
-# arithmetic. `_time_indices` matches `geom.times` with the same tolerance, so
-# the constructor and its readers agree.
-function _find_canonical_time(canon::AbstractVector{Float64}, t::Float64)
-    atol = _epoch_atol(t)
-    i = searchsortedfirst(canon, t - atol)
-    return (i <= length(canon) && abs(canon[i] - t) <= atol) ? i : nothing
+# Two timestamps within `_epoch_atol` of each other are the same instant, and
+# two channel frequencies within `_freq_atol` the same channel. An axis is built
+# by matching each new value against the canonical ones already seen, not by
+# rounding to a grid: a grid still splits two values that straddle a bucket
+# edge, which is the case this exists to remove. The canonical value is a real
+# observed value, so the axis keeps feeding physical `t - t0` and `f - f0`
+# arithmetic. `_time_indices` and `_channel_indices` match the geometry with the
+# same tolerances, so the constructor and its readers agree.
+_freq_atol(f::Real) = 1.0e-9 * abs(Float64(f))
+
+function _find_canonical(canon::AbstractVector{Float64}, x::Float64, atol)
+    i = searchsortedfirst(canon, x - atol)
+    return (i <= length(canon) && abs(canon[i] - x) <= atol) ? i : nothing
 end
 
-function _canonical_time!(canon::Vector{Float64}, t::Float64)
-    i = _find_canonical_time(canon, t)
-    i === nothing || return canon[i]
-    insert!(canon, searchsortedfirst(canon, t), t)
-    return t
+function _canonical!(canon::Vector{Float64}, x::Float64, atol)
+    i = _find_canonical(canon, x, atol)
+    isnothing(i) || return canon[i]
+    insert!(canon, searchsortedfirst(canon, x), x)
+    return x
 end
+
+_canonical_time!(canon::Vector{Float64}, t::Float64) = _canonical!(canon, t, _epoch_atol(t))
+_canonical_freq!(canon::Vector{Float64}, f::Float64) = _canonical!(canon, f, _freq_atol(f))
 
 # Read-only counterpart for a second pass over times already canonicalized.
 function _canonical_time(canon::AbstractVector{Float64}, t::Float64)
-    i = _find_canonical_time(canon, t)
+    i = _find_canonical(canon, t, _epoch_atol(t))
     i === nothing && throw(
         ArgumentError("time $t s was not canonicalized on the first pass")
     )
@@ -559,8 +564,10 @@ function _span_geometry(pieces, stations, nfeed; f0, t0)
     time_scan = Dict{Float64, String}()
     time_stations = Dict{Float64, Set{String}}()
     time_canon = Float64[]
+    freq_canon = Float64[]
     for piece in pieces
         for f in piece.freqs
+            f = _canonical_freq!(freq_canon, Float64(f))
             prev = get(freq_spw, f, nothing)
             (prev === nothing || prev == piece.spw) || throw(
                 ArgumentError(
@@ -729,7 +736,7 @@ end
 _channel_indices(geom::DataGeometry, fs) = [_channel_index(geom, Float64(f)) for f in fs]
 
 function _channel_index(geom::DataGeometry, f)
-    j = findfirst(g -> isapprox(g, f; rtol = 1.0e-9), geom.channel_freqs)
+    j = findfirst(g -> abs(g - f) <= _freq_atol(f), geom.channel_freqs)
     isnothing(j) && throw(ArgumentError("channel frequency $f Hz is not in the geometry"))
     return j
 end

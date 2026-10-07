@@ -4,9 +4,12 @@ const CALg = Gustavo.Calibration
 
 _relabel(ms, name, values) = (ms[name] = rebuild(ms[name], values); ms)
 
-function _subarray_ms(antennas, scan; times = 1.6e9 .+ 30.0 .* (0:3), spw = "band_1")
+function _subarray_ms(
+        antennas, scan; times = 1.6e9 .+ 30.0 .* (0:3), spw = "band_1",
+        frequencies = 230.0e9 .+ 2.0e6 .* (0:3),
+    )
     return XRadio.Testing.measurement_set(;
-        antennas, times, frequencies = 230.0e9 .+ 2.0e6 .* (0:3),
+        antennas, times, frequencies,
         spectral_window = spw, scan, field = "F$scan", source = "S$scan",
     )
 end
@@ -91,6 +94,21 @@ end
             )
         )
         @test_throws "cannot be in two scans at one instant" CALg.DataGeometry(near_clash)
+    end
+
+    @testset "channel frequencies that differ by rounding are one channel" begin
+        freqs = 230.0e9 .+ 2.0e6 .* (0:3)
+        nudged = nextfloat.(collect(freqs))
+        @test nudged != freqs
+        split = XRadio.ProcessingSet(
+            OrderedDict(
+                :a => _subarray_ms(["A1", "A2"], "1"; frequencies = freqs),
+                :b => _subarray_ms(["A1", "A2"], "2"; times = 1.7e9 .+ 30.0 .* (0:3), frequencies = nudged),
+            )
+        )
+        g = CALg.DataGeometry(split)
+        @test length(g.channel_freqs) == length(freqs)
+        @test CALg.GeometryWindow(g, split[:b]).chan_idx == CALg.GeometryWindow(g, split[:a]).chan_idx
     end
 
     @testset "errors" begin

@@ -180,7 +180,7 @@ end
 function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, solgeom::DataGeometry, flagged)
     isnothing(flagged) && return ms
     station = win.geom.stations
-    scan = [something(findfirst(==(String(c)), solgeom.scan_names), 0) for c in ms[:scan_name]]
+    scan = [_solution_scan(solgeom, String(c)) for c in ms[:scan_name]]
     feeds = feed_pairs(ms)
     flag = ms[:flag]
     for (bi, (a, b)) in pairs(win.stations)
@@ -193,6 +193,19 @@ function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, so
         end
     end
     return ms
+end
+
+function _solution_scan(solgeom::DataGeometry, name::String)
+    s = findfirst(==(name), solgeom.scan_names)
+    isnothing(s) && throw(
+        ArgumentError(
+            "scan $(repr(name)) is not in the solution, which covers " *
+                "$(join(map(repr, solgeom.scan_names), ", ")); its unconstrained-station flags " *
+                "cannot be applied. Calibrate only the scans the solution was solved on, or pass " *
+                "`apply_flags = false`."
+        )
+    )
+    return s
 end
 
 # ── The runner ───────────────────────────────────────────────────────────────

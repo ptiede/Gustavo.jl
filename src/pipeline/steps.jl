@@ -155,6 +155,13 @@ end
 
 _check_step_gauge(gauge::AbstractGauge, model::GainModel) =
     check_gauge_components(gauge, _model_component_names(model))
+_check_step_gauge(gauge, ::GainModel) = throw(
+    ArgumentError(
+        "a step's `gauge` must be an AbstractGauge, got $(repr(gauge)) of type $(typeof(gauge)): " *
+            "`PinAntenna(\"A1\")` or `PinAntenna(2)` (a reference station, or a ranked list), " *
+            "`ZeroSumPhase()`, or `ByComponent((; component = gauge, …); default = gauge)`.",
+    ),
+)
 
 # ── Model components (compiled in step order into one GainModel) ───────
 
@@ -340,6 +347,13 @@ function _solve_group(
     round > 1 && (group = Fring.residual_group(ctx.layout, ctx.θ, group, ctx.geom))
     gc = Fring._GroupCells(group, ctx.geom)
     ti = Calibration._time_index(ctx.geom, first(gc.times))
+    length(gc.times) < 2 && any(c -> last(c) === :rate, stageB) && throw(
+        ArgumentError(
+            "BaselineFringeFit: scan $(repr(ctx.geom.scan_names[ctx.geom.scan_of_time[ti]])) has one " *
+                "time, and a rate needs at least two. Data averaged to one sample per scan cannot " *
+                "fit a `Rate`; fit unaveraged data, or use a model without a `Rate` term.",
+        ),
+    )
     # The recorded detection phases are referenced to the scan's mean time.
     epoch = sum(gc.times) / length(gc.times)
     res = Fring.search_scan(

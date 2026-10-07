@@ -160,7 +160,9 @@ function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) whe
                 M = Ai' * Λ * Ai
                 η̃ = Ai' * η
                 F = I + Q * M
-                c += dot(η̃, Q * (F' \ η̃)) / 2 - log(abs(det(A))) - log(det(F)) / 2
+                detF = det(F)
+                detF > 0 || _throw_precision_loss(model, "determinant of the predicted information update", detF, k)
+                c += dot(η̃, Q * (F' \ η̃)) / 2 - log(abs(det(A))) - log(detF) / 2
                 Λ = _symmetric(F' \ M)
                 η = F' \ η̃
             else
@@ -179,6 +181,7 @@ function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) whe
                 nobs += 1
             else
                 Sk = P[1, 1] + rk
+                Sk > 0 || _throw_precision_loss(model, "innovation variance", Sk, k)
                 vk = yk - μ[1]
                 K = P[:, 1] / Sk
                 μ += K * vk
@@ -217,6 +220,18 @@ function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) whe
         ),
     )
     return loglik, ndiffuse, b, c1
+end
+
+@noinline function _throw_precision_loss(model, what, value, k)
+    throw(
+        ArgumentError(
+            "the $what at sample $k under $(nameof(typeof(model))) is $value, not positive: " *
+                "the filter lost all precision. Under a random walk this means σ is far " *
+                "too large for the coordinate's steps, most often a RandomWalkPrior σ stated per " *
+                "channel rather than in units per x^(order − ½) (1/Hz^(order − ½) along frequency); " *
+                "divide it by (channel spacing in Hz)^(order − ½)."
+        )
+    )
 end
 
 # The log marginal likelihood of `y` under `model` (restricted, for a flat

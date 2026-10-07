@@ -261,6 +261,14 @@ end
     @test_throws "needs a proper start" FRs.kalman_mv_filter(rows, ys, rs, times, [models[1], FRs.RandomWalkModel{1}(0.05)])
 end
 
+@testset "a random walk too rough for its steps names the unit mistake" begin
+    x = 230.0e9 .+ 2.0e6 .* (0:15)
+    y = 0.1 .* randn(MersenneTwister(1), length(x))
+    @test_throws "RandomWalkPrior σ stated per channel" FRs.kalman_filter(
+        FRs.RandomWalkModel{2}(1.0e-4), y, fill(1.0e-4, length(x)), x,
+    )
+end
+
 @testset "Multivariate OU: a τ = 0 station is temporally independent" begin
     # A τ = 0 station has a fresh N(0, σ²) value at every step and no temporal coupling,
     # so the RTS pass has nothing to propagate back: the smoothed track equals the

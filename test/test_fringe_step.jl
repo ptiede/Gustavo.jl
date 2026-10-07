@@ -49,6 +49,11 @@
     @test_throws "delay station system is not determined" fit(BaselineFringeFit(; model = twice, gauge = PinAntenna(1)), ps)
 end
 
+@testset "a rate needs two times per scan" begin
+    ps, _ = _build_fringe_ps(; nant = 4, nscans = 2, ntime = 1, noise = 0.3, eltype = ComplexF64)
+    @test_throws "has one time, and a rate needs at least two" fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+end
+
 # Station 1's delays read `value` rather than zero.
 struct DelayOffset{T} <: CAL.AbstractGauge
     value::T
