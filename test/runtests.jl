@@ -85,6 +85,9 @@ include("test_bandpass_step.jl")
 # default, and the shape specs acting as priors inside its gain update.
 include("test_joint_bandpass.jl")
 
+# The weight convention behind the bandpass SNRs and gain-estimate weights.
+include("test_noise_convention.jl")
+
 # The AdhocPhase step + output sink: multi-scan solves of the three steps in
 # turn, and calibrate.
 include("test_smoother_step.jl")
