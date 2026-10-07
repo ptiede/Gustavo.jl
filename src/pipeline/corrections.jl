@@ -20,10 +20,8 @@ _one_member(ms::XRadio.MeasurementSet) =
 # The interval each time sample integrates over, from the time coordinate's
 # `integration_time`; `nothing` when the Measurement Set does not state it.
 function _time_span(ms::XRadio.MeasurementSet)
-    md = DimensionalData.metadata(lookup(ms[:visibility], Ti))
-    md isa AbstractDict || return nothing
-    it = get(md, :integration_time, nothing)
-    it === nothing && return nothing
+    it = get(DimensionalData.metadata(dims(ms, Ti)), :integration_time, nothing)
+    isnothing(it) && return nothing
     return fill(Float64(it.value), length(XRadio.times(ms)))
 end
 

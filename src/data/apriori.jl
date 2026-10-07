@@ -158,7 +158,7 @@ function _sefd_scale(ms, T, curves, rule, min_elevation, plausible)
     names, receptors = collect(lookup(types, A)), collect(lookup(types, R))
     times = XRadio.times(ms)
     scans = collect(ms[:scan_name])
-    meta = metadata(lookup(ms[:visibility], Ti))
+    meta = metadata(dims(ms, Ti))
     half = haskey(meta, :integration_time) ? meta[:integration_time].value / 2 : 0.0
 
     tdim = only(d for d in dims(T) if d isa Union{XRadio.TimeSystemCal, Ti})
@@ -198,7 +198,7 @@ end
 # Source elevation (radians) over (time, antenna), from each antenna's position,
 # the phase center of the field observed at each time, and the time as UTC.
 function _elevations(ms, names, times)
-    meta = metadata(lookup(ms[:visibility], Ti))
+    meta = metadata(dims(ms, Ti))
     (get(meta, :scale, nothing), get(meta, :format, nothing)) == ("utc", "unix") || throw(ArgumentError(
         "elevations need UTC times, and this Measurement Set's are " *
             "$(get(meta, :scale, nothing)) $(get(meta, :format, nothing))"
