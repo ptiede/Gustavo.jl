@@ -261,6 +261,7 @@
         # searched plane, a number that span in main-lobe widths.
         @test !isnothing(FP.plot_fringe_search(m; zoom = 30))
         @test_throws "zoom must be positive" FP.plot_fringe_search(m; zoom = 0)
+        @test_throws "span in main-lobe widths" FP.plot_fringe_search(m; zoom = true)
         figfull = FP.plot_fringe_search(m; zoom = false)
         show(IOBuffer(), MIME("image/png"), figfull)          # lay out, so limits are final
         zoomed = map_axis(figm).finallimits[]

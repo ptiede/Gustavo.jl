@@ -274,7 +274,7 @@ function _build_source_info(primary_hdu)
     if dec == 0.0
         dec = Float64(something(_find_crval(cards, "DEC"), 0.0))
     end
-    # AIPS UVFITS stores OBSRA/OBSDEC and the RA/DEC axis CRVALs in DEGREES
+    # AIPS UVFITS stores OBSRA/OBSDEC and the RA/DEC axis CRVALs in degrees
     # (Memo 117 §3.1.1); Gustavo's internal source coordinates are radians.
     return (; source_name = object, ra = deg2rad(ra), dec = deg2rad(dec))
 end
@@ -443,8 +443,6 @@ function _read_uvfits(path, element_type)
     fid = FITSFiles.fits(path)
     primary_hdu = fid[1]
     cards = primary_hdu.cards
-    # Bypass FITSFiles' per-record Vector{Float32} allocation when the
-    # primary HDU is lazy random-group data.
     primary_lazy = getfield(primary_hdu, :data)
     dt = _is_lazy_random(primary_lazy) ?
         _fast_random_read(primary_lazy) : primary_hdu.data
@@ -484,19 +482,12 @@ function _read_uvfits(path, element_type)
     freq_setups, fq_frqsels = _read_frequency_setups(cards, fq_hdu.data, size(raw, 5))
     src_info = _build_source_info(primary_hdu)
 
-    # AIPS UVFITS stores DATE as two PTYPE columns. Different writers use
-    # different splits:
-    #   * AIPS strict: col1 = integer JD (~2.46e6 for 2022 data), col2 =
-    #     fractional day. Sum is full JD.
-    #   * RDATE-relative: col1 = floor(days_since_RDATE) (~0..few),
-    #     col2 = fractional remainder. Sum is days_since_RDATE.
-    # We lift each column to Float64 *before* combining (Float32 ULP at JD
-    # magnitude is ~0.25 days, which would collapse sub-second timestamps),
-    # then detect whether the pair is a full JD or already RDATE-relative and
-    # produce **seconds since `JD_UNIX_EPOCH`**, the `Ti` convention.
-    # The two columns stay separate through the epoch subtraction: a Float64
-    # resolves only ~40 µs at Julian-Day magnitude, so summing them first
-    # would discard the split's whole purpose.
+    # AIPS UVFITS stores DATE as two PTYPE columns, split one of two ways:
+    #   * full JD: col1 = integer JD, col2 = fractional day;
+    #   * RDATE-relative: col1 = whole days since RDATE, col2 = the remainder.
+    # Each column is lifted to Float64 before combining (a Float32 resolves
+    # ~0.25 days at JD magnitude) and kept separate through the epoch
+    # subtraction (see `jd_to_unix`).
     rdate_jd = _rdate_jd_or_zero(first(antenna_tables).rdate)
     date_raw = collect(dt.DATE)
     date_hi, date_lo = if ndims(date_raw) == 2
@@ -655,17 +646,12 @@ function _read_uvfits(path, element_type)
     return XRadio.ProcessingSet(sets)
 end
 
-# Bypass FITSFiles' per-record `Vector{Float32}` allocation by streaming
-# the entire random-group data section into a single buffer. Returns a
-# NamedTuple with the same key shape as `read(io, ::Type{Random}, …)` on
-# the same file: one entry per unique PTYPE name (Vector for unique
-# names, Matrix for duplicates) plus `:data` of shape `(N, format.shape…)`.
-#
-# The original FITSFiles path allocates one `Vector{Float32}` per record
-# (~50 M allocs / 2 GiB on a 100k-record EHT file). The bulk read here
-# is a single `read!` into a `Vector{T}` of length
-# `N * (P + prod(shape))`, plus an in-place `bswap` pass.
-# The two-method split is a function barrier: the body runs with `T` concrete.
+# The random-group data section read with one `read!` into a single buffer,
+# where FITSFiles allocates a `Vector` per record. Returns a NamedTuple keyed
+# like `read(io, ::Type{Random}, …)` on the same file: one entry per PTYPE name
+# (Vector for unique names, Matrix for duplicates) plus `:data` of shape
+# `(N, format.shape…)`. The two-method split is a function barrier: the body
+# runs with `T` concrete.
 function _fast_random_read(lazy::FITSFiles.LazyStructuredData)
     T = lazy.format.type
     T === Float32 || T === Float64 ||
@@ -694,10 +680,7 @@ function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyStructuredData) where 
     rec = reshape(buf, L, N)
 
     data_field = fields[end]
-    # Permute (leng_data, N) view → (N, leng_data) materialised matrix
-    # via blocked transpose (Base's `permutedims` handles cache locality
-    # well on 2-D), then reshape to (N, shape...). Copying here decouples
-    # the data block from the PTYPE block so `buf` can be freed.
+    # The copy decouples the data block from the PTYPE block so `buf` can be freed.
     data_view = view(rec, (P + 1):L, :)
     data_perm = permutedims(data_view, (2, 1))
     data_block = reshape(data_perm, N, fmt.shape...)
@@ -771,10 +754,9 @@ function _rdate_jd_or_zero(rdate_str::AbstractString)
     end
 end
 
-# Warn if the AIPS Stokes axis (circular vs linear block) doesn't match the
-# antennas' nominal basis (POLTYA/POLTYB). For mixed arrays we just check the
-# circular vs linear block — fine-grained per-antenna mismatches are the
-# user's problem.
+# Warn if the AIPS Stokes axis (circular or linear block) doesn't match the
+# antennas' nominal basis (POLTYA/POLTYB). Only the block is compared, not
+# each antenna's feeds.
 function _check_stokes_vs_poltya(aips_codes, tab)
     stokes_is_linear = all(c -> c <= -5, aips_codes)
     stokes_is_circular = all(c -> -4 <= c <= -1, aips_codes)

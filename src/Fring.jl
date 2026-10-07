@@ -66,11 +66,10 @@ fringe is a single sharp peak far above the sidelobe forest with `pfa ≪ 1`; a
 false fringe barely clears the forest (`pfa` not small) and shows several
 comparable-height peaks. Provided by `GustavoMakieExt`.
 
-`zoom` sets the view: `true` (default) centers both axes on the peak over a span
-of a dozen main-lobe widths, a `Real` gives that span in main-lobe widths, and
-`false` shows the whole searched window. The main lobe is a few grid cells wide
-against a window sized for the clock search, so the unzoomed plane resolves the
-alias structure but not the peak itself. `pfa` and the SNR normalization come
+`zoom` sets the view: a number centers both axes on the peak over that many
+main-lobe widths (default 24), and `false` shows the whole searched window. The
+main lobe is a few grid cells wide against a window sized for the clock search,
+so the unzoomed plane resolves the alias structure but not the peak itself. `pfa` and the SNR normalization come
 from the full plane either way.
 """
 function plot_fringe_search end

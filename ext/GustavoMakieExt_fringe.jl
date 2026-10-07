@@ -28,13 +28,7 @@ end
 
 # ── plot_fringe_search: delay–rate SNR surface + peak cross-sections ───────────
 #
-# HOPS-style fringe plot: the windowed matched-filter plane as a heatmap with the
-# delay and rate cross-sections through the map peak alongside, and the refined
-# detection (SNR / delay / rate / PFA) annotated. Axis units: delay in ns, rate
-# in mHz (the FringeSearch window units are s / Hz).
-
-# Number of main-lobe widths the default (`zoom = true`) view spans.
-const _FRINGE_ZOOM_SPAN = 48.0
+# Plotted in ns and mHz; the map's own axes are in s and Hz.
 
 # Half-width of the main lobe along one axis: half the extent of the run through
 # the peak `i` that stays above half the peak value, floored at one grid step so
@@ -63,16 +57,18 @@ end
 function _peak_limits(x::AbstractVector, prof::AbstractVector, i::Integer, c::Real, span::Real)
     hw = _lobe_halfwidth(x, prof, i)
     xmin, xmax = extrema(x)
-    lo = max(min(c, x[i]) - span * hw / 2, xmin)
-    hi = min(max(c, x[i]) + span * hw / 2, xmax)
+    lo = max(min(c, x[i]) - span * hw, xmin)
+    hi = min(max(c, x[i]) + span * hw, xmax)
     return hi > lo ? (lo, hi) : nothing
 end
 
-_zoom_span(zoom::Bool) = zoom ? _FRINGE_ZOOM_SPAN : nothing
+_zoom_span(zoom::Bool) = zoom ? error(
+    "plot_fringe_search: give zoom as a span in main-lobe widths, or false for the whole window"
+) : nothing
 _zoom_span(zoom::Real) = (zoom > 0 || error("plot_fringe_search: zoom must be positive"); Float64(zoom))
 
 function Fring.plot_fringe_search(
-        parent, fsm::FringeSearchMap; zoom::Union{Bool, Real} = true,
+        parent, fsm::FringeSearchMap; zoom::Union{Bool, Real} = 24,
     )
     isempty(fsm.snr) && error("plot_fringe_search: empty map (no unflagged data)")
     det = fsm.detection
