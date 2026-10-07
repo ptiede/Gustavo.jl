@@ -40,6 +40,7 @@ end
 
     @testset "baseline products do not depend on the gauge" begin
         pinned = _fit_each_step(ps64, PinAntenna([3, 1]))
+        # The bandpass gauge enters only through a phase prior, which the default model lacks.
         for step in keys(zs)
             dphase, dlogamp = _baseline_product_difference(zs[step], pinned[step])
             @test dphase < 1.0e-6

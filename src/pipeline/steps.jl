@@ -61,7 +61,7 @@ end
 provides(::BaselineFringeFit) = :fringe
 
 """
-    Bandpass(; gauge, model = default_bandpass_terms(), smoother = JointSmoother())
+    Bandpass(; gauge = ZeroSumPhase(), model = default_bandpass_terms(), smoother = JointSmoother())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
@@ -72,15 +72,20 @@ states how its values relate within a spectral window. How it is solved
 lives on `smoother`, a pluggable [`Fring.AbstractBandpassSmoother`](@ref); by
 default [`Fring.JointSmoother`](@ref), which fits the complex visibilities
 against an explicit per-scan source coherence and so does not assume the
-calibrator is unresolved and unpolarized. `gauge` (required, an
-[`AbstractGauge`](@ref)) references the bandpass phase: the smoothers pin its
-[`gauge_anchor`](@ref) node, and `PerTrackSmoother`'s seed applies its full
-constraints. It solves one complex gain per
+calibrator is unresolved and unpolarized. `gauge`, an
+[`AbstractGauge`](@ref), references the bandpass phase: `JointSmoother`
+imposes its constraints inside every sweep, and `PerTrackSmoother` on its
+per-segment seed solves. It solves one complex gain per
 (station, feed, frequency segment), so it needs both halves of the
 model — a phase-only or amplitude-only model must name
 [`Fring.PerTrackSmoother`](@ref) instead, which runs the per-segment closure
 solves and then fits each track. The model is self-contained, so placing
 `Bandpass` before or after `BaselineFringeFit` is equally legal.
+
+Unlike the other steps, `Bandpass` has a default gauge, `ZeroSumPhase()`: the
+phase the data leave free is a spectrum common to every station, and a pin
+moves the reference station's bandpass into every other station's track and
+so into its prior, while the mean over stations biases none.
 
 The bandpass is fit on data the fringe solution has already corrected, for
 example on calibrator scans held in memory:
@@ -91,7 +96,7 @@ example on calibrator scans held in memory:
 Base.@kwdef struct Bandpass{M <: GainModel, S <: Fring.AbstractBandpassSmoother, G <: AbstractGauge} <: SolveStep
     model::M = Fring.default_bandpass_terms()
     smoother::S = Fring.JointSmoother()
-    gauge::G = _missing_gauge(Bandpass)
+    gauge::G = ZeroSumPhase()
     function Bandpass(model::M, smoother::S, gauge::G) where {M, S, G}
         _check_step_gauge(gauge, model)
         return new{M, S, G}(model, smoother, gauge)

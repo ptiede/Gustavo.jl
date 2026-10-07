@@ -107,25 +107,29 @@ Base.getindex(fs::GaugeFreedoms, i::Int) = fs.freedoms[i]
 """
     gauge_constraints(g::AbstractGauge, freedoms::GaugeFreedoms{T}) -> (C, d)
 
-The constraints `C * x == d` that fix every freedom of one system: `C` is
-`length(freedoms) × freedoms.nnodes` and `d` has one entry per row. The rows
-together must determine each freedom; a gauge that ties freedoms (the same
-value in consecutive scans, say) overrides this method.
+The constraints `C * x == d` that fix every freedom of one system: `C` is a
+`length(freedoms) × freedoms.nnodes` `AbstractMatrix` and `d` has one entry per
+row. The rows together must determine each freedom; a gauge that ties freedoms
+(the same value in consecutive scans, say) overrides this method.
 
-The default stacks [`gauge_constraint`](@ref) over the freedoms, in type `T`.
+The default stacks [`gauge_constraint`](@ref) over the freedoms into a sparse
+`C`, in type `T`; a row holds only its freedom's nodes.
 """
 function gauge_constraints(g::AbstractGauge, fs::GaugeFreedoms{T}) where {T}
-    C = zeros(T, length(fs), fs.nnodes)
+    I, J, V = Int[], Int[], T[]
     d = zeros(T, length(fs))
     for j in eachindex(fs)
         f = fs[j]
         row, value = gauge_constraint(g, f)
         for i in eachindex(f.nodes, row)
-            C[j, f.nodes[i]] = row[i]
+            iszero(row[i]) && continue
+            push!(I, j)
+            push!(J, f.nodes[i])
+            push!(V, row[i])
         end
         d[j] = value
     end
-    return C, d
+    return sparse(I, J, V, length(fs), fs.nnodes), d
 end
 
 """
@@ -301,14 +305,18 @@ function _component_choice(g::ByComponent, f::GaugeFreedom)
 end
 
 function gauge_constraints(g::ByComponent, fs::GaugeFreedoms{T}) where {T}
-    C = zeros(T, length(fs), fs.nnodes)
+    I, J, V = Int[], Int[], T[]
     d = zeros(T, length(fs))
     choice = [_component_choice(g, f) for f in fs]
     for c in unique(choice)
         idx = findall(x -> x === c, choice)
-        C[idx, :], d[idx] = _gauge_system(c, GaugeFreedoms{T}(fs.freedoms[idx], fs.nnodes))
+        Cc, d[idx] = _gauge_system(c, GaugeFreedoms{T}(fs.freedoms[idx], fs.nnodes))
+        Ic, Jc, Vc = findnz(sparse(Cc))
+        append!(I, idx[Ic])
+        append!(J, Jc)
+        append!(V, Vc)
     end
-    return C, d
+    return sparse(I, J, V, length(fs), fs.nnodes), d
 end
 
 gauge_anchor(g::ByComponent, f::GaugeFreedom) = gauge_anchor(_component_choice(g, f), f)

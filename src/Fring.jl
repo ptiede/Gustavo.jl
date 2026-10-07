@@ -29,6 +29,7 @@ import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
+using SparseArrays: sparse, nzrange, nonzeros, rowvals
 using StaticArrays: SMatrix, SVector
 
 include("Fring/search.jl")

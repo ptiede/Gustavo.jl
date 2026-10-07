@@ -18,6 +18,7 @@ using ..Gustavo: Frequency, Polarization, BaselineID, AntennaName, Feed, Ti, fee
 using LinearAlgebra
 using LinearSolve
 using Statistics: median
+using SparseArrays: sparse, findnz
 using Dates: Period, Nanosecond, DateTime, datetime2unix
 
 include("Calibration/gauge.jl")

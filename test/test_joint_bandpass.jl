@@ -281,14 +281,14 @@ function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, geom)
 end
 
 # The pinned gain slots of a joint solve's phase gauge, as `(block, (ant, feed,
-# channel, time segment))` positions.
+# channel, time segment))` positions; empty for a gauge imposed in the sweep.
 function _joint_pins(geom, blocks, results, tseg, gauge)
     nant = length(geom.stations)
     fseg, _ = FP._station_freq_segments(blocks, nant)
     data = (; ends = FP._cell_nodes(first(results).rl, geom.stations, PerFeed()))
     layout = (; loc = FP._block_locations(blocks, nant), tseg, fseg)
     gains = [FP._block_gains(b, geom, ComplexF64) for b in blocks]
-    FP._joint_bandpass_pins!(gains, data, layout, blocks, gauge)
+    FP._joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     return Set((k, Tuple(I)) for (k, st) in pairs(gains) for I in findall(parent(st.pinned)))
 end
 
@@ -891,4 +891,98 @@ end
         tstep = log(abs(gtrue[a, f, 1, end])) - log(abs(gtrue[a, f, 1, 1]))
         @test Lstep ≈ tstep atol = 0.05
     end
+end
+
+# ── A gauge imposed inside the sweep ─────────────────────────────────────────
+#
+# The free direction of the joint solve is a phase spectrum common to every
+# station, and a phase prior along frequency is not invariant to it: under a
+# pin, the reference's bandpass lands, sign-flipped, in every other station's
+# track. `ZeroSumPhase` is imposed as a constraint on every sweep's fit.
+
+@testset "JointSmoother: a zero-sum gauge is a constraint in the sweep" begin
+    nant, nchan = 6, 16
+    anames = ["A$i" for i in 1:nant]
+    geom = _seg_geometry(nchan; nant)
+    comp(; prior = nothing) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
+    setup(l) = (;
+        layout = l,
+        paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)),
+    )
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    feeds = [(1, 1), (2, 2)]
+
+    # Smooth phase bandpasses, except the reference station's, which has
+    # strong channel-to-channel structure.
+    rng = MersenneTwister(286)
+    ν = range(0, 1; length = nchan)
+    gtrue = ones(ComplexF64, nant, 2, 1, nchan)
+    for a in 1:nant, f in 1:2
+        φ = a == 1 ? 0.8 .* randn(rng, nchan) : 0.5 .* sin.(2π .* (ν .+ rand(rng)))
+        gtrue[a, f, 1, :] .= exp.(complex.(0.1 .* randn(rng, nchan), φ))
+    end
+    Strue = [(0.5 + rand(rng)) * cis(2pi * rand(rng)) for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(feeds)]
+    results = _joint_scan_accumulators(gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom)
+
+    layout(prior = nothing) =
+        CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp(; prior)), logamp = (; bandpass = comp())), anames, geom)
+    # Converged within the default 200 sweeps: no warning.
+    function solve(gauge; prior = nothing)
+        l = layout(prior)
+        θ = zeros(l.nθ)
+        pb, ab = FP.bandpass_blocks(setup(l), θ, :phase), FP.bandpass_blocks(setup(l), θ, :logamp)
+        @test_logs FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, tolerance = 1.0e-10)
+        φ = only(pb).θ
+        return [φ[1, f, c, 1, a] for a in 1:nant, f in 1:2, c in 1:nchan]
+    end
+    # The largest and rms phase error of every baseline product against truth,
+    # each referenced to its own circular band mean, the constant the source
+    # coherence absorbs.
+    function product_error(φ)
+        worst, ss, n = 0.0, 0.0, 0
+        for (a, b) in bl_pairs, f in 1:2
+            e = [φ[a, f, c] - φ[b, f, c] - angle(gtrue[a, f, 1, c] * conj(gtrue[b, f, 1, c])) for c in 1:nchan]
+            e = rem2pi.(e .- angle(sum(cis, e)), RoundNearest)
+            worst = max(worst, maximum(abs, e))
+            ss += sum(abs2, e)
+            n += nchan
+        end
+        return worst, sqrt(ss / n)
+    end
+    # Each written track is referenced to its own circular band mean, so the
+    # zero station mean of every cell reads as one constant across the band.
+    station_mean_spread(φ) = maximum(f -> (m = vec(sum(φ[:, f, :]; dims = 1)) ./ nant; maximum(m) - minimum(m)), 1:2)
+
+    @testset "without a prior the gauge leaves the products unchanged" begin
+        zs, pin = solve(ZeroSumPhase()), solve(PinAntenna(1))
+        @test station_mean_spread(zs) < 1.0e-8
+        @test product_error(zs)[1] < 1.0e-8
+        @test product_error(pin)[1] < 1.0e-8
+    end
+
+    @testset "under a prior the zero sum spreads the reference's structure" begin
+        # A second-order walk of σ = 1 rad per channel (1 MHz), as rad/Hz^(3/2).
+        prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * 1.0e6^3)))
+        zs, pin = solve(ZeroSumPhase(); prior), solve(PinAntenna(1); prior)
+        @test station_mean_spread(zs) < 1.0e-8
+        # Pinned, every track carries the reference's bandpass and its prior
+        # smooths it away: rms error 0.20 rad, worst 0.87, against 0.10 and 0.41.
+        worst_zs, rms_zs = product_error(zs)
+        worst_pin, rms_pin = product_error(pin)
+        @test rms_zs < 0.6 * rms_pin
+        @test worst_zs < 0.6 * worst_pin
+
+        # `ByComponent` maps the bandpass component to its choice.
+        bc(choice, default) = ByComponent((; bandpass = choice); default)
+        @test solve(bc(ZeroSumPhase(), PinAntenna(1)); prior) == zs
+        @test solve(bc(PinAntenna(1), ZeroSumPhase()); prior) == pin
+    end
+
+    @testset "only a pin marks pinned slots" begin
+        blocks = FP.bandpass_blocks(setup(layout()), zeros(layout().nθ), :phase)
+        @test isempty(_joint_pins(geom, blocks, results, fill(1, nant, 4), ZeroSumPhase()))
+        @test length(_joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1))) == 2 * nchan
+    end
+
+    @test Bandpass().gauge === ZeroSumPhase()
 end

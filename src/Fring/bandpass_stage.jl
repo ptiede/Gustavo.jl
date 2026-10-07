@@ -648,9 +648,15 @@ _segment_levels(level, seg) = [level[p] for p in seg.piece_of]
 # instead; see that constant.
 #
 # `status` receives one `_BP_TRACK_*` code per piece.
+#
+# `constraint`, a pair `(yc, wc)` over the track's segments, adds a Gaussian
+# pseudo-observation of each segment to the pieces that carry data. The
+# hyperparameters come from the data alone; the levels and the track are fit to
+# both.
 function _fit_track!(
         track, w, x, pieces, prior;
         level = nothing, nlevel::Integer = 0, unwrap::Bool = false, status = nothing,
+        constraint = nothing,
     )
     T = eltype(track)
     ys = [T[track[c] for c in p] for p in pieces]
@@ -675,6 +681,7 @@ function _fit_track!(
         return prior, levels
     end
     resolved = _estimate_hypers(prior, ys, ws, xs; level)
+    isnothing(constraint) || _merge_observations!(ys, ws, pieces, constraint...)
     isnothing(level) || (levels .= _estimate_levels(resolved, ys, ws, xs, level, nlevel))
     for (j, p) in pairs(pieces)
         L = isnothing(level) ? zero(T) : levels[level[j]]
@@ -685,6 +692,26 @@ function _fit_track!(
         isnothing(status) || (status[j] = declined[j] ? _BP_TRACK_DECLINED : _band_track_status(fitted))
     end
     return resolved, levels
+end
+
+# Combine each segment's observation `(ys[j][i], ws[j][i])` with a second one
+# `(yc[c], wc[c])` of the same segment `c = pieces[j][i]` into their
+# weighted mean and summed weight, in every piece that carries data.
+function _merge_observations!(ys, ws, pieces, yc, wc)
+    for (j, p) in pairs(pieces)
+        any(k -> _shape_usable(ys[j][k], ws[j][k]), eachindex(ys[j], ws[j])) || continue
+        for (i, c) in pairs(p)
+            wc[c] > 0 || continue
+            if _shape_usable(ys[j][i], ws[j][i])
+                W = ws[j][i] + wc[c]
+                ys[j][i] = (ws[j][i] * ys[j][i] + wc[c] * yc[c]) / W
+                ws[j][i] = W
+            else
+                ys[j][i], ws[j][i] = yc[c], wc[c]
+            end
+        end
+    end
+    return ys, ws
 end
 
 # Shift each unwrapped phase piece by the multiple of 2π that brings its weighted
@@ -1171,12 +1198,17 @@ function _joint_bandpass_graph(data, layout, ids)
 end
 
 """
-    _joint_bandpass_pins!(gains, data, layout, blocks, gauge) -> gains
+    _joint_bandpass_gauge!(gains, data, layout, blocks, gauge) -> Union{Nothing, NamedTuple}
 
-Mark one reference slot per connected component of the joint-bandpass graph in
-the `pinned` layer of `gains` — mirrors `_solve_observable!`'s pin selection in
-`stationize.jl`. The pinned slot's phase is held at zero; its amplitude is
-solved like any other slot's.
+Impose `gauge` on the phase of a joint bandpass solve: one
+[`GaugeFreedom`](@ref) per connected component of the joint-bandpass graph,
+and the constraints `C·φ = d` that [`gauge_constraints`](@ref) gives over
+every gain slot's phase `φ`, numbered by `_gain_slot_ids`. When every row
+holds a single slot at zero, as `PinAntenna`'s do, those slots are marked in
+the `pinned` layer of `gains`, held at zero phase, and the result is
+`nothing`. Any other gauge is imposed inside the sweep by an augmented
+Lagrangian, whose state this returns (see `_joint_gauge_state`). Either way a
+constrained slot's amplitude is solved like any other slot's.
 
 Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
 shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
@@ -1184,12 +1216,16 @@ correlation internal to that set: the phase of `c` cancels between the two
 conjugated factors. The sets on which it cancels everywhere are exactly the
 components above, so the phase carries one unobservable constant per component
 and needs one constraint there — no more. A station-uniform segmentation splits
-the graph along the array-wide (frequency segment, time segment) cells and
-recovers one pin per cell, which together zero the reference station's whole
-track; a model in which one station breaks mid-track keeps the whole track in
-one component, because the stations that hold one gain over it bridge the
-broken station's two segments, and the relative phase across that break is then
-measured rather than gauged away.
+the graph along the array-wide (frequency segment, time segment) cells, so the
+free direction is a phase spectrum common to every station, and a pin per cell
+zeroes the reference station's whole track; a model in which one station
+breaks mid-track keeps the whole track in one component, because the stations
+that hold one gain over it bridge the broken station's two segments, and the
+relative phase across that break is then measured rather than gauged away.
+
+The per-station priors along frequency are not invariant to that common
+spectrum, so the gauge changes the solution and is imposed during the fit
+rather than by shifting a fitted result.
 
 The same bridging on the frequency axis makes a pin PARTIAL: where a station
 holds one gain across cells the others split, those cells lie in one component,
@@ -1205,22 +1241,103 @@ structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 over the band eliminates `ls` and leaves the full-rank signless-Laplacian
 system) and biasing every other station through the inconsistency.
 """
-function _joint_bandpass_pins!(gains, data, layout, blocks, gauge)
+function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
+    T = real(eltype(first(gains).g))
     ids = _gain_slot_ids(gains)
     compid, ncomp, deg = _joint_bandpass_graph(data, layout, ids)
     slot = [(k, I) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
-    for c in 1:ncomp
+    freedoms = map(1:ncomp) do c
         cn = findall(==(c), compid)
-        f = GaugeFreedom(;
+        GaugeFreedom(;
             nodes = cn, station = [blocks[slot[n][1]].stations[slot[n][2][1]] for n in cn],
             feed = [slot[n][2][2] for n in cn], scan = zeros(Int, length(cn)),
             component = [blocks[slot[n][1]].plan.path for n in cn], observable = fill(:phase, length(cn)),
-            direction = ones(length(cn)), weight = deg[cn],
+            direction = ones(T, length(cn)), weight = deg[cn],
         )
-        k, I = slot[gauge_anchor(gauge, f)]
-        gains[k].pinned[I] = true
     end
-    return gains
+    C, d = _gauge_system(gauge, GaugeFreedoms{T}(freedoms, length(compid)))
+    Cs = sparse(C)
+    rows = [Tuple{Int, T}[] for _ in axes(Cs, 1)]
+    for n in axes(Cs, 2), i in nzrange(Cs, n)
+        iszero(nonzeros(Cs)[i]) || push!(rows[rowvals(Cs)[i]], (n, nonzeros(Cs)[i]))
+    end
+    if all(j -> length(rows[j]) == 1 && iszero(d[j]), eachindex(rows, d))
+        for row in rows
+            k, I = slot[first(only(row))]
+            gains[k].pinned[I] = true
+        end
+        return nothing
+    end
+    return _joint_gauge_state(rows, d, ids, length(compid))
+end
+
+# The augmented-Lagrangian state of the constraints `C·φ = d` over the slot
+# phases: `rows[j]` the `(slot, coefficient)` pairs of row `j`, `slot_rows[n]`
+# the `(row, coefficient)` pairs of slot `n`, multipliers `λ`, `Cφ` the current
+# `C·φ`, the penalty `ρ[]` (zero until `_advance_joint_gauge!` sets it from
+# `weights`, the data weights the first sweep collects), and `ids` the slot
+# numbering.
+function _joint_gauge_state(rows, d::AbstractVector{T}, ids, nslots) where {T}
+    slot_rows = [Tuple{Int, T}[] for _ in 1:nslots]
+    for (j, row) in pairs(rows), (n, c) in row
+        push!(slot_rows[n], (j, c))
+    end
+    return (;
+        rows, slot_rows, d, ids, λ = zeros(T, length(d)), Cφ = zeros(T, length(d)),
+        ρ = Ref(zero(T)), weights = T[],
+    )
+end
+
+# The constraint terms of slot `n` at phase `φn` as one Gaussian
+# pseudo-observation `(value, weight)` of its phase, the others held fixed: row
+# `j` contributes `(ρ/2)(C_j·φ − d_j + λ_j/ρ)²`, a weight `ρ·C_jn²` at the value
+# that zeroes it. `(NaN, 0)` for a slot no row holds, or before `ρ` is set.
+function _joint_gauge_observation(gs, n, φn)
+    T = eltype(gs.d)
+    ρ = gs.ρ[]
+    num, den = zero(T), zero(T)
+    iszero(ρ) && return T(NaN), den
+    for (j, c) in gs.slot_rows[n]
+        y = (gs.d[j] - gs.λ[j] / ρ - (gs.Cφ[j] - c * φn)) / c
+        wj = ρ * c^2
+        num += wj * y
+        den += wj
+    end
+    return iszero(den) ? (T(NaN), den) : (num / den, den)
+end
+
+# Move `Cφ` by slot `n`'s phase change `δ`.
+function _shift_joint_gauge!(gs, n, δ)
+    for (j, c) in gs.slot_rows[n]
+        gs.Cφ[j] += c * δ
+    end
+    return gs
+end
+
+# Recompute `Cφ` from the gains' phases and return the largest constraint
+# residual `|C·φ − d|`. After the first sweep, which runs without the
+# constraints, `ρ` is set so a row's pseudo-observation weight `ρ·C_jn²` equals
+# the median data weight per slot, comparable pulls from the data and the
+# gauge; after every later sweep the multipliers step by `ρ·(C·φ − d)`.
+function _advance_joint_gauge!(gs, gains; seed::Bool)
+    T = eltype(gs.d)
+    for (j, row) in pairs(gs.rows)
+        gs.Cφ[j] = sum(c * _slot_phase(gains, gs.ids, n) for (n, c) in row; init = zero(T))
+    end
+    if seed
+        coefs = [c^2 for row in gs.rows for (_, c) in row]
+        gs.ρ[] = (isempty(gs.weights) ? one(T) : median(gs.weights)) / median(coefs)
+    else
+        gs.λ .+= gs.ρ[] .* (gs.Cφ .- gs.d)
+    end
+    return maximum(j -> abs(gs.Cφ[j] - gs.d[j]), eachindex(gs.Cφ, gs.d); init = zero(T))
+end
+
+# The stored phase of slot `n`.
+function _slot_phase(gains, ids, n)
+    for (k, idk) in pairs(ids)
+        n <= last(idk) && return gains[k].φ[n - first(idk) + 1]
+    end
 end
 
 # Closed-form per-(scan, station pair, feed pair) solve of the source coherence
@@ -1283,8 +1400,13 @@ end
 # `(; x, pieces, prior, level, nlevel)` and `levels[a]` its fitted levels, each
 # over `(Feed, level segment, Ti)` or `nothing`. The status and prior arrays,
 # when given, hold one array per block.
+#
+# `gauge_state`, the augmented-Lagrangian state of `_joint_bandpass_gauge!` or
+# `nothing` for a pinned gauge, adds each slot's constraint terms to its phase
+# track as a pseudo-observation (`_joint_gauge_observation`); the first sweep
+# runs without them and collects the data weights that set the penalty.
 function _update_station_gains!(
-        gains, data, layout; fits, levels, seed::Bool,
+        gains, data, layout; fits, levels, seed::Bool, gauge_state = nothing,
         phase_status = nothing, amp_status = nothing, phase_priors = nothing, amp_priors = nothing,
     )
     (; r, w, S) = data
@@ -1298,6 +1420,8 @@ function _update_station_gains!(
     wf = Vector{T}(undef, nfsmax)
     la = Vector{T}(undef, nfsmax)
     φ̃ = Vector{T}(undef, nfsmax)
+    yg = Vector{T}(undef, nfsmax)
+    wg = Vector{T}(undef, nfsmax)
     for feed in axes(touching, 2), ant in eachindex(loc)
         k, ai = loc[ant]
         iszero(k) && continue
@@ -1310,9 +1434,9 @@ function _update_station_gains!(
             # The gauge fixes this node's phase in the frequency segments it pins —
             # every one of them where the array leaves this track no free structure,
             # a single one where a coarser station ties the band into one mode. The
-            # amplitude is solved like any other node's (see `_joint_bandpass_pins!`).
+            # amplitude is solved like any other node's (see `_joint_bandpass_gauge!`).
             pins = view(pinned, ai, feed, :, ts)
-            for buf in (num, den, ĝ, wf, la, φ̃)
+            for buf in (num, den, ĝ, wf, la, φ̃, yg, wg)
                 resize!(buf, nfs)
             end
             fill!(num, zero(C))
@@ -1374,9 +1498,19 @@ function _update_station_gains!(
                 fill!(φ̃, zero(T))
                 isnothing(levels[ant].phase) || (levels[ant].phase[feed, :, ts] .= zero(T))
             else
+                constraint = if isnothing(gauge_state)
+                    nothing
+                else
+                    seed && append!(gauge_state.weights, (wf[fs] for fs in 1:nfs if wf[fs] > 0))
+                    for fs in 1:nfs
+                        n = gauge_state.ids[k][ai, feed, fs, ts]
+                        yg[fs], wg[fs] = _joint_gauge_observation(gauge_state, n, φ[ai, feed, fs, ts])
+                    end
+                    (yg, wg)
+                end
                 phase_prior, phase_levels = _fit_track!(
                     φ̃, wf, fit.phase.x, fit.phase.pieces, fit.phase.prior;
-                    fit.phase.level, fit.phase.nlevel, unwrap = seed, status = pst,
+                    fit.phase.level, fit.phase.nlevel, unwrap = seed, status = pst, constraint,
                 )
                 isnothing(phase_priors) || (phase_priors[k][ai, feed, ts] = phase_prior)
                 isnothing(phase_levels) || (levels[ant].phase[feed, :, ts] .= phase_levels)
@@ -1390,6 +1524,8 @@ function _update_station_gains!(
             end
             for fs in 1:nfs
                 (isfinite(la[fs]) && isfinite(φ̃[fs])) || continue
+                isnothing(gauge_state) ||
+                    _shift_joint_gauge!(gauge_state, gauge_state.ids[k][ai, feed, fs, ts], φ̃[fs] - φ[ai, feed, fs, ts])
                 g[ai, feed, fs, ts] = exp(C(la[fs], φ̃[fs]))
                 φ[ai, feed, fs, ts] = φ̃[fs]
                 touched[ai, feed, fs, ts] = true
@@ -1402,7 +1538,9 @@ end
 # Move each (station, feed, time segment) track's band-mean log-amplitude and
 # phase into `S`, which absorbs any band-constant station factor: the data leave
 # that level free, and under a prior the sweep would otherwise drift along it.
-# A pinned track keeps its phase; levels move with their track.
+# A pinned track keeps its phase; levels move with their track. Under a gauge
+# imposed in the sweep the removal can move `C·φ`, and `_advance_joint_gauge!`
+# measures the constraint residual after it.
 function _remove_band_levels!(gains, levels, layout)
     for (a, (k, ai)) in pairs(layout.loc)
         iszero(k) && continue
@@ -1517,8 +1655,9 @@ and a log-amplitude shape on one frequency and one time segmentation per
 station; their priors and levels may differ.
 
 Sweeps stop once no gain changes by more than `tolerance` relative to its
-magnitude, and warn if `max_iterations` sweeps pass first: an unconverged
-solve still depends on its starting point, which the gauge sets. The default
+magnitude and the gauge's constraints hold to within `tolerance` radians, and
+warn if `max_iterations` sweeps pass first: an unconverged solve still depends
+on its starting point. The default
 `tolerance = nothing` is `max(1e-8, 16·eps(T))` for the data's real type `T`,
 the smallest a `Float32` solve can resolve.
 """
@@ -1634,10 +1773,11 @@ model-compile time; the throw here guards direct callers.
 Scaling a set of stations by one phase leaves every visibility internal to that
 set unchanged, so the gauge fixes one constant per such set. The sets are the
 connected components of the (station, feed, frequency segment, time segment)
-graph the correlations span, and one node of each is pinned
-([`_joint_bandpass_pins!`](@ref)). Where stations' frequency segmentations
-differ, a pin can hold part of a track; a phase prior, which relates the
-track's segments, then throws rather than fit around it.
+graph the correlations span, and `gauge` gives one constraint per component
+([`_joint_bandpass_gauge!`](@ref)): a pin holds its node at zero, and any other
+constraint is imposed in every sweep's fit. Where stations' frequency
+segmentations differ, a pin can hold part of a track; a phase prior, which
+relates the track's segments, then throws rather than fit around it.
 
 `scans` is the per-scan `(rl, wl)` accumulator pairs from
 `accumulate_bandpass` — not summed across scans, since the source term
@@ -1649,7 +1789,7 @@ each distinct `tseg[a, :]` value, in that station's own segment numbering, and a
 station whose entry is `0` is left out of the solve. Every station shares one
 segment when it is omitted. `scans` must hold the scans `tseg`'s columns
 describe, in the same order. The phase gauge acts on the graph these scans
-span, pinning one node per connected component, so a break at one station is
+span, one constraint per connected component, so a break at one station is
 measured against the stations that hold one gain across it rather than gauged
 away. Solved phases are comparable only WITHIN a component: where that graph
 splits — disjoint sub-arrays, or every station segmented at the same epoch —
@@ -1657,7 +1797,8 @@ each piece carries its own arbitrary constant, and a per-station change read
 across the split is that constant plus the change.
 
 Convergence is judged on the largest relative per-iteration gain change over
-every (station, feed, segment) node solved here, not a tracked χ² (which would
+every (station, feed, segment) node solved here, together with the largest
+gauge-constraint residual, not a tracked χ² (which would
 need a per-channel power accumulator this stage does not keep). The scans handed
 to one call are a connected piece of the coupling graph, so this is one
 criterion over one coupled problem: nodes that share no data are solved by
@@ -1714,7 +1855,7 @@ function solve_joint_bandpass!(
         touching = _joint_bandpass_touching(ends, nant, geom.nfeed),
     )
     gains = [_block_gains(b, geom, eltype(r)) for b in phase_blocks]
-    _joint_bandpass_pins!(gains, data, layout, phase_blocks, gauge)
+    gauge_state = _joint_bandpass_gauge!(gains, data, layout, phase_blocks, gauge)
 
     segs = [_shape_segments(b.plan, geom) for b in phase_blocks]
     phase_level = _station_levels(phase_level_blocks, segs, loc, geom, θ, real(eltype(r)))
@@ -1736,20 +1877,23 @@ function solve_joint_bandpass!(
     T = real(eltype(r))
     tolerance = something(tolerance, max(1.0e-8, 16 * eps(T)))
     maxrel = convert(T, Inf)
+    maxres = zero(T)
     previous = [copy(gk.g) for gk in gains]
     for iter in 1:max_iterations
         foreach((dst, gk) -> copyto!(dst, gk.g), previous, gains)
         _update_station_gains!(
             gains, data, layout;
-            fits, levels, seed = iter == 1, phase_status, amp_status, phase_priors, amp_priors,
+            fits, levels, seed = iter == 1, gauge_state, phase_status, amp_status, phase_priors, amp_priors,
         )
         _remove_band_levels!(gains, levels, layout)
         maxrel = _largest_relative_change(gains, previous)
+        isnothing(gauge_state) || (maxres = _advance_joint_gauge!(gauge_state, gains; seed = iter == 1))
         _update_source_coherence!(data, gains, layout)
-        maxrel < tolerance && break
+        maxrel < tolerance && maxres < tolerance && break
     end
-    maxrel < tolerance || @warn "the joint bandpass solve did not converge in $max_iterations sweeps: " *
-        "the largest relative gain change is $maxrel against a tolerance of $tolerance; " *
+    maxrel < tolerance && maxres < tolerance || @warn "the joint bandpass solve did not converge in " *
+        "$max_iterations sweeps: the largest relative gain change is $maxrel and the largest gauge " *
+        "constraint residual $maxres rad, against a tolerance of $tolerance; " *
         "raise `JointSmoother(; max_iterations)`"
 
     level_writers = [

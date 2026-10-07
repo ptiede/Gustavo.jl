@@ -527,6 +527,8 @@ function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol
     end
     A = _incidence(rows, nnodes, T)
     C, d = _gauge_system(gauge, GaugeFreedoms{T}(freedoms, nnodes))
+    # The null-space test and the constrained factorization work on dense rows.
+    C = Matrix(C)
     C, d = _pin_leftover_freedoms(C, d, A, rows, nodew, gauge)
     solve_system = try
         ConstrainedWLS(A, w, C, d)
