@@ -198,21 +198,22 @@ function _estimate_map!(out, prior::OUPrior, y, w, x)
 end
 
 """
-    _prior_energy(prior, y, x) -> E
+    _prior_energy(prior, y, x; gradient = nothing) -> E
 
 `−log` of the resolved `prior`'s density at the track `y` over `x`, less a
 normalization that depends only on `prior` and `x` (see `_exact_energy`).
-Non-finite entries are unobserved; `nothing` contributes zero.
+Non-finite entries are unobserved; `nothing` contributes zero. `gradient`, when
+given, receives the gradient in `y`, zero at unobserved entries.
 """
-_prior_energy(::Nothing, y, x) = 0.0
+_prior_energy(::Nothing, y, x; gradient = nothing) = (isnothing(gradient) || fill!(gradient, 0); 0.0)
 
-function _prior_energy(prior::RandomWalkPrior, y, x)
+function _prior_energy(prior::RandomWalkPrior, y, x; gradient = nothing)
     _, u, h = _random_walk_problem(y, ones(length(y)), x)
-    return _exact_energy(_random_walk_model(prior.order, prior.σ, prior.init, h, Float64), y, u)
+    return _exact_energy(_random_walk_model(prior.order, prior.σ, prior.init, h, Float64), y, u; gradient)
 end
 
-_prior_energy(prior::OUPrior, y, x) =
-    _exact_energy(OUModel(Float64(prior.scale), Float64(prior.σ)^2), y, Float64.(x))
+_prior_energy(prior::OUPrior, y, x; gradient = nothing) =
+    _exact_energy(OUModel(Float64(prior.scale), Float64(prior.σ)^2), y, Float64.(x); gradient)
 
 # `½·Σ ν²/s` over the innovations of `model`'s filter with `y` observed exactly:
 # the negative log density of `y` less its normalization, which the innovation
@@ -220,7 +221,10 @@ _prior_energy(prior::OUPrior, y, x) =
 # first `statedim` observations fix its state and are left out, so a random walk
 # of order `m` does not see a polynomial of degree below `m`; with fewer
 # observations than that the energy is zero.
-function _exact_energy(model, y, u)
+#
+# The innovations are affine in `y` through gains that do not depend on it, so
+# `gradient`, when given, is filled by one reverse pass over those gains.
+function _exact_energy(model, y, u; gradient = nothing)
     D = statedim(model)
     start = initial(model, Float64)
     flat = isnothing(start)
@@ -230,8 +234,11 @@ function _exact_energy(model, y, u)
     E = 0.0
     seen = 0
     prev = 0
+    record = !isnothing(gradient)
+    steps = Tuple{Int, typeof(P), typeof(x), Float64}[]
     for k in eachindex(y, u)
         isfinite(y[k]) || continue
+        A = one(P)
         if prev > 0
             A, Q = transition(model, u[k] - u[prev], Float64)
             x = A * x
@@ -240,11 +247,22 @@ function _exact_energy(model, y, u)
         ν = y[k] - x[1]
         s = P[1, 1]
         seen += 1
-        (flat && seen <= D) || (E += ν^2 / (2s))
+        counted = !(flat && seen <= D)
+        counted && (E += ν^2 / (2s))
         K = P[:, 1] / s
         x = x + K * ν
         P = _symmetric(P - K * P[1, :]')
+        record && push!(steps, (k, A, K, counted ? ν / s : 0.0))
         prev = k
+    end
+    record || return E
+    fill!(gradient, 0)
+    # `x⁺ = x⁻ + K·ν` with `ν = y_k − x⁻[1]` and `x⁻ = A·x⁺` of the previous step.
+    x̄ = zero(x)
+    for (k, A, K, ν̄) in Iterators.reverse(steps)
+        Kx̄ = dot(K, x̄)
+        gradient[k] = ν̄ + Kx̄
+        x̄ = A' * Base.setindex(x̄, x̄[1] - Kx̄ - ν̄, 1)
     end
     return E
 end

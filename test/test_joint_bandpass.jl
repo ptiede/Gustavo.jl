@@ -893,14 +893,14 @@ end
     end
 end
 
-# ── A gauge imposed inside the sweep ─────────────────────────────────────────
+# ── A gauge imposed inside the solve ─────────────────────────────────────────
 #
 # The free direction of the joint solve is a phase spectrum common to every
 # station, and a phase prior along frequency is not invariant to it: under a
 # pin, the reference's bandpass lands, sign-flipped, in every other station's
-# track. `ZeroSumPhase` is imposed as a constraint on every sweep's fit.
+# track. `ZeroSumPhase` is imposed as a constraint on every joint step.
 
-@testset "JointSmoother: a zero-sum gauge is a constraint in the sweep" begin
+@testset "JointSmoother: a zero-sum gauge is a constraint on the solve" begin
     nant, nchan = 6, 16
     anames = ["A$i" for i in 1:nant]
     geom = _seg_geometry(nchan; nant)
@@ -1051,15 +1051,27 @@ end
         @test rl_error([φ[1, f, c, 1, a] for a in 1:nant, f in 1:2, c in 1:nchan]) < 1.0e-8
     end
 
-    # Under a phase prior the step is the MAP step, and a pinned solve converges
-    # as fast; a sweep alone takes tens of thousands of sweeps here.
+    # Under a prior the step is the MAP step under the gauge, with any level
+    # profiled out, and converges as fast; a sweep alone takes tens of thousands
+    # of sweeps here.
     rw2 = CAL.RandomWalkPrior(; order = 2, σ = 0.3 * sqrt(3 / (2 * 1.0e6^3)))
+    ou = CAL.OUPrior(; scale = 3.0e6, σ = 0.5)
     cp = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = rw2)
-    lp = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = cp), logamp = (; bandpass = cp)), anames, geom)
-    setup_p = (; layout = lp, paths = (; phase = FP._bandpass_paths(lp.plantree, :phase), logamp = FP._bandpass_paths(lp.plantree, :logamp)))
-    θ = zeros(lp.nθ)
-    pb, ab = FP.bandpass_blocks(setup_p, θ, :phase), FP.bandpass_blocks(setup_p, θ, :logamp)
-    @test_logs FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), max_iterations = 60, tolerance = 1.0e-10)
+    leveled = (;
+        level = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), Feed = PerFeed()),
+        shape = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = ou),
+    )
+    @testset "$name, $gauge" for (name, obs) in (("RW2", (; bandpass = cp)), ("level + OU", leveled)), gauge in (PinAntenna(1), ZeroSumPhase())
+        lp = CAL.plan_parameters(CAL.GainModel(; phase = obs, logamp = obs), anames, geom)
+        setup_p = (; layout = lp, paths = (; phase = FP._bandpass_paths(lp.plantree, :phase), logamp = FP._bandpass_paths(lp.plantree, :logamp)))
+        θ = zeros(lp.nθ)
+        pb, ab = FP.bandpass_blocks(setup_p, θ, :phase), FP.bandpass_blocks(setup_p, θ, :logamp)
+        plb, alb = FP.bandpass_level_blocks(setup_p, θ, :phase), FP.bandpass_level_blocks(setup_p, θ, :logamp)
+        @test_logs FP.solve_joint_bandpass!(
+            θ, results, geom, pb, ab; phase_level_blocks = plb, amp_level_blocks = alb,
+            gauge, max_iterations = 30, tolerance = 1.0e-10,
+        )
+    end
 end
 
 # ── Band-referenced products and declined tracks ─────────────────────────────

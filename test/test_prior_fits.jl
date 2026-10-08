@@ -304,3 +304,55 @@ end
     y1 = ys[1] .- only(L)
     @test FRpf._estimate_map(prior, y1, ws[1], xs[1]) ≈ _dense_ou_map(y1, ws[1], xs[1], τ, σ2) rtol = 1.0e-8
 end
+
+@testset "prior energy and its gradient" begin
+    rng = MersenneTwister(315)
+    n = 20
+    x = sort!(1.0e9 .+ 1.0e6 .* (1:n) .+ 3.0e5 .* rand(rng, n))
+    y = randn(rng, n)
+    y[[4, 11]] .= NaN
+    o = findall(isfinite, y)
+
+    # OU: the negative log density, an unobserved entry marginalized out.
+    τ, σ = 3.0e6, 0.5
+    ou = CALpf.OUPrior(; scale = τ, σ)
+    @test FRpf._prior_energy(ou, y, x) ≈ y[o]' * (_ou_cov(x[o], τ, σ^2) \ y[o]) / 2 rtol = 1.0e-10
+
+    priors = (
+        CALpf.RandomWalkPrior(; order = 1, σ = 1.0e-3),
+        CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-8),
+        CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-8, init = MvNormal([0.1, 0.0], [1.0 0; 0 1.0e-12])),
+        ou,
+    )
+    for prior in priors
+        g = fill(NaN, n)
+        @test FRpf._prior_energy(prior, y, x; gradient = g) == FRpf._prior_energy(prior, y, x)
+        @test all(iszero, g[[4, 11]])
+        h = 1.0e-6
+        fd = map(o) do k
+            yp, ym = copy(y), copy(y)
+            yp[k] += h
+            ym[k] -= h
+            (FRpf._prior_energy(prior, yp, x) - FRpf._prior_energy(prior, ym, x)) / 2h
+        end
+        @test g[o] ≈ fd rtol = 1.0e-7
+    end
+
+    # A level beside the prior is profiled out: the energy is the minimum over
+    # one level per level group, and its gradient is the gradient there.
+    pieces = [1:8, 9:14, 15:20]
+    sys = (; prior = ou, pieces, x, level = [1, 1, 2], nlevel = 2)
+    yl = y .+ [fill(0.7, 14); fill(-0.4, 6)]
+    energy(L) = sum(FRpf._prior_energy(ou, yl[p] .- L[l], x[p]) for (p, l) in zip(pieces, sys.level))
+    grid = [(a, b) for a in range(0.0, 1.4; length = 141), b in range(-1.1, 0.3; length = 141)]
+    Lbest = argmin(L -> energy(collect(L)), grid)
+    g = zeros(n)
+    E = FRpf._track_energy(sys, yl; gradient = g)
+    @test E <= energy(collect(Lbest)) + 1.0e-12
+    @test E ≈ energy(collect(Lbest)) rtol = 1.0e-3
+    # The energy's slope along each level vanishes at the optimum.
+    slope = map(1:2) do l
+        sum(sum(g[p]) for (p, lj) in zip(pieces, sys.level) if lj == l)
+    end
+    @test maximum(abs, slope) < 1.0e-8 * maximum(abs, g)
+end
