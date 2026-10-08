@@ -634,6 +634,33 @@ end
     @test isequal(FP._seed_amp_tracks(rp, wp, stations, fsegs, segs), (amp, aprec))
 end
 
+@testset "PerTrackSmoother: pooled scans add their signal power" begin
+    rng = MersenneTwister(312)
+    pairs_ = [("A1", "A2"), ("A1", "A3"), ("A2", "A3")]
+    ends = [(1, 2), (1, 3), (2, 3)]
+    freqs = collect(2.3e11 .+ (0:7) .* 1.0e6)
+    ax = (FP._station_pair_dim(pairs_), FP.FeedPair([(1, 1)]), Frequency(freqs))
+    g = exp.(complex.(0.2 .* randn(rng, 3, 8), 0.5 .* randn(rng, 3, 8)))
+    # One strong scan and one twenty times weaker, each with its own source term.
+    S = [cis(2π * rand(rng)) * s for s in (1.0, 0.05), _ in 1:3]
+    results = map(1:2) do si
+        rl, wl = zeros(ComplexF64, ax), zeros(ax)
+        for (bi, (a, b)) in pairs(ends), c in 1:8
+            wl[bi, 1, c] = 2.0
+            rl[bi, 1, c] = 2.0 * g[a, c] * S[si, bi] * conj(g[b, c])
+        end
+        (; rl, wl)
+    end
+    rbar, wbar = FP._pool_scans(results, 1:2, Float64)
+    snr2(r, w) = abs2.(r) ./ w
+    @test snr2(rbar, wbar) ≈ snr2(results[1].rl, results[1].wl) .+ snr2(results[2].rl, results[2].wl)
+    for (bi, (a, b)) in pairs(ends)
+        product = [g[a, c] * conj(g[b, c]) for c in 1:8]
+        ratio = rbar[bi, 1, :] ./ wbar[bi, 1, :] ./ product
+        @test maximum(abs, ratio .- first(ratio)) < 1.0e-12
+    end
+end
+
 @testset "Bandpass: the solve publishes its per-track record" begin
     nant, nspw, nchan, ntime, nscans = 4, 2, 8, 6, 4
     rng = MersenneTwister(777)

@@ -1009,6 +1009,39 @@ end
     @test Bandpass().gauge === ZeroSumPhase()
 end
 
+@testset "JointSmoother: weak cross-hands converge in a few sweeps" begin
+    nant, nchan = 5, 12
+    anames = ["A$i" for i in 1:nant]
+    geom = _seg_geometry(nchan; nant)
+    comp = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed())
+    l = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp), logamp = (; bandpass = comp)), anames, geom)
+    setup = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)))
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    feeds = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    rng = MersenneTwister(313)
+    gtrue = exp.(complex.(0.1 .* randn(rng, nant, 2, 1, nchan), 0.6 .* randn(rng, nant, 2, 1, nchan)))
+    # The cross-hand source terms carry ~1e-3 of the parallel hands' information,
+    # which a station-by-station sweep alone takes thousands of sweeps to resolve.
+    S = [(p in (2, 3) ? 0.03 : 1.0) * (0.5 + rand(rng)) * cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, p in eachindex(feeds)]
+    results = _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs, feeds, geom)
+    # Every station's phase between feeds, referenced to its circular band mean.
+    function rl_error(φ)
+        worst = 0.0
+        for a in 1:nant
+            e = [φ[a, 1, c] - φ[a, 2, c] - angle(gtrue[a, 1, 1, c] * conj(gtrue[a, 2, 1, c])) for c in 1:nchan]
+            worst = max(worst, maximum(abs, rem2pi.(e .- angle(sum(cis, e)), RoundNearest)))
+        end
+        return worst
+    end
+    for gauge in (PinAntenna(1), ZeroSumPhase())
+        θ = zeros(l.nθ)
+        pb, ab = FP.bandpass_blocks(setup, θ, :phase), FP.bandpass_blocks(setup, θ, :logamp)
+        @test_logs FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, max_iterations = 30, tolerance = 1.0e-10)
+        φ = only(pb).θ
+        @test rl_error([φ[1, f, c, 1, a] for a in 1:nant, f in 1:2, c in 1:nchan]) < 1.0e-8
+    end
+end
+
 # ── Band-referenced products and declined tracks ─────────────────────────────
 
 @testset "JointSmoother: gauges agree on band-referenced products" begin

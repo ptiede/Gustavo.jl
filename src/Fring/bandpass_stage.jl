@@ -556,8 +556,9 @@ the fit, so a prior sees a continuous branch rather than a sawtooth. A prior
 fills segments the closure solve had no data for; without one they stay
 unapplied.
 
-The scans of a time segment are pooled before the solve, each first rotated by
-its own band-averaged phase per (baseline, feed pair). The pooled sums are held
+The scans of a time segment are pooled before the solve, each weighted by the
+conjugate of its own band-averaged visibility per (baseline, feed pair), so
+every scan contributes in proportion to its signal power. The pooled sums are held
 in `eltype`, a real floating-point type; `nothing` keeps the data's.
 
 The closure assumes a baseline's source term cancels out of the per-segment
@@ -949,24 +950,34 @@ function _joint_scan_groups(tseg)
 end
 
 # Sum the per-scan residual accumulators of `idx` into one pooled pair. A scan's
-# source phase on a baseline is its own, so each scan is first rotated by the
-# conjugate of its band-averaged phase per (baseline, feed pair); unaligned scans
-# would partly cancel. The rotation is flat in frequency, so the bandpass shape
-# and the phase steps between spectral windows are kept.
+# source term on a baseline is its own, so each scan's sums are multiplied by
+# `c = conj(Ŝ)/max|Ŝ|`, with `Ŝ` its band-averaged visibility per (baseline,
+# feed pair) and the maximum over the pooled scans, and its weights by `|c|²`.
+# Unaligned scans would partly cancel; weighting by `|Ŝ|` makes each cell's
+# pooled `|r|²/w` the sum of the scans' own, so a weak scan adds its information
+# instead of diluting a strong one; and the per-row normalization leaves the
+# pooled amplitude `|g_a·g_b|` times a source amplitude, the band-averaged gains
+# cancelling, so the amplitude closure is not coupled across stations through
+# them. The factor is flat in frequency, so the bandpass shape and the phase
+# steps between spectral windows are kept.
 function _pool_scans(results, idx, T)
     rbar = zeros(complex(T), dims(results[first(idx)].rl))
     wbar = zeros(T, dims(results[first(idx)].wl))
-    for i in idx
-        rl = results[i].rl
-        rbar .+= DimensionalData.broadcast_dims(*, rl, _scan_alignment(rl))
-        wbar .+= results[i].wl
+    Ŝs = [_band_average(results[i].rl, results[i].wl) for i in idx]
+    peak = map((xs...) -> maximum(x -> isfinite(x) ? abs(x) : zero(real(x)), xs), Ŝs...)
+    for (i, Ŝ) in zip(idx, Ŝs)
+        (; rl, wl) = results[i]
+        c = map((s, m) -> m > 0 ? conj(s) / m : zero(s), Ŝ, peak)
+        rbar .+= DimensionalData.broadcast_dims(*, rl, c)
+        wbar .+= DimensionalData.broadcast_dims(*, wl, abs2.(c))
     end
     return rbar, wbar
 end
 
-_scan_alignment(rl) = map(
-    z -> iszero(z) ? one(z) : conj(z) / abs(z),
+_band_average(rl, wl) = map(
+    (r, w) -> w > 0 ? r / w : zero(r),
     dropdims(sum(rl; dims = Frequency); dims = Frequency),
+    dropdims(sum(wl; dims = Frequency); dims = Frequency),
 )
 
 function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::AbstractGauge)
@@ -1646,6 +1657,178 @@ function _move_band_level!(gk, lv, S, ai, f, ts, entries, tseg_a)
     return gk
 end
 
+# The fixed structure of the joint gain step (`_joint_gain_step!`): the slot
+# numbering `ids` (`_gain_slot_ids`), the `(slot, slot)` pairs a correlation
+# joins, `edge[si, bi, p, cell]` the pair of that correlation (`0` for none), and,
+# for a gauge imposed in the sweep, the slots of each constraint row's connected
+# component.
+function _joint_gain_layout(gains, data, layout, gauge_state)
+    (; r, ends) = data
+    (; loc, tseg, fseg) = layout
+    ids = _gain_slot_ids(gains)
+    edge = zeros(Int32, size(r))
+    index = Dict{Tuple{Int, Int}, Int32}()
+    slot_pairs = Tuple{Int, Int}[]
+    for cell in axes(r, Frequency), p in axes(r, FeedPair), bi in axes(r, AntennaPair)
+        _solvable(ends[bi, p]) || continue
+        (a, fa), (b, fb) = ends[bi, p]
+        (ka, ia), (kb, ib) = loc[a], loc[b]
+        for si in axes(r, Scan)
+            ta, tb = tseg[a, si], tseg[b, si]
+            (iszero(ta) || iszero(tb)) && continue
+            key = (ids[ka][ia, fa, fseg[a, cell], ta], ids[kb][ib, fb, fseg[b, cell], tb])
+            edge[si, bi, p, cell] = get!(index, key) do
+                push!(slot_pairs, key)
+                Int32(length(slot_pairs))
+            end
+        end
+    end
+    row_slots = if isnothing(gauge_state)
+        nothing
+    else
+        compid, ncomp, _ = _joint_bandpass_graph(data, layout, ids)
+        members = [Int[] for _ in 1:ncomp]
+        for n in eachindex(compid)
+            iszero(compid[n]) || push!(members[compid[n]], n)
+        end
+        [isempty(row) ? Int[] : members[compid[first(first(row))]] for row in gauge_state.rows]
+    end
+    return (; ids, edge, slot_pairs, row_slots)
+end
+
+# One Gauss–Newton step on every gain slot at once, given `S`. To first order a
+# correlation's model `m = g_a·S·conj(g_b)` moves to
+# `m·(1 + δℓ_a + δℓ_b + i(δφ_a − δφ_b))` for log-amplitude `ℓ` and phase `φ`,
+# so with `u = r/(w·m) − 1` and weight `q = w·|m|²` the step solves two weighted
+# least-squares problems over the slots: `Im u` measures `δφ_a − δφ_b` and
+# `Re u` measures `δℓ_a + δℓ_b`. Solving every slot together moves the
+# directions a station-by-station sweep is slow along — those only weakly
+# measured correlations constrain, such as the phase between feeds — as fast as
+# any other. A χ² backtracking search keeps the step a descent step. Pinned
+# slots keep their phase; a gauge imposed in the sweep is restored afterwards by
+# shifting each component's phase along its free direction, exact without a
+# prior. Returns the largest gauge-constraint residual before that shift.
+function _joint_gain_step!(gains, data, jl, gauge_state)
+    (; r, w, S) = data
+    (; ids, edge, slot_pairs, row_slots) = jl
+    T = real(eltype(S))
+    nslots = sum(length, ids)
+    gv = zeros(complex(T), nslots)
+    φv = zeros(T, nslots)
+    phase_free = falses(nslots)
+    amp_free = falses(nslots)
+    for (k, idk) in pairs(ids), I in eachindex(idk)
+        gk = gains[k]
+        n = idk[I]
+        gv[n], φv[n] = gk.g[I], gk.φ[I]
+        amp_free[n] = gk.touched[I]
+        phase_free[n] = gk.touched[I] && !gk.pinned[I]
+    end
+
+    function chi2(g)
+        out = zero(Float64)
+        for I in CartesianIndices(edge)
+            e = edge[I]
+            iszero(e) && continue
+            wc = w[I]
+            wc > 0 || continue
+            na, nb = slot_pairs[e]
+            out += abs2(r[I] - wc * g[na] * S[I[1], I[2], I[3]] * conj(g[nb])) / wc
+        end
+        return out
+    end
+
+    q = zeros(Float64, length(slot_pairs))
+    bφ = zeros(Float64, nslots)
+    bℓ = zeros(Float64, nslots)
+    for I in CartesianIndices(edge)
+        e = edge[I]
+        iszero(e) && continue
+        wc = w[I]
+        wc > 0 || continue
+        na, nb = slot_pairs[e]
+        m = gv[na] * S[I[1], I[2], I[3]] * conj(gv[nb])
+        qc = wc * abs2(m)
+        qc > 0 || continue
+        u = r[I] / (wc * m) - 1
+        q[e] += qc
+        bφ[na] += qc * imag(u)
+        bφ[nb] -= qc * imag(u)
+        bℓ[na] += qc * real(u)
+        bℓ[nb] += qc * real(u)
+    end
+    δφ = _joint_normal_solve(q, slot_pairs, bφ, phase_free, -1)
+    δℓ = _joint_normal_solve(q, slot_pairs, bℓ, amp_free, 1)
+
+    χ0 = chi2(gv)
+    trial = similar(gv)
+    step = zero(T)
+    for t in (1, 1 // 2, 1 // 4, 1 // 8, 1 // 16)
+        @. trial = gv * exp(complex(T(t) * δℓ, T(t) * δφ))
+        if chi2(trial) < χ0
+            step = T(t)
+            break
+        end
+    end
+
+    maxres = zero(T)
+    shift = zeros(T, nslots)
+    if !isnothing(gauge_state)
+        for (j, row) in pairs(gauge_state.rows)
+            isempty(row) && continue
+            res = sum(c * (φv[n] + step * δφ[n]) for (n, c) in row) - gauge_state.d[j]
+            maxres = max(maxres, abs(res))
+            α = -res / sum(last, row)
+            for n in row_slots[j]
+                shift[n] += α
+            end
+        end
+    end
+    for (k, idk) in pairs(ids), I in eachindex(idk)
+        gk = gains[k]
+        n = idk[I]
+        gk.touched[I] || continue
+        Δφ = step * δφ[n] + shift[n]
+        gk.g[I] *= exp(complex(step * δℓ[n], Δφ))
+        gk.φ[I] += Δφ
+    end
+    return maxres
+end
+
+# Solve `Σ_e q_e·(x_a + s·x_b)²`'s normal equations `H·δ = b` over the `free`
+# slots, `s = −1` for phase differences and `+1` for log-amplitude sums. A
+# ridge of `1e-9` of each slot's own weight fixes the phase's free common
+# direction per component and a bipartite component's alternating one without
+# moving any measured direction.
+function _joint_normal_solve(q, slot_pairs, b, free, s)
+    pos = cumsum(free)
+    nfree = last(pos)
+    Is, Js, Vs = Int[], Int[], Float64[]
+    for (e, (na, nb)) in pairs(slot_pairs)
+        qe = q[e]
+        qe > 0 || continue
+        # A fixed end contributes only to the free end's own weight.
+        for n in (na, nb)
+            free[n] && (push!(Is, pos[n]); push!(Js, pos[n]); push!(Vs, qe))
+        end
+        if free[na] && free[nb]
+            append!(Is, (pos[na], pos[nb]))
+            append!(Js, (pos[nb], pos[na]))
+            append!(Vs, (s * qe, s * qe))
+        end
+    end
+    H = sparse(Is, Js, Vs, nfree, nfree)
+    d = diag(H)
+    keep = d .> 0
+    δ = zeros(eltype(b), length(b))
+    any(keep) || return δ
+    Hk = H[keep, keep] + Diagonal(1.0e-9 .* d[keep])
+    x = cholesky(Symmetric(Hk)) \ b[free][keep]
+    idx = findall(free)[keep]
+    δ[idx] .= x
+    return δ
+end
+
 # The largest relative change of any gain from `previous`, the gains a sweep
 # started from.
 function _largest_relative_change(gains, previous)
@@ -1883,6 +2066,13 @@ to one call are a connected piece of the coupling graph, so this is one
 criterion over one coupled problem: nodes that share no data are solved by
 separate calls rather than being averaged into a common tolerance.
 
+A station-by-station sweep moves slowly along any direction that only weakly
+measured correlations constrain, such as the phase between feeds, which only
+the correlations pairing different feeds see. Where no component has a prior or
+a level, each sweep is followed by one Gauss–Newton step on every gain slot at
+once (`_joint_gain_step!`), which moves those directions as fast as any other;
+both steps decrease the same χ², so the iteration converges to its minimum.
+
 `phase_status`/`amp_status`, when given, hold one `(AntennaName, Feed, Frequency, Ti)`
 array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref)),
 receiving each spectral window's `_BP_TRACK_*` outcome code from the final
@@ -1951,6 +2141,8 @@ function solve_joint_bandpass!(
     end
     levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
     _reject_partial_pins(gains, fits, loc, phase_blocks, geom)
+    joint = all(f -> isnothing(f) || _plain_track(f.phase) && _plain_track(f.amp), fits) ?
+        _joint_gain_layout(gains, data, layout, gauge_state) : nothing
 
     _update_source_coherence!(data, gains, layout)
     T = real(eltype(r))
@@ -1960,12 +2152,19 @@ function solve_joint_bandpass!(
     previous = [copy(gk.g) for gk in gains]
     for iter in 1:max_iterations
         foreach((dst, gk) -> copyto!(dst, gk.g), previous, gains)
+        # Without a prior the joint step restores the gauge exactly, so the sweep
+        # fits free of the constraint forces.
         nupdated, declined = _update_station_gains!(
             gains, data, layout;
-            fits, levels, seed = iter == 1, gauge_state, phase_status, amp_status, phase_priors, amp_priors,
+            fits, levels, seed = iter == 1, gauge_state = isnothing(joint) ? gauge_state : nothing,
+            phase_status, amp_status, phase_priors, amp_priors,
         )
         iszero(nupdated) && _throw_unchanged_sweep(declined, geom)
-        isnothing(gauge_state) || (maxres = _project_joint_gauge!(gauge_state, gains, tolerance))
+        if isnothing(joint)
+            isnothing(gauge_state) || (maxres = _project_joint_gauge!(gauge_state, gains, tolerance))
+        else
+            maxres = _joint_gain_step!(gains, data, joint, gauge_state)
+        end
         maxrel = _largest_relative_change(gains, previous)
         _update_source_coherence!(data, gains, layout)
         maxrel < tolerance && maxres < tolerance && break
@@ -1997,6 +2196,9 @@ function _throw_unchanged_sweep(declined, geom::DataGeometry)
         ),
     )
 end
+
+# A track the joint gain step can solve exactly: no prior and no level.
+_plain_track(track) = isnothing(track.prior) && iszero(track.nlevel)
 
 # Each station's level for one observable, `nothing` where it has none: its
 # piece → level map and level count against the station's shape segments, its
