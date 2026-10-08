@@ -924,14 +924,15 @@ end
     Strue = [(0.5 + rand(rng)) * cis(2pi * rand(rng)) for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(feeds)]
     results = _joint_scan_accumulators(gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom)
 
-    layout(prior = nothing) =
-        CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp(; prior)), logamp = (; bandpass = comp())), anames, geom)
-    # Converged within the default 200 sweeps: no warning.
-    function solve(gauge; prior = nothing)
-        l = layout(prior)
+    layout(prior = nothing, amp_prior = nothing) = CAL.plan_parameters(
+        CAL.GainModel(; phase = (; bandpass = comp(; prior)), logamp = (; bandpass = comp(; prior = amp_prior))), anames, geom,
+    )
+    # Converged within `max_iterations` sweeps: no warning.
+    function solve(gauge; prior = nothing, amp_prior = nothing, data = results, max_iterations = 200)
+        l = layout(prior, amp_prior)
         θ = zeros(l.nθ)
         pb, ab = FP.bandpass_blocks(setup(l), θ, :phase), FP.bandpass_blocks(setup(l), θ, :logamp)
-        @test_logs FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, tolerance = 1.0e-10)
+        @test_logs FP.solve_joint_bandpass!(θ, data, geom, pb, ab; gauge, max_iterations, tolerance = 1.0e-10)
         φ = only(pb).θ
         return [φ[1, f, c, 1, a] for a in 1:nant, f in 1:2, c in 1:nchan]
     end
@@ -953,6 +954,9 @@ end
     # zero station mean of every cell reads as one constant across the band.
     station_mean_spread(φ) = maximum(f -> (m = vec(sum(φ[:, f, :]; dims = 1)) ./ nant; maximum(m) - minimum(m)), 1:2)
 
+    # A second-order walk of `σ` rad per channel (1 MHz), as rad/Hz^(3/2).
+    rw2(σ) = CAL.RandomWalkPrior(; order = 2, σ = σ * sqrt(3 / (2 * 1.0e6^3)))
+
     @testset "without a prior the gauge leaves the products unchanged" begin
         zs, pin = solve(ZeroSumPhase()), solve(PinAntenna(1))
         @test station_mean_spread(zs) < 1.0e-8
@@ -961,8 +965,7 @@ end
     end
 
     @testset "under a prior the zero sum spreads the reference's structure" begin
-        # A second-order walk of σ = 1 rad per channel (1 MHz), as rad/Hz^(3/2).
-        prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * 1.0e6^3)))
+        prior = rw2(1.0)
         zs, pin = solve(ZeroSumPhase(); prior), solve(PinAntenna(1); prior)
         @test station_mean_spread(zs) < 1.0e-8
         # Pinned, every track carries the reference's bandpass and its prior
@@ -976,6 +979,25 @@ end
         bc(choice, default) = ByComponent((; bandpass = choice); default)
         @test solve(bc(ZeroSumPhase(), PinAntenna(1)); prior) == zs
         @test solve(bc(PinAntenna(1), ZeroSumPhase()); prior) == pin
+    end
+
+    @testset "a stiff prior converges in about a pin's sweep count" for σ in (0.05, 0.01)
+        # A pin takes about 60 sweeps here.
+        zs = solve(ZeroSumPhase(); prior = rw2(σ), max_iterations = 80)
+        solve(PinAntenna(1); prior = rw2(σ), max_iterations = 80)
+        @test station_mean_spread(zs) < 1.0e-8
+    end
+
+    @testset "a slot without data takes the constraint through its priors" begin
+        gap = deepcopy(results)
+        for r in gap, (bi, (a, b)) in pairs(bl_pairs)
+            3 in (a, b) || continue
+            r.wl[bi, :, 5] .= 0
+            r.rl[bi, :, 5] .= 0
+        end
+        zs = solve(ZeroSumPhase(); prior = rw2(0.05), amp_prior = rw2(0.05), data = gap)
+        @test all(isfinite, zs[3, :, 5])
+        @test station_mean_spread(zs) < 1.0e-8
     end
 
     @testset "only a pin marks pinned slots" begin
