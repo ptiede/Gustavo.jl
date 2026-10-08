@@ -982,10 +982,20 @@ end
     end
 
     @testset "a stiff prior converges in about a pin's sweep count" for σ in (0.05, 0.01)
-        # A pin takes about 60 sweeps here.
-        zs = solve(ZeroSumPhase(); prior = rw2(σ), max_iterations = 80)
-        solve(PinAntenna(1); prior = rw2(σ), max_iterations = 80)
+        # A phase this stiff cannot follow the reference's structure, and where a
+        # slot is left more than π/2 off, a free amplitude's MAP is zero; the
+        # amplitude prior keeps the MAP finite.
+        zs = solve(ZeroSumPhase(); prior = rw2(σ), amp_prior = rw2(0.05), max_iterations = 80)
+        solve(PinAntenna(1); prior = rw2(σ), amp_prior = rw2(0.05), max_iterations = 80)
         @test station_mean_spread(zs) < 1.0e-8
+
+        # Without it the MAP does not exist, and the solve says so.
+        l = layout(rw2(σ), nothing)
+        θ = zeros(l.nθ)
+        pb, ab = FP.bandpass_blocks(setup(l), θ, :phase), FP.bandpass_blocks(setup(l), θ, :logamp)
+        @test_logs (:warn, r"did not converge|could not lower") match_mode = :any FP.solve_joint_bandpass!(
+            θ, results, geom, pb, ab; gauge = PinAntenna(1), max_iterations = 80, tolerance = 1.0e-10,
+        )
     end
 
     @testset "a slot without data takes the constraint through its priors" begin
@@ -1040,6 +1050,16 @@ end
         φ = only(pb).θ
         @test rl_error([φ[1, f, c, 1, a] for a in 1:nant, f in 1:2, c in 1:nchan]) < 1.0e-8
     end
+
+    # Under a phase prior the step is the MAP step, and a pinned solve converges
+    # as fast; a sweep alone takes tens of thousands of sweeps here.
+    rw2 = CAL.RandomWalkPrior(; order = 2, σ = 0.3 * sqrt(3 / (2 * 1.0e6^3)))
+    cp = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = rw2)
+    lp = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = cp), logamp = (; bandpass = cp)), anames, geom)
+    setup_p = (; layout = lp, paths = (; phase = FP._bandpass_paths(lp.plantree, :phase), logamp = FP._bandpass_paths(lp.plantree, :logamp)))
+    θ = zeros(lp.nθ)
+    pb, ab = FP.bandpass_blocks(setup_p, θ, :phase), FP.bandpass_blocks(setup_p, θ, :logamp)
+    @test_logs FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), max_iterations = 60, tolerance = 1.0e-10)
 end
 
 # ── Band-referenced products and declined tracks ─────────────────────────────

@@ -539,6 +539,10 @@ const _BP_FLAT_SPAN = 0.01
 # multi-radian ramp is not.
 const _BP_MAX_UNWRAP_AMBIGUITY = 0.25
 
+# The largest log-gain step a linearized joint bandpass update takes; the
+# first-order model of `|g·e^δ − ĝ|²` is poor much beyond it.
+const _BP_MAX_LINEAR_STEP = 0.5
+
 # Fraction of a solve's tracks that may come back flat or declined before the
 # bandpass as a whole is worth a warning.
 const _BP_DEGENERATE_WARN_FRACTION = 0.25
@@ -1459,10 +1463,15 @@ end
 # component prior acting on the resulting track rather than as a post-hoc smooth.
 #
 # Solving each segment independently is the no-prior case; the prior enters
-# where that independence is dropped. Around the unconstrained per-segment
-# estimate `ĝ` the residual linearizes as `Σ denom·|ĝ|²·(δlogamp² + δphase²)`, so
-# `denom·|ĝ|²` is the Fisher weight both real tracks are fit under. Each sweep
-# re-estimates the priors' hyperparameters, and any levels, from its own
+# where that independence is dropped. A segment's residual is `denom·|g − ĝ|²`
+# about its unconstrained estimate `ĝ`, and the real tracks are fit to it to
+# first order in the log-gain. Without a prior the track lands on `ĝ`, so the
+# first sweep, and every sweep of a track without a prior, linearizes about
+# `ĝ` itself (weight `denom·|ĝ|²`); under a prior the track does not, so with
+# `relinearize` the residual is linearized about the current gain `g`
+# (observation `log g + (ĝ/g − 1)`, weight `denom·|g|²`), whose fixed point is
+# the MAP of the complex residual rather than of its expansion about `ĝ`. Each
+# sweep re-estimates the priors' hyperparameters, and any levels, from its own
 # linearized tracks, so iterated to convergence this is MAP estimation under the
 # two priors with type-II MAP hyperparameters.
 #
@@ -1478,12 +1487,13 @@ end
 # `gauge_state`, the constraint state of `_joint_bandpass_gauge!` or `nothing`
 # for a pinned gauge, adds the constraints' linear term `Cᵀλ` to each phase
 # track's fit and records the track's fit in `gauge_state.systems` for
-# `_project_joint_gauge!`.
+# `_project_joint_gauge!`. `systems`, when given, receives every phase and
+# log-amplitude track's fit the same way, for `_joint_gain_step!`.
 #
 # Returns the number of slots the sweep updated and the `(station, feed, time
 # segment)` of each phase track with a piece declined at unwrapping.
 function _update_station_gains!(
-        gains, data, layout; fits, levels, seed::Bool, gauge_state = nothing,
+        gains, data, layout; fits, levels, seed::Bool, relinearize::Bool = false, gauge_state = nothing, systems = nothing,
         phase_status = nothing, amp_status = nothing, phase_priors = nothing, amp_priors = nothing,
     )
     (; r, w, S) = data
@@ -1500,7 +1510,9 @@ function _update_station_gains!(
     ug = Vector{T}(undef, nfsmax)
     yg = Vector{T}(undef, nfsmax)
     wg = Vector{T}(undef, nfsmax)
+    wa = Vector{T}(undef, nfsmax)
     isnothing(gauge_state) || empty!(gauge_state.systems)
+    isnothing(systems) || (empty!(systems.phase); empty!(systems.amp))
     nupdated = 0
     declined = Tuple{Int, Int, Int}[]
     for feed in axes(touching, 2), ant in eachindex(loc)
@@ -1517,7 +1529,7 @@ function _update_station_gains!(
             # a single one where a coarser station ties the band into one mode. The
             # amplitude is solved like any other node's (see `_joint_bandpass_gauge!`).
             pins = view(pinned, ai, feed, :, ts)
-            for buf in (num, den, ĝ, wf, la, φ̃, ug, yg, wg)
+            for buf in (num, den, ĝ, wf, la, φ̃, ug, yg, wg, wa)
                 resize!(buf, nfs)
             end
             fill!(num, zero(C))
@@ -1547,11 +1559,23 @@ function _update_station_gains!(
                     end
                 end
             end
+            linear = relinearize && !(isnothing(fit.phase.prior) && isnothing(fit.amp.prior))
             for fs in 1:nfs
                 gh = den[fs] > 0 ? num[fs] / den[fs] : zero(C)
                 ĝ[fs] = gh
-                wf[fs] = (den[fs] > 0 && abs(gh) > 0) ? den[fs] * abs2(gh) : zero(T)
-                if wf[fs] > 0
+                gc = g[ai, feed, fs, ts]
+                wf[fs] = den[fs] > 0 && abs(linear ? gc : gh) > 0 ? den[fs] * abs2(linear ? gc : gh) : zero(T)
+                if wf[fs] > 0 && linear
+                    # `den·|g − ĝ|²` to first order in the log-gain about the current `g`.
+                    # Far from `ĝ` the weight is raised and the step shortened by the
+                    # same factor, which leaves the gradient, and so the fixed point,
+                    # unchanged.
+                    ρ = gh / gc - 1
+                    κ = max(one(T), abs(ρ) / _BP_MAX_LINEAR_STEP)
+                    wf[fs] *= κ
+                    la[fs] = log(abs(gc)) + real(ρ) / κ
+                    φ̃[fs] = φ[ai, feed, fs, ts] + imag(ρ) / κ
+                elseif wf[fs] > 0
                     la[fs] = log(abs(gh))
                     # The wrapped increment about this track's current value keeps the
                     # candidate on the same 2π branch as the iterate it refines.
@@ -1568,7 +1592,11 @@ function _update_station_gains!(
             pst = isnothing(phase_status) ? similar(fit.phase.pieces, Int8) : view(phase_status[k], ai, feed, :, ts)
             amp_prior, amp_levels = _fit_track!(
                 la, wf, fit.amp.x, fit.amp.pieces, fit.amp.prior;
-                fit.amp.level, fit.amp.nlevel, status = ast,
+                fit.amp.level, fit.amp.nlevel, status = ast, weights = wa,
+            )
+            isnothing(systems) || push!(
+                systems.amp,
+                (; slots = systems.ids[k][ai, feed, 1:nfs, ts], w = wa[1:nfs], fit.amp.x, fit.amp.pieces, prior = amp_prior, fit.amp.level, fit.amp.nlevel),
             )
             isnothing(amp_priors) || (amp_priors[k][ai, feed, ts] = amp_prior)
             isnothing(amp_levels) || (levels[ant].amp[feed, :, ts] .= amp_levels)
@@ -1599,6 +1627,10 @@ function _update_station_gains!(
                 isnothing(gauge_state) || push!(
                     gauge_state.systems,
                     (; slots = collect(slots), w = wg[1:nfs], fit.phase.x, fit.phase.pieces, prior = phase_prior, fit.phase.level, fit.phase.nlevel),
+                )
+                isnothing(systems) || push!(
+                    systems.phase,
+                    (; slots = systems.ids[k][ai, feed, 1:nfs, ts], w = wg[1:nfs], fit.phase.x, fit.phase.pieces, prior = phase_prior, fit.phase.level, fit.phase.nlevel),
                 )
                 any(==(_BP_TRACK_DECLINED), pst) && push!(declined, (ant, feed, ts))
                 isnothing(phase_priors) || (phase_priors[k][ai, feed, ts] = phase_prior)
@@ -1704,11 +1736,14 @@ end
 # `Re u` measures `δℓ_a + δℓ_b`. Solving every slot together moves the
 # directions a station-by-station sweep is slow along — those only weakly
 # measured correlations constrain, such as the phase between feeds — as fast as
-# any other. A χ² backtracking search keeps the step a descent step. Pinned
-# slots keep their phase; a gauge imposed in the sweep is restored afterwards by
-# shifting each component's phase along its free direction, exact without a
-# prior. Returns the largest gauge-constraint residual before that shift.
-function _joint_gain_step!(gains, data, jl, gauge_state)
+# any other. Without a prior the normal equations are solved directly and a χ²
+# backtracking search keeps the step a descent step; under one, `systems` holds
+# the sweep's per-track fits and the MAP step is solved by `_joint_prior_solve`.
+# Pinned slots keep their phase; a gauge imposed in the sweep is restored
+# afterwards by shifting each component's phase along its free direction, exact
+# without a prior. Returns the largest gauge-constraint residual before that
+# shift.
+function _joint_gain_step!(gains, data, jl, gauge_state, systems)
     (; r, w, S) = data
     (; ids, edge, slot_pairs, row_slots) = jl
     T = real(eltype(S))
@@ -1757,17 +1792,24 @@ function _joint_gain_step!(gains, data, jl, gauge_state)
         bℓ[na] += qc * real(u)
         bℓ[nb] += qc * real(u)
     end
-    δφ = _joint_normal_solve(q, slot_pairs, bφ, phase_free, -1)
-    δℓ = _joint_normal_solve(q, slot_pairs, bℓ, amp_free, 1)
-
-    χ0 = chi2(gv)
-    trial = similar(gv)
-    step = zero(T)
-    for t in (1, 1 // 2, 1 // 4, 1 // 8, 1 // 16)
-        @. trial = gv * exp(complex(T(t) * δℓ, T(t) * δφ))
-        if chi2(trial) < χ0
-            step = T(t)
-            break
+    priors = !isnothing(systems) && any(sys -> !isnothing(sys.prior), Iterators.flatten((systems.phase, systems.amp)))
+    step = one(T)
+    if priors
+        δφ = _joint_prior_solve(q, slot_pairs, bφ, φv, phase_free, -1, systems.phase)
+        δℓ = _joint_prior_solve(q, slot_pairs, bℓ, log.(abs.(gv)), amp_free, 1, systems.amp)
+        step = T(min(1, _BP_MAX_LINEAR_STEP / max(maximum(abs, δφ), maximum(abs, δℓ))))
+    else
+        δφ = _joint_normal_solve(q, slot_pairs, bφ, phase_free, -1)
+        δℓ = _joint_normal_solve(q, slot_pairs, bℓ, amp_free, 1)
+        χ0 = chi2(gv)
+        trial = similar(gv)
+        step = zero(T)
+        for t in (1, 1 // 2, 1 // 4, 1 // 8, 1 // 16)
+            @. trial = gv * exp(complex(T(t) * δℓ, T(t) * δφ))
+            if chi2(trial) < χ0
+                step = T(t)
+                break
+            end
         end
     end
 
@@ -1827,6 +1869,160 @@ function _joint_normal_solve(q, slot_pairs, b, free, s)
     idx = findall(free)[keep]
     δ[idx] .= x
     return δ
+end
+
+# The MAP step of one observable under the tracks' priors: `x` solves
+# `(H + P)·x = H·x₀ + b + P·μ` over the free slots, with `H` the normal matrix
+# of `_joint_normal_solve` and `P`, `μ` the priors' precision and mean, and the
+# step is `x − x₀`. Conjugate gradients, preconditioned by `M = W + P` with `W`
+# each slot's weight in its track's fit, so applying `M⁻¹` is one fit of every
+# track (`_track_response`, affine in its observations) and `P` is never
+# formed: each search direction's `M·p` follows from `M·z = r`, and
+# `A·p = M·p + (H − W)·p`. A slot its track's fit does not weight is held
+# fixed; restricting `M⁻¹` to the rest inverts the prior's Schur complement over
+# it, so this is exact. Tracks without a prior are fit by their own data alone.
+function _joint_prior_solve(q, slot_pairs, b, x0, free, s, systems)
+    nslots = length(b)
+    weight = zeros(nslots)
+    for (e, (na, nb)) in pairs(slot_pairs)
+        weight[na] += q[e]
+        weight[nb] += q[e]
+    end
+    tracks = NamedTuple[]
+    for sys in systems
+        isnothing(sys.prior) && continue
+        wt = [free[n] ? Float64(wi) : 0.0 for (n, wi) in zip(sys.slots, sys.w)]
+        weight[sys.slots] .= wt
+        push!(tracks, merge(sys, (; w = wt)))
+    end
+    free = free .& (weight .> 0)
+    inprior = falses(nslots)
+    foreach(t -> inprior[t.slots] .= true, tracks)
+    response0 = [_track_response(t, zeros(length(t.slots))) for t in tracks]
+
+    function apply_H(p)
+        out = zeros(nslots)
+        for (e, (na, nb)) in pairs(slot_pairs)
+            v = q[e] * (p[na] + s * p[nb])
+            out[na] += v
+            out[nb] += s * v
+        end
+        return out .* free
+    end
+    # `M⁻¹·v`, with `affine` adding the priors' mean term.
+    function apply_Minv(v; affine = false)
+        out = zeros(nslots)
+        for n in eachindex(out)
+            free[n] && !inprior[n] && (out[n] = v[n] / weight[n])
+        end
+        for (t, f0) in zip(tracks, response0)
+            f = _track_response(t, v[t.slots])
+            affine || (f .-= f0)
+            for (i, n) in pairs(t.slots)
+                free[n] && (out[n] = f[i])
+            end
+        end
+        return out
+    end
+
+    x = apply_Minv(weight .* x0 .+ b; affine = true)
+    x[.!free] .= x0[.!free]
+    d = (x0 .- x) .* free
+    r = apply_H(d) .- weight .* d
+    z = apply_Minv(r)
+    p = copy(z)
+    Mp = copy(r)
+    rz = dot(r, z)
+    target = 1.0e-20 * rz
+    for _ in 1:max(50, 2 * count(free))
+        rz <= target && break
+        Ap = Mp .+ apply_H(p) .- weight .* p
+        α = rz / dot(p, Ap)
+        x .+= α .* p
+        r .-= α .* Ap
+        z = apply_Minv(r)
+        rz, rz_prev = dot(r, z), rz
+        β = rz / rz_prev
+        p .= z .+ β .* p
+        Mp .= r .+ β .* Mp
+    end
+    return (x .- x0) .* free
+end
+
+# The MAP objective of a joint bandpass solve: half the χ² of the visibilities
+# against `g_a·S·conj(g_b)`, the scale its track fits weight their data on, plus
+# each track's prior energy (`_prior_energy`) under the priors `systems` records,
+# one spectral window at a time.
+function _joint_objective(gains, data, layout, systems)
+    (; r, w, S, ends) = data
+    (; loc, tseg, fseg) = layout
+    χ2 = 0.0
+    for p in axes(r, FeedPair), bi in axes(r, AntennaPair)
+        _solvable(ends[bi, p]) || continue
+        (a, fa), (b, fb) = ends[bi, p]
+        (ka, ia), (kb, ib) = loc[a], loc[b]
+        ga, gb = gains[ka].g, gains[kb].g
+        for si in axes(r, Scan)
+            ta, tb = tseg[a, si], tseg[b, si]
+            (iszero(ta) || iszero(tb)) && continue
+            s = S[Scan(si), AntennaPair(bi), FeedPair(p)]
+            for cell in axes(r, Frequency)
+                wc = w[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)]
+                wc > 0 || continue
+                m = ga[ia, fa, fseg[a, cell], ta] * s * conj(gb[ib, fb, fseg[b, cell], tb])
+                χ2 += abs2(r[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)] - wc * m) / wc
+            end
+        end
+    end
+    slot = [(k, I) for (k, idk) in pairs(systems.ids) for I in eachindex(idk)]
+    energy = 0.0
+    for (tracks, value) in ((systems.phase, gk -> gk.φ), (systems.amp, gk -> log.(abs.(gk.g))))
+        values = map(value, gains)
+        for sys in tracks
+            isnothing(sys.prior) && continue
+            y = map(sys.slots) do n
+                k, I = slot[n]
+                gains[k].touched[I] ? Float64(values[k][I]) : NaN
+            end
+            for p in sys.pieces
+                energy += _prior_energy(sys.prior, y[p], sys.x[p])
+            end
+        end
+    end
+    return χ2 / 2 + energy
+end
+
+# Hold an iteration of the joint bandpass solve to decreasing the MAP objective
+# (`_joint_objective`, under the hyperparameters this iteration resolved): from
+# the gains it started at (`previous`, `previous_φ`) the step to the current
+# gains is halved, the source coherence re-solved each time, until the
+# objective is no higher than its starting value up to the gains' rounding, down to a 64th
+# of the step. A linear gauge constraint both ends satisfy holds all along the
+# step. Returns `false`, with the starting gains restored, when no such step
+# decreases the objective.
+function _backtrack_joint!(gains, previous, previous_φ, data, layout, systems)
+    J = _joint_objective(gains, data, layout, systems)
+    current = [(copy(gk.g), copy(gk.φ)) for gk in gains]
+    current_S = copy(data.S)
+    function place!(t)
+        for (gk, g0, φ0, (g1, φ1)) in zip(gains, previous, previous_φ, current)
+            @. gk.φ = φ0 + t * (φ1 - φ0)
+            @. gk.g = ifelse(iszero(g0) | iszero(g1), g1, abs(g0)^(1 - t) * abs(g1)^t * cis(gk.φ))
+        end
+        _update_source_coherence!(data, gains, layout)
+        return gains
+    end
+    place!(0)
+    J0 = _joint_objective(gains, data, layout, systems)
+    # The gains are held at their own precision, which sets the objective's.
+    bound = J0 + 16 * eps(real(eltype(first(gains).g))) * abs(J0)
+    J <= bound && (place!(1); copyto!(data.S, current_S); return true)
+    for t in (1 // 2, 1 // 4, 1 // 8, 1 // 16, 1 // 32, 1 // 64)
+        place!(t)
+        _joint_objective(gains, data, layout, systems) <= bound && return true
+    end
+    place!(0)
+    return false
 end
 
 # The largest relative change of any gain from `previous`, the gains a sweep
@@ -2068,10 +2264,20 @@ separate calls rather than being averaged into a common tolerance.
 
 A station-by-station sweep moves slowly along any direction that only weakly
 measured correlations constrain, such as the phase between feeds, which only
-the correlations pairing different feeds see. Where no component has a prior or
-a level, each sweep is followed by one Gauss–Newton step on every gain slot at
-once (`_joint_gain_step!`), which moves those directions as fast as any other;
-both steps decrease the same χ², so the iteration converges to its minimum.
+the correlations pairing different feeds see. Where no component has a level,
+and either the gauge is pinned or no component has a prior, each sweep is
+followed by one Gauss–Newton step on every gain slot at once (`_joint_gain_step!`),
+which moves those directions as fast as any other; the two steps share their
+fixed point, the minimum of the objective.
+
+Under a prior (without levels) that objective is the posterior: half the χ² of
+the visibilities plus each track's prior energy at the hyperparameters the
+sweep resolves. The sweep then linearizes each slot about its current gain,
+whose fixed point is that posterior's mode, and every iteration is held to
+lowering it by backtracking along its step. An iteration that cannot lower it
+stops the solve with a warning: the objective is flat or not convex there,
+typically because a prior too stiff for the data drives an amplitude toward
+zero, where the mode does not exist.
 
 `phase_status`/`amp_status`, when given, hold one `(AntennaName, Feed, Frequency, Ti)`
 array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref)),
@@ -2141,8 +2347,14 @@ function solve_joint_bandpass!(
     end
     levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
     _reject_partial_pins(gains, fits, loc, phase_blocks, geom)
-    joint = all(f -> isnothing(f) || _plain_track(f.phase) && _plain_track(f.amp), fits) ?
+    tracks = [t for f in fits if !isnothing(f) for t in (f.phase, f.amp)]
+    joint = all(t -> iszero(t.nlevel), tracks) && (isnothing(gauge_state) || all(t -> isnothing(t.prior), tracks)) ?
         _joint_gain_layout(gains, data, layout, gauge_state) : nothing
+    # Under a prior the sweep linearizes about the current gains, whose fixed point
+    # is the MAP, and each iteration is held to decreasing the MAP objective.
+    guarded = all(t -> iszero(t.nlevel), tracks) && any(t -> !isnothing(t.prior), tracks)
+    systems = isnothing(joint) && !guarded ? nothing :
+        (; ids = isnothing(joint) ? _gain_slot_ids(gains) : joint.ids, phase = NamedTuple[], amp = NamedTuple[])
 
     _update_source_coherence!(data, gains, layout)
     T = real(eltype(r))
@@ -2150,26 +2362,37 @@ function solve_joint_bandpass!(
     maxrel = convert(T, Inf)
     maxres = zero(T)
     previous = [copy(gk.g) for gk in gains]
+    previous_φ = [copy(gk.φ) for gk in gains]
+    stalled = false
     for iter in 1:max_iterations
         foreach((dst, gk) -> copyto!(dst, gk.g), previous, gains)
-        # Without a prior the joint step restores the gauge exactly, so the sweep
-        # fits free of the constraint forces.
+        foreach((dst, gk) -> copyto!(dst, gk.φ), previous_φ, gains)
+        # The joint step imposes the gauge itself, so the sweep fits free of the
+        # constraint forces.
         nupdated, declined = _update_station_gains!(
             gains, data, layout;
-            fits, levels, seed = iter == 1, gauge_state = isnothing(joint) ? gauge_state : nothing,
+            fits, levels, seed = iter == 1, relinearize = guarded && iter > 1, gauge_state = isnothing(joint) ? gauge_state : nothing, systems,
             phase_status, amp_status, phase_priors, amp_priors,
         )
         iszero(nupdated) && _throw_unchanged_sweep(declined, geom)
         if isnothing(joint)
             isnothing(gauge_state) || (maxres = _project_joint_gauge!(gauge_state, gains, tolerance))
         else
-            maxres = _joint_gain_step!(gains, data, joint, gauge_state)
+            maxres = _joint_gain_step!(gains, data, joint, gauge_state, systems)
+        end
+        _update_source_coherence!(data, gains, layout)
+        if guarded && iter > 1 && !_backtrack_joint!(gains, previous, previous_φ, data, layout, systems)
+            stalled = true
+            break
         end
         maxrel = _largest_relative_change(gains, previous)
-        _update_source_coherence!(data, gains, layout)
         maxrel < tolerance && maxres < tolerance && break
     end
-    maxrel < tolerance && maxres < tolerance || @warn "the joint bandpass solve did not converge in " *
+    stalled && @warn "the joint bandpass solve stopped after a sweep that could not lower its MAP " *
+        "objective even at a 64th of its step; the largest relative gain change before it was " *
+        "$maxrel. The objective is flat or not convex near this point, often because a prior " *
+        "is too stiff for the data, which can drive a gain's amplitude toward zero."
+    stalled || maxrel < tolerance && maxres < tolerance || @warn "the joint bandpass solve did not converge in " *
         "$max_iterations sweeps: the largest relative gain change is $maxrel and the largest gauge " *
         "constraint residual $maxres rad, against a tolerance of $tolerance; " *
         "raise `JointSmoother(; max_iterations)`"
@@ -2196,9 +2419,6 @@ function _throw_unchanged_sweep(declined, geom::DataGeometry)
         ),
     )
 end
-
-# A track the joint gain step can solve exactly: no prior and no level.
-_plain_track(track) = isnothing(track.prior) && iszero(track.nlevel)
 
 # Each station's level for one observable, `nothing` where it has none: its
 # piece → level map and level count against the station's shape segments, its

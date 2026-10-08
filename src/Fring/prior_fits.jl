@@ -198,6 +198,58 @@ function _estimate_map!(out, prior::OUPrior, y, w, x)
 end
 
 """
+    _prior_energy(prior, y, x) -> E
+
+`−log` of the resolved `prior`'s density at the track `y` over `x`, less a
+normalization that depends only on `prior` and `x` (see `_exact_energy`).
+Non-finite entries are unobserved; `nothing` contributes zero.
+"""
+_prior_energy(::Nothing, y, x) = 0.0
+
+function _prior_energy(prior::RandomWalkPrior, y, x)
+    _, u, h = _random_walk_problem(y, ones(length(y)), x)
+    return _exact_energy(_random_walk_model(prior.order, prior.σ, prior.init, h, Float64), y, u)
+end
+
+_prior_energy(prior::OUPrior, y, x) =
+    _exact_energy(OUModel(Float64(prior.scale), Float64(prior.σ)^2), y, Float64.(x))
+
+# `½·Σ ν²/s` over the innovations of `model`'s filter with `y` observed exactly:
+# the negative log density of `y` less its normalization, which the innovation
+# variances `s` alone carry and which does not depend on `y`. A flat start's
+# first `statedim` observations fix its state and are left out, so a random walk
+# of order `m` does not see a polynomial of degree below `m`; with fewer
+# observations than that the energy is zero.
+function _exact_energy(model, y, u)
+    D = statedim(model)
+    start = initial(model, Float64)
+    flat = isnothing(start)
+    x = flat ? zero(SVector{D, Float64}) : SVector{D, Float64}(start[1])
+    # A flat start as a variance far above any step's.
+    P = flat ? SMatrix{D, D, Float64}(1.0e8 * I) : SMatrix{D, D, Float64}(start[2])
+    E = 0.0
+    seen = 0
+    prev = 0
+    for k in eachindex(y, u)
+        isfinite(y[k]) || continue
+        if prev > 0
+            A, Q = transition(model, u[k] - u[prev], Float64)
+            x = A * x
+            P = A * P * A' + Q
+        end
+        ν = y[k] - x[1]
+        s = P[1, 1]
+        seen += 1
+        (flat && seen <= D) || (E += ν^2 / (2s))
+        K = P[:, 1] / s
+        x = x + K * ν
+        P = _symmetric(P - K * P[1, :]')
+        prev = k
+    end
+    return E
+end
+
+"""
     _estimate_map(prior, y, w, x) -> ŷ
 
 [`_estimate_map!`](@ref) into a new vector.
