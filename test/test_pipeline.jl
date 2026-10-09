@@ -366,15 +366,7 @@ end
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
     sol_on = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
-    sol_off = _combined(
-        _fit_chain(
-            (
-                ff,
-                Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge),
-                AdhocPhase(adhoc; gauge),
-            ), ps,
-        )
-    )
+    sol_off = _combined(_fit_chain((ff, AdhocPhase(adhoc; gauge)), ps))
 
     don = _time_averaged_spectra(calibrate(sol_on, ps))
     doff = _time_averaged_spectra(calibrate(sol_off, ps))
@@ -497,15 +489,7 @@ end
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
     sol_on = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
-    sol_off = _combined(
-        _fit_chain(
-            (
-                ff,
-                Bandpass(; model = GainModel(; logamp = default_bandpass_terms().logamp), smoother = FP.PerTrackSmoother(), gauge),
-                AdhocPhase(adhoc; gauge),
-            ), ps,
-        )
-    )
+    sol_off = _combined(_fit_chain((ff, AdhocPhase(adhoc; gauge)), ps))
 
     don = _time_averaged_spectra(calibrate(sol_on, ps))
     doff = _time_averaged_spectra(calibrate(sol_off, ps))
@@ -612,7 +596,7 @@ end
         _fit_chain(
             (
                 ff,
-                Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), smoother = FP.PerTrackSmoother(), gauge),
+                Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), gauge),
                 AdhocPhase(adhoc; gauge),
             ), ps,
         )

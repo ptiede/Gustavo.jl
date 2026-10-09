@@ -1183,3 +1183,33 @@ end
         @test_throws "changed no gain" solve(1, 1, ZeroSumPhase(), geom, results; prior)
     end
 end
+
+# ── One observable ──────────────────────────────────────────────────────────
+
+@testset "JointSmoother: a phase-only or amplitude-only model holds the other at zero" begin
+    nant, nchan, ntime, nscans = 4, 8, 6, 6
+    rng = MersenneTwister(0x0515)
+    gauge = PinAntenna(1)
+    fm = default_fringe_terms()
+    terms = default_bandpass_terms()
+    # Where the data hold no bandpass in the other observable, a one-sided model
+    # gives the same answer as the two-sided one.
+    function compare(obs, data_kw)
+        ps, _ = _build_fringe_ps(; nant, nspw = 1, nchan, ntime, nscans, data_kw...)
+        one_sided = GainModel(; (obs => getproperty(terms, obs),)...)
+        _, sol1 = _fit_chain((BaselineFringeFit(; model = fm, gauge), Bandpass(; model = one_sided, gauge)), ps)
+        _, sol2 = _fit_chain((BaselineFringeFit(; model = fm, gauge), Bandpass(; model = terms, gauge)), ps)
+        return sol1, maximum(abs, _jb_leaf(sol1, obs) .- _jb_leaf(sol2, obs))
+    end
+
+    sol, Δ = compare(:phase, (; bandpass = 0.4 .* randn(rng, nant, 2, nchan), seed = 7))
+    @test Δ < 1.0e-4
+    @test isempty(sol.steps[:bandpass].amp_status)
+
+    abp_true = 0.15 .* randn(rng, nant, 2, nchan)
+    sol, Δ = compare(:logamp, (; amp_bandpass = abp_true, seed = 8))
+    @test Δ < 1.0e-4
+    @test isempty(sol.steps[:bandpass].phase_status)
+    leaf = _jb_leaf(sol, :logamp)
+    @test all(abs(leaf[1, f, c, 1, a] - (abp_true[a, f, c] - sum(abp_true[a, f, :]) / nchan)) < 1.0e-3 for a in 1:nant, f in 1:2, c in 1:nchan)
+end

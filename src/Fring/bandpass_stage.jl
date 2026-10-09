@@ -1092,6 +1092,15 @@ end
 # complex gains `g`; their unwrapped phase tracks `φ`, carried across sweeps so
 # the prior fit never sees a 2π branch cut; the slots a sweep has solved
 # (`touched`) and the gauge pins (`pinned`).
+# The blocks a joint solve holds its complex gains on: the phase blocks, or the
+# amplitude blocks when the model has no phase. Where both exist they match.
+_gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : phase_blocks
+
+# A station's track prior, `nothing` for a track without one or an observable the
+# model holds at zero; and whether either of its tracks has one.
+_prior(track) = isnothing(track) ? nothing : track.prior
+_has_prior(fit) = !isnothing(_prior(fit.phase)) || !isnothing(_prior(fit.amp))
+
 function _block_gains(block, geom::DataGeometry, C::Type)
     ax = (
         _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
@@ -1342,7 +1351,8 @@ end
 # advanced by wrapped increments about its own current value, so no global
 # unwrap is needed inside the loop and the 2π branch cannot flip between
 # iterations. `fits[a]` holds station `a`'s phase and amplitude
-# `(; x, pieces, prior, level, nlevel)` and `levels[a]` its fitted levels, each
+# `(; x, pieces, prior, level, nlevel)`, `nothing` for an observable held at
+# zero, and `levels[a]` its fitted levels, each
 # over `(Feed, level segment, Ti)` or `nothing`. The status and prior arrays,
 # when given, hold one array per block.
 #
@@ -1415,7 +1425,7 @@ function _update_station_gains!(
                     end
                 end
             end
-            linear = relinearize && !(isnothing(fit.phase.prior) && isnothing(fit.amp.prior))
+            linear = relinearize && _has_prior(fit)
             for fs in 1:nfs
                 gh = den[fs] > 0 ? num[fs] / den[fs] : zero(C)
                 ĝ[fs] = gh
@@ -1432,7 +1442,8 @@ function _update_station_gains!(
                     la[fs] = log(abs(gc)) + real(ρ) / κ
                     φ̃[fs] = φ[ai, feed, fs, ts] + imag(ρ) / κ
                 elseif wf[fs] > 0
-                    la[fs] = log(abs(gh))
+                    # With the phase held at zero the least-squares amplitude is `Re ĝ`.
+                    la[fs] = isnothing(fit.phase) ? (real(gh) > 0 ? log(real(gh)) : T(NaN)) : log(abs(gh))
                     # The wrapped increment about this track's current value keeps the
                     # candidate on the same 2π branch as the iterate it refines.
                     φ̃[fs] = φ[ai, feed, fs, ts] +
@@ -1444,19 +1455,26 @@ function _update_station_gains!(
             end
             # The status of the last sweep is the status of the solve: each sweep
             # overwrites the previous one's codes for this node.
-            ast = isnothing(amp_status) ? nothing : view(amp_status[k], ai, feed, :, ts)
-            pst = isnothing(phase_status) ? similar(fit.phase.pieces, Int8) : view(phase_status[k], ai, feed, :, ts)
-            amp_prior, amp_levels = _fit_track!(
-                la, wf, fit.amp.x, fit.amp.pieces, fit.amp.prior;
-                fit.amp.level, fit.amp.nlevel, status = ast, weights = wa,
-            )
-            isnothing(systems) || push!(
-                systems.amp,
-                (; slots = systems.ids[k][ai, feed, 1:nfs, ts], w = wa[1:nfs], fit.amp.x, fit.amp.pieces, prior = amp_prior, fit.amp.level, fit.amp.nlevel),
-            )
-            isnothing(amp_priors) || (amp_priors[k][ai, feed, ts] = amp_prior)
-            isnothing(amp_levels) || (levels[ant].amp[feed, :, ts] .= amp_levels)
-            if all(pins)
+            if isnothing(fit.amp)
+                replace!(v -> isfinite(v) ? zero(T) : v, la)
+            else
+                ast = isnothing(amp_status) ? nothing : view(amp_status[k], ai, feed, :, ts)
+                amp_prior, amp_levels = _fit_track!(
+                    la, wf, fit.amp.x, fit.amp.pieces, fit.amp.prior;
+                    fit.amp.level, fit.amp.nlevel, status = ast, weights = wa,
+                )
+                isnothing(systems) || push!(
+                    systems.amp,
+                    (; slots = systems.ids[k][ai, feed, 1:nfs, ts], w = wa[1:nfs], fit.amp.x, fit.amp.pieces, prior = amp_prior, fit.amp.level, fit.amp.nlevel),
+                )
+                isnothing(amp_priors) || (amp_priors[k][ai, feed, ts] = amp_prior)
+                isnothing(amp_levels) || (levels[ant].amp[feed, :, ts] .= amp_levels)
+            end
+            pst = isnothing(fit.phase) ? nothing :
+                isnothing(phase_status) ? similar(fit.phase.pieces, Int8) : view(phase_status[k], ai, feed, :, ts)
+            if isnothing(fit.phase)
+                replace!(v -> isfinite(v) ? zero(T) : v, φ̃)
+            elseif all(pins)
                 # A wholly pinned track is known rather than fitted: report it as such
                 # instead of leaving it at NODATA.
                 fill!(pst, _BP_TRACK_SOLVED)
@@ -1586,7 +1604,7 @@ end
 # normal matrix: the inverse variance of its log-gain from the data alone.
 function _joint_gain_step!(gains, data, jl, gauge_state, systems)
     (; r, w, S) = data
-    (; ids, edge, slot_pairs, row_slots) = jl
+    (; ids, edge, slot_pairs, row_slots, fitted) = jl
     T = real(eltype(S))
     nslots = sum(length, ids)
     gv = zeros(complex(T), nslots)
@@ -1597,8 +1615,8 @@ function _joint_gain_step!(gains, data, jl, gauge_state, systems)
         gk = gains[k]
         n = idk[I]
         gv[n], φv[n] = gk.g[I], gk.φ[I]
-        amp_free[n] = gk.touched[I]
-        phase_free[n] = gk.touched[I] && !gk.pinned[I]
+        amp_free[n] = fitted.amp && gk.touched[I]
+        phase_free[n] = fitted.phase && gk.touched[I] && !gk.pinned[I]
     end
 
     function chi2(g)
@@ -2004,13 +2022,16 @@ _level_at(lw, ts) = merge(lw, (; values = view(lw.values, :, :, ts)))
 # The band means are removed at θ's precision, which may exceed the gains': the
 # gauge is a property of θ.
 function _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers; max_logamp)
-    for (k, (pb, ab)) in enumerate(zip(phase_blocks, amp_blocks))
-        T = eltype(pb.θ)
-        (; g, φ, touched) = gains[k]
-        for (ai, a) in pairs(pb.stations), f in axes(g, Feed), ts in layout.present[a]
+    for (k, gk) in pairs(gains)
+        pb, ab = get(phase_blocks, k, nothing), get(amp_blocks, k, nothing)
+        block = something(pb, ab)
+        T = eltype(block.θ)
+        (; g, φ, touched) = gk
+        node(b, f) = isnothing(b) ? 0 : _feed_node(b.plan.tying, f)
+        for (ai, a) in pairs(block.stations), f in axes(g, Feed), ts in layout.present[a]
             valid = view(touched, ai, f, :, ts)
             any(valid) || continue
-            pnode, anode = _feed_node(pb.plan.tying, f), _feed_node(ab.plan.tying, f)
+            pnode, anode = node(pb, f), node(ab, f)
             phase(fs) = T(φ[ai, f, fs, ts])
             logamp(fs) = log(T(abs(g[ai, f, fs, ts])))
             mphase = angle(sum(cis(phase(fs)) for fs in axes(g, Frequency) if valid[fs]))
@@ -2054,9 +2075,10 @@ two priors.
 Because the per-scan source term absorbs a baseline's own structure, this suits a
 resolved or polarized calibrator, where [`PerTrackSmoother`](@ref)'s closure
 assumption would bias the bandpass. It solves one complex gain per
-(station, feed, frequency segment), so it requires a model with both a phase
-and a log-amplitude shape on one frequency and one time segmentation per
-station; their priors and levels may differ.
+(station, feed, frequency segment), so a model with both a phase and a
+log-amplitude shape must give them one frequency and one time segmentation per
+station; their priors and levels may differ. A model with only one of them
+holds the other at zero: unit amplitude, or zero phase.
 
 Sweeps stop once no gain moves by more than `tolerance` of its standard error
 from the data, and warn if `max_iterations` sweeps pass first: an unconverged
@@ -2075,14 +2097,7 @@ function validate_model(::JointSmoother, model)
     validate_bandpass_groups(model)
     ph = _shape_component(model.phase)
     la = _shape_component(model.logamp)
-    !isnothing(ph) && !isnothing(la) || throw(
-        ArgumentError(
-            "JointSmoother requires both a phase and a logamp component — it solves one " *
-                "COMPLEX gain per (station, feed, segment), not independent phase/log-amp " *
-                "tracks. Use `smoother = PerTrackSmoother()` for a phase-only or " *
-                "amplitude-only bandpass.",
-        ),
-    )
+    (isnothing(ph) || isnothing(la)) && return nothing
     ph.Frequency == la.Frequency || throw(
         ArgumentError(
             "JointSmoother requires the phase and logamp shapes to share one frequency " *
@@ -2117,12 +2132,13 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
     amp_blocks = bandpass_blocks(setup, θ, :logamp)
     # One complex gain per (station, feed, segment) means one time segmentation
     # for both observables — `validate_model` holds each station's two plans to
-    # it — so the phase side's table is the whole solve's.
-    tseg = _station_time_segments(phase_blocks, results, length(geom.stations))
-    phase_status = [_block_status_array(b, geom) for b in phase_blocks]
-    amp_status = [_block_status_array(b, geom) for b in amp_blocks]
-    phase_priors = [_block_prior_array(b, geom) for b in phase_blocks]
-    amp_priors = [_block_prior_array(b, geom) for b in amp_blocks]
+    # it — so either side's table is the whole solve's.
+    tseg = _station_time_segments(_gain_blocks(phase_blocks, amp_blocks), results, length(geom.stations))
+    arrays(f, blocks) = isempty(blocks) ? nothing : [f(b, geom) for b in blocks]
+    phase_status = arrays(_block_status_array, phase_blocks)
+    amp_status = arrays(_block_status_array, amp_blocks)
+    phase_priors = arrays(_block_prior_array, phase_blocks)
+    amp_priors = arrays(_block_prior_array, amp_blocks)
     for idx in _joint_scan_groups(tseg)
         solve_joint_bandpass!(
             θ, results[idx], geom, phase_blocks, amp_blocks;
@@ -2132,9 +2148,10 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
             tseg = view(tseg, :, idx), phase_status, amp_status, phase_priors, amp_priors,
         )
     end
+    leaves(arrays) = isnothing(arrays) ? nothing : _block_leaves(arrays)
     report = bandpass_track_report(
-        _block_leaves(phase_status), _block_leaves(amp_status);
-        phase_priors = _block_leaves(phase_priors), amp_priors = _block_leaves(amp_priors),
+        leaves(phase_status), leaves(amp_status);
+        phase_priors = leaves(phase_priors), amp_priors = leaves(amp_priors),
     )
     _warn_degenerate_bandpass(report)
     return report
@@ -2166,7 +2183,9 @@ gain. Each track is fit under its own block's prior, one spectral window at a
 time, with the prior's hyperparameters and any levels re-estimated every sweep.
 A station's two shapes must hold the same stations on the same frequency and
 time segmentations, which `validate_model(::JointSmoother, model)` enforces at
-model-compile time; the throw here guards direct callers.
+model-compile time; the throw here guards direct callers. Either list may be
+empty, which holds that observable at zero: unit amplitude, or zero phase and
+no gauge.
 
 `geom` supplies the stations the `AntennaPair` labels name (θ's stations, in
 θ's order) and the channel frequencies the priors are fit along.
@@ -2247,7 +2266,8 @@ function solve_joint_bandpass!(
     # the throw guards direct callers).
     _same_segmentation(pb, ab) =
         pb.stations == ab.stations && pb.plan.fseg_id == ab.plan.fseg_id && pb.plan.tseg_id == ab.plan.tseg_id
-    length(amp_blocks) == length(phase_blocks) && all(splat(_same_segmentation), zip(phase_blocks, amp_blocks)) || throw(
+    isempty(phase_blocks) || isempty(amp_blocks) ||
+        length(amp_blocks) == length(phase_blocks) && all(splat(_same_segmentation), zip(phase_blocks, amp_blocks)) || throw(
         ArgumentError(
             "solve_joint_bandpass!: the phase and logamp components give the stations " *
                 "different segmentations — the solve carries one COMPLEX gain per " *
@@ -2258,7 +2278,8 @@ function solve_joint_bandpass!(
     # The data are reduced onto the refinement of every block's frequency
     # segmentation, and each station's gain is held in its own segments — one
     # gain over however many refinement cells that segment spans.
-    fseg, cells = _station_freq_segments(phase_blocks, nant)
+    blocks = _gain_blocks(phase_blocks, amp_blocks)
+    fseg, cells = _station_freq_segments(blocks, nant)
     r, w = _reduce_all_scans(scans, cells, Frequency(_segment_lookup(geom.channel_freqs, cells)))
     ends = _cell_nodes(r, geom.stations, PerFeed())
     S = zeros(eltype(r), (Scan(axes(r, Scan)), dims(r, AntennaPair), dims(r, FeedPair)))
@@ -2267,34 +2288,38 @@ function solve_joint_bandpass!(
     # The time segments each station is actually solved for here, in its own
     # segmentation's numbering — the numbering of its block's `Ti` axis.
     tsg = isnothing(tseg) ? ones(Int, nant, length(scans)) : tseg
-    loc = _block_locations(phase_blocks, nant)
+    loc = _block_locations(blocks, nant)
     layout = (;
         loc, tseg = tsg, fseg,
         present = [sort!(filter!(!iszero, unique(view(tsg, a, :)))) for a in axes(tsg, 1)],
         touching = _joint_bandpass_touching(ends, nant, geom.nfeed),
     )
-    gains = [_block_gains(b, geom, eltype(r)) for b in phase_blocks]
-    gauge_state = _joint_bandpass_gauge!(gains, data, layout, phase_blocks, gauge)
+    gains = [_block_gains(b, geom, eltype(r)) for b in blocks]
+    # The gauge fixes phases; a solve that holds every phase at zero has none to fix.
+    gauge_state = isempty(phase_blocks) ? nothing : _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
 
-    segs = [_shape_segments(b.plan, geom) for b in phase_blocks]
+    segs = [_shape_segments(b.plan, geom) for b in blocks]
     phase_level = _station_levels(phase_level_blocks, segs, loc, geom, θ, real(eltype(r)))
     amp_level = _station_levels(amp_level_blocks, segs, loc, geom, θ, real(eltype(r)))
     fits = map(1:nant) do a
         k, ai = loc[a]
         iszero(k) && return nothing
         seg = segs[k]
-        track(blocks, level) = (;
+        track(blocks, level) = isempty(blocks) ? nothing : (;
             seg.x, seg.pieces, prior = _prior_along(blocks[k].plan.priors[ai], :Frequency),
             level = isnothing(level) ? nothing : level.level, nlevel = isnothing(level) ? 0 : level.nlevel,
         )
         return (; phase = track(phase_blocks, phase_level[a]), amp = track(amp_blocks, amp_level[a]))
     end
     levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
-    _reject_partial_pins(gains, fits, loc, phase_blocks, geom)
-    joint = _joint_gain_layout(gains, data, layout, gauge_state)
+    _reject_partial_pins(gains, fits, loc, geom)
+    joint = merge(
+        _joint_gain_layout(gains, data, layout, gauge_state),
+        (; fitted = (; phase = !isempty(phase_blocks), amp = !isempty(amp_blocks))),
+    )
     # Under a prior the sweep linearizes about the current gains, whose fixed point
     # is the MAP, and each iteration is held to decreasing the MAP objective.
-    guarded = any(f -> !isnothing(f) && !(isnothing(f.phase.prior) && isnothing(f.amp.prior)), fits)
+    guarded = any(f -> !isnothing(f) && _has_prior(f), fits)
     systems = (; joint.ids, phase = NamedTuple[], amp = NamedTuple[])
 
     _update_source_coherence!(data, gains, layout)
@@ -2383,10 +2408,10 @@ _joint_level_writer(l, values) = (; l.leaf, l.tying, l.seg, values, l.ai)
 # constrained fit only when the track's segments are fit independently. A phase
 # prior relates them, so a partly pinned track under one is rejected rather than
 # fit with one segment overwritten.
-function _reject_partial_pins(gains, fits, loc, blocks, geom::DataGeometry)
+function _reject_partial_pins(gains, fits, loc, geom::DataGeometry)
     for a in eachindex(loc, fits)
         k, ai = loc[a]
-        (iszero(k) || isnothing(fits[a].phase.prior)) && continue
+        (iszero(k) || isnothing(_prior(fits[a].phase))) && continue
         st = gains[k]
         for ts in axes(st, Ti), feed in axes(st, Feed)
             track = view(st.pinned, ai, feed, :, ts)

@@ -354,10 +354,7 @@ end
         # before any data is read.
         @test_throws ArgumentError fit(Bandpass(; model = GainModel(), smoother = pertrack, gauge = PinAntenna(1)), ps)
         @test_throws "fits nothing" fit(Bandpass(; model = GainModel(), smoother = pertrack, gauge = PinAntenna(1)), ps)
-        # JointSmoother is stricter: one complex gain per (station, feed, segment)
-        # needs both observables, not just one — so it rejects a model
-        # PerTrackSmoother would happily solve.
-        @test_throws "JointSmoother requires" fit(Bandpass(; model = phase_only, gauge = PinAntenna(1)), ps)
+        @test fit(Bandpass(; model = phase_only, gauge = PinAntenna(1)), ps) isa CAL.CalibrationSolution
         @test fit(Bandpass(; model = phase_only, smoother = pertrack, gauge = PinAntenna(1)), ps) isa
             CAL.CalibrationSolution
         # Its two shapes share one frequency segmentation: one complex gain per segment.
