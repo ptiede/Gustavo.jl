@@ -1074,6 +1074,48 @@ end
     end
 end
 
+# ── Stopping in standard errors ──────────────────────────────────────────────
+#
+# A station whose data carry almost no information moves by large fractions of
+# a radian between sweeps long after the solution has settled within its
+# standard error; the default tolerance stops on the change in standard errors.
+
+@testset "JointSmoother: the default tolerance stops within a fraction of a standard error" begin
+    nant, nchan = 5, 48
+    anames = ["A$i" for i in 1:nant]
+    geom = _seg_geometry(nchan; nant)
+    comp = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed())
+    l = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp), logamp = (; bandpass = comp)), anames, geom)
+    setup = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)))
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    feeds = [(1, 1), (2, 2)]
+    rng = MersenneTwister(308)
+    gtrue = exp.(complex.(0.1 .* randn(rng, nant, 2, 1, nchan), 0.6 .* randn(rng, nant, 2, 1, nchan)))
+    S = [(0.5 + rand(rng)) * cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, _ in feeds]
+    results = _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs, feeds, geom)
+    # Weight 1/σ² per real component; station A5 carries 2e-6 of the rest's.
+    for res in results, (bi, (a, b)) in pairs(bl_pairs)
+        w = nant in (a, b) ? 1.0e-4 : 50.0
+        res.wl[bi, :, :] .= w
+        res.rl[bi, :, :] .= w .* res.rl[bi, :, :] .+ sqrt(w) .* complex.(randn(rng, 2, nchan), randn(rng, 2, nchan))
+    end
+    function solve(; kw...)
+        θ = zeros(l.nθ)
+        pb, ab = FP.bandpass_blocks(setup, θ, :phase), FP.bandpass_blocks(setup, θ, :logamp)
+        FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), kw...)
+        return only(pb).θ[1, :, :, 1, :]
+    end
+    # A relative-change criterion needs over 160 sweeps here.
+    φ_default = @test_logs solve(max_iterations = 60)
+    φ_tight = solve(max_iterations = 5000, tolerance = 1.0e-8)
+    # Phase standard error of a well-measured station's slot: 1/√(Σ w|m|²) over
+    # its 4 baselines and 4 scans, with |g| ≈ 1 and |S| ≥ 0.5.
+    σφ = 1 / sqrt(4 * 4 * 50.0 * 0.25)
+    @test maximum(abs, rem2pi.(φ_default[:, :, 1:(nant - 1)] .- φ_tight[:, :, 1:(nant - 1)], RoundNearest)) < 0.1σφ
+
+    @test_logs (:warn, r"did not converge in 2 sweeps: the last sweep moved a gain by .* of its standard error \(A\d, feed \d, frequency segment \d+, time segment 1\)") solve(max_iterations = 2)
+end
+
 # ── Band-referenced products and declined tracks ─────────────────────────────
 
 @testset "JointSmoother: gauges agree on band-referenced products" begin

@@ -1582,8 +1582,8 @@ end
 # solved by `_joint_prior_solve`. Pinned slots keep their phase; any other gauge
 # is restored after the step by shifting each component's phase along its free
 # direction, which a full step under a prior leaves unchanged and which is
-# exact without one. Returns the largest gauge-constraint residual before that
-# shift.
+# exact without one. Returns each slot's information, the diagonal of the
+# normal matrix: the inverse variance of its log-gain from the data alone.
 function _joint_gain_step!(gains, data, jl, gauge_state, systems)
     (; r, w, S) = data
     (; ids, edge, slot_pairs, row_slots) = jl
@@ -1655,13 +1655,11 @@ function _joint_gain_step!(gains, data, jl, gauge_state, systems)
         end
     end
 
-    maxres = zero(T)
     shift = zeros(T, nslots)
     if !isnothing(gauge_state)
         for (j, row) in pairs(gauge_state.rows)
             isempty(row) && continue
             res = sum(c * (φv[n] + step * δφ[n]) for (n, c) in row) - gauge_state.d[j]
-            maxres = max(maxres, abs(res))
             α = -res / sum(last, row)
             for n in row_slots[j]
                 shift[n] += α
@@ -1676,7 +1674,12 @@ function _joint_gain_step!(gains, data, jl, gauge_state, systems)
         gk.g[I] *= exp(complex(step * δℓ[n], Δφ))
         gk.φ[I] += Δφ
     end
-    return maxres
+    information = zeros(nslots)
+    for (e, (na, nb)) in pairs(slot_pairs)
+        information[na] += q[e]
+        information[nb] += q[e]
+    end
+    return information
 end
 
 # Solve `Σ_e q_e·(x_a + s·x_b)²`'s normal equations `H·δ = b` over the `free`
@@ -1954,16 +1957,30 @@ function _backtrack_joint!(gains, previous, previous_φ, data, layout, systems)
     return false
 end
 
-# The largest relative change of any gain from `previous`, the gains a sweep
-# started from.
-function _largest_relative_change(gains, previous)
-    T = real(eltype(first(gains).g))
-    worst = zero(T)
-    for (gk, prev) in zip(gains, previous), I in eachindex(gk.g, prev)
-        new, old = gk.g[I], prev[I]
-        worst = max(worst, abs(new - old) / max(abs(old), abs(new), eps(T)))
+# The largest change of any gain's log from `previous`, the gains a sweep
+# started from, in standard errors of its `information` (slots numbered by
+# `ids`), and the `(k, I)` of that gain. A change within the gains' own
+# precision is none; a gain that reaches or leaves zero moves infinitely far
+# unless the data hold no information on it.
+function _largest_weighted_change(gains, previous, ids, information)
+    worst, at = 0.0, nothing
+    for (k, gk) in pairs(gains), I in eachindex(gk.g, previous[k])
+        wn = information[ids[k][I]]
+        wn > 0 || continue
+        new, old = gk.g[I], previous[k][I]
+        Δ = iszero(new) || iszero(old) ? (new == old ? 0.0 : Inf) : abs(complex(log(abs(new / old)), angle(new / old)))
+        Δ > 16 * eps(real(eltype(gk.g))) || continue
+        change = sqrt(wn) * Δ
+        change > worst && ((worst, at) = (change, (k, CartesianIndices(gk.g)[I])))
     end
-    return worst
+    return worst, at
+end
+
+# `" (station, feed f, frequency segment s, time segment t)"` for gain `I` of block `k`.
+function _slot_description(geom::DataGeometry, loc, k, I)
+    ai, f, fs, ts = Tuple(I)
+    ant = findfirst(==((k, ai)), loc)
+    return " ($(geom.stations[ant]), feed $f, frequency segment $fs, time segment $ts)"
 end
 
 # A joint level writer's values at time segment `ts`.
@@ -2023,7 +2040,7 @@ function _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_w
 end
 
 """
-    JointSmoother(; max_iterations = 200, tolerance = nothing)
+    JointSmoother(; max_iterations = 200, tolerance = 0.01)
 
 Fit the station bandpass against the actual complex visibilities, with each
 component's prior acting inside the solve rather than as a fit applied to it
@@ -2041,19 +2058,16 @@ assumption would bias the bandpass. It solves one complex gain per
 and a log-amplitude shape on one frequency and one time segmentation per
 station; their priors and levels may differ.
 
-Sweeps stop once no gain changes by more than `tolerance` relative to its
-magnitude and a sweep leaves the gauge's constraints within `tolerance` radians, and
-warn if `max_iterations` sweeps pass first: an unconverged solve still depends
-on its starting point. The default
-`tolerance = nothing` is `max(1e-8, 16·eps(T))` for the data's real type `T`,
-the smallest a `Float32` solve can resolve.
+Sweeps stop once no gain moves by more than `tolerance` of its standard error
+from the data, and warn if `max_iterations` sweeps pass first: an unconverged
+solve still depends on its starting point.
 """
 struct JointSmoother <: AbstractBandpassSmoother
     max_iterations::Int
-    tolerance::Union{Nothing, Float64}
+    tolerance::Float64
 end
-JointSmoother(; max_iterations::Integer = 200, tolerance::Union{Nothing, Real} = nothing) =
-    JointSmoother(Int(max_iterations), isnothing(tolerance) ? nothing : Float64(tolerance))
+JointSmoother(; max_iterations::Integer = 200, tolerance::Real = 0.01) =
+    JointSmoother(Int(max_iterations), Float64(tolerance))
 
 can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
@@ -2129,7 +2143,7 @@ end
 """
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
-                          gauge, max_iterations = 200, tolerance = nothing,
+                          gauge, max_iterations = 200, tolerance = 0.01,
                           max_logamp = log(10.0), phase_status = nothing,
                           amp_status = nothing, phase_priors = nothing,
                           amp_priors = nothing, tseg = nothing)
@@ -2183,13 +2197,15 @@ splits — disjoint sub-arrays, or every station segmented at the same epoch —
 each piece carries its own arbitrary constant, and a per-station change read
 across the split is that constant plus the change.
 
-Convergence is judged on the largest relative per-iteration gain change over
-every (station, feed, segment) node solved here, together with the largest
-gauge-constraint residual a sweep leaves before the constraints are imposed, not a tracked χ² (which would
-need a per-channel power accumulator this stage does not keep). The scans handed
-to one call are a connected piece of the coupling graph, so this is one
-criterion over one coupled problem: nodes that share no data are solved by
-separate calls rather than being averaged into a common tolerance.
+Convergence is judged on the largest per-iteration change of any
+(station, feed, segment) gain's log, in standard errors of that gain from the
+data (the inverse square root of its weight in the joint step), so a gain the
+data barely constrain counts for as little as its precision. The solve stops
+once that is below `tolerance`, or once an iteration under a prior cannot lower
+the objective yet moved no gain by `tolerance`. The scans handed to one call are
+a connected piece of the coupling graph, so this is one criterion over one
+coupled problem: nodes that share no data are solved by separate calls rather
+than being averaged into a common tolerance.
 
 A station-by-station sweep moves slowly along any direction that only weakly
 measured correlations constrain, such as the phase between feeds, which only
@@ -2203,9 +2219,9 @@ plus each track's prior energy at the hyperparameters the sweep resolves, with
 any level profiled out (the prior acts on the track less its level). The sweep then linearizes each slot about its current gain,
 whose fixed point is that posterior's mode, and every iteration is held to
 lowering it by backtracking along its step. An iteration that cannot lower it
-stops the solve with a warning: the objective is flat or not convex there,
-typically because a prior too stiff for the data drives an amplitude toward
-zero, where the mode does not exist.
+stops the solve, with a warning if it moved a gain by `tolerance` or more: the
+objective is then flat or not convex there, typically because a prior too stiff
+for the data drives an amplitude toward zero, where the mode does not exist.
 
 `phase_status`/`amp_status`, when given, hold one `(AntennaName, Feed, Frequency, Ti)`
 array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref)),
@@ -2217,7 +2233,7 @@ only its own time segments.
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
-        gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Union{Nothing, Real} = nothing,
+        gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Real = 0.01,
         max_logamp::Real = _BP_MAX_LOGAMP,
         phase_status = nothing, amp_status = nothing,
         phase_priors = nothing, amp_priors = nothing,
@@ -2282,10 +2298,7 @@ function solve_joint_bandpass!(
     systems = (; joint.ids, phase = NamedTuple[], amp = NamedTuple[])
 
     _update_source_coherence!(data, gains, layout)
-    T = real(eltype(r))
-    tolerance = something(tolerance, max(1.0e-8, 16 * eps(T)))
-    maxrel = convert(T, Inf)
-    maxres = zero(T)
+    change, worst = Inf, nothing
     previous = [copy(gk.g) for gk in gains]
     previous_φ = [copy(gk.φ) for gk in gains]
     stalled = false
@@ -2299,23 +2312,25 @@ function solve_joint_bandpass!(
             phase_status, amp_status, phase_priors, amp_priors,
         )
         iszero(nupdated) && _throw_unchanged_sweep(declined, geom)
-        maxres = _joint_gain_step!(gains, data, joint, gauge_state, systems)
+        information = _joint_gain_step!(gains, data, joint, gauge_state, systems)
         _update_source_coherence!(data, gains, layout)
+        change, worst = _largest_weighted_change(gains, previous, joint.ids, information)
+        # A sweep the safeguard rejects has converged if it moved no gain by `tolerance`.
         if guarded && iter > 1 && !_backtrack_joint!(gains, previous, previous_φ, data, layout, systems)
-            stalled = true
+            stalled = change >= tolerance
             break
         end
-        maxrel = _largest_relative_change(gains, previous)
-        maxrel < tolerance && maxres < tolerance && break
+        guarded && ((change, worst) = _largest_weighted_change(gains, previous, joint.ids, information))
+        change < tolerance && break
     end
+    location = isnothing(worst) ? "" : _slot_description(geom, loc, worst...)
     stalled && @warn "the joint bandpass solve stopped after a sweep that could not lower its MAP " *
-        "objective even at a 64th of its step; the largest relative gain change before it was " *
-        "$maxrel. The objective is flat or not convex near this point, often because a prior " *
+        "objective even at a 64th of its step; that sweep moved a gain by $change of its standard " *
+        "error$location. The objective is flat or not convex near this point, often because a prior " *
         "is too stiff for the data, which can drive a gain's amplitude toward zero."
-    stalled || maxrel < tolerance && maxres < tolerance || @warn "the joint bandpass solve did not converge in " *
-        "$max_iterations sweeps: the largest relative gain change is $maxrel and the largest gauge " *
-        "constraint residual $maxres rad, against a tolerance of $tolerance; " *
-        "raise `JointSmoother(; max_iterations)`"
+    stalled || change < tolerance || @warn "the joint bandpass solve did not converge in " *
+        "$max_iterations sweeps: the last sweep moved a gain by $change of its standard error$location, " *
+        "against a tolerance of $tolerance; raise `JointSmoother(; max_iterations)`"
 
     level_writers = [
         (; phase = _joint_level_writer(phase_level[a], levels[a].phase), amp = _joint_level_writer(amp_level[a], levels[a].amp))

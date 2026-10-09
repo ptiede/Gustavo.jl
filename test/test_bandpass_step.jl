@@ -912,12 +912,12 @@ end
         )
     end
 
-    # The alternating solve converges slowly on this model: a sweep change of
-    # 2e-6 still leaves 1e-5 rad, so it runs to Float32's resolution instead.
+    # The solve converges slowly on this model, so it runs far below the default
+    # tolerance to resolve the break to 1e-6 rad.
     sol = fit(
         Bandpass(;
             model = het,
-            smoother = FP.JointSmoother(max_iterations = 400, tolerance = 1.0e-12),
+            smoother = FP.JointSmoother(max_iterations = 400, tolerance = 1.0e-6),
             gauge = PinAntenna(1),
         ),
         uvset,
