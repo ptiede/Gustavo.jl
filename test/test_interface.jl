@@ -109,9 +109,9 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
-    @testset "a step without a gauge throws; an unknown station is named" begin
+    @testset "every step defaults to ZeroSumPhase; an unknown station is named" begin
         ps, _ = _build_fringe_ps()
-        @test_throws "BaselineFringeFit needs a `gauge`" BaselineFringeFit()
+        @test all(st -> st.gauge === ZeroSumPhase(), (BaselineFringeFit(), Bandpass(), AdhocPhase(), AdhocPhase(FP.PerTrackAdhocSmoother())))
         @test_throws "station code \"ZZ\" not in antenna table" fit(BaselineFringeFit(; gauge = PinAntenna("ZZ")), ps)
     end
 

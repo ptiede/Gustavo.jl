@@ -976,7 +976,6 @@ end
         @test length(_joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1))) == 2 * nchan
     end
 
-    @test Bandpass().gauge === ZeroSumPhase()
 end
 
 @testset "JointSmoother: weak cross-hands converge in a few sweeps" begin

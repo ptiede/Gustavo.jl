@@ -35,8 +35,8 @@ The execution model behind them:
   `GeometryWindow(ctx.geom, ms)` addresses a Measurement Set in the solve's
   index space. `each_group` returns `f`'s results in group order. A solve that iterates, such as a residual
   re-search, calls `each_group` once per round.
-- **A step carries its own gauge.** The built-in steps take a required `gauge`
-  keyword, and `step_gauge(step)` returns it. `fit` resolves the station codes
+- **A step carries its own gauge.** The built-in steps take a `gauge` keyword,
+  `ZeroSumPhase()` by default, and `step_gauge(step)` returns it. `fit` resolves the station codes
   of the returned gauge against the run's antenna table and hands the result to
   `solve` as `ctx.gauge`. A step without a `step_gauge` method has none:
   `ctx.gauge` is `nothing`.

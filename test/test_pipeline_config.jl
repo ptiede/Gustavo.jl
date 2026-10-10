@@ -175,7 +175,6 @@ end
         # A bare index is not a gauge, so it is rejected rather than silently
         # treated as one.
         @test_throws "`gauge` must be an AbstractGauge, got 2" BaselineFringeFit(; gauge = 2)
-        @test_throws "BaselineFringeFit needs a `gauge`" BaselineFringeFit()
     end
 end
 

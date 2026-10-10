@@ -4,15 +4,15 @@
 # components and implements `solve`, reading the data through `each_group`.
 
 """
-    BaselineFringeFit(; gauge, model = default_fringe_terms(), search = FringeSearch(),
+    BaselineFringeFit(; gauge = ZeroSumPhase(), model = default_fringe_terms(), search = FringeSearch(),
                       closure = Stationization(), rounds = 1, steer_cells = 9.0)
 
 The fringe-fitting stage: a per-baseline delay/rate matched-filter `search` on
 every scan group, then the closure-screened station WLS (`closure`) that ties
 the feeds. What is solved is `model`, a phase-only [`GainModel`](@ref):
 per-scan constant/delay/rate and the inter-feed offsets; see
-[`Fring.default_fringe_terms`](@ref) for the default. `gauge` (required, an
-[`AbstractGauge`](@ref)) fixes the station systems' undetermined values, with
+[`Fring.default_fringe_terms`](@ref) for the default. `gauge`, an
+[`AbstractGauge`](@ref), fixes the station systems' undetermined values, with
 its full constraints; a [`ByComponent`](@ref) names components of `model`.
 
 With one round and an all-per-scan model, each scan's station systems solve as
@@ -52,7 +52,7 @@ Base.@kwdef struct BaselineFringeFit{M <: GainModel, C <: Fring.Stationization, 
     closure::C = Fring.Stationization()
     rounds::Int = 1
     steer_cells::R = 9.0
-    gauge::G = _missing_gauge(BaselineFringeFit)
+    gauge::G = ZeroSumPhase()
     function BaselineFringeFit(model::M, search, closure::C, rounds, steer_cells::R, gauge::G) where {M, C, R, G}
         _check_step_gauge(gauge, model)
         return new{M, C, R, G}(model, search, closure, rounds, steer_cells, gauge)
@@ -79,10 +79,10 @@ imposes its constraints inside every sweep. `JointSmoother` solves one complex g
 the other half at zero. The model is self-contained, so placing
 `Bandpass` before or after `BaselineFringeFit` is equally legal.
 
-Unlike the other steps, `Bandpass` has a default gauge, `ZeroSumPhase()`: the
-phase the data leave free is a spectrum common to every station, and a pin
-moves the reference station's bandpass into every other station's track and
-so into its prior, while the mean over stations biases none.
+The phase the data leave free is a spectrum common to every station.
+`PinAntenna` moves the reference station's bandpass into every other station's
+track, and so into its prior, which suits a reference with a clean, stable
+bandpass; `ZeroSumPhase()` takes the mean over stations and biases none.
 
 The bandpass is fit on data the fringe solution has already corrected, for
 example on calibrator scans held in memory:
@@ -102,8 +102,8 @@ end
 provides(::Bandpass) = :bandpass
 
 """
-    AdhocPhase(; gauge, model = default_adhoc_terms(), smoother = PerTrackAdhocSmoother())
-    AdhocPhase(smoother; gauge)
+    AdhocPhase(; gauge = ZeroSumPhase(), model = default_adhoc_terms(), smoother = PerTrackAdhocSmoother())
+    AdhocPhase(smoother; gauge = ZeroSumPhase())
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
 globally-closing per-AP station phase on the fringe/bandpass residual. What is
@@ -113,8 +113,8 @@ its prior along time — see [`Fring.default_adhoc_terms`](@ref) for the default
 `smoother`, a pluggable [`Fring.AbstractAdhocSmoother`](@ref)
 ([`Fring.PerTrackAdhocSmoother`](@ref) or [`Fring.JointKalmanSmoother`](@ref), which
 requires the feed-common (`SharedFeeds`) model). The one-argument form takes
-the smoother and keeps the default model. `gauge` (required, an
-[`AbstractGauge`](@ref)) sets each AP's convention after smoothing, so the
+the smoother and keeps the default model. `gauge`, an
+[`AbstractGauge`](@ref), sets each AP's convention after smoothing, so the
 applied correction does not depend on it: `PinAntenna` holds the first of its
 references present in that AP at 0, and `ZeroSumPhase` centers every AP on the
 stations covered throughout the scan.
@@ -126,24 +126,16 @@ one `Ti` value per scan, its first AP epoch.
 Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother, G <: AbstractGauge} <: SolveStep
     model::M = Fring.default_adhoc_terms()
     smoother::S = Fring.PerTrackAdhocSmoother()
-    gauge::G = _missing_gauge(AdhocPhase)
+    gauge::G = ZeroSumPhase()
     function AdhocPhase(model::M, smoother::S, gauge::G) where {M, S, G}
         _check_step_gauge(gauge, model)
         return new{M, S, G}(model, smoother, gauge)
     end
 end
-AdhocPhase(smoother::Fring.AbstractAdhocSmoother; gauge = _missing_gauge(AdhocPhase)) = AdhocPhase(; smoother, gauge)
+AdhocPhase(smoother::Fring.AbstractAdhocSmoother; gauge = ZeroSumPhase()) = AdhocPhase(; smoother, gauge)
 provides(::AdhocPhase) = :adhoc
 
 step_gauge(s::Union{BaselineFringeFit, Bandpass, AdhocPhase}) = s.gauge
-
-_missing_gauge(T) = throw(
-    ArgumentError(
-        "$(nameof(T)) needs a `gauge`: `PinAntenna(\"A1\")` (a reference station, or a ranked " *
-            "list), `ZeroSumPhase()`, or `ByComponent((; component = gauge, …); default = gauge)` " *
-            "to choose by component.",
-    ),
-)
 
 # Every component path of `model` without its `:phase`/`:logamp` root, over the
 # base tree and each station entry.
