@@ -1,0 +1,270 @@
+# ── Corrections and `calibrate` on Measurement Sets ──────────────────────────
+#
+# Each built-in correction against a direct computation, on a hand-built
+# solution, so these tests do not depend on any solver.
+
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
+
+const CALc = Gustavo.Calibration
+
+_halve_weights(ms) = (parent(ms[:weight]) ./= 2; ms)
+
+# A solution over `geom` with a per-(scan, window) phase and a per-channel
+# amplitude, each per feed, set to seeded random values.
+function _hand_solution(geom; info = (;), seed = 7)
+    model = CALc.GainModel(;
+        phase = (; ph = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.PerScan(), Frequency = CALc.PerSpectralWindow(), Feed = CALc.PerFeed())),
+        logamp = (; la = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.GlobalTime(), Frequency = CALc.ChannelBlocks(1), Feed = CALc.PerFeed())),
+    )
+    layout = CALc.plan_parameters(model, geom.stations, geom)
+    θ = 0.3 .* randn(StableRNG(seed), layout.nθ)
+    return CALc.CalibrationSolution(
+        model, layout, geom, θ, info; name = :hand,
+    )
+end
+
+_with_stations(geom, stations) = CALc.DataGeometry(;
+    geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.channel_widths, geom.t0, geom.f0,
+    geom.scan_names, geom.spw_names, stations, geom.nfeed,
+)
+
+# The largest relative error of `out` against `ms` divided by `sol`'s gains,
+# over every cell, visibilities and weights.
+function _division_error(out, ms, sol, geom)
+    win = CALc.GeometryWindow(geom, ms)
+    g = parent(CALc.gains(sol, win))
+    feeds = Gustavo.feed_pairs(ms)
+    worst = 0.0
+    for p in axes(feeds, 1), bi in axes(feeds, 2), c in eachindex(win.chan_idx), t in eachindex(win.ti_idx)
+        a, b = win.stations[bi]
+        fa, fb = feeds[p, bi]
+        den = g[c, t, a, fa] * conj(g[c, t, b, fb])
+        cell = (Polarization(p), BaselineID(bi), Frequency(c), Ti(t))
+        v = ms[:visibility][cell...] / den
+        w = ms[:weight][cell...] * abs2(den)
+        worst = max(worst, abs(out[:visibility][cell...] - v) / abs(v), abs(out[:weight][cell...] - w) / w)
+    end
+    return worst
+end
+
+@testset "corrections" begin
+    ps, _ = _build_fringe_ps(; nscans = 2, nspw = 2)
+    geom = CALc.DataGeometry(ps)
+    sol = _hand_solution(geom)
+    ms = read(first(ps))
+    fresh() = deepcopy(ms)
+
+    @testset "baselines relating different feed pairs" begin
+        lr_ps, _ = _build_fringe_ps(; polarizations = ["RR", "LL"], receptor_order = Dict("A2" => ["L", "R"]))
+        lr_geom = CALc.DataGeometry(lr_ps)
+        lr = read(first(lr_ps))
+        @test _division_error(calibrate!(_hand_solution(lr_geom), deepcopy(lr); apply_flags = false), lr, _hand_solution(lr_geom), lr_geom) < 1.0e-6
+    end
+
+    @testset "a feed count read from the antenna table" begin
+        @test geom.nfeed == 2
+        for receptors in (("R",), ("R", "L", "X"))
+            n = length(receptors)
+            products = [a * b for a in receptors for b in receptors]
+            ps_n, _ = _build_fringe_ps(; polarizations = products, receptors)
+            geom_n = CALc.DataGeometry(ps_n)
+            @test geom_n.nfeed == n
+            sol_n = _hand_solution(geom_n)
+            @test lookup(CALc.gains(sol_n), Gustavo.Feed) == 1:n
+            m = read(first(ps_n))
+            @test _division_error(calibrate!(sol_n, deepcopy(m); apply_flags = false), m, sol_n, geom_n) < 1.0e-6
+            mktempdir() do dir
+                @test load_solution(save_solution(joinpath(dir, "sol.zarr"), sol_n)).geom.nfeed == n
+            end
+        end
+
+        one, _ = _build_fringe_ps(; polarizations = ["RR"], receptors = ("R",))
+        mixed = XRadio.ProcessingSet(merge(OrderedDict(pairs(ps)), OrderedDict(Symbol(k, "_one") => v for (k, v) in pairs(one))))
+        @test_throws "different numbers of receptors per antenna" CALc.DataGeometry(mixed)
+
+        model = CALc.GainModel(; phase = (; p = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.GlobalTime(), Feed = CALc.SingleFeed(3))))
+        @test_throws "SingleFeed(3) names a feed the data does not have" CALc.plan_parameters(model, geom.stations, geom)
+    end
+
+    @testset "calibrate! divides out the gains in place" begin
+        target = fresh()
+        out = calibrate!(sol, target; apply_flags = false)
+        @test out === target
+        @test _division_error(out, ms, sol, geom) < 1.0e-6
+        @test parent(out[:flag]) == parent(ms[:flag])
+    end
+
+    @testset "calibrate! on one window matches the run's geometry" begin
+        # A per-channel segmentation of the whole set places each channel of one
+        # window by frequency: the same correction the whole set receives.
+        whole = calibrate(sol, ps)
+        for (k, m) in pairs(ps)
+            @test isequal(
+                parent(calibrate!(sol, deepcopy(read(m)))[:visibility]),
+                parent(whole[k][:visibility]),
+            )
+        end
+        # A solution segmented only by name applies with the window's own geometry.
+        own = CALc.DataGeometry(Gustavo._one_member(ms))
+        onewin = _hand_solution(own)
+        @test _division_error(calibrate!(onewin, fresh()), ms, onewin, own) < 1.0e-6
+    end
+
+    @testset "calibrate! matches stations by name" begin
+        @test_throws "must name its stations" CALc.CalibrationSolution(_with_stations(geom, String[]), sol.components)
+        strangers = _hand_solution(_with_stations(geom, ["X1", "X2", "X3", "X4"]))
+        @test_throws "shares no station" calibrate!(strangers, fresh())
+        # A station the solution lacks: its cross baselines are flagged under
+        # `apply_flags`, and otherwise pass through uncorrected.
+        partial = _hand_solution(_with_stations(geom, ["A1", "A2", "A3", "X4"]))
+        names = collect(XRadio.baselines(ms))
+        a4 = findall(((a, b),) -> "A4" in (a, b) && a != b, names)
+        others = findall(((a, b),) -> !("A4" in (a, b)), names)
+        out = @test_logs (:warn, r"\[\"A4\"\] are not in the solution; their baselines are flagged") calibrate!(partial, fresh())
+        @test all(parent(out[:flag][BaselineID = a4]))
+        @test !any(parent(out[:flag][BaselineID = others]))
+        @test parent(out[:visibility][BaselineID = a4]) == parent(ms[:visibility][BaselineID = a4])
+        kept = @test_logs (:warn, r"left uncorrected") calibrate!(partial, fresh(); apply_flags = false)
+        @test !any(parent(kept[:flag][BaselineID = a4]))
+        @test parent(kept[:visibility][BaselineID = a4]) == parent(ms[:visibility][BaselineID = a4])
+    end
+
+    @testset "scale_weights!" begin
+        scale = Dict("A2" => 2.0, :ZZ => 5.0)
+        target = fresh()
+        out = scale_weights!(target, scale)
+        @test out === target
+        for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
+            f = ("A2" in (a, b)) ? 2.0 : 1.0
+            @test parent(out[:weight][BaselineID = bi]) ≈ f .* parent(ms[:weight][BaselineID = bi])
+        end
+        @test parent(out[:visibility]) == parent(ms[:visibility])
+        @test_throws "scale_weights!: every factor must be finite and positive" scale_weights!(
+            fresh(), Dict("A1" => 1.0, "A2" => 0.0)
+        )
+    end
+
+    @testset "flagging with selectors" begin
+        # The forms the docs show: each writes the flag layer in place.
+        f, t = XRadio.frequencies(ms), XRadio.times(ms)
+        flagged_channels(m) = [any(parent(XRadio.flags(m)[Frequency = c])) for c in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[Frequency = f[2] .. f[3]] .= true
+        @test flagged_channels(m) == [f[2] <= x <= f[3] for x in f]
+
+        m = fresh()
+        k = 2
+        XRadio.flags(m)[Frequency = DimensionalData.Begin:(DimensionalData.Begin + k - 1)] .= true
+        XRadio.flags(m)[Frequency = (DimensionalData.End - k + 1):DimensionalData.End] .= true
+        @test flagged_channels(m) == [i - firstindex(f) < k || lastindex(f) - i < k for i in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[Frequency = Where(>(f[end - 1]))] .= true
+        @test flagged_channels(m) == [i == lastindex(f) for i in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[Ti = t[1] .. t[2]] .= true
+        @test [any(parent(XRadio.flags(m)[Ti = i])) for i in eachindex(t)] == [i <= firstindex(t) + 1 for i in eachindex(t)]
+
+        m = fresh()
+        XRadio.flags(m)[XRadio.baselines(m, "A2"), Frequency(f[1] .. f[2])] .= true
+        pairs_hit = [p for (bi, p) in enumerate(XRadio.baselines(m)) if any(parent(XRadio.flags(m)[BaselineID = bi]))]
+        @test Set(pairs_hit) == Set(p for p in XRadio.baselines(m) if "A2" in p)
+        @test flagged_channels(m) == [i - firstindex(f) < 2 for i in eachindex(f)]
+
+        m = fresh()
+        XRadio.flags(m)[XRadio.baseline(m, ("A1", "A3"))] .= true
+        @test all(parent(XRadio.flags(m)[XRadio.baseline(m, ("A1", "A3"))]))
+        @test count(XRadio.flags(m)) == length(XRadio.flags(m)[XRadio.baseline(m, ("A1", "A3"))])
+    end
+end
+
+@testset "calibrate" begin
+    ps, _ = _build_fringe_ps(; nscans = 2, nspw = 2)
+    geom = CALc.DataGeometry(ps)
+    sol = _hand_solution(geom; info = (; flagged_ant = ["A2", "A2"], flagged_feed = [1, 2], flagged_scan = [1, 1]))
+
+    @testset "divides by the gains only" begin
+        out = calibrate(sol, ps; apply_flags = false)
+        @test collect(keys(out)) == collect(keys(ps))
+        for (name, lazy) in pairs(ps)
+            @test _division_error(out[name], read(lazy), sol, geom) < 1.0e-6
+            @test !any(parent(out[name][:flag]))
+        end
+    end
+
+    @testset "flags the baselines of an unconstrained station, on that scan only" begin
+        out = calibrate(sol, ps)
+        for ms in values(out), (bi, pair) in pairs(collect(XRadio.baselines(ms)))
+            on_scan1 = ms[:scan_name] .== "1"
+            fl = ms[:flag][BaselineID = bi]
+            for (t, s1) in pairs(on_scan1)
+                @test all(parent(fl[Ti = t])) == ("A2" in pair && s1)
+            end
+        end
+    end
+
+    @testset "flags only the products touching an unconstrained feed" begin
+        feed2 = _hand_solution(geom; info = (; flagged_ant = ["A2"], flagged_feed = [2], flagged_scan = [1]))
+        @test !any(ms -> any(parent(ms[:flag])), values(calibrate(feed2, ps; apply_flags = false)))
+        out = calibrate(feed2, ps)
+        for ms in values(out)
+            feeds = Gustavo.feed_pairs(ms)
+            @test Set(feeds) == Set([(1, 1), (1, 2), (2, 1), (2, 2)])
+            on_scan1 = ms[:scan_name] .== "1"
+            names = collect(XRadio.baselines(ms))
+            hit(p, bi) = let (a, b) = names[bi], (fa, fb) = feeds[p, bi]
+                (a == "A2" && fa == 2) || (b == "A2" && fb == 2)
+            end
+            flag = parent(ms[:flag])
+            expected = [
+                hit(p, bi) && on_scan1[t]
+                    for p in axes(flag, 1), _ in axes(flag, 2), bi in axes(flag, 3), t in axes(flag, 4)
+            ]
+            @test flag == expected
+        end
+    end
+
+    @testset "a scan the solution does not cover" begin
+        ms = read(first(ps))
+        renamed = CALc.DataGeometry(;
+            geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.channel_widths, geom.t0, geom.f0,
+            scan_names = ["x" * n for n in geom.scan_names], geom.spw_names, geom.stations, geom.nfeed,
+        )
+        win = CALc.GeometryWindow(geom, ms)
+        @test_throws "is not in the solution, which covers" Gustavo._flag_unconstrained!(
+            ms, win, renamed, Gustavo._solution_flag_sets(sol),
+        )
+    end
+
+    @testset "post runs on each corrected Measurement Set" begin
+        out = calibrate(sol, ps; post = _halve_weights, apply_flags = false)
+        ref = calibrate(sol, ps; apply_flags = false)
+        @test all(parent(out[k][:weight]) == parent(ref[k][:weight]) ./ 2 for k in keys(ps))
+    end
+
+    @testset "post returns the Measurement Set it modified" begin
+        @test_throws "returned a different MeasurementSet" calibrate(sol, ps; post = deepcopy)
+        @test_throws "returned a Nothing" calibrate(sol, ps; post = m -> nothing)
+    end
+
+    @testset "leaves its input as it was" begin
+        before = deepcopy(ps)
+        calibrate(sol, ps)
+        @test all(isequal(parent(ps[k][:visibility]), parent(before[k][:visibility])) for k in keys(ps))
+        @test all(parent(ps[k][:flag]) == parent(before[k][:flag]) for k in keys(ps))
+    end
+
+    @testset "a degenerate gain flags the sample" begin
+        bad = deepcopy(sol)
+        foreach(c -> parent(c.params) .= -1.0e4, bad.components)    # gain amplitude exp(-1e4) underflows to zero
+        out = calibrate(bad, ps; apply_flags = false)
+        @test all(parent(first(out)[:flag]))
+        @test all(isnan, parent(first(out)[:visibility]))
+    end
+
+    @testset "refuses an empty solution" begin
+        @test_throws "holds no components" calibrate(filter(_ -> false, sol), ps)
+    end
+end
