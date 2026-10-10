@@ -116,6 +116,10 @@ end
         @test sol2.components == sol.components
         @test collect(keys(sol2.steps)) == collect(keys(sol.steps))
         @test sol2.provenance == sol.provenance
+        @test sol2.steps[:bandpass].phase_status == sol.steps[:bandpass].phase_status
+        @test eltype(sol2.steps[:bandpass].phase_status) == FP.TrackStatus
+        # Stored as a Zarr array of codes, not as JSON.
+        @test isdir(joinpath(path, "steps", "bandpass", "phase_status", "data"))
 
         corr2 = calibrate(sol2, ps)
         for (k, ms) in pairs(corr)
@@ -570,7 +574,9 @@ end
 
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[1, f, plan.fseg_id[gc], 1, a]
+    # The phase has no prior, so over a killed channel only the amplitude has a value.
     amp_model(prior) = GainModel(;
+        phase = default_bandpass_terms().phase,
         logamp = (;
             bandpass = CAL.GainComponent(
                 CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(), prior,
@@ -629,6 +635,9 @@ end
             @test abs(larec(bp.θ, plan, a, f, dg) - nbr) < 0.1    # estimated, on the smooth curve
             @test abs(nbr) > 0.12                                 # ...curve far from |g|=1 (meaningful)
         end
+        bpp = only(CAL._applied(sol[:bandpass, :phase, :bandpass]).groups)
+        pplan = only(bpp.layout.plans)
+        @test all(larec(bpp.θ, pplan, a, f, dg) == 0.0 for dg in dead_globals, a in 2:nant, f in 1:2)
     end
 
     # With no prior the killed channels are NOT estimated — their θ slot is

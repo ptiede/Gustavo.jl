@@ -99,6 +99,7 @@ export default_bandpass_terms
 export AbstractBandpassSmoother, JointSmoother
 export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks,
     bandpass_level_blocks
+export TrackStatus, TrackNoData, TrackSolved, TrackFlat, TrackDeclined
 export fringe_snr_table, fringe_detections, cat_scans
 export fringe_station_solutions
 export baseline_spectra, freq_group_coherence, fringe_freq_groups, FreqGroup, Triangle

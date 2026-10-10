@@ -421,12 +421,17 @@ end
     pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]
     x = collect(range(8.6e10, 8.6e10 + 1.28e8; length = nband * nchan))
     prior = CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.3), 1.0))
-    fit!(track, w; unwrap) = (st = fill(Int8(-1), nband); FP._fit_track!(track, w, x, pieces, prior; unwrap, status = st); st)
+    sm = FP.JointSmoother()
+    fit!(track, w; unwrap, max_unwrap_ambiguity = sm.max_unwrap_ambiguity, flat_span = sm.flat_span) = (
+        st = Vector{FP.TrackStatus}(undef, nband);
+        FP._fit_track!(track, w, x, pieces, prior; unwrap, status = st, max_unwrap_ambiguity, flat_span);
+        st
+    )
 
     # A clean, structured track: every piece solved.
     smooth = 0.3 .* sin.(range(0, 6π; length = nband * nchan))
     w = fill(1.0e4, nband * nchan)
-    @test all(==(FP._BP_TRACK_SOLVED), fit!(copy(smooth), w; unwrap = true))
+    @test all(==(FP.TrackSolved), fit!(copy(smooth), w; unwrap = true))
 
     # A piece with no usable channel estimates nothing and says so.
     gappy = copy(smooth)
@@ -434,21 +439,24 @@ end
     gappy[1:nchan] .= NaN
     wg[1:nchan] .= 0
     st = fit!(gappy, wg; unwrap = true)
-    @test st[1] == FP._BP_TRACK_NODATA
+    @test st[1] == FP.TrackNoData
     @test all(isnan, gappy[1:nchan])
 
     # A constant piece is fit, but carries no shape — reported as flat rather
     # than passed off as a measured response.
-    @test all(==(FP._BP_TRACK_FLAT), fit!(fill(0.2, nband * nchan), w; unwrap = true))
+    @test all(==(FP.TrackFlat), fit!(fill(0.2, nband * nchan), w; unwrap = true))
+    # What counts as flat is the smoother's `flat_span`.
+    @test all(==(FP.TrackFlat), fit!(copy(smooth), w; unwrap = true, flat_span = 1.0))
 
     # Phase noise past a radian leaves the 2π branch undetermined: the piece is
     # declined, not fit, so nothing is written for it and no invented trend can
     # reach θ. The amplitude path is never unwrapped and so is never declined.
     noisy = 2.0 .* randn(rng, nband * nchan)
     out = copy(noisy)
-    @test all(==(FP._BP_TRACK_DECLINED), fit!(out, w; unwrap = true))
+    @test all(==(FP.TrackDeclined), fit!(out, w; unwrap = true))
     @test all(isnan, out)
-    @test !any(==(FP._BP_TRACK_DECLINED), fit!(copy(noisy), w; unwrap = false))
+    @test !any(==(FP.TrackDeclined), fit!(copy(noisy), w; unwrap = false))
+    @test !any(==(FP.TrackDeclined), fit!(copy(noisy), w; unwrap = true, max_unwrap_ambiguity = 1.0))
 
     # The resolved prior is returned: hyperpriors become the fitted values.
     resolved, levels = FP._fit_track!(copy(smooth), w, x, pieces, prior)
@@ -481,18 +489,17 @@ end
     wrapped = copy(y)
     wrapped[pieces[2]] .+= 2π
     tp = copy(wrapped)
-    _, Lp = FP._fit_track!(tp, w, x, pieces, prior; level, nlevel = 2, unwrap = true)
+    _, Lp = FP._fit_track!(tp, w, x, pieces, prior; level, nlevel = 2, unwrap = true, max_unwrap_ambiguity = 0.25)
     @test Lp ≈ truth atol = 0.05
     @test sqrt(mean(abs2, tp .- track)) < 1.0e-6
 end
 
 @testset "bandpass_track_report: counts and the unfitted observable" begin
-    ph = Int8[FP._BP_TRACK_SOLVED FP._BP_TRACK_FLAT; FP._BP_TRACK_NODATA FP._BP_TRACK_DECLINED]
+    ph = [FP.TrackSolved FP.TrackFlat; FP.TrackNoData FP.TrackDeclined]
     phase_status = reshape(ph, 2, 2, 1)
     rep = FP.bandpass_track_report(phase_status, nothing)
     @test (rep.n_solved, rep.n_flat, rep.n_nodata, rep.n_declined) == (1, 1, 1, 1)
     @test !haskey(rep, :band_ids)
-    @test rep.track_labels[FP._BP_TRACK_SOLVED + 1] == "solved"
     # An observable that was not fit is an EMPTY status, not a missing one: the
     # record is serialized with the solution and every field must carry a value.
     @test rep.amp_status isa AbstractArray && isempty(rep.amp_status)
@@ -501,6 +508,10 @@ end
     # Per-block arrays are counted together.
     blocks = FP.bandpass_track_report((g1 = phase_status, g2 = phase_status), nothing)
     @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata, blocks.n_declined) == (2, 2, 2, 2)
+    # Three of four pieces measured nothing; the smoother's `warn_fraction` decides
+    # whether that warns.
+    @test_logs (:warn, r"75.0% of") FP._warn_degenerate_bandpass(rep, 0.5)
+    @test_logs FP._warn_degenerate_bandpass(rep, 0.8)
 end
 
 @testset "Bandpass: the solve publishes its per-track record" begin

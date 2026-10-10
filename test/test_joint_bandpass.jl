@@ -375,9 +375,9 @@ end
                 @test all(iszero, pleaf[1, f, :, 2, a])
                 @test all(iszero, aleaf[1, f, :, 2, a])
                 # …and the status array leaves that slot at its initial code.
-                @test only(phase_status)[a, f, 1, 2] == FP._BP_TRACK_NODATA
+                @test only(phase_status)[a, f, 1, 2] == FP.TrackNoData
             end
-            @test only(phase_status)[1, f, 1, 2] == FP._BP_TRACK_SOLVED
+            @test only(phase_status)[1, f, 1, 2] == FP.TrackSolved
         end
     end
 
@@ -423,7 +423,7 @@ end
             ref = CAL._time_segment_lookup(b.plan, geom)
             @test collect(lookup(st, Ti)) == collect(ref)
             @test val(DimensionalData.Lookups.span(lookup(st, Ti))) == val(DimensionalData.Lookups.span(ref))
-            @test all(==(FP._BP_TRACK_NODATA), st)
+            @test all(==(FP.TrackNoData), st)
         end
 
         FP.solve_joint_bandpass!(
@@ -452,7 +452,7 @@ end
                 @test phase_blocks[2].θ[1, f, :, 1, ai] ≈ want_phase(a, f, 1) atol = 1.0e-8
                 @test amp_blocks[2].θ[1, f, :, 1, ai] ≈ want_amp(a, f, 1) atol = 1.0e-8
             end
-            @test phase_status[1][FP.AntennaName(At("A1")), Feed(f), Ti(2)] == [FP._BP_TRACK_SOLVED]
+            @test phase_status[1][FP.AntennaName(At("A1")), Feed(f), Ti(2)] == [FP.TrackSolved]
         end
         # The report keys the blocks as `parameters` keys their leaves, and counts
         # only the tracks the blocks have: station A1's two segments and one
@@ -1166,6 +1166,8 @@ end
     @test isempty(sol.steps[:bandpass].amp_status)
 
     abp_true = 0.15 .* randn(rng, nant, 2, nchan)
+    # A gain ten times too strong at one channel is written as fit.
+    abp_true[2, 1, 4] = 3.0
     sol, Δ = compare(:logamp, (; amp_bandpass = abp_true, seed = 8))
     @test Δ < 1.0e-4
     @test isempty(sol.steps[:bandpass].phase_status)

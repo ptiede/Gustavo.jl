@@ -288,48 +288,30 @@ function _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
     return r, w
 end
 
-# ── Track fitting, outcome codes and limits ─────────────────────────────────
+# ── Track fitting and outcome codes ─────────────────────────────────────────
 
-const _BP_MAX_LOGAMP = log(10.0)
+"""
+    TrackStatus
 
-# Outcome of fitting one piece of a (station, feed) bandpass track, reported by
-# `bandpass_track_report` so a caller can tell a measurement from a placeholder.
-# `θ` carries no such distinction: an unfitted track reads back as unit gain and a
-# starved one as a constant, both indistinguishable from a real flat response.
-const _BP_TRACK_NODATA = Int8(0)      # no usable channel; left at unit gain
-const _BP_TRACK_SOLVED = Int8(1)      # fit, with frequency structure
-const _BP_TRACK_FLAT = Int8(2)        # fit, but constant to within `_BP_FLAT_SPAN`
-const _BP_TRACK_DECLINED = Int8(3)    # phase branch undetermined; not fit
-
-const _BP_TRACK_LABELS = ("nodata", "solved", "flat", "declined")
-
-# A fitted track this flat carries no shape: reported as `_BP_TRACK_FLAT` rather
-# than silently passed off as a measured response. In radians for a phase track and
-# nepers for a log-amplitude one — both are the observable's own natural unit and a
-# hundredth of it is far below any real passband feature.
-const _BP_FLAT_SPAN = 0.01
-
-# Above this fraction of coin-flip steps (`phase_unwrap_ambiguity`) a phase track's
-# 2π branch is not determined by the data, and the smooth trend a prior then
-# fits through the unwrap's random walk is an artifact of the walk. Such a track is
-# declined rather than fit: unit gain is honest about knowing nothing, an invented
-# multi-radian ramp is not.
-const _BP_MAX_UNWRAP_AMBIGUITY = 0.25
+The outcome of fitting one piece (one spectral window) of a bandpass track, as
+the bandpass report records it: `TrackNoData` (no usable channel; unit gain),
+`TrackSolved` (fit, with frequency structure), `TrackFlat` (fit, but its range is
+below the smoother's `flat_span`) or `TrackDeclined` (its phase branch is not
+determined under a prior; neither its phase nor its amplitude is fit). θ alone cannot tell these apart: an unfitted
+piece reads back as unit gain and a flat one as a constant.
+"""
+@enum TrackStatus::Int8 TrackNoData TrackSolved TrackFlat TrackDeclined
 
 # The largest log-gain step a linearized joint bandpass update takes; the
 # first-order model of `|g·e^δ − ĝ|²` is poor much beyond it.
 const _BP_MAX_LINEAR_STEP = 0.5
 
-# Fraction of a solve's tracks that may come back flat or declined before the
-# bandpass as a whole is worth a warning.
-const _BP_DEGENERATE_WARN_FRACTION = 0.25
-
-# The outcome code for one fitted piece: nothing estimated, a constant, or a
-# real shape.
-function _band_track_status(fitted)
+# The outcome code for one fitted piece: nothing estimated, a constant (a range
+# below `flat_span`), or a real shape.
+function _band_track_status(fitted, flat_span)
     obs = [v for v in fitted if isfinite(v)]
-    isempty(obs) && return _BP_TRACK_NODATA
-    return (maximum(obs) - minimum(obs)) < _BP_FLAT_SPAN ? _BP_TRACK_FLAT : _BP_TRACK_SOLVED
+    isempty(obs) && return TrackNoData
+    return (maximum(obs) - minimum(obs)) < flat_span ? TrackFlat : TrackSolved
 end
 
 # A shape plan's frequency segments as channel groups `fsegs`, each segment's
@@ -391,18 +373,19 @@ _segment_levels(level, seg) = [level[p] for p in seg.piece_of]
 # frequency first, because the prior fits a real track and the ±π branch cuts of
 # a raw phase solve would otherwise read as genuine structure; the pieces sharing
 # a level are then put on one branch. Under a prior, a piece whose branch the
-# data do not determine (`phase_unwrap_ambiguity` past `_BP_MAX_UNWRAP_AMBIGUITY`)
-# is dropped instead; see that constant. Without one the segments are fit
+# data do not determine (`phase_unwrap_ambiguity` past `max_unwrap_ambiguity`)
+# is dropped instead; see `JointSmoother`. Without one the segments are fit
 # independently and the branch does not affect the fit.
 #
-# `status` receives one `_BP_TRACK_*` code per piece.
+# `status` receives one `TrackStatus` per piece, a piece whose range is
+# below `flat_span` counting as flat.
 #
 # `weights`, when given, receives each segment's weight in the final fit, zero
 # where it carried none.
 function _fit_track!(
         track, w, x, pieces, prior;
         level = nothing, nlevel::Integer = 0, unwrap::Bool = false, status = nothing,
-        weights = nothing,
+        weights = nothing, max_unwrap_ambiguity = nothing, flat_span = nothing,
     )
     T = eltype(track)
     isnothing(weights) || fill!(weights, zero(T))
@@ -412,7 +395,7 @@ function _fit_track!(
     declined = falses(length(pieces))
     if unwrap
         for j in eachindex(ys, ws)
-            if !isnothing(prior) && phase_unwrap_ambiguity(ys[j]; weights = ws[j]) > _BP_MAX_UNWRAP_AMBIGUITY
+            if !isnothing(prior) && phase_unwrap_ambiguity(ys[j]; weights = ws[j]) > max_unwrap_ambiguity
                 declined[j] = true
                 fill!(ys[j], T(NaN))
             else
@@ -424,7 +407,7 @@ function _fit_track!(
     fill!(track, T(NaN))
     levels = isnothing(level) ? nothing : fill(T(NaN), nlevel)
     if !any(j -> any(k -> _shape_usable(ys[j][k], ws[j][k]), eachindex(ys[j], ws[j])), eachindex(ys, ws))
-        isnothing(status) || (status .= ifelse.(declined, _BP_TRACK_DECLINED, _BP_TRACK_NODATA))
+        isnothing(status) || (status .= ifelse.(declined, TrackDeclined, TrackNoData))
         return prior, levels
     end
     resolved = _estimate_hypers(prior, ys, ws, xs; level)
@@ -440,7 +423,7 @@ function _fit_track!(
         ys[j] .-= L
         _estimate_map!(fitted, resolved, ys[j], ws[j], xs[j])
         fitted .+= L
-        isnothing(status) || (status[j] = declined[j] ? _BP_TRACK_DECLINED : _band_track_status(fitted))
+        isnothing(status) || (status[j] = declined[j] ? TrackDeclined : _band_track_status(fitted, flat_span))
     end
     return resolved, levels
 end
@@ -469,7 +452,7 @@ function _block_status_array(block, geom::DataGeometry)
         Frequency(_segment_lookup(geom.channel_freqs, _shape_segments(plan, geom).piece_chans)),
         Ti(_time_segment_lookup(plan, geom, plan.shape[4])),
     )
-    return fill!(zeros(Int8, ax), _BP_TRACK_NODATA)
+    return fill(TrackNoData, ax)
 end
 
 # A station block's resolved prior per (station, feed, time segment), over
@@ -501,7 +484,7 @@ _status_arrays(st) = (st,)
 
 Summarize a bandpass solve's per-piece outcomes into the record the
 [`Bandpass`](@ref Gustavo.Bandpass) step publishes. `phase_status`/`amp_status`
-hold one `_BP_TRACK_*` code per (station, feed, frequency segment, time segment)
+hold one [`TrackStatus`](@ref) per (station, feed, frequency segment, time segment)
 — either may be `nothing` when that half was not fit — as `DimArray`s over
 `(AntennaName, Feed, Frequency, Ti)`: the stations, every feed, each frequency
 segment of the component over the extent of its channels and each time segment
@@ -513,28 +496,26 @@ as the solution's components name the station blocks, each over its own
 stations and segments.
 
 Returns the arrays as `phase_status`/`amp_status`/`phase_priors`/`amp_priors`
-alongside `track_labels` (the code → name mapping, so a reader needs no constant
-from this module) and the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata`
-summed over both observables. `flat` and `declined` are the two ways a piece
+alongside the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata` summed over
+both observables. `flat` and `declined` are the two ways a piece
 can occupy a slot without measuring anything, and they are what the counts
 exist to expose: θ itself records an unfitted piece as unit gain and a starved
 one as a constant, neither distinguishable there from a genuinely flat response.
 """
 function bandpass_track_report(phase_status, amp_status; phase_priors = nothing, amp_priors = nothing)
-    counts = zeros(Int, length(_BP_TRACK_LABELS))
+    counts = zeros(Int, length(instances(TrackStatus)))
     for st in (phase_status, amp_status), a in _status_arrays(st), c in a
         counts[Int(c) + 1] += 1
     end
     # Concrete arrays throughout — the record is serialized with the solution, and
     # an observable that was not fit is an empty status rather than a missing field.
-    empty_status = Array{Int8, 4}(undef, 0, 0, 0, 0)
+    empty_status = Array{TrackStatus, 4}(undef, 0, 0, 0, 0)
     empty_priors = Array{Union{Nothing, AbstractPrior}, 3}(undef, 0, 0, 0)
     return (;
         phase_status = something(phase_status, empty_status),
         amp_status = something(amp_status, empty_status),
         phase_priors = something(phase_priors, empty_priors),
         amp_priors = something(amp_priors, empty_priors),
-        track_labels = collect(String, _BP_TRACK_LABELS),
         n_nodata = counts[1], n_solved = counts[2],
         n_flat = counts[3], n_declined = counts[4],
     )
@@ -544,12 +525,12 @@ end
 # a bandpass that is mostly placeholder looking exactly like one that is mostly
 # measured — the caller cannot tell from θ, which is why this is a warning and not
 # only a record.
-function _warn_degenerate_bandpass(report)
+function _warn_degenerate_bandpass(report, warn_fraction)
     total = report.n_nodata + report.n_solved + report.n_flat + report.n_declined
     total > 0 || return nothing
     degenerate = report.n_flat + report.n_declined + report.n_nodata
     frac = degenerate / total
-    frac > _BP_DEGENERATE_WARN_FRACTION || return nothing
+    frac > warn_fraction || return nothing
     @warn """
     Bandpass: $(round(100 * frac; digits = 1))% of (station, feed, frequency segment) pieces \
     carry no measured frequency shape — $(report.n_flat) fit flat, $(report.n_declined) \
@@ -696,11 +677,6 @@ function _block_locations(blocks, nant)
     return loc
 end
 
-# One phase block's solve state over `(AntennaName, Feed, Frequency, Ti)` — its
-# stations, every feed, its frequency segments and its time segments: the
-# complex gains `g`; their unwrapped phase tracks `φ`, carried across sweeps so
-# the prior fit never sees a 2π branch cut; the slots a sweep has solved
-# (`touched`) and the gauge pins (`pinned`).
 # The blocks a joint solve holds its complex gains on: the phase blocks, or the
 # amplitude blocks when the model has no phase. Where both exist they match.
 _gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : phase_blocks
@@ -710,6 +686,14 @@ _gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : ph
 _prior(track) = isnothing(track) ? nothing : track.prior
 _has_prior(fit) = !isnothing(_prior(fit.phase)) || !isnothing(_prior(fit.amp))
 
+# One gain block's solve state over `(AntennaName, Feed, Frequency, Ti)` — its
+# stations, every feed, its frequency segments and its time segments: the
+# complex gains `g`; their unwrapped phase tracks `φ`, carried across sweeps so
+# the prior fit never sees a 2π branch cut; the slots whose phase and whose
+# log-amplitude a sweep has given a value (`phase_valid`, `amp_valid`), which
+# differ where a prior fills one observable over a slot without data and the
+# other has no prior; and the gauge pins (`pinned`).
+
 function _block_gains(block, geom::DataGeometry, C::Type)
     ax = (
         _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
@@ -718,7 +702,7 @@ function _block_gains(block, geom::DataGeometry, C::Type)
     )
     return DimStack((;
         g = ones(C, ax), φ = zeros(real(C), ax),
-        touched = zeros(Bool, ax), pinned = zeros(Bool, ax),
+        phase_valid = zeros(Bool, ax), amp_valid = zeros(Bool, ax), pinned = zeros(Bool, ax),
     ))
 end
 
@@ -971,7 +955,8 @@ end
 # Returns the number of slots the sweep updated and the `(station, feed, time
 # segment)` of each phase track with a piece declined at unwrapping.
 function _update_station_gains!(
-        gains, data, layout; fits, levels, seed::Bool, relinearize::Bool = false, systems = nothing,
+        gains, data, layout; fits, levels, seed::Bool, max_unwrap_ambiguity, flat_span,
+        relinearize::Bool = false, systems = nothing,
         phase_status = nothing, amp_status = nothing, phase_priors = nothing, amp_priors = nothing,
     )
     (; r, w, S) = data
@@ -995,7 +980,7 @@ function _update_station_gains!(
         iszero(k) && continue
         entries = touching[ant, feed]
         isempty(entries) && continue
-        (; g, φ, touched, pinned) = gains[k]
+        (; g, φ, phase_valid, amp_valid, pinned) = gains[k]
         nfs = size(g, Frequency)
         fit = fits[ant]
         for ts in present[ant]
@@ -1065,12 +1050,12 @@ function _update_station_gains!(
             # The status of the last sweep is the status of the solve: each sweep
             # overwrites the previous one's codes for this node.
             if isnothing(fit.amp)
-                fill!(la, zero(T))
+                fill!(la, T(NaN))
             else
                 ast = isnothing(amp_status) ? nothing : view(amp_status[k], ai, feed, :, ts)
                 amp_prior, amp_levels = _fit_track!(
                     la, wf, fit.amp.x, fit.amp.pieces, fit.amp.prior;
-                    fit.amp.level, fit.amp.nlevel, status = ast, weights = wa,
+                    fit.amp.level, fit.amp.nlevel, status = ast, weights = wa, flat_span,
                 )
                 isnothing(systems) || push!(
                     systems.amp,
@@ -1080,26 +1065,33 @@ function _update_station_gains!(
                 isnothing(amp_levels) || (levels[ant].amp[feed, :, ts] .= amp_levels)
             end
             pst = isnothing(fit.phase) ? nothing :
-                isnothing(phase_status) ? similar(fit.phase.pieces, Int8) : view(phase_status[k], ai, feed, :, ts)
+                isnothing(phase_status) ? similar(fit.phase.pieces, TrackStatus) : view(phase_status[k], ai, feed, :, ts)
             if isnothing(fit.phase)
-                fill!(φ̃, zero(T))
+                fill!(φ̃, T(NaN))
             elseif all(pins)
                 # A wholly pinned track is known rather than fitted: report it as such
                 # instead of leaving it at NODATA.
-                fill!(pst, _BP_TRACK_SOLVED)
+                fill!(pst, TrackSolved)
                 fill!(φ̃, zero(T))
                 isnothing(levels[ant].phase) || (levels[ant].phase[feed, :, ts] .= zero(T))
             else
                 phase_prior, phase_levels = _fit_track!(
                     φ̃, wf, fit.phase.x, fit.phase.pieces, fit.phase.prior;
                     fit.phase.level, fit.phase.nlevel, unwrap = seed, status = pst,
-                    weights = wg,
+                    weights = wg, max_unwrap_ambiguity, flat_span,
                 )
                 isnothing(systems) || push!(
                     systems.phase,
                     (; slots = systems.ids[k][ai, feed, 1:nfs, ts], w = wg[1:nfs], fit.phase.x, fit.phase.pieces, prior = phase_prior, fit.phase.level, fit.phase.nlevel),
                 )
-                any(==(_BP_TRACK_DECLINED), pst) && push!(declined, (ant, feed, ts))
+                any(==(TrackDeclined), pst) && push!(declined, (ant, feed, ts))
+                # A declined piece leaves its slots without a value in either
+                # observable: its data are not fit until its phase branch is known.
+                for (j, p) in pairs(fit.phase.pieces)
+                    pst[j] == TrackDeclined || continue
+                    la[p] .= T(NaN)
+                    isnothing(fit.amp) || isnothing(amp_status) || (amp_status[k][ai, feed, j, ts] = TrackDeclined)
+                end
                 isnothing(phase_priors) || (phase_priors[k][ai, feed, ts] = phase_prior)
                 isnothing(phase_levels) || (levels[ant].phase[feed, :, ts] .= phase_levels)
                 # A partial pin holds its own segments and leaves the rest fitted.
@@ -1110,11 +1102,15 @@ function _update_station_gains!(
                     pins[fs] && (φ̃[fs] = zero(T))
                 end
             end
+            # A slot takes whichever of its values the fits gave; the other keeps
+            # its current value.
             for fs in 1:nfs
-                (isfinite(la[fs]) && isfinite(φ̃[fs])) || continue
-                g[ai, feed, fs, ts] = exp(C(la[fs], φ̃[fs]))
-                φ[ai, feed, fs, ts] = φ̃[fs]
-                touched[ai, feed, fs, ts] = true
+                I = CartesianIndex(ai, feed, fs, ts)
+                has_amp, has_phase = isfinite(la[fs]), isfinite(φ̃[fs])
+                has_amp || has_phase || continue
+                has_amp && (amp_valid[I] = true)
+                has_phase && (phase_valid[I] = true; φ[I] = φ̃[fs])
+                g[I] = exp(C(has_amp ? la[fs] : log(abs(g[I])), φ[I]))
                 nupdated += 1
             end
             _move_band_level!(gains[k], levels[ant], S, ai, feed, ts, entries, view(tseg, ant, :))
@@ -1132,19 +1128,17 @@ end
 # `tseg_a` its station's time segment per scan. A pinned track keeps its
 # phase; levels move with their track.
 function _move_band_level!(gk, lv, S, ai, f, ts, entries, tseg_a)
-    (; g, φ, touched, pinned) = gk
+    (; g, φ, phase_valid, amp_valid, pinned) = gk
     T = real(eltype(g))
-    valid = view(touched, ai, f, :, ts)
-    n = count(valid)
-    iszero(n) && return gk
-    mla = sum(log(abs(g[ai, f, fs, ts])) for fs in axes(g, Frequency) if valid[fs]) / n
-    mφ = any(view(pinned, ai, f, :, ts)) ? zero(T) :
-        sum(φ[ai, f, fs, ts] for fs in axes(g, Frequency) if valid[fs]) / n
-    shift = exp(-complex(mla, mφ))
+    pv, av = view(phase_valid, ai, f, :, ts), view(amp_valid, ai, f, :, ts)
+    any(pv) || any(av) || return gk
+    mla = any(av) ? sum(log(abs(g[ai, f, fs, ts])) for fs in axes(g, Frequency) if av[fs]) / count(av) : zero(T)
+    mφ = !any(pv) || any(view(pinned, ai, f, :, ts)) ? zero(T) :
+        sum(φ[ai, f, fs, ts] for fs in axes(g, Frequency) if pv[fs]) / count(pv)
     for fs in axes(g, Frequency)
-        valid[fs] || continue
-        g[ai, f, fs, ts] *= shift
-        φ[ai, f, fs, ts] -= mφ
+        dla, dφ = av[fs] ? mla : zero(T), pv[fs] ? mφ : zero(T)
+        g[ai, f, fs, ts] *= exp(-complex(dla, dφ))
+        φ[ai, f, fs, ts] -= dφ
     end
     isnothing(lv.amp) || (view(lv.amp, f, :, ts) .-= mla)
     isnothing(lv.phase) || (view(lv.phase, f, :, ts) .-= mφ)
@@ -1224,8 +1218,8 @@ function _joint_gain_step!(gains, data, jl, gauge_state, systems)
         gk = gains[k]
         n = idk[I]
         gv[n], φv[n] = gk.g[I], gk.φ[I]
-        amp_free[n] = fitted.amp && gk.touched[I]
-        phase_free[n] = fitted.phase && gk.touched[I] && !gk.pinned[I]
+        amp_free[n] = fitted.amp && gk.amp_valid[I]
+        phase_free[n] = fitted.phase && gk.phase_valid[I] && !gk.pinned[I]
     end
 
     function chi2(g)
@@ -1272,6 +1266,8 @@ function _joint_gain_step!(gains, data, jl, gauge_state, systems)
         δℓ = _joint_normal_solve(q, slot_pairs, bℓ, amp_free, 1)
         χ0 = chi2(gv)
         trial = similar(gv)
+        # A Gauss–Newton direction that lowers χ² at none of these is taken as
+        # no step: near convergence the decrease is below round-off.
         step = zero(T)
         for t in (1, 1 // 2, 1 // 4, 1 // 8, 1 // 16)
             @. trial = gv * exp(complex(T(t) * δℓ, T(t) * δφ))
@@ -1296,9 +1292,9 @@ function _joint_gain_step!(gains, data, jl, gauge_state, systems)
     for (k, idk) in pairs(ids), I in eachindex(idk)
         gk = gains[k]
         n = idk[I]
-        gk.touched[I] || continue
-        Δφ = step * δφ[n] + shift[n]
-        gk.g[I] *= exp(complex(step * δℓ[n], Δφ))
+        Δℓ = gk.amp_valid[I] ? step * δℓ[n] : zero(T)
+        Δφ = gk.phase_valid[I] ? step * δφ[n] + shift[n] : zero(T)
+        gk.g[I] *= exp(complex(Δℓ, Δφ))
         gk.φ[I] += Δφ
     end
     information = zeros(nslots)
@@ -1455,6 +1451,8 @@ function _joint_prior_solve(q, slot_pairs, b, x0, free, s, systems; gauge = noth
     z = apply_Minv(ry)
     py = copy(z)
     rz = dot(ry, z)
+    # Solved to a residual norm 1e-10 of its start: the step is then exact to the
+    # precision the outer iteration can use.
     target = 1.0e-20 * rz
     for _ in 1:max(50, 2 * count(free))
         rz <= target && break
@@ -1498,13 +1496,16 @@ function _joint_objective(gains, data, layout, systems)
     end
     slot = [(k, I) for (k, idk) in pairs(systems.ids) for I in eachindex(idk)]
     energy = 0.0
-    for (tracks, value) in ((systems.phase, gk -> gk.φ), (systems.amp, gk -> log.(abs.(gk.g))))
+    for (tracks, value, valid) in (
+            (systems.phase, gk -> gk.φ, gk -> gk.phase_valid),
+            (systems.amp, gk -> log.(abs.(gk.g)), gk -> gk.amp_valid),
+        )
         values = map(value, gains)
         for sys in tracks
             isnothing(sys.prior) && continue
             y = map(sys.slots) do n
                 k, I = slot[n]
-                gains[k].touched[I] ? Float64(values[k][I]) : NaN
+                valid(gains[k])[I] ? Float64(values[k][I]) : NaN
             end
             energy += _track_energy(sys, y)
         end
@@ -1618,9 +1619,9 @@ _level_at(lw, ts) = merge(lw, (; values = view(lw.values, :, :, ts)))
 # log-amplitude, circular-mean reference phase — and write it into the station
 # block that carries it. Both gauges
 # are over the frequency track of one time segment, so each of a station's
-# segments is normalized on its own. A (station, feed, segment) that `touched`
-# nowhere is left unwritten, holding whatever θ already had, which is unit gain;
-# so is a station no block covers. With a level, the reference comes off the
+# segments is normalized on its own. Each observable is written, and referenced,
+# over the slots it has a value in; the rest are left unwritten, holding whatever
+# θ already had, which is unit gain, as is a station no block covers. With a level, the reference comes off the
 # level and the shape is written as fit.
 #
 # `gains[k]` holds the stations of phase block `k` and amplitude block `k`, in
@@ -1630,38 +1631,36 @@ _level_at(lw, ts) = merge(lw, (; values = view(lw.values, :, :, ts)))
 #
 # The band means are removed at θ's precision, which may exceed the gains': the
 # gauge is a property of θ.
-function _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers; max_logamp)
+function _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers)
     for (k, gk) in pairs(gains)
         pb, ab = get(phase_blocks, k, nothing), get(amp_blocks, k, nothing)
         block = something(pb, ab)
         T = eltype(block.θ)
-        (; g, φ, touched) = gk
+        (; g, φ, phase_valid, amp_valid) = gk
         node(b, f) = isnothing(b) ? 0 : _feed_node(b.plan.tying, f)
         for (ai, a) in pairs(block.stations), f in axes(g, Feed), ts in layout.present[a]
-            valid = view(touched, ai, f, :, ts)
-            any(valid) || continue
             pnode, anode = node(pb, f), node(ab, f)
-            phase(fs) = T(φ[ai, f, fs, ts])
-            logamp(fs) = log(T(abs(g[ai, f, fs, ts])))
-            mphase = angle(sum(cis(phase(fs)) for fs in axes(g, Frequency) if valid[fs]))
-            mlogamp = sum(logamp(fs) for fs in axes(g, Frequency) if valid[fs]) / count(valid)
             lw = map(l -> _level_at(l, ts), level_writers[a])
-            Lp = _write_level!(lw.phase, f, ts, Lj -> rem2pi(T(Lj) - mphase, RoundNearest))
-            La = _write_level!(lw.amp, f, ts, Lj -> T(Lj) - mlogamp)
-            for fs in axes(g, Frequency)
-                valid[fs] || continue
-                if !iszero(pnode)
+            pv = view(phase_valid, ai, f, :, ts)
+            if !iszero(pnode) && any(pv)
+                phase = fs -> T(φ[ai, f, fs, ts])
+                mphase = angle(sum(cis(phase(fs)) for fs in axes(g, Frequency) if pv[fs]))
+                Lp = _write_level!(lw.phase, f, ts, Lj -> rem2pi(T(Lj) - mphase, RoundNearest))
+                for fs in axes(g, Frequency)
+                    pv[fs] || continue
                     pb.θ[1, pnode, fs, ts, ai] = isnothing(Lp) ?
                         rem2pi(phase(fs) - mphase, RoundNearest) : phase(fs) - T(Lp[lw.phase.seg[fs]])
                 end
-                iszero(anode) && continue
-                la = logamp(fs) - mlogamp
-                gated = abs(la) > max_logamp
-                ab.θ[1, anode, fs, ts, ai] = if isnothing(La)
-                    gated ? zero(la) : la
-                else
-                    Lv = T(La[lw.amp.seg[fs]])
-                    gated ? mlogamp - Lv : logamp(fs) - Lv
+            end
+            av = view(amp_valid, ai, f, :, ts)
+            if !iszero(anode) && any(av)
+                logamp = fs -> log(T(abs(g[ai, f, fs, ts])))
+                mlogamp = sum(logamp(fs) for fs in axes(g, Frequency) if av[fs]) / count(av)
+                La = _write_level!(lw.amp, f, ts, Lj -> T(Lj) - mlogamp)
+                for fs in axes(g, Frequency)
+                    av[fs] || continue
+                    ab.θ[1, anode, fs, ts, ai] = isnothing(La) ?
+                        logamp(fs) - mlogamp : logamp(fs) - T(La[lw.amp.seg[fs]])
                 end
             end
         end
@@ -1692,13 +1691,26 @@ holds the other at zero: unit amplitude, or zero phase.
 Sweeps stop once no gain moves by more than `tolerance` of its standard error
 from the data, and warn if `max_iterations` sweeps pass first: an unconverged
 solve still depends on its starting point.
+
+Under a prior, a phase piece whose 2π branch the data do not determine — more
+than `max_unwrap_ambiguity` of its steps along frequency could go either way
+(`phase_unwrap_ambiguity`) — is declined at the first sweep: a prior fit through
+an undetermined unwrap would invent a smooth trend. A fitted piece whose range is
+below `flat_span` (radians or nepers) is reported flat rather than as a measured
+shape, and the solve warns when more than `warn_fraction` of its pieces are flat,
+declined or without data.
 """
 struct JointSmoother <: AbstractBandpassSmoother
     max_iterations::Int
     tolerance::Float64
+    max_unwrap_ambiguity::Float64
+    flat_span::Float64
+    warn_fraction::Float64
 end
-JointSmoother(; max_iterations::Integer = 200, tolerance::Real = 0.01) =
-    JointSmoother(Int(max_iterations), Float64(tolerance))
+JointSmoother(;
+    max_iterations::Integer = 200, tolerance::Real = 0.01, max_unwrap_ambiguity::Real = 0.25,
+    flat_span::Real = 0.01, warn_fraction::Real = 0.25,
+) = JointSmoother(max_iterations, tolerance, max_unwrap_ambiguity, flat_span, warn_fraction)
 
 can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
@@ -1752,7 +1764,7 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
             θ, results[idx], geom, phase_blocks, amp_blocks;
             phase_level_blocks = bandpass_level_blocks(setup, θ, :phase),
             amp_level_blocks = bandpass_level_blocks(setup, θ, :logamp),
-            gauge, max_iterations = sm.max_iterations, tolerance = sm.tolerance,
+            gauge, sm.max_iterations, sm.tolerance, sm.max_unwrap_ambiguity, sm.flat_span,
             tseg = view(tseg, :, idx), phase_status, amp_status, phase_priors, amp_priors,
         )
     end
@@ -1761,7 +1773,7 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
         leaves(phase_status), leaves(amp_status);
         phase_priors = leaves(phase_priors), amp_priors = leaves(amp_priors),
     )
-    _warn_degenerate_bandpass(report)
+    _warn_degenerate_bandpass(report, sm.warn_fraction)
     return report
 end
 
@@ -1769,7 +1781,7 @@ end
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
                           gauge, max_iterations = 200, tolerance = 0.01,
-                          max_logamp = log(10.0), phase_status = nothing,
+                          max_unwrap_ambiguity = 0.25, flat_span = 0.01, phase_status = nothing,
                           amp_status = nothing, phase_priors = nothing,
                           amp_priors = nothing, tseg = nothing)
 
@@ -1852,7 +1864,7 @@ for the data drives an amplitude toward zero, where the mode does not exist.
 
 `phase_status`/`amp_status`, when given, hold one `(AntennaName, Feed, Frequency, Ti)`
 array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref)),
-receiving each spectral window's `_BP_TRACK_*` outcome code from the final
+receiving each spectral window's [`TrackStatus`](@ref) from the final
 sweep, and `phase_priors`/`amp_priors` one `(AntennaName, Feed, Ti)` array per block
 receiving each track's resolved prior; a call solving part of a track writes
 only its own time segments.
@@ -1861,7 +1873,7 @@ function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
         gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Real = 0.01,
-        max_logamp::Real = _BP_MAX_LOGAMP,
+        max_unwrap_ambiguity::Real = 0.25, flat_span::Real = 0.01,
         phase_status = nothing, amp_status = nothing,
         phase_priors = nothing, amp_priors = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
@@ -1942,6 +1954,7 @@ function solve_joint_bandpass!(
         nupdated, declined = _update_station_gains!(
             gains, data, layout;
             fits, levels, seed = iter == 1, relinearize = guarded && iter > 1, systems,
+            max_unwrap_ambiguity, flat_span,
             phase_status, amp_status, phase_priors, amp_priors,
         )
         iszero(nupdated) && _throw_unchanged_sweep(declined, geom)
@@ -1969,7 +1982,7 @@ function solve_joint_bandpass!(
         (; phase = _joint_level_writer(phase_level[a], levels[a].phase), amp = _joint_level_writer(amp_level[a], levels[a].amp))
             for a in 1:nant
     ]
-    _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers; max_logamp)
+    _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers)
     return θ
 end
 

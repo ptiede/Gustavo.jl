@@ -14,9 +14,10 @@
 # A collection of solutions stores its keys in the root's attributes and each
 # solution, laid out as above, in a group named by its position (`1/`, `2/`, …).
 #
-# Plain numeric arrays are Zarr arrays with xarray's `_ARRAY_DIMENSIONS`;
-# everything else is JSON in the attributes, tagged with its Julia type so it
-# is rebuilt exactly on load.
+# Plain numeric arrays are Zarr arrays with xarray's `_ARRAY_DIMENSIONS`, as is
+# a labeled array of enums, by its integer codes with the enum type named in
+# its attributes; everything else is JSON in the attributes, tagged with its
+# Julia type so it is rebuilt exactly on load.
 
 import JSON
 import Zarr
@@ -113,6 +114,7 @@ _encode(x::AbstractString) = String(x)
 _encode(x::Float64) = isfinite(x) ? x : _kind("value", Float64, "value" => string(x))
 _encode(x::Symbol) = _kind("value", Symbol, "value" => String(x))
 _encode(x::Real) = _kind("value", typeof(x), "value" => isfinite(x) ? x : string(x))
+_encode(x::Enum) = _kind("value", typeof(x), "value" => Integer(x))
 _encode(x::Tuple) = Dict{String, Any}("_kind" => "tuple", "items" => Any[_encode(v) for v in x])
 _encode(x::NamedTuple) = Dict{String, Any}(
     "_kind" => "namedtuple", "names" => _strings(keys(x)), "items" => Any[_encode(v) for v in x],
@@ -237,7 +239,10 @@ function _write_dimarray!(parent_group, key, A::AbstractDimArray, path; attrs = 
     arrays = Tuple{String, AbstractArray, Any}[]
     specs = Any[_dim_spec!(arrays, d, path) for d in DimensionalData.dims(A)]
     own = Dict{String, Any}("kind" => "dimarray", "dims" => specs)
-    if _is_plain_array(data)
+    if eltype(data) <: Enum
+        own["enum"] = _type_string(eltype(data))
+        push!(arrays, ("data", Integer.(data), [s["name"] for s in specs]))
+    elseif _is_plain_array(data)
         push!(arrays, ("data", data, [s["name"] for s in specs]))
     else
         own["data"] = _encode_checked(data, path)
@@ -253,6 +258,7 @@ function _read_dimarray(g)
     attrs = g.attrs
     dims_ = Tuple(_read_dim(g, s) for s in attrs["dims"])
     data = haskey(attrs, "data") ? _decode(attrs["data"]) : _read_array(g.arrays["data"])
+    haskey(attrs, "enum") && (data = _resolve_type(attrs["enum"]).(data))
     return DimArray(data, dims_)
 end
 
