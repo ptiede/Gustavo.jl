@@ -280,13 +280,12 @@ an `init` they are, as for OU (`_estimate_hypers`).
 
 ## Where the solvers use this
 
-**Bandpass, [`PerTrackSmoother`](@ref).** Each (station, feed, time segment)
-has one track per spectral window along frequency. A hyperprior is resolved
-once for all of that track's windows together, with the level of each level
-segment integrated out; then the levels are estimated and each window is fit.
-
-**Bandpass, [`JointSmoother`](@ref).** The same fit runs inside each sweep of
-the gain update, on the tracks linearized around the current gains, with the
+**Bandpass, [`JointSmoother`](@ref).** Each (station, feed, time segment)
+has one track per spectral window along frequency. Inside each sweep of the
+gain update, a hyperprior is resolved once for all of that track's windows
+together, with the level of each level segment integrated out; then the levels
+are estimated and each window is fit. The tracks are linearized around the
+current gains, with the
 hyperparameters and levels re-estimated every sweep. Iterated to convergence
 this is MAP estimation of the gains under both priors, with type-II MAP
 hyperparameters.

@@ -96,7 +96,7 @@ export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
 export solve_adhoc_phasing, default_adhoc_terms, default_adhoc_prior
 export default_bandpass_terms
-export AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
+export AbstractBandpassSmoother, JointSmoother
 export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks,
     bandpass_level_blocks
 export fringe_snr_table, fringe_detections, cat_scans

@@ -103,98 +103,6 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test_throws "holds no component under bandpass" sol_f[:bandpass]
     end
 
-    @testset "gate → spike guard → shape: a contaminated channel is excised, then estimated" begin
-        # The synthetic visibilities carry no thermal noise, so an unconstrained
-        # per-segment solve reproduces the injected bandpass exactly and nothing
-        # about rejection would be exercised. The case that does exercise it is a
-        # channel the multiplicative gain model does NOT describe: one narrowband
-        # contaminant, on the baselines of a single station. It shows as EXCESS
-        # amplitude, so the Fisher weight of the very segment carrying it is the
-        # LARGEST on the track — no Gaussian prior can outvote it, and rejection
-        # is the narrow-spike guard's job, not the prior's. What the prior then
-        # supplies is the estimate of the excised channel.
-        nspwc, nchanc, ntimec, nscansc = 1, 32, 4, 2
-        nglobc = nspwc * nchanc
-        chan_bw = 2.0e6
-        rngc = MersenneTwister(0x000A51DE)
-        # Injected truth: an OU (AR(1)) draw along frequency per (station, feed) —
-        # the process `OUPrior` assumes, correlated over 6 channels.
-        nu = 6 * chan_bw
-        sigma_bp = 0.15
-        a1 = exp(-chan_bw / nu)
-        bpc = zeros(nant, 2, nglobc)
-        abpc = zeros(nant, 2, nglobc)
-        for trk in (bpc, abpc), a in 1:nant, f in 1:2
-            trk[a, f, 1] = sigma_bp * randn(rngc)
-            for c in 2:nglobc
-                trk[a, f, c] = a1 * trk[a, f, c - 1] + sqrt(sigma_bp^2 * (1 - a1^2)) * randn(rngc)
-            end
-        end
-        uvc, truthc = _build_fringe_ps(;
-            nant, nspw = nspwc, nchan = nchanc, ntime = ntimec, nscans = nscansc,
-            chan_bw, bandpass = bpc, amp_bandpass = abpc, seed = 7, eltype = ComplexF64,
-        )
-        bad_chan, bad_ant = 17, 2
-        for ms in values(uvc)
-            V = DimensionalData.modify(Array, ms[:visibility])
-            for (bi, (a, b)) in pairs(truthc.bl_pairs)
-                (a == bad_ant || b == bad_ant) || continue
-                view(V, Frequency(bad_chan), BaselineID(bi)) .*= 8
-            end
-            ms[:visibility] = V
-        end
-
-        fmc = default_fringe_terms()
-        runc(amp) = last(
-            _fit_chain(
-                (
-                    BaselineFringeFit(; model = fmc, gauge = PinAntenna(1)), AdhocPhase(adhoc; gauge = PinAntenna(1)),
-                    Bandpass(; model = _bpmodel(; amp), smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)),
-                ), uvc; exec = ExecutionConfig(),
-            )
-        )
-        track(s, a, f) = (
-            L = parent(_bp_amp(s));
-            Float64[L[1, f, c, 1, a] for c in 1:nglobc]
-        )
-        gauge(x) = x .- sum(x) / length(x)
-        cleanc = [c for c in 1:nglobc if abs(c - bad_chan) > 2]
-        rms_clean(v, a, f) =
-            sqrt(sum(abs2, gauge(v)[cleanc] .- gauge(abpc[a, f, :])[cleanc]) / length(cleanc))
-
-        s_free = runc(nothing)
-        s_ar = runc(CAL.OUPrior(; scale = LogNormal(log(nu), 1.0), σ = LogNormal(log(sigma_bp), 1.0)))
-        # σ = 0.02 rad per channel (2 MHz) as rad/Hz^(3/2).
-        s_wh = runc(CAL.RandomWalkPrior(; order = 2, σ = 0.02 * sqrt(3 / (2 * 2.0e6^3))))
-
-        # The guard excises the contaminated channel; no prior estimates
-        # nothing it has no datum for, so that slot stays UNAPPLIED (log-amp 0)
-        # while every uncontaminated channel is recovered exactly.
-        vfree = track(s_free, bad_ant, 1)
-        @test vfree[bad_chan] == 0.0
-        @test rms_clean(vfree, bad_ant, 1) < 1.0e-2
-        for a in (1, 3, 4)                       # stations the contaminant never touched
-            @test rms_clean(track(s_free, a, 1), a, 1) < 1.0e-6
-        end
-
-        # A prior fills that slot from the in-band shape, closer to the truth than
-        # leaving it unapplied, and about as close as the OU conditional mean of
-        # the true neighbors under the true parameters allows.
-        var = track(s_ar, bad_ant, 1)
-        err_at(v) = abs(gauge(v)[bad_chan] - gauge(abpc[bad_ant, 1, :])[bad_chan])
-        oracle = a1 * (abpc[bad_ant, 1, bad_chan - 1] + abpc[bad_ant, 1, bad_chan + 1]) / (1 + a1^2)
-        @test var[bad_chan] != 0.0
-        @test err_at(var) < err_at(vfree)
-        @test err_at(var) < 1.25 * abs(oracle - abpc[bad_ant, 1, bad_chan])
-
-        # The OU prior is the correctly-specified one for this track (the truth IS
-        # an OU draw along frequency), so on the uncontaminated channels it costs
-        # less than the second-order random walk.
-        ar_rms = mean(rms_clean(track(s_ar, a, f), a, f) for a in 1:nant, f in 1:2)
-        wh_rms = mean(rms_clean(track(s_wh, a, f), a, f) for a in 1:nant, f in 1:2)
-        @test ar_rms < 0.85 * wh_rms
-    end
-
     @testset "portable calibrate!: same-set + cross-set by station name" begin
         bps = bp_n[:bandpass]
         correct(sol, ps) = collect(values(calibrate!(sol, deepcopy(ps); flag_bad = false, apply_flags = false)))
@@ -282,7 +190,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
 end
 
-@testset "PerTrackSmoother: a prior on both observables, broken at its segments" begin
+@testset "Bandpass: a prior on both observables, broken at its segments" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
     nglob = nspw * nchan
@@ -293,7 +201,7 @@ end
     # One (feed, station) phase track over the solve's channels.
     phase_track(sol, a, f) = _by_channel(_bp_phase(sol))[:, f, 1, a]
     curvature(trk) = maximum(abs, diff(diff(CAL.unwrap_phase_track(trk))))
-    run(model) = fit(Bandpass(; model, smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)), ps)
+    run(model) = fit(Bandpass(; model, gauge = PinAntenna(1)), ps)
 
     # A stiff second-order walk on the PHASE leaves only its null space — a
     # straight line in frequency within each spectral window, each with its own
@@ -336,6 +244,10 @@ end
     end
 end
 
+# A smoother that solves one gain table for every station.
+struct _UniformSmoother <: FP.AbstractBandpassSmoother end
+FP.can_fit(::_UniformSmoother, tc, geom) = true
+
 @testset "Bandpass step: model vetting" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
@@ -347,23 +259,19 @@ end
     )
 
     @testset "compile-time model vetting (can_fit / validate_model)" begin
-        pertrack = FP.PerTrackSmoother()
         phase_only = GainModel(; phase = default_bandpass_terms().phase)
         # An empty tree compiles no component at all, so the step would
         # accumulate every scan and write nowhere — rejected at compile time,
         # before any data is read.
-        @test_throws ArgumentError fit(Bandpass(; model = GainModel(), smoother = pertrack, gauge = PinAntenna(1)), ps)
-        @test_throws "fits nothing" fit(Bandpass(; model = GainModel(), smoother = pertrack, gauge = PinAntenna(1)), ps)
+        @test_throws ArgumentError fit(Bandpass(; model = GainModel(), gauge = PinAntenna(1)), ps)
+        @test_throws "fits nothing" fit(Bandpass(; model = GainModel(), gauge = PinAntenna(1)), ps)
         @test fit(Bandpass(; model = phase_only, gauge = PinAntenna(1)), ps) isa CAL.CalibrationSolution
-        @test fit(Bandpass(; model = phase_only, smoother = pertrack, gauge = PinAntenna(1)), ps) isa
-            CAL.CalibrationSolution
         # Its two shapes share one frequency segmentation: one complex gain per segment.
         mixed = GainModel(;
             phase = (; bandpass = _bpc(CAL.ChannelBlocks(1))),
             logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
         )
         @test_throws "share one frequency segmentation" model_components(Bandpass(; model = mixed, gauge = PinAntenna(1)), nothing)
-        @test model_components(Bandpass(; model = mixed, smoother = pertrack, gauge = PinAntenna(1)), nothing) isa CAL.GainModel
         # A prior the smoothers do not fit is rejected by `can_fit`.
         @test_throws "cannot fit the component" model_components(
             Bandpass(; model = GainModel(; phase = (; bandpass = _bpc(CAL.ChannelBlocks(1); prior = CAL.IIDPrior(0.1)))), gauge = PinAntenna(1)),
@@ -386,7 +294,7 @@ end
         ou = CAL.OUPrior(; scale = 1.0e7, σ = 0.1)
         shape = _bpc(CAL.ChannelBlocks(1); prior = ou)
         level = _bpc(CAL.PerSpectralWindow())
-        pair(; kw...) = model_components(Bandpass(; model = GainModel(; phase = (; kw...)), smoother = pertrack, gauge = PinAntenna(1)), nothing)
+        pair(; kw...) = model_components(Bandpass(; model = GainModel(; phase = (; kw...)), gauge = PinAntenna(1)), nothing)
         @test pair(; level, shape) isa CAL.GainModel
         @test_throws "a shape and at most one level" pair(; shape, level, whole = _bpc(CAL.GlobalFrequency()))
         @test_throws "one is the shape" pair(; a = shape, b = _bpc(CAL.ChannelBlocks(2)))
@@ -421,12 +329,11 @@ end
 
         # A heterogeneous model reaches the solver only where the smoother
         # solves per station. `Bandpass` forwards the question to it: the joint
-        # path loops over the layout's station blocks and takes the model, the
-        # closure path solves one rectangular gain table and does not, and the
-        # runner rejects it there, naming the differing component and its
-        # per-station signatures.
+        # path loops over the layout's station blocks and takes the model; a
+        # smoother that does not declare support is rejected by the runner,
+        # naming the differing component and its per-station signatures.
         @test supports_station_heterogeneity(Bandpass(; smoother = FP.JointSmoother(), gauge = PinAntenna(1)))
-        @test !supports_station_heterogeneity(Bandpass(; smoother = pertrack, gauge = PinAntenna(1)))
+        @test !supports_station_heterogeneity(Bandpass(; smoother = _UniformSmoother(), gauge = PinAntenna(1)))
         het = with_station(
             default_bandpass_terms(), "A1";
             phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
@@ -434,8 +341,8 @@ end
         )
         @test model_components(Bandpass(; model = het, gauge = PinAntenna(1)), nothing) isa CAL.GainModel
         @test fit(Bandpass(; model = het, gauge = PinAntenna(1)), ps) isa CAL.CalibrationSolution
-        @test_throws "station-uniform" fit(Bandpass(; model = het, smoother = pertrack, gauge = PinAntenna(1)), ps)
-        @test_throws "phase.bandpass" fit(Bandpass(; model = het, smoother = pertrack, gauge = PinAntenna(1)), ps)
+        @test_throws "station-uniform" fit(Bandpass(; model = het, smoother = _UniformSmoother(), gauge = PinAntenna(1)), ps)
+        @test_throws "phase.bandpass" fit(Bandpass(; model = het, smoother = _UniformSmoother(), gauge = PinAntenna(1)), ps)
     end
 
     @testset "observables are located by name, not plan-list position" begin
@@ -596,68 +503,6 @@ end
     @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata, blocks.n_declined) == (2, 2, 2, 2)
 end
 
-@testset "PerTrackSmoother seeds are labeled and read the sums by name" begin
-    rng = MersenneTwister(179)
-    stations = ["A1", "A2", "A3", "A4"]
-    pairs_ = [(stations[a], stations[b]) for a in 1:4 for b in (a + 1):4]
-    feeds = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    freqs = collect(2.3e11 .+ (0:11) .* 1.0e6)
-    ax = (FP._station_pair_dim(pairs_), FP.FeedPair(feeds), Frequency(freqs))
-    φ = 0.4 .* randn(rng, 4, 2, 12)
-    la = 0.1 .* randn(rng, 4, 2, 12)
-    rl = zeros(ComplexF32, ax)
-    wl = zeros(Float32, ax)
-    for (bi, (a, b)) in enumerate([(a, b) for a in 1:4 for b in (a + 1):4]), (p, (fa, fb)) in enumerate(feeds), c in 1:12
-        w = 1.0f0 + rand(rng, Float32)
-        wl[bi, p, c] = w
-        rl[bi, p, c] = w * exp(la[a, fa, c] + la[b, fb, c] + im * (φ[a, fa, c] - φ[b, fb, c]))
-    end
-    fsegs = [[c] for c in 1:12]
-    segs = dims(DimArray(freqs, Frequency(freqs)), Frequency)
-
-    phase, pprec = @inferred FP._seed_phase_tracks(rl, wl, stations, fsegs, segs; gauge = PinAntenna(1))
-    amp, aprec = @inferred FP._seed_amp_tracks(rl, wl, stations, fsegs, segs)
-    for A in (phase, pprec, amp, aprec)
-        @test eltype(A) == Float32
-        @test lookup(A, FP.AntennaName) == stations
-        @test lookup(A, Frequency) == freqs
-    end
-    @test maximum(abs, (phase .- (φ .- φ[1:1, :, :]))[FP.Feed(1)]) < 1.0e-4
-    @test maximum(abs, amp .- la) < 1.0e-4
-
-    # Storage order is not an input: the same sums stored permuted seed the same tracks.
-    rp, wp = permutedims(rl, (Frequency, FP.FeedPair, FP.AntennaPair)), permutedims(wl, (Frequency, FP.FeedPair, FP.AntennaPair))
-    @test isequal(FP._seed_phase_tracks(rp, wp, stations, fsegs, segs; gauge = PinAntenna(1)), (phase, pprec))
-    @test isequal(FP._seed_amp_tracks(rp, wp, stations, fsegs, segs), (amp, aprec))
-end
-
-@testset "PerTrackSmoother: pooled scans add their signal power" begin
-    rng = MersenneTwister(312)
-    pairs_ = [("A1", "A2"), ("A1", "A3"), ("A2", "A3")]
-    ends = [(1, 2), (1, 3), (2, 3)]
-    freqs = collect(2.3e11 .+ (0:7) .* 1.0e6)
-    ax = (FP._station_pair_dim(pairs_), FP.FeedPair([(1, 1)]), Frequency(freqs))
-    g = exp.(complex.(0.2 .* randn(rng, 3, 8), 0.5 .* randn(rng, 3, 8)))
-    # One strong scan and one twenty times weaker, each with its own source term.
-    S = [cis(2π * rand(rng)) * s for s in (1.0, 0.05), _ in 1:3]
-    results = map(1:2) do si
-        rl, wl = zeros(ComplexF64, ax), zeros(ax)
-        for (bi, (a, b)) in pairs(ends), c in 1:8
-            wl[bi, 1, c] = 2.0
-            rl[bi, 1, c] = 2.0 * g[a, c] * S[si, bi] * conj(g[b, c])
-        end
-        (; rl, wl)
-    end
-    rbar, wbar = FP._pool_scans(results, 1:2, Float64)
-    snr2(r, w) = abs2.(r) ./ w
-    @test snr2(rbar, wbar) ≈ snr2(results[1].rl, results[1].wl) .+ snr2(results[2].rl, results[2].wl)
-    for (bi, (a, b)) in pairs(ends)
-        product = [g[a, c] * conj(g[b, c]) for c in 1:8]
-        ratio = rbar[bi, 1, :] ./ wbar[bi, 1, :] ./ product
-        @test maximum(abs, ratio .- first(ratio)) < 1.0e-12
-    end
-end
-
 @testset "Bandpass: the solve publishes its per-track record" begin
     nant, nspw, nchan, ntime, nscans = 4, 2, 8, 6, 4
     rng = MersenneTwister(777)
@@ -762,8 +607,8 @@ end
         @test s_brk < 0.5 * s_glob
     end
 
-    @testset "the per-track record is labeled like θ" begin
-        sol = fit(Bandpass(; model = model(seg), smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)), broken)
+    @testset "the record is labeled like θ" begin
+        sol = fit(Bandpass(; model = model(seg), gauge = PinAntenna(1)), broken)
         st = sol.steps[:bandpass].phase_status
         leaf = _bp_phase(sol)
         @test lookup(st, Ti) == lookup(leaf, Ti)
@@ -822,9 +667,6 @@ end
 
     @testset "per-scan resolution is still refused" begin
         @test_throws "cannot fit the component" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
-        @test_throws "cannot fit the component" fit(
-            Bandpass(; model = model(PerScan()), smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)), broken,
-        )
         @test_throws "degenerate with that scan's source coherence" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
         @test_throws "GlobalTime, InstrumentScans or TimeBlocks" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
     end
@@ -832,11 +674,6 @@ end
     @testset "JointSmoother holds both observables to one time segmentation" begin
         mixed = GainModel(phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(GlobalTime())))
         @test_throws "share one time segmentation" fit(Bandpass(; model = mixed, gauge = PinAntenna(1)), broken)
-        # PerTrackSmoother solves the two independently, so it allows the split —
-        # a phase bandpass that breaks beside an amplitude one held all track.
-        @test fit(
-            Bandpass(; model = mixed, smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)), broken,
-        ) isa CAL.CalibrationSolution
     end
 end
 
@@ -901,11 +738,11 @@ end
 
     @testset "the capability is declared by the smoother, not the step" begin
         @test supports_station_heterogeneity(Bandpass(; smoother = FP.JointSmoother(), gauge = PinAntenna(1)))
-        @test !supports_station_heterogeneity(Bandpass(; smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)))
-        # The closure path solves one rectangular gain table for every station,
-        # so the rejection names it and the smoother that would take the model.
+        @test !supports_station_heterogeneity(Bandpass(; smoother = _UniformSmoother(), gauge = PinAntenna(1)))
+        # A smoother that solves one gain table for every station is rejected,
+        # naming the smoother that would take the model.
         @test_throws "Bandpass(smoother = JointSmoother())" fit(
-            Bandpass(; model = het, smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1)), uvset,
+            Bandpass(; model = het, smoother = _UniformSmoother(), gauge = PinAntenna(1)), uvset,
         )
     end
 

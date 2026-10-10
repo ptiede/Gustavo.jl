@@ -81,8 +81,8 @@ include("test_fringe_step.jl")
 include("test_bandpass_step.jl")
 
 # Bandpass(smoother = JointSmoother()): the alternating complex-visibility +
-# per-scan source-coherence solve, vs. the closure-based PerTrackSmoother
-# default, and the shape specs acting as priors inside its gain update.
+# per-scan source-coherence solve, and the shape specs acting as priors inside
+# its gain update.
 include("test_joint_bandpass.jl")
 
 # The weight convention behind the bandpass SNRs and gain-estimate weights.

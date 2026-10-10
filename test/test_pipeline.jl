@@ -571,7 +571,6 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[1, f, plan.fseg_id[gc], 1, a]
     amp_model(prior) = GainModel(;
-        phase = default_bandpass_terms().phase,
         logamp = (;
             bandpass = CAL.GainComponent(
                 CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(), prior,
@@ -615,7 +614,7 @@ end
     for prior in priors
         sol = _combined(
             _fit_chain(
-                (ff, Bandpass(; model = amp_model(prior), smoother = FP.PerTrackSmoother(), gauge), AdhocPhase(adhoc; gauge)),
+                (ff, Bandpass(; model = amp_model(prior), gauge), AdhocPhase(adhoc; gauge)),
                 ps,
             )
         )
@@ -634,7 +633,7 @@ end
 
     # With no prior the killed channels are NOT estimated — their θ slot is
     # untouched (log-amp 0 ⇒ |g| = 1), the contrast that motivates the priors.
-    solf = _combined(_fit_chain((ff, Bandpass(; smoother = FP.PerTrackSmoother(), gauge), AdhocPhase(adhoc; gauge)), ps))
+    solf = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
     bpf = only(CAL._applied(solf[:bandpass, :logamp, :bandpass]).groups)
     planf = only(bpf.layout.plans)
     for dg in dead_globals, a in 2:nant, f in 1:2

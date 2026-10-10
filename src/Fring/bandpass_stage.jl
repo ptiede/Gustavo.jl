@@ -7,16 +7,11 @@
 # per observable, a shape component with a value per `ChannelBlocks` segment,
 # optionally beside a level component at spectral-window resolution or coarser.
 # A prior on the shape relates its values within each spectral window. How it is
-# solved is pluggable through `AbstractBandpassSmoother`, in two tiers.
-# `PerTrackSmoother` sums every scan's residual into one accumulator, runs the
-# per-segment closure solves — which assume a baseline's source term cancels —
-# and fits each resulting (station, feed) track under its component's prior.
-# `JointSmoother` runs [`solve_joint_bandpass!`](@ref) instead, fitting the
-# complex visibilities against an explicit per-scan source term, for when that
-# assumption fails, with the priors entering inside the gain update.
+# solved is pluggable through `AbstractBandpassSmoother`; `JointSmoother` runs
+# [`solve_joint_bandpass!`](@ref), fitting the complex visibilities against an
+# explicit per-scan source term, with the priors entering inside the gain update.
 #
-# The graph/solve helpers (`_solve_observable!`, `_node`) live
-# in adhoc.jl; the prior fits live in prior_fits.jl.
+# The prior fits live in prior_fits.jl.
 
 """
     default_bandpass_terms(; freq = ChannelBlocks(1)) -> GainModel
@@ -29,8 +24,7 @@ sets the segments; `ChannelBlocks(1)` is a free value per channel.
 Either group of a `Bandpass` model may be empty. Fit one observable only by
 keeping just that group, e.g.
 
-    Bandpass(model = GainModel(; phase = default_bandpass_terms().phase),
-             smoother = PerTrackSmoother())
+    Bandpass(model = GainModel(; phase = default_bandpass_terms().phase))
 
 fits the phase bandpass alone. Uniform across every antenna.
 
@@ -55,9 +49,8 @@ end
 
 How the [`Bandpass`](@ref Gustavo.Bandpass) step turns the accumulated
 per-channel residual into station bandpass tracks, under each component's
-prior. Concretely [`PerTrackSmoother`](@ref), which solves the per-segment closures
-and fits each track, or [`JointSmoother`](@ref), which fits the complex
-visibilities against an explicit per-scan source term.
+prior. [`JointSmoother`](@ref) fits the complex visibilities against an explicit
+per-scan source term.
 
 # Implementing a smoother
 
@@ -68,7 +61,7 @@ Define:
 
 [`can_fit`](@ref) declares which model components the smoother can solve; it
 defaults to `false`, so an undeclared model is rejected at compile time
-rather than leaving θ blocks unsolved. Both shipped smoothers accept
+rather than leaving θ blocks unsolved. `JointSmoother` accepts
 `GainComponent(ConstantTerm(); Ti = <GlobalTime, InstrumentScans or
 TimeBlocks>, Frequency = <any segmentation>, Feed = PerFeed(), prior = <nothing,
 or a RandomWalkPrior or OUPrior along Frequency>)` and nothing else — a
@@ -102,13 +95,13 @@ so it must re-establish the base checks, available as
 abstract type AbstractBandpassSmoother end
 
 # A bandpass track is one value per frequency segment, per feed, held over a
-# stretch of time, under a prior along frequency. Both smoothers pool the scans
-# of a time segment and solve that stretch as a unit, so any segmentation whose
+# stretch of time, under a prior along frequency. The scans of a time segment
+# are solved together as one stretch, so any segmentation whose
 # segments span scans fits: `GlobalTime` is the whole track, `InstrumentScans`
 # breaks it at named epochs, `TimeBlocks` at a fixed cadence. `PerScan` and
 # `PerIntegration` do not — a segment holding one scan leaves the band mean of
 # the gain degenerate with that scan's own source coherence, which needs the
-# deviation-from-template scheme neither smoother implements.
+# deviation-from-template scheme the smoother does not implement.
 _fits_bandpass_track(tc) =
     tc.term isa ConstantTerm &&
     tc.Ti isa Union{GlobalTime, InstrumentScans, TimeBlocks} &&
@@ -265,84 +258,6 @@ function _member_bandpass_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
     return (; wv, ws, stations = _member_station_pairs(ms), feeds = feed_pairs(ms), chan)
 end
 
-# Free per-segment closure seed for the phase bandpass: the globally-closing
-# per-feed phase solved independently in each frequency segment, plus each
-# (station, feed, segment)'s Fisher weight — the summed weight of the gated rows
-# touching it, which is the diagonal of the segment's normal matrix and so the
-# per-segment precision the prior fit weights the track by. Both are over
-# `(AntennaName(stations), Feed, segments)`, in the sums' real type; the seed solves each
-# feed as its own node.
-function _seed_phase_tracks(
-        rbar_bp, wbar_bp, stations, fsegs, segments::Frequency;
-        gauge::AbstractGauge, snr_floor::Real = 1.0,
-        component::Tuple{Vararg{Symbol}} = (),
-    )
-    T = real(eltype(rbar_bp))
-    nodes = _cell_nodes(rbar_bp, stations, PerFeed())
-    val = zeros(T, dims(nodes))
-    wt = zeros(T, dims(nodes))
-    mask = fill!(similar(nodes, Bool), false)
-    nfeed = maximum(maximum, lookup(rbar_bp, FeedPair))
-    tracks = (_station_dim(stations), Feed(1:nfeed), segments)
-    phase = fill!(zeros(T, tracks), T(NaN))
-    prec = zeros(T, tracks)
-    solved = falses(length(stations), nfeed)
-    for (fs, chans) in enumerate(fsegs)
-        fill!(mask, false)
-        for bi in axes(nodes, AntennaPair), p in axes(nodes, FeedPair)
-            c = (AntennaPair(bi), FeedPair(p))
-            _solvable(nodes[c...]) || continue
-            (a, fa), (b, fb) = nodes[c...]
-            r, w = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
-            (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            snr2 = abs2(r) / w
-            snr2 >= snr_floor^2 || continue
-            val[c...] = angle(r)
-            wt[c...] = snr2
-            mask[c...] = true
-            prec[a, fa, fs] += snr2
-            prec[b, fb, fs] += snr2
-        end
-        _solve_observable!(view(phase, Frequency(fs)), solved, val, wt, mask, nodes, gauge; rewrap = 0, component)
-    end
-    return phase, prec
-end
-
-# Gauge and write a solved phase bandpass `(AntennaName, Feed, Frequency)` over the
-# plan's frequency segments: each (station, feed) track is referenced to its
-# circular-mean phase over segments, so the bandpass applies zero net phase.
-# `phase`'s `AntennaName` axis is θ's stations, in θ's order. With a `level`
-# (`_level_writer`), `phase` holds level plus shape; the reference comes off the
-# level and the shape is written as fit.
-function _write_phase_bandpass!(θ, plan, phase, ts::Integer = 1; level = nothing)
-    leaf = _component_leaf(plan, θ)
-    for a in axes(phase, AntennaName), f in axes(phase, Feed)
-        node = _feed_node(plan.tying, f)
-        node == 0 && continue
-        track = view(phase, AntennaName(a), Feed(f))
-        acc = sum(v -> isfinite(v) ? cis(v) : zero(complex(v)), track)
-        abs(acc) > 0 || continue
-        m = angle(acc)
-        L = _write_level!(_station_level(level, a), f, ts, Lj -> rem2pi(Lj - m, RoundNearest))
-        for fs in axes(track, Frequency)
-            v = track[fs]
-            isfinite(v) || continue
-            leaf[1, node, fs, ts, a] = isnothing(L) ? rem2pi(v - m, RoundNearest) : v - L[level.seg[fs]]
-        end
-    end
-    return θ
-end
-
-# A level component's writer: its leaf and feed tying, the level segment of each
-# shape segment `seg`, and the fitted `values` over `(AntennaName, Feed, level segment)`.
-_level_writer(::Nothing, θ, seg, values) = nothing
-_level_writer(plan, θ, seg, values) = (; leaf = _component_leaf(plan, θ), tying = plan.tying, seg, values)
-
-# One station's view of a level writer: `values` over `(Feed, level segment)`,
-# written at position `ai` of the leaf's `AntennaName` axis.
-_station_level(::Nothing, a) = nothing
-_station_level(level, a) = (; level.leaf, level.tying, level.seg, values = view(level.values, a, :, :), ai = a)
-
 # Write one station's feed-`f` levels, each through `gauge`, and return them;
 # `nothing` without a level.
 _write_level!(::Nothing, f, ts, gauge) = nothing
@@ -373,146 +288,8 @@ function _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
     return r, w
 end
 
+# ── Track fitting, outcome codes and limits ─────────────────────────────────
 
-# Narrow-spike guard: additive contamination (pcal tones, RFI) violates the
-# multiplicative gain model — a contaminated channel shows excess amplitude,
-# the fit hands it |g| > 1, and applying that gain would then UP-weight it
-# (w → w·|g|²), amplifying exactly the channels that should be distrusted.
-# Genuine passband structure is smooth or negative (roll-off), so narrow
-# positive log-amp outliers vs the per-(station, feed, piece) robust scale are
-# excised (left unapplied, |g| = 1) instead of trusted. `spike_sigma = 0`
-# disables the guard. `pieces` holds the channel groups the scale is taken over.
-function _spike_guard!(la, pieces, spike_sigma::Real)
-    spike_sigma > 0 || return la
-    T = eltype(la)
-    for sidx in pieces
-        for a in axes(la, AntennaName), f in axes(la, Feed)
-            track = view(la, AntennaName(a), Feed(f))
-            v = [track[s] for s in sidx if isfinite(track[s])]
-            length(v) >= 8 || continue
-            med = median(v)
-            cut = T(spike_sigma) * max(T(1.4826) * median(abs.(v .- med)), T(0.02))
-            for s in sidx
-                isfinite(track[s]) && track[s] - med > cut && (track[s] = T(NaN))
-            end
-        end
-    end
-    return la
-end
-
-# Gauge and write a solved log-amp bandpass `(AntennaName, Feed, Frequency)` over the
-# plan's frequency segments: zero band-mean per (station, feed), so the bandpass
-# applies unit net amplitude. `la`'s `AntennaName` axis is θ's stations, in θ's order.
-# With a `level`, `la` holds level plus shape; the mean comes off the level and
-# the shape is written as fit.
-function _write_amp_bandpass!(θ, plan, la, max_logamp::Real, ts::Integer = 1; level = nothing)
-    leaf = _component_leaf(plan, θ)
-    # The band mean is removed at θ's precision, which may exceed the track's:
-    # the gauge is a property of θ.
-    T = eltype(leaf)
-    for a in axes(la, AntennaName), f in axes(la, Feed)
-        node = _feed_node(plan.tying, f)
-        node == 0 && continue
-        track = view(la, AntennaName(a), Feed(f))
-        n = count(isfinite, track)
-        n == 0 && continue
-        m = sum(v -> isfinite(v) ? T(v) : zero(T), track) / n
-        L = _write_level!(_station_level(level, a), f, ts, Lj -> T(Lj) - m)
-        for fs in axes(track, Frequency)
-            v = T(track[fs])
-            isfinite(v) || continue
-            # Leave implausibly-large corrections unapplied (|g| = 1). A prior that
-            # interpolates gaps self-regularizes, but an unconstrained fit can hand a
-            # low-SNR band-edge segment that barely clears the gate a huge log-amp;
-            # applying it would up-weight that segment's noise, since
-            # applying a gain scales weights by |g|². The bound is generous
-            # (|g| ≤ 10) so real passband roll-off/structure passes unchanged — only
-            # pathological noise blow-ups are gated.
-            gated = abs(v - m) > max_logamp
-            leaf[1, node, fs, ts, a] = if isnothing(L)
-                gated ? zero(v) : v - m
-            else
-                Lv = T(L[level.seg[fs]])
-                gated ? m - Lv : v - Lv
-            end
-        end
-    end
-    return θ
-end
-
-# Free per-segment closure seed for the log-amp bandpass: the sum closure
-# `log|V̄_ab| = la_a + la_b` solved independently in each frequency segment, plus
-# each (station, feed, segment)'s summed gate weight as its precision, both over
-# `(AntennaName(stations), Feed, segments)` in the sums' real type. Segments with no
-# gated observation are left `NaN` for a prior to estimate — or not.
-function _seed_amp_tracks(
-        rbar_bp, wbar_bp, stations, fsegs, segments::Frequency;
-        snr_floor::Real = 1.0, ridge::Real = 1.0e-6,
-    )
-    T = real(eltype(rbar_bp))
-    nodes = _cell_nodes(rbar_bp, stations, PerFeed())
-    val = zeros(T, dims(nodes))
-    wt = zeros(T, dims(nodes))
-    mask = fill!(similar(nodes, Bool), false)
-    tracks = (_station_dim(stations), Feed(1:maximum(maximum, lookup(rbar_bp, FeedPair))), segments)
-    la = fill!(zeros(T, tracks), T(NaN))
-    prec = zeros(T, tracks)
-    for (fs, chans) in enumerate(fsegs)
-        fill!(mask, false)
-        for bi in axes(nodes, AntennaPair), p in axes(nodes, FeedPair)
-            c = (AntennaPair(bi), FeedPair(p))
-            _solvable(nodes[c...]) || continue
-            (a, fa), (b, fb) = nodes[c...]
-            r, w = _segment_residual(rbar_bp, wbar_bp, bi, p, chans)
-            (isfinite(r) && abs(r) > 0 && isfinite(w) && w > 0) || continue
-            snr2 = abs2(r) / w
-            snr2 >= snr_floor^2 || continue
-            amp = abs(r / w); amp > 0 || continue
-            val[c...] = log(amp)
-            wt[c...] = snr2
-            mask[c...] = true
-            prec[a, fa, fs] += snr2
-            prec[b, fb, fs] += snr2
-        end
-        _solve_log_amp!(view(la, Frequency(fs)), val, wt, mask, nodes, ridge)
-    end
-    return la, prec
-end
-
-# Solve the sum closure over the masked cells of `val` into `la` `(nant, nfeed)`,
-# leaving nodes no cell touches untouched. A component whose graph is bipartite
-# determines its nodes only up to an alternating offset; `ridge` picks the
-# smallest solution.
-function _solve_log_amp!(la, val, w, mask, nodes, ridge::Real)
-    T = eltype(val)
-    nant = size(la, 1)
-    cells = [I for I in eachindex(val, w, mask, nodes) if mask[I]]
-    isempty(cells) && return la
-    edges = [_edge(nodes[I], nant) for I in cells]
-    touched = sort!(unique!([n for e in edges for n in e]))
-    column = zeros(Int, length(la))
-    column[touched] .= eachindex(touched)
-    ncell = length(cells)
-    A = zeros(T, ncell + length(touched), length(touched))
-    for (i, (u, v)) in enumerate(edges)
-        A[i, column[u]] += one(T)
-        A[i, column[v]] += one(T)
-    end
-    for j in eachindex(touched)
-        A[ncell + j, j] = one(T)
-    end
-    b = [T[val[I] for I in cells]; zeros(T, length(touched))]
-    wts = [T[w[I] for I in cells]; fill(T(ridge), length(touched))]
-    x = FactoredWLS(A, wts)(b)
-    for (j, n) in pairs(touched)
-        la[(n - 1) % nant + 1, (n - 1) ÷ nant + 1] = x[j]
-    end
-    return la
-end
-
-# ── Per-track bandpass smoothing (seed closure solve → per-track prior fit) ────
-
-const _BP_SPIKE_SIGMA = 5.0
 const _BP_MAX_LOGAMP = log(10.0)
 
 # Outcome of fitting one piece of a (station, feed) bandpass track, reported by
@@ -546,41 +323,6 @@ const _BP_MAX_LINEAR_STEP = 0.5
 # Fraction of a solve's tracks that may come back flat or declined before the
 # bandpass as a whole is worth a warning.
 const _BP_DEGENERATE_WARN_FRACTION = 0.25
-
-"""
-    PerTrackSmoother(; eltype = nothing)
-
-Solve the bandpass one (station, feed) track at a time: the per-segment closure
-graph solve seeds real phase and log-amp tracks, then each track is fit under
-its component's prior, one spectral window at a time, with the level of a level
-component estimated alongside.
-
-Phase tracks are unwrapped along frequency within each spectral window before
-the fit, so a prior sees a continuous branch rather than a sawtooth. A prior
-fills segments the closure solve had no data for; without one they stay
-unapplied.
-
-The scans of a time segment are pooled before the solve, each weighted by the
-conjugate of its own band-averaged visibility per (baseline, feed pair), so
-every scan contributes in proportion to its signal power. The pooled sums are held
-in `eltype`, a real floating-point type; `nothing` keeps the data's.
-
-The closure assumes a baseline's source term cancels out of the per-segment
-phase-difference / log-amp-sum, so it is not appropriate for a resolved or
-polarized calibrator (see [`JointSmoother`](@ref)).
-"""
-struct PerTrackSmoother{E} <: AbstractBandpassSmoother
-    eltype::E
-    function PerTrackSmoother(eltype)
-        isnothing(eltype) || eltype isa Type{<:AbstractFloat} || throw(
-            ArgumentError("`eltype` must be a real floating-point type or `nothing`, got $eltype"),
-        )
-        return new{typeof(eltype)}(eltype)
-    end
-end
-PerTrackSmoother(; eltype = nothing) = PerTrackSmoother(eltype)
-
-can_fit(::PerTrackSmoother, tc, geom) = _fits_bandpass_track(tc)
 
 # The outcome code for one fitted piece: nothing estimated, a constant, or a
 # real shape.
@@ -717,61 +459,31 @@ function _align_branches!(ys, ws, level)
     return ys
 end
 
-# Fit every (station, feed) track of `tracks` in place (see `_fit_track!`), each
-# segment weighted by its seed precision. `tracks` and `prec` are over
-# `(AntennaName, Feed, Frequency)`, and `station_priors[a]` is station `a`'s resolved
-# prior. `status`, when given, is over `(AntennaName, Feed, Frequency)` with one entry per
-# piece; `priors` over `(AntennaName, Feed)`, receiving each track's resolved prior; and
-# `levels`, with `level`, over `(AntennaName, Feed, level segment)`.
-function _fit_tracks!(
-        tracks, prec, x, pieces, station_priors;
-        unwrap::Bool, level = nothing, levels = nothing, status = nothing, priors = nothing,
-    )
-    nlevel = isnothing(levels) ? 0 : size(levels, 3)
-    for a in axes(tracks, AntennaName), f in axes(tracks, Feed)
-        st = isnothing(status) ? nothing : view(status, AntennaName(a), Feed(f))
-        resolved, L = _fit_track!(
-            view(tracks, AntennaName(a), Feed(f)), view(prec, AntennaName(a), Feed(f)), x, pieces,
-            _prior_along(station_priors[a], :Frequency);
-            level, nlevel, unwrap, status = st,
-        )
-        isnothing(priors) || (priors[a, f] = resolved)
-        isnothing(L) || (levels[a, f, :] .= L)
-    end
-    return tracks
-end
-
-# One observable's per-piece outcome array over `(AntennaName, Feed, Frequency, Ti)`:
-# `stations`, every feed, each spectral window of `seg` over the extent of its
-# channels, and each of `plan`'s `nts` time segments over the extent of its
-# samples.
-function _track_status_array(stations, geom::DataGeometry, plan, seg, nts::Integer)
+# A station block's outcome per piece over `(AntennaName, Feed, Frequency, Ti)`:
+# its stations, every feed, each spectral window of its shape over the extent of
+# its channels, and each of its time segments over the extent of its samples.
+function _block_status_array(block, geom::DataGeometry)
+    (; plan) = block
     ax = (
-        _station_dim(stations), Feed(1:geom.nfeed),
-        Frequency(_segment_lookup(geom.channel_freqs, seg.piece_chans)),
-        Ti(_time_segment_lookup(plan, geom, nts)),
+        _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
+        Frequency(_segment_lookup(geom.channel_freqs, _shape_segments(plan, geom).piece_chans)),
+        Ti(_time_segment_lookup(plan, geom, plan.shape[4])),
     )
     return fill!(zeros(Int8, ax), _BP_TRACK_NODATA)
 end
 
-# One observable's resolved prior per (station, feed, time segment), over
-# `(AntennaName, Feed, Ti)` labeled as `_track_status_array`; each slot starts at its
-# station's own prior.
-function _track_prior_array(stations, geom::DataGeometry, plan, nts::Integer)
-    ax = (_station_dim(stations), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom, nts)))
+# A station block's resolved prior per (station, feed, time segment), over
+# `(AntennaName, Feed, Ti)` labeled as `_block_status_array`; each slot starts at
+# its station's own prior.
+function _block_prior_array(block, geom::DataGeometry)
+    (; plan) = block
+    ax = (_station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom, plan.shape[4])))
     arr = DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax)
     for a in axes(arr, 1)
         arr[a, :, :] .= Ref(_prior_along(plan.priors[a], :Frequency))
     end
     return arr
 end
-
-# A station block's outcome and prior arrays: its own stations and time segments.
-_block_status_array(block, geom::DataGeometry) = _track_status_array(
-    geom.stations[block.stations], geom, block.plan, _shape_segments(block.plan, geom), block.plan.shape[4],
-)
-_block_prior_array(block, geom::DataGeometry) =
-    _track_prior_array(geom.stations[block.stations], geom, block.plan, block.plan.shape[4])
 
 # One entry per station block, keyed `g1, g2, …` as a `CalibrationSolution` keys a
 # station-heterogeneous component's leaves; a single block is its own array.
@@ -849,23 +561,6 @@ function _warn_degenerate_bandpass(report)
 end
 
 """
-    time_segment_scans(plan, results) -> Vector{Vector{Int}}
-
-The `results` indices belonging to each of `plan`'s time segments, in segment
-order. A scan lies wholly inside one segment of any segmentation the smoothers
-accept, so its first sample (`res.ti`) names the segment. Segments the pass
-never visited come back empty.
-"""
-function time_segment_scans(plan, results)
-    nts = isempty(plan.tseg_id) ? 1 : maximum(plan.tseg_id)
-    groups = [Int[] for _ in 1:nts]
-    for (i, res) in pairs(results)
-        push!(groups[plan.tseg_id[res.ti]], i)
-    end
-    return groups
-end
-
-"""
     _station_time_segments(blocks, results, nant) -> Matrix{Int}
 
 Each station's own time segment for each scan: `tseg[ant, i]` is the segment
@@ -875,7 +570,7 @@ stays at unit gain. A scan lies wholly inside one segment of any segmentation th
 smoothers accept, so its first sample (`res.ti`) names the segment.
 
 A station-uniform model has one block spanning every station, so every row is the
-same and the table reduces to [`time_segment_scans`](@ref)' single grouping.
+same.
 """
 function _station_time_segments(blocks, results, nant)
     tseg = zeros(Int, Base.OneTo(nant), axes(results, 1))
@@ -925,93 +620,9 @@ function _joint_scan_groups(tseg)
     return filter!(!isempty, groups)
 end
 
-# Sum the per-scan residual accumulators of `idx` into one pooled pair. A scan's
-# source term on a baseline is its own, so each scan's sums are multiplied by
-# `c = conj(Ŝ)/max|Ŝ|`, with `Ŝ` its band-averaged visibility per (baseline,
-# feed pair) and the maximum over the pooled scans, and its weights by `|c|²`.
-# Unaligned scans would partly cancel; weighting by `|Ŝ|` makes each cell's
-# pooled `|r|²/w` the sum of the scans' own, so a weak scan adds its information
-# instead of diluting a strong one; and the per-row normalization leaves the
-# pooled amplitude `|g_a·g_b|` times a source amplitude, the band-averaged gains
-# cancelling, so the amplitude closure is not coupled across stations through
-# them. The factor is flat in frequency, so the bandpass shape and the phase
-# steps between spectral windows are kept.
-function _pool_scans(results, idx, T)
-    rbar = zeros(complex(T), dims(results[first(idx)].rl))
-    wbar = zeros(T, dims(results[first(idx)].wl))
-    Ŝs = [_band_average(results[i].rl, results[i].wl) for i in idx]
-    peak = map((xs...) -> maximum(x -> isfinite(x) ? abs(x) : zero(real(x)), xs), Ŝs...)
-    for (i, Ŝ) in zip(idx, Ŝs)
-        (; rl, wl) = results[i]
-        c = map((s, m) -> m > 0 ? conj(s) / m : zero(s), Ŝ, peak)
-        rbar .+= DimensionalData.broadcast_dims(*, rl, c)
-        wbar .+= DimensionalData.broadcast_dims(*, wl, abs2.(c))
-    end
-    return rbar, wbar
-end
-
-_band_average(rl, wl) = map(
-    (r, w) -> w > 0 ? r / w : zero(r),
-    dropdims(sum(rl; dims = Frequency); dims = Frequency),
-    dropdims(sum(wl; dims = Frequency); dims = Frequency),
-)
-
-function solve_bandpass!(sm::PerTrackSmoother, θ, results, setup; gauge::AbstractGauge)
-    T = something(sm.eltype, mapreduce(r -> eltype(r.wl), promote_type, results))
-    # The two observables are solved independently here, so each partitions the
-    # scans by its own time segmentation — a phase bandpass that breaks mid-track
-    # can sit beside an amplitude one held over the whole of it.
-    phase = _per_track_observable!(θ, results, setup, :phase, T; gauge)
-    amp = _per_track_observable!(θ, results, setup, :logamp, T; gauge)
-    report = bandpass_track_report(
-        phase.status, amp.status; phase_priors = phase.priors, amp_priors = amp.priors,
-    )
-    _warn_degenerate_bandpass(report)
-    return report
-end
-
-# Seed, fit and write one observable of a `PerTrackSmoother` solve, returning its
-# outcome and prior arrays (`nothing` when the model has no such component).
-function _per_track_observable!(θ, results, setup, group::Symbol, T; gauge)
-    blocks = bandpass_blocks(setup, θ, group)
-    isempty(blocks) && return (; status = nothing, priors = nothing)
-    geom = setup.geom
-    plan = only(blocks).plan
-    level_blocks = bandpass_level_blocks(setup, θ, group)
-    level_plan = isempty(level_blocks) ? nothing : only(level_blocks).plan
-    seg = _shape_segments(plan, geom)
-    level, nlevel = isnothing(level_plan) ? (nothing, 0) : _piece_levels(level_plan, seg)
-    segments = Frequency(_frequency_segment_lookup(plan, geom))
-    groups = time_segment_scans(plan, results)
-    status = _track_status_array(geom.stations, geom, plan, seg, length(groups))
-    priors = _track_prior_array(geom.stations, geom, plan, length(groups))
-    for (ts, idx) in pairs(groups)
-        isempty(idx) && continue
-        rbar, wbar = _pool_scans(results, idx, T)
-        tracks, prec = group === :phase ?
-            _seed_phase_tracks(rbar, wbar, geom.stations, seg.fsegs, segments; gauge, component = plan.path) :
-            _seed_amp_tracks(rbar, wbar, geom.stations, seg.fsegs, segments)
-        group === :logamp && _spike_guard!(tracks, seg.pieces, _BP_SPIKE_SIGMA)
-        levels = isnothing(level) ? nothing : fill(eltype(tracks)(NaN), length(geom.stations), geom.nfeed, nlevel)
-        _fit_tracks!(
-            tracks, prec, seg.x, seg.pieces, plan.priors;
-            unwrap = group === :phase, level, levels,
-            status = view(status, Ti(ts)), priors = view(priors, Ti(ts)),
-        )
-        writer = _level_writer(level_plan, θ, isnothing(level) ? nothing : _segment_levels(level, seg), levels)
-        group === :phase ?
-            _write_phase_bandpass!(θ, plan, tracks, ts; level = writer) :
-            _write_amp_bandpass!(θ, plan, tracks, _BP_MAX_LOGAMP, ts; level = writer)
-    end
-    return (; status, priors)
-end
-
 # ── Joint complex bandpass + per-scan source coherence (ALS) ─────────────────
 #
-# The per-segment closure solves assume a baseline's source term cancels out of
-# the per-segment phase-difference/log-amp-sum closure, which holds only for an
-# unresolved, unpolarized source. `solve_joint_bandpass!` instead fits the
-# complex visibilities against
+# `solve_joint_bandpass!` fits the complex visibilities against
 #
 #     V_ab(ν) | scan  ≈  g_a(ν) · S_{scan,ab,pol} · conj(g_b(ν)),
 #
@@ -1038,9 +649,7 @@ end
 # These must not be SNR-gated. The joint solve consumes them as complex
 # residuals under inverse-variance weights, and that accumulation is unbiased at
 # any SNR: a weak cell contributes its information at its honest weight and
-# costs variance, never validity. The closure tier's gate is justified there
-# because that tier extracts a per-segment phase, which is meaningless below the
-# noise. Applied here it would preferentially delete the weak cells pairing
+# costs variance, never validity. A gate would preferentially delete the weak cells pairing
 # different feeds, the only rows tying one feed's gain block to another's and so
 # the only measurement of the bandpass between feeds, leaving those blocks at
 # their initialization. Outliers
@@ -1058,7 +667,7 @@ function _reduce_scan_segments!(rview, wview, sc, segs)
 end
 
 # Every scan's (AntennaPair, FeedPair, segment) residual, stacked over an added Scan
-# axis — not summed across scans (unlike the closure tier's fold), since the per-scan source coherence needs each
+# axis — not summed across scans, since the per-scan source coherence needs each
 # scan's own coherent visibility. Element types follow the scan accumulators'
 # own, not a hardcoded precision.
 function _reduce_all_scans(scans, segs, cells::Frequency)
@@ -1456,7 +1065,7 @@ function _update_station_gains!(
             # The status of the last sweep is the status of the solve: each sweep
             # overwrites the previous one's codes for this node.
             if isnothing(fit.amp)
-                replace!(v -> isfinite(v) ? zero(T) : v, la)
+                fill!(la, zero(T))
             else
                 ast = isnothing(amp_status) ? nothing : view(amp_status[k], ai, feed, :, ts)
                 amp_prior, amp_levels = _fit_track!(
@@ -1473,7 +1082,7 @@ function _update_station_gains!(
             pst = isnothing(fit.phase) ? nothing :
                 isnothing(phase_status) ? similar(fit.phase.pieces, Int8) : view(phase_status[k], ai, feed, :, ts)
             if isnothing(fit.phase)
-                replace!(v -> isfinite(v) ? zero(T) : v, φ̃)
+                fill!(φ̃, zero(T))
             elseif all(pins)
                 # A wholly pinned track is known rather than fitted: report it as such
                 # instead of leaving it at NODATA.
@@ -2006,17 +1615,17 @@ _level_at(::Nothing, ts) = nothing
 _level_at(lw, ts) = merge(lw, (; values = view(lw.values, :, :, ts)))
 
 # Gauge-fix each (station, feed, time segment) track — zero band-mean
-# log-amplitude, circular-mean reference phase, matching the closure tier's
-# convention — and write it into the station block that carries it. Both gauges
+# log-amplitude, circular-mean reference phase — and write it into the station
+# block that carries it. Both gauges
 # are over the frequency track of one time segment, so each of a station's
 # segments is normalized on its own. A (station, feed, segment) that `touched`
 # nowhere is left unwritten, holding whatever θ already had, which is unit gain;
 # so is a station no block covers. With a level, the reference comes off the
-# level and the shape is written as fit, as in the closure tier's writers.
+# level and the shape is written as fit.
 #
 # `gains[k]` holds the stations of phase block `k` and amplitude block `k`, in
 # the blocks' own order; `level_writers[a]` holds station `a`'s
-# `(; phase, amp)` level writers (see `_station_level`), each `nothing` without
+# `(; phase, amp)` level writers (see `_joint_level_writer`), each `nothing` without
 # a level.
 #
 # The band means are removed at θ's precision, which may exceed the gains': the
@@ -2073,8 +1682,8 @@ levels, every sweep. Iterated to convergence that is MAP estimation under the
 two priors.
 
 Because the per-scan source term absorbs a baseline's own structure, this suits a
-resolved or polarized calibrator, where [`PerTrackSmoother`](@ref)'s closure
-assumption would bias the bandpass. It solves one complex gain per
+resolved or polarized calibrator, which a closure solve that assumes the source
+term cancels would bias. It solves one complex gain per
 (station, feed, frequency segment), so a model with both a phase and a
 log-amplitude shape must give them one frequency and one time segmentation per
 station; their priors and levels may differ. A model with only one of them
@@ -2110,8 +1719,7 @@ function validate_model(::JointSmoother, model)
             "JointSmoother requires the phase and logamp components to share one time " *
                 "segmentation — one complex gain per (station, feed, segment) is solved over " *
                 "one stretch of time, not two. Got $(repr(ph.Ti)) (phase) vs " *
-                "$(repr(la.Ti)) (logamp). Use `smoother = PerTrackSmoother()` to give " *
-                "the two observables different time resolutions.",
+                "$(repr(la.Ti)) (logamp).",
         ),
     )
     return nothing

@@ -74,8 +74,7 @@ default [`Fring.JointSmoother`](@ref), which fits the complex visibilities
 against an explicit per-scan source coherence and so does not assume the
 calibrator is unresolved and unpolarized. `gauge`, an
 [`AbstractGauge`](@ref), references the bandpass phase: `JointSmoother`
-imposes its constraints inside every sweep, and `PerTrackSmoother` on its
-per-segment seed solves. `JointSmoother` solves one complex gain per
+imposes its constraints inside every sweep. `JointSmoother` solves one complex gain per
 (station, feed, frequency segment); a phase-only or amplitude-only model holds
 the other half at zero. The model is self-contained, so placing
 `Bandpass` before or after `BaselineFringeFit` is equally legal.
@@ -223,7 +222,7 @@ end
 
 model_components(s::Bandpass, spec) = _vet_step_model(
     s.smoother, s.model,
-    "Both shipped bandpass smoothers fit `GainComponent(ConstantTerm(); " *
+    "`JointSmoother` fits `GainComponent(ConstantTerm(); " *
         "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
         "segmentation>, Feed = PerFeed(), prior = <nothing, or a RandomWalkPrior or " *
         "OUPrior along Frequency>)` — a time segmentation whose segments each span " *

@@ -95,7 +95,7 @@ level = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectral
 GainModel(phase = (; level, shape), logamp = (; level, shape))
 ```
 
-The bandpass smoothers estimate the level by generalized least squares under the
+The bandpass smoother estimates the level by generalized least squares under the
 shape's prior, and an `OUPrior` hyperprior with the level integrated out. A
 random walk beside a level is rejected, since the walk leaves its own level
 free, as is a shape with no prior.

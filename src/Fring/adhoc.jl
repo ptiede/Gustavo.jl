@@ -339,7 +339,7 @@ function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::Union{OUPrior, 
     return resolved
 end
 
-# ── Node-graph solve (adhoc per-AP and bandpass closures) ───────────────────
+# ── Node-graph solve (adhoc per-AP closures) ─────────────────────────────────
 
 # Node index on the (station, feed node) graph: node `n`'s block is `(n - 1) * nant .+ (1:nant)`.
 _node(ant::Integer, feed::Integer, nant::Integer) = (feed - 1) * nant + ant
@@ -356,14 +356,14 @@ _edge(((a, na), (b, nb)), nant::Integer) = (_node(a, na, nant), _node(b, nb, nan
 # nodes were solved. `val`, `w`, `mask` and `nodes` share their `(AntennaPair,
 # FeedPair)` axes; each cell with `mask` set is one observation `val` of its edge
 # (see `_edge`) with weight `w`. The system is solved in `val`'s element type.
-# `component` and `scan` label the gauge freedoms, whose observable is `:phase`
-# (see `GaugeFreedom`).
+# `scan` labels the gauge freedoms, whose observable is `:phase` (see
+# `GaugeFreedom`).
 # Returns the number of connected components.
 function _solve_observable!(
         vals, cov, val, w, mask, nodes, gauge::AbstractGauge;
         rewrap::Integer,
         seed_phase::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
-        component::Tuple{Vararg{Symbol}} = (), scan::Integer = 0,
+        scan::Integer = 0,
     )
     # `_node` numbers stations and feeds from 1.
     Base.require_one_based_indexing(vals, cov)
@@ -394,7 +394,7 @@ function _solve_observable!(
         cn = findall(==(c), compid)
         GaugeFreedom(;
             nodes = cn, station = station_of.(cn), feed = feed_of.(cn), scan = fill(Int(scan), length(cn)),
-            component = fill(component, length(cn)), observable = fill(:phase, length(cn)),
+            component = fill((), length(cn)), observable = fill(:phase, length(cn)),
             direction = ones(T, length(cn)), weight = nodew[cn],
         )
     end

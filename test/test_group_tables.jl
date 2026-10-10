@@ -93,7 +93,7 @@ end
     serial = ExecutionConfig(inner_executor = SerialScheduler())
     wide = ExecutionConfig(outer_executor = DynamicScheduler(), inner_executor = DynamicScheduler(; nchunks = 4))
     gauge = PinAntenna(1)
-    for st in (Bandpass(; gauge), Bandpass(; smoother = FP.PerTrackSmoother(), gauge), AdhocPhase(; gauge))
+    for st in (Bandpass(; gauge), AdhocPhase(; gauge))
         a = fit(st, ps; exec = serial)
         b = fit(st, ps; exec = wide)
         @test a.components == b.components
@@ -133,22 +133,17 @@ function _offset_scans(ps, seed)
     return XRadio.ProcessingSet(members, DimensionalData.metadata(ps))
 end
 
-@testset "PerTrackSmoother aligns each scan's phase before pooling" begin
+@testset "Bandpass is unchanged by a per-scan phase offset" begin
     rng = MersenneTwister(5)
     ps, _ = _build_fringe_ps(;
         nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 3,
         bandpass = 0.3 .* randn(rng, 4, 2, 16), seed = 3,
     )
-    st = Bandpass(; smoother = FP.PerTrackSmoother(), gauge = PinAntenna(1))
+    st = Bandpass(; gauge = PinAntenna(1))
     solved_θ(sol) = vcat((vec(parent(c.params)) for c in sol.components)...)
     θ = solved_θ(fit(st, ps))
     θoff = solved_θ(fit(st, _offset_scans(ps, 4)))
     @test maximum(abs, θoff .- θ) < 1.0e-6
-
-    # Pooling follows the data's type unless the smoother names one.
-    θ64 = solved_θ(fit(Bandpass(; smoother = FP.PerTrackSmoother(eltype = Float64), gauge = PinAntenna(1)), ps))
-    @test θ64 ≈ θ atol = 1.0e-5
-    @test_throws "must be a real floating-point type" FP.PerTrackSmoother(eltype = ComplexF64)
 end
 
 @testset "bandpass sums by label" begin
@@ -176,9 +171,6 @@ end
         sum(wv[BaselineID = .!autos])
     end
     @test sum(rl) ≈ tot
-    results = [(; rl, wl)]
-    @test eltype(FP._pool_scans(results, [1], Float32)[1]) == ComplexF32
-    @test eltype(FP._pool_scans(results, [1], Float64)[2]) == Float64
 
     # A scan holding only the parallel hands lines up with the full set's labels:
     # its cross-hand rows stay empty and the rest are unchanged.

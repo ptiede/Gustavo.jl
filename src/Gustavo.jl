@@ -56,7 +56,7 @@ export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!
 export BaselineFringeFit, default_fringe_terms, Bandpass, default_bandpass_terms, AdhocPhase,
-    default_adhoc_terms, AbstractBandpassSmoother, PerTrackSmoother, JointSmoother
+    default_adhoc_terms, AbstractBandpassSmoother, JointSmoother
 # The gain-model vocabulary: everything a step's `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.

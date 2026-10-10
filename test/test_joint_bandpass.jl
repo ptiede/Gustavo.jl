@@ -1,26 +1,18 @@
 # ── Bandpass(smoother = JointSmoother()): solve_joint_bandpass! ──────────────
 #
-# `PerTrackSmoother` (the default, closure-based path)
-# assumes a baseline's source term cancels out of the per-channel
-# phase-difference/log-amp-sum closure — true only for an unresolved,
-# unpolarized calibrator. This exercises the alternative: an unresolved point
-# source cannot distinguish the two paths, so the synthetic visibilities here
-# are post-multiplied by an independent random complex factor per
+# A closure solve assumes a baseline's source term cancels out of the
+# per-channel phase-difference/log-amp-sum closure — true only for an
+# unresolved, unpolarized calibrator. The joint solve fits an explicit per-scan
+# source coherence instead, so the synthetic visibilities here are
+# post-multiplied by an independent random complex factor per
 # (scan, baseline, polarization) — a stand-in for a resolved/polarized
-# calibrator's per-baseline structure — and the test checks that
+# calibrator's per-baseline structure — and the tests check that
 # `solve_joint_bandpass!` still recovers the injected station bandpass.
 #
 # A single station's ABSOLUTE per-channel bandpass is never observable from
-# baseline data alone (only differences between stations are), so both paths'
-# recovered bandpass is relative to the gauge's reference — truth is gauged the same way
-# before comparing. The injected factor is frequency-FLAT (matching "constant
-# per scan"), which the closure path's per-AP de-rotation heuristic already
-# absorbs incidentally for PHASE (it isn't targeted at this, but a band-flat
-# offset is exactly what de-rotating each AP to its own band-average removes),
-# so the phase gate here only asks that the joint solve be no worse. The
-# injected AMPLITUDE has no such accidental cover — `log|V| = la_a + la_b` has
-# no baseline term at all — so that is where the joint solve's structural
-# advantage is unambiguous.
+# baseline data alone (only differences between stations are), so the recovered
+# bandpass is relative to the gauge's reference — truth is gauged the same way
+# before comparing.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
@@ -64,64 +56,37 @@ end
     # `ref_ant` indexes the truth arrays below; `gauge` is what the solve takes.
     ref_ant = 1
     gauge = PinAntenna(ref_ant)     # the gauge every test here passes to `fit`
-    _, sol_closure = _fit_chain(
-        (BaselineFringeFit(; model = fm, gauge), Bandpass(; smoother = FP.PerTrackSmoother(), gauge)),
-        ps; exec = ExecutionConfig(),
-    )
-    # This synthetic truth is i.i.d. RANDOM per channel (a deliberately hard,
-    # uncorrelated-neighbor case for the ALS to track) — noticeably slower to
-    # converge than JointSmoother's own defaults, hence the raised iteration
-    # count/tolerance.
-    _, sol_joint = _fit_chain(
-        (
-            BaselineFringeFit(; model = fm, gauge),
-            Bandpass(; smoother = FP.JointSmoother(), gauge),
-        ),
-        ps; exec = ExecutionConfig(),
-    )
+    _, sol = _fit_chain((BaselineFringeFit(; model = fm, gauge), Bandpass(; gauge)), ps; exec = ExecutionConfig())
+    pleaf, aleaf = _jb_leaf(sol, :phase), _jb_leaf(sol, :logamp)
 
-    bp_leaves(sol) = (_jb_leaf(sol, :phase), _jb_leaf(sol, :logamp))
-    pleaf_c, aleaf_c = bp_leaves(sol_closure)
-    pleaf_j, aleaf_j = bp_leaves(sol_joint)
-
-    wrapped_err(x, y) = maximum(abs, rem2pi.(x .- y, RoundNearest))
-    # PHASE is recovered relative to the reference's feed 1 — the joint tier pins that
-    # node's phase at every channel, and the closure tier references its solve to
-    # it — so truth is gauged the same way before comparing, then to its own
-    # circular mean.
+    # The fringe fit's delays take up each station's phase slope across the band,
+    # so the phase is compared after removing a straight line in channel.
+    function wrapped_err(x, y)
+        d = rem2pi.(x .- y, RoundNearest)
+        A = [ones(length(d)) eachindex(d)]
+        return maximum(abs, d .- A * (A \ d))
+    end
+    # PHASE is recovered relative to the reference's feed 1, whose phase the gauge
+    # pins at every channel, so truth is gauged the same way before comparing,
+    # then to its own circular mean.
     gauge_phase_rel(x, xref) = rem2pi.((x .- xref) .- angle(sum(cis, x .- xref)), RoundNearest)
-    # AMPLITUDE is NOT referenced to any antenna: the closure tier's SUM incidence
-    # is full rank and the joint tier pins only phase, so each station's own
-    # passband shape is identifiable and only its band mean is unobservable.
-    # Subtracting the reference's track here would inject a spurious error into
-    # both arms.
+    # AMPLITUDE is NOT referenced to any antenna: the gauge pins only phase, so
+    # each station's own passband shape is identifiable and only its band mean
+    # is unobservable.
     gauge_amp(x) = x .- sum(x) / length(x)
 
-    max_phase_err_closure = 0.0
-    max_phase_err_joint = 0.0
-    max_amp_err_closure = 0.0
-    max_amp_err_joint = 0.0
+    max_phase_err = 0.0
+    max_amp_err = 0.0
     for a in 1:nant, f in 1:2
-        btrue = gauge_phase_rel(bp_true[a, f, :], bp_true[ref_ant, 1, :])
-        abtrue = gauge_amp(abp_true[a, f, :])
-        bc = Float64[pleaf_c[1, f, c, 1, a] for c in 1:nglob]
-        bj = Float64[pleaf_j[1, f, c, 1, a] for c in 1:nglob]
-        ac = Float64[aleaf_c[1, f, c, 1, a] for c in 1:nglob]
-        aj = Float64[aleaf_j[1, f, c, 1, a] for c in 1:nglob]
-        max_phase_err_closure = max(max_phase_err_closure, wrapped_err(bc, btrue))
-        max_phase_err_joint = max(max_phase_err_joint, wrapped_err(bj, btrue))
-        max_amp_err_closure = max(max_amp_err_closure, maximum(abs, ac .- abtrue))
-        max_amp_err_joint = max(max_amp_err_joint, maximum(abs, aj .- abtrue))
+        bj = Float64[pleaf[1, f, c, 1, a] for c in 1:nglob]
+        aj = Float64[aleaf[1, f, c, 1, a] for c in 1:nglob]
+        max_phase_err = max(max_phase_err, wrapped_err(bj, gauge_phase_rel(bp_true[a, f, :], bp_true[ref_ant, 1, :])))
+        max_amp_err = max(max_amp_err, maximum(abs, aj .- gauge_amp(abp_true[a, f, :])))
     end
-
-    # Phase: the joint solve must not be meaningfully worse than the closure
-    # (both recover essentially the same thing here — see the header note).
-    @test max_phase_err_joint < max_phase_err_closure + 0.02
-    # Amplitude: log|V| = la_a + la_b has no baseline term to absorb the
-    # injected per-baseline/pol factor, so the closure solve is measurably
-    # biased by it; the joint solve's explicit source coherence absorbs it.
-    @test max_amp_err_joint < 0.3
-    @test max_amp_err_joint < 0.7 * max_amp_err_closure
+    # log|V| = la_a + la_b has no baseline term to absorb the injected
+    # per-baseline/pol factor; the explicit source coherence absorbs it.
+    @test max_phase_err < 5.0e-3
+    @test max_amp_err < 1.0e-3
 end
 
 @testset "JointSmoother: the component priors act INSIDE the ALS" begin
@@ -197,8 +162,7 @@ end
         nant, nspw, nchan, ntime, nscans,
         bandpass = bp_true, amp_bandpass = abp_true, seed = 33,
     )
-    # Per-(scan, baseline, pol) structure: what the joint tier exists to absorb,
-    # and what biases the closure.
+    # Per-(scan, baseline, pol) structure, which the source coherence absorbs.
     nbl = length(truth.bl_pairs); npol = length(truth.polarizations)
     samp = 0.4 .+ 1.6 .* rand(rng, nscans, nbl, npol)
     sph = (2 .* rand(rng, nscans, nbl, npol) .- 1) .* pi
@@ -212,7 +176,6 @@ end
         )
     )
     s_joint = runbp(FP.JointSmoother())
-    s_closure = runbp(FP.PerTrackSmoother())
 
     la(s, a, f) = (
         L = _jb_leaf(s, :logamp);
@@ -226,13 +189,13 @@ end
     @test std(ref_got) > 0.5 * std(ref_true)
     @test maximum(abs, ref_got .- ref_true) < 0.1
 
-    # ...and with the reference free to carry its own shape, the joint solve's
-    # amplitude beats the closure it is meant to improve on under this structure.
+    # ...and with the reference free to carry its own shape, every station's is
+    # recovered.
     amprms(s) = sqrt(
         sum(sum(abs2, gauge(la(s, a, f)) .- gauge(abp_true[a, f, :])) for a in 1:nant, f in 1:2) /
             (2 * nant * nglob),
     )
-    @test amprms(s_joint) < amprms(s_closure)
+    @test amprms(s_joint) < 1.0e-3
 end
 
 # ── The per-station time-segment axis inside one ALS ─────────────────────────
@@ -329,7 +292,6 @@ end
 
     @testset "a uniform table reproduces the per-segment partition" begin
         l = layout(InstrumentScans([1.5]))
-        plan = only(FP.bandpass_blocks(setup(l), zeros(l.nθ), :phase)).plan
         results = _joint_scan_accumulators(
             gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom,
         )
@@ -337,8 +299,7 @@ end
         tseg = FP._station_time_segments(blocks, results, nant)
         # One block spans every station, so every row is that block's own table.
         @test all(tseg[a, :] == [1, 1, 2, 2] for a in 1:nant)
-        @test FP._joint_scan_groups(tseg) ==
-            filter(!isempty, FP.time_segment_scans(plan, results))
+        @test FP._joint_scan_groups(tseg) == [[1, 2], [3, 4]]
 
         # …and the merged driver's θ is the per-segment loop's, exactly.
         θ_merged = zeros(l.nθ)
@@ -353,8 +314,7 @@ end
         end
         θ_loop = zeros(l.nθ)
         loop_blocks = FP.bandpass_blocks(setup(l), θ_loop, :phase)
-        for (ts, idx) in pairs(FP.time_segment_scans(plan, results))
-            isempty(idx) && continue
+        for (ts, idx) in pairs([[1, 2], [3, 4]])
             FP.solve_joint_bandpass!(
                 θ_loop, results[idx], geom,
                 loop_blocks, loop_blocks;
