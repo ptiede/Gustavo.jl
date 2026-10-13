@@ -80,7 +80,7 @@ export scale_weights!, normalize_by_autocorrelations!
 export apriori_calibrate!, TsysPlacement, ScanMean, LinearInTime, NearestInTime
 export search_scan
 # The solution surface: the container, its components, and serialization.
-export CalibrationSolution, SolvedComponent
+export CalibrationSolution, ComponentFit
 export gains, plot_gain_phases
 export save_solution, load_solution
 

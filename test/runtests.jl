@@ -57,12 +57,12 @@ include("test_adhoc.jl")
 # End-to-end CalibrationSolution + fit pipeline (Phase 6).
 include("test_pipeline.jl")
 
-# The calibration surface: fit and calibrate, gauges, provenance, defaults.
+# The calibration surface: fit and calibrate, gauges, the step record, defaults.
 # Reuses _build_fringe_ps + CAL/FP aliases from test_pipeline.jl.
 include("test_pipeline_config.jl")
 
-# Solve-step interface (step protocol, selections, solutions of several steps,
-# fit/calibrate). Reuses the same aliases.
+# Solve-step interface (step protocol, selections, solutions of a chain of
+# steps, fit/calibrate). Reuses the same aliases.
 include("test_interface.jl")
 
 # Reading scan groups, and the corrections.

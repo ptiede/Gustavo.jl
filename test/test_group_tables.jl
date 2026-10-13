@@ -97,12 +97,12 @@ end
         a = fit(st, ps; exec = serial)
         b = fit(st, ps; exec = wide)
         @test a.components == b.components
-        @test only(values(a.steps)).nscans == 3
+        @test a.info.nscans == 3
     end
-    @test fit(Bandpass(; gauge), ps).steps[:bandpass].sources == ["SRC1"]
+    @test fit(Bandpass(; gauge), ps).info.sources == ["SRC1"]
 
     # The adhoc step reports each track's resolved prior, one `Ti` per scan.
-    info = fit(AdhocPhase(; gauge), ps).steps[:adhoc]
+    info = fit(AdhocPhase(; gauge), ps).info
     pr = info.priors
     @test DimensionalData.name(dims(pr)) == (:AntennaName, :Feed, :Ti)
     @test size(pr, Ti) == 3 && issorted(lookup(pr, Ti))

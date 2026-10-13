@@ -197,9 +197,3 @@ function _calibrate_chain(sols, data; kwargs...)
     foreach(s -> calibrate!(s, out; kwargs...), sols[2:end])
     return out
 end
-
-# One solution holding the components and diagnostics of every solution in `sols`.
-_combined(sols) = CalibrationSolution(
-    first(sols).geom, reduce(vcat, [s.components for s in sols]),
-    merge((s.steps for s in sols)...), first(sols).info,
-)

@@ -6,7 +6,7 @@
 #   geometry/         times, scan_of_time, channel_freqs, spw_of_chan and, when
 #                     stated, channel_widths; t0, f0 and the name vectors as
 #                     attributes
-#   components/<label>/  one per SolvedComponent: `data` over the params dims plus
+#   components/<label>/  one per ComponentFit: `data` over the params dims plus
 #                     their coordinates; step, path and component as attributes
 #   steps/<step>/     that step's diagnostics
 #   info/             run-wide diagnostics
@@ -349,8 +349,8 @@ end
 
 Write `sol` to a new Zarr store at `path`: its geometry, each component's
 parameters as a labeled array (with the component's term, segmentation, feed
-tying and prior as attributes), each step's diagnostics, the run-wide `info`
-and the provenance text. [`load_solution`](@ref) rebuilds it.
+tying and prior as attributes), its name, its diagnostics `info` and the step
+text. [`load_solution`](@ref) rebuilds it.
 
 The second form writes a collection of solutions, such as the per-unit fits
 [`mapsets`](@ref Gustavo.mapsets) returns, one group per entry in order, each key stored with
@@ -391,8 +391,8 @@ end
 
 function _solution_attrs(sol::CalibrationSolution, toplevel::Bool)
     attrs = Dict{String, Any}(
-        "pipeline" => sol.provenance.pipeline,
-        "components" => _strings(map(_label, sol.components)), "steps" => _strings(keys(sol.steps)),
+        "name" => String(sol.name), "step" => sol.step,
+        "components" => _strings(map(_label, sol.components)),
     )
     toplevel && (attrs["gustavo_solution_format"] = _STORE_FORMAT)
     return attrs
@@ -405,14 +405,10 @@ function _write_solution!(root, sol::CalibrationSolution)
         label = _label(c)
         _write_dimarray!(
             comps, label, c.params, label; attrs = Dict{String, Any}(
-                "step" => String(c.step), "path" => _strings(c.path),
+                "path" => _strings(c.path),
                 "component" => _encode_checked(c.component, label),
             )
         )
-    end
-    steps = Zarr.zgroup(root, "steps")
-    for (name, diag) in sol.steps
-        _write_node!(steps, String(name), diag, String(name))
     end
     _write_node!(root, "info", sol.info, "info")
     return nothing
@@ -445,16 +441,10 @@ function _read_solution(root)
     comps = root.groups["components"]
     components = map(root.attrs["components"]) do label
         g = comps.groups[label]
-        SolvedComponent(
-            Symbol(g.attrs["step"]), Tuple(Symbol.(g.attrs["path"])),
-            _decode(g.attrs["component"]), _read_dimarray(g),
-        )
+        ComponentFit(Tuple(Symbol.(g.attrs["path"])), _decode(g.attrs["component"]), _read_dimarray(g))
     end
-    steps = OrderedDict{Symbol, NamedTuple}(
-        Symbol(s) => _read_node(root.groups["steps"].groups[s]) for s in root.attrs["steps"]
-    )
     return CalibrationSolution(
-        _read_geometry(root.groups["geometry"]), components, steps, _read_node(root.groups["info"]);
-        pipeline = root.attrs["pipeline"],
+        _read_geometry(root.groups["geometry"]), Symbol(root.attrs["name"]), components,
+        _read_node(root.groups["info"]); step = root.attrs["step"],
     )
 end

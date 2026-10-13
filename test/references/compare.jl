@@ -207,11 +207,11 @@ function compare_run(root, sols)
         )
     end
     out[:detections] = detection_difference(
-        recorded_detections(zpath(recorded["fringe"], "info"), ax.station), sols.fringe.steps[:fringe],
+        recorded_detections(zpath(recorded["fringe"], "info"), ax.station), sols.fringe.info,
     )
     counts = ("n_solved", "n_flat", "n_nodata")
     recorded_info = zpath(recorded["bandpass"], "info").attrs
-    current_info = sols.bandpass.steps[:bandpass]
+    current_info = sols.bandpass.info
     out[:bandpass_status] = [(k, recorded_info[k], getproperty(current_info, Symbol(k))) for k in counts]
     composed = gains(sols.fringe) .* gains(sols.bandpass) .* gains(sols.adhoc)
     out[:composed] = gain_difference(recorded_gains(root, ax), composed)

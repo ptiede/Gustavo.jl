@@ -10,12 +10,8 @@ DimensionalData.@dim FreqGroup "Frequency group"
 DimensionalData.@dim Triangle "Station triangle"
 
 function _fringe_info(sol::CalibrationSolution)
-    haskey(sol.steps, :fringe) || throw(
-        ArgumentError(
-            "the solution has no :fringe step; it holds $(join(repr.(collect(keys(sol.steps))), ", "))"
-        )
-    )
-    return sol.steps[:fringe]
+    sol.name === :fringe || throw(ArgumentError("the solution is not a fringe solution; it holds $(repr(sol.name))"))
+    return sol.info
 end
 
 _scan_dim(names) = Scan(DimensionalData.Lookups.Categorical(collect(String, names); order = DimensionalData.Lookups.Unordered()))
@@ -109,7 +105,8 @@ reads back as 0, indistinguishable from a solved zero. Mask it with
 [`fringe_station_flags`](@ref).
 """
 function fringe_station_solutions(sol::CalibrationSolution)
-    groups = Calibration._applied(sol[:fringe]).groups
+    _fringe_info(sol)
+    groups = Calibration._applied(sol).groups
     length(groups) == 1 || error(
         "fringe_station_solutions: the fringe components differ across stations; decode each " *
             "station set's components from their `params` instead"

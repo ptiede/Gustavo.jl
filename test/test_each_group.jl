@@ -14,7 +14,7 @@ Gustavo.provides(::GroupProbe) = :probe
 Gustavo.solve(s::GroupProbe, ctx) = (; seen = each_group(s.f, ctx))
 
 _probe(step, data; kw...) =
-    fit(step, data; kw...).steps[:probe].seen
+    fit(step, data; kw...).info.seen
 
 @testset "each_group" begin
     ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
@@ -59,7 +59,7 @@ _probe(step, data; kw...) =
         sol = fit(GroupProbe(), ps; exec = ExecutionConfig(progress = cb))
         @test events[1] == (:probe, 0, 3)
         @test sort([e[2] for e in events[2:end]]) == 1:3
-        timing = sol.steps[:probe].timing
+        timing = sol.info.timing
         @test length(timing[:decode]) == 3 && all(>=(0), timing[:decode])
         @test sol.info.nscan == 3
     end

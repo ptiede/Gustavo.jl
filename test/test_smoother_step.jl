@@ -8,9 +8,9 @@
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
-# The parameters of a step's first per-integration phase component.
-_per_integration_params(sol, step) =
-    first(c for c in sol[step].components if first(c.path) === :phase && c.component.Ti isa CAL.PerIntegration).params
+# The parameters of a solution's first per-integration phase component.
+_per_integration_params(sol) =
+    first(c for c in sol.components if first(c.path) === :phase && c.component.Ti isa CAL.PerIntegration).params
 
 # Worst parallel-hand coherence over the cross baselines of a corrected set.
 function _worst_parallel_coherence(corr)
@@ -60,10 +60,10 @@ end
     ad_n = last(sols_n)
 
     @testset "3-scan full chain: structure, determinism, coherence" begin
-        @test [only(keys(s.steps)) for s in sols_n] == [:fringe, :bandpass, :adhoc]
+        @test [s.name for s in sols_n] == [:fringe, :bandpass, :adhoc]
         # The adhoc block is really solved (nonzero) on every scan.
-        @test any(!=(0), _per_integration_params(ad_n, :adhoc))
-        @test ad_n.steps[:adhoc].t_pass > 0
+        @test any(!=(0), _per_integration_params(ad_n))
+        @test ad_n.info.t_pass > 0
 
         # θ is bit-deterministic across runs.
         sols4 = _fit_chain(steps, ps; exec = ExecutionConfig())
@@ -82,12 +82,12 @@ end
         )
         components = vcat(fr_fs.components, ad_fs.components)
         @test !any(c -> c.path[2] === :bandpass, components)
-        @test any(!=(0), _per_integration_params(ad_fs, :adhoc))
+        @test any(!=(0), _per_integration_params(ad_fs))
         # Without the bandpass stage the injected per-channel bandpass survives,
         # so full coherence is NOT reached — but the delay/rate/adhoc solve must
         # still be sane (all θ finite, per-scan SNRs strong).
         @test all(c -> all(isfinite, c.params), components)
-        @test all(>(10), filter(isfinite, fr_fs.steps[:fringe].scan_snr))
+        @test all(>(10), filter(isfinite, fr_fs.info.scan_snr))
     end
 
     @testset "fit never writes the caller's data" begin

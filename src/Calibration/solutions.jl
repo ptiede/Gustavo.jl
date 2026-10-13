@@ -1,11 +1,12 @@
-# ── CalibrationSolution: a list of solved components ─────────────────────────
+# ── CalibrationSolution: one step's solved components ───────────────────────
 #
-# A solution is a flat list of `SolvedComponent`s, each holding one gain
-# component's fitted parameters as a labeled array. Gains are separable over
-# components (`exp(Σ logamp)·cis(Σ phase)`), so any subset of the list is a
-# solution in its own right. Applying one re-plans the components it holds
-# against the solution's geometry, one layout per (step, station set), and runs
-# the forward map on θ built from their parameters.
+# A solution is what one solve step fit: a flat list of `ComponentFit`s,
+# each holding one gain component's fitted parameters as a labeled array, and
+# the step's diagnostics. Gains are separable over components
+# (`exp(Σ logamp)·cis(Σ phase)`), so any subset of the list is a solution in its
+# own right. Applying one re-plans the components it holds against the
+# solution's geometry, one layout per station set, and runs the forward map on
+# θ built from their parameters.
 
 using Statistics: mean
 using DimensionalData: lookup, Ti, DimArray, Dim, Dimensions, AbstractDimArray
@@ -13,7 +14,7 @@ using DimensionalData.Lookups: Sampled, Explicit, Intervals, Center
 using OrderedCollections: OrderedDict
 
 """
-    SolvedComponent(step, path, component, params)
+    ComponentFit(path, component, params)
 
 One fitted gain component: `component` (a [`GainComponent`](@ref): term,
 segmentation, feed tying, prior) and its parameters `params`, a `DimArray`
@@ -22,66 +23,64 @@ segment is labeled by the midpoint of the channels or samples it covers, with
 intervals so `Contains(x)` selects the segment covering `x`; `AntennaName` names the
 stations that carry the component.
 
-`step` is the solve step that fit it (`:fringe`, `:bandpass`, …) and `path`
-its place in that step's model, starting at `:phase` or `:logamp`
+`path` is its place in the step's model, starting at `:phase` or `:logamp`
 (`(:phase, :mbd)`; `(:phase, :bandpass, :g1)` for one signature group of a
 component whose specification differs across stations).
 """
-struct SolvedComponent{C <: GainComponent, A <: AbstractDimArray}
-    step::Symbol
+struct ComponentFit{C <: GainComponent, A <: AbstractDimArray}
     path::Tuple{Vararg{Symbol}}
     component::C
     params::A
-    function SolvedComponent{C, A}(step, path, component, params) where {C, A}
+    function ComponentFit{C, A}(path, component, params) where {C, A}
         p = Tuple(path)
         (!isempty(p) && first(p) in (:phase, :logamp)) || throw(
             ArgumentError("a component's path starts at :phase or :logamp, got $(p)")
         )
-        return new{C, A}(step, p, component, params)
+        return new{C, A}(p, component, params)
     end
 end
 
-SolvedComponent(step::Symbol, path, component::GainComponent, params::AbstractDimArray) =
-    SolvedComponent{typeof(component), typeof(params)}(step, path, component, params)
+ComponentFit(path, component::GainComponent, params::AbstractDimArray) =
+    ComponentFit{typeof(component), typeof(params)}(path, component, params)
 
-_label(c::SolvedComponent) = join((c.step, c.path...), '.')
+_label(c::ComponentFit) = join(c.path, '.')
 
-Base.show(io::IO, c::SolvedComponent) = print(
-    io, "SolvedComponent(", _label(c), ", ", nameof(typeof(c.component.term)), ", ",
+Base.show(io::IO, c::ComponentFit) = print(
+    io, "ComponentFit(", _label(c), ", ", nameof(typeof(c.component.term)), ", ",
     join(size(c.params), "×"), ")",
 )
 
 """
-    CalibrationSolution(geom, components, steps = OrderedDict(), info = (;); pipeline = "")
-    CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, pipeline = "")
+    CalibrationSolution(geom, name, components, info = (;); step = "")
+    CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, step = "")
 
-A solved calibration: the list `components` of [`SolvedComponent`](@ref)s over
-the geometry `geom`, whose `stations` name every station a component may
+What one solve step fit: the list `components` of [`ComponentFit`](@ref)s
+over the geometry `geom`, whose `stations` name every station a component may
 carry. Gains compose multiplicatively across components.
 
-- `steps` maps each solve step, in run order, to its diagnostics (detections,
-  per-scan SNR, timing, the fringe step's unconstrained `flagged_ant` /
-  `flagged_feed` / `flagged_scan`, …).
-- `info` holds run-wide diagnostics.
-- `provenance` is the solve step the run was given, its gauge included, as
-  text for the record (`provenance.pipeline`).
+- `name` names the step's solution (`:fringe`, `:bandpass`, `:adhoc`).
+- `info` holds the step's diagnostics (detections, per-scan SNR, timing, the
+  fringe step's unconstrained `flagged_ant` / `flagged_feed` / `flagged_scan`,
+  …) and the run's (`nscan`, task counts).
+- `step` is the solve step that was fit, its gauge included, as text for the
+  record.
 
 Any subset of the components is a solution: `filter(pred, sol)`,
-`sol[:fringe]` (one step), `sol[:fringe, :phase, :mbd]` (the components under a
-path). The fields are the interface: iterate `sol.components`, read
-`c.params`.
+`sol[:phase, :mbd]` (the components under a path). The fields are the
+interface: iterate `sol.components`, read `c.params`. Steps compose by applying
+one solution to the data ([`calibrate!`](@ref Gustavo.calibrate!)) before
+fitting the next.
 
-The second form builds a one-step solution from a flat parameter vector `θ`
-laid out by `layout` (1-based, `length(θ) == layout.nθ`), copying θ; `info`
-is that step's diagnostics.
+The second form builds a solution from a flat parameter vector `θ` laid out by
+`layout` (1-based, `length(θ) == layout.nθ`), copying θ.
 """
 struct CalibrationSolution{G <: DataGeometry}
     geom::G
-    components::Vector{SolvedComponent}
-    steps::OrderedDict{Symbol, NamedTuple}
+    name::Symbol
+    components::Vector{ComponentFit}
     info::NamedTuple
-    provenance::@NamedTuple{pipeline::String}
-    function CalibrationSolution{G}(geom, components, steps, info, provenance) where {G}
+    step::String
+    function CalibrationSolution{G}(geom, name, components, info, step) where {G}
         isempty(geom.stations) && throw(
             ArgumentError(
                 "a solution's geometry must name its stations; build it with `DataGeometry(ps)` " *
@@ -92,45 +91,35 @@ struct CalibrationSolution{G <: DataGeometry}
         allunique(labels) || throw(
             ArgumentError("CalibrationSolution: components repeat: $(join(unique(filter(l -> count(==(l), labels) > 1, labels)), ", "))")
         )
-        return new{G}(geom, components, steps, info, provenance)
+        return new{G}(geom, name, components, info, step)
     end
 end
 
 function CalibrationSolution(
-        geom::DataGeometry, components::AbstractVector{<:SolvedComponent},
-        steps::AbstractDict = OrderedDict{Symbol, NamedTuple}(), info::NamedTuple = NamedTuple();
-        pipeline::AbstractString = "",
+        geom::DataGeometry, name::Symbol, components::AbstractVector{<:ComponentFit},
+        info::NamedTuple = NamedTuple(); step::AbstractString = "",
     )
-    return CalibrationSolution{typeof(geom)}(
-        geom, collect(SolvedComponent, components), OrderedDict{Symbol, NamedTuple}(steps), info,
-        (; pipeline = String(pipeline)),
-    )
+    return CalibrationSolution{typeof(geom)}(geom, name, collect(ComponentFit, components), info, String(step))
 end
 
 function CalibrationSolution(
         model::GainModel, layout::ParameterLayout, geom::DataGeometry,
         θ::AbstractVector, info::NamedTuple = NamedTuple();
-        name::Symbol = :solution, pipeline::AbstractString = "",
+        name::Symbol = :solution, step::AbstractString = "",
     )
-    return CalibrationSolution(
-        geom, _solved_components(name, model, layout, θ, geom),
-        OrderedDict{Symbol, NamedTuple}(name => info); pipeline,
-    )
+    return CalibrationSolution(geom, name, _solved_components(model, layout, θ, geom), info; step)
 end
 
-Base.:(==)(a::SolvedComponent, b::SolvedComponent) =
-    a.step === b.step && a.path == b.path && a.component == b.component && a.params == b.params
-Base.hash(c::SolvedComponent, h::UInt) =
-    hash(c.params, hash(c.component, hash(c.path, hash(c.step, hash(:SolvedComponent, h)))))
+Base.:(==)(a::ComponentFit, b::ComponentFit) =
+    a.path == b.path && a.component == b.component && a.params == b.params
+Base.hash(c::ComponentFit, h::UInt) =
+    hash(c.params, hash(c.component, hash(c.path, hash(:ComponentFit, h))))
 
 # ── Selection ────────────────────────────────────────────────────────────────
 
-# The solution holding `components`, keeping the diagnostics of the steps they
-# came from.
-function _with_components(sol::CalibrationSolution, components)
-    steps = OrderedDict{Symbol, NamedTuple}(k => v for (k, v) in sol.steps if any(c -> c.step === k, components))
-    return CalibrationSolution{typeof(sol.geom)}(sol.geom, collect(SolvedComponent, components), steps, sol.info, sol.provenance)
-end
+# The solution holding `components`, with the step's diagnostics.
+_with_components(sol::CalibrationSolution, components) =
+    CalibrationSolution{typeof(sol.geom)}(sol.geom, sol.name, collect(ComponentFit, components), sol.info, sol.step)
 
 """
     filter(pred, sol::CalibrationSolution) -> CalibrationSolution
@@ -140,33 +129,33 @@ The solution holding the components `c` of `sol` for which `pred(c)` is true.
 Base.filter(pred, sol::CalibrationSolution) = _with_components(sol, filter(pred, sol.components))
 
 """
-    sol[step]
-    sol[step, path...]
+    sol[path...]
 
-The components fit by `step`, or those of `step` whose path begins with
-`path` (`sol[:fringe, :phase]`, `sol[:bandpass, :phase, :bandpass, :g1]`), as a
-solution. Throws when nothing matches, naming what the solution holds;
-`haskey(sol, step)` tests for a step first.
+The components whose path begins with `path` (`sol[:phase]`,
+`sol[:phase, :bandpass, :g1]`), as a solution. Throws when nothing matches,
+naming what the solution holds; `haskey(sol, path...)` tests first.
 """
-function Base.getindex(sol::CalibrationSolution, step::Symbol, path::Symbol...)
-    keep = filter(c -> c.step === step && length(c.path) >= length(path) && c.path[1:length(path)] == path, sol.components)
+function Base.getindex(sol::CalibrationSolution, path::Symbol...)
+    keep = filter(c -> _under(c, path), sol.components)
     isempty(keep) && throw(
         ArgumentError(
-            "the solution holds no component under $(join((step, path...), '.')); it holds " *
+            "the solution holds no component under $(join(path, '.')); it holds " *
                 join(map(_label, sol.components), ", ")
         )
     )
     return _with_components(sol, keep)
 end
 
-Base.haskey(sol::CalibrationSolution, step::Symbol) = any(c -> c.step === step, sol.components)
+_under(c::ComponentFit, path) = length(c.path) >= length(path) && c.path[1:length(path)] == path
+
+Base.haskey(sol::CalibrationSolution, path::Symbol...) = any(c -> _under(c, path), sol.components)
 Base.length(sol::CalibrationSolution) = length(sol.components)
 Base.iterate(sol::CalibrationSolution, i...) = iterate(sol.components, i...)
-Base.eltype(::Type{<:CalibrationSolution}) = SolvedComponent
+Base.eltype(::Type{<:CalibrationSolution}) = ComponentFit
 
 function Base.show(io::IO, ::MIME"text/plain", sol::CalibrationSolution)
     println(io, "CalibrationSolution")
-    println(io, "  Steps     : ", join(keys(sol.steps), ", "))
+    println(io, "  Step      : ", sol.name)
     println(io, "  Grid      : ", length(sol.geom.stations), " stations × ", nchannels(sol.geom), " channels × ", ntimes(sol.geom), " times")
     print(io, "  Components:")
     for c in sol.components
@@ -182,38 +171,38 @@ Base.show(io::IO, sol::CalibrationSolution) =
 
 # The components of one solved step: `layout` laid out `model` over the
 # geometry's stations, and `θ` holds its parameters.
-function _solved_components(step::Symbol, model::GainModel, layout::ParameterLayout, θ::AbstractVector, geom::DataGeometry)
+function _solved_components(model::GainModel, layout::ParameterLayout, θ::AbstractVector, geom::DataGeometry)
     Base.require_one_based_indexing(θ)
     length(θ) == layout.nθ || throw(
         DimensionMismatch("θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)")
     )
     names = _station_labels(geom, layout.nant)
-    out = SolvedComponent[]
+    out = ComponentFit[]
     for group in (:phase, :logamp)
         _collect_components!(
-            out, step, getproperty(layout.plantree, group), getproperty(layout.axes, group),
+            out, getproperty(layout.plantree, group), getproperty(layout.axes, group),
             (group,), θ, model, geom, names,
         )
     end
     return out
 end
 
-function _collect_components!(out, step, nt::NamedTuple, axnode, path, θ, model, geom, names)
+function _collect_components!(out, nt::NamedTuple, axnode, path, θ, model, geom, names)
     for k in keys(nt)
-        _collect_components!(out, step, nt[k], axnode[k], (path..., k), θ, model, geom, names)
+        _collect_components!(out, nt[k], axnode[k], (path..., k), θ, model, geom, names)
     end
     return out
 end
 
-function _collect_components!(out, step, plan::ComponentPlan, axnode, path, θ, model, geom, names)
-    push!(out, SolvedComponent(step, path, _component_at(model, path, first(names)), _params_array(plan, axnode, θ, geom, names)))
+function _collect_components!(out, plan::ComponentPlan, axnode, path, θ, model, geom, names)
+    push!(out, ComponentFit(path, _component_at(model, path, first(names)), _params_array(plan, axnode, θ, geom, names)))
     return out
 end
 
-function _collect_components!(out, step, g::GroupedComponentPlan, axnode, path, θ, model, geom, names)
+function _collect_components!(out, g::GroupedComponentPlan, axnode, path, θ, model, geom, names)
     for (i, k) in enumerate(keys(g.groups))
         comp = _component_at(model, path, names[first(g.stations[i])])
-        push!(out, SolvedComponent(step, (path..., k), comp, _params_array(g.groups[i], axnode[i], θ, geom, names)))
+        push!(out, ComponentFit((path..., k), comp, _params_array(g.groups[i], axnode[i], θ, geom, names)))
     end
     return out
 end
@@ -259,18 +248,17 @@ end
 
 # ── Applying ─────────────────────────────────────────────────────────────────
 
-# Components of one step over one station set, planned together: `stations`
-# indexes `geom.stations`.
+# Components over one station set, planned together: `stations` indexes
+# `geom.stations`.
 struct _EvalGroup{M <: GainModel, L <: ParameterLayout, V <: AbstractVector}
-    step::Symbol
     model::M
     layout::L
     θ::V
     stations::Vector{Int}
 end
 
-# What a solution applies: its geometry and one planned group per
-# (step, station set), in component order.
+# What a solution applies: its geometry and one planned group per station set,
+# in component order.
 struct _AppliedSolution{G <: DataGeometry}
     geom::G
     groups::Vector{_EvalGroup}
@@ -281,23 +269,23 @@ function _applied(sol::CalibrationSolution)
         ArgumentError("the solution holds no components, so applying it would change nothing")
     )
     geom = sol.geom
-    keys_ = Tuple{Symbol, Vector{String}}[]
-    members = Vector{SolvedComponent}[]
+    keys_ = Vector{String}[]
+    members = Vector{ComponentFit}[]
     for c in sol.components
-        k = (c.step, String.(collect(lookup(c.params, AntennaName))))
+        k = String.(collect(lookup(c.params, AntennaName)))
         i = findfirst(==(k), keys_)
         if isnothing(i)
             push!(keys_, k)
-            push!(members, SolvedComponent[c])
+            push!(members, ComponentFit[c])
         else
             push!(members[i], c)
         end
     end
-    groups = _EvalGroup[_eval_group(step, stations, cs, geom) for ((step, stations), cs) in zip(keys_, members)]
+    groups = _EvalGroup[_eval_group(stations, cs, geom) for (stations, cs) in zip(keys_, members)]
     return _AppliedSolution(geom, groups)
 end
 
-function _eval_group(step::Symbol, stations::Vector{String}, cs::Vector{SolvedComponent}, geom::DataGeometry)
+function _eval_group(stations::Vector{String}, cs::Vector{ComponentFit}, geom::DataGeometry)
     idx = map(stations) do s
         i = findfirst(==(s), geom.stations)
         isnothing(i) && throw(
@@ -318,7 +306,7 @@ function _eval_group(step::Symbol, stations::Vector{String}, cs::Vector{SolvedCo
         _check_params_dims(DimensionalData.dims(c.params), _params_dims(plan, axnode, geom, stations), _label(c))
         copyto!(view(θ, plan.range), parent(c.params))
     end
-    return _EvalGroup(step, model, layout, θ, idx)
+    return _EvalGroup(model, layout, θ, idx)
 end
 
 function _check_params_dims(got::Tuple, expected::Tuple, label)
@@ -358,7 +346,7 @@ end
     gains(sol::CalibrationSolution; Frequency, Ti, AntennaName, Feed) -> DimArray
 
 The complex antenna gains of `sol` — a whole solution or any selection of it
-(`sol[:bandpass]`, `sol[:fringe, :phase, :mbd]`, `filter(pred, sol)`) — as a
+(`sol[:phase]`, `sol[:phase, :mbd]`, `filter(pred, sol)`) — as a
 `DimArray` over `(Frequency, Ti, AntennaName, Feed)`: channel frequencies (Hz),
 integration times (seconds), the geometry's stations, and feed.
 `gain = exp(Σ logamp) · cis(Σ phase)` over the components is the same forward

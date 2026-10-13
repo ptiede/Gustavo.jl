@@ -49,7 +49,7 @@
 
     @testset "a fit inside the body equals a fit on the group" begin
         step = BaselineFringeFit(; gauge = PinAntenna(1))
-        θ(sol) = [collect(c.params) for c in sol[:fringe].components]
+        θ(sol) = [collect(c.params) for c in sol.components]
         inside = mapsets(g -> θ(fit(step, g)), by_scan)
         @test all(inside[k] == θ(fit(step, g)) for (k, g) in pairs(by_scan))
     end
@@ -66,9 +66,9 @@
             for (k, sol) in pairs(sols)
                 @test back[k].components == sol.components
                 @test all(f -> getfield(back[k].geom, f) == getfield(sol.geom, f), fieldnames(typeof(sol.geom)))
-                @test collect(keys(back[k].steps)) == collect(keys(sol.steps))
-                @test back[k].steps[:fringe].flagged_scan == sol.steps[:fringe].flagged_scan
-                @test back[k].provenance == sol.provenance
+                @test back[k].name == sol.name
+                @test back[k].info.flagged_scan == sol.info.flagged_scan
+                @test back[k].step == sol.step
             end
             @test_throws "exists" save_solution(path, sols)
         finally

@@ -1,5 +1,5 @@
-# The calibration surface: `fit`, `calibrate` and its `post`, gauges,
-# provenance, defaults.
+# The calibration surface: `fit`, `calibrate` and its `post`, gauges, the
+# step record, defaults.
 # Reuses `_build_fringe_ps` and the CAL/FP aliases from test_pipeline.jl
 # (included earlier in runtests.jl).
 
@@ -10,8 +10,8 @@
         sols = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
         @test all(s -> s isa CAL.CalibrationSolution, sols)
         @test all(s -> length(s.geom.stations) == 4, sols)
-        @test [only(keys(s.steps)) for s in sols] == [:fringe, :bandpass, :adhoc]
-        @test startswith(first(sols).provenance.pipeline, "BaselineFringeFit")
+        @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
+        @test startswith(first(sols).step, "BaselineFringeFit")
         out = _calibrate_chain(sols, ps)
         @test out isa XRadio.ProcessingSet
         @test collect(keys(out)) == collect(keys(ps))
@@ -46,8 +46,8 @@
         # A standalone Bandpass fit needs no BaselineFringeFit step, no anchor
         # check, and no fringe-estimator diagnostics.
         sol = fit(Bandpass(; gauge = PinAntenna(2)), ps)
-        @test collect(keys(sol.steps)) == [:bandpass]
-        @test !haskey(sol.steps[:bandpass], :search)
+        @test sol.name === :bandpass
+        @test !haskey(sol.info, :search)
         @test length(sol.geom.stations) == 4
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
@@ -166,11 +166,11 @@ end
     @testset "the solution records its step, gauge included" begin
         ff = BaselineFringeFit(; gauge = PinAntenna("A1"))
         sol = fit(ff, ps)
-        @test sol.provenance.pipeline == sprint(show, ff; context = :limit => true)
+        @test sol.step == sprint(show, ff; context = :limit => true)
         # The gauge as given, not as resolved against the stations.
-        @test occursin(sprint(show, PinAntenna("A1")), sol.provenance.pipeline)
-        # A step selection carries it along.
-        @test sol[:fringe].provenance == sol.provenance
+        @test occursin(sprint(show, PinAntenna("A1")), sol.step)
+        # A selection carries it along.
+        @test sol[:phase].step == sol.step
 
         # A bare index is not a gauge, so it is rejected rather than silently
         # treated as one.
@@ -184,13 +184,13 @@ end
     ps, _ = _build_fringe_ps()
     sol = last(_fit_chain((BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps))
     rewrapped = [
-        CAL.SolvedComponent(
-            c.step, c.path, c.component,
+        CAL.ComponentFit(
+            c.path, c.component,
             DimArray(view(copy(parent(c.params)), axes(c.params)...), dims(c.params)),
         )
             for c in sol.components
     ]
-    sold = CAL.CalibrationSolution(sol.geom, rewrapped, sol.steps, sol.info)
+    sold = CAL.CalibrationSolution(sol.geom, sol.name, rewrapped, sol.info; step = sol.step)
     @test all(parent(c.params) isa SubArray for c in sold.components)
 
     a = calibrate(sol, ps)

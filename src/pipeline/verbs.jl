@@ -38,8 +38,8 @@ station codes against the data's antenna table. `exec` (an
 [`ExecutionConfig`](@ref)) supplies the schedulers and progress callback.
 
 The solution is a [`CalibrationSolution`](@ref): the solved components, the
-step's diagnostics in `sol.steps`, and the step, its gauge included, as text in
-`sol.provenance`.
+step's diagnostics in `sol.info`, and the step, its gauge included, as text in
+`sol.step`.
 """
 function StatsAPI.fit(
         step::SolveStep, ps::XRadio.ProcessingSet;
@@ -68,8 +68,8 @@ calibrate(sol::CalibrationSolution, data::Union{XRadio.ProcessingSet, XRadio.Mea
                exec = ExecutionConfig()) -> ps
     calibrate!(sol::CalibrationSolution, ms::MeasurementSet; flag_bad = true, apply_flags = true) -> ms
 
-Apply a fitted solution, or any selection of one (`sol[:bandpass]`,
-`sol[:fringe, :phase, :mbd]`, `filter(pred, sol)`), to the data in place: each
+Apply a fitted solution, or any selection of one (`sol[:phase]`,
+`sol[:phase, :mbd]`, `filter(pred, sol)`), to the data in place: each
 Measurement Set has the gains of the components `sol` holds divided out
 (`V → V / (g_a·conj(g_b))`, `w → w·|g_a g_b|²`), then the flags of its step
 and `post` applied. `post` modifies the Measurement Set it is handed and
@@ -161,16 +161,15 @@ function _flag_absent_stations!(ms::XRadio.MeasurementSet, win::GeometryWindow, 
     return ms
 end
 
-# The unconstrained (station name, feed, scan id) triples the steps of `sol`
-# record, as a lookup set, `nothing` when they record none.
+# The unconstrained (station name, feed, scan id) triples the step of `sol`
+# records, as a lookup set, `nothing` when it records none.
 function _solution_flag_sets(sol::CalibrationSolution)
-    flagged = Set{Tuple{String, Int, Int}}()
-    for info in values(sol.steps)
-        haskey(info, :flagged_ant) || continue
-        for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
-            push!(flagged, (String(info.flagged_ant[i]), Int(info.flagged_feed[i]), Int(info.flagged_scan[i])))
-        end
-    end
+    info = sol.info
+    haskey(info, :flagged_ant) || return nothing
+    flagged = Set(
+        (String(info.flagged_ant[i]), Int(info.flagged_feed[i]), Int(info.flagged_scan[i]))
+            for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
+    )
     return isempty(flagged) ? nothing : flagged
 end
 
@@ -230,17 +229,15 @@ function _run_step(st::SolveStep, exec::ExecutionConfig, ps::XRadio.ProcessingSe
                 "diagnostics, got a $(typeof(info))",
         ),
     )
-    stepsol = CalibrationSolution(ctx.model, ctx.layout, geom, ctx.θ; name = provides(st))
-    steps = OrderedDict{Symbol, NamedTuple}(provides(st) => _with_timing(info, ctx, t0))
     return CalibrationSolution(
-        geom, stepsol.components, steps, _run_info(groups, exec);
-        pipeline = sprint(show, st; context = :limit => true),
+        ctx.model, ctx.layout, geom, ctx.θ, (; _run_info(groups, exec)..., _with_timing(info, ctx, t0)...);
+        name = provides(st), step = sprint(show, st; context = :limit => true),
     )
 end
 
 # A step compiles its own model against the run's geometry and may compile no
 # components at all; it still runs, with nothing to solve. The model is resolved
-# against the run's stations here, so the context and the solution's provenance
+# against the run's stations here, so the context and the solution's step text
 # hold the per-station trees the solve uses. A step that does not declare
 # `supports_station_heterogeneity` is handed uniform models only; anything else
 # is rejected before any data is read.
@@ -279,7 +276,7 @@ function _group_scan_names(groups)
     return names
 end
 
-# The run-wide diagnostics. Each step's own diagnostics are `sol.steps[name]`.
+# The run's diagnostics, which `sol.info` holds beside the step's own.
 function _run_info(groups, exec)
     return (;
         nscan = length(groups),

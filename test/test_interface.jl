@@ -1,5 +1,5 @@
-# Solve-step interface tests (protocol, provenance, solutions of several steps,
-# and the fit/calibrate verbs), on ProcessingSets from `_build_fringe_ps`. Uses
+# Solve-step interface tests (protocol, step record, solutions of a chain of
+# steps, and the fit/calibrate verbs), on ProcessingSets from `_build_fringe_ps`. Uses
 # the CAL/FP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
@@ -48,7 +48,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
     @testset "a step drives its own passes with each_group" begin
         ps, _ = _build_fringe_ps(; nscans = 3)
         sol = fit(_TwoPassStep(), ps)
-        info = sol.steps[:twopass]
+        info = sol.info
         # One result per scan group, in the same group order on every pass.
         @test length(info.first_t) == sol.info.nscan == 3
         @test allunique(info.first_t)
@@ -115,62 +115,63 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test_throws "station code \"ZZ\" not in antenna table" fit(BaselineFringeFit(; gauge = PinAntenna("ZZ")), ps)
     end
 
-    @testset "a solution of several steps: components keyed by step" begin
+    @testset "a chain of steps: one solution per step" begin
         ps, _ = _build_fringe_ps()
         sols = _fit_chain(_full_chain(), ps)
-        sol = _combined(sols)
+        fr, bp, ad = sols
 
-        @test sol isa CAL.CalibrationSolution
-        @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
-        @test unique(c.step for c in sol.components) == [:fringe, :bandpass, :adhoc]
-        @test all(c -> c isa CAL.SolvedComponent, sol.components)
-        @test sol.steps[:fringe] isa NamedTuple
-        @test all(s -> occursin("PinAntenna{Int64}(1)", s.provenance.pipeline), sols)
-        @test_throws "holds no component under bogus" sol[:bogus]
+        @test all(s -> s isa CAL.CalibrationSolution, sols)
+        @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
+        @test all(s -> all(c -> c isa CAL.ComponentFit, s.components), sols)
+        @test all(s -> s.info isa NamedTuple, sols)
+        @test all(s -> occursin("PinAntenna{Int64}(1)", s.step), sols)
+        @test_throws "holds no component under bogus" fr[:bogus]
 
         # The fringe step's unconstrained stations and search settings are its
         # own diagnostics.
-        @test haskey(sol.steps[:fringe], :flagged_ant)
-        @test sol.steps[:fringe].search isa Gustavo.Fring.FringeSearch
-        @test !haskey(sol.info, :flagged_ant) && !haskey(sol.info, :search)
+        @test haskey(fr.info, :flagged_ant)
+        @test fr.info.search isa Gustavo.Fring.FringeSearch
+        @test all(s -> !haskey(s.info, :flagged_ant) && !haskey(s.info, :search), (bp, ad))
 
-        # Gains factor multiplicatively over steps and over components.
-        g_full = parent(gains(sol))
-        @test parent(gains(sol[:fringe])) .* parent(gains(sol[:bandpass])) .* parent(gains(sol[:adhoc])) == g_full
-        g_prod = ones(ComplexF64, size(g_full))
-        for c in sol.components
-            g_prod .*= parent(gains(filter(==(c), sol)))
+        # Gains factor multiplicatively over components.
+        for sol in sols
+            g_full = parent(gains(sol))
+            g_prod = ones(ComplexF64, size(g_full))
+            for c in sol.components
+                g_prod .*= parent(gains(filter(==(c), sol)))
+            end
+            @test g_prod ≈ g_full
         end
-        @test g_prod ≈ g_full
 
-        # Any selection applies. Calibrating step by step is calibrating by the
-        # whole solution.
-        whole = calibrate(sol, ps; apply_flags = false)
-        stepwise = ps
-        for k in (:fringe, :bandpass, :adhoc)
-            stepwise = calibrate(sol[k], stepwise; apply_flags = false)
+        # Any selection applies. Calibrating component by component is
+        # calibrating by the whole solution.
+        whole = calibrate(fr, ps; apply_flags = false)
+        componentwise = ps
+        for c in fr.components
+            componentwise = calibrate(filter(==(c), fr), componentwise; apply_flags = false)
         end
         for (k, ms) in pairs(whole)
-            @test isapprox(parent(stepwise[k][:visibility]), parent(ms[:visibility]); nans = true)
-            @test parent(stepwise[k][:weight]) ≈ parent(ms[:weight])
+            @test isapprox(parent(componentwise[k][:visibility]), parent(ms[:visibility]); nans = true)
+            @test parent(componentwise[k][:weight]) ≈ parent(ms[:weight])
         end
-        @test calibrate(sol[:fringe, :phase, :mbd], ps) isa XRadio.ProcessingSet
-        @test calibrate(filter(c -> c.component.term isa Delay, sol), ps) isa XRadio.ProcessingSet
-        @test_throws "holds no components" calibrate(filter(_ -> false, sol), ps)
-        @test_throws "holds no components" calibrate!(filter(_ -> false, sol), deepcopy(ps))
+        @test calibrate(fr[:phase, :mbd], ps) isa XRadio.ProcessingSet
+        @test calibrate(filter(c -> c.component.term isa Delay, fr), ps) isa XRadio.ProcessingSet
+        @test_throws "holds no components" calibrate(filter(_ -> false, fr), ps)
+        @test_throws "holds no components" calibrate!(filter(_ -> false, fr), deepcopy(ps))
     end
 
     @testset "selections and gains selectors" begin
         ps, _ = _build_fringe_ps()
-        sol = _combined(_fit_chain(_full_chain(), ps))
+        sol = fit(first(_full_chain()), ps)
 
         # A path prefix selects the components under it; their gains multiply.
-        ph = sol[:fringe, :phase]
+        ph = sol[:phase]
         @test !isempty(ph.components)
-        @test collect(keys(ph.steps)) == [:fringe]
+        @test ph.name === :fringe
+        @test haskey(sol, :phase) && haskey(sol, :phase, :mbd) && !haskey(sol, :phase, :bogus)
         g_group = ones(ComplexF64, size(gains(sol)))
         for c in ph.components
-            g_group .*= parent(gains(sol[:fringe, c.path...]))
+            g_group .*= parent(gains(sol[c.path...]))
         end
         @test parent(gains(ph)) ≈ g_group
 
@@ -187,18 +188,19 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test_throws "unknown dimension keyword" gains(sol; Polarization = 1)
     end
 
-    @testset "flags come from the steps a selection holds" begin
+    @testset "flags come from the solution's step" begin
         ps, _ = _build_fringe_ps()
-        fitted = _combined(_fit_chain(_full_chain(), ps))
-        steps = copy(fitted.steps)
-        steps[:fringe] = (; steps[:fringe]..., flagged_ant = ["A2"], flagged_feed = [2], flagged_scan = [1])
-        sol = CAL.CalibrationSolution(fitted.geom, fitted.components, steps, fitted.info)
+        fr, bp, _ = _fit_chain(_full_chain(), ps)
+        sol = CAL.CalibrationSolution(
+            fr.geom, fr.name, fr.components,
+            (; fr.info..., flagged_ant = ["A2"], flagged_feed = [2], flagged_scan = [1]); step = fr.step,
+        )
         @test Gustavo._solution_flag_sets(sol) == Set([("A2", 2, 1)])
-        @test Gustavo._solution_flag_sets(sol[:fringe, :phase, :mbd]) == Set([("A2", 2, 1)])
-        @test Gustavo._solution_flag_sets(sol[:bandpass]) === nothing
+        @test Gustavo._solution_flag_sets(sol[:phase, :mbd]) == Set([("A2", 2, 1)])
+        @test Gustavo._solution_flag_sets(bp) === nothing
         flagged(out) = any(ms -> any(parent(ms[:flag])), values(out))
         @test flagged(calibrate(sol, ps)) && !flagged(calibrate(sol, ps; apply_flags = false))
-        @test !flagged(calibrate(sol[:bandpass], ps))
+        @test !flagged(calibrate(bp, ps))
     end
 
     @testset "calibrate divides by the gains alone" begin
@@ -210,11 +212,11 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             ),
             copy(DimensionalData.metadata(set)),
         )
-        sol = _combined(_fit_chain(_full_chain(), scale(ps)))
+        sols = _fit_chain(_full_chain(), scale(ps))
 
         # Scaling the data before or after `calibrate` gives the same result.
-        before = calibrate(sol, scale(ps))
-        after = scale(calibrate(sol, ps))
+        before = _calibrate_chain(sols, scale(ps))
+        after = scale(_calibrate_chain(sols, ps))
         @test collect(keys(before)) == collect(keys(after))
         for (k, ms) in pairs(after)
             @test isequal(parent(before[k][:visibility]), parent(ms[:visibility]))
@@ -222,9 +224,11 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         end
 
         # Two weight scales compose (w·(s_a s_b)²).
-        sol_b = _combined(_fit_chain(_full_chain(), scale(scale(ps))))
-        @test parent(gains(_combined(_fit_chain(_full_chain(), scale(ps, Dict(k => v^2 for (k, v) in ws)))))) ≈
-            parent(gains(sol_b))
+        sols_b = _fit_chain(_full_chain(), scale(scale(ps)))
+        sols_sq = _fit_chain(_full_chain(), scale(ps, Dict(k => v^2 for (k, v) in ws)))
+        for (a, b) in zip(sols_sq, sols_b)
+            @test parent(gains(a)) ≈ parent(gains(b))
+        end
     end
 
     @testset "solution Zarr round-trip" begin
@@ -232,24 +236,28 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         ws = Dict("A1" => 1.0, "A2" => 0.5, "A3" => 1.0, "A4" => 1.0)
         scaled = Gustavo.materialize(ps)
         foreach(ms -> scale_weights!(ms, ws), values(scaled))
-        sol = _combined(_fit_chain(_full_chain(), scaled))
+        sols = _fit_chain(_full_chain(), scaled)
         dir = mktempdir()
-        path = joinpath(dir, "sol.zarr")
-        CAL.save_solution(path, sol)
-        back = CAL.load_solution(path)
-        @test back.components == sol.components
-        # `isequal`: the bandpass record holds NaN where a piece has no slip probability.
-        @test isequal(back.steps, sol.steps)
-        @test back.info == sol.info
-        @test back.provenance == sol.provenance
-        @test back.geom.stations == sol.geom.stations && back.geom.times == sol.geom.times
-        @test parent(gains(back)) == parent(gains(sol))
+        for sol in sols
+            path = joinpath(dir, "$(sol.name).zarr")
+            CAL.save_solution(path, sol)
+            back = CAL.load_solution(path)
+            @test back.components == sol.components
+            @test back.name == sol.name
+            # `isequal`: the bandpass record holds NaN where a piece has no slip probability.
+            @test isequal(back.info, sol.info)
+            @test back.step == sol.step
+            @test back.geom.stations == sol.geom.stations && back.geom.times == sol.geom.times
+            @test parent(gains(back)) == parent(gains(sol))
+        end
 
+        sol = first(sols)
+        path = joinpath(dir, "fringe.zarr")
         @test_throws "exists" CAL.save_solution(path, sol)
-        @test_throws "not a Gustavo solution store" CAL.load_solution(joinpath(dir, "sol.zarr", "geometry"))
+        @test_throws "not a Gustavo solution store" CAL.load_solution(joinpath(path, "geometry"))
 
         # A diagnostic with no stored form fails the save and leaves nothing behind.
-        bad = CalibrationSolution(sol.geom, sol.components, sol.steps, (; hook = x -> x))
+        bad = CalibrationSolution(sol.geom, sol.name, sol.components, (; hook = x -> x))
         badpath = joinpath(dir, "bad.zarr")
         @test_throws "cannot save info.hook" CAL.save_solution(badpath, bad)
         @test !ispath(badpath)

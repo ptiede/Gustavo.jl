@@ -40,7 +40,7 @@ Gain phase of `g`, a [`gains`](@ref) array reduced to `AntennaName`, `Feed` and
 one more dimension: one panel per antenna (rows) and feed (columns), with the
 remaining dimension on the x axis. Select that dimension by indexing, e.g.
 `plot_gain_phases(gains(sol; Ti = 1))` for phase against frequency or
-`plot_gain_phases(gains(sol[:bandpass]; Ti = 1))` for the bandpass alone.
+`plot_gain_phases(gains(sol[:phase]; Ti = 1))` for the phase components alone.
 Provided by `GustavoMakieExt`.
 """
 function plot_gain_phases end
@@ -82,7 +82,7 @@ export ParameterLayout, plan_parameters, station_blocks
 export evaluate_gains
 
 # Calibration solution container, apply, serialization
-export CalibrationSolution, SolvedComponent, GeometryWindow
+export CalibrationSolution, ComponentFit, GeometryWindow
 export gains, plot_gain_phases
 export save_solution, load_solution, storage_constructor, storage_arguments
 

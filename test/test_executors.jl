@@ -81,7 +81,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         sols_t, sols_d = run(DynamicScheduler()), run(GreedyScheduler())
         for (sol_t, sol_d) in zip(sols_t, sols_d)
             @test parent(gains(sol_d)) == parent(gains(sol_t))
-            @test collect(keys(sol_d.steps)) == collect(keys(sol_t.steps))
+            @test sol_d.name == sol_t.name
         end
         out_t = _calibrate_chain(sols_t, ps; exec = ExecutionConfig(outer_executor = DynamicScheduler()))
         out_d = _calibrate_chain(sols_d, ps; exec = ExecutionConfig(outer_executor = GreedyScheduler()))

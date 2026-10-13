@@ -28,7 +28,7 @@
         fixd = let sols = _fit_chain(steps, scaled)
             (sols, _calibrate_chain(sols, scaled))
         end
-        bfr, ffr = base[1][1].steps[:fringe], fixd[1][1].steps[:fringe]
+        bfr, ffr = base[1][1].info, fixd[1][1].info
         for i in eachindex(bfr.det_snr, ffr.det_snr)
             s = scale(bfr.det_ant_a[i]) * scale(bfr.det_ant_b[i])
             @test ffr.det_snr[i] ≈ sqrt(s) * bfr.det_snr[i] rtol = 1.0e-4

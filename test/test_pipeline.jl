@@ -78,19 +78,17 @@ end
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
     # keeps every well-determined AP in this high-SNR synthetic.
     gauge = PinAntenna(1)
-    sol = _combined(
-        _fit_chain(
-            (
-                BaselineFringeFit(; gauge), Bandpass(; gauge),
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            ), ps,
-        )
+    sols = _fit_chain(
+        (
+            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+        ), ps,
     )
-    @test sol isa CAL.CalibrationSolution
-    @test collect(keys(sol.steps)) == [:fringe, :bandpass, :adhoc]
-    @test all(haskey(sol, k) for k in keys(sol.steps))
+    @test all(s -> s isa CAL.CalibrationSolution, sols)
+    @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
+    @test all(s -> !isempty(s.components), sols)
 
-    corr = calibrate(sol, ps)
+    corr = _calibrate_chain(sols, ps)
 
     @testset "parallel-hand coherence ≈ 1" begin
         cohs = _product_coherences(corr; keep = _parallel_hand)
@@ -108,20 +106,24 @@ end
 
     @testset "save / load round-trip" begin
         path = tempname()
-        CAL.save_solution(path, sol)
-        sol2 = CAL.load_solution(path)
-        @test sol2.geom.times == sol.geom.times
-        @test sol2.geom.channel_freqs == sol.geom.channel_freqs
-        @test sol2.geom.channel_widths == sol.geom.channel_widths
-        @test sol2.components == sol.components
-        @test collect(keys(sol2.steps)) == collect(keys(sol.steps))
-        @test sol2.provenance == sol.provenance
-        @test sol2.steps[:bandpass].phase_status == sol.steps[:bandpass].phase_status
-        @test eltype(sol2.steps[:bandpass].phase_status) == FP.TrackStatus
+        CAL.save_solution(path, OrderedDict(s.name => s for s in sols))
+        back = CAL.load_solution(path)
+        @test collect(keys(back)) == [s.name for s in sols]
+        for (sol, sol2) in zip(sols, values(back))
+            @test sol2.geom.times == sol.geom.times
+            @test sol2.geom.channel_freqs == sol.geom.channel_freqs
+            @test sol2.geom.channel_widths == sol.geom.channel_widths
+            @test sol2.components == sol.components
+            @test sol2.name == sol.name
+            @test sol2.step == sol.step
+        end
+        bp, bp2 = sols[2], back[:bandpass]
+        @test bp2.info.phase_status == bp.info.phase_status
+        @test eltype(bp2.info.phase_status) == FP.TrackStatus
         # Stored as a Zarr array of codes, not as JSON.
-        @test isdir(joinpath(path, "steps", "bandpass", "phase_status", "data"))
+        @test isdir(joinpath(path, "2", "info", "phase_status", "data"))
 
-        corr2 = calibrate(sol2, ps)
+        corr2 = _calibrate_chain(collect(values(back)), ps)
         for (k, ms) in pairs(corr)
             @test isequal(parent(corr2[k][:visibility]), parent(ms[:visibility]))
         end
@@ -135,7 +137,7 @@ end
             k => (copy(parent(ms[:visibility])), copy(parent(ms[:weight])), copy(parent(ms[:flag])))
                 for (k, ms) in pairs(ps)
         )
-        calibrate(sol, ps)
+        _calibrate_chain(sols, ps)
         for (k, ms) in pairs(ps)
             @test parent(ms[:visibility]) == snap[k][1]
             @test parent(ms[:weight]) == snap[k][2]
@@ -145,9 +147,11 @@ end
 
     @testset "standard interfaces: show" begin
         # `show` gives each type its own summary line instead of a raw dump.
+        sol = first(sols)
         @test occursin("CalibrationSolution", sprint(show, sol))
         @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
-        @test occursin("SolvedComponent", sprint(show, first(sol[:fringe].components)))
+        @test occursin("Step      : fringe", sprint(show, MIME"text/plain"(), sol))
+        @test occursin("ComponentFit", sprint(show, first(sol.components)))
     end
 end
 
@@ -242,13 +246,13 @@ end
     # parallel hands still flatten.
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
-    sol = _combined(_fit_chain((BaselineFringeFit(; gauge), AdhocPhase(; model = pf, smoother = sm, gauge)), ps))
-    adhoc_c = only(sol[:adhoc, :phase, :adhoc].components)
+    sols = _fit_chain((BaselineFringeFit(; gauge), AdhocPhase(; model = pf, smoother = sm, gauge)), ps)
+    adhoc_c = only(last(sols)[:phase, :adhoc].components)
     @test adhoc_c.component.Feed isa CAL.PerFeed
     leaf = parent(adhoc_c.params)     # (param, node, fseg, tseg, ant)
     @test any(!=(0), @view leaf[1, 1, 1, :, :])
     @test any(!=(0), @view leaf[1, 2, 1, :, :])
-    @test all(>(0.99), _product_coherences(calibrate(sol, ps); keep = _parallel_hand))
+    @test all(>(0.99), _product_coherences(_calibrate_chain(sols, ps); keep = _parallel_hand))
 end
 
 @testset "calibrate ≡ member-by-member calibrate" begin
@@ -258,12 +262,12 @@ end
     ps, _ = _build_fringe_ps()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
-    sol_ref = _combined(_fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
-    out_fused = calibrate(sol_ref, ps)
+    sols_ref = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    out_fused = _calibrate_chain(sols_ref, ps)
     @test collect(keys(out_fused)) == collect(keys(ps))
     same(x, y) = (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5)
     for (k, ms) in pairs(ps)
-        alone = only(values(calibrate(sol_ref, XRadio.ProcessingSet(OrderedDict(k => ms)))))
+        alone = only(values(_calibrate_chain(sols_ref, XRadio.ProcessingSet(OrderedDict(k => ms)))))
         Vr = parent(alone[:visibility]); Wr = parent(alone[:weight])
         Vf = parent(out_fused[k][:visibility]); Wf = parent(out_fused[k][:weight])
         @test size(Vf) == size(Vr)
@@ -274,7 +278,7 @@ end
     # `post` runs on each corrected member: the same as applying it to every
     # member of the corrected set.
     halve(ms) = (parent(ms[:weight]) ./= 2; ms)
-    out_post = calibrate(sol_ref, ps; post = halve)
+    out_post = calibrate!(last(sols_ref), _calibrate_chain(sols_ref[1:(end - 1)], ps); post = halve)
     for (k, ms) in pairs(out_fused)
         @test parent(out_post[k][:weight]) == parent(ms[:weight]) ./ 2
         @test isequal(parent(out_post[k][:visibility]), parent(ms[:visibility]))
@@ -330,8 +334,8 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
         gauge = PinAntenna(1)
-        sol = _combined(_fit_chain((BaselineFringeFit(; rounds = r, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
-        @test minimum(_product_coherences(calibrate(sol, ps); keep = _parallel_hand)) > 0.99
+        sols = _fit_chain((BaselineFringeFit(; rounds = r, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+        @test minimum(_product_coherences(_calibrate_chain(sols, ps); keep = _parallel_hand)) > 0.99
     end
 end
 
@@ -339,9 +343,9 @@ end
     # Noise puts every pfa strictly inside (0, 1), where the family size moves it.
     ps, _ = _build_fringe_ps(; nscans = 2, noise = 10.0)
     step = BaselineFringeFit(; gauge = PinAntenna(1))
-    both = fit(step, ps).steps[:fringe]
+    both = fit(step, ps).info
     first_scan = first(values(XRadio.groupby(ps, XRadio.ByScan())))
-    alone = fit(step, first_scan).steps[:fringe]
+    alone = fit(step, first_scan).info
     rows = both.det_scan .== 1
     @test count(rows) == length(alone.det_pfa) > 0
     @test any(p -> 0 < p < 1, alone.det_pfa)
@@ -369,11 +373,11 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
-    sol_on = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
-    sol_off = _combined(_fit_chain((ff, AdhocPhase(adhoc; gauge)), ps))
+    sols_on = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    sols_off = _fit_chain((ff, AdhocPhase(adhoc; gauge)), ps)
 
-    don = _time_averaged_spectra(calibrate(sol_on, ps))
-    doff = _time_averaged_spectra(calibrate(sol_off, ps))
+    don = _time_averaged_spectra(_calibrate_chain(sols_on, ps))
+    doff = _time_averaged_spectra(_calibrate_chain(sols_off, ps))
     p = findfirst(==((1, 1)), don.feeds)
     # Per-channel phase coherence per cross baseline: R = |Σ_c V̄_c| / Σ_c |V̄_c|
     # (1 ⇒ flat per-channel phase). Mean over baselines.
@@ -399,8 +403,8 @@ end
     mx(c) = maximum(abs, filter(isfinite, c); init = 0.0)
     τscale = mx(FP.baseline_delays(FP.baseline_spectra(XRadio.average(ps, XRadio.ByScan()))))
     @test τscale > 0
-    @test mx(FP.delay_closure(FP.baseline_spectra(XRadio.average(calibrate(sol_on, ps), XRadio.ByScan())))) < 1.0e-3 * τscale
-    @test mx(FP.delay_closure(FP.baseline_spectra(XRadio.average(calibrate(sol_off, ps), XRadio.ByScan())))) < 1.0e-3 * τscale
+    @test mx(FP.delay_closure(FP.baseline_spectra(XRadio.average(_calibrate_chain(sols_on, ps), XRadio.ByScan())))) < 1.0e-3 * τscale
+    @test mx(FP.delay_closure(FP.baseline_spectra(XRadio.average(_calibrate_chain(sols_off, ps), XRadio.ByScan())))) < 1.0e-3 * τscale
 end
 
 @testset "Bandpass on scan-averaged data applies to the full data" begin
@@ -492,11 +496,11 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
-    sol_on = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
-    sol_off = _combined(_fit_chain((ff, AdhocPhase(adhoc; gauge)), ps))
+    sols_on = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    sols_off = _fit_chain((ff, AdhocPhase(adhoc; gauge)), ps)
 
-    don = _time_averaged_spectra(calibrate(sol_on, ps))
-    doff = _time_averaged_spectra(calibrate(sol_off, ps))
+    don = _time_averaged_spectra(_calibrate_chain(sols_on, ps))
+    doff = _time_averaged_spectra(_calibrate_chain(sols_off, ps))
     # Per-channel phase coherence R = |Σ_c V̄_c| / Σ_c |V̄_c| over a product set.
     # The source is unpolarized, so a correct solve leaves the corrected CROSS
     # spectra flat; a SIGN error in the feed-2 block doubles the ref inter-feed
@@ -523,7 +527,7 @@ end
     # to per-band constant + slope components (the parts the per-band SBD and inter-feed
     # delay terms legitimately absorb). Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
-    bp_on = only(CAL._applied(sol_on[:bandpass, :phase, :bandpass]).groups)
+    bp_on = only(CAL._applied(sols_on[2][:phase, :bandpass]).groups)
     plan = only(bp_on.layout.plans)
     @test plan_off1(plan)[1, 2, 1, 1] != 0
     rec = [bp_on.θ[plan_off1(plan)[1, 2, 1, plan.fseg_id[gc]]] for gc in 1:nchg]
@@ -597,16 +601,14 @@ end
 
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(; gauge)
-    sol_off = _combined(
-        _fit_chain(
-            (
-                ff,
-                Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), gauge),
-                AdhocPhase(adhoc; gauge),
-            ), ps,
-        )
+    sols_off = _fit_chain(
+        (
+            ff,
+            Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), gauge),
+            AdhocPhase(adhoc; gauge),
+        ), ps,
     )
-    doff = _time_averaged_spectra(calibrate(sol_off, ps))
+    doff = _time_averaged_spectra(_calibrate_chain(sols_off, ps))
     poff = findfirst(==((1, 1)), doff.feeds)
     @test amp_ripple(doff.spec, doff, poff) > 1.3    # roll-off ripple without the stage
 
@@ -618,16 +620,14 @@ end
         CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.2), 1.0)),
     )
     for prior in priors
-        sol = _combined(
-            _fit_chain(
-                (ff, Bandpass(; model = amp_model(prior), gauge), AdhocPhase(adhoc; gauge)),
-                ps,
-            )
+        fr, bp_sol, ad = _fit_chain(
+            (ff, Bandpass(; model = amp_model(prior), gauge), AdhocPhase(adhoc; gauge)),
+            ps,
         )
-        don = _time_averaged_spectra(calibrate(sol, ps))
+        don = _time_averaged_spectra(_calibrate_chain([fr, bp_sol, ad], ps))
         p = findfirst(==((1, 1)), don.feeds)
         @test amp_ripple(don.spec, don, p) < 1.08
-        bp = only(CAL._applied(sol[:bandpass, :logamp, :bandpass]).groups)
+        bp = only(CAL._applied(bp_sol[:logamp, :bandpass]).groups)
         plan = only(bp.layout.plans)
         for dg in dead_globals, a in 2:nant, f in 1:2
             nbr = 0.5 * (larec(bp.θ, plan, a, f, dg - 1) + larec(bp.θ, plan, a, f, dg + 1))
@@ -635,15 +635,15 @@ end
             @test abs(larec(bp.θ, plan, a, f, dg) - nbr) < 0.1    # estimated, on the smooth curve
             @test abs(nbr) > 0.12                                 # ...curve far from |g|=1 (meaningful)
         end
-        bpp = only(CAL._applied(sol[:bandpass, :phase, :bandpass]).groups)
+        bpp = only(CAL._applied(bp_sol[:phase, :bandpass]).groups)
         pplan = only(bpp.layout.plans)
         @test all(larec(bpp.θ, pplan, a, f, dg) == 0.0 for dg in dead_globals, a in 2:nant, f in 1:2)
     end
 
     # With no prior the killed channels are NOT estimated — their θ slot is
     # untouched (log-amp 0 ⇒ |g| = 1), the contrast that motivates the priors.
-    solf = _combined(_fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps))
-    bpf = only(CAL._applied(solf[:bandpass, :logamp, :bandpass]).groups)
+    _, bp_solf, _ = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    bpf = only(CAL._applied(bp_solf[:logamp, :bandpass]).groups)
     planf = only(bpf.layout.plans)
     for dg in dead_globals, a in 2:nant, f in 1:2
         @test larec(bpf.θ, planf, a, f, dg) == 0.0
@@ -653,8 +653,8 @@ end
 @testset "Default adhoc step flattens end-to-end" begin
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
-    sol = _combined(_fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps))
-    @test minimum(_product_coherences(calibrate(sol, ps); keep = _parallel_hand)) > 0.99
+    sols = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
+    @test minimum(_product_coherences(_calibrate_chain(sols, ps); keep = _parallel_hand)) > 0.99
 end
 
 @testset "Fringe pipeline via hierarchical MBD search" begin
@@ -668,18 +668,17 @@ end
     @test ax.mbd !== nothing
 
     gauge = PinAntenna(1)
-    sol = _combined(
-        _fit_chain(
-            (
-                BaselineFringeFit(; gauge), Bandpass(; gauge),
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            ), ps,
-        )
+    sols = _fit_chain(
+        (
+            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+        ), ps,
     )
-    @test all(>(10), filter(isfinite, sol.steps[:fringe].scan_snr))
-    det = FP.fringe_detections(sol)
+    fr = first(sols)
+    @test all(>(10), filter(isfinite, fr.info.scan_snr))
+    det = FP.fringe_detections(fr)
     @test all(det.pfa[det.detected] .< 1.0e-10)             # all detections secure
-    @test minimum(_product_coherences(calibrate(sol, ps))) > 0.99
+    @test minimum(_product_coherences(_calibrate_chain(sols, ps))) > 0.99
 end
 
 @testset "Threaded per-baseline search ≡ serial, and stage timers" begin
@@ -693,14 +692,12 @@ end
     # fires per completed scan of each pass (plus a done=0 pass announcement).
     events = Tuple{Symbol, Int, Int}[]
     gauge = PinAntenna(1)
-    sol = _combined(
-        _fit_chain(
-            (
-                BaselineFringeFit(; gauge), Bandpass(; gauge),
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            ), ps;
-            exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
-        )
+    sols = _fit_chain(
+        (
+            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+        ), ps;
+        exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
     )
     ngroups = length(XRadio.groupby(ps, XRadio.ByScan()))
     # Stages report under each step's `provides` name (:fringe/:bandpass/:adhoc).
@@ -713,15 +710,14 @@ end
         @test all(t == total for (_, t) in ev)
     end
     @test any(e -> e[1] === :bandpass, events)                 # bandpass enabled by default
-    inf = sol.info
-    fringe_step, bandpass_step, adhoc_step = sol.steps[:fringe], sol.steps[:bandpass], sol.steps[:adhoc]
+    fringe_step, bandpass_step, adhoc_step = (s.info for s in sols)
     @test fringe_step.t_pass > 0 && adhoc_step.t_pass > 0 && bandpass_step.t_pass >= 0
-    @test inf.ntasks_used >= 1 && inf.inner_tasks >= 1
+    @test all(s -> s.info.ntasks_used >= 1 && s.info.inner_tasks >= 1, sols)
     # Every step publishes the SAME generic per-scan timing shape — no
     # per-step-name code in the runner, so a third-party step gets this too.
     for step in (fringe_step, bandpass_step, adhoc_step)
         t = step.timing
-        @test collect(lookup(t, Gustavo.Scan)) == sol.geom.scan_names
+        @test collect(lookup(t, Gustavo.Scan)) == first(sols).geom.scan_names
         @test all(>=(0), t.decode) && all(>=(0), t.work)
     end
     @test sum(fringe_step.timing.work) > 0
@@ -730,19 +726,17 @@ end
     # single-scan set (the stage-B/bandpass/adhoc chain is intact).
     ev2 = Tuple{Symbol, Int, Int}[]
     gauge = PinAntenna(1)
-    solc = _combined(
-        _fit_chain(
-            (
-                BaselineFringeFit(; gauge), Bandpass(; gauge),
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            ), ps;
-            exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
-        )
+    solsc = _fit_chain(
+        (
+            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+        ), ps;
+        exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
     )
-    @test solc isa CAL.CalibrationSolution
+    @test all(s -> s isa CAL.CalibrationSolution, solsc)
     bp2 = [(d, t) for (s2, d, t) in ev2 if s2 === :bandpass]
     @test !isempty(bp2) && bp2[1][2] == 1                     # one scan in this set
-    l2 = first(values(calibrate(solc, ps)))
+    l2 = first(values(_calibrate_chain(solsc, ps)))
     b2 = findfirst(pr -> pr[1] != pr[2], collect(XRadio.baselines(l2)))
     @test _coherence(Gustavo._cell_plane(l2[:visibility], b2, 1), Gustavo._cell_plane(l2[:weight], b2, 1)) > 0.99
 end
@@ -791,8 +785,8 @@ end
     )
     # Each scan's station systems solve as it is searched.
     @test Gustavo._scan_local_solve(ff)
-    sol = _combined(_fit_chain((ff, AdhocPhase(; gauge)), ps))
-    flags = FP.fringe_station_flags(sol)
+    sols = _fit_chain((ff, AdhocPhase(; gauge)), ps)
+    flags = FP.fringe_station_flags(first(sols))
     @test any(flags)
     @test all(flags[AntennaName = At("A4")])          # only station 4 unconstrained
     @test !any(flags[AntennaName = At(["A1", "A2", "A3"])])
@@ -800,7 +794,7 @@ end
     # An unconstrained row is flagged, not blanked: it holds real data that the
     # solve left uncalibrated, so its visibilities and weights survive and
     # clearing the flag gives it back.
-    corr = calibrate(sol, ps)
+    corr = _calibrate_chain(sols, ps)
     for ms in values(corr)
         for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
             a == b && continue
@@ -816,7 +810,7 @@ end
         end
     end
     # Opting out leaves the (identity-gain) row unflagged.
-    l0 = first(values(calibrate(sol, ps; apply_flags = false)))
+    l0 = first(values(_calibrate_chain(sols, ps; apply_flags = false)))
     bi4 = findfirst(((a, b),) -> a != b && has4(a, b), collect(XRadio.baselines(l0)))
     @test !any(view(l0[:flag], BaselineID(bi4)))
     @test any(>(0), view(l0[:weight], BaselineID(bi4)))

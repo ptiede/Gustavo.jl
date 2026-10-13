@@ -148,7 +148,7 @@ quantity solved `SharedFeeds` averages away a real signal.
 
 Components compose by *named* `NamedTuple` entries, never positionally: θ is
 addressed as `θ.phase.<name>`, diagnostics label by name, and
-`sol[:fringe, :phase, :mbd]` selects by the same name. A value may
+`sol[:phase, :mbd]` selects by the same name. A value may
 itself be a named subtree of components, addressed through its key
 (`θ.phase.<name>.<part>`).
 
@@ -278,5 +278,5 @@ iterator can declare it too (see [Authoring a solve step](@ref authoring-steps))
 you can paste back — and error messages use the same spelling.
 Showing a `GainModel` lists its components the same way, and the stations
 with their own groups. After a fit, each
-[`SolvedComponent`](@ref) of the solution holds its solved θ as a labeled
+[`ComponentFit`](@ref) of the solution holds its solved θ as a labeled
 `DimArray` (`c.params`).

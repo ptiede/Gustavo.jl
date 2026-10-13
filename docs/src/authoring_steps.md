@@ -123,8 +123,7 @@ component it needs can skip routers and reach it through
 ## Diagnostics and logging
 
 The `NamedTuple` `solve` returns **is** the step logging interface: every key
-lands in the solution's diagnostics for the step, `sol.steps[:adhoc]`. The
-runner adds `t_pass` and `timing`, a `DimStack` over `Scan` (scan names). A per-scan quantity
+lands in the solution's diagnostics, `sol.info`. The runner adds `t_pass` and `timing`, a `DimStack` over `Scan` (scan names). A per-scan quantity
 is a vector built from `each_group`'s results, which are already in scan-group
 order:
 

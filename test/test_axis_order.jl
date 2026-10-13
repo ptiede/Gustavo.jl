@@ -27,7 +27,7 @@
     # spans windows far apart in frequency.
     ps, _ = _build_fringe_ps(nspw = 4, noise = 0.05, ref_freq = 3.0e9, spw_sep = 2.0e9)
     geom = CAL.DataGeometry(ps)
-    θ(sol, name) = vcat((vec(parent(c.params)) for c in sol[name].components)...)
+    θ(sol) = vcat((vec(parent(c.params)) for c in sol.components)...)
     reference = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
     ref_search = FP.search_scan(ps, geom, FP.FringeSearch())
     @test any(parent(ref_search[:valid]))
@@ -46,8 +46,8 @@
         @testset "residual_group" begin
             model = Gustavo.model_components(BaselineFringeFit(; gauge = PinAntenna(1)), (; geom))
             layout = CAL.plan_parameters(model, length(geom.stations), geom)
-            a = FP.residual_group(layout, θ(reference, :fringe), ps, geom)
-            b = FP.residual_group(layout, θ(reference, :fringe), other, geom)
+            a = FP.residual_group(layout, θ(reference), ps, geom)
+            b = FP.residual_group(layout, θ(reference), other, geom)
             for (k, ms) in pairs(b)
                 @test dims(ms[:visibility]) == dims(other[k][:visibility])
                 @test isequal(parent(permutedims(ms[:visibility], dims(a[k][:visibility]))), parent(a[k][:visibility]))
@@ -61,9 +61,9 @@
             )
             a = fit(step, ps)
             b = fit(step, other)
-            name = Gustavo.provides(step)
-            @test maximum(abs, θ(a, name)) > 0
-            @test isequal(θ(a, name), θ(b, name))
+            @test a.name === b.name === Gustavo.provides(step)
+            @test maximum(abs, θ(a)) > 0
+            @test isequal(θ(a), θ(b))
         end
     end
 end

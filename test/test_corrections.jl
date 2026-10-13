@@ -111,7 +111,7 @@ end
     end
 
     @testset "calibrate! matches stations by name" begin
-        @test_throws "must name its stations" CALc.CalibrationSolution(_with_stations(geom, String[]), sol.components)
+        @test_throws "must name its stations" CALc.CalibrationSolution(_with_stations(geom, String[]), sol.name, sol.components)
         strangers = _hand_solution(_with_stations(geom, ["X1", "X2", "X3", "X4"]))
         @test_throws "shares no station" calibrate!(strangers, fresh())
         # A station the solution lacks: its cross baselines are flagged under

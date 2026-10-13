@@ -732,7 +732,7 @@ recipes, and [`plot_gain_phases`](@ref) draws the gain phase of a
 snr = cat_scans(fringe_snr_table.(values(sols)))
 plot(snr.max_snr)                                        # peak SNR per scan
 plot_gain_phases(gains(sol; Ti = 1))                     # phase against frequency
-plot_gain_phases(gains(sol[:bandpass]; Ti = 1))          # the bandpass alone
+plot_gain_phases(gains(bp[:phase]; Ti = 1))              # a bandpass solution's phase
 plot_gain_phases(gains(sol; Frequency = Near(sol.geom.f0)))  # phase against time
 ```
 

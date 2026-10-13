@@ -18,7 +18,7 @@
 
 # The bandpass step's `obs` (`:phase` or `:logamp`) bandpass parameters over
 # `(param, Feed, Frequency, Ti, AntennaName)`.
-_jb_leaf(sol, obs) = parent(only(sol[:bandpass, obs, :bandpass].components).params)
+_jb_leaf(sol, obs) = parent(only(sol[obs, :bandpass].components).params)
 
 # Multiply each (scan, baseline, product) of `ps` by `amp·cis(phase)`, indexed
 # `[scan, baseline, product]` in each Measurement Set's own baseline and product
@@ -1173,14 +1173,14 @@ end
 
     sol, Δ = compare(:phase, (; bandpass = 0.4 .* randn(rng, nant, 2, nchan), seed = 7))
     @test Δ < 1.0e-4
-    @test isempty(sol.steps[:bandpass].amp_status)
+    @test isempty(sol.info.amp_status)
 
     abp_true = 0.15 .* randn(rng, nant, 2, nchan)
     # A gain ten times too strong at one channel is written as fit.
     abp_true[2, 1, 4] = 3.0
     sol, Δ = compare(:logamp, (; amp_bandpass = abp_true, seed = 8))
     @test Δ < 1.0e-4
-    @test isempty(sol.steps[:bandpass].phase_status)
+    @test isempty(sol.info.phase_status)
     leaf = _jb_leaf(sol, :logamp)
     @test all(abs(leaf[1, f, c, 1, a] - (abp_true[a, f, c] - sum(abp_true[a, f, :]) / nchan)) < 1.0e-3 for a in 1:nant, f in 1:2, c in 1:nchan)
 end

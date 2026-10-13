@@ -8,18 +8,17 @@
     station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3]
     ps, _truth = _build_fringe_ps(; station_rate)
     gauge = PinAntenna(1)
-    sol = _combined(
-        _fit_chain(
-            (
-                BaselineFringeFit(; gauge), Bandpass(; gauge),
-                AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
-            ), ps,
-        )
+    sols = _fit_chain(
+        (
+            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+        ), ps,
     )
+    sol = first(sols)
 
     @testset "snr table" begin
         t = FP.fringe_snr_table(sol)
-        fringe = sol.steps[:fringe]
+        fringe = sol.info
         @test t isa DimStack
         @test keys(t) == (:max_snr, :pfa)
         @test collect(lookup(t, Gustavo.Scan)) == fringe.scan_names
@@ -35,14 +34,14 @@
         # A marginal SNR on the same search space would NOT be secure.
         @test FP.fringe_pfa(3.0, fringe.scan_ncells[1]) > 0.01
 
-        bp_only = sol[:bandpass]
-        @test_throws "the solution has no :fringe step" FP.fringe_snr_table(bp_only)
+        bp_only = sols[2]
+        @test_throws "the solution is not a fringe solution; it holds :bandpass" FP.fringe_snr_table(bp_only)
     end
 
     @testset "fringe_detections" begin
         # The solve records every MEASURED cell; `det_detected` marks the ones it
         # accepted as real fringes.
-        inf = sol.steps[:fringe]
+        inf = sol.info
         det = FP.fringe_detections(sol)
         @test keys(det) == (:snr, :pfa, :delay, :rate, :phase, :detected)
         @test map(DimensionalData.basetypeof, dims(det)) == (Gustavo.Scan, Gustavo.AntennaPair, Gustavo.FeedPair)
@@ -118,7 +117,7 @@
 
     scan_average(data) = XRadio.average(data, XRadio.ByScan())
     before = FP.baseline_spectra(scan_average(ps))
-    after = FP.baseline_spectra(scan_average(calibrate(sol[:fringe], ps; flag_bad = false, apply_flags = false)))
+    after = FP.baseline_spectra(scan_average(calibrate(sol, ps; flag_bad = false, apply_flags = false)))
 
     @testset "baseline spectra before/after" begin
         @test keys(before) == (:vis, :weight)
@@ -194,7 +193,7 @@
         @test m.detection.snr ≈ rec.snr rtol = 1.0e-6
         @test m.detection.delay ≈ rec.delay rtol = 1.0e-6
         @test m.detection.rate ≈ rec.rate rtol = 1.0e-6
-        @test m.ncells == only(sol.steps[:fringe].scan_ncells)
+        @test m.ncells == only(sol.info.scan_ncells)
         @test m.pfa == FP.fringe_pfa(m.detection.snr, m.ncells)
         @test m.pfa < 1.0e-6
         # The map's discrete peak sits at the detection within a grid bin.
@@ -220,7 +219,7 @@
         @test_throws "is not a cross baseline" FP.fringe_search_map(sol, ps; baseline = ("A1", "A1"), feeds = (1, 1))
         @test_throws "holds no feed pair" FP.fringe_search_map(sol, ps; baseline = pair, feeds = (1, 3))
         @test_throws "measured no cell" FP.fringe_search_map(sol, ps; baseline = ("A1", "nope"))
-        @test_throws "the solution has no :fringe step" FP.fringe_search_map(sol[:bandpass], ps)
+        @test_throws "the solution is not a fringe solution" FP.fringe_search_map(sols[2], ps)
         ps2, _ = _build_fringe_ps(; nscans = 2)
         @test_throws "must hold one scan" FP.fringe_search_map(sol, ps2)
     end
@@ -274,7 +273,7 @@
 
     @testset "coherence report" begin
         raw = FP.coherence_report(ps)
-        coh = FP.coherence_report(calibrate(sol, ps; flag_bad = false, apply_flags = false))
+        coh = FP.coherence_report(_calibrate_chain(sols, ps; flag_bad = false, apply_flags = false))
         @test keys(coh) == (:time, :freq, :time_pooled, :freq_pooled)
         @test map(DimensionalData.basetypeof, dims(coh.time)) == (Gustavo.Scan, AntennaPair, FeedPair, FP.AveragingTime)
         @test map(DimensionalData.basetypeof, dims(coh.freq_pooled)) == (Gustavo.Scan, FeedPair, FP.AveragingBandwidth)
@@ -318,7 +317,7 @@
     end
 
     @testset "plot_coherence" begin
-        coh = FP.coherence_report(calibrate(sol, ps; flag_bad = false, apply_flags = false))
+        coh = FP.coherence_report(_calibrate_chain(sols, ps; flag_bad = false, apply_flags = false))
         one = coh[Gustavo.Scan(1), FeedPair(At((1, 1)))]
         fig = FP.plot_coherence(one)
         @test (show(IOBuffer(), MIME("image/png"), fig); true)

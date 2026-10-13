@@ -57,8 +57,8 @@ heterogeneity_rejector(step::SolveStep) = string(nameof(typeof(step)))
     provides(step::SolveStep) -> Symbol
 
 The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
-names its components and diagnostics in the solution (`sol[name]`,
-`sol.steps[name]`) and labels its progress-callback stage. Default: `:nothing`.
+names its solution (`sol.name`) and labels its progress-callback stage.
+Default: `:nothing`.
 """
 provides(step::SolveStep) = :nothing
 
@@ -75,7 +75,7 @@ step_gauge(step::SolveStep) = nothing
     solve(step::SolveStep, ctx::SolveContext) -> NamedTuple
 
 Fit `step`'s own model: fill `ctx.θ` and return the step's diagnostics, which
-become `sol.steps[name]`. The data are read
+become `sol.info`. The data are read
 with [`each_group`](@ref), once per pass the solve needs; a solve that
 iterates (a residual re-search, say) calls it once per round. The runner adds
 `t_pass`, the solve's wall time, and `timing`, each scan group's decode and

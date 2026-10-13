@@ -8,7 +8,7 @@
 
 @testset "station gauge: every scan pinned, undetermined columns throw" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
-    at_ref(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params[AntennaName(At("A1"))]
+    at_ref(sol, key) = only(c for c in sol.components if last(c.path) === key).params[AntennaName(At("A1"))]
     # The fit, and whether it warned that a fringe group's feeds are not linked.
     function fit_unlinked(step, data)
         logs, sol = Test.collect_test_logs(() -> fit(step, data))
@@ -65,7 +65,7 @@ end
 
 @testset "custom gauges drive the station solve" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
-    params(sol, key) = only(c for c in sol[:fringe].components if last(c.path) === key).params
+    params(sol, key) = only(c for c in sol.components if last(c.path) === key).params
     at(sol, key, name) = params(sol, key)[AntennaName(At(name))]
     # Every station's value less station `i`'s: invariant under the gauge.
     rel(sol, key, i) = (p = parent(params(sol, key)); p .- p[:, :, :, :, i:i])
@@ -90,38 +90,38 @@ end
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64)
     fr, ad = _fit_chain((BaselineFringeFit(; gauge = PinAntenna("A1")), AdhocPhase(; gauge = PinAntenna("A2"))), ps)
     at(c, name) = c.params[AntennaName(At(name))]
-    mbd = only(c for c in fr[:fringe].components if last(c.path) === :mbd)
-    adhoc = only(ad[:adhoc].components)
+    mbd = only(c for c in fr.components if last(c.path) === :mbd)
+    adhoc = only(ad.components)
     @test all(iszero, at(mbd, "A1"))
     @test all(iszero, at(adhoc, "A2"))
     @test !all(iszero, at(adhoc, "A1"))
-    @test occursin("PinAntenna{String}(\"A1\")", fr.provenance.pipeline)
-    @test occursin("PinAntenna{String}(\"A2\")", ad.provenance.pipeline)
+    @test occursin("PinAntenna{String}(\"A1\")", fr.step)
+    @test occursin("PinAntenna{String}(\"A2\")", ad.step)
 
     by_name = ByComponent((; adhoc = PinAntenna("A2")); default = PinAntenna("A1"))
     _, ad2 = _fit_chain((BaselineFringeFit(; gauge = PinAntenna("A1")), AdhocPhase(; gauge = by_name)), ps)
-    @test only(ad2[:adhoc].components).params == adhoc.params
+    @test only(ad2.components).params == adhoc.params
 end
 
 @testset "BaselineFringeFit step (new engine)" begin
     @testset "a fringe-only solution" begin
         ps, _ = _build_fringe_ps()
         sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
-        fr = sol[:fringe].components
+        fr = sol.components
         @test length(fr) == 3
-        @test collect(keys(sol.steps)) == [:fringe]
+        @test sol.name === :fringe
 
         # `scan_ncells` is the false-alarm family each recorded `pfa` was computed over.
         solr = fit(BaselineFringeFit(; gauge = PinAntenna(1)), _build_fringe_ps(; nscans = 3, noise = 0.5)[1])
-        fr3 = solr.steps[:fringe]
+        fr3 = solr.info
         @test fr3.det_pfa ≈ FP.fringe_pfa.(fr3.det_snr, fr3.scan_ncells[fr3.det_scan])
 
         # A gauge naming a station code resolves identically.
         sol_code = fit(BaselineFringeFit(; gauge = PinAntenna("A1")), ps)
-        @test sol_code[:fringe].components == fr
+        @test sol_code.components == fr
 
-        # Step selection works on a single-step solution.
-        @test filter(c -> c.step === :fringe, sol)[:fringe].components == fr
+        # Path selection and filtering keep every component of a fringe-only solution.
+        @test filter(c -> first(c.path) === :phase, sol)[:phase].components == fr
 
         # A fringe-only solution applies cleanly.
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
@@ -135,14 +135,14 @@ end
         model = default_fringe_terms()
 
         sol = fit(BaselineFringeFit(; model, gauge = PinAntenna("A4")), ps)
-        @test isempty(sol.steps[:fringe].flagged_ant)
+        @test isempty(sol.info.flagged_ant)
         @test !any(FP.fringe_station_flags(sol))
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
 
         # The flags do not depend on which station holds the gauge.
         present = fit(BaselineFringeFit(; model, gauge = PinAntenna("A1")), ps)
-        @test present.steps[:fringe].flagged_ant == sol.steps[:fringe].flagged_ant
-        @test present.steps[:fringe].flagged_scan == sol.steps[:fringe].flagged_scan
+        @test present.info.flagged_ant == sol.info.flagged_ant
+        @test present.info.flagged_scan == sol.info.flagged_scan
     end
 
     @testset "opt-in cross-feed rate (a feed-2 Rate list element)" begin
@@ -157,19 +157,19 @@ end
         )
 
         sol = fit(BaselineFringeFit(; model = rel_terms, gauge = PinAntenna(1)), ps)
-        @test count(c -> first(c.path) === :phase, sol[:fringe].components) == 4
-        solved = only(sol[:fringe, :phase, :rel_rate].components).params
+        @test count(c -> first(c.path) === :phase, sol.components) == 4
+        solved = only(sol[:phase, :rel_rate].components).params
         @test vec(parent(solved)) ≈ inj .- inj[1] atol = 1.0e-7
 
         # Null case: no injected feed-rate offset → solved offsets ≈ 0.
         ps0, _ = _build_fringe_ps()
         sol0 = fit(BaselineFringeFit(; model = rel_terms, gauge = PinAntenna(1)), ps0)
-        @test maximum(abs, only(sol0[:fringe, :phase, :rel_rate].components).params) < 1.0e-7
+        @test maximum(abs, only(sol0[:phase, :rel_rate].components).params) < 1.0e-7
 
         # No feed-specific Rate element: the component does not exist — the
         # The inter-feed rate is tied ≡ 0.
         sold = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
-        @test length(sold[:fringe].components) == 3
+        @test length(sold.components) == 3
     end
 
     @testset "corrections before the step, including a function" begin
@@ -183,7 +183,7 @@ end
         sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         @test all(
             isapprox(parent(a.params), parent(b.params); rtol = 1.0e-4)
-                for (a, b) in zip(sol_ws[:fringe].components, sol[:fringe].components)
+                for (a, b) in zip(sol_ws.components, sol.components)
         )
 
         # Flagging one baseline before the step keeps it flagged in the
@@ -207,7 +207,7 @@ end
     @testset "a solve uses samples whose input flags are cleared" begin
         ps, _ = _build_fringe_ps(; noise = 0.3)
         step = BaselineFringeFit(; gauge = PinAntenna(1))
-        params(sol) = [parent(c.params) for c in sol[:fringe].components]
+        params(sol) = [parent(c.params) for c in sol.components]
         reference = params(fit(step, ps))
         data = Gustavo.materialize(ps)
         function set_flags!(value)
@@ -246,19 +246,19 @@ end
             ),
             ps; exec = ExecutionConfig(),
         )
-        @test [only(keys(s.steps)) for s in sols_full] == [:fringe, :bandpass, :adhoc]
+        @test [s.name for s in sols_full] == [:fringe, :bandpass, :adhoc]
         # Bandpass after the fringe step alone still solves a :bandpass stage.
         _, sol_fb = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge)), ps)
-        @test haskey(sol_fb, :bandpass)
+        @test sol_fb.name === :bandpass && !isempty(sol_fb.components)
 
         # Any real `steer_cells`, and a Float32 station solve, agreeing with the default.
         @test BaselineFringeFit(; steer_cells = 9, gauge).steer_cells === 9
         sol64 = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
         sol32 = fit(BaselineFringeFit(; closure = FP.Stationization(eltype = Float32), steer_cells = 9, gauge = PinAntenna(1)), ps)
-        for (c32, c64) in zip(sol32[:fringe].components, sol64[:fringe].components)
+        for (c32, c64) in zip(sol32.components, sol64.components)
             @test c32.params ≈ c64.params atol = 1.0e-6
         end
-        @test sol32.steps[:fringe].flagged_ant == sol64.steps[:fringe].flagged_ant
+        @test sol32.info.flagged_ant == sol64.info.flagged_ant
     end
 
     @testset "model compilation: order, gating, duplicate rejection" begin
@@ -338,8 +338,8 @@ end
 
     @testset "the solution records the search configuration" begin
         sol = fit(BaselineFringeFit(; model, gauge = PinAntenna(1)), ps)
-        @test sol.steps[:fringe].search == FP.FringeSearch()
-        @test haskey(sol.steps[:fringe], :flagged_ant) && haskey(sol.steps[:fringe], :flagged_scan)
+        @test sol.info.search == FP.FringeSearch()
+        @test haskey(sol.info, :flagged_ant) && haskey(sol.info, :flagged_scan)
     end
 
     @testset "a term the step cannot fit is rejected by name" begin
@@ -433,7 +433,7 @@ end
         ps, _ = _build_fringe_ps(; polarizations = products, receptors, noise = 0.3, eltype = ComplexF64, bandpass = bp)
         fr = fit(BaselineFringeFit(; gauge), ps)
         bp_sol = fit(Bandpass(; gauge), _precal(fr, ps))
-        @test lookup(only(bp_sol[:bandpass, :phase, :bandpass].components).params, Gustavo.Feed) == 1:n
+        @test lookup(only(bp_sol[:phase, :bandpass].components).params, Gustavo.Feed) == 1:n
         out = _calibrate_chain([fr, bp_sol], ps; flag_bad = false, apply_flags = false)
         coh = [
             abs(sum(z)) / sum(abs, z)

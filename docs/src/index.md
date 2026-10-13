@@ -176,15 +176,15 @@ and leaves the data passed to it as it was. `flag_bad = false, apply_flags =
 false` divides out the gains without flagging, as suits data handed to a later
 fit.
 
-**Solutions.** A solution is a list of solved components
-(`sol.components`), each a [`SolvedComponent`](@ref Gustavo.Calibration.SolvedComponent)
-holding its step, its path in that step's model, its `GainComponent` and its
-parameters as a labeled `DimArray` (`c.params`). Any selection is itself a
-solution that applies, plots and differences like the whole: `sol[:fringe]`,
-`sol[:fringe, :phase, :mbd]` or `filter(pred, sol)`.
+**Solutions.** A solution is what one step fit: a list of component fits
+(`sol.components`), each a [`ComponentFit`](@ref Gustavo.Calibration.ComponentFit)
+holding its path in the step's model, its `GainComponent` and its parameters as
+a labeled `DimArray` (`c.params`), and the step's diagnostics (`sol.info`).
+Any selection is itself a solution that applies, plots and differences like
+the whole: `sol[:phase]`, `sol[:phase, :mbd]` or `filter(pred, sol)`.
 [`gains`](@ref Gustavo.Calibration.gains) evaluates a selection's complex
-station gains as a labeled `DimArray`, and `sol.steps[:fringe]` holds a step's
-diagnostics. [`save_solution`](@ref Gustavo.Calibration.save_solution) /
+station gains as a labeled `DimArray`. Steps compose through the data: apply
+one solution with [`calibrate!`](@ref) and fit the next step on the result. [`save_solution`](@ref Gustavo.Calibration.save_solution) /
 [`load_solution`](@ref Gustavo.Calibration.load_solution) round-trip it through
 a Zarr store, as they do a collection of solutions such as the per-scan fits
 `mapsets` returns (`OrderedDict(k => s.fr for (k, s) in sols)`), keys and order
