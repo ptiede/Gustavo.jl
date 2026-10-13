@@ -209,7 +209,7 @@ function compare_run(root, sols)
     out[:detections] = detection_difference(
         recorded_detections(zpath(recorded["fringe"], "info"), ax.station), sols.fringe.steps[:fringe],
     )
-    counts = ("n_solved", "n_flat", "n_declined", "n_nodata")
+    counts = ("n_solved", "n_flat", "n_nodata")
     recorded_info = zpath(recorded["bandpass"], "info").attrs
     current_info = sols.bandpass.steps[:bandpass]
     out[:bandpass_status] = [(k, recorded_info[k], getproperty(current_info, Symbol(k))) for k in counts]

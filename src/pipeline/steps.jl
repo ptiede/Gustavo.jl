@@ -74,7 +74,7 @@ default [`Fring.JointSmoother`](@ref), which fits the complex visibilities
 against an explicit per-scan source coherence and so does not assume the
 calibrator is unresolved and unpolarized. `gauge`, an
 [`AbstractGauge`](@ref), references the bandpass phase: `JointSmoother`
-imposes its constraints inside every sweep. `JointSmoother` solves one complex gain per
+imposes its constraints exactly in every step. `JointSmoother` solves one complex gain per
 (station, feed, frequency segment); a phase-only or amplitude-only model holds
 the other half at zero. The model is self-contained, so placing
 `Bandpass` before or after `BaselineFringeFit` is equally legal.

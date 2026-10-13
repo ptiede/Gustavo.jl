@@ -116,12 +116,12 @@ end
     )
 
     s_free = runbp(FP.JointSmoother())
-    @test_logs (:warn, r"did not converge in 2 sweeps") match_mode = :any runbp(FP.JointSmoother(max_iterations = 2))
+    @test_logs (:warn, r"did not converge in 2 iterations") match_mode = :any runbp(FP.JointSmoother(max_iterations = 2))
 
     # σ = 1e-6 rad per channel (2 MHz) as rad/Hz^(3/2).
     stiff = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-6 * sqrt(3 / (2 * 2.0e6^3)))
     # A prior the gains cannot follow exactly must still converge: the band
-    # level that trades with the source coherence is held fixed in the sweep.
+    # constant that trades with the source coherence is profiled out of the prior.
     logs, s_stiff = Test.collect_test_logs(() -> runbp(FP.JointSmoother(); prior = stiff))
     @test !any(l -> occursin("did not converge", string(l.message)), logs)
     pleaf, aleaf = _jb_leaf(s_stiff, :phase), _jb_leaf(s_stiff, :logamp)
@@ -244,7 +244,7 @@ function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, geom)
 end
 
 # The pinned gain slots of a joint solve's phase gauge, as `(block, (ant, feed,
-# channel, time segment))` positions; empty for a gauge imposed in the sweep.
+# channel, time segment))` positions; empty for a gauge imposed as constraints.
 function _joint_pins(geom, blocks, results, tseg, gauge)
     nant = length(geom.stations)
     fseg, _ = FP._station_freq_segments(blocks, nant)
@@ -460,7 +460,7 @@ end
         rep = FP.bandpass_track_report(FP._block_leaves(phase_status), FP._block_leaves(amp_status))
         @test keys(rep.phase_status) == keys(rep.amp_status) == (:g1, :g2)
         @test rep.phase_status.g2 === phase_status[2]
-        @test rep.n_nodata + rep.n_solved + rep.n_flat + rep.n_declined == 2 * 2 * (2 + (nant - 1))
+        @test rep.n_nodata + rep.n_solved + rep.n_flat == 2 * 2 * (2 + (nant - 1))
     end
 end
 
@@ -629,8 +629,7 @@ end
         pb = FP.bandpass_blocks(setup(l), θ, :phase)
         ab = FP.bandpass_blocks(setup(l), θ, :logamp)
         # The misaligned refinement couples the two segmentations through cells
-        # neither owns alone, which the alternating sweep works through slowly:
-        # the recovery is exact, but 200 sweeps only reach 3e-8 of it.
+        # neither owns alone; the recovery is exact.
         FP.solve_joint_bandpass!(
             θ, results, geom, pb, ab; gauge = PinAntenna(1),
             max_iterations = 1000, tolerance = 1.0e-13,
@@ -655,19 +654,19 @@ end
             θ, results, geom, pb, FP.bandpass_blocks(setup(lu), θu, :logamp); gauge = PinAntenna(1),
         )
 
-        # A phase prior relates a track's segments, so it cannot express the
-        # partial pin: two of station 1's three segments would be fitted and the
-        # third overwritten with zero, which is not the fit the prior asks for.
+        # Under a phase prior the partial pin holds its segment of station 1's
+        # track at zero, and the prior fits the rest of the track with it.
         lp = CAL.plan_parameters(
             hetmodel(ChannelBlocks(2), ChannelBlocks(3); prior = CAL.RandomWalkPrior(; σ = 0.1)), anames, geom,
         )
         θ2 = zeros(lp.nθ)
-        @test_throws "Drop the phase prior" FP.solve_joint_bandpass!(
+        FP.solve_joint_bandpass!(
             θ2, results, geom,
             FP.bandpass_blocks(setup(lp), θ2, :phase),
             FP.bandpass_blocks(setup(lp), θ2, :logamp);
             gauge = PinAntenna(1),
         )
+        @test all(isfinite, θ2)
     end
 
     @testset "one segmentation for every station is the identity refinement" begin
@@ -770,7 +769,7 @@ end
         end
     end
 
-    @testset "hyperparameters are resolved every sweep and recorded" begin
+    @testset "hyperparameters are resolved every iteration and recorded" begin
         ou = CAL.OUPrior(; scale = LogNormal(log(2.0e6), 1.0), σ = LogNormal(log(0.2), 1.0))
         l = CAL.plan_parameters(
             CAL.GainModel(;
@@ -887,7 +886,7 @@ end
     layout(prior = nothing, amp_prior = nothing) = CAL.plan_parameters(
         CAL.GainModel(; phase = (; bandpass = comp(; prior)), logamp = (; bandpass = comp(; prior = amp_prior))), anames, geom,
     )
-    # Converged within `max_iterations` sweeps: no warning.
+    # Converged within `max_iterations` iterations: no warning.
     function solve(gauge; prior = nothing, amp_prior = nothing, data = results, max_iterations = 200)
         l = layout(prior, amp_prior)
         θ = zeros(l.nθ)
@@ -941,7 +940,7 @@ end
         @test solve(bc(PinAntenna(1), ZeroSumPhase()); prior) == pin
     end
 
-    @testset "a stiff prior converges in about a pin's sweep count" for σ in (0.05, 0.01)
+    @testset "a stiff prior converges under either gauge" for σ in (0.05, 0.01)
         # A phase this stiff cannot follow the reference's structure, and where a
         # slot is left more than π/2 off, a free amplitude's MAP is zero; the
         # amplitude prior keeps the MAP finite.
@@ -953,7 +952,7 @@ end
         l = layout(rw2(σ), nothing)
         θ = zeros(l.nθ)
         pb, ab = FP.bandpass_blocks(setup(l), θ, :phase), FP.bandpass_blocks(setup(l), θ, :logamp)
-        @test_logs (:warn, r"did not converge|could not lower") match_mode = :any FP.solve_joint_bandpass!(
+        @test_logs (:warn, r"has no mode for the amplitude") match_mode = :any FP.solve_joint_bandpass!(
             θ, results, geom, pb, ab; gauge = PinAntenna(1), max_iterations = 80, tolerance = 1.0e-10,
         )
     end
@@ -978,7 +977,7 @@ end
 
 end
 
-@testset "JointSmoother: weak cross-hands converge in a few sweeps" begin
+@testset "JointSmoother: weak cross-hands converge in a few iterations" begin
     nant, nchan = 5, 12
     anames = ["A$i" for i in 1:nant]
     geom = _seg_geometry(nchan; nant)
@@ -989,8 +988,8 @@ end
     feeds = [(1, 1), (1, 2), (2, 1), (2, 2)]
     rng = MersenneTwister(313)
     gtrue = exp.(complex.(0.1 .* randn(rng, nant, 2, 1, nchan), 0.6 .* randn(rng, nant, 2, 1, nchan)))
-    # The cross-hand source terms carry ~1e-3 of the parallel hands' information,
-    # which a station-by-station sweep alone takes thousands of sweeps to resolve.
+    # The cross-hand source terms carry ~1e-3 of the parallel hands' information;
+    # a step on every gain at once resolves the phase between feeds they measure.
     S = [(p in (2, 3) ? 0.03 : 1.0) * (0.5 + rand(rng)) * cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, p in eachindex(feeds)]
     results = _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs, feeds, geom)
     # Every station's phase between feeds, referenced to its circular band mean.
@@ -1011,8 +1010,8 @@ end
     end
 
     # Under a prior the step is the MAP step under the gauge, with any level
-    # profiled out, and converges as fast; a sweep alone takes tens of thousands
-    # of sweeps here.
+    # profiled out. The source term re-solved between steps makes the last
+    # digits come linearly here.
     rw2 = CAL.RandomWalkPrior(; order = 2, σ = 0.3 * sqrt(3 / (2 * 1.0e6^3)))
     ou = CAL.OUPrior(; scale = 3.0e6, σ = 0.5)
     cp = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = rw2)
@@ -1028,7 +1027,7 @@ end
         plb, alb = FP.bandpass_level_blocks(setup_p, θ, :phase), FP.bandpass_level_blocks(setup_p, θ, :logamp)
         @test_logs FP.solve_joint_bandpass!(
             θ, results, geom, pb, ab; phase_level_blocks = plb, amp_level_blocks = alb,
-            gauge, max_iterations = 30, tolerance = 1.0e-10,
+            gauge, max_iterations = 60, tolerance = 1.0e-10,
         )
     end
 end
@@ -1036,7 +1035,7 @@ end
 # ── Stopping in standard errors ──────────────────────────────────────────────
 #
 # A station whose data carry almost no information moves by large fractions of
-# a radian between sweeps long after the solution has settled within its
+# a radian between iterations long after the solution has settled within its
 # standard error; the default tolerance stops on the change in standard errors.
 
 @testset "JointSmoother: the default tolerance stops within a fraction of a standard error" begin
@@ -1064,7 +1063,6 @@ end
         FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), kw...)
         return only(pb).θ[1, :, :, 1, :]
     end
-    # A relative-change criterion needs over 160 sweeps here.
     φ_default = @test_logs solve(max_iterations = 60)
     φ_tight = solve(max_iterations = 5000, tolerance = 1.0e-8)
     # Phase standard error of a well-measured station's slot: 1/√(Σ w|m|²) over
@@ -1072,10 +1070,10 @@ end
     σφ = 1 / sqrt(4 * 4 * 50.0 * 0.25)
     @test maximum(abs, rem2pi.(φ_default[:, :, 1:(nant - 1)] .- φ_tight[:, :, 1:(nant - 1)], RoundNearest)) < 0.1σφ
 
-    @test_logs (:warn, r"did not converge in 2 sweeps: the last sweep moved a gain by .* of its standard error \(A\d, feed \d, frequency segment \d+, time segment 1\)") solve(max_iterations = 2)
+    @test_logs (:warn, r"did not converge in 2 iterations: the last step moved a gain by .* of its standard error \(A\d, feed \d, frequency segment \d+, time segment 1\)") solve(max_iterations = 2)
 end
 
-# ── Band-referenced products and declined tracks ─────────────────────────────
+# ── Band-referenced products ──────────────────────────────────────────────────
 
 @testset "JointSmoother: gauges agree on band-referenced products" begin
     bl_pairs(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
@@ -1103,12 +1101,12 @@ end
         geom = _seg_geometry(nchan; nant)
         return gtrue, geom, _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs(nant), feeds, geom)
     end
-    function solve(n1, nrest, gauge, geom, results; prior = nothing)
+    function solve(n1, nrest, gauge, geom, results; prior = nothing, max_iterations = 2000)
         nant = length(geom.stations)
         l = CAL.plan_parameters(hetmodel(ChannelBlocks(n1), ChannelBlocks(nrest); prior), geom.stations, geom)
         θ = zeros(l.nθ)
         pb, ab = FP.bandpass_blocks(setup(l), θ, :phase), FP.bandpass_blocks(setup(l), θ, :logamp)
-        FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, max_iterations = 2000, tolerance = 1.0e-12)
+        FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, max_iterations, tolerance = 1.0e-12)
         φ = zeros(nant, 2, length(geom.channel_freqs))
         for blk in pb, (ai, a) in pairs(blk.stations), f in 1:2, c in axes(φ, 3)
             φ[a, f, c] = blk.θ[1, f, blk.plan.fseg_id[c], 1, ai]
@@ -1134,12 +1132,17 @@ end
         end
     end
 
-    @testset "per-channel structure past unwrapping" begin
+    @testset "per-channel structure a stiff prior cannot follow" begin
         gtrue, geom, results = synthetic(1, 1; nant = 6, nchan = 16, spread = 2.0, seed = 302)
         @test product_error(solve(1, 1, ZeroSumPhase(), geom, results), gtrue) < 1.0e-8
-        # Under a prior every track is declined at unwrapping, so no gain changes.
+        # A phase prior far too stiff for that structure, beside an amplitude
+        # without one, holds slots more than π/2 from their data, whose best
+        # amplitude is zero: the posterior has no mode and the solve says so,
+        # with the phases still a smooth track the data pull on.
         prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * 1.0e6^3)))
-        @test_throws "changed no gain" solve(1, 1, ZeroSumPhase(), geom, results; prior)
+        φp = @test_logs (:warn, r"did not converge") solve(1, 1, ZeroSumPhase(), geom, results; prior, max_iterations = 100)
+        @test all(isfinite, φp)
+        @test product_error(φp, gtrue) > 1
     end
 end
 

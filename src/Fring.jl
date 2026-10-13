@@ -23,18 +23,20 @@ using ..Calibration: ComponentPlan, GeometryWindow,
     _freq_group_ranges, _init_moments, _call_string, _gauge_system, _gauge_for, _leaf_paths
 # Numeric kernels the model layer keeps off its public surface.
 using ..Calibration: weighted_regularized_least_squares, ConstrainedWLS, FactoredWLS,
-    unwrap_phase_track, phase_unwrap_ambiguity, connected_components
+    unwrap_phase_track, connected_components
 using FFTW: fft, fftfreq, plan_fft, ESTIMATE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
-using SparseArrays: sparse, nzrange, nonzeros, rowvals
+using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nzrange, nonzeros, rowvals
+import ForwardDiff
 using StaticArrays: SMatrix, SVector
 
 include("Fring/search.jl")
 include("Fring/stationize.jl")
 include("Fring/statespace.jl")
+include("Fring/branches.jl")
 # Fitting one track's parameter blocks under a component prior, independent of
 # any solver stage.
 include("Fring/prior_fits.jl")
@@ -99,7 +101,7 @@ export default_bandpass_terms
 export AbstractBandpassSmoother, JointSmoother
 export validate_bandpass_groups, solve_bandpass!, bandpass_track_report, bandpass_blocks,
     bandpass_level_blocks
-export TrackStatus, TrackNoData, TrackSolved, TrackFlat, TrackDeclined
+export TrackStatus, TrackNoData, TrackSolved, TrackFlat
 export fringe_snr_table, fringe_detections, cat_scans
 export fringe_station_solutions
 export baseline_spectra, freq_group_coherence, fringe_freq_groups, FreqGroup, Triangle

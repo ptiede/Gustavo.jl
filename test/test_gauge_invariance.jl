@@ -23,13 +23,16 @@ function _baseline_product_difference(sol1, sol2)
 end
 
 # The fringe fit one scan at a time and pooled, then `Bandpass` and
-# `AdhocPhase` (with each smoother) on data the first corrected.
+# `AdhocPhase` (with each smoother) on data the first corrected. The bandpass is
+# converged well inside its default tolerance, at which two gauges stop at
+# different points within 0.01 of a standard error.
 function _fit_each_step(ps, gauge)
     fringe = fit(BaselineFringeFit(; gauge), ps)
     corrected = calibrate(fringe, ps; flag_bad = false, apply_flags = false)
+    bandpass = Bandpass(; gauge, smoother = Gustavo.Fring.JointSmoother(; tolerance = 1.0e-6))
     return (;
         fringe, pooled = fit(BaselineFringeFit(; rounds = 2, gauge), ps),
-        bandpass = fit(Bandpass(; gauge), corrected), adhoc = fit(AdhocPhase(; gauge), corrected),
+        bandpass = fit(bandpass, corrected), adhoc = fit(AdhocPhase(; gauge), corrected),
         adhoc_joint = fit(AdhocPhase(Gustavo.Fring.JointKalmanSmoother(); gauge), corrected),
     )
 end

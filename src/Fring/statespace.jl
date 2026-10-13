@@ -298,8 +298,11 @@ end
 
 # Compact fixed-budget Nelder–Mead for low-dimensional unconstrained minimization
 # — enough for the 2-parameter (log τ, log σ2) ML fit, avoiding an Optim dependency.
-# Standard coefficients (reflect 1, expand 2, contract 1/2, shrink 1/2).
-function _nelder_mead(f, x0::AbstractVector{<:Real}; step::Real = 0.5, iters::Integer = 200, tol::Real = 1.0e-6)
+# Standard coefficients (reflect 1, expand 2, contract 1/2, shrink 1/2). The
+# functions minimized are negative log densities, so their differences are in
+# nats: the search stops once the simplex's values agree to `atol`, which places
+# the minimum within about `√(2·atol)` of its standard error.
+function _nelder_mead(f, x0::AbstractVector{<:Real}; step::Real = 0.5, iters::Integer = 200, atol::Real = 1.0e-8)
     # The working precision is the starting point's — `step`/`tol` are scale
     # hyperparameters and are converted into it rather than promoted against it.
     T = float(eltype(x0))
@@ -309,13 +312,12 @@ function _nelder_mead(f, x0::AbstractVector{<:Real}; step::Real = 0.5, iters::In
         simplex[i + 1][i] += T(step)
     end
     fval = [f(s) for s in simplex]
-    # Never demand more agreement than the working precision can express.
-    rtol = max(T(tol), eps(T))
     for _ in 1:iters
         order = sortperm(fval)
         simplex = simplex[order]
         fval = fval[order]
-        (abs(fval[end] - fval[1]) <= rtol * (abs(fval[1]) + rtol)) && break
+        # Never demand more agreement than the working precision can express.
+        abs(fval[end] - fval[1]) <= max(T(atol), 4 * eps(abs(fval[1]))) && break
         c = zeros(T, n)                               # centroid of all but worst
         for i in 1:n
             c .+= simplex[i]
@@ -439,15 +441,17 @@ end
 _track_model(models::AbstractVector, i) = models[i]
 _track_model(model, i) = model
 
-_ou_loglik(ys, rs, xs, levels; τ, σ2) = _pooled_loglik(OUModel(τ, σ2), ys, rs, xs, levels)
+_ou_loglik(ys, rs, xs, levels; τ, σ2, branches::Bool = false) =
+    (branches ? _branch_pooled_loglik : _pooled_loglik)(OUModel(τ, σ2), ys, rs, xs, levels)
 
 # Type-II MAP of an `OUPrior`'s hyperparameters shared by a group of tracks:
 # the pooled Kalman marginal likelihood (`_ou_loglik`, zero-mean or with each
 # `levels` group's level integrated out) plus the hyperprior density over
 # `(log τ, log σ)`, whose Jacobian adds `log τ + log σ`. `scale` and `σ` are each
 # a fixed value or a density (`is_fixed_hyper`); only the densities are searched.
-# `[τ_lo, τ_hi]` bounds the `τ` search and seeds it at its geometric mean.
-function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, levels = nothing)
+# `[τ_lo, τ_hi]` bounds the `τ` search and seeds it at its geometric mean. With
+# `branches` the tracks are phases on unknown 2π branches.
+function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, levels = nothing, branches::Bool = false)
     T = float(
         promote_type(
             typeof(τ_lo), typeof(τ_hi), typeof(σ2_seed), _blocks_eltype(ys, ws), mapreduce(eltype, promote_type, xs),
@@ -460,7 +464,7 @@ function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_see
     lτ_lo, lτ_hi = log(T(τ_lo)), log(T(τ_hi))
     lτ0 = fixτ ? log(T(scale)) : (lτ_lo + lτ_hi) / 2
     lσ20 = fixσ ? 2 * log(T(σ)) : log(max(T(σ2_seed), σ2_lo))
-    neglp = _OUNegLogPost(ys, rs, xs, levels, scale, σ, lτ_lo, lτ_hi, lτ0, lσ20, σ2_lo)
+    neglp = _OUNegLogPost(ys, rs, xs, levels, scale, σ, lτ_lo, lτ_hi, lτ0, lσ20, σ2_lo, branches)
     x0 = fixτ ? T[lσ20] : fixσ ? T[clamp(lτ0, lτ_lo, lτ_hi)] : T[clamp(lτ0, lτ_lo, lτ_hi), lσ20]
     xbest, _ = _nelder_mead(neglp, x0)
     lτ̂, lσ̂2 = _unpack(neglp, xbest)
@@ -482,6 +486,7 @@ struct _OUNegLogPost{Y, R, X, L, S, G, T}
     lτ0::T
     lσ20::T
     σ2_lo::T
+    branches::Bool
 end
 
 function _unpack(f::_OUNegLogPost, p)
@@ -496,7 +501,7 @@ function (f::_OUNegLogPost)(p)
     lτ, lσ2 = _unpack(f, p)
     τ = _tau(f, lτ)
     σ2 = max(exp(lσ2), f.σ2_lo)
-    lp = _ou_loglik(f.ys, f.rs, f.xs, f.levels; τ, σ2)
+    lp = _ou_loglik(f.ys, f.rs, f.xs, f.levels; τ, σ2, f.branches)
     is_fixed_hyper(f.scale) || (lp += logdensityof(f.scale, τ) + log(τ))
     is_fixed_hyper(f.σ) || (lp += logdensityof(f.σ, sqrt(σ2)) + log(σ2) / 2)
     val = isfinite(lp) ? -lp : oftype(lp, Inf)

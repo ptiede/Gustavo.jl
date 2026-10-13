@@ -43,15 +43,17 @@ as a hyperprior is estimated by type-II MAP over the blocks together, on their
 marginal likelihood: zero-mean, or with the level of each group of `level`
 (one group id per block) integrated out under a flat prior. A walk without a
 `init` leaves its own level free, so it takes no `level`; its likelihood is
-the restricted one ([`_random_walk_loglik`](@ref)).
+the restricted one ([`_random_walk_loglik`](@ref)). With `branches`, the blocks
+are phases on unknown 2π branches and the likelihood is summed over their
+branches ([`_branch_filter`](@ref)).
 
 Blocks without data (for a walk without an `init` of order `m`, with fewer
 than `m` usable segments) are ignored; with none left the hyperpriors cannot
 be resolved and this throws.
 """
-_estimate_hypers(::Nothing, ys, ws, xs; level = nothing) = nothing
+_estimate_hypers(::Nothing, ys, ws, xs; level = nothing, branches::Bool = false) = nothing
 
-function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; level = nothing)
+function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; level = nothing, branches::Bool = false)
     _proper_prior(prior) || isnothing(level) || throw(
         ArgumentError("a RandomWalkPrior without an init leaves its level free; it takes no level groups"),
     )
@@ -66,17 +68,17 @@ function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; level = nothing)
     problems = [_random_walk_problem(ys[i], ws[i], xs[i]) for i in usable]
     neglp = _RandomWalkNegLogPost(
         [_masked(ys[i], ws[i]) for i in usable], first.(problems), getindex.(problems, 2), last.(problems),
-        m, prior.init, prior.σ, isnothing(level) ? nothing : level[usable],
+        m, prior.init, prior.σ, isnothing(level) ? nothing : level[usable], branches,
     )
-    lσ, _ = _nelder_mead(neglp, T[log(_random_walk_σ_seed(ys[usable], ws[usable], xs[usable], m))])
+    lσ, _ = _nelder_mead(neglp, T[log(_random_walk_σ_seed(ys[usable], ws[usable], xs[usable], m; branches))])
     return RandomWalkPrior(; order = m, σ = exp(only(lσ)), prior.init)
 end
 
 # The negative log posterior of a random walk's `log σ` over blocks already set
 # up for the filter (masked values `ys`, variances `rs`, rescaled coordinates
 # `us`, spacings `hs`): their pooled marginal likelihood (restricted, for a flat
-# init or with `levels`), the hyperprior density of `σ`, and the Jacobian
-# `log σ`.
+# init or with `levels`; over the 2π branches, with `branches`), the hyperprior
+# density of `σ`, and the Jacobian `log σ`.
 struct _RandomWalkNegLogPost{Y, R, U, H, S, P, L}
     ys::Y
     rs::R
@@ -86,6 +88,7 @@ struct _RandomWalkNegLogPost{Y, R, U, H, S, P, L}
     init::S
     hyper::P
     levels::L
+    branches::Bool
 end
 
 function (f::_RandomWalkNegLogPost)(p)
@@ -93,7 +96,8 @@ function (f::_RandomWalkNegLogPost)(p)
     σ = exp(lσ)
     S = eltype(eltype(f.rs))
     models = [_random_walk_model(f.order, σ, f.init, h, S) for h in f.hs]
-    lp = _pooled_loglik(models, f.ys, f.rs, f.us, f.levels)::S + logdensityof(f.hyper, σ) + lσ
+    loglik = f.branches ? _branch_pooled_loglik : _pooled_loglik
+    lp = loglik(models, f.ys, f.rs, f.us, f.levels)::S + logdensityof(f.hyper, σ) + lσ
     if isnothing(f.init)
         for h in f.hs
             lp -= _flat_start_jacobian(f.order, h)
@@ -102,7 +106,7 @@ function (f::_RandomWalkNegLogPost)(p)
     return isfinite(lp) ? -lp : oftype(lp, Inf)
 end
 
-function _estimate_hypers(prior::OUPrior, ys, ws, xs; level = nothing)
+function _estimate_hypers(prior::OUPrior, ys, ws, xs; level = nothing, branches::Bool = false)
     is_fixed_hyper(prior.scale) && is_fixed_hyper(prior.σ) && return prior
     usable = [i for i in eachindex(ys, ws, xs) if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i]))]
     isempty(usable) && throw(
@@ -115,7 +119,7 @@ function _estimate_hypers(prior::OUPrior, ys, ws, xs; level = nothing)
     τ, σ2 = _map_ou_hypers(
         yus, wus, xus, prior.scale, prior.σ;
         τ_lo, τ_hi, σ2_seed = _init_track_var(reduce(vcat, yus), reduce(vcat, wus)),
-        levels = isnothing(level) ? nothing : level[usable],
+        levels = isnothing(level) ? nothing : level[usable], branches,
     )
     return OUPrior(; scale = τ, σ = sqrt(σ2))
 end
@@ -195,76 +199,6 @@ function _estimate_map!(out, prior::OUPrior, y, w, x)
     )
     any(k -> _shape_usable(y[k], w[k]), eachindex(y, w)) || return fill!(out, NaN)
     return copyto!(out, smooth_ou_track(_masked(y, w), w, x; τ = prior.scale, σ2 = prior.σ^2))
-end
-
-"""
-    _prior_energy(prior, y, x; gradient = nothing) -> E
-
-`−log` of the resolved `prior`'s density at the track `y` over `x`, less a
-normalization that depends only on `prior` and `x` (see `_exact_energy`).
-Non-finite entries are unobserved; `nothing` contributes zero. `gradient`, when
-given, receives the gradient in `y`, zero at unobserved entries.
-"""
-_prior_energy(::Nothing, y, x; gradient = nothing) = (isnothing(gradient) || fill!(gradient, 0); 0.0)
-
-function _prior_energy(prior::RandomWalkPrior, y, x; gradient = nothing)
-    _, u, h = _random_walk_problem(y, ones(length(y)), x)
-    return _exact_energy(_random_walk_model(prior.order, prior.σ, prior.init, h, Float64), y, u; gradient)
-end
-
-_prior_energy(prior::OUPrior, y, x; gradient = nothing) =
-    _exact_energy(OUModel(Float64(prior.scale), Float64(prior.σ)^2), y, Float64.(x); gradient)
-
-# `½·Σ ν²/s` over the innovations of `model`'s filter with `y` observed exactly:
-# the negative log density of `y` less its normalization, which the innovation
-# variances `s` alone carry and which does not depend on `y`. A flat start's
-# first `statedim` observations fix its state and are left out, so a random walk
-# of order `m` does not see a polynomial of degree below `m`; with fewer
-# observations than that the energy is zero.
-#
-# The innovations are affine in `y` through gains that do not depend on it, so
-# `gradient`, when given, is filled by one reverse pass over those gains.
-function _exact_energy(model, y, u; gradient = nothing)
-    D = statedim(model)
-    start = initial(model, Float64)
-    flat = isnothing(start)
-    x = flat ? zero(SVector{D, Float64}) : SVector{D, Float64}(start[1])
-    # A flat start as a variance far above any step's.
-    P = flat ? SMatrix{D, D, Float64}(1.0e8 * I) : SMatrix{D, D, Float64}(start[2])
-    E = 0.0
-    seen = 0
-    prev = 0
-    record = !isnothing(gradient)
-    steps = Tuple{Int, typeof(P), typeof(x), Float64}[]
-    for k in eachindex(y, u)
-        isfinite(y[k]) || continue
-        A = one(P)
-        if prev > 0
-            A, Q = transition(model, u[k] - u[prev], Float64)
-            x = A * x
-            P = A * P * A' + Q
-        end
-        ν = y[k] - x[1]
-        s = P[1, 1]
-        seen += 1
-        counted = !(flat && seen <= D)
-        counted && (E += ν^2 / (2s))
-        K = P[:, 1] / s
-        x = x + K * ν
-        P = _symmetric(P - K * P[1, :]')
-        record && push!(steps, (k, A, K, counted ? ν / s : 0.0))
-        prev = k
-    end
-    record || return E
-    fill!(gradient, 0)
-    # `x⁺ = x⁻ + K·ν` with `ν = y_k − x⁻[1]` and `x⁻ = A·x⁺` of the previous step.
-    x̄ = zero(x)
-    for (k, A, K, ν̄) in Iterators.reverse(steps)
-        Kx̄ = dot(K, x̄)
-        gradient[k] = ν̄ + Kx̄
-        x̄ = A' * Base.setindex(x̄, x̄[1] - Kx̄ - ν̄, 1)
-    end
-    return E
 end
 
 """
@@ -355,7 +289,7 @@ end
 # segments, less their noise variance, against the walk's variance of an m-th
 # difference at the median spacing `h`, `c_m σ² h^(2m−1)`. `c_m` is the order-2m
 # cardinal B-spline at its center (1, 2/3, 11/20, …).
-function _random_walk_σ_seed(ys, ws, xs, m::Integer)
+function _random_walk_σ_seed(ys, ws, xs, m::Integer; branches::Bool = false)
     T = _blocks_eltype(ys, ws)
     c = sum(k -> (-1)^k * binomial(2m, k) * T(m - k)^(2m - 1), 0:m) / factorial(2m - 1)
     binom = [binomial(m, k) for k in 0:m]
@@ -368,6 +302,9 @@ function _random_walk_σ_seed(ys, ws, xs, m::Integer)
         for j in firstindex(o):(lastindex(o) - m)
             idx = o[j:(j + m)]
             d = sum((-1)^k * binom[k + 1] * T(y[idx[k + 1]]) for k in 0:m)
+            # An m-th difference has integer coefficients, so on unknown branches it
+            # is known modulo 2π.
+            branches && (d = rem2pi(d, RoundNearest))
             sig += d^2
             noise += sum(binom[k + 1]^2 / T(w[idx[k + 1]]) for k in 0:m)
             nd += 1

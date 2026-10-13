@@ -408,62 +408,73 @@ FP.can_fit(::_UniformSmoother, tc, geom) = true
 
 end
 
-# ── Per-track outcome reporting and the undetermined-branch gate ──────────────
+# ── Per-track outcome reporting and phase branches ───────────────────────────
 #
 # θ records an unfitted bandpass track as unit gain and a starved one as a
 # constant, neither distinguishable there from a genuinely flat response. These
-# cover the record that makes the difference visible, and the gate that keeps an
-# undetermined phase branch from being reported as a measured ramp.
+# cover the record that makes the difference visible, and the choice of a phase
+# track's 2π branches under a prior.
+
+# One track fit the way the joint solve fits each of its tracks: the prior
+# seeded from the observations `y` (weights `w`), for a phase the branches
+# chosen, the hyperparameters fit to the marginal likelihood, and the MAP step,
+# which for this quadratic likelihood is the MAP.
+function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, phase = false, flat_span = 0.01)
+    n = length(y)
+    known = isfinite.(y) .& (w .> 0)
+    fits = [(; phase = (; x, pieces, prior, level, nlevel))]
+    t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
+    yk, wk = ifelse.(known, y, NaN), ifelse.(known, w, 0.0)
+    x0 = ifelse.(known, y, 0.0)
+    priors = Any[any(t.active) ? FP._seed_prior(t, yk, wk; phase) : prior]
+    slip = fill(NaN, length(pieces))
+    phase && any(t.active) && FP._choose_branches!(x0, t, only(priors), yk, wk, known; slip)
+    free = copy(known)
+    for (j, p) in pairs(pieces)
+        t.active[j] && (free[p] .= true)
+    end
+    sys = FP._posterior_system(FP.spdiagm(wk), zeros(n), x0, free, any(t.active) ? [t] : [], x)
+    any(t.active) && FP._fit_hypers!(priors, Any[nothing], sys, [t], 0.0; tolerance = 1.0e-6, max_iterations = 100)
+    x1, levels, _ = FP._map_step(sys, any(t.active) ? priors : [])
+    values = ifelse.(free, x1, NaN)
+    status = [FP._band_track_status(values[p], flat_span) for p in pieces]
+    return (; values, status, prior = only(priors), levels = any(t.active) ? only(levels) : Dict{Int, Float64}(), slip)
+end
 
 @testset "Bandpass: per-piece outcome codes" begin
-    rng = MersenneTwister(24601)
     nband, nchan = 4, 32
     pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]
     x = collect(range(8.6e10, 8.6e10 + 1.28e8; length = nband * nchan))
     prior = CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.3), 1.0))
-    sm = FP.JointSmoother()
-    fit!(track, w; unwrap, max_unwrap_ambiguity = sm.max_unwrap_ambiguity, flat_span = sm.flat_span) = (
-        st = Vector{FP.TrackStatus}(undef, nband);
-        FP._fit_track!(track, w, x, pieces, prior; unwrap, status = st, max_unwrap_ambiguity, flat_span);
-        st
-    )
+    fit(y, w; kw...) = _fit_one_track(y, w, x, pieces, prior; phase = true, kw...)
 
-    # A clean, structured track: every piece solved.
+    # A clean, structured track: every piece solved, its branches certain.
     smooth = 0.3 .* sin.(range(0, 6π; length = nband * nchan))
     w = fill(1.0e4, nband * nchan)
-    @test all(==(FP.TrackSolved), fit!(copy(smooth), w; unwrap = true))
+    f = fit(smooth, w)
+    @test all(==(FP.TrackSolved), f.status)
+    @test all(<(1.0e-6), f.slip)
+    # The resolved prior: hyperpriors become the fitted values.
+    @test CAL.is_fixed_hyper(f.prior.scale) && CAL.is_fixed_hyper(f.prior.σ)
 
     # A piece with no usable channel estimates nothing and says so.
     gappy = copy(smooth)
     wg = copy(w)
     gappy[1:nchan] .= NaN
     wg[1:nchan] .= 0
-    st = fit!(gappy, wg; unwrap = true)
-    @test st[1] == FP.TrackNoData
-    @test all(isnan, gappy[1:nchan])
+    f = fit(gappy, wg)
+    @test f.status[1] == FP.TrackNoData
+    @test all(isnan, f.values[1:nchan])
+    @test isnan(f.slip[1])
 
     # A constant piece is fit, but carries no shape — reported as flat rather
     # than passed off as a measured response.
-    @test all(==(FP.TrackFlat), fit!(fill(0.2, nband * nchan), w; unwrap = true))
+    @test all(==(FP.TrackFlat), fit(fill(0.2, nband * nchan), w).status)
     # What counts as flat is the smoother's `flat_span`.
-    @test all(==(FP.TrackFlat), fit!(copy(smooth), w; unwrap = true, flat_span = 1.0))
+    @test all(==(FP.TrackFlat), fit(smooth, w; flat_span = 1.0).status)
 
-    # Phase noise past a radian leaves the 2π branch undetermined: the piece is
-    # declined, not fit, so nothing is written for it and no invented trend can
-    # reach θ. The amplitude path is never unwrapped and so is never declined.
-    noisy = 2.0 .* randn(rng, nband * nchan)
-    out = copy(noisy)
-    @test all(==(FP.TrackDeclined), fit!(out, w; unwrap = true))
-    @test all(isnan, out)
-    @test !any(==(FP.TrackDeclined), fit!(copy(noisy), w; unwrap = false))
-    @test !any(==(FP.TrackDeclined), fit!(copy(noisy), w; unwrap = true, max_unwrap_ambiguity = 1.0))
-
-    # The resolved prior is returned: hyperpriors become the fitted values.
-    resolved, levels = FP._fit_track!(copy(smooth), w, x, pieces, prior)
-    @test CAL.is_fixed_hyper(resolved.scale) && CAL.is_fixed_hyper(resolved.σ)
-    @test isnothing(levels)
     # A track with no data keeps the prior it was given.
-    @test FP._fit_track!(fill(NaN, nband * nchan), w, x, pieces, prior) === (prior, nothing)
+    @test fit(fill(NaN, nband * nchan), w).prior === prior
 end
 
 @testset "Bandpass: a track as levels plus a zero-mean shape" begin
@@ -479,39 +490,148 @@ end
     w = fill(1.0e4, nband * nchan)
     y = [truth[level[b]] for b in 1:nband for _ in 1:nchan] .+ shape .+ randn(rng, nband * nchan) ./ 100
 
-    track = copy(y)
-    _, L = FP._fit_track!(track, w, x, pieces, prior; level, nlevel = 2)
-    @test L ≈ truth atol = 0.05
-    # The track receives their sum.
-    @test sqrt(mean(abs2, track .- ([truth[level[b]] for b in 1:nband for _ in 1:nchan] .+ shape))) < 0.03
+    f = _fit_one_track(y, w, x, pieces, prior; level, nlevel = 2)
+    @test [f.levels[1], f.levels[2]] ≈ truth atol = 0.05
+    # The track is their sum.
+    @test sqrt(mean(abs2, f.values .- ([truth[level[b]] for b in 1:nband for _ in 1:nchan] .+ shape))) < 0.03
 
     # Phase pieces sharing a level are put on one 2π branch before the level is fit.
     wrapped = copy(y)
     wrapped[pieces[2]] .+= 2π
-    tp = copy(wrapped)
-    _, Lp = FP._fit_track!(tp, w, x, pieces, prior; level, nlevel = 2, unwrap = true, max_unwrap_ambiguity = 0.25)
-    @test Lp ≈ truth atol = 0.05
-    @test sqrt(mean(abs2, tp .- track)) < 1.0e-6
+    fp = _fit_one_track(wrapped, w, x, pieces, prior; level, nlevel = 2, phase = true)
+    @test [fp.levels[1], fp.levels[2]] ≈ truth atol = 0.05
+    @test sqrt(mean(abs2, fp.values .- f.values)) < 1.0e-6
+end
+
+@testset "Bandpass: a phase track's branches at low SNR" begin
+    # A smooth track under a second-order random walk with 0.9 rad of phase noise
+    # per channel: stepping from channel to channel slips 2π on most tracks, while
+    # choosing every channel's branch under the prior recovers them.
+    rng = MersenneTwister(1017)
+    n, σn, sq = 64, 0.9, 0.02
+    x = collect(1.0:n)
+    prior = CAL.RandomWalkPrior(; order = 2, σ = sq / sqrt(2 / 3))
+    w = fill(1 / σn^2, n)
+    function slipped(track, truth)
+        e = rem2pi.(track .- truth, RoundNearest)
+        return maximum(abs, rem2pi.(e .- angle(sum(cis, e)), RoundNearest)) > π / 2
+    end
+    nwalk = nfilter = 0
+    for _ in 1:20
+        truth = cumsum(cumsum(sq .* randn(rng, n))) .+ 0.4 * (2rand(rng) - 1) .* x
+        θ = rem2pi.(truth .+ σn .* randn(rng, n), RoundNearest)
+        nwalk += slipped(FP._estimate_map(prior, CAL.unwrap_phase_track(θ; weights = w), w, x), truth)
+        nfilter += slipped(_fit_one_track(θ, w, x, [1:n], prior; phase = true).values, truth)
+    end
+    @test nwalk >= 8
+    @test nfilter <= 1
+
+    # With one branch history the summed likelihood is that history's own, as the
+    # filter computes it on the lifted track, so the hyperparameters estimated over
+    # every branch match those of the lifted track.
+    truth = cumsum(cumsum(sq .* randn(rng, n))) .+ 0.3 .* x
+    wclean = fill(1.0e4, n)
+    θ = rem2pi.(truth .+ randn(rng, n) ./ 100, RoundNearest)
+    model, ym, r, u = FP._filter_inputs(prior, θ, wclean, x)
+    bf = FP._branch_filter(model, ym, r, u)
+    @test length(bf.histories) == 1
+    @test bf.loglik ≈ bf.best ≈ FP._kalman_loglik(model, only(bf.histories).lift, r, u)
+    @test maximum(abs, diff(only(bf.histories).lift .- truth)) < 0.1
+    hyper = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.02), 1.0))
+    @test FP._estimate_hypers(hyper, [θ], [wclean], [x]; branches = true).σ ≈
+        FP._estimate_hypers(hyper, [only(bf.histories).lift], [wclean], [x]).σ rtol = 1.0e-6
+end
+
+@testset "Bandpass: hyperparameters from the Laplace marginal" begin
+    rng = MersenneTwister(2022)
+
+    # The selected inverse is the inverse on the factor's pattern.
+    A = FP.sparse(randn(rng, 40, 40) .* (rand(rng, 40, 40) .< 0.1))
+    A = A * A' + 5I
+    F = FP._factor(A, rand(rng, 40))
+    Σ = FP._selected_inverse(F)
+    L = FP.sparse(F.L)
+    pattern = [(F.p[i], F.p[j]) for j in axes(L, 2) for i in FP.rowvals(L)[FP.nzrange(L, j)]]
+    @test maximum(((a, b),) -> abs(Σ(a, b) - inv(Matrix(A))[a, b]), pattern) < 1.0e-12
+    outside = first((a, b) for a in 1:40, b in 1:40 if !((a, b) in pattern || (b, a) in pattern))
+    @test_throws "not on the factor's sparsity pattern" Σ(outside...)
+
+    # A gauge row solved for one slot is the constrained minimum.
+    n = 6
+    M = randn(rng, n, n)
+    H = FP.sparse(M * M' + I)
+    b = randn(rng, n)
+    x = randn(rng, n)
+    free = trues(n)
+    free[2] = false
+    gauge = (; rows = [[(1, 0.5), (2, 1.0), (4, 2.0), (6, -1.0)]], d = [0.3])
+    sys = FP._posterior_system(H, b, x, free, [], collect(1.0:n); gauge)
+    x1, _, _ = FP._map_step(sys, [])
+    f = findall(free)
+    C = [0.5 0 2.0 0 -1.0]
+    K = [Matrix(H[f, f]) C'; C 0]
+    ref = (K \ [b[f] .+ H[f, f] * x[f]; 0.3 - x[2]])[1:length(f)]
+    @test x1[f] ≈ ref rtol = 1.0e-10
+    @test x1[2] == x[2]
+    @test dot([0.5, 1.0, 2.0, -1.0], x1[[1, 2, 4, 6]]) ≈ 0.3
+
+    # One track whose slots are measured independently: the Laplace marginal is
+    # the Kalman one, and its maximum is type-II MAP on the track.
+    m = 64
+    xf = collect(range(1.0e9, 1.0e9 + 63.0e6; length = m))
+    y = 0.3 .* sin.(range(0, 3π; length = m)) .+ randn(rng, m) ./ 20
+    w = fill(400.0, m)
+    function marginal(prior, resolved)
+        fits = [(; phase = (; x = xf, pieces = [1:m], prior, level = nothing, nlevel = 0))]
+        t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:m, 1, 1, m, 1)], [(1, 1)], [[1]], 1, trues(m)))
+        sys = FP._posterior_system(FP.spdiagm(w), w .* y, zeros(m), trues(m), [t], xf)
+        K, h, c, key = FP._reduced(sys, FP._assembled(sys, [resolved]), 0.0)
+        G = FP._factor(K, key)
+        lp = dot(h, G \ h) / 2 - c - logdet(G) / 2 + FP._expected_log_prior(resolved, only(sys.chains), nothing, Float64)
+        return lp, t, sys
+    end
+    rw = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(1.0e-12), 2.0))
+    walk(σ) = CAL.RandomWalkPrior(; order = 2, σ)
+    kalman(σ) = FP._random_walk_loglik(y, w, xf, 2, σ)
+    @test first(marginal(rw, walk(2.0e-11))) - first(marginal(rw, walk(1.0e-11))) ≈ kalman(2.0e-11) - kalman(1.0e-11) rtol = 1.0e-8
+    _, t, sys = marginal(rw, walk(1.0e-11))
+    priors = Any[walk(1.0e-11)]
+    @test FP._fit_hypers!(priors, Any[nothing], sys, [t], 0.0; tolerance = 1.0e-4, max_iterations = 50)
+    @test only(priors).σ ≈ FP._estimate_hypers(rw, [y], [w], [xf]).σ rtol = 1.0e-3
+
+    # An OU prior, both hyperparameters, its band constant integrated out.
+    ou = CAL.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = LogNormal(log(0.3), 1.0))
+    _, t, sys = marginal(ou, CAL.OUPrior(; scale = 1.0e7, σ = 0.3))
+    priors = Any[CAL.OUPrior(; scale = 1.0e7, σ = 0.3)]
+    @test FP._fit_hypers!(priors, Any[nothing], sys, [t], 0.0; tolerance = 1.0e-4, max_iterations = 50)
+    ref = FP._estimate_hypers(ou, [y], [w], [xf]; level = [1])
+    @test only(priors).scale ≈ ref.scale rtol = 1.0e-2
+    @test only(priors).σ ≈ ref.σ rtol = 1.0e-2
 end
 
 @testset "bandpass_track_report: counts and the unfitted observable" begin
-    ph = [FP.TrackSolved FP.TrackFlat; FP.TrackNoData FP.TrackDeclined]
+    ph = [FP.TrackSolved FP.TrackFlat; FP.TrackNoData FP.TrackNoData]
     phase_status = reshape(ph, 2, 2, 1)
     rep = FP.bandpass_track_report(phase_status, nothing)
-    @test (rep.n_solved, rep.n_flat, rep.n_nodata, rep.n_declined) == (1, 1, 1, 1)
+    @test (rep.n_solved, rep.n_flat, rep.n_nodata) == (1, 1, 2)
     @test !haskey(rep, :band_ids)
     # An observable that was not fit is an EMPTY status, not a missing one: the
     # record is serialized with the solution and every field must carry a value.
     @test rep.amp_status isa AbstractArray && isempty(rep.amp_status)
     @test rep.phase_status === phase_status
     @test rep.phase_priors isa AbstractArray && isempty(rep.phase_priors)
+    @test rep.phase_slip isa AbstractArray && isempty(rep.phase_slip)
     # Per-block arrays are counted together.
     blocks = FP.bandpass_track_report((g1 = phase_status, g2 = phase_status), nothing)
-    @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata, blocks.n_declined) == (2, 2, 2, 2)
+    @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata) == (2, 2, 4)
     # Three of four pieces measured nothing; the smoother's `warn_fraction` decides
     # whether that warns.
     @test_logs (:warn, r"75.0% of") FP._warn_degenerate_bandpass(rep, 0.5)
     @test_logs FP._warn_degenerate_bandpass(rep, 0.8)
+    # A phase piece whose slip probability reaches the smoother's threshold warns.
+    slipped = FP.bandpass_track_report(phase_status, nothing; phase_slip = reshape([0.01 0.2; NaN NaN], 2, 2, 1))
+    @test_logs (:warn, r"1 of 2 phase pieces") FP._warn_uncertain_branches(slipped, 0.05)
+    @test_logs FP._warn_uncertain_branches(slipped, 0.5)
 end
 
 @testset "Bandpass: the solve publishes its per-track record" begin
@@ -531,12 +651,14 @@ end
     @test size(info.phase_status) == (nant, 2, nspw, 1)
     @test size(info.amp_status) == (nant, 2, nspw, 1)
     @test dims(info.phase_status) == dims(info.amp_status)
-    total = info.n_solved + info.n_flat + info.n_declined + info.n_nodata
+    total = info.n_solved + info.n_flat + info.n_nodata
     @test total == 2 * nant * 2 * nspw
     # High-SNR synthetic data with real injected structure: the tracks are
     # measured, not placeholders.
     @test info.n_solved > total ÷ 2
-    @test info.n_declined == 0
+    # No phase prior, so no branch was chosen and no slip probability recorded.
+    @test dims(info.phase_slip) == dims(info.phase_status)
+    @test all(isnan, info.phase_slip)
     # No prior to resolve: every track records the component's own.
     @test size(info.phase_priors) == (nant, 2, 1)
     @test all(isnothing, info.phase_priors) && all(isnothing, info.amp_priors)
@@ -653,7 +775,7 @@ end
             end
             @test [size(st[k], Ti) for k in keys(st)] == [2, 1]
         end
-        @test info.n_nodata + info.n_solved + info.n_flat + info.n_declined == 2 * 2 * (2 + nant - 1)
+        @test info.n_nodata + info.n_solved + info.n_flat == 2 * 2 * (2 + nant - 1)
         @test !haskey(info, :n_na)
     end
 

@@ -295,16 +295,11 @@ end
 
 The outcome of fitting one piece (one spectral window) of a bandpass track, as
 the bandpass report records it: `TrackNoData` (no usable channel; unit gain),
-`TrackSolved` (fit, with frequency structure), `TrackFlat` (fit, but its range is
-below the smoother's `flat_span`) or `TrackDeclined` (its phase branch is not
-determined under a prior; neither its phase nor its amplitude is fit). θ alone cannot tell these apart: an unfitted
+`TrackSolved` (fit, with frequency structure) or `TrackFlat` (fit, but its range
+is below the smoother's `flat_span`). θ alone cannot tell these apart: an unfitted
 piece reads back as unit gain and a flat one as a constant.
 """
-@enum TrackStatus::Int8 TrackNoData TrackSolved TrackFlat TrackDeclined
-
-# The largest log-gain step a linearized joint bandpass update takes; the
-# first-order model of `|g·e^δ − ĝ|²` is poor much beyond it.
-const _BP_MAX_LINEAR_STEP = 0.5
+@enum TrackStatus::Int8 TrackNoData TrackSolved TrackFlat
 
 # The outcome code for one fitted piece: nothing estimated, a constant (a range
 # below `flat_span`), or a real shape.
@@ -360,88 +355,6 @@ end
 # The level id of each of `seg`'s segments.
 _segment_levels(level, seg) = [level[p] for p in seg.piece_of]
 
-# Fit one (station, feed, time segment) track in place under `prior`, one piece
-# per spectral window: segment values `track`, weights `w`, segment frequencies
-# `x`, and `pieces` the segment groups. The prior's hyperparameters are resolved
-# once over all of the track's pieces. With `level` (each piece's level segment,
-# of `nlevel`), the track is a level per level segment plus a zero-mean shape
-# under the prior, and `track` receives their sum. Returns the resolved prior —
-# `prior` itself when the track carries no data — and the levels, `nothing`
-# without `level`.
-#
-# `unwrap` re-references each piece of a phase track to a continuous branch along
-# frequency first, because the prior fits a real track and the ±π branch cuts of
-# a raw phase solve would otherwise read as genuine structure; the pieces sharing
-# a level are then put on one branch. Under a prior, a piece whose branch the
-# data do not determine (`phase_unwrap_ambiguity` past `max_unwrap_ambiguity`)
-# is dropped instead; see `JointSmoother`. Without one the segments are fit
-# independently and the branch does not affect the fit.
-#
-# `status` receives one `TrackStatus` per piece, a piece whose range is
-# below `flat_span` counting as flat.
-#
-# `weights`, when given, receives each segment's weight in the final fit, zero
-# where it carried none.
-function _fit_track!(
-        track, w, x, pieces, prior;
-        level = nothing, nlevel::Integer = 0, unwrap::Bool = false, status = nothing,
-        weights = nothing, max_unwrap_ambiguity = nothing, flat_span = nothing,
-    )
-    T = eltype(track)
-    isnothing(weights) || fill!(weights, zero(T))
-    ys = [T[track[c] for c in p] for p in pieces]
-    ws = [T[w[c] for c in p] for p in pieces]
-    xs = [float.(x[p]) for p in pieces]
-    declined = falses(length(pieces))
-    if unwrap
-        for j in eachindex(ys, ws)
-            if !isnothing(prior) && phase_unwrap_ambiguity(ys[j]; weights = ws[j]) > max_unwrap_ambiguity
-                declined[j] = true
-                fill!(ys[j], T(NaN))
-            else
-                ys[j] = unwrap_phase_track(ys[j]; weights = ws[j])
-            end
-        end
-        isnothing(level) || _align_branches!(ys, ws, level)
-    end
-    fill!(track, T(NaN))
-    levels = isnothing(level) ? nothing : fill(T(NaN), nlevel)
-    if !any(j -> any(k -> _shape_usable(ys[j][k], ws[j][k]), eachindex(ys[j], ws[j])), eachindex(ys, ws))
-        isnothing(status) || (status .= ifelse.(declined, TrackDeclined, TrackNoData))
-        return prior, levels
-    end
-    resolved = _estimate_hypers(prior, ys, ws, xs; level)
-    if !isnothing(weights)
-        for (j, p) in pairs(pieces), (i, c) in pairs(p)
-            _shape_usable(ys[j][i], ws[j][i]) && (weights[c] = ws[j][i])
-        end
-    end
-    isnothing(level) || (levels .= _estimate_levels(resolved, ys, ws, xs, level, nlevel))
-    for (j, p) in pairs(pieces)
-        L = isnothing(level) ? zero(T) : levels[level[j]]
-        fitted = view(track, p)
-        ys[j] .-= L
-        _estimate_map!(fitted, resolved, ys[j], ws[j], xs[j])
-        fitted .+= L
-        isnothing(status) || (status[j] = declined[j] ? TrackDeclined : _band_track_status(fitted, flat_span))
-    end
-    return resolved, levels
-end
-
-# Shift each unwrapped phase piece by the multiple of 2π that brings its weighted
-# mean nearest that of the first piece with data in its level group, so a level
-# shared across spectral windows sees one branch.
-function _align_branches!(ys, ws, level)
-    ref = Dict{Int, eltype(eltype(ys))}()
-    for j in eachindex(ys, ws, level)
-        any(k -> _shape_usable(ys[j][k], ws[j][k]), eachindex(ys[j], ws[j])) || continue
-        m = _weighted_mean_finite(ys[j], ws[j])
-        r = get!(ref, level[j], m)
-        ys[j] .-= 2π * round((m - r) / 2π)
-    end
-    return ys
-end
-
 # A station block's outcome per piece over `(AntennaName, Feed, Frequency, Ti)`:
 # its stations, every feed, each spectral window of its shape over the extent of
 # its channels, and each of its time segments over the extent of its samples.
@@ -454,6 +367,10 @@ function _block_status_array(block, geom::DataGeometry)
     )
     return fill(TrackNoData, ax)
 end
+
+# A station block's phase slip probability per piece, labeled as
+# `_block_status_array`; `NaN` until a fit under a prior writes it.
+_block_slip_array(block, geom::DataGeometry) = fill(NaN, dims(_block_status_array(block, geom)))
 
 # A station block's resolved prior per (station, feed, time segment), over
 # `(AntennaName, Feed, Ti)` labeled as `_block_status_array`; each slot starts at
@@ -480,7 +397,7 @@ _status_arrays(st) = (st,)
 
 """
     bandpass_track_report(phase_status, amp_status; phase_priors = nothing,
-                          amp_priors = nothing) -> NamedTuple
+                          amp_priors = nothing, phase_slip = nothing) -> NamedTuple
 
 Summarize a bandpass solve's per-piece outcomes into the record the
 [`Bandpass`](@ref Gustavo.Bandpass) step publishes. `phase_status`/`amp_status`
@@ -490,19 +407,22 @@ hold one [`TrackStatus`](@ref) per (station, feed, frequency segment, time segme
 segment of the component over the extent of its channels and each time segment
 over the extent of its samples. `phase_priors`/`amp_priors` hold the prior each
 (station, feed, time segment) track was fit under, its hyperparameters resolved,
-over `(AntennaName, Feed, Ti)`. Where the model gives stations different segmentations,
+over `(AntennaName, Feed, Ti)`. `phase_slip` holds, over the axes of
+`phase_status`, the posterior probability that each phase piece fit under a
+prior carries a 2π slip (`NaN` for a piece without a prior or data); see
+[`JointSmoother`](@ref). Where the model gives stations different segmentations,
 [`JointSmoother`](@ref) passes one array per station block, keyed `g1, g2, …`
 as the solution's components name the station blocks, each over its own
 stations and segments.
 
-Returns the arrays as `phase_status`/`amp_status`/`phase_priors`/`amp_priors`
-alongside the counts `n_solved`/`n_flat`/`n_declined`/`n_nodata` summed over
-both observables. `flat` and `declined` are the two ways a piece
-can occupy a slot without measuring anything, and they are what the counts
-exist to expose: θ itself records an unfitted piece as unit gain and a starved
-one as a constant, neither distinguishable there from a genuinely flat response.
+Returns the arrays as `phase_status`/`amp_status`/`phase_priors`/`amp_priors`/`phase_slip`
+alongside the counts `n_solved`/`n_flat`/`n_nodata` summed over both
+observables. `flat` and `nodata` are the two ways a piece can occupy a slot
+without measuring anything, and they are what the counts exist to expose: θ
+itself records an unfitted piece as unit gain and a starved one as a constant,
+neither distinguishable there from a genuinely flat response.
 """
-function bandpass_track_report(phase_status, amp_status; phase_priors = nothing, amp_priors = nothing)
+function bandpass_track_report(phase_status, amp_status; phase_priors = nothing, amp_priors = nothing, phase_slip = nothing)
     counts = zeros(Int, length(instances(TrackStatus)))
     for st in (phase_status, amp_status), a in _status_arrays(st), c in a
         counts[Int(c) + 1] += 1
@@ -516,8 +436,8 @@ function bandpass_track_report(phase_status, amp_status; phase_priors = nothing,
         amp_status = something(amp_status, empty_status),
         phase_priors = something(phase_priors, empty_priors),
         amp_priors = something(amp_priors, empty_priors),
-        n_nodata = counts[1], n_solved = counts[2],
-        n_flat = counts[3], n_declined = counts[4],
+        phase_slip = something(phase_slip, Array{Float64, 4}(undef, 0, 0, 0, 0)),
+        n_nodata = counts[1], n_solved = counts[2], n_flat = counts[3],
     )
 end
 
@@ -526,18 +446,33 @@ end
 # measured — the caller cannot tell from θ, which is why this is a warning and not
 # only a record.
 function _warn_degenerate_bandpass(report, warn_fraction)
-    total = report.n_nodata + report.n_solved + report.n_flat + report.n_declined
+    total = report.n_nodata + report.n_solved + report.n_flat
     total > 0 || return nothing
-    degenerate = report.n_flat + report.n_declined + report.n_nodata
+    degenerate = report.n_flat + report.n_nodata
     frac = degenerate / total
     frac > warn_fraction || return nothing
     @warn """
     Bandpass: $(round(100 * frac; digits = 1))% of (station, feed, frequency segment) pieces \
-    carry no measured frequency shape — $(report.n_flat) fit flat, $(report.n_declined) \
-    declined for an undetermined phase branch, $(report.n_nodata) with no usable data \
-    (of $total). They are unit gain or a constant in the solution, not a measured \
+    carry no measured frequency shape — $(report.n_flat) fit flat, $(report.n_nodata) \
+    with no usable data (of $total). They are unit gain or a constant in the solution, not a measured \
     response. Check per-segment SNR and the detection coverage of the bandpass scans.
     """ n_solved = report.n_solved
+    return nothing
+end
+
+# Warn when phase pieces fit under a prior may carry a 2π slip: the data do not
+# determine their branches, so the fitted track is one of several the posterior
+# allows.
+function _warn_uncertain_branches(report, max_slip_probability)
+    slips = [p for a in _status_arrays(report.phase_slip) for p in a if isfinite(p)]
+    nslip = count(>=(max_slip_probability), slips)
+    nslip > 0 || return nothing
+    @warn """
+    Bandpass: $nslip of $(length(slips)) phase pieces fit under a prior have a posterior \
+    probability of at least $max_slip_probability (largest $(round(maximum(slips); sigdigits = 3))) \
+    that their fitted track carries a 2π slip: their data do not determine the phase \
+    branch from channel to channel. See the report's `phase_slip`.
+    """
     return nothing
 end
 
@@ -601,7 +536,7 @@ function _joint_scan_groups(tseg)
     return filter!(!isempty, groups)
 end
 
-# ── Joint complex bandpass + per-scan source coherence (ALS) ─────────────────
+# ── Joint complex bandpass + per-scan source coherence ───────────────────────
 #
 # `solve_joint_bandpass!` fits the complex visibilities against
 #
@@ -609,12 +544,9 @@ end
 #
 # one frequency-flat complex `S` per (scan, baseline, polarization product), so
 # a resolved or polarized source's per-baseline structure is absorbed into `S`
-# rather than biasing the station bandpass. `g` is bilinear with `S`, so this
-# alternates a closed-form per-(scan, baseline, pol) solve of `S` given the
-# current `g` ([`_update_source_coherence!`](@ref)) with a Gauss-Seidel
-# per-(station, feed) solve of `g` given `S` and every other station's current
-# gain ([`_update_station_gains!`](@ref)), one gain per frequency segment, to
-# convergence.
+# rather than biasing the station bandpass. `S` given the gains is closed-form
+# (`_source_coherence!`), and the gains take Gauss–Newton steps of the MAP
+# objective with `S` profiled out (`_map_step`).
 #
 # The data are `(Scan, AntennaPair, FeedPair, Frequency)` arrays over the
 # refinement cells every station's segmentation is a union of. The gains are one
@@ -681,18 +613,12 @@ end
 # amplitude blocks when the model has no phase. Where both exist they match.
 _gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : phase_blocks
 
-# A station's track prior, `nothing` for a track without one or an observable the
-# model holds at zero; and whether either of its tracks has one.
-_prior(track) = isnothing(track) ? nothing : track.prior
-_has_prior(fit) = !isnothing(_prior(fit.phase)) || !isnothing(_prior(fit.amp))
-
-# One gain block's solve state over `(AntennaName, Feed, Frequency, Ti)` — its
+# One gain block's solved state over `(AntennaName, Feed, Frequency, Ti)` — its
 # stations, every feed, its frequency segments and its time segments: the
-# complex gains `g`; their unwrapped phase tracks `φ`, carried across sweeps so
-# the prior fit never sees a 2π branch cut; the slots whose phase and whose
-# log-amplitude a sweep has given a value (`phase_valid`, `amp_valid`), which
-# differ where a prior fills one observable over a slot without data and the
-# other has no prior; and the gauge pins (`pinned`).
+# complex gains `g`; their phases `φ` on the branches the solve chose; the slots
+# whose phase and whose log-amplitude the solve gave a value (`phase_valid`,
+# `amp_valid`), which differ where a prior fills one observable over a slot
+# without data and the other has no prior; and the gauge pins (`pinned`).
 
 function _block_gains(block, geom::DataGeometry, C::Type)
     ax = (
@@ -730,20 +656,6 @@ function _station_freq_segments(blocks, nant)
         end
     end
     return fseg, cells
-end
-
-# Every (station pair, feed pair) cell touching (station, feed): the cell, the
-# station and feed at its other end, and whether (station, feed) is the cell's
-# first end — built once, reused by every ALS iteration's gain update.
-function _joint_bandpass_touching(cells, nant, nfeed)
-    touching = [Tuple{Int, Int, Int, Int, Bool}[] for _ in 1:nant, _ in 1:nfeed]
-    for p in axes(cells, FeedPair), bi in axes(cells, AntennaPair)
-        _solvable(cells[bi, p]) || continue
-        (a, fa), (b, fb) = cells[bi, p]
-        push!(touching[a, fa], (bi, p, b, fb, true))
-        push!(touching[b, fb], (bi, p, a, fa, false))
-    end
-    return touching
 end
 
 # Dense ids of the gain slots, one array per block in its gain array's shape,
@@ -807,8 +719,8 @@ and the constraints `C·φ = d` that [`gauge_constraints`](@ref) gives over
 every gain slot's phase `φ`, numbered by `_gain_slot_ids`. When every row
 holds a single slot at zero, as `PinAntenna`'s do, those slots are marked in
 the `pinned` layer of `gains`, held at zero phase, and the result is
-`nothing`. Any other gauge is imposed in every iteration's joint step
-(`_joint_gain_step!`), and this returns the constraints as `(; rows, d)`,
+`nothing`. Any other gauge is imposed exactly in every Gauss–Newton step
+(`_map_step`), and this returns the constraints as `(; rows, d)`,
 `rows[j]` the `(slot, coefficient)` pairs of row `j`. Either way a constrained
 slot's amplitude is solved like any other slot's.
 
@@ -837,7 +749,7 @@ rest of that track is fitted.
 Besides that common phase, each (station, feed, time segment) track has a free
 band-constant phase and log-amplitude: `S` is per scan and baseline but
 frequency-flat, so it absorbs a band-constant factor on any one station, and
-`_move_band_level!` moves those levels into `S`. Pinning `|g|` as well
+a prior is profiled over that constant (see `_add_track_prior!`). Pinning `|g|` as well
 would assert the reference antenna has a flat amplitude bandpass, discarding
 structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 over the band eliminates `ls` and leaves the full-rank signless-Laplacian
@@ -873,292 +785,670 @@ function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     return (; rows, d)
 end
 
-# The fit of one track system to `v ./ sys.w` (no observation where the
-# weight is zero) under its resolved prior, levels and pieces.
-function _track_response(sys, v)
-    T = eltype(v)
-    y = T[w > 0 ? vi / w : T(NaN) for (vi, w) in zip(v, sys.w)]
-    _fit_track!(y, sys.w, sys.x, sys.pieces, sys.prior; sys.level, sys.nlevel)
-    return y
+# The source coherence that minimizes the χ² for the given slot gains `g`: for
+# each (scan, station pair, feed pair) the weighted least-squares solution of
+# `Σ_cell w·|r/w − g_a·S·conj(g_b)|²` over the single complex `S`.
+function _source_coherence!(S, g, data, jl)
+    (; r, w) = data
+    (; edge, slot_pairs) = jl
+    num = zeros(ComplexF64, size(S))
+    den = zeros(size(S))
+    for I in CartesianIndices(edge)
+        e = edge[I]
+        iszero(e) && continue
+        wc = w[I]
+        wc > 0 || continue
+        na, nb = slot_pairs[e]
+        u = g[na] * conj(g[nb])
+        J = CartesianIndex(I[1], I[2], I[3])
+        num[J] += conj(u) * r[I]
+        den[J] += wc * abs2(u)
+    end
+    for J in eachindex(S, num, den)
+        S[J] = den[J] > 0 ? num[J] / den[J] : zero(eltype(S))
+    end
+    return S
 end
 
-# Closed-form per-(scan, station pair, feed pair) solve of the source coherence
-# `S` given the current station gains: the weighted-least-squares minimizer of
-# `Σ_cell w·|r/w − g_a·S·conj(g_b)|²` over the single complex unknown `S`.
+# The χ² of the visibilities against `g_a·S·conj(g_b)`.
+function _chi2(g, S, data, jl)
+    (; r, w) = data
+    (; edge, slot_pairs) = jl
+    out = 0.0
+    for I in CartesianIndices(edge)
+        e = edge[I]
+        iszero(e) && continue
+        wc = w[I]
+        wc > 0 || continue
+        na, nb = slot_pairs[e]
+        out += abs2(r[I] - wc * g[na] * S[I[1], I[2], I[3]] * conj(g[nb])) / wc
+    end
+    return out
+end
+
+# The χ² to second order in each slot's log-gain about `g`. A correlation's model
+# `m = g_a·S·conj(g_b)` moves to `m·(1 + δℓ_a + δℓ_b + i(δφ_a − δφ_b))`, so with
+# `u = r/(w·m) − 1` and weight `q = w·|m|²`, `Re u` measures `δℓ_a + δℓ_b` and
+# `Im u` measures `δφ_a − δφ_b`, and the two observables decouple. Returns each
+# correlation pair's weight `q`, each slot's `c = Σ q·u` (with `conj(u)` at a
+# second end), whose real and imaginary parts are the log-amplitude and phase
+# gradients, and its total weight `W`: `1 + c/W` is the slot's own gain
+# estimate given every other gain and `S`, relative to its current one.
+function _linearize(g, S, data, jl, nslots)
+    (; r, w) = data
+    (; edge, slot_pairs) = jl
+    q = zeros(length(slot_pairs))
+    c = zeros(ComplexF64, nslots)
+    W = zeros(nslots)
+    for I in CartesianIndices(edge)
+        e = edge[I]
+        iszero(e) && continue
+        wc = w[I]
+        wc > 0 || continue
+        na, nb = slot_pairs[e]
+        m = g[na] * S[I[1], I[2], I[3]] * conj(g[nb])
+        qc = wc * abs2(m)
+        qc > 0 || continue
+        u = r[I] / (wc * m) - 1
+        q[e] += qc
+        c[na] += qc * u
+        c[nb] += qc * conj(u)
+        W[na] += qc
+        W[nb] += qc
+    end
+    return (; q, c, W)
+end
+
+# The curvature of the χ² in one observable's slot values: `Σ_e q_e·(x_a + s·x_b)²`
+# with `s = +1` for log-amplitude sums and `−1` for phase differences.
+function _data_curvature(q, slot_pairs, s, nslots)
+    Is, Js, Vs = Int[], Int[], Float64[]
+    for (e, (na, nb)) in pairs(slot_pairs)
+        qe = q[e]
+        qe > 0 || continue
+        append!(Is, (na, nb, na, nb))
+        append!(Js, (na, nb, nb, na))
+        append!(Vs, (qe, qe, s * qe, s * qe))
+    end
+    return sparse(Is, Js, Vs, nslots, nslots)
+end
+
+# ── Track priors as sparse quadratics ────────────────────────────────────────
 #
-# `r`/`w` are reduced onto the refinement grid the two stations have in common,
-# while the gains are held in each station's own frequency segments, so each end
-# is read through its own `fseg` row.
-function _update_source_coherence!(data, gains, layout)
-    (; r, w, S, ends) = data
-    (; loc, tseg, fseg) = layout
-    T = real(eltype(S))
-    for p in axes(r, FeedPair), bi in axes(r, AntennaPair)
-        _solvable(ends[bi, p]) || continue
-        (a, fa), (b, fb) = ends[bi, p]
-        (ka, ia), (kb, ib) = loc[a], loc[b]
-        for si in axes(r, Scan)
-            # Each station is in its own time segment for this scan; a station no
-            # block covers (segment 0) has no gain to fit, so the pairs that
-            # touch it carry no source term either.
-            ta, tb = tseg[a, si], tseg[b, si]
-            (iszero(ta) || iszero(tb)) && continue
-            ga, gb = gains[ka].g, gains[kb].g
-            numer = zero(eltype(S))
-            denom = zero(T)
-            for cell in axes(r, Frequency)
-                wc = w[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)]
-                wc > 0 || continue
-                u = ga[ia, fa, fseg[a, cell], ta] * conj(gb[ib, fb, fseg[b, cell], tb])
-                abs2(u) > 0 || continue
-                numer += conj(u) * r[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)]
-                denom += wc * abs2(u)
-            end
-            S[Scan(si), AntennaPair(bi), FeedPair(p)] = denom > 0 ? numer / denom : zero(eltype(S))
+# A prior's energy over a track is a sum of state-space terms: each piece (one
+# spectral window) is a chain of states along frequency, `s_k = A_k·s_{k−1} + η_k`,
+# `η_k ~ N(0, Q_k)`, from the prior's start where it is proper, whose first entry
+# is the track's value less its level. Written over the states themselves the
+# energy is a sum of small quadratic terms, so a track's prior, its latent states
+# and its levels enter one sparse system with the data, exactly and without a
+# start variance standing in for a flat start.
+#
+# The per-scan source term is frequency-flat, so it absorbs any constant added to
+# a (station, feed, time segment) track: the data cannot measure a track's band
+# constant. The MAP of everything else is then the same as under the prior
+# profiled over that constant, so a proper prior acts on its track less a free
+# constant, as if beside a level. A flat-start walk is unchanged by a constant.
+
+# A quadratic `½uᵀKu − hᵀu + c` over a growing set of unknowns `u`, each with
+# the frequency `key` by which they are ordered for factoring.
+mutable struct _Quadratic
+    Is::Vector{Int}
+    Js::Vector{Int}
+    Vs::Vector{Float64}
+    h::Vector{Float64}
+    c::Float64
+    key::Vector{Float64}
+end
+_Quadratic(key) = _Quadratic(Int[], Int[], Float64[], zeros(length(key)), 0.0, collect(Float64, key))
+_unknown!(Q::_Quadratic, key) = (push!(Q.h, 0.0); push!(Q.key, key); length(Q.h))
+_matrix(Q::_Quadratic) = sparse(Q.Is, Q.Js, Q.Vs, length(Q.h), length(Q.h))
+Base.copy(Q::_Quadratic) = _Quadratic(copy(Q.Is), copy(Q.Js), copy(Q.Vs), copy(Q.h), Q.c, Q.key)
+
+# A linear form `Σ a·u[j] + b`: its terms `j => a` and its constant `b`.
+const _Form = Tuple{Vector{Pair{Int, Float64}}, Float64}
+
+# `Σ_j c_j·forms_j`.
+function _combine(forms, coefs)
+    terms = Pair{Int, Float64}[]
+    b = 0.0
+    for (f, a) in zip(forms, coefs)
+        iszero(a) && continue
+        append!(terms, (j => a * v) for (j, v) in f[1])
+        b += a * f[2]
+    end
+    return (terms, b)
+end
+
+# Add `½ρᵀWρ` for the forms `ρ`.
+function _add_term!(Q::_Quadratic, ρ, W)
+    cols = unique(first(t) for f in ρ for t in f[1])
+    G = zeros(length(ρ), length(cols))
+    r = zeros(length(ρ))
+    for (i, f) in pairs(ρ)
+        for (j, a) in f[1]
+            G[i, findfirst(==(j), cols)] += a
+        end
+        r[i] = -f[2]
+    end
+    W = (W + W') / 2
+    GW = G' * W
+    K = GW * G
+    for a in eachindex(cols), b in eachindex(cols)
+        push!(Q.Is, cols[a])
+        push!(Q.Js, cols[b])
+        push!(Q.Vs, K[a, b])
+    end
+    h = GW * r
+    for (a, j) in pairs(cols)
+        Q.h[j] += h[a]
+    end
+    Q.c += dot(r, W * r) / 2
+    return Q
+end
+
+# The coordinates a prior's state-space model runs on over one piece's
+# frequencies `x`, and their unit `h` in `x`.
+function _piece_coordinates(::RandomWalkPrior, x)
+    _, u, h = _random_walk_problem(x, ones(length(x)), x)
+    return u, h
+end
+_piece_coordinates(::OUPrior, x) = float.(x), 1.0
+
+# The state-space model of a resolved prior on coordinates of unit `h`, in
+# element type `T`.
+_piece_model(prior::RandomWalkPrior, h, T = Float64) = _random_walk_model(prior.order, prior.σ, prior.init, h, T)
+_piece_model(prior::OUPrior, h, T = Float64) = OUModel(T(prior.scale), T(prior.σ)^2)
+_statedim(prior::RandomWalkPrior) = prior.order
+_statedim(::OUPrior) = 1
+
+# The samples a flat-start walk needs to have its state determined; one for a
+# proper prior.
+_samples_needed(prior::RandomWalkPrior) = _proper_prior(prior) ? 1 : prior.order
+_samples_needed(::OUPrior) = 1
+
+# The level group of track `t`'s piece `j`: its level segment beside a level,
+# one group for the whole track under a proper prior (the constant the source term
+# absorbs), and `nothing` under a flat-start walk, which no constant changes.
+_level_group(t, prior, j) = !isnothing(t.level) ? t.level[j] : _proper_prior(prior) ? 1 : nothing
+_level_groups(t, prior) = !isnothing(t.level) ? t.level : _proper_prior(prior) ? ones(Int, length(t.pieces)) : nothing
+
+# The state chain of each piece of track `t` its prior acts on, over the unknowns
+# of `Q`: per sample its state less the piece's level, as linear forms whose
+# first is the slot (`slot(n)` gives its unknown, or `0` and its fixed value) and
+# the rest new latent unknowns, with the coordinates its prior runs on. Returns
+# the chains and the unknown of each level group.
+function _track_chains!(Q::_Quadratic, t, slot)
+    levels = Dict{Int, Int}()
+    chains = NamedTuple[]
+    for (j, p) in pairs(t.pieces)
+        t.active[j] || continue
+        group = _level_group(t, t.prior, j)
+        L = isnothing(group) ? 0 : get!(() -> _unknown!(Q, Inf), levels, group)
+        states = map(p) do k
+            j1, v1 = slot(t.slots[k])
+            value = (iszero(j1) ? Pair{Int, Float64}[] : [j1 => 1.0], iszero(j1) ? v1 : 0.0)
+            iszero(L) || push!(value[1], L => -1.0)
+            _Form[value; [([_unknown!(Q, t.x[k]) => 1.0], 0.0) for _ in 2:_statedim(t.prior)]]
+        end
+        u, h = _piece_coordinates(t.prior, t.x[p])
+        push!(chains, (; u, h, states))
+    end
+    return chains, levels
+end
+
+# Add the energy of `chains` under the resolved `prior` to `Q`: a term per
+# transition and, where the prior's start is proper, one for the first state.
+function _add_prior_terms!(Q::_Quadratic, chains, prior)
+    for ch in chains
+        model = _piece_model(prior, ch.h)
+        start = initial(model, Float64)
+        if !isnothing(start)
+            μ0, P0 = start
+            _add_term!(Q, [(f[1], f[2] - μ0[i]) for (i, f) in pairs(ch.states[1])], inv(Matrix(P0)))
+        end
+        for i in 2:length(ch.states)
+            A, Qk = transition(model, ch.u[i] - ch.u[i - 1], Float64)
+            ρ = [_combine([ch.states[i][r]; ch.states[i - 1]], [1.0; -A[r, :]]) for r in axes(A, 1)]
+            _add_term!(Q, ρ, inv(Matrix(Qk)))
         end
     end
-    return nothing
+    return Q
 end
 
-# One Gauss-Seidel sweep over every (station, feed, time segment): closed-form
-# per-segment solve of its complex gain given the current source coherence `S`
-# and every other station's current gain, which is immediately visible to later
-# antennas in the same sweep — Gauss-Seidel, not Jacobi — with each observable's
-# component prior acting on the resulting track rather than as a post-hoc smooth.
-#
-# Solving each segment independently is the no-prior case; the prior enters
-# where that independence is dropped. A segment's residual is `denom·|g − ĝ|²`
-# about its unconstrained estimate `ĝ`, and the real tracks are fit to it to
-# first order in the log-gain. Without a prior the track lands on `ĝ`, so the
-# first sweep, and every sweep of a track without a prior, linearizes about
-# `ĝ` itself (weight `denom·|ĝ|²`); under a prior the track does not, so with
-# `relinearize` the residual is linearized about the current gain `g`
-# (observation `log g + (ĝ/g − 1)`, weight `denom·|g|²`), whose fixed point is
-# the MAP of the complex residual rather than of its expansion about `ĝ`. Each
-# sweep re-estimates the priors' hyperparameters, and any levels, from its own
-# linearized tracks, so iterated to convergence this is MAP estimation under the
-# two priors with type-II MAP hyperparameters.
-#
-# `φ` carries each (station, feed)'s unwrapped phase track across sweeps. It is
-# unwrapped once, when `seed` (the first sweep) initializes it, and thereafter
-# advanced by wrapped increments about its own current value, so no global
-# unwrap is needed inside the loop and the 2π branch cannot flip between
-# iterations. `fits[a]` holds station `a`'s phase and amplitude
-# `(; x, pieces, prior, level, nlevel)`, `nothing` for an observable held at
-# zero, and `levels[a]` its fitted levels, each
-# over `(Feed, level segment, Ti)` or `nothing`. The status and prior arrays,
-# when given, hold one array per block.
-#
-# `systems`, when given, receives every phase and log-amplitude track's fit,
-# for `_joint_gain_step!`.
-#
-# Returns the number of slots the sweep updated and the `(station, feed, time
-# segment)` of each phase track with a piece declined at unwrapping.
-function _update_station_gains!(
-        gains, data, layout; fits, levels, seed::Bool, max_unwrap_ambiguity, flat_span,
-        relinearize::Bool = false, systems = nothing,
-        phase_status = nothing, amp_status = nothing, phase_priors = nothing, amp_priors = nothing,
+# The log density of `chains` under the resolved `prior`, in expectation over
+# the states' posterior with the moments `mom` (`_chain_moments`), or its
+# normalization alone without them; in element type `T`.
+_expected_log_prior(prior, chains, mom, T) = sum(
+    (_expected_chain_log_prior(_piece_model(prior, ch.h, T), ch.u, isnothing(mom) ? nothing : mom[c], T) for (c, ch) in pairs(chains));
+    init = zero(T),
+)
+
+function _expected_chain_log_prior(model, u, mom, T)
+    D = statedim(model)
+    out = zero(T)
+    start = initial(model, T)
+    if !isnothing(start)
+        μ0, P0 = start
+        out -= logdet(2π * P0) / 2
+        if !isnothing(mom)
+            m, M = SVector{D}(mom.start[1]), SMatrix{D, D}(mom.start[2])
+            out -= tr(P0 \ (M - μ0 * m' - m * μ0' + μ0 * μ0')) / 2
+        end
+    end
+    for i in 2:length(u)
+        A, Q = transition(model, u[i] - u[i - 1], T)
+        out -= logdet(2π * Q) / 2
+        isnothing(mom) && continue
+        G = hcat(SMatrix{D, D, T}(I), -A)
+        out -= tr(Q \ (G * SMatrix{2D, 2D}(mom.pairs[i - 1]) * G')) / 2
+    end
+    return out
+end
+
+# The posterior moments of each chain's states, from the mean `z` and covariance
+# `cov(i, j)` of the unknowns: the first state's mean and second moment, and the
+# second moment of each consecutive pair `(s_i, s_{i−1})`.
+function _chain_moments(chains, z, cov)
+    mean_of(f) = sum((a * z[j] for (j, a) in f[1]); init = 0.0) + f[2]
+    second(fs) = [
+        sum((a * b * cov(i, j) for (i, a) in f[1] for (j, b) in g[1]); init = 0.0) + mean_of(f) * mean_of(g)
+            for f in fs, g in fs
+    ]
+    return map(chains) do ch
+        (;
+            start = (mean_of.(ch.states[1]), second(ch.states[1])),
+            pairs = [second([ch.states[i]; ch.states[i - 1]]) for i in 2:length(ch.states)],
+        )
+    end
+end
+
+# Track `t`'s prior energy at the slot values `x`, minimized over its latent
+# states and levels, and those levels by group.
+function _track_energy(t, prior, x)
+    Q = _Quadratic(Float64[])
+    chains, levels = _track_chains!(Q, t, n -> (0, x[n]))
+    _add_prior_terms!(Q, chains, prior)
+    isempty(Q.h) && return Q.c, Dict{Int, Float64}()
+    u = cholesky(Symmetric(_matrix(Q))) \ Q.h
+    return Q.c - dot(Q.h, u) / 2, Dict(g => u[j] for (g, j) in levels)
+end
+
+"""
+    _posterior_system(H, b, x, free, tracks, key; gauge = nothing)
+
+The MAP problem of one observable's slot values `x` with the χ² to second order
+(data curvature `H` and gradient `b` at `x`, over every slot) and the exact prior
+energy of each of `tracks`, over the `free` slots (the other slots keep their
+values), the tracks' latent states and their levels: the data's quadratic and
+each track's state chains (`_track_chains!`), the priors added by
+`_assembled`. `gauge`, when given, holds constraint rows `(slot, coefficient)` and
+right-hand sides `d`; each row is solved for its free slot of largest
+coefficient, `x = T·u + t0` over the unknowns, so that `u`, the unknowns left,
+are unconstrained and the system positive definite. `key` gives each slot's
+frequency, by which the unknowns are ordered for factoring: the system is then
+banded, coupling stations only at one frequency and frequencies only along a
+track.
+"""
+function _posterior_system(H, b, x, free, tracks, key; gauge = nothing)
+    idx = zeros(Int, length(x))
+    nf = 0
+    for n in eachindex(free)
+        free[n] && (idx[n] = (nf += 1))
+    end
+    data = _Quadratic(key[free])
+    Hf = H[free, free]
+    Is, Js, Vs = findnz(Hf)
+    append!(data.Is, Is)
+    append!(data.Js, Js)
+    append!(data.Vs, Vs)
+    xf = Float64.(x[free])
+    data.h .= b[free] .+ Hf * xf
+    data.c = dot(xf, Hf * xf) / 2 + dot(b[free], xf)
+    slot(n) = free[n] ? (idx[n], 0.0) : (0, Float64(x[n]))
+    built = [_track_chains!(data, t, slot) for t in tracks]
+    return (;
+        data, chains = first.(built), levels = last.(built), x = Float64.(x), free, xf,
+        gauge = _gauge_map(gauge, x, free, idx, length(data.h)),
     )
-    (; r, w, S) = data
-    (; loc, touching, tseg, fseg, present) = layout
-    C = eltype(first(gains).g)
-    T = real(C)
-    nfsmax = maximum(st -> size(st, Frequency), gains)
-    num = Vector{C}(undef, nfsmax)
-    den = Vector{T}(undef, nfsmax)
-    ĝ = Vector{C}(undef, nfsmax)
-    wf = Vector{T}(undef, nfsmax)
-    la = Vector{T}(undef, nfsmax)
-    φ̃ = Vector{T}(undef, nfsmax)
-    wg = Vector{T}(undef, nfsmax)
-    wa = Vector{T}(undef, nfsmax)
-    isnothing(systems) || (empty!(systems.phase); empty!(systems.amp))
-    nupdated = 0
-    declined = Tuple{Int, Int, Int}[]
-    for feed in axes(touching, 2), ant in eachindex(loc)
-        k, ai = loc[ant]
-        iszero(k) && continue
-        entries = touching[ant, feed]
-        isempty(entries) && continue
-        (; g, φ, phase_valid, amp_valid, pinned) = gains[k]
-        nfs = size(g, Frequency)
-        fit = fits[ant]
-        for ts in present[ant]
-            # The gauge fixes this node's phase in the frequency segments it pins —
-            # every one of them where the array leaves this track no free structure,
-            # a single one where a coarser station ties the band into one mode. The
-            # amplitude is solved like any other node's (see `_joint_bandpass_gauge!`).
-            pins = view(pinned, ai, feed, :, ts)
-            for buf in (num, den, ĝ, wf, la, φ̃, wg, wa)
-                resize!(buf, nfs)
-            end
-            fill!(num, zero(C))
-            fill!(den, zero(T))
-            for cell in axes(r, Frequency)
-                sa = fseg[ant, cell]
-                for (bi, p, o, fo, first_end) in entries
-                    ko, io = loc[o]
-                    # A station no block covers has no gain, so its cells constrain nothing.
-                    iszero(ko) && continue
-                    go = gains[ko].g
-                    so = fseg[o, cell]
-                    for si in axes(r, Scan)
-                        # Only the scans this node's own segment covers constrain it.
-                        tseg[ant, si] == ts || continue
-                        wc = w[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)]
-                        wc > 0 || continue
-                        to = tseg[o, si]
-                        iszero(to) && continue
-                        s = S[Scan(si), AntennaPair(bi), FeedPair(p)]
-                        # `V ≈ g_first·S·conj(g_second)`; the second end fits `conj(V)`.
-                        coeff = first_end ? s * conj(go[io, fo, so, to]) : conj(go[io, fo, so, to] * s)
-                        abs2(coeff) > 0 || continue
-                        rc = r[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)]
-                        num[sa] += conj(coeff) * (first_end ? rc : conj(rc))
-                        den[sa] += wc * abs2(coeff)
-                    end
-                end
-            end
-            linear = relinearize && _has_prior(fit)
-            for fs in 1:nfs
-                gh = den[fs] > 0 ? num[fs] / den[fs] : zero(C)
-                ĝ[fs] = gh
-                gc = g[ai, feed, fs, ts]
-                wf[fs] = den[fs] > 0 && abs(linear ? gc : gh) > 0 ? den[fs] * abs2(linear ? gc : gh) : zero(T)
-                if wf[fs] > 0 && linear
-                    # `den·|g − ĝ|²` to first order in the log-gain about the current `g`.
-                    # Far from `ĝ` the weight is raised and the step shortened by the
-                    # same factor, which leaves the gradient, and so the fixed point,
-                    # unchanged.
-                    ρ = gh / gc - 1
-                    κ = max(one(T), abs(ρ) / _BP_MAX_LINEAR_STEP)
-                    wf[fs] *= κ
-                    la[fs] = log(abs(gc)) + real(ρ) / κ
-                    φ̃[fs] = φ[ai, feed, fs, ts] + imag(ρ) / κ
-                elseif wf[fs] > 0
-                    # With the phase held at zero the least-squares amplitude is `Re ĝ`.
-                    la[fs] = isnothing(fit.phase) ? (real(gh) > 0 ? log(real(gh)) : T(NaN)) : log(abs(gh))
-                    # The wrapped increment about this track's current value keeps the
-                    # candidate on the same 2π branch as the iterate it refines.
-                    φ̃[fs] = φ[ai, feed, fs, ts] +
-                        rem2pi(angle(gh) - φ[ai, feed, fs, ts], RoundNearest)
-                else
-                    la[fs] = T(NaN)
-                    φ̃[fs] = T(NaN)
-                end
-            end
-            # The status of the last sweep is the status of the solve: each sweep
-            # overwrites the previous one's codes for this node.
-            if isnothing(fit.amp)
-                fill!(la, T(NaN))
-            else
-                ast = isnothing(amp_status) ? nothing : view(amp_status[k], ai, feed, :, ts)
-                amp_prior, amp_levels = _fit_track!(
-                    la, wf, fit.amp.x, fit.amp.pieces, fit.amp.prior;
-                    fit.amp.level, fit.amp.nlevel, status = ast, weights = wa, flat_span,
-                )
-                isnothing(systems) || push!(
-                    systems.amp,
-                    (; slots = systems.ids[k][ai, feed, 1:nfs, ts], w = wa[1:nfs], fit.amp.x, fit.amp.pieces, prior = amp_prior, fit.amp.level, fit.amp.nlevel),
-                )
-                isnothing(amp_priors) || (amp_priors[k][ai, feed, ts] = amp_prior)
-                isnothing(amp_levels) || (levels[ant].amp[feed, :, ts] .= amp_levels)
-            end
-            pst = isnothing(fit.phase) ? nothing :
-                isnothing(phase_status) ? similar(fit.phase.pieces, TrackStatus) : view(phase_status[k], ai, feed, :, ts)
-            if isnothing(fit.phase)
-                fill!(φ̃, T(NaN))
-            elseif all(pins)
-                # A wholly pinned track is known rather than fitted: report it as such
-                # instead of leaving it at NODATA.
-                fill!(pst, TrackSolved)
-                fill!(φ̃, zero(T))
-                isnothing(levels[ant].phase) || (levels[ant].phase[feed, :, ts] .= zero(T))
-            else
-                phase_prior, phase_levels = _fit_track!(
-                    φ̃, wf, fit.phase.x, fit.phase.pieces, fit.phase.prior;
-                    fit.phase.level, fit.phase.nlevel, unwrap = seed, status = pst,
-                    weights = wg, max_unwrap_ambiguity, flat_span,
-                )
-                isnothing(systems) || push!(
-                    systems.phase,
-                    (; slots = systems.ids[k][ai, feed, 1:nfs, ts], w = wg[1:nfs], fit.phase.x, fit.phase.pieces, prior = phase_prior, fit.phase.level, fit.phase.nlevel),
-                )
-                any(==(TrackDeclined), pst) && push!(declined, (ant, feed, ts))
-                # A declined piece leaves its slots without a value in either
-                # observable: its data are not fit until its phase branch is known.
-                for (j, p) in pairs(fit.phase.pieces)
-                    pst[j] == TrackDeclined || continue
-                    la[p] .= T(NaN)
-                    isnothing(fit.amp) || isnothing(amp_status) || (amp_status[k][ai, feed, j, ts] = TrackDeclined)
-                end
-                isnothing(phase_priors) || (phase_priors[k][ai, feed, ts] = phase_prior)
-                isnothing(phase_levels) || (levels[ant].phase[feed, :, ts] .= phase_levels)
-                # A partial pin holds its own segments and leaves the rest fitted.
-                # With segments fit independently that is the constrained fit itself;
-                # `solve_joint_bandpass!` rejects a prior that relates them rather
-                # than pass off a joint fit with one segment overwritten.
-                for fs in 1:nfs
-                    pins[fs] && (φ̃[fs] = zero(T))
-                end
-            end
-            # A slot takes whichever of its values the fits gave; the other keeps
-            # its current value.
-            for fs in 1:nfs
-                I = CartesianIndex(ai, feed, fs, ts)
-                has_amp, has_phase = isfinite(la[fs]), isfinite(φ̃[fs])
-                has_amp || has_phase || continue
-                has_amp && (amp_valid[I] = true)
-                has_phase && (phase_valid[I] = true; φ[I] = φ̃[fs])
-                g[I] = exp(C(has_amp ? la[fs] : log(abs(g[I])), φ[I]))
-                nupdated += 1
-            end
-            _move_band_level!(gains[k], levels[ant], S, ai, feed, ts, entries, view(tseg, ant, :))
+end
+
+# Each gauge row solved for its free slot of largest coefficient, over the `n`
+# unknowns of a system whose first are the free slots (numbered `idx`):
+# `x = T·u + t0`, `keep` the unknowns `u` stands for, and `Tt = Tᵀ`. The rows hold
+# disjoint slots, one per connected component.
+function _gauge_map(gauge, x, free, idx, n)
+    isnothing(gauge) && return nothing
+    row_of = zeros(Int, n)
+    for (r, row) in pairs(gauge.rows)
+        cands = [(m, c) for (m, c) in row if free[m]]
+        isempty(cands) && continue
+        row_of[idx[first(cands[argmax([abs(c) for (_, c) in cands])])]] = r
+    end
+    keep = findall(iszero, row_of)
+    col = zeros(Int, n)
+    col[keep] = eachindex(keep)
+    Is, Js, Vs = collect(keep), col[keep], ones(length(keep))
+    t0 = zeros(n)
+    for e in findall(!iszero, row_of)
+        row = gauge.rows[row_of[e]]
+        ce = only(c for (m, c) in row if free[m] && idx[m] == e)
+        t0[e] = (gauge.d[row_of[e]] - sum((c * x[m] for (m, c) in row if !free[m]); init = 0.0)) / ce
+        for (m, c) in row
+            (free[m] && idx[m] != e) || continue
+            push!(Is, e)
+            push!(Js, col[idx[m]])
+            push!(Vs, -c / ce)
         end
     end
-    return nupdated, declined
+    T = sparse(Is, Js, Vs, n, length(keep))
+    return (; T, t0, keep, Tt = sparse(T'))
 end
 
-# Move one (station, feed, time segment) track's band-mean log-amplitude and
-# phase into the source coherence `S` of every correlation it enters, which
-# leaves every model visibility unchanged: the data leave that level free, and
-# under a prior the sweep would otherwise drift along it. Moving it as soon as
-# the track is fit keeps the gains and `S` the later tracks of the sweep are
-# fit against consistent. `entries` are the track's `touching` entries and
-# `tseg_a` its station's time segment per scan. A pinned track keeps its
-# phase; levels move with their track.
-function _move_band_level!(gk, lv, S, ai, f, ts, entries, tseg_a)
-    (; g, φ, phase_valid, amp_valid, pinned) = gk
-    T = real(eltype(g))
-    pv, av = view(phase_valid, ai, f, :, ts), view(amp_valid, ai, f, :, ts)
-    any(pv) || any(av) || return gk
-    mla = any(av) ? sum(log(abs(g[ai, f, fs, ts])) for fs in axes(g, Frequency) if av[fs]) / count(av) : zero(T)
-    mφ = !any(pv) || any(view(pinned, ai, f, :, ts)) ? zero(T) :
-        sum(φ[ai, f, fs, ts] for fs in axes(g, Frequency) if pv[fs]) / count(pv)
-    for fs in axes(g, Frequency)
-        dla, dφ = av[fs] ? mla : zero(T), pv[fs] ? mφ : zero(T)
-        g[ai, f, fs, ts] *= exp(-complex(dla, dφ))
-        φ[ai, f, fs, ts] -= dφ
+# The system's quadratic with each track's energy under `priors` added.
+function _assembled(sys, priors)
+    Q = copy(sys.data)
+    for (chains, prior) in zip(sys.chains, priors)
+        _add_prior_terms!(Q, chains, prior)
     end
-    isnothing(lv.amp) || (view(lv.amp, f, :, ts) .-= mla)
-    isnothing(lv.phase) || (view(lv.phase, f, :, ts) .-= mφ)
-    # `V ≈ g_first·S·conj(g_second)`.
-    for (bi, p, _, _, first_end) in entries, si in axes(S, Scan)
-        tseg_a[si] == ts || continue
-        S[Scan(si), AntennaPair(bi), FeedPair(p)] *= exp(complex(mla, first_end ? mφ : -mφ))
-    end
-    return gk
+    return Q
 end
 
-# The fixed structure of the joint gain step (`_joint_gain_step!`): the slot
-# numbering `ids` (`_gain_slot_ids`), the `(slot, slot)` pairs a correlation
-# joins, `edge[si, bi, p, cell]` the pair of that correlation (`0` for none), and,
-# for a gauge other than a pin, the slots of each constraint row's connected
-# component.
-function _joint_gain_layout(gains, data, layout, gauge_state)
+# `Q` plus `λ/2·‖x′ − x‖²` over the free slots, over the unknowns the gauge
+# leaves: `(K, h, c, key)` of `½uᵀKu − hᵀu + c`.
+function _reduced(sys, Q, λ)
+    nf = length(sys.xf)
+    K = _matrix(Q) + spdiagm([fill(Float64(λ), nf); zeros(length(Q.h) - nf)])
+    h = copy(Q.h)
+    h[1:nf] .+= λ .* sys.xf
+    c = Q.c + λ * dot(sys.xf, sys.xf) / 2
+    isnothing(sys.gauge) && return K, h, c, Q.key
+    (; T, t0, keep) = sys.gauge
+    return T' * K * T, T' * (h - K * t0), c + dot(t0, K * t0) / 2 - dot(h, t0), Q.key[keep]
+end
+
+# The unknowns `u` in the system's own.
+_unreduced(sys, u) = isnothing(sys.gauge) ? u : sys.gauge.T * u + sys.gauge.t0
+
+_factor(K, key; check = true) = cholesky(Symmetric(K); perm = sortperm(key), check)
+
+"""
+    _map_step(sys, priors; λ = 0) -> (x′, levels, model)
+
+One Levenberg–Marquardt step of the MAP objective of the system `sys`
+(`_posterior_system`) with each track's resolved prior from `priors`: the
+minimum of its quadratic plus `λ/2·‖x′ − x‖²` over the free slots. Returns the
+new slot values, each track's level values by group, and the undamped
+quadratic's value there, which is the prior energy alone at `x′ = x`.
+"""
+function _map_step(sys, priors; λ = 0)
+    Q = _assembled(sys, priors)
+    K, h, _, key = _reduced(sys, Q, λ)
+    z = _unreduced(sys, _factor(K, key) \ h)
+    x′ = copy(sys.x)
+    x′[sys.free] .= z[eachindex(sys.xf)]
+    return x′, [Dict(g => z[j] for (g, j) in lv) for lv in sys.levels], dot(z, _matrix(Q) * z) / 2 - dot(Q.h, z) + Q.c
+end
+
+# ── Hyperparameters and branches ─────────────────────────────────────────────
+
+"""
+    _selected_inverse(F) -> (i, j) -> K⁻¹[i, j]
+
+The entries of `K⁻¹` on the sparsity pattern of its Cholesky factor `F`, by the
+recursion of Takahashi, Fagan & Chen (1973) from the last column back. The
+pattern holds every pair of unknowns that share a term of the energy, so these
+are the posterior covariances the expected energy needs. Looking up a pair
+outside it throws.
+"""
+function _selected_inverse(F)
+    L = sparse(F.L)
+    rv, Lv = rowvals(L), nonzeros(L)
+    n = size(L, 1)
+    Zv = zeros(length(Lv))
+    acc = zeros(n)
+    pos = zeros(Int, n)
+    mark = zeros(Int, n)
+    for j in reverse(axes(L, 2))
+        rng = nzrange(L, j)
+        below = rng[2:end]
+        for kk in below
+            mark[rv[kk]] = j
+            pos[rv[kk]] = kk
+            acc[rv[kk]] = 0.0
+        end
+        # `Σ_k L_kj·Z_ik` for each row `i` below the diagonal, from the stored
+        # lower triangle of the columns already done.
+        for kk in below
+            k = rv[kk]
+            for zz in nzrange(L, k)
+                i = rv[zz]
+                mark[i] == j || continue
+                acc[i] += Lv[kk] * Zv[zz]
+                i != k && (acc[k] += Lv[pos[i]] * Zv[zz])
+            end
+        end
+        d = Lv[first(rng)]
+        s = 0.0
+        for kk in below
+            Zv[kk] = -acc[rv[kk]] / d
+            s += Lv[kk] * Zv[kk]
+        end
+        Zv[first(rng)] = (1 / d - s) / d
+    end
+    Z = SparseMatrixCSC(n, n, copy(L.colptr), copy(rv), Zv)
+    ip = invperm(F.p)
+    return function (a, b)
+        col, row = minmax(ip[a], ip[b])
+        rng = nzrange(Z, col)
+        k = searchsortedfirst(view(rowvals(Z), rng), row)
+        k <= length(rng) && rowvals(Z)[rng[k]] == row ||
+            error("posterior covariance ($a, $b) is not on the factor's sparsity pattern")
+        return nonzeros(Z)[rng[k]]
+    end
+end
+
+# The covariance of a system's own unknowns, from the covariance `cov` of the
+# unknowns `u` its gauge leaves.
+_covariance(cov, ::Nothing) = cov
+function _covariance(cov, gauge)
+    Tt = gauge.Tt
+    rv, v = rowvals(Tt), nonzeros(Tt)
+    return (a, b) -> sum((v[p] * v[q] * cov(rv[p], rv[q]) for p in nzrange(Tt, a) for q in nzrange(Tt, b)); init = 0.0)
+end
+
+# The hyperparameters `prior` gives as densities, by name; `prior` with those at
+# the values `vals`; and their hyperprior's log density over their logs.
+_hyper_names(::Nothing) = ()
+_hyper_names(p::RandomWalkPrior) = is_fixed_hyper(p.σ) ? () : (:σ,)
+_hyper_names(p::OUPrior) = Tuple(s for s in (:scale, :σ) if !is_fixed_hyper(getfield(p, s)))
+_with_hypers(p::RandomWalkPrior, vals) = RandomWalkPrior(; p.order, σ = get(vals, :σ, p.σ), p.init)
+_with_hypers(p::OUPrior, vals) = OUPrior(; scale = get(vals, :scale, p.scale), σ = get(vals, :σ, p.σ))
+_log_hyperprior(prior, vals) = sum(logdensityof(getfield(prior, k), v) + log(v) for (k, v) in pairs(vals))
+
+# The inverse of a symmetric curvature, its eigenvalues taken in magnitude.
+function _inverse_curvature(C)
+    E = eigen(Symmetric(C))
+    return E.vectors * Diagonal(inv.(abs.(E.values))) * E.vectors'
+end
+
+"""
+    _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterations) -> Bool
+
+Type-II MAP of the hyperparameters `tracks`' priors give as densities, written
+into `priors` (each track's resolved prior, the current values on entry): the
+maximum over their logs of the hyperprior density times the Laplace
+approximation of the marginal likelihood of the system `sys`
+(`_posterior_system`, damped by `λ`). That quadratic is Gaussian in its
+unknowns, so the marginal is exact for it:
+
+    log p(data | θ) = −min_u f_θ(u) − ½·log det ∇²f_θ + Σ_k log N-normalization of each prior term,
+
+the levels and flat starts integrated under their flat priors. Its gradient in
+a track's hyperparameters is that of the track's prior log density in
+expectation over the posterior of its states (Fisher's identity), whose moments
+need only the covariances `_selected_inverse` gives.
+
+The search is quasi-Newton with one secant (BFGS) block per track, started from
+the curvature of that expected log density and kept in `curvature` from call to
+call, each step backtracked until the log posterior is no lower. It stops once
+the Newton step is within `tolerance` of its standard error, `gᵀH⁻¹g ≤
+tolerance²`, by every track's curvature measured along a step of its own, and
+returns whether it did within `max_iterations` steps.
+"""
+function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterations)
+    est = [i for i in eachindex(tracks) if !isempty(_hyper_names(tracks[i].prior))]
+    isempty(est) && return true
+    names = [_hyper_names(tracks[i].prior) for i in est]
+    vals(k, lθ) = NamedTuple{names[k]}(Tuple(exp.(lθ)))
+    θ = [log.([getfield(priors[i], s) for s in names[k]]) for (k, i) in pairs(est)]
+    function evaluate(θ)
+        trial = copy(priors)
+        for (k, i) in pairs(est)
+            trial[i] = _with_hypers(tracks[i].prior, vals(k, θ[k]))
+        end
+        K, h, c, key = _reduced(sys, _assembled(sys, trial), λ)
+        F = _factor(K, key; check = false)
+        # Hyperparameters so extreme that the posterior's curvature is lost to
+        # rounding are no candidate.
+        issuccess(F) || return (; lp = -Inf, F, u = h, trial)
+        u = F \ h
+        lp = dot(h, u) / 2 - c - logdet(F) / 2
+        lp += sum(_expected_log_prior(p, ch, nothing, Float64) for (p, ch) in zip(trial, sys.chains); init = 0.0)
+        lp += sum(_log_hyperprior(tracks[i].prior, vals(k, θ[k])) for (k, i) in pairs(est))
+        return (; lp, F, u, trial)
+    end
+    # Each track's expected log prior density and hyperprior, as a function of
+    # its log hyperparameters.
+    function expected(at)
+        cov = _covariance(_selected_inverse(at.F), sys.gauge)
+        z = _unreduced(sys, at.u)
+        moms = [_chain_moments(sys.chains[i], z, cov) for i in est]
+        return [
+            lθ -> _expected_log_prior(_with_hypers(tracks[i].prior, vals(k, lθ)), sys.chains[i], moms[k], eltype(lθ)) +
+                _log_hyperprior(tracks[i].prior, vals(k, lθ))
+                for (k, i) in pairs(est)
+        ]
+    end
+    at = evaluate(θ)
+    isfinite(at.lp) || throw(PosDefException(0))
+    fs = expected(at)
+    for (k, i) in pairs(est)
+        isnothing(curvature[i]) &&
+            (curvature[i] = (; inverse = _inverse_curvature(-ForwardDiff.hessian(fs[k], θ[k])), measured = false))
+    end
+    g = [ForwardDiff.gradient(fs[k], θ[k]) for k in eachindex(est)]
+    converged = false
+    for _ in 1:max_iterations
+        Hinv = [curvature[i].inverse for i in est]
+        if sum(k -> dot(g[k], Hinv[k] * g[k]), eachindex(est)) <= tolerance^2 && all(i -> curvature[i].measured, est)
+            converged = true
+            break
+        end
+        d = [Hinv[k] * g[k] for k in eachindex(est)]
+        α = 1.0
+        next = nothing
+        while true
+            θ1 = [θ[k] .+ α .* d[k] for k in eachindex(est)]
+            all(k -> _within_rounding(θ1[k], θ[k]), eachindex(est)) && break
+            trial = evaluate(θ1)
+            # The log posterior is known to its rounding.
+            trial.lp >= at.lp - 16 * eps(abs(at.lp)) && (next = (θ1, trial); break)
+            α /= 2
+        end
+        # No step changes the hyperparameters: they are at the maximum to rounding.
+        isnothing(next) && (converged = true; break)
+        θ1, at = next
+        fs = expected(at)
+        g1 = [ForwardDiff.gradient(fs[k], θ1[k]) for k in eachindex(est)]
+        for (k, i) in pairs(est)
+            s, y = θ1[k] - θ[k], g[k] - g1[k]
+            sy = dot(s, y)
+            sy > 0 || continue
+            V = I - y * s' / sy
+            curvature[i] = (; inverse = V' * curvature[i].inverse * V + s * s' / sy, measured = true)
+        end
+        θ, g = θ1, g1
+    end
+    priors[est] .= at.trial[est]
+    return converged
+end
+
+# Each slot's own estimate of one observable given every other gain and `S`, from
+# its relative gain estimate `1 + c/W` (`_linearize`), and its weight; `NaN` and
+# zero for a slot without data. With the phase held at zero the least-squares
+# log-amplitude is that of `Re(1 + c/W)`.
+function _slot_estimates(x, lin, observable; phase_held = false)
+    y = fill(NaN, length(x))
+    wy = zeros(length(x))
+    for n in eachindex(x, lin.W)
+        lin.W[n] > 0 || continue
+        ρ = 1 + lin.c[n] / lin.W[n]
+        v = observable === :phase ? angle(ρ) : phase_held ? (real(ρ) > 0 ? log(real(ρ)) : NaN) : log(abs(ρ))
+        isfinite(v) || continue
+        y[n] = x[n] + v
+        wy[n] = lin.W[n] * abs2(ρ)
+    end
+    return y, wy
+end
+
+# Track `t`'s prior with its hyperparameters estimated from the slot estimates
+# `y` (weights `wy`) as independent measurements of the track alone: type-II MAP
+# over its pieces, any constant the source term absorbs integrated out, and for
+# a phase over its pieces' 2π branches. The joint solve starts from these.
+function _seed_prior(t, y, wy; phase::Bool)
+    ys = [y[t.slots[p]] for p in t.pieces]
+    ws = [wy[t.slots[p]] for p in t.pieces]
+    xs = [float.(t.x[p]) for p in t.pieces]
+    return _estimate_hypers(t.prior, ys, ws, xs; level = _level_groups(t, t.prior), branches = phase)
+end
+
+# Put phase track `t` on the branches `_branch_filter` finds most probable for its
+# slot estimates `y` under the resolved `prior`: each free slot of `φ` moves by the
+# multiple of 2π its estimate moves, which leaves its gain unchanged. A piece's
+# branches are first moved together by the multiple of 2π nearest its estimates,
+# and the pieces sharing a level group onto one branch. Writes each piece's
+# `_slip_probability` into `slip` and returns the per-slot shifts (radians).
+function _choose_branches!(φ, t, prior, y, wy, free; slip = nothing)
+    groups = _level_groups(t, prior)
+    ys = [y[t.slots[p]] for p in t.pieces]
+    ws = [wy[t.slots[p]] for p in t.pieces]
+    lifts = map(eachindex(t.pieces)) do j
+        p = t.pieces[j]
+        model, θ, r, u = _filter_inputs(prior, ys[j], ws[j], float.(t.x[p]))
+        any(isfinite, θ) || return θ
+        bf = _branch_filter(model, θ, r, u; level = !isnothing(groups))
+        isnothing(slip) || (slip[j] = _slip_probability(model, bf.histories, r, u; level = !isnothing(groups)))
+        lift = first(bf.histories).lift
+        return lift .+ 2π * round(_weighted_mean_finite(θ .- lift, ws[j]) / 2π)
+    end
+    isnothing(groups) || _align_branches!(lifts, ws, groups)
+    shift = zeros(length(φ))
+    for (j, p) in pairs(t.pieces), (i, k) in pairs(p)
+        n = t.slots[k]
+        (free[n] && isfinite(lifts[j][i])) || continue
+        shift[n] = 2π * round((lifts[j][i] - ys[j][i]) / 2π)
+        φ[n] += shift[n]
+    end
+    return shift
+end
+
+# Move each gauge row's right-hand side by the branch shifts of its slots, so
+# the constraint still holds on the gains after a change of branch.
+function _shift_gauge!(gauge, shift)
+    for (j, row) in pairs(gauge.rows)
+        gauge.d[j] += sum((c * shift[n] for (n, c) in row); init = 0.0)
+    end
+    return gauge
+end
+
+# ── The solve ────────────────────────────────────────────────────────────────
+
+# The fixed structure of the joint solve: `edge[si, bi, p, cell]` numbers the
+# `(slot, slot)` pair a correlation joins, `0` for none, and `slot_pairs` lists
+# them, the slots numbered by `ids` (`_gain_slot_ids`).
+function _joint_gain_layout(data, layout, ids)
     (; r, ends) = data
     (; loc, tseg, fseg) = layout
-    ids = _gain_slot_ids(gains)
     edge = zeros(Int32, size(r))
     index = Dict{Tuple{Int, Int}, Int32}()
     slot_pairs = Tuple{Int, Int}[]
@@ -1176,430 +1466,39 @@ function _joint_gain_layout(gains, data, layout, gauge_state)
             end
         end
     end
-    row_slots = if isnothing(gauge_state)
-        nothing
-    else
-        compid, ncomp, _ = _joint_bandpass_graph(data, layout, ids)
-        members = [Int[] for _ in 1:ncomp]
-        for n in eachindex(compid)
-            iszero(compid[n]) || push!(members[compid[n]], n)
-        end
-        [isempty(row) ? Int[] : members[compid[first(first(row))]] for row in gauge_state.rows]
-    end
-    return (; ids, edge, slot_pairs, row_slots)
+    return (; edge, slot_pairs)
 end
 
-# One Gauss–Newton step on every gain slot at once, given `S`. To first order a
-# correlation's model `m = g_a·S·conj(g_b)` moves to
-# `m·(1 + δℓ_a + δℓ_b + i(δφ_a − δφ_b))` for log-amplitude `ℓ` and phase `φ`,
-# so with `u = r/(w·m) − 1` and weight `q = w·|m|²` the step solves two weighted
-# least-squares problems over the slots: `Im u` measures `δφ_a − δφ_b` and
-# `Re u` measures `δℓ_a + δℓ_b`. Solving every slot together moves the
-# directions a station-by-station sweep is slow along — those only weakly
-# measured correlations constrain, such as the phase between feeds — as fast as
-# any other. Without a prior the normal equations are solved directly and a χ²
-# backtracking search keeps the step a descent step; under one, `systems` holds
-# the sweep's per-track fits and the MAP step, under the gauge's constraints, is
-# solved by `_joint_prior_solve`. Pinned slots keep their phase; any other gauge
-# is restored after the step by shifting each component's phase along its free
-# direction, which a full step under a prior leaves unchanged and which is
-# exact without one. Returns each slot's information, the diagonal of the
-# normal matrix: the inverse variance of its log-gain from the data alone.
-function _joint_gain_step!(gains, data, jl, gauge_state, systems)
-    (; r, w, S) = data
-    (; ids, edge, slot_pairs, row_slots, fitted) = jl
-    T = real(eltype(S))
-    nslots = sum(length, ids)
-    gv = zeros(complex(T), nslots)
-    φv = zeros(T, nslots)
-    phase_free = falses(nslots)
-    amp_free = falses(nslots)
-    for (k, idk) in pairs(ids), I in eachindex(idk)
-        gk = gains[k]
-        n = idk[I]
-        gv[n], φv[n] = gk.g[I], gk.φ[I]
-        amp_free[n] = fitted.amp && gk.amp_valid[I]
-        phase_free[n] = fitted.phase && gk.phase_valid[I] && !gk.pinned[I]
-    end
-
-    function chi2(g)
-        out = zero(Float64)
-        for I in CartesianIndices(edge)
-            e = edge[I]
-            iszero(e) && continue
-            wc = w[I]
-            wc > 0 || continue
-            na, nb = slot_pairs[e]
-            out += abs2(r[I] - wc * g[na] * S[I[1], I[2], I[3]] * conj(g[nb])) / wc
-        end
-        return out
-    end
-
-    q = zeros(Float64, length(slot_pairs))
-    bφ = zeros(Float64, nslots)
-    bℓ = zeros(Float64, nslots)
-    for I in CartesianIndices(edge)
-        e = edge[I]
-        iszero(e) && continue
-        wc = w[I]
-        wc > 0 || continue
-        na, nb = slot_pairs[e]
-        m = gv[na] * S[I[1], I[2], I[3]] * conj(gv[nb])
-        qc = wc * abs2(m)
-        qc > 0 || continue
-        u = r[I] / (wc * m) - 1
-        q[e] += qc
-        bφ[na] += qc * imag(u)
-        bφ[nb] -= qc * imag(u)
-        bℓ[na] += qc * real(u)
-        bℓ[nb] += qc * real(u)
-    end
-    priors = !isnothing(systems) && any(sys -> !isnothing(sys.prior), Iterators.flatten((systems.phase, systems.amp)))
-    step = one(T)
-    if priors
-        gauge = isnothing(gauge_state) ? nothing : (; gauge_state.rows, gauge_state.d, row_slots)
-        δφ = _joint_prior_solve(q, slot_pairs, bφ, φv, phase_free, -1, systems.phase; gauge)
-        δℓ = _joint_prior_solve(q, slot_pairs, bℓ, log.(abs.(gv)), amp_free, 1, systems.amp)
-        step = T(min(1, _BP_MAX_LINEAR_STEP / max(maximum(abs, δφ), maximum(abs, δℓ))))
-    else
-        δφ = _joint_normal_solve(q, slot_pairs, bφ, phase_free, -1)
-        δℓ = _joint_normal_solve(q, slot_pairs, bℓ, amp_free, 1)
-        χ0 = chi2(gv)
-        trial = similar(gv)
-        # A Gauss–Newton direction that lowers χ² at none of these is taken as
-        # no step: near convergence the decrease is below round-off.
-        step = zero(T)
-        for t in (1, 1 // 2, 1 // 4, 1 // 8, 1 // 16)
-            @. trial = gv * exp(complex(T(t) * δℓ, T(t) * δφ))
-            if chi2(trial) < χ0
-                step = T(t)
-                break
-            end
-        end
-    end
-
-    shift = zeros(T, nslots)
-    if !isnothing(gauge_state)
-        for (j, row) in pairs(gauge_state.rows)
-            isempty(row) && continue
-            res = sum(c * (φv[n] + step * δφ[n]) for (n, c) in row) - gauge_state.d[j]
-            α = -res / sum(last, row)
-            for n in row_slots[j]
-                shift[n] += α
-            end
-        end
-    end
-    for (k, idk) in pairs(ids), I in eachindex(idk)
-        gk = gains[k]
-        n = idk[I]
-        Δℓ = gk.amp_valid[I] ? step * δℓ[n] : zero(T)
-        Δφ = gk.phase_valid[I] ? step * δφ[n] + shift[n] : zero(T)
-        gk.g[I] *= exp(complex(Δℓ, Δφ))
-        gk.φ[I] += Δφ
-    end
-    information = zeros(nslots)
-    for (e, (na, nb)) in pairs(slot_pairs)
-        information[na] += q[e]
-        information[nb] += q[e]
-    end
-    return information
-end
-
-# Solve `Σ_e q_e·(x_a + s·x_b)²`'s normal equations `H·δ = b` over the `free`
-# slots, `s = −1` for phase differences and `+1` for log-amplitude sums. A
-# ridge of `1e-9` of each slot's own weight fixes the phase's free common
-# direction per component and a bipartite component's alternating one without
-# moving any measured direction.
-function _joint_normal_solve(q, slot_pairs, b, free, s)
-    pos = cumsum(free)
-    nfree = last(pos)
-    Is, Js, Vs = Int[], Int[], Float64[]
-    for (e, (na, nb)) in pairs(slot_pairs)
-        qe = q[e]
-        qe > 0 || continue
-        # A fixed end contributes only to the free end's own weight.
-        for n in (na, nb)
-            free[n] && (push!(Is, pos[n]); push!(Js, pos[n]); push!(Vs, qe))
-        end
-        if free[na] && free[nb]
-            append!(Is, (pos[na], pos[nb]))
-            append!(Js, (pos[nb], pos[na]))
-            append!(Vs, (s * qe, s * qe))
-        end
-    end
-    H = sparse(Is, Js, Vs, nfree, nfree)
-    d = diag(H)
-    keep = d .> 0
-    δ = zeros(eltype(b), length(b))
-    any(keep) || return δ
-    Hk = H[keep, keep] + Diagonal(1.0e-9 .* d[keep])
-    x = cholesky(Symmetric(Hk)) \ b[free][keep]
-    idx = findall(free)[keep]
-    δ[idx] .= x
-    return δ
-end
-
-# The MAP step of one observable under the tracks' priors: `x` minimizes
-# `½(x − x₀)ᵀH(x − x₀) − bᵀ(x − x₀) + E(x)` over the free slots, with `H` the
-# normal matrix of `_joint_normal_solve` and `E` the tracks' prior energy with
-# their levels profiled out (`_track_energy`), and the step is `x − x₀`. A slot
-# its track's fit does not weight is held fixed and left out of `E`, which
-# marginalizes it. Tracks without a prior are fit by their own data alone.
-#
-# Conjugate gradients, preconditioned by `M = W + P` with `W` each slot's
-# weight in its track's fit and `P` the prior precision, so applying `M⁻¹` is
-# one fit of every track (`_track_response`, affine in its observations), and
-# `P·p` is the change of `E`'s gradient. `gauge`, when given, holds constraint
-# rows `C·x = d` over the slots (`rows`, `d`) and the slots of each row's
-# connected component (`row_slots`), one row per component. The start is moved
-# onto the constraints along each component's common shift `z`, and every search
-# direction is projected onto `C·p = 0` along the same shifts,
-# `Π = I − z·(C·z)⁻¹·C`, which is CG on the problem reduced to that subspace.
-function _joint_prior_solve(q, slot_pairs, b, x0, free, s, systems; gauge = nothing)
-    nslots = length(b)
-    weight = zeros(nslots)
-    for (e, (na, nb)) in pairs(slot_pairs)
-        weight[na] += q[e]
-        weight[nb] += q[e]
-    end
+# Every (station, feed, time segment) track of one observable: its slots in
+# frequency-segment order and its station's coordinates, pieces, prior and
+# levels (`fits[a]`), with `active` marking the pieces its prior acts on — those
+# with data or fixed values at enough slots (`known`) to determine its states.
+function _bandpass_tracks(fits, observable, ids, loc, present, nfeed, known)
     tracks = NamedTuple[]
-    for sys in systems
-        isnothing(sys.prior) && continue
-        wt = [free[n] ? Float64(wi) : 0.0 for (n, wi) in zip(sys.slots, sys.w)]
-        weight[sys.slots] .= wt
-        push!(tracks, merge(sys, (; w = wt)))
-    end
-    free = free .& (weight .> 0)
-    inprior = falses(nslots)
-    foreach(t -> inprior[t.slots] .= true, tracks)
-    response0 = [_track_response(t, zeros(length(t.slots))) for t in tracks]
-
-    function apply_H(p)
-        out = zeros(nslots)
-        for (e, (na, nb)) in pairs(slot_pairs)
-            v = q[e] * (p[na] + s * p[nb])
-            out[na] += v
-            out[nb] += s * v
+    for a in eachindex(fits, loc)
+        (isnothing(fits[a]) || isnothing(fits[a][observable])) && continue
+        f = fits[a][observable]
+        k, ai = loc[a]
+        for feed in 1:nfeed, ts in present[a]
+            slots = vec(ids[k][ai, feed, :, ts])
+            active = [!isnothing(f.prior) && count(n -> known[n], slots[p]) >= _samples_needed(f.prior) for p in f.pieces]
+            push!(tracks, (; a, k, ai, feed, ts, slots, f.x, f.pieces, f.prior, f.level, f.nlevel, active))
         end
-        return out .* free
     end
-    # `M⁻¹·v`, with `affine` adding the priors' mean term.
-    function apply_Minv(v; affine = false)
-        out = zeros(nslots)
-        for n in eachindex(out)
-            free[n] && !inprior[n] && (out[n] = v[n] / weight[n])
-        end
-        for (t, f0) in zip(tracks, response0)
-            f = _track_response(t, v[t.slots])
-            affine || (f .-= f0)
-            for (i, n) in pairs(t.slots)
-                free[n] && (out[n] = f[i])
-            end
-        end
-        return out
-    end
-
-    function prior_gradient(v)
-        out = zeros(nslots)
-        for t in tracks
-            y = [free[n] ? Float64(v[n]) : NaN for n in t.slots]
-            g = zeros(length(y))
-            _track_energy(t, y; gradient = g)
-            for (i, n) in pairs(t.slots)
-                free[n] && (out[n] += g[i])
-            end
-        end
-        return out
-    end
-    gradient0 = prior_gradient(zeros(nslots))
-    apply_A(p) = (apply_H(p) .+ prior_gradient(p) .- gradient0) .* free
-
-    # Each constraint row's index `j`, free slots `(slot, coefficient)` and
-    # component's free slots, and `C·z` over them.
-    rows = isnothing(gauge) ? NamedTuple[] : map(eachindex(gauge.rows)) do j
-        (; j, c = [(n, cn) for (n, cn) in gauge.rows[j] if free[n]], z = filter(n -> free[n], gauge.row_slots[j]))
-    end
-    filter!(row -> !isempty(row.c), rows)
-    allunique(Iterators.flatten(row.z for row in rows)) ||
-        throw(ArgumentError("the joint bandpass gauge holds more than one constraint on a connected component"))
-    cz = [sum(last, row.c) for row in rows]
-    function project!(v)
-        for (row, czj) in zip(rows, cz)
-            γ = sum(cn * v[n] for (n, cn) in row.c) / czj
-            v[row.z] .-= γ
-        end
-        return v
-    end
-    function project_adjoint!(v)
-        for (row, czj) in zip(rows, cz)
-            γ = sum(n -> v[n], row.z) / czj
-            for (n, cn) in row.c
-                v[n] -= cn * γ
-            end
-        end
-        return v
-    end
-
-    x = apply_Minv(weight .* x0 .+ b; affine = true)
-    x[.!free] .= x0[.!free]
-    for (row, czj) in zip(rows, cz)
-        res = sum(cn * x[n] for (n, cn) in gauge.rows[row.j]) - gauge.d[row.j]
-        x[row.z] .-= res / czj
-    end
-    r =(b .- apply_H(x .- x0) .- prior_gradient(x)) .* free
-    ry = project_adjoint!(copy(r))
-    z = apply_Minv(ry)
-    py = copy(z)
-    rz = dot(ry, z)
-    # Solved to a residual norm 1e-10 of its start: the step is then exact to the
-    # precision the outer iteration can use.
-    target = 1.0e-20 * rz
-    for _ in 1:max(50, 2 * count(free))
-        rz <= target && break
-        p = project!(copy(py))
-        Ap = apply_A(p)
-        α = rz / dot(p, Ap)
-        x .+= α .* p
-        r .-= α .* Ap
-        ry = project_adjoint!(copy(r))
-        z = apply_Minv(ry)
-        rz, rz_prev = dot(ry, z), rz
-        py .= z .+ (rz / rz_prev) .* py
-    end
-    return (x .- x0) .* free
+    return tracks
 end
 
-# The MAP objective of a joint bandpass solve: half the χ² of the visibilities
-# against `g_a·S·conj(g_b)`, the scale its track fits weight their data on, plus
-# each track's prior energy (`_prior_energy`) under the priors `systems` records,
-# one spectral window at a time.
-function _joint_objective(gains, data, layout, systems)
-    (; r, w, S, ends) = data
-    (; loc, tseg, fseg) = layout
-    χ2 = 0.0
-    for p in axes(r, FeedPair), bi in axes(r, AntennaPair)
-        _solvable(ends[bi, p]) || continue
-        (a, fa), (b, fb) = ends[bi, p]
-        (ka, ia), (kb, ib) = loc[a], loc[b]
-        ga, gb = gains[ka].g, gains[kb].g
-        for si in axes(r, Scan)
-            ta, tb = tseg[a, si], tseg[b, si]
-            (iszero(ta) || iszero(tb)) && continue
-            s = S[Scan(si), AntennaPair(bi), FeedPair(p)]
-            for cell in axes(r, Frequency)
-                wc = w[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)]
-                wc > 0 || continue
-                m = ga[ia, fa, fseg[a, cell], ta] * s * conj(gb[ib, fb, fseg[b, cell], tb])
-                χ2 += abs2(r[Scan(si), AntennaPair(bi), FeedPair(p), Frequency(cell)] - wc * m) / wc
-            end
-        end
-    end
-    slot = [(k, I) for (k, idk) in pairs(systems.ids) for I in eachindex(idk)]
-    energy = 0.0
-    for (tracks, value, valid) in (
-            (systems.phase, gk -> gk.φ, gk -> gk.phase_valid),
-            (systems.amp, gk -> log.(abs.(gk.g)), gk -> gk.amp_valid),
-        )
-        values = map(value, gains)
-        for sys in tracks
-            isnothing(sys.prior) && continue
-            y = map(sys.slots) do n
-                k, I = slot[n]
-                valid(gains[k])[I] ? Float64(values[k][I]) : NaN
-            end
-            energy += _track_energy(sys, y)
-        end
-    end
-    return χ2 / 2 + energy
-end
+# Whether `x′` differs from `x` by no more than `x`'s own rounding.
+_within_rounding(x′, x) = all(i -> abs(x′[i] - x[i]) <= eps(abs(x[i])), eachindex(x′, x))
 
-# The prior energy of one track system's values `y`, `NaN` where unobserved,
-# with each of its levels at the value that minimizes it: the prior acts on the
-# track less its level, and a level is flat a priori, so this is the energy
-# with the levels profiled out. `gradient`, when given, receives its gradient
-# in `y`, which by the levels' optimality is the gradient at those levels.
-function _track_energy(sys, y; gradient = nothing)
-    (; prior, pieces, x, level) = sys
-    pg = isnothing(gradient) && isnothing(level) ? nothing : [zeros(length(p)) for p in pieces]
-    L = zeros(length(pieces))
-    if !isnothing(level)
-        # The energy is quadratic in a piece's level, with slope `−1ᵀ∇E` and
-        # curvature `1ᵀ(∇E(y + 1) − ∇E(y))`.
-        slope, curve = zeros(sys.nlevel), zeros(sys.nlevel)
-        g1 = similar(first(pg), 0)
-        for (j, p) in pairs(pieces)
-            _prior_energy(prior, y[p], x[p]; gradient = pg[j])
-            resize!(g1, length(p))
-            _prior_energy(prior, y[p] .+ 1, x[p]; gradient = g1)
-            slope[level[j]] += sum(pg[j])
-            curve[level[j]] += sum(g1) - sum(pg[j])
-        end
-        for j in eachindex(pieces)
-            c = curve[level[j]]
-            L[j] = c > 0 ? slope[level[j]] / c : 0.0
-        end
-    end
-    E = 0.0
-    for (j, p) in pairs(pieces)
-        E += _prior_energy(prior, y[p] .- L[j], x[p]; gradient = isnothing(pg) ? nothing : pg[j])
-    end
-    if !isnothing(gradient)
-        fill!(gradient, 0)
-        for (j, p) in pairs(pieces)
-            gradient[p] .= pg[j]
-        end
-    end
-    return E
-end
-
-# Hold an iteration of the joint bandpass solve to decreasing the MAP objective
-# (`_joint_objective`, under the hyperparameters this iteration resolved): from
-# the gains it started at (`previous`, `previous_φ`) the step to the current
-# gains is halved, the source coherence re-solved each time, until the
-# objective is no higher than its starting value up to the gains' rounding, down to a 64th
-# of the step. A linear gauge constraint both ends satisfy holds all along the
-# step. Returns `false`, with the starting gains restored, when no such step
-# decreases the objective.
-function _backtrack_joint!(gains, previous, previous_φ, data, layout, systems)
-    J = _joint_objective(gains, data, layout, systems)
-    current = [(copy(gk.g), copy(gk.φ)) for gk in gains]
-    current_S = copy(data.S)
-    function place!(t)
-        for (gk, g0, φ0, (g1, φ1)) in zip(gains, previous, previous_φ, current)
-            @. gk.φ = φ0 + t * (φ1 - φ0)
-            @. gk.g = ifelse(iszero(g0) | iszero(g1), g1, abs(g0)^(1 - t) * abs(g1)^t * cis(gk.φ))
-        end
-        _update_source_coherence!(data, gains, layout)
-        return gains
-    end
-    place!(0)
-    J0 = _joint_objective(gains, data, layout, systems)
-    # The gains are held at their own precision, which sets the objective's.
-    bound = J0 + 16 * eps(real(eltype(first(gains).g))) * abs(J0)
-    J <= bound && (place!(1); copyto!(data.S, current_S); return true)
-    for t in (1 // 2, 1 // 4, 1 // 8, 1 // 16, 1 // 32, 1 // 64)
-        place!(t)
-        _joint_objective(gains, data, layout, systems) <= bound && return true
-    end
-    place!(0)
-    return false
-end
-
-# The largest change of any gain's log from `previous`, the gains a sweep
-# started from, in standard errors of its `information` (slots numbered by
-# `ids`), and the `(k, I)` of that gain. A change within the gains' own
-# precision is none; a gain that reaches or leaves zero moves infinitely far
-# unless the data hold no information on it.
-function _largest_weighted_change(gains, previous, ids, information)
-    worst, at = 0.0, nothing
-    for (k, gk) in pairs(gains), I in eachindex(gk.g, previous[k])
-        wn = information[ids[k][I]]
-        wn > 0 || continue
-        new, old = gk.g[I], previous[k][I]
-        Δ = iszero(new) || iszero(old) ? (new == old ? 0.0 : Inf) : abs(complex(log(abs(new / old)), angle(new / old)))
-        Δ > 16 * eps(real(eltype(gk.g))) || continue
-        change = sqrt(wn) * Δ
-        change > worst && ((worst, at) = (change, (k, CartesianIndices(gk.g)[I])))
+# The largest change of any slot's log-gain, `(Δℓ, Δφ)` with the phase change
+# wrapped, in standard errors of its weight `W` from the data, and that slot.
+function _largest_weighted_change(Δℓ, Δφ, W)
+    worst, at = 0.0, 0
+    for n in eachindex(Δℓ, Δφ, W)
+        W[n] > 0 || continue
+        c = sqrt(W[n]) * abs(complex(Δℓ[n], rem2pi(Δφ[n], RoundNearest)))
+        c > worst && ((worst, at) = (c, n))
     end
     return worst, at
 end
@@ -1669,16 +1568,13 @@ function _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_w
 end
 
 """
-    JointSmoother(; max_iterations = 200, tolerance = 0.01)
+    JointSmoother(; max_iterations = 200, tolerance = 0.01, max_slip_probability = 0.05,
+                  flat_span = 0.01, warn_fraction = 0.25)
 
 Fit the station bandpass against the actual complex visibilities, with each
 component's prior acting inside the solve rather than as a fit applied to it
-afterwards. The alternating complex-gain / per-scan source-coherence scheme is
-[`solve_joint_bandpass!`](@ref)'s; a prior changes the per-(station, feed) gain
-update, which fits the whole track under the prior instead of solving each
-segment on its own, and re-estimates the prior's hyperparameters, and any
-levels, every sweep. Iterated to convergence that is MAP estimation under the
-two priors.
+afterwards: the gains maximize their posterior, with the per-scan source term
+profiled out and type-II MAP hyperparameters ([`solve_joint_bandpass!`](@ref)).
 
 Because the per-scan source term absorbs a baseline's own structure, this suits a
 resolved or polarized calibrator, which a closure solve that assumes the source
@@ -1688,29 +1584,33 @@ log-amplitude shape must give them one frequency and one time segmentation per
 station; their priors and levels may differ. A model with only one of them
 holds the other at zero: unit amplitude, or zero phase.
 
-Sweeps stop once no gain moves by more than `tolerance` of its standard error
-from the data, and warn if `max_iterations` sweeps pass first: an unconverged
-solve still depends on its starting point.
+Iterations stop once no gain moves by more than `tolerance` of its standard
+error from the data and the hyperparameters given as densities are within
+`tolerance` of their standard errors of the type-II MAP, and warn if
+`max_iterations` iterations pass first: an unconverged solve still depends on
+its starting point.
 
-Under a prior, a phase piece whose 2π branch the data do not determine — more
-than `max_unwrap_ambiguity` of its steps along frequency could go either way
-(`phase_unwrap_ambiguity`) — is declined at the first sweep: a prior fit through
-an undetermined unwrap would invent a smooth trend. A fitted piece whose range is
-below `flat_span` (radians or nepers) is reported flat rather than as a measured
-shape, and the solve warns when more than `warn_fraction` of its pieces are flat,
-declined or without data.
+A phase prior depends on each segment's 2π branch, which the data leave open, so
+every iteration chooses the branches of each phase piece as well, by a Gaussian-sum
+Kalman filter over branch histories, and fits the hyperparameters on those
+branches (see the [fitting-under-priors](@ref fitting-under-priors) page). The report's `phase_slip`
+gives each piece's posterior probability of a 2π slip, and the solve warns when
+any piece's reaches `max_slip_probability`. A fitted piece whose range is below
+`flat_span` (radians or nepers) is reported flat rather than as a measured shape,
+and the solve warns when more than `warn_fraction` of its pieces are flat or
+without data.
 """
 struct JointSmoother <: AbstractBandpassSmoother
     max_iterations::Int
     tolerance::Float64
-    max_unwrap_ambiguity::Float64
+    max_slip_probability::Float64
     flat_span::Float64
     warn_fraction::Float64
 end
 JointSmoother(;
-    max_iterations::Integer = 200, tolerance::Real = 0.01, max_unwrap_ambiguity::Real = 0.25,
+    max_iterations::Integer = 200, tolerance::Real = 0.01, max_slip_probability::Real = 0.05,
     flat_span::Real = 0.01, warn_fraction::Real = 0.25,
-) = JointSmoother(max_iterations, tolerance, max_unwrap_ambiguity, flat_span, warn_fraction)
+) = JointSmoother(max_iterations, tolerance, max_slip_probability, flat_span, warn_fraction)
 
 can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
@@ -1759,21 +1659,23 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
     amp_status = arrays(_block_status_array, amp_blocks)
     phase_priors = arrays(_block_prior_array, phase_blocks)
     amp_priors = arrays(_block_prior_array, amp_blocks)
+    phase_slip = arrays(_block_slip_array, phase_blocks)
     for idx in _joint_scan_groups(tseg)
         solve_joint_bandpass!(
             θ, results[idx], geom, phase_blocks, amp_blocks;
             phase_level_blocks = bandpass_level_blocks(setup, θ, :phase),
             amp_level_blocks = bandpass_level_blocks(setup, θ, :logamp),
-            gauge, sm.max_iterations, sm.tolerance, sm.max_unwrap_ambiguity, sm.flat_span,
-            tseg = view(tseg, :, idx), phase_status, amp_status, phase_priors, amp_priors,
+            gauge, sm.max_iterations, sm.tolerance, sm.flat_span,
+            tseg = view(tseg, :, idx), phase_status, amp_status, phase_priors, amp_priors, phase_slip,
         )
     end
     leaves(arrays) = isnothing(arrays) ? nothing : _block_leaves(arrays)
     report = bandpass_track_report(
         leaves(phase_status), leaves(amp_status);
-        phase_priors = leaves(phase_priors), amp_priors = leaves(amp_priors),
+        phase_priors = leaves(phase_priors), amp_priors = leaves(amp_priors), phase_slip = leaves(phase_slip),
     )
     _warn_degenerate_bandpass(report, sm.warn_fraction)
+    _warn_uncertain_branches(report, sm.max_slip_probability)
     return report
 end
 
@@ -1781,16 +1683,15 @@ end
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
                           gauge, max_iterations = 200, tolerance = 0.01,
-                          max_unwrap_ambiguity = 0.25, flat_span = 0.01, phase_status = nothing,
+                          flat_span = 0.01, phase_status = nothing,
                           amp_status = nothing, phase_priors = nothing,
-                          amp_priors = nothing, tseg = nothing)
+                          amp_priors = nothing, phase_slip = nothing, tseg = nothing)
 
 Jointly solve the per-(station, feed, frequency segment) complex bandpass gain
 and a per-scan, per-station-pair, per-feed-pair constant source coherence (see
-the module comment above `_reduce_scan_segments!` for the model and the
-alternating scheme), then gauge-fix each (station, feed, time segment) track and
-write the result into the station blocks of the two observables
-(`_write_joint_bandpass!`).
+the module comment above `_reduce_scan_segments!` for the model), then
+gauge-fix each (station, feed, time segment) track and write the result into the
+station blocks of the two observables (`_write_joint_bandpass!`).
 
 `phase_blocks` and `amp_blocks` are [`bandpass_blocks`](@ref)`(setup, θ, :phase)`
 and `(…, :logamp)` — station blocks over the SAME `θ` this call is handed, since
@@ -1799,8 +1700,9 @@ the matching [`bandpass_level_blocks`](@ref bandpass_blocks), empty without a le
 station-uniform model gives one block per component spanning every station;
 where the model differs across stations, each block carries its own stations,
 feed tying, segments and prior, and a station no block covers is left at unit
-gain. Each track is fit under its own block's prior, one spectral window at a
-time, with the prior's hyperparameters and any levels re-estimated every sweep.
+gain. Each track is fit under its own block's prior, which relates the values
+within each spectral window, with the prior's hyperparameters re-estimated every
+iteration.
 A station's two shapes must hold the same stations on the same frequency and
 time segmentations, which `validate_model(::JointSmoother, model)` enforces at
 model-compile time; the throw here guards direct callers. Either list may be
@@ -1815,9 +1717,9 @@ set unchanged, so the gauge fixes one constant per such set. The sets are the
 connected components of the (station, feed, frequency segment, time segment)
 graph the correlations span, and `gauge` gives one constraint per component
 ([`_joint_bandpass_gauge!`](@ref)): a pin holds its node at zero, and any other
-constraint is imposed in every iteration's joint step. Where stations' frequency
-segmentations differ, a pin can hold part of a track; a phase prior, which
-relates the track's segments, then throws rather than fit around it.
+constraint is imposed exactly in every step. Where stations' frequency
+segmentations differ, a pin can hold part of a track; under a phase prior the
+rest of the track is then fit with the pinned segment held at zero.
 
 `scans` is the per-scan `(rl, wl)` accumulator pairs from
 `accumulate_bandpass` — not summed across scans, since the source term
@@ -1836,46 +1738,52 @@ splits — disjoint sub-arrays, or every station segmented at the same epoch —
 each piece carries its own arbitrary constant, and a per-station change read
 across the split is that constant plus the change.
 
-Convergence is judged on the largest per-iteration change of any
-(station, feed, segment) gain's log, in standard errors of that gain from the
-data (the inverse square root of its weight in the joint step), so a gain the
-data barely constrain counts for as little as its precision. The solve stops
-once that is below `tolerance`, or once an iteration under a prior cannot lower
-the objective yet moved no gain by `tolerance`. The scans handed to one call are
-a connected piece of the coupling graph, so this is one criterion over one
-coupled problem: nodes that share no data are solved by separate calls rather
-than being averaged into a common tolerance.
+The solve maximizes the posterior of the gains: half the χ² of the visibilities,
+with `S` at its closed-form optimum for the gains, plus each track's prior energy
+with its levels profiled out. `S` absorbs any constant on a (station, feed, time
+segment) track, which the data therefore cannot measure, so a proper prior is
+profiled over that constant as well. Each iteration:
 
-A station-by-station sweep moves slowly along any direction that only weakly
-measured correlations constrain, such as the phase between feeds, which only
-the correlations pairing different feeds see. Each sweep is therefore followed
-by one Gauss–Newton step on every gain slot at once (`_joint_gain_step!`), which
-moves those directions as fast as any other and imposes the gauge; the two
-steps share their fixed point, the minimum of the objective.
+1. linearizes the χ² in every slot's log-amplitude and phase about the current
+   gains, with `S` held;
+2. puts each phase spectral window on its most probable 2π branches, from every
+   slot's own estimate given all the other gains and `S` (`_choose_branches!`);
+3. fits the hyperparameters given as densities, all tracks together, by type-II
+   MAP on the marginal likelihood of the linearized posterior (`_fit_hypers!`),
+   as closely as the last step moved the gains;
+4. takes one Levenberg–Marquardt step of the posterior, solved exactly as one
+   sparse system over the slots, the priors' latent states and levels, with the
+   gauge solved for one slot per constraint (`_map_step`), and accepts it once
+   the posterior with `S` re-solved is no lower.
 
-Under a prior that objective is the posterior: half the χ² of the visibilities
-plus each track's prior energy at the hyperparameters the sweep resolves, with
-any level profiled out (the prior acts on the track less its level). The sweep then linearizes each slot about its current gain,
-whose fixed point is that posterior's mode, and every iteration is held to
-lowering it by backtracking along its step. An iteration that cannot lower it
-stops the solve, with a warning if it moved a gain by `tolerance` or more: the
-objective is then flat or not convex there, typically because a prior too stiff
-for the data drives an amplitude toward zero, where the mode does not exist.
+The solve starts from every slot's own estimate given unit gains elsewhere, and
+the hyperparameters from type-II MAP on each track alone. Convergence is judged
+on the largest change the undamped step makes to any (station, feed, segment)
+gain's log, in standard errors of that gain from the data, so a gain the data
+barely constrain counts for as little as its precision. The solve stops once
+that is below `tolerance` with the hyperparameters fit to `tolerance` of their
+standard errors, or once no damping lowers the posterior, with a warning if
+that step would have moved a gain by `tolerance` or more: the posterior is
+then flat or not convex there, typically because a prior too stiff for the data
+drives an amplitude toward zero, where the mode does not exist. docs/src/priors.md
+("The bandpass posterior") derives each step. The scans handed to one call are a connected piece of
+the coupling graph, so this is one criterion over one coupled problem: nodes
+that share no data are solved by separate calls rather than being averaged into
+a common tolerance.
 
 `phase_status`/`amp_status`, when given, hold one `(AntennaName, Feed, Frequency, Ti)`
 array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref)),
-receiving each spectral window's [`TrackStatus`](@ref) from the final
-sweep, and `phase_priors`/`amp_priors` one `(AntennaName, Feed, Ti)` array per block
-receiving each track's resolved prior; a call solving part of a track writes
-only its own time segments.
+receiving each spectral window's [`TrackStatus`](@ref), `phase_slip` the same arrays as `phase_status` receiving each phase
+piece's posterior probability of a 2π slip from the last iteration, and `phase_priors`/`amp_priors` one
+`(AntennaName, Feed, Ti)` array per block receiving each track's resolved prior;
+a call solving part of a track writes only its own time segments.
 """
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
         gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Real = 0.01,
-        max_unwrap_ambiguity::Real = 0.25, flat_span::Real = 0.01,
-        phase_status = nothing, amp_status = nothing,
-        phase_priors = nothing, amp_priors = nothing,
+        flat_span::Real = 0.01, phase_status = nothing, amp_status = nothing,
+        phase_priors = nothing, amp_priors = nothing, phase_slip = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )
     isempty(scans) && return θ
@@ -1912,11 +1820,11 @@ function solve_joint_bandpass!(
     layout = (;
         loc, tseg = tsg, fseg,
         present = [sort!(filter!(!iszero, unique(view(tsg, a, :)))) for a in axes(tsg, 1)],
-        touching = _joint_bandpass_touching(ends, nant, geom.nfeed),
     )
     gains = [_block_gains(b, geom, eltype(r)) for b in blocks]
     # The gauge fixes phases; a solve that holds every phase at zero has none to fix.
     gauge_state = isempty(phase_blocks) ? nothing : _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
+    gauge_rows = isnothing(gauge_state) ? nothing : (; gauge_state.rows, d = Float64.(gauge_state.d))
 
     segs = [_shape_segments(b.plan, geom) for b in blocks]
     phase_level = _station_levels(phase_level_blocks, segs, loc, geom, θ, real(eltype(r)))
@@ -1931,74 +1839,217 @@ function solve_joint_bandpass!(
         )
         return (; phase = track(phase_blocks, phase_level[a]), amp = track(amp_blocks, amp_level[a]))
     end
-    levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
-    _reject_partial_pins(gains, fits, loc, geom)
-    joint = merge(
-        _joint_gain_layout(gains, data, layout, gauge_state),
-        (; fitted = (; phase = !isempty(phase_blocks), amp = !isempty(amp_blocks))),
-    )
-    # Under a prior the sweep linearizes about the current gains, whose fixed point
-    # is the MAP, and each iteration is held to decreasing the MAP objective.
-    guarded = any(f -> !isnothing(f) && _has_prior(f), fits)
-    systems = (; joint.ids, phase = NamedTuple[], amp = NamedTuple[])
 
-    _update_source_coherence!(data, gains, layout)
-    change, worst = Inf, nothing
-    previous = [copy(gk.g) for gk in gains]
-    previous_φ = [copy(gk.φ) for gk in gains]
-    stalled = false
-    for iter in 1:max_iterations
-        foreach((dst, gk) -> copyto!(dst, gk.g), previous, gains)
-        foreach((dst, gk) -> copyto!(dst, gk.φ), previous_φ, gains)
-        # The joint step imposes the gauge, so the sweep fits free of it.
-        nupdated, declined = _update_station_gains!(
-            gains, data, layout;
-            fits, levels, seed = iter == 1, relinearize = guarded && iter > 1, systems,
-            max_unwrap_ambiguity, flat_span,
-            phase_status, amp_status, phase_priors, amp_priors,
-        )
-        iszero(nupdated) && _throw_unchanged_sweep(declined, geom)
-        information = _joint_gain_step!(gains, data, joint, gauge_state, systems)
-        _update_source_coherence!(data, gains, layout)
-        change, worst = _largest_weighted_change(gains, previous, joint.ids, information)
-        # A sweep the safeguard rejects has converged if it moved no gain by `tolerance`.
-        if guarded && iter > 1 && !_backtrack_joint!(gains, previous, previous_φ, data, layout, systems)
-            stalled = change >= tolerance
+    ids = _gain_slot_ids(gains)
+    jl = _joint_gain_layout(data, layout, ids)
+    slot = [(k, I) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
+    nslots = length(slot)
+    pinned = [gains[k].pinned[I] for (k, I) in slot]
+    hasdata = falses(nslots)
+    for I in CartesianIndices(jl.edge)
+        e = jl.edge[I]
+        (iszero(e) || !(w[I] > 0)) && continue
+        foreach(n -> hasdata[n] = true, jl.slot_pairs[e])
+    end
+    any(hasdata) || throw(ArgumentError("solve_joint_bandpass!: no gain slot has data to fit."))
+    fitted = (; phase = !isempty(phase_blocks), amp = !isempty(amp_blocks))
+    known = (; phase = hasdata .| pinned, amp = hasdata)
+    tracks = map((:phase, :amp)) do obs
+        fitted[obs] ? _bandpass_tracks(fits, obs, ids, loc, layout.present, geom.nfeed, known[obs]) : NamedTuple[]
+    end
+    tracks = (; phase = tracks[1], amp = tracks[2])
+    # A slot moves where it has data, or where a prior acting on its track fills it.
+    function movable(obs)
+        out = fitted[obs] .& hasdata
+        for t in tracks[obs], (j, p) in pairs(t.pieces)
+            t.active[j] && (out[t.slots[p]] .= fitted[obs])
+        end
+        return out
+    end
+    free = (; phase = movable(:phase) .& .!pinned, amp = movable(:amp))
+    filled = map(obs -> movable(obs) .& .!hasdata, (; phase = :phase, amp = :amp))
+    priors = map(ts -> Any[t.prior for t in ts], tracks)
+    acting = map(ts -> findall(t -> any(t.active), ts), tracks)
+    energy(obs, x) = sum((first(_track_energy(tracks[obs][i], priors[obs][i], x)) for i in acting[obs]); init = 0.0)
+
+    ℓ, φ = zeros(nslots), zeros(nslots)
+    gains_of(ℓ, φ) = exp.(complex.(ℓ, φ))
+    _source_coherence!(S, gains_of(ℓ, φ), data, jl)
+    # Start every slot at its own estimate given unit gains elsewhere, a nonlinear
+    # step the linearized iterations then refine.
+    lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
+    for (obs, x) in ((:phase, φ), (:amp, ℓ))
+        fitted[obs] || continue
+        y, _ = _slot_estimates(x, lin, obs; phase_held = !fitted.phase)
+        for n in eachindex(x)
+            free[obs][n] && isfinite(y[n]) && (x[n] = y[n])
+        end
+    end
+    _source_coherence!(S, gains_of(ℓ, φ), data, jl)
+
+    objective(ℓ, φ, S) = _chi2(gains_of(ℓ, φ), S, data, jl) / 2 + energy(:phase, φ) + energy(:amp, ℓ)
+    key = zeros(nslots)
+    for ts in tracks, t in ts
+        key[t.slots] .= t.x
+    end
+    curvature = map(ts -> Vector{Any}(nothing, length(ts)), tracks)
+    change, worst, stalled, converged, hypers_fit = Inf, 0, false, false, true
+    μ, ν, near = 1.0e-3, 2.0, false
+    for iteration in 1:max_iterations
+        lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
+        if fitted.phase
+            y, wy = _slot_estimates(φ, lin, :phase)
+            for i in acting.phase
+                t = tracks.phase[i]
+                isone(iteration) && (priors.phase[i] = _seed_prior(t, y, wy; phase = true))
+                slip = isnothing(phase_slip) ? nothing : view(phase_slip[t.k], t.ai, t.feed, :, t.ts)
+                shift = _choose_branches!(φ, t, priors.phase[i], y, wy, free.phase; slip)
+                isnothing(gauge_rows) || _shift_gauge!(gauge_rows, shift)
+            end
+        end
+        if fitted.amp && isone(iteration)
+            y, wy = _slot_estimates(ℓ, lin, :amp; phase_held = !fitted.phase)
+            for i in acting.amp
+                priors.amp[i] = _seed_prior(tracks.amp[i], y, wy; phase = false)
+            end
+        end
+        # Levenberg–Marquardt: each observable's step is damped by `μ` times the
+        # largest data curvature of its slots, a trust region in log-gain, where
+        # the linearization's error is measured, and `μ` follows how well the
+        # quadratic model predicted the objective's actual decrease (Madsen,
+        # Nielsen & Tingleff 2004, §3.2). `μ` stays at least the curvature's own
+        # precision, so a direction neither the data nor a prior determine takes
+        # no step, and a slot with no curvature above that precision, from its data
+        # or a prior, does not move.
+        H = (; phase = _data_curvature(lin.q, jl.slot_pairs, -1, nslots), amp = _data_curvature(lin.q, jl.slot_pairs, 1, nslots))
+        b = (; phase = imag.(lin.c), amp = real.(lin.c))
+        scale = map(h -> maximum(diag(h); init = 0.0), H)
+        systems = map((; phase = :phase, amp = :amp)) do obs
+            fitted[obs] || return nothing
+            d = diag(H[obs])
+            moving = free[obs] .& ((d .> eps() * scale[obs]) .| filled[obs])
+            return _posterior_system(
+                H[obs], b[obs], obs === :phase ? φ : ℓ, moving, tracks[obs][acting[obs]], key;
+                gauge = obs === :phase ? gauge_rows : nothing,
+            )
+        end
+        # The hyperparameters' optimum moves with the linearization, so they are
+        # fit only as closely as the gains last moved, and to `tolerance` once the
+        # gains have converged.
+        hypers_fit = all((:phase, :amp)) do obs
+            fitted[obs] || return true
+            p = priors[obs][acting[obs]]
+            ok = _fit_hypers!(
+                p, view(curvature[obs], acting[obs]), systems[obs], tracks[obs][acting[obs]], eps() * scale[obs];
+                tolerance = max(tolerance, change), max_iterations,
+            )
+            priors[obs][acting[obs]] = p
+            return ok
+        end
+        function propose(μ)
+            steps = map((:phase, :amp)) do obs
+                fitted[obs] || return (obs === :phase ? φ : ℓ), 0.0
+                x′, _, model = _map_step(systems[obs], priors[obs][acting[obs]]; λ = μ * scale[obs])
+                return x′, model
+            end
+            return (; phase = steps[1][1], amp = steps[2][1]), steps[1][2] + steps[2][2]
+        end
+        # A damped step understates the change; converged once the undamped step
+        # is within `tolerance` too.
+        if near
+            x1, _ = propose(eps())
+            change, worst = _largest_weighted_change(x1.amp .- ℓ, x1.phase .- φ, lin.W)
+            change < tolerance && hypers_fit && (converged = true; break)
+        end
+        O0 = objective(ℓ, φ, S)
+        E0 = energy(:phase, φ) + energy(:amp, ℓ)
+        accepted = false
+        while isfinite(μ)
+            x1, predicted = propose(μ)
+            change, worst = _largest_weighted_change(x1.amp .- ℓ, x1.phase .- φ, lin.W)
+            _within_rounding(x1.amp, ℓ) && _within_rounding(x1.phase, φ) && break
+            S1 = _source_coherence!(similar(S), gains_of(x1.amp, x1.phase), data, jl)
+            O1 = objective(x1.amp, x1.phase, S1)
+            # The objective is known to its rounding.
+            if O1 <= O0 + 16 * eps(abs(O0))
+                ρ = (O0 - O1) / (E0 - predicted)
+                ℓ, φ, S = x1.amp, x1.phase, S1
+                μ = max(μ * max(1 / 3, 1 - (2ρ - 1)^3), eps())
+                ν = 2.0
+                accepted = true
+                break
+            end
+            μ *= ν
+            ν *= 2
+        end
+        # A step lowers the objective by about half its squared change in
+        # standard errors, so one too small for that to exceed the objective's
+        # rounding cannot be verified, and ending there is not a stall.
+        if !accepted
+            stalled = change >= tolerance && change^2 / 2 > 16 * eps(abs(O0))
+            converged = !stalled
             break
         end
-        guarded && ((change, worst) = _largest_weighted_change(gains, previous, joint.ids, information))
-        change < tolerance && break
+        near = change < tolerance
     end
-    location = isnothing(worst) ? "" : _slot_description(geom, loc, worst...)
-    stalled && @warn "the joint bandpass solve stopped after a sweep that could not lower its MAP " *
-        "objective even at a 64th of its step; that sweep moved a gain by $change of its standard " *
+    location = iszero(worst) ? "" : _slot_description(geom, loc, slot[worst]...)
+    stalled && @warn "the joint bandpass solve stopped at a step that could not lower its MAP " *
+        "objective at any damping; that step would have moved a gain by $change of its standard " *
         "error$location. The objective is flat or not convex near this point, often because a prior " *
         "is too stiff for the data, which can drive a gain's amplitude toward zero."
-    stalled || change < tolerance || @warn "the joint bandpass solve did not converge in " *
-        "$max_iterations sweeps: the last sweep moved a gain by $change of its standard error$location, " *
+    # Where a slot's phase is held more than π/2 from its own data — by a phase
+    # prior or the gauge — the amplitude that fits it best is zero, and without an
+    # amplitude prior the posterior has no mode: its log-amplitude runs off.
+    if fitted.amp && (stalled || converged)
+        lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
+        unpriored = free.amp .& .!filled.amp
+        for t in tracks.amp, (j, p) in pairs(t.pieces)
+            t.active[j] && (unpriored[t.slots[p]] .= false)
+        end
+        modeless = [n for n in findall(unpriored) if lin.W[n] > 0 && real(1 + lin.c[n] / lin.W[n]) <= 0]
+        isempty(modeless) || @warn "the joint bandpass posterior has no mode for the amplitude of " *
+            "$(length(modeless)) gain slots, e.g.$(_slot_description(geom, loc, slot[first(modeless)]...)): " *
+            "their phase is held more than π/2 from their data, by a phase prior or the gauge, so the " *
+            "amplitude that fits them best is zero. Give the amplitude a prior."
+    end
+    hypers_fit || @warn "the joint bandpass hyperparameter fit did not converge in $max_iterations " *
+        "steps at the last iteration; raise `JointSmoother(; max_iterations)`"
+    stalled || converged || @warn "the joint bandpass solve did not converge in " *
+        "$max_iterations iterations: the last step moved a gain by $change of its standard error$location, " *
         "against a tolerance of $tolerance; raise `JointSmoother(; max_iterations)`"
 
+    for (n, (k, I)) in pairs(slot)
+        gk = gains[k]
+        gk.g[I] = exp(complex(ℓ[n], φ[n]))
+        gk.φ[I] = φ[n]
+        gk.phase_valid[I] = free.phase[n] || (fitted.phase && pinned[n])
+        gk.amp_valid[I] = free.amp[n]
+    end
+    levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
+    for (obs, x, status, recorded) in ((:phase, φ, phase_status, phase_priors), (:amp, ℓ, amp_status, amp_priors))
+        valid = obs === :phase ? free.phase .| (fitted.phase .& pinned) : free.amp
+        for (i, t) in pairs(tracks[obs])
+            if !isnothing(status)
+                for (j, p) in pairs(t.pieces)
+                    vals = [valid[n] ? x[n] : NaN for n in t.slots[p]]
+                    status[t.k][t.ai, t.feed, j, t.ts] = all(pinned[t.slots[p]]) && obs === :phase ? TrackSolved :
+                        _band_track_status(vals, flat_span)
+                end
+            end
+            isnothing(recorded) || (recorded[t.k][t.ai, t.feed, t.ts] = priors[obs][i])
+            (isnothing(t.level) || !any(t.active)) && continue
+            _, L = _track_energy(t, priors[obs][i], x)
+            for (g, v) in L
+                levels[t.a][obs][t.feed, g, t.ts] = v
+            end
+        end
+    end
     level_writers = [
         (; phase = _joint_level_writer(phase_level[a], levels[a].phase), amp = _joint_level_writer(amp_level[a], levels[a].amp))
             for a in 1:nant
     ]
     _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers)
     return θ
-end
-
-function _throw_unchanged_sweep(declined, geom::DataGeometry)
-    head = "solve_joint_bandpass!: the joint bandpass changed no gain in a sweep. "
-    isempty(declined) && throw(ArgumentError(head * "No gain slot had data to fit."))
-    named = join(("$(geom.stations[a]) (feed $f, time segment $ts)" for (a, f, ts) in first(declined, 3)), ", ")
-    more = length(declined) > 3 ? ", …" : ""
-    throw(
-        ArgumentError(
-            head * "$(length(declined)) phase tracks were declined at unwrapping: $named$more. " *
-                "Their phase changes between adjacent frequency segments are too scattered to " *
-                "unwrap, which a phase prior requires; without a phase prior the segments are " *
-                "fit independently and are not declined.",
-        ),
-    )
 end
 
 # Each station's level for one observable, `nothing` where it has none: its
@@ -2024,33 +2075,3 @@ _level_values(l) = fill(l.T(NaN), l.nfeed, l.nlevel, l.nts)
 
 _joint_level_writer(::Nothing, values) = nothing
 _joint_level_writer(l, values) = (; l.leaf, l.tying, l.seg, values, l.ai)
-
-# A pin that holds part of a track leaves the rest fitted, which is the
-# constrained fit only when the track's segments are fit independently. A phase
-# prior relates them, so a partly pinned track under one is rejected rather than
-# fit with one segment overwritten.
-function _reject_partial_pins(gains, fits, loc, geom::DataGeometry)
-    for a in eachindex(loc, fits)
-        k, ai = loc[a]
-        (iszero(k) || isnothing(_prior(fits[a].phase))) && continue
-        st = gains[k]
-        for ts in axes(st, Ti), feed in axes(st, Feed)
-            track = view(st.pinned, ai, feed, :, ts)
-            np, nfs = count(track), length(track)
-            (iszero(np) || np == nfs) && continue
-            throw(
-                ArgumentError(
-                    "solve_joint_bandpass!: the phase gauge pins $np of the $nfs frequency " *
-                        "segments of station $(geom.stations[a]) (feed $feed, time segment " *
-                        "$ts), because the stations' frequency segmentations tie those " *
-                        "channels into fewer independent common-phase modes than this " *
-                        "station has segments. Its phase prior relates the track's segments, " *
-                        "so holding part of it at zero is not the constrained fit the prior " *
-                        "asks for. Drop the phase prior, or give the stations frequency " *
-                        "segmentations that nest.",
-                ),
-            )
-        end
-    end
-    return nothing
-end

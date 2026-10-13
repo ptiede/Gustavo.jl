@@ -241,36 +241,6 @@ end
 (F::ConstrainedWLS{<:Any, <:Any, Nothing})(b) = F.Z * F.reduced(b)
 (F::ConstrainedWLS{<:Any, <:Any, <:AbstractVector})(b) = F.x0 .+ F.Z * F.reduced(b .- F.Ax0)
 
-# Inverse-variance weight of the increment between samples `k` and `k+1`: the
-# precision of a difference of two independent estimates, `1/(1/w_k + 1/w_{k+1})`.
-# A missing/non-positive endpoint weight makes the increment uninformative.
-function _increment_weight(weights, k)
-    weights === nothing && return 1.0
-    wa, wb = weights[k], weights[k + 1]
-    (isfinite(wa) && isfinite(wb) && wa > 0 && wb > 0) || return 0.0
-    return wa * wb / (wa + wb)
-end
-
-# Where a track's step-to-step increments center: the weighted circular mean of the
-# wrapped increments between adjacent finite samples, which is also the track's
-# dominant per-sample trend. Only strictly adjacent pairs contribute — across a gap
-# the true increment is unknown modulo 2π, so a gap-spanning pair says nothing about
-# either.
-#
-# `angle` returns the mean in (-π, π], the range a sampled phase can resolve at all:
-# a trend steeper than π per sample is aliased in the data itself.
-function _increment_center(phases, weights)
-    T = float(eltype(phases))
-    acc = zero(Complex{T})
-    for k in firstindex(phases):(lastindex(phases) - 1)
-        (isfinite(phases[k]) && isfinite(phases[k + 1])) || continue
-        wk = _increment_weight(weights, k)
-        wk > 0 || continue
-        acc += wk * cis(T(phases[k + 1]) - T(phases[k]))
-    end
-    return iszero(acc) ? zero(T) : T(angle(acc))
-end
-
 """
     unwrap_phase_track(phases; weights=nothing) -> Vector
 
@@ -284,8 +254,7 @@ A step is resolved only while the true increment plus its noise stays inside
 fringe rate along time) is walked onto the wrong branch systematically —
 fit the trend out first. Noise puts individual steps over the boundary at
 random, accumulating 2π errors that a subsequent smooth fit reports as a
-large trend; [`phase_unwrap_ambiguity`](@ref) detects that, so consult it
-before trusting an unwrapped track.
+large trend.
 
 The seed is an algorithmic anchor only; downstream gauge code should fix the
 phase gauge itself rather than rely on the unwrap reference.
@@ -335,40 +304,3 @@ function unwrap_phase_track(phases; weights = nothing)
     return unwrapped
 end
 
-"""
-    phase_unwrap_ambiguity(phases; weights=nothing) -> Float64
-
-How far a phase track's step-to-step increments SCATTER: the fraction of adjacent
-finite pairs whose wrapped increment lies more than π/2 from the increments' own
-weighted circular mean. A pure measurement — the track is read, never modified.
-
-Scatter is what decides whether [`unwrap_phase_track`](@ref)'s walk is meaningful.
-0 means every step falls in a tight cluster and the branch it picks is determined;
-as the fraction grows the walk degenerates into a random walk whose accumulated 2π
-errors look, to any subsequent smooth fit, like a large genuine trend. Above
-roughly a quarter a track should be treated as carrying no recoverable branch,
-rather than as evidence of the trend that fit reports.
-
-The circular mean is a location parameter here, nothing more: it is what makes this
-a measure of scatter rather than of the trend the track happens to carry, so a
-steadily-trending track reads near 0 however steep its trend. Steepness is a
-separate failure of the walk (increments approaching ±π go onto the wrong branch
-systematically) and this statistic does not report it — fit the trend out first if
-a caller can carry one that large.
-
-Returns 0 for a track with no adjacent finite pair to compare.
-"""
-function phase_unwrap_ambiguity(phases; weights = nothing)
-    Base.require_one_based_indexing(phases)
-    weights === nothing || Base.require_one_based_indexing(weights)
-    center = _increment_center(phases, weights)
-    nstep = 0
-    namb = 0
-    for k in firstindex(phases):(lastindex(phases) - 1)
-        (isfinite(phases[k]) && isfinite(phases[k + 1])) || continue
-        _increment_weight(weights, k) > 0 || continue
-        nstep += 1
-        abs(rem2pi(phases[k + 1] - phases[k] - center, RoundNearest)) > π / 2 && (namb += 1)
-    end
-    return nstep == 0 ? 0.0 : namb / nstep
-end

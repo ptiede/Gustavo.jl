@@ -238,7 +238,8 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         CAL.save_solution(path, sol)
         back = CAL.load_solution(path)
         @test back.components == sol.components
-        @test back.steps == sol.steps
+        # `isequal`: the bandpass record holds NaN where a piece has no slip probability.
+        @test isequal(back.steps, sol.steps)
         @test back.info == sol.info
         @test back.provenance == sol.provenance
         @test back.geom.stations == sol.geom.stations && back.geom.times == sol.geom.times

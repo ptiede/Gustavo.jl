@@ -305,54 +305,69 @@ end
     @test FRpf._estimate_map(prior, y1, ws[1], xs[1]) ≈ _dense_ou_map(y1, ws[1], xs[1], τ, σ2) rtol = 1.0e-8
 end
 
-@testset "prior energy and its gradient" begin
+@testset "a track's prior energy" begin
     rng = MersenneTwister(315)
     n = 20
     x = sort!(1.0e9 .+ 1.0e6 .* (1:n) .+ 3.0e5 .* rand(rng, n))
     y = randn(rng, n)
-    y[[4, 11]] .= NaN
-    o = findall(isfinite, y)
+    track(prior; pieces = [1:n], level = nothing, nlevel = 0) =
+        (; slots = collect(1:n), x, pieces, prior, level, nlevel, active = trues(length(pieces)))
+    energy(prior; kw...) = FRpf._track_energy(track(prior; kw...), prior, y)
 
-    # OU: the negative log density, an unobserved entry marginalized out.
+    # A random walk of order 1 from a flat start: the sum of its increments' energies.
+    σ1 = 1.0e-3
+    @test first(energy(CALpf.RandomWalkPrior(; order = 1, σ = σ1))) ≈ sum(abs2.(diff(y)) ./ (2 .* σ1^2 .* diff(x))) rtol = 1.0e-10
+
+    # A proper prior acts on the track less a free constant: a zero-mean OU's
+    # energy minimized over that constant.
     τ, σ = 3.0e6, 0.5
-    ou = CALpf.OUPrior(; scale = τ, σ)
-    @test FRpf._prior_energy(ou, y, x) ≈ y[o]' * (_ou_cov(x[o], τ, σ^2) \ y[o]) / 2 rtol = 1.0e-10
+    P = inv(_ou_cov(x, τ, σ^2))
+    one_ = ones(n)
+    c = dot(one_, P * y) / dot(one_, P * one_)
+    E, L = energy(CALpf.OUPrior(; scale = τ, σ))
+    @test E ≈ dot(y .- c, P * (y .- c)) / 2 rtol = 1.0e-10
+    @test L[1] ≈ c rtol = 1.0e-10
 
-    priors = (
-        CALpf.RandomWalkPrior(; order = 1, σ = 1.0e-3),
-        CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-8),
-        CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-8, init = MvNormal([0.1, 0.0], [1.0 0; 0 1.0e-12])),
-        ou,
-    )
-    for prior in priors
-        g = fill(NaN, n)
-        @test FRpf._prior_energy(prior, y, x; gradient = g) == FRpf._prior_energy(prior, y, x)
-        @test all(iszero, g[[4, 11]])
-        h = 1.0e-6
-        fd = map(o) do k
-            yp, ym = copy(y), copy(y)
-            yp[k] += h
-            ym[k] -= h
-            (FRpf._prior_energy(prior, yp, x) - FRpf._prior_energy(prior, ym, x)) / 2h
-        end
-        @test g[o] ≈ fd rtol = 1.0e-7
-    end
-
-    # A level beside the prior is profiled out: the energy is the minimum over
-    # one level per level group, and its gradient is the gradient there.
+    # Levels shared by pieces: each level at the value minimizing the energy.
     pieces = [1:8, 9:14, 15:20]
-    sys = (; prior = ou, pieces, x, level = [1, 1, 2], nlevel = 2)
-    yl = y .+ [fill(0.7, 14); fill(-0.4, 6)]
-    energy(L) = sum(FRpf._prior_energy(ou, yl[p] .- L[l], x[p]) for (p, l) in zip(pieces, sys.level))
-    grid = [(a, b) for a in range(0.0, 1.4; length = 141), b in range(-1.1, 0.3; length = 141)]
-    Lbest = argmin(L -> energy(collect(L)), grid)
-    g = zeros(n)
-    E = FRpf._track_energy(sys, yl; gradient = g)
-    @test E <= energy(collect(Lbest)) + 1.0e-12
-    @test E ≈ energy(collect(Lbest)) rtol = 1.0e-3
-    # The energy's slope along each level vanishes at the optimum.
-    slope = map(1:2) do l
-        sum(sum(g[p]) for (p, lj) in zip(pieces, sys.level) if lj == l)
+    level = [1, 1, 2]
+    Ps = [inv(_ou_cov(x[p], τ, σ^2)) for p in pieces]
+    Lref = map(1:2) do g
+        js = findall(==(g), level)
+        sum(sum(Ps[j] * y[pieces[j]]) for j in js) / sum(sum(Ps[j]) for j in js)
     end
-    @test maximum(abs, slope) < 1.0e-8 * maximum(abs, g)
+    Eref = sum(dot(y[p] .- Lref[g], Ps[j] * (y[p] .- Lref[g])) / 2 for (j, (p, g)) in enumerate(zip(pieces, level)))
+    E, L = energy(CALpf.OUPrior(; scale = τ, σ); pieces, level, nlevel = 2)
+    @test E ≈ Eref rtol = 1.0e-10
+    @test [L[1], L[2]] ≈ Lref rtol = 1.0e-10
+
+    # A stiff second-order walk from a flat start, against a Kalman filter in
+    # 256-bit arithmetic with a start variance far above any step's.
+    function kalman_energy(prior, y, x)
+        u, h = FRpf._piece_coordinates(prior, x)
+        model = FRpf._piece_model(prior, h)
+        setprecision(BigFloat, 256) do
+            T = BigFloat
+            μ, P = zeros(T, 2), T(10)^40 * Matrix{T}(I, 2, 2)
+            E = zero(T)
+            for k in eachindex(y)
+                if k > 1
+                    A, Q = FRpf.transition(model, u[k] - u[k - 1], Float64)
+                    μ = T.(Matrix(A)) * μ
+                    P = T.(Matrix(A)) * P * T.(Matrix(A))' + T.(Matrix(Q))
+                end
+                v, s = T(y[k]) - μ[1], P[1, 1]
+                k > 2 && (E += v^2 / 2s)
+                K = P[:, 1] / s
+                μ = μ + K * v
+                P = P - K * P[1, :]'
+            end
+            Float64(E)
+        end
+    end
+    Δν = 1.0e6
+    for σc in (0.05, 1.0e-3)
+        prior = CALpf.RandomWalkPrior(; order = 2, σ = σc * sqrt(3 / (2 * Δν^3)))
+        @test first(energy(prior)) ≈ kalman_energy(prior, y, x) rtol = 1.0e-9
+    end
 end

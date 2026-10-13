@@ -1097,36 +1097,6 @@ end
     @test maximum(abs, (out[31:end] .- out[31]) .- (gentle[31:end] .- gentle[31])) < 1.0e-8
 end
 
-@testset "phase_unwrap_ambiguity flags an undetermined branch" begin
-    rng = MersenneTwister(5150)
-    n = 64
-    k = 0:(n - 1)
-    w = fill(100.0, n)
-
-    # A clean track: its increments sit in a tight cluster, so there is no scatter
-    # to report however steep the trend that cluster is centered on. Steepness is a
-    # separate failure of the walk and deliberately not this statistic's business.
-    clean = rem2pi.(1.1 .* k .+ 0.3 .* sin.(k ./ 7), RoundNearest)
-    @test CAL.phase_unwrap_ambiguity(clean; weights = w) == 0
-    @test CAL.phase_unwrap_ambiguity(rem2pi.(2.7 .* k, RoundNearest); weights = w) == 0
-
-    # Pure noise well below a radian stays resolvable; past it the walk is a coin
-    # flip at a large fraction of its steps and the branch is not determined.
-    amb(σ) = median(
-        [
-            CAL.phase_unwrap_ambiguity(rem2pi.(σ .* randn(rng, n), RoundNearest); weights = fill(1 / σ^2, n))
-                for _ in 1:40
-        ],
-    )
-    @test amb(0.2) < 0.05
-    @test amb(0.4) < 0.1
-    @test amb(1.5) > 0.25
-
-    # No adjacent pair to compare ⇒ nothing to be ambiguous about.
-    @test CAL.phase_unwrap_ambiguity(fill(NaN, 8)) == 0
-    @test CAL.phase_unwrap_ambiguity(Float64[]) == 0
-end
-
 @testset "Per-station heterogeneity" begin
     geom = CAL.DataGeometry(; nfeed = 2,
         times = [0.0, 0.1, 1.0, 1.1],
