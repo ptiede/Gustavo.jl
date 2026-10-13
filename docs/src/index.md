@@ -198,7 +198,7 @@ Three seams, in increasing scope:
   [Authoring a new gain term](@ref authoring-terms);
 - a new **smoother** behind an existing step — a different way to solve the
   same model: see
-  [`AbstractBandpassSmoother`](@ref Gustavo.Fring.AbstractBandpassSmoother);
+  [`AbstractAdhocSmoother`](@ref Gustavo.Fring.AbstractAdhocSmoother);
 - a new **solve step** — a solver that reads the data through
   [`each_group`](@ref Gustavo.each_group):
   [Authoring a solve step](@ref authoring-steps).

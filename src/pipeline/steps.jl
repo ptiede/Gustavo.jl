@@ -67,10 +67,9 @@ The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan it is given. What is fit
 is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_terms`](@ref) for the
-default and the component form the smoothers accept; each component's prior
+default and the component form the smoother accepts; each component's prior
 states how its values relate within a spectral window. How it is solved
-lives on `smoother`, a pluggable [`Fring.AbstractBandpassSmoother`](@ref); by
-default [`Fring.JointSmoother`](@ref), which fits the complex visibilities
+lives on `smoother`, a [`Fring.JointSmoother`](@ref), which fits the complex visibilities
 against an explicit per-scan source coherence and so does not assume the
 calibrator is unresolved and unpolarized. `gauge`, an
 [`AbstractGauge`](@ref), references the bandpass phase: `JointSmoother`
@@ -90,13 +89,13 @@ example on calibrator scans held in memory:
     fr = fit(BaselineFringeFit(; gauge), calibrator_scans)
     bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
 """
-Base.@kwdef struct Bandpass{M <: GainModel, S <: Fring.AbstractBandpassSmoother, G <: AbstractGauge} <: SolveStep
+Base.@kwdef struct Bandpass{M <: GainModel, G <: AbstractGauge} <: SolveStep
     model::M = Fring.default_bandpass_terms()
-    smoother::S = Fring.JointSmoother()
+    smoother::Fring.JointSmoother = Fring.JointSmoother()
     gauge::G = ZeroSumPhase()
-    function Bandpass(model::M, smoother::S, gauge::G) where {M, S, G}
+    function Bandpass(model::M, smoother, gauge::G) where {M, G}
         _check_step_gauge(gauge, model)
-        return new{M, S, G}(model, smoother, gauge)
+        return new{M, G}(model, smoother, gauge)
     end
 end
 provides(::Bandpass) = :bandpass
@@ -224,18 +223,7 @@ model_components(s::Bandpass, spec) = _vet_step_model(
     spec,
 )
 
-# `Bandpass` delegates its solve to `smoother`, so the capability question and
-# the name in the rejection both belong to the smoother rather than the step.
-# `JointSmoother` writes its solve as a loop over station blocks; the closure
-# path does not, and its θ blocks for the differing stations would stay at zero.
-supports_station_heterogeneity(s::Bandpass) = supports_station_heterogeneity(s.smoother)
-supports_station_heterogeneity(::Fring.AbstractBandpassSmoother) = false
-supports_station_heterogeneity(::Fring.JointSmoother) = true
-
-heterogeneity_rejector(s::Bandpass) =
-    "Bandpass(smoother = $(nameof(typeof(s.smoother)))(...)), whose smoother solves " *
-    "one rectangular gain table for every station — `Bandpass(smoother = JointSmoother())` " *
-    "solves a per-station model"
+supports_station_heterogeneity(::Bandpass) = true
 
 model_components(s::AdhocPhase, spec) = _vet_step_model(
     s.smoother, s.model,
@@ -469,14 +457,14 @@ function solve(s::Bandpass, ctx::SolveContext)
     setup = _group_setup(s, ctx)
     results = each_group(group -> _solve_group(s, ctx, setup, group), ctx)
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
-    report = Fring.solve_bandpass!(s.smoother, ctx.θ, results, setup; gauge = ctx.gauge)
+    report = Fring._solve_bandpass!(s.smoother, ctx.θ, results, setup; gauge = ctx.gauge)
     # The smoother's own per-track record travels with the step's info, so a
     # consumer can tell a measured bandpass track from a placeholder without
     # re-deriving it from the gains (where the two look identical).
     return (;
         nscans = length(results),
         sources = unique(String[r.source for r in results]),
-        (report === nothing ? (;) : report)...,
+        report...,
     )
 end
 

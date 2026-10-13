@@ -243,10 +243,6 @@ end
     end
 end
 
-# A smoother that solves one gain table for every station.
-struct _UniformSmoother <: FP.AbstractBandpassSmoother end
-FP.can_fit(::_UniformSmoother, tc, geom) = true
-
 @testset "Bandpass step: model vetting" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
@@ -326,13 +322,9 @@ FP.can_fit(::_UniformSmoother, tc, geom) = true
             Bandpass(; model = bad_entry, gauge = PinAntenna(1)), nothing,
         )
 
-        # A heterogeneous model reaches the solver only where the smoother
-        # solves per station. `Bandpass` forwards the question to it: the joint
-        # path loops over the layout's station blocks and takes the model; a
-        # smoother that does not declare support is rejected by the runner,
-        # naming the differing component and its per-station signatures.
-        @test supports_station_heterogeneity(Bandpass(; smoother = FP.JointSmoother(), gauge = PinAntenna(1)))
-        @test !supports_station_heterogeneity(Bandpass(; smoother = _UniformSmoother(), gauge = PinAntenna(1)))
+        # The joint solve loops over the layout's station blocks, so it takes a
+        # model that differs across stations.
+        @test supports_station_heterogeneity(Bandpass(; gauge = PinAntenna(1)))
         het = with_station(
             default_bandpass_terms(), "A1";
             phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
@@ -340,8 +332,6 @@ FP.can_fit(::_UniformSmoother, tc, geom) = true
         )
         @test model_components(Bandpass(; model = het, gauge = PinAntenna(1)), nothing) isa CAL.GainModel
         @test fit(Bandpass(; model = het, gauge = PinAntenna(1)), ps) isa CAL.CalibrationSolution
-        @test_throws "station-uniform" fit(Bandpass(; model = het, smoother = _UniformSmoother(), gauge = PinAntenna(1)), ps)
-        @test_throws "phase.bandpass" fit(Bandpass(; model = het, smoother = _UniformSmoother(), gauge = PinAntenna(1)), ps)
     end
 
     @testset "observables are located by name, not plan-list position" begin
@@ -361,8 +351,8 @@ FP.can_fit(::_UniformSmoother, tc, geom) = true
 
         lu = CAL.plan_parameters(default_bandpass_terms(), anames, geom)
         @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing)
-        @test only(FP.bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
-        @test isempty(FP.bandpass_level_blocks(_setup(lu), zeros(lu.nθ), :phase))
+        @test only(FP._bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
+        @test isempty(FP._bandpass_level_blocks(_setup(lu), zeros(lu.nθ), :phase))
 
         # The path is a NAME descent, so it reaches a component the user nested
         # under names of their own.
@@ -380,7 +370,7 @@ FP.can_fit(::_UniformSmoother, tc, geom) = true
         )
         ll = CAL.plan_parameters(leveled, anames, geom)
         @test FP._bandpass_paths(ll.plantree, :phase) == (; shape = (:phase, :chan, :c), level = (:phase, :spw))
-        @test only(FP.bandpass_level_blocks(_setup(ll), zeros(ll.nθ), :phase)).plan.fseg isa CAL.PerSpectralWindow
+        @test only(FP._bandpass_level_blocks(_setup(ll), zeros(ll.nθ), :phase)).plan.fseg isa CAL.PerSpectralWindow
 
         # A model differing across stations puts one plan per signature group on
         # the flat `plans` list, so its positions no longer name the two
@@ -393,7 +383,7 @@ FP.can_fit(::_UniformSmoother, tc, geom) = true
         lh = CAL.plan_parameters(mh, anames, geom)
         @test lh.nphase == 2 && length(lh.plans) == 4
         for group in (:phase, :logamp)
-            @test [b.stations for b in FP.bandpass_blocks(_setup(lh), zeros(lh.nθ), group)] ==
+            @test [b.stations for b in FP._bandpass_blocks(_setup(lh), zeros(lh.nθ), group)] ==
                 [[1], [2, 3]]
         end
 
@@ -402,7 +392,7 @@ FP.can_fit(::_UniformSmoother, tc, geom) = true
             CAL.GainModel(; phase = default_bandpass_terms().phase), anames, geom,
         )
         @test FP._bandpass_paths(lp.plantree, :logamp) == (; shape = nothing, level = nothing)
-        @test isempty(FP.bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
+        @test isempty(FP._bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
     end
 
 end
@@ -608,10 +598,10 @@ end
     @test only(priors).σ ≈ ref.σ rtol = 1.0e-2
 end
 
-@testset "bandpass_track_report: counts and the unfitted observable" begin
+@testset "_bandpass_track_report: counts and the unfitted observable" begin
     ph = [FP.TrackSolved FP.TrackFlat; FP.TrackNoData FP.TrackNoData]
     phase_status = reshape(ph, 2, 2, 1)
-    rep = FP.bandpass_track_report(phase_status, nothing)
+    rep = FP._bandpass_track_report(phase_status, nothing)
     @test (rep.n_solved, rep.n_flat, rep.n_nodata) == (1, 1, 2)
     @test !haskey(rep, :band_ids)
     # An observable that was not fit is an EMPTY status, not a missing one: the
@@ -621,14 +611,14 @@ end
     @test rep.phase_priors isa AbstractArray && isempty(rep.phase_priors)
     @test rep.phase_slip isa AbstractArray && isempty(rep.phase_slip)
     # Per-block arrays are counted together.
-    blocks = FP.bandpass_track_report((g1 = phase_status, g2 = phase_status), nothing)
+    blocks = FP._bandpass_track_report((g1 = phase_status, g2 = phase_status), nothing)
     @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata) == (2, 2, 4)
     # Three of four pieces measured nothing; the smoother's `warn_fraction` decides
     # whether that warns.
     @test_logs (:warn, r"75.0% of") FP._warn_degenerate_bandpass(rep, 0.5)
     @test_logs FP._warn_degenerate_bandpass(rep, 0.8)
     # A phase piece whose slip probability reaches the smoother's threshold warns.
-    slipped = FP.bandpass_track_report(phase_status, nothing; phase_slip = reshape([0.01 0.2; NaN NaN], 2, 2, 1))
+    slipped = FP._bandpass_track_report(phase_status, nothing; phase_slip = reshape([0.01 0.2; NaN NaN], 2, 2, 1))
     @test_logs (:warn, r"1 of 2 phase pieces") FP._warn_uncertain_branches(slipped, 0.05)
     @test_logs FP._warn_uncertain_branches(slipped, 0.5)
 end
@@ -867,16 +857,6 @@ end
             ),
         ),
     )
-
-    @testset "the capability is declared by the smoother, not the step" begin
-        @test supports_station_heterogeneity(Bandpass(; smoother = FP.JointSmoother(), gauge = PinAntenna(1)))
-        @test !supports_station_heterogeneity(Bandpass(; smoother = _UniformSmoother(), gauge = PinAntenna(1)))
-        # A smoother that solves one gain table for every station is rejected,
-        # naming the smoother that would take the model.
-        @test_throws "Bandpass(smoother = JointSmoother())" fit(
-            Bandpass(; model = het, smoother = _UniformSmoother(), gauge = PinAntenna(1)), uvset,
-        )
-    end
 
     # The solve converges slowly on this model, so it runs far below the default
     # tolerance to resolve the break to 1e-6 rad.

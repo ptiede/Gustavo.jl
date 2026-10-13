@@ -1,7 +1,7 @@
 # Fring
 
 The solver stages and their pluggable smoothers: the fringe
-search, stationization, bandpass smoothers, and
+search, stationization, the bandpass solve, and
 adhoc phasing.
 
 ```@autodocs

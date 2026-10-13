@@ -7,7 +7,7 @@
 # per observable, a shape component with a value per `ChannelBlocks` segment,
 # optionally beside a level component at spectral-window resolution or coarser.
 # A prior on the shape relates its values within each spectral window. How it is
-# solved is pluggable through `AbstractBandpassSmoother`; `JointSmoother` runs
+# solved is `JointSmoother`, which runs
 # [`solve_joint_bandpass!`](@ref), fitting the complex visibilities against an
 # explicit per-scan source term, with the priors entering inside the gain update.
 #
@@ -44,56 +44,6 @@ function default_bandpass_terms(; freq::ChannelBlocks = ChannelBlocks(1))
     return GainModel(phase = (; bandpass), logamp = (; bandpass))
 end
 
-"""
-    AbstractBandpassSmoother
-
-How the [`Bandpass`](@ref Gustavo.Bandpass) step turns the accumulated
-per-channel residual into station bandpass tracks, under each component's
-prior. [`JointSmoother`](@ref) fits the complex visibilities against an explicit
-per-scan source term.
-
-# Implementing a smoother
-
-Define:
-
-    Gustavo.Fring.can_fit(sm::MySmoother, tc::Calibration.GainComponent, geom) -> Bool
-    Gustavo.Fring.solve_bandpass!(sm::MySmoother, θ, results, setup; gauge) -> report
-
-[`can_fit`](@ref) declares which model components the smoother can solve; it
-defaults to `false`, so an undeclared model is rejected at compile time
-rather than leaving θ blocks unsolved. `JointSmoother` accepts
-`GainComponent(ConstantTerm(); Ti = <GlobalTime, InstrumentScans or
-TimeBlocks>, Frequency = <any segmentation>, Feed = PerFeed(), prior = <nothing,
-or a RandomWalkPrior or OUPrior along Frequency>)` and nothing else — a
-time segmentation whose segments each span several scans, solved one segment at
-a time.
-
-`solve_bandpass!` writes into `θ`'s bandpass blocks. `results` is the
-per-scan `(; rl, wl, ti, source)` list in group-index order: `rl` and `wl` are
-`accumulate_bandpass`'s sums, `ti` the scan's first sample on the
-solve's time axis (hence which time segment it falls in). `setup` is
-`(; station_pairs, feeds, layout, geom, paths)`, built once per
-solve: `station_pairs` and `feeds` label the sums' `AntennaPair` and `FeedPair`
-axes, and `geom` is the solve's `DataGeometry`, whose `stations` are θ's
-stations. Reach each observable's parameters through
-[`bandpass_blocks`](@ref)`(setup, θ, :phase)` / `(…, :logamp)`, and its level
-through [`bandpass_level_blocks`](@ref bandpass_blocks), rather than the paths directly.
-`report` is published on the step's solution record and
-should say which tracks were measured (see [`bandpass_track_report`](@ref));
-θ alone cannot distinguish a measured flat response from an unfitted one.
-Return `nothing` to report nothing.
-
-One optional hook:
-
-    Gustavo.Fring.validate_model(sm::MySmoother, model)
-
-`validate_model` receives the whole `(; phase, logamp)` tree at compile time for requirements
-`can_fit` cannot express per component. A new method replaces the default,
-so it must re-establish the base checks, available as
-[`validate_bandpass_groups`](@ref).
-"""
-abstract type AbstractBandpassSmoother end
-
 # A bandpass track is one value per frequency segment, per feed, held over a
 # stretch of time, under a prior along frequency. The scans of a time segment
 # are solved together as one stretch, so any segmentation whose
@@ -108,19 +58,12 @@ _fits_bandpass_track(tc) =
     tc.Feed isa PerFeed &&
     _is_prior_along(resolve_prior(tc), :Frequency)
 
-"""
-    validate_bandpass_groups(model)
-
-The structural requirement the [`Bandpass`](@ref Gustavo.Bandpass) step
-places on every smoother's model: at least one component overall, and per
-observable group either one component or a shape and its level. In a pair, the
-shape is the component on `ChannelBlocks` and carries a proper zero-mean prior
-(an `OUPrior`, or a `RandomWalkPrior` with an `init`);
-the level is the other, on the same time segmentation, with no prior. The
-default `validate_model` for [`AbstractBandpassSmoother`](@ref), and the base a
-smoother's own method must re-establish.
-"""
-function validate_bandpass_groups(model)
+# The structure every bandpass model must have: at least one component overall,
+# and per observable group either one component or a shape and its level. In a
+# pair, the shape is the component on `ChannelBlocks` and carries a proper
+# zero-mean prior (an `OUPrior`, or a `RandomWalkPrior` with an `init`); the
+# level is the other, on the same time segmentation, with no prior.
+function _validate_bandpass_groups(model)
     np = length(Calibration._flatten_components(model.phase))
     na = length(Calibration._flatten_components(model.logamp))
     np + na >= 1 || throw(
@@ -177,10 +120,8 @@ function _validate_level_pair(name, a, b)
     return nothing
 end
 
-validate_model(sm::AbstractBandpassSmoother, model) = validate_bandpass_groups(model)
-
 # The paths to a bandpass observable's shape and level components in a step
-# layout's plantree, each `nothing` when absent. `validate_bandpass_groups`
+# layout's plantree, each `nothing` when absent. `_validate_bandpass_groups`
 # allows at most two components per group, and the shape is the one on
 # `ChannelBlocks`.
 function _bandpass_paths(plantree, group::Symbol)
@@ -197,32 +138,16 @@ _plan_node(tree, path) = foldl((node, k) -> node[k], path; init = tree)
 _is_shape_node(plan::ComponentPlan) = plan.fseg isa ChannelBlocks
 _is_shape_node(g::Calibration.GroupedComponentPlan) = _is_shape_node(first(values(g.groups)))
 
-"""
-    bandpass_blocks(setup, θ, group::Symbol) -> Vector
-    bandpass_level_blocks(setup, θ, group::Symbol) -> Vector
-
-The station blocks of the bandpass's `:phase` or `:logamp` shape component, or
-of its level component — [`Calibration.station_blocks`](@ref) resolved against
-`setup`'s recorded paths — empty when the model compiles no such component for
-that observable. Each block is `(; stations, θ, plan)`, and a station-uniform
-model yields exactly one block spanning every station.
-
-The paths are resolved by NAME through the layout's component tree: the flat
-`layout.plans` list holds one entry per signature group, so its positions do not
-name the components once a model differs across stations.
-"""
-bandpass_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths[group].shape)
-bandpass_level_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths[group].level)
+# The station blocks `(; stations, θ, plan)` of an observable's (`:phase` or
+# `:logamp`) shape or level component, empty when the model has none. The paths
+# are resolved by name: `layout.plans` holds one entry per station-signature
+# group, so its positions do not name the components once a model differs
+# across stations.
+_bandpass_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths[group].shape)
+_bandpass_level_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths[group].level)
 
 _path_blocks(setup, θ, ::Nothing) = NamedTuple[]
 _path_blocks(setup, θ, path) = station_blocks(setup.layout, θ, path...)
-
-function solve_bandpass! end
-solve_bandpass!(sm::AbstractBandpassSmoother, θ, results, setup; gauge) =
-    error(
-    "$(typeof(sm)) does not implement the bandpass smoother interface: define " *
-        "Gustavo.Fring.solve_bandpass!(::$(typeof(sm)), θ, results, setup; gauge)."
-)
 
 """
     accumulate_bandpass(group::XRadio.ProcessingSet, geom::DataGeometry, station_pairs, feeds;
@@ -396,7 +321,7 @@ _status_arrays(st::NamedTuple) = values(st)
 _status_arrays(st) = (st,)
 
 """
-    bandpass_track_report(phase_status, amp_status; phase_priors = nothing,
+    _bandpass_track_report(phase_status, amp_status; phase_priors = nothing,
                           amp_priors = nothing, phase_slip = nothing) -> NamedTuple
 
 Summarize a bandpass solve's per-piece outcomes into the record the
@@ -422,7 +347,7 @@ without measuring anything, and they are what the counts exist to expose: θ
 itself records an unfitted piece as unit gain and a starved one as a constant,
 neither distinguishable there from a genuinely flat response.
 """
-function bandpass_track_report(phase_status, amp_status; phase_priors = nothing, amp_priors = nothing, phase_slip = nothing)
+function _bandpass_track_report(phase_status, amp_status; phase_priors = nothing, amp_priors = nothing, phase_slip = nothing)
     counts = zeros(Int, length(instances(TrackStatus)))
     for st in (phase_status, amp_status), a in _status_arrays(st), c in a
         counts[Int(c) + 1] += 1
@@ -1584,6 +1509,12 @@ log-amplitude shape must give them one frequency and one time segmentation per
 station; their priors and levels may differ. A model with only one of them
 holds the other at zero: unit amplitude, or zero phase.
 
+It accepts components of the form `GainComponent(ConstantTerm(); Ti = <GlobalTime,
+InstrumentScans or TimeBlocks>, Frequency = <any segmentation>, Feed = PerFeed(),
+prior = <nothing, or a RandomWalkPrior or OUPrior along Frequency>)`: a time
+segmentation whose segments each span several scans, solved one segment at a
+time. Stations may have different models.
+
 Iterations stop once no gain moves by more than `tolerance` of its standard
 error from the data and the hyperparameters given as densities are within
 `tolerance` of their standard errors of the type-II MAP, and warn if
@@ -1606,7 +1537,7 @@ an MSv4 store); `eltype`, a real floating-point type, names another. The
 linearized steps are solved in `Float64`, the type the sparse Cholesky
 factorization supports.
 """
-struct JointSmoother <: AbstractBandpassSmoother
+struct JointSmoother
     max_iterations::Int
     tolerance::Float64
     max_slip_probability::Float64
@@ -1622,7 +1553,7 @@ JointSmoother(;
 can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
 function validate_model(::JointSmoother, model)
-    validate_bandpass_groups(model)
+    _validate_bandpass_groups(model)
     ph = _shape_component(model.phase)
     la = _shape_component(model.logamp)
     (isnothing(ph) || isnothing(la)) && return nothing
@@ -1653,10 +1584,10 @@ function _shape_component(tree)
     return only(c for c in comps if c.Frequency isa ChannelBlocks)
 end
 
-function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge)
+function _solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge)
     geom = setup.geom
-    phase_blocks = bandpass_blocks(setup, θ, :phase)
-    amp_blocks = bandpass_blocks(setup, θ, :logamp)
+    phase_blocks = _bandpass_blocks(setup, θ, :phase)
+    amp_blocks = _bandpass_blocks(setup, θ, :logamp)
     # One complex gain per (station, feed, segment) means one time segmentation
     # for both observables — `validate_model` holds each station's two plans to
     # it — so either side's table is the whole solve's.
@@ -1670,14 +1601,14 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
     for idx in _joint_scan_groups(tseg)
         solve_joint_bandpass!(
             θ, results[idx], geom, phase_blocks, amp_blocks;
-            phase_level_blocks = bandpass_level_blocks(setup, θ, :phase),
-            amp_level_blocks = bandpass_level_blocks(setup, θ, :logamp),
+            phase_level_blocks = _bandpass_level_blocks(setup, θ, :phase),
+            amp_level_blocks = _bandpass_level_blocks(setup, θ, :logamp),
             gauge, sm.max_iterations, sm.tolerance, sm.flat_span, sm.eltype,
             tseg = view(tseg, :, idx), phase_status, amp_status, phase_priors, amp_priors, phase_slip,
         )
     end
     leaves(arrays) = isnothing(arrays) ? nothing : _block_leaves(arrays)
-    report = bandpass_track_report(
+    report = _bandpass_track_report(
         leaves(phase_status), leaves(amp_status);
         phase_priors = leaves(phase_priors), amp_priors = leaves(amp_priors), phase_slip = leaves(phase_slip),
     )
@@ -1700,10 +1631,10 @@ the module comment above `_reduce_scan_segments!` for the model), then
 gauge-fix each (station, feed, time segment) track and write the result into the
 station blocks of the two observables (`_write_joint_bandpass!`).
 
-`phase_blocks` and `amp_blocks` are [`bandpass_blocks`](@ref)`(setup, θ, :phase)`
+`phase_blocks` and `amp_blocks` are `_bandpass_blocks(setup, θ, :phase)`
 and `(…, :logamp)` — station blocks over the SAME `θ` this call is handed, since
 each block's `θ` is a view into it — and `phase_level_blocks`/`amp_level_blocks`
-the matching [`bandpass_level_blocks`](@ref bandpass_blocks), empty without a level. A
+the matching `_bandpass_level_blocks`, empty without a level. A
 station-uniform model gives one block per component spanning every station;
 where the model differs across stations, each block carries its own stations,
 feed tying, segments and prior, and a station no block covers is left at unit
@@ -1779,7 +1710,7 @@ that share no data are solved by separate calls rather than being averaged into
 a common tolerance.
 
 `phase_status`/`amp_status`, when given, hold one `(AntennaName, Feed, Frequency, Ti)`
-array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref)),
+array per block of `phase_blocks`/`amp_blocks` (`_bandpass_track_report`),
 receiving each spectral window's [`TrackStatus`](@ref), `phase_slip` the same arrays as `phase_status` receiving each phase
 piece's posterior probability of a 2π slip from the last iteration, and `phase_priors`/`amp_priors` one
 `(AntennaName, Feed, Ti)` array per block receiving each track's resolved prior;
