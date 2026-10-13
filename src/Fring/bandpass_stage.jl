@@ -581,15 +581,15 @@ end
 
 # Every scan's (AntennaPair, FeedPair, segment) residual, stacked over an added Scan
 # axis — not summed across scans, since the per-scan source coherence needs each
-# scan's own coherent visibility. Element types follow the scan accumulators'
-# own, not a hardcoded precision.
-function _reduce_all_scans(scans, segs, cells::Frequency)
+# scan's own coherent visibility, in the scan accumulators' element types or
+# in the real type `eltype`.
+function _reduce_all_scans(scans, segs, cells::Frequency; eltype = nothing)
     nscan = length(scans)
     rl = first(scans).rl
     nbl, npol = size(rl, AntennaPair), size(rl, FeedPair)
     nseg = length(segs)
-    C = eltype(rl)
-    T = real(eltype(first(scans).wl))
+    T = something(eltype, real(Base.eltype(first(scans).wl)))
+    C = isnothing(eltype) ? Base.eltype(rl) : complex(eltype)
     d = (Scan(1:nscan), dims(rl, AntennaPair), dims(rl, FeedPair), cells)
     rseg = DimensionalData.DimArray(zeros(C, nscan, nbl, npol, nseg), d)
     wseg = DimensionalData.DimArray(zeros(T, nscan, nbl, npol, nseg), d)
@@ -1569,7 +1569,7 @@ end
 
 """
     JointSmoother(; max_iterations = 200, tolerance = 0.01, max_slip_probability = 0.05,
-                  flat_span = 0.01, warn_fraction = 0.25)
+                  flat_span = 0.01, warn_fraction = 0.25, eltype = nothing)
 
 Fit the station bandpass against the actual complex visibilities, with each
 component's prior acting inside the solve rather than as a fit applied to it
@@ -1599,6 +1599,12 @@ any piece's reaches `max_slip_probability`. A fitted piece whose range is below
 `flat_span` (radians or nepers) is reported flat rather than as a measured shape,
 and the solve warns when more than `warn_fraction` of its pieces are flat or
 without data.
+
+The visibilities are reduced onto the frequency segments, and the gains and
+source terms held, in the real type of the summed visibilities (`Float32` for
+an MSv4 store); `eltype`, a real floating-point type, names another. The
+linearized steps are solved in `Float64`, the type the sparse Cholesky
+factorization supports.
 """
 struct JointSmoother <: AbstractBandpassSmoother
     max_iterations::Int
@@ -1606,11 +1612,12 @@ struct JointSmoother <: AbstractBandpassSmoother
     max_slip_probability::Float64
     flat_span::Float64
     warn_fraction::Float64
+    eltype::Union{Nothing, DataType}
 end
 JointSmoother(;
     max_iterations::Integer = 200, tolerance::Real = 0.01, max_slip_probability::Real = 0.05,
-    flat_span::Real = 0.01, warn_fraction::Real = 0.25,
-) = JointSmoother(max_iterations, tolerance, max_slip_probability, flat_span, warn_fraction)
+    flat_span::Real = 0.01, warn_fraction::Real = 0.25, eltype::Union{Nothing, Type{<:AbstractFloat}} = nothing,
+) = JointSmoother(max_iterations, tolerance, max_slip_probability, flat_span, warn_fraction, eltype)
 
 can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
@@ -1665,7 +1672,7 @@ function solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractG
             θ, results[idx], geom, phase_blocks, amp_blocks;
             phase_level_blocks = bandpass_level_blocks(setup, θ, :phase),
             amp_level_blocks = bandpass_level_blocks(setup, θ, :logamp),
-            gauge, sm.max_iterations, sm.tolerance, sm.flat_span,
+            gauge, sm.max_iterations, sm.tolerance, sm.flat_span, sm.eltype,
             tseg = view(tseg, :, idx), phase_status, amp_status, phase_priors, amp_priors, phase_slip,
         )
     end
@@ -1683,7 +1690,7 @@ end
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
                           gauge, max_iterations = 200, tolerance = 0.01,
-                          flat_span = 0.01, phase_status = nothing,
+                          flat_span = 0.01, eltype = nothing, phase_status = nothing,
                           amp_status = nothing, phase_priors = nothing,
                           amp_priors = nothing, phase_slip = nothing, tseg = nothing)
 
@@ -1776,13 +1783,15 @@ array per block of `phase_blocks`/`amp_blocks` ([`bandpass_track_report`](@ref))
 receiving each spectral window's [`TrackStatus`](@ref), `phase_slip` the same arrays as `phase_status` receiving each phase
 piece's posterior probability of a 2π slip from the last iteration, and `phase_priors`/`amp_priors` one
 `(AntennaName, Feed, Ti)` array per block receiving each track's resolved prior;
-a call solving part of a track writes only its own time segments.
+a call solving part of a track writes only its own time segments. The data
+are reduced and the gains and source terms held in the accumulators' types, or
+in the real type `eltype`; the steps are solved in `Float64`.
 """
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
         gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Real = 0.01,
-        flat_span::Real = 0.01, phase_status = nothing, amp_status = nothing,
+        flat_span::Real = 0.01, eltype = nothing, phase_status = nothing, amp_status = nothing,
         phase_priors = nothing, amp_priors = nothing, phase_slip = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )
@@ -1808,9 +1817,9 @@ function solve_joint_bandpass!(
     # gain over however many refinement cells that segment spans.
     blocks = _gain_blocks(phase_blocks, amp_blocks)
     fseg, cells = _station_freq_segments(blocks, nant)
-    r, w = _reduce_all_scans(scans, cells, Frequency(_segment_lookup(geom.channel_freqs, cells)))
+    r, w = _reduce_all_scans(scans, cells, Frequency(_segment_lookup(geom.channel_freqs, cells)); eltype)
     ends = _cell_nodes(r, geom.stations, PerFeed())
-    S = zeros(eltype(r), (Scan(axes(r, Scan)), dims(r, AntennaPair), dims(r, FeedPair)))
+    S = zeros(Base.eltype(r), (Scan(axes(r, Scan)), dims(r, AntennaPair), dims(r, FeedPair)))
     data = DimStack((; r, w, S, ends))
 
     # The time segments each station is actually solved for here, in its own
@@ -1821,14 +1830,14 @@ function solve_joint_bandpass!(
         loc, tseg = tsg, fseg,
         present = [sort!(filter!(!iszero, unique(view(tsg, a, :)))) for a in axes(tsg, 1)],
     )
-    gains = [_block_gains(b, geom, eltype(r)) for b in blocks]
+    gains = [_block_gains(b, geom, Base.eltype(r)) for b in blocks]
     # The gauge fixes phases; a solve that holds every phase at zero has none to fix.
     gauge_state = isempty(phase_blocks) ? nothing : _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     gauge_rows = isnothing(gauge_state) ? nothing : (; gauge_state.rows, d = Float64.(gauge_state.d))
 
     segs = [_shape_segments(b.plan, geom) for b in blocks]
-    phase_level = _station_levels(phase_level_blocks, segs, loc, geom, θ, real(eltype(r)))
-    amp_level = _station_levels(amp_level_blocks, segs, loc, geom, θ, real(eltype(r)))
+    phase_level = _station_levels(phase_level_blocks, segs, loc, geom, θ, real(Base.eltype(r)))
+    amp_level = _station_levels(amp_level_blocks, segs, loc, geom, θ, real(Base.eltype(r)))
     fits = map(1:nant) do a
         k, ai = loc[a]
         iszero(k) && return nothing
@@ -1872,6 +1881,7 @@ function solve_joint_bandpass!(
     acting = map(ts -> findall(t -> any(t.active), ts), tracks)
     energy(obs, x) = sum((first(_track_energy(tracks[obs][i], priors[obs][i], x)) for i in acting[obs]); init = 0.0)
 
+    # Float64 whatever the data's type: CHOLMOD factors only Float64.
     ℓ, φ = zeros(nslots), zeros(nslots)
     gains_of(ℓ, φ) = exp.(complex.(ℓ, φ))
     _source_coherence!(S, gains_of(ℓ, φ), data, jl)

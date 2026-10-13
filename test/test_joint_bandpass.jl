@@ -116,6 +116,13 @@ end
     )
 
     s_free = runbp(FP.JointSmoother())
+    # The data reduced and the gains held in another type: the same gains to
+    # that type's precision.
+    s32, s64 = runbp(FP.JointSmoother(; eltype = Float32)), runbp(FP.JointSmoother(; eltype = Float64))
+    for leaf in (:phase, :logamp)
+        @test _jb_leaf(s32, leaf) ≈ _jb_leaf(s64, leaf) rtol = 1.0e-4
+        @test !(_jb_leaf(s32, leaf) == _jb_leaf(s64, leaf))
+    end
     @test_logs (:warn, r"did not converge in 2 iterations") match_mode = :any runbp(FP.JointSmoother(max_iterations = 2))
 
     # σ = 1e-6 rad per channel (2 MHz) as rad/Hz^(3/2).
