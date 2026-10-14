@@ -349,11 +349,12 @@ end
 
         phase_status = [FP._block_status_array(b, geom) for b in phase_blocks]
         amp_status = [FP._block_status_array(b, geom) for b in amp_blocks]
-        FP.solve_joint_bandpass!(
+        fits = FP.solve_joint_bandpass!(
             θ, results, geom, phase_blocks, amp_blocks;
-            gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13,
-            tseg, phase_status, amp_status,
+            gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13, tseg,
         )
+        FP._record_track_fits!(phase_status, nothing, nothing, fits.phase)
+        FP._record_track_fits!(amp_status, nothing, nothing, fits.amp)
 
         pleaf = CAL._component_leaf(phase_plan, θ)
         aleaf = CAL._component_leaf(amp_plan, θ)
@@ -433,11 +434,12 @@ end
             @test all(==(FP.TrackNoData), st)
         end
 
-        FP.solve_joint_bandpass!(
+        fits = FP.solve_joint_bandpass!(
             θ, results, geom, phase_blocks, amp_blocks;
-            gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13,
-            tseg = tsg, phase_status, amp_status,
+            gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13, tseg = tsg,
         )
+        FP._record_track_fits!(phase_status, nothing, nothing, fits.phase)
+        FP._record_track_fits!(amp_status, nothing, nothing, fits.amp)
 
         demean(v) = v .- sum(v) / length(v)
         cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
@@ -791,7 +793,8 @@ end
         results = _joint_scan_accumulators(gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom)
         amp_priors = [FP._block_prior_array(b, geom) for b in ab]
         @test all(p -> p === ou, only(amp_priors))
-        FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), amp_priors)
+        fits = FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1))
+        FP._record_track_fits!(nothing, amp_priors, nothing, fits.amp)
         @test all(p -> CAL.is_fixed_hyper(p.scale) && CAL.is_fixed_hyper(p.σ), only(amp_priors))
         rep = FP._bandpass_track_report(nothing, nothing; amp_priors = only(amp_priors))
         @test rep.amp_priors === only(amp_priors)

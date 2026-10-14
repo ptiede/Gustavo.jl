@@ -1599,13 +1599,15 @@ function _solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::Abstract
     amp_priors = arrays(_block_prior_array, amp_blocks)
     phase_slip = arrays(_block_slip_array, phase_blocks)
     for idx in _joint_scan_groups(tseg)
-        solve_joint_bandpass!(
+        fits = solve_joint_bandpass!(
             θ, results[idx], geom, phase_blocks, amp_blocks;
             phase_level_blocks = _bandpass_level_blocks(setup, θ, :phase),
             amp_level_blocks = _bandpass_level_blocks(setup, θ, :logamp),
             gauge, sm.max_iterations, sm.tolerance, sm.flat_span, sm.eltype,
-            tseg = view(tseg, :, idx), phase_status, amp_status, phase_priors, amp_priors, phase_slip,
+            tseg = view(tseg, :, idx),
         )
+        _record_track_fits!(phase_status, phase_priors, phase_slip, fits.phase)
+        _record_track_fits!(amp_status, amp_priors, nothing, fits.amp)
     end
     leaves(arrays) = isnothing(arrays) ? nothing : _block_leaves(arrays)
     report = _bandpass_track_report(
@@ -1621,9 +1623,7 @@ end
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
                           gauge, max_iterations = 200, tolerance = 0.01,
-                          flat_span = 0.01, eltype = nothing, phase_status = nothing,
-                          amp_status = nothing, phase_priors = nothing,
-                          amp_priors = nothing, phase_slip = nothing, tseg = nothing)
+                          flat_span = 0.01, eltype = nothing, tseg = nothing) -> (; phase, amp)
 
 Jointly solve the per-(station, feed, frequency segment) complex bandpass gain
 and a per-scan, per-station-pair, per-feed-pair constant source coherence (see
@@ -1709,24 +1709,22 @@ the coupling graph, so this is one criterion over one coupled problem: nodes
 that share no data are solved by separate calls rather than being averaged into
 a common tolerance.
 
-`phase_status`/`amp_status`, when given, hold one `(AntennaName, Feed, Frequency, Ti)`
-array per block of `phase_blocks`/`amp_blocks` (`_bandpass_track_report`),
-receiving each spectral window's [`TrackStatus`](@ref), `phase_slip` the same arrays as `phase_status` receiving each phase
-piece's posterior probability of a 2π slip from the last iteration, and `phase_priors`/`amp_priors` one
-`(AntennaName, Feed, Ti)` array per block receiving each track's resolved prior;
-a call solving part of a track writes only its own time segments. The data
-are reduced and the gains and source terms held in the accumulators' types, or
-in the real type `eltype`; the steps are solved in `Float64`.
+Returns, per observable, one `(; track, prior, status, slip)` per (station,
+feed, time segment) track: the track, the prior it was fit under with its
+hyperparameters resolved, the [`TrackStatus`](@ref) of each spectral window,
+and for a phase track each spectral window's posterior probability of a 2π slip
+from the last iteration (`nothing` for an amplitude track). The data are reduced
+and the gains and source terms held in the accumulators' types, or in the real
+type `eltype`; the steps are solved in `Float64`.
 """
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
         gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Real = 0.01,
-        flat_span::Real = 0.01, eltype = nothing, phase_status = nothing, amp_status = nothing,
-        phase_priors = nothing, amp_priors = nothing, phase_slip = nothing,
+        flat_span::Real = 0.01, eltype = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )
-    isempty(scans) && return θ
+    isempty(scans) && return (; phase = [], amp = [])
     nant = length(geom.stations)
     # Both observables carry one complex gain per (station, feed, segment), so
     # their blocks must hold the same stations on the same segmentations
@@ -1810,6 +1808,7 @@ function solve_joint_bandpass!(
     filled = map(obs -> movable(obs) .& .!hasdata, (; phase = :phase, amp = :amp))
     priors = map(ts -> Any[t.prior for t in ts], tracks)
     acting = map(ts -> findall(t -> any(t.active), ts), tracks)
+    slips = [fill(NaN, length(t.pieces)) for t in tracks.phase]
     energy(obs, x) = sum((first(_track_energy(tracks[obs][i], priors[obs][i], x)) for i in acting[obs]); init = 0.0)
 
     # Float64 whatever the data's type: CHOLMOD factors only Float64.
@@ -1843,8 +1842,7 @@ function solve_joint_bandpass!(
             for i in acting.phase
                 t = tracks.phase[i]
                 isone(iteration) && (priors.phase[i] = _seed_prior(t, y, wy; phase = true))
-                slip = isnothing(phase_slip) ? nothing : view(phase_slip[t.k], t.ai, t.feed, :, t.ts)
-                shift = _choose_branches!(φ, t, priors.phase[i], y, wy, free.phase; slip)
+                shift = _choose_branches!(φ, t, priors.phase[i], y, wy, free.phase; slip = slips[i])
                 isnothing(gauge_rows) || _shift_gauge!(gauge_rows, shift)
             end
         end
@@ -1967,22 +1965,22 @@ function solve_joint_bandpass!(
         gk.amp_valid[I] = free.amp[n]
     end
     levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
-    for (obs, x, status, recorded) in ((:phase, φ, phase_status, phase_priors), (:amp, ℓ, amp_status, amp_priors))
+    fits = map((:phase, :amp)) do obs
+        x = obs === :phase ? φ : ℓ
         valid = obs === :phase ? free.phase .| (fitted.phase .& pinned) : free.amp
-        for (i, t) in pairs(tracks[obs])
-            if !isnothing(status)
-                for (j, p) in pairs(t.pieces)
-                    vals = [valid[n] ? x[n] : NaN for n in t.slots[p]]
-                    status[t.k][t.ai, t.feed, j, t.ts] = all(pinned[t.slots[p]]) && obs === :phase ? TrackSolved :
-                        _band_track_status(vals, flat_span)
+        map(eachindex(tracks[obs])) do i
+            t = tracks[obs][i]
+            status = map(t.pieces) do p
+                all(pinned[t.slots[p]]) && obs === :phase && return TrackSolved
+                return _band_track_status([valid[n] ? x[n] : NaN for n in t.slots[p]], flat_span)
+            end
+            if !isnothing(t.level) && any(t.active)
+                _, L = _track_energy(t, priors[obs][i], x)
+                for (g, v) in L
+                    levels[t.a][obs][t.feed, g, t.ts] = v
                 end
             end
-            isnothing(recorded) || (recorded[t.k][t.ai, t.feed, t.ts] = priors[obs][i])
-            (isnothing(t.level) || !any(t.active)) && continue
-            _, L = _track_energy(t, priors[obs][i], x)
-            for (g, v) in L
-                levels[t.a][obs][t.feed, g, t.ts] = v
-            end
+            return (; track = t, prior = priors[obs][i], status, slip = obs === :phase ? slips[i] : nothing)
         end
     end
     level_writers = [
@@ -1990,7 +1988,22 @@ function solve_joint_bandpass!(
             for a in 1:nant
     ]
     _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers)
-    return θ
+    return (; phase = fits[1], amp = fits[2])
+end
+
+# Record a joint solve's track fits (`solve_joint_bandpass!`) into one array per
+# station block of their status (`_block_status_array`), prior
+# (`_block_prior_array`) and slip probability (`_block_slip_array`), each
+# `nothing` to skip. A solve over part of a track's time writes only its own
+# time segments.
+function _record_track_fits!(status, priors, slip, fits)
+    for f in fits
+        t = f.track
+        isnothing(status) || (status[t.k][t.ai, t.feed, :, t.ts] = f.status)
+        isnothing(priors) || (priors[t.k][t.ai, t.feed, t.ts] = f.prior)
+        isnothing(slip) || isnothing(f.slip) || (slip[t.k][t.ai, t.feed, :, t.ts] = f.slip)
+    end
+    return nothing
 end
 
 # Each station's level for one observable, `nothing` where it has none: its
