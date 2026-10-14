@@ -76,8 +76,8 @@ include("test_axis_order.jl")
 # cross-feed rate opt-in, fit-on-subset masking, corrections before the step.
 include("test_fringe_step.jl")
 
-# The Bandpass step on the new engine (M4 gates): fringe+bandpass θ
-# vs the frozen monolith, step-selection extraction + portable calibrate!.
+# The Bandpass step: model vetting, deterministic folding, the per-track
+# record, and portable calibrate!.
 include("test_bandpass_step.jl")
 
 # Bandpass(smoother = JointSmoother()): the alternating complex-visibility +

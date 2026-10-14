@@ -53,8 +53,7 @@ end
 # segments span scans fits: `GlobalTime` is the whole track, `InstrumentScans`
 # breaks it at named epochs, `TimeBlocks` at a fixed cadence. `PerScan` and
 # `PerIntegration` do not — a segment holding one scan leaves the band mean of
-# the gain degenerate with that scan's own source coherence, which needs the
-# deviation-from-template scheme the smoother does not implement.
+# the gain degenerate with that scan's own source coherence.
 _fits_bandpass_track(tc) =
     tc.term isa ConstantTerm &&
     tc.Ti isa Union{GlobalTime, InstrumentScans, TimeBlocks} &&
@@ -161,8 +160,7 @@ channel), `rl = Σ w·v` and `wl = Σ w`, on data already gain-corrected. Both a
 `FeedPair(feeds)` and `Frequency(geom.channel_freqs)` — labels shared by every
 group of a solve, so the sums of different scans line up — in the element types
 of the data. Autocorrelations never contribute; a cross pair or feed pair of the
-group that the labels do not hold is an error. Every smoother receives these
-sums as they are.
+group that the labels do not hold is an error.
 """
 function accumulate_bandpass(
         group::XRadio.ProcessingSet, geom::DataGeometry, station_pairs, feeds;
@@ -224,7 +222,7 @@ end
 The outcome of fitting one piece (one spectral window) of a bandpass track, as
 the bandpass report records it: `TrackNoData` (no usable channel; unit gain),
 `TrackSolved` (fit, with frequency structure) or `TrackFlat` (fit, but its range
-is below the smoother's `flat_span`). θ alone cannot tell these apart: an unfitted
+is below `JointSmoother`'s `flat_span`). θ alone cannot tell these apart: an unfitted
 piece reads back as unit gain and a flat one as a constant.
 """
 @enum TrackStatus::Int8 TrackNoData TrackSolved TrackFlat
@@ -432,7 +430,7 @@ end
 # Two scans share a parameter only through a station that is in the same one of
 # its own time segments in both, so the coupling graph has one node per
 # (station, segment) and one edge per pair of stations a scan holds together, and
-# the ALS runs once per connected component. With one segmentation for the whole
+# the joint solve runs once per connected component. With one segmentation for the whole
 # array the components are exactly the array-wide time segments. With one station
 # broken mid-track and the rest constant, the constant stations bridge the break
 # and the whole track is one component.
@@ -474,8 +472,7 @@ afterwards: the gains maximize their posterior, with the per-scan source term
 profiled out and type-II MAP hyperparameters ([`solve_joint_bandpass!`](@ref)).
 
 Because the per-scan source term absorbs a baseline's own structure, this suits a
-resolved or polarized calibrator, which a closure solve that assumes the source
-term cancels would bias. It solves one complex gain per
+resolved or polarized calibrator. It solves one complex gain per
 (station, feed, frequency segment), so a model with both a phase and a
 log-amplitude shape must give them one frequency and one time segmentation per
 station; their priors and levels may differ. A model with only one of them

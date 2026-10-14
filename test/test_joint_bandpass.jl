@@ -1,10 +1,7 @@
 # ── Bandpass(smoother = JointSmoother()): solve_joint_bandpass! ──────────────
 #
-# A closure solve assumes a baseline's source term cancels out of the
-# per-channel phase-difference/log-amp-sum closure — true only for an
-# unresolved, unpolarized calibrator. The joint solve fits an explicit per-scan
-# source coherence instead, so the synthetic visibilities here are
-# post-multiplied by an independent random complex factor per
+# The joint solve fits an explicit per-scan source coherence, so the synthetic
+# visibilities here are post-multiplied by an independent random complex factor per
 # (scan, baseline, polarization) — a stand-in for a resolved/polarized
 # calibrator's per-baseline structure — and the tests check that
 # `solve_joint_bandpass!` still recovers the injected station bandpass.
@@ -655,13 +652,6 @@ end
                 @test ab[bi].θ[1, f, :, 1, ai] ≈ demean(log.(abs.(truth))) atol = 1.0e-10
             end
         end
-
-        # The two observables must give each station the same segments.
-        lu = CAL.plan_parameters(hetmodel(ChannelBlocks(3), ChannelBlocks(3)), anames, geom)
-        θu = zeros(lu.nθ)
-        @test_throws "different segmentations" FP.solve_joint_bandpass!(
-            θ, results, geom, pb, FP._bandpass_blocks(setup(lu), θu, :logamp); gauge = PinAntenna(1),
-        )
 
         # Under a phase prior the partial pin holds its segment of station 1's
         # track at zero, and the prior fits the rest of the track with it.

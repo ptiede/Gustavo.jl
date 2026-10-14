@@ -1,13 +1,9 @@
 # ── Bandpass step ─────────────────────────────────────────────────────────────
 #
-# The bandpass stage on the composable engine. (The M4 parity gates against the
-# frozen monolith ran before its deletion.) Standing guarantees:
 # - The bandpass step fit after BaselineFringeFit solves only its own
 #   per-channel blocks, and θ is bit-deterministic across group concurrency (the
 #   per-scan accumulator contributions fold in group-index order).
-# - The refine kernels (dTEC, SBD) are inner-invariant and recover the
-#   injected dTEC standalone on a scan view.
-# - a bandpass solution is portable: `calibrate!` applies it same-set
+# - A bandpass solution is portable: `calibrate!` applies it same-set
 #   (index-aligned) and cross-set (station-name-mapped, channel-layout-validated,
 #   time-constant only).
 
@@ -37,7 +33,7 @@ _bp_station_blocks(sol, path...) = [
 # axis dropped.
 _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
-@testset "Bandpass step (new engine)" begin
+@testset "Bandpass step" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
     nglob = nspw * nchan
@@ -64,7 +60,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test bp_n.info.t_pass > 0
     end
 
-    @testset "new-engine fold is deterministic across ntasks" begin
+    @testset "the fold is deterministic across ntasks" begin
         sols4 = _fit_chain(
             (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
             ps; exec = ExecutionConfig(),

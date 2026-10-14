@@ -132,7 +132,7 @@ end
 
 Jointly solve the per-(station, feed, frequency segment) complex bandpass gain
 and a per-scan, per-station-pair, per-feed-pair constant source coherence (see
-the module comment above `_reduce_scan_segments!` for the model), then
+the header comment of bandpass_data.jl for the model), then
 gauge-fix each (station, feed, time segment) track and write the result into the
 station blocks of the two observables (`_write_joint_bandpass!`).
 
@@ -148,7 +148,7 @@ within each spectral window, with the prior's hyperparameters re-estimated every
 iteration.
 A station's two shapes must hold the same stations on the same frequency and
 time segmentations, which `validate_model(::JointSmoother, model)` enforces at
-model-compile time; the throw here guards direct callers. Either list may be
+model-compile time. Either list may be
 empty, which holds that observable at zero: unit amplitude, or zero phase and
 no gauge.
 
@@ -231,20 +231,6 @@ function solve_joint_bandpass!(
     )
     isempty(scans) && return (; phase = [], amp = [])
     nant = length(geom.stations)
-    # Both observables carry one complex gain per (station, feed, segment), so
-    # their blocks must hold the same stations on the same segmentations
-    # (`validate_model(::JointSmoother, model)` holds each station's tree to it;
-    # the throw guards direct callers).
-    _same_segmentation(pb, ab) =
-        pb.stations == ab.stations && pb.plan.fseg_id == ab.plan.fseg_id && pb.plan.tseg_id == ab.plan.tseg_id
-    isempty(phase_blocks) || isempty(amp_blocks) ||
-        length(amp_blocks) == length(phase_blocks) && all(splat(_same_segmentation), zip(phase_blocks, amp_blocks)) || throw(
-        ArgumentError(
-            "solve_joint_bandpass!: the phase and logamp components give the stations " *
-                "different segmentations — the solve carries one COMPLEX gain per " *
-                "(station, feed, segment), not independent phase/log-amp tracks.",
-        ),
-    )
 
     # The data are reduced onto the refinement of every block's frequency
     # segmentation, and each station's gain is held in its own segments — one

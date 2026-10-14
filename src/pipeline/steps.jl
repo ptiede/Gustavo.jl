@@ -67,7 +67,7 @@ The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan it is given. What is fit
 is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_terms`](@ref) for the
-default and the component form the smoother accepts; each component's prior
+default and the component form `JointSmoother` accepts; each component's prior
 states how its values relate within a spectral window. How it is solved
 lives on `smoother`, a [`Fring.JointSmoother`](@ref), which fits the complex visibilities
 against an explicit per-scan source coherence and so does not assume the
@@ -414,7 +414,7 @@ function _solve_group(
     return (; det, ncomp, flags, unlinked, max_snr, ncells, rows)
 end
 
-# ── Bandpass: accumulate per scan → per-channel/joint solves ─────────────────
+# ── Bandpass: accumulate per scan group, then one joint solve ────────────────
 
 function _group_setup(::Bandpass, ctx::SolveContext)
     layout = ctx.layout
@@ -458,7 +458,7 @@ function solve(s::Bandpass, ctx::SolveContext)
     results = each_group(group -> _solve_group(s, ctx, setup, group), ctx)
     isempty(results) && return (; nscans = 0)     # no scans → bandpass stays 0
     report = Fring._solve_bandpass!(s.smoother, ctx.θ, results, setup; gauge = ctx.gauge)
-    # The smoother's own per-track record travels with the step's info, so a
+    # The solve's per-track record travels with the step's info, so a
     # consumer can tell a measured bandpass track from a placeholder without
     # re-deriving it from the gains (where the two look identical).
     return (;

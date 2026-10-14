@@ -21,14 +21,9 @@
 # into `rview`/`wview`, a (AntennaPair, FeedPair, Frequency) slice of the multi-scan
 # accumulator, with no intermediate allocation.
 #
-# These must not be SNR-gated. The joint solve consumes them as complex
-# residuals under inverse-variance weights, and that accumulation is unbiased at
-# any SNR: a weak cell contributes its information at its honest weight and
-# costs variance, never validity. A gate would preferentially delete the weak cells pairing
-# different feeds, the only rows tying one feed's gain block to another's and so
-# the only measurement of the bandpass between feeds, leaving those blocks at
-# their initialization. Outliers
-# belong to a flagging step upstream of the solve, not to a cell gate.
+# Cells are kept at their inverse-variance weights at any SNR: a weak cell is
+# unbiased, and the weak cells pairing different feeds are the only rows tying
+# one feed's gains to another's. Outliers are flagged upstream of the solve.
 function _reduce_scan_segments!(rview, wview, sc, segs)
     for p in axes(rview, FeedPair), bi in axes(rview, AntennaPair)
         for (fs, chans) in enumerate(segs)
@@ -134,8 +129,8 @@ end
 # one edge per (scan, station pair, feed pair, refinement cell) correlation,
 # joining its two ends in the segments they are in for that scan and that cell.
 # Node degree stands in for the row weight the gauge scores elsewhere; the graph
-# is built from the correlations that exist, before any per-channel gating, so a
-# node's degree is the observation count available to anchor it.
+# is built from the correlations that exist, so a node's degree is the
+# observation count available to anchor it.
 #
 # The node set is the gauge condition. An edge names the two gain slots one
 # correlation reads, and a shared phase cancels out of `g_a·S·conj(g_b)` only
@@ -211,7 +206,7 @@ rest of that track is fitted.
 Besides that common phase, each (station, feed, time segment) track has a free
 band-constant phase and log-amplitude: `S` is per scan and baseline but
 frequency-flat, so it absorbs a band-constant factor on any one station, and
-a prior is profiled over that constant (see `_add_track_prior!`). Pinning `|g|` as well
+a prior is profiled over that constant (see the header of bandpass_priors.jl). Pinning `|g|` as well
 would assert the reference antenna has a flat amplitude bandpass, discarding
 structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
 over the band eliminates `ls` and leaves the full-rank signless-Laplacian
