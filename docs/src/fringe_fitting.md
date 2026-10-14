@@ -485,11 +485,10 @@ reference's value equal across scans, implements
 [`gauge_constraints`](@ref Gustavo.Calibration.gauge_constraints)`(g, freedoms)`
 instead, returning `C` and `d` for all freedoms of one system.
 
-The joint bandpass solve also needs one node per freedom;
-[`gauge_anchor`](@ref Gustavo.Calibration.gauge_anchor) supplies it, by
-default the first station of
-[`gauge_station_order`](@ref Gustavo.Calibration.gauge_station_order) present
-in the freedom, and the solve pins that node. The adhoc phase solve smooths
+The joint bandpass solve imposes the gauge's constraints exactly in every
+step, solving each constraint for one of its nodes; where every constraint
+holds one node at zero, as a pin does, it holds those nodes fixed instead.
+The adhoc phase solve smooths
 its tracks in a frame independent of the gauge and applies the gauge's
 constraint to each integration afterwards.
 
