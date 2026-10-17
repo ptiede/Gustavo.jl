@@ -87,10 +87,14 @@ function _branch_filter(
     # `(parent, branch)` of each history after each filtered sample `steps[s]`.
     trail = Vector{Vector{NTuple{2, Int}}}()
     steps = Int[]
+    children, links = _BranchHistory{D, T}[], NTuple{2, Int}[]
+    workspace = _prune_workspace()
     for k in k0:lastindex(θ)
         if k > firstindex(θ)
             A, Q = transition(model, x[k] - x[k - 1], T)
-            hyps = [_BranchHistory(A * h.μ, h.ll, h.b, h.extra) for h in hyps]
+            for (i, h) in pairs(hyps)
+                hyps[i] = _BranchHistory(A * h.μ, h.ll, h.b, h.extra)
+            end
             μ1 = A * μ1
             P = _symmetric(A * P * A' + Q)
         end
@@ -105,8 +109,8 @@ function _branch_filter(
         proper = !level || c > 0
         sd = sqrt(level && c > 0 ? S + v1^2 / c : S)
         span = proper ? Int(min(ceil(nsig * sd / 2π), maxhyp)) : 0
-        children = _BranchHistory{D, T}[]
-        links = NTuple{2, Int}[]
+        empty!(children)
+        empty!(links)
         for (i, h) in pairs(hyps)
             center = h.μ[1] + (level && c > 0 ? h.b / c * v1 : zero(T))
             m0 = round(Int, (center - θk) / 2π)
@@ -124,13 +128,13 @@ function _branch_filter(
         end
         IK = I - K * e1'
         P = _symmetric(IK * P * IK' + K * rk * K')
-        kept = _prune_histories!(children, c, P; level, prune, maxhyp, merge_tol)
+        kept = _prune_histories!(workspace, children, c, P; level, prune, maxhyp, merge_tol)
         hyps = children[kept]
         push!(trail, links[kept])
         push!(steps, k)
     end
     norm = level && c > 0 ? -log(c) / 2 : zero(T)
-    scores = [_branch_score(h, c) + norm for h in hyps]
+    scores = _branch_score.(hyps, c) .+ norm
     loglik = _logsumexp(scores)
     order = sortperm(scores; rev = true)
     histories = [(; lift = _branch_lift(base, θ, trail, steps, i), weight = exp(scores[i] - loglik)) for i in order]
@@ -138,23 +142,45 @@ function _branch_filter(
     return (; histories, loglik, best)
 end
 
+# Scratch space for `_prune_histories!`, reused from sample to sample.
+_prune_workspace() = (; scores = Float64[], order = Int[], kept = Int[], head = Dict{Int, Int}(), next = Int[])
+
 # The indices of `children` to carry on, most probable first: within `prune` of
 # the best, at most `maxhyp`, each history that predicts the same as a more
-# probable one merged into it.
-function _prune_histories!(children, c, P; level, prune, maxhyp, merge_tol)
-    scores = [_branch_score(h, c) for h in children]
-    order = sortperm(scores; rev = true)
-    sd = sqrt.(diag(P))
-    kept = Int[]
+# probable one merged into the most probable such. Kept histories are binned by
+# their first state in units of its merge tolerance, so a match lies in a
+# history's own bin or a neighbor; `head` and `next` chain each bin's members.
+function _prune_histories!(ws, children, c, P; level, prune, maxhyp, merge_tol)
+    (; scores, order, kept, head, next) = ws
+    resize!(scores, length(children))
+    map!(h -> _branch_score(h, c), scores, children)
+    sortperm!(resize!(order, length(children)), scores; rev = true)
+    tol = merge_tol .* sqrt.(diag(P))
+    empty!(kept)
+    empty!(head)
+    empty!(next)
+    best = scores[first(order)]
     for i in order
-        scores[i] < scores[first(order)] - prune && break
+        scores[i] < best - prune && break
         h = children[i]
-        j = findfirst(kept) do j
-            g = children[j]
-            all(abs.(h.μ - g.μ) .<= merge_tol .* sd) && (!level || abs(h.b - g.b) <= merge_tol * sqrt(c))
+        bin = floor(Int, h.μ[1] / tol[1])
+        j = 0
+        for b in (bin - 1):(bin + 1)
+            m = get(head, b, 0)
+            while !iszero(m)
+                o = children[kept[m]]
+                if (iszero(j) || m < j) && all(abs.(h.μ - o.μ) .<= tol) && (!level || abs(h.b - o.b) <= merge_tol * sqrt(c))
+                    j = m
+                end
+                m = next[m]
+            end
         end
-        if isnothing(j)
-            length(kept) < maxhyp && push!(kept, i)
+        if iszero(j)
+            if length(kept) < maxhyp
+                push!(kept, i)
+                push!(next, get(head, bin, 0))
+                head[bin] = length(kept)
+            end
         else
             g = children[kept[j]]
             children[kept[j]] = _BranchHistory(g.μ, g.ll, g.b, g.extra + log1p(exp(scores[i] - _branch_score(g, c))))
