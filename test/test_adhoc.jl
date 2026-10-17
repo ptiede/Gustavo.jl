@@ -1,0 +1,1145 @@
+# Phase 5 — globally-closing adhoc phasing.
+# Standalone-runnable and included from runtests.jl.
+
+using Gustavo
+using Test
+using Random
+using Statistics: mean, median, std
+using Gustavo.DimensionalData: At, Dim, DimArray, Ti, dims, lookup
+using LinearAlgebra: Diagonal
+using Distributions: LogNormal, Normal
+using OffsetArrays: OffsetArray
+
+const FRa = Gustavo.Fring
+const CALa = Gustavo.Calibration
+
+all_bl_a(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
+
+# Build residual baseline visibilities rbar[bl,pol,ap] from a per-(station,feed,
+# ap) phase screen and a per-(baseline,product) source visibility phase `x`
+# (constant over the scan, as `solve_adhoc_phasing` models it). `amp` sets the
+# coherent SNR.
+function inject_screen(bl_pairs, pol_products, screen, x = nothing; amp = 10.0, noise = 0.0, rng = nothing)
+    nbl, npol = length(bl_pairs), length(pol_products)
+    nap = size(screen, 3)
+    feeds = collect(pol_products)
+    xs = x === nothing ? zeros(nbl, npol) : x
+    rbar = Array{ComplexF64}(undef, nbl, npol, nap)
+    wbar = fill(noise > 0 ? 2 / noise^2 : 1.0, nbl, npol, nap)
+    for ap in 1:nap, bi in 1:nbl, p in 1:npol
+        a, b = bl_pairs[bi]
+        fa, fb = feeds[p]
+        model = screen[a, fa, ap] - screen[b, fb, ap] + xs[bi, p]
+        v = amp * cis(model)
+        if noise > 0 && rng !== nothing
+            v += noise * (randn(rng) + im * randn(rng)) / sqrt(2)
+        end
+        rbar[bi, p, ap] = v
+    end
+    return rbar, wbar
+end
+
+# Labels positional sums `[baseline, product, ap]` for `solve_adhoc_phasing`:
+# station `i` is named `"S$i"`, and `bl_pairs`, `pols` and `times` label the axes.
+function label_sums(rbar, wbar, bl_pairs, pols, nant, times)
+    names = ["S$i" for i in 1:nant]
+    ax = (
+        FRa._station_pair_dim([(names[a], names[b]) for (a, b) in bl_pairs]),
+        FRa.FeedPair(collect(pols)), Ti(times),
+    )
+    return DimArray(rbar, ax), DimArray(wbar, ax), names
+end
+
+function solve_positional(rbar, wbar, bl_pairs, pols, nant, times; kw...)
+    R, W, names = label_sums(rbar, wbar, bl_pairs, pols, nant, times)
+    return FRa.solve_adhoc_phasing(R, W, names; kw...)
+end
+
+# Max |measured − model-from-solution| (mod 2π) over valid baselines/APs.
+function adhoc_recon(rbar, sol, bl_pairs, pol_products)
+    feeds = collect(pol_products)
+    m = 0.0
+    for ap in axes(rbar, 3), bi in eachindex(bl_pairs), p in eachindex(pol_products)
+        a, b = bl_pairs[bi]
+        a == b && continue
+        r = rbar[bi, p, ap]
+        abs(r) > 0 || continue
+        fa, fb = feeds[p]
+        (isfinite(sol.phase[a, fa, ap]) && isfinite(sol.phase[b, fb, ap])) || continue
+        xhat = isfinite(sol.source[bi, p]) ? sol.source[bi, p] : 0.0
+        model = sol.phase[a, fa, ap] - sol.phase[b, fb, ap] + xhat
+        m = max(m, abs(rem2pi(angle(r) - model, RoundNearest)))
+    end
+    return m
+end
+
+@testset "Adhoc: ZeroSumPhase gauges each AP without moving the frame" begin
+    rng = MersenneTwister(0x0ADC)
+    nant, nap = 5, 20
+    ref = 2
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    screen = 0.3 .* randn(rng, nant, 2, nap)
+    times = collect(0:(nap - 1)) .* 1.0
+    rbar, wbar = inject_screen(bl, pols, screen)
+
+    zs = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        gauge = ZeroSumPhase(), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+    )
+    pin = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+    )
+
+    # The gauge is a per-AP common mode, which cancels on every baseline: both
+    # conventions reconstruct the data identically.
+    @test adhoc_recon(rbar, zs, bl, pols) < 1.0e-9
+    @test adhoc_recon(rbar, pin, bl, pols) < 1.0e-9
+
+    # ONE constant per AP across BOTH feeds: cross hands tie the feeds into a
+    # single component with a single freedom, so the sum that vanishes is taken
+    # over every covered (station, feed) cell, not per feed.
+    for ap in 1:nap
+        cells = [(a, f) for a in 1:nant for f in 1:2 if zs.covered[a, f, ap]]
+        isempty(cells) && continue
+        @test sum(zs.phase[a, f, ap] for (a, f) in cells) ≈ 0 atol = 1.0e-8
+    end
+    # No station is held at zero the way a pin holds its reference.
+    @test !all(abs.(zs.phase[ref, 1, :]) .< 1.0e-9)
+    @test all(abs.(pin.phase[ref, 1, :]) .< 1.0e-9)
+
+    # The two differ by a per-AP constant and nothing more, and it is the SAME
+    # constant on both feeds — the frame moved, the physics did not. A per-feed
+    # constant would pass a per-feed check while breaking every cross-hand
+    # difference, so the spread is taken across feeds together.
+    for ap in 1:nap
+        d = [
+            zs.phase[a, f, ap] - pin.phase[a, f, ap]
+                for a in 1:nant for f in 1:2
+                if zs.covered[a, f, ap] && pin.covered[a, f, ap]
+        ]
+        length(d) < 2 && continue
+        @test maximum(d) - minimum(d) ≈ 0 atol = 1.0e-8
+    end
+end
+
+@testset "Adhoc: raw per-AP global solve closes" begin
+    rng = MersenneTwister(0x0ADC)
+    nant, nap = 5, 20
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    screen = 0.3 .* randn(rng, nant, 2, nap)
+    times = collect(0:(nap - 1)) .* 1.0
+
+    rbar, wbar = inject_screen(bl, pols, screen)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother())
+
+    @test adhoc_recon(rbar, sol, bl, pols) < 1.0e-9
+    # Cross-hand rows join the two feed blocks into ONE connected component, whose
+    # single per-AP gauge freedom is pinned at the reference's feed-1 node. Every
+    # other node — the reference's own feed 2 included — is measured against it, so
+    # the reference's inter-feed phase stays in the solution instead of being
+    # pinned away.
+    @test all(abs.(sol.phase[ref, 1, :]) .< 1.0e-9)
+
+    # The free source terms leave one further freedom, a constant per node
+    # (`φ_a → φ_a + c_a`, `x_ab → x_ab − (c_a − c_b)`), so a track is recovered up
+    # to its own constant.
+    truth(a, f) = [screen[a, f, ap] - screen[ref, 1, ap] for ap in 1:nap]
+    for a in 1:nant, f in 1:2
+        d = sol.phase[a, f, :] .- truth(a, f)
+        @test maximum(d) - minimum(d) < 1.0e-8
+    end
+
+    # The demean fixes the gauge: each track matches truth exactly, to within the
+    # per-scan mean it removes by design.
+    for a in 1:nant, f in 1:2
+        t = truth(a, f)
+        @test maximum(abs.(sol.phase[a, f, :] .- (t .- mean(t)))) < 1.0e-8
+    end
+end
+
+@testset "Adhoc: a free source term absorbs the source visibility phase" begin
+    # The model carries one source phase per (baseline, product), constant over the
+    # scan. Its NON-closing part is the source's closure phase, which no station
+    # term can represent — omit it and the per-AP solve absorbs it into the station
+    # tracks. The absorption is time-varying (and so survives the demean) exactly
+    # when coverage flickers, because that is what makes the per-AP solve matrix
+    # vary from AP to AP.
+    rng = MersenneTwister(0x50C1)
+    nant, nap = 6, 30
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = repeat(0.4 .* randn(rng, nant, 1, nap), 1, 2, 1)   # feed-common truth
+    xtrue = 0.8 .* randn(rng, length(bl), length(pols))
+    rbar, wbar = inject_screen(bl, pols, screen, xtrue; amp = 30.0)
+    for ap in 1:nap, bi in eachindex(bl), p in eachindex(pols)   # coverage flicker
+        rand(rng) < 0.35 || continue
+        rbar[bi, p, ap] = 0.0 + 0.0im
+        wbar[bi, p, ap] = 0.0
+    end
+
+    # Deviation of the recovered track from truth, after removing the per-station
+    # constant the (φ, x) gauge leaves free. Zero iff the source term was absorbed.
+    wobble(sol) = maximum(
+        begin
+            v = filter(isfinite, [sol.phase[a, 1, ap] - (screen[a, 1, ap] - screen[ref, 1, ap]) for ap in 1:nap])
+            isempty(v) ? 0.0 : maximum(abs.(v .- (sum(v) / length(v))))
+        end for a in 1:nant
+    )
+    opts = (; gauge = PinAntenna(ref), tying = CALa.SharedFeeds())
+    # The negative control disables BOTH source-term mechanisms: the seed
+    # alternation (`source_iters = 1`) and the complex-domain refinement
+    # (`complex_iters = 0`), whose complex source means otherwise absorb the
+    # same per-(baseline, product) constant.
+    off = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        prior = nothing, smoother = FRa.PerTrackAdhocSmoother(options = FRa.AdhocOptions(; snr_floor = 0.0, source_iters = 1, complex_iters = 0)), opts...,
+    )
+    on = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        prior = nothing, smoother = FRa.PerTrackAdhocSmoother(options = FRa.AdhocOptions(; snr_floor = 0.0)), opts...,
+    )
+    # The refinement alone (seed alternation still disabled) also absorbs the
+    # source phase: its complex source means play the same role.
+    refined = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        prior = nothing, smoother = FRa.PerTrackAdhocSmoother(options = FRa.AdhocOptions(; snr_floor = 0.0, source_iters = 1)), opts...,
+    )
+    @test wobble(off) > 0.3                       # unmodeled source phase corrupts the tracks
+    @test wobble(on) < 1.0e-3                     # modeling it removes the corruption
+    @test wobble(off) > 100 * wobble(on)          # by orders of magnitude, not marginally
+    @test wobble(refined) < 0.05
+
+    # `x` is defined only up to `x_ab → x_ab − (c_a − c_b)`; the closure triangle is
+    # the gauge-invariant part, and it must match the injected source. A triangle
+    # sums three terms, each converged to the smoother's `source_tol`.
+    ix = Dict(bl[i] => i for i in eachindex(bl))
+    worst = 0.0
+    for a in 1:nant, b in (a + 1):nant, c in (b + 1):nant, p in eachindex(pols)
+        tri(v) = v[ix[(a, b)], p] + v[ix[(b, c)], p] - v[ix[(a, c)], p]
+        worst = max(worst, abs(rem2pi(tri(on.source) - tri(xtrue), RoundNearest)))
+    end
+    @test worst < 1.0e-5
+end
+
+@testset "Adhoc: a one-AP (baseline, product) is dropped, not fitted" begin
+    # Its source term absorbs its single row exactly, so the row constrains no
+    # station phase; admitting it would only inflate `covered`.
+    rng = MersenneTwister(0x01AF)
+    nant, nap = 4, 12
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = repeat(0.3 .* randn(rng, nant, 1, nap), 1, 2, 1)
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 20.0)
+    wbar[1, 1, 2:end] .= 0.0                   # baseline 1, product 1 survives at ONE AP
+    rbar[1, 1, 2:end] .= 0.0 + 0.0im
+    sol = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        gauge = PinAntenna(1), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(options = FRa.AdhocOptions(; snr_floor = 0.0)),
+        tying = CALa.SharedFeeds(),
+    )
+    @test isnan(sol.source[1, 1])              # unidentifiable, so never fitted
+    @test all(isfinite, sol.source[2:end, 1])  # its neighbours still are
+end
+
+@testset "Adhoc: the demean removes the per-scan mean only (keeps slope/rate)" begin
+    rng = MersenneTwister(0x0DE7)
+    nant, nap = 4, 30
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    tc = times .- mean(times)
+    # Screen = per-station constant + slope + a common wiggle (cancels in the
+    # ref-relative solve, so the recovered track is exactly constant + slope).
+    c0 = 0.5 .* randn(rng, nant, 2)
+    c1 = 0.02 .* randn(rng, nant, 2)
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        screen[a, f, ap] = c0[a, f] + c1[a, f] * tc[ap] + 0.05 * sin(2π * ap / nap)
+    end
+    rbar, wbar = inject_screen(bl, pols, screen)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother())
+
+    # The demean removes the per-station MEAN (breaks the constant-phase gauge vs the
+    # Stage-B ConstantTerm) but KEEPS the slope — so adhoc can flatten a residual
+    # fringe rate. The recovered slope must match the injected differential rate
+    # c1[a] - c1[ref] (the common wiggle cancels in the ref-relative solve).
+    for a in 1:nant, f in 1:2
+        a == ref && continue
+        tr = sol.phase[a, f, :]
+        @test abs(mean(tr)) < 1.0e-8
+        slope = sum(tc .* (tr .- mean(tr))) / sum(tc .^ 2)
+        @test isapprox(slope, c1[a, f] - c1[ref, 1]; atol = 1.0e-8)
+    end
+end
+
+@testset "Adhoc: smoothing reduces noise on a smooth screen" begin
+    rng = MersenneTwister(0x5704)
+    nant, nap = 5, 60
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    # Smooth (band-limited) screen per station/feed.
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2
+        ph = 2π * rand(rng)
+        amp = 0.4 * rand(rng)
+        for ap in 1:nap
+            screen[a, f, ap] = amp * sin(2π * 2 * ap / nap + ph)
+        end
+    end
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 4.0, noise = 1.5, rng = rng)
+
+    truth(a, f) = screen[a, f, :] .- screen[ref, 1, :]
+    rms_to_truth(sol) = begin
+        e = Float64[]
+        for a in 1:nant, f in 1:2
+            a == ref && continue
+            d = sol.phase[a, f, :] .- truth(a, f)
+            d .-= mean(d)                      # remove gauge constant
+            append!(e, d)
+        end
+        sqrt(mean(abs2, e))
+    end
+
+    raw = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother())
+    rw = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = RandomWalkPrior(; σ = 1 / sqrt(20.0)))
+    ou = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = FRa.default_adhoc_prior())
+
+    @test rms_to_truth(rw) < rms_to_truth(raw)
+    # The OU prior with type-II MAP hyperparameters also denoises, and should be
+    # competitive with the random walk.
+    @test rms_to_truth(ou) < rms_to_truth(raw)
+    @test rms_to_truth(ou) < 1.5 * rms_to_truth(rw)
+end
+
+@testset "Adhoc :gp preserves the injected differential slope" begin
+    # Like the demean test but under an OU prior: a constant + slope screen (no
+    # wiggle) must survive the OU fit and the demean with its slope
+    # matching the injected differential rate c1[a] - c1[ref].
+    rng = MersenneTwister(0x6959)
+    nant, nap = 4, 40
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    tc = times .- mean(times)
+    c0 = 0.5 .* randn(rng, nant, 2)
+    c1 = 0.02 .* randn(rng, nant, 2)
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        screen[a, f, ap] = c0[a, f] + c1[a, f] * tc[ap]
+    end
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 20.0)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = FRa.default_adhoc_prior())
+
+    for a in 1:nant, f in 1:2
+        a == ref && continue
+        tr = sol.phase[a, f, :]
+        @test abs(mean(tr)) < 1.0e-6
+        slope = sum(tc .* (tr .- mean(tr))) / sum(tc .^ 2)
+        @test isapprox(slope, c1[a, f] - c1[ref, 1]; atol = 5.0e-3)
+    end
+end
+
+@testset "Adhoc :gp ref antenna pinned to zero" begin
+    rng = MersenneTwister(0x7A17)
+    nant, nap = 4, 30
+    ref = 2
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant, f in 1:2, ap in 1:nap
+        screen[a, f, ap] = 0.3 * sin(2π * ap / nap + a) + 0.2 * randn(rng)
+    end
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0, noise = 0.5, rng = rng)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = FRa.default_adhoc_prior())
+    # The gauge pins the reference's feed-1 node; its feed 2 holds the reference's
+    # own inter-feed phase, measured against that pin.
+    @test all(abs.(sol.phase[ref, 1, :]) .< 1.0e-8)
+end
+
+# Non-birefringent (feed-common) smooth screen for the joint solve — matches the
+# `SharedFeeds` truth (feed 2 ≡ feed 1) so the recovered per-station track is well
+# defined up to the ref gauge.
+function shared_screen(rng, nant, nap; k = 2.0, amp = 0.4)
+    screen = Array{Float64}(undef, nant, 2, nap)
+    for a in 1:nant
+        ph = 2π * rand(rng)
+        a0 = amp * rand(rng)
+        for ap in 1:nap
+            screen[a, 1, ap] = a0 * sin(2π * k * ap / nap + ph)
+            screen[a, 2, ap] = screen[a, 1, ap]
+        end
+    end
+    return screen
+end
+
+# Cross-hand rows enter the solve like any other product: whatever extra phase
+# they carry — source EVPA, D-terms, the rotated Stokes combination a linear feed
+# sees — is a per-(baseline, product) constant the model fits, so it never reaches
+# the station tracks. That extra phase may be large and wildly baseline-dependent
+# without disturbing the result; what the model does require is that it hold still
+# over the scan.
+@testset "Adhoc :gp_joint pins ref and absorbs a poisoned cross hand" begin
+    rng = MersenneTwister(0x00102547)
+    nant, nap = 5, 50
+    ref = 2
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap)
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 6.0, noise = 1.0, rng = rng)
+    # Cross hands carrying a strong, baseline-dependent phase near the wrap cut —
+    # the linear-feed case. Constant over the scan, so the source term takes it.
+    feeds = collect(pols)
+    for p in eachindex(pols)
+        fa, fb = feeds[p]
+        fa == fb && continue
+        for bi in eachindex(bl), ap in 1:nap
+            a, b = bl[bi]
+            rbar[bi, p, ap] = 20.0 * cis(screen[a, 1, ap] - screen[b, 1, ap] + π - 0.02 * bi)
+        end
+    end
+    sol = solve_positional(
+        rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref),
+        smoother = FRa.JointKalmanSmoother(coherence_time = 15.0), tying = CALa.SharedFeeds(),
+    )
+    @test all(abs.(filter(isfinite, sol.phase[ref, :, :])) .< 1.0e-8)     # ref pinned
+    @test all(sol.phase[:, 1, :] .=== sol.phase[:, 2, :])                 # both feeds share the node
+    # Station tracks recover the injected screen (ref-relative, up to each track's
+    # own gauge constant) undisturbed by the cross hands.
+    dev = 0.0
+    for a in 1:nant
+        d = [sol.phase[a, 1, ap] - (screen[a, 1, ap] - screen[ref, 1, ap]) for ap in 1:nap]
+        d .-= mean(d)
+        dev = max(dev, maximum(abs, d))
+    end
+    @test dev < 0.35
+end
+
+@testset "Adhoc :gp_joint denoises and closes" begin
+    rng = MersenneTwister(0x9317)
+    nant, nap = 5, 60
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap; k = 1.5, amp = 0.5)
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 3.0, noise = 2.0, rng = rng)
+
+    truth(a, f) = screen[a, f, :] .- screen[ref, 1, :]
+    rms_to_truth(sol) = begin
+        e = Float64[]
+        for a in 1:nant, f in 1:2
+            a == ref && continue
+            d = sol.phase[a, f, :] .- truth(a, f)
+            all(isfinite, d) || continue
+            d .-= mean(d)
+            append!(e, d)
+        end
+        sqrt(mean(abs2, e))
+    end
+
+    none = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(), tying = CALa.SharedFeeds())
+    gp = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = FRa.default_adhoc_prior(), tying = CALa.SharedFeeds())
+    gpj = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.JointKalmanSmoother(coherence_time = 20.0), tying = CALa.SharedFeeds())
+
+    @test rms_to_truth(gpj) < rms_to_truth(none)          # joint solve denoises
+    @test rms_to_truth(gpj) < 1.1 * rms_to_truth(gp)      # competitive with per-track
+
+    # A random walk with an `init` runs in the joint state as well.
+    walk = RandomWalkPrior(; order = 1, σ = LogNormal(log(0.1), 1.0), init = Normal(0.0, 1.0))
+    rwj = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.JointKalmanSmoother(coherence_time = 20.0), tying = CALa.SharedFeeds(), prior = walk)
+    rwp = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = FRa.PerTrackAdhocSmoother(), tying = CALa.SharedFeeds(), prior = walk)
+    @test rms_to_truth(rwj) < rms_to_truth(none)
+    @test rms_to_truth(rwj) < 1.1 * rms_to_truth(rwp)
+end
+
+@testset "Adhoc :gp_joint resolves each station's prior" begin
+    rng = MersenneTwister(0x70B1)
+    nant, nap = 5, 40
+    ref = 2
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    rbar, wbar = inject_screen(bl, pols, shared_screen(rng, nant, nap); amp = 5.0, noise = 1.0, rng)
+    solve(prior; gauge = PinAntenna(ref), w = wbar) = solve_positional(
+        rbar, w, bl, pols, nant, times;
+        gauge, smoother = FRa.JointKalmanSmoother(), tying = CALa.SharedFeeds(), prior,
+    )
+    same_hypers(p, q) = all(name -> getproperty(p, name) ≈ getproperty(q, name), (:scale, :σ))
+
+    # Fixed hyperparameters are used as stated at every station.
+    fixed = OUPrior(; scale = 12.0, σ = 0.3)
+    @test all(==(fixed), solve(fixed).prior)
+
+    # Hyperpriors resolve to numbers per station, the reference station's
+    # included, and do not depend on the gauge.
+    pr = solve(FRa.default_adhoc_prior()).prior
+    @test all(p -> p isa OUPrior && CALa.is_fixed_hyper(p.scale) && CALa.is_fixed_hyper(p.σ), pr)
+    @test all(splat(same_hypers), zip(pr, solve(FRa.default_adhoc_prior(); gauge = ZeroSumPhase()).prior))
+    @test isequal(pr[:, 1], pr[:, 2])
+
+    # A station keeps its own fixed values.
+    mixed = [a == ref ? fixed : FRa.default_adhoc_prior() for a in 1:nant]
+    @test solve(mixed).prior[ref, 1] == fixed
+
+    # A walk's σ resolves the same way; the init is kept as given.
+    walk = RandomWalkPrior(; order = 1, σ = LogNormal(log(0.1), 1.0), init = Normal(0.0, 1.0))
+    pw = solve(walk).prior
+    @test all(p -> p isa RandomWalkPrior && CALa.is_fixed_hyper(p.σ) && p.init == walk.init, pw)
+    # An unobserved station takes the median of the stations of the same form,
+    # and there must be one.
+    unseen = nant
+    w_unseen = copy(wbar)
+    for (bi, (a, b)) in pairs(bl)
+        unseen in (a, b) && (w_unseen[bi, :, :] .= 0)
+    end
+    @test_throws "no other station has a prior of the same form" solve([a == unseen ? walk : fixed for a in 1:nant]; w = w_unseen)
+
+    # The joint state needs a proper prior: a flat walk or no prior is an error.
+    @test_throws "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init`" solve(RandomWalkPrior(; σ = 0.1))
+    @test_throws "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init`" solve(nothing)
+end
+
+@testset "Adhoc :gp_joint requires one node per station" begin
+    rng = MersenneTwister(0x5A17)
+    nant, nap = 3, 10
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap)
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 8.0)
+    @test_throws ErrorException solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        gauge = PinAntenna(1), smoother = FRa.JointKalmanSmoother(), tying = CALa.PerFeed(),
+    )
+end
+
+@testset "Adhoc: low-SNR no-anchor solve is unbiased" begin
+    # No dominant anchor station (all equal SNR), low per-baseline SNR. The
+    # global solve over all baselines should be unbiased — averaging many noise
+    # realizations recovers the gauged truth.
+    nant, nap = 5, 4
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    rng = MersenneTwister(0xB1A5)
+    screen = 0.4 .* randn(rng, nant, 2, nap)
+
+    ntrial = 80
+    acc = zeros(nant, 2, nap)
+    cnt = zeros(nant, 2, nap)
+    for _ in 1:ntrial
+        rbar, wbar = inject_screen(bl, pols, screen; amp = 2.0, noise = 1.0, rng = rng)
+        sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(options = FRa.AdhocOptions(; snr_floor = 0.0)))
+        for a in 1:nant, f in 1:2, ap in 1:nap
+            isfinite(sol.phase[a, f, ap]) || continue
+            acc[a, f, ap] += rem2pi(sol.phase[a, f, ap], RoundNearest)
+            cnt[a, f, ap] += 1
+        end
+    end
+    maxbias = 0.0
+    for a in 1:nant, f in 1:2
+        a == ref && continue
+        aps = [ap for ap in 1:nap if cnt[a, f, ap] > 0]
+        isempty(aps) && continue
+        d = [acc[a, f, ap] / cnt[a, f, ap] - (screen[a, f, ap] - screen[ref, 1, ap]) for ap in aps]
+        d .-= mean(d)                      # the per-track gauge constant
+        maxbias = max(maxbias, maximum(abs, d))
+    end
+    # Averaging 80 low-SNR trials: bias well below the single-trial scatter.
+    @test maxbias < 0.1
+end
+
+@testset "Adhoc: ref-antenna dropout gauge restitch (K3)" begin
+    # A time-CONSTANT screen so the only across-AP variation is the per-AP gauge.
+    # The reference antenna drops out in a middle block of APs; without the K3
+    # restitch those APs anchor on a different node, injecting a common-mode jump
+    # into every station's track. With it, the recovered track (relative to the
+    # injected truth) is the SAME constant in every AP — including the dropout.
+    nant, nap = 5, 12
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    rng = MersenneTwister(0xC3C3)
+
+    c = 0.6 .* randn(rng, nant, 2)                 # per-(station,feed) constant
+    screen = repeat(reshape(c, nant, 2, 1), 1, 1, nap)
+    rbar, wbar = inject_screen(bl, pols, screen)
+
+    # Drop every baseline touching the reference in APs 5..8.
+    dropaps = 5:8
+    for ap in dropaps, bi in eachindex(bl)
+        (bl[bi][1] == ref || bl[bi][2] == ref) || continue
+        rbar[bi, :, ap] .= 0.0 + 0.0im
+        wbar[bi, :, ap] .= 0.0
+    end
+
+    sol = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+    )
+
+    # The reference is unsolved in the dropout APs but solved elsewhere.
+    @test all(!sol.covered[ref, 1, ap] && !sol.covered[ref, 2, ap] for ap in dropaps)
+    @test all(sol.covered[ref, 1, ap] for ap in 1:nap if !(ap in dropaps))
+
+    # Non-ref stations are still solved in the dropout APs, and the recovered
+    # phase relative to truth is the SAME constant across ALL APs (no jump).
+    for a in 2:nant, f in 1:2
+        truth = c[a, f] - c[ref, 1]
+        d = [rem2pi(sol.phase[a, f, ap] - truth, RoundNearest) for ap in 1:nap if isfinite(sol.phase[a, f, ap])]
+        @test length(d) == nap                                    # solved every AP
+        @test maximum(d) - minimum(d) < 1.0e-6                    # gauge consistent across dropout
+    end
+
+    # REF-ABSENT variant (multi-subarray track): the nominal reference NEVER
+    # observes, and the best-covered station (the effective anchor) drops out in
+    # a middle block. Keying the restitch on the literal reference left these
+    # scans with NO gauge repair at all — the dropout APs pin on a different
+    # node and every station's track jumps by an arbitrary constant (this is
+    # what let the adhoc DEGRADE VR2505's GS-less 0607-157 scan).
+    nant6 = nant + 1                                 # station 6 = the absent reference
+    rbar2, wbar2 = inject_screen(bl, pols, screen)
+    for ap in dropaps, bi in eachindex(bl)           # drop the anchor (station 1) instead
+        (bl[bi][1] == 1 || bl[bi][2] == 1) || continue
+        rbar2[bi, :, ap] .= 0.0 + 0.0im
+        wbar2[bi, :, ap] .= 0.0
+    end
+    sol2 = solve_positional(
+        rbar2, wbar2, bl, pols, nant6, times;
+        gauge = PinAntenna(nant6), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+    )
+    @test !any(sol2.covered[nant6, :, :])            # absent ref never fabricated
+    for a in 2:nant, f in 1:2
+        truth = c[a, f] - c[1, 1]
+        d = [rem2pi(sol2.phase[a, f, ap] - truth, RoundNearest) for ap in 1:nap if isfinite(sol2.phase[a, f, ap])]
+        @test length(d) == nap                                    # solved every AP
+        @test maximum(d) - minimum(d) < 1.0e-6                    # gauge consistent across dropout
+    end
+end
+
+@testset "Adhoc: per-AP gauge over the always-covered cells" begin
+    nant, nap = 5, 12
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    rng = MersenneTwister(0x287)
+    screen = 0.4 .* randn(rng, nant, 2, nap)
+    rbar, wbar = inject_screen(bl, pols, screen)
+    dropaps = 5:8
+    for ap in dropaps, bi in eachindex(bl)
+        ref in bl[bi] || continue
+        rbar[bi, :, ap] .= 0
+        wbar[bi, :, ap] .= 0
+    end
+    kw = (; prior = nothing, smoother = FRa.PerTrackAdhocSmoother())
+
+    pin = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), kw...)
+    always = [(a, f) for a in 1:nant, f in 1:2 if all(pin.covered[a, f, :])]
+    @test (ref, 1) ∉ always
+    zeroed = [(a, f) for (a, f) in always if all(iszero, pin.phase[a, f, :])]
+    @test length(zeroed) == 1
+    @test all(!iszero(pin.phase[ref, 1, ap]) for ap in 1:nap if !(ap in dropaps))
+
+    zs = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = ZeroSumPhase(), kw...)
+    @test all(abs(sum(zs.phase[a, f, ap] for (a, f) in always)) < 1.0e-10 for ap in 1:nap)
+    (a0, f0) = first(always)
+    for (a, f) in always
+        @test pin.phase[a, f, :] .- pin.phase[a0, f0, :] ≈ zs.phase[a, f, :] .- zs.phase[a0, f0, :] atol = 1.0e-8
+    end
+end
+
+@testset "Adhoc: warm-start selects the rewrap branch (no per-AP flips)" begin
+    # A weakly constrained station's per-AP solve can be BISTABLE — two rewrap
+    # fixed points a sub-2π distance apart — and which one the spanning-tree
+    # seed lands on can flip AP-to-AP, injecting a phantom phase jump the
+    # integer-2π unwrap and the smoother both leave intact. The per-AP solve
+    # therefore accepts a temporal warm-start (`seed_phase`, the previous AP's
+    # solution) that pins the branch.
+    #
+    # Construct a genuinely bistable solve: station 4 sees two weak edges (to 2 and
+    # 3, both pinned ≈0 by strong edges to ref=1) whose WRAPPED phases disagree by
+    # ~2π, so φ4 ≈ 0 and φ4 ≈ ±π are BOTH self-consistent rewrap fixed points.
+    ends = [(1, 2), (1, 3), (2, 4), (3, 4)]
+    cells = (FRa._station_pair_dim([("S$a", "S$b") for (a, b) in ends]), FRa.FeedPair([(1, 1)]))
+    nodes = DimArray([((a, 1), (b, 1)) for (a, b) in ends, _ in 1:1], cells)
+    val = DimArray(reshape([0.0, 0.0, 3.0, -3.0], :, 1), cells)
+    w = DimArray(reshape([100.0, 100.0, 1.0, 1.0], :, 1), cells)
+    mask = DimArray(trues(4, 1), cells)
+    nant, ref = 4, 1
+    solve4(seed) = begin
+        sp = seed === nothing ? nothing : (M = fill(NaN, nant, 2); M[4, 1] = seed; M)
+        ph, cov = zeros(nant, 2), falses(nant, 2)
+        FRa._solve_observable!(ph, cov, val, w, mask, nodes, PinAntenna(ref); rewrap = 3, seed_phase = sp)
+        @test cov[4, 1]
+        ph[4, 1]
+    end
+
+    # Unseeded, the solve lands on the ±π branch (NOT zero).
+    φ_none = solve4(nothing)
+    @test abs(abs(φ_none) - π) < 1.0e-3
+    # A warm-start in the basin of zero selects the zero branch; one near π selects π.
+    @test abs(solve4(0.0)) < 1.0e-3
+    @test abs(abs(solve4(Float64(π))) - π) < 1.0e-3
+    # The two seeded branches differ by ~π — the seed genuinely controls the result.
+    @test abs(rem2pi(solve4(Float64(π)) - solve4(0.0), RoundNearest)) > 1.0
+
+    # The default `solve_adhoc_phasing` warm-starts internally, so a smooth screen
+    # near the wrap cut is recovered as a CONTINUOUS track (no spurious sub-2π
+    # jumps) on the weak station.
+    rng = MersenneTwister(0xBADC0FFE)
+    nant2, nap = 5, 60
+    bl = all_bl_a(nant2)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = 0.2 .* randn(rng, nant2, 2, nap)
+    for ap in 1:nap                                  # station 5 hovers near +π
+        screen[5, :, ap] .= (π - 0.1) .+ 0.1 .* sin(2π * ap / 15)
+    end
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 6.0, noise = 1.0, rng = rng)
+    sol = solve_positional(
+        rbar, wbar, bl, pols, nant2, times;
+        gauge = PinAntenna(1), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+    )
+    tr = sol.phase[5, 1, :]
+    jumps = [abs(rem2pi(tr[ap + 1] - tr[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(tr[ap]) && isfinite(tr[ap + 1])]
+    @test maximum(jumps) < 1.0                       # no ~π branch flip in the track
+
+    # REF-ABSENT scan (multi-subarray track, e.g. VR2505's 0607-157 with no GS):
+    # the reference antenna never observes, so the warm start must key on the
+    # EFFECTIVE anchor (best-covered station) instead — keying on the literal
+    # the literal reference disabled the warm start entirely here and the branch flips
+    # returned on the weak station.
+    nant3 = nant2 + 1                                # station 6 = the absent reference
+    sol_noref = solve_positional(
+        rbar, wbar, bl, pols, nant3, times;
+        gauge = PinAntenna(nant3), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+    )
+    @test !any(sol_noref.covered[nant3, :, :])       # absent ref is never fabricated
+    trn = sol_noref.phase[5, 1, :]
+    @test count(isfinite, trn) == nap
+    jumpsn = [abs(rem2pi(trn[ap + 1] - trn[ap], RoundNearest)) for ap in 1:(nap - 1) if isfinite(trn[ap]) && isfinite(trn[ap + 1])]
+    @test maximum(jumpsn) < 1.0                      # warm start armed via the anchor
+end
+
+@testset "Adhoc: per-track fits under each prior" begin
+    rng = MersenneTwister(31)
+    n = 120
+    y = cumsum(0.2 .* randn(rng, n)) .+ 4
+    y[40:55] .= NaN                                # gap filled by the prior
+    w = rand(rng, n) .+ 0.5
+    w[[3, 90]] .= 0
+    x = 2.0 .* (0:(n - 1))
+    track(v) = view(DimArray(reshape(copy(v), 1, :), (Dim{:feed}(1:1), Ti(x))), 1, :)
+    wk = [isfinite(y[k]) && w[k] > 0 ? w[k] : 0.0 for k in 1:n]
+    sm = FRa.PerTrackAdhocSmoother()
+
+    # A first-order random walk, steps `N(0, σ²Δx)` with Δx = 2 s: `(W + DᵀD/(2σ²))ŷ = Wy`.
+    D = [Float64((j == k) - (j == k + 1)) for k in 1:(n - 1), j in 1:n]
+    for σ in (0.03, 0.5, 3.0)
+        t = track(y)
+        @test FRa.smooth_track!(sm, t, w, RandomWalkPrior(; σ)) == RandomWalkPrior(; σ)
+        ref = (Diagonal(wk) + D' * D / (2σ^2)) \ (wk .* replace(y, NaN => 0.0))
+        @test maximum(abs, parent(t) .- ref) < 1.0e-8
+    end
+
+    # An OU prior with fixed hyperparameters: the GLS level plus the zero-mean
+    # OU MAP, i.e. the posterior mean with the level under a flat prior.
+    τ, σ = 15.0, 0.4
+    K = [σ^2 * exp(-abs(x[i] - x[j]) / τ) for i in 1:n, j in 1:n]
+    o = findall(>(0), wk)
+    C = K[o, o] + Diagonal(1 ./ wk[o])
+    u = ones(length(o))
+    L = (u' * (C \ y[o])) / (u' * (C \ u))
+    ref = L .+ K[:, o] * (C \ (y[o] .- L))
+    t = track(y)
+    p = OUPrior(; scale = τ, σ)
+    @test FRa.smooth_track!(sm, t, w, p) == p
+    @test maximum(abs, parent(t) .- ref) < 1.0e-8
+    @test parent(t) ≈ FRa.smooth_ou_track(y .- L, w, x; τ, σ2 = σ^2) .+ L
+
+    # Hyperpriors are resolved to numbers, and the fit does not depend on the level.
+    t = track(y)
+    r = FRa.smooth_track!(sm, t, w, FRa.default_adhoc_prior())
+    @test r isa OUPrior && CALa.is_fixed_hyper(r.scale) && CALa.is_fixed_hyper(r.σ)
+    t2 = track(y .+ 3)
+    r2 = FRa.smooth_track!(sm, t2, w, FRa.default_adhoc_prior())
+    @test r2.scale ≈ r.scale rtol = 1.0e-4
+    @test r2.σ ≈ r.σ rtol = 1.0e-4
+    @test parent(t2) ≈ parent(t) .+ 3 rtol = 1.0e-4
+
+    # No prior leaves the track as solved.
+    t = track(y)
+    @test isnothing(FRa.smooth_track!(sm, t, w, nothing))
+    @test isequal(parent(t), y)
+end
+
+# A per-track smoother that replaces each track by its mean.
+struct FlattenSmoother <: FRa.AbstractAdhocSmoother
+    options::FRa.AdhocOptions
+end
+function FRa.smooth_track!(::FlattenSmoother, track, w, prior)
+    fill!(track, mean(filter(isfinite, track)))
+    return prior
+end
+
+@testset "Adhoc smoother interface: every type dispatches" begin
+    # The pluggable `AbstractAdhocSmoother` interface — each concrete smoother
+    # constructs, subtypes the abstract type, and drives `solve_adhoc_phasing`
+    # through `apply_adhoc!`. Mirrors the bandpass-smoother loop in test_pipeline.jl.
+    rng = MersenneTwister(0x00FACADE)
+    nant, nap = 4, 30
+    ref = 1
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 1.0
+    screen = shared_screen(rng, nant, nap)         # feed-common (works for the joint solve too)
+    rbar, wbar = inject_screen(bl, pols, screen; amp = 6.0, noise = 0.5, rng = rng)
+
+    # (smoother, prior, tying) — the joint solve needs one phase node per station.
+    cases = [
+        (FRa.PerTrackAdhocSmoother(), RandomWalkPrior(; σ = 0.3), CALa.PerFeed()),
+        (FRa.PerTrackAdhocSmoother(), FRa.default_adhoc_prior(), CALa.PerFeed()),
+        (FRa.PerTrackAdhocSmoother(), nothing, CALa.PerFeed()),
+        (FRa.JointKalmanSmoother(coherence_time = 15.0), FRa.default_adhoc_prior(), CALa.SharedFeeds()),
+    ]
+    for (sm, prior, ty) in cases
+        @test sm isa FRa.AbstractAdhocSmoother
+        sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(ref), smoother = sm, prior, tying = ty)
+        @test sol isa Gustavo.DimensionalData.AbstractDimStack
+        @test (:phase, :covered, :source, :prior) ⊆ keys(sol)     # DimStack layers
+        @test size(sol.phase) == (nant, 2, length(times))        # AntennaName × Feed × Ti
+        @test count(isfinite, sol.phase) > 0                     # the stage actually ran
+        @test all(abs.(filter(isfinite, sol.phase[ref, 1, :])) .< 1.0e-8)   # ref gauge held
+    end
+
+    # A smoother that defines only the per-track hook overwrites each track.
+    flat = solve_positional(
+        rbar, wbar, bl, pols, nant, times;
+        gauge = PinAntenna(ref), smoother = FlattenSmoother(FRa.AdhocOptions()),
+    )
+    for a in 1:nant, f in 1:2
+        tr = filter(isfinite, flat.phase[a, f, :])
+        isempty(tr) || @test maximum(tr) - minimum(tr) < 1.0e-6
+    end
+end
+
+
+# ── Complex-domain Gauss–Newton refinement ───────────────────────────────────
+#
+# The refinement's value case: a few strong baselines give the phase-extraction
+# seed its 2π-branch spine, and the WEAK baselines — whose per-AP rows the
+# seed's gate drops or mis-weights — contribute through the linearized complex
+# rows at their exact first-order information. The refined tracks must beat the
+# seed-only tracks where weak data dominates, and stay equivalent where the
+# seed was already near-optimal.
+@testset "Adhoc: complex-domain refinement exploits weak baselines" begin
+    function screen_scenario(snrs; seed = 0x0ADC, nap = 240, nant = 6)
+        rng = MersenneTwister(seed)
+        bl = all_bl_a(nant)
+        pols = [(1, 1), (2, 2)]
+        times = collect(0:(nap - 1)) .* 1.0
+        screen = zeros(nant, nap)
+        for a in 2:nant, t in 2:nap
+            screen[a, t] = screen[a, t - 1] + 0.08 * randn(rng)
+        end
+        rbar = zeros(ComplexF64, length(bl), 2, nap)
+        wbar = zeros(length(bl), 2, nap)
+        for (bi, (a, b)) in enumerate(bl)
+            sigma = 1.0 / (sqrt(2) * snrs(a, b))
+            w = 1 / sigma^2
+            for p in 1:2, ap in 1:nap
+                v = cis(screen[a, ap] - screen[b, ap]) + sigma * (randn(rng) + im * randn(rng))
+                rbar[bi, p, ap] = w * v
+                wbar[bi, p, ap] = w
+            end
+        end
+        return rbar, wbar, bl, pols, times, screen
+    end
+    function track_rmse(sol, screen, nant, nap)
+        tot = 0.0; n = 0
+        for a in 2:nant
+            v = filter(isfinite, [sol.phase[a, 1, ap] - screen[a, ap] for ap in 1:nap])
+            isempty(v) && continue
+            v .-= sum(v) / length(v)
+            tot += sum(abs2, v); n += length(v)
+        end
+        return n == 0 ? NaN : sqrt(tot / n)
+    end
+    nant, nap = 6, 240
+    rbar, wbar, bl, pols, times, screen =
+        screen_scenario((a, b) -> (a == 2 || b == 2) ? 3.0 : 0.5)
+    rms = map((0, 2)) do ci
+        sol = solve_positional(
+            rbar, wbar, bl, pols, nant, times;
+            gauge = PinAntenna(1),
+            smoother = FRa.JointKalmanSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
+            tying = CALa.SharedFeeds(),
+        )
+        track_rmse(sol, screen, nant, nap)
+    end
+    @test rms[2] < 0.85 * rms[1]     # weak baselines genuinely add information
+    @test rms[2] < 0.15              # and the refined tracks are good in absolute terms
+    per_track = track_rmse(
+        solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.SharedFeeds()),
+        screen, nant, nap,
+    )
+    @test rms[2] < 1.1 * per_track   # the joint solve is competitive with per-track
+
+    # Where the seed is already near-optimal (uniform moderate SNR), refinement
+    # must not degrade it beyond its slightly different smoothing balance.
+    rbar, wbar, bl, pols, times, screen = screen_scenario((a, b) -> 1.5)
+    rms = map((0, 2)) do ci
+        sol = solve_positional(
+            rbar, wbar, bl, pols, nant, times;
+            gauge = PinAntenna(1),
+            smoother = FRa.JointKalmanSmoother(coherence_time = 30.0, options = FRa.AdhocOptions(; complex_iters = ci)),
+            tying = CALa.SharedFeeds(),
+        )
+        track_rmse(sol, screen, nant, nap)
+    end
+    @test rms[2] < 1.3 * rms[1]
+    @test rms[2] < 0.15
+end
+
+@testset "Adhoc: the solve works in the data's element type" begin
+    rng = MersenneTwister(0x0AD7)
+    nant, nap = 5, 20
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    screen = 0.3 .* randn(rng, nant, 2, nap)
+    times = collect(0:(nap - 1)) .* 1.0
+    rbar, wbar = inject_screen(bl, pols, screen; noise = 0.5, rng)
+    r32, w32 = ComplexF32.(rbar), Float32.(wbar)
+    solve(r, w, sm) = solve_positional(r, w, bl, pols, nant, times; gauge = PinAntenna(1), smoother = sm)
+
+    s32 = solve(r32, w32, FRa.PerTrackAdhocSmoother())
+    @test eltype(s32.phase) == Float32
+    @test eltype(s32.source) == Float32
+    s64 = solve(r32, w32, FRa.PerTrackAdhocSmoother(; options = FRa.AdhocOptions(; eltype = Float64)))
+    @test eltype(s64.phase) == Float64
+    @test maximum(abs, filter(isfinite, s64.phase .- s32.phase)) < 1.0e-5
+    @test eltype(solve(rbar, wbar, FRa.PerTrackAdhocSmoother()).phase) == Float64
+    @test_throws "`eltype` must be a real floating-point type" FRa.AdhocOptions(; eltype = Int)
+
+    R, W, names = label_sums(r32, w32, bl, pols, nant, times)
+    nodes = FRa._cell_nodes(R, names, CALa.PerFeed())
+    obs = @inferred FRa._adhoc_obs(R, W, nodes, 1.0)
+    @test eltype(obs.val) == eltype(obs.w) == Float32
+    phase = zeros(Float32, nant, 2, nap)
+    sbar = ones(ComplexF32, dims(nodes))
+    @test eltype((@inferred FRa._linearized_obs(R, W, nodes, phase, sbar)).val) == Float32
+    slice(A) = view(A, Ti(1))
+    ph, cov = zeros(Float32, nant, 2), falses(nant, 2)
+    @test (@inferred FRa._solve_observable!(
+        ph, cov, slice(obs.val), slice(obs.w), slice(obs.mask), nodes, PinAntenna(1); rewrap = 2,
+    )) == 1
+    @test all(isfinite, ph) && all(cov)
+    seed = @inferred Union{Nothing, Matrix{Float32}} FRa._circular_ap_seed(
+        slice(obs.val), slice(obs.w), slice(obs.mask), nodes, nant, 2, 1,
+    )
+    @test seed isa Matrix{Float32}
+end
+
+@testset "Adhoc: sums are read by label" begin
+    rng = MersenneTwister(0x1ABE)
+    nant, nap = 5, 16
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 2.0
+    rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 2, nap); noise = 1.0, rng)
+    R, W, names = label_sums(rbar, wbar, bl, pols, nant, times)
+    sm = FRa.PerTrackAdhocSmoother()
+    gauge = PinAntenna(1)
+    sol = FRa.solve_adhoc_phasing(R, W, names; gauge, smoother = sm)
+    @test lookup(sol.phase, FRa.AntennaName) == names
+    @test lookup(sol.phase, Ti) == times
+    @test lookup(sol.source, FRa.AntennaPair) == lookup(R, FRa.AntennaPair)
+    @test lookup(sol.source, FRa.FeedPair) == pols
+
+    # Storage order is free, and a view along time solves only its APs.
+    perm = FRa.solve_adhoc_phasing(
+        permutedims(R, (Ti, FRa.FeedPair, FRa.AntennaPair)), permutedims(W, (FRa.FeedPair, Ti, FRa.AntennaPair)),
+        names; gauge, smoother = sm,
+    )
+    @test isequal(perm.phase, sol.phase) && isequal(perm.source, sol.source)
+    R2, W2, _ = label_sums(cat(rbar, rbar; dims = 3), cat(wbar, wbar; dims = 3), bl, pols, nant, vcat(times, times .+ 100))
+    part = FRa.solve_adhoc_phasing(view(R2, Ti(1:nap)), view(W2, Ti(1:nap)), names; gauge, smoother = sm)
+    @test isequal(parent(part.phase), parent(sol.phase))
+
+    # Stations are matched by name: an extra, unobserved station is uncovered
+    # and leaves the others untouched.
+    wider = FRa.solve_adhoc_phasing(R, W, vcat(names, "X"); gauge, smoother = sm)
+    @test !any(wider.covered[FRa.AntennaName(At("X"))])
+    @test parent(wider.phase)[1:nant, :, :] ≈ parent(sol.phase) atol = 1.0e-12
+
+    @test_throws "station `S5` of a station pair is not among the stations" FRa.solve_adhoc_phasing(
+        R, W, names[1:4]; gauge, smoother = sm,
+    )
+    @test_throws "station names must be unique; repeated: S2" FRa.solve_adhoc_phasing(
+        R, W, vcat(names, "S2"); gauge, smoother = sm,
+    )
+    shifted(A) = DimArray(
+        OffsetArray(parent(A), 1, 0, 0),
+        (FRa.AntennaPair(OffsetArray(parent(lookup(A, FRa.AntennaPair)), 1)), dims(A, FRa.FeedPair), dims(A, Ti)),
+    )
+    @test_throws "offset arrays are not supported" FRa.solve_adhoc_phasing(shifted(R), shifted(W), names; gauge, smoother = sm)
+    @test_throws "must be over AntennaPair, FeedPair and Ti" FRa.solve_adhoc_phasing(
+        DimArray(rbar, (FRa.BaselineID(1:length(bl)), FRa.Polarization(1:4), Ti(times))), W, names; gauge,
+    )
+end
+
+@testset "Adhoc: the source alternation ignores per-station constants" begin
+    rng = MersenneTwister(0x0176)
+    nant = 5
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    R, _, names = label_sums(zeros(ComplexF64, length(bl), 4, 2), ones(length(bl), 4, 2), bl, pols, nant, [0.0, 1.0])
+    nodes = FRa._cell_nodes(R, names, CALa.PerFeed())
+    x_prev = DimArray(randn(rng, length(bl), 4), dims(nodes))
+    cell_w = map(_ -> 1.0 + rand(rng), x_prev)
+    mask = map(_ -> true, x_prev)
+    c = 0.1 .* randn(rng, nant, 2)
+    shifted = map((x, ((a, na), (b, nb))) -> x + c[a, na] - c[b, nb], x_prev, nodes)
+    @test FRa._source_move(shifted, x_prev, cell_w, mask, nodes, nant, 2, 1) < 1.0e-12
+    moved = copy(shifted)
+    moved[3, 2] += 0.01
+    @test 1.0e-3 < FRa._source_move(moved, x_prev, cell_w, mask, nodes, nant, 2, 1) <= 0.01
+end
+
+# Relabel station `s`'s feeds by `σ` (new feed `σ[f]` holds old feed `f`) or
+# change its feed basis by the unitary `U`, in the sums `rbar[bl, product, ap]`.
+function restation(rbar, bl_pairs, pols, s; σ = nothing, U = nothing)
+    out = copy(rbar)
+    slot = Dict(p => i for (i, p) in pairs(pols))
+    for (bi, (a, b)) in pairs(bl_pairs), ap in axes(rbar, 3)
+        (a == s || b == s) || continue
+        Z = zeros(eltype(rbar), 2, 2)
+        for (i, (fa, fb)) in pairs(pols)
+            Z[fa, fb] = rbar[bi, i, ap]
+        end
+        if !isnothing(σ)
+            Z = a == s ? Z[invperm(σ), :] : Z[:, invperm(σ)]
+        else
+            Z = a == s ? U * Z : Z * U'
+        end
+        for (i, (fa, fb)) in pairs(pols)
+            out[bi, i, ap] = Z[fa, fb]
+        end
+    end
+    return out
+end
+
+@testset "Adhoc: solved phases follow a station's feed labels, not its feed order" begin
+    rng = MersenneTwister(0x0129)
+    nant, nap = 5, 24
+    bl = all_bl_a(nant)
+    times = collect(0:(nap - 1)) .* 2.0
+    t = reshape(times, 1, 1, :)
+    screen = 0.8 .* sin.(t ./ 9 .+ 6 .* rand(rng, nant, 2, 1)) .+ 0.3 .* randn(rng, nant, 2, 1)
+    # Station 2 dominates the gated weight, so it anchors the per-AP solves, and
+    # it drops out in the middle APs.
+    dropaps = 9:13
+    σ = [2, 1]
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    # With `linked = false` only same-index products carry weight, so under
+    # `PerFeed` each AP's feed blocks are separate components; relabeled,
+    # station 3 joins the other block.
+    for linked in (true, false), tying in (CALa.PerFeed(), CALa.SharedFeeds())
+        x = 0.5 .* randn(rng, length(bl), length(pols))
+        rbar, wbar = inject_screen(bl, pols, screen, x; noise = 1.0, rng)
+        for (bi, (a, b)) in pairs(bl)
+            2 in (a, b) && (rbar[bi, :, :] .*= 3)
+            2 in (a, b) && (rbar[bi, :, dropaps] .= 0; wbar[bi, :, dropaps] .= 0)
+        end
+        if !linked
+            rbar[:, [2, 3], :] .= 0
+            wbar[:, [2, 3], :] .= 0
+        end
+        kw = (; gauge = PinAntenna(1), tying, smoother = FRa.PerTrackAdhocSmoother())
+        sol = solve_positional(rbar, wbar, bl, pols, nant, times; kw...)
+        perm = solve_positional(
+            restation(rbar, bl, pols, 3; σ), restation(wbar, bl, pols, 3; σ), bl, pols, nant, times; kw...,
+        )
+        relabeled = copy(parent(sol.phase))
+        relabeled[3, σ, :] .= parent(sol.phase)[3, :, :]
+        @test isequal(isfinite.(parent(perm.phase)), isfinite.(relabeled))
+        @test all(isapprox.(parent(perm.phase), relabeled; atol = 1.0e-8) .| isnan.(relabeled))
+    end
+end
+
+@testset "Adhoc: a feed-common track ignores a station's feed basis" begin
+    rng = MersenneTwister(0x1290)
+    nant, nap = 5, 24
+    bl = all_bl_a(nant)
+    pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    times = collect(0:(nap - 1)) .* 2.0
+    common = 0.8 .* sin.(reshape(times, 1, 1, :) ./ 9 .+ 6 .* rand(rng, nant, 1, 1))
+    screen = repeat(common, 1, 2, 1)
+    # A source with every product present, so a basis change keeps every product
+    # above the gate.
+    x = 0.5 .* randn(rng, length(bl), length(pols))
+    rbar, wbar = inject_screen(bl, pols, screen, x; amp = 20.0, noise = 1.0, rng)
+    θ = 0.7
+    U = [cos(θ) -sin(θ); sin(θ) cos(θ)] * [cis(0.4) 0; 0 cis(-0.9)]
+    kw = (; gauge = PinAntenna(1), tying = CALa.SharedFeeds(), smoother = FRa.PerTrackAdhocSmoother(), prior = nothing)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; kw...)
+    rot = solve_positional(restation(rbar, bl, pols, 3; U), wbar, bl, pols, nant, times; kw...)
+    @test isequal(isfinite.(rot.phase), isfinite.(sol.phase))
+    @test maximum(abs, filter(isfinite, rot.phase .- sol.phase)) < 1.0e-6
+end
+
+@testset "Adhoc: stations with one or three receptors" begin
+    rng = MersenneTwister(0x0267)
+    nant, nap = 5, 20
+    ref = 1
+    bl = all_bl_a(nant)
+    times = collect(0:(nap - 1)) .* 1.0
+    for nfeed in (1, 3), tying in (CALa.PerFeed(), CALa.SharedFeeds())
+        pols = [(fa, fb) for fa in 1:nfeed for fb in 1:nfeed]
+        screen = 0.3 .* randn(rng, nant, nfeed, nap)
+        tying isa CALa.SharedFeeds && (screen .= screen[:, 1:1, :])
+        rbar, wbar = inject_screen(bl, pols, screen)
+        sol = solve_positional(
+            rbar, wbar, bl, pols, nant, times;
+            tying, gauge = PinAntenna(ref), prior = nothing, smoother = FRa.PerTrackAdhocSmoother(),
+        )
+        @test lookup(sol.phase, FRa.Feed) == 1:nfeed
+        @test all(sol.covered)
+        @test adhoc_recon(rbar, sol, bl, pols) < 1.0e-9
+        for a in 1:nant, f in 1:nfeed
+            t = [screen[a, f, ap] - screen[ref, 1, ap] for ap in 1:nap]
+            @test maximum(abs.(sol.phase[a, f, :] .- (t .- mean(t)))) < 1.0e-8
+        end
+    end
+
+    # One node per station: the joint solve takes a single receptor under
+    # either tying, and any count under `SharedFeeds`.
+    pols = [(1, 1)]
+    rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 1, nap))
+    joint = FRa.JointKalmanSmoother(coherence_time = 15.0)
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.PerFeed(), smoother = joint)
+    @test all(isfinite, sol.phase)
+    pols = [(fa, fb) for fa in 1:3 for fb in 1:3]
+    rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 3, nap))
+    sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.SharedFeeds(), smoother = joint)
+    @test all(isfinite, sol.phase)
+    @test_throws "requires one phase node per station" solve_positional(
+        rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.PerFeed(), smoother = joint,
+    )
+end
