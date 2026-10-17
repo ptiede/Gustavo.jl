@@ -474,7 +474,7 @@ end
     geom3 = CAL.DataGeometry(; nfeed = 3, times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
     lay_ex = CAL.plan_parameters(mk(CAL.ExceptFeed(2)), 2, geom3)
     @test lay_ex.nθ == 4                                    # 2 ant × feeds 1 and 3
-    @test lay_ex.plans[1].shape == (1, 2, 1, 1, 2)
+    @test Tuple(lay_ex.plans[1].shape) == (1, 2, 1, 1, 2)
     @test [CAL._feed_node(CAL.ExceptFeed(2), f) for f in 1:3] == [1, 0, 2]   # feed 2 has no block
     geom1 = CAL.DataGeometry(; nfeed = 1, times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
     @test CAL.plan_parameters(mk(CAL.ExceptFeed(1)), 2, geom1).nθ == 0
@@ -506,10 +506,10 @@ end
 
     # Each leaf is the full-rank shape its tying × segmentation imply
     # (param, feed-node, freq-seg, time-seg, ant), size-1 axes kept.
-    @test layout.axes.phase.a.dims == (1, 2, 1, 1, nant)                 # PerFeed: two feed nodes
-    @test layout.axes.phase.bp.dims == (1, 1, length(freqs), 1, nant)    # ChannelBlocks(1): one freq-seg per channel
-    @test layout.axes.phase.grp.d.dims == (1, 1, 1, 1, nant)             # a nested part is a plain leaf
-    @test layout.axes.phase.grp.c.dims == (1, 1, 1, 1, nant)
+    @test Tuple(layout.axes.phase.a.dims) == (1, 2, 1, 1, nant)                 # PerFeed: two feed nodes
+    @test Tuple(layout.axes.phase.bp.dims) == (1, 1, length(freqs), 1, nant)    # ChannelBlocks(1): one freq-seg per channel
+    @test Tuple(layout.axes.phase.grp.d.dims) == (1, 1, 1, 1, nant)             # a nested part is a plain leaf
+    @test Tuple(layout.axes.phase.grp.c.dims) == (1, 1, 1, 1, nant)
 
     # The stored axis roles name each dimension.
     @test layout.axes.phase.a.roles == (:param, :Feed, :Frequency, :Ti, :AntennaName)
@@ -566,7 +566,7 @@ end
     @test c.component == model.phase.atmos
     a = c.params
     @test a isa DimArray
-    @test size(a) == layout.axes.phase.atmos.dims
+    @test size(a) == Tuple(layout.axes.phase.atmos.dims)
     @test name.(dims(a)) == layout.axes.phase.atmos.roles
 
     # PerFeed carries a physical Feed axis; the tied tyings carry a positional
@@ -1227,8 +1227,8 @@ end
         @test node.group_of == [1, 2, 2]
         @test node.local_of == [1, 1, 2]
         # Ragged: AA's global-frequency block vs the others' per-channel one.
-        @test node.groups.g1.shape == (1, 2, 1, 1, 1)
-        @test node.groups.g2.shape == (1, 2, 6, 1, 2)
+        @test Tuple(node.groups.g1.shape) == (1, 2, 1, 1, 1)
+        @test Tuple(node.groups.g2.shape) == (1, 2, 6, 1, 2)
         # θ leaves nest under the group keys and spans stay contiguous.
         @test length(node.groups.g1.range) == 2
         @test node.groups.g2.range == last(node.groups.g1.range) .+ (1:24)

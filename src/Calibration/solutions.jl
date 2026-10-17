@@ -222,7 +222,7 @@ function _component_at(model::GainModel, path, station)
 end
 
 function _params_array(plan::ComponentPlan, axnode, θ, geom, names)
-    raw = Array{eltype(θ)}(undef, plan.shape)
+    raw = Array{eltype(θ)}(undef, Tuple(plan.shape))
     copyto!(raw, view(θ, plan.range))
     return DimArray(raw, _params_dims(plan, axnode, geom, names))
 end
@@ -415,9 +415,9 @@ function _segment_lookup(coords, groups)
     )
 end
 
-_frequency_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape[3]) =
+_frequency_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape.Frequency) =
     _segment_lookup(geom.channel_freqs, segment_groups(plan.fseg_id, n))
-_time_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape[4]) =
+_time_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.shape.Ti) =
     _segment_lookup(geom.times, segment_groups(plan.tseg_id, n))
 
 # The dimension for one axis of a component's parameters, from its role:

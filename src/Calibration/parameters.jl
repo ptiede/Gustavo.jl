@@ -20,9 +20,9 @@
     ComponentPlan
 
 The term, resolved segmentation, and θ location for one gain component. `range`
-is the component's contiguous span in θ and `shape` its column-major shaped leaf
-`(param, feed-node, freq-seg, time-seg, ant)`, so `reshape(view(θ, range),
-shape)` recovers the leaf. The forward map reads `tseg_id[ti]`/`fseg_id[c]` to
+is the component's contiguous span in θ and `shape` the sizes of its column-major
+leaf by axis, `(; param, node, Frequency, Ti, AntennaName)`, so
+`reshape(view(θ, range), Tuple(shape))` recovers the leaf. The forward map reads `tseg_id[ti]`/`fseg_id[c]` to
 place a cell in its segment, `xf`/`xt` for the term's coordinates, and
 `nchan_seg` for the term's per-segment arity, then addresses the leaf block at
 `(node, fs, ts, ant)` with `node = _feed_node(tying, feed)`. A block holds the
@@ -57,7 +57,7 @@ struct ComponentPlan{
     nchan_seg::Vector{Int}      # length nfseg  → channels in the frequency segment
     tying::Ty
     range::UnitRange{Int}       # the component's contiguous θ span
-    shape::NTuple{5, Int}       # (param, feed-node, freq-seg, time-seg, ant)
+    shape::@NamedTuple{param::Int, node::Int, Frequency::Int, Ti::Int, AntennaName::Int}
     fstate::FC                  # the term's resolved frequency-coordinate constants
     tstate::TC                  # …and its time-coordinate constants
     priors::PR                  # length nant   → the station's resolved prior
@@ -93,13 +93,13 @@ end
 # data with θ. Writing into it writes through to θ. `shape` is a fixed rank-5
 # tuple, so the reshape is type-stable.
 @inline _component_leaf(plan::ComponentPlan, θ::AbstractVector) =
-    reshape(view(θ, plan.range), plan.shape)
+    reshape(view(θ, plan.range), Tuple(plan.shape))
 
 # The absolute 1-based θ index of a block's first parameter at
 # `(node, fs, ts, ant)` — for the column-space station solver, which works in
 # flat θ positions rather than shaped leaves.
 @inline _block_index(plan::ComponentPlan, node::Int, fs::Int, ts::Int, ant::Int) =
-    first(plan.range) + LinearIndices(plan.shape)[1, node, fs, ts, ant] - 1
+    first(plan.range) + LinearIndices(Tuple(plan.shape))[1, node, fs, ts, ant] - 1
 
 # ── Per-component layout ─────────────────────────────────────────────────────
 #
@@ -165,7 +165,7 @@ end
 # `(param, node, Frequency, Ti, AntennaName)` role set for labeling a wrapped θ.
 function _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tying)
     node_role = tying isa PerFeed ? :Feed : :node
-    return (bl, nfeed, nfseg, ntseg, nant), (:param, node_role, :Frequency, :Ti, :AntennaName)
+    return (; param = bl, node = nfeed, Frequency = nfseg, Ti = ntseg, AntennaName = nant), (:param, node_role, :Frequency, :Ti, :AntennaName)
 end
 
 # ── Station-signature canonicalization ───────────────────────────────────────
